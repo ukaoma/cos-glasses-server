@@ -74,6 +74,9 @@ import { dirname, resolve } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import { isValidNativeThreadId } from './native-thread-id.js'
+import { QUERY_JOB_ORPHAN_FENCE_MS } from './query-job-store.js'
+import { serverMetrics } from './server-metrics.js'
+import { pinBootReapEnabled, queuedTurnReasonCopy } from './thread-turn-queue.js'
 import {
   BINDING_ID_RE,
   activate as activateBinding,
@@ -244,6 +247,60 @@ export interface BindingRecord {
    * changing a type this module does not own.
    */
   pinnedAt: Readonly<Record<string, number>>
+  /**
+   * 6.78.0 (COS_PIN_BOOT_REAP): which client turn each pin carries, and the boot that took
+   * it. Absent on every pin a 6.77 build wrote, and on every pin taken with the flag off:
+   * such a pin can still be released after a crash, but with no turn to name it leaves no
+   * ledger record (the upgrade-window gap the 6.78.0 notes state).
+   */
+  pinMeta?: Readonly<Record<string, PinMeta>>
+}
+
+/** 6.78.0: what a pin says about the turn it holds the lease for. */
+export interface PinMeta {
+  clientTurnId: string
+  bootId: string
+}
+
+/** How a recorded delivery attempt ended. `pending` is "began and never reported back". */
+export type TurnAttemptExit = 'pending' | 'sent' | 'not_sent' | 'unknown'
+
+/**
+ * One delivery attempt for a client turn on a target (6.78.0, the attempt journal).
+ *
+ * TARGET-SCOPED AND SEPARATE FROM THE TURN LEDGER. The ledger lives with a binding and is
+ * dropped when the binding is reaped (24 h after it went inert), while a phone retries a key
+ * for up to a day and a stranded queue row outlives both. So the journal is keyed by target,
+ * survives reaps, and is written in the SAME commit as the pin, before any frame or spawn:
+ * "no attempt on file" then proves the turn never reached a delivery hop.
+ */
+export interface TurnAttempt {
+  bootId: string
+  at: number
+  mode: 'turn' | 'steer'
+  exit: TurnAttemptExit
+}
+
+/** What the journal can say about one key. `evictedThrough`: no attempt at or before this instant can be read back. */
+export interface TurnAttemptLookup {
+  attempt: TurnAttempt | null
+  evictedThrough: number | null
+}
+
+/** Attempts are kept at least this long: twice the phone's 24 h retry horizon. */
+export const ATTEMPT_RETENTION_MS = 48 * 60 * 60 * 1000
+/** Per target. A target past this sheds its oldest attempt (and records that it did). */
+export const MAX_ATTEMPTS_PER_TARGET = 256
+/** Targets with a journal. Past this the oldest target's attempts are shed. */
+export const MAX_ATTEMPT_TARGETS = 2048
+const ATTEMPT_EXITS: ReadonlySet<string> = new Set(['pending', 'sent', 'not_sent', 'unknown'])
+
+/** What a boot-orphan release did. */
+export interface OrphanPinReport {
+  /** Pins a dead boot left, released because their orphan child must be gone. */
+  released: number
+  /** Of those, the ones that named a client turn and got an `ambiguous` ledger record. */
+  recorded: number
 }
 
 export interface ReapReport {
@@ -274,6 +331,10 @@ export interface BindingRegistryOptions {
   maxRetainedBindings?: number
   maxEpochTargets?: number
   maxPinsPerBinding?: number
+  /** 6.78.0: this process's boot, stamped on pins and attempts. Defaults to `serverMetrics.bootId`. */
+  bootId?: string
+  /** 6.78.0: `COS_PIN_BOOT_REAP`, read per call. Injectable for tests. */
+  pinBootReap?: () => boolean
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -394,6 +455,57 @@ interface LoadedState {
   floors: Map<string, number>
   /** bindingId -> completed turns, oldest first. See TURN LEDGER below. */
   turns: Map<string, TurnRecord[]>
+  /**
+   * 6.78.0: targetKey -> clientTurnId -> attempt. Optional so every pre-6.78 commit path
+   * carries the current journal forward untouched; only the journal's own writers set it.
+   */
+  attempts?: Map<string, Map<string, TurnAttempt>>
+  /** 6.78.0: the newest `at` the journal ever shed (age or count). Null: nothing shed yet. */
+  attemptsEvictedThrough?: number | null
+}
+
+/** Validate one persisted attempt. Anything unexpected is dropped, never trusted. */
+function validateAttempt(value: unknown): TurnAttempt | null {
+  if (!isPlainObject(value)) return null
+  const { bootId, at, mode, exit } = value
+  if (typeof bootId !== 'string' || bootId.length === 0 || bootId.length > 128) return null
+  if (typeof at !== 'number' || !Number.isFinite(at)) return null
+  if (mode !== 'turn' && mode !== 'steer') return null
+  if (typeof exit !== 'string' || !ATTEMPT_EXITS.has(exit)) return null
+  return { bootId, at, mode, exit: exit as TurnAttemptExit }
+}
+
+/**
+ * Bound the journal: age first (ATTEMPT_RETENTION_MS), then per-target count, then target
+ * count. Every attempt shed raises `evictedThrough`, so a lookup can tell "never attempted"
+ * from "attempted and forgotten", and the second reads as unknown, never as unsent.
+ */
+function boundAttempts(
+  attempts: Map<string, Map<string, TurnAttempt>>,
+  evictedThrough: number | null,
+  now: number,
+): number | null {
+  let through = evictedThrough
+  const shed = (at: number): void => { through = through === null ? at : Math.max(through, at) }
+  for (const [key, rows] of attempts) {
+    for (const [id, row] of rows) {
+      if (Number.isFinite(now) && now - row.at > ATTEMPT_RETENTION_MS) { rows.delete(id); shed(row.at) }
+    }
+    if (rows.size > MAX_ATTEMPTS_PER_TARGET) {
+      const oldest = [...rows.entries()].sort((a, b) => a[1].at - b[1].at)
+      for (const [id, row] of oldest.slice(0, rows.size - MAX_ATTEMPTS_PER_TARGET)) { rows.delete(id); shed(row.at) }
+    }
+    if (rows.size === 0) attempts.delete(key)
+  }
+  if (attempts.size > MAX_ATTEMPT_TARGETS) {
+    const newestOf = (rows: Map<string, TurnAttempt>) => Math.max(...[...rows.values()].map(r => r.at))
+    const byAge = [...attempts.entries()].sort((a, b) => newestOf(a[1]) - newestOf(b[1]))
+    for (const [key, rows] of byAge.slice(0, attempts.size - MAX_ATTEMPT_TARGETS)) {
+      for (const row of rows.values()) shed(row.at)
+      attempts.delete(key)
+    }
+  }
+  return through
 }
 
 /**
@@ -421,6 +533,42 @@ export interface TurnRecord {
   at: number
 }
 
+/** 6.78.0: what `pin` may carry beyond the job id. */
+export interface PinExtras {
+  /** Name the client turn this pin holds the lease for (COS_PIN_BOOT_REAP). */
+  pinMeta?: { clientTurnId: string }
+  /** Open an attempt for this client turn in the same commit (COS_QUEUE_RECONCILE). */
+  attempt?: { clientTurnId: string; mode: 'turn' | 'steer' }
+}
+
+/** 6.78.0: what `unpin` may carry: how the turn's delivery ended. */
+export interface UnpinExtras {
+  attemptExit?: { clientTurnId: string; exit: TurnAttemptExit }
+}
+
+function cloneAttempts(source: Map<string, Map<string, TurnAttempt>>): Map<string, Map<string, TurnAttempt>> {
+  return new Map([...source].map(([key, rows]) => [key, new Map(rows)]))
+}
+
+/**
+ * The ledger record a released dead-boot pin leaves for its client turn: the same shape as
+ * the turns route's own ambiguous answer, so a retry of the key replays it verbatim and
+ * every client already reads it as "do not send again".
+ */
+export function orphanReleaseRecord(turnId: string): Record<string, unknown> {
+  return {
+    turnId,
+    outcome: 'ambiguous',
+    deliveryState: 'unknown',
+    retryable: false,
+    changed: false,
+    revision: null,
+    reason: 'delivery_unknown_after_restart',
+    reasonCopy: queuedTurnReasonCopy('delivery_unknown_after_restart'),
+    status: 409,
+  }
+}
+
 export class AgentSessionBindingRegistry {
   readonly path: string
   readonly hydration: HydrationReport
@@ -429,6 +577,18 @@ export class AgentSessionBindingRegistry {
   private targets: Map<string, string>
   private floors: Map<string, number>
   private turns: Map<string, TurnRecord[]>
+  /** 6.78.0: the attempt journal (targetKey -> clientTurnId -> attempt). */
+  private attempts: Map<string, Map<string, TurnAttempt>>
+  private attemptsEvictedThrough: number | null
+  /**
+   * 6.78.0: every pin that was ALREADY on disk when this registry opened, as
+   * `bindingId\u0000jobId`. One server owns this store (the instance lock), so a pin loaded at
+   * hydration was taken by a boot that is gone, whatever its metadata says, including a 6.77
+   * pin that carries none. A pin this process takes is never in the set.
+   */
+  private readonly inheritedPins: Set<string>
+  private readonly bootId: string
+  private readonly pinBootReap: () => boolean
 
   private readonly warn: (message: string, detail?: unknown) => void
   private readonly terminalRetentionMs: number
@@ -445,6 +605,14 @@ export class AgentSessionBindingRegistry {
     this.targets = state.targets
     this.floors = state.floors
     this.turns = state.turns
+    this.attempts = state.attempts ?? new Map()
+    this.attemptsEvictedThrough = state.attemptsEvictedThrough ?? null
+    this.inheritedPins = new Set()
+    for (const record of state.records.values()) {
+      for (const job of record.binding.pinnedJobs) this.inheritedPins.add(`${record.binding.bindingId}\u0000${job}`)
+    }
+    this.bootId = typeof options.bootId === 'string' && options.bootId.length > 0 ? options.bootId : serverMetrics.bootId
+    this.pinBootReap = typeof options.pinBootReap === 'function' ? options.pinBootReap : () => pinBootReapEnabled()
     this.warn = options.onWarn ?? ((message, detail) => console.warn(`[binding-registry] ${message}`, detail ?? ''))
     this.terminalRetentionMs = nonNegativeMsOption(options.terminalRetentionMs, DEFAULT_TERMINAL_RETENTION_MS)
     this.stalePinMs = nonNegativeMsOption(options.stalePinMs, DEFAULT_STALE_PIN_MS)
@@ -591,6 +759,18 @@ export class AgentSessionBindingRegistry {
         pinnedAt[job] = Number.isFinite(at) ? (at as number) : updatedAt
       }
 
+      // 6.78.0: pin metadata, per pin still held. A malformed entry is dropped: the pin
+      // still releases on time, it just cannot name a turn.
+      const pinMeta: Record<string, PinMeta> = {}
+      const storedMeta = isPlainObject(entry.pinMeta) ? entry.pinMeta : {}
+      for (const job of binding.pinnedJobs) {
+        const meta = storedMeta[job]
+        if (isPlainObject(meta) && typeof meta.clientTurnId === 'string' && TURN_ID_RE.test(meta.clientTurnId)
+          && typeof meta.bootId === 'string' && meta.bootId.length > 0 && meta.bootId.length <= 128) {
+          pinMeta[job] = { clientTurnId: meta.clientTurnId, bootId: meta.bootId }
+        }
+      }
+
       records.set(binding.bindingId, {
         binding,
         createdAt,
@@ -598,6 +778,7 @@ export class AgentSessionBindingRegistry {
         terminalAt,
         lastUnpinAt: Number.isFinite(entry.lastUnpinAt) ? (entry.lastUnpinAt as number) : null,
         pinnedAt: Object.freeze(pinnedAt),
+        ...(Object.keys(pinMeta).length > 0 ? { pinMeta: Object.freeze(pinMeta) } : {}),
       })
 
       // Fold every surviving epoch upward. A record can only have been written
@@ -615,6 +796,30 @@ export class AgentSessionBindingRegistry {
         return degraded('duplicate_target')
       }
       targets.set(record.binding.targetKey, record.binding.bindingId)
+    }
+
+    // 6.78.0: the attempt journal. Additive at version 1, like `turns`: absent reads as an
+    // empty journal, a malformed row is dropped. A dropped row is NOT "never attempted": the
+    // shed high-water rises to the newest instant the store could have held it (`now`), so
+    // every lookup at or before it reads unknown rather than unsent.
+    const attempts = new Map<string, Map<string, TurnAttempt>>()
+    let attemptsEvictedThrough: number | null = Number.isFinite(root.attemptsEvictedThrough) ? (root.attemptsEvictedThrough as number) : null
+    const rawAttempts = root.attempts
+    if (rawAttempts !== undefined) {
+      if (!isPlainObject(rawAttempts)) {
+        attemptsEvictedThrough = now
+      } else {
+        for (const [key, rows] of Object.entries(rawAttempts)) {
+          if (parseTargetKey(key) === null || !isPlainObject(rows)) { attemptsEvictedThrough = now; continue }
+          const kept = new Map<string, TurnAttempt>()
+          for (const [id, row] of Object.entries(rows)) {
+            const attempt = TURN_ID_RE.test(id) ? validateAttempt(row) : null
+            if (attempt) kept.set(id, attempt)
+            else attemptsEvictedThrough = now
+          }
+          if (kept.size > 0) attempts.set(key, kept)
+        }
+      }
     }
 
     if (dropped > 0) {
@@ -635,7 +840,7 @@ export class AgentSessionBindingRegistry {
         droppedRecords: dropped,
         epochTargets: floors.size,
       },
-      { records, targets, floors, turns },
+      { records, targets, floors, turns, attempts, attemptsEvictedThrough },
       options,
     )
   }
@@ -752,6 +957,9 @@ export class AgentSessionBindingRegistry {
 
       const now = input.now
       const key = makeTargetKey(input.provider, input.nativeThreadId)
+      // 6.78.0: a dead boot's pin on THIS target is released here, lazily, once its orphan
+      // window has passed (`reapOrphanedPins`). Its own commit, before this attach's.
+      if (this.pinBootReap()) this.releaseOrphansUnlocked(now, key)
 
       const holderId = this.targets.get(key)
       const holder = holderId === undefined ? undefined : this.records.get(holderId)
@@ -880,7 +1088,7 @@ export class AgentSessionBindingRegistry {
    * expire or be detached while the job runs, so a caller that proceeds anyway has
    * defeated the lease. Do not treat a failed pin as advisory.
    */
-  pin(bindingId: unknown, jobId: unknown, now: number): RegistryResult {
+  pin(bindingId: unknown, jobId: unknown, now: number, extras: PinExtras = {}): RegistryResult {
     return this.runMutation(() => {
       const found = this.requireRecord(bindingId)
       if ('reason' in found) return reject(found.reason)
@@ -901,11 +1109,23 @@ export class AgentSessionBindingRegistry {
 
       const next = pinBinding(record.binding, jobId)
       if (!next.pinnedJobs.includes(jobId)) return reject('terminal_state')
-      return this.commitBinding(record, next, now, { pinnedAt: { ...record.pinnedAt, [jobId]: now } })
+      // 6.78.0: the pin metadata and the attempt land in THIS commit. Nothing is sent before
+      // a pin, so an attempt written with it is on disk before any frame or spawn can be.
+      const meta = extras.pinMeta && TURN_ID_RE.test(extras.pinMeta.clientTurnId)
+        ? { ...(record.pinMeta ?? {}), [jobId]: { clientTurnId: extras.pinMeta.clientTurnId, bootId: this.bootId } }
+        : undefined
+      const journal = extras.attempt && TURN_ID_RE.test(extras.attempt.clientTurnId)
+        ? this.attemptsWith(record.binding.targetKey, extras.attempt.clientTurnId, { bootId: this.bootId, at: now, mode: extras.attempt.mode, exit: 'pending' }, now)
+        : null
+      return this.commitBinding(record, next, now, {
+        pinnedAt: { ...record.pinnedAt, [jobId]: now },
+        ...(meta ? { pinMeta: meta } : {}),
+        ...(journal ? { attempts: journal.attempts, attemptsEvictedThrough: journal.evictedThrough } : {}),
+      })
     })
   }
 
-  unpin(bindingId: unknown, jobId: unknown, now: number): RegistryResult {
+  unpin(bindingId: unknown, jobId: unknown, now: number, extras: UnpinExtras = {}): RegistryResult {
     return this.runMutation(() => {
       const found = this.requireRecord(bindingId)
       if ('reason' in found) return reject(found.reason)
@@ -916,13 +1136,237 @@ export class AgentSessionBindingRegistry {
       const next = unpinBinding(record.binding, jobId)
       const pinnedAt = { ...record.pinnedAt }
       delete pinnedAt[jobId]
+      // 6.78.0: the turn's exit, in the same commit as the release.
+      const journal = extras.attemptExit && TURN_ID_RE.test(extras.attemptExit.clientTurnId)
+        ? this.attemptExitWith(record.binding.targetKey, extras.attemptExit.clientTurnId, extras.attemptExit.exit, now)
+        : null
       return this.commitBinding(record, next, now, {
         pinnedAt,
         // Only an actual release starts the inert clock. Unpinning a job that was
         // never pinned is a no-op and must not extend anything.
         lastUnpinAt: held && Number.isFinite(now) ? now : record.lastUnpinAt,
+        ...(journal ? { attempts: journal.attempts, attemptsEvictedThrough: journal.evictedThrough } : {}),
       })
     })
+  }
+
+  // ------------------------------------------------------- 6.78.0 attempt journal
+
+  /**
+   * Record that a delivery is about to begin, durably, BEFORE the frame goes out. The steer
+   * path's first write (it takes no pin). False when the store could not record it, in
+   * which case the caller must not send.
+   */
+  beginAttempt(provider: unknown, nativeThreadId: unknown, clientTurnId: unknown, mode: 'turn' | 'steer', now: number): boolean {
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId)) return false
+    if (typeof clientTurnId !== 'string' || !TURN_ID_RE.test(clientTurnId) || !Number.isFinite(now)) return false
+    const result = this.runJournalMutation(() => {
+      const journal = this.attemptsWith(makeTargetKey(provider, nativeThreadId), clientTurnId, { bootId: this.bootId, at: now, mode, exit: 'pending' }, now)
+      return this.persistJournal(journal)
+    })
+    return result
+  }
+
+  /** Record how an attempt ended. False when it could not be written. */
+  settleAttempt(provider: unknown, nativeThreadId: unknown, clientTurnId: unknown, exit: TurnAttemptExit, now: number): boolean {
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId)) return false
+    if (typeof clientTurnId !== 'string' || !TURN_ID_RE.test(clientTurnId)) return false
+    return this.runJournalMutation(() => {
+      const journal = this.attemptExitWith(makeTargetKey(provider, nativeThreadId), clientTurnId, exit, now)
+      return journal ? this.persistJournal(journal) : true
+    })
+  }
+
+  /**
+   * What the journal knows about one key, or null when the store cannot be read (degraded).
+   * Null is never "no attempt": a caller deciding whether to resend must treat it as unknown.
+   */
+  attemptFor(provider: unknown, nativeThreadId: unknown, clientTurnId: unknown): TurnAttemptLookup | null {
+    if (!this.available()) return null
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId)) return null
+    if (typeof clientTurnId !== 'string') return null
+    const row = this.attempts.get(makeTargetKey(provider, nativeThreadId))?.get(clientTurnId) ?? null
+    return { attempt: row ? { ...row } : null, evictedThrough: this.attemptsEvictedThrough }
+  }
+
+  /**
+   * The terminal ledger record for a client turn on a TARGET (every binding that ever held
+   * it), or null. The turns route reads the same thing through `findTurn`; the restart
+   * reconcile has no binding id to start from, only the thread.
+   */
+  findTurnForTarget(provider: unknown, nativeThreadId: unknown, turnId: unknown): TurnRecord | null {
+    if (!this.available()) return null
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId)) return null
+    if (typeof turnId !== 'string' || !TURN_ID_RE.test(turnId)) return null
+    const key = makeTargetKey(provider, nativeThreadId)
+    for (const [id, record] of this.records) {
+      if (record.binding.targetKey !== key) continue
+      const hit = this.turns.get(id)?.find(row => row.turnId === turnId)
+      if (hit) return hit
+    }
+    return null
+  }
+
+  // ------------------------------------------------------- 6.78.0 dead-boot pins
+
+  /**
+   * Is this target held ONLY by pins a dead boot left, none of them old enough to release?
+   * Returns when the last of them frees, for the refusal copy; null otherwise (no holder, a
+   * live pin of this boot, or the flag off).
+   */
+  orphanPinHold(provider: unknown, nativeThreadId: unknown, now: number): { releasesAt: number } | null {
+    if (!this.available() || !this.pinBootReap()) return null
+    if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId) || !Number.isFinite(now)) return null
+    const id = this.targets.get(makeTargetKey(provider, nativeThreadId))
+    const record = id === undefined ? undefined : this.records.get(id)
+    if (!record || record.binding.pinnedJobs.length === 0) return null
+    let releasesAt = Number.NEGATIVE_INFINITY
+    for (const job of record.binding.pinnedJobs) {
+      if (!this.inheritedPins.has(`${record.binding.bindingId}\u0000${job}`)) return null
+      const at = record.pinnedAt[job]
+      releasesAt = Math.max(releasesAt, (Number.isFinite(at) ? at : record.updatedAt) + QUERY_JOB_ORPHAN_FENCE_MS)
+    }
+    return releasesAt > now ? { releasesAt } : null
+  }
+
+  /**
+   * Release every pin a dead boot left whose orphan child must be gone by now.
+   *
+   * WHY 21 MINUTES AND NOT AT BOOT. A crash leaves the turn's resume child running: it is
+   * not this process's child any more, nothing kills it, and it runs to the attached
+   * adapter's own deadline. After the restart `cosSpawnLedger` is empty, so the occupancy
+   * gate sees that child as a FOREIGN holder, and while it idles in a long tool the
+   * idle-holder relaxation lets an attach through: releasing the pin at boot would let COS
+   * start a second writer on the thread. `QUERY_JOB_ORPHAN_FENCE_MS` is the same bound the
+   * query jobs use for exactly this child. Until then the pin holds, and the refusal says so.
+   *
+   * A pin whose metadata names a client turn gets an `ambiguous` ledger record, so a retry
+   * of that key replays "may not have been sent" instead of sending it again, and its
+   * attempt (if still `pending`) becomes `unknown`. A 6.77 pin names nothing: it is released
+   * with no record. Off (`COS_PIN_BOOT_REAP=0`): nothing is released before the 24 h reap.
+   */
+  reapOrphanedPins(now: number, onlyTarget?: string): OrphanPinReport {
+    const none: OrphanPinReport = { released: 0, recorded: 0 }
+    if (!this.available() || !Number.isFinite(now) || !this.pinBootReap()) return none
+    if (this.mutating) return none
+    this.mutating = true
+    try {
+      return this.releaseOrphansUnlocked(now, onlyTarget)
+    } finally {
+      this.mutating = false
+    }
+  }
+
+  private releaseOrphansUnlocked(now: number, onlyTarget?: string): OrphanPinReport {
+    const records = new Map(this.records)
+    const turns = new Map(this.turns)
+    let attempts: Map<string, Map<string, TurnAttempt>> | null = null
+    let released = 0, recorded = 0
+    for (const [id, record] of this.records) {
+      if (onlyTarget !== undefined && record.binding.targetKey !== onlyTarget) continue
+      const due = record.binding.pinnedJobs.filter(job => {
+        if (!this.inheritedPins.has(`${id}\u0000${job}`)) return false
+        const at = record.pinnedAt[job]
+        return now - (Number.isFinite(at) ? at : record.updatedAt) >= QUERY_JOB_ORPHAN_FENCE_MS
+      })
+      if (due.length === 0) continue
+      let binding = record.binding
+      const pinnedAt = { ...record.pinnedAt }
+      const pinMeta: Record<string, PinMeta> = { ...(record.pinMeta ?? {}) }
+      for (const job of due) {
+        binding = unpinBinding(binding, job)
+        delete pinnedAt[job]
+        const meta = pinMeta[job]
+        delete pinMeta[job]
+        released += 1
+        if (!meta) continue
+        const ledger = turns.get(id) ?? []
+        const known = this.findTurn(id, meta.clientTurnId) !== null || ledger.some(row => row.turnId === meta.clientTurnId)
+        if (!known) {
+          turns.set(id, [...ledger, { turnId: meta.clientTurnId, result: orphanReleaseRecord(job), at: now }].slice(-MAX_TURNS_PER_BINDING))
+          recorded += 1
+        }
+        const current = (attempts ?? this.attempts).get(record.binding.targetKey)?.get(meta.clientTurnId)
+        if (current && current.exit === 'pending') {
+          attempts = attempts ?? cloneAttempts(this.attempts)
+          attempts.get(record.binding.targetKey)!.set(meta.clientTurnId, { ...current, exit: 'unknown' })
+        }
+      }
+      const { pinMeta: _old, ...rest } = record
+      records.set(id, {
+        ...rest,
+        binding: freezeBinding(binding),
+        // NOT `now`. `updatedAt` is the idle-lease clock (`IDLE_LEASE_YIELD_MS`): a release
+        // is not activity, and restarting that clock here would hold the thread another 90 s
+        // for a client that died with the boot.
+        updatedAt: record.updatedAt,
+        pinnedAt: Object.freeze(pinnedAt),
+        lastUnpinAt: now,
+        terminalAt: record.terminalAt ?? (isTerminal(binding) ? now : null),
+        ...(Object.keys(pinMeta).length > 0 ? { pinMeta: Object.freeze(pinMeta) } : {}),
+      })
+      this.warn(`released ${due.length} pin(s) a dead boot left on binding ${id}: past the ${QUERY_JOB_ORPHAN_FENCE_MS} ms orphan window`)
+    }
+    if (released === 0) return { released: 0, recorded: 0 }
+    // Rebuilt from the records exactly as `reap` and hydration do: a holder is a binding that blocks.
+    const targets = new Map<string, string>()
+    for (const record of records.values()) {
+      if (blocksTarget(record.binding, now)) targets.set(record.binding.targetKey, record.binding.bindingId)
+    }
+    const failure = this.persist({ records, targets, floors: new Map(this.floors), turns, ...(attempts ? { attempts } : {}) })
+    if (failure) return { released: 0, recorded: 0 }
+    return { released, recorded }
+  }
+
+  private attemptsWith(
+    targetKeyValue: string,
+    clientTurnId: string,
+    attempt: TurnAttempt,
+    now: number,
+  ): { attempts: Map<string, Map<string, TurnAttempt>>; evictedThrough: number | null } {
+    const attempts = cloneAttempts(this.attempts)
+    const rows = attempts.get(targetKeyValue) ?? new Map<string, TurnAttempt>()
+    rows.delete(clientTurnId)
+    rows.set(clientTurnId, attempt)
+    attempts.set(targetKeyValue, rows)
+    const evictedThrough = boundAttempts(attempts, this.attemptsEvictedThrough, now)
+    return { attempts, evictedThrough }
+  }
+
+  private attemptExitWith(
+    targetKeyValue: string,
+    clientTurnId: string,
+    exit: TurnAttemptExit,
+    now: number,
+  ): { attempts: Map<string, Map<string, TurnAttempt>>; evictedThrough: number | null } | null {
+    const current = this.attempts.get(targetKeyValue)?.get(clientTurnId)
+    // Nothing began under this key in the journal: there is no attempt to settle. Writing
+    // one here would invent a `bootId` and an `at` that never happened.
+    if (!current) return null
+    const attempts = cloneAttempts(this.attempts)
+    attempts.get(targetKeyValue)!.set(clientTurnId, { ...current, exit })
+    return { attempts, evictedThrough: boundAttempts(attempts, this.attemptsEvictedThrough, now) }
+  }
+
+  private persistJournal(journal: { attempts: Map<string, Map<string, TurnAttempt>>; evictedThrough: number | null }): boolean {
+    return this.persist({
+      records: new Map(this.records),
+      targets: new Map(this.targets),
+      floors: new Map(this.floors),
+      turns: new Map(this.turns),
+      attempts: journal.attempts,
+      attemptsEvictedThrough: journal.evictedThrough,
+    }) === null
+  }
+
+  private runJournalMutation(body: () => boolean): boolean {
+    if (!this.available() || this.mutating) return false
+    this.mutating = true
+    try {
+      return body()
+    } finally {
+      this.mutating = false
+    }
   }
 
   /**
@@ -979,6 +1423,8 @@ export class AgentSessionBindingRegistry {
   attachBlocked(provider: unknown, nativeThreadId: unknown, now: number): boolean {
     if (!this.available()) return false
     if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId)) return false
+    // 6.78.0: the occupancy check is the other place a dead boot's pin is looked at lazily.
+    if (this.pinBootReap()) this.reapOrphanedPins(now, makeTargetKey(provider, nativeThreadId))
     const id = this.targets.get(makeTargetKey(provider, nativeThreadId))
     if (id === undefined) return false
     const record = this.records.get(id)
@@ -1041,13 +1487,18 @@ export class AgentSessionBindingRegistry {
           }
           pinsDropped += stale.length
           changed = true
+          // 6.78.0: metadata follows its pin out.
+          const { pinMeta: oldMeta, ...rest } = record
+          const keptMeta: Record<string, PinMeta> = {}
+          for (const job of binding.pinnedJobs) if (oldMeta?.[job]) keptMeta[job] = oldMeta[job]
           current = {
-            ...record,
+            ...rest,
             binding: freezeBinding(binding),
             updatedAt: now,
             pinnedAt: Object.freeze(pinnedAt),
             lastUnpinAt: now,
             terminalAt: record.terminalAt ?? (isTerminal(binding) ? now : null),
+            ...(Object.keys(keptMeta).length > 0 ? { pinMeta: Object.freeze(keptMeta) } : {}),
           }
           this.warn(
             `dropped ${stale.length} leaked pin(s) from binding ${id} — held longer than ` +
@@ -1118,7 +1569,15 @@ export class AgentSessionBindingRegistry {
     previous: BindingRecord,
     nextBinding: NativeBinding,
     now: number,
-    patch: { pinnedAt?: Record<string, number>; lastUnpinAt?: number | null } = {},
+    patch: {
+      pinnedAt?: Record<string, number>
+      lastUnpinAt?: number | null
+      /** 6.78.0: the record's pin metadata after this commit. Undefined: carried forward. */
+      pinMeta?: Record<string, PinMeta>
+      /** 6.78.0: the attempt journal after this commit, written in the SAME atomic write. */
+      attempts?: Map<string, Map<string, TurnAttempt>>
+      attemptsEvictedThrough?: number | null
+    } = {},
   ): RegistryResult {
     const binding = freezeBinding(nextBinding)
     const pins = patch.pinnedAt ?? { ...previous.pinnedAt }
@@ -1135,23 +1594,35 @@ export class AgentSessionBindingRegistry {
       binding.pinnedJobs.every((job, i) => job === previous.binding.pinnedJobs[i]) &&
       Object.keys(pins).length === Object.keys(previous.pinnedAt).length &&
       Object.keys(pins).every(job => pins[job] === previous.pinnedAt[job])
-    if (unchanged) return { binding: previous.binding, reason: null }
+    // 6.78.0: an attempt-only change (an unpin of a pin that is not held, carrying the
+    // turn's exit) is still a change to commit.
+    if (unchanged && patch.attempts === undefined) return { binding: previous.binding, reason: null }
+
+    // Pin metadata follows the pins: a job no longer pinned keeps no metadata.
+    const metaSource = patch.pinMeta ?? previous.pinMeta ?? {}
+    const pinMeta: Record<string, PinMeta> = {}
+    for (const job of binding.pinnedJobs) if (metaSource[job]) pinMeta[job] = metaSource[job]
 
     const records = new Map(this.records)
+    const { pinMeta: _previousMeta, ...rest } = previous
     records.set(binding.bindingId, {
-      ...previous,
+      ...rest,
       binding,
       updatedAt: Number.isFinite(now) ? now : previous.updatedAt,
       terminalAt: previous.terminalAt ?? (isTerminal(binding) && Number.isFinite(now) ? now : previous.terminalAt),
       lastUnpinAt,
       pinnedAt: Object.freeze(pins),
+      ...(Object.keys(pinMeta).length > 0 ? { pinMeta: Object.freeze(pinMeta) } : {}),
     })
 
     const targets = new Map(this.targets)
     if (blocksTarget(binding, now)) targets.set(binding.targetKey, binding.bindingId)
     else if (targets.get(binding.targetKey) === binding.bindingId) targets.delete(binding.targetKey)
 
-    const failure = this.persist({ records, targets, floors: new Map(this.floors), turns: new Map(this.turns) })
+    const failure = this.persist({
+      records, targets, floors: new Map(this.floors), turns: new Map(this.turns),
+      ...(patch.attempts !== undefined ? { attempts: patch.attempts, attemptsEvictedThrough: patch.attemptsEvictedThrough ?? this.attemptsEvictedThrough } : {}),
+    })
     return failure ? reject(failure) : { binding, reason: null }
   }
 
@@ -1195,6 +1666,8 @@ export class AgentSessionBindingRegistry {
       // which would strand a live binding over a stale file we cannot read anyway.
     }
 
+    const attempts = next.attempts ?? this.attempts
+    const attemptsEvictedThrough = next.attemptsEvictedThrough !== undefined ? next.attemptsEvictedThrough : this.attemptsEvictedThrough
     let json: string
     try {
       json = JSON.stringify({
@@ -1210,7 +1683,14 @@ export class AgentSessionBindingRegistry {
           terminalAt: record.terminalAt,
           lastUnpinAt: record.lastUnpinAt,
           pinnedAt: record.pinnedAt,
+          // 6.78.0: only when a pin carries some, so a store that never used it stays the 6.77 bytes.
+          ...(record.pinMeta && Object.keys(record.pinMeta).length > 0 ? { pinMeta: record.pinMeta } : {}),
         })),
+        // 6.78.0: the attempt journal, again only once it holds something.
+        ...(attempts.size > 0
+          ? { attempts: Object.fromEntries([...attempts.entries()].map(([key, rows]) => [key, Object.fromEntries(rows)])) }
+          : {}),
+        ...(attemptsEvictedThrough !== null ? { attemptsEvictedThrough } : {}),
       })
     } catch (err) {
       this.warn('refusing to commit: state did not serialize', err)
@@ -1229,6 +1709,8 @@ export class AgentSessionBindingRegistry {
     this.targets = next.targets
     this.floors = next.floors
     this.turns = next.turns
+    this.attempts = attempts
+    this.attemptsEvictedThrough = attemptsEvictedThrough
     return null
   }
 

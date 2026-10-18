@@ -1,0 +1,235 @@
+{
+  "q01_park": {
+    "status": 202,
+    "text": "{\"queued\":true,\"clientTurnId\":\"ct-golden-0001\",\"position\":0,\"waitingOn\":\"native_thread_working\"}"
+  },
+  "q02_duplicate": {
+    "status": 409,
+    "text": "{\"error\":\"duplicate_turn\"}"
+  },
+  "q03_steer_mode_ignored": {
+    "status": 202,
+    "text": "{\"queued\":true,\"clientTurnId\":\"ct-golden-0002\",\"position\":1,\"waitingOn\":\"native_thread_working\"}"
+  },
+  "q04_codex_steer_mode_ignored": {
+    "status": 202,
+    "text": "{\"queued\":true,\"clientTurnId\":\"ct-golden-0003\",\"position\":0,\"waitingOn\":\"native_thread_working\"}"
+  },
+  "q05_cursor_423": {
+    "status": 202,
+    "text": "{\"queued\":true,\"clientTurnId\":\"ct-golden-0004\",\"position\":0,\"waitingOn\":\"native_thread_working\"}"
+  },
+  "q06_invalid": {
+    "status": 400,
+    "text": "{\"error\":\"invalid_request\",\"reason\":\"invalid_cos_session_id\"}"
+  },
+  "q07_list": {
+    "status": 200,
+    "text": "{\"turns\":[{\"clientTurnId\":\"ct-golden-0001\",\"status\":\"waiting\",\"queuedAt\":1790000000000,\"attempts\":0,\"position\":0,\"prompt\":\"first\",\"editable\":true,\"owner\":\"cos\",\"preview\":\"first\"},{\"clientTurnId\":\"ct-golden-0002\",\"status\":\"waiting\",\"queuedAt\":1790000000000,\"attempts\":0,\"position\":1,\"prompt\":\"second\",\"editable\":true,\"owner\":\"cos\",\"preview\":\"second\"}]}"
+  },
+  "q08_patch": {
+    "status": 200,
+    "text": "{\"updated\":true}"
+  },
+  "q09_file_after_park": "[\n  {\n    \"clientTurnId\": \"ct-golden-0001\",\n    \"cosSessionId\": \"cos-1\",\n    \"provider\": \"claude\",\n    \"threadId\": \"11111111-1111-4111-8111-111111111111\",\n    \"prompt\": \"first\",\n    \"queuedAt\": 1790000000000,\n    \"status\": \"waiting\",\n    \"attempts\": 0\n  },\n  {\n    \"clientTurnId\": \"ct-golden-0002\",\n    \"cosSessionId\": \"cos-1\",\n    \"provider\": \"claude\",\n    \"threadId\": \"11111111-1111-4111-8111-111111111111\",\n    \"prompt\": \"second edited\",\n    \"queuedAt\": 1790000000000,\n    \"status\": \"waiting\",\n    \"attempts\": 0\n  }\n]\n",
+  "q10_duplicate_when_free": {
+    "status": 409,
+    "text": "{\"error\":\"thread_free\",\"hint\":\"send_now\"}"
+  },
+  "q11_resend": {
+    "status": 404,
+    "text": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Error</title>\n</head>\n<body>\n<pre>Cannot POST /api/agent-sessions/claude/11111111-1111-4111-8111-111111111111/queued-turns/ct-golden-0001/resend</pre>\n</body>\n</html>\n"
+  },
+  "q12_drain": {
+    "delivered": 1,
+    "held": 1,
+    "retired": 0
+  },
+  "q13_file_after_drain": "[\n  {\n    \"clientTurnId\": \"ct-golden-0001\",\n    \"cosSessionId\": \"cos-1\",\n    \"provider\": \"claude\",\n    \"threadId\": \"11111111-1111-4111-8111-111111111111\",\n    \"prompt\": \"first\",\n    \"queuedAt\": 1790000000000,\n    \"status\": \"delivered\",\n    \"attempts\": 1,\n    \"settledAt\": 1790000060000\n  },\n  {\n    \"clientTurnId\": \"ct-golden-0002\",\n    \"cosSessionId\": \"cos-1\",\n    \"provider\": \"claude\",\n    \"threadId\": \"11111111-1111-4111-8111-111111111111\",\n    \"prompt\": \"second edited\",\n    \"queuedAt\": 1790000000000,\n    \"status\": \"waiting\",\n    \"attempts\": 1,\n    \"reason\": \"delivery_ambiguous\"\n  }\n]\n",
+  "q14_list_after_drain": {
+    "status": 200,
+    "text": "{\"turns\":[{\"clientTurnId\":\"ct-golden-0001\",\"status\":\"delivered\",\"queuedAt\":1790000000000,\"attempts\":1,\"position\":-1,\"prompt\":\"first\",\"editable\":false,\"owner\":\"cos\",\"preview\":\"first\",\"settledAt\":1790000060000},{\"clientTurnId\":\"ct-golden-0002\",\"status\":\"waiting\",\"queuedAt\":1790000000000,\"attempts\":1,\"position\":0,\"prompt\":\"second edited\",\"editable\":true,\"owner\":\"cos\",\"preview\":\"second edited\",\"reason\":\"delivery_ambiguous\"}]}"
+  },
+  "q15_delete_settled": {
+    "status": 200,
+    "text": "{\"cancelled\":true,\"clientTurnId\":\"ct-golden-0002\",\"status\":\"cancelled\"}"
+  },
+  "q16_delete_unknown": {
+    "status": 404,
+    "text": "{\"error\":\"unknown_turn\"}"
+  },
+  "q17_drain_stranded": {
+    "delivered": 0,
+    "held": 0,
+    "retired": 0
+  },
+  "q18_file_stranded": "[\n  {\n    \"clientTurnId\": \"ct-golden-0100\",\n    \"cosSessionId\": \"cos-1\",\n    \"provider\": \"claude\",\n    \"threadId\": \"22222222-2222-4222-8222-222222222222\",\n    \"prompt\": \"stranded\",\n    \"queuedAt\": 1790000000000,\n    \"status\": \"delivering\",\n    \"attempts\": 1\n  }\n]\n",
+  "q19_cancel_stranded": {
+    "status": 409,
+    "text": "{\"error\":\"already_delivering\"}"
+  },
+  "q20_read_after_30min": "[]",
+  "q21_sends": [
+    "ct-golden-0001",
+    "ct-golden-0002"
+  ],
+  "b01_attach": {
+    "status": 201,
+    "text": "{\"attached\":true,\"reason\":null,\"reasonCopy\":\"Attached. COS is driving the original thread.\",\"bindingId\":\"bnd-g1\",\"epoch\":1,\"boundTo\":\"65642af7cc5b116b9e66093bbbc06e12\",\"revision\":\"bca8bf016ab3e996d0ed642c65483676\",\"binding\":{\"bindingId\":\"bnd-g1\",\"provider\":\"claude\",\"state\":\"active\",\"epoch\":1,\"expiresAt\":1790001800000,\"pinned\":false,\"expired\":false}}"
+  },
+  "b02_attach_young_lease": {
+    "status": 409,
+    "text": "{\"attached\":false,\"reason\":\"native_target_busy\",\"reasonCopy\":\"This thread is already attached to another COS chat. Detach that one first.\"}"
+  },
+  "b03_turn_live": {
+    "status": 200,
+    "text": "{\"turnId\":\"g3\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"via\":\"live\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Sent to the open session. It will show where you left it.\"}"
+  },
+  "b04_turn_replay": {
+    "status": 200,
+    "text": "{\"turnId\":\"g3\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"via\":\"live\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Sent to the open session. It will show where you left it.\",\"replayed\":true}"
+  },
+  "b05_turn_live_unverified": {
+    "status": 409,
+    "text": "{\"turnId\":\"g5\",\"outcome\":\"refused\",\"deliveryState\":\"unknown\",\"retryable\":true,\"changed\":false,\"revision\":null,\"reason\":\"live_unverified\",\"reasonCopy\":\"Sent, not yet confirmed. Send again: COS checks before sending twice.\"}"
+  },
+  "b06_turn_live_unverified_retry": {
+    "status": 409,
+    "text": "{\"turnId\":\"g6\",\"outcome\":\"refused\",\"deliveryState\":\"unknown\",\"retryable\":true,\"changed\":false,\"revision\":null,\"reason\":\"live_unverified\",\"reasonCopy\":\"Sent, not yet confirmed. Send again: COS checks before sending twice.\"}"
+  },
+  "b07_turn_spawn": {
+    "status": 202,
+    "text": "{\"turnId\":\"g7\",\"outcome\":\"queued\",\"clientTurnId\":\"ct-golden-b003\",\"bindingId\":\"bnd-g1\",\"deliveryState\":\"pending\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Queued to the original thread. It keeps running if you put your phone away.\"}"
+  },
+  "b08_turn_status": {
+    "status": 200,
+    "text": "{\"turnId\":\"g7\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"retryable\":false,\"changed\":false,\"revision\":\"bca8bf016ab3e996d0ed642c65483676\",\"reason\":null,\"reasonCopy\":\"Sent to the original thread.\",\"recordedStatus\":200,\"polled\":true}"
+  },
+  "b09_turn_never_opened": {
+    "status": 202,
+    "text": "{\"turnId\":\"g8\",\"outcome\":\"queued\",\"clientTurnId\":\"ct-golden-b004\",\"bindingId\":\"bnd-g1\",\"deliveryState\":\"pending\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Queued to the original thread. It keeps running if you put your phone away.\"}"
+  },
+  "b10_registry_after_turns": "{\"version\":1,\"epochHighWater\":{\"6:claude:36:11111111-1111-4111-8111-111111111111\":1},\"turns\":{\"bnd-g1\":[{\"turnId\":\"ct-golden-b001\",\"result\":{\"turnId\":\"g3\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"via\":\"live\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Sent to the open session. It will show where you left it.\",\"status\":200},\"at\":1790000000000},{\"turnId\":\"ct-golden-b003\",\"result\":{\"turnId\":\"g7\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"retryable\":false,\"changed\":false,\"revision\":\"bca8bf016ab3e996d0ed642c65483676\",\"reason\":null,\"reasonCopy\":\"Sent to the original thread.\",\"status\":200},\"at\":1790000000000},{\"turnId\":\"ct-golden-b004\",\"result\":{\"turnId\":\"g8\",\"outcome\":\"refused\",\"deliveryState\":\"not_delivered\",\"retryable\":true,\"changed\":false,\"revision\":null,\"reason\":\"provider_never_opened\",\"reasonCopy\":\"The assistant never opened the thread, so nothing was sent. You can try again.\",\"status\":409},\"at\":1790000000000}]},\"records\":[{\"binding\":{\"bindingId\":\"bnd-g1\",\"cosSessionId\":\"cos-1\",\"provider\":\"claude\",\"nativeThreadId\":\"11111111-1111-4111-8111-111111111111\",\"targetKey\":\"6:claude:36:11111111-1111-4111-8111-111111111111\",\"workspaceFingerprint\":\"w\",\"sourceFingerprint\":\"s\",\"nativeHeadAtAttach\":\"bca8bf016ab3e996d0ed642c65483676\",\"epoch\":1,\"state\":\"active\",\"expiresAt\":1790001800000,\"pinnedJobs\":[]},\"createdAt\":1790000000000,\"updatedAt\":1790000000000,\"terminalAt\":null,\"lastUnpinAt\":1790000000000,\"pinnedAt\":{}}]}",
+  "b11_attach_working": {
+    "status": 409,
+    "text": "{\"attached\":false,\"reason\":\"native_thread_working\",\"reasonCopy\":\"Your Mac is writing to this thread right now. Wait a few seconds and try again, or fork it.\"}"
+  },
+  "b12_attach_t3": {
+    "status": 201,
+    "text": "{\"attached\":true,\"reason\":null,\"reasonCopy\":\"Attached. COS is driving the original thread.\",\"bindingId\":\"bnd-g9\",\"epoch\":1,\"boundTo\":\"1764697403cbc026a87f4aeb184d5505\",\"revision\":\"bca8bf016ab3e996d0ed642c65483676\",\"binding\":{\"bindingId\":\"bnd-g9\",\"provider\":\"claude\",\"state\":\"active\",\"epoch\":1,\"expiresAt\":1790001891000,\"pinned\":false,\"expired\":false}}"
+  },
+  "b13_turn_hangs": {
+    "status": 202,
+    "text": "{\"turnId\":\"g10\",\"outcome\":\"queued\",\"clientTurnId\":\"ct-golden-b005\",\"bindingId\":\"bnd-g9\",\"deliveryState\":\"pending\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Queued to the original thread. It keeps running if you put your phone away.\"}"
+  },
+  "b14_registry_with_live_pin": "{\"version\":1,\"epochHighWater\":{\"6:claude:36:11111111-1111-4111-8111-111111111111\":1,\"6:claude:36:33333333-3333-4333-8333-333333333333\":1},\"turns\":{\"bnd-g1\":[{\"turnId\":\"ct-golden-b001\",\"result\":{\"turnId\":\"g3\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"via\":\"live\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Sent to the open session. It will show where you left it.\",\"status\":200},\"at\":1790000000000},{\"turnId\":\"ct-golden-b003\",\"result\":{\"turnId\":\"g7\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"retryable\":false,\"changed\":false,\"revision\":\"bca8bf016ab3e996d0ed642c65483676\",\"reason\":null,\"reasonCopy\":\"Sent to the original thread.\",\"status\":200},\"at\":1790000000000},{\"turnId\":\"ct-golden-b004\",\"result\":{\"turnId\":\"g8\",\"outcome\":\"refused\",\"deliveryState\":\"not_delivered\",\"retryable\":true,\"changed\":false,\"revision\":null,\"reason\":\"provider_never_opened\",\"reasonCopy\":\"The assistant never opened the thread, so nothing was sent. You can try again.\",\"status\":409},\"at\":1790000000000}]},\"records\":[{\"binding\":{\"bindingId\":\"bnd-g1\",\"cosSessionId\":\"cos-1\",\"provider\":\"claude\",\"nativeThreadId\":\"11111111-1111-4111-8111-111111111111\",\"targetKey\":\"6:claude:36:11111111-1111-4111-8111-111111111111\",\"workspaceFingerprint\":\"w\",\"sourceFingerprint\":\"s\",\"nativeHeadAtAttach\":\"bca8bf016ab3e996d0ed642c65483676\",\"epoch\":1,\"state\":\"active\",\"expiresAt\":1790001800000,\"pinnedJobs\":[]},\"createdAt\":1790000000000,\"updatedAt\":1790000000000,\"terminalAt\":null,\"lastUnpinAt\":1790000000000,\"pinnedAt\":{}},{\"binding\":{\"bindingId\":\"bnd-g9\",\"cosSessionId\":\"cos-1\",\"provider\":\"claude\",\"nativeThreadId\":\"33333333-3333-4333-8333-333333333333\",\"targetKey\":\"6:claude:36:33333333-3333-4333-8333-333333333333\",\"workspaceFingerprint\":\"w\",\"sourceFingerprint\":\"s\",\"nativeHeadAtAttach\":\"bca8bf016ab3e996d0ed642c65483676\",\"epoch\":1,\"state\":\"active\",\"expiresAt\":1790001891000,\"pinnedJobs\":[\"g10\"]},\"createdAt\":1790000091000,\"updatedAt\":1790000091000,\"terminalAt\":null,\"lastUnpinAt\":null,\"pinnedAt\":{\"g10\":1790000091000}}]}",
+  "r01_blocked_after_22min": true,
+  "r02_reap_after_22min": {
+    "removed": [],
+    "pinsDropped": 0,
+    "retained": 2
+  },
+  "r03_registry_after_reap": "{\"version\":1,\"epochHighWater\":{\"6:claude:36:11111111-1111-4111-8111-111111111111\":1,\"6:claude:36:33333333-3333-4333-8333-333333333333\":1},\"turns\":{\"bnd-g1\":[{\"turnId\":\"ct-golden-b001\",\"result\":{\"turnId\":\"g3\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"via\":\"live\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Sent to the open session. It will show where you left it.\",\"status\":200},\"at\":1790000000000},{\"turnId\":\"ct-golden-b003\",\"result\":{\"turnId\":\"g7\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"retryable\":false,\"changed\":false,\"revision\":\"bca8bf016ab3e996d0ed642c65483676\",\"reason\":null,\"reasonCopy\":\"Sent to the original thread.\",\"status\":200},\"at\":1790000000000},{\"turnId\":\"ct-golden-b004\",\"result\":{\"turnId\":\"g8\",\"outcome\":\"refused\",\"deliveryState\":\"not_delivered\",\"retryable\":true,\"changed\":false,\"revision\":null,\"reason\":\"provider_never_opened\",\"reasonCopy\":\"The assistant never opened the thread, so nothing was sent. You can try again.\",\"status\":409},\"at\":1790000000000}]},\"records\":[{\"binding\":{\"bindingId\":\"bnd-g1\",\"cosSessionId\":\"cos-1\",\"provider\":\"claude\",\"nativeThreadId\":\"11111111-1111-4111-8111-111111111111\",\"targetKey\":\"6:claude:36:11111111-1111-4111-8111-111111111111\",\"workspaceFingerprint\":\"w\",\"sourceFingerprint\":\"s\",\"nativeHeadAtAttach\":\"bca8bf016ab3e996d0ed642c65483676\",\"epoch\":1,\"state\":\"active\",\"expiresAt\":1790001800000,\"pinnedJobs\":[]},\"createdAt\":1790000000000,\"updatedAt\":1790000000000,\"terminalAt\":null,\"lastUnpinAt\":1790000000000,\"pinnedAt\":{}},{\"binding\":{\"bindingId\":\"bnd-g9\",\"cosSessionId\":\"cos-1\",\"provider\":\"claude\",\"nativeThreadId\":\"33333333-3333-4333-8333-333333333333\",\"targetKey\":\"6:claude:36:33333333-3333-4333-8333-333333333333\",\"workspaceFingerprint\":\"w\",\"sourceFingerprint\":\"s\",\"nativeHeadAtAttach\":\"bca8bf016ab3e996d0ed642c65483676\",\"epoch\":1,\"state\":\"active\",\"expiresAt\":1790001891000,\"pinnedJobs\":[\"g10\"]},\"createdAt\":1790000091000,\"updatedAt\":1790000091000,\"terminalAt\":null,\"lastUnpinAt\":null,\"pinnedAt\":{\"g10\":1790000091000}}]}",
+  "r04_attach_after_restart": {
+    "status": 409,
+    "text": "{\"attached\":false,\"reason\":\"native_target_busy\",\"reasonCopy\":\"This thread is already attached to another COS chat. Detach that one first.\"}"
+  },
+  "r05_registry_final": "{\"version\":1,\"epochHighWater\":{\"6:claude:36:11111111-1111-4111-8111-111111111111\":1,\"6:claude:36:33333333-3333-4333-8333-333333333333\":1},\"turns\":{\"bnd-g1\":[{\"turnId\":\"ct-golden-b001\",\"result\":{\"turnId\":\"g3\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"via\":\"live\",\"retryable\":false,\"changed\":false,\"revision\":null,\"reason\":null,\"reasonCopy\":\"Sent to the open session. It will show where you left it.\",\"status\":200},\"at\":1790000000000},{\"turnId\":\"ct-golden-b003\",\"result\":{\"turnId\":\"g7\",\"outcome\":\"completed\",\"deliveryState\":\"delivered\",\"retryable\":false,\"changed\":false,\"revision\":\"bca8bf016ab3e996d0ed642c65483676\",\"reason\":null,\"reasonCopy\":\"Sent to the original thread.\",\"status\":200},\"at\":1790000000000},{\"turnId\":\"ct-golden-b004\",\"result\":{\"turnId\":\"g8\",\"outcome\":\"refused\",\"deliveryState\":\"not_delivered\",\"retryable\":true,\"changed\":false,\"revision\":null,\"reason\":\"provider_never_opened\",\"reasonCopy\":\"The assistant never opened the thread, so nothing was sent. You can try again.\",\"status\":409},\"at\":1790000000000}]},\"records\":[{\"binding\":{\"bindingId\":\"bnd-g1\",\"cosSessionId\":\"cos-1\",\"provider\":\"claude\",\"nativeThreadId\":\"11111111-1111-4111-8111-111111111111\",\"targetKey\":\"6:claude:36:11111111-1111-4111-8111-111111111111\",\"workspaceFingerprint\":\"w\",\"sourceFingerprint\":\"s\",\"nativeHeadAtAttach\":\"bca8bf016ab3e996d0ed642c65483676\",\"epoch\":1,\"state\":\"active\",\"expiresAt\":1790001800000,\"pinnedJobs\":[]},\"createdAt\":1790000000000,\"updatedAt\":1790000000000,\"terminalAt\":null,\"lastUnpinAt\":1790000000000,\"pinnedAt\":{}},{\"binding\":{\"bindingId\":\"bnd-g9\",\"cosSessionId\":\"cos-1\",\"provider\":\"claude\",\"nativeThreadId\":\"33333333-3333-4333-8333-333333333333\",\"targetKey\":\"6:claude:36:33333333-3333-4333-8333-333333333333\",\"workspaceFingerprint\":\"w\",\"sourceFingerprint\":\"s\",\"nativeHeadAtAttach\":\"bca8bf016ab3e996d0ed642c65483676\",\"epoch\":1,\"state\":\"active\",\"expiresAt\":1790001891000,\"pinnedJobs\":[\"g10\"]},\"createdAt\":1790000091000,\"updatedAt\":1790000091000,\"terminalAt\":null,\"lastUnpinAt\":null,\"pinnedAt\":{\"g10\":1790000091000}}]}",
+  "a01_acts": {
+    "claude": {
+      "continueIdle": {
+        "supported": true,
+        "mode": "live"
+      },
+      "continueBusy": {
+        "supported": false,
+        "reason": "queued_until_turn_end"
+      },
+      "fork": {
+        "supported": true
+      },
+      "cancelDesk": {
+        "supported": true,
+        "mode": "next_command"
+      },
+      "approvals": {
+        "supported": true
+      },
+      "nativeQueue": {
+        "supported": false,
+        "reason": "engine_limit"
+      },
+      "keepModel": {
+        "supported": true
+      },
+      "permissions": {
+        "supported": true,
+        "mode": "session"
+      }
+    },
+    "codex": {
+      "continueIdle": {
+        "supported": true,
+        "mode": "app_queue"
+      },
+      "continueBusy": {
+        "supported": true,
+        "mode": "app_queue"
+      },
+      "fork": {
+        "supported": true
+      },
+      "cancelDesk": {
+        "supported": false,
+        "reason": "hooks_not_ready"
+      },
+      "approvals": {
+        "supported": true,
+        "mode": "on_request_only"
+      },
+      "nativeQueue": {
+        "supported": true
+      },
+      "keepModel": {
+        "supported": true
+      },
+      "permissions": {
+        "supported": true,
+        "mode": "session_posture"
+      }
+    },
+    "cursor": {
+      "continueIdle": {
+        "supported": true,
+        "mode": "cli_chat_only"
+      },
+      "continueBusy": {
+        "supported": false,
+        "reason": "queued_until_turn_end"
+      },
+      "fork": {
+        "supported": true,
+        "mode": "new_session"
+      },
+      "cancelDesk": {
+        "supported": false,
+        "reason": "hooks_not_ready"
+      },
+      "approvals": {
+        "supported": false,
+        "reason": "engine_limit"
+      },
+      "nativeQueue": {
+        "supported": false,
+        "reason": "engine_limit"
+      },
+      "keepModel": {
+        "supported": true
+      },
+      "permissions": {
+        "supported": true,
+        "mode": "run_everything"
+      }
+    }
+  }
+}

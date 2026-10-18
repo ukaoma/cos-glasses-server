@@ -13,6 +13,7 @@ import { continueFullPermissionsEnabled } from './continue-plan.js'
 import { permissionBrokerHealthFields } from './permission-broker.js'
 import { continueLiveEnabled } from './session-peer-inbox-deps.js'
 import { codexLiveQueueEnabled } from './codex-live-queue.js'
+import { sessionSteerEnabled } from './thread-turn-queue.js'
 
 export type ProviderName = 'claude' | 'codex' | 'cursor'
 
@@ -33,6 +34,11 @@ export interface ProviderAct {
   nativeQueue: ProviderCapability
   keepModel: ProviderCapability
   permissions: ProviderCapability
+  /**
+   * 6.78.0: can a turn go INTO a busy session's running turn (Sessions steer)? OPTIONAL and
+   * ABSENT while `COS_SESSION_STEER` is off, so the eight 6.62 keys stay the whole object.
+   */
+  steer?: ProviderCapability
 }
 
 export interface ProviderActInput {
@@ -48,6 +54,8 @@ export interface ProviderActInput {
   continueLive: boolean
   /** `COS_CODEX_LIVE_QUEUE` (Codex's app-queue hop, idle and busy). */
   codexLiveQueue: boolean
+  /** 6.78.0: `COS_SESSION_STEER`. Absent or false: no `steer` entry at all. */
+  sessionSteer?: boolean
   env?: NodeJS.ProcessEnv
 }
 
@@ -63,6 +71,10 @@ export function providerActs(input: ProviderActInput): Record<ProviderName, Prov
   const fork = (provider: ProviderName, mode?: string) =>
     (input.forkProviders.includes(provider) ? yes(mode) : no('fork_unsupported'))
   const desk = (key: string) => (cancel[key] === true ? yes('next_command') : no('hooks_not_ready'))
+  // 6.78.0: Sessions steer. Claude through the peer inbox (it needs the live hop); Codex has
+  // `turn/steer` only in an app-server COS does not hold; Cursor's only door is the Stop hook.
+  const steer = input.sessionSteer === true
+  const claudeSteer = !attach ? no('attach_disabled') : input.continueLive ? yes('peer_inbox') : no('no_outside_channel')
   return {
     claude: {
       continueIdle: continueIdle(input.continueLive ? 'live' : 'resume'),
@@ -74,6 +86,7 @@ export function providerActs(input: ProviderActInput): Record<ProviderName, Prov
       nativeQueue: no('engine_limit'),
       keepModel: yes(),
       permissions: yes('session'),
+      ...(steer ? { steer: claudeSteer } : {}),
     },
     codex: {
       continueIdle: continueIdle(input.codexLiveQueue ? 'app_queue' : 'resume'),
@@ -85,6 +98,7 @@ export function providerActs(input: ProviderActInput): Record<ProviderName, Prov
       nativeQueue: yes(),
       keepModel: full ? yes() : no('full_permissions_off'),
       permissions: full ? yes('session_posture') : no('full_permissions_off'),
+      ...(steer ? { steer: no('no_outside_channel') } : {}),
     },
     cursor: {
       // An idle IDE composer cannot take a message from outside; a CLI chat can.
@@ -97,6 +111,7 @@ export function providerActs(input: ProviderActInput): Record<ProviderName, Prov
       nativeQueue: no('engine_limit'),
       keepModel: full ? yes() : no('full_permissions_off'),
       permissions: full ? yes('run_everything') : no('full_permissions_off'),
+      ...(steer ? { steer: no('engine_limit') } : {}),
     },
   }
 }
@@ -145,5 +160,8 @@ export function liveProviderActInput(base: {
     brokerEnabled,
     continueLive: continueLiveEnabled(),
     codexLiveQueue: codexLiveQueueEnabled(),
+    // 6.78.0: present (and true) only while COS_SESSION_STEER is on, so the input object the
+    // 6.62 tests build is unchanged with the flag off.
+    ...(sessionSteerEnabled() ? { sessionSteer: true } : {}),
   }
 }

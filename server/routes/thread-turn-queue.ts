@@ -18,12 +18,17 @@
 import { Router, type Request, type Response } from 'express'
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 import { nativeQueueControl, plainQueueText, type NativeQueueControl } from '../lib/codex-queue-control.js'
-import { COS_SESSION_ID_RE, DEFAULT_MAX_PROMPT_CHARS } from './agent-session-bindings.js'
+import { CLIENT_TURN_ID_RE, COS_SESSION_ID_RE, DEFAULT_MAX_PROMPT_CHARS } from './agent-session-bindings.js'
 import {
   admitToQueue, drainDecision, queueableRefusal, queuePosition,
   MAX_DELIVERY_ATTEMPTS, type DrainObservation, type QueuedThreadTurn,
+  queueReconcileEnabled, queueResendEnabled, queuedTurnReasonCopy, sessionSteerAvailability, sessionSteerEnabled,
+  type SessionSteerAvailability,
 } from '../lib/thread-turn-queue.js'
 import { readQueue, writeQueue, queuedThreadKeys } from '../lib/thread-turn-queue-store.js'
+import type { DeliveryEvidence } from '../lib/queue-turn-evidence.js'
+import { continueLiveEnabled } from '../lib/session-peer-inbox-deps.js'
+import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 
 export interface ThreadTurnQueueDeps {
   /** Re-runs the FULL occupancy gate. The drainer never decides attachability itself. */
@@ -48,6 +53,10 @@ export interface ThreadTurnQueueDeps {
     reason?: string
     /** The turn route's OWN `retryable` judgement, when it sent one. Authoritative. */
     serverRetryable?: boolean
+    /** 6.78.0: the turn route REPLAYED this key (`replayed: true`) rather than deciding afresh. */
+    replayed?: boolean
+    /** 6.78.0: the turn route's `deliveryState`; `unknown` on a replay is settled, never retried. */
+    deliveryState?: string
   }>
   nativeQueue?: NativeQueueControl
   /**
@@ -58,11 +67,54 @@ export interface ThreadTurnQueueDeps {
    */
   cursorCliChat?: (threadId: string) => boolean
   now: () => number
+
+  // ------------------------------------------------------------- 6.78.0 (P3)
+  // Every member is optional. Absent, the queue behaves exactly as 6.77.0 for that member's
+  // part: no stamp boot id, no restart reconcile, no steer, no attempt journal.
+
+  /** This server's boot (`serverMetrics.bootId`). A `delivering` row stamped with another boot was cut off. */
+  bootId?: string
+  /**
+   * What happened to a `delivering` row a dead boot left (MVP-B, read by `drainThread`).
+   * Production: `makeDeliveryEvidence` over the registry, the transcript and the Codex queue.
+   * May be async. A throw is `unknown`.
+   */
+  deliveryEvidence?: (turn: QueuedThreadTurn) => DeliveryEvidence | Promise<DeliveryEvidence>
+  /** Session steer's transport: `makeLiveTurnDeliverer`, the same one the turns route's live hop uses. */
+  deliverLiveTurn?: (request: { provider: string; sessionId: string; prompt: string; verifyTimeoutMs?: number; clientTurnId?: string }) => Promise<{ ok: boolean; reason: string }>
+  /** Can this Claude session take a steer: is a peer inbox open, and is it held on a prompt? */
+  steerProbe?: (provider: string, threadId: string) => { peerInbox: boolean; waitingOnPrompt: boolean }
+  /** `COS_CONTINUE_LIVE`. Defaults to `continueLiveEnabled()`, read per request. */
+  continueLive?: () => boolean
+  /** The attempt journal (the binding registry). The steer path writes `pending` here BEFORE any frame. */
+  attempts?: {
+    begin: (provider: string, threadId: string, clientTurnId: string, mode: 'turn' | 'steer', now: number) => boolean
+    settle: (provider: string, threadId: string, clientTurnId: string, exit: 'sent' | 'not_sent' | 'unknown', now: number) => boolean
+  }
+}
+
+/**
+ * Steer availability for one thread, from the shared rule. A throwing probe is "no channel":
+ * the turn is queued, which is always safe.
+ */
+export function steerAvailabilityFor(deps: Pick<ThreadTurnQueueDeps, 'steerProbe' | 'deliverLiveTurn' | 'continueLive'>, provider: string, threadId: string, gateReason: string | null): SessionSteerAvailability {
+  let probe: { peerInbox: boolean; waitingOnPrompt: boolean } = { peerInbox: false, waitingOnPrompt: false }
+  if (provider === 'claude' && typeof deps.steerProbe === 'function' && typeof deps.deliverLiveTurn === 'function') {
+    try {
+      const read = deps.steerProbe(provider, threadId)
+      probe = { peerInbox: read?.peerInbox === true, waitingOnPrompt: read?.waitingOnPrompt === true }
+    } catch {
+      probe = { peerInbox: false, waitingOnPrompt: false }
+    }
+  }
+  let continueLive = false
+  try { continueLive = (deps.continueLive ?? (() => continueLiveEnabled()))() === true } catch { continueLive = false }
+  return sessionSteerAvailability({ provider, gateReason, continueLive, peerInbox: probe.peerInbox, waitingOnPrompt: probe.waitingOnPrompt })
 }
 
 /** Public shape of a queued turn. No prompt echo beyond a short preview. */
-function publicRow(turn: QueuedThreadTurn, position: number): Record<string, unknown> {
-  return {
+export function publicRow(turn: QueuedThreadTurn, position: number): Record<string, unknown> {
+  const row: Record<string, unknown> = {
     clientTurnId: turn.clientTurnId,
     status: turn.status,
     queuedAt: turn.queuedAt,
@@ -74,6 +126,21 @@ function publicRow(turn: QueuedThreadTurn, position: number): Record<string, unk
     preview: turn.prompt.length > 80 ? `${turn.prompt.slice(0, 79)}…` : turn.prompt,
     ...(turn.reason ? { reason: turn.reason } : {}),
     ...(turn.settledAt ? { settledAt: turn.settledAt } : {}),
+  }
+  // 6.78.0: additive, and only while a P3 flag is on, so the row is the 6.77 bytes otherwise.
+  // `resendable` is the per-row capability: present only when Send again can act on it.
+  const reconcile = queueReconcileEnabled()
+  const resend = queueResendEnabled()
+  if (!reconcile && !resend && !sessionSteerEnabled()) return row
+  const reasonCopy = reconcile ? queuedTurnReasonCopy(turn.reason) : null
+  return {
+    ...row,
+    ...(reasonCopy ? { reasonCopy } : {}),
+    deliveryState: turn.deliveryState ?? null,
+    mode: turn.mode ?? 'queue',
+    resendOf: turn.resendOf ?? null,
+    resentAs: turn.resentAs ?? null,
+    ...(resend && (turn.status === 'refused' || turn.status === 'expired') ? { resendable: true } : {}),
   }
 }
 
@@ -129,15 +196,19 @@ export async function drainThread(
   threadId: string,
   deps: ThreadTurnQueueDeps,
 ): Promise<{ delivered: number; held: number; retired: number }> {
+  // 6.78.0: settle what a dead boot left `delivering` BEFORE anything is drained, so a turn
+  // proved unsent is sent in this same pass and an unknown one is never sent at all.
+  const reconcile = queueReconcileEnabled()
+  if (reconcile && typeof deps.deliveryEvidence === 'function') await reconcileDeliveringTurns(provider, threadId, deps)
   const now = deps.now()
   const queue = readQueue(provider, threadId, now)
   if (queue.length === 0) return { delivered: 0, held: 0, retired: 0 }
 
   let delivered = 0, held = 0, retired = 0
-  const persist = (turn: QueuedThreadTurn) => {
+  const persist = (turn: QueuedThreadTurn, durable = false) => {
     const latest = readQueue(provider, threadId, deps.now())
     const index = latest.findIndex(t => t.clientTurnId === turn.clientTurnId)
-    if (index >= 0) { latest[index] = turn; writeQueue(provider, threadId, latest) }
+    if (index >= 0) { latest[index] = turn; writeQueue(provider, threadId, latest, durable ? { durable: true } : {}) }
   }
   let refusedGate: ReturnType<ThreadTurnQueueDeps['occupancy']> | null = null
 
@@ -196,9 +267,18 @@ export async function drainThread(
     // forever; the ceiling only bounds anything if it survives the crash it is bounding.
     turn.attempts += 1
     turn.status = 'delivering'
-    persist(turn)
+    // 6.78.0: the stamp the restart reconcile reads. `journal: 1` says this build keeps an
+    // attempt record for the delivery that follows; `deliveringBootId` says which boot owns
+    // it, so a sweep never touches a row this process is delivering right now. Durable:
+    // this is the intent a crash leaves behind.
+    if (reconcile) {
+      turn.journal = 1
+      if (typeof deps.bootId === 'string' && deps.bootId.length > 0) turn.deliveringBootId = deps.bootId
+      else delete turn.deliveringBootId
+    }
+    persist(turn, reconcile)
 
-    let outcome: { ok: boolean; reason?: string; serverRetryable?: boolean }
+    let outcome: Awaited<ReturnType<ThreadTurnQueueDeps['deliver']>>
     refusedGate = null
     try {
       outcome = await deps.deliver(turn)
@@ -217,6 +297,15 @@ export async function drainThread(
       // cancelled here, never put back to wait and sent again after the hold.
       turn.status = 'cancelled'
       turn.reason = 'turn_cancelled'
+      turn.settledAt = deps.now()
+      retired += 1
+    } else if (reconcile && outcome.replayed === true && outcome.deliveryState === 'unknown') {
+      // 6.78.0 (V1 W6): the turn route REPLAYED this key as unknown (a receipt, or an
+      // ambiguous ledger record). It will answer the same on every retry, by design, so it
+      // is settled now as what it is: may have been sent, never sent again.
+      turn.status = 'refused'
+      turn.reason = 'delivery_unknown_after_restart'
+      turn.deliveryState = 'unknown'
       turn.settledAt = deps.now()
       retired += 1
     } else if (isRetryableDelivery(outcome)) {
@@ -250,6 +339,71 @@ export async function drainThread(
   return { delivered, held, retired }
 }
 
+/**
+ * 6.78.0 (MVP-B): settle the `delivering` rows a dead boot left on one thread.
+ *
+ * Today a row the process died delivering holds forever: `drainDecision` only acts on
+ * `waiting`, `pruneQueue` keeps it, DELETE refuses it, and the busy-Codex hop stays off for
+ * the thread while it exists. Only rows stamped by ANOTHER boot (or by none) are touched, so
+ * a sweep cannot settle a row this process is delivering right now.
+ *
+ * The verdict is `deps.deliveryEvidence`; the one rule it cannot override is enforced here
+ * as well: only a row this build stamped (`journal: 1`) and that is not a steer can be put
+ * back to wait. Everything else needs positive evidence of delivery or is unknown.
+ *   delivered      `delivered`, reason `reconciled_after_restart`
+ *   not_delivered  back to `waiting`, reason `requeued_after_restart`, the attempt stays SPENT
+ *                  (the ceiling must outlive the crash it bounds)
+ *   unknown        `refused`, reason `delivery_unknown_after_restart`, `deliveryState:
+ *                  'unknown'`, kept six hours and never resent
+ */
+export async function reconcileDeliveringTurns(
+  provider: string,
+  threadId: string,
+  deps: ThreadTurnQueueDeps,
+): Promise<{ delivered: number; requeued: number; unknown: number }> {
+  const counts = { delivered: 0, requeued: 0, unknown: 0 }
+  if (typeof deps.deliveryEvidence !== 'function') return counts
+  const ownBoot = typeof deps.bootId === 'string' && deps.bootId.length > 0 ? deps.bootId : undefined
+  const stranded = readQueue(provider, threadId, deps.now())
+    .filter(t => t.status === 'delivering' && !(t.deliveringBootId !== undefined && t.deliveringBootId === ownBoot))
+  for (const row of stranded) {
+    let verdict: DeliveryEvidence
+    try {
+      verdict = await deps.deliveryEvidence(row)
+    } catch {
+      verdict = 'unknown'
+    }
+    if (verdict !== 'delivered' && verdict !== 'not_delivered') verdict = 'unknown'
+    if (verdict === 'not_delivered' && (row.journal !== 1 || row.mode === 'steer')) verdict = 'unknown'
+    // Re-read after the await, and only touch the row if it is still the one we judged.
+    const latest = readQueue(provider, threadId, deps.now())
+    const current = latest.find(t => t.clientTurnId === row.clientTurnId)
+    if (!current || current.status !== 'delivering' || current.deliveringBootId !== row.deliveringBootId) continue
+    const at = deps.now()
+    if (verdict === 'delivered') {
+      current.status = 'delivered'
+      current.reason = 'reconciled_after_restart'
+      current.settledAt = at
+      counts.delivered += 1
+    } else if (verdict === 'not_delivered') {
+      current.status = 'waiting'
+      current.reason = 'requeued_after_restart'
+      delete current.journal
+      delete current.deliveringBootId
+      counts.requeued += 1
+    } else {
+      current.status = 'refused'
+      current.reason = 'delivery_unknown_after_restart'
+      current.deliveryState = 'unknown'
+      current.settledAt = at
+      counts.unknown += 1
+    }
+    writeQueue(provider, threadId, latest, { durable: true })
+    console.log(`[thread-turn-queue] reconciled provider=${provider} clientTurnId=${row.clientTurnId} verdict=${verdict} stamped=${row.journal === 1} mode=${row.mode ?? 'queue'}`)
+  }
+  return counts
+}
+
 /** One pass over every thread holding a queue. */
 export async function drainAllThreads(deps: ThreadTurnQueueDeps): Promise<number> {
   let delivered = 0
@@ -264,11 +418,127 @@ export async function drainAllThreads(deps: ThreadTurnQueueDeps): Promise<number
   return delivered
 }
 
+/**
+ * Session steer (6.78.0, COS_SESSION_STEER): the turn goes INTO the running Claude turn
+ * through the session's peer inbox, and lands at its next tool boundary (live probe 3,
+ * Claude Code 2.1.302: a COS-format frame written mid-tool folded into the running turn).
+ *
+ * THE ORDER IS THE SAFETY:
+ *   1. the intent row, durably: `delivering`, `mode: 'steer'`, stamped
+ *   2. the attempt `pending`, durably, BEFORE any frame
+ *   3. `deliverLiveTurn`
+ *   4. the verdict, journal first, then the row
+ * A crash after 1 leaves a steer row with no positive evidence (the reconcile reads it as
+ * unknown, never resends it); after 2, an attempt that never reported back (unknown).
+ *
+ *   ok                                   200 {state: delivered, reason: steered}
+ *   unverified, write_failed, a throw    200 {state: refused, reason: steer_unverified,
+ *                                        deliveryState: unknown}: may be in the session,
+ *                                        never resent, kept six hours
+ *   nothing reached the session          the row waits like any parked turn: 202 with
+ *                                        `steerFallback` (or, with fallback none, settled
+ *                                        `refused` / `steer_not_sent`)
+ */
+async function steerTurn(
+  _req: Request,
+  res: Response,
+  deps: ThreadTurnQueueDeps,
+  turn: QueuedThreadTurn,
+  queue: QueuedThreadTurn[],
+  gateReason: string | null,
+  fallbackNone: boolean,
+): Promise<unknown> {
+  const { provider, threadId, clientTurnId, prompt } = turn
+  const intent: QueuedThreadTurn = {
+    ...turn,
+    status: 'delivering',
+    attempts: 1,
+    mode: 'steer',
+    journal: 1,
+    ...(typeof deps.bootId === 'string' && deps.bootId.length > 0 ? { deliveringBootId: deps.bootId } : {}),
+  }
+  const admitted = admitToQueue(queue, intent)
+  if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
+  writeQueue(provider, threadId, admitted.queue, { durable: true })
+
+  /** Rewrite this row on the CURRENT file: other requests may have changed others meanwhile. */
+  const settleRow = (apply: (row: QueuedThreadTurn) => void): QueuedThreadTurn[] => {
+    const latest = readQueue(provider, threadId, deps.now())
+    const row = latest.find(t => t.clientTurnId === clientTurnId)
+    if (row) { apply(row); writeQueue(provider, threadId, latest, { durable: true }) }
+    return latest
+  }
+  const backToWaiting = (row: QueuedThreadTurn): void => {
+    row.status = 'waiting'
+    row.attempts = 0
+    delete row.mode
+    delete row.journal
+    delete row.deliveringBootId
+  }
+  const queued202 = (latest: QueuedThreadTurn[], steerFallback: string) => res.status(202).json({
+    queued: true,
+    clientTurnId,
+    position: queuePosition(latest, clientTurnId),
+    waitingOn: gateReason,
+    steerFallback,
+  })
+
+  let begun = false
+  try {
+    begun = deps.attempts?.begin(provider, threadId, clientTurnId, 'steer', deps.now()) === true
+  } catch {
+    begun = false
+  }
+  if (!begun) {
+    // Nothing was sent, and nothing may be until the attempt is on record: an ordinary park.
+    const latest = settleRow(backToWaiting)
+    console.warn(`[thread-turn-queue] steer not attempted provider=${provider} clientTurnId=${clientTurnId}: the attempt journal could not record it; queued`)
+    return queued202(latest, 'journal_unavailable')
+  }
+
+  let live: { ok: boolean; reason: string } | null = null
+  try {
+    live = await deps.deliverLiveTurn!({ provider, sessionId: threadId, prompt, verifyTimeoutMs: PEER_VERIFY_TIMEOUT_MS, clientTurnId })
+  } catch (error) {
+    console.error(`[thread-turn-queue] steer delivery threw: ${error instanceof Error ? error.message : error}`)
+    live = null
+  }
+  const at = deps.now()
+  const journal = (exit: 'sent' | 'not_sent' | 'unknown'): void => {
+    try { deps.attempts?.settle(provider, threadId, clientTurnId, exit, at) } catch { /* the reconcile reads `pending` as unknown */ }
+  }
+  console.log(`[thread-turn-queue] steer provider=${provider} clientTurnId=${clientTurnId} hop=${live?.reason ?? 'threw'}`)
+
+  if (live?.ok === true) {
+    journal('sent')
+    settleRow(row => { row.status = 'delivered'; row.reason = 'steered'; row.settledAt = at })
+    return res.status(200).json({ state: 'delivered', reason: 'steered', clientTurnId })
+  }
+  if (live === null || live.reason === 'unverified' || live.reason === 'write_failed') {
+    journal('unknown')
+    settleRow(row => { row.status = 'refused'; row.reason = 'steer_unverified'; row.deliveryState = 'unknown'; row.settledAt = at })
+    return res.status(200).json({
+      state: 'refused',
+      reason: 'steer_unverified',
+      deliveryState: 'unknown',
+      reasonCopy: queuedTurnReasonCopy('steer_unverified'),
+    })
+  }
+  // disabled, no_record, connect_failed, protocol_unsupported, suspect_expired, not_claude:
+  // the transport's own word that nothing reached a session.
+  journal('not_sent')
+  if (fallbackNone) {
+    settleRow(row => { row.status = 'refused'; row.reason = 'steer_not_sent'; row.settledAt = at })
+    return res.status(200).json({ state: 'refused', reason: 'steer_not_sent', reasonCopy: queuedTurnReasonCopy('steer_not_sent') })
+  }
+  return queued202(settleRow(backToWaiting), 'no_outside_channel')
+}
+
 export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
   const router = Router()
 
   // POST — park a turn for a thread that is busy right now.
-  router.post('/agent-sessions/:provider/:threadId/queued-turns', (req: Request, res: Response) => {
+  router.post('/agent-sessions/:provider/:threadId/queued-turns', async (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
     const provider = String(req.params.provider ?? '')
     const threadId = String(req.params.threadId ?? '')
@@ -284,6 +554,30 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     // whole TTL. Refuse it here, where the client can still fix it.
     if (!COS_SESSION_ID_RE.test(cosSessionId)) {
       return res.status(400).json({ error: 'invalid_request', reason: 'invalid_cos_session_id' })
+    }
+
+    // 6.78.0: `mode: 'steer'` asks for the running turn itself (COS_SESSION_STEER). Off, the
+    // field is ignored exactly as a 6.77 server ignores it.
+    const steerOn = sessionSteerEnabled()
+    const wantSteer = steerOn && body.mode === 'steer'
+    const fallbackNone = wantSteer && body.fallback === 'none'
+
+    // 6.78.0: REPLAY BEFORE THE GATE. A key this queue already holds answers with what that
+    // row is, whatever the thread is doing now: still 409 `duplicate_turn` (the 6.10.644 lens
+    // and Control read that code as "parked"), with the row's state, its delivery state and
+    // the reason line. Before 6.78 the gate ran first, so a retry of a turn that had since
+    // drained on a now-free thread read `thread_free` and was sent a second time.
+    if (queueReconcileEnabled() || steerOn) {
+      const held = readQueue(provider, threadId, deps.now()).find(t => t.clientTurnId === clientTurnId)
+      if (held) {
+        const heldCopy = queueReconcileEnabled() ? queuedTurnReasonCopy(held.reason) : null
+        return res.status(409).json({
+          error: 'duplicate_turn',
+          state: held.status,
+          ...(held.deliveryState ? { deliveryState: held.deliveryState } : {}),
+          ...(heldCopy ? { reasonCopy: heldCopy } : {}),
+        })
+      }
     }
 
     // THE GATE DECIDES WHETHER PARKING IS EVEN HONEST. A structural refusal can never
@@ -305,12 +599,22 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
 
     const now = deps.now()
     const queue = readQueue(provider, threadId, now)
-    const admitted = admitToQueue(queue, {
+    const turn: QueuedThreadTurn = {
       clientTurnId, cosSessionId, provider, threadId, prompt,
       queuedAt: now, status: 'waiting', attempts: 0,
       // 6.62.0 /qa (Q3): the acknowledgement travels with the row to its drain.
       ...(continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]) ? { continueNoteAck: true as const } : {}),
-    })
+    }
+
+    let steerFallback: string | null = null
+    if (wantSteer) {
+      const availability = steerAvailabilityFor(deps, provider, threadId, gate.reason)
+      if (availability.available) return steerTurn(req, res, deps, turn, queue, gate.reason, fallbackNone)
+      if (fallbackNone) return res.status(409).json({ error: 'steer_unavailable', reason: availability.reason })
+      steerFallback = availability.reason
+    }
+
+    const admitted = admitToQueue(queue, turn)
     if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
 
     writeQueue(provider, threadId, admitted.queue)
@@ -319,7 +623,60 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       clientTurnId,
       position: queuePosition(admitted.queue, clientTurnId),
       waitingOn: gate.reason,
+      ...(steerFallback !== null ? { steerFallback } : {}),
     })
+  })
+
+  // POST — Send again (6.78.0, COS_QUEUE_RESEND). A refused or expired row's words, copied
+  // ON THE SERVER under a new key. Once only, across every surface: the original records the
+  // copy it became (`resentAs`), and a repeat from anywhere answers that row.
+  //
+  // ONE SYNCHRONOUS READ-MODIFY-WRITE. There is no `await` between reading `resentAs` and
+  // writing it, so two taps (lens and phone) in the same tick cannot both pass the check.
+  // The new row is admitted even when the thread is free: the drain sends it through the
+  // ordinary front door, with every gate.
+  router.post('/agent-sessions/:provider/:threadId/queued-turns/:clientTurnId/resend', (req: Request, res: Response, next) => {
+    // Off: not a route at all, exactly as on 6.77 (a client reads the 404 as "update the server").
+    if (!queueResendEnabled()) return next()
+    res.set('Cache-Control', 'private, no-store')
+    const provider = String(req.params.provider ?? '')
+    const threadId = String(req.params.threadId ?? '')
+    const originalId = String(req.params.clientTurnId ?? '')
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const newId = typeof body.clientTurnId === 'string' ? body.clientTurnId : ''
+    const cosSessionId = typeof body.cosSessionId === 'string' ? body.cosSessionId : ''
+    if (!CLIENT_TURN_ID_RE.test(newId) || !COS_SESSION_ID_RE.test(cosSessionId)) {
+      return res.status(400).json({ error: 'invalid_request' })
+    }
+    const now = deps.now()
+    const queue = readQueue(provider, threadId, now)
+    const original = queue.find(t => t.clientTurnId === originalId)
+    // Pruned (or never here): nothing to copy, and saying "sent again" would be invented.
+    if (!original) return res.status(404).json({ error: 'unknown_turn' })
+    if (typeof original.resentAs === 'string' && original.resentAs.length > 0) {
+      const again = queue.find(t => t.clientTurnId === original.resentAs)
+      return res.status(200).json(again
+        ? { ...publicRow(again, queuePosition(queue, again.clientTurnId)), replayed: true }
+        : { clientTurnId: original.resentAs, resendOf: original.clientTurnId, replayed: true })
+    }
+    if (original.status !== 'refused' && original.status !== 'expired') return res.status(409).json({ error: 'not_resendable' })
+    // "May not have been sent": a second copy is possible, so the person has to have been told.
+    if (original.deliveryState === 'unknown' && body.acknowledge !== 'may_duplicate') {
+      return res.status(409).json({ error: 'acknowledge_required' })
+    }
+    const copy: QueuedThreadTurn = {
+      clientTurnId: newId, cosSessionId, provider, threadId,
+      prompt: original.prompt,
+      queuedAt: now, status: 'waiting', attempts: 0,
+      ...(original.continueNoteAck === true ? { continueNoteAck: true as const } : {}),
+      resendOf: original.clientTurnId,
+    }
+    const admitted = admitToQueue(queue, copy)
+    if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
+    original.resentAs = newId
+    writeQueue(provider, threadId, admitted.queue)
+    console.log(`[thread-turn-queue] resend provider=${provider} from=${original.clientTurnId} as=${newId} unknown=${original.deliveryState === 'unknown'}`)
+    return res.status(200).json(publicRow(copy, queuePosition(admitted.queue, newId)))
   })
 
   // GET — what is waiting, for the pending row on the lens.

@@ -12,7 +12,7 @@ import { nativeQueuedCounts } from './codex-queue-control.js'
 
 import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync } from 'node:fs'
 import { join } from 'node:path'
-import { atomicWriteFileSync } from './atomic-fs.js'
+import { atomicWriteFileSync, durableAtomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import { turnFromTail, type SessionStreamProvider, type TurnFromTail } from './session-stream-events.js'
 import { pruneQueue, type QueuedThreadTurn } from './thread-turn-queue.js'
@@ -64,9 +64,18 @@ export function readQueue(provider: string, threadId: string, now: number): Queu
   }
 }
 
-/** Replace a thread's queue. Atomic, so a crash mid-write cannot truncate it. */
-export function writeQueue(provider: string, threadId: string, queue: readonly QueuedThreadTurn[]): void {
-  atomicWriteFileSync(queuePath(provider, threadId), `${JSON.stringify(queue, null, 2)}\n`)
+/**
+ * Replace a thread's queue. Atomic, so a crash mid-write cannot truncate it.
+ *
+ * 6.78.0: `durable` also fsyncs the bytes and the directory before returning. Used for the
+ * one write that must survive a power cut as well as a crash: a row entering `delivering`,
+ * which is the intent the restart reconcile reads. Same bytes either way.
+ */
+export function writeQueue(provider: string, threadId: string, queue: readonly QueuedThreadTurn[], options: { durable?: boolean } = {}): void {
+  const path = queuePath(provider, threadId)
+  const text = `${JSON.stringify(queue, null, 2)}\n`
+  if (options.durable === true) durableAtomicWriteFileSync(path, text)
+  else atomicWriteFileSync(path, text)
 }
 
 /**

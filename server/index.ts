@@ -28,7 +28,7 @@ import { cachedHookStatus, isCosSpawnedPid, registryEntrypointSync, claudeDeskRu
 import { clearingHaltOnSpawn, writeHaltMarker } from './lib/session-halt.js'
 import { startProviderObserveRefresh } from './lib/provider-observe.js'
 import { appendSessionCancelLedger, cancelHoldUntil as cancelHoldUntilFor, noteThreadCancelled, setDeskCancelReaders, threadCancel } from './lib/session-cancel.js'
-import { makeQueueTurnEvidence } from './lib/queue-turn-evidence.js'
+import { makeDeliveryEvidence, makeQueueTurnEvidence, makeTurnReceiptLookup } from './lib/queue-turn-evidence.js'
 import {
   PermissionBroker,
   brokerSignalSink,
@@ -64,7 +64,9 @@ import { readComposerFacts } from './lib/cursor-session-model.js'
 import { MAX_PROMPT_CHARS } from './lib/attached-provider-adapter.js'
 import { readRecentSessionTurns } from './lib/agent-session-turns.js'
 import { parseAgentSession } from './lib/agent-session-store.js'
-import { makeLiveTurnDeliverer } from './lib/session-peer-inbox-deps.js'
+import { makeLiveTurnDeliverer, readPeerInboxRecords } from './lib/session-peer-inbox-deps.js'
+import { selectPeerInbox } from './lib/session-peer-inbox.js'
+import { nativeQueueControl, plainQueueText } from './lib/codex-queue-control.js'
 import { makeCodexLiveDeliverer } from './lib/codex-live-queue-deps.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
 import { ForkJobLedger, fileForkJobPersistence } from './lib/fork-job-ledger.js'
@@ -192,16 +194,16 @@ import {
 } from './lib/maintenance-lifecycle.js'
 
 const app = express()
-import { createThreadTurnQueueRouter, drainAllThreads } from './routes/thread-turn-queue.js'
+import { createThreadTurnQueueRouter, drainAllThreads, steerAvailabilityFor } from './routes/thread-turn-queue.js'
 import { createCursorStopFollowupRouter } from './routes/cursor-stop-followup.js'
-import { queuedThreadKeys, readQueue, transcriptTurnVerdict, writeQueue } from './lib/thread-turn-queue-store.js'
+import { queuedThreadKeys, readQueue, readTranscriptTailLines, transcriptTurnVerdict, writeQueue } from './lib/thread-turn-queue-store.js'
 import { cursorDeskHaltReady, hookHaltReady, readHookToken } from './lib/claude-hooks-installer.js'
 import { OPEN_TURN_CEILING_MS } from './lib/session-state-derive.js'
 import { createDrainKick, kickPlanFor } from './lib/thread-drain-kick.js'
 import { transcriptPathFor } from './lib/native-head.js'
 import { deliverQueuedTurnOverLoopback } from './lib/thread-turn-queue-deliver.js'
 import { readFences, writeFences } from './lib/thread-fence-store.js'
-import type { QueuedThreadTurn } from './lib/thread-turn-queue.js'
+import { sessionSteerEnabled, type QueuedThreadTurn } from './lib/thread-turn-queue.js'
 
 const PORT = parseInt(process.env.PORT ?? '3141', 10)
 
@@ -507,10 +509,23 @@ try {
 } catch (error) {
   console.warn('[binding-registry] boot reap failed', error)
 }
+// 6.78.0 (COS_PIN_BOOT_REAP): a pin a dead boot left frees its thread 21 minutes after it
+// was taken (the orphan child's own deadline), not 24 h. Here at boot, on the tick below,
+// and lazily on every attach and occupancy check (`attachBlocked`, `create`).
+const releaseOrphanPins = (when: string): void => {
+  try {
+    const orphans = agentSessionBindingRegistry.reapOrphanedPins(Date.now())
+    if (orphans.released > 0) console.log(`[binding-registry] ${when}: released ${orphans.released} pin(s) a dead boot left, ${orphans.recorded} recorded as delivery unknown`)
+  } catch (error) {
+    console.warn('[binding-registry] orphan pin release failed', error)
+  }
+}
+releaseOrphanPins('boot')
 // And periodically, so a strand created mid-run clears without waiting for the next
 // restart. Unref'd so it never holds the process open during shutdown.
 const bindingReapTimer = setInterval(() => {
   try { agentSessionBindingRegistry.reap(Date.now()) } catch { /* next tick retries */ }
+  releaseOrphanPins('tick')
 }, 10 * 60_000)
 bindingReapTimer.unref()
 
@@ -865,6 +880,26 @@ const sharedTargetGuard = new TargetGuard(
     : null,
 )
 
+// 6.78.0 (P3): one live-turn transport for the turns route's live hop and Sessions steer,
+// so the health counters see both. And what a steer needs to know about a Claude session:
+// a peer inbox it can be reached through, and whether it is held on a dialog (hooks).
+const liveTurnDeliverer = makeLiveTurnDeliverer(nativeHeadDeps)
+const steerDeps = {
+  deliverLiveTurn: liveTurnDeliverer,
+  steerProbe: (_provider: string, threadId: string) => ({
+    peerInbox: selectPeerInbox(threadId, readPeerInboxRecords(), pid => cosSpawnedPids().has(pid)) !== null,
+    waitingOnPrompt: sessionHooksEnabled() ? (signalFor(threadId)?.waiting ?? null) !== null : false,
+  }),
+}
+/** The bounded transcript tail the reconcile and the receipts read evidence from. */
+const QUEUE_EVIDENCE_TAIL_BYTES = 4 * 1024 * 1024
+const queueEvidenceLines = (provider: string, threadId: string): readonly string[] | null =>
+  provider === 'claude' || provider === 'codex'
+    ? readTranscriptTailLines(transcriptPathFor(provider, threadId, nativeHeadDeps), QUEUE_EVIDENCE_TAIL_BYTES)
+    : null
+const queueAttempt = (provider: string, threadId: string, clientTurnId: string) =>
+  agentSessionBindingRegistry.attemptFor(provider, threadId, clientTurnId)
+
 const queueTurnEvidence = makeQueueTurnEvidence({
   signalFor: threadId => signalFor(threadId),
   registryIdleAfterStop: (threadId, stopAt) => registryIdleAfterStop(threadId, stopAt),
@@ -942,6 +977,28 @@ if (threadAttachEnabled()) {
       }
     },
     deliver: (turn: QueuedThreadTurn) => deliverQueuedTurnOverLoopback(turn, PORT, API_TOKEN),
+    // 6.78.0 (P3): the restart reconcile, the attempt journal and Sessions steer.
+    bootId: serverMetrics.bootId,
+    deliveryEvidence: makeDeliveryEvidence({
+      ledgerOutcome: (provider, threadId, clientTurnId) => {
+        const result = agentSessionBindingRegistry.findTurnForTarget(provider, threadId, clientTurnId)?.result
+        return result && typeof result === 'object' && typeof (result as { outcome?: unknown }).outcome === 'string'
+          ? (result as { outcome: string }).outcome
+          : null
+      },
+      attempt: queueAttempt,
+      transcriptLines: queueEvidenceLines,
+      codexQueueTexts: async threadId => (await nativeQueueControl.list(threadId))
+        .map(row => plainQueueText(row))
+        .filter((text): text is string => typeof text === 'string'),
+    }),
+    ...steerDeps,
+    attempts: {
+      begin: (provider: string, threadId: string, clientTurnId: string, mode: 'turn' | 'steer', now: number) =>
+        agentSessionBindingRegistry.beginAttempt(provider, threadId, clientTurnId, mode, now),
+      settle: (provider: string, threadId: string, clientTurnId: string, exit: 'sent' | 'not_sent' | 'unknown', now: number) =>
+        agentSessionBindingRegistry.settleAttempt(provider, threadId, clientTurnId, exit, now),
+    },
     // 6.53.0: parked turns hold for two minutes after a cancel on their thread.
     cancelHoldUntil: (provider: string, threadId: string) => cancelHoldUntilFor(provider, threadId),
     // 6.62.0 (W14): a busy Agent CLI chat's parked turn drains here (no Stop hook fires for `-p`).
@@ -1021,7 +1078,7 @@ app.use('/api', createAgentSessionBindingsRouter({
   // 6.49.0: the running session first (Desktop tab or iTerm, same registry record),
   // the resume child second. Reads `COS_CONTINUE_LIVE` per call, so the flag reports
   // on /api/health without a restart and every refusal falls back to the 6.48.2 path.
-  deliverLiveTurn: makeLiveTurnDeliverer(nativeHeadDeps),
+  deliverLiveTurn: liveTurnDeliverer,
   // 6.51.0: a Codex thread the Codex app holds goes into that app's own queue
   // (`codex queue`), never into a resume child that cannot open a held thread.
   // `COS_CODEX_LIVE_QUEUE=0` restores the 6.50 path.
@@ -1067,6 +1124,14 @@ app.use('/api', createAgentSessionBindingsRouter({
   // empty list — "nothing is bound" and "the store could not be read" must not
   // look the same.
   bindings: agentSessionBindingRegistry,
+  // 6.78.0 (P3): receipts before the claim, and the `steer` field on an attach refusal.
+  turnReceipt: makeTurnReceiptLookup({
+    queueRows: (provider, threadId) => readQueue(provider, threadId, Date.now()),
+    attempt: queueAttempt,
+    transcriptLines: queueEvidenceLines,
+    bootId: serverMetrics.bootId,
+  }),
+  sessionSteer: (provider, threadId, gateReason) => (sessionSteerEnabled() ? steerAvailabilityFor(steerDeps, provider, threadId, gateReason) : null),
   // 6.53.0: cancel a session run from the lens. The route's own in-flight map answers for
   // a COS turn; these answer for a run at the desk. Read per request, so Install hooks in
   // Control flips `hooks_outdated` to `desk_run` within the status cache's five seconds.

@@ -60,7 +60,11 @@
     "COS_LENS_GIST_DAILY_CAP",
     "COS_DIARIZER",
     "COS_NEMOTRON_CLI",
-    "COS_NEMOTRON_MODELS"
+    "COS_NEMOTRON_MODELS",
+    "COS_QUEUE_RECONCILE",
+    "COS_PIN_BOOT_REAP",
+    "COS_QUEUE_RESEND",
+    "COS_SESSION_STEER"
   ],
   "maintenance": {
     "scope": "cross_boot",

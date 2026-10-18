@@ -63,6 +63,8 @@
     "!server/scripts/nemotron-replay.ts",
     "!server/scripts/turn-request-mutation-gate.mjs",
     "!server/scripts/mutation-gate.mjs",
+    "!server/scripts/turn-queue-durable-mutation-gate.mjs",
+    "!server/scripts/check-gate-anchors.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",
     "!shared/**/*.test.ts",
