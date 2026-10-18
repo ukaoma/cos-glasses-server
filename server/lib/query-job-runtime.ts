@@ -36,6 +36,7 @@ import {
 import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
 import type { JobTrailDraft } from './job-trail.js'
 import { registerMessageReservationSource } from './message-reservations.js'
+import { bootResumeGate } from './boot-resume.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -386,6 +387,8 @@ export const queryJobCoordinator = new QueryJobCoordinator(queryJobStore, runner
   projectTerminal: projectPublicConversationTerminal,
   acquireSessionLock: acquireModelSessionRunLock,
   acquireMaintenanceWork: () => acquireMaintenanceWork('durable_query', { phase: 'queued' }),
+  // 6.78.0: the boot requeue counts crashed boots per lineage and parks one past the limit.
+  bootResumeGate,
 })
 
 // A job's number is a live reservation from admission until its terminal

@@ -20,6 +20,7 @@ import {
 } from './query-job-types.js'
 import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
+import { crashLoopParkedError, type BootResumeGate } from './boot-resume.js'
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -86,6 +87,8 @@ export interface QueryJobCoordinatorOptions {
    * refusing its start lease) before the coordinator looks again. Bounded so a Mac
    * that slept through the end of a fence does not wait out a stale timer. */
   holdRecheckMs?: number
+  /** 6.78.0: the process's crash-loop gate (lib/boot-resume.ts), read when it is used. */
+  bootResumeGate?: () => Pick<BootResumeGate, 'admit' | 'retry' | 'forget' | 'limit'>
 }
 
 /** Margin past the fence before the start is retried, so the retry lands after it. */
@@ -200,10 +203,48 @@ export class QueryJobCoordinator {
     // 6.61.3: work the last boot admitted but never started runs now, with no
     // phone needed to send it again, in admission order. Each takes its own start
     // lease in execute.
+    const parked: string[] = []
     for (const { jobId, sessionId } of this.store.takeRequeuedOnBoot()) {
+      // 6.78.0: counted BEFORE its start is queued, so a start that kills the process is
+      // counted. Past the limit the job is parked: never started again by a boot.
+      if (!this.admitBootRequeue(jobId)) { parked.push(jobId); continue }
       queueMicrotask(() => { void this.execute(jobId, sessionId) })
     }
+    for (const jobId of parked) await this.parkBootRequeue(jobId)
     return this.getHealth()
+  }
+
+  /** Keyed by lineage (clientJobId), so the app's Resume (a new generation) is the same item. */
+  private admitBootRequeue(jobId: string): boolean {
+    const gate = this.options.bootResumeGate?.()
+    if (!gate) return true
+    try {
+      return gate.admit('query_job', this.store.lineageOf(jobId) ?? jobId, 'start')
+    } catch {
+      return true
+    }
+  }
+
+  /** A parked job ends `interrupted` with `restart_limit`, so the app shows it and can Resume it. */
+  private async parkBootRequeue(jobId: string): Promise<void> {
+    try {
+      const result = await this.store.interruptParked(jobId, crashLoopParkedError(this.options.bootResumeGate?.().limit))
+      if (!result.applied) return
+      console.warn(`[query-jobs] ${jobId.slice(0, 8)} parked: its start crashed the server on every boot; Resume runs it again`)
+      const execution = await this.store.getExecution(jobId)
+      await this.projectTerminal(execution.job, execution.request)
+    } catch (error) {
+      // Left `accepted`: the next boot offers it again and the gate keeps it parked.
+      console.error(`[query-jobs] ${jobId.slice(0, 8)} could not be parked:`, error)
+    }
+  }
+
+  private bootResumeLineage(op: 'retry' | 'forget', clientJobId: string): void {
+    try {
+      const gate = this.options.bootResumeGate?.()
+      if (op === 'retry') gate?.retry('query_job', clientJobId)
+      else gate?.forget('query_job', clientJobId)
+    } catch { /* the gate fails open on its own; never fail an admission or a start */ }
   }
 
   /** Admission serialization makes first-run session allocation idempotent:
@@ -224,6 +265,9 @@ export class QueryJobCoordinator {
         const admission = await this.store.admit(normalized)
         resolve(admission)
         if (admission.created) {
+          // 6.78.0: a new generation of a lineage is the person's Retry (the app's Resume or a
+          // Messages retry): a parked lineage is unparked and its count starts over.
+          if (admission.job.generation > 1) this.bootResumeLineage('retry', admission.job.clientJobId)
           if (maintenanceLease) this.admittedMaintenance.set(admission.job.jobId, maintenanceLease)
           queueMicrotask(() => { void this.execute(admission.job.jobId, admission.job.sessionId) })
         } else {
@@ -302,6 +346,8 @@ export class QueryJobCoordinator {
       try {
         const starting = await this.store.markStarting(jobId, () => !this.shuttingDown)
         if (starting.applied) {
+          // 6.78.0: a started job is never handed back by a boot again, so its count is done.
+          this.bootResumeLineage('forget', starting.job.clientJobId)
           if (heldSinceMs != null) console.info(`[query-jobs] ${id} starting after a ${Math.round((Date.now() - heldSinceMs) / 1000)}s hold`)
           return { lease }
         }

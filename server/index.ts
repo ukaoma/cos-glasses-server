@@ -158,6 +158,7 @@ import { createWorkSearchRouter } from './routes/work-search.js'
 import { isReadOnlyApiPost } from './lib/work-search.js'
 import { dataPath } from './lib/data-dir.js'
 import { loadJsonOrQuarantine, durableAtomicWriteFileSync } from './lib/atomic-fs.js'
+import { BOOT_RESUME_LEDGER_FILE, createBootResumeGate, installBootResumeGate } from './lib/boot-resume.js'
 import { WorkIntakeStore, createOptionalWorkIntakeStore } from './lib/work-intake-store.js'
 import { WorkHandoffRequestStore, createOptionalWorkHandoffRequestStore, handoffRequestCapabilities } from './lib/work-handoff-requests.js'
 import { createWorkBoardReader } from './lib/work-board-reader.js'
@@ -1151,6 +1152,15 @@ app.get('/', (_req, res) => {
   )
 })
 
+// 6.78.0: crash-loop parking (lib/boot-resume.ts). One gate per process. It opens its boot
+// in startAdmittedRuntime (after the listeners bind, so exits 74 and 75 never count), before
+// any boot resume, and gracefulShutdown marks a clean exit first thing, so only boots that
+// follow a crash count. A Retry of a parked meeting resumes that one job.
+// COS_CRASH_LOOP_PARKING=0 turns it off (default on).
+const bootResume = installBootResumeGate(createBootResumeGate({ path: dataPath(BOOT_RESUME_LEDGER_FILE) }), {
+  resume: { meeting_finalization: sessionId => resumeMeetingFinalizationJobs({ sessionId }) },
+})
+
 // Graceful shutdown persists an interrupted terminal before provider abort.
 // The bounded force-exit keeps service managers from hanging forever on a
 // broken disk while retaining the previous session/catalog/Whisper cleanup.
@@ -1158,6 +1168,10 @@ let gracefulShutdownStarted = false
 async function gracefulShutdown(): Promise<void> {
   if (gracefulShutdownStarted) return
   gracefulShutdownStarted = true
+  // 6.78.0: first, before the 8 s force exit can fire. A SIGTERM/SIGINT shutdown (Update
+  // Server, kickstart -k, bootout) is not a crash loop even if a later step hangs into exit(1),
+  // so the next boot does not count toward crash-loop parking.
+  bootResume.markCleanShutdown()
   const forceExit = setTimeout(() => process.exit(1), 8_000)
   forceExit.unref?.()
   await meetingAskRuntime.shutdown()
@@ -1373,6 +1387,8 @@ listenRequiredServers(listeners).then(() => {
     if (admittedRuntimeStarted) return
     admittedRuntimeStarted = true
 
+    // 6.78.0: before any boot resume. Was the last exit clean? Only boots after a crash count.
+    bootResume.openBoot()
     // Resume already-saved meetings whose post-response HQ/operations work
     // was interrupted by a prior server update or process exit.
     resumeMeetingFinalizationJobs()
