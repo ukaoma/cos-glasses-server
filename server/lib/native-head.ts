@@ -119,7 +119,7 @@
 
 import { createHash } from 'node:crypto'
 import { closeSync, constants as fsConstants, fstatSync, openSync, readSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { agentSessionRoots, idFromCodexFilename } from './agent-session-store.js'
 import { cursorTranscriptPath } from './cursor-agent-store.js'
 import { isValidNativeThreadId } from './native-thread-id.js'
@@ -177,8 +177,16 @@ export const TAIL_WINDOW_BYTES_BY_PROVIDER: Record<NativeHeadProvider, number> =
  */
 export const HEAD_ROW_COUNT = 3
 
-/** Ceilings that keep a pathological tree from turning attach into a directory walk. */
-export const MAX_CLAUDE_PROJECT_DIRS = 2048
+/**
+ * Ceilings that keep a pathological tree from turning attach into a directory walk.
+ *
+ * 6.78.1: Claude raised from 2048. COS's own stateless `claude -p` calls each left an empty
+ * project folder behind (about 100 to 270 a day on Miles's Mac); at 2,049 the walk refused,
+ * every Claude transcript read as missing, and every glasses message to an open Claude session
+ * waited from 2026-10-17 12:33 until it expired. A session whose hooks name its transcript
+ * no longer walks at all (`hintedClaudeTranscript`); this ceiling now bounds only the rest.
+ */
+export const MAX_CLAUDE_PROJECT_DIRS = 8192
 export const MAX_CODEX_DIR_ENTRIES = 512
 export const MAX_CODEX_FILES_SCANNED = 20_000
 
@@ -224,6 +232,13 @@ export interface NativeHeadDeps {
    * as `agentSessionLines`' injectable head/tail sizes.
    */
   tailWindowBytes?: number
+  /**
+   * 6.78.1: where Claude Code itself says this session's transcript is (the `transcript_path`
+   * its hook events carry), or null. Optional: absent, or null, means walk the project folders
+   * as before. Validated before use (`hintedClaudeTranscript`), so a wrong hint can only fall
+   * back to the walk, never name another file.
+   */
+  claudeTranscriptHint?: (sessionId: string) => string | null
 }
 
 /**
@@ -406,6 +421,41 @@ export function transcriptPathFor(
   }
 }
 
+/**
+ * The hook's transcript path, only if it is exactly `<root>/<one folder>/<threadId>.jsonl` and
+ * the file exists. The walk's two-copies refusal is not repeated here: this is the file Claude
+ * Code reported writing for this very session, which is stronger evidence than a name match.
+ */
+function hintedClaudeTranscript(filename: string, root: string, threadId: string, deps: NativeHeadDeps): string | null {
+  if (typeof deps.claudeTranscriptHint !== 'function') return null
+  let hint: string | null
+  try {
+    hint = deps.claudeTranscriptHint(threadId)
+  } catch {
+    return null
+  }
+  if (typeof hint !== 'string') return null
+  const path = resolve(hint)
+  if (basename(path) !== filename) return null
+  if (dirname(dirname(path)) !== resolve(root)) return null
+  return deps.fileExists(path) ? path : null
+}
+
+/** Said at most once an hour: the walk refusing is otherwise silent, and it was for 26 hours. */
+let lastOverflowWarnAt = 0
+function warnClaudeProjectsOverflow(root: string, count: number): void {
+  const now = Date.now()
+  if (now - lastOverflowWarnAt < 60 * 60_000) return
+  lastOverflowWarnAt = now
+  console.warn(`[native-head] ${count} folders in ${root}, over the ${MAX_CLAUDE_PROJECT_DIRS} walk limit: Claude sessions without a hook-reported transcript read as missing`)
+}
+
+/** Where index.ts registers the hook lookup, so every `realNativeHeadDeps()` gets it. */
+let claudeTranscriptHintSource: ((sessionId: string) => string | null) | null = null
+export function registerClaudeTranscriptHint(read: ((sessionId: string) => string | null) | null): void {
+  claudeTranscriptHintSource = read
+}
+
 function cursorAgentTranscriptPath(threadId: string, deps: NativeHeadDeps): string | null {
   return cursorTranscriptPath(threadId, deps.dirs.cursorProjectsDir)
 }
@@ -414,10 +464,16 @@ function claudeTranscriptPath(threadId: string, deps: NativeHeadDeps): string | 
   const root = deps.dirs.claudeProjectsDir
   if (!deps.dirExists(root)) return null
 
-  const folders = deps.readDir(root)
-  if (folders.length > MAX_CLAUDE_PROJECT_DIRS) return null
-
   const filename = `${threadId}.jsonl`
+  const hinted = hintedClaudeTranscript(filename, root, threadId, deps)
+  if (hinted !== null) return hinted
+
+  const folders = deps.readDir(root)
+  if (folders.length > MAX_CLAUDE_PROJECT_DIRS) {
+    warnClaudeProjectsOverflow(root, folders.length)
+    return null
+  }
+
   let found: string | null = null
   for (const folder of folders) {
     const candidate = join(root, folder, filename)
@@ -660,5 +716,8 @@ function readTail(path: string, maxBytes: number): TailRead | null {
 }
 
 export function realNativeHeadDeps(dirs: NativeHeadDirs = realNativeHeadDirs()): NativeHeadDeps {
-  return { dirs, dirExists, readDir, fileExists, readTail }
+  return {
+    dirs, dirExists, readDir, fileExists, readTail,
+    claudeTranscriptHint: sessionId => (claudeTranscriptHintSource === null ? null : claudeTranscriptHintSource(sessionId)),
+  }
 }

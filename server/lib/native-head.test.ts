@@ -26,9 +26,10 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   HEAD_ROW_COUNT,
+  MAX_CLAUDE_PROJECT_DIRS,
   NATIVE_HEAD_TOKEN_RE,
   TAIL_WINDOW_BYTES,
   headsDiffer,
@@ -37,6 +38,7 @@ import {
   nativeHead,
   realNativeHeadDeps,
   realNativeHeadDirs,
+  registerClaudeTranscriptHint,
   transcriptPathFor,
   type NativeHeadDeps,
   type NativeHeadDirs,
@@ -574,15 +576,93 @@ describe('nativeHead — Claude', () => {
 
   it('refuses when a directory listing exceeds the project-folder ceiling', () => {
     // The real slug is IN the flood list, so without the ceiling this resolves
-    // to a perfectly good token after 2049 stats. The refusal has to come from
+    // to a perfectly good token one stat past it. The refusal has to come from
     // the ceiling itself, not from failing to find anything.
     writeClaude('-slug', claudeTranscriptLines())
-    const listing = [...Array.from({ length: 2048 }, (_, i) => `slug-${i}`), '-slug']
+    const listing = [...Array.from({ length: MAX_CLAUDE_PROJECT_DIRS }, (_, i) => `slug-${i}`), '-slug']
     const flood = { ...deps, readDir: () => listing }
 
     expect(nativeHead('claude', THREAD, flood)).toBeNull()
     expect(nativeHead('claude', THREAD, { ...deps, readDir: () => listing.slice(-1) }))
       .toMatch(NATIVE_HEAD_TOKEN_RE)
+  })
+})
+
+// 6.78.1. From 2026-10-17 12:33 Miles's ~/.claude/projects held 2,235 folders, the walk refused
+// past 2,048, and every Claude transcript read as missing: the queue held every glasses message
+// to an open Claude session until it expired. The hooks already knew each session's file.
+describe('Claude transcript from the hook (6.78.1)', () => {
+  afterEach(() => {
+    registerClaudeTranscriptHint(null)
+    vi.restoreAllMocks()
+  })
+  const pastTheLimit = () => [...Array.from({ length: MAX_CLAUDE_PROJECT_DIRS }, (_, i) => `slug-${i}`), '-slug']
+
+  it('uses the hook-reported transcript without walking, even past the folder limit', () => {
+    const path = writeClaude('-slug', claudeTranscriptLines())
+    let walks = 0
+    const hooked: NativeHeadDeps = { ...deps, readDir: () => { walks += 1; return pastTheLimit() }, claudeTranscriptHint: () => path }
+
+    expect(transcriptPathFor('claude', THREAD, hooked)).toBe(path)
+    expect(nativeHead('claude', THREAD, hooked)).toMatch(NATIVE_HEAD_TOKEN_RE)
+    expect(walks).toBe(0)
+  })
+
+  it('reaches every realNativeHeadDeps() once index.ts registers the hook lookup', () => {
+    const path = writeClaude('-slug', claudeTranscriptLines())
+    const real = { ...realNativeHeadDeps(dirs), readDir: pastTheLimit }
+    expect(transcriptPathFor('claude', THREAD, real)).toBeNull()
+
+    registerClaudeTranscriptHint(id => (id === THREAD ? path : null))
+    expect(transcriptPathFor('claude', THREAD, real)).toBe(path)
+    expect(transcriptPathFor('claude', THREAD, { ...realNativeHeadDeps(dirs), readDir: pastTheLimit })).toBe(path)
+  })
+
+  it("ignores a hint naming another session's file", () => {
+    const other = writeClaude('-slug', claudeTranscriptLines(), OTHER_THREAD)
+    expect(transcriptPathFor('claude', THREAD, { ...deps, claudeTranscriptHint: () => other })).toBeNull()
+  })
+
+  it('ignores a hint outside the projects root, or nested below a project folder', () => {
+    const outside = join(root, 'elsewhere', '-slug')
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(outside, `${THREAD}.jsonl`), claudeTranscriptLines().join('\n'))
+    expect(transcriptPathFor('claude', THREAD, { ...deps, claudeTranscriptHint: () => join(outside, `${THREAD}.jsonl`) })).toBeNull()
+
+    const nested = join(dirs.claudeProjectsDir, '-slug', 'subagents')
+    mkdirSync(nested, { recursive: true })
+    writeFileSync(join(nested, `${THREAD}.jsonl`), claudeTranscriptLines().join('\n'))
+    expect(transcriptPathFor('claude', THREAD, { ...deps, claudeTranscriptHint: () => join(nested, `${THREAD}.jsonl`) })).toBeNull()
+  })
+
+  it('walks when the hinted file is gone, the hint is empty, or the lookup throws', () => {
+    const real = writeClaude('-real', claudeTranscriptLines())
+    const gone = join(dirs.claudeProjectsDir, '-moved', `${THREAD}.jsonl`)
+    for (const hint of [() => gone, () => '', () => null, () => { throw new Error('signal store down') }]) {
+      expect(transcriptPathFor('claude', THREAD, { ...deps, claudeTranscriptHint: hint })).toBe(real)
+    }
+  })
+
+  it("still finds a session by walking at today's 2,235 folders", () => {
+    const path = writeClaude('-slug', claudeTranscriptLines())
+    const today = [...Array.from({ length: 2234 }, (_, i) => `slug-${i}`), '-slug']
+    expect(transcriptPathFor('claude', THREAD, { ...deps, readDir: () => today })).toBe(path)
+  })
+
+  it('says so in the log when the walk refuses, at most once an hour', () => {
+    writeClaude('-slug', claudeTranscriptLines())
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2030, 0, 1))
+    const flooded = { ...deps, readDir: pastTheLimit }
+
+    expect(transcriptPathFor('claude', THREAD, flooded)).toBeNull()
+    expect(transcriptPathFor('claude', THREAD, flooded)).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0][0])).toContain(`${MAX_CLAUDE_PROJECT_DIRS + 1} folders`)
+
+    now.mockReturnValue(Date.UTC(2030, 0, 1) + 60 * 60_000)
+    transcriptPathFor('claude', THREAD, flooded)
+    expect(warn).toHaveBeenCalledTimes(2)
   })
 })
 

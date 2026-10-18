@@ -70,7 +70,7 @@ import { nativeQueueControl, plainQueueText } from './lib/codex-queue-control.js
 import { makeCodexLiveDeliverer } from './lib/codex-live-queue-deps.js'
 import { forkThread, realForkDeps } from './lib/fork-thread.js'
 import { ForkJobLedger, fileForkJobPersistence } from './lib/fork-job-ledger.js'
-import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
+import { nativeHead, realNativeHeadDeps, registerClaudeTranscriptHint } from './lib/native-head.js'
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter, getActiveTranscriptionSessionCount } from './routes/transcribe-stream.js'
@@ -536,6 +536,9 @@ bindingReapTimer.unref()
 // re-deriving roots per request.
 const occupancyDirs = realOccupancyDirs()
 const nativeHeadDeps = realNativeHeadDeps()
+// 6.78.1: Claude Code's own transcript path from the hooks, so finding a session's transcript
+// needs no walk of ~/.claude/projects (which refused past its folder limit; see native-head.ts).
+registerClaudeTranscriptHint(sessionId => signalFor(sessionId)?.transcriptPath ?? null)
 const attachedWorkspaceDeps = realAttachedWorkspaceDeps(nativeHeadDeps)
 // 6.62.0: one set of readers for the Continue plan, rows, detail and the attach verdict.
 const continueFactsDeps = realContinueFactsDeps()
