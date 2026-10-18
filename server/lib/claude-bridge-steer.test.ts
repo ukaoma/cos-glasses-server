@@ -132,6 +132,14 @@ describe('steer mode: the spawn', () => {
     expect(child.stdin.end).not.toHaveBeenCalled()
   })
 
+  it('the prompt line carries the job\'s turn id as its uuid', async () => {
+    const turnId = '0e5a9c1d-3333-4333-8333-000000000001'
+    const { prompt } = await run(new SteerPort(), { turnId })
+    expect(prompt).toBe(turnId)
+    const other = await run(new SteerPort(), { turnId: 'not-a-uuid' })
+    expect(other.prompt).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
   it('a dispatch never steers: a port is ignored and the spawn is the 6.77.0 one', async () => {
     const cb = callbacks()
     await callClaudeStreaming('Summarize the task file.', 'steer-bridge-dispatch', cb, 'sonnet', undefined, undefined, undefined, {

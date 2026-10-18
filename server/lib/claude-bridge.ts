@@ -65,6 +65,8 @@ import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } f
 import { STEER_REAPER_MS, STEER_SETTLE_MS, SteerTracker, composeFirstContent, encodeUserLine, type SteerPort } from './claude-steer.js'
 import { randomUUID } from 'node:crypto'
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
   opus: 180_000,    // 3 minutes — Opus can gap during tool use (WebSearch, reasoning)
@@ -667,7 +669,11 @@ export async function callClaudeStreaming(
   let lastActivity = Date.now() // Tracks last stdout data for inactivity timeout
   let receivedStreamEvents = false  // Track if CLI emits stream_event (vs older assistant-only format)
   // 6.78.0 steer state (all inert without a port).
-  const steerTracker = steerPort ? new SteerTracker(randomUUID()) : null
+  // The prompt line's uuid is the job's turn id when it is one (the plan's wire shape), so a
+  // result's user_message_uuids names the turn; anything else gets a fresh uuid.
+  const steerTracker = steerPort
+    ? new SteerTracker(typeof options?.turnId === 'string' && UUID_RE.test(options.turnId) ? options.turnId.toLowerCase() : randomUUID())
+    : null
   let steerSettling = false            // a result left a steer uncovered: the settle window is open
   let steerSettleTimer: ReturnType<typeof setTimeout> | null = null
   let steerNeedsSeparator = false      // text after such a result is a second turn
