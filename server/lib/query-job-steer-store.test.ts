@@ -2,7 +2,7 @@
 // row is journal-only like a trail row (no eventSeq, no ring slot, no updatedAt), idempotent by
 // state rank, found by lineage across generations, carried only out of an interrupted or
 // failed generation, and invisible to a 6.51.0 or 6.77.0 reader (ST-4).
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -82,6 +82,39 @@ describe('steer rows are journal rows, never job events', () => {
     expect((await store.appendSteer(jobId, { steerId, state: 'delivered' })).applied).toBe(false)
     expect((await store.appendSteer(jobId, { steerId, state: 'too_late' })).applied).toBe(false)
     expect((await store.getSnapshot(jobId)).steers![0]!.state).toBe('folded')
+  })
+
+  it('hydration applies rows by rank: a duplicate or lower row an older process wrote changes nothing', async () => {
+    const root = await tempRoot()
+    const store = new QueryJobStore({ root, bootId: 'boot-a' })
+    await store.init()
+    const jobId = await running(store)
+    const steerId = S()
+    await store.appendSteer(jobId, { steerId, state: 'accepted', text: 'x', create: true })
+    await store.appendSteer(jobId, { steerId, state: 'folded' })
+    const folded = (await lines(root)).find(r => r.type === 'steer' && r.eventData.state === 'folded')!
+    const stale = { ...folded, recordId: randomUUID(), eventData: { ...folded.eventData, state: 'delivered' } }
+    const file = join(root, (await readdir(root)).find(f => f.endsWith('.jsonl'))!)
+    await appendFile(file, `${JSON.stringify(stale)}\n`)
+    const reboot = new QueryJobStore({ root, bootId: 'boot-b' })
+    expect((await reboot.init()).malformedRows).toBe(0)
+    expect((await reboot.getSnapshot(jobId)).steers!.map(s => s.state)).toEqual(['folded'])
+  })
+
+  it('a steer row with a state that is never journaled (not_applied) or a bad id is malformed', async () => {
+    const root = await tempRoot()
+    const store = new QueryJobStore({ root, bootId: 'boot-a' })
+    await store.init()
+    const jobId = await running(store)
+    const steerId = S()
+    await store.appendSteer(jobId, { steerId, state: 'accepted', text: 'x', create: true })
+    const row = (await lines(root)).find(r => r.type === 'steer')!
+    const file = join(root, (await readdir(root)).find(f => f.endsWith('.jsonl'))!)
+    await appendFile(file, `${JSON.stringify({ ...row, recordId: randomUUID(), eventData: { ...row.eventData, state: 'not_applied' } })}\n`)
+    await appendFile(file, `${JSON.stringify({ ...row, recordId: randomUUID(), eventData: { ...row.eventData, steerId: 'bad' } })}\n`)
+    const reboot = new QueryJobStore({ root, bootId: 'boot-b' })
+    expect((await reboot.init()).malformedRows).toBe(2)
+    expect((await reboot.getSnapshot(jobId)).steers!.map(s => s.state)).toEqual(['accepted'])
   })
 
   it('the same id with the same text replays; with other text it is a conflict', async () => {

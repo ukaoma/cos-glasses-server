@@ -43,7 +43,7 @@ interface FakeRun {
   answer: (text: string) => Promise<void>
 }
 
-function harness(options: { steer?: Partial<QueryJobSteerOptions>; providerTimeoutMs?: number; lock?: () => Promise<() => void>; wall?: { startedAt: number; wallMaxMs: number }; storage?: NodeQueryJobJournalStorage } = {}) {
+function harness(options: { steer?: Partial<QueryJobSteerOptions>; providerTimeoutMs?: number; lock?: () => Promise<() => void>; wall?: { startedAt: number; wallMaxMs: number }; storage?: NodeQueryJobJournalStorage; sinkFails?: boolean } = {}) {
   const runs: FakeRun[] = []
   const runner: QueryJobRunner = async ctx => {
     const run: FakeRun = {
@@ -60,7 +60,7 @@ function harness(options: { steer?: Partial<QueryJobSteerOptions>; providerTimeo
     if (run.port) {
       const composed = run.port.drainForCompose()
       run.firstLine = composed.length ? `${ctx.request.query} + ${composed.map(s => s.text).join(' | ')}` : ctx.request.query
-      run.port.open((line, _id) => { run.lines.push(line); return true }, options.wall ?? { startedAt: Date.now(), wallMaxMs: 10 * 60_000 })
+      run.port.open((line, _id) => { if (options.sinkFails) return false; run.lines.push(line); return true }, options.wall ?? { startedAt: Date.now(), wallMaxMs: 10 * 60_000 })
     } else {
       run.firstLine = ctx.request.query
     }
@@ -108,6 +108,8 @@ describe('accepted, then delivered, then folded (the happy path)', () => {
     const status = await coordinator.steerStatus(job.clientJobId, steerId)
     expect(status).toEqual({ steerId, state: 'folded', fallback: null, jobStatus: 'completed' })
     expect((await store.getSnapshot(job.jobId)).steers!.map(s => s.state)).toEqual(['folded'])
+    // The run's port is closed once the job is terminal, whatever the bridge did.
+    expect(run.port!.isClosed).toBe(true)
   })
 })
 
@@ -182,6 +184,23 @@ describe('what a steer cannot do', () => {
     await run.answer('done')
     expect(await coordinator.steer(job.jobId, { generation: 1, steerId: S(), text: 'x' })).toMatchObject({ state: 'too_late', fallback: 'queue_follow_up', jobStatus: 'completed' })
     expect(run.lines).toEqual([])
+  })
+
+  it('a steer the port can no longer write (stdin closing) is journaled too_late and answered so', async () => {
+    const h = harness({ sinkFails: true })
+    const { coordinator, store } = await h.make(await tempRoot())
+    const { job } = await started(h, coordinator)
+    const steerId = S()
+    expect(await coordinator.steer(job.jobId, { generation: 1, steerId, text: 'x' })).toMatchObject({ state: 'too_late', fallback: 'queue_follow_up', jobStatus: 'running' })
+    expect((await store.getSnapshot(job.jobId)).steers!.map(s => s.state)).toEqual(['too_late'])
+  })
+
+  it('an ended job is too_late even when its run could never be steered (not unsupported)', async () => {
+    const h = harness({ steer: { provider: () => 'codex' } })
+    const { coordinator } = await h.make(await tempRoot())
+    const { job, run } = await started(h, coordinator)
+    await run.answer('done')
+    expect((await coordinator.steer(job.jobId, { generation: 1, steerId: S(), text: 'x' })).state).toBe('too_late')
   })
 
   it('unsupported for a run that is not Claude, or not steerable, with no port at all', async () => {

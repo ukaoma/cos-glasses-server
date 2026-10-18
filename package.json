@@ -65,6 +65,7 @@
     "!server/scripts/crash-loop-mutation-gate.mjs",
     "!server/scripts/restart-notice-mutation-gate.mjs",
     "!server/scripts/gate-anchor-check.mjs",
+    "!server/scripts/messages-steer-mutation-gate.mjs",
     "!server/scripts/mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",

@@ -1384,7 +1384,7 @@ export class QueryJobStore {
     await this.ensureInitialized()
     const indexed = this.steerIndex.get(`${clientJobId.toLowerCase()}:${steerId.toLowerCase()}`)
     if (!indexed) return undefined
-    await this.ensureHydrated(indexed.jobId)
+    if (!await this.hydratedOrGone(indexed.jobId)) return undefined
     const hydrated = this.jobs.get(indexed.jobId)!
     const steer = hydrated.snapshot.steers?.find(item => item.steerId === steerId.toLowerCase())
     if (!steer) return undefined
@@ -1417,7 +1417,7 @@ export class QueryJobStore {
     const found: Array<{ steerId: string; text: string; carriedFrom: number; at: string }> = []
     for (const [key, indexed] of this.steerIndex) {
       if (!key.startsWith(prefix) || indexed.generation >= generation) continue
-      await this.ensureHydrated(indexed.jobId)
+      if (!await this.hydratedOrGone(indexed.jobId)) continue
       const snapshot = this.jobs.get(indexed.jobId)!.snapshot
       if (snapshot.status !== 'failed' && snapshot.status !== 'interrupted') continue
       const steer = snapshot.steers?.find(item => key === `${prefix}${item.steerId}`)
@@ -1426,6 +1426,17 @@ export class QueryJobStore {
     }
     return found.sort((a, b) => a.carriedFrom - b.carriedFrom || a.at.localeCompare(b.at))
       .map(({ at: _at, ...item }) => item)
+  }
+
+  /** 6.78.0: hydrate a job a steer points at; false when its journal is gone (never an error). */
+  private async hydratedOrGone(jobId: string): Promise<boolean> {
+    try {
+      await this.ensureHydrated(jobId)
+      return true
+    } catch (error) {
+      if (error instanceof QueryJobNotFoundError) return false
+      throw error
+    }
   }
 
   /** 6.78.0: the checkpoint of a steered run, if one was journaled (internal; never on a snapshot). */

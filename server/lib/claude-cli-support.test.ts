@@ -12,7 +12,7 @@ vi.mock('node:child_process', () => ({
   }),
 }))
 
-import { claudeSupportsSessionName, helpListsNameOption, resetClaudeCliSupportForTests } from './claude-cli-support.js'
+import { claudeSteerSupportKnown, claudeSupportsSessionName, claudeSupportsSteer, helpListsNameOption, helpListsSteerOptions, resetClaudeCliSupportForTests } from './claude-cli-support.js'
 
 afterEach(() => {
   resetClaudeCliSupportForTests()
@@ -42,5 +42,34 @@ describe('6.58.2: the server names a session only when the Claude CLI takes --na
     resetClaudeCliSupportForTests()
     state.reply = { error: new Error('spawn claude ENOENT'), stdout: '  -n, --name <name>', stderr: '' }
     expect(await claudeSupportsSessionName()).toBe(false)
+  })
+})
+
+describe('6.78.0: Messages steer only on a Claude CLI that takes stream-json input', () => {
+  const HELP_2_1_302 = [
+    '  --input-format <format>       Input format (only works with --print): "text" (default), or "stream-json"',
+    '  --replay-user-messages        Re-emit user messages from stdin back on stdout for acknowledgment',
+  ].join('\n')
+
+  it('needs BOTH options, as Claude Code 2.1.302 prints them', () => {
+    expect(helpListsSteerOptions(HELP_2_1_302)).toBe(true)
+    expect(helpListsSteerOptions(HELP_2_1_302.split('\n')[0]!)).toBe(false)
+    expect(helpListsSteerOptions(HELP_2_1_302.split('\n')[1]!)).toBe(false)
+    expect(helpListsSteerOptions('  --input-format-x <f>\n  --replay-user-messages-later')).toBe(false)
+  })
+
+  it('asks once, remembers, and says so synchronously once the answer is in', async () => {
+    expect(claudeSteerSupportKnown()).toBeNull()
+    state.reply.stdout = HELP_2_1_302
+    expect(await claudeSupportsSteer()).toBe(true)
+    expect(await claudeSupportsSteer()).toBe(true)
+    expect(state.calls).toBe(1)
+    expect(claudeSteerSupportKnown()).toBe(true)
+  })
+
+  it('a failing help is a no', async () => {
+    state.reply = { error: new Error('spawn claude ENOENT'), stdout: HELP_2_1_302, stderr: '' }
+    expect(await claudeSupportsSteer()).toBe(false)
+    expect(claudeSteerSupportKnown()).toBe(false)
   })
 })

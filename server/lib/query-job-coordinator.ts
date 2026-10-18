@@ -514,7 +514,8 @@ export class QueryJobCoordinator {
       }
       // 6.78.0: decided before the start (the CLI probe is cached), so nothing awaits between
       // the start and the runner but the steer seeding below.
-      steerMode = await this.steerable(execution.request)
+      // With the switch off nothing is awaited here, so a 6.77.0 start keeps its exact timing.
+      if (this.options.steer?.enabled()) steerMode = await this.steerable(execution.request)
       const started = await this.startWhenClear(jobId, lockRequest ? undefined : admitted)
       if (!started) {
         release?.()
