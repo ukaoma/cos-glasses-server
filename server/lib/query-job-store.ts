@@ -243,11 +243,10 @@ export class NodeQueryJobJournalStorage implements QueryJobJournalStorage {
  *
  * SELF-CHECKING. A delta row whose rebuilt length is not its `partialChars` (a row before it
  * was torn or lost) never applies: the job keeps the last partial it could prove, marked
- * `partialTruncated`, and later delta rows are ignored until a row carries a full partial
- * again. A wrong answer is never assembled from a gap.
+ * `partialTruncated`. Every later delta row then fails the same check, until a row carries a
+ * full partial again. A wrong answer is never assembled from a gap.
  */
-const DELTA_GAP = Symbol('delta-gap')
-type DeltaState = Map<string, string | typeof DELTA_GAP>
+type DeltaState = Map<string, string>
 
 function rebuildDeltaRow(parsed: unknown, deltas: DeltaState, onlyJobId?: string): unknown {
   if (!parsed || typeof parsed !== 'object') return parsed
@@ -259,9 +258,8 @@ function rebuildDeltaRow(parsed: unknown, deltas: DeltaState, onlyJobId?: string
   if (row.type === 'chunk' && eventData?.deltaOnly === true && patch && typeof eventData.text === 'string') {
     const { deltaOnly: _deltaOnly, partialChars, text, ...data } = eventData
     const base = deltas.get(row.jobId)
-    const partialText = typeof base === 'string' ? base + text : null
+    const partialText = base === undefined ? null : base + text
     if (partialText === null || (typeof partialChars === 'number' && partialText.length !== partialChars)) {
-      deltas.set(row.jobId, DELTA_GAP)
       const { partialText: _none, ...rest } = patch
       return { ...row, patch: { ...rest, partialTruncated: true }, eventData: { text, ...data, partialTruncated: true } }
     }
@@ -311,8 +309,9 @@ export class DeltaQueryJobJournalStorage implements QueryJobJournalStorage {
     if (!jobId) return this.inner.append(root, partitionDay, line)
     const partial = row.patch?.partialText
     const delta = row.eventData?.text
-    if (row.type === 'chunk' && typeof partial === 'string' && typeof delta === 'string'
-      && row.eventData?.deltaTruncated !== true && row.patch?.partialTruncated !== true) {
+    // The equality alone decides. A delta the store cut (deltaTruncated) or a partial at its cap
+    // can never equal the previous partial plus the stored delta, so neither is ever stripped.
+    if (row.type === 'chunk' && typeof partial === 'string' && typeof delta === 'string') {
       const previous = this.written.get(jobId)
       if (previous !== undefined && partial === previous + delta) {
         const { partialText: _patchPartial, ...patch } = row.patch!

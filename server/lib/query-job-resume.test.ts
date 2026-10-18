@@ -108,6 +108,9 @@ describe('buildInterruption (6.78.0)', () => {
     // The line came before a newer step: it describes an older one, so the newer step's own words win.
     expect(build(seq([{ kind: 'status', state: 'working', detail: 'Running the test suite.' }, tool('edit', 'x.ts', 'call_e1')])).cutOffDuring)
       .toBe('editing x.ts')
+    // The newest step finished and an OLDER one is still open: the line is not about the older one.
+    expect(build(seq([tool('edit', 'a.ts', 'call_e1'), tool('bash', 'npm test', 'call_b2'), done('call_b2'), { kind: 'status', state: 'working', detail: 'Running the test suite.' }])).cutOffDuring)
+      .toBe('editing a.ts')
   })
 
   it('keeps the newest five done steps, each at most 60 characters, and says older ones were dropped', () => {

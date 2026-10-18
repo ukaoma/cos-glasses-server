@@ -223,14 +223,20 @@ describe('the reader never assembles a wrong answer from a gap', () => {
     await stream(a, jobId, ['Alpha. ', 'Bravo. '])
     const final = 'FINAL.'
     await a.appendPartial(jobId, final, final)
+    // A suffix after the whole row is a delta again, and must build on the whole row.
+    await a.appendPartial(jobId, ' More.', `${final} More.`)
     const file = join(root, (await readdir(root)).find(name => name.endsWith('.jsonl'))!)
     const lines = (await readFile(file, 'utf8')).split('\n').filter(Boolean)
+    const chunks = lines.map(line => JSON.parse(line)).filter(row => row.type === 'chunk')
+    expect(chunks.map(row => row.eventData.deltaOnly === true)).toEqual([true, true, false, true])
     const firstChunk = lines.findIndex(line => JSON.parse(line).type === 'chunk')
     lines.splice(firstChunk, 1)
     await writeFile(file, `${lines.join('\n')}\n`)
     const b = new QueryJobStore({ root, bootId: 'boot-b' })
     await b.init()
-    expect((await b.getSnapshot(jobId)).partialText).toBe(final)
+    const snapshot = await b.getSnapshot(jobId)
+    expect(snapshot.partialText).toBe(`${final} More.`)
+    expect(snapshot.partialTruncated).toBe(false)
   })
 
   it('a journal with no delta rows reads exactly as before (the reader on a 6.77.0 journal)', async () => {
