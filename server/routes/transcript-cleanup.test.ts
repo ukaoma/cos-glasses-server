@@ -31,6 +31,8 @@ beforeEach(() => {
 afterEach(async () => {
   for (const s of servers.splice(0)) await new Promise<void>(r => s.close(() => r()))
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true })
+  // The profile path is shared by every test file in the run: never leave this owner behind for the next file.
+  rmSync(process.env.COS_PROFILE_PATH!, { force: true })
   clearProfileCache()
 })
 

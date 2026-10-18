@@ -63,7 +63,8 @@ describe('owner card from the profile', () => {
   const path = process.env.COS_PROFILE_PATH!
   afterEach(() => { rmSync(path, { force: true }); clearProfileCache() })
   it('is null without a real owner name, so the Ask is unchanged', () => {
-    clearProfileCache(); expect(ownerCardFromProfile()).toBeNull()
+    // An explicit empty profile, not an absent one: the path is shared with other test files in the run.
+    writeFileSync(path, JSON.stringify({})); clearProfileCache(); expect(ownerCardFromProfile()).toBeNull()
     writeFileSync(path, JSON.stringify({ owner_name: 'Your Name' })); clearProfileCache(); expect(ownerCardFromProfile()).toBeNull()
   })
   it('carries the name, label, home area and notes, and drops address, phone and email sentences', () => {
