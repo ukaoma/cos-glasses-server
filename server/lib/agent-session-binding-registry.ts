@@ -588,6 +588,12 @@ export class AgentSessionBindingRegistry {
    */
   private readonly inheritedPins: Set<string>
   private readonly bootId: string
+  /**
+   * 6.78.0: when this registry opened the store, an upper bound on when the boot that left
+   * an inherited pin died. A dead boot's pin is released no earlier than 21 minutes after
+   * BOTH its pin and this instant (`orphanReleaseAt`).
+   */
+  private readonly openedAt: number
   private readonly pinBootReap: () => boolean
 
   private readonly warn: (message: string, detail?: unknown) => void
@@ -612,6 +618,7 @@ export class AgentSessionBindingRegistry {
       for (const job of record.binding.pinnedJobs) this.inheritedPins.add(`${record.binding.bindingId}\u0000${job}`)
     }
     this.bootId = typeof options.bootId === 'string' && options.bootId.length > 0 ? options.bootId : serverMetrics.bootId
+    this.openedAt = Number.isFinite(options.now) ? (options.now as number) : Date.now()
     this.pinBootReap = typeof options.pinBootReap === 'function' ? options.pinBootReap : () => pinBootReapEnabled()
     this.warn = options.onWarn ?? ((message, detail) => console.warn(`[binding-registry] ${message}`, detail ?? ''))
     this.terminalRetentionMs = nonNegativeMsOption(options.terminalRetentionMs, DEFAULT_TERMINAL_RETENTION_MS)
@@ -1223,8 +1230,7 @@ export class AgentSessionBindingRegistry {
     let releasesAt = Number.NEGATIVE_INFINITY
     for (const job of record.binding.pinnedJobs) {
       if (!this.inheritedPins.has(`${record.binding.bindingId}\u0000${job}`)) return null
-      const at = record.pinnedAt[job]
-      releasesAt = Math.max(releasesAt, (Number.isFinite(at) ? at : record.updatedAt) + QUERY_JOB_ORPHAN_FENCE_MS)
+      releasesAt = Math.max(releasesAt, this.orphanReleaseAt(record, job))
     }
     return releasesAt > now ? { releasesAt } : null
   }
@@ -1233,12 +1239,15 @@ export class AgentSessionBindingRegistry {
    * Release every pin a dead boot left whose orphan child must be gone by now.
    *
    * WHY 21 MINUTES AND NOT AT BOOT. A crash leaves the turn's resume child running: it is
-   * not this process's child any more, nothing kills it, and it runs to the attached
-   * adapter's own deadline. After the restart `cosSpawnLedger` is empty, so the occupancy
-   * gate sees that child as a FOREIGN holder, and while it idles in a long tool the
-   * idle-holder relaxation lets an attach through: releasing the pin at boot would let COS
-   * start a second writer on the thread. `QUERY_JOB_ORPHAN_FENCE_MS` is the same bound the
-   * query jobs use for exactly this child. Until then the pin holds, and the refusal says so.
+   * not this process's child any more, and nothing kills it (the adapter's 21-minute
+   * deadline was a timer in the process that died). After the restart `cosSpawnLedger` is
+   * empty, so the occupancy gate sees that child as a FOREIGN holder, and while it idles in a
+   * long tool the idle-holder relaxation lets an attach through: releasing the pin at boot
+   * would let COS start a second writer on the thread. `QUERY_JOB_ORPHAN_FENCE_MS` is the
+   * bound the query jobs use for exactly this child, counted from the restart, and so is this
+   * one (`orphanReleaseAt`: the later of the pin and this boot's open). It is a bound chosen
+   * to match theirs, not a proof the child is gone. Until then the pin holds, and the refusal
+   * says so.
    *
    * A pin whose metadata names a client turn gets an `ambiguous` ledger record, so a retry
    * of that key replays "may not have been sent" instead of sending it again, and its
@@ -1257,6 +1266,20 @@ export class AgentSessionBindingRegistry {
     }
   }
 
+  /**
+   * When an inherited pin may be released: 21 minutes after the LATER of its pin and the
+   * moment this boot opened the store. The pin time alone is not enough: a pin taken 20
+   * minutes before a crash would free one minute after the restart, while the turn's child,
+   * which no timer of the dead process can stop any more, may still be writing. Measured
+   * from this boot's open, the thread is never offered to a second writer within 21 minutes
+   * of the crash (the same window the query jobs fence from the interrupt at boot).
+   */
+  private orphanReleaseAt(record: BindingRecord, job: string): number {
+    const at = record.pinnedAt[job]
+    const pinned = Number.isFinite(at) ? at : record.updatedAt
+    return Math.max(pinned, this.openedAt) + QUERY_JOB_ORPHAN_FENCE_MS
+  }
+
   private releaseOrphansUnlocked(now: number, onlyTarget?: string): OrphanPinReport {
     const records = new Map(this.records)
     const turns = new Map(this.turns)
@@ -1266,8 +1289,7 @@ export class AgentSessionBindingRegistry {
       if (onlyTarget !== undefined && record.binding.targetKey !== onlyTarget) continue
       const due = record.binding.pinnedJobs.filter(job => {
         if (!this.inheritedPins.has(`${id}\u0000${job}`)) return false
-        const at = record.pinnedAt[job]
-        return now - (Number.isFinite(at) ? at : record.updatedAt) >= QUERY_JOB_ORPHAN_FENCE_MS
+        return now >= this.orphanReleaseAt(record, job)
       })
       if (due.length === 0) continue
       let binding = record.binding

@@ -363,9 +363,13 @@ export async function reconcileDeliveringTurns(
 ): Promise<{ delivered: number; requeued: number; unknown: number }> {
   const counts = { delivered: 0, requeued: 0, unknown: 0 }
   if (typeof deps.deliveryEvidence !== 'function') return counts
-  const ownBoot = typeof deps.bootId === 'string' && deps.bootId.length > 0 ? deps.bootId : undefined
+  // Without its own boot id this process cannot tell a row it is delivering right now (the
+  // drain and the steer path stamp only with one) from a row a dead boot left, so it
+  // touches nothing: a row in flight must never be judged.
+  const ownBoot = typeof deps.bootId === 'string' && deps.bootId.length > 0 ? deps.bootId : null
+  if (ownBoot === null) return counts
   const stranded = readQueue(provider, threadId, deps.now())
-    .filter(t => t.status === 'delivering' && !(t.deliveringBootId !== undefined && t.deliveringBootId === ownBoot))
+    .filter(t => t.status === 'delivering' && t.deliveringBootId !== ownBoot)
   for (const row of stranded) {
     let verdict: DeliveryEvidence
     try {

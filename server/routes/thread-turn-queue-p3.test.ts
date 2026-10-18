@@ -165,6 +165,18 @@ describe('the restart reconcile settles what a dead boot left delivering', () =>
     expect(onDisk(t.clientTurnId)?.status).toBe('delivering')
   })
 
+  it('with no boot id of its own the reconcile touches nothing: it cannot tell its own row in flight', async () => {
+    const own = row({ status: 'delivering', attempts: 1, journal: 1 })
+    const dead = stranded()
+    writeQueue('claude', threadId, [own, dead])
+    let asked = 0
+    const counts = await reconcileDeliveringTurns('claude', threadId, deps({ deliveryEvidence: () => { asked++; return 'unknown' } }))
+    expect(counts).toEqual({ delivered: 0, requeued: 0, unknown: 0 })
+    expect(asked).toBe(0)
+    expect(onDisk(own.clientTurnId)?.status).toBe('delivering')
+    expect(onDisk(dead.clientTurnId)?.status).toBe('delivering')
+  })
+
   it('a legacy (unstamped) row reads unknown even when the evidence says not_delivered', async () => {
     const t = row({ status: 'delivering', attempts: 1 })
     writeQueue('claude', threadId, [t])

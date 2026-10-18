@@ -147,13 +147,28 @@ describe('pins a dead boot left: released at the orphan window, never before', (
   it('holds the thread until now - pinnedAt >= QUERY_JOB_ORPHAN_FENCE_MS (21 min), then frees it', () => {
     expect(QUERY_JOB_ORPHAN_FENCE_MS).toBe(21 * 60_000)
     crashedWithPin(true)
-    const life2 = open({ bootId: 'boot-2', now: T0 + 60_000 })
+    // The restart is at the pin's own instant, so the pin is the later of the two clocks.
+    const life2 = open({ bootId: 'boot-2', now: T0 })
     expect(life2.attachBlocked('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS - 1)).toBe(true)
     expect(life2.orphanPinHold('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS - 1)).toEqual({ releasesAt: T0 + QUERY_JOB_ORPHAN_FENCE_MS })
     expect(life2.get('bind-1')?.pinnedJobs).toEqual(['job-1'])
     expect(life2.attachBlocked('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toBe(false)
     expect(life2.get('bind-1')?.pinnedJobs).toEqual([])
     expect(life2.orphanPinHold('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toBeNull()
+  })
+
+  it('and 21 minutes after the restart: an old pin does not free the thread a minute after the crash', () => {
+    crashedWithPin(true)
+    // Pinned at T0, the boot died 30 minutes later, and this boot opened the store then.
+    // now - pinnedAt passed 21 minutes long ago; the orphan child may still be writing.
+    const restart = T0 + 30 * 60_000
+    const life2 = open({ bootId: 'boot-2', now: restart })
+    expect(life2.reapOrphanedPins(restart + 60_000)).toEqual({ released: 0, recorded: 0 })
+    expect(life2.attachBlocked('claude', THREAD, restart + QUERY_JOB_ORPHAN_FENCE_MS - 1)).toBe(true)
+    expect(life2.orphanPinHold('claude', THREAD, restart + 60_000)).toEqual({ releasesAt: restart + QUERY_JOB_ORPHAN_FENCE_MS })
+    expect(life2.get('bind-1')?.pinnedJobs).toEqual(['job-1'])
+    expect(life2.attachBlocked('claude', THREAD, restart + QUERY_JOB_ORPHAN_FENCE_MS)).toBe(false)
+    expect(life2.get('bind-1')?.pinnedJobs).toEqual([])
   })
 
   it('a released pin that named its turn leaves an ambiguous ledger record, and its pending attempt reads unknown', () => {
