@@ -276,6 +276,20 @@ describe('steer mode: timers', () => {
     expect(state.terminate).toHaveBeenCalledTimes(1)
   })
 
+  it('a run that finishes on its close (no result) is never reaped afterwards', async () => {
+    vi.useFakeTimers()
+    const port = new SteerPort(events())
+    const pending = run(port)
+    await vi.advanceTimersByTimeAsync(0)
+    const { cb, child } = await pending
+    emit(child, text('Partial answer.'))
+    child.emit('close', 0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onAnswerReady).toHaveBeenCalledWith('Partial answer.')
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(state.terminate).not.toHaveBeenCalled()
+  })
+
   it('the wall clock after the first whole answer finishes with the checkpoint, not the half second turn', async () => {
     vi.useFakeTimers()
     const port = new SteerPort(events())
