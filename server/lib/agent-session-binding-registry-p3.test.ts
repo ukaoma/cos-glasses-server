@@ -250,6 +250,20 @@ describe('pins a dead boot left: released at the orphan window, never before', (
     expect(life2.create({ bindingId: 'bind-3', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: THREAD, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: TTL, now: later }).reason).toBeNull()
   })
 
+  it('a release is not activity: a lease still live when its dead pin frees yields to the next attach at once', () => {
+    // The binding outlives the orphan window (a long lease), so only its idle clock decides.
+    // `updatedAt` is that clock (IDLE_LEASE_YIELD_MS): restarting it at the release would hold
+    // the thread another 90 s for a client that died with the boot.
+    const life1 = open({ bootId: 'boot-dead' })
+    expect(life1.create({ bindingId: 'bind-1', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: THREAD, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: 60 * 60_000, now: T0 }).reason).toBeNull()
+    expect(life1.activate('bind-1', T0).reason).toBeNull()
+    life1.pin('bind-1', 'job-1', T0, { pinMeta: { clientTurnId: 'ct-long-lease' } })
+    const life2 = open({ bootId: 'boot-2', now: T0 })
+    const at = T0 + QUERY_JOB_ORPHAN_FENCE_MS
+    expect(life2.create({ bindingId: 'bind-2', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: THREAD, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: TTL, now: at }).reason).toBeNull()
+    expect(life2.get('bind-1')?.pinnedJobs).toEqual([])
+  })
+
   it('COS_PIN_BOOT_REAP off: nothing is released before the 24 h reap, and no hold is reported', () => {
     crashedWithPin(true)
     const life2 = open({ bootId: 'boot-2', pinBootReap: () => false })
