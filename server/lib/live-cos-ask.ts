@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto'
 import { runLensGistEngine, redactSecrets } from './lens-gist-engines.js'
 import { AskProcessError } from './meeting-ask-runner.js'
 import { searchMemories } from './context-library-search.js'
+import { listBridgeMemories, localDateOf, RankFusion, scoreBridgeMemories, type BridgeMemory } from './cos-bridge-notes.js'
 import { searchMeetingLibrary } from './meeting-library-search.js'
 import { MEETING_ASK_LABELS, meetingAskAnswerMarkdown, meetingAskCitations, type MeetingAskSection, type MeetingAskPhaseTiming, type MeetingAskTimings } from '../../shared/meeting-ask.js'
 import { ABSENCE_CLAIM, matchOwnerName, ownerCardSource, personLookupQuery, personQuestion, searchedDisclosure, type OwnerCard } from './meeting-ask-owner.js'
@@ -240,18 +241,51 @@ export function sectionsFromAnswer(action: AskAction, answer: string, allowed: R
 }
 /** 'meaning' adds the embedding search (default); 'keyword' stays on local keyword matching, so no query is embedded. */
 export type CosSearchMode = 'meaning' | 'keyword'
-export async function searchAskHistory(query: string, excludeSessionId?: string, signal?: AbortSignal, mode: CosSearchMode = 'meaning', domain?: string): Promise<{ sources: AskSource[]; notices: string[] }> {
+/** The memory bridge listing searchAskHistory falls back to (cos-bridge-notes.ts); a parameter so tests can fake it. */
+export type AskBridgeList = (signal?: AbortSignal) => Promise<BridgeMemory[]>
+const ASK_HIT_MIN = 0.35
+export async function searchAskHistory(query: string, excludeSessionId?: string, signal?: AbortSignal, mode: CosSearchMode = 'meaning', domain?: string, bridge: AskBridgeList = s => listBridgeMemories(s)): Promise<{ sources: AskSource[]; notices: string[] }> {
   const semantic = mode !== 'keyword'
   const results = await Promise.allSettled([searchMemories({ query, limit: domain ? 50 : 3, semantic, ...(signal?{signal}:{}) }), searchMeetingLibrary({ query, limit: 3, semantic, ...(domain ? {domain} : {}), ...(signal?{signal}:{}) })])
   const sources: AskSource[] = [], notices: string[] = semantic ? [] : ['COS search used keywords only, as set in Meeting assistant settings.']
   if (domain) notices.push(`COS search focused on the confirmed ${domain.replace(/_/g, ' ')} domain.`)
-  results.forEach((result, i) => {
-    if (result.status === 'rejected') { if(result.reason instanceof AskProcessError)throw result.reason; notices.push(`${i === 0 ? 'COS memory' : 'Earlier meeting'} search is unavailable.`); return }
-    if (semantic && !result.value.semanticAvailable) notices.push(`${i === 0 ? 'COS memory' : 'Earlier meeting'} semantic search is unavailable; local keyword results are shown.`)
-    result.value.hits.filter(h => (!domain || h.domain === domain) && (!excludeSessionId || !('sessionId' in h) || h.sessionId !== excludeSessionId) && Math.max(h.keywordScore, h.semanticScore) >= 0.35).slice(0, 3).forEach(h => {
-      sources.push({ id: `H${sources.length + 1}`, kind: i === 0 ? 'memory' : 'meeting', title: redactSecrets(h.title + ('date' in h && h.date ? ' · ' + h.date : '')).slice(0, 180), text: redactSecrets(h.snippet).slice(0, 1500), ...('recordId' in h ? { recordId: h.recordId, sessionId: h.sessionId, domain: h.domain, month: h.month, filename: h.filename } : { memoryId: h.id, domain: h.domain }) })
+  for (const result of results) if (result.status === 'rejected' && result.reason instanceof AskProcessError) throw result.reason
+  const keep = (h: { domain?: string; keywordScore: number; semanticScore: number; sessionId?: string }) =>
+    (!domain || h.domain === domain) && (!excludeSessionId || !('sessionId' in h) || h.sessionId !== excludeSessionId) && Math.max(h.keywordScore, h.semanticScore) >= ASK_HIT_MIN
+  // id first: the same key order as before, so an unchanged search yields the same prompt bytes.
+  const source = (s: Omit<AskSource, 'id'>): AskSource => ({ id: `H${sources.length + 1}`, ...s })
+  // Memories. 6.76.2: when memory search did not answer (it failed, its meaning arm failed, or it found nothing), the
+  // owner's notes are also read from the memory bridge listing and matched by keyword (cos-bridge-notes.ts, shared with
+  // live cues). The public memory runtime keeps them only there. A memory search that answers is used exactly as before.
+  const memory = results[0]
+  if (memory.status === 'rejected') notices.push('COS memory search is unavailable.')
+  else if (semantic && !memory.value.semanticAvailable) notices.push('COS memory semantic search is unavailable; local keyword results are shown.')
+  const memoryRaw = memory.status === 'fulfilled' ? memory.value.hits : []
+  const memoryHits = memoryRaw.filter(keep)
+  const fused = new RankFusion<Omit<AskSource, 'id'> & { listed?: true }>()
+  fused.add(memoryHits.map(h => ({ key: `memory:${h.id}`, item: { kind: 'memory' as const, title: redactSecrets(h.title).slice(0, 180), text: redactSecrets(h.snippet).slice(0, 1500), memoryId: h.id, domain: h.domain } })))
+  const memoryDidNotAnswer = memoryRaw.length === 0 || (memory.status === 'fulfilled' && semantic && !memory.value.semanticAvailable)
+  if (memoryDidNotAnswer && !signal?.aborted) {
+    let listed: BridgeMemory[] = []
+    try { listed = await bridge(signal) } catch { /* no listing: the notices above stand */ }
+    fused.add(scoreBridgeMemories(listed, query).filter(x => x.score >= ASK_HIT_MIN && (!domain || x.row.domain === domain)).map(({ row }) => {
+      const date = localDateOf(row.created_at)
+      const title = row.summary || row.content.split('\n').find(l => l.trim()) || row.id
+      return { key: `memory:${row.id}`, item: { kind: 'memory' as const, title: redactSecrets(title.replace(/\s+/g, ' ').trim().slice(0, 140) + (date ? ' · ' + date : '')).slice(0, 180), text: redactSecrets(row.content).slice(0, 1500), memoryId: row.id, domain: row.domain, listed: true as const } }
+    }))
+  }
+  const memorySources = fused.ranked(3)
+  for (const { listed, ...s } of memorySources) sources.push(source(s))
+  if (memorySources.some(s => s.listed)) notices.push('COS also searched the notes in its memory list by keyword.')
+  // Earlier meetings: unchanged.
+  const meetings = results[1]
+  if (meetings.status === 'rejected') notices.push('Earlier meeting search is unavailable.')
+  else {
+    if (semantic && !meetings.value.semanticAvailable) notices.push('Earlier meeting semantic search is unavailable; local keyword results are shown.')
+    meetings.value.hits.filter(keep).slice(0, 3).forEach(h => {
+      sources.push(source({ kind: 'meeting', title: redactSecrets(h.title + (h.date ? ' · ' + h.date : '')).slice(0, 180), text: redactSecrets(h.snippet).slice(0, 1500), recordId: h.recordId, sessionId: h.sessionId, domain: h.domain, month: h.month, filename: h.filename }))
     })
-  })
+  }
   if (!sources.length) notices.push('No relevant COS history was found.')
   return { sources, notices }
 }

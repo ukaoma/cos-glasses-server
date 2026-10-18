@@ -8,6 +8,7 @@
 //   2. The mutated file differs from the original, so the edit landed.
 //   3. A NAMED test fails ("FAIL  server/x.test.ts > name"); a build error or a harness failure is not a kill.
 //   4. The file is restored byte for byte (compared) before the next mutant.
+// Also the Live COS Ask's memory bridge fallback (searchAskHistory) and the helpers it shares with cues (cos-bridge-notes.ts).
 // Usage: node server/scripts/live-cues-v2-notes-mutation-gate.mjs [--list] [name…]
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -19,8 +20,13 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const CUES = ['server/lib/live-cues-v2.test.ts', 'server/lib/live-cues-v2-notes.test.ts', 'server/lib/live-cues-v2-notes-bridge.test.ts',
   'server/lib/live-cues-v2-settings.test.ts', 'server/routes/live-cues-v2-settings-route.test.ts', 'server/routes/live-cues-v2-route.test.ts']
 const HEALTH = [...CUES, 'server/routes/health.test.ts']
+const ASK = ['server/lib/live-cos-ask-memory-fallback.test.ts', 'server/lib/live-cos-ask-queen-runtime.test.ts', 'server/lib/meeting-ask-cos-search.test.ts',
+  'server/lib/live-cos-ask.test.ts', 'server/lib/meeting-ask-owner.test.ts']
+const BOTH = [...CUES, ...ASK]
+const ALL = [...HEALTH, ...ASK]
 const ENGINE = 'server/lib/live-cues-v2.ts', NOTES = 'server/lib/live-cues-v2-notes.ts', SETTINGS = 'server/lib/live-cues-v2-settings.ts'
 const ROUTE = 'server/routes/live-cues.ts', DECISION = 'server/lib/decision-provider.ts'
+const SHARED = 'server/lib/cos-bridge-notes.ts', ASKLIB = 'server/lib/live-cos-ask.ts'
 const m = (name, file, edits, tests = CUES) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 
 const mutations = [
@@ -58,8 +64,8 @@ const mutations = [
   m('source-none-when-empty', ENGINE, ["cueMemorySource: mem.notes.length ? source : 'none'", 'cueMemorySource: source']),
   m('capability-memory-source', ENGINE, [": notesAvailable() ? 'notes' : 'none'", ": 'none'"]),
   // ── Notes fallback (search) ──
-  m('notes-date-bound', NOTES, ['      if (c.date && c.date >= before) return\n', '']),
-  m('notes-local-day', NOTES, ["return Number.isFinite(ms) ? new Date(ms).toLocaleDateString('en-CA') : ''", "return Number.isFinite(ms) ? v.slice(0, 10) : ''"]),
+  m('notes-date-bound', NOTES, ['!!c && !(c.date && c.date >= before)', '!!c']),
+  m('notes-local-day', SHARED, ["return Number.isFinite(ms) ? new Date(ms).toLocaleDateString('en-CA') : ''", "return Number.isFinite(ms) ? v.slice(0, 10) : ''"], BOTH),
   m('notes-drop-live-meeting', NOTES, ['hits.filter(h => !(opts.sessionId && h.sessionId === opts.sessionId))', 'hits']),
   m('notes-budget-race', NOTES, ['new Promise<boolean>(r => { timer = setTimeout(() => r(true), budgetMs) })', 'new Promise<boolean>(() => {})']),
   m('notes-bridge-timeout', NOTES, ['searchers.bridge(local.signal, budgetMs)', 'searchers.bridge(local.signal, 30_000)']),
@@ -68,10 +74,12 @@ const mutations = [
   m('notes-no-terms-no-search', NOTES, ["  if (!terms.length) return { notes: [], error: 'notes_no_terms' }\n", '']),
   m('notes-queries-short', NOTES, ['terms.slice(0, 4).join', 'terms.join']),
   m('notes-stopwords', NOTES, ['if (term.length < 3 || STOP.has(term) ||', 'if (term.length < 3 ||']),
-  m('notes-rank-fusion', NOTES, ['score: (prev?.score ?? 0) + 1 / (RRF_K + rank)', 'score: 1 / (RRF_K + rank)']),
-  m('notes-top-four', NOTES, ['.sort((a, b) => b.score - a.score).slice(0, top)', '.sort((a, b) => b.score - a.score)']),
-  m('notes-bridge-scored', NOTES, ['    .filter(x => x.score > 0).sort(', '    .sort(']),
-  m('notes-bridge-needs-content', NOTES, ['if (!id || !content.trim()) continue', 'if (!id) continue']),
+  m('shared-rank-fusion', SHARED, ['score: (prev?.score ?? 0) + 1 / (RRF_K + rank)', 'score: 1 / (RRF_K + rank)'], BOTH),
+  m('shared-fusion-keeps-order-on-ties', SHARED, ['b.score - a.score || a.order - b.order', 'b.score - a.score || b.order - a.order'], BOTH),
+  m('notes-top-four', NOTES, ['fused.ranked(top)', 'fused.ranked()']),
+  m('shared-bridge-scored', SHARED, ['    .filter(x => x.score > 0).sort(', '    .sort('], BOTH),
+  m('shared-bridge-needs-content', SHARED, ['if (!id || !content.trim()) continue', 'if (!id) continue'], BOTH),
+  m('shared-bridge-lists-memory', SHARED, ["callPython(['memory', '--days'", "callPython(['memory-overview', '--days'"], BOTH),
   m('notes-bridge-searched', NOTES, ['    for (const q of queries) add(rankBridgeMemories(rows, q).map(bridgeCandidate))\n', '']),
   m('notes-real-memories-keyword-only', NOTES, ['(await searchMemories({ query, limit: 10, semantic: false, signal })).hits', '[]']),
   m('notes-real-meetings-keyword-only', NOTES, ['(await searchMeetingLibrary({ query, limit: 10, semantic: false, signal })).hits', '[]']),
@@ -102,6 +110,20 @@ const mutations = [
   m('subq-configured-honest', ENGINE, ['return { configured: st.configured, breakerOpen: st.breakerOpenUntil !== null', 'return { configured: true, breakerOpen: st.breakerOpenUntil !== null']),
   m('subq-status-unreadable-is-spent', DECISION, ['    let usedToday = dailyCap\n', '    let usedToday = 0\n']),
   m('subq-tracked-for-new-key', DECISION, ['{ configuredSubqClients.add(client); return client }', '{ return client }']),
+  // ── Live COS Ask: memory bridge fallback ──
+  m('ask-listing-only-when-memory-did-not-answer', ASKLIB, ['  const memoryDidNotAnswer = memoryRaw.length === 0 ||', '  const memoryDidNotAnswer = true ||'], ASK),
+  m('ask-listing-when-memory-empty', ASKLIB, ['  const memoryDidNotAnswer = memoryRaw.length === 0 ||', '  const memoryDidNotAnswer = false ||'], ASK),
+  m('ask-listing-when-meaning-failed', ASKLIB, ["|| (memory.status === 'fulfilled' && semantic && !memory.value.semanticAvailable)\n", '\n'], ASK),
+  m('ask-listing-meaning-only', ASKLIB, ["(memory.status === 'fulfilled' && semantic && !memory.value.semanticAvailable)", "(memory.status === 'fulfilled' && !memory.value.semanticAvailable)"], ASK),
+  m('ask-listing-threshold', ASKLIB, ['x.score >= ASK_HIT_MIN && (!domain', 'x.score > 0 && (!domain'], ASK),
+  m('ask-listing-domain', ASKLIB, ['x.score >= ASK_HIT_MIN && (!domain || x.row.domain === domain)', 'x.score >= ASK_HIT_MIN'], ASK),
+  m('ask-memory-cap-three', ASKLIB, ['const memorySources = fused.ranked(3)', 'const memorySources = fused.ranked()'], ASK),
+  m('ask-listing-notice', ASKLIB, ["  if (memorySources.some(s => s.listed)) notices.push('COS also searched the notes in its memory list by keyword.')\n", ''], ASK),
+  m('ask-abort-skips-listing', ASKLIB, ['if (memoryDidNotAnswer && !signal?.aborted) {', 'if (memoryDidNotAnswer) {'], ASK),
+  m('ask-listing-failure-tolerated', ASKLIB, ['try { listed = await bridge(signal) } catch { /* no listing: the notices above stand */ }', 'listed = await bridge(signal)'], ASK),
+  m('ask-source-id-first', ASKLIB, ["({ id: `H${sources.length + 1}`, ...s })", "({ ...s, id: `H${sources.length + 1}` })"], ASK),
+  m('ask-listing-cites-content', ASKLIB, ['text: redactSecrets(row.content).slice(0, 1500), memoryId: row.id', "text: '', memoryId: row.id"], ASK),
+  m('ask-default-listing-is-the-bridge', ASKLIB, ['bridge: AskBridgeList = s => listBridgeMemories(s)', 'bridge: AskBridgeList = async () => []'], ASK),
 ]
 
 const args = process.argv.slice(2)
@@ -114,17 +136,17 @@ const scratch = mkdtempSync(join(tmpdir(), 'cues-notes-mutations-'))
 try {
   const skip = new Set(['data', 'models', 'certs', 'node_modules'])
   cpSync(join(root, 'server'), join(scratch, 'server'), { recursive: true, filter: src => !(skip.has(basename(src)) && dirname(src) === join(root, 'server')) })
-  for (const dir of ['shared', 'work-task-runtime', 'bin', 'docs']) cpSync(join(root, dir), join(scratch, dir), { recursive: true })
+  for (const dir of ['shared', 'work-task-runtime', 'bin', 'docs', 'memory-runtime']) cpSync(join(root, dir), join(scratch, dir), { recursive: true })
   for (const file of ['vitest.config.ts', 'package.json', 'managed-runtime-contract.json']) cpSync(join(root, file), join(scratch, file))
   symlinkSync(join(root, 'node_modules'), join(scratch, 'node_modules'), 'dir')
   const run = tests => spawnSync(process.execPath, [join(root, 'node_modules/vitest/vitest.mjs'), 'run', '--maxWorkers=1', ...tests], {
     cwd: scratch, env: { PATH: process.env.PATH, HOME: scratch, TMPDIR: process.env.TMPDIR, COS_DATA_DIR: join(scratch, 'data'), COS_PROFILE_PATH: join(scratch, 'data', 'profile.json') },
     encoding: 'utf8', timeout: 300000,
   })
-  const baseline = run(HEALTH)
+  const baseline = run(ALL)
   if (baseline.status !== 0) throw new Error('Baseline failed; a gate over a red suite proves nothing:\n' + baseline.stdout + '\n' + baseline.stderr)
   const totals = /Tests\s+(\d+) passed/.exec(baseline.stdout)
-  console.log(`baseline PASS (${totals ? totals[1] : '?'} tests in ${HEALTH.length} files)`)
+  console.log(`baseline PASS (${totals ? totals[1] : '?'} tests in ${ALL.length} files)`)
   let killed = 0
   for (const { name, file, edits, tests } of selected) {
     const target = join(scratch, file), original = readFileSync(target, 'utf8')
@@ -144,5 +166,5 @@ try {
     killed += 1
     console.log(`${name} KILLED by ${killers.slice(0, 2).join(' | ')}${killers.length > 2 ? ` (+${killers.length - 2} more)` : ''}`)
   }
-  console.log(`${killed} of ${selected.length} live cues 6.76.2 mutations killed`)
+  console.log(`${killed} of ${selected.length} live cues and Ask 6.76.2 mutations killed`)
 } finally { rmSync(scratch, { recursive: true, force: true }) }
