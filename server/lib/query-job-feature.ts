@@ -51,6 +51,20 @@ export function queryJobDeltaJournalEnabled(env: NodeJS.ProcessEnv = process.env
   return triState(env.COS_QUERY_JOB_DELTA_JOURNAL, false)
 }
 
+/**
+ * 6.78.0 Messages steer, default OFF in 6.78.0 (on for the candidate; the default flips after
+ * the field window). Read per job and per request, so a restart applies a change.
+ */
+export function messagesSteerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return triState(env.COS_MESSAGES_STEER, false)
+}
+
+/** 6.78.0: `capabilities.durableQueryJobs.steer`, or undefined (the key is then absent). */
+export function messagesSteerCapability(input: { jobsEnabled: boolean; cliSupported: boolean | null }, env: NodeJS.ProcessEnv = process.env): { protocolVersion: 1; providers: ['claude'] } | undefined {
+  if (!input.jobsEnabled || input.cliSupported !== true || !messagesSteerEnabled(env)) return undefined
+  return { protocolVersion: 1, providers: ['claude'] }
+}
+
 export function durableQueryJobsCapability(): {
   enabled: boolean
   protocolVersion: number

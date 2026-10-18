@@ -62,6 +62,8 @@ import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { teeJobTrail, type JobTrailDraft } from './job-trail.js'
 import { claudeSupportsSessionName } from './claude-cli-support.js'
 import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } from './turn-request.js'
+import { STEER_REAPER_MS, STEER_SETTLE_MS, SteerTracker, composeFirstContent, encodeUserLine, type SteerPort } from './claude-steer.js'
+import { randomUUID } from 'node:crypto'
 
 // Inactivity = no stdout data for this long → kill (catches stalls)
 const INACTIVITY_BY_MODEL: Record<ClaudeModelPreference, number> = {
@@ -407,6 +409,12 @@ export interface CallOptions {
   dispatch?: { restricted: true; tools: readonly string[] }
   /** 6.58.2: `claude --name` for a session this COS session starts fresh (QueryJobRequest.sessionName). */
   sessionName?: string
+  /**
+   * 6.78.0 Messages steer: the job's steer port. Present only when the coordinator decided the
+   * run is steerable (lib/claude-steer.ts). Absent, every argument and every stdin byte is the
+   * 6.77.0 one. A dispatch never steers.
+   */
+  steer?: SteerPort
 }
 
 export async function callClaudeStreaming(
@@ -599,6 +607,10 @@ export async function callClaudeStreaming(
   if (startsOwnCliSession && !options?.dispatch && options?.sessionName && await claudeSupportsSessionName()) {
     args.push(`--name=${options.sessionName}`)
   }
+  // 6.78.0 steer: the prompt becomes one stream-json line and stdin stays open for steers.
+  // These two flags and nothing else (plan P4); the CLI probe passed before the port existed.
+  const steerPort = options?.dispatch ? undefined : options?.steer
+  if (steerPort) args.push('--input-format', 'stream-json', '--replay-user-messages')
 
   // Strip CLAUDECODE env var so claude -p doesn't think it's nested
   const env = { ...process.env }
@@ -627,9 +639,12 @@ export async function callClaudeStreaming(
 
   // Ultracode is a CLI-only orchestration keyword; history/chat keeps the
   // original user text so the keyword never appears on the lens.
-  const cliQuery = resolvedEffort === 'ultracode'
+  const promptText = resolvedEffort === 'ultracode'
     ? `${fullQuery}\n\n${ULTRACODE_KEYWORD}`
     : fullQuery
+  // 6.78.0 steer: steers that arrived before the first line ride in it (never in request.query
+  // or the fingerprint). They are journaled `included` once the line is written.
+  const cliQuery = steerPort ? composeFirstContent(promptText, steerPort.drainForCompose()) : promptText
   // The COS UserPromptSubmit hook sees `cliQuery` (image preamble, attachment block and
   // all). This private file hands it the user's own words, bound by the hash of exactly
   // what goes on stdin; the file dies with the child. See lib/turn-request.ts.
@@ -651,6 +666,37 @@ export async function callClaudeStreaming(
   let terminalTextError: string | null = null
   let lastActivity = Date.now() // Tracks last stdout data for inactivity timeout
   let receivedStreamEvents = false  // Track if CLI emits stream_event (vs older assistant-only format)
+  // 6.78.0 steer state (all inert without a port).
+  const steerTracker = steerPort ? new SteerTracker(randomUUID()) : null
+  let steerSettling = false            // a result left a steer uncovered: the settle window is open
+  let steerSettleTimer: ReturnType<typeof setTimeout> | null = null
+  let steerNeedsSeparator = false      // text after such a result is a second turn
+  let steerCheckpoint: string | null = null
+  let steerStdinEnded = false
+  let steerReaper: ReturnType<typeof setTimeout> | null = null
+  let childClosed = false
+  function endSteerStdin() {
+    if (!steerPort || steerStdinEnded) return
+    steerStdinEnded = true
+    steerPort.close()
+    try { proc.stdin.end() } catch { /* the child is gone */ }
+  }
+  /** A finished steer-mode run whose child has not exited by now is terminated (stdin is closed). */
+  function armSteerReaper() {
+    if (!steerPort || steerReaper || childClosed) return
+    steerReaper = setTimeout(() => {
+      if (!childClosed && !terminationRequested) void terminateProviderProcess(proc)
+    }, STEER_REAPER_MS)
+    steerReaper.unref?.()
+  }
+  /** Second-turn text keeps the partial a prefix of the answer: one separator first. */
+  function steerSeparator() {
+    if (!steerNeedsSeparator) return
+    steerNeedsSeparator = false
+    if (!fullText) return
+    fullText += '\n\n'
+    callbacks.onChunk('\n\n')
+  }
   const toolInputs = new Map<number, { name: string; json: string }>()
 
   function cleanupImages() {
@@ -683,6 +729,7 @@ export async function callClaudeStreaming(
     }
     finalized = true
     cleanup()
+    armSteerReaper()
     cleanupImages()
 
     // The coordinator persists the final provider text before conversation
@@ -796,6 +843,7 @@ export async function callClaudeStreaming(
     if (finalized) return
     finalized = true
     cleanup()
+    armSteerReaper()
     cleanupImages()
     outputImagePublisher?.cleanup()
     removeExchange(sid, pendingUserExchange)
@@ -860,6 +908,11 @@ export async function callClaudeStreaming(
   function resetInactivity() {
     lastActivity = Date.now()
     clearTimeout(inactivityTimer)
+    // 6.78.0 steer: the inactivity timer pauses during the settle window; output resets the settle.
+    if (steerSettling) {
+      armSteerSettle()
+      return
+    }
     inactivityTimer = setTimeout(() => {
       const elapsed = Math.round((Date.now() - startTime) / 1000)
       void terminateForTerminal('inactivity timeout', result => finalizeError(
@@ -869,10 +922,33 @@ export async function callClaudeStreaming(
     }, inactivityMs)
   }
 
+  /**
+   * 6.78.0 steer: a result covered the prompt but not every steer. Wait for the next result,
+   * at most STEER_SETTLE_MS of quiet; then close stdin (the CLI runs anything queued and
+   * exits) and let the close finish the run with what it has.
+   */
+  function armSteerSettle() {
+    if (steerSettleTimer) clearTimeout(steerSettleTimer)
+    steerSettleTimer = setTimeout(() => {
+      steerSettleTimer = null
+      steerSettling = false
+      endSteerStdin()
+      if (!finalized) resetInactivity()
+    }, STEER_SETTLE_MS)
+    steerSettleTimer.unref?.()
+  }
+  function enterSteerSettle() {
+    steerSettling = true
+    clearTimeout(inactivityTimer)
+    armSteerSettle()
+  }
+
   // ─── Wall clock max: absolute cap ───
 
   const wallTimer = setTimeout(() => {
     void terminateForTerminal('wall timeout', result => {
+      // 6.78.0 steer: a steered run past its first whole answer completes with that answer.
+      if (steerCheckpoint !== null) return finalize(steerCheckpoint)
       if (fullText) {
         // Got partial output — deliver only after the process tree is closed.
         return finalize(fullText)
@@ -886,6 +962,11 @@ export async function callClaudeStreaming(
     clearTimeout(inactivityTimer)
     clearTimeout(wallTimer)
     options?.abortSignal?.removeEventListener('abort', handleAbort)
+    // 6.78.0 steer: every terminal path closes the port and stdin.
+    if (steerSettleTimer) clearTimeout(steerSettleTimer)
+    steerSettleTimer = null
+    steerSettling = false
+    endSteerStdin()
   }
 
   // ─── Process stdout ───
@@ -924,6 +1005,7 @@ export async function callClaudeStreaming(
           const inner = event.event
           if (inner?.type === 'content_block_delta' && inner.delta?.type === 'text_delta' && inner.delta.text) {
             phase = 'generating'
+            steerSeparator()
             fullText += inner.delta.text
             callbacks.onChunk(inner.delta.text)
           } else if (inner?.type === 'content_block_start' && inner.content_block?.type === 'thinking') {
@@ -982,12 +1064,16 @@ export async function callClaudeStreaming(
               if (authFailure) terminalTextError = authFailure
               else {
                 phase = 'generating'
+                steerSeparator()
                 fullText += text
                 callbacks.onChunk(text)
               }
             }
           }
         } else if (event.type === 'user') {
+          // 6.78.0 steer: the CLI replaying a steer line means it has it.
+          const delivered = steerTracker?.onUserEvent(event)
+          if (delivered) steerPort!.events.onDelivered?.(delivered)
           for (const preview of claudeToolResultPreviewLines(event)) callbacks.onActivityLine?.(preview)
         } else if (event.type === 'result') {
           const resultError = claudeResultErrorMessage(event)
@@ -1000,6 +1086,25 @@ export async function callClaudeStreaming(
             cliSessionMap.set(resolvedCliKey, event.session_id)
             scheduleCliSessionSave()
             updateClaudeRun(run.runId, { cliSessionId: event.session_id })
+          }
+          // 6.78.0 steer: a result finishes the run only when it (with the ones before it)
+          // covers every line written. A result that leaves a steer uncovered checkpoints the
+          // answer the first time it covers the prompt, and the run waits.
+          if (steerTracker && !finalized) {
+            const verdict = steerTracker.onResult(event)
+            if (verdict.folded.length > 0) steerPort!.events.onFolded?.(verdict.folded)
+            if (verdict.action === 'wait') {
+              if (verdict.checkpoint) {
+                const checkpoint: string = fullText || event.result || ''
+                steerCheckpoint = checkpoint
+                steerPort!.events.onCheckpoint?.(checkpoint)
+              }
+              steerNeedsSeparator = true
+              enterSteerSettle()
+              continue
+            }
+            // finish, or finish with steering off (the CLI named no uuids): no more steers.
+            steerPort!.close()
           }
           // Final result — use accumulated text (more reliable than result.result)
           void finalize(fullText || event.result || '')
@@ -1025,6 +1130,9 @@ export async function callClaudeStreaming(
   })
 
   proc.on('close', (code) => {
+    childClosed = true
+    if (steerReaper) clearTimeout(steerReaper)
+    steerPort?.close()
     if (terminationRequested) return
     // Process any remaining buffer
     if (buffer.trim()) {
@@ -1090,8 +1198,20 @@ export async function callClaudeStreaming(
       return sid
     }
     if (finalized) return sid
-    proc.stdin.write(cliQuery)
-    proc.stdin.end()
+    if (steerPort && steerTracker) {
+      // 6.78.0 steer: the prompt is one stream-json line; stdin stays open. Steers offered
+      // after the compose are written right behind it, then every later one as it comes.
+      proc.stdin.write(encodeUserLine(steerTracker.promptUuid, cliQuery))
+      steerPort.open((line, steerId) => {
+        if (finalized || steerStdinEnded || !proc.stdin.writable) return false
+        proc.stdin.write(line)
+        steerTracker.noteWritten(steerId)
+        return true
+      }, { startedAt: startTime, wallMaxMs: wallMax })
+    } else {
+      proc.stdin.write(cliQuery)
+      proc.stdin.end()
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     if (!finalized) {

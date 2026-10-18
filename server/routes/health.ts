@@ -57,7 +57,8 @@ import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 // The flag lives beside the endpoints it describes, so it cannot drift from
 // whether they are actually registered.
 import { MEDIA_CHUNKED_UPLOAD_ENABLED } from './media.js'
-import { durableQueryJobsCapability, messagesTrailEnabled } from '../lib/query-job-feature.js'
+import { durableQueryJobsCapability, messagesSteerCapability, messagesTrailEnabled } from '../lib/query-job-feature.js'
+import { claudeSteerSupportKnown } from '../lib/claude-cli-support.js'
 import { jobTrailStats } from '../lib/job-trail.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
 import { getMorningBriefScheduler } from '../lib/morning-brief-runtime.js'
@@ -647,6 +648,9 @@ healthRouter.get('/models', async (req, res) => {
         // THIS surface (not /api/health) and falls back to the activity log without it.
         // False whenever jobs themselves are off or COS_MESSAGES_TRAIL=0.
         trail: durableJobs.enabled && messagesTrailEnabled(),
+        // 6.78.0 Messages steer: present only with COS_MESSAGES_STEER on and a Claude CLI that
+        // takes stream-json input (probed once). Absent, the app shows today's UI.
+        ...steerCapabilityField(durableJobs.enabled),
       },
       // 6.52.0: the session questions API and its client contract. A client polls
       // `GET /api/session-questions?client=glasses|phone` every `pollIntervalMs`; one
@@ -695,6 +699,12 @@ healthRouter.get('/models', async (req, res) => {
     },
   })
 })
+/** 6.78.0: `{ steer }` for /api/models `durableQueryJobs`, or nothing at all. */
+export function steerCapabilityField(jobsEnabled: boolean): { steer?: { protocolVersion: 1; providers: ['claude'] } } {
+  const steer = messagesSteerCapability({ jobsEnabled, cliSupported: claudeSteerSupportKnown() })
+  return steer ? { steer } : {}
+}
+
 // GET /api/cli-session — returns current CLI session ID for cross-device resume
 healthRouter.get('/cli-session', (req, res) => {
   const cosSessionId = req.query.sid as string | undefined

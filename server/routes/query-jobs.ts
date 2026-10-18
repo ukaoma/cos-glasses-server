@@ -1,8 +1,10 @@
 import { Router, type Request, type Response } from 'express'
-import { durableQueryJobsEnabled } from '../lib/query-job-feature.js'
+import { durableQueryJobsEnabled, messagesSteerEnabled } from '../lib/query-job-feature.js'
 import {
   QueryJobCoordinator,
   QueryJobCoordinatorError,
+  QueryJobSteerLimitError,
+  QueryJobSteerUnknownError,
   queryJobErrorCode,
 } from '../lib/query-job-coordinator.js'
 import {
@@ -15,13 +17,16 @@ import {
   QueryJobNotTerminalError,
   QueryJobPersistenceError,
   QueryJobProviderOrphanFenceError,
+  QueryJobSteerConflictError,
   QueryJobStoreError,
+  type QueryJobSteerFrame,
   type QueryJobTrailFrame,
 } from '../lib/query-job-store.js'
 import {
   isTerminalQueryJobStatus,
   normalizeQueryJobError,
   parsePositiveInteger,
+  steerReadState,
   QueryJobValidationError,
   type QueryJobEvent,
   type QueryJobSnapshot,
@@ -33,6 +38,8 @@ export interface QueryJobsRouterOptions {
   enabled?: () => boolean
   heartbeatMs?: number
   prepareAdmission?: (raw: unknown) => unknown | Promise<unknown>
+  /** 6.78.0 Messages steer. Defaults to COS_MESSAGES_STEER (off). */
+  steerEnabled?: () => boolean
 }
 
 interface WireError {
@@ -104,13 +111,50 @@ function wantsTrail(req: Request): boolean {
   return req.query.trail === '1'
 }
 
-function forClient(job: QueryJobSnapshot, trail: boolean): QueryJobSnapshot {
+function forClient(job: QueryJobSnapshot, trail: boolean, steer = false): QueryJobSnapshot {
+  return steerView(trailView(job, trail), steer)
+}
+
+function trailView(job: QueryJobSnapshot, trail: boolean): QueryJobSnapshot {
   if (trail || !('trail' in job)) return job
   const { trail: _trail, ...rest } = job
   return rest as QueryJobSnapshot
 }
 
-function snapshotEvent(job: QueryJobSnapshot, reason: string, trail: boolean): Record<string, unknown> {
+/**
+ * 6.78.0: STEERS ARE OPT-IN, like the trail. Without `?steer=1` a snapshot carries no `steers`
+ * (exactly the 6.77.0 shape); with it, each steer reads as a client should see it now
+ * (`not_applied` for one an ended job did not get to apply).
+ */
+function wantsSteer(req: Request): boolean {
+  return req.query.steer === '1'
+}
+
+function steerView(job: QueryJobSnapshot, steer: boolean): QueryJobSnapshot {
+  if (!('steers' in job)) return job
+  const { steers, ...rest } = job
+  if (!steer || !steers) return rest as QueryJobSnapshot
+  return { ...rest, steers: steers.map(item => ({ ...item, state: steerReadState(item.state, job.status) })) } as QueryJobSnapshot
+}
+
+/** A steer frame on the wire (contract messages-steer.json `sse_frame`): no `id:` line, no eventSeq. */
+function writeSteer(res: Response, frame: Pick<QueryJobSteerFrame, 'steerId' | 'state' | 'at'>): void {
+  res.write(`event: steer\ndata: ${JSON.stringify({ steerId: frame.steerId, state: frame.state, at: frame.at })}\n\n`)
+}
+
+/** The steer routes' error bodies (contract messages-steer.json `errors`). */
+function steerWireError(error: unknown): { status: number; body: WireError } {
+  if (error instanceof QueryJobSteerConflictError) return { status: 409, body: { error: { code: error.code, message: error.message } } }
+  if (error instanceof QueryJobSteerLimitError) return { status: 429, body: { error: { code: error.code, message: error.message, retryable: false } } }
+  if (error instanceof QueryJobSteerUnknownError) return { status: 404, body: { error: { code: error.code, message: error.message } } }
+  if (error instanceof QueryJobNotFoundError) return { status: 404, body: { error: { code: 'query_job_not_found', message: 'Query job not found' } } }
+  if (error instanceof QueryJobGenerationMismatchError) return { status: 409, body: { error: { code: 'query_job_generation_mismatch', message: 'Generation mismatch' } } }
+  return wireError(error)
+}
+
+const STEER_DISABLED: WireError = { error: { code: 'steer_disabled', message: 'Steering is off on this Mac.' } }
+
+function snapshotEvent(job: QueryJobSnapshot, reason: string, trail: boolean, steer = false): Record<string, unknown> {
   return {
     type: 'snapshot',
     eventSeq: job.eventSeq,
@@ -119,7 +163,7 @@ function snapshotEvent(job: QueryJobSnapshot, reason: string, trail: boolean): R
     generation: job.generation,
     status: job.status,
     at: job.updatedAt,
-    data: { reason, job: forClient(job, trail) },
+    data: { reason, job: forClient(job, trail, steer) },
   }
 }
 
@@ -129,6 +173,7 @@ export function createQueryJobsRouter(
 ): Router {
   const router = Router()
   const enabled = options.enabled ?? durableQueryJobsEnabled
+  const steerEnabled = options.steerEnabled ?? messagesSteerEnabled
   const heartbeatMs = Math.max(1_000, options.heartbeatMs ?? 15_000)
 
   router.post('/query-jobs', async (req, res) => {
@@ -143,7 +188,7 @@ export function createQueryJobsRouter(
     try {
       const prepared = options.prepareAdmission ? await options.prepareAdmission(req.body) : req.body
       const admission = await coordinator.submit(prepared)
-      return res.status(202).json({ job: forClient(admission.job, wantsTrail(req)) })
+      return res.status(202).json({ job: forClient(admission.job, wantsTrail(req), wantsSteer(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -159,9 +204,22 @@ export function createQueryJobsRouter(
       const generation = requiredGeneration(req.query.generation)
       const job = await coordinator.getByClientGeneration(clientJobId, generation)
       if (!job) throw new QueryJobNotFoundError(`${clientJobId}:${generation}`)
-      return res.json({ job: forClient(job, wantsTrail(req)) })
+      return res.json({ job: forClient(job, wantsTrail(req), wantsSteer(req)) })
     } catch (error) {
       const wire = wireError(error)
+      return res.status(wire.status).json(wire.body)
+    }
+  })
+
+  // 6.78.0: a steer by its id and lineage, from the newest generation that holds it. Ahead of
+  // the dynamic job routes, like by-client.
+  router.get('/query-jobs/steers/:steerId', async (req, res) => {
+    if (!enabled() || !steerEnabled()) return res.status(404).json(STEER_DISABLED)
+    try {
+      const clientJobId = validClientJobId(req.query.clientJobId)
+      return res.json(await coordinator.steerStatus(clientJobId, req.params.steerId))
+    } catch (error) {
+      const wire = steerWireError(error)
       return res.status(wire.status).json(wire.body)
     }
   })
@@ -171,7 +229,7 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.query.generation)
       const job = await coordinator.getSnapshot(jobId, generation)
-      return res.json({ job: forClient(job, wantsTrail(req)) })
+      return res.json({ job: forClient(job, wantsTrail(req), wantsSteer(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -188,6 +246,9 @@ export function createQueryJobsRouter(
     const pendingLive: QueryJobEvent[] = []
     const pendingTrail: QueryJobTrailFrame[] = []
     const trail = wantsTrail(req)
+    // 6.78.0: `?steer=1` adds `steer` frames; without it the stream is the 6.77.0 one.
+    const steer = wantsSteer(req) && steerEnabled()
+    const pendingSteer: QueryJobSteerFrame[] = []
     const writeTrail = (frame: QueryJobTrailFrame) => {
       if (closed || frame.trailSeq <= sentTrailSeq) return
       sentTrailSeq = frame.trailSeq
@@ -243,8 +304,22 @@ export function createQueryJobsRouter(
         writeSse(res, event.type, event as unknown as Record<string, unknown>)
         if (isTerminalQueryJobStatus(event.status)) finish()
       }
+      const steerSubscription = steer
+        ? {
+          listener: (frame: QueryJobSteerFrame) => {
+            if (closed) return
+            if (!streamReady) {
+              pendingSteer.push(frame)
+              return
+            }
+            writeSteer(res, frame)
+          },
+        }
+        : undefined
       // Without `?trail=1` the call is exactly the 6.51.0 one.
-      const subscription = trailSubscription
+      const subscription = steerSubscription
+        ? await coordinator.subscribe(jobId, generation, after, onEvent, trailSubscription, steerSubscription)
+        : trailSubscription
         ? await coordinator.subscribe(jobId, generation, after, onEvent, trailSubscription)
         : await coordinator.subscribe(jobId, generation, after, onEvent)
       unsubscribe = subscription.unsubscribe
@@ -263,7 +338,10 @@ export function createQueryJobsRouter(
       res.flushHeaders()
       res.write(': keepalive\n\n')
 
-      const { replay, trailReplay } = subscription
+      const { replay, trailReplay, steerReplay } = subscription
+      // 6.78.0: every steer as it reads now, before any job event (a state only moves forward,
+      // so a client that saw some of these simply sees them again).
+      if (steer && steerReplay) for (const item of steerReplay) writeSteer(res, item)
       // The trail first: every entry precedes the terminal event that may end this stream.
       if (trail && trailReplay) {
         if (trailReplay.gap) {
@@ -289,7 +367,7 @@ export function createQueryJobsRouter(
         }
       }
       if (replay.gap) {
-        writeSse(res, 'snapshot', snapshotEvent(replay.snapshot, replay.reason ?? 'replay_gap', trail))
+        writeSse(res, 'snapshot', snapshotEvent(replay.snapshot, replay.reason ?? 'replay_gap', trail, steer))
         sentSeq = replay.snapshot.eventSeq
       } else {
         for (const event of replay.events) {
@@ -301,7 +379,7 @@ export function createQueryJobsRouter(
 
       const replayTerminal = replay.events.some(event => isTerminalQueryJobStatus(event.status))
       if (isTerminalQueryJobStatus(replay.snapshot.status) && !replayTerminal && !replay.gap) {
-        writeSse(res, 'snapshot', snapshotEvent(replay.snapshot, 'terminal_snapshot', trail))
+        writeSse(res, 'snapshot', snapshotEvent(replay.snapshot, 'terminal_snapshot', trail, steer))
         sentSeq = replay.snapshot.eventSeq
       }
       if (isTerminalQueryJobStatus(replay.snapshot.status)) {
@@ -312,6 +390,8 @@ export function createQueryJobsRouter(
       streamReady = true
       for (const frame of pendingTrail) writeTrail(frame)
       pendingTrail.length = 0
+      for (const frame of pendingSteer) writeSteer(res, frame)
+      pendingSteer.length = 0
       for (const event of pendingLive) {
         if (closed || event.eventSeq <= sentSeq) continue
         sentSeq = event.eventSeq
@@ -344,7 +424,7 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.body?.generation)
       const { job } = await coordinator.cancel(jobId, generation)
-      return res.json({ job: forClient(job, wantsTrail(req)) })
+      return res.json({ job: forClient(job, wantsTrail(req), wantsSteer(req)) })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)
@@ -356,9 +436,21 @@ export function createQueryJobsRouter(
       const jobId = validJobId(req.params.jobId)
       const generation = requiredGeneration(req.body?.generation)
       const job = await coordinator.acknowledge(jobId, generation)
-      return res.json({ job: forClient(job, wantsTrail(req)) })
+      return res.json({ job: forClient(job, wantsTrail(req), wantsSteer(req)) })
     } catch (error) {
       const wire = wireError(error)
+      return res.status(wire.status).json(wire.body)
+    }
+  })
+
+  // 6.78.0 Messages steer (contract messages-steer.json). 404 steer_disabled when off.
+  router.post('/query-jobs/:jobId/steer', async (req, res) => {
+    if (!enabled() || !steerEnabled()) return res.status(404).json(STEER_DISABLED)
+    try {
+      const jobId = validJobId(req.params.jobId)
+      return res.json(await coordinator.steer(jobId, req.body))
+    } catch (error) {
+      const wire = steerWireError(error)
       return res.status(wire.status).json(wire.body)
     }
   })
