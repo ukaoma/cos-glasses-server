@@ -55,7 +55,8 @@ describe('one-shot transcription availability contract', () => {
     const response = await fetch(`${base}/api/transcribe/capabilities`)
     expect(response.status).toBe(200)
     // COS Control 0.5.316 and earlier accept desktopDictationVersion == 1 exactly.
-    expect(await response.json()).toEqual({ desktopDictationVersion: 1, desktopDictationVersions: [1, 2], requiredEngines: ['parakeet-ultra', 'local'], localOnly: true, dictionary: 'cos', benchmark: 1 })
+    // 6.77.0 adds transcriptCleanup, additively (the old helper reads only the keys above).
+    expect(await response.json()).toEqual({ desktopDictationVersion: 1, desktopDictationVersions: [1, 2], requiredEngines: ['parakeet-ultra', 'local'], localOnly: true, dictionary: 'cos', benchmark: 1, transcriptCleanup: { protocol: 1, suggestions: 1, screenContext: 1 } })
   })
 
   it('old helper contract (COS Control 0.5.316 main.swift:15397) is byte for byte: version exactly 1, localOnly true, Parakeet answers parakeet-ultra', async () => {

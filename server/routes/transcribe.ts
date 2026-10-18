@@ -37,6 +37,9 @@ transcribeRouter.get('/transcribe/capabilities', (_req, res) => {
     localOnly: true,
     dictionary: 'cos',
     benchmark: 1,
+    // 6.77.0: post-save transcript cleanup. suggestions = /api/transcript-cleanup/suggestions,
+    // screenContext = POST /api/meeting/:sessionId/screen-context.
+    transcriptCleanup: { protocol: 1, suggestions: 1, screenContext: 1 },
   })
 })
 

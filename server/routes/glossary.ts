@@ -198,7 +198,7 @@ function commitWords(words: GlossaryWords, nextLog: CorrectionLogEntry[], previo
   resetVocabEchoCache()
 }
 
-type Outcome = { status: number; body: unknown }
+export type Outcome = { status: number; body: unknown }
 
 function serialized(work: () => Outcome): Promise<Outcome> {
   const run = putChain.catch(() => {}).then(work)
@@ -206,17 +206,27 @@ function serialized(work: () => Outcome): Promise<Outcome> {
   return run
 }
 
+/**
+ * Learn one correction inside the glossary write chain, exactly as POST
+ * /transcription-glossary/correction does (logged, undoable). Exported for the transcript
+ * cleanup's dictionary suggestions (6.77.0), so an accepted suggestion uses this writer and
+ * never a second copy of it.
+ */
+export function glossaryLearnCorrection(body: unknown): Promise<Outcome> {
+  return serialized(() => {
+    const previousLog = readCorrectionsLog()
+    const learned = learnCorrection(storedWords(), (body ?? {}) as { heard: unknown; written: unknown; source: unknown }, { id: randomUUID(), at: new Date().toISOString() })
+    if (!learned.ok) return { status: learned.status, body: { error: learned.error } }
+    if (learned.unchanged) return { status: 200, body: { unchanged: true, entry: null, glossary: currentGlossary() } }
+    commitWords(learned.words, appendLog(previousLog, learned.entry), previousLog)
+    return { status: 200, body: { unchanged: false, entry: learned.entry, glossary: currentGlossary() } }
+  })
+}
+
 glossaryRouter.post('/transcription-glossary/correction', async (req, res) => {
   const body = req.body ?? {}
   try {
-    const outcome = await serialized(() => {
-      const previousLog = readCorrectionsLog()
-      const learned = learnCorrection(storedWords(), body, { id: randomUUID(), at: new Date().toISOString() })
-      if (!learned.ok) return { status: learned.status, body: { error: learned.error } }
-      if (learned.unchanged) return { status: 200, body: { unchanged: true, entry: null, glossary: currentGlossary() } }
-      commitWords(learned.words, appendLog(previousLog, learned.entry), previousLog)
-      return { status: 200, body: { unchanged: false, entry: learned.entry, glossary: currentGlossary() } }
-    })
+    const outcome = await glossaryLearnCorrection(body)
     return res.status(outcome.status).json(outcome.body)
   } catch (err) {
     return res.status(500).json({ error: errMsg(err) })
@@ -250,20 +260,29 @@ glossaryRouter.post('/transcription-glossary/correction/undo', async (req, res) 
 // ── Single-item hand edits (6.73.12) ─────────────────────────────────────────
 // One word or one correction at a time, inside the same chain as PUT and learn,
 // so COS Control never has to read the whole map and write it back.
+function runSingleEdit(edit: (words: GlossaryWords, raw: unknown) => ReturnType<typeof addVocabulary>, raw: unknown): Promise<Outcome> {
+  return serialized(() => {
+    const result = edit(storedWords(), raw)
+    if (!result.ok) return { status: result.status, body: { error: result.error } }
+    if (!result.unchanged) {
+      updateProfileFields({ vocabulary: result.words.vocabulary, whisper_corrections: JSON.stringify(result.words.corrections) })
+      resetDecoderCaches()
+      resetVocabEchoCache()
+    }
+    return { status: 200, body: { unchanged: result.unchanged, glossary: currentGlossary() } }
+  })
+}
+
+/** Add one vocabulary word inside the glossary write chain (same as POST /transcription-glossary/vocabulary/add). */
+export function glossaryAddVocabulary(term: unknown): Promise<Outcome> {
+  return runSingleEdit(addVocabulary, term)
+}
+
 function singleEdit(path: string, field: 'term' | 'heard', edit: (words: GlossaryWords, raw: unknown) => ReturnType<typeof addVocabulary>) {
   glossaryRouter.post(path, async (req, res) => {
     const raw = (req.body ?? {})[field]
     try {
-      const outcome = await serialized(() => {
-        const result = edit(storedWords(), raw)
-        if (!result.ok) return { status: result.status, body: { error: result.error } }
-        if (!result.unchanged) {
-          updateProfileFields({ vocabulary: result.words.vocabulary, whisper_corrections: JSON.stringify(result.words.corrections) })
-          resetDecoderCaches()
-          resetVocabEchoCache()
-        }
-        return { status: 200, body: { unchanged: result.unchanged, glossary: currentGlossary() } }
-      })
+      const outcome = await runSingleEdit(edit, raw)
       return res.status(outcome.status).json(outcome.body)
     } catch (err) {
       return res.status(500).json({ error: errMsg(err) })

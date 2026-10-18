@@ -91,6 +91,12 @@ describe('health capability contract', () => {
     const body = await response.json() as any
     expect(body.capabilities?.pairing).toEqual({ version: 1 })
   }, 20_000)
+
+  // 6.77.0: public route, so only the protocol and the switch; off until Miles turns it on.
+  it('advertises transcript cleanup as codes only, off by default', async () => {
+    const body = await (await fetch(`${base}/api/health`)).json() as any
+    expect(body.capabilities?.transcriptCleanup).toEqual({ protocol: 1, enabled: false })
+  }, 20_000)
 })
 
 describe('morning brief capability', () => {

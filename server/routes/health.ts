@@ -69,6 +69,7 @@ import { maintenanceLifecycle } from '../lib/maintenance-lifecycle.js'
 import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
 import { liveCuesV2Advertised } from '../lib/live-cues-v2.js'
+import { transcriptCleanupAdvertised } from './transcript-cleanup.js'
 import { getMeetingSyncSnapshot } from '../lib/meeting-batch-progress.js'
 import { listUnsavedCaptures } from '../lib/unsaved-audio-quarantine.js'
 import { getStrandedCaptures } from './transcribe-stream.js'
@@ -497,6 +498,8 @@ healthRouter.get('/health', async (_req, res) => {
       cliDebug: CLI_DEBUG_CAPABILITY,
       liveCues,
       ...(liveCuesV2Advertised() ? { liveCuesV2: liveCuesV2Advertised() } : {}),
+      // 6.77.0: codes only (this route is public): the protocol and whether the switch is on.
+      transcriptCleanup: transcriptCleanupAdvertised(),
       richMedia: {
         text: true,
         pdf: richMedia.pdf,

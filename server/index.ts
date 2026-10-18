@@ -72,7 +72,8 @@ import { nativeHead, realNativeHeadDeps } from './lib/native-head.js'
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter, getActiveTranscriptionSessionCount } from './routes/transcribe-stream.js'
-import { meetingRouter, resumeMeetingFinalizationJobs } from './routes/meeting.js'
+import { meetingRouter, resumeMeetingFinalizationJobs, scheduleTranscriptCleanupSweep, transcriptCleanupRouteDeps } from './routes/meeting.js'
+import { createTranscriptCleanupRouter } from './routes/transcript-cleanup.js'
 import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { openaiKeyRouter } from './routes/openai-key.js'
@@ -1086,6 +1087,8 @@ app.use('/api', createAgentSessionBindingsRouter({
 app.use('/api', displayRouter)
 app.use('/api', transcribeStreamRouter)
 app.use('/api', meetingRouter)
+// 6.77.0: transcript cleanup settings, screen context, the cleanup ledger and dictionary suggestions.
+app.use('/api', createTranscriptCleanupRouter(transcriptCleanupRouteDeps()))
 app.use('/api', meetingsRouter)
 app.use('/api', memoryRouter)
 app.use('/api', threadsRouter)
@@ -1373,6 +1376,8 @@ listenRequiredServers(listeners).then(() => {
     // Resume already-saved meetings whose post-response HQ/operations work
     // was interrupted by a prior server update or process exit.
     resumeMeetingFinalizationJobs()
+    // 6.77.0: transcript cleanup data whose meeting is gone, and screen text past retention.
+    scheduleTranscriptCleanupSweep()
 
     // Debris from an import killed mid-write: a temp file, or a sidecar whose
     // markdown never landed. Both are invisible to every reader, so nothing

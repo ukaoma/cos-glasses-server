@@ -4,7 +4,11 @@
 //
 // Used by:
 //   - /api/transcribe       (short-form dictation / messaging)
-//   - /api/meeting/save     (batch post-processing, Phase 3.5 — via meeting.ts)
+//   - prompt drafts         (routes/prompt-drafts.ts)
+//   - the post-save transcript cleanup (6.77.0, transcript-cleanup.ts), one word at
+//     a time through fuzzyReplacementFor, with the meeting's own screen and file
+//     terms as extra targets. Not otherwise on the meeting save path: the Phase 3.5
+//     LLM pass this file once fed was deleted with the app's server fork.
 //
 // Zero LLM cost, ~5ms on typical dictation length.
 //
@@ -191,6 +195,72 @@ const COMMON_ENGLISH_WORDS = new Set<string>([
   'willie', 'zachary',
 ])
 
+/** True for a word the stop list protects from ever being replaced (lowercase compare). */
+export function isCommonEnglishWord(word: string): boolean {
+  return COMMON_ENGLISH_WORDS.has(word.toLowerCase())
+}
+
+/**
+ * The proper-noun targets fuzzy correction may write, in first-seen order: speaker
+ * tokens (Ext, Unknown, the owner label) and entries that do not start uppercase or
+ * are shorter than 4 characters are dropped.
+ */
+export function canonicalFuzzyTargets(targets: string[]): string[] {
+  const owner = getOwnerSpeakerLabel()
+  return Array.from(new Set(
+    targets
+      .filter(t => {
+        if (!t || t.length < 4) return false
+        if (t === 'Ext' || t === 'Unknown' || t === owner) return false
+        return /^[A-Z]/.test(t.trim())
+      })
+      .map(t => t.trim()),
+  ))
+}
+
+/**
+ * The replacement fuzzy correction would write for ONE word, or null to leave it.
+ * `canonical` comes from canonicalFuzzyTargets. Same rules as applyFuzzyCorrections,
+ * which calls this for every candidate word.
+ */
+export function fuzzyReplacementFor(word: string, canonical: string[], targetLowerSet?: ReadonlySet<string>): string | null {
+  if (!/^[A-Za-z][A-Za-z'-]{4,}$/.test(word)) return null
+  const lower = word.toLowerCase()
+
+  // Skip common English words (primary false-positive defense)
+  if (COMMON_ENGLISH_WORDS.has(lower)) return null
+
+  // Skip exact matches (already correct)
+  const exact = targetLowerSet ?? new Set(canonical.map(t => t.toLowerCase()))
+  if (exact.has(lower)) return null
+
+  // Length-scaled distance threshold
+  const len = word.length
+  const maxDist = len <= 8 ? 1 : len <= 11 ? 2 : 3
+
+  let bestTarget: string | null = null
+  let bestDist = maxDist + 1
+
+  for (const target of canonical) {
+    // Split multi-word targets — match on individual tokens
+    const tokens = target.split(/\s+/)
+    for (const token of tokens) {
+      if (token.length < 4) continue
+      // Length difference must be small to prevent collapses
+      if (Math.abs(token.length - len) > 2) continue
+      const dist = levenshtein(lower, token.toLowerCase())
+      if (dist > 0 && dist < bestDist && dist <= maxDist) {
+        bestDist = dist
+        bestTarget = token
+      }
+    }
+  }
+
+  if (!bestTarget) return null
+  // Preserve original capitalization pattern
+  return /^[A-Z]/.test(word) ? bestTarget : bestTarget.toLowerCase()
+}
+
 /**
  * Fuzzy-match transcript words against a canonical list of proper nouns.
  *
@@ -218,16 +288,7 @@ export function applyFuzzyCorrections(
 
   // Keep only targets that look like proper nouns.
   // Drop speaker tokens and entries that don't start with uppercase.
-  const owner = getOwnerSpeakerLabel()
-  const canonical = Array.from(new Set(
-    targets
-      .filter(t => {
-        if (!t || t.length < 4) return false
-        if (t === 'Ext' || t === 'Unknown' || t === owner) return false
-        return /^[A-Z]/.test(t.trim())
-      })
-      .map(t => t.trim()),
-  ))
+  const canonical = canonicalFuzzyTargets(targets)
   if (canonical.length === 0) return { text, replacements: 0 }
 
   const targetLowerSet = new Set(canonical.map(t => t.toLowerCase()))
@@ -237,44 +298,11 @@ export function applyFuzzyCorrections(
   // Match any 5+ char word (case-insensitive). Stop-list + strict distance
   // thresholds are the primary defenses against false positives.
   const result = text.replace(/\b[A-Za-z][A-Za-z'-]{4,}\b/g, (word) => {
-    const lower = word.toLowerCase()
-
-    // Skip common English words (primary false-positive defense)
-    if (COMMON_ENGLISH_WORDS.has(lower)) return word
-
-    // Skip exact matches (already correct)
-    if (targetLowerSet.has(lower)) return word
-
-    // Length-scaled distance threshold
-    const len = word.length
-    const maxDist = len <= 8 ? 1 : len <= 11 ? 2 : 3
-
-    let bestTarget: string | null = null
-    let bestDist = maxDist + 1
-
-    for (const target of canonical) {
-      // Split multi-word targets — match on individual tokens
-      const tokens = target.split(/\s+/)
-      for (const token of tokens) {
-        if (token.length < 4) continue
-        // Length difference must be small to prevent collapses
-        if (Math.abs(token.length - len) > 2) continue
-        const dist = levenshtein(lower, token.toLowerCase())
-        if (dist > 0 && dist < bestDist && dist <= maxDist) {
-          bestDist = dist
-          bestTarget = token
-        }
-      }
-    }
-
-    if (bestTarget) {
-      replacements++
-      fuzzyLog.push({ from: word, to: bestTarget })
-      // Preserve original capitalization pattern
-      const wasCapitalized = /^[A-Z]/.test(word)
-      return wasCapitalized ? bestTarget : bestTarget.toLowerCase()
-    }
-    return word
+    const replacement = fuzzyReplacementFor(word, canonical, targetLowerSet)
+    if (replacement === null) return word
+    replacements++
+    fuzzyLog.push({ from: word, to: replacement })
+    return replacement
   })
 
   if (fuzzyLog.length > 0) {

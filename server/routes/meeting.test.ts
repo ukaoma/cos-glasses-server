@@ -10,6 +10,7 @@ import { initializeServerInstanceId } from '../lib/server-instance-id.js'
 import type { BatchTranscription } from '../lib/batch-transcript-quality.js'
 import { createMeetingRouter } from './meeting.js'
 import { createMeetingsRouter } from './meetings.js'
+import { dataPath } from '../lib/data-dir.js'
 
 const TOKEN = 'meeting-route-token'
 const roots: string[] = []
@@ -39,6 +40,7 @@ interface HarnessOptions {
   moveFails?: boolean
   runBatch?: () => Promise<BatchTranscription>
   finalDiarize?: import('./meeting.js').FinalDiarize
+  transcriptCleanup?: import('./meeting.js').TranscriptCleanupRunner
 }
 
 async function harness(options: HarnessOptions) {
@@ -100,6 +102,7 @@ async function harness(options: HarnessOptions) {
     emit: vi.fn(),
     finalizationJobs,
     ...(options.finalDiarize ? { finalDiarize: options.finalDiarize } : {}),
+    ...(options.transcriptCleanup ? { transcriptCleanup: options.transcriptCleanup } : {}),
   }))
   app.use('/api', createMeetingsRouter(store))
 
@@ -516,6 +519,44 @@ describe('meeting save/list/detail API', () => {
       jobPhase: 'batch_pending',
     })
     expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
+  })
+
+  it('runs the transcript cleanup once, after the HQ text and the relabel, before the job completes (6.77.0)', async () => {
+    const order: string[] = []
+    let h: Awaited<ReturnType<typeof harness>>
+    const finalDiarize = vi.fn(async () => { order.push('relabel'); return { status: 'applied' as const } })
+    const transcriptCleanup = vi.fn(async (input: { sessionId: string; meetingPath: string; sidecarPath: string }) => {
+      order.push(`cleanup:${h.finalizationJobs.get('meeting_route_001')?.phase}`)
+      expect(readFileSync(input.meetingPath, 'utf8')).toContain('The improved batch transcript')
+      expect(JSON.parse(readFileSync(input.sidecarPath, 'utf8')).batchApplied).toBe(true)
+      return { status: 'done' as const, applied: 0 }
+    })
+    h = await harness({ batch: acceptedBatch(), finalDiarize, transcriptCleanup })
+    const response = await h.api('/api/meeting/save', { method: 'POST', body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Cleanup order' }) })
+    const saved = await response.json() as any
+    await Promise.all(h.background)
+    expect(transcriptCleanup).toHaveBeenCalledTimes(1)
+    expect(transcriptCleanup.mock.calls[0][0]).toEqual({
+      sessionId: 'meeting_route_001',
+      meetingPath: join(h.recordingsRoot, '2026-07', saved.filename),
+      sidecarPath: join(h.recordingsRoot, '2026-07', saved.filename.replace(/\.md$/, '.g2-chunks.json')),
+    })
+    // After the batch phase closed (the relabel ran first), before the job finished.
+    expect(order).toEqual(['relabel', 'cleanup:ops_pending'])
+    expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
+  })
+
+  it('a cleanup that throws never fails the finalization, and the default (switch off) writes nothing', async () => {
+    const throwing = await harness({ batch: acceptedBatch(), transcriptCleanup: async () => { throw new Error('boom') } })
+    await throwing.api('/api/meeting/save', { method: 'POST', body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Cleanup throws' }) })
+    await Promise.all(throwing.background)
+    expect(throwing.finalizationJobs.get('meeting_route_001')).toBeNull()
+    rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true })
+    const plain = await harness({ batch: acceptedBatch() })
+    await plain.api('/api/meeting/save', { method: 'POST', body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Default cleanup' }) })
+    await Promise.all(plain.background)
+    expect(plain.finalizationJobs.get('meeting_route_001')).toBeNull()
+    expect(existsSync(dataPath('transcript-cleanup'))).toBe(false)
   })
 
   it('a failed relabel saves as today: the meeting is byte-identical to a save without the pass', async () => {

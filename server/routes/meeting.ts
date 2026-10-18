@@ -182,6 +182,12 @@ import {
 } from '../lib/meeting-finalization-jobs.js'
 import { enrichStandaloneMeeting } from '../lib/meeting-summary-persistence.js'
 import { recordFinalPassSkip, runNemotronFinalPass, type FinalPassOptions, type FinalPassOutcome } from '../lib/nemotron-final.js'
+import { runTranscriptCleanup, type CleanupOutcome } from '../lib/transcript-cleanup.js'
+import { sweepTranscriptCleanupData } from '../lib/transcript-cleanup-screen.js'
+import type { TranscriptCleanupRouteDeps } from './transcript-cleanup.js'
+
+/** 6.77.0: the post-save transcript cleanup. Injectable so tests never reach a model. */
+export type TranscriptCleanupRunner = (input: { sessionId: string; meetingPath: string; sidecarPath: string }) => Promise<CleanupOutcome>
 
 /** 6.61.0: the save-time Nemotron pass. Injectable so tests never spawn the CLI. */
 export type FinalDiarize = (options: Pick<FinalPassOptions, 'meetingPath' | 'sidecarPath' | 'audioDir'>) => Promise<FinalPassOutcome>
@@ -243,6 +249,8 @@ export interface MeetingRouteDependencies {
   finalDiarize?: FinalDiarize
   /** Control's stop requests for live G2 meetings (lib/meeting-stop-requests.ts). */
   stopRequests?: StopRequestStore
+  /** 6.77.0: the post-save transcript cleanup (lib/transcript-cleanup.ts). */
+  transcriptCleanup?: TranscriptCleanupRunner
 }
 
 const activeFinalizationJobs = new Set<string>()
@@ -254,6 +262,21 @@ interface FinalizationRuntime {
   scheduleBackground: (task: Promise<void>) => void
   sessions?: MeetingSessionSource
   finalDiarize?: FinalDiarize
+  transcriptCleanup?: TranscriptCleanupRunner
+}
+
+/**
+ * The cleanup as finalization runs it: a meeting whose session is somehow live again is
+ * skipped, and nothing it does can fail the finalization (it never throws; this catch is
+ * the last line of defence should that ever change).
+ */
+async function runCleanupStage(runner: TranscriptCleanupRunner | undefined, input: { sessionId: string; meetingPath: string; sidecarPath: string }, sessions?: MeetingSessionSource): Promise<void> {
+  const run = runner ?? (cleanupInput => runTranscriptCleanup(cleanupInput, { sessionLive: id => (sessions?.getState ?? defaultSessionState)(id) === 'active' }))
+  try {
+    await run(input)
+  } catch (error) {
+    console.warn(`[meeting/save] transcript cleanup threw; the saved transcript is unchanged: ${error instanceof Error ? error.name : 'error'}`)
+  }
 }
 
 function validReplayEntries(raw: unknown[]): IndexedTranscriptChunk[] | null {
@@ -371,6 +394,11 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
       })
       markCanonicalFinalizationState(current.sidecarPath, 'ops_pending', current.claimPending)
     }
+
+    // 6.77.0: the transcript is final here (HQ text and the Nemotron relabel are written),
+    // and nothing downstream has read it yet: COS operations imports, and the standalone
+    // summary describes, the cleaned text. Off unless Miles turns it on.
+    await runCleanupStage(runtime.transcriptCleanup, { sessionId: current.sessionId, meetingPath: current.meetingPath, sidecarPath: current.sidecarPath }, runtime.sessions)
 
     if (cosOpsPipelineConfigured() && !MAC_CAPTURE_ID.test(current.sessionId)) {
       await handoffMeetingToOperations(current.meetingPath)
@@ -558,6 +586,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const emit = deps.emit ?? emitDisplay
   const finalizationJobs = deps.finalizationJobs ?? new MeetingFinalizationJobStore()
   const finalDiarize = deps.finalDiarize ?? runNemotronFinalPass
+  const transcriptCleanup = deps.transcriptCleanup
   const router = Router()
   const savingSessions = new Set<string>()
   const stopRequests = deps.stopRequests ?? createStopRequestStore()
@@ -780,6 +809,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         finalizationJobs.reconcileCanonicalSidecars()
         const pendingJob = finalizationJobs.get(sessionId)
         if (pendingJob) scheduleFinalizationJob(pendingJob, {
+          transcriptCleanup,
           finalizationJobs,
           runBatch,
           scheduleBackground,
@@ -956,6 +986,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           scheduleBackground,
           sessions,
           finalDiarize,
+          transcriptCleanup,
         })
       }
     } catch (error) {
@@ -2438,6 +2469,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           },
         })
       } catch { /* display is best-effort */ }
+      await runCleanupStage(transcriptCleanup, { sessionId, meetingPath: saved.filepath, sidecarPath: saved.sidecarPath }, sessions)
       if (cosOpsPipelineConfigured() && !macCapture) {
         await handoffMeetingToOperations(saved.filepath)
       } else {
@@ -2620,3 +2652,36 @@ async function finalizeBatch(options: {
 }
 
 export const meetingRouter = createMeetingRouter()
+
+/** 6.77.0: what the transcript cleanup routes need from the meeting layer. */
+export function transcriptCleanupRouteDeps(store: MeetingStore = getMeetingStore()): TranscriptCleanupRouteDeps {
+  return {
+    sessionState: id => defaultSessionState(id),
+    sessionStartedAt: id => getSessionStartTime(id),
+    findMeeting: id => {
+      const meeting = store.findBySessionId(id)
+      return meeting ? { meetingPath: meeting.filepath, sidecarPath: meeting.sidecarPath } : null
+    },
+  }
+}
+
+/**
+ * Boot: delete cleanup data (screen context and ledgers) whose meeting is gone, and screen
+ * text past its retention. Deferred and unref'd, so it never delays startup or a restart.
+ */
+export function scheduleTranscriptCleanupSweep(delayMs = 90_000): void {
+  const timer = setTimeout(() => {
+    try {
+      const store = getMeetingStore()
+      const jobs = new MeetingFinalizationJobStore()
+      const result = sweepTranscriptCleanupData({
+        now: Date.now(),
+        known: id => defaultSessionState(id) !== 'missing' || Boolean(jobs.get(id)) || store.findBySessionId(id) !== null,
+      })
+      if (result.screenDeleted || result.ledgersDeleted) {
+        console.log(`[transcript-cleanup] swept ${result.screenDeleted} screen and ${result.ledgersDeleted} ledger files`)
+      }
+    } catch { /* the next boot sweeps again */ }
+  }, delayMs)
+  timer.unref()
+}
