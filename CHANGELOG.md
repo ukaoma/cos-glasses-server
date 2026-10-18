@@ -1,3 +1,11 @@
+## 6.78.1 - Glasses messages reach open Claude sessions again, whatever the size of ~/.claude/projects
+
+Hotfix on 6.78.0. No companion or COS Control change.
+
+- **What broke.** To decide whether an open Claude session is idle, the server finds its transcript by walking `~/.claude/projects`, and it refused the walk past 2,048 folders. Every Claude transcript then read as missing, so occupancy answered `live_desktop_process` for every open session: queued glasses messages waited until they expired (the lens said "Waiting for the current turn to end"), and live delivery through the peer inbox could not confirm either. On Miles's Mac the count passed 2,048 on 2026-10-17 12:33, almost all of it empty folders left by COS's own stateless `claude -p` calls (fixed in the COS scripts separately). The ceiling dates from 6.36; 6.77.0 has the same refusal.
+- **The fix.** The transcript path Claude Code reports in every hook event (`transcript_path`, already in the session signal store) is used first, registered at boot so every reader of Claude transcripts gets it: no walk, no folder limit. It is used only when it is `<projects>/<one folder>/<session id>.jsonl` and the file exists; anything else falls back to the walk, unchanged. The walk ceiling rises to 8,192, and a refusal now logs one `[native-head]` line at most once an hour instead of failing silently.
+- **Checks.** Full suite 7,715 passed, 2 skipped. 9 of 9 guard mutants killed by named tests.
+
 ## 6.78.0 - Steer from the glasses, Retry and Send again, and crash safety for Asks and desk turns (Pi Durable parity)
 
 Pairs with COS Glasses companion 6.10.645. Includes 6.77.0. No COS Control change is required (0.5.322 and 0.5.323 work; see the client matrix). Miles, 2026-10-18: steer from the glasses and retry, for Messages and Sessions; no regressions; better offline to online. Plan: Pi Durable parity build v3.1.
