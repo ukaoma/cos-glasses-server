@@ -510,9 +510,9 @@ try {
   console.warn('[binding-registry] boot reap failed', error)
 }
 // 6.78.0 (COS_PIN_BOOT_REAP): a pin a dead boot left frees its thread 21 minutes after the
-// later of its pin and this restart (the query jobs' orphan fence), not 24 h. Checked here at
-// boot, on the tick below, and lazily on every attach and occupancy check (`attachBlocked`,
-// `create`).
+// later of its pin and this restart (the query jobs' orphan fence), not 24 h. Checked on the
+// tick below and lazily on every attach and occupancy check (`attachBlocked`, `create`).
+// Not at boot: nothing can be due until 21 minutes after this registry opened.
 const releaseOrphanPins = (when: string): void => {
   try {
     const orphans = agentSessionBindingRegistry.reapOrphanedPins(Date.now())
@@ -521,7 +521,6 @@ const releaseOrphanPins = (when: string): void => {
     console.warn('[binding-registry] orphan pin release failed', error)
   }
 }
-releaseOrphanPins('boot')
 // And periodically, so a strand created mid-run clears without waiting for the next
 // restart. Unref'd so it never holds the process open during shutdown.
 const bindingReapTimer = setInterval(() => {
