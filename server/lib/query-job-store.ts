@@ -12,6 +12,7 @@ import {
   boundedText,
   isTerminalQueryJobStatus,
   normalizeQueryJobError,
+  parseQueryJobInterruption,
   parseQueryJobOutputImageStats,
   originWasDropped,
   parseQueryJobRequest,
@@ -36,6 +37,8 @@ import {
   sanitizeJobTrailDraft,
   type JobTrailDraft,
 } from './job-trail.js'
+import { buildInterruption, restartError } from './query-job-resume.js'
+import { queryJobDeltaJournalEnabled, restartNoticeEnabled } from './query-job-feature.js'
 
 const QUERY_JOB_STATUSES: readonly QueryJobStatus[] = [
   'accepted', 'starting', 'running', 'answer_ready', 'completed', 'failed', 'canceled', 'interrupted',
@@ -226,6 +229,101 @@ export class NodeQueryJobJournalStorage implements QueryJobJournalStorage {
   }
 }
 
+/**
+ * 6.78.0 (MVP-D release 1): the delta-only chunk READER, always on.
+ *
+ * A writer-on journal (`createQueryJobJournalStorage` with COS_QUERY_JOB_DELTA_JOURNAL) stores
+ * a chunk row whose partial is exactly the previous partial plus its delta as the delta alone:
+ * `eventData.deltaOnly: true`, and no `partialText` in `patch` or `eventData`. This puts the
+ * partial back, in read order: an `accepted` row starts a job at '', every row that carries a
+ * `partialText` sets it, and a delta-only row appends its `eventData.text`. Any other row is
+ * returned untouched, so a journal with no delta rows reads byte for byte as before. `deltas`
+ * is one scan's state (a full boot scan, or one job's rehydration), keyed by jobId.
+ */
+function rebuildDeltaRow(parsed: unknown, deltas: Map<string, string>, onlyJobId?: string): unknown {
+  if (!parsed || typeof parsed !== 'object') return parsed
+  const row = parsed as { jobId?: unknown; type?: unknown; patch?: unknown; eventData?: unknown }
+  if (typeof row.jobId !== 'string' || (onlyJobId && row.jobId !== onlyJobId)) return parsed
+  const patch = row.patch && typeof row.patch === 'object' ? row.patch as Record<string, unknown> : null
+  const eventData = row.eventData && typeof row.eventData === 'object' ? row.eventData as Record<string, unknown> : null
+  if (row.type === 'accepted') deltas.set(row.jobId, '')
+  if (row.type === 'chunk' && eventData?.deltaOnly === true && patch && typeof eventData.text === 'string') {
+    const partialText = (deltas.get(row.jobId) ?? '') + eventData.text
+    deltas.set(row.jobId, partialText)
+    const { deltaOnly: _deltaOnly, ...data } = eventData
+    return { ...row, patch: { ...patch, partialText }, eventData: { ...data, partialText } }
+  }
+  if (typeof patch?.partialText === 'string') deltas.set(row.jobId, patch.partialText)
+  return parsed
+}
+
+/**
+ * 6.78.0 (MVP-D release 1): the journal storage production uses. Reads are the store's own
+ * (the reader above is always on). Appends pass through UNCHANGED unless the delta WRITER is on
+ * (COS_QUERY_JOB_DELTA_JOURNAL, default off): then a chunk row is stored as its delta alone, but
+ * ONLY when its partial is exactly the last partial this writer stored for the job plus that
+ * delta. An authoritative rewrite (the coordinator's flush, which REPLACES the partial), a
+ * truncated delta or partial, and the first chunk of a job this writer never saw are written
+ * in full. The last stored partial moves only after its append succeeded.
+ *
+ * Rollback: a 6.51.0 to 6.77.x server reads every finished answer whole (completed rows carry
+ * the full response), but shows a job left mid-run by a writer-on build with an empty partial.
+ * That is why the reader ships a release before the writer.
+ */
+export class DeltaQueryJobJournalStorage implements QueryJobJournalStorage {
+  readonly inner: QueryJobJournalStorage
+  /** Rows stored as their delta alone, and chunk rows kept whole (observability, tests). */
+  stripped = 0
+  keptFull = 0
+  private readonly writeDeltas: boolean
+  private readonly written = new Map<string, string>()
+
+  constructor(options: { writeDeltas?: boolean; inner?: QueryJobJournalStorage } = {}) {
+    this.inner = options.inner ?? new NodeQueryJobJournalStorage()
+    this.writeDeltas = options.writeDeltas === true
+  }
+
+  prepare(root: string): Promise<void> { return this.inner.prepare(root) }
+  listPartitions(root: string): Promise<string[]> { return this.inner.listPartitions(root) }
+  readPartition(root: string, partition: string): Promise<string> { return this.inner.readPartition(root, partition) }
+  removePartition(root: string, partition: string): Promise<void> { return this.inner.removePartition(root, partition) }
+
+  async append(root: string, partitionDay: string, line: string): Promise<void> {
+    if (!this.writeDeltas) return this.inner.append(root, partitionDay, line)
+    let row: { jobId?: unknown; type?: unknown; patch?: Record<string, unknown>; eventData?: Record<string, unknown> }
+    try { row = JSON.parse(line) } catch { return this.inner.append(root, partitionDay, line) }
+    const jobId = typeof row.jobId === 'string' ? row.jobId : null
+    if (!jobId) return this.inner.append(root, partitionDay, line)
+    const partial = row.patch?.partialText
+    const delta = row.eventData?.text
+    if (row.type === 'chunk' && typeof partial === 'string' && typeof delta === 'string'
+      && row.eventData?.deltaTruncated !== true && row.patch?.partialTruncated !== true) {
+      const previous = this.written.get(jobId)
+      if (previous !== undefined && partial === previous + delta) {
+        const { partialText: _patchPartial, ...patch } = row.patch!
+        const { partialText: _dataPartial, ...data } = row.eventData!
+        await this.inner.append(root, partitionDay, JSON.stringify({ ...row, patch, eventData: { ...data, deltaOnly: true } }))
+        this.written.set(jobId, partial)
+        this.stripped++
+        return
+      }
+      await this.inner.append(root, partitionDay, line)
+      this.written.set(jobId, partial)
+      this.keptFull++
+      return
+    }
+    await this.inner.append(root, partitionDay, line)
+    if (row.type === 'accepted') this.written.set(jobId, '')
+    else if (typeof partial === 'string') this.written.set(jobId, partial)
+    if (row.type === 'completed' || row.type === 'failed' || row.type === 'canceled' || row.type === 'interrupted') this.written.delete(jobId)
+  }
+}
+
+/** 6.78.0 (MVP-D release 1): the storage production journals through. The writer reads COS_QUERY_JOB_DELTA_JOURNAL once, here. */
+export function createQueryJobJournalStorage(env: NodeJS.ProcessEnv = process.env): QueryJobJournalStorage {
+  return new DeltaQueryJobJournalStorage({ writeDeltas: queryJobDeltaJournalEnabled(env) })
+}
+
 export interface QueryJobStoreOptions {
   root: string
   bootId: string
@@ -251,6 +349,11 @@ export interface QueryJobStoreOptions {
    * and a kept job would sit `accepted` for the life of the process.
    */
   requeueNeverStartedOnBoot?: boolean
+  /**
+   * 6.78.0: write `error.cause` and `interruption` when a restart ends a job. Defaults to
+   * COS_RESTART_NOTICE (on), read on every interrupt. Tests pass it instead of the env.
+   */
+  restartNotice?: () => boolean
 }
 
 export class QueryJobStoreError extends Error {
@@ -382,6 +485,7 @@ export class QueryJobStore {
   private readonly maxTrailEntries: number
   private readonly maxTrailChars: number
   private readonly journalEventTypes: readonly QueryJobEventType[]
+  private readonly restartNotice: () => boolean
   private readonly jobs = new Map<string, HydratedQueryJob>()
   private readonly identitiesByJobId = new Map<string, QueryJobIdentity>()
   private readonly identitiesByKey = new Map<string, QueryJobIdentity>()
@@ -406,6 +510,7 @@ export class QueryJobStore {
     this.maxTrailEntries = Math.max(1, options.maxTrailEntries ?? QUERY_JOB_LIMITS.trailEntries)
     this.maxTrailChars = Math.max(1, options.maxTrailChars ?? QUERY_JOB_LIMITS.trailChars)
     this.journalEventTypes = options.journalEventTypes ?? QUERY_JOB_JOURNAL_EVENT_TYPES
+    this.restartNotice = options.restartNotice ?? (() => restartNoticeEnabled())
     this.emitter.setMaxListeners(1_000)
     this.trailEmitter.setMaxListeners(1_000)
     this.health = {
@@ -473,7 +578,9 @@ export class QueryJobStore {
         if (partition.slice(0, 10) < cutoff) await this.storage.removePartition(this.options.root, partition)
       }
       this.partitions = await this.storage.listPartitions(this.options.root)
-      for (const partition of this.partitions) await this.hydratePartition(partition)
+      // One delta-reader state per scan, carried across partitions in read order (MVP-D).
+      const deltas = new Map<string, string>()
+      for (const partition of this.partitions) await this.hydratePartition(partition, undefined, deltas)
       this.health.state = 'ready'
 
       // No provider child can be reattached after a boot (a detached one may still be
@@ -533,7 +640,7 @@ export class QueryJobStore {
     }
   }
 
-  private async hydratePartition(partition: string, onlyJobId?: string): Promise<void> {
+  private async hydratePartition(partition: string, onlyJobId?: string, deltas = new Map<string, string>()): Promise<void> {
     let text: string
     try {
       text = await this.storage.readPartition(this.options.root, partition)
@@ -545,7 +652,7 @@ export class QueryJobStore {
       if (!line.trim()) continue
       try {
         const parsed = JSON.parse(line) as unknown
-        const record = this.parseJournalRecord(parsed)
+        const record = this.parseJournalRecord(rebuildDeltaRow(parsed, deltas, onlyJobId))
         if (!record || (onlyJobId && record.jobId !== onlyJobId)) {
           if (!record && !onlyJobId) this.health.malformedRows++
           continue
@@ -690,6 +797,10 @@ export class QueryJobStore {
       snapshot.completedAt = typeof patch.completedAt === 'string' ? patch.completedAt : record.persistedAt
       snapshot.error = normalizeQueryJobError(patch.error, record.type)
       if (typeof patch.orphanFenceUntil === 'string') snapshot.orphanFenceUntil = patch.orphanFenceUntil
+      // 6.78.0: what a restart cut off. Re-parsed on every read, so a record another build
+      // wrote is held to this build's shape and bounds.
+      const interruption = record.type === 'interrupted' ? parseQueryJobInterruption(patch.interruption) : undefined
+      if (interruption) snapshot.interruption = interruption
     } else if (record.type === 'acknowledged') {
       snapshot.acknowledgedAt = typeof patch.acknowledgedAt === 'string'
         ? patch.acknowledgedAt : record.persistedAt
@@ -1134,13 +1245,24 @@ export class QueryJobStore {
         cursorRunId: current.cursorRunId,
       })
     }
-    const error: QueryJobError = {
+    // 6.78.0 restart truth: both restart paths (a crash then boot, and a graceful shutdown) get
+    // one message, `error.cause` set HERE at construction (normalizeQueryJobError keeps only an
+    // allowlisted cause), and an `interruption` record built in memory from the job's own trail.
+    const restartCause = (reason === 'server_restarted' || reason === 'server_shutdown') && this.restartNotice()
+      ? reason : null
+    const error: QueryJobError = restartCause ? restartError(restartCause) : {
       code: 'interrupted',
       message: reason === 'server_restarted'
         ? 'Server restarted. Prompt preserved; provider was not restarted.'
         : sanitizeQueryJobActivity(reason).text,
       retryable: true,
     }
+    const interruption = restartCause ? buildInterruption({
+      job: current,
+      activityToolMode: this.jobs.get(jobId)?.request.activityToolMode ?? 'status',
+      cause: restartCause,
+      at: this.now().toISOString(),
+    }) : undefined
     // Only a job with a persisted provider-process ledger id can own an
     // orphan after this server process dies. Accepted/starting/context-build
     // jobs are safe to retry immediately after restart.
@@ -1154,7 +1276,8 @@ export class QueryJobStore {
     return this.transition(jobId, 'interrupted', 'interrupted', {
       error, completedAt: this.now().toISOString(),
       ...(orphanFenceUntil ? { orphanFenceUntil } : {}),
-    }, { error, ...(orphanFenceUntil ? { orphanFenceUntil } : {}) })
+      ...(interruption ? { interruption } : {}),
+    }, { error, ...(orphanFenceUntil ? { orphanFenceUntil } : {}), ...(interruption ? { interruption } : {}) })
   }
 
   /**
@@ -1170,10 +1293,18 @@ export class QueryJobStore {
       this.assertWritable()
       const hydrated = this.jobs.get(jobId)
       if (!hydrated) throw new QueryJobNotFoundError(jobId)
+      // 6.78.0 restart truth: a parked job carries its interruption record too.
+      const interruption = error.cause === 'crash_loop_parked' && this.restartNotice() ? buildInterruption({
+        job: hydrated.snapshot,
+        activityToolMode: hydrated.request.activityToolMode,
+        cause: 'crash_loop_parked',
+        at: this.now().toISOString(),
+      }) : undefined
       if (hydrated.snapshot.status !== 'accepted') return { applied: false, job: clone(hydrated.snapshot) }
       return this.persistMutation(hydrated, 'interrupted', 'interrupted', {
         error, completedAt: this.now().toISOString(),
-      }, { error })
+        ...(interruption ? { interruption } : {}),
+      }, { error, ...(interruption ? { interruption } : {}) })
     })
   }
 
@@ -1295,7 +1426,8 @@ export class QueryJobStore {
   private async ensureHydrated(jobId: string): Promise<void> {
     if (this.jobs.has(jobId)) return
     if (!this.identitiesByJobId.has(jobId)) throw new QueryJobNotFoundError(jobId)
-    for (const partition of this.partitions) await this.hydratePartition(partition, jobId)
+    const deltas = new Map<string, string>()
+    for (const partition of this.partitions) await this.hydratePartition(partition, jobId, deltas)
     if (!this.jobs.has(jobId)) throw new QueryJobNotFoundError(jobId)
     this.trimHydratedJobs(jobId)
   }

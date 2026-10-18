@@ -205,7 +205,76 @@ export interface QueryJobError {
 
 /** 6.78.0: the only `error.cause` values a journaled error keeps. An allowlist, so no
  * provider error (an Error's own `cause` included) can start carrying one. */
-export const QUERY_JOB_ERROR_CAUSES: ReadonlySet<string> = new Set(['crash_loop_parked'])
+export const QUERY_JOB_ERROR_CAUSES: ReadonlySet<string> = new Set(['server_restarted', 'server_shutdown', 'crash_loop_parked'])
+
+/** 6.78.0: why a restart ended a job: a crash then boot, a graceful shutdown, or crash-loop parking. */
+export type QueryJobRestartCause = 'server_restarted' | 'server_shutdown' | 'crash_loop_parked'
+
+/** 6.78.0: the message of a job either restart path cut off. Its lead fits a 32-column footer. */
+export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Retry or resume.'
+
+/** 6.78.0: the bounds of `snapshot.interruption` (contract interrupted-job.json `limits`). */
+export const QUERY_JOB_INTERRUPTION_LIMITS = Object.freeze({
+  alreadyDoneMax: 5,
+  alreadyDoneEntryChars: 60,
+  cutOffDuringChars: 60,
+})
+
+/**
+ * 6.78.0: what a restart cut off, built once from the job's own trail when the job ends
+ * (lib/query-job-resume.ts `buildInterruption`) and journaled with the terminal record.
+ *
+ *   cutOffDuring  the step that was running, or null when none was (or none is known)
+ *   alreadyDone   side-effect steps that finished (reads and searches are not listed), the
+ *                 newest QUERY_JOB_INTERRUPTION_LIMITS.alreadyDoneMax of them
+ *   incomplete    the list may be missing steps: tool activity was off, the trail hit its
+ *                 bound, a step had no outcome to match, older steps were dropped from the
+ *                 list, or the provider started and left no trail at all
+ *   resumable     the app may offer Resume (false for a crash-loop-parked job)
+ *
+ * Additive: absent on every job a restart did not end, and with COS_RESTART_NOTICE=0.
+ */
+export interface QueryJobInterruption {
+  cause: QueryJobRestartCause
+  at: string
+  cutOffDuring: string | null
+  alreadyDone: string[]
+  incomplete: boolean
+  resumable: boolean
+}
+
+const RESTART_CAUSES: ReadonlySet<string> = new Set(['server_restarted', 'server_shutdown', 'crash_loop_parked'])
+
+/** One line of the interruption record: redacted like activity, one line, at most `max` characters. */
+export function interruptionLine(value: unknown, max: number): string {
+  if (typeof value !== 'string' || !value.replace(CONTROL_RE, '').trim()) return ''
+  const text = sanitizeQueryJobActivity(value).text.replace(/\s+/g, ' ').trim()
+  return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`
+}
+
+/** The only shape a journaled interruption may have, from anything. Undefined when it is not one. */
+export function parseQueryJobInterruption(raw: unknown): QueryJobInterruption | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const r = raw as Record<string, unknown>
+  if (typeof r.cause !== 'string' || !RESTART_CAUSES.has(r.cause)) return undefined
+  if (typeof r.at !== 'string' || !Number.isFinite(Date.parse(r.at))) return undefined
+  if (typeof r.incomplete !== 'boolean' || typeof r.resumable !== 'boolean' || !Array.isArray(r.alreadyDone)) return undefined
+  const limits = QUERY_JOB_INTERRUPTION_LIMITS
+  const cutOffDuring = typeof r.cutOffDuring === 'string' ? interruptionLine(r.cutOffDuring, limits.cutOffDuringChars) || null : null
+  const alreadyDone = r.alreadyDone
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map(entry => interruptionLine(entry, limits.alreadyDoneEntryChars))
+    .filter(Boolean)
+    .slice(-limits.alreadyDoneMax)
+  return {
+    cause: r.cause as QueryJobRestartCause,
+    at: r.at,
+    cutOffDuring,
+    alreadyDone,
+    incomplete: r.incomplete,
+    resumable: r.resumable,
+  }
+}
 
 export interface QueryJobActivity {
   eventSeq: number
@@ -246,6 +315,8 @@ export interface QueryJobSnapshot extends QueryJobProviderLinkage {
   responseTruncated?: boolean
   outputImageStats?: QueryJobOutputImageStats
   error?: QueryJobError
+  /** 6.78.0: what a restart cut off (see QueryJobInterruption). Only on a job a restart ended. */
+  interruption?: QueryJobInterruption
   activity: QueryJobActivity[]
   /** The readable trail (6.52.0), bounded by `QUERY_JOB_LIMITS.trailEntries` and
    * `trailChars`, rebuilt from the journal on restart. ABSENT, never `[]`, on a job

@@ -67,7 +67,8 @@ const mutations = [
   m('qj-forget-on-start', COORD, ["          this.bootResumeLineage('forget', starting.job.clientJobId)\n", ''], QJ),
   m('qj-park-only-never-started', STORE, ["      if (hydrated.snapshot.status !== 'accepted') return { applied: false, job: clone(hydrated.snapshot) }\n      return this.persistMutation(hydrated, 'interrupted', 'interrupted', {",
     "      return this.persistMutation(hydrated, 'interrupted', 'interrupted', {"], QJ),
-  m('qj-cause-allowlist', TYPES, ["new Set(['crash_loop_parked'])", 'new Set([])'], QJ),
+  // 6.78.0 P2 (restart truth) widened the allowlist; the mutant still drops crash_loop_parked from it.
+  m('qj-cause-allowlist', TYPES, ["new Set(['server_restarted', 'server_shutdown', 'crash_loop_parked'])", "new Set(['server_restarted', 'server_shutdown'])"], QJ),
   m('qj-runtime-passes-gate', RUNTIME, ['  bootResumeGate,\n', ''], WIRE),
 
   // ── Meeting finalization ──
