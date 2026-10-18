@@ -32,17 +32,22 @@ describe('6.78.0 flags are tri-state and read per call', () => {
     ['COS_SESSION_STEER', () => sessionSteerEnabled(), false],
   ]
   for (const [name, read, fallback] of cases) {
-    it(`${name}: '1' on, '0' off, anything else the default (${fallback ? 'on' : 'off'})`, () => {
+    it(`${name}: 1/true/on on, 0/false/off off, anything else the default (${fallback ? 'on' : 'off'}), the one 6.78.0 reader (P7 S3)`, () => {
       delete process.env[name]
       expect(read()).toBe(fallback)
-      process.env[name] = '1'
-      expect(read()).toBe(true)
-      process.env[name] = '0'
-      expect(read()).toBe(false)
-      process.env[name] = 'true'
-      expect(read()).toBe(fallback)
-      process.env[name] = ''
-      expect(read()).toBe(fallback)
+      for (const value of ['1', 'true', 'on', ' ON ', 'True']) {
+        process.env[name] = value
+        expect(read(), value).toBe(true)
+      }
+      // P7 S3: before the shared reader, `false` and `off` read as the default (ON for three of these).
+      for (const value of ['0', 'false', 'off', ' Off ', 'FALSE']) {
+        process.env[name] = value
+        expect(read(), value).toBe(false)
+      }
+      for (const value of ['', 'yes', '2', 'maybe']) {
+        process.env[name] = value
+        expect(read(), value).toBe(fallback)
+      }
     })
   }
 

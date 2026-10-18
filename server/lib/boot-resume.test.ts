@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  AUTO_UNPARK_AFTER_MS,
   BOOT_RESUME_KINDS,
   CRASH_LOOP_WINDOW_MS,
   RESTART_LIMIT,
@@ -358,6 +359,80 @@ describe('the restart limit, counted on CONSECUTIVE crashed boots', () => {
       verdicts.push(gate.admit('query_job', 'l', 'start'))
     }
     expect(verdicts).toEqual([true, false, false])
+  })
+})
+
+describe('P7 S5: one automatic second chance for a parked meeting finalization', () => {
+  const T0 = Date.parse('2026-10-18T12:00:00.000Z')
+  function boots(path: string, kind: 'meeting_finalization' | 'query_job', id: string) {
+    let t = T0
+    return {
+      at: () => t,
+      /** One crashed boot `advanceMs` after the last; true when the item was admitted. */
+      boot(advanceMs: number): boolean {
+        t += advanceMs
+        const gate = gateAt(path, { now: () => t })
+        gate.openBoot()
+        return gate.admit(kind, id, 'batch_pending')
+      },
+      gate: () => gateAt(path, { now: () => t }),
+    }
+  }
+
+  it('unparks once on the first boot 30 minutes after the park, with a fresh count; a second park is permanent', () => {
+    expect(AUTO_UNPARK_AFTER_MS).toBe(30 * 60_000)
+    const path = priorCrash(ledgerPath())
+    const key = 'meeting_finalization:g2-storm'
+    const b = boots(path, 'meeting_finalization', 'g2-storm')
+    for (let i = 0; i < RESTART_LIMIT; i++) expect(b.boot(60_000), `crash ${i + 1}`).toBe(true)
+    expect(b.boot(60_000)).toBe(false)
+    const parkedAt = Date.parse(readLedger(path).entries[key]!.parkedAt as string)
+    expect(parkedAt).toBe(b.at())
+    // Not before 30 minutes.
+    expect(b.boot(AUTO_UNPARK_AFTER_MS - 1)).toBe(false)
+    expect(readLedger(path).entries[key]).toMatchObject({ parked: true, autoRetriedAt: null })
+    // At 30 minutes: the one second chance. This boot crashed too, so it counts as attempt 1.
+    expect(b.boot(1)).toBe(true)
+    expect(readLedger(path).entries[key]).toMatchObject({ parked: false, attempts: 1, reason: null, parkedAt: null, autoRetriedAt: new Date(parkedAt + AUTO_UNPARK_AFTER_MS).toISOString() })
+    // The storm goes on: parked again after the limit, and this park is permanent.
+    for (let i = 1; i < RESTART_LIMIT; i++) expect(b.boot(60_000)).toBe(true)
+    expect(b.boot(60_000)).toBe(false)
+    expect(b.boot(2 * 3_600_000)).toBe(false)
+    expect(b.boot(48 * 3_600_000)).toBe(false)
+    expect(b.gate().status().parked.map(item => item.id)).toEqual(['g2-storm'])
+  })
+
+  it("the person's Retry still unparks it, and keeps the second chance spent", () => {
+    const path = priorCrash(ledgerPath())
+    const key = 'meeting_finalization:g2-retried'
+    const b = boots(path, 'meeting_finalization', 'g2-retried')
+    for (let i = 0; i <= RESTART_LIMIT; i++) b.boot(60_000)
+    expect(b.boot(AUTO_UNPARK_AFTER_MS)).toBe(true)
+    for (let i = 1; i <= RESTART_LIMIT; i++) b.boot(60_000)
+    expect(readLedger(path).entries[key]).toMatchObject({ parked: true })
+    const retried = b.gate().retry('meeting_finalization', 'g2-retried')
+    expect(retried).toMatchObject({ parked: false, attempts: 0 })
+    expect(retried!.autoRetriedAt).not.toBeNull()
+    for (let i = 0; i <= RESTART_LIMIT; i++) b.boot(60_000)
+    expect(b.boot(AUTO_UNPARK_AFTER_MS * 4)).toBe(false)
+  })
+
+  it('a parked query job never unparks by itself (the app shows it and offers Retry)', () => {
+    const path = priorCrash(ledgerPath())
+    const b = boots(path, 'query_job', 'c1a2b3c4-0000-4000-8000-000000000009')
+    for (let i = 0; i < RESTART_LIMIT; i++) expect(b.boot(60_000)).toBe(true)
+    expect(b.boot(60_000)).toBe(false)
+    expect(b.boot(AUTO_UNPARK_AFTER_MS * 10)).toBe(false)
+  })
+
+  it('a parked entry with no usable parkedAt is never unparked by the timer', () => {
+    const path = ledgerPath()
+    writeFileSync(path, JSON.stringify({ version: 1, cleanShutdown: false, entries: {
+      'meeting_finalization:g2-undated': { kind: 'meeting_finalization', id: 'g2-undated', phase: 'batch_pending', attempts: 4, parked: true, reason: 'restart_limit', parkedAt: null, retriedAt: null, lastAttemptAt: null, updatedAt: '2026-10-18T12:00:00.000Z' },
+    } }))
+    const gate = gateAt(path, { now: () => T0 + 365 * 86_400_000 })
+    gate.openBoot()
+    expect(gate.admit('meeting_finalization', 'g2-undated', 'batch_pending')).toBe(false)
   })
 })
 

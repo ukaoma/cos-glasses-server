@@ -26,7 +26,7 @@ import { REASON_COPY } from './agent-session-bindings.js'
 
 afterAll(() => { rmSync(FIXTURE.dir, { recursive: true, force: true }) })
 
-const CONTRACT = JSON.parse(readFileSync(new URL('../lib/__fixtures__/pi-durable-contracts/session-steer.json', import.meta.url), 'utf8'))
+const CONTRACT = JSON.parse(readFileSync(new URL('../lib/__fixtures__/pi-durable/contracts/session-steer.json', import.meta.url), 'utf8'))
 const FLAGS = ['COS_QUEUE_RECONCILE', 'COS_PIN_BOOT_REAP', 'COS_QUEUE_RESEND', 'COS_SESSION_STEER', 'COS_CONTINUE_LIVE'] as const
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(FLAGS.map(k => [k, process.env[k]]))
 
@@ -465,6 +465,7 @@ describe('Session steer (COS_SESSION_STEER): mode steer on the queued-turns POST
     expect((await http('POST', `/api/agent-sessions/codex/${threadId}/queued-turns`, body())).json.steerFallback).toBe('no_outside_channel')
     expect((await http('POST', `/api/agent-sessions/cursor/${threadId}/queued-turns`, body())).json.steerFallback).toBe('engine_limit')
     expect(calls).toEqual([])
+    for (const reason of ['no_outside_channel', 'engine_limit', 'permission_pending', 'journal_unavailable']) expect(CONTRACT.steer_unavailable_reasons).toContain(reason)
   })
 
   it('an attempt the journal could not record is never framed: queued, journal_unavailable', async () => {
@@ -473,6 +474,8 @@ describe('Session steer (COS_SESSION_STEER): mode steer on the queued-turns POST
     const b = body()
     const res = await http('POST', base(), b)
     expect(res.json.steerFallback).toBe('journal_unavailable')
+    // P7 S9: every steerFallback the server sends is in the contract's enum.
+    expect(CONTRACT.steer_unavailable_reasons).toContain(res.json.steerFallback)
     expect(calls).toEqual([])
     expect(onDisk(b.clientTurnId)).toMatchObject({ status: 'waiting', attempts: 0 })
   })

@@ -63,6 +63,8 @@
 // event, and positive evidence of an OPEN turn outranks it. Same reasoning as the
 // session-trail handoff, one layer down.
 
+import { readSwitch } from './env-switch.js'
+
 /** Terminal-ish states a queued turn can reach. `waiting` is the only live one. */
 export type QueuedTurnStatus =
   | 'waiting'
@@ -118,13 +120,12 @@ export interface QueuedThreadTurn {
 
 // ------------------------------------------------------------------- 6.78.0 flags
 //
-// Read at CALL time, tri-state like `COS_TRANSCRIPT_CLEANUP`: exactly '1' is on, exactly
-// '0' is off, anything else is the default. One reader per flag, so every caller (routes,
-// registry, drain, health) decides with the same answer in the same tick.
+// Read at CALL time through the one 6.78.0 switch reader (lib/env-switch.ts): `1`, `true`
+// or `on` is on, `0`, `false` or `off` is off, anything else is the default (P7 S3: an exact
+// `0`/`1` reader here made `COS_QUEUE_RECONCILE=false` read ON). One reader per flag, so
+// every caller (routes, registry, drain, health) decides with the same answer in the same tick.
 function triStateFlag(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
-  if (env[name] === '1') return true
-  if (env[name] === '0') return false
-  return fallback
+  return readSwitch(env[name], fallback)
 }
 
 /** `COS_QUEUE_RECONCILE`: the attempt journal, the restart reconcile, receipts, unknown-row retention and reason copy. Default ON. */

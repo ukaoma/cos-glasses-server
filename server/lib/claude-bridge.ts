@@ -62,7 +62,7 @@ import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { teeJobTrail, type JobTrailDraft } from './job-trail.js'
 import { claudeSupportsSessionName } from './claude-cli-support.js'
 import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } from './turn-request.js'
-import { STEER_REAPER_MS, STEER_SETTLE_MS, SteerTracker, composeFirstContent, encodeUserLine, type SteerPort } from './claude-steer.js'
+import { STEER_REAPER_MS, STEER_SETTLE_MS, SteerTracker, composeFirstContent, encodeUserLine, steerClock, type SteerPort } from './claude-steer.js'
 import { randomUUID } from 'node:crypto'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -626,6 +626,9 @@ export async function callClaudeStreaming(
     : defaultWallMax
   const wallMax = isExtendedQuery(query) ? Math.max(WALL_MAX_EXTENDED_MS, effortWallMax) : effortWallMax
   const startTime = Date.now()
+  // 6.78.0 steer (P7 S7): the wall clock's start on the monotonic steer clock, next to the
+  // wall timer it describes, so the coordinator's cut-off reads the same clock after a sleep.
+  const steerStartedAt = steerClock()
   const run = startClaudeRun({
     cosSessionId: sid,
     model: resolvedModel,
@@ -680,6 +683,7 @@ export async function callClaudeStreaming(
   let steerCheckpoint: string | null = null
   let steerStdinEnded = false
   let steerReaper: ReturnType<typeof setTimeout> | null = null
+  let steerKilled = false
   let childClosed = false
   function endSteerStdin() {
     if (!steerPort || steerStdinEnded) return
@@ -687,9 +691,24 @@ export async function callClaudeStreaming(
     steerPort.close()
     try { proc.stdin.end() } catch { /* the child is gone */ }
   }
+  /**
+   * 6.78.0 (P7 S2): the run ended with steer lines written that no result covered. Ending
+   * stdin would let the CLI run those queued lines unwatched (up to the 15 s reaper), and a
+   * later --resume of its session would inherit them while the job reads them not_applied,
+   * so the client sends them again. Instead: the port closes, the child is killed, and the
+   * CLI session mapping is dropped so the next Ask starts a fresh session.
+   */
+  function abandonUncoveredSteers() {
+    steerStdinEnded = true
+    steerPort!.close()
+    if (cliSessionMap.delete(resolvedCliKey)) scheduleCliSessionSave()
+    if (childClosed || terminationRequested || steerKilled) return
+    steerKilled = true
+    void terminateProviderProcess(proc)
+  }
   /** A finished steer-mode run whose child has not exited by now is terminated (stdin is closed). */
   function armSteerReaper() {
-    if (!steerPort || steerReaper || childClosed) return
+    if (!steerPort || steerReaper || childClosed || steerKilled) return
     steerReaper = setTimeout(() => {
       if (!childClosed && !terminationRequested) void terminateProviderProcess(proc)
     }, STEER_REAPER_MS)
@@ -972,6 +991,10 @@ export async function callClaudeStreaming(
     if (steerSettleTimer) clearTimeout(steerSettleTimer)
     steerSettleTimer = null
     steerSettling = false
+    if (steerTracker && steerTracker.uncovered().length > 0) {
+      abandonUncoveredSteers()
+      return
+    }
     endSteerStdin()
   }
 
@@ -1213,7 +1236,7 @@ export async function callClaudeStreaming(
         proc.stdin.write(line)
         steerTracker.noteWritten(steerId)
         return true
-      }, { startedAt: startTime, wallMaxMs: wallMax })
+      }, { startedAt: steerStartedAt, wallMaxMs: wallMax })
     } else {
       proc.stdin.write(cliQuery)
       proc.stdin.end()

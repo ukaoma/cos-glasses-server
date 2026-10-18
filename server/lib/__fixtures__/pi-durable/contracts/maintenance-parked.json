@@ -1,0 +1,59 @@
+{
+  "_contract": "plan v3.1 section 5.4",
+  "status_fragment": {
+    "parked": [
+      {
+        "kind": "query_job",
+        "id": "c1a2b3c4-0000-4000-8000-000000000009",
+        "phase": "start",
+        "attempts": 4,
+        "parkedAt": "2026-10-18T19:31:02.000Z",
+        "reason": "restart_limit"
+      },
+      {
+        "kind": "meeting_finalization",
+        "id": "g2-meeting-123",
+        "phase": "diarize",
+        "attempts": 4,
+        "parkedAt": "2026-10-18T19:31:02.000Z",
+        "reason": "restart_limit"
+      }
+    ]
+  },
+  "retry": {
+    "path": "/api/maintenance/parked/:kind/:id/retry",
+    "replies": {
+      "ok": {
+        "status": 200,
+        "body": {
+          "retried": true,
+          "resumed": true,
+          "entry": {
+            "kind": "meeting_finalization",
+            "id": "g2-meeting-123",
+            "phase": "diarize",
+            "attempts": 0,
+            "parkedAt": null,
+            "reason": null
+          }
+        }
+      },
+      "not_parked": {
+        "status": 404,
+        "body": {
+          "error": "not_parked"
+        }
+      },
+      "unknown_kind": {
+        "status": 400,
+        "body": {
+          "error": "unknown_parked_kind"
+        }
+      }
+    }
+  },
+  "_changes": [
+    "2026-10-18 07:18: 400 code is unknown_parked_kind; 200 body {retried, resumed, entry} (MVP-C shipped)",
+    "2026-10-18 P7 S9: a parked entry reads attempts 4 (it parks on the count past the limit of 3); P7 S5: a parked meeting_finalization auto-unparks once, on the first boot 30 min after its park; /api/health crash_loop_parking {enabled, parked: <count>}"
+  ]
+}

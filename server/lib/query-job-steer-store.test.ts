@@ -175,6 +175,12 @@ describe('reading: not_applied is computed, never journaled', () => {
     expect(steerFallback('not_applied', 'canceled')).toBeNull()
     expect(steerFallback('folded', 'answer_ready')).toBeNull()
     expect(steerFallback('accepted', 'running')).toBeNull()
+    // P7 S1: decided from the journaled state. An accepted steer on a completed job falls
+    // back; a delivered one (the CLI has it) never does, on any terminal.
+    expect(steerFallback('accepted', 'completed')).toBe('queue_follow_up')
+    for (const status of ['completed', 'failed', 'interrupted', 'canceled'] as const) {
+      expect(steerFallback('delivered', status), status).toBeNull()
+    }
   })
 })
 

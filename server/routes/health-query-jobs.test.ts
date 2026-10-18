@@ -235,6 +235,27 @@ describe('public durable-query capability health', () => {
     }
   }, 20_000)
 
+  it('6.78.0 (P7 S5): publishes how many boot-resumed items are parked, a count only', async () => {
+    const gateModule = await import('../lib/boot-resume.js')
+    const before = await (await fetch(`${base}/api/health`)).json() as any
+    expect(before.crash_loop_parking).toEqual({ enabled: false, parked: 0 })
+    const path = join(root, 'boot-resume-ledger.json')
+    const entry = (kind: string, id: string, parked: boolean) => ({ kind, id, phase: 'start', attempts: 4, parked, reason: parked ? 'restart_limit' : null, parkedAt: parked ? '2026-10-18T12:00:00.000Z' : null, retriedAt: null, lastAttemptAt: null, autoRetriedAt: null, updatedAt: '2026-10-18T12:00:00.000Z' })
+    await writeFile(path, JSON.stringify({ version: 1, cleanShutdown: true, entries: {
+      'query_job:c1a2b3c4-0000-4000-8000-000000000009': entry('query_job', 'c1a2b3c4-0000-4000-8000-000000000009', true),
+      'meeting_finalization:g2-meeting-123': entry('meeting_finalization', 'g2-meeting-123', true),
+      'meeting_finalization:g2-meeting-456': entry('meeting_finalization', 'g2-meeting-456', false),
+    } }))
+    gateModule.installBootResumeGate(gateModule.createBootResumeGate({ path, env: {}, log: () => {} }))
+    try {
+      const body = await (await fetch(`${base}/api/health`)).json() as any
+      expect(body.crash_loop_parking).toEqual({ enabled: true, parked: 2 })
+      expect(JSON.stringify(body)).not.toContain('g2-meeting-123')
+    } finally {
+      gateModule.installBootResumeGate(null)
+    }
+  })
+
   it('fails closed on both capability surfaces once shutdown begins', async () => {
     await shutdown?.()
 

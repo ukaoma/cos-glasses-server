@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { atomicWriteFileSync } from '../lib/atomic-fs.js'
+import { bootResumeGate } from '../lib/boot-resume.js'
 import { scheduleManagedServerRestart } from '../lib/managed-restart.js'
 import { isManagedRuntime } from '../lib/managed-runtime.js'
 import { acquireMaintenance, getRecoveryActivityStatus } from '../lib/recovery-activity.js'
@@ -72,6 +73,9 @@ recoveryRouter.post('/recovery/server/restart', (_req, res) => {
   // SuccessfulExit:false, so a clean exit leaves the service STOPPED and the
   // phone shows "Restart requested; reconnect is taking longer than expected."
   scheduleManagedServerRestart({
+    // 6.78.0 (P7 S4): a requested restart is a clean exit, whichever way the process ends
+    // (SIGTERM from kickstart -k, or the 2 s exit(1) fallback): it never counts as a crash.
+    beforeRestart: () => bootResumeGate().markCleanShutdown(),
     onError: (error) => {
       gate.release()
       console.error('[recovery] Failed to schedule managed server restart:', error)

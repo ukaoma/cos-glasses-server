@@ -30,6 +30,16 @@ export const STEER_REAPER_MS = 15_000
 const CUTOFF_FLOOR_MS = 10_000
 const CUTOFF_FRACTION = 0.2
 
+/**
+ * 6.78.0 (P7 S7): the clock every steer cut-off is measured on, the bridge's wall clock and the
+ * coordinator's deadline alike. Monotonic, like the timers that actually end the run
+ * (setTimeout runs on libuv's monotonic clock), so a Mac that slept does not make a steer read
+ * too late against a timer that did not advance. `Date.now()` jumps across a sleep.
+ */
+export function steerClock(): number {
+  return performance.now()
+}
+
 /** A steer arriving with less than this left on the wall clock or the deadline is too late. */
 export function steerCutoffMs(wallMaxMs: number): number {
   return Math.max(CUTOFF_FLOOR_MS, Math.round(CUTOFF_FRACTION * Math.max(0, wallMaxMs)))

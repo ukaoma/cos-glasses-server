@@ -219,8 +219,8 @@ describe('an unverified live frame: never a second copy (OO-3, V1 W6)', () => {
     expect((await post(`/api/agent-sessions/claude/${thread}/queued-turns`, { clientTurnId: key, cosSessionId: 'cos-phone', prompt: 'deploy the fix' })).status).toBe(202)
     await drainThread('claude', thread, queueDeps)
     expect(readQueue('claude', thread, clock).find(t => t.clientTurnId === key)?.status).toBe('waiting')
-    // 21 minutes after the pin: released with an ambiguous record; the drain's own post replays it.
-    clock = pinnedAt + 21 * 60_000
+    // 31 minutes after the pin (P7 S6): released with an ambiguous record; the drain's own post replays it.
+    clock = pinnedAt + 31 * 60_000
     await drainThread('claude', thread, queueDeps)
     expect(readQueue('claude', thread, clock).find(t => t.clientTurnId === key)).toMatchObject({ status: 'refused', reason: 'delivery_unknown_after_restart', deliveryState: 'unknown' })
     await settle()

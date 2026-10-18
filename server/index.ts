@@ -48,10 +48,10 @@ import {
 
   threadAttachEnabled,
 } from './routes/agent-session-bindings.js'
-import { AgentSessionBindingRegistry } from './lib/agent-session-binding-registry.js'
+import { AgentSessionBindingRegistry, makePinChildProbe } from './lib/agent-session-binding-registry.js'
 import { targetKey } from './lib/agent-session-binding-store.js'
 import { cosSpawnedPids } from './lib/agent-session-ownership-store.js'
-import { buildOccupancyProbes, realOccupancyDirs, withCodexTurnClock, withCursorComposerTurn, withHookTurnClock } from './lib/occupancy-probes.js'
+import { buildOccupancyProbes, processStartMs, realOccupancyDirs, withCodexTurnClock, withCursorComposerTurn, withHookTurnClock } from './lib/occupancy-probes.js'
 import { readCodexTurnEndedAtMs } from './lib/codex-turn-clock.js'
 import { codexLiveQueueEnabled } from './lib/codex-live-queue.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './lib/attached-workspace.js'
@@ -492,7 +492,9 @@ app.use((_req, _res, next) => {
 
 // Hydrated once at boot, before any route can read it. Never throws; a corrupt
 // or unreadable store yields a degraded registry rather than a silent empty one.
-const agentSessionBindingRegistry = AgentSessionBindingRegistry.open()
+// 6.78.0 (P7 S6): a crash's orphan pin that names its resume child waits for that pid, with
+// its MEASURED start time, so a reused pid reads as gone.
+const agentSessionBindingRegistry = AgentSessionBindingRegistry.open({ pinChildProbe: makePinChildProbe(processStartMs) })
 // Boot reap, and it is load-bearing rather than housekeeping. A turn pins its
 // binding and unpins in a `finally` that never runs if the process dies during the
 // provider run — a window of up to the 21-minute attached timeout, and exactly what

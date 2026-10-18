@@ -1611,7 +1611,8 @@ export class QueryJobStore {
    * 6.78.0 (crash-loop parking): end a job that never started, because handing it back on
    * boot kept killing the server. Only an `accepted` job (no prompt byte reached a provider,
    * so there is no orphan fence); any other status is `applied: false`. `interrupted` is
-   * terminal, so the app's Resume (the next generation of the same clientJobId) is admitted.
+   * terminal and `resumable: false`, so the app's Retry (the next generation of the same
+   * clientJobId) is admitted.
    */
   async interruptParked(jobId: string, error: QueryJobError): Promise<QueryJobMutationResult> {
     await this.ensureInitialized()

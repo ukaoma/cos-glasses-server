@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import express from 'express'
 import type { Server } from 'node:http'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -343,6 +343,31 @@ describe('6.78.0: parked boot-resumed work', () => {
     } finally {
       await new Promise<void>(resolve => remoteServer.close(() => resolve()))
     }
+  })
+
+  it('P7 S9: status parked[] and every Retry reply match the wire contract (maintenance-parked.json)', async () => {
+    const CONTRACT = JSON.parse(readFileSync(join(import.meta.dirname, '../lib/__fixtures__/pi-durable/contracts/maintenance-parked.json'), 'utf8'))
+    const fragment = CONTRACT.status_fragment.parked as Array<Record<string, unknown>>
+    // A real park reads attempts RESTART_LIMIT + 1 (it parks on the count past the limit), and so does the contract.
+    for (const item of fragment) expect(item.attempts).toBe(RESTART_LIMIT + 1)
+    const ledger = join(dataDir, `boot-resume-contract-${Math.random().toString(36).slice(2)}.json`)
+    const entries = Object.fromEntries(fragment.map(item => [`${item.kind}:${item.id}`, { ...item, parked: true, retriedAt: null, lastAttemptAt: item.parkedAt, autoRetriedAt: null, updatedAt: item.parkedAt }]))
+    writeFileSync(ledger, JSON.stringify({ version: 1, cleanShutdown: true, entries }))
+    const resumed: string[] = []
+    installBootResumeGate(createBootResumeGate({ path: ledger, env: {}, log: () => {} }), { resume: { meeting_finalization: id => resumed.push(id) } })
+    const status = await (await fetch(`${base}/api/maintenance/status`)).json() as any
+    expect(status.parked).toEqual(fragment)
+    const replies = CONTRACT.retry.replies
+    let response = await fetch(`${base}/api/maintenance/parked/meeting_finalization/g2-meeting-123/retry`, { method: 'POST' })
+    expect(response.status).toBe(replies.ok.status)
+    expect(await response.json()).toMatchObject(replies.ok.body)
+    expect(resumed).toEqual(['g2-meeting-123'])
+    response = await fetch(`${base}/api/maintenance/parked/meeting_finalization/g2-meeting-123/retry`, { method: 'POST' })
+    expect(response.status).toBe(replies.not_parked.status)
+    expect(await response.json()).toMatchObject(replies.not_parked.body)
+    response = await fetch(`${base}/api/maintenance/parked/finalization/g2-meeting-123/retry`, { method: 'POST' })
+    expect(response.status).toBe(replies.unknown_kind.status)
+    expect(await response.json()).toMatchObject(replies.unknown_kind.body)
   })
 
   it('Retry of something not parked is 404 and changes nothing; an unknown kind is 400', async () => {

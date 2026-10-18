@@ -5,7 +5,7 @@
     "error": {
       "code": "interrupted",
       "cause": "server_restarted",
-      "message": "Server restarted. Retry or resume.",
+      "message": "Server restarted. Tap to retry.",
       "retryable": true
     },
     "interruption": {
@@ -25,7 +25,7 @@
     "error": {
       "code": "interrupted",
       "cause": "server_shutdown",
-      "message": "Server restarted. Retry or resume.",
+      "message": "Server restarted. Tap to retry.",
       "retryable": true
     },
     "interruption": {
@@ -65,9 +65,11 @@
   "limits": {
     "alreadyDoneMax": 5,
     "alreadyDoneEntryChars": 60,
-    "messageLeadColumns": 32
+    "messageLeadColumns": 32,
+    "cutOffDuringChars": 60
   },
   "_changes": [
-    "2026-10-18 07:18: parked.status is interrupted (MVP-C shipped), not failed"
+    "2026-10-18 07:18: parked.status is interrupted (MVP-C shipped), not failed",
+    "2026-10-18 P7 S8/S10: restart and shutdown message is \"Server restarted. Tap to retry.\" (31 chars, the whole message fits the 32-column lead); limits.cutOffDuringChars 60 (the server bound)"
   ]
 }

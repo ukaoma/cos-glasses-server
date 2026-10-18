@@ -464,7 +464,18 @@ No inline `#` on the EXTRA_ARGS line.),
 `COS_SCRIPTS_DIR` (full pipeline), `COS_DURABLE_QUERY_JOBS=0` (optional
 machine-wide rollback for build 204+ server-owned query recovery),
 `COS_MESSAGES_TRAIL=0` (6.52.0: no Messages trail; every job stream and snapshot is the
-6.51.0 one), `COS_PERMISSION_BROKER` (6.52.0: `0` answers every permission request with
+6.51.0 one), the 6.78.0 switches (each reads `1`, `true` or `on` as on and `0`, `false` or
+`off` as off; anything else is its default): `COS_CRASH_LOOP_PARKING` (default on: boot-resumed
+work that crashed the server on 3 boots in a row is parked; see `GET /api/maintenance/status`),
+`COS_RESTART_NOTICE` (default on: an Ask a restart cut off says so and names the step it was
+cut off during), `COS_QUEUE_RECONCILE` (default on: queued desk turns a crash cut off are
+settled on evidence, never sent twice), `COS_PIN_BOOT_REAP` (default on: a thread a crashed
+run held frees 31 minutes after the restart, once its child is gone), `COS_QUEUE_RESEND`
+(default on: Send again on a refused or expired queued turn), `COS_MESSAGES_STEER` (default
+off: steer a running Claude Ask from the glasses), `COS_SESSION_STEER` (default off: steer a
+busy Claude desk session through its peer inbox) and `COS_QUERY_JOB_DELTA_JOURNAL` (default
+off until the release after 6.78.0: the compact Ask journal writer),
+`COS_PERMISSION_BROKER` (6.52.0: `0` answers every permission request with
 the Mac's own dialog, `questions` holds questions but not tool approvals; unset holds
 both), `COS_PERMISSION_BROKER_DESK_IDLE_S` (default 90, never below 30),
 `COS_PERMISSION_BROKER_TIMEOUT_S` (default 110, clamped to 5 through 120),

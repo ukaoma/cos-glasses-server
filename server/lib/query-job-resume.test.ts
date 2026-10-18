@@ -181,8 +181,17 @@ describe('the wire contract (pi_durable_build/contracts/interrupted-job.json)', 
   it('the bounds are the contract limits', () => {
     expect(QUERY_JOB_INTERRUPTION_LIMITS.alreadyDoneMax).toBe(CONTRACT.limits.alreadyDoneMax)
     expect(QUERY_JOB_INTERRUPTION_LIMITS.alreadyDoneEntryChars).toBe(CONTRACT.limits.alreadyDoneEntryChars)
+    // P7 S10: the cutOffDuring bound is in the contract too.
+    expect(QUERY_JOB_INTERRUPTION_LIMITS.cutOffDuringChars).toBe(CONTRACT.limits.cutOffDuringChars)
     // The lead a 32-column footer shows whole.
     expect(QUERY_JOB_RESTART_MESSAGE.split('. ')[0]!.length + 1).toBeLessThanOrEqual(CONTRACT.limits.messageLeadColumns)
+  })
+
+  it('P7 S8: the WHOLE restart message fits the 32-column lead, in plain words (no dash or arrow)', () => {
+    expect(QUERY_JOB_RESTART_MESSAGE.length).toBeLessThanOrEqual(CONTRACT.limits.messageLeadColumns)
+    expect(CONTRACT.limits.messageLeadColumns).toBe(32)
+    expect(QUERY_JOB_RESTART_MESSAGE).toMatch(/^[\x20-\x7e]+$/)
+    expect(QUERY_JOB_RESTART_MESSAGE).not.toMatch(/ - |--|->/)
   })
 
   it('every contract interruption survives the journal parser unchanged', () => {

@@ -221,8 +221,12 @@ export const QUERY_JOB_ERROR_CAUSES: ReadonlySet<string> = new Set(['server_rest
 export const QUERY_JOB_RESTART_CAUSES = ['server_restarted', 'server_shutdown', 'crash_loop_parked'] as const
 export type QueryJobRestartCause = typeof QUERY_JOB_RESTART_CAUSES[number]
 
-/** 6.78.0: the message of a job either restart path cut off. Its lead fits a 32-column footer. */
-export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Retry or resume.'
+/**
+ * 6.78.0: the message of a job either restart path cut off. The WHOLE message fits the lens's
+ * 32-column footer lead (P7 S8: the 34-character first copy was cut mid-word by companion
+ * 6.10.644). The hold menu offers Retry or Resume from `interruption.resumable`.
+ */
+export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Tap to retry.'
 
 /** 6.78.0: the bounds of `snapshot.interruption` (contract interrupted-job.json `limits`). */
 export const QUERY_JOB_INTERRUPTION_LIMITS = Object.freeze({
@@ -333,12 +337,19 @@ export function steerReadState(state: QueryJobSteerState, jobStatus: QueryJobSta
 
 /**
  * What the client does with a steer that will not reach this run. `queue_follow_up`: send it as
- * the next Ask. Null: nothing (it applied, or it is carried by Retry or Resume, or the run was
- * canceled).
+ * the next Ask. Null: nothing (it applied, it may have applied, it is carried by Retry or
+ * Resume, or the run was canceled).
+ *
+ * Decided from the JOURNALED state, never the read one (P7 S1). A steer the CLI replayed
+ * (`delivered`) reached the run: a deadline, inactivity, a restart or a second-turn error can
+ * still complete the job from its checkpoint, and the read state is then `not_applied`, but
+ * the guidance may already be in the answer or in Claude's session. Sending it again as an Ask
+ * would apply it twice, which the plan forbids, so a delivered steer never falls back.
  */
-export function steerFallback(state: QueryJobSteerState, jobStatus: QueryJobStatus): 'queue_follow_up' | null {
-  if (state === 'too_late' || state === 'unsupported') return 'queue_follow_up'
-  if (state === 'not_applied' && jobStatus === 'completed') return 'queue_follow_up'
+export function steerFallback(journaled: QueryJobSteerState, jobStatus: QueryJobStatus): 'queue_follow_up' | null {
+  if (journaled === 'too_late' || journaled === 'unsupported') return 'queue_follow_up'
+  if (journaled === 'delivered') return null
+  if (steerReadState(journaled, jobStatus) === 'not_applied' && jobStatus === 'completed') return 'queue_follow_up'
   return null
 }
 

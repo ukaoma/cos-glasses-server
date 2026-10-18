@@ -7,6 +7,7 @@
 // The store sits inside a real `.cos-glasses/data` dot directory, like the registry suite,
 // because the production data home is one.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,9 +17,11 @@ import {
   DEFAULT_TERMINAL_RETENTION_MS,
   MAX_ATTEMPTS_PER_TARGET,
   type BindingRegistryOptions,
+  PIN_ORPHAN_FENCE_MS,
+  makePinChildProbe,
 } from './agent-session-binding-registry.js'
 import { targetKey } from './agent-session-binding-store.js'
-import { QUERY_JOB_ORPHAN_FENCE_MS } from './query-job-store.js'
+import { MAX_ATTACHED_TIMEOUT_MS } from './attached-provider-adapter.js'
 
 const THREAD = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
 const KEY = targetKey('claude', THREAD)
@@ -176,40 +179,42 @@ describe('pins a dead boot left: released at the orphan window, never before', (
     // The process dies here: no unpin, no shutdown code.
   }
 
-  it('holds the thread until now - pinnedAt >= QUERY_JOB_ORPHAN_FENCE_MS (21 min), then frees it', () => {
-    expect(QUERY_JOB_ORPHAN_FENCE_MS).toBe(21 * 60_000)
+  it('holds the thread until now - pinnedAt >= PIN_ORPHAN_FENCE_MS (31 min), then frees it', () => {
+    // P7 S6: the longest turn the attached adapter accepts, plus one minute.
+    expect(PIN_ORPHAN_FENCE_MS).toBe(31 * 60_000)
+    expect(PIN_ORPHAN_FENCE_MS).toBe(MAX_ATTACHED_TIMEOUT_MS + 60_000)
     crashedWithPin(true)
     // The restart is at the pin's own instant, so the pin is the later of the two clocks.
     const life2 = open({ bootId: 'boot-2', now: T0 })
-    expect(life2.attachBlocked('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS - 1)).toBe(true)
-    expect(life2.orphanPinHold('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS - 1)).toEqual({ releasesAt: T0 + QUERY_JOB_ORPHAN_FENCE_MS })
+    expect(life2.attachBlocked('claude', THREAD, T0 + PIN_ORPHAN_FENCE_MS - 1)).toBe(true)
+    expect(life2.orphanPinHold('claude', THREAD, T0 + PIN_ORPHAN_FENCE_MS - 1)).toEqual({ releasesAt: T0 + PIN_ORPHAN_FENCE_MS })
     expect(life2.get('bind-1')?.pinnedJobs).toEqual(['job-1'])
     // Due but not yet released (the hold is a read; it releases nothing): no time in the past.
-    expect(life2.orphanPinHold('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toBeNull()
+    expect(life2.orphanPinHold('claude', THREAD, T0 + PIN_ORPHAN_FENCE_MS)).toBeNull()
     expect(life2.get('bind-1')?.pinnedJobs).toEqual(['job-1'])
-    expect(life2.attachBlocked('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toBe(false)
+    expect(life2.attachBlocked('claude', THREAD, T0 + PIN_ORPHAN_FENCE_MS)).toBe(false)
     expect(life2.get('bind-1')?.pinnedJobs).toEqual([])
-    expect(life2.orphanPinHold('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toBeNull()
+    expect(life2.orphanPinHold('claude', THREAD, T0 + PIN_ORPHAN_FENCE_MS)).toBeNull()
   })
 
-  it('and 21 minutes after the restart: an old pin does not free the thread a minute after the crash', () => {
+  it('and 31 minutes after the restart: an old pin does not free the thread a minute after the crash', () => {
     crashedWithPin(true)
     // Pinned at T0, the boot died 30 minutes later, and this boot opened the store then.
-    // now - pinnedAt passed 21 minutes long ago; the orphan child may still be writing.
+    // now - pinnedAt reaches 31 minutes a minute after the restart; the orphan child may still be writing.
     const restart = T0 + 30 * 60_000
     const life2 = open({ bootId: 'boot-2', now: restart })
     expect(life2.reapOrphanedPins(restart + 60_000)).toEqual({ released: 0, recorded: 0 })
-    expect(life2.attachBlocked('claude', THREAD, restart + QUERY_JOB_ORPHAN_FENCE_MS - 1)).toBe(true)
-    expect(life2.orphanPinHold('claude', THREAD, restart + 60_000)).toEqual({ releasesAt: restart + QUERY_JOB_ORPHAN_FENCE_MS })
+    expect(life2.attachBlocked('claude', THREAD, restart + PIN_ORPHAN_FENCE_MS - 1)).toBe(true)
+    expect(life2.orphanPinHold('claude', THREAD, restart + 60_000)).toEqual({ releasesAt: restart + PIN_ORPHAN_FENCE_MS })
     expect(life2.get('bind-1')?.pinnedJobs).toEqual(['job-1'])
-    expect(life2.attachBlocked('claude', THREAD, restart + QUERY_JOB_ORPHAN_FENCE_MS)).toBe(false)
+    expect(life2.attachBlocked('claude', THREAD, restart + PIN_ORPHAN_FENCE_MS)).toBe(false)
     expect(life2.get('bind-1')?.pinnedJobs).toEqual([])
   })
 
   it('a released pin that named its turn leaves an ambiguous ledger record, and its pending attempt reads unknown', () => {
     crashedWithPin(true)
     const life2 = open({ bootId: 'boot-2' })
-    expect(life2.reapOrphanedPins(T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toEqual({ released: 1, recorded: 1 })
+    expect(life2.reapOrphanedPins(T0 + PIN_ORPHAN_FENCE_MS)).toEqual({ released: 1, recorded: 1 })
     const record = life2.findTurnForTarget('claude', THREAD, 'ct-orphan-1')
     expect(record?.result).toMatchObject({ outcome: 'ambiguous', deliveryState: 'unknown', retryable: false, reason: 'delivery_unknown_after_restart', status: 409 })
     expect(life2.findTurn('bind-1', 'ct-orphan-1')).not.toBeNull()
@@ -219,7 +224,7 @@ describe('pins a dead boot left: released at the orphan window, never before', (
   it('a pre-6.78 pin (no metadata) is released with no record: the documented upgrade-window gap', () => {
     crashedWithPin(false)
     const life2 = open({ bootId: 'boot-2' })
-    expect(life2.reapOrphanedPins(T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toEqual({ released: 1, recorded: 0 })
+    expect(life2.reapOrphanedPins(T0 + PIN_ORPHAN_FENCE_MS)).toEqual({ released: 1, recorded: 0 })
     expect(life2.get('bind-1')?.pinnedJobs).toEqual([])
   })
 
@@ -229,7 +234,7 @@ describe('pins a dead boot left: released at the orphan window, never before', (
     life1.pin('bind-1', 'job-1', T0, { pinMeta: { clientTurnId: 'ct-done-001' } })
     life1.recordTurn('bind-1', 'ct-done-001', { outcome: 'completed', status: 200 }, T0 + 1)
     const life2 = open({ bootId: 'boot-2' })
-    expect(life2.reapOrphanedPins(T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toEqual({ released: 1, recorded: 0 })
+    expect(life2.reapOrphanedPins(T0 + PIN_ORPHAN_FENCE_MS)).toEqual({ released: 1, recorded: 0 })
     expect(life2.findTurnForTarget('claude', THREAD, 'ct-done-001')?.result).toMatchObject({ outcome: 'completed' })
   })
 
@@ -237,8 +242,8 @@ describe('pins a dead boot left: released at the orphan window, never before', (
     const r = open()
     attached(r)
     r.pin('bind-1', 'job-live', T0, { pinMeta: { clientTurnId: 'ct-live-001' } })
-    expect(r.reapOrphanedPins(T0 + 10 * QUERY_JOB_ORPHAN_FENCE_MS)).toEqual({ released: 0, recorded: 0 })
-    expect(r.attachBlocked('claude', THREAD, T0 + 10 * QUERY_JOB_ORPHAN_FENCE_MS)).toBe(true)
+    expect(r.reapOrphanedPins(T0 + 10 * PIN_ORPHAN_FENCE_MS)).toEqual({ released: 0, recorded: 0 })
+    expect(r.attachBlocked('claude', THREAD, T0 + 10 * PIN_ORPHAN_FENCE_MS)).toBe(true)
     expect(r.orphanPinHold('claude', THREAD, T0 + 60_000)).toBeNull()
   })
 
@@ -246,7 +251,7 @@ describe('pins a dead boot left: released at the orphan window, never before', (
     crashedWithPin(true)
     const life2 = open({ bootId: 'boot-2' })
     expect(life2.create({ bindingId: 'bind-2', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: THREAD, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: TTL, now: T0 + 60_000 }).reason).toBe('target_busy')
-    const later = T0 + QUERY_JOB_ORPHAN_FENCE_MS + 1
+    const later = T0 + PIN_ORPHAN_FENCE_MS + 1
     expect(life2.create({ bindingId: 'bind-3', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: THREAD, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: TTL, now: later }).reason).toBeNull()
   })
 
@@ -259,7 +264,7 @@ describe('pins a dead boot left: released at the orphan window, never before', (
     expect(life1.activate('bind-1', T0).reason).toBeNull()
     life1.pin('bind-1', 'job-1', T0, { pinMeta: { clientTurnId: 'ct-long-lease' } })
     const life2 = open({ bootId: 'boot-2', now: T0 })
-    const at = T0 + QUERY_JOB_ORPHAN_FENCE_MS
+    const at = T0 + PIN_ORPHAN_FENCE_MS
     expect(life2.create({ bindingId: 'bind-2', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: THREAD, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: TTL, now: at }).reason).toBeNull()
     expect(life2.get('bind-1')?.pinnedJobs).toEqual([])
   })
@@ -267,8 +272,98 @@ describe('pins a dead boot left: released at the orphan window, never before', (
   it('COS_PIN_BOOT_REAP off: nothing is released before the 24 h reap, and no hold is reported', () => {
     crashedWithPin(true)
     const life2 = open({ bootId: 'boot-2', pinBootReap: () => false })
-    expect(life2.reapOrphanedPins(T0 + 2 * QUERY_JOB_ORPHAN_FENCE_MS)).toEqual({ released: 0, recorded: 0 })
-    expect(life2.attachBlocked('claude', THREAD, T0 + 2 * QUERY_JOB_ORPHAN_FENCE_MS)).toBe(true)
+    expect(life2.reapOrphanedPins(T0 + 2 * PIN_ORPHAN_FENCE_MS)).toEqual({ released: 0, recorded: 0 })
+    expect(life2.attachBlocked('claude', THREAD, T0 + 2 * PIN_ORPHAN_FENCE_MS)).toBe(true)
     expect(life2.orphanPinHold('claude', THREAD, T0 + 60_000)).toBeNull()
+  })
+})
+
+describe('P7 S6: a dead boot\'s pin that names its resume child waits for that child', () => {
+  const CHILD = { pid: 48_123, startMs: T0 - 5_000 }
+  function crashedWithChild(): void {
+    const life1 = open({ bootId: 'boot-dead' })
+    attached(life1)
+    expect(life1.pin('bind-1', 'job-1', T0, { pinMeta: { clientTurnId: 'ct-child-001' }, attempt: { clientTurnId: 'ct-child-001', mode: 'turn' } }).reason).toBeNull()
+    expect(life1.notePinChild('bind-1', 'job-1', CHILD).reason).toBeNull()
+  }
+
+  it('notePinChild persists the pid and measured start with the pin, and touches nothing else', () => {
+    const r = open()
+    attached(r)
+    r.pin('bind-1', 'job-1', T0, { pinMeta: { clientTurnId: 'ct-child-002' } })
+    const before = disk().records[0]
+    expect(r.notePinChild('bind-1', 'job-1', CHILD).reason).toBeNull()
+    const after = disk().records[0]
+    expect(after.pinMeta).toEqual({ 'job-1': { clientTurnId: 'ct-child-002', bootId: 'boot-1', child: CHILD } })
+    expect(after.updatedAt).toBe(before.updatedAt)
+    expect(after.pinnedAt).toEqual(before.pinnedAt)
+    // Read back on the next boot.
+    expect(open().get('bind-1')?.pinnedJobs).toEqual(['job-1'])
+  })
+
+  it('records nothing for a pin without metadata, an unknown job, an inherited pin, or a malformed child', () => {
+    const r = open()
+    attached(r)
+    r.pin('bind-1', 'job-plain', T0)
+    expect(r.notePinChild('bind-1', 'job-plain', CHILD).reason).toBeNull()
+    expect(r.notePinChild('bind-1', 'job-missing', CHILD).reason).toBeNull()
+    r.pin('bind-1', 'job-meta', T0, { pinMeta: { clientTurnId: 'ct-child-003' } })
+    for (const bad of [{ pid: 0, startMs: T0 }, { pid: 1, startMs: T0 }, { pid: 1.5, startMs: T0 }, { pid: 77, startMs: Number.NaN }, { pid: 77, startMs: 0 }]) {
+      expect(r.notePinChild('bind-1', 'job-meta', bad).reason).toBeNull()
+    }
+    expect(disk().records[0].pinMeta).toEqual({ 'job-meta': { clientTurnId: 'ct-child-003', bootId: 'boot-1' } })
+    // A pin a dead boot left is never rewritten by this boot.
+    const life2 = open({ bootId: 'boot-2' })
+    expect(life2.notePinChild('bind-1', 'job-meta', CHILD).reason).toBeNull()
+    expect(disk().records[0].pinMeta['job-meta'].child).toBeUndefined()
+  })
+
+  it('past the window, a running child keeps the pin (no time promised); once gone it releases with its record', () => {
+    crashedWithChild()
+    let state: 'running' | 'gone' = 'running'
+    const probed: unknown[] = []
+    const life2 = open({ bootId: 'boot-2', pinChildProbe: child => { probed.push(child); return state } })
+    // Inside the window the child is not even asked about.
+    expect(life2.orphanPinHold('claude', THREAD, T0 + 60_000)).toEqual({ releasesAt: T0 + PIN_ORPHAN_FENCE_MS })
+    expect(probed).toEqual([])
+    const past = T0 + PIN_ORPHAN_FENCE_MS + 10 * 60_000
+    expect(life2.reapOrphanedPins(past)).toEqual({ released: 0, recorded: 0 })
+    expect(life2.attachBlocked('claude', THREAD, past)).toBe(true)
+    const hold = life2.orphanPinHold('claude', THREAD, past)
+    expect(hold?.childRunning).toBe(true)
+    expect(Number.isNaN(hold?.releasesAt)).toBe(true)
+    expect(probed[0]).toEqual(CHILD)
+    state = 'gone'
+    expect(life2.orphanPinHold('claude', THREAD, past)).toBeNull()
+    expect(life2.reapOrphanedPins(past)).toEqual({ released: 1, recorded: 1 })
+    expect(life2.attemptFor('claude', THREAD, 'ct-child-001')?.attempt?.exit).toBe('unknown')
+  })
+
+  it('a gone child does not release early: the window still holds first', () => {
+    crashedWithChild()
+    const life2 = open({ bootId: 'boot-2', pinChildProbe: () => 'gone' })
+    expect(life2.reapOrphanedPins(T0 + PIN_ORPHAN_FENCE_MS - 1)).toEqual({ released: 0, recorded: 0 })
+    expect(life2.reapOrphanedPins(T0 + PIN_ORPHAN_FENCE_MS)).toEqual({ released: 1, recorded: 1 })
+  })
+
+  it('a probe that throws keeps the pin (fails closed)', () => {
+    crashedWithChild()
+    const life2 = open({ bootId: 'boot-2', pinChildProbe: () => { throw new Error('ps') } })
+    expect(life2.reapOrphanedPins(T0 + 2 * PIN_ORPHAN_FENCE_MS)).toEqual({ released: 0, recorded: 0 })
+  })
+
+  it('the default probe: ESRCH is gone, a live pid with its own start is running, a reused pid is gone, an unmeasurable start keeps the hold', () => {
+    const exited = spawnSync(process.execPath, ['-e', ''])
+    expect(exited.pid).toBeGreaterThan(1)
+    expect(makePinChildProbe()({ pid: exited.pid!, startMs: T0 })).toBe('gone')
+    const self = { pid: process.pid, startMs: 1_000_000 }
+    expect(makePinChildProbe()(self)).toBe('running')
+    // EPERM (launchd, pid 1, not ours to signal) is a live process: fail closed.
+    if (process.getuid?.() !== 0) expect(makePinChildProbe()({ pid: 1, startMs: 1 })).toBe('running')
+    expect(makePinChildProbe(() => self.startMs + 1_000)(self)).toBe('running')
+    expect(makePinChildProbe(() => self.startMs + 1_501)(self)).toBe('gone')
+    expect(makePinChildProbe(() => self.startMs - 60_000)(self)).toBe('gone')
+    expect(makePinChildProbe(() => null)(self)).toBe('running')
+    expect(makePinChildProbe(() => { throw new Error('ps') })(self)).toBe('running')
   })
 })

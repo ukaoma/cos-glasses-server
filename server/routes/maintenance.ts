@@ -172,7 +172,7 @@ maintenanceRouter.get('/maintenance/status', (req, res) => {
 // token, like GET /maintenance/status, and not loopback-only, so the phone and the lens can
 // offer it; the /api mutation lease still refuses it during a drain. The count starts over;
 // a meeting finalization is resumed again now, and a query job (id = its clientJobId) runs
-// again when the app Resumes it.
+// again when the app Retries it (a parked Ask is never resumable: it never started).
 maintenanceRouter.post('/maintenance/parked/:kind/:id/retry', (req, res) => {
   const { kind, id } = req.params
   if (!isBootResumeKind(kind)) {

@@ -24,6 +24,12 @@ function between(text: string, from: string, to: string): string {
 describe('server/index.ts wires the 6.78.0 Sessions durability pieces', () => {
   const index = source('server/index.ts')
 
+  it('P7 S6: the registry checks a dead boot\'s recorded child with the MEASURED start-time probe', () => {
+    expect(count(index, 'AgentSessionBindingRegistry.open(')).toBe(1)
+    expect(index).toContain('const agentSessionBindingRegistry = AgentSessionBindingRegistry.open({ pinChildProbe: makePinChildProbe(processStartMs) })')
+    expect(index).toMatch(/import \{[^}]*\bprocessStartMs\b[^}]*\} from '\.\/lib\/occupancy-probes\.js'/)
+  })
+
   it('releases dead-boot pins on the 10-minute reap tick (nothing can be due at boot)', () => {
     expect(count(index, 'releaseOrphanPins(')).toBe(1)
     const tick = between(index, 'const bindingReapTimer = setInterval(() => {', '}, 10 * 60_000)\nbindingReapTimer.unref()')

@@ -31,7 +31,7 @@ import {
   type QueryJobSteerState,
   type QueryJobStoreHealth,
 } from './query-job-types.js'
-import { SteerPort, steerCutoffMs, type PendingSteer, type QueryProvider } from './claude-steer.js'
+import { SteerPort, steerClock, steerCutoffMs, type PendingSteer, type QueryProvider } from './claude-steer.js'
 import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
 import { crashLoopParkedError, type BootResumeGate } from './boot-resume.js'
@@ -121,7 +121,9 @@ export class QueryJobSteerUnknownError extends Error {
 
 function steerReply(steer: QueryJobSteer, job: Pick<QueryJobSnapshot, 'status'>): QueryJobSteerReply {
   const state = steerReadState(steer.state, job.status)
-  return { steerId: steer.steerId, state, fallback: steerFallback(state, job.status), jobStatus: job.status }
+  // The fallback reads the journaled state: a delivered steer reads not_applied on an ended
+  // job, and must still never be resent (P7 S1).
+  return { steerId: steer.steerId, state, fallback: steerFallback(steer.state, job.status), jobStatus: job.status }
 }
 
 export type QueryJobRunner = (context: QueryJobRunnerContext) => Promise<void>
@@ -211,7 +213,7 @@ interface ActiveRun {
   providerTimeoutTimer: ReturnType<typeof setTimeout> | null
   /** 6.78.0: the run's steer port, present only when the run is steerable. */
   steer?: SteerPort
-  /** 6.78.0: when the coordinator deadline fires (ms), once the run is running. */
+  /** 6.78.0: when the coordinator deadline fires, on the monotonic steer clock (`steerClock`), once the run is running. */
   deadlineAt?: number
 }
 
@@ -292,7 +294,7 @@ export class QueryJobCoordinator {
     return this.getHealth()
   }
 
-  /** Keyed by lineage (clientJobId), so the app's Resume (a new generation) is the same item. */
+  /** Keyed by lineage (clientJobId), so the app's Retry (a new generation) is the same item. */
   private admitBootRequeue(jobId: string): boolean {
     const gate = this.options.bootResumeGate?.()
     if (!gate) return true
@@ -303,12 +305,15 @@ export class QueryJobCoordinator {
     }
   }
 
-  /** A parked job ends `interrupted` with `restart_limit`, so the app shows it and can Resume it. */
+  /**
+   * A parked job ends `interrupted` with `restart_limit` and `interruption.resumable: false`, so
+   * the app shows it and offers Retry (never Resume: its run never started).
+   */
   private async parkBootRequeue(jobId: string): Promise<void> {
     try {
       const result = await this.store.interruptParked(jobId, crashLoopParkedError(this.options.bootResumeGate?.().limit))
       if (!result.applied) return
-      console.warn(`[query-jobs] ${jobId.slice(0, 8)} parked: its start crashed the server on every boot; Resume runs it again`)
+      console.warn(`[query-jobs] ${jobId.slice(0, 8)} parked: its start crashed the server on every boot; Retry runs it again`)
       const execution = await this.store.getExecution(jobId)
       await this.projectTerminal(execution.job, execution.request)
     } catch (error) {
@@ -343,8 +348,8 @@ export class QueryJobCoordinator {
         const admission = await this.store.admit(normalized)
         resolve(admission)
         if (admission.created) {
-          // 6.78.0: a new generation of a lineage is the person's Retry (the app's Resume or a
-          // Messages retry): a parked lineage is unparked and its count starts over.
+          // 6.78.0: a new generation of a lineage is the person's Retry (the app's Retry or
+          // Resume, or a Messages retry): a parked lineage is unparked and its count starts over.
           if (admission.job.generation > 1) this.bootResumeLineage('retry', admission.job.clientJobId)
           if (maintenanceLease) this.admittedMaintenance.set(admission.job.jobId, maintenanceLease)
           queueMicrotask(() => { void this.execute(admission.job.jobId, admission.job.sessionId) })
@@ -714,7 +719,8 @@ export class QueryJobCoordinator {
 
   private armProviderDeadline(active: ActiveRun): void {
     if (active.providerTimeoutTimer || active.terminalPersisted || active.persistenceFailed) return
-    active.deadlineAt = Date.now() + this.providerTimeoutMs
+    // On the monotonic steer clock (P7 S7): decideSteer compares it with the bridge's wall clock.
+    active.deadlineAt = steerClock() + this.providerTimeoutMs
     active.providerTimeoutTimer = setTimeout(() => active.resolveProviderTimeout(), this.providerTimeoutMs)
     active.providerTimeoutTimer.unref?.()
   }
@@ -954,7 +960,9 @@ export class QueryJobCoordinator {
     const port = active.steer
     if (!port) return 'unsupported'
     if (port.isClosed) return 'too_late'
-    const now = Date.now()
+    // Monotonic, as the timers that end the run are (P7 S7): after a Mac sleep Date.now()
+    // has jumped and every steer would read too late.
+    const now = steerClock()
     const wallMax = port.wallMax()
     const margin = steerCutoffMs(wallMax ?? this.providerTimeoutMs)
     const wallLeft = port.wallRemainingMs(now)

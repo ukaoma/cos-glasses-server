@@ -101,6 +101,7 @@ import { permissionBrokerHealthFields, sessionQuestionsCapability } from '../lib
 import { continueLiveEnabled, liveDeliveryStats } from '../lib/session-peer-inbox-deps.js'
 import { codexLiveStats } from '../lib/codex-live-queue-deps.js'
 import { codexLiveQueueEnabled } from '../lib/codex-live-queue.js'
+import { bootResumeGate } from '../lib/boot-resume.js'
 
 /**
  * 6.49.0: which last hop a Continue takes, and how often each fell back.
@@ -545,8 +546,22 @@ healthRouter.get('/health', async (_req, res) => {
       enabled: durableJobs.enabled && messagesTrailEnabled(),
       ...jobTrailStats(),
     },
+    // 6.78.0 (P7 S5): how much boot-resumed work is parked for crash-looping the server. A
+    // count only (health is public); the items and their Retry are behind the token at
+    // GET /api/maintenance/status.
+    crash_loop_parking: crashLoopParkingHealth(),
   })
 })
+
+/** Never throws: health must not 500 because of the ledger. */
+function crashLoopParkingHealth(): { enabled: boolean; parked: number } {
+  try {
+    const status = bootResumeGate().status()
+    return { enabled: status.enabled, parked: status.parked.length }
+  } catch {
+    return { enabled: false, parked: 0 }
+  }
+}
 
 // Stable app slots backed by Codex + Cursor live catalogs. Authenticated by
 // global /api middleware; ?refresh=1 forces discovery.

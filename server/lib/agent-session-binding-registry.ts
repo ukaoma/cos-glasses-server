@@ -74,8 +74,8 @@ import { dirname, resolve } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import { isValidNativeThreadId } from './native-thread-id.js'
-import { QUERY_JOB_ORPHAN_FENCE_MS } from './query-job-store.js'
 import { serverMetrics } from './server-metrics.js'
+import { PROC_START_TOLERANCE_MS } from './thread-occupancy.js'
 import { pinBootReapEnabled, queuedTurnReasonCopy } from './thread-turn-queue.js'
 import {
   BINDING_ID_RE,
@@ -260,7 +260,53 @@ export interface BindingRecord {
 export interface PinMeta {
   clientTurnId: string
   bootId: string
+  /**
+   * 6.78.0 (P7 S6): the resume child this pin's turn spawned, with its MEASURED start time
+   * (`ps -o lstart`), recorded at spawn. A dead boot's pin that names one is released only
+   * once that child is gone (no such pid, or a pid with a different start time: reused).
+   * Absent when the turn went live, never spawned, or the pin predates this build.
+   */
+  child?: { pid: number; startMs: number }
 }
+
+/**
+ * 6.78.0 (P7 S6): how long a pin a dead boot left holds its thread, counted from the later of
+ * the pin and the restart. The attached adapter accepts turns of up to
+ * `MAX_ATTACHED_TIMEOUT_MS` (30 min, attached-provider-adapter.ts), so the dead boot's child
+ * may legitimately run that long; one minute more covers its SIGTERM-to-SIGKILL grace. A test
+ * pins the parity (the registry does not import the adapter: it would pull the provider
+ * spawn machinery into every module that reads bindings). Wall clock, so a Mac that slept
+ * through it has had the time pass; a pin that names its child also waits for that child.
+ */
+export const PIN_ORPHAN_FENCE_MS = 31 * 60_000
+
+/** 6.78.0 (P7 S6): is a recorded resume child still the same running process? */
+export type PinChildProbe = (child: { pid: number; startMs: number }) => 'running' | 'gone'
+
+/**
+ * The default probe. `kill(pid, 0)` failing with ESRCH is the only proof the pid is gone;
+ * EPERM or any other error means a process holds it (fail closed). A live pid whose measured
+ * start time differs from the recorded one by more than the ownership tolerance is a reused
+ * pid: gone. A start time that cannot be measured keeps the hold (fail closed).
+ */
+export function makePinChildProbe(processStartMs?: (pid: number) => number | null): PinChildProbe {
+  return child => {
+    try {
+      process.kill(child.pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') return 'gone'
+      return 'running'
+    }
+    if (!processStartMs) return 'running'
+    let start: number | null = null
+    try { start = processStartMs(child.pid) } catch { start = null }
+    if (typeof start !== 'number' || !Number.isFinite(start)) return 'running'
+    return Math.abs(start - child.startMs) > PROC_START_TOLERANCE_MS ? 'gone' : 'running'
+  }
+}
+
+/** Refusal copy while a dead boot's pin waits on a child that is still running (62 columns or fewer). */
+export const ORPHAN_CHILD_RUNNING_COPY = 'An earlier run is still running on this Mac'
 
 /** How a recorded delivery attempt ended. `pending` is "began and never reported back". */
 export type TurnAttemptExit = 'pending' | 'sent' | 'not_sent' | 'unknown'
@@ -335,10 +381,25 @@ export interface BindingRegistryOptions {
   bootId?: string
   /** 6.78.0: `COS_PIN_BOOT_REAP`, read per call. Injectable for tests. */
   pinBootReap?: () => boolean
+  /**
+   * 6.78.0 (P7 S6): how a dead boot's pin learns whether its recorded child still runs.
+   * Defaults to `makePinChildProbe()` (kill 0 only); index.ts passes the measured start-time
+   * probe so a reused pid reads as gone.
+   */
+  pinChildProbe?: PinChildProbe
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** A recorded resume child, or null when the value is not one. */
+function parsePinChild(value: unknown): { pid: number; startMs: number } | null {
+  if (!isPlainObject(value)) return null
+  const { pid, startMs } = value
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 1) return null
+  if (typeof startMs !== 'number' || !Number.isFinite(startMs) || startMs <= 0) return null
+  return { pid, startMs }
 }
 
 function positiveIntOption(value: number | undefined, fallback: number): number {
@@ -590,11 +651,12 @@ export class AgentSessionBindingRegistry {
   private readonly bootId: string
   /**
    * 6.78.0: when this registry opened the store, an upper bound on when the boot that left
-   * an inherited pin died. A dead boot's pin is released no earlier than 21 minutes after
-   * BOTH its pin and this instant (`orphanReleaseAt`).
+   * an inherited pin died. A dead boot's pin is released no earlier than PIN_ORPHAN_FENCE_MS
+   * (31 minutes) after BOTH its pin and this instant (`orphanReleaseAt`).
    */
   private readonly openedAt: number
   private readonly pinBootReap: () => boolean
+  private readonly pinChildProbe: PinChildProbe
 
   private readonly warn: (message: string, detail?: unknown) => void
   private readonly terminalRetentionMs: number
@@ -620,6 +682,7 @@ export class AgentSessionBindingRegistry {
     this.bootId = typeof options.bootId === 'string' && options.bootId.length > 0 ? options.bootId : serverMetrics.bootId
     this.openedAt = Number.isFinite(options.now) ? (options.now as number) : Date.now()
     this.pinBootReap = typeof options.pinBootReap === 'function' ? options.pinBootReap : () => pinBootReapEnabled()
+    this.pinChildProbe = typeof options.pinChildProbe === 'function' ? options.pinChildProbe : makePinChildProbe()
     this.warn = options.onWarn ?? ((message, detail) => console.warn(`[binding-registry] ${message}`, detail ?? ''))
     this.terminalRetentionMs = nonNegativeMsOption(options.terminalRetentionMs, DEFAULT_TERMINAL_RETENTION_MS)
     this.stalePinMs = nonNegativeMsOption(options.stalePinMs, DEFAULT_STALE_PIN_MS)
@@ -774,7 +837,8 @@ export class AgentSessionBindingRegistry {
         const meta = storedMeta[job]
         if (isPlainObject(meta) && typeof meta.clientTurnId === 'string' && TURN_ID_RE.test(meta.clientTurnId)
           && typeof meta.bootId === 'string' && meta.bootId.length > 0 && meta.bootId.length <= 128) {
-          pinMeta[job] = { clientTurnId: meta.clientTurnId, bootId: meta.bootId }
+          const child = parsePinChild(meta.child)
+          pinMeta[job] = { clientTurnId: meta.clientTurnId, bootId: meta.bootId, ...(child ? { child } : {}) }
         }
       }
 
@@ -1221,33 +1285,40 @@ export class AgentSessionBindingRegistry {
    * Returns when the last of them frees, for the refusal copy; null otherwise (no holder, a
    * live pin of this boot, or the flag off).
    */
-  orphanPinHold(provider: unknown, nativeThreadId: unknown, now: number): { releasesAt: number } | null {
+  orphanPinHold(provider: unknown, nativeThreadId: unknown, now: number): { releasesAt: number; childRunning?: true } | null {
     if (!this.available() || !this.pinBootReap()) return null
     if (!isBindableProvider(provider) || !isValidNativeThreadId(nativeThreadId) || !Number.isFinite(now)) return null
     const id = this.targets.get(makeTargetKey(provider, nativeThreadId))
     const record = id === undefined ? undefined : this.records.get(id)
     if (!record || record.binding.pinnedJobs.length === 0) return null
     let releasesAt = Number.NEGATIVE_INFINITY
+    let childRunning = false
     for (const job of record.binding.pinnedJobs) {
       if (!this.inheritedPins.has(`${record.binding.bindingId}\u0000${job}`)) return null
-      releasesAt = Math.max(releasesAt, this.orphanReleaseAt(record, job))
+      const at = this.orphanReleaseAt(record, job)
+      releasesAt = Math.max(releasesAt, at)
+      if (now >= at && this.orphanChildRunning(record, job)) childRunning = true
     }
+    // Past the window with the recorded child still alive: no time to promise (P7 S6).
+    if (childRunning) return { releasesAt: Number.NaN, childRunning: true }
     return releasesAt > now ? { releasesAt } : null
   }
 
   /**
    * Release every pin a dead boot left whose orphan child must be gone by now.
    *
-   * WHY 21 MINUTES AND NOT AT BOOT. A crash leaves the turn's resume child running: it is
-   * not this process's child any more, and nothing kills it (the adapter's 21-minute
-   * deadline was a timer in the process that died). After the restart `cosSpawnLedger` is
-   * empty, so the occupancy gate sees that child as a FOREIGN holder, and while it idles in a
-   * long tool the idle-holder relaxation lets an attach through: releasing the pin at boot
-   * would let COS start a second writer on the thread. `QUERY_JOB_ORPHAN_FENCE_MS` is the
-   * bound the query jobs use for exactly this child, counted from the restart, and so is this
-   * one (`orphanReleaseAt`: the later of the pin and this boot's open). It is a bound chosen
-   * to match theirs, not a proof the child is gone. Until then the pin holds, and the refusal
-   * says so.
+   * WHY 31 MINUTES AND NOT AT BOOT. A crash leaves the turn's resume child running: it is
+   * not this process's child any more, and nothing kills it (the adapter's deadline was a
+   * timer in the process that died). After the restart `cosSpawnLedger` is empty, so the
+   * occupancy gate sees that child as a FOREIGN holder, and while it idles in a long tool the
+   * idle-holder relaxation lets an attach through: releasing the pin at boot would let COS
+   * start a second writer on the thread. `PIN_ORPHAN_FENCE_MS` is the longest turn the
+   * adapter accepts (MAX_ATTACHED_TIMEOUT_MS, 30 min) plus one minute, counted from the later
+   * of the pin and this boot's open (`orphanReleaseAt`). When the pin also names its child
+   * (P7 S6: pid and measured start time, recorded at spawn), it is held past the window for as
+   * long as that process still runs. A pin with no child recorded (a 6.77 pin, a live
+   * delivery, a spawn whose record failed) has only the window, a bound and not a proof.
+   * Until release the pin holds, and the refusal says so.
    *
    * A pin whose metadata names a client turn gets an `ambiguous` ledger record, so a retry
    * of that key replays "may not have been sent" instead of sending it again, and its
@@ -1267,17 +1338,54 @@ export class AgentSessionBindingRegistry {
   }
 
   /**
-   * When an inherited pin may be released: 21 minutes after the LATER of its pin and the
-   * moment this boot opened the store. The pin time alone is not enough: a pin taken 20
+   * When an inherited pin may be released: PIN_ORPHAN_FENCE_MS after the LATER of its pin and
+   * the moment this boot opened the store. The pin time alone is not enough: a pin taken 30
    * minutes before a crash would free one minute after the restart, while the turn's child,
    * which no timer of the dead process can stop any more, may still be writing. Measured
-   * from this boot's open, the thread is never offered to a second writer within 21 minutes
-   * of the crash (the same window the query jobs fence from the interrupt at boot).
+   * from this boot's open, the thread is never offered to a second writer within 31 minutes
+   * of the crash. (A pin that names its child also waits for it: `orphanChildRunning`.)
    */
   private orphanReleaseAt(record: BindingRecord, job: string): number {
     const at = record.pinnedAt[job]
     const pinned = Number.isFinite(at) ? at : record.updatedAt
-    return Math.max(pinned, this.openedAt) + QUERY_JOB_ORPHAN_FENCE_MS
+    return Math.max(pinned, this.openedAt) + PIN_ORPHAN_FENCE_MS
+  }
+
+  /** P7 S6: the pin names a resume child that is still the same running process. */
+  private orphanChildRunning(record: BindingRecord, job: string): boolean {
+    const child = record.pinMeta?.[job]?.child
+    if (!child) return false
+    try {
+      return this.pinChildProbe(child) !== 'gone'
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * 6.78.0 (P7 S6): record the resume child a pinned turn spawned, so that after a crash the
+   * pin waits for THAT process, not only for the window. Called from the turns route's
+   * `onSpawn`, after the ownership ledger accepted the child and before any prompt byte is
+   * written. Only a pin of this boot that carries metadata (COS_PIN_BOOT_REAP on). Anything
+   * else, or a failed write, changes nothing: the window alone still bounds the pin.
+   */
+  notePinChild(bindingId: unknown, jobId: unknown, child: { pid: number; startMs: number }): RegistryResult {
+    return this.runMutation(() => {
+      const found = this.requireRecord(bindingId)
+      if ('reason' in found) return reject(found.reason)
+      const { record } = found
+      if (typeof jobId !== 'string' || !PIN_JOB_ID_RE.test(jobId)) return reject('invalid_job_id')
+      const parsed = parsePinChild(child)
+      const meta = record.pinMeta?.[jobId]
+      if (!parsed || !meta || !record.binding.pinnedJobs.includes(jobId) || this.inheritedPins.has(`${record.binding.bindingId}\u0000${jobId}`)) {
+        return { binding: record.binding, reason: null }
+      }
+      const records = new Map(this.records)
+      // `updatedAt` is untouched: recording a pid is not lease activity.
+      records.set(record.binding.bindingId, { ...record, pinMeta: Object.freeze({ ...record.pinMeta, [jobId]: { ...meta, child: parsed } }) })
+      const failure = this.persist({ records, targets: new Map(this.targets), floors: new Map(this.floors), turns: new Map(this.turns) })
+      return failure ? reject(failure) : { binding: record.binding, reason: null }
+    })
   }
 
   private releaseOrphansUnlocked(now: number, onlyTarget?: string): OrphanPinReport {
@@ -1289,7 +1397,9 @@ export class AgentSessionBindingRegistry {
       if (onlyTarget !== undefined && record.binding.targetKey !== onlyTarget) continue
       const due = record.binding.pinnedJobs.filter(job => {
         if (!this.inheritedPins.has(`${id}\u0000${job}`)) return false
-        return now >= this.orphanReleaseAt(record, job)
+        if (now < this.orphanReleaseAt(record, job)) return false
+        // P7 S6: a pin that names its resume child waits for that child to be gone.
+        return !this.orphanChildRunning(record, job)
       })
       if (due.length === 0) continue
       let binding = record.binding
@@ -1327,7 +1437,7 @@ export class AgentSessionBindingRegistry {
         terminalAt: record.terminalAt ?? (isTerminal(binding) ? now : null),
         ...(Object.keys(pinMeta).length > 0 ? { pinMeta: Object.freeze(pinMeta) } : {}),
       })
-      this.warn(`released ${due.length} pin(s) a dead boot left on binding ${id}: past the ${QUERY_JOB_ORPHAN_FENCE_MS} ms orphan window`)
+      this.warn(`released ${due.length} pin(s) a dead boot left on binding ${id}: past the ${PIN_ORPHAN_FENCE_MS} ms orphan window`)
     }
     if (released === 0) return { released: 0, recorded: 0 }
     // Rebuilt from the records exactly as `reap` and hydration do: a holder is a binding that blocks.

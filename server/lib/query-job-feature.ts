@@ -1,3 +1,4 @@
+import { readSwitch } from './env-switch.js'
 import { QUERY_JOB_PROTOCOL_VERSION } from './query-job-types.js'
 
 /**
@@ -19,17 +20,9 @@ export function messagesTrailEnabled(env: NodeJS.ProcessEnv = process.env): bool
   return env.COS_MESSAGES_TRAIL !== '0'
 }
 
-/**
- * 6.78.0 switches read the tri-state of MVP-C (COS_CRASH_LOOP_PARKING): `1`, `true` or `on`
- * force a switch on, `0`, `false` or `off` force it off, and anything else (unset included)
- * is its DEFAULT. Read at call time, so a restart applies a change.
- */
-function triState(raw: string | undefined, fallback: boolean): boolean {
-  const value = (raw ?? '').trim().toLowerCase()
-  if (value === '1' || value === 'true' || value === 'on') return true
-  if (value === '0' || value === 'false' || value === 'off') return false
-  return fallback
-}
+// 6.78.0 switches all read through `readSwitch` (lib/env-switch.ts): `1`, `true` or `on`
+// force a switch on, `0`, `false` or `off` force it off, anything else is its DEFAULT.
+const triState = readSwitch
 
 /**
  * 6.78.0 restart truth, default ON. An Ask a restart cut off (crash then boot, or a graceful

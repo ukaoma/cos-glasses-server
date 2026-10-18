@@ -170,7 +170,17 @@ export function buildInterruption(input: InterruptionInput): QueryJobInterruptio
   }
 }
 
-/** One sentence group for a person: what happened, the step cut off, what was already done. */
+// ── Deferred: the restart-resume planner (QJ-6a) ─────────────────────────────────────────
+// Everything from here to `restartError` ships UNCALLED in 6.78.0 (P7 S11). Nothing in the
+// server reads a plan: the app decides Resume or Retry from `interruption.resumable`, and
+// dispatch auto-resume (QJ-6a, V3 N11) is deferred to a later release. The exports stay
+// because the Pi Durable canaries (QJ-6b, QJ-6d) drive this exact planner, so the release
+// that wires it inherits a tested contract. Marked @internal: not an API.
+
+/**
+ * @internal Deferred with the planner (QJ-6a): uncalled in 6.78.0.
+ * One sentence group for a person: what happened, the step cut off, what was already done.
+ */
 export function restartNoticeText(interruption: QueryJobInterruption): string {
   return [
     interruption.cause === 'crash_loop_parked'
@@ -182,7 +192,7 @@ export function restartNoticeText(interruption: QueryJobInterruption): string {
   ].filter(Boolean).join(' ')
 }
 
-/** The restart cause of a terminal job, or null. Reads 6.78.0 causes and the 6.77.0 messages. */
+/** @internal (QJ-6a, uncalled in 6.78.0) The restart cause of a terminal job, or null. Reads 6.78.0 causes and the 6.77.0 messages. */
 export function restartCauseOf(job: Pick<QueryJobSnapshot, 'status' | 'error' | 'interruption'>): QueryJobRestartCause | null {
   if (job.status !== 'interrupted') return null
   if (job.interruption) return job.interruption.cause
@@ -196,14 +206,16 @@ export function restartCauseOf(job: Pick<QueryJobSnapshot, 'status' | 'error' | 
   return null
 }
 
-/** Was this job cut off by a server restart (not cancelled, failed or stopped by a person)? */
+/** @internal (QJ-6a, uncalled in 6.78.0) Was this job cut off by a server restart (not cancelled, failed or stopped by a person)? */
 export function interruptedByRestart(job: Pick<QueryJobSnapshot, 'status' | 'error' | 'interruption'>): boolean {
   const cause = restartCauseOf(job)
   return cause === 'server_restarted' || cause === 'server_shutdown'
 }
 
+/** @internal (QJ-6a) No lineage is auto-resumed in 6.78.0. */
 export const MAX_AUTO_RESUMES_PER_LINEAGE = 0
 
+/** @internal (QJ-6a) */
 export interface ResumePlan {
   action: 'auto_resume' | 'ask_user' | 'wait' | 'none'
   reason: string
@@ -213,6 +225,7 @@ export interface ResumePlan {
 }
 
 /**
+ * @internal (QJ-6a, uncalled in 6.78.0: the canaries drive it; the server does not.)
  * What to do with a job a restart ended. `wait` while a provider child from before the
  * restart may still own the session (the 21-minute orphan fence), `ask_user` otherwise: the
  * person picks Resume or Retry with the notice in front of them. Never `auto_resume` in
@@ -247,6 +260,8 @@ export function planRestartResume(
     steps, notice, listMayBeIncomplete,
   }
 }
+
+// ── End of the deferred planner. ─────────────────────────────────────────────────────────
 
 /** The error a restart writes (both paths), with its cause set at construction. */
 export function restartError(cause: Exclude<QueryJobRestartCause, 'crash_loop_parked'>): { code: 'interrupted'; cause: string; message: string; retryable: true } {

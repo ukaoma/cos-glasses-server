@@ -35,21 +35,32 @@
 // logs `boot_resume.fail_open`. Bounded: unparked entries untouched for 7 days are dropped,
 // and the file keeps at most 500 entries.
 //
-// FLAG. COS_CRASH_LOOP_PARKING, read at call time with the 6.77.0 tri-state: `1` forces it
-// on, `0` / `false` / `off` force it off, anything else (unset included) is the DEFAULT,
-// which is ON. Off is 6.77.0 behaviour exactly: every item is admitted and the ledger is
+// FLAG. COS_CRASH_LOOP_PARKING, read at call time with the shared 6.78.0 reader: `1` /
+// `true` / `on` force it on, `0` / `false` / `off` force it off, anything else (unset
+// included) is the DEFAULT, which is ON. Off is 6.77.0 behaviour exactly: every item is admitted and the ledger is
 // never read or written.
 //
-// This module imports only node builtins and atomic-fs, so the Pi Durable canaries
-// (CL-1, CL-2) can load `createBootResumeGate` without reaching a live-state module.
+// This module imports only node builtins, atomic-fs and the pure env-switch, so the Pi
+// Durable canaries (CL-1, CL-2) can load `createBootResumeGate` without reaching a
+// live-state module.
 import { mkdirSync, renameSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
+import { readSwitch } from './env-switch.js'
 
 /** Consecutive crashed boots an item may be resumed on. The next one parks it. */
 export const RESTART_LIMIT = 3
 /** Crashed boots count as consecutive only when each comes within this of the item's last count. */
 export const CRASH_LOOP_WINDOW_MS = 30 * 60_000
+/**
+ * 6.78.0 (P7 S5): a parked meeting finalization gets ONE second chance, on the first boot at
+ * least this long after it was parked. A kernel panic storm can park a meeting that was never
+ * the cause, and Control has no Retry for it yet. A second park is permanent (until the
+ * person's Retry). Query jobs never auto-unpark: the app shows them and offers Retry.
+ */
+export const AUTO_UNPARK_AFTER_MS = 30 * 60_000
+/** The kinds that get the one automatic second chance. */
+const AUTO_UNPARK_KINDS: ReadonlySet<string> = new Set(['meeting_finalization'])
 /** The ledger's file name under the data directory. */
 export const BOOT_RESUME_LEDGER_FILE = 'boot-resume-ledger.json'
 /** The kinds of boot-resumed work the server gates. */
@@ -67,12 +78,9 @@ export function isBootResumeKind(value: unknown): value is BootResumeKind {
   return typeof value === 'string' && (BOOT_RESUME_KINDS as readonly string[]).includes(value)
 }
 
-/** Default ON. `1` forces on; `0`, `false` and `off` force off; anything else is the default. */
+/** Default ON, read through the one 6.78.0 switch reader (lib/env-switch.ts). */
 export function isCrashLoopParkingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = (env.COS_CRASH_LOOP_PARKING ?? '').trim().toLowerCase()
-  if (raw === '1') return true
-  if (raw === '0' || raw === 'false' || raw === 'off') return false
-  return true
+  return readSwitch(env.COS_CRASH_LOOP_PARKING, true)
 }
 
 /** What the person reads on the lens and phone: fits a 32-column footer lead. No dashes or arrows. */
@@ -96,6 +104,8 @@ export interface BootResumeEntry {
   retriedAt: string | null
   /** When the last crashed boot counted it (the consecutive-window anchor). */
   lastAttemptAt: string | null
+  /** 6.78.0 (P7 S5): when the one automatic second chance unparked it. Set once, never cleared. */
+  autoRetriedAt: string | null
   updatedAt: string
 }
 
@@ -179,6 +189,7 @@ function parseEntry(key: string, raw: unknown): BootResumeEntry | null {
     kind, id, phase: e.phase, attempts: e.attempts, parked: e.parked,
     reason: text(e.reason), parkedAt: text(e.parkedAt), retriedAt: text(e.retriedAt),
     lastAttemptAt: text(e.lastAttemptAt),
+    autoRetriedAt: text(e.autoRetriedAt),
     updatedAt: text(e.updatedAt) ?? new Date(0).toISOString(),
   }
 }
@@ -275,8 +286,9 @@ class LedgerGate implements BootResumeGate {
         this.loaded = 'corrupt'
         this.log('warn', 'boot_resume.fail_open', { op: 'quarantine', quarantinedAs: basename(result.quarantinedAs) })
       }
-      // `missing`: no ledger yet. Its first boot counts as one after a crash, which is
-      // what keeps counting a loop that was already running when this build was installed.
+      // `missing`: no ledger yet. It reads as a CLEAN previous boot (openBoot counts a crash
+      // only from a ledger read back intact), so a loop already running when this build was
+      // installed starts counting on the next crashed boot and parks one boot later.
     } catch (error) {
       this.loaded = 'unreadable'
       this.failOpen('load', error)
@@ -328,13 +340,21 @@ class LedgerGate implements BootResumeGate {
       const file = this.ledger()
       const key = keyOf(kind, id)
       const before = file.entries[key]
-      if (before?.parked) {
-        this.seenThisBoot.add(key)
-        this.log('warn', 'boot_resume.parked', { kind, id, phase: before.phase, attempts: before.attempts, newly: false })
-        return false
-      }
       let entry: BootResumeEntry | undefined = before ? { ...before } : undefined
       let changed = false
+      if (before?.parked) {
+        if (!this.secondChanceDue(before)) {
+          this.seenThisBoot.add(key)
+          this.log('warn', 'boot_resume.parked', { kind, id, phase: before.phase, attempts: before.attempts, newly: false })
+          return false
+        }
+        // The one automatic second chance (P7 S5): unparked with a fresh count, then counted
+        // below like any item, so a crash on this boot is attempt 1 of a new run of three.
+        const at = this.iso()
+        entry = { ...before, attempts: 0, parked: false, reason: null, parkedAt: null, lastAttemptAt: null, autoRetriedAt: at, updatedAt: at }
+        changed = true
+        this.log('info', 'boot_resume.auto_unpark', { kind, id, phase: before.phase, parkedAt: before.parkedAt })
+      }
       if (entry && entry.phase !== phase) {
         // Progress since the last count: it starts over.
         entry.phase = phase
@@ -344,7 +364,7 @@ class LedgerGate implements BootResumeGate {
       const counts = this.crashedBoot === true && !this.seenThisBoot.has(key)
       this.seenThisBoot.add(key)
       if (counts) {
-        entry ??= { kind, id, phase, attempts: 0, parked: false, reason: null, parkedAt: null, retriedAt: null, lastAttemptAt: null, updatedAt: this.iso() }
+        entry ??= { kind, id, phase, attempts: 0, parked: false, reason: null, parkedAt: null, retriedAt: null, lastAttemptAt: null, autoRetriedAt: null, updatedAt: this.iso() }
         const last = entry.lastAttemptAt ? Date.parse(entry.lastAttemptAt) : Number.NaN
         const consecutive = Number.isFinite(last) && this.now() - last < CRASH_LOOP_WINDOW_MS
         entry.attempts = consecutive ? entry.attempts + 1 : 1
@@ -360,7 +380,8 @@ class LedgerGate implements BootResumeGate {
       }
       file.entries[key] = entry
       if (!this.save('admit')) {
-        // FAILS OPEN: an unrecorded count must never park anything.
+        // FAILS OPEN: an unrecorded count must never park anything. (An unrecorded second
+        // chance still runs: failing open admits the item.)
         if (before) file.entries[key] = before
         else delete file.entries[key]
         return true
@@ -374,6 +395,13 @@ class LedgerGate implements BootResumeGate {
       this.failOpen('admit', error)
       return true
     }
+  }
+
+  /** A parked meeting finalization's one automatic second chance, 30 minutes after its park. */
+  private secondChanceDue(entry: BootResumeEntry): boolean {
+    if (!AUTO_UNPARK_KINDS.has(entry.kind) || entry.autoRetriedAt !== null) return false
+    const parkedAt = entry.parkedAt ? Date.parse(entry.parkedAt) : Number.NaN
+    return Number.isFinite(parkedAt) && this.now() - parkedAt >= AUTO_UNPARK_AFTER_MS
   }
 
   markCleanShutdown(): void {
@@ -489,7 +517,7 @@ const resumers = new Map<BootResumeKind, (id: string) => void>()
 
 /**
  * Install the process's gate, and what a Retry of each kind re-runs (a meeting finalization
- * is resumed again; a query job is resumed by the app's Resume, so it has none). Null resets
+ * is resumed again; a query job runs again when the app Retries it, so it has none). Null resets
  * both, for tests.
  */
 export function installBootResumeGate(

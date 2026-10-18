@@ -123,6 +123,7 @@ import {
 } from '../lib/agent-session-binding-store.js'
 import { boundedContinueNote, CONTINUE_NOTE_HEADER, continueNoteAcknowledged, fallbackContinueNote } from '../lib/continue-plan.js'
 import type { PinExtras, RegistryCheck, RegistryRejection, RegistryResult, UnpinExtras } from '../lib/agent-session-binding-registry.js'
+import { ORPHAN_CHILD_RUNNING_COPY } from '../lib/agent-session-binding-registry.js'
 import { pinBootReapEnabled, queueableRefusal, queueReconcileEnabled, sessionSteerEnabled, type SessionSteerAvailability } from '../lib/thread-turn-queue.js'
 import type { TurnReceipt } from '../lib/queue-turn-evidence.js'
 import { recordCosSpawn, releaseCosSpawn } from '../lib/agent-session-ownership-store.js'
@@ -226,7 +227,12 @@ export interface BindingRegistry {
    * 6.78.0: is this target held only by pins a dead boot left, and until when? Optional; the
    * refusal copy says when the thread frees, or keeps its 6.77 words without it.
    */
-  orphanPinHold?: (provider: string, nativeThreadId: string, now: number) => { releasesAt: number } | null
+  orphanPinHold?: (provider: string, nativeThreadId: string, now: number) => { releasesAt: number; childRunning?: true } | null
+  /**
+   * 6.78.0 (P7 S6): record the resume child a pinned turn spawned (pid and measured start),
+   * so a crash's orphan pin waits for that process. Optional; a failure changes nothing.
+   */
+  notePinChild?: (bindingId: string, jobId: string, child: { pid: number; startMs: number }) => RegistryResult
 }
 
 /** What attach resolves server-side because plan 4.2 forbids the client sending it. */
@@ -1934,9 +1940,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
   const attachRefusalExtras = (provider: string, threadId: string, reason: WriteRefusal, now: number | null): Record<string, unknown> => {
     const extra: Record<string, unknown> = {}
     if (reason === 'native_target_busy' && now !== null && typeof deps.bindings?.orphanPinHold === 'function') {
-      let hold: { releasesAt: number } | null = null
+      let hold: { releasesAt: number; childRunning?: true } | null = null
       try { hold = deps.bindings.orphanPinHold(provider, threadId, now) } catch { hold = null }
       if (hold && Number.isFinite(hold.releasesAt)) extra.reasonCopy = orphanPinWaitCopy(hold.releasesAt)
+      // P7 S6: past the window, the dead boot's child itself still runs: no time to promise.
+      else if (hold?.childRunning === true) extra.reasonCopy = ORPHAN_CHILD_RUNNING_COPY
     }
     if (sessionSteerEnabled() && typeof deps.sessionSteer === 'function' && queueableRefusal(reason)) {
       let steer: SessionSteerAvailability | null = null
@@ -3395,6 +3403,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
             // occupancy check.
             if (outcome !== 'recorded') return false
             recordedPids.push({ pid, startMs })
+            // 6.78.0 (P7 S6): the pin names this child, so after a crash the thread waits for
+            // THIS process to be gone, not only for the window. Never fails the turn.
+            if (pinBootReapEnabled() && typeof deps.bindings.notePinChild === 'function') {
+              try { deps.bindings.notePinChild(bindingId, turnId, { pid, startMs }) } catch { /* the window still bounds the pin */ }
+            }
             return true
           },
         })

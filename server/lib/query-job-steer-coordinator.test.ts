@@ -60,7 +60,7 @@ function harness(options: { steer?: Partial<QueryJobSteerOptions>; providerTimeo
     if (run.port) {
       const composed = run.port.drainForCompose()
       run.firstLine = composed.length ? `${ctx.request.query} + ${composed.map(s => s.text).join(' | ')}` : ctx.request.query
-      run.port.open((line, _id) => { if (options.sinkFails) return false; run.lines.push(line); return true }, options.wall ?? { startedAt: Date.now(), wallMaxMs: 10 * 60_000 })
+      run.port.open((line, _id) => { if (options.sinkFails) return false; run.lines.push(line); return true }, options.wall ?? { startedAt: performance.now(), wallMaxMs: 10 * 60_000 })
     } else {
       run.firstLine = ctx.request.query
     }
@@ -225,7 +225,8 @@ describe('what a steer cannot do', () => {
   })
 
   it('too_late near the wall clock or the coordinator deadline (max(10 s, 20% of wallMax))', async () => {
-    const wall = harness({ wall: { startedAt: Date.now() - 55_000, wallMaxMs: 60_000 } })
+    // The bridge opens the port on the monotonic steer clock (performance.now), P7 S7.
+    const wall = harness({ wall: { startedAt: performance.now() - 55_000, wallMaxMs: 60_000 } })
     const a = await wall.make(await tempRoot())
     const ja = await started(wall, a.coordinator)
     expect((await a.coordinator.steer(ja.job.jobId, { generation: 1, steerId: S(), text: 'x' })).state).toBe('too_late')
@@ -234,6 +235,20 @@ describe('what a steer cannot do', () => {
     const jb = await started(deadline, b.coordinator)
     expect((await b.coordinator.steer(jb.job.jobId, { generation: 1, steerId: S(), text: 'x' })).state).toBe('too_late')
     expect(ja.run.lines.length + jb.run.lines.length).toBe(0)
+  })
+
+  it('P7 S7: after a Mac sleep (Date.now jumps, the monotonic clock does not) a steer is still accepted', async () => {
+    const h = harness()
+    const { coordinator } = await h.make(await tempRoot())
+    const { job, run } = await started(h, coordinator)
+    const realNow = Date.now
+    const jump = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 2 * 3_600_000)
+    try {
+      expect((await coordinator.steer(job.jobId, { generation: 1, steerId: S(), text: 'after the lid opened' })).state).toBe('accepted')
+    } finally {
+      jump.mockRestore()
+    }
+    expect(run.lines.length).toBe(1)
   })
 
   it('at most 8 steers per job', async () => {
@@ -330,5 +345,55 @@ describe('ST-5: the answer checkpoint survives a deadline in steer mode', () => 
     const snapshot = await store.getSnapshot(job.jobId)
     expect(snapshot).toMatchObject({ status: 'completed', response: 'The whole answer.' })
     expect((await coordinator.steerStatus(job.clientJobId, steerId)).state).toBe('not_applied')
+  })
+})
+
+describe('P7 S1: a delivered steer is never sent again as an Ask', () => {
+  it('delivered, then a second-turn error completes the job from its checkpoint: the lookup reads not_applied with fallback null', async () => {
+    const h = harness()
+    const { coordinator, store } = await h.make(await tempRoot())
+    const { job } = await coordinator.submit(request())
+    await until(() => h.runs[0]?.firstLine !== undefined)
+    const run = h.runs[0]!
+    const steerId = S()
+    expect(await coordinator.steer(job.jobId, { generation: 1, steerId, text: 'also the tests' })).toMatchObject({ state: 'accepted', fallback: null })
+    // The CLI replays the line (it has it), then the first result checkpoints the answer.
+    run.echo(steerId)
+    run.ctx.callbacks.onChunk('The whole answer.')
+    run.port!.events.onCheckpoint?.('The whole answer.')
+    await until(() => (store as any).checkpointOf(job.jobId) !== undefined)
+    let journaled = ''
+    for (let i = 0; i < 200 && journaled !== 'delivered'; i++) {
+      journaled = (await store.getSnapshot(job.jobId)).steers?.[0]?.state ?? ''
+      if (journaled !== 'delivered') await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    expect(journaled).toBe('delivered')
+    // The second turn (the one the steer started) fails: the bridge's error path.
+    await run.ctx.callbacks.onError(new Error('second turn: error_during_execution'))
+    let snapshot = await store.getSnapshot(job.jobId)
+    for (let i = 0; i < 200 && snapshot.status !== 'completed'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 5))
+      snapshot = await store.getSnapshot(job.jobId)
+    }
+    expect(snapshot).toMatchObject({ status: 'completed', response: 'The whole answer.' })
+    const lookup = await coordinator.steerStatus(job.clientJobId, steerId)
+    expect(lookup).toEqual({ steerId, state: 'not_applied', fallback: null, jobStatus: 'completed' })
+    // The same id again (a phone retry) answers the same, never queue_follow_up.
+    expect(await coordinator.steer(job.jobId, { generation: 1, steerId, text: 'also the tests' })).toEqual(lookup)
+  })
+
+  it('an accepted steer the CLI never replayed still falls back on a completed job', async () => {
+    const h = harness()
+    const { coordinator, store } = await h.make(await tempRoot())
+    const { job } = await coordinator.submit(request())
+    await until(() => h.runs[0]?.firstLine !== undefined)
+    const run = h.runs[0]!
+    const steerId = S()
+    await coordinator.steer(job.jobId, { generation: 1, steerId, text: 'also the tests' })
+    run.ctx.callbacks.onChunk('Done.')
+    await run.answer('Done.')
+    await until(() => false, 50).catch(() => {})
+    expect((await store.getSnapshot(job.jobId)).status).toBe('completed')
+    expect(await coordinator.steerStatus(job.clientJobId, steerId)).toEqual({ steerId, state: 'not_applied', fallback: 'queue_follow_up', jobStatus: 'completed' })
   })
 })

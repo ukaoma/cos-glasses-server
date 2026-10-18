@@ -74,7 +74,8 @@
   "steer_unavailable_reasons": [
     "no_outside_channel",
     "engine_limit",
-    "permission_pending"
+    "permission_pending",
+    "journal_unavailable"
   ],
   "queue_row": {
     "clientTurnId": "3c2b1a00-0000-4000-8000-000000000002",
@@ -126,6 +127,11 @@
   "copy": {
     "unknown": "May not have been sent. Read it, then say it again.",
     "pinWait": "An earlier run may still be running · frees 7:52",
-    "maxColumns": 62
-  }
+    "maxColumns": 62,
+    "orphanChildRunning": "An earlier run is still running on this Mac"
+  },
+  "_changes": [
+    "2026-10-18 P7 S9: steer_unavailable_reasons gains journal_unavailable (a steerFallback when the attempt journal could not record the steer; never an attach steer.reason)",
+    "2026-10-18 P7 S6: copy.orphanChildRunning, the attach refusal while a dead boot's pin waits past its 31-minute window on a resume child that still runs (pinWait keeps its format; the window is 31 min, not 21)"
+  ]
 }

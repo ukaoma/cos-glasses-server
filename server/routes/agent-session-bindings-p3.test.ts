@@ -18,18 +18,17 @@ import {
   type AgentSessionBindingsDeps,
   type BindingRegistry,
 } from './agent-session-bindings.js'
-import { AgentSessionBindingRegistry } from '../lib/agent-session-binding-registry.js'
+import { AgentSessionBindingRegistry, ORPHAN_CHILD_RUNNING_COPY, PIN_ORPHAN_FENCE_MS } from '../lib/agent-session-binding-registry.js'
 import { targetKey } from '../lib/agent-session-binding-store.js'
 import { makeTurnReceiptLookup } from '../lib/queue-turn-evidence.js'
 import { sessionSteerAvailability, type QueuedThreadTurn } from '../lib/thread-turn-queue.js'
-import { QUERY_JOB_ORPHAN_FENCE_MS } from '../lib/query-job-store.js'
 import type { Occupancy } from '../lib/thread-occupancy.js'
 
 const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
 const CODEX = '019fc80a-cc79-7921-8541-298e71695afd'
 const KEY = targetKey('claude', SID)
 const NOW = 1_786_000_000_000
-const CONTRACT = JSON.parse(readFileSync(new URL('../lib/__fixtures__/pi-durable-contracts/session-steer.json', import.meta.url), 'utf8'))
+const CONTRACT = JSON.parse(readFileSync(new URL('../lib/__fixtures__/pi-durable/contracts/session-steer.json', import.meta.url), 'utf8'))
 const FLAGS = ['COS_QUEUE_RECONCILE', 'COS_PIN_BOOT_REAP', 'COS_QUEUE_RESEND', 'COS_SESSION_STEER'] as const
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(FLAGS.map(k => [k, process.env[k]]))
 
@@ -78,6 +77,7 @@ function wire(r: AgentSessionBindingRegistry): BindingRegistry {
     findTurn: (id, turnId) => r.findTurn(id, turnId),
     recordTurn: (id, turnId, result, now) => r.recordTurn(id, turnId, result, now),
     orphanPinHold: (p, t, now) => r.orphanPinHold(p, t, now),
+    notePinChild: (id, job, child) => r.notePinChild(id, job, child),
   }
 }
 
@@ -157,6 +157,39 @@ describe('the attempt is on disk before any frame or spawn, and records how the 
     expect(await settledExit('ct-spawn-0001')).toBe('sent')
     expect(seenAttempt).toMatchObject({ bootId: 'boot-live', mode: 'turn', exit: 'pending' })
     expect(Object.values(seenMeta as Record<string, unknown>)).toEqual([{ clientTurnId: 'ct-spawn-0001', bootId: 'boot-live' }])
+  })
+
+  it('P7 S6: the spawned resume child is recorded on the pin (pid and measured start) before the turn runs', async () => {
+    const r = open()
+    let seenMeta: unknown = null
+    await start(deps(wire(r), {
+      probes: {
+        isAlive: () => true, processStartMs: pid => (pid === 61_234 ? NOW - 2_000 : NOW), fileExists: () => true, dirExists: () => true, readDir: () => [], readFile: () => '{}',
+        lockHolders: () => [], cosSpawnedPids: () => new Map(), cursorAgentSession: () => null,
+      },
+      deliverAttachedTurn: async (req: any) => {
+        expect(req.onSpawn(61_234)).toBe(true)
+        seenMeta = disk().records.find((x: any) => x.binding.bindingId === req.bindingId)?.pinMeta
+        return { status: 'completed', nativeRevisionAfter: 'head-1' }
+      },
+    }))
+    expect((await turn('ct-spawn-pid01')).status).toBe(202)
+    expect(await settledExit('ct-spawn-pid01')).toBe('sent')
+    expect(Object.values(seenMeta as Record<string, unknown>)).toEqual([{ clientTurnId: 'ct-spawn-pid01', bootId: 'boot-live', child: { pid: 61_234, startMs: NOW - 2_000 } }])
+  })
+
+  it('P7 S6: with COS_PIN_BOOT_REAP off no child is recorded (the pin carries no metadata)', async () => {
+    process.env.COS_PIN_BOOT_REAP = '0'
+    const r = open()
+    let noted = 0
+    const wired = { ...wire(r), notePinChild: (id: string, job: string, child: { pid: number; startMs: number }) => { noted++; return r.notePinChild(id, job, child) } }
+    await start(deps(wired, {
+      deliverAttachedTurn: async (req: any) => { expect(req.onSpawn(61_235)).toBe(true); return { status: 'completed', nativeRevisionAfter: 'head-1' } },
+    }))
+    expect((await turn('ct-spawn-pid02')).status).toBe(202)
+    await settledExit('ct-spawn-pid02')
+    await new Promise(r => setTimeout(r, 50))
+    expect(noted).toBe(0)
   })
 
   it('live path: pending when the frame goes out; sent on a verified delivery', async () => {
@@ -330,7 +363,7 @@ describe('the attach refusal: `steer` (COS_SESSION_STEER) and the dead-boot copy
     expect(res.body.reasonCopy).toBe(REASON_COPY.native_thread_working)
   })
 
-  it("a dead boot's pin: native_target_busy, 'frees h:mm', until 21 minutes after it was taken", async () => {
+  it("a dead boot's pin: native_target_busy, 'frees h:mm', until 31 minutes after it was taken", async () => {
     const dead = open('boot-dead')
     const created = dead.create({ bindingId: 'bnd-dead', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: SID, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: 60_000, now: NOW })
     expect(created.reason).toBeNull()
@@ -340,14 +373,14 @@ describe('the attach refusal: `steer` (COS_SESSION_STEER) and the dead-boot copy
     await start(deps(wire(open()), { now: () => now }))
     const held = await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })
     expect(held.status).toBe(409)
-    expect(held.body).toEqual({ attached: false, reason: 'native_target_busy', reasonCopy: orphanPinWaitCopy(NOW + QUERY_JOB_ORPHAN_FENCE_MS) })
+    expect(held.body).toEqual({ attached: false, reason: 'native_target_busy', reasonCopy: orphanPinWaitCopy(NOW + PIN_ORPHAN_FENCE_MS) })
     expect(held.body.reasonCopy).toMatch(/^An earlier run may still be running · frees \d{1,2}:\d{2}$/)
     expect(held.body.reasonCopy.length).toBeLessThanOrEqual(62)
-    now = NOW + QUERY_JOB_ORPHAN_FENCE_MS
+    now = NOW + PIN_ORPHAN_FENCE_MS
     expect((await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })).status).toBe(201)
   })
 
-  it('V3 B1: an IDLE foreign holder passes the real occupancy gate, and a pin 20 minutes old at the crash still holds 21 minutes after the restart', async () => {
+  it('V3 B1: an IDLE foreign holder passes the real occupancy gate, and a pin 30 minutes old at the crash still holds 31 minutes after the restart', async () => {
     // The orphaned resume child: alive, in the Claude registry, its transcript quiet for ten
     // minutes (idle in a long tool). The real `threadOccupancy` relaxes an idle holder, so
     // the dead boot's pin is the only thing between the attach and a second writer.
@@ -357,11 +390,11 @@ describe('the attach refusal: `steer` (COS_SESSION_STEER) and the dead-boot copy
       cwd: '/Users/ukaoma/Documents/GitHub/cos-glasses-server', kind: 'interactive', entrypoint: 'claude-desktop',
     }
     const dead = open('boot-dead')
-    const pinnedAt = NOW - 20 * 60_000
+    const pinnedAt = NOW - 30 * 60_000
     expect(dead.create({ bindingId: 'bnd-old', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: SID, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: 30 * 60_000, now: pinnedAt }).reason).toBeNull()
     dead.activate('bnd-old', pinnedAt)
     dead.pin('bnd-old', 'job-old', pinnedAt, { pinMeta: { clientTurnId: 'ct-old-turn01' } })
-    // The restart is at NOW (the registry opens then): the pin is already 20 minutes old.
+    // The restart is at NOW (the registry opens then): the pin is already 30 minutes old.
     let now = NOW + 60_000
     const d = deps(wire(open()), {
       now: () => now,
@@ -374,15 +407,35 @@ describe('the attach refusal: `steer` (COS_SESSION_STEER) and the dead-boot copy
       },
     })
     await start(d)
-    // Under "21 minutes after the pin" alone this attach would go through: a second writer.
+    // Under "31 minutes after the pin" alone this attach would go through: a second writer.
     const held = await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })
     expect(held.status).toBe(409)
-    expect(held.body).toEqual({ attached: false, reason: 'native_target_busy', reasonCopy: orphanPinWaitCopy(NOW + QUERY_JOB_ORPHAN_FENCE_MS) })
-    now = NOW + QUERY_JOB_ORPHAN_FENCE_MS - 1
+    expect(held.body).toEqual({ attached: false, reason: 'native_target_busy', reasonCopy: orphanPinWaitCopy(NOW + PIN_ORPHAN_FENCE_MS) })
+    now = NOW + PIN_ORPHAN_FENCE_MS - 1
     expect((await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })).status).toBe(409)
-    now = NOW + QUERY_JOB_ORPHAN_FENCE_MS
+    now = NOW + PIN_ORPHAN_FENCE_MS
     const freed = await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })
     expect(freed.status, JSON.stringify(freed.body)).toBe(201)
+  })
+
+  it('P7 S6: past the window with the dead boot\'s child still running, the copy promises no time', async () => {
+    const dead = open('boot-dead')
+    expect(dead.create({ bindingId: 'bnd-child', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: SID, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: 60_000, now: NOW }).reason).toBeNull()
+    dead.activate('bnd-child', NOW)
+    dead.pin('bnd-child', 'job-child', NOW, { pinMeta: { clientTurnId: 'ct-child-run1' } })
+    expect(dead.notePinChild('bnd-child', 'job-child', { pid: 61_236, startMs: NOW - 1_000 }).reason).toBeNull()
+    let running = true
+    const life2 = AgentSessionBindingRegistry.open({ filePath: storeFile, now: NOW, onWarn: () => {}, bootId: 'boot-live', pinBootReap: () => true, pinChildProbe: () => (running ? 'running' : 'gone') })
+    let now = NOW + PIN_ORPHAN_FENCE_MS + 60_000
+    await start(deps(wire(life2), { now: () => now }))
+    const held = await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })
+    expect(held.status).toBe(409)
+    expect(held.body).toEqual({ attached: false, reason: 'native_target_busy', reasonCopy: ORPHAN_CHILD_RUNNING_COPY })
+    expect(ORPHAN_CHILD_RUNNING_COPY.length).toBeLessThanOrEqual(CONTRACT.copy.maxColumns)
+    expect(ORPHAN_CHILD_RUNNING_COPY).not.toMatch(/[\u2014\u2013\u2192]/)
+    running = false
+    now += 1
+    expect((await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })).status).toBe(201)
   })
 
   it('orphanPinWaitCopy rounds UP to the minute, on a 12-hour clock', () => {

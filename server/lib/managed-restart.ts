@@ -15,6 +15,13 @@ export function scheduleManagedServerRestart(options?: {
   kickstart?: (args: string[]) => void
   exitProcess?: (code: number) => void
   onError?: (error: unknown) => void
+  /**
+   * 6.78.0 (P7 S4): runs right before the kickstart, after the self-restart switch is read.
+   * The phone's Restart marks a CLEAN exit here: if kickstart -k does not land a SIGTERM (so
+   * gracefulShutdown never runs) the 2 s `exit(1)` below would otherwise read as a crashed
+   * boot and count toward crash-loop parking. Never throws upward.
+   */
+  beforeRestart?: () => void
 }): void {
   const delayMs = options?.delayMs ?? 350
   const label = (options?.label ?? process.env.COS_LAUNCHD_LABEL?.trim()) || DEFAULT_LAUNCHD_LABEL
@@ -29,6 +36,7 @@ export function scheduleManagedServerRestart(options?: {
 
   const timer = setTimeout(() => {
     if (process.env.COS_DISABLE_SELF_RESTART === '1') return
+    try { options?.beforeRestart?.() } catch (error) { onError(error) }
     try {
       const uid = userInfo().uid
       kickstart(['kickstart', '-k', `gui/${uid}/${label}`])

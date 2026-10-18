@@ -84,7 +84,7 @@ vi.mock('./provider-process-lifecycle.js', () => {
 })
 vi.mock('./claude-cli-support.js', () => ({ claudeSupportsSessionName: vi.fn(async () => true) }))
 
-import { callClaudeStreaming } from './claude-bridge.js'
+import { callClaudeStreaming, getCliSessionId } from './claude-bridge.js'
 import { SteerPort } from './claude-steer.js'
 
 const GOLDEN = JSON.parse(readFileSync(join(import.meta.dirname, '__fixtures__/pi-durable/claude-bridge-off-6.77.0.json'), 'utf8'))
@@ -216,7 +216,71 @@ describe('steer mode: finishing only on coverage (ST-1)', () => {
     port.offer({ steerId: B, text: 'x' })
     emit(child, text('Whole.'), result([prompt]), result([B], { subtype: 'error_during_execution', is_error: true, result: 'boom' }))
     await vi.waitFor(() => expect(cb.onError).toHaveBeenCalled())
+    // P7 S2: B was written and no successful result covered it, so the child is killed
+    // rather than left to run the line with stdin ended.
+    expect(child.stdin.end).not.toHaveBeenCalled()
+    expect(state.terminate).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('P7 S2: a terminal with written steers no result covered', () => {
+  it('steering off (no user_message_uuids): the child is killed, stdin is not ended, the CLI session is not kept for --resume', async () => {
+    const port = new SteerPort(events())
+    const { cb, child } = await run(port)
+    expect(port.offer({ steerId: B, text: 'also the tests' })).toBe('written')
+    emit(child, text('Done.'), result(undefined, { session_id: 'cli-session-steering-off' }))
+    await vi.waitFor(() => expect(cb.onAnswerReady).toHaveBeenCalledWith('Done.'))
+    expect(state.terminate).toHaveBeenCalledTimes(1)
+    expect(state.terminate.mock.calls[0][0]).toBe(child)
+    expect(child.stdin.end).not.toHaveBeenCalled()
+    expect(port.isClosed).toBe(true)
+    expect(getCliSessionId(`steer-bridge-${session}`)).toBeUndefined()
+    // The finished job names no session to resume either.
+    expect(cb.onDone.mock.calls[0][2]).toBeUndefined()
+  })
+
+  it('a covered run keeps its session and ends stdin as before (no kill)', async () => {
+    const port = new SteerPort(events())
+    const { cb, child, prompt } = await run(port)
+    port.offer({ steerId: B, text: 'also the tests' })
+    emit(child, text('ALPHA BRAVO'), result([prompt, B], { session_id: 'cli-session-covered' }))
+    await vi.waitFor(() => expect(cb.onAnswerReady).toHaveBeenCalledWith('ALPHA BRAVO'))
     expect(child.stdin.end).toHaveBeenCalledTimes(1)
+    expect(state.terminate).not.toHaveBeenCalled()
+    expect(getCliSessionId(`steer-bridge-${session}`)).toBe('cli-session-covered')
+  })
+
+  it('the killed child is not reaped a second time 15 s later', async () => {
+    vi.useFakeTimers()
+    const port = new SteerPort(events())
+    const pending = run(port)
+    await vi.advanceTimersByTimeAsync(0)
+    const { cb, child } = await pending
+    port.offer({ steerId: B, text: 'x' })
+    emit(child, text('Done.'), result(undefined))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onAnswerReady).toHaveBeenCalledWith('Done.')
+    expect(state.terminate).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(state.terminate).toHaveBeenCalledTimes(1)
+  })
+
+  it('a child that already closed is not killed, but its session is still dropped', async () => {
+    vi.useFakeTimers()
+    const port = new SteerPort(events())
+    const pending = run(port)
+    await vi.advanceTimersByTimeAsync(0)
+    const { cb, child, prompt } = await pending
+    port.offer({ steerId: B, text: 'x' })
+    emit(child, text('Whole.'), result([prompt], { session_id: 'cli-session-settled' }))
+    // The settle window closes stdin; the CLI exits without a result covering B.
+    await vi.advanceTimersByTimeAsync(20_100)
+    child.emit('close', 0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(cb.onAnswerReady).toHaveBeenCalledWith('Whole.')
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(state.terminate).not.toHaveBeenCalled()
+    expect(getCliSessionId(`steer-bridge-${session}`)).toBeUndefined()
   })
 })
 
@@ -310,6 +374,18 @@ describe('steer mode: timers', () => {
     expect(child.stdin.end).toHaveBeenCalledTimes(1)
     emit(child, text('Done.'), result([]))
     await vi.waitFor(() => expect(cb.onAnswerReady).toHaveBeenCalledWith('Done.'))
+  })
+})
+
+describe('P7 S7: the port reads the monotonic steer clock', () => {
+  it('the wall clock the coordinator checks is measured on performance.now(), not Date.now()', async () => {
+    const port = new SteerPort(events())
+    await run(port)
+    const left = port.wallRemainingMs(performance.now())!
+    // haiku's wall clock is 60 s; a Date.now() start would read about 1.7e12 here.
+    expect(left).toBeGreaterThan(55_000)
+    expect(left).toBeLessThanOrEqual(60_000)
+    expect(port.wallMax()).toBe(60_000)
   })
 })
 
