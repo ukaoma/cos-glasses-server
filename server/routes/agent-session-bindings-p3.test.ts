@@ -347,6 +347,44 @@ describe('the attach refusal: `steer` (COS_SESSION_STEER) and the dead-boot copy
     expect((await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })).status).toBe(201)
   })
 
+  it('V3 B1: an IDLE foreign holder passes the real occupancy gate, and a pin 20 minutes old at the crash still holds 21 minutes after the restart', async () => {
+    // The orphaned resume child: alive, in the Claude registry, its transcript quiet for ten
+    // minutes (idle in a long tool). The real `threadOccupancy` relaxes an idle holder, so
+    // the dead boot's pin is the only thing between the attach and a second writer.
+    const PID = 7872
+    const holder = {
+      pid: PID, sessionId: SID, procStart: 'Sun Aug 16 02:03:05 2026', messagingSocketPath: '/tmp/cc-socks/7872.sock',
+      cwd: '/Users/ukaoma/Documents/GitHub/cos-glasses-server', kind: 'interactive', entrypoint: 'claude-desktop',
+    }
+    const dead = open('boot-dead')
+    const pinnedAt = NOW - 20 * 60_000
+    expect(dead.create({ bindingId: 'bnd-old', cosSessionId: 'cos-1', provider: 'claude', nativeThreadId: SID, workspaceFingerprint: 'w', sourceFingerprint: 's', ttlMs: 30 * 60_000, now: pinnedAt }).reason).toBeNull()
+    dead.activate('bnd-old', pinnedAt)
+    dead.pin('bnd-old', 'job-old', pinnedAt, { pinMeta: { clientTurnId: 'ct-old-turn01' } })
+    // The restart is at NOW (the registry opens then): the pin is already 20 minutes old.
+    let now = NOW + 60_000
+    const d = deps(wire(open()), {
+      now: () => now,
+      occupancy: undefined,
+      probes: {
+        isAlive: () => true, processStartMs: () => Date.UTC(2026, 7, 16, 2, 3, 5), fileExists: () => true, dirExists: () => true,
+        readDir: () => [`${PID}.json`], readFile: () => JSON.stringify(holder),
+        lockHolders: () => [], cosSpawnedPids: () => new Map(), cursorAgentSession: () => null,
+        transcriptMtimeMs: () => Date.now() - 10 * 60_000,
+      },
+    })
+    await start(d)
+    // Under "21 minutes after the pin" alone this attach would go through: a second writer.
+    const held = await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })
+    expect(held.status).toBe(409)
+    expect(held.body).toEqual({ attached: false, reason: 'native_target_busy', reasonCopy: orphanPinWaitCopy(NOW + QUERY_JOB_ORPHAN_FENCE_MS) })
+    now = NOW + QUERY_JOB_ORPHAN_FENCE_MS - 1
+    expect((await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })).status).toBe(409)
+    now = NOW + QUERY_JOB_ORPHAN_FENCE_MS
+    const freed = await post(`/api/agent-sessions/claude/${SID}/attach`, { cosSessionId: 'cos-1' })
+    expect(freed.status, JSON.stringify(freed.body)).toBe(201)
+  })
+
   it('orphanPinWaitCopy rounds UP to the minute, on a 12-hour clock', () => {
     const at = new Date(2026, 9, 18, 19, 51, 1).getTime()
     expect(orphanPinWaitCopy(at)).toBe('An earlier run may still be running · frees 7:52')
