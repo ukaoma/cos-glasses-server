@@ -1,0 +1,751 @@
+{
+  "_source": "6.77.0 aa87c9d",
+  "journal": [
+    "{\"schemaVersion\":1,\"recordId\":\"<id:1>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:00.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":1,\"type\":\"accepted\",\"status\":\"accepted\",\"request\":{\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"query\":\"Push the logo strip branch, then summarize the README.\",\"sessionId\":\"session-flags-off\",\"attachmentIds\":[],\"attachmentRefs\":[],\"activityToolMode\":\"preview\"},\"patch\":{},\"eventData\":{\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:4>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:01.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":2,\"type\":\"starting\",\"status\":\"starting\",\"patch\":{},\"eventData\":{}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:5>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:02.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":3,\"type\":\"running\",\"status\":\"running\",\"patch\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"startedAt\":\"2026-10-18T19:00:02.000Z\"},\"eventData\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:6>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:03.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":4,\"type\":\"running\",\"status\":\"running\",\"patch\":{\"provider\":\"claude\",\"claudeRunId\":\"run-01\",\"providerOwnershipConfirmedAt\":\"2026-10-18T19:00:03.000Z\"},\"eventData\":{\"provider\":\"claude\",\"claudeRunId\":\"run-01\",\"providerOwnershipConfirmedAt\":\"2026-10-18T19:00:03.000Z\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:7>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:04.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":4,\"type\":\"trail\",\"status\":\"running\",\"patch\":{},\"eventData\":{\"kind\":\"tool\",\"verb\":\"bash\",\"target\":\"git push origin feature/logo-strip\",\"detail\":\"\",\"call\":\"toolu_flags_off_1\",\"trailSeq\":1}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:8>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:05.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":4,\"type\":\"trail\",\"status\":\"running\",\"patch\":{},\"eventData\":{\"kind\":\"status\",\"state\":\"working\",\"tool_outcome\":{\"ok\":true,\"detail\":\"pushed\",\"call\":\"toolu_flags_off_1\"},\"trailSeq\":2}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:9>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:06.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":4,\"type\":\"trail\",\"status\":\"running\",\"patch\":{},\"eventData\":{\"kind\":\"tool\",\"verb\":\"read\",\"target\":\"README.md\",\"detail\":\"\",\"call\":\"toolu_flags_off_2\",\"trailSeq\":3}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:10>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:07.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":5,\"type\":\"tool_status\",\"status\":\"running\",\"patch\":{},\"eventData\":{\"kind\":\"status\",\"text\":\"Using Read...\",\"truncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:11>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:08.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":6,\"type\":\"chunk\",\"status\":\"running\",\"patch\":{\"partialText\":\"Pushed the branch. \",\"partialTruncated\":false},\"eventData\":{\"text\":\"Pushed the branch. \",\"partialText\":\"Pushed the branch. \",\"partialTruncated\":false,\"deltaTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:12>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:09.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":7,\"type\":\"chunk\",\"status\":\"running\",\"patch\":{\"partialText\":\"Pushed the branch. Reading the README\",\"partialTruncated\":false},\"eventData\":{\"text\":\"Reading the README\",\"partialText\":\"Pushed the branch. Reading the README\",\"partialTruncated\":false,\"deltaTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:13>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:10.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:14>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000002\",\"generation\":1,\"turnId\":\"<id:15>\",\"requestFingerprint\":\"5906674fffa9c5c30a87a0fdc9fbf7a83a3ef2350951b5f1348ccea7e8f934f2\",\"eventSeq\":1,\"type\":\"accepted\",\"status\":\"accepted\",\"request\":{\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000002\",\"generation\":1,\"query\":\"A question that never reached a provider.\",\"sessionId\":\"session-flags-off\",\"attachmentIds\":[],\"attachmentRefs\":[],\"activityToolMode\":\"preview\"},\"patch\":{},\"eventData\":{\"requestFingerprint\":\"5906674fffa9c5c30a87a0fdc9fbf7a83a3ef2350951b5f1348ccea7e8f934f2\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:16>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:11.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:14>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000002\",\"generation\":1,\"turnId\":\"<id:15>\",\"requestFingerprint\":\"5906674fffa9c5c30a87a0fdc9fbf7a83a3ef2350951b5f1348ccea7e8f934f2\",\"eventSeq\":2,\"type\":\"starting\",\"status\":\"starting\",\"patch\":{},\"eventData\":{}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:17>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:12.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:18>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000004\",\"generation\":1,\"turnId\":\"<id:19>\",\"requestFingerprint\":\"3311b38ff9006a847a6f9f9b9b2db36d6b95ff7337061e8aad9210ea3b8e9775\",\"eventSeq\":1,\"type\":\"accepted\",\"status\":\"accepted\",\"request\":{\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000004\",\"generation\":1,\"query\":\"A held question.\",\"sessionId\":\"session-flags-off\",\"attachmentIds\":[],\"attachmentRefs\":[],\"activityToolMode\":\"preview\"},\"patch\":{},\"eventData\":{\"requestFingerprint\":\"3311b38ff9006a847a6f9f9b9b2db36d6b95ff7337061e8aad9210ea3b8e9775\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:20>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:13.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":1,\"type\":\"accepted\",\"status\":\"accepted\",\"request\":{\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"query\":\"Say three things.\",\"sessionId\":\"session-flags-off\",\"attachmentIds\":[],\"attachmentRefs\":[],\"activityToolMode\":\"preview\"},\"patch\":{},\"eventData\":{\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:23>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:14.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":2,\"type\":\"starting\",\"status\":\"starting\",\"patch\":{},\"eventData\":{}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:24>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:15.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":3,\"type\":\"running\",\"status\":\"running\",\"patch\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"startedAt\":\"2026-10-18T19:00:15.000Z\"},\"eventData\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:25>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:16.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":4,\"type\":\"running\",\"status\":\"running\",\"patch\":{\"provider\":\"claude\",\"claudeRunId\":\"run-05\",\"providerOwnershipConfirmedAt\":\"2026-10-18T19:00:16.000Z\"},\"eventData\":{\"provider\":\"claude\",\"claudeRunId\":\"run-05\",\"providerOwnershipConfirmedAt\":\"2026-10-18T19:00:16.000Z\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:26>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:17.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":5,\"type\":\"chunk\",\"status\":\"running\",\"patch\":{\"partialText\":\"One. \",\"partialTruncated\":false},\"eventData\":{\"text\":\"One. \",\"partialText\":\"One. \",\"partialTruncated\":false,\"deltaTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:27>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:18.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":6,\"type\":\"chunk\",\"status\":\"running\",\"patch\":{\"partialText\":\"One. Two. \",\"partialTruncated\":false},\"eventData\":{\"text\":\"Two. \",\"partialText\":\"One. Two. \",\"partialTruncated\":false,\"deltaTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:28>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:19.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":7,\"type\":\"chunk\",\"status\":\"running\",\"patch\":{\"partialText\":\"One. Two. Three.\",\"partialTruncated\":false},\"eventData\":{\"text\":\"Three.\",\"partialText\":\"One. Two. Three.\",\"partialTruncated\":false,\"deltaTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:29>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:20.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":8,\"type\":\"answer_ready\",\"status\":\"answer_ready\",\"patch\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"answerReadyAt\":\"2026-10-18T19:00:20.000Z\",\"partialText\":\"One. Two. Three.\",\"partialTruncated\":false},\"eventData\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"partialText\":\"One. Two. Three.\",\"partialTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:30>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:21.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:21>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000005\",\"generation\":1,\"turnId\":\"<id:22>\",\"requestFingerprint\":\"bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2\",\"eventSeq\":9,\"type\":\"completed\",\"status\":\"completed\",\"patch\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"completedAt\":\"2026-10-18T19:00:21.000Z\",\"response\":\"One. Two. Three.\",\"responseTruncated\":false,\"partialText\":\"One. Two. Three.\",\"partialTruncated\":false,\"attachments\":[]},\"eventData\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"response\":\"One. Two. Three.\",\"responseTruncated\":false,\"attachments\":[]}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:31>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:22.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:32>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000006\",\"generation\":1,\"turnId\":\"<id:33>\",\"requestFingerprint\":\"6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c\",\"eventSeq\":1,\"type\":\"accepted\",\"status\":\"accepted\",\"request\":{\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000006\",\"generation\":1,\"query\":\"Answer then crash.\",\"sessionId\":\"session-flags-off\",\"attachmentIds\":[],\"attachmentRefs\":[],\"activityToolMode\":\"preview\"},\"patch\":{},\"eventData\":{\"requestFingerprint\":\"6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:34>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:23.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:32>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000006\",\"generation\":1,\"turnId\":\"<id:33>\",\"requestFingerprint\":\"6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c\",\"eventSeq\":2,\"type\":\"starting\",\"status\":\"starting\",\"patch\":{},\"eventData\":{}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:35>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:24.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:32>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000006\",\"generation\":1,\"turnId\":\"<id:33>\",\"requestFingerprint\":\"6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c\",\"eventSeq\":3,\"type\":\"running\",\"status\":\"running\",\"patch\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"startedAt\":\"2026-10-18T19:00:24.000Z\"},\"eventData\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:36>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:25.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:32>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000006\",\"generation\":1,\"turnId\":\"<id:33>\",\"requestFingerprint\":\"6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c\",\"eventSeq\":4,\"type\":\"running\",\"status\":\"running\",\"patch\":{\"provider\":\"claude\",\"claudeRunId\":\"run-06\",\"providerOwnershipConfirmedAt\":\"2026-10-18T19:00:25.000Z\"},\"eventData\":{\"provider\":\"claude\",\"claudeRunId\":\"run-06\",\"providerOwnershipConfirmedAt\":\"2026-10-18T19:00:25.000Z\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:37>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:26.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:32>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000006\",\"generation\":1,\"turnId\":\"<id:33>\",\"requestFingerprint\":\"6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c\",\"eventSeq\":5,\"type\":\"chunk\",\"status\":\"running\",\"patch\":{\"partialText\":\"The answer.\",\"partialTruncated\":false},\"eventData\":{\"text\":\"The answer.\",\"partialText\":\"The answer.\",\"partialTruncated\":false,\"deltaTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:38>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:27.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:32>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000006\",\"generation\":1,\"turnId\":\"<id:33>\",\"requestFingerprint\":\"6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c\",\"eventSeq\":6,\"type\":\"answer_ready\",\"status\":\"answer_ready\",\"patch\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"answerReadyAt\":\"2026-10-18T19:00:27.000Z\",\"partialText\":\"The answer.\",\"partialTruncated\":false},\"eventData\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"partialText\":\"The answer.\",\"partialTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:39>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:28.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:40>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000003\",\"generation\":1,\"turnId\":\"<id:41>\",\"requestFingerprint\":\"43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae\",\"eventSeq\":1,\"type\":\"accepted\",\"status\":\"accepted\",\"request\":{\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000003\",\"generation\":1,\"query\":\"Edit the API client to retry once.\",\"sessionId\":\"session-flags-off\",\"attachmentIds\":[],\"attachmentRefs\":[],\"activityToolMode\":\"preview\"},\"patch\":{},\"eventData\":{\"requestFingerprint\":\"43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:42>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:29.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:40>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000003\",\"generation\":1,\"turnId\":\"<id:41>\",\"requestFingerprint\":\"43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae\",\"eventSeq\":2,\"type\":\"starting\",\"status\":\"starting\",\"patch\":{},\"eventData\":{}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:43>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:30.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:40>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000003\",\"generation\":1,\"turnId\":\"<id:41>\",\"requestFingerprint\":\"43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae\",\"eventSeq\":3,\"type\":\"running\",\"status\":\"running\",\"patch\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"startedAt\":\"2026-10-18T19:00:30.000Z\"},\"eventData\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:44>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:31.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:40>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000003\",\"generation\":1,\"turnId\":\"<id:41>\",\"requestFingerprint\":\"43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae\",\"eventSeq\":4,\"type\":\"running\",\"status\":\"running\",\"patch\":{\"provider\":\"claude\",\"claudeRunId\":\"run-03\",\"providerOwnershipConfirmedAt\":\"2026-10-18T19:00:31.000Z\"},\"eventData\":{\"provider\":\"claude\",\"claudeRunId\":\"run-03\",\"providerOwnershipConfirmedAt\":\"2026-10-18T19:00:31.000Z\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:45>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:32.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:40>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000003\",\"generation\":1,\"turnId\":\"<id:41>\",\"requestFingerprint\":\"43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae\",\"eventSeq\":4,\"type\":\"trail\",\"status\":\"running\",\"patch\":{},\"eventData\":{\"kind\":\"tool\",\"verb\":\"edit\",\"target\":\"api-client.ts\",\"detail\":\"\",\"call\":\"toolu_flags_off_3\",\"trailSeq\":1}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:46>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:33.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:40>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000003\",\"generation\":1,\"turnId\":\"<id:41>\",\"requestFingerprint\":\"43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae\",\"eventSeq\":5,\"type\":\"chunk\",\"status\":\"running\",\"patch\":{\"partialText\":\"Editing.\",\"partialTruncated\":false},\"eventData\":{\"text\":\"Editing.\",\"partialText\":\"Editing.\",\"partialTruncated\":false,\"deltaTruncated\":false}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:47>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:00:34.000Z\",\"bootId\":\"boot-a-before-crash\",\"jobId\":\"<id:40>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000003\",\"generation\":1,\"turnId\":\"<id:41>\",\"requestFingerprint\":\"43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae\",\"eventSeq\":6,\"type\":\"interrupted\",\"status\":\"interrupted\",\"patch\":{\"error\":{\"code\":\"interrupted\",\"message\":\"server_shutdown\",\"retryable\":true},\"completedAt\":\"2026-10-18T19:00:34.000Z\",\"orphanFenceUntil\":\"2026-10-18T19:21:34.000Z\"},\"eventData\":{\"error\":{\"code\":\"interrupted\",\"message\":\"server_shutdown\",\"retryable\":true},\"orphanFenceUntil\":\"2026-10-18T19:21:34.000Z\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:48>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:01:35.000Z\",\"bootId\":\"boot-b-after-crash\",\"jobId\":\"<id:2>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000001\",\"generation\":1,\"turnId\":\"<id:3>\",\"requestFingerprint\":\"55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39\",\"eventSeq\":8,\"type\":\"interrupted\",\"status\":\"interrupted\",\"patch\":{\"error\":{\"code\":\"interrupted\",\"message\":\"Server restarted. Prompt preserved; provider was not restarted.\",\"retryable\":true},\"completedAt\":\"2026-10-18T19:01:35.000Z\",\"orphanFenceUntil\":\"2026-10-18T19:22:35.000Z\"},\"eventData\":{\"error\":{\"code\":\"interrupted\",\"message\":\"Server restarted. Prompt preserved; provider was not restarted.\",\"retryable\":true},\"orphanFenceUntil\":\"2026-10-18T19:22:35.000Z\"}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:49>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:01:35.000Z\",\"bootId\":\"boot-b-after-crash\",\"jobId\":\"<id:14>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000002\",\"generation\":1,\"turnId\":\"<id:15>\",\"requestFingerprint\":\"5906674fffa9c5c30a87a0fdc9fbf7a83a3ef2350951b5f1348ccea7e8f934f2\",\"eventSeq\":3,\"type\":\"interrupted\",\"status\":\"interrupted\",\"patch\":{\"error\":{\"code\":\"interrupted\",\"message\":\"Server restarted. Prompt preserved; provider was not restarted.\",\"retryable\":true},\"completedAt\":\"2026-10-18T19:01:35.000Z\"},\"eventData\":{\"error\":{\"code\":\"interrupted\",\"message\":\"Server restarted. Prompt preserved; provider was not restarted.\",\"retryable\":true}}}",
+    "{\"schemaVersion\":1,\"recordId\":\"<id:50>\",\"partitionDay\":\"2026-10-18\",\"persistedAt\":\"2026-10-18T19:01:35.000Z\",\"bootId\":\"boot-b-after-crash\",\"jobId\":\"<id:32>\",\"clientJobId\":\"0e5a9c1d-1111-4111-8111-000000000006\",\"generation\":1,\"turnId\":\"<id:33>\",\"requestFingerprint\":\"6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c\",\"eventSeq\":7,\"type\":\"completed\",\"status\":\"completed\",\"patch\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"claudeRunId\":\"run-06\",\"completedAt\":\"2026-10-18T19:01:35.000Z\",\"response\":\"The answer.\",\"responseTruncated\":false,\"partialText\":\"The answer.\",\"partialTruncated\":false,\"attachments\":[]},\"eventData\":{\"provider\":\"claude\",\"resolvedModel\":\"opus\",\"claudeRunId\":\"run-06\",\"response\":\"The answer.\",\"responseTruncated\":false,\"attachments\":[]}}"
+  ],
+  "snapshots": {
+    "crashed": {
+      "schemaVersion": 1,
+      "jobId": "<id:2>",
+      "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+      "generation": 1,
+      "turnId": "<id:3>",
+      "requestFingerprint": "55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39",
+      "status": "interrupted",
+      "eventSeq": 8,
+      "oldestEventSeq": 1,
+      "sessionId": "session-flags-off",
+      "attachments": [],
+      "partialText": "Pushed the branch. Reading the README",
+      "partialTruncated": false,
+      "activity": [
+        {
+          "eventSeq": 5,
+          "at": "2026-10-18T19:00:07.000Z",
+          "kind": "status",
+          "text": "Using Read..."
+        }
+      ],
+      "acceptedAt": "2026-10-18T19:00:00.000Z",
+      "updatedAt": "2026-10-18T19:01:35.000Z",
+      "retentionUntil": "2026-10-25T19:00:00.000Z",
+      "startedAt": "2026-10-18T19:00:03.000Z",
+      "provider": "claude",
+      "resolvedModel": "opus",
+      "claudeRunId": "run-01",
+      "providerOwnershipConfirmedAt": "2026-10-18T19:00:03.000Z",
+      "trail": [
+        {
+          "kind": "tool",
+          "verb": "bash",
+          "target": "git push origin feature/logo-strip",
+          "detail": "",
+          "call": "toolu_flags_off_1",
+          "trailSeq": 1,
+          "at": "2026-10-18T19:00:04.000Z"
+        },
+        {
+          "kind": "status",
+          "state": "working",
+          "tool_outcome": {
+            "ok": true,
+            "detail": "pushed",
+            "call": "toolu_flags_off_1"
+          },
+          "trailSeq": 2,
+          "at": "2026-10-18T19:00:05.000Z"
+        },
+        {
+          "kind": "tool",
+          "verb": "read",
+          "target": "README.md",
+          "detail": "",
+          "call": "toolu_flags_off_2",
+          "trailSeq": 3,
+          "at": "2026-10-18T19:00:06.000Z"
+        }
+      ],
+      "completedAt": "2026-10-18T19:01:35.000Z",
+      "error": {
+        "code": "interrupted",
+        "message": "Server restarted. Prompt preserved; provider was not restarted.",
+        "retryable": true
+      },
+      "orphanFenceUntil": "2026-10-18T19:22:35.000Z"
+    },
+    "neverStarted": {
+      "schemaVersion": 1,
+      "jobId": "<id:14>",
+      "clientJobId": "0e5a9c1d-1111-4111-8111-000000000002",
+      "generation": 1,
+      "turnId": "<id:15>",
+      "requestFingerprint": "5906674fffa9c5c30a87a0fdc9fbf7a83a3ef2350951b5f1348ccea7e8f934f2",
+      "status": "interrupted",
+      "eventSeq": 3,
+      "oldestEventSeq": 1,
+      "sessionId": "session-flags-off",
+      "attachments": [],
+      "partialText": "",
+      "partialTruncated": false,
+      "activity": [],
+      "acceptedAt": "2026-10-18T19:00:10.000Z",
+      "updatedAt": "2026-10-18T19:01:35.000Z",
+      "retentionUntil": "2026-10-25T19:00:10.000Z",
+      "completedAt": "2026-10-18T19:01:35.000Z",
+      "error": {
+        "code": "interrupted",
+        "message": "Server restarted. Prompt preserved; provider was not restarted.",
+        "retryable": true
+      }
+    },
+    "shutdown": {
+      "schemaVersion": 1,
+      "jobId": "<id:40>",
+      "clientJobId": "0e5a9c1d-1111-4111-8111-000000000003",
+      "generation": 1,
+      "turnId": "<id:41>",
+      "requestFingerprint": "43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae",
+      "status": "interrupted",
+      "eventSeq": 6,
+      "oldestEventSeq": 1,
+      "sessionId": "session-flags-off",
+      "attachments": [],
+      "partialText": "Editing.",
+      "partialTruncated": false,
+      "activity": [],
+      "acceptedAt": "2026-10-18T19:00:28.000Z",
+      "updatedAt": "2026-10-18T19:00:34.000Z",
+      "retentionUntil": "2026-10-25T19:00:28.000Z",
+      "startedAt": "2026-10-18T19:00:31.000Z",
+      "provider": "claude",
+      "resolvedModel": "opus",
+      "claudeRunId": "run-03",
+      "providerOwnershipConfirmedAt": "2026-10-18T19:00:31.000Z",
+      "trail": [
+        {
+          "kind": "tool",
+          "verb": "edit",
+          "target": "api-client.ts",
+          "detail": "",
+          "call": "toolu_flags_off_3",
+          "trailSeq": 1,
+          "at": "2026-10-18T19:00:32.000Z"
+        }
+      ],
+      "completedAt": "2026-10-18T19:00:34.000Z",
+      "error": {
+        "code": "interrupted",
+        "message": "server_shutdown",
+        "retryable": true
+      },
+      "orphanFenceUntil": "2026-10-18T19:21:34.000Z"
+    },
+    "held": {
+      "schemaVersion": 1,
+      "jobId": "<id:18>",
+      "clientJobId": "0e5a9c1d-1111-4111-8111-000000000004",
+      "generation": 1,
+      "turnId": "<id:19>",
+      "requestFingerprint": "3311b38ff9006a847a6f9f9b9b2db36d6b95ff7337061e8aad9210ea3b8e9775",
+      "status": "accepted",
+      "eventSeq": 1,
+      "oldestEventSeq": 1,
+      "sessionId": "session-flags-off",
+      "attachments": [],
+      "partialText": "",
+      "partialTruncated": false,
+      "activity": [],
+      "acceptedAt": "2026-10-18T19:00:12.000Z",
+      "updatedAt": "2026-10-18T19:00:12.000Z",
+      "retentionUntil": "2026-10-25T19:00:12.000Z"
+    },
+    "completed": {
+      "schemaVersion": 1,
+      "jobId": "<id:21>",
+      "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+      "generation": 1,
+      "turnId": "<id:22>",
+      "requestFingerprint": "bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2",
+      "status": "completed",
+      "eventSeq": 9,
+      "oldestEventSeq": 1,
+      "sessionId": "session-flags-off",
+      "attachments": [],
+      "partialText": "One. Two. Three.",
+      "partialTruncated": false,
+      "activity": [],
+      "acceptedAt": "2026-10-18T19:00:13.000Z",
+      "updatedAt": "2026-10-18T19:00:21.000Z",
+      "retentionUntil": "2026-10-25T19:00:13.000Z",
+      "startedAt": "2026-10-18T19:00:16.000Z",
+      "provider": "claude",
+      "resolvedModel": "opus",
+      "claudeRunId": "run-05",
+      "providerOwnershipConfirmedAt": "2026-10-18T19:00:16.000Z",
+      "answerReadyAt": "2026-10-18T19:00:20.000Z",
+      "completedAt": "2026-10-18T19:00:21.000Z",
+      "response": "One. Two. Three.",
+      "responseTruncated": false
+    },
+    "answerReady": {
+      "schemaVersion": 1,
+      "jobId": "<id:32>",
+      "clientJobId": "0e5a9c1d-1111-4111-8111-000000000006",
+      "generation": 1,
+      "turnId": "<id:33>",
+      "requestFingerprint": "6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c",
+      "status": "completed",
+      "eventSeq": 7,
+      "oldestEventSeq": 1,
+      "sessionId": "session-flags-off",
+      "attachments": [],
+      "partialText": "The answer.",
+      "partialTruncated": false,
+      "activity": [],
+      "acceptedAt": "2026-10-18T19:00:22.000Z",
+      "updatedAt": "2026-10-18T19:01:35.000Z",
+      "retentionUntil": "2026-10-25T19:00:22.000Z",
+      "startedAt": "2026-10-18T19:00:25.000Z",
+      "provider": "claude",
+      "resolvedModel": "opus",
+      "claudeRunId": "run-06",
+      "providerOwnershipConfirmedAt": "2026-10-18T19:00:25.000Z",
+      "answerReadyAt": "2026-10-18T19:00:27.000Z",
+      "completedAt": "2026-10-18T19:01:35.000Z",
+      "response": "The answer.",
+      "responseTruncated": false
+    }
+  },
+  "events": {
+    "crashed": [
+      {
+        "type": "accepted",
+        "eventSeq": 1,
+        "jobId": "<id:2>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+        "generation": 1,
+        "status": "accepted",
+        "at": "2026-10-18T19:00:00.000Z",
+        "data": {
+          "requestFingerprint": "55854c873977a3fe37e973f2704b6ad8c6ca9dc9030b1aabd8a7936a0ebcaa39"
+        }
+      },
+      {
+        "type": "starting",
+        "eventSeq": 2,
+        "jobId": "<id:2>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+        "generation": 1,
+        "status": "starting",
+        "at": "2026-10-18T19:00:01.000Z",
+        "data": {}
+      },
+      {
+        "type": "running",
+        "eventSeq": 3,
+        "jobId": "<id:2>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:02.000Z",
+        "data": {
+          "provider": "claude",
+          "resolvedModel": "opus"
+        }
+      },
+      {
+        "type": "running",
+        "eventSeq": 4,
+        "jobId": "<id:2>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:03.000Z",
+        "data": {
+          "provider": "claude",
+          "claudeRunId": "run-01",
+          "providerOwnershipConfirmedAt": "2026-10-18T19:00:03.000Z"
+        }
+      },
+      {
+        "type": "tool_status",
+        "eventSeq": 5,
+        "jobId": "<id:2>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:07.000Z",
+        "data": {
+          "kind": "status",
+          "text": "Using Read...",
+          "truncated": false
+        }
+      },
+      {
+        "type": "chunk",
+        "eventSeq": 6,
+        "jobId": "<id:2>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:08.000Z",
+        "data": {
+          "text": "Pushed the branch. ",
+          "partialText": "Pushed the branch. ",
+          "partialTruncated": false,
+          "deltaTruncated": false
+        }
+      },
+      {
+        "type": "chunk",
+        "eventSeq": 7,
+        "jobId": "<id:2>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:09.000Z",
+        "data": {
+          "text": "Reading the README",
+          "partialText": "Pushed the branch. Reading the README",
+          "partialTruncated": false,
+          "deltaTruncated": false
+        }
+      },
+      {
+        "type": "interrupted",
+        "eventSeq": 8,
+        "jobId": "<id:2>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000001",
+        "generation": 1,
+        "status": "interrupted",
+        "at": "2026-10-18T19:01:35.000Z",
+        "data": {
+          "error": {
+            "code": "interrupted",
+            "message": "Server restarted. Prompt preserved; provider was not restarted.",
+            "retryable": true
+          },
+          "orphanFenceUntil": "2026-10-18T19:22:35.000Z"
+        }
+      }
+    ],
+    "neverStarted": [
+      {
+        "type": "accepted",
+        "eventSeq": 1,
+        "jobId": "<id:14>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000002",
+        "generation": 1,
+        "status": "accepted",
+        "at": "2026-10-18T19:00:10.000Z",
+        "data": {
+          "requestFingerprint": "5906674fffa9c5c30a87a0fdc9fbf7a83a3ef2350951b5f1348ccea7e8f934f2"
+        }
+      },
+      {
+        "type": "starting",
+        "eventSeq": 2,
+        "jobId": "<id:14>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000002",
+        "generation": 1,
+        "status": "starting",
+        "at": "2026-10-18T19:00:11.000Z",
+        "data": {}
+      },
+      {
+        "type": "interrupted",
+        "eventSeq": 3,
+        "jobId": "<id:14>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000002",
+        "generation": 1,
+        "status": "interrupted",
+        "at": "2026-10-18T19:01:35.000Z",
+        "data": {
+          "error": {
+            "code": "interrupted",
+            "message": "Server restarted. Prompt preserved; provider was not restarted.",
+            "retryable": true
+          }
+        }
+      }
+    ],
+    "shutdown": [
+      {
+        "type": "accepted",
+        "eventSeq": 1,
+        "jobId": "<id:40>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000003",
+        "generation": 1,
+        "status": "accepted",
+        "at": "2026-10-18T19:00:28.000Z",
+        "data": {
+          "requestFingerprint": "43e79ba570c16151b58bff583b0979713f604f794e7b7e8236358b007dc421ae"
+        }
+      },
+      {
+        "type": "starting",
+        "eventSeq": 2,
+        "jobId": "<id:40>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000003",
+        "generation": 1,
+        "status": "starting",
+        "at": "2026-10-18T19:00:29.000Z",
+        "data": {}
+      },
+      {
+        "type": "running",
+        "eventSeq": 3,
+        "jobId": "<id:40>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000003",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:30.000Z",
+        "data": {
+          "provider": "claude",
+          "resolvedModel": "opus"
+        }
+      },
+      {
+        "type": "running",
+        "eventSeq": 4,
+        "jobId": "<id:40>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000003",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:31.000Z",
+        "data": {
+          "provider": "claude",
+          "claudeRunId": "run-03",
+          "providerOwnershipConfirmedAt": "2026-10-18T19:00:31.000Z"
+        }
+      },
+      {
+        "type": "chunk",
+        "eventSeq": 5,
+        "jobId": "<id:40>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000003",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:33.000Z",
+        "data": {
+          "text": "Editing.",
+          "partialText": "Editing.",
+          "partialTruncated": false,
+          "deltaTruncated": false
+        }
+      },
+      {
+        "type": "interrupted",
+        "eventSeq": 6,
+        "jobId": "<id:40>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000003",
+        "generation": 1,
+        "status": "interrupted",
+        "at": "2026-10-18T19:00:34.000Z",
+        "data": {
+          "error": {
+            "code": "interrupted",
+            "message": "server_shutdown",
+            "retryable": true
+          },
+          "orphanFenceUntil": "2026-10-18T19:21:34.000Z"
+        }
+      }
+    ],
+    "held": [
+      {
+        "type": "accepted",
+        "eventSeq": 1,
+        "jobId": "<id:18>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000004",
+        "generation": 1,
+        "status": "accepted",
+        "at": "2026-10-18T19:00:12.000Z",
+        "data": {
+          "requestFingerprint": "3311b38ff9006a847a6f9f9b9b2db36d6b95ff7337061e8aad9210ea3b8e9775"
+        }
+      }
+    ],
+    "completed": [
+      {
+        "type": "accepted",
+        "eventSeq": 1,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "accepted",
+        "at": "2026-10-18T19:00:13.000Z",
+        "data": {
+          "requestFingerprint": "bc5e99578d841ce1c7b17059377d5e8bd135a1f9b765b2ef33334d050eeaafb2"
+        }
+      },
+      {
+        "type": "starting",
+        "eventSeq": 2,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "starting",
+        "at": "2026-10-18T19:00:14.000Z",
+        "data": {}
+      },
+      {
+        "type": "running",
+        "eventSeq": 3,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:15.000Z",
+        "data": {
+          "provider": "claude",
+          "resolvedModel": "opus"
+        }
+      },
+      {
+        "type": "running",
+        "eventSeq": 4,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:16.000Z",
+        "data": {
+          "provider": "claude",
+          "claudeRunId": "run-05",
+          "providerOwnershipConfirmedAt": "2026-10-18T19:00:16.000Z"
+        }
+      },
+      {
+        "type": "chunk",
+        "eventSeq": 5,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:17.000Z",
+        "data": {
+          "text": "One. ",
+          "partialText": "One. ",
+          "partialTruncated": false,
+          "deltaTruncated": false
+        }
+      },
+      {
+        "type": "chunk",
+        "eventSeq": 6,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:18.000Z",
+        "data": {
+          "text": "Two. ",
+          "partialText": "One. Two. ",
+          "partialTruncated": false,
+          "deltaTruncated": false
+        }
+      },
+      {
+        "type": "chunk",
+        "eventSeq": 7,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:19.000Z",
+        "data": {
+          "text": "Three.",
+          "partialText": "One. Two. Three.",
+          "partialTruncated": false,
+          "deltaTruncated": false
+        }
+      },
+      {
+        "type": "answer_ready",
+        "eventSeq": 8,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "answer_ready",
+        "at": "2026-10-18T19:00:20.000Z",
+        "data": {
+          "provider": "claude",
+          "resolvedModel": "opus",
+          "partialText": "One. Two. Three.",
+          "partialTruncated": false
+        }
+      },
+      {
+        "type": "completed",
+        "eventSeq": 9,
+        "jobId": "<id:21>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000005",
+        "generation": 1,
+        "status": "completed",
+        "at": "2026-10-18T19:00:21.000Z",
+        "data": {
+          "provider": "claude",
+          "resolvedModel": "opus",
+          "response": "One. Two. Three.",
+          "responseTruncated": false,
+          "attachments": []
+        }
+      }
+    ],
+    "answerReady": [
+      {
+        "type": "accepted",
+        "eventSeq": 1,
+        "jobId": "<id:32>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000006",
+        "generation": 1,
+        "status": "accepted",
+        "at": "2026-10-18T19:00:22.000Z",
+        "data": {
+          "requestFingerprint": "6d75c9b555cc5cd34b9cd1b9a40a58b81b7a5a27a3d530373ab6228e0367bc8c"
+        }
+      },
+      {
+        "type": "starting",
+        "eventSeq": 2,
+        "jobId": "<id:32>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000006",
+        "generation": 1,
+        "status": "starting",
+        "at": "2026-10-18T19:00:23.000Z",
+        "data": {}
+      },
+      {
+        "type": "running",
+        "eventSeq": 3,
+        "jobId": "<id:32>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000006",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:24.000Z",
+        "data": {
+          "provider": "claude",
+          "resolvedModel": "opus"
+        }
+      },
+      {
+        "type": "running",
+        "eventSeq": 4,
+        "jobId": "<id:32>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000006",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:25.000Z",
+        "data": {
+          "provider": "claude",
+          "claudeRunId": "run-06",
+          "providerOwnershipConfirmedAt": "2026-10-18T19:00:25.000Z"
+        }
+      },
+      {
+        "type": "chunk",
+        "eventSeq": 5,
+        "jobId": "<id:32>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000006",
+        "generation": 1,
+        "status": "running",
+        "at": "2026-10-18T19:00:26.000Z",
+        "data": {
+          "text": "The answer.",
+          "partialText": "The answer.",
+          "partialTruncated": false,
+          "deltaTruncated": false
+        }
+      },
+      {
+        "type": "answer_ready",
+        "eventSeq": 6,
+        "jobId": "<id:32>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000006",
+        "generation": 1,
+        "status": "answer_ready",
+        "at": "2026-10-18T19:00:27.000Z",
+        "data": {
+          "provider": "claude",
+          "resolvedModel": "opus",
+          "partialText": "The answer.",
+          "partialTruncated": false
+        }
+      },
+      {
+        "type": "completed",
+        "eventSeq": 7,
+        "jobId": "<id:32>",
+        "clientJobId": "0e5a9c1d-1111-4111-8111-000000000006",
+        "generation": 1,
+        "status": "completed",
+        "at": "2026-10-18T19:01:35.000Z",
+        "data": {
+          "provider": "claude",
+          "resolvedModel": "opus",
+          "claudeRunId": "run-06",
+          "response": "The answer.",
+          "responseTruncated": false,
+          "attachments": []
+        }
+      }
+    ]
+  },
+  "health": {
+    "malformedRows": 0,
+    "interruptedOnBoot": 2,
+    "requeuedOnBoot": 1,
+    "counts": {
+      "accepted": 1,
+      "starting": 0,
+      "running": 0,
+      "answer_ready": 0,
+      "completed": 2,
+      "failed": 0,
+      "canceled": 0,
+      "interrupted": 3
+    },
+    "fingerprintMismatches": 0
+  },
+  "requeued": [
+    "<id:18>"
+  ]
+}

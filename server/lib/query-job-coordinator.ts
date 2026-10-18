@@ -21,6 +21,7 @@ import {
 import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
 import { crashLoopParkedError, type BootResumeGate } from './boot-resume.js'
+import { restartNoticeEnabled } from './query-job-feature.js'
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -89,7 +90,19 @@ export interface QueryJobCoordinatorOptions {
   holdRecheckMs?: number
   /** 6.78.0: the process's crash-loop gate (lib/boot-resume.ts), read when it is used. */
   bootResumeGate?: () => Pick<BootResumeGate, 'admit' | 'retry' | 'forget' | 'limit'>
+  /** 6.78.0 restart truth: defaults to COS_RESTART_NOTICE (on), read at shutdown. */
+  restartNotice?: () => boolean
+  /** 6.78.0: the longest shutdown waits for steps a run already reported to reach the journal. */
+  shutdownDrainMs?: number
 }
+
+/**
+ * 6.78.0 restart truth: how long a graceful shutdown lets the steps, chunks and activity a run
+ * already reported reach the journal before it writes the interrupt, so the notice names them.
+ * All active runs drain at once, so this bounds the whole wait, far inside index.ts's 8-second
+ * force exit. A run whose writes are stuck (a broken disk) is interrupted when it runs out.
+ */
+export const SHUTDOWN_CALLBACK_DRAIN_MS = 1_000
 
 /** Margin past the fence before the start is retried, so the retry lands after it. */
 const FENCE_HOLD_SLACK_MS = 250
@@ -791,6 +804,10 @@ export class QueryJobCoordinator {
     // Held jobs stay `accepted` in the journal; the next boot re-queues them.
     for (const end of [...this.holds.values()]) end()
     await this.admissionTail.catch(() => {})
+    // 6.78.0 restart truth: the notice is built from the journal, so the steps a run reported
+    // before this point reach it first (bounded; see SHUTDOWN_CALLBACK_DRAIN_MS). Off, the
+    // interrupt is written at once, as 6.77.0 did, ahead of any queued step.
+    if ((this.options.restartNotice ?? restartNoticeEnabled)()) await this.drainCallbacks([...this.active.values()])
     for (const active of [...this.active.values()]) {
       try {
         const result = await this.store.interrupt(active.jobId, reason)
@@ -802,6 +819,21 @@ export class QueryJobCoordinator {
       } catch (error) {
         this.handleCallbackPersistenceFailure(active, error)
       }
+    }
+  }
+
+  /** Every run's queued callback writes, all at once, for at most the drain bound. Never throws. */
+  private async drainCallbacks(runs: ActiveRun[]): Promise<void> {
+    if (runs.length === 0) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const bound = new Promise<void>(resolve => {
+      timer = setTimeout(resolve, Math.max(0, this.options.shutdownDrainMs ?? SHUTDOWN_CALLBACK_DRAIN_MS))
+      timer.unref?.()
+    })
+    try {
+      await Promise.race([Promise.all(runs.map(run => run.callbackTail.catch(() => {}))), bound])
+    } finally {
+      if (timer) clearTimeout(timer)
     }
   }
 

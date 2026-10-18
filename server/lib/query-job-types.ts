@@ -208,7 +208,8 @@ export interface QueryJobError {
 export const QUERY_JOB_ERROR_CAUSES: ReadonlySet<string> = new Set(['server_restarted', 'server_shutdown', 'crash_loop_parked'])
 
 /** 6.78.0: why a restart ended a job: a crash then boot, a graceful shutdown, or crash-loop parking. */
-export type QueryJobRestartCause = 'server_restarted' | 'server_shutdown' | 'crash_loop_parked'
+export const QUERY_JOB_RESTART_CAUSES = ['server_restarted', 'server_shutdown', 'crash_loop_parked'] as const
+export type QueryJobRestartCause = typeof QUERY_JOB_RESTART_CAUSES[number]
 
 /** 6.78.0: the message of a job either restart path cut off. Its lead fits a 32-column footer. */
 export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Retry or resume.'
@@ -243,7 +244,7 @@ export interface QueryJobInterruption {
   resumable: boolean
 }
 
-const RESTART_CAUSES: ReadonlySet<string> = new Set(['server_restarted', 'server_shutdown', 'crash_loop_parked'])
+const RESTART_CAUSES: ReadonlySet<string> = new Set(QUERY_JOB_RESTART_CAUSES)
 
 /** One line of the interruption record: redacted like activity, one line, at most `max` characters. */
 export function interruptionLine(value: unknown, max: number): string {

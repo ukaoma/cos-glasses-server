@@ -9,7 +9,7 @@ import { dataPath } from './data-dir.js'
 import { currentMessageEra, LEGACY_MESSAGE_ERA } from './message-era.js'
 import { durableQueryJobsEnabled, messagesTrailEnabled } from './query-job-feature.js'
 import { QueryJobCoordinator, type QueryJobRunner } from './query-job-coordinator.js'
-import { QueryJobStore } from './query-job-store.js'
+import { QueryJobStore, createQueryJobJournalStorage } from './query-job-store.js'
 import {
   isCodexModel,
   isCursorModel,
@@ -378,6 +378,9 @@ const queryJobRoot = configuredRoot ? resolve(configuredRoot) : dataPath('query-
 export const queryJobStore = new QueryJobStore({
   root: queryJobRoot,
   bootId: randomUUID(),
+  // 6.78.0 (MVP-D release 1): reads delta-only chunk rows; writes them only with
+  // COS_QUERY_JOB_DELTA_JOURNAL=1 (default off: every append is the 6.77.0 line).
+  storage: createQueryJobJournalStorage(),
   // 6.61.3: only when the coordinator will run them. With COS_DURABLE_QUERY_JOBS=0 no
   // coordinator starts, so prior-boot never-started jobs are interrupted as before.
   requeueNeverStartedOnBoot: durableQueryJobsEnabled(),

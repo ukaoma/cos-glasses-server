@@ -128,4 +128,5 @@ if (base) {
   const checked = results.filter(r => !r.error).length
   console.log(`${checked - bad} of ${checked} anchors match exactly once${only ? ` (files: ${[...only].join(', ')})` : ''}`)
 }
-process.exit(bad ? 1 : 0)
+// exitCode, not exit(): a large --json report on a pipe must flush before the process ends.
+process.exitCode = bad ? 1 : 0
