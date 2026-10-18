@@ -417,6 +417,20 @@ describe('P7 S5: one automatic second chance for a parked meeting finalization',
     expect(b.boot(AUTO_UNPARK_AFTER_MS * 4)).toBe(false)
   })
 
+  it('the second chance on a CLEAN boot (a restart after the storm) admits it with the count at 0, not still over the limit', () => {
+    const path = priorCrash(ledgerPath())
+    const key = 'meeting_finalization:g2-clean-after'
+    const b = boots(path, 'meeting_finalization', 'g2-clean-after')
+    for (let i = 0; i <= RESTART_LIMIT; i++) b.boot(60_000)
+    expect(readLedger(path).entries[key]).toMatchObject({ parked: true, attempts: RESTART_LIMIT + 1 })
+    // The last storm boot exits cleanly (a person restarts the Mac): nothing counts on the next boot.
+    const last = b.gate()
+    last.openBoot()
+    last.markCleanShutdown()
+    expect(b.boot(AUTO_UNPARK_AFTER_MS)).toBe(true)
+    expect(readLedger(path).entries[key]).toMatchObject({ parked: false, attempts: 0, autoRetriedAt: expect.any(String) })
+  })
+
   it('a parked query job never unparks by itself (the app shows it and offers Retry)', () => {
     const path = priorCrash(ledgerPath())
     const b = boots(path, 'query_job', 'c1a2b3c4-0000-4000-8000-000000000009')
