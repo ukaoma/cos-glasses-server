@@ -1943,8 +1943,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       let hold: { releasesAt: number; childRunning?: true } | null = null
       try { hold = deps.bindings.orphanPinHold(provider, threadId, now) } catch { hold = null }
       if (hold && Number.isFinite(hold.releasesAt)) extra.reasonCopy = orphanPinWaitCopy(hold.releasesAt)
-      // P7 S6: past the window, the dead boot's child itself still runs: no time to promise.
-      else if (hold?.childRunning === true) extra.reasonCopy = ORPHAN_CHILD_RUNNING_COPY
+      // P7 S6: past the window, the dead boot's child itself still runs: no time to promise
+      // (such a hold carries no finite releasesAt, so the line above never wrote).
+      if (hold?.childRunning === true) extra.reasonCopy = ORPHAN_CHILD_RUNNING_COPY
     }
     if (sessionSteerEnabled() && typeof deps.sessionSteer === 'function' && queueableRefusal(reason)) {
       let steer: SessionSteerAvailability | null = null

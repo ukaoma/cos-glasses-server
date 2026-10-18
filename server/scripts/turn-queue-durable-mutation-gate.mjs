@@ -186,7 +186,7 @@ const mutations = [
   m('hydrate-keeps-child', REG, ['          pinMeta[job] = { clientTurnId: meta.clientTurnId, bootId: meta.bootId, ...(child ? { child } : {}) }', '          pinMeta[job] = { clientTurnId: meta.clientTurnId, bootId: meta.bootId }'], [...REGT, ...BINDT]),
   m('route-notes-child', BIND, ['              try { deps.bindings.notePinChild(bindingId, turnId, { pid, startMs }) } catch { /* the window still bounds the pin */ }\n', ''], BINDT),
   m('route-note-child-needs-flag', BIND, ['            if (pinBootReapEnabled() && typeof deps.bindings.notePinChild === \'function\') {', '            if (typeof deps.bindings.notePinChild === \'function\') {'], BINDT),
-  m('attach-child-running-copy', BIND, ['      else if (hold?.childRunning === true) extra.reasonCopy = ORPHAN_CHILD_RUNNING_COPY\n', ''], BINDT),
+  m('attach-child-running-copy', BIND, ['      if (hold?.childRunning === true) extra.reasonCopy = ORPHAN_CHILD_RUNNING_COPY\n', ''], BINDT),
   m('index-pin-child-probe', INDEX, ['AgentSessionBindingRegistry.open({ pinChildProbe: makePinChildProbe(processStartMs) })', 'AgentSessionBindingRegistry.open({ pinChildProbe: makePinChildProbe() })'], WIRET),
 ]
 
