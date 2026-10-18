@@ -56,6 +56,10 @@ export type QueryJobEventType =
   // and reaches only a subscriber that asked for the trail. Its data is one draft plus
   // `trailSeq`, a dense 1..n per job.
   | 'trail'
+  // 6.78.0 (Messages steer): a steer's state, or the answer checkpoint of a steered run. A
+  // JOURNAL row type only, like `trail`: never a job event, never an eventSeq or a ring slot,
+  // never `updatedAt`. Builds before 6.78.0 skip it as malformed.
+  | 'steer'
 
 export type QueryJobActivityMode = 'off' | 'status' | 'preview'
 export type QueryJobActivityKind = 'status' | 'input' | 'output' | 'gap'
@@ -128,6 +132,12 @@ export interface QueryJobRequest {
    * it names the session, it does not change what is asked.
    */
   sessionName?: string
+  /**
+   * 6.78.0: the client can steer this run (it read `durableQueryJobs.steer`). Only `true` is
+   * kept. Excluded from the fingerprint: it says how the answer may be guided, not what is
+   * asked, and a build that does not know it must still hydrate the job.
+   */
+  steerable?: true
 }
 
 /** 6.58.2: longest session name kept (the Claude sidebar shows about 40 characters). */
@@ -205,7 +215,178 @@ export interface QueryJobError {
 
 /** 6.78.0: the only `error.cause` values a journaled error keeps. An allowlist, so no
  * provider error (an Error's own `cause` included) can start carrying one. */
-export const QUERY_JOB_ERROR_CAUSES: ReadonlySet<string> = new Set(['crash_loop_parked'])
+export const QUERY_JOB_ERROR_CAUSES: ReadonlySet<string> = new Set(['server_restarted', 'server_shutdown', 'crash_loop_parked'])
+
+/** 6.78.0: why a restart ended a job: a crash then boot, a graceful shutdown, or crash-loop parking. */
+export const QUERY_JOB_RESTART_CAUSES = ['server_restarted', 'server_shutdown', 'crash_loop_parked'] as const
+export type QueryJobRestartCause = typeof QUERY_JOB_RESTART_CAUSES[number]
+
+/** 6.78.0: the message of a job either restart path cut off. Its lead fits a 32-column footer. */
+export const QUERY_JOB_RESTART_MESSAGE = 'Server restarted. Retry or resume.'
+
+/** 6.78.0: the bounds of `snapshot.interruption` (contract interrupted-job.json `limits`). */
+export const QUERY_JOB_INTERRUPTION_LIMITS = Object.freeze({
+  alreadyDoneMax: 5,
+  alreadyDoneEntryChars: 60,
+  cutOffDuringChars: 60,
+})
+
+/**
+ * 6.78.0: what a restart cut off, built once from the job's own trail when the job ends
+ * (lib/query-job-resume.ts `buildInterruption`) and journaled with the terminal record.
+ *
+ *   cutOffDuring  the step that was running, or null when none was (or none is known)
+ *   alreadyDone   side-effect steps that finished (reads and searches are not listed), the
+ *                 newest QUERY_JOB_INTERRUPTION_LIMITS.alreadyDoneMax of them
+ *   incomplete    the list may be missing steps: tool activity was off, the trail hit its
+ *                 bound, a step had no outcome to match, older steps were dropped from the
+ *                 list, or the provider started and left no trail at all
+ *   resumable     the app may offer Resume (false for a crash-loop-parked job)
+ *
+ * Additive: absent on every job a restart did not end, and with COS_RESTART_NOTICE=0.
+ */
+export interface QueryJobInterruption {
+  cause: QueryJobRestartCause
+  at: string
+  cutOffDuring: string | null
+  alreadyDone: string[]
+  incomplete: boolean
+  resumable: boolean
+}
+
+const RESTART_CAUSES: ReadonlySet<string> = new Set(QUERY_JOB_RESTART_CAUSES)
+
+/** One line of the interruption record: redacted like activity, one line, at most `max` characters. */
+export function interruptionLine(value: unknown, max: number): string {
+  if (typeof value !== 'string' || !value.replace(CONTROL_RE, '').trim()) return ''
+  const text = sanitizeQueryJobActivity(value).text.replace(/\s+/g, ' ').trim()
+  return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 3)).trimEnd()}...`
+}
+
+/** The only shape a journaled interruption may have, from anything. Undefined when it is not one. */
+export function parseQueryJobInterruption(raw: unknown): QueryJobInterruption | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const r = raw as Record<string, unknown>
+  if (typeof r.cause !== 'string' || !RESTART_CAUSES.has(r.cause)) return undefined
+  if (typeof r.at !== 'string' || !Number.isFinite(Date.parse(r.at))) return undefined
+  if (typeof r.incomplete !== 'boolean' || typeof r.resumable !== 'boolean' || !Array.isArray(r.alreadyDone)) return undefined
+  const limits = QUERY_JOB_INTERRUPTION_LIMITS
+  const cutOffDuring = typeof r.cutOffDuring === 'string' ? interruptionLine(r.cutOffDuring, limits.cutOffDuringChars) || null : null
+  const alreadyDone = r.alreadyDone
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map(entry => interruptionLine(entry, limits.alreadyDoneEntryChars))
+    .filter(Boolean)
+    .slice(-limits.alreadyDoneMax)
+  return {
+    cause: r.cause as QueryJobRestartCause,
+    at: r.at,
+    cutOffDuring,
+    alreadyDone,
+    incomplete: r.incomplete,
+    resumable: r.resumable,
+  }
+}
+
+/** 6.78.0 Messages steer: the bounds (contract messages-steer.json `limits`). */
+export const QUERY_JOB_STEER_LIMITS = Object.freeze({
+  steerChars: 4_000,
+  /** Steers a client may send to one job. Carried steers (from an earlier generation) do not count. */
+  steersPerJob: 8,
+})
+
+/**
+ * 6.78.0: a steer's state (contract messages-steer.json `states`).
+ *
+ *   accepted     journaled; written to the CLI, or waiting for the first line
+ *   delivered    the CLI replayed it: it has it
+ *   folded       a result covered it: the answer includes it
+ *   included     composed into the first prompt (sent before the start, or carried from an
+ *                interrupted or failed generation)
+ *   too_late     the run could not take it any more (answering, ended, or near a deadline)
+ *   unsupported  this run cannot be steered (Codex, Cursor, Ollama, a dispatch, an old client)
+ *   not_applied  NEVER journaled: read for an accepted or delivered steer of an ended job
+ */
+export const QUERY_JOB_STEER_STATES = ['accepted', 'delivered', 'folded', 'included', 'too_late', 'unsupported', 'not_applied'] as const
+export type QueryJobSteerState = typeof QUERY_JOB_STEER_STATES[number]
+export type QueryJobJournaledSteerState = Exclude<QueryJobSteerState, 'not_applied'>
+const JOURNALED_STEER_STATES: ReadonlySet<string> = new Set(QUERY_JOB_STEER_STATES.filter(state => state !== 'not_applied'))
+
+export interface QueryJobSteer {
+  steerId: string
+  state: QueryJobSteerState
+  /** When the current state was journaled. */
+  at: string
+  text: string
+  /** The generation it was first sent to, when it was carried into this one. */
+  carriedFrom?: number
+}
+
+/** A steer state only moves forward: accepted, then delivered, then a final state. */
+export function steerStateRank(state: string): number {
+  return state === 'accepted' ? 1 : state === 'delivered' ? 2 : 3
+}
+
+/** The state a client reads: an accepted or delivered steer of an ended job did not apply. */
+export function steerReadState(state: QueryJobSteerState, jobStatus: QueryJobStatus): QueryJobSteerState {
+  return isTerminalQueryJobStatus(jobStatus) && (state === 'accepted' || state === 'delivered') ? 'not_applied' : state
+}
+
+/**
+ * What the client does with a steer that will not reach this run. `queue_follow_up`: send it as
+ * the next Ask. Null: nothing (it applied, or it is carried by Retry or Resume, or the run was
+ * canceled).
+ */
+export function steerFallback(state: QueryJobSteerState, jobStatus: QueryJobStatus): 'queue_follow_up' | null {
+  if (state === 'too_late' || state === 'unsupported') return 'queue_follow_up'
+  if (state === 'not_applied' && jobStatus === 'completed') return 'queue_follow_up'
+  return null
+}
+
+/** One `steer` journal row: a state, or a steered run's answer checkpoint. */
+export type QueryJobSteerRow =
+  | { kind: 'state'; steerId: string; state: QueryJobJournaledSteerState; textSha256: string; text?: string; carriedFrom?: number }
+  | { kind: 'checkpoint'; text: string; truncated: boolean }
+
+/** The only shapes a `steer` row may have. Null means malformed. */
+export function parseQueryJobSteerRow(raw: unknown): QueryJobSteerRow | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  if (r.checkpoint && typeof r.checkpoint === 'object') {
+    const c = r.checkpoint as Record<string, unknown>
+    if (typeof c.text !== 'string' || c.text.length > QUERY_JOB_LIMITS.partialChars) return null
+    return { kind: 'checkpoint', text: c.text, truncated: c.truncated === true }
+  }
+  if (typeof r.steerId !== 'string' || !CLIENT_JOB_ID_RE.test(r.steerId)) return null
+  if (typeof r.state !== 'string' || !JOURNALED_STEER_STATES.has(r.state)) return null
+  if (typeof r.textSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(r.textSha256)) return null
+  if (r.text !== undefined && (typeof r.text !== 'string' || r.text.length > QUERY_JOB_STEER_LIMITS.steerChars)) return null
+  const carriedFrom = r.carriedFrom === undefined ? undefined : Number(r.carriedFrom)
+  if (carriedFrom !== undefined && (!Number.isSafeInteger(carriedFrom) || carriedFrom < 1)) return null
+  return {
+    kind: 'state', steerId: r.steerId, state: r.state as QueryJobJournaledSteerState, textSha256: r.textSha256,
+    ...(typeof r.text === 'string' ? { text: r.text } : {}),
+    ...(carriedFrom !== undefined ? { carriedFrom } : {}),
+  }
+}
+
+/** Steer text as the journal and the CLI get it: control characters out, trimmed, bounded. */
+export function parseSteerText(raw: unknown): string {
+  if (typeof raw !== 'string') throw new QueryJobValidationError('invalid_steer_text')
+  const text = raw.replace(CONTROL_RE, '').trim()
+  if (!text) throw new QueryJobValidationError('invalid_steer_text')
+  if (text.length > QUERY_JOB_STEER_LIMITS.steerChars) throw new QueryJobValidationError('steer_text_too_large')
+  return text
+}
+
+/** A steer id is a client-minted UUID v4, lowercased. */
+export function parseSteerId(raw: unknown): string {
+  if (typeof raw !== 'string' || !CLIENT_JOB_ID_RE.test(raw.toLowerCase())) throw new QueryJobValidationError('invalid_steer_id')
+  return raw.toLowerCase()
+}
+
+export function steerTextSha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
 
 export interface QueryJobActivity {
   eventSeq: number
@@ -246,6 +427,14 @@ export interface QueryJobSnapshot extends QueryJobProviderLinkage {
   responseTruncated?: boolean
   outputImageStats?: QueryJobOutputImageStats
   error?: QueryJobError
+  /** 6.78.0: what a restart cut off (see QueryJobInterruption). Only on a job a restart ended. */
+  interruption?: QueryJobInterruption
+  /**
+   * 6.78.0: the steers sent to this job, in arrival order, with the state JOURNALED (a reader
+   * computes `not_applied`, see steerReadState). ABSENT on a job with no steer, and stripped
+   * from every snapshot sent to a client that did not ask with `?steer=1`.
+   */
+  steers?: QueryJobSteer[]
   activity: QueryJobActivity[]
   /** The readable trail (6.52.0), bounded by `QUERY_JOB_LIMITS.trailEntries` and
    * `trailChars`, rebuilt from the journal on restart. ABSENT, never `[]`, on a job
@@ -457,6 +646,7 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
     ...(input.handoffLatest === true ? { handoffLatest: true } : {}),
     ...(clientQueueItemId ? { clientQueueItemId } : {}),
     ...(sessionName ? { sessionName } : {}),
+    ...(input.steerable === true ? { steerable: true as const } : {}),
     attachmentIds,
     attachmentRefs,
     activityToolMode,
@@ -526,7 +716,7 @@ export const FINGERPRINT_KEYS = [
 /** The request keys deliberately OUTSIDE the identity. Every key of
  * `QueryJobRequest` must appear in exactly one of the two lists: adding a key
  * without naming it here or above fails to compile, so the author picks a side. */
-export const FINGERPRINT_EXCLUDED = ['origin', 'dispatch', 'sessionName'] as const satisfies readonly (keyof QueryJobRequest)[]
+export const FINGERPRINT_EXCLUDED = ['origin', 'dispatch', 'sessionName', 'steerable'] as const satisfies readonly (keyof QueryJobRequest)[]
 type FingerprintUncovered = Exclude<keyof QueryJobRequest, typeof FINGERPRINT_KEYS[number] | typeof FINGERPRINT_EXCLUDED[number]>
 export const FINGERPRINT_KEYS_COVER_REQUEST: FingerprintUncovered extends never ? true : never = true
 

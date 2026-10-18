@@ -1,0 +1,136 @@
+{
+  "_contract": "plan v3.1 section 5.2",
+  "request": {
+    "generation": 1,
+    "steerId": "7f0d3c1e-6a1b-4f43-9c2a-1d5e8b7a9c10",
+    "text": "Also check the tests."
+  },
+  "replies": {
+    "accepted": {
+      "steerId": "7f0d3c1e-6a1b-4f43-9c2a-1d5e8b7a9c10",
+      "state": "accepted",
+      "fallback": null,
+      "jobStatus": "running"
+    },
+    "folded": {
+      "steerId": "7f0d3c1e-6a1b-4f43-9c2a-1d5e8b7a9c10",
+      "state": "folded",
+      "fallback": null,
+      "jobStatus": "answer_ready"
+    },
+    "too_late": {
+      "steerId": "7f0d3c1e-6a1b-4f43-9c2a-1d5e8b7a9c10",
+      "state": "too_late",
+      "fallback": "queue_follow_up",
+      "jobStatus": "completed"
+    },
+    "unsupported": {
+      "steerId": "7f0d3c1e-6a1b-4f43-9c2a-1d5e8b7a9c10",
+      "state": "unsupported",
+      "fallback": "queue_follow_up",
+      "jobStatus": "running"
+    }
+  },
+  "states": [
+    "accepted",
+    "delivered",
+    "folded",
+    "included",
+    "too_late",
+    "unsupported",
+    "not_applied"
+  ],
+  "errors": {
+    "disabled": {
+      "status": 404,
+      "body": {
+        "error": {
+          "code": "steer_disabled",
+          "message": "Steering is off on this Mac."
+        }
+      }
+    },
+    "not_found": {
+      "status": 404,
+      "body": {
+        "error": {
+          "code": "query_job_not_found",
+          "message": "Query job not found"
+        }
+      }
+    },
+    "conflict": {
+      "status": 409,
+      "body": {
+        "error": {
+          "code": "steer_identity_conflict",
+          "message": "This steer id was already used with different text."
+        }
+      }
+    },
+    "generation": {
+      "status": 409,
+      "body": {
+        "error": {
+          "code": "query_job_generation_mismatch",
+          "message": "Generation mismatch"
+        }
+      }
+    },
+    "limit": {
+      "status": 429,
+      "body": {
+        "error": {
+          "code": "steer_limit",
+          "message": "This run already has 8 steers.",
+          "retryable": false
+        }
+      }
+    },
+    "lookup_unknown": {
+      "status": 404,
+      "body": {
+        "error": {
+          "code": "steer_unknown",
+          "message": "No steer with this id."
+        }
+      }
+    }
+  },
+  "lookup": {
+    "path": "/api/query-jobs/steers/:steerId?clientJobId=<id>"
+  },
+  "sse_frame": {
+    "event": "steer",
+    "data": {
+      "steerId": "7f0d3c1e-6a1b-4f43-9c2a-1d5e8b7a9c10",
+      "state": "folded",
+      "at": "2026-10-18T19:31:02.000Z"
+    },
+    "hasIdLine": false
+  },
+  "capability": {
+    "durableQueryJobs": {
+      "enabled": true,
+      "protocolVersion": 1,
+      "trail": true,
+      "steer": {
+        "protocolVersion": 1,
+        "providers": [
+          "claude"
+        ]
+      }
+    }
+  },
+  "capability_off": {
+    "durableQueryJobs": {
+      "enabled": true,
+      "protocolVersion": 1,
+      "trail": true
+    }
+  },
+  "limits": {
+    "steerChars": 4000,
+    "steersPerJob": 8
+  }
+}

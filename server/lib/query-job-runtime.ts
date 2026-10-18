@@ -7,9 +7,11 @@ import { resolveQueryAttachments } from './query-attachments.js'
 import { getMediaStore } from './media-store.js'
 import { dataPath } from './data-dir.js'
 import { currentMessageEra, LEGACY_MESSAGE_ERA } from './message-era.js'
-import { durableQueryJobsEnabled, messagesTrailEnabled } from './query-job-feature.js'
+import { durableQueryJobsEnabled, messagesSteerEnabled, messagesTrailEnabled } from './query-job-feature.js'
+import { claudeSupportsSteer } from './claude-cli-support.js'
+import { providerOfModel, resolveRunModel } from './claude-steer.js'
 import { QueryJobCoordinator, type QueryJobRunner } from './query-job-coordinator.js'
-import { QueryJobStore } from './query-job-store.js'
+import { QueryJobStore, createQueryJobJournalStorage } from './query-job-store.js'
 import {
   isCodexModel,
   isCursorModel,
@@ -24,6 +26,7 @@ import { attachmentHistoryPrefix, defaultAttachmentRequest } from '../../shared/
 import {
   findExchangesByJobIdentity,
   flushConversationToDisk,
+  getSessionModel,
   reconcileExchangeByJobIdentity,
   removeExchangesByJobIdentity,
 } from './conversation.js'
@@ -192,7 +195,7 @@ export function nativeSessionLinkage(linkage: { cliSessionId: string; provider?:
     : { provider, cliSessionId: linkage.cliSessionId }
 }
 
-const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callbacks }) => {
+const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callbacks, steer }) => {
   // Resolve ids again at execution time. This closes the admission/execution
   // TOCTOU window without ever putting paths or bytes in the journal.
   const resolvedAttachments = await resolveQueryAttachments({
@@ -368,6 +371,8 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
       sessionLockHeld: true,
       ...(request.dispatch ? { dispatch: request.dispatch } : {}),
       ...(request.sessionName ? { sessionName: request.sessionName } : {}),
+      // 6.78.0: only on a run the coordinator decided is steerable.
+      ...(steer ? { steer } : {}),
     },
   )
 }
@@ -378,6 +383,9 @@ const queryJobRoot = configuredRoot ? resolve(configuredRoot) : dataPath('query-
 export const queryJobStore = new QueryJobStore({
   root: queryJobRoot,
   bootId: randomUUID(),
+  // 6.78.0 (MVP-D release 1): reads delta-only chunk rows; writes them only with
+  // COS_QUERY_JOB_DELTA_JOURNAL=1 (default off: every append is the 6.77.0 line).
+  storage: createQueryJobJournalStorage(),
   // 6.61.3: only when the coordinator will run them. With COS_DURABLE_QUERY_JOBS=0 no
   // coordinator starts, so prior-boot never-started jobs are interrupted as before.
   requeueNeverStartedOnBoot: durableQueryJobsEnabled(),
@@ -389,6 +397,13 @@ export const queryJobCoordinator = new QueryJobCoordinator(queryJobStore, runner
   acquireMaintenanceWork: () => acquireMaintenanceWork('durable_query', { phase: 'queued' }),
   // 6.78.0: the boot requeue counts crashed boots per lineage and parks one past the limit.
   bootResumeGate,
+  // 6.78.0 Messages steer (COS_MESSAGES_STEER, default off). The provider is resolved as
+  // model-router resolves it, so a run is steerable only when it will run on Claude.
+  steer: {
+    enabled: () => messagesSteerEnabled(),
+    provider: request => providerOfModel(resolveRunModel(request.model, getSessionModel(request.sessionId), process.env.COS_G2_DEFAULT_MODEL)),
+    cliSupported: () => claudeSupportsSteer(),
+  },
 })
 
 // A job's number is a live reservation from admission until its terminal
@@ -401,6 +416,8 @@ registerMessageReservationSource(() => queryJobCoordinator.liveMessageReservatio
 
 export function initQueryJobRuntime() {
   if (!durableQueryJobsEnabled()) return Promise.resolve(queryJobCoordinator.getHealth())
+  // 6.78.0: warm the steer probe so /api/models can advertise steer on its first answers.
+  if (messagesSteerEnabled()) void claudeSupportsSteer()
   return queryJobCoordinator.init()
 }
 

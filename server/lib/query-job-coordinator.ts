@@ -1,6 +1,9 @@
 import { getOrCreateSession } from './conversation.js'
 import {
+  QueryJobNotFoundError,
+  QueryJobPersistenceError,
   QueryJobProviderOrphanFenceError,
+  QueryJobSteerConflictError,
   QueryJobStore,
   QueryJobStoreError,
   type QueryJobAdmissionResult,
@@ -9,18 +12,30 @@ import {
 } from './query-job-store.js'
 import {
   QUERY_JOB_LIMITS,
+  QUERY_JOB_STEER_LIMITS,
+  QueryJobValidationError,
   isTerminalQueryJobStatus,
   normalizeQueryJobError,
   parsePositiveInteger,
+  parseSteerId,
+  parseSteerText,
+  steerFallback,
+  steerReadState,
+  steerTextSha256,
   type QueryJobProviderLinkage,
   type QueryJobOutputImageStats,
   type QueryJobRequest,
   type QueryJobSnapshot,
+  type QueryJobStatus,
+  type QueryJobSteer,
+  type QueryJobSteerState,
   type QueryJobStoreHealth,
 } from './query-job-types.js'
+import { SteerPort, steerCutoffMs, type PendingSteer, type QueryProvider } from './claude-steer.js'
 import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
 import { crashLoopParkedError, type BootResumeGate } from './boot-resume.js'
+import { restartNoticeEnabled } from './query-job-feature.js'
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -64,6 +79,49 @@ export interface QueryJobRunnerContext {
   request: QueryJobRequest
   signal: AbortSignal
   callbacks: QueryJobRunnerCallbacks
+  /** 6.78.0: present only when this run is steerable (see QueryJobSteerOptions). */
+  steer?: SteerPort
+}
+
+/**
+ * 6.78.0 Messages steer. A run is steerable only when ALL hold: the switch is on
+ * (COS_MESSAGES_STEER), the client asked (`request.steerable`), it is not a dispatch, the
+ * provider (resolved as model-router resolves it) is Claude, and the installed CLI takes
+ * `--input-format stream-json --replay-user-messages`.
+ */
+export interface QueryJobSteerOptions {
+  enabled: () => boolean
+  provider: (request: QueryJobRequest) => QueryProvider
+  cliSupported: () => Promise<boolean>
+}
+
+/** 6.78.0: what POST /query-jobs/:jobId/steer and the steer lookup answer (contract messages-steer.json). */
+export interface QueryJobSteerReply {
+  steerId: string
+  state: QueryJobSteerState
+  fallback: 'queue_follow_up' | null
+  jobStatus: QueryJobStatus
+}
+
+export class QueryJobSteerLimitError extends Error {
+  readonly code = 'steer_limit'
+  constructor() {
+    super(`This run already has ${QUERY_JOB_STEER_LIMITS.steersPerJob} steers.`)
+    this.name = 'QueryJobSteerLimitError'
+  }
+}
+
+export class QueryJobSteerUnknownError extends Error {
+  readonly code = 'steer_unknown'
+  constructor() {
+    super('No steer with this id.')
+    this.name = 'QueryJobSteerUnknownError'
+  }
+}
+
+function steerReply(steer: QueryJobSteer, job: Pick<QueryJobSnapshot, 'status'>): QueryJobSteerReply {
+  const state = steerReadState(steer.state, job.status)
+  return { steerId: steer.steerId, state, fallback: steerFallback(state, job.status), jobStatus: job.status }
 }
 
 export type QueryJobRunner = (context: QueryJobRunnerContext) => Promise<void>
@@ -89,7 +147,21 @@ export interface QueryJobCoordinatorOptions {
   holdRecheckMs?: number
   /** 6.78.0: the process's crash-loop gate (lib/boot-resume.ts), read when it is used. */
   bootResumeGate?: () => Pick<BootResumeGate, 'admit' | 'retry' | 'forget' | 'limit'>
+  /** 6.78.0 restart truth: defaults to COS_RESTART_NOTICE (on), read at shutdown. */
+  restartNotice?: () => boolean
+  /** 6.78.0: the longest shutdown waits for steps a run already reported to reach the journal. */
+  shutdownDrainMs?: number
+  /** 6.78.0: Messages steer. Absent (the default) means no run is ever steerable. */
+  steer?: QueryJobSteerOptions
 }
+
+/**
+ * 6.78.0 restart truth: how long a graceful shutdown lets the steps, chunks and activity a run
+ * already reported reach the journal before it writes the interrupt, so the notice names them.
+ * All active runs drain at once, so this bounds the whole wait, far inside index.ts's 8-second
+ * force exit. A run whose writes are stuck (a broken disk) is interrupted when it runs out.
+ */
+export const SHUTDOWN_CALLBACK_DRAIN_MS = 1_000
 
 /** Margin past the fence before the start is retried, so the retry lands after it. */
 const FENCE_HOLD_SLACK_MS = 250
@@ -137,6 +209,10 @@ interface ActiveRun {
   providerTimeoutPromise: Promise<void>
   resolveProviderTimeout: () => void
   providerTimeoutTimer: ReturnType<typeof setTimeout> | null
+  /** 6.78.0: the run's steer port, present only when the run is steerable. */
+  steer?: SteerPort
+  /** 6.78.0: when the coordinator deadline fires (ms), once the run is running. */
+  deadlineAt?: number
 }
 
 export interface QueryJobCoordinatorHealth {
@@ -171,6 +247,8 @@ export class QueryJobCoordinator {
   private readonly holds = new Map<string, () => void>()
   /** Admitted jobs inside execute that have not started (or given up) yet. */
   private readonly waiting = new Set<string>()
+  /** 6.78.0: steer ports by job, registered before a steerable run's runner starts. */
+  private readonly steerPorts = new Map<string, SteerPort>()
   private readonly holdRecheckMs: number
   private admissionTail: Promise<void> = Promise.resolve()
   private shuttingDown = false
@@ -413,6 +491,7 @@ export class QueryJobCoordinator {
     this.waiting.add(jobId)
     let release: (() => void) | undefined
     let maintenanceLease: MaintenanceWorkLease | undefined
+    let steerMode = false
     let execution
     try {
       if (lockRequest) {
@@ -433,6 +512,10 @@ export class QueryJobCoordinator {
         release?.()
         return
       }
+      // 6.78.0: decided before the start (the CLI probe is cached), so nothing awaits between
+      // the start and the runner but the steer seeding below.
+      // With the switch off nothing is awaited here, so a 6.77.0 start keeps its exact timing.
+      if (this.options.steer?.enabled()) steerMode = await this.steerable(execution.request)
       const started = await this.startWhenClear(jobId, lockRequest ? undefined : admitted)
       if (!started) {
         release?.()
@@ -477,7 +560,23 @@ export class QueryJobCoordinator {
       resolveProviderTimeout,
       providerTimeoutTimer: null,
     }
+    if (steerMode) {
+      active.steer = this.steerPortFor(active)
+      this.steerPorts.set(jobId, active.steer)
+    }
     this.active.set(jobId, active)
+    if (active.steer) {
+      // Registered first, then seeded, so a steer journaled meanwhile is offered by one side or
+      // both (the port drops a repeat): the ones accepted while the job waited, then, for a
+      // Retry or Resume, the ones an interrupted or failed generation did not get to apply.
+      await this.seedSteers(active).catch(error => { this.handleCallbackPersistenceFailure(active, error) })
+      if (active.terminalPersisted || active.persistenceFailed) return
+      if (this.shuttingDown) {
+        // As above: never spawn under a closing server. The job stays `starting` for the boot.
+        this.abandonActive(active)
+        return
+      }
+    }
 
     const callbacks = this.callbacksFor(active)
     try {
@@ -487,6 +586,7 @@ export class QueryJobCoordinator {
         request: execution.request,
         signal: active.controller.signal,
         callbacks,
+        ...(active.steer ? { steer: active.steer } : {}),
       })
 
       const runnerFailed = runnerPromise.then(
@@ -614,6 +714,7 @@ export class QueryJobCoordinator {
 
   private armProviderDeadline(active: ActiveRun): void {
     if (active.providerTimeoutTimer || active.terminalPersisted || active.persistenceFailed) return
+    active.deadlineAt = Date.now() + this.providerTimeoutMs
     active.providerTimeoutTimer = setTimeout(() => active.resolveProviderTimeout(), this.providerTimeoutMs)
     active.providerTimeoutTimer.unref?.()
   }
@@ -780,10 +881,128 @@ export class QueryJobCoordinator {
     after: number,
     listener: Parameters<QueryJobStore['subscribe']>[3],
     trail?: Parameters<QueryJobStore['subscribe']>[4],
+    steer?: Parameters<QueryJobStore['subscribe']>[5],
   ): Promise<QueryJobSubscription> {
+    if (steer) return this.store.subscribe(jobId, generation, after, listener, trail, steer)
     return trail
       ? this.store.subscribe(jobId, generation, after, listener, trail)
       : this.store.subscribe(jobId, generation, after, listener)
+  }
+
+  /**
+   * 6.78.0 Messages steer, in the plan's order: validate; look the steer id up across the
+   * lineage (the same text replays, other text is a conflict) BEFORE the generation check;
+   * decide and journal (fsynced) `accepted`, `too_late` or `unsupported`; then, for an
+   * accepted steer, write it through the run's port. The reply is the state after the write:
+   * a steer the port could no longer take is journaled `too_late` and answered so.
+   */
+  async steer(jobId: string, raw: unknown): Promise<QueryJobSteerReply> {
+    const body = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const generation = parsePositiveInteger(body.generation)
+    if (generation == null || generation < 1) throw new QueryJobValidationError('invalid_generation')
+    const steerId = parseSteerId(body.steerId)
+    const text = parseSteerText(body.text)
+    await this.store.init()
+    const clientJobId = this.store.lineageOf(jobId)
+    if (!clientJobId) throw new QueryJobNotFoundError(jobId)
+    const known = await this.store.findSteer(clientJobId, steerId)
+    if (known) {
+      if (known.textSha256 !== steerTextSha256(text)) throw new QueryJobSteerConflictError()
+      return steerReply(known.steer, known.job)
+    }
+    const job = await this.store.getSnapshot(jobId, generation)
+    if (await this.store.steerCount(jobId) >= QUERY_JOB_STEER_LIMITS.steersPerJob) throw new QueryJobSteerLimitError()
+    const decided = await this.decideSteer(job)
+    let result = await this.store.appendSteer(jobId, { steerId, state: decided, text, create: true })
+    if (result.applied && result.steer.state === 'accepted') {
+      const port = this.steerPorts.get(jobId)
+      if (port && port.offer({ steerId, text }) === 'closed') {
+        result = await this.store.appendSteer(jobId, { steerId, state: 'too_late' })
+      }
+    }
+    return steerReply(result.steer, result.job)
+  }
+
+  /** 6.78.0: GET /query-jobs/steers/:steerId?clientJobId=, from the newest generation. */
+  async steerStatus(clientJobId: string, rawSteerId: unknown): Promise<QueryJobSteerReply> {
+    const steerId = parseSteerId(rawSteerId)
+    const known = await this.store.findSteer(clientJobId, steerId)
+    if (!known) throw new QueryJobSteerUnknownError()
+    return steerReply(known.steer, known.job)
+  }
+
+  private async steerable(request: QueryJobRequest): Promise<boolean> {
+    const options = this.options.steer
+    if (!options || !options.enabled() || request.steerable !== true || request.dispatch) return false
+    try {
+      if (options.provider(request) !== 'claude') return false
+      return await options.cliSupported()
+    } catch {
+      return false
+    }
+  }
+
+  /** The state a new steer is journaled with (before the port is tried). */
+  private async decideSteer(job: QueryJobSnapshot): Promise<'accepted' | 'too_late' | 'unsupported'> {
+    if (isTerminalQueryJobStatus(job.status) || job.status === 'answer_ready') return 'too_late'
+    const active = this.active.get(job.jobId)
+    if (!active) {
+      // Not started yet (waiting its turn, fenced, or held by a drain): it reads the predicate.
+      const execution = await this.store.getExecution(job.jobId)
+      return await this.steerable(execution.request) ? 'accepted' : 'unsupported'
+    }
+    const port = active.steer
+    if (!port) return 'unsupported'
+    if (port.isClosed) return 'too_late'
+    const now = Date.now()
+    const wallMax = port.wallMax()
+    const margin = steerCutoffMs(wallMax ?? this.providerTimeoutMs)
+    const wallLeft = port.wallRemainingMs(now)
+    if (wallLeft !== null && wallLeft < margin) return 'too_late'
+    if (active.deadlineAt !== undefined && active.deadlineAt - now < margin) return 'too_late'
+    return 'accepted'
+  }
+
+  /** A steer port whose events journal through the run's ordered callback tail. */
+  private steerPortFor(active: ActiveRun): SteerPort {
+    const journal = (operation: () => Promise<unknown>) => {
+      void this.enqueueCallback(active, async () => {
+        try {
+          await operation()
+        } catch (error) {
+          // A broken journal is the run's failure; a steer bookkeeping refusal is not.
+          if (error instanceof QueryJobPersistenceError || !(error instanceof QueryJobStoreError)) throw error
+          console.warn(`[query-jobs] ${active.jobId.slice(0, 8)} steer not journaled:`, (error as Error).message)
+        }
+      })
+    }
+    const jobId = active.jobId
+    return new SteerPort({
+      onIncluded: steers => journal(async () => {
+        for (const steer of steers) {
+          await this.store.appendSteer(jobId, steer.carriedFrom !== undefined
+            ? { steerId: steer.steerId, state: 'included', text: steer.text, carriedFrom: steer.carriedFrom, create: true }
+            : { steerId: steer.steerId, state: 'included' })
+        }
+      }),
+      onDelivered: steerId => journal(() => this.store.appendSteer(jobId, { steerId, state: 'delivered' })),
+      onFolded: steerIds => journal(async () => {
+        for (const steerId of steerIds) await this.store.appendSteer(jobId, { steerId, state: 'folded' })
+      }),
+      onCheckpoint: text => journal(() => this.store.appendSteerCheckpoint(jobId, text)),
+    })
+  }
+
+  /** Offer the run's port what it must start with: this job's accepted steers, then carried ones. */
+  private async seedSteers(active: ActiveRun): Promise<void> {
+    const port = active.steer!
+    const own: PendingSteer[] = (await this.store.queuedSteers(active.jobId))
+      .filter(steer => steer.state === 'accepted' && steer.carriedFrom === undefined)
+      .map(steer => ({ steerId: steer.steerId, text: steer.text }))
+    for (const steer of own) port.offer(steer)
+    if (active.generation > 1) {
+      for (const steer of await this.store.listCarryableSteers(active.request.clientJobId, active.generation)) port.offer(steer)
+    }
   }
 
   async shutdown(reason = 'server_shutdown'): Promise<void> {
@@ -791,6 +1010,10 @@ export class QueryJobCoordinator {
     // Held jobs stay `accepted` in the journal; the next boot re-queues them.
     for (const end of [...this.holds.values()]) end()
     await this.admissionTail.catch(() => {})
+    // 6.78.0 restart truth: the notice is built from the journal, so the steps a run reported
+    // before this point reach it first (bounded; see SHUTDOWN_CALLBACK_DRAIN_MS). Off, the
+    // interrupt is written at once, as 6.77.0 did, ahead of any queued step.
+    if ((this.options.restartNotice ?? restartNoticeEnabled)()) await this.drainCallbacks([...this.active.values()])
     for (const active of [...this.active.values()]) {
       try {
         const result = await this.store.interrupt(active.jobId, reason)
@@ -805,9 +1028,25 @@ export class QueryJobCoordinator {
     }
   }
 
+  /** Every run's queued callback writes, all at once, for at most the drain bound. Never throws. */
+  private async drainCallbacks(runs: ActiveRun[]): Promise<void> {
+    if (runs.length === 0) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const bound = new Promise<void>(resolve => {
+      timer = setTimeout(resolve, Math.max(0, this.options.shutdownDrainMs ?? SHUTDOWN_CALLBACK_DRAIN_MS))
+      timer.unref?.()
+    })
+    try {
+      await Promise.race([Promise.all(runs.map(run => run.callbackTail.catch(() => {}))), bound])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   private finishActive(active: ActiveRun): void {
     if (active.terminalPersisted) return
     active.terminalPersisted = true
+    this.releaseSteerPort(active)
     active.resolveTerminal()
     if (active.providerTimeoutTimer) clearTimeout(active.providerTimeoutTimer)
     active.providerTimeoutTimer = null
@@ -821,7 +1060,14 @@ export class QueryJobCoordinator {
     }
   }
 
+  private releaseSteerPort(active: ActiveRun): void {
+    if (!active.steer) return
+    active.steer.close()
+    if (this.steerPorts.get(active.jobId) === active.steer) this.steerPorts.delete(active.jobId)
+  }
+
   private abandonActive(active: ActiveRun): void {
+    this.releaseSteerPort(active)
     if (active.providerTimeoutTimer) clearTimeout(active.providerTimeoutTimer)
     active.providerTimeoutTimer = null
     if (active.partialTimer) clearTimeout(active.partialTimer)

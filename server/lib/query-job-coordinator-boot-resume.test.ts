@@ -219,9 +219,12 @@ describe('QueryJobStore.interruptParked (6.78.0)', () => {
 })
 
 describe('error.cause is allowlisted (6.78.0)', () => {
-  it('keeps crash_loop_parked and drops every other cause, including an Error\'s own', () => {
+  // P2 (restart truth) widened the allowlist to the two restart paths; anything else still drops.
+  it('keeps crash_loop_parked and the restart causes and drops every other cause, including an Error\'s own', () => {
     expect(normalizeQueryJobError({ code: 'restart_limit', message: 'm', cause: 'crash_loop_parked' })).toMatchObject({ cause: 'crash_loop_parked' })
-    expect(normalizeQueryJobError({ code: 'x', message: 'm', cause: 'server_restarted' })).not.toHaveProperty('cause')
+    expect(normalizeQueryJobError({ code: 'interrupted', message: 'm', cause: 'server_restarted' })).toMatchObject({ cause: 'server_restarted' })
+    expect(normalizeQueryJobError({ code: 'interrupted', message: 'm', cause: 'server_shutdown' })).toMatchObject({ cause: 'server_shutdown' })
+    expect(normalizeQueryJobError({ code: 'x', message: 'm', cause: 'provider_crashed' })).not.toHaveProperty('cause')
     expect(normalizeQueryJobError(new Error('boom', { cause: new Error('inner') }))).not.toHaveProperty('cause')
   })
 })

@@ -1,0 +1,73 @@
+{
+  "_contract": "plan v3.1 section 5.1. Copy byte-identical into server and app fixture dirs; integration diffs the copies.",
+  "restart": {
+    "status": "interrupted",
+    "error": {
+      "code": "interrupted",
+      "cause": "server_restarted",
+      "message": "Server restarted. Retry or resume.",
+      "retryable": true
+    },
+    "interruption": {
+      "cause": "server_restarted",
+      "at": "2026-10-18T19:31:02.000Z",
+      "cutOffDuring": "running the test suite",
+      "alreadyDone": [
+        "read 6 files",
+        "edited api-client.ts"
+      ],
+      "incomplete": false,
+      "resumable": true
+    }
+  },
+  "shutdown": {
+    "status": "interrupted",
+    "error": {
+      "code": "interrupted",
+      "cause": "server_shutdown",
+      "message": "Server restarted. Retry or resume.",
+      "retryable": true
+    },
+    "interruption": {
+      "cause": "server_shutdown",
+      "at": "2026-10-18T19:31:02.000Z",
+      "cutOffDuring": null,
+      "alreadyDone": [],
+      "incomplete": true,
+      "resumable": true
+    }
+  },
+  "parked": {
+    "status": "interrupted",
+    "error": {
+      "code": "restart_limit",
+      "cause": "crash_loop_parked",
+      "message": "Stopped after 3 server crashes.",
+      "retryable": true
+    },
+    "interruption": {
+      "cause": "crash_loop_parked",
+      "at": "2026-10-18T19:31:02.000Z",
+      "cutOffDuring": null,
+      "alreadyDone": [],
+      "incomplete": true,
+      "resumable": false
+    }
+  },
+  "legacy_6_77": {
+    "status": "interrupted",
+    "error": {
+      "code": "interrupted",
+      "message": "Server restarted. Prompt preserved; provider was not restarted.",
+      "retryable": true
+    }
+  },
+  "limits": {
+    "alreadyDoneMax": 5,
+    "alreadyDoneEntryChars": 60,
+    "messageLeadColumns": 32
+  },
+  "_changes": [
+    "2026-10-18 07:18: parked.status is interrupted (MVP-C shipped), not failed"
+  ]
+}

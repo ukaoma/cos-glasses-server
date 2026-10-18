@@ -9,10 +9,16 @@ import {
 import {
   QUERY_JOB_LIMITS,
   QUERY_JOB_SCHEMA_VERSION,
+  QUERY_JOB_STEER_LIMITS,
   boundedText,
   isTerminalQueryJobStatus,
   normalizeQueryJobError,
+  parseQueryJobInterruption,
   parseQueryJobOutputImageStats,
+  parseQueryJobSteerRow,
+  steerReadState,
+  steerStateRank,
+  steerTextSha256,
   originWasDropped,
   parseQueryJobRequest,
   requestFingerprint,
@@ -28,6 +34,9 @@ import {
   type QueryJobSnapshot,
   type QueryJobStatus,
   type QueryJobStoreHealth,
+  type QueryJobJournaledSteerState,
+  type QueryJobSteer,
+  type QueryJobSteerState,
   type QueryJobTrailEntry,
 } from './query-job-types.js'
 import {
@@ -36,6 +45,8 @@ import {
   sanitizeJobTrailDraft,
   type JobTrailDraft,
 } from './job-trail.js'
+import { buildInterruption, restartError } from './query-job-resume.js'
+import { queryJobDeltaJournalEnabled, restartNoticeEnabled } from './query-job-feature.js'
 
 const QUERY_JOB_STATUSES: readonly QueryJobStatus[] = [
   'accepted', 'starting', 'running', 'answer_ready', 'completed', 'failed', 'canceled', 'interrupted',
@@ -57,6 +68,8 @@ const QUERY_JOB_STATUSES: readonly QueryJobStatus[] = [
  */
 export const QUERY_JOB_JOURNAL_EVENT_TYPES: readonly QueryJobEventType[] = [
   ...QUERY_JOB_STATUSES, 'chunk', 'tool_status', 'activity_line', 'acknowledged', 'trail',
+  // 6.78.0: steer rows follow the trail's rules (a journal row, never a job event).
+  'steer',
 ]
 
 const PARTITION_RE = /^\d{4}-\d{2}-\d{2}\.jsonl$/
@@ -100,6 +113,11 @@ interface HydratedQueryJob {
   /** The last `trailSeq` this job journaled. The next trail row is this plus one,
    * assigned inside the serialized append, so the persisted order is dense 1..n. */
   trailSeq: number
+  /** 6.78.0: the text hash of each steer, for the identity check (never sent to a client). */
+  steerHashes?: Map<string, string>
+  /** 6.78.0: a steered run's answer once a result first covered its prompt. Every terminal
+   * path but cancel completes with it (see fail and interrupt). Never sent to a client. */
+  checkpoint?: { text: string; truncated: boolean }
 }
 
 interface QueryJobIdentity {
@@ -138,6 +156,8 @@ export interface QueryJobSubscription {
   replay: QueryJobReplay
   /** Present only when the subscriber asked for the trail. */
   trailReplay?: QueryJobTrailReplay
+  /** 6.78.0: present only when the subscriber asked for steers: each one as it reads now. */
+  steerReplay?: QueryJobSteer[]
   unsubscribe: () => void
 }
 
@@ -164,6 +184,37 @@ export interface QueryJobTrailReplay {
   reason?: 'trail_gap' | 'cursor_ahead'
   oldestTrailSeq: number
   latestTrailSeq: number
+}
+
+/** 6.78.0: one steer state change as a subscriber receives it. No eventSeq, no ring slot. */
+export interface QueryJobSteerFrame {
+  type: 'steer'
+  jobId: string
+  generation: number
+  steerId: string
+  state: QueryJobSteerState
+  at: string
+}
+
+export interface QueryJobSteerSubscribe {
+  listener: (frame: QueryJobSteerFrame) => void
+}
+
+/** 6.78.0: a steer found by its lineage (clientJobId and steerId), at its newest generation. */
+export interface QueryJobSteerLookup {
+  jobId: string
+  generation: number
+  textSha256: string
+  steer: QueryJobSteer
+  job: QueryJobSnapshot
+}
+
+export class QueryJobSteerConflictError extends Error {
+  readonly code = 'steer_identity_conflict'
+  constructor() {
+    super('This steer id was already used with different text.')
+    this.name = 'QueryJobSteerConflictError'
+  }
 }
 
 export interface QueryJobTrailSubscribe {
@@ -226,6 +277,117 @@ export class NodeQueryJobJournalStorage implements QueryJobJournalStorage {
   }
 }
 
+/**
+ * 6.78.0 (MVP-D release 1): the delta-only chunk READER, always on.
+ *
+ * A writer-on journal (`createQueryJobJournalStorage` with COS_QUERY_JOB_DELTA_JOURNAL) stores
+ * a chunk row whose partial is exactly the previous partial plus its delta as the delta alone:
+ * `eventData.deltaOnly: true`, `eventData.partialChars` (the partial's length once the delta is
+ * added), and no `partialText` in `patch` or `eventData`. This puts the partial back, in read
+ * order: an `accepted` row starts a job at '', every row that carries a `partialText` sets it,
+ * and a delta-only row appends its `eventData.text`. Any other row is returned untouched, so a
+ * journal with no delta rows reads byte for byte as before. `deltas` is one scan's state (a
+ * full boot scan, or one job's rehydration), keyed by jobId.
+ *
+ * SELF-CHECKING. A delta row whose rebuilt length is not its `partialChars` (a row before it
+ * was torn or lost) never applies: the job keeps the last partial it could prove, marked
+ * `partialTruncated`. Every later delta row then fails the same check, until a row carries a
+ * full partial again. A wrong answer is never assembled from a gap.
+ */
+type DeltaState = Map<string, string>
+
+function rebuildDeltaRow(parsed: unknown, deltas: DeltaState, onlyJobId?: string): unknown {
+  if (!parsed || typeof parsed !== 'object') return parsed
+  const row = parsed as { jobId?: unknown; type?: unknown; patch?: unknown; eventData?: unknown }
+  if (typeof row.jobId !== 'string' || (onlyJobId && row.jobId !== onlyJobId)) return parsed
+  const patch = row.patch && typeof row.patch === 'object' ? row.patch as Record<string, unknown> : null
+  const eventData = row.eventData && typeof row.eventData === 'object' ? row.eventData as Record<string, unknown> : null
+  if (row.type === 'accepted') deltas.set(row.jobId, '')
+  if (row.type === 'chunk' && eventData?.deltaOnly === true && patch && typeof eventData.text === 'string') {
+    const { deltaOnly: _deltaOnly, partialChars, text, ...data } = eventData
+    const base = deltas.get(row.jobId)
+    const partialText = base === undefined ? null : base + text
+    if (partialText === null || (typeof partialChars === 'number' && partialText.length !== partialChars)) {
+      const { partialText: _none, ...rest } = patch
+      return { ...row, patch: { ...rest, partialTruncated: true }, eventData: { text, ...data, partialTruncated: true } }
+    }
+    deltas.set(row.jobId, partialText)
+    return { ...row, patch: { partialText, ...patch }, eventData: { text, partialText, ...data } }
+  }
+  if (typeof patch?.partialText === 'string') deltas.set(row.jobId, patch.partialText)
+  return parsed
+}
+
+/**
+ * 6.78.0 (MVP-D release 1): the journal storage production uses. Reads are the store's own
+ * (the reader above is always on). Appends pass through UNCHANGED unless the delta WRITER is on
+ * (COS_QUERY_JOB_DELTA_JOURNAL, default off): then a chunk row is stored as its delta alone, but
+ * ONLY when its partial is exactly the last partial this writer stored for the job plus that
+ * delta. An authoritative rewrite (the coordinator's flush, which REPLACES the partial), a
+ * truncated delta or partial, and the first chunk of a job this writer never saw are written
+ * in full. The last stored partial moves only after its append succeeded.
+ *
+ * Rollback: a 6.51.0 to 6.77.x server reads every finished answer whole (completed rows carry
+ * the full response), but shows a job left mid-run by a writer-on build with an empty partial.
+ * That is why the reader ships a release before the writer.
+ */
+export class DeltaQueryJobJournalStorage implements QueryJobJournalStorage {
+  readonly inner: QueryJobJournalStorage
+  /** Rows stored as their delta alone, and chunk rows kept whole (observability, tests). */
+  stripped = 0
+  keptFull = 0
+  private readonly writeDeltas: boolean
+  private readonly written = new Map<string, string>()
+
+  constructor(options: { writeDeltas?: boolean; inner?: QueryJobJournalStorage } = {}) {
+    this.inner = options.inner ?? new NodeQueryJobJournalStorage()
+    this.writeDeltas = options.writeDeltas === true
+  }
+
+  prepare(root: string): Promise<void> { return this.inner.prepare(root) }
+  listPartitions(root: string): Promise<string[]> { return this.inner.listPartitions(root) }
+  readPartition(root: string, partition: string): Promise<string> { return this.inner.readPartition(root, partition) }
+  removePartition(root: string, partition: string): Promise<void> { return this.inner.removePartition(root, partition) }
+
+  async append(root: string, partitionDay: string, line: string): Promise<void> {
+    if (!this.writeDeltas) return this.inner.append(root, partitionDay, line)
+    let row: { jobId?: unknown; type?: unknown; patch?: Record<string, unknown>; eventData?: Record<string, unknown> }
+    try { row = JSON.parse(line) } catch { return this.inner.append(root, partitionDay, line) }
+    const jobId = typeof row.jobId === 'string' ? row.jobId : null
+    if (!jobId) return this.inner.append(root, partitionDay, line)
+    const partial = row.patch?.partialText
+    const delta = row.eventData?.text
+    // The equality alone decides. A delta the store cut (deltaTruncated) or a partial at its cap
+    // can never equal the previous partial plus the stored delta, so neither is ever stripped.
+    if (row.type === 'chunk' && typeof partial === 'string' && typeof delta === 'string') {
+      const previous = this.written.get(jobId)
+      if (previous !== undefined && partial === previous + delta) {
+        const { partialText: _patchPartial, ...patch } = row.patch!
+        const { partialText: _dataPartial, ...data } = row.eventData!
+        await this.inner.append(root, partitionDay, JSON.stringify({
+          ...row, patch, eventData: { ...data, deltaOnly: true, partialChars: partial.length },
+        }))
+        this.written.set(jobId, partial)
+        this.stripped++
+        return
+      }
+      await this.inner.append(root, partitionDay, line)
+      this.written.set(jobId, partial)
+      this.keptFull++
+      return
+    }
+    await this.inner.append(root, partitionDay, line)
+    if (row.type === 'accepted') this.written.set(jobId, '')
+    else if (typeof partial === 'string') this.written.set(jobId, partial)
+    if (row.type === 'completed' || row.type === 'failed' || row.type === 'canceled' || row.type === 'interrupted') this.written.delete(jobId)
+  }
+}
+
+/** 6.78.0 (MVP-D release 1): the storage production journals through. The writer reads COS_QUERY_JOB_DELTA_JOURNAL once, here. */
+export function createQueryJobJournalStorage(env: NodeJS.ProcessEnv = process.env): QueryJobJournalStorage {
+  return new DeltaQueryJobJournalStorage({ writeDeltas: queryJobDeltaJournalEnabled(env) })
+}
+
 export interface QueryJobStoreOptions {
   root: string
   bootId: string
@@ -251,6 +413,11 @@ export interface QueryJobStoreOptions {
    * and a kept job would sit `accepted` for the life of the process.
    */
   requeueNeverStartedOnBoot?: boolean
+  /**
+   * 6.78.0: write `error.cause` and `interruption` when a restart ends a job. Defaults to
+   * COS_RESTART_NOTICE (on), read on every interrupt. Tests pass it instead of the env.
+   */
+  restartNotice?: () => boolean
 }
 
 export class QueryJobStoreError extends Error {
@@ -382,12 +549,18 @@ export class QueryJobStore {
   private readonly maxTrailEntries: number
   private readonly maxTrailChars: number
   private readonly journalEventTypes: readonly QueryJobEventType[]
+  private readonly restartNotice: () => boolean
   private readonly jobs = new Map<string, HydratedQueryJob>()
   private readonly identitiesByJobId = new Map<string, QueryJobIdentity>()
   private readonly identitiesByKey = new Map<string, QueryJobIdentity>()
   private readonly emitter = new EventEmitter()
   /** Trail frames, apart from job events: only a subscriber that asked for them listens. */
   private readonly trailEmitter = new EventEmitter()
+  /** 6.78.0: steer frames, apart from job events: only a subscriber that asked listens. */
+  private readonly steerEmitter = new EventEmitter()
+  /** 6.78.0: every journaled steer by lineage (`clientJobId:steerId`), at its newest generation.
+   * Built by the boot scan and kept when a job body is evicted, like the identities. */
+  private readonly steerIndex = new Map<string, { jobId: string; generation: number; textSha256: string }>()
   private appendTail: Promise<void> = Promise.resolve()
   private initPromise: Promise<QueryJobStoreHealth> | null = null
   /** Never-started jobs the last boot left `accepted`, in journal (admission) order. */
@@ -406,8 +579,10 @@ export class QueryJobStore {
     this.maxTrailEntries = Math.max(1, options.maxTrailEntries ?? QUERY_JOB_LIMITS.trailEntries)
     this.maxTrailChars = Math.max(1, options.maxTrailChars ?? QUERY_JOB_LIMITS.trailChars)
     this.journalEventTypes = options.journalEventTypes ?? QUERY_JOB_JOURNAL_EVENT_TYPES
+    this.restartNotice = options.restartNotice ?? (() => restartNoticeEnabled())
     this.emitter.setMaxListeners(1_000)
     this.trailEmitter.setMaxListeners(1_000)
+    this.steerEmitter.setMaxListeners(1_000)
     this.health = {
       state: 'new',
       bootId: options.bootId,
@@ -473,7 +648,9 @@ export class QueryJobStore {
         if (partition.slice(0, 10) < cutoff) await this.storage.removePartition(this.options.root, partition)
       }
       this.partitions = await this.storage.listPartitions(this.options.root)
-      for (const partition of this.partitions) await this.hydratePartition(partition)
+      // One delta-reader state per scan, carried across partitions in read order (MVP-D).
+      const deltas: DeltaState = new Map()
+      for (const partition of this.partitions) await this.hydratePartition(partition, undefined, deltas)
       this.health.state = 'ready'
 
       // No provider child can be reattached after a boot (a detached one may still be
@@ -517,7 +694,8 @@ export class QueryJobStore {
           })
         } else {
           const result = await this.interrupt(snapshot.jobId, 'server_restarted')
-          if (result.applied) this.health.interruptedOnBoot++
+          // A steered run with a whole answer completes instead (6.78.0); only an interrupt counts.
+          if (result.applied && result.job.status === 'interrupted') this.health.interruptedOnBoot++
         }
       }
       if (this.requeuedJobs.length > 0) {
@@ -533,7 +711,7 @@ export class QueryJobStore {
     }
   }
 
-  private async hydratePartition(partition: string, onlyJobId?: string): Promise<void> {
+  private async hydratePartition(partition: string, onlyJobId?: string, deltas: DeltaState = new Map()): Promise<void> {
     let text: string
     try {
       text = await this.storage.readPartition(this.options.root, partition)
@@ -545,7 +723,7 @@ export class QueryJobStore {
       if (!line.trim()) continue
       try {
         const parsed = JSON.parse(line) as unknown
-        const record = this.parseJournalRecord(parsed)
+        const record = this.parseJournalRecord(rebuildDeltaRow(parsed, deltas, onlyJobId))
         if (!record || (onlyJobId && record.jobId !== onlyJobId)) {
           if (!record && !onlyJobId) this.health.malformedRows++
           continue
@@ -579,6 +757,7 @@ export class QueryJobStore {
       || !this.journalEventTypes.includes(r.type as QueryJobEventType)) return null
     // A trail row whose data is not a trail entry is malformed, not a hole in the trail.
     if (r.type === 'trail' && !parseJobTrailEventData(r.eventData)) return null
+    if (r.type === 'steer' && !parseQueryJobSteerRow(r.eventData)) return null
     return r as unknown as QueryJobJournalRecord
   }
 
@@ -647,6 +826,11 @@ export class QueryJobStore {
       this.applyTrail(hydrated, record, publish)
       return undefined
     }
+    // 6.78.0: neither is a steer row; it touches only the job's steers (or its checkpoint).
+    if (record.type === 'steer') {
+      this.applySteer(hydrated, record, publish)
+      return undefined
+    }
     if (record.eventSeq <= hydrated.snapshot.eventSeq) return undefined
     if (record.type !== 'accepted'
       && record.type !== 'acknowledged'
@@ -690,6 +874,10 @@ export class QueryJobStore {
       snapshot.completedAt = typeof patch.completedAt === 'string' ? patch.completedAt : record.persistedAt
       snapshot.error = normalizeQueryJobError(patch.error, record.type)
       if (typeof patch.orphanFenceUntil === 'string') snapshot.orphanFenceUntil = patch.orphanFenceUntil
+      // 6.78.0: what a restart cut off. Re-parsed on every read, so a record another build
+      // wrote is held to this build's shape and bounds.
+      const interruption = record.type === 'interrupted' ? parseQueryJobInterruption(patch.interruption) : undefined
+      if (interruption) snapshot.interruption = interruption
     } else if (record.type === 'acknowledged') {
       snapshot.acknowledgedAt = typeof patch.acknowledgedAt === 'string'
         ? patch.acknowledgedAt : record.persistedAt
@@ -724,8 +912,58 @@ export class QueryJobStore {
     this.identitiesByJobId.set(identity.jobId, identity)
     this.identitiesByKey.set(identityKey(identity.clientJobId, identity.generation), identity)
     this.refreshHealth()
+    if (publish && isTerminalQueryJobStatus(record.status)) this.publishUnappliedSteers(hydrated, record.persistedAt)
     if (publish) this.emitter.emit(record.jobId, clone(event))
     return event
+  }
+
+  /**
+   * 6.78.0: one steer row into the job's steers (or its checkpoint). Idempotent by
+   * (steerId, state rank): a state never moves back, a final state never changes, and a row at
+   * or below the current rank is history. Applies to a terminal job too (a steer that arrives
+   * after the answer is journaled `too_late`), and touches NOTHING else of the job: not
+   * eventSeq, not the replay ring, not `updatedAt`, not the identity.
+   */
+  private applySteer(hydrated: HydratedQueryJob, record: QueryJobJournalRecord, publish: boolean): void {
+    const row = parseQueryJobSteerRow(record.eventData)
+    if (!row || record.generation !== hydrated.snapshot.generation) return
+    if (row.kind === 'checkpoint') {
+      hydrated.checkpoint = { text: row.text, truncated: row.truncated }
+      return
+    }
+    const steers = hydrated.snapshot.steers ?? (hydrated.snapshot.steers = [])
+    let entry = steers.find(item => item.steerId === row.steerId)
+    if (!entry) {
+      entry = {
+        steerId: row.steerId, state: row.state, at: record.persistedAt, text: row.text ?? '',
+        ...(row.carriedFrom !== undefined ? { carriedFrom: row.carriedFrom } : {}),
+      }
+      steers.push(entry)
+      ;(hydrated.steerHashes ??= new Map()).set(row.steerId, row.textSha256)
+    } else if (steerStateRank(row.state) > steerStateRank(entry.state)) {
+      entry.state = row.state
+      entry.at = record.persistedAt
+    } else {
+      return
+    }
+    const key = `${record.clientJobId}:${row.steerId}`
+    const indexed = this.steerIndex.get(key)
+    if (!indexed || indexed.generation <= record.generation) {
+      this.steerIndex.set(key, { jobId: record.jobId, generation: record.generation, textSha256: hydrated.steerHashes!.get(row.steerId)! })
+    }
+    if (publish) this.emitSteer(hydrated, entry.steerId, entry.state, entry.at)
+  }
+
+  private emitSteer(hydrated: HydratedQueryJob, steerId: string, state: QueryJobSteerState, at: string): void {
+    const frame: QueryJobSteerFrame = { type: 'steer', jobId: hydrated.snapshot.jobId, generation: hydrated.snapshot.generation, steerId, state, at }
+    this.steerEmitter.emit(hydrated.snapshot.jobId, frame)
+  }
+
+  /** At a job's terminal: a live `not_applied` frame for each steer that did not apply (never journaled). */
+  private publishUnappliedSteers(hydrated: HydratedQueryJob, at: string): void {
+    for (const steer of hydrated.snapshot.steers ?? []) {
+      if (steerReadState(steer.state, hydrated.snapshot.status) === 'not_applied') this.emitSteer(hydrated, steer.steerId, 'not_applied', at)
+    }
   }
 
   private applyLinkage(snapshot: QueryJobSnapshot, raw: Record<string, unknown>): void {
@@ -1033,6 +1271,179 @@ export class QueryJobStore {
     })
   }
 
+  /**
+   * 6.78.0: one steer state into the journal (fsynced before the caller acts on it). With
+   * `create`, this is the steer's first row and carries its text: a steer id the job already
+   * has is a replay (the same text) or a conflict (different text). Without it, a state move:
+   * applied only when it moves the steer forward. `accepted` on a job that is answering or
+   * ended is written `too_late` instead, decided INSIDE the serialized write. Like a trail row,
+   * a steer row carries the job's current eventSeq and never advances it.
+   */
+  async appendSteer(jobId: string, input: {
+    steerId: string
+    state: QueryJobJournaledSteerState
+    text?: string
+    carriedFrom?: number
+    create?: boolean
+  }): Promise<{ applied: boolean; steer: QueryJobSteer; job: QueryJobSnapshot }> {
+    await this.ensureInitialized()
+    await this.ensureHydrated(jobId)
+    return this.enqueue(async () => {
+      this.assertWritable()
+      const hydrated = this.jobs.get(jobId)
+      if (!hydrated) throw new QueryJobNotFoundError(jobId)
+      const snapshot = hydrated.snapshot
+      const existing = snapshot.steers?.find(item => item.steerId === input.steerId)
+      const text = input.text === undefined ? undefined : boundedText(input.text, QUERY_JOB_STEER_LIMITS.steerChars).text
+      if (input.create) {
+        if (text === undefined) throw new QueryJobStoreError('steer_text_required')
+        if (existing) {
+          if (hydrated.steerHashes?.get(input.steerId) !== steerTextSha256(text)) throw new QueryJobSteerConflictError()
+          return { applied: false, steer: clone(existing), job: clone(snapshot) }
+        }
+      } else if (!existing) {
+        throw new QueryJobStoreError('steer_not_found')
+      }
+      let state = input.state
+      if (state === 'accepted' && (isTerminalQueryJobStatus(snapshot.status) || snapshot.status === 'answer_ready')) state = 'too_late'
+      if (existing && steerStateRank(state) <= steerStateRank(existing.state)) {
+        return { applied: false, steer: clone(existing), job: clone(snapshot) }
+      }
+      const record: QueryJobJournalRecord = {
+        schemaVersion: QUERY_JOB_SCHEMA_VERSION,
+        recordId: randomUUID(),
+        partitionDay: localPartitionDay(this.now()),
+        persistedAt: this.now().toISOString(),
+        bootId: this.options.bootId,
+        jobId: snapshot.jobId,
+        clientJobId: snapshot.clientJobId,
+        generation: snapshot.generation,
+        turnId: snapshot.turnId,
+        requestFingerprint: snapshot.requestFingerprint,
+        // The event this row follows. Never `+ 1`: a steer is not a job event.
+        eventSeq: hydrated.snapshot.eventSeq,
+        type: 'steer',
+        status: snapshot.status,
+        patch: {},
+        eventData: {
+          steerId: input.steerId,
+          state,
+          textSha256: existing ? hydrated.steerHashes!.get(input.steerId)! : steerTextSha256(text!),
+          ...(!existing ? { text } : {}),
+          ...(!existing && input.carriedFrom !== undefined ? { carriedFrom: input.carriedFrom } : {}),
+        },
+      }
+      await this.appendRecord(record)
+      this.applySteer(hydrated, record, true)
+      const steer = snapshot.steers!.find(item => item.steerId === input.steerId)!
+      return { applied: true, steer: clone(steer), job: clone(snapshot) }
+    })
+  }
+
+  /**
+   * 6.78.0: a steered run's answer at the moment a result first covered its prompt while a
+   * steer was still uncovered. Only on a running job. From here every terminal but cancel
+   * completes the job with this text (fail and interrupt), so a deadline, a restart or a
+   * second-turn error never loses an answer that was already whole.
+   */
+  async appendSteerCheckpoint(jobId: string, text: string): Promise<QueryJobMutationResult> {
+    await this.ensureInitialized()
+    await this.ensureHydrated(jobId)
+    return this.enqueue(async () => {
+      this.assertWritable()
+      const hydrated = this.jobs.get(jobId)
+      if (!hydrated) throw new QueryJobNotFoundError(jobId)
+      const snapshot = hydrated.snapshot
+      if (snapshot.status !== 'running') return { applied: false, job: clone(snapshot) }
+      const bounded = boundedText(text, QUERY_JOB_LIMITS.partialChars)
+      const record: QueryJobJournalRecord = {
+        schemaVersion: QUERY_JOB_SCHEMA_VERSION,
+        recordId: randomUUID(),
+        partitionDay: localPartitionDay(this.now()),
+        persistedAt: this.now().toISOString(),
+        bootId: this.options.bootId,
+        jobId: snapshot.jobId,
+        clientJobId: snapshot.clientJobId,
+        generation: snapshot.generation,
+        turnId: snapshot.turnId,
+        requestFingerprint: snapshot.requestFingerprint,
+        eventSeq: hydrated.snapshot.eventSeq,
+        type: 'steer',
+        status: snapshot.status,
+        patch: {},
+        eventData: { checkpoint: { text: bounded.text, truncated: bounded.truncated } },
+      }
+      await this.appendRecord(record)
+      this.applySteer(hydrated, record, false)
+      return { applied: true, job: clone(snapshot) }
+    })
+  }
+
+  /** 6.78.0: a steer by lineage, at its newest generation (that job is hydrated first). */
+  async findSteer(clientJobId: string, steerId: string): Promise<QueryJobSteerLookup | undefined> {
+    await this.ensureInitialized()
+    const indexed = this.steerIndex.get(`${clientJobId.toLowerCase()}:${steerId.toLowerCase()}`)
+    if (!indexed) return undefined
+    if (!await this.hydratedOrGone(indexed.jobId)) return undefined
+    const hydrated = this.jobs.get(indexed.jobId)!
+    const steer = hydrated.snapshot.steers?.find(item => item.steerId === steerId.toLowerCase())
+    if (!steer) return undefined
+    return { ...indexed, steer: clone(steer), job: clone(hydrated.snapshot) }
+  }
+
+  /** 6.78.0: the job's steers, read INSIDE the serialized queue, so every steer row appended
+   * before this call is in the answer (the coordinator seeds a new run's port from it). */
+  async queuedSteers(jobId: string): Promise<QueryJobSteer[]> {
+    await this.ensureInitialized()
+    await this.ensureHydrated(jobId)
+    return this.enqueue(async () => clone(this.jobs.get(jobId)?.snapshot.steers ?? []))
+  }
+
+  /** 6.78.0: steers a client sent to this job (carried ones do not count toward the cap). */
+  async steerCount(jobId: string): Promise<number> {
+    const snapshot = await this.getSnapshot(jobId)
+    return (snapshot.steers ?? []).filter(item => item.carriedFrom === undefined).length
+  }
+
+  /**
+   * 6.78.0: what generation `generation` of a lineage carries forward. Each steer once, from the
+   * newest generation that holds it, when that generation ended `failed` or `interrupted` and
+   * the steer was meant to apply there (never `too_late` or `unsupported`). A completed or
+   * canceled generation carries nothing.
+   */
+  async listCarryableSteers(clientJobId: string, generation: number): Promise<Array<{ steerId: string; text: string; carriedFrom: number }>> {
+    await this.ensureInitialized()
+    const prefix = `${clientJobId.toLowerCase()}:`
+    const found: Array<{ steerId: string; text: string; carriedFrom: number; at: string }> = []
+    for (const [key, indexed] of this.steerIndex) {
+      if (!key.startsWith(prefix) || indexed.generation >= generation) continue
+      if (!await this.hydratedOrGone(indexed.jobId)) continue
+      const snapshot = this.jobs.get(indexed.jobId)!.snapshot
+      if (snapshot.status !== 'failed' && snapshot.status !== 'interrupted') continue
+      const steer = snapshot.steers?.find(item => key === `${prefix}${item.steerId}`)
+      if (!steer || steer.state === 'too_late' || steer.state === 'unsupported') continue
+      found.push({ steerId: steer.steerId, text: steer.text, carriedFrom: steer.carriedFrom ?? indexed.generation, at: steer.at })
+    }
+    return found.sort((a, b) => a.carriedFrom - b.carriedFrom || a.at.localeCompare(b.at))
+      .map(({ at: _at, ...item }) => item)
+  }
+
+  /** 6.78.0: hydrate a job a steer points at; false when its journal is gone (never an error). */
+  private async hydratedOrGone(jobId: string): Promise<boolean> {
+    try {
+      await this.ensureHydrated(jobId)
+      return true
+    } catch (error) {
+      if (error instanceof QueryJobNotFoundError) return false
+      throw error
+    }
+  }
+
+  /** 6.78.0: the checkpoint of a steered run, if one was journaled (internal; never on a snapshot). */
+  private checkpointOf(jobId: string): { text: string; truncated: boolean } | undefined {
+    return this.jobs.get(jobId)?.checkpoint
+  }
+
   async markAnswerReady(
     jobId: string,
     fullText: string,
@@ -1083,6 +1494,10 @@ export class QueryJobStore {
 
   async fail(jobId: string, error: unknown): Promise<QueryJobMutationResult> {
     const current = await this.getSnapshot(jobId)
+    // 6.78.0 steer: a deadline, an inactivity kill or a second-turn error after the answer was
+    // whole completes with that answer; the steers it did not cover read not_applied.
+    const checkpoint = isTerminalQueryJobStatus(current.status) ? undefined : this.checkpointOf(jobId)
+    if (checkpoint) return this.completeFromCheckpoint(current, checkpoint.text)
     if (current.status === 'answer_ready') {
       return this.complete(jobId, {
         text: current.partialText,
@@ -1103,6 +1518,21 @@ export class QueryJobStore {
     }, { error: normalized })
   }
 
+  private completeFromCheckpoint(current: QueryJobSnapshot, text: string): Promise<QueryJobMutationResult> {
+    return this.complete(current.jobId, {
+      text,
+      attachments: current.attachments,
+      outputImageStats: current.outputImageStats,
+      provider: current.provider,
+      resolvedModel: current.resolvedModel,
+      cliSessionId: current.cliSessionId,
+      claudeRunId: current.claudeRunId,
+      codexRunId: current.codexRunId,
+      codexThreadId: current.codexThreadId,
+      cursorRunId: current.cursorRunId,
+    })
+  }
+
   async cancel(jobId: string, generation: number): Promise<QueryJobMutationResult> {
     const current = await this.getSnapshot(jobId, generation)
     if (isTerminalQueryJobStatus(current.status)) return { applied: false, job: current }
@@ -1120,6 +1550,9 @@ export class QueryJobStore {
   async interrupt(jobId: string, reason = 'server_interrupted'): Promise<QueryJobMutationResult> {
     const current = await this.getSnapshot(jobId)
     if (isTerminalQueryJobStatus(current.status)) return { applied: false, job: current }
+    // 6.78.0 steer: a restart after the answer was whole completes with that answer.
+    const checkpoint = this.checkpointOf(jobId)
+    if (checkpoint) return this.completeFromCheckpoint(current, checkpoint.text)
     if (current.status === 'answer_ready') {
       return this.complete(jobId, {
         text: current.partialText,
@@ -1134,13 +1567,30 @@ export class QueryJobStore {
         cursorRunId: current.cursorRunId,
       })
     }
-    const error: QueryJobError = {
+    // 6.78.0 restart truth: both restart paths (a crash then boot, and a graceful shutdown) get
+    // one message, `error.cause` set HERE at construction (normalizeQueryJobError keeps only an
+    // allowlisted cause), and an `interruption` record built from the job's own trail. The flag
+    // is read once per interrupt, so a restart applies a change.
+    const restartCause = (reason === 'server_restarted' || reason === 'server_shutdown') && this.restartNotice()
+      ? reason : null
+    const error: QueryJobError = restartCause ? restartError(restartCause) : {
       code: 'interrupted',
       message: reason === 'server_restarted'
         ? 'Server restarted. Prompt preserved; provider was not restarted.'
         : sanitizeQueryJobActivity(reason).text,
       retryable: true,
     }
+    // Built INSIDE the serialized write (transition's `late`), from the snapshot as it stands
+    // there, so a trail row the run journaled just before the interrupt is in the record. Pure
+    // and in memory: the graceful path stays inside its 8-second shutdown budget.
+    const late = restartCause ? (hydrated: HydratedQueryJob) => ({
+      interruption: buildInterruption({
+        job: hydrated.snapshot,
+        activityToolMode: hydrated.request.activityToolMode,
+        cause: restartCause,
+        at: this.now().toISOString(),
+      }),
+    }) : undefined
     // Only a job with a persisted provider-process ledger id can own an
     // orphan after this server process dies. Accepted/starting/context-build
     // jobs are safe to retry immediately after restart.
@@ -1154,7 +1604,7 @@ export class QueryJobStore {
     return this.transition(jobId, 'interrupted', 'interrupted', {
       error, completedAt: this.now().toISOString(),
       ...(orphanFenceUntil ? { orphanFenceUntil } : {}),
-    }, { error, ...(orphanFenceUntil ? { orphanFenceUntil } : {}) })
+    }, { error, ...(orphanFenceUntil ? { orphanFenceUntil } : {}) }, late)
   }
 
   /**
@@ -1170,10 +1620,18 @@ export class QueryJobStore {
       this.assertWritable()
       const hydrated = this.jobs.get(jobId)
       if (!hydrated) throw new QueryJobNotFoundError(jobId)
+      // 6.78.0 restart truth: a parked job carries its interruption record too.
+      const interruption = error.cause === 'crash_loop_parked' && this.restartNotice() ? buildInterruption({
+        job: hydrated.snapshot,
+        activityToolMode: hydrated.request.activityToolMode,
+        cause: 'crash_loop_parked',
+        at: this.now().toISOString(),
+      }) : undefined
       if (hydrated.snapshot.status !== 'accepted') return { applied: false, job: clone(hydrated.snapshot) }
       return this.persistMutation(hydrated, 'interrupted', 'interrupted', {
         error, completedAt: this.now().toISOString(),
-      }, { error })
+        ...(interruption ? { interruption } : {}),
+      }, { error, ...(interruption ? { interruption } : {}) })
     })
   }
 
@@ -1218,12 +1676,17 @@ export class QueryJobStore {
     }
   }
 
+  /**
+   * `late` (6.78.0) adds fields computed from the job as it stands INSIDE the serialized write,
+   * after every earlier append, to both the patch and the event data. Only interrupt passes it.
+   */
   private async transition(
     jobId: string,
     status: QueryJobStatus,
     type: QueryJobEventType,
     patch: Record<string, unknown>,
     eventData: Record<string, unknown>,
+    late?: (hydrated: HydratedQueryJob) => Record<string, unknown>,
   ): Promise<QueryJobMutationResult> {
     await this.ensureInitialized()
     await this.ensureHydrated(jobId)
@@ -1236,6 +1699,10 @@ export class QueryJobStore {
       }
       if (hydrated.snapshot.status === status || !ALLOWED_TRANSITIONS[hydrated.snapshot.status].has(status)) {
         return { applied: false, job: clone(hydrated.snapshot) }
+      }
+      if (late) {
+        const extra = late(hydrated)
+        return this.persistMutation(hydrated, status, type, { ...patch, ...extra }, { ...eventData, ...extra })
       }
       return this.persistMutation(hydrated, status, type, patch, eventData)
     })
@@ -1295,7 +1762,8 @@ export class QueryJobStore {
   private async ensureHydrated(jobId: string): Promise<void> {
     if (this.jobs.has(jobId)) return
     if (!this.identitiesByJobId.has(jobId)) throw new QueryJobNotFoundError(jobId)
-    for (const partition of this.partitions) await this.hydratePartition(partition, jobId)
+    const deltas: DeltaState = new Map()
+    for (const partition of this.partitions) await this.hydratePartition(partition, jobId, deltas)
     if (!this.jobs.has(jobId)) throw new QueryJobNotFoundError(jobId)
     this.trimHydratedJobs(jobId)
   }
@@ -1392,6 +1860,7 @@ export class QueryJobStore {
     after: number,
     listener: (event: QueryJobEvent) => void,
     trail?: QueryJobTrailSubscribe,
+    steer?: QueryJobSteerSubscribe,
   ): Promise<QueryJobSubscription> {
     await this.getSnapshot(jobId, generation)
     let closed = false
@@ -1405,8 +1874,13 @@ export class QueryJobStore {
         if (!closed && frame.generation === generation && frame.trailSeq > trailCursor) trail.listener(clone(frame))
       }
       : null
+    // 6.78.0: steer frames, only for a subscriber that asked (`?steer=1`).
+    const steerWrapped = steer
+      ? (frame: QueryJobSteerFrame) => { if (!closed && frame.generation === generation) steer.listener(clone(frame)) }
+      : null
     this.emitter.on(jobId, wrapped)
     if (trailWrapped) this.trailEmitter.on(jobId, trailWrapped)
+    if (steerWrapped) this.steerEmitter.on(jobId, steerWrapped)
     this.subscriberCount++
     this.refreshHealth()
     // Register first, then take the synchronous replay snapshot. An append can
@@ -1414,6 +1888,7 @@ export class QueryJobStore {
     // trailSeq), but can never fall into an await-sized gap between the two.
     const replay = this.buildReplay(jobId, after)
     const trailReplay = trail ? this.buildTrailReplay(jobId, trail.after) : undefined
+    const steerReplay = steer ? this.readSteers(jobId) : undefined
     // A rebuild (`cursor_ahead` or `trail_gap`) resets the client's trail to the held entries
     // and continues from `latestTrailSeq`, so the live filter does too (6.52.0 app QA). A
     // retried Messages run keeps its queue row but starts a new job whose trail restarts at 1;
@@ -1423,15 +1898,23 @@ export class QueryJobStore {
     return {
       replay,
       ...(trailReplay ? { trailReplay } : {}),
+      ...(steerReplay ? { steerReplay } : {}),
       unsubscribe: () => {
         if (closed) return
         closed = true
         this.emitter.off(jobId, wrapped)
         if (trailWrapped) this.trailEmitter.off(jobId, trailWrapped)
+        if (steerWrapped) this.steerEmitter.off(jobId, steerWrapped)
         this.subscriberCount = Math.max(0, this.subscriberCount - 1)
         this.refreshHealth()
       },
     }
+  }
+
+  /** 6.78.0: the job's steers as a client reads them now (not_applied computed). */
+  private readSteers(jobId: string): QueryJobSteer[] {
+    const snapshot = this.jobs.get(jobId)!.snapshot
+    return (snapshot.steers ?? []).map(item => ({ ...clone(item), state: steerReadState(item.state, snapshot.status) }))
   }
 
   /** The trail entries after `after`, or the whole held trail when some are gone. */
