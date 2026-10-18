@@ -181,6 +181,7 @@ import {
   type MeetingFinalizationJob,
 } from '../lib/meeting-finalization-jobs.js'
 import { enrichStandaloneMeeting } from '../lib/meeting-summary-persistence.js'
+import { bootResumeGate, type BootResumeGate } from '../lib/boot-resume.js'
 import { recordFinalPassSkip, runNemotronFinalPass, type FinalPassOptions, type FinalPassOutcome } from '../lib/nemotron-final.js'
 import { runTranscriptCleanup, type CleanupOutcome } from '../lib/transcript-cleanup.js'
 import { sweepTranscriptCleanupData } from '../lib/transcript-cleanup-screen.js'
@@ -312,6 +313,7 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
     let current = runtime.finalizationJobs.get(job.sessionId) ?? job
     if (canonicalFinalizationIsComplete(current)) {
       runtime.finalizationJobs.remove(current.sessionId)
+      bootResumeGate().forget('meeting_finalization', current.sessionId)
       return
     }
     if (current.phase === 'capture_pending') {
@@ -415,6 +417,8 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
     // capture, and never throws back at the finalization path.
     if (!MAC_CAPTURE_ID.test(current.sessionId)) triggerMeetingMergeRun('g2_finalized')
     runtime.finalizationJobs.remove(current.sessionId)
+    // 6.78.0: finished, so its crash-loop count (lib/boot-resume.ts) is done.
+    bootResumeGate().forget('meeting_finalization', current.sessionId)
     finalizationRetryCounts.delete(key)
   }).catch(error => {
     const current = runtime.finalizationJobs.get(job.sessionId) ?? job
@@ -457,16 +461,28 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
 }
 
 /** Boot hook: replay post-save HQ/operations work whose response already
- * succeeded before a prior process exited. Safe to call more than once. */
-export function resumeMeetingFinalizationJobs(): void {
-  const finalizationJobs = new MeetingFinalizationJobStore()
+ * succeeded before a prior process exited. Safe to call more than once.
+ * 6.78.0: `sessionId` resumes one job (the maintenance Retry); the rest are seams for tests. */
+export function resumeMeetingFinalizationJobs(options: {
+  sessionId?: string
+  gate?: BootResumeGate
+  finalizationJobs?: MeetingFinalizationJobStore
+  schedule?: (job: MeetingFinalizationJob) => void
+} = {}): void {
+  const finalizationJobs = options.finalizationJobs ?? new MeetingFinalizationJobStore()
   finalizationJobs.reconcileCanonicalSidecars()
+  const gate = options.gate ?? bootResumeGate()
+  const schedule = options.schedule ?? ((job: MeetingFinalizationJob) => scheduleFinalizationJob(job, {
+    finalizationJobs,
+    runBatch: runMeetingBatchPipeline,
+    scheduleBackground: task => { void task },
+  }))
   for (const job of finalizationJobs.list()) {
-    scheduleFinalizationJob(job, {
-      finalizationJobs,
-      runBatch: runMeetingBatchPipeline,
-      scheduleBackground: task => { void task },
-    })
+    if (options.sessionId !== undefined && job.sessionId !== options.sessionId) continue
+    // 6.78.0: counted (durably) BEFORE it runs, so a job that kills the process is parked
+    // after RESTART_LIMIT crashed boots. A parked job is skipped and stays in its store.
+    if (!gate.admit('meeting_finalization', job.sessionId, job.phase)) continue
+    schedule(job)
   }
 }
 
@@ -808,7 +824,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       if (alreadySaved) {
         finalizationJobs.reconcileCanonicalSidecars()
         const pendingJob = finalizationJobs.get(sessionId)
-        if (pendingJob) scheduleFinalizationJob(pendingJob, {
+        // 6.78.0: a replayed save never re-runs a job parked for crash-looping the server.
+        if (pendingJob && !bootResumeGate().isParked('meeting_finalization', sessionId)) scheduleFinalizationJob(pendingJob, {
           transcriptCleanup,
           finalizationJobs,
           runBatch,
@@ -973,6 +990,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         markCanonicalFinalizationState(saved.sidecarPath, 'complete', false)
         if (!readMacRecording(sessionId)) triggerMeetingMergeRun('g2_finalized')
         finalizationJobs.remove(sessionId)
+        bootResumeGate().forget('meeting_finalization', sessionId)
         finalizationJob = null
       }
 

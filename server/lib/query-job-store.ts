@@ -443,6 +443,11 @@ export class QueryJobStore {
     return this.requeuedJobs.splice(0)
   }
 
+  /** 6.78.0: the clientJobId (lineage) of a job, from the in-memory identities. Null when unknown. */
+  lineageOf(jobId: string): string | null {
+    return this.identitiesByJobId.get(jobId)?.clientJobId ?? null
+  }
+
   /**
    * Epoch ms until which a provider child of `sessionId` may still be running, or 0.
    * Read from the in-memory identities, so it never hydrates a journal partition.
@@ -1150,6 +1155,26 @@ export class QueryJobStore {
       error, completedAt: this.now().toISOString(),
       ...(orphanFenceUntil ? { orphanFenceUntil } : {}),
     }, { error, ...(orphanFenceUntil ? { orphanFenceUntil } : {}) })
+  }
+
+  /**
+   * 6.78.0 (crash-loop parking): end a job that never started, because handing it back on
+   * boot kept killing the server. Only an `accepted` job (no prompt byte reached a provider,
+   * so there is no orphan fence); any other status is `applied: false`. `interrupted` is
+   * terminal, so the app's Resume (the next generation of the same clientJobId) is admitted.
+   */
+  async interruptParked(jobId: string, error: QueryJobError): Promise<QueryJobMutationResult> {
+    await this.ensureInitialized()
+    await this.ensureHydrated(jobId)
+    return this.enqueue(async () => {
+      this.assertWritable()
+      const hydrated = this.jobs.get(jobId)
+      if (!hydrated) throw new QueryJobNotFoundError(jobId)
+      if (hydrated.snapshot.status !== 'accepted') return { applied: false, job: clone(hydrated.snapshot) }
+      return this.persistMutation(hydrated, 'interrupted', 'interrupted', {
+        error, completedAt: this.now().toISOString(),
+      }, { error })
+    })
   }
 
   async acknowledge(jobId: string, generation: number): Promise<QueryJobMutationResult> {

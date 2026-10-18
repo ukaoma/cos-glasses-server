@@ -158,6 +158,7 @@ import { createWorkSearchRouter } from './routes/work-search.js'
 import { isReadOnlyApiPost } from './lib/work-search.js'
 import { dataPath } from './lib/data-dir.js'
 import { loadJsonOrQuarantine, durableAtomicWriteFileSync } from './lib/atomic-fs.js'
+import { BOOT_RESUME_LEDGER_FILE, createBootResumeGate, installBootResumeGate } from './lib/boot-resume.js'
 import { WorkIntakeStore, createOptionalWorkIntakeStore } from './lib/work-intake-store.js'
 import { WorkHandoffRequestStore, createOptionalWorkHandoffRequestStore, handoffRequestCapabilities } from './lib/work-handoff-requests.js'
 import { createWorkBoardReader } from './lib/work-board-reader.js'
@@ -1151,6 +1152,14 @@ app.get('/', (_req, res) => {
   )
 })
 
+// 6.78.0: crash-loop parking (lib/boot-resume.ts). One gate per process. It opens its boot
+// in startAdmittedRuntime, before any boot resume, and gracefulShutdown marks a clean exit,
+// so only boots that follow a crash count. A Retry of a parked meeting resumes that one job.
+// COS_CRASH_LOOP_PARKING=0 turns it off (default on).
+const bootResume = installBootResumeGate(createBootResumeGate({ path: dataPath(BOOT_RESUME_LEDGER_FILE) }), {
+  resume: { meeting_finalization: sessionId => resumeMeetingFinalizationJobs({ sessionId }) },
+})
+
 // Graceful shutdown persists an interrupted terminal before provider abort.
 // The bounded force-exit keeps service managers from hanging forever on a
 // broken disk while retaining the previous session/catalog/Whisper cleanup.
@@ -1175,6 +1184,10 @@ async function gracefulShutdown(): Promise<void> {
   } catch (error) {
     console.error('[query-jobs] graceful interruption failed:', error)
   }
+  // 6.78.0: durable state is persisted, so this exit is clean and the next boot does not count
+  // toward crash-loop parking. Before the slow Whisper and TTS stops, so the 8 s force exit
+  // after this point is still a clean exit.
+  bootResume.markCleanShutdown()
   // Live Cues spawns detached trees (Cursor CLI, python with claude -p
   // grandchildren) that would survive this process's death — kill them
   // explicitly inside the 8s force-exit budget. Single-flight guarantees at
@@ -1373,6 +1386,8 @@ listenRequiredServers(listeners).then(() => {
     if (admittedRuntimeStarted) return
     admittedRuntimeStarted = true
 
+    // 6.78.0: before any boot resume. Was the last exit clean? Only boots after a crash count.
+    bootResume.openBoot()
     // Resume already-saved meetings whose post-response HQ/operations work
     // was interrupted by a prior server update or process exit.
     resumeMeetingFinalizationJobs()

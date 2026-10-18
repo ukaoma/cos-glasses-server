@@ -17,6 +17,7 @@ import { getServerInstanceId } from '../lib/server-instance-id.js'
 import { getWhisperHealth } from '../lib/whisper-local.js'
 import { getActiveTranscriptionSessionCount, getTranscriptionSessionLiveness } from './transcribe-stream.js'
 import { getVideoUploadRegistry } from '../lib/video-upload-v2.js'
+import { bootResumeGate, isBootResumeKind, resumeRetriedItem, type ParkedBootResume } from '../lib/boot-resume.js'
 
 export const maintenanceRouter = Router()
 
@@ -66,6 +67,15 @@ function operationCredentials(req: Request): MaintenanceOperationCredentials {
     nonce: typeof req.headers['x-cos-maintenance-nonce'] === 'string'
       ? req.headers['x-cos-maintenance-nonce']
       : undefined,
+  }
+}
+
+/** 6.78.0: boot-resumed work parked for crash-looping the server. Never throws. */
+function parkedSnapshot(): ParkedBootResume[] {
+  try {
+    return bootResumeGate().status().parked
+  } catch {
+    return []
   }
 }
 
@@ -133,6 +143,9 @@ function statusSnapshot(credentials: MaintenanceOperationCredentials = {}) {
     // block a binary downgrade, where an old server could erase V2 evidence.
     safeToRestart: lifecycle.safeToRestart && !jobs.shuttingDown && !videoUploads.blocksRestart,
     whisper: getWhisperHealth(),
+    // 6.78.0, additive (contractVersion unchanged): work a boot no longer resumes because
+    // it crashed the server on RESTART_LIMIT boots in a row. Retry with the route below.
+    parked: parkedSnapshot(),
   }
 }
 
@@ -153,6 +166,26 @@ function requireLoopback(req: Request, res: Response): boolean {
 
 maintenanceRouter.get('/maintenance/status', (req, res) => {
   res.json(statusSnapshot(operationCredentials(req)))
+})
+
+// 6.78.0: the person's Retry of parked boot-resumed work (lib/boot-resume.ts). Loopback and
+// the API token, like the drain routes. The count starts over; a meeting finalization is
+// resumed again now, and a query job runs again when the app Resumes it.
+maintenanceRouter.post('/maintenance/parked/:kind/:id/retry', (req, res) => {
+  if (!requireLoopback(req, res)) return
+  const { kind, id } = req.params
+  if (!isBootResumeKind(kind)) {
+    res.status(400).json({ error: 'unknown_parked_kind', retryable: false })
+    return
+  }
+  const gate = bootResumeGate()
+  if (!gate.isParked(kind, id)) {
+    res.status(404).json({ error: 'not_parked', retryable: false })
+    return
+  }
+  const entry = gate.retry(kind, id)
+  const resumed = resumeRetriedItem(kind, id)
+  res.json({ retried: true, resumed, entry })
 })
 
 maintenanceRouter.post('/maintenance/drain', (req, res) => {

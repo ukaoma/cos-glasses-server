@@ -11,6 +11,7 @@ import type { BatchTranscription } from '../lib/batch-transcript-quality.js'
 import { createMeetingRouter } from './meeting.js'
 import { createMeetingsRouter } from './meetings.js'
 import { dataPath } from '../lib/data-dir.js'
+import { RESTART_LIMIT, createBootResumeGate, installBootResumeGate } from '../lib/boot-resume.js'
 
 const TOKEN = 'meeting-route-token'
 const roots: string[] = []
@@ -488,6 +489,81 @@ describe('meeting save/list/detail API', () => {
     expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
     expect(existsSync(h.pendingAudio)).toBe(false)
     expect(readdirSync(join(h.recordingsRoot, '2026-07')).filter(name => name.endsWith('.md'))).toHaveLength(1)
+  })
+
+  it('6.78.0: a finished finalization forgets its crash-loop count', async () => {
+    const h = await harness({ batch: acceptedBatch() })
+    const ledger = join(h.parent, 'boot-resume-ledger.json')
+    const gate = installBootResumeGate(createBootResumeGate({ path: ledger, env: {}, log: () => {} }))
+    try {
+      gate.openBoot()
+      // Counted on a crashed boot, as a resumed job would be.
+      expect(gate.admit('meeting_finalization', 'meeting_route_001', 'batch_pending')).toBe(true)
+      expect(gate.status('meeting_finalization', 'meeting_route_001')).toMatchObject({ attempts: 1 })
+      const saved = await h.api('/api/meeting/save', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Forget on finish' }),
+      })
+      expect(saved.status).toBe(200)
+      await h.background[0]
+      expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
+      expect(gate.status('meeting_finalization', 'meeting_route_001')).toBeNull()
+      expect(JSON.parse(readFileSync(ledger, 'utf8')).entries).toEqual({})
+    } finally {
+      installBootResumeGate(null)
+    }
+  })
+
+  it('6.78.0: a replayed save never re-runs a job parked for crash-looping the server; after Retry it does', async () => {
+    let attempts = 0
+    const h = await harness({
+      batch: acceptedBatch(),
+      runBatch: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('simulated process interruption')
+        return acceptedBatch()
+      },
+    })
+    const first = await h.api('/api/meeting/save', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 'meeting_route_001', title: 'Parked replay' }),
+    })
+    expect(first.status).toBe(200)
+    await h.background[0]
+    expect(h.finalizationJobs.get('meeting_route_001')).toMatchObject({ phase: 'batch_pending' })
+
+    // Parked on the boot after RESTART_LIMIT crashed boots that each resumed it.
+    const ledger = join(h.parent, 'boot-resume-ledger.json')
+    for (let boot = 0; boot <= RESTART_LIMIT; boot++) {
+      const gate = createBootResumeGate({ path: ledger, env: {}, log: () => {} })
+      gate.openBoot()
+      gate.admit('meeting_finalization', 'meeting_route_001', 'batch_pending')
+    }
+    const gate = installBootResumeGate(createBootResumeGate({ path: ledger, env: {}, log: () => {} }))
+    try {
+      expect(gate.isParked('meeting_finalization', 'meeting_route_001')).toBe(true)
+      const replay = await h.api('/api/meeting/save', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: 'meeting_route_001' }),
+      })
+      expect(await replay.json()).toMatchObject({ replayed: true })
+      expect(h.background).toHaveLength(1)
+      expect(attempts).toBe(1)
+      expect(h.finalizationJobs.get('meeting_route_001')).toMatchObject({ phase: 'batch_pending' })
+
+      gate.retry('meeting_finalization', 'meeting_route_001')
+      const retried = await h.api('/api/meeting/save', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: 'meeting_route_001' }),
+      })
+      expect(await retried.json()).toMatchObject({ replayed: true })
+      await h.background[1]
+      expect(attempts).toBe(2)
+      expect(h.finalizationJobs.get('meeting_route_001')).toBeNull()
+      expect(gate.status('meeting_finalization', 'meeting_route_001')).toBeNull()
+    } finally {
+      installBootResumeGate(null)
+    }
   })
 
   it('runs the Nemotron final pass on the saved files while the audio exists, before the job finishes', async () => {

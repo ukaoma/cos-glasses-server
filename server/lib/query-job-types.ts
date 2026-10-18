@@ -198,7 +198,14 @@ export interface QueryJobError {
   message: string
   retryable?: boolean
   retryAfterMs?: number
+  /** 6.78.0: why the server ended the job, from QUERY_JOB_ERROR_CAUSES only. Additive: a
+   * client that does not read it sees the 6.77.0 error. */
+  cause?: string
 }
+
+/** 6.78.0: the only `error.cause` values a journaled error keeps. An allowlist, so no
+ * provider error (an Error's own `cause` included) can start carrying one. */
+export const QUERY_JOB_ERROR_CAUSES: ReadonlySet<string> = new Set(['crash_loop_parked'])
 
 export interface QueryJobActivity {
   eventSeq: number
@@ -593,6 +600,7 @@ export function normalizeQueryJobError(error: unknown, fallbackCode = 'query_job
     ...(candidate.retryable === true ? { retryable: true } : {}),
     ...(typeof candidate.retryAfterMs === 'number' && Number.isFinite(candidate.retryAfterMs)
       ? { retryAfterMs: Math.max(0, Math.ceil(candidate.retryAfterMs)) } : {}),
+    ...(typeof candidate.cause === 'string' && QUERY_JOB_ERROR_CAUSES.has(candidate.cause) ? { cause: candidate.cause } : {}),
   }
 }
 

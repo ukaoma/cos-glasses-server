@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { RESTART_LIMIT, createBootResumeGate, installBootResumeGate } from '../lib/boot-resume.js'
 
 const state = vi.hoisted(() => ({ activeJobs: 0, heldJobs: 0, requeuedOnBoot: 0, activeSessions: 0, staleSessions: 0 }))
 
@@ -261,6 +262,79 @@ describe('managed maintenance rev4 contract', () => {
     expect(await response.json()).toMatchObject({ error: 'invalid_maintenance_operation' })
 
     response = await fetch(`${base}/api/maintenance/whisper/restart`, { method: 'POST' })
+    expect(response.status).toBe(404)
+  })
+})
+
+describe('6.78.0: parked boot-resumed work', () => {
+  /** A gate whose ledger has one meeting finalization parked after RESTART_LIMIT + 1 crashed boots. */
+  function parkedGate(resumed: string[] = []) {
+    const ledger = join(dataDir, `boot-resume-${Math.random().toString(36).slice(2)}.json`)
+    for (let boot = 0; boot <= RESTART_LIMIT; boot++) {
+      const gate = createBootResumeGate({ path: ledger, env: {}, log: () => {} })
+      gate.openBoot()
+      gate.admit('meeting_finalization', 'g2-parked-1', 'ops_pending')
+      gate.admit('query_job', 'lineage-counting', 'start')
+      if (boot === RESTART_LIMIT) gate.forget('query_job', 'lineage-counting')
+    }
+    return installBootResumeGate(createBootResumeGate({ path: ledger, env: {}, log: () => {} }), {
+      resume: { meeting_finalization: id => resumed.push(id) },
+    })
+  }
+
+  afterEach(() => { installBootResumeGate(null) })
+
+  it('status carries parked[] additively, and an empty list when nothing is parked or no gate is installed', async () => {
+    let body = await (await fetch(`${base}/api/maintenance/status`)).json() as any
+    expect(body.parked).toEqual([])
+    expect(body.contractVersion).toBe(2)
+
+    parkedGate()
+    body = await (await fetch(`${base}/api/maintenance/status`)).json() as any
+    expect(body.contractVersion).toBe(2)
+    expect(body.parked).toEqual([{
+      kind: 'meeting_finalization',
+      id: 'g2-parked-1',
+      phase: 'ops_pending',
+      attempts: RESTART_LIMIT + 1,
+      parkedAt: expect.any(String),
+      reason: 'restart_limit',
+    }])
+    // Every 6.77.0 field is still there.
+    expect(body).toMatchObject({ managed: true, safeToRestart: expect.any(Boolean), lifecycle: expect.any(Object), whisper: expect.any(Object) })
+  })
+
+  it('Retry answers 200 with the entry, starts its count over and resumes that meeting now', async () => {
+    const resumed: string[] = []
+    const gate = parkedGate(resumed)
+    const response = await fetch(`${base}/api/maintenance/parked/meeting_finalization/g2-parked-1/retry`, { method: 'POST' })
+    expect(response.status).toBe(200)
+    const body = await response.json() as any
+    expect(body).toMatchObject({
+      retried: true,
+      resumed: true,
+      entry: { kind: 'meeting_finalization', id: 'g2-parked-1', parked: false, attempts: 0, retriedAt: expect.any(String) },
+    })
+    expect(resumed).toEqual(['g2-parked-1'])
+    expect(gate.isParked('meeting_finalization', 'g2-parked-1')).toBe(false)
+    const status = await (await fetch(`${base}/api/maintenance/status`)).json() as any
+    expect(status.parked).toEqual([])
+  })
+
+  it('Retry of something not parked is 404 and changes nothing; an unknown kind is 400', async () => {
+    const resumed: string[] = []
+    const gate = parkedGate(resumed)
+    let response = await fetch(`${base}/api/maintenance/parked/query_job/lineage-unknown/retry`, { method: 'POST' })
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ error: 'not_parked' })
+    response = await fetch(`${base}/api/maintenance/parked/finalization/g2-parked-1/retry`, { method: 'POST' })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: 'unknown_parked_kind' })
+    expect(resumed).toEqual([])
+    expect(gate.isParked('meeting_finalization', 'g2-parked-1')).toBe(true)
+    // With no gate installed, nothing is parked.
+    installBootResumeGate(null)
+    response = await fetch(`${base}/api/maintenance/parked/meeting_finalization/g2-parked-1/retry`, { method: 'POST' })
     expect(response.status).toBe(404)
   })
 })
