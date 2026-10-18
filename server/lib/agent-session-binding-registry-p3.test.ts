@@ -70,6 +70,20 @@ describe('the attempt journal: written with the pin, settled with the unpin', ()
     expect(open().attemptFor('claude', THREAD, 'ct-journal-2')).toEqual({ attempt: { bootId: 'boot-1', at: T0, mode: 'turn', exit: 'sent' }, evictedThrough: null })
   })
 
+  it('a turn whose pin was already dropped still records its exit: an attempt-only commit is a commit', () => {
+    // The leaked-pin reap can take a pin while its turn is still running. When that turn
+    // ends, its unpin changes no pin, but the exit must land: a `pending` left behind reads
+    // as "in flight" for the rest of this boot and as unknown after the next restart.
+    const r = open({ stalePinMs: 1_000 })
+    attached(r)
+    r.pin('bind-1', 'job-1', T0, { attempt: { clientTurnId: 'ct-journal-9', mode: 'turn' } })
+    expect(r.reap(T0 + 2_000).pinsDropped).toBe(1)
+    expect(r.get('bind-1')?.pinnedJobs).toEqual([])
+    expect(r.unpin('bind-1', 'job-1', T0 + 3_000, { attemptExit: { clientTurnId: 'ct-journal-9', exit: 'sent' } }).reason).toBeNull()
+    expect(disk().attempts[KEY]['ct-journal-9'].exit).toBe('sent')
+    expect(open().attemptFor('claude', THREAD, 'ct-journal-9')?.attempt?.exit).toBe('sent')
+  })
+
   it('with no extras, a pin writes the 6.77 shape: no pinMeta, no attempts key', () => {
     const r = open()
     attached(r)
@@ -103,6 +117,16 @@ describe('the attempt journal: written with the pin, settled with the unpin', ()
     expect(r.beginAttempt('claude', 'not a thread', 'ct-steer-2', 'steer', T0)).toBe(false)
   })
 
+  it('findTurnForTarget reads only the bindings of that thread', () => {
+    const OTHER = 'b5c3c5ee-f51d-4c19-9b22-d9ab129d208e'
+    const r = open()
+    attached(r)
+    r.recordTurn('bind-1', 'ct-scoped-01', { outcome: 'completed', status: 200 }, T0 + 1)
+    expect(r.findTurnForTarget('claude', THREAD, 'ct-scoped-01')?.result).toMatchObject({ outcome: 'completed' })
+    expect(r.findTurnForTarget('claude', OTHER, 'ct-scoped-01')).toBeNull()
+    expect(r.findTurnForTarget('codex', THREAD, 'ct-scoped-01')).toBeNull()
+  })
+
   it('a degraded store answers null (unknown), never "no attempt"', () => {
     writeFileSync(storePath, '{ not json')
     const r = open()
@@ -117,9 +141,17 @@ describe('the attempt journal: written with the pin, settled with the unpin', ()
     r.beginAttempt('claude', THREAD, 'ct-new-0001', 'steer', T0 + ATTEMPT_RETENTION_MS + 1)
     const lookup = open().attemptFor('claude', THREAD, 'ct-old-0001')
     expect(lookup).toEqual({ attempt: null, evictedThrough: T0 })
-    // Count: one target past MAX_ATTEMPTS_PER_TARGET sheds its oldest.
+    // Count: one target past MAX_ATTEMPTS_PER_TARGET sheds its oldest. The full journal is
+    // seeded on disk rather than written one durable commit at a time (257 fsyncs ran past
+    // the 5 s test budget on a loaded Mac); the write that crosses the cap is the real one.
+    const raw = disk()
+    for (let i = 0; i < MAX_ATTEMPTS_PER_TARGET; i++) {
+      raw.attempts[KEY][`ct-count-${String(i).padStart(4, '0')}`] = { bootId: 'boot-1', at: T0 + ATTEMPT_RETENTION_MS + 10 + i, mode: 'turn', exit: 'sent' }
+    }
+    writeFileSync(storePath, JSON.stringify(raw))
     const c = open()
-    for (let i = 0; i <= MAX_ATTEMPTS_PER_TARGET; i++) c.beginAttempt('claude', THREAD, `ct-count-${String(i).padStart(4, '0')}`, 'turn', T0 + ATTEMPT_RETENTION_MS + 10 + i)
+    expect(c.attemptFor('claude', THREAD, 'ct-count-0000')?.attempt?.exit).toBe('sent')
+    expect(c.beginAttempt('claude', THREAD, `ct-count-${String(MAX_ATTEMPTS_PER_TARGET).padStart(4, '0')}`, 'turn', T0 + ATTEMPT_RETENTION_MS + 10 + MAX_ATTEMPTS_PER_TARGET)).toBe(true)
     expect(open().attemptFor('claude', THREAD, 'ct-count-0000')?.attempt).toBeNull()
     expect(open().attemptFor('claude', THREAD, 'ct-count-0000')?.evictedThrough).toBeGreaterThanOrEqual(T0 + ATTEMPT_RETENTION_MS + 10)
   })
@@ -151,6 +183,9 @@ describe('pins a dead boot left: released at the orphan window, never before', (
     const life2 = open({ bootId: 'boot-2', now: T0 })
     expect(life2.attachBlocked('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS - 1)).toBe(true)
     expect(life2.orphanPinHold('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS - 1)).toEqual({ releasesAt: T0 + QUERY_JOB_ORPHAN_FENCE_MS })
+    expect(life2.get('bind-1')?.pinnedJobs).toEqual(['job-1'])
+    // Due but not yet released (the hold is a read; it releases nothing): no time in the past.
+    expect(life2.orphanPinHold('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toBeNull()
     expect(life2.get('bind-1')?.pinnedJobs).toEqual(['job-1'])
     expect(life2.attachBlocked('claude', THREAD, T0 + QUERY_JOB_ORPHAN_FENCE_MS)).toBe(false)
     expect(life2.get('bind-1')?.pinnedJobs).toEqual([])

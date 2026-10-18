@@ -191,6 +191,39 @@ describe('every exit, one key per case', () => {
     })
   })
 
+  // The Codex app's own queue (6.51.0): the hop runs when the app holds the thread idle.
+  const heldByCodexApp: Occupancy = {
+    attachable: true, reason: null, idleHolder: true,
+    owners: [{ provider: 'codex', threadId: CODEX, pid: 4242, source: 'codex-writer-lock', selfOwned: false }],
+  }
+  const codexCases: Array<[string, NonNullable<AgentSessionBindingsDeps['deliverCodexLiveTurn']>, string]> = [
+    ['codex queue row verified', async () => ({ ok: true, reason: 'delivered', verifiedBy: 'codex-queue', queuedId: 'q-1' }), 'sent'],
+    ['codex queue write unverified', async () => ({ ok: false, reason: 'unverified' }), 'unknown'],
+    ['codex queue hop throws', async () => { throw new Error('transport bug') }, 'unknown'],
+  ]
+  codexCases.forEach(([name, hop, exit], i) => {
+    it(`${name}: ${exit}`, async () => {
+      const spawns: string[] = []
+      await start(deps(wire(open()), {
+        occupancy: () => heldByCodexApp,
+        deliverCodexLiveTurn: hop,
+        deliverAttachedTurn: async request => { spawns.push(request.turnId); return { status: 'completed', nativeRevisionAfter: 'head-1' } },
+      }))
+      const a = await attach('codex', CODEX)
+      const id = `ct-codex-exit-${i}`
+      await post(`/api/agent-sessions/bindings/${a.bindingId}/turns`, { clientTurnId: id, prompt: 'also check the footer', epoch: a.epoch, targetKey: targetKey('codex', CODEX) })
+      const until = Date.now() + 3_000
+      let seen: string | undefined
+      for (;;) {
+        seen = open().attemptFor('codex', CODEX, id)?.attempt?.exit
+        if ((seen && seen !== 'pending') || Date.now() > until) break
+        await new Promise(r => setTimeout(r, 10))
+      }
+      expect(seen).toBe(exit)
+      expect(spawns).toEqual([])
+    })
+  })
+
   it('flags off: no pin metadata and no attempts in the store, ever', async () => {
     process.env.COS_QUEUE_RECONCILE = '0'
     process.env.COS_PIN_BOOT_REAP = '0'

@@ -104,6 +104,9 @@ describe('transcriptShowsPrompt: exact, wrapper-aware, after `since`', () => {
     expect(transcriptShowsPrompt('claude', [user(prompt, T0 - 1)], prompt, T0)).toBe(false)
     expect(transcriptShowsPrompt('claude', [user(prompt, null)], prompt, T0)).toBe(false)
     expect(transcriptShowsPrompt('claude', [user([{ type: 'tool_result', content: prompt }])], prompt, T0)).toBe(false)
+    // A row that carries a tool result is tool traffic, whatever text rides beside it: never
+    // the person's turn. Erring to "no evidence" reads unknown, which is never resent.
+    expect(transcriptShowsPrompt('claude', [user([{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }, { type: 'text', text: prompt }])], prompt, T0)).toBe(false)
     expect(transcriptShowsPrompt('claude', null, prompt, T0)).toBe(false)
     expect(transcriptShowsPrompt('claude', [user(prompt)], '   ', T0)).toBe(false)
   })

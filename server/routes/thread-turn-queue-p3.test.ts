@@ -177,6 +177,22 @@ describe('the restart reconcile settles what a dead boot left delivering', () =>
     expect(onDisk(dead.clientTurnId)?.status).toBe('delivering')
   })
 
+  it('a row another pass settled while the evidence was read is left as that pass settled it', async () => {
+    gate = { attachable: true, reason: null }
+    const t = stranded()
+    writeQueue('claude', threadId, [t])
+    // Two sweeps overlap (the drain kick and the tick). The first settles the row while the
+    // second awaits its own evidence; the second must not put a delivered turn back to wait.
+    const evidence = async (x: QueuedThreadTurn): Promise<DeliveryEvidence> => {
+      writeQueue('claude', threadId, readQueue('claude', threadId, clock).map(r => r.clientTurnId === x.clientTurnId
+        ? { ...r, status: 'delivered' as const, reason: 'reconciled_after_restart', settledAt: clock } : r))
+      return 'not_delivered'
+    }
+    await drainThread('claude', threadId, deps({ bootId: 'boot-live', deliveryEvidence: evidence }))
+    expect(delivered).toEqual([])
+    expect(onDisk(t.clientTurnId)).toMatchObject({ status: 'delivered', reason: 'reconciled_after_restart' })
+  })
+
   it('a legacy (unstamped) row reads unknown even when the evidence says not_delivered', async () => {
     const t = row({ status: 'delivering', attempts: 1 })
     writeQueue('claude', threadId, [t])
@@ -240,6 +256,15 @@ describe('publicRow: reason copy, delivery state, mode, resend links and resenda
   it('flags on: the contract queue_row for a refused unknown row', () => {
     const r = row({ clientTurnId: CONTRACT.queue_row.clientTurnId, status: 'refused', reason: 'delivery_unknown_after_restart', deliveryState: 'unknown', settledAt: clock })
     expect(publicRow(r, -1)).toMatchObject(CONTRACT.queue_row)
+  })
+
+  it('the reason line belongs to COS_QUEUE_RECONCILE: off, no reasonCopy even while Send again is on', () => {
+    const r = row({ status: 'refused', reason: 'delivery_attempts_exhausted', settledAt: clock })
+    expect(publicRow(r, -1)).toMatchObject({ reasonCopy: 'Not sent: the session refused it five times.', resendable: true })
+    process.env.COS_QUEUE_RECONCILE = '0'
+    const off = publicRow(r, -1)
+    expect(off).not.toHaveProperty('reasonCopy')
+    expect(off).toMatchObject({ resendable: true })
   })
 
   it('resendable only on refused or expired rows, and only with COS_QUEUE_RESEND on', () => {
