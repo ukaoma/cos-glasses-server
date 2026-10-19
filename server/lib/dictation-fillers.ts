@@ -12,6 +12,8 @@
  * - hyphenated or apostrophe forms ("Uh-oh", "uh-huh", "mm-hmm", "um's"): they carry meaning.
  * - words that merely contain the letters ("umbrella", "err", "ahead", "hmmingbird").
  * - "mm" after a number ("5 mm"): a unit.
+ * - a capitalized token away from a sentence start ("Ask Ah Kow"): a name.
+ * - "uh huh", "uh oh" and "mm hmm" written without a hyphen: answers, not hesitations.
  * - "like", "you know", "I mean": filler only sometimes, so the model decides, not a regex.
  * A filler inside quotes is removed like any other; dictation rarely quotes a hesitation.
  * If nothing but fillers was said, the original text is returned unchanged.
@@ -44,15 +46,21 @@ export function stripDisfluencies(text: string): string {
     const token = match[0]
     let before = rest.slice(0, match.index)
     let after = rest.slice(match.index + token.length)
+    const atStart = sentenceStart(out + before)
     const keep = (token.length > 1 && token === token.toUpperCase())
       || (/^mm+$/i.test(token) && /\d[ \t]*$/.test(out + before))
+      // A capital away from a sentence start is a name ("Ask Ah Kow"), not a hesitation.
+      || (!atStart && /^[A-Z]/.test(token))
+      // Two-word answers said without a hyphen: "uh huh", "uh oh", "mm hmm".
+      || (/^uh$/i.test(token) && /^[ \t]+(huh|oh)(?![\p{L}\p{N}'’-])/iu.test(after))
+      || (/^mm$/i.test(token) && /^[ \t]+hm+(?![\p{L}\p{N}'’-])/iu.test(after))
+      || (/^hm+$/i.test(token) && /(?<![\p{L}\p{N}'’-])mm[ \t]+$/iu.test(out + before))
     if (keep) {
       out += before + token
       rest = after
       continue
     }
     removed = true
-    const atStart = sentenceStart(out + before)
     const spaceBefore = /[ \t]$/.test(before) || (before === '' && /[ \t]$/.test(out))
     after = atStart && OWN_SENTENCE_END.test(after)
       ? after.replace(OWN_SENTENCE_END, '')

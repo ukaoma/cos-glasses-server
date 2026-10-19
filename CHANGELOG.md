@@ -21,6 +21,7 @@ Miles, 2026-10-19: AI polish for Mac dictation failed on every dictation from 11
 - **Filler pass.** A deterministic pass runs before the model and on every skip path, for messages and prompt drafts only. It removes standalone um, umm, uh, uhh, uhm, er, erm, ah, ahh, hmm, hm, mm, mhm and their elongations, in any case.
   - It cleans the comma, ellipsis or dash after the filler, drops the comma before closing punctuation ("I think, uh." becomes "I think."), and hands a sentence-start capital to the next word. Lowercase input stays lowercase.
   - It leaves ALL-CAPS tokens alone (UM, ER, AH are acronyms), as well as hyphen and apostrophe forms (Uh-oh, uh-huh, mm-hmm), words that contain the letters (umbrella, err, ahead) and "mm" after a number.
+  - It also keeps a capitalized token away from a sentence start, as a name or initial ("Ask Ah Kow", "Hm Tran"), and "uh huh", "uh oh" and "mm hmm" written without a hyphen. "uh hmm" is still two hesitations and is removed.
   - A filler inside quotes is removed like any other. If nothing but fillers was said, the text is unchanged.
   - Meeting lines are never touched, so a transcript stays faithful.
   - `COS_DICTATION_FILLER_PASS=0` turns it off.
@@ -39,10 +40,13 @@ Miles, 2026-10-19: AI polish for Mac dictation failed on every dictation from 11
   | Sonnet v1 | 4 | 2/10 | 1.000 | 0 | 11/11 |
   | Sonnet v2 | 0 | 10/10 | 0.994 | 0 | 11/11 |
 
-  The whole recall difference is one case: v2 drops "let me think" from "uh hmm let me think the deck needs like three more slides".
+  - **One-case miss, accepted.** The whole recall difference is one case: v2 drops "let me think" from "uh hmm let me think the deck needs like three more slides".
+    - That misses the strict adoption rule ("not worse on content-word recall") by one case per model.
+    - It was accepted because "let me think" there is a spoken hesitation, which is what this polish is meant to remove.
+  - **Filler pass alone: 0.976 recall, but no dropped word.** In all three of its misses, the pass returned the input unchanged; the reference expected the model's spelling fixes (Tableau, Priya, HubSpot, POS). A test now runs the pass over all 45 dictations and fails if it removes anything but a filler token.
 - **Managed runtime.** All six variables are in `managed-runtime-contract.json` `optionalEnvironment`: the three bucket caps, the legacy cap, `COS_DICTATION_POLISH_PROMPT` and `COS_DICTATION_FILLER_PASS`.
 - **Not changed.** The phone's meeting polish still runs. Its own 200-a-day bucket now bounds it, and it can no longer starve Mac dictation. Removing it is a companion decision.
-- **Checks.** Mutation gate `server/scripts/dictation-polish-mutation-gate.mjs` (not packaged): 42 of 42 guard mutants killed by named tests against a proven green baseline (102 tests in 5 files).
+- **Checks.** Mutation gate `server/scripts/dictation-polish-mutation-gate.mjs` (not packaged): 47 of 47 guard mutants killed by named tests against a proven green baseline (113 tests in 5 files).
 
 ## 6.79.0 - Live cue verdicts: every cue is logged, rated from COS Control, and listed for Friday's tuning
 

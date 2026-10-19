@@ -47,6 +47,12 @@ describe('6.79.1 deterministic filler pass', () => {
     ['He said "um, no"', 'He said "no"'],
     ['First line\num, second line', 'First line\nsecond line'],
     ['First line\nUm, second line', 'First line\nSecond line'],
+    // A filler next to a kept name is still removed.
+    ['Ask, um, Ah Kow to join', 'Ask, Ah Kow to join'],
+    ['uh uh the deck', 'the deck'],
+    // Two hesitations in a row are not an answer.
+    ['uh hmm let me think', 'let me think'],
+    ['Uh hmm, the plan', 'The plan'],
     // A doubled pause mark left at the start goes too.
     ['um,, so we go', 'so we go'],
   ])('%j -> %j', (input, expected) => {
@@ -68,6 +74,14 @@ describe('6.79.1 deterministic filler pass', () => {
     'HMM is the model name',
     // A unit after a number.
     'Use a 5 mm bolt and a 10mm spacer',
+    // A capital away from a sentence start is a name, or an initial.
+    'Ask Ah Kow to join the call',
+    'Loop in Er Lin and Hm Tran',
+    'The note from Mm Patel is attached',
+    // Two-word answers said without a hyphen.
+    'He said uh huh and left',
+    'uh oh, the build broke',
+    'She went mm hmm and nodded',
     // Nothing to do.
     'Plain text with no hesitation.',
     ', and a leading comma stays when nothing was removed',
@@ -78,6 +92,21 @@ describe('6.79.1 deterministic filler pass', () => {
 
   it('returns the original when every word was a filler', () => {
     for (const input of ['Um.', 'uh, um', 'Hmm?', ' mm ']) expect(stripDisfluencies(input)).toBe(input)
+  })
+
+  it('on all 45 synthetic eval dictations, removes only filler tokens and never another word', async () => {
+    const { CASES, words } = await import('../scripts/dictation-polish-eval.js')
+    const FILLER = /^(um+|uhm|uh+|erm?|ah+|hm+|mm+|mhm)$/
+    for (const c of CASES) {
+      const before = words(c.input), after = words(stripDisfluencies(c.input))
+      const removed = [...before]
+      for (const w of after) {
+        const i = removed.indexOf(w)
+        expect(i, `${c.id} gained "${w}"`).toBeGreaterThanOrEqual(0)
+        removed.splice(i, 1)
+      }
+      for (const w of removed) expect(w, `${c.id} dropped "${w}"`).toMatch(FILLER)
+    }
   })
 
   it('is idempotent', () => {
