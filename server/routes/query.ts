@@ -8,8 +8,9 @@ import { errMsg } from '../lib/utils.js'
 import {
   isCursorModel,
   normalizeEffortPreference,
-  normalizeModelPreference,
 } from '../../shared/model-preference.js'
+import { parsePreference } from '../../shared/key-preference.js'
+import type { KeyProfileTurn } from '../lib/key-profile-routing.js'
 import { QueryAttachmentError, resolveQueryAttachments } from '../lib/query-attachments.js'
 import { getMediaStore } from '../lib/media-store.js'
 import { mergeMediaAttachmentRefs } from '../../shared/media-attachment.js'
@@ -92,8 +93,11 @@ queryRouter.post('/query', async (req, res) => {
     return res.status(400).json({ error: 'query string or attachment required' })
   }
 
-  // Validate model if provided
-  const validModel = normalizeModelPreference(model)
+  // Validate model if provided. Key lanes K1 (plan 5.2): Accept. A `profile:<id>` is passed to
+  // model-router as is (it runs on the profile or is refused there); every family guard below
+  // reads the closed slot, so a model slot behaves exactly as before.
+  const requestedBinding = parsePreference(model)
+  const validModel = requestedBinding?.kind === 'model' ? requestedBinding.value : undefined
   const validEffort = normalizeEffortPreference(effort)
 
   // Validate globalMsgNum if provided
@@ -136,12 +140,17 @@ queryRouter.post('/query', async (req, res) => {
     done = true
   })
 
+  // Set only by model-router's onKeyProfileTurn: the binding is the turn's model on the stream.
+  let keyTurn: KeyProfileTurn | undefined
   try {
     const sid = await callModelStreaming(resolvedQuery || '', sessionId, {
+      ...(requestedBinding?.kind === 'model' ? {} : {
+        onKeyProfileTurn: (turn: KeyProfileTurn) => { keyTurn = turn },
+      }),
       onStart: (model, sid, cliSessionId, metadata) => {
         streamSessionId = sid
         if (!done) {
-          const payload = { model, sessionId: sid, cliSessionId, ...metadata }
+          const payload = { model: keyTurn ? keyTurn.binding : model, sessionId: sid, cliSessionId, ...metadata }
           res.write(`event: start\ndata: ${JSON.stringify(payload)}\n\n`)
           emitDisplay({ type: 'start', data: payload })
         }
@@ -192,7 +201,7 @@ queryRouter.post('/query', async (req, res) => {
             const attachments = mergeMediaAttachmentRefs(attachmentRefs, metadata?.outputAttachments)
             const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
             const payload = {
-              text: fullText, sessionId: streamSessionId, model, cliSessionId, ...runMetadata,
+              text: fullText, sessionId: streamSessionId, model: keyTurn ? keyTurn.binding : model, cliSessionId, ...runMetadata,
               ...(attachments.length > 0 ? { attachments } : {}),
             }
             res.write(`event: done\ndata: ${JSON.stringify(payload)}\n\n`)
@@ -215,7 +224,7 @@ queryRouter.post('/query', async (req, res) => {
           maintenanceLease.release()
         }
       },
-    }, validModel, imageInputs,
+    }, requestedBinding?.kind === 'profile' ? model as KeyProfileTurn['binding'] : validModel, imageInputs,
       // Pass reference if provided (for "recall message N" feature)
       reference && typeof reference === 'object' && reference.query && reference.response
         ? { query: String(reference.query), response: String(reference.response) }

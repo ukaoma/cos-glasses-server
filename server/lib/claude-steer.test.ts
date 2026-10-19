@@ -162,8 +162,11 @@ describe('the run model, resolved exactly as model-router resolves it', () => {
 
   it('pins the order model-router.ts uses (a change there must change this module too)', () => {
     const router = readFileSync(new URL('./model-router.ts', import.meta.url), 'utf8')
-    expect(router).toContain('const resolvedModel = normalizeModelPreference(model) ?? sessionModel ?? envDefault ?? DEFAULT_MODEL')
-    expect(router).toContain('const envDefault = normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL)')
+    // Key lanes K1 (P6): parsePreference's model branch IS normalizeModelPreference, and
+    // closedEnvDefaultModel returns normalizeModelPreference(raw), so the order is unchanged.
+    expect(router).toContain('const requested = parsePreference(model)')
+    expect(router).toContain("const resolvedModel = (requested?.kind === 'model' ? requested.value : undefined) ?? sessionModel ?? envDefault ?? DEFAULT_MODEL")
+    expect(router).toContain('const envDefault = closedEnvDefaultModel(process.env.COS_G2_DEFAULT_MODEL)')
   })
 
   it('the provider of a model, with anything else falling through to Claude', () => {

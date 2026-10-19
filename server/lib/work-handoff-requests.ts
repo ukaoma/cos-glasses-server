@@ -23,6 +23,7 @@ import { isSafeDomainName } from './domains.js'
 import { acquireServerInstanceLock, type ServerInstanceLock } from './server-instance-lock.js'
 import { parseWorkSessionId, modelProvider, UUID_V4, FORK_PROVIDERS } from './work-activity.js'
 import { normalizeModelPreference } from '../../shared/model-preference.js'
+import { KEY_PROFILE_REJECT_CODE, KEY_PROFILE_WORK_REJECT, keyProfileRejectApplies } from './key-profile-rejects.js'
 
 export class WorkHandoffRequestError extends Error {
   /** `extra` goes into the error body next to the code (the daily cap's `resetsAt`). */
@@ -136,6 +137,8 @@ export function parseHandoffRequest(body: unknown, defaultModel: string): { inpu
   let model: string | undefined
   if (given(body.model)) {
     model = normalizeModelPreference(body.model)
+    // Key lanes K1 (plan 5.2): Reject, and say why. Work hands off subscription sessions only.
+    if (!model && keyProfileRejectApplies(body.model)) throw new WorkHandoffRequestError(KEY_PROFILE_REJECT_CODE, 400, KEY_PROFILE_WORK_REJECT)
     if (!model) throw invalid('Choose a model slot this server knows.')
   }
   let note: string | undefined

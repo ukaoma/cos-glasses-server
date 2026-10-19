@@ -9,7 +9,7 @@ import { dataPath } from './data-dir.js'
 import { currentMessageEra, LEGACY_MESSAGE_ERA } from './message-era.js'
 import { durableQueryJobsEnabled, messagesSteerEnabled, messagesTrailEnabled } from './query-job-feature.js'
 import { claudeSupportsSteer } from './claude-cli-support.js'
-import { providerOfModel, resolveRunModel } from './claude-steer.js'
+import { steerProviderFor } from './claude-steer.js'
 import { QueryJobCoordinator, type QueryJobRunner } from './query-job-coordinator.js'
 import { QueryJobStore, createQueryJobJournalStorage } from './query-job-store.js'
 import {
@@ -17,7 +17,6 @@ import {
   isCursorModel,
   isOllamaModel,
   normalizeEffortPreference,
-  normalizeModelPreference,
   type CursorExecutionMode,
   type ModelPreference,
 } from '../../shared/model-preference.js'
@@ -26,10 +25,15 @@ import { attachmentHistoryPrefix, defaultAttachmentRequest } from '../../shared/
 import {
   findExchangesByJobIdentity,
   flushConversationToDisk,
+  getSessionBinding,
   getSessionModel,
   reconcileExchangeByJobIdentity,
   removeExchangesByJobIdentity,
+  type KeyProfileBinding,
+  type SessionModelBinding,
 } from './conversation.js'
+import { parsePreference, profilePreference } from '../../shared/key-preference.js'
+import { linkageProviderForEngine, profileSteerProvider, type KeyProfileTurn } from './key-profile-routing.js'
 import {
   isTerminalQueryJobStatus,
   type QueryJobProviderLinkage,
@@ -118,6 +122,38 @@ export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<
   }
 }
 
+/**
+ * Plan 5.2 Accept by syntax for the terminal projection: a model slot exactly as
+ * normalizeModelPreference gives it, or `profile:<id>`. Same rule as conversation's
+ * normalizeSessionBinding, computed here so the projection needs nothing new from the store.
+ */
+function requestBinding(model: unknown): SessionModelBinding | undefined {
+  const parsed = parsePreference(model)
+  if (!parsed) return undefined
+  return parsed.kind === 'model' ? parsed.value : profilePreference(parsed.id) as KeyProfileBinding
+}
+
+/** Linkage provider for a keyed turn: the profile's engine. Direct (Lane C) carries none. */
+function keyProfileLinkageProvider(turn: KeyProfileTurn): { provider?: 'claude' | 'codex' } {
+  const provider = linkageProviderForEngine(turn.profile.engine)
+  return provider ? { provider } : {}
+}
+
+/**
+ * The steer gate's provider for a job (P6 owns this; P3 consumes it). With no profile anywhere
+ * this is exactly `providerOfModel(resolveRunModel(...))`, as in 6.78.0.
+ */
+export function steerProviderForJob(request: Pick<QueryJobRequest, 'model' | 'sessionId'>): ReturnType<typeof profileSteerProvider> {
+  const verdict = steerProviderFor(
+    request.model,
+    getSessionModel(request.sessionId),
+    process.env.COS_G2_DEFAULT_MODEL,
+    () => getSessionBinding(request.sessionId),
+  )
+  if (verdict.kind === 'profile_session') return profileSteerProvider(verdict.profileId)
+  return verdict.provider
+}
+
 function providerFor(model: ModelPreference): 'claude' | 'codex' | 'cursor' | 'ollama' {
   if (isOllamaModel(model)) return 'ollama'
   if (isCursorModel(model)) return 'cursor'
@@ -167,7 +203,7 @@ export async function projectPublicConversationTerminal(
     request.globalMsgNum,
     request.attachmentRefs,
     request.messageEra,
-    normalizeModelPreference(request.model),
+    requestBinding(request.model),
     request.origin,
   )
   reconcileExchangeByJobIdentity(
@@ -178,7 +214,7 @@ export async function projectPublicConversationTerminal(
     request.globalMsgNum,
     mergeMediaAttachmentRefs(outputAttachments, existingOutputAttachments),
     request.messageEra,
-    normalizeModelPreference(request.model),
+    requestBinding(request.model),
     request.origin,
   )
   flushConversationToDisk()
@@ -204,19 +240,29 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
     sessionId: request.sessionId,
   })
   const imageInputs = resolvedAttachments.inputs.length > 0 ? resolvedAttachments.inputs : undefined
-  const validModel = normalizeModelPreference(request.model)
+  // Key lanes K1 (plan 5.2): Accept. A `profile:<id>` goes to model-router, which runs it on the
+  // profile's engine or refuses it; the closed slot keeps every family guard below unchanged.
+  const requestedBinding = parsePreference(request.model)
+  const validModel = requestedBinding?.kind === 'model' ? requestedBinding.value : undefined
   const validEffort = normalizeEffortPreference(request.effort)
   let activeModel = validModel
+  // Set only by model-router's onKeyProfileTurn, so a subscription turn never sees it.
+  let keyTurn: KeyProfileTurn | undefined
+  const linkageFor = (model: ModelPreference) => keyTurn
+    ? { ...keyProfileLinkageProvider(keyTurn), resolvedModel: keyTurn.binding }
+    : { provider: providerFor(model), resolvedModel: model }
 
   await callModelStreaming(
     request.query,
     request.sessionId,
     {
+      ...(requestedBinding?.kind === 'model' ? {} : {
+        onKeyProfileTurn: (turn: KeyProfileTurn) => { keyTurn = turn },
+      }),
       onStart: async (model, sessionId, cliSessionId, metadata) => {
         activeModel = model
         const linkage = {
-          provider: providerFor(model),
-          resolvedModel: model,
+          ...linkageFor(model),
           cliSessionId,
           claudeRunId: metadata?.claudeRunId,
           codexRunId: metadata?.codexRunId,
@@ -232,7 +278,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           turnId,
           messageEra: request.messageEra,
           globalMsgNum: request.globalMsgNum,
-          model,
+          model: keyTurn ? keyTurn.binding : model,
           sessionId,
           cliSessionId,
           ...metadata,
@@ -241,7 +287,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
       },
       onProviderProcess: metadata => callbacks.onProviderProcess({
         provider: metadata.provider,
-        ...(activeModel ? { resolvedModel: activeModel } : {}),
+        ...(keyTurn ? { resolvedModel: keyTurn.binding } : activeModel ? { resolvedModel: activeModel } : {}),
         ...(metadata.provider === 'claude'
           ? { claudeRunId: metadata.runId }
           : metadata.provider === 'cursor'
@@ -273,7 +319,8 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
         onTrail: (draft: JobTrailDraft) => callbacks.onTrail(draft),
       } : {}),
       onAnswerReady: text => callbacks.onAnswerReady(text, {
-        ...(activeModel ? { provider: providerFor(activeModel), resolvedModel: activeModel } : {}),
+        ...(keyTurn ? { ...keyProfileLinkageProvider(keyTurn), resolvedModel: keyTurn.binding }
+          : activeModel ? { provider: providerFor(activeModel), resolvedModel: activeModel } : {}),
       }),
       onDone: async (fullText, model, cliSessionId, metadata) => {
         const attachments = mergeMediaAttachmentRefs(
@@ -287,8 +334,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
           ? acquireMaintenanceWork('query_attachment_write', { allowDuringDrain: true })
           : undefined
         const linkage = {
-          provider: providerFor(model),
-          resolvedModel: model,
+          ...linkageFor(model),
           cliSessionId,
           claudeRunId: metadata?.claudeRunId,
           codexRunId: metadata?.codexRunId,
@@ -323,7 +369,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
             globalMsgNum: request.globalMsgNum,
             text: fullText,
             sessionId: request.sessionId,
-            model,
+            model: keyTurn ? keyTurn.binding : model,
             cliSessionId,
             ...runMetadata,
             ...(attachments.length > 0 ? { attachments } : {}),
@@ -348,7 +394,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
         } })
       },
     },
-    validModel,
+    requestedBinding?.kind === 'profile' ? requestBinding(request.model) : validModel,
     imageInputs,
     request.reference,
     request.globalMsgNum,
@@ -399,9 +445,11 @@ export const queryJobCoordinator = new QueryJobCoordinator(queryJobStore, runner
   bootResumeGate,
   // 6.78.0 Messages steer (COS_MESSAGES_STEER, default off). The provider is resolved as
   // model-router resolves it, so a run is steerable only when it will run on Claude.
+  // Key lanes K1 (plan 5.2): claude-steer stays closed and names a profile-bound job
+  // `profile_session`; the profile's engine then decides (only Lane B Claude steers).
   steer: {
     enabled: () => messagesSteerEnabled(),
-    provider: request => providerOfModel(resolveRunModel(request.model, getSessionModel(request.sessionId), process.env.COS_G2_DEFAULT_MODEL)),
+    provider: request => steerProviderForJob(request),
     cliSupported: () => claudeSupportsSteer(),
   },
 })

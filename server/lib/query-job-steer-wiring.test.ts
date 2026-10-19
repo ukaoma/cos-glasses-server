@@ -19,7 +19,12 @@ describe('Messages steer wiring (6.78.0)', () => {
     const options = runtime.slice(runtime.indexOf('export const queryJobCoordinator = new QueryJobCoordinator('))
     const steer = options.slice(options.indexOf('  steer: {'), options.indexOf('\n})'))
     expect(steer).toContain('enabled: () => messagesSteerEnabled(),')
-    expect(steer).toContain('provider: request => providerOfModel(resolveRunModel(request.model, getSessionModel(request.sessionId), process.env.COS_G2_DEFAULT_MODEL)),')
+    // Key lanes K1 (P6): the same rule behind the explicit profile guard; with no profile the
+    // verdict is providerOfModel(resolveRunModel(...)) (key-lanes-p6-steer.test.ts executes it).
+    expect(steer).toContain('provider: request => steerProviderForJob(request),')
+    const job = runtime.slice(runtime.indexOf('export function steerProviderForJob('), runtime.indexOf('\nfunction providerFor('))
+    expect(job).toContain('getSessionModel(request.sessionId),\n    process.env.COS_G2_DEFAULT_MODEL,')
+    expect(job).toContain("if (verdict.kind === 'profile_session') return profileSteerProvider(verdict.profileId)")
     expect(steer).toContain('cliSupported: () => claudeSupportsSteer(),')
   })
 
