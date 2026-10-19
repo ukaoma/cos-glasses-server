@@ -41,6 +41,12 @@ describe('pins', () => {
     expect(L.judgeKeep).toBe(0.8)
     expect(L.judgeMaxNotes).toBe(2)
   })
+  it('per-meeting and weekly caps are the 6.78.2 decision (Miles 2026-10-19: 25 cues; writer calls twice the cues)', () => {
+    expect(L.maxCuesPerMeeting).toBe(25)
+    expect(L.maxWriterCallsPerMeeting).toBe(2 * L.maxCuesPerMeeting)
+    expect(L.defaultWeeklyWriterCalls).toBe(750)
+    expect(mod.liveCuesV2WeeklyCap({})).toBe(750)
+  })
   it('every v2 flag is forwarded by the managed runtime contract', () => {
     const c = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
     for (const key of ['COS_LIVE_CUES_V2', 'COS_LIVE_CUES_V2_GATE', 'COS_LIVE_CUES_V2_MODEL', 'COS_LIVE_CUES_V2_PROMPT', 'COS_LIVE_CUES_V2_WEEKLY', 'COS_LIVE_CUES_V2_NUMBER_GUARD', 'COS_LIVE_CUES_JEV_DAILY_TOKENS'])

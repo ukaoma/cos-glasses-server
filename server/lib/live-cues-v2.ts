@@ -2,7 +2,7 @@
 //
 // Evidence and thresholds: docs/PLAN-live-cues-v2-mvp.md. Every recurring model caller must answer how it stops; here:
 // the master switch COS_LIVE_CUES_V2=1 (default off; independent of the v1 COS_LIVE_CUES flag, so turning v2 off can never
-// re-enable the v1 Composer path), a per-meeting cap (10 cues, 20 writer calls; persisted, so a restart does not reset
+// re-enable the v1 Composer path), a per-meeting cap (25 cues, 50 writer calls; persisted, so a restart does not reset
 // it), a weekly writer ceiling checked BEFORE the gate and charged before the call, never refunded (local week in the zone
 // stored at first use), the Jev client's own daily token cap and breaker, a 3-failure breaker per meeting (cancel, pause,
 // end, stale and maintenance are NOT failures), single flight per meeting, a 20 s cadence floor, a 45 s cooldown after a
@@ -54,9 +54,11 @@ export const LIVE_CUES_V2_LIMITS = {
   staleMs: 30_000,
   windowWords: 400,
   windowChars: 2_200,
-  maxCuesPerMeeting: 10,
-  maxWriterCallsPerMeeting: 20,
-  defaultWeeklyWriterCalls: 300,
+  /** 25 a meeting (Miles 2026-10-19: 10 ran out 10 minutes into an HC call). Writer calls stay at twice the cue cap so
+   *  discarded drafts cannot end a meeting's cues early, and the weekly default keeps the same ~15 capped meetings. */
+  maxCuesPerMeeting: 25,
+  maxWriterCallsPerMeeting: 50,
+  defaultWeeklyWriterCalls: 750,
   breakerFailures: 3,
   judgeKeep: 0.8,
   judgeMaxNotes: 2,
