@@ -26,7 +26,10 @@ import { JevClient, JevError, estimateJevTokens, resolveJevKey, type JevAnswers 
 import { DecisionProviderError, SubqDecisionClient, trackSubqDecisionClient, type DecisionClient } from './decision-provider.js'
 import type { DecisionProvider } from './decision-settings.js'
 import { resolveSubqKey } from './subq-key.js'
-import { liveCuesV2EnvForced, liveCuesV2Settings, resolveLiveCuesV2, type LiveCuesV2SettingReader, type LiveCuesV2SettingSource } from './live-cues-v2-settings.js'
+import {
+  LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, liveCuesV2EnvForced, liveCuesV2Settings, resolveLiveCuesV2,
+  type LiveCuesV2LimitName, type LiveCuesV2SettingReader, type LiveCuesV2SettingSource, type LiveCuesV2StoredLimits,
+} from './live-cues-v2-settings.js'
 import { notesMemory } from './live-cues-v2-notes.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
 import { getMeetingStore } from './meeting-store.js'
@@ -87,9 +90,13 @@ export const LIVE_CUES_V2_LIMITS = {
 export function liveCuesV2Enabled(env: NodeJS.ProcessEnv = process.env, settings: LiveCuesV2SettingReader | null = liveCuesV2Settings()): boolean {
   return resolveLiveCuesV2(env, settings).enabled
 }
-export function liveCuesV2Gate(env: NodeJS.ProcessEnv = process.env): number {
+/** The gate from env alone, or null when env does not set a usable one (unchanged acceptance: 0.3 to 0.99). */
+function envGate(env: NodeJS.ProcessEnv): number | null {
   const raw = Number(env.COS_LIVE_CUES_V2_GATE)
-  return Number.isFinite(raw) && raw >= 0.3 && raw <= 0.99 ? raw : LIVE_CUES_V2_LIMITS.defaultGate
+  return env.COS_LIVE_CUES_V2_GATE !== undefined && env.COS_LIVE_CUES_V2_GATE.trim() !== '' && Number.isFinite(raw) && raw >= 0.3 && raw <= 0.99 ? raw : null
+}
+export function liveCuesV2Gate(env: NodeJS.ProcessEnv = process.env): number {
+  return envGate(env) ?? LIVE_CUES_V2_LIMITS.defaultGate
 }
 /** 6.79.0 tuning knobs for Friday's rated-cue review. Unset (or empty, which a managed env may pass for an unset optional
  *  variable) is the calibrated default with no log. Anything else outside the accepted form falls back to the default with
@@ -102,12 +109,49 @@ function knobFallback<T>(name: string, raw: string, fallback: T, accepted: strin
   }
   return fallback
 }
-export function liveCuesV2CooldownMs(env: NodeJS.ProcessEnv = process.env): number {
+/** A whole-number env knob (6.79.2 limits): null when unset or empty, the value when inside [min, max], else null with
+ *  one log line per value (the saved setting or the default then applies). */
+function envWhole(env: NodeJS.ProcessEnv, name: string, min: number, max: number): number | null {
+  const raw = env[name]
+  if (raw === undefined || raw.trim() === '') return null
+  const n = /^\d{1,4}$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN
+  return n >= min && n <= max ? n : knobFallback<number | null>(name, raw, null, `a whole number from ${min} to ${max}`)
+}
+/** The cooldown from env alone (whole seconds 20..900), or null when unset, empty or invalid (one log line per value). */
+function envCooldownSeconds(env: NodeJS.ProcessEnv): number | null {
   const raw = env.COS_LIVE_CUES_V2_COOLDOWN_S
-  if (raw === undefined || raw.trim() === '') return LIVE_CUES_V2_LIMITS.cooldownAfterCueMs
+  if (raw === undefined || raw.trim() === '') return null
   const seconds = /^\d{1,3}$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN     // whole seconds only
-  return seconds >= 20 && seconds <= 900 ? seconds * 1000
-    : knobFallback('COS_LIVE_CUES_V2_COOLDOWN_S', raw, LIVE_CUES_V2_LIMITS.cooldownAfterCueMs, 'whole seconds from 20 to 900')
+  return seconds >= 20 && seconds <= 900 ? seconds : knobFallback<number | null>('COS_LIVE_CUES_V2_COOLDOWN_S', raw, null, 'whole seconds from 20 to 900')
+}
+export function liveCuesV2CooldownMs(env: NodeJS.ProcessEnv = process.env): number {
+  const seconds = envCooldownSeconds(env)
+  return seconds === null ? LIVE_CUES_V2_LIMITS.cooldownAfterCueMs : seconds * 1000
+}
+
+/** One resolved limit: where its value came from, and whether COS Control may change it (an env var locks it). */
+export interface LiveCuesV2Limit { value: number; source: LiveCuesV2SettingSource; locked: boolean; min: number; max: number; default: number }
+export type LiveCuesV2Limits = Record<LiveCuesV2LimitName, LiveCuesV2Limit>
+/** 6.79.2: env wins and locks; else the saved setting; else the default. Read on every evaluation, so a saved change
+ *  applies from the next one with no restart. */
+export function resolveLiveCuesV2Limits(env: NodeJS.ProcessEnv = process.env, settings: LiveCuesV2SettingReader | null = liveCuesV2Settings()): LiveCuesV2Limits {
+  let saved: LiveCuesV2StoredLimits = {}
+  try { saved = settings?.limits?.() ?? {} } catch { saved = {} }
+  const fromEnv: Record<LiveCuesV2LimitName, number | null> = {
+    gate: envGate(env),
+    maxCuesPerMeeting: envWhole(env, LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting.env, 1, 25),
+    cooldownSeconds: envCooldownSeconds(env),
+    dailyWriterCalls: envWhole(env, LIVE_CUES_V2_LIMIT_BOUNDS.dailyWriterCalls.env, 1, 500),
+  }
+  const out = {} as LiveCuesV2Limits
+  for (const name of LIVE_CUES_V2_LIMIT_NAMES) {
+    const b = LIVE_CUES_V2_LIMIT_BOUNDS[name]
+    const e = fromEnv[name], v = saved[name]
+    out[name] = e !== null ? { value: e, source: 'env', locked: true, min: b.min, max: b.max, default: b.default }
+      : v !== undefined ? { value: v, source: 'setting', locked: false, min: b.min, max: b.max, default: b.default }
+        : { value: b.default, source: 'default', locked: false, min: b.min, max: b.max, default: b.default }
+  }
+  return out
 }
 export function liveCuesV2JudgeKeep(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.COS_LIVE_CUES_V2_JUDGE_KEEP
@@ -244,11 +288,22 @@ export function localWeekStart(now: Date, zone: string): string {
 
 // ── Durable state: weekly ceiling, tombstones, pauses, per-meeting counters ─────
 interface MeetingCounters { cues: number; writerCalls: number; at: number }
+/** 6.79.2: usage on the local calendar day (in the stored zone), for the daily writer ceiling and COS Control's readout. */
+export interface LiveCuesV2DayUsage { writerCalls: number; writerTokensIn: number; writerTokensOut: number; cues: number; jevTokens: number }
+const DAY_FIELDS = ['writerCalls', 'writerTokensIn', 'writerTokensOut', 'cues', 'jevTokens'] as const
 interface DurableState {
   zone: string; weekStart: string; writerCalls: number
   ended: Record<string, number>; paused: Record<string, boolean>; pauseSeq: Record<string, number>
   meetings: Record<string, MeetingCounters>
+  day: string; today: LiveCuesV2DayUsage
 }
+/** Local calendar day (YYYY-MM-DD) in `zone`. Intl, never toISOString: a UTC key flips the day at 19:00 Central. */
+export function localDay(now: Date, zone: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now)
+}
+const zeroDay = (): LiveCuesV2DayUsage => ({ writerCalls: 0, writerTokensIn: 0, writerTokensOut: 0, cues: 0, jevTokens: 0 })
+/** Saturated writer calls: an unreadable, future-dated or malformed day fails toward NOT spending, like the week. */
+const spentDay = (): LiveCuesV2DayUsage => ({ ...zeroDay(), writerCalls: Number.MAX_SAFE_INTEGER })
 function validZone(zone: unknown): string | null {
   if (typeof zone !== 'string' || !zone) return null
   try { new Intl.DateTimeFormat('en-CA', { timeZone: zone }); return zone } catch { return null }
@@ -278,11 +333,20 @@ export class LiveCuesV2Store {
       const calls = Number(s.writerCalls ?? 0)
       // A future week key or a negative/non-numeric count fails toward NOT spending: the week is saturated.
       const saturated = futureWeek || (sameWeek && !(calls >= 0))
-      return { zone, weekStart: week, writerCalls: saturated ? Number.MAX_SAFE_INTEGER : sameWeek ? calls : 0, ended, paused, pauseSeq, meetings }
+      const day = localDay(this.now(), zone)
+      const t = (s.today ?? {}) as Partial<Record<string, unknown>>
+      let today: LiveCuesV2DayUsage
+      if (s.day === undefined || (typeof s.day === 'string' && s.day < day)) today = zeroDay()
+      else if (s.day !== day) today = spentDay()                                   // a future or malformed day
+      else today = DAY_FIELDS.every(f => t[f] === undefined || Number(t[f]) >= 0)
+        ? Object.fromEntries(DAY_FIELDS.map(f => [f, Number(t[f] ?? 0)])) as unknown as LiveCuesV2DayUsage
+        : spentDay()
+      return { zone, weekStart: week, writerCalls: saturated ? Number.MAX_SAFE_INTEGER : sameWeek ? calls : 0, ended, paused, pauseSeq, meetings, day, today }
     } catch {
-      // An unreadable file fails closed for this week (no spending) but keeps cues off nothing else.
+      // An unreadable file fails closed for this week and this day (no spending) but keeps cues off nothing else.
       const zone = validZone(Intl.DateTimeFormat().resolvedOptions().timeZone) ?? 'UTC'
-      return { zone, weekStart: localWeekStart(this.now(), zone), writerCalls: Number.MAX_SAFE_INTEGER, ended: {}, paused: {}, pauseSeq: {}, meetings: {} }
+      return { zone, weekStart: localWeekStart(this.now(), zone), writerCalls: Number.MAX_SAFE_INTEGER, ended: {}, paused: {}, pauseSeq: {}, meetings: {},
+        day: localDay(this.now(), zone), today: spentDay() }
     }
   }
   private write(s: DurableState): void {
@@ -294,6 +358,7 @@ export class LiveCuesV2Store {
     const s = this.read()
     if (s.writerCalls >= cap) return false
     s.writerCalls += 1
+    s.today.writerCalls += 1
     const m = s.meetings[sessionId] ?? { cues: 0, writerCalls: 0, at: 0 }
     s.meetings[sessionId] = { ...m, writerCalls: m.writerCalls + 1, at: this.now().getTime() }
     this.write(s)
@@ -303,8 +368,21 @@ export class LiveCuesV2Store {
     const s = this.read()
     const m = s.meetings[sessionId] ?? { cues: 0, writerCalls: 0, at: 0 }
     s.meetings[sessionId] = { ...m, cues: m.cues + 1, at: this.now().getTime() }
+    s.today.cues += 1
     this.write(s)
   }
+  /** Tokens one evaluation spent (writer in and out, the decision provider's gate and judge). One write; nothing when zero. */
+  recordUsage(u: { writerTokensIn?: number; writerTokensOut?: number; jevTokens?: number }): void {
+    const add = (n: number | undefined) => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.round(n) : 0)
+    const inc = { writerTokensIn: add(u.writerTokensIn), writerTokensOut: add(u.writerTokensOut), jevTokens: add(u.jevTokens) }
+    if (!inc.writerTokensIn && !inc.writerTokensOut && !inc.jevTokens) return
+    const s = this.read()
+    s.today.writerTokensIn += inc.writerTokensIn; s.today.writerTokensOut += inc.writerTokensOut; s.today.jevTokens += inc.jevTokens
+    this.write(s)
+  }
+  /** Today's usage (local day in the stored zone). A saturated (fail-closed) day reads its writer calls as the sentinel. */
+  today(): { day: string } & LiveCuesV2DayUsage { const s = this.read(); return { day: s.day, ...s.today } }
+  dailyWriterCalls(): number { return this.read().today.writerCalls }
   counters(sessionId: string): { cues: number; writerCalls: number } {
     const m = this.read().meetings[sessionId]
     return { cues: m?.cues ?? 0, writerCalls: m?.writerCalls ?? 0 }
@@ -544,6 +622,15 @@ export class LiveCuesV2Engine {
   constructor(private readonly deps: LiveCuesV2Deps) {}
 
   private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, this.deps.settings) }
+  /** 6.79.2: the spend limits as they stand now (env, else COS Control's saved values, else the defaults). The writer
+   *  cap per meeting stays twice the cue cap. */
+  private limits(): { gate: number; maxCues: number; writerCap: number; cooldownMs: number; dailyWriterCalls: number } {
+    const r = resolveLiveCuesV2Limits(this.deps.env, this.deps.settings)
+    return { gate: r.gate.value, maxCues: r.maxCuesPerMeeting.value, writerCap: 2 * r.maxCuesPerMeeting.value,
+      cooldownMs: r.cooldownSeconds.value * 1000, dailyWriterCalls: r.dailyWriterCalls.value }
+  }
+  /** Today's usage for COS Control (local day in the stored zone). */
+  today(): { day: string } & LiveCuesV2DayUsage { return this.deps.store.today() }
 
   capability(): LiveCuesV2Capability {
     const model = liveCuesV2Model(this.deps.env)
@@ -620,10 +707,12 @@ export class LiveCuesV2Engine {
   }
 
   private stopReasonOf(s: Session, counters: { cues: number; writerCalls: number }): LiveCuesV2StopReason | null {
-    const L = LIVE_CUES_V2_LIMITS
+    const lim = this.limits()
     if (s.breaker) return 'breaker_open'
-    if (counters.cues >= L.maxCuesPerMeeting || counters.writerCalls >= L.maxWriterCallsPerMeeting) return 'meeting_cap'
-    if (this.deps.store.weeklyUsed() >= liveCuesV2WeeklyCap(this.deps.env)) return 'budget_exhausted'
+    if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) return 'meeting_cap'
+    // The daily ceiling reads as budget_exhausted on the wire: the shared stop-reason union (pinned with the companion's
+    // copy) has no daily_cap. The trace says daily_cap.
+    if (this.deps.store.weeklyUsed() >= liveCuesV2WeeklyCap(this.deps.env) || this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) return 'budget_exhausted'
     return s.stopReason
   }
 
@@ -665,10 +754,12 @@ export class LiveCuesV2Engine {
     if (s.breaker) return this.traceSkip(s, 'breaker_open', nowMs)
     if (this.deps.store.isPaused(sessionId)) return this.traceSkip(s, 'paused', nowMs)
     if (s.wordsSinceEval < L.minNewWords) return
-    if (nowMs - s.lastEvalAt < L.minIntervalMs || nowMs - s.lastCueAt < liveCuesV2CooldownMs(this.deps.env)) return
+    const lim = this.limits()
+    if (nowMs - s.lastEvalAt < L.minIntervalMs || nowMs - s.lastCueAt < lim.cooldownMs) return
     const counters = this.deps.store.counters(sessionId)
-    if (counters.cues >= L.maxCuesPerMeeting || counters.writerCalls >= L.maxWriterCallsPerMeeting) return this.traceSkip(s, 'meeting_cap', nowMs)
+    if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) return this.traceSkip(s, 'meeting_cap', nowMs)
     if (this.deps.store.weeklyUsed() >= liveCuesV2WeeklyCap(this.deps.env)) return this.traceSkip(s, 'budget_exhausted', nowMs)  // before the gate
+    if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) return this.traceSkip(s, 'daily_cap', nowMs)              // before the gate
     if (this.deps.busy()) return this.traceSkip(s, 'busy', nowMs)
     await this.evaluate(s)
   }
@@ -704,7 +795,7 @@ export class LiveCuesV2Engine {
       const gate = await this.deps.gate(s.title, window, abort.signal, provider)
       const pCue = Number.isFinite(gate.pCue) ? gate.pCue : 0
       Object.assign(trace, { gateMs: Date.now() - t0, pCue: round(pCue), cueKind: gate.kind, lookup: gate.lookup, gateTokens: gate.tokens })
-      if (pCue < liveCuesV2Gate(this.deps.env)) { trace.outcome = 'gate_silent'; s.stopReason = null; return }
+      if (pCue < this.limits().gate) { trace.outcome = 'gate_silent'; s.stopReason = null; return }
       if (abort.signal.aborted) { trace.outcome = 'cancelled'; return }
 
       const t1 = Date.now()
@@ -731,6 +822,10 @@ export class LiveCuesV2Engine {
       trace.kept = kept.length
       if (abort.signal.aborted) { trace.outcome = 'cancelled'; return }
 
+      // 6.79.2: limits lowered while this evaluation ran apply before the writer is charged.
+      const lim = this.limits(), counters = this.deps.store.counters(s.sessionId)
+      if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) { trace.outcome = 'meeting_cap'; return }
+      if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) { trace.outcome = 'daily_cap'; s.stopReason = 'budget_exhausted'; return }
       if (!this.deps.store.charge(liveCuesV2WeeklyCap(this.deps.env), s.sessionId)) { trace.outcome = 'budget_exhausted'; s.stopReason = 'budget_exhausted'; return }
       const { version, system } = liveCuesV2WriterSystem(this.deps.env)
       const model = liveCuesV2Model(this.deps.env)
@@ -791,6 +886,11 @@ export class LiveCuesV2Engine {
       if (error instanceof LensGistLimitError || s.failures >= L.breakerFailures) s.breaker = true
     } finally {
       clearTimeout(wall)
+      // 6.79.2: today's spend for COS Control, from the numbers this evaluation traced. One write; best effort.
+      try {
+        this.deps.store.recordUsage({ writerTokensIn: trace.writerIn as number | undefined, writerTokensOut: trace.writerOut as number | undefined,
+          jevTokens: (Number(trace.gateTokens) || 0) + (Number(trace.judgeTokens) || 0) })
+      } catch { /* the readout is best effort; the trace row still has the numbers */ }
       if (wallHit && trace.outcome === 'cancelled') { trace.outcome = 'failure'; trace.error = 'wall_timeout'; s.failures += 1; if (s.failures >= L.breakerFailures) s.breaker = true }
       if (trace.outcome === 'cancelled' && abort.signal.reason === V2_OFF) trace.cancelReason = V2_OFF
       s.inFlight = null
@@ -850,16 +950,44 @@ export function liveCuesV2SettingsView(env: NodeJS.ProcessEnv = process.env): Li
 /** Save the switch. Off while env forces it on is refused and changes nothing. Turning it off ends cue evaluation for running
  *  meetings at once; turning it on applies from each meeting's next evaluation. */
 export function setLiveCuesV2Enabled(enabled: boolean, env: NodeJS.ProcessEnv = process.env): { ok: true; view: LiveCuesV2SettingsResponse } | { ok: false; error: 'env_forced' } {
-  if (!enabled && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }
+  const r = applyLiveCuesV2Settings({ enabled, limits: {} }, env)
+  if (!r.ok) return { ok: false, error: 'env_forced' }
+  return { ok: true, view: liveCuesV2SettingsView(env) }
+}
+
+/** GET /api/live-cues/v2/settings?v=2 and POST {v: 2, ...} (6.79.2): the v1 body plus the spend limits and today's usage.
+ *  Without v=2 the routes answer exactly the v1 body, so an older COS Control is unaffected. */
+export interface LiveCuesV2SettingsResponseV2 extends LiveCuesV2SettingsResponse {
+  v: 2
+  limits: LiveCuesV2Limits
+  /** Always twice the cue cap. */
+  writerCallsPerMeeting: number
+  today: { day: string } & LiveCuesV2DayUsage
+}
+export function liveCuesV2SettingsViewV2(env: NodeJS.ProcessEnv = process.env): LiveCuesV2SettingsResponseV2 {
+  const limits = resolveLiveCuesV2Limits(env, liveCuesV2Settings())
+  return { ...liveCuesV2SettingsView(env), v: 2, limits, writerCallsPerMeeting: 2 * limits.maxCuesPerMeeting.value, today: liveCuesV2().today() }
+}
+
+/** Save the switch and any limits in ONE write, after every check passed: nothing is saved when any part is refused.
+ *  Turning v2 off stops evaluations in flight; limits apply from each meeting's next evaluation. */
+export function applyLiveCuesV2Settings(patch: { enabled?: boolean; limits: LiveCuesV2StoredLimits }, env: NodeJS.ProcessEnv = process.env):
+  { ok: true } | { ok: false; error: 'env_forced' } | { ok: false; error: 'env_locked'; fields: LiveCuesV2LimitName[] } {
+  if (patch.enabled === false && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }
+  const current = resolveLiveCuesV2Limits(env, liveCuesV2Settings())
+  const locked = (Object.keys(patch.limits) as LiveCuesV2LimitName[]).filter(name => current[name].locked)
+  if (locked.length) return { ok: false, error: 'env_locked', fields: locked }
   const wasOn = liveCuesV2Enabled(env)
-  liveCuesV2Settings().save(enabled)
+  liveCuesV2Settings().update(patch)
   if (wasOn && !liveCuesV2Enabled(env)) {
     const aborted = engine?.suspend() ?? 0
     console.log(`[live-cues-v2] switched off by setting; ${aborted} evaluation(s) stopped`)
   } else if (!wasOn && liveCuesV2Enabled(env)) {
     console.log('[live-cues-v2] switched on by setting')
   }
-  return { ok: true, view: liveCuesV2SettingsView(env) }
+  const changed = Object.entries(patch.limits).map(([k, v]) => `${k}=${v}`).join(' ')
+  if (changed) console.log(`[live-cues-v2] limits saved: ${changed}`)
+  return { ok: true }
 }
 /** What /api/health, /api/models and the status route advertise: NOTHING while v2 is switched off, so a 6.10.642
  *  companion treats the server exactly like a v1 server (v1 cues keep their own capability and indicator). */

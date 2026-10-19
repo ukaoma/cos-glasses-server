@@ -21,6 +21,8 @@ Master switch `COS_LIVE_CUES_V2=1` (default off; independent of v1's `COS_LIVE_C
 
 6.79.0 tuning knobs (defaults unchanged): `COS_LIVE_CUES_V2_COOLDOWN_S` (whole seconds 20..900, default 45) and `COS_LIVE_CUES_V2_JUDGE_KEEP` (0.5..0.95, default 0.8); unset or empty is the default, anything else falls back to it with one log line per value. `COS_LIVE_CUES_V2_REPEAT_OVERLAP` (0.3..0.9, unset = off): withhold a cue that repeats an earlier shown cue at that content-token overlap (zero model calls; port of `filter_cues.py`). Every logged cue carries the shadow `wouldWithhold` owner/date template rules, never enforced.
 
+6.79.2 spend limits, set from COS Control and applied without a restart (`GET /api/live-cues/v2/settings?v=2`, `POST {v: 2, ...}`): `gate` 0.5..0.95 (0.8), `maxCuesPerMeeting` 1..25 (25; writer cap twice), `cooldownSeconds` 20..900 (45), `dailyWriterCalls` 1..500 (150, per local day, checked before the gate). Env `COS_LIVE_CUES_V2_GATE`, `_MAX_PER_MEETING`, `_COOLDOWN_S`, `_DAILY_WRITER_CALLS` win and lock.
+
 ## Routes (additive)
 `POST /api/live-cues/start|stop` (unchanged shape, v2 when enabled), `GET /api/live-cues/status?sessionId=`, `POST /api/live-cues/pause`, `POST /api/live-cues/feedback`. Capability `capabilities.liveCuesV2` on `/api/health` and `/api/models`.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Live cue verdicts 6.79.0 mutation gate: the cue log, the verdict store, the history and verdict routes, and the engine's
-// emit point. Mutations run only in a disposable copy of the checkout; the live checkout is never rewritten.
+// Live cues 6.79.x mutation gate: the cue log, the verdict store, the history and verdict routes, the engine's emit point,
+// the repeat filter and shadow template rules, and (6.79.2) COS Control's spend limits. Mutations run only in a disposable copy of the checkout; the live checkout is never rewritten.
 //
 // What it proves, in order:
 //   0. The target suites are GREEN unmutated. A gate over a red suite reads every mutant as killed and proves nothing.
@@ -20,9 +20,11 @@ const LIB_T = ['server/lib/live-cue-verdicts.test.ts']
 const ROUTE_T = ['server/routes/live-cue-verdicts-route.test.ts']
 const ENGINE_T = ['server/lib/live-cues-v2.test.ts']
 const FILTER_T = ['server/lib/live-cues-filter.test.ts']
-const ALL = [...LIB_T, ...ROUTE_T, ...ENGINE_T, ...FILTER_T, 'server/routes/live-cues-v2-route.test.ts', 'server/routes/live-cues-v2-settings-route.test.ts']
+const SETTINGS_T = ['server/lib/live-cues-v2-settings.test.ts']
+const LIMITS_T = ['server/routes/live-cues-v2-limits-route.test.ts']
+const ALL = [...LIB_T, ...ROUTE_T, ...ENGINE_T, ...FILTER_T, ...SETTINGS_T, ...LIMITS_T, 'server/routes/live-cues-v2-route.test.ts', 'server/routes/live-cues-v2-settings-route.test.ts']
 const LIB = 'server/lib/live-cue-verdicts.ts', ROUTE = 'server/routes/live-cues.ts', ENGINE = 'server/lib/live-cues-v2.ts'
-const FILTER = 'server/lib/live-cues-filter.ts'
+const FILTER = 'server/lib/live-cues-filter.ts', SETTINGS = 'server/lib/live-cues-v2-settings.ts'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 
 const mutations = [
@@ -125,11 +127,11 @@ const mutations = [
   m('engine-logs-prompt', ENGINE, ['model: cue.model, prompt: version,', "model: cue.model, prompt: 'v3',"], ENGINE_T),
   m('engine-logs-memory-source', ENGINE, ["memorySource: mem.notes.length ? source : 'none'", 'memorySource: source'], ENGINE_T),
   m('engine-logs-kept', ENGINE, ['kept: kept.length,', 'kept: 0,'], ENGINE_T),
-  m('cooldown-knob-used', ENGINE, ['nowMs - s.lastCueAt < liveCuesV2CooldownMs(this.deps.env)', 'nowMs - s.lastCueAt < L.cooldownAfterCueMs'], ENGINE_T),
+  m('cooldown-knob-used', ENGINE, ['nowMs - s.lastCueAt < lim.cooldownMs', 'nowMs - s.lastCueAt < L.cooldownAfterCueMs'], ENGINE_T),
   m('cooldown-knob-floor', ENGINE, ['seconds >= 20 && seconds <= 900', 'seconds >= 0 && seconds <= 900'], ENGINE_T),
   m('cooldown-knob-ceiling', ENGINE, ['seconds >= 20 && seconds <= 900', 'seconds >= 20'], ENGINE_T),
   m('cooldown-knob-whole-seconds', ENGINE, ['/^\\d{1,3}$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN', 'Number(raw.trim())'], ENGINE_T),
-  m('cooldown-knob-unset-silent', ENGINE, ["  if (raw === undefined || raw.trim() === '') return LIVE_CUES_V2_LIMITS.cooldownAfterCueMs\n", "  if (raw === undefined) return LIVE_CUES_V2_LIMITS.cooldownAfterCueMs\n"], ENGINE_T),
+  m('cooldown-knob-unset-silent', ENGINE, ["const raw = env.COS_LIVE_CUES_V2_COOLDOWN_S\n  if (raw === undefined || raw.trim() === '') return null\n", "const raw = env.COS_LIVE_CUES_V2_COOLDOWN_S\n  if (raw === undefined) return null\n"], ENGINE_T),
   m('judge-knob-used', ENGINE, ['(judged.probs[m.id] ?? 0) >= liveCuesV2JudgeKeep(this.deps.env)', '(judged.probs[m.id] ?? 0) >= L.judgeKeep'], ENGINE_T),
   m('judge-knob-floor', ENGINE, ['keep >= 0.5 && keep <= 0.95', 'keep >= 0.3 && keep <= 0.95'], ENGINE_T),
   m('judge-knob-ceiling', ENGINE, ['keep >= 0.5 && keep <= 0.95', 'keep >= 0.5 && keep <= 0.99'], ENGINE_T),
@@ -160,13 +162,62 @@ const mutations = [
   m('engine-repeat-trace-ids', ENGINE, ["Object.assign(trace, { outcome: 'withheld_repeat', repeatOf: repeat.blocker, repeatOverlap: repeat.overlap })", "Object.assign(trace, { outcome: 'withheld_repeat' })"], ENGINE_T),
   m('engine-repeat-floor', ENGINE, ['t >= 0.3 && t <= 0.9 ? t', 't >= 0 && t <= 0.9 ? t'], ENGINE_T),
   m('engine-repeat-ceiling', ENGINE, ['t >= 0.3 && t <= 0.9 ? t', 't >= 0.3 ? t'], ENGINE_T),
-  m('engine-repeat-unset-silent', ENGINE, ["  if (raw === undefined || raw.trim() === '') return null\n", '  if (raw === undefined) return null\n'], ENGINE_T),
+  m('engine-repeat-unset-silent', ENGINE, ["const raw = env.COS_LIVE_CUES_V2_REPEAT_OVERLAP\n  if (raw === undefined || raw.trim() === '') return null\n", 'const raw = env.COS_LIVE_CUES_V2_REPEAT_OVERLAP\n  if (raw === undefined) return null\n'], ENGINE_T),
   m('engine-shadow-logged', ENGINE, ['wouldWithhold: wouldWithhold(cue.detail, s.cues), ', ''], ENGINE_T),
   m('engine-shadow-against-shown', ENGINE, ['wouldWithhold: wouldWithhold(cue.detail, s.cues)', 'wouldWithhold: wouldWithhold(cue.detail, [])'], ENGINE_T),
   m('schema-would-withhold', LIB, ['\n    && optional(r.wouldWithhold, isWouldWithhold)', ''], LIB_T),
   m('schema-would-withhold-topic', LIB, ["typeof w.perMeeting === 'boolean' && typeof w.perTopic === 'boolean'", "typeof w.perMeeting === 'boolean'"], LIB_T),
   m('schema-would-withhold-blocker', LIB, ['optional(w.blockerCueId, str)', 'true'], LIB_T),
   m('contract-repeat-overlap', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_REPEAT_OVERLAP",\n', ''], ENGINE_T),
+  // ── 6.79.2 spend limits ──
+  m('bounds-inclusive-min', SETTINGS, ['value >= b.min && value <= b.max', 'value > b.min && value <= b.max'], SETTINGS_T),
+  m('bounds-inclusive-max', SETTINGS, ['value >= b.min && value <= b.max', 'value >= b.min && value < b.max'], SETTINGS_T),
+  m('bounds-whole', SETTINGS, ['(!b.integer || Number.isInteger(value))', 'true'], SETTINGS_T),
+  m('bounds-numbers-only', SETTINGS, ["typeof value === 'number' && Number.isFinite(value) && ", ''], SETTINGS_T),
+  m('settings-read-validates', SETTINGS, ['if (limitInBounds(name, r[name])) limits[name] = r[name] as number', 'if (r[name] !== undefined) limits[name] = r[name] as number'], SETTINGS_T),
+  m('settings-update-merges', SETTINGS, ['const limits = { ...current.limits, ...patch.limits }', 'const limits = { ...patch.limits }'], SETTINGS_T),
+  m('settings-update-keeps-switch', SETTINGS, ['const value = patch.enabled ?? current.value', 'const value = patch.enabled ?? null'], SETTINGS_T),
+  m('settings-schema-1-without-limits', SETTINGS, ['schema: hasLimits ? 2 : 1', 'schema: 2'], [...SETTINGS_T, ...LIMITS_T]),
+  m('settings-no-enabled-when-unset', SETTINGS, ['...(value === null ? {} : { enabled: value })', 'enabled: value'], SETTINGS_T),
+  m('limits-gate-used', ENGINE, ['if (pCue < this.limits().gate)', 'if (pCue < liveCuesV2Gate(this.deps.env))'], ENGINE_T),
+  m('limits-cap-feed', ENGINE, ["if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) return this.traceSkip(s, 'meeting_cap', nowMs)", "if (counters.cues >= L.maxCuesPerMeeting || counters.writerCalls >= L.maxWriterCallsPerMeeting) return this.traceSkip(s, 'meeting_cap', nowMs)"], ENGINE_T),
+  m('limits-writer-cap-twice', ENGINE, ['writerCap: 2 * r.maxCuesPerMeeting.value', 'writerCap: LIVE_CUES_V2_LIMITS.maxWriterCallsPerMeeting'], ENGINE_T),
+  m('limits-cooldown-used', ENGINE, ['cooldownMs: r.cooldownSeconds.value * 1000', 'cooldownMs: LIVE_CUES_V2_LIMITS.cooldownAfterCueMs'], ENGINE_T),
+  m('limits-daily-before-gate', ENGINE, ["    if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) return this.traceSkip(s, 'daily_cap', nowMs)", ''], ENGINE_T),
+  m('limits-daily-precharge', ENGINE, ["      if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) { trace.outcome = 'daily_cap';", "      if (false) { trace.outcome = 'daily_cap';"], ENGINE_T),
+  m('limits-cap-precharge', ENGINE, ["      if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) { trace.outcome = 'meeting_cap'; return }\n", ''], ENGINE_T),
+  m('limits-status-cap', ENGINE, ["if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) return 'meeting_cap'", "if (false) return 'meeting_cap'"], ENGINE_T),
+  m('limits-status-daily', ENGINE, [" || this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) return 'budget_exhausted'", ") return 'budget_exhausted'"], ENGINE_T),
+  m('resolver-env-wins', ENGINE, ['const e = fromEnv[name], v = saved[name]', 'const e = null as number | null, v = saved[name]'], [...ENGINE_T, ...LIMITS_T]),
+  m('resolver-saved-used', ENGINE, ['const e = fromEnv[name], v = saved[name]', 'const e = fromEnv[name], v = undefined as number | undefined'], [...ENGINE_T, ...LIMITS_T]),
+  m('env-whole-range', ENGINE, ['return n >= min && n <= max ? n', 'return n >= min ? n'], LIMITS_T),
+  m('env-whole-digits', ENGINE, ["const n = /^\\d{1,4}$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN", 'const n = Number(raw.trim())'], LIMITS_T),
+  m('env-max-per-meeting-read', ENGINE, ['maxCuesPerMeeting: envWhole(env, LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting.env, 1, 25)', 'maxCuesPerMeeting: null'], LIMITS_T),
+  m('env-daily-read', ENGINE, ['dailyWriterCalls: envWhole(env, LIVE_CUES_V2_LIMIT_BOUNDS.dailyWriterCalls.env, 1, 500)', 'dailyWriterCalls: null'], LIMITS_T),
+  m('env-cooldown-read', ENGINE, ['    cooldownSeconds: envCooldownSeconds(env),', '    cooldownSeconds: null,'], LIMITS_T),
+  m('day-charge-counts', ENGINE, ['    s.writerCalls += 1\n    s.today.writerCalls += 1\n', '    s.writerCalls += 1\n'], ENGINE_T),
+  m('day-cue-counts', ENGINE, ['    s.today.cues += 1\n', ''], ENGINE_T),
+  m('day-usage-recorded', ENGINE, ['        this.deps.store.recordUsage({ writerTokensIn:', '        void ({ writerTokensIn:'], ENGINE_T),
+  m('day-usage-whole', ENGINE, ['n > 0 ? Math.round(n) : 0', 'n > 0 ? n : 0'], ENGINE_T),
+  m('day-usage-positive', ENGINE, ['Number.isFinite(n) && n > 0 ? Math.round(n)', 'Number.isFinite(n) ? Math.round(n)'], ENGINE_T),
+  m('day-rollover', ENGINE, ["if (s.day === undefined || (typeof s.day === 'string' && s.day < day)) today = zeroDay()", 'if (s.day === undefined) today = zeroDay()'], ENGINE_T),
+  m('day-future-saturated', ENGINE, ['else if (s.day !== day) today = spentDay()', 'else if (s.day !== day) today = zeroDay()'], ENGINE_T),
+  m('day-malformed-saturated', ENGINE, ['DAY_FIELDS.every(f => t[f] === undefined || Number(t[f]) >= 0)', 'true'], ENGINE_T),
+  m('day-unreadable-saturated', ENGINE, ['        day: localDay(this.now(), zone), today: spentDay() }', '        day: localDay(this.now(), zone), today: zeroDay() }'], ENGINE_T),
+  m('day-is-local', ENGINE, ["new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now)", 'now.toISOString().slice(0, 10)'], ENGINE_T),
+  m('apply-env-locked', ENGINE, ["  if (locked.length) return { ok: false, error: 'env_locked', fields: locked }\n", ''], LIMITS_T),
+  m('apply-env-forced', ENGINE, ["  if (patch.enabled === false && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }\n", ''], LIMITS_T),
+  m('view-writer-cap', ENGINE, ['writerCallsPerMeeting: 2 * limits.maxCuesPerMeeting.value', 'writerCallsPerMeeting: LIVE_CUES_V2_LIMITS.maxWriterCallsPerMeeting'], LIMITS_T),
+  m('route-get-v1-unless-v2', ROUTE, ["res.json(v === '2' ? liveCuesV2SettingsViewV2() : liveCuesV2SettingsView())", 'res.json(liveCuesV2SettingsViewV2())'], LIMITS_T),
+  m('route-get-version-checked', ROUTE, ["  if (v !== undefined && v !== '2') return res.status(400)", "  if (false) return res.status(400)"], LIMITS_T),
+  m('route-post-v1-unless-versioned', ROUTE, ['body.v !== undefined) return postSettingsV2', 'body.v === 2) return postSettingsV2'], LIMITS_T),
+  m('route-post-version-checked', ROUTE, ['  if (body.v !== 2) return res.status(400)', '  if (false) return res.status(400)'], LIMITS_T),
+  m('route-unknown-field', ROUTE, ['  if (unknown) return res.status(400)', '  if (false) return res.status(400)'], LIMITS_T),
+  m('route-enabled-boolean', ROUTE, ["  if (body.enabled !== undefined && typeof body.enabled !== 'boolean') return", '  if (false) return'], LIMITS_T),
+  m('route-bounds', ROUTE, ['    if (!limitInBounds(name, body[name])) {', '    if (false) {'], LIMITS_T),
+  m('route-empty', ROUTE, ['  if (body.enabled === undefined && Object.keys(limits).length === 0) return', '  if (false) return'], LIMITS_T),
+  m('contract-max-per-meeting', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_MAX_PER_MEETING",\n', ''], ENGINE_T),
+  m('contract-daily-writer-calls', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_DAILY_WRITER_CALLS",\n', ''], ENGINE_T),
   m('engine-find-cue', ENGINE, ['const cue = s.cues.find(c => c.cueId === cueId); if (cue) return cue', ''], ENGINE_T),
 ]
 
@@ -210,5 +261,5 @@ try {
     killed += 1
     console.log(`${name} KILLED by ${killers.slice(0, 2).join(' | ')}${killers.length > 2 ? ` (+${killers.length - 2} more)` : ''}`)
   }
-  console.log(`${killed} of ${selected.length} live cue verdict 6.79.0 mutations killed`)
+  console.log(`${killed} of ${selected.length} live cues 6.79.x mutations killed`)
 } finally { rmSync(scratch, { recursive: true, force: true }) }

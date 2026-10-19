@@ -50,7 +50,8 @@ describe('pins', () => {
   it('every v2 flag is forwarded by the managed runtime contract', () => {
     const c = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
     for (const key of ['COS_LIVE_CUES_V2', 'COS_LIVE_CUES_V2_GATE', 'COS_LIVE_CUES_V2_MODEL', 'COS_LIVE_CUES_V2_PROMPT', 'COS_LIVE_CUES_V2_WEEKLY', 'COS_LIVE_CUES_V2_NUMBER_GUARD', 'COS_LIVE_CUES_JEV_DAILY_TOKENS',
-      'COS_LIVE_CUES_V2_COOLDOWN_S', 'COS_LIVE_CUES_V2_JUDGE_KEEP', 'COS_LIVE_CUES_V2_REPEAT_OVERLAP'])
+      'COS_LIVE_CUES_V2_COOLDOWN_S', 'COS_LIVE_CUES_V2_JUDGE_KEEP', 'COS_LIVE_CUES_V2_REPEAT_OVERLAP',
+      'COS_LIVE_CUES_V2_MAX_PER_MEETING', 'COS_LIVE_CUES_V2_DAILY_WRITER_CALLS'])
       expect(c.optionalEnvironment, key).toContain(key)
   })
 })
@@ -133,6 +134,37 @@ describe('durable store', () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'cues-v2-store-')) })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
   const at = (iso: string) => () => new Date(iso)
+  it('6.79.2: today\'s usage counts writer calls, cues and tokens on the local day, and a new local day starts at zero', () => {
+    const file = join(dir, 's.json')
+    writeFileSync(file, JSON.stringify({ zone: 'America/Chicago', weekStart: '2026-10-12', writerCalls: 0 }))
+    const s = new LiveCuesV2Store(file, at('2026-10-14T15:00:00Z'))
+    expect(s.today()).toEqual({ day: '2026-10-14', writerCalls: 0, writerTokensIn: 0, writerTokensOut: 0, cues: 0, jevTokens: 0 })   // a pre-6.79.2 file
+    s.charge(10, 'm'); s.charge(10, 'm'); s.recordCue('m')
+    s.recordUsage({ writerTokensIn: 1200.4, writerTokensOut: 80, jevTokens: 1900 })
+    s.recordUsage({ writerTokensIn: -5, writerTokensOut: Number.NaN })                      // nothing to add: no write
+    expect(s.today()).toEqual({ day: '2026-10-14', writerCalls: 2, writerTokensIn: 1200, writerTokensOut: 80, cues: 1, jevTokens: 1900 })
+    expect(s.dailyWriterCalls()).toBe(2)
+    // 23:30 local on the 14th is still the 14th (04:30 UTC on the 15th); 00:30 local on the 15th is a new day.
+    expect(new LiveCuesV2Store(file, at('2026-10-15T04:30:00Z')).dailyWriterCalls()).toBe(2)
+    expect(new LiveCuesV2Store(file, at('2026-10-15T05:30:00Z')).today()).toMatchObject({ day: '2026-10-15', writerCalls: 0, cues: 0 })
+  })
+  it('6.79.2: a future-dated, malformed or unreadable day fails closed: writer calls read as spent', () => {
+    const file = join(dir, 's.json')
+    const base = { zone: 'America/Chicago', weekStart: '2026-10-12', writerCalls: 0 }
+    const now = at('2026-10-14T15:00:00Z')
+    writeFileSync(file, JSON.stringify({ ...base, day: '2026-10-15', today: { writerCalls: 1 } }))
+    expect(new LiveCuesV2Store(file, now).dailyWriterCalls()).toBe(Number.MAX_SAFE_INTEGER)
+    writeFileSync(file, JSON.stringify({ ...base, day: '2026-10-14', today: { writerCalls: -3 } }))
+    expect(new LiveCuesV2Store(file, now).dailyWriterCalls()).toBe(Number.MAX_SAFE_INTEGER)
+    writeFileSync(file, JSON.stringify({ ...base, day: '2026-10-14', today: { writerCalls: 'many' } }))
+    expect(new LiveCuesV2Store(file, now).dailyWriterCalls()).toBe(Number.MAX_SAFE_INTEGER)
+    writeFileSync(file, JSON.stringify({ ...base, day: 20261014, today: { writerCalls: 1 } }))
+    expect(new LiveCuesV2Store(file, now).dailyWriterCalls()).toBe(Number.MAX_SAFE_INTEGER)
+    writeFileSync(file, '{not json')
+    expect(new LiveCuesV2Store(file, now).dailyWriterCalls()).toBe(Number.MAX_SAFE_INTEGER)
+    writeFileSync(file, JSON.stringify({ ...base, day: '2026-10-13', today: { writerCalls: 99 } }))   // yesterday: zero
+    expect(new LiveCuesV2Store(file, now).dailyWriterCalls()).toBe(0)
+  })
   it('charges until the cap, then refuses; a new local week starts at zero; per-meeting counters persist', () => {
     const s = new LiveCuesV2Store(join(dir, 's.json'), at('2026-10-14T15:00:00Z'))
     expect(s.charge(2, 'm')).toBe(true); expect(s.charge(2, 'm')).toBe(true); expect(s.charge(2, 'm')).toBe(false)
@@ -429,6 +461,118 @@ describe('engine', () => {
       { perMeeting: true, perTopic: false, blockerCueId: logged[0].cueId },
       { perMeeting: true, perTopic: true, blockerCueId: logged[0].cueId },
     ])
+  })
+
+  describe('6.79.2 spend limits from COS Control, applied at runtime', () => {
+    let saved: Record<string, number>
+    const withLimits = (over: Partial<Deps> = {}) => engine({ settings: { stored: () => storedSetting, limits: () => ({ ...saved }) }, ...over })
+    beforeEach(() => { saved = {} })
+
+    it('the defaults match the calibrated limits (gate 0.8, 25 cues, 45 s; writer cap twice the cues)', () => {
+      const r = mod.resolveLiveCuesV2Limits({}, null)
+      expect([r.gate.value, r.maxCuesPerMeeting.value, r.cooldownSeconds.value]).toEqual([L.defaultGate, L.maxCuesPerMeeting, L.cooldownAfterCueMs / 1000])
+      expect(2 * r.maxCuesPerMeeting.value).toBe(L.maxWriterCallsPerMeeting)
+      expect(r.dailyWriterCalls).toMatchObject({ value: 150, source: 'default', locked: false })
+    })
+
+    it('a saved gate applies from the next evaluation, with no restart', async () => {
+      pCue = 0.85; saved.gate = 0.9
+      const e = withLimits(); e.arm('meeting_a')
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(evaluations().at(-1)).toMatchObject({ outcome: 'gate_silent' })
+      saved.gate = 0.8; clock += L.minIntervalMs
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue' })
+    })
+
+    it('an env gate wins over the saved one', async () => {
+      pCue = 0.85; saved.gate = 0.5; env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_GATE: '0.9' }
+      const e = withLimits(); e.arm('meeting_a')
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(evaluations().at(-1)).toMatchObject({ outcome: 'gate_silent' })
+    })
+
+    it('a cap lowered below what a running meeting already used stops it at once (skip meeting_cap, no gate call)', async () => {
+      const e = withLimits(); e.arm('meeting_a')
+      for (let i = 0; i < 2; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
+      expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(2)
+      saved.maxCuesPerMeeting = 2
+      const gates = calls.gate
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(calls.gate).toBe(gates)
+      expect(traces.at(-1)).toMatchObject({ kind: 'skip', reason: 'meeting_cap' })
+      expect(e.status('meeting_a').session).toMatchObject({ state: 'stopped', reason: 'meeting_cap' })
+      saved.maxCuesPerMeeting = 3; next()                                                // raised again: it resumes
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(calls.gate).toBe(gates + 1)
+    })
+
+    it('the writer cap per meeting is twice the saved cue cap', async () => {
+      saved.maxCuesPerMeeting = 1
+      writerText = async () => 'null'                                                     // the writer declines: calls, no cues
+      const e = withLimits(); e.arm('meeting_a')
+      for (let i = 0; i < 2; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
+      expect(calls.writer).toBe(2)
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(calls.writer).toBe(2)
+      expect(traces.at(-1)).toMatchObject({ kind: 'skip', reason: 'meeting_cap' })
+    })
+
+    it('a saved cooldown applies from the next feed', async () => {
+      saved.cooldownSeconds = 120
+      const e = withLimits(); e.arm('meeting_a')
+      await e.feed('meeting_a', words(L.minNewWords)); expect(calls.gate).toBe(1)
+      clock += L.cooldownAfterCueMs + 1
+      await e.feed('meeting_a', words(L.minNewWords)); expect(calls.gate).toBe(1)
+      clock += 120_000 - L.cooldownAfterCueMs
+      await e.feed('meeting_a', words(1)); expect(calls.gate).toBe(2)
+    })
+
+    it('the daily writer ceiling is checked before the gate (skip daily_cap) across meetings, and lifts on the next local day', async () => {
+      saved.dailyWriterCalls = 2
+      const e = withLimits(); e.arm('meeting_a'); e.arm('meeting_b')
+      await e.feed('meeting_a', words(L.minNewWords)); next()
+      await e.feed('meeting_b', words(L.minNewWords)); next()
+      expect(calls.writer).toBe(2)
+      const gates = calls.gate
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(calls.gate).toBe(gates)                                                      // no Jev spend either
+      expect(traces.at(-1)).toMatchObject({ kind: 'skip', reason: 'daily_cap' })
+      expect(e.status('meeting_a').session).toMatchObject({ state: 'stopped', reason: 'budget_exhausted' })
+      expect(e.today()).toMatchObject({ writerCalls: 2, cues: 2 })
+      clock += 24 * 60 * 60_000
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(calls.gate).toBe(gates + 1)
+    })
+
+    it('limits lowered while an evaluation runs apply before the writer is charged', async () => {
+      // The second evaluation passes the feed checks; its gate call then lowers the limit to what is already used.
+      let n = 0
+      const lowerDaily = withLimits({ gate: async () => { calls.gate++; if (++n === 2) saved.dailyWriterCalls = 1; return { pCue, kind: 'challenge', lookup: null, tokens: 1000 } } })
+      lowerDaily.arm('meeting_a')
+      await lowerDaily.feed('meeting_a', words(L.minNewWords)); next()
+      await lowerDaily.feed('meeting_a', words(L.minNewWords))
+      expect(calls.writer).toBe(1)
+      expect(evaluations().at(-1)).toMatchObject({ outcome: 'daily_cap' })
+      expect(lowerDaily.status('meeting_a').session).toMatchObject({ reason: 'budget_exhausted' })
+      saved = {}; n = 0
+      const lowerCap = withLimits({ gate: async () => { calls.gate++; if (++n === 2) saved.maxCuesPerMeeting = 1; return { pCue, kind: 'challenge', lookup: null, tokens: 1000 } } })
+      lowerCap.arm('meeting_c')
+      await lowerCap.feed('meeting_c', words(L.minNewWords)); next()
+      await lowerCap.feed('meeting_c', words(L.minNewWords))
+      expect(calls.writer).toBe(2)
+      expect(evaluations().at(-1)).toMatchObject({ outcome: 'meeting_cap' })
+    })
+
+    it('today\'s usage records writer tokens and the gate and judge tokens of each evaluation', async () => {
+      const e = withLimits({ writer: async (_m, _s, prompt) => { calls.writer++; calls.prompts.push(prompt); return { text: await writerText(), model: 'claude-sonnet-5-5', inputTokens: 2400, outputTokens: 60 } } })
+      e.arm('meeting_a')
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(e.today()).toMatchObject({ writerCalls: 1, cues: 1, writerTokensIn: 2400, writerTokensOut: 60, jevTokens: 1900 })
+      pCue = 0.1; next()
+      await e.feed('meeting_a', words(L.minNewWords))                                   // gate only
+      expect(e.today()).toMatchObject({ writerCalls: 1, jevTokens: 2900 })
+    })
   })
 
   it('the judge keeps at most two notes even when three pass, in rank order', async () => {
