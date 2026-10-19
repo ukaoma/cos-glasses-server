@@ -1,0 +1,1979 @@
+{
+  "schema": "key-lanes-census/1",
+  "generator": "server/lib/__fixtures__/key-lanes/census-generate.mjs",
+  "shas": {
+    "server": "6237057",
+    "app": "f02fab64",
+    "mu": "d91957856"
+  },
+  "counts": {
+    "serverPreferenceCalls": {
+      "plan": 25,
+      "real": 25,
+      "files": 15
+    },
+    "familyGuardCalls": {
+      "plan": 27,
+      "real": 29,
+      "server": 25,
+      "sharedInternal": 4,
+      "distinctServerLines": 22
+    },
+    "appPreferenceSites": {
+      "plan": 27,
+      "realIncludingDefinitions": 28,
+      "calls": 26,
+      "definitions": 2,
+      "internal": 1,
+      "fallbacks": 10
+    },
+    "resolveProviderBinarySites": {
+      "plan": 21,
+      "real": 22
+    },
+    "serverSpawnShapedLines": {
+      "plan": 82,
+      "realIncludingComments": 82,
+      "realCalls": 81,
+      "nonProvider": 58
+    },
+    "muSubprocessSites": {
+      "plan": 197,
+      "real": 197,
+      "files": 72,
+      "filesIncludingNonPython": 74,
+      "aliasAndWrapperSites": 8,
+      "allSites": 205
+    },
+    "claudeSettingsHooks": {
+      "plan": 15,
+      "real": 15
+    },
+    "codexHooks": {
+      "plan": 12,
+      "real": 12
+    },
+    "codexHomePlanReaders": {
+      "plan": 13,
+      "real": 13
+    }
+  },
+  "problems": [],
+  "serverPreference": {
+    "pattern": "(?<![\\w.])(normalizeModelPreference|isModelPreference)\\( in server/ and shared/, non-test, one row per call",
+    "calls": [
+      {
+        "file": "server/lib/claude-steer.ts",
+        "line": 251,
+        "fn": "normalizeModelPreference",
+        "text": "return normalizeModelPreference(model) ?? sessionModel ?? normalizeModelPreference(envDefault) ?? DEFAULT_MODEL",
+        "rule": "closed_with_profile_session_guard"
+      },
+      {
+        "file": "server/lib/claude-steer.ts",
+        "line": 251,
+        "fn": "normalizeModelPreference",
+        "text": "return normalizeModelPreference(model) ?? sessionModel ?? normalizeModelPreference(envDefault) ?? DEFAULT_MODEL",
+        "rule": "closed_with_profile_session_guard"
+      },
+      {
+        "file": "server/lib/codex-engine-sessions.ts",
+        "line": 50,
+        "fn": "normalizeModelPreference",
+        "text": "const model = normalizeModelPreference(raw?.model)",
+        "rule": "closed"
+      },
+      {
+        "file": "server/lib/control2-draft.ts",
+        "line": 90,
+        "fn": "normalizeModelPreference",
+        "text": "const model = normalizeModelPreference(input.model ?? process.env.COS_G2_DEFAULT_MODEL ?? DEFAULT_MODEL)",
+        "rule": "closed_env_default"
+      },
+      {
+        "file": "server/lib/conversation.ts",
+        "line": 163,
+        "fn": "normalizeModelPreference",
+        "text": "session.modelPreference = normalizeModelPreference(session.modelPreference) ?? null",
+        "rule": "accept_by_syntax"
+      },
+      {
+        "file": "server/lib/conversation.ts",
+        "line": 168,
+        "fn": "normalizeModelPreference",
+        "text": "const exchangeModel = normalizeModelPreference(exchange.modelPreference)",
+        "rule": "accept_by_syntax"
+      },
+      {
+        "file": "server/lib/conversation.ts",
+        "line": 490,
+        "fn": "normalizeModelPreference",
+        "text": "const stampedModel = normalizeModelPreference(modelPreference)",
+        "rule": "accept_by_syntax"
+      },
+      {
+        "file": "server/lib/conversation.ts",
+        "line": 628,
+        "fn": "normalizeModelPreference",
+        "text": "const stampedModel = normalizeModelPreference(modelPreference)",
+        "rule": "accept_by_syntax"
+      },
+      {
+        "file": "server/lib/conversation.ts",
+        "line": 722,
+        "fn": "normalizeModelPreference",
+        "text": "return normalizeModelPreference(",
+        "rule": "accept_by_syntax"
+      },
+      {
+        "file": "server/lib/cursor-engine-sessions.ts",
+        "line": 54,
+        "fn": "normalizeModelPreference",
+        "text": "const model = normalizeModelPreference(raw?.model)",
+        "rule": "closed"
+      },
+      {
+        "file": "server/lib/handoff-store.ts",
+        "line": 190,
+        "fn": "normalizeModelPreference",
+        "text": "const normalizedModel = normalizeModelPreference(raw.codex.model)",
+        "rule": "closed"
+      },
+      {
+        "file": "server/lib/model-router.ts",
+        "line": 78,
+        "fn": "normalizeModelPreference",
+        "text": "const envDefault = normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL)",
+        "rule": "closed_env_default"
+      },
+      {
+        "file": "server/lib/model-router.ts",
+        "line": 79,
+        "fn": "normalizeModelPreference",
+        "text": "const resolvedModel = normalizeModelPreference(model) ?? sessionModel ?? envDefault ?? DEFAULT_MODEL",
+        "rule": "accept"
+      },
+      {
+        "file": "server/lib/morning-brief-config.ts",
+        "line": 412,
+        "fn": "normalizeModelPreference",
+        "text": "const model = normalizeModelPreference(patch.model)",
+        "rule": "reject"
+      },
+      {
+        "file": "server/lib/morning-brief-config.ts",
+        "line": 449,
+        "fn": "normalizeModelPreference",
+        "text": "const model = normalizeModelPreference(input.model)",
+        "rule": "reject"
+      },
+      {
+        "file": "server/lib/query-job-runtime.ts",
+        "line": 170,
+        "fn": "normalizeModelPreference",
+        "text": "normalizeModelPreference(request.model),",
+        "rule": "accept"
+      },
+      {
+        "file": "server/lib/query-job-runtime.ts",
+        "line": 181,
+        "fn": "normalizeModelPreference",
+        "text": "normalizeModelPreference(request.model),",
+        "rule": "accept"
+      },
+      {
+        "file": "server/lib/query-job-runtime.ts",
+        "line": 207,
+        "fn": "normalizeModelPreference",
+        "text": "const validModel = normalizeModelPreference(request.model)",
+        "rule": "accept"
+      },
+      {
+        "file": "server/lib/work-activity.ts",
+        "line": 364,
+        "fn": "normalizeModelPreference",
+        "text": "const slot = normalizeModelPreference(draft.modelID)",
+        "rule": "reject"
+      },
+      {
+        "file": "server/lib/work-handoff-requests.ts",
+        "line": 138,
+        "fn": "normalizeModelPreference",
+        "text": "model = normalizeModelPreference(body.model)",
+        "rule": "reject"
+      },
+      {
+        "file": "server/routes/cli-debug.ts",
+        "line": 33,
+        "fn": "normalizeModelPreference",
+        "text": "const raw = typeof value === 'string' ? normalizeModelPreference(value) : undefined",
+        "rule": "closed"
+      },
+      {
+        "file": "server/routes/openai-compat.ts",
+        "line": 103,
+        "fn": "normalizeModelPreference",
+        "text": "const normalized = normalizeModelPreference(model)",
+        "rule": "closed"
+      },
+      {
+        "file": "server/routes/openai-compat.ts",
+        "line": 118,
+        "fn": "normalizeModelPreference",
+        "text": "return normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL) ?? DEFAULT_MODEL",
+        "rule": "closed_env_default"
+      },
+      {
+        "file": "server/routes/query.ts",
+        "line": 96,
+        "fn": "normalizeModelPreference",
+        "text": "const validModel = normalizeModelPreference(model)",
+        "rule": "accept"
+      },
+      {
+        "file": "server/routes/work-handoff-requests.ts",
+        "line": 21,
+        "fn": "normalizeModelPreference",
+        "text": "export const defaultHandoffModel = (): string => normalizeModelPreference(process.env.COS_G2_DEFAULT_MODEL) ?? DEFAULT_MODEL",
+        "rule": "closed_env_default"
+      }
+    ],
+    "callCount": 25,
+    "callFiles": [
+      "server/lib/claude-steer.ts",
+      "server/lib/codex-engine-sessions.ts",
+      "server/lib/control2-draft.ts",
+      "server/lib/conversation.ts",
+      "server/lib/cursor-engine-sessions.ts",
+      "server/lib/handoff-store.ts",
+      "server/lib/model-router.ts",
+      "server/lib/morning-brief-config.ts",
+      "server/lib/query-job-runtime.ts",
+      "server/lib/work-activity.ts",
+      "server/lib/work-handoff-requests.ts",
+      "server/routes/cli-debug.ts",
+      "server/routes/openai-compat.ts",
+      "server/routes/query.ts",
+      "server/routes/work-handoff-requests.ts"
+    ],
+    "definitions": [
+      {
+        "file": "shared/model-preference.ts",
+        "line": 135,
+        "fn": "isModelPreference",
+        "text": "export function isModelPreference(value: unknown): value is ModelPreference {"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 139,
+        "fn": "normalizeModelPreference",
+        "text": "export function normalizeModelPreference(value: unknown): ModelPreference | undefined {"
+      }
+    ],
+    "internalCallsInsideShared": [
+      {
+        "file": "shared/model-preference.ts",
+        "line": 142,
+        "fn": "isModelPreference",
+        "text": "return isModelPreference(value) ? value : undefined"
+      }
+    ],
+    "problems": []
+  },
+  "familyGuards": {
+    "pattern": "(?<![\\w.])(isClaudeModel|isCodexModel|isCursorModel|isOllamaModel)\\( in server/ and shared/, non-test, one row per call",
+    "calls": [
+      {
+        "file": "server/lib/claude-bridge.ts",
+        "line": 175,
+        "fn": "isClaudeModel",
+        "text": "if (sessionModel && isClaudeModel(sessionModel)) {"
+      },
+      {
+        "file": "server/lib/claude-bridge.ts",
+        "line": 443,
+        "fn": "isClaudeModel",
+        "text": "?? (sessionModel && isClaudeModel(sessionModel) ? sessionModel : DEFAULT_MODEL)"
+      },
+      {
+        "file": "server/lib/claude-steer.ts",
+        "line": 256,
+        "fn": "isOllamaModel",
+        "text": "if (isOllamaModel(model)) return 'ollama'"
+      },
+      {
+        "file": "server/lib/claude-steer.ts",
+        "line": 257,
+        "fn": "isCursorModel",
+        "text": "if (isCursorModel(model)) return 'cursor'"
+      },
+      {
+        "file": "server/lib/claude-steer.ts",
+        "line": 258,
+        "fn": "isCodexModel",
+        "text": "return isCodexModel(model) ? 'codex' : 'claude'"
+      },
+      {
+        "file": "server/lib/codex-engine-sessions.ts",
+        "line": 53,
+        "fn": "isCodexModel",
+        "text": "!isCodexModel(model) ||"
+      },
+      {
+        "file": "server/lib/control2-draft.ts",
+        "line": 91,
+        "fn": "isClaudeModel",
+        "text": "if (!model || !isClaudeModel(model)) throw new Error('draft_claude_model_required')"
+      },
+      {
+        "file": "server/lib/cursor-engine-sessions.ts",
+        "line": 55,
+        "fn": "isCursorModel",
+        "text": "if (!model || !isCursorModel(model) || typeof raw?.cosSessionId !== 'string') continue"
+      },
+      {
+        "file": "server/lib/handoff-store.ts",
+        "line": 193,
+        "fn": "isCodexModel",
+        "text": "model: normalizedModel && isCodexModel(normalizedModel)"
+      },
+      {
+        "file": "server/lib/model-router.ts",
+        "line": 108,
+        "fn": "isClaudeModel",
+        "text": "if (options?.dispatch && !isClaudeModel(resolvedModel)) {"
+      },
+      {
+        "file": "server/lib/model-router.ts",
+        "line": 113,
+        "fn": "isCursorModel",
+        "text": "if (isCursorModel(resolvedModel)) {"
+      },
+      {
+        "file": "server/lib/model-router.ts",
+        "line": 125,
+        "fn": "isOllamaModel",
+        "text": "if (isOllamaModel(resolvedModel)) {"
+      },
+      {
+        "file": "server/lib/model-router.ts",
+        "line": 133,
+        "fn": "isCodexModel",
+        "text": "if (isCodexModel(resolvedModel)) {"
+      },
+      {
+        "file": "server/lib/model-router.ts",
+        "line": 136,
+        "fn": "isClaudeModel",
+        "text": "if (isClaudeModel(resolvedModel)) {"
+      },
+      {
+        "file": "server/lib/query-job-runtime.ts",
+        "line": 122,
+        "fn": "isOllamaModel",
+        "text": "if (isOllamaModel(model)) return 'ollama'"
+      },
+      {
+        "file": "server/lib/query-job-runtime.ts",
+        "line": 123,
+        "fn": "isCursorModel",
+        "text": "if (isCursorModel(model)) return 'cursor'"
+      },
+      {
+        "file": "server/lib/query-job-runtime.ts",
+        "line": 124,
+        "fn": "isCodexModel",
+        "text": "return isCodexModel(model) ? 'codex' : 'claude'"
+      },
+      {
+        "file": "server/lib/query-job-runtime.ts",
+        "line": 360,
+        "fn": "isCursorModel",
+        "text": "...(validModel && isCursorModel(validModel)"
+      },
+      {
+        "file": "server/lib/task-store.ts",
+        "line": 196,
+        "fn": "isClaudeModel",
+        "text": "return config.model && isClaudeModel(config.model) ? config.model : DEFAULT_MODEL"
+      },
+      {
+        "file": "server/lib/work-activity.ts",
+        "line": 107,
+        "fn": "isClaudeModel",
+        "text": "return isClaudeModel(slot) ? 'claude' : isCodexModel(slot) ? 'codex' : isCursorModel(slot) ? 'cursor' : isOllamaModel(slot) ? 'ollama' : 'claude'"
+      },
+      {
+        "file": "server/lib/work-activity.ts",
+        "line": 107,
+        "fn": "isCodexModel",
+        "text": "return isClaudeModel(slot) ? 'claude' : isCodexModel(slot) ? 'codex' : isCursorModel(slot) ? 'cursor' : isOllamaModel(slot) ? 'ollama' : 'claude'"
+      },
+      {
+        "file": "server/lib/work-activity.ts",
+        "line": 107,
+        "fn": "isCursorModel",
+        "text": "return isClaudeModel(slot) ? 'claude' : isCodexModel(slot) ? 'codex' : isCursorModel(slot) ? 'cursor' : isOllamaModel(slot) ? 'ollama' : 'claude'"
+      },
+      {
+        "file": "server/lib/work-activity.ts",
+        "line": 107,
+        "fn": "isOllamaModel",
+        "text": "return isClaudeModel(slot) ? 'claude' : isCodexModel(slot) ? 'codex' : isCursorModel(slot) ? 'cursor' : isOllamaModel(slot) ? 'ollama' : 'claude'"
+      },
+      {
+        "file": "server/routes/cli-debug.ts",
+        "line": 34,
+        "fn": "isClaudeModel",
+        "text": "return raw && isClaudeModel(raw) ? raw : undefined"
+      },
+      {
+        "file": "server/routes/query.ts",
+        "line": 230,
+        "fn": "isCursorModel",
+        "text": "...(validModel && isCursorModel(validModel) ? { cursorExecutionMode } : {}),"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 167,
+        "fn": "isCursorModel",
+        "text": "(!isCursorModel(model) || cursorAvailable) &&"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 168,
+        "fn": "isOllamaModel",
+        "text": "(!isOllamaModel(model) || ollamaAvailable),"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 187,
+        "fn": "isCodexModel",
+        "text": "if (!isCodexModel(option.preference)) continue"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 200,
+        "fn": "isCursorModel",
+        "text": "if (!isCursorModel(option.preference)) continue"
+      }
+    ],
+    "callCount": 29,
+    "serverCallCount": 25,
+    "sharedInternalCallCount": 4,
+    "distinctServerLines": 22,
+    "definitions": [
+      {
+        "file": "shared/model-preference.ts",
+        "line": 145,
+        "fn": "isClaudeModel",
+        "text": "export function isClaudeModel(model: ModelPreference): model is ClaudeModelPreference {"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 149,
+        "fn": "isCodexModel",
+        "text": "export function isCodexModel(model: ModelPreference): model is CodexModelPreference {"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 153,
+        "fn": "isCursorModel",
+        "text": "export function isCursorModel(model: ModelPreference): model is CursorModelPreference {"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 157,
+        "fn": "isOllamaModel",
+        "text": "export function isOllamaModel(model: ModelPreference): model is OllamaModelPreference {"
+      }
+    ],
+    "rule": "Each guard call is Closed in K1 unless its 5.2 caller is Accept; the plan names claude-bridge.ts:175, :443, query-job-runtime.ts:122-124, :360, routes/query.ts:230"
+  },
+  "appPreference": {
+    "pattern": "(?<![\\w.])(normalizeModelPreference|isModelPreference)\\( in shared/ and src/, non-test; fallbacks: \\?\\?\\s*state\\.modelPreference",
+    "sites": [
+      {
+        "file": "shared/model-preference.ts",
+        "line": 165,
+        "fn": "isModelPreference",
+        "kind": "definition",
+        "text": "export function isModelPreference(value: unknown): value is ModelPreference {"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 169,
+        "fn": "normalizeModelPreference",
+        "kind": "definition",
+        "text": "export function normalizeModelPreference(value: unknown): ModelPreference | undefined {"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 174,
+        "fn": "isModelPreference",
+        "kind": "internal_call",
+        "text": "return isModelPreference(value) ? value : undefined"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 6063,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "modelPreference: normalizeModelPreference(it.modelPreference) ?? state.modelPreference,"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 11328,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const model = item.target.kind === 'job' ? normalizeModelPreference(item.target.model) ?? state.modelPreference : state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 23729,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const confirmedModel = normalizeModelPreference(model)"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 23829,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const confirmedModel = normalizeModelPreference(doneModel) ?? activeModel"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 24412,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const confirmedModel = normalizeModelPreference(doneModel) ?? state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 24684,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const modelPreference = normalizeModelPreference(request.model) ?? state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 24866,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const modelPreference = normalizeModelPreference(pin?.admission.snapshot.request.model)"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 25124,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const normalized = normalizeModelPreference(model)"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 25163,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "normalizeModelPreference(row?.modelPreference) ?? state.modelPreference,"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 26178,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const confirmedModel = normalizeModelPreference(doneModel)"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 26312,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const confirmedModel = normalizeModelPreference(startModel)"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 27385,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const model = normalizeModelPreference((e as CustomEvent).detail)"
+      },
+      {
+        "file": "src/glasses-entry.ts",
+        "line": 1084,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const normalizedModel = normalizeModelPreference(model) ?? restored?.modelPreference ?? DEFAULT_MODEL"
+      },
+      {
+        "file": "src/glasses-entry.ts",
+        "line": 1192,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "durableQueueItem(active, normalizeModelPreference(prior?.modelPreference), 'failed', error),"
+      },
+      {
+        "file": "src/glasses-entry.ts",
+        "line": 1410,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "model: normalizeModelPreference(queueItem?.modelPreference),"
+      },
+      {
+        "file": "src/glasses-entry.ts",
+        "line": 1593,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "model: normalizeModelPreference(queueItem?.modelPreference),"
+      },
+      {
+        "file": "src/glasses-entry.ts",
+        "line": 1767,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "normalizeModelPreference(parsed.model) ?? messageModel ?? DEFAULT_MODEL,"
+      },
+      {
+        "file": "src/lib/api-client.ts",
+        "line": 2234,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const modelPreference = normalizeModelPreference(message.modelPreference)"
+      },
+      {
+        "file": "src/lib/message-model.ts",
+        "line": 19,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const saved = normalizeModelPreference(message.modelPreference)"
+      },
+      {
+        "file": "src/lib/message-model.ts",
+        "line": 39,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const localModel = normalizeModelPreference(local?.modelPreference)"
+      },
+      {
+        "file": "src/lib/message-model.ts",
+        "line": 40,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const serverModel = normalizeModelPreference(server?.modelPreference)"
+      },
+      {
+        "file": "src/lib/session-persistence.ts",
+        "line": 1477,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "modelPreference: normalizeModelPreference(parsed.modelPreference) ?? DEFAULT_MODEL,"
+      },
+      {
+        "file": "src/lib/session-persistence.ts",
+        "line": 1483,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const standaloneModel = normalizeModelPreference(modelRaw)"
+      },
+      {
+        "file": "src/lib/session-persistence.ts",
+        "line": 1495,
+        "fn": "normalizeModelPreference",
+        "kind": "call",
+        "text": "const modelPreference = normalizeModelPreference(raw.modelPreference)"
+      },
+      {
+        "file": "src/lib/steer-view.ts",
+        "line": 102,
+        "fn": "isModelPreference",
+        "kind": "call",
+        "text": "if (!isModelPreference(model)) return null"
+      },
+      {
+        "file": "src/lib/voice-prompt-flow.ts",
+        "line": 446,
+        "fn": "isModelPreference",
+        "kind": "call",
+        "text": "return isModelPreference(id)"
+      }
+    ],
+    "siteCountIncludingDefinitions": 28,
+    "callCount": 26,
+    "definitionCount": 2,
+    "internalCallCount": 1,
+    "stateModelPreferenceFallbacks": [
+      {
+        "file": "src/Main.ts",
+        "line": 6063,
+        "text": "modelPreference: normalizeModelPreference(it.modelPreference) ?? state.modelPreference,"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 11328,
+        "text": "const model = item.target.kind === 'job' ? normalizeModelPreference(item.target.model) ?? state.modelPreference : state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 20913,
+        "text": "const model = msg?.modelPreference ?? state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 23337,
+        "text": "const activeModel = messageModel ?? state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 24412,
+        "text": "const confirmedModel = normalizeModelPreference(doneModel) ?? state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 24684,
+        "text": "const modelPreference = normalizeModelPreference(request.model) ?? state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 24868,
+        "text": "?? state.modelPreference"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 25163,
+        "text": "normalizeModelPreference(row?.modelPreference) ?? state.modelPreference,"
+      },
+      {
+        "file": "src/Main.ts",
+        "line": 26222,
+        "text": "modelPreference: confirmedModel ?? state.modelPreference,"
+      },
+      {
+        "file": "src/display-manager.ts",
+        "line": 4057,
+        "text": "const model = sessionIdentity?.footer ?? askModel ?? modelShortLabel(viewedMessage?.modelPreference ?? state.modelPreference)"
+      }
+    ],
+    "fallbackCount": 10,
+    "labelOpusDefaults": [
+      {
+        "file": "shared/model-preference.ts",
+        "line": 262,
+        "text": "return 'Opus'"
+      },
+      {
+        "file": "shared/model-preference.ts",
+        "line": 278,
+        "text": "return 'Opus'"
+      }
+    ]
+  },
+  "serverSpawn": {
+    "spawnPattern": "(?<![\\w.])(spawn|execFile|spawnSync|execFileSync)\\( in server/lib, server/routes, shared; non-test; one row per LINE",
+    "spawnShapedLinesIncludingComments": 82,
+    "commentLines": [
+      {
+        "file": "server/lib/agent-session-ownership-store.ts",
+        "line": 42,
+        "text": "//       - claude: `spawn('claude', ['-p', ...])` returned pid 98602 and Claude"
+      }
+    ],
+    "spawnCallLines": [
+      {
+        "file": "server/lib/__fixtures__/attached-fake-provider.cjs",
+        "line": 23,
+        "text": "const sh = (script, options) => spawn('/bin/sh', ['-c', script, token], options)",
+        "class": "non_provider",
+        "binary": "/bin/sh",
+        "note": "test fixture, not shipped behavior"
+      },
+      {
+        "file": "server/lib/__fixtures__/attached-fake-provider.cjs",
+        "line": 37,
+        "text": "spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', token], { stdio: 'ignore' })",
+        "class": "non_provider",
+        "binary": "node (process.execPath)",
+        "note": "test fixture"
+      },
+      {
+        "file": "server/lib/__fixtures__/attached-fake-provider.cjs",
+        "line": 48,
+        "text": "spawn(process.execPath, [",
+        "class": "non_provider",
+        "binary": "node (process.execPath)",
+        "note": "test fixture"
+      },
+      {
+        "file": "server/lib/__fixtures__/permission-broker-6.71.5.ts",
+        "line": 275,
+        "text": "execFile('/usr/sbin/ioreg', ['-r', '-d', '1', '-k', 'HIDIdleTime', '-c', 'IOHIDSystem'], { timeout: 1_000, maxBuffer: 1 << 20 }, (error, stdout) => {",
+        "class": "non_provider",
+        "binary": "/usr/sbin/ioreg",
+        "note": "test fixture (frozen 6.71.5 copy)"
+      },
+      {
+        "file": "server/lib/adaptive-playback-audio.ts",
+        "line": 203,
+        "text": "const proc = spawn('ffmpeg', [",
+        "class": "non_provider",
+        "binary": "ffmpeg"
+      },
+      {
+        "file": "server/lib/archive.ts",
+        "line": 196,
+        "text": "const proc = spawn('claude', ['-p', '--model', 'sonnet', instruction], {",
+        "class": "background_lane_a",
+        "binary": "claude",
+        "planned": true
+      },
+      {
+        "file": "server/lib/attached-provider-adapter.ts",
+        "line": 1553,
+        "text": "const output = execFileSync('/bin/ps', [...ATTACHED_PS_ARGS], attachedPsOptions())",
+        "class": "non_provider",
+        "binary": "/bin/ps"
+      },
+      {
+        "file": "server/lib/attached-provider-adapter.ts",
+        "line": 1573,
+        "text": "execFile('/bin/ps', [...ATTACHED_PS_ARGS], attachedPsOptions(), (error, stdout) => {",
+        "class": "non_provider",
+        "binary": "/bin/ps"
+      },
+      {
+        "file": "server/lib/audio-enhance.ts",
+        "line": 44,
+        "text": "const proc = spawn('ffmpeg', [",
+        "class": "non_provider",
+        "binary": "ffmpeg"
+      },
+      {
+        "file": "server/lib/claude-bridge.ts",
+        "line": 231,
+        "text": "const proc = spawn('claude', [",
+        "class": "background_lane_a",
+        "binary": "claude",
+        "planned": true,
+        "note": "prewarm"
+      },
+      {
+        "file": "server/lib/claude-bridge.ts",
+        "line": 659,
+        "text": "const proc = spawnWithTurnRequest(turnRequest, () => spawn('claude', args, {",
+        "class": "lane_b_capable",
+        "binary": "claude",
+        "planned": true,
+        "note": "turn"
+      },
+      {
+        "file": "server/lib/claude-cli-support.ts",
+        "line": 17,
+        "text": "execFile('claude', ['--help'], { timeout: HELP_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {",
+        "class": "probe_catalog",
+        "binary": "claude",
+        "planned": false,
+        "note": "claude --help; NOT in plan 6.1 table"
+      },
+      {
+        "file": "server/lib/claude-cli-support.ts",
+        "line": 48,
+        "text": "execFile('claude', ['--help'], { timeout: HELP_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {",
+        "class": "probe_catalog",
+        "binary": "claude",
+        "planned": false,
+        "note": "claude --help; NOT in plan 6.1 table"
+      },
+      {
+        "file": "server/lib/codex-bridge.ts",
+        "line": 163,
+        "text": "const result = spawnSync(resolved.path, ['exec', '--help'], {",
+        "class": "probe_catalog",
+        "binary": "codex",
+        "planned": true,
+        "note": "exec --help; plan names the resolve at :156"
+      },
+      {
+        "file": "server/lib/codex-bridge.ts",
+        "line": 492,
+        "text": "const proc = spawnWithTurnRequest(turnRequest, () => spawn(resolvedCodex.path, args, {",
+        "class": "lane_b_capable",
+        "binary": "codex",
+        "planned": true,
+        "note": "turn"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 408,
+        "text": "child = spawn(options.binary, ['app-server', '--listen', 'stdio://'], { cwd: options.cwd ?? homedir(), env: options.env ?? process.env, stdio: ['pipe', 'pipe', 'ignore'] })",
+        "class": "probe_catalog",
+        "binary": "codex",
+        "planned": true,
+        "note": "app-server; plan names the resolve at :494"
+      },
+      {
+        "file": "server/lib/codex-live-queue-deps.ts",
+        "line": 41,
+        "text": "child = spawn(binary, [...args], { stdio: ['ignore', 'pipe', 'pipe'], shell: false, detached: true })",
+        "class": "probe_catalog",
+        "binary": "codex",
+        "planned": true,
+        "note": "live queue app-server; plan names the resolve at :114"
+      },
+      {
+        "file": "server/lib/codex-model-catalog.ts",
+        "line": 290,
+        "text": "const child = spawn(resolved.path, ['app-server', '--stdio'], {",
+        "class": "probe_catalog",
+        "binary": "codex",
+        "planned": true,
+        "note": "app-server catalog; plan names :282"
+      },
+      {
+        "file": "server/lib/codex-queue-control.ts",
+        "line": 24,
+        "text": "const child = spawn(resolved.path, ['app-server', '--disable', 'in_app_local_automation', '--disable', 'memories'], { stdio: ['pipe', 'pipe', 'ignore'], shell: false })",
+        "class": "probe_catalog",
+        "binary": "codex",
+        "planned": true,
+        "note": "app-server queue; plan names :19"
+      },
+      {
+        "file": "server/lib/context-library-search.ts",
+        "line": 282,
+        "text": "execFile(",
+        "class": "non_provider",
+        "binary": "python (PYTHON_BIN)"
+      },
+      {
+        "file": "server/lib/control2-draft.ts",
+        "line": 44,
+        "text": "const child = spawn('claude', control2DraftArgs(model), { cwd: snapshot.root, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })",
+        "class": "background_lane_a",
+        "binary": "claude",
+        "planned": true
+      },
+      {
+        "file": "server/lib/control2-sandbox.ts",
+        "line": 105,
+        "text": "const child = spawn('/usr/bin/sandbox-exec', ['-p', profile(owned.root), input.executable, ...(input.args ?? [])], {",
+        "class": "non_provider",
+        "binary": "/usr/bin/sandbox-exec",
+        "note": "runs input.executable under a sandbox profile with a minimal env {PATH,HOME,TMPDIR,LANG,LC_ALL}"
+      },
+      {
+        "file": "server/lib/control2-sandbox.ts",
+        "line": 166,
+        "text": "const child = spawn('/bin/bash', ['-c', `printf host-control > /dev/tcp/127.0.0.1/${address.port}`], { env: { PATH: '/usr/bin:/bin' }, stdio: 'ignore' })",
+        "class": "non_provider",
+        "binary": "/bin/bash",
+        "note": "sandbox self-test"
+      },
+      {
+        "file": "server/lib/cursor-bridge.ts",
+        "line": 368,
+        "text": "proc = spawnWithTurnRequest(turnRequest, () => spawn(agentBinary, args, {",
+        "class": "cursor_turn_no_key_lane",
+        "binary": "agent",
+        "planned": false,
+        "note": "Cursor turn; plan: Cursor has no key lane; NOT in plan 6.1 table"
+      },
+      {
+        "file": "server/lib/cursor-model-catalog.ts",
+        "line": 268,
+        "text": "child = spawn(agentBinary, ['models'], {",
+        "class": "probe_catalog",
+        "binary": "agent",
+        "planned": true,
+        "note": "agent models; plan names the resolve at :129"
+      },
+      {
+        "file": "server/lib/cursor-session-model.ts",
+        "line": 137,
+        "text": "const child = execFile(SQLITE3_BIN, [...args], { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' }, (error, stdout) => {",
+        "class": "non_provider",
+        "binary": "sqlite3"
+      },
+      {
+        "file": "server/lib/diarizer-backend.ts",
+        "line": 66,
+        "text": "const found = execFileSync('which', ['fluidaudiocli'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000 }).trim()",
+        "class": "non_provider",
+        "binary": "which"
+      },
+      {
+        "file": "server/lib/dictation-benchmark.ts",
+        "line": 71,
+        "text": "execFile('/bin/ps', ['-o', 'rss=', '-p', String(pid)], { timeout: 1_000 }, (error, stdout) => {",
+        "class": "non_provider",
+        "binary": "/bin/ps"
+      },
+      {
+        "file": "server/lib/dictation-clean.ts",
+        "line": 85,
+        "text": "const proc = spawn(binary.path, args, { stdio: ['pipe', 'pipe', 'pipe'], env, cwd: workspace, detached: true })",
+        "class": "background_lane_a",
+        "binary": "claude|agent",
+        "planned": true,
+        "note": "plan names the resolve at :38"
+      },
+      {
+        "file": "server/lib/g2-enrichment-runner.ts",
+        "line": 105,
+        "text": "const child = spawn(",
+        "class": "non_provider",
+        "binary": "python (options.pythonBin)"
+      },
+      {
+        "file": "server/lib/health-static-probes.ts",
+        "line": 86,
+        "text": "execFile(file, args, {",
+        "class": "probe_catalog",
+        "binary": "python|claude|codex --version",
+        "planned": true,
+        "note": "plan names the resolves at :128, :142"
+      },
+      {
+        "file": "server/lib/image-safety.ts",
+        "line": 197,
+        "text": "const proc = spawn('ffmpeg', ['-version'], { stdio: ['ignore', 'ignore', 'ignore'] })",
+        "class": "non_provider",
+        "binary": "ffmpeg"
+      },
+      {
+        "file": "server/lib/image-safety.ts",
+        "line": 226,
+        "text": "const proc = spawn('ffmpeg', ['-nostdin', '-v', 'error', ...args], {",
+        "class": "non_provider",
+        "binary": "ffmpeg"
+      },
+      {
+        "file": "server/lib/image-safety.ts",
+        "line": 258,
+        "text": "const proc = spawn('ffprobe', [",
+        "class": "non_provider",
+        "binary": "ffprobe"
+      },
+      {
+        "file": "server/lib/lens-gist-engines.ts",
+        "line": 140,
+        "text": "proc = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'], env: { ...(isolation ? isolation.env : lensGistChildEnv(binary)), ...(opts.maxOutputTokens ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(opts.",
+        "class": "background_lane_a",
+        "binary": "claude|codex|agent",
+        "planned": true,
+        "note": "plan names the resolve at :182"
+      },
+      {
+        "file": "server/lib/live-cues-cursor.ts",
+        "line": 78,
+        "text": "proc = spawn(agentBinary, args, {",
+        "class": "background_lane_a",
+        "binary": "agent",
+        "planned": false,
+        "note": "Cursor live cues; NOT in plan 6.1 table"
+      },
+      {
+        "file": "server/lib/live-cues-memory.ts",
+        "line": 82,
+        "text": "execFile(",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/live-cues-memory.ts",
+        "line": 151,
+        "text": "const proc = spawn(pythonBin, [script, '--explore', entity], {",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/live-cues-v2.ts",
+        "line": 473,
+        "text": "const proc = spawn(p.python, [p.script, '--warm'], { cwd: p.cwd, detached: true, stdio: 'ignore' })",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/live-cues-v2.ts",
+        "line": 490,
+        "text": "proc = spawn(paths.python, [paths.script, '--stdin'], { cwd: paths.cwd, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/managed-restart.ts",
+        "line": 29,
+        "text": "const child = spawn('launchctl', args, { detached: true, stdio: 'ignore' })",
+        "class": "non_provider",
+        "binary": "launchctl"
+      },
+      {
+        "file": "server/lib/meeting-actions.ts",
+        "line": 1543,
+        "text": "attempt = await spawn(",
+        "class": "non_provider",
+        "binary": "injected pipeline runner (python)"
+      },
+      {
+        "file": "server/lib/meeting-actions.ts",
+        "line": 2258,
+        "text": "const attempt = await spawn([PIPELINE_STATUS_ARG], {})",
+        "class": "non_provider",
+        "binary": "injected pipeline runner (python)"
+      },
+      {
+        "file": "server/lib/meeting-ask-runner.ts",
+        "line": 58,
+        "text": "const child = spawn(binary.path, args, { cwd: workspace, detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...lensGistChildEnv(binary.path), ...meetingAskTokenEnv(budget) } });",
+        "class": "background_lane_a",
+        "binary": "claude|codex",
+        "planned": true,
+        "note": "plan names the resolve at :50"
+      },
+      {
+        "file": "server/lib/meeting-ask-search-process.ts",
+        "line": 9,
+        "text": "const child = spawn(file, args, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });",
+        "class": "non_provider",
+        "binary": "python (file param, from context/meeting library search)"
+      },
+      {
+        "file": "server/lib/meeting-image-ocr.ts",
+        "line": 50,
+        "text": "execFile('/usr/bin/osascript', ['-l', 'JavaScript', script, path], {",
+        "class": "non_provider",
+        "binary": "/usr/bin/osascript"
+      },
+      {
+        "file": "server/lib/meeting-library-search.ts",
+        "line": 517,
+        "text": "execFile(",
+        "class": "non_provider",
+        "binary": "python (PYTHON_BIN)"
+      },
+      {
+        "file": "server/lib/meeting-summary.ts",
+        "line": 371,
+        "text": "raw = await spawn(buildSummaryPrompt(text, truncated), {",
+        "class": "background_lane_a",
+        "binary": "claude (spawnClaudeText, prompt-edit.ts:72)",
+        "planned": false,
+        "note": "injected; default is spawnClaudeText, which spawns at prompt-edit.ts:94; NOT separately in plan 6.1 table"
+      },
+      {
+        "file": "server/lib/meeting-sync-lock.ts",
+        "line": 14,
+        "text": "const child = spawn(python,['-c',code,join(scripts,'.sync_meetings.lock')],{stdio:['pipe','pipe','pipe']})",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/nemotron-cli.ts",
+        "line": 94,
+        "text": "const listing = execFileSync('/bin/ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf8', timeout: 2_000, maxBuffer: 4 * 1024 * 1024 })",
+        "class": "non_provider",
+        "binary": "/bin/ps"
+      },
+      {
+        "file": "server/lib/occupancy-probes.ts",
+        "line": 158,
+        "text": "const stdout = execFileSync(bin, args, {",
+        "class": "non_provider",
+        "binary": "lsof/pgrep-style probe (bin param)"
+      },
+      {
+        "file": "server/lib/occupancy-probes.ts",
+        "line": 597,
+        "text": "execFile(bin, args, {",
+        "class": "non_provider",
+        "binary": "lsof/pgrep-style probe (bin param)"
+      },
+      {
+        "file": "server/lib/parakeet-cli-trust.ts",
+        "line": 54,
+        "text": "execFile(command, args, { timeout: timeoutMs, maxBuffer: 256 * 1024, env: { PATH: '/usr/bin:/bin' } }, (error, stdout, stderr) => {",
+        "class": "non_provider",
+        "binary": "parakeet cli (command param)"
+      },
+      {
+        "file": "server/lib/parakeet.ts",
+        "line": 541,
+        "text": "const out = execFileSync('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'], { encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()",
+        "class": "non_provider",
+        "binary": "/usr/bin/getconf"
+      },
+      {
+        "file": "server/lib/permission-broker.ts",
+        "line": 283,
+        "text": "execFile('/usr/sbin/ioreg', ['-r', '-d', '1', '-k', 'HIDIdleTime', '-c', 'IOHIDSystem'], { timeout: 1_000, maxBuffer: 1 << 20 }, (error, stdout) => {",
+        "class": "non_provider",
+        "binary": "/usr/sbin/ioreg"
+      },
+      {
+        "file": "server/lib/pipeline-runner.ts",
+        "line": 120,
+        "text": "child = spawn(options.pythonBin, [options.script, ...options.args], {",
+        "class": "non_provider",
+        "binary": "python (options.pythonBin)"
+      },
+      {
+        "file": "server/lib/prompt-edit.ts",
+        "line": 94,
+        "text": "const proc = spawn('claude', args, {",
+        "class": "background_lane_a",
+        "binary": "claude",
+        "planned": true
+      },
+      {
+        "file": "server/lib/provider-proof.ts",
+        "line": 62,
+        "text": "return spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true })",
+        "class": "probe_catalog",
+        "binary": "claude|codex|agent (command param)",
+        "planned": false,
+        "note": "provider proof spawnPiped; NOT in plan 6.1 table"
+      },
+      {
+        "file": "server/lib/python-bridge.ts",
+        "line": 292,
+        "text": "const child = execFile(",
+        "class": "non_provider",
+        "binary": "python (PYTHON_BIN)"
+      },
+      {
+        "file": "server/lib/rich-media-safety.ts",
+        "line": 207,
+        "text": "proc = spawn(command, args, { stdio: 'ignore' })",
+        "class": "non_provider",
+        "binary": "ffmpeg/ffprobe (command param)"
+      },
+      {
+        "file": "server/lib/rich-media-safety.ts",
+        "line": 306,
+        "text": "const proc = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] })",
+        "class": "non_provider",
+        "binary": "ffmpeg (command param)"
+      },
+      {
+        "file": "server/lib/rich-media-safety.ts",
+        "line": 392,
+        "text": "const proc = spawn('ffprobe', [",
+        "class": "non_provider",
+        "binary": "ffprobe"
+      },
+      {
+        "file": "server/lib/session-continue-facts-real.ts",
+        "line": 33,
+        "text": "execFile(GIT_BIN, [...args], { cwd, timeout: timeoutMs, encoding: 'utf8', env: GIT_ENV, maxBuffer: 256 * 1024 }, (error, stdout) => {",
+        "class": "non_provider",
+        "binary": "git"
+      },
+      {
+        "file": "server/lib/session-continue-facts-real.ts",
+        "line": 40,
+        "text": "String(execFileSync(GIT_BIN, [...args], { cwd, timeout: timeoutMs, encoding: 'utf8', env: GIT_ENV, maxBuffer: 256 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }))",
+        "class": "non_provider",
+        "binary": "git"
+      },
+      {
+        "file": "server/lib/session-halt.ts",
+        "line": 136,
+        "text": "return spawn(request)",
+        "class": "wrapper",
+        "binary": "caller-supplied spawn (attach/fork)",
+        "planned": false,
+        "note": "pass-through wrapper; the provider is decided by the attach/fork caller"
+      },
+      {
+        "file": "server/lib/session-hooks-runtime.ts",
+        "line": 56,
+        "text": "const out = execFileSync('/bin/ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf-8', timeout: 1_000 })",
+        "class": "non_provider",
+        "binary": "/bin/ps"
+      },
+      {
+        "file": "server/lib/speaker-embeddings.ts",
+        "line": 163,
+        "text": "const probe = spawnSync(process.execPath, ['-e', script, modelPath], {",
+        "class": "non_provider",
+        "binary": "node (process.execPath)"
+      },
+      {
+        "file": "server/lib/task-bridge.ts",
+        "line": 42,
+        "text": "execFileSync(candidate, ['-I','-S','-c','import sys, os, fcntl; sys.exit(0 if sys.version_info >= (3,10) and hasattr(os, \"O_NOFOLLOW\") and hasattr(os, \"O_DIRECTORY\") else 1)'], {timeout:3000,stdio:'ig",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/task-bridge.ts",
+        "line": 77,
+        "text": "const child = execFile(executable, argv, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, cwd: runtime,",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/task-dates.ts",
+        "line": 77,
+        "text": "execFile(GIT_BIN, [...args], { cwd, timeout: timeoutMs, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,",
+        "class": "non_provider",
+        "binary": "git"
+      },
+      {
+        "file": "server/lib/tts-local.ts",
+        "line": 101,
+        "text": "const child = spawn(path, ['-c', probe], {",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/tts-local.ts",
+        "line": 147,
+        "text": "const child = spawn('/bin/bash', [BOOTSTRAP], {",
+        "class": "non_provider",
+        "binary": "/bin/bash"
+      },
+      {
+        "file": "server/lib/tts-local.ts",
+        "line": 332,
+        "text": "const child = spawn(",
+        "class": "non_provider",
+        "binary": "python"
+      },
+      {
+        "file": "server/lib/video-compression.ts",
+        "line": 141,
+        "text": "proc = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })",
+        "class": "non_provider",
+        "binary": "ffmpeg"
+      },
+      {
+        "file": "server/lib/whisper-local.ts",
+        "line": 359,
+        "text": "execFile(file, args, {",
+        "class": "non_provider",
+        "binary": "whisper/ffmpeg (file param)"
+      },
+      {
+        "file": "server/lib/whisper-local.ts",
+        "line": 698,
+        "text": "const child = spawn(WHISPER_SERVER, serverArgs, {",
+        "class": "non_provider",
+        "binary": "whisper-server"
+      },
+      {
+        "file": "server/lib/whisper-local.ts",
+        "line": 1083,
+        "text": "const proc = spawn(",
+        "class": "non_provider",
+        "binary": "whisper-cli or /usr/sbin/taskpolicy"
+      },
+      {
+        "file": "server/lib/whisper-local.ts",
+        "line": 1326,
+        "text": "const proc = spawn(WHISPER_CLI, [",
+        "class": "non_provider",
+        "binary": "whisper-cli"
+      },
+      {
+        "file": "server/lib/whisper-preview.ts",
+        "line": 156,
+        "text": "execFile(file, args, {",
+        "class": "non_provider",
+        "binary": "whisper (file param)"
+      },
+      {
+        "file": "server/lib/whisper-preview.ts",
+        "line": 385,
+        "text": "const child = spawn(WHISPER_SERVER, args, { stdio: 'ignore', detached: false })",
+        "class": "non_provider",
+        "binary": "whisper-server"
+      },
+      {
+        "file": "server/routes/tts.ts",
+        "line": 343,
+        "text": "spawn(",
+        "class": "non_provider",
+        "binary": "osascript"
+      }
+    ],
+    "spawnCallLineCount": 81,
+    "spawnClassCounts": {
+      "non_provider": 58,
+      "background_lane_a": 9,
+      "lane_b_capable": 2,
+      "probe_catalog": 10,
+      "cursor_turn_no_key_lane": 1,
+      "wrapper": 1
+    },
+    "providerSpawnLinesNotInPlanTable": [
+      "server/lib/claude-cli-support.ts:17",
+      "server/lib/claude-cli-support.ts:48",
+      "server/lib/cursor-bridge.ts:368",
+      "server/lib/live-cues-cursor.ts:78",
+      "server/lib/meeting-summary.ts:371",
+      "server/lib/provider-proof.ts:62",
+      "server/lib/session-halt.ts:136"
+    ],
+    "resolvePattern": "(?<![\\w.])resolveProviderBinary\\( in server/lib, server/routes, shared; non-test, non-comment, definition excluded",
+    "resolveProviderBinarySites": [
+      {
+        "file": "server/lib/attached-provider-adapter.ts",
+        "line": 1862,
+        "text": "resolveBinary: provider => resolveProviderBinary(provider),",
+        "class": "attach_fork"
+      },
+      {
+        "file": "server/lib/codex-bridge.ts",
+        "line": 156,
+        "text": "const resolved = resolveProviderBinary('codex')",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/codex-bridge.ts",
+        "line": 477,
+        "text": "const resolvedCodex = resolveProviderBinary('codex')",
+        "class": "lane_b_capable"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 115,
+        "text": "if (!resolveProviderBinary('codex', env).ok) return false",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 494,
+        "text": "const resolved = resolveProviderBinary('codex', options.env ?? process.env)",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/codex-live-queue-deps.ts",
+        "line": 114,
+        "text": "const resolved = resolveProviderBinary('codex')",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/codex-model-catalog.ts",
+        "line": 282,
+        "text": "const resolved = resolveProviderBinary('codex')",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/codex-queue-control.ts",
+        "line": 19,
+        "text": "const resolved = binary ? { ok: true as const, path: binary } : resolveProviderBinary('codex')",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/cursor-model-catalog.ts",
+        "line": 129,
+        "text": "const resolved = resolveProviderBinary('cursor')",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/dictation-clean.ts",
+        "line": 38,
+        "text": "const binary = resolveProviderBinary(cursor ? 'cursor' : 'claude')",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/fork-thread.ts",
+        "line": 1063,
+        "text": "resolveBinary: provider => resolveProviderBinary(provider),",
+        "class": "attach_fork"
+      },
+      {
+        "file": "server/lib/health-static-probes.ts",
+        "line": 128,
+        "text": "const resolved = resolveProviderBinary('claude')",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/health-static-probes.ts",
+        "line": 142,
+        "text": "const resolved = resolveProviderBinary('codex')",
+        "class": "probe_catalog"
+      },
+      {
+        "file": "server/lib/lens-gist-engines.ts",
+        "line": 182,
+        "text": "const resolved = resolveProviderBinary(provider)",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/lens-gist.ts",
+        "line": 274,
+        "text": "let claudeInstalled: () => boolean = () => resolveProviderBinary('claude').ok",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/lens-gist.ts",
+        "line": 278,
+        "text": "claudeInstalled = fn ?? (() => resolveProviderBinary('claude').ok)",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/lens-gist.ts",
+        "line": 937,
+        "text": "const binary = resolveProviderBinary('cursor')",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/lens-gist.ts",
+        "line": 960,
+        "text": "const resolved = resolveProviderBinary(provider)",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/live-cues-v2.ts",
+        "line": 564,
+        "text": "if (!resolveProviderBinary('claude').ok) return off('claude_not_found')",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/meeting-ask-runner.ts",
+        "line": 50,
+        "text": "const binary = resolveProviderBinary(provider);",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/meeting-ask-web.ts",
+        "line": 330,
+        "text": "export function meetingWebCapability() { return resolveProviderBinary('claude').ok ? { available: true, engine: 'claude:haiku' } : { available: false, reason: 'claude_search_provider_unavailable' }; }",
+        "class": "background_lane_a"
+      },
+      {
+        "file": "server/lib/transcript-cleanup.ts",
+        "line": 200,
+        "text": "claudeAvailable: () => resolveProviderBinary('claude').ok,",
+        "class": "background_lane_a"
+      }
+    ],
+    "resolveProviderBinaryCount": 22,
+    "resolveClassCounts": {
+      "attach_fork": 2,
+      "probe_catalog": 9,
+      "lane_b_capable": 1,
+      "background_lane_a": 10
+    },
+    "problems": []
+  },
+  "codexHomes": {
+    "planReaders": [
+      {
+        "name": "session_store",
+        "file": "server/lib/agent-session-store.ts",
+        "lines": [
+          {
+            "line": 76,
+            "text": "codexSessions: join(home, '.codex', 'sessions'),"
+          }
+        ]
+      },
+      {
+        "name": "native_head",
+        "file": "server/lib/native-head.ts",
+        "lines": [
+          {
+            "line": 197,
+            "text": "codexSessionsDir: string"
+          }
+        ]
+      },
+      {
+        "name": "stream_events",
+        "file": "server/lib/session-stream-events.ts",
+        "lines": [
+          {
+            "line": 644,
+            "text": "* 1. A rollout (`~/.codex/sessions/.../rollout-*.jsonl`, what the transcript watcher"
+          }
+        ]
+      },
+      {
+        "name": "queue_control_sqlite",
+        "file": "server/lib/codex-queue-control.ts",
+        "lines": [
+          {
+            "line": 92,
+            "text": "const db = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'queue_1.sqlite')"
+          }
+        ]
+      },
+      {
+        "name": "continue_facts",
+        "file": "server/lib/session-continue-facts-real.ts",
+        "lines": [
+          {
+            "line": 44,
+            "text": "return readCodexConfigText(home ? join(home, '.codex', 'config.toml') : codexConfigPath())"
+          }
+        ]
+      },
+      {
+        "name": "lens_gist",
+        "file": "server/lib/lens-gist.ts",
+        "lines": [
+          {
+            "line": 918,
+            "text": "const path = resolve(process.env.CODEX_HOME?.trim() || resolve(homedir(), '.codex'), 'models_cache.json')"
+          }
+        ]
+      },
+      {
+        "name": "lens_gist_engines",
+        "file": "server/lib/lens-gist-engines.ts",
+        "lines": [
+          {
+            "line": 265,
+            "text": "// still comes from CODEX_HOME, and AGENTS.md discovery starts at the empty workspace."
+          }
+        ]
+      },
+      {
+        "name": "hook_events",
+        "file": "server/lib/session-hook-events.ts",
+        "lines": [
+          {
+            "line": 73,
+            "text": "if (typeof payload.transcript_path === 'string' && payload.transcript_path.includes('/.codex/sessions/')) return 'codex'"
+          }
+        ]
+      },
+      {
+        "name": "occupancy_locks",
+        "file": "server/lib/occupancy-probes.ts",
+        "lines": [
+          {
+            "line": 68,
+            "text": "* `<CODEX_HOME|~/.codex>/thread-writer-locks`."
+          },
+          {
+            "line": 76,
+            "text": "return join(home ? resolve(home) : join(homedir(), '.codex'), 'thread-writer-locks')"
+          }
+        ]
+      },
+      {
+        "name": "thread_occupancy",
+        "file": "server/lib/thread-occupancy.ts",
+        "lines": [
+          {
+            "line": 549,
+            "text": "/** `<CODEX_HOME|~/.codex>/thread-writer-locks` */"
+          }
+        ]
+      },
+      {
+        "name": "posture",
+        "file": "server/lib/codex-session-posture.ts",
+        "lines": [
+          {
+            "line": 226,
+            "text": "/** `~/.codex/config.toml`, honouring CODEX_HOME like the rest of the server. */"
+          },
+          {
+            "line": 228,
+            "text": "return join(env.CODEX_HOME?.trim() || join(homedir(), '.codex'), 'config.toml')"
+          }
+        ]
+      },
+      {
+        "name": "morning_brief_runtime",
+        "file": "server/lib/morning-brief-runtime.ts",
+        "lines": [
+          {
+            "line": 174,
+            "text": "['~/.codex/prompts', join(home, '.codex', 'prompts', `${name}.md`)],"
+          }
+        ]
+      },
+      {
+        "name": "catalog",
+        "file": "server/lib/codex-model-catalog.ts",
+        "lines": [
+          {
+            "line": 62,
+            "text": "process.env.CODEX_HOME?.trim() || resolve(homedir(), '.codex'),"
+          }
+        ]
+      }
+    ],
+    "planReaderCount": 13,
+    "grepPattern": "CODEX_HOME|'\\.codex'|\\.codex/ in server/lib, server/routes, shared; non-test",
+    "codexHomeReferences": [
+      {
+        "file": "server/lib/__fixtures__/cos-session-hook-6.62.0-preqa",
+        "line": 23,
+        "comment": false,
+        "text": "# 6.62.0: the same script also runs from ~/.codex/hooks.json, whose command adds"
+      },
+      {
+        "file": "server/lib/__fixtures__/cos-session-hook-6.71.5",
+        "line": 23,
+        "comment": false,
+        "text": "# 6.62.0: the same bytes also run from ~/.codex/hooks.json (as their own copy,"
+      },
+      {
+        "file": "server/lib/__fixtures__/cos-session-hook-6.71.5",
+        "line": 100,
+        "comment": false,
+        "text": "case \"$TP\" in */.codex/sessions/*) PROV=codex ;; esac"
+      },
+      {
+        "file": "server/lib/agent-session-ownership-store.ts",
+        "line": 47,
+        "comment": true,
+        "text": "//         holding the new `~/.codex/thread-writer-locks/<uuid>.lock`."
+      },
+      {
+        "file": "server/lib/agent-session-store.ts",
+        "line": 76,
+        "comment": false,
+        "text": "codexSessions: join(home, '.codex', 'sessions'),"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 1,
+        "comment": true,
+        "text": "// Installing the COS session hook into Codex's user-level `~/.codex/hooks.json` (6.62.0), and"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 20,
+        "comment": true,
+        "text": "// `~/.codex/config.toml`. Claude's merge drops our block and appends a fresh one, which would"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 102,
+        "comment": false,
+        "text": "const raw = env.CODEX_HOME?.trim()"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 103,
+        "comment": false,
+        "text": "return raw ? resolve(raw) : join(homedir(), '.codex')"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 112,
+        "comment": true,
+        "text": "* uses) AND it has a home: a Mac that never ran Codex gets no `~/.codex/hooks.json` from us."
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 526,
+        "comment": false,
+        "text": "return `~/.codex/hooks.json carries the COS hook more than once for ${status.duplicated.join(', ')}, so it runs twice there. `"
+      },
+      {
+        "file": "server/lib/codex-hooks-installer.ts",
+        "line": 531,
+        "comment": false,
+        "text": "? 'The COS hooks in ~/.codex/hooks.json are not current. Run `npx --yes @gotcos/glasses-server@latest --hooks install`, or press Install hooks in COS Control.'"
+      },
+      {
+        "file": "server/lib/codex-live-queue-deps.ts",
+        "line": 21,
+        "comment": true,
+        "text": "* The environment is the server's own, so `CODEX_HOME` (if an operator set one) is the"
+      },
+      {
+        "file": "server/lib/codex-live-queue.ts",
+        "line": 15,
+        "comment": true,
+        "text": "// into `$CODEX_HOME/queue_1.sqlite`, and every app-server watches that database for writes"
+      },
+      {
+        "file": "server/lib/codex-live-queue.ts",
+        "line": 17,
+        "comment": true,
+        "text": "// Canary, 2026-09-19, scratch CODEX_HOME, codex-cli 0.155.0-alpha.9.2, holder ="
+      },
+      {
+        "file": "server/lib/codex-live-queue.ts",
+        "line": 40,
+        "comment": true,
+        "text": "// above), and the alternative -- a second `codex app-server` on the user's CODEX_HOME to"
+      },
+      {
+        "file": "server/lib/codex-model-catalog.ts",
+        "line": 62,
+        "comment": false,
+        "text": "process.env.CODEX_HOME?.trim() || resolve(homedir(), '.codex'),"
+      },
+      {
+        "file": "server/lib/codex-queue-control.ts",
+        "line": 92,
+        "comment": false,
+        "text": "const db = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'queue_1.sqlite')"
+      },
+      {
+        "file": "server/lib/codex-session-posture.ts",
+        "line": 19,
+        "comment": true,
+        "text": "// Codex itself already trusts the folder in `~/.codex/config.toml`. Codex writes a permanent"
+      },
+      {
+        "file": "server/lib/codex-session-posture.ts",
+        "line": 226,
+        "comment": true,
+        "text": "/** `~/.codex/config.toml`, honouring CODEX_HOME like the rest of the server. */"
+      },
+      {
+        "file": "server/lib/codex-session-posture.ts",
+        "line": 228,
+        "comment": false,
+        "text": "return join(env.CODEX_HOME?.trim() || join(homedir(), '.codex'), 'config.toml')"
+      },
+      {
+        "file": "server/lib/lens-gist-engines.ts",
+        "line": 265,
+        "comment": true,
+        "text": "// still comes from CODEX_HOME, and AGENTS.md discovery starts at the empty workspace."
+      },
+      {
+        "file": "server/lib/lens-gist.ts",
+        "line": 915,
+        "comment": true,
+        "text": "/** Visible models in Codex's own catalog cache (~/.codex/models_cache.json). */"
+      },
+      {
+        "file": "server/lib/lens-gist.ts",
+        "line": 918,
+        "comment": false,
+        "text": "const path = resolve(process.env.CODEX_HOME?.trim() || resolve(homedir(), '.codex'), 'models_cache.json')"
+      },
+      {
+        "file": "server/lib/morning-brief-coverage.ts",
+        "line": 219,
+        "comment": false,
+        "text": ": { id: source.id, state: 'unavailable', summary: `${slash} not found under .claude/skills, .agents/skills, .claude/commands, or ~/.codex/prompts.` }"
+      },
+      {
+        "file": "server/lib/morning-brief-prompt.ts",
+        "line": 188,
+        "comment": false,
+        "text": "`Run this workspace's ${slash} skill exactly as it is defined (look under .claude/skills, .agents/skills, .claude/commands, and ~/.codex/prompts) and use its output for this section.`,"
+      },
+      {
+        "file": "server/lib/morning-brief-runtime.ts",
+        "line": 174,
+        "comment": false,
+        "text": "['~/.codex/prompts', join(home, '.codex', 'prompts', `${name}.md`)],"
+      },
+      {
+        "file": "server/lib/native-head.ts",
+        "line": 196,
+        "comment": true,
+        "text": "/** `<COS_AGENT_SESSIONS_HOME|~>/.codex/sessions` */"
+      },
+      {
+        "file": "server/lib/occupancy-probes.ts",
+        "line": 68,
+        "comment": true,
+        "text": "* `<CODEX_HOME|~/.codex>/thread-writer-locks`."
+      },
+      {
+        "file": "server/lib/occupancy-probes.ts",
+        "line": 70,
+        "comment": true,
+        "text": "* CODEX_HOME is Codex's own variable, so it is both the real override and the"
+      },
+      {
+        "file": "server/lib/occupancy-probes.ts",
+        "line": 75,
+        "comment": false,
+        "text": "const home = process.env.CODEX_HOME"
+      },
+      {
+        "file": "server/lib/occupancy-probes.ts",
+        "line": 76,
+        "comment": false,
+        "text": "return join(home ? resolve(home) : join(homedir(), '.codex'), 'thread-writer-locks')"
+      },
+      {
+        "file": "server/lib/occupancy-probes.ts",
+        "line": 520,
+        "comment": true,
+        "text": "* CODEX_HOME does the same. Requested paths keep the caller's spelling as the map"
+      },
+      {
+        "file": "server/lib/provider-binary.ts",
+        "line": 128,
+        "comment": false,
+        "text": "home ? join(home, '.codex', 'bin', 'codex') : '',"
+      },
+      {
+        "file": "server/lib/session-cancel.ts",
+        "line": 41,
+        "comment": true,
+        "text": "* 6.62.0: the COS hooks in `~/.codex/hooks.json` can stop a desk Codex run: installed, trusted"
+      },
+      {
+        "file": "server/lib/session-continue-facts-real.ts",
+        "line": 44,
+        "comment": false,
+        "text": "return readCodexConfigText(home ? join(home, '.codex', 'config.toml') : codexConfigPath())"
+      },
+      {
+        "file": "server/lib/session-continue-facts.ts",
+        "line": 152,
+        "comment": true,
+        "text": "/** `~/.codex/config.toml` text. Defaults to the live, read-only reader. */"
+      },
+      {
+        "file": "server/lib/session-hook-events.ts",
+        "line": 68,
+        "comment": true,
+        "text": "* `/.codex/sessions/` (a COS Claude block Codex imported runs without the stamp); else Claude."
+      },
+      {
+        "file": "server/lib/session-hook-events.ts",
+        "line": 73,
+        "comment": false,
+        "text": "if (typeof payload.transcript_path === 'string' && payload.transcript_path.includes('/.codex/sessions/')) return 'codex'"
+      },
+      {
+        "file": "server/lib/session-stream-events.ts",
+        "line": 644,
+        "comment": true,
+        "text": "* 1. A rollout (`~/.codex/sessions/.../rollout-*.jsonl`, what the transcript watcher"
+      },
+      {
+        "file": "server/lib/thread-occupancy.ts",
+        "line": 24,
+        "comment": true,
+        "text": "//  1. A lock FILE is not a held lock. `~/.codex/thread-writer-locks/` keeps"
+      },
+      {
+        "file": "server/lib/thread-occupancy.ts",
+        "line": 549,
+        "comment": true,
+        "text": "/** `<CODEX_HOME|~/.codex>/thread-writer-locks` */"
+      }
+    ],
+    "codexHomeReferenceCount": 42,
+    "nonCommentReferencesInFilesThePlanDoesNotList": [
+      "server/lib/__fixtures__/cos-session-hook-6.62.0-preqa:23",
+      "server/lib/__fixtures__/cos-session-hook-6.71.5:23",
+      "server/lib/__fixtures__/cos-session-hook-6.71.5:100",
+      "server/lib/codex-hooks-installer.ts:102",
+      "server/lib/codex-hooks-installer.ts:103",
+      "server/lib/codex-hooks-installer.ts:526",
+      "server/lib/codex-hooks-installer.ts:531",
+      "server/lib/morning-brief-coverage.ts:219",
+      "server/lib/morning-brief-prompt.ts:188",
+      "server/lib/provider-binary.ts:128"
+    ]
+  },
+  "mu": {
+    "see": "operations/scripts/tests/fixtures/child_env_census.json (MU repo)",
+    "siteCount": 197,
+    "hookCounts": {
+      "claude": 15,
+      "codex": 12
+    }
+  }
+}
