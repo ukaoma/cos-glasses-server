@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { codexUserAsk, unwrapPeerMessage } from './session-stream-events.js'
+import { profileCodexHomeSubdirs } from './codex-homes.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -66,6 +67,12 @@ export interface AgentSessionRoots {
   cursorChats: string
   cursorComposerDb: string
   cursorWorkspaceStorage: string
+  /**
+   * Key lanes K1 (plan v4 8.2): `data/codex-homes/<id>/sessions` for each keyed Codex profile
+   * home. Present only while key lanes are on and a profile home exists; absent otherwise, so
+   * the roots (and every list and lookup) are the 963fe25 ones.
+   */
+  codexProfileSessions?: string[]
 }
 
 export function agentSessionRoots(home = process.env.COS_AGENT_SESSIONS_HOME || homedir()): AgentSessionRoots {
@@ -78,7 +85,18 @@ export function agentSessionRoots(home = process.env.COS_AGENT_SESSIONS_HOME || 
     cursorChats: join(home, '.cursor', 'chats'),
     cursorComposerDb: join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb'),
     cursorWorkspaceStorage: join(home, 'Library', 'Application Support', 'Cursor', 'User', 'workspaceStorage'),
+    ...codexProfileSessionsField(),
   }
+}
+
+function codexProfileSessionsField(): { codexProfileSessions?: string[] } {
+  const dirs = profileCodexHomeSubdirs('sessions')
+  return dirs.length ? { codexProfileSessions: dirs } : {}
+}
+
+/** The server home's sessions root first, then each profile home's (plan 8.2 codexHomes order). */
+function codexSessionRootsOf(roots: AgentSessionRoots): string[] {
+  return [roots.codexSessions, ...(roots.codexProfileSessions ?? [])]
 }
 
 export function isSafeSessionId(value: string): boolean {
@@ -1392,7 +1410,7 @@ export async function listAgentSessions(
   let rows = dedupeSessions([
     ...enrichedLive,
     ...await listClaudeSessions(roots.claudeProjects, now, liveIds, cap, starredIds, roots.claudeCodeSessions, dropped, aliases),
-    ...await listCodexSessions(roots.codexSessions, now, cap, dropped),
+    ...(await Promise.all(codexSessionRootsOf(roots).map(root => listCodexSessions(root, now, cap, dropped)))).flat(),
     ...await listCursorSessions(roots.cursorProjects, now, cap, roots.cursorComposerDb, cursorPinned, dropped),
   ])
   if (sort === 'opened') {
@@ -1458,9 +1476,11 @@ export async function findAgentSessionFile(
     return matches.length === 1 ? matches[0] : null
   }
   if (provider === 'codex') {
-    for (const file of await listCodexJsonlFiles(roots.codexSessions)) {
-      const name = file.split('/').pop()?.toLowerCase() ?? ''
-      if (name.includes(needle)) return file
+    for (const root of codexSessionRootsOf(roots)) {
+      for (const file of await listCodexJsonlFiles(root)) {
+        const name = file.split('/').pop()?.toLowerCase() ?? ''
+        if (name.includes(needle)) return file
+      }
     }
     return null
   }

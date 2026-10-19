@@ -543,11 +543,32 @@ export function codexOwners(
   return { owners, doubt }
 }
 
+/**
+ * Key lanes K1 (plan v4 8.2): the server home's writer locks, then each keyed profile home's.
+ * A keyed home that is absent adds nothing (its detector was never the server's to lose); with
+ * no profile home this is exactly `codexOwners` on the server home.
+ */
+export function codexOwnersAcrossHomes(threadId: string, probes: OccupancyProbes, dirs: OccupancyDirs): ScanResult {
+  const base = codexOwners(threadId, probes, dirs.codexLocksDir)
+  if (!dirs.codexProfileLocksDirs) return base
+  const owners = [...base.owners]
+  let doubt = base.doubt
+  for (const dir of dirs.codexProfileLocksDirs) {
+    if (!probes.dirExists(dir)) continue
+    const keyed = codexOwners(threadId, probes, dir)
+    owners.push(...keyed.owners)
+    if (keyed.doubt !== null && keyed.doubt !== 'detector_unavailable') doubt ??= keyed.doubt
+  }
+  return { ...base, owners, doubt }
+}
+
 export interface OccupancyDirs {
   /** `<CLAUDE_CONFIG_DIR|~/.claude>/sessions` */
   claudeSessionsDir: string
   /** `<CODEX_HOME|~/.codex>/thread-writer-locks` */
   codexLocksDir: string
+  /** Key lanes K1 (plan v4 8.2): each keyed profile home's `thread-writer-locks`. Absent with no profile home. */
+  codexProfileLocksDirs?: string[]
   /** `<COS_AGENT_SESSIONS_HOME|~>/.cursor/chats` */
   cursorChatsDir: string
 }
@@ -698,7 +719,7 @@ export function threadOccupancy(
   try {
     result = provider === 'claude'
       ? claudeOwners(threadId, probes, dirs.claudeSessionsDir)
-      : codexOwners(threadId, probes, dirs.codexLocksDir)
+      : codexOwnersAcrossHomes(threadId, probes, dirs)
   } catch {
     return { attachable: false, owners: [], reason: 'probe_failed' }
   }

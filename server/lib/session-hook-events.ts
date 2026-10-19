@@ -14,6 +14,8 @@
 // whose shapes are still the documented ones until a Desktop recording lands.
 
 import { createHash } from 'node:crypto'
+import { profileIdForCodexPath } from './codex-homes.js'
+import { isKeyProfileId } from '../../shared/key-preference.js'
 
 /** Events the installer subscribes and the reducer understands. Anything else is dropped. */
 export const HOOK_EVENT_NAMES = [
@@ -71,7 +73,20 @@ export function inferHookProvider(stamped: unknown, payload: Record<string, unkn
   if (isHookProvider(stamped)) return stamped
   if ('cursor_version' in payload) return 'cursor'
   if (typeof payload.transcript_path === 'string' && payload.transcript_path.includes('/.codex/sessions/')) return 'codex'
+  // Key lanes K1 (plan v4 8.2): a keyed Codex profile home keeps its rollouts under
+  // `data/codex-homes/<id>/sessions/`, which never contains `/.codex/`.
+  if (profileIdForCodexPath(payload.transcript_path) !== undefined) return 'codex'
   return 'claude'
+}
+
+/**
+ * Key lanes K1 (plan v4 7.3): the key profile a hook event ran under, or undefined. Read from
+ * the envelope's own `keyProfile` stamp (a hook script that forwards `COS_KEY_PROFILE`), else
+ * from a transcript inside a keyed Codex profile home. Undefined for every Lane A event.
+ */
+export function hookKeyProfile(stamped: unknown, payload: Record<string, unknown>): string | undefined {
+  if (isKeyProfileId(stamped)) return stamped
+  return profileIdForCodexPath(payload.transcript_path)
 }
 
 /** 6.62.0: the cap on an agent thought kept in memory and sent on the live feed. */
@@ -99,6 +114,8 @@ export interface HookEnvelope {
   payload: Record<string, unknown>
   /** 6.62.0: set by `parseHookEnvelope` and a 6.62 ledger row; absent on older rows and hand-built envelopes. */
   provider?: HookProvider
+  /** Key lanes K1 (plan v4 7.3): the key profile this event ran under. Absent on every Lane A envelope. */
+  keyProfile?: string
   /**
    * 6.62.0 (QA W2): the envelope itself named the provider: a 6.62 hook script (from the Codex
    * command, or from a Codex payload) or the Cursor observer wrote it. Inferred is not stamped.
@@ -150,6 +167,7 @@ export function parseHookEnvelope(text: string): ParsedHookEnvelope {
   const sessionId = typeof p.session_id === 'string' && SESSION_ID_RE.test(p.session_id) ? p.session_id.toLowerCase() : null
   if (!sessionId) return { ok: false, reason: 'no_session', salvaged: null }
   const ppid = Number(r.ppid)
+  const keyProfile = hookKeyProfile(r.keyProfile, p)
   return {
     ok: true,
     envelope: {
@@ -160,6 +178,7 @@ export function parseHookEnvelope(text: string): ParsedHookEnvelope {
       payload: p,
       provider: inferHookProvider(r.provider, p),
       ...(isHookProvider(r.provider) ? { stamped: true as const } : {}),
+      ...(keyProfile ? { keyProfile } : {}),
     },
   }
 }

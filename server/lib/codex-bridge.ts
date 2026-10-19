@@ -86,6 +86,23 @@ import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { teeJobTrail } from './job-trail.js'
 import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } from './turn-request.js'
+// Key lanes K1 P4 (plan v4 8): Lane B Codex. Every use below sits behind `options.keyProfile`;
+// without one, argv, env, the catalog read and the resume binding are the 963fe25 ones.
+import { randomUUID } from 'node:crypto'
+import { profilePreference } from '../../shared/key-preference.js'
+import type { KeyKind, KeyProfile, RelayTurnHandle } from './key-relay-contract.js'
+import {
+  CODEX_LANE_B_COPY,
+  CODEX_RELAY_PROVIDER_ID,
+  applyCodexLaneBEnv,
+  codexKeyRelay,
+  codexProfilePreflight,
+  recordKeyedCodexThread,
+  renderCodexProfileHome,
+  writeCodexProfileHome,
+  type CodexKeyLaneCallOptions,
+  type RenderedCodexProfileHome,
+} from './codex-profile-home.js'
 
 const INACTIVITY_MS = 180_000
 const WALL_MAX_MS = 900_000
@@ -240,6 +257,50 @@ export function buildCodexExecArgs(input: {
   return args
 }
 
+/**
+ * Key lanes (plan v4 8.1): argv for a keyed Codex turn. The user's COS_CODEX_EXTRA_ARGS, the
+ * ChatGPT model catalog and its effort and service-tier settings never reach it: the profile's
+ * slug goes on `--model` and the generated home's relay is selected as the provider. Sandbox,
+ * publisher directory, resume and image handling are the subscription ones.
+ */
+export function buildCodexProfileExecArgs(input: {
+  codexCwd: string
+  imagePaths?: string[]
+  persistentCodexSession: boolean
+  codexThreadId?: string
+  profileModel: string
+  publisherWritableDirectory?: string
+}): string[] {
+  const imagePaths = input.imagePaths ?? []
+  const args = ['exec', ...codexSandboxArgs()]
+  if (input.publisherWritableDirectory) {
+    args.push('--add-dir', input.publisherWritableDirectory)
+  }
+  // A trusted project's own config could name another provider; argv wins over every layer.
+  args.push('-c', `model_provider="${CODEX_RELAY_PROVIDER_ID}"`)
+  if (input.codexThreadId) {
+    args.push('resume', '--json', '--all', '--model', input.profileModel)
+    for (const p of imagePaths) args.push('--image', p)
+    args.push(input.codexThreadId, '-')
+    return args
+  }
+  args.push('--json', '--cd', input.codexCwd, '--model', input.profileModel)
+  if (!input.persistentCodexSession) args.push('--ephemeral')
+  for (const p of imagePaths) args.push('--image', p)
+  args.push('-')
+  return args
+}
+
+/** Key lanes: a spawn that throws synchronously revokes the turn's nonce. Without one it is the call itself. */
+function withKeyTurnRevokedOnThrow<T>(keyTurn: RelayTurnHandle | null, run: () => T): T {
+  try {
+    return run()
+  } catch (err) {
+    keyTurn?.revoke('cancel')
+    throw err
+  }
+}
+
 function buildCodexPrompt(systemPrompt: string, fullQuery: string): string {
   return [
     'SYSTEM INSTRUCTIONS',
@@ -300,6 +361,23 @@ function toolStatus(event: any): string | undefined {
   return undefined
 }
 
+/**
+ * Key lanes: the Codex runner in P6's engine-seam shape (`registerKeyProfileEngine('codex', ...)`
+ * in key-profile-routing.ts; P11 wires it). The turn's profile rides `options.keyProfile`.
+ */
+export function runCodexKeyProfileTurn(
+  query: string,
+  sessionId: string,
+  callbacks: StreamCallbacks,
+  turn: { profile: KeyProfile },
+  images?: ModelImageInput[],
+  reference?: PromptReference,
+  globalMsgNum?: number,
+  options?: CallOptions,
+): Promise<string> {
+  return callCodexStreaming(query, sessionId, callbacks, undefined, images, reference, globalMsgNum, { ...options, keyProfile: turn.profile })
+}
+
 function safeCodexUserError(message: string): string {
   const code = classifyCodexError(message)
   if (code === 'codex.cli_unavailable') return 'Codex CLI unavailable. Check server Settings.'
@@ -317,27 +395,55 @@ export async function callCodexStreaming(
   images?: ModelImageInput[],
   reference?: PromptReference,
   globalMsgNum?: number,
-  options?: CallOptions,
+  options?: CallOptions & CodexKeyLaneCallOptions,
 ): Promise<string> {
   const sid = getOrCreateSession(sessionId)
-  // Refresh is TTL-cached and coalesced, so every run sees the newest known
-  // catalog without creating duplicate app-server discovery processes.
-  await getCodexModelCatalog()
+  // Key lanes: a keyed turn passes every check before history, the run ledger or a process, and
+  // never reads the ChatGPT catalog or COS_CODEX_EXTRA_ARGS. A refusal ends the turn with its lens
+  // line; the subscription is never the fallback.
+  const keyProfile = options?.keyProfile
+  let keyKind: KeyKind | null = null
+  let profileHome: RenderedCodexProfileHome | null = null
+  if (keyProfile) {
+    const preflight = codexProfilePreflight({ profile: keyProfile, dispatch: !!options?.dispatch })
+    if (!preflight.ok) {
+      await callbacks.onError(preflight.message)
+      return sid
+    }
+    keyKind = preflight.keyKind
+    try {
+      profileHome = renderCodexProfileHome(keyProfile)
+    } catch (err) {
+      console.error(`[codex-bridge] key profile home render failed: ${err instanceof Error ? err.message.slice(0, 200) : 'unknown'}`)
+      await callbacks.onError(CODEX_LANE_B_COPY.relayUnavailable)
+      return sid
+    }
+  } else {
+    // Refresh is TTL-cached and coalesced, so every run sees the newest known
+    // catalog without creating duplicate app-server discovery processes.
+    await getCodexModelCatalog()
+  }
   if (options?.abortSignal?.aborted) {
     throw new Error('codex-bridge: client disconnected before Codex started.')
   }
   let extra: string[]
-  try {
-    extra = parseCodexExtraArgs(process.env.COS_CODEX_EXTRA_ARGS)
-    assertSafeCodexExtraArgs(extra)
-  } catch (error) {
-    if (error instanceof CodexExtraArgsError) {
-      await callbacks.onError(error.message)
-      return sid
+  if (keyProfile) {
+    extra = []
+  } else {
+    try {
+      extra = parseCodexExtraArgs(process.env.COS_CODEX_EXTRA_ARGS)
+      assertSafeCodexExtraArgs(extra)
+    } catch (error) {
+      if (error instanceof CodexExtraArgsError) {
+        await callbacks.onError(error.message)
+        return sid
+      }
+      throw error
     }
-    throw error
   }
-  const extraFingerprint = codexEngineFingerprint(extra)
+  // Plan 8.1 resume binding: a keyed thread resumes only under its own profile and generated
+  // config, and a subscription turn never resumes it (nor a keyed turn a subscription thread).
+  const extraFingerprint = profileHome ? profileHome.engineFingerprint : codexEngineFingerprint(extra)
   const history = getHistory(sid)
   const session = getSessionRaw(sid)
   const contextBreaks = session?.contextBreaks ?? []
@@ -346,8 +452,11 @@ export async function callCodexStreaming(
   const persistentCodexSession = isCodexPersistenceEnabled()
   const codexCwd = getCodexExecutionCwd()
   const codexTrustMode = getCodexTrustMode()
-  const resolvedCodexModel = resolveCodexModelOption(model)
-  const resolvedCodexEffort = resolveCodexEffortForModel(resolvedCodexModel, options?.effort)
+  // A keyed turn's model is the profile slug; the catalog is never consulted for it.
+  const resolvedCodexModel = keyProfile ? null : resolveCodexModelOption(model)
+  const resolvedCodexEffort = resolvedCodexModel ? resolveCodexEffortForModel(resolvedCodexModel, options?.effort) : 'provider-default'
+  // A keyed exchange is stamped with its profile (P6 persists it by syntax), never with the slot.
+  const exchangeModel = keyProfile ? profilePreference(keyProfile.id) as unknown as CodexModelPreference : model
   const engineSession = persistentCodexSession
     ? getCodexEngineSession({
       cosSessionId: sid,
@@ -370,7 +479,7 @@ export async function callCodexStreaming(
     trustMode: codexTrustMode,
     codexThreadId: engineSession?.codexThreadId,
     expiresAt: engineSession?.expiresAt,
-    cliModel: resolvedCodexModel.id || 'codex-cli-default',
+    cliModel: keyProfile ? keyProfile.model : (resolvedCodexModel?.id || 'codex-cli-default'),
     reasoningEffort: resolvedCodexEffort,
     query,
   })
@@ -438,7 +547,7 @@ export async function callCodexStreaming(
     globalMsgNum,
     inboundAttachments,
     exchangeProvenance,
-    model,
+    exchangeModel,
   )
 
   const hasNonImageAttachment = requestRefs.some(ref => mediaCategoryOf(ref) !== 'image')
@@ -455,17 +564,26 @@ export async function callCodexStreaming(
   if (options?.attachmentPromptBlock) fullQuery = `${fullQuery}\n\n${options.attachmentPromptBlock}`
 
   const prompt = buildCodexPrompt(systemPrompt, fullQuery)
-  const args = buildCodexExecArgs({
-    codexCwd,
-    imagePaths,
-    persistentCodexSession,
-    codexThreadId: engineSession?.codexThreadId,
-    model,
-    resolvedModel: resolvedCodexModel,
-    effort: options?.effort,
-    publisherWritableDirectory: outputImagePublisher?.writableDirectory,
-    extra,
-  })
+  const args = keyProfile
+    ? buildCodexProfileExecArgs({
+      codexCwd,
+      imagePaths,
+      persistentCodexSession,
+      codexThreadId: engineSession?.codexThreadId,
+      profileModel: keyProfile.model,
+      publisherWritableDirectory: outputImagePublisher?.writableDirectory,
+    })
+    : buildCodexExecArgs({
+      codexCwd,
+      imagePaths,
+      persistentCodexSession,
+      codexThreadId: engineSession?.codexThreadId,
+      model,
+      resolvedModel: resolvedCodexModel!,
+      effort: options?.effort,
+      publisherWritableDirectory: outputImagePublisher?.writableDirectory,
+      extra,
+    })
 
   const env = { ...process.env }
   delete env.CLAUDECODE
@@ -482,6 +600,38 @@ export async function callCodexStreaming(
     )
   }
 
+  // Key lanes: one nonce per turn from the relay (P2 contract), the generated home written with
+  // its origin, then the child env points at both. Only the child's copy is written. A relay
+  // that cannot issue, or a home that cannot be written, ends the turn before spawn.
+  let keyTurn: RelayTurnHandle | null = null
+  if (keyProfile && profileHome) {
+    try {
+      const relay = await codexKeyRelay()
+      keyTurn = await relay.issueTurn({
+        keyRef: keyProfile.keyRef,
+        profileId: keyProfile.id,
+        turnId: options?.turnId ?? randomUUID(),
+        sessionId: sid,
+        engine: 'codex',
+        allowedModel: keyProfile.model,
+      }, { wallMaxMs: WALL_MAX_MS })
+      writeCodexProfileHome(profileHome, keyTurn.origin)
+      applyCodexLaneBEnv(env, { home: profileHome.home, nonce: keyTurn.nonce, profileId: keyProfile.id })
+    } catch (err) {
+      keyTurn?.revoke('cancel')
+      outputImagePublisher?.cleanup()
+      cleanupModelImageInputs(imageInputs)
+      removeExchange(sid, pendingUserExchange)
+      try {
+        finishCodexRun(run.runId, { status: 'failed', startedAtMs: startTime, error: 'codex-bridge: key relay refused the turn.', exitCode: null })
+      } catch { /* the ledger is best effort here */ }
+      console.error(`[codex-bridge] key relay refused the turn: ${err instanceof Error ? err.message.slice(0, 200) : 'unknown'}`)
+      await callbacks.onError(CODEX_LANE_B_COPY.relayUnavailable)
+      return sid
+    }
+  }
+  const keyAuditFields = keyProfile && keyKind ? { profile: keyProfile.id, lane: 'key' as const, credentialKind: keyKind } : {}
+
   // The COS UserPromptSubmit hook sees `prompt`, which is SYSTEM INSTRUCTIONS plus USER
   // REQUEST in one text, on a fresh thread and on resume alike. This private file hands it
   // the user's own words, bound by the hash of exactly what goes on stdin; the file dies
@@ -489,12 +639,12 @@ export async function callCodexStreaming(
   const turnRequest = createTurnRequestBinding({ userText: query, prompt, turnId: options?.turnId })
   applyTurnRequestEnv(env, turnRequest)
 
-  const proc = spawnWithTurnRequest(turnRequest, () => spawn(resolvedCodex.path, args, {
+  const proc = withKeyTurnRevokedOnThrow(keyTurn, () => spawnWithTurnRequest(turnRequest, () => spawn(resolvedCodex.path, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
     env,
     cwd: codexCwd,
     detached: true,
-  }))
+  })))
 
   let fullText = ''
   let stderr = ''
@@ -615,7 +765,7 @@ export async function callCodexStreaming(
       globalMsgNum,
       undefined,
       exchangeProvenance,
-      model,
+      exchangeModel,
     )
     if (imagePaths.length > 0) {
       replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
@@ -656,6 +806,7 @@ export async function callCodexStreaming(
       outputChars: text.length,
       durationMs: totalMs,
       caller: options?.lightweight ? 'voice_query' : 'full_query',
+      ...keyAuditFields,
     })
     saveEngineSessionBestEffort()
 
@@ -739,6 +890,7 @@ export async function callCodexStreaming(
   }
 
   function handleAbort() {
+    keyTurn?.revoke('cancel')
     void terminateForTerminal('client disconnect', result => finalizeError(
         'codex-bridge: client disconnected before Codex completed.',
         result.code,
@@ -784,6 +936,9 @@ export async function callCodexStreaming(
     if (nextThreadId && nextThreadId !== codexThreadId) {
       codexThreadId = nextThreadId
       updateCodexRun(run.runId, { codexThreadId })
+      // Key lanes (plan 7.3): recorded before any answer text, so Continue, Fork, attach and
+      // handoff refuse this thread from the moment it exists.
+      if (keyProfile) recordKeyedCodexThread({ id: nextThreadId, engine: 'codex', profileId: keyProfile.id, cosSessionId: sid })
     }
     // 6.62.0 (plan 3.9): the job links to its native thread at the first event naming it,
     // not only at completion.
@@ -860,6 +1015,7 @@ export async function callCodexStreaming(
   })
 
   proc.on('close', (code) => {
+    keyTurn?.childClosed()
     if (terminationRequested) return
     if (buffer.trim()) {
       try { handleEvent(JSON.parse(buffer.trim())) } catch { /* ignore */ }
@@ -880,6 +1036,7 @@ export async function callCodexStreaming(
   })
 
   proc.on('error', (err) => {
+    keyTurn?.revoke('cancel')
     if (terminationRequested) return
     finalizeError(`codex-bridge: ${err.message}`)
   })

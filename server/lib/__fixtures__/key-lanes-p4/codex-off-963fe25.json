@@ -1,0 +1,143 @@
+{
+  "base": "963fe25",
+  "note": "Recorded on the unmodified 963fe25 tree with COS_P4_RECORD=1.",
+  "scenarios": {
+    "fresh-lightweight": {
+      "argv": [
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "--json",
+        "--cd",
+        "/tmp/cos-p4-cwd",
+        "--model",
+        "gpt-test",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "service_tier=\"priority\"",
+        "-"
+      ],
+      "binary": "/opt/test/bin/codex",
+      "added": [
+        "COS_TURN_REQUEST_FILE"
+      ],
+      "removed": [
+        "CLAUDECODE"
+      ],
+      "catalogReads": 1
+    },
+    "fresh-full-publisher": {
+      "argv": [
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "--add-dir",
+        "/tmp/cos-p4-publisher",
+        "--json",
+        "--cd",
+        "/tmp/cos-p4-cwd",
+        "--model",
+        "gpt-test",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "service_tier=\"priority\"",
+        "-"
+      ],
+      "binary": "/opt/test/bin/codex",
+      "added": [
+        "COS_RUN_OUTPUT_DIR",
+        "COS_RUN_OUTPUT_TOKEN",
+        "COS_TURN_REQUEST_FILE"
+      ],
+      "removed": [
+        "CLAUDECODE"
+      ],
+      "catalogReads": 1
+    },
+    "resume": {
+      "argv": [
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "resume",
+        "--json",
+        "--all",
+        "--model",
+        "gpt-test",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "service_tier=\"priority\"",
+        "0199a000-0000-7000-8000-000000000001",
+        "-"
+      ],
+      "binary": "/opt/test/bin/codex",
+      "added": [
+        "COS_TURN_REQUEST_FILE"
+      ],
+      "removed": [
+        "CLAUDECODE"
+      ],
+      "catalogReads": 1
+    },
+    "extra-args": {
+      "argv": [
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "-c",
+        "service_tier=\"flex\"",
+        "--model",
+        "gpt-extra",
+        "--json",
+        "--cd",
+        "/tmp/cos-p4-cwd",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-"
+      ],
+      "binary": "/opt/test/bin/codex",
+      "added": [
+        "COS_TURN_REQUEST_FILE"
+      ],
+      "removed": [
+        "CLAUDECODE"
+      ],
+      "catalogReads": 1
+    },
+    "workspace-write": {
+      "argv": [
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "--json",
+        "--cd",
+        "/tmp/cos-p4-cwd",
+        "--model",
+        "gpt-test",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "service_tier=\"priority\"",
+        "-"
+      ],
+      "binary": "/opt/test/bin/codex",
+      "added": [
+        "COS_TURN_REQUEST_FILE"
+      ],
+      "removed": [
+        "CLAUDECODE"
+      ],
+      "catalogReads": 1
+    }
+  }
+}

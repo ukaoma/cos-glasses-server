@@ -195,6 +195,8 @@ export interface NativeHeadDirs {
   claudeProjectsDir: string
   /** `<COS_AGENT_SESSIONS_HOME|~>/.codex/sessions` */
   codexSessionsDir: string
+  /** Key lanes (plan v4 8.2): each keyed profile home's `sessions`, searched after the server's. Absent with no profile home. */
+  codexProfileSessionsDirs?: string[]
   /** `<COS_AGENT_SESSIONS_HOME|~>/.cursor/projects` */
   cursorProjectsDir: string
 }
@@ -495,7 +497,16 @@ function claudeTranscriptPath(threadId: string, deps: NativeHeadDeps): string | 
  * certified.
  */
 function codexRolloutPath(threadId: string, deps: NativeHeadDeps): string | null {
-  const root = deps.dirs.codexSessionsDir
+  const found = codexRolloutPathIn(deps.dirs.codexSessionsDir, threadId, deps)
+  if (found !== null || !deps.dirs.codexProfileSessionsDirs) return found
+  for (const root of deps.dirs.codexProfileSessionsDirs) {
+    const keyed = codexRolloutPathIn(root, threadId, deps)
+    if (keyed !== null) return keyed
+  }
+  return null
+}
+
+function codexRolloutPathIn(root: string, threadId: string, deps: NativeHeadDeps): string | null {
   if (!deps.dirExists(root)) return null
 
   let scanned = 0
@@ -626,6 +637,7 @@ export function realNativeHeadDirs(): NativeHeadDirs {
     claudeProjectsDir: roots.claudeProjects,
     codexSessionsDir: roots.codexSessions,
     cursorProjectsDir: roots.cursorProjects,
+    ...(roots.codexProfileSessions ? { codexProfileSessionsDirs: roots.codexProfileSessions } : {}),
   }
 }
 

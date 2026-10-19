@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { resolveProviderBinary } from './provider-binary.js'
+import { codexHomes } from './codex-homes.js'
 
 export interface NativeQueuedSubmission { id: string; input: Array<{ type: string; text?: string; text_elements?: unknown[] }>; clientUserMessageId: string }
 export interface NativeQueueControl {
@@ -89,7 +90,22 @@ export const nativeQueueControl: NativeQueueControl = {
 // One read-only aggregate per session-list request, not 80 protocol processes.
 // No queue file is ever edited via SQL; mutations use Codex's own protocol above.
 export async function nativeQueuedCounts(): Promise<Map<string, number> | null> {
-  const db = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'queue_1.sqlite')
+  // Key lanes K1 (plan v4 8.2): the server home first, then each keyed profile home. With no
+  // profile home this is exactly the one read it always was.
+  const homes = codexHomes(process.env.CODEX_HOME || join(homedir(), '.codex'))
+  if (homes.length === 1) return queuedCountsIn(homes[0]!)
+  const total = new Map<string, number>()
+  for (const home of homes) {
+    const counts = await queuedCountsIn(home)
+    // An unreadable keyed home never degrades the server home's answer.
+    if (counts === null) { if (home === homes[0]) return null; continue }
+    for (const [thread, n] of counts) total.set(thread, (total.get(thread) ?? 0) + n)
+  }
+  return total
+}
+
+async function queuedCountsIn(home: string): Promise<Map<string, number> | null> {
+  const db = join(home, 'queue_1.sqlite')
   if (!existsSync(db)) return new Map()
   try {
     const { stdout } = await promisify(execFile)('/usr/bin/sqlite3', ['-readonly', '-json', db, 'SELECT thread_id, count(*) AS n FROM queued_items GROUP BY thread_id'], { timeout: 2000, maxBuffer: 1024 * 1024 })

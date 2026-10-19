@@ -58,7 +58,8 @@ describe('buildCodexExecArgs', () => {
   it('awaits the TTL-coalesced live catalog before resolving each run', () => {
     const source = readFileSync(new URL('./codex-bridge.ts', import.meta.url), 'utf8')
     const refresh = source.indexOf('await getCodexModelCatalog()')
-    const resolve = source.indexOf('const resolvedCodexModel = resolveCodexModelOption(model)')
+    // Key lanes P4: a keyed turn skips both (its model is the profile slug); a subscription turn still refreshes first.
+    const resolve = source.indexOf('const resolvedCodexModel = keyProfile ? null : resolveCodexModelOption(model)')
     expect(refresh).toBeGreaterThan(0)
     expect(resolve).toBeGreaterThan(refresh)
   })
