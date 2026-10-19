@@ -23,6 +23,7 @@ import { errMsg } from './utils.js'
 import { getMeetingStore } from './meeting-store.js'
 import { findCosOperationsMeetingBySessionId, findDirectLibraryMeetingBySessionId } from './cos-operations-meetings.js'
 import { CUE_FEEDBACK_REASON_MAX, type CueKind, type CueSourceRef, type LiveCuesV2MemorySource } from '../../shared/live-cues-v2.js'
+import type { WouldWithhold } from './live-cues-filter.js'
 
 // ── Wire types (server-local: shared/live-cues-v2.ts is hash-pinned with the companion copy) ──
 export const LIVE_CUE_VERDICTS_PROTOCOL = 1 as const
@@ -53,6 +54,8 @@ export interface LiveCueLogRow {
   memorySource?: LiveCuesV2MemorySource
   /** Notes the judge kept for the writer. */
   kept?: number
+  /** Shadow owner/date template rules (never enforced): would this cue be withheld per meeting, or per topic. */
+  wouldWithhold?: WouldWithhold
   before: string
 }
 /** A history row's rating. `verdict` null with a `vote` is a lens vote alone: unrated. */
@@ -99,6 +102,10 @@ export function isCueVerdict(value: unknown): value is CueVerdict {
 const str = (v: unknown): v is string => typeof v === 'string'
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 const optional = (v: unknown, ok: (x: unknown) => boolean) => v === undefined || ok(v)
+function isWouldWithhold(v: unknown): boolean {
+  const w = v as Partial<WouldWithhold> | null
+  return !!w && typeof w === 'object' && typeof w.perMeeting === 'boolean' && typeof w.perTopic === 'boolean' && optional(w.blockerCueId, str)
+}
 /** The full row schema. Hand-seeded rows must pass it too (`before: ""` and no optional fields are fine). */
 export function isLogRow(value: unknown): value is LiveCueLogRow {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -109,6 +116,7 @@ export function isLogRow(value: unknown): value is LiveCueLogRow {
     && Array.isArray(r.sources) && r.sources.every(s => !!s && typeof s === 'object' && str((s as CueSourceRef).id) && str((s as CueSourceRef).date) && str((s as CueSourceRef).title))
     && optional(r.armedAt, num) && optional(r.prompt, p => typeof p === 'string' && /^v\d{1,2}$/.test(p))
     && optional(r.memorySource, m => m === 'cue_memory' || m === 'notes' || m === 'none') && optional(r.kept, num)
+    && optional(r.wouldWithhold, isWouldWithhold)
 }
 
 export class LiveCueLog {

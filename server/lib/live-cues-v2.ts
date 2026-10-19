@@ -37,6 +37,7 @@ import { dataPath } from './data-dir.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { cueBefore, liveCueVerdicts, type LiveCueLogRow } from './live-cue-verdicts.js'
+import { repeatOf, wouldWithhold } from './live-cues-filter.js'
 import { errMsg } from './utils.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
 import {
@@ -94,7 +95,7 @@ export function liveCuesV2Gate(env: NodeJS.ProcessEnv = process.env): number {
  *  variable) is the calibrated default with no log. Anything else outside the accepted form falls back to the default with
  *  one log line per distinct value per process: the knobs are read on every transcript feed. */
 const knobWarned = new Set<string>()
-function knobFallback(name: string, raw: string, fallback: number, accepted: string): number {
+function knobFallback<T>(name: string, raw: string, fallback: T, accepted: string): T {
   if (!knobWarned.has(`${name}=${raw}`)) {
     knobWarned.add(`${name}=${raw}`)
     console.warn(`[live-cues-v2] ${name}=${JSON.stringify(raw)} is not ${accepted}; using the default`)
@@ -113,6 +114,15 @@ export function liveCuesV2JudgeKeep(env: NodeJS.ProcessEnv = process.env): numbe
   if (raw === undefined || raw.trim() === '') return LIVE_CUES_V2_LIMITS.judgeKeep
   const keep = Number(raw)
   return keep >= 0.5 && keep <= 0.95 ? keep : knobFallback('COS_LIVE_CUES_V2_JUDGE_KEEP', raw, LIVE_CUES_V2_LIMITS.judgeKeep, 'a number from 0.5 to 0.95')
+}
+/** COS_LIVE_CUES_V2_REPEAT_OVERLAP: the repeat rule's threshold, 0.3 to 0.9, or null (off, today's behaviour) when unset
+ *  or empty. Any other value leaves the rule off, with one log line per value. RESULTS_filter.md: 0.5 withheld no useful
+ *  cue on any receipt; 0.4 withheld three. */
+export function liveCuesV2RepeatOverlap(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.COS_LIVE_CUES_V2_REPEAT_OVERLAP
+  if (raw === undefined || raw.trim() === '') return null
+  const t = Number(raw)
+  return t >= 0.3 && t <= 0.9 ? t : knobFallback<number | null>('COS_LIVE_CUES_V2_REPEAT_OVERLAP', raw, null, 'a number from 0.3 to 0.9 (the repeat rule stays off)')
 }
 export function liveCuesV2Model(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.COS_LIVE_CUES_V2_MODEL ?? '').trim().toLowerCase()
@@ -745,12 +755,17 @@ export class LiveCuesV2Engine {
       const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: cueHeadline(parsed.detail), detail: parsed.detail,
         kind: parsed.kind, sources, gate: round(pCue), createdAt: this.deps.now().getTime(), model: out.model ?? model }
       if (!isLiveCueV2(cue)) { trace.outcome = 'withheld_invalid'; return }       // never emit what the companion would drop
+      // 6.79.0 repeat rule, off unless COS_LIVE_CUES_V2_REPEAT_OVERLAP is set: a cue that repeats an earlier SHOWN cue of
+      // this meeting is not logged, emitted or counted (the writer call already counted). Ids and the overlap only.
+      const repeatT = liveCuesV2RepeatOverlap(this.deps.env)
+      const repeat = repeatT === null ? null : repeatOf(cue.detail, s.cues, repeatT)
+      if (repeat) { Object.assign(trace, { outcome: 'withheld_repeat', repeatOf: repeat.blocker, repeatOverlap: repeat.overlap }); return }
       // 6.79.0: logged before it is held or emitted, so a rating that arrives at once finds it. Its own try/catch: a log
       // failure is traced on this evaluation and is never a writer failure or a step toward the breaker.
       try {
         this.deps.cueLog?.({ v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, armedAt: s.armedAt, kind: cue.kind,
           headline: cue.headline, detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model, prompt: version,
-          memorySource: mem.notes.length ? source : 'none', kept: kept.length, before: cueBefore(said) })
+          memorySource: mem.notes.length ? source : 'none', kept: kept.length, wouldWithhold: wouldWithhold(cue.detail, s.cues), before: cueBefore(said) })
       } catch (error) {
         trace.cueLogError = (error as NodeJS.ErrnoException)?.code ?? 'append_failed'
         console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`)

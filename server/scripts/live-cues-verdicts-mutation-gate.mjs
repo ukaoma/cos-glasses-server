@@ -19,8 +19,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const LIB_T = ['server/lib/live-cue-verdicts.test.ts']
 const ROUTE_T = ['server/routes/live-cue-verdicts-route.test.ts']
 const ENGINE_T = ['server/lib/live-cues-v2.test.ts']
-const ALL = [...LIB_T, ...ROUTE_T, ...ENGINE_T, 'server/routes/live-cues-v2-route.test.ts', 'server/routes/live-cues-v2-settings-route.test.ts']
+const FILTER_T = ['server/lib/live-cues-filter.test.ts']
+const ALL = [...LIB_T, ...ROUTE_T, ...ENGINE_T, ...FILTER_T, 'server/routes/live-cues-v2-route.test.ts', 'server/routes/live-cues-v2-settings-route.test.ts']
 const LIB = 'server/lib/live-cue-verdicts.ts', ROUTE = 'server/routes/live-cues.ts', ENGINE = 'server/lib/live-cues-v2.ts'
+const FILTER = 'server/lib/live-cues-filter.ts'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 
 const mutations = [
@@ -136,6 +138,35 @@ const mutations = [
   m('knob-warns-at-all', ENGINE, ["    console.warn(`[live-cues-v2] ${name}=${JSON.stringify(raw)} is not ${accepted}; using the default`)\n", ''], ENGINE_T),
   m('contract-cooldown', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_COOLDOWN_S",\n', ''], ENGINE_T),
   m('contract-judge-keep', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_JUDGE_KEEP",\n', ''], ENGINE_T),
+  // ── Repeat filter (enforced only when set) and shadow template rules ──
+  m('filter-lowercase', FILTER, ["(cue || '').toLowerCase().match(TOKEN_RE)", "(cue || '').match(TOKEN_RE)"], FILTER_T),
+  m('filter-comma-drop', FILTER, ["const t = m.replace(/,/g, '')", 'const t = m'], FILTER_T),
+  m('filter-digit-min-length', FILTER, ['if (t.length >= 2) out.add(t)', 'out.add(t)'], FILTER_T),
+  m('filter-word-min-length', FILTER, ['t.length >= 3 && !CUE_FILTER_STOPWORDS.has(t)', 't.length >= 2 && !CUE_FILTER_STOPWORDS.has(t)'], FILTER_T),
+  m('filter-stopwords', FILTER, ['t.length >= 3 && !CUE_FILTER_STOPWORDS.has(t)', 't.length >= 3'], FILTER_T),
+  m('filter-overlap-min', FILTER, ['shared / Math.min(a.size, b.size)', 'shared / Math.max(a.size, b.size)'], FILTER_T),
+  m('filter-overlap-empty', FILTER, ['  if (!a.size || !b.size) return 0\n', ''], FILTER_T),
+  m('filter-repeat-inclusive', FILTER, ['if (o >= threshold) return', 'if (o > threshold) return'], FILTER_T),
+  m('filter-repeat-rounding', FILTER, ['overlap: Math.round(o * 1000) / 1000', 'overlap: o'], FILTER_T),
+  m('filter-template-gate', FILTER, ['  if (!isTemplateCue(detail)) return { perMeeting: false, perTopic: false }\n', ''], FILTER_T),
+  m('filter-earlier-template-only', FILTER, ['const templates = shown.filter(s => isTemplateCue(s.detail))', 'const templates = shown'], FILTER_T),
+  m('filter-topic-threshold', FILTER, ['export const CUE_TOPIC_OVERLAP = 0.25', 'export const CUE_TOPIC_OVERLAP = 0.5'], FILTER_T),
+  m('filter-topic-inclusive', FILTER, ['cueOverlap(mine, cueTokens(s.detail)) >= CUE_TOPIC_OVERLAP', 'cueOverlap(mine, cueTokens(s.detail)) > CUE_TOPIC_OVERLAP'], FILTER_T),
+  m('filter-blocker-topic-first', FILTER, ['const blocker = topic ?? templates[0]', 'const blocker = templates[0] ?? topic'], FILTER_T),
+  m('filter-template-case', FILTER, ['is computing|does))\\b/i', 'is computing|does))\\b/'], FILTER_T),
+  m('engine-repeat-enforced', ENGINE, ['      if (repeat) { Object.assign(trace,', '      if (false) { Object.assign(trace,'], ENGINE_T),
+  m('engine-repeat-off-by-default', ENGINE, ['const repeat = repeatT === null ? null : repeatOf(cue.detail, s.cues, repeatT)', 'const repeat = repeatOf(cue.detail, s.cues, repeatT ?? 0.5)'], ENGINE_T),
+  m('engine-repeat-threshold-used', ENGINE, ['repeatOf(cue.detail, s.cues, repeatT)', 'repeatOf(cue.detail, s.cues, 0.5)'], ENGINE_T),
+  m('engine-repeat-trace-ids', ENGINE, ["Object.assign(trace, { outcome: 'withheld_repeat', repeatOf: repeat.blocker, repeatOverlap: repeat.overlap })", "Object.assign(trace, { outcome: 'withheld_repeat' })"], ENGINE_T),
+  m('engine-repeat-floor', ENGINE, ['t >= 0.3 && t <= 0.9 ? t', 't >= 0 && t <= 0.9 ? t'], ENGINE_T),
+  m('engine-repeat-ceiling', ENGINE, ['t >= 0.3 && t <= 0.9 ? t', 't >= 0.3 ? t'], ENGINE_T),
+  m('engine-repeat-unset-silent', ENGINE, ["  if (raw === undefined || raw.trim() === '') return null\n", '  if (raw === undefined) return null\n'], ENGINE_T),
+  m('engine-shadow-logged', ENGINE, ['wouldWithhold: wouldWithhold(cue.detail, s.cues), ', ''], ENGINE_T),
+  m('engine-shadow-against-shown', ENGINE, ['wouldWithhold: wouldWithhold(cue.detail, s.cues)', 'wouldWithhold: wouldWithhold(cue.detail, [])'], ENGINE_T),
+  m('schema-would-withhold', LIB, ['\n    && optional(r.wouldWithhold, isWouldWithhold)', ''], LIB_T),
+  m('schema-would-withhold-topic', LIB, ["typeof w.perMeeting === 'boolean' && typeof w.perTopic === 'boolean'", "typeof w.perMeeting === 'boolean'"], LIB_T),
+  m('schema-would-withhold-blocker', LIB, ['optional(w.blockerCueId, str)', 'true'], LIB_T),
+  m('contract-repeat-overlap', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_REPEAT_OVERLAP",\n', ''], ENGINE_T),
   m('engine-find-cue', ENGINE, ['const cue = s.cues.find(c => c.cueId === cueId); if (cue) return cue', ''], ENGINE_T),
 ]
 

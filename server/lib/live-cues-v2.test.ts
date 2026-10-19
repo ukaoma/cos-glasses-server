@@ -50,7 +50,7 @@ describe('pins', () => {
   it('every v2 flag is forwarded by the managed runtime contract', () => {
     const c = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
     for (const key of ['COS_LIVE_CUES_V2', 'COS_LIVE_CUES_V2_GATE', 'COS_LIVE_CUES_V2_MODEL', 'COS_LIVE_CUES_V2_PROMPT', 'COS_LIVE_CUES_V2_WEEKLY', 'COS_LIVE_CUES_V2_NUMBER_GUARD', 'COS_LIVE_CUES_JEV_DAILY_TOKENS',
-      'COS_LIVE_CUES_V2_COOLDOWN_S', 'COS_LIVE_CUES_V2_JUDGE_KEEP'])
+      'COS_LIVE_CUES_V2_COOLDOWN_S', 'COS_LIVE_CUES_V2_JUDGE_KEEP', 'COS_LIVE_CUES_V2_REPEAT_OVERLAP'])
       expect(c.optionalEnvironment, key).toContain(key)
   })
 })
@@ -277,7 +277,7 @@ describe('engine', () => {
     expect(logged).toHaveLength(1)
     expect(logged[0]).toEqual({ v: 1, cueId: cue.cueId, sessionId: 'meeting_a', meetingTitle: expect.stringMatching(/^G2 Recording /), createdAt: cue.createdAt,
       armedAt: clock, kind: cue.kind, headline: cue.headline, detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model,
-      prompt: 'v3', memorySource: 'cue_memory', kept: 2, before: expect.any(String) })
+      prompt: 'v3', memorySource: 'cue_memory', kept: 2, wouldWithhold: { perMeeting: false, perTopic: false }, before: expect.any(String) })
     expect(logged[0].before).toHaveLength(400)
     expect(logged[0].before).toMatch(/ tail Speaker 2: agreed on the cap$/)
     expect(logged[0].before).not.toMatch(/\s{2}/)
@@ -356,6 +356,79 @@ describe('engine', () => {
     const e = engine(); e.arm('meeting_a')
     await e.feed('meeting_a', words(L.minNewWords))
     expect((JSON.parse(calls.prompts[0]) as { memory: Array<{ title: string }> }).memory.map(m => m.title)).toEqual(['Kept A'])
+  })
+
+  it('6.79.0: with COS_LIVE_CUES_V2_REPEAT_OVERLAP unset, a repeated cue is shown exactly as before', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    onTestFinished(() => warn.mockRestore())
+    const e = engine(); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords)); next()
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(2)
+    expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue'])
+    expect(mod.liveCuesV2RepeatOverlap({})).toBeNull()
+    expect(mod.liveCuesV2RepeatOverlap({ COS_LIVE_CUES_V2_REPEAT_OVERLAP: ' ' })).toBeNull()
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('6.79.0: with COS_LIVE_CUES_V2_REPEAT_OVERLAP=0.5 a repeat of a SHOWN cue is withheld: not logged, not emitted, not counted, and it frees the cap', async () => {
+    env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_REPEAT_OVERLAP: '0.5' }
+    const texts = ['Overage is 12% with no cap set. Name who quotes the cap today.', 'Overage is 12% with no cap set. Name who quotes the cap today.',
+      'Kiosk vendor review slipped twice; agree a new pilot date with procurement.']   // overlap 0 with the first
+    let n = 0
+    writerText = async () => JSON.stringify({ cue: texts[n++], kind: 'challenge' })
+    const logged: string[] = []
+    const e = engine({ cueLog: row => { logged.push(row.cueId) } }); e.arm('meeting_a')
+    for (let i = 0; i < 3; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
+    const shown = emitted.filter(x => x.type === 'coaching_nudge_v2').map(x => x.data)
+    expect(shown.map(c => c.detail)).toEqual([texts[0], texts[2]])
+    expect(emitted.filter(x => x.type === 'coaching_nudge')).toHaveLength(2)
+    expect(logged).toEqual(shown.map(c => c.cueId))
+    const evals = evaluations()
+    expect(evals.map(t => t.outcome)).toEqual(['cue', 'withheld_repeat', 'cue'])
+    expect(evals[1]).toMatchObject({ repeatOf: shown[0].cueId, repeatOverlap: 1 })
+    expect(JSON.stringify(evals[1])).not.toContain('Overage')                            // ids and the overlap, never text
+    expect(e.status('meeting_a').session?.cues.map(c => c.detail)).toEqual([texts[0], texts[2]])
+    expect(e.status('meeting_a').session?.writerCalls).toBe(3)                           // the writer call still counts
+    const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as { meetings: Record<string, { cues: number; writerCalls: number }> }
+    expect(state.meetings.meeting_a).toMatchObject({ cues: 2, writerCalls: 3 })            // the withheld cue frees a cap slot
+  })
+
+  it('6.79.0: a withheld cue never blocks a later one, and the threshold is the value set', async () => {
+    env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_REPEAT_OVERLAP: '0.9' }
+    const texts = ['Kiosk pilot vendor review slipped twice this month.', 'Kiosk pilot vendor review slipped again this quarter.']
+    let n = 0
+    writerText = async () => JSON.stringify({ cue: texts[n++], kind: 'challenge' })
+    const e = engine(); e.arm('meeting_a')
+    for (let i = 0; i < 2; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
+    expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue'])                    // overlap 0.8 < 0.9: shown
+  })
+
+  it('6.79.0: an invalid COS_LIVE_CUES_V2_REPEAT_OVERLAP leaves the rule off with one log line per value', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    onTestFinished(() => warn.mockRestore())
+    for (const ok of ['0.3', '0.5', '0.9']) expect(mod.liveCuesV2RepeatOverlap({ COS_LIVE_CUES_V2_REPEAT_OVERLAP: ok }), ok).toBe(Number(ok))
+    const bad = ['0.29', '0.91', 'on', '1']
+    for (const raw of bad) expect(mod.liveCuesV2RepeatOverlap({ COS_LIVE_CUES_V2_REPEAT_OVERLAP: raw }), raw).toBeNull()
+    mod.liveCuesV2RepeatOverlap({ COS_LIVE_CUES_V2_REPEAT_OVERLAP: 'on' })
+    expect(warn).toHaveBeenCalledTimes(bad.length)
+    expect(String(warn.mock.calls[0][0])).toContain('COS_LIVE_CUES_V2_REPEAT_OVERLAP')
+  })
+
+  it('6.79.0: every logged cue carries the shadow wouldWithhold (template rules never enforced)', async () => {
+    const texts = ['Acme kiosk pilot slipped; nobody named an owner for the vendor follow-up.', 'Widget refunds lag in March with no owner for the backlog.',
+      'Acme kiosk vendor follow-up still has no owner after the pilot slipped.']
+    let n = 0
+    writerText = async () => JSON.stringify({ cue: texts[n++], kind: 'challenge' })
+    const logged: Array<Record<string, unknown>> = []
+    const e = engine({ cueLog: row => { logged.push(row as unknown as Record<string, unknown>) } }); e.arm('meeting_a')
+    for (let i = 0; i < 3; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
+    expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue', 'cue'])            // shadow: all three shown
+    expect(logged.map(r => r.wouldWithhold)).toEqual([
+      { perMeeting: false, perTopic: false },
+      { perMeeting: true, perTopic: false, blockerCueId: logged[0].cueId },
+      { perMeeting: true, perTopic: true, blockerCueId: logged[0].cueId },
+    ])
   })
 
   it('the judge keeps at most two notes even when three pass, in rank order', async () => {

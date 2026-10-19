@@ -77,12 +77,16 @@ describe('log row schema', () => {
     expect(isLogRow(seed)).toBe(true)
     expect(isLogRow(row(id(1)))).toBe(true)
     expect(isLogRow(row(id(1), { prompt: 'v4' }))).toBe(true)          // a newer writer's rows are never skipped
+    expect(isLogRow(row(id(1), { wouldWithhold: { perMeeting: true, perTopic: false, blockerCueId: id(9) } }))).toBe(true)
+    expect(isLogRow(row(id(1), { wouldWithhold: { perMeeting: false, perTopic: false } }))).toBe(true)
   })
   it('every field is checked', () => {
     const bad: Array<Record<string, unknown>> = [
       { v: 2 }, { cueId: '' }, { cueId: 7 }, { sessionId: '' }, { meetingTitle: null }, { createdAt: '1' }, { createdAt: Number.NaN },
       { armedAt: 'x' }, { kind: 'nudge' }, { headline: 1 }, { detail: undefined }, { gate: '0.9' }, { model: null }, { before: null },
-      { sources: 'none' }, { sources: [{ id: 'a', date: 'b' }] }, { sources: [null] }, { prompt: 'four' }, { prompt: 'v' }, { prompt: 3 }, { memorySource: 'web' }, { kept: '2' },
+      { sources: 'none' }, { sources: [{ id: 'a', date: 'b' }] }, { sources: [null] }, { prompt: 'four' }, { prompt: 'v' }, { prompt: 3 },
+      { wouldWithhold: true }, { wouldWithhold: { perMeeting: 'yes', perTopic: false } }, { wouldWithhold: { perMeeting: true } },
+      { wouldWithhold: { perMeeting: true, perTopic: false, blockerCueId: 5 } }, { memorySource: 'web' }, { kept: '2' },
     ]
     for (const over of bad) expect(isLogRow({ ...row(id(1)), ...over }), JSON.stringify(over)).toBe(false)
     expect(isLogRow([row(id(1))])).toBe(false)
@@ -326,6 +330,11 @@ describe('history', () => {
     clock += L.titleCacheMs
     q()
     expect(titleCalls).toBe(6)
+  })
+
+  it('the shadow wouldWithhold rides along on the history row', () => {
+    svc.logCue(row(id(5), { createdAt: T0 - 1000, wouldWithhold: { perMeeting: true, perTopic: true, blockerCueId: id(4) } }))
+    expect(q().cues.at(-1)).toMatchObject({ cueId: id(5), wouldWithhold: { perMeeting: true, perTopic: true, blockerCueId: id(4) } })
   })
 
   it('days widens the window', () => {

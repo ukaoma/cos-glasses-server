@@ -19,7 +19,7 @@ tombstone on Stop, cancellations are not breaker failures, everything default-of
 ## Caps (how it stops)
 Master switch `COS_LIVE_CUES_V2=1` (default off; independent of v1's `COS_LIVE_CUES`); per meeting 10 cues and 20 writer calls (persisted); 300 writer calls per local week (`COS_LIVE_CUES_V2_WEEKLY`; stored IANA zone, Monday start, checked before the gate, charged before the writer, never refunded); Jev daily token cap; breaker after 3 writer failures without a successful writer call in between (cancel, pause, stale and maintenance are not failures).
 
-6.79.0 tuning knobs (defaults unchanged): `COS_LIVE_CUES_V2_COOLDOWN_S` (whole seconds 20..900, default 45) and `COS_LIVE_CUES_V2_JUDGE_KEEP` (0.5..0.95, default 0.8); unset or empty is the default, anything else falls back to it with one log line per value.
+6.79.0 tuning knobs (defaults unchanged): `COS_LIVE_CUES_V2_COOLDOWN_S` (whole seconds 20..900, default 45) and `COS_LIVE_CUES_V2_JUDGE_KEEP` (0.5..0.95, default 0.8); unset or empty is the default, anything else falls back to it with one log line per value. `COS_LIVE_CUES_V2_REPEAT_OVERLAP` (0.3..0.9, unset = off): withhold a cue that repeats an earlier shown cue at that content-token overlap (zero model calls; port of `filter_cues.py`). Every logged cue carries the shadow `wouldWithhold` owner/date template rules, never enforced.
 
 ## Routes (additive)
 `POST /api/live-cues/start|stop` (unchanged shape, v2 when enabled), `GET /api/live-cues/status?sessionId=`, `POST /api/live-cues/pause`, `POST /api/live-cues/feedback`. Capability `capabilities.liveCuesV2` on `/api/health` and `/api/models`.

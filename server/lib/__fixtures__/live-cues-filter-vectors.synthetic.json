@@ -1,0 +1,279 @@
+[
+ {
+  "earlier": "The Acme kiosk pilot slipped twice. Decide who owns the vendor follow-up before the next review.",
+  "cue": "Acme kiosk pilot vendor follow-up still has no owner; settle who drives it this week.",
+  "expect": {
+   "tokens_cue": [
+    "acme",
+    "drives",
+    "follow",
+    "kiosk",
+    "pilot",
+    "vendor",
+    "week"
+   ],
+   "template_cue": true,
+   "tokens_earlier": [
+    "acme",
+    "follow",
+    "kiosk",
+    "pilot",
+    "review",
+    "slipped",
+    "twice",
+    "vendor"
+   ],
+   "template_earlier": true,
+   "overlap": 0.7143,
+   "decision_topic_0.25_repeat_0.5": "repeat",
+   "decision_meeting_repeat_0.5": "repeat"
+  }
+ },
+ {
+  "earlier": "The Acme kiosk pilot slipped twice. Decide who owns the vendor follow-up before the next review.",
+  "cue": "Widget returns rose 14% in March with no fix agreed. Name who tracks the refund backlog.",
+  "expect": {
+   "tokens_cue": [
+    "14",
+    "agreed",
+    "backlog",
+    "fix",
+    "march",
+    "refund",
+    "returns",
+    "rose",
+    "tracks",
+    "widget"
+   ],
+   "template_cue": true,
+   "tokens_earlier": [
+    "acme",
+    "follow",
+    "kiosk",
+    "pilot",
+    "review",
+    "slipped",
+    "twice",
+    "vendor"
+   ],
+   "template_earlier": true,
+   "overlap": 0.0,
+   "decision_topic_0.25_repeat_0.5": null,
+   "decision_meeting_repeat_0.5": "template"
+  }
+ },
+ {
+  "earlier": "Widget returns rose 14% in March while refunds lagged at the warehouse in Denver.",
+  "cue": "Widget returns rose 14% in March and refunds still lag at the Denver warehouse.",
+  "expect": {
+   "tokens_cue": [
+    "14",
+    "denver",
+    "lag",
+    "march",
+    "refunds",
+    "returns",
+    "rose",
+    "warehouse",
+    "widget"
+   ],
+   "template_cue": false,
+   "tokens_earlier": [
+    "14",
+    "denver",
+    "lagged",
+    "march",
+    "refunds",
+    "returns",
+    "rose",
+    "warehouse",
+    "widget"
+   ],
+   "template_earlier": false,
+   "overlap": 0.8889,
+   "decision_topic_0.25_repeat_0.5": "repeat",
+   "decision_meeting_repeat_0.5": "repeat"
+  }
+ },
+ {
+  "earlier": "Kiosk vendor contract renewal is due Friday; decide who owns the Acme renewal call.",
+  "cue": "Acme raised kiosk pricing 8% for the renewal; nobody named who drives the counteroffer or the budget review.",
+  "expect": {
+   "tokens_cue": [
+    "acme",
+    "budget",
+    "counteroffer",
+    "drives",
+    "kiosk",
+    "pricing",
+    "raised",
+    "renewal",
+    "review"
+   ],
+   "template_cue": true,
+   "tokens_earlier": [
+    "acme",
+    "contract",
+    "due",
+    "friday",
+    "kiosk",
+    "renewal",
+    "vendor"
+   ],
+   "template_earlier": true,
+   "overlap": 0.4286,
+   "decision_topic_0.25_repeat_0.5": "template",
+   "decision_meeting_repeat_0.5": "template"
+  }
+ },
+ {
+  "earlier": "Beacon churn rose among annual plans in the northeast region after the support change.",
+  "cue": "Beacon churn and annual renewals: survey data, pricing pages, ticket backlog and onboarding all matter.",
+  "expect": {
+   "tokens_cue": [
+    "annual",
+    "backlog",
+    "beacon",
+    "churn",
+    "data",
+    "matter",
+    "onboarding",
+    "pages",
+    "pricing",
+    "renewals",
+    "survey",
+    "ticket"
+   ],
+   "template_cue": false,
+   "tokens_earlier": [
+    "among",
+    "annual",
+    "beacon",
+    "change",
+    "churn",
+    "northeast",
+    "plans",
+    "region",
+    "rose",
+    "support"
+   ],
+   "template_earlier": false,
+   "overlap": 0.3,
+   "decision_topic_0.25_repeat_0.5": null,
+   "decision_meeting_repeat_0.5": null
+  }
+ },
+ {
+  "earlier": "Orbit launch copy is final but pricing tiers changed after legal review on Tuesday.",
+  "cue": "Gamma onboarding emails convert at 3.2% versus 4.1% last quarter across both regions.",
+  "expect": {
+   "tokens_cue": [
+    "3.2",
+    "4.1",
+    "across",
+    "convert",
+    "emails",
+    "gamma",
+    "last",
+    "onboarding",
+    "quarter",
+    "regions",
+    "versus"
+   ],
+   "template_cue": false,
+   "tokens_earlier": [
+    "changed",
+    "copy",
+    "final",
+    "launch",
+    "legal",
+    "orbit",
+    "pricing",
+    "review",
+    "tiers",
+    "tuesday"
+   ],
+   "template_earlier": false,
+   "overlap": 0.0,
+   "decision_topic_0.25_repeat_0.5": null,
+   "decision_meeting_repeat_0.5": null
+  }
+ },
+ {
+  "earlier": "Gamma onboarding emails convert at 3.2% versus 4.1% last quarter.",
+  "cue": "Nobody set a date for the Gamma onboarding rewrite; who will sign off on the 4.1% target?",
+  "expect": {
+   "tokens_cue": [
+    "4.1",
+    "gamma",
+    "onboarding",
+    "rewrite",
+    "sign",
+    "target"
+   ],
+   "template_cue": true,
+   "tokens_earlier": [
+    "3.2",
+    "4.1",
+    "convert",
+    "emails",
+    "gamma",
+    "last",
+    "onboarding",
+    "quarter",
+    "versus"
+   ],
+   "template_earlier": false,
+   "overlap": 0.5,
+   "decision_topic_0.25_repeat_0.5": "repeat",
+   "decision_meeting_repeat_0.5": "repeat"
+  }
+ },
+ {
+  "earlier": "SET A DATE for the Delta migration and confirm the OWNER of the cutover checklist.",
+  "cue": "Delta migration cutover checklist: who approves it, and by when?",
+  "expect": {
+   "tokens_cue": [
+    "approves",
+    "checklist",
+    "cutover",
+    "delta",
+    "migration"
+   ],
+   "template_cue": true,
+   "tokens_earlier": [
+    "checklist",
+    "confirm",
+    "cutover",
+    "delta",
+    "migration"
+   ],
+   "template_earlier": true,
+   "overlap": 0.8,
+   "decision_topic_0.25_repeat_0.5": "repeat",
+   "decision_meeting_repeat_0.5": "repeat"
+  }
+ },
+ {
+  "earlier": null,
+  "cue": "Revenue hit $3,000,000 at 1.5x plan in Q3; don't wait on the 2 remaining deals, it's 9 days. Café sales 12,5 up.",
+  "expect": {
+   "tokens_cue": [
+    "1.5",
+    "125",
+    "3000000",
+    "caf",
+    "days",
+    "deals",
+    "hit",
+    "plan",
+    "q3",
+    "remaining",
+    "revenue",
+    "sales",
+    "wait"
+   ],
+   "template_cue": false
+  }
+ }
+]
