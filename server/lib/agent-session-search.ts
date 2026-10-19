@@ -40,8 +40,9 @@ import {
   codexUserText,
   listCodexJsonlFiles,
   loadClaudeStarredIds,
-  loadCodexPinnedIds,
-  loadCodexThreadNames,
+  codexSessionRootsOf,
+  loadCodexPinnedIdsAll,
+  loadCodexThreadNamesAll,
   loadCursorComposerNames,
   loadCursorPinnedIds,
   parseJsonLine,
@@ -314,10 +315,12 @@ async function collectClaudeDocs(roots: AgentSessionRoots, docs: SearchDoc[], bu
 }
 
 async function collectCodexDocs(roots: AgentSessionRoots, docs: SearchDoc[], budget: ScanBudget) {
-  const names = await loadCodexThreadNames(roots.codexSessions)
-  const pinned = await loadCodexPinnedIds(roots.codexSessions)
+  // Key lanes (P11): every Codex home, the server home first. One root with lanes off.
+  const names = await loadCodexThreadNamesAll(roots)
+  const pinned = await loadCodexPinnedIdsAll(roots)
   const candidates: Array<{ file: string; mtimeMs: number; birthtimeMs: number }> = []
-  for (const file of await listCodexJsonlFiles(roots.codexSessions)) {
+  const files = (await Promise.all(codexSessionRootsOf(roots).map(root => listCodexJsonlFiles(root)))).flat()
+  for (const file of files) {
     const st = await fileStat(file)
     if (!st?.isFile) continue
     candidates.push({ file, mtimeMs: st.mtimeMs, birthtimeMs: st.birthtimeMs })

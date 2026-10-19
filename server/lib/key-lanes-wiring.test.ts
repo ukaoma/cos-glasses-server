@@ -95,13 +95,16 @@ describe('wireKeyLanes: every seam filled, the relay seams only while enabled', 
     expect(provider.breaker).toBeTypeOf('function')
   })
 
-  it('both Lane B relay seams resolve to the one shared relay, and wiring opens no listener', async () => {
+  it('both Lane B relay seams reach the one shared relay, and wiring opens no listener', async () => {
     await rewire('1')
     const a = await laneB.laneBRelay()
     const b = await codexHome.codexKeyRelay()
-    expect(a).toBe(b)
-    expect(a).toBe(relayMod.getKeyRelay())
     expect(a.port()).toBeNull()
+    expect(b.port()).toBeNull()
+    const shared = relayMod.getKeyRelay()
+    const revoke = vi.spyOn(shared, 'revokeAll')
+    a.revokeAll('cancel'); b.revokeAll('cancel')
+    expect(revoke).toHaveBeenCalledTimes(2)
   })
 
   it('claude runner: callClaudeStreaming with the timeout tier and the profile, options kept', async () => {
@@ -110,8 +113,11 @@ describe('wireKeyLanes: every seam filled, the relay seams only while enabled', 
     const sid = await routing.keyProfileEngineRunner('claude')!('q', 's1', callbacks, TURN, undefined, undefined, 7, { lightweight: true, turnId: 't1' })
     expect(sid).toBe('claude-sid')
     const args = mocks.claude.mock.calls[0]!
-    expect(args.slice(0, 7)).toEqual(['q', 's1', callbacks, 'haiku', undefined, undefined, 7])
+    expect([...args.slice(0, 2), ...args.slice(3, 7)]).toEqual(['q', 's1', 'haiku', undefined, undefined, 7])
     expect(args[7]).toEqual({ lightweight: true, turnId: 't1', keyProfile: PROFILE })
+    // The callbacks are the caller's, with onError reading the relay's line for the turn.
+    const wrapped = args[2] as { onChunk: unknown; onError: (e: string) => Promise<void> }
+    expect(wrapped.onChunk).toBe((callbacks as { onChunk: unknown }).onChunk)
   })
 
   it('codex runner: runCodexKeyProfileTurn with the resolved turn', async () => {
@@ -393,5 +399,88 @@ describe('composition root (source shape: index.ts cannot be executed in a test)
     const src = readFileSync(join(import.meta.dirname, '..', 'index.ts'), 'utf8')
     expect(src.split('\nwireKeyLanes()\n').length - 1).toBe(1)
     expect(src.indexOf('\nwireKeyLanes()\n')).toBeGreaterThan(src.indexOf("app.use('/api', createKeyLanesRouter("))
+  })
+})
+
+
+// ── Relay turn failures read as the key-notices line (P11) ───────────────────
+
+describe('a keyed turn the relay failed shows the key-notices line, not the CLI error', () => {
+  const RAW = 'claude-bridge: API Error: 402 {"error":{"message":"Insufficient credits"}}'
+  async function claudeTurn(turnId?: string) {
+    await rewire('1')
+    mocks.claude.mockClear()
+    const callbacks = { onChunk: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
+    await routing.keyProfileEngineRunner('claude')!('q', 's', callbacks as never, TURN, undefined, undefined, undefined, turnId ? { turnId } : {})
+    const args = mocks.claude.mock.calls[0]!
+    return { callbacks, wrapped: args[2] as { onError: (e: string) => Promise<void>; onDone: (...a: unknown[]) => unknown }, turnId: (args[7] as { turnId: string }).turnId }
+  }
+
+  it('402 mid-turn: the out-of-credit line', async () => {
+    const t = await claudeTurn('turn-402')
+    wiring.recordKeyTurnFailure({ turnId: 'turn-402', sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: 'out_of_credit', status: 402 })
+    await t.wrapped.onError(RAW)
+    const line = t.callbacks.onError.mock.calls[0]![0] as string
+    expect(line).toMatch(/out of credit/i)
+    expect(line).not.toContain('API Error')
+  })
+
+  it('cap mid-turn and 401: the cap line and the rejected-key line', async () => {
+    const a = await claudeTurn('turn-cap')
+    wiring.recordKeyTurnFailure({ turnId: 'turn-cap', sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: 'cap_refused', status: 402 })
+    await a.wrapped.onError(RAW)
+    expect(a.callbacks.onError.mock.calls[0]![0]).toMatch(/cap on this key is used/)
+    const b = await claudeTurn('turn-401')
+    wiring.recordKeyTurnFailure({ turnId: 'turn-401', sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: 'key_rejected', status: 401 })
+    await b.wrapped.onError(RAW)
+    expect(b.callbacks.onError.mock.calls[0]![0]).toMatch(/was rejected/)
+  })
+
+  it('the failure that opened the breaker reads as the pause', async () => {
+    const t = await claudeTurn('turn-brk')
+    const br = relayMod.getKeyRelay().breakers
+    for (let i = 0; i < 3; i++) br.record('key', PROFILE.keyRef, 'key_rejected', false)
+    wiring.recordKeyTurnFailure({ turnId: 'turn-brk', sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: 'key_rejected', status: 401 })
+    await t.wrapped.onError(RAW)
+    expect(t.callbacks.onError.mock.calls[0]![0]).toMatch(/^Key paused 1 hour after 3 failures\.$/)
+  })
+
+  it('a turn refused before spawn (lanes went off) reads the profile-off line, not "could not start"', async () => {
+    const t = await claudeTurn('turn-pre')
+    delete process.env.COS_KEY_LANES
+    lanes.__resetKeyLanesForTests()
+    const view = await laneB.laneBRelay()
+    await expect(view.issueTurn({ keyRef: PROFILE.keyRef, profileId: PROFILE.id, turnId: 'turn-pre', sessionId: 's', engine: 'claude', allowedModel: PROFILE.model }, { wallMaxMs: 1000 })).rejects.toThrow()
+    await t.wrapped.onError(laneB.LANE_B_COPY.relayUnavailable)
+    expect(t.callbacks.onError.mock.calls[0]![0]).toBe('Key profile Sonnet is off. Pick a model.')
+  })
+
+  it('no recorded failure: the error passes through unchanged; onDone forgets a stale one; the turn gets an id', async () => {
+    const t = await claudeTurn()
+    expect(t.turnId).toMatch(/^[0-9a-f-]{36}$/)
+    await t.wrapped.onError(RAW)
+    expect(t.callbacks.onError).toHaveBeenCalledWith(RAW)
+    const d = await claudeTurn('turn-done')
+    wiring.recordKeyTurnFailure({ turnId: 'turn-done', sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: 'out_of_credit', status: 402 })
+    await d.wrapped.onDone('answer', 'opus')
+    expect(wiring.keyTurnFailureLine('turn-done', PROFILE)).toBeNull()
+  })
+
+  it('the shared relay reports its turn failures into the same table', async () => {
+    await rewire('1')
+    const relay = wiring.sharedKeyRelay() as unknown as { onTurnFailure: (f: unknown) => void }
+    relay.onTurnFailure({ turnId: 'turn-shared', sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: 'out_of_credit', status: 402 })
+    expect(wiring.keyTurnFailureLine('turn-shared', PROFILE)).toMatch(/out of credit/i)
+  })
+
+  it('the Codex runner reads the same lines', async () => {
+    await rewire('1')
+    mocks.codex.mockClear()
+    const callbacks = { onChunk: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
+    await routing.keyProfileEngineRunner('codex')!('q', 's', callbacks as never, TURN, undefined, undefined, undefined, { turnId: 'turn-codex-402' })
+    const wrapped = mocks.codex.mock.calls[0]![2] as { onError: (e: string) => Promise<void> }
+    wiring.recordKeyTurnFailure({ turnId: 'turn-codex-402', sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: 'out_of_credit', status: 402 })
+    await wrapped.onError('Codex failed (codex.unknown). Retry or check Codex Debug.')
+    expect(callbacks.onError.mock.calls[0]![0]).toMatch(/out of credit/i)
   })
 })

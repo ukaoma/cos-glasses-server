@@ -104,6 +104,18 @@ describe('done carries the keyed answer fields (P11)', () => {
     expect(JSON.stringify(done.data)).not.toMatch(/sk-or-/)
   })
 
+  it('durable runtime: the job record of a keyed answer keeps them (app recovery reads it)', async () => {
+    mocks.callModelStreaming.mockImplementation(routerFake('sonnet'))
+    const snap = await runJob('profile:gpt')
+    expect(snap).toMatchObject({ lane: 'key', credential: { kind: 'openrouter', ref: 'key_000000000000', profileId: 'gpt' }, profile: 'gpt', usd: 0.0123 })
+  })
+
+  it('durable runtime: a subscription job record has none of them', async () => {
+    mocks.callModelStreaming.mockImplementation(routerFake('unused'))
+    const snap = await runJob('codex-high')
+    for (const k of [...KEY_FIELDS, 'keyLane']) expect(snap, k).not.toHaveProperty(k)
+  })
+
   it('durable runtime: a subscription answer has none of them', async () => {
     mocks.callModelStreaming.mockImplementation(routerFake('unused'))
     await runJob('codex-high')

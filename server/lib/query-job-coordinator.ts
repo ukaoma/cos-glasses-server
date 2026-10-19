@@ -31,6 +31,7 @@ import {
   type QueryJobSteerState,
   type QueryJobStoreHealth,
 } from './query-job-types.js'
+import type { QueryJobKeyAnswerFields } from './key-answer-fields.js'
 import { SteerPort, steerClock, steerCutoffMs, type PendingSteer, type QueryProvider } from './claude-steer.js'
 import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
@@ -43,7 +44,7 @@ export interface QueryJobRunnerStart extends QueryJobProviderLinkage {
   sessionId?: string
 }
 
-export interface QueryJobRunnerCompletion extends QueryJobProviderLinkage {
+export interface QueryJobRunnerCompletion extends QueryJobProviderLinkage, QueryJobKeyAnswerFields {
   text: string
   attachments?: unknown
   outputImageStats?: QueryJobOutputImageStats

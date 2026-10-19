@@ -263,3 +263,56 @@ describe('readers that stay on the server home', () => {
     expect(codexGistModelsFromCache()).toEqual(['gpt-5.4-mini'])
   })
 })
+
+describe('names, pinned ids, search and subagents across Codex homes (P11)', () => {
+  const embedTexts = async () => ({ reason: 'no embeddings in this test' })
+
+  it('a keyed thread has its own name and is found by search only with lanes on; the server home wins a clash', async () => {
+    const { loadCodexThreadNamesAll, loadCodexThreadNames } = await import('./agent-session-store.js')
+    const { searchAgentSessions } = await import('./agent-session-search.js')
+    rollout(SERVER_CODEX, PLAIN_ID, 'subscription thread')
+    rollout(codexProfileHome('gpt-key'), KEYED_ID, 'zebracorn keyed thread')
+    // Lanes off: exactly the server home's names, and the keyed thread is not searchable.
+    expect(await loadCodexThreadNamesAll(agentSessionRoots())).toEqual(await loadCodexThreadNames(join(SERVER_CODEX, 'sessions')))
+    const off = await searchAgentSessions({ query: 'zebracorn', roots: agentSessionRoots(), embedTexts: embedTexts as never, now: NOW })
+    expect(off.hits.map(h => h.session_id)).not.toContain(KEYED_ID)
+    lanesOn()
+    const names = await loadCodexThreadNamesAll(agentSessionRoots())
+    expect(names.get(KEYED_ID)).toBe('zebracorn keyed thread')
+    expect(names.get(PLAIN_ID)).toBe('subscription thread')
+    const on = await searchAgentSessions({ query: 'zebracorn', roots: agentSessionRoots(), embedTexts: embedTexts as never, now: NOW })
+    expect(on.hits.map(h => h.session_id)).toContain(KEYED_ID)
+    // A clash: the server home's name is kept.
+    writeFileSync(join(codexProfileHome('gpt-key'), 'session_index.jsonl'), JSON.stringify({ id: PLAIN_ID, thread_name: 'impostor' }) + '\n')
+    expect((await loadCodexThreadNamesAll(agentSessionRoots())).get(PLAIN_ID)).toBe('subscription thread')
+  })
+
+  it('pinned ids are the union across homes with lanes on, the server set with lanes off', async () => {
+    const { loadCodexPinnedIdsAll } = await import('./agent-session-store.js')
+    mkdirSync(join(SERVER_CODEX, 'sessions'), { recursive: true })
+    mkdirSync(join(codexProfileHome('gpt-key'), 'sessions'), { recursive: true })
+    writeFileSync(join(SERVER_CODEX, '.codex-global-state.json'), JSON.stringify({ 'pinned-thread-ids': [PLAIN_ID] }))
+    writeFileSync(join(codexProfileHome('gpt-key'), '.codex-global-state.json'), JSON.stringify({ 'pinned-thread-ids': [KEYED_ID] }))
+    expect([...await loadCodexPinnedIdsAll(agentSessionRoots())]).toEqual([PLAIN_ID])
+    lanesOn()
+    expect([...await loadCodexPinnedIdsAll(agentSessionRoots())].sort()).toEqual([PLAIN_ID, KEYED_ID].sort())
+  })
+
+  it('subagents of a keyed thread are read in its profile home; with one root it is one server call', async () => {
+    const { readCodexSubagentsAcross } = await import('./codex-subagent-activity.js')
+    const CHILD = '019f9999-aaaa-bbbb-cccc-dddddddddddd'
+    const profileHome = codexProfileHome('gpt-key')
+    rollout(profileHome, KEYED_ID, 'keyed parent')
+    const childFile = rollout(profileHome, CHILD, 'child')
+    const db = join(profileHome, 'state_5.sqlite')
+    execFileSync('/usr/bin/sqlite3', [db, `CREATE TABLE threads(id TEXT,rollout_path TEXT,archived INT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT); INSERT INTO threads VALUES('${CHILD}','${childFile}',1); INSERT INTO thread_spawn_edges VALUES('${KEYED_ID}','${CHILD}','open');`])
+    const serverRoot = join(SERVER_CODEX, 'sessions')
+    const profileRoot = join(profileHome, 'sessions')
+    // One root: the server home answers (it has no state db, so nothing).
+    expect((await readCodexSubagentsAcross([KEYED_ID], [serverRoot])).get(KEYED_ID)).toBeUndefined()
+    // Two roots, routed to the keyed thread's home: its child is counted.
+    const across = await readCodexSubagentsAcross([KEYED_ID, PLAIN_ID], [serverRoot, profileRoot], NOW.getTime(), id => id === KEYED_ID ? profileRoot : undefined)
+    expect(across.get(KEYED_ID)).toMatchObject({ total: 1, completed: 1 })
+    expect(across.has(PLAIN_ID)).toBe(false)
+  })
+})

@@ -95,8 +95,29 @@ function codexProfileSessionsField(): { codexProfileSessions?: string[] } {
 }
 
 /** The server home's sessions root first, then each profile home's (plan 8.2 codexHomes order). */
-function codexSessionRootsOf(roots: AgentSessionRoots): string[] {
+export function codexSessionRootsOf(roots: AgentSessionRoots): string[] {
   return [roots.codexSessions, ...(roots.codexProfileSessions ?? [])]
+}
+
+/**
+ * Key lanes (P11): thread names across every Codex home, the server home's first (it wins a
+ * clash). With lanes off there is one root and this is exactly loadCodexThreadNames(server).
+ */
+export async function loadCodexThreadNamesAll(roots: AgentSessionRoots): Promise<Map<string, string>> {
+  const [server, ...profiles] = codexSessionRootsOf(roots)
+  const names = await loadCodexThreadNames(server!)
+  for (const root of profiles) {
+    for (const [id, name] of await loadCodexThreadNames(root)) if (!names.has(id)) names.set(id, name)
+  }
+  return names
+}
+
+/** Key lanes (P11): pinned thread ids across every Codex home (one root with lanes off). */
+export async function loadCodexPinnedIdsAll(roots: AgentSessionRoots): Promise<Set<string>> {
+  const [server, ...profiles] = codexSessionRootsOf(roots)
+  const pinned = await loadCodexPinnedIds(server!)
+  for (const root of profiles) for (const id of await loadCodexPinnedIds(root)) pinned.add(id)
+  return pinned
 }
 
 export function isSafeSessionId(value: string): boolean {

@@ -81,6 +81,28 @@ async function childState(file: string, root: string, now: number, budget: { byt
 }
 
 /** One bounded read-only SQLite snapshot per list/detail read. */
+/**
+ * Key lanes (P11): readCodexSubagents over every Codex home. Each parent is read in the home that
+ * holds its thread (`rootOf`, a keyed thread's profile home), every other one in the server home.
+ * With one root (key lanes off, or no profile home) it is exactly the one server-home call.
+ */
+export async function readCodexSubagentsAcross(
+  parents: readonly string[], sessionsRoots: readonly string[], now?: number, rootOf?: (id: string) => string | undefined,
+): Promise<Map<string, SubagentActivity>> {
+  const server = sessionsRoots[0]!
+  const read = (ids: readonly string[], root: string) => now === undefined ? readCodexSubagents(ids, root) : readCodexSubagents(ids, root, now)
+  if (sessionsRoots.length <= 1 || !rootOf) return read(parents, server)
+  const groups = new Map<string, string[]>()
+  for (const id of parents) {
+    const own = rootOf(id)
+    const root = own && sessionsRoots.includes(own) ? own : server
+    groups.set(root, [...(groups.get(root) ?? []), id])
+  }
+  const out = new Map<string, SubagentActivity>()
+  for (const [root, ids] of groups) for (const [id, activity] of await read(ids, root)) out.set(id, activity)
+  return out
+}
+
 export async function readCodexSubagents(
   parents: readonly string[], sessionsRoot: string, now = Date.now(),
 ): Promise<Map<string, SubagentActivity>> {

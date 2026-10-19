@@ -32,10 +32,14 @@ const FIELDS_T = ['server/lib/key-lanes-p11-answer-fields.test.ts']
 const CLAUDE_T = ['server/lib/claude-bridge-key-lanes.test.ts']
 const CODEX_T = ['server/lib/codex-bridge-key-lanes.test.ts']
 const BIND_T = ['server/routes/agent-session-bindings.test.ts']
-const ALL = [...WIRE_T, ...ROUTE_T, ...FIELDS_T, ...CLAUDE_T, ...CODEX_T, ...BIND_T]
+const JOB_T = ['server/lib/key-lanes-p11-job-record.test.ts']
+const READ_T = ['server/lib/codex-homes-readers.test.ts']
+const SESS_T = ['server/routes/agent-sessions-keyed.test.ts']
+const ALL = [...WIRE_T, ...ROUTE_T, ...FIELDS_T, ...CLAUDE_T, ...CODEX_T, ...BIND_T, ...JOB_T, ...READ_T, ...SESS_T]
 
 const WIRING = 'server/lib/key-lanes-wiring.ts', METER = 'server/lib/key-relay-meter.ts', ROUTES = 'server/routes/key-lanes.ts'
 const CLAUDE = 'server/lib/claude-bridge.ts', CODEX = 'server/lib/codex-bridge.ts', CES = 'server/lib/codex-engine-sessions.ts'
+const STORE = 'server/lib/agent-session-store.ts'
 const BIND = 'server/routes/agent-session-bindings.ts', NOTICES = 'server/lib/key-notices.ts', PHOME = 'server/lib/codex-profile-home.ts'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 
@@ -45,11 +49,19 @@ const mutations = [
   m('wire-claude-engine-missing', WIRING, ["  registerKeyProfileEngine('claude', runClaudeKeyProfileTurn)\n", ''], WIRE_T),
   m('wire-codex-engine-missing', WIRING, ["  registerKeyProfileEngine('codex', runCodexKeyTurn)\n", ''], WIRE_T),
   m('wire-direct-engine-missing', WIRING, ["  registerKeyProfileEngine('direct', runDirectKeyTurn)\n", ''], WIRE_T),
-  m('wire-laneb-relay-missing', WIRING, ['  registerLaneBRelay(() => sharedKeyRelay())\n', ''], WIRE_T),
-  m('wire-codex-relay-missing', WIRING, ['  registerCodexKeyRelay(() => sharedKeyRelay())\n', ''], WIRE_T),
+  m('wire-laneb-relay-missing', WIRING, ['  registerLaneBRelay(() => laneBRelayView())\n', ''], WIRE_T),
+  m('wire-codex-relay-missing', WIRING, ['  registerCodexKeyRelay(() => laneBRelayView())\n', ''], WIRE_T),
   m('wire-codex-thread-recorder-missing', WIRING, ["  registerCodexKeyedThreadRecorder(thread => recordKeyedSession({ id: thread.id, engine: 'codex', profileId: thread.profileId, cosSessionId: thread.cosSessionId }))\n", ''], WIRE_T),
-  m('wire-claude-runner-wrong-tier', WIRING, ['callClaudeStreaming(query, sessionId, callbacks, turn.profile.timeoutTier, images', "callClaudeStreaming(query, sessionId, callbacks, 'opus', images"], WIRE_T),
-  m('wire-claude-runner-drops-profile', WIRING, ['globalMsgNum, { ...options, keyProfile: turn.profile })', 'globalMsgNum, { ...options })'], WIRE_T),
+  m('wire-claude-runner-wrong-tier', WIRING, ['withKeyFailureLines(callbacks, turnId, turn.profile), turn.profile.timeoutTier, images', "withKeyFailureLines(callbacks, turnId, turn.profile), 'opus', images"], WIRE_T),
+  m('wire-claude-runner-drops-profile', WIRING, ['globalMsgNum, { ...options, turnId, keyProfile: turn.profile })', 'globalMsgNum, { ...options, turnId })'], WIRE_T),
+  // ── Relay turn failures read as the key-notices line (second pass) ──
+  m('turn-failure-not-reported', WIRING, ['getKeyRelay({ priceFor: keyCatalogPeekPrice, onTurnFailure: recordKeyTurnFailure })', 'getKeyRelay({ priceFor: keyCatalogPeekPrice })'], WIRE_T),
+  m('turn-failure-line-ignored', WIRING, ['    onError: error => callbacks.onError(keyTurnFailureLine(turnId, profile) ?? error),', '    onError: error => callbacks.onError(error),'], WIRE_T),
+  m('breaker-pause-not-read', WIRING, ["  const paused = f.scope && f.id && f.kind !== 'breaker_open' && sharedKeyRelay().breakers.isOpen(f.scope, f.id)", '  const paused = false'], WIRE_T),
+  m('pre-spawn-refusal-not-remembered', WIRING, ['        if (id) rememberFailure(binding.turnId, { kind: id, keyRef: binding.keyRef })\n', ''], WIRE_T),
+  m('claude-runner-no-turn-id', WIRING, ['globalMsgNum, { ...options, turnId, keyProfile: turn.profile })', 'globalMsgNum, { ...options, keyProfile: turn.profile })'], WIRE_T),
+  m('codex-runner-raw-errors', WIRING, ['runCodexKeyProfileTurn(query, sessionId, withKeyFailureLines(callbacks, turnId, turn.profile), turn', 'runCodexKeyProfileTurn(query, sessionId, callbacks, turn'], WIRE_T),
+  m('done-keeps-stale-failure', WIRING, ['    onDone: (...args) => { turnFailures.delete(turnId); return callbacks.onDone(...args) },', '    onDone: (...args) => callbacks.onDone(...args),'], WIRE_T),
   m('boot-wiring-removed', 'server/index.ts', ['\nwireKeyLanes()\n', '\n'], WIRE_T),
   // ── The direct relay adapter ──
   m('direct-model-not-forced', WIRING, ['JSON.stringify({ ...body, model: binding.model })', 'JSON.stringify(body)'], WIRE_T),
@@ -74,6 +86,21 @@ const mutations = [
   m('sse-done-no-key-fields', 'server/routes/query.ts', ['              ...keyAnswerDoneFields(runMetadata),\n', ''], FIELDS_T),
   m('runtime-done-no-key-fields', 'server/lib/query-job-runtime.ts', ['            ...keyAnswerDoneFields(runMetadata),\n', ''], FIELDS_T),
   m('answer-fields-no-profile', 'server/lib/key-answer-fields.ts', ['  return { lane: keyLane.lane, credential: keyLane.credential, profile: keyLane.credential.profileId }', '  return { lane: keyLane.lane, credential: keyLane.credential }'], FIELDS_T),
+  // ── Durable job records of keyed answers (second pass) ──
+  m('job-record-no-key-fields', 'server/lib/query-job-store.ts', ['      ...(outputImageStats ? { outputImageStats } : {}),\n      ...keyAnswer,\n    }, {', '      ...(outputImageStats ? { outputImageStats } : {}),\n    }, {'], JOB_T),
+  m('job-replay-drops-key-fields', 'server/lib/query-job-store.ts', ['      Object.assign(snapshot, keyAnswerJobFields(patch))\n', ''], JOB_T),
+  m('runtime-completion-no-key-fields', 'server/lib/query-job-runtime.ts', ['            ...keyAnswerCompletionFields(metadata),\n', ''], FIELDS_T),
+  m('job-fields-profile-mismatch-kept', 'server/lib/key-answer-fields.ts', ['  if (x.profile !== c.profileId) return {}\n', ''], JOB_T),
+  m('job-fields-bad-ref-kept', 'server/lib/key-answer-fields.ts', ['typeof c.ref !== \'string\' || !KEY_REF_RE.test(c.ref)', 'typeof c.ref !== \'string\''], JOB_T),
+  // ── Agent sessions read every Codex home (second pass) ──
+  m('names-server-home-only', STORE, ['  for (const root of profiles) {\n    for (const [id, name] of await loadCodexThreadNames(root)) if (!names.has(id)) names.set(id, name)\n  }\n', ''], [...READ_T, ...SESS_T]),
+  m('names-profile-wins-clash', STORE, ['if (!names.has(id)) names.set(id, name)', 'names.set(id, name)'], READ_T),
+  m('pinned-server-home-only', STORE, ['  for (const root of profiles) for (const id of await loadCodexPinnedIds(root)) pinned.add(id)\n', ''], READ_T),
+  m('search-server-home-only', 'server/lib/agent-session-search.ts', ['codexSessionRootsOf(roots).map(root => listCodexJsonlFiles(root))', '[roots.codexSessions].map(root => listCodexJsonlFiles(root))'], READ_T),
+  m('subagents-not-routed-to-home', 'server/lib/codex-subagent-activity.ts', ['    const root = own && sessionsRoots.includes(own) ? own : server', '    const root = server'], [...READ_T, ...SESS_T]),
+  m('list-subagents-server-home-only', 'server/routes/agent-sessions.ts', ['codexRoots, now, codexRoots.length > 1 ? keyedCodexRootOf() : undefined)', 'codexRoots, now, undefined)'], SESS_T),
+  m('detail-subagents-server-home-only', 'server/routes/agent-sessions.ts', ['detailRoots, undefined, detailRoots.length > 1 ? keyedCodexRootOf() : undefined)', 'detailRoots, undefined, undefined)'], SESS_T),
+  m('detail-name-server-home-only', 'server/routes/agent-sessions.ts', ['      const names = await loadCodexThreadNamesAll(agentSessionRoots())', '      const names = new Map<string, string>()'], SESS_T),
   // ── Nonce revoke on steer abort (P3 asked for this mutant) ──
   m('steer-abort-keeps-nonce', CLAUDE, ["    keyTurn?.revoke('steer_abort')\n", ''], CLAUDE_T),
   // ── Codex resume slot by profile ──

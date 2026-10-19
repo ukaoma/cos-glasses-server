@@ -44,7 +44,7 @@ import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
 import type { JobTrailDraft } from './job-trail.js'
 import { registerMessageReservationSource } from './message-reservations.js'
 import { bootResumeGate } from './boot-resume.js'
-import { keyAnswerDoneFields } from './key-answer-fields.js'
+import { keyAnswerCompletionFields, keyAnswerDoneFields } from './key-answer-fields.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -351,6 +351,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
             attachments,
             outputImageStats: metadata?.outputImageStats,
             ...linkage,
+            ...keyAnswerCompletionFields(metadata),
           })
           if (!terminalOwned) return
           if (resolvedAttachments.ids.length > 0) {

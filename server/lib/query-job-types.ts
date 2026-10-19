@@ -1,5 +1,6 @@
 import { providerFailureCode } from './provider-failure-text.js'
 import { createHash } from 'node:crypto'
+import type { QueryJobKeyAnswerFields } from './key-answer-fields.js'
 import {
   parseMediaAttachmentRefs,
   parseMediaIdList,
@@ -437,6 +438,11 @@ export interface QueryJobSnapshot extends QueryJobProviderLinkage {
   response?: string
   responseTruncated?: boolean
   outputImageStats?: QueryJobOutputImageStats
+  /** Key lanes (P11, plan 3.1): present only on a job a key profile answered; omitted, never null. */
+  lane?: QueryJobKeyAnswerFields['lane']
+  credential?: QueryJobKeyAnswerFields['credential']
+  profile?: string
+  usd?: number
   error?: QueryJobError
   /** 6.78.0: what a restart cut off (see QueryJobInterruption). Only on a job a restart ended. */
   interruption?: QueryJobInterruption

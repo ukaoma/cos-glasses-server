@@ -1,5 +1,14 @@
 import { workObservationFields } from '../lib/session-work-observation.js'
-import { readCodexSubagents } from '../lib/codex-subagent-activity.js'
+import { readCodexSubagentsAcross } from '../lib/codex-subagent-activity.js'
+import { listKeyedSessions } from '../lib/keyed-sessions.js'
+import { codexProfileHome } from '../lib/codex-homes.js'
+import { join as joinPath } from 'node:path'
+
+/** Key lanes (P11): a keyed Codex thread's own sessions root (P3's keyed-session record). */
+function keyedCodexRootOf(): (id: string) => string | undefined {
+  const byId = new Map(listKeyedSessions().filter(r => r.engine === 'codex').map(r => [r.id.toLowerCase(), joinPath(codexProfileHome(r.profileId), 'sessions')]))
+  return id => byId.get(id.toLowerCase())
+}
 // GET /api/agent-sessions
 // GET /api/agent-sessions/search?q=
 // GET /api/agent-sessions/:provider/:sessionId
@@ -31,7 +40,8 @@ import {
   emptySessionListDropped,
   loadClaudeDesktopAliases,
   loadCursorComposerNames,
-  loadCodexThreadNames,
+  codexSessionRootsOf,
+  loadCodexThreadNamesAll,
   idFromCodexFilename,
   parseAgentSession,
   type AgentProvider,
@@ -518,7 +528,8 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
       derivedById.set(row.session_id, deriveCodexRow(row.session_id, running.occupied.has(row.session_id), facts, now))
     }
     const queuedOf = await allQueuedWaitingLookup(now)
-    const subagents = await readCodexSubagents(sessions.filter(row => row.provider === 'codex').map(row => row.session_id), roots.codexSessions, now)
+    const codexRoots = codexSessionRootsOf(roots)
+    const subagents = await readCodexSubagentsAcross(sessions.filter(row => row.provider === 'codex').map(row => row.session_id), codexRoots, now, codexRoots.length > 1 ? keyedCodexRootOf() : undefined)
     res.json({
       sessions: sessions.map((row, index) => {
         const derived = derivedById.get(row.session_id)
@@ -624,7 +635,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     // parent's id (see `listCodexSessions`), and the parent's name would be the wrong one.
     let codexThreadName: string | undefined
     if (provider === 'codex') {
-      const names = await loadCodexThreadNames(agentSessionRoots().codexSessions)
+      const names = await loadCodexThreadNamesAll(agentSessionRoots())
       const fileId = idFromCodexFilename(found.split('/').pop() || '')
       codexThreadName = (fileId ? names.get(fileId) : undefined) || names.get(sessionId) || undefined
     }
@@ -649,7 +660,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     const now = Date.now()
     const rollout = provider === 'codex' ? codexRolloutFacts(found, now) : null
     const observed = provider === 'codex' ? codexCompactionFields(workObservationFor(parsed.session_id), rollout, now) : workObservationFields(workObservationFor(parsed.session_id))
-    const subagents = provider === 'codex' ? (await readCodexSubagents([sessionId], agentSessionRoots().codexSessions)).get(sessionId.toLowerCase()) : observed.subagent_activity
+    const detailRoots = provider === 'codex' ? codexSessionRootsOf(agentSessionRoots()) : []
+    const subagents = provider === 'codex' ? (await readCodexSubagentsAcross([sessionId], detailRoots, undefined, detailRoots.length > 1 ? keyedCodexRootOf() : undefined)).get(sessionId.toLowerCase()) : observed.subagent_activity
     const modified = st.mtime.toISOString()
     const activity = await readSessionActivity(provider, found)
     const running = runningForThread(provider, parsed.session_id, activityClockMs(st.mtimeMs, activity))

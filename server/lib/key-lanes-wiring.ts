@@ -14,16 +14,20 @@
 // status seams are installed at boot only when keyLanesEnabled(); every registered runner and
 // relay resolver refuses (or is never reached) while keyLanesActive() is false, so a server with
 // no key takes the 6.79.0 path byte for byte.
+import { randomUUID } from 'node:crypto'
 import { callClaudeStreaming } from './claude-bridge.js'
 import { runCodexKeyProfileTurn } from './codex-bridge.js'
 import { registerCodexKeyRelay, registerCodexKeyedThreadRecorder } from './codex-profile-home.js'
 import { keyCatalogPeekPrice } from './key-lanes-pricing.js'
 import { keyLanesActive, keyLanesEnabled, registerKeyLanesStatusProvider } from './key-lanes.js'
 import { registerKeyProfileEngine, type KeyProfileEngineRunner } from './key-profile-routing.js'
-import type { KeyRef } from './key-relay-contract.js'
+import type { KeyProfile, KeyRef, KeyRelay, RelayNonceBinding } from './key-relay-contract.js'
+import { KEY_NOTICE_ERROR_IDS, keyModelLabel, keyNoticeError, type KeyNoticeErrorId } from './key-notices.js'
+import { getPublicKey } from './key-store.js'
+import type { StreamCallbacks } from './claude-bridge.js'
 import { breakerScopeFor, classifyUpstreamStatus, countsTowardBreaker, redactSecrets } from './key-relay-errors.js'
 import { estimateReserveUsd, getSharedKeyMeter, tokensToUsd, type KeyRelayMeter } from './key-relay-meter.js'
-import { getKeyRelay, installKeyRelaySeams, type KeyRelayServer } from './key-relay.js'
+import { getKeyRelay, installKeyRelaySeams, KeyRelayRefusal, type KeyRelayServer, type RelayTurnFailure } from './key-relay.js'
 import { readKeySecretForRelay } from './key-store.js'
 import { keyedSessionIds, recordKeyedSession } from './keyed-sessions.js'
 import { registerLaneBRelay } from './lane-b-env.js'
@@ -31,18 +35,103 @@ import type { DirectRefusalKind, DirectRelay, DirectRelayPost, DirectRelayTurn, 
 
 /** The one relay, created on first keyed use with live catalog prices (P5) for the meter. */
 export function sharedKeyRelay(): KeyRelayServer {
-  return getKeyRelay({ priceFor: keyCatalogPeekPrice })
+  return getKeyRelay({ priceFor: keyCatalogPeekPrice, onTurnFailure: recordKeyTurnFailure })
+}
+
+// ── Turn failures: the key-notices line, never the CLI's raw error ───────────
+// The relay reports the plan 4.6 "ends the turn" rows (cap, 401, 402, model gone) for a turn id,
+// and issueTurn refuses a turn before spawn (breaker open, cap used, key gone). The CLI then
+// fails with its own wording ("API Error: 402 ..."). The Lane B runners below wrap onError so
+// the lens, the durable job and COS Control read the P8 line for that failure instead.
+
+interface KeyTurnFailure { kind: KeyNoticeErrorId; keyRef: KeyRef; scope?: 'key' | 'profile'; id?: string }
+const KEY_TURN_FAILURES_MAX = 256
+const turnFailures = new Map<string, KeyTurnFailure>()
+
+function rememberFailure(turnId: string, failure: KeyTurnFailure): void {
+  if (!turnId) return
+  turnFailures.delete(turnId)
+  turnFailures.set(turnId, failure)
+  while (turnFailures.size > KEY_TURN_FAILURES_MAX) {
+    const oldest = turnFailures.keys().next().value
+    if (oldest === undefined) break
+    turnFailures.delete(oldest)
+  }
+}
+
+/** The relay's onTurnFailure. */
+export function recordKeyTurnFailure(f: RelayTurnFailure): void {
+  const scope = f.kind === 'model_gone' ? 'profile' : 'key'
+  rememberFailure(f.turnId, { kind: f.kind, keyRef: f.keyRef, scope, id: scope === 'key' ? f.keyRef : f.profileId })
+}
+
+function refusalId(err: KeyRelayRefusal): KeyNoticeErrorId | null {
+  if (err.code === 'breaker_open') return 'breaker_open'
+  if (err.kind === 'lanes_inactive') return 'profile_off'
+  if (err.code === 'key_missing') return 'profile_removed'
+  return (KEY_NOTICE_ERROR_IDS as readonly string[]).includes(err.kind) ? err.kind as KeyNoticeErrorId : null
+}
+
+/** The P8 line for a turn the relay failed or refused, once (it is consumed), or null. */
+export function keyTurnFailureLine(turnId: string, profile: Pick<KeyProfile, 'label' | 'model'>, now: Date = new Date()): string | null {
+  const f = turnFailures.get(turnId)
+  if (!f) return null
+  turnFailures.delete(turnId)
+  // A counted failure that opened its breaker reads as the pause, not as one more rejection.
+  const paused = f.scope && f.id && f.kind !== 'breaker_open' && sharedKeyRelay().breakers.isOpen(f.scope, f.id)
+  const key = getPublicKey(f.keyRef)
+  return keyNoticeError(paused ? 'breaker_open' : f.kind, {
+    ...(key ? { keyKind: key.kind, capUsd: key.capUsd } : {}),
+    modelLabel: keyModelLabel(profile.model),
+    profileLabel: profile.label,
+    now,
+  })
+}
+
+/** The Lane B relay as the bridges see it: the shared relay, with pre-spawn refusals remembered. */
+function laneBRelayView(): KeyRelay {
+  const relay = sharedKeyRelay()
+  return {
+    issueTurn: async (binding: RelayNonceBinding, options) => {
+      try {
+        return await relay.issueTurn(binding, options)
+      } catch (err) {
+        const id = err instanceof KeyRelayRefusal ? refusalId(err) : null
+        if (id) rememberFailure(binding.turnId, { kind: id, keyRef: binding.keyRef })
+        throw err
+      }
+    },
+    revokeTurn: (turnId, reason) => relay.revokeTurn(turnId, reason),
+    revokeAll: reason => relay.revokeAll(reason),
+    port: () => relay.port(),
+    close: () => relay.close(),
+  }
+}
+
+/** onError reads the turn's key-notices line when the relay has one; onDone forgets it. */
+function withKeyFailureLines(callbacks: StreamCallbacks, turnId: string, profile: KeyProfile): StreamCallbacks {
+  turnFailures.delete(turnId)
+  return {
+    ...callbacks,
+    onError: error => callbacks.onError(keyTurnFailureLine(turnId, profile) ?? error),
+    onDone: (...args) => { turnFailures.delete(turnId); return callbacks.onDone(...args) },
+  }
 }
 
 // ── Runners (P6's engine seam) ───────────────────────────────────────────────
 
 /** Lane B Claude (P3): the profile's timeout tier for the clock, its model on `--model`. */
-export const runClaudeKeyProfileTurn: KeyProfileEngineRunner = (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) =>
-  callClaudeStreaming(query, sessionId, callbacks, turn.profile.timeoutTier, images, reference, globalMsgNum, { ...options, keyProfile: turn.profile })
+export const runClaudeKeyProfileTurn: KeyProfileEngineRunner = (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) => {
+  // The relay keys failures by turn id, so the turn gets one here when the caller has none.
+  const turnId = options?.turnId ?? randomUUID()
+  return callClaudeStreaming(query, sessionId, withKeyFailureLines(callbacks, turnId, turn.profile), turn.profile.timeoutTier, images, reference, globalMsgNum, { ...options, turnId, keyProfile: turn.profile })
+}
 
 /** Lane B Codex (P4). */
-export const runCodexKeyTurn: KeyProfileEngineRunner = (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) =>
-  runCodexKeyProfileTurn(query, sessionId, callbacks, turn, images, reference, globalMsgNum, options)
+export const runCodexKeyTurn: KeyProfileEngineRunner = (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) => {
+  const turnId = options?.turnId ?? randomUUID()
+  return runCodexKeyProfileTurn(query, sessionId, withKeyFailureLines(callbacks, turnId, turn.profile), turn, images, reference, globalMsgNum, { ...options, turnId })
+}
 
 /** Lane C1 (P5). The module loads on the first direct turn, never at boot. */
 export const runDirectKeyTurn: KeyProfileEngineRunner = async (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) => {
@@ -167,8 +256,8 @@ let wired = false
 export function wireKeyLanes(): void {
   if (wired) return
   wired = true
-  registerLaneBRelay(() => sharedKeyRelay())
-  registerCodexKeyRelay(() => sharedKeyRelay())
+  registerLaneBRelay(() => laneBRelayView())
+  registerCodexKeyRelay(() => laneBRelayView())
   registerCodexKeyedThreadRecorder(thread => recordKeyedSession({ id: thread.id, engine: 'codex', profileId: thread.profileId, cosSessionId: thread.cosSessionId }))
   registerKeyProfileEngine('claude', runClaudeKeyProfileTurn)
   registerKeyProfileEngine('codex', runCodexKeyTurn)
@@ -182,4 +271,5 @@ export function wireKeyLanes(): void {
 export function __resetKeyLanesWiringForTests(): void {
   wired = false
   directRelay = null
+  turnFailures.clear()
 }

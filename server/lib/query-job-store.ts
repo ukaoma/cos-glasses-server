@@ -39,6 +39,7 @@ import {
   type QueryJobSteerState,
   type QueryJobTrailEntry,
 } from './query-job-types.js'
+import { keyAnswerJobFields, type QueryJobKeyAnswerFields } from './key-answer-fields.js'
 import {
   jobTrailTextChars,
   parseJobTrailEventData,
@@ -868,6 +869,7 @@ export class QueryJobStore {
       const outputImageStats = parseQueryJobOutputImageStats(patch.outputImageStats)
       if (outputImageStats) snapshot.outputImageStats = outputImageStats
       else delete snapshot.outputImageStats
+      Object.assign(snapshot, keyAnswerJobFields(patch))
       this.applyLinkage(snapshot, patch)
       delete snapshot.error
     } else if (record.type === 'failed' || record.type === 'canceled' || record.type === 'interrupted') {
@@ -1466,13 +1468,15 @@ export class QueryJobStore {
 
   async complete(
     jobId: string,
-    input: { text: string; attachments?: unknown; outputImageStats?: unknown } & QueryJobProviderLinkage,
+    input: { text: string; attachments?: unknown; outputImageStats?: unknown } & QueryJobProviderLinkage & QueryJobKeyAnswerFields,
   ): Promise<QueryJobMutationResult> {
     const response = boundedText(input.text, QUERY_JOB_LIMITS.terminalResponseChars)
     const partial = boundedText(input.text, QUERY_JOB_LIMITS.partialChars)
     const linkage = this.safeLinkage(input)
     const attachments = parseMediaAttachmentRefs(input.attachments)
     const outputImageStats = parseQueryJobOutputImageStats(input.outputImageStats)
+    // Key lanes (P11): {} unless a key profile answered, so a subscription record is unchanged.
+    const keyAnswer = keyAnswerJobFields(input)
     const completedAt = this.now().toISOString()
     return this.transition(jobId, 'completed', 'completed', {
       ...linkage,
@@ -1483,12 +1487,14 @@ export class QueryJobStore {
       partialTruncated: partial.truncated,
       attachments,
       ...(outputImageStats ? { outputImageStats } : {}),
+      ...keyAnswer,
     }, {
       ...linkage,
       response: response.text,
       responseTruncated: response.truncated,
       attachments,
       ...(outputImageStats ? { outputImageStats } : {}),
+      ...keyAnswer,
     })
   }
 
