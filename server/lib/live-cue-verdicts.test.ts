@@ -320,10 +320,10 @@ describe('history', () => {
   })
 
   it('the title is the saved one when known, else the logged capture title, resolved once per meeting and cached', () => {
-    titles = { meeting_b: { title: 'Pricing review with Silas', source: 'library' } }
+    titles = { meeting_b: { title: 'Pricing review with the team', source: 'library' } }
     const h = q()
     expect(h.cues.map(c => [c.title, c.titleSource])).toEqual([
-      ['G2 Recording 2026-10-19 1000', 'capture'], ['Pricing review with Silas', 'library'], ['G2 Recording 2026-10-19 1000', 'capture'], ['G2 Recording 2026-10-19 1000', 'capture']])
+      ['G2 Recording 2026-10-19 1000', 'capture'], ['Pricing review with the team', 'library'], ['G2 Recording 2026-10-19 1000', 'capture'], ['G2 Recording 2026-10-19 1000', 'capture']])
     expect(titleCalls).toBe(3)                                          // meeting_a, meeting_b, meeting_c
     q()
     expect(titleCalls).toBe(3)
