@@ -1,6 +1,6 @@
 {
   "name": "@gotcos/glasses-server",
-  "version": "6.79.0",
+  "version": "6.80.0",
   "description": "COS Glasses: self-hosted AI heads-up-display server for Even G2 smart glasses, powered by Claude Code, Codex, Cursor Agent CLI, or local Ollama",
   "type": "module",
   "bin": {
@@ -76,7 +76,11 @@
     "!server/scripts/key-lanes-p1-mutation-gate.mjs",
     "!server/scripts/key-lanes-p2-mutation-gate.mjs",
     "!server/scripts/key-lanes-p3-mutation-gate.mjs",
+    "!server/scripts/key-lanes-p4-mutation-gate.mjs",
+    "!server/scripts/key-lanes-p5-mutation-gate.mjs",
     "!server/scripts/key-lanes-p6-mutation-gate.mjs",
+    "!server/scripts/key-lanes-p8-mutation-gate.mjs",
+    "!server/scripts/key-lanes-mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",
     "!shared/**/*.test.ts",
