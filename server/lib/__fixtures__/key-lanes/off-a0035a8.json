@@ -12,7 +12,7 @@
     "mkdtemp suffixes under /tmp -> <MKDTEMP>",
     "credential-shaped env values: the fixed API token hash is named <sha256(API_TOKEN)>; every other value is minted per boot (hook and image tokens) -> <per-boot-secret>",
     "numeric fields named like measurements (uptime, *Ms, latency, duration, memory, pid, size, bytes, count, age) -> <MEASURED>",
-    "stdin: sha256 and byte count replaced by <sha256>/<bytes> (prompts carry run-time context); stdin mode kept",
+    "stdin: sha256 and length of the stdin text AFTER the normalizations above (so prompt and history changes fail the replay); stdin mode kept",
     "spawn records and Ollama requests sorted canonically (background callers interleave)",
     "data and HOME trees: path, type and mode only; ~/.claude and ~/.codex files: sha256 of the normalized text"
   ],
@@ -3487,9 +3487,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "agent",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4329,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:7db6ee1ed3588827c8ed"
     },
     {
       "argv": [
@@ -3542,9 +3542,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "agent",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4328,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:ba5c490a976044336e77"
     },
     {
       "argv": [
@@ -3597,9 +3597,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "agent",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4325,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:3483e53898c7ed091214"
     },
     {
       "argv": [
@@ -3652,9 +3652,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "agent",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4324,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:8013efb047568d2c5491"
     },
     {
       "argv": [
@@ -3963,9 +3963,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 26,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:7f9147ea8aa4ebe1e4d8"
     },
     {
       "argv": [
@@ -4018,9 +4018,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 27,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:dce8a2e659267330e054"
     },
     {
       "argv": [
@@ -4073,9 +4073,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 27,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:54ce84530b1a2795acbc"
     },
     {
       "argv": [
@@ -4128,9 +4128,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 26,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:9b2a2b061df6a2625a2d"
     },
     {
       "argv": [
@@ -4183,9 +4183,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 26,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:78d2a16690ebd78bd2b4"
     },
     {
       "argv": [
@@ -4238,9 +4238,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 25,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:f3951a31a60e0f7b91d3"
     },
     {
       "argv": [
@@ -4286,9 +4286,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 520,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:02ae5f53e317045330df"
     },
     {
       "argv": [
@@ -4332,9 +4332,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 5,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:b24d6d33736ecd5604a4"
     },
     {
       "argv": [
@@ -4378,9 +4378,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 5,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:b24d6d33736ecd5604a4"
     },
     {
       "argv": [
@@ -4424,9 +4424,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 5,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:b24d6d33736ecd5604a4"
     },
     {
       "argv": [
@@ -4470,9 +4470,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 5,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:b24d6d33736ecd5604a4"
     },
     {
       "argv": [
@@ -4516,9 +4516,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 5,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:b24d6d33736ecd5604a4"
     },
     {
       "argv": [
@@ -4573,9 +4573,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 27,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:810218437bf0b2698871"
     },
     {
       "argv": [
@@ -4630,9 +4630,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 28,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:f929cd3fa4e325118808"
     },
     {
       "argv": [
@@ -4687,9 +4687,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "claude",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 34,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:27aaf9ad5f61cdb58583"
     },
     {
       "argv": [
@@ -5219,9 +5219,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "codex",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4906,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:0e66e0236ae696372d0c"
     },
     {
       "argv": [
@@ -5272,9 +5272,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "codex",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4905,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:482d5216c42e34d0a95d"
     },
     {
       "argv": [
@@ -5325,9 +5325,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "codex",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4905,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:96d21fef4a48eaa79f89"
     },
     {
       "argv": [
@@ -5378,9 +5378,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "codex",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4906,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:fc0a4cd7485aa2a3ac53"
     },
     {
       "argv": [
@@ -5431,9 +5431,9 @@
         "__CF_USER_TEXT_ENCODING"
       ],
       "name": "codex",
-      "stdinBytes": "<bytes>",
+      "stdinBytes": 4912,
       "stdinMode": "eof",
-      "stdinSha256": "<sha256>"
+      "stdinSha256": "sha256:96c669de6704203dae6e"
     }
   ]
 }

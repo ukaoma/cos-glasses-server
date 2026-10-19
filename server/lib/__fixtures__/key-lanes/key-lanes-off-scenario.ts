@@ -478,8 +478,10 @@ export async function runScenario(): Promise<{ result: Record<string, unknown>; 
       cwd: norm.text(String(r.cwd)),
       envNames: KEY_LANES_ARG !== undefined ? (r.envNames as string[]).filter(n => n !== 'COS_KEY_LANES') : r.envNames,
       credentialHashes: creds,
-      stdinSha256: r.stdinSha256 === null ? null : '<sha256>',
-      stdinBytes: r.stdinBytes === null ? null : '<bytes>',
+      // QA G1: the prompt is compared, not masked: sha256 of the normalized stdin text.
+      // 80 bits, written so the id normalizers below leave it alone (they mask 24+ hex runs).
+      stdinSha256: typeof r.stdinText === 'string' ? `sha256:${sha256(norm.text(r.stdinText)).slice(0, 20)}` : null,
+      stdinBytes: typeof r.stdinText === 'string' ? norm.text(r.stdinText).length : null,
       stdinMode: r.stdinMode,
     }
   })
@@ -520,7 +522,7 @@ const HEADER = {
     'mkdtemp suffixes under /tmp -> <MKDTEMP>',
     'credential-shaped env values: the fixed API token hash is named <sha256(API_TOKEN)>; every other value is minted per boot (hook and image tokens) -> <per-boot-secret>',
     'numeric fields named like measurements (uptime, *Ms, latency, duration, memory, pid, size, bytes, count, age) -> <MEASURED>',
-    'stdin: sha256 and byte count replaced by <sha256>/<bytes> (prompts carry run-time context); stdin mode kept',
+    'stdin: sha256 and length of the stdin text AFTER the normalizations above (so prompt and history changes fail the replay); stdin mode kept',
     'spawn records and Ollama requests sorted canonically (background callers interleave)',
     'data and HOME trees: path, type and mode only; ~/.claude and ~/.codex files: sha256 of the normalized text',
   ],

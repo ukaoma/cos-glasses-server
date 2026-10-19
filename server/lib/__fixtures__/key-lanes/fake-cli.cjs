@@ -45,6 +45,8 @@ function record(stdinText, mode) {
     credentialHashes,
     stdinSha256: stdinText === null ? null : sha(stdinText),
     stdinBytes: stdinText === null ? null : Buffer.byteLength(stdinText),
+    // QA G1: the text itself, so the scenario can hash it AFTER normalizing run-time values.
+    stdinText,
     stdinMode: mode,
   }
   fs.writeFileSync(path.join(logDir, `spawn-${String(seq).padStart(6, '0')}.json`), JSON.stringify(rec))
