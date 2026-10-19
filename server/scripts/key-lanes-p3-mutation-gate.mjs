@@ -69,7 +69,8 @@ const mutations = [
   // ── Answer, history and audit fields ──
   m('exchange-stamped-with-tier', BRIDGE, ['const exchangeModel = keyProfile ? profilePreference(keyProfile.id) as unknown as ModelPreference : resolvedModel', 'const exchangeModel = resolvedModel'], BRIDGE_T),
   m('audit-key-fields-dropped', BRIDGE, ['      ...keyAuditFields,\n', ''], BRIDGE_T),
-  m('done-key-lane-dropped', BRIDGE, ['      ...(keyLane ? { keyLane } : {}),\n    })\n    if (terminalOwned === false) return', '    })\n    if (terminalOwned === false) return'], BRIDGE_T),
+  // P11: the done line now also carries the turn's usd (anchor re-pinned at integration).
+  m('done-key-lane-dropped', BRIDGE, ['      ...(keyLane ? { keyLane, ...keyUsdFields } : {}),\n    })\n    if (terminalOwned === false) return', '    })\n    if (terminalOwned === false) return'], BRIDGE_T),
   // ── No profile: the b7c620e spawn (G-off) can fail ──
   m('golden-lane-a-credential-stripped', BRIDGE, ['  delete env.CLAUDECODE\n  if (outputImagePublisher) Object.assign(env, outputImagePublisher.env)', '  delete env.CLAUDECODE\n  delete env.OPENROUTER_API_KEY\n  if (outputImagePublisher) Object.assign(env, outputImagePublisher.env)'], GOLDEN_T),
   m('golden-subscription-map-skipped', BRIDGE, ["      if (key.includes(':p:', cosSessionId.length)) continue\n", '      continue\n'], GOLDEN_T),

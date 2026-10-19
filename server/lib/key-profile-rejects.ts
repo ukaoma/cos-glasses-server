@@ -6,12 +6,13 @@
 // lanes are enabled. With lanes off, the input falls through to the site's existing closed
 // refusal, byte for byte as 6.79.0 answers it.
 import { keyLanesEnabled } from './key-lanes.js'
+import { KEY_LANE_REFUSAL_COPY } from './key-notices.js'
 import { isProfilePreference } from '../../shared/key-preference.js'
 
 /** Plan 5.2: morning brief and task dispatch. */
-export const KEY_PROFILE_SCHEDULED_REJECT = 'Key profiles cannot run scheduled briefs.'
+export const KEY_PROFILE_SCHEDULED_REJECT = KEY_LANE_REFUSAL_COPY.scheduled
 /** Plan 5.2: Work handoff requests and drafts, K1. */
-export const KEY_PROFILE_WORK_REJECT = 'Key sessions are not in Work yet.'
+export const KEY_PROFILE_WORK_REJECT = KEY_LANE_REFUSAL_COPY.workNotYet
 /** The error code the rejecting routes answer with. */
 export const KEY_PROFILE_REJECT_CODE = 'key_profile_not_allowed'
 

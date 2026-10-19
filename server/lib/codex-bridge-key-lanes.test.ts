@@ -377,3 +377,47 @@ describe('Lane B Codex refusals spawn nothing and never fall back to the subscri
     expect(state.spawns).toEqual([])
   })
 })
+
+describe('Lane B Codex: P11 wiring (answer fields, cost, one resume slot per lane)', () => {
+  const PLAIN_THREAD = '019f8888-9999-aaaa-bbbb-cccccccccccc'
+
+  it('a keyed answer carries lane, credential and the settled usd; a subscription answer none of them', async () => {
+    const { getSharedKeyMeter } = await import('./key-relay-meter.js')
+    const cb = cbs()
+    await keyedRun(profile(), cb, { turnId: 'turn-codex-usd' })
+    const meter = getSharedKeyMeter()
+    const r = meter.reserve({ keyRef: profile().keyRef, turnId: 'turn-codex-usd', estimateUsd: 0.01 })
+    if (!r.ok) throw new Error('reserve refused')
+    meter.settle({ reservationId: r.reservationId, usd: 0.0077, tokens: { input: 5, output: 5 } })
+    complete(state.spawns.at(-1)!, THREAD)
+    await flush()
+    const meta = cb.onDone.mock.calls[0][3]
+    expect(meta.keyLane).toEqual({ lane: 'key', credential: { kind: 'openrouter', ref: profile().keyRef, profileId: 'gpt-key' } })
+    expect(meta.usd).toBe(0.0077)
+    expect(state.audits.at(-1)).toMatchObject({ lane: 'key', usd: 0.0077 })
+    const plain = cbs()
+    await plainRun(plain)
+    complete(state.spawns.at(-1)!, PLAIN_THREAD)
+    await flush()
+    const plainMeta = plain.onDone.mock.calls[0][3]
+    expect('keyLane' in plainMeta).toBe(false)
+    expect('usd' in plainMeta).toBe(false)
+  })
+
+  it('a keyed turn never overwrites the subscription resume of the same session (and back)', async () => {
+    await plainRun()
+    complete(state.spawns.at(-1)!, PLAIN_THREAD)
+    await flush()
+    await keyedRun()
+    complete(state.spawns.at(-1)!, THREAD)
+    await flush()
+    await plainRun()
+    const back = state.spawns.at(-1)!
+    expect(back.args).toContain(PLAIN_THREAD)
+    expect(back.args).not.toContain(THREAD)
+    back.child.emit('close', 0, null)
+    await flush()
+    await keyedRun()
+    expect(state.spawns.at(-1)!.args).toContain(THREAD)
+  })
+})

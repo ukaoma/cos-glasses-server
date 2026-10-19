@@ -408,3 +408,41 @@ describe('Lane B Claude: refusals spawn nothing and never fall back to the subsc
     expect(state.removed).toBe(removedBefore + 1)
   })
 })
+
+describe('Lane B Claude: P11 wiring (per-answer cost, steer abort)', () => {
+  it('a keyed answer carries what the relay settled for its turn as usd, in done and the audit row', async () => {
+    const { getSharedKeyMeter } = await import('./key-relay-meter.js')
+    state.audit.length = 0
+    const callbacks = cb()
+    await bridge.callClaudeStreaming('What changed?', 'usd-k', callbacks, 'opus', undefined, undefined, undefined, { lightweight: true, keyProfile: profile, turnId: 'turn-usd-1' } as any)
+    // The relay settles the child's request before the CLI prints its result.
+    const meter = getSharedKeyMeter()
+    const r = meter.reserve({ keyRef: key.ref, turnId: 'turn-usd-1', estimateUsd: 0.01 })
+    if (!r.ok) throw new Error('reserve refused')
+    meter.settle({ reservationId: r.reservationId, usd: 0.0421, tokens: { input: 10, output: 20 } })
+    finish(state.children.at(-1))
+    await settle()
+    const meta = callbacks.onDone.mock.calls[0][3]
+    expect(meta.usd).toBe(0.0421)
+    expect(meta.keyLane).toMatchObject({ lane: 'key' })
+    expect(state.audit.at(-1)).toMatchObject({ profile: 'sonnet-key', lane: 'key', usd: 0.0421 })
+    // A subscription answer carries no usd.
+    const a = await turn('usd-a', {}, 'opus')
+    expect('usd' in a.callbacks.onDone.mock.calls[0][3]).toBe(false)
+  })
+
+  it('a steer abort (written steers no result covered) revokes the turn nonce with steer_abort', async () => {
+    const { SteerPort } = await import('./claude-steer.js')
+    const port = new SteerPort({ onIncluded: vi.fn(), onDelivered: vi.fn(), onFolded: vi.fn(), onCheckpoint: vi.fn() })
+    const callbacks = cb()
+    await bridge.callClaudeStreaming('Read the README.', 'steer-abort-k', callbacks, 'opus', undefined, undefined, undefined, { lightweight: true, keyProfile: profile, steer: port } as any)
+    const child = state.children.at(-1)
+    await vi.waitFor(() => expect(child.stdin.write).toHaveBeenCalled())
+    const handle = relayLog.issued.at(-1)!.handle
+    expect(port.offer({ steerId: '22222222-2222-4222-8222-222222222222', text: 'also the tests' })).toBe('written')
+    child.stdout.emit('data', Buffer.from(`${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Done.' } } })}\n${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '' })}\n`))
+    await vi.waitFor(() => expect(handle.revoke).toHaveBeenCalledWith('steer_abort'))
+    child.emit('close', null)
+    await settle()
+  })
+})

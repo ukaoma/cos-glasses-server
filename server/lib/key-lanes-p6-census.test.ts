@@ -60,7 +60,7 @@ const PARSE_PREFERENCE_ALLOWED = new Set([
 
 export const CENSUS: CensusRow[] = [
   ["server/lib/claude-bridge.ts", "isClaudeModel", 1, "if (sessionModel && isClaudeModel(sessionModel)) {", "closed", "P3 owns; a profile session reads null from getSessionModel"],
-  ["server/lib/claude-bridge.ts", "isClaudeModel", 1, "?? (sessionModel && isClaudeModel(sessionModel) ? sessionModel : DEFAULT_MODEL)", "closed", "P3 owns; a profile session reads null from getSessionModel"],
+  ["server/lib/claude-bridge.ts", "isClaudeModel", 1, "?? (sessionModel && isClaudeModel(sessionModel) ? sessionModel : DEFAULT_MODEL))", "closed", "P3 owns (P3 wrapped the line in the keyed ternary; text re-pinned by P11); a profile session reads null from getSessionModel"],
   ["server/lib/claude-steer.ts", "normalizeModelPreference", 2, "return normalizeModelPreference(model) ?? sessionModel ?? normalizeModelPreference(envDefault) ?? DEFAULT_MODEL", "closed", "resolveRunModel / providerOfModel stay closed"],
   ["server/lib/claude-steer.ts", "isOllamaModel", 1, "if (isOllamaModel(model)) return 'ollama'", "closed", "resolveRunModel / providerOfModel stay closed"],
   ["server/lib/claude-steer.ts", "isCursorModel", 1, "if (isCursorModel(model)) return 'cursor'", "closed", "resolveRunModel / providerOfModel stay closed"],

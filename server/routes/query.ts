@@ -20,6 +20,7 @@ import {
   maintenanceErrorPayload,
 } from '../lib/maintenance-lifecycle.js'
 import { currentMessageEra, LEGACY_MESSAGE_ERA } from '../lib/message-era.js'
+import { keyAnswerDoneFields } from '../lib/key-answer-fields.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -202,6 +203,7 @@ queryRouter.post('/query', async (req, res) => {
             const { outputAttachments: _outputAttachments, ...runMetadata } = metadata ?? {}
             const payload = {
               text: fullText, sessionId: streamSessionId, model: keyTurn ? keyTurn.binding : model, cliSessionId, ...runMetadata,
+              ...keyAnswerDoneFields(runMetadata),
               ...(attachments.length > 0 ? { attachments } : {}),
             }
             res.write(`event: done\ndata: ${JSON.stringify(payload)}\n\n`)

@@ -5,6 +5,7 @@ import {
   normalizeModelPreference,
   type CodexModelPreference,
 } from '../../shared/model-preference.js'
+import { isKeyProfileId } from '../../shared/key-preference.js'
 
 export const CODEX_ENGINE_SESSION_TTL_MS = 2 * 60 * 60_000
 
@@ -21,6 +22,12 @@ export interface CodexEngineSession {
   lastUsedAt: number
   expiresAt: string
   engineFingerprint: string
+  /**
+   * Key lanes (P11): the key profile this thread runs under. Its own slot, so a keyed turn and a
+   * subscription turn of one COS session never overwrite each other's resume. Absent on every
+   * subscription row, which keeps its 6.79.0 key and bytes.
+   */
+  profileId?: string
 }
 
 interface CodexEngineSessionFile {
@@ -28,8 +35,12 @@ interface CodexEngineSessionFile {
   savedAt: string
 }
 
-function sessionKey(cosSessionId: string, model: CodexModelPreference): string {
-  return `${cosSessionId}:${model}`
+function sessionKey(cosSessionId: string, model: CodexModelPreference, profileId?: string): string {
+  return profileId ? `${cosSessionId}:${model}:profile:${profileId}` : `${cosSessionId}:${model}`
+}
+
+function slotProfile(raw: unknown): string | undefined {
+  return isKeyProfileId(raw) ? raw : undefined
 }
 
 export function getCodexEngineSessionPath(): string {
@@ -58,7 +69,8 @@ function readStore(): CodexEngineSessionFile {
         typeof raw?.lastUsedAt !== 'number' ||
         typeof raw?.expiresAt !== 'string'
       ) continue
-      const key = sessionKey(raw.cosSessionId, model)
+      if (raw.profileId !== undefined && !slotProfile(raw.profileId)) continue
+      const key = sessionKey(raw.cosSessionId, model, slotProfile(raw.profileId))
       const normalized = { ...raw, key, model } as CodexEngineSession
       const prior = sessions[key]
       if (!prior || normalized.lastUsedAt > prior.lastUsedAt) sessions[key] = normalized
@@ -95,12 +107,13 @@ export function getCodexEngineSession(input: {
   cwd: string
   trustMode: CodexTrustMode
   engineFingerprint?: string
+  profileId?: string
 }): CodexEngineSession | null {
   const { engineFingerprint = '', ...rest } = input
   const store = readStore()
   const now = Date.now()
   const sessions = pruneExpired(store.sessions, now)
-  const existing = sessions[sessionKey(rest.cosSessionId, rest.model)]
+  const existing = sessions[sessionKey(rest.cosSessionId, rest.model, slotProfile(rest.profileId))]
   if (!existing) {
     if (Object.keys(sessions).length !== Object.keys(store.sessions).length) {
       writeStore({ sessions, savedAt: new Date().toISOString() })
@@ -120,11 +133,13 @@ export function saveCodexEngineSession(input: {
   trustMode: CodexTrustMode
   now?: number
   engineFingerprint?: string
+  profileId?: string
 }): CodexEngineSession {
   const now = input.now ?? Date.now()
   const store = readStore()
   const sessions = pruneExpired(store.sessions, now)
-  const key = sessionKey(input.cosSessionId, input.model)
+  const profileId = slotProfile(input.profileId)
+  const key = sessionKey(input.cosSessionId, input.model, profileId)
   const previous = sessions[key]
   const session: CodexEngineSession = {
     key,
@@ -137,13 +152,18 @@ export function saveCodexEngineSession(input: {
     lastUsedAt: now,
     expiresAt: expiresAtFrom(now),
     engineFingerprint: input.engineFingerprint ?? '',
+    ...(profileId ? { profileId } : {}),
   }
   sessions[key] = session
   writeStore({ sessions, savedAt: new Date().toISOString() })
   return session
 }
 
-export function clearCodexEngineSession(cosSessionId: string, model?: CodexModelPreference): number {
+/**
+ * With a model, clears that model's slot of one lane only: the subscription slot, or with
+ * `profileId` that profile's slot. Without a model (deleting the COS session), every slot.
+ */
+export function clearCodexEngineSession(cosSessionId: string, model?: CodexModelPreference, profileId?: string): number {
   const store = readStore()
   const sessions = pruneExpired(store.sessions)
   let removed = 0
@@ -151,6 +171,7 @@ export function clearCodexEngineSession(cosSessionId: string, model?: CodexModel
     const session = sessions[key]
     if (session.cosSessionId !== cosSessionId) continue
     if (model && session.model !== model) continue
+    if (model && (session.profileId ?? undefined) !== slotProfile(profileId)) continue
     delete sessions[key]
     removed += 1
   }

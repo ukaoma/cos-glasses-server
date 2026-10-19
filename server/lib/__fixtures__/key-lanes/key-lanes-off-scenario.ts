@@ -33,6 +33,10 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..', '..', '..', '..')
 const API_TOKEN = 'kl-golden-api-token-0000000000000000'
+// P11 (K1 replay): `--key-lanes <value>` sets COS_KEY_LANES on the server, and only then is that one
+// name left out of each spawn's recorded env names (the switch itself, not a code path). Without
+// the flag the recording is exactly K0's.
+const KEY_LANES_ARG = (() => { const i = process.argv.indexOf('--key-lanes'); return i >= 0 ? process.argv[i + 1] : undefined })()
 
 function argOf(name: string): string | undefined {
   const i = process.argv.indexOf(name)
@@ -218,6 +222,7 @@ function serverEnv(w: World, ports: { http: number; https: number; ollama: numbe
     COS_OLLAMA_HOST: `http://127.0.0.1:${ports.ollama}`,
     COS_TTS_LOCAL_DISABLE: '1',
     KL_FAKE_CLI_LOG: w.log,
+    ...(KEY_LANES_ARG !== undefined ? { COS_KEY_LANES: KEY_LANES_ARG } : {}),
   }
 }
 
@@ -464,13 +469,14 @@ export async function runScenario(): Promise<{ result: Record<string, unknown>; 
   const normRecs = recs.map(r => {
     const creds: Record<string, string> = {}
     for (const [k, h] of Object.entries((r.credentialHashes ?? {}) as Record<string, string>)) {
+      if (KEY_LANES_ARG !== undefined && k === 'COS_KEY_LANES') continue
       creds[k] = h === sha256(API_TOKEN) ? '<sha256(API_TOKEN)>' : '<per-boot-secret>'
     }
     return {
       name: r.name,
       argv: norm.value(r.argv),
       cwd: norm.text(String(r.cwd)),
-      envNames: r.envNames,
+      envNames: KEY_LANES_ARG !== undefined ? (r.envNames as string[]).filter(n => n !== 'COS_KEY_LANES') : r.envNames,
       credentialHashes: creds,
       stdinSha256: r.stdinSha256 === null ? null : '<sha256>',
       stdinBytes: r.stdinBytes === null ? null : '<bytes>',

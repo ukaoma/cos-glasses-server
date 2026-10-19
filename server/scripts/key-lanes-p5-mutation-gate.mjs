@@ -48,7 +48,8 @@ const mutations = [
   m('retry-cap-raised', BRIDGE, ['export const DIRECT_MAX_RETRIES = 2', 'export const DIRECT_MAX_RETRIES = 5'], BRIDGE_T),
   m('long-retry-after-waited', BRIDGE, ['          if (retryAfter !== null && retryAfter > DIRECT_RETRY_AFTER_MAX_MS) {', '          if (false) {'], BRIDGE_T),
   m('out-of-credit-retried', BRIDGE, ["new Set(['rate_limited', 'upstream_error', 'network_error'])", "new Set(['rate_limited', 'upstream_error', 'network_error', 'out_of_credit'])"], BRIDGE_T),
-  m('model-gone-not-classified', BRIDGE, ["  if (status === 400 && MODEL_GONE_RE.test(bodyText)) return 'model_gone'\n", ''], BRIDGE_T),
+  // P11: the direct lane now uses P2's classifier (key-relay-errors.ts), so the mutant targets it there.
+  m('model-gone-not-classified', 'server/lib/key-relay-errors.ts', ["  if (status === 400 && MODEL_GONE_RE.test(bodyText)) return 'model_gone'\n", ''], BRIDGE_T),
   // ── Metering ──
   m('usage-not-marked-measured', BRIDGE, ['      usageTotals.measured = true\n', ''], BRIDGE_T),
   m('cut-stream-settled-as-free', BRIDGE, ['    } else {\n      settle(null)\n    }', '    } else {\n      settle({ input: 0, output: 0 })\n    }'], BRIDGE_T),

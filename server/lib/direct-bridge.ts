@@ -56,6 +56,9 @@ import { historyToOllamaMessages } from './ollama-bridge.js'
 import { TOOL_HONESTY_CLAUSE, UNTRUSTED_CONTENT_CLAUSE } from './claude-tool-access.js'
 import { ollamaTrailOutcome, ollamaTrailStep, type JobTrailDraft } from './job-trail.js'
 import { keyLanesActive } from './key-lanes.js'
+import * as keyNotices from './key-notices.js'
+import { KEY_LANE_REFUSAL_COPY } from './key-notices.js'
+import { classifyUpstreamStatus } from './key-relay-errors.js'
 import { getPublicKey } from './key-store.js'
 import { logTokenAudit } from './token-audit.js'
 import { getKeyCatalog, keyModelPrice, keyModelSupportsTools, type KeyCatalog } from './key-catalog.js'
@@ -209,11 +212,9 @@ export function directRelayRegistered(): boolean {
 // ── Copy (P8 key-notices.ts) ─────────────────────────────────────────────────
 
 /**
- * The part of P8's `server/lib/key-notices.ts` this lane uses, by its exported names and shapes
- * (read from claude/key-lanes-k1-p8 at 8385336). P8 is the one source of key-lane strings.
- * TODO(P11): key-notices.ts is not on this package's base (963fe25). After the merge, replace
- * loadDirectNotices with a static `import * as notices from './key-notices.js'` and delete this
- * interface in favour of P8's own types.
+ * The part of P8's `server/lib/key-notices.ts` this lane uses, by its exported names and shapes.
+ * P8 is the one source of key-lane strings; the module is imported statically (P11) and these
+ * types are kept as the narrow seam tests inject through `options.notices`.
  */
 export type DirectNoticeVariant = 'c1-tools-off' | 'c1-tools-on'
 export interface DirectNoticeContext {
@@ -245,53 +246,34 @@ export interface DirectNoticeCopy {
   keyModelLabel(slug: string): string
 }
 
-/** Resolved at run time so this package type-checks before P8 lands. */
-const KEY_NOTICES_MODULE = './key-notices.js'
-
+/** P8's module, imported statically since the P11 merge (it is pure: no file, env, clock or socket). */
 export async function loadDirectNotices(): Promise<DirectNoticeCopy | null> {
-  try {
-    const mod = await import(/* @vite-ignore */ KEY_NOTICES_MODULE) as Partial<DirectNoticeCopy>
-    if (typeof mod.keyLaneNotice === 'function' && typeof mod.keyNoticeError === 'function' && typeof mod.keyModelLabel === 'function') {
-      return mod as DirectNoticeCopy
-    }
-  } catch { /* absent before the P11 merge */ }
-  return null
+  return keyNotices
 }
 
-/**
- * Lines P8 does not carry yet (direct-only conditions). TODO(P11): move into key-notices.ts.
- * No em dashes, no arrows, no sign-in wording.
- */
+/** The direct-only lines, from key-notices.ts (P11 moved them there). */
 export const DIRECT_COPY = {
-  copyUnavailable: 'Your key could not answer this one.',
-  relayUnavailable: 'Your key could not start this turn. Your plan was not used.',
-  wrongEngine: 'This key profile is not a direct profile. Pick a model.',
-  noEndpoint: 'This key cannot answer direct. Pick a model.',
-  scheduled: 'Key profiles cannot run scheduled briefs.',
-  textOnly: 'Direct key answers are text only. Remove the photo and retry.',
-  empty: 'The model finished without an answer. Your plan was not used.',
-  toolCap: 'The model hit its tool round cap without an answer. Ask a narrower question.',
-  cancelled: 'That answer was cancelled.',
+  copyUnavailable: KEY_LANE_REFUSAL_COPY.directCopyUnavailable,
+  relayUnavailable: KEY_LANE_REFUSAL_COPY.relayUnavailable,
+  wrongEngine: KEY_LANE_REFUSAL_COPY.wrongEngineDirect,
+  noEndpoint: KEY_LANE_REFUSAL_COPY.directNoEndpoint,
+  scheduled: KEY_LANE_REFUSAL_COPY.scheduled,
+  textOnly: KEY_LANE_REFUSAL_COPY.directTextOnly,
+  empty: KEY_LANE_REFUSAL_COPY.directEmpty,
+  toolCap: KEY_LANE_REFUSAL_COPY.directToolCap,
+  cancelled: KEY_LANE_REFUSAL_COPY.directCancelled,
 } as const
 
 // ── Status mapping (plan 4.6) ────────────────────────────────────────────────
 
 /**
- * Same rows and model-gone pattern as P2's classifyUpstreamStatus (key-relay-errors.ts, not on
- * this base). TODO(P11): import P2's after the merge. Any other non-2xx (403 moderation, a plain
- * 400) ends the turn with the upstream-error line, which never counts toward a breaker.
+ * P2's classifyUpstreamStatus (key-relay-errors.ts), the one model-gone pattern. Any other non-2xx
+ * it passes through (403 moderation, a plain 400) ends the turn with the upstream-error line, which
+ * never counts toward a breaker.
  */
-const MODEL_GONE_RE = /model[^\n]{0,80}(not found|does not exist|not available|no longer|is not a valid|invalid model)|no endpoints found|unknown model|not a valid model/i
-
-/** An upstream HTTP status as a relay failure kind, or null for a 2xx. */
 export function classifyDirectStatus(status: number, bodyText = ''): RelayFailureKind | null {
   if (status >= 200 && status < 300) return null
-  if (status === 401) return 'key_rejected'
-  if (status === 402) return 'out_of_credit'
-  if (status === 404) return 'model_gone'
-  if (status === 400 && MODEL_GONE_RE.test(bodyText)) return 'model_gone'
-  if (status === 429) return 'rate_limited'
-  return 'upstream_error'
+  return classifyUpstreamStatus(status, bodyText) ?? 'upstream_error'
 }
 
 const RETRYABLE: ReadonlySet<DirectRefusalKind> = new Set(['rate_limited', 'upstream_error', 'network_error'])
@@ -508,8 +490,7 @@ export async function callDirectStreaming(
     origin: endpointOrigin(endpoint),
     query,
   })
-  // Typed wider than ModelRunMetadata on purpose: P3 adds `keyLane` to it on its branch.
-  const startMeta: ModelRunMetadata & { keyLane: AnswerKeyFields; directRunId: string } = {
+  const startMeta: ModelRunMetadata = {
     clientJobId: options?.clientJobId,
     generation: options?.generation,
     keyLane,
@@ -621,7 +602,7 @@ export async function callDirectStreaming(
     notifyExchange(sid, query, text)
     let keyNotice: DirectNoticeView | undefined
     try { keyNotice = notices.keyLaneNotice(noticeContext({ costUsd: usageTotals.usd }), options?.noticeSeen) } catch { /* display only */ }
-    const doneMeta: ModelRunMetadata & { keyLane: AnswerKeyFields; directRunId: string; keyNotice?: DirectNoticeView; usd: number } = {
+    const doneMeta: ModelRunMetadata & { keyNotice?: DirectNoticeView } = {
       clientJobId: options?.clientJobId,
       generation: options?.generation,
       keyLane,

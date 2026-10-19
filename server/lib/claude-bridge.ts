@@ -70,6 +70,7 @@ import { profilePreference } from '../../shared/key-preference.js'
 import type { AnswerKeyFields, KeyKind, KeyProfile, RelayTurnHandle } from './key-relay-contract.js'
 import { applyLaneBClaudeEnv, LANE_B_COPY, laneBClaudePreflight, laneBRelay } from './lane-b-env.js'
 import { recordKeyedSession } from './keyed-sessions.js'
+import { getSharedKeyMeter } from './key-relay-meter.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -342,6 +343,10 @@ export interface ModelRunMetadata {
   outputImageStats?: RunOutputImageCollectionStats
   /** Key lanes (plan v4 3.1): present only on a keyed turn. The `model` beside it is then the timeout tier. */
   keyLane?: AnswerKeyFields
+  /** Key lanes (P11): what this keyed answer cost on the key, settled by the relay. Keyed turns only. */
+  usd?: number
+  /** Key lanes (P5): the direct lane's run ledger id. Direct turns only. */
+  directRunId?: string
 }
 
 /** Public-safe provider launch metadata for durable job coordination. It
@@ -680,13 +685,14 @@ export async function callClaudeStreaming(
   // Key lanes: one nonce per turn from the relay (P2 contract), then the child env points at it.
   // Only the child's copy is written. A relay that cannot issue ends the turn before spawn.
   let keyTurn: RelayTurnHandle | null = null
+  const keyTurnId = keyProfile ? options?.turnId ?? randomUUID() : null
   if (keyProfile) {
     try {
       const relay = await laneBRelay()
       keyTurn = await relay.issueTurn({
         keyRef: keyProfile.keyRef,
         profileId: keyProfile.id,
-        turnId: options?.turnId ?? randomUUID(),
+        turnId: keyTurnId!,
         sessionId: sid,
         engine: 'claude',
         allowedModel: keyProfile.model,
@@ -906,6 +912,8 @@ export async function callClaudeStreaming(
     // Token audit — log every completed claude -p call
     const totalMs = Date.now() - startTime
     const inputEstimate = systemPrompt.length + fullQuery.length + contextPrompt.length
+    // Key lanes (P11): this turn's settled spend on the key. Keyed turns only.
+    const keyUsdFields = keyTurnId ? { usd: Math.round(getSharedKeyMeter().turnSettledUsd(keyTurnId) * 1e6) / 1e6 } : {}
     logTokenAudit({
       source: options?.lightweight ? 'g2-voice' : 'g2-query',
       model: resolvedModel,
@@ -914,6 +922,7 @@ export async function callClaudeStreaming(
       durationMs: totalMs,
       caller: options?.lightweight ? 'voice_query' : 'full_query',
       ...keyAuditFields,
+      ...keyUsdFields,
     })
 
     finishClaudeRun(run.runId, {
@@ -929,7 +938,7 @@ export async function callClaudeStreaming(
       generation: options?.generation,
       ...(outputAttachments.length > 0 ? { outputAttachments } : {}),
       ...(outputImageStats && outputImageStats.published > 0 ? { outputImageStats } : {}),
-      ...(keyLane ? { keyLane } : {}),
+      ...(keyLane ? { keyLane, ...keyUsdFields } : {}),
     })
     if (terminalOwned === false) return
 

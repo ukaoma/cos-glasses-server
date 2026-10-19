@@ -131,6 +131,7 @@ import { isValidNativeThreadId } from '../lib/native-thread-id.js'
 import { FORK_PROVIDER_FAILURES, type ForkProviderFailure } from '../lib/fork-thread.js'
 import { CLIENT_FORK_ID_RE, ForkJobLedger, type ForkJobRow } from '../lib/fork-job-ledger.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
+import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
@@ -652,6 +653,9 @@ export type WriteRefusal =
   // person said stop. Deliberately NOT a fence (plan validation B2): the next Continue
   // must work, and it re-reads the head.
   | 'turn_cancelled'
+  // Key lanes (P3, wired by P11): the thread ran on a key profile. Refused before any spawn, with
+  // the same 409 body every other keyed entry point answers (keyed-sessions.ts).
+  | 'keyed_session'
   // ------------------------------------------------------------------- fork
   //
   // Fork gets its OWN members rather than reusing the ones above, and the reason
@@ -739,6 +743,7 @@ export const WRITE_REASON_COPY: Record<Exclude<WriteRefusal, OccupancyReason>, s
     'COS could not run this turn. Nothing was sent. You can try again.',
   turn_cancelled:
     'Run cancelled.',
+  keyed_session: KEYED_SESSION_REFUSAL.message,
 
   // Fork copy. No sentence here may end with "Fork it instead" — this IS the fork,
   // and pointing a failed fork back at itself is a dead end rather than an action.
@@ -2698,6 +2703,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return refuseFork('fork_orphan_possible', { orphanPossible: true })
       }
 
+      // Key lanes: fork-thread refused a keyed source before any spawn (P3). The exact keyed 409.
+      if (raw && typeof raw === 'object' && (raw as { ok?: unknown }).ok === false && (raw as { reason?: unknown }).reason === 'keyed_session') {
+        return refuseFork('keyed_session', { ...KEYED_SESSION_REFUSAL, retryable: false })
+      }
       const outcome = classifyFork(raw, threadIdParam)
       {
         // 6.62.1: one line per attempt. On 2026-10-05 a fork's real cause existed only
@@ -3456,6 +3465,12 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         if (reread !== null) guard.acknowledgeHead(bindingId, reread.digest)
         console.log(`[agent-session-bindings] turn cancelled provider=${binding.provider} turnId=${turnId} bindingId=${bindingId} detail=${adapterEvidence.adapterDetail ?? 'none'} childReaped=${adapterEvidence.childReaped ?? 'unknown'} durationMs=${adapterEvidence.durationMs ?? 'unknown'} spawnCount=${recordedPids.length}`)
         return refuseTurn('turn_cancelled', { retryable: false, deliveryState: 'cancelled' })
+      }
+
+      // Key lanes: the adapter refused a keyed thread before any spawn (P3). The exact keyed 409.
+      if (adapterEvidence.adapterReason === 'keyed_session') {
+        spawnMay = false // refused before any spawn
+        return refuseTurn('keyed_session', { ...KEYED_SESSION_REFUSAL, retryable: false })
       }
 
       if (delivery.kind === 'aborted') {

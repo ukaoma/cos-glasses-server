@@ -18,7 +18,7 @@ import { randomBytes } from 'node:crypto'
 import { getPublicKey } from './key-store.js'
 import type { KeyLane, KeyMeter, KeyRef } from './key-relay-contract.js'
 import { appendKeyLedgerRow, ledgerSpentUsd, utcDay } from './key-ledger.js'
-import { CURATED_KEY_MODELS } from '../routes/key-lanes.js'
+import { KEY_CATALOG_CURATED } from './key-catalog.js'
 
 export interface ModelPrice {
   inUsdPerM: number
@@ -32,10 +32,12 @@ export interface ModelPrice {
 export const FALLBACK_PRICE: ModelPrice = { inUsdPerM: 15, outUsdPerM: 75 }
 export const RESERVE_MAX_OUTPUT_TOKENS = 4096
 export const BYTES_PER_TOKEN_ESTIMATE = 4
+/** Turns whose settled spend the meter remembers (oldest dropped first). */
+export const TURN_SPEND_MAX = 512
 
 /** Curated prices (plan D10), then the fallback. P5's live catalog can be passed in instead. */
 export function defaultPriceFor(model: string): ModelPrice {
-  const curated = CURATED_KEY_MODELS.find(m => m.id === model)
+  const curated = KEY_CATALOG_CURATED.find(m => m.id === model)
   return curated ? { inUsdPerM: curated.inUsdPerM, outUsdPerM: curated.outUsdPerM } : FALLBACK_PRICE
 }
 
@@ -96,6 +98,11 @@ export class KeyRelayMeter implements KeyMeter {
   private readonly log: (line: string) => void
   private readonly days = new Map<KeyRef, DaySpend>()
   private readonly reservations = new Map<string, Reservation>()
+  /** P11: settled spend per turn id (newest TURN_SPEND_MAX), so a keyed answer can carry its cost. */
+  private readonly turnSpend = new Map<string, number>()
+  /** P11 (plan 4.5 "Cap value"): the cap Control last saved per key, this boot. */
+  private readonly savedCaps = new Map<KeyRef, number>()
+  private readonly capMismatchLogged = new Set<KeyRef>()
 
   constructor(options: KeyRelayMeterOptions = {}) {
     this.now = options.now ?? Date.now
@@ -125,8 +132,47 @@ export class KeyRelayMeter implements KeyMeter {
   }
 
   capUsd(keyRef: KeyRef): number | null {
-    const cap = this.capOf(keyRef)
-    return typeof cap === 'number' && Number.isFinite(cap) ? cap : null
+    const raw = this.capOf(keyRef)
+    const cap = typeof raw === 'number' && Number.isFinite(raw) ? raw : null
+    // A key that is gone always refuses, whatever was saved before.
+    if (cap === null) return null
+    // Plan 4.5: the server keeps Control's last saved value. A cap that changed in the file by any
+    // other path (a Lane A turn editing provider-keys.json) is ignored and logged once. The first
+    // value seen this boot is the baseline until Control saves one.
+    const saved = this.savedCaps.get(keyRef)
+    if (saved === undefined) {
+      this.savedCaps.set(keyRef, cap)
+      return cap
+    }
+    if (saved !== cap && !this.capMismatchLogged.has(keyRef)) {
+      this.capMismatchLogged.add(keyRef)
+      this.log(`[key-relay] cap for ${keyRef} changed outside COS Control; keeping the saved cap`)
+    }
+    return saved
+  }
+
+  /** P11: the key-lanes routes call this when COS Control saves a key or changes its cap. */
+  noteSavedCap(keyRef: KeyRef, capUsd: number): void {
+    if (typeof capUsd !== 'number' || !Number.isFinite(capUsd) || capUsd <= 0) return
+    this.savedCaps.set(keyRef, capUsd)
+    this.capMismatchLogged.delete(keyRef)
+  }
+
+  /** P11: what this turn has settled so far on any key (0 when nothing settled). */
+  turnSettledUsd(turnId: string): number {
+    return this.turnSpend.get(turnId) ?? 0
+  }
+
+  private addTurnSpend(turnId: string, usd: number): void {
+    if (!turnId) return
+    const prior = this.turnSpend.get(turnId) ?? 0
+    this.turnSpend.delete(turnId)
+    this.turnSpend.set(turnId, prior + usd)
+    while (this.turnSpend.size > TURN_SPEND_MAX) {
+      const oldest = this.turnSpend.keys().next().value
+      if (oldest === undefined) break
+      this.turnSpend.delete(oldest)
+    }
   }
 
   openReservationsUsd(keyRef: KeyRef): number {
@@ -177,6 +223,7 @@ export class KeyRelayMeter implements KeyMeter {
     this.reservations.delete(input.reservationId)
     const usd = Number.isFinite(input.usd) && input.usd > 0 ? input.usd : 0
     this.today(r.keyRef).settledUsd += usd
+    this.addTurnSpend(r.turnId, usd)
     this.write({
       ts: new Date(this.now()).toISOString(), keyRef: r.keyRef, profile: r.profile, lane: r.lane, turnId: r.turnId,
       ...(input.generationId ? { generationId: input.generationId } : {}),
@@ -211,6 +258,9 @@ export class KeyRelayMeter implements KeyMeter {
   clear(): void {
     this.days.clear()
     this.reservations.clear()
+    this.turnSpend.clear()
+    this.savedCaps.clear()
+    this.capMismatchLogged.clear()
   }
 }
 

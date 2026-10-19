@@ -187,7 +187,12 @@ describe('switch on, no profile: only the exposure-list rows', () => {
   it('status answers with the documented shape and writes nothing', async () => {
     const r = await get('/api/key-lanes/status')
     expect(r.status).toBe(200)
-    expect(json(r)).toEqual({ enabled: true, active: false, keys: [], profiles: [], keyedSessionIds: [] })
+    const body = json(r)
+    expect(body).toEqual({ enabled: true, active: false, keys: [], profiles: [], keyedSessionIds: [], resetsAt: expect.stringMatching(/T00:00:00\.000Z$/) })
+    // P11: the next UTC midnight, when every key's daily cap resets (the phone shows it).
+    const untilReset = Date.parse(body.resetsAt) - Date.now()
+    expect(untilReset).toBeGreaterThan(0)
+    expect(untilReset).toBeLessThanOrEqual(24 * 60 * 60 * 1000)
     expect(listing()).toEqual([])
   })
 

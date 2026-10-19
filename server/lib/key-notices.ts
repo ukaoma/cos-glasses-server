@@ -435,3 +435,30 @@ export function keyNoticeError(id: KeyNoticeErrorId, params: KeyNoticeErrorParam
   const render = Object.prototype.hasOwnProperty.call(ERRORS, id) ? ERRORS[id] : undefined
   return render ? render(params) : KEY_NOTICE_COPY.unknownError
 }
+
+// ── Lane refusal lines (plan 11.3, 5.2, 9.4) ─────────────────────────────────
+// Moved here by P11 so this module stays the one source: P3 (lane-b-env.ts LANE_B_COPY), P4
+// (codex-profile-home.ts CODEX_LANE_B_COPY), P5 (direct-bridge.ts DIRECT_COPY) and P6
+// (key-profile-routing.ts, key-profile-rejects.ts) now read their lines from this object. Each line
+// is one lens row with a typical label; no em dashes, no arrows, no sign-in wording.
+
+export const KEY_LANE_REFUSAL_COPY = {
+  lanesOff: 'Key lanes are off. Pick a model.',
+  profileOff: (label: string) => `Key profile ${label} is off. Pick a model.`,
+  profileUnavailable: (label: string) => `Key profile ${label} cannot answer on this server yet. Pick a model.`,
+  wrongEngineClaude: (label: string) => `Key profile ${label} is not a Claude profile. Pick a model.`,
+  wrongEngineCodex: (label: string) => `Key profile ${label} is not a Codex profile. Pick a model.`,
+  wrongEngineDirect: 'This key profile is not a direct profile. Pick a model.',
+  keyMissing: (label: string) => `The key for profile ${label} is not saved on this Mac. Fix it in COS Control.`,
+  codexModelNotAllowed: (label: string) => `Key profile ${label} has a model Codex cannot run. Pick a model.`,
+  scheduled: 'Key profiles cannot run scheduled briefs.',
+  workNotYet: 'Key sessions are not in Work yet.',
+  relayUnavailable: 'Your key could not start this turn. Your plan was not used.',
+  v1NotOffered: 'That key profile is not offered on /v1. Turn on Offer on /v1 in COS Control.',
+  directCopyUnavailable: 'Your key could not answer this one.',
+  directNoEndpoint: 'This key cannot answer direct. Pick a model.',
+  directTextOnly: 'Direct key answers are text only. Remove the photo and retry.',
+  directEmpty: 'The model finished without an answer. Your plan was not used.',
+  directToolCap: 'The model hit its tool round cap without an answer. Ask a narrower question.',
+  directCancelled: 'That answer was cancelled.',
+} as const

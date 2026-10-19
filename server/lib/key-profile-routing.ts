@@ -21,6 +21,7 @@ import type { ModelImageInput } from './model-image-input.js'
 import type { KeyKind, KeyProfile, KeyProfileEngine } from './key-relay-contract.js'
 import type { QueryProvider } from './claude-steer.js'
 import { keyLanesActive } from './key-lanes.js'
+import { KEY_LANE_REFUSAL_COPY } from './key-notices.js'
 import { getProfile, listProfiles } from './key-profiles.js'
 import { getPublicKey } from './key-store.js'
 import type { KeyProfileBinding, PromptReference } from './conversation.js'
@@ -44,14 +45,14 @@ export type KeyProfileResolution =
 
 /** Plan 5.2 and 11.3: the one refusal for a profile that cannot run (missing, disabled, no key, lanes off). */
 export function keyProfileOffLine(label: string): string {
-  return `Key profile ${label} is off. Pick a model.`
+  return KEY_LANE_REFUSAL_COPY.profileOff(label)
 }
 /** No runner is registered for the profile's engine on this build. */
 export function keyProfileUnavailableLine(label: string): string {
-  return `Key profile ${label} cannot answer on this server yet. Pick a model.`
+  return KEY_LANE_REFUSAL_COPY.profileUnavailable(label)
 }
 /** Plan 9.4: a `cos-key-<id>` that is not an active profile with "Offer on /v1" on. */
-export const KEY_PROFILE_V1_NOT_OFFERED = 'That key profile is not offered on /v1. Turn on Offer on /v1 in COS Control.'
+export const KEY_PROFILE_V1_NOT_OFFERED = KEY_LANE_REFUSAL_COPY.v1NotOffered
 
 function labelFor(id: string, profile: KeyProfile | undefined): string {
   return profile?.label?.trim() || id

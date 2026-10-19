@@ -8,6 +8,7 @@
 // HARD RULE (zero impact without a key): nothing here runs unless a caller passes a key profile.
 // Importing this module reads no file, opens no socket and starts no timer.
 import { keyLanesActive } from './key-lanes.js'
+import { KEY_LANE_REFUSAL_COPY } from './key-notices.js'
 import { getPublicKey } from './key-store.js'
 import { claudeSettingsRefusal } from './claude-settings-guard.js'
 import { KEY_LANE_CHILD_ENV, RELAY_BASE_PATHS } from './key-relay-contract.js'
@@ -124,15 +125,14 @@ export async function laneBRelay(): Promise<KeyRelay> {
 }
 
 // ── Lens copy ───────────────────────────────────────────────────────────────
-// P8 (key-notices.ts) is the single source of key-lane strings; until it lands these are the plan
-// 11.3 lines verbatim. No em dashes, no arrows, no sign-in wording.
+// P8's key-notices.ts is the single source of key-lane strings (P11 moved these lines there).
 export const LANE_B_COPY = {
-  lanesOff: 'Key lanes are off. Pick a model.',
-  profileOff: (label: string) => `Key profile ${label} is off. Pick a model.`,
-  wrongEngine: (label: string) => `Key profile ${label} is not a Claude profile. Pick a model.`,
-  keyMissing: (label: string) => `The key for profile ${label} is not saved on this Mac. Fix it in COS Control.`,
-  scheduled: 'Key profiles cannot run scheduled briefs.',
-  relayUnavailable: 'Your key could not start this turn. Your plan was not used.',
+  lanesOff: KEY_LANE_REFUSAL_COPY.lanesOff,
+  profileOff: KEY_LANE_REFUSAL_COPY.profileOff,
+  wrongEngine: KEY_LANE_REFUSAL_COPY.wrongEngineClaude,
+  keyMissing: KEY_LANE_REFUSAL_COPY.keyMissing,
+  scheduled: KEY_LANE_REFUSAL_COPY.scheduled,
+  relayUnavailable: KEY_LANE_REFUSAL_COPY.relayUnavailable,
 } as const
 
 export type LaneBClaudePreflight = { ok: true; keyKind: KeyKind } | { ok: false; message: string }

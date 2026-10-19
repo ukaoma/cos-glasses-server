@@ -220,6 +220,9 @@ describe('P6 persistence: Accept by syntax (conversation.ts :163 :168 :490 :628 
   })
 
   it('a restart keeps the session binding and the exchange stamp, so the next turn is refused, not answered on the plan', async () => {
+    // P11: settle the earlier module instance's debounced save first. Under full-suite load its
+    // timer fired while the fresh import below was loading and overwrote this file (seen once).
+    conversation.flushConversationToDisk()
     const file = join(dataDir, 'sessions.json')
     writeFileSync(file, JSON.stringify({
       savedAt: new Date().toISOString(),

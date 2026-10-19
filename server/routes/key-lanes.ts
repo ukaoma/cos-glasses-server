@@ -42,12 +42,15 @@ import {
 import { isLoopbackSocket } from '../lib/network-policy.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { isKeyProfileId } from '../../shared/key-preference.js'
+import { catalogLanesFor, curatedKeyModels, getKeyCatalog, KEY_CATALOG_CURATED, type KeyCatalogModel } from '../lib/key-catalog.js'
+import { keyNoticeError } from '../lib/key-notices.js'
+import { getSharedKeyMeter } from '../lib/key-relay-meter.js'
+import { installKeyRelaySeams } from '../lib/key-relay.js'
 
 export const KEY_LANES_ENABLE_PATH = '/api/key-lanes/enable'
 export const KEY_LEDGER_FILE = 'key-ledger.jsonl'
 export const CODEX_HOMES_DIR = 'codex-homes'
 const VALIDATE_TIMEOUT_MS = 10_000
-const CATALOG_TIMEOUT_MS = 8_000
 const CATALOG_TTL_MS = 24 * 60 * 60 * 1000
 
 export type KeyValidation =
@@ -163,7 +166,7 @@ export async function defaultValidateKey(kind: KeyKind, secret: string, baseUrl?
   try { data = ((await response.json()) as { data?: typeof data }).data } catch { data = undefined }
   if (!data) return { ok: false, error: 'validation_failed', message: 'OpenRouter sent an answer COS could not read. Try again.' }
   if (data.limit === null || data.limit === undefined) {
-    return { ok: false, error: 'no_credit_limit', message: 'Set a credit limit on this key at openrouter.ai first.' }
+    return { ok: false, error: 'no_credit_limit', message: keyNoticeError('no_credit_limit') }
   }
   if (typeof data.limit_remaining === 'number' && data.limit_remaining <= 0) {
     return { ok: false, error: 'out_of_credit', message: 'This OpenRouter key has no credit left.' }
@@ -177,29 +180,26 @@ export async function defaultValidateKey(kind: KeyKind, secret: string, baseUrl?
 
 // ── Catalog (plan 10.4) ──────────────────────────────────────────────────────
 
-export const CURATED_KEY_MODELS = [
-  { id: 'anthropic/claude-sonnet-5.5', name: 'Claude Sonnet 5.5', inUsdPerM: 2, outUsdPerM: 10, role: 'default' as const },
-  { id: 'anthropic/claude-haiku-5.5', name: 'Claude Haiku 5.5', inUsdPerM: 0.1, outUsdPerM: 0.5, role: 'cheaper' as const },
-]
+/** The curated two (D10), from P5's key-catalog.ts, in the shape this route has always served. */
+export const CURATED_KEY_MODELS = KEY_CATALOG_CURATED.map(({ id, name, inUsdPerM, outUsdPerM, role }) => ({ id, name, inUsdPerM, outUsdPerM, role }))
 
+/** P11: the shared 24 h public catalog (key-catalog.ts). Throws when only the built-in list is known. */
 export async function defaultFetchCatalog(): Promise<CatalogModel[]> {
-  const response = await fetch('https://openrouter.ai/api/v1/models', { signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS), redirect: 'error' })
-  if (!response.ok) throw new Error(`catalog HTTP ${response.status}`)
-  const body = await response.json() as { data?: Array<{ id?: unknown; name?: unknown; pricing?: { prompt?: unknown; completion?: unknown } }> }
-  const out: CatalogModel[] = []
-  for (const m of body.data ?? []) {
-    const inPer = Number(m.pricing?.prompt), outPer = Number(m.pricing?.completion)
-    if (typeof m.id !== 'string' || !Number.isFinite(inPer) || !Number.isFinite(outPer)) continue
-    out.push({ id: m.id, name: typeof m.name === 'string' ? m.name : m.id, inUsdPerM: inPer * 1e6, outUsdPerM: outPer * 1e6 })
-  }
-  return out
+  const snapshot = await getKeyCatalog().get()
+  if (snapshot.from !== 'openrouter') throw new Error('catalog unavailable')
+  return snapshot.models
+}
+
+/** The next UTC midnight: when every key's daily cap resets (plan 4.5, OpenRouter usage_daily). */
+export function keyCapResetsAt(now: Date): string {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString()
 }
 
 // ── Router ───────────────────────────────────────────────────────────────────
 
 const CLOSED_BREAKER: BreakerState = { open: false, failures: 0 }
 
-function statusBody(): KeyLanesStatusBody {
+function statusBody(now: Date): KeyLanesStatusBody & { resetsAt: string } {
   const provider = keyLanesStatusProvider()
   return {
     enabled: keyLanesEnabled(),
@@ -214,6 +214,8 @@ function statusBody(): KeyLanesStatusBody {
     })),
     profiles: listProfiles(),
     keyedSessionIds: provider.keyedSessionIds?.() ?? [],
+    // P11: the phone shows when today's caps reset. Never a secret: keys go out as ref and last 4.
+    resetsAt: keyCapResetsAt(now),
   }
 }
 
@@ -253,6 +255,8 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
 
   router.post('/key-lanes/enable', macOnly, (_req, res) => {
     setKeyLanesEnabled(true, now)
+    // P11: lanes turned on without a restart get the relay's status answers at once (map writes only).
+    installKeyRelaySeams()
     res.json({ enabled: keyLanesEnabled(), active: keyLanesActive() })
   })
 
@@ -266,7 +270,7 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
 
   router.get('/key-lanes/status', (_req, res) => {
     res.set('Cache-Control', 'private, no-store')
-    res.json(statusBody())
+    res.json(statusBody(now()))
   })
 
   router.post('/key-lanes/keys', macOnly, async (req, res) => {
@@ -278,6 +282,8 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
       if (body.capUsd === undefined || cap === null) return res.status(400).json({ error: 'invalid_cap', message: 'A daily cap is between $0.01 and $1000.' })
       const updated = updateKeyCap(body.ref, cap)
       if (!updated) return res.status(404).json({ error: 'unknown_key', message: 'That key is not saved on this Mac.' })
+      // P11 (plan 4.5): the relay meters against the cap Control saved, not a later file edit.
+      getSharedKeyMeter().noteSavedCap(updated.ref, updated.capUsd)
       return res.json({ key: updated })
     }
     if (!isKeyKind(body.kind)) return res.status(400).json({ error: 'invalid_kind', message: 'Pick OpenRouter, Anthropic, OpenAI or a custom endpoint.' })
@@ -300,6 +306,7 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
     }
     if (!check.ok) return res.status(422).json({ error: check.error, message: check.message })
     const saved = saveKey({ kind, secret, capUsd: cap, validatedAt: now().toISOString(), ...(baseUrl ? { baseUrl } : {}) }, now)
+    getSharedKeyMeter().noteSavedCap(saved.ref, saved.capUsd)
     return res.json({
       key: saved,
       ...(check.limitRemainingUsd !== undefined || check.isFreeTier !== undefined
@@ -396,15 +403,13 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
         models = null
       }
     }
-    const live = new Map((models ?? []).map(m => [m.id, m]))
-    const curated = CURATED_KEY_MODELS.map(c => {
-      const m = live.get(c.id)
-      return { ...c, ...(m ? { inUsdPerM: m.inUsdPerM, outUsdPerM: m.outUsdPerM } : {}) }
-    })
+    // P11: curated prices and lanes from P5's key-catalog.ts, the one catalog module.
+    const curated = curatedKeyModels(models as KeyCatalogModel[] | null)
+      .map(({ id, name, inUsdPerM, outUsdPerM, role }) => ({ id, name, inUsdPerM, outUsdPerM, role }))
     // Lane B takes only anthropic/ and openai/ slugs; every other model is direct only (plan 4.4).
     const search = q && models
       ? models.filter(m => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)).slice(0, 20)
-        .map(m => ({ ...m, lanes: m.id.startsWith('anthropic/') || m.id.startsWith('openai/') ? ['key', 'direct'] : ['direct'] }))
+        .map(m => ({ ...m, lanes: catalogLanesFor(m.id) }))
       : undefined
     res.json({ curated, pricesFrom: models ? 'openrouter' : 'built-in', ...(search ? { search } : {}) })
   })

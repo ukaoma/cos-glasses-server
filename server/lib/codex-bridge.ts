@@ -90,7 +90,8 @@ import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } f
 // without one, argv, env, the catalog read and the resume binding are the 963fe25 ones.
 import { randomUUID } from 'node:crypto'
 import { profilePreference } from '../../shared/key-preference.js'
-import type { KeyKind, KeyProfile, RelayTurnHandle } from './key-relay-contract.js'
+import type { AnswerKeyFields, KeyKind, KeyProfile, RelayTurnHandle } from './key-relay-contract.js'
+import { getSharedKeyMeter } from './key-relay-meter.js'
 import {
   CODEX_LANE_B_COPY,
   CODEX_RELAY_PROVIDER_ID,
@@ -464,6 +465,7 @@ export async function callCodexStreaming(
       cwd: codexCwd,
       trustMode: codexTrustMode,
       engineFingerprint: extraFingerprint,
+      ...(keyProfile ? { profileId: keyProfile.id } : {}),
     })
     : null
   const imageInputs: ModelImageInput[] = images ?? []
@@ -604,13 +606,14 @@ export async function callCodexStreaming(
   // its origin, then the child env points at both. Only the child's copy is written. A relay
   // that cannot issue, or a home that cannot be written, ends the turn before spawn.
   let keyTurn: RelayTurnHandle | null = null
+  const keyTurnId = keyProfile && profileHome ? options?.turnId ?? randomUUID() : null
   if (keyProfile && profileHome) {
     try {
       const relay = await codexKeyRelay()
       keyTurn = await relay.issueTurn({
         keyRef: keyProfile.keyRef,
         profileId: keyProfile.id,
-        turnId: options?.turnId ?? randomUUID(),
+        turnId: keyTurnId!,
         sessionId: sid,
         engine: 'codex',
         allowedModel: keyProfile.model,
@@ -631,6 +634,10 @@ export async function callCodexStreaming(
     }
   }
   const keyAuditFields = keyProfile && keyKind ? { profile: keyProfile.id, lane: 'key' as const, credentialKind: keyKind } : {}
+  // Key lanes (P11, plan 3.1): `lane` and `credential` on a keyed answer, omitted otherwise.
+  const keyLane: AnswerKeyFields | null = keyProfile && keyKind
+    ? { lane: 'key', credential: { kind: keyKind, ref: keyProfile.keyRef, profileId: keyProfile.id } }
+    : null
 
   // The COS UserPromptSubmit hook sees `prompt`, which is SYSTEM INSTRUCTIONS plus USER
   // REQUEST in one text, on a fresh thread and on resume alike. This private file hands it
@@ -669,7 +676,7 @@ export async function callCodexStreaming(
   function clearEngineSessionBestEffort(reason: string) {
     if (!engineSession) return
     try {
-      clearCodexEngineSession(sid, model)
+      clearCodexEngineSession(sid, model, keyProfile?.id)
     } catch (error) {
       console.error(`[codex-bridge] engine session clear failed (${reason}):`, error)
     }
@@ -685,6 +692,7 @@ export async function callCodexStreaming(
         cwd: codexCwd,
         trustMode: codexTrustMode,
         engineFingerprint: extraFingerprint,
+        ...(keyProfile ? { profileId: keyProfile.id } : {}),
       })
       updateCodexRun(run.runId, { codexThreadId, expiresAt: saved.expiresAt })
     } catch (error) {
@@ -799,6 +807,8 @@ export async function callCodexStreaming(
     }
 
     const totalMs = Date.now() - startTime
+    // Key lanes (P11): this turn's settled spend on the key. Keyed turns only.
+    const keyUsdFields = keyTurnId ? { usd: Math.round(getSharedKeyMeter().turnSettledUsd(keyTurnId) * 1e6) / 1e6 } : {}
     logTokenAudit({
       source: options?.lightweight ? 'g2-voice' : 'g2-query',
       model,
@@ -807,6 +817,7 @@ export async function callCodexStreaming(
       durationMs: totalMs,
       caller: options?.lightweight ? 'voice_query' : 'full_query',
       ...keyAuditFields,
+      ...keyUsdFields,
     })
     saveEngineSessionBestEffort()
 
@@ -824,6 +835,7 @@ export async function callCodexStreaming(
         generation: options?.generation,
         ...(outputAttachments.length > 0 ? { outputAttachments } : {}),
         ...(outputImageStats && outputImageStats.published > 0 ? { outputImageStats } : {}),
+        ...(keyLane ? { keyLane, ...keyUsdFields } : {}),
       })
       if (terminalOwned === false) return
     } catch (error) {

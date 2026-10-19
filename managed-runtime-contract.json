@@ -71,7 +71,8 @@
     "COS_QUEUE_RECONCILE",
     "COS_PIN_BOOT_REAP",
     "COS_QUEUE_RESEND",
-    "COS_SESSION_STEER"
+    "COS_SESSION_STEER",
+    "COS_KEY_LANES"
   ],
   "maintenance": {
     "scope": "cross_boot",

@@ -2283,6 +2283,8 @@ describe('every way a write can be refused reaches the wire with words', () => {
     },
     { reason: 'adapter_unwired', run: () => oneTurn({ deliverAttachedTurn: undefined }) },
     { reason: 'provider_never_opened', run: () => oneTurn({ deliverAttachedTurn: async () => ({ status: 'aborted' }) }) },
+    // Key lanes (P3 refusal, P11 route mapping): the adapter refused a thread that ran on a key.
+    { reason: 'keyed_session', run: () => oneTurn({ deliverAttachedTurn: async () => ({ ok: false, reason: 'keyed_session', delivery: 'not_attempted' }) as never }) },
     { reason: 'delivery_ambiguous', run: () => oneTurn({ deliverAttachedTurn: async () => ({ status: '?' }) }) },
     // 6.49.0: the live transport wrote a frame it could not see accepted.
     { reason: 'live_unverified', run: () => oneTurn({ deliverLiveTurn: async () => ({ ok: false, reason: 'unverified' }) }) },
@@ -4923,5 +4925,33 @@ describe('fork job ledger', () => {
     const ledger = new ForkJobLedger('a', { load: () => rows, save: () => {} })
     expect(ledger.get('cf-ledger-0003')?.state).toBe('running')
     expect(ledger.runningCount()).toBe(1)
+  })
+})
+
+
+describe('key lanes: a keyed thread is refused with the one keyed 409 body (P11)', () => {
+  const KEYED_BODY = { error: 'keyed_session', message: 'This session ran on your key. Continue it from COS.' }
+
+  it('Continue: 409, reason keyed_session, the exact keyed body, not retryable, nothing delivered', async () => {
+    const base = await start(writeDeps({ deliverAttachedTurn: async () => ({ ok: false, reason: 'keyed_session', delivery: 'not_attempted' }) as never }))
+    const a = await attached(base)
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-keyed-0001' })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ ...KEYED_BODY, reason: 'keyed_session', reasonCopy: KEYED_BODY.message, retryable: false, deliveryState: 'not_delivered' })
+  })
+
+  it('Fork: 409, reason keyed_session, the exact keyed body (not fork_failed)', async () => {
+    const res = await start(forkDeps({ forkThread: () => ({ ...FORK_CLEAN_FAILURE, reason: 'keyed_session', detail: undefined }) as never }))
+      .then(base => post(base, forkPath('claude', SID), FORK_BODY))
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ ...KEYED_BODY, reason: 'keyed_session', forked: false, retryable: false })
+  })
+
+  it('an ordinary not-attempted refusal still reads provider_never_opened', async () => {
+    const base = await start(writeDeps({ deliverAttachedTurn: async () => ({ ok: false, reason: 'binary_not_found', delivery: 'not_attempted' }) as never }))
+    const a = await attached(base)
+    const res = await post(base, turnsPath(a.bindingId), { prompt: PROMPT, epoch: a.epoch, targetKey: a.targetKey, clientTurnId: 'ct-keyed-0002' })
+    expect(res.body.reason).not.toBe('keyed_session')
+    expect(res.body.error).toBeUndefined()
   })
 })

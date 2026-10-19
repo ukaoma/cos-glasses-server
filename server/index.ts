@@ -80,6 +80,7 @@ import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { openaiKeyRouter } from './routes/openai-key.js'
 import { createKeyLanesBodyParser, createKeyLanesRouter } from './routes/key-lanes.js'
+import { wireKeyLanes } from './lib/key-lanes-wiring.js'
 import { firefliesKeyRouter } from './routes/fireflies-key.js'
 import { meetingImportRouter } from './routes/meeting-import.js'
 import { startMeetingImportScheduler, stopMeetingImportScheduler } from './lib/meeting-import.js'
@@ -1173,6 +1174,8 @@ app.use('/api', openaiKeyRouter)
 // Key lanes (plan v4 3.1). Off (the default): every /api/key-lanes path falls through to the
 // usual 404, except an authenticated loopback POST /api/key-lanes/enable from COS Control.
 app.use('/api', createKeyLanesRouter({ apiToken: () => API_TOKEN }))
+// P11: fill the key-lane seams (map writes only; the relay's status seams only while enabled).
+wireKeyLanes()
 // Fireflies: the key, and importing meetings this Mac did not record (6.47.0).
 app.use('/api', firefliesKeyRouter)
 app.use('/api', meetingImportRouter)

@@ -26,6 +26,8 @@ import { codexSubscribedEvents, mergeCodexHooks, stableCodexHookScriptPath } fro
 import { codexProfileHome, codexProfileHomesRoot, serverCodexHome } from './codex-homes.js'
 import { CODEX_KEYED_STEER_NOTICE } from './codex-live-queue.js'
 import { keyLanesActive } from './key-lanes.js'
+import { KEY_LANE_REFUSAL_COPY } from './key-notices.js'
+import { isLaneBStrippedName, LANE_B_STRIPPED_NAMES } from './lane-b-env.js'
 import { engineModelProblem } from './key-profiles.js'
 import { KEY_LANE_CHILD_ENV, RELAY_BASE_PATHS } from './key-relay-contract.js'
 import type { KeyKind, KeyProfile, KeyRelay } from './key-relay-contract.js'
@@ -46,29 +48,13 @@ export interface CodexKeyLaneCallOptions {
 // ── Child environment (plan 7.2 base, 8.1 additions) ────────────────────────
 
 /**
- * Provider-credential names a Lane B child never inherits (plan 7.2, the list P3 strips for
- * Claude), plus `CODEX_HOME`, which the profile home replaces. Every other name is kept.
+ * Provider-credential names a Lane B child never inherits: P3's one list (lane-b-env.ts, deduped by
+ * P11), plus `CODEX_HOME`, which the profile home replaces. Every other name is kept.
  */
-export const CODEX_LANE_B_STRIPPED_NAMES: readonly string[] = [
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_BASE_URL',
-  'ANTHROPIC_MODEL',
-  'ANTHROPIC_SMALL_FAST_MODEL',
-  'CLAUDE_CODE_SUBAGENT_MODEL',
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_VERTEX',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
-  'OPENAI_API_KEY',
-  'OPENAI_BASE_URL',
-  'OPENROUTER_API_KEY',
-  'CODEX_HOME',
-]
-const STRIPPED_PATTERN = /^ANTHROPIC_DEFAULT_[A-Z0-9_]+_MODEL$/
+export const CODEX_LANE_B_STRIPPED_NAMES: readonly string[] = [...LANE_B_STRIPPED_NAMES, 'CODEX_HOME']
 
 export function isCodexLaneBStrippedName(name: string): boolean {
-  return CODEX_LANE_B_STRIPPED_NAMES.includes(name) || STRIPPED_PATTERN.test(name)
+  return name === 'CODEX_HOME' || isLaneBStrippedName(name)
 }
 
 /** The names applyCodexLaneBEnv sets. With the stripped names this is the whole A-vs-B difference. */
@@ -134,13 +120,13 @@ export function __resetCodexProfileSeamsForTests(): void {
 // ── Lens copy (plan 11.3). P8's key-notices.ts is the single source once merged. ─────────────
 
 export const CODEX_LANE_B_COPY = {
-  lanesOff: 'Key lanes are off. Pick a model.',
-  profileOff: (label: string) => `Key profile ${label} is off. Pick a model.`,
-  wrongEngine: (label: string) => `Key profile ${label} is not a Codex profile. Pick a model.`,
-  keyMissing: (label: string) => `The key for profile ${label} is not saved on this Mac. Fix it in COS Control.`,
-  modelNotAllowed: (label: string) => `Key profile ${label} has a model Codex cannot run. Pick a model.`,
-  scheduled: 'Key profiles cannot run scheduled briefs.',
-  relayUnavailable: 'Your key could not start this turn. Your plan was not used.',
+  lanesOff: KEY_LANE_REFUSAL_COPY.lanesOff,
+  profileOff: KEY_LANE_REFUSAL_COPY.profileOff,
+  wrongEngine: KEY_LANE_REFUSAL_COPY.wrongEngineCodex,
+  keyMissing: KEY_LANE_REFUSAL_COPY.keyMissing,
+  modelNotAllowed: KEY_LANE_REFUSAL_COPY.codexModelNotAllowed,
+  scheduled: KEY_LANE_REFUSAL_COPY.scheduled,
+  relayUnavailable: KEY_LANE_REFUSAL_COPY.relayUnavailable,
   /** Plan 8.1: a keyed Codex session never joins the Codex app queue. */
   steerAfterTurn: CODEX_KEYED_STEER_NOTICE,
 } as const
