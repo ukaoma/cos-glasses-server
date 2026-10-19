@@ -772,6 +772,26 @@ VOICE) follow the same settings. Contract and measurements:
 - `COS_DICTATION_FOLLOWS_STT=0` holds every dictation decode on its 6.72.0
   Whisper engine.
 
+### Dictation polish budgets and filler pass (6.79.1)
+
+- Each caller has its own daily polish budget, counted per local calendar day
+  in `<data>/.dictation_autoclean_count.json`:
+  `COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE` (Mac dictation and G2
+  messages, default 300; falls back to the older
+  `COS_DICTATION_AUTOCLEAN_MAX_PER_DAY`), `..._MEETING` (G2 live meeting
+  lines, default 200) and `..._PROMPT_DRAFT` (prompt-draft finalize and retry,
+  default 200). One caller running out never stops another.
+- When the model does not polish, the finalize answer says why:
+  `polishSkipped` is `daily_cap`, `breaker_open`, `too_long`, `disabled` or
+  `failed`. A polished answer has no `polishSkipped`.
+- Messages and prompt drafts drop standalone um, uh, er, ah, hmm, mm and mhm
+  before the model and when it is skipped. Meeting lines are left as heard.
+  It keeps ALL-CAPS tokens, a Titlecase token mid-sentence (a name) unless a
+  comma follows it, any token after a title (Mr., Dr.) and quoted mentions.
+  `COS_DICTATION_FILLER_PASS=0` turns the pass off.
+- `COS_DICTATION_POLISH_PROMPT=v1` restores the 6.79.0 polish prompt (default
+  `v2`).
+
 ### Parakeet (FluidAudio CoreML, offline)
 
 `POST /api/stt-settings/parakeet/install` installs FluidAudio's `fluidaudiocli`

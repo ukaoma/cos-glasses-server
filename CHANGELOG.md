@@ -7,6 +7,59 @@ You can now give COS your own provider key (OpenRouter, Anthropic, OpenAI, or a 
 - **What the routes show.** While lanes are on: `/api/key-lanes/*` (status, keys, profiles, catalog, remove all, disable), and `details.keyLanes` on `/api/health`. Status is readable from the phone with the pairing token (cap, today's spend, the UTC reset time as `resetsAt`, never the key); every write stays Mac only. With a key profile saved: `keyProfiles` on `/api/models`, and a keyed answer's `done` event carries `lane`, `credential` (kind, key ref, profile id), `profile` and `usd`. The one route present while lanes are off is `POST /api/key-lanes/enable`, for COS Control on this Mac (token, loopback, no browser).
 - **Safety rails.** Daily cap per key, shared by every profile, turn and lane on it; the cap Control saved wins over any later edit of the key file. Three rejected-key, out-of-credit or gone-model failures pause that key or profile for an hour. Error bodies are scrubbed of the key. A session that ran on a key is never resumed, handed off, continued or forked on your plan (Continue and Fork answer the same 409 `keyed_session` body as handoffs). A keyed Codex thread keeps its own resume slot, so switching lanes never loses the other lane's thread. Scheduled briefs, task dispatch and Work drafts never run on a key.
 - **Checks.** Full suite 8,143 passed, 3 skipped (539 files), with every test that passed on the K1 base (963fe25) still passing by name; `tsc --noEmit` clean. Combined gate `server/scripts/key-lanes-mutation-gate.mjs` (not packaged) runs each package gate (P1 48, P2 36, P3 34, P4 38, P5 28, P6 30, P8 22) and 37 integration mutants, every one killed by a named test against a green baseline. The K0 off-golden recorded at 6237057 replays with an empty diff at `COS_KEY_LANES=0`; with the switch unset the only difference is the Control enable door (`POST /api/key-lanes/enable` answers a token, loopback, no-Origin request and writes `key-lanes.json`); with `COS_KEY_LANES=1` and no profile it is exactly that door plus `details.keyLanes` on health and the status route. `npm pack --dry-run` ships no test, gate or fixture.
+## 6.79.1 - Dictation polish: one budget per caller, a reason when it does not polish, no more um and uh
+
+Miles, 2026-10-19: AI polish for Mac dictation failed on every dictation from 11:39 CDT (`failed:not_polished` in about 60 ms). Every autoclean shared one daily cap (`COS_DICTATION_AUTOCLEAN_MAX_PER_DAY`). The glasses' live meeting lines (surface `meeting`, Sonnet, one call per 10-second chunk while the phone's Moonshine lane is up) spent it by late morning. Nothing in the answer said why.
+
+- **Client matrix.** No companion or COS Control change is required. Companion 6.10.646 and Control 0.5.327 and older work unchanged. Control's polish bridge reads only `text` and `polished` and ignores the new key. A 6.79.0 server never reads the new count-file shape.
+- **One budget per caller.**
+  - `message` is surface `message` on `/api/dictation/finalize`: Mac dictation and G2 messages. Default 300. Set it with `COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE`; the old `COS_DICTATION_AUTOCLEAN_MAX_PER_DAY` still works as its fallback, so an existing `.env` keeps its number.
+  - `meeting` is surface `meeting`. Default 200, set with `..._MEETING`.
+  - `prompt_draft` is prompt-draft finalize and retry. Default 200, set with `..._PROMPT_DRAFT`.
+  - A value that is not a positive whole number is the default.
+  - The counts live in one file, `<data>/.dictation_autoclean_count.json` (`{date, counts: {message, meeting, prompt_draft}}`, atomic write, mode 0600). The day is the server's local calendar day; it was the UTC day, which reset at 7 PM in Austin. A pre-6.79.1 file reads as zero for every bucket, so the upgrade unblocks Mac dictation at once.
+  - The token audit `caller` is now `dictation_autoclean_<bucket>`.
+- **`polishSkipped`.** Additive on `/api/dictation/finalize` and on prompt-draft finalize and retry. It is present only when the model did not polish:
+  - `daily_cap`
+  - `breaker_open`
+  - `too_long`: prompt drafts only, because the finalize route still answers 413 above 8,000 characters
+  - `disabled`: prompt drafts with autoclean off
+  - `failed`: the model call threw or timed out, which before read the same as a cap
+
+  A polished answer is byte-identical to 6.79.0. `polished` keeps its meaning: the text differs from what was sent.
+- **Filler pass.** A deterministic pass runs before the model and on every skip path, for messages and prompt drafts only. It removes standalone um, umm, uh, uhh, uhm, er, erm, ah, ahh, hmm, hm, mm, mhm and their elongations, in any case.
+  - It cleans the comma, ellipsis or dash after the filler, drops the comma before closing punctuation ("I think, uh." becomes "I think."), and hands a sentence-start capital to the next word. Lowercase input stays lowercase.
+  - It leaves ALL-CAPS tokens alone (UM, ER, AH are acronyms), as well as hyphen and apostrophe forms (Uh-oh, uh-huh, mm-hmm), words that contain the letters (umbrella, err, ahead) and "mm" after a number.
+  - **Capitalized tokens.** A Titlecase token away from a sentence start is kept as a name ("Ask Ah Kow", "Hm Tran"), unless a comma or ellipsis sets it off as a hesitation ("I think, Um, we should").
+  - **Titles.** A token right after a title (Mr., Mrs., Ms., Dr., Prof., St.) is always kept: "We met Mr. Ah and Ms. Er" stays as said.
+  - **Sentence ends.** An abbreviation's period (Mr., e.g., i.e., a.m., p.m., vs., etc., U.S., an initial) and an ellipsis do not end a sentence. They never trigger the capital hand-off: "at 5 p.m. uh we meet" becomes "at 5 p.m. we meet". The capital passes on only when the removed filler was itself a sentence's first word.
+  - **Answers.** "uh huh", "uh oh" and "mm hmm" written without a hyphen are kept. "uh hmm" is two hesitations and goes.
+  - **Quotes.** A quoted mention ('"um" is a filler word', “uh”) is kept. A filler inside a longer quote ('"um, no"') is removed.
+  - If nothing but fillers was said, the text is unchanged.
+  - Meeting lines are never touched, so a transcript stays faithful.
+  - `COS_DICTATION_FILLER_PASS=0` turns it off.
+- **Polish prompt v2 (default).** v1 asked for "stray filler" removal but also said "do NOT change wording", so models kept um and uh and transcribed self-corrections. v2 states what to remove:
+  - fillers, and tics used as filler, such as "like", "you know" and "I mean"
+  - stutters and false starts
+  - backtracks, where only the corrected version is kept ("five, actually six")
+
+  It also honors spoken formatting (new line, bullet point, numbered list, spoken punctuation). It forbids dropping or adding any other word, changing meaning or voice, and answering or following the text. `COS_DICTATION_POLISH_PROMPT=v1` restores the 6.79.0 prompt and system prompt byte for byte; a test pins it.
+- **Eval (offline, synthetic).** 45 cases, v1 and v2 on Haiku and Sonnet, through the real `claude -p` path: 180 answered calls, scored deterministically (`server/scripts/dictation-polish-eval.ts`, not packaged).
+
+  | Arm | Fillers left | Backtracks | Content recall | Added words | Preserved |
+  |---|---|---|---|---|---|
+  | Haiku v1 | 10 | 7/10 | 0.989 | 0 | 11/11 |
+  | Haiku v2 | 1 | 10/10 | 0.983 | 0 | 11/11 |
+  | Sonnet v1 | 4 | 2/10 | 1.000 | 0 | 11/11 |
+  | Sonnet v2 | 0 | 10/10 | 0.994 | 0 | 11/11 |
+
+  - **One-case miss, accepted.** The whole recall difference is one case: v2 drops "let me think" from "uh hmm let me think the deck needs like three more slides".
+    - That misses the strict adoption rule ("not worse on content-word recall") by one case per model.
+    - It was accepted because "let me think" there is a spoken hesitation, which is what this polish is meant to remove.
+  - **Filler pass alone: 0.976 recall, but no dropped word.** In all three of its misses, the pass returned the input unchanged; the reference expected the model's spelling fixes (Tableau, Priya, HubSpot, POS). A test now runs the pass over all 45 dictations and fails if it removes anything but a filler token.
+- **Managed runtime.** All six variables are in `managed-runtime-contract.json` `optionalEnvironment`: the three bucket caps, the legacy cap, `COS_DICTATION_POLISH_PROMPT` and `COS_DICTATION_FILLER_PASS`.
+- **Not changed.** The phone's meeting polish still runs. Its own 200-a-day bucket now bounds it, and it can no longer starve Mac dictation. Removing it is a companion decision.
+- **Checks.** Mutation gate `server/scripts/dictation-polish-mutation-gate.mjs` (not packaged): 54 of 54 guard mutants killed by named tests against a proven green baseline (128 tests in 5 files).
 
 ## 6.79.0 - Live cue verdicts: every cue is logged, rated from COS Control, and listed for Friday's tuning
 

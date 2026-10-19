@@ -12,6 +12,8 @@ let transcribeAudioBuffer: ReturnType<typeof vi.fn>
 let transcribeWhisperPreview: ReturnType<typeof vi.fn>
 let emitDisplay: ReturnType<typeof vi.fn>
 let autoCleanDictation: ReturnType<typeof vi.fn>
+const POLISH_ENV = ['COS_DICTATION_AUTOCLEAN_MAX_PER_DAY', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE',
+  'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT', 'COS_DICTATION_FILLER_PASS', 'COS_DICTATION_AUTOCLEAN']
 
 class MockNoSpeechDetectedError extends Error {
   constructor(readonly rawText = '') { super('No speech detected') }
@@ -112,6 +114,7 @@ describe('public prompt draft recovery contract', () => {
     delete process.env.COS_PROMPT_DRAFT_DIR
     delete process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE
     delete process.env.COS_HQ_SPECULATIVE_WARM
+    for (const key of POLISH_ENV) delete process.env[key]
     if (draftDir) rmSync(draftDir, { recursive: true, force: true })
   })
 
@@ -245,6 +248,106 @@ describe('public prompt draft recovery contract', () => {
     expect(oversized.status).toBe(413)
     expect(oversized.json).toMatchObject({ error: 'text_too_large', maxChars: 8000 })
     expect(autoCleanDictation).not.toHaveBeenCalled()
+  })
+
+  // 6.79.1. Synthetic text only.
+  const finalizeText = (text: string, surface: 'message' | 'meeting', autocleanModel = 'sonnet') =>
+    httpRequest('POST', '/api/dictation/finalize', JSON.stringify({ text, surface, autocleanModel }))
+
+  it('6.79.1: meeting lines spend their own daily budget, never Mac dictation\'s', async () => {
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING = '2'
+    autoCleanDictation.mockImplementation(async (text: string) => `${text} Polished.`)
+    const meeting = []
+    for (let i = 0; i < 3; i++) meeting.push(await finalizeText('The forecast is ready', 'meeting'))
+    expect(meeting.map(r => r.json.polishSkipped)).toEqual([undefined, undefined, 'daily_cap'])
+    expect(meeting[2].json).toEqual({ text: 'The forecast is ready', surface: 'meeting', polished: false, polishSkipped: 'daily_cap' })
+    const message = await finalizeText('Ask Dana about the plan', 'message')
+    expect(message.json).toEqual({ text: 'Ask Dana about the plan Polished.', surface: 'message', polished: true })
+    expect(autoCleanDictation).toHaveBeenCalledTimes(3)
+  })
+
+  it('6.79.1: the pre-6.79.1 cap still sets the message budget; the per-bucket variable wins', async () => {
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY = '1'
+    autoCleanDictation.mockImplementation(async (text: string) => `${text} Polished.`)
+    expect((await finalizeText('First note', 'message')).json.polishSkipped).toBeUndefined()
+    expect((await finalizeText('Second note', 'message')).json).toEqual({
+      text: 'Second note', surface: 'message', polished: false, polishSkipped: 'daily_cap',
+    })
+    // The legacy variable is the message fallback only: meeting keeps its own default.
+    expect((await finalizeText('Meeting line', 'meeting')).json.polishSkipped).toBeUndefined()
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = '3'
+    expect((await finalizeText('Third note', 'message')).json.polishSkipped).toBeUndefined()
+    expect(autoCleanDictation).toHaveBeenCalledTimes(3)
+  })
+
+  it('6.79.1: prompt drafts spend their own budget', async () => {
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT = '1'
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = '1'
+    autoCleanDictation.mockImplementation(async (text: string) => `${text} Polished.`)
+    transcribeAudioBuffer.mockResolvedValue({ text: 'Keep this draft.', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', elapsedMs: 20, audioBytes: 3200 })
+    const drafts = []
+    for (let i = 0; i < 2; i++) {
+      const started = await httpRequest('POST', '/api/prompt-drafts/start')
+      await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+      drafts.push(await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast&autoclean=1&autocleanModel=haiku`))
+    }
+    expect(drafts[0].json.text).toBe('Keep this draft. Polished.')
+    expect(drafts[0].json.polishSkipped).toBeUndefined()
+    expect(drafts[1].json).toMatchObject({ text: 'Keep this draft.', polishSkipped: 'daily_cap' })
+    expect((await finalizeText('Ask Dana', 'message')).json.polishSkipped).toBeUndefined()
+  })
+
+  it('6.79.1: says why the model did not polish: disabled, breaker open, failed', async () => {
+    transcribeAudioBuffer.mockResolvedValue({ text: 'Keep this draft.', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', elapsedMs: 20, audioBytes: 3200 })
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+    const disabled = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast`)
+    expect(disabled.json).toMatchObject({ text: 'Keep this draft.', polishSkipped: 'disabled' })
+
+    autoCleanDictation.mockImplementation(async () => { throw new Error('provider down') })
+    const failed = await finalizeText('Keep this draft.', 'message', 'luna-5.6-fast')
+    expect(failed.json).toEqual({ text: 'Keep this draft.', surface: 'message', polished: false, polishSkipped: 'failed' })
+    let skipped: string | undefined
+    for (let i = 0; i < 10 && skipped !== 'breaker_open'; i++) skipped = (await finalizeText('Keep this draft.', 'message', 'luna-5.6-fast')).json.polishSkipped
+    expect(skipped).toBe('breaker_open')
+    const calls = autoCleanDictation.mock.calls.length
+    expect((await finalizeText('Keep this draft.', 'message', 'luna-5.6-fast')).json.polishSkipped).toBe('breaker_open')
+    expect(autoCleanDictation).toHaveBeenCalledTimes(calls)
+  })
+
+  it('6.79.1: prompt drafts over the polish size say too_long', async () => {
+    const long = Array.from({ length: 1500 }, (_, i) => `word${i}`).join(' ')
+    transcribeAudioBuffer.mockResolvedValue({ text: long, backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', elapsedMs: 20, audioBytes: 3200 })
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+    const result = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast&autoclean=1`)
+    expect(result.json.polishSkipped).toBe('too_long')
+    expect(autoCleanDictation).not.toHaveBeenCalled()
+  })
+
+  it('6.79.1: strips um and uh from messages and prompt drafts before the model, and when it is skipped; never from meetings', async () => {
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = '1'
+    const message = await finalizeText('Um, ask Dana about, uh, the plan', 'message')
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('Ask Dana about, the plan', expect.any(Array), expect.anything())
+    expect(message.json.text).toBe('Ask Dana about, the plan')
+    // Budget spent: the model is skipped, the fillers still go.
+    const capped = await finalizeText('So, um, we ship Friday', 'message')
+    expect(capped.json).toEqual({ text: 'So, we ship Friday', surface: 'message', polished: true, polishSkipped: 'daily_cap' })
+    // A meeting line reaches the model exactly as heard.
+    await finalizeText('Um, the forecast, uh, is ready', 'meeting')
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('Um, the forecast, uh, is ready', expect.any(Array), expect.anything())
+    // Prompt drafts with autoclean off still lose their fillers.
+    transcribeAudioBuffer.mockResolvedValue({ text: 'Uh, send the deck to Chris.', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', elapsedMs: 20, audioBytes: 3200 })
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+    const draft = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast`)
+    expect(draft.json).toMatchObject({ text: 'Send the deck to Chris.', polishSkipped: 'disabled' })
+  })
+
+  it('6.79.1: COS_DICTATION_FILLER_PASS=0 sends the text to the model as heard', async () => {
+    process.env.COS_DICTATION_FILLER_PASS = '0'
+    await finalizeText('Um, ask Dana', 'message')
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('Um, ask Dana', expect.any(Array), expect.anything())
   })
 
   it('6.45.4: drops an invented closing sentence from the committed chunk and keeps the prompt', async () => {

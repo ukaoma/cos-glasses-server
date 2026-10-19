@@ -81,6 +81,8 @@
     "!server/scripts/key-lanes-p6-mutation-gate.mjs",
     "!server/scripts/key-lanes-p8-mutation-gate.mjs",
     "!server/scripts/key-lanes-mutation-gate.mjs",
+    "!server/scripts/dictation-polish-eval.ts",
+    "!server/scripts/dictation-polish-mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",
     "!shared/**/*.test.ts",
