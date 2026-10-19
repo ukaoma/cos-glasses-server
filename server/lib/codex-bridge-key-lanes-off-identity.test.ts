@@ -170,14 +170,14 @@ async function runScenario(s: Scenario): Promise<Record_> {
 
 function writeEnabledCodexProfile(): void {
   mkdirSync(DATA, { recursive: true, mode: 0o700 })
-  writeFileSync(join(DATA, 'provider-keys.json'), JSON.stringify({ v: 1, keys: [{ ref: 'key_0123456789ab', kind: 'openrouter', secret: 'sk-or-v1-p4-off-identity-fake', last4: 'fake', capUsd: 1, savedAt: '2026-10-19T00:00:00.000Z' }] }), { mode: 0o600 })
+  mkdirSync(join(DATA, 'key-secrets'), { recursive: true }); writeFileSync(join(DATA, 'key-secrets', 'provider-keys.json'), JSON.stringify({ v: 1, keys: [{ ref: 'key_0123456789ab', kind: 'openrouter', secret: 'sk-or-v1-p4-off-identity-fake', last4: 'fake', capUsd: 1, savedAt: '2026-10-19T00:00:00.000Z' }] }), { mode: 0o600 })
   writeFileSync(join(DATA, 'provider-profiles.json'), JSON.stringify({ v: 1, profiles: [{ id: 'gpt-key', label: 'GPT key', keyRef: 'key_0123456789ab', engine: 'codex', model: 'openai/gpt-5.3-codex', enabled: true, timeoutTier: 'sonnet', offerOnV1: false, directTools: false, createdAt: '2026-10-19T00:00:00.000Z', updatedAt: '2026-10-19T00:00:00.000Z' }] }), { mode: 0o600 })
 }
 
 const savedLanes = process.env.COS_KEY_LANES
 beforeEach(() => {
   rmSync(join(DATA, 'provider-profiles.json'), { force: true })
-  rmSync(join(DATA, 'provider-keys.json'), { force: true })
+  rmSync(join(DATA, 'key-secrets'), { recursive: true, force: true })
   delete process.env.COS_KEY_LANES
   __resetKeyLanesForTests()
 })

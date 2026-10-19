@@ -444,6 +444,13 @@ export class KeyRelayServer implements KeyRelay {
     this.breakers.reset(scope, id)
   }
 
+  /** QA W5: every live nonce of one profile (turned off, changed or removed). Returns how many. */
+  revokeProfile(profileId: string, reason: RelayRevokeReason = 'cancel'): number {
+    let n = 0
+    for (const [hash, e] of [...this.turns]) if (e.binding.profileId === profileId) { this.drop(hash, reason); n++ }
+    return n
+  }
+
   /** Live nonces (tests and diagnostics; never the nonce itself). */
   liveTurnCount(): number {
     return this.turns.size
@@ -860,6 +867,14 @@ export function installKeyRelaySeams(): void {
 export function getKeyRelay(deps?: KeyRelayDeps): KeyRelayServer {
   if (!shared) shared = createKeyRelay(deps)
   installKeyRelaySeams()
+  return shared
+}
+
+/**
+ * The shared relay when one exists, else null. Routes use this so a Control action never
+ * creates the relay (and its deps) early: with no relay there is no live nonce and no open breaker.
+ */
+export function existingKeyRelay(): KeyRelayServer | null {
   return shared
 }
 

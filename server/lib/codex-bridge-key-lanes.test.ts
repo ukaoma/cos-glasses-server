@@ -156,7 +156,7 @@ function seedUserCodex(): void {
 
 function seedKeyAndProfiles(profiles: KeyProfile[] = [profile()]): void {
   mkdirSync(DATA, { recursive: true, mode: 0o700 })
-  writeFileSync(join(DATA, 'provider-keys.json'), JSON.stringify({ v: 1, keys: [{ ref: 'key_0123456789ab', kind: 'openrouter', secret: FAKE_KEY, last4: '0000', capUsd: 1, savedAt: '2026-10-19T00:00:00.000Z' }] }), { mode: 0o600 })
+  mkdirSync(join(DATA, 'key-secrets'), { recursive: true }); writeFileSync(join(DATA, 'key-secrets', 'provider-keys.json'), JSON.stringify({ v: 1, keys: [{ ref: 'key_0123456789ab', kind: 'openrouter', secret: FAKE_KEY, last4: '0000', capUsd: 1, savedAt: '2026-10-19T00:00:00.000Z' }] }), { mode: 0o600 })
   writeFileSync(join(DATA, 'provider-profiles.json'), JSON.stringify({ v: 1, profiles }), { mode: 0o600 })
 }
 

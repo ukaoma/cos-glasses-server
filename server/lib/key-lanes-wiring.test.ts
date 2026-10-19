@@ -394,6 +394,14 @@ describe('key-lane refusal lines live in key-notices.ts', () => {
   })
 })
 
+describe('same-Mac residual risk copy (QA B1, pinned by COS Control)', () => {
+  it('is exactly the agreed sentence and fits the house copy rules', async () => {
+    const notices = await import('./key-notices.js')
+    expect(notices.KEY_LANE_SAME_MAC_COPY).toBe("Your key is saved on this Mac. Apps and agents that run on this Mac as you can read it. Your provider's spending limit is the real stop.")
+    expect(notices.KEY_LANE_SAME_MAC_COPY).not.toMatch(/[\u2013\u2014\u2190-\u21ff]/u)
+  })
+})
+
 describe('composition root (source shape: index.ts cannot be executed in a test)', () => {
   it('index.ts wires the key lanes exactly once, after the key-lanes router is mounted', () => {
     const src = readFileSync(join(import.meta.dirname, '..', 'index.ts'), 'utf8')

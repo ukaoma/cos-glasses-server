@@ -91,7 +91,7 @@ async function call(origin: string, c: Call) {
   return { status: res.status, headers: h, text }
 }
 const json = (r: { text: string }) => JSON.parse(r.text)
-const store = () => (JSON.parse(readFileSync(dataPath('provider-keys.json'), 'utf8')) as { keys: Array<{ ref: string }> }).keys
+const store = () => (JSON.parse(readFileSync(dataPath('key-secrets', 'provider-keys.json'), 'utf8')) as { keys: Array<{ ref: string }> }).keys
 const post = (path: string, body: unknown, extra: Partial<Call> = {}) => call(base, { method: 'POST', path, body: JSON.stringify(body), ...extra })
 const get = (path: string, extra: Partial<Call> = {}) => call(base, { method: 'GET', path, ...extra })
 
@@ -270,14 +270,14 @@ describe('keys and profiles (switch on)', () => {
 
   it('the key file is 0600, and saving a profile makes lanes active and fills keyProfiles', async () => {
     const key = await saveKey()
-    expect(statSync(dataPath('provider-keys.json')).mode & 0o777).toBe(0o600)
+    expect(statSync(dataPath('key-secrets', 'provider-keys.json')).mode & 0o777).toBe(0o600)
     expect(lanes.keyLanesActive()).toBe(false)
     const r = await post('/api/key-lanes/profiles', { id: 'sonnet', label: 'Sonnet 5.5', keyRef: key.ref, engine: 'claude', model: 'anthropic/claude-sonnet-5.5' })
     expect(r.status).toBe(200)
     expect(json(r).active).toBe(true)
     expect(lanes.keyLanesHealthFields()).toEqual({ details: { keyLanes: { enabled: true, active: true } } })
     expect(lanes.keyProfilesModelsField().keyProfiles?.map(p => p.id)).toEqual(['sonnet'])
-    expect(listing()).toEqual(['provider-keys.json', 'provider-profiles.json'])
+    expect(listing()).toEqual(['key-secrets', 'provider-profiles.json'])
   })
 
   it('refusals: bad kind, bad shape, bad cap, unknown key, disallowed model, provider says no', async () => {
@@ -330,8 +330,8 @@ describe('keys and profiles (switch on)', () => {
     expect(forced.status).toBe(200)
     expect(json(forced)).toEqual({ removed: true, disabledProfiles: ['a'], active: false })
     expect(store().map(k => k.ref)).toEqual([other.ref])
-    expect(statSync(dataPath('provider-keys.json')).mode & 0o777).toBe(0o600)
-    expect(readFileSync(dataPath('provider-keys.json'), 'utf8')).not.toContain(FAKE_KEY)
+    expect(statSync(dataPath('key-secrets', 'provider-keys.json')).mode & 0o777).toBe(0o600)
+    expect(readFileSync(dataPath('key-secrets', 'provider-keys.json'), 'utf8')).not.toContain(FAKE_KEY)
     expect(json(await get('/api/key-lanes/status')).profiles.map((p: { id: string; enabled: boolean }) => [p.id, p.enabled])).toEqual([['a', false], ['b', false]])
     expect(seen).toEqual(['no_enabled_profile'])
     // A key only a disabled profile names goes without force; unknown and malformed refs are refused.
@@ -386,7 +386,7 @@ describe('remove all keys (plan 12)', () => {
     try {
       const r = await post('/api/key-lanes/remove-all', { exportLedger: true })
       expect(r.status).toBe(500)
-      expect(existsSync(dataPath('provider-keys.json'))).toBe(true)
+      expect(existsSync(dataPath('key-secrets', 'provider-keys.json'))).toBe(true)
       expect(existsSync(dataPath('key-ledger.jsonl'))).toBe(true)
       expect(lanes.keyLanesEnabled()).toBe(true)
     } finally {

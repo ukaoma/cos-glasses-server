@@ -29,7 +29,7 @@ beforeAll(async () => {
 afterAll(() => { server.close(); rmSync(dataDir, { recursive: true, force: true }); delete process.env.COS_KEY_LANES })
 beforeEach(() => {
   delete process.env.COS_KEY_LANES
-  for (const f of readdirSync(dataDir)) if (/^(key-lanes|provider-keys|provider-profiles)\.json$/.test(f)) rmSync(join(dataDir, f))
+  for (const f of readdirSync(dataDir)) if (/^(key-lanes\.json|key-secrets|provider-profiles\.json)$/.test(f)) rmSync(join(dataDir, f), { recursive: true })
   lanes.__resetKeyLanesForTests()
 })
 
@@ -45,7 +45,7 @@ function paths(value: unknown, prefix = ''): Set<string> {
 }
 const getJson = async (path: string) => (await fetch(base + path)).json() as Promise<Record<string, unknown>>
 const diff = (a: Set<string>, b: Set<string>) => ({ added: [...b].filter(x => !a.has(x)).sort(), removed: [...a].filter(x => !b.has(x)).sort() })
-const keyLanesFiles = () => readdirSync(dataDir).filter(f => /^(key-lanes|provider-keys|provider-profiles)\.json$/.test(f))
+const keyLanesFiles = () => readdirSync(dataDir).filter(f => /^(key-lanes\.json|key-secrets|provider-profiles\.json)$/.test(f))
 
 describe('exposure list (plan 3.1)', () => {
   it('switch off: no key-lanes field anywhere on health or models, and no key-lanes file', async () => {

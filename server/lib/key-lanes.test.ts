@@ -145,7 +145,10 @@ describe('key store (plan 4, 10.3, 12)', () => {
     const file = store.keyStorePath()
     expect(statSync(file).mode & 0o777).toBe(0o600)
     expect(statSync(dataDir).mode & 0o777).toBe(0o700)
-    expect(listing()).toEqual(['provider-keys.json'])
+    // QA B1: the secrets live alone in a 0700 directory of their own.
+    expect(statSync(store.keySecretsDir()).mode & 0o777).toBe(0o700)
+    expect(file).toBe(join(store.keySecretsDir(), 'provider-keys.json'))
+    expect(listing()).toEqual(['key-secrets'])
     expect(JSON.stringify(store.listPublicKeys())).not.toContain(FAKE_KEY)
     expect(JSON.stringify(store.getPublicKey(rec.ref))).not.toContain(FAKE_KEY)
     expect(store.readKeySecretForRelay(rec.ref)).toBe(FAKE_KEY)
@@ -162,10 +165,11 @@ describe('key store (plan 4, 10.3, 12)', () => {
   })
 
   it('a corrupt store reads as empty and is not moved or rewritten', () => {
+    mkdirSync(store.keySecretsDir(), { recursive: true, mode: 0o700 })
     writeFileSync(store.keyStorePath(), 'not json')
     expect(store.listPublicKeys()).toEqual([])
     expect(readFileSync(store.keyStorePath(), 'utf8')).toBe('not json')
-    expect(listing()).toEqual(['provider-keys.json'])
+    expect(listing()).toEqual(['key-secrets'])
   })
 
   it('shape, cap and URL checks', () => {

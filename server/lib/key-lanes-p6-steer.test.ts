@@ -29,7 +29,7 @@ function saveProfile(id: string, engine: 'claude' | 'codex' | 'direct', model: s
 
 beforeEach(() => {
   delete process.env.COS_KEY_LANES
-  for (const f of ['key-lanes.json', 'provider-keys.json', 'provider-profiles.json']) rmSync(join(dataDir, f), { force: true })
+  for (const f of ['key-lanes.json', 'key-secrets', 'provider-profiles.json']) rmSync(join(dataDir, f), { recursive: true, force: true })
   lanes.refreshKeyLanesEnabled()
 })
 afterAll(() => { rmSync(scratch, { recursive: true, force: true }) })

@@ -1,4 +1,5 @@
-// Key lanes (K1, plan v4 sections 4, 10.3, 12): the saved provider keys, `data/provider-keys.json`.
+// Key lanes (K1, plan v4 sections 4, 10.3, 12): the saved provider keys, `data/key-secrets/provider-keys.json`
+// (QA B1: a dedicated 0700 directory, so the deny rules every Claude spawn gets name one place).
 //
 // The only file on the Mac that holds a real key. 0600, written atomically into the 0700 data
 // dir, never followed through a symlink. Nothing here logs a secret, and the only function that
@@ -7,7 +8,8 @@
 //
 // Reading never creates: a missing file is an empty store, a corrupt one reads as empty and is
 // left exactly where it is.
-import { existsSync, lstatSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmdirSync, statSync, unlinkSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { DATA_DIR, dataPath } from './data-dir.js'
@@ -15,6 +17,8 @@ import type { KeyKind, KeyRef, PublicKeyRecord } from './key-relay-contract.js'
 import { KEY_KINDS, KEY_REF_RE } from './key-relay-contract.js'
 
 export const KEY_STORE_FILE = 'provider-keys.json'
+/** QA B1: the secrets live alone in this 0700 directory under the data dir. */
+export const KEY_SECRETS_DIR = 'key-secrets'
 export const DEFAULT_KEY_CAP_USD = 1.0
 export const KEY_CAP_LIMITS = { minUsd: 0.01, maxUsd: 1000 } as const
 const MAX_SECRET_CHARS = 512
@@ -27,8 +31,12 @@ interface KeyStoreFile {
   keys: StoredKey[]
 }
 
+export function keySecretsDir(): string {
+  return dataPath(KEY_SECRETS_DIR)
+}
+
 export function keyStorePath(): string {
-  return dataPath(KEY_STORE_FILE)
+  return join(keySecretsDir(), KEY_STORE_FILE)
 }
 
 /** Parse a private JSON state file without creating, repairing or moving anything. */
@@ -39,9 +47,15 @@ export function readPrivateJsonFile(file: string): unknown {
   try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return undefined }
 }
 
-/** Atomic 0600 write into the 0700 data dir. */
+/** Atomic 0600 write into its 0700 directory (the data dir, or the key secrets dir). */
 export function writePrivateJsonFile(file: string, value: unknown): void {
   mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 })
+  const dir = dirname(file)
+  if (dir !== DATA_DIR) {
+    if (existsSync(dir) && lstatSync(dir).isSymbolicLink()) throw new Error('refusing to write through a symlinked directory')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    chmodSync(dir, 0o700)
+  }
   if (existsSync(file) && lstatSync(file).isSymbolicLink()) throw new Error('refusing to write through a symlink')
   durableAtomicWriteFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
 }
@@ -201,5 +215,6 @@ export function deleteKeyStore(): boolean {
   const file = keyStorePath()
   if (!existsSync(file)) return false
   unlinkSync(file)
+  try { rmdirSync(keySecretsDir()) } catch { /* not empty or already gone */ }
   return true
 }

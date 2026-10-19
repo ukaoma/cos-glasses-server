@@ -95,7 +95,7 @@ async function call(origin: string, c: Call) {
   return { status: res.status, headers: h, text }
 }
 const json = (r: { text: string }) => JSON.parse(r.text)
-const store = () => (JSON.parse(readFileSync(dataPath('provider-keys.json'), 'utf8')) as { keys: Array<{ ref: string }> }).keys
+const store = () => (JSON.parse(readFileSync(dataPath('key-secrets', 'provider-keys.json'), 'utf8')) as { keys: Array<{ ref: string }> }).keys
 const post = (path: string, body: unknown, extra: Partial<Call> = {}) => call(base, { method: 'POST', path, body: JSON.stringify(body), ...extra })
 const get = (path: string, extra: Partial<Call> = {}) => call(base, { method: 'GET', path, ...extra })
 
@@ -151,7 +151,7 @@ describe('cap saves reach the relay meter (plan 4.5 "Cap value")', () => {
     expect((await post('/api/key-lanes/keys', { ref, capUsd: 5 })).status).toBe(200)
     expect(meter.capUsd(ref)).toBe(5)
     // Something other than Control raises the cap in the file.
-    const path = dataPath('provider-keys.json')
+    const path = dataPath('key-secrets', 'provider-keys.json')
     const file = JSON.parse(readFileSync(path, 'utf8'))
     file.keys[0].capUsd = 900
     writeFileSync(path, JSON.stringify(file))
@@ -160,7 +160,7 @@ describe('cap saves reach the relay meter (plan 4.5 "Cap value")', () => {
 
   it('a fresh key save is noted too, before any turn reads the file', async () => {
     const ref = await saveKey(3)
-    const path = dataPath('provider-keys.json')
+    const path = dataPath('key-secrets', 'provider-keys.json')
     const file = JSON.parse(readFileSync(path, 'utf8'))
     file.keys[0].capUsd = 700
     writeFileSync(path, JSON.stringify(file))
@@ -203,5 +203,74 @@ describe('catalog route reads P5 key-catalog.ts', () => {
     const body = json(await call(fresh, { method: 'GET', path: '/api/key-lanes/catalog' }))
     expect(body.pricesFrom).toBe('built-in')
     expect(body.curated.map((c: { inUsdPerM: number }) => c.inUsdPerM)).toEqual([2, 0.1])
+  })
+})
+
+describe('QA U6 / W5: breaker reset route; profile off, change or removal stops its turns', () => {
+  beforeEach(() => { process.env.COS_KEY_LANES = '1' })
+  const profileBody = (ref: string, extra: Record<string, unknown> = {}) => ({ id: 'sonnet', label: 'Sonnet', keyRef: ref, engine: 'claude', model: 'anthropic/claude-sonnet-5.5', ...extra })
+
+  it('POST /breaker/reset closes a paused key; refuses the phone, a bad ref and an unknown key', async () => {
+    const ref = await saveKey()
+    const relay = relayMod.getKeyRelay()
+    for (let i = 0; i < 3; i++) relay.breakers.record('key', ref, 'key_rejected', false)
+    expect(relay.breakerState('key', ref).open).toBe(true)
+    expect((await post('/api/key-lanes/breaker/reset', { ref }, { ip: PHONE })).status).toBe(403)
+    expect(relay.breakerState('key', ref).open).toBe(true)
+    expect((await post('/api/key-lanes/breaker/reset', { ref: 'nope' })).status).toBe(400)
+    expect((await post('/api/key-lanes/breaker/reset', { ref: 'key_000000000000' })).status).toBe(404)
+    const r = await post('/api/key-lanes/breaker/reset', { ref })
+    expect(r.status).toBe(200)
+    expect(json(r)).toEqual({ reset: true, breaker: { open: false, failures: 0 } })
+    expect(relay.breakerState('key', ref).open).toBe(false)
+  })
+
+  it('with lanes off the reset route is today\'s 404', async () => {
+    delete process.env.COS_KEY_LANES
+    lanes.__resetKeyLanesForTests()
+    const r = await post('/api/key-lanes/breaker/reset', { ref: 'key_000000000000' })
+    expect(r.status).toBe(404)
+    expect(r.text).toContain('Cannot POST')
+  })
+
+  it('turning a profile off revokes its nonces; a model change also resets its breaker; delete revokes', async () => {
+    const ref = await saveKey()
+    expect((await post('/api/key-lanes/profiles', profileBody(ref))).status).toBe(200)
+    const relay = relayMod.getKeyRelay()
+    const revoke = vi.spyOn(relay, 'revokeProfile')
+    const reset = vi.spyOn(relay, 'resetBreaker')
+    // Same profile, nothing changed: nothing revoked.
+    expect((await post('/api/key-lanes/profiles', profileBody(ref))).status).toBe(200)
+    expect(revoke).not.toHaveBeenCalled()
+    expect((await post('/api/key-lanes/profiles', profileBody(ref, { enabled: false }))).status).toBe(200)
+    expect(revoke).toHaveBeenCalledWith('sonnet')
+    expect(reset).not.toHaveBeenCalled()
+    revoke.mockClear()
+    expect((await post('/api/key-lanes/profiles', profileBody(ref, { model: 'anthropic/claude-haiku-5.5' }))).status).toBe(200)
+    expect(revoke).toHaveBeenCalledWith('sonnet')
+    expect(reset).toHaveBeenCalledWith('profile', 'sonnet')
+    revoke.mockClear()
+    expect((await call(base, { method: 'DELETE', path: '/api/key-lanes/profiles/sonnet' })).status).toBe(200)
+    expect(revoke).toHaveBeenCalledWith('sonnet')
+  })
+
+  it('removing a key revokes the live turns of the profiles it turns off', async () => {
+    const ref = await saveKey()
+    await post('/api/key-lanes/profiles', profileBody(ref))
+    const revoke = vi.spyOn(relayMod.getKeyRelay(), 'revokeProfile')
+    expect((await call(base, { method: 'DELETE', path: `/api/key-lanes/keys/${ref}?force=1` })).status).toBe(200)
+    expect(revoke).toHaveBeenCalledWith('sonnet')
+  })
+})
+
+describe('relay revokeProfile', () => {
+  it('drops only that profile\'s nonces', async () => {
+    const relay = relayMod.createKeyRelay({ isActive: () => true, secretFor: () => 'sk-ant-api03-fakefakefakefakefakefake', keyKindOf: () => 'anthropic', log: () => {}, reconcileDelayMs: null, meter: new meterMod.KeyRelayMeter({ capUsd: () => 5, appendRow: () => {}, loadSettled: () => 0, log: () => {} }) })
+    const turn = (profileId: string, turnId: string) => relay.issueTurn({ keyRef: 'key_0123456789ab', profileId, turnId, sessionId: 's', engine: 'claude', allowedModel: 'claude-sonnet-5-5' }, { wallMaxMs: 60_000 })
+    await turn('a', 't1'); await turn('a', 't2'); await turn('b', 't3')
+    expect(relay.liveTurnCount()).toBe(3)
+    expect(relay.revokeProfile('a')).toBe(2)
+    expect(relay.liveTurnCount()).toBe(1)
+    await relay.close()
   })
 })

@@ -24,7 +24,7 @@ import {
   runKeyLanesInactiveHooks,
   setKeyLanesEnabled,
 } from '../lib/key-lanes.js'
-import { deleteProfile, deleteProfilesFile, listProfiles, upsertProfile, validateProfileInput } from '../lib/key-profiles.js'
+import { deleteProfile, deleteProfilesFile, getProfile, listProfiles, upsertProfile, validateProfileInput } from '../lib/key-profiles.js'
 import type { BreakerState, KeyKind, KeyLanesStatusBody } from '../lib/key-relay-contract.js'
 import { KEY_REF_RE } from '../lib/key-relay-contract.js'
 import {
@@ -45,7 +45,7 @@ import { isKeyProfileId } from '../../shared/key-preference.js'
 import { catalogLanesFor, curatedKeyModels, getKeyCatalog, KEY_CATALOG_CURATED, type KeyCatalogModel } from '../lib/key-catalog.js'
 import { keyNoticeError } from '../lib/key-notices.js'
 import { getSharedKeyMeter } from '../lib/key-relay-meter.js'
-import { installKeyRelaySeams } from '../lib/key-relay.js'
+import { existingKeyRelay, installKeyRelaySeams } from '../lib/key-relay.js'
 
 export const KEY_LANES_ENABLE_PATH = '/api/key-lanes/enable'
 export const KEY_LEDGER_FILE = 'key-ledger.jsonl'
@@ -332,17 +332,37 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
     }
     const wasActive = keyLanesActive()
     for (const p of users) upsertProfile({ ...p, enabled: false, updatedAt: now().toISOString() })
+    for (const p of users) existingKeyRelay()?.revokeProfile(p.id)
     deleteKey(ref)
     await settle(wasActive, 'no_enabled_profile')
     return res.json({ removed: true, disabledProfiles: users.map(p => p.id), active: keyLanesActive() })
+  })
+
+  // QA U6 / C8: Control's "Reset" for a key paused after three failures (plan 4.6).
+  router.post('/key-lanes/breaker/reset', macOnly, (req, res) => {
+    const ref = (req.body as { ref?: unknown } | undefined)?.ref
+    if (typeof ref !== 'string' || !KEY_REF_RE.test(ref)) return res.status(400).json({ error: 'invalid_key_ref', message: 'Unknown key.' })
+    if (!getPublicKey(ref)) return res.status(404).json({ error: 'unknown_key', message: 'That key is not saved on this Mac.' })
+    const relay = existingKeyRelay()
+    relay?.resetBreaker('key', ref)
+    return res.json({ reset: true, breaker: relay?.breakerState('key', ref) ?? CLOSED_BREAKER })
   })
 
   router.post('/key-lanes/profiles', macOnly, async (req, res) => {
     const wasActive = keyLanesActive()
     const result = validateProfileInput((req.body ?? {}) as Record<string, unknown>, ref => getPublicKey(ref)?.kind, now)
     if (!result.ok) return res.status(400).json({ error: result.error, message: result.message })
+    const before = getProfile(result.profile.id)
     const write = upsertProfile(result.profile)
     if (!write.ok) return res.status(409).json({ error: write.error, message: 'That is the most key profiles COS keeps. Remove one first.' })
+    const p = result.profile
+    if (before) {
+      const relay = existingKeyRelay()
+      // QA W5: a profile turned off or pointed elsewhere stops its live turns now.
+      if (!p.enabled || before.keyRef !== p.keyRef || before.model !== p.model || before.engine !== p.engine) relay?.revokeProfile(p.id)
+      // QA U6: a new model or key is a fresh start for the profile's breaker.
+      if (before.keyRef !== p.keyRef || before.model !== p.model) relay?.resetBreaker('profile', p.id)
+    }
     await settle(wasActive, 'no_enabled_profile')
     return res.json({ profile: result.profile, active: keyLanesActive() })
   })
@@ -352,6 +372,7 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
     const wasActive = keyLanesActive()
     const removed = deleteProfile(req.params.id)
     if (!removed) return res.status(404).json({ error: 'unknown_profile', message: 'No profile with that id.' })
+    existingKeyRelay()?.revokeProfile(req.params.id)
     await settle(wasActive, 'no_enabled_profile')
     return res.json({ removed: true, active: keyLanesActive() })
   })

@@ -281,7 +281,7 @@ describe('applyCodexLaneBEnv', () => {
 describe('codexProfilePreflight', () => {
   const fakeRelay = {} as KeyRelay
   function saveKeyAndProfile(kind = 'openrouter', model = 'openai/gpt-5.3-codex', enabled = true) {
-    writeFileSync(join(DATA, 'provider-keys.json'), JSON.stringify({ v: 1, keys: [{ ref: 'key_0123456789ab', kind, secret: 'sk-or-v1-preflight-fake', last4: 'fake', capUsd: 1, savedAt: '2026-10-19T00:00:00.000Z' }] }), { mode: 0o600 })
+    mkdirSync(join(DATA, 'key-secrets'), { recursive: true }); writeFileSync(join(DATA, 'key-secrets', 'provider-keys.json'), JSON.stringify({ v: 1, keys: [{ ref: 'key_0123456789ab', kind, secret: 'sk-or-v1-preflight-fake', last4: 'fake', capUsd: 1, savedAt: '2026-10-19T00:00:00.000Z' }] }), { mode: 0o600 })
     writeFileSync(join(DATA, 'provider-profiles.json'), JSON.stringify({ v: 1, profiles: [profile({ model, enabled })] }), { mode: 0o600 })
   }
 

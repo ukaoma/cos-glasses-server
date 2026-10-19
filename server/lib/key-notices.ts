@@ -442,6 +442,12 @@ export function keyNoticeError(id: KeyNoticeErrorId, params: KeyNoticeErrorParam
 // (key-profile-routing.ts, key-profile-rejects.ts) now read their lines from this object. Each line
 // is one lens row with a typical label; no em dashes, no arrows, no sign-in wording.
 
+/**
+ * QA B1 (main session decision): the plain same-Mac residual risk, shown by COS Control and in the
+ * changelog. Exact wording agreed with Control; do not edit without its pin.
+ */
+export const KEY_LANE_SAME_MAC_COPY = "Your key is saved on this Mac. Apps and agents that run on this Mac as you can read it. Your provider's spending limit is the real stop."
+
 export const KEY_LANE_REFUSAL_COPY = {
   lanesOff: 'Key lanes are off. Pick a model.',
   profileOff: (label: string) => `Key profile ${label} is off. Pick a model.`,

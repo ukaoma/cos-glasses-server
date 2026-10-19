@@ -78,7 +78,7 @@ afterAll(async () => {
 beforeEach(() => {
   process.env.COS_API_TOKEN = TOKEN
   delete process.env.COS_KEY_LANES
-  for (const f of ['key-lanes.json', 'provider-keys.json', 'provider-profiles.json']) rmSync(join(dataDir, f), { force: true })
+  for (const f of ['key-lanes.json', 'key-secrets', 'provider-profiles.json']) rmSync(join(dataDir, f), { recursive: true, force: true })
   lanes.refreshKeyLanesEnabled()
   state.callModelStreaming.mockReset()
   state.callModelStreaming.mockImplementation(async (_q: string, sid: string, callbacks: any) => {

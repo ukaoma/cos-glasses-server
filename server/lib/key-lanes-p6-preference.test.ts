@@ -36,7 +36,7 @@ const routing = await import('./key-profile-routing.js')
 const { callModelStreaming } = await import('./model-router.js')
 
 const FAKE_KEY = 'sk-or-v1-' + 'ab'.repeat(32)
-const KEY_FILES = ['key-lanes.json', 'provider-keys.json', 'provider-profiles.json']
+const KEY_FILES = ['key-lanes.json', 'key-secrets', 'provider-profiles.json']
 
 function cb() {
   return { onChunk: vi.fn(), onDone: vi.fn(), onError: vi.fn(), onKeyProfileTurn: vi.fn() }
@@ -54,7 +54,7 @@ function saveProfile(opts: { id?: string; label?: string; engine?: 'claude' | 'c
 }
 
 function wipeKeys() {
-  for (const f of KEY_FILES) rmSync(join(dataDir, f), { force: true })
+  for (const f of KEY_FILES) rmSync(join(dataDir, f), { recursive: true, force: true })
   lanes.refreshKeyLanesEnabled()  // not __resetKeyLanesForTests: that drops the remove-all hook conversation.ts registered
   routing.__resetKeyProfileEnginesForTests()
   routing.__resetEnvProfileWarningForTests()
