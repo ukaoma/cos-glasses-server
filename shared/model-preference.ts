@@ -208,7 +208,23 @@ export function resetRuntimeCursorModelLabels(): void {
   delete runtimeCursorLabels[CURSOR_COMPOSER_MODEL]
 }
 
-export function modelLabel(model: ModelPreference): string {
+/**
+ * Key lanes K1 (plan 5.2 labels): a caller that renders a key-profile turn passes the profile
+ * record, and its label wins. With no profile passed every label below is the 6.79.0 one,
+ * including the `'Opus'` default. `isModelPreference` stays closed: a profile is never a slot.
+ */
+export interface ModelLabelProfile {
+  label: string
+}
+
+function profileLabel(profile: ModelLabelProfile | undefined, max: number): string | undefined {
+  const label = typeof profile?.label === 'string' ? profile.label.trim() : ''
+  return label ? Array.from(label).slice(0, max).join('') : undefined
+}
+
+export function modelLabel(model: ModelPreference, profile?: ModelLabelProfile): string {
+  const fromProfile = profileLabel(profile, 40)
+  if (fromProfile) return fromProfile
   switch (model) {
     case 'fable': return 'Fable'
     case 'sonnet': return 'Sonnet'
@@ -224,7 +240,9 @@ export function modelLabel(model: ModelPreference): string {
   }
 }
 
-export function modelShortLabel(model: ModelPreference): string {
+export function modelShortLabel(model: ModelPreference, profile?: ModelLabelProfile): string {
+  const fromProfile = profileLabel(profile, 12)
+  if (fromProfile) return fromProfile
   switch (model) {
     case 'fable': return 'Fable'
     case 'sonnet': return 'Sonnet'

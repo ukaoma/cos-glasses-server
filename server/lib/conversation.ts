@@ -13,12 +13,46 @@ import { logSessionEnd, buildSessionLogEntry, writeSessionLog } from './session-
 import { atomicWriteFileSync, durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { localDay } from './local-day.js'
 import { normalizeModelPreference, type ModelPreference } from '../../shared/model-preference.js'
+import { parsePreference, profilePreference } from '../../shared/key-preference.js'
+import { onKeyLanesInactive } from './key-lanes.js'
 import { parseMediaAttachmentRefs, type MediaAttachmentRef } from '../../shared/media-attachment.js'
 import { secureExistingPrivateFile } from './secure-user-config.js'
 import { currentMessageEra } from './message-era.js'
 import { formatReferencedSourceData } from './prompt-reference-boundary.js'
 
 export type { ModelPreference }
+
+/**
+ * Key lanes K1 (plan v4 5.2, W2): what a session or an exchange may be bound to. A model slot,
+ * exactly as before, or a key profile as `profile:<id>`. Persistence accepts a profile by SYNTAX
+ * only: whether that profile still exists, is enabled and has a key is decided at resolve time
+ * (model-router), which refuses with a lens line. Dropping the binding here would make the next
+ * turn run on the subscription without a word, which is the bug this type exists to prevent.
+ */
+export type KeyProfileBinding = `profile:${string}`
+export type SessionModelBinding = ModelPreference | KeyProfileBinding
+
+/**
+ * The persistence normalizer (plan 5.2 Accept by syntax). For every input that is not a well
+ * formed `profile:<id>` this returns exactly what normalizeModelPreference returns, so a store
+ * with no profile in it reads and writes byte for byte as 6.79.0 did.
+ */
+export function normalizeSessionBinding(value: unknown): SessionModelBinding | undefined {
+  const parsed = parsePreference(value)
+  if (!parsed) return undefined
+  return parsed.kind === 'model' ? parsed.value : profilePreference(parsed.id) as KeyProfileBinding
+}
+
+/** The profile id of a `profile:<id>` binding, else undefined. */
+export function bindingProfileId(value: unknown): string | undefined {
+  const parsed = parsePreference(value)
+  return parsed?.kind === 'profile' ? parsed.id : undefined
+}
+
+/** The closed view of a binding: the model slot, or null for a profile (or nothing). */
+function closedSessionModel(value: SessionModelBinding | null | undefined): ModelPreference | null {
+  return normalizeModelPreference(value) ?? null
+}
 
 export interface Exchange {
   role: 'user' | 'assistant'
@@ -31,8 +65,9 @@ export interface Exchange {
   /** Short-number namespace. Missing means the original legacy era. */
   messageEra?: string
   /** Per-exchange model badge. Prefer this over session.modelPreference when
-   * rendering history so Cursor/Codex turns do not inherit an Opus default. */
-  modelPreference?: ModelPreference
+   * rendering history so Cursor/Codex turns do not inherit an Opus default.
+   * K1: a keyed turn is stamped `profile:<id>` (accepted by syntax). */
+  modelPreference?: SessionModelBinding
   /** Public attachment refs may live on either half of a Q&A pair: request
    * photos on the user exchange, model-published images on the assistant
    * exchange. Bytes, filesystem paths, and capabilities never persist here. */
@@ -75,7 +110,7 @@ interface Session {
   exchanges: Exchange[]
   lastActivity: number
   createdAt: number
-  modelPreference: ModelPreference | null
+  modelPreference: SessionModelBinding | null
   contextBreaks: number[]  // timestamps where user said "new chat" — prompt history only sees exchanges after last break
 }
 
@@ -160,12 +195,12 @@ function loadFromDisk(): void {
   let loaded = 0
   for (const [id, session] of Object.entries(result.data.sessions)) {
     if (!session.contextBreaks) session.contextBreaks = []
-    session.modelPreference = normalizeModelPreference(session.modelPreference) ?? null
+    session.modelPreference = normalizeSessionBinding(session.modelPreference) ?? null
     // Persistence boundary: malformed refs are dropped without sacrificing
     // the surrounding exchange or the rest of the recovered session.
     for (const exchange of session.exchanges) {
       validateLoadedExchangeProvenance(exchange)
-      const exchangeModel = normalizeModelPreference(exchange.modelPreference)
+      const exchangeModel = normalizeSessionBinding(exchange.modelPreference)
       if (exchangeModel) exchange.modelPreference = exchangeModel
       else delete exchange.modelPreference
       if ('attachments' in exchange && exchange.attachments !== undefined) {
@@ -479,7 +514,7 @@ export function addExchange(
   globalMsgNum?: number,
   attachments?: MediaAttachmentRef[],
   provenance?: ExchangeJobProvenance,
-  modelPreference?: ModelPreference | null,
+  modelPreference?: SessionModelBinding | null,
 ): Exchange {
   let session = sessions.get(sessionId)
   if (!session) {
@@ -487,7 +522,7 @@ export function addExchange(
     sessions.set(sessionId, session)
   }
 
-  const stampedModel = normalizeModelPreference(modelPreference)
+  const stampedModel = normalizeSessionBinding(modelPreference)
   const exchange: Exchange = {
     role,
     content,
@@ -593,7 +628,7 @@ export function reconcileExchangeByJobIdentity(
   globalMsgNum?: number,
   attachments?: MediaAttachmentRef[],
   messageEra?: string,
-  modelPreference?: ModelPreference | null,
+  modelPreference?: SessionModelBinding | null,
   origin?: ExchangeOriginStamp,
 ): ReconciledExchange {
   if (!validClientJobId(identity.clientJobId) || !validGeneration(identity.generation)) {
@@ -625,7 +660,7 @@ export function reconcileExchangeByJobIdentity(
     && /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(messageEra)
     ? messageEra
     : currentMessageEra()
-  const stampedModel = normalizeModelPreference(modelPreference)
+  const stampedModel = normalizeSessionBinding(modelPreference)
   let exchange: Exchange
   const created = matchingIndexes.length === 0
   if (created) {
@@ -709,17 +744,57 @@ export async function clearSession(sessionId: string): Promise<void> {
   scheduleCacheUpdate()
 }
 
+/**
+ * The session's model slot. CLOSED (plan 5): a session bound to a key profile reads null here,
+ * so no caller that predates key lanes can ever mistake `profile:<id>` for a model and fall
+ * through to Claude. Routing reads getSessionBinding instead.
+ */
 export function getSessionModel(sessionId: string): ModelPreference | null {
+  return closedSessionModel(sessions.get(sessionId)?.modelPreference)
+}
+
+/** The session's binding, a model slot or `profile:<id>`. Only model-router and the job runtime read it. */
+export function getSessionBinding(sessionId: string): SessionModelBinding | null {
   return sessions.get(sessionId)?.modelPreference ?? null
 }
+
+/**
+ * Plan 12 (Remove all keys): every session bound to a profile (or only to `profileIds`) loses the
+ * binding and gets a context break, so a later subscription turn starts a fresh CLI session and
+ * never resumes a keyed transcript. Exchange stamps stay: history still says which answers ran
+ * on a key. Returns the session ids it changed.
+ */
+export function clearProfileBindings(profileIds?: readonly string[]): string[] {
+  const only = profileIds ? new Set(profileIds) : null
+  const changed: string[] = []
+  const now = Date.now()
+  for (const session of sessions.values()) {
+    const id = bindingProfileId(session.modelPreference)
+    if (id === undefined || (only && !only.has(id))) continue
+    session.modelPreference = null
+    session.contextBreaks.push(now)
+    changed.push(session.id)
+  }
+  if (changed.length > 0) {
+    scheduleSave()
+    scheduleCacheUpdate()
+  }
+  return changed
+}
+
+// Plan 12: Remove all keys clears every profile binding. A named Map entry; nothing runs until
+// the remove-all route fires it.
+onKeyLanesInactive('p6-session-bindings', reason => {
+  if (reason === 'remove_all') clearProfileBindings()
+})
 
 /** Prefer per-exchange stamps; fall back to session model for pre-stamp rows. */
 export function resolveExchangePairModel(
   user: Pick<Exchange, 'modelPreference'> | undefined,
   assistant: Pick<Exchange, 'modelPreference'> | undefined,
-  sessionModel: ModelPreference | null | undefined,
-): ModelPreference | undefined {
-  return normalizeModelPreference(
+  sessionModel: SessionModelBinding | null | undefined,
+): SessionModelBinding | undefined {
+  return normalizeSessionBinding(
     assistant?.modelPreference
       ?? user?.modelPreference
       ?? sessionModel
@@ -727,7 +802,7 @@ export function resolveExchangePairModel(
   )
 }
 
-export function setSessionModel(sessionId: string, model: ModelPreference | null): void {
+export function setSessionModel(sessionId: string, model: SessionModelBinding | null): void {
   const session = sessions.get(sessionId)
   if (session) {
     session.modelPreference = model
@@ -809,7 +884,7 @@ export interface SessionSummary {
   exchangeCount: number
   lastActivity: number
   createdAt: number
-  modelPreference: ModelPreference | null
+  modelPreference: SessionModelBinding | null
   lastQuery: string | null
 }
 
@@ -948,7 +1023,9 @@ export function getActiveSessions(): SessionToArchive[] {
       contextBreaks: session.contextBreaks,
       createdAt: session.createdAt,
       lastActivity: session.lastActivity,
-      modelPreference: session.modelPreference,
+      // Archive rows carry their own stamps (a keyed answer is stamped profile:<id>); the
+      // session-level fallback stays a closed model slot, as archive.ts types it.
+      modelPreference: closedSessionModel(session.modelPreference),
     })
   }
   return result

@@ -21,7 +21,9 @@
 //   SteerTracker          sent and covered uuids; what a result means (finish, wait, steering off)
 //   steerCutoffMs         how close to a deadline a steer is refused as too late
 //   resolveRunModel       the model a run will use, exactly as model-router resolves it
+//   steerProviderFor      the steer gate's provider; a key-profile job is `profile_session`
 import { DEFAULT_MODEL, isCodexModel, isCursorModel, isOllamaModel, normalizeModelPreference, type ModelPreference } from '../../shared/model-preference.js'
+import { parsePreference } from '../../shared/key-preference.js'
 
 /** Quiet after a result that left a steer uncovered, before stdin is closed (plan P4). */
 export const STEER_SETTLE_MS = 20_000
@@ -256,4 +258,29 @@ export function providerOfModel(model: ModelPreference): QueryProvider {
   if (isOllamaModel(model)) return 'ollama'
   if (isCursorModel(model)) return 'cursor'
   return isCodexModel(model) ? 'codex' : 'claude'
+}
+
+export type SteerProviderVerdict =
+  | { kind: 'provider'; provider: QueryProvider }
+  | { kind: 'profile_session'; profileId: string }
+
+/**
+ * Key lanes K1 (plan 5.2): the explicit guard in front of resolveRunModel / providerOfModel,
+ * which stay CLOSED. A job whose request names `profile:<id>`, or that names no model in a
+ * session bound to one, is a `profile_session`; the caller asks the profile's engine whether it
+ * steers. Without this guard both fall through to the Claude default and a Codex profile's job
+ * would be offered Claude steering. With no profile anywhere the verdict is exactly
+ * `providerOfModel(resolveRunModel(model, sessionModel, envDefault))`. The session binding is read
+ * only when nothing else names the model, as model-router does.
+ */
+export function steerProviderFor(
+  model: unknown,
+  sessionModel: ModelPreference | null | undefined,
+  envDefault: unknown,
+  sessionBinding: () => unknown,
+): SteerProviderVerdict {
+  const requested = parsePreference(model)
+  const bound = requested ?? (sessionModel == null ? parsePreference(sessionBinding()) : undefined)
+  if (bound?.kind === 'profile') return { kind: 'profile_session', profileId: bound.id }
+  return { kind: 'provider', provider: providerOfModel(resolveRunModel(model, sessionModel, envDefault)) }
 }

@@ -13,6 +13,10 @@ import {
 } from '../lib/codex-model-catalog.js'
 import { resolveCursorPreferenceForModelId } from '../lib/cursor-model-catalog.js'
 import { tryInstantResponse } from '../lib/response-cache.js'
+import { keyLanesActive } from '../lib/key-lanes.js'
+import { KEY_PROFILE_V1_NOT_OFFERED, v1OfferedProfile, v1OfferedProfiles } from '../lib/key-profile-routing.js'
+import type { SessionModelBinding } from '../lib/conversation.js'
+import { parseV1KeyModelName, profilePreference, v1KeyModelName } from '../../shared/key-preference.js'
 
 import crypto from 'node:crypto'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
@@ -188,10 +192,22 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
     model,
     typeof req.query.model === 'string' ? req.query.model : undefined,
   )
-  const resolvedModel = resolveModel(selectedModel, query)
+  // Key lanes K1 (plan 9.4): `cos-key-<id>` is handled BEFORE resolveModel, which stays closed.
+  // Only an active profile with "Offer on /v1" on runs; any other `cos-key-<id>` is refused, never
+  // answered on the subscription. Every other model name takes the 6.79.0 path unchanged.
+  const keyProfileId = parseV1KeyModelName(selectedModel)
+  if (keyProfileId !== undefined && !v1OfferedProfile(keyProfileId)) {
+    maintenanceLease.release()
+    return res.status(400).json({
+      error: { message: KEY_PROFILE_V1_NOT_OFFERED, type: 'invalid_request_error', code: 'model_not_offered' },
+    })
+  }
+  const resolvedModel: SessionModelBinding = keyProfileId !== undefined
+    ? profilePreference(keyProfileId) as SessionModelBinding
+    : resolveModel(selectedModel, query)
   const completionId = `chatcmpl-${crypto.randomUUID().slice(0, 12)}`
   const timestamp = Math.floor(Date.now() / 1000)
-  const responseModel = MODEL_NAMES[resolvedModel]
+  const responseModel = keyProfileId !== undefined ? v1KeyModelName(keyProfileId) : MODEL_NAMES[resolvedModel as ModelPreference]
 
   // ── Predictive response cache — bypass Claude for common queries ──
   const cached = tryInstantResponse(query)
@@ -557,7 +573,10 @@ openaiCompatRouter.post('/v1/chat/completions', async (req, res) => {
 })
 
 // GET /v1/models — required by some clients for model discovery
-openaiCompatRouter.get('/v1/models', async (_req, res) => {
+// Key lanes K1 (plan 9.4, D8): open and byte-identical until a key lane is active; then it asks
+// for the chat Bearer and lists `cos-key-<id>` for each profile offered on /v1.
+openaiCompatRouter.get('/v1/models', async (req, res) => {
+  if (keyLanesActive() && !validateAuth(req, res)) return
   const catalog = await getCodexModelCatalog()
   res.json({
     object: 'list',
@@ -573,6 +592,12 @@ openaiCompatRouter.get('/v1/models', async (_req, res) => {
 	        object: 'model',
 	        created: 1709251200,
 	        owned_by: 'openai',
+	      })),
+	      ...v1OfferedProfiles().map(profile => ({
+	        id: v1KeyModelName(profile.id),
+	        object: 'model',
+	        created: 1709251200,
+	        owned_by: 'cos-key',
 	      })),
 	    ],
 	  })

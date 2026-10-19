@@ -19,6 +19,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
+import { KEY_PROFILE_REJECT_CODE, KEY_PROFILE_SCHEDULED_REJECT, keyProfileRejectApplies } from './key-profile-rejects.js'
 import {
   normalizeEffortPreference,
   normalizeModelPreference,
@@ -410,6 +411,8 @@ export function applyMorningBriefPatch(current: MorningBriefConfig, raw: unknown
       delete next.model
     } else {
       const model = normalizeModelPreference(patch.model)
+      // Key lanes K1 (plan 5.2): Reject, and say why. A brief always runs on the subscription.
+      if (!model && keyProfileRejectApplies(patch.model)) throw new MorningBriefConfigError(KEY_PROFILE_REJECT_CODE, KEY_PROFILE_SCHEDULED_REJECT)
       if (!model) throw new MorningBriefConfigError('invalid_model', 'Unknown model preference.')
       next.model = model
     }
