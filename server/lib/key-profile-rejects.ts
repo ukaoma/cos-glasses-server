@@ -18,5 +18,8 @@ export const KEY_PROFILE_REJECT_CODE = 'key_profile_not_allowed'
 
 /** True when `value` names a key profile and the site should say so instead of its generic refusal. */
 export function keyProfileRejectApplies(value: unknown): boolean {
-  return isProfilePreference(value) && keyLanesEnabled()
+  const applies = isProfilePreference(value) && keyLanesEnabled()
+  // QA G4: one line per reject (a closed site met a profile).
+  if (applies) console.info('[key-lanes] refused kind=key_profile_not_allowed (scheduled, dispatch or Work site)')
+  return applies
 }

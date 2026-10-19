@@ -204,16 +204,20 @@ async function runKeyProfileRoute(
   }
   try {
     if (options?.dispatch) {
+      console.info(`[key-lanes] refused kind=dispatch profile=${profileId}`)
       await lockedCallbacks.onError('dispatch_requires_claude')
       return sid
     }
     const resolved = resolveKeyProfileTurn(profileId)
     if (!resolved.ok) {
+      // QA G4: one line per refusal kind.
+      console.info(`[key-lanes] refused kind=${resolved.code} profile=${profileId}`)
       await lockedCallbacks.onError(resolved.message)
       return sid
     }
     const runner = keyProfileEngineRunner(resolved.turn.profile.engine)
     if (!runner) {
+      console.info(`[key-lanes] refused kind=no_runner engine=${resolved.turn.profile.engine}`)
       await lockedCallbacks.onError(keyProfileUnavailableLine(resolved.turn.profile.label))
       return sid
     }

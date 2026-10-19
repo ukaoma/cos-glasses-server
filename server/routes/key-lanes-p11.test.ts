@@ -199,8 +199,7 @@ describe('catalog route reads P5 key-catalog.ts', () => {
 
   it('catalog unreachable: the built-in curated prices', async () => {
     catalogMod.__setKeyCatalogForTests(new catalogMod.KeyCatalog({ fetchImpl: (async () => { throw new Error('offline') }) as unknown as typeof fetch }))
-    const fresh = await listen(buildApp(true, true, true)) // the route keeps its own 24 h copy too
-    const body = json(await call(fresh, { method: 'GET', path: '/api/key-lanes/catalog' }))
+    const body = json(await call(live, { method: 'GET', path: '/api/key-lanes/catalog' }))
     expect(body.pricesFrom).toBe('built-in')
     expect(body.curated.map((c: { inUsdPerM: number }) => c.inUsdPerM)).toEqual([2, 0.1])
   })
@@ -272,5 +271,19 @@ describe('relay revokeProfile', () => {
     expect(relay.revokeProfile('a')).toBe(2)
     expect(relay.liveTurnCount()).toBe(1)
     await relay.close()
+  })
+})
+
+describe('QA G5: the catalog route uses P5 downselect and keeps no cache of its own', () => {
+  beforeEach(() => { process.env.COS_KEY_LANES = '1' })
+  it('a long or glyph-laden name becomes one clean lens row; every call asks the shared catalog', async () => {
+    fetchCatalog = vi.fn(async () => [{ id: 'vendor/long-model', name: `Very ⚠ long ${'x'.repeat(90)} model`, inUsdPerM: 1, outUsdPerM: 2 }])
+    const a = json(await get('/api/key-lanes/catalog?q=long'))
+    expect(a.search).toHaveLength(1)
+    expect([...a.search[0].label].length).toBeLessThanOrEqual(64)
+    expect(a.search[0].label).not.toContain('⚠')
+    expect(a.search[0].label.endsWith('per M')).toBe(true)
+    await get('/api/key-lanes/catalog?q=long')
+    expect(fetchCatalog).toHaveBeenCalledTimes(2)
   })
 })

@@ -42,7 +42,7 @@ import {
 import { isLoopbackSocket } from '../lib/network-policy.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { isKeyProfileId } from '../../shared/key-preference.js'
-import { catalogLanesFor, curatedKeyModels, getKeyCatalog, KEY_CATALOG_CURATED, type KeyCatalogModel } from '../lib/key-catalog.js'
+import { curatedKeyModels, downselectKeyCatalog, getKeyCatalog, KEY_CATALOG_CURATED, type KeyCatalogModel } from '../lib/key-catalog.js'
 import { keyNoticeError } from '../lib/key-notices.js'
 import { getSharedKeyMeter } from '../lib/key-relay-meter.js'
 import { existingKeyRelay, installKeyRelaySeams } from '../lib/key-relay.js'
@@ -51,7 +51,6 @@ export const KEY_LANES_ENABLE_PATH = '/api/key-lanes/enable'
 export const KEY_LEDGER_FILE = 'key-ledger.jsonl'
 export const CODEX_HOMES_DIR = 'codex-homes'
 const VALIDATE_TIMEOUT_MS = 10_000
-const CATALOG_TTL_MS = 24 * 60 * 60 * 1000
 
 export type KeyValidation =
   | { ok: true; limitRemainingUsd?: number; isFreeTier?: boolean }
@@ -232,7 +231,6 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
   const fetchCatalog = deps.fetchCatalog ?? defaultFetchCatalog
   const downloadsDir = deps.downloadsDir ?? (() => join(homedir(), 'Downloads'))
   const now = deps.now ?? (() => new Date())
-  let catalogCache: { at: number; models: CatalogModel[] } | null = null
 
   const router = Router()
 
@@ -415,23 +413,28 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
 
   router.get('/key-lanes/catalog', async (req, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase().slice(0, 40) : ''
-    let models: CatalogModel[] | null = catalogCache && Date.now() - catalogCache.at < CATALOG_TTL_MS ? catalogCache.models : null
-    if (!models) {
-      try {
-        models = await fetchCatalog()
-        catalogCache = { at: Date.now(), models }
-      } catch {
-        models = null
-      }
+    // QA G5: one 24 h cache (key-catalog.ts), not a second one here.
+    let models: CatalogModel[] | null
+    try {
+      models = await fetchCatalog()
+    } catch {
+      models = null
     }
     // P11: curated prices and lanes from P5's key-catalog.ts, the one catalog module.
     const curated = curatedKeyModels(models as KeyCatalogModel[] | null)
       .map(({ id, name, inUsdPerM, outUsdPerM, role }) => ({ id, name, inUsdPerM, outUsdPerM, role }))
     // Lane B takes only anthropic/ and openai/ slugs; every other model is direct only (plan 4.4).
-    const search = q && models
-      ? models.filter(m => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)).slice(0, 20)
-        .map(m => ({ ...m, lanes: catalogLanesFor(m.id) }))
-      : undefined
+    // QA G5: P5's downselect (20 rows, one 64-character lens row each, unsafe glyphs cleaned),
+    // reporting only the rows that match the search.
+    let search: Array<CatalogModel & { lanes: string[]; label: string }> | undefined
+    if (q && models) {
+      const byId = new Map(models.map(m => [m.id, m]))
+      search = downselectKeyCatalog(models as KeyCatalogModel[], { query: q })
+        .flatMap(r => {
+          const m = byId.get(r.id)
+          return m && (m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)) ? [{ ...m, lanes: r.lanes, label: r.label }] : []
+        })
+    }
     res.json({ curated, pricesFrom: models ? 'openrouter' : 'built-in', ...(search ? { search } : {}) })
   })
 

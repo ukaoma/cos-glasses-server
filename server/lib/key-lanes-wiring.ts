@@ -9,18 +9,20 @@
 //   registerDirectRelay                          the in-process door the direct lane posts through
 //   installKeyRelaySeams                         the relay's answers on GET /api/key-lanes/status
 //
-// HARD RULE: wireKeyLanes() does map writes only. No file is read or written, no socket or timer
-// is opened, and the direct lane module is not even loaded until a direct profile turn runs. The
-// status seams are installed at boot only when keyLanesEnabled(); every registered runner and
-// relay resolver refuses (or is never reached) while keyLanesActive() is false, so a server with
-// no key takes the 6.79.0 path byte for byte.
+// HARD RULE: wireKeyLanes() does map writes, plus the one read keyLanesEnabled() makes of
+// data/key-lanes.json (an existsSync when it is absent; QA N1: this comment said "no file is read").
+// Nothing is written, no socket or timer is opened, and the direct lane module is not even loaded
+// until a direct profile turn runs. The status seams are installed at boot only when
+// keyLanesEnabled(); every registered runner and relay resolver refuses (or is never reached)
+// while keyLanesActive() is false, so a server with no key takes the 6.79.1 path byte for byte.
 import { randomUUID } from 'node:crypto'
 import { callClaudeStreaming } from './claude-bridge.js'
 import { runCodexKeyProfileTurn } from './codex-bridge.js'
 import { registerCodexKeyRelay, registerCodexKeyedThreadRecorder } from './codex-profile-home.js'
 import { keyCatalogPeekPrice } from './key-lanes-pricing.js'
 import { keyLanesActive, keyLanesEnabled, registerKeyLanesStatusProvider } from './key-lanes.js'
-import { registerKeyProfileEngine, type KeyProfileEngineRunner } from './key-profile-routing.js'
+import { registerKeyProfileEngine, type KeyProfileEngineRunner, type KeyProfileTurn } from './key-profile-routing.js'
+import { getKeyCatalog } from './key-catalog.js'
 import type { KeyProfile, KeyRef, KeyRelay, RelayNonceBinding } from './key-relay-contract.js'
 import { KEY_NOTICE_ERROR_IDS, keyModelLabel, keyNoticeError, type KeyNoticeErrorId } from './key-notices.js'
 import { getPublicKey } from './key-store.js'
@@ -126,21 +128,47 @@ function withKeyFailureLines(callbacks: StreamCallbacks, turnId: string, profile
 
 // ── Runners (P6's engine seam) ───────────────────────────────────────────────
 
+/**
+ * QA C11: an OpenRouter profile whose slug left the (cached) catalog is refused before anything
+ * spawns, with the model-gone line. No cached catalog: the turn goes ahead and a refresh starts.
+ */
+export function keyProfileSlugGoneLine(turn: Pick<KeyProfileTurn, 'profile' | 'keyKind'>, catalog = getKeyCatalog()): string | null {
+  if (turn.keyKind !== 'openrouter') return null
+  const models = catalog.peek()
+  if (!models) { catalog.refreshInBackground(); return null }
+  if (models.some(m => m.id === turn.profile.model)) return null
+  console.info(`[key-lanes] refused kind=model_gone profile=${turn.profile.id} (slug not in the catalog)`)
+  return keyNoticeError('model_gone', { keyKind: turn.keyKind, modelLabel: keyModelLabel(turn.profile.model), profileLabel: turn.profile.label })
+}
+
+async function refuseGoneSlug(sessionId: string, callbacks: StreamCallbacks, turn: KeyProfileTurn): Promise<string | null> {
+  const line = keyProfileSlugGoneLine(turn)
+  if (!line) return null
+  await callbacks.onError(line)
+  return sessionId
+}
+
 /** Lane B Claude (P3): the profile's timeout tier for the clock, its model on `--model`. */
-export const runClaudeKeyProfileTurn: KeyProfileEngineRunner = (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) => {
+export const runClaudeKeyProfileTurn: KeyProfileEngineRunner = async (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) => {
+  const gone = await refuseGoneSlug(sessionId, callbacks, turn)
+  if (gone !== null) return gone
   // The relay keys failures by turn id, so the turn gets one here when the caller has none.
   const turnId = options?.turnId ?? randomUUID()
   return callClaudeStreaming(query, sessionId, withKeyFailureLines(callbacks, turnId, turn.profile), turn.profile.timeoutTier, images, reference, globalMsgNum, { ...options, turnId, keyProfile: turn.profile })
 }
 
 /** Lane B Codex (P4). */
-export const runCodexKeyTurn: KeyProfileEngineRunner = (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) => {
+export const runCodexKeyTurn: KeyProfileEngineRunner = async (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) => {
+  const gone = await refuseGoneSlug(sessionId, callbacks, turn)
+  if (gone !== null) return gone
   const turnId = options?.turnId ?? randomUUID()
   return runCodexKeyProfileTurn(query, sessionId, withKeyFailureLines(callbacks, turnId, turn.profile), turn, images, reference, globalMsgNum, { ...options, turnId })
 }
 
 /** Lane C1 (P5). The module loads on the first direct turn, never at boot. */
 export const runDirectKeyTurn: KeyProfileEngineRunner = async (query, sessionId, callbacks, turn, images, reference, globalMsgNum, options) => {
+  const gone = await refuseGoneSlug(sessionId, callbacks, turn)
+  if (gone !== null) return gone
   const direct = await import('./direct-bridge.js')
   if (!direct.directRelayRegistered()) direct.registerDirectRelay(() => sharedDirectRelay())
   return direct.callDirectStreaming(query, sessionId, callbacks, turn.profile, images, reference, globalMsgNum, options)
@@ -188,7 +216,10 @@ export function createDirectRelay(deps: DirectRelayAdapterDeps = {}): DirectRela
   return {
     async openTurn(binding) {
       const refused = preflight(binding)
-      if (refused) return { ok: false, refused }
+      if (refused) {
+        console.info(`[key-lanes] direct refused kind=${refused} profile=${binding.profileId}`)
+        return { ok: false, refused }
+      }
       const price = priceFor(binding.model)
       const turn: DirectRelayTurn = {
         async post(body, signal) {

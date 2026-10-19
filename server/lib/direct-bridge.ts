@@ -402,6 +402,8 @@ export async function callDirectStreaming(
   })
   const lensLine = (id: DirectNoticeErrorId): string => notices ? notices.keyNoticeError(id, errorParams()) : DIRECT_COPY.copyUnavailable
   const refuse = async (line: string): Promise<string> => {
+    // QA G4: one line per refusal (the lens copy only, never a body or a key).
+    console.info(`[direct-bridge] refused profile=${profile.id}: ${line}`)
     cleanupModelImageInputs(imageInputs)
     await callbacks.onError(line)
     return sid

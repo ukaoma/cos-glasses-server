@@ -57,7 +57,17 @@ const PROFILE: KeyProfile = {
 const TURN = { binding: 'profile:sonnet-key', profile: PROFILE, keyKind: 'openrouter' } as never
 const cb = () => ({ onChunk: vi.fn(), onDone: vi.fn(), onError: vi.fn() }) as never
 
+const catalogMod = await import('./key-catalog.js')
+/** Tests never reach the network: the catalog fetch fails offline unless a test seeds it. */
+function offlineCatalog(models?: Array<{ id: string; name: string; inUsdPerM: number; outUsdPerM: number }>) {
+  const body = models ? JSON.stringify({ data: models.map(m => ({ id: m.id, name: m.name, pricing: { prompt: String(m.inUsdPerM / 1e6), completion: String(m.outUsdPerM / 1e6) }, architecture: { output_modalities: ['text'] } })) }) : null
+  const catalog = new catalogMod.KeyCatalog({ fetchImpl: (async () => { if (!body) throw new Error('offline'); return new Response(body, { status: 200 }) }) as unknown as typeof fetch })
+  catalogMod.__setKeyCatalogForTests(catalog)
+  return catalog
+}
+
 async function rewire(env: string | undefined) {
+  offlineCatalog()
   if (env === undefined) delete process.env.COS_KEY_LANES
   else process.env.COS_KEY_LANES = env
   lanes.__resetKeyLanesForTests()
@@ -508,5 +518,36 @@ describe('a keyed turn the relay failed shows the key-notices line, not the CLI 
     wiring.recordKeyTurnFailure({ turnId: 'turn-codex-402', sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: 'out_of_credit', status: 402 })
     await wrapped.onError('Codex failed (codex.unknown). Retry or check Codex Debug.')
     expect(callbacks.onError.mock.calls[0]![0]).toMatch(/out of credit/i)
+  })
+})
+
+
+describe('QA C11: an OpenRouter slug that left the catalog is refused before anything runs', () => {
+  beforeEach(() => { mocks.claude.mockClear(); mocks.codex.mockClear(); mocks.direct.mockClear() })
+
+  it('cached catalog without the slug: the model-gone line, no bridge; with it, or with no cache, the turn runs', async () => {
+    await rewire('1')
+    const catalog = offlineCatalog([{ id: 'anthropic/claude-haiku-5.5', name: 'Haiku', inUsdPerM: 1, outUsdPerM: 5 }])
+    await catalog.get()
+    const callbacks = { onChunk: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
+    for (const engine of ['claude', 'codex', 'direct'] as const) {
+      await routing.keyProfileEngineRunner(engine)!('q', 's', callbacks as never, TURN)
+    }
+    expect(mocks.claude).not.toHaveBeenCalled(); expect(mocks.codex).not.toHaveBeenCalled(); expect(mocks.direct).not.toHaveBeenCalled()
+    expect(callbacks.onError).toHaveBeenCalledTimes(3)
+    expect(callbacks.onError.mock.calls[0]![0]).toMatch(/is no longer on OpenRouter/)
+    const present = offlineCatalog([{ id: PROFILE.model, name: 'Sonnet', inUsdPerM: 2, outUsdPerM: 10 }])
+    await present.get()
+    await routing.keyProfileEngineRunner('claude')!('q', 's', cb(), TURN)
+    expect(mocks.claude).toHaveBeenCalledTimes(1)
+    offlineCatalog()
+    await routing.keyProfileEngineRunner('claude')!('q', 's', cb(), TURN)
+    expect(mocks.claude).toHaveBeenCalledTimes(2)
+  })
+
+  it('a key with no OpenRouter catalog (Anthropic) is never checked against it', async () => {
+    await rewire('1')
+    await offlineCatalog([{ id: 'x/y', name: 'Y', inUsdPerM: 1, outUsdPerM: 1 }]).get()
+    expect(wiring.keyProfileSlugGoneLine({ profile: PROFILE, keyKind: 'anthropic' } as never)).toBeNull()
   })
 })

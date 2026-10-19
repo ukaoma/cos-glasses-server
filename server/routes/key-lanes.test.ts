@@ -402,9 +402,10 @@ describe('catalog (plan 10.4)', () => {
     expect(r.curated.map((m: { id: string }) => m.id)).toEqual(['anthropic/claude-sonnet-5.5', 'anthropic/claude-haiku-5.5'])
     expect(r.curated[0]).toMatchObject({ inUsdPerM: 3, outUsdPerM: 15, role: 'default' })
     expect(r.pricesFrom).toBe('openrouter')
+    // QA G5 (P11): rows come from P5's downselect and carry its lens label.
     expect(r.search).toEqual([
-      { ...FAKE_CATALOG[0], lanes: ['key', 'direct'] },
-      { ...FAKE_CATALOG[1], lanes: ['direct'] },
+      { ...FAKE_CATALOG[0], lanes: ['key', 'direct'], label: 'Claude Sonnet 5.5 | $3/$15 per M' },
+      { ...FAKE_CATALOG[1], lanes: ['direct'], label: 'Llama 9 | $0.20/$0.20 per M' },
     ])
   })
   it('a failed catalog fetch uses the built-in prices', async () => {
