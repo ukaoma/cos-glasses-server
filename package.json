@@ -74,6 +74,7 @@
     "!server/scripts/live-cues-v2-notes-mutation-gate.mjs",
     "!server/scripts/live-cues-verdicts-mutation-gate.mjs",
     "!server/scripts/key-lanes-p1-mutation-gate.mjs",
+    "!server/scripts/key-lanes-p3-mutation-gate.mjs",
     "!server/lib/meeting-engine/__fixtures__/**",
     "!server/lib/__fixtures__/**",
     "!shared/**/*.test.ts",
