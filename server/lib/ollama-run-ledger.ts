@@ -1,7 +1,9 @@
 import crypto from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
-import { OLLAMA_MODEL, type OllamaModelPreference } from '../../shared/model-preference.js'
+import { OLLAMA_MODEL } from '../../shared/model-preference.js'
+import { dataPath } from './data-dir.js'
+import type { KeyLane } from './key-relay-contract.js'
 
 const DEFAULT_MAX_RUNS = 100
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60_000
@@ -10,6 +12,13 @@ const RUNNING_STALE_MS = 30 * 60_000
 
 export type OllamaRunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'client_disconnected'
 
+/**
+ * One run, Ollama or (key lanes K1 P5, plan v4 9.1) direct. `model` was OllamaModelPreference; it
+ * is a string now so a direct run can carry its `profile:<id>` preference. Ollama rows still write
+ * exactly `model: 'ollama'` and never a `lane`, `profile` or `providerModel` key, in the 6.79.0
+ * key order (pinned byte for byte by ollama-run-ledger.test.ts). Direct rows live in their own
+ * file (`direct-runs.jsonl` under the data dir), so the Ollama ledger only ever holds Ollama runs.
+ */
 export interface OllamaRunRecord {
   runId: string
   turnId?: string
@@ -18,8 +27,15 @@ export interface OllamaRunRecord {
   status: OllamaRunStatus
   createdAt: string
   updatedAt: string
-  model: OllamaModelPreference
-  ollamaModel: string
+  model: string
+  /** Direct rows only. */
+  lane?: KeyLane
+  /** Direct rows only: the key profile id. */
+  profile?: string
+  /** Ollama rows: the pulled tag. Direct rows leave it out and use providerModel. */
+  ollamaModel?: string
+  /** Direct rows only: the provider model id or OpenRouter slug. */
+  providerModel?: string
   origin: string
   queryPreview?: string
   outputPreview?: string
@@ -42,6 +58,11 @@ export function getOllamaLedgerPath(): string {
   return resolve(process.env.COS_OLLAMA_RUN_LEDGER_FILE || resolve(import.meta.dirname, '..', 'data', 'ollama-runs.jsonl'))
 }
 
+/** Direct (Lane C1) runs. Written only by a keyed turn, so nothing is created while lanes are off. */
+export function getDirectRunLedgerPath(): string {
+  return resolve(process.env.COS_DIRECT_RUN_LEDGER_FILE || dataPath('direct-runs.jsonl'))
+}
+
 function getMaxRuns(): number {
   const raw = Number(process.env.COS_OLLAMA_RUN_LEDGER_MAX ?? DEFAULT_MAX_RUNS)
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_RUNS
@@ -52,9 +73,8 @@ function getTtlMs(): number {
   return Number.isFinite(rawDays) && rawDays > 0 ? rawDays * 24 * 60 * 60_000 : DEFAULT_TTL_MS
 }
 
-function appendEvent(event: OllamaRunEvent): void {
+function appendEvent(event: OllamaRunEvent, path: string = getOllamaLedgerPath()): void {
   try {
-    const path = getOllamaLedgerPath()
     mkdirSync(dirname(path), { recursive: true })
     appendFileSync(path, JSON.stringify(event) + '\n')
   } catch (err) {
@@ -62,8 +82,7 @@ function appendEvent(event: OllamaRunEvent): void {
   }
 }
 
-function readEvents(): OllamaRunEvent[] {
-  const path = getOllamaLedgerPath()
+function readEvents(path: string = getOllamaLedgerPath()): OllamaRunEvent[] {
   if (!existsSync(path)) return []
   try {
     const events: OllamaRunEvent[] = []
@@ -129,23 +148,29 @@ export function startOllamaRun(input: {
   return run
 }
 
-export function finishOllamaRun(runId: string, input: {
+interface FinishRunInput {
   status: Exclude<OllamaRunStatus, 'running'>
   startedAtMs: number
   output?: string
   error?: string
-}): OllamaRunRecord | null {
+}
+
+function finishRun(path: string, classify: (message: string) => string, runId: string, input: FinishRunInput): void {
   const patch: Partial<OllamaRunRecord> = {
     status: input.status,
     durationMs: Math.max(0, Date.now() - input.startedAtMs),
   }
   if (input.output) patch.outputPreview = redactForOllamaLedger(input.output)
   if (input.error) {
-    patch.errorCode = classifyOllamaError(input.error)
+    patch.errorCode = classify(input.error)
     patch.errorPreview = redactForOllamaLedger(input.error)
   }
   const ts = new Date().toISOString()
-  appendEvent({ runId, ts, patch: { ...patch, updatedAt: ts } })
+  appendEvent({ runId, ts, patch: { ...patch, updatedAt: ts } }, path)
+}
+
+export function finishOllamaRun(runId: string, input: FinishRunInput): OllamaRunRecord | null {
+  finishRun(getOllamaLedgerPath(), classifyOllamaError, runId, input)
   return getOllamaRun(runId)
 }
 
@@ -154,10 +179,14 @@ export function getOllamaRun(runId: string): OllamaRunRecord | null {
 }
 
 export function listOllamaRuns(limit = 20, sessionId?: string): OllamaRunRecord[] {
+  return listRuns(getOllamaLedgerPath(), 'ollama.timeout', limit, sessionId)
+}
+
+function listRuns(path: string, staleCode: string, limit: number, sessionId?: string): OllamaRunRecord[] {
   const runs = new Map<string, OllamaRunRecord>()
   const order = new Map<string, number>()
   let eventIndex = 0
-  for (const event of readEvents()) {
+  for (const event of readEvents(path)) {
     eventIndex += 1
     const existing = runs.get(event.runId)
     const next = { ...(existing ?? {}), ...event.patch, runId: event.runId } as OllamaRunRecord
@@ -175,11 +204,65 @@ export function listOllamaRuns(limit = 20, sessionId?: string): OllamaRunRecord[
         return {
           ...run,
           status: 'client_disconnected' as const,
-          errorCode: run.errorCode ?? 'ollama.timeout',
+          errorCode: run.errorCode ?? staleCode,
         }
       }
       return run
     })
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
     .slice(0, limit)
+}
+
+// ── Direct runs (key lanes K1 P5, plan v4 9.1) ───────────────────────────────
+
+/** `direct.<failure>` for a key-lane failure kind, else the closest generic code. */
+export function classifyDirectError(message: string): string {
+  const m = /^direct-bridge: \[([a-z_]+)\]/.exec(message)
+  if (m) return `direct.${m[1]}`
+  const text = message.toLowerCase()
+  if (/tool round cap/.test(text)) return 'direct.tool_cap'
+  if (/tool aborted|tool call aborted/.test(text)) return 'direct.tool_abort'
+  if (/timeout|timed out|aborted/.test(text)) return 'direct.timeout'
+  return 'direct.error'
+}
+
+export function startDirectRun(input: {
+  turnId?: string
+  clientJobId?: string
+  cosSessionId: string
+  /** The COS preference the exchange is stamped with, `profile:<id>`. */
+  model: string
+  profile: string
+  providerModel: string
+  /** Endpoint origin only (scheme, host, port). Never a path, query or key. */
+  origin: string
+  query: string
+}): OllamaRunRecord {
+  const now = new Date().toISOString()
+  const run: OllamaRunRecord = {
+    runId: `direct-${crypto.randomUUID().slice(0, 8)}`,
+    turnId: input.turnId,
+    clientJobId: input.clientJobId,
+    cosSessionId: input.cosSessionId,
+    status: 'running',
+    createdAt: now,
+    updatedAt: now,
+    model: input.model,
+    lane: 'direct',
+    profile: input.profile,
+    providerModel: input.providerModel,
+    origin: input.origin,
+    queryPreview: redactForOllamaLedger(input.query),
+  }
+  appendEvent({ runId: run.runId, ts: now, patch: run }, getDirectRunLedgerPath())
+  return run
+}
+
+export function finishDirectRun(runId: string, input: FinishRunInput): OllamaRunRecord | null {
+  finishRun(getDirectRunLedgerPath(), classifyDirectError, runId, input)
+  return listDirectRuns(getMaxRuns()).find(run => run.runId === runId) ?? null
+}
+
+export function listDirectRuns(limit = 20, sessionId?: string): OllamaRunRecord[] {
+  return listRuns(getDirectRunLedgerPath(), 'direct.timeout', limit, sessionId)
 }
