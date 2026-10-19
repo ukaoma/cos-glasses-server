@@ -69,3 +69,16 @@ describe('keyAnswerJobFields / keyAnswerCompletionFields', () => {
     expect(keyAnswerJobFields({ lane: 'key', credential: CREDENTIAL, profile: 'gpt-key', usd: -1 })).toEqual({ lane: 'key', credential: CREDENTIAL, profile: 'gpt-key' })
   })
 })
+
+describe('QA U9: keyTurnOnly on a durable request', () => {
+  it('is kept only with a profile model, absent otherwise, and is part of the identity', async () => {
+    const { parseQueryJobRequest, requestFingerprint } = await import('./query-job-types.js')
+    const base = { clientJobId: randomUUID(), generation: 1, query: 'q', sessionId: 'session-p11' }
+    expect(parseQueryJobRequest({ ...base, model: 'profile:gpt-key', keyTurnOnly: true }).keyTurnOnly).toBe(true)
+    expect(parseQueryJobRequest({ ...base, model: 'haiku', keyTurnOnly: true })).not.toHaveProperty('keyTurnOnly')
+    expect(parseQueryJobRequest({ ...base, model: 'profile:gpt-key', keyTurnOnly: 'yes' })).not.toHaveProperty('keyTurnOnly')
+    const plain = parseQueryJobRequest({ ...base, model: 'profile:gpt-key' })
+    expect(plain).not.toHaveProperty('keyTurnOnly')
+    expect(requestFingerprint(plain)).not.toBe(requestFingerprint(parseQueryJobRequest({ ...base, model: 'profile:gpt-key', keyTurnOnly: true })))
+  })
+})

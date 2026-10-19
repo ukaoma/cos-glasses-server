@@ -217,8 +217,9 @@ async function runKeyProfileRoute(
       await lockedCallbacks.onError(keyProfileUnavailableLine(resolved.turn.profile.label))
       return sid
     }
-    // Persisted by syntax (conversation.ts) so the next turn of this session stays on the key.
-    setSessionModel(sid, resolved.turn.binding)
+    // Persisted by syntax (conversation.ts) so the next turn of this session stays on the key,
+    // unless this is the one-turn plan-limit offer (QA U9): then the session keeps its model.
+    if (!options?.keyTurnOnly) setSessionModel(sid, resolved.turn.binding)
     onKeyProfileTurn?.(resolved.turn)
     return await runner(query, sid, lockedCallbacks, resolved.turn, images, reference, globalMsgNum, options)
   } catch (err) {

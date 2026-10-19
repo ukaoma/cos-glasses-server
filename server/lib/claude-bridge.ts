@@ -451,6 +451,8 @@ export interface CallOptions {
    * the relay, no relay is registered, or this is a dispatch.
    */
   keyProfile?: KeyProfile
+  /** Key lanes (QA U9): run this one profile turn without binding the session to the profile. */
+  keyTurnOnly?: boolean
 }
 
 export async function callClaudeStreaming(

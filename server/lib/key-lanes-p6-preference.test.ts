@@ -175,6 +175,23 @@ describe('P6 Accept: an active profile runs on its engine', () => {
     expect(conversation.getSessionBinding(sid)).toBe('haiku')
   })
 
+  it('QA U9: the one-turn plan-limit run answers on the key but leaves the session on its model', async () => {
+    process.env.COS_KEY_LANES = '1'
+    saveProfile()
+    const runner = vi.fn(async (_q: string, sid: string, callbacks: any) => { await callbacks.onDone('key answer', 'sonnet'); return sid })
+    routing.registerKeyProfileEngine('claude', runner)
+    const sid = conversation.createSession()
+    await callModelStreaming('q1', sid, cb(), 'haiku')
+    expect(conversation.getSessionBinding(sid)).toBe('haiku')
+    await callModelStreaming('q2', sid, cb(), 'profile:sonnet55', undefined, undefined, undefined, { keyTurnOnly: true } as never)
+    expect(runner).toHaveBeenCalledTimes(1)
+    expect(conversation.getSessionBinding(sid)).toBe('haiku')
+    // The next model-less turn is the subscription's again, never the key.
+    await callModelStreaming('q3', sid, cb(), undefined)
+    expect(runner).toHaveBeenCalledTimes(1)
+    expect(bridges.claude).toHaveBeenCalledTimes(2)
+  })
+
   it('the session run lock releases on the keyed terminal callback', async () => {
     process.env.COS_KEY_LANES = '1'
     saveProfile()

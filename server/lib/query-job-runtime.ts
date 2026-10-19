@@ -420,6 +420,7 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
       sessionLockHeld: true,
       ...(request.dispatch ? { dispatch: request.dispatch } : {}),
       ...(request.sessionName ? { sessionName: request.sessionName } : {}),
+      ...(request.keyTurnOnly ? { keyTurnOnly: true } : {}),
       // 6.78.0: only on a run the coordinator decided is steerable.
       ...(steer ? { steer } : {}),
     },

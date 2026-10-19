@@ -21,6 +21,7 @@ import {
 } from '../lib/maintenance-lifecycle.js'
 import { currentMessageEra, LEGACY_MESSAGE_ERA } from '../lib/message-era.js'
 import { keyAnswerDoneFields } from '../lib/key-answer-fields.js'
+import { isProfilePreference } from '../../shared/key-preference.js'
 
 const TOOL_STATUS_MESSAGES: Record<string, string> = {
   WebSearch: 'Searching web...',
@@ -239,6 +240,8 @@ queryRouter.post('/query', async (req, res) => {
         requestAttachments: attachmentRefs,
         attachmentPromptBlock: resolvedAttachments.promptBlock,
         ...(validModel && isCursorModel(validModel) ? { cursorExecutionMode } : {}),
+        // QA U9: the one-turn plan-limit offer runs on the key without binding the session.
+        ...(req.body.keyTurnOnly === true && isProfilePreference(model) ? { keyTurnOnly: true } : {}),
       },
     )
   } catch (err: unknown) {

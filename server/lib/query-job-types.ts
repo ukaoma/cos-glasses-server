@@ -1,6 +1,7 @@
 import { providerFailureCode } from './provider-failure-text.js'
 import { createHash } from 'node:crypto'
 import type { QueryJobKeyAnswerFields } from './key-answer-fields.js'
+import { isProfilePreference } from '../../shared/key-preference.js'
 import {
   parseMediaAttachmentRefs,
   parseMediaIdList,
@@ -133,6 +134,12 @@ export interface QueryJobRequest {
    * it names the session, it does not change what is asked.
    */
   sessionName?: string
+  /**
+   * Key lanes (QA U9 / C10): run THIS turn on the key profile it names without binding the
+   * session to it (the plan-limit "run this one on your key" offer). Kept only with a
+   * `profile:<id>` model; in the fingerprint, since it changes what the turn does.
+   */
+  keyTurnOnly?: true
   /**
    * 6.78.0: the client can steer this run (it read `durableQueryJobs.steer`). Only `true` is
    * kept. Excluded from the fingerprint: it says how the answer may be guided, not what is
@@ -663,6 +670,7 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
     ...(input.handoffLatest === true ? { handoffLatest: true } : {}),
     ...(clientQueueItemId ? { clientQueueItemId } : {}),
     ...(sessionName ? { sessionName } : {}),
+    ...(input.keyTurnOnly === true && isProfilePreference(model) ? { keyTurnOnly: true as const } : {}),
     ...(input.steerable === true ? { steerable: true as const } : {}),
     attachmentIds,
     attachmentRefs,
@@ -727,7 +735,7 @@ export const FINGERPRINT_KEYS = [
   'clientJobId', 'generation', 'query', 'sessionId', 'model', 'effort',
   'cursorExecutionMode', 'messageEra', 'globalMsgNum', 'reference', 'handoffCode',
   'handoffLatest', 'clientQueueItemId', 'attachmentIds', 'attachmentRefs',
-  'activityToolMode',
+  'activityToolMode', 'keyTurnOnly',
 ] as const satisfies readonly (keyof QueryJobRequest)[]
 
 /** The request keys deliberately OUTSIDE the identity. Every key of

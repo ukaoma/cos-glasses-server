@@ -152,6 +152,9 @@ describe('the fingerprint pick', () => {
       'cursorExecutionMode', 'messageEra', 'globalMsgNum', 'reference', 'handoffCode',
       'handoffLatest', 'clientQueueItemId', 'attachmentIds', 'attachmentRefs',
       'activityToolMode',
+      // 6.80.0 key lanes (QA U9): a one-turn key run asks something different. Absent on every
+      // older request, so no stored hash moves (the pick drops an absent key).
+      'keyTurnOnly',
     ])
     expect(FINGERPRINT_KEYS).not.toContain('origin')
     // Every request key is in exactly one list; the type-level assertion is
