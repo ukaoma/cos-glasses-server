@@ -1,3 +1,11 @@
+## 6.78.2 - Live cues: 25 a meeting instead of 10
+
+No companion or COS Control change.
+
+- **What changed.** A meeting now gets up to 25 live cues (was 10) and 50 writer calls (was 20, still twice the cue cap so discarded drafts cannot end a meeting's cues early). The weekly writer ceiling default rises from 300 to 750 (`COS_LIVE_CUES_V2_WEEKLY` still overrides), so about the same 15 capped meetings fit in a week. Miles, 2026-10-19: an HC call used all 10 cues by 7:54, ten minutes in, and the server skipped for the rest of the meeting (trace reason `meeting_cap`).
+- **Not changed.** The bar (`COS_LIVE_CUES_V2_GATE`, default 0.8), the 45 s cooldown, the 20 s cadence and every prompt are 6.78.1's. Spacing and repeat suppression wait for tuning on rated cues.
+- **Checks.** A pin test kills all three mutants (cap 10, writer 20, weekly 300).
+
 ## 6.78.1 - Glasses messages reach open Claude sessions again, whatever the size of ~/.claude/projects
 
 Hotfix on 6.78.0. No companion or COS Control change.
