@@ -54,6 +54,7 @@
 // sentence into the thread twice. A clap usage error (exit 2) queued nothing.
 
 import { isValidNativeThreadId } from './native-thread-id.js'
+import { isProfileCodexThread } from './codex-homes.js'
 
 export type CodexLiveReason =
   /** The row is in the holder's queue. */
@@ -71,6 +72,11 @@ export type CodexLiveReason =
   | 'refused'
   /** Something may be queued. Hold; never retry, never spawn over it. */
   | 'unverified'
+  /**
+   * Key lanes K1 (plan v4 8.1): the thread lives in a keyed profile home, never the Codex app's
+   * queue. Nothing sent; the steer lands after the running turn (CODEX_KEYED_STEER_NOTICE).
+   */
+  | 'keyed_session'
 
 export interface CodexLiveResult {
   ok: boolean
@@ -100,7 +106,12 @@ export interface CodexLiveDeps {
   run: (binary: string, args: readonly string[], timeoutMs: number) => Promise<CodexQueueRun>
   now: () => number
   log?: (level: 'info' | 'warn', event: string, detail: Record<string, unknown>) => void
+  /** Key lanes: is this thread a keyed profile thread? Defaults to a look in the profile homes. */
+  isKeyedThread?: (threadId: string) => boolean
 }
+
+/** Plan 8.1 lens line for a steer into a keyed Codex session. */
+export const CODEX_KEYED_STEER_NOTICE = 'Steer lands after this turn.'
 
 export interface CodexLiveRequest {
   provider: string
@@ -182,6 +193,9 @@ export async function deliverOverCodexQueue(request: CodexLiveRequest, deps: Cod
   })
   if (!request.enabled) return done('disabled')
   if (request.provider !== 'codex' || request.foreignHolder !== true) return done('no_holder')
+  // Key lanes: a keyed profile thread is never the Codex app's, so it never joins its queue.
+  // With no profile home this is one predicate call that touches nothing.
+  if ((deps.isKeyedThread ?? isProfileCodexThread)(request.sessionId)) return done('keyed_session')
   let args: string[]
   try {
     args = buildCodexQueueArgs(request.sessionId, request.prompt)

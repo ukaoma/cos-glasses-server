@@ -63,6 +63,7 @@ import { activeSqliteReaderPids, cliChatLastWriteMs } from './cursor-session-mod
 // about which directory "empty" was observed in.
 export { claudeSessionsDir } from '../routes/claude-sessions.js'
 import { claudeSessionsDir } from '../routes/claude-sessions.js'
+import { profileCodexHomeSubdirs } from './codex-homes.js'
 
 /**
  * `<CODEX_HOME|~/.codex>/thread-writer-locks`.
@@ -78,10 +79,13 @@ export function codexLocksDir(): string {
 
 export function realOccupancyDirs(): OccupancyDirs {
   const home = process.env.COS_AGENT_SESSIONS_HOME?.trim() || homedir()
+  const profileLocks = profileCodexHomeSubdirs('thread-writer-locks')
   return {
     claudeSessionsDir: claudeSessionsDir(),
     codexLocksDir: codexLocksDir(),
     cursorChatsDir: join(home, '.cursor', 'chats'),
+    // Key lanes K1 (plan v4 8.2): absent with no keyed profile home, so the dirs are 963fe25's.
+    ...(profileLocks.length ? { codexProfileLocksDirs: profileLocks } : {}),
   }
 }
 
