@@ -186,6 +186,15 @@ export function updateKeyCap(ref: string, capUsd: number): PublicKeyRecord | und
   return toPublic(keys[i])
 }
 
+/** Remove one key (plan 17 item 3): the store is rewritten atomically without it. True when it existed. */
+export function deleteKey(ref: string): boolean {
+  const keys = readStore()
+  const next = keys.filter(k => k.ref !== ref)
+  if (next.length === keys.length) return false
+  writeStore(next)
+  return true
+}
+
 /** Remove all keys (plan 12). True when a file was deleted. */
 export function deleteKeyStore(): boolean {
   cache = null

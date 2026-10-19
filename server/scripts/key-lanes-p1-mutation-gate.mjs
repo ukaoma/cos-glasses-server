@@ -73,6 +73,14 @@ const mutations = [
   m('profile-direct-tools-default-on', PROFILES, ['      directTools: input.directTools === true,', '      directTools: input.directTools !== false,'], LIB_T),
   m('profile-unknown-key-accepted', PROFILES, ['  const keyKind = keyKindOf(input.keyRef)\n', "  const keyKind = keyKindOf(input.keyRef) ?? 'openrouter'\n"], [...LIB_T, ...ROUTE_T]),
   m('inactive-hooks-not-run', ROUTE, ['    if (wasActive && !keyLanesActive()) await runKeyLanesInactiveHooks(reason)', '    void wasActive; void reason'], ROUTE_T),
+  // ── Remove one key (plan 17 item 3) ──
+  m('delete-key-answers-when-off', ROUTE, ["  return req.method === 'POST'\n    && requestPath(req) === KEY_LANES_ENABLE_PATH\n", "  return (req.method === 'POST' && requestPath(req) === KEY_LANES_ENABLE_PATH || req.method === 'DELETE')\n"], ROUTE_T),
+  m('delete-key-in-use-without-force', ROUTE, ['    if (users.length && !force) {', '    if (false) {'], ROUTE_T),
+  m('delete-key-force-keeps-profiles-on', ROUTE, ['    for (const p of users) upsertProfile({ ...p, enabled: false, updatedAt: now().toISOString() })\n', ''], ROUTE_T),
+  m('delete-key-echoes-secret', ROUTE, [
+    ['    deleteKey(ref)\n', "    const gone = (await import('../lib/key-store.js')).readKeySecretForRelay(ref)\n    deleteKey(ref)\n"],
+    ['return res.json({ removed: true, disabledProfiles', 'return res.json({ removed: true, secret: gone, disabledProfiles']], ROUTE_T),
+  m('delete-key-store-untouched', STORE, ['  writeStore(next)\n  return true', '  return true'], ROUTE_T),
   // ── Remove all keys ──
   m('remove-all-keeps-keys', ROUTE, ["    if (deleteKeyStore()) removed.push('keys')", "    removed.push('keys')"], ROUTE_T),
   m('remove-all-keeps-codex-homes', ROUTE, ["    if (existsSync(homes)) { rmSync(homes, { recursive: true, force: true }); removed.push('codexHomes') }", "    if (existsSync(homes)) removed.push('codexHomes')"], ROUTE_T),

@@ -91,6 +91,7 @@ async function call(origin: string, c: Call) {
   return { status: res.status, headers: h, text }
 }
 const json = (r: { text: string }) => JSON.parse(r.text)
+const store = () => (JSON.parse(readFileSync(dataPath('provider-keys.json'), 'utf8')) as { keys: Array<{ ref: string }> }).keys
 const post = (path: string, body: unknown, extra: Partial<Call> = {}) => call(base, { method: 'POST', path, body: JSON.stringify(body), ...extra })
 const get = (path: string, extra: Partial<Call> = {}) => call(base, { method: 'GET', path, ...extra })
 
@@ -102,6 +103,8 @@ const OFF_CASES: Call[] = [
   { method: 'POST', path: '/api/key-lanes/keys', body: JSON.stringify({ kind: 'openrouter', key: FAKE_KEY }) },
   { method: 'POST', path: '/api/key-lanes/profiles', body: '{}' },
   { method: 'DELETE', path: '/api/key-lanes/profiles/sonnet' },
+  { method: 'DELETE', path: '/api/key-lanes/keys/key_0123456789ab' },
+  { method: 'DELETE', path: '/api/key-lanes/keys/key_0123456789ab?force=1' },
   { method: 'POST', path: '/api/key-lanes/remove-all', body: '{}' },
   { method: 'POST', path: '/api/key-lanes/disable', body: '{}' },
   { method: 'GET', path: '/api/key-lanes/enable' },
@@ -199,6 +202,7 @@ describe('switch on, no profile: only the exposure-list rows', () => {
       ['POST', '/api/key-lanes/keys', JSON.stringify({ kind: 'openrouter', key: FAKE_KEY })],
       ['POST', '/api/key-lanes/profiles', '{}'],
       ['DELETE', '/api/key-lanes/profiles/sonnet', ''],
+      ['DELETE', '/api/key-lanes/keys/key_0123456789ab?force=1', ''],
       ['POST', '/api/key-lanes/remove-all', '{}'],
       ['POST', '/api/key-lanes/enable', '{}'],
       ['POST', '/api/key-lanes/disable', '{}'],
@@ -299,6 +303,40 @@ describe('keys and profiles (switch on)', () => {
     expect(json(del)).toEqual({ removed: true, active: false })
     expect(seen).toEqual(['no_enabled_profile', 'no_enabled_profile'])
     expect((await call(base, { method: 'DELETE', path: '/api/key-lanes/profiles/a' })).status).toBe(404)
+  })
+
+  it('removing one key: 409 while an enabled profile uses it, ?force=1 turns those off, and no body carries the secret', async () => {
+    const seen: string[] = []
+    lanes.onKeyLanesInactive('test', r => { seen.push(r) })
+    const key = await saveKey()
+    const other = json(await post('/api/key-lanes/keys', { kind: 'openrouter', key: FAKE_KEY.replace('9z9z', '7x7x') })).key
+    await post('/api/key-lanes/profiles', { id: 'a', label: 'Sonnet A', keyRef: key.ref, engine: 'claude', model: 'anthropic/claude-sonnet-5.5' })
+    await post('/api/key-lanes/profiles', { id: 'b', label: 'Haiku B', keyRef: key.ref, engine: 'claude', model: 'anthropic/claude-haiku-5.5', enabled: false })
+    const del = (path: string) => call(base, { method: 'DELETE', path })
+    const bodies: string[] = []
+    const refused = await del(`/api/key-lanes/keys/${key.ref}`)
+    bodies.push(refused.text)
+    expect(refused.status).toBe(409)
+    expect(json(refused)).toEqual({ error: 'key_in_use', message: 'Turn off the profiles that use this key first: Sonnet A.', profiles: ['a'] })
+    expect(store().map(k => k.ref).sort()).toEqual([key.ref, other.ref].sort())
+    expect(lanes.keyLanesActive()).toBe(true)
+    const forced = await del(`/api/key-lanes/keys/${key.ref}?force=1`)
+    bodies.push(forced.text)
+    expect(forced.status).toBe(200)
+    expect(json(forced)).toEqual({ removed: true, disabledProfiles: ['a'], active: false })
+    expect(store().map(k => k.ref)).toEqual([other.ref])
+    expect(statSync(dataPath('provider-keys.json')).mode & 0o777).toBe(0o600)
+    expect(readFileSync(dataPath('provider-keys.json'), 'utf8')).not.toContain(FAKE_KEY)
+    expect(json(await get('/api/key-lanes/status')).profiles.map((p: { id: string; enabled: boolean }) => [p.id, p.enabled])).toEqual([['a', false], ['b', false]])
+    expect(seen).toEqual(['no_enabled_profile'])
+    // A key only a disabled profile names goes without force; unknown and malformed refs are refused.
+    await post('/api/key-lanes/profiles', { id: 'c', label: 'C', keyRef: other.ref, engine: 'claude', model: 'anthropic/claude-haiku-5.5', enabled: false })
+    const plain = await del(`/api/key-lanes/keys/${other.ref}`)
+    bodies.push(plain.text)
+    expect(json(plain)).toEqual({ removed: true, disabledProfiles: [], active: false })
+    expect((await del(`/api/key-lanes/keys/${other.ref}`)).status).toBe(404)
+    expect((await del('/api/key-lanes/keys/not-a-ref')).status).toBe(400)
+    for (const b of bodies) expect(b).not.toContain(FAKE_KEY.slice(0, 20))
   })
 
   it('status takes spend, breaker and keyed sessions from the registered provider', async () => {

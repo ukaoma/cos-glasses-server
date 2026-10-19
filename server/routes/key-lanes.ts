@@ -26,7 +26,9 @@ import {
 } from '../lib/key-lanes.js'
 import { deleteProfile, deleteProfilesFile, listProfiles, upsertProfile, validateProfileInput } from '../lib/key-profiles.js'
 import type { BreakerState, KeyKind, KeyLanesStatusBody } from '../lib/key-relay-contract.js'
+import { KEY_REF_RE } from '../lib/key-relay-contract.js'
 import {
+  deleteKey,
   deleteKeyStore,
   getPublicKey,
   isKeyKind,
@@ -304,6 +306,28 @@ export function createKeyLanesRouter(deps: KeyLanesRouteDeps = {}): Router {
         ? { credit: { ...(check.limitRemainingUsd !== undefined ? { remainingUsd: check.limitRemainingUsd } : {}), ...(check.isFreeTier !== undefined ? { freeTier: check.isFreeTier } : {}) } }
         : {}),
     })
+  })
+
+  // Remove one key (plan 17 item 3). Refused while an enabled profile uses it, unless ?force=1,
+  // which turns those profiles off first so no turn can pick a key that is gone.
+  router.delete('/key-lanes/keys/:ref', macOnly, async (req, res) => {
+    const ref = typeof req.params.ref === 'string' ? req.params.ref : ''
+    if (!KEY_REF_RE.test(ref)) return res.status(400).json({ error: 'invalid_key_ref', message: 'Unknown key.' })
+    if (!getPublicKey(ref)) return res.status(404).json({ error: 'unknown_key', message: 'That key is not saved on this Mac.' })
+    const force = req.query.force === '1'
+    const users = listProfiles().filter(p => p.keyRef === ref && p.enabled)
+    if (users.length && !force) {
+      return res.status(409).json({
+        error: 'key_in_use',
+        message: `Turn off the profiles that use this key first: ${users.map(p => p.label).join(', ')}.`,
+        profiles: users.map(p => p.id),
+      })
+    }
+    const wasActive = keyLanesActive()
+    for (const p of users) upsertProfile({ ...p, enabled: false, updatedAt: now().toISOString() })
+    deleteKey(ref)
+    await settle(wasActive, 'no_enabled_profile')
+    return res.json({ removed: true, disabledProfiles: users.map(p => p.id), active: keyLanesActive() })
   })
 
   router.post('/key-lanes/profiles', macOnly, async (req, res) => {
