@@ -22,7 +22,7 @@ import { registerCodexKeyRelay, registerCodexKeyedThreadRecorder } from './codex
 import { keyCatalogPeekPrice } from './key-lanes-pricing.js'
 import { keyLanesActive, keyLanesEnabled, registerKeyLanesStatusProvider } from './key-lanes.js'
 import { registerKeyProfileEngine, type KeyProfileEngineRunner, type KeyProfileTurn } from './key-profile-routing.js'
-import { getKeyCatalog } from './key-catalog.js'
+import { __setKeyCatalogForTests, getKeyCatalog, KeyCatalog } from './key-catalog.js'
 import type { KeyProfile, KeyRef, KeyRelay, RelayNonceBinding } from './key-relay-contract.js'
 import { KEY_NOTICE_ERROR_IDS, keyModelLabel, keyNoticeError, type KeyNoticeErrorId } from './key-notices.js'
 import { getPublicKey } from './key-store.js'
@@ -35,9 +35,35 @@ import { keyedSessionIds, recordKeyedSession } from './keyed-sessions.js'
 import { registerLaneBRelay } from './lane-b-env.js'
 import type { DirectRefusalKind, DirectRelay, DirectRelayPost, DirectRelayTurn, DirectTurnBinding, DirectUsage } from './direct-bridge.js'
 
+/**
+ * QA C2 journeys: `COS_KEY_RELAY_TEST_UPSTREAM=http://127.0.0.1:<port>` points the relay's
+ * upstreams, OpenRouter's key API and the public catalog at a LOOPBACK mock, so the journey
+ * harness can boot index.ts and run a keyed turn end to end. Anything that is not
+ * http://127.0.0.1 is ignored with a warning. Not in managed-runtime-contract.json: a managed
+ * install never forwards it.
+ */
+export function keyRelayTestUpstream(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.COS_KEY_RELAY_TEST_UPSTREAM
+  if (!raw) return null
+  try {
+    const u = new URL(raw)
+    if (u.protocol === 'http:' && u.hostname === '127.0.0.1' && u.port) return u.origin
+  } catch { /* fall through */ }
+  console.warn('[key-lanes] COS_KEY_RELAY_TEST_UPSTREAM ignored: only http://127.0.0.1:<port> is accepted')
+  return null
+}
+
 /** The one relay, created on first keyed use with live catalog prices (P5) for the meter. */
 export function sharedKeyRelay(): KeyRelayServer {
-  return getKeyRelay({ priceFor: keyCatalogPeekPrice, onTurnFailure: recordKeyTurnFailure })
+  const test = keyRelayTestUpstream()
+  return getKeyRelay({
+    priceFor: keyCatalogPeekPrice,
+    onTurnFailure: recordKeyTurnFailure,
+    ...(test ? {
+      upstreams: { openrouterMessages: `${test}/api/v1/messages`, openrouterResponses: `${test}/api/v1/responses`, anthropicMessages: `${test}/anthropic/v1/messages`, openaiResponses: `${test}/openai/v1/responses` },
+      openrouterApiBase: `${test}/api/v1`,
+    } : {}),
+  })
 }
 
 // ── Turn failures: the key-notices line, never the CLI's raw error ───────────
@@ -305,6 +331,11 @@ export function wireKeyLanes(): void {
   registerKeyProfileEngine('direct', runDirectKeyTurn)
   // Read only by GET /api/key-lanes/status, which answers only while lanes are enabled.
   registerKeyLanesStatusProvider({ keyedSessionIds })
+  const test = keyRelayTestUpstream()
+  if (test) {
+    console.warn(`[key-lanes] test upstream ${test}: keyed requests and the catalog go to this loopback mock`)
+    __setKeyCatalogForTests(new KeyCatalog({ url: `${test}/api/v1/models` }))
+  }
   if (keyLanesEnabled()) installKeyRelaySeams()
 }
 

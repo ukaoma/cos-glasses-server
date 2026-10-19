@@ -1036,6 +1036,16 @@ usable on Fast and reports the downgrade truthfully. Set
 `COS_BATCH_LARGE_V3=0` to explicitly use turbo. Interactive HQ uses beam 2 by
 default (`COS_HQ_BEAM_INTERACTIVE`); meeting batch remains beam 5.
 
+## Answer with your own key (6.80.0, opt in)
+
+Off by default, and without a key nothing changes. Turn it on in COS Control (Settings, "Answer with your own key"), or set `COS_KEY_LANES=1`; `COS_KEY_LANES=0` forces it off.
+
+- **What it does.** You save a provider key (OpenRouter, Anthropic, OpenAI or a compatible endpoint) in COS Control and make a key profile: which harness answers (Claude Code, Codex, or a direct call), which model, and a daily cap. A thread you put on that profile answers on the key instead of your plan. It never falls back to your plan: when the key, the cap or the provider says no, the lens says why.
+- **Where the key lives.** In `data/key-secrets/provider-keys.json` (0600, in a 0700 folder), used only by the server's loopback relay, which gives each keyed turn a one-turn token instead of the key. Every Claude spawn that can use tools gets deny rules for that folder. Codex has no sandbox read exclusion. Plainly: your key is saved on this Mac, apps and agents that run on this Mac as you can read it, and your provider's spending limit is the real stop. OpenRouter keys must have a credit limit set; Anthropic and OpenAI keys have no provider-side daily backstop, so the cap here is the only one.
+- **Spend.** A daily cap per key (UTC day), shared by every profile on it. A reply that would pass the cap is cut and the lens shows the cap line. `GET /api/key-lanes/status` shows cap, today's spend and the reset time.
+- **Routes** (all 404 while off, except the enable door COS Control uses): `/api/key-lanes/status`, `keys`, `profiles`, `catalog`, `breaker/reset`, `remove-all`, `enable`, `disable`. Writes answer only COS Control on this Mac (token, loopback, no browser).
+- **Before you downgrade** below 6.80, remove your keys in COS Control. An older server cannot see them and would answer a keyed thread on your plan.
+
 ## Run from source
 
 ```bash

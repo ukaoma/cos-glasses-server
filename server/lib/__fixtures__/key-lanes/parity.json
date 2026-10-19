@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "note": "QA G8: the one source of truth for the key-lane files the companion app copies byte for byte. The server test key-lanes-parity.test.ts fails when a file changes without this manifest; the app parity test compares its copies against this file at the server tip.",
+  "files": {
+    "shared/key-preference.ts": "0e67a4dd42e2e059eabcd10f2bf2245be3b77dcdcf6b0b375b755c3ad4a92a44",
+    "server/lib/key-relay-contract.ts": "dd89dcb7c3f2d177baa9fe12d30317cb773e9022d07bb53f71ae9967e3df4b0f",
+    "server/lib/key-notices.ts": "8c5be9d543435c456ddee08b2d2f977bd1ff215d03dc18050e802d5691d318cb"
+  }
+}

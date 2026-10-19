@@ -226,9 +226,9 @@ function serverEnv(w: World, ports: { http: number; https: number; ollama: numbe
   }
 }
 
-async function bootServer(w: World, env: NodeJS.ProcessEnv): Promise<{ proc: ChildProcess; output: () => string }> {
+async function bootServer(w: World, env: NodeJS.ProcessEnv, repo: string = REPO): Promise<{ proc: ChildProcess; output: () => string }> {
   let output = ''
-  const proc = spawn(process.execPath, ['--import', 'tsx/esm', 'server/index.ts'], { cwd: REPO, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  const proc = spawn(process.execPath, ['--import', 'tsx/esm', 'server/index.ts'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] })
   proc.stdout!.on('data', c => { output += c })
   proc.stderr!.on('data', c => { output += c })
   const deadline = Date.now() + 90_000
@@ -564,6 +564,10 @@ async function main(): Promise<void> {
     process.exitCode = 1
   }
 }
+
+// P11 journeys (key-lanes-journeys.ts) reuse the scratch world, boot and call helpers.
+export { API_TOKEN, REPO, bootServer, call, freePort, makeWorld, parseSse, serverEnv, startFakeOllama, stopServer }
+export type { World }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => { console.error(error); process.exitCode = 2 })

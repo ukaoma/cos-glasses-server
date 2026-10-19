@@ -89,11 +89,39 @@ function readStdin(streamJson, done) {
   setTimeout(() => finish(data.length ? 'idle_partial' : 'idle_empty'), 800)
 }
 
-function claudeAnswer() {
+function claudeAnswer(answer = 'Golden answer.') {
   const model = valueOf('--model') ?? 'default'
   out({ type: 'system', subtype: 'init', session_id: sessionId, model, tools: [], mcp_servers: [], cwd: process.cwd() })
-  out({ type: 'assistant', session_id: sessionId, message: { id: `msg_${id12}`, type: 'message', role: 'assistant', model, content: [{ type: 'text', text: 'Golden answer.' }] } })
-  out({ type: 'result', subtype: 'success', is_error: false, session_id: sessionId, result: 'Golden answer.', num_turns: 1, duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } })
+  out({ type: 'assistant', session_id: sessionId, message: { id: `msg_${id12}`, type: 'message', role: 'assistant', model, content: [{ type: 'text', text: answer }] } })
+  out({ type: 'result', subtype: 'success', is_error: false, session_id: sessionId, result: answer, num_turns: 1, duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } })
+}
+
+// P11 journeys: a keyed Claude child (the relay's base URL and the profile marker in its env)
+// asks the relay like Claude Code does, and answers with what came back. Never used off.
+async function claudeKeyedAnswer(prompt) {
+  const model = valueOf('--model') ?? 'default'
+  let res
+  try {
+    res = await fetch(`${process.env.ANTHROPIC_BASE_URL}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${process.env.ANTHROPIC_AUTH_TOKEN}`, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model, max_tokens: 1000, stream: true, messages: [{ role: 'user', content: String(prompt || '').slice(0, 2000) }] }),
+    })
+  } catch (err) {
+    out({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: sessionId, result: `API Error: Connection error. ${err}` })
+    return
+  }
+  const body = await res.text()
+  if (res.status !== 200) {
+    out({ type: 'result', subtype: 'success', is_error: true, session_id: sessionId, result: `API Error: ${res.status} ${body.slice(0, 200)}` })
+    return
+  }
+  let text = ''
+  for (const line of body.split('\n')) {
+    if (!line.startsWith('data:')) continue
+    try { const ev = JSON.parse(line.slice(5)); if (ev.type === 'content_block_delta' && ev.delta?.text) text += ev.delta.text } catch { /* skip */ }
+  }
+  claudeAnswer(text || 'Keyed answer.')
 }
 
 function codexAnswer() {
@@ -112,6 +140,10 @@ function main() {
       const textOut = valueOf('--output-format') === 'text'
       readStdin(valueOf('--input-format') === 'stream-json', (text, mode) => {
         record(text, mode)
+        if (process.env.ANTHROPIC_BASE_URL && process.env.COS_KEY_PROFILE && !textOut) {
+          claudeKeyedAnswer(text).then(() => setTimeout(() => process.exit(0), 20))
+          return
+        }
         if (textOut) process.stdout.write('Golden answer.\n')
         else claudeAnswer()
         setTimeout(() => process.exit(0), 20)
