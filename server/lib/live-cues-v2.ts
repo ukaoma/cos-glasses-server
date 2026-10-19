@@ -90,15 +90,29 @@ export function liveCuesV2Gate(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.COS_LIVE_CUES_V2_GATE)
   return Number.isFinite(raw) && raw >= 0.3 && raw <= 0.99 ? raw : LIVE_CUES_V2_LIMITS.defaultGate
 }
-/** 6.79.0 tuning knobs for Friday's rated-cue review. Defaults are the calibrated values above. The range check is the
- *  whole guard: unset or non-numeric (NaN fails every comparison), empty (0) and Infinity all fall outside it. */
+/** 6.79.0 tuning knobs for Friday's rated-cue review. Unset (or empty, which a managed env may pass for an unset optional
+ *  variable) is the calibrated default with no log. Anything else outside the accepted form falls back to the default with
+ *  one log line per distinct value per process: the knobs are read on every transcript feed. */
+const knobWarned = new Set<string>()
+function knobFallback(name: string, raw: string, fallback: number, accepted: string): number {
+  if (!knobWarned.has(`${name}=${raw}`)) {
+    knobWarned.add(`${name}=${raw}`)
+    console.warn(`[live-cues-v2] ${name}=${JSON.stringify(raw)} is not ${accepted}; using the default`)
+  }
+  return fallback
+}
 export function liveCuesV2CooldownMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = Number(env.COS_LIVE_CUES_V2_COOLDOWN_S)
-  return raw >= 20 && raw <= 900 ? Math.round(raw * 1000) : LIVE_CUES_V2_LIMITS.cooldownAfterCueMs
+  const raw = env.COS_LIVE_CUES_V2_COOLDOWN_S
+  if (raw === undefined || raw.trim() === '') return LIVE_CUES_V2_LIMITS.cooldownAfterCueMs
+  const seconds = /^\d{1,3}$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN     // whole seconds only
+  return seconds >= 20 && seconds <= 900 ? seconds * 1000
+    : knobFallback('COS_LIVE_CUES_V2_COOLDOWN_S', raw, LIVE_CUES_V2_LIMITS.cooldownAfterCueMs, 'whole seconds from 20 to 900')
 }
 export function liveCuesV2JudgeKeep(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = Number(env.COS_LIVE_CUES_V2_JUDGE_KEEP)
-  return raw >= 0.3 && raw <= 0.99 ? raw : LIVE_CUES_V2_LIMITS.judgeKeep
+  const raw = env.COS_LIVE_CUES_V2_JUDGE_KEEP
+  if (raw === undefined || raw.trim() === '') return LIVE_CUES_V2_LIMITS.judgeKeep
+  const keep = Number(raw)
+  return keep >= 0.5 && keep <= 0.95 ? keep : knobFallback('COS_LIVE_CUES_V2_JUDGE_KEEP', raw, LIVE_CUES_V2_LIMITS.judgeKeep, 'a number from 0.5 to 0.95')
 }
 export function liveCuesV2Model(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.COS_LIVE_CUES_V2_MODEL ?? '').trim().toLowerCase()

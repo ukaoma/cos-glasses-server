@@ -49,7 +49,8 @@ describe('pins', () => {
   })
   it('every v2 flag is forwarded by the managed runtime contract', () => {
     const c = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
-    for (const key of ['COS_LIVE_CUES_V2', 'COS_LIVE_CUES_V2_GATE', 'COS_LIVE_CUES_V2_MODEL', 'COS_LIVE_CUES_V2_PROMPT', 'COS_LIVE_CUES_V2_WEEKLY', 'COS_LIVE_CUES_V2_NUMBER_GUARD', 'COS_LIVE_CUES_JEV_DAILY_TOKENS'])
+    for (const key of ['COS_LIVE_CUES_V2', 'COS_LIVE_CUES_V2_GATE', 'COS_LIVE_CUES_V2_MODEL', 'COS_LIVE_CUES_V2_PROMPT', 'COS_LIVE_CUES_V2_WEEKLY', 'COS_LIVE_CUES_V2_NUMBER_GUARD', 'COS_LIVE_CUES_JEV_DAILY_TOKENS',
+      'COS_LIVE_CUES_V2_COOLDOWN_S', 'COS_LIVE_CUES_V2_JUDGE_KEEP'])
       expect(c.optionalEnvironment, key).toContain(key)
   })
 })
@@ -314,13 +315,23 @@ describe('engine', () => {
     expect(warn).toHaveBeenCalledTimes(L.breakerFailures + 1)
   })
 
-  it('6.79.0: COS_LIVE_CUES_V2_COOLDOWN_S moves the cooldown after a cue (20..900 s); unset or out of range keeps 45 s', async () => {
-    expect(mod.liveCuesV2CooldownMs({})).toBe(L.cooldownAfterCueMs)
+  it('6.79.0: COS_LIVE_CUES_V2_COOLDOWN_S: unset or empty is 45 s silently; whole seconds 20..900 apply; anything else is 45 s with one log line per value', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    onTestFinished(() => warn.mockRestore())
     expect(L.cooldownAfterCueMs).toBe(45_000)
-    expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '90' })).toBe(90_000)
-    expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '20' })).toBe(20_000)
-    expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '900' })).toBe(900_000)
-    for (const bad of ['19', '901', 'abc', '', '-5']) expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: bad }), bad).toBe(L.cooldownAfterCueMs)
+    expect(mod.liveCuesV2CooldownMs({})).toBe(45_000)
+    expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '' })).toBe(45_000)
+    expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '  ' })).toBe(45_000)
+    expect(warn).not.toHaveBeenCalled()
+    for (const [raw, ms] of [['20', 20_000], ['90', 90_000], [' 120 ', 120_000], ['900', 900_000]] as const)
+      expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: raw }), raw).toBe(ms)
+    expect(warn).not.toHaveBeenCalled()
+    const bad = ['19', '901', '45.5', '1e2', 'abc', '-30', '0x3c', '0045']
+    for (const raw of bad) expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: raw }), raw).toBe(45_000)
+    expect(warn).toHaveBeenCalledTimes(bad.length)
+    expect(String(warn.mock.calls[0][0])).toContain('COS_LIVE_CUES_V2_COOLDOWN_S')
+    mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '19' })                       // the same bad value again: no second line
+    expect(warn).toHaveBeenCalledTimes(bad.length)
     env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_COOLDOWN_S: '120' }
     const e = engine(); e.arm('meeting_a')
     await e.feed('meeting_a', words(L.minNewWords)); expect(calls.gate).toBe(1)          // cue at t0
@@ -330,19 +341,21 @@ describe('engine', () => {
     await e.feed('meeting_a', words(1)); expect(calls.gate).toBe(2)
   })
 
-  it('6.79.0: COS_LIVE_CUES_V2_JUDGE_KEEP moves the judge bar (0.3..0.99); unset or out of range keeps 0.8', async () => {
+  it('6.79.0: COS_LIVE_CUES_V2_JUDGE_KEEP: unset or empty is 0.8 silently; 0.5..0.95 applies; anything else is 0.8 with one log line per value', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    onTestFinished(() => warn.mockRestore())
     expect(mod.liveCuesV2JudgeKeep({})).toBe(0.8)
-    expect(mod.liveCuesV2JudgeKeep({ COS_LIVE_CUES_V2_JUDGE_KEEP: '0.9' })).toBe(0.9)
-    for (const bad of ['0.2', '1', 'x', '']) expect(mod.liveCuesV2JudgeKeep({ COS_LIVE_CUES_V2_JUDGE_KEEP: bad }), bad).toBe(0.8)
+    expect(mod.liveCuesV2JudgeKeep({ COS_LIVE_CUES_V2_JUDGE_KEEP: '' })).toBe(0.8)
+    expect(warn).not.toHaveBeenCalled()
+    for (const [raw, keep] of [['0.5', 0.5], ['0.86', 0.86], ['0.95', 0.95]] as const) expect(mod.liveCuesV2JudgeKeep({ COS_LIVE_CUES_V2_JUDGE_KEEP: raw }), raw).toBe(keep)
+    expect(warn).not.toHaveBeenCalled()
+    const bad = ['0.49', '0.96', '1', 'x', '-0.8']
+    for (const raw of bad) expect(mod.liveCuesV2JudgeKeep({ COS_LIVE_CUES_V2_JUDGE_KEEP: raw }), raw).toBe(0.8)
+    expect(warn).toHaveBeenCalledTimes(bad.length)
     env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_JUDGE_KEEP: '0.86' }                  // M1 0.91 stays, M3 0.85 goes
     const e = engine(); e.arm('meeting_a')
     await e.feed('meeting_a', words(L.minNewWords))
     expect((JSON.parse(calls.prompts[0]) as { memory: Array<{ title: string }> }).memory.map(m => m.title)).toEqual(['Kept A'])
-  })
-
-  it('6.79.0: both tuning knobs are forwarded by the managed runtime contract', () => {
-    const c = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
-    for (const key of ['COS_LIVE_CUES_V2_COOLDOWN_S', 'COS_LIVE_CUES_V2_JUDGE_KEEP']) expect(c.optionalEnvironment, key).toContain(key)
   })
 
   it('the judge keeps at most two notes even when three pass, in rank order', async () => {
