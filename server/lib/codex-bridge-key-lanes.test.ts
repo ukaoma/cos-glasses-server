@@ -421,3 +421,17 @@ describe('Lane B Codex: P11 wiring (answer fields, cost, one resume slot per lan
     expect(state.spawns.at(-1)!.args).toContain(THREAD)
   })
 })
+
+describe('Lane B Codex: the resume fingerprint still binds the generated config (P11)', () => {
+  // With one slot per profile (P11), the profile home's fingerprint is what stops a thread from
+  // resuming under a changed config of the SAME profile (another model or relay provider).
+  it('a profile whose model changed does not resume the thread its old config started', async () => {
+    await keyedRun()
+    complete(state.spawns.at(-1)!, THREAD)
+    await flush()
+    await keyedRun(profile({ model: 'openai/gpt-5.5' }))
+    const changed = state.spawns.at(-1)!
+    expect(changed.args).not.toContain(THREAD)
+    expect(changed.args).not.toContain('resume')
+  })
+})
