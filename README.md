@@ -787,7 +787,8 @@ VOICE) follow the same settings. Contract and measurements:
 - Messages and prompt drafts drop standalone um, uh, er, ah, hmm, mm and mhm
   before the model and when it is skipped. Meeting lines are left as heard.
   It keeps ALL-CAPS tokens, a Titlecase token mid-sentence (a name) unless a
-  comma follows it, any token after a title (Mr., Dr.) and quoted mentions.
+  comma follows it, a Titlecase token after a title or abbreviation (Mr. Ah,
+  Dr. Er) and quoted mentions.
   `COS_DICTATION_FILLER_PASS=0` turns the pass off.
 - `COS_DICTATION_POLISH_PROMPT=v1` restores the 6.79.0 polish prompt (default
   `v2`).

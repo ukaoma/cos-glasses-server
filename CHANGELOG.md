@@ -22,8 +22,8 @@ Miles, 2026-10-19: AI polish for Mac dictation failed on every dictation from 11
   - It cleans the comma, ellipsis or dash after the filler, drops the comma before closing punctuation ("I think, uh." becomes "I think."), and hands a sentence-start capital to the next word. Lowercase input stays lowercase.
   - It leaves ALL-CAPS tokens alone (UM, ER, AH are acronyms), as well as hyphen and apostrophe forms (Uh-oh, uh-huh, mm-hmm), words that contain the letters (umbrella, err, ahead) and "mm" after a number.
   - **Capitalized tokens.** A Titlecase token away from a sentence start is kept as a name ("Ask Ah Kow", "Hm Tran"), unless a comma or ellipsis sets it off as a hesitation ("I think, Um, we should").
-  - **Titles.** A token right after a title (Mr., Mrs., Ms., Dr., Prof., St.) is always kept: "We met Mr. Ah and Ms. Er" stays as said.
-  - **Sentence ends.** An abbreviation's period (Mr., e.g., i.e., a.m., p.m., vs., etc., U.S., an initial) and an ellipsis do not end a sentence. They never trigger the capital hand-off: "at 5 p.m. uh we meet" becomes "at 5 p.m. we meet". The capital passes on only when the removed filler was itself a sentence's first word.
+  - **Titles and abbreviations.** A Titlecase token right after a title or abbreviation (Mr., Mrs., Ms., Dr., Prof., St., Jr., Sr., vs., etc., e.g., i.e., a.m., p.m., U.S., an initial) is a name and is kept: "We met Mr. Ah and Ms. Er yesterday" and "Dr. Er said yes" stay as said. A lowercase filler there still goes, with no capital hand-off: "We met Mr. uh Jones" becomes "We met Mr. Jones", and "at 5 p.m. uh we meet" becomes "at 5 p.m. we meet".
+  - **Sentence ends.** An ellipsis does not end a sentence. The capital passes on only when the removed filler was itself a sentence's first word.
   - **Answers.** "uh huh", "uh oh" and "mm hmm" written without a hyphen are kept. "uh hmm" is two hesitations and goes.
   - **Quotes.** A quoted mention ('"um" is a filler word', “uh”) is kept. A filler inside a longer quote ('"um, no"') is removed.
   - If nothing but fillers was said, the text is unchanged.
@@ -50,7 +50,7 @@ Miles, 2026-10-19: AI polish for Mac dictation failed on every dictation from 11
   - **Filler pass alone: 0.976 recall, but no dropped word.** In all three of its misses, the pass returned the input unchanged; the reference expected the model's spelling fixes (Tableau, Priya, HubSpot, POS). A test now runs the pass over all 45 dictations and fails if it removes anything but a filler token.
 - **Managed runtime.** All six variables are in `managed-runtime-contract.json` `optionalEnvironment`: the three bucket caps, the legacy cap, `COS_DICTATION_POLISH_PROMPT` and `COS_DICTATION_FILLER_PASS`.
 - **Not changed.** The phone's meeting polish still runs. Its own 200-a-day bucket now bounds it, and it can no longer starve Mac dictation. Removing it is a companion decision.
-- **Checks.** Mutation gate `server/scripts/dictation-polish-mutation-gate.mjs` (not packaged): 54 of 54 guard mutants killed by named tests against a proven green baseline (128 tests in 5 files).
+- **Checks.** Mutation gate `server/scripts/dictation-polish-mutation-gate.mjs` (not packaged): 55 of 55 guard mutants killed by named tests against a proven green baseline (133 tests in 5 files).
 
 ## 6.79.0 - Live cue verdicts: every cue is logged, rated from COS Control, and listed for Friday's tuning
 
