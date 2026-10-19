@@ -53,6 +53,15 @@ describe('6.79.1 deterministic filler pass', () => {
     // Two hesitations in a row are not an answer.
     ['uh hmm let me think', 'let me think'],
     ['Uh hmm, the plan', 'The plan'],
+    // 6.79.1 review: titles, abbreviations, ellipses and quoted mentions.
+    ['Hmm. Let me check ... and Ah Kim\'s notes', 'Let me check ... and Ah Kim\'s notes'],
+    ['at 5 p.m. uh we meet', 'at 5 p.m. we meet'],
+    ['e.g. um the deck', 'e.g. the deck'],
+    // Set off by a comma it is a hesitation, but "U.S." does not end a sentence: no capital hand-off.
+    ['Ship it to the U.S. Um, team first', 'Ship it to the U.S. team first'],
+    ['I think, Um, we should', 'I think, we should'],
+    ['Wait... Uh, maybe', 'Wait... maybe'],
+    ['Wait. Uh, maybe', 'Wait. Maybe'],
     // A doubled pause mark left at the start goes too.
     ['um,, so we go', 'so we go'],
   ])('%j -> %j', (input, expected) => {
@@ -78,6 +87,17 @@ describe('6.79.1 deterministic filler pass', () => {
     'Ask Ah Kow to join the call',
     'Loop in Er Lin and Hm Tran',
     'The note from Mm Patel is attached',
+    // Right after a title, a token is a name.
+    'We met Mr. Ah and Ms. Er yesterday',
+    'Dr. Er said the scan is clear',
+    'Dr. Er said',
+    'Dr. Er, the surgeon, called',
+    // An initial's period does not start a sentence.
+    'Meet with J. Ah tomorrow',
+    'Ask Mrs. Um and Prof. Hm about it',
+    // A quoted mention is the word itself.
+    '"um" is a filler word',
+    'Say “uh” less often',
     // Two-word answers said without a hyphen.
     'He said uh huh and left',
     'uh oh, the build broke',
