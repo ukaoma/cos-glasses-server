@@ -32,6 +32,7 @@ import { meetingAskCapabilities } from '../lib/meeting-ask-runtime.js'
 import { lensGistPublicHealth } from '../lib/lens-gist.js'
 import { meetingSummaryLLMEnabled } from '../lib/meeting-summary.js'
 import { getKeyStatus } from '../lib/openai-key.js'
+import { keyLanesHealthFields, keyProfilesModelsField } from '../lib/key-lanes.js'
 import {
   getCodexModelCatalog,
   getCodexModelCatalogSnapshot,
@@ -550,6 +551,8 @@ healthRouter.get('/health', async (_req, res) => {
     // count only (health is public); the items and their Retry are behind the token at
     // GET /api/maintenance/status.
     crash_loop_parking: crashLoopParkingHealth(),
+    // Key lanes (plan v4 3.1): `details.keyLanes` only while enabled. Absent, never null, when off.
+    ...keyLanesHealthFields(),
   })
 })
 
@@ -616,6 +619,8 @@ healthRouter.get('/models', async (req, res) => {
       refreshedAt: ollamaCatalog.refreshedAt,
     },
     ollamaReady: isOllamaProviderReady(),
+    // Key lanes (plan v4 3.1): `keyProfiles` only while a profile is active. Absent when off.
+    ...keyProfilesModelsField(),
     serverInstanceId: getServerInstanceId(),
     // Minted here rather than on a route of its own: this response is already
     // authenticated, and the mint is stateless, so it costs nothing and stores

@@ -79,6 +79,7 @@ import { createTranscriptCleanupRouter } from './routes/transcript-cleanup.js'
 import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
 import { openaiKeyRouter } from './routes/openai-key.js'
+import { createKeyLanesBodyParser, createKeyLanesRouter } from './routes/key-lanes.js'
 import { firefliesKeyRouter } from './routes/fireflies-key.js'
 import { meetingImportRouter } from './routes/meeting-import.js'
 import { startMeetingImportScheduler, stopMeetingImportScheduler } from './lib/meeting-import.js'
@@ -477,6 +478,10 @@ app.use('/api', (req, res, next) => {
     return res.status(500).json({ error: 'maintenance_internal_error', retryable: false })
   }
 })
+
+// Key lanes (plan v4 3.1): parses its own small body ahead of the 10 MB parser, and only for a
+// request the key-lanes router will answer. Every other request passes through untouched.
+app.use('/api/key-lanes', ...createKeyLanesBodyParser({ apiToken: () => API_TOKEN }))
 
 // Authenticate before parsing large upload bodies. The 16 MB allowance stays
 // scoped to /api/media; every other route retains the 10 MB ceiling.
@@ -1165,6 +1170,9 @@ app.use('/api', memoryRouter)
 app.use('/api', threadsRouter)
 app.use('/api', skillsRouter)
 app.use('/api', openaiKeyRouter)
+// Key lanes (plan v4 3.1). Off (the default): every /api/key-lanes path falls through to the
+// usual 404, except an authenticated loopback POST /api/key-lanes/enable from COS Control.
+app.use('/api', createKeyLanesRouter({ apiToken: () => API_TOKEN }))
 // Fireflies: the key, and importing meetings this Mac did not record (6.47.0).
 app.use('/api', firefliesKeyRouter)
 app.use('/api', meetingImportRouter)
