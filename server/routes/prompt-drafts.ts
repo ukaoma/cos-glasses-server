@@ -2,8 +2,7 @@ import { isDictationCleanModel, type DictationCleanModel } from '../lib/dictatio
 import { Router } from 'express'
 import { createHash } from 'node:crypto'
 import type { Response } from 'express'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
+import { resolve } from 'node:path'
 import {
   createPromptDraft,
   loadPromptDraftMeta,
@@ -43,11 +42,11 @@ import { transcribeWhisperPreview } from '../lib/whisper-preview.js'
 import { currentDictationPlan, runParakeetDictation } from '../lib/dictation-stt.js'
 import { dictationSlotForMode, legacyDictationKey, type DictationPlan } from '../lib/stt-settings.js'
 import { autoCleanDictation, AUTOCLEAN_MAX_CHARS } from '../lib/dictation-clean.js'
+import { fillerPassEnabled, stripDisfluencies } from '../lib/dictation-fillers.js'
+import { polishBudgetExhausted, recordPolishCall, type PolishBucket } from '../lib/dictation-polish-budget.js'
 import { getVocabulary } from '../lib/profile.js'
 import { createBreaker } from '../lib/claude-circuit.js'
 import { logTokenAudit } from '../lib/token-audit.js'
-import { atomicWriteFileSync } from '../lib/atomic-fs.js'
-import { dataPath } from '../lib/data-dir.js'
 import { emitDisplay } from '../lib/display-bus.js'
 import {
   acquireMaintenanceWork,
@@ -83,26 +82,10 @@ const autoCleanBreakers = {
   'luna-5.6-fast': createBreaker({ label: 'dictation-autoclean-luna' }),
   haiku: createBreaker({ label: 'dictation-autoclean-haiku' }),
 }
-const autoCleanCountFile = () => process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE || dataPath('.dictation_autoclean_count.json')
 const autoCleanDefaultEnabled = () => ['1', 'true', 'on'].includes((process.env.COS_DICTATION_AUTOCLEAN ?? '').toLowerCase())
-const autoCleanDailyCap = () => {
-  const value = Number.parseInt(process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY || '200', 10)
-  return Number.isFinite(value) && value > 0 ? value : 200
-}
-function autoCleanCountToday(): number {
-  try {
-    const raw = JSON.parse(readFileSync(autoCleanCountFile(), 'utf-8'))
-    if (raw?.date === new Date().toISOString().slice(0, 10) && Number.isFinite(raw?.count)) return raw.count
-  } catch {}
-  return 0
-}
-function recordAutoCleanCall(): void {
-  try {
-    const file = autoCleanCountFile()
-    if (!existsSync(dirname(file))) mkdirSync(dirname(file), { recursive: true })
-    atomicWriteFileSync(file, JSON.stringify({ date: new Date().toISOString().slice(0, 10), count: autoCleanCountToday() + 1 }), { mode: 0o600 })
-  } catch {}
-}
+
+/** 6.79.1, additive on finalize answers: why the polish model did not run (or did not finish). */
+export type PolishSkipped = 'disabled' | 'too_long' | 'breaker_open' | 'daily_cap' | 'failed'
 
 interface AutoCleanRequest { enabled?: boolean; model?: DictationCleanModel }
 function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
@@ -114,7 +97,10 @@ function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
   return { enabled, model: isDictationCleanModel(rawModel) ? rawModel : undefined }
 }
 
-async function cleanOutboundDictation(text: string, opts: AutoCleanRequest & { signal?: AbortSignal }): Promise<string> {
+async function cleanOutboundDictation(
+  text: string,
+  opts: AutoCleanRequest & { bucket: PolishBucket; signal?: AbortSignal },
+): Promise<{ text: string; polishSkipped?: PolishSkipped }> {
   let cleaned = applyNegativeRules(applyCorrections(text)).replace(/\s+/g, ' ').trim() || text
   // applyCorrections above is an EXACT string map, so it only fixes misspellings someone
   // already hand-authored. A novel miss ("Rileyy" for Riley, "Exampel" for Example) sails
@@ -137,24 +123,28 @@ async function cleanOutboundDictation(text: string, opts: AutoCleanRequest & { s
   } catch (fuzzyErr: any) {
     console.warn(`[prompt-draft] Fuzzy correction failed (non-fatal): ${fuzzyErr?.message ?? fuzzyErr}`)
   }
-  if (!(opts.enabled ?? autoCleanDefaultEnabled())) return cleaned
+  // 6.79.1: um/uh never survive a skipped polish. Meeting lines stay faithful.
+  if (opts.bucket !== 'meeting' && fillerPassEnabled()) cleaned = stripDisfluencies(cleaned)
+  if (!(opts.enabled ?? autoCleanDefaultEnabled())) return { text: cleaned, polishSkipped: 'disabled' }
   const model = opts.model ?? 'haiku'
   const autoCleanBreaker = autoCleanBreakers[model]
-  if (cleaned.length > AUTOCLEAN_MAX_CHARS || autoCleanBreaker.isOpen() || autoCleanCountToday() >= autoCleanDailyCap()) return cleaned
+  if (cleaned.length > AUTOCLEAN_MAX_CHARS) return { text: cleaned, polishSkipped: 'too_long' }
+  if (autoCleanBreaker.isOpen()) return { text: cleaned, polishSkipped: 'breaker_open' }
+  if (polishBudgetExhausted(opts.bucket)) return { text: cleaned, polishSkipped: 'daily_cap' }
   const startedAt = Date.now()
-  recordAutoCleanCall()
+  recordPolishCall(opts.bucket)
   try {
     const polished = (await autoCleanDictation(cleaned, getVocabulary(), { model, signal: opts.signal })).trim()
     autoCleanBreaker.recordSuccess()
     logTokenAudit({
       source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: polished.length,
-      durationMs: Date.now() - startedAt, caller: 'dictation_autoclean',
+      durationMs: Date.now() - startedAt, caller: `dictation_autoclean_${opts.bucket}`,
     })
-    return polished || cleaned
+    return { text: polished || cleaned }
   } catch (err: any) {
     autoCleanBreaker.recordFailure()
     console.warn(`[prompt-draft] auto-clean failed (glossary-only): ${err?.message ?? err}`)
-    return cleaned
+    return { text: cleaned, polishSkipped: 'failed' }
   }
 }
 
@@ -178,12 +168,14 @@ promptDraftsRouter.post('/dictation/finalize', async (req, res) => {
 
   const abort = new AbortController()
   res.on('close', () => { if (!res.writableEnded) abort.abort() })
-  const finalText = await cleanOutboundDictation(text, {
+  const { text: finalText, polishSkipped } = await cleanOutboundDictation(text, {
     enabled: true,
     model,
+    bucket: surface,
     signal: abort.signal,
   })
-  res.json({ text: finalText, surface, polished: finalText !== text })
+  // 6.79.1: polishSkipped only when the model did not polish, so a polished answer is unchanged.
+  res.json({ text: finalText, surface, polished: finalText !== text, ...(polishSkipped ? { polishSkipped } : {}) })
 })
 
 async function readRawBody(req: AsyncIterable<Buffer | Uint8Array | string>): Promise<Buffer> {
@@ -446,7 +438,7 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
     await markPromptDraftError(draftId, 'No speech detected')
     throw new NoSpeechDetectedError()
   }
-  const finalText = await cleanOutboundDictation(text, { ...autoClean, signal })
+  const { text: finalText, polishSkipped } = await cleanOutboundDictation(text, { ...autoClean, bucket: 'prompt_draft', signal })
   const finalized = await markPromptDraftFinalized(draftId, finalText)
   const qualities = transcriptRecords.map(record => record.actualQuality)
   const actualQuality: 'hq' | 'fast' | 'cloud' = qualities.includes('cloud')
@@ -474,6 +466,8 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
     // 6.73.0, additive.
     engine: engines.length === 1 ? engines[0] : engines.length === 0 ? plan.engine : 'mixed',
     ...(engineReason ? { engineReason } : {}),
+    // 6.79.1, additive.
+    ...(polishSkipped ? { polishSkipped } : {}),
   }
 }
 
