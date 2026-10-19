@@ -64,6 +64,12 @@ import { claudeSupportsSessionName } from './claude-cli-support.js'
 import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } from './turn-request.js'
 import { STEER_REAPER_MS, STEER_SETTLE_MS, SteerTracker, composeFirstContent, encodeUserLine, steerClock, type SteerPort } from './claude-steer.js'
 import { randomUUID } from 'node:crypto'
+// Key lanes K1 P3 (plan v4 7): Lane B Claude. Every use below sits behind `options.keyProfile`;
+// without one, argv, env, session keys and the pre-warm handoff are the b7c620e ones.
+import { profilePreference } from '../../shared/key-preference.js'
+import type { AnswerKeyFields, KeyKind, KeyProfile, RelayTurnHandle } from './key-relay-contract.js'
+import { applyLaneBClaudeEnv, LANE_B_COPY, laneBClaudePreflight, laneBRelay } from './lane-b-env.js'
+import { recordKeyedSession } from './keyed-sessions.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -117,9 +123,19 @@ function cliSessionKey(cosSessionId: string, model: ClaudeModelPreference): stri
   return `${cosSessionId}:${model}`
 }
 
+/** Key lanes (plan v4 7.1): a keyed turn's CLI session is its own key, never `${sid}:${tier}`. */
+export function keyedCliSessionKey(cosSessionId: string, tier: ClaudeModelPreference, profileId: string): string {
+  return `${cosSessionId}:${tier}:p:${profileId}`
+}
+
 function getAnyCliSessionId(cosSessionId: string): string | undefined {
   for (const [key, cliId] of cliSessionMap) {
-    if (key === cosSessionId || key.startsWith(`${cosSessionId}:`)) return cliId
+    if (key === cosSessionId || key.startsWith(`${cosSessionId}:`)) {
+      // Key lanes: a keyed CLI session is never handed out here (handoff, health, Continue). Only
+      // the keyed turn itself reaches it, through its own exact key.
+      if (key.includes(':p:', cosSessionId.length)) continue
+      return cliId
+    }
   }
   return undefined
 }
@@ -324,6 +340,8 @@ export interface ModelRunMetadata {
   ollamaRunId?: string
   outputAttachments?: MediaAttachmentRef[]
   outputImageStats?: RunOutputImageCollectionStats
+  /** Key lanes (plan v4 3.1): present only on a keyed turn. The `model` beside it is then the timeout tier. */
+  keyLane?: AnswerKeyFields
 }
 
 /** Public-safe provider launch metadata for durable job coordination. It
@@ -417,6 +435,15 @@ export interface CallOptions {
    * 6.77.0 one. A dispatch never steers.
    */
   steer?: SteerPort
+  /**
+   * Key lanes K1 (plan v4 7): run this turn on a saved key profile (Lane B Claude) through the
+   * loopback relay. The profile's timeoutTier sets the timeouts and its model goes on `--model`;
+   * the `model` argument is ignored. Absent, every argument, env name, session key and stdin
+   * byte is the b7c620e one. Refused (onError, nothing spawned) when lanes are not active, the
+   * profile is off or not a Claude profile, its key is gone, a Claude settings file would bypass
+   * the relay, no relay is registered, or this is a dispatch.
+   */
+  keyProfile?: KeyProfile
 }
 
 export async function callClaudeStreaming(
@@ -431,6 +458,25 @@ export async function callClaudeStreaming(
 ): Promise<string> {
   // Get or create session
   const sid = getOrCreateSession(sessionId)
+  // Key lanes: every check a keyed turn needs runs here, before history, the run ledger or a
+  // process. A refusal ends the turn with its lens line; the subscription is never the fallback.
+  const keyProfile = options?.keyProfile
+  let keyKind: KeyKind | null = null
+  if (keyProfile) {
+    const preflight = laneBClaudePreflight({
+      profile: keyProfile,
+      dispatch: !!options?.dispatch,
+      cwd: resolveProviderWorkDir({ scriptsDir: COS_SCRIPTS_DIR }),
+    })
+    if (!preflight.ok) {
+      await callbacks.onError(preflight.message)
+      return sid
+    }
+    keyKind = preflight.keyKind
+  }
+  const keyLane: AnswerKeyFields | null = keyProfile && keyKind
+    ? { lane: 'key', credential: { kind: keyKind, ref: keyProfile.keyRef, profileId: keyProfile.id } }
+    : null
   const history = getHistory(sid)
   const session = getSessionRaw(sid)
   const contextBreaks = session?.contextBreaks ?? []
@@ -439,14 +485,16 @@ export async function callClaudeStreaming(
 
   // Resolve model: per-message > session preference > public-server default.
   const sessionModel = getSessionModel(sid)
-  const resolvedModel: ClaudeModelPreference = model
-    ?? (sessionModel && isClaudeModel(sessionModel) ? sessionModel : DEFAULT_MODEL)
+  const resolvedModel: ClaudeModelPreference = keyProfile ? keyProfile.timeoutTier : (model
+    ?? (sessionModel && isClaudeModel(sessionModel) ? sessionModel : DEFAULT_MODEL))
   const resolvedEffort = options?.effort
   const cliEffortFlag = resolvedEffort ? resolveCliEffortFlag(resolvedEffort) : getClaudeEffortLevel()
 
   // Notify client immediately — model is known before any async work
   // Pass existing CLI session ID if resuming (new sessions get it after first result)
-  const resolvedCliKey = cliSessionKey(sid, resolvedModel)
+  const resolvedCliKey = keyProfile ? keyedCliSessionKey(sid, resolvedModel, keyProfile.id) : cliSessionKey(sid, resolvedModel)
+  // A keyed exchange is stamped with its profile (P6 persists it by syntax), never with the tier.
+  const exchangeModel = keyProfile ? profilePreference(keyProfile.id) as unknown as ModelPreference : resolvedModel
   let existingCliSession = options?.dispatch ? undefined : cliSessionMap.get(resolvedCliKey)
   // 6.58.2: decided before the pre-warmed session below stands in: a COS session that has no
   // Claude session of its own yet starts one here, and only that one may be named.
@@ -454,6 +502,7 @@ export async function callClaudeStreaming(
   callbacks.onStart?.(resolvedModel, sid, existingCliSession, {
     clientJobId: options?.clientJobId,
     generation: options?.generation,
+    ...(keyLane ? { keyLane } : {}),
   })
 
   // Phase: context loading (skipped in lightweight mode)
@@ -531,7 +580,7 @@ export async function callClaudeStreaming(
     globalMsgNum,
     inboundAttachments,
     exchangeProvenance,
-    resolvedModel,
+    exchangeModel,
   )
 
   // Vision queries need the Read tool to see the image files
@@ -559,7 +608,8 @@ export async function callClaudeStreaming(
   // 6.58.2: nor does a named New session (COS Control Work). The warmed session opens with the
   // boot prompt "ready" under the glasses prompt; a session someone will open in the Claude app
   // under its task's name starts clean.
-  if (!options?.dispatch && !options?.sessionName && !existingCliSession && preWarmedCliSessionId && resolvedModel === DEFAULT_MODEL) {
+  // Key lanes: a keyed turn never takes the warmed subscription session.
+  if (!options?.dispatch && !options?.sessionName && !existingCliSession && preWarmedCliSessionId && resolvedModel === DEFAULT_MODEL && !keyProfile) {
     // Only the default model consumes the pre-warmed session.
     // Hey Even (Haiku) cold-starts its own session to avoid model contamination.
     existingCliSession = preWarmedCliSessionId
@@ -582,6 +632,8 @@ export async function callClaudeStreaming(
     '--system-prompt', systemPrompt,
     ...(options?.dispatch ? [] : mcpConfigArgs),
   ]
+  // Key lanes (plan 7.1): a keyed turn names the profile slug on --model (never ANTHROPIC_MODEL, no [1m]).
+  if (keyProfile) args[2] = keyProfile.model
 
   // Full and lightweight paths share the same explicit MCP selector contract.
   if (options?.dispatch) {
@@ -625,6 +677,32 @@ export async function callClaudeStreaming(
     ? Math.max(defaultWallMax, WALL_MAX_DEEP_EFFORT_MS)
     : defaultWallMax
   const wallMax = isExtendedQuery(query) ? Math.max(WALL_MAX_EXTENDED_MS, effortWallMax) : effortWallMax
+  // Key lanes: one nonce per turn from the relay (P2 contract), then the child env points at it.
+  // Only the child's copy is written. A relay that cannot issue ends the turn before spawn.
+  let keyTurn: RelayTurnHandle | null = null
+  if (keyProfile) {
+    try {
+      const relay = await laneBRelay()
+      keyTurn = await relay.issueTurn({
+        keyRef: keyProfile.keyRef,
+        profileId: keyProfile.id,
+        turnId: options?.turnId ?? randomUUID(),
+        sessionId: sid,
+        engine: 'claude',
+        allowedModel: keyProfile.model,
+      }, { wallMaxMs: wallMax })
+      applyLaneBClaudeEnv(env, { origin: keyTurn.origin, nonce: keyTurn.nonce, slug: keyProfile.model, profileId: keyProfile.id })
+    } catch (err) {
+      keyTurn?.revoke('cancel')
+      outputImagePublisher?.cleanup()
+      cleanupModelImageInputs(imageInputs)
+      removeExchange(sid, pendingUserExchange)
+      console.error(`[claude-bridge] key relay refused the turn: ${err instanceof Error ? err.message.slice(0, 200) : 'unknown'}`)
+      await callbacks.onError(LANE_B_COPY.relayUnavailable)
+      return sid
+    }
+  }
+  const keyAuditFields = keyProfile && keyKind ? { profile: keyProfile.id, lane: 'key' as const, credentialKind: keyKind } : {}
   const startTime = Date.now()
   // 6.78.0 steer (P7 S7): the wall clock's start on the monotonic steer clock, next to the
   // wall timer it describes, so the coordinator's cut-off reads the same clock after a sleep.
@@ -639,7 +717,7 @@ export async function callClaudeStreaming(
     wallMaxMs: wallMax,
     query: fullQuery,
     effortLevel: resolvedEffort ?? getClaudeEffortLevel(),
-    cliModelId: resolveClaudeCliModelId(resolvedModel),
+    cliModelId: keyProfile ? keyProfile.model : resolveClaudeCliModelId(resolvedModel),
   })
 
   // Ultracode is a CLI-only orchestration keyword; history/chat keeps the
@@ -699,6 +777,7 @@ export async function callClaudeStreaming(
    * CLI session mapping is dropped so the next Ask starts a fresh session.
    */
   function abandonUncoveredSteers() {
+    keyTurn?.revoke('steer_abort')
     steerStdinEnded = true
     steerPort!.close()
     if (cliSessionMap.delete(resolvedCliKey)) scheduleCliSessionSave()
@@ -791,7 +870,7 @@ export async function callClaudeStreaming(
       globalMsgNum,
       undefined,
       exchangeProvenance,
-      resolvedModel,
+      exchangeModel,
     )
     if (imagePaths.length > 0) {
       replaceLastExchangeWithSummary(sid, query, text, imagePaths.length)
@@ -834,6 +913,7 @@ export async function callClaudeStreaming(
       outputChars: text.length,
       durationMs: totalMs,
       caller: options?.lightweight ? 'voice_query' : 'full_query',
+      ...keyAuditFields,
     })
 
     finishClaudeRun(run.runId, {
@@ -849,6 +929,7 @@ export async function callClaudeStreaming(
       generation: options?.generation,
       ...(outputAttachments.length > 0 ? { outputAttachments } : {}),
       ...(outputImageStats && outputImageStats.published > 0 ? { outputImageStats } : {}),
+      ...(keyLane ? { keyLane } : {}),
     })
     if (terminalOwned === false) return
 
@@ -901,6 +982,7 @@ export async function callClaudeStreaming(
   }
 
   function handleAbort() {
+    keyTurn?.revoke('cancel')
     void terminateForTerminal('client disconnect', result => finalizeError(
         'claude-bridge: client disconnected before Claude completed.',
         result.code,
@@ -1022,6 +1104,9 @@ export async function callClaudeStreaming(
         // recorded as before, so the finished job names the session the result names.
         if (!nativeSessionAnnounced && !options?.dispatch && typeof event.session_id === 'string' && event.session_id) {
           nativeSessionAnnounced = true
+          // Key lanes (plan 7.3): recorded before any answer text, so Continue, Fork, attach and
+          // handoff refuse this transcript from the moment it exists.
+          if (keyProfile) recordKeyedSession({ id: event.session_id, engine: 'claude', profileId: keyProfile.id, cosSessionId: sid })
           updateClaudeRun(run.runId, { cliSessionId: event.session_id })
           callbacks.onNativeSession?.({ cliSessionId: event.session_id })
         }
@@ -1112,6 +1197,7 @@ export async function callClaudeStreaming(
           }
           // Capture CLI session ID for future --resume (avoids cold start on next query)
           if (event.session_id && !options?.dispatch) {
+            if (keyProfile) recordKeyedSession({ id: event.session_id, engine: 'claude', profileId: keyProfile.id, cosSessionId: sid })
             cliSessionMap.set(resolvedCliKey, event.session_id)
             scheduleCliSessionSave()
             updateClaudeRun(run.runId, { cliSessionId: event.session_id })
@@ -1160,6 +1246,7 @@ export async function callClaudeStreaming(
 
   proc.on('close', (code) => {
     childClosed = true
+    keyTurn?.childClosed()
     if (steerReaper) clearTimeout(steerReaper)
     steerPort?.close()
     if (terminationRequested) return
@@ -1196,6 +1283,7 @@ export async function callClaudeStreaming(
   })
 
   proc.on('error', (err) => {
+    keyTurn?.revoke('child_close')
     if (terminationRequested) return
     finalizeError(`claude-bridge: ${err.message}`, null)
   })

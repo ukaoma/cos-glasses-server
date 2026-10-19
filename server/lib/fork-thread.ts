@@ -87,6 +87,7 @@ import {
 import { findBannedPermissionArg } from './banned-permission-args.js'
 import { PROVIDER_AUTH_RE, PROVIDER_OVERFLOW_RE, PROVIDER_QUOTA_RE } from './provider-failure-text.js'
 import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
+import { anyKeyedSessions, isKeyedSession } from './keyed-sessions.js'
 
 /**
  * Providers that can be forked.
@@ -134,6 +135,8 @@ export type ForkFailure =
   /** The source thread changed while we forked it. The one unforgivable outcome. */
   | 'source_thread_mutated'
   | 'fork_internal_error'
+  /** Key lanes K1 (plan v4 7.3): the source thread ran on a key. Refused before any child. */
+  | 'keyed_session'
 
 /**
  * How much of a new thread may exist on the user's Mac as a result of this call.
@@ -646,6 +649,12 @@ async function run(request: ForkRequest, deps: ForkDeps, startedAt: number): Pro
     return fail('invalid_thread_id', 'none', { provider, durationMs: duration() })
   }
   const sourceNativeThreadId: string = request.nativeThreadId
+
+  // Key lanes K1 (plan v4 7.3): a thread that ran on a key is not forked onto the subscription.
+  // One failed stat when no keyed session was ever recorded.
+  if (anyKeyedSessions() && isKeyedSession(sourceNativeThreadId)) {
+    return fail('keyed_session', 'none', { provider, sourceNativeThreadId, durationMs: duration() })
+  }
 
   const base = { provider, sourceNativeThreadId }
 
