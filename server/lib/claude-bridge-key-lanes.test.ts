@@ -231,6 +231,16 @@ describe('Lane B Claude: argv and child env (plan 7.1, 7.2)', () => {
     expect(envB.COS_TURN_REQUEST_FILE).toBeTruthy()
   })
 
+  it('QA B1: with a key saved, the turn argv carries the key-secrets deny layer (subscription and keyed alike)', async () => {
+    const a = await turn('guard-a', {}, 'opus')
+    const b = await turn('guard-b', { keyProfile: profile })
+    for (const spawned of [a.spawned!, b.spawned!]) {
+      const i = spawned.args.indexOf('--settings')
+      expect(i).toBeGreaterThan(0)
+      expect(JSON.parse(spawned.args[i + 1]!).permissions.deny).toEqual(expect.arrayContaining(['Bash(*key-secrets*)']))
+    }
+  })
+
   it('process.env is never written by a keyed turn', async () => {
     const before = JSON.stringify(process.env)
     await turn('procenv', { keyProfile: profile })
