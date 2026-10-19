@@ -41,7 +41,7 @@ const mutations = [
   m('task-dispatch-accepts-profile', TASKS, ['  return config.model && isClaudeModel(config.model) ? config.model : DEFAULT_MODEL', "  return config.model && (isClaudeModel(config.model) || String(config.model).startsWith('profile:')) ? config.model : DEFAULT_MODEL"], REJ_T),
   m('work-request-accepts-profile', WREQ, ['    model = normalizeModelPreference(body.model)', `    model = ${ACCEPT('normalizeModelPreference(body.model)')}`], REJ_T),
   m('work-draft-accepts-profile', WACT, ['  const slot = normalizeModelPreference(draft.modelID)', `  const slot = ${ACCEPT('normalizeModelPreference(draft.modelID)')}`], REJ_T),
-  m('reject-ignores-lanes-off', REJECTS, ['  return isProfilePreference(value) && keyLanesEnabled()', '  return isProfilePreference(value)'], REJ_T),
+  m('reject-ignores-lanes-off', REJECTS, ['  const applies = isProfilePreference(value) && keyLanesEnabled()', '  const applies = isProfilePreference(value)'], REJ_T),
   m('env-default-accepts-profile', ROUTING, ['  return normalizeModelPreference(raw)', "  return (isProfilePreference(raw) ? raw : normalizeModelPreference(raw)) as never"], PREF_T),
   m('v1-not-offered-accepted', COMPAT, ['  if (keyProfileId !== undefined && !v1OfferedProfile(keyProfileId)) {', '  if (false) {'], V1_T),
   m('v1-offer-flag-ignored', ROUTING, ['p.enabled && p.offerOnV1 && getPublicKey', 'p.enabled && getPublicKey'], V1_T),
@@ -55,7 +55,7 @@ const mutations = [
   // ── Silent fallback to the subscription restored ──
   m('router-profile-to-subscription', ROUTER, ['  if (profileId !== undefined) return await runKeyProfileRoute(', '  if (false) return await runKeyProfileRoute('], PREF_T),
   m('resolve-runs-with-lanes-off', ROUTING, ['  if (!keyLanesActive()) return off()\n', ''], PREF_T),
-  m('no-runner-to-subscription', ROUTER, ['    if (!runner) {\n      await lockedCallbacks.onError(keyProfileUnavailableLine(resolved.turn.profile.label))', "    if (!runner) {\n      return await callClaudeStreaming(query, sid, lockedCallbacks, DEFAULT_MODEL, images, reference, globalMsgNum, options)"], PREF_T),
+  m('no-runner-to-subscription', ROUTER, ['    if (!runner) {\n      console.info(`[key-lanes] refused kind=no_runner engine=${resolved.turn.profile.engine}`)\n      await lockedCallbacks.onError(keyProfileUnavailableLine(resolved.turn.profile.label))', "    if (!runner) {\n      return await callClaudeStreaming(query, sid, lockedCallbacks, DEFAULT_MODEL, images, reference, globalMsgNum, options)"], PREF_T),
   m('profile-dispatch-runs', ROUTER, ['    if (options?.dispatch) {\n', '    if (false) {\n'], PREF_T),
   m('session-model-open', CONV, ['  return closedSessionModel(sessions.get(sessionId)?.modelPreference)', '  return (sessions.get(sessionId)?.modelPreference ?? null) as never'], PREF_T),
   m('load-drops-session-binding', CONV, ['    session.modelPreference = normalizeSessionBinding(session.modelPreference) ?? null', '    session.modelPreference = normalizeModelPreference(session.modelPreference) ?? null'], PREF_T),

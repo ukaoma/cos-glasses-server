@@ -70,8 +70,9 @@ const mutations = [
   m('child-token-forwarded-upstream', RELAY, ['    else h.authorization = `Bearer ${secret}`', '    else h.authorization = String(req.headers.authorization)'], [...RELAY_T, ...CLI_T]),
   // ── Ledger (plan 4.5) ──
   m('ledger-extra-fields-kept', LEDGER, ['  const line = JSON.stringify(toLedgerRow(row)) + ', '  const line = JSON.stringify({ ...row, ...toLedgerRow(row) }) + '], METER_T),
-  m('ledger-through-symlink', LEDGER, ["  if (existsSync(file) && lstatSync(file).isSymbolicLink()) throw new Error('refusing to write the key ledger through a symlink')\n", ''], METER_T),
-  m('ledger-mode-not-private', LEDGER, ["  appendFileSync(file, line, { encoding: 'utf8', mode: 0o600, flag: 'a' })\n  chmodSync(file, 0o600)", "  appendFileSync(file, line, { encoding: 'utf8', mode: 0o644, flag: 'a' })\n  chmodSync(file, 0o644)"], METER_T),
+  // P11 QA W6: the ledger append is an O_NOFOLLOW open (anchors re-pinned at integration).
+  m('ledger-through-symlink', LEDGER, ['fsConstants.O_CREAT | fsConstants.O_NOFOLLOW, 0o600)', 'fsConstants.O_CREAT, 0o600)'], [...METER_T, 'server/lib/key-ledger.test.ts']),
+  m('ledger-mode-not-private', LEDGER, [['fsConstants.O_NOFOLLOW, 0o600)', 'fsConstants.O_NOFOLLOW, 0o644)'], ['    fchmodSync(fd, 0o600)', '    fchmodSync(fd, 0o644)']], METER_T),
   // ── Lifecycle (plan 4.1) ──
   m('inactive-hook-keeps-listener', RELAY, ['    await relay.close()\n  })', '  })'], RELAY_T),
 ]

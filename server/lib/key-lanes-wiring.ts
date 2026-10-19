@@ -257,9 +257,8 @@ export function createDirectRelay(deps: DirectRelayAdapterDeps = {}): DirectRela
           const payload = JSON.stringify({ ...body, model: binding.model })
           const maxTokens = typeof body.max_tokens === 'number' ? body.max_tokens : null
           // QA W2: the direct lane caps each reply at its own max_tokens, so the whole of it is
-          // reserved, and a post it does not fit under today's cap is refused (no overshoot).
+          // reserved; the meter refuses a reservation that does not fit under today's cap.
           const fullUsd = estimateReserveUsd({ bodyBytes: Buffer.byteLength(payload), maxTokens, price })
-          if (fullUsd > meter().headroomUsd(binding.keyRef)) return { refused: 'cap_refused' }
           const reserved = meter().reserve({
             keyRef: binding.keyRef,
             turnId: binding.turnId,

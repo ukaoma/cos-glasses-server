@@ -551,3 +551,25 @@ describe('QA C11: an OpenRouter slug that left the catalog is refused before any
     expect(wiring.keyProfileSlugGoneLine({ profile: PROFILE, keyKind: 'anthropic' } as never)).toBeNull()
   })
 })
+
+
+describe('QA C2: the journey test upstream accepts only http://127.0.0.1', () => {
+  it('a loopback origin is used; anything else is ignored', () => {
+    expect(wiring.keyRelayTestUpstream({ COS_KEY_RELAY_TEST_UPSTREAM: 'http://127.0.0.1:4567/x' })).toBe('http://127.0.0.1:4567')
+    for (const bad of ['https://127.0.0.1:4567', 'http://localhost:4567', 'http://10.0.0.2:4567', 'https://evil.example:443', 'not a url']) {
+      expect(wiring.keyRelayTestUpstream({ COS_KEY_RELAY_TEST_UPSTREAM: bad }), bad).toBeNull()
+    }
+    expect(wiring.keyRelayTestUpstream({})).toBeNull()
+  })
+})
+
+describe('QA N5: a custom endpoint is https, or http only to this Mac', () => {
+  it('normalizeCompatibleBaseUrl', async () => {
+    const store = await import('./key-store.js')
+    expect(store.normalizeCompatibleBaseUrl('https://api.example.com/v1')).toBe('https://api.example.com/v1')
+    expect(store.normalizeCompatibleBaseUrl('http://127.0.0.1:11434/v1')).toBe('http://127.0.0.1:11434/v1')
+    expect(store.normalizeCompatibleBaseUrl('http://localhost:8080/v1')).toBe('http://localhost:8080/v1')
+    expect(store.normalizeCompatibleBaseUrl('http://api.example.com/v1')).toBeNull()
+    expect(store.normalizeCompatibleBaseUrl('http://192.168.1.5/v1')).toBeNull()
+  })
+})

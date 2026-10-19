@@ -298,6 +298,10 @@ describe('codexProfilePreflight', () => {
     expect(codexProfilePreflight({ profile: profile(), dispatch: false })).toEqual({ ok: false, message: CODEX_LANE_B_COPY.relayUnavailable })
     registerCodexKeyRelay(() => fakeRelay)
     expect(codexProfilePreflight({ profile: profile(), dispatch: false })).toEqual({ ok: true, keyKind: 'openrouter' })
+    // QA W4: a project config in the working directory that sets a provider refuses the turn.
+    const proj = join(scratch.root, 'proj'); mkdirSync(join(proj, '.codex'), { recursive: true }); mkdirSync(join(proj, '.git'), { recursive: true })
+    writeFileSync(join(proj, '.codex', 'config.toml'), '[model_providers.cos-relay]\nbase_url = "https://elsewhere.example"\n')
+    expect(codexProfilePreflight({ profile: profile(), dispatch: false, cwd: proj })).toEqual({ ok: false, message: 'A Codex project config sets model_providers. Remove it to use a key.' })
   })
 
   it('has no em dashes or arrows in its lens lines', () => {

@@ -35,7 +35,15 @@ const BIND_T = ['server/routes/agent-session-bindings.test.ts']
 const JOB_T = ['server/lib/key-lanes-p11-job-record.test.ts']
 const READ_T = ['server/lib/codex-homes-readers.test.ts']
 const SESS_T = ['server/routes/agent-sessions-keyed.test.ts']
-const ALL = [...WIRE_T, ...ROUTE_T, ...FIELDS_T, ...CLAUDE_T, ...CODEX_T, ...BIND_T, ...JOB_T, ...READ_T, ...SESS_T]
+// QA fix pass
+const GUARD_T = ['server/lib/key-secrets-guard.test.ts', 'server/lib/key-secrets-cli.test.ts']
+const CENSUS_T = ['server/lib/key-lanes-spawn-census.test.ts']
+const RELAY_T = ['server/lib/key-relay.test.ts']
+const LEDGER_T = ['server/lib/key-ledger.test.ts']
+const LANEB_T = ['server/lib/lane-b-env.test.ts']
+const HOME_T = ['server/lib/codex-profile-home.test.ts']
+const PREF_T = ['server/lib/key-lanes-p6-preference.test.ts']
+const ALL = [...WIRE_T, ...ROUTE_T, ...FIELDS_T, ...CLAUDE_T, ...CODEX_T, ...BIND_T, ...JOB_T, ...READ_T, ...SESS_T, ...GUARD_T, ...CENSUS_T, ...RELAY_T, ...LEDGER_T, ...LANEB_T, ...HOME_T, ...PREF_T]
 
 const WIRING = 'server/lib/key-lanes-wiring.ts', METER = 'server/lib/key-relay-meter.ts', ROUTES = 'server/routes/key-lanes.ts'
 const CLAUDE = 'server/lib/claude-bridge.ts', CODEX = 'server/lib/codex-bridge.ts', CES = 'server/lib/codex-engine-sessions.ts'
@@ -55,10 +63,10 @@ const mutations = [
   m('wire-claude-runner-wrong-tier', WIRING, ['withKeyFailureLines(callbacks, turnId, turn.profile), turn.profile.timeoutTier, images', "withKeyFailureLines(callbacks, turnId, turn.profile), 'opus', images"], WIRE_T),
   m('wire-claude-runner-drops-profile', WIRING, ['globalMsgNum, { ...options, turnId, keyProfile: turn.profile })', 'globalMsgNum, { ...options, turnId })'], WIRE_T),
   // ── Relay turn failures read as the key-notices line (second pass) ──
-  m('turn-failure-not-reported', WIRING, ['getKeyRelay({ priceFor: keyCatalogPeekPrice, onTurnFailure: recordKeyTurnFailure })', 'getKeyRelay({ priceFor: keyCatalogPeekPrice })'], WIRE_T),
+  m('turn-failure-not-reported', WIRING, ['    onTurnFailure: recordKeyTurnFailure,\n', ''], WIRE_T),
   m('turn-failure-line-ignored', WIRING, ['    onError: error => callbacks.onError(keyTurnFailureLine(turnId, profile) ?? error),', '    onError: error => callbacks.onError(error),'], WIRE_T),
   m('breaker-pause-not-read', WIRING, ["  const paused = f.scope && f.id && f.kind !== 'breaker_open' && sharedKeyRelay().breakers.isOpen(f.scope, f.id)", '  const paused = false'], WIRE_T),
-  m('pre-spawn-refusal-not-remembered', WIRING, ['        if (id) rememberFailure(binding.turnId, { kind: id, keyRef: binding.keyRef })\n', ''], WIRE_T),
+  m('pre-spawn-refusal-not-remembered', WIRING, ['        if (id) rememberFailure(binding.turnId, { kind: id, keyRef: binding.keyRef, ends: true })\n', ''], WIRE_T),
   m('claude-runner-no-turn-id', WIRING, ['globalMsgNum, { ...options, turnId, keyProfile: turn.profile })', 'globalMsgNum, { ...options, keyProfile: turn.profile })'], WIRE_T),
   m('codex-runner-raw-errors', WIRING, ['runCodexKeyProfileTurn(query, sessionId, withKeyFailureLines(callbacks, turnId, turn.profile), turn', 'runCodexKeyProfileTurn(query, sessionId, callbacks, turn'], WIRE_T),
   m('done-keeps-stale-failure', WIRING, ['    onDone: (...args) => { turnFailures.delete(turnId); return callbacks.onDone(...args) },', '    onDone: (...args) => callbacks.onDone(...args),'], WIRE_T),
@@ -101,6 +109,39 @@ const mutations = [
   m('list-subagents-server-home-only', 'server/routes/agent-sessions.ts', ['codexRoots, now, codexRoots.length > 1 ? keyedCodexRootOf() : undefined)', 'codexRoots, now, undefined)'], SESS_T),
   m('detail-subagents-server-home-only', 'server/routes/agent-sessions.ts', ['detailRoots, undefined, detailRoots.length > 1 ? keyedCodexRootOf() : undefined)', 'detailRoots, undefined, undefined)'], SESS_T),
   m('detail-name-server-home-only', 'server/routes/agent-sessions.ts', ['      const names = await loadCodexThreadNamesAll(agentSessionRoots())', '      const names = new Map<string, string>()'], SESS_T),
+  // ── QA fix pass: B1 secrets deny layer ──
+  m('secrets-deny-layer-dropped', 'server/lib/key-secrets-guard.ts', ["  return ['--settings', JSON.stringify({ permissions: { deny: keySecretsDenyRules() } })]", '  return []'], [...GUARD_T, ...CLAUDE_T]),
+  m('secrets-deny-ignores-lanes-off', 'server/lib/key-secrets-guard.ts', ['  if (!keyLanesEnabled()) return []\n', ''], GUARD_T),
+  m('secrets-deny-no-bash-rule', 'server/lib/key-secrets-guard.ts', ['  rules.push(`Bash(*${KEY_SECRETS_DIR}*)`, `Bash(*${KEY_STORE_FILE}*)`)\n', ''], GUARD_T),
+  m('archive-spawn-without-deny-layer', 'server/lib/archive.ts', ["'sonnet', ...claudeKeySecretsGuardArgs(), instruction]", "'sonnet', instruction]"], CENSUS_T),
+  m('prompt-edit-spawn-without-deny-layer', 'server/lib/prompt-edit.ts', ['    args.push(...claudeKeySecretsGuardArgs())\n', ''], CENSUS_T),
+  // ── W2 cap overshoot, W3 open reserves ──
+  m('reserve-ignores-headroom-floor', METER, ['  if (headroom < floorUsd) return null\n', ''], RELAY_T),
+  m('stream-not-cut-at-cap', 'server/lib/key-relay.ts', ['            if (reservationId && this.streamPastCap(b.keyRef, reservationId, parser.usage, price, body.length)) {', '            if (false) {'], RELAY_T),
+  m('open-reserves-not-counted', 'server/lib/key-ledger.ts', ['  for (const left of open.values()) for (const usd of left) sum += usd\n', ''], LEDGER_T),
+  // ── W4 / G7 settings and env guards ──
+  m('settings-guard-skips-managed', 'server/lib/claude-settings-guard.ts', ['    ...(input.managed ?? CLAUDE_MANAGED_SETTINGS_FILES),\n', ''], LANEB_T),
+  m('settings-guard-skips-config-dir', 'server/lib/claude-settings-guard.ts', ["    ...(configDir ? [join(configDir, 'settings.json')] : []),\n", ''], LANEB_T),
+  m('oauth-token-not-stripped', 'server/lib/lane-b-env.ts', ["  'CLAUDE_CODE_OAUTH_TOKEN',\n", ''], LANEB_T),
+  m('codex-project-config-ignored', PHOME, ['  if (project) return { ok: false, message: KEY_LANE_REFUSAL_COPY.codexProjectConfig(project.name) }\n', ''], HOME_T),
+  // ── W5, U6 routes ──
+  m('profile-off-keeps-turns', ROUTES, ['      if (!p.enabled || before.keyRef !== p.keyRef || before.model !== p.model || before.engine !== p.engine) relay?.revokeProfile(p.id)\n', ''], ROUTE_T),
+  m('model-change-keeps-breaker', ROUTES, ["      if (before.keyRef !== p.keyRef || before.model !== p.model) relay?.resetBreaker('profile', p.id)\n", ''], ROUTE_T),
+  m('breaker-reset-route-noop', ROUTES, ["    relay?.resetBreaker('key', ref)\n", ''], ROUTE_T),
+  // ── N3, N5, N6, N10 / U2 ──
+  m('redaction-misses-escaped-forms', 'server/lib/key-relay-errors.ts', ['    const forms = new Set([s, JSON.stringify(s).slice(1, -1), encodeURIComponent(s)])', '    const forms = new Set([s])'], RELAY_T),
+  m('remote-http-endpoint-allowed', 'server/lib/key-store.ts', ["    if (u.protocol === 'http:' && !isLoopbackHost(u.hostname)) return null\n", ''], WIRE_T),
+  m('rewrite-log-unsanitized', 'server/lib/key-relay.ts', [".slice(0, 64).replace(/[^A-Za-z0-9._:/@\\[\\]-]/g, '?')}", '.slice(0, 64)}'], RELAY_T),
+  m('ended-nonce-not-reported', 'server/lib/key-relay.ts', ["        if (ended) this.fail({ binding: ended.binding }, ended.reason === 'expired' ? 'nonce_expired' : 'nonce_revoked', 401)\n", ''], RELAY_T),
+  m('refused-4xx-not-reported', 'server/lib/key-relay.ts', ["        this.fail(entry, kind ?? 'upstream_refused', upstream.status)", '        if (kind) this.fail(entry, kind, upstream.status)'], RELAY_T),
+  m('network-error-not-reported', 'server/lib/key-relay.ts', ["        this.fail(entry, 'network_error', 502)\n", ''], RELAY_T),
+  m('turn-ending-failure-overwritten', WIRING, ['  if (turnFailures.get(turnId)?.ends && !failure.ends) return\n', ''], WIRE_T),
+  // ── U9, C11, C2 test upstream, same-Mac copy ──
+  m('one-turn-binds-the-session', 'server/lib/model-router.ts', ['    if (!options?.keyTurnOnly) setSessionModel(sid, resolved.turn.binding)', '    setSessionModel(sid, resolved.turn.binding)'], PREF_T),
+  m('key-turn-only-on-any-model', 'server/lib/query-job-types.ts', ['input.keyTurnOnly === true && isProfilePreference(model) ? { keyTurnOnly: true as const }', 'input.keyTurnOnly === true ? { keyTurnOnly: true as const }'], JOB_T),
+  m('gone-slug-not-refused', WIRING, ['  if (models.some(m => m.id === turn.profile.model)) return null', '  return null'], WIRE_T),
+  m('test-upstream-accepts-any-host', WIRING, ["    if (u.protocol === 'http:' && u.hostname === '127.0.0.1' && u.port) return u.origin", '    if (u.port) return u.origin'], WIRE_T),
+  m('same-mac-copy-drift', NOTICES, ["Apps and agents that run on this Mac as you can read it.", "Apps on this Mac can read it."], WIRE_T),
   // ── Nonce revoke on steer abort (P3 asked for this mutant) ──
   m('steer-abort-keeps-nonce', CLAUDE, ["    keyTurn?.revoke('steer_abort')\n", ''], CLAUDE_T),
   // ── Codex resume slot by profile ──

@@ -105,7 +105,8 @@ const mutations = [
   m('store-boot-counts-only-interrupts', STORE, ["          if (result.applied && result.job.status === 'interrupted') this.health.interruptedOnBoot++", '          if (result.applied) this.health.interruptedOnBoot++'], STORE_T),
 
   // ── Types: identity, reading, bounds ──
-  m('steerable-outside-fingerprint', TYPES, ["  'activityToolMode',\n] as const satisfies readonly (keyof QueryJobRequest)[]", "  'activityToolMode', 'steerable',\n] as const satisfies readonly (keyof QueryJobRequest)[]"], [...STORE_T, ...ORIGIN]),
+  // 6.80.0 key lanes added 'keyTurnOnly' to the pick (anchor re-pinned by P11).
+  m('steerable-outside-fingerprint', TYPES, ["  'activityToolMode', 'keyTurnOnly',\n] as const satisfies readonly (keyof QueryJobRequest)[]", "  'activityToolMode', 'keyTurnOnly', 'steerable',\n] as const satisfies readonly (keyof QueryJobRequest)[]"], [...STORE_T, ...ORIGIN]),
   m('steerable-true-only', TYPES, ['    ...(input.steerable === true ? { steerable: true as const } : {}),', '    ...(input.steerable ? { steerable: true as const } : {}),'], STORE_T),
   m('read-state-not-applied', TYPES, ["  return isTerminalQueryJobStatus(jobStatus) && (state === 'accepted' || state === 'delivered') ? 'not_applied' : state", '  return state'], [...STORE_T, ...COORD_T, ...ROUTE_T]),
   m('fallback-completed-only', TYPES, ["  if (steerReadState(journaled, jobStatus) === 'not_applied' && jobStatus === 'completed') return 'queue_follow_up'", "  if (steerReadState(journaled, jobStatus) === 'not_applied') return 'queue_follow_up'"], [...STORE_T, ...COORD_T]),
