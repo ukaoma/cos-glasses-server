@@ -104,6 +104,7 @@ import { getCodexTrustMode } from './codex-run-ledger.js'
 import { CURSOR_SLOT_MODEL_IDS } from './cursor-model-catalog.js'
 import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import type { PermissionAllowance } from './banned-permission-args.js'
+import { anyKeyedSessions, isKeyedSession } from './keyed-sessions.js'
 import {
   continueAllowanceFor,
   validateContinuePlan,
@@ -149,6 +150,8 @@ export type AttachedTurnFailure =
   | 'adapter_internal_error'
   /** 6.53.0: the caller's abort signal fired (a cancel from the lens). Never ambiguous. */
   | 'cancelled'
+  /** Key lanes K1 (plan v4 7.3): the thread ran on a key. Refused before anything is built. */
+  | 'keyed_session'
 
 /** See the header. The boundary is the first byte handed to the child's stdin. */
 export type AttachedDeliveryState = 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered' | 'cancelled'
@@ -819,6 +822,12 @@ async function run(
     return fail('invalid_thread_id', 'not_attempted', { provider, durationMs: duration() })
   }
   const nativeThreadId: string = request.nativeThreadId
+
+  // Key lanes K1 (plan v4 7.3): a thread that ran on a key is not continued here, where it would
+  // resume on the subscription. One failed stat when no keyed session was ever recorded.
+  if (anyKeyedSessions() && isKeyedSession(nativeThreadId)) {
+    return fail('keyed_session', 'not_attempted', { provider, nativeThreadId, durationMs: duration() })
+  }
 
   const base = { provider, nativeThreadId, durationMs: 0 }
 
