@@ -19,8 +19,9 @@
 // a key profile in hand; importing this module reads no file, opens no socket and starts no timer.
 import { createHash } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
-import { atomicWriteFileSync } from './atomic-fs.js'
+import { dirname, join, resolve as resolvePath } from 'node:path'
+import { homedir } from 'node:os'
+import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { currentHookPaths, type HookPaths } from './claude-hooks-installer.js'
 import { codexSubscribedEvents, mergeCodexHooks, stableCodexHookScriptPath } from './codex-hooks-installer.js'
 import { codexProfileHome, codexProfileHomesRoot, serverCodexHome } from './codex-homes.js'
@@ -133,8 +134,38 @@ export const CODEX_LANE_B_COPY = {
 
 export type CodexProfilePreflight = { ok: true; keyKind: KeyKind } | { ok: false; message: string }
 
+/** Project-config names that could point a keyed Codex turn at a provider other than the relay. */
+const CODEX_PROJECT_PROVIDER_RE = /^\s*(?:\[\s*model_providers\b|(?:model_provider|model_providers|openai_base_url|chatgpt_base_url)\s*[=.])/m
+
+/**
+ * QA W4: a trusted project's `.codex/config.toml` is merged over the profile home's config, so
+ * one that sets a provider (or redefines `cos-relay`) could send a keyed turn around the meter.
+ * Walks from the working directory up to the repository root (a `.git` entry) or the filesystem
+ * root, never into the user's home itself (that `.codex` is the global config the profile home
+ * replaces). Returns the file and the name it sets, or null. Read only on a keyed turn.
+ */
+export function codexProjectConfigRefusal(cwd: string, home: string = homedir()): { file: string; name: string } | null {
+  let dir = resolvePath(cwd)
+  for (let i = 0; i < 32; i++) {
+    if (dir !== home) {
+      const file = join(dir, '.codex', 'config.toml')
+      try {
+        if (lstatSync(file).isFile()) {
+          const m = CODEX_PROJECT_PROVIDER_RE.exec(readFileSync(file, 'utf8'))
+          if (m) return { file, name: m[0].replace(/[\s\[=.]/g, '') || 'model_provider' }
+        }
+      } catch { /* none here */ }
+      try { if (lstatSync(join(dir, '.git'))) break } catch { /* not the repo root */ }
+    }
+    const up = dirname(dir)
+    if (up === dir) break
+    dir = up
+  }
+  return null
+}
+
 /** Everything a keyed Codex turn passes before history, the run ledger or a process. Fails closed. */
-export function codexProfilePreflight(input: { profile: KeyProfile; dispatch: boolean }): CodexProfilePreflight {
+export function codexProfilePreflight(input: { profile: KeyProfile; dispatch: boolean; cwd?: string }): CodexProfilePreflight {
   const { profile } = input
   if (!keyLanesActive()) return { ok: false, message: CODEX_LANE_B_COPY.lanesOff }
   if (profile.engine !== 'codex') return { ok: false, message: CODEX_LANE_B_COPY.wrongEngine(profile.label) }
@@ -143,6 +174,8 @@ export function codexProfilePreflight(input: { profile: KeyProfile; dispatch: bo
   const key = getPublicKey(profile.keyRef)
   if (!key) return { ok: false, message: CODEX_LANE_B_COPY.keyMissing(profile.label) }
   if (engineModelProblem('codex', profile.model, key.kind)) return { ok: false, message: CODEX_LANE_B_COPY.modelNotAllowed(profile.label) }
+  const project = input.cwd ? codexProjectConfigRefusal(input.cwd) : null
+  if (project) return { ok: false, message: KEY_LANE_REFUSAL_COPY.codexProjectConfig(project.name) }
   if (!codexKeyRelayRegistered()) return { ok: false, message: CODEX_LANE_B_COPY.relayUnavailable }
   return { ok: true, keyKind: key.kind }
 }
@@ -407,7 +440,7 @@ export function writeCodexProfileHome(rendered: RenderedCodexProfileHome, relayO
   try { lstatSync(auth); unlinkSync(auth) } catch { /* none, as it should be */ }
   const configPath = join(rendered.home, 'config.toml')
   const hooksPath = join(rendered.home, 'hooks.json')
-  atomicWriteFileSync(configPath, rendered.configTemplate.split(ORIGIN_PLACEHOLDER).join(relayOrigin), { mode: 0o600 })
-  atomicWriteFileSync(hooksPath, rendered.hooksText, { mode: 0o600 })
+  durableAtomicWriteFileSync(configPath, rendered.configTemplate.split(ORIGIN_PLACEHOLDER).join(relayOrigin), { mode: 0o600 })
+  durableAtomicWriteFileSync(hooksPath, rendered.hooksText, { mode: 0o600 })
   return { configPath, hooksPath }
 }

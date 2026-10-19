@@ -109,6 +109,8 @@ export function directEndpointFor(key: Pick<PublicKeyRecord, 'kind' | 'baseUrl'>
     try {
       const u = new URL(key.baseUrl)
       if (u.protocol !== 'https:' && u.protocol !== 'http:') return null
+      // QA N5: a key saved before the https rule still never posts in the clear to another host.
+      if (u.protocol === 'http:' && !isLoopbackEndpoint(u.toString())) return null
       return `${key.baseUrl.replace(/\/+$/, '')}/chat/completions`
     } catch {
       return null

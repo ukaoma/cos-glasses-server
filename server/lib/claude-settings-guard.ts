@@ -14,7 +14,13 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-export const CLAUDE_SETTINGS_REFUSED_ENV = /^(ANTHROPIC_|CLAUDE_CODE_USE_)/
+export const CLAUDE_SETTINGS_REFUSED_ENV = /^(ANTHROPIC_|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH_TOKEN$|AWS_BEARER_TOKEN_BEDROCK$)/
+
+/** QA W4 / G7: the managed (enterprise) settings files Claude Code reads above every user file. */
+export const CLAUDE_MANAGED_SETTINGS_FILES: readonly string[] = [
+  '/Library/Application Support/ClaudeCode/managed-settings.json',
+  '/etc/claude-code/managed-settings.json',
+]
 
 export interface ClaudeSettingsRefusal {
   /** The file that sets it. */
@@ -24,9 +30,14 @@ export interface ClaudeSettingsRefusal {
   message: string
 }
 
-export function claudeSettingsFiles(input: { cwd: string; home?: string }): string[] {
+export function claudeSettingsFiles(input: { cwd: string; home?: string; env?: NodeJS.ProcessEnv; managed?: readonly string[] }): string[] {
   const home = input.home ?? homedir()
+  const env = input.env ?? process.env
+  // QA W4 / G7: CLAUDE_CONFIG_DIR moves the user settings; both places are checked.
+  const configDir = typeof env.CLAUDE_CONFIG_DIR === 'string' && env.CLAUDE_CONFIG_DIR.trim() ? env.CLAUDE_CONFIG_DIR.trim() : null
   return [
+    ...(input.managed ?? CLAUDE_MANAGED_SETTINGS_FILES),
+    ...(configDir ? [join(configDir, 'settings.json')] : []),
     join(home, '.claude', 'settings.json'),
     join(input.cwd, '.claude', 'settings.json'),
     join(input.cwd, '.claude', 'settings.local.json'),
@@ -48,7 +59,7 @@ export function claudeSettingsRefusalMessage(name: string): string {
 }
 
 /** The first setting that would bypass the relay, or null when a keyed spawn may go ahead. */
-export function claudeSettingsRefusal(input: { cwd: string; home?: string }): ClaudeSettingsRefusal | null {
+export function claudeSettingsRefusal(input: { cwd: string; home?: string; env?: NodeJS.ProcessEnv; managed?: readonly string[] }): ClaudeSettingsRefusal | null {
   for (const file of claudeSettingsFiles(input)) {
     const settings = readSettings(file)
     if (!settings) continue

@@ -45,7 +45,10 @@ import {
 } from './key-relay-errors.js'
 import type { RelayLocalError } from './key-relay-errors.js'
 import type { KeyRelayMeter, ModelPrice } from './key-relay-meter.js'
-import { defaultPriceFor, estimateReserveUsd, getSharedKeyMeter, tokensToUsd } from './key-relay-meter.js'
+import { defaultPriceFor, getSharedKeyMeter, reserveWithinHeadroomUsd, tokensToUsd } from './key-relay-meter.js'
+
+/** Ended nonces remembered (hash only) so a late request reads why; oldest dropped first. */
+const ENDED_NONCES_MAX = 256
 
 /** The only address the relay ever listens on. */
 export const RELAY_HOST = '127.0.0.1'
@@ -201,6 +204,14 @@ export class RelayUsageParser {
   }
 }
 
+/** QA W2: the running cost of a reply mid-stream: input as reported (or the body estimate), output at least the text seen. */
+export function streamedUsd(usage: ParsedUsage, price: ModelPrice, bodyBytes: number): { usd: number; tokens: { input: number; output: number } } {
+  const input = usage.input > 0 ? usage.input : Math.ceil(Math.max(0, bodyBytes) / 4)
+  const output = Math.max(usage.output, Math.ceil(usage.deltaChars / 4))
+  const tokens = { input: Math.round(input), output: Math.round(output) }
+  return { usd: tokensToUsd(tokens, price), tokens }
+}
+
 /** USD for what was parsed, or null when no usage arrived (settle the full reservation). */
 export function usageUsd(usage: ParsedUsage, price: ModelPrice): { usd: number; tokens: { input: number; output: number } } | null {
   if (!usage.sawUsage) return null
@@ -222,13 +233,23 @@ export class KeyRelayRefusal extends Error {
   }
 }
 
+/**
+ * QA N10 / U2: every way a keyed request went wrong, not only the ones that end the turn. A 429,
+ * 5xx or network error is retried by the child; reported anyway so a turn that still fails reads
+ * why. `nonce_*` is a request on a token the relay already ended; `upstream_refused` a 4xx with
+ * no row of its own (403 moderation, a plain 400).
+ */
+export type RelayTurnFailureKind = RelayFailureKind | 'nonce_expired' | 'nonce_revoked' | 'upstream_refused'
+
 export interface RelayTurnFailure {
   turnId: string
   sessionId: string
   profileId: string
   keyRef: KeyRef
-  kind: RelayFailureKind
+  kind: RelayTurnFailureKind
   status: number
+  /** The plan 4.6 "ends the turn" rows (cap, 401, 402, model gone). */
+  endsTurn?: boolean
 }
 
 export interface KeyRelayDeps {
@@ -321,6 +342,7 @@ export class KeyRelayServer implements KeyRelay {
   private server: http.Server | null = null
   private listening: Promise<void> | null = null
   private readonly turns = new Map<string, TurnEntry>()
+  private readonly ended = new Map<string, { binding: RelayNonceBinding; reason: RelayRevokeReason }>()
   private readonly byTurnId = new Map<string, string>()
   private readonly usageReadAt = new Map<KeyRef, number>()
   private readonly keyStamps = new Map<KeyRef, string>()
@@ -434,6 +456,14 @@ export class KeyRelayServer implements KeyRelay {
     })
   }
 
+  /** QA W2: settled spend today (this reservation excluded) plus what this reply has streamed so far, against the cap. */
+  private streamPastCap(ref: KeyRef, reservationId: string, usage: ParsedUsage, price: ModelPrice, bodyBytes: number): boolean {
+    const cap = this.meter.capUsd(ref)
+    if (cap === null) return true
+    const others = this.meter.spentTodayUsd(ref) - (this.meter.reservedUsd(reservationId) ?? 0)
+    return others + streamedUsd(usage, price, bodyBytes).usd > cap
+  }
+
   // ── Extras for the status route, Control's Reset button and tests ──
 
   breakerState(scope: BreakerScope, id: string): BreakerState {
@@ -463,6 +493,13 @@ export class KeyRelayServer implements KeyRelay {
     if (!e) return
     this.turns.delete(hash)
     if (this.byTurnId.get(e.binding.turnId) === hash) this.byTurnId.delete(e.binding.turnId)
+    // Remembered (hash, binding and reason only) so a late request on it can say why it failed.
+    this.ended.set(hash, { binding: e.binding, reason })
+    while (this.ended.size > ENDED_NONCES_MAX) {
+      const oldest = this.ended.keys().next().value
+      if (oldest === undefined) break
+      this.ended.delete(oldest)
+    }
     if (e.timer) clearTimeout(e.timer)
     for (const c of e.controllers) c.abort()
     e.controllers.clear()
@@ -582,10 +619,10 @@ export class KeyRelayServer implements KeyRelay {
     res.end(body)
   }
 
-  private fail(entry: TurnEntry, kind: RelayFailureKind, status: number): void {
-    if (!endsTurn(kind)) return
+  private fail(entry: TurnEntry | { binding: RelayNonceBinding }, kind: RelayTurnFailureKind, status: number): void {
     const b = entry.binding
-    try { this.onTurnFailure({ turnId: b.turnId, sessionId: b.sessionId, profileId: b.profileId, keyRef: b.keyRef, kind, status }) } catch { /* a listener never breaks the relay */ }
+    const ends = kind !== 'nonce_expired' && kind !== 'nonce_revoked' && kind !== 'upstream_refused' && endsTurn(kind)
+    try { this.onTurnFailure({ turnId: b.turnId, sessionId: b.sessionId, profileId: b.profileId, keyRef: b.keyRef, kind, status, endsTurn: ends }) } catch { /* a listener never breaks the relay */ }
   }
 
   private async readBody(req: IncomingMessage): Promise<Buffer | null> {
@@ -621,6 +658,9 @@ export class KeyRelayServer implements KeyRelay {
       if (entry && !this.isActive()) this.revokeAll('lanes_inactive')
       if (!entry || !this.turns.has(entry.hash) || this.now() >= entry.expiresAt || entry.binding.engine !== route.engine) {
         if (entry && this.now() >= entry.expiresAt) this.drop(entry.hash, 'expired')
+        // QA N10: a token this relay ended reports why to its turn (an unknown one, nothing).
+        const ended = token ? this.ended.get(hashNonce(token)) : undefined
+        if (ended) this.fail({ binding: ended.binding }, ended.reason === 'expired' ? 'nonce_expired' : 'nonce_revoked', 401)
         req.resume()
         return this.sendLocal(res, route.engine, 'nonce_invalid')
       }
@@ -664,7 +704,8 @@ export class KeyRelayServer implements KeyRelay {
     if (decision.action === 'rewrite') {
       json.model = b.allowedModel
       body = Buffer.from(JSON.stringify(json))
-      this.log(`[key-relay] model rewritten from=${String(decision.requested).slice(0, 64)} nonce=${entry.nonceHead}`)
+      // QA N6: the requested name comes from the child; only safe characters reach the log line.
+      this.log(`[key-relay] model rewritten from=${String(decision.requested).slice(0, 64).replace(/[^A-Za-z0-9._:/@\[\]-]/g, '?')} nonce=${entry.nonceHead}`)
     }
 
     const secret = this.secretFor(b.keyRef)
@@ -678,8 +719,11 @@ export class KeyRelayServer implements KeyRelay {
     if (route.metered) {
       await this.refreshUsageIfStale(b.keyRef, entry.keyKind, secret)
       const maxTokens = route.engine === 'claude' ? json.max_tokens : json.max_output_tokens
-      const estimateUsd = estimateReserveUsd({ bodyBytes: body.length, maxTokens: typeof maxTokens === 'number' ? maxTokens : null, price })
-      const r = this.meter.reserve({ keyRef: b.keyRef, turnId: b.turnId, estimateUsd, profile: b.profileId, lane: 'key' })
+      // QA W2: the request's own max_tokens, within what the key has left today.
+      const estimateUsd = reserveWithinHeadroomUsd({ bodyBytes: body.length, maxTokens: typeof maxTokens === 'number' ? maxTokens : null, price, headroomUsd: this.meter.headroomUsd(b.keyRef) })
+      const r = estimateUsd === null
+        ? { ok: false as const }
+        : this.meter.reserve({ keyRef: b.keyRef, turnId: b.turnId, estimateUsd, profile: b.profileId, lane: 'key' })
       if (!r.ok) {
         this.log(`[key-relay] cap refused nonce=${entry.nonceHead}`)
         this.fail(entry, 'cap_refused', 402)
@@ -691,6 +735,7 @@ export class KeyRelayServer implements KeyRelay {
     const controller = new AbortController()
     entry.controllers.add(controller)
     let childGone = false
+    let cutAtCap = false
     res.on('close', () => {
       if (!res.writableFinished) { childGone = true; controller.abort() }
     })
@@ -712,6 +757,7 @@ export class KeyRelayServer implements KeyRelay {
         if (reservationId) this.meter.settle({ reservationId, usd: 0, tokens: { input: 0, output: 0 } })
         if (childGone) return
         this.log(`[key-relay] upstream unreachable nonce=${entry.nonceHead}`)
+        this.fail(entry, 'network_error', 502)
         return this.sendLocal(res, route.engine, 'network_error')
       }
       clearTimeout(headersTimer)
@@ -729,7 +775,7 @@ export class KeyRelayServer implements KeyRelay {
           const scope = breakerScopeFor(kind)
           this.breakers.record(scope, scope === 'key' ? b.keyRef : b.profileId, kind, false)
         }
-        if (kind) this.fail(entry, kind, upstream.status)
+        this.fail(entry, kind ?? 'upstream_refused', upstream.status)
         this.log(`[key-relay] upstream ${upstream.status} ${kind ?? 'passed'} nonce=${entry.nonceHead}`)
         if (childGone) return
         res.writeHead(upstream.status, outHeaders)
@@ -751,6 +797,12 @@ export class KeyRelayServer implements KeyRelay {
             if (done) break
             parser.push(value)
             if (childGone) break
+            // QA W2: stop a reply whose running cost would take the key past today's cap.
+            if (reservationId && this.streamPastCap(b.keyRef, reservationId, parser.usage, price, body.length)) {
+              cutAtCap = true
+              controller.abort()
+              break
+            }
             if (!res.write(value)) {
               await new Promise<void>(resolve => {
                 const go = () => { res.off('drain', go); res.off('close', go); resolve() }
@@ -768,6 +820,13 @@ export class KeyRelayServer implements KeyRelay {
       }
       if (!childGone && !res.writableEnded) res.end()
       if (!reservationId) return
+      if (cutAtCap) {
+        const streamed = streamedUsd(parser.usage, price, body.length)
+        this.meter.settle({ reservationId, usd: streamed.usd, tokens: streamed.tokens })
+        this.log(`[key-relay] cap reached mid-reply, stream cut nonce=${entry.nonceHead}`)
+        this.fail(entry, 'cap_refused', 402)
+        return
+      }
       const usage = usageUsd(parser.finish(), price)
       const generationId = upstream.headers.get('x-generation-id') ?? undefined
       const settledUsd = usage ? usage.usd : (this.meter.reservedUsd(reservationId) ?? 0)

@@ -18,6 +18,8 @@ const store = await import('./key-store.js')
 const profiles = await import('./key-profiles.js')
 const ledger = await import('./key-ledger.js')
 const { KeyRelayMeter } = await import('./key-relay-meter.js')
+const meterMod = await import('./key-relay-meter.js')
+const errorsMod = await import('./key-relay-errors.js')
 const relayMod = await import('./key-relay.js')
 const { RELAY_PATHS } = await import('./key-relay-contract.js')
 type KeyRelayServer = import('./key-relay.js').KeyRelayServer
@@ -506,11 +508,46 @@ describe('key relay: metering and the cap (plan 4.5)', () => {
     const first = await post(h, MSG, msgBody())
     expect(first.status).toBe(200)
     await first.text()
-    mock.usageDaily = 0.995
+    // QA W2 (P11): a request now reserves within the headroom, so the jump must leave less than
+    // the input plus a short reply (256 output tokens at $10 per M is $0.00256).
+    mock.usageDaily = 0.999
     const second = await post(h, MSG, msgBody())
     expect(second.status).toBe(402)
     await second.text()
     expect(upstreamCalls('/messages')).toHaveLength(1)
+  })
+
+  it('QA W2: a reply that runs past the cap is cut mid-stream, settled at what streamed, and reported as cap_refused', async () => {
+    mock.usageDaily = 0.95 // $0.05 left of the $1 cap
+    mock.messages = async (_req, res, seen) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      const ev = anthropicEvents(bodyModel(seen))
+      res.write(sse([ev[0]!, ev[1]!]))
+      // 60 chunks of 2,000 characters: about $0.005 each at $10 per M output, $0.30 in all.
+      for (let i = 0; i < 60 && !res.destroyed; i++) {
+        res.write(sse([['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x'.repeat(2000) } }]]))
+        await new Promise(r => setTimeout(r, 2))
+      }
+      if (!res.destroyed) res.end(sse(ev.slice(3)))
+    }
+    const { relay, failures } = makeRelay({ priceFor: price, usagePollMs: 60_000 })
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
+    const r = await post(h, MSG, msgBody(SLUG, { max_tokens: 32_000 }))
+    const text = await r.text()
+    expect(text).not.toContain('message_stop')
+    expect(failures).toContainEqual({ kind: 'cap_refused', status: 402 })
+    const settle = ledgerRows().filter(x => x.kind === 'settle')
+    expect(settle).toHaveLength(1)
+    // Cut within one chunk of the cap's $0.05 headroom.
+    expect(settle[0]!.usd).toBeGreaterThan(0.04)
+    expect(settle[0]!.usd).toBeLessThan(0.05 + 0.006)
+  })
+
+  it('QA W2: max_tokens is reserved in full (no 4096 clamp) when it fits under the cap', () => {
+    const p = { inUsdPerM: 1, outUsdPerM: 10 }
+    expect(meterMod.reserveWithinHeadroomUsd({ bodyBytes: 4000, maxTokens: 32_000, price: p, headroomUsd: 10 })).toBeCloseTo(0.001 + 0.32, 9)
+    expect(meterMod.reserveWithinHeadroomUsd({ bodyBytes: 4000, maxTokens: 32_000, price: p, headroomUsd: 0.05 })).toBe(0.05)
+    expect(meterMod.reserveWithinHeadroomUsd({ bodyBytes: 4000, maxTokens: 32_000, price: p, headroomUsd: 0.002 })).toBeNull()
   })
 
   it('refuses the turn before spawn when the key is already at its cap', async () => {
@@ -633,15 +670,57 @@ describe('key relay: streaming (plan 4.6)', () => {
   })
 })
 
+describe('QA N10 / U2: a request on a token the relay ended says why', () => {
+  it('revoked: 401 to the child and nonce_revoked to the turn; an unknown token reports nothing', async () => {
+    const { relay, failures } = makeRelay()
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
+    h.revoke('cancel')
+    expect((await post(h, MSG, msgBody())).status).toBe(401)
+    expect(failures).toEqual([{ kind: 'nonce_revoked', status: 401 }])
+    expect((await post({ origin: h.origin, nonce: 'not-a-nonce-the-relay-made' }, MSG, msgBody())).status).toBe(401)
+    expect(failures).toHaveLength(1)
+  })
+
+  it('expired: nonce_expired', async () => {
+    const { relay, failures } = makeRelay()
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 1 })
+    offset += 5 * 60_000
+    expect((await post(h, MSG, msgBody())).status).toBe(401)
+    expect(failures.map(f => f.kind)).toEqual(['nonce_expired'])
+  })
+})
+
+describe('QA N3 / N6: redaction of escaped forms; the rewrite log line', () => {
+  it('redacts the plain, JSON-escaped and URL-encoded forms', () => {
+    const s = 'sk-or-v1-abc/def+ghi"jkl'
+    const text = `a ${s} b ${JSON.stringify(s).slice(1, -1)} c ${encodeURIComponent(s)}`
+    const out = errorsMod.redactSecrets(text, [s])
+    expect(out).not.toContain('abc/def')
+    expect(out.split('[redacted]')).toHaveLength(4)
+  })
+
+  it('a child-sent model name with control characters reaches the log as safe characters only', async () => {
+    const { relay, logs } = makeRelay()
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
+    await (await post(h, MSG, msgBody('claude-opus\n[key-relay] forged line\u001b[31m'))).text()
+    const line = logs.find(l => l.includes('model rewritten'))!
+    expect(line).toBeDefined()
+    expect(line).not.toMatch(/[\n\u001b]/)
+    expect(line.split('\n')).toHaveLength(1)
+  })
+})
+
 describe('key relay: status mapping (plan 4.6, every row)', () => {
   const rows: Array<{ name: string; status: number; body: string; headers?: Record<string, string>; kind: string | null; breaker: 'key' | 'profile' | null }> = [
     { name: 'upstream 401', status: 401, body: '{"type":"error","error":{"type":"authentication_error","message":"bad key"}}', kind: 'key_rejected', breaker: 'key' },
     { name: 'upstream 402', status: 402, body: '{"error":{"message":"Insufficient credits"}}', kind: 'out_of_credit', breaker: 'key' },
     { name: 'model 404', status: 404, body: '{"error":{"message":"No endpoints found"}}', kind: 'model_gone', breaker: 'profile' },
     { name: 'model 400', status: 400, body: '{"error":{"message":"model not found"}}', kind: 'model_gone', breaker: 'profile' },
-    { name: '429', status: 429, body: '{"error":{"message":"slow down"}}', headers: { 'retry-after': '7' }, kind: null, breaker: null },
-    { name: '5xx', status: 500, body: '{"error":{"message":"boom"}}', kind: null, breaker: null },
-    { name: '529', status: 529, body: '{"type":"error","error":{"type":"overloaded_error"}}', kind: null, breaker: null },
+    // QA N10 / U2 (P11): retried rows are reported too, so a turn that still fails reads why.
+    { name: '429', status: 429, body: '{"error":{"message":"slow down"}}', headers: { 'retry-after': '7' }, kind: 'rate_limited', breaker: null },
+    { name: '5xx', status: 500, body: '{"error":{"message":"boom"}}', kind: 'upstream_error', breaker: null },
+    { name: '529', status: 529, body: '{"type":"error","error":{"type":"overloaded_error"}}', kind: 'upstream_error', breaker: null },
+    { name: '403 (moderation): upstream_refused, no breaker', status: 403, body: '{"error":{"message":"flagged"}}', kind: 'upstream_refused', breaker: null },
   ]
   for (const row of rows) {
     it(row.name, async () => {
@@ -666,12 +745,13 @@ describe('key relay: status mapping (plan 4.6, every row)', () => {
     await new Promise<void>(r => dead.listen(0, '127.0.0.1', () => r()))
     const port = (dead.address() as AddressInfo).port
     await new Promise<void>(r => dead.close(() => r()))
-    const { relay } = makeRelay({ upstreams: { openrouterMessages: `http://127.0.0.1:${port}/api/v1/messages` } })
+    const { relay, failures } = makeRelay({ upstreams: { openrouterMessages: `http://127.0.0.1:${port}/api/v1/messages` } })
     const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
     const r = await post(h, MSG, msgBody())
     expect(r.status).toBe(502)
     expect(await r.json()).toMatchObject({ type: 'error', error: { type: 'overloaded_error' } })
     expect(relay.breakerState('key', keyRef).failures).toBe(0)
+    expect(failures.map(f => f.kind)).toContain('network_error')
 
     mock.messages = () => { /* never answers */ }
     const slow = makeRelay({ upstreamHeadersTimeoutMs: 50 })

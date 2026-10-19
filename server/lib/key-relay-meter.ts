@@ -53,6 +53,25 @@ export function estimateReserveUsd(input: { bodyBytes: number; maxTokens?: numbe
   return tokensToUsd({ input: inTokens, output: outTokens }, input.price)
 }
 
+/** QA W2: the smallest reply worth starting; less headroom than this refuses the request. */
+export const MIN_RESERVE_OUTPUT_TOKENS = 256
+
+/**
+ * QA W2: reserve the request's own max_tokens (no 4096 clamp), but never more than the key has
+ * left today. Null when even the input plus a short reply does not fit: refuse before sending.
+ * A reply longer than what was reserved is cut by the relay when the spend reaches the cap.
+ */
+export function reserveWithinHeadroomUsd(input: { bodyBytes: number; maxTokens?: number | null; price: ModelPrice; headroomUsd: number }): number | null {
+  const inTokens = Math.ceil(Math.max(0, input.bodyBytes) / BYTES_PER_TOKEN_ESTIMATE)
+  const mt = typeof input.maxTokens === 'number' && Number.isFinite(input.maxTokens) && input.maxTokens > 0 ? input.maxTokens : RESERVE_MAX_OUTPUT_TOKENS
+  const inputUsd = tokensToUsd({ input: inTokens, output: 0 }, input.price)
+  const fullUsd = inputUsd + tokensToUsd({ input: 0, output: mt }, input.price)
+  const floorUsd = inputUsd + tokensToUsd({ input: 0, output: Math.min(mt, MIN_RESERVE_OUTPUT_TOKENS) }, input.price)
+  const headroom = Number.isFinite(input.headroomUsd) ? input.headroomUsd : 0
+  if (headroom < floorUsd) return null
+  return Math.min(fullUsd, headroom)
+}
+
 interface Reservation {
   keyRef: KeyRef
   turnId: string
@@ -192,6 +211,12 @@ export class KeyRelayMeter implements KeyMeter {
     if (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 0) return
     const d = this.today(keyRef)
     d.usageDailyUsd = Math.max(d.usageDailyUsd ?? 0, usd)
+  }
+
+  /** QA W2: what the key may still spend today (cap minus spent, open reservations included). */
+  headroomUsd(keyRef: KeyRef): number {
+    const cap = this.capUsd(keyRef)
+    return cap === null ? 0 : cap - this.spentTodayUsd(keyRef)
   }
 
   /** True when the key has nothing left under its cap today (refuse a turn before spawn). */

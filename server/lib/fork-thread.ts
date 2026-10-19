@@ -88,6 +88,7 @@ import { findBannedPermissionArg } from './banned-permission-args.js'
 import { PROVIDER_AUTH_RE, PROVIDER_OVERFLOW_RE, PROVIDER_QUOTA_RE } from './provider-failure-text.js'
 import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import { anyKeyedSessions, isKeyedSession } from './keyed-sessions.js'
+import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
 
 /**
  * Providers that can be forked.
@@ -317,6 +318,7 @@ export function buildClaudeForkArgs(nativeThreadId: string): string[] {
     '--fork-session',
     '--permission-mode', 'plan',
     '--allowedTools', '',
+    ...claudeKeySecretsGuardArgs(),
   ]
 }
 

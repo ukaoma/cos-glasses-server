@@ -71,6 +71,7 @@ import type { AnswerKeyFields, KeyKind, KeyProfile, RelayTurnHandle } from './ke
 import { applyLaneBClaudeEnv, LANE_B_COPY, laneBClaudePreflight, laneBRelay } from './lane-b-env.js'
 import { recordKeyedSession } from './keyed-sessions.js'
 import { getSharedKeyMeter } from './key-relay-meter.js'
+import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -252,6 +253,7 @@ export async function preWarmCLI(): Promise<void> {
       '--output-format', 'stream-json',
       '--verbose',
       ...claudePermissionArgs(getClaudeTrustMode(), null),
+      ...claudeKeySecretsGuardArgs(),
       '--system-prompt', buildPrewarmSystemPrompt(),
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -656,6 +658,8 @@ export async function callClaudeStreaming(
   } else {
     args.push(...claudePermissionArgs(getClaudeTrustMode(), tools), '--include-partial-messages')
   }
+  // QA B1: deny the key secrets dir while lanes are on and a key is saved ([] otherwise).
+  args.push(...claudeKeySecretsGuardArgs())
 
   if (existingCliSession) {
     // Resume prior CLI session — reuses cached context, avoids cold start

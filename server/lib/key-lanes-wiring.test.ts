@@ -474,6 +474,24 @@ describe('a keyed turn the relay failed shows the key-notices line, not the CLI 
     expect(wiring.keyTurnFailureLine('turn-done', PROFILE)).toBeNull()
   })
 
+  it('QA U2: every kind maps to a line; a turn-ending failure is never hidden by a later retry note', async () => {
+    const f = (turnId: string, kind: string, status: number, endsTurn: boolean) => wiring.recordKeyTurnFailure({ turnId, sessionId: 's', profileId: PROFILE.id, keyRef: PROFILE.keyRef, kind: kind as never, status, endsTurn })
+    f('k429', 'rate_limited', 429, false)
+    expect(wiring.keyTurnFailureLine('k429', PROFILE)).toMatch(/busy for this key/)
+    f('k5xx', 'upstream_error', 500, false)
+    expect(wiring.keyTurnFailureLine('k5xx', PROFILE)).toMatch(/had an error/)
+    f('knet', 'network_error', 502, false)
+    expect(wiring.keyTurnFailureLine('knet', PROFILE)).toMatch(/Could not reach/)
+    f('k403', 'upstream_refused', 403, false)
+    expect(wiring.keyTurnFailureLine('k403', PROFILE)).toMatch(/refused this request/)
+    f('kexp', 'nonce_expired', 401, false)
+    expect(wiring.keyTurnFailureLine('kexp', PROFILE)).toMatch(/ran past its time limit/)
+    f('krev', 'nonce_revoked', 401, false)
+    expect(wiring.keyTurnFailureLine('krev', PROFILE)).toMatch(/was stopped/)
+    f('kmix', 'rate_limited', 429, false); f('kmix', 'out_of_credit', 402, true); f('kmix', 'nonce_revoked', 401, false)
+    expect(wiring.keyTurnFailureLine('kmix', PROFILE)).toMatch(/out of credit/i)
+  })
+
   it('the shared relay reports its turn failures into the same table', async () => {
     await rewire('1')
     const relay = wiring.sharedKeyRelay() as unknown as { onTurnFailure: (f: unknown) => void }

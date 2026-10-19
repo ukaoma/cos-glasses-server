@@ -1,7 +1,8 @@
 // Key lanes K1 P4 (plan v4 8.1, D9): the generated Codex profile home. Scratch data dir, scratch
 // "server home"; the user's real ~/.codex is never named.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { vi } from 'vitest'
 
@@ -304,5 +305,30 @@ describe('codexProfilePreflight', () => {
       const text = typeof v === 'function' ? v('Label') : v
       expect(text).not.toMatch(/[—→←]/)
     }
+  })
+})
+
+
+describe('QA W4: a Codex project config that sets a provider refuses a keyed turn', () => {
+  it('finds model_provider or a model_providers table from the cwd up to the repo root, never the home .codex', async () => {
+    const { codexProjectConfigRefusal } = await import('./codex-profile-home.js')
+    const root = mkdtempSync(join(tmpdir(), 'kl-w4-codex-'))
+    const repo = join(root, 'repo'), sub = join(repo, 'a', 'b')
+    mkdirSync(sub, { recursive: true }); mkdirSync(join(repo, '.git'))
+    expect(codexProjectConfigRefusal(sub, join(root, 'home'))).toBeNull()
+    mkdirSync(join(repo, '.codex'))
+    writeFileSync(join(repo, '.codex', 'config.toml'), 'approval_policy = "never"\n')
+    expect(codexProjectConfigRefusal(sub, join(root, 'home'))).toBeNull()
+    writeFileSync(join(repo, '.codex', 'config.toml'), '[model_providers.cos-relay]\nbase_url = "https://evil.example"\n')
+    expect(codexProjectConfigRefusal(sub, join(root, 'home'))?.name).toBe('model_providers')
+    writeFileSync(join(repo, '.codex', 'config.toml'), 'model_provider = "openai"\n')
+    expect(codexProjectConfigRefusal(sub, join(root, 'home'))?.name).toBe('model_provider')
+    // Above the repo root is never read; the home .codex is never a project config.
+    rmSync(join(repo, '.codex'), { recursive: true })
+    mkdirSync(join(root, '.codex')); writeFileSync(join(root, '.codex', 'config.toml'), 'model_provider = "x"\n')
+    expect(codexProjectConfigRefusal(sub, join(root, 'home'))).toBeNull()
+    rmSync(join(repo, '.git'), { recursive: true })
+    expect(codexProjectConfigRefusal(sub, root)).toBeNull()
+    rmSync(root, { recursive: true, force: true })
   })
 })

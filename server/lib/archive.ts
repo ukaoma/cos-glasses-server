@@ -19,6 +19,7 @@ import { resolveExchangePairModel } from './conversation.js'
 import type { ModelPreference } from '../../shared/model-preference.js'
 
 import { dataPath } from './data-dir.js'
+import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
 const ARCHIVE_DIR = dataPath('archive')
 
 // ── Interfaces ──────────────────────────────────────────────
@@ -193,7 +194,7 @@ function fallbackDaySummary(chats: ArchivedChat[]): string {
  */
 function runClaudeArchiveSummary(input: string, instruction: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('claude', ['-p', '--model', 'sonnet', instruction], {
+    const proc = spawn('claude', ['-p', '--model', 'sonnet', ...claudeKeySecretsGuardArgs(), instruction], {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 

@@ -389,6 +389,10 @@ export type KeyNoticeErrorId =
   | 'dictated_key'
   | 'no_credit_limit'
   | 'downgrade'
+  // QA N10 / U2: the relay ended the turn's token, or the provider refused without a reason COS names.
+  | 'nonce_expired'
+  | 'nonce_revoked'
+  | 'upstream_refused'
 
 export interface KeyNoticeErrorParams {
   keyKind?: KeyKind
@@ -427,6 +431,9 @@ const ERRORS: { readonly [K in KeyNoticeErrorId]: (p: KeyNoticeErrorParams) => s
   dictated_key: () => 'Keys only by paste, on the phone.',
   no_credit_limit: () => 'Set a credit limit on this key at openrouter.ai first.',
   downgrade: () => 'Remove your keys first. Older COS cannot see them.',
+  nonce_expired: () => 'This key turn ran past its time limit. Your plan was not used.',
+  nonce_revoked: () => 'This key turn was stopped. Your plan was not used.',
+  upstream_refused: p => put('{f} refused this request. Your plan was not used.', providerCopy(p.keyKind).Dest),
 }
 export const KEY_NOTICE_ERROR_IDS = Object.keys(ERRORS) as KeyNoticeErrorId[]
 
@@ -460,6 +467,7 @@ export const KEY_LANE_REFUSAL_COPY = {
   scheduled: 'Key profiles cannot run scheduled briefs.',
   workNotYet: 'Key sessions are not in Work yet.',
   relayUnavailable: 'Your key could not start this turn. Your plan was not used.',
+  codexProjectConfig: (name: string) => `A Codex project config sets ${name}. Remove it to use a key.`,
   v1NotOffered: 'That key profile is not offered on /v1. Turn on Offer on /v1 in COS Control.',
   directCopyUnavailable: 'Your key could not answer this one.',
   directNoEndpoint: 'This key cannot answer direct. Pick a model.',

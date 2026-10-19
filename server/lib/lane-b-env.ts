@@ -33,6 +33,10 @@ export const LANE_B_STRIPPED_NAMES: readonly string[] = [
   'OPENAI_API_KEY',
   'OPENAI_BASE_URL',
   'OPENROUTER_API_KEY',
+  // QA W4: other ways a child authenticates to someone else.
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'AWS_BEARER_TOKEN_BEDROCK',
 ]
 /** Plus every `ANTHROPIC_DEFAULT_<TIER>_MODEL`, whatever the tier is called. */
 export const LANE_B_STRIPPED_PATTERN = /^ANTHROPIC_DEFAULT_[A-Z0-9_]+_MODEL$/

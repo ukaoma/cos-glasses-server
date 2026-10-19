@@ -241,6 +241,9 @@ describe('strings golden (plan 11.1, 11.2, 11.3, D14, 12)', () => {
       dictated_key: 'Keys only by paste, on the phone.',
       no_credit_limit: 'Set a credit limit on this key at openrouter.ai first.',
       downgrade: 'Remove your keys first. Older COS cannot see them.',
+      nonce_expired: 'This key turn ran past its time limit. Your plan was not used.',
+      nonce_revoked: 'This key turn was stopped. Your plan was not used.',
+      upstream_refused: 'OpenRouter refused this request. Your plan was not used.',
     })
     expect(keyNoticeError('cap_refused', { ...errParams, now: new Date('2026-11-02T15:00:00Z') })).toBe("Today's $1.00 cap on this key is used. Resets 6 PM.")
     expect(keyNoticeError('cap_refused', { capUsd: 2.5 })).toBe("Today's $2.50 cap on this key is used.")

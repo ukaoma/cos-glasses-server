@@ -9,7 +9,7 @@ import {
   laneBBaseEnv,
   LANE_B_CLAUDE_MODEL_NAMES,
 } from './lane-b-env.js'
-import { claudeSettingsFiles, claudeSettingsRefusal } from './claude-settings-guard.js'
+import { CLAUDE_MANAGED_SETTINGS_FILES, claudeSettingsFiles, claudeSettingsRefusal } from './claude-settings-guard.js'
 
 const SPEC = { origin: 'http://127.0.0.1:40123', nonce: 'nonce-abc', slug: 'anthropic/claude-haiku-5.5', profileId: 'haiku-key' }
 
@@ -56,9 +56,25 @@ describe('Claude settings guard', () => {
   mkdirSync(join(home, '.claude'), { recursive: true }); mkdirSync(join(cwd, '.claude'), { recursive: true })
 
   it('reads the user file, the project file and the local file for this cwd', () => {
-    expect(claudeSettingsFiles({ cwd, home })).toEqual([
+    expect(claudeSettingsFiles({ cwd, home, env: {} })).toEqual([
+      ...CLAUDE_MANAGED_SETTINGS_FILES,
       join(home, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.local.json'),
     ])
+    // QA W4 / G7: CLAUDE_CONFIG_DIR moves the user file; both are read.
+    expect(claudeSettingsFiles({ cwd, home, env: { CLAUDE_CONFIG_DIR: '/cfg' } })).toContain('/cfg/settings.json')
+  })
+
+  it('QA W4: managed settings, CLAUDE_CONFIG_DIR and the OAuth/Bedrock token names refuse a keyed spawn', () => {
+    const managed = join(home, 'managed-settings.json')
+    writeFileSync(managed, JSON.stringify({ env: { AWS_BEARER_TOKEN_BEDROCK: 'x' } }))
+    expect(claudeSettingsRefusal({ cwd, home, env: {}, managed: [managed] })?.name).toBe('AWS_BEARER_TOKEN_BEDROCK')
+    rmSync(managed)
+    const cfg = join(home, 'cfgdir'); mkdirSync(cfg, { recursive: true })
+    writeFileSync(join(cfg, 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_OAUTH_TOKEN: 'x' } }))
+    expect(claudeSettingsRefusal({ cwd, home, env: { CLAUDE_CONFIG_DIR: cfg }, managed: [] })?.name).toBe('CLAUDE_CODE_OAUTH_TOKEN')
+    expect(claudeSettingsRefusal({ cwd, home, env: {}, managed: [] })).toBeNull()
+    rmSync(cfg, { recursive: true, force: true })
+    for (const n of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'AWS_BEARER_TOKEN_BEDROCK']) expect(isLaneBStrippedName(n), n).toBe(true)
   })
 
   it('names the setting, never its value; a torn file is skipped', () => {

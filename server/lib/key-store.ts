@@ -148,11 +148,19 @@ export function normalizeCapUsd(v: unknown): number | null {
 }
 
 /** A custom OpenAI-compatible base URL (Mac only), normalized without a trailing slash, or null. */
+/** 127.0.0.0/8, ::1 and localhost. */
+export function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  return h === 'localhost' || h === '::1' || /^127(?:\.\d{1,3}){3}$/.test(h)
+}
+
 export function normalizeCompatibleBaseUrl(v: unknown): string | null {
   if (typeof v !== 'string' || v.length > 300) return null
   try {
     const u = new URL(v.trim())
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return null
+    // QA N5: plain http only to this Mac (a local model server); anything remote is https.
+    if (u.protocol === 'http:' && !isLoopbackHost(u.hostname)) return null
     if (u.username || u.password || u.search || u.hash) return null
     return u.toString().replace(/\/+$/, '')
   } catch {

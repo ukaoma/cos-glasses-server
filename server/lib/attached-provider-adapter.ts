@@ -105,6 +105,7 @@ import { CURSOR_SLOT_MODEL_IDS } from './cursor-model-catalog.js'
 import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import type { PermissionAllowance } from './banned-permission-args.js'
 import { anyKeyedSessions, isKeyedSession } from './keyed-sessions.js'
+import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
 import {
   continueAllowanceFor,
   validateContinuePlan,
@@ -535,6 +536,7 @@ export function buildClaudeAttachedArgs(nativeThreadId: string): string[] {
     // never observe the session id we are required to verify.
     '--verbose',
     '--resume', nativeThreadId,
+    ...claudeKeySecretsGuardArgs(),
   ]
 }
 

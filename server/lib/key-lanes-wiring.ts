@@ -44,12 +44,14 @@ export function sharedKeyRelay(): KeyRelayServer {
 // fails with its own wording ("API Error: 402 ..."). The Lane B runners below wrap onError so
 // the lens, the durable job and COS Control read the P8 line for that failure instead.
 
-interface KeyTurnFailure { kind: KeyNoticeErrorId; keyRef: KeyRef; scope?: 'key' | 'profile'; id?: string }
+interface KeyTurnFailure { kind: KeyNoticeErrorId; keyRef: KeyRef; scope?: 'key' | 'profile'; id?: string; ends?: boolean }
 const KEY_TURN_FAILURES_MAX = 256
 const turnFailures = new Map<string, KeyTurnFailure>()
 
 function rememberFailure(turnId: string, failure: KeyTurnFailure): void {
   if (!turnId) return
+  // A failure that ended the turn is the reason; a later retry note (429, an ended token) never hides it.
+  if (turnFailures.get(turnId)?.ends && !failure.ends) return
   turnFailures.delete(turnId)
   turnFailures.set(turnId, failure)
   while (turnFailures.size > KEY_TURN_FAILURES_MAX) {
@@ -61,8 +63,12 @@ function rememberFailure(turnId: string, failure: KeyTurnFailure): void {
 
 /** The relay's onTurnFailure. */
 export function recordKeyTurnFailure(f: RelayTurnFailure): void {
+  // QA G4: one line per failure kind (names and kinds only, never a body or a token).
+  console.info(`[key-lanes] turn failure kind=${f.kind} status=${f.status} profile=${f.profileId}`)
+  const counted = f.kind === 'key_rejected' || f.kind === 'out_of_credit' || f.kind === 'model_gone'
   const scope = f.kind === 'model_gone' ? 'profile' : 'key'
-  rememberFailure(f.turnId, { kind: f.kind, keyRef: f.keyRef, scope, id: scope === 'key' ? f.keyRef : f.profileId })
+  const ends = f.endsTurn ?? (f.kind === 'cap_refused' || counted)
+  rememberFailure(f.turnId, { kind: f.kind, keyRef: f.keyRef, ends, ...(counted ? { scope, id: scope === 'key' ? f.keyRef : f.profileId } : {}) })
 }
 
 function refusalId(err: KeyRelayRefusal): KeyNoticeErrorId | null {
@@ -97,7 +103,7 @@ function laneBRelayView(): KeyRelay {
         return await relay.issueTurn(binding, options)
       } catch (err) {
         const id = err instanceof KeyRelayRefusal ? refusalId(err) : null
-        if (id) rememberFailure(binding.turnId, { kind: id, keyRef: binding.keyRef })
+        if (id) rememberFailure(binding.turnId, { kind: id, keyRef: binding.keyRef, ends: true })
         throw err
       }
     },
@@ -193,10 +199,14 @@ export function createDirectRelay(deps: DirectRelayAdapterDeps = {}): DirectRela
           // Only the profile's model goes upstream, whatever the body says.
           const payload = JSON.stringify({ ...body, model: binding.model })
           const maxTokens = typeof body.max_tokens === 'number' ? body.max_tokens : null
+          // QA W2: the direct lane caps each reply at its own max_tokens, so the whole of it is
+          // reserved, and a post it does not fit under today's cap is refused (no overshoot).
+          const fullUsd = estimateReserveUsd({ bodyBytes: Buffer.byteLength(payload), maxTokens, price })
+          if (fullUsd > meter().headroomUsd(binding.keyRef)) return { refused: 'cap_refused' }
           const reserved = meter().reserve({
             keyRef: binding.keyRef,
             turnId: binding.turnId,
-            estimateUsd: estimateReserveUsd({ bodyBytes: Buffer.byteLength(payload), maxTokens, price }),
+            estimateUsd: fullUsd,
             profile: binding.profileId,
             lane: 'direct',
           })

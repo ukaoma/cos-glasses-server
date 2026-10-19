@@ -107,7 +107,9 @@ export function redactSecrets(text: string, secrets: ReadonlyArray<string | null
   let out = text
   for (const s of secrets) {
     if (!s || s.length < 8) continue
-    out = out.split(s).join(REDACTED)
+    // QA N3: the plain form, the JSON-escaped form (a body quoting it), and the URL-encoded form.
+    const forms = new Set([s, JSON.stringify(s).slice(1, -1), encodeURIComponent(s)])
+    for (const f of [...forms].sort((a, b) => b.length - a.length)) out = out.split(f).join(REDACTED)
   }
   return out
 }

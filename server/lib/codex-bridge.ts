@@ -406,7 +406,7 @@ export async function callCodexStreaming(
   let keyKind: KeyKind | null = null
   let profileHome: RenderedCodexProfileHome | null = null
   if (keyProfile) {
-    const preflight = codexProfilePreflight({ profile: keyProfile, dispatch: !!options?.dispatch })
+    const preflight = codexProfilePreflight({ profile: keyProfile, dispatch: !!options?.dispatch, cwd: getCodexExecutionCwd() })
     if (!preflight.ok) {
       await callbacks.onError(preflight.message)
       return sid

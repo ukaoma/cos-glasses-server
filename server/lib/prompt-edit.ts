@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
 
 export const PROMPT_EDIT_DRAFT_MAX_CHARS = 24_000
 export const PROMPT_EDIT_INSTRUCTION_MAX_CHARS = 2_000
@@ -90,6 +91,7 @@ export function spawnClaudeText(prompt: string, opts: SpawnClaudeTextOptions = {
     const args = ['-p', '--model', model, '--effort', effort, '--output-format', 'text', '--no-session-persistence',
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
     if (opts.systemPrompt) args.push('--system-prompt', opts.systemPrompt)
+    args.push(...claudeKeySecretsGuardArgs())
 
     const proc = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
