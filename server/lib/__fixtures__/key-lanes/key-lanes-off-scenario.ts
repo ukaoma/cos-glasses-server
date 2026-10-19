@@ -541,9 +541,13 @@ async function main(): Promise<void> {
   if (!keep) rmSync(world.root, { recursive: true, force: true })
   else console.error(`scratch kept at ${world.root}`)
   if (compare) {
-    const golden = readFileSync(compare, 'utf8')
-    if (golden === text) { console.log(`REPLAY OK: identical to ${compare}`); return }
-    const a = golden.split('\n'); const b = text.split('\n')
+    // The build identity (sha, version) is the one thing a replay is expected to change:
+    // a K1 candidate is a different commit and version. Everything else must match.
+    const body = (t: string) => { const d = JSON.parse(t) as Record<string, unknown>; delete d.sourceSha; delete d.sourceVersion; return `${JSON.stringify(d, null, 2)}\n` }
+    const golden = body(readFileSync(compare, 'utf8'))
+    const replay = body(text)
+    if (golden === replay) { console.log(`REPLAY OK: identical to ${compare} (sourceSha/sourceVersion excluded)`); return }
+    const a = golden.split('\n'); const b = replay.split('\n')
     let shown = 0
     for (let i = 0; i < Math.max(a.length, b.length) && shown < 40; i++) {
       if (a[i] !== b[i]) { console.log(`line ${i + 1}\n- ${a[i]}\n+ ${b[i]}`); shown++ }
