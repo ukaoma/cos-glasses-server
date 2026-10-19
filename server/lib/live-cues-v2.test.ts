@@ -262,6 +262,58 @@ describe('engine', () => {
     expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue', kept: 2, candidates: 3 })
   })
 
+  it('6.79.0: every cue is logged once BEFORE it is held or emitted, with the Friday fields and the last 400 characters said (labels kept)', async () => {
+    const logged: Array<Record<string, unknown>> = []
+    let e!: InstanceType<typeof LiveCuesV2Engine>
+    e = engine({ cueLog: row => {
+      expect(emitted).toEqual([])                                        // not emitted yet
+      expect(e.findCue(String(row.cueId))).toBeNull()                    // not held yet: a rating that arrives at once finds the log
+      logged.push(row as unknown as Record<string, unknown>)
+    } })
+    e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords) + '\n\n  the  cap  ' + words(120, 'tail') + '\n[7] Speaker 2: agreed on the cap')
+    const cue = emitted[0].data
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toEqual({ v: 1, cueId: cue.cueId, sessionId: 'meeting_a', meetingTitle: expect.stringMatching(/^G2 Recording /), createdAt: cue.createdAt,
+      armedAt: clock, kind: cue.kind, headline: cue.headline, detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model,
+      prompt: 'v3', memorySource: 'cue_memory', kept: 2, before: expect.any(String) })
+    expect(logged[0].before).toHaveLength(400)
+    expect(logged[0].before).toMatch(/ tail Speaker 2: agreed on the cap$/)
+    expect(logged[0].before).not.toMatch(/\s{2}/)
+    expect(emitted.map(x => x.type)).toEqual(['coaching_nudge_v2', 'coaching_nudge'])
+    expect(JSON.stringify(traces)).not.toContain('agreed on the cap')    // the excerpt never reaches the trace
+    expect(evaluations().at(-1)).not.toHaveProperty('cueLogError')
+    expect(e.findCue(String(cue.cueId))).toMatchObject({ sessionId: 'meeting_a' })
+    expect(e.findCue('0f8fad5b-d9cb-469f-a165-70867728950e')).toBeNull()
+  })
+
+  it('6.79.0: the notes fallback, an empty memory and the writer rules version are logged as they were', async () => {
+    const logged: Array<Record<string, unknown>> = []
+    notesFound = [{ id: 'M1', date: '2026-10-01', title: 'Notes', notes: 'Summary: redirect pricing 12% overage', key: 'n.md' }]
+    const e = engine({ memory: async () => ({ notes: [], denseError: 'no_cue_memory_script' }), cueLog: row => { logged.push(row as unknown as Record<string, unknown>) } })
+    e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect(logged[0]).toMatchObject({ memorySource: 'notes', kept: 1, prompt: 'v3' })
+    notesFound = []; next(); env.COS_LIVE_CUES_V2_PROMPT = 'v2'
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect(logged[1]).toMatchObject({ memorySource: 'none', kept: 0, prompt: 'v2' })
+  })
+
+  it('6.79.0: a cue log failure is traced on the evaluation, never withholds the cue, and is never a writer failure or a breaker step', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    onTestFinished(() => warn.mockRestore())
+    let n = 0
+    const e = engine({ cueLog: () => { n += 1; throw Object.assign(new Error('disk full'), n === 1 ? { code: 'ENOSPC' } : {}) } }); e.arm('meeting_a')
+    for (let i = 0; i < L.breakerFailures + 1; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
+    expect(evaluations().map(t => t.outcome)).toEqual(Array(L.breakerFailures + 1).fill('cue'))
+    expect(evaluations().map(t => t.cueLogError)).toEqual(['ENOSPC', ...Array(L.breakerFailures).fill('append_failed')])
+    expect(evaluations().some(t => 'error' in t)).toBe(false)
+    expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(L.breakerFailures + 1)
+    expect(e.status('meeting_a').session).toMatchObject({ state: 'active' })
+    expect(e.status('meeting_a').session?.cues).toHaveLength(L.breakerFailures + 1)
+    expect(warn).toHaveBeenCalledTimes(L.breakerFailures + 1)
+  })
+
   it('the judge keeps at most two notes even when three pass, in rank order', async () => {
     const e = engine({ judge: async () => { calls.judge++; return { probs: { M1: 0.95, M2: 0.9, M3: 0.85 }, tokens: 900 } } }); e.arm('meeting_a')
     await e.feed('meeting_a', words(L.minNewWords))

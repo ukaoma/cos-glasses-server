@@ -22,8 +22,15 @@ Master switch `COS_LIVE_CUES_V2=1` (default off; independent of v1's `COS_LIVE_C
 ## Routes (additive)
 `POST /api/live-cues/start|stop` (unchanged shape, v2 when enabled), `GET /api/live-cues/status?sessionId=`, `POST /api/live-cues/pause`, `POST /api/live-cues/feedback`. Capability `capabilities.liveCuesV2` on `/api/health` and `/api/models`.
 
-## Logs (no transcript text)
-`live-cues-trace.jsonl`: one row per evaluation (gate p, lookup, kept count, memory error and index age, timings, tokens, cost, outcome), rate-limited `skip` rows, and feedback rows (cueId, vote, optional user reason). This is the live accuracy record.
+## Logs (the trace has no transcript text; since 6.79.0 the cue log does, see below)
+`live-cues-trace.jsonl`: one row per evaluation (gate p, lookup, kept count, memory error and index age, timings, tokens, cost, outcome), rate-limited `skip` rows, and feedback rows (cueId, vote or verdict, optional user reason). This is the live accuracy record.
+
+## Cue log and verdicts (6.79.0)
+These two files DO carry text: the cue itself, up to 400 characters of what was said before it (blanked after 7 days), and Miles's rating notes. Both are 0600, never written to the trace, and not in any diagnostics export.
+- `live-cues-log.jsonl`: one row per cue `{v:1, cueId, sessionId, meetingTitle, createdAt, armedAt, kind, headline, detail, gate, sources, model, prompt, memorySource, kept, before}`, appended before the cue is held or emitted. The reader validates each line and skips (counts) anything else. Pruned on first use in the process, then at most once a day: rows past 30 days dropped, `before` past 7 days blanked.
+- `live-cues-verdicts.json`: `{v:1, verdicts: {[cueId]: {verdict?, note?, vote?, at}}}`, atomic write, last write wins, fails closed (503 `verdicts_unreadable`) when unreadable. A lens vote is kept in `vote` beside the verdict and never overwrites it. Records go when their cue leaves the log.
+- `POST /api/live-cues/feedback {sessionId, cueId, verdict: useful|late|repeat|wrong|obvious|clear, note?}` answers `{ok, cueId, verdict, vote}`; works with v2 off; 404 `unknown_cue`, 409 `cue_session_mismatch`. The lens body `{vote, reason?}` and its `{ok, knownCue}` answer are unchanged.
+- `GET /api/live-cues/history?days=7&sessionId=a,b&unrated=1&limit=200` answers `{v:1, cues: [{...row, title, titleSource, rating}], counts, truncated, skipped, maxCuesPerMeeting, meetings?}`, oldest first, the newest `limit` rows. Feature-detect with `verdicts.protocol` (1) on `GET /api/live-cues/status` without sessionId, whatever the v2 switch.
 
 ## Not in the MVP
 Public web research, solo/think-aloud mode, SubQ (needs zero-retention first), Control UI, lens pause from the ring.

@@ -1195,3 +1195,11 @@ A server that boots behind a closed maintenance gate (every managed update) now 
 - Until recovery has run, a status for an id with no saved meeting answers `503 {"reason": "recovery_pending", "retryable": true}` with `Retry-After: 5`, instead of a `missing` that would tell the phone the Mac lost the meeting.
 - No new chunk refusal: a chunk for a quarantined or receipted capture starts its own session, because the phone treats a 410 as "already saved" and deletes its copy. The existing 4-hour closed-session 410 still applies, now after a managed boot too. A session that resumed under a receipted id is adopted at the next boot, never split off.
 - Each minute, an `active-sessions/*.json` whose session is not live and has been idle for 4 hours (the earlier of its `lastActivityAt` and its file time) is moved to `data/stale-active-session-files/`, with a `.reason.json` written first. Moved files are removed 7 days after the move. Boot recovery also moves aside, rather than adopts, a file whose capture was already recovered or receipted.
+
+### Live cue log and verdicts (6.79.0)
+
+Every live cue (v2) is written to `<data>/live-cues-log.jsonl` (mode 0600) so it can be rated in COS Control after the
+meeting, with v2 on or off. Retention: each row holds the cue and up to 400 characters of what was said before it; that
+excerpt is blanked after 7 days and the row is removed after 30. Ratings live in `<data>/live-cues-verdicts.json` (0600)
+and go with their cue. Neither file is written to `live-cues-trace.jsonl` or to any diagnostics export. Routes:
+`POST /api/live-cues/feedback` with `verdict`, and `GET /api/live-cues/history` (see the CHANGELOG for shapes).

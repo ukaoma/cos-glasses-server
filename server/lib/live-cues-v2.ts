@@ -36,6 +36,8 @@ import { COS_SCRIPTS_DIR, PYTHON_BIN, contextSourceAvailable } from './python-br
 import { dataPath } from './data-dir.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
+import { cueBefore, liveCueVerdicts, type LiveCueLogRow } from './live-cue-verdicts.js'
+import { errMsg } from './utils.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
 import {
   CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, LIVE_CUES_V2_PROTOCOL, isLiveCueV2,
@@ -273,6 +275,11 @@ export class LiveCuesV2Store {
     const m = this.read().meetings[sessionId]
     return { cues: m?.cues ?? 0, writerCalls: m?.writerCalls ?? 0 }
   }
+  /** The durable per-meeting counters, or null once they expired (24 h) or never existed. */
+  meetingCounters(sessionId: string): { cues: number; writerCalls: number } | null {
+    const m = this.read().meetings[sessionId]
+    return m ? { cues: m.cues, writerCalls: m.writerCalls } : null
+  }
   weeklyUsed(): number { return this.read().writerCalls }
   end(sessionId: string): void { const s = this.read(); s.ended[sessionId] = this.now().getTime(); delete s.paused[sessionId]; this.write(s) }
   isEnded(sessionId: string): boolean { return sessionId in this.read().ended }
@@ -322,6 +329,9 @@ export interface LiveCuesV2Deps {
   now(): Date
   store: LiveCuesV2Store
   trace(row: Record<string, unknown>): void
+  /** 6.79.0: the durable cue log (live-cues-log.jsonl) that verdicts are recorded against. May throw; never the trace,
+   *  which must stay free of transcript text. */
+  cueLog?(row: LiveCueLogRow): void
   env: NodeJS.ProcessEnv
 }
 
@@ -408,6 +418,7 @@ function realDeps(): LiveCuesV2Deps {
     trace(row) {
       try { mkdirSync(dirname(traceFile), { recursive: true, mode: 0o700 }); appendFileSync(traceFile, JSON.stringify(row) + '\n', { mode: 0o600 }) } catch { /* trace is best effort */ }
     },
+    cueLog: row => liveCueVerdicts().logCue(row),
     env: process.env,
   }
 }
@@ -582,6 +593,12 @@ export class LiveCuesV2Engine {
     return s.stopReason
   }
 
+  /** The cue, if this process emitted it and still holds it, under whichever meeting. */
+  findCue(cueId: string): LiveCueV2 | null {
+    for (const s of this.sessions.values()) { const cue = s.cues.find(c => c.cueId === cueId); if (cue) return cue }
+    return null
+  }
+
   recordFeedback(input: { sessionId: string; cueId: string; vote: 'up' | 'down'; reason?: string }): { ok: true; knownCue: boolean } {
     const knownCue = !!this.sessions.get(input.sessionId)?.cues.some(c => c.cueId === input.cueId)
     const reason = (input.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, CUE_FEEDBACK_REASON_MAX)
@@ -637,6 +654,8 @@ export class LiveCuesV2Engine {
     s.lastEvalAt = started
     s.wordsSinceEval = 0
     const window = cleanWindow(s.chunks.join('\n')).slice(-L.windowChars)
+    // 6.79.0: what was said up to this evaluation, speaker labels kept, for the cue log's `before` (never a model input).
+    const said = s.chunks.join('\n').replace(/^\[\d+\]\s*/gm, '')
     const trace: Record<string, unknown> = { kind: 'evaluation', at: new Date(started).toISOString(), sessionId: s.sessionId, n: s.evaluations }
     let lease: MaintenanceWorkLease | null = null
     let wallHit = false
@@ -702,6 +721,16 @@ export class LiveCuesV2Engine {
       const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: cueHeadline(parsed.detail), detail: parsed.detail,
         kind: parsed.kind, sources, gate: round(pCue), createdAt: this.deps.now().getTime(), model: out.model ?? model }
       if (!isLiveCueV2(cue)) { trace.outcome = 'withheld_invalid'; return }       // never emit what the companion would drop
+      // 6.79.0: logged before it is held or emitted, so a rating that arrives at once finds it. Its own try/catch: a log
+      // failure is traced on this evaluation and is never a writer failure or a step toward the breaker.
+      try {
+        this.deps.cueLog?.({ v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, armedAt: s.armedAt, kind: cue.kind,
+          headline: cue.headline, detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model, prompt: version,
+          memorySource: mem.notes.length ? source : 'none', kept: kept.length, before: cueBefore(said) })
+      } catch (error) {
+        trace.cueLogError = (error as NodeJS.ErrnoException)?.code ?? 'append_failed'
+        console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`)
+      }
       s.cues.push(cue)
       s.lastCueAt = cue.createdAt
       this.deps.store.recordCue(s.sessionId)
@@ -797,5 +826,9 @@ export function setLiveCuesV2Enabled(enabled: boolean, env: NodeJS.ProcessEnv = 
  *  companion treats the server exactly like a v1 server (v1 cues keep their own capability and indicator). */
 export function liveCuesV2Advertised(env: NodeJS.ProcessEnv = process.env): LiveCuesV2Capability | undefined {
   return liveCuesV2Enabled(env) ? liveCuesV2Capability() : undefined
+}
+/** 6.79.0: a meeting's durable cue and writer-call counters for the history route, read without building the engine. */
+export function liveCuesV2MeetingCounters(sessionId: string): { cues: number; writerCalls: number } | null {
+  return new LiveCuesV2Store(dataPath('live-cues-v2-state.json'), () => new Date()).meetingCounters(sessionId)
 }
 export function shutdownLiveCuesV2(): void { engine?.shutdown(); unsubscribe?.(); unsubscribe = null; engine = null }
