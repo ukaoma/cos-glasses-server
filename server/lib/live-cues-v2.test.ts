@@ -314,6 +314,37 @@ describe('engine', () => {
     expect(warn).toHaveBeenCalledTimes(L.breakerFailures + 1)
   })
 
+  it('6.79.0: COS_LIVE_CUES_V2_COOLDOWN_S moves the cooldown after a cue (20..900 s); unset or out of range keeps 45 s', async () => {
+    expect(mod.liveCuesV2CooldownMs({})).toBe(L.cooldownAfterCueMs)
+    expect(L.cooldownAfterCueMs).toBe(45_000)
+    expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '90' })).toBe(90_000)
+    expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '20' })).toBe(20_000)
+    expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: '900' })).toBe(900_000)
+    for (const bad of ['19', '901', 'abc', '', '-5']) expect(mod.liveCuesV2CooldownMs({ COS_LIVE_CUES_V2_COOLDOWN_S: bad }), bad).toBe(L.cooldownAfterCueMs)
+    env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_COOLDOWN_S: '120' }
+    const e = engine(); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords)); expect(calls.gate).toBe(1)          // cue at t0
+    clock += L.cooldownAfterCueMs + 1                                                    // past the default, inside 120 s
+    await e.feed('meeting_a', words(L.minNewWords)); expect(calls.gate).toBe(1)
+    clock += 120_000 - L.cooldownAfterCueMs
+    await e.feed('meeting_a', words(1)); expect(calls.gate).toBe(2)
+  })
+
+  it('6.79.0: COS_LIVE_CUES_V2_JUDGE_KEEP moves the judge bar (0.3..0.99); unset or out of range keeps 0.8', async () => {
+    expect(mod.liveCuesV2JudgeKeep({})).toBe(0.8)
+    expect(mod.liveCuesV2JudgeKeep({ COS_LIVE_CUES_V2_JUDGE_KEEP: '0.9' })).toBe(0.9)
+    for (const bad of ['0.2', '1', 'x', '']) expect(mod.liveCuesV2JudgeKeep({ COS_LIVE_CUES_V2_JUDGE_KEEP: bad }), bad).toBe(0.8)
+    env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_JUDGE_KEEP: '0.86' }                  // M1 0.91 stays, M3 0.85 goes
+    const e = engine(); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords))
+    expect((JSON.parse(calls.prompts[0]) as { memory: Array<{ title: string }> }).memory.map(m => m.title)).toEqual(['Kept A'])
+  })
+
+  it('6.79.0: both tuning knobs are forwarded by the managed runtime contract', () => {
+    const c = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
+    for (const key of ['COS_LIVE_CUES_V2_COOLDOWN_S', 'COS_LIVE_CUES_V2_JUDGE_KEEP']) expect(c.optionalEnvironment, key).toContain(key)
+  })
+
   it('the judge keeps at most two notes even when three pass, in rank order', async () => {
     const e = engine({ judge: async () => { calls.judge++; return { probs: { M1: 0.95, M2: 0.9, M3: 0.85 }, tokens: 900 } } }); e.arm('meeting_a')
     await e.feed('meeting_a', words(L.minNewWords))

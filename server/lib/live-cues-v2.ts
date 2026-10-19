@@ -90,6 +90,16 @@ export function liveCuesV2Gate(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.COS_LIVE_CUES_V2_GATE)
   return Number.isFinite(raw) && raw >= 0.3 && raw <= 0.99 ? raw : LIVE_CUES_V2_LIMITS.defaultGate
 }
+/** 6.79.0 tuning knobs for Friday's rated-cue review. Defaults are the calibrated values above. The range check is the
+ *  whole guard: unset or non-numeric (NaN fails every comparison), empty (0) and Infinity all fall outside it. */
+export function liveCuesV2CooldownMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.COS_LIVE_CUES_V2_COOLDOWN_S)
+  return raw >= 20 && raw <= 900 ? Math.round(raw * 1000) : LIVE_CUES_V2_LIMITS.cooldownAfterCueMs
+}
+export function liveCuesV2JudgeKeep(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.COS_LIVE_CUES_V2_JUDGE_KEEP)
+  return raw >= 0.3 && raw <= 0.99 ? raw : LIVE_CUES_V2_LIMITS.judgeKeep
+}
 export function liveCuesV2Model(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.COS_LIVE_CUES_V2_MODEL ?? '').trim().toLowerCase()
   if (raw === 'haiku') return 'claude-haiku-5-5'
@@ -631,7 +641,7 @@ export class LiveCuesV2Engine {
     if (s.breaker) return this.traceSkip(s, 'breaker_open', nowMs)
     if (this.deps.store.isPaused(sessionId)) return this.traceSkip(s, 'paused', nowMs)
     if (s.wordsSinceEval < L.minNewWords) return
-    if (nowMs - s.lastEvalAt < L.minIntervalMs || nowMs - s.lastCueAt < L.cooldownAfterCueMs) return
+    if (nowMs - s.lastEvalAt < L.minIntervalMs || nowMs - s.lastCueAt < liveCuesV2CooldownMs(this.deps.env)) return
     const counters = this.deps.store.counters(sessionId)
     if (counters.cues >= L.maxCuesPerMeeting || counters.writerCalls >= L.maxWriterCallsPerMeeting) return this.traceSkip(s, 'meeting_cap', nowMs)
     if (this.deps.store.weeklyUsed() >= liveCuesV2WeeklyCap(this.deps.env)) return this.traceSkip(s, 'budget_exhausted', nowMs)  // before the gate
@@ -692,7 +702,7 @@ export class LiveCuesV2Engine {
         const t2 = Date.now()
         const judged = await this.deps.judge(s.title, window, mem.notes, abort.signal, provider)
         Object.assign(trace, { judgeMs: Date.now() - t2, judgeTokens: judged.tokens })
-        kept = mem.notes.filter(m => (judged.probs[m.id] ?? 0) >= L.judgeKeep).slice(0, L.judgeMaxNotes).map((m, i) => ({ ...m, id: `M${i + 1}` }))
+        kept = mem.notes.filter(m => (judged.probs[m.id] ?? 0) >= liveCuesV2JudgeKeep(this.deps.env)).slice(0, L.judgeMaxNotes).map((m, i) => ({ ...m, id: `M${i + 1}` }))
       }
       trace.kept = kept.length
       if (abort.signal.aborted) { trace.outcome = 'cancelled'; return }

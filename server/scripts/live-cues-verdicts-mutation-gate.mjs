@@ -123,6 +123,14 @@ const mutations = [
   m('engine-logs-prompt', ENGINE, ['model: cue.model, prompt: version,', "model: cue.model, prompt: 'v3',"], ENGINE_T),
   m('engine-logs-memory-source', ENGINE, ["memorySource: mem.notes.length ? source : 'none'", 'memorySource: source'], ENGINE_T),
   m('engine-logs-kept', ENGINE, ['kept: kept.length,', 'kept: 0,'], ENGINE_T),
+  m('cooldown-knob-used', ENGINE, ['nowMs - s.lastCueAt < liveCuesV2CooldownMs(this.deps.env)', 'nowMs - s.lastCueAt < L.cooldownAfterCueMs'], ENGINE_T),
+  m('cooldown-knob-floor', ENGINE, ['raw >= 20 && raw <= 900 ? Math.round(raw * 1000)', 'raw >= 0 && raw <= 900 ? Math.round(raw * 1000)'], ENGINE_T),
+  m('cooldown-knob-ceiling', ENGINE, ['raw >= 20 && raw <= 900 ? Math.round(raw * 1000)', 'raw >= 20 ? Math.round(raw * 1000)'], ENGINE_T),
+  m('judge-knob-used', ENGINE, ['(judged.probs[m.id] ?? 0) >= liveCuesV2JudgeKeep(this.deps.env)', '(judged.probs[m.id] ?? 0) >= L.judgeKeep'], ENGINE_T),
+  m('judge-knob-floor', ENGINE, ['raw >= 0.3 && raw <= 0.99 ? raw : LIVE_CUES_V2_LIMITS.judgeKeep', 'raw >= 0 && raw <= 0.99 ? raw : LIVE_CUES_V2_LIMITS.judgeKeep'], ENGINE_T),
+  m('judge-knob-ceiling', ENGINE, ['raw >= 0.3 && raw <= 0.99 ? raw : LIVE_CUES_V2_LIMITS.judgeKeep', 'raw >= 0.3 ? raw : LIVE_CUES_V2_LIMITS.judgeKeep'], ENGINE_T),
+  m('contract-cooldown', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_COOLDOWN_S",\n', ''], ENGINE_T),
+  m('contract-judge-keep', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_JUDGE_KEEP",\n', ''], ENGINE_T),
   m('engine-find-cue', ENGINE, ['const cue = s.cues.find(c => c.cueId === cueId); if (cue) return cue', ''], ENGINE_T),
 ]
 
