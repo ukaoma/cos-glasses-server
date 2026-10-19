@@ -43,7 +43,7 @@ const LEDGER_T = ['server/lib/key-ledger.test.ts']
 const LANEB_T = ['server/lib/lane-b-env.test.ts']
 const HOME_T = ['server/lib/codex-profile-home.test.ts']
 const PREF_T = ['server/lib/key-lanes-p6-preference.test.ts']
-const ALL = [...WIRE_T, ...ROUTE_T, ...FIELDS_T, ...CLAUDE_T, ...CODEX_T, ...BIND_T, ...JOB_T, ...READ_T, ...SESS_T, ...GUARD_T, ...CENSUS_T, ...RELAY_T, ...LEDGER_T, ...LANEB_T, ...HOME_T, ...PREF_T]
+const ALL = [...WIRE_T, ...ROUTE_T, ...FIELDS_T, ...CLAUDE_T, ...CODEX_T, ...BIND_T, ...JOB_T, ...READ_T, ...SESS_T, ...GUARD_T, ...CENSUS_T, ...RELAY_T, ...LEDGER_T, ...LANEB_T, ...HOME_T, ...PREF_T, 'server/lib/hazard-invariants.test.ts']
 
 const WIRING = 'server/lib/key-lanes-wiring.ts', METER = 'server/lib/key-relay-meter.ts', ROUTES = 'server/routes/key-lanes.ts'
 const CLAUDE = 'server/lib/claude-bridge.ts', CODEX = 'server/lib/codex-bridge.ts', CES = 'server/lib/codex-engine-sessions.ts'
@@ -118,6 +118,7 @@ const mutations = [
   // ── W2 cap overshoot, W3 open reserves ──
   m('reserve-ignores-headroom-floor', METER, ['  if (headroom < floorUsd) return null\n', ''], RELAY_T),
   m('stream-not-cut-at-cap', 'server/lib/key-relay.ts', ['            if (reservationId && this.streamPastCap(b.keyRef, reservationId, parser.usage, price, body.length)) {', '            if (false) {'], RELAY_T),
+  m('ledger-open-blocks-on-a-fifo', 'server/lib/key-ledger.ts', [' | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600)', ' | fsConstants.O_NOFOLLOW, 0o600)'], ['server/lib/hazard-invariants.test.ts']),
   m('open-reserves-not-counted', 'server/lib/key-ledger.ts', ['  for (const left of open.values()) for (const usd of left) sum += usd\n', ''], LEDGER_T),
   // ── W4 / G7 settings and env guards ──
   m('settings-guard-skips-managed', 'server/lib/claude-settings-guard.ts', ['    ...(input.managed ?? CLAUDE_MANAGED_SETTINGS_FILES),\n', ''], LANEB_T),

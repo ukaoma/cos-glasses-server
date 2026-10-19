@@ -65,7 +65,8 @@ export function appendKeyLedgerRow(row: KeyLedgerRow, file: string = keyLedgerPa
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
   let fd: number
   try {
-    fd = openSync(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW, 0o600)
+    // O_NONBLOCK too: a FIFO planted at the path fails at once (ENXIO) instead of hanging the server.
+    fd = openSync(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600)
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ELOOP') throw new Error('refusing to write the key ledger through a symlink')
     throw err
