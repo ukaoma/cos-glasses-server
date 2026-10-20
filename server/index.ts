@@ -74,7 +74,7 @@ import { nativeHead, realNativeHeadDeps, registerClaudeTranscriptHint } from './
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter, getActiveTranscriptionSessionCount } from './routes/transcribe-stream.js'
-import { meetingRouter, resumeMeetingFinalizationJobs, scheduleTranscriptCleanupSweep, transcriptCleanupRouteDeps } from './routes/meeting.js'
+import { meetingRouter, resumeAutonomousMeetingSaves, resumeMeetingFinalizationJobs, scheduleTranscriptCleanupSweep, transcriptCleanupRouteDeps } from './routes/meeting.js'
 import { createTranscriptCleanupRouter } from './routes/transcript-cleanup.js'
 import { meetingsRouter } from './routes/meetings.js'
 import { openaiCompatRouter } from './routes/openai-compat.js'
@@ -1473,6 +1473,8 @@ listenRequiredServers(listeners).then(() => {
     // Resume already-saved meetings whose post-response HQ/operations work
     // was interrupted by a prior server update or process exit.
     resumeMeetingFinalizationJobs()
+    // 6.81.0: Stops the phone sent before the last exit; the server saves them once complete.
+    resumeAutonomousMeetingSaves()
     // 6.77.0: transcript cleanup data whose meeting is gone, and screen text past retention.
     scheduleTranscriptCleanupSweep()
 

@@ -1,5 +1,6 @@
 import { MacParakeetUnavailableError, transcribeMacParakeet } from '../lib/mac-recording-asr.js'
 import { getMeetingStore } from '../lib/meeting-store.js'
+import { appendAutonomousSaveLog, getStopIntentStore, savedChunkReplay, type StopIntent } from '../lib/meeting-stop-intents.js'
 import { MAC_AUDIO, MAC_CAPTURE_ID, persistMacChunkReceipt, macError, registerMacRecording, requireMacRecording, readMacRecording, validateMacWav } from '../lib/mac-recording.js'
 import { AUTO_ENROLL_THRESHOLD } from '../lib/voiceprint-floor.js'
 import { readSpeakerPolicy, policyLabel, type SpeakerMode } from '../lib/meeting-speaker-policy.js'
@@ -2164,6 +2165,47 @@ interface StreamCandidateInput {
   mode?: string
 }
 
+/**
+ * 6.81.0: the phone re-sends a chunk after the server saved its meeting on its own.
+ *
+ * WHY. The server saves a stopped meeting itself only once it holds every chunk, so any chunk
+ * the phone still lists as unconfirmed is one whose upload reached the Mac and whose answer
+ * was lost while the phone was off screen. Before 6.81.0 such a replay was refused 410 and the
+ * phone, holding a closed meeting with "unconfirmed" audio, called it a collision and kept the
+ * audio forever. The saved meeting already holds that chunk, so it answers with the saved
+ * text, exactly as a live session answers a replayed index, and the phone adopts the receipt.
+ *
+ * ONLY for meetings the SERVER saved after a Stop: every other closed session answers 410 as
+ * before. A chunk the saved meeting never held is still refused, and is logged loudly, because
+ * the finalizer's rule (never save an incomplete capture) says it cannot happen.
+ */
+function replayAfterAutonomousSave(sessionId: string, chunkIndex: number): StreamChunkCompletionResponse | null {
+  let intent: StopIntent | null
+  try { intent = getStopIntentStore().get(sessionId) } catch { return null }
+  if (!intent || intent.state !== 'saved' || intent.savedBy !== 'server' || !intent.sidecarPath) return null
+  const closed = closedSessionRecords.get(sessionId)
+  const replay = savedChunkReplay(intent.sidecarPath, chunkIndex, closed?.asrCompletedIndices ?? [])
+  const store = getStopIntentStore()
+  if (!replay) {
+    store.update(sessionId, { lateRefused: (intent.lateRefused ?? 0) + 1 })
+    const fields = { sessionId, chunkIndex, finalChunkIndex: intent.finalChunkIndex, lateRefused: (intent.lateRefused ?? 0) + 1 }
+    console.warn(`[meeting/auto-save] late_chunk_refused ${sessionId} ${JSON.stringify(fields)}`)
+    appendAutonomousSaveLog('late_chunk_refused', fields)
+    return null
+  }
+  const at = Date.now()
+  store.update(sessionId, {
+    lateReplays: (intent.lateReplays ?? 0) + 1,
+    ...(intent.phoneConfirmedAt ? {} : { phoneConfirmedAt: at, phoneConfirmedBy: 'chunk_replay' }),
+  })
+  const fields = { sessionId, chunkIndex, kind: replay.kind, lateReplays: (intent.lateReplays ?? 0) + 1, sinceSaveMs: at - (intent.savedAt ?? at) }
+  console.log(`[meeting/auto-save] late_replay ${sessionId} ${JSON.stringify(fields)}`)
+  appendAutonomousSaveLog('late_replay', fields)
+  if (!intent.phoneConfirmedAt) appendAutonomousSaveLog('phone_confirmed', { sessionId, via: 'chunk_replay', sinceSaveMs: at - (intent.savedAt ?? at) })
+  if (replay.kind === 'canonical') return canonicalChunkResponse(replay.chunk as unknown as TranscriptChunk, sessionId, chunkIndex)
+  return emptyChunkResponse({ text: '', speaker: 'Ext', elapsed: 0, canonical: false }, sessionId, chunkIndex)
+}
+
 async function processStreamChunk(opts: {
   sessionId: string
   chunkIndex: number
@@ -2182,7 +2224,12 @@ async function processStreamChunk(opts: {
   const tReq = performance.now()
   validateSessionId(sessionId)
   validateChunkIndex(chunkIndex)
-  if (isSessionDeleted(sessionId)) throw makeHttpError(410, 'session is closed', 'session_closed')
+  if (isSessionDeleted(sessionId)) {
+    // 6.81.0: a meeting the server saved on its own answers a chunk it already holds.
+    const replay = replayAfterAutonomousSave(sessionId, chunkIndex)
+    if (replay) return replay
+    throw makeHttpError(410, 'session is closed', 'session_closed')
+  }
   if (audioBuffer.length < 100) throw makeHttpError(400, 'audio too short', 'audio_too_short')
 
   const audioSha256 = sha256Hex(audioBuffer)

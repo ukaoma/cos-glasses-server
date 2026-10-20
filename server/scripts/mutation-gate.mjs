@@ -4370,8 +4370,9 @@ const CASES = [
   {
     name: "cx-6533-save-nothing-to-save",
     file: "server/routes/meeting.ts",
-    find: "        res.status(404).json(known === 'active' || known === 'closed'\n",
-    replace: "        res.status(404).json(false\n",
+    // 6.81.0: the save body moved into performSave, which answers through respond().
+    find: "        respond(404, known === 'active' || known === 'closed'\n",
+    replace: "        respond(404, false\n",
     tests: ["server/routes/transcribe-stream-closed-sessions.test.ts"],
   },
   {

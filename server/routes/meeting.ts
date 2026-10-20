@@ -11,6 +11,16 @@ import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
 import { createStopRequestStore, isStopRequestRefusal, STOP_REQUEST_CLAIM_WINDOW_MS, type StopRequest, type StopRequestStore } from '../lib/meeting-stop-requests.js'
+import { appendAutonomousSaveLog, getStopIntentStore, type StopIntent, type StopIntentStore } from '../lib/meeting-stop-intents.js'
+import {
+  AUTONOMOUS_FINALIZE_POLL_MS,
+  AUTONOMOUS_FINALIZE_SETTLE_MS,
+  createAutonomousFinalizer,
+  indicesFromRanges,
+  type AutonomousFinalizer,
+  type AutonomousSaveOutcome,
+  type SessionLedger,
+} from '../lib/meeting-autonomous-finalize.js'
 import { cleanTranscriptLines } from '../lib/hallucination-filter.js'
 import { durableAtomicWriteFileSync } from '../lib/atomic-fs.js'
 import { appendCorrection, appliedCorrections, pendingCorrections } from '../lib/meeting-corrections.js'
@@ -231,9 +241,24 @@ interface MeetingSessionSource {
   delete(sessionId: string, options?: { preserveAudio?: boolean }): void
   /** 6.53.3: live, closed within its retention, or unknown (`getMeetingSessionStatus`). */
   getState?(sessionId: string): 'active' | 'closed' | 'missing'
+  /** 6.81.0: the received/ASR ledger the server's own save of a stopped meeting reads. */
+  getLedger?(sessionId: string): SessionLedger
 }
 
 const defaultSessionState = (sessionId: string): 'active' | 'closed' | 'missing' => getMeetingSessionStatus(sessionId).state
+
+/** 6.81.0: the live ledger as the autonomous finalizer reads it (the status route's own numbers). */
+function defaultSessionLedger(sessionId: string): SessionLedger {
+  const status = getMeetingSessionStatus(sessionId)
+  const lastActivityAt = status.lastActivityAt ? Date.parse(status.lastActivityAt) : NaN
+  return {
+    state: status.state,
+    received: indicesFromRanges(status.receivedRanges),
+    asrCompleted: indicesFromRanges(status.asrCompletedRanges),
+    maxChunkIndex: status.maxChunkIndex,
+    lastActivityAt: Number.isFinite(lastActivityAt) ? lastActivityAt : null,
+  }
+}
 
 export interface MeetingRouteDependencies {
   store?: MeetingStore
@@ -252,6 +277,16 @@ export interface MeetingRouteDependencies {
   stopRequests?: StopRequestStore
   /** 6.77.0: the post-save transcript cleanup (lib/transcript-cleanup.ts). */
   transcriptCleanup?: TranscriptCleanupRunner
+  /** 6.81.0: the phone's Stop, durable (lib/meeting-stop-intents.ts). */
+  stopIntents?: StopIntentStore
+  /** 6.81.0: the server's own save of a stopped meeting. Tests inject the clock, timer and gate. */
+  autonomousFinalize?: {
+    now?: () => number
+    schedule?: (fn: () => void, ms: number) => () => void
+    ready?: () => boolean
+    log?: (event: string, fields: Record<string, unknown>) => void
+    onCreate?: (finalizer: AutonomousFinalizer) => void
+  }
 }
 
 const activeFinalizationJobs = new Set<string>()
@@ -584,6 +619,21 @@ function publicDisposition(disposition: CaptureDisposition | null): Record<strin
   }
 }
 
+/** 6.81.0: the Stop the server holds, as the status and stop routes show it. Never a path. */
+function publicStopIntent(intent: StopIntent): Record<string, unknown> {
+  return {
+    finalChunkIndex: intent.finalChunkIndex,
+    state: intent.state,
+    receivedAt: new Date(intent.receivedAt).toISOString(),
+    savedBy: intent.savedBy ?? null,
+    savedAt: intent.savedAt ? new Date(intent.savedAt).toISOString() : null,
+    reason: intent.reason ?? null,
+    waitingFor: intent.state === 'waiting' && intent.lastWait
+      ? { reason: intent.lastWait.reason, missingCount: intent.lastWait.missingCount, missingSample: intent.lastWait.missingSample }
+      : null,
+  }
+}
+
 function suppliedServerPin(
   req: { get: (name: string) => string | undefined },
   fallback: unknown,
@@ -607,6 +657,83 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const savingSessions = new Set<string>()
   const stopRequests = deps.stopRequests ?? createStopRequestStore()
   setNamingSessionLiveness(id => sessions.getStartTime(id) !== null || savingSessions.has(id) || activeFinalizationJobs.has(id))
+
+  // ── 6.81.0: the server finishes a stopped meeting on its own ─────────────────────
+  // lib/meeting-stop-intents.ts says what a Stop intent is; lib/meeting-autonomous-
+  // finalize.ts says when the server may save (only a complete capture, never early).
+  const stopIntents = deps.stopIntents ?? getStopIntentStore()
+  const autoDeps = deps.autonomousFinalize ?? {}
+  const autoNow = autoDeps.now ?? Date.now
+  const ledgerFor = (sessionId: string): SessionLedger => (sessions.getLedger ?? defaultSessionLedger)(sessionId)
+  const autoLog = autoDeps.log ?? ((event: string, fields: Record<string, unknown>) => {
+    const line = `[meeting/auto-save] ${event} ${String(fields.sessionId ?? '')} ${JSON.stringify(fields)}`
+    if (event === 'finalize_failed' || event === 'revoked' || event === 'late_chunk_refused') console.warn(line)
+    else console.log(line)
+    appendAutonomousSaveLog(event, fields)
+  })
+
+  /** Someone saved a meeting the phone had told us about before the server did: theirs, not ours. */
+  const notePhoneSavedFirst = (sessionId: string, savedBy: 'phone' | 'other') => {
+    const intent = stopIntents.get(sessionId)
+    if (!intent || intent.state !== 'waiting') return
+    const at = autoNow()
+    stopIntents.update(sessionId, { state: 'saved', savedBy, savedAt: at, lastWait: null })
+    autoLog(savedBy === 'phone' ? 'phone_saved' : 'client_saved', { sessionId, waitedMs: at - intent.receivedAt, finalChunkIndex: intent.finalChunkIndex })
+  }
+  /** The phone came back after the server saved on its own. Logged once, with how it showed up. */
+  const notePhoneAfterAutonomousSave = (sessionId: string, via: string) => {
+    const intent = stopIntents.get(sessionId)
+    if (!intent || intent.state !== 'saved' || intent.savedBy !== 'server' || intent.phoneConfirmedAt) return
+    const at = autoNow()
+    stopIntents.update(sessionId, { phoneConfirmedAt: at, phoneConfirmedBy: via })
+    autoLog('phone_confirmed', { sessionId, via, sinceSaveMs: at - (intent.savedAt ?? at), lateReplays: intent.lateReplays ?? 0, lateRefused: intent.lateRefused ?? 0 })
+  }
+
+  const autonomousSave = async (intent: StopIntent): Promise<AutonomousSaveOutcome> => {
+    // The phone pinned one server instance. A different one (a reinstall) is not its Mac.
+    if (intent.serverInstanceId !== getServerInstanceId()) return { ok: false, status: 409, reason: 'server_instance_mismatch' }
+    const entries = sessions.getChunkEntries(intent.sessionId) ?? []
+    const canonicalCount = entries.filter(entry => entry?.chunk?.text).length
+    const integrity = sessions.getIntegrity(intent.sessionId)
+    let status = 0
+    let payload: Record<string, unknown> = {}
+    const saved = await performSave(
+      intent.sessionId,
+      { ...(intent.title ? { title: intent.title } : {}), ...(intent.domain ? { domain: intent.domain } : {}) },
+      (code, body) => { status = code; payload = body },
+      'server',
+    )
+    if (!saved || status !== 200) return { ok: false, status, reason: String(payload.reason ?? 'meeting_save_error') }
+    // Someone saved it between the decision and the lock: theirs, not ours.
+    if (payload.replayed === true) return { ok: false, status: 200, reason: 'already_saved' }
+    return {
+      ok: true,
+      filename: saved.filename,
+      sidecarPath: saved.sidecarPath,
+      chunkCount: intent.finalChunkIndex + 1,
+      canonicalCount,
+      missingIndices: integrity?.missingIndices ?? [],
+    }
+  }
+
+  const autonomousFinalizer = createAutonomousFinalizer({
+    waiting: () => stopIntents.waiting(),
+    get: sessionId => stopIntents.get(sessionId),
+    update: (sessionId, patch) => { stopIntents.update(sessionId, patch) },
+    ledger: ledgerFor,
+    alreadySaved: sessionId => store.findBySessionId(sessionId) !== null,
+    saving: sessionId => savingSessions.has(sessionId),
+    save: autonomousSave,
+    ready: autoDeps.ready ?? (() => maintenanceAdmissionsOpen() && durableSessionRecoveryHasRun()),
+    now: autoNow,
+    schedule: autoDeps.schedule ?? ((fn, ms) => {
+      const timer = setTimeout(fn, ms)
+      timer.unref?.()
+      return () => clearTimeout(timer)
+    }),
+    log: autoLog,
+  })
+  autoDeps.onCreate?.(autonomousFinalizer)
 
   let recoveryPendingLogged = false
   router.get('/meeting/sessions/:sessionId/status', (req, res) => {
@@ -651,6 +778,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // A saved meeting or a live session is the truth for itself; the quarantine is
     // read only when neither is.
     const disposition = state === 'saved' || state === 'active' ? null : readCaptureDisposition(sessionId)
+    // 6.81.0: a pinned status read is the phone; one after the server saved on its own is its return.
+    if (saved && pin) notePhoneAfterAutonomousSave(sessionId, 'status')
+    const intent = stopIntents.get(sessionId)
     res.set('Cache-Control', 'private, no-store')
     res.json({
       sessionId,
@@ -670,6 +800,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // (null otherwise). Older clients ignore both.
       outcome: captureOutcome(state, disposition),
       disposition: publicDisposition(disposition),
+      // 6.81.0, additive: the Stop the server holds for this meeting, if any. Older clients ignore it.
+      stopIntent: intent ? publicStopIntent(intent) : null,
     })
   })
 
@@ -781,43 +913,124 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     res.json(stopRequestBody(request, savingSessions.has(sessionId) ? { finalizing: true } : {}))
   })
 
-  router.post('/meeting/save', async (req, res) => {
+  // ── 6.81.0: the phone's Stop ──────────────────────────────────────────────────────
+  // POST /meeting/sessions/:id/stop {finalChunkIndex, serverInstanceId}. One small fetch the
+  // phone can send the moment Stop is pressed, before any IndexedDB work, so a phone that is
+  // off screen still tells the Mac. It never closes the session and never refuses a chunk:
+  // the server saves on its own only once it holds every chunk 0..finalChunkIndex.
+  router.post('/meeting/sessions/:sessionId/stop', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    if (MAC_CAPTURE_ID.test(sessionId)) {
+      res.status(400).json({ error: 'A Mac recording stops from Record on Mac', reason: 'mac_capture' })
+      return
+    }
+    const body = req.body as Record<string, unknown> | undefined
+    const finalChunkIndex = body?.finalChunkIndex
+    if (!Number.isInteger(finalChunkIndex) || (finalChunkIndex as number) < -1 || (finalChunkIndex as number) > 1_000_000) {
+      res.status(400).json({ error: 'finalChunkIndex must be a whole number, -1 or more', reason: 'invalid_final_chunk_index' })
+      return
+    }
+    if ((body?.title !== undefined && typeof body.title !== 'string') || (body?.domain !== undefined && typeof body.domain !== 'string')) {
+      res.status(400).json({ error: 'title and domain must be strings', reason: 'invalid_metadata' })
+      return
+    }
+    const serverInstanceId = getServerInstanceId()
+    if (!serverInstanceId) {
+      res.status(503).json({ error: 'Server identity unavailable', reason: 'server_identity_unavailable' })
+      return
+    }
+    // Required, not optional: only a phone pinned to THIS Mac may hand it a Stop.
+    const pin = suppliedServerPin(req, body?.serverInstanceId)
+    if (!pin) {
+      res.status(400).json({ error: 'Server identity pin required', reason: 'server_identity_pin_required' })
+      return
+    }
+    if (pin !== serverInstanceId) {
+      res.status(409).json({ error: 'Server identity mismatch', reason: 'server_instance_mismatch' })
+      return
+    }
+    res.set('Cache-Control', 'private, no-store')
+    const saved = store.findBySessionId(sessionId)
+    if (saved) {
+      notePhoneAfterAutonomousSave(sessionId, 'stop_retry')
+      res.json({ sessionId, state: 'saved', saveReceipt: publicSaveResponse(saved, true) })
+      return
+    }
+    const ready = (autoDeps.ready ?? (() => maintenanceAdmissionsOpen() && durableSessionRecoveryHasRun()))()
+    // Before recovery has run the ledger is empty by construction, so it proves nothing:
+    // record the Stop and let the finalizer judge it once the gate opens.
+    const ledger = ready ? ledgerFor(sessionId) : null
+    if (ledger?.state === 'closed') {
+      res.status(409).json({ error: 'This meeting is closed without a save', reason: 'not_live', state: 'closed' })
+      return
+    }
+    if (ledger && ledger.maxChunkIndex > (finalChunkIndex as number)) {
+      // The Mac holds audio past the phone's last chunk. Never take that Stop.
+      res.status(409).json({ error: 'The Mac holds chunks past finalChunkIndex', reason: 'final_index_behind_server', maxChunkIndex: ledger.maxChunkIndex })
+      return
+    }
+    const source = typeof body?.source === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(body.source) ? body.source : 'companion'
+    let result: ReturnType<StopIntentStore['record']>
+    try {
+      result = stopIntents.record({
+        sessionId,
+        finalChunkIndex: finalChunkIndex as number,
+        source,
+        ...(typeof body?.title === 'string' && body.title.trim() ? { title: body.title.slice(0, 160) } : {}),
+        ...(typeof body?.domain === 'string' && body.domain.trim() ? { domain: body.domain } : {}),
+        serverInstanceId,
+      })
+    } catch (error) {
+      // Not durable means not received: the phone must keep its own Stop path.
+      console.error(`[meeting/auto-save] Could not record the Stop for ${sessionId}: ${error instanceof Error ? error.message : error}`)
+      res.status(503).json({ error: 'Stop could not be recorded; retry', reason: 'stop_persistence_failed', retryable: true })
+      return
+    }
+    if (!result.ok) {
+      res.json({ sessionId, state: 'saved', stopIntent: publicStopIntent(result.intent) })
+      return
+    }
+    const intent = result.intent
+    if (result.created || result.raised) {
+      autoLog(result.created ? 'stop_received' : 'stop_raised', {
+        sessionId, source, finalChunkIndex: intent.finalChunkIndex, posts: intent.posts,
+        received: ledger?.received.length ?? null, replaced: intent.replaced ?? null,
+      })
+    }
+    void autonomousFinalizer.tick('stop_received')
+    res.status(202).json({
+      sessionId,
+      state: 'stop_received',
+      finalChunkIndex: intent.finalChunkIndex,
+      receivedAt: new Date(intent.receivedAt).toISOString(),
+      posts: intent.posts,
+      autonomousSave: { settleMs: AUTONOMOUS_FINALIZE_SETTLE_MS, pollMs: AUTONOMOUS_FINALIZE_POLL_MS },
+    })
+  })
+
+  /**
+   * The save itself, shared by the phone's POST /meeting/save and the server's own save of a
+   * stopped meeting (6.81.0). One body so the two can never drift: the same lock, the same
+   * idempotent receipt, the same durable sidecar-then-job order, and the same maintenance
+   * lease order (the finalization job's lease is taken before the save lease is released).
+   *
+   * `respond` is called exactly once, before any background work is scheduled, as the route
+   * always did. `origin` changes only bookkeeping: who is recorded as having saved, and the
+   * phone-confirmed line when the phone replays a save the server already made.
+   */
+  async function performSave(
+    sessionId: string,
+    body: Record<string, unknown> | undefined,
+    respond: (status: number, payload: Record<string, unknown>, noStore?: boolean) => void,
+    origin: 'phone' | 'client' | 'server',
+  ): Promise<SavedMeeting | null> {
     let lockedSessionId: string | null = null
     let maintenanceLease: MaintenanceWorkLease | undefined
     try {
-      const body = req.body as Record<string, unknown> | undefined
-      const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
-      if (!sessionId) {
-        res.status(400).json({ error: 'sessionId required', reason: 'missing_session_id' })
-        return
-      }
-      if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
-        res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
-        return
-      }
-      if (body?.title !== undefined && typeof body.title !== 'string') {
-        res.status(400).json({ error: 'Invalid title', reason: 'invalid_title' })
-        return
-      }
-      if (body?.domain !== undefined && typeof body.domain !== 'string') {
-        res.status(400).json({ error: 'Invalid domain', reason: 'invalid_domain' })
-        return
-      }
-      const serverInstanceId = getServerInstanceId()
-      if (!serverInstanceId) {
-        res.status(503).json({ error: 'Server identity unavailable', reason: 'server_identity_unavailable' })
-        return
-      }
-      const pin = suppliedServerPin(req, body?.serverInstanceId)
-      if (MAC_CAPTURE_ID.test(sessionId) && !pin) {
-        res.status(400).json({ error: 'Server identity pin required', reason: 'server_identity_pin_required' })
-        return
-      }
-      if (pin && pin !== serverInstanceId) {
-        res.status(409).json({ error: 'Server identity mismatch', reason: 'server_instance_mismatch' })
-        return
-      }
-
       // A response can be lost after both durable files were committed. Find
       // the sidecar by session ID so client retry/restart is idempotent.
       const alreadySaved = store.findBySessionId(sessionId)
@@ -833,16 +1046,16 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           sessions,
           finalDiarize,
         })
-        res.set('Cache-Control', 'private, no-store')
-        res.json(publicSaveResponse(alreadySaved, true))
-        return
+        if (origin === 'phone') notePhoneAfterAutonomousSave(sessionId, 'save_replay')
+        respond(200, publicSaveResponse(alreadySaved, true), true)
+        return alreadySaved
       }
       if (MAC_CAPTURE_ID.test(sessionId)) {
         requireMacRecordingForSave(sessionId, body?.expectedChunkCount)
       }
       if (savingSessions.has(sessionId)) {
-        res.status(409).json({ error: 'Meeting save already in progress', reason: 'save_in_progress' })
-        return
+        respond(409, { error: 'Meeting save already in progress', reason: 'save_in_progress' })
+        return null
       }
       // Saving/finalizing an already-recording session is a drain
       // continuation. It must remain admitted so existing audio can reach a
@@ -858,10 +1071,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         // lets a client stop asking ("nothing to save") instead of retrying a 404 all day.
         // Still 404, so every existing client reads it exactly as before.
         const known = (sessions.getState ?? defaultSessionState)(sessionId)
-        res.status(404).json(known === 'active' || known === 'closed'
+        respond(404, known === 'active' || known === 'closed'
           ? { error: `Nothing to save for session ${sessionId}`, reason: 'nothing_to_save', state: known }
           : { error: `No transcript found for session ${sessionId}`, reason: 'session_not_found' })
-        return
+        return null
       }
 
       const chunks = sessions.getChunks(sessionId) ?? []
@@ -913,6 +1126,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         finalizationRequired,
         claimPending,
       })
+      // 6.81.0: who saved. A pinned save is the phone's; an unpinned one (the stranded sweep's
+      // own POST, a manual curl) is someone else's. Either closes a waiting Stop. The server's
+      // own save is recorded by its finalizer.
+      if (origin !== 'server') notePhoneSavedFirst(sessionId, origin === 'phone' ? 'phone' : 'other')
 
       // Two-phase replay intent: the canonical sidecar above is the recovery
       // source of truth, and this indexed job is its fast execution ledger.
@@ -965,6 +1182,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
             filename: saved.filename,
             durationMin: saved.durationMin,
             domain: saved.domain,
+            // 6.81.0, additive: the server saved this on its own after the phone's Stop.
+            ...(origin === 'server' ? { savedBy: 'server' } : {}),
           },
         })
       } catch (error) {
@@ -994,8 +1213,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         finalizationJob = null
       }
 
-      res.set('Cache-Control', 'private, no-store')
-      res.json(publicSaveResponse(saved))
+      respond(200, publicSaveResponse(saved), true)
 
       if (finalizationJob) {
         scheduleFinalizationJob(finalizationJob, {
@@ -1007,16 +1225,67 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           transcriptCleanup,
         })
       }
+      return saved
     } catch (error) {
       if (error instanceof MeetingStoreError) {
-        res.status(error.status).json({ error: error.message, reason: error.code })
-        return
+        respond(error.status, { error: error.message, reason: error.code })
+        return null
       }
       console.error('[meeting/save] Finalization failed:', error)
-      res.status(500).json({ error: 'Meeting save failed', reason: 'meeting_save_error' })
+      respond(500, { error: 'Meeting save failed', reason: 'meeting_save_error' })
+      return null
     } finally {
       maintenanceLease?.release()
       if (lockedSessionId) savingSessions.delete(lockedSessionId)
+    }
+  }
+
+  router.post('/meeting/save', async (req, res) => {
+    let responded = false
+    const respond = (status: number, payload: Record<string, unknown>, noStore = false) => {
+      if (responded) return
+      responded = true
+      if (noStore) res.set('Cache-Control', 'private, no-store')
+      res.status(status).json(payload)
+    }
+    try {
+      const body = req.body as Record<string, unknown> | undefined
+      const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId required', reason: 'missing_session_id' })
+        return
+      }
+      if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+        res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+        return
+      }
+      if (body?.title !== undefined && typeof body.title !== 'string') {
+        res.status(400).json({ error: 'Invalid title', reason: 'invalid_title' })
+        return
+      }
+      if (body?.domain !== undefined && typeof body.domain !== 'string') {
+        res.status(400).json({ error: 'Invalid domain', reason: 'invalid_domain' })
+        return
+      }
+      const serverInstanceId = getServerInstanceId()
+      if (!serverInstanceId) {
+        res.status(503).json({ error: 'Server identity unavailable', reason: 'server_identity_unavailable' })
+        return
+      }
+      const pin = suppliedServerPin(req, body?.serverInstanceId)
+      if (MAC_CAPTURE_ID.test(sessionId) && !pin) {
+        res.status(400).json({ error: 'Server identity pin required', reason: 'server_identity_pin_required' })
+        return
+      }
+      if (pin && pin !== serverInstanceId) {
+        res.status(409).json({ error: 'Server identity mismatch', reason: 'server_instance_mismatch' })
+        return
+      }
+      // Only the phone pins its saves (the local-first contract); the stranded sweep does not.
+      await performSave(sessionId, body, respond, pin ? 'phone' : 'client')
+    } catch (error) {
+      console.error('[meeting/save] Finalization failed:', error)
+      respond(500, { error: 'Meeting save failed', reason: 'meeting_save_error' })
     }
   })
 
@@ -2669,7 +2938,17 @@ async function finalizeBatch(options: {
   }
 }
 
-export const meetingRouter = createMeetingRouter()
+let defaultAutonomousFinalizer: AutonomousFinalizer | null = null
+export const meetingRouter = createMeetingRouter({ autonomousFinalize: { onCreate: finalizer => { defaultAutonomousFinalizer = finalizer } } })
+
+/**
+ * 6.81.0: at boot (once admissions open), pick up every Stop the server was holding when it
+ * last exited and check it again. A Stop is durable, so a restart between the Stop and the
+ * last chunk loses nothing: the finalizer waits for recovery, then for the chunks.
+ */
+export function resumeAutonomousMeetingSaves(): void {
+  void defaultAutonomousFinalizer?.tick('boot')
+}
 
 /** 6.77.0: what the transcript cleanup routes need from the meeting layer. */
 export function transcriptCleanupRouteDeps(store: MeetingStore = getMeetingStore()): TranscriptCleanupRouteDeps {
