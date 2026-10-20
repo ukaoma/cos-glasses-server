@@ -545,6 +545,29 @@ describe('key relay: metering and the cap (plan 4.5)', () => {
     expect(settle[0]!.usd).toBeLessThan(0.05 + 0.006)
   })
 
+  it('canary rerun item 2: a cut late in a reply overshoots the cap by at most one response (its max_tokens plus its input)', async () => {
+    mock.usageDaily = 0.996 // $0.004 left of the $1 cap
+    mock.messages = async (_req, res, seen) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      const ev = anthropicEvents(bodyModel(seen))
+      res.write(sse([ev[0]!, ev[1]!]))
+      // The provider generates up to max_tokens (1,000) before the relay sees a byte of it.
+      res.write(sse([['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'y'.repeat(4000) } }]]))
+      await new Promise(r => setTimeout(r, 5))
+      if (!res.destroyed) res.end(sse(ev.slice(3)))
+    }
+    const { relay, failures } = makeRelay({ priceFor: price, usagePollMs: 60_000 })
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
+    await (await post(h, MSG, msgBody(SLUG, { max_tokens: 1000 }))).text()
+    expect(failures).toContainEqual({ kind: 'cap_refused', status: 402 })
+    // usage_daily (another device's spend) plus what this reply settled at, past the $1 cap.
+    const settled = ledgerRows().filter(x => x.kind === 'settle').at(-1)!.usd
+    const overshoot = 0.996 + settled - 1
+    expect(overshoot).toBeGreaterThan(0)
+    // Bound: one response's output at max_tokens plus its input (40 tokens), at the price.
+    expect(overshoot).toBeLessThanOrEqual((1000 * 10 + 40 * 1) / 1e6)
+  })
+
   it('QA W2: max_tokens is reserved in full (no 4096 clamp) when it fits under the cap', () => {
     const p = { inUsdPerM: 1, outUsdPerM: 10 }
     expect(meterMod.reserveWithinHeadroomUsd({ bodyBytes: 4000, maxTokens: 32_000, price: p, headroomUsd: 10 })).toBeCloseTo(0.001 + 0.32, 9)

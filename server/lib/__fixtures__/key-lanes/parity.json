@@ -4,6 +4,6 @@
   "files": {
     "shared/key-preference.ts": "0e67a4dd42e2e059eabcd10f2bf2245be3b77dcdcf6b0b375b755c3ad4a92a44",
     "server/lib/key-relay-contract.ts": "c7537214f760910fa923efc30714f458d5eefb4d0143e150cf96b261d9a6eb61",
-    "server/lib/key-notices.ts": "dbc0f9da2e41062330cdef721fb87cf1b4eb96ba2713283800bc673f6cd722e3"
+    "server/lib/key-notices.ts": "ad87aced7fa94d6df0c0bb6b10f38913efe877a2f0d7131fb040a25fb7b8de36"
   }
 }

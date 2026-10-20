@@ -4,7 +4,7 @@
 // COS_DATA_DIR and COS_AGENT_SESSIONS_HOME; the user's ~/.codex is never named.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const scratch = vi.hoisted(() => {
@@ -232,6 +232,46 @@ describe('hook events (session-hook-events.ts)', () => {
     expect(on.ok && on.envelope.provider).toBe('claude')
     const other = parseHookEnvelope(claudeEnv('d0000000-1111-4222-8333-444444444444'))
     expect(other.ok && 'keyProfile' in other.envelope).toBe(false)
+    keyed.__resetKeyedSessionsForTests()
+  })
+
+  it('canary rerun R8: a keyed Codex hook row in session-hook-events.jsonl carries keyProfile from the keyed-thread record, and a lanes-off row is unchanged', async () => {
+    const keyed = await import('./keyed-sessions.js')
+    const { registerCodexKeyedThreadRecorder, recordKeyedCodexThread } = await import('./codex-profile-home.js')
+    const { SessionHookLedger } = await import('./session-hook-ledger.js')
+    // The same seam the wiring registers: a Codex thread lands in keyed-sessions.json like a Claude session.
+    registerCodexKeyedThreadRecorder(t => keyed.recordKeyedSession({ id: t.id, engine: 'codex', profileId: t.profileId, cosSessionId: t.cosSessionId }))
+    recordKeyedCodexThread({ id: KEYED_ID, engine: 'codex', profileId: 'gpt-key', cosSessionId: 'cos-c' })
+    // The installed hook script stamps nothing, and a Codex payload's transcript path need not sit in the profile home.
+    const codexEnv = JSON.stringify({ ts: 1760900000000, ppid: 77, event: 'SessionStart', provider: 'codex', payload: { session_id: KEYED_ID, transcript_path: null } })
+    const path = join(DATA, 'session-hook-events.jsonl')
+    const rows = () => readFileSync(path, 'utf-8').trim().split('\n').map(l => JSON.parse(l) as Record<string, unknown>)
+
+    const off = parseHookEnvelope(codexEnv)
+    expect(off.ok).toBe(true)
+    if (!off.ok) return
+    new SessionHookLedger(path).append('k-off', off.envelope)
+    expect(Object.keys(rows()[0]).sort()).toEqual(['event', 'key', 'payload', 'ppid', 'provider', 'session_id', 'stamped', 'ts'])
+    // Lanes off, even an envelope that carries a profile writes the row it always did.
+    new SessionHookLedger(path).append('k-off-2', { ...off.envelope, keyProfile: 'gpt-key' })
+    expect(rows()[1]).toEqual({ ...rows()[0], key: 'k-off-2' })
+
+    lanesOn()
+    const on = parseHookEnvelope(codexEnv)
+    expect(on.ok && on.envelope.keyProfile).toBe('gpt-key')
+    if (!on.ok) return
+    const ledger = new SessionHookLedger(path)
+    ledger.append('k-on', on.envelope)
+    expect(rows()[2].keyProfile).toBe('gpt-key')
+    expect(rows()[2].provider).toBe('codex')
+    // A boot replay keeps it.
+    const replayed: Array<string | undefined> = []
+    ledger.replay(0, env => { replayed.push(env.keyProfile) })
+    expect(replayed).toEqual([undefined, undefined, 'gpt-key'])
+    // A Codex thread nobody recorded gets no profile.
+    const plain = parseHookEnvelope(codexEnv.replace(KEYED_ID, PLAIN_ID))
+    expect(plain.ok && 'keyProfile' in plain.envelope).toBe(false)
+    registerCodexKeyedThreadRecorder(null)
     keyed.__resetKeyedSessionsForTests()
   })
 

@@ -9,6 +9,8 @@
 import { appendFileSync, existsSync, readFileSync, renameSync, statSync } from 'node:fs'
 import type { HookEnvelope, HookEventName, HookProvider } from './session-hook-events.js'
 import { projectHookPayload, isHookEventName, isHookProvider, SESSION_ID_RE } from './session-hook-events.js'
+import { keyLanesEnabled } from './key-lanes.js'
+import { isKeyProfileId } from '../../shared/key-preference.js'
 
 export const LEDGER_ROTATE_BYTES = 10 * 1024 * 1024
 
@@ -30,6 +32,12 @@ export interface LedgerRow {
   provider?: HookProvider
   /** 6.62.0 (QA W2): the envelope carried the provider stamp; a replay keeps the evidence. */
   stamped?: true
+  /**
+   * Key lanes K1 (canary rerun R8): the key profile the event ran under, as `hookKeyProfile`
+   * resolved it at ingest (for a Codex thread, from the keyed-thread record the bridge wrote).
+   * Written only while lanes are on, so a row with lanes off is byte-identical to before.
+   */
+  keyProfile?: string
   payload: Record<string, unknown>
 }
 
@@ -77,6 +85,7 @@ export class SessionHookLedger {
         ...(entrypoint ? { entrypoint } : {}),
         ...(env.provider ? { provider: env.provider } : {}),
         ...(env.stamped ? { stamped: true as const } : {}),
+        ...(env.keyProfile && keyLanesEnabled() ? { keyProfile: env.keyProfile } : {}),
         payload: projectHookPayload(env.event, env.payload),
       }
     } catch (error) {
@@ -137,6 +146,7 @@ export class SessionHookLedger {
         payload: { session_id: r.session_id, ...payload },
         ...(isHookProvider(r.provider) ? { provider: r.provider } : {}),
         ...(r.stamped === true && isHookProvider(r.provider) ? { stamped: true as const } : {}),
+        ...(isKeyProfileId(r.keyProfile) ? { keyProfile: r.keyProfile } : {}),
       }, r.key, r.child === true, entrypoint)
       applied++
     }

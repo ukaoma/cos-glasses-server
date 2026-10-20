@@ -161,6 +161,11 @@ const mutations = [
   m('codex-error-keeps-nonce', CODEX, ["    // Canary R14: a Codex child keeps retrying after the bridge ends the turn; its nonce dies now.\n    keyTurn?.revoke('cancel')\n", ''], CODEX_T),
   m('hook-profile-not-from-record', 'server/lib/session-hook-events.ts', ['  const recorded = keyedSessionProfile(sessionId)', '  const recorded = undefined'], READ_T),
   m('hook-profile-looked-up-with-lanes-off', 'server/lib/session-hook-events.ts', ['  if (!sessionId || !keyLanesEnabled()) return undefined', '  if (!sessionId) return undefined'], READ_T),
+  // ── Canary rerun on 8cf5ca7: R8 Codex hook rows, the cap overshoot copy ──
+  m('hook-ledger-drops-key-profile', 'server/lib/session-hook-ledger.ts', ['        ...(env.keyProfile && keyLanesEnabled() ? { keyProfile: env.keyProfile } : {}),\n', ''], READ_T),
+  m('hook-ledger-key-profile-with-lanes-off', 'server/lib/session-hook-ledger.ts', ['env.keyProfile && keyLanesEnabled() ?', 'env.keyProfile ?'], READ_T),
+  m('hook-ledger-replay-drops-key-profile', 'server/lib/session-hook-ledger.ts', ['        ...(isKeyProfileId(r.keyProfile) ? { keyProfile: r.keyProfile } : {}),\n', ''], READ_T),
+  m('cap-overshoot-copy-drift', NOTICES, ["The cap can be exceeded by the last reply in progress. Your provider limit is the hard stop.", "The cap is a hard stop."], WIRE_T),
   // ── Nonce revoke on steer abort (P3 asked for this mutant) ──
   m('steer-abort-keeps-nonce', CLAUDE, ["    keyTurn?.revoke('steer_abort')\n", ''], CLAUDE_T),
   // ── Codex resume slot by profile ──

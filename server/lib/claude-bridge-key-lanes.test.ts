@@ -461,3 +461,27 @@ describe('Lane B Claude: P11 wiring (per-answer cost, steer abort)', () => {
     await settle()
   })
 })
+
+describe('canary rerun item 1: two results (background subagents) on a keyed turn', () => {
+  it('a keyed turn takes the same input mode and answers exactly as the plan lane does (the limit predates key lanes)', async () => {
+    const run = async (opts: Record<string, unknown>) => {
+      const callbacks = cb()
+      await bridge.callClaudeStreaming('Run twelve background subagents.', `two-${Math.random()}`, callbacks, 'opus', undefined, undefined, undefined, { lightweight: true, ...opts } as any)
+      const spawned = state.spawns.at(-1)!
+      const child = state.children.at(-1)
+      const r = (t: string) => ({ type: 'result', subtype: 'success', is_error: false, result: t, session_id: 'cli-two' })
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify(r('Eight of the 12 have reported.'))}\n`))
+      await settle()
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify(r('All 12 reported: FULL ANSWER.'))}\n`))
+      child.emit('close', 0)
+      await settle()
+      return { inputFormat: spawned.args.includes('--input-format'), done: callbacks.onDone.mock.calls.map((c: unknown[]) => c[0]) }
+    }
+    const plan = await run({})
+    const keyed = await run({ keyProfile: profile })
+    expect(keyed.inputFormat).toBe(false)
+    expect(keyed.inputFormat).toBe(plan.inputFormat)
+    expect(keyed.done).toEqual(plan.done)
+    expect(keyed.done).toEqual(['Eight of the 12 have reported.'])
+  })
+})

@@ -457,6 +457,12 @@ export function keyNoticeError(id: KeyNoticeErrorId, params: KeyNoticeErrorParam
  */
 export const KEY_LANE_SAME_MAC_COPY = "Your key is saved on this Mac. Apps and agents that run on this Mac as you can read it. Your provider's spending limit is the real stop."
 
+/**
+ * Canary rerun item 2: the cap is checked as a reply streams, so the reply already in progress can
+ * pass it by up to one response. Shown by COS Control beside the cap (and in the changelog).
+ */
+export const KEY_CAP_OVERSHOOT_COPY = 'The cap can be exceeded by the last reply in progress. Your provider limit is the hard stop.'
+
 export const KEY_LANE_REFUSAL_COPY = {
   lanesOff: 'Key lanes are off. Pick a model.',
   profileOff: (label: string) => `Key profile ${label} is off. Pick a model.`,

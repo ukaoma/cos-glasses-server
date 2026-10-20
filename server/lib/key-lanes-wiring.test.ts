@@ -409,6 +409,8 @@ describe('same-Mac residual risk copy (QA B1, pinned by COS Control)', () => {
     const notices = await import('./key-notices.js')
     expect(notices.KEY_LANE_SAME_MAC_COPY).toBe("Your key is saved on this Mac. Apps and agents that run on this Mac as you can read it. Your provider's spending limit is the real stop.")
     expect(notices.KEY_LANE_SAME_MAC_COPY).not.toMatch(/[\u2013\u2014\u2190-\u21ff]/u)
+    // Canary rerun item 2: the cap copy says plainly that the last reply can pass it.
+    expect(notices.KEY_CAP_OVERSHOOT_COPY).toBe('The cap can be exceeded by the last reply in progress. Your provider limit is the hard stop.')
   })
 })
 
