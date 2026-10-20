@@ -40,6 +40,41 @@ Miles, 2026-10-19: cap live-cue spend from COS Control. On 10/19, live cues ran 
   - A lowercase filler there still goes, with no capital hand-off: "We met Mr. uh Jones" becomes "We met Mr. Jones", and "at 5 p.m. uh we meet" becomes "at 5 p.m. we meet". In 6.79.1 every token after a title was kept, so "Mr. uh Jones" kept the "uh", and Jr. and Sr. were not abbreviations.
   - **Sentence ends.** An ellipsis does not end a sentence. The capital passes on only when the removed filler was itself a sentence's first word. The abbreviation check that became unreachable once the rule above runs first is removed.
   - Dictation mutation gate `server/scripts/dictation-polish-mutation-gate.mjs`: 55 of 55 against a 133-test baseline.
+- **Faster dictation polish: start the polish process at key press.**
+  - **Why.** Miles, 2026-10-19: polish takes 1.8 to 4.1 s with Haiku (median about 2.4 s). A trivial `claude -p` with the polish args takes 1.6 to 1.8 s, so most of the wait is the CLI starting, not the edit.
+  - **Canary on his Mac (Haiku, 9 real calls).** Cold: 1786, 1894, 1886, 1968 ms. A process started 3 to 5 s before the text answered 962 to 1305 ms after the text arrived; one started 1 s before took 1501 ms, because the CLI had not finished starting.
+  - **`POST /api/dictation/polish/prewarm`** `{model, surface?}` answers `{token, expiresMs}`. It spawns the exact polish process now (same args: no tools, MCP, hooks or session file, its own empty workspace) with `--input-format stream-json`, waiting for one message.
+    - Refusals are 409 `{error: "prewarm_unavailable", reason}`, with reason `disabled`, `model` (Luna cannot be warmed), `breaker_open`, `daily_cap` or `cli`.
+    - `DELETE /api/dictation/polish/prewarm/<token>` discards one.
+  - **`/api/dictation/finalize` takes an optional `prewarmToken`.**
+    - A live token for the same model gets the one message, then its stdin is closed and it exits: no history ever carries over.
+    - A process that died before the message falls back to today's cold spawn, the same single call. A failure after the message was sent is a real `failed`, never retried cold.
+    - With a token, the answer adds `prewarm`: `used`, `missed` (unknown, expired, evicted, wrong model or dead) or `discarded` (the model was not called, so the process was killed).
+    - A malformed token is 400 `invalid_prewarm_token`.
+  - **Bounds.**
+    - At most 2 warm processes; a third evicts the oldest.
+    - Each is killed 150 s after it starts if unused.
+    - Every live one is signalled when the server exits, claimed or not.
+    - The daily polish budget is spent only when one is used; a warm process makes no model call until its message.
+    - `COS_DICTATION_PREWARM=0` turns it off.
+  - **Clients.** No companion change. Control needs a change to call it, specified in the COS workspace (`wk43_2026/dictation_polish/PREWARM_CONTROL_SPEC.md`). Control 0.5.328's polish bridge ignores the new answer keys.
+- **Skip the model when the text is clean (off by default).**
+  - **The rule.** With `COS_DICTATION_POLISH_SKIP_CLEAN=1`, finalize returns the filler-passed text with `polishSkipped: "clean"` unless the text has any of these:
+    - a backtrack marker
+    - a repeated word or restarted clause
+    - a filler-like ("like", "you know", "kind of", or a leading "So", "Well" or "Okay")
+    - a filler sound
+    - spoken formatting or punctuation
+    - no opening capital or no closing punctuation
+    - more than 40 words
+
+    The rule is `polishNeed` in `server/lib/dictation-polish-need.ts`, with a table test.
+  - **Eval on the 45 synthetic cases.**
+    - As dictated (lowercase, unpunctuated), all 45 still reach the model, so nothing changes.
+    - Capitalized with a closing period, as Mac dictation arrives, 15 would skip. 3 of those lose a word fix that v2 makes on both models: mis-heard names ("tablo" for Tableau and "jewel three sixty" for Jewel360, "preeya" for Priya and "hub spot" for HubSpot, "p o s" for POS). No rule can see those.
+    - It therefore stays off.
+- **Managed runtime.** `COS_DICTATION_PREWARM` and `COS_DICTATION_POLISH_SKIP_CLEAN` are in `managed-runtime-contract.json` `optionalEnvironment`.
+- **Dictation mutation gate** (`server/scripts/dictation-polish-mutation-gate.mjs`, not packaged): 92 of 92 against a 199-test baseline in 7 files. 37 of them are new for the prewarm and the skip rule.
 - **Checks.** Full suite 7,896 passed, 3 skipped (510 files); `tsc --noEmit` clean. Mutation gate `server/scripts/live-cues-verdicts-mutation-gate.mjs` (not packaged): 179 of 179 guard mutants killed by named tests against a proven green baseline (149 tests in 8 files), 48 of them new for the limits. The existing pins (prompts, contract hash, calibrated defaults, the v1 settings body and its schema-1 file) are unchanged.
 
 ## 6.79.1 - Dictation polish: one budget per caller, a reason when it does not polish, no more um and uh

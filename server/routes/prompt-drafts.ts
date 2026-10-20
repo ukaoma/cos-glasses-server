@@ -44,6 +44,11 @@ import { dictationSlotForMode, legacyDictationKey, type DictationPlan } from '..
 import { autoCleanDictation, AUTOCLEAN_MAX_CHARS } from '../lib/dictation-clean.js'
 import { fillerPassEnabled, stripDisfluencies } from '../lib/dictation-fillers.js'
 import { polishBudgetExhausted, recordPolishCall, type PolishBucket } from '../lib/dictation-polish-budget.js'
+import { polishNeed, skipCleanEnabled } from '../lib/dictation-polish-need.js'
+import {
+  discardPolishPrewarm, isPrewarmModel, prewarmEnabled, PrewarmUnavailableError, runWarmPolish,
+  startPolishPrewarm, takePolishPrewarm,
+} from '../lib/dictation-prewarm.js'
 import { getVocabulary } from '../lib/profile.js'
 import { createBreaker } from '../lib/claude-circuit.js'
 import { logTokenAudit } from '../lib/token-audit.js'
@@ -85,7 +90,9 @@ const autoCleanBreakers = {
 const autoCleanDefaultEnabled = () => ['1', 'true', 'on'].includes((process.env.COS_DICTATION_AUTOCLEAN ?? '').toLowerCase())
 
 /** 6.79.1, additive on finalize answers: why the polish model did not run (or did not finish). */
-export type PolishSkipped = 'disabled' | 'too_long' | 'breaker_open' | 'daily_cap' | 'failed'
+export type PolishSkipped = 'disabled' | 'too_long' | 'breaker_open' | 'daily_cap' | 'failed' | 'clean'
+/** 6.79.2, additive when finalize was given a prewarmToken: what became of that warm process. */
+export type PrewarmOutcome = 'used' | 'missed' | 'discarded'
 
 interface AutoCleanRequest { enabled?: boolean; model?: DictationCleanModel }
 function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
@@ -99,8 +106,20 @@ function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
 
 async function cleanOutboundDictation(
   text: string,
-  opts: AutoCleanRequest & { bucket: PolishBucket; signal?: AbortSignal },
-): Promise<{ text: string; polishSkipped?: PolishSkipped }> {
+  opts: AutoCleanRequest & { bucket: PolishBucket; signal?: AbortSignal; prewarmToken?: string },
+): Promise<{ text: string; polishSkipped?: PolishSkipped; prewarm?: PrewarmOutcome }> {
+  const result = await polishOutboundDictation(text, opts)
+  // A warm process the model call did not take must not sit until its TTL.
+  if (opts.prewarmToken && !result.prewarm) {
+    return { ...result, prewarm: discardPolishPrewarm(opts.prewarmToken) ? 'discarded' : 'missed' }
+  }
+  return result
+}
+
+async function polishOutboundDictation(
+  text: string,
+  opts: AutoCleanRequest & { bucket: PolishBucket; signal?: AbortSignal; prewarmToken?: string },
+): Promise<{ text: string; polishSkipped?: PolishSkipped; prewarm?: PrewarmOutcome }> {
   let cleaned = applyNegativeRules(applyCorrections(text)).replace(/\s+/g, ' ').trim() || text
   // applyCorrections above is an EXACT string map, so it only fixes misspellings someone
   // already hand-authored. A novel miss ("Rileyy" for Riley, "Exampel" for Example) sails
@@ -129,22 +148,37 @@ async function cleanOutboundDictation(
   const model = opts.model ?? 'haiku'
   const autoCleanBreaker = autoCleanBreakers[model]
   if (cleaned.length > AUTOCLEAN_MAX_CHARS) return { text: cleaned, polishSkipped: 'too_long' }
+  // 6.79.2, off by default: nothing for the model to fix (see dictation-polish-need.ts).
+  if (skipCleanEnabled() && polishNeed(cleaned) === null) return { text: cleaned, polishSkipped: 'clean' }
   if (autoCleanBreaker.isOpen()) return { text: cleaned, polishSkipped: 'breaker_open' }
   if (polishBudgetExhausted(opts.bucket)) return { text: cleaned, polishSkipped: 'daily_cap' }
   const startedAt = Date.now()
   recordPolishCall(opts.bucket)
+  // 6.79.2: a warm process started at key press answers without the CLI's start-up cost.
+  const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null
+  let prewarm: PrewarmOutcome | undefined = opts.prewarmToken ? 'missed' : undefined
   try {
-    const polished = (await autoCleanDictation(cleaned, getVocabulary(), { model, signal: opts.signal })).trim()
+    let polished: string | null = null
+    if (warmEntry) {
+      try {
+        polished = (await runWarmPolish(warmEntry, cleaned, getVocabulary(), { signal: opts.signal })).trim()
+        prewarm = 'used'
+      } catch (err) {
+        // Nothing was sent: the cold path below is the same call, not a second one.
+        if (!(err instanceof PrewarmUnavailableError)) throw err
+      }
+    }
+    if (polished === null) polished = (await autoCleanDictation(cleaned, getVocabulary(), { model, signal: opts.signal })).trim()
     autoCleanBreaker.recordSuccess()
     logTokenAudit({
       source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: polished.length,
       durationMs: Date.now() - startedAt, caller: `dictation_autoclean_${opts.bucket}`,
     })
-    return { text: polished || cleaned }
+    return { text: polished || cleaned, ...(prewarm ? { prewarm } : {}) }
   } catch (err: any) {
     autoCleanBreaker.recordFailure()
     console.warn(`[prompt-draft] auto-clean failed (glossary-only): ${err?.message ?? err}`)
-    return { text: cleaned, polishSkipped: 'failed' }
+    return { text: cleaned, polishSkipped: 'failed', ...(prewarm ? { prewarm } : {}) }
   }
 }
 
@@ -165,17 +199,50 @@ promptDraftsRouter.post('/dictation/finalize', async (req, res) => {
   if (model !== undefined && !isDictationCleanModel(model)) {
     return res.status(400).json({ error: 'invalid_autoclean_model' })
   }
+  const rawToken = req.body?.prewarmToken
+  if (rawToken !== undefined && (typeof rawToken !== 'string' || !PREWARM_TOKEN.test(rawToken))) {
+    return res.status(400).json({ error: 'invalid_prewarm_token' })
+  }
 
   const abort = new AbortController()
   res.on('close', () => { if (!res.writableEnded) abort.abort() })
-  const { text: finalText, polishSkipped } = await cleanOutboundDictation(text, {
+  const { text: finalText, polishSkipped, prewarm } = await cleanOutboundDictation(text, {
     enabled: true,
     model,
     bucket: surface,
     signal: abort.signal,
+    prewarmToken: rawToken,
   })
   // 6.79.1: polishSkipped only when the model did not polish, so a polished answer is unchanged.
-  res.json({ text: finalText, surface, polished: finalText !== text, ...(polishSkipped ? { polishSkipped } : {}) })
+  // 6.79.2: prewarm only when the request carried a prewarmToken.
+  res.json({
+    text: finalText, surface, polished: finalText !== text,
+    ...(polishSkipped ? { polishSkipped } : {}), ...(prewarm ? { prewarm } : {}),
+  })
+})
+
+const PREWARM_TOKEN = /^[0-9a-f-]{36}$/
+
+/** 6.79.2: start the polish process at key press. Fire and forget: every refusal is a normal
+ * answer, and finalize without a token (or with a dead one) spawns as before. */
+promptDraftsRouter.post('/dictation/polish/prewarm', (req, res) => {
+  const model = req.body?.model ?? 'haiku'
+  const surface = req.body?.surface ?? 'message'
+  if (!isDictationCleanModel(model)) return res.status(400).json({ error: 'invalid_autoclean_model' })
+  if (surface !== 'message' && surface !== 'meeting') return res.status(400).json({ error: 'invalid_surface' })
+  if (!prewarmEnabled()) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'disabled' })
+  if (!isPrewarmModel(model)) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'model' })
+  if (autoCleanBreakers[model].isOpen()) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'breaker_open' })
+  if (polishBudgetExhausted(surface)) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'daily_cap' })
+  try {
+    res.json(startPolishPrewarm(model))
+  } catch (err: any) {
+    res.status(409).json({ error: 'prewarm_unavailable', reason: 'cli' })
+  }
+})
+
+promptDraftsRouter.delete('/dictation/polish/prewarm/:token', (req, res) => {
+  res.json({ discarded: discardPolishPrewarm(req.params.token) })
 })
 
 async function readRawBody(req: AsyncIterable<Buffer | Uint8Array | string>): Promise<Buffer> {

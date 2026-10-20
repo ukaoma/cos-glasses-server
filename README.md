@@ -792,6 +792,14 @@ VOICE) follow the same settings. Contract and measurements:
   `COS_DICTATION_FILLER_PASS=0` turns the pass off.
 - `COS_DICTATION_POLISH_PROMPT=v1` restores the 6.79.0 polish prompt (default
   `v2`).
+- 6.79.2: `POST /api/dictation/polish/prewarm` `{model}` starts the polish
+  process at key press and answers `{token, expiresMs}`. Pass the token as
+  `prewarmToken` to `/api/dictation/finalize` and the polish skips the CLI's
+  start-up (about 0.9 s on a Mac). At most 2 warm processes, 150 s each, one
+  message each. `COS_DICTATION_PREWARM=0` turns it off.
+- 6.79.2: `COS_DICTATION_POLISH_SKIP_CLEAN=1` returns finished, clean text
+  without the model (`polishSkipped: "clean"`). Off by default: it cannot see
+  a mis-heard name.
 
 ### Parakeet (FluidAudio CoreML, offline)
 

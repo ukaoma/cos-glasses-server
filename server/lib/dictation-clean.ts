@@ -83,6 +83,18 @@ export function dictationChildEnv(binary: string): NodeJS.ProcessEnv {
   return env
 }
 
+/** The Claude polish process: no tools, MCP, hooks or session file. `stream` keeps stdin open
+ * for exactly one stream-json user message (the 6.79.2 prewarm); `text` reads the prompt from stdin. */
+export function claudePolishArgs(model: string, version: DictationPolishPromptVersion, io: 'text' | 'stream'): string[] {
+  return [
+    '-p', '--model', model, '--effort', 'low',
+    ...(io === 'text' ? ['--output-format', 'text'] : ['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']),
+    '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    '--tools', '', '--settings', '{"disableAllHooks":true}', '--permission-mode', 'dontAsk',
+    '--system-prompt', DICTATION_POLISH_SYSTEM_PROMPTS[version],
+  ]
+}
+
 /** A fresh workspace and no MCP. Claude has no tools or hooks; Cursor's ask
  * mode retains read tools. Neither runner is given the COS working directory.
  * Failure rejects so callers preserve the deterministic transcript. */
@@ -128,12 +140,7 @@ export async function autoCleanDictation(
     const args = cursor ? [
       '-p', '--mode', 'ask', '--model', LUNA_DICTATION_CLI_MODEL,
       '--output-format', 'json', '--trust', '--workspace', workspace,
-    ] : [
-      '-p', '--model', model, '--effort', 'low', '--output-format', 'text',
-      '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-      '--tools', '', '--settings', '{"disableAllHooks":true}', '--permission-mode', 'dontAsk',
-      '--system-prompt', DICTATION_POLISH_SYSTEM_PROMPTS[version],
-    ]
+    ] : claudePolishArgs(model, version, 'text')
     return await new Promise<string>((resolve, reject) => {
       const proc = spawn(binary.path, args, { stdio: ['pipe', 'pipe', 'pipe'], env, cwd: workspace, detached: true })
       let stdout = ''

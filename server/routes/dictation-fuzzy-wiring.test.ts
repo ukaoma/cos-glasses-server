@@ -19,9 +19,10 @@ describe('fuzzy corrections reach the dictation finalize path (6.27.4)', () => {
     expect(src).toMatch(/import \{ applyFuzzyCorrections \} from '\.\.\/lib\/fuzzy-correct\.js'/)
     // Inside cleanOutboundDictation, and BEFORE the autoclean LLM call, so the model sees
     // corrected proper nouns instead of being asked to guess at them.
-    expect(src).toMatch(/async function cleanOutboundDictation[\s\S]{0,1400}applyFuzzyCorrections\(cleaned, fuzzyTargets\)/)
-    // 6.79.1: the window grew for the filler pass and the per-caller budget checks between them.
-    expect(src).toMatch(/applyFuzzyCorrections\(cleaned, fuzzyTargets\)[\s\S]{0,1400}autoCleanDictation\(/)
+    // 6.79.2: the body moved to polishOutboundDictation (cleanOutboundDictation wraps it to settle a prewarm).
+    expect(src).toMatch(/async function polishOutboundDictation[\s\S]{0,1400}applyFuzzyCorrections\(cleaned, fuzzyTargets\)/)
+    // 6.79.1 and 6.79.2: the window grew for the filler pass, the budget checks and the warm path between them.
+    expect(src).toMatch(/applyFuzzyCorrections\(cleaned, fuzzyTargets\)[\s\S]{0,2600}autoCleanDictation\(/)
   })
 
   it('uses the same target construction as the proven call site', () => {

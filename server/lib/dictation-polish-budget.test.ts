@@ -98,7 +98,8 @@ describe('6.79.1 managed runtime forwarding', () => {
   it('lists every dictation polish variable in optionalEnvironment', () => {
     const contract = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
     for (const key of ['COS_DICTATION_AUTOCLEAN_MAX_PER_DAY', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING',
-      'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT', 'COS_DICTATION_POLISH_PROMPT', 'COS_DICTATION_FILLER_PASS']) {
+      'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT', 'COS_DICTATION_POLISH_PROMPT', 'COS_DICTATION_FILLER_PASS',
+      'COS_DICTATION_PREWARM', 'COS_DICTATION_POLISH_SKIP_CLEAN']) {
       expect(contract.optionalEnvironment, key).toContain(key)
     }
   })
