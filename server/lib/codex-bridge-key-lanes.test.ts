@@ -336,6 +336,9 @@ describe('Lane B Codex turn', () => {
     const ac = new AbortController()
     await keyedRun(profile(), cbs(), { abortSignal: ac.signal })
     ac.abort()
+    // At once, before the child is even terminated (P11: the bridge's end-of-turn revoke would
+    // otherwise cover a missing cancel revoke a moment later).
+    expect(relay.revoked).toContain('cancel')
     await flush()
     expect(relay.revoked).toContain('cancel')
   })
