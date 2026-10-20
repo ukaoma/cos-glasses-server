@@ -61,9 +61,9 @@ describe('key lanes spawn census (QA C7)', () => {
   })
 
   it('every tool-capable Claude spawn carries the key-secrets deny layer; the others have no tools', () => {
-    for (const f of TOOL_CAPABLE_CLAUDE) expect(src(f), f).toMatch(/\.\.\.claudeKeySecretsGuardArgs\(\)/)
-    // claude-bridge: the turn and the prewarm both.
-    expect(src('server/lib/claude-bridge.ts').split('claudeKeySecretsGuardArgs()').length - 1).toBe(2)
+    for (const f of TOOL_CAPABLE_CLAUDE) expect(src(f), f).toMatch(/\.\.\.claudeKeySecretsGuardArgs\(/)
+    // claude-bridge: the turn (with the keyed Lane B option) and the prewarm both.
+    expect(src('server/lib/claude-bridge.ts').split('...claudeKeySecretsGuardArgs(').length - 1).toBe(2)
     for (const [f, re] of Object.entries(TOOL_LESS_CLAUDE)) expect(src(f), f).toMatch(re)
   })
 
