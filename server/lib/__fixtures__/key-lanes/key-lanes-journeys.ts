@@ -13,9 +13,9 @@
 //   bad key      the provider's 401 ends the turn with the rejected-key line
 //   restart      a new boot keeps the binding and answers on the key again
 //   remove all   keys, profiles and the ledger go; the bound session is refused, never the plan
-//   downgrade    6.79.1 (git archive a0035a8) booted on the same data dir, both ways (see below)
+//   downgrade    6.79.2 (git archive ba4fc66) booted on the same data dir, both ways (see below)
 //
-// usage: node --import tsx/esm server/lib/__fixtures__/key-lanes/key-lanes-journeys.ts [--old-ref a0035a8] [--skip-downgrade]
+// usage: node --import tsx/esm server/lib/__fixtures__/key-lanes/key-lanes-journeys.ts [--old-ref ba4fc66] [--skip-downgrade]
 // Exit 0 when every assertion holds; prints one JSON receipt either way.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -195,7 +195,7 @@ async function main(): Promise<void> {
     check('restart: after a new boot the profile answers, and its binding holds for the next model-less turn', doneText(a7).includes('KEYED-ANSWER-') && doneText(a8).includes('KEYED-ANSWER-'), `a7=${doneText(a7) || errText(a7)} a8=${doneText(a8) || errText(a8)}`)
 
     // downgrade, keys left behind (an undocumented path: Control tells the user to remove keys first)
-    const oldRef = argOf('--old-ref') ?? 'a0035a8'
+    const oldRef = argOf('--old-ref') ?? 'ba4fc66'
     let oldTree = ''
     if (!process.argv.includes('--skip-downgrade')) {
       oldTree = mkdtempSync(join(tmpdir(), 'kl-old-'))
@@ -206,11 +206,11 @@ async function main(): Promise<void> {
       const old = await boot(oldTree)
       const oa = await ask(old.port, keyedSid)
       const ranOnPlan = claudeTurns(w).length > o0 && doneText(oa) === 'Golden answer.'
-      check('downgrade, keys left: 6.79.1 leaves the key files untouched', existsSync(join(w.data, 'key-secrets', 'provider-keys.json')))
-      // OBSERVATION, not a pass/fail row: 6.79.1 cannot know a key profile, so a session bound to
+      check('downgrade, keys left: 6.79.2 leaves the key files untouched', existsSync(join(w.data, 'key-secrets', 'provider-keys.json')))
+      // OBSERVATION, not a pass/fail row: 6.79.2 cannot know a key profile, so a session bound to
       // one answers on the plan. 6.80 cannot change what an older server does; the mitigation is
       // Control's "Remove your keys first" before a downgrade (QA U7, C2).
-      checks.push({ journey: 'downgrade, keys left: OBSERVED 6.79.1 answers a keyed session on the plan', ok: true, detail: `ranOnPlan=${ranOnPlan}` })
+      checks.push({ journey: 'downgrade, keys left: OBSERVED 6.79.2 answers a keyed session on the plan', ok: true, detail: `ranOnPlan=${ranOnPlan}` })
       await stopServer(old.proc)
       srv = await boot()
     }
@@ -229,7 +229,7 @@ async function main(): Promise<void> {
       await stopServer(srv.proc)
       const old = await boot(oldTree)
       const health = await call(old.port, 'GET', '/api/health')
-      check('downgrade after Remove all keys: 6.79.1 boots healthy on the same data dir', health.status === 200)
+      check('downgrade after Remove all keys: 6.79.2 boots healthy on the same data dir', health.status === 200)
       check('downgrade after Remove all keys: no key file is left for it', !existsSync(join(w.data, 'key-secrets')))
       await stopServer(old.proc)
       rmSync(oldTree, { recursive: true, force: true })
