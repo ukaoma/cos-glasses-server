@@ -17,6 +17,85 @@ You can now give COS your own provider key (OpenRouter, Anthropic, OpenAI, or a 
 - **Known limit (not from key lanes).** When a turn starts background subagents, the CLI can emit a first `result` before they finish ("Eight of the 12 have reported...") and a full one later. COS ends the turn on the first `result`, so the lens gets the partial answer. This is the same on your plan at 6.79.1 (a0035a8), in normal and steer mode (`claude-bridge-two-results.test.ts` passes there unchanged), and a keyed turn runs with the same arguments as a plan turn (no stream-json input), so it is recorded here and not changed in this candidate.
 - **Checks.** Full suite 8,307 passed, 3 skipped (550 files), every test that passed at a0035a8 (6.79.1, 7,870) still passing by name; `tsc --noEmit` clean. Combined gate `server/scripts/key-lanes-mutation-gate.mjs` (not packaged): P1 48, P2 36, P3 34, P4 38, P5 28, P6 30, P8 22 and 104 integration mutants, every one killed by a named test against a green baseline. The off-golden re-recorded at a0035a8 compares each CLI's normalized stdin; it replays with an empty diff at `COS_KEY_LANES=0`; unset, the only difference is the Control enable door; at `=1` with no profile, exactly that door plus `details.keyLanes` and the status route. Journeys (`key-lanes-journeys.ts`, booting `server/index.ts` against a loopback mock): 24 of 24. `npm pack --dry-run` ships no test, gate or fixture.
 
+## 6.79.2 - Live cue limits from COS Control: the bar, cues per meeting, cooldown and a daily writer ceiling, applied without a restart
+
+Miles, 2026-10-19: cap live-cue spend from COS Control. On 10/19, live cues ran 126 Sonnet writer calls (about 310K writer tokens) across 7 meetings.
+
+- **Client matrix.**
+  - COS Control 0.5.328 (or later) reads and sets the limits.
+  - Control 0.5.327 and older keep working byte for byte: GET and POST without a version answer exactly the 6.79.1 body.
+  - No companion change is required. The lens shows a meeting stopped by the daily ceiling as `budget_exhausted`, a reason it already knows.
+- **Four limits, stored in `live-cues-v2-settings.json`** (atomic write, mode 0600, the file that holds the on/off switch). They apply from each meeting's next evaluation, with no restart.
+  - `gate`: the gate's bar, 0.5 to 0.95. Default 0.8.
+  - `maxCuesPerMeeting`: 1 to 25, default 25. The writer cap per meeting stays twice this.
+  - `cooldownSeconds`: whole seconds, 20 to 900. Default 45.
+  - `dailyWriterCalls`: 1 to 500, default 150. **This is a new ceiling**: writer calls per local calendar day across all meetings. The weekly ceiling is unchanged, so this caps today at 150 writer calls a day where before only the weekly 750 applied.
+  - A value saved out of bounds (a hand edit) reads as unset, never as a looser limit.
+  - A file holding only the switch is still written as schema 1, so a 6.79.1 server reads it as before. Any saved limit makes it schema 2, which 6.79.1 also reads (it looks only at `enabled`).
+- **Env wins and locks.** `COS_LIVE_CUES_V2_GATE` (its acceptance unchanged, 0.3 to 0.99), `COS_LIVE_CUES_V2_MAX_PER_MEETING` (new, whole 1 to 25), `COS_LIVE_CUES_V2_COOLDOWN_S` and `COS_LIVE_CUES_V2_DAILY_WRITER_CALLS` (new, whole 1 to 500).
+  - A valid env value is reported `source: "env", locked: true`.
+  - A POST naming a locked limit is 409 `env_locked` and saves nothing.
+  - An env value outside its range does not lock: the saved setting or the default applies, with one log line per value.
+  - Both new variables are in `managed-runtime-contract.json` `optionalEnvironment`.
+- **Engine.**
+  - The gate, cue cap, writer cap and cooldown are read from the resolver on every feed and evaluation.
+  - A meeting already past a lowered cap stops at its next feed (skip `meeting_cap`, no gate call), and resumes if the cap is raised.
+  - The daily ceiling is checked before the gate (skip `daily_cap`, so no Jev spend either).
+  - Both the cap and the daily ceiling are checked again just before the writer is charged, so a limit lowered mid-evaluation applies at once (outcome `meeting_cap` or `daily_cap`).
+  - On the wire the daily ceiling reads as `budget_exhausted`: the shared stop-reason union, pinned with the companion's copy, has no `daily_cap`.
+  - Cue generation, prompts and the judge are unchanged.
+- **Today's usage.** The durable state file gains `day` and `today` `{writerCalls, writerTokensIn, writerTokensOut, cues, jevTokens}` on the local calendar day of the zone it already stores.
+  - Writer calls count when charged, cues when shown, and tokens once per evaluation from the numbers it traced. `jevTokens` is the gate plus the judge, from the decision provider that ran them: Jev, or SubQ when SubQ runs cues.
+  - A future-dated, malformed or unreadable day reads its writer calls as spent, like the week: it fails toward not spending.
+  - A pre-6.79.2 file reads as zero for today.
+- **Routes.** `GET /api/live-cues/v2/settings?v=2` and `POST {"v": 2, ...}` answer the v1 body plus `v`, `limits`, `writerCallsPerMeeting` and `today`.
+  - Each limit is reported as `{value, source, locked, min, max, default}`.
+  - POST v2 accepts any subset of `enabled`, `gate`, `maxCuesPerMeeting`, `cooldownSeconds` and `dailyWriterCalls`. Every field is checked before one write, so a refused request changes nothing.
+  - 400 `invalid_request` with `reason`: `out_of_bounds` (with `field`, `min`, `max`, `integer`), `unknown_field`, `invalid_enabled`, `empty` or `unsupported_version`.
+  - 409 `env_locked` (with `fields`), or `env_forced` when turning v2 off while env forces it on.
+  - An older server ignores `?v=2` and answers without `v`: that is Control's feature detection.
+- **Dictation filler pass (from `320ecb7`, which shipped after 6.79.1 was published from `a0035a8`).**
+  - **Titles and abbreviations.** A Titlecase token right after a title or abbreviation (Mr., Mrs., Ms., Dr., Prof., St., Jr., Sr., vs., etc., e.g., i.e., a.m., p.m., U.S., an initial) is a name and is kept: "We met Mr. Ah and Ms. Er yesterday" and "Dr. Er said yes" stay as said.
+  - A lowercase filler there still goes, with no capital hand-off: "We met Mr. uh Jones" becomes "We met Mr. Jones", and "at 5 p.m. uh we meet" becomes "at 5 p.m. we meet". In 6.79.1 every token after a title was kept, so "Mr. uh Jones" kept the "uh", and Jr. and Sr. were not abbreviations.
+  - **Sentence ends.** An ellipsis does not end a sentence. The capital passes on only when the removed filler was itself a sentence's first word. The abbreviation check that became unreachable once the rule above runs first is removed.
+  - Dictation mutation gate `server/scripts/dictation-polish-mutation-gate.mjs`: 55 of 55 against a 133-test baseline.
+- **Faster dictation polish: start the polish process at key press.**
+  - **Why.** Miles, 2026-10-19: polish takes 1.8 to 4.1 s with Haiku (median about 2.4 s). A trivial `claude -p` with the polish args takes 1.6 to 1.8 s, so most of the wait is the CLI starting, not the edit.
+  - **Canary on his Mac (Haiku, 9 real calls).** Cold: 1786, 1894, 1886, 1968 ms. A process started 3 to 5 s before the text answered 962 to 1305 ms after the text arrived; one started 1 s before took 1501 ms, because the CLI had not finished starting.
+  - **`POST /api/dictation/polish/prewarm`** `{model, surface?}` answers `{token, expiresMs}`. It spawns the exact polish process now (same args: no tools, MCP, hooks or session file, its own empty workspace) with `--input-format stream-json`, waiting for one message.
+    - Refusals are 409 `{error: "prewarm_unavailable", reason}`, with reason `disabled`, `model` (Luna cannot be warmed), `breaker_open`, `daily_cap` or `cli`.
+    - `DELETE /api/dictation/polish/prewarm/<token>` discards one.
+  - **`/api/dictation/finalize` takes an optional `prewarmToken`.**
+    - A live token for the same model gets the one message, then its stdin is closed and it exits: no history ever carries over.
+    - A process that died before the message falls back to today's cold spawn, the same single call. A failure after the message was sent is a real `failed`, never retried cold.
+    - With a token, the answer adds `prewarm`: `used`, `missed` (unknown, expired, evicted, wrong model or dead) or `discarded` (the model was not called, so the process was killed).
+    - A malformed token is 400 `invalid_prewarm_token`.
+  - **Bounds.**
+    - At most 2 warm processes; a third evicts the oldest.
+    - Each is killed 150 s after it starts if unused.
+    - Every live one is signalled when the server exits, claimed or not.
+    - The daily polish budget is spent only when one is used; a warm process makes no model call until its message.
+    - `COS_DICTATION_PREWARM=0` turns it off.
+  - **Clients.** No companion change. Control needs a change to call it, specified in the COS workspace (`wk43_2026/dictation_polish/PREWARM_CONTROL_SPEC.md`). Control 0.5.328's polish bridge ignores the new answer keys.
+- **Skip the model when the text is clean (off by default).**
+  - **The rule.** With `COS_DICTATION_POLISH_SKIP_CLEAN=1`, finalize returns the filler-passed text with `polishSkipped: "clean"` unless the text has any of these:
+    - a backtrack marker
+    - a repeated word or restarted clause
+    - a filler-like ("like", "you know", "kind of", or a leading "So", "Well" or "Okay")
+    - a filler sound
+    - spoken formatting or punctuation
+    - no opening capital or no closing punctuation
+    - more than 40 words
+
+    The rule is `polishNeed` in `server/lib/dictation-polish-need.ts`, with a table test.
+  - **Eval on the 45 synthetic cases.**
+    - As dictated (lowercase, unpunctuated), all 45 still reach the model, so nothing changes.
+    - Capitalized with a closing period, as Mac dictation arrives, 15 would skip. 3 of those lose a word fix that v2 makes on both models: mis-heard names ("tablo" for Tableau and "jewel three sixty" for Jewel360, "preeya" for Priya and "hub spot" for HubSpot, "p o s" for POS). No rule can see those.
+    - It therefore stays off.
+- **Managed runtime.** `COS_DICTATION_PREWARM` and `COS_DICTATION_POLISH_SKIP_CLEAN` are in `managed-runtime-contract.json` `optionalEnvironment`.
+- **Dictation mutation gate** (`server/scripts/dictation-polish-mutation-gate.mjs`, not packaged): 92 of 92 against a 199-test baseline in 7 files. 37 of them are new for the prewarm and the skip rule.
+- **Checks.** Full suite 7,896 passed, 3 skipped (510 files); `tsc --noEmit` clean. Mutation gate `server/scripts/live-cues-verdicts-mutation-gate.mjs` (not packaged): 179 of 179 guard mutants killed by named tests against a proven green baseline (149 tests in 8 files), 48 of them new for the limits. The existing pins (prompts, contract hash, calibrated defaults, the v1 settings body and its schema-1 file) are unchanged.
+
 ## 6.79.1 - Dictation polish: one budget per caller, a reason when it does not polish, no more um and uh
 
 Miles, 2026-10-19: AI polish for Mac dictation failed on every dictation from 11:39 CDT (`failed:not_polished` in about 60 ms). Every autoclean shared one daily cap (`COS_DICTATION_AUTOCLEAN_MAX_PER_DAY`). The glasses' live meeting lines (surface `meeting`, Sonnet, one call per 10-second chunk while the phone's Moonshine lane is up) spent it by late morning. Nothing in the answer said why.

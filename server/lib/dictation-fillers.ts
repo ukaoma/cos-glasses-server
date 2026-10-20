@@ -16,7 +16,8 @@
  *   ellipsis follows it ("I think, Um, we"). An abbreviation's period ("Mr.", "e.g.", "5 p.m.",
  *   "U.S.", an initial) and an ellipsis are not sentence ends, so they neither start a sentence
  *   nor trigger the capital hand-off.
- * - any token right after a title ("Mr. Ah", "Dr. Er") and any quoted mention ('"um"').
+ * - a Titlecase token right after a title or abbreviation ("Mr. Ah", "Dr. Er"; "Mr. uh Jones"
+ *   still loses "uh"), and any quoted mention ('"um"').
  * - "uh huh", "uh oh" and "mm hmm" written without a hyphen: answers, not hesitations.
  * - "like", "you know", "I mean": filler only sometimes, so the model decides, not a regex.
  * A filler inside a longer quote ("um, no") is removed like any other.
@@ -30,23 +31,28 @@ const TRAILING_PAUSE = /^[ \t]*(?:,|\.{2,}|…|--|—|–)?[ \t]*/
 const OWN_SENTENCE_END = /^[ \t]*[.?!]+[ \t]*/
 const CLOSES_CLAUSE = /^(?:[.?!;:)\]}"”’]|$|\n)/
 
-/** A period that ends an abbreviation, not a sentence: "Mr.", "e.g.", "5 p.m.", "U.S.", "J.". */
-const ABBREVIATION = /(?:^|[\s(“"‘'])(?:mrs?|ms|dr|prof|st|vs|etc|e\.g|i\.e|a\.m|p\.m|u\.s)\.["”’)]*$/i
+/** A period that ends an abbreviation, not a sentence: "Mr.", "Jr.", "e.g.", "5 p.m.", "U.S.", "J.". */
+const ABBREVIATION = /(?:^|[\s(“"‘'])(?:mrs?|ms|dr|prof|st|jr|sr|vs|etc|e\.g|i\.e|a\.m|p\.m|u\.s)\.["”’)]*$/i
 const INITIAL = /(?:^|[\s(“"‘'])[A-Z]\.["”’)]*$/
-/** A title right before a token makes the token a name ("Mr. Ah", "Dr. Er"). */
-const TITLE = /(?:^|[\s(“"‘'])(?:mrs?|ms|dr|prof|st)\.[ \t]*$/i
 const QUOTE_OPEN = /["“”'‘’]$/
 const QUOTE_CLOSE = /^["“”'‘’]/
 /** A pause mark right after the token: a Titlecase filler set off this way is a hesitation. */
 const PAUSE_AFTER = /^[ \t]*(?:,|\.{2,}|…)/
 
+function afterAbbreviation(before: string): boolean {
+  const trimmed = before.replace(/[ \t]+$/, '')
+  return ABBREVIATION.test(trimmed) || INITIAL.test(trimmed)
+}
+
 function sentenceStart(before: string): boolean {
   const trimmed = before.replace(/[ \t]+$/, '')
   if (trimmed === '' || trimmed.endsWith('\n')) return true
   if (!/[.?!]["”’)]*$/.test(trimmed)) return false
-  // An ellipsis is a pause, and an abbreviation's period is not a sentence end.
-  if (/(?:\.{2,}|…)["”’)]*$/.test(trimmed)) return false
-  return !(ABBREVIATION.test(trimmed) || INITIAL.test(trimmed))
+  // An ellipsis is a pause, not a sentence end. An abbreviation's period needs no case here:
+  // the only thing a sentence start changes is the capital hand-off from a Titlecase filler,
+  // and a Titlecase token after an abbreviation is kept as a name before this is consulted
+  // (the 6.79.1 mutation gate showed a check here was unreachable).
+  return !/(?:\.{2,}|…)["”’)]*$/.test(trimmed)
 }
 
 export function fillerPassEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -70,8 +76,9 @@ export function stripDisfluencies(text: string): string {
       // A capital away from a sentence start is a name ("Ask Ah Kow"), unless a pause mark
       // sets it off as a hesitation ("I think, Um, we should").
       || (!atStart && /^[A-Z]/.test(token) && !PAUSE_AFTER.test(after))
-      // Right after a title it is a name ("Mr. Ah", "Dr. Er").
-      || TITLE.test(out + before)
+      // Titlecase right after a title or abbreviation is a name ("Mr. Ah", "Dr. Er, the surgeon").
+      // A lowercase filler there still goes ("Mr. uh Jones").
+      || (/^[A-Z]/.test(token) && afterAbbreviation(out + before))
       // A quoted mention is the word itself ('"um" is a filler word').
       || (QUOTE_OPEN.test(out + before) && QUOTE_CLOSE.test(after))
       // Two-word answers said without a hyphen: "uh huh", "uh oh", "mm hmm".

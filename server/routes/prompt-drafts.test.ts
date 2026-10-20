@@ -12,8 +12,14 @@ let transcribeAudioBuffer: ReturnType<typeof vi.fn>
 let transcribeWhisperPreview: ReturnType<typeof vi.fn>
 let emitDisplay: ReturnType<typeof vi.fn>
 let autoCleanDictation: ReturnType<typeof vi.fn>
+let prewarm: {
+  start: ReturnType<typeof vi.fn>; take: ReturnType<typeof vi.fn>; run: ReturnType<typeof vi.fn>; discard: ReturnType<typeof vi.fn>
+}
+class MockPrewarmUnavailableError extends Error {}
+const WARM_TOKEN = '11111111-2222-3333-4444-555555555555'
 const POLISH_ENV = ['COS_DICTATION_AUTOCLEAN_MAX_PER_DAY', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE',
-  'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT', 'COS_DICTATION_FILLER_PASS', 'COS_DICTATION_AUTOCLEAN']
+  'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT', 'COS_DICTATION_FILLER_PASS', 'COS_DICTATION_AUTOCLEAN',
+  'COS_DICTATION_PREWARM', 'COS_DICTATION_POLISH_SKIP_CLEAN']
 
 class MockNoSpeechDetectedError extends Error {
   constructor(readonly rawText = '') { super('No speech detected') }
@@ -53,6 +59,20 @@ async function startServer(): Promise<void> {
     AUTOCLEAN_MAX_CHARS: 8000,
     autoCleanDictation: (autoCleanDictation = vi.fn(async (text: string) => text)),
   }))
+  vi.doMock('../lib/dictation-prewarm.js', () => {
+    prewarm = {
+      start: vi.fn(() => ({ token: WARM_TOKEN, expiresMs: 150000 })),
+      take: vi.fn((token: string, model: string) => token === WARM_TOKEN ? { token, model } : null),
+      run: vi.fn(async (_entry: unknown, text: string) => `${text} Warm.`),
+      discard: vi.fn((token: string) => token === WARM_TOKEN),
+    }
+    return {
+      startPolishPrewarm: prewarm.start, takePolishPrewarm: prewarm.take, runWarmPolish: prewarm.run,
+      discardPolishPrewarm: prewarm.discard, PrewarmUnavailableError: MockPrewarmUnavailableError,
+      prewarmEnabled: () => !['0', 'false', 'off'].includes((process.env.COS_DICTATION_PREWARM ?? '').toLowerCase()),
+      isPrewarmModel: (model: string) => model === 'haiku' || model === 'sonnet',
+    }
+  })
   vi.doMock('../lib/display-bus.js', () => {
     emitDisplay = vi.fn((event) => event)
     return { emitDisplay }
@@ -111,6 +131,7 @@ describe('public prompt draft recovery contract', () => {
     vi.doUnmock('../lib/whisper-preview.js')
     vi.doUnmock('../lib/dictation-clean.js')
     vi.doUnmock('../lib/display-bus.js')
+    vi.doUnmock('../lib/dictation-prewarm.js')
     delete process.env.COS_PROMPT_DRAFT_DIR
     delete process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE
     delete process.env.COS_HQ_SPECULATIVE_WARM
@@ -348,6 +369,102 @@ describe('public prompt draft recovery contract', () => {
     process.env.COS_DICTATION_FILLER_PASS = '0'
     await finalizeText('Um, ask Dana', 'message')
     expect(autoCleanDictation).toHaveBeenLastCalledWith('Um, ask Dana', expect.any(Array), expect.anything())
+  })
+
+  // 6.79.2. Synthetic text only.
+  const finalizeWarm = (body: Record<string, unknown>) =>
+    httpRequest('POST', '/api/dictation/finalize', JSON.stringify({ surface: 'message', autocleanModel: 'haiku', ...body }))
+
+  it('6.79.2: prewarm answers a token; finalize with it uses the warm process, once, on its own budget', async () => {
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = '1'
+    const warm = await httpRequest('POST', '/api/dictation/polish/prewarm', JSON.stringify({ model: 'haiku' }))
+    expect(warm.json).toEqual({ token: WARM_TOKEN, expiresMs: 150000 })
+    expect(prewarm.start).toHaveBeenCalledWith('haiku')
+    const used = await finalizeWarm({ text: 'Send the deck to Dana', prewarmToken: WARM_TOKEN })
+    expect(used.json).toEqual({ text: 'Send the deck to Dana Warm.', surface: 'message', polished: true, prewarm: 'used' })
+    expect(prewarm.take).toHaveBeenCalledWith(WARM_TOKEN, 'haiku')
+    expect(prewarm.run).toHaveBeenCalledWith({ token: WARM_TOKEN, model: 'haiku' }, 'Send the deck to Dana', expect.any(Array), expect.anything())
+    expect(autoCleanDictation).not.toHaveBeenCalled()
+    expect(prewarm.discard).not.toHaveBeenCalled()
+    // The warm call spent the message budget like a cold one.
+    expect((await finalizeWarm({ text: 'Second note' })).json.polishSkipped).toBe('daily_cap')
+  })
+
+  it('6.79.2: a dead warm process falls back to one cold call; a failure after sending does not', async () => {
+    prewarm.run.mockRejectedValueOnce(new MockPrewarmUnavailableError('gone'))
+    const missed = await finalizeWarm({ text: 'Send the deck', prewarmToken: WARM_TOKEN })
+    expect(missed.json).toEqual({ text: 'Send the deck', surface: 'message', polished: false, prewarm: 'missed' })
+    expect(autoCleanDictation).toHaveBeenCalledTimes(1)
+
+    prewarm.run.mockRejectedValueOnce(new Error('Warm polish returned an unsuccessful result'))
+    const failed = await finalizeWarm({ text: 'Send the deck', prewarmToken: WARM_TOKEN })
+    expect(failed.json).toMatchObject({ polishSkipped: 'failed', prewarm: 'missed' })
+    expect(autoCleanDictation).toHaveBeenCalledTimes(1)
+
+    // An unknown token (expired, evicted, another model) is a plain cold call.
+    const unknown = await finalizeWarm({ text: 'Send the deck', prewarmToken: '99999999-2222-3333-4444-555555555555' })
+    expect(unknown.json).toMatchObject({ prewarm: 'missed' })
+    expect(autoCleanDictation).toHaveBeenCalledTimes(2)
+  })
+
+  it('6.79.2: when the model is not called, the warm process is discarded', async () => {
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = '1'
+    await finalizeWarm({ text: 'First note' })
+    const capped = await finalizeWarm({ text: 'Second note', prewarmToken: WARM_TOKEN })
+    expect(capped.json).toMatchObject({ polishSkipped: 'daily_cap', prewarm: 'discarded' })
+    expect(prewarm.discard).toHaveBeenCalledWith(WARM_TOKEN)
+    expect(prewarm.take).not.toHaveBeenCalled()
+  })
+
+  it('6.79.2: no prewarm field without a token; a malformed token is 400', async () => {
+    expect(await finalizeWarm({ text: 'Plain' })).toMatchObject({ json: { text: 'Plain', surface: 'message', polished: false } })
+    expect((await finalizeWarm({ text: 'Plain' })).json.prewarm).toBeUndefined()
+    for (const bad of ['../../etc', 42, 'x'.repeat(36)]) {
+      const result = await finalizeWarm({ text: 'Plain', prewarmToken: bad })
+      expect(result.status, String(bad)).toBe(400)
+      expect(result.json.error).toBe('invalid_prewarm_token')
+    }
+  })
+
+  it('6.79.2: prewarm refuses when it could not be used, and never spawns then', async () => {
+    const ask = (body: object) => httpRequest('POST', '/api/dictation/polish/prewarm', JSON.stringify(body))
+    expect((await ask({ model: 'luna-5.6-fast' })).json).toEqual({ error: 'prewarm_unavailable', reason: 'model' })
+    expect((await ask({ model: 'typo' })).status).toBe(400)
+    expect((await ask({ model: 'haiku', surface: 'other' })).status).toBe(400)
+    process.env.COS_DICTATION_PREWARM = '0'
+    expect((await ask({ model: 'haiku' })).json).toEqual({ error: 'prewarm_unavailable', reason: 'disabled' })
+    delete process.env.COS_DICTATION_PREWARM
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING = '1'
+    await finalizeText('A meeting line', 'meeting')
+    expect((await ask({ model: 'haiku', surface: 'meeting' })).json).toEqual({ error: 'prewarm_unavailable', reason: 'daily_cap' })
+    autoCleanDictation.mockImplementation(async () => { throw new Error('down') })
+    for (let i = 0; i < 10; i++) await finalizeText('Note', 'message', 'sonnet')
+    expect((await ask({ model: 'sonnet' })).json).toEqual({ error: 'prewarm_unavailable', reason: 'breaker_open' })
+    expect(prewarm.start).not.toHaveBeenCalled()
+    prewarm.start.mockImplementationOnce(() => { throw new Error('no cli') })
+    expect((await ask({})).json).toEqual({ error: 'prewarm_unavailable', reason: 'cli' })
+    expect(prewarm.start).toHaveBeenCalledWith('haiku')
+  })
+
+  it('6.79.2: DELETE discards a warm process', async () => {
+    expect((await httpRequest('DELETE', `/api/dictation/polish/prewarm/${WARM_TOKEN}`)).json).toEqual({ discarded: true })
+    expect((await httpRequest('DELETE', '/api/dictation/polish/prewarm/unknown')).json).toEqual({ discarded: false })
+  })
+
+  it('6.79.2: COS_DICTATION_POLISH_SKIP_CLEAN=1 sends clean text without the model; default calls it', async () => {
+    const clean = 'Send the deck to Dana before lunch.'
+    expect((await finalizeText(clean, 'message')).json.polishSkipped).toBeUndefined()
+    expect(autoCleanDictation).toHaveBeenCalledTimes(1)
+    process.env.COS_DICTATION_POLISH_SKIP_CLEAN = '1'
+    expect((await finalizeText(clean, 'message')).json).toEqual({ text: clean, surface: 'message', polished: false, polishSkipped: 'clean' })
+    // The filler pass runs first: what it removed counts as a change.
+    expect((await finalizeText('Um, send the deck to Dana.', 'message')).json).toEqual({
+      text: 'Send the deck to Dana.', surface: 'message', polished: true, polishSkipped: 'clean',
+    })
+    expect(autoCleanDictation).toHaveBeenCalledTimes(1)
+    // Anything the model is needed for still reaches it.
+    await finalizeText('Order five, actually six cases.', 'message')
+    expect(autoCleanDictation).toHaveBeenCalledTimes(2)
   })
 
   it('6.45.4: drops an invented closing sentence from the committed chunk and keeps the prompt', async () => {

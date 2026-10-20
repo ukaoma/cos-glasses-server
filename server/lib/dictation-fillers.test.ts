@@ -57,8 +57,10 @@ describe('6.79.1 deterministic filler pass', () => {
     ['Hmm. Let me check ... and Ah Kim\'s notes', 'Let me check ... and Ah Kim\'s notes'],
     ['at 5 p.m. uh we meet', 'at 5 p.m. we meet'],
     ['e.g. um the deck', 'e.g. the deck'],
-    // Set off by a comma it is a hesitation, but "U.S." does not end a sentence: no capital hand-off.
-    ['Ship it to the U.S. Um, team first', 'Ship it to the U.S. team first'],
+    // Lead review probes (6.79.1): lowercase fillers after an abbreviation still go, with no capital.
+    ['We met Mr. uh Jones', 'We met Mr. Jones'],
+    ['I spoke to the U.S. uh team', 'I spoke to the U.S. team'],
+    ['Smith Jr. um signed', 'Smith Jr. signed'],
     ['I think, Um, we should', 'I think, we should'],
     ['Wait... Uh, maybe', 'Wait... maybe'],
     ['Wait. Uh, maybe', 'Wait. Maybe'],
@@ -91,6 +93,10 @@ describe('6.79.1 deterministic filler pass', () => {
     'We met Mr. Ah and Ms. Er yesterday',
     'Dr. Er said the scan is clear',
     'Dr. Er said',
+    'Dr. Er said yes',
+    'Ask Jr. Ah and Sr. Um',
+    // Titlecase after an abbreviation is a name even with a comma after it.
+    'Ship it to the U.S. Um, team first',
     'Dr. Er, the surgeon, called',
     // An initial's period does not start a sentence.
     'Meet with J. Ah tomorrow',

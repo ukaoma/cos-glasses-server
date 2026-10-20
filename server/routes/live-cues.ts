@@ -18,6 +18,8 @@ import {
   LiveCuesArmError,
 } from '../lib/live-cues-engine.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
+import { applyLiveCuesV2Settings, liveCuesV2SettingsViewV2 } from '../lib/live-cues-v2.js'
+import { LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, limitInBounds, type LiveCuesV2StoredLimits } from '../lib/live-cues-v2-settings.js'
 import { LIVE_CUES_V2_LIMITS, LiveCuesV2ArmError, liveCuesV2, liveCuesV2Advertised, liveCuesV2Enabled, liveCuesV2MeetingCounters, liveCuesV2SettingsView, peekLiveCuesV2, setLiveCuesV2Enabled } from '../lib/live-cues-v2.js'
 import { LIVE_CUE_VERDICTS_PROTOCOL, LIVE_CUE_VERDICT_LIMITS, VerdictsUnreadableError, isCueVerdict, liveCueVerdicts } from '../lib/live-cue-verdicts.js'
 
@@ -186,14 +188,23 @@ liveCuesRouter.get('/live-cues/history', (req, res) => {
 // COS Control's live cues v2 toggle (6.76.2). Token-authenticated like every /api route. The setting lives in this server's
 // data dir (live-cues-v2-settings.json, atomic write) and applies without a restart: /api/health and /api/models advertise
 // liveCuesV2 only while it is on. capability.memory and capability.decisionProvider say where notes and the gate come from.
-liveCuesRouter.get('/live-cues/v2/settings', (_req, res) => {
+//
+// 6.79.2: COS Control's spend limits ride the same routes, opt-in by version so an older Control is answered byte for byte as
+// before. GET ?v=2 and POST {v: 2, ...any of enabled, gate, maxCuesPerMeeting, cooldownSeconds, dailyWriterCalls} answer the
+// v1 body plus {v: 2, limits, writerCallsPerMeeting, today}. A limit an env var sets is locked (409 env_locked). An older
+// server ignores ?v=2 and answers without `v`, which is Control's signal to hide the limits.
+liveCuesRouter.get('/live-cues/v2/settings', (req, res) => {
   res.set('Cache-Control', 'private, no-store')
-  try { return res.json(liveCuesV2SettingsView()) } catch { return res.status(503).json({ error: 'settings_unavailable' }) }
+  const v = req.query.v
+  if (v !== undefined && v !== '2') return res.status(400).json({ error: 'invalid_request', reason: 'unsupported_version' })
+  try { return res.json(v === '2' ? liveCuesV2SettingsViewV2() : liveCuesV2SettingsView()) } catch { return res.status(503).json({ error: 'settings_unavailable' }) }
 })
 
+const V2_SETTINGS_KEYS = new Set<string>(['v', 'enabled', ...LIVE_CUES_V2_LIMIT_NAMES])
 liveCuesRouter.post('/live-cues/v2/settings', (req, res) => {
   res.set('Cache-Control', 'private, no-store')
-  const body = req.body as { enabled?: unknown } | undefined
+  const body = req.body as { enabled?: unknown; v?: unknown } | undefined
+  if (body && typeof body === 'object' && !Array.isArray(body) && body.v !== undefined) return postSettingsV2(body as Record<string, unknown>, res)
   if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean') {
     return res.status(400).json({ error: 'invalid_request' })
   }
@@ -205,3 +216,28 @@ liveCuesRouter.post('/live-cues/v2/settings', (req, res) => {
     return res.status(500).json({ error: 'settings_write_failed' })
   }
 })
+
+/** POST {v: 2, ...}: every field is checked before anything is saved, so a refused request changes nothing. */
+function postSettingsV2(body: Record<string, unknown>, res: import('express').Response) {
+  if (body.v !== 2) return res.status(400).json({ error: 'invalid_request', reason: 'unsupported_version' })
+  const unknown = Object.keys(body).find(k => !V2_SETTINGS_KEYS.has(k))
+  if (unknown) return res.status(400).json({ error: 'invalid_request', reason: 'unknown_field', field: unknown })
+  if (body.enabled !== undefined && typeof body.enabled !== 'boolean') return res.status(400).json({ error: 'invalid_request', reason: 'invalid_enabled', field: 'enabled' })
+  const limits: LiveCuesV2StoredLimits = {}
+  for (const name of LIVE_CUES_V2_LIMIT_NAMES) {
+    if (body[name] === undefined) continue
+    if (!limitInBounds(name, body[name])) {
+      const b = LIVE_CUES_V2_LIMIT_BOUNDS[name]
+      return res.status(400).json({ error: 'invalid_request', reason: 'out_of_bounds', field: name, min: b.min, max: b.max, integer: b.integer })
+    }
+    limits[name] = body[name] as number
+  }
+  if (body.enabled === undefined && Object.keys(limits).length === 0) return res.status(400).json({ error: 'invalid_request', reason: 'empty' })
+  try {
+    const result = applyLiveCuesV2Settings({ ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}), limits })
+    if (!result.ok) return res.status(409).json(result.error === 'env_locked' ? { error: 'env_locked', fields: result.fields } : { error: result.error })
+    return res.json(liveCuesV2SettingsViewV2())
+  } catch {
+    return res.status(500).json({ error: 'settings_write_failed' })
+  }
+}

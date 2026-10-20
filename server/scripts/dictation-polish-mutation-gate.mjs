@@ -17,7 +17,9 @@ import { spawnSync } from 'node:child_process'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const tests = ['server/lib/dictation-fillers.test.ts', 'server/lib/dictation-polish-budget.test.ts', 'server/lib/dictation-clean.test.ts',
+  'server/lib/dictation-polish-need.test.ts', 'server/lib/dictation-prewarm.test.ts',
   'server/routes/prompt-drafts.test.ts', 'server/routes/dictation-fuzzy-wiring.test.ts']
+const N = 'server/lib/dictation-polish-need.ts', P = 'server/lib/dictation-prewarm.ts'
 const F = 'server/lib/dictation-fillers.ts', B = 'server/lib/dictation-polish-budget.ts', PD = 'server/routes/prompt-drafts.ts', C = 'server/lib/dictation-clean.ts'
 const mutations = [
   // Filler pass: what it must leave alone.
@@ -27,12 +29,13 @@ const mutations = [
   ['hyphen-before-kept', F, "/(?<![\\p{L}\\p{N}'’-])(", "/(?<![\\p{L}\\p{N}'’])("],
   ['capital-mid-sentence-is-name', F, "      || (!atStart && /^[A-Z]/.test(token) && !PAUSE_AFTER.test(after))\n", ''],
   ['titlecase-with-pause-is-hesitation', F, '      || (!atStart && /^[A-Z]/.test(token) && !PAUSE_AFTER.test(after))', '      || (!atStart && /^[A-Z]/.test(token))'],
-  ['title-keeps-name', F, '      || TITLE.test(out + before)\n', ''],
+  ['abbreviation-keeps-titlecase-name', F, '      || (/^[A-Z]/.test(token) && afterAbbreviation(out + before))', '      || false'],
+  ['abbreviation-name-needs-titlecase', F, '      || (/^[A-Z]/.test(token) && afterAbbreviation(out + before))', '      || afterAbbreviation(out + before)'],
+  ['jr-sr-are-abbreviations', F, '|st|jr|sr|vs|', '|st|vs|'],
+  ['initial-is-an-abbreviation', F, '  return ABBREVIATION.test(trimmed) || INITIAL.test(trimmed)', '  return ABBREVIATION.test(trimmed)'],
+  ['ellipsis-is-not-a-sentence-end', F, "  return !/(?:\\.{2,}|…)[\"”’)]*$/.test(trimmed)", '  return true'],
   ['quoted-mention-kept', F, '      || (QUOTE_OPEN.test(out + before) && QUOTE_CLOSE.test(after))', '      || false'],
   ['quote-needs-both-sides', F, '      || (QUOTE_OPEN.test(out + before) && QUOTE_CLOSE.test(after))', '      || QUOTE_OPEN.test(out + before)'],
-  ['ellipsis-is-not-a-sentence-end', F, "  if (/(?:\\.{2,}|…)[\"”’)]*$/.test(trimmed)) return false\n", ''],
-  ['abbreviation-is-not-a-sentence-end', F, '  return !(ABBREVIATION.test(trimmed) || INITIAL.test(trimmed))', '  return !INITIAL.test(trimmed)'],
-  ['initial-is-not-a-sentence-end', F, '  return !(ABBREVIATION.test(trimmed) || INITIAL.test(trimmed))', '  return !ABBREVIATION.test(trimmed)'],
   ['uh-huh-uh-oh-kept', F, "      || (/^uh$/i.test(token) && /^[ \\t]+(huh|oh)(?![\\p{L}\\p{N}'’-])/iu.test(after))\n", ''],
   ['mm-hmm-first-word-kept', F, "      || (/^mm$/i.test(token) && /^[ \\t]+hm+(?![\\p{L}\\p{N}'’-])/iu.test(after))\n", ''],
   ['uh-hmm-is-two-hesitations', F, "/^uh$/i.test(token) && /^[ \\t]+(huh|oh)(", "/^uh$/i.test(token) && /^[ \\t]+(huh|oh|hmm)("],
@@ -70,8 +73,9 @@ const mutations = [
   ['reason-too-long', PD, "polishSkipped: 'too_long' }", '}'],
   ['reason-breaker', PD, "polishSkipped: 'breaker_open' }", '}'],
   ['reason-daily-cap', PD, "polishSkipped: 'daily_cap' }", '}'],
-  ['reason-failed', PD, "polishSkipped: 'failed' }", '}'],
-  ['finalize-reports-reason', PD, '...(polishSkipped ? { polishSkipped } : {}) })', '...{} })'],
+  ['reason-failed', PD, "polishSkipped: 'failed', ...(prewarm", '...(prewarm'],
+  ['finalize-reports-reason', PD, '    ...(polishSkipped ? { polishSkipped } : {}), ...(prewarm', '    ...(prewarm'],
+  ['finalize-reports-prewarm', PD, ', ...(prewarm ? { prewarm } : {}),\n  })', ',\n  })'],
   ['draft-reports-reason', PD, '    ...(polishSkipped ? { polishSkipped } : {}),\n', ''],
   // Prompt switch.
   ['env-selects-version', C, "  return raw === 'v1' || raw === 'v2' ? raw : DEFAULT_DICTATION_POLISH_PROMPT", '  return DEFAULT_DICTATION_POLISH_PROMPT'],
@@ -79,6 +83,44 @@ const mutations = [
   ['system-prompt-follows-version', C, 'DICTATION_POLISH_SYSTEM_PROMPTS[version]', 'DICTATION_POLISH_SYSTEM_PROMPTS.v2'],
   ['v1-is-byte-identical', C, "doubled words, stray filler, and the known spellings below.'", "doubled words, stray filler, fillers, and the known spellings below.'"],
   ['default-is-v2', C, "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v2'", "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v1'"],
+  // 6.79.2: skip when clean.
+  ['need-backtrack', N, "  if (BACKTRACK.test(trimmed)) return 'backtrack'\n", ''],
+  ['need-comma-no-comma', N, "|i meant|no no)\\b|,\\s*no\\s*,/i", "|i meant|no no)\\b/i"],
+  ['need-repeat', N, "  if (REPEAT.test(trimmed)) return 'repeat'\n", ''],
+  ['need-false-start', N, "  if (FALSE_START.test(trimmed)) return 'false_start'\n", ''],
+  ['need-filler-like', N, "  if (FILLER_LIKE.test(trimmed)) return 'filler_like'\n", ''],
+  ['need-leading-tic', N, "|i guess)\\b|^[\"“(]?(so|well|okay|ok|alright|anyway)\\b/i", "|i guess)\\b/i"],
+  ['need-filler', N, "  if (FILLER.test(trimmed)) return 'filler'\n", ''],
+  ['need-formatting', N, "  if (FORMATTING.test(trimmed)) return 'formatting'\n", ''],
+  ['need-unfinished', N, "  if (!/^[\"“'‘(]?[\\p{Lu}\\p{N}]/u.test(trimmed) || !/[.?!][\"”’)]*$/.test(trimmed)) return 'unfinished'", "  if (false) return 'unfinished'"],
+  ['need-long-boundary', N, '  if (trimmed.split(/\\s+/).length > MAX_WORDS)', '  if (trimmed.split(/\\s+/).length >= MAX_WORDS)'],
+  ['skip-clean-default-off', N, "  return ['1', 'true', 'on'].includes((env.COS_DICTATION_POLISH_SKIP_CLEAN", "  return !['0', 'false', 'off'].includes((env.COS_DICTATION_POLISH_SKIP_CLEAN"],
+  ['skip-clean-wired', PD, '  if (skipCleanEnabled() && polishNeed(cleaned) === null)', '  if (false)'],
+  ['skip-clean-switch', PD, '  if (skipCleanEnabled() && polishNeed(cleaned) === null)', '  if (polishNeed(cleaned) === null)'],
+  // 6.79.2: prewarm.
+  ['stream-json-input', C, "['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']", "['--output-format', 'stream-json', '--verbose']"],
+  ['evict-oldest', P, '  while (warm.size >= PREWARM_MAX) retire(', '  while (false) retire('],
+  ['ttl-kills', P, '    timer: setTimeout(() => retire(entry), PREWARM_TTL_MS),', '    timer: setTimeout(() => {}, PREWARM_TTL_MS),'],
+  ['token-used-once', P, '  warm.delete(entry.token)\n  if (entry.model', '  if (entry.model'],
+  ['model-must-match', P, '  if (entry.model !== model || entry.exited)', '  if (entry.exited)'],
+  ['one-message-then-stdin-closed', P, '      entry.proc.stdin!.end()\n', ''],
+  ['dead-before-send-is-unavailable', P, '  if (entry.exited || !entry.proc.stdin || entry.proc.stdin.destroyed) {', '  if (false) {'],
+  ['retire-after-answer', P, '      retire(entry)\n      if (error) reject(error)', '      if (error) reject(error)'],
+  ['result-must-succeed', P, "      if (event.subtype !== 'success' || event.is_error || typeof event.result !== 'string') {", "      if (typeof event.result !== 'string') {"],
+  ['exit-kills-claimed', P, '  for (const entry of alive) {', '  for (const entry of warm.values()) {'],
+  ['exit-removes-workspaces', P, '    try { rmSync(entry.scratch, { recursive: true, force: true }) } catch {}\n', ''],
+  ['workspace-removed', P, '    rmSync(scratch, { recursive: true, force: true })\n', ''],
+  ['claimed-tracked', P, '    alive.delete(entry)\n', ''],
+  ['prewarm-switch', PD, "  if (!prewarmEnabled()) return res.status(409)", "  if (false) return res.status(409)"],
+  ['prewarm-claude-only', PD, "  if (!isPrewarmModel(model)) return res.status(409)", "  if (false) return res.status(409)"],
+  ['prewarm-breaker', PD, "  if (autoCleanBreakers[model].isOpen()) return res.status(409)", "  if (false) return res.status(409)"],
+  ['prewarm-budget', PD, "  if (polishBudgetExhausted(surface)) return res.status(409)", "  if (false) return res.status(409)"],
+  ['finalize-takes-warm', PD, '  const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null', '  const warmEntry = null as any'],
+  ['unavailable-falls-back-cold', PD, '        if (!(err instanceof PrewarmUnavailableError)) throw err', '        throw err'],
+  ['sent-failure-is-not-retried', PD, '        if (!(err instanceof PrewarmUnavailableError)) throw err\n', ''],
+  ['unused-warm-discarded', PD, "prewarm: discardPolishPrewarm(opts.prewarmToken) ? 'discarded' : 'missed' }", "prewarm: 'missed' }"],
+  ['prewarm-token-validated', PD, "(typeof rawToken !== 'string' || !PREWARM_TOKEN.test(rawToken))", "(typeof rawToken !== 'string')"],
+  ['delete-discards', PD, '  res.json({ discarded: discardPolishPrewarm(req.params.token) })', '  res.json({ discarded: false })'],
 ]
 
 const args = process.argv.slice(2)
