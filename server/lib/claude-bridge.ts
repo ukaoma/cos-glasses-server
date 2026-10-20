@@ -660,8 +660,9 @@ export async function callClaudeStreaming(
   } else {
     args.push(...claudePermissionArgs(getClaudeTrustMode(), tools), '--include-partial-messages')
   }
-  // QA B1: deny the key secrets dir while lanes are on and a key is saved ([] otherwise).
-  args.push(...claudeKeySecretsGuardArgs())
+  // QA B1: deny the key secrets dir while lanes are on and a key is saved ([] otherwise). A keyed
+  // turn's layer also forces agent teams off over any settings file (canary R12).
+  args.push(...claudeKeySecretsGuardArgs(keyProfile ? { laneB: true } : {}))
 
   if (existingCliSession) {
     // Resume prior CLI session — reuses cached context, avoids cold start

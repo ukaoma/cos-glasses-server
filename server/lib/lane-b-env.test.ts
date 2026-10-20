@@ -9,7 +9,7 @@ import {
   laneBBaseEnv,
   LANE_B_CLAUDE_MODEL_NAMES,
 } from './lane-b-env.js'
-import { CLAUDE_MANAGED_SETTINGS_FILES, claudeSettingsFiles, claudeSettingsRefusal } from './claude-settings-guard.js'
+import { CLAUDE_MANAGED_SETTINGS_FILES, claudeSettingsFiles, claudeSettingsRefusal, claudeSettingsWatched } from './claude-settings-guard.js'
 
 const SPEC = { origin: 'http://127.0.0.1:40123', nonce: 'nonce-abc', slug: 'anthropic/claude-haiku-5.5', profileId: 'haiku-key' }
 
@@ -62,6 +62,14 @@ describe('Claude settings guard', () => {
     ])
     // QA W4 / G7: CLAUDE_CONFIG_DIR moves the user file; both are read.
     expect(claudeSettingsFiles({ cwd, home, env: { CLAUDE_CONFIG_DIR: '/cfg' } })).toContain('/cfg/settings.json')
+  })
+
+  it('canary R12: agent teams set by a settings file is watched, not refused (the keyed layer forces it off)', () => {
+    writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ env: { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' } }))
+    expect(claudeSettingsRefusal({ cwd, home, env: {}, managed: [] })).toBeNull()
+    expect(claudeSettingsWatched({ cwd, home, env: {}, managed: [] })).toEqual([{ file: join(cwd, '.claude', 'settings.json'), name: 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS' }])
+    rmSync(join(cwd, '.claude', 'settings.json'))
+    expect(claudeSettingsWatched({ cwd, home, env: {}, managed: [] })).toEqual([])
   })
 
   it('QA W4: managed settings, CLAUDE_CONFIG_DIR and the OAuth/Bedrock token names refuse a keyed spawn', () => {

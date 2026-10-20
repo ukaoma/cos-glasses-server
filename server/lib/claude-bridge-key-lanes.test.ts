@@ -199,8 +199,13 @@ describe('Lane B Claude: argv and child env (plan 7.1, 7.2)', () => {
     const b = await turn('argv-b', { keyProfile: profile })
     expect(modelArg(b.spawned!.args)).toBe(SLUG)
     expect(b.spawned!.args.join(' ')).not.toContain('[1m]')
-    const strip = (args: string[]) => args.map((v, i) => args[i - 1] === '--model' ? '<model>' : args[i - 1] === '--resume' ? '<resume>' : v).filter(v => v !== '--resume' && v !== '<resume>')
+    const strip = (args: string[]) => args.map((v, i) => args[i - 1] === '--model' ? '<model>' : args[i - 1] === '--resume' ? '<resume>' : args[i - 1] === '--settings' ? '<settings>' : v).filter(v => v !== '--resume' && v !== '<resume>')
     expect(strip(b.spawned!.args)).toEqual(strip(a.spawned!.args))
+    // The one --settings layer: the same deny rules, and on the keyed turn agent teams forced off (canary R12).
+    const layer = (args: string[]) => JSON.parse(args[args.indexOf('--settings') + 1]!)
+    expect(layer(b.spawned!.args).permissions).toEqual(layer(a.spawned!.args).permissions)
+    expect(layer(b.spawned!.args).env).toEqual({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '0' })
+    expect(layer(a.spawned!.args)).not.toHaveProperty('env')
     expect(b.spawned!.cmd).toBe('claude')
   })
 

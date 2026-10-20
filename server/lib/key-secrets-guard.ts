@@ -30,9 +30,23 @@ export function keySecretsDenyRules(dir: string = keySecretsDir()): string[] {
   return rules
 }
 
-/** `['--settings', <deny JSON>]` while lanes are enabled and a key is saved, else []. */
-export function claudeKeySecretsGuardArgs(): string[] {
+/**
+ * Canary R12: settings `env` names a keyed (Lane B) run forces, whatever a user or project settings
+ * file says. A flag `--settings` layer outranks both (MU's project file turns agent teams on).
+ */
+export const LANE_B_FORCED_SETTINGS_ENV: Readonly<Record<string, string>> = {
+  CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '0',
+}
+
+/**
+ * `['--settings', <JSON>]` while lanes are enabled and a key is saved, else []. A keyed run
+ * (`laneB`) also gets LANE_B_FORCED_SETTINGS_ENV in the same layer (one `--settings` per spawn).
+ */
+export function claudeKeySecretsGuardArgs(opts: { laneB?: boolean } = {}): string[] {
   if (!keyLanesEnabled()) return []
   if (!existsSync(keyStorePath())) return []
-  return ['--settings', JSON.stringify({ permissions: { deny: keySecretsDenyRules() } })]
+  return ['--settings', JSON.stringify({
+    permissions: { deny: keySecretsDenyRules() },
+    ...(opts.laneB ? { env: { ...LANE_B_FORCED_SETTINGS_ENV } } : {}),
+  })]
 }

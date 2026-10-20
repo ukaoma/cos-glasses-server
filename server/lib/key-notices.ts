@@ -393,6 +393,7 @@ export type KeyNoticeErrorId =
   | 'nonce_expired'
   | 'nonce_revoked'
   | 'upstream_refused'
+  | 'relay_busy'
 
 export interface KeyNoticeErrorParams {
   keyKind?: KeyKind
@@ -434,6 +435,7 @@ const ERRORS: { readonly [K in KeyNoticeErrorId]: (p: KeyNoticeErrorParams) => s
   nonce_expired: () => 'This key turn ran past its time limit. Your plan was not used.',
   nonce_revoked: () => 'This key turn was stopped. Your plan was not used.',
   upstream_refused: p => put('{f} refused this request. Your plan was not used.', providerCopy(p.keyKind).Dest),
+  relay_busy: () => 'Too many steps at once. Your plan was not used.',
 }
 export const KEY_NOTICE_ERROR_IDS = Object.keys(ERRORS) as KeyNoticeErrorId[]
 

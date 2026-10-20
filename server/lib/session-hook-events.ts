@@ -16,6 +16,8 @@
 import { createHash } from 'node:crypto'
 import { profileIdForCodexPath } from './codex-homes.js'
 import { isKeyProfileId } from '../../shared/key-preference.js'
+import { keyLanesEnabled } from './key-lanes.js'
+import { keyedSessionProfile } from './keyed-sessions.js'
 
 /** Events the installer subscribes and the reducer understands. Anything else is dropped. */
 export const HOOK_EVENT_NAMES = [
@@ -82,11 +84,18 @@ export function inferHookProvider(stamped: unknown, payload: Record<string, unkn
 /**
  * Key lanes K1 (plan v4 7.3): the key profile a hook event ran under, or undefined. Read from
  * the envelope's own `keyProfile` stamp (a hook script that forwards `COS_KEY_PROFILE`), else
- * from a transcript inside a keyed Codex profile home. Undefined for every Lane A event.
+ * from a transcript inside a keyed Codex profile home, else (canary R7: the installed hook script
+ * does not stamp it, and changing the script would mark every install outdated) from the
+ * keyed-session record the bridge wrote for that CLI session id. Lanes off: never looked up.
+ * Undefined for every Lane A event.
  */
-export function hookKeyProfile(stamped: unknown, payload: Record<string, unknown>): string | undefined {
+export function hookKeyProfile(stamped: unknown, payload: Record<string, unknown>, sessionId?: string | null): string | undefined {
   if (isKeyProfileId(stamped)) return stamped
-  return profileIdForCodexPath(payload.transcript_path)
+  const codex = profileIdForCodexPath(payload.transcript_path)
+  if (codex) return codex
+  if (!sessionId || !keyLanesEnabled()) return undefined
+  const recorded = keyedSessionProfile(sessionId)
+  return isKeyProfileId(recorded) ? recorded : undefined
 }
 
 /** 6.62.0: the cap on an agent thought kept in memory and sent on the live feed. */
@@ -167,7 +176,7 @@ export function parseHookEnvelope(text: string): ParsedHookEnvelope {
   const sessionId = typeof p.session_id === 'string' && SESSION_ID_RE.test(p.session_id) ? p.session_id.toLowerCase() : null
   if (!sessionId) return { ok: false, reason: 'no_session', salvaged: null }
   const ppid = Number(r.ppid)
-  const keyProfile = hookKeyProfile(r.keyProfile, p)
+  const keyProfile = hookKeyProfile(r.keyProfile, p, sessionId)
   return {
     ok: true,
     envelope: {

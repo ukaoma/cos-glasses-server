@@ -435,3 +435,27 @@ describe('Lane B Codex: the resume fingerprint still binds the generated config 
     expect(changed.args).not.toContain('resume')
   })
 })
+
+describe('Lane B Codex: the nonce dies when the bridge ends the turn (canary R14)', () => {
+  it('a finished turn revokes its nonce at once, before the child is gone', async () => {
+    await keyedRun()
+    const rec = state.spawns.at(-1)!
+    rec.child.stdout.emit('data', Buffer.from([
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'answer' } }),
+      JSON.stringify({ type: 'turn.completed' }), '',
+    ].join('\n')))
+    await flush()
+    expect(relay.revoked).toContain('child_close')
+    rec.child.emit('close', 0, null)
+    await flush()
+  })
+
+  it('a failed turn revokes its nonce too', async () => {
+    const cb = cbs()
+    await keyedRun(profile(), cb)
+    state.spawns.at(-1)!.child.emit('close', 1, null)
+    await flush()
+    expect(cb.onError).toHaveBeenCalled()
+    expect(relay.revoked).toContain('cancel')
+  })
+})

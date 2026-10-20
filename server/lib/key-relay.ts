@@ -33,7 +33,7 @@ import type {
   RelayRevokeReason,
   RelayTurnHandle,
 } from './key-relay-contract.js'
-import { KEY_REF_RE, RELAY_LIMITS, RELAY_PATHS, RELAY_UPSTREAMS } from './key-relay-contract.js'
+import { KEY_REF_RE, RELAY_BASE_PATHS, RELAY_LIMITS, RELAY_PATHS, RELAY_UPSTREAMS } from './key-relay-contract.js'
 import {
   RelayBreakers,
   breakerScopeFor,
@@ -46,6 +46,9 @@ import {
 import type { RelayLocalError } from './key-relay-errors.js'
 import type { KeyRelayMeter, ModelPrice } from './key-relay-meter.js'
 import { defaultPriceFor, getSharedKeyMeter, reserveWithinHeadroomUsd, tokensToUsd } from './key-relay-meter.js'
+
+/** A request past the in-flight cap waits this long for a slot before the busy 429. */
+const IN_FLIGHT_WAIT_MS = 120_000
 
 /** Ended nonces remembered (hash only) so a late request reads why; oldest dropped first. */
 const ENDED_NONCES_MAX = 256
@@ -107,6 +110,22 @@ export interface ParsedUsage {
   sawUsage: boolean
   /** Characters of generated text seen, for a partial settle when the stream was cut. */
   deltaChars: number
+  /** Canary R9: the cached share of `input`, priced at its own rates (read 0.1x, write 1.25x). */
+  cacheRead?: number
+  cacheWrite?: number
+  /** The provider's message id from message_start (OpenRouter's is the generation id). */
+  messageId?: string
+}
+
+/** Anthropic prompt-cache prices relative to the input price (canary R9: cache reads dominate keyed turns). */
+export const CACHE_READ_PRICE_FACTOR = 0.1
+export const CACHE_WRITE_PRICE_FACTOR = 1.25
+
+/** USD for counted tokens with the cached share of the input at its own rates. */
+export function cachePricedUsd(t: { input: number; output: number; cacheRead?: number; cacheWrite?: number }, price: ModelPrice): number {
+  const read = Math.max(0, t.cacheRead ?? 0), write = Math.max(0, t.cacheWrite ?? 0)
+  const plain = Math.max(0, t.input - read - write)
+  return (plain * price.inUsdPerM + read * price.inUsdPerM * CACHE_READ_PRICE_FACTOR + write * price.inUsdPerM * CACHE_WRITE_PRICE_FACTOR + Math.max(0, t.output) * price.outUsdPerM) / 1e6
 }
 
 function num(v: unknown): number {
@@ -166,6 +185,10 @@ export class RelayUsageParser {
 
   private applyUsage(u: Record<string, unknown>, final: boolean): void {
     const input = num(u.input_tokens) + num(u.cache_creation_input_tokens) + num(u.cache_read_input_tokens)
+    if (input >= this.usage.input) {
+      this.usage.cacheRead = num(u.cache_read_input_tokens)
+      this.usage.cacheWrite = num(u.cache_creation_input_tokens)
+    }
     this.usage.input = Math.max(this.usage.input, input)
     this.usage.output = Math.max(this.usage.output, num(u.output_tokens))
     const cost = costOf(u)
@@ -182,7 +205,9 @@ export class RelayUsageParser {
     const type = ev.type
     if (this.engine === 'claude') {
       if (type === 'message_start') {
-        const u = (ev.message as { usage?: Record<string, unknown> } | undefined)?.usage
+        const m = ev.message as { id?: unknown; usage?: Record<string, unknown> } | undefined
+        if (typeof m?.id === 'string' && m.id.length <= 128) this.usage.messageId = m.id
+        const u = m?.usage
         if (u) this.applyUsage(u, false)
       } else if (type === 'message_delta') {
         const u = ev.usage as Record<string, unknown> | undefined
@@ -209,7 +234,9 @@ export function streamedUsd(usage: ParsedUsage, price: ModelPrice, bodyBytes: nu
   const input = usage.input > 0 ? usage.input : Math.ceil(Math.max(0, bodyBytes) / 4)
   const output = Math.max(usage.output, Math.ceil(usage.deltaChars / 4))
   const tokens = { input: Math.round(input), output: Math.round(output) }
-  return { usd: tokensToUsd(tokens, price), tokens }
+  // Canary R9: cache reads and writes at their own rates, so a reply that fits is not cut.
+  const cached = usage.input > 0 ? { cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite } : {}
+  return { usd: cachePricedUsd({ ...tokens, ...cached }, price), tokens }
 }
 
 /** USD for what was parsed, or null when no usage arrived (settle the full reservation). */
@@ -218,7 +245,7 @@ export function usageUsd(usage: ParsedUsage, price: ModelPrice): { usd: number; 
   const output = usage.complete ? usage.output : Math.max(usage.output, Math.ceil(usage.deltaChars / 4))
   const tokens = { input: Math.round(usage.input), output: Math.round(output) }
   if (usage.complete && usage.costUsd !== undefined) return { usd: usage.costUsd, tokens }
-  return { usd: tokensToUsd(tokens, price), tokens }
+  return { usd: cachePricedUsd({ ...tokens, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite }, price), tokens }
 }
 
 // ── The relay ────────────────────────────────────────────────────────────────
@@ -239,7 +266,7 @@ export class KeyRelayRefusal extends Error {
  * why. `nonce_*` is a request on a token the relay already ended; `upstream_refused` a 4xx with
  * no row of its own (403 moderation, a plain 400).
  */
-export type RelayTurnFailureKind = RelayFailureKind | 'nonce_expired' | 'nonce_revoked' | 'upstream_refused'
+export type RelayTurnFailureKind = RelayFailureKind | 'nonce_expired' | 'nonce_revoked' | 'upstream_refused' | 'relay_busy'
 
 export interface RelayTurnFailure {
   turnId: string
@@ -267,6 +294,8 @@ export interface KeyRelayDeps {
   fetch?: typeof fetch
   usagePollMs?: number
   upstreamHeadersTimeoutMs?: number
+  /** How long a request past the in-flight cap waits for a slot (default 120 s). */
+  inFlightWaitMs?: number
   /** Delay before the generation-cost reconcile; null turns it off. */
   reconcileDelayMs?: number | null
   log?: (line: string) => void
@@ -283,6 +312,8 @@ interface TurnEntry {
   inFlight: number
   controllers: Set<AbortController>
   timer?: ReturnType<typeof setTimeout>
+  /** QA (canary, parallel subagents): requests past the in-flight cap wait here, oldest first. */
+  waiters: Array<(got: boolean) => void>
 }
 
 interface Route {
@@ -335,6 +366,7 @@ export class KeyRelayServer implements KeyRelay {
   private readonly usagePollMs: number
   private readonly headersTimeoutMs: number
   private readonly reconcileDelayMs: number | null
+  private readonly inFlightWaitMs: number
   private readonly log: (line: string) => void
   private readonly onTurnFailure: (failure: RelayTurnFailure) => void
   readonly breakers: RelayBreakers
@@ -362,6 +394,7 @@ export class KeyRelayServer implements KeyRelay {
     this.usagePollMs = deps.usagePollMs ?? USAGE_POLL_MS
     this.headersTimeoutMs = deps.upstreamHeadersTimeoutMs ?? UPSTREAM_HEADERS_TIMEOUT_MS
     this.reconcileDelayMs = deps.reconcileDelayMs === undefined ? RECONCILE_DELAY_MS : deps.reconcileDelayMs
+    this.inFlightWaitMs = deps.inFlightWaitMs ?? IN_FLIGHT_WAIT_MS
     this.log = deps.log ?? (line => console.info(line))
     this.onTurnFailure = deps.onTurnFailure ?? (() => {})
     this.breakers = new RelayBreakers(this.now, (scope, id) => this.onBreakerOpen(scope, id))
@@ -414,6 +447,7 @@ export class KeyRelayServer implements KeyRelay {
       expiresAt: this.now() + wallMaxMs + RELAY_LIMITS.wallMaxGraceMs,
       inFlight: 0,
       controllers: new Set(),
+      waiters: [],
     }
     this.turns.set(hash, entry)
     this.byTurnId.set(binding.turnId, hash)
@@ -453,6 +487,21 @@ export class KeyRelayServer implements KeyRelay {
     await new Promise<void>(resolve => {
       server.close(() => resolve())
       server.closeAllConnections()
+    })
+  }
+
+  /** Wait for an in-flight slot on this nonce; true once one is handed over, false on timeout or revoke. */
+  private waitForSlot(entry: TurnEntry): Promise<boolean> {
+    return new Promise(resolve => {
+      let done = false
+      const finish = (got: boolean) => { if (done) return; done = true; clearTimeout(timer); resolve(got) }
+      const timer = setTimeout(() => {
+        const i = entry.waiters.indexOf(finish)
+        if (i >= 0) entry.waiters.splice(i, 1)
+        finish(false)
+      }, this.inFlightWaitMs)
+      timer.unref?.()
+      entry.waiters.push(finish)
     })
   }
 
@@ -503,6 +552,7 @@ export class KeyRelayServer implements KeyRelay {
     if (e.timer) clearTimeout(e.timer)
     for (const c of e.controllers) c.abort()
     e.controllers.clear()
+    for (const w of e.waiters.splice(0)) w(false)
     this.log(`[key-relay] revoked nonce=${e.nonceHead} reason=${reason}`)
   }
 
@@ -621,7 +671,7 @@ export class KeyRelayServer implements KeyRelay {
 
   private fail(entry: TurnEntry | { binding: RelayNonceBinding }, kind: RelayTurnFailureKind, status: number): void {
     const b = entry.binding
-    const ends = kind !== 'nonce_expired' && kind !== 'nonce_revoked' && kind !== 'upstream_refused' && endsTurn(kind)
+    const ends = kind !== 'nonce_expired' && kind !== 'nonce_revoked' && kind !== 'upstream_refused' && kind !== 'relay_busy' && endsTurn(kind)
     try { this.onTurnFailure({ turnId: b.turnId, sessionId: b.sessionId, profileId: b.profileId, keyRef: b.keyRef, kind, status, endsTurn: ends }) } catch { /* a listener never breaks the relay */ }
   }
 
@@ -647,6 +697,14 @@ export class KeyRelayServer implements KeyRelay {
         res.end('{"ok":true}')
         return
       }
+      // Claude Code sends `HEAD /api/hello` under its base URL once per turn (canary R12): a
+      // reachability probe. Answered empty, never metered, never logged as a 404.
+      if (req.method === 'HEAD' && path === `${RELAY_BASE_PATHS.claude}/api/hello`) {
+        req.resume()
+        res.writeHead(204)
+        res.end()
+        return
+      }
       route = ROUTES[path]
       if (!route || req.method !== 'POST') {
         this.log(`[key-relay] 404 ${req.method ?? '?'} ${path.slice(0, LOG_PATH_CHARS)}`)
@@ -664,15 +722,26 @@ export class KeyRelayServer implements KeyRelay {
         req.resume()
         return this.sendLocal(res, route.engine, 'nonce_invalid')
       }
+      // Canary QA: parallel subagents past the cap wait for a slot (bounded) instead of a 429
+      // that ends the turn on the CLI's raw error. Past the wait, the 429 is reported to the turn
+      // as relay_busy, which reads as a key-notices line.
       if (entry.inFlight >= RELAY_LIMITS.inFlightPerNonce) {
-        req.resume()
-        return this.sendLocal(res, route.engine, 'too_many_in_flight', { 'retry-after': '1' })
+        const got = await this.waitForSlot(entry)
+        if (!got) {
+          req.resume()
+          if (this.turns.has(entry.hash)) this.fail(entry, 'relay_busy', 429)
+          return this.sendLocal(res, route.engine, 'too_many_in_flight', { 'retry-after': '1' })
+        }
+      } else {
+        entry.inFlight += 1
       }
-      entry.inFlight += 1
       try {
         await this.forward(req, res, entry, route, url.search)
       } finally {
-        entry.inFlight -= 1
+        // The slot passes straight to the oldest waiter, or is released.
+        const next = entry.waiters.shift()
+        if (next) next(true)
+        else entry.inFlight -= 1
       }
     } catch {
       this.sendLocal(res, route?.engine ?? 'unknown', 'network_error')
@@ -822,7 +891,11 @@ export class KeyRelayServer implements KeyRelay {
       if (!reservationId) return
       if (cutAtCap) {
         const streamed = streamedUsd(parser.usage, price, body.length)
-        this.meter.settle({ reservationId, usd: streamed.usd, tokens: streamed.tokens })
+        // Canary R9: the provider's generation id (header, else OpenRouter's message id) so the
+        // estimate is reconciled to the real cost like any other request.
+        const cutGeneration = upstream.headers.get('x-generation-id') ?? (parser.usage.messageId?.startsWith('gen-') ? parser.usage.messageId : undefined)
+        this.meter.settle({ reservationId, usd: streamed.usd, tokens: streamed.tokens, ...(cutGeneration ? { generationId: cutGeneration } : {}) })
+        if (cutGeneration && entry.keyKind === 'openrouter') this.scheduleReconcile(entry, cutGeneration, streamed.usd)
         this.log(`[key-relay] cap reached mid-reply, stream cut nonce=${entry.nonceHead}`)
         this.fail(entry, 'cap_refused', 402)
         return

@@ -116,7 +116,8 @@ export const RELAY_UPSTREAMS = {
 /** Plan 4.3 nonce limits. */
 export const RELAY_LIMITS = {
   nonceBytes: 32,
-  inFlightPerNonce: 8,
+  /** Canary QA (2026-10-19): 12 parallel Task subagents were measured; 16 leaves headroom, and the relay queues past it. */
+  inFlightPerNonce: 16,
   bodyCapBytes: 20 * 1024 * 1024,
   /** Nonce lives until child close plus this. */
   childCloseGraceMs: 5_000,

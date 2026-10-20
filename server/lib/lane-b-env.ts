@@ -10,7 +10,7 @@
 import { keyLanesActive } from './key-lanes.js'
 import { KEY_LANE_REFUSAL_COPY } from './key-notices.js'
 import { getPublicKey } from './key-store.js'
-import { claudeSettingsRefusal } from './claude-settings-guard.js'
+import { claudeSettingsRefusal, claudeSettingsWatched } from './claude-settings-guard.js'
 import { KEY_LANE_CHILD_ENV, RELAY_BASE_PATHS } from './key-relay-contract.js'
 import type { KeyKind, KeyProfile, KeyRelay } from './key-relay-contract.js'
 
@@ -161,6 +161,9 @@ export function laneBClaudePreflight(input: {
   if (!key) return { ok: false, message: LANE_B_COPY.keyMissing(profile.label) }
   const settings = claudeSettingsRefusal({ cwd: input.cwd, home: input.home })
   if (settings) return { ok: false, message: settings.message }
+  for (const w of claudeSettingsWatched({ cwd: input.cwd, home: input.home })) {
+    console.info(`[key-lanes] ${w.name} is set by a Claude settings file; this keyed run forces it off`)
+  }
   if (!laneBRelayRegistered()) return { ok: false, message: LANE_B_COPY.relayUnavailable }
   return { ok: true, keyKind: key.kind }
 }

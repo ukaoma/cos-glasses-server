@@ -38,6 +38,12 @@ import { getPublicKey } from './key-store.js'
 export const CODEX_RELAY_PROVIDER_ID = 'cos-relay'
 /** Plan 4.6: the child retries a 429 or 5xx twice; the relay never retries itself. R15 checks the names. */
 export const CODEX_RELAY_RETRIES = 2
+/**
+ * Canary R14 / R15: Codex multiplies the two (each stream reconnect runs its own request retries:
+ * 7 to 9 upstream calls per failure). Stream reconnects are off, so one failure costs at most
+ * 1 + CODEX_RELAY_RETRIES = 3 attempts, the plan 4.6 budget.
+ */
+export const CODEX_RELAY_STREAM_RETRIES = 0
 /** Top-level config tables copied from the server home (first key segment). */
 export const CODEX_COPIED_TABLES: readonly string[] = ['mcp_servers', 'projects', 'shell_environment_policy', 'sandbox_workspace_write']
 
@@ -403,7 +409,7 @@ export function renderCodexProfileHome(profile: KeyProfile, sources: CodexProfil
     `env_key = "${KEY_LANE_CHILD_ENV.codexToken}"`,
     'wire_api = "responses"',
     `request_max_retries = ${CODEX_RELAY_RETRIES}`,
-    `stream_max_retries = ${CODEX_RELAY_RETRIES}`,
+    `stream_max_retries = ${CODEX_RELAY_STREAM_RETRIES}`,
     '',
   ]
   const tail = out.length ? [`# Copied read-only from ${join(serverHome, 'config.toml')} (plan D9).`, ...out] : []

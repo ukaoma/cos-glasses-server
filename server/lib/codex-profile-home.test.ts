@@ -158,7 +158,8 @@ describe('renderCodexProfileHome', () => {
     expect(r.configTemplate).toContain('wire_api = "responses"')
     expect(r.configTemplate).not.toContain('wire_api = "chat"')
     expect(r.configTemplate).toContain('request_max_retries = 2')
-    expect(r.configTemplate).toContain('stream_max_retries = 2')
+    // Canary R14 (P11): stream reconnects off, so request retries cannot multiply (3 attempts at most).
+    expect(r.configTemplate).toContain('stream_max_retries = 0')
     // The user's top-level model, effort, base URL override and notify never reach a keyed home.
     expect(r.configTemplate).not.toContain('gpt-6.1-sol')
     expect(r.configTemplate).not.toContain('openai_base_url')

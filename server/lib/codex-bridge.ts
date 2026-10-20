@@ -728,6 +728,8 @@ export async function callCodexStreaming(
       return
     }
     finalized = true
+    // Canary R14: the turn is over the moment the bridge says so; the child gets no more calls on the key.
+    keyTurn?.revoke('child_close')
     cleanup()
     cleanupImages()
 
@@ -852,6 +854,8 @@ export async function callCodexStreaming(
   async function finalizeError(msg: string, exitCode?: number | null, status: Exclude<CodexRunStatus, 'running'> = 'failed') {
     if (finalized) return
     finalized = true
+    // Canary R14: a Codex child keeps retrying after the bridge ends the turn; its nonce dies now.
+    keyTurn?.revoke('cancel')
     cleanup()
     cleanupImages()
     outputImagePublisher?.cleanup()

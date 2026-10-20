@@ -100,6 +100,14 @@ export function isKeyedCosSession(cosSessionId: unknown): boolean {
   return listKeyedSessions().some(r => r.cosSessionId === cosSessionId)
 }
 
+/** Canary R7: the key profile a recorded CLI session ran under, by session id (any case), or undefined. */
+export function keyedSessionProfile(id: unknown): string | undefined {
+  if (typeof id !== 'string' || !id) return undefined
+  const needle = id.toLowerCase()
+  for (const r of memory.values()) if (r.id.toLowerCase() === needle) return r.profileId
+  return fileRecords().find(r => r.id.toLowerCase() === needle)?.profileId
+}
+
 export function keyedSessionIds(): string[] {
   return listKeyedSessions().map(r => r.id)
 }

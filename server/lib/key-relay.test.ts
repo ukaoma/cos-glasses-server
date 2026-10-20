@@ -21,7 +21,7 @@ const { KeyRelayMeter } = await import('./key-relay-meter.js')
 const meterMod = await import('./key-relay-meter.js')
 const errorsMod = await import('./key-relay-errors.js')
 const relayMod = await import('./key-relay.js')
-const { RELAY_PATHS } = await import('./key-relay-contract.js')
+const { RELAY_LIMITS, RELAY_PATHS } = await import('./key-relay-contract.js')
 type KeyRelayServer = import('./key-relay.js').KeyRelayServer
 type KeyRelayDeps = import('./key-relay.js').KeyRelayDeps
 type RelayNonceBinding = import('./key-relay-contract.js').RelayNonceBinding
@@ -355,15 +355,17 @@ describe('key relay: nonce (plan 4.3)', () => {
     expect(relay.liveTurnCount()).toBe(0)
   })
 
-  it('holds at most 8 requests in flight per nonce', async () => {
+  it('holds at most RELAY_LIMITS.inFlightPerNonce requests in flight per nonce (past the wait, a 429)', async () => {
     const release: Array<() => void> = []
     mock.messages = (_req, res, seen) => new Promise<void>(resolve => {
       release.push(() => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(sse(anthropicEvents(bodyModel(seen)))); resolve() })
     })
-    const { relay } = makeRelay()
+    // P11 (canary QA): requests past the cap wait for a slot; a short wait here reaches the 429.
+    const { relay } = makeRelay({ inFlightWaitMs: 50 })
     const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
-    const held = Array.from({ length: 8 }, () => post(h, MSG, msgBody()))
-    await waitFor(() => release.length === 8)
+    const n = RELAY_LIMITS.inFlightPerNonce
+    const held = Array.from({ length: n }, () => post(h, MSG, msgBody()))
+    await waitFor(() => release.length === n)
     const ninth = await post(h, MSG, msgBody())
     expect(ninth.status).toBe(429)
     expect(ninth.headers.get('retry-after')).toBe('1')
@@ -687,6 +689,114 @@ describe('QA N10 / U2: a request on a token the relay ended says why', () => {
     offset += 5 * 60_000
     expect((await post(h, MSG, msgBody())).status).toBe(401)
     expect(failures.map(f => f.kind)).toEqual(['nonce_expired'])
+  })
+})
+
+describe('canary QA: parallel requests past the in-flight cap wait for a slot', () => {
+  it('20 parallel requests on one nonce: at most RELAY_LIMITS.inFlightPerNonce upstream at once, every one answered', async () => {
+    let live = 0, peak = 0
+    const release: Array<() => void> = []
+    mock.messages = async (_req, res, seen) => {
+      live++; peak = Math.max(peak, live)
+      await new Promise<void>(r => release.push(r))
+      live--
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(sse(anthropicEvents(bodyModel(seen))))
+    }
+    const { relay, failures } = makeRelay({ usagePollMs: 60_000 })
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
+    const all = Array.from({ length: 20 }, () => post(h, MSG, msgBody()).then(async r => { await r.text(); return r.status }))
+    const cap = RELAY_LIMITS.inFlightPerNonce
+    expect(cap).toBe(16)
+    for (let i = 0; i < 400 && release.length < cap; i++) await new Promise(r => setTimeout(r, 5))
+    await new Promise(r => setTimeout(r, 50))
+    expect(release.length).toBe(cap)
+    // Release one at a time: each freed slot goes to a waiter.
+    for (let i = 0; i < 20; i++) {
+      for (let j = 0; j < 400 && release.length === 0; j++) await new Promise(r => setTimeout(r, 5))
+      release.shift()?.()
+    }
+    expect(await Promise.all(all)).toEqual(Array(20).fill(200))
+    expect(peak).toBe(cap)
+    expect(failures).toEqual([])
+  })
+
+  it('a wait past the bound gets the busy 429, reported to the turn as relay_busy', async () => {
+    const release: Array<() => void> = []
+    mock.messages = async (_req, res, seen) => {
+      await new Promise<void>(r => release.push(r))
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(sse(anthropicEvents(bodyModel(seen))))
+    }
+    const { relay, failures } = makeRelay({ usagePollMs: 60_000, inFlightWaitMs: 50 })
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
+    const held = Array.from({ length: RELAY_LIMITS.inFlightPerNonce }, () => post(h, MSG, msgBody()))
+    for (let i = 0; i < 400 && release.length < RELAY_LIMITS.inFlightPerNonce; i++) await new Promise(r => setTimeout(r, 5))
+    const extra = await post(h, MSG, msgBody())
+    expect(extra.status).toBe(429)
+    await extra.text()
+    expect(failures).toContainEqual({ kind: 'relay_busy', status: 429 })
+    for (const r of release.splice(0)) r()
+    await Promise.all(held.map(p => p.then(r => r.text())))
+  })
+
+  it("HEAD /relay/a/api/hello is answered 204, never metered or logged as a 404", async () => {
+    const { relay, logs } = makeRelay()
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
+    const r = await fetch(`${h.origin}/relay/a/api/hello`, { method: 'HEAD' })
+    expect(r.status).toBe(204)
+    expect(logs.some(l => l.includes('404'))).toBe(false)
+    expect(ledgerRows()).toEqual([])
+  })
+})
+
+describe('canary R9: cut-at-cap pricing and reconcile', () => {
+  it('cache reads and writes are priced at their own rates', () => {
+    const p = { inUsdPerM: 1, outUsdPerM: 10 }
+    expect(relayMod.cachePricedUsd({ input: 100_000, output: 0, cacheRead: 100_000 }, p)).toBeCloseTo(0.01, 9)
+    expect(relayMod.cachePricedUsd({ input: 100_000, output: 0, cacheWrite: 100_000 }, p)).toBeCloseTo(0.125, 9)
+    expect(relayMod.cachePricedUsd({ input: 100_000, output: 1000, cacheRead: 90_000 }, p)).toBeCloseTo((10_000 + 9_000 + 10_000) / 1e6, 9)
+  })
+
+  it('a cache-heavy reply that fits under the headroom is not cut; a cut one is reconciled from its generation', async () => {
+    const reconciled: string[] = []
+    // 200k cached input tokens: full price $0.20, cache-read price $0.02. Headroom $0.05.
+    mock.usageDaily = 0.95
+    mock.messages = (_req, res, seen) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      const ev = anthropicEvents(bodyModel(seen))
+      const start = ev[0]![1] as { message: { id: string; usage: Record<string, number> } }
+      start.message.id = 'gen-cut-1'
+      start.message.usage = { input_tokens: 10, cache_read_input_tokens: 200_000, output_tokens: 1 }
+      res.end(sse(ev))
+    }
+    const { relay, failures } = makeRelay({ priceFor: () => ({ inUsdPerM: 1, outUsdPerM: 10 }), usagePollMs: 60_000, reconcileDelayMs: 1,
+      fetch: (async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(url).includes('/generation?')) reconciled.push(String(url))
+        return fetch(url, init)
+      }) as typeof fetch })
+    const h = await relay.issueTurn(binding(), { wallMaxMs: 60_000 })
+    const r = await post(h, MSG, msgBody(SLUG, { max_tokens: 100 }))
+    expect(await r.text()).toContain('message_stop')
+    expect(failures).toEqual([])
+    // Now one that really passes the cap: plain input at full price.
+    mock.messages = async (_req, res, seen) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      const ev = anthropicEvents(bodyModel(seen))
+      const start = ev[0]![1] as { message: { id: string; usage: Record<string, number> } }
+      start.message.id = 'gen-cut-2'
+      start.message.usage = { input_tokens: 200_000, output_tokens: 1 }
+      res.write(sse([ev[0]!, ev[1]!]))
+      await new Promise(rr => setTimeout(rr, 5))
+      if (!res.destroyed) res.end(sse(ev.slice(2)))
+    }
+    const r2 = await post(h, MSG, msgBody(SLUG, { max_tokens: 100 }))
+    await r2.text()
+    expect(failures).toContainEqual({ kind: 'cap_refused', status: 402 })
+    const cutSettle = ledgerRows().filter(x => x.kind === 'settle').at(-1)!
+    expect(cutSettle.generationId).toBe('gen-cut-2')
+    for (let i = 0; i < 100 && !reconciled.some(u => u.includes('gen-cut-2')); i++) await new Promise(rr => setTimeout(rr, 10))
+    expect(reconciled.some(u => u.includes('gen-cut-2'))).toBe(true)
   })
 })
 

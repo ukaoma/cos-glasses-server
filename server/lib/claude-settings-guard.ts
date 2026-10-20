@@ -58,6 +58,23 @@ export function claudeSettingsRefusalMessage(name: string): string {
   return `A Claude settings file sets ${name}. Remove it to use a key.`
 }
 
+/**
+ * Canary R12: names a settings file may set that do not bypass the relay but that a keyed run
+ * must not inherit. They are not refused (MU's own project file sets one); the keyed run's flag
+ * layer forces them off, and this reports which file set them so the log says so.
+ */
+export const CLAUDE_SETTINGS_WATCHED_ENV: readonly string[] = ['CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS']
+
+export function claudeSettingsWatched(input: { cwd: string; home?: string; env?: NodeJS.ProcessEnv; managed?: readonly string[] }): Array<{ file: string; name: string }> {
+  const out: Array<{ file: string; name: string }> = []
+  for (const file of claudeSettingsFiles(input)) {
+    const env = readSettings(file)?.env
+    if (!env || typeof env !== 'object' || Array.isArray(env)) continue
+    for (const name of CLAUDE_SETTINGS_WATCHED_ENV) if (Object.prototype.hasOwnProperty.call(env, name)) out.push({ file, name })
+  }
+  return out
+}
+
 /** The first setting that would bypass the relay, or null when a keyed spawn may go ahead. */
 export function claudeSettingsRefusal(input: { cwd: string; home?: string; env?: NodeJS.ProcessEnv; managed?: readonly string[] }): ClaudeSettingsRefusal | null {
   for (const file of claudeSettingsFiles(input)) {

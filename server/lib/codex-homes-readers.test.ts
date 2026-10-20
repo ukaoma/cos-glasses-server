@@ -219,6 +219,22 @@ describe('hook events (session-hook-events.ts)', () => {
     expect(bad.ok && 'keyProfile' in bad.envelope).toBe(false)
   })
 
+  it('canary R7: an unstamped Claude hook event of a keyed CLI session reads its profile from keyed-sessions.json, only with lanes on', async () => {
+    const keyed = await import('./keyed-sessions.js')
+    const CLAUDE_KEYED = 'c9b975ab-1111-4222-8333-444444444444'
+    keyed.recordKeyedSession({ id: CLAUDE_KEYED, engine: 'claude', profileId: 'sonnet-key', cosSessionId: 'cos-1' })
+    const claudeEnv = (sid: string) => JSON.stringify({ ts: 1760900000000, ppid: 77, event: 'PreToolUse', payload: { session_id: sid, transcript_path: `/Users/x/.claude/projects/p/${sid}.jsonl` } })
+    const off = parseHookEnvelope(claudeEnv(CLAUDE_KEYED.toUpperCase()))
+    expect(off.ok && 'keyProfile' in off.envelope).toBe(false)
+    lanesOn()
+    const on = parseHookEnvelope(claudeEnv(CLAUDE_KEYED.toUpperCase()))
+    expect(on.ok && on.envelope.keyProfile).toBe('sonnet-key')
+    expect(on.ok && on.envelope.provider).toBe('claude')
+    const other = parseHookEnvelope(claudeEnv('d0000000-1111-4222-8333-444444444444'))
+    expect(other.ok && 'keyProfile' in other.envelope).toBe(false)
+    keyed.__resetKeyedSessionsForTests()
+  })
+
   it('adds no field to a Lane A envelope', () => {
     const parsed = parseHookEnvelope(env({ transcript_path: '/Users/x/.claude/projects/p/a.jsonl' }))
     expect(parsed.ok).toBe(true)

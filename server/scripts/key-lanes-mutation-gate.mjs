@@ -43,7 +43,9 @@ const LEDGER_T = ['server/lib/key-ledger.test.ts']
 const LANEB_T = ['server/lib/lane-b-env.test.ts']
 const HOME_T = ['server/lib/codex-profile-home.test.ts']
 const PREF_T = ['server/lib/key-lanes-p6-preference.test.ts']
-const ALL = [...WIRE_T, ...ROUTE_T, ...FIELDS_T, ...CLAUDE_T, ...CODEX_T, ...BIND_T, ...JOB_T, ...READ_T, ...SESS_T, ...GUARD_T, ...CENSUS_T, ...RELAY_T, ...LEDGER_T, ...LANEB_T, ...HOME_T, ...PREF_T, 'server/lib/hazard-invariants.test.ts']
+// Real-canary fix pass
+const AT_T = ['server/lib/key-lanes-agent-teams-cli.test.ts']
+const ALL = [...WIRE_T, ...ROUTE_T, ...FIELDS_T, ...CLAUDE_T, ...CODEX_T, ...BIND_T, ...JOB_T, ...READ_T, ...SESS_T, ...GUARD_T, ...CENSUS_T, ...RELAY_T, ...LEDGER_T, ...LANEB_T, ...HOME_T, ...PREF_T, 'server/lib/hazard-invariants.test.ts', ...AT_T]
 
 const WIRING = 'server/lib/key-lanes-wiring.ts', METER = 'server/lib/key-relay-meter.ts', ROUTES = 'server/routes/key-lanes.ts'
 const CLAUDE = 'server/lib/claude-bridge.ts', CODEX = 'server/lib/codex-bridge.ts', CES = 'server/lib/codex-engine-sessions.ts'
@@ -110,7 +112,7 @@ const mutations = [
   m('detail-subagents-server-home-only', 'server/routes/agent-sessions.ts', ['detailRoots, undefined, detailRoots.length > 1 ? keyedCodexRootOf() : undefined)', 'detailRoots, undefined, undefined)'], SESS_T),
   m('detail-name-server-home-only', 'server/routes/agent-sessions.ts', ['      const names = await loadCodexThreadNamesAll(agentSessionRoots())', '      const names = new Map<string, string>()'], SESS_T),
   // ── QA fix pass: B1 secrets deny layer ──
-  m('secrets-deny-layer-dropped', 'server/lib/key-secrets-guard.ts', ["  return ['--settings', JSON.stringify({ permissions: { deny: keySecretsDenyRules() } })]", '  return []'], [...GUARD_T, ...CLAUDE_T]),
+  m('secrets-deny-layer-dropped', 'server/lib/key-secrets-guard.ts', ['    permissions: { deny: keySecretsDenyRules() },\n', ''], [...GUARD_T, ...CLAUDE_T]),
   m('secrets-deny-ignores-lanes-off', 'server/lib/key-secrets-guard.ts', ['  if (!keyLanesEnabled()) return []\n', ''], GUARD_T),
   m('secrets-deny-no-bash-rule', 'server/lib/key-secrets-guard.ts', ['  rules.push(`Bash(*${KEY_SECRETS_DIR}*)`, `Bash(*${KEY_STORE_FILE}*)`)\n', ''], GUARD_T),
   m('archive-spawn-without-deny-layer', 'server/lib/archive.ts', ["'sonnet', ...claudeKeySecretsGuardArgs(), instruction]", "'sonnet', instruction]"], CENSUS_T),
@@ -143,6 +145,22 @@ const mutations = [
   m('gone-slug-not-refused', WIRING, ['  if (models.some(m => m.id === turn.profile.model)) return null', '  return null'], WIRE_T),
   m('test-upstream-accepts-any-host', WIRING, ["    if (u.protocol === 'http:' && u.hostname === '127.0.0.1' && u.port) return u.origin", '    if (u.port) return u.origin'], WIRE_T),
   m('same-mac-copy-drift', NOTICES, ["Apps and agents that run on this Mac as you can read it.", "Apps on this Mac can read it."], WIRE_T),
+  // ── Real-canary fix pass (R12 agent teams, parallel subagents, R14 Codex, R9 cut pricing, R7 hook marker) ──
+  m('agent-teams-layer-dropped', 'server/lib/key-secrets-guard.ts', ['    ...(opts.laneB ? { env: { ...LANE_B_FORCED_SETTINGS_ENV } } : {}),\n', ''], [...CLAUDE_T, ...AT_T]),
+  m('keyed-turn-without-agent-teams-layer', CLAUDE, ['claudeKeySecretsGuardArgs(keyProfile ? { laneB: true } : {})', 'claudeKeySecretsGuardArgs()'], CLAUDE_T),
+  m('agent-teams-setting-not-watched', 'server/lib/claude-settings-guard.ts', ['    for (const name of CLAUDE_SETTINGS_WATCHED_ENV) if (Object.prototype.hasOwnProperty.call(env, name)) out.push({ file, name })\n', ''], LANEB_T),
+  m('in-flight-no-queue', 'server/lib/key-relay.ts', ['        const got = await this.waitForSlot(entry)', '        const got = false'], RELAY_T),
+  m('in-flight-slot-not-handed-over', 'server/lib/key-relay.ts', ['        if (next) next(true)\n        else entry.inFlight -= 1', '        entry.inFlight -= 1'], RELAY_T),
+  m('relay-busy-not-reported', 'server/lib/key-relay.ts', ["          if (this.turns.has(entry.hash)) this.fail(entry, 'relay_busy', 429)\n", ''], RELAY_T),
+  m('hello-probe-not-answered', 'server/lib/key-relay.ts', ["      if (req.method === 'HEAD' && path === `${RELAY_BASE_PATHS.claude}/api/hello`) {", '      if (false) {'], RELAY_T),
+  m('cache-read-priced-at-full', 'server/lib/key-relay.ts', ['read * price.inUsdPerM * CACHE_READ_PRICE_FACTOR', 'read * price.inUsdPerM'], RELAY_T),
+  m('cut-not-reconciled', 'server/lib/key-relay.ts', ["        if (cutGeneration && entry.keyKind === 'openrouter') this.scheduleReconcile(entry, cutGeneration, streamed.usd)\n", ''], RELAY_T),
+  m('cut-decision-ignores-cache-pricing', 'server/lib/key-relay.ts', ['  const cached = usage.input > 0 ? { cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite } : {}', '  const cached = {}'], RELAY_T),
+  m('codex-stream-retries-multiply', PHOME, ['export const CODEX_RELAY_STREAM_RETRIES = 0', 'export const CODEX_RELAY_STREAM_RETRIES = 2'], HOME_T),
+  m('codex-done-keeps-nonce', CODEX, ["    keyTurn?.revoke('child_close')\n", ''], CODEX_T),
+  m('codex-error-keeps-nonce', CODEX, ["    // Canary R14: a Codex child keeps retrying after the bridge ends the turn; its nonce dies now.\n    keyTurn?.revoke('cancel')\n", ''], CODEX_T),
+  m('hook-profile-not-from-record', 'server/lib/session-hook-events.ts', ['  const recorded = keyedSessionProfile(sessionId)', '  const recorded = undefined'], READ_T),
+  m('hook-profile-looked-up-with-lanes-off', 'server/lib/session-hook-events.ts', ['  if (!sessionId || !keyLanesEnabled()) return undefined', '  if (!sessionId) return undefined'], READ_T),
   // ── Nonce revoke on steer abort (P3 asked for this mutant) ──
   m('steer-abort-keeps-nonce', CLAUDE, ["    keyTurn?.revoke('steer_abort')\n", ''], CLAUDE_T),
   // ── Codex resume slot by profile ──
