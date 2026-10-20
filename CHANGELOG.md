@@ -1,4 +1,4 @@
-## 6.80.0-next.1 - Answer with your own key (opt in, off by default)
+## 6.80.0 - Answer with your own key (opt in, off by default)
 
 You can now give COS your own provider key (OpenRouter, Anthropic, OpenAI, or a compatible endpoint) and pick a key profile for a thread, so that thread answers on the key instead of your Claude or ChatGPT plan. **This is opt in. Without a key, nothing changes:** with `COS_KEY_LANES` unset or `0`, or with lanes on but no key profile saved, the server answers, spawns and writes exactly as 6.79.1 did. Turning it on and saving keys happens in COS Control on this Mac.
 
