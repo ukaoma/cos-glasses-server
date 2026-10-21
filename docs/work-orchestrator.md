@@ -144,11 +144,12 @@ them, writes the round into the card's record, sends through its own Send path a
 | Who | Route | What |
 | --- | --- | --- |
 | Lens | `POST /api/work/chat/lens-rounds` | Record a plan. 201 `{roundId, workID, state, control}`; a repeated `clientRoundId` 200, same body (answered from the store even if the card left the board). 400 `invalid_lens_round` + `field`, 404 `unknown_work`, 413 `lens_round_too_large`, 503 `work_board_unavailable` when neither Control's snapshot nor the board can say. |
-| Lens | `GET /api/work/chat/lens-rounds/:roundId` | State (`recorded`, `in_history`, `send_requested`, `sending`, `sent`, `partly_sent`, `refused`, `expired`), `inHistory`, `autoSendCard`, per assignment `{id, state, sessionID, receiptId, detail}`. Never prompts. |
-| Lens | `POST /api/work/chat/lens-rounds/:roundId/send` | 202 `{sendRequestId, state: "send_requested"}`. Omitted ids: the whole plan minus what is already sent. 409 `send_in_progress`, `already_sent`, `plan_stale`; 428 `confirmation_required` (no `confirm: "two-step"` and the card's Auto-send off); 423 `control_not_connected`. |
+| Lens | `GET /api/work/chat/lens-rounds/:roundId` | State (`recorded`, `in_history`, `send_requested`, `sending`, `sent`, `partly_sent`, `failed`, `stopped`, `refused`, `expired`), `inHistory`, `autoSendCard`, per assignment `{id, state, sessionID, receiptId, detail}`. Never prompts. |
+| Lens | `POST /api/work/chat/lens-rounds/:roundId/send` | 202 `{sendRequestId, state: "send_requested"}`. Omitted ids: the whole plan minus what is already sent (or held by COS Control). 409 `send_in_progress`, `already_sent` (with `assignmentIds`: those already sent), `plan_stale`; 428 `confirmation_required` (no `confirm: "two-step"` and the card's Auto-send off); 423 `control_not_connected`. |
 | Lens | `POST /api/work/chat/lens-rounds/:roundId/stop` | 202 `{stopRequestId, state: "stop_requested"}`; 423 without Control. |
 | Control (loopback) | `GET /api/work/chat/lens-inbox?since=<cursor>&autoSend=0\|1` | Rounds not yet in history (after `since`, with their full plan), send requests (each with its round) and stop requests (with the send they belong to), 50 at most. Listing a send or stop is its pick-up: it is listed once. `autoSend` is Settings > Work > Send plans without review, the card-independent hint. |
 | Control (loopback) | `POST /api/work/chat/lens-rounds/:roundId/history` | `{state: "in_history", autoSendCard?}` after Control wrote the round into the card's record. `autoSendCard` is the card's switch; Control re-posts it when the switch changes. |
+| Control (loopback) | `POST /api/work/chat/lens-rounds/:roundId/mac-send` | The same `{assignments: [...]}` shape, when COS Control sent assignments of the round with its own Send on the Mac (after a 423 the wearer is told to send from the Mac). Those never go again from the lens. |
 | Control (loopback) | `POST /api/work/chat/lens-send/:sendRequestId/result` | `{assignments: [{id, state, receiptId?, detail?, sessionID?}]}`, as often as states change (`held` until earlier work resolves, then `sent`; `stopped` after a Stop). |
 
 Rules the server enforces:
@@ -165,7 +166,14 @@ Rules the server enforces:
   may be asked for. A picked-up assignment Control never reports is marked `failed` after 15 minutes so the lens can
   stop polling. A round is kept 14 days; at most 200 are kept, oldest idle first.
 - **Outcome.** Every assignment terminal (`sent`, `delivered`, `failed`, `refused`, `stopped`): all sent or delivered
-  is `sent`, some is `partly_sent`, none is `refused`.
+  is `sent`, some is `partly_sent`. None: all stopped is `stopped`; all refused (or refused and stopped) is `refused`, an
+  actual refusal (confirmation, a stale plan, a COS Control check); otherwise `failed`. The lens stops polling at
+  `sent`, `partly_sent`, `failed`, `stopped`, `refused` or `expired`.
+- **Sent from the Mac.** An assignment COS Control reported through `mac-send` as `sent`, `delivered` or `held` (queued
+  behind earlier work) is already sent: naming it is 409 `already_sent` with its id, and an omitted list leaves it out.
+  The round reads as that Mac send's outcome (`partly_sent` while the rest of the plan was never sent).
+- **Recording never sends.** COS Control writes a recorded round into history and nothing else; only a lens send request
+  (two-step confirm, or the card's Auto-send plus an explicit request) or Miles's own Send on the Mac sends it.
 - **Maintenance.** Every route answers 503 `maintenance` while admissions are closed; writes hold the `api_mutation`
   lease themselves (the global mutation lease skips `/work/chat/lens-*` so the code is the contract's).
 - **Storage.** `data/work-lens-rounds.json`, 0600, atomic; an unreadable file is moved aside, never overwritten. Inside a

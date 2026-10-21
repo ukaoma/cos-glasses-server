@@ -10,6 +10,7 @@
  *   GET  /api/work/chat/lens-inbox?since=<cursor>[&autoSend=1]   rounds not yet in history, send and stop requests
  *   POST /api/work/chat/lens-rounds/:roundId/history      { state: "in_history", autoSendCard? }
  *   POST /api/work/chat/lens-send/:sendRequestId/result   { assignments: [{ id, state, receiptId?, detail?, sessionID? }] }
+ *   POST /api/work/chat/lens-rounds/:roundId/mac-send     the same shape, for COS Control's own Send of this round on the Mac
  *
  * Nothing here sends to a session: COS Control performs every send through its own Send path and reports back.
  * Every route answers 503 `maintenance` while admissions are closed; writes hold the api_mutation lease themselves
@@ -154,6 +155,15 @@ export function createWorkLensRoundsRouter(given: Partial<WorkLensRoundsDeps> = 
     }
     const round = deps.store.markInHistory(roundId, b.autoSendCard)
     return res.json(roundView(round))
+  }))
+
+  // COS Control: it sent assignments of this round with its own Send on the Mac. Same assignments[] shape as a result.
+  router.post('/work/chat/lens-rounds/:roundId/mac-send', (req, res) => write(res, 'mac-send', () => {
+    local(req)
+    const round = deps.store.reportMac(roundIdOf(req), parseResultBody(req.body))
+    const view = roundView(round)
+    console.log(`[work-lens-rounds] mac send round=${round.roundId} state=${view.state} ${view.assignments.map(a => `${a.id}:${a.state}`).join(' ')}`)
+    return res.json(view)
   }))
 
   router.post('/work/chat/lens-send/:sendRequestId/result', (req, res) => write(res, 'result', () => {

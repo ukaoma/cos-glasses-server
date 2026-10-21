@@ -257,6 +257,52 @@ describe('send this plan', () => {
   })
 })
 
+describe('COS Control sent it from the Mac', () => {
+  const confirmed = { v: 1, confirm: 'two-step', confirmedAt: '2026-10-21T14:22:00.000Z' }
+  it('a Mac send lands on the round; a lens send then never delivers those twice and an omitted list sends only the rest', async () => {
+    const h = await setup()
+    const id = await recordAndHistory(h); await poll(h)
+    const mac = await json(await h.post(`/work/chat/lens-rounds/${id}/mac-send`, { assignments: [{ id: 'a1', state: 'sent', receiptId: 'mac-r1' }] }))
+    expect(mac).toMatchObject({ status: 200, body: { state: 'partly_sent', assignments: [{ id: 'a1', state: 'sent', receiptId: 'mac-r1' }, { id: 'a2', state: 'pending' }] } })
+    expect(await json(await h.post(`/work/chat/lens-rounds/${id}/send`, { ...confirmed, assignmentIds: ['a1'] })))
+      .toMatchObject({ status: 409, body: { error: 'already_sent', assignmentIds: ['a1'] } })
+    expect((await h.post(`/work/chat/lens-rounds/${id}/send`, confirmed)).status).toBe(202)
+    expect((await poll(h)).body.sends[0].assignmentIds).toEqual(['a2'])
+  })
+  it('held on the Mac (queued behind earlier work) counts as sent; all of it sent from the Mac is already_sent, listing the ids', async () => {
+    const h = await setup()
+    const id = await recordAndHistory(h); await poll(h)
+    await h.post(`/work/chat/lens-rounds/${id}/mac-send`, { assignments: [{ id: 'a1', state: 'delivered' }, { id: 'a2', state: 'held' }] })
+    expect((await json(await h.get(`/work/chat/lens-rounds/${id}`))).body.state).toBe('sending')
+    expect(await json(await h.post(`/work/chat/lens-rounds/${id}/send`, confirmed))).toMatchObject({ status: 409, body: { error: 'already_sent', assignmentIds: ['a1', 'a2'] } })
+    await h.post(`/work/chat/lens-rounds/${id}/mac-send`, { assignments: [{ id: 'a2', state: 'sent' }] })
+    expect((await json(await h.get(`/work/chat/lens-rounds/${id}`))).body.state).toBe('sent')
+  })
+  it('the Mac route answers only this Mac and only for a known round and assignment', async () => {
+    const h = await setup()
+    const id = await recordAndHistory(h)
+    expect((await json(await h.post(`/work/chat/lens-rounds/${id}/mac-send`, { assignments: [{ id: 'a7', state: 'sent' }] }))).body.field).toBe('assignments.id')
+    expect((await json(await h.post('/work/chat/lens-rounds/lr_0123456789abcdef/mac-send', { assignments: [{ id: 'a1', state: 'sent' }] }))).status).toBe(404)
+    h.state.local = false
+    expect((await json(await h.post(`/work/chat/lens-rounds/${id}/mac-send`, { assignments: [{ id: 'a1', state: 'sent' }] }))).body.error).toBe('local_only')
+    expect((await json(await h.get(`/work/chat/lens-rounds/${id}`))).body.assignments[0].state).toBe('pending')
+  })
+})
+
+describe('round outcomes', () => {
+  const confirmed = { v: 1, confirm: 'two-step', confirmedAt: '2026-10-21T14:22:00.000Z' }
+  for (const [states, outcome] of [[['failed', 'failed'], 'failed'], [['stopped', 'stopped'], 'stopped'], [['refused', 'refused'], 'refused'], [['delivered', 'failed'], 'partly_sent']] as const) {
+    it(`${states.join(' + ')} reads ${outcome}`, async () => {
+      const h = await setup()
+      const id = await recordAndHistory(h); await poll(h)
+      const sid = (await json(await h.post(`/work/chat/lens-rounds/${id}/send`, confirmed))).body.sendRequestId
+      await poll(h)
+      const r = await json(await h.post(`/work/chat/lens-send/${sid}/result`, { assignments: [{ id: 'a1', state: states[0] }, { id: 'a2', state: states[1] }] }))
+      expect(r.body.state).toBe(outcome)
+    })
+  }
+})
+
 describe('stop', () => {
   it('202 and COS Control gets the stop with the send it belongs to; reports stopped; 423 without Control', async () => {
     const h = await setup()
@@ -383,5 +429,10 @@ describe('store: storage, bounds and pure rules', () => {
     expect(sendOutcome(['sent', 'delivered'])).toBe('sent')
     expect(sendOutcome(['sent', 'failed'])).toBe('partly_sent')
     expect(sendOutcome(['refused', 'stopped'])).toBe('refused')
+    expect(sendOutcome(['failed', 'failed'])).toBe('failed')
+    expect(sendOutcome(['stopped', 'stopped'])).toBe('stopped')
+    expect(sendOutcome(['failed', 'stopped'])).toBe('failed')
+    expect(sendOutcome(['refused', 'failed'])).toBe('failed')
+    expect(sendOutcome(['refused', 'refused'])).toBe('refused')
   })
 })

@@ -52,7 +52,11 @@ still owns every send.
   COS Control performs every send through its own Send path. A send not picked up in 10 minutes is `expired`.
   Storage `data/work-lens-rounds.json` (0600, atomic, 200 rounds, 14 days). Every route answers 503 `maintenance`
   while admissions are closed. Existing routes are unchanged (pinned). Contract: `CONTRACT_lens_plans_6.83.0_2026-10-21.md`.
-  Checks: `work-lens-rounds.test.ts` 25 tests; `server/scripts/work-lens-rounds-mutation-gate.mjs` (not packaged): green
+  QA on 6.10.651 (additive): `POST /api/work/chat/lens-rounds/:roundId/mac-send` (COS Control reports its own Send of a
+  lens round on the Mac, so a later lens send never delivers twice; `already_sent` lists the ids, and held counts as
+  sent); round outcomes add `failed` and `stopped` (all failed, all stopped), `refused` only for an actual refusal.
+  Checks after QA: `work-lens-rounds.test.ts` 32 tests; gate green baseline (40 tests in 2 files), 64 of 64 killed.
+  Checks before QA: `work-lens-rounds.test.ts` 25 tests; `server/scripts/work-lens-rounds-mutation-gate.mjs` (not packaged): green
   baseline (33 tests in 2 files), 56 of 56 mutants killed by a named test. Full suite after: 8,576 passed, 0 failed,
   3 skipped (569 files).
 - **Checks.** Full suite 8,506 passed, 0 failed, 3 skipped (563 files); `tsc --noEmit` clean. The first full run

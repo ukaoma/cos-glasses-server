@@ -39,7 +39,16 @@ const mutations = [
   ['lr-card-fork-source', LR, "if (r.sessionID && !(r.mode === 'fork' && r.sessionID === r.sourceSessionID)) out.add(r.sessionID)", "if (r.sessionID) out.add(r.sessionID)"],
   ['lr-card-fork-child', LR, "    if (r.forkChildID) out.add(r.forkChildID)\n", ''],
   // Outcomes, expiry and bounds.
-  ['lr-outcome-partly', LR, "sent > 0 ? 'partly_sent' : 'refused'", "'refused'"],
+  ['lr-outcome-partly', LR, "  if (sent > 0) return 'partly_sent'\n", ''],
+  ['lr-outcome-stopped', LR, "  if (states.every(s => s === 'stopped')) return 'stopped'\n", ''],
+  ['lr-outcome-failed', LR, "return states.every(s => s === 'refused' || s === 'stopped') ? 'refused' : 'failed'", "return 'refused'"],
+  // COS Control's own Send on the Mac (QA 6.10.651 blocker: a later lens send must never deliver twice).
+  ['lr-already-held', LR, "const ALREADY: readonly AssignmentState[] = ['sent', 'delivered', 'held']", "const ALREADY: readonly AssignmentState[] = ['sent', 'delivered']"],
+  ['lr-already-lists-ids', LR, "{ assignmentIds: r.assignments.map(a => a.id).filter(sentAlready) }", "{}"],
+  ['lr-mac-records', LR, "    r.mac = { at: now, ids: [...new Set([...(r.mac?.ids ?? []), ...results.map(x => x.id)])] }\n", ''],
+  ['lr-mac-view', LR, "  if (r.mac && (!send || r.mac.at >= send.requestedAt)) {", "  if (false) {"],
+  ['lr-mac-partial', LR, "    if (state === 'sent' && r.mac.ids.length < r.assignments.length) state = 'partly_sent'\n", ''],
+  ['rr-local-mac', RR, "    local(req)\n    const round = deps.store.reportMac", "    const round = deps.store.reportMac"],
   ['lr-settle-terminal', LR, "if (states.every(s => TERMINAL.includes(s)))", "if (true)"],
   ['lr-pickup-expiry', LR, "now - send.requestedAt > LENS_SEND_PICKUP_MS", "false"],
   ['lr-report-timeout', LR, "now - send.pickedUpAt > LENS_SEND_REPORT_MS", "false"],

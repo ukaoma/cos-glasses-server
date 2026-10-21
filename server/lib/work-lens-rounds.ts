@@ -45,13 +45,16 @@ export const SEND_ID = /^ls_[a-f0-9]{16}$/
 
 export const ASSIGNMENT_MODES = ['continue', 'fork', 'newSession'] as const
 export const ASSIGNMENT_STATES = ['pending', 'held', 'sent', 'delivered', 'failed', 'refused', 'stopped'] as const
-export const ROUND_STATES = ['recorded', 'in_history', 'send_requested', 'sending', 'sent', 'partly_sent', 'refused', 'expired'] as const
+export const ROUND_STATES = ['recorded', 'in_history', 'send_requested', 'sending', 'sent', 'partly_sent', 'failed', 'stopped', 'refused', 'expired'] as const
 export type AssignmentMode = typeof ASSIGNMENT_MODES[number]
 export type AssignmentState = typeof ASSIGNMENT_STATES[number]
 export type RoundState = typeof ROUND_STATES[number]
-type SendState = 'send_requested' | 'sending' | 'sent' | 'partly_sent' | 'refused' | 'expired'
+type SendState = 'send_requested' | 'sending' | Outcome | 'expired'
+type Outcome = 'sent' | 'partly_sent' | 'failed' | 'stopped' | 'refused'
 const TERMINAL: readonly AssignmentState[] = ['sent', 'delivered', 'failed', 'refused', 'stopped']
 const SENT_LIKE: readonly AssignmentState[] = ['sent', 'delivered']
+/** An assignment the lens may not send again: it reached its session, or COS Control holds it to send after earlier work. */
+const ALREADY: readonly AssignmentState[] = ['sent', 'delivered', 'held']
 
 export interface LensAssignment {
   id: string; mode: AssignmentMode; sessionID?: string; provider?: string; prompt: string; contextItemIDs?: string[]
@@ -69,6 +72,8 @@ export interface LensRound {
   /** The card's sessions (Control snapshot links and receipts) when the plan was recorded; null when no snapshot. */
   cardSessions: string[] | null
   sends: LensSendRequest[]; stops: LensStopRequest[]; updatedAt: number
+  /** COS Control's own Send of this round's assignments on the Mac (the lens was told to send from the Mac): when, and which. */
+  mac?: { at: number; ids: string[] } | null
 }
 interface StoreFile { version: 1; seq: number; rounds: LensRound[] }
 
@@ -146,10 +151,17 @@ export function planIsStale(round: LensRound, now: string[] | null): boolean {
   return after.length !== before.size || after.some(s => !before.has(s))
 }
 
-/** Where a picked-up send ended, from its assignments. */
-export function sendOutcome(states: AssignmentState[]): 'sent' | 'partly_sent' | 'refused' {
+/**
+ * Where a send ended, from its assignments (all final). All reached their sessions: `sent`; some: `partly_sent`. None:
+ * `stopped` when every one was stopped, `refused` when every one not stopped was refused (confirmation, a stale plan, a
+ * COS Control check), otherwise `failed`.
+ */
+export function sendOutcome(states: AssignmentState[]): Outcome {
   const sent = states.filter(s => SENT_LIKE.includes(s)).length
-  return sent === states.length ? 'sent' : sent > 0 ? 'partly_sent' : 'refused'
+  if (sent === states.length) return 'sent'
+  if (sent > 0) return 'partly_sent'
+  if (states.every(s => s === 'stopped')) return 'stopped'
+  return states.every(s => s === 'refused' || s === 'stopped') ? 'refused' : 'failed'
 }
 
 export interface ControlSeen { at: number; autoSend: boolean }
@@ -256,9 +268,11 @@ export class LensRoundStore {
     if (this.active(r)) throw new LensRoundError('send_in_progress', 409, 'This plan is already being sent.')
     const known = new Set(r.assignments.map(a => a.id))
     if (body.assignmentIds && body.assignmentIds.some(id => !known.has(id))) throw invalid('assignmentIds', 'That assignment is not in this plan.')
-    const sentAlready = (id: string) => SENT_LIKE.includes(r.assignments.find(a => a.id === id)!.state)
+    const sentAlready = (id: string) => ALREADY.includes(r.assignments.find(a => a.id === id)!.state)
     const ids = body.assignmentIds ? [...new Set(body.assignmentIds)] : r.assignments.map(a => a.id).filter(id => !sentAlready(id))
-    if (!ids.length || ids.some(sentAlready)) throw new LensRoundError('already_sent', 409, 'This plan was already sent.')
+    if (!ids.length || ids.some(sentAlready)) {
+      throw new LensRoundError('already_sent', 409, 'This plan was already sent.', { assignmentIds: r.assignments.map(a => a.id).filter(sentAlready) })
+    }
     if (planIsStale(r, checks.cardSessions)) throw new LensRoundError('plan_stale', 409, "This card's sessions changed since the plan. Plan again.")
     if (body.confirm !== 'two-step' && !r.autoSendCard) throw new LensRoundError('confirmation_required', 428, 'Confirm on the lens to send this plan.')
     if (!checks.controlConnected) throw new LensRoundError('control_not_connected', 423, 'COS Control is not connected. The plan is saved; send it from the Mac.')
@@ -331,6 +345,28 @@ export class LensRoundStore {
     return r
   }
 
+  /**
+   * COS Control sent assignments of this round with its own Send on the Mac (no lens send request). Their states land on
+   * the round, so a later lens send never delivers them twice (`already_sent`) and an omitted list sends only the rest.
+   */
+  reportMac(roundId: string, results: { id: string; state: AssignmentState; receiptId?: string; detail?: string; sessionID?: string }[]): LensRound {
+    const r = this.find(roundId)
+    if (!r) throw new LensRoundError('unknown_round', 404, 'This plan is not on the server any more.')
+    if (results.some(x => !r.assignments.some(a => a.id === x.id))) throw invalid('assignments.id', 'That assignment is not in this plan.')
+    const now = this.now(), at = new Date(now).toISOString()
+    for (const x of results) {
+      const a = r.assignments.find(y => y.id === x.id)!
+      a.state = x.state; a.updatedAt = at
+      if (x.receiptId) a.receiptId = x.receiptId
+      if (x.detail !== undefined) a.detail = x.detail
+      if (x.sessionID) a.reportedSessionID = x.sessionID
+    }
+    r.mac = { at: now, ids: [...new Set([...(r.mac?.ids ?? []), ...results.map(x => x.id)])] }
+    r.updatedAt = now
+    this.persist()
+    return r
+  }
+
   report(sendRequestId: string, results: { id: string; state: AssignmentState; receiptId?: string; detail?: string; sessionID?: string }[]): LensRound {
     this.tick()
     const r = this.file.rounds.find(x => x.sends.some(s => s.id === sendRequestId))
@@ -386,7 +422,14 @@ export function parseResultBody(v: unknown): { id: string; state: AssignmentStat
 /** The round as the lens reads it: state, never the prompts. */
 export function roundView(r: LensRound) {
   const send = r.sends[r.sends.length - 1]
-  const state: RoundState = send ? send.state : r.inHistory ? 'in_history' : 'recorded'
+  let state: RoundState = send ? send.state : r.inHistory ? 'in_history' : 'recorded'
+  // The newest send was COS Control's own on the Mac: the round reads as that send's outcome.
+  if (r.mac && (!send || r.mac.at >= send.requestedAt)) {
+    const states = r.assignments.filter(a => r.mac!.ids.includes(a.id)).map(a => a.state)
+    state = states.length && states.every(s => TERMINAL.includes(s)) ? sendOutcome(states) : 'sending'
+    // Part of the plan sent from the Mac and the rest never sent: partly sent, and the rest may still go from the lens.
+    if (state === 'sent' && r.mac.ids.length < r.assignments.length) state = 'partly_sent'
+  }
   return {
     roundId: r.roundId, workID: r.workID, state, inHistory: r.inHistory, autoSendCard: r.autoSendCard,
     assignments: r.assignments.map(a => ({ id: a.id, state: a.state, ...(a.reportedSessionID ?? a.sessionID ? { sessionID: a.reportedSessionID ?? a.sessionID } : {}),
