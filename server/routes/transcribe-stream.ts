@@ -15,7 +15,8 @@ import { chmodSync, readFileSync, writeFileSync, existsSync, lstatSync, mkdirSyn
 import { writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { getVocabulary, getOwnerName, getOwnerSpeakerLabel } from '../lib/profile.js'
+import { getVocabulary, getOwnerName, getOwnerSpeakerLabel, getWhisperCorrections } from '../lib/profile.js'
+import { decoderContextWindow } from '../lib/glossary-learn.js'
 import { getOpenAIKey } from '../lib/openai-key.js'
 import { getTranscriptionPolicySnapshot, isOpenAIWhisperFallbackReady } from '../lib/transcription-policy.js'
 import { STRANDED_STALE_MS } from '../lib/stranded-sessions.js'
@@ -1946,7 +1947,13 @@ function recentWhisperContext(sessionId: string, session: TranscriptSession): st
     .map(c => c.text)
     .join(' ')
   const cleanedContext = stripInlineHallucinations(recentText, sessionId)
-  return cleanedContext.length > 250 ? cleanedContext.slice(-250) : cleanedContext
+  // 6.83.1: correction-only forms ("/pricing") go back to speech BEFORE the 250-character cut.
+  return decoderContextWindow(cleanedContext, decoderCorrections()) ?? ''
+}
+
+/** The corrections map for the decoder window; a test double without it reads as none. */
+function decoderCorrections(): Record<string, string> {
+  try { return getWhisperCorrections() } catch { return {} }
 }
 
 function isCrossChunkRepeat(session: TranscriptSession, text: string): boolean {

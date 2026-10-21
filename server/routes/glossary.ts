@@ -8,7 +8,9 @@
 //     left unchanged). whisper_corrections is stored as a JSON STRING in the
 //     profile (legacy decoder contract), so the route encodes/decodes it here.
 //   POST /api/transcription-glossary/correction {heard, written, source} → learn
-//     ONE correction and its spelling (6.73.11, Fix a word), logged for undo.
+//     ONE correction and its spelling (6.73.11, Fix a word), logged for undo. A
+//     written link, email or path is a correction only (6.83.1): the answer adds
+//     correctionOnly: true and a note, and the vocabulary is untouched.
 //   GET  /api/transcription-glossary/recent → { entries } newest first.
 //   POST /api/transcription-glossary/correction/undo {id} → revert that entry.
 //   POST /api/transcription-glossary/vocabulary/add {term}, /vocabulary/remove {term},
@@ -32,6 +34,8 @@ import {
   MAX_TERM_LEN,
   addVocabulary,
   appendLog,
+  CORRECTION_ONLY_NOTE,
+  isCorrectionOnly,
   learnCorrection,
   looksLikeUrlEmailPath,
   parseLog,
@@ -219,7 +223,15 @@ export function glossaryLearnCorrection(body: unknown): Promise<Outcome> {
     if (!learned.ok) return { status: learned.status, body: { error: learned.error } }
     if (learned.unchanged) return { status: 200, body: { unchanged: true, entry: null, glossary: currentGlossary() } }
     commitWords(learned.words, appendLog(previousLog, learned.entry), previousLog)
-    return { status: 200, body: { unchanged: false, entry: learned.entry, glossary: currentGlossary() } }
+    // 6.83.1: a link, email or path is kept as a correction only; say so in words a client can show.
+    const correctionOnly = isCorrectionOnly(learned.entry.written)
+    return {
+      status: 200,
+      body: {
+        unchanged: false, entry: learned.entry, glossary: currentGlossary(),
+        ...(correctionOnly ? { correctionOnly: true, note: CORRECTION_ONLY_NOTE } : {}),
+      },
+    }
   })
 }
 

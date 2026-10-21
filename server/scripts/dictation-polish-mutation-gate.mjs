@@ -78,11 +78,12 @@ const mutations = [
   ['finalize-reports-prewarm', PD, ', ...(prewarm ? { prewarm } : {}),\n  })', ',\n  })'],
   ['draft-reports-reason', PD, '    ...(polishSkipped ? { polishSkipped } : {}),\n', ''],
   // Prompt switch.
-  ['env-selects-version', C, "  return raw === 'v1' || raw === 'v2' ? raw : DEFAULT_DICTATION_POLISH_PROMPT", '  return DEFAULT_DICTATION_POLISH_PROMPT'],
+  ['env-selects-version', C, "  return raw === 'v1' || raw === 'v2' || raw === 'v3' ? raw : DEFAULT_DICTATION_POLISH_PROMPT", '  return DEFAULT_DICTATION_POLISH_PROMPT'],
   ['explicit-version-wins', C, '  const version = opts.promptVersion ?? dictationPolishPromptVersion()', '  const version = dictationPolishPromptVersion()'],
   ['system-prompt-follows-version', C, 'DICTATION_POLISH_SYSTEM_PROMPTS[version]', 'DICTATION_POLISH_SYSTEM_PROMPTS.v2'],
   ['v1-is-byte-identical', C, "doubled words, stray filler, and the known spellings below.'", "doubled words, stray filler, fillers, and the known spellings below.'"],
-  ['default-is-v2', C, "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v2'", "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v1'"],
+  // 6.83.1: v3 is the default; v2 stays selectable byte for byte.
+  ['default-is-v3', C, "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v3'", "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v2'"],
   // 6.79.2: skip when clean.
   ['need-backtrack', N, "  if (BACKTRACK.test(trimmed)) return 'backtrack'\n", ''],
   ['need-comma-no-comma', N, "|i meant|no no)\\b|,\\s*no\\s*,/i", "|i meant|no no)\\b/i"],

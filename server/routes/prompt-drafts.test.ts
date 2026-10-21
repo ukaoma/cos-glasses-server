@@ -371,6 +371,64 @@ describe('public prompt draft recovery contract', () => {
     expect(autoCleanDictation).toHaveBeenLastCalledWith('Um, ask Dana', expect.any(Array), expect.anything())
   })
 
+  // 6.83.1. Synthetic text only.
+  it('6.83.1: "forward slash pricing," reaches the model and the skipped path as "/pricing,"; meetings stay faithful', async () => {
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = '1'
+    await finalizeText('Track demo, forward slash pricing, forward slash build and price', 'message')
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('Track demo, /pricing, forward slash build and price', expect.any(Array), expect.anything())
+    const capped = await finalizeText('Go to forward slash pricing.', 'message')
+    expect(capped.json).toEqual({ text: 'Go to /pricing.', surface: 'message', polished: true, polishSkipped: 'daily_cap' })
+    await finalizeText('Go to forward slash pricing.', 'meeting')
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('Go to forward slash pricing.', expect.any(Array), expect.anything())
+  })
+
+  it('6.83.1: COS_DICTATION_SPOKEN_PATHS=0 leaves the words for the model', async () => {
+    process.env.COS_DICTATION_SPOKEN_PATHS = '0'
+    try {
+      await finalizeText('Go to forward slash pricing.', 'message')
+      expect(autoCleanDictation).toHaveBeenLastCalledWith('Go to forward slash pricing.', expect.any(Array), expect.anything())
+    } finally { delete process.env.COS_DICTATION_SPOKEN_PATHS }
+  })
+
+  it('6.83.1: a polish that invents a link is refused and the pre-polish text goes out', async () => {
+    autoCleanDictation.mockImplementation(async () => 'Check quilt.com for details.')
+    const invented = await finalizeText('check our website for details', 'message')
+    expect(invented.json).toEqual({ text: 'check our website for details', surface: 'message', polished: false, polishSkipped: 'link_guard' })
+    // A link the speaker spelled out is kept.
+    autoCleanDictation.mockImplementation(async () => 'Mail sam@example.com today.')
+    const spelled = await finalizeText('mail sam at example dot com today', 'message')
+    expect(spelled.json).toEqual({ text: 'Mail sam@example.com today.', surface: 'message', polished: true })
+  })
+
+  it('6.83.1: a polish that drops a link the dictionary wrote is refused', async () => {
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(process.env.COS_PROFILE_PATH!, JSON.stringify({ vocabulary: ['Quilt'], whisper_corrections: JSON.stringify({ 'forward slash pricing': '/pricing' }) }))
+    const profileModule = await import('../lib/profile.js')
+    profileModule.clearProfileCache()
+    try {
+      autoCleanDictation.mockImplementation(async () => 'Go to the pricing page.')
+      const lost = await finalizeText('go to /pricing', 'message')
+      expect(lost.json).toMatchObject({ text: 'go to /pricing', polished: false, polishSkipped: 'link_guard' })
+      // Any case: "/Pricing" in the answer still holds the dictionary's link.
+      autoCleanDictation.mockImplementation(async () => 'Go to /Pricing.')
+      expect((await finalizeText('go to /pricing', 'message')).json).toMatchObject({ text: 'Go to /Pricing.', polished: true })
+      // A corrected spelling from the vocabulary is not an invented link.
+      autoCleanDictation.mockImplementation(async () => 'See quilt.com.')
+      expect((await finalizeText('see kwilt dot com', 'message')).json).toMatchObject({ text: 'See quilt.com.', polished: true })
+      // A misheard name with no dictionary spelling is still an invented link.
+      autoCleanDictation.mockImplementation(async () => 'See quill.com.')
+      expect((await finalizeText('see kwilt dot com', 'message')).json).toMatchObject({ polishSkipped: 'link_guard' })
+      // The vocabulary handed to the model holds no path: the known spellings are vocabulary only.
+      expect(autoCleanDictation).toHaveBeenCalledWith('go to /pricing', ['Quilt'], expect.anything())
+      autoCleanDictation.mockImplementation(async () => 'Go to /pricing.')
+      expect((await finalizeText('go to /pricing', 'message')).json).toEqual({ text: 'Go to /pricing.', surface: 'message', polished: true })
+    } finally {
+      const { rmSync: rm } = await import('node:fs')
+      rm(process.env.COS_PROFILE_PATH!, { force: true })
+      profileModule.clearProfileCache()
+    }
+  })
+
   // 6.79.2. Synthetic text only.
   const finalizeWarm = (body: Record<string, unknown>) =>
     httpRequest('POST', '/api/dictation/finalize', JSON.stringify({ surface: 'message', autocleanModel: 'haiku', ...body }))

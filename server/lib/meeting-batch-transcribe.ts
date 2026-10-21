@@ -24,7 +24,15 @@ import { MAC_CAPTURE_ID } from './mac-recording.js'
 import { MacParakeetUnavailableError } from './mac-recording-asr.js'
 import { transcribeParakeet, type ParakeetResult, type ParakeetRunOptions } from './parakeet.js'
 import { isDeletionProneEngine, resolveHypotheses, RESOLVER_VERSION, type Hypothesis } from './stt-resolver.js'
-import { getVocabulary } from './profile.js'
+import { getVocabulary, getWhisperCorrections } from './profile.js'
+import { decoderContextWindow } from './glossary-learn.js'
+
+/** 6.83.1: the decoder's priming window, with correction-only forms put back to speech before the cut. */
+function decoderWindow(previousText?: string): string | undefined {
+  let corrections: Record<string, string> = {}
+  try { corrections = getWhisperCorrections() } catch { /* a test double without it reads as none */ }
+  return decoderContextWindow(previousText, corrections)
+}
 import { captureSpeakerMode, policyLabel } from './meeting-speaker-policy.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { isMetalBatchPreempted } from './whisper-metal-gate.js'
@@ -526,7 +534,7 @@ async function decodeWhisperOnce(
   audioDir: string,
 ): Promise<HighQualityTranscriptionResult> {
   try {
-    return await deps.whisper(input, previousText?.slice(-250), { priority: 'batch', timestamps })
+    return await deps.whisper(input, decoderWindow(previousText), { priority: 'batch', timestamps })
   } catch (error) {
     // A live meeting took the GPU mid-segment. The truncated Metal output
     // was already discarded upstream (BLOCKER contract) — it is never
@@ -539,7 +547,7 @@ async function decodeWhisperOnce(
       + 'retrying once on CPU',
     )
     refreshPendingLease(audioDir)
-    return deps.whisper(input, previousText?.slice(-250), { priority: 'batch', forceCpu: true, forceCpuReason: 'preempt_retry', timestamps })
+    return deps.whisper(input, decoderWindow(previousText), { priority: 'batch', forceCpu: true, forceCpuReason: 'preempt_retry', timestamps })
   }
 }
 
@@ -1043,7 +1051,7 @@ function queueProgressiveWork(sessionId: string, state: ProgressiveSessionState)
       const identity = currentCheckpointIdentity()
       const enhanced = await asrFrontEnd(combined, identity.frontEnd)
       if (controller.signal.aborted || state.closed) return
-      const decoded = await transcribeHighQuality(enhanced, pending.previousText?.slice(-250), {
+      const decoded = await transcribeHighQuality(enhanced, decoderWindow(pending.previousText), {
         priority: 'batch',
         forceCpu: true,
         forceCpuReason: 'progressive_checkpoint',

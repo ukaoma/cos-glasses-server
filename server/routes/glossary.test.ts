@@ -165,9 +165,10 @@ describe('glossary route', () => {
     expect(recent.json.entries).toHaveLength(3)
   })
 
+  // 6.83.1: "gotcos.com" is now a correction-only learn (glossary-correction-only.test.ts); a bare "/" is still refused.
   it('POST correction refuses bad input without writing', async () => {
     const before = readFileSync(profilePath, 'utf-8')
-    for (const body of [{ heard: 'x', written: 'gotcos.com', source: 'manual' }, { heard: 'x', written: 'y', source: 'nope' }, { heard: 'x' }]) {
+    for (const body of [{ heard: 'slash', written: '/', source: 'manual' }, { heard: 'x', written: 'y', source: 'nope' }, { heard: 'x' }]) {
       const res = await httpRequest('POST', '/api/transcription-glossary/correction', body)
       expect(res.status).toBe(400)
     }

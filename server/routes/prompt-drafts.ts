@@ -49,7 +49,9 @@ import {
   discardPolishPrewarm, isPrewarmModel, prewarmEnabled, PrewarmUnavailableError, runWarmPolish,
   startPolishPrewarm, takePolishPrewarm,
 } from '../lib/dictation-prewarm.js'
-import { getVocabulary } from '../lib/profile.js'
+import { getVocabulary, getWhisperCorrections } from '../lib/profile.js'
+import { correctionOnlyForms } from '../lib/glossary-learn.js'
+import { polishLinkProblem, renderSpokenPaths, spokenPathsEnabled } from '../lib/dictation-format.js'
 import { createBreaker } from '../lib/claude-circuit.js'
 import { logTokenAudit } from '../lib/token-audit.js'
 import { emitDisplay } from '../lib/display-bus.js'
@@ -90,7 +92,7 @@ const autoCleanBreakers = {
 const autoCleanDefaultEnabled = () => ['1', 'true', 'on'].includes((process.env.COS_DICTATION_AUTOCLEAN ?? '').toLowerCase())
 
 /** 6.79.1, additive on finalize answers: why the polish model did not run (or did not finish). */
-export type PolishSkipped = 'disabled' | 'too_long' | 'breaker_open' | 'daily_cap' | 'failed' | 'clean'
+export type PolishSkipped = 'disabled' | 'too_long' | 'breaker_open' | 'daily_cap' | 'failed' | 'clean' | 'link_guard'
 /** 6.79.2, additive when finalize was given a prewarmToken: what became of that warm process. */
 export type PrewarmOutcome = 'used' | 'missed' | 'discarded'
 
@@ -144,6 +146,9 @@ async function polishOutboundDictation(
   }
   // 6.79.1: um/uh never survive a skipped polish. Meeting lines stay faithful.
   if (opts.bucket !== 'meeting' && fillerPassEnabled()) cleaned = stripDisfluencies(cleaned)
+  // 6.83.1: "forward slash pricing," is "/pricing," even when the model is skipped. One word
+  // at a phrase end only; slugs of several words are the model's (dictation-format.ts).
+  if (opts.bucket !== 'meeting' && spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)
   if (!(opts.enabled ?? autoCleanDefaultEnabled())) return { text: cleaned, polishSkipped: 'disabled' }
   const model = opts.model ?? 'haiku'
   const autoCleanBreaker = autoCleanBreakers[model]
@@ -174,6 +179,14 @@ async function polishOutboundDictation(
       source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: polished.length,
       durationMs: Date.now() - startedAt, caller: `dictation_autoclean_${opts.bucket}`,
     })
+    // 6.83.1: the model never invents a link and never drops one the dictionary wrote. Its
+    // answer is refused (the pre-polish text goes out, polishSkipped "link_guard") rather than
+    // pasting a URL nobody said. The call still counted: it ran.
+    const linkProblem = polished ? polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary()) : null
+    if (linkProblem) {
+      console.warn(`[prompt-draft] auto-clean answer refused: ${linkProblem}`)
+      return { text: cleaned, ...(prewarm ? { prewarm } : {}), polishSkipped: 'link_guard' }
+    }
     return { text: polished || cleaned, ...(prewarm ? { prewarm } : {}) }
   } catch (err: any) {
     autoCleanBreaker.recordFailure()
