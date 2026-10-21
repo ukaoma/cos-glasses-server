@@ -100,6 +100,7 @@ import { archiveRouter } from './routes/archive.js'
 import { sessionsRouter } from './routes/sessions.js'
 import { mediaRouter, mediaBodyParser, mediaBinaryBodyParser } from './routes/media.js'
 import { promptDraftsRouter } from './routes/prompt-drafts.js'
+import { dictationPolishSettingsRouter } from './routes/dictation-polish-settings.js'
 import { cliDebugRouter } from './routes/cli-debug.js'
 import { maintenanceRouter } from './routes/maintenance.js'
 import { ttsRouter } from './routes/tts.js'
@@ -1203,6 +1204,8 @@ app.use('/api', archiveRouter)
 app.use('/api', sessionsRouter)
 app.use('/api', mediaRouter)
 app.use('/api', promptDraftsRouter)
+// 6.85.0: Your polish instructions (GET/PUT/DELETE) and the built-in rules view.
+app.use('/api', dictationPolishSettingsRouter)
 app.use('/api', cliDebugRouter)
 app.use('/api', maintenanceRouter)
 app.use('/api', ttsRouter)

@@ -12,6 +12,7 @@ let transcribeAudioBuffer: ReturnType<typeof vi.fn>
 let transcribeWhisperPreview: ReturnType<typeof vi.fn>
 let emitDisplay: ReturnType<typeof vi.fn>
 let autoCleanDictation: ReturnType<typeof vi.fn>
+let logTokenAudit: ReturnType<typeof vi.fn>
 let prewarm: {
   start: ReturnType<typeof vi.fn>; take: ReturnType<typeof vi.fn>; run: ReturnType<typeof vi.fn>; discard: ReturnType<typeof vi.fn>
 }
@@ -77,6 +78,8 @@ async function startServer(): Promise<void> {
     emitDisplay = vi.fn((event) => event)
     return { emitDisplay }
   })
+  // 6.85.0: the polish audit row, captured (and kept out of any real audit file).
+  vi.doMock('../lib/token-audit.js', async (original) => ({ ...(await original<object>()), logTokenAudit: (logTokenAudit = vi.fn()) }))
   const { promptDraftsRouter } = await import('./prompt-drafts.js')
   const app = express()
   app.use(express.json({ limit: '20kb' }))
@@ -132,6 +135,7 @@ describe('public prompt draft recovery contract', () => {
     vi.doUnmock('../lib/dictation-clean.js')
     vi.doUnmock('../lib/display-bus.js')
     vi.doUnmock('../lib/dictation-prewarm.js')
+    vi.doUnmock('../lib/token-audit.js')
     delete process.env.COS_PROMPT_DRAFT_DIR
     delete process.env.COS_DICTATION_AUTOCLEAN_COUNT_FILE
     delete process.env.COS_HQ_SPECULATIVE_WARM
@@ -833,5 +837,76 @@ describe('public prompt draft recovery contract', () => {
     expect(busy.status).toBe(204)
     resolvePeek({ text: 'first peek', backend: 'whisper-preview-server', model: 'small.en' })
     expect((await first).status).toBe(200)
+  })
+
+  // 6.85.0 "Your polish instructions". Synthetic text only.
+  async function withInstructions(value: string, run: () => Promise<void>) {
+    const store = await import('../lib/dictation-polish-instructions.js')
+    store.writeCustomInstructions(value)
+    try { await run() } finally { store.writeCustomInstructions('') }
+  }
+
+  it('6.85.0: Mac dictation and G2 messages (surface message) give the model the instructions, cold and warm', async () => {
+    const { customInstructionsHash } = await import('../lib/dictation-polish-instructions.js')
+    await withInstructions('Use Oxford commas.', async () => {
+      autoCleanDictation.mockImplementation(async () => 'Send the deck, notes, and plan.')
+      const cold = await finalizeText('send the deck notes and plan', 'message', 'haiku')
+      expect(autoCleanDictation).toHaveBeenCalledWith('send the deck notes and plan', expect.any(Array), expect.objectContaining({ customInstructions: 'Use Oxford commas.' }))
+      // Additive: a hash of the instructions, never their words.
+      expect(cold.json).toEqual({
+        text: 'Send the deck, notes, and plan.', surface: 'message', polished: true,
+        customInstructions: true, instructionsHash: customInstructionsHash('Use Oxford commas.'),
+      })
+      expect(JSON.stringify(cold.json)).not.toContain('Oxford')
+      // The audit row says the instructions were sent, by hash, never their words.
+      expect(logTokenAudit).toHaveBeenCalledWith(expect.objectContaining({
+        caller: 'dictation_autoclean_message', polishInstructions: { on: true, hash: customInstructionsHash('Use Oxford commas.') },
+      }))
+      expect(JSON.stringify(logTokenAudit.mock.calls)).not.toContain('Oxford')
+      const warm = await finalizeWarm({ text: 'Send the deck to Dana', prewarmToken: WARM_TOKEN })
+      expect(prewarm.run).toHaveBeenCalledWith(expect.anything(), 'Send the deck to Dana', expect.any(Array), expect.objectContaining({ customInstructions: 'Use Oxford commas.' }))
+      expect(warm.json).toMatchObject({ prewarm: 'used', customInstructions: true })
+    })
+  })
+
+  it('6.85.0: meeting lines stay on the built-in rules alone', async () => {
+    await withInstructions('Use Oxford commas.', async () => {
+      const meeting = await finalizeText('The forecast is ready', 'meeting')
+      expect(autoCleanDictation).toHaveBeenCalledWith('The forecast is ready', expect.any(Array), expect.objectContaining({ customInstructions: '' }))
+      expect(meeting.json).toEqual({ text: 'The forecast is ready', surface: 'meeting', polished: false })
+    })
+  })
+
+  it('6.85.0: prompt drafts (G2 server dictation) give the model the instructions', async () => {
+    await withInstructions('Write product names as Bottle POS.', async () => {
+      transcribeAudioBuffer.mockResolvedValue({ text: 'Open bottle pos.', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', elapsedMs: 20, audioBytes: 3200 })
+      const started = await httpRequest('POST', '/api/prompt-drafts/start')
+      await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+      await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
+      const result = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast&autoclean=1&autocleanModel=haiku`)
+      expect(result.status).toBe(200)
+      expect(autoCleanDictation).toHaveBeenCalledWith('Open bottle pos.', expect.any(Array), expect.objectContaining({ customInstructions: 'Write product names as Bottle POS.' }))
+      expect(result.json).toMatchObject({ customInstructions: true, instructionsHash: expect.stringMatching(/^[0-9a-f]{8}$/) })
+    })
+  })
+
+  it('6.85.0: with no instructions the model gets "" and every answer is unchanged', async () => {
+    autoCleanDictation.mockImplementation(async (text: string) => `${text} Polished.`)
+    const message = await finalizeText('Ask Dana', 'message')
+    expect(autoCleanDictation).toHaveBeenCalledWith('Ask Dana', expect.any(Array), expect.objectContaining({ customInstructions: '' }))
+    expect(message.json).toEqual({ text: 'Ask Dana Polished.', surface: 'message', polished: true })
+    expect(logTokenAudit).toHaveBeenCalledWith(expect.objectContaining({ polishInstructions: { on: false, hash: '' } }))
+  })
+
+  it('6.85.0: when the model is not called the instructions are not claimed', async () => {
+    await withInstructions('Use Oxford commas.', async () => {
+      process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = '1'
+      await finalizeText('First', 'message')
+      expect((await finalizeText('Second', 'message')).json).toEqual({ text: 'Second', surface: 'message', polished: false, polishSkipped: 'daily_cap' })
+      // A failed or refused model answer still says the instructions were sent.
+      delete process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE
+      autoCleanDictation.mockImplementation(async () => { throw new Error('down') })
+      expect((await finalizeText('Third', 'message')).json).toMatchObject({ polishSkipped: 'failed', customInstructions: true })
+    })
   })
 })

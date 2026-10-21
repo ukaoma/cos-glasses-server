@@ -83,7 +83,7 @@ const mutations = [
   ['handle-token', DF, '  HANDLE.source,\n', ''],
   ['guard-gets-dictionary-links', PD, 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary())', 'polishLinkProblem(cleaned, polished, [], getVocabulary())'],
   ['guard-gets-vocabulary', PD, 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary())', 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()))'],
-  ['guard-reason-named', PD, "polishSkipped: 'link_guard' }", "polishSkipped: 'failed' }"],
+  ['guard-reason-named', PD, "polishSkipped: 'link_guard', ...used }", "polishSkipped: 'failed', ...used }"],
   ['vocabulary-never-links', 'server/lib/profile.ts', ' || seen.has(key) || looksLikeUrlEmailPath(term)) return []', ' || seen.has(key)) return []'],
   // Route wiring.
   ['guard-wired', PD, '    if (linkProblem) {', '    if (false) {'],

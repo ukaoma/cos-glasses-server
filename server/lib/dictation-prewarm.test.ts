@@ -246,3 +246,14 @@ describe('6.79.2 polish prewarm', () => {
     for (const off of ['0', 'false', ' OFF ']) expect(prewarmEnabled({ COS_DICTATION_PREWARM: off }), off).toBe(false)
   })
 })
+
+describe('6.85.0 polish instructions on the warm call', () => {
+  it('the one message carries the instructions; the process was started without them', async () => {
+    const { token } = startPolishPrewarm('haiku')
+    const entry = takePolishPrewarm(token, 'haiku')!
+    await runWarmPolish(entry, 'order five actually six', ['Quilt'], { customInstructions: 'Use Oxford commas.' })
+    const sent = JSON.parse(children[0].written.trim())
+    expect(sent.message.content).toBe(buildDictationPolishPrompt('order five actually six', ['Quilt'], 'v3', 'Use Oxford commas.'))
+    expect(JSON.stringify(children[0].args)).not.toContain('Oxford')
+  })
+})

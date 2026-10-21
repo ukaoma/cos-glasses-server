@@ -34,6 +34,8 @@ export interface TokenAuditEntry extends TokenAuditKeyFields {
   sessionId?: string
   clientJobId?: string
   usageKind?: 'provider_final' | 'estimated'
+  /** 6.85.0, dictation polish only: whether the user's polish instructions were in the prompt, and their hash. */
+  polishInstructions?: { on: boolean; hash: string }
 }
 
 /**
@@ -61,6 +63,11 @@ export function buildTokenAuditRecord(entry: TokenAuditEntry, now: Date = new Da
     ...(entry.lane ? { lane: entry.lane } : {}),
     ...(entry.credentialKind ? { credentialKind: entry.credentialKind } : {}),
     ...(typeof entry.usd === 'number' && Number.isFinite(entry.usd) ? { usd: entry.usd } : {}),
+    // 6.85.0: set only by the dictation polish caller, so every other row is unchanged. Never the text.
+    ...(entry.polishInstructions ? {
+      custom_instructions: entry.polishInstructions.on,
+      ...(entry.polishInstructions.hash ? { instructions_hash: entry.polishInstructions.hash } : {}),
+    } : {}),
   }
 }
 

@@ -801,6 +801,29 @@ VOICE) follow the same settings. Contract and measurements:
   without the model (`polishSkipped: "clean"`). Off by default: it cannot see
   a mis-heard name.
 
+### Your polish instructions (6.85.0)
+
+Extra direction for AI polish, written by the person, layered after the
+built-in polish rules, which keep precedence.
+
+- `GET /api/dictation/polish/instructions` answers `{customInstructions,
+  enabled, updatedAt, instructionsHash, maxChars: 1000, appliesTo}`.
+  `PUT` with `{"customInstructions": "..."}` saves (control and invisible
+  characters and the prompt's own tags are removed, then trimmed; over 1,000
+  characters is 413 `instructions_too_long`); `""` or `DELETE` turns it off.
+  Stored in `<data>/dictation-polish-instructions.json` (0600).
+- `GET /api/dictation/polish/rules` shows the built-in rules in use
+  (`version` v3, or v2 under `COS_DICTATION_POLISH_PROMPT=v2`, `rolledBack`)
+  and the block the instructions go into.
+- They apply to Mac dictation and G2 messages (`/api/dictation/finalize`
+  surface `message`) and prompt drafts, never to meeting lines. When the model
+  was given them, the finalize and prompt-draft answers add
+  `customInstructions: true` and `instructionsHash` (8 hex characters, never
+  the text); the token audit row adds `custom_instructions` and
+  `instructions_hash`.
+- Clients detect it with `capabilities.dictationCleanup.customInstructions`
+  (`{protocol: 1, maxChars: 1000}`) on `/api/health` and `/api/models`.
+
 ### Parakeet (FluidAudio CoreML, offline)
 
 `POST /api/stt-settings/parakeet/install` installs FluidAudio's `fluidaudiocli`

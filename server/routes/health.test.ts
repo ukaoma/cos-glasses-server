@@ -336,7 +336,11 @@ describe('display-stream capability advertisement', () => {
     // yet, and an old server simply omits the key — which is how a new client
     // detects support at all.
     const body = await (await fetch(`${base}/api/health`)).json() as any
-    expect(body.capabilities?.dictationCleanup).toEqual({ models: ['haiku', 'sonnet', 'luna-5.6-fast'] })
+    // 6.85.0: Your polish instructions. Codes and numbers only (this route is public).
+    expect(body.capabilities?.dictationCleanup).toEqual({ models: ['haiku', 'sonnet', 'luna-5.6-fast'], customInstructions: { protocol: 1, maxChars: 1000 } })
+    // The same block on /api/models, which COS Control and the phone poll with a token.
+    const models = await (await fetch(`${base}/api/models`)).json() as any
+    expect(models.capabilities?.dictationCleanup).toEqual(body.capabilities.dictationCleanup)
     expect(body.capabilities?.displayStream).toEqual({
       ticketSupported: true,
       ticketTtlSeconds: DISPLAY_TICKET_TTL_SECONDS,
