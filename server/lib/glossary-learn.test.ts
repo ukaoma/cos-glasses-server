@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CORRECTION_ONLY_NOTE,
   correctionOnlyForms,
+  decoderContextWindow,
   decoderSafeContext,
   isCorrectionOnly,
   MAX_LOG,
@@ -288,5 +289,41 @@ describe('correction-only written forms (links, emails, paths)', () => {
     expect(decoderSafeContext('see /build-and-price and /build', nested)).toBe('see forward slash build and price and forward slash build')
     // A pair whose heard side is itself a path is not put back (nothing spoken to restore).
     expect(decoderSafeContext('see /a', { '/b': '/a' })).toBe('see /a')
+  })
+})
+
+describe('6.83.1 QA: handles, shared TLDs, any-case swap, the decoder window', () => {
+  it('a handle is a link: correction only, never a vocabulary word', () => {
+    expect(isCorrectionOnly('@sam')).toBe(true)
+    expect(isCorrectionOnly('@quilt_hq')).toBe(true)
+    expect(isCorrectionOnly('example.uk')).toBe(true)
+    expect(isCorrectionOnly('sam@example.com')).toBe(true)
+    for (const plain of ['AT&T', 'Jewel360', 'Bottle POS', 'Q3 @ 5', 'U.S.']) expect(isCorrectionOnly(plain), plain).toBe(false)
+    expect(learn(words(['Quilt']), 'at sam', '@sam').words.vocabulary).toEqual(['Quilt'])
+    expect(addVocabulary(words(), '@sam')).toMatchObject({ ok: false, status: 400 })
+  })
+
+  it('puts the spoken form back in any case', () => {
+    const corrections = { 'forward slash pricing': '/pricing', 'sam at example dot com': 'sam@example.com' }
+    expect(decoderSafeContext('see /Pricing and SAM@EXAMPLE.COM', corrections)).toBe('see forward slash pricing and sam at example dot com')
+  })
+
+  it('swaps before the cut, so a link split by the 250-character window leaves no tail', () => {
+    const corrections = { 'sam at example dot com': 'sam@example.com' }
+    const text = `${'word '.repeat(60)}mail sam@example.com ${'tail '.repeat(48)}`.trim()
+    expect(text.slice(-250)).toMatch(/^[^ ]*\.com/)
+    const window = decoderContextWindow(text, corrections)!
+    expect(window.length).toBeLessThanOrEqual(250)
+    expect(window).not.toMatch(/@|\.com/)
+    expect(window).toContain('dot com')
+    // A link the speaker said that is not in the dictionary: its split tail is dropped.
+    const raw = `${'word '.repeat(60)}see bottlepos.com ${'tail '.repeat(48)}`.trim()
+    expect(raw.slice(-250)).toMatch(/^[^ ]*\.com/)
+    expect(decoderContextWindow(raw, {})!).not.toMatch(/\.com/)
+    // A split ordinary word stays, as before 6.83.1.
+    const plain = `${'alpha '.repeat(80)}`.trim()
+    expect(decoderContextWindow(plain, {})).toBe(plain.slice(-250))
+    expect(decoderContextWindow('short', corrections)).toBe('short')
+    expect(decoderContextWindow(undefined, corrections)).toBeUndefined()
   })
 })

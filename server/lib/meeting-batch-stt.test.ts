@@ -346,3 +346,36 @@ it('surfaces selected Mac HQ failure to durable finalization while preserving th
   expect(JSON.parse(fs.readFileSync(join(dir,'_batch_terminal.json'),'utf8'))).toMatchObject({outcome:'failed',reason:expect.stringContaining('audio is preserved for retry')})
  } finally {vi.doUnmock('./parakeet.js');vi.doUnmock('./whisper-local.js');vi.doUnmock('./stt-live.js')}
 })
+
+describe('6.83.1: the decoder window for the next segment', () => {
+  it('puts a dictionary link back to speech before the 250-character cut', async () => {
+    const { writeFileSync: write } = await import('node:fs')
+    write(process.env.COS_PROFILE_PATH!, JSON.stringify({ vocabulary: ['Quilt'], whisper_corrections: JSON.stringify({ 'sam at example dot com': 'sam@example.com' }) }))
+    const profile = await import('./profile.js')
+    const whisper = await import('./whisper-local.js')
+    profile.clearProfileCache(); whisper.resetDecoderCaches()
+    try {
+      // The first segment's corrected text holds the link where the raw 250-character cut splits it.
+      const first = `${'word '.repeat(60)}mail sam@example.com ${'tail '.repeat(48)}`.trim()
+      const seen: Array<string | undefined> = []
+      const { d } = deps({ whisper: vi.fn(async (_w: Buffer, ctx: string | undefined, opts: any) => {
+        seen.push(ctx)
+        const text = seen.length === 1 ? first : 'next part'
+        return { text, words: words(text), timestamps: !!opts.timestamps, model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' } as any
+      }) })
+      const segs = [0, 1].map(i => ({ startChunkIdx: i, endChunkIdx: i, startElapsed: i * 6_000, endElapsed: (i + 1) * 6_000, speakers: ['MU'] }))
+      const results = await M.transcribeSegments(dir, segs, entries, undefined, plan({ secondOpinion: 'none' as any }), d)
+      expect(results[0].text).toContain('sam@example.com')
+      expect(first.slice(-250)).toMatch(/^[^ ]*\.com/)
+      const ctx = seen[1] ?? ''
+      expect(ctx.length).toBeGreaterThan(0)
+      expect(ctx).not.toContain('@')
+      expect(ctx).not.toContain('.com')
+      expect(ctx).toContain('dot com')
+    } finally {
+      const { rmSync: rm } = await import('node:fs')
+      rm(process.env.COS_PROFILE_PATH!, { force: true })
+      profile.clearProfileCache(); whisper.resetDecoderCaches()
+    }
+  })
+})

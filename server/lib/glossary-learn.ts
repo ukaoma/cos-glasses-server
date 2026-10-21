@@ -48,10 +48,16 @@ export type UndoResult =
 // there induce ".com"/handle hallucinations on quiet audio, so they never join the
 // vocabulary. As a correction's written form they are fine (6.83.1): corrections are
 // applied to text after decoding and are not part of any decoder prompt.
+// 6.83.1: one top-level-domain list for this guard and the polish link check (dictation-format.ts).
+export const LINK_TLDS = ['com', 'net', 'org', 'io', 'ai', 'co', 'gov', 'edu', 'app', 'dev', 'us', 'uk'] as const
+const TLD = new RegExp(`\\.(?:${LINK_TLDS.join('|')})\\b`, 'i')
+/** "@sam" or "@quilt_hq": a handle seeds handle hallucinations in the decoder just as an email does. */
+export const HANDLE = /(?<![\p{L}\p{N}._%+-])@[\p{L}\p{N}_]{2,}/u
 export function looksLikeUrlEmailPath(s: string): boolean {
   return /(?:https?:\/\/|www\.)/i.test(s)
     || /@[\w.-]+\.\w/.test(s)
-    || /\.(?:com|net|org|io|ai|co|gov|edu|app|dev)\b/i.test(s)
+    || TLD.test(s)
+    || HANDLE.test(s)
     || /[/\\]/.test(s)
 }
 
@@ -133,9 +139,8 @@ export function isCorrectionOnly(written: string): boolean {
 export const CORRECTION_ONLY_NOTE = 'Saved as a correction. Links, emails and paths are never added to the words that guide transcription, so COS rewrites what it hears instead.'
 
 /**
- * The written forms of correction-only entries ("/pricing"), for callers that may use
- * them as known spellings outside the decoder (the AI polish prompt), and for
- * decoderSafeContext below.
+ * The written forms of correction-only entries ("/pricing"). The polish link check
+ * (routes/prompt-drafts.ts) refuses an answer that drops one of them.
  */
 export function correctionOnlyForms(corrections: Record<string, string>): string[] {
   const out: string[] = []
@@ -150,7 +155,8 @@ export function correctionOnlyForms(corrections: Record<string, string>): string
  * The rolling transcript context Whisper is primed with already holds corrected text, so
  * a correction-only form ("/pricing") would reach the decoder through it. Put the spoken
  * form back ("forward slash pricing") before priming: the decoder hears words, never the
- * link or path. Longest forms first so "/build-and-price" is not split by "/build".
+ * link or path. Any case ("/Pricing" too). Longest forms first so "/build-and-price" is not
+ * split by "/build".
  */
 export function decoderSafeContext(context: string, corrections: Record<string, string>): string {
   const pairs = Object.entries(corrections)
@@ -158,8 +164,27 @@ export function decoderSafeContext(context: string, corrections: Record<string, 
     .filter(([heard, written]) => heard && written && isCorrectionOnly(written) && !isCorrectionOnly(heard))
     .sort((a, b) => b[1].length - a[1].length)
   let out = context
-  for (const [heard, written] of pairs) out = out.split(written).join(heard)
+  for (const [heard, written] of pairs) {
+    out = out.replace(new RegExp(written.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), () => heard)
+  }
   return out
+}
+
+/**
+ * The decoder's priming window (6.83.1 QA W2): swap correction-only forms back to speech
+ * BEFORE taking the last `max` characters, so a dictionary link that straddles the cut can
+ * never leave its tail in the window. A first token the cut split that still reads as a
+ * link ("ample.com", "@example", "e/pricing", from a link the speaker said that is not in
+ * the dictionary) is dropped too; a split ordinary word stays, as before.
+ */
+export function decoderContextWindow(context: string | undefined, corrections: Record<string, string>, max = 250): string | undefined {
+  if (context === undefined) return undefined
+  const safe = decoderSafeContext(context, corrections)
+  if (safe.length <= max) return safe
+  const cut = safe.slice(-max)
+  const first = /^\S+/.exec(cut)?.[0] ?? ''
+  const split = first !== '' && /\S$/.test(safe.slice(0, safe.length - max))
+  return split && looksLikeUrlEmailPath(first) ? cut.slice(first.length).replace(/^\s+/, '') : cut
 }
 
 /** Newest first, bounded. */

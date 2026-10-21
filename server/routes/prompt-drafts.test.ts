@@ -393,7 +393,7 @@ describe('public prompt draft recovery contract', () => {
   it('6.83.1: a polish that invents a link is refused and the pre-polish text goes out', async () => {
     autoCleanDictation.mockImplementation(async () => 'Check quilt.com for details.')
     const invented = await finalizeText('check our website for details', 'message')
-    expect(invented.json).toEqual({ text: 'check our website for details', surface: 'message', polished: false, polishSkipped: 'failed' })
+    expect(invented.json).toEqual({ text: 'check our website for details', surface: 'message', polished: false, polishSkipped: 'link_guard' })
     // A link the speaker spelled out is kept.
     autoCleanDictation.mockImplementation(async () => 'Mail sam@example.com today.')
     const spelled = await finalizeText('mail sam at example dot com today', 'message')
@@ -408,9 +408,18 @@ describe('public prompt draft recovery contract', () => {
     try {
       autoCleanDictation.mockImplementation(async () => 'Go to the pricing page.')
       const lost = await finalizeText('go to /pricing', 'message')
-      expect(lost.json).toMatchObject({ text: 'go to /pricing', polished: false, polishSkipped: 'failed' })
+      expect(lost.json).toMatchObject({ text: 'go to /pricing', polished: false, polishSkipped: 'link_guard' })
+      // Any case: "/Pricing" in the answer still holds the dictionary's link.
+      autoCleanDictation.mockImplementation(async () => 'Go to /Pricing.')
+      expect((await finalizeText('go to /pricing', 'message')).json).toMatchObject({ text: 'Go to /Pricing.', polished: true })
+      // A corrected spelling from the vocabulary is not an invented link.
+      autoCleanDictation.mockImplementation(async () => 'See quilt.com.')
+      expect((await finalizeText('see kwilt dot com', 'message')).json).toMatchObject({ text: 'See quilt.com.', polished: true })
+      // A misheard name with no dictionary spelling is still an invented link.
+      autoCleanDictation.mockImplementation(async () => 'See quill.com.')
+      expect((await finalizeText('see kwilt dot com', 'message')).json).toMatchObject({ polishSkipped: 'link_guard' })
       // The vocabulary handed to the model holds no path: the known spellings are vocabulary only.
-      expect(autoCleanDictation).toHaveBeenLastCalledWith('go to /pricing', ['Quilt'], expect.anything())
+      expect(autoCleanDictation).toHaveBeenCalledWith('go to /pricing', ['Quilt'], expect.anything())
       autoCleanDictation.mockImplementation(async () => 'Go to /pricing.')
       expect((await finalizeText('go to /pricing', 'message')).json).toEqual({ text: 'Go to /pricing.', surface: 'message', polished: true })
     } finally {

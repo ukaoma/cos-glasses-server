@@ -1384,10 +1384,10 @@ function buildCorrections(): Array<[RegExp, string]> {
 
   // Escape correction keys before interpolation. Names such as "A.C.M.E."
   // are literal vocabulary, never regular-expression programs.
-  // 6.83.1: the words of a multi-word key may be split by any run of spaces or a hyphen
-  // ("forward slash pricing", "forward-slash  pricing").
+  // 6.83.1: the words of a multi-word key may be split by a run of spaces or tabs, or by one
+  // hyphen ("forward-slash  pricing"); never by a line break or a spaced dash (" - ").
   for (const [pattern, replacement] of correctionOrder(getWhisperCorrections())) {
-    const escaped = pattern.trim().split(/\s+/).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s-]+')
+    const escaped = pattern.trim().split(/\s+/).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('(?:[ \\t]+|-)')
     corrections.push([new RegExp(`\\b${escaped}\\b`, 'gi'), replacement])
   }
 

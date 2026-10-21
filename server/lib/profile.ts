@@ -5,6 +5,7 @@ import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve, dirname } from 'node:path'
 import { atomicWriteFileSync } from './atomic-fs.js'
+import { looksLikeUrlEmailPath } from './glossary-learn.js'
 
 const APP_ROOT = resolve(import.meta.dirname, '../..')
 
@@ -136,7 +137,8 @@ export function getVocabulary(): string[] {
     if (typeof value !== 'string') return []
     const term = value.trim()
     const key = term.toLowerCase()
-    if (!term || PLACEHOLDER_VOCABULARY.has(key) || seen.has(key)) return []
+    // 6.83.1: a link, email, handle or path never steers the decoder, even hand-written here.
+    if (!term || PLACEHOLDER_VOCABULARY.has(key) || seen.has(key) || looksLikeUrlEmailPath(term)) return []
     seen.add(key)
     return [term]
   })

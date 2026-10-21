@@ -14,6 +14,9 @@
  *   dictionary entry for "/pricing" (6.83.0 refused it).
  * - after: 6.83.1. the dictionary holds "forward slash pricing" written "/pricing" (for the
  *   case that says so), spoken-path rule, prompt v3, link guard.
+ * Order omissions: the route also runs negative rules and the fuzzy name pass before the filler
+ * pass; this script does not (no vocabulary targets in these cases). The after arm's link guard
+ * gets the vocabulary as known spellings, as the route does.
  * Every model call spends the polish budget's "message" bucket in this scratch data dir
  * (recordPolishCall), is capped by --max-calls, and the run stops after 3 consecutive failures.
  */
@@ -74,6 +77,14 @@ export const CANARY: FormatCase[] = [
   { id: 'o06', category: 'ordinary', input: 'check our website for the pricing', must: [/website/i, /pricing/i], mustNot: ['/', '.com', 'www'] },
   { id: 'o07', category: 'ordinary', input: 'ask Priya to update the pricing page', must: [/pricing page/i], mustNot: ['/pricing'] },
   { id: 'o08', category: 'ordinary', input: 'press the forward slash key to search', must: [/forward slash key|\/ key|"\/" key/i] , links: [] },
+  // 6.83.1 QA W1: "forward slash" said about the character, not a page.
+  { id: 'w01', category: 'ordinary', input: 'separate them with forward slash instead of commas', must: [/instead of commas/i], mustNot: ['/instead'] },
+  { id: 'w02', category: 'ordinary', input: 'type forward slash twice to open the menu', must: [/twice/i], mustNot: ['/twice'] },
+  { id: 'w03', category: 'ordinary', input: 'the old paths need forward slash everywhere', must: [/everywhere/i], mustNot: ['/everywhere'] },
+  { id: 'w04', category: 'ordinary', input: 'press forward slash once and wait', must: [/once/i], mustNot: ['/once'] },
+  { id: 'w05', category: 'ordinary', input: 'you will see two forward slash marks in the url', must: [/marks/i], mustNot: ['/marks'] },
+  { id: 'w06', category: 'ordinary', input: 'use forward slash too, not just dashes', must: [/too/i], mustNot: ['/too'] },
+  { id: 'w07', category: 'ordinary', input: 'the critical path is the pricing page', must: [/critical path/i, /pricing page/i], mustNot: ['/pricing'] },
   // Formatting instructions inside the dictation.
   { id: 'i01', category: 'instruction', input: 'format these as slugs: pricing, build and price, schedule demo', must: ['build-and-price', 'schedule-demo'], mustNot: [/format these/i], links: ['/pricing', '/build-and-price', '/schedule-demo'], optional: ['format', 'these', 'as', 'slugs'] },
   { id: 'i02', category: 'instruction', input: 'put this next part in all caps: do not ship on Friday', must: ['DO NOT SHIP ON FRIDAY'], mustNot: [/all caps/i], optional: ['put', 'this', 'next', 'part', 'in', 'all', 'caps'] },
@@ -188,7 +199,7 @@ async function main() {
       let output = polished || pre
       let refused: string | undefined
       if (arm === 'after') {
-        const problem = polishLinkProblem(pre, polished, correctionOnlyForms(job.dictionary ?? {}))
+        const problem = polishLinkProblem(pre, polished, correctionOnlyForms(job.dictionary ?? {}), VOCABULARY)
         if (problem) { refused = problem; output = pre }
       }
       rows.push({ id: job.id, arm, output, ms: Date.now() - started, pre, deterministic: pre, ...(refused ? { refused, polished } : {}) })

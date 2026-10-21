@@ -180,6 +180,7 @@ describe('subscription CLI dictation cleanup', () => {
       'lowercase slug joined by hyphens',
       '"dot com"', '"underscore" becomes "_"', '"at sign" becomes "@"', '"sam@example.com"',
       '"and slash or" may become "and/or"', '"slash prices"',
+      'is the character itself: keep the words or write a lone "/", never "/twice"',
       'Never invent a link, domain, path or email', 'Do not add "https://", "www." or ".com" unless they were said',
       '"format these as slugs"', 'apply it to the words it names and remove the instruction',
       '"write the email in all caps") is part of the message: keep it',

@@ -92,7 +92,7 @@ const autoCleanBreakers = {
 const autoCleanDefaultEnabled = () => ['1', 'true', 'on'].includes((process.env.COS_DICTATION_AUTOCLEAN ?? '').toLowerCase())
 
 /** 6.79.1, additive on finalize answers: why the polish model did not run (or did not finish). */
-export type PolishSkipped = 'disabled' | 'too_long' | 'breaker_open' | 'daily_cap' | 'failed' | 'clean'
+export type PolishSkipped = 'disabled' | 'too_long' | 'breaker_open' | 'daily_cap' | 'failed' | 'clean' | 'link_guard'
 /** 6.79.2, additive when finalize was given a prewarmToken: what became of that warm process. */
 export type PrewarmOutcome = 'used' | 'missed' | 'discarded'
 
@@ -180,12 +180,12 @@ async function polishOutboundDictation(
       durationMs: Date.now() - startedAt, caller: `dictation_autoclean_${opts.bucket}`,
     })
     // 6.83.1: the model never invents a link and never drops one the dictionary wrote. Its
-    // answer is refused (the pre-polish text goes out, as on any failed polish) rather than
+    // answer is refused (the pre-polish text goes out, polishSkipped "link_guard") rather than
     // pasting a URL nobody said. The call still counted: it ran.
-    const linkProblem = polished ? polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections())) : null
+    const linkProblem = polished ? polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary()) : null
     if (linkProblem) {
       console.warn(`[prompt-draft] auto-clean answer refused: ${linkProblem}`)
-      return { text: cleaned, ...(prewarm ? { prewarm } : {}), polishSkipped: 'failed' }
+      return { text: cleaned, ...(prewarm ? { prewarm } : {}), polishSkipped: 'link_guard' }
     }
     return { text: polished || cleaned, ...(prewarm ? { prewarm } : {}) }
   } catch (err: any) {

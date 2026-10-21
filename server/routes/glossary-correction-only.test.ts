@@ -114,6 +114,30 @@ describe('correction-only learn, end to end', () => {
     expect(whisper.buildPrompt(context, true)).toBe('')
   })
 
+  it('6.83.1 QA: a link split by the window never reaches the real decoder prompt', async () => {
+    await post('/api/transcription-glossary/correction', { heard: 'sam at example dot com', written: 'sam@example.com', source: 'dictation' })
+    const { decoderContextWindow } = await import('../lib/glossary-learn.js')
+    const text = `${'word '.repeat(60)}mail sam@example.com ${'tail '.repeat(48)}`.trim()
+    expect(text.slice(-250)).toMatch(/^[^ ]*\.com/)
+    const prompt = whisper.buildPrompt(decoderContextWindow(text, profile.getWhisperCorrections()))
+    expect(prompt).not.toMatch(/@|\.com/)
+    expect(prompt).toContain('dot com')
+  })
+
+  it('6.83.1 QA: links hand-written into the profile vocabulary never reach the decoder', async () => {
+    writeFileSync(process.env.COS_PROFILE_PATH!, JSON.stringify({ owner_name: 'Sam Example', vocabulary: ['Quilt', 'www.example.com', '/pricing', '@sam', 'Bottle POS'] }))
+    profile.clearProfileCache(); whisper.resetDecoderCaches()
+    expect(profile.getVocabulary()).toEqual(['Quilt', 'Bottle POS'])
+    expect(whisper.buildPrompt()).not.toMatch(/example|pricing|@/)
+  })
+
+  it('6.83.1 QA: the live stream builds its decoder window through decoderContextWindow (source pin)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const src = readFileSync(new URL('./transcribe-stream.ts', import.meta.url), 'utf8')
+    expect(src.split("return decoderContextWindow(cleanedContext, decoderCorrections()) ?? ''").length).toBe(2)
+    expect(src).not.toContain('cleanedContext.slice(-250)')
+  })
+
   it('applies a multi-word key across case, punctuation, hyphens and doubled spaces', async () => {
     await post('/api/transcription-glossary/correction', { heard: 'forward slash pricing', written: '/pricing', source: 'dictation' })
     await post('/api/transcription-glossary/correction', { heard: 'forward slash build', written: '/build', source: 'manual' })
@@ -123,6 +147,9 @@ describe('correction-only learn, end to end', () => {
       .toBe('demo, /pricing, /build-and-price, all of which')
     expect(whisper.applyCorrections('FORWARD SLASH PRICING.')).toBe('/pricing.')
     expect(whisper.applyCorrections('see forward  slash\tpricing; then')).toBe('see /pricing; then')
+    // Never across a line break or a spaced dash.
+    expect(whisper.applyCorrections('forward slash\npricing')).toBe('forward slash\npricing')
+    expect(whisper.applyCorrections('forward - slash pricing')).toBe('forward - slash pricing')
     expect(whisper.applyCorrections('"forward slash pricing"')).toBe('"/pricing"')
     // The shorter key added FIRST still loses to the longer phrase that contains it.
     expect(whisper.applyCorrections('go to forward slash build and price now')).toBe('go to /build-and-price now')
