@@ -1,0 +1,259 @@
+{
+  "defaults": {
+    "v": 1,
+    "enabled": true,
+    "time": "07:00",
+    "days": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "catchUpMinutes": 180,
+    "taskCatchUpMinutes": 180,
+    "sources": [
+      {
+        "id": "calendar",
+        "enabled": true,
+        "options": {
+          "includeTomorrow": false
+        }
+      },
+      {
+        "id": "meetings",
+        "enabled": true,
+        "options": {
+          "lookbackDays": 3,
+          "horizonDays": 7
+        }
+      },
+      {
+        "id": "tasks",
+        "enabled": true,
+        "options": {
+          "horizonDays": 7,
+          "includeOverdue": true
+        }
+      },
+      {
+        "id": "waiting",
+        "enabled": true,
+        "options": {
+          "lookbackDays": 7
+        }
+      },
+      {
+        "id": "knowledge",
+        "enabled": false,
+        "options": {
+          "lookbackDays": 7
+        }
+      },
+      {
+        "id": "reflection",
+        "enabled": false,
+        "options": {}
+      },
+      {
+        "id": "health",
+        "enabled": false,
+        "options": {}
+      },
+      {
+        "id": "reading",
+        "enabled": false,
+        "options": {
+          "text": "proverbs"
+        }
+      },
+      {
+        "id": "pulse",
+        "enabled": false,
+        "options": {
+          "instruction": ""
+        }
+      },
+      {
+        "id": "skill",
+        "enabled": false,
+        "options": {
+          "name": ""
+        }
+      },
+      {
+        "id": "custom",
+        "enabled": false,
+        "options": {
+          "instruction": ""
+        }
+      }
+    ],
+    "closingInstruction": ""
+  },
+  "preview": "Morning brief for Jun. Tuesday, September 1, 2026, 07:00 America/Chicago.\n\nThis is the start-of-day brief that waits in the COS Glasses inbox before the wearer opens it. Nobody is watching this run: do not ask questions, do not pause for confirmation, and do not stop early. It is read-only. Do not send messages or email, create or change calendar events, edit tasks, or write files other than any journal or log a skill you run is already designed to keep.\n\nEvidence discipline: every line must come from something you actually read in this workspace or through its connectors. When a source cannot be read, give that section one line, \"<Section>: unavailable (reason)\", and move on. Never invent a meeting, a message, a number, or a name. An aside is not a finding; include only items with a hard edge (a decision, a date, a dollar figure, an owner).\n\nSections, in this order, each opened by its label on its own line:\n1. CALENDAR. Today's commitments in time order, each on one line: start time, title, who it is with when that matters. Name the first commitment of the day and how much open time exists before it. Read every calendar this workspace can reach (connectors, local calendar helpers, cached calendar files). If none can be read, write \"Calendar: unavailable\" with the reason.\n2. FROM RECENT MEETINGS. Meetings synced in the last 3 days (the last business day before 2026-09-01 was 2026-08-31). Surface only items with a hard edge: a decision that was made, a deadline inside the next 7 days, a dollar figure, or a named owner. Read the meeting's summary and decisions; never paste an extracted action-item list verbatim, and when a number or date matters, quote it from the transcript. Three to five items ranked by consequence, one line each: the decision or open question, then the hard edge. If nothing decision-grade happened, say so in one line.\n3. DUE. Open tasks from this workspace's task files due within 7 days, overdue items first. One line each: the task, its owner if not the wearer, and the date. Cap at seven. Skip anything already marked done.\n4. WAITING ON YOU. Across every channel this workspace can read (Slack, email, chat connectors), from the last 7 days: direct mentions with no reply from the wearer, questions addressed to the wearer with no answer beneath them, and threads that moved after the wearer's last message. Up to five, ranked by consequence. Each line names the channel or sender, who is waiting, and the ask. Never claim something is unread; report only what is verifiable. If no channel can be read, write \"Waiting on you: unavailable\" with the reason.\n\nFormat for the glasses: plain text only. No markdown headings, tables, or bullet symbols; a section is its label on one line followed by short lines. Keep every line under 60 characters where you can, because the lens is 576 pixels wide and wraps silently. Keep the whole brief under about 60 lines; trim from the bottom of each section, not from the top.\nEnd with one line beginning \"Order your energy:\" naming the single posture for the day, grounded in the sections above.\nDo not say \"here is\" or \"I found\". Do not add a preamble or a sign-off.",
+  "status": {
+    "protocolVersion": 1,
+    "enabled": true,
+    "time": "07:00",
+    "timezone": "America/Chicago",
+    "serverTimezone": "<server>",
+    "days": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "nextRunAt": "2026-09-01T12:00:00.000Z",
+    "lastRun": null,
+    "gate": "ready"
+  },
+  "tickFired": true,
+  "submission": {
+    "clientJobId": "76ee860e-f58b-4bb6-8aef-4062aed4d857",
+    "generation": 1,
+    "query": "Morning brief for Jun. Tuesday, September 1, 2026, 07:00 America/Chicago.\n\nThis is the start-of-day brief that waits in the COS Glasses inbox before the wearer opens it. Nobody is watching this run: do not ask questions, do not pause for confirmation, and do not stop early. It is read-only. Do not send messages or email, create or change calendar events, edit tasks, or write files other than any journal or log a skill you run is already designed to keep.\n\nEvidence discipline: every line must come from something you actually read in this workspace or through its connectors. When a source cannot be read, give that section one line, \"<Section>: unavailable (reason)\", and move on. Never invent a meeting, a message, a number, or a name. An aside is not a finding; include only items with a hard edge (a decision, a date, a dollar figure, an owner).\n\nSections, in this order, each opened by its label on its own line:\n1. CALENDAR. Today's commitments in time order, each on one line: start time, title, who it is with when that matters. Name the first commitment of the day and how much open time exists before it. Read every calendar this workspace can reach (connectors, local calendar helpers, cached calendar files). If none can be read, write \"Calendar: unavailable\" with the reason.\n2. FROM RECENT MEETINGS. Meetings synced in the last 3 days (the last business day before 2026-09-01 was 2026-08-31). Surface only items with a hard edge: a decision that was made, a deadline inside the next 7 days, a dollar figure, or a named owner. Read the meeting's summary and decisions; never paste an extracted action-item list verbatim, and when a number or date matters, quote it from the transcript. Three to five items ranked by consequence, one line each: the decision or open question, then the hard edge. If nothing decision-grade happened, say so in one line.\n3. DUE. Open tasks from this workspace's task files due within 7 days, overdue items first. One line each: the task, its owner if not the wearer, and the date. Cap at seven. Skip anything already marked done.\n4. WAITING ON YOU. Across every channel this workspace can read (Slack, email, chat connectors), from the last 7 days: direct mentions with no reply from the wearer, questions addressed to the wearer with no answer beneath them, and threads that moved after the wearer's last message. Up to five, ranked by consequence. Each line names the channel or sender, who is waiting, and the ask. Never claim something is unread; report only what is verifiable. If no channel can be read, write \"Waiting on you: unavailable\" with the reason.\n\nFormat for the glasses: plain text only. No markdown headings, tables, or bullet symbols; a section is its label on one line followed by short lines. Keep every line under 60 characters where you can, because the lens is 576 pixels wide and wraps silently. Keep the whole brief under about 60 lines; trim from the bottom of each section, not from the top.\nEnd with one line beginning \"Order your energy:\" naming the single posture for the day, grounded in the sections above.\nDo not say \"here is\" or \"I found\". Do not add a preamble or a sign-off.",
+    "sessionId": "<session>",
+    "messageEra": "era-golden",
+    "globalMsgNum": 42,
+    "activityToolMode": "status",
+    "attachmentIds": [],
+    "attachmentRefs": [],
+    "origin": {
+      "kind": "routine",
+      "id": "morning-brief"
+    }
+  },
+  "envelopeKeys": [
+    "config",
+    "coverage",
+    "runs",
+    "sources",
+    "status"
+  ],
+  "configKeys": [
+    "catchUpMinutes",
+    "closingInstruction",
+    "days",
+    "enabled",
+    "sources",
+    "taskCatchUpMinutes",
+    "time",
+    "timezone",
+    "updatedAt",
+    "v"
+  ],
+  "statusKeys": [
+    "days",
+    "enabled",
+    "gate",
+    "lastRun",
+    "nextRunAt",
+    "protocolVersion",
+    "serverTimezone",
+    "time",
+    "timezone"
+  ],
+  "sources": [
+    {
+      "id": "calendar",
+      "label": "Calendar",
+      "defaultEnabled": true,
+      "options": [
+        "includeTomorrow"
+      ]
+    },
+    {
+      "id": "meetings",
+      "label": "Meetings",
+      "defaultEnabled": true,
+      "options": [
+        "lookbackDays",
+        "horizonDays"
+      ]
+    },
+    {
+      "id": "tasks",
+      "label": "Tasks",
+      "defaultEnabled": true,
+      "options": [
+        "horizonDays",
+        "includeOverdue"
+      ]
+    },
+    {
+      "id": "waiting",
+      "label": "Waiting on you",
+      "defaultEnabled": true,
+      "options": [
+        "lookbackDays"
+      ]
+    },
+    {
+      "id": "knowledge",
+      "label": "Knowledge graph",
+      "defaultEnabled": false,
+      "options": [
+        "lookbackDays"
+      ]
+    },
+    {
+      "id": "reflection",
+      "label": "Reflection",
+      "defaultEnabled": false,
+      "options": []
+    },
+    {
+      "id": "health",
+      "label": "Health",
+      "defaultEnabled": false,
+      "options": []
+    },
+    {
+      "id": "reading",
+      "label": "Opening reading",
+      "defaultEnabled": false,
+      "options": [
+        "text"
+      ]
+    },
+    {
+      "id": "pulse",
+      "label": "Metrics pulse",
+      "defaultEnabled": false,
+      "options": [
+        "instruction"
+      ]
+    },
+    {
+      "id": "skill",
+      "label": "Workspace skill",
+      "defaultEnabled": false,
+      "options": [
+        "name"
+      ]
+    },
+    {
+      "id": "custom",
+      "label": "Custom section",
+      "defaultEnabled": false,
+      "options": [
+        "instruction"
+      ]
+    }
+  ],
+  "badPut": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "invalid_time",
+        "message": "time must be HH:MM in 24-hour form, e.g. 07:00."
+      }
+    }
+  },
+  "runNow": {
+    "status": 409,
+    "keys": []
+  }
+}
