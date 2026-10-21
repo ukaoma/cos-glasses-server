@@ -37,7 +37,15 @@ still owns every send.
 - **Every plan logged**, from any client: `data/work-orchestrator/plans.jsonl` (2 MB, newest half kept) and one
   `[work-orchestrator] plan` line: sessions sent and their availability, left out and why, usage age, assignments
   (mode and target, never text), outcome, time.
-- **Checks.** CHECKS_PLACEHOLDER
+- **Checks.** Full suite 8,506 passed, 0 failed, 3 skipped (563 files); `tsc --noEmit` clean. The first full run
+  failed (9 Claude bridge suites that mock `node:child_process` could not load the orchestrator runtime; the key-lanes
+  P6 census had an unclassified site): the bridges now report through a leaf module and the site is classified.
+  `server/scripts/work-orchestrator-mutation-gate.mjs` (not packaged): green baseline (62 tests in 8 files), 70 mutants,
+  68 killed by a named test, 2 documented survivors (a seek-cut row never parses; the key check refuses `mode` from an
+  older client first). The gate found 11 real gaps on its first pass, each closed by a test (and fixed its own `$&`
+  replacement bug). Journey: the toadstone card replay (fake logs in the 2026-10-20 shapes) finds both sessions, plans
+  with them, and never says "no sessions"; the 6.81.0 path on the same card saw none. Real probes on Miles's Mac read
+  Claude and Codex usage with no turn sent. Shadow replay C4 (10 cards, 10 Opus calls, nothing sent): see the hand-off.
 
 ## 6.81.0 - The Mac saves a stopped meeting on its own once it holds every chunk
 
