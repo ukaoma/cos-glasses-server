@@ -92,6 +92,8 @@
     "!server/lib/__fixtures__/**",
     "!server/lib/work-orchestrator/__fixtures__/**",
     "!server/scripts/work-orchestrator-mutation-gate.mjs",
+    "!server/scripts/work-lens-rounds-mutation-gate.mjs",
+    "!server/scripts/mac-discard-mutation-gate.mjs",
     "docs/work-orchestrator.md",
     "!shared/**/*.test.ts",
     ".env.example",

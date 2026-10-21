@@ -11,6 +11,9 @@ as 6.83.2). Neither of those versions was published; 6.84.0 is the first package
 - **Pairs with COS Control 0.5.334.** Control shows the learn note, labels a `link_guard` refusal as not polished,
   and offers Discard for a stranded Mac recording with no sound (it needs this server for the server-side discard).
 
+- **Package.** Two mutation gates no longer ship in the tarball: `server/scripts/mac-discard-mutation-gate.mjs` (new)
+  and `server/scripts/work-lens-rounds-mutation-gate.mjs` (it shipped in 6.83.0 although its docs say not packaged).
+
 ### Dictation: spoken paths and links, a dictionary that can hold "/pricing", and a polish that never invents a link
 
 Miles, 2026-10-21 13:09, dictating funnel pages ("demo, forward slash pricing, forward slash build and price"): COS
