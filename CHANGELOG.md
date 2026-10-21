@@ -72,8 +72,13 @@ Each benign set ran 28 of the 45 (rotating, so every case ran under two of the t
   wiring); additions to `dictation-clean.test.ts`, `dictation-prewarm.test.ts`, `prompt-drafts.test.ts` (both
   surfaces, warm and cold, meeting excluded, audit row, answers unchanged when off), `token-audit-key-fields.test.ts`
   and `health.test.ts`.
-- `server/scripts/dictation-custom-polish-mutation-gate.mjs`: see the branch commit for the count. The 6.83.1
-  format gate and the 6.79.1 polish gate had one target each re-anchored to the new answer shape.
+- `server/scripts/dictation-custom-polish-mutation-gate.mjs`: 46 of 46 killed, each by a named test, green baseline
+  121 tests in 8 files. First run 45 of 46: `warns-once` survived (the second damaged read hit the mtime cache, so the
+  test could not see a second warning); the test now writes a different damaged file, and the mutant is killed.
+- The 6.83.1 format gate (`guard-reason-named`) and the 6.79.1 polish gate (`finalize-reports-prewarm`) each had one
+  target re-anchored to the new answer shape; both killed (baselines 263 tests in 10 files, 217 in 7). Every other
+  target in both gates still lands exactly once (63 of 63, 92 of 92).
+- Full suite after the bump: 574 files, 8708 passed, 3 skipped, 0 failed. `tsc --noEmit` clean.
 
 ## 6.83.1 - Dictation: spoken paths and links, a dictionary that can hold "/pricing", and a polish that never invents a link
 
