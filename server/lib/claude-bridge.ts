@@ -60,6 +60,7 @@ import { terminalProviderAuthFailure } from './provider-terminal-error.js'
 import { claudePermissionArgs, getClaudeTrustMode } from './claude-permissions.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { teeJobTrail, type JobTrailDraft } from './job-trail.js'
+import { noteClaudeRateLimitFrame } from './work-orchestrator/runtime.js'
 import { claudeSupportsSessionName } from './claude-cli-support.js'
 import { applyTurnRequestEnv, createTurnRequestBinding, spawnWithTurnRequest } from './turn-request.js'
 import { STEER_REAPER_MS, STEER_SETTLE_MS, SteerTracker, composeFirstContent, encodeUserLine, steerClock, type SteerPort } from './claude-steer.js'
@@ -1129,6 +1130,9 @@ export async function callClaudeStreaming(
 
         if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string') {
           updateClaudeRun(run.runId, { resolvedModelId: event.model })
+        } else if (event.type === 'rate_limit_event') {
+          // 6.83.0: free passive plan-usage refresh (canary C1). A key-lane turn's limits are the key's, never the plan's.
+          if (!keyProfile) noteClaudeRateLimitFrame(event)
         } else if (event.type === 'stream_event') {
           // Real-time token streaming — fires every few tokens during generation
           receivedStreamEvents = true

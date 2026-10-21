@@ -37,6 +37,7 @@ import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
 import { crashLoopParkedError, type BootResumeGate } from './boot-resume.js'
 import { restartNoticeEnabled } from './query-job-feature.js'
+import { noteJobProviderLimit } from './work-orchestrator/runtime.js'
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -836,7 +837,10 @@ export class QueryJobCoordinator {
         this.finishActive(active)
         return false
       }
-      const result = await this.store.fail(active.jobId, normalizeQueryJobError(error))
+      const failure = normalizeQueryJobError(error)
+      // 6.83.0: a plan-lane provider limit marks that provider exhausted for the Work orchestrator (until its reset).
+      noteJobProviderLimit(snapshot.provider, failure.code, error instanceof Error ? error.message : String((error as any)?.message ?? ''), active.request.model, snapshot.lane)
+      const result = await this.store.fail(active.jobId, failure)
       const projected = isTerminalQueryJobStatus(result.job.status)
         ? await this.projectTerminal(result.job, active.request)
         : false
