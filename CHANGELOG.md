@@ -55,7 +55,8 @@ still owns every send.
   QA on 6.10.651 (additive): `POST /api/work/chat/lens-rounds/:roundId/mac-send` (COS Control reports its own Send of a
   lens round on the Mac, so a later lens send never delivers twice; `already_sent` lists the ids, and held counts as
   sent); round outcomes add `failed` and `stopped` (all failed, all stopped), `refused` only for an actual refusal.
-  Checks after QA: `work-lens-rounds.test.ts` 32 tests; gate green baseline (40 tests in 2 files), 64 of 64 killed.
+  Checks after QA: `work-lens-rounds.test.ts` 32 tests; gate green baseline (40 tests in 2 files), 64 of 64 killed;
+  full suite 8,583 passed, 0 failed, 3 skipped (569 files).
   Checks before QA: `work-lens-rounds.test.ts` 25 tests; `server/scripts/work-lens-rounds-mutation-gate.mjs` (not packaged): green
   baseline (33 tests in 2 files), 56 of 56 mutants killed by a named test. Full suite after: 8,576 passed, 0 failed,
   3 skipped (569 files).
