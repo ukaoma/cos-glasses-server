@@ -158,6 +158,8 @@ import { createSubqKeyRouter } from './routes/subq-key.js'
 import { createDecisionProviderRouter } from './routes/decision-provider.js'
 import { createJevRouter } from './routes/jev.js'
 import { createWorkChatRouter } from './routes/work-chat.js'
+import { createWorkOrchestratorRouter } from './routes/work-orchestrator.js'
+import { startWorkOrchestrator } from './lib/work-orchestrator/runtime.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
 import { isReadOnlyApiPost } from './lib/work-search.js'
 import { dataPath } from './lib/data-dir.js'
@@ -836,6 +838,8 @@ app.use('/api', createDecisionProviderRouter())
 app.use('/api', createSubqKeyRouter())
 app.use('/api', createWorkSearchRouter())
 app.use('/api', createWorkChatRouter())
+// 6.83.0 Work orchestrator: Control's Work snapshot, the planner input and plan usage (docs/work-orchestrator.md).
+app.use('/api', createWorkOrchestratorRouter())
 app.use('/api', queryRouter)
 // The scheduled start-of-day brief: settings, status, run-now. Same auth as
 // every other settings route; the brief itself is an ordinary durable job.
@@ -1482,6 +1486,8 @@ listenRequiredServers(listeners).then(() => {
     resumeAutonomousMeetingSaves()
     // 6.77.0: transcript cleanup data whose meeting is gone, and screen text past retention.
     scheduleTranscriptCleanupSweep()
+    // 6.83.0: the plan-usage poll (10 min; COS_WORK_USAGE_POLL=0 turns it off) and a first background log scan.
+    startWorkOrchestrator()
 
     // Debris from an import killed mid-write: a temp file, or a sidecar whose
     // markdown never landed. Both are invisible to every reader, so nothing
