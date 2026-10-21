@@ -6,6 +6,7 @@ import { runMeetingAskModel } from '../lib/meeting-ask-runner.js'
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen } from '../lib/maintenance-lifecycle.js'
 import { appendPlanLog, type PlanLogRow } from '../lib/work-orchestrator/plan-log.js'
 import { PLAN_LOG_PATH } from '../lib/work-orchestrator/runtime.js'
+import { defaultLensRoundStore } from '../lib/work-lens-rounds.js'
 
 /** 6.83.0: one plan's log row. Ids and enums only (plan-log.ts). */
 export function planLogRow(input: WorkChatInput, outcome: PlanLogRow['outcome'], answer: WorkChatAnswer | null, ms: number, now = new Date()): PlanLogRow {
@@ -23,7 +24,8 @@ export function planLogRow(input: WorkChatInput, outcome: PlanLogRow['outcome'],
 }
 
 const WORK_CHAT_DEPS = {run:runMeetingAskModel, admissions:maintenanceAdmissionsOpen, lease:()=>acquireMaintenanceWork('work_chat'),
-  planLog:(row: PlanLogRow)=>appendPlanLog(PLAN_LOG_PATH(), row), now:()=>Date.now()}
+  planLog:(row: PlanLogRow)=>appendPlanLog(PLAN_LOG_PATH(), row), now:()=>Date.now(),
+  lensPlansControl:()=>defaultLensRoundStore().controlStatus()}
 export function createWorkChatRouter(given: Partial<typeof WORK_CHAT_DEPS> = {}) {
   // 6.83.0: a caller that passes only some deps (the tests pass run, admissions and lease) gets the rest by default.
   const deps={...WORK_CHAT_DEPS,...given}
@@ -33,7 +35,10 @@ export function createWorkChatRouter(given: Partial<typeof WORK_CHAT_DEPS> = {})
   // references means the input may carry read-only reference sessions (never targets).
   // 6.83.0: orchestrator 1 means a client may send the orchestrator input (POST /api/work/orchestrator/input) and get
   // fork and new-session assignments back (docs/work-orchestrator.md).
-  router.get('/work/chat',(_req,res)=>res.json({protocolVersion:1,planner:'sonnet',planners:WORK_CHAT_PLANNERS,effort:WORK_CHAT_DEFAULT_EFFORT,efforts:WORK_CHAT_EFFORTS,automaticProviders:['claude','codex'],maxAssignments:WORK_CHAT_MAX_ASSIGNMENTS,contextItems:true,maxContextItems:WORK_CHAT_MAX_ITEMS,queueRounds:true,references:true,maxReferences:WORK_CHAT_MAX_REFERENCES,orchestrator:1}))
+  // 6.83.0: lensPlans 1 means the lens may record a plan into the card's Work chat history and ask COS Control to send
+  // it (routes/work-lens-rounds.ts); lensPlansControl says whether a COS Control polled the lens inbox in the last 60 s.
+  router.get('/work/chat',(_req,res)=>res.json({protocolVersion:1,planner:'sonnet',planners:WORK_CHAT_PLANNERS,effort:WORK_CHAT_DEFAULT_EFFORT,efforts:WORK_CHAT_EFFORTS,automaticProviders:['claude','codex'],maxAssignments:WORK_CHAT_MAX_ASSIGNMENTS,contextItems:true,maxContextItems:WORK_CHAT_MAX_ITEMS,queueRounds:true,references:true,maxReferences:WORK_CHAT_MAX_REFERENCES,orchestrator:1,
+    lensPlans:1,lensPlansControl:deps.lensPlansControl()}))
   router.post('/work/chat',async(req,res)=>{
     let input: WorkChatInput
     try {

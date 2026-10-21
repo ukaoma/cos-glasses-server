@@ -159,6 +159,7 @@ import { createDecisionProviderRouter } from './routes/decision-provider.js'
 import { createJevRouter } from './routes/jev.js'
 import { createWorkChatRouter } from './routes/work-chat.js'
 import { createWorkOrchestratorRouter } from './routes/work-orchestrator.js'
+import { createWorkLensRoundsRouter } from './routes/work-lens-rounds.js'
 import { startWorkOrchestrator } from './lib/work-orchestrator/runtime.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
 import { isReadOnlyApiPost } from './lib/work-search.js'
@@ -421,6 +422,8 @@ app.use('/api', (req, res, next) => {
     || req.path === '/meeting-ask/requests'
     || /^\/meeting-ask\/requests\/[A-Za-z0-9_-]+\/cancel$/.test(req.path)
     || req.path.startsWith('/maintenance/drain')
+    // 6.83.0 lens plans: each write takes the api_mutation lease itself and answers the contract's 503 `maintenance`.
+    || req.path.startsWith('/work/chat/lens-')
   if (lifecycleOwned) return next()
 
   // COS Control must prove the candidate while a committed cross-boot gate is
@@ -840,6 +843,8 @@ app.use('/api', createWorkSearchRouter())
 app.use('/api', createWorkChatRouter())
 // 6.83.0 Work orchestrator: Control's Work snapshot, the planner input and plan usage (docs/work-orchestrator.md).
 app.use('/api', createWorkOrchestratorRouter())
+// 6.83.0 lens plans: the lens records a plan and may ask for it to be sent; COS Control pulls, sends and reports.
+app.use('/api', createWorkLensRoundsRouter())
 app.use('/api', queryRouter)
 // The scheduled start-of-day brief: settings, status, run-now. Same auth as
 // every other settings route; the brief itself is an ordinary durable job.

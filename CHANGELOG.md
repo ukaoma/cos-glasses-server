@@ -40,6 +40,18 @@ still owns every send.
 - **Every plan logged**, from any client: `data/work-orchestrator/plans.jsonl` (2 MB, newest half kept) and one
   `[work-orchestrator] plan` line: sessions sent and their availability, left out and why, usage age, assignments
   (mode and target, never text), outcome, time.
+- **Lens plans (Miles 2026-10-21 09:11, "Add both").** A plan the lens made can be saved into the card's Work chat
+  history, and sent from the lens. `GET /api/work/chat` adds `lensPlans: 1` and `lensPlansControl {connected,
+  lastSeenSec, autoSend}` (connected: COS Control polled the lens inbox in the last 60 s). The lens records with
+  `POST /api/work/chat/lens-rounds` (201, a repeated `clientRoundId` 200 with the same body; 400 `invalid_lens_round`
+  with `field`, 404 `unknown_work`, 413), reads `GET .../lens-rounds/:roundId` (state and per-assignment results, never
+  the prompts), asks `POST .../:roundId/send` (202; 409 `already_sent`, `send_in_progress`, `plan_stale`; 423
+  `control_not_connected`; 428 `confirmation_required` without `confirm: "two-step"` unless the card's Auto-send is on)
+  and `POST .../:roundId/stop`. COS Control, loopback only, polls `GET /api/work/chat/lens-inbox`, marks
+  `POST .../:roundId/history` and reports `POST /api/work/chat/lens-send/:sendRequestId/result`. Nothing here sends:
+  COS Control performs every send through its own Send path. A send not picked up in 10 minutes is `expired`.
+  Storage `data/work-lens-rounds.json` (0600, atomic, 200 rounds, 14 days). Every route answers 503 `maintenance`
+  while admissions are closed. Existing routes are unchanged (pinned). Contract: `CONTRACT_lens_plans_6.83.0_2026-10-21.md`.
 - **Checks.** Full suite 8,506 passed, 0 failed, 3 skipped (563 files); `tsc --noEmit` clean. The first full run
   failed (9 Claude bridge suites that mock `node:child_process` could not load the orchestrator runtime; the key-lanes
   P6 census had an unclassified site): the bridges now report through a leaf module and the site is classified.

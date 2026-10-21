@@ -132,3 +132,45 @@ the outcome and the time taken.
 - Auto-send: a per-card switch whose default is Settings › Work › Send plans without review (off by default). On: the
   plan's assignments (Continue, Fork and New session) go through the existing handoff path without the review click,
   each with a visible Stop and a log line. Off: today, unchanged.
+
+## Lens plans (server 6.83.0, COS Control 0.5.333)
+
+Contract: `operations/personal/wk43_2026/CONTRACT_lens_plans_6.83.0_2026-10-21.md` (MU repo), Miles 2026-10-21 09:11
+("Add both"). The lens plans with `POST /api/work/chat` as above, then may save that plan into the card's Work chat
+history and ask for it to be sent. COS Control stays the owner of every send and of its Work chat journal: the server
+holds lens rounds and requests (`server/lib/work-lens-rounds.ts`, `server/routes/work-lens-rounds.ts`); Control pulls
+them, writes the round into the card's record, sends through its own Send path and reports results.
+
+| Who | Route | What |
+| --- | --- | --- |
+| Lens | `POST /api/work/chat/lens-rounds` | Record a plan. 201 `{roundId, workID, state, control}`; a repeated `clientRoundId` 200, same body (answered from the store even if the card left the board). 400 `invalid_lens_round` + `field`, 404 `unknown_work`, 413 `lens_round_too_large`, 503 `work_board_unavailable` when neither Control's snapshot nor the board can say. |
+| Lens | `GET /api/work/chat/lens-rounds/:roundId` | State (`recorded`, `in_history`, `send_requested`, `sending`, `sent`, `partly_sent`, `refused`, `expired`), `inHistory`, `autoSendCard`, per assignment `{id, state, sessionID, receiptId, detail}`. Never prompts. |
+| Lens | `POST /api/work/chat/lens-rounds/:roundId/send` | 202 `{sendRequestId, state: "send_requested"}`. Omitted ids: the whole plan minus what is already sent. 409 `send_in_progress`, `already_sent`, `plan_stale`; 428 `confirmation_required` (no `confirm: "two-step"` and the card's Auto-send off); 423 `control_not_connected`. |
+| Lens | `POST /api/work/chat/lens-rounds/:roundId/stop` | 202 `{stopRequestId, state: "stop_requested"}`; 423 without Control. |
+| Control (loopback) | `GET /api/work/chat/lens-inbox?since=<cursor>&autoSend=0\|1` | Rounds not yet in history (after `since`, with their full plan), send requests (each with its round) and stop requests (with the send they belong to), 50 at most. Listing a send or stop is its pick-up: it is listed once. `autoSend` is Settings > Work > Send plans without review, the card-independent hint. |
+| Control (loopback) | `POST /api/work/chat/lens-rounds/:roundId/history` | `{state: "in_history", autoSendCard?}` after Control wrote the round into the card's record. `autoSendCard` is the card's switch; Control re-posts it when the switch changes. |
+| Control (loopback) | `POST /api/work/chat/lens-send/:sendRequestId/result` | `{assignments: [{id, state, receiptId?, detail?, sessionID?}]}`, as often as states change (`held` until earlier work resolves, then `sent`; `stopped` after a Stop). |
+
+Rules the server enforces:
+
+- **Connected** means a loopback inbox poll in the last 60 s (Control polls every 5 s while running). A phone request
+  never counts. Without it a send or stop is 423 and the plan stays recorded, so it can be sent from the Mac.
+- **Confirmation.** `confirm: "two-step"` (with `confirmedAt`) records the wearer's two-step tap. Without it the send is
+  refused 428 unless the card's Auto-send is on as Control last reported it; Control checks the switch again before it
+  sends and refuses an unconfirmed assignment if the switch has since gone off.
+- **Plan stale.** At record time the server keeps the card's sessions from Control's snapshot (links, receipt targets,
+  fork children). A send is 409 `plan_stale` when that set changed (a session added or gone). Sessions the round's own
+  sends reported are not a change, so a partly sent plan can send the rest. No snapshot on either side: never stale.
+- **Expiry.** A send request not picked up in 10 minutes is `expired` (and never handed to Control later); a new send
+  may be asked for. A picked-up assignment Control never reports is marked `failed` after 15 minutes so the lens can
+  stop polling. A round is kept 14 days; at most 200 are kept, oldest idle first.
+- **Outcome.** Every assignment terminal (`sent`, `delivered`, `failed`, `refused`, `stopped`): all sent or delivered
+  is `sent`, some is `partly_sent`, none is `refused`.
+- **Maintenance.** Every route answers 503 `maintenance` while admissions are closed; writes hold the `api_mutation`
+  lease themselves (the global mutation lease skips `/work/chat/lens-*` so the code is the contract's).
+- **Storage.** `data/work-lens-rounds.json`, 0600, atomic; an unreadable file is moved aside, never overwritten. Inside a
+  test the store is in memory only.
+
+Checks: `server/routes/work-lens-rounds.test.ts` (record, idempotent repeat, send with and without confirm, Auto-send,
+423, `plan_stale`, expiry, stop, loopback-only, maintenance, the existing GET and POST unchanged) and
+`server/scripts/work-lens-rounds-mutation-gate.mjs` (not packaged).
