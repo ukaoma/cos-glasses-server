@@ -52,6 +52,9 @@ still owns every send.
   COS Control performs every send through its own Send path. A send not picked up in 10 minutes is `expired`.
   Storage `data/work-lens-rounds.json` (0600, atomic, 200 rounds, 14 days). Every route answers 503 `maintenance`
   while admissions are closed. Existing routes are unchanged (pinned). Contract: `CONTRACT_lens_plans_6.83.0_2026-10-21.md`.
+  Checks: `work-lens-rounds.test.ts` 25 tests; `server/scripts/work-lens-rounds-mutation-gate.mjs` (not packaged): green
+  baseline (33 tests in 2 files), 56 of 56 mutants killed by a named test. Full suite after: 8,576 passed, 0 failed,
+  3 skipped (569 files).
 - **Checks.** Full suite 8,506 passed, 0 failed, 3 skipped (563 files); `tsc --noEmit` clean. The first full run
   failed (9 Claude bridge suites that mock `node:child_process` could not load the orchestrator runtime; the key-lanes
   P6 census had an unclassified site): the bridges now report through a leaf module and the site is classified.
