@@ -95,7 +95,7 @@ const mutations = [
   ['usage-rejected-frame', US, "    if (info.status === 'rejected') {", "    if (false) {"],
   ['usage-codex-read-line', US, "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify(CODEX_READ)); return }", "      if (o.id === 1 && !done) { child.write(JSON.stringify({ method: 'initialized' })); child.write(JSON.stringify({ ...CODEX_READ, params: { ...CODEX_READ.params, supportsLunaReserve: true } })); return }"],
   ['usage-probe-timeout-kills', US, "    const timer = setTimeout(() => { child.kill(); finish(new Error('timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'", "    const timer = setTimeout(() => { finish(new Error('timed out')) }, timeoutMs)\n    child.onLine(o => {\n      if (o.type !== 'control_response'"],
-  ['usage-limit-hook-key-lane', RT, "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],
+  ['usage-limit-hook-key-lane', O + 'usage-events.ts', "    if (code !== 'provider_limit' || lane || isProfilePreference(model)) return\n", "    if (code !== 'provider_limit') return\n"],
   // The plan contract.
   ['wc-orchestrator-keys-gated', WC, "  const topKeys = ['workID','revision','question','context','sessions','history','updates','mode','planner','effort','items','references', ...(orchestrator ? ORCHESTRATOR_KEYS : [])]", "  const topKeys = ['workID','revision','question','context','sessions','history','updates','mode','planner','effort','items','references', ...ORCHESTRATOR_KEYS]"],
   ['wc-row-keys-gated', WC, '...(orchestrator ? ORCHESTRATOR_SESSION_KEYS : [])].includes(k))', '...ORCHESTRATOR_SESSION_KEYS].includes(k))'],

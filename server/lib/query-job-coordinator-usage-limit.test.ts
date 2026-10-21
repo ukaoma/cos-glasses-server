@@ -8,7 +8,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 const seen = vi.hoisted(() => ({ calls: [] as unknown[][] }))
 vi.mock('./conversation.js', () => ({ getOrCreateSession: () => 'test-conversation' }))
-vi.mock('./work-orchestrator/runtime.js', () => ({ noteJobProviderLimit: (...args: unknown[]) => { seen.calls.push(args) } }))
+vi.mock('./work-orchestrator/usage-events.js', () => ({ noteJobProviderLimit: (...args: unknown[]) => { seen.calls.push(args) } }))
 
 import { QueryJobCoordinator } from './query-job-coordinator.js'
 import { QueryJobStore } from './query-job-store.js'

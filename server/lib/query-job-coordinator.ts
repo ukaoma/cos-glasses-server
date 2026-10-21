@@ -37,7 +37,7 @@ import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
 import { crashLoopParkedError, type BootResumeGate } from './boot-resume.js'
 import { restartNoticeEnabled } from './query-job-feature.js'
-import { noteJobProviderLimit } from './work-orchestrator/runtime.js'
+import { noteJobProviderLimit } from './work-orchestrator/usage-events.js'
 
 const CLIENT_JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 

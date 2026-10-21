@@ -68,7 +68,7 @@ vi.mock('./provider-process-lifecycle.js', () => ({
   terminateProviderProcess: (...args: unknown[]) => state.terminateProviderProcess(...args),
 }))
 
-vi.mock('./work-orchestrator/runtime.js', () => ({ noteClaudeRateLimitFrame: (frame: unknown) => { state.frames.push(frame) } }))
+vi.mock('./work-orchestrator/usage-events.js', () => ({ noteClaudeRateLimitFrame: (frame: unknown) => { state.frames.push(frame) } }))
 
 import { callClaudeStreaming } from './claude-bridge.js'
 
