@@ -206,6 +206,23 @@ describe('public durable query runtime', () => {
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 
+  it('6.82.0: a routine job tells the provider its audit caller; a phone job does not', async () => {
+    const runtime = await import('./query-job-runtime.js')
+    await runtime.initQueryJobRuntime()
+    const routine = await runtime.queryJobCoordinator.submit(await runtime.preparePublicDurableQueryAdmission({
+      clientJobId: randomUUID(), generation: 1, query: 'run the skill', sessionId: 'runtime-session', model: 'sonnet',
+      origin: { kind: 'routine', id: 'routine-0123456789' },
+    }))
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(routine.job.jobId))
+    const phone = await runtime.queryJobCoordinator.submit(await runtime.preparePublicDurableQueryAdmission({
+      clientJobId: randomUUID(), generation: 1, query: 'hello', sessionId: 'runtime-session', model: 'sonnet',
+    }))
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(phone.job.jobId))
+    expect(mocks.callModelStreaming.mock.calls[0][7]).toMatchObject({ auditCaller: 'routine:routine-0123456789' })
+    expect(mocks.callModelStreaming.mock.calls[1][7]).not.toHaveProperty('auditCaller')
+    await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
   it('6.58.2: a New session carries its name to the provider, and the session it names mid-run lands on the job', async () => {
     const SID = '8f7a53b9-b478-4d88-88e4-4a915b256da5'
     mocks.callModelStreaming.mockImplementationOnce(async (

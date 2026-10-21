@@ -564,7 +564,7 @@ export async function callDirectStreaming(
       inputChars: messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0),
       outputChars: text.length,
       durationMs: Date.now() - startTime,
-      caller: 'direct_query',
+      caller: options?.auditCaller ?? 'direct_query',
       ...(options?.turnId ? { turnId: options.turnId } : {}),
       runId: run.runId,
       sessionId: sid,

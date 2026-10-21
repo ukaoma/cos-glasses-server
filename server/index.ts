@@ -170,6 +170,8 @@ import { listBoard } from './lib/task-store.js'
 import { createDefaultWorkReviewRuntime } from './lib/work-review-backend.js'
 import { createMorningBriefRouter } from './routes/morning-brief.js'
 import { getMorningBriefScheduler, startMorningBriefScheduler, stopMorningBriefScheduler } from './lib/morning-brief-runtime.js'
+import { createRoutinesRouter } from './routes/routines.js'
+import { getRoutineRegistry, routineSkillCatalog, startRoutineScheduler, stopRoutineScheduler } from './lib/routines-runtime.js'
 import {
   initQueryJobRuntime,
   preparePublicDurableQueryAdmission,
@@ -838,6 +840,8 @@ app.use('/api', queryRouter)
 // The scheduled start-of-day brief: settings, status, run-now. Same auth as
 // every other settings route; the brief itself is an ordinary durable job.
 app.use('/api', createMorningBriefRouter(getMorningBriefScheduler))
+// 6.82.0: every routine (the brief first, then skill routines), each with its own cap, switch and breaker.
+app.use('/api', createRoutinesRouter(getRoutineRegistry, routineSkillCatalog))
 app.use('/api', providerProofRouter)
 app.use('/api', transcribeRouter)
 // Ported from cos-glasses-app in 6.24.0. The companion's Sessions tab has been
@@ -1257,6 +1261,7 @@ async function gracefulShutdown(): Promise<void> {
   forceExit.unref?.()
   await meetingAskRuntime.shutdown()
   stopMorningBriefScheduler()
+  stopRoutineScheduler()
   await workReviewRuntime?.close()
   workIntakeStore?.close()
   workHandoffRequestStore?.close()
@@ -1534,6 +1539,8 @@ listenRequiredServers(listeners).then(() => {
       // that store is ready. Its own tick checks the durable-jobs switch and the
       // maintenance gate, so starting it here is safe when either is off.
       startMorningBriefScheduler()
+      // 6.82.0: skill routines ride the same coordinator and the same gates.
+      startRoutineScheduler()
       void workReviewRuntime?.start().catch(error => console.error('[work-reviews] reconciliation unavailable:', error))
     }).catch(error => {
       // The store remains degraded and rejects admission. Legacy /api/query is

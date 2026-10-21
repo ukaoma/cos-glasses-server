@@ -113,9 +113,15 @@ function daysBetween(fromDay: string, toDay: string): number {
   return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86_400_000)
 }
 
+/** The schedule fields the arithmetic reads. The morning brief config and a
+ * 6.82.0 skill routine both carry them, so both share one decision table. */
+export type ScheduleShape = Pick<MorningBriefConfig, 'enabled' | 'time' | 'timezone' | 'days' | 'catchUpMinutes'>
+/** The ledger fields the fire decision reads (a brief run and a routine run both have them). */
+export type ScheduledRunShape = Pick<MorningBriefRun, 'day' | 'trigger' | 'attempt' | 'firedAt' | 'jobId' | 'submitError'>
+
 /** ISO instant of the next scheduled fire at or after `nowMs`, or null when
  * the brief is disabled or no weekday is selected. */
-export function nextScheduledFire(config: MorningBriefConfig, nowMs: number): string | null {
+export function nextScheduledFire(config: Pick<ScheduleShape, 'enabled' | 'time' | 'timezone' | 'days'>, nowMs: number): string | null {
   if (!config.enabled || config.days.length === 0) return null
   const target = parseTime(config.time)
   const clock = localClock(nowMs, config.timezone)
@@ -129,8 +135,8 @@ export function nextScheduledFire(config: MorningBriefConfig, nowMs: number): st
   return null
 }
 
-export type FireDecision =
-  | { fire: true; day: string; attempt: number; resume?: MorningBriefRun }
+export type FireDecision<R extends ScheduledRunShape = MorningBriefRun> =
+  | { fire: true; day: string; attempt: number; resume?: R }
   | { fire: false; reason: 'disabled' | 'not_a_brief_day' | 'before_slot' | 'window_closed' | 'already_fired' | 'in_flight' | 'attempts_exhausted' | 'backoff' }
 
 /**
@@ -140,11 +146,11 @@ export type FireDecision =
  * job id and no error is a crash between ledger write and admission — resumed
  * by client identity rather than re-run.
  */
-export function decideScheduledFire(
-  config: MorningBriefConfig,
-  runs: readonly MorningBriefRun[],
+export function decideScheduledFire<R extends ScheduledRunShape = MorningBriefRun>(
+  config: ScheduleShape,
+  runs: readonly R[],
   nowMs: number,
-): FireDecision {
+): FireDecision<R> {
   if (!config.enabled) return { fire: false, reason: 'disabled' }
   const clock = localClock(nowMs, config.timezone)
   if (!config.days.includes(clock.weekday)) return { fire: false, reason: 'not_a_brief_day' }

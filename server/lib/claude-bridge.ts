@@ -437,6 +437,11 @@ export interface CallOptions {
   /** 6.58.2: `claude --name` for a session this COS session starts fresh (QueryJobRequest.sessionName). */
   sessionName?: string
   /**
+   * 6.82.0: the token-audit `caller` for this run, so a server-started job is counted by who started
+   * it (`routine:morning-brief`, `routine:routine-<id>`). Absent, every bridge writes the caller it always did.
+   */
+  auditCaller?: string
+  /**
    * 6.78.0 Messages steer: the job's steer port. Present only when the coordinator decided the
    * run is steerable (lib/claude-steer.ts). Absent, every argument and every stdin byte is the
    * 6.77.0 one. A dispatch never steers.
@@ -927,7 +932,7 @@ export async function callClaudeStreaming(
       inputChars: inputEstimate,
       outputChars: text.length,
       durationMs: totalMs,
-      caller: options?.lightweight ? 'voice_query' : 'full_query',
+      caller: options?.auditCaller ?? (options?.lightweight ? 'voice_query' : 'full_query'),
       ...keyAuditFields,
       ...keyUsdFields,
     })

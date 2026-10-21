@@ -528,7 +528,7 @@ export async function callCursorStreaming(
       inputChars: systemPrompt.length + fullQuery.length + contextPrompt.length,
       outputChars: text.length,
       durationMs: totalMs,
-      caller: options?.lightweight ? 'voice_query' : 'full_query',
+      caller: options?.auditCaller ?? (options?.lightweight ? 'voice_query' : 'full_query'),
       turnId: options?.turnId,
       runId: run.runId,
       sessionId: sid,

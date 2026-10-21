@@ -817,7 +817,7 @@ export async function callCodexStreaming(
       inputChars: systemPrompt.length + fullQuery.length + contextPrompt.length,
       outputChars: text.length,
       durationMs: totalMs,
-      caller: options?.lightweight ? 'voice_query' : 'full_query',
+      caller: options?.auditCaller ?? (options?.lightweight ? 'voice_query' : 'full_query'),
       ...keyAuditFields,
       ...keyUsdFields,
     })

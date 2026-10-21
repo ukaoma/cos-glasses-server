@@ -1,3 +1,4 @@
+import { routineAuditCaller } from './routines-config.js'
 import { carriesBoundTo } from './agent-session-binding-store.js'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -420,6 +421,8 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
       sessionLockHeld: true,
       ...(request.dispatch ? { dispatch: request.dispatch } : {}),
       ...(request.sessionName ? { sessionName: request.sessionName } : {}),
+      // 6.82.0: a routine's run is counted in the token audit under the routine that started it.
+      ...(routineAuditCaller(request) ? { auditCaller: routineAuditCaller(request) } : {}),
       ...(request.keyTurnOnly ? { keyTurnOnly: true } : {}),
       // 6.78.0: only on a run the coordinator decided is steerable.
       ...(steer ? { steer } : {}),
