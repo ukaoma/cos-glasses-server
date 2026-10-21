@@ -6,7 +6,7 @@ import { readSpeakerPolicy, writeSpeakerPolicy, isSpeakerMode } from '../lib/mee
 
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
@@ -129,6 +129,7 @@ import {
   analyzeTranscriptGaps,
   deleteSession,
   assertMacCaptureComplete,
+  discardSilentMacCapture,
   drainSessionAudioWrites,
   durableSessionRecoveryHasRun,
   getSessionChunkEntries,
@@ -803,6 +804,80 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // 6.81.0, additive: the Stop the server holds for this meeting, if any. Older clients ignore it.
       stopIntent: intent ? publicStopIntent(intent) : null,
     })
+  })
+
+  // ── 6.83.2: discard a stranded Mac capture that held no sound ──────────────────────
+  // POST /meeting/sessions/:id/discard {confirm: true, serverInstanceId}. COS Control offers it only for a capture the
+  // server called no_speech or whose audio was all zeros; the server re-checks everything itself
+  // (transcribe-stream.ts discardSilentMacCapture) and never touches a capture with speech. Without `confirm: true`
+  // it answers 400 confirmation_required with what it WOULD do, and changes nothing.
+  router.post('/meeting/sessions/:sessionId/discard', async (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
+      res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
+      return
+    }
+    res.set('Cache-Control', 'private, no-store')
+    if (!MAC_CAPTURE_ID.test(sessionId)) {
+      res.status(400).json({ error: 'Only a Mac recording can be discarded here', reason: 'not_mac_capture' })
+      return
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const serverInstanceId = getServerInstanceId()
+    if (!serverInstanceId) {
+      res.status(503).json({ error: 'Server identity unavailable', reason: 'server_identity_unavailable' })
+      return
+    }
+    const pin = suppliedServerPin(req, body.serverInstanceId)
+    if (!pin) {
+      res.status(400).json({ error: 'Server identity pin required', reason: 'server_identity_pin_required' })
+      return
+    }
+    if (pin !== serverInstanceId) {
+      res.status(409).json({ error: 'Server identity mismatch', reason: 'server_instance_mismatch' })
+      return
+    }
+    if (store.findBySessionId(sessionId)) {
+      res.status(409).json({ error: 'This recording is saved as a meeting', reason: 'already_saved' })
+      return
+    }
+    if (savingSessions.has(sessionId)) {
+      res.status(409).json({ error: 'This recording is being saved', reason: 'saving' })
+      return
+    }
+    const confirmed = body.confirm === true
+    const result = await discardSilentMacCapture(sessionId, { dryRun: !confirmed })
+    if (!result.ok && result.reason === 'session_not_found') {
+      // Already discarded (a retry after a lost answer): the quarantine says so, and the answer is the same.
+      const disposition = readCaptureDisposition(sessionId)
+      if (disposition?.quarantineReason === 'discarded_no_sound') {
+        res.json({ sessionId, discarded: true, replayed: true, quarantined: disposition.dirName, retainedUntil: disposition.retainedUntil })
+        return
+      }
+      res.status(404).json({ error: 'The server holds no live session for this recording', reason: 'session_not_found' })
+      return
+    }
+    if (!result.ok) {
+      const message: Record<string, string> = {
+        has_speech: 'This recording has speech; save it instead',
+        asr_in_progress: 'Audio is still being transcribed; try again in a moment',
+        chunk_in_progress: 'An audio chunk is still arriving; try again in a moment',
+        not_idle: 'This recording is still receiving audio',
+        not_mac_capture: 'Only a Mac recording can be discarded here',
+      }
+      res.status(409).json({ error: message[result.reason ?? ''] ?? 'Not discarded', reason: result.reason, receivedCount: result.receivedCount })
+      return
+    }
+    if (!confirmed) {
+      res.status(400).json({
+        error: 'Confirmation required', reason: 'confirmation_required',
+        preview: { sessionId, chunkFiles: result.chunkFiles, receivedCount: result.receivedCount, retentionHours: 24 },
+      })
+      return
+    }
+    console.warn(`[meeting/discard] Discarded no-sound Mac capture ${sessionId}: ${result.receivedCount} chunk(s) received, audio quarantined for 24 h`)
+    res.json({ sessionId, discarded: true, replayed: false, quarantined: result.quarantined ? basename(result.quarantined) : null,
+      chunkFiles: result.chunkFiles, receivedCount: result.receivedCount, retainedUntil: result.retainedUntil })
   })
 
   // ── Stop a live G2 meeting from the Mac (COS Control) ────────────────────────────

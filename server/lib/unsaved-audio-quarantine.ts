@@ -43,7 +43,15 @@ export interface QuarantineManifest {
   reason: string
   chunkFiles: number
   bytes: number
+  /** 6.83.2: a shorter clock for this one capture (a Mac capture discarded with no sound). Never longer than the global one. */
+  retentionMs?: number
 }
+
+/** 6.83.2: how long a discarded no-sound Mac capture stays quarantined: long enough to undo a wrong discard by hand. */
+export const DISCARDED_RETENTION_MS = 24 * 60 * 60 * 1000
+
+/** The receipt a discard writes, so the capture is terminal (`no_speech`) and never recovered on its own. */
+export interface QuarantineReceipt { outcome: 'no_speech'; discarded: true; chunkFiles?: number; note: string }
 
 export interface UnsavedCapture {
   sessionId: string
@@ -55,6 +63,12 @@ export interface UnsavedCapture {
   reason: string | null
   expiresAt: string | null
   recovered: boolean
+}
+
+/** The clock that applies to one capture: its own when it set a shorter one, else the global retention. */
+export function effectiveRetentionMs(manifest: { retentionMs?: unknown } | null, retentionMs: number): number {
+  const own = manifest?.retentionMs
+  return typeof own === 'number' && Number.isFinite(own) && own > 0 ? Math.min(retentionMs, own) : retentionMs
 }
 
 export function unsavedAudioRoot(): string {
@@ -99,6 +113,7 @@ export function quarantineSessionAudio(
   sourceDir: string,
   reason: string,
   root: string = unsavedAudioRoot(),
+  options: { retentionMs?: number; receipt?: QuarantineReceipt } = {},
 ): string | null {
   const sessionId = basename(sourceDir)
   try {
@@ -114,6 +129,7 @@ export function quarantineSessionAudio(
       reason,
       chunkFiles: countChunkWavs(target),
       bytes: dirBytes(target),
+      ...(options.retentionMs ? { retentionMs: options.retentionMs } : {}),
     }
     try {
       writeFileSync(resolve(target, QUARANTINE_MANIFEST), `${JSON.stringify(manifest)}\n`, {
@@ -121,6 +137,19 @@ export function quarantineSessionAudio(
         mode: 0o600,
       })
     } catch { /* manifest is observability; the audio move already succeeded */ }
+    if (options.receipt) {
+      // 6.83.2: a discarded capture is terminal. The receipt is what keeps the auto-recover sweep and the
+      // unsaved-captures count off it (listUnsavedCaptures reads it as recovered, readCaptureDisposition as no_speech).
+      try {
+        writeFileSync(resolve(target, RECOVERED_RECEIPT), `${JSON.stringify({
+          schemaVersion: 1,
+          recoveredAt: new Date().toISOString(),
+          chunkFiles: manifest.chunkFiles,
+          words: 0,
+          ...options.receipt,
+        })}\n`, { encoding: 'utf8', mode: 0o600 })
+      } catch { /* the audio is quarantined either way; without the receipt it is merely listed as recoverable */ }
+    }
     return target
   } catch {
     // Rename failed (cross-device, permissions, race). Leave the source alone —
@@ -220,6 +249,7 @@ export function listUnsavedCaptures(
     } catch { continue }
     const manifest = readManifest(dirPath)
     const atMs = quarantinedAtMs(dirPath, manifest)
+    const ownRetentionMs = effectiveRetentionMs(manifest, retentionMs)
     captures.push({
       sessionId: manifest?.sessionId ?? dir.replace(/\.\d+$/, ''),
       dirName: dir,
@@ -228,7 +258,7 @@ export function listUnsavedCaptures(
       chunkFiles: manifest?.chunkFiles ?? countChunkWavs(dirPath),
       bytes: manifest?.bytes ?? dirBytes(dirPath),
       reason: manifest?.reason ?? null,
-      expiresAt: atMs != null ? new Date(atMs + retentionMs).toISOString() : null,
+      expiresAt: atMs != null ? new Date(atMs + ownRetentionMs).toISOString() : null,
       recovered: existsSync(resolve(dirPath, RECOVERED_RECEIPT)),
     })
   }
@@ -248,9 +278,10 @@ export function purgeExpiredQuarantine(
     // sitting exactly at the retention boundary would otherwise lose its
     // audio mid-run, in the module whose thesis is "never delete evidence".
     if (isRecoveryActive(capture.dirName)) continue
-    const atMs = capture.quarantinedAt ? Date.parse(capture.quarantinedAt) : NaN
-    if (!Number.isFinite(atMs)) continue
-    if (Date.now() - atMs > retentionMs) {
+    // The capture's own expiry: a discarded no-sound capture sets a shorter clock (6.83.2).
+    const expiresMs = capture.expiresAt ? Date.parse(capture.expiresAt) : NaN
+    if (!Number.isFinite(expiresMs)) continue
+    if (Date.now() > expiresMs) {
       try {
         rmSync(resolve(root, capture.dirName), { recursive: true, force: true })
         purged.push(capture.dirName)
@@ -433,7 +464,7 @@ function dispositionOf(sessionId: string, dirPath: string, retentionMs: number):
     quarantineReason: manifest?.reason ?? null,
     savedFilename,
     recovering: isRecoveryActive(basename(dirPath)),
-    retainedUntil: atMs != null ? new Date(atMs + retentionMs).toISOString() : null,
+    retainedUntil: atMs != null ? new Date(atMs + effectiveRetentionMs(manifest, retentionMs)).toISOString() : null,
   }
 }
 

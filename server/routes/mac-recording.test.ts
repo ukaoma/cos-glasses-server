@@ -162,3 +162,82 @@ it('records Parakeet silence over detected speech as an empty chunk so later chu
  expect(next.json).toMatchObject({asrCompleted:true,canonical:true,asrProvider:'server-parakeet'})
  expect(whisper.transcribeLocal).not.toHaveBeenCalled()
 })
+
+// ── 6.83.2: discard a stranded Mac capture that held no sound ──────────────────────
+// Miles 2026-10-21: 211 chunks of exact zeros sat stranded with a Save that could never work.
+async function silentCapture(chunks=2){
+ await start(); const whisper=await import('../lib/whisper-local.js')
+ vi.mocked(whisper.transcribeLocal).mockResolvedValue({text:'',backend:'server'} as any)
+ for(let i=0;i<chunks;i++) expect((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+(6000*(i+1)),wavOf(6,()=>0))).json).toMatchObject({asrCompleted:true,canonical:false})
+}
+function goIdle(ms=3*60_000){ const session=stream.__sessionsForTests.get(id)!; session.lastActivityAt-=ms }
+const discard=(body:Record<string,unknown>={confirm:true},pin='server-mac')=>call('/meeting/sessions/'+id+'/discard',body,pin)
+it('advertises the discard route on Mac recording capabilities',async()=>{
+ expect((await call('/mac-recording/capabilities')).json.discard).toBe(true)
+})
+it('discards a stranded no-sound capture only on confirm: quarantined for 24 h with a terminal receipt, off the stranded list, closed to late chunks',async()=>{
+ await silentCapture(2); goIdle()
+ const before=(await call('/meeting/orphans')).json.stranded.find((s:any)=>s.sessionId===id)
+ expect(before).toMatchObject({transcriptState:'no_speech',canSave:false})
+ const preview=await discard({})
+ expect(preview.status).toBe(400); expect(preview.json).toMatchObject({reason:'confirmation_required',preview:{sessionId:id,chunkFiles:2,receivedCount:2,retentionHours:24}})
+ expect(stream.__sessionsForTests.has(id)).toBe(true); expect(existsSync(join(root,'session-audio',id,'chunk_0000.wav'))).toBe(true)
+ const done=await discard()
+ expect(done.status).toBe(200); expect(done.json).toMatchObject({sessionId:id,discarded:true,replayed:false,quarantined:id,chunkFiles:2,receivedCount:2})
+ expect(stream.__sessionsForTests.has(id)).toBe(false)
+ expect((await call('/meeting/orphans')).json.stranded.some((s:any)=>s.sessionId===id)).toBe(false)
+ expect(existsSync(join(root,'session-audio',id))).toBe(false)
+ expect(existsSync(join(root,'unsaved-audio',id,'chunk_0001.wav'))).toBe(true)
+ expect(JSON.parse(readFileSync(join(root,'unsaved-audio',id,'_quarantine.json'),'utf8'))).toMatchObject({reason:'discarded_no_sound',retentionMs:24*3600_000})
+ expect(JSON.parse(readFileSync(join(root,'unsaved-audio',id,'_recovered.json'),'utf8'))).toMatchObject({outcome:'no_speech',discarded:true})
+ const orphans=(await call('/meeting/orphans')).json
+ expect(orphans.items.find((i:any)=>i.sessionId===id)).toMatchObject({recovered:true}); expect(orphans.count).toBe(0)
+ expect((await call('/meeting/sessions/'+id+'/status')).json).toMatchObject({outcome:'receipted'})
+ expect((await call('/mac-recording/'+id+'/chunks?chunkIndex=2&elapsed=18000',wavOf(6,()=>0))).status).toBe(410)
+ expect((await start()).status).toBe(410)
+ expect((await discard()).json).toMatchObject({discarded:true,replayed:true})
+ // Past the closed-session TTL the in-memory tombstone is gone; the registry's closedAt still refuses a late chunk,
+ // so a discarded capture can never come back as a new live session.
+ stream.sweepExpiredClosedSessions(Date.now()+400*24*3600_000)
+ const late=await call('/mac-recording/'+id+'/chunks?chunkIndex=2&elapsed=18000',wavOf(6,()=>0))
+ expect(late.status).toBe(410); expect(late.json.reason).toBe('session_closed'); expect(stream.__sessionsForTests.has(id)).toBe(false)
+})
+it('never discards a capture with speech, one still transcribing, one still receiving, or a G2 session',async()=>{
+ await start(); await call('/mac-recording/'+id+'/chunks?chunkIndex=0&elapsed=6000',wavOf(6,()=>400)); goIdle()
+ const speech=await discard()
+ expect(speech.status).toBe(409); expect(speech.json.reason).toBe('has_speech')
+ expect(stream.getSessionChunks(id)).toHaveLength(1); expect(existsSync(join(root,'session-audio',id,'chunk_0000.wav'))).toBe(true)
+ // The route refuses a G2 id itself, before any pin or session check (400, not the guard's 409).
+ const g2=await call('/meeting/sessions/g2_1700000000000/discard',{confirm:true},'')
+ expect(g2.status).toBe(400); expect(g2.json.reason).toBe('not_mac_capture')
+})
+it('refuses while a chunk is still being transcribed or audio is still arriving',async()=>{
+ await silentCapture(1)
+ expect((await discard()).json.reason).toBe('not_idle')
+ const whisper=await import('../lib/whisper-local.js')
+ vi.mocked(whisper.transcribeLocal).mockRejectedValueOnce(new Error('ASR unavailable'))
+ expect((await call('/mac-recording/'+id+'/chunks?chunkIndex=1&elapsed=12000',wavOf(6,()=>0))).status).toBe(503)
+ goIdle()
+ expect((await discard()).json.reason).toBe('asr_in_progress')
+ expect(stream.__sessionsForTests.has(id)).toBe(true)
+})
+it('requires this server pin and a session it holds',async()=>{
+ await silentCapture(1); goIdle()
+ expect((await discard({confirm:true},'')).json.reason).toBe('server_identity_pin_required')
+ expect((await discard({confirm:true},'wrong')).json.reason).toBe('server_instance_mismatch')
+ expect(stream.__sessionsForTests.has(id)).toBe(true)
+ const other=await call('/meeting/sessions/mac_00000000-0000-4000-8000-000000000000/discard',{confirm:true})
+ expect(other.status).toBe(404); expect(other.json.reason).toBe('session_not_found')
+})
+it('macDiscardRefusal: every guard by name, idle measured at the empty-session threshold',()=>{
+ const ok={sessionId:id,present:true,canonicalCount:0,receivedIndices:[0,1],asrCompletedIndices:[0,1],silentForMs:stream.MAC_DISCARD_IDLE_MS,chunkInProgress:false}
+ expect(stream.MAC_DISCARD_IDLE_MS).toBe(2*60_000)
+ expect(stream.macDiscardRefusal(ok)).toBeNull()
+ expect(stream.macDiscardRefusal({...ok,sessionId:'g2_1700000000000'})).toBe('not_mac_capture')
+ expect(stream.macDiscardRefusal({...ok,present:false})).toBe('session_not_found')
+ expect(stream.macDiscardRefusal({...ok,canonicalCount:1})).toBe('has_speech')
+ expect(stream.macDiscardRefusal({...ok,asrCompletedIndices:[0]})).toBe('asr_in_progress')
+ expect(stream.macDiscardRefusal({...ok,chunkInProgress:true})).toBe('chunk_in_progress')
+ expect(stream.macDiscardRefusal({...ok,silentForMs:stream.MAC_DISCARD_IDLE_MS-1})).toBe('not_idle')
+ expect(stream.macDiscardRefusal({...ok,receivedIndices:[],asrCompletedIndices:[]})).toBeNull()
+})

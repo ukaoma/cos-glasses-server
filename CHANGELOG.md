@@ -1,4 +1,17 @@
-## 6.83.1 - Dictation: spoken paths and links, a dictionary that can hold "/pricing", and a polish that never invents a link
+## 6.84.0 - Dictation keeps "/pricing" and spoken paths; discard a Mac recording that captured no sound
+
+Two lanes in one release: the dictation formatting lane (built as 6.83.1) and the Mac recorder discard route (built
+as 6.83.2). Neither of those versions was published; 6.84.0 is the first package with either.
+
+- **Defaults and switches.** The AI polish prompt v3 is the default. Rollback: `COS_DICTATION_POLISH_PROMPT=v2`
+  (the 6.79.1 prompt, byte for byte). The deterministic spoken-path rule ("forward slash pricing" to "/pricing") is
+  on; `COS_DICTATION_SPOKEN_PATHS=0` turns it off.
+- **Known follow-up.** A self-correction such as "add Priya to the invite actually add Dana instead" sometimes keeps
+  both names on v3 (2 of 2 runs in the eval). v2 handles it; set `COS_DICTATION_POLISH_PROMPT=v2` if it matters.
+- **Pairs with COS Control 0.5.334.** Control shows the learn note, labels a `link_guard` refusal as not polished,
+  and offers Discard for a stranded Mac recording with no sound (it needs this server for the server-side discard).
+
+### Dictation: spoken paths and links, a dictionary that can hold "/pricing", and a polish that never invents a link
 
 Miles, 2026-10-21 13:09, dictating funnel pages ("demo, forward slash pricing, forward slash build and price"): COS
 gave him the words, and when he taught Fix a word "forward slash pricing" written "/pricing" it refused with "the
@@ -7,10 +20,10 @@ dictation is honored by the AI polish, and a mapping like that works from then o
 
 - **Client matrix.** Fix a word sends the same learn request, and the server now answers 200; Control 0.5.333 shows
   its usual "Saved" line. The answer adds `correctionOnly: true` and a `note`, which COS Control 0.5.334 shows. A
-  refused polish answer now says `polishSkipped: "link_guard"`. COS Control does not know that word yet (its two skip
-  lists, in `HelperSources/ProviderStatusCore.swift` and `Sources/MacDictationCore.swift`), so it labels the dictation
-  polished or not polished instead; it pastes the same pre-polish text the server sent either way. Older servers
-  still refuse the learn.
+  refused polish answer now says `polishSkipped: "link_guard"`. COS Control 0.5.334 lists that word in both of its
+  skip lists (`HelperSources/ProviderStatusCore.swift` and `Sources/MacDictationCore.swift`) and labels such a
+  dictation not polished; an older Control may label it either way, and pastes the same pre-polish text the server
+  sent either way. Older servers still refuse the learn.
 - **Dictionary: links, emails and paths are corrections only.** `learnCorrection` stores a written form that is a
   link, email, handle ("@sam") or path in `corrections` and never adds it to `vocabulary` (`addedVocabulary: false`), so it never
   reaches a decoder prompt. A repeat is `unchanged`, a full vocabulary does not block it, and Undo removes it and
@@ -93,6 +106,31 @@ dictation is honored by the AI polish, and a mapping like that works from then o
   8640 passed, 32 failed, 3 skipped (571 files) with another session compiling. Rerunning the 24 failing files alone:
   25 failures here, 23 at 6.83.0 (`d10d92e`), the same set except 4 timing tests that flipped either way (3 here pass
   when their files run alone); most are 5-second timeouts. `tsc` clean.
+
+### Mac recorder: discard a stranded recording that captured no sound
+
+Miles, 2026-10-21: Record on Mac captured a 21-minute Zoom call as 211 chunks of exact zeros (macOS hands a process
+tap zeros, not an error, when it is not letting the app record system audio). The save refused it as no speech, and the
+capture then sat in the stranded list with a Save that could never work. COS Control 0.5.334 offers Discard for it.
+
+- **`POST /api/meeting/sessions/:id/discard {confirm: true, serverInstanceId}`** (authenticated, pinned to this server).
+  Mac captures only (`not_mac_capture` 400 otherwise). It refuses, and changes nothing, unless the server holds the
+  session in memory with NO canonical (transcribed) chunk, ASR finished on every chunk it received, no chunk upload in
+  progress, and no audio for 2 minutes (`has_speech`, `asr_in_progress`, `chunk_in_progress`, `not_idle` 409;
+  `session_not_found` 404; `already_saved` and `saving` 409). Without `confirm: true` it answers 400
+  `confirmation_required` with a preview (chunk files, chunks received, 24 h retention). A retry after a lost answer
+  answers `replayed: true`.
+- **Never deleted.** The session's chunk audio moves into the existing unsaved-audio quarantine with reason
+  `discarded_no_sound`, a terminal `no_speech` receipt (so the auto-recover sweep and the unsaved-captures count leave
+  it alone, and the session status reads `outcome: receipted`) and its own 24-hour clock instead of 72 hours. The
+  session leaves the in-memory map and the stranded list, and its Mac registry is closed, so a late chunk or a replayed
+  start answers 410 even after the closed-session tombstone expires.
+- **Quarantine clocks.** A quarantine manifest may carry its own `retentionMs`; it can only shorten the global
+  retention, never lengthen it. Purge, the unsaved list's `expiresAt` and the disposition's `retainedUntil` all read it.
+- **Advertised.** `GET /api/mac-recording/capabilities` adds `discard: true`. An older server omits it, and Control then
+  discards only its own local copy and says so.
+- Tests: route tests for the discard path, every refusal and the replay, a pure test naming each guard, and a quarantine
+  test for the shorter clock. Mutation gate `server/scripts/mac-discard-mutation-gate.mjs` (25 mutants).
 
 ## 6.83.0 - Work orchestrator: every session on a card, where each left off, and plan usage, in the planner input
 
