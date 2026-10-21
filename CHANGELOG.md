@@ -14,6 +14,12 @@ as 6.83.2). Neither of those versions was published; 6.84.0 is the first package
 - **Package.** Two mutation gates no longer ship in the tarball: `server/scripts/mac-discard-mutation-gate.mjs` (new)
   and `server/scripts/work-lens-rounds-mutation-gate.mjs` (it shipped in 6.83.0 although its docs say not packaged).
 
+- **Checks on the merged tree (6.84.0).** Full suite: 571 files, 8679 passed, 3 skipped, 0 failed (first run, no
+  reruns). The dictation lane's earlier "32 failed" run (below) was taken while another session was compiling; none
+  of those failures reproduced here. Mutation gates against green baselines: dictation format 63 of 63 killed (256
+  tests in 10 files), dictation polish 92 of 92 (210 tests in 7 files), Mac discard 25 of 25 (28 tests in 2 files).
+  `tsc --noEmit` clean. `npm pack --dry-run`: 539 files, no test, gate, eval or fixture directory.
+
 ### Dictation: spoken paths and links, a dictionary that can hold "/pricing", and a polish that never invents a link
 
 Miles, 2026-10-21 13:09, dictating funnel pages ("demo, forward slash pricing, forward slash build and price"): COS
