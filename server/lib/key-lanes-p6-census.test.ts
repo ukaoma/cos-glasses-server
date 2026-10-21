@@ -99,6 +99,9 @@ export const CENSUS: CensusRow[] = [
   ["server/lib/morning-brief-config.ts", "normalizeModelPreference", 1, "const model = normalizeModelPreference(patch.model)", "reject", "brief patch (:412) and coerce (:449): never a keyed brief"],
   ["server/lib/morning-brief-config.ts", "keyProfileRejectApplies", 1, "if (!model && keyProfileRejectApplies(patch.model)) throw new MorningBriefConfigError(KEY_PROFILE_REJECT_CODE, KEY_PROFILE_SCHEDULED_REJECT)", "reject", "brief patch (:412) and coerce (:449): never a keyed brief"],
   ["server/lib/morning-brief-config.ts", "normalizeModelPreference", 1, "const model = normalizeModelPreference(input.model)", "reject", "brief patch (:412) and coerce (:449): never a keyed brief"],
+  ["server/lib/routines-config.ts", "normalizeModelPreference", 1, "const model = normalizeModelPreference(patch.model)", "reject", "6.82.0 skill routine patch: a scheduled routine never runs on a key"],
+  ["server/lib/routines-config.ts", "keyProfileRejectApplies", 1, "if (!model && keyProfileRejectApplies(patch.model)) throw new RoutineConfigError(KEY_PROFILE_REJECT_CODE, KEY_PROFILE_SCHEDULED_REJECT)", "reject", "6.82.0 skill routine patch: a scheduled routine never runs on a key"],
+  ["server/lib/routines-config.ts", "normalizeModelPreference", 1, "const model = normalizeModelPreference(r.model)", "reject", "6.82.0 skill routine coerce: a stored profile falls back to sonnet"],
   ["server/lib/query-job-runtime.ts", "parsePreference", 1, "const parsed = parsePreference(model)", "accept", "request model and terminal projection"],
   ["server/lib/query-job-runtime.ts", "steerProviderFor", 1, "const verdict = steerProviderFor(", "accept", "steer gate; profile_session goes to the profile engine"],
   ["server/lib/query-job-runtime.ts", "isOllamaModel", 1, "if (isOllamaModel(model)) return 'ollama'", "closed", "providerFor / cursor mode on the closed slot"],
@@ -160,7 +163,7 @@ describe('P6 preference census (plan 5.2)', () => {
 
   it('the plan 5.2 Reject and Closed sites are classified as such', () => {
     const ruleOf = (file: string) => new Set(CENSUS.filter(r => r[0] === file && /normalize|Reject|steerProvider|parseV1|requestBinding|parsePreference|closedEnv/.test(r[1])).map(r => r[4]))
-    for (const f of ['server/lib/morning-brief-config.ts', 'server/lib/work-handoff-requests.ts', 'server/lib/task-store.ts']) expect([f, [...new Set(CENSUS.filter(r => r[0] === f).map(r => r[4]))]]).toEqual([f, ['reject']])
+    for (const f of ['server/lib/morning-brief-config.ts', 'server/lib/routines-config.ts', 'server/lib/work-handoff-requests.ts', 'server/lib/task-store.ts']) expect([f, [...new Set(CENSUS.filter(r => r[0] === f).map(r => r[4]))]]).toEqual([f, ['reject']])
     for (const f of ['server/routes/work-handoff-requests.ts', 'server/lib/control2-draft.ts', 'server/lib/handoff-store.ts', 'server/lib/codex-engine-sessions.ts', 'server/lib/cursor-engine-sessions.ts', 'server/routes/cli-debug.ts']) {
       expect([f, [...ruleOf(f)]]).toEqual([f, ['closed']])
     }
