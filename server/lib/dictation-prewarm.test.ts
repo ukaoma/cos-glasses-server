@@ -82,7 +82,8 @@ describe('6.79.2 polish prewarm', () => {
   it('sends exactly one message, closes stdin at once, answers, and removes its workspace', async () => {
     const { token } = startPolishPrewarm('sonnet')
     const entry = takePolishPrewarm(token, 'sonnet')!
-    const prompt = buildDictationPolishPrompt('order five actually six', ['Quilt'], 'v2')
+    // 6.83.1: the warm process gets the default prompt, now v3.
+    const prompt = buildDictationPolishPrompt('order five actually six', ['Quilt'], 'v3')
     const out = await runWarmPolish(entry, 'order five actually six', ['Quilt'])
     expect(out).toBe(`Cleaned: ${prompt.length}`)
     const child = children[0]

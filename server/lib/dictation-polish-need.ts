@@ -9,7 +9,9 @@
  * - a filler-like the deterministic pass leaves to the model ("like", "you know", "kind of"),
  *   or a sentence that opens on a tic ("So", "Well", "Okay")
  * - a filler sound still present (a meeting line, or one the pass kept)
- * - spoken formatting or punctuation ("new line", "bullet point", "comma", "question mark")
+ * - spoken formatting or punctuation ("new line", "bullet point", "comma", "question mark"), and
+ *   since 6.83.1 spoken links and formatting instructions ("slash", "dot com", "underscore",
+ *   "at sign", "all caps", "slugs")
  * - text that does not read as finished: no capital at the start or no closing punctuation
  * - more than MAX_WORDS words
  * Each check errs toward calling the model: a false "needed" costs a model call, a false
@@ -27,7 +29,7 @@ const REPEAT = /(?<![\p{L}\p{N}'])([\p{L}\p{N}']+)[\s,]+\1(?![\p{L}\p{N}'])/iu
 const FALSE_START = /(?<![\p{L}\p{N}'])([\p{L}']+)\s+[\p{L}']+(?:\s+[\p{L}']+)?,\s+\1(?![\p{L}\p{N}'])/iu
 const FILLER_LIKE = /\b(like|you know|kind of|kinda|sort of|sorta|basically|literally|i guess)\b|^["“(]?(so|well|okay|ok|alright|anyway)\b/i
 const FILLER = /(?<![\p{L}\p{N}'’-])(um+|uhm|uh+|erm?|ah+|hm+|mm+|mhm)(?![\p{L}\p{N}'’-])/iu
-const FORMATTING = /\b(new ?line|new paragraph|next line|bullet( point)?|numbered|number (one|two|three|1|2|3)|comma|period|full stop|question mark|exclamation (point|mark)|colon|semicolon|open (quote|paren)|close (quote|paren)|dash)\b/i
+const FORMATTING = /\b(new ?line|new paragraph|next line|bullet( point)?|numbered|number (one|two|three|1|2|3)|comma|period|full stop|question mark|exclamation (point|mark)|colon|semicolon|open (quote|paren)|close (quote|paren)|dash|slash|backslash|underscore|hyphen|at sign|dot (com|net|org|io|ai|co|dev|app)|all caps|slugs?)\b/i
 
 export function polishNeed(text: string): PolishNeed | null {
   const trimmed = text.trim()

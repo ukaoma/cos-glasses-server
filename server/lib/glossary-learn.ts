@@ -1,6 +1,9 @@
 // One-word dictionary learning (6.73.11). "Fix a word" in COS Control, and any
 // other surface, teaches ONE correction at a time: heard → written joins the
-// corrections map and `written` joins the vocabulary, in one write. Every learn
+// corrections map and `written` joins the vocabulary, in one write. Since 6.83.1 a
+// written form that is a link, email or path ("forward slash pricing" written
+// "/pricing") is kept as a correction ONLY: it never joins the vocabulary, so it
+// never reaches a decoder prompt. Every learn
 // is logged (bounded, newest first) so the person can see what COS learned, from
 // where, and undo exactly that one entry.
 //
@@ -42,7 +45,9 @@ export type UndoResult =
   | { ok: false; status: number; error: string }
 
 // Positive vocab is injected into the Whisper decoder prompt; URLs/emails/paths
-// there induce ".com"/handle hallucinations on quiet audio, so they are refused.
+// there induce ".com"/handle hallucinations on quiet audio, so they never join the
+// vocabulary. As a correction's written form they are fine (6.83.1): corrections are
+// applied to text after decoding and are not part of any decoder prompt.
 export function looksLikeUrlEmailPath(s: string): boolean {
   return /(?:https?:\/\/|www\.)/i.test(s)
     || /@[\w.-]+\.\w/.test(s)
@@ -78,26 +83,30 @@ export function learnCorrection(
     return { ok: false, status: 400, error: 'a correction cannot contain line breaks or control characters' }
   }
   if (heard === written) return { ok: false, status: 400, error: 'the written spelling is the same as what was heard' }
-  if (looksLikeUrlEmailPath(written)) {
-    return { ok: false, status: 400, error: 'the written spelling cannot be a URL, email or path; it would join the decoder prompt' }
+  // 6.83.1: a link, email or path is a correction only (see correctionOnly).
+  const correctionOnly = isCorrectionOnly(written)
+  if (correctionOnly && !/[\p{L}\p{N}]/u.test(written)) {
+    // "/" or "@" alone rewrites every "slash" or "at" in every transcript: no word to anchor it.
+    return { ok: false, status: 400, error: 'the written spelling needs a letter or number; a bare symbol would rewrite every sentence that says it' }
   }
 
   const existingKey = Object.keys(words.corrections).find(key => same(key, heard)) ?? null
   const correctionChanged = existingKey !== heard || words.corrections[heard] !== written
   const inVocabulary = words.vocabulary.some(term => same(term, written))
-  if (!correctionChanged && inVocabulary) return { ok: true, unchanged: true }
+  if (!correctionChanged && (inVocabulary || correctionOnly)) return { ok: true, unchanged: true }
 
   if (existingKey === null && Object.keys(words.corrections).length >= MAX_TERMS) {
     return { ok: false, status: 409, error: `the dictionary already holds ${MAX_TERMS} corrections; remove one first` }
   }
-  if (!inVocabulary && words.vocabulary.length >= MAX_TERMS) {
+  const addsVocabulary = !inVocabulary && !correctionOnly
+  if (addsVocabulary && words.vocabulary.length >= MAX_TERMS) {
     return { ok: false, status: 409, error: `the vocabulary already holds ${MAX_TERMS} terms; remove one first` }
   }
 
   const corrections = { ...words.corrections }
   if (existingKey !== null && existingKey !== heard) delete corrections[existingKey]
   corrections[heard] = written
-  const vocabulary = inVocabulary ? [...words.vocabulary] : [...words.vocabulary, written]
+  const vocabulary = addsVocabulary ? [...words.vocabulary, written] : [...words.vocabulary]
   const entry: CorrectionLogEntry = {
     id: stamp.id,
     heard,
@@ -106,9 +115,51 @@ export function learnCorrection(
     at: stamp.at,
     replacedKey: existingKey,
     previous: existingKey === null ? null : words.corrections[existingKey],
-    addedVocabulary: !inVocabulary,
+    addedVocabulary: addsVocabulary,
   }
   return { ok: true, unchanged: false, words: { vocabulary, corrections }, entry }
+}
+
+/**
+ * 6.83.1: a written form that is a link, email or path is kept in the corrections map
+ * and never added to the vocabulary (the decoder prompt). Same test as the vocabulary
+ * guard, so nothing the decoder refuses can reach it through a correction.
+ */
+export function isCorrectionOnly(written: string): boolean {
+  return looksLikeUrlEmailPath(written)
+}
+
+/** The one line a client can show after a correction-only learn. No em dashes, no arrows. */
+export const CORRECTION_ONLY_NOTE = 'Saved as a correction. Links, emails and paths are never added to the words that guide transcription, so COS rewrites what it hears instead.'
+
+/**
+ * The written forms of correction-only entries ("/pricing"), for callers that may use
+ * them as known spellings outside the decoder (the AI polish prompt), and for
+ * decoderSafeContext below.
+ */
+export function correctionOnlyForms(corrections: Record<string, string>): string[] {
+  const out: string[] = []
+  for (const value of Object.values(corrections)) {
+    const v = value.trim()
+    if (v && isCorrectionOnly(v) && !out.includes(v)) out.push(v)
+  }
+  return out
+}
+
+/**
+ * The rolling transcript context Whisper is primed with already holds corrected text, so
+ * a correction-only form ("/pricing") would reach the decoder through it. Put the spoken
+ * form back ("forward slash pricing") before priming: the decoder hears words, never the
+ * link or path. Longest forms first so "/build-and-price" is not split by "/build".
+ */
+export function decoderSafeContext(context: string, corrections: Record<string, string>): string {
+  const pairs = Object.entries(corrections)
+    .map(([heard, written]) => [heard.trim(), written.trim()] as const)
+    .filter(([heard, written]) => heard && written && isCorrectionOnly(written) && !isCorrectionOnly(heard))
+    .sort((a, b) => b[1].length - a[1].length)
+  let out = context
+  for (const [heard, written] of pairs) out = out.split(written).join(heard)
+  return out
 }
 
 /** Newest first, bounded. */
@@ -189,7 +240,9 @@ export function addVocabulary(words: GlossaryWords, raw: unknown): EditResult {
   const term = validTerm(raw, 'term')
   if (!term.ok) return term
   if (looksLikeUrlEmailPath(term.value)) {
-    return { ok: false, status: 400, error: 'a vocabulary word cannot be a URL, email or path; it would join the decoder prompt' }
+    // A vocabulary word has no heard side: it only steers the decoder, which is exactly
+    // where a link, email or path does harm. Point at the correction that does work.
+    return { ok: false, status: 400, error: 'a link, email or path cannot be a vocabulary word because it would steer transcription. Add it as a correction instead: what you say, then how to write it' }
   }
   if (words.vocabulary.some(existing => same(existing, term.value))) return { ok: true, unchanged: true }
   if (words.vocabulary.length >= MAX_TERMS) {

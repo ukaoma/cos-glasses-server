@@ -1,3 +1,78 @@
+## 6.83.1 - Dictation: spoken paths and links, a dictionary that can hold "/pricing", and a polish that never invents a link
+
+Miles, 2026-10-21 13:09, dictating funnel pages ("demo, forward slash pricing, forward slash build and price"): COS
+gave him the words, and when he taught Fix a word "forward slash pricing" written "/pricing" it refused with "the
+written spelling cannot be a URL, email or path; it would join the decoder prompt". His ask: formatting said inside a
+dictation is honored by the AI polish, and a mapping like that works from then on.
+
+- **Client matrix.** No COS Control change is required: Fix a word sends the same learn request, and the server now
+  answers 200. Control 0.5.333 shows its usual "Saved" line. The answer adds `correctionOnly: true` and a `note` for a
+  client that wants to say it was kept as a correction only (Control ignores both today). Older servers still refuse.
+- **Dictionary: links, emails and paths are corrections only.** `learnCorrection` stores a written form that is a
+  link, email or path in `corrections` and never adds it to `vocabulary` (`addedVocabulary: false`), so it never
+  reaches a decoder prompt. A repeat is `unchanged`, a full vocabulary does not block it, and Undo removes it and
+  leaves the vocabulary alone. Refused: a written form with no letter or number ("/", a lone backslash), which would
+  rewrite every sentence that says "slash". Adding a link, email or path as a vocabulary word is still refused, now
+  with "Add it as a correction instead: what you say, then how to write it" (it has no heard side, so it is only
+  decoder risk). The whole-map PUT already accepted such corrections; this makes the one-entry learn agree.
+- **Decoder prompt.** The vocabulary prompt is unchanged. The rolling context Whisper is primed with already holds
+  corrected text, so a correction-only form there is put back to its spoken form before priming ("/pricing" becomes
+  "forward slash pricing"; longest first). The vocab-echo silence filter skips correction-only pairs: they are never
+  seeded, so a chunk of just "forward slash pricing" is speech.
+- **Correction pass.** A multi-word key matches across any run of spaces or a hyphen ("forward-slash  pricing"),
+  case-insensitive, with punctuation around it ("pricing,"). A key goes ahead of any earlier key whose words it
+  contains, so "forward slash build and price" is not cut short by "forward slash build"; chains a profile relies on
+  ("Myles", then "Miles Ukoma") keep their order. A written form is inserted literally ("$&" is not a pattern).
+  Same pass on every path that already ran it: dictation finalize, prompt drafts, G2 live lines, meeting batch
+  transcripts, previews. It runs before the AI polish.
+- **Spoken paths, deterministic.** For messages and prompt drafts (never meeting lines), "forward slash" plus one word
+  that ends a phrase becomes "/word", lowercase: "go to forward slash pricing." becomes "go to /pricing.", also when
+  the model is skipped (cap, breaker, too long). Longer slugs are the model's. Not rewritten: "slash" without
+  "forward", "the forward slash key", "a forward slash". `COS_DICTATION_SPOKEN_PATHS=0` turns it off.
+- **AI polish prompt v3 (default).** v2 plus spoken links, paths and emails ("forward slash build and price" becomes
+  "/build-and-price"; "dot com", "dash", "underscore", "at" inside a link or email), formatting instructions about
+  the speaker's own words ("format these as slugs", "in all caps", "in quotes") applied and removed, a request for an
+  AI to produce something kept, ordinary speech left as words, and never inventing a link. `COS_DICTATION_POLISH_PROMPT=v2`
+  restores the 6.79.1 prompt byte for byte (pinned by SHA-256). Skip-when-clean now counts slash, dot com,
+  underscore, at sign, all caps and slugs as formatting.
+- **Link guard on the answer.** The model's answer is refused, and the pre-polish text goes out (`polishSkipped:
+  "failed"`), when it holds a link, email or path whose letters were never said or whose shape was never spoken
+  (a path without "slash" unless slugs or paths were asked for, a domain without "dot", an email without "at", a
+  scheme or "www" nobody said), or when it drops a link the dictionary wrote.
+- **Canary (synthetic, Haiku, through `autoCleanDictation` and the finalize steps in order;
+  `server/scripts/dictation-format-eval.ts`, not packaged).** 33 dictations: slugs, multi-word slugs, URLs, emails and
+  file names, ordinary "slash", "dash", "at" and "dot" speech, formatting instructions, and the dictionary entry.
+
+  | Arm | Pass (format and every word kept) | Format right | Words kept | Rule only, no model |
+  |---|---|---|---|---|
+  | 6.83.0 (v2, no rule, no guard, no dictionary entry) | 20/33 | 24/33 | 25/33 | 9/33 |
+  | 6.83.1 first run | 24/33 | 27/33 | 28/33 | 12/33 |
+  | 6.83.1 with the slug-request guard fix (2 reruns) | 26/33 | 29/33 | 28/33 | 12/33 |
+
+  - Gains: one-word slugs 5/5 (was 4/5), multi-word slugs 6/6 (was 3/6: "/build and price", "/free trial",
+    "/schedule a demo"), the dictionary case 1/1 (was "demo/pricing"). Ordinary speech 8/8 in both: nothing invented.
+  - Still failing in both arms: "bottle pos dot com" (6.83.1 "bottle pos.com/pricing"), "jordan dot lee at example
+    dot org" (6.83.1 "Jordan Lee@example.org"), dropped lead-ins ("the site is", "go to", "use") on bare URL
+    dictations, and "write a reply to Dana in all caps saying thanks", which both prompts follow instead of keeping.
+  - Instructions: 2/4 in both. "put this next part in all caps" passed in 6.83.0 and failed in 6.83.1 (it
+    capitalized the instruction too); it passed once with a prompt tweak that was not kept.
+  - The first 6.83.1 run refused 2 answers. One was "format these as slugs" answered with "/pricing", which the guard
+    called an invented path; the guard now accepts a path when slugs, paths or URLs were asked for.
+- **Regression (the 45 cases of the 6.79.1 eval, Haiku v3).** Fillers left 1 (6.79.1 Haiku v2: 1), backtracks 9/10
+  (10/10), content recall 0.990 (0.983), added words 0 (0), preserved 11/11 (11/11). **One regression:** "add Priya
+  to the invite actually add Dana instead" keeps both ("Add Priya to the invite. Actually, add Dana instead.") on v3
+  in 2 of 2 runs; v2 got it right in a rerun. A prompt tweak aimed at it failed it 2 of 2 too and was not kept. Rollback
+  for that case: `COS_DICTATION_POLISH_PROMPT=v2`.
+- **Budget.** 120 polish calls in all (the cap), each counted in the polish budget's message bucket of a scratch data
+  dir; no failures, so the 3-in-a-row stop never fired.
+- **Checks.** New mutation gate `server/scripts/dictation-format-mutation-gate.mjs` (not packaged): 44 of 44 mutants
+  killed by named tests against a green baseline (205 tests in 9 files). Its first run left 6 survivors: two guard
+  lines that could not be reached (the scheme and "www" checks, already covered by the letters check) and one
+  redundant early pass were removed, and tests now reach the article, letters and "at" checks. The 6.79.1 polish gate
+  pins v3 as the default: 92 of 92 killed (210 tests in 7 files). Full suite: 8616 passed, 29 failed, 3 skipped (571
+  files). The 18 that still fail when their 22 files are rerun alone fail identically at 6.83.0 (`d10d92e`), 17 of them
+  5-second timeouts on a loaded Mac; the other 11 pass alone on both. `tsc` clean.
+
 ## 6.83.0 - Work orchestrator: every session on a card, where each left off, and plan usage, in the planner input
 
 Miles, 2026-10-20 21:47: the Work chat should act like an orchestrator, not a form: find a card's sessions itself,

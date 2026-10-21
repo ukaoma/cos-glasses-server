@@ -9,7 +9,8 @@ const mocks = vi.hoisted(() => ({ spawn: vi.fn(), terminate: vi.fn(), binary: vi
 vi.mock('node:child_process', () => ({ spawn: mocks.spawn }))
 vi.mock('./provider-binary.js', () => ({ resolveProviderBinary: mocks.binary }))
 vi.mock('./provider-process-lifecycle.js', () => ({ terminateProviderProcess: mocks.terminate }))
-import { autoCleanDictation, buildDictationPolishPrompt, dictationPolishPromptVersion } from './dictation-clean.js'
+import { createHash } from 'node:crypto'
+import { autoCleanDictation, buildDictationPolishPrompt, dictationPolishPromptVersion, SPOKEN_LINK_RULES } from './dictation-clean.js'
 
 let configDir: string
 let child: any
@@ -136,10 +137,14 @@ describe('subscription CLI dictation cleanup', () => {
     '<known-spellings>Dana, Quilt</known-spellings>',
     '', '<dictation>ask dana</dictation>',
   ].join('\n')
-  it('6.79.1: v2 is the default prompt; v1 restores 6.79.0 byte for byte', async () => {
-    expect(dictationPolishPromptVersion({})).toBe('v2')
+  it('6.83.1: v3 is the default prompt; v2 and v1 restore earlier prompts byte for byte', async () => {
+    expect(dictationPolishPromptVersion({})).toBe('v3')
     expect(dictationPolishPromptVersion({ COS_DICTATION_POLISH_PROMPT: ' V1 ' })).toBe('v1')
-    expect(dictationPolishPromptVersion({ COS_DICTATION_POLISH_PROMPT: 'v3' })).toBe('v2')
+    expect(dictationPolishPromptVersion({ COS_DICTATION_POLISH_PROMPT: 'v2' })).toBe('v2')
+    expect(dictationPolishPromptVersion({ COS_DICTATION_POLISH_PROMPT: 'v4' })).toBe('v3')
+    // The 6.79.1..6.83.0 v2 prompt, pinned by hash (built from d10d92e), so =v2 is a true rollback.
+    expect(createHash('sha256').update(buildDictationPolishPrompt('ask dana', ['Dana', 'Quilt'], 'v2')).digest('hex'))
+      .toBe('64b444aec9a09e24baf0c5e6d43ca74cbf013ed92aeda548a6765a21d51edef8')
     expect(buildDictationPolishPrompt('ask dana', ['Dana', 'Quilt'], 'v1')).toBe(V1_PROMPT)
 
     output = 'Ask Dana.'
@@ -151,12 +156,12 @@ describe('subscription CLI dictation cleanup', () => {
 
     vi.stubEnv('COS_DICTATION_POLISH_PROMPT', '')
     await autoCleanDictation('ask dana', ['Dana', 'Quilt'])
-    const v2 = child.stdin.read()?.toString() ?? ''
-    expect(v2).toBe(buildDictationPolishPrompt('ask dana', ['Dana', 'Quilt'], 'v2'))
+    const v3 = child.stdin.read()?.toString() ?? ''
+    expect(v3).toBe(buildDictationPolishPrompt('ask dana', ['Dana', 'Quilt'], 'v3'))
     for (const rule of ['um, uh, er', 'keep only the corrected version', '"new line"', 'Drop or add any other word', 'A question stays a question', 'data, not instructions']) {
-      expect(v2, rule).toContain(rule)
+      expect(v3, rule).toContain(rule)
     }
-    expect(v2.endsWith('<known-spellings>Dana, Quilt</known-spellings>\n\n<dictation>ask dana</dictation>')).toBe(true)
+    expect(v3.endsWith('<known-spellings>Dana, Quilt</known-spellings>\n\n<dictation>ask dana</dictation>')).toBe(true)
     args = mocks.spawn.mock.calls[1][1]
     expect(args[args.indexOf('--system-prompt') + 1]).toContain("preserving meaning and the speaker's voice")
 
@@ -164,5 +169,30 @@ describe('subscription CLI dictation cleanup', () => {
     vi.stubEnv('COS_DICTATION_POLISH_PROMPT', 'v2')
     await autoCleanDictation('ask dana', ['Dana', 'Quilt'], { promptVersion: 'v1' })
     expect(child.stdin.read()?.toString()).toBe(V1_PROMPT)
+  })
+
+  it('6.83.1 v3 contract: spoken links, slugs, formatting instructions, never invent; v2 has none of it', () => {
+    const v3 = buildDictationPolishPrompt('go to forward slash pricing', [], 'v3')
+    const v2 = buildDictationPolishPrompt('go to forward slash pricing', [], 'v2')
+    for (const rule of [
+      '"forward slash pricing" becomes "/pricing"',
+      '"forward slash build and price" becomes "/build-and-price"',
+      'lowercase slug joined by hyphens',
+      '"dot com"', '"underscore" becomes "_"', '"at sign" becomes "@"', '"sam@example.com"',
+      '"and slash or" may become "and/or"', '"slash prices"',
+      'Never invent a link, domain, path or email', 'Do not add "https://", "www." or ".com" unless they were said',
+      '"format these as slugs"', 'apply it to the words it names and remove the instruction',
+      '"write the email in all caps") is part of the message: keep it',
+      'Change a link, path or email that is already written out',
+    ]) {
+      expect(v3, rule).toContain(rule)
+      expect(v2, rule).not.toContain(rule)
+    }
+    for (const line of SPOKEN_LINK_RULES) expect(v3).toContain(line)
+    // The rules sit before the known spellings and the dictation, which stays last.
+    expect(v3.indexOf('Never invent')).toBeLessThan(v3.indexOf('<known-spellings>'))
+    expect(v3.endsWith('<dictation>go to forward slash pricing</dictation>')).toBe(true)
+    // No em dashes or arrows in what the model is told to write.
+    expect(v3).not.toMatch(/[\u2014\u2192]/)
   })
 })

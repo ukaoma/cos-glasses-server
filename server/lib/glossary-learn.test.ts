@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CORRECTION_ONLY_NOTE,
+  correctionOnlyForms,
+  decoderSafeContext,
+  isCorrectionOnly,
   MAX_LOG,
   MAX_TERMS,
   MAX_TERM_LEN,
@@ -59,8 +63,9 @@ describe('learnCorrection', () => {
       ['a', 'b'.repeat(MAX_TERM_LEN + 1), 'dictation', 400],
       ['a\nb', 'c', 'dictation', 400],
       ['same', 'same', 'dictation', 400],
-      ['gotcos', 'gotcos.com', 'dictation', 400],
-      ['slash', 'a/b', 'dictation', 400],
+      // 6.83.1: a link or path is allowed as a correction, but a bare symbol is not.
+      ['slash', '/', 'dictation', 400],
+      ['backslash', '\\', 'dictation', 400],
     ]
     for (const [heard, written, source, status] of bad) {
       const r = learnCorrection(words(), { heard, written, source }, stamp(1))
@@ -176,6 +181,12 @@ describe('single-item edits (6.73.12)', () => {
     expect(r).toEqual({ ok: true, unchanged: false, words: { vocabulary: ['Parakeet', 'Wispr'], corrections: { Myles: 'Miles' } } })
     expect(addVocabulary(words(['wispr']), 'Wispr')).toEqual({ ok: true, unchanged: true })
     expect(addVocabulary(words(), 'gotcos.com')).toMatchObject({ ok: false, status: 400 })
+    // 6.83.1: a vocabulary word has no heard side, so a link or path there is only decoder risk.
+    for (const term of ['/pricing', 'sam@example.com', 'https://example.com']) {
+      const r = addVocabulary(words(), term)
+      expect(r).toMatchObject({ ok: false, status: 400 })
+      if (!r.ok) expect(r.error).toContain('Add it as a correction instead')
+    }
     expect(addVocabulary(words(), 'a'.repeat(MAX_TERM_LEN)).ok).toBe(true)
     expect(addVocabulary(words(), 'a'.repeat(MAX_TERM_LEN + 1))).toMatchObject({ ok: false, status: 400 })
     expect(addVocabulary(words(), 'a\nb')).toMatchObject({ ok: false, status: 400 })
@@ -199,5 +210,83 @@ describe('single-item edits (6.73.12)', () => {
     expect(removeCorrection(base, 'Myles')).toEqual({ ok: true, unchanged: false, words: { vocabulary: ['Miles'], corrections: { 'carrot iq': 'CaratIQ' } } })
     expect(removeCorrection(base, 'Carrot IQ')).toEqual({ ok: true, unchanged: false, words: { vocabulary: ['Miles'], corrections: { Myles: 'Miles' } } })
     expect(removeCorrection(base, 'nope')).toEqual({ ok: true, unchanged: true })
+  })
+})
+
+// 6.83.1. Miles, 2026-10-21: "forward slash pricing" written "/pricing" was refused because the
+// written form "would join the decoder prompt". It now joins the corrections only.
+describe('correction-only written forms (links, emails, paths)', () => {
+  it('stores "/pricing" as a correction and never in the vocabulary', () => {
+    const before = words(['Quilt'], { Myles: 'Miles' })
+    const r = learn(before, 'forward slash pricing', '/pricing')
+    expect(r.words.corrections).toEqual({ Myles: 'Miles', 'forward slash pricing': '/pricing' })
+    expect(r.words.vocabulary).toEqual(['Quilt'])
+    expect(r.entry.addedVocabulary).toBe(false)
+    expect(before.vocabulary).toEqual(['Quilt'])
+  })
+
+  it('accepts slugs, URLs, domains, emails and file paths the same way', () => {
+    for (const [heard, written] of [
+      ['forward slash build and price', '/build-and-price'],
+      ['bottle pos dot com', 'bottlepos.com'],
+      ['sam at example dot com', 'sam@example.com'],
+      ['example site', 'https://example.com/demo'],
+      ['docs path', 'docs/setup.md'],
+    ]) {
+      const r = learn(words(['Quilt']), heard, written)
+      expect(r.words.corrections[heard], heard).toBe(written)
+      expect(r.words.vocabulary, heard).toEqual(['Quilt'])
+      expect(r.entry.addedVocabulary, heard).toBe(false)
+      expect(isCorrectionOnly(written), written).toBe(true)
+    }
+  })
+
+  it('an exact repeat is unchanged even though the spelling is not in the vocabulary', () => {
+    const r = learnCorrection(words([], { 'forward slash pricing': '/pricing' }), { heard: 'forward slash pricing', written: '/pricing', source: 'dictation' }, stamp(2))
+    expect(r).toEqual({ ok: true, unchanged: true })
+  })
+
+  it('a full vocabulary does not block a correction-only learn; a full corrections map still does', () => {
+    const fullVocab = Array.from({ length: MAX_TERMS }, (_, i) => `T${i}`)
+    expect(learn(words(fullVocab), 'forward slash pricing', '/pricing').words.vocabulary).toHaveLength(MAX_TERMS)
+    expect(learnCorrection(words(fullVocab), { heard: 'Whisper', written: 'Wispr', source: 'manual' }, stamp(1))).toMatchObject({ ok: false, status: 409 })
+    const fullCorrections = Object.fromEntries(fullVocab.map(t => [t, t.toLowerCase()]))
+    expect(learnCorrection(words([], fullCorrections), { heard: 'forward slash pricing', written: '/pricing', source: 'manual' }, stamp(1))).toMatchObject({ ok: false, status: 409 })
+  })
+
+  it('undo takes the correction back out and leaves the vocabulary alone', () => {
+    const start = words(['Quilt', '/legacy-never-written-by-this-entry'], {})
+    const r = learn(start, 'forward slash pricing', '/pricing', 1)
+    const log = appendLog([], r.entry)
+    const undone = undoCorrection(r.words, log, r.entry.id)
+    if (!undone.ok) throw new Error(undone.error)
+    expect(undone.words).toEqual(start)
+    expect(undone.log).toEqual([])
+  })
+
+  it('undo of a correction-only entry that replaced an older spelling puts the older one back', () => {
+    const r = learn(words(['Pricing Page'], { 'pricing page': 'Pricing Page' }), 'Pricing Page', '/pricing', 1)
+    expect(r.entry).toMatchObject({ replacedKey: 'pricing page', previous: 'Pricing Page', addedVocabulary: false })
+    const undone = undoCorrection(r.words, appendLog([], r.entry), r.entry.id)
+    if (!undone.ok) throw new Error(undone.error)
+    expect(undone.words).toEqual({ vocabulary: ['Pricing Page'], corrections: { 'pricing page': 'Pricing Page' } })
+  })
+
+  it('the note a client shows has no em dash or arrow', () => {
+    expect(CORRECTION_ONLY_NOTE).not.toMatch(/[\u2014\u2192]/)
+    expect(CORRECTION_ONLY_NOTE).toContain('never added to the words that guide transcription')
+  })
+
+  it('lists correction-only forms and puts the spoken form back in decoder context', () => {
+    const corrections = { Myles: 'Miles', 'forward slash pricing': '/pricing', 'forward slash build and price': '/build-and-price', 'sam at example dot com': 'sam@example.com' }
+    expect(correctionOnlyForms(corrections)).toEqual(['/pricing', '/build-and-price', 'sam@example.com'])
+    expect(decoderSafeContext('Miles moved /pricing and /build-and-price, mail sam@example.com.', corrections))
+      .toBe('Miles moved forward slash pricing and forward slash build and price, mail sam at example dot com.')
+    expect(decoderSafeContext('nothing here', corrections)).toBe('nothing here')
+    // The longer form goes back first, so a shorter form inside it cannot split it.
+    const nested = { 'forward slash build': '/build', 'forward slash build and price': '/build-and-price' }
+    expect(decoderSafeContext('see /build-and-price and /build', nested)).toBe('see forward slash build and price and forward slash build')
+    // A pair whose heard side is itself a path is not put back (nothing spoken to restore).
+    expect(decoderSafeContext('see /a', { '/b': '/a' })).toBe('see /a')
   })
 })

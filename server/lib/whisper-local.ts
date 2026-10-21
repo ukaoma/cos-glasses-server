@@ -16,6 +16,7 @@ import crypto from 'node:crypto'
 import { batchTimestampsEnabled, parseNativeVadTimeline, remapBatchWords } from './whisper-batch-timing.js'
 import { readSttSettings, type FrontEndId } from './stt-settings.js'
 import { getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js'
+import { decoderSafeContext } from './glossary-learn.js'
 import { stripBrandUrls } from './hallucination-filter.js'
 import {
   batchHqMetalEnabled,
@@ -1243,8 +1244,9 @@ export async function transcribeHighQuality(
   }
 }
 
-/** Build prompt with optional previous transcript context for continuity */
-function buildPrompt(context?: string, isQuiet?: boolean): string {
+/** Build prompt with optional previous transcript context for continuity.
+ *  Exported (6.83.1) only so tests can assert on the exact decoder prompt. */
+export function buildPrompt(context?: string, isQuiet?: boolean): string {
   // During quiet/silence audio, skip vocabulary prompt to reduce decoder bias
   if (isQuiet) return ''
   if (!context || context.length < 10) return getWhisperPrompt()
@@ -1259,6 +1261,9 @@ function buildPrompt(context?: string, isQuiet?: boolean): string {
   // prior chunk would otherwise feed back through this context and re-seed the
   // next decode. Strip brand URLs from the priming context (output unaffected).
   if (STRIP_BRAND_URLS) sanitized = stripBrandUrls(sanitized)
+  // 6.83.1: a correction-only form ("/pricing") came from the corrections pass, not the
+  // speaker's audio; the decoder is primed with the spoken form instead (glossary-learn.ts).
+  sanitized = decoderSafeContext(sanitized, getWhisperCorrections())
   // Previous transcript helps Whisper maintain proper noun consistency,
   // continue sentences across chunk boundaries, and reduce hallucinations
   return PROMPT_V2 ? `${getWhisperPrompt()} ${sanitized}` : `${getWhisperPrompt()}. ${sanitized}`
@@ -1379,12 +1384,32 @@ function buildCorrections(): Array<[RegExp, string]> {
 
   // Escape correction keys before interpolation. Names such as "A.C.M.E."
   // are literal vocabulary, never regular-expression programs.
-  for (const [pattern, replacement] of Object.entries(getWhisperCorrections())) {
-    const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // 6.83.1: the words of a multi-word key may be split by any run of spaces or a hyphen
+  // ("forward slash pricing", "forward-slash  pricing").
+  for (const [pattern, replacement] of correctionOrder(getWhisperCorrections())) {
+    const escaped = pattern.trim().split(/\s+/).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s-]+')
     corrections.push([new RegExp(`\\b${escaped}\\b`, 'gi'), replacement])
   }
 
   return corrections
+}
+
+/**
+ * The profile's order, except that a key goes ahead of any earlier key whose words it
+ * contains (6.83.1): "forward slash build and price" runs before "forward slash build", or
+ * the shorter key would cut the longer phrase short. Chains the person relies on
+ * ("Myles" then "Miles Ukoma") keep their order, since neither key contains the other.
+ */
+export function correctionOrder(corrections: Record<string, string>): Array<[string, string]> {
+  const norm = (key: string) => ` ${key.trim().toLowerCase().split(/[\s-]+/).join(' ')} `
+  const out: Array<[string, string]> = []
+  for (const entry of Object.entries(corrections)) {
+    const mine = norm(entry[0])
+    const at = out.findIndex(([key]) => mine !== norm(key) && mine.includes(norm(key)))
+    if (at < 0) out.push(entry)
+    else out.splice(at, 0, entry)
+  }
+  return out
 }
 
 let _corrections: Array<[RegExp, string]> | null = null
@@ -1399,7 +1424,8 @@ function getCorrections(): Array<[RegExp, string]> {
 export function applyCorrections(text: string): string {
   let result = text
   for (const [pattern, replacement] of getCorrections()) {
-    result = result.replace(pattern, replacement)
+    // A function, so a written form holding "$&" or "$1" is inserted literally (6.83.1).
+    result = result.replace(pattern, () => replacement)
   }
   return result
 }

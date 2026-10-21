@@ -44,6 +44,13 @@ describe('6.79.2 skip-when-clean rule', () => {
     ['Hi Dana comma thanks.', 'formatting'],
     ['Can we talk question mark.', 'formatting'],
     ['End it with a period.', 'formatting'],
+    // 6.83.1: spoken links and formatting instructions go to the model.
+    ['Open forward slash build and price.', 'formatting'],
+    ['Mail sam at sign example.', 'formatting'],
+    ['It is bottle pos dot com today.', 'formatting'],
+    ['Name it report underscore final.', 'formatting'],
+    ['Write the first part in all caps.', 'formatting'],
+    ['Format these as slugs.', 'formatting'],
     // Not finished: the model fixes case and punctuation.
     ['send the deck to Dana', 'unfinished'],
     ['Send the deck to Dana', 'unfinished'],

@@ -12,6 +12,7 @@
 //     entirety (silence artifacts, caption training, foreign script, filler-only).
 
 import { getNegativeRules, getVocabulary, getOwnerName, getWhisperCorrections } from './profile.js'
+import { isCorrectionOnly } from './glossary-learn.js'
 
 // ── Whole-chunk silence hallucinations ─────────────────────────────────────
 const CAPTION_CREDIT_HALLUCINATION = /^\s*(?:closed\s+)?caption(?:ing|s)?\s+(?:is\s+)?provided\s+by\b/i
@@ -344,6 +345,9 @@ function getVocabEchoMatcher(): RegExp {
   // Include whisper_corrections key/value variants so the echo matches whatever
   // spelling whisper emits ("POS Nation" ↔ "POSNation", "Jewel 360" ↔ "Jewel360").
   for (const [key, value] of Object.entries(getWhisperCorrections())) {
+    // 6.83.1: a correction-only pair ("forward slash pricing" written "/pricing") is never
+    // seeded into the decoder, so it cannot be a prompt echo; a chunk of just that phrase is speech.
+    if (isCorrectionOnly(value)) continue
     raw.add(key)
     raw.add(value)
   }
