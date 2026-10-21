@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  DISCARDED_RETENTION_MS,
   QUARANTINE_MANIFEST,
   RECOVERED_RECEIPT,
   clearActiveRecovery,
@@ -13,6 +14,7 @@ import {
   markRecovered,
   purgeExpiredQuarantine,
   quarantineSessionAudio,
+  readCaptureDisposition,
   registerActiveRecovery,
   sweepOrphanedSessionAudio,
   unsavedAudioRetentionMs,
@@ -133,6 +135,47 @@ describe('unsaved-audio quarantine (6.19.0 P0)', () => {
       expect(purged[0]).toContain('meeting_old')
       expect(findQuarantineDir('meeting_old', quarantineRoot)).toBeNull()
       expect(findQuarantineDir('meeting_fresh', quarantineRoot)).not.toBeNull()
+    } finally {
+      rmSync(sessionRoot, { recursive: true, force: true })
+      rmSync(quarantineRoot, { recursive: true, force: true })
+    }
+  })
+
+  // 6.83.2: a Mac capture discarded with no sound keeps its audio on a SHORTER clock, with a terminal receipt.
+  it('a discarded capture expires on its own shorter clock and is terminal, never recoverable', () => {
+    const sessionRoot = scratch('discard-src')
+    const quarantineRoot = scratch('discard-dst')
+    try {
+      const id = 'mac_abcdef01-2345-6789-abcd-0123456789ab'
+      const target = quarantineSessionAudio(makeSessionDir(sessionRoot, id, 3), 'discarded_no_sound', quarantineRoot, {
+        retentionMs: DISCARDED_RETENTION_MS,
+        receipt: { outcome: 'no_speech', discarded: true, note: 'test' },
+      })!
+      const keptSource = makeSessionDir(sessionRoot, 'meeting_kept', 3)
+      const kept = quarantineSessionAudio(keptSource, 'kept', quarantineRoot)!
+      expect(JSON.parse(readFileSync(join(target, QUARANTINE_MANIFEST), 'utf8')).retentionMs).toBe(24 * 3_600_000)
+      expect(JSON.parse(readFileSync(join(target, RECOVERED_RECEIPT), 'utf8'))).toMatchObject({ outcome: 'no_speech', discarded: true, chunkFiles: 3 })
+      const listed = listUnsavedCaptures(quarantineRoot, 72 * 3_600_000).find(item => item.sessionId === id)!
+      expect(listed.recovered).toBe(true)
+      expect(Date.parse(listed.expiresAt!) - Date.parse(listed.quarantinedAt!)).toBe(24 * 3_600_000)
+      const disposition = readCaptureDisposition(id, quarantineRoot, 72 * 3_600_000)!
+      expect(disposition.kind).toBe('no_speech')
+      expect(Date.parse(disposition.retainedUntil!) - Date.parse(disposition.quarantinedAt!)).toBe(24 * 3_600_000)
+      // 30 hours on: past the discard clock, inside the global 72 h one.
+      for (const dir of [target, kept]) {
+        const path = join(dir, QUARANTINE_MANIFEST), manifest = JSON.parse(readFileSync(path, 'utf8'))
+        manifest.quarantinedAt = new Date(Date.now() - 30 * 3_600_000).toISOString()
+        writeFileSync(path, `${JSON.stringify(manifest)}\n`)
+      }
+      expect(purgeExpiredQuarantine(quarantineRoot, 72 * 3_600_000)).toEqual([id])
+      expect(existsSync(kept)).toBe(true)
+      // A capture's own clock never LENGTHENS the global one.
+      const longSource = makeSessionDir(sessionRoot, 'meeting_long', 1)
+      const long = quarantineSessionAudio(longSource, 'long', quarantineRoot, { retentionMs: 500 * 3_600_000 })!
+      const longPath = join(long, QUARANTINE_MANIFEST), longManifest = JSON.parse(readFileSync(longPath, 'utf8'))
+      longManifest.quarantinedAt = new Date(Date.now() - 100 * 3_600_000).toISOString()
+      writeFileSync(longPath, `${JSON.stringify(longManifest)}\n`)
+      expect(purgeExpiredQuarantine(quarantineRoot, 72 * 3_600_000)).toEqual(['meeting_long'])
     } finally {
       rmSync(sessionRoot, { recursive: true, force: true })
       rmSync(quarantineRoot, { recursive: true, force: true })

@@ -1,3 +1,28 @@
+## 6.83.2 - Discard a stranded Mac recording that captured no sound
+
+Miles, 2026-10-21: Record on Mac captured a 21-minute Zoom call as 211 chunks of exact zeros (macOS hands a process
+tap zeros, not an error, when it is not letting the app record system audio). The save refused it as no speech, and the
+capture then sat in the stranded list with a Save that could never work. COS Control 0.5.334 offers Discard for it.
+
+- **`POST /api/meeting/sessions/:id/discard {confirm: true, serverInstanceId}`** (authenticated, pinned to this server).
+  Mac captures only (`not_mac_capture` 400 otherwise). It refuses, and changes nothing, unless the server holds the
+  session in memory with NO canonical (transcribed) chunk, ASR finished on every chunk it received, no chunk upload in
+  progress, and no audio for 2 minutes (`has_speech`, `asr_in_progress`, `chunk_in_progress`, `not_idle` 409;
+  `session_not_found` 404; `already_saved` and `saving` 409). Without `confirm: true` it answers 400
+  `confirmation_required` with a preview (chunk files, chunks received, 24 h retention). A retry after a lost answer
+  answers `replayed: true`.
+- **Never deleted.** The session's chunk audio moves into the existing unsaved-audio quarantine with reason
+  `discarded_no_sound`, a terminal `no_speech` receipt (so the auto-recover sweep and the unsaved-captures count leave
+  it alone, and the session status reads `outcome: receipted`) and its own 24-hour clock instead of 72 hours. The
+  session leaves the in-memory map and the stranded list, and its Mac registry is closed, so a late chunk or a replayed
+  start answers 410 even after the closed-session tombstone expires.
+- **Quarantine clocks.** A quarantine manifest may carry its own `retentionMs`; it can only shorten the global
+  retention, never lengthen it. Purge, the unsaved list's `expiresAt` and the disposition's `retainedUntil` all read it.
+- **Advertised.** `GET /api/mac-recording/capabilities` adds `discard: true`. An older server omits it, and Control then
+  discards only its own local copy and says so.
+- Tests: route tests for the discard path, every refusal and the replay, a pure test naming each guard, and a quarantine
+  test for the shorter clock. Mutation gate `server/scripts/mac-discard-mutation-gate.mjs` (25 mutants).
+
 ## 6.83.0 - Work orchestrator: every session on a card, where each left off, and plan usage, in the planner input
 
 Miles, 2026-10-20 21:47: the Work chat should act like an orchestrator, not a form: find a card's sessions itself,

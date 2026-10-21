@@ -1,7 +1,7 @@
 import { MacParakeetUnavailableError, transcribeMacParakeet } from '../lib/mac-recording-asr.js'
 import { getMeetingStore } from '../lib/meeting-store.js'
 import { appendAutonomousSaveLog, getStopIntentStore, savedChunkReplay, type StopIntent } from '../lib/meeting-stop-intents.js'
-import { MAC_AUDIO, MAC_CAPTURE_ID, persistMacChunkReceipt, macError, registerMacRecording, requireMacRecording, readMacRecording, validateMacWav } from '../lib/mac-recording.js'
+import { MAC_AUDIO, MAC_CAPTURE_ID, closeMacRecording, persistMacChunkReceipt, macError, registerMacRecording, requireMacRecording, readMacRecording, validateMacWav } from '../lib/mac-recording.js'
 import { AUTO_ENROLL_THRESHOLD } from '../lib/voiceprint-floor.js'
 import { readSpeakerPolicy, policyLabel, type SpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/transcribe-stream — Streaming transcription for continuous meeting capture
@@ -81,12 +81,14 @@ import {
 } from '../lib/even-hub-speaker-role.js'
 import { archiveSessionAudio, runMeetingAudioRetention } from '../lib/meeting-audio-archive.js'
 import {
+  DISCARDED_RETENTION_MS,
   countChunkWavs,
   listUnsavedCaptures,
   purgeExpiredQuarantine,
   quarantineSessionAudio,
   readCaptureDisposition,
   sweepOrphanedSessionAudio,
+  type QuarantineReceipt,
 } from '../lib/unsaved-audio-quarantine.js'
 import {
   STALE_ACTIVE_SESSION_DIR_NAME,
@@ -1728,11 +1730,14 @@ export function getMeetingSessionStatus(sessionId: string, now = Date.now()): Me
   }
 }
 
+/** 6.83.2: a close that quarantines under its own reason, clock and terminal receipt (the Mac discard). */
+type CloseQuarantine = { reason: string; retentionMs?: number; receipt?: QuarantineReceipt }
+
 function closeTranscriptSession(
   sessionId: string,
   reason: ClosedTranscriptSession['reason'],
-  options: { preserveAudio?: boolean } = {},
-): void {
+  options: { preserveAudio?: boolean; quarantine?: CloseQuarantine } = {},
+): string | null {
   // Progressive HQ is disposable cache state. Every terminal session path —
   // save, expiry, quarantine, or abandonment — must release the single owner.
   void stopProgressiveHqSession(sessionId)
@@ -1751,7 +1756,7 @@ function closeTranscriptSession(
     maxChunkIndex,
     reason,
   })
-  finishClosingTranscriptSession(sessionId, { ...options, closeReason: reason })
+  return finishClosingTranscriptSession(sessionId, { ...options, closeReason: reason })
 }
 
 /** Delete session after save */
@@ -1759,10 +1764,11 @@ export function deleteSession(sessionId: string, options: { preserveAudio?: bool
   closeTranscriptSession(sessionId, 'saved', options)
 }
 
+/** Where a close put the session's chunk audio (the quarantine dir), or null when it moved none. */
 function finishClosingTranscriptSession(
   sessionId: string,
-  options: { preserveAudio?: boolean; closeReason?: ClosedTranscriptSession['reason'] },
-): void {
+  options: { preserveAudio?: boolean; closeReason?: ClosedTranscriptSession['reason']; quarantine?: CloseQuarantine },
+): string | null {
   sessions.delete(sessionId)
   sessionAudioBytes.delete(sessionId)
   sessionAudioWrites.delete(sessionId)
@@ -1794,6 +1800,7 @@ function finishClosingTranscriptSession(
     if (countChunkWavs(audioDir) > 0) {
       const target = quarantineSessionAudio(audioDir, 'close_saved_residual_chunks')
       if (target) console.warn(`[transcribe-stream] Saved-close left chunk audio behind; quarantined: ${sessionId} → ${target}`)
+      return target
     } else {
       try { rmSync(audioDir, { recursive: true, force: true }) } catch {}
     }
@@ -1801,12 +1808,113 @@ function finishClosingTranscriptSession(
     // Any non-saved close (expired, error, …) with chunk audio still on disk
     // is an unsaved capture. Quarantine it — never delete evidence (6.19.0).
     if (countChunkWavs(audioDir) > 0) {
-      const target = quarantineSessionAudio(audioDir, `close_${options.closeReason ?? 'unknown'}`)
+      const quarantine = options.quarantine
+      const target = quarantineSessionAudio(audioDir, quarantine?.reason ?? `close_${options.closeReason ?? 'unknown'}`, undefined,
+        quarantine ? { retentionMs: quarantine.retentionMs, receipt: quarantine.receipt } : {})
       if (target) console.warn(`[transcribe-stream] Quarantined unsaved session-audio on close: ${sessionId} → ${target}`)
       else console.error(`[transcribe-stream] Quarantine move failed on close, source retained: ${sessionId}`)
+      return target
     } else {
       try { rmSync(audioDir, { recursive: true, force: true }) } catch {}
     }
+  }
+  return null
+}
+
+// ── 6.83.2: discard a stranded Mac capture that holds no sound ─────────────────────
+// Miles, 2026-10-21: Record on Mac captured a 21-minute Zoom call as 211 chunks of exact zeros (macOS returns
+// zeros, not an error, when system audio recording is not allowed). The save refused it (no_speech), and the
+// capture then sat in the stranded list with a Save that can never work. COS Control asks the server to let it go.
+//
+// What it may touch: a Mac capture (Control is its only uploader, so nothing else will send it a chunk) that is in
+// memory, holds NO canonical chunk (no transcribed text, so no speech), has finished ASR on every chunk it received
+// (an in-flight chunk could still become speech), is idle past EMPTY_SESSION_STALE_MS, and has no chunk upload in
+// progress. Anything else is refused and left exactly as it was. The audio is never deleted here: it moves into the
+// existing quarantine with a terminal no_speech receipt and a 24-hour clock (DISCARDED_RETENTION_MS).
+export type MacDiscardRefusal =
+  | 'session_not_found' | 'not_mac_capture' | 'has_speech' | 'asr_in_progress' | 'not_idle' | 'chunk_in_progress'
+
+export interface MacDiscardResult {
+  ok: boolean
+  reason?: MacDiscardRefusal
+  sessionId: string
+  /** The quarantine dir the audio moved into, or null when the capture held no chunk audio. */
+  quarantined: string | null
+  chunkFiles: number
+  receivedCount: number
+  retainedUntil: string | null
+}
+
+export const MAC_DISCARD_IDLE_MS = EMPTY_SESSION_STALE_MS
+
+/** Why a session may not be discarded, or null when it may. Pure over the session's ledger. */
+export function macDiscardRefusal(input: {
+  sessionId: string
+  present: boolean
+  canonicalCount: number
+  receivedIndices: number[]
+  asrCompletedIndices: number[]
+  silentForMs: number
+  chunkInProgress: boolean
+}): MacDiscardRefusal | null {
+  if (!MAC_CAPTURE_ID.test(input.sessionId)) return 'not_mac_capture'
+  if (!input.present) return 'session_not_found'
+  if (input.canonicalCount > 0) return 'has_speech'
+  const completed = new Set(input.asrCompletedIndices)
+  if (input.receivedIndices.some(index => !completed.has(index))) return 'asr_in_progress'
+  if (input.chunkInProgress) return 'chunk_in_progress'
+  if (input.silentForMs < MAC_DISCARD_IDLE_MS) return 'not_idle'
+  return null
+}
+
+export async function discardSilentMacCapture(sessionId: string, options: { now?: number; dryRun?: boolean } = {}): Promise<MacDiscardResult> {
+  const now = options.now ?? Date.now()
+  const refusalFor = () => {
+    const session = sessions.get(sessionId)
+    return {
+      session,
+      refusal: macDiscardRefusal({
+        sessionId,
+        present: !!session,
+        canonicalCount: session ? canonicalIndices(session).length : 0,
+        receivedIndices: session?.receivedIndices ?? [],
+        asrCompletedIndices: session?.asrCompletedIndices ?? [],
+        silentForMs: session ? now - session.lastActivityAt : 0,
+        chunkInProgress: macChunkLocks.has(sessionId),
+      }),
+    }
+  }
+  const empty = (reason: MacDiscardRefusal, receivedCount = 0): MacDiscardResult =>
+    ({ ok: false, reason, sessionId, quarantined: null, chunkFiles: 0, receivedCount, retainedUntil: null })
+  const first = refusalFor()
+  if (first.refusal) return empty(first.refusal, first.session?.receivedIndices?.length ?? 0)
+  if (options.dryRun) {
+    const audioDir = getSessionAudioDirectory(sessionId)
+    return { ok: true, sessionId, quarantined: null, chunkFiles: audioDir ? countChunkWavs(audioDir) : 0,
+      receivedCount: first.session?.receivedIndices?.length ?? 0, retainedUntil: null }
+  }
+  // Every chunk write this session started reaches disk before its directory moves.
+  await drainSessionAudioWrites(sessionId)
+  // Ask again after the await: a chunk may have arrived meanwhile.
+  const second = refusalFor()
+  if (second.refusal) return empty(second.refusal, second.session?.receivedIndices?.length ?? 0)
+  const receivedCount = second.session?.receivedIndices?.length ?? 0
+  const quarantined = closeTranscriptSession(sessionId, 'closed', {
+    quarantine: {
+      reason: 'discarded_no_sound',
+      retentionMs: DISCARDED_RETENTION_MS,
+      receipt: { outcome: 'no_speech', discarded: true, note: 'Discarded from COS Control: no sound was captured. Audio retained until its 24-hour clock clears it.' },
+    },
+  })
+  // A late chunk or a replayed start for this capture answers 410 from here on.
+  closeMacRecording(sessionId)
+  return {
+    ok: true,
+    sessionId,
+    quarantined,
+    chunkFiles: quarantined ? countChunkWavs(quarantined) : 0,
+    receivedCount,
+    retainedUntil: quarantined ? new Date(Date.now() + DISCARDED_RETENTION_MS).toISOString() : null,
   }
 }
 
@@ -2610,7 +2718,9 @@ export function assertMacCaptureComplete(sessionId: string, expectedChunkCount: 
 
 // Manual Mac pilot: independent from iPhone candidate and cue rollout gates.
 transcribeStreamRouter.get('/mac-recording/capabilities', (_req, res) => {
-  res.set('Cache-Control', 'private, no-store').json({ available: true, ...MAC_AUDIO, serverInstanceId: getServerInstanceId() })
+  // 6.83.2: `discard` advertises POST /api/meeting/sessions/:id/discard for a stranded no-sound capture. Older
+  // servers omit it, and COS Control then discards only its own local copy and says so.
+  res.set('Cache-Control', 'private, no-store').json({ available: true, ...MAC_AUDIO, serverInstanceId: getServerInstanceId(), discard: true })
 })
 function requireMacPin(req: { get(name: string): string | undefined }): string {
   const pin = req.get('X-COS-Server-Instance')?.trim()
