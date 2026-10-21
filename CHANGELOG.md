@@ -1,3 +1,44 @@
+## 6.83.0 - Work orchestrator: every session on a card, where each left off, and plan usage, in the planner input
+
+Miles, 2026-10-20 21:47: the Work chat should act like an orchestrator, not a form: find a card's sessions itself,
+read a session's log to know where to pick up, and fork to whichever of Claude, Codex or Cursor has usage left.
+Decisions (21:55): Auto-send is a per-card switch in COS Control; plan usage only, never a silent key-lane fallback.
+This is M1 plus the planner-input parts of M2 and M3 (`docs/work-orchestrator.md`). The server plans; COS Control
+still owns every send.
+
+- **Client matrix.** COS Control 0.5.333 uses it. Older Controls never send `orchestrator: true` and get 6.81.0's
+  prompt, schema, parser and output budget byte for byte (`WORK_CHAT_SYSTEM` SHA-256 pinned). Version 6.82.0 is
+  another release line (routines); this one takes 6.83.0 and touches separate files where it can.
+- **Phase A: Control pushes, the server keeps.** `POST /api/work/orchestrator/input {workID, meetingWorkIDs, snapshot}`
+  stores Control's bounded Work snapshot (`data/work-orchestrator/control-snapshot.json`, 0600, atomic; ids, modes,
+  statuses, times only) and answers the card's planner rows. Nothing there sends, links or calls a model.
+- **Discovery** (canary C3 rules 1 to 8): links, newSession, fork child and continue receipts, the card's COS-WORK
+  handoff prompt in a user turn, a valid status line in the session's own reply, the tag in the live row, the card's
+  source meeting (a suggestion). Never: tool output, quoted handoffs, subagents, a sourceSessionID. Precision fixes:
+  Claude rows credited by their own sessionId, Codex guardian and other child threads skipped (thread_spawn folds into
+  its parent), placeholder tags inert, newest strong evidence decides which card a session works on now. The log
+  index is incremental (`data/work-orchestrator/tag-index.json`): 8.7 GB, 1,368 files scanned in 10.4 s on Miles's
+  Mac, then 112 ms. On the toadstone card it finds both sessions.
+- **Pick-up notes** (M2 input): deterministic, from the last 6 MB of the log (seek from the end), harness notices
+  skipped, the live busy flag on top, secrets and customer identifiers (emails, phones, URL paths, amounts, long ids)
+  redacted, at most 1,500 characters. No model call.
+- **Plan usage** (M3 input): Claude `get_usage` over stream-json (no turn), Codex `account/rateLimits/read` (never
+  `supportsLunaReserve`, never a reset-credit call), Cursor unknown (no Keychain read, no TUI launch). Polled every
+  10 min and before a plan when older than 2 min; `rate_limit_event` frames from plan-lane Claude jobs and
+  `provider_limit` failures from plan-lane jobs mark a provider exhausted until the stated reset (or 1 h), over any
+  cached percentage; a key-lane turn never counts. Switch `COS_WORK_USAGE_POLL=0`; three failed probes pause that
+  provider for an hour. Read on this Mac at 23:0x: Claude 43% weekly headroom, Codex 8%.
+- **Planner input and answer.** Rows add discoveredBy, linked, member, lastTouchedCard, lastActivity, live, busy,
+  pickup, available + reason (not_in_session_list, app_owned, cursor, plan_limit, on_another_card) and forkable; the
+  input adds now, usage, leftOut and newSessionProviders. `automatic` stays the only Continue gate. Answers may Fork a
+  forkable row or start a New session on an offered provider. `WORK_CHAT_ORCHESTRATOR_RULES` (appended only for an
+  orchestrator input): prefer headroom, never an exhausted provider, avoid stale owners, continue vs fork, and never
+  say a card has no sessions when rows or leftOut are present.
+- **Every plan logged**, from any client: `data/work-orchestrator/plans.jsonl` (2 MB, newest half kept) and one
+  `[work-orchestrator] plan` line: sessions sent and their availability, left out and why, usage age, assignments
+  (mode and target, never text), outcome, time.
+- **Checks.** CHECKS_PLACEHOLDER
+
 ## 6.81.0 - The Mac saves a stopped meeting on its own once it holds every chunk
 
 Miles, 2026-10-20: "if the application isn't in the foreground, it can fail to save the meetings". Both G2 meetings that day saved only once the phone came back on screen: the phone's Stop needs IndexedDB, and iOS suspends IndexedDB while the companion is hidden (11:19 qbbgyq: Stop 12:43, `stop_blocked`, "Load failed", saved 12:47 by a new WebView; 14:07 mip9qb: Stop 15:13:50, saved 15:14:37 only after the phone was visible). The full map is `docs/meeting-autonomous-save.md`.

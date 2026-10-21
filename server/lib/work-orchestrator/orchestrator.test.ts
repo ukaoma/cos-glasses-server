@@ -5,9 +5,9 @@ import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tagForWorkID, statusLines, isHandoffPrompt, tagsIn } from './tags.js'
 import { redactNote } from './redact.js'
-import { readTail, turnsFrom } from './session-log.js'
+import { readTail, turnsFrom, codexThreadKind } from './session-log.js'
 import { pickupFromTurns, pickupNote, PICKUP_MAX_CHARS } from './pickup.js'
-import { TagIndex, classifyRow } from './tag-index.js'
+import { TagIndex, classifyRow, codexKindOf, scanRange } from './tag-index.js'
 import { discoverCardSessions } from './discovery.js'
 import { buildOrchestratorInput, ORCHESTRATOR_MAX_ROWS } from './input.js'
 import { parseSnapshot, isGuardianRow, type ControlSnapshot } from './snapshot.js'
@@ -97,6 +97,18 @@ describe('pick-up notes', () => {
     expect(pickupFromTurns([{ role: 'user', text: 'go', at: null }, { role: 'assistant', text: 'ok', at: null },
       { role: 'todo', text: JSON.stringify([{ content: 'ship', status: 'pending' }, { content: 'done one', status: 'completed' }]), at: null }]).note).toContain('Open todos: pending: ship')
   })
+  it('redacts what the note carries, and bounds it when every part is at its maximum', () => {
+    const secret = 'Call jane.doe@bottle.example with token=abcdefghijklmnop1234 about $4,900 at https://acme.example/proposal/acme-liquor'
+    const note = pickupFromTurns([{ role: 'user', text: secret, at: '2026-10-20T10:00:00Z' }, { role: 'assistant', text: secret, at: '2026-10-20T10:01:00Z' }]).note
+    expect(note).not.toMatch(/jane\.doe|abcdefghijklmnop1234|4,900|acme-liquor/)
+    expect(note).toContain('[email]'); expect(note).toContain('https://acme.example/[path]')
+    const long = (c: string) => (c + ' ').repeat(400)
+    const reply = `COS-WORK 420a0114f1a9: blocked: ${long('evidence')}\n` + Array.from({ length: 6 }, (_, i) => `Is question ${i} ${long('q').slice(0, 250)}?`).join('\n') + '\n' + long('result')
+    const full = pickupFromTurns([{ role: 'user', text: long('ask'), at: '2026-10-20T10:00:00Z' }, { role: 'assistant', text: reply, at: '2026-10-20T10:01:00Z' },
+      { role: 'todo', text: JSON.stringify(Array.from({ length: 20 }, (_, i) => ({ content: long('todo' + i).slice(0, 80), status: 'pending' }))), at: null }]).note
+    expect(full.length).toBe(PICKUP_MAX_CHARS)
+    expect(full.endsWith('\u2026')).toBe(true)
+  })
   it('a resumed Claude file credits only its own rows', () => {
     const text = [JSON.stringify({ type: 'user', sessionId: uuid(9), timestamp: 'x', message: { role: 'user', content: 'replayed older ask' } }),
       JSON.stringify({ type: 'user', sessionId: uuid(1), timestamp: 'y', message: { role: 'user', content: 'my own ask' } })].join('\n')
@@ -148,6 +160,30 @@ describe('the log index', () => {
     expect((await again.refresh()).scannedFiles).toBe(0)
     expect(again.hits().length).toBe(index.hits().length)
   })
+  it('reads a Codex child thread\'s kind, also when its first line is longer than the 512 KB read', async () => {
+    expect(codexThreadKind(JSON.stringify({ type: 'session_meta', payload: { source: { subagent: { other: 'guardian' } } } }))).toEqual({ kind: 'guardian' })
+    expect(codexThreadKind(JSON.stringify({ type: 'session_meta', payload: { source: { subagent: { thread_spawn: { parent_thread_id: uuid(3).toUpperCase() } } } } }))).toEqual({ kind: 'spawn', parent: uuid(3) })
+    expect(codexThreadKind(JSON.stringify({ type: 'session_meta', payload: { source: { subagent: { review: true } } } }))).toEqual({ kind: 'other_child' })
+    expect(codexThreadKind(JSON.stringify({ type: 'session_meta', payload: { source: 'cli' } }))).toEqual({ kind: 'thread' })
+    const h = fakeHome()
+    const big = (source: unknown) => { const p = join(h.dataDir, `meta-${Math.random()}.jsonl`); writeFileSync(p, JSON.stringify({ type: 'session_meta', payload: { source, base_instructions: { text: 'x'.repeat(700_000) } } }) + '\n'); return p }
+    expect(await codexKindOf(big({ subagent: { other: 'guardian' } }))).toEqual({ kind: 'guardian' })
+    expect(await codexKindOf(big({ subagent: { thread_spawn: { parent_thread_id: uuid(4) } } }))).toEqual({ kind: 'spawn', parent: uuid(4) })
+    expect(await codexKindOf(big('cli'))).toEqual({ kind: 'thread' })
+  })
+  it('a chunk ending in a partial line resumes at that line, so the line is read once it is whole', async () => {
+    const h = fakeHome()
+    const path = join(h.dataDir, 'x.jsonl')
+    const row = (tag: string) => JSON.stringify({ type: 'assistant', sessionId: uuid(1), timestamp: '2026-10-20T10:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text: `COS-WORK ${tag}: done: shipped it` }] } })
+    const first = row(TAG) + '\n', second = row(OTHER_TAG)
+    writeFileSync(path, first + second.slice(0, 30))
+    const a = await scanRange(path, 'claude', 'claude:' + uuid(1), 0, statSync(path).size, 0)
+    expect(a.offset).toBe(Buffer.byteLength(first))
+    expect(a.hits.map(x => x.tag)).toEqual([TAG])
+    appendFileSync(path, second.slice(30) + '\n')
+    const b = await scanRange(path, 'claude', 'claude:' + uuid(1), a.offset, statSync(path).size, 0)
+    expect(b.hits.map(x => x.tag)).toEqual([OTHER_TAG])
+  })
   it('classifies tool output, quoted handoffs and mentions as never-membership kinds', () => {
     const sid = 'claude:' + uuid(1)
     const tool = classifyRow({ type: 'user', sessionId: uuid(1), message: { role: 'user', content: [{ type: 'tool_result', content: 'COS-WORK ' + TAG }] } }, 'claude', sid, null)
@@ -191,6 +227,10 @@ describe('discovery (rules 1 to 8 and the precision fixes)', () => {
     expect(found.has(S(11))).toBe(false)
     expect(found.has(S(12))).toBe(false)
     expect(found.has(S(8))).toBe(false)
+  })
+  it('a fork receipt that still names its source, with no journaled child, makes no session a member', () => {
+    const s = snap({ receipts: [receipt({ mode: 'fork', sessionID: S(20), sourceSessionID: S(20), forkChildID: null })] })
+    expect(discoverCardSessions(CARD, s, [])).toEqual([])
   })
   it('newest strong evidence decides which card a session works on', () => {
     const s = snap({ links: [{ sessionID: S(1), workID: CARD, at: NOW / 1000 - 86400 * 5 }],

@@ -1,6 +1,6 @@
 // 6.83.0: a plan-lane provider limit marks that provider exhausted for the orchestrator; a key-lane one never does (Q2).
 import { expect, it } from 'vitest'
-import { noteJobProviderLimit, orchestratorUsage } from './runtime.js'
+import { noteJobProviderLimit, orchestratorUsage, startWorkOrchestrator } from './runtime.js'
 
 it('marks a plan-lane provider_limit exhausted, and ignores key lanes, key profiles and other failures', () => {
   const state = () => orchestratorUsage().views().find(v => v.provider === 'codex')!.state
@@ -12,4 +12,9 @@ it('marks a plan-lane provider_limit exhausted, and ignores key lanes, key profi
   expect(state()).toBe(before)
   noteJobProviderLimit('codex', 'provider_limit', "You've hit your usage limit. Try again in 45 minutes", 'gpt-5', undefined)
   expect(orchestratorUsage().views().find(v => v.provider === 'codex')).toMatchObject({ state: 'exhausted', source: 'provider_limit' })
+})
+
+it('a server booted by a test starts no usage poll and no log scan', () => {
+  startWorkOrchestrator({ VITEST: 'true' })
+  expect((orchestratorUsage() as any).timer).toBeNull()
 })

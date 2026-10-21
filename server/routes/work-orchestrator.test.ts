@@ -85,6 +85,17 @@ describe('the plan contract', () => {
     expect(WORK_CHAT_ORCHESTRATOR_RULES).toMatch(/Never say this task has no sessions when rows or leftOut are present/)
     expect(WORK_CHAT_ORCHESTRATOR_OUTPUT_TOKENS).toBeGreaterThan(WORK_CHAT_OUTPUT_TOKENS)
   })
+  it('a plan the model answered badly is logged as invalid_answer, and nothing is dispatched', async () => {
+    const logged: any[] = []
+    const app = express(); app.use(express.json({ limit: '1mb' }))
+    app.use('/api', createWorkChatRouter({ run: async () => ({ text: 'not json' }) as any, admissions: () => true, lease: () => ({ release() {} }) as any, planLog: r => logged.push(r) }))
+    const s = await listen(app)
+    try {
+      const res = await fetch(s.url + '/work/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...base, sessions: [] }) })
+      expect(res.status).toBe(503)
+      expect(logged).toEqual([expect.objectContaining({ outcome: 'invalid_answer', assignments: [] })])
+    } finally { s.server.close() }
+  })
   it('logs every plan with sessions, what was left out, usage age, and no prompt text; a failed plan too', () => {
     const input = parseWorkChatInput({ ...base, orchestrator: true, now: new Date(NOW).toISOString(), usage, leftOut: [{ id: GROWTH, title: 'G', reason: 'over' }],
       sessions: [row(SBU, { discoveredBy: ['link'], available: true })] })

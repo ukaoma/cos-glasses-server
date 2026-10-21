@@ -21,7 +21,9 @@ export function orchestratorUsage(): UsageMonitor { return usage ??= new UsageMo
 export const PLAN_LOG_PATH = () => dataPath('work-orchestrator', 'plans.jsonl')
 
 /** Starts the usage poll (10 min) and a first log scan in the background. Called once by the server at boot. */
-export function startWorkOrchestrator(): void {
+export function startWorkOrchestrator(env: NodeJS.ProcessEnv = process.env): void {
+  // A test that boots the server must never spawn the real claude or codex CLI, nor scan this Mac's session logs.
+  if (env.VITEST || env.NODE_ENV === 'test') return
   orchestratorUsage().start()
   setTimeout(() => { void orchestratorTagIndex().refresh().catch(() => {}) }, 45_000).unref?.()
 }

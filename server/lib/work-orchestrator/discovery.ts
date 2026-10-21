@@ -27,8 +27,13 @@ export interface CardSession {
 
 interface Ev { kind: Evidence; at: number | null }
 
-/** Strong evidence per card tag and session, from Control's records and the logs. */
-function strongByTag(snapshot: ControlSnapshot | null, hits: TagHit[], knownTags: Set<string>): Map<string, Map<string, Ev[]>> {
+/**
+ * Strong evidence per card tag and session, from Control's records and the logs.
+ * A placeholder or never-used tag (canary precision fix 7: `aaaaaaaaaaaa`, `0123456789ab`) is inert by construction: only
+ * the requested card's own tag is read for this card, and only member evidence (a Control record or a real handoff
+ * prompt) can make another card the newer owner, so a status line with an unknown tag never changes a row.
+ */
+function strongByTag(snapshot: ControlSnapshot | null, hits: TagHit[]): Map<string, Map<string, Ev[]>> {
   const out = new Map<string, Map<string, Ev[]>>()
   const add = (tag: string, sid: string | null, kind: Evidence, at: number | null) => {
     if (!sid) return
@@ -48,23 +53,13 @@ function strongByTag(snapshot: ControlSnapshot | null, hits: TagHit[], knownTags
     // A sourceSessionID is where a fork or new session came FROM, never membership (precision fix 2).
   }
   for (const h of hits) {
-    if (!knownTags.has(h.tag)) continue // placeholder or never-used tags are ignored (precision fix 7)
     if (h.kind === 'prompt') add(h.tag, h.sid, 'prompt', h.at)
     else if (h.kind === 'status') add(h.tag, h.sid, 'status', h.at)
   }
   for (const row of snapshot?.live?.rows ?? []) {
-    for (const tag of tagsIn(row.summary)) if (knownTags.has(tag)) add(tag, row.id, 'listed', row.updatedAt ? Date.parse(row.updatedAt) || null : null)
+    for (const tag of tagsIn(row.summary)) add(tag, row.id, 'listed', row.updatedAt ? Date.parse(row.updatedAt) || null : null)
   }
   return out
-}
-
-/** Tags of real cards: every card Control recorded, the requested ones, and every tag a real handoff prompt carried. */
-export function knownTagsOf(snapshot: ControlSnapshot | null, hits: TagHit[], workIDs: string[]): Set<string> {
-  const tags = new Set<string>(workIDs.map(tagForWorkID))
-  for (const l of snapshot?.links ?? []) tags.add(tagForWorkID(l.workID))
-  for (const r of snapshot?.receipts ?? []) tags.add(tagForWorkID(r.workID))
-  for (const h of hits) if (h.kind === 'prompt') tags.add(h.tag)
-  return tags
 }
 
 const newest = (list: Ev[], kinds?: ReadonlySet<Evidence>) => list.filter(e => !kinds || kinds.has(e.kind)).reduce<number | null>((m, e) => (e.at !== null && (m === null || e.at > m) ? e.at : m), null)
@@ -74,8 +69,7 @@ const newest = (list: Ev[], kinds?: ReadonlySet<Evidence>) => list.filter(e => !
  * a session that is a member of one of them is suggested here with the reason (rule 8).
  */
 export function discoverCardSessions(workID: string, snapshot: ControlSnapshot | null, hits: TagHit[], meetingWorkIDs: string[] = []): CardSession[] {
-  const known = knownTagsOf(snapshot, hits, [workID, ...meetingWorkIDs])
-  const byTag = strongByTag(snapshot, hits, known)
+  const byTag = strongByTag(snapshot, hits)
   const tag = tagForWorkID(workID)
   const mine = new Map<string, Ev[]>(byTag.get(tag) ?? [])
   for (const m of meetingWorkIDs) {

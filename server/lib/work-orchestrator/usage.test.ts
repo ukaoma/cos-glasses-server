@@ -20,6 +20,13 @@ describe('parsing what the providers answered on 2026-10-20', () => {
     const v = viewOf({ provider: 'claude', reading: r, observedAt: NOW, source: 'probe', lastError: null, failures: 0, pausedUntil: null, limitUntil: null, limitSource: null, warning: false }, NOW)
     expect(v).toMatchObject({ state: 'ok', headroomPct: 45, resetsAt: '2026-10-26T08:00:00.432Z' })
   })
+  it('Claude: only the session and weekly all-models windows bind; a model-scoped weekly window does not', () => {
+    const scoped = { ...claudeFixture, rate_limits: { ...claudeFixture.rate_limits, limits: [
+      { kind: 'session', percent: 9, resets_at: '2026-10-21T05:50:00Z' }, { kind: 'weekly_all', percent: 55, resets_at: '2026-10-26T08:00:00Z' },
+      { kind: 'weekly_scoped', percent: 97, resets_at: '2026-10-26T08:00:00Z' }] } }
+    const v = viewOf({ provider: 'claude', reading: parseClaudeUsage(scoped), observedAt: NOW, source: 'probe', lastError: null, failures: 0, pausedUntil: null, limitUntil: null, limitSource: null, warning: false }, NOW)
+    expect(v).toMatchObject({ state: 'ok', headroomPct: 45 })
+  })
   it('Claude: an unknown shape is unknown, never zero; an API-key login has no plan limits', () => {
     expect(parseClaudeUsage({ rate_limits_available: true, rate_limits: { five_hour: {} } })).toBeNull()
     expect(parseClaudeUsage({ rate_limits_available: true, rate_limits: { limits: [{ kind: 'session', percent: 'lots' }] } })).toBeNull()
