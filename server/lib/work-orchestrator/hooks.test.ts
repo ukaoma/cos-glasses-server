@@ -16,7 +16,14 @@ it('marks a plan-lane provider_limit exhausted (once the runtime is up), and ign
   expect(orchestratorUsage().views().find(v => v.provider === 'codex')).toMatchObject({ state: 'exhausted', source: 'provider_limit' })
 })
 
-it('a server booted by a test starts no usage poll and no log scan', () => {
-  startWorkOrchestrator({ VITEST: 'true' })
-  expect((orchestratorUsage() as any).timer).toBeNull()
+it('a server booted by a test starts no usage poll and no log scan, even with the poll opted in', () => {
+  try {
+    startWorkOrchestrator({ VITEST: 'true', COS_WORK_USAGE_POLL: '1' })
+    expect((orchestratorUsage() as any).timer).toBeNull()
+  } finally { orchestratorUsage().stop() }
+})
+
+it('inside a test, the process-wide monitor never spawns the real claude or codex CLI', async () => {
+  await orchestratorUsage().refresh('claude')
+  expect(orchestratorUsage().entry('claude')).toMatchObject({ source: 'none', lastError: 'not probed inside a test' })
 })

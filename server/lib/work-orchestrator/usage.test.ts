@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseClaudeUsage, parseCodexUsage, parseLimitReset, UsageMonitor, viewOf, probeClaudeUsage, probeCodexUsage,
-  CLAUDE_USAGE_LINES, CODEX_INIT, CODEX_READ, USAGE_FRESH_MS, USAGE_BREAKER_MS, type SpawnLines } from './usage.js'
+  CLAUDE_USAGE_LINES, CODEX_INIT, CODEX_READ, USAGE_FRESH_MS, USAGE_CACHE_MS, USAGE_POLL_MS, USAGE_BREAKER_MS, usagePollOptedIn, type SpawnLines } from './usage.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const claudeFixture = JSON.parse(readFileSync(join(here, '__fixtures__', 'claude-get-usage-2026-10-20.json'), 'utf8'))
@@ -79,13 +79,51 @@ describe('the monitor', () => {
     m.noteClaudeRateLimitEvent({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Math.round((now + 7200_000) / 1000) } })
     expect(m.entry('claude').limitUntil).toBe(Math.round((now + 7200_000) / 1000) * 1000)
   })
-  it('the poll does not start when switched off', () => {
-    const prior = process.env.COS_WORK_USAGE_POLL
-    process.env.COS_WORK_USAGE_POLL = '0'
+  it('no timer reads usage by default; only COS_WORK_USAGE_POLL=1 starts the 10-minute poll', async () => {
+    vi.useFakeTimers()
     try {
-      const m = new UsageMonitor({ probes: { claude: vi.fn(), codex: vi.fn() } as any })
-      m.start(); expect((m as any).timer).toBeNull(); m.stop()
-    } finally { if (prior === undefined) delete process.env.COS_WORK_USAGE_POLL; else process.env.COS_WORK_USAGE_POLL = prior }
+      for (const env of [{}, { COS_WORK_USAGE_POLL: '0' }, { COS_WORK_USAGE_POLL: 'true' }, { COS_WORK_USAGE_POLL: '' }] as NodeJS.ProcessEnv[]) {
+        expect(usagePollOptedIn(env)).toBe(false)
+        const claude = vi.fn(async () => parseClaudeUsage(claudeFixture)!), codex = vi.fn(async () => parseCodexUsage(codexFixture)!)
+        const m = new UsageMonitor({ probes: { claude, codex } })
+        m.start(env)
+        await vi.advanceTimersByTimeAsync(3 * USAGE_POLL_MS)
+        expect([JSON.stringify(env), claude.mock.calls.length, codex.mock.calls.length]).toEqual([JSON.stringify(env), 0, 0])
+        m.stop()
+      }
+      expect(usagePollOptedIn({ COS_WORK_USAGE_POLL: '1' })).toBe(true)
+      const claude = vi.fn(async () => parseClaudeUsage(claudeFixture)!), codex = vi.fn(async () => parseCodexUsage(codexFixture)!)
+      const m = new UsageMonitor({ probes: { claude, codex } })
+      m.start({ COS_WORK_USAGE_POLL: '1' })
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect([claude.mock.calls.length, codex.mock.calls.length]).toEqual([1, 1])
+      await vi.advanceTimersByTimeAsync(USAGE_POLL_MS)
+      expect([claude.mock.calls.length, codex.mock.calls.length]).toEqual([2, 2])
+      m.stop()
+    } finally { vi.useRealTimers() }
+  })
+  it('on demand: GET answers from a reading under 10 minutes old, refresh=1 and a plan re-read one over 2 minutes', async () => {
+    let now = NOW
+    const claude = vi.fn(async () => parseClaudeUsage(claudeFixture)!), codex = vi.fn(async () => parseCodexUsage(codexFixture)!)
+    const m = new UsageMonitor({ probes: { claude, codex }, now: () => now })
+    const calls = () => [claude.mock.calls.length, codex.mock.calls.length]
+    // Never read: the first on-demand read probes both.
+    const first = await m.onDemand()
+    expect(calls()).toEqual([1, 1])
+    expect(first.find(v => v.provider === 'claude')).toMatchObject({ state: 'ok', headroomPct: 45, ageSec: 0, source: 'probe' })
+    // 3 minutes later: GET answers from the cache; refresh=1 and a plan input re-read.
+    now += 3 * 60_000
+    await m.onDemand(); expect(calls()).toEqual([1, 1])
+    await m.onDemand(true); expect(calls()).toEqual([2, 2])
+    now += 3 * 60_000
+    const plan = await m.forPlan(); expect(calls()).toEqual([3, 3])
+    expect(plan.find(v => v.provider === 'codex')).toMatchObject({ state: 'low', ageSec: 0 })
+    // Under 2 minutes: nothing re-reads, not even a plan.
+    now += USAGE_FRESH_MS - 1000
+    await m.forPlan(); await m.onDemand(true); await m.onDemand(); expect(calls()).toEqual([3, 3])
+    // Past 10 minutes since the last read: a plain GET re-reads.
+    now += USAGE_CACHE_MS - USAGE_FRESH_MS + 2000
+    await m.onDemand(); expect(calls()).toEqual([4, 4])
   })
 })
 

@@ -6,12 +6,13 @@
  *        Stores Control's snapshot when one is sent (Phase A: Control pushes, the server keeps the copy), then answers
  *        the card's planner rows, what was left out and why, and the usage snapshot.
  *   GET  /api/work/orchestrator/usage[?refresh=1]
- *        The usage snapshot per provider; `refresh=1` re-reads Claude and Codex when older than 2 minutes.
+ *        The usage snapshot per provider, read on demand: Claude and Codex are re-read when their reading is older than
+ *        10 minutes (`refresh=1`: 2 minutes). No timer reads usage unless COS_WORK_USAGE_POLL=1.
  */
 import { Router } from 'express'
 import { parseSnapshot, type ControlSnapshot } from '../lib/work-orchestrator/snapshot.js'
 import type { OrchestratorInput } from '../lib/work-orchestrator/input.js'
-import type { UsageView } from '../lib/work-orchestrator/usage.js'
+import type { UsageMonitor, UsageView } from '../lib/work-orchestrator/usage.js'
 import { orchestratorInputFor, orchestratorSnapshots, orchestratorUsage } from '../lib/work-orchestrator/runtime.js'
 
 const WORK_ID = /^task:[a-z_]+:[a-f0-9]{12}$/
@@ -25,10 +26,13 @@ export interface WorkOrchestratorDeps {
   now: () => number
 }
 
+/** GET /usage reads on demand: a reading older than 10 minutes is re-read (`refresh=1`: 2 minutes). */
+export const readUsage = (refresh: boolean, monitor: UsageMonitor = orchestratorUsage()): Promise<UsageView[]> => monitor.onDemand(refresh)
+
 const DEFAULTS: WorkOrchestratorDeps = {
   putSnapshot: s => orchestratorSnapshots().put(s),
   input: orchestratorInputFor,
-  usage: async refresh => { if (refresh) await orchestratorUsage().ensureFresh(); return orchestratorUsage().views() },
+  usage: refresh => readUsage(refresh),
   now: () => Date.now(),
 }
 

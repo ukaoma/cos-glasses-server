@@ -91,14 +91,16 @@ milestone; the canary's optional Haiku polish stays undecided.
 | | Claude | Codex | Cursor |
 | --- | --- | --- | --- |
 | Probe | `claude -p` stream-json control request `get_usage` (`skip_behaviors`), no turn | `codex app-server` `account/rateLimits/read` (`excludeResetCreditDetails`) | none: marked unknown (no Keychain read, no TUI launch; not approved) |
-| Poll | every 10 min, and before a plan when older than 2 min | same | never |
+| Read | on demand: before a plan (POST input) when older than 2 min; GET usage when older than 10 min (2 with `refresh=1`) | same | never |
+| Timer | none by default; every 10 min only with `COS_WORK_USAGE_POLL=1` | same | never |
 | Passive | `rate_limit_event` frames from the server's own plan-lane Claude jobs | none yet | none |
 | Fallback | a `provider_limit` failure marks the provider exhausted until its stated reset, or 1 h | same | same |
 
 Never sent: `supportsLunaReserve`. Never called: `ConsumeAccountRateLimitResetCredit`. Codex is gated on
 `ordinaryUsageAllowed === false` first. Probes run in a fresh empty directory, hooks and MCP off, killed by exact PID
-after 15 s. Stops: `COS_WORK_USAGE_POLL=0` turns the poll off; three failed probes in a row pause that provider's probe
-for an hour. A key-lane turn's rate-limit frames are never recorded as plan usage.
+after 15 s. Stops: no background poll unless the owner sets `COS_WORK_USAGE_POLL=1` (Miles has not approved a poll
+for every user; the 6.83.0 release reads usage only when a plan or a usage read asks); three failed probes in a row
+pause that provider's probe for an hour. A key-lane turn's rate-limit frames are never recorded as plan usage.
 
 ### Planner input and answer
 

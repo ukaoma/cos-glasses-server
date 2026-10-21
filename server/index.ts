@@ -1486,7 +1486,8 @@ listenRequiredServers(listeners).then(() => {
     resumeAutonomousMeetingSaves()
     // 6.77.0: transcript cleanup data whose meeting is gone, and screen text past retention.
     scheduleTranscriptCleanupSweep()
-    // 6.83.0: the plan-usage poll (10 min; COS_WORK_USAGE_POLL=0 turns it off) and a first background log scan.
+    // 6.83.0: the usage-event sink and a first background log scan. Plan usage is read on demand; the 10-minute poll
+    // runs only with COS_WORK_USAGE_POLL=1.
     startWorkOrchestrator()
 
     // Debris from an import killed mid-write: a temp file, or a sidecar whose

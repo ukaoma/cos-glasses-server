@@ -3,11 +3,14 @@
 // (fake sessions and logs in the shapes of 2026-10-20: a planner that saw no sessions must now see both).
 import express from 'express'
 import { describe, expect, it, vi } from 'vitest'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { type Server } from 'node:http'
-import { createWorkOrchestratorRouter } from './work-orchestrator.js'
+import { createWorkOrchestratorRouter, readUsage } from './work-orchestrator.js'
+import { UsageMonitor, parseClaudeUsage, parseCodexUsage } from '../lib/work-orchestrator/usage.js'
+import { orchestratorInputFor } from '../lib/work-orchestrator/runtime.js'
 import { createWorkChatRouter, planLogRow } from './work-chat.js'
 import { parseWorkChatInput, parseWorkChatAnswer, WORK_CHAT_SYSTEM, WORK_CHAT_ORCHESTRATOR_RULES, WORK_CHAT_OUTPUT_TOKENS, WORK_CHAT_ORCHESTRATOR_OUTPUT_TOKENS } from '../lib/work-chat.js'
 import { parseSnapshot, type ControlSnapshot } from '../lib/work-orchestrator/snapshot.js'
@@ -112,7 +115,7 @@ describe('the plan contract', () => {
 describe('the input route', () => {
   it('stores Control\'s snapshot before building the input, refuses a bad one whole', async () => {
     const put = vi.fn(), input = vi.fn(async (workID: string) => ({ protocolVersion: 1, workID, rows: [], leftOut: [] } as any))
-    const app = express(); app.use(express.json({ limit: '10mb' })); app.use('/api', createWorkOrchestratorRouter({ putSnapshot: put, input, now: () => NOW }))
+    const app = express(); app.use(express.json({ limit: '10mb' })); app.use('/api', createWorkOrchestratorRouter({ putSnapshot: put, input, usage: async () => [], now: () => NOW }))
     const s = await listen(app)
     const post = (body: unknown) => fetch(s.url + '/work/orchestrator/input', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     try {
@@ -186,5 +189,44 @@ describe('the toadstone journey (2026-10-20)', () => {
       const before = await fetch(s.url + '/work/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...base, sessions: [] }) })
       expect((await before.json()).answer).toBe('This task has no sessions yet.')
     } finally { s.server.close() }
+  })
+})
+
+describe('usage is read on demand, never on a timer by default (6.83.0 release)', () => {
+  const fixture = (name: string) => JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'work-orchestrator', '__fixtures__', name), 'utf8'))
+  function monitor(clock: { now: number }) {
+    const claude = vi.fn(async () => parseClaudeUsage(fixture('claude-get-usage-2026-10-20.json'))!)
+    const codex = vi.fn(async () => parseCodexUsage(fixture('codex-rate-limits-2026-10-20.json'))!)
+    return { m: new UsageMonitor({ probes: { claude, codex }, now: () => clock.now }), calls: () => [claude.mock.calls.length, codex.mock.calls.length] }
+  }
+  it('GET /usage reads when the reading is over 10 minutes old, and refresh=1 when it is over 2', async () => {
+    const clock = { now: NOW }, { m, calls } = monitor(clock)
+    const app = express(); app.use('/api', createWorkOrchestratorRouter({ usage: refresh => readUsage(refresh, m), now: () => clock.now }))
+    const s = await listen(app)
+    const get = async (q = '') => (await fetch(s.url + '/work/orchestrator/usage' + q)).json()
+    try {
+      const first = await get()
+      expect(calls()).toEqual([1, 1])
+      expect(first.usage.find((u: any) => u.provider === 'claude')).toMatchObject({ state: 'ok', source: 'probe', ageSec: 0 })
+      clock.now += 5 * 60_000
+      await get(); expect(calls()).toEqual([1, 1])
+      await get('?refresh=1'); expect(calls()).toEqual([2, 2])
+      clock.now += 11 * 60_000
+      await get(); expect(calls()).toEqual([3, 3])
+    } finally { s.server.close() }
+  })
+  it('a plan input re-reads usage older than 2 minutes before it answers, and uses what it just read', async () => {
+    const clock = { now: NOW }, { m, calls } = monitor(clock), h = fakeHome()
+    const tags = new TagIndex({ roots: h.roots, path: join(h.dataDir, 'work-orchestrator', 'tag-index.json') })
+    const parts = { tags, usage: m, snapshot: () => null }
+    const first = await orchestratorInputFor(CARD, [], parts)
+    expect(calls()).toEqual([1, 1])
+    expect(first.usage.find(u => u.provider === 'codex')).toMatchObject({ state: 'low', headroomPct: 8, ageSec: 0 })
+    clock.now += 60_000
+    await orchestratorInputFor(CARD, [], parts); expect(calls()).toEqual([1, 1])
+    clock.now += 90_000
+    const later = await orchestratorInputFor(CARD, [], parts)
+    expect(calls()).toEqual([2, 2])
+    expect(later.usage.find(u => u.provider === 'claude')).toMatchObject({ ageSec: 0 })
   })
 })

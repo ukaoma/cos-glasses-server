@@ -23,11 +23,14 @@ still owns every send.
   skipped, the live busy flag on top, secrets and customer identifiers (emails, phones, URL paths, amounts, long ids)
   redacted, at most 1,500 characters. No model call.
 - **Plan usage** (M3 input): Claude `get_usage` over stream-json (no turn), Codex `account/rateLimits/read` (never
-  `supportsLunaReserve`, never a reset-credit call), Cursor unknown (no Keychain read, no TUI launch). Polled every
-  10 min and before a plan when older than 2 min; `rate_limit_event` frames from plan-lane Claude jobs and
+  `supportsLunaReserve`, never a reset-credit call), Cursor unknown (no Keychain read, no TUI launch). Read on
+  demand only: a plan input re-reads a provider whose reading is older than 2 min (the plan is where a fork or a new
+  session is chosen); `GET /api/work/orchestrator/usage` re-reads one older than 10 min (2 with `refresh=1`). No
+  timer reads usage by default; the 10-minute poll runs only when the owner sets `COS_WORK_USAGE_POLL=1` (Miles has
+  not approved a background poll for every user). `rate_limit_event` frames from plan-lane Claude jobs and
   `provider_limit` failures from plan-lane jobs mark a provider exhausted until the stated reset (or 1 h), over any
-  cached percentage; a key-lane turn never counts. Switch `COS_WORK_USAGE_POLL=0`; three failed probes pause that
-  provider for an hour. Read on this Mac at 23:0x: Claude 43% weekly headroom, Codex 8%.
+  cached percentage; a key-lane turn never counts. Three failed probes pause that provider for an hour. Read on this
+  Mac at 23:0x: Claude 43% weekly headroom, Codex 8%.
 - **Planner input and answer.** Rows add discoveredBy, linked, member, lastTouchedCard, lastActivity, live, busy,
   pickup, available + reason (not_in_session_list, app_owned, cursor, plan_limit, on_another_card) and forkable; the
   input adds now, usage, leftOut and newSessionProviders. `automatic` stays the only Continue gate. Answers may Fork a
@@ -46,6 +49,15 @@ still owns every send.
   replacement bug). Journey: the toadstone card replay (fake logs in the 2026-10-20 shapes) finds both sessions, plans
   with them, and never says "no sessions"; the 6.81.0 path on the same card saw none. Real probes on Miles's Mac read
   Claude and Codex usage with no turn sent. Shadow replay C4 (10 cards, 10 Opus calls, nothing sent): see the hand-off.
+- **Release checks (merged 6.82.0 + 6.83.0, after the on-demand usage change).** `tsc --noEmit` clean. Full suite
+  8,550 passed, 1 failed, 3 skipped (568 files): the failure is ST-3 in `query-job-steer-coordinator.test.ts`, a
+  fixed 50 ms sleep before reading the steer snapshot; that file and `claude-steer.ts` are unchanged from 6.82.0, the
+  carried steer was in the prompt, and the file passed 18 of 18 five runs out of five in isolation. Routines gate:
+  green baseline (55 tests in 6 files), 42 of 42 killed. Orchestrator gate: green baseline (66 tests in 8 files), 79
+  mutants, 77 killed by a named test, the same 2 documented survivors; the 10 new mutants, which replace the old `usage-poll-switch` (the opt-in switch and its
+  gate, the on-demand read, its 10-minute cache and 2-minute refresh, the plan's 2-minute re-read, the input and route
+  wiring) are all killed. `npm pack --dry-run`: 536 files, every new routines and orchestrator source file present,
+  no tests, fixtures, gates or canary.
 
 ## 6.82.0 - Routines: any COS skill on a schedule, each with its own cap, off switch and breaker
 

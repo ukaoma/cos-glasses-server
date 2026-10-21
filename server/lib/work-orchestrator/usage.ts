@@ -8,13 +8,16 @@
  *   Cursor  unknown. Its only usage reader is the interactive TUI (which auto-updates the CLI) or a Keychain token;
  *           Miles has approved neither, so the server reads neither.
  *
- * Polled every 10 minutes, and on demand before a plan when older than 2 minutes. Passive refresh: the
- * `rate_limit_event` frames the server's own plan-lane Claude jobs already receive. A `provider_limit` failure marks the
- * provider exhausted until the reset it states (or one hour), and that beats any cached percentage.
+ * Read ON DEMAND only (6.83.0 release decision, Miles has not approved a background poll for every user): a plan
+ * input (`POST /api/work/orchestrator/input`, the moment a fork or a new session is chosen) re-reads a provider whose
+ * reading is older than 2 minutes; `GET /api/work/orchestrator/usage` re-reads one older than 10 minutes (2 with
+ * `refresh=1`). Nothing reads usage on a timer unless the owner opts in with `COS_WORK_USAGE_POLL=1` (every 10 minutes).
+ * Passive refresh needs no probe: the `rate_limit_event` frames the server's own plan-lane Claude jobs already receive.
+ * A `provider_limit` failure marks the provider exhausted until the reset it states (or one hour), and that beats any
+ * cached percentage.
  *
- * How it stops: `COS_WORK_USAGE_POLL=0` turns the poll off (on-demand reads still run when a plan asks); three failed
- * probes in a row pause that provider's probe for an hour. Each probe runs in a fresh empty directory with hooks and MCP
- * off, and is killed by its exact PID after 15 seconds.
+ * How it stops: no timer by default; three failed probes in a row pause that provider's probe for an hour. Each probe
+ * runs in a fresh empty directory with hooks and MCP off, and is killed by its exact PID after 15 seconds.
  */
 import { spawn } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
@@ -25,8 +28,12 @@ import { resolveProviderBinary } from '../provider-binary.js'
 
 export type UsageProvider = 'claude' | 'codex' | 'cursor'
 export const USAGE_PROVIDERS: UsageProvider[] = ['claude', 'codex', 'cursor']
+/** The opt-in poll's period (`COS_WORK_USAGE_POLL=1` only). */
 export const USAGE_POLL_MS = 10 * 60_000
+/** Before a plan (it may fork or start a session): a reading older than this is re-read. */
 export const USAGE_FRESH_MS = 2 * 60_000
+/** An on-demand usage read (GET /usage) answers from a reading younger than this. */
+export const USAGE_CACHE_MS = 10 * 60_000
 export const USAGE_STALE_MS = 25 * 60_000
 export const USAGE_PROBE_TIMEOUT_MS = 15_000
 export const USAGE_BREAKER_FAILURES = 3
@@ -140,6 +147,9 @@ export function viewOf(e: UsageEntry, now: number): UsageView {
   return { ...base, state, headroomPct: headroom, resetsAt: tightest?.resetsAt ?? null, note: stale ? 'reading is old' : '' }
 }
 
+/** The background poll runs only when the owner opted in: `COS_WORK_USAGE_POLL=1`, nothing else. */
+export function usagePollOptedIn(env: NodeJS.ProcessEnv = process.env): boolean { return env.COS_WORK_USAGE_POLL === '1' }
+
 export interface UsageProbes {
   claude: () => Promise<UsageReading>
   codex: () => Promise<UsageReading>
@@ -194,13 +204,17 @@ export class UsageMonitor {
     this.inflight[p] = run
     return run
   }
-  /** Before a plan: re-read any provider whose reading is older than 2 minutes, waiting at most `waitMs`. */
-  async ensureFresh(waitMs = 16_000): Promise<void> {
+  /** Re-read any provider whose reading is older than `maxAgeMs` (default 2 minutes), waiting at most `waitMs`. */
+  async ensureFresh(maxAgeMs = USAGE_FRESH_MS, waitMs = 16_000): Promise<void> {
     const now = this.now()
-    const due = (['claude', 'codex'] as const).filter(p => !this.entries[p].observedAt || now - this.entries[p].observedAt! > USAGE_FRESH_MS)
+    const due = (['claude', 'codex'] as const).filter(p => !this.entries[p].observedAt || now - this.entries[p].observedAt! > maxAgeMs)
     if (!due.length) return
     await Promise.race([Promise.all(due.map(p => this.refresh(p))), new Promise(r => setTimeout(r, waitMs).unref?.())])
   }
+  /** Before a plan (POST /input), which may fork or start a new session: re-read what is older than 2 minutes. */
+  async forPlan(): Promise<UsageView[]> { await this.ensureFresh(USAGE_FRESH_MS); return this.views() }
+  /** On demand (GET /usage): answer from a reading younger than 10 minutes; `refresh` tightens that to 2. */
+  async onDemand(refresh = false): Promise<UsageView[]> { await this.ensureFresh(refresh ? USAGE_FRESH_MS : USAGE_CACHE_MS); return this.views() }
   /** A provider refused a plan-lane turn with its limit text. Never called for a key-lane turn. */
   noteLimit(p: UsageProvider, message: string, source = 'provider_limit'): void {
     const now = this.now()
@@ -223,8 +237,9 @@ export class UsageMonitor {
     if (e.source === 'none') e.source = 'passive'
     this.save()
   }
-  start(): void {
-    if (this.timer || this.options.pollEnabled === false || process.env.COS_WORK_USAGE_POLL === '0') return
+  /** The opt-in background poll. Off unless `pollEnabled` is true or the env says `COS_WORK_USAGE_POLL=1`. */
+  start(env: NodeJS.ProcessEnv = process.env): void {
+    if (this.timer || !(this.options.pollEnabled ?? usagePollOptedIn(env))) return
     const tick = () => { void this.refresh('claude'); void this.refresh('codex') }
     this.timer = setInterval(tick, USAGE_POLL_MS)
     this.timer.unref?.()
