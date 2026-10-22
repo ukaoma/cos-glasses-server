@@ -114,6 +114,7 @@
     "docs/work-reviews.md",
     "docs/work-intake.md",
     "docs/work-handoff-requests.md",
+    "docs/active-query-jobs.md",
     "work-task-runtime",
     "docs/work-task-runtime.md",
     "!server/scripts/build-work-task-runtime.py",

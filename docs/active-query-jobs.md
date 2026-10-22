@@ -120,4 +120,4 @@ The route reads the job store's in-memory identities and hydrated records (`Quer
 
 ## Tests
 
-`server/routes/query-jobs-active.test.ts` (route and title rules) and `server/routes/health-query-jobs.test.ts` (the capability). `server/scripts/active-query-jobs-mutation-gate.mjs` mutates the exclusion, count, truncation, title, origin, state, cap, order, route and capability guards one at a time against a green baseline (not packaged).
+`server/routes/query-jobs-active.test.ts` (route, states, origins, elapsed time and title rules) and `server/routes/health-query-jobs.test.ts` (the capability). `server/scripts/active-query-jobs-mutation-gate.mjs` (not packaged) mutates the exclusion, count, truncation, title and session-name title, every origin branch, every state, the elapsed-time clamp, cap, order, route and capability guards one at a time against a green baseline. It also covers the `calendarRead` flag 6.84.1 adds to `GET /api/welcome-context` (`server/routes/welcome-context-calendar.test.ts`), which the Activity home reads beside this list.

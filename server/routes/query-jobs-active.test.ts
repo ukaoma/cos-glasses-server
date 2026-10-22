@@ -16,9 +16,12 @@ import { isPublicApiRequest, requireApiToken } from '../lib/api-auth.js'
 import {
   ACTIVE_QUERY_JOB_TITLE_MAX,
   activeQueryJobOrigin,
+  activeQueryJobState,
   activeQueryJobTitle,
+  projectActiveQueryJob,
   truncateActiveTitle,
 } from '../lib/query-job-active.js'
+import type { QueryJobRequest, QueryJobSnapshot } from '../lib/query-job-types.js'
 import { createQueryJobsRouter } from './query-jobs.js'
 
 const TOKEN = 'active-route-test-token'
@@ -33,7 +36,7 @@ interface Rig {
 }
 
 /** A runner that starts (codex, gpt-5), streams a private chunk and tool line, and answers only when released. */
-async function rig(options: { maxHydratedJobs?: number; holdSession?: string } = {}): Promise<Rig> {
+async function rig(options: { maxHydratedJobs?: number; holdSession?: string; answerReady?: boolean } = {}): Promise<Rig> {
   const root = await mkdtemp(join(tmpdir(), 'cos-active-query-jobs-'))
   roots.push(root)
   const store = new QueryJobStore({ root, bootId: randomUUID(), ...(options.maxHydratedJobs ? { maxHydratedJobs: options.maxHydratedJobs } : {}) })
@@ -43,6 +46,7 @@ async function rig(options: { maxHydratedJobs?: number; holdSession?: string } =
       await context.callbacks.onStart({ provider: 'codex', resolvedModel: 'gpt-5', sessionId: context.request.sessionId })
       context.callbacks.onToolStatus('TOOL OUTPUT LINE reading /Users/miles/private')
       context.callbacks.onChunk('PARTIAL ANSWER TEXT')
+      if (options.answerReady) await context.callbacks.onAnswerReady('DRAFT ANSWER TEXT')
       await new Promise<void>(resolve => { releases.push(resolve) })
       await context.callbacks.onDone({ text: 'FINAL ANSWER TEXT', provider: 'codex' })
     },
@@ -96,8 +100,10 @@ function person(query: string, extra: Record<string, unknown> = {}): Record<stri
 
 afterAll(async () => {
   for (const release of releases.splice(0)) release()
+  // Released runs finish and journal their terminal records; let them land before removing the roots.
+  await new Promise(resolve => setTimeout(resolve, 150))
   await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve()))))
-  await Promise.all(roots.map(root => rm(root, { recursive: true, force: true })))
+  await Promise.all(roots.map(root => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })))
 })
 
 describe('GET /api/query-jobs/active', () => {
@@ -233,6 +239,54 @@ describe('active job states, origins and bounds', () => {
     // Oldest first.
     expect(body.items[0].title).toBe('Held question 0')
     expect(body.items.map((row: any) => row.acceptedAt)).toEqual([...body.items.map((row: any) => row.acceptedAt)].sort())
+  })
+
+  it('shows a job whose answer is written as finishing (status answer_ready), without the draft', async () => {
+    const ready = await rig({ answerReady: true })
+    const admission = await ready.coordinator.submit(person('Almost done question'))
+    await waitStatus(ready.store, admission.job.jobId, ['answer_ready'])
+    const { body, text } = await active(ready.base)
+    expect(body.items[0]).toMatchObject({ jobId: admission.job.jobId, state: 'finishing', status: 'answer_ready' })
+    expect(text).not.toContain('DRAFT ANSWER')
+  })
+
+  it('titles a COS Control Work session by its session name, with the same 80-character rule', async () => {
+    const named = await rig()
+    const admission = await named.coordinator.submit({
+      clientJobId: randomUUID(), generation: 1, model: 'opus',
+      query: 'You are continuing the Work item below.\nPRIVATE WORK BRIEF',
+      sessionName: 'Fix the pricing page hero',
+    })
+    await waitStatus(named.store, admission.job.jobId, ['running'])
+    const first = (await active(named.base)).body.items[0]
+    expect(first).toMatchObject({ origin: 'other', title: 'Fix the pricing page hero' })
+    expect(first).not.toHaveProperty('messageNo')
+    const long = await named.coordinator.submit({
+      clientJobId: randomUUID(), generation: 1, model: 'opus', query: 'Prompt line',
+      sessionName: `Rewrite ${'the comparison table copy '.repeat(4)}end`,
+    })
+    await waitStatus(named.store, long.job.jobId, ['running'])
+    const title: string = (await active(named.base)).body.items.find((row: any) => row.jobId === long.job.jobId).title
+    expect(Array.from(title).length).toBeLessThanOrEqual(ACTIVE_QUERY_JOB_TITLE_MAX)
+    expect(title.startsWith('Rewrite the comparison table copy')).toBe(true)
+    expect(title.endsWith('\u2026')).toBe(true)
+  })
+
+  it('maps every in-flight status to its state', () => {
+    expect(activeQueryJobState('accepted')).toBe('queued')
+    expect(activeQueryJobState('starting')).toBe('running')
+    expect(activeQueryJobState('running')).toBe('running')
+    expect(activeQueryJobState('answer_ready')).toBe('finishing')
+  })
+
+  it('never reports a negative or unreadable elapsedMs', () => {
+    const request = { clientJobId: randomUUID(), generation: 1, query: 'q', sessionId: 's', attachmentIds: [], attachmentRefs: [], activityToolMode: 'status' } as QueryJobRequest
+    const snapshot = (acceptedAt: string) => ({ jobId: randomUUID(), generation: 1, status: 'running', acceptedAt } as unknown as QueryJobSnapshot)
+    const now = Date.parse('2026-10-22T12:00:00.000Z')
+    expect(projectActiveQueryJob(request, snapshot('2026-10-22T11:59:30.000Z'), now).elapsedMs).toBe(30_000)
+    // A clock step backwards (acceptedAt after now) reads 0, not a negative wait.
+    expect(projectActiveQueryJob(request, snapshot('2026-10-22T12:00:05.000Z'), now).elapsedMs).toBe(0)
+    expect(projectActiveQueryJob(request, snapshot('not a date'), now).elapsedMs).toBe(0)
   })
 
   it('labels routine, task, person and other origins from the job record', () => {

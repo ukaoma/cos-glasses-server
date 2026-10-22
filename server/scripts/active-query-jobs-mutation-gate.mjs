@@ -8,7 +8,8 @@ import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
 const repo = process.argv[2] || process.cwd()
-const tests = ['server/routes/query-jobs-active.test.ts', 'server/routes/health-query-jobs.test.ts']
+const tests = ['server/routes/query-jobs-active.test.ts', 'server/routes/health-query-jobs.test.ts', 'server/routes/welcome-context-calendar.test.ts']
+const W = 'server/routes/welcome-context.ts'
 const A = 'server/lib/query-job-active.ts', S = 'server/lib/query-job-store.ts', R = 'server/routes/query-jobs.ts', H = 'server/routes/health.ts', C = 'server/lib/query-job-coordinator.ts'
 const mutants = [
   ['exclusion: drop the terminal-status skip', S, '      if (isTerminalQueryJobStatus(identity.status)) continue\n      const hydrated = this.jobs.get(identity.jobId)', '      const hydrated = this.jobs.get(identity.jobId)'],
@@ -32,6 +33,24 @@ const mutants = [
   ['route: not registered', R, "  router.get('/query-jobs/active', (_req, res) => {", "  router.get('/query-jobs/active-disabled', (_req, res) => {"],
   ['sort: no oldest-first order', C, '    items.sort(compareActiveQueryJobs)\n', '    items.reverse()\n'],
   ['capability: not advertised', H, '    activeQueryJobs: true,\n', ''],
+  // QA follow-up (6.84.1): the gaps the Activity home QA named.
+  ['origin: no routine branch', A, "  if (request.origin?.kind === 'routine') return { origin: 'routine', originId: request.origin.id }\n", ''],
+  ['origin: routine without originId', A, "return { origin: 'routine', originId: request.origin.id }", "return { origin: 'routine' }"],
+  ['origin: no task branch', A, "  if (request.origin?.kind === 'task') return { origin: 'task', originId: request.origin.id }\n", ''],
+  ['origin: task without originId', A, "return { origin: 'task', originId: request.origin.id }", "return { origin: 'task' }"],
+  ['title: session name ignored', A, '    title: named || activeQueryJobTitle(request.query),', '    title: activeQueryJobTitle(request.query),'],
+  ['title: session name not truncated', A, '  const named = request.sessionName ? truncateActiveTitle(flattenDisplayText(redactQueryJobText(request.sessionName))) : \'\'', '  const named = request.sessionName ?? \'\''],
+  ['state: answer_ready reads running', A, "  if (status === 'answer_ready') return 'finishing'\n", ''],
+  ['elapsed: no clamp at zero', A, 'Math.max(0, Math.round(nowMs - acceptedMs))', 'Math.round(nowMs - acceptedMs)'],
+  ['elapsed: no finite guard', A, 'Number.isFinite(acceptedMs) ? Math.max(0, Math.round(nowMs - acceptedMs)) : 0', 'Math.max(0, Math.round(nowMs - acceptedMs))'],
+  // welcome-context `calendarRead`.
+  ['calendarRead: no bridge check', W, '  if (!bridgeReady) return false\n', ''],
+  ['calendarRead: error answer counts as read', W, "  return !('error' in answer)", '  return true'],
+  ['calendarRead: non-object answer counts as read', W, "  if (!answer || typeof answer !== 'object' || Array.isArray(answer)) return false\n", ''],
+  ['calendarRead: a thrown read counts as read', W, '    return { event: cachedNextEvent, read: false }', '    return { event: cachedNextEvent, read: true }'],
+  ['calendarRead: cache hit always true', W, '    return { event: cachedNextEvent, read: cachedCalendarRead }', '    return { event: cachedNextEvent, read: true }'],
+  ['calendarRead: cache keeps no flag', W, '    cachedCalendarRead = read\n', ''],
+  ['calendarRead: not in the answer', W, '    calendarRead: calendar.read,\n', ''],
 ]
 
 function run() {

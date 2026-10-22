@@ -21,14 +21,25 @@ questions in its Running panel. Contract: `docs/active-query-jobs.md`.
 - **Cost.** One synchronous pass over the store's in-memory identities (`QueryJobStore.listInFlight`, the walk
   `/api/message-counter` already does): no hydration, no disk read, no await, no timer. A live job whose record the
   store evicted from memory is counted but not listed rather than read back from disk.
-- **Checks.** `server/routes/query-jobs-active.test.ts` (15 tests) and the health capability assertion.
-  `server/scripts/active-query-jobs-mutation-gate.mjs` (not packaged): 21 of 21 mutants killed against a green
-  baseline of 21 tests in 2 files. `tsc --noEmit` clean. Full suite once after the bump, with HOME, TMPDIR,
-  COS_DATA_DIR and COS_PROFILE_PATH in a scratch folder and COS_SCRIPTS_DIR unset: 572 files, 8697 tests, 8679
-  passed, 14 skipped, 4 failed. The 4 (occupancy-probes, parakeet-cli-trust, two in session-peer-inbox) fail the
-  same way on 6.84.0 (c88fd2e) under that environment and all 133 tests in those 3 files pass on this branch with a
-  short TMPDIR: the scratch TMPDIR path is too long for a unix socket path. `npm pack --dry-run`: 540 files (the new
-  `server/lib/query-job-active.ts`), no test, gate or doc for this route.
+- **`GET /api/welcome-context` says whether the calendar was read.** New field `calendarRead` (always present):
+  `true` only when this answer's calendar came from a successful bridge read, an empty calendar included; `false`
+  when the read threw, timed out (the bridge's `calendar_unavailable` deadline answer, or a killed call) or there is
+  no COS pipeline (COS_SCRIPTS_DIR unset, or set without its venv and bridge script, where the empty no-op answer
+  used to look like an empty calendar). A stale event served after a failed read keeps `nextEvent` as before and
+  reads `false`. Additive: `weather` and `nextEvent` are unchanged. Lets the Activity home tell "nothing else
+  today" from "could not read the calendar".
+- **Package.** `docs/active-query-jobs.md` ships with the other route contracts.
+- **Checks.** `server/routes/query-jobs-active.test.ts` (19 tests), `server/routes/welcome-context-calendar.test.ts`
+  (8 tests: read with an event, an empty calendar, a thrown read, both timeout shapes, no pipeline, the cache window
+  and a stale event after a failed read) and the health capability assertion. `server/scripts/active-query-jobs-mutation-gate.mjs`
+  (not packaged): 37 of 37 mutants killed against a green baseline of 33 tests in 3 files, including every origin
+  branch, the session-name title, `answer_ready` to `finishing`, the `elapsedMs` clamp and finite guard, and seven on
+  `calendarRead`. `tsc --noEmit` clean. Full suite once after these changes, with HOME, COS_DATA_DIR and
+  COS_PROFILE_PATH in a scratch folder, a short scratch TMPDIR and COS_SCRIPTS_DIR unset: 573 files, 8709 tests,
+  8695 passed, 14 skipped, 0 failed. (The first 6.84.1 run used a long TMPDIR and had 4 failures in
+  occupancy-probes, parakeet-cli-trust and session-peer-inbox; they fail the same way on 6.84.0 (c88fd2e) with that
+  TMPDIR, because the path is too long for a unix socket, and pass with a short one.) `npm pack --dry-run`: 541
+  files (the new `server/lib/query-job-active.ts` and `docs/active-query-jobs.md`), no test or gate.
 
 ## 6.84.0 - Dictation keeps "/pricing" and spoken paths; discard a Mac recording that captured no sound
 
