@@ -176,6 +176,28 @@ describe('whisper-server health reconciliation', () => {
     })
   })
 
+  it('logs counts for a server transcription, never the transcribed text (6.85.0)', async () => {
+    const spoken = 'Priya said the Lakeview renewal closes on Thursday at noon'
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ text: spoken }) }))
+    const lines: string[] = []
+    for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+      vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(arg => typeof arg === 'string' ? arg : String(arg)).join(' '))
+      })
+    }
+
+    const { transcribeLocal } = await import('./whisper-local.js')
+    await expect(transcribeLocal(Buffer.alloc(3200, 1))).resolves.toMatchObject({ text: spoken, backend: 'server' })
+
+    const done = lines.filter(line => line.includes('[whisper-local] Server transcribed in'))
+    expect(done).toHaveLength(1)
+    expect(done[0]).toMatch(/Server transcribed in \d+ms \(\d+ words, \d+ chars\)$/)
+    expect(done[0]).toContain(`${spoken.length} chars`)
+    expect(lines.filter(line => line.includes('Lakeview'))).toEqual([])
+  })
+
   it('omits decoder vocabulary from cosmetic preview requests', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true })

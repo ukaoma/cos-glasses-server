@@ -1500,7 +1500,8 @@ export async function transcribeLocal(
         console.log(`[whisper-local] Server recovered after ${serverConsecutiveFailures} consecutive failure(s)`)
         serverConsecutiveFailures = 0
       }
-      console.log(`[whisper-local] Server transcribed in ${elapsed}ms (${words?.length ?? 0} words): "${text.slice(0, 80)}${text.length > 80 ? '...' : ''}"`)
+      // 6.85.0: counts only. Every meeting chunk, dictation and draft passes here, so the text stays out of the log.
+      console.log(`[whisper-local] Server transcribed in ${elapsed}ms (${words?.length ?? 0} words, ${text.length} chars)`)
       return { text, backend: 'server', words }
     } catch (err: any) {
       if (previewLease?.signal.aborted) throw new MetalPreviewContendedError()

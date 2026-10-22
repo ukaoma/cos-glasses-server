@@ -1,11 +1,15 @@
 ## 6.85.0 - Your polish instructions, and COS Control can list the questions COS is answering right now
 
-Two lanes in one release. Your own polish instructions for AI dictation polish, layered after COS's built-in rules
+Two lanes and a privacy fix in one release. Your own polish instructions for AI dictation polish, layered after COS's built-in rules
 (`GET/PUT/DELETE /api/dictation/polish/instructions`, `GET /api/dictation/polish/rules`, capability
 `dictationCleanup.customInstructions`). And a read-only `GET /api/query-jobs/active` route plus an additive
 `calendarRead` field on `GET /api/welcome-context`, for the COS Control Activity home (health
 `features.activeQueryJobs`). The active query jobs lane was built and labelled as 6.84.1; 6.84.1 was never published,
 so 6.85.0 is the first package with either lane.
+
+- **Privacy fix.** The server log no longer carries meeting text. The per-chunk `[perf] TOTAL` line and the
+  whisper-server `Server transcribed in` line now log a character count where they used to log the first 50 and 80
+  characters of every transcript.
 
 - **Pairs with COS Control 0.5.335 (build 389)** for the polish instructions box. An older Control does not show the
   box, and nothing changes for it: with no instructions saved, the polish prompt is byte-identical to 6.84.0.
@@ -139,6 +143,23 @@ questions in its Running panel. Contract: `docs/active-query-jobs.md`.
   occupancy-probes, parakeet-cli-trust and session-peer-inbox; they fail the same way on 6.84.0 (c88fd2e) with that
   TMPDIR, because the path is too long for a unix socket, and pass with a short one.) `npm pack --dry-run`: 541
   files (the new `server/lib/query-job-active.ts` and `docs/active-query-jobs.md`), no test or gate.
+
+### Privacy: meeting text stays out of the server log
+
+- **`[perf] TOTAL request`** (`server/routes/transcribe-stream.ts`, once per meeting chunk) ended with the first 50
+  characters of the chunk's transcript. It now ends with `chars=<count>`; the timing, chunk number, bytes, rms, quiet
+  gate, speech seconds, front end and provider fields are unchanged.
+- **`[whisper-local] Server transcribed in`** (`server/lib/whisper-local.ts`, once per whisper-server transcription:
+  meeting chunks, dictation and prompt drafts) ended with the first 80 characters of the text. It now reads
+  `(<words> words, <count> chars)`. Same kind of leak, so it is fixed in the same change.
+- **Tests.** `server/routes/transcribe-stream-log-privacy.test.ts` posts a chunk whose transcript is a known
+  sentence, asserts exactly one `[perf] TOTAL` line with its timing fields and `chars=<length>`, and that no log line
+  written during the chunk contains any of its words. `whisper-local-health.test.ts` adds the same check for the
+  whisper-server line. Both were mutation-checked by hand: putting the text back fails each test.
+- **Left as they are (reported, not changed).** Lines that log text only on an exceptional path: the
+  `[hallucination] Dropped` and `Filtered` lines in `transcribe-stream.ts` (60 characters of a chunk the filter
+  dropped), `[prompt-draft] tail_drop` in `prompt-drafts.ts` (100 characters of a dropped trailing sentence), and
+  `[g2] Request` and `Dedup hit` in `openai-compat.ts` (the first 50 characters of an Ask query, not meeting text).
 
 ## 6.84.0 - Dictation keeps "/pricing" and spoken paths; discard a Mac recording that captured no sound
 
