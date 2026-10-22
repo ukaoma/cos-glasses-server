@@ -23,7 +23,12 @@ questions in its Running panel. Contract: `docs/active-query-jobs.md`.
   store evicted from memory is counted but not listed rather than read back from disk.
 - **Checks.** `server/routes/query-jobs-active.test.ts` (15 tests) and the health capability assertion.
   `server/scripts/active-query-jobs-mutation-gate.mjs` (not packaged): 21 of 21 mutants killed against a green
-  baseline of 21 tests in 2 files.
+  baseline of 21 tests in 2 files. `tsc --noEmit` clean. Full suite once after the bump, with HOME, TMPDIR,
+  COS_DATA_DIR and COS_PROFILE_PATH in a scratch folder and COS_SCRIPTS_DIR unset: 572 files, 8697 tests, 8679
+  passed, 14 skipped, 4 failed. The 4 (occupancy-probes, parakeet-cli-trust, two in session-peer-inbox) fail the
+  same way on 6.84.0 (c88fd2e) under that environment and all 133 tests in those 3 files pass on this branch with a
+  short TMPDIR: the scratch TMPDIR path is too long for a unix socket path. `npm pack --dry-run`: 540 files (the new
+  `server/lib/query-job-active.ts`), no test, gate or doc for this route.
 
 ## 6.84.0 - Dictation keeps "/pricing" and spoken paths; discard a Mac recording that captured no sound
 
