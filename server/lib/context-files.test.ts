@@ -232,7 +232,7 @@ describe('tier state distinguishes healthy-empty from absent', () => {
 })
 
 describe('notes attached from elsewhere by symlink', () => {
-  // Queen wired `operations/memory` at her real store on 2026-08-09. It worked, but
+  // Grace wired `operations/memory` at her real store on 2026-08-09. It worked, but
   // only by luck: findDir uses statSync (follows links) while the WALK used
   // Dirent.isDirectory(), which is FALSE for a symlink. Anything linked a level
   // deeper vanished with no error. Attaching an existing store is a primary use

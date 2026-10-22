@@ -483,13 +483,13 @@ describe('meeting content over HTTP', () => {
   // THE DEFECT, over HTTP. The de-attribution ledger has recorded `proseStale`
   // on every applied removal since the feature shipped, and this route never read
   // it: on 2026-08-07 Miles removed "Clem Ukaoma" from a call that was only him
-  // and Queen, all 8 label sites were rewritten, and the summary still opened
-  // "Miles, Queen, and Clem talk through..." with nothing anywhere in the payload.
+  // and Grace, all 8 label sites were rewritten, and the summary still opened
+  // "Miles, Grace, and Clem talk through..." with nothing anywhere in the payload.
   // Mutating the ledger read to `[]` passed every test before this one existed.
   it('reports a name the human removed, and says the prose is stale', async () => {
-    seedMeeting('meeting_content_rm', turns('MU', 'Queen Ukaoma', 6, 12), {
+    seedMeeting('meeting_content_rm', turns('MU', 'Grace Ukaoma', 6, 12), {
       scribe: ['# Generational Trauma And Parenting Fears (G2)', '',
-               '## Summary', 'Miles, Queen, and Clem talk through the fallout.', '',
+               '## Summary', 'Miles, Grace, and Clem talk through the fallout.', '',
                '## Transcript', '[Unidentified 1]: reclose that is how you close it'].join('\n'),
     })
     mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
@@ -508,7 +508,7 @@ describe('meeting content over HTTP', () => {
     }
     // The prose is preserved, not rewritten. Substituting into a written sentence
     // mangles grammar and can hit the wrong person.
-    expect(r.json.clipboardSummary).toContain('Miles, Queen, and Clem talk through')
+    expect(r.json.clipboardSummary).toContain('Miles, Grace, and Clem talk through')
   })
 
   it('says nothing about removals when the ledger is empty', async () => {

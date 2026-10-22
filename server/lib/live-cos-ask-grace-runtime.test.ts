@@ -1,4 +1,4 @@
-// 6.76.2: a person question on a Mac set up like Queen's. The REAL public memory runtime this package ships
+// 6.76.2: a person question on a Mac set up like Grace's. The REAL public memory runtime this package ships
 // (memory-runtime/cos-memory-runtime-0.1.0.tar.gz) is installed in a scratch dir with one accepted note, and the Live COS
 // Ask runs its default COS search against it. Before 6.76.2 searchMemories found nothing there: the runtime's
 // bot_memory.py has no `search` command (meaning: memory_parse_error) and the note is not a markdown file (keyword: none).
@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 
-const root = mkdtempSync(join(tmpdir(), 'ask-queen-'))
+const root = mkdtempSync(join(tmpdir(), 'ask-grace-'))
 const home = join(root, 'home'), notes = join(root, 'notes'), data = join(root, 'data')
 for (const d of [home, data]) mkdirSync(d, { recursive: true })
 const tarball = new URL('../../memory-runtime/cos-memory-runtime-0.1.0.tar.gz', import.meta.url).pathname
@@ -55,7 +55,7 @@ describe('Live COS Ask on the public memory runtime', () => {
     }
     const phases: Array<{ phase: string; ms: number; results?: number; forced?: true }> = []
     const ask = createLiveAsk({ run, now: () => 5000, phases: phases as never })
-    const result = await ask(normalizeAsk({ sessionId: 'meeting_queen_1', action: 'ask', question: 'Who is Delgado?', elapsedMs: 60_000,
+    const result = await ask(normalizeAsk({ sessionId: 'meeting_grace_1', action: 'ask', question: 'Who is Delgado?', elapsedMs: 60_000,
       turns: [{ id: 1, speaker: 'Person A', elapsedMs: 30_000, text: 'Delgado is coming by Friday about the deposit.' }] }))
     const evidence = prompts[0].evidence as Array<{ id: string; kind: string; text: string; memoryId?: string }>
     expect(evidence.find(s => s.id === 'H1')).toMatchObject({ kind: 'memory', memoryId: 'mem_delgado', text: expect.stringContaining('pool contractor') })

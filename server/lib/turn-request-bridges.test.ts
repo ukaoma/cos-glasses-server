@@ -80,8 +80,8 @@ vi.mock('./launch-dir.js', () => ({ resolveProviderWorkDir: () => '/tmp' }))
 vi.mock('./token-audit.js', () => ({ logTokenAudit: vi.fn() }))
 vi.mock('./model-image-input.js', () => ({ cleanupModelImageInputs: vi.fn() }))
 vi.mock('./context-builder.js', () => ({
-  buildSystemPrompt: vi.fn(async () => 'DISPLAY RULES. CURRENT CONTEXT: today, calendar, standing tasks for Niala and HubSpot.'),
-  buildLightweightSystemPrompt: vi.fn(() => 'DISPLAY RULES. CURRENT CONTEXT: today, calendar, standing tasks for Niala and HubSpot.'),
+  buildSystemPrompt: vi.fn(async () => 'DISPLAY RULES. CURRENT CONTEXT: today, calendar, standing tasks for Ilona and HubSpot.'),
+  buildLightweightSystemPrompt: vi.fn(() => 'DISPLAY RULES. CURRENT CONTEXT: today, calendar, standing tasks for Ilona and HubSpot.'),
   buildPrewarmSystemPrompt: vi.fn(() => 'prewarm system'),
   getCachedContextInstant: vi.fn(() => ''),
 }))

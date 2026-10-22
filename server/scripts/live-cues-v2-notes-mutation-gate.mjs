@@ -20,7 +20,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const CUES = ['server/lib/live-cues-v2.test.ts', 'server/lib/live-cues-v2-notes.test.ts', 'server/lib/live-cues-v2-notes-bridge.test.ts',
   'server/lib/live-cues-v2-settings.test.ts', 'server/routes/live-cues-v2-settings-route.test.ts', 'server/routes/live-cues-v2-route.test.ts']
 const HEALTH = [...CUES, 'server/routes/health.test.ts']
-const ASK = ['server/lib/live-cos-ask-memory-fallback.test.ts', 'server/lib/live-cos-ask-queen-runtime.test.ts', 'server/lib/meeting-ask-cos-search.test.ts',
+const ASK = ['server/lib/live-cos-ask-memory-fallback.test.ts', 'server/lib/live-cos-ask-grace-runtime.test.ts', 'server/lib/meeting-ask-cos-search.test.ts',
   'server/lib/live-cos-ask.test.ts', 'server/lib/meeting-ask-owner.test.ts']
 const BOTH = [...CUES, ...ASK]
 const ALL = [...HEALTH, ...ASK]

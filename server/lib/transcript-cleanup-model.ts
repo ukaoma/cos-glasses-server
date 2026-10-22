@@ -5,7 +5,7 @@
 // servers, no hooks, an empty scratch workspace, a pinned model id, low effort, a
 // bounded output budget. Never a direct SDK. The doubtful spans of a meeting go in ONE
 // batched prompt; the answer is strict JSON, one entry per span id:
-//   {"edits":[{"id":"S1","action":"keep"},{"id":"S2","action":"replace","text":"Queen Ukaoma"}]}
+//   {"edits":[{"id":"S1","action":"keep"},{"id":"S2","action":"replace","text":"Grace Ukaoma"}]}
 //
 // THE GUARDS. Every replacement is checked before anything is applied. It is rejected if
 //   unknown_span      its id was not sent

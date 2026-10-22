@@ -16,13 +16,13 @@ writeFileSync(join(scripts, 'cos_api_bridge.py'), [
   'import json, sys',
   "if sys.argv[1:2] == ['memory'] and '--limit' in sys.argv:",
   '    print(json.dumps([{"id": "mem_pool_1", "content": "The pool contractor Delgado quoted 18500 for the resurfacing and wants a deposit by Friday.", "created_at": "2026-10-10T12:00:00+00:00"},',
-  '                      {"id": "mem_swim", "content": "Amira has swim practice on Tuesdays.", "created_at": "2026-10-11T12:00:00+00:00"}]))',
+  '                      {"id": "mem_swim", "content": "Talia has swim practice on Tuesdays.", "created_at": "2026-10-11T12:00:00+00:00"}]))',
   'else:',
   '    print(json.dumps({"error": "capability_not_available_in_public_file_runtime", "retryable": False}))',
   '',
 ].join('\n'))
 mkdirSync(join(context, 'memory'), { recursive: true })
-writeFileSync(join(context, 'memory', 'pebble-finish.md'), '# Pebble finish\n\nQueen prefers the pebble finish for the pool. Delgado said it adds a week.\n')
+writeFileSync(join(context, 'memory', 'pebble-finish.md'), '# Pebble finish\n\nGrace prefers the pebble finish for the pool. Delgado said it adds a week.\n')
 const saved = { ...process.env }
 process.env.COS_SCRIPTS_DIR = scripts
 process.env.COS_CONTEXT_DIR = context

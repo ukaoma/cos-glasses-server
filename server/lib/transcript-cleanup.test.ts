@@ -14,7 +14,7 @@ import type { OwnerCard } from './meeting-ask-owner.js'
 const START = Date.UTC(2026, 9, 18, 2, 32, 0)
 const SESSION = 'meeting_cleanup_001'
 
-const OWNER: OwnerCard = { name: 'Miles Ukaoma', speakerLabel: 'MU', homeArea: null, notes: 'Married to Queen Ukaoma.' }
+const OWNER: OwnerCard = { name: 'Miles Ukaoma', speakerLabel: 'MU', homeArea: null, notes: 'Married to Grace Ukaoma.' }
 
 let roots: string[] = []
 beforeEach(() => { rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true }) })
@@ -55,7 +55,7 @@ const section = (path: string) => readFileSync(path, 'utf8').split('## Transcrip
 /** The reported Ukoma, Yukoma, eucoma and U coma meeting (Miles, 2026-10-17). */
 function ukaomaMeeting() {
   return meeting([
-    ['MU', [...w('I talked to Queen', 1), { word: 'Ukoma', p: 0.62, t: 2.6 }, ...w('about the trip.', 3)]],
+    ['MU', [...w('I talked to Grace', 1), { word: 'Ukoma', p: 0.62, t: 2.6 }, ...w('about the trip.', 3)]],
     ['Ext', [{ word: 'Yukoma', p: 0.41, t: 20 }, ...w('said the flight leaves at 6 and', 20.5), { word: 'eucoma', p: 0.38, t: 24 }, ...w('will not be late.', 24.5)]],
     ['MU', [...w('Then', 40), { word: 'U', p: 0.33, t: 40.5 }, { word: 'coma', p: 0.44, t: 40.8 }, ...w('called back.', 41.2)]],
   ])
@@ -97,7 +97,7 @@ function harness(opts: {
       if (opts.fail) throw opts.fail
       return { text: opts.reply ? await opts.reply(prompt) : '{"edits":[]}', inputTokens: 1200, outputTokens: 80, model }
     },
-    speakers: () => opts.speakers ?? ['Graham Smith', 'Niala Jones'],
+    speakers: () => opts.speakers ?? ['Graham Smith', 'Ilona Jones'],
     vocabulary: () => opts.vocabulary ?? [],
     corrections: () => ({}),
     owner: () => (opts.owner === undefined ? OWNER : opts.owner),
@@ -119,11 +119,11 @@ function replyUkaoma(prompt: string): string {
 describe('transcript cleanup end to end (fake Claude provider)', () => {
   it('resolves Ukoma, Yukoma, eucoma and U coma to Ukaoma with the owner card and a screen line', async () => {
     const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma, screen: [{ at: START + 21_000, text: 'Queen Ukaoma | Zoom', app: 'Zoom' }] })
+    const h = harness({ reply: replyUkaoma, screen: [{ at: START + 21_000, text: 'Grace Ukaoma | Zoom', app: 'Zoom' }] })
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(out.status).toBe('done')
     expect(section(m.meetingPath)).toBe([
-      '[MU]: I talked to Queen Ukaoma about the trip.',
+      '[MU]: I talked to Grace Ukaoma about the trip.',
       '[Ext]: Ukaoma said the flight leaves at 6 and Ukaoma will not be late.',
       '[MU]: Then Ukaoma called back.',
     ].join('\n'))
@@ -135,7 +135,7 @@ describe('transcript cleanup end to end (fake Claude provider)', () => {
     expect(h.calls[0].prompt).toMatch(/\[\[U coma\]\]/)
     // Textual and screen awareness reached the model.
     expect(h.calls[0].prompt).toContain('this COS belongs to Miles Ukaoma')
-    expect(h.calls[0].prompt).toMatch(/screen at 0:21 Zoom: "Queen Ukaoma \| Zoom"/)
+    expect(h.calls[0].prompt).toMatch(/screen at 0:21 Zoom: "Grace Ukaoma \| Zoom"/)
     expect(h.calls[0].model).toBe('claude-haiku-5-5')
     const ledger = ledgerView(SESSION)
     expect(ledger.edits.map(e => [e.source, e.original, e.replacement])).toEqual([
@@ -149,14 +149,14 @@ describe('transcript cleanup end to end (fake Claude provider)', () => {
 
   it('the trace carries counts, tokens and milliseconds, never transcript or screen text', async () => {
     const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma, screen: [{ at: START + 21_000, text: 'Queen Ukaoma | Zoom' }] })
+    const h = harness({ reply: replyUkaoma, screen: [{ at: START + 21_000, text: 'Grace Ukaoma | Zoom' }] })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(h.traces).toHaveLength(1)
     const row = h.traces[0]
     expect(row).toMatchObject({ status: 'done', spansSent: 3, accepted: 3, fixes: 1, inputTokens: 1200, outputTokens: 80, screenLines: 1 })
     expect(row.spansFound).toBeGreaterThanOrEqual(3)
     const text = JSON.stringify(row)
-    for (const word of ['Ukoma', 'Yukoma', 'eucoma', 'coma', 'Queen', 'flight', 'Zoom', 'Ukaoma']) expect(text, word).not.toContain(word)
+    for (const word of ['Ukoma', 'Yukoma', 'eucoma', 'coma', 'Grace', 'flight', 'Zoom', 'Ukaoma']) expect(text, word).not.toContain(word)
   })
 
   it('a second run on the cleaned meeting is a no-op (idempotent finalization retry)', async () => {
@@ -190,8 +190,8 @@ describe('local notes for the names spans are near', () => {
     const asked: string[] = []
     const search = createNotesSearch({
       memories: async q => { asked.push(`memories:${q}`); return q === 'Ukaoma' ? [] : [{ id: 'mem_1', title: 'Graham note', snippet: 'Graham Smith runs demand' }] },
-      meetings: async q => { asked.push(`meetings:${q}`); return [{ recordId: 'r1', sessionId: SESSION, title: 'this meeting' }, { recordId: 'r2', sessionId: 'other', title: 'Family sync', snippet: 'Queen Ukaoma flight' }] },
-      bridge: async () => { asked.push('bridge'); return [{ id: 'mem_9', content: 'Queen Ukaoma is Miles\'s wife', summary: 'Queen Ukaoma' }, { id: 'mem_8', content: 'unrelated' }] },
+      meetings: async q => { asked.push(`meetings:${q}`); return [{ recordId: 'r1', sessionId: SESSION, title: 'this meeting' }, { recordId: 'r2', sessionId: 'other', title: 'Family sync', snippet: 'Grace Ukaoma flight' }] },
+      bridge: async () => { asked.push('bridge'); return [{ id: 'mem_9', content: 'Grace Ukaoma is Miles\'s wife', summary: 'Grace Ukaoma' }, { id: 'mem_8', content: 'unrelated' }] },
       score: (rows, q) => rows.filter(r => r.content.includes(q)).map(row => ({ row })),
     })
     const notes = await search(['Graham', 'Ukaoma'], SESSION, new AbortController().signal)
@@ -206,10 +206,10 @@ describe('local notes for the names spans are near', () => {
     const m = ukaomaMeeting()
     const h = harness({ reply: replyUkaoma })
     let queries: string[] = []
-    h.deps.searchNotes = async q => { queries = q; return [{ id: '', ref: 'memory:mem_9', kind: 'memory', title: 'Queen Ukaoma', snippet: 'x'.repeat(2000), query: q[0] }] }
+    h.deps.searchNotes = async q => { queries = q; return [{ id: '', ref: 'memory:mem_9', kind: 'memory', title: 'Grace Ukaoma', snippet: 'x'.repeat(2000), query: q[0] }] }
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(queries).toEqual(['Ukaoma'])
-    expect(h.calls[0].prompt).toMatch(/Note N1 \(memory\) "Queen Ukaoma": x{200,280}/)
+    expect(h.calls[0].prompt).toMatch(/Note N1 \(memory\) "Grace Ukaoma": x{200,280}/)
     expect(h.calls[0].prompt).not.toMatch(/x{300}/)
     expect(h.traces[0].notes).toBe(1)
   })
@@ -256,7 +256,7 @@ describe('stop conditions', () => {
     const out = await runTranscriptCleanup({ sessionId: 'meeting_cleanup_002', meetingPath: second.meetingPath, sidecarPath: second.sidecarPath }, h.deps)
     expect(out).toMatchObject({ status: 'done', modelSkipped: 'daily_calls', applied: 1 })
     expect(h.calls).toHaveLength(1)
-    expect(section(second.meetingPath)).toContain('Queen Ukaoma about')
+    expect(section(second.meetingPath)).toContain('Grace Ukaoma about')
     expect(section(second.meetingPath)).toContain('Yukoma said')
     expect(JSON.parse(readFileSync(second.sidecarPath, 'utf8')).transcriptCleanup.modelSkipped).toBe('daily_calls')
   })
@@ -278,7 +278,7 @@ describe('stop conditions', () => {
       const out = await runTranscriptCleanup({ sessionId: `meeting_cleanup_10${i}`, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
       expect(out.modelSkipped).toBe('model_failed')
       // A failed call never costs the free fixes.
-      expect(section(m.meetingPath)).toContain('Queen Ukaoma about')
+      expect(section(m.meetingPath)).toContain('Grace Ukaoma about')
     }
     expect(h.calls).toHaveLength(3)
     const blocked = ukaomaMeeting()
@@ -417,7 +417,7 @@ describe('ledger undo', () => {
     const h = harness({ reply: replyUkaoma })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     const edit = ledgerView(SESSION).edits.find(e => e.original === 'U coma')!
-    writeFileSync(m.meetingPath, readFileSync(m.meetingPath, 'utf8').replace('Then Ukaoma called back.', 'Then Queen called back.'))
+    writeFileSync(m.meetingPath, readFileSync(m.meetingPath, 'utf8').replace('Then Ukaoma called back.', 'Then Grace called back.'))
     expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, editId: edit.id })).toEqual({ ok: false, status: 409, error: 'stale' })
     expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, editId: 'te_0000000000000000' })).toMatchObject({ status: 404 })
   })
@@ -436,10 +436,10 @@ describe('ledger undo', () => {
 
 describe('per-meeting vocabulary and dictionary suggestions', () => {
   it('a screen line naming Ukaoma corrects Ukoma to Ukaoma with no dictionary entry and no model call', async () => {
-    const m = meeting([['MU', [...w('I talked to Queen', 1), { word: 'Ukoma', p: 0.9, t: 2.6 }, ...w('about the trip.', 3)]]])
-    const h = harness({ owner: null, speakers: [], vocabulary: [], screen: [{ at: START + 2_000, text: 'Queen Ukaoma joined the meeting', app: 'Zoom' }] })
+    const m = meeting([['MU', [...w('I talked to Grace', 1), { word: 'Ukoma', p: 0.9, t: 2.6 }, ...w('about the trip.', 3)]]])
+    const h = harness({ owner: null, speakers: [], vocabulary: [], screen: [{ at: START + 2_000, text: 'Grace Ukaoma joined the meeting', app: 'Zoom' }] })
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(section(m.meetingPath)).toBe('[MU]: I talked to Queen Ukaoma about the trip.')
+    expect(section(m.meetingPath)).toBe('[MU]: I talked to Grace Ukaoma about the trip.')
     expect(out).toMatchObject({ status: 'done', modelSkipped: 'no_spans', applied: 1 })
     expect(h.calls).toHaveLength(0)
     expect(ledgerView(SESSION).edits[0]).toMatchObject({ source: 'fuzzy', original: 'Ukoma', replacement: 'Ukaoma', reasons: ['meeting_term'] })
@@ -451,19 +451,19 @@ describe('per-meeting vocabulary and dictionary suggestions', () => {
   })
 
   it('a model edit writing a phrase from the screen suggests the phrase once, not its words again', async () => {
-    const m = meeting([['MU', [...w('I met', 1), { word: 'Quin', p: 0.3, t: 2 }, { word: 'Yukoma', p: 0.4, t: 2.4 }, ...w('today.', 3)]]])
-    const h = harness({ owner: null, speakers: [], vocabulary: [], screen: [{ at: START + 2_000, text: 'Queen Ukaoma joined' }],
-      reply: () => '{"edits":[{"id":"S1","action":"replace","text":"Queen Ukaoma"}]}' })
+    const m = meeting([['MU', [...w('I met', 1), { word: 'Grays', p: 0.3, t: 2 }, { word: 'Yukoma', p: 0.4, t: 2.4 }, ...w('today.', 3)]]])
+    const h = harness({ owner: null, speakers: [], vocabulary: [], screen: [{ at: START + 2_000, text: 'Grace Ukaoma joined' }],
+      reply: () => '{"edits":[{"id":"S1","action":"replace","text":"Grace Ukaoma"}]}' })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(section(m.meetingPath)).toBe('[MU]: I met Queen Ukaoma today.')
-    expect(h.suggestions.list().map(x => [x.written, x.heard, x.evidence.map(e => e.source)])).toEqual([['Queen Ukaoma', ['Quin Yukoma'], ['screen']]])
+    expect(section(m.meetingPath)).toBe('[MU]: I met Grace Ukaoma today.')
+    expect(h.suggestions.list().map(x => [x.written, x.heard, x.evidence.map(e => e.source)])).toEqual([['Grace Ukaoma', ['Grays Yukoma'], ['screen']]])
   })
 
   it('without the screen line the same meeting is left alone', async () => {
-    const m = meeting([['MU', [...w('I talked to Queen', 1), { word: 'Ukoma', p: 0.9, t: 2.6 }, ...w('about the trip.', 3)]]])
+    const m = meeting([['MU', [...w('I talked to Grace', 1), { word: 'Ukoma', p: 0.9, t: 2.6 }, ...w('about the trip.', 3)]]])
     const h = harness({ owner: null, speakers: [], vocabulary: [] })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(section(m.meetingPath)).toBe('[MU]: I talked to Queen Ukoma about the trip.')
+    expect(section(m.meetingPath)).toBe('[MU]: I talked to Grace Ukoma about the trip.')
     expect(h.suggestions.list()).toHaveLength(0)
   })
 
@@ -521,8 +521,8 @@ describe('screen context store', () => {
   it('bounds, dedupes, holds secrets and refuses bad clocks', () => {
     const now = START + 600_000
     const r = appendScreenContext(SESSION, { lines: [
-      { at: START + 1_000, text: 'Queen Ukaoma joined' },
-      { at: START + 5_000, text: 'Queen  Ukaoma joined' },
+      { at: START + 1_000, text: 'Grace Ukaoma joined' },
+      { at: START + 5_000, text: 'Grace  Ukaoma joined' },
       { at: new Date(START + 60_000).toISOString(), text: 'x'.repeat(500), app: 'Keynote<script>' },
       { at: START + 2_000, text: 'API_KEY=sk-live-abcdefghijklmnop1234' },
       { at: START + 2_000, text: 'password: Hunter2!Hunter2!' },

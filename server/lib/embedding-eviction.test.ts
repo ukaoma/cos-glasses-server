@@ -5,9 +5,9 @@
 // shapes are real:
 //
 //   MU            20/20 — fireflies 10, g2-training 9, unknown 1  (no human sample)
-//   Queen Ukaoma  20/20 — manual at index 0, 17 weaker samples available
+//   Grace Ukaoma  20/20 — manual at index 0, 17 weaker samples available
 //
-// Queen's profile is the concrete case this policy exists for: under plain FIFO
+// Grace's profile is the concrete case this policy exists for: under plain FIFO
 // the next correction deletes the only deliberately-enrolled sample of her voice
 // while seventeen weaker samples sit untouched. Four profiles at cap share that
 // shape.
@@ -27,8 +27,8 @@ const MU = [
   ...Array(9).fill('g2-training'),
   'unknown',
 ]
-/** Queen as stored today: the deliberate enrollment is the OLDEST sample. */
-const QUEEN = [
+/** Grace as stored today: the deliberate enrollment is the OLDEST sample. */
+const GRACE = [
   'manual',
   ...Array(14).fill('fireflies'),
   ...Array(5).fill('g2-training'),
@@ -124,11 +124,11 @@ describe('eviction order', () => {
 })
 
 describe('the live profiles this policy was written for', () => {
-  it("protects Queen's only deliberate enrollment, which FIFO would delete first", () => {
-    const c = chooseEviction(QUEEN, 'correction:meeting_new', 40)
+  it("protects Grace's only deliberate enrollment, which FIFO would delete first", () => {
+    const c = chooseEviction(GRACE, 'correction:meeting_new', 40)
     expect(c).not.toBeNull()
     expect(c!.index).not.toBe(0)              // index 0 is the `manual` sample
-    expect(QUEEN[c!.index]).toBe('fireflies') // a weaker sample goes instead
+    expect(GRACE[c!.index]).toBe('fireflies') // a weaker sample goes instead
     expect(c!.tier).toBe('metadata')
   })
 

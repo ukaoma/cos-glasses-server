@@ -236,9 +236,9 @@ describe('held naming execution',()=>{
   })
 
   it('a named label in either copy prevents held relabel on every copy',async()=>{
-    twoCopies();const op=JSON.parse(readFileSync(opSide,'utf8'));op.chunks[1].speaker='Queen';op.chunkEntries[3].chunk.speaker='Queen';writeFileSync(opSide,JSON.stringify(op))
+    twoCopies();const op=JSON.parse(readFileSync(opSide,'utf8'));op.chunks[1].speaker='Grace';op.chunkEntries[3].chunk.speaker='Grace';writeFileSync(opSide,JSON.stringify(op))
     const p=api.previewHeldNaming('Brigitta Pólya',refs);expect(p.meetings[0].status).toBe('blocked');expect(p.meetings[0].error).toContain('disagree on speaker labels')
-    await expect(api.applyHeldNaming('Brigitta Pólya',refs,p.previewHash,{confirm:true})).rejects.toMatchObject({reason:'meetings_changed'});expect(enrollments).toBe(0);expect(JSON.parse(readFileSync(opSide,'utf8')).chunks[1].speaker).toBe('Queen')
+    await expect(api.applyHeldNaming('Brigitta Pólya',refs,p.previewHash,{confirm:true})).rejects.toMatchObject({reason:'meetings_changed'});expect(enrollments).toBe(0);expect(JSON.parse(readFileSync(opSide,'utf8')).chunks[1].speaker).toBe('Grace')
   })
 
   it('disjoint undo survives later attendee insertions and restores only its own prefixes',async()=>{

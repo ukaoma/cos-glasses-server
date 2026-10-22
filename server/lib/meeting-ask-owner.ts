@@ -83,7 +83,7 @@ export interface OwnerMatch { heard: string; owner: string }
 /**
  * Whether the question names the owner, allowing ASR spellings. Full name: first and last words, in
  * order and adjacent. Surname alone: only after a lead-in word ("who is Ukoma"), never after another
- * first name ("Isaiah Ukaoma" is someone else). First name alone: only when it is the whole subject of
+ * first name ("Rafael Ukaoma" is someone else). First name alone: only when it is the whole subject of
  * a who question, compared exactly.
  */
 export function matchOwnerName(question: string, ownerName: string | null | undefined): OwnerMatch | null {

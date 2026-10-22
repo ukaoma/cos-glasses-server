@@ -25,7 +25,7 @@ afterAll(() => rmSync(fixture.scripts, { recursive: true, force: true }))
 beforeEach(() => { fixture.memory = '[]'; fixture.meetings = '[]' })
 const signal = () => new AbortController().signal
 const NOTE = { id: 'mem_delgado', content: 'Delgado is the pool contractor. He quoted 18500 for the resurfacing and wants a deposit by Friday.', created_at: '2026-10-10T12:00:00+00:00' }
-const OTHER = { id: 'mem_swim', content: 'Amira has swim practice on Tuesdays.', created_at: '2026-10-11T12:00:00+00:00' }
+const OTHER = { id: 'mem_swim', content: 'Talia has swim practice on Tuesdays.', created_at: '2026-10-11T12:00:00+00:00' }
 const LISTED = 'COS also searched the notes in its memory list by keyword.'
 
 describe('Ask COS search: the memory bridge fallback', () => {

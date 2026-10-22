@@ -6,7 +6,7 @@ import { buildCleanupPrompt, parseCleanupReply, validateCleanupEdits } from './t
 import { applyPlannedEdits } from './transcript-cleanup-ledger.js'
 
 function pack(over: Partial<Parameters<typeof buildContextPack>[0]> = {}): ContextPack {
-  return buildContextPack({ title: 'Sync', date: '2026-10-17', attendees: [], speakers: ['Queen Ukaoma', 'Graham Smith'], owner: null, vocabulary: ['Jewel360', 'Bottle POS'], corrections: {}, files: [], screen: [], ...over })
+  return buildContextPack({ title: 'Sync', date: '2026-10-17', attendees: [], speakers: ['Grace Ukaoma', 'Graham Smith'], owner: null, vocabulary: ['Jewel360', 'Bottle POS'], corrections: {}, files: [], screen: [], ...over })
 }
 
 function setup(section: string, probability?: (t: Token) => number | undefined, p: ContextPack = pack()) {
@@ -48,7 +48,7 @@ describe('span selection (no model)', () => {
   })
 
   it('an out-of-vocabulary capital beside a known name is doubtful; at a sentence start it is not', () => {
-    const s = setup('[MU]: I saw Queen Zebulona there. Zebulona left, and Graham Fennimore stayed.')
+    const s = setup('[MU]: I saw Grace Zebulona there. Zebulona left, and Graham Fennimore stayed.')
     expect(texts(s)).toEqual(['Zebulona', 'Fennimore'])
     expect(s.sel.spans[0].reasons).toEqual(['oov_capitalized'])
   })
@@ -103,22 +103,22 @@ describe('span selection (no model)', () => {
   it('two repetitions are speech, not a loop; a capital that opens a sentence is not out of vocabulary', () => {
     const lines = parseTranscriptLines('[MU]: we went we went home')
     expect(repeatRuns(tokenize(lines))).toEqual([])
-    expect(texts(setup('[MU]: I saw them there. Ozmanda and Queen left.'))).toEqual([])
+    expect(texts(setup('[MU]: I saw them there. Ozmanda and Grace left.'))).toEqual([])
   })
 
   it('a known exact spelling is never doubtful', () => {
-    expect(texts(setup('[MU]: Queen Ukaoma uses Jewel360 and Bottle POS.'))).toEqual([])
+    expect(texts(setup('[MU]: Grace Ukaoma uses Jewel360 and Bottle POS.'))).toEqual([])
   })
 
   it('aligns batch words to tokens greedily, and an unmatched token stays unscored', () => {
-    const lines = parseTranscriptLines('[MU]: Hello, Queen Ukaoma.\n[Ext]: Hi there')
+    const lines = parseTranscriptLines('[MU]: Hello, Grace Ukaoma.\n[Ext]: Hi there')
     const tokens = tokenize(lines)
     const words = wordInfoFromSidecar({ startTime: 1_000_000, batchSegments: [{ startElapsed: 2_000, stt: { engine: 'parakeet-ultra' }, words: [
-      { word: 'Hello,', start: 0, probability: 0.9 }, { word: 'Queen', start: 0.5, probability: 0.8 }, { word: 'Ukaoma', start: 1, probability: 0.4 }, { word: 'Hi', start: 3, probability: 0.7 },
+      { word: 'Hello,', start: 0, probability: 0.9 }, { word: 'Grace', start: 0.5, probability: 0.8 }, { word: 'Ukaoma', start: 1, probability: 0.4 }, { word: 'Hi', start: 3, probability: 0.7 },
     ] }] })
     expect(alignWordInfo(tokens, words)).toBe(4)
     expect(tokens.map(t => [t.core, t.probability, t.atMs, t.engine])).toEqual([
-      ['Hello', 0.9, 1_002_000, 'parakeet-ultra'], ['Queen', 0.8, 1_002_500, 'parakeet-ultra'], ['Ukaoma', 0.4, 1_003_000, 'parakeet-ultra'],
+      ['Hello', 0.9, 1_002_000, 'parakeet-ultra'], ['Grace', 0.8, 1_002_500, 'parakeet-ultra'], ['Ukaoma', 0.4, 1_003_000, 'parakeet-ultra'],
       ['Hi', 0.7, 1_005_000, 'parakeet-ultra'], ['there', undefined, undefined, undefined],
     ])
   })
@@ -175,7 +175,7 @@ describe('deterministic fixes', () => {
 
 describe('context terms', () => {
   it('extracts names and runs of capitals, not common words, acronyms or sentence filler', () => {
-    expect(extractTerms('Queen Ukaoma joined. The Meeting has POS and Jewel360 | Settings')).toEqual(['Queen Ukaoma', 'Ukaoma', 'Jewel360', 'Settings'])
+    expect(extractTerms('Grace Ukaoma joined. The Meeting has POS and Jewel360 | Settings')).toEqual(['Grace Ukaoma', 'Ukaoma', 'Jewel360', 'Settings'])
   })
 
   it('notes are bounded when added, and again in the prompt', () => {
@@ -189,7 +189,7 @@ describe('context terms', () => {
 })
 
 describe('edit validation', () => {
-  const p = pack({ screen: [{ at: 1, text: 'Queen Ukaoma' }] })
+  const p = pack({ screen: [{ at: 1, text: 'Grace Ukaoma' }] })
   const lines = parseTranscriptLines('[MU]: I met Yukoma at 6 and she could not stay, thank you thank you thank you thank you, we ate at the resturant')
   const tokens = tokenize(lines)
   for (const t of tokens) t.probability = ['yukoma', 'resturant'].includes(t.key) ? 0.2 : 0.99
@@ -240,7 +240,7 @@ describe('edit validation', () => {
   })
 
   it('rejects edits that change more than the span', () => {
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Queen Ukaoma Jones Smith' }]).rejected).toEqual({ longer_than_span: 1 })
+    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Grace Ukaoma Jones Smith' }]).rejected).toEqual({ longer_than_span: 1 })
     expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Ukaoma at' }]).rejected).toEqual({ outside_span: 1 })
     expect(check([{ id: byText('resturant'), action: 'replace', text: 'the restaurant' }]).rejected).toEqual({ outside_span: 1 })
     expect(check([{ id: byText('thank you thank you thank you thank you'), action: 'replace', text: 'thanks so much' }]).rejected).toEqual({ longer_than_span: 1 })
@@ -249,7 +249,7 @@ describe('edit validation', () => {
   })
 
   it('a phrase the context knows is accepted even where its words do not resemble the span', () => {
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Queen Ukaoma' }]).accepted.map(a => a.text)).toEqual(['Queen Ukaoma'])
+    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Grace Ukaoma' }]).accepted.map(a => a.text)).toEqual(['Grace Ukaoma'])
   })
 
   it('rejects added facts: new words, numbers and negations', () => {
@@ -267,15 +267,15 @@ describe('edit validation', () => {
   })
 
   it('the prompt carries the owner, the dictionary, screen lines by time and the spans, within its cap', () => {
-    const withOwner = buildContextPack({ title: 'Sync', date: '2026-10-17', attendees: ['MU'], speakers: ['Queen Ukaoma'], owner: { name: 'Miles Ukaoma', speakerLabel: 'MU', homeArea: null, notes: null },
-      vocabulary: ['Jewel360'], corrections: { Ukoma: 'Ukaoma' }, files: [{ name: 'agenda.pdf', text: 'Agenda: Queen Ukaoma travel' }], screen: [{ at: 10_000, text: 'Queen Ukaoma | Zoom', app: 'Zoom' }, { at: 900_000, text: 'far away' }] })
+    const withOwner = buildContextPack({ title: 'Sync', date: '2026-10-17', attendees: ['MU'], speakers: ['Grace Ukaoma'], owner: { name: 'Miles Ukaoma', speakerLabel: 'MU', homeArea: null, notes: null },
+      vocabulary: ['Jewel360'], corrections: { Ukoma: 'Ukaoma' }, files: [{ name: 'agenda.pdf', text: 'Agenda: Grace Ukaoma travel' }], screen: [{ at: 10_000, text: 'Grace Ukaoma | Zoom', app: 'Zoom' }, { at: 900_000, text: 'far away' }] })
     const spans = sel.spans.map(s => ({ ...s, atMs: 12_000 }))
     const built = buildCleanupPrompt(withOwner, spans, 0)
     expect(built.sent).toEqual(ids)
     expect(built.prompt).toContain('this COS belongs to Miles Ukaoma, who appears in transcripts as [MU]')
     expect(built.prompt).toContain('Known mishearings: Ukoma = Ukaoma')
-    expect(built.prompt).toContain('File "agenda.pdf": Agenda: Queen Ukaoma travel')
-    expect(built.prompt).toContain('screen at 0:10 Zoom: "Queen Ukaoma | Zoom"')
+    expect(built.prompt).toContain('File "agenda.pdf": Agenda: Grace Ukaoma travel')
+    expect(built.prompt).toContain('screen at 0:10 Zoom: "Grace Ukaoma | Zoom"')
     expect(built.prompt).not.toContain('far away')
     expect(built.prompt).toContain('S1 at 0:12 (low_confidence, near_name; near Ukaoma)\n  I met [[Yukoma]] at 6 and she could not stay,')
     const huge = buildCleanupPrompt(withOwner, Array.from({ length: 400 }, (_, i) => ({ ...spans[0], id: `S${i + 1}`, before: 'x '.repeat(30) })), 0)

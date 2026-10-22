@@ -6,7 +6,7 @@
 // cannot say "yes, that really is her" because `relabelSidecarJson` rejects
 // `from === to`. So the panel demoted the row, told the reviewer to name it,
 // and offered a candidate list that deliberately excluded the very name they
-// wanted. Miles hit exactly that on 2026-08-07 with Queen Ukaoma at 0.56.
+// wanted. Miles hit exactly that on 2026-08-07 with Grace Ukaoma at 0.56.
 //
 // A confirmation rewrites NOTHING. It records that a human vouched, and the
 // review stops presenting the label as unearned.
@@ -44,8 +44,8 @@ describe('confirming a demoted label', () => {
   it('demotes a weak label when nothing is confirmed', async () => {
     const { reviewMeetingSpeakers } = await import('./meeting-speaker-review.js')
 
-    const review = reviewMeetingSpeakers(weakChunks('Queen Ukaoma'), { owner: 'MU' })
-    const row = review.voices.find(v => v.label === 'Queen Ukaoma')
+    const review = reviewMeetingSpeakers(weakChunks('Grace Ukaoma'), { owner: 'MU' })
+    const row = review.voices.find(v => v.label === 'Grace Ukaoma')
 
     expect(row).toBeDefined()
     expect(row!.nameAsserted).toBe(false)
@@ -58,11 +58,11 @@ describe('confirming a demoted label', () => {
   it('asserts the name once a human confirms it', async () => {
     const { reviewMeetingSpeakers } = await import('./meeting-speaker-review.js')
 
-    const review = reviewMeetingSpeakers(weakChunks('Queen Ukaoma'), {
+    const review = reviewMeetingSpeakers(weakChunks('Grace Ukaoma'), {
       owner: 'MU',
-      confirmed: new Set(['Queen Ukaoma']),
+      confirmed: new Set(['Grace Ukaoma']),
     })
-    const row = review.voices.find(v => v.label === 'Queen Ukaoma')!
+    const row = review.voices.find(v => v.label === 'Grace Ukaoma')!
 
     expect(row.nameAsserted).toBe(true)
     expect(row.confirmedByHuman).toBe(true)
@@ -75,13 +75,13 @@ describe('confirming a demoted label', () => {
   it('confirms ONLY the named label, not every weak row', async () => {
     const { reviewMeetingSpeakers } = await import('./meeting-speaker-review.js')
     const chunks = [
-      ...weakChunks('Queen Ukaoma'),
+      ...weakChunks('Grace Ukaoma'),
       { speaker: 'Luke Henry', text: 'a different weak voice', elapsed: 40_000, similarity: 0.58 },
     ]
 
-    const review = reviewMeetingSpeakers(chunks, { owner: 'MU', confirmed: new Set(['Queen Ukaoma']) })
+    const review = reviewMeetingSpeakers(chunks, { owner: 'MU', confirmed: new Set(['Grace Ukaoma']) })
 
-    expect(review.voices.find(v => v.label === 'Queen Ukaoma')!.nameAsserted).toBe(true)
+    expect(review.voices.find(v => v.label === 'Grace Ukaoma')!.nameAsserted).toBe(true)
     expect(review.voices.find(v => v.label === 'Luke Henry')!.nameAsserted).toBe(false)
   })
 
@@ -91,7 +91,7 @@ describe('confirming a demoted label', () => {
     expect(confirmedLabels('meeting_a').size).toBe(0)
     const ok = appendCorrection('meeting_a', {
       id: 'confirm-1', phase: 'confirmed', at: new Date().toISOString(),
-      from: 'Queen Ukaoma', to: 'Queen Ukaoma', chunks: [], scope: 'meeting',
+      from: 'Grace Ukaoma', to: 'Grace Ukaoma', chunks: [], scope: 'meeting',
     })
     expect(ok).toBe(true)
 
@@ -100,9 +100,9 @@ describe('confirming a demoted label', () => {
     // row counted as unusable and the confirmation vanished with no error.
     const { readCorrections } = await import('./meeting-corrections.js')
     expect(readCorrections('meeting_a').unusable).toBe(0)
-    expect(confirmedLabels('meeting_a').has('Queen Ukaoma')).toBe(true)
+    expect(confirmedLabels('meeting_a').has('Grace Ukaoma')).toBe(true)
     // Vouching for a voice in one room says nothing about a different room.
-    expect(confirmedLabels('meeting_b').has('Queen Ukaoma')).toBe(false)
+    expect(confirmedLabels('meeting_b').has('Grace Ukaoma')).toBe(false)
   })
 
   it('does not treat an ordinary rename as a confirmation', async () => {
@@ -110,7 +110,7 @@ describe('confirming a demoted label', () => {
 
     appendCorrection('meeting_c', {
       id: 'rename-1', phase: 'applied', at: new Date().toISOString(),
-      from: 'Navaz Sharif', to: 'Queen Ukaoma', chunks: [0], scope: 'meeting',
+      from: 'Navaz Sharif', to: 'Grace Ukaoma', chunks: [0], scope: 'meeting',
     })
 
     // An applied rename is not a vouch. Only a 'confirmed' row waives the floor.
@@ -121,14 +121,14 @@ describe('confirming a demoted label', () => {
     const { reviewMeetingSpeakers } = await import('./meeting-speaker-review.js')
     // Alternating speakers produce a thrash pair.
     const chunks = Array.from({ length: 12 }, (_, i) => ({
-      speaker: i % 2 === 0 ? 'Queen Ukaoma' : 'Clem Ukaoma',
+      speaker: i % 2 === 0 ? 'Grace Ukaoma' : 'Clem Ukaoma',
       text: `turn ${i}`,
       elapsed: i * 10_000,
       similarity: 0.9,
     }))
 
-    const review = reviewMeetingSpeakers(chunks, { owner: 'MU', confirmed: new Set(['Queen Ukaoma']) })
-    const row = review.voices.find(v => v.label === 'Queen Ukaoma')!
+    const review = reviewMeetingSpeakers(chunks, { owner: 'MU', confirmed: new Set(['Grace Ukaoma']) })
+    const row = review.voices.find(v => v.label === 'Grace Ukaoma')!
 
     expect(row.confirmedByHuman).toBe(true)
     // The name is asserted, but the evidence that it swaps is NOT hidden.

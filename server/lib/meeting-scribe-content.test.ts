@@ -355,17 +355,17 @@ describe('provenance names the WARRANT, not "voice matching" for all three', () 
   })
 
   it('credits only a real cosine match to voice matching', () => {
-    const out = renderProvenance([A('Niala Samnarine')], 0.9)
-    expect(out).toMatch(/"Niala Samnarine" by voice match/)
+    const out = renderProvenance([A('Ilona Halvorsen')], 0.9)
+    expect(out).toMatch(/"Ilona Halvorsen" by voice match/)
   })
 
   it('separates all three warrants in one meeting', () => {
     const out = renderProvenance([
       A('MU', { isOwner: true }),
-      A('Niala Samnarine'),
+      A('Ilona Halvorsen'),
       A('Luke Henry', { confirmedByHuman: true }),
     ], 0.9)
-    expect(out).toMatch(/"MU" by wearing the device; "Niala Samnarine" by voice match; "Luke Henry" because a human named that voice/)
+    expect(out).toMatch(/"MU" by wearing the device; "Ilona Halvorsen" by voice match; "Luke Henry" because a human named that voice/)
   })
 
   it('quotes labels so a comma inside one cannot read as two people', () => {
@@ -490,11 +490,11 @@ describe('time and date edges', () => {
 
 describe('a name the human explicitly removed', () => {
   // 2026-08-07: Miles removed "Clem Ukaoma" from a call that was only him and
-  // Queen. All 8 label sites were rewritten; the summary still opened
-  // "Miles, Queen, and Clem talk through..." and the payload said nothing.
+  // Grace. All 8 label sites were rewritten; the summary still opened
+  // "Miles, Grace, and Clem talk through..." and the payload said nothing.
   const scribe = parseScribe([
     '# Generational Trauma And Parenting Fears (G2)',
-    '## Summary', 'Miles, Queen, and Clem talk through the fallout.',
+    '## Summary', 'Miles, Grace, and Clem talk through the fallout.',
     '## Transcript', '[Unidentified 1]: reclose that is how you close it',
   ].join('\n'))
   const removed = [{ label: 'Clem Ukaoma', proseStale: true }]
@@ -512,7 +512,7 @@ describe('a name the human explicitly removed', () => {
   it('does NOT rewrite the prose', () => {
     // Substituting into a written sentence mangles grammar and can hit the wrong
     // person. The record stays; the correction travels beside it.
-    expect(clipboardSummary({ ...BASE, scribe, removed })).toMatch(/Miles, Queen, and Clem talk through/)
+    expect(clipboardSummary({ ...BASE, scribe, removed })).toMatch(/Miles, Grace, and Clem talk through/)
   })
 
   it('is quieter when the prose does not carry the name', () => {
@@ -531,7 +531,7 @@ describe('a name the human explicitly removed', () => {
 describe('the overlap note is gated on meeting LENGTH, not voiced time', () => {
   const two = (a: number, b: number): AttendeeLine[] => [
     { label: 'MU', asserted: true, speakingMs: a, share: 0.6, isOwner: true, confirmedByHuman: false },
-    { label: 'Queen Ukaoma', asserted: true, speakingMs: b, share: 0.4, isOwner: false, confirmedByHuman: false },
+    { label: 'Grace Ukaoma', asserted: true, speakingMs: b, share: 0.4, isOwner: false, confirmedByHuman: false },
   ]
 
   it('stays QUIET on ordinary overlap inside the meeting length', () => {

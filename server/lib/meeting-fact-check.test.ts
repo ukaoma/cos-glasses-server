@@ -142,7 +142,7 @@ describe('pending fact-check continuation', () => {
     expect(originClarification('Austin to KC', withClaim)).toEqual({ text: 'Austin', source: 'user' })
     expect(originClarification('from Austin, TX', withClaim)).toEqual({ text: 'Austin TX', source: 'user' })
     // A state suffix must be a real state code, the city a listed one; people, labels and ordinary words are not places.
-    for (const q of ['Silas PM to KC', 'from Amira TX', 'HR to KC', 'time to Kansas', 'from MU', 'MU to KC', 'from Dallas, ZZ'])
+    for (const q of ['Silas PM to KC', 'from Talia TX', 'HR to KC', 'time to Kansas', 'from MU', 'MU to KC', 'from Dallas, ZZ'])
       expect(originClarification(q, withClaim)).toBeNull()
     for (const q of ['Gina to send the deck by Friday?', 'What did we hear from Silas Larson today?', 'From Silas', 'From Gina where mu is based', 'from here', 'What did we decide?', 'Dallas to KC', 'ATX to the deck', 'From ATX and send the deck', 'Send the deck from ATX', 'ATX to Paris is the request'])
       expect(originClarification(q, withClaim)).toBeNull()
@@ -311,7 +311,7 @@ describe('hedged model calls', () => {
 
 describe('medical dosing', () => {
   it('needs a named medicine plus dosing intent; POS work talk, money, counts and schedules never trigger it (QA W4)', () => {
-    for (const q of ['whats the dose of tylenol for a child', 'How much Tylenol for Isaiah?', "how much children's tylenol for 3 year old", 'Can I take 800 mg of ibuprofen?', 'how many advil is safe',
+    for (const q of ['whats the dose of tylenol for a child', 'How much Tylenol for Rafael?', "how much children's tylenol for 3 year old", 'Can I take 800 mg of ibuprofen?', 'how many advil is safe',
       "How much pain medication for a 400 lb, 5'5 man", 'How much Tylenol can I take?', 'What dose of ibuprofen for my kid?', 'How many mg of Benadryl should I give a 30 lb toddler?', 'How much amoxicillin for a 40 pound child'])
       expect(medicalDosingRequest(q), q).toBe(true)
     for (const q of ['how many tablets should we give the sales team for demos', 'how many units can we give each rep', 'how many units should I take for the demo',

@@ -688,10 +688,10 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
 
     // a second kickoff while one runs: 409 merge_running with the receipt; a held lock: 409 lock_held
     callBridge.mockResolvedValueOnce({ error: 'merge_running', message: 'A merge is already running on this Mac.', receipt, protocol: 1 })
-    const running = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'Niala', target: 'Niala Samnarine', confirm: true }) })
+    const running = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'Ilona', target: 'Ilona Halvorsen', confirm: true }) })
     expect(running.status).toBe(409); expect((await running.json() as Record<string, any>).receipt.ticket).toBe(receipt.ticket)
     callBridge.mockResolvedValueOnce({ error: 'lock_held', message: 'The ingest lock is held.', lock: { state: 'exclusive', owner_pid: 77 }, protocol: 1 })
-    const held = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'Niala', target: 'Niala Samnarine', confirm: true }) })
+    const held = await fetch(`${base}/api/context/graph/merge`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: 'Ilona', target: 'Ilona Halvorsen', confirm: true }) })
     expect(held.status).toBe(409); expect((await held.json() as Record<string, any>).lock).toEqual({ state: 'exclusive', owner_pid: 77 })
 
     // the receipt: a done merge with its counts and the log tail; an unknown state is dropped, not passed through
@@ -706,13 +706,13 @@ describe('recent learning and knowledge routes (6.44.5)', () => {
 
     // duplicates: groups bounded and typed; Miles Mallard never appears next to Miles Ukaoma because the bridge never sends it
     callBridge.mockResolvedValueOnce({ available: true, index_state: 'fresh', index_built_at: '2026-09-08T12:00:00+00:00', scanned: 2690, total_groups: 246,
-      groups: [{ target: 'Niala Samnarine', confidence: 'high', reasons: ['bare first name with one full name in the index'], linked: true,
-        members: [{ id: 'Niala Samnarine', degree: 948, shared_neighbors: 0, description: 'VP Customer Marketing.', why: null }, { id: 'Niala', degree: 56, shared_neighbors: 27, description: '', why: 'bare first name with one full name in the index' }] },
+      groups: [{ target: 'Ilona Halvorsen', confidence: 'high', reasons: ['bare first name with one full name in the index'], linked: true,
+        members: [{ id: 'Ilona Halvorsen', degree: 948, shared_neighbors: 0, description: 'VP Customer Marketing.', why: null }, { id: 'Ilona', degree: 56, shared_neighbors: 27, description: '', why: 'bare first name with one full name in the index' }] },
         { target: 'Lonely', confidence: 'weird', members: [{ id: 'Lonely', degree: 1 }] }], protocol: 1 })
     const dup = await fetch(`${base}/api/context/graph/duplicates?limit=25`)
     expect(dup.status).toBe(200)
     const dupBody = await dup.json() as Record<string, any>
-    expect(dupBody.scanned).toBe(2690); expect(dupBody.groups).toHaveLength(1); expect(dupBody.groups[0].members[1]).toEqual({ id: 'Niala', degree: 56, shared_neighbors: 27, description: '', why: 'bare first name with one full name in the index' })
+    expect(dupBody.scanned).toBe(2690); expect(dupBody.groups).toHaveLength(1); expect(dupBody.groups[0].members[1]).toEqual({ id: 'Ilona', degree: 56, shared_neighbors: 27, description: '', why: 'bare first name with one full name in the index' })
     expect(callBridge).toHaveBeenLastCalledWith(['graph-duplicates', '--limit=25'], 30_000)
     expect((await fetch(`${base}/api/context/graph/duplicates?limit=0`)).status).toBe(400)
     expect((await fetch(`${base}/api/context/graph/duplicates?limit=101`)).status).toBe(400)

@@ -19,7 +19,7 @@
 //                     adjacent pieces joined ("U coma"), none a function word; or the
 //                     leading-y rule at any confidence ("Yukoma" for Ukaoma)
 //    oov_capitalized  a capitalised word mid-sentence that is no known name and no common
-//                     word, within two words of a known name ("Queen Eucoma")
+//                     word, within two words of a known name ("Grace Eucoma")
 //    repeat           a phrase of 2 to 4 words (or one long word) said three or more
 //                     times in a row: the classic decoder loop
 //    Flagged words one word apart merge; a span holds at most 6 words (12 for a repeat)

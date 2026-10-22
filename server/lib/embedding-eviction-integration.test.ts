@@ -110,16 +110,16 @@ describe.skipIf(!haveModel)('eviction through the real enrollment path', () => {
     expect(storedSources('Twenty').filter(s => s === 'fireflies')).toHaveLength(20)
   })
 
-  it("protects Queen's only deliberate enrollment when the profile IS full", () => {
+  it("protects Grace's only deliberate enrollment when the profile IS full", () => {
     // The live shape that motivated this: `manual` at index 0, weaker samples
     // available. Under plain FIFO index 0 is the first thing deleted.
     const sources = ['manual', ...Array(34).fill('fireflies'), ...Array(5).fill('g2-training')]
     expect(sources).toHaveLength(40)
-    seedAndStart('Queen Ukaoma', sources)
+    seedAndStart('Grace Ukaoma', sources)
 
-    enroll('Queen Ukaoma', 101, 'correction:meeting_new')
+    enroll('Grace Ukaoma', 101, 'correction:meeting_new')
 
-    const after = storedSources('Queen Ukaoma')
+    const after = storedSources('Grace Ukaoma')
     expect(after).toHaveLength(40)
     // The deliberate enrollment survived; a metadata sample went instead.
     expect(after).toContain('manual')

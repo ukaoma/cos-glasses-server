@@ -341,7 +341,7 @@ voiceRouter.get('/voice/ext-audio', (_req, res) => {
         ageHours: parseFloat(ageHours),
         expiresIn: `${Math.max(0, 72 - parseFloat(ageHours)).toFixed(1)}h`,
         // 6.45.3 — the chunk indices a reviewer can ask to hear (`?chunk=` on
-        // the sample route). Queen, 2026-09-12: the Add-a-voice panel let her
+        // the sample route). Grace, 2026-09-12: the Add-a-voice panel let her
         // name a session but not listen to it; naming is a guess without this.
         chunkIndices: listExtAudioChunks(d.name),
       }

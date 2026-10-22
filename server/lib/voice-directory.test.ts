@@ -13,7 +13,7 @@ function writeEvidence(base: string, sessionId: string, speaker: string, title: 
     sessionId,
     title,
     durationMs: 10_000,
-    chunks: [{ text: title, speaker, elapsed: 5_000, similarity: speaker === 'Niala' ? 0.72 : 0 }],
+    chunks: [{ text: title, speaker, elapsed: 5_000, similarity: speaker === 'Ilona' ? 0.72 : 0 }],
   }))
   writeFileSync(join(month, `${stem}.md`), `# ${title}\n`)
 }
@@ -32,8 +32,8 @@ describe('voice directory corpus aggregation', () => {
     const direct = join(root, 'direct')
     const recordings = join(root, 'recordings')
     const operationMeetings = join(operations, 'quilt', 'meetings')
-    writeEvidence(operationMeetings, 'session_same', 'Niala', 'Canonical title')
-    writeEvidence(direct, 'session_same', 'Niala', 'Duplicate direct title')
+    writeEvidence(operationMeetings, 'session_same', 'Ilona', 'Canonical title')
+    writeEvidence(direct, 'session_same', 'Ilona', 'Duplicate direct title')
     writeEvidence(recordings, 'session_ext', 'Ext', 'Unidentified room')
 
     // A Markdown symlink must never let the directory read outside its selected
@@ -54,7 +54,7 @@ describe('voice directory corpus aggregation', () => {
     vi.doMock('./speaker-embeddings.js', () => ({
     AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72, AUTO_ENROLL_THRESHOLD: 0.88,
       readVoiceProfiles: () => ({ profiles: [
-        { name: 'Niala', embeddings: [[1], [2]], sources: ['manual', 'fireflies'] },
+        { name: 'Ilona', embeddings: [[1], [2]], sources: ['manual', 'fireflies'] },
         { name: 'Never Heard', embeddings: [[3]], sources: ['manual'] },
       ] }),
     }))
@@ -68,9 +68,9 @@ describe('voice directory corpus aggregation', () => {
             label,
             segments: 5,
             speakingMs: 9_000,
-            meanSimilarity: label === 'Niala' ? 0.72 : null,
-            reliability: label === 'Niala' ? 'confident' : 'unattributed',
-            nameAsserted: label === 'Niala',
+            meanSimilarity: label === 'Ilona' ? 0.72 : null,
+            reliability: label === 'Ilona' ? 'confident' : 'unattributed',
+            nameAsserted: label === 'Ilona',
             confirmedByHuman: false,
           }],
         }
@@ -84,7 +84,7 @@ describe('voice directory corpus aggregation', () => {
     expect(snapshot.unresolvedMeetings).toBe(1)
     expect(snapshot.unresolvedSegments).toBe(5)
     expect(snapshot.profiles).toHaveLength(2)
-    expect(snapshot.profiles.find(p => p.name === 'Niala')).toMatchObject({
+    expect(snapshot.profiles.find(p => p.name === 'Ilona')).toMatchObject({
       embeddings: 2,
       assertedSegments: 5,
       assertedSpeakingMs: 9_000,
@@ -93,7 +93,7 @@ describe('voice directory corpus aggregation', () => {
       firstSeen: '2026-08-11',
       lastSeen: '2026-08-11',
     })
-    expect(snapshot.profiles.find(p => p.name === 'Niala')?.appearances[0].title).toBe('Canonical title')
+    expect(snapshot.profiles.find(p => p.name === 'Ilona')?.appearances[0].title).toBe('Canonical title')
     expect(snapshot.profiles.find(p => p.name === 'Never Heard')).toMatchObject({
       assertedSegments: 0,
       meetingCount: 0,

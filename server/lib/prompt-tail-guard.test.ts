@@ -44,7 +44,7 @@ describe('rule (a): whole-sentence fillers', () => {
     const real = [
       'Summarize the Bottle POS notes and put the risks at the end.',
       'Move the pricing table to the end.',
-      'Reply to Niala and say I will see you next time we are both in Austin.',
+      'Reply to Ilona and say I will see you next time we are both in Austin.',
       'Write the intro for the webinar about thanks for watching screens.',
       'Tell Silas I will send the model tonight. See you later.',
       'Remind me to book the flight. That is the end.',

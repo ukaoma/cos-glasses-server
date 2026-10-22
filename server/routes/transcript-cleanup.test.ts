@@ -92,7 +92,7 @@ describe('screen context route', () => {
   it('stores bounded lines for a live meeting and answers counts, never text', async () => {
     const h = await start()
     const res = await h.api(`/api/meeting/${SESSION}/screen-context`, post({ lines: [
-      { at: NOW - 60_000, text: 'Queen Ukaoma joined', app: 'Zoom' },
+      { at: NOW - 60_000, text: 'Grace Ukaoma joined', app: 'Zoom' },
       { at: new Date(NOW - 30_000).toISOString(), text: 'Agenda: travel' },
       { at: NOW - 20_000, text: 'token=ghp_abcdefghijklmnopqrstuvwxyz0123456789' },
     ] }))
@@ -101,7 +101,7 @@ describe('screen context route', () => {
     const stats = await (await h.api(`/api/meeting/${SESSION}/screen-context`)).json() as Record<string, unknown>
     expect(stats).toMatchObject({ protocol: 1, lines: 2, firstAt: NOW - 60_000, lastAt: NOW - 30_000 })
     expect(JSON.stringify(stats)).not.toMatch(/Ukaoma|Agenda/)
-    expect(readScreenContext(SESSION).map(l => l.text)).toEqual(['Queen Ukaoma joined', 'Agenda: travel'])
+    expect(readScreenContext(SESSION).map(l => l.text)).toEqual(['Grace Ukaoma joined', 'Agenda: travel'])
   })
 
   it('refuses oversized requests, bad bodies and bad ids', async () => {

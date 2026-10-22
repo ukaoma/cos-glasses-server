@@ -10,7 +10,7 @@
 // SCREEN AWARENESS. On-screen text lines COS Control recorded during the meeting
 // (transcript-cleanup-screen.ts), shown beside each passage by time.
 //
-// TERMS. Every source contributes terms: capitalised words and runs of them ("Queen
+// TERMS. Every source contributes terms: capitalised words and runs of them ("Grace
 // Ukaoma", "Jewel360"). Terms are the per-meeting vocabulary: deterministic correction
 // may write a term from this meeting's screen or files, the model may write any term,
 // and a term the model writes that came from the meeting (not the dictionary) becomes a
@@ -86,7 +86,7 @@ export function extractTerms(text: string, max: number = CONTEXT_LIMITS.termsPer
     const w = words[i].w
     const capital = /^\p{Lu}/u.test(w)
     if (looksLikeName(w)) out.add(w)
-    // "Queen Ukaoma": a capitalised word directly before a name-like word, with nothing but a space between.
+    // "Grace Ukaoma": a capitalised word directly before a name-like word, with nothing but a space between.
     if (capital && i + 1 < words.length && text.slice(words[i].end, words[i + 1].at) === ' ' && looksLikeName(words[i + 1].w)) {
       out.add(`${w} ${words[i + 1].w}`)
     }

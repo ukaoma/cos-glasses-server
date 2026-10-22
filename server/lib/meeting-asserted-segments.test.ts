@@ -65,18 +65,18 @@ describe('assertedSegments', () => {
   })
 
   it('counts a voice a human confirmed, even though it failed the floor', () => {
-    const seq = [...Array(10).fill('Gina Torres'), 'Queen Ukaoma', 'Queen Ukaoma']
+    const seq = [...Array(10).fill('Gina Torres'), 'Grace Ukaoma', 'Grace Ukaoma']
     const cs = seq.map((s, i) => ({
       speaker: s,
       text: `${s} covered the Jewel360 migration numbers in segment ${i}`,
       elapsed: i * 7000,
-      similarity: s === 'Queen Ukaoma' ? 0.56 : 0.8,
+      similarity: s === 'Grace Ukaoma' ? 0.56 : 0.8,
     }))
     const before = reviewMeetingSpeakers(cs, { owner: 'MU' })
     expect(before.assertedSegments).toBe(10)
 
-    const after = reviewMeetingSpeakers(cs, { owner: 'MU', confirmed: new Set(['Queen Ukaoma']) })
-    expect(after.voices.find(v => v.label === 'Queen Ukaoma')!.nameAsserted).toBe(true)
+    const after = reviewMeetingSpeakers(cs, { owner: 'MU', confirmed: new Set(['Grace Ukaoma']) })
+    expect(after.voices.find(v => v.label === 'Grace Ukaoma')!.nameAsserted).toBe(true)
     expect(after.assertedSegments).toBe(12)
   })
 

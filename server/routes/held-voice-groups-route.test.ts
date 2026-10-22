@@ -298,7 +298,7 @@ describe('POST /api/voice/held-groups/enroll', () => {
   it('creates a new profile from one sample — naming sample by sample is allowed', async () => {
     await seedCrowd()
     await startServer()
-    const { status, json } = await call('POST', '/api/voice/held-groups/enroll', { name: 'Queen', members: [{ sessionId: 'meeting_b', chunkIndex: 30 }], confirm: true })
+    const { status, json } = await call('POST', '/api/voice/held-groups/enroll', { name: 'Grace', members: [{ sessionId: 'meeting_b', chunkIndex: 30 }], confirm: true })
     expect(status).toBe(200)
     expect(json).toMatchObject({ created: true, coherent: 1, enrolled: 1, deleted: 1, leftBehind: [] })
     expect(json.kind).toBe('applied')

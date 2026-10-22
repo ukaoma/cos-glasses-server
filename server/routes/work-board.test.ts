@@ -105,7 +105,7 @@ it('links a real operations meeting chosen from the meeting list, and still refu
   const prior=process.env.COS_OPERATIONS_DIR
   const base=mkdtempSync(join(tmpdir(),'cos-work-link-'))
   const root=join(base,'Chief Of Staff.v2','operations')
-  const file="2026-09-25_COS_Updates_and_Queen's_(G2).md"
+  const file="2026-09-25_COS_Updates_and_Grace's_(G2).md"
   try {
     mkdirSync(join(root,'hermit_crabs','meetings','2026-09'),{recursive:true})
     writeFileSync(join(root,'hermit_crabs','meetings','2026-09',file),'# COS Updates and Glasses\n\n**Date** | 2026-09-25 09:00 |\n\n## Summary\nBody\n')

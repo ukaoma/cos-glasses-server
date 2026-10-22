@@ -7,7 +7,7 @@ import { applyFuzzyCorrections } from '../lib/fuzzy-correct.js'
 const here = dirname(fileURLToPath(import.meta.url))
 const routeSrc = () => readFileSync(resolve(here, 'prompt-drafts.ts'), 'utf8')
 
-// Miles's 344 report: phone Moonshine dictation renders Niala and Ukaoma wrong. The exact
+// Miles's 344 report: phone Moonshine dictation renders Ilona and Ukaoma wrong. The exact
 // correction map only fixes hand-authored misspellings, so a novel miss sails through.
 // applyFuzzyCorrections is the pass that should catch those, and it had exactly ONE call
 // site (transcribe-audio.ts:252) — the server-transcription route. Phone dictation arrives
@@ -39,20 +39,20 @@ describe('fuzzy corrections reach the dictation finalize path (6.27.4)', () => {
 // The measured behaviour, so nobody assumes a reach this pass does not have. Thresholds
 // are edit-distance by word length: 5-8 chars gets 1, 9-11 gets 2, 12+ gets 3.
 describe('what the fuzzy pass actually catches (measured, not assumed)', () => {
-  const targets = ['Niala', 'Ukaoma', 'Austin', 'Miles', 'Queen', 'Amira', 'Isaiah']
+  const targets = ['Ilona', 'Ukaoma', 'Austin', 'Miles', 'Grace', 'Talia', 'Rafael']
   const run = (s: string) => applyFuzzyCorrections(s, targets)
 
   it('catches single-edit misses', () => {
     expect(run('Meet in Austen').text).toContain('Austin')
-    expect(run('Talk to Nyala').text).toContain('Niala')
+    expect(run('Talk to Ilena').text).toContain('Ilona')
   })
 
   it('DOES NOT catch multi-edit misses — the distance budget is 1 at these lengths', () => {
-    // Miyala->Niala is 2 edits and Yukoma->Ukaoma is 3, both over budget for their length.
+    // Yilena->Ilona is 2 edits and Yukoma->Ukaoma is 3, both over budget for their length.
     // Recorded rather than wished away: these two specific words still need explicit
     // entries in whisper_corrections, so wiring the fuzzy pass does NOT make that
     // backfill redundant.
-    expect(run('Call Miyala today').replacements).toBe(0)
+    expect(run('Call Yilena today').replacements).toBe(0)
     expect(run('Miles Yukoma spoke').replacements).toBe(0)
   })
 })

@@ -805,19 +805,19 @@ describe('a merge carries the rename out to the meeting library', () => {
     // meeting they appear in, off the back of a typo.
     //
     // Found by mutation: swapping `report.merged` for `from` passed all 51 tests.
-    const other = meeting('quilt', '2026-08', 'unrelated', 'Niala Boodhoo')
+    const other = meeting('quilt', '2026-08', 'unrelated', 'Ilona Boodhoo')
 
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: ['Clem Ukaoma', 'Niala Boodhoo'], confirm: true })
+      { into: 'MU', from: ['Clem Ukaoma', 'Ilona Boodhoo'], confirm: true })
 
     expect(res.status).toBe(200)
     expect(res.json.merged).toEqual(['Clem Ukaoma'])
-    expect(res.json.missing).toEqual(['Niala Boodhoo'])
+    expect(res.json.missing).toEqual(['Ilona Boodhoo'])
     // Her name survives untouched. She was never merged into anything.
-    for (const path of [other.md, other.localMd]) expect(readFileSync(path, 'utf-8')).toContain('[Niala Boodhoo]:')
+    for (const path of [other.md, other.localMd]) expect(readFileSync(path, 'utf-8')).toContain('[Ilona Boodhoo]:')
     for (const path of [other.sidecar, other.localSidecar]) {
-      expect(JSON.parse(readFileSync(path, 'utf-8')).chunks[0].speaker).toBe('Niala Boodhoo')
+      expect(JSON.parse(readFileSync(path, 'utf-8')).chunks[0].speaker).toBe('Ilona Boodhoo')
     }
   })
 
