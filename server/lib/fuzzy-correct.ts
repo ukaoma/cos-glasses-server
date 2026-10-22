@@ -293,7 +293,6 @@ export function applyFuzzyCorrections(
 
   const targetLowerSet = new Set(canonical.map(t => t.toLowerCase()))
   let replacements = 0
-  const fuzzyLog: Array<{ from: string; to: string }> = []
 
   // Match any 5+ char word (case-insensitive). Stop-list + strict distance
   // thresholds are the primary defenses against false positives.
@@ -301,13 +300,12 @@ export function applyFuzzyCorrections(
     const replacement = fuzzyReplacementFor(word, canonical, targetLowerSet)
     if (replacement === null) return word
     replacements++
-    fuzzyLog.push({ from: word, to: replacement })
     return replacement
   })
 
-  if (fuzzyLog.length > 0) {
-    const preview = fuzzyLog.slice(0, 5).map(x => `${x.from}→${x.to}`).join(', ')
-    console.log(`[fuzzy-correct] Applied ${replacements} correction(s): ${preview}${fuzzyLog.length > 5 ? '...' : ''}`)
+  if (replacements > 0) {
+    // 6.86.0: the count only. The pairs were the words someone said.
+    console.log(`[fuzzy-correct] Applied ${replacements} correction(s)`)
   }
 
   return { text: result, replacements }

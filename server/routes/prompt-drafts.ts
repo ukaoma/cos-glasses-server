@@ -414,7 +414,7 @@ async function transcribeChunk(draftId: string, chunkIndex: number, audio: Buffe
       // plus the decoder's own low confidence (prompt-tail-guard.ts).
       const guarded = guardPromptTail({ text: result.text, words: result.words, speech: speechWindowsFromWav(audio) })
       for (const drop of guarded.dropped) {
-        console.warn(`[prompt-draft] tail_drop ${draftId}/${chunkIndex} ${purpose}/${mode} (${drop.reason}, start=${drop.startSec ?? '?'}s, lastSpeech=${guarded.lastSpeechEndSec ?? '?'}s, p=${drop.meanProbability?.toFixed(2) ?? '?'}): "${drop.text.slice(0, 100)}"`)
+        console.warn(`[prompt-draft] tail_drop ${draftId}/${chunkIndex} ${purpose}/${mode} (${drop.reason}, start=${drop.startSec ?? '?'}s, lastSpeech=${guarded.lastSpeechEndSec ?? '?'}s, p=${drop.meanProbability?.toFixed(2) ?? '?'}): chars=${drop.text.length}`)
       }
       if (guarded.dropped.length > 0 && !guarded.text.trim()) throw new NoSpeechDetectedError(result.text)
       const text = sanitizeTranscript(draftId, guarded.text)

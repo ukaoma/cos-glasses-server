@@ -15,12 +15,18 @@ provisional (grey) line of a live meeting for Control to show before the final t
 - **Pairs with the COS Control live meeting view** (the Control half ships separately). An older Control and every
   companion are unaffected: glasses meetings keep reinforce and challenge, byte-identical writer rules, and the
   same wire shapes.
-- **Privacy.** Nothing new logs transcript text. 6.85.0 already took the text out of the per-chunk `[perf] TOTAL`
-  line (`transcribe-stream-log-privacy.test.ts`, re-run here). The provisional line is held in memory only, never
-  written to disk or the log.
+- **Privacy: five more log lines stop printing what was said.** 6.85.0 took the text out of the per-chunk
+  `[perf] TOTAL` line. Five others still printed it: the three `[hallucination]` lines (a dropped brand URL, thank-you
+  or vocabulary echo, and a chunk the filter emptied, each with up to 60 characters of the chunk), the dictation
+  `[prompt-draft] tail_drop` line (up to 100 characters of the dropped sentence) and `[fuzzy-correct]` (the misheard
+  word and its correction, up to five pairs). Each now logs its reason and a character count; fuzzy-correct logs how
+  many words it fixed. `transcript-log-privacy-686.test.ts` scans every server and shared source for a console call
+  that prints a slice of transcript text, and drives fuzzy-correct; restoring each of the five old lines fails it
+  (5 of 5). Nothing new logs transcript text, and the provisional line is held in memory only, never written to disk
+  or the log.
 - **Checks (6.86.0 branch).** Full suite, serial (`--maxWorkers=1`), HOME, COS_DATA_DIR and COS_PROFILE_PATH in a
-  scratch folder, COS_SCRIPTS_DIR unset: 581 files (580 passed, 1 skipped), 8796 tests, 8782 passed, 14 skipped, 0
-  failed. Mutation gate `live-meeting-6860-mutation-gate.mjs` against a green baseline (159 tests in 7 files): 63 of
+  scratch folder, COS_SCRIPTS_DIR unset: 582 files (581 passed, 1 skipped), 8800 tests, 8786 passed, 14 skipped, 0
+  failed (re-run after the log-line fix). Mutation gate `live-meeting-6860-mutation-gate.mjs` against a green baseline (159 tests in 7 files): 63 of
   63 killed, each by a named test, every target landing exactly once and restored byte for byte. The 6.79.x verdicts
   gate's `schema-kind` mutant, retargeted to `isCueKind`, is still killed. `tsc --noEmit` clean. `npm pack --dry-run`:
   545 files (6.85.0's 543 plus `server/lib/live-provisional.ts` and `server/lib/live-cues-v2-prompts-kinds.ts`), no

@@ -2104,7 +2104,7 @@ function sanitizeStreamTranscript(sessionId: string, session: TranscriptSession,
     const dropReason = streamSilenceDropReason(trimmedText, isQuiet)
     const flagAllows = dropReason === 'thankyou_silence' ? THANKYOU_FILTER : STRIP_BRAND_URLS
     if (dropReason && flagAllows) {
-      console.log(`[hallucination] Dropped (${dropReason}, q=${isQuiet ? 1 : 0}): "${trimmedText.slice(0, 60)}"`)
+      console.log(`[hallucination] Dropped (${dropReason}, q=${isQuiet ? 1 : 0}): chars=${trimmedText.length}`)
       return { text: '', fallbackReason: dropReason }
     }
   }
@@ -2122,7 +2122,7 @@ function sanitizeStreamTranscript(sessionId: string, session: TranscriptSession,
     const streak = (session.vocabEchoStreak ?? 0) + 1
     session.vocabEchoStreak = streak
     if (isQuiet || streak >= 2 || isCrossChunkRepeat(session, trimmedText)) {
-      console.log(`[hallucination] Dropped (vocab_echo, q=${isQuiet ? 1 : 0}, streak=${streak}): "${trimmedText.slice(0, 60)}"`)
+      console.log(`[hallucination] Dropped (vocab_echo, q=${isQuiet ? 1 : 0}, streak=${streak}): chars=${trimmedText.length}`)
       return { text: '', fallbackReason: 'vocab_echo' }
     }
   } else if (trimmedText) {
@@ -2540,7 +2540,7 @@ async function processStreamChunk(opts: {
   if (labels.segments) labels.segments = labels.segments.map(segment => policyLabel(segment, capturePolicy))
 
   if (!trimmedText) {
-    console.log(`[hallucination] Filtered (${sanitized.fallbackReason || fallbackReason || 'empty'}): "${rawText.slice(0, 60)}"`)
+    console.log(`[hallucination] Filtered (${sanitized.fallbackReason || fallbackReason || 'empty'}): chars=${rawText.length}`)
     if (candidate && candidateRecordKey && session.providerCandidates?.[candidateRecordKey]) {
       session.providerCandidates[candidateRecordKey].accepted = false
       session.providerCandidates[candidateRecordKey].fallbackReason = sanitized.fallbackReason || fallbackReason || 'empty'
