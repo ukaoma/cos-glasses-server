@@ -143,7 +143,7 @@ export async function runWarmPolish(
   entry: WarmPolish,
   text: string,
   terms: string[],
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; customInstructions?: string } = {},
 ): Promise<string> {
   if (entry.exited || !entry.proc.stdin || entry.proc.stdin.destroyed) {
     retire(entry)
@@ -180,7 +180,7 @@ export async function runWarmPolish(
     opts.signal?.addEventListener('abort', abort, { once: true })
     const message = JSON.stringify({
       type: 'user',
-      message: { role: 'user', content: buildDictationPolishPrompt(text, terms, entry.version) },
+      message: { role: 'user', content: buildDictationPolishPrompt(text, terms, entry.version, opts.customInstructions ?? '') },
     })
     try {
       entry.proc.stdin!.write(message + '\n')

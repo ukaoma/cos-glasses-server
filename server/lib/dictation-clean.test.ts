@@ -197,3 +197,20 @@ describe('subscription CLI dictation cleanup', () => {
     expect(v3).not.toMatch(/[\u2014\u2192]/)
   })
 })
+
+describe('6.85.0 polish instructions on the cold call', () => {
+  it('the instructions reach the prompt the CLI reads; without them the prompt is the default', async () => {
+    vi.stubEnv('COS_DICTATION_POLISH_PROMPT', '')
+    output = 'Send the deck, notes, and plan.'
+    await autoCleanDictation('send the deck notes and plan', ['Quilt'], { customInstructions: 'Use Oxford commas.' })
+    expect(child.stdin.read()?.toString()).toBe(buildDictationPolishPrompt('send the deck notes and plan', ['Quilt'], 'v3', 'Use Oxford commas.'))
+    await autoCleanDictation('send the deck notes and plan', ['Quilt'])
+    expect(child.stdin.read()?.toString()).toBe(buildDictationPolishPrompt('send the deck notes and plan', ['Quilt'], 'v3'))
+    // The rolled-back prompt carries them too, after its own rules.
+    vi.stubEnv('COS_DICTATION_POLISH_PROMPT', 'v2')
+    await autoCleanDictation('send it', [], { customInstructions: 'Use Oxford commas.' })
+    expect(child.stdin.read()?.toString()).toBe(buildDictationPolishPrompt('send it', [], 'v2', 'Use Oxford commas.'))
+    // Never on the command line: argv is visible to every process on the Mac.
+    for (const call of mocks.spawn.mock.calls) expect(JSON.stringify(call[1])).not.toContain('Oxford')
+  })
+})

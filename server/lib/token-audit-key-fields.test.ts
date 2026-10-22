@@ -29,3 +29,16 @@ describe('token audit key-lane fields', () => {
     expect('usd' in buildTokenAuditRecord({ ...laneA, usd: Number.NaN }, at)).toBe(false)
   })
 })
+
+describe('6.85.0 dictation polish instructions on the audit row', () => {
+  const at = new Date('2026-10-21T20:00:00.000Z')
+  const base = { source: 'g2-dictation-autoclean', model: 'haiku', inputChars: 40, outputChars: 38, durationMs: 900, caller: 'dictation_autoclean_message' }
+  it('records true and the hash, or false and no hash, after every older key; absent leaves the row unchanged', () => {
+    const plain = buildTokenAuditRecord(base, at)
+    expect(Object.keys(plain)).not.toContain('custom_instructions')
+    const on = buildTokenAuditRecord({ ...base, polishInstructions: { on: true, hash: '0a1b2c3d' } }, at)
+    expect(on).toEqual({ ...plain, custom_instructions: true, instructions_hash: '0a1b2c3d' })
+    expect(Object.keys(on).slice(-2)).toEqual(['custom_instructions', 'instructions_hash'])
+    expect(buildTokenAuditRecord({ ...base, polishInstructions: { on: false, hash: '' } }, at)).toEqual({ ...plain, custom_instructions: false })
+  })
+})

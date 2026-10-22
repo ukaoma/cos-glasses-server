@@ -75,7 +75,7 @@ const mutations = [
   ['reason-daily-cap', PD, "polishSkipped: 'daily_cap' }", '}'],
   ['reason-failed', PD, "polishSkipped: 'failed', ...(prewarm", '...(prewarm'],
   ['finalize-reports-reason', PD, '    ...(polishSkipped ? { polishSkipped } : {}), ...(prewarm', '    ...(prewarm'],
-  ['finalize-reports-prewarm', PD, ', ...(prewarm ? { prewarm } : {}),\n  })', ',\n  })'],
+  ['finalize-reports-prewarm', PD, ', ...(prewarm ? { prewarm } : {}),\n    // 6.85.0', ',\n    // 6.85.0'],
   ['draft-reports-reason', PD, '    ...(polishSkipped ? { polishSkipped } : {}),\n', ''],
   // Prompt switch.
   ['env-selects-version', C, "  return raw === 'v1' || raw === 'v2' || raw === 'v3' ? raw : DEFAULT_DICTATION_POLISH_PROMPT", '  return DEFAULT_DICTATION_POLISH_PROMPT'],
