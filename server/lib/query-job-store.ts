@@ -1829,6 +1829,31 @@ export class QueryJobStore {
     return out
   }
 
+  /**
+   * 6.84.1: the jobs admitted and not yet terminal, each passed to `project` with its live
+   * request and snapshot (READ ONLY: nothing is cloned, so a projection must copy what it
+   * keeps and never write). Synchronous and in memory, like listLiveMessageReservations: no
+   * hydration, no journal read, no await. A non-terminal identity whose body is not hydrated
+   * (the LRU evicts terminal jobs first, so only past QUERY_JOB_LIMITS.hydratedJobs live
+   * ones) is counted in `unlisted` instead of read from disk.
+   */
+  listInFlight<T>(project: (request: Readonly<QueryJobRequest>, snapshot: Readonly<QueryJobSnapshot>) => T | null): { items: T[]; unlisted: number } {
+    const items: T[] = []
+    let unlisted = 0
+    for (const identity of this.identitiesByJobId.values()) {
+      if (isTerminalQueryJobStatus(identity.status)) continue
+      const hydrated = this.jobs.get(identity.jobId)
+      if (!hydrated) {
+        unlisted++
+        continue
+      }
+      // The identity's status is rebuilt with the snapshot on every record, so one check covers both.
+      const item = project(hydrated.request, hydrated.snapshot)
+      if (item != null) items.push(item)
+    }
+    return { items, unlisted }
+  }
+
   async findByClientGeneration(clientJobId: string, generation: number): Promise<QueryJobSnapshot | undefined> {
     await this.ensureInitialized()
     const identity = this.identitiesByKey.get(identityKey(clientJobId.toLowerCase(), generation))

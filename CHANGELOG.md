@@ -1,3 +1,30 @@
+## 6.84.1 - COS Control can list the questions COS is answering right now
+
+Miles approved a small read-only route (2026-10-21) so COS Control's Activity home can show glasses and phone
+questions in its Running panel. Contract: `docs/active-query-jobs.md`.
+
+- **`GET /api/query-jobs/active`** (X-Cos-Token, like every `/api` route). Lists durable query jobs that are admitted
+  and not finished: `jobId`, `generation`, `origin`, `state` (`queued`, `running`, `finishing`) with the job's own
+  `status`, `acceptedAt`, `startedAt`, `elapsedMs`, `provider`, `model`, `resolvedModel`, `messageNo` and a `title`.
+  The answer adds `protocolVersion: 1`, `enabled`, `now` and `count`; at most 50 items, oldest first. Completed,
+  failed, canceled and interrupted jobs are never listed or counted.
+- **Titles only, never the prompt.** A title is the prompt's first non-blank line (from its first 1,000 characters),
+  with the job store's credential and path redaction, on one line, at most 80 characters with an ellipsis, cut at a
+  word break and never inside an emoji. No prompt body, reference turn, answer, tool output, trail, steer or session
+  id is in the answer.
+- **Origin.** `person` (no origin and a message number: asked on the phone or the glasses; the phone sends both the
+  same way, so the server cannot tell them apart), `routine`, `task` (with `originId`), or `other` (a COS Control Work
+  session, a meeting review).
+- **Detection.** `GET /api/health` carries `features.activeQueryJobs: true` and `features.activeQueryJobsProtocol: 1`.
+  An older server answers the path 400 `invalid_job_id` (its `/query-jobs/:jobId` route), so clients key off the
+  feature, not the status code, and hide the rows without it.
+- **Cost.** One synchronous pass over the store's in-memory identities (`QueryJobStore.listInFlight`, the walk
+  `/api/message-counter` already does): no hydration, no disk read, no await, no timer. A live job whose record the
+  store evicted from memory is counted but not listed rather than read back from disk.
+- **Checks.** `server/routes/query-jobs-active.test.ts` (15 tests) and the health capability assertion.
+  `server/scripts/active-query-jobs-mutation-gate.mjs` (not packaged): 21 of 21 mutants killed against a green
+  baseline of 21 tests in 2 files.
+
 ## 6.84.0 - Dictation keeps "/pricing" and spoken paths; discard a Mac recording that captured no sound
 
 Two lanes in one release: the dictation formatting lane (built as 6.83.1) and the Mac recorder discard route (built

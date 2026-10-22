@@ -32,6 +32,7 @@ import {
   type QueryJobStoreHealth,
 } from './query-job-types.js'
 import type { QueryJobKeyAnswerFields } from './key-answer-fields.js'
+import { compareActiveQueryJobs, projectActiveQueryJob, type ActiveQueryJob } from './query-job-active.js'
 import { SteerPort, steerClock, steerCutoffMs, type PendingSteer, type QueryProvider } from './claude-steer.js'
 import type { MaintenanceWorkLease } from './maintenance-lifecycle.js'
 import { applyTrailToolMode, type JobTrailDraft } from './job-trail.js'
@@ -1109,6 +1110,13 @@ export class QueryJobCoordinator {
    * lib/message-reservations.ts). Sync: read straight off the store's identities. */
   liveMessageReservations(): Array<{ jobId: string; sessionId: string; messageEra?: string; globalMsgNum: number }> {
     return this.store.listLiveMessageReservations()
+  }
+
+  /** 6.84.1: the in-flight jobs for GET /api/query-jobs/active. In memory and synchronous. */
+  activeJobs(nowMs: number = Date.now()): { items: ActiveQueryJob[]; count: number } {
+    const { items, unlisted } = this.store.listInFlight((request, snapshot) => projectActiveQueryJob(request, snapshot, nowMs))
+    items.sort(compareActiveQueryJobs)
+    return { items, count: items.length + unlisted }
   }
 
   getHealth(): QueryJobCoordinatorHealth {

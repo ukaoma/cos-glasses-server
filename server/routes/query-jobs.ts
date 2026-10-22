@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express'
 import { durableQueryJobsEnabled, messagesSteerEnabled } from '../lib/query-job-feature.js'
+import { ACTIVE_QUERY_JOBS_LIST_MAX, ACTIVE_QUERY_JOBS_PROTOCOL } from '../lib/query-job-active.js'
 import {
   QueryJobCoordinator,
   QueryJobCoordinatorError,
@@ -191,6 +192,27 @@ export function createQueryJobsRouter(
       const prepared = options.prepareAdmission ? await options.prepareAdmission(req.body) : req.body
       const admission = await coordinator.submit(prepared)
       return res.status(202).json({ job: forClient(admission.job, wantsTrail(req), steerRead(req)) })
+    } catch (error) {
+      const wire = wireError(error)
+      return res.status(wire.status).json(wire.body)
+    }
+  })
+
+  // 6.84.1: the in-flight jobs for COS Control's Running panel (docs/active-query-jobs.md).
+  // Read-only and in memory; registered ahead of `/query-jobs/:jobId`, which would answer
+  // 400 invalid_job_id for "active". A title is the prompt's first line, cut to 80
+  // characters; no prompt body, answer, activity or trail is ever in this answer.
+  router.get('/query-jobs/active', (_req, res) => {
+    try {
+      const now = Date.now()
+      const { items, count } = coordinator.activeJobs(now)
+      return res.json({
+        protocolVersion: ACTIVE_QUERY_JOBS_PROTOCOL,
+        enabled: enabled(),
+        now: new Date(now).toISOString(),
+        count,
+        items: items.slice(0, ACTIVE_QUERY_JOBS_LIST_MAX),
+      })
     } catch (error) {
       const wire = wireError(error)
       return res.status(wire.status).json(wire.body)

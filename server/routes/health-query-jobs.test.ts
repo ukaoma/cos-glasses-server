@@ -60,6 +60,9 @@ describe('public durable-query capability health', () => {
       durableQueryJobsProtocol: 1,
       cursor: expect.any(Boolean),
     })
+    // 6.84.1: GET /api/query-jobs/active is detectable from health (docs/active-query-jobs.md).
+    expect(body.features.activeQueryJobs).toBe(true)
+    expect(body.features.activeQueryJobsProtocol).toBe(1)
     expect(body.cursor_models).toMatchObject({
       source: expect.any(String),
       options: [
