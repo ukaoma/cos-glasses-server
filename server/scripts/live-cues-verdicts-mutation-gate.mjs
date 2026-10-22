@@ -35,7 +35,7 @@ const mutations = [
   m('store-refuses-non-file', LIB, ["      if (!statSync(this.file).isFile()) throw new Error('not a regular file')\n", ''], LIB_T),
   m('reader-schema-gate', LIB, ['if (isLogRow(value)) rows.push(value); else skipped += 1', 'rows.push(value as LiveCueLogRow)'], LIB_T),
   m('reader-counts-unparseable', LIB, ['try { value = JSON.parse(line) } catch { skipped += 1; continue }', 'try { value = JSON.parse(line) } catch { continue }'], LIB_T),
-  m('schema-kind', LIB, ["&& (r.kind === 'reinforce' || r.kind === 'challenge')", ''], LIB_T),
+  m('schema-kind', LIB, ['&& isCueKind(r.kind)', ''], LIB_T),
   m('schema-sources', LIB, ['r.sources.every(s => !!s && typeof s === \'object\' && str((s as CueSourceRef).id) && str((s as CueSourceRef).date) && str((s as CueSourceRef).title))', 'true'], LIB_T),
   m('schema-before', LIB, ['&& str(r.model) && str(r.before)', '&& str(r.model)'], LIB_T),
   m('schema-finite-numbers', LIB, ["typeof v === 'number' && Number.isFinite(v)", "typeof v === 'number'"], LIB_T),

@@ -115,6 +115,8 @@ import {
   type MaintenanceWorkLease,
 } from '../lib/maintenance-lifecycle.js'
 import { feedLiveCueTranscript } from '../lib/live-cues-engine.js'
+import { armMacLiveCues, type MacLiveCuesAnswer } from '../lib/live-cues-v2.js'
+import { liveProvisional } from '../lib/live-provisional.js'
 import { preemptMetalBatchForLive, registerLiveActivityProbe } from '../lib/whisper-metal-gate.js'
 import {
   scheduleProgressiveHqCheckpoint,
@@ -1409,10 +1411,23 @@ function recordReceivedChunk(session: TranscriptSession, chunkIndex: number): vo
   }
 }
 
-function recordAsrCompleted(session: TranscriptSession, chunkIndex: number): void {
+function recordAsrCompleted(session: TranscriptSession, chunkIndex: number, sessionId: string): void {
   if (!Number.isInteger(chunkIndex) || chunkIndex < 0) return
   if (!session.asrCompletedIndices) session.asrCompletedIndices = []
   insertSortedUnique(session.asrCompletedIndices, chunkIndex)
+  // 6.86.0: the canonical answer replaces the grey provisional line for this chunk (live-provisional.ts).
+  liveProvisional().settle(sessionId, chunkIndex)
+}
+
+/** 6.86.0: keep the newest preview of a LIVE meeting for COS Control's grey line. Only a session this server holds (a
+ *  close removes it from `sessions`), and only while that chunk is still open: a preview that lands after its chunk (or a
+ *  later one) settled is stale. Memory only; never logged. */
+function noteLiveProvisional(sessionId: string, chunkIndex: number, previewGen: number, text: string, model: string): void {
+  const session = sessions.get(sessionId)
+  if (!session) return
+  const completed = session.asrCompletedIndices ?? []
+  if (completed.length && chunkIndex <= completed[completed.length - 1]) return
+  liveProvisional().record(sessionId, { chunkIndex, previewGen, text, model })
 }
 
 function canonicalIndices(session: TranscriptSession): number[] {
@@ -1773,6 +1788,7 @@ function finishClosingTranscriptSession(
   sessions.delete(sessionId)
   sessionAudioBytes.delete(sessionId)
   sessionAudioWrites.delete(sessionId)
+  liveProvisional().clear(sessionId)
   // Clean up inline hallucination tracking (was leaking until 4-hour interval fired)
   clearSessionHallucinationState(sessionId)
   // Track as deleted so orphan heartbeats get 410 Gone (prevents zombie client spam)
@@ -2377,7 +2393,7 @@ async function processStreamChunk(opts: {
   if (alreadyCanonical?.text) {
     session.lastActivityAt = Date.now()
     recordReceivedChunk(session, chunkIndex)
-    recordAsrCompleted(session, chunkIndex)
+    recordAsrCompleted(session, chunkIndex, sessionId)
     if (candidate && candidateRecordKey) {
       session.providerCandidates![candidateRecordKey].accepted =
         alreadyCanonical.asrProvider === 'iphone-whisperkit-beta' && alreadyCanonical.audioSha256 === audioSha256
@@ -2390,7 +2406,7 @@ async function processStreamChunk(opts: {
   if (alreadyEmpty) {
     session.lastActivityAt = Date.now()
     recordReceivedChunk(session, chunkIndex)
-    recordAsrCompleted(session, chunkIndex)
+    recordAsrCompleted(session, chunkIndex, sessionId)
     persistSessionRequired(sessionId)
     return emptyChunkResponse(alreadyEmpty, sessionId, chunkIndex)
   }
@@ -2543,7 +2559,7 @@ async function processStreamChunk(opts: {
     }
     session.emptyCompletions ??= {}
     session.emptyCompletions[String(chunkIndex)] = emptyCompletion
-    recordAsrCompleted(session, chunkIndex)
+    recordAsrCompleted(session, chunkIndex, sessionId)
     persistSessionRequired(sessionId)
     scheduleSessionProgressiveHq(sessionId)
     return emptyChunkResponse(emptyCompletion, sessionId, chunkIndex)
@@ -2578,12 +2594,12 @@ async function processStreamChunk(opts: {
         session.providerCandidates[candidateRecordKey].accepted ? undefined : 'canonical_exists'
     }
     session.lastActivityAt = Date.now()
-    recordAsrCompleted(session, chunkIndex)
+    recordAsrCompleted(session, chunkIndex, sessionId)
     persistSessionRequired(sessionId)
     return canonicalChunkResponse(finalExisting, sessionId, chunkIndex)
   }
   session.chunks[chunkIndex] = chunk
-  recordAsrCompleted(session, chunkIndex)
+  recordAsrCompleted(session, chunkIndex, sessionId)
   if (candidate && candidateRecordKey) {
     if (session.providerCandidates?.[candidateRecordKey]) {
       session.providerCandidates[candidateRecordKey].accepted = asrProvider === 'iphone-whisperkit-beta'
@@ -2690,6 +2706,7 @@ transcribeStreamRouter.post('/transcribe-stream/preview', async (req, res) => {
       if (!cleaned || sharedIsFullHallucination(cleaned)) {
         return void res.status(204).send()
       }
+      noteLiveProvisional(sessionId, chunkIndex, previewGen, cleaned, result.model)
       return void res.json({
         sessionId,
         chunkIndex,
@@ -2706,6 +2723,20 @@ transcribeStreamRouter.post('/transcribe-stream/preview', async (req, res) => {
   } catch (err: unknown) {
     sendStreamError(res, err)
   }
+})
+
+/**
+ * 6.86.0: GET /transcribe-stream/provisional?sessionId=<id>. The newest provisional text of a live meeting, for COS
+ * Control's grey line (live-provisional.ts). Token-authenticated like every /api route; private, no-store. Memory only:
+ * a restart, a save or a settled chunk empties it. `live` is false when this server holds no open session by that id.
+ */
+transcribeStreamRouter.get('/transcribe-stream/provisional', (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : ''
+  if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) return void res.status(400).json({ error: 'invalid sessionId', reason: 'invalid_session_id' })
+  const live = sessions.has(sessionId)
+  const held = live ? liveProvisional().read(sessionId) : null
+  res.json({ v: 1, sessionId, live, provisional: held, serverInstanceId: getServerInstanceId() })
 })
 
 /** Unlike the received ledger, only these canonical completions acknowledge ASR.
@@ -2741,6 +2772,9 @@ transcribeStreamRouter.post('/mac-recording/start', (req, res) => {
   try {
     const serverInstanceId = requireMacPin(req)
     if (typeof req.body?.captureId !== 'string' || !MAC_CAPTURE_ID.test(req.body.captureId)) throw macError(400, 'invalid_capture_id', 'Invalid Mac capture ID')
+    // 6.86.0: `liveCues: true` asks for live cues on this recording (COS Control's live meeting view). Checked before
+    // anything is written, so a bad body admits nothing.
+    if (req.body.liveCues !== undefined && typeof req.body.liveCues !== 'boolean') throw macError(400, 'invalid_live_cues', 'liveCues must be true or false')
     if (isSessionDeleted(req.body.captureId) || getMeetingStore().findBySessionId(req.body.captureId)) throw macError(410, 'session_closed', 'Capture is closed')
     // An existing non-Mac session may not acquire new source metadata.
     if (sessions.has(req.body.captureId) && !readMacRecording(req.body.captureId)) throw macError(409, 'mac_capture_conflict', 'Capture ID already exists')
@@ -2749,7 +2783,13 @@ transcribeStreamRouter.post('/mac-recording/start', (req, res) => {
     const session = getSession(recording.sessionId)
     if (!session.chunks.some(Boolean)) session.startTime = recording.startTime
     persistSessionRequired(recording.sessionId)
-    res.json({ ...MAC_AUDIO, ...recording, replayed, serverInstanceId })
+    // Arming happens only after the recording is admitted, and its answer never fails the start (armMacLiveCues returns a
+    // reason code instead of throwing). Without `liveCues: true` the answer is byte for byte what 6.85.0 sent.
+    let liveCues: MacLiveCuesAnswer | undefined
+    if (req.body.liveCues === true) {
+      try { liveCues = armMacLiveCues(recording.sessionId) } catch { liveCues = { armed: false, reason: 'unavailable' } }
+    }
+    res.json({ ...MAC_AUDIO, ...recording, replayed, serverInstanceId, ...(liveCues ? { liveCues } : {}) })
   } catch (error) { sendStreamError(res, error) } finally { lease?.release() }
 })
 const macChunkLocks = new Set<string>()

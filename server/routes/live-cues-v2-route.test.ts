@@ -56,4 +56,19 @@ describe('live cues v2 routes', () => {
     expect(again.status).toBe(409)
     expect(await again.json()).toMatchObject({ reason: 'meeting_ended', protocol: 2 })
   })
+
+  it('6.86.0: start answers the meeting kinds; kinds extended opts a meeting in; any other kinds value is 400 and arms nothing', async () => {
+    delete process.env.COS_LIVE_CUES; process.env.COS_LIVE_CUES_V2 = '1'; delete process.env.ANTHROPIC_API_KEY
+    expect(await (await post('/live-cues/start', { sessionId: 'meeting_c' })).json()).toMatchObject({ armed: true, kinds: ['reinforce', 'challenge'] })
+    expect(await (await post('/live-cues/start', { sessionId: 'meeting_d', kinds: 'extended' })).json())
+      .toMatchObject({ armed: true, kinds: ['reinforce', 'challenge', 'decision', 'promise', 'followUp'] })
+    expect(await (await post('/live-cues/start', { sessionId: 'mac_0f8fad5b-d9cb-469f-a165-70867728950e' })).json())
+      .toMatchObject({ armed: true, kinds: ['reinforce', 'challenge', 'decision', 'promise', 'followUp'] })
+    for (const kinds of ['all', true, ['decision']]) {
+      const bad = await post('/live-cues/start', { sessionId: 'meeting_e', kinds })
+      expect(bad.status, JSON.stringify(kinds)).toBe(400)
+      expect(await bad.json()).toMatchObject({ reason: 'invalid_kinds' })
+    }
+    expect((await (await fetch(base + '/live-cues/status?sessionId=meeting_e')).json() as { session: unknown }).session).toBeNull()
+  })
 })

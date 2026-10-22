@@ -73,6 +73,14 @@ import { maintenanceLifecycle } from '../lib/maintenance-lifecycle.js'
 import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
 import { liveCuesV2Advertised } from '../lib/live-cues-v2.js'
+import { liveMeetingCapability } from '../lib/live-provisional.js'
+import { CUE_KINDS } from '../../shared/live-cues-v2.js'
+
+/** 6.86.0: `capabilities.liveCues.kinds`, the cue kinds this server can write (additive; an older server omits it, which
+ *  is how a client knows to expect only reinforce and challenge). Which kinds a given meeting gets is in its arm answer. */
+function withCueKinds<T extends object>(capability: T): T & { kinds: string[] } {
+  return { ...capability, kinds: [...CUE_KINDS] }
+}
 import { transcriptCleanupAdvertised } from './transcript-cleanup.js'
 import { getMeetingSyncSnapshot } from '../lib/meeting-batch-progress.js'
 import { listUnsavedCaptures } from '../lib/unsaved-audio-quarantine.js'
@@ -506,8 +514,9 @@ healthRouter.get('/health', async (_req, res) => {
         carriedAcrossBoot: maintenance.operation?.carriedAcrossBoot ?? false,
       },
       cliDebug: CLI_DEBUG_CAPABILITY,
-      liveCues,
+      liveCues: withCueKinds(liveCues),
       ...(liveCuesV2Advertised() ? { liveCuesV2: liveCuesV2Advertised() } : {}),
+      liveMeeting: liveMeetingCapability(),
       // 6.77.0: codes only (this route is public): the protocol and whether the switch is on.
       transcriptCleanup: transcriptCleanupAdvertised(),
       richMedia: {
@@ -703,8 +712,9 @@ healthRouter.get('/models', async (req, res) => {
       // Same helper as /api/health — the companion's 15s liveness poll reads
       // THIS surface, so a value present only on /api/health leaves the
       // live-cues indicator blind.
-      liveCues: liveCuesCapability(),
+      liveCues: withCueKinds(liveCuesCapability()),
       ...(liveCuesV2Advertised() ? { liveCuesV2: liveCuesV2Advertised() } : {}),
+      liveMeeting: liveMeetingCapability(),
       richMedia: {
         video: richMedia.video,
         maxPromptVisuals: MAX_MODEL_IMAGE_INPUTS,

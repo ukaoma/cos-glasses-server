@@ -2,13 +2,29 @@
  * Live cues v2 wire contract (server 6.75 candidate, companion 6.10.641 candidate; optional capability fields since 6.76.2).
  * Additive to v1: old clients keep receiving `coaching_nudge` and ignore the new named event.
  * The companion keeps a byte-identical copy at src/lib/live-cues-v2-contract.ts.
+ * 6.86.0 widens CueKind (additive for every meeting that did not opt in; see CueKind). A companion that has not taken this
+ * copy keeps validating the two legacy kinds, which is safe because it is never sent anything else.
  */
 export const LIVE_CUES_V2_PROTOCOL = 2 as const
 export const CUE_HEADLINE_MAX = 64
 export const CUE_DETAIL_MAX = 220
 export const CUE_FEEDBACK_REASON_MAX = 200
 
-export type CueKind = 'reinforce' | 'challenge'
+/** 6.86.0: three more kinds for COS Control's live meeting view. A meeting gets them only when its armer opts in (a Mac
+ *  recording, or POST /live-cues/start with `kinds: 'extended'`). Every other meeting keeps the two legacy kinds, so a
+ *  companion that validates `kind` against reinforce | challenge never sees a cue it would drop. Readers must treat any
+ *  kind they do not know as a plain cue, never as an error. */
+export type CueKind = 'reinforce' | 'challenge' | 'decision' | 'promise' | 'followUp'
+export const LEGACY_CUE_KINDS = ['reinforce', 'challenge'] as const
+export const CUE_KINDS = ['reinforce', 'challenge', 'decision', 'promise', 'followUp'] as const
+export type CueKindSet = 'legacy' | 'extended'
+export function isCueKind(value: unknown): value is CueKind {
+  return typeof value === 'string' && (CUE_KINDS as readonly string[]).includes(value)
+}
+/** The legacy kind a v1 reader is shown for any kind (the `coaching_nudge` twin and the stop answer's `nudges`). */
+export function legacyCueKind(kind: CueKind): 'reinforce' | 'challenge' {
+  return kind === 'reinforce' || kind === 'decision' || kind === 'promise' ? 'reinforce' : 'challenge'
+}
 
 /** A past meeting the cue drew on (0 to 2 per cue). */
 export interface CueSourceRef { id: string; date: string; title: string }
@@ -31,7 +47,7 @@ export interface LiveCueV2 {
 }
 
 /** v1 `coaching_nudge` as the v2 engine emits it for old clients (headline only). */
-export interface LiveCueV1Compat { nudge: string; type: CueKind; priority: 2; cueId: string; sessionId: string; protocol: 2 }
+export interface LiveCueV1Compat { nudge: string; type: 'reinforce' | 'challenge'; priority: 2; cueId: string; sessionId: string; protocol: 2 }
 
 /** `reason` when unavailable: master_flag_off, api_key_in_env, decision_invalid_provider, decision_not_configured (no key
  *  for the selected decision provider; jev_not_configured when Jev was chosen and only a SubQ key exists), claude_not_found,
@@ -75,7 +91,7 @@ export function isLiveCueV2(value: unknown): value is LiveCueV2 {
   return v.protocol === 2 && typeof v.cueId === 'string' && v.cueId.length > 0 && typeof v.sessionId === 'string'
     && typeof v.headline === 'string' && v.headline.length > 0 && v.headline.length <= CUE_HEADLINE_MAX
     && typeof v.detail === 'string' && v.detail.length > 0 && v.detail.length <= CUE_DETAIL_MAX
-    && (v.kind === 'reinforce' || v.kind === 'challenge')
+    && isCueKind(v.kind)
     && Array.isArray(v.sources) && v.sources.length <= 2
     && v.sources.every(s => !!s && typeof (s as CueSourceRef).id === 'string' && typeof (s as CueSourceRef).date === 'string' && typeof (s as CueSourceRef).title === 'string')
     && typeof v.gate === 'number' && typeof v.createdAt === 'number' && typeof v.model === 'string'

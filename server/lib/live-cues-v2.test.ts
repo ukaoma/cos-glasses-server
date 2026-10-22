@@ -31,7 +31,8 @@ describe('pins', () => {
   })
   it('the wire contract matches the companion copy byte for byte (src/lib/live-cues-v2-contract.ts pins the same hash)', () => {
     // 6.76.2: optional capability fields memory and decisionProvider, and four decision_* stop reasons (additive; was df08c712...).
-    expect(sha('FILE:' + new URL('../../shared/live-cues-v2.ts', import.meta.url).pathname)).toBe('174728e74100f9ab8067bb7980a15742da73a6155cef0e5eea62c1d7e1a031f7')
+    // 6.86.0: CueKind widened to decision | promise | followUp, sent only to meetings that opt in (was 174728e7...).
+    expect(sha('FILE:' + new URL('../../shared/live-cues-v2.ts', import.meta.url).pathname)).toBe('ad51c642a6e996ff3b2f55f2679937abbc1bc41916fc4e186b7b5d5a62c2c5b5')
   })
   it('the gate threshold was calibrated on jev-1.13.0; a model change needs a new replay', () => {
     expect(JEV_MODEL).toBe('jev-1.13.0')

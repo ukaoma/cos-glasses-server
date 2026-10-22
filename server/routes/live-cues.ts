@@ -1,7 +1,9 @@
 // Live Cues routes. Authenticated by the global /api X-Cos-Token middleware
 // (index.ts:148) like every other /api route — no route-local auth needed.
 //
-// POST /live-cues/start { sessionId }  -> { armed, sessionId, pipelinesUsed }
+// POST /live-cues/start { sessionId, kinds? }  -> { armed, sessionId, pipelinesUsed } (v1) or the v2 arm answer
+//   kinds (6.86.0, v2 only): 'legacy' (reinforce, challenge) or 'extended' (plus decision, promise, followUp). Absent: a
+//   Mac recording (mac_ id) gets extended, every other meeting legacy, so an older companion never sees a kind it drops.
 // POST /live-cues/stop  { sessionId }  -> { nudgesGenerated, nudges }
 // GET  /live-cues/status               -> engine snapshot + capability
 // GET  /live-cues/v2/settings           -> { enabled, source: env|setting|default, capability }       (6.76.2)
@@ -45,8 +47,12 @@ liveCuesRouter.post('/live-cues/start', async (req, res) => {
   if (!sessionId || !SESSION_ID.test(sessionId)) {
     return res.status(400).json({ error: 'sessionId required', reason: 'missing_session_id' })
   }
+  const kinds = (req.body as { kinds?: unknown } | undefined)?.kinds
+  if (kinds !== undefined && kinds !== 'legacy' && kinds !== 'extended') {
+    return res.status(400).json({ error: "kinds must be 'legacy' or 'extended'", reason: 'invalid_kinds' })
+  }
   try {
-    if (liveCuesV2Enabled()) return res.json(liveCuesV2().arm(sessionId))
+    if (liveCuesV2Enabled()) return res.json(liveCuesV2().arm(sessionId, kinds ? { kinds } : {}))
     const result = await armLiveCues(sessionId)
     return res.json(result)
   } catch (error) {

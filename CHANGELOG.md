@@ -1,3 +1,92 @@
+## 6.86.0 - Decision, promise and follow-up cues, live cues on Mac recordings, and the grey provisional line
+
+The server half of COS Control's live meeting view (plan of 2026-10-22, decisions of 15:21). Three lanes: three more cue
+kinds from the same single writer call, live cues on Mac recordings when COS Control asks for them, and the newest
+provisional (grey) line of a live meeting for Control to show before the final text replaces it.
+
+- **This adds spend for Mac meetings.** Until now a Mac recording never got live cues. From this release, a Mac
+  recording that COS Control starts with `liveCues: true` runs the live cues pipeline (the Jev gate and judge, and the
+  one Claude writer call per evaluation) for that meeting. It is capped by the same budgets as every meeting: the
+  master switch (COS Control's Live cues toggle, or `COS_LIVE_CUES_V2`), 25 cues and 50 writer calls a meeting, the
+  daily writer ceiling and gate COS Control sets, the weekly writer ceiling, the Jev daily token cap and breaker, and
+  the per-meeting breaker. There is no new LLM caller. `COS_LIVE_CUES_V2_MAC=0` switches Mac recordings off on their
+  own (answer `mac_cues_off`) and leaves glasses meetings alone. An older COS Control never sends `liveCues`, so it
+  starts no Mac cues and spends nothing new.
+- **Pairs with the COS Control live meeting view** (the Control half ships separately). An older Control and every
+  companion are unaffected: glasses meetings keep reinforce and challenge, byte-identical writer rules, and the
+  same wire shapes.
+- **Privacy.** Nothing new logs transcript text. 6.85.0 already took the text out of the per-chunk `[perf] TOTAL`
+  line (`transcribe-stream-log-privacy.test.ts`, re-run here). The provisional line is held in memory only, never
+  written to disk or the log.
+- **Checks (6.86.0 branch).** Full suite, serial (`--maxWorkers=1`), HOME, COS_DATA_DIR and COS_PROFILE_PATH in a
+  scratch folder, COS_SCRIPTS_DIR unset: 581 files (580 passed, 1 skipped), 8796 tests, 8782 passed, 14 skipped, 0
+  failed. Mutation gate `live-meeting-6860-mutation-gate.mjs` against a green baseline (159 tests in 7 files): 63 of
+  63 killed, each by a named test, every target landing exactly once and restored byte for byte. The 6.79.x verdicts
+  gate's `schema-kind` mutant, retargeted to `isCueKind`, is still killed. `tsc --noEmit` clean. `npm pack --dry-run`:
+  545 files (6.85.0's 543 plus `server/lib/live-provisional.ts` and `server/lib/live-cues-v2-prompts-kinds.ts`), no
+  test, gate or fixture.
+
+### Cue kinds: decision, promise and followUp
+
+- **`CueKind`** (`shared/live-cues-v2.ts`) is now `reinforce | challenge | decision | promise | followUp`, with
+  `CUE_KINDS`, `LEGACY_CUE_KINDS`, `isCueKind` and `legacyCueKind`. `isLiveCueV2` and the cue log reader accept the
+  five kinds and still refuse anything else.
+- **Opt-in per meeting.** A meeting gets the new kinds only when its armer asks: a Mac recording (`mac_` capture id)
+  by default, or `POST /api/live-cues/start {sessionId, kinds: 'extended'}`. `kinds: 'legacy'` forces the two old
+  kinds; any other value is 400 `invalid_kinds` and arms nothing. A glasses meeting armed as before keeps reinforce and
+  challenge: a companion that has not taken the new contract validates `kind` against those two and would drop
+  anything else. The arm answer adds `kinds` (the list this meeting may carry). A repeat arm keeps the first kinds.
+- **Writer rules v4** (`server/lib/live-cues-v2-prompts-kinds.ts`) run only for those meetings: v3 with rule 3 (five
+  kinds: a decision says what was decided, a promise says who owes what, a followUp names what is still open), rule 4
+  (a decision, promise or followUp may record what the room said) and the schema kind list swapped. Everything else
+  is v3: one cue, at most 200 characters, the same evidence rules, null for noise. Built from v3 by exact swaps, so a
+  regenerated v3 fails the suite instead of shipping under the v4 label. Not replay-measured; rate them in Control.
+  The generated `live-cues-v2-prompts.ts` is unchanged, so the v2 and v3 replay pins hold.
+- **Old readers.** The v1 `coaching_nudge` twin and the stop answer's `nudges[].type` carry a legacy type (decision
+  and promise read as reinforce, followUp as challenge). The v2 cue, the status route and history keep the real kind.
+  COS Control before this release shows an unknown kind as its raw name (`MeetingAskCore.kindLabel` default).
+- **Trace.** An evaluation of an extended meeting traces `kindSet: 'extended'` and `prompt: 'v4'`; the trace still
+  carries no transcript text.
+
+### Live cues on Mac recordings
+
+- **Arm point.** `POST /api/mac-recording/start {captureId, startTime, sourceType, liveCues: true}`. Arming runs only
+  after the recording is admitted, and never fails the start: the answer adds `liveCues: {armed: true, kinds,
+  cuesGenerated, paused, pauseSeq}` or `{armed: false, reason}` (`master_flag_off`, `mac_cues_off`, `meeting_ended`,
+  `budget_exhausted`, `jev_cap_reached`, and the other capability reasons). With v2 off the engine is never built,
+  so a Mac recording never reaches the v1 Composer path. `liveCues` that is not a boolean is 400 `invalid_live_cues`
+  before anything is written. Without `liveCues` the answer is byte for byte 6.85.0's.
+- **Resume.** A Mac recording armed from the start route is remembered in `live-cues-v2-state.json` (`resume`, with
+  its kinds). A restarted server re-arms it on its next chunk and traces one `resume` row. Cleared when the meeting
+  ends; expires with the counters (24 h).
+- **Title.** Mac meetings are titled `Mac Recording <date> <time>` in the gate, the writer prompt and the cue log.
+- **Pause and stop** are the existing routes: `POST /api/live-cues/pause` and the save, which ends the meeting's
+  cues through `recording_stop`.
+
+### The grey provisional line
+
+- **Route.** `GET /api/transcribe-stream/provisional?sessionId=<id>` (token-protected, `private, no-store`) answers
+  `{v: 1, sessionId, live, provisional: {chunkIndex, previewGen, text, model, at} | null, serverInstanceId}`.
+- **What it holds.** The newest preview the preview route produced for a session this server holds open, one per
+  meeting: a later chunk, or the same chunk with a later `previewGen`, replaces it; a preview for a chunk that already
+  settled is refused. The canonical answer for that chunk (text, silence or a drop) removes it, and so does any close.
+  Bounded: the last 600 characters, 8 meetings, 30 s without an update reads as none.
+- **Why a route and not the active-session file.** That file is the 4-hour crash-recovery record and is written with
+  fsync before each chunk is acknowledged. Provisional text must not outlive the live session, and writing the file
+  per preview would add a durable write on the recording path and churn the stamp Control uses to skip reads.
+- **Mac recordings.** COS Control does not post previews today, so a Mac recording has no provisional text until it
+  does. The minimal path needs no server change: Control posts a copy of the still-open chunk (canonical 16 kHz mono
+  WAV, at most 512 KB, about 16 s) to the existing `POST /api/transcribe-stream/preview` with the capture id, the open
+  chunk index and a rising `previewGen`. The answer carries the text, and the route above serves it too. Preview runs
+  Whisper Turbo (or Parakeet when selected); transcription never calls an LLM.
+
+### Capabilities
+
+- `capabilities.liveCues.kinds`: the five kinds, beside the unchanged v1 `available` and `reason`.
+- `capabilities.liveMeeting: {protocol: 1, macLiveCues: true, provisional: {route, maxChars: 600, ttlMs: 30000}}`.
+- Both on `/api/health` and `/api/models` from one helper. An older server omits them, which is how COS Control knows
+  to hide the inline kinds, skip `liveCues` on the Mac start and skip the grey line.
+
 ## 6.85.0 - Your polish instructions, and COS Control can list the questions COS is answering right now
 
 Two lanes and a privacy fix in one release. Your own polish instructions for AI dictation polish, layered after

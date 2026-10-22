@@ -43,9 +43,11 @@ import { cueBefore, liveCueVerdicts, type LiveCueLogRow } from './live-cue-verdi
 import { repeatOf, wouldWithhold } from './live-cues-filter.js'
 import { errMsg } from './utils.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
+import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
+import { MAC_CAPTURE_ID } from './mac-recording.js'
 import {
-  CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, LIVE_CUES_V2_PROTOCOL, isLiveCueV2,
-  type CueKind, type CueSourceRef, type LiveCueV1Compat, type LiveCueV2, type LiveCuesV2Capability, type LiveCuesV2MemorySource,
+  CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isLiveCueV2, legacyCueKind,
+  type CueKind, type CueKindSet, type CueSourceRef, type LiveCueV1Compat, type LiveCueV2, type LiveCuesV2Capability, type LiveCuesV2MemorySource,
   type LiveCuesV2SessionStatus, type LiveCuesV2StatusResponse, type LiveCuesV2StopReason,
 } from '../../shared/live-cues-v2.js'
 
@@ -174,8 +176,22 @@ export function liveCuesV2Model(env: NodeJS.ProcessEnv = process.env): string {
   if (raw === 'sonnet' || raw === '') return 'claude-sonnet-5-5'
   return /^claude-[a-z0-9.-]{3,40}$/.test(raw) ? raw : 'claude-sonnet-5-5'
 }
-export function liveCuesV2WriterSystem(env: NodeJS.ProcessEnv = process.env): { version: 'v2' | 'v3'; system: string } {
+/** The writer rules. A meeting with the extended kinds (6.86.0) always runs v4: v2 and v3 only know reinforce and challenge.
+ *  Every other meeting is unchanged: COS_LIVE_CUES_V2_PROMPT=v2 picks v2, anything else v3. */
+export function liveCuesV2WriterSystem(env: NodeJS.ProcessEnv = process.env, kinds: CueKindSet = 'legacy'): { version: 'v2' | 'v3' | 'v4'; system: string } {
+  if (kinds === 'extended') return { version: 'v4', system: CUE_WRITER_SYSTEM_V4 }
   return (env.COS_LIVE_CUES_V2_PROMPT ?? '').trim() === 'v2' ? { version: 'v2', system: CUE_WRITER_SYSTEM_V2 } : { version: 'v3', system: CUE_WRITER_SYSTEM_V3 }
+}
+/** 6.86.0: which kinds a meeting gets when its armer does not say. A Mac recording (`mac_` capture id) is read only by COS
+ *  Control, which shows any kind, so it gets the extended set; every other meeting keeps the two legacy kinds, because a
+ *  companion that validates `kind` drops a cue whose kind it does not know. */
+export function defaultCueKindSet(sessionId: string): CueKindSet {
+  return MAC_CAPTURE_ID.test(sessionId) ? 'extended' : 'legacy'
+}
+/** 6.86.0: env COS_LIVE_CUES_V2_MAC=0 refuses live cues on Mac recordings (reason mac_cues_off) without touching glasses
+ *  meetings. Unset or anything else: Mac recordings may be armed, under the same switch and limits as every meeting. */
+export function liveCuesV2MacAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.COS_LIVE_CUES_V2_MAC ?? '').trim() !== '0'
 }
 export function liveCuesV2WeeklyCap(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.COS_LIVE_CUES_V2_WEEKLY)
@@ -253,7 +269,10 @@ export interface ParsedCue { detail: string; kind: CueKind; memoryIds: string[];
 export type CueRejection = 'null' | 'unparseable' | 'empty' | 'too_long' | 'unsupported_number'
 /** `enforceNumbers` withholds a cue whose numbers are not in the source. Off by default: on the held-out replay the
  *  guard fired on 3 v3 cues and only 1 was unsupported (ASR writes "300 000" and "a hundred"), so it is traced, not enforced. */
-export function parseWriterCue(raw: string, fallbackKind: CueKind, window: string, kept: MemoryNote[], enforceNumbers = false): ParsedCue | CueRejection {
+/** `allowed` is the meeting's kind set (6.86.0): a kind outside it, or none, falls back to the gate's kind, so a legacy
+ *  meeting can never carry decision, promise or followUp even when the writer answers with one. */
+export function parseWriterCue(raw: string, fallbackKind: CueKind, window: string, kept: MemoryNote[], enforceNumbers = false,
+  allowed: readonly CueKind[] = LEGACY_CUE_KINDS): ParsedCue | CueRejection {
   const text = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
   if (!text || text === 'null') return 'null'
   const start = text.indexOf('{'), end = text.lastIndexOf('}')
@@ -265,7 +284,7 @@ export function parseWriterCue(raw: string, fallbackKind: CueKind, window: strin
   if (cue.length > CUE_DETAIL_MAX) return 'too_long'
   const numberFlags = unsupportedNumbers(cue, window, kept)
   if (enforceNumbers && numberFlags.length) return 'unsupported_number'
-  const kind: CueKind = value.kind === 'reinforce' || value.kind === 'challenge' ? value.kind : fallbackKind
+  const kind: CueKind = typeof value.kind === 'string' && (allowed as readonly string[]).includes(value.kind) ? value.kind as CueKind : fallbackKind
   const ids = new Set(kept.map(m => m.id))
   const memoryIds = Array.isArray(value.memoryIds) ? [...new Set(value.memoryIds.filter((x): x is string => typeof x === 'string' && ids.has(x)))] : []
   return { detail: cue, kind, memoryIds, numberFlags }
@@ -296,6 +315,9 @@ interface DurableState {
   ended: Record<string, number>; paused: Record<string, boolean>; pauseSeq: Record<string, number>
   meetings: Record<string, MeetingCounters>
   day: string; today: LiveCuesV2DayUsage
+  /** 6.86.0: meetings armed with resume (Mac recordings): a restarted server re-arms them on their next chunk, with the
+   *  kind set they were armed with. Cleared at end; expires with the counters (24 h). */
+  resume: Record<string, { at: number; kinds: CueKindSet }>
 }
 /** Local calendar day (YYYY-MM-DD) in `zone`. Intl, never toISOString: a UTC key flips the day at 19:00 Central. */
 export function localDay(now: Date, zone: string): string {
@@ -326,6 +348,8 @@ export class LiveCuesV2Store {
       const meetings = keep<MeetingCounters>(s.meetings, c => !!c && typeof c.at === 'number' && c.at >= nowMs - LIVE_CUES_V2_LIMITS.counterTtlMs)
       const live = (id: string) => id in meetings || !(id in ended)
       const paused = keep<boolean>(s.paused, v => v === true)
+      const resume = keep<{ at: number; kinds: CueKindSet }>(s.resume, r => !!r && typeof r === 'object' && typeof r.at === 'number'
+        && r.at >= nowMs - LIVE_CUES_V2_LIMITS.counterTtlMs && (r.kinds === 'legacy' || r.kinds === 'extended'))
       const pauseSeq = keep<number>(s.pauseSeq, v => typeof v === 'number' && Number.isFinite(v))
       for (const id of Object.keys(paused)) if (!live(id) && !(id in meetings)) delete paused[id]
       const sameWeek = s.weekStart === week
@@ -341,12 +365,12 @@ export class LiveCuesV2Store {
       else today = DAY_FIELDS.every(f => t[f] === undefined || Number(t[f]) >= 0)
         ? Object.fromEntries(DAY_FIELDS.map(f => [f, Number(t[f] ?? 0)])) as unknown as LiveCuesV2DayUsage
         : spentDay()
-      return { zone, weekStart: week, writerCalls: saturated ? Number.MAX_SAFE_INTEGER : sameWeek ? calls : 0, ended, paused, pauseSeq, meetings, day, today }
+      return { zone, weekStart: week, writerCalls: saturated ? Number.MAX_SAFE_INTEGER : sameWeek ? calls : 0, ended, paused, pauseSeq, meetings, day, today, resume }
     } catch {
       // An unreadable file fails closed for this week and this day (no spending) but keeps cues off nothing else.
       const zone = validZone(Intl.DateTimeFormat().resolvedOptions().timeZone) ?? 'UTC'
       return { zone, weekStart: localWeekStart(this.now(), zone), writerCalls: Number.MAX_SAFE_INTEGER, ended: {}, paused: {}, pauseSeq: {}, meetings: {},
-        day: localDay(this.now(), zone), today: spentDay() }
+        day: localDay(this.now(), zone), today: spentDay(), resume: {} }
     }
   }
   private write(s: DurableState): void {
@@ -393,7 +417,16 @@ export class LiveCuesV2Store {
     return m ? { cues: m.cues, writerCalls: m.writerCalls } : null
   }
   weeklyUsed(): number { return this.read().writerCalls }
-  end(sessionId: string): void { const s = this.read(); s.ended[sessionId] = this.now().getTime(); delete s.paused[sessionId]; this.write(s) }
+  end(sessionId: string): void { const s = this.read(); s.ended[sessionId] = this.now().getTime(); delete s.paused[sessionId]; delete s.resume[sessionId]; this.write(s) }
+  /** 6.86.0: remember an armed meeting so a restarted server re-arms it on its next chunk. One write, only when new. */
+  setResume(sessionId: string, kinds: CueKindSet): void {
+    const s = this.read()
+    if (sessionId in s.ended || s.resume[sessionId]?.kinds === kinds) return
+    s.resume[sessionId] = { at: this.now().getTime(), kinds }
+    this.write(s)
+  }
+  /** The kind set a meeting was armed with for resume, or null. */
+  resumeKinds(sessionId: string): CueKindSet | null { return this.read().resume[sessionId]?.kinds ?? null }
   isEnded(sessionId: string): boolean { return sessionId in this.read().ended }
   /** Applies only when `seq` is absent or newer than the last applied one. */
   setPaused(sessionId: string, paused: boolean, seq?: number): { applied: boolean; paused: boolean; pauseSeq: number } {
@@ -600,7 +633,13 @@ interface Session {
   /** The last reason cues were not produced, cleared by the next evaluation that runs the writer. */
   stopReason: LiveCuesV2StopReason | null
   skipTracedAt: Record<string, number>
+  /** 6.86.0: the kinds this meeting's cues may carry, fixed at arm. */
+  kinds: CueKindSet
 }
+
+/** 6.86.0: how a meeting is armed. `kinds` defaults by session (defaultCueKindSet); `resume` makes a restarted server re-arm
+ *  it on its next chunk (the Mac recording start passes it). */
+export interface LiveCuesV2ArmOptions { kinds?: CueKindSet; resume?: boolean }
 
 export class LiveCuesV2ArmError extends Error {
   constructor(readonly code: string, readonly status: number, message: string) { super(message); this.name = 'LiveCuesV2ArmError' }
@@ -658,22 +697,32 @@ export class LiveCuesV2Engine {
     }
   }
 
-  /** Idempotent. A repeat start for an armed meeting keeps its counters; an ended meeting cannot be re-armed. */
-  arm(sessionId: string): { armed: true; sessionId: string; protocol: 2; cuesGenerated: number; paused: boolean; pauseSeq: number } {
+  /** Idempotent. A repeat start for an armed meeting keeps its counters and its kinds; an ended meeting cannot be re-armed.
+   *  `kinds` (6.86.0, additive) is the kind list this meeting's cues may carry. */
+  arm(sessionId: string, opts: LiveCuesV2ArmOptions = {}): { armed: true; sessionId: string; protocol: 2; cuesGenerated: number; paused: boolean; pauseSeq: number; kinds: CueKind[] } {
     this.reap()
     const cap = this.capability()
     if (!cap.available) throw new LiveCuesV2ArmError(cap.reason ?? 'unavailable', cap.reason === 'master_flag_off' ? 403 : 503, `Live cues v2 unavailable: ${cap.reason}.`)
+    const mac = MAC_CAPTURE_ID.test(sessionId)
+    if (mac && !liveCuesV2MacAllowed(this.deps.env)) throw new LiveCuesV2ArmError('mac_cues_off', 403, 'Live cues are switched off for Mac recordings (COS_LIVE_CUES_V2_MAC=0).')
     if (this.deps.store.isEnded(sessionId)) throw new LiveCuesV2ArmError('meeting_ended', 409, 'This meeting has ended; live cues cannot be re-armed for it.')
     const existing = this.sessions.get(sessionId)
     const nowMs = this.deps.now().getTime()
-    const answer = (cues: number) => ({ armed: true as const, sessionId, protocol: 2 as const, cuesGenerated: cues, paused: this.deps.store.isPaused(sessionId), pauseSeq: this.deps.store.pauseSeq(sessionId) })
-    if (existing) { existing.lastSeenAt = nowMs; return answer(existing.cues.length) }
+    const answer = (cues: number, kinds: CueKindSet) => ({ armed: true as const, sessionId, protocol: 2 as const, cuesGenerated: cues, paused: this.deps.store.isPaused(sessionId),
+      pauseSeq: this.deps.store.pauseSeq(sessionId), kinds: [...(kinds === 'extended' ? CUE_KINDS : LEGACY_CUE_KINDS)] })
+    if (existing) {
+      existing.lastSeenAt = nowMs
+      if (opts.resume) this.deps.store.setResume(sessionId, existing.kinds)
+      return answer(existing.cues.length, existing.kinds)
+    }
+    const kinds = opts.kinds ?? defaultCueKindSet(sessionId)
     const d = this.deps.now()
-    const title = `G2 Recording ${d.toLocaleDateString('en-CA')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
+    const title = `${mac ? 'Mac' : 'G2'} Recording ${d.toLocaleDateString('en-CA')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
     this.sessions.set(sessionId, { sessionId, title, armedAt: nowMs, lastSeenAt: nowMs, chunks: [], wordsSinceEval: 0, lastEvalAt: 0, lastCueAt: 0,
-      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {} })
+      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds })
+    if (opts.resume) this.deps.store.setResume(sessionId, kinds)
     this.deps.warmMemory()
-    return answer(this.deps.store.counters(sessionId).cues)
+    return answer(this.deps.store.counters(sessionId).cues, kinds)
   }
 
   /** Stop or save: tombstone FIRST (so trailing chunks cannot revive it), then abort any evaluation in flight. */
@@ -683,7 +732,8 @@ export class LiveCuesV2Engine {
     s?.inFlight?.abort()
     const cues = s ? [...s.cues] : []
     return { nudgesGenerated: cues.length, protocol: 2, cues,
-      nudges: cues.map(c => ({ nudge: c.headline, type: c.kind, priority: 2, timestamp: c.createdAt, cueId: c.cueId })) }
+      // v1 readers know two types: an extended kind is shown as its legacy kind there (the cues keep the real one).
+      nudges: cues.map(c => ({ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId })) }
   }
 
   setPaused(sessionId: string, paused: boolean, seq?: number): { ok: true; paused: boolean; applied: boolean; pauseSeq: number } {
@@ -735,8 +785,11 @@ export class LiveCuesV2Engine {
     if (this.deps.store.isEnded(sessionId)) return                    // tombstone before any auto-arm
     let s = this.sessions.get(sessionId)
     if (!s) {
-      if (this.deps.env.COS_LIVE_CUES_AUTO !== '1') return
-      try { this.arm(sessionId) } catch { return }
+      // 6.86.0: a meeting armed with resume (a Mac recording) is re-armed with its kinds after a server restart.
+      const resume = this.deps.store.resumeKinds(sessionId)
+      if (this.deps.env.COS_LIVE_CUES_AUTO !== '1' && !resume) return
+      try { this.arm(sessionId, resume ? { kinds: resume } : {}) } catch { return }
+      if (resume) this.deps.trace({ kind: 'resume', at: this.deps.now().toISOString(), sessionId, kindSet: resume })
       s = this.sessions.get(sessionId)
       if (!s) return
     }
@@ -827,7 +880,8 @@ export class LiveCuesV2Engine {
       if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) { trace.outcome = 'meeting_cap'; return }
       if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) { trace.outcome = 'daily_cap'; s.stopReason = 'budget_exhausted'; return }
       if (!this.deps.store.charge(liveCuesV2WeeklyCap(this.deps.env), s.sessionId)) { trace.outcome = 'budget_exhausted'; s.stopReason = 'budget_exhausted'; return }
-      const { version, system } = liveCuesV2WriterSystem(this.deps.env)
+      const { version, system } = liveCuesV2WriterSystem(this.deps.env, s.kinds)
+      if (s.kinds === 'extended') trace.kindSet = 'extended'
       const model = liveCuesV2Model(this.deps.env)
       const previous = s.cues.slice(-3).map(c => c.detail)
       const promptMemory = kept.map(m => ({ id: m.id, date: m.date, title: m.title, notes: m.notes }))  // the replay's exact keys
@@ -839,7 +893,8 @@ export class LiveCuesV2Engine {
       s.failures = 0
       s.stopReason = null
 
-      const parsed = parseWriterCue(out.text, gate.kind, window, kept, this.deps.env.COS_LIVE_CUES_V2_NUMBER_GUARD === 'withhold')
+      const parsed = parseWriterCue(out.text, gate.kind, window, kept, this.deps.env.COS_LIVE_CUES_V2_NUMBER_GUARD === 'withhold',
+        s.kinds === 'extended' ? CUE_KINDS : LEGACY_CUE_KINDS)
       if (typeof parsed === 'string') { trace.outcome = parsed === 'null' ? 'writer_null' : `withheld_${parsed}`; return }
       const elapsed = this.deps.now().getTime() - started
       if (s.wordsSinceEval > L.staleWords || elapsed > L.staleMs) { trace.outcome = 'stale'; return }
@@ -869,7 +924,7 @@ export class LiveCuesV2Engine {
       s.lastCueAt = cue.createdAt
       this.deps.store.recordCue(s.sessionId)
       this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)
-      const v1: LiveCueV1Compat = { nudge: cue.headline, type: cue.kind, priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
+      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(cue.kind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
       this.deps.emit('coaching_nudge', v1 as unknown as Record<string, unknown>)
       Object.assign(trace, { outcome: 'cue', cueId: cue.cueId, cueChars: cue.detail.length, sources: sources.length, ...(parsed.numberFlags.length ? { numberFlags: parsed.numberFlags.length } : {}) })
     } catch (error) {
@@ -940,6 +995,25 @@ export function liveCuesV2(): LiveCuesV2Engine {
 /** The engine if it exists, without creating one (a v1-only server never builds the v2 clients). */
 export function peekLiveCuesV2(): LiveCuesV2Engine | null { return engine }
 export function liveCuesV2Capability(): LiveCuesV2Capability { return liveCuesV2().capability() }
+
+/** 6.86.0: what POST /api/mac-recording/start answers under `liveCues` when COS Control asked for cues. Never throws:
+ *  a refusal is a reason code and the recording starts regardless. */
+export type MacLiveCuesAnswer =
+  | { armed: true; kinds: CueKind[]; cuesGenerated: number; paused: boolean; pauseSeq: number }
+  | { armed: false; reason: string }
+/** Arms live cues for a Mac recording, under the same switch, caps and limits as every meeting, with the extended kinds and
+ *  resume (a restarted server re-arms it on its next chunk). With v2 off the answer is master_flag_off and the engine is
+ *  never built: a Mac recording never reaches the v1 Composer path. */
+export function armMacLiveCues(sessionId: string, env: NodeJS.ProcessEnv = process.env): MacLiveCuesAnswer {
+  if (!liveCuesV2Enabled(env)) return { armed: false, reason: 'master_flag_off' }
+  if (!liveCuesV2MacAllowed(env)) return { armed: false, reason: 'mac_cues_off' }
+  try {
+    const a = liveCuesV2().arm(sessionId, { resume: true })
+    return { armed: true, kinds: a.kinds, cuesGenerated: a.cuesGenerated, paused: a.paused, pauseSeq: a.pauseSeq }
+  } catch (error) {
+    return { armed: false, reason: error instanceof LiveCuesV2ArmError ? error.code : 'unavailable' }
+  }
+}
 
 /** GET/POST /api/live-cues/v2/settings (COS Control's toggle). */
 export interface LiveCuesV2SettingsResponse { enabled: boolean; source: LiveCuesV2SettingSource; capability: LiveCuesV2Capability }

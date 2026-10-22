@@ -22,7 +22,7 @@ import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { errMsg } from './utils.js'
 import { getMeetingStore } from './meeting-store.js'
 import { findCosOperationsMeetingBySessionId, findDirectLibraryMeetingBySessionId } from './cos-operations-meetings.js'
-import { CUE_FEEDBACK_REASON_MAX, type CueKind, type CueSourceRef, type LiveCuesV2MemorySource } from '../../shared/live-cues-v2.js'
+import { CUE_FEEDBACK_REASON_MAX, isCueKind, type CueKind, type CueSourceRef, type LiveCuesV2MemorySource } from '../../shared/live-cues-v2.js'
 import type { WouldWithhold } from './live-cues-filter.js'
 
 // ── Wire types (server-local: shared/live-cues-v2.ts is hash-pinned with the companion copy) ──
@@ -43,6 +43,7 @@ export interface LiveCueLogRow {
   meetingTitle: string
   createdAt: number
   armedAt?: number
+  /** reinforce | challenge, or (6.86.0, meetings with the extended kinds) decision | promise | followUp. */
   kind: CueKind
   headline: string
   detail: string
@@ -111,7 +112,7 @@ export function isLogRow(value: unknown): value is LiveCueLogRow {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const r = value as Record<string, unknown>
   return r.v === 1 && str(r.cueId) && r.cueId.length > 0 && str(r.sessionId) && r.sessionId.length > 0 && str(r.meetingTitle)
-    && num(r.createdAt) && (r.kind === 'reinforce' || r.kind === 'challenge')
+    && num(r.createdAt) && isCueKind(r.kind)
     && str(r.headline) && str(r.detail) && num(r.gate) && str(r.model) && str(r.before)
     && Array.isArray(r.sources) && r.sources.every(s => !!s && typeof s === 'object' && str((s as CueSourceRef).id) && str((s as CueSourceRef).date) && str((s as CueSourceRef).title))
     && optional(r.armedAt, num) && optional(r.prompt, p => typeof p === 'string' && /^v\d{1,2}$/.test(p))
