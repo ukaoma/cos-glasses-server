@@ -60,6 +60,7 @@ import { G2_LENS_VARIANT_CAPABILITY } from '../lib/media-store.js'
 // whether they are actually registered.
 import { MEDIA_CHUNKED_UPLOAD_ENABLED } from './media.js'
 import { durableQueryJobsCapability, messagesSteerCapability, messagesTrailEnabled } from '../lib/query-job-feature.js'
+import { ACTIVE_QUERY_JOBS_PROTOCOL } from '../lib/query-job-active.js'
 import { claudeSteerSupportKnown } from '../lib/claude-cli-support.js'
 import { jobTrailStats } from '../lib/job-trail.js'
 import { getQueryJobRuntimeHealth } from '../lib/query-job-runtime.js'
@@ -297,6 +298,11 @@ healthRouter.get('/health', async (_req, res) => {
     g2LensVariant: G2_LENS_VARIANT_CAPABILITY,
     durableQueryJobs: durableJobs.enabled,
     durableQueryJobsProtocol: durableJobs.protocolVersion,
+    // 6.84.1: GET /api/query-jobs/active (docs/active-query-jobs.md), the in-flight jobs for
+    // COS Control's Running panel. Static: this build has the route; it lists nothing while
+    // durableQueryJobs is false. Absent on older servers, which answer that path 400.
+    activeQueryJobs: true,
+    activeQueryJobsProtocol: ACTIVE_QUERY_JOBS_PROTOCOL,
     // Static: this build carries the scheduler. The live schedule is under
     // capabilities.morningBrief and may be absent while the runtime boots.
     morningBrief: true,

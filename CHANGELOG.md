@@ -1,4 +1,21 @@
-## 6.85.0 - Your polish instructions: your own direction for AI polish, after COS's built-in rules
+## 6.85.0 - Your polish instructions, and COS Control can list the questions COS is answering right now
+
+Two lanes in one release. Your own polish instructions for AI dictation polish, layered after COS's built-in rules
+(`GET/PUT/DELETE /api/dictation/polish/instructions`, `GET /api/dictation/polish/rules`, capability
+`dictationCleanup.customInstructions`). And a read-only `GET /api/query-jobs/active` route plus an additive
+`calendarRead` field on `GET /api/welcome-context`, for the COS Control Activity home (health
+`features.activeQueryJobs`). The active query jobs lane was built and labelled as 6.84.1; 6.84.1 was never published,
+so 6.85.0 is the first package with either lane.
+
+- **Pairs with COS Control 0.5.335 (build 389)** for the polish instructions box. An older Control does not show the
+  box, and nothing changes for it: with no instructions saved, the polish prompt is byte-identical to 6.84.0.
+- **Defaults.** Polish instructions are off until a user saves some. The active jobs route lists nothing while
+  durable query jobs are off. `calendarRead` is additive; `weather` and `nextEvent` are unchanged.
+- **Package.** `docs/active-query-jobs.md` ships. The custom polish eval and gate and the active query jobs gate do
+  not.
+- **Checks on the merged tree (6.85.0).** MERGED_CHECKS_PLACEHOLDER
+
+### Your polish instructions: your own direction for AI polish, after COS's built-in rules
 
 Miles, 2026-10-21 15:15: "I want the ability to change that polishing prompt, at least expose for me ... make
 available to our users as well ... different formatting needs ... a custom AI polish. Like we still want to keep all
@@ -31,7 +48,7 @@ of our kind of general rules, but this would allow them to provide further steer
   add `customInstructions: true` and `instructionsHash` (8 hex characters of a SHA-256); without them the answers are
   unchanged. The polish token-audit row adds `custom_instructions` (true or false) and `instructions_hash`.
 
-### Eval (Haiku, prompt v3, the real `claude -p` polish caller; synthetic text; deterministic scoring)
+#### Eval (Haiku, prompt v3, the real `claude -p` polish caller; synthetic text; deterministic scoring)
 
 `server/scripts/dictation-custom-polish-eval.ts`: the 45 cases of the 6.79.1 set, 4 link cases of the 6.83.1 canary
 (s01, m01, e01, d01), and 3 steer probes per benign set, through the route's order (dictionary, filler pass, spoken
@@ -64,7 +81,7 @@ Each benign set ran 28 of the 45 (rotating, so every case ran under two of the t
 - **Calls:** 198 of the 200 cap (1 smoke, 191 eval, 6 repeats of b01, b07 and f12), every one counted through the
   polish budget's message bucket in a scratch data dir, zero failures. Median 4.1 to 4.5 s per call.
 
-### Tests and gates
+#### Tests and gates
 
 - New: `dictation-polish-instructions.test.ts` (sanitizer bounds, controls, invisibles, tags, hash, the stored file),
   `dictation-polish-custom-prompt.test.ts` (golden for v1/v2/v3, block order, adversarial text kept inside the block),
@@ -79,6 +96,49 @@ Each benign set ran 28 of the 45 (rotating, so every case ran under two of the t
   target re-anchored to the new answer shape; both killed (baselines 263 tests in 10 files, 217 in 7). Every other
   target in both gates still lands exactly once (63 of 63, 92 of 92).
 - Full suite after the bump: 574 files, 8708 passed, 3 skipped, 0 failed. `tsc --noEmit` clean.
+
+### COS Control can list the questions COS is answering right now (built as 6.84.1, never published)
+
+Miles approved a small read-only route (2026-10-21) so COS Control's Activity home can show glasses and phone
+questions in its Running panel. Contract: `docs/active-query-jobs.md`.
+
+- **`GET /api/query-jobs/active`** (X-Cos-Token, like every `/api` route). Lists durable query jobs that are admitted
+  and not finished: `jobId`, `generation`, `origin`, `state` (`queued`, `running`, `finishing`) with the job's own
+  `status`, `acceptedAt`, `startedAt`, `elapsedMs`, `provider`, `model`, `resolvedModel`, `messageNo` and a `title`.
+  The answer adds `protocolVersion: 1`, `enabled`, `now` and `count`; at most 50 items, oldest first. Completed,
+  failed, canceled and interrupted jobs are never listed or counted.
+- **Titles only, never the prompt.** A title is the prompt's first non-blank line (from its first 1,000 characters),
+  with the job store's credential and path redaction, on one line, at most 80 characters with an ellipsis, cut at a
+  word break and never inside an emoji. No prompt body, reference turn, answer, tool output, trail, steer or session
+  id is in the answer.
+- **Origin.** `person` (no origin and a message number: asked on the phone or the glasses; the phone sends both the
+  same way, so the server cannot tell them apart), `routine`, `task` (with `originId`), or `other` (a COS Control Work
+  session, a meeting review).
+- **Detection.** `GET /api/health` carries `features.activeQueryJobs: true` and `features.activeQueryJobsProtocol: 1`.
+  An older server answers the path 400 `invalid_job_id` (its `/query-jobs/:jobId` route), so clients key off the
+  feature, not the status code, and hide the rows without it.
+- **Cost.** One synchronous pass over the store's in-memory identities (`QueryJobStore.listInFlight`, the walk
+  `/api/message-counter` already does): no hydration, no disk read, no await, no timer. A live job whose record the
+  store evicted from memory is counted but not listed rather than read back from disk.
+- **`GET /api/welcome-context` says whether the calendar was read.** New field `calendarRead` (always present):
+  `true` only when this answer's calendar came from a successful bridge read, an empty calendar included; `false`
+  when the read threw, timed out (the bridge's `calendar_unavailable` deadline answer, or a killed call) or there is
+  no COS pipeline (COS_SCRIPTS_DIR unset, or set without its venv and bridge script, where the empty no-op answer
+  used to look like an empty calendar). A stale event served after a failed read keeps `nextEvent` as before and
+  reads `false`. Additive: `weather` and `nextEvent` are unchanged. Lets the Activity home tell "nothing else
+  today" from "could not read the calendar".
+- **Package.** `docs/active-query-jobs.md` ships with the other route contracts.
+- **Checks.** `server/routes/query-jobs-active.test.ts` (19 tests), `server/routes/welcome-context-calendar.test.ts`
+  (8 tests: read with an event, an empty calendar, a thrown read, both timeout shapes, no pipeline, the cache window
+  and a stale event after a failed read) and the health capability assertion. `server/scripts/active-query-jobs-mutation-gate.mjs`
+  (not packaged): 37 of 37 mutants killed against a green baseline of 33 tests in 3 files, including every origin
+  branch, the session-name title, `answer_ready` to `finishing`, the `elapsedMs` clamp and finite guard, and seven on
+  `calendarRead`. `tsc --noEmit` clean. Full suite once after these changes, with HOME, COS_DATA_DIR and
+  COS_PROFILE_PATH in a scratch folder, a short scratch TMPDIR and COS_SCRIPTS_DIR unset: 573 files, 8709 tests,
+  8695 passed, 14 skipped, 0 failed. (The first 6.84.1 run used a long TMPDIR and had 4 failures in
+  occupancy-probes, parakeet-cli-trust and session-peer-inbox; they fail the same way on 6.84.0 (c88fd2e) with that
+  TMPDIR, because the path is too long for a unix socket, and pass with a short one.) `npm pack --dry-run`: 541
+  files (the new `server/lib/query-job-active.ts` and `docs/active-query-jobs.md`), no test or gate.
 
 ## 6.84.0 - Dictation keeps "/pricing" and spoken paths; discard a Mac recording that captured no sound
 

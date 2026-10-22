@@ -3,7 +3,7 @@
 // only proxies Open-Meteo / reverse-geocode — it is not "server location".
 
 import { Router } from 'express'
-import { callPython } from '../lib/python-bridge.js'
+import { callPython, pythonBridgeAvailable } from '../lib/python-bridge.js'
 
 export const welcomeContextRouter = Router()
 
@@ -24,6 +24,8 @@ let lastKnownCity = ''
 
 let cachedNextEvent: NextEventPayload | null = null
 let calendarFetchedAt = 0
+/** 6.84.1: whether the read that filled `cachedNextEvent` really reached the calendar. */
+let cachedCalendarRead = false
 
 // 6.63.1: after a server restart the first forecast lookup can fail and, with nothing cached, the
 // glasses Home got no weather until the app was relaunched. The last good weather and
@@ -282,9 +284,21 @@ function isGenericNoiseEvent(title: string): boolean {
   return /\booo\b|out of office|vacation|\bpto\b/i.test(t)
 }
 
-async function fetchNextEvent(): Promise<NextEventPayload | null> {
+/**
+ * 6.84.1: did the bridge answer with a calendar? False for no bridge (COS_SCRIPTS_DIR unset, or
+ * set without the venv and bridge script: callPython then answers an empty no-op), for a
+ * missing answer, and for the bridge's own error answer (`calendar_unavailable` on its
+ * deadline, or not configured). An empty calendar is a real read.
+ */
+export function calendarAnswerWasRead(bridgeReady: boolean, answer: unknown): boolean {
+  if (!bridgeReady) return false
+  if (!answer || typeof answer !== 'object' || Array.isArray(answer)) return false
+  return !('error' in answer)
+}
+
+async function fetchNextEvent(): Promise<{ event: NextEventPayload | null; read: boolean }> {
   if (cachedNextEvent && Date.now() - calendarFetchedAt < CALENDAR_TTL_MS) {
-    return cachedNextEvent
+    return { event: cachedNextEvent, read: cachedCalendarRead }
   }
 
   try {
@@ -299,6 +313,7 @@ async function fetchNextEvent(): Promise<NextEventPayload | null> {
       minutes_until_next?: number
     } | null
 
+    const read = calendarAnswerWasRead(pythonBridgeAvailable(), cal)
     const remaining = cal?.today_remaining ?? []
     const meaningful = remaining.find((evt) => {
       if (evt.is_all_day) return false
@@ -327,9 +342,11 @@ async function fetchNextEvent(): Promise<NextEventPayload | null> {
     }
 
     calendarFetchedAt = Date.now()
-    return cachedNextEvent
+    cachedCalendarRead = read
+    return { event: cachedNextEvent, read }
   } catch {
-    return cachedNextEvent
+    // Threw or timed out: whatever is cached was not read just now.
+    return { event: cachedNextEvent, read: false }
   }
 }
 
@@ -342,6 +359,7 @@ export function _resetWelcomeContextCachesForTests(): void {
   lastKnownCity = ''
   cachedNextEvent = null
   calendarFetchedAt = 0
+  cachedCalendarRead = false
   weatherPersistence = null
   weatherRestored = false
   lastFailureLogAt.clear()
@@ -354,13 +372,18 @@ welcomeContextRouter.get('/welcome-context', async (req, res) => {
   const pairLat = lat != null && lon != null ? lat : undefined
   const pairLon = lat != null && lon != null ? lon : undefined
 
-  const [weather, nextEvent] = await Promise.all([
+  const [weather, calendar] = await Promise.all([
     fetchWeather(pairLat, pairLon),
     fetchNextEvent(),
   ])
+  const nextEvent = calendar.event
 
   res.json({
     ...(weather ? { weather } : {}),
     ...(nextEvent ? { nextEvent } : {}),
+    // 6.84.1: true only when this answer's calendar came from a successful read (an empty
+    // calendar included); false when the read threw, timed out or there is no COS pipeline.
+    // Lets a client tell "no more events today" from "could not read the calendar".
+    calendarRead: calendar.read,
   })
 })
