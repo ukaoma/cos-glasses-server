@@ -1,23 +1,31 @@
 ## 6.85.0 - Your polish instructions, and COS Control can list the questions COS is answering right now
 
-Two lanes and a privacy fix in one release. Your own polish instructions for AI dictation polish, layered after COS's built-in rules
-(`GET/PUT/DELETE /api/dictation/polish/instructions`, `GET /api/dictation/polish/rules`, capability
-`dictationCleanup.customInstructions`). And a read-only `GET /api/query-jobs/active` route plus an additive
-`calendarRead` field on `GET /api/welcome-context`, for the COS Control Activity home (health
-`features.activeQueryJobs`). The active query jobs lane was built and labelled as 6.84.1; 6.84.1 was never published,
-so 6.85.0 is the first package with either lane.
+Two lanes and a privacy fix in one release. Your own polish instructions for AI dictation polish, layered after
+COS's built-in rules (`GET/PUT/DELETE /api/dictation/polish/instructions`, `GET /api/dictation/polish/rules`,
+capability `dictationCleanup.customInstructions`). And a read-only `GET /api/query-jobs/active` route plus an
+additive `calendarRead` field on `GET /api/welcome-context`, for the COS Control Activity home (health
+`features.activeQueryJobs`). The active query jobs lane was built and labelled as 6.84.1; 6.84.1 was never
+published, so 6.85.0 is the first package with either lane.
 
 - **Privacy fix.** The server log no longer carries meeting text. The per-chunk `[perf] TOTAL` line and the
   whisper-server `Server transcribed in` line now log a character count where they used to log the first 50 and 80
   characters of every transcript.
-
 - **Pairs with COS Control 0.5.335 (build 389)** for the polish instructions box. An older Control does not show the
   box, and nothing changes for it: with no instructions saved, the polish prompt is byte-identical to 6.84.0.
 - **Defaults.** Polish instructions are off until a user saves some. The active jobs route lists nothing while
   durable query jobs are off. `calendarRead` is additive; `weather` and `nextEvent` are unchanged.
 - **Package.** `docs/active-query-jobs.md` ships. The custom polish eval and gate and the active query jobs gate do
   not.
-- **Checks on the merged tree (6.85.0).** MERGED_CHECKS_PLACEHOLDER
+- **Checks on the merged tree (6.85.0).** Full suite, serial (`--maxWorkers=1`), HOME,
+  COS_DATA_DIR and COS_PROFILE_PATH in a scratch folder, COS_SCRIPTS_DIR unset: 577 files (576 passed, 1 skipped),
+  8747 tests, 8733 passed, 14 skipped, 0 failed. An earlier run with TMPDIR set inside the home folder had one
+  failure in `codex-profile-home.test.ts` (its walk up from the temp folder found the real `~/.codex/config.toml`); it
+  passes with the default TMPDIR and is not a merge defect. Mutation gates against green baselines: custom polish 46
+  of 46 killed (121 tests in 8 files), dictation format 63 of 63 (263 tests in 10 files), dictation polish 92 of 92
+  (217 tests in 7 files), Mac discard 25 of 25 (28 tests in 2 files), active query jobs 37 of 37 (33 tests in 3
+  files). Every target still lands exactly once. `tsc --noEmit` clean. `npm pack --dry-run`: 543 files (6.84.0's 539
+  plus `docs/active-query-jobs.md`, `server/lib/query-job-active.ts`, `server/lib/dictation-polish-instructions.ts`
+  and `server/routes/dictation-polish-settings.ts`), no test, gate, eval script or fixture.
 
 ### Your polish instructions: your own direction for AI polish, after COS's built-in rules
 
