@@ -1,3 +1,46 @@
+## 6.88.0 - LAN first: a pre-token route proof and the Mac's addresses for the phone
+
+The server half of the glasses "LAN first" reconnect plan (plan of 2026-10-22, Miles's decisions of 2026-10-23: "Go
+with your picks on the reconnect plan. No regressions or loss of existing functionality."). After the 10/22 Mac restart
+the phone stayed on a stale Tailscale tunnel while the Mac answered fine on the same Wi-Fi. These two additions let a
+phone build reach the Mac over the home network first, without ever sending its token to the wrong machine. Contract
+for the phone side: `docs/lan-first.md`.
+
+- **`GET /api/route-proof?nonce=<22 to 64 base64url characters>`, public.** Answers `{ v: 1, serverInstanceId, proof }`,
+  where `proof` is lowercase hex HMAC-SHA256(token, "cos-route-proof:v1:" + nonce + ":" + serverInstanceId). The phone
+  computes the same HMAC with its stored token and sends `X-Cos-Token` to that address only on a match. The token is never
+  in the response, the nonce is never echoed or logged, and the caller chooses only the nonce, so the route is not a
+  general HMAC oracle; the fixed prefix also keeps a proof from ever being a display-stream ticket. Exact public door,
+  GET only (`server/lib/api-auth.ts`); every other verb and path stays behind the token. Errors: 400 `bad_nonce`,
+  404 `disabled`, 405 `method_not_allowed`, 429 `rate_limited` (with `Retry-After`), 503 `not_ready`.
+- **Rate limited.** 20 a minute per socket address and 240 a minute in all, in memory; bad nonces spend the same budget.
+- **Only for a strong token.** A proof lets anyone who reaches the port test guesses offline, so it is served (and
+  advertised) only when the token is 32 characters or more. Tokens made by COS Control (64) and by the server (44) qualify;
+  a short hand-set legacy token keeps today's behaviour.
+- **`routes` on authenticated `/api/models` only.** `{ v: 1, serverInstanceId, learnedAt, lan: [{ip, port, scheme}],
+  tailscale: [{ip, port, scheme}] }`: RFC1918 IPv4 on real interfaces (tunnels, Internet Sharing and VM bridges, Docker,
+  AirDrop and link-local left out) and 100.64/10 on Tailscale's own interface, plain http on `PORT` (3141). Re-read at
+  most every 10 s, so a new DHCP lease shows up; a failed interface read omits the field and leaves the rest of the
+  response alone. Never on public `/api/health`. The MagicDNS name is left out (reading it needs a `tailscale`
+  process per request).
+- **Capability flags.** `capabilities.routeProof: { protocol: 1 }` and `capabilities.lanRoutes: { protocol: 1 }` on
+  `/api/health` and `/api/models`, from one helper. An older server omits both, and a phone keeps today's single URL.
+- **Switch.** `COS_LAN_FIRST=0` turns both pieces off, read per request; the responses are then the 6.87.0 shape exactly.
+- **No regression.** Every existing field of `/api/health` and `/api/models` is unchanged, checked path for path against
+  a golden captured from the unmodified 6.87.0 base, and byte for byte against the same response with the switch off.
+- **Not built:** Phase 3's loopback `/api/glasses/link` for COS Control's banner. It needs new tracking of the phone's
+  last path and check-in, so it is not a purely additive change.
+- **No spend.** No LLM, no new caller, nothing written to disk.
+- **Checks (6.88.0 branch).** Full suite, serial (`--maxWorkers=1`), HOME, COS_DATA_DIR and COS_PROFILE_PATH in a scratch folder,
+  COS_SCRIPTS_DIR unset. Unmodified 6.87.0 base (601d807): 584 files (583 passed, 1 skipped), 8815 tests, 8801 passed,
+  14 skipped, 0 failed. This branch: 588 files (587 passed, 1 skipped), 8911 tests, 8897 passed, 14 skipped, 0 failed.
+  The 96 new tests are the only change per file (`lan-first.test.ts` 58, `route-proof.test.ts` 18, `health-lan-first.test.ts`
+  9, `lan-first-wiring.test.ts` 2, `api-auth.test.ts` 40 to 49); no existing test was changed. Mutation gate
+  `lan-first-mutation-gate.mjs` against a green baseline (136 tests in 5 files): 56 of 56 killed, each by a named test,
+  every target landing exactly once and restored byte for byte. Its first run left two survivors (the IPv4-only filter and
+  the de-duplication), each now covered by its own test and killed. `tsc --noEmit` clean. Pack dry run 549 files
+  (6.87.0: 546; the three new files are `server/lib/lan-first.ts`, `server/routes/route-proof.ts` and `docs/lan-first.md`).
+
 ## 6.87.0 - A rough level per chunk for COS Control's glasses meeting strip
 
 The server half of the level strip COS Control 0.5.339 draws in a glasses meeting's bottom bar (plan of 2026-10-23,

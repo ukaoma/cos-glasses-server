@@ -75,6 +75,7 @@ import { liveCuesCapability } from '../lib/live-cues-capability.js'
 import { liveCuesV2Advertised } from '../lib/live-cues-v2.js'
 import { liveMeetingCapability } from '../lib/live-provisional.js'
 import { CUE_KINDS } from '../../shared/live-cues-v2.js'
+import { lanFirstCapabilities, lanFirstHttpPort, lanRoutesField } from '../lib/lan-first.js'
 
 /** 6.86.0: `capabilities.liveCues.kinds`, the cue kinds this server can write (additive; an older server omits it, which
  *  is how a client knows to expect only reinforce and challenge). Which kinds a given meeting gets is in its arm answer. */
@@ -547,6 +548,9 @@ healthRouter.get('/health', async (_req, res) => {
       tasks: {
         gate: taskBridgeAvailable() ? 'ready' : 'disabled',
       },
+      // 6.88.0 LAN first (docs/lan-first.md): protocol flags only. This route is public, so
+      // the addresses themselves are published only on authenticated /api/models.
+      ...lanFirstCapabilities({ token: process.env.COS_API_TOKEN ?? '', serverInstanceId: getServerInstanceId() }),
     },
     // /api/health is intentionally unauthenticated for setup diagnostics.
     // Publish capability only; job counts, retention identities, subscriber
@@ -638,6 +642,10 @@ healthRouter.get('/models', async (req, res) => {
     // Key lanes (plan v4 3.1): `keyProfiles` only while a profile is active. Absent when off.
     ...keyProfilesModelsField(),
     serverInstanceId: getServerInstanceId(),
+    // 6.88.0 LAN first (docs/lan-first.md): the addresses this Mac answers on, behind the
+    // token. Absent when the switch is off, the instance id is not minted yet, or the
+    // interface read failed; never a reason for this response to fail.
+    ...lanRoutesModelsField(),
     // Minted here rather than on a route of its own: this response is already
     // authenticated, and the mint is stateless, so it costs nothing and stores
     // nothing.
@@ -733,9 +741,16 @@ healthRouter.get('/models', async (req, res) => {
       tasks: {
         gate: taskBridgeAvailable() ? 'ready' : 'disabled',
       },
+      // 6.88.0 LAN first: the same helper as /api/health, so the two surfaces cannot disagree.
+      ...lanFirstCapabilities({ token: apiToken, serverInstanceId: getServerInstanceId() }),
     },
   })
 })
+/** 6.88.0: `{ routes }` for /api/models, or nothing at all. lanRoutesField never throws. */
+function lanRoutesModelsField(): { routes?: NonNullable<ReturnType<typeof lanRoutesField>> } {
+  const routes = lanRoutesField({ port: lanFirstHttpPort(), serverInstanceId: getServerInstanceId() })
+  return routes ? { routes } : {}
+}
 /** 6.78.0: `{ steer }` for /api/models `durableQueryJobs`, or nothing at all. */
 export function steerCapabilityField(jobsEnabled: boolean): { steer?: { protocolVersion: 1; providers: ['claude'] } } {
   const steer = messagesSteerCapability({ jobsEnabled, cliSupported: claudeSteerSupportKnown() })

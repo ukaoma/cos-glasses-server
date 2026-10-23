@@ -43,6 +43,16 @@ reproduction you have. Do not include real transcripts.
   turns itself off after 10 minutes. Over Tailscale the traffic is encrypted.
 - Behind `tailscale serve` or `funnel`, requests arrive from a loopback proxy, so
   every claim is refused (`not_allowed_network`): pairing fails closed there.
+- `GET /api/route-proof` (6.88.0, `docs/lan-first.md`) is public by design. It returns
+  the server instance id and HMAC-SHA256(token, "cos-route-proof:v1:" + nonce + ":" +
+  instance id), never the token, so the phone can check which Mac answers at a home
+  Wi-Fi address before sending the token there. The caller picks only a 22 to 64
+  character base64url nonce. It is served only for a token of 32 characters or more,
+  because a proof lets anyone who reaches the port test guesses offline. Limits: 20 a
+  minute per connection address, 240 a minute in all. It does not stop an active
+  attacker on the same Wi-Fi who relays the request to the real Mac: the LAN path is
+  plain HTTP, as above. `COS_LAN_FIRST=0` turns it off. The Mac's addresses are
+  published only on authenticated `/api/models`, never on `/api/health`.
 - `GET /api/display-stream` is public by design and returns lifecycle events
   only. Content requires a ticket or the token header. See
   `server/routes/display.ts` for the allowlist.

@@ -43,10 +43,17 @@ const DISPLAY_STREAM_CAPABILITY_PATH = /^\/display-stream\/\d{1,15}\.[0-9a-f]{64
 // Minting, status and decisions stay behind the token AND a loopback socket.
 const PAIRING_POLL_PATH = new RegExp(`^/pairing/claim/${PAIRING_NONCE_BODY}$`)
 
+// 6.88.0 LAN first (docs/lan-first.md): GET /route-proof is public because it exists to
+// prove which Mac answers at an address BEFORE the phone sends its token there. Exact path,
+// GET only (HEAD and every other verb stay behind the token). It returns an HMAC keyed by
+// the token over a fixed, domain-separated message, never the token (routes/route-proof.ts).
+const ROUTE_PROOF_PATH = '/route-proof'
+
 export function isPublicApiRequest(method: string, path: string): boolean {
   if (PUBLIC_API_PATHS.has(path)) return true
   if (method === 'POST' && path === '/pairing/claim') return true
   if (method === 'GET' && PAIRING_POLL_PATH.test(path)) return true
+  if (method === 'GET' && path === ROUTE_PROOF_PATH) return true
   if (method !== 'GET' && method !== 'HEAD') return false
   return TTS_PLAYBACK_CAPABILITY_PATH.test(path)
     || DISPLAY_STREAM_CAPABILITY_PATH.test(path)

@@ -147,7 +147,7 @@ import { logActiveSessionsOnShutdown, startAutoSnapshot } from './lib/conversati
 import { getMediaStore } from './lib/media-store.js'
 import { listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
 import { serverMetrics } from './lib/server-metrics.js'
-import { initializeServerInstanceId } from './lib/server-instance-id.js'
+import { getServerInstanceId, initializeServerInstanceId } from './lib/server-instance-id.js'
 import { appendPrivateEnvBlock, UnsafeUserConfigPathError } from './lib/secure-user-config.js'
 import { getTranscriptionProfileStatus } from './lib/profile.js'
 import { createQueryJobsRouter } from './routes/query-jobs.js'
@@ -191,6 +191,7 @@ import {
 import { requireApiToken } from './lib/api-auth.js'
 import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
+import { createRouteProofRouter } from './routes/route-proof.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -367,6 +368,14 @@ app.use('/api', requireApiToken(API_TOKEN, {
 app.use('/api', createPairingRouter({
   state: () => pairingState,
   isDraining: () => gracefulShutdownStarted || !maintenanceAdmissionsOpen(),
+}))
+// 6.88.0 LAN first (docs/lan-first.md): the public pre-token identity proof. Writes nothing,
+// so it sits beside pairing, ahead of the lease catch-all and the global parser, and is
+// served during a drain. The instance id is read per request: it is minted only after
+// every listener binds, and until then the route answers 503 `not_ready`.
+app.use('/api', createRouteProofRouter({
+  token: () => API_TOKEN,
+  serverInstanceId: getServerInstanceId,
 }))
 
 // Fail-closed catch-all for mutation routes that do not own a more specific
