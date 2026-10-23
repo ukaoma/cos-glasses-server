@@ -1,3 +1,27 @@
+## 6.87.0 - A rough level per chunk for COS Control's glasses meeting strip
+
+The server half of the level strip COS Control 0.5.339 draws in a glasses meeting's bottom bar (plan of 2026-10-23,
+approved 09:25). The quiet gate already measured every live chunk (RMS, and Silero speech seconds) and only printed the
+numbers on the `[perf]` line. Now each chunk keeps them.
+
+- **Two numbers per chunk on the active-session record.** `chunkLevels[{i, level, speechSec}]` in
+  `active-sessions/<id>.json`: `level` is the chunk's RMS on a dBFS scale, 0 at -60 dBFS and under, 1 at -10 dBFS and
+  over, three decimals; `speechSec` is the Silero speech seconds (two decimals), or null when the gate fell back to
+  RMS. Every chunk the quiet gate sees gets one, quiet chunks included; a replayed index keeps its first answer, like
+  the chunk itself. Bounded to the newest 120 chunks (about 12 minutes of 6 s chunks) and restored, validated, after a
+  restart. It lives only as long as the record (deleted at save). `server/lib/chunk-levels.ts`.
+- **Control reads it from the file it already reads.** The helper's `live-transcript` read opens this same file, so
+  there is no new route. `capabilities.liveMeeting.chunkLevels: true` on `/api/health` and `/api/models` tells Control
+  the record carries levels; an older server omits it and Control keeps its still glyph.
+- **Not text, never logged.** Nothing new is logged, and no text is stored: the entries hold an index and two numbers.
+  `transcribe-stream-chunk-levels.test.ts` spies every console level and checks the record holds numbers only.
+- **No spend.** No LLM, no new caller, no new disk write: the numbers ride on the durable write each chunk already makes.
+- **Checks (6.87.0 branch).** Full suite, serial (`--maxWorkers=1`), HOME, COS_DATA_DIR and COS_PROFILE_PATH in a scratch folder,
+  COS_SCRIPTS_DIR unset: 584 files (583 passed, 1 skipped), 8815 tests, 8801 passed, 14 skipped, 0 failed. Mutation gate `live-meeting-6870-mutation-gate.mjs` against a green
+  baseline (32 tests in 4 files): 25 of 25 killed, each by a named
+  test, every target landing exactly once and restored byte for byte. `tsc --noEmit` clean. Pack dry run 546 files (6.86.0:
+  545; the one new file is `server/lib/chunk-levels.ts`).
+
 ## 6.86.0 - Decision, promise and follow-up cues, live cues on Mac recordings, and the grey provisional line
 
 The server half of COS Control's live meeting view (plan of 2026-10-22, decisions of 15:21). Three lanes: three more cue

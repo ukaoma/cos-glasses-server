@@ -117,6 +117,7 @@ import {
 import { feedLiveCueTranscript } from '../lib/live-cues-engine.js'
 import { armMacLiveCues, type MacLiveCuesAnswer } from '../lib/live-cues-v2.js'
 import { liveProvisional } from '../lib/live-provisional.js'
+import { chunkLevel, restoreChunkLevels, withChunkLevel, type ChunkLevel } from '../lib/chunk-levels.js'
 import { preemptMetalBatchForLive, registerLiveActivityProbe } from '../lib/whisper-metal-gate.js'
 import {
   scheduleProgressiveHqCheckpoint,
@@ -348,6 +349,8 @@ interface TranscriptSession {
   /** Exact replay records for silent/filtered ASR completions. */
   emptyCompletions?: Record<string, EmptyTranscriptCompletion>
   maxChunkIndex?: number
+  /** 6.87.0: two numbers per chunk (level 0 to 1, Silero speech seconds) for Control's level strip. Never text. */
+  chunkLevels?: ChunkLevel[]
   /** Persisted idle-retention clock. Meeting date/duration still use startTime. */
   lastActivityAt: number
   // Count of consecutive vocab-echo (prompt-regurgitation) chunks. Reset to 0 by
@@ -713,6 +716,7 @@ function persistSessionRequired(sessionId: string): void {
       emptyCompletions: session.emptyCompletions ?? {},
       maxChunkIndex: session.maxChunkIndex ?? -1,
       providerCandidates: session.providerCandidates ?? {},
+      chunkLevels: session.chunkLevels ?? [],
     })
   try {
     durableAtomicWriteFileSync(filePath, data, { mode: 0o600 })
@@ -901,6 +905,7 @@ function recoverSessions(): void {
               providerCandidates: data.providerCandidates && typeof data.providerCandidates === 'object'
                 ? data.providerCandidates
                 : {},
+              chunkLevels: restoreChunkLevels(data.chunkLevels),
             }
             // Retroactively strip inline hallucinations from recovered chunks.
             // Two-pass: (1) scan all chunks to build frequency/blocklist,
@@ -2439,6 +2444,8 @@ async function processStreamChunk(opts: {
   const quiet = decideQuiet(audioBuffer, stt.quietGate)
   const rms = quiet.rms
   const isQuiet = quiet.isQuiet
+  // 6.87.0: the level strip's two numbers, on the record every terminal path below persists. Not text, never logged.
+  session.chunkLevels = withChunkLevel(session.chunkLevels, chunkLevel(chunkIndex, rms, quiet.speechSec))
   const whisperAudio = isQuiet ? audioBuffer : await asrFrontEnd(audioBuffer, stt.frontEnd)
   const whisperContext = recentWhisperContext(sessionId, session)
   console.log(`[perf] whisperContext: ${whisperContext.length}b | session.chunks: ${session.chunks.length}`)

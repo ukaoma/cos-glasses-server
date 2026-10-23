@@ -16,7 +16,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>(resolve => server ? server.close(() => resolve()) : resolve()) })
 
 const KINDS = ['reinforce', 'challenge', 'decision', 'promise', 'followUp']
-const LIVE_MEETING = { protocol: 1, macLiveCues: true, provisional: { route: '/api/transcribe-stream/provisional', maxChars: 600, ttlMs: 30_000 } }
+const LIVE_MEETING = { protocol: 1, macLiveCues: true, provisional: { route: '/api/transcribe-stream/provisional', maxChars: 600, ttlMs: 30_000 }, chunkLevels: true }
 
 describe('live meeting capabilities (6.86.0)', () => {
   it('/api/health: capabilities.liveCues.kinds lists the five kinds beside the v1 fields, and capabilities.liveMeeting is published', async () => {

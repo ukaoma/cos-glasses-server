@@ -80,7 +80,8 @@ export function liveProvisional(): LiveProvisionalStore { return (store ??= new 
 /** 6.86.0: what /api/health and /api/models publish as `capabilities.liveMeeting`, so COS Control gates the live meeting
  *  view by capability, never by a status code. Constants only (health is public). An older server omits the key.
  *  - macLiveCues: POST /api/mac-recording/start takes `liveCues: true` and answers `liveCues: {armed, ...}`.
- *  - provisional: GET <route>?sessionId= serves the newest preview of a live meeting. */
-export function liveMeetingCapability(): { protocol: 1; macLiveCues: true; provisional: { route: string; maxChars: number; ttlMs: number } } {
-  return { protocol: 1, macLiveCues: true, provisional: { route: '/api/transcribe-stream/provisional', maxChars: LIVE_PROVISIONAL_LIMITS.maxChars, ttlMs: LIVE_PROVISIONAL_LIMITS.ttlMs } }
+ *  - provisional: GET <route>?sessionId= serves the newest preview of a live meeting.
+ *  - chunkLevels (6.87.0): the active-session record keeps `chunkLevels[{i, level, speechSec}]` (lib/chunk-levels.ts). */
+export function liveMeetingCapability(): { protocol: 1; macLiveCues: true; provisional: { route: string; maxChars: number; ttlMs: number }; chunkLevels: true } {
+  return { protocol: 1, macLiveCues: true, provisional: { route: '/api/transcribe-stream/provisional', maxChars: LIVE_PROVISIONAL_LIMITS.maxChars, ttlMs: LIVE_PROVISIONAL_LIMITS.ttlMs }, chunkLevels: true }
 }

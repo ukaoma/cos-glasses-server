@@ -238,6 +238,6 @@ describe('LiveProvisionalStore (6.86.0)', () => {
     expect(store.read('m1x')).toBeNull()
   })
   it('the capability names the route and its bounds', () => {
-    expect(liveMeetingCapability()).toEqual({ protocol: 1, macLiveCues: true, provisional: { route: '/api/transcribe-stream/provisional', maxChars: 600, ttlMs: 30_000 } })
+    expect(liveMeetingCapability()).toEqual({ protocol: 1, macLiveCues: true, provisional: { route: '/api/transcribe-stream/provisional', maxChars: 600, ttlMs: 30_000 }, chunkLevels: true })
   })
 })
