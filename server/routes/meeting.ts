@@ -12,6 +12,7 @@ import { Router } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
 import { createStopRequestStore, isStopRequestRefusal, STOP_REQUEST_CLAIM_WINDOW_MS, type StopRequest, type StopRequestStore } from '../lib/meeting-stop-requests.js'
 import { appendAutonomousSaveLog, getStopIntentStore, type StopIntent, type StopIntentStore } from '../lib/meeting-stop-intents.js'
+import { chunksOutstanding, parsePhoneFinalChunkIndex, phoneFinalChunkIndex, withPhoneFinalIndex } from '../lib/transfer-integrity.js'
 import {
   AUTONOMOUS_FINALIZE_POLL_MS,
   AUTONOMOUS_FINALIZE_SETTLE_MS,
@@ -1128,6 +1129,24 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       if (MAC_CAPTURE_ID.test(sessionId)) {
         requireMacRecordingForSave(sessionId, body?.expectedChunkCount)
       }
+      // 6.88.0 (lib/transfer-integrity.ts): how far a phone window said it captured, from its Stop or
+      // from this save (glasses 6.10.652). The saved file's integrity counts against it.
+      const phoneFinal = phoneFinalChunkIndex(stopIntents.get(sessionId)?.finalChunkIndex, parsePhoneFinalChunkIndex(body?.finalChunkIndex))
+      // An origin-wipe recovery never finalizes a meeting a phone window still holds chunks for, unless
+      // it says it waited them out. A save without `recovery` is never refused here.
+      if (body?.recovery === 'origin_wipe' && body?.acceptMissing !== true) {
+        const report = sessions.getIntegrity(sessionId)
+        const outstanding = report ? chunksOutstanding(report, phoneFinal) : 0
+        if (outstanding > 0) {
+          respond(409, {
+            error: 'A phone window captured chunks this Mac does not hold yet',
+            reason: 'chunks_outstanding',
+            missingCount: outstanding,
+            finalChunkIndex: phoneFinal,
+          })
+          return null
+        }
+      }
       if (savingSessions.has(sessionId)) {
         respond(409, { error: 'Meeting save already in progress', reason: 'save_in_progress' })
         return null
@@ -1166,7 +1185,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       const durationMs = durationFromTimeline > 0
         ? durationFromTimeline
         : Math.max(0, Date.now() - startTime)
-      const integrity = sessions.getIntegrity(sessionId)
+      const integrity = withPhoneFinalIndex(sessions.getIntegrity(sessionId), phoneFinal)
       const needsOperations = cosOpsPipelineConfigured() && !macRecording
       // Standalone saves need a finalization pass too, for summary enrichment.
       // Before 6.37 a standalone save with no audio nulled the job below and

@@ -41,6 +41,29 @@ for the phone side: `docs/lan-first.md`.
   the de-duplication), each now covered by its own test and killed. `tsc --noEmit` clean. Pack dry run 549 files
   (6.87.0: 546; the three new files are `server/lib/lan-first.ts`, `server/routes/route-proof.ts` and `docs/lan-first.md`).
 
+### Also in 6.88.0: transfer integrity counts what the phone captured, and recovery saves wait for it
+
+For glasses 6.10.652 (meeting t2xs9u, 2026-10-23 07:59): a relaunched COS window saved a meeting from the Mac's 74 chunks
+while the window still recording it had captured through index 120, and the file said "Transfer integrity 100%". One new
+file (`server/lib/transfer-integrity.ts`) and two edits in `performSave` (`server/routes/meeting.ts`).
+
+- **Integrity counts the phone's final index.** When the phone has said how far it captured (the Stop intent's
+  `finalChunkIndex`, or the save's own new optional `finalChunkIndex`), expected is that index plus one and every index past
+  the Mac's highest chunk is missing. 74 of 121 now reads 61.1% with 47 chunks not received, in the saved markdown, the
+  sidecar and the receipt. A final index more than 20,000 past the Mac's highest chunk is capped there; a malformed one is
+  ignored.
+- **A recovery save waits.** A save with `recovery: 'origin_wipe'` (glasses 6.10.652) is refused with 409
+  `chunks_outstanding` (`missingCount`, `finalChunkIndex`) while the phone's final index says the Mac lacks chunks, and
+  nothing is saved or closed. `acceptMissing: true` (the phone waited its 10 minutes) saves what the Mac has, honestly counted.
+- **Unchanged:** a save without `recovery` is never refused here; a save with no final index from anywhere writes exactly
+  what 6.87.0 wrote; an already saved meeting replays its receipt first; the autonomous save, the stop route and the status
+  route are untouched. No new log line, no LLM, no new disk write. Contract: `docs/meeting-autonomous-save.md`, section 6.88.0.
+- **Checks (integrity, on top of c593b91).** Full suite, serial, the same scratch folder rules: 590 files, 8926 tests, 8912
+  passed, 14 skipped, 0 failed (the LAN-first record above is 8911 tests; the 15 new ones are `transfer-integrity.test.ts` 5
+  and `meeting-save-integrity.test.ts` 10; no existing test was changed). Mutation gate `integrity-6880-mutation-gate.mjs`
+  against a green baseline (15 tests in 2 files): 15 of 15 killed, each by a named test. `tsc --noEmit` clean. Pack dry run
+  551 files (the LAN-first 549 plus `server/lib/transfer-integrity.ts` and the gate script).
+
 ## 6.87.0 - A rough level per chunk for COS Control's glasses meeting strip
 
 The server half of the level strip COS Control 0.5.339 draws in a glasses meeting's bottom bar (plan of 2026-10-23,

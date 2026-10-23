@@ -99,3 +99,16 @@ The server side is inert until the companion sends the Stop. The companion shoul
 1. In `stopMeetingCaptureOnce`, right after `beginStop()` and before any IndexedDB work, POST the Stop with `finalChunkIndex` = the highest captured index (including `captureHeldIndex`). Retry it (it is idempotent) until a 2xx, from the same retry hooks that already finalize.
 2. When the held chunk cannot be committed while hidden, upload it from memory as well as retrying the commit. Without this, today's two cases still wait for the phone, because the held chunk exists nowhere else.
 3. In `runFinalize`, when status is `saved` and every pending index is inside the Mac's `asrCompletedRanges`, drain (the Mac now answers those replays) before declaring a collision.
+
+## 6.88.0: integrity against the phone's final index, and recovery saves that wait
+
+Meeting t2xs9u (2026-10-23 07:59): a relaunched COS window found no local copy of a meeting, read its recovery hint as a storage wipe, and asked the Mac to save it from 74 chunks while the window still recording it had captured through index 120. The saved file said "Transfer integrity 100%". Code: `lib/transfer-integrity.ts`, wired in `performSave`.
+
+| Field on `POST /meeting/save` (all optional, glasses 6.10.652) | What the server does |
+| --- | --- |
+| `finalChunkIndex` (a whole number, -1 to 1,000,000; anything else is ignored) | With the Stop intent's `finalChunkIndex`, the higher one is the phone's final index. Integrity counts against it: expected = final + 1, every index past the Mac's highest chunk is missing (74 of 121 reads 61.1%, 47 not received). A final more than 20,000 past the Mac's highest chunk is capped there. |
+| `recovery: 'origin_wipe'` | Refused with 409 `chunks_outstanding` (`missingCount`, `finalChunkIndex`) while the phone's final index says the Mac lacks chunks in `0..final`. Nothing is saved or closed. |
+| `acceptMissing: true` | The recovery waited out its bound (10 minutes on the phone): save what the Mac has, with the honest integrity above. |
+
+A save without `recovery` is never refused here, and a save with no final index from anywhere is unchanged. An already saved meeting replays its receipt first, as before. The phone checks the same thing from the status route (`stopIntent`, `receivedRanges`, `lastActivityAt`) before it asks; the server check closes the moment between that read and the save.
+
