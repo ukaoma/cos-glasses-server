@@ -376,7 +376,10 @@ export function identifySpeaker(
   expectedSpeakers?: string[],
   /** 6.61.0: `event` tags the calibration rows, e.g. 'nemotron-track' for one
    *  Nemotron track's audio, so they are never read as whole-chunk checks. */
-  options: { event?: string; minSimilarity?: number; prioritizeOwner?: boolean } = {},
+  /** 6.90.0 `shadowEvent`: when the strict floor finds nobody, also log the best
+   *  match at the 0.55 search floor under this event. Calibration only: the
+   *  returned label is unchanged (`Ext`), and nothing is enrolled. */
+  options: { event?: string; minSimilarity?: number; prioritizeOwner?: boolean; shadowEvent?: string } = {},
 ): { speaker: string; similarity: number; embedding?: Float32Array } | null {
   if (!extractor || !manager) return null
   const minimum = Number.isFinite(options.minSimilarity) ? Math.max(0, Math.min(1, options.minSimilarity!)) : 0
@@ -422,6 +425,10 @@ export function identifySpeaker(
     // unidentified voice's vector is the most valuable thing to retain, because
     // naming it later is exactly the correction that has no other evidence.
     logCalibration('Ext', 0, false, options.event)
+    if (options.shadowEvent) {
+      const shadow = shadowBestMatch(manager, embedding)
+      logCalibration(shadow.speaker, shadow.similarity, false, options.shadowEvent)
+    }
     return { speaker: 'Ext', similarity: 0, embedding }
   } catch (err: unknown) {
     console.error('[speaker] Identification error:', errMsg(err))
@@ -827,6 +834,37 @@ function computeCosineSimilarity(_embedding: Float32Array, _name: string): numbe
     }
   }
   return (lo + hi) / 2
+}
+
+/** The subset of the sherpa manager the shadow score needs. */
+export interface ShadowSearchManager {
+  search(query: { v: Float32Array; threshold: number }): string
+  verify(query: { name: string; v: Float32Array; threshold: number }): boolean
+}
+
+/** The floor shadow scoring reports against: the ordinary search floor. */
+export const SHADOW_FLOOR = SEARCH_THRESHOLD
+
+/**
+ * 6.90.0 shadow score for Mac chunks: who the voice would be at the ordinary
+ * 0.55 search floor, and how close. Calibration data only. The caller never
+ * labels, enrols or trains from it. `Ext` with 0 when nobody clears the floor.
+ */
+export function shadowBestMatch(m: ShadowSearchManager, embedding: Float32Array, floor = SHADOW_FLOOR): { speaker: string; similarity: number } {
+  try {
+    const found = m.search({ v: embedding, threshold: floor })
+    if (!found) return { speaker: 'Ext', similarity: 0 }
+    let lo = 0
+    let hi = 1
+    for (let i = 0; i < 10; i++) {
+      const mid = (lo + hi) / 2
+      if (m.verify({ name: found, v: embedding, threshold: mid })) lo = mid
+      else hi = mid
+    }
+    return { speaker: found, similarity: (lo + hi) / 2 }
+  } catch {
+    return { speaker: 'Ext', similarity: 0 }
+  }
 }
 
 /** Log calibration data for threshold tuning */

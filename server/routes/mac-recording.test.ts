@@ -46,7 +46,7 @@ it('registers before first audio, refuses unregistered/invalid/bypass uploads, p
  expect((await call(path,Buffer.alloc(100))).json.reason).toBe('invalid_mac_audio')
  expect((await call('/transcribe-stream?sessionId='+id+'&chunkIndex=0',wav)).json.reason).toBe('mac_transport_required')
  const done=await call(path,wav); expect(done.status).toBe(200); expect(done.json).toMatchObject({sessionId:id,chunkIndex:0,serverInstanceId:'server-mac',asrCompleted:true,canonical:true,elapsed:0}); expect(stream.getSessionChunks(id)?.[0]).toMatchObject({speaker:'Ext',speakerPolicy:'high-confidence',elapsed:0,audioDurationMs:6000}); expect(enroll).not.toHaveBeenCalled(); expect(existsSync(join(root,'chunk-embeddings',id+'.jsonl'))).toBe(false); expect(existsSync(join(root,'ext-audio',id))).toBe(false)
- expect((await call(path,wav)).status).toBe(200); expect(identify).toHaveBeenCalledTimes(1); expect(identify.mock.calls[0]).toHaveLength(3); expect((identify.mock.calls[0] as unknown[])[2]).toMatchObject({minSimilarity:0.88,prioritizeOwner:false,event:'mac-system-audio'})
+ expect((await call(path,wav)).status).toBe(200); expect(identify).toHaveBeenCalledTimes(1); expect(identify.mock.calls[0]).toHaveLength(3); expect((identify.mock.calls[0] as unknown[])[2]).toMatchObject({minSimilarity:0.88,prioritizeOwner:false,event:'mac-system-audio',shadowEvent:'mac-shadow'})
  expect((await call('/mac-recording/'+id+'/chunks?chunkIndex=0&elapsed=6001',wav)).json.reason).toBe('mac_chunk_conflict')
  expect((await call(path,wavOf(6,()=>401))).json.reason).toBe('mac_chunk_conflict')
  expect((await call('/mac-recording/'+id+'/chunks?chunkIndex=1&elapsed=1',wav)).json.reason).toBe('invalid_elapsed')
@@ -240,4 +240,18 @@ it('macDiscardRefusal: every guard by name, idle measured at the empty-session t
  expect(stream.macDiscardRefusal({...ok,chunkInProgress:true})).toBe('chunk_in_progress')
  expect(stream.macDiscardRefusal({...ok,silentForMs:stream.MAC_DISCARD_IDLE_MS-1})).toBe('not_idle')
  expect(stream.macDiscardRefusal({...ok,receivedIndices:[],asrCompletedIndices:[]})).toBeNull()
+})
+
+it('6.90.0: Mac Nemotron tracks skip the wearer check and are tagged as Mac, while the chunk stays strict Ext',async()=>{
+ const live=await import('../lib/nemotron-live.js'); const {activityOf}=await import('../lib/__fixtures__/nemotron-helpers.js')
+ vi.mocked(live.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[0,0,2.6],[5,3,6]]),loadSec:0.1,audioSec:6,wallMs:140}} as never)
+ await start(); const done=await call('/mac-recording/'+id+'/chunks?chunkIndex=0&elapsed=6000',wavOf(6,t=>(t<2.8?400:-400)))
+ expect(done.status).toBe(200)
+ const options=identify.mock.calls.map(c=>(c as unknown[])[2] as Record<string,unknown>)
+ expect(options[0]).toMatchObject({event:'mac-system-audio',prioritizeOwner:false,shadowEvent:'mac-shadow'})
+ const tracks=options.slice(1); expect(tracks.length).toBeGreaterThanOrEqual(2)
+ for(const o of tracks){expect(o).toMatchObject({event:'mac-nemotron-track',prioritizeOwner:false,minSimilarity:0.88}); expect(o.shadowEvent).toBeUndefined()}
+ // The 0.64 track matches stay below the 0.88 floor: every label is Ext and nothing trains.
+ const chunk=stream.getSessionChunks(id)?.[0]; expect(chunk?.speaker).toBe('Ext'); for(const segment of chunk?.segments??[]) expect(segment.speaker).toBe('Ext')
+ expect(enroll).not.toHaveBeenCalled(); expect(existsSync(join(root,'chunk-embeddings',id+'.jsonl'))).toBe(false)
 })

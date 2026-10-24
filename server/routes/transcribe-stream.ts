@@ -2215,6 +2215,10 @@ async function transcribeWithServerWhisper(audioBuffer: Buffer, whisperAudio: Bu
   }
 }
 
+/** 6.90.0 calibration tags for Mac audio: the whole-chunk shadow score, and one Nemotron track. */
+export const MAC_SHADOW_EVENT = 'mac-shadow'
+export const MAC_TRACK_EVENT = 'mac-nemotron-track'
+
 /** The wearer's label for the 6.61.1 owner guard; null when the profile cannot say. */
 function ownerLabelOrNull(): string | null {
   try { return getOwnerSpeakerLabel() } catch { return null }
@@ -2227,7 +2231,7 @@ function identifyChunkSpeaker(audioBuffer: Buffer, sessionId: string, chunkIndex
   if (!isEmbeddingAvailable() || audioDurationSec < VOICEPRINT_MIN_AUDIO_SEC) return policyLabel({ speaker: clientSpeaker, similarity: 0 }, policy)
 
   const tEmb = performance.now()
-  const embeddingResult = identifySpeaker(audioBuffer, expectedSpeakers, { minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined, ...(MAC_CAPTURE_ID.test(sessionId) ? { prioritizeOwner: false, event: 'mac-system-audio' } : {}) })
+  const embeddingResult = identifySpeaker(audioBuffer, expectedSpeakers, { minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined, ...(MAC_CAPTURE_ID.test(sessionId) ? { prioritizeOwner: false, event: 'mac-system-audio', shadowEvent: MAC_SHADOW_EVENT } : {}) })
   console.log(`[perf] identifySpeaker: ${(performance.now() - tEmb).toFixed(1)}ms`)
   if (!embeddingResult) return policyLabel({ speaker: clientSpeaker, similarity: 0 }, policy)
 
@@ -2537,7 +2541,14 @@ async function processStreamChunk(opts: {
         identify: wav => {
           const policy = capturePolicy
           if (policy === 'anonymous') return { speaker: 'Ext', similarity: 0 }
-          const named = identifySpeaker(wav, undefined, { event: 'nemotron-track', minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined })
+          // 6.90.0: a Mac track is never checked against the wearer first (the wearer
+          // is not in Mac playback) and is tagged so its calibration rows are separable.
+          const mac = MAC_CAPTURE_ID.test(sessionId)
+          const named = identifySpeaker(wav, undefined, {
+            event: mac ? MAC_TRACK_EVENT : 'nemotron-track',
+            minSimilarity: policy === 'high-confidence' ? AUTO_ENROLL_THRESHOLD : undefined,
+            ...(mac ? { prioritizeOwner: false } : {}),
+          })
           return named ? policyLabel({ speaker: named.speaker, similarity: named.similarity }, policy) : null
         },
       })

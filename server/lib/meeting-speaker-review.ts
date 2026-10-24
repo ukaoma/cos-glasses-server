@@ -22,6 +22,8 @@
 //
 // Everything here is pure over a chunk array so it can be tested by execution.
 
+import { isVoiceLabel } from './mac-voice-labels.js'
+
 /** One transcript chunk as stored in the `.g2-chunks.json` sidecar. */
 export interface ReviewChunk {
   text?: string
@@ -64,7 +66,8 @@ export const DEATTRIBUTED_PREFIX = 'Unidentified'
 /** True when a label asserts no identity — the exact set, or a numbered
  *  de-attribution. Prefix-aware so `Unidentified 3` is treated as unnamed. */
 export function isUnattributed(label: string): boolean {
-  return UNATTRIBUTED.has(label) || new RegExp(`^${DEATTRIBUTED_PREFIX} \\d+$`).test(label)
+  // 6.90.0: `Voice N` (an unnamed, meeting-stable Mac recording voice) asserts no identity either.
+  return UNATTRIBUTED.has(label) || new RegExp(`^${DEATTRIBUTED_PREFIX} \\d+$`).test(label) || isVoiceLabel(label)
 }
 
 /** Calibrated from the control pair above. A pair must be BOTH flip-happy and

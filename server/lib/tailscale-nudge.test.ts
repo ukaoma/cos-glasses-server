@@ -226,6 +226,33 @@ describe('the trigger table', () => {
     expect(w.pings()).toEqual([])
   })
 
+  it('6.90.0: a boot or wake that skips a phone already back logs one line, trigger and outcome only', async () => {
+    const w = world({ peers: [{ ip: PHONE, os: 'iOS' }] })
+    w.nudger.start(); w.nudger.stop()
+    w.advance(5_000)
+    w.nudger.noteRequest(PHONE)
+    await run(w, 60_000)
+    expect(w.pings()).toEqual([])
+    expect(w.logs.filter(l => l.includes('already_reconnected'))).toEqual(['[tailscale-nudge] trigger=boot outcome=already_reconnected'])
+    w.logs.length = 0
+    w.sleep(25 * 60_000)
+    w.advance(10_000)
+    w.nudger.noteRequest(PHONE)
+    await w.nudger.tick()
+    await run(w, 30_000)
+    expect(w.pings()).toEqual([])
+    expect(w.logs.filter(l => l.includes('already_reconnected'))).toEqual(['[tailscale-nudge] trigger=wake outcome=already_reconnected'])
+    for (const line of w.logs) expect(line).not.toMatch(/\d+\.\d+\.\d+\.\d+/)
+  })
+
+  it('6.90.0: a boot that nudges logs no already_reconnected line', async () => {
+    const w = world({ peers: [{ ip: PHONE, os: 'iOS' }] })
+    w.nudger.start(); w.nudger.stop()
+    await run(w, 40_000)
+    expect(w.discoPings()).toHaveLength(1)
+    expect(w.logs.some(l => l.includes('already_reconnected'))).toBe(false)
+  })
+
   it('boot: a laptop that authenticated here counts as known and is nudged', async () => {
     const w = world({ peers: [{ ip: LAPTOP, os: 'macOS' }] })
     w.nudger.noteRequest(LAPTOP, { authenticated: true })

@@ -15,6 +15,7 @@
 //
 // No LLM anywhere. Transcription must never call `claude -p`.
 
+import { isVoiceLabel } from './mac-voice-labels.js'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -104,7 +105,8 @@ const round = (value: number, places = 2): number => Math.round(value * 10 ** pl
 
 function isRealLabel(label: string): boolean {
   const value = label.trim()
-  return value.length > 0 && value !== 'Unknown' && value !== 'Ext'
+  // 6.90.0: a Mac `Voice N` placeholder is not a name either.
+  return value.length > 0 && value !== 'Unknown' && value !== 'Ext' && !isVoiceLabel(value)
 }
 
 /**

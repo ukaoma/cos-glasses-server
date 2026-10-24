@@ -434,10 +434,14 @@ export class TailscaleNudger {
       const t = this.peers.get(ip)
       return !!t && t.lastAuthenticatedAt > 0 && at - t.lastAuthenticatedAt <= L.knownPeerWindowMs
     }
-    const candidates = status.peers
-      .filter(p => p.online && (known(p.ip) || isMobileOs(p.os)))
-      // Already back since the event: nothing to heal.
-      .filter(p => (this.peers.get(p.ip)?.lastRequestAt ?? 0) < pending.firedAt)
+    const eligible = status.peers.filter(p => p.online && (known(p.ip) || isMobileOs(p.os)))
+    // Already back since the event: nothing to heal.
+    const backSince = (p: PeerStatus) => (this.peers.get(p.ip)?.lastRequestAt ?? 0) >= pending.firedAt
+    // 6.90.0: say so once per event, so a quiet log after a wake reads as "the phone came back
+    // on its own", not "the trigger never ran". Trigger and outcome only, never an address.
+    if (eligible.some(backSince)) this.log(`[tailscale-nudge] trigger=${pending.trigger} outcome=already_reconnected`)
+    const candidates = eligible
+      .filter(p => !backSince(p))
       .sort((a, b) => Number(known(b.ip)) - Number(known(a.ip)))
       .slice(0, L.eventMaxPeers)
     for (const peer of candidates) {

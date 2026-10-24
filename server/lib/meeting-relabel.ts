@@ -26,6 +26,8 @@
 // a first-name substitution in narrative text would rewrite sentences about
 // somebody else. Reported as `proseStale` instead.
 
+import { isVoiceLabel } from './mac-voice-labels.js'
+
 /** A label that would corrupt the file formats it gets written into. */
 export function invalidLabelReason(label: string): string | null {
   if (label.trim() === '') return 'label is empty'
@@ -126,7 +128,12 @@ export function relabelSidecarJson(
   // attributed anything.
   const existing = Array.isArray(doc.speakers) ? doc.speakers.filter((s): s is string => typeof s === 'string') : []
   const speakers = [...existing]
-  if (!speakers.includes(to)) {
+  if (isVoiceLabel(to)) {
+    // 6.90.0: a Mac `Voice N` placeholder never enters `speakers` (the store
+    // keeps it out too), so merging into one adds nothing. Retire `from` only.
+    const at = speakers.indexOf(from)
+    if (at >= 0 && remainingWithFrom === 0) speakers.splice(at, 1)
+  } else if (!speakers.includes(to)) {
     // Replace in place when `from` is being fully retired, so the list keeps its
     // original ordering rather than moving the person to the end.
     const at = speakers.indexOf(from)

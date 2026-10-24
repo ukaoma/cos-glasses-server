@@ -102,6 +102,16 @@ describe('MeetingStore', () => {
     expect(sidecar.chunkEntries[1].chunk.speakerPolicy).toBe('high-confidence')
   })
 
+  it('6.90.0: a Mac Voice N placeholder never enters the sidecar speakers list, like Ext', () => {
+    const store = new MeetingStore(newRoot())
+    const value = input()
+    value.chunks[0]!.speaker = 'Voice 1'
+    value.chunks[1]!.speaker = 'Dana Reyes'
+    value.chunks[1]!.segments = [{ speaker: 'Voice 2', text: 'I will own', startSec: 0, endSec: 1 }, { speaker: 'Ext', text: 'the follow-up.', startSec: 1, endSec: 2 }]
+    const saved = store.save(value)
+    expect(JSON.parse(readFileSync(saved.sidecarPath, 'utf8')).speakers).toEqual(['Dana Reyes'])
+  })
+
   it('publishes a private markdown+sidecar pair and exposes build199 list/detail shapes', () => {
     const root = newRoot()
     const store = new MeetingStore(root)

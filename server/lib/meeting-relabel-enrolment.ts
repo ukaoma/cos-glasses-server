@@ -48,6 +48,7 @@ import {
   readVoiceProfiles,
 } from './speaker-embeddings.js'
 import { attachRawChunkIndices, type ReviewChunk } from './meeting-speaker-review.js'
+import { isMacCaptureSidecar } from './mac-voice-labels.js'
 import {
   MAX_ENROL_PER_CORRECTION,
   dominantCoherentCluster,
@@ -56,7 +57,8 @@ import {
 
 /** Labels the diariser invents when it does not know who is speaking. Naming one
  *  of these is a FIRST TRAINING RUN for a new person, not a correction. */
-const PLACEHOLDER_LABEL = /^(ext|unknown|unidentified(\s+\d+)?|speaker\s*\d+)$/i
+// 6.90.0: `Voice N`, the unnamed Mac recording voice, is a placeholder too.
+const PLACEHOLDER_LABEL = /^(ext|unknown|unidentified(\s+\d+)?|speaker\s*\d+|voice\s+[1-9]\d?)$/i
 
 export const isPlaceholderLabel = (label: string): boolean => PLACEHOLDER_LABEL.test(label.trim())
 
@@ -81,6 +83,8 @@ export type EnrolmentSkipReason =
   | 'disabled'
   | 'expired'
   | 'store_unavailable'
+  /** 6.90.0: a Mac recording. Its audio is call or video playback and never trains a profile. */
+  | 'mac_capture'
 
 export interface EnrolmentReport {
   /** Samples the voice store actually accepted. */
@@ -216,6 +220,13 @@ export function enrolNamedVoice(input: EnrolNamedVoiceInput): EnrolmentReport {
   // person first appears in review (Nick Gurney → Milo LeBaron). Gating on
   // placeholder-only `from` labelled the meeting and taught the store nothing.
   if (isPlaceholderLabel(to) || changed.length === 0) return IDLE
+
+  // 6.90.0: a Mac recording renames TEXT ONLY, always. Mac audio is call, video
+  // and podcast playback through one global tap; naming `Voice 2` must never
+  // turn that into a voice profile. Today Mac banks no embeddings, so this would
+  // also stop at `no_embeddings`, but only by accident of the store. This guard
+  // says it on purpose, before any store is read.
+  if (isMacCaptureSidecar(sidecar, sessionId)) return { ...IDLE, skipped: 'mac_capture' }
 
   if (!chunkEmbeddingsEnabled()) return { ...IDLE, skipped: 'disabled' }
   // No extractor/manager means every enrollEmbedding would return success:false.

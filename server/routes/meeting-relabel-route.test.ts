@@ -80,6 +80,8 @@ interface SeedOptions {
    *  14-day embedding TTL is read against it and a hardcoded date would make
    *  those tests change verdict on a calendar boundary. */
   startTime?: number
+  /** Extra top-level sidecar fields, e.g. a Mac recording's `sourceType`. */
+  extra?: Record<string, unknown>
 }
 
 function seed(sessionId: string, labels: string[], opts: SeedOptions = {}): void {
@@ -116,6 +118,7 @@ function seed(sessionId: string, labels: string[], opts: SeedOptions = {}): void
     speakers: [...new Set(labels)],
     chunks,
     ...(chunkEntries ? { chunkEntries } : {}),
+    ...(opts.extra ?? {}),
   }, null, 2))
 }
 
@@ -1087,3 +1090,67 @@ describe('backfilling enrolment from a recorded correction', () => {
     expect(res.json.reason).toBe('invalid_label')
   })
 }, HTTP_TEST_TIMEOUT)
+
+// 6.90.0: a Mac recording's unnamed `Voice N` turns can be renamed, as TEXT ONLY.
+// The fixture banks embeddings for every relabelled raw index, so the ONLY thing
+// standing between this rename and a profile write is the Mac guard: remove it
+// and `enrolCalls` fills with the call-audio voice (the mutation this pins).
+describe('6.90.0: renaming a Mac recording voice never trains a profile', () => {
+  const MAC_SCRIBE = `# Vendor call
+
+| Field | Value |
+|-------|-------|
+| **Date** | 2026-10-23 |
+| **Capture source** | mac_system_audio |
+
+## Summary
+
+*Standalone recording.*
+
+## Transcript
+
+[Voice 1]: The renewal is due in March.
+[Voice 2]: We can hold the price until then.
+[Voice 1]: Send it over this week.
+`
+  const MAC_ID = 'mac_1b2c3d4e-0000-4000-8000-00000000abcd'
+  const RAW = [0, 2, 4]
+  const ROWS = [{ i: 0, speaker: 'Ext' }, { i: 2, speaker: 'Ext' }, { i: 4, speaker: 'Ext' }]
+
+  it.each([
+    ['a mac_ capture id', MAC_ID, {}],
+    ['a sidecar marked mac_system_audio', 'meeting_mac_marked', { sourceType: 'mac_system_audio' }],
+  ])('%s: the rename lands in the sidecar and transcript, and nothing is enrolled', async (_name, sessionId, extra) => {
+    seed(sessionId, ['Voice 1', 'Voice 2', 'Voice 1'], { scribe: MAC_SCRIBE, rawIndices: RAW, startTime: Date.now() - 3_600_000, extra })
+    writeChunkEmbeddings(sessionId, ROWS)
+    await startServer()
+
+    const res = await post(`/api/meeting/${sessionId}/relabel`, { from: 'Voice 2', to: 'Dana Reyes', confirm: true })
+    expect(res.status).toBe(200)
+    expect(enrolCalls).toEqual([])
+    expect(res.json.enrolment).toEqual({ enrolled: 0, attempted: 0, created: false, clusterSkipped: 0, skipped: 'mac_capture' })
+    expect(sidecarNow().labels).toEqual(['Voice 1', 'Dana Reyes', 'Voice 1'])
+    expect(scribeNow()).toContain('[Dana Reyes]: We can hold the price until then.')
+    expect(scribeNow()).toContain('[Voice 1]: The renewal is due in March.')
+  }, HTTP_TEST_TIMEOUT)
+
+  it('the same fixture as a glasses meeting DOES enrol, so the guard above is what stops it', async () => {
+    seed('meeting_g2_control', ['Voice 1', 'Voice 2', 'Voice 1'], { scribe: MAC_SCRIBE, rawIndices: RAW, startTime: Date.now() - 3_600_000 })
+    writeChunkEmbeddings('meeting_g2_control', ROWS)
+    await startServer()
+    const res = await post('/api/meeting/meeting_g2_control/relabel', { from: 'Voice 2', to: 'Dana Reyes', confirm: true })
+    expect(res.status).toBe(200)
+    expect(enrolCalls.map(c => c.marker)).toEqual([2])
+    expect(res.json.enrolment.skipped).toBeNull()
+  }, HTTP_TEST_TIMEOUT)
+
+  it('renaming one Voice into another is a placeholder rename and enrols nothing either way', async () => {
+    seed(MAC_ID, ['Voice 1', 'Voice 2', 'Voice 1'], { scribe: MAC_SCRIBE, rawIndices: RAW, startTime: Date.now() - 3_600_000 })
+    writeChunkEmbeddings(MAC_ID, ROWS)
+    await startServer()
+    const res = await post(`/api/meeting/${MAC_ID}/relabel`, { from: 'Voice 2', to: 'Voice 1', confirm: true })
+    expect(res.status).toBe(200)
+    expect(enrolCalls).toEqual([])
+    expect(res.json.enrolment.attempted).toBe(0)
+  }, HTTP_TEST_TIMEOUT)
+})

@@ -1,3 +1,39 @@
+## 6.90.0 - Mac recordings tell voices apart: unnamed Voice 1, Voice 2, renamed as text only
+
+Miles, 2026-10-23 09:35: "Voice 1/2 + rename", split out of 6.87.0 at 10:06. Every saved Mac recording was 100% `Ext`:
+Nemotron heard a second voice in about 1 chunk in 10, and the 0.88 naming floor and same-label turn merge threw that
+away. This keeps Mac audio unnamed (no calibration exists to name anyone from call audio) and keeps its voices apart.
+
+- **Unnamed meeting-wide voices** (`server/lib/nemotron-final.ts`, `unnamedVoicePass`). At save, a Mac recording (the
+  `mac_system_audio` sidecar or a `mac_` id, every chunk with words strict `high-confidence`, none carrying a real name)
+  now takes the meeting-wide Nemotron final pass in an unnamed mode instead of `skipped: speaker_policy`. A channel that
+  holds the floor, one-sided, in 3 or more chunks becomes `Voice 1`, `Voice 2`, ... in order of first speech. No voice
+  profile is read or written, the wearer is never consulted, and `speakers` is left as saved. A crowded room (more than
+  4 such voices, or all 8 Nemotron channels in use) is `voices_crowded`, and a room with no such channel is
+  `voices_unconfident`: both stay `Ext`, byte for byte. A voice that would have turns but lead no chunk (or the reverse)
+  is dropped back to `Ext` and the rest renumbered, so every `Voice N` can be renamed in one action. Words, line breaks
+  and the human-correction rule are the final pass's own guarantees, unchanged; the original transcript stays under
+  `diarization.originalTranscript` with `labels: "unnamed"`. Glasses and every other strict capture keep the 6.73.6 skip.
+- **Switch:** `COS_MAC_VOICE_LABELS`, on by default; `0`, `false`, `off` or `no` gives 6.89.0's behaviour. Forwarded by
+  the managed runtime contract.
+- **`Voice N` is a placeholder everywhere a name is checked:** `isUnattributed` (review panel, final pass), the relabel
+  `PLACEHOLDER_LABEL`, the sidecar `speakers` filter at save, the batch segment `speakers` filters
+  (`isNamedSegmentSpeaker`), `isRealLabel` in live naming, and a merge into a Voice label never writes it into `speakers`.
+- **Rename is text only.** The existing `POST /meeting/:id/relabel` renames `Voice 2` to a person. `enrolNamedVoice` now
+  refuses any Mac recording with `skipped: "mac_capture"` before it reads a store, so a Mac rename can never enrol or
+  train a profile (until now that was true only because Mac banks no embeddings).
+- **Shadow scoring (calibration only).** A Mac chunk the 0.88 floor leaves `Ext` also logs its best profile match at the
+  ordinary 0.55 floor to `speaker-calibration.jsonl` under `event: "mac-shadow"`, `matched: false`. The label stays
+  `Ext`; nothing is enrolled; nothing goes to server.log.
+- **Mac Nemotron tracks** are identified with `prioritizeOwner: false` and tagged `mac-nemotron-track`, so their
+  calibration rows are separable from the glasses' `nemotron-track`.
+- **Replay** (read-only, clones of six 10/16 to 10/22 Mac sidecars against Miles's private audio copy, scratch data dir):
+  3 of 6 took voices (4, 1 and 1 voices; 76 of 370 chunks with words split into two or more voices in the 4-voice call),
+  3 stayed `Ext` as crowded (all 8 channels in use, 7, 5 and 7 confident channels). Found and fixed on the way: text-less
+  Mac entries carry no policy marker, which refused every real recording.
+- **Tailscale nudge follow-up (6.89.0):** a boot, wake, network or tailscale trigger that finds the phone already back logs
+  one line, `[tailscale-nudge] trigger=<t> outcome=already_reconnected`. Trigger and outcome only, never an address.
+
 ## 6.89.0 - LAN first removed; the Mac nudges a stale Tailscale tunnel back to life
 
 Miles, 2026-10-23 19:57: no LAN-only code, because he uses COS away from home; and checks around the nudge so the

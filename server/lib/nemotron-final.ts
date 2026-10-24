@@ -68,6 +68,7 @@ import {
   wavHeader,
 } from './nemotron-segments.js'
 import { captureSpeakerMode, type SpeakerMode } from './meeting-speaker-policy.js'
+import { isMacCaptureSidecar, isVoiceLabel, macVoiceLabelsEnabled, voiceLabel } from './mac-voice-labels.js'
 import { NEMOTRON_CHANNELS } from './nemotron-cli.js'
 import type { WhisperWord } from './whisper-local.js'
 
@@ -633,7 +634,7 @@ export const FINAL_REASON_CODES = [
   'no_transcript', 'already_applied', 'no_chunks', 'nemotron_timeout', 'nemotron_cli_failed',
   'nemotron_bad_output', 'nemotron_spawn_failed', 'nemotron_error', 'no_speaker_words', 'chunk_map_ambiguous',
   'word_mismatch', 'no_change', 'changed_during_pass', 'markdown_write', 'sidecar_restore_failed', 'too_long',
-  'metadata_not_persisted', 'speaker_policy', 'error',
+  'metadata_not_persisted', 'speaker_policy', 'voices_crowded', 'voices_unconfident', 'error',
 ] as const
 export type FinalReasonCode = typeof FINAL_REASON_CODES[number]
 const REASON_SET: ReadonlySet<string> = new Set(FINAL_REASON_CODES)
@@ -659,6 +660,10 @@ export interface FinalPassOutcome {
   /** Distinct speakers in the transcript before and after. */
   speakersBefore?: number
   speakersAfter?: number
+  /** 6.90.0: a Mac recording labelled with unnamed `Voice N` turns (no profile was read). */
+  unnamed?: boolean
+  /** How many `Voice N` labels the meeting carries after an unnamed pass. */
+  voices?: number
 }
 
 export interface FinalPassOptions {
@@ -738,7 +743,7 @@ export function runNemotronFinalPass(options: FinalPassOptions): Promise<FinalPa
     lastFinal = published
     const log = options.log ?? console.log
     if (outcome.status === 'applied') {
-      log(`[diarizer] final pass applied (${outcome.mode}${outcome.crowded ? `, crowded: ${outcome.identities} identities, per-chunk turns only` : ''}) in ${outcome.ms} ms: ${outcome.channels} channels, mapped ${JSON.stringify(outcome.mapped)}, ${outcome.words?.relabeled}/${outcome.words?.total} words relabelled, speakers ${outcome.speakersBefore} -> ${outcome.speakersAfter}${excludedNote(outcome)}`)
+      log(`[diarizer] final pass applied (${outcome.mode}${outcome.unnamed ? `, unnamed: ${outcome.voices} voices, no profile read` : ''}${outcome.crowded ? `, crowded: ${outcome.identities} identities, per-chunk turns only` : ''}) in ${outcome.ms} ms: ${outcome.channels} channels, mapped ${JSON.stringify(outcome.mapped)}, ${outcome.words?.relabeled}/${outcome.words?.total} words relabelled, speakers ${outcome.speakersBefore} -> ${outcome.speakersAfter}${excludedNote(outcome)}`)
     } else if (outcome.reason === 'sidecar_restore_failed') {
       log(`[diarizer] final pass FAILED and could not restore the sidecar: ${outcome.detail}`)
     } else {
@@ -798,9 +803,14 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   // Final diarization builds meeting-wide channel/name maps. Earlier Standard
   // identities cannot safely authorize names for later strict-policy audio.
   // Preserve the canonical transcript (including earlier names) byte-for-byte.
+  const sidecarChunks = (Array.isArray(sidecar.chunks) ? sidecar.chunks : []) as SidecarChunk[]
+  let unnamed = false
   if (entries.some(entry => captureSpeakerMode(entry.chunk.speakerPolicy) !== 'standard')
-    || (Array.isArray(sidecar.chunks) && sidecar.chunks.some((chunk: SidecarChunk) => captureSpeakerMode(chunk.speakerPolicy) !== 'standard'))) {
-    return { status: 'skipped', reason: 'speaker_policy' }
+    || sidecarChunks.some(chunk => captureSpeakerMode(chunk.speakerPolicy) !== 'standard')) {
+    // 6.90.0: a Mac recording may still take UNNAMED voices (see unnamedVoicePass).
+    // Every other strict capture keeps the 6.73.6 skip, byte for byte.
+    if (!unnamedVoicesEligible(sidecar, entries, sidecarChunks, env)) return { status: 'skipped', reason: 'speaker_policy' }
+    unnamed = true
   }
 
   const timeline = await buildMeetingTimeline(entries, options.audioDir)
@@ -850,6 +860,9 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   // A channel is in use once it holds a track's worth of speech (QA 6.61.0 N2:
   // one 10 ms blip on a third channel made a two-person call "crowded").
   const channelsUsed = new Set(tracksIn(activity, 0, activity.frames).map(track => track.channel))
+  if (unnamed) {
+    return unnamedVoicePass({ options, sidecar, sidecarText, markdown, transcript, entries, timeline, activity, run, channelsUsed: channelsUsed.size, started })
+  }
   // The canary's rule for a meeting-wide map (OUTCOME_2026-10-01, retro plan 4):
   // four or fewer identities and fewer than eight channels. A crowded room
   // (Wed 07:31 filled all eight with five names) gets no channel map; its words
@@ -955,6 +968,37 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   const nextMarkdown = replaceTranscriptSection(markdown, next)
   if (nextMarkdown === null) return { status: 'skipped', reason: 'no_transcript' }
 
+  const committed = commitFinalPass(options, sidecarText, markdown, nextSidecar, nextMarkdown, excluded)
+  if (committed) return committed
+  return {
+    status: 'applied',
+    mode,
+    crowded,
+    identities,
+    ms,
+    audioSec: Math.round(timeline.durationSec),
+    channels: channelsUsed.size,
+    mapped,
+    words: stats,
+    excluded,
+    speakersBefore: distinctSpeakers(transcript),
+    speakersAfter: distinctSpeakers(next),
+  }
+}
+
+/**
+ * Write a computed pass: re-read both files first (a human edit during the CLI
+ * run makes the pass stale), then sidecar, then markdown, restoring the sidecar
+ * if the markdown write fails. Null means both files were written.
+ */
+function commitFinalPass(
+  options: FinalPassOptions,
+  sidecarText: string,
+  markdown: string,
+  nextSidecar: Record<string, any>,
+  nextMarkdown: string,
+  excluded: MeetingTimeline['excluded'],
+): FinalPassOutcome | null {
   // The CLI ran for tens of seconds. A human relabel or deattribution, or a
   // summary, may have landed meanwhile; writing from the copy read before the
   // run would erase it. Re-read both files: any change and this pass is stale.
@@ -997,14 +1041,277 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
     }
     return { status: 'failed', reason: 'markdown_write', detail: `${why}; sidecar restored`, excluded }
   }
-  return {
+  return null
+}
+
+// ── 6.90.0: unnamed, meeting-stable voices for Mac recordings ───────────────────
+//
+// The named pass above maps a channel to a name from chunks the voiceprint was
+// sure of. A Mac recording has no such chunks (every one is `Ext` at the 0.88
+// floor) and must never borrow a name, so it skips that pass (`speaker_policy`).
+// This pass keeps the channels and drops the names: each channel that holds the
+// floor in enough chunks becomes `Voice 1`, `Voice 2`, ... in order of first
+// speech. No profile is read or written anywhere below; `owner` is never passed,
+// so the wearer guard cannot fire and no name can enter. A crowded room (more
+// than FINAL_MAX_IDENTITIES voices, or every channel in use) and a room with no
+// confident channel stay `Ext` exactly as saved.
+
+/** A channel becomes a voice only if it holds the floor, one-sided, in at least this many chunks. */
+export const VOICE_MIN_SUPPORT = FINAL_MIN_SUPPORT
+
+/**
+ * Unnamed mode applies to a Mac recording, with the switch on, when every chunk
+ * that carries words is the Mac strict policy and none already carries a real
+ * name (a 0.88 match is rare, and a pass must never overwrite one with a
+ * placeholder).
+ */
+export function unnamedVoicesEligible(
+  sidecar: Record<string, unknown>,
+  entries: SidecarEntry[],
+  chunks: SidecarChunk[],
+  env: NodeJS.ProcessEnv,
+): boolean {
+  if (!macVoiceLabelsEnabled(env) || !isMacCaptureSidecar(sidecar)) return false
+  const hasText = (chunk: SidecarChunk) => typeof chunk?.text === 'string' && chunk.text.trim().length > 0
+  const spoken = [...entries.map(entry => entry.chunk), ...chunks].filter(hasText)
+  if (!spoken.length) return false
+  // Measured on the six 10/16-10/22 Mac recordings: every text-less entry (an
+  // empty completion) is stored with no policy marker, so only the chunks that
+  // carry words must prove the Mac pin. A text-less entry may be unmarked or
+  // strict; anything else (anonymous, a malformed marker) still refuses.
+  const silentOk = entries.filter(entry => !hasText(entry.chunk))
+    .every(entry => entry.chunk?.speakerPolicy === undefined || entry.chunk.speakerPolicy === 'high-confidence')
+  return silentOk && spoken.every(chunk => chunk.speakerPolicy === 'high-confidence' && !isName(chunk.speaker))
+}
+
+export interface VoiceChannels {
+  /** Accepted channels, in order of first supporting chunk. */
+  channels: number[]
+  evidence: Array<{ channel: number; support: number; firstSec: number; accepted: boolean }>
+  eligible: number
+}
+
+/** Channels that hold the floor, one-sided, in VOICE_MIN_SUPPORT or more chunks. Names are never read. */
+export function mapChannelsToVoices(windows: TimelineWindow[], a: Activity, options: { oneSided?: number; minSupport?: number } = {}): VoiceChannels {
+  const oneSided = options.oneSided ?? FINAL_ONE_SIDED
+  const minSupport = options.minSupport ?? VOICE_MIN_SUPPORT
+  const support = new Map<number, { support: number; firstSec: number }>()
+  let eligible = 0
+  for (const window of windows) {
+    const [f0, f1] = frameRange(a, window.start, window.end)
+    const counts = new Array<number>(NEMOTRON_CHANNELS).fill(0)
+    let speech = 0
+    for (let f = f0; f < f1; f++) {
+      let any = false
+      for (let c = 0; c < NEMOTRON_CHANNELS; c++) if (isActive(a, f, c)) { counts[c]++; any = true }
+      if (any) speech++
+    }
+    if (speech === 0) continue
+    let dom = 0
+    for (let c = 1; c < NEMOTRON_CHANNELS; c++) if (counts[c] > counts[dom]) dom = c
+    if (counts[dom] / speech < oneSided) continue
+    eligible++
+    const row = support.get(dom) ?? { support: 0, firstSec: window.start }
+    row.support++
+    row.firstSec = Math.min(row.firstSec, window.start)
+    support.set(dom, row)
+  }
+  const ordered = [...support.entries()].sort((x, y) => x[1].firstSec - y[1].firstSec || x[0] - y[0])
+  const evidence = ordered.map(([channel, row]) => ({ channel, support: row.support, firstSec: Math.round(row.firstSec * 100) / 100, accepted: row.support >= minSupport }))
+  return { channels: evidence.filter(row => row.accepted).map(row => row.channel), evidence, eligible }
+}
+
+/** `Voice 1` for the first channel, `Voice 2` for the next, and so on. */
+export function numberVoices(channels: number[]): Map<number, string> {
+  return new Map(channels.map((channel, i) => [channel, voiceLabel(i + 1)]))
+}
+
+function voicesIn(transcript: string): Set<string> {
+  const out = new Set<string>()
+  for (const line of transcript.split('\n')) {
+    const match = /^\[([^\]\n]+)\]:/.exec(line)
+    if (match && isVoiceLabel(match[1])) out.add(match[1])
+  }
+  return out
+}
+
+/** The label with the most words, ties to the earlier label. */
+function mostWords(counts: Map<string, number>): string | null {
+  let best: string | null = null
+  let n = -1
+  for (const [label, count] of counts) if (count > n) { best = label; n = count }
+  return best
+}
+
+interface UnnamedInput {
+  options: FinalPassOptions
+  sidecar: Record<string, any>
+  sidecarText: string
+  markdown: string
+  transcript: string
+  entries: SidecarEntry[]
+  timeline: MeetingTimeline
+  activity: Activity
+  run: NemotronPreds
+  channelsUsed: number
+  started: number
+}
+
+interface UnnamedLabelling {
+  next: string
+  stats: RelabelStats
+  /** chunkIndex -> the chunk's label (the one with the most words). */
+  chunkSpeakers: Map<number, string>
+  batchSegments?: SidecarBatchSegment[]
+  finals?: Map<number, { speaker: string; segments: ChunkSpeakerSegment[] }>
+}
+
+function labelUnnamed(input: UnnamedInput, mode: 'batch' | 'streaming', map: Map<number, string>): UnnamedLabelling | FinalPassOutcome {
+  const { sidecar, timeline, activity, transcript, entries } = input
+  if (mode === 'batch') {
+    const segments = (Array.isArray(sidecar.batchSegments) ? sidecar.batchSegments : []) as SidecarBatchSegment[]
+    if (!segments.length) return { status: 'skipped', reason: 'no_speaker_words' }
+    const selected = selectBatchTranscriptForPersistence(
+      String(sidecar.batchTranscript ?? ''),
+      segments.map(segment => ({ text: segment.text, speakerWords: segment.speakerWords })),
+    )
+    if (selected.source !== 'speaker-words') return { status: 'skipped', reason: 'no_speaker_words' }
+    const relabeled = relabelBatchSegments(segments, timeline, activity, map, null)
+    const sequence = relabeled.segments.flatMap(segment => segment.speakerWords
+      .map(word => ({ word: String(word.word ?? '').trim(), speaker: word.speaker || 'Ext' }))
+      .filter(word => word.word))
+    const next = (input.options.relabelWords ?? relabelTranscriptWords)(transcript, sequence)
+    const perChunk = new Map<number, Map<string, number>>()
+    for (const segment of relabeled.segments) {
+      for (const word of segment.speakerWords) {
+        const at = batchWordToTimeline(segment, Number(word.start), timeline)
+        if (!at) continue
+        const counts = perChunk.get(at.window.chunkIndex) ?? new Map<string, number>()
+        counts.set(word.speaker || 'Ext', (counts.get(word.speaker || 'Ext') ?? 0) + 1)
+        perChunk.set(at.window.chunkIndex, counts)
+      }
+    }
+    const chunkSpeakers = new Map<number, string>()
+    for (const [index, counts] of perChunk) { const top = mostWords(counts); if (top) chunkSpeakers.set(index, top) }
+    return { next, stats: relabeled.stats, chunkSpeakers, batchSegments: relabeled.segments }
+  }
+  const relabeled = relabelStreamingChunks(timeline, activity, map, null)
+  const textEntries = entries.filter(entry => typeof entry.chunk?.text === 'string' && entry.chunk.text.trim())
+  const next = relabelStreamingTranscript(transcript, textEntries.map(entry => ({ chunkIndex: entry.chunkIndex, text: entry.chunk.text })), relabeled.finals)
+  const chunkSpeakers = new Map<number, string>([...relabeled.finals.entries()].map(([index, final]) => [index, final.speaker]))
+  return { next, stats: relabeled.stats, chunkSpeakers, finals: relabeled.finals }
+}
+
+/**
+ * The unnamed pass. Labels are kept consistent between the transcript and the
+ * chunks the relabel route edits: a voice that would appear in turns but lead no
+ * chunk (or lead a chunk but have no turn, or neither) could never be renamed in
+ * one action, so its channel is dropped back to `Ext` and the rest are
+ * renumbered. A pass with no voice left is `voices_unconfident`.
+ */
+async function unnamedVoicePass(input: UnnamedInput): Promise<FinalPassOutcome> {
+  const { options, sidecar, sidecarText, markdown, transcript, entries, timeline, activity, run, channelsUsed, started } = input
+  const excluded = timeline.excluded
+  const mode: 'batch' | 'streaming' = sidecar.batchApplied === true ? 'batch' : 'streaming'
+  const found = mapChannelsToVoices(timeline.windows, activity)
+  const crowded = isCrowded(found.channels.length, channelsUsed)
+  if (crowded) {
+    return { status: 'skipped', reason: 'voices_crowded', unnamed: true, mode, crowded: true, identities: found.channels.length, channels: channelsUsed, excluded }
+  }
+
+  const nextSidecar: Record<string, any> = JSON.parse(sidecarText)
+  const chunks = Array.isArray(nextSidecar.chunks) ? nextSidecar.chunks as SidecarChunk[] : []
+  const nextEntries = (Array.isArray(nextSidecar.chunkEntries) ? nextSidecar.chunkEntries : []) as SidecarEntry[]
+  const textNext = nextEntries.filter(entry => typeof entry.chunk?.text === 'string' && entry.chunk.text.trim())
+  const aligned = textNext.length === chunks.length && textNext.every((entry, i) => entry.chunk.text === chunks[i]?.text)
+  if (!aligned) return { status: 'skipped', reason: 'chunk_map_ambiguous', unnamed: true, mode, excluded }
+
+  let channels = [...found.channels]
+  let map = numberVoices(channels)
+  let labelled: UnnamedLabelling | null = null
+  for (let round = 0; round <= NEMOTRON_CHANNELS && channels.length; round++) {
+    map = numberVoices(channels)
+    const attempt = labelUnnamed(input, mode, map)
+    if ('status' in attempt) return { ...attempt, unnamed: true, mode, excluded }
+    const inTurns = voicesIn(attempt.next)
+    const leading = new Set(textNext.map(entry => attempt.chunkSpeakers.get(entry.chunkIndex)).filter((label): label is string => isVoiceLabel(label)))
+    // A voice must both speak a turn and lead a chunk. One that does neither (a
+    // channel with no words) is dropped too, so numbering never skips a voice.
+    const kept = channels.filter(channel => inTurns.has(map.get(channel)!) && leading.has(map.get(channel)!))
+    if (kept.length === channels.length) { labelled = attempt; break }
+    channels = kept
+  }
+  // No confident channel at all, or none left once orphans are dropped: the room stays Ext.
+  if (!labelled || !channels.length) return { status: 'skipped', reason: 'voices_unconfident', unnamed: true, mode, channels: channelsUsed, excluded }
+  const { next, stats } = labelled
+
+  if (!sameWords(transcript, next)) return { status: 'skipped', reason: 'word_mismatch', unnamed: true, mode, excluded }
+  if (next === transcript) return { status: 'skipped', reason: 'no_change', unnamed: true, mode, words: stats, excluded, channels: channelsUsed }
+
+  textNext.forEach((entry, i) => {
+    const label = labelled!.chunkSpeakers.get(entry.chunkIndex)
+    if (!label) return
+    const final = labelled!.finals?.get(entry.chunkIndex)
+    for (const chunk of [entry.chunk, chunks[i]]) {
+      const original = typeof chunk.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk.speaker
+      if (final) chunk.finalSegments = final.segments
+      chunk.speaker = label
+      if (label !== original) chunk.originalSpeaker = original
+      else delete chunk.originalSpeaker
+    }
+  })
+  if (labelled.batchSegments) {
+    nextSidecar.batchSegments = labelled.batchSegments
+    if (typeof sidecar.batchTranscript === 'string') nextSidecar.batchTranscript = next
+  }
+
+  const voices = voicesIn(next).size
+  const ms = (options.now ?? Date.now)() - started
+  const mapped = Object.fromEntries([...map.entries()].map(([channel, label]) => [String(channel), label]))
+  // `speakers` is left exactly as saved: a `Voice N` placeholder is never a speaker name.
+  nextSidecar.lifecycleRevision = Number(sidecar.lifecycleRevision ?? 0) + 1
+  nextSidecar.diarization = {
+    engine: 'nemotron3',
+    variant: NEMOTRON_VARIANT,
+    bundle: NEMOTRON_BUNDLE,
+    computeUnits: 'ane',
     status: 'applied',
     mode,
-    crowded,
-    identities,
+    labels: 'unnamed',
+    appliedAt: new Date((options.now ?? Date.now)()).toISOString(),
+    ms,
+    audioSec: Math.round(timeline.durationSec * 10) / 10,
+    frames: run.frames,
+    channelsUsed,
+    channelMap: mapped,
+    mapping: {
+      unnamed: true,
+      crowded: false,
+      voices,
+      eligibleChunks: found.eligible,
+      oneSided: FINAL_ONE_SIDED,
+      minSupport: VOICE_MIN_SUPPORT,
+      evidence: found.evidence,
+    },
+    words: stats,
+    excludedChunks: timeline.excluded,
+    originalTranscript: transcript,
+    outputSha256: sha(next),
+  }
+  const nextMarkdown = replaceTranscriptSection(markdown, next)
+  if (nextMarkdown === null) return { status: 'skipped', reason: 'no_transcript' }
+  const committed = commitFinalPass(options, sidecarText, markdown, nextSidecar, nextMarkdown, excluded)
+  if (committed) return { ...committed, unnamed: true }
+  return {
+    status: 'applied',
+    unnamed: true,
+    voices,
+    mode,
+    crowded: false,
+    identities: 0,
     ms,
     audioSec: Math.round(timeline.durationSec),
-    channels: channelsUsed.size,
+    channels: channelsUsed,
     mapped,
     words: stats,
     excluded,

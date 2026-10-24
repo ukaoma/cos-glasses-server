@@ -1,3 +1,4 @@
+import { isVoiceLabel } from './mac-voice-labels.js'
 import { MAC_SOURCE_TYPE, readMacRecording, closeMacRecording } from './mac-recording.js'
 import {
   chmodSync,
@@ -429,8 +430,9 @@ export class MeetingStore {
       providers,
       providerCandidates: input.providerCandidates ?? {},
       // 6.61.0: a chunk can hold two named voices; its segments count too.
+      // 6.90.0: a Mac `Voice N` placeholder is no more a speaker than `Ext` is.
       speakers: [...new Set(input.chunks.flatMap(chunk => [chunk.speaker, ...(chunk.segments ?? []).map(segment => segment.speaker)])
-        .filter(speaker => speaker && speaker !== 'Ext'))],
+        .filter(speaker => speaker && speaker !== 'Ext' && !isVoiceLabel(speaker)))],
       chunks: input.chunks,
       chunkEntries: input.chunkEntries ?? input.chunks.map((chunk, chunkIndex) => ({ chunkIndex, chunk })),
       transferIntegrity: input.transferIntegrity ?? null,

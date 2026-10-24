@@ -358,9 +358,20 @@ describe('the whole review', () => {
   })
 
   it('calls a low-confidence but stable voice weak, not unreliable', () => {
-    const cs = chunks(turnTaking('MU', 'Voice 2', 8, 30)).map(c => ({ ...c, similarity: 0.58 }))
+    // 6.90.0: was 'Voice 2', which is now an unnamed Mac placeholder (see the next test).
+    const cs = chunks(turnTaking('MU', 'Dana Reyes', 8, 30)).map(c => ({ ...c, similarity: 0.58 }))
     const review = reviewMeetingSpeakers(cs, { owner: 'MU' })
     expect(review.voices.every(v => v.reliability === 'weak')).toBe(true)
+  })
+
+  it('6.90.0: a Mac Voice N label is an unnamed voice to name, never a weak or asserted name', () => {
+    const cs = chunks(turnTaking('Voice 1', 'Voice 2', 8, 30))
+    const review = reviewMeetingSpeakers(cs, { owner: 'MU' })
+    expect(review.attributed).toBe(false)
+    expect(review.voices.map(v => [v.label, v.reliability, v.nameAsserted])).toEqual(expect.arrayContaining([
+      ['Voice 1', 'unattributed', false], ['Voice 2', 'unattributed', false],
+    ]))
+    for (const voice of review.voices) expect(voice.thrashesWith).toEqual([])
   })
 
   it('reports a recovered meeting as unattributed rather than empty', () => {

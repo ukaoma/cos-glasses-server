@@ -2,6 +2,7 @@
 // larger windows so Whisper gets enough context to improve the live stream.
 // The candidate is never canonical until batch-transcript-quality accepts it.
 
+import { isVoiceLabel } from './mac-voice-labels.js'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism } from 'node:os'
@@ -109,6 +110,11 @@ export function concatenateWavChunks(audioDir: string, startChunk: number, endCh
   return Buffer.concat([createWavHeader(pcm.length), pcm])
 }
 
+/** A segment's `speakers` list holds names only: never `Ext`, and (6.90.0) never a Mac `Voice N` placeholder. */
+export function isNamedSegmentSpeaker(speaker: string): boolean {
+  return Boolean(speaker) && speaker !== 'Ext' && !isVoiceLabel(speaker)
+}
+
 /** Group live transcript chunks into roughly 30-second Whisper windows. */
 export function segmentTranscriptChunks(
   entries: IndexedTranscriptChunk[],
@@ -135,7 +141,7 @@ export function segmentTranscriptChunks(
       segments.push({
         startChunkIdx: first.chunkIndex, endChunkIdx: last.chunkIndex,
         startElapsed: first.chunk.elapsed, endElapsed: last.chunk.elapsed,
-        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(isNamedSegmentSpeaker))],
         speakerPolicy: captureSpeakerMode(first.chunk.speakerPolicy),
       })
       segmentStartPosition = position
@@ -148,7 +154,7 @@ export function segmentTranscriptChunks(
         endChunkIdx: entry.chunkIndex,
         startElapsed: first.chunk.elapsed,
         endElapsed: chunk.elapsed,
-        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(isNamedSegmentSpeaker))],
         speakerPolicy: captureSpeakerMode(first.chunk.speakerPolicy),
       })
       segmentStartPosition = position + 1
@@ -165,7 +171,7 @@ export function segmentTranscriptChunks(
         endChunkIdx: last.chunkIndex,
         startElapsed: first.chunk.elapsed,
         endElapsed: last.chunk.elapsed,
-        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(speaker => speaker && speaker !== 'Ext'))],
+        speakers: [...new Set(window.map(item => policyLabel(item.chunk, captureSpeakerMode(item.chunk.speakerPolicy)).speaker).filter(isNamedSegmentSpeaker))],
         speakerPolicy: captureSpeakerMode(first.chunk.speakerPolicy),
       })
     }
