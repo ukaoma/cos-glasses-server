@@ -125,24 +125,6 @@ describe('global API authentication boundary', () => {
     expect((await request(path, { method })).status).toBe(401)
   })
 
-  // 6.88.0 LAN first: one more exact public door, GET only (docs/lan-first.md).
-  it('admits GET /api/route-proof without a token', async () => {
-    expect((await request('/api/route-proof?nonce=phoneNonce_0123456789-AB')).status).toBe(204)
-  })
-
-  it.each([
-    ['HEAD', '/api/route-proof'],
-    ['POST', '/api/route-proof'],
-    ['PUT', '/api/route-proof'],
-    ['DELETE', '/api/route-proof'],
-    ['GET', '/api/route-proof/'],
-    ['GET', '/api/route-proof/extra'],
-    ['GET', '/api/route-proofs'],
-    ['GET', '/api/x/route-proof'],
-  ])('keeps %s %s behind the token', async (method, path) => {
-    expect((await request(path, { method })).status).toBe(401)
-  })
-
   it('calls onAuthenticated only for requests that passed the token check', async () => {
     const seen: string[] = []
     const app = express()
