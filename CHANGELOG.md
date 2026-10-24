@@ -1,3 +1,34 @@
+## 6.89.0 - LAN first removed; the Mac nudges a stale Tailscale tunnel back to life
+
+Miles, 2026-10-23 19:57: no LAN-only code, because he uses COS away from home; and checks around the nudge so the
+Tailscale connection always comes back. After the 10/22 Mac restart the phone's Tailscale extension kept a stale tunnel:
+Tailscale's own ping went through, no COS request did, and only toggling Tailscale on the phone fixed it. Contract and
+field canary: `docs/tailscale-self-heal.md`.
+
+- **LAN first is gone.** Removed: public `GET /api/route-proof`, `routes` on `/api/models`, `capabilities.routeProof` and
+  `capabilities.lanRoutes`, `COS_LAN_FIRST`, `server/lib/lan-first.ts`, `server/routes/route-proof.ts`,
+  `docs/lan-first.md`, the SECURITY.md note, their tests and gate (reverts c593b91). `/api/models` is the 6.87.0 shape
+  path for path, and `/api/health` is 6.87.0 plus `tailscaleNudge`, both checked against goldens captured from
+  601d807. `/api/route-proof` is an unknown path behind the token again. `COS_LAN_FIRST` is read by nothing.
+- **Kept:** 6.88.0's transfer integrity against the phone's final index and the origin-wipe recovery save that waits
+  for it (fc52f49), and the older opt-in "Allow pairing on this Wi-Fi" pairing switch (6.67.0).
+- **The nudge** (`server/lib/tailscale-nudge.ts`). `tailscale ping -c 3 --timeout 5s <peer>` (disco: both ends redo
+  path discovery), then, only after a pong, `tailscale ping --icmp -c 1 --timeout 5s <peer>` (one packet through
+  WireGuard, which starts a fresh handshake on a stale session). `execFile` from a fixed path, never a shell.
+- **Triggers:** 30 s after boot; a wake from sleep (the wall clock outran the monotonic clock by 20 s); a change in
+  this Mac's IPv4 interfaces; a change in Tailscale's own state (BackendState, this Mac's Tailscale IPs, or peer byte
+  counters going backwards, meaning tailscaled restarted); and a phone that made an authenticated request in the last
+  5 minutes, or sent meeting chunks in the last 15 minutes while a meeting is open, silent for 45 s. Every one needs
+  the peer `Online` in a status read at most 15 s old and Tailscale `Running`: absence of requests alone never nudges.
+- **Caps:** one nudge per peer per 60 s, doubling per unanswered nudge to 15 minutes, reset by any request; 30 an hour
+  in all; one pass at a time; hard timeouts (5, 20 and 10 s, SIGKILL). `COS_TAILSCALE_NUDGE=0` turns it off, read
+  every tick, forwarded by the managed runtime contract. No LLM, no disk write, no new route.
+- **What it says.** `[tailscale-nudge]` log lines with trigger, outcome, timing, handshake age and byte movement, never
+  an address; `tailscaleNudge { enabled, available, lastAt, lastTrigger, lastOutcome, lastDataPath, lastRecoveredAt,
+  nudgesLastHour }` on public `/api/health`.
+- **Phone contract for glasses 6.10.653** (not built here): retry with fresh `no-store` requests on a 2, 4, 8, 15, 30 s
+  ladder, show 6.10.652's stuck-Tailscale message only after 90 s, read `tailscaleNudge`, and the iOS VPN On Demand note.
+
 ## 6.88.0 - LAN first: a pre-token route proof and the Mac's addresses for the phone
 
 The server half of the glasses "LAN first" reconnect plan (plan of 2026-10-22, Miles's decisions of 2026-10-23: "Go

@@ -75,6 +75,7 @@ import { liveCuesCapability } from '../lib/live-cues-capability.js'
 import { liveCuesV2Advertised } from '../lib/live-cues-v2.js'
 import { liveMeetingCapability } from '../lib/live-provisional.js'
 import { CUE_KINDS } from '../../shared/live-cues-v2.js'
+import { tailscaleNudgeHealthField } from '../lib/tailscale-nudge.js'
 
 /** 6.86.0: `capabilities.liveCues.kinds`, the cue kinds this server can write (additive; an older server omits it, which
  *  is how a client knows to expect only reinforce and challenge). Which kinds a given meeting gets is in its arm answer. */
@@ -445,6 +446,8 @@ healthRouter.get('/health', async (_req, res) => {
     ...continueLiveHealthFields(),
     // 6.62.0 /qa (W6): spawn isolation, posture and Cursor model read counters.
     ...continueReadHealthFields(),
+    // 6.89.0 Tailscale self-heal: switch, last nudge and its outcome, count this hour. No address.
+    ...tailscaleNudgeHealthField(),
     // 6.62.0: ONE providers object per engine. `act` (plan 3.11): what each provider can do,
     // with a reason for every "no". `observe` (plan 1.10): what COS can see of its sessions.
     providers: mergeProviderSections(

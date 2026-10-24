@@ -43,6 +43,11 @@ reproduction you have. Do not include real transcripts.
   turns itself off after 10 minutes. Over Tailscale the traffic is encrypted.
 - Behind `tailscale serve` or `funnel`, requests arrive from a loopback proxy, so
   every claim is refused (`not_allowed_network`): pairing fails closed there.
+- 6.89.0 Tailscale self-heal (`docs/tailscale-self-heal.md`): the server runs `tailscale status --json`
+  and `tailscale ping` at a peer that Tailscale reports online, with `execFile` from a fixed path and a
+  fixed argument list (the only variable is a 100.64.0.0/10 address read from Tailscale's own status).
+  Never a shell. Public `/api/health` shows when it last ran and the outcome, never an address.
+  `COS_TAILSCALE_NUDGE=0` turns it off.
 - `GET /api/display-stream` is public by design and returns lifecycle events
   only. Content requires a ticket or the token header. See
   `server/routes/display.ts` for the allowlist.

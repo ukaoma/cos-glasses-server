@@ -137,6 +137,8 @@
     "!server/scripts/live-meeting-6860-mutation-gate.mjs",
     "!server/scripts/live-meeting-6870-mutation-gate.mjs",
     "!server/scripts/integrity-6880-mutation-gate.mjs",
+    "!server/scripts/tailscale-nudge-6890-mutation-gate.mjs",
+    "docs/tailscale-self-heal.md",
     "docs/test-plan-6.71.8.md",
     "docs/test-plan-6.71.9.md",
     "docs/test-plan-6.71.10.md",

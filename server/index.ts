@@ -14,7 +14,8 @@ import { execSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
 import { diagRouter } from './routes/diag.js'
-import { createClientInstanceRouter } from './routes/client-instance.js'
+import { createClientInstanceRouter, isMeetingChunkPost } from './routes/client-instance.js'
+import { installTailscaleNudger } from './lib/tailscale-nudge.js'
 import { queryRouter } from './routes/query.js'
 import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
@@ -188,7 +189,7 @@ import {
   isLoopbackSocket,
   reachableIpv4Addresses,
 } from './lib/network-policy.js'
-import { requireApiToken } from './lib/api-auth.js'
+import { isPublicApiRequest, requireApiToken } from './lib/api-auth.js'
 import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
@@ -355,9 +356,23 @@ const pairingState = new PairingState({
   serverName: () => hostname().replace(/\.local$/i, ''),
   hosts: lanArmed => pairingHostsFrom(reachableIpv4Addresses(networkInterfaces()), PORT, lanArmed),
 })
+// 6.89.0 Tailscale self-heal (lib/tailscale-nudge.ts, docs/tailscale-self-heal.md). Every /api
+// request from a Tailscale address is noted BEFORE the token check, public routes included: any
+// request that arrives proves the tunnel carries COS traffic. Authenticated ones also mark the
+// address as a paired phone. Notes only, never answers; noteRequest never throws.
+const tailscaleNudger = installTailscaleNudger({ activeMeetings: () => getActiveTranscriptionSessionCount() })
+app.use('/api', (req, _res, next) => {
+  tailscaleNudger.noteRequest(req.socket?.remoteAddress, { meetingChunk: isMeetingChunkPost(req.method, req.path) })
+  next()
+})
 app.use('/api', requireApiToken(API_TOKEN, {
   onAuthenticated: req => pairingState.noteAuthenticated(req.socket?.remoteAddress),
 }))
+// Past the token gate, a request on a non-public path carried the token: mark a paired phone.
+app.use('/api', (req, _res, next) => {
+  if (!isPublicApiRequest(req.method, req.path)) tailscaleNudger.noteRequest(req.socket?.remoteAddress, { authenticated: true })
+  next()
+})
 
 // Pairing routes sit HERE on purpose: after the token gate (mint, status and decision
 // need it; the claim and its poll are exact public doors in api-auth.ts), and BEFORE the
@@ -1274,6 +1289,7 @@ async function gracefulShutdown(): Promise<void> {
   await meetingAskRuntime.shutdown()
   stopMorningBriefScheduler()
   stopRoutineScheduler()
+  tailscaleNudger.stop()
   await workReviewRuntime?.close()
   workIntakeStore?.close()
   workHandoffRequestStore?.close()
@@ -1476,6 +1492,8 @@ listenRequiredServers(listeners).then(() => {
     // Hash the pinned FluidAudio CLI once at boot so the first Settings GET already knows `installable`.
     void findPinnedCli().catch(() => null)
     startPreviewWarmLoop()
+    // 6.89.0: the Tailscale nudge loop. Its boot trigger is due 30 s from here. COS_TAILSCALE_NUDGE=0 stops it.
+    tailscaleNudger.start()
   }
 
   // Durable recovery starts with the admitted runtime by default. A literal
