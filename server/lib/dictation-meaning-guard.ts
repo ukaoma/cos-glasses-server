@@ -386,14 +386,44 @@ function levenshtein(a: string, b: string): number {
   return row[b.length]
 }
 
-/** Mostly English? A short text is assumed to be; a long one with few English function words is not. */
+/**
+ * 6.92.0: common function words of German, Portuguese, Spanish, French and Dutch that are not
+ * English words, not name particles or place words ("de", "la", "von", "Los", "Las") and not words
+ * dictation says in English ("dot com", "em dash", "est", "eu"). Evidence that a short text is not
+ * English. An all-caps token ("MIT") never counts.
+ */
+const FOREIGN = new Set(['der', 'das', 'ein', 'eine', 'einen', 'einem', 'einer', 'und', 'ist', 'sind', 'nicht', 'ich', 'wir', 'ihr',
+  'sie', 'mit', 'uns', 'auf', 'für', 'uhr', 'auch', 'noch', 'oder', 'aber', 'wie', 'kommt', 'heute', 'morgen', 'bitte', 'danke',
+  'haben', 'wird', 'kann', 'zum', 'zur', 'bei', 'nach', 'ja', 'nein',
+  'uma', 'não', 'nao', 'por', 'que', 'você', 'voce', 'ele', 'ela', 'nós', 'isso', 'este', 'esta', 'muito', 'obrigado', 'obrigada',
+  'amanhã', 'hoje',
+  'una', 'unos', 'está', 'pero', 'muy', 'gracias', 'mañana', 'hoy',
+  'une', 'je', 'nous', 'vous', 'avec', 'pour', 'pas', 'mais', 'oui', 'merci',
+  'het', 'een', 'ik', 'niet', 'wij', 'voor'])
+/** 6.92.0: an English filler sound that is also a word in German, Portuguese, Danish, Norwegian or Dutch. */
+const AMBIGUOUS_FILLERS = new Set(['um', 'er'])
+
+/**
+ * Mostly English? A long text needs English function words (12% of its words). 6.92.0 tightens a
+ * short one (under 12 words), which was always assumed English: with a foreign function word in it,
+ * English function words must outnumber the foreign ones ("Wir treffen uns um 5 Uhr" is not
+ * English); with "um" or "er" said inline (no pause after it), at least one English function word
+ * must be there ("Comprei um carro", "Er kommt morgen." are not; "ship it er tomorrow" is). With
+ * neither, a short command is still English ("ping Marco re pricing"), so its names are checked.
+ */
 export function looksEnglish(text: string): boolean {
   const letters = text.match(/\p{L}/gu) ?? []
   if (letters.length && letters.filter(ch => !/[A-Za-z]/.test(ch)).length / letters.length > 0.2) return false
-  const words = tokenize(text).map(t => t.low)
-  // A short command ("ask Marco about the deck") has few function words; only a longer text can tell.
-  if (words.length < 12) return true
-  return words.filter(w => ENGLISH.has(w)).length / words.length >= 0.12
+  const tokens = tokenize(text)
+  const words = tokens.map(t => t.low)
+  if (words.length >= 12) return words.filter(w => ENGLISH.has(w)).length / words.length >= 0.12
+  // A short command ("ask Marco about the deck") has few function words; only evidence decides.
+  const english = words.filter(w => ENGLISH.has(w)).length
+  const foreign = tokens.filter(t => FOREIGN.has(t.low) && !(t.raw.length > 1 && t.raw === t.raw.toUpperCase())).length
+  if (foreign > 0) return english > foreign
+  const inlineAmbiguous = tokens.some((t, i) => AMBIGUOUS_FILLERS.has(t.low) && i + 1 < tokens.length && !tokens[i + 1].pause)
+  if (inlineAmbiguous) return english > 0
+  return true
 }
 
 const zero = (): Record<MeaningGuardKind, number> => ({ negation: 0, number: 0, date: 0, name: 0 })

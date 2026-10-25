@@ -20,9 +20,22 @@
  *   still loses "uh"), and any quoted mention ('"um"').
  * - "uh huh", "uh oh" and "mm hmm" written without a hyphen: answers, not hesitations.
  * - "like", "you know", "I mean": filler only sometimes, so the model decides, not a regex.
+ * - 6.92.0: a token that touches a path, handle or code character is part of that token, not a
+ *   hesitation: "src/um.txt", "~/uh", "@uh", "#um", "$um", "my_um", "um.py", "um:8080", "um/bin".
+ *   Kept when the character right before it is one of / . @ _ : # $ (a leading - is already
+ *   outside the token pattern), or the character right after it is one of / @ _ # $, or a . or :
+ *   followed by a letter or digit. A sentence-final "um." or "um:" (a space or the end after it)
+ *   still goes.
  * A filler inside a longer quote ("um, no") is removed like any other.
  * If nothing but fillers was said, the original text is returned unchanged.
+ *
+ * 6.92.0: the language gate lives in the caller, not here (`stripFillersIfEnglish`): "um" and "er"
+ * are words in German, Portuguese, Danish, Norwegian and Dutch ("um 5 Uhr", "um carro", "Er kommt
+ * morgen"). This function stays the pure token rules that the canonical fixture
+ * (__fixtures__/dictation-fillers.json, scope "both") pins for COS Control's port.
  */
+import { looksEnglish } from './dictation-meaning-guard.js'
+
 
 const FILLER = /(?<![\p{L}\p{N}'’-])(um+|uhm|uh+|erm?|ah+|hm+|mm+|mhm)(?![\p{L}\p{N}'’-])/giu
 /** After a filler: a pause mark (comma, ellipsis, dash) with its spacing. */
@@ -38,6 +51,10 @@ const QUOTE_OPEN = /["“”'‘’]$/
 const QUOTE_CLOSE = /^["“”'‘’]/
 /** A pause mark right after the token: a Titlecase filler set off this way is a hesitation. */
 const PAUSE_AFTER = /^[ \t]*(?:,|\.{2,}|…)/
+/** 6.92.0: a path, handle or code character right before the token ("~/uh", "@uh", "#um", ".um"). */
+const TOUCH_BEFORE = /[/.@_:#$]$/
+/** 6.92.0: right after it: / @ _ # $ ("um/bin", "um_id"), or . or : with a letter or digit next ("um.py", "um:8080"). */
+const TOUCH_AFTER = /^(?:[/@_#$]|[.:][\p{L}\p{N}])/u
 
 function afterAbbreviation(before: string): boolean {
   const trimmed = before.replace(/[ \t]+$/, '')
@@ -73,6 +90,9 @@ export function stripDisfluencies(text: string): string {
     const atStart = sentenceStart(out + before)
     const keep = (token.length > 1 && token === token.toUpperCase())
       || (/^mm+$/i.test(token) && /\d[ \t]*$/.test(out + before))
+      // 6.92.0: part of a path, handle or code token, never a hesitation.
+      || TOUCH_BEFORE.test(out + before)
+      || TOUCH_AFTER.test(after)
       // A capital away from a sentence start is a name ("Ask Ah Kow"), unless a pause mark
       // sets it off as a hesitation ("I think, Um, we should").
       || (!atStart && /^[A-Z]/.test(token) && !PAUSE_AFTER.test(after))
@@ -113,4 +133,14 @@ export function stripDisfluencies(text: string): string {
   if (!removed) return text
   const result = (out + rest).replace(/^[ \t]*[,;][ \t]*/, '')
   return result.trim() === '' ? text : result
+}
+
+/**
+ * 6.92.0: the server's outbound filler step. The token rules (stripDisfluencies) run only when the
+ * text is mostly English (dictation-meaning-guard.ts looksEnglish), so "Wir treffen uns um 5 Uhr",
+ * "Comprei um carro" and "Er kommt morgen." go out as said. COS Control gates its own port with
+ * its own language detector; that is why the fixture tags these rows scope "server".
+ */
+export function stripFillersIfEnglish(text: string): string {
+  return looksEnglish(text) ? stripDisfluencies(text) : text
 }

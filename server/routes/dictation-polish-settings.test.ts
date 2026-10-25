@@ -325,6 +325,20 @@ describe('6.91.0 /api/dictation/polish/options ("Previous polish")', () => {
     expect((await call('GET', '/dictation/polish/options')).json).toMatchObject({ promptVersion: 'v3', effectiveVersion: 'v4', source: 'env', envOverride: true })
   })
 
+  it('6.92.0: the options answer says meaningGuard (COS_DICTATION_MEANING_GUARD) and the styled pairs', async () => {
+    const view = (await call('GET', '/dictation/polish/options')).json
+    expect(view).toMatchObject({ meaningGuard: true, stylePairs: [{ model: 'sonnet', prompt: 'v4' }] })
+    expect(typeof view.meaningGuard).toBe('boolean')
+    vi.stubEnv('COS_DICTATION_MEANING_GUARD', '0')
+    expect((await call('GET', '/dictation/polish/options')).json.meaningGuard).toBe(false)
+    vi.stubEnv('COS_DICTATION_MEANING_GUARD', '')
+    // Previous polish puts Sonnet on v3: no pair is styled, and the PUT answer says so too.
+    expect((await call('PUT', '/dictation/polish/options', { promptVersion: 'v3' })).json).toMatchObject({ stylePairs: [], meaningGuard: true })
+    // Haiku forced to v4 by the environment is not a styled pair.
+    vi.stubEnv('COS_DICTATION_POLISH_PROMPT', 'v4')
+    expect((await call('GET', '/dictation/polish/options')).json.stylePairs).toEqual([{ model: 'sonnet', prompt: 'v4' }])
+  })
+
   it('anything but {promptVersion: "default" | "v3"} is 400', async () => {
     for (const body of [{}, { promptVersion: 'v2' }, { promptVersion: 'v4' }, { promptVersion: 'v3', extra: 1 }]) {
       expect((await call('PUT', '/dictation/polish/options', body)).status, JSON.stringify(body)).toBe(400)

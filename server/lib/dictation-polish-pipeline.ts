@@ -5,7 +5,7 @@ import { applyFuzzyCorrections } from './fuzzy-correct.js'
 import { getAllSpeakerNames } from './speaker-embeddings.js'
 import { autoCleanDictation, AUTOCLEAN_MAX_CHARS } from './dictation-clean.js'
 import { dictationPolishPromptVersion, styleAndRegisterApply, type DictationPolishPromptVersion } from './dictation-polish-options.js'
-import { fillerPassEnabled, stripDisfluencies } from './dictation-fillers.js'
+import { fillerPassEnabled, stripFillersIfEnglish } from './dictation-fillers.js'
 import { polishBudgetExhausted, recordPolishCall, type PolishBucket } from './dictation-polish-budget.js'
 import { polishNeed, skipCleanEnabled } from './dictation-polish-need.js'
 import { discardPolishPrewarm, PrewarmUnavailableError, runWarmPolish, takePolishPrewarm } from './dictation-prewarm.js'
@@ -155,7 +155,8 @@ export function prepareOutboundDictation(text: string, bucket: PolishBucket): st
     console.warn(`[prompt-draft] Fuzzy correction failed (non-fatal): ${fuzzyErr?.message ?? fuzzyErr}`)
   }
   // 6.79.1: um/uh never survive a skipped polish. Meeting lines stay faithful.
-  if (bucket !== 'meeting' && fillerPassEnabled()) cleaned = stripDisfluencies(cleaned)
+  // 6.92.0: only when the text is mostly English ("um 5 Uhr" and "um carro" are words).
+  if (bucket !== 'meeting' && fillerPassEnabled()) cleaned = stripFillersIfEnglish(cleaned)
   // 6.83.1: "forward slash pricing," is "/pricing," even when the model is skipped. One word
   // at a phrase end only; slugs of several words are the model's (dictation-format.ts).
   if (bucket !== 'meeting' && spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)

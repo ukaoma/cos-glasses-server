@@ -1,0 +1,904 @@
+{
+  "schema": 1,
+  "generator": "server/scripts/generate-dictation-fillers-fixture.ts",
+  "tokens": [
+    "um+",
+    "uhm",
+    "uh+",
+    "er",
+    "erm",
+    "ah+",
+    "hm+",
+    "mm+",
+    "mhm"
+  ],
+  "scopes": {
+    "both": "stripDisfluencies: the token rules alone; a port must match every row",
+    "server": "stripFillersIfEnglish: the server language gate, then the token rules",
+    "client": "reserved for client-only rows; the server generates none"
+  },
+  "rows": [
+    {
+      "id": "en001",
+      "scope": "both",
+      "group": "english",
+      "input": "We need uh the deck by Friday",
+      "expected": "We need the deck by Friday"
+    },
+    {
+      "id": "en002",
+      "scope": "both",
+      "group": "english",
+      "input": "Send the um the update",
+      "expected": "Send the the update"
+    },
+    {
+      "id": "en003",
+      "scope": "both",
+      "group": "english",
+      "input": "ship it er tomorrow",
+      "expected": "ship it tomorrow"
+    },
+    {
+      "id": "en004",
+      "scope": "both",
+      "group": "english",
+      "input": "ship it erm tomorrow",
+      "expected": "ship it tomorrow"
+    },
+    {
+      "id": "en005",
+      "scope": "both",
+      "group": "english",
+      "input": "Book the room uhm at noon",
+      "expected": "Book the room at noon"
+    },
+    {
+      "id": "en006",
+      "scope": "both",
+      "group": "english",
+      "input": "So, um, we should ship",
+      "expected": "So, we should ship"
+    },
+    {
+      "id": "en007",
+      "scope": "both",
+      "group": "english",
+      "input": "The plan, uh, is solid",
+      "expected": "The plan, is solid"
+    },
+    {
+      "id": "en008",
+      "scope": "both",
+      "group": "english",
+      "input": "Um, I think we are ready",
+      "expected": "I think we are ready"
+    },
+    {
+      "id": "en009",
+      "scope": "both",
+      "group": "english",
+      "input": "Uh, can you check the build",
+      "expected": "Can you check the build"
+    },
+    {
+      "id": "en010",
+      "scope": "both",
+      "group": "english",
+      "input": "um, so we go",
+      "expected": "so we go"
+    },
+    {
+      "id": "en011",
+      "scope": "both",
+      "group": "english",
+      "input": "Okay. Um, let us start",
+      "expected": "Okay. Let us start"
+    },
+    {
+      "id": "en012",
+      "scope": "both",
+      "group": "english",
+      "input": "Done? Uh, maybe not",
+      "expected": "Done? Maybe not"
+    },
+    {
+      "id": "en013",
+      "scope": "both",
+      "group": "english",
+      "input": "Hmm. Let me think about it.",
+      "expected": "Let me think about it."
+    },
+    {
+      "id": "en014",
+      "scope": "both",
+      "group": "english",
+      "input": "Okay. Um. Let us go",
+      "expected": "Okay. Let us go"
+    },
+    {
+      "id": "en015",
+      "scope": "both",
+      "group": "english",
+      "input": "Mhm, sure thing",
+      "expected": "Sure thing"
+    },
+    {
+      "id": "en016",
+      "scope": "both",
+      "group": "english",
+      "input": "I think, uh.",
+      "expected": "I think."
+    },
+    {
+      "id": "en017",
+      "scope": "both",
+      "group": "english",
+      "input": "Is that right, hmm?",
+      "expected": "Is that right?"
+    },
+    {
+      "id": "en018",
+      "scope": "both",
+      "group": "english",
+      "input": "Let us ship it, um",
+      "expected": "Let us ship it"
+    },
+    {
+      "id": "en019",
+      "scope": "both",
+      "group": "english",
+      "input": "Let us ship it um.",
+      "expected": "Let us ship it."
+    },
+    {
+      "id": "en020",
+      "scope": "both",
+      "group": "english",
+      "input": "Call (uh) Dana",
+      "expected": "Call () Dana"
+    },
+    {
+      "id": "en021",
+      "scope": "both",
+      "group": "english",
+      "input": "It was um... great",
+      "expected": "It was great"
+    },
+    {
+      "id": "en022",
+      "scope": "both",
+      "group": "english",
+      "input": "It was um… great",
+      "expected": "It was great"
+    },
+    {
+      "id": "en023",
+      "scope": "both",
+      "group": "english",
+      "input": "well — um — we could",
+      "expected": "well — we could"
+    },
+    {
+      "id": "en024",
+      "scope": "both",
+      "group": "english",
+      "input": "Um... I forgot",
+      "expected": "I forgot"
+    },
+    {
+      "id": "en025",
+      "scope": "both",
+      "group": "english",
+      "input": "um um the deck",
+      "expected": "the deck"
+    },
+    {
+      "id": "en026",
+      "scope": "both",
+      "group": "english",
+      "input": "Uh, um, so the plan",
+      "expected": "So the plan"
+    },
+    {
+      "id": "en027",
+      "scope": "both",
+      "group": "english",
+      "input": "Ummm, yes",
+      "expected": "Yes"
+    },
+    {
+      "id": "en028",
+      "scope": "both",
+      "group": "english",
+      "input": "the hmmm thing",
+      "expected": "the thing"
+    },
+    {
+      "id": "en029",
+      "scope": "both",
+      "group": "english",
+      "input": "it is ahh fine",
+      "expected": "it is fine"
+    },
+    {
+      "id": "en030",
+      "scope": "both",
+      "group": "english",
+      "input": "Ahh, I see",
+      "expected": "I see"
+    },
+    {
+      "id": "en031",
+      "scope": "both",
+      "group": "english",
+      "input": "Mm, that works",
+      "expected": "That works"
+    },
+    {
+      "id": "en032",
+      "scope": "both",
+      "group": "english",
+      "input": "that uhh works",
+      "expected": "that works"
+    },
+    {
+      "id": "en033",
+      "scope": "both",
+      "group": "english",
+      "input": "He said \"um, no\"",
+      "expected": "He said \"no\""
+    },
+    {
+      "id": "en034",
+      "scope": "both",
+      "group": "english",
+      "input": "First line\num, second line",
+      "expected": "First line\nsecond line"
+    },
+    {
+      "id": "en035",
+      "scope": "both",
+      "group": "english",
+      "input": "First line\nUm, second line",
+      "expected": "First line\nSecond line"
+    },
+    {
+      "id": "en036",
+      "scope": "both",
+      "group": "english",
+      "input": "Ask, um, Ah Kow to join",
+      "expected": "Ask, Ah Kow to join"
+    },
+    {
+      "id": "en037",
+      "scope": "both",
+      "group": "english",
+      "input": "uh uh the deck",
+      "expected": "the deck"
+    },
+    {
+      "id": "en038",
+      "scope": "both",
+      "group": "english",
+      "input": "uh hmm let me think",
+      "expected": "let me think"
+    },
+    {
+      "id": "en039",
+      "scope": "both",
+      "group": "english",
+      "input": "Uh hmm, the plan",
+      "expected": "The plan"
+    },
+    {
+      "id": "en040",
+      "scope": "both",
+      "group": "english",
+      "input": "Hmm. Let me check ... and Ah Kim's notes",
+      "expected": "Let me check ... and Ah Kim's notes"
+    },
+    {
+      "id": "en041",
+      "scope": "both",
+      "group": "english",
+      "input": "at 5 p.m. uh we meet",
+      "expected": "at 5 p.m. we meet"
+    },
+    {
+      "id": "en042",
+      "scope": "both",
+      "group": "english",
+      "input": "e.g. um the deck",
+      "expected": "e.g. the deck"
+    },
+    {
+      "id": "en043",
+      "scope": "both",
+      "group": "english",
+      "input": "We met Mr. uh Jones",
+      "expected": "We met Mr. Jones"
+    },
+    {
+      "id": "en044",
+      "scope": "both",
+      "group": "english",
+      "input": "I spoke to the U.S. uh team",
+      "expected": "I spoke to the U.S. team"
+    },
+    {
+      "id": "en045",
+      "scope": "both",
+      "group": "english",
+      "input": "Smith Jr. um signed",
+      "expected": "Smith Jr. signed"
+    },
+    {
+      "id": "en046",
+      "scope": "both",
+      "group": "english",
+      "input": "I think, Um, we should",
+      "expected": "I think, we should"
+    },
+    {
+      "id": "en047",
+      "scope": "both",
+      "group": "english",
+      "input": "Wait... Uh, maybe",
+      "expected": "Wait... maybe"
+    },
+    {
+      "id": "en048",
+      "scope": "both",
+      "group": "english",
+      "input": "Wait. Uh, maybe",
+      "expected": "Wait. Maybe"
+    },
+    {
+      "id": "en049",
+      "scope": "both",
+      "group": "english",
+      "input": "um,, so we go",
+      "expected": "so we go"
+    },
+    {
+      "id": "en050",
+      "scope": "both",
+      "group": "english",
+      "input": "Bring an umbrella and keep going ahead",
+      "expected": "Bring an umbrella and keep going ahead"
+    },
+    {
+      "id": "en051",
+      "scope": "both",
+      "group": "english",
+      "input": "To err is human",
+      "expected": "To err is human"
+    },
+    {
+      "id": "en052",
+      "scope": "both",
+      "group": "english",
+      "input": "The hummingbird hummed",
+      "expected": "The hummingbird hummed"
+    },
+    {
+      "id": "en053",
+      "scope": "both",
+      "group": "english",
+      "input": "Erma and Ahmed will join",
+      "expected": "Erma and Ahmed will join"
+    },
+    {
+      "id": "en054",
+      "scope": "both",
+      "group": "english",
+      "input": "Check the umami and the uhaul",
+      "expected": "Check the umami and the uhaul"
+    },
+    {
+      "id": "en055",
+      "scope": "both",
+      "group": "english",
+      "input": "Uh-oh, the build broke",
+      "expected": "Uh-oh, the build broke"
+    },
+    {
+      "id": "en056",
+      "scope": "both",
+      "group": "english",
+      "input": "She said uh-huh and mm-hmm",
+      "expected": "She said uh-huh and mm-hmm"
+    },
+    {
+      "id": "en057",
+      "scope": "both",
+      "group": "english",
+      "input": "UM beat ER in the final, AH was close",
+      "expected": "UM beat ER in the final, AH was close"
+    },
+    {
+      "id": "en058",
+      "scope": "both",
+      "group": "english",
+      "input": "HMM is the model name",
+      "expected": "HMM is the model name"
+    },
+    {
+      "id": "en059",
+      "scope": "both",
+      "group": "english",
+      "input": "Use a 5 mm bolt and a 10mm spacer",
+      "expected": "Use a 5 mm bolt and a 10mm spacer"
+    },
+    {
+      "id": "en060",
+      "scope": "both",
+      "group": "english",
+      "input": "Ask Ah Kow to join the call",
+      "expected": "Ask Ah Kow to join the call"
+    },
+    {
+      "id": "en061",
+      "scope": "both",
+      "group": "english",
+      "input": "Loop in Er Lin and Hm Tran",
+      "expected": "Loop in Er Lin and Hm Tran"
+    },
+    {
+      "id": "en062",
+      "scope": "both",
+      "group": "english",
+      "input": "The note from Mm Patel is attached",
+      "expected": "The note from Mm Patel is attached"
+    },
+    {
+      "id": "en063",
+      "scope": "both",
+      "group": "english",
+      "input": "We met Mr. Ah and Ms. Er yesterday",
+      "expected": "We met Mr. Ah and Ms. Er yesterday"
+    },
+    {
+      "id": "en064",
+      "scope": "both",
+      "group": "english",
+      "input": "Dr. Er said the scan is clear",
+      "expected": "Dr. Er said the scan is clear"
+    },
+    {
+      "id": "en065",
+      "scope": "both",
+      "group": "english",
+      "input": "Dr. Er said",
+      "expected": "Dr. Er said"
+    },
+    {
+      "id": "en066",
+      "scope": "both",
+      "group": "english",
+      "input": "Dr. Er said yes",
+      "expected": "Dr. Er said yes"
+    },
+    {
+      "id": "en067",
+      "scope": "both",
+      "group": "english",
+      "input": "Ask Jr. Ah and Sr. Um",
+      "expected": "Ask Jr. Ah and Sr. Um"
+    },
+    {
+      "id": "en068",
+      "scope": "both",
+      "group": "english",
+      "input": "Ship it to the U.S. Um, team first",
+      "expected": "Ship it to the U.S. Um, team first"
+    },
+    {
+      "id": "en069",
+      "scope": "both",
+      "group": "english",
+      "input": "Dr. Er, the surgeon, called",
+      "expected": "Dr. Er, the surgeon, called"
+    },
+    {
+      "id": "en070",
+      "scope": "both",
+      "group": "english",
+      "input": "Meet with J. Ah tomorrow",
+      "expected": "Meet with J. Ah tomorrow"
+    },
+    {
+      "id": "en071",
+      "scope": "both",
+      "group": "english",
+      "input": "Ask Mrs. Um and Prof. Hm about it",
+      "expected": "Ask Mrs. Um and Prof. Hm about it"
+    },
+    {
+      "id": "en072",
+      "scope": "both",
+      "group": "english",
+      "input": "\"um\" is a filler word",
+      "expected": "\"um\" is a filler word"
+    },
+    {
+      "id": "en073",
+      "scope": "both",
+      "group": "english",
+      "input": "Say “uh” less often",
+      "expected": "Say “uh” less often"
+    },
+    {
+      "id": "en074",
+      "scope": "both",
+      "group": "english",
+      "input": "He said uh huh and left",
+      "expected": "He said uh huh and left"
+    },
+    {
+      "id": "en075",
+      "scope": "both",
+      "group": "english",
+      "input": "uh oh, the build broke",
+      "expected": "uh oh, the build broke"
+    },
+    {
+      "id": "en076",
+      "scope": "both",
+      "group": "english",
+      "input": "She went mm hmm and nodded",
+      "expected": "She went mm hmm and nodded"
+    },
+    {
+      "id": "en077",
+      "scope": "both",
+      "group": "english",
+      "input": "Plain text with no hesitation.",
+      "expected": "Plain text with no hesitation."
+    },
+    {
+      "id": "en078",
+      "scope": "both",
+      "group": "english",
+      "input": ", and a leading comma stays when nothing was removed",
+      "expected": ", and a leading comma stays when nothing was removed"
+    },
+    {
+      "id": "ex001",
+      "scope": "both",
+      "group": "exemption",
+      "input": "open src/um.txt now",
+      "expected": "open src/um.txt now"
+    },
+    {
+      "id": "ex002",
+      "scope": "both",
+      "group": "exemption",
+      "input": "cd ~/uh and list it",
+      "expected": "cd ~/uh and list it"
+    },
+    {
+      "id": "ex003",
+      "scope": "both",
+      "group": "exemption",
+      "input": "ping @uh about the deck",
+      "expected": "ping @uh about the deck"
+    },
+    {
+      "id": "ex004",
+      "scope": "both",
+      "group": "exemption",
+      "input": "the tag #um is trending",
+      "expected": "the tag #um is trending"
+    },
+    {
+      "id": "ex005",
+      "scope": "both",
+      "group": "exemption",
+      "input": "echo $um in the shell",
+      "expected": "echo $um in the shell"
+    },
+    {
+      "id": "ex006",
+      "scope": "both",
+      "group": "exemption",
+      "input": "set the my_um field",
+      "expected": "set the my_um field"
+    },
+    {
+      "id": "ex007",
+      "scope": "both",
+      "group": "exemption",
+      "input": "rename it to .um before lunch",
+      "expected": "rename it to .um before lunch"
+    },
+    {
+      "id": "ex008",
+      "scope": "both",
+      "group": "exemption",
+      "input": "connect to host:um today",
+      "expected": "connect to host:um today"
+    },
+    {
+      "id": "ex009",
+      "scope": "both",
+      "group": "exemption",
+      "input": "run um.py again",
+      "expected": "run um.py again"
+    },
+    {
+      "id": "ex010",
+      "scope": "both",
+      "group": "exemption",
+      "input": "open port um:8080 first",
+      "expected": "open port um:8080 first"
+    },
+    {
+      "id": "ex011",
+      "scope": "both",
+      "group": "exemption",
+      "input": "the um/bin folder",
+      "expected": "the um/bin folder"
+    },
+    {
+      "id": "ex012",
+      "scope": "both",
+      "group": "exemption",
+      "input": "mail um@example.com later",
+      "expected": "mail um@example.com later"
+    },
+    {
+      "id": "ex013",
+      "scope": "both",
+      "group": "exemption",
+      "input": "the um_id column",
+      "expected": "the um_id column"
+    },
+    {
+      "id": "ex014",
+      "scope": "both",
+      "group": "exemption",
+      "input": "issue um#12 is open",
+      "expected": "issue um#12 is open"
+    },
+    {
+      "id": "ex015",
+      "scope": "both",
+      "group": "exemption",
+      "input": "the um$ variable",
+      "expected": "the um$ variable"
+    },
+    {
+      "id": "ex016",
+      "scope": "both",
+      "group": "exemption",
+      "input": "pass the -um flag",
+      "expected": "pass the -um flag"
+    },
+    {
+      "id": "ex017",
+      "scope": "both",
+      "group": "exemption",
+      "input": "Let us ship it um.",
+      "expected": "Let us ship it."
+    },
+    {
+      "id": "ex018",
+      "scope": "both",
+      "group": "exemption",
+      "input": "The reason is um: we ran out",
+      "expected": "The reason is: we ran out"
+    },
+    {
+      "id": "ex019",
+      "scope": "both",
+      "group": "exemption",
+      "input": "src/um.txt and um, the notes",
+      "expected": "src/um.txt and the notes"
+    },
+    {
+      "id": "ex020",
+      "scope": "both",
+      "group": "exemption",
+      "input": "Uh-oh, the build broke",
+      "expected": "Uh-oh, the build broke"
+    },
+    {
+      "id": "ex021",
+      "scope": "both",
+      "group": "exemption",
+      "input": "We flew to Umbria in May",
+      "expected": "We flew to Umbria in May"
+    },
+    {
+      "id": "ex022",
+      "scope": "both",
+      "group": "exemption",
+      "input": "uh huh, sounds good",
+      "expected": "uh huh, sounds good"
+    },
+    {
+      "id": "ex023",
+      "scope": "both",
+      "group": "exemption",
+      "input": "she said \"um\" twice",
+      "expected": "she said \"um\" twice"
+    },
+    {
+      "id": "ex024",
+      "scope": "both",
+      "group": "exemption",
+      "input": "He said \"um, no\"",
+      "expected": "He said \"no\""
+    },
+    {
+      "id": "ex025",
+      "scope": "both",
+      "group": "exemption",
+      "input": "Erm, the uhaul is here",
+      "expected": "The uhaul is here"
+    },
+    {
+      "id": "la001",
+      "scope": "server",
+      "group": "language",
+      "input": "Wir treffen uns um 5 Uhr",
+      "expected": "Wir treffen uns um 5 Uhr"
+    },
+    {
+      "id": "la002",
+      "scope": "server",
+      "group": "language",
+      "input": "um drei Uhr",
+      "expected": "um drei Uhr"
+    },
+    {
+      "id": "la003",
+      "scope": "server",
+      "group": "language",
+      "input": "Er kommt morgen.",
+      "expected": "Er kommt morgen."
+    },
+    {
+      "id": "la004",
+      "scope": "server",
+      "group": "language",
+      "input": "Er ist heute nicht da",
+      "expected": "Er ist heute nicht da"
+    },
+    {
+      "id": "la005",
+      "scope": "server",
+      "group": "language",
+      "input": "Ich komme um 9 Uhr",
+      "expected": "Ich komme um 9 Uhr"
+    },
+    {
+      "id": "la006",
+      "scope": "server",
+      "group": "language",
+      "input": "Er hat um 8 Uhr angerufen",
+      "expected": "Er hat um 8 Uhr angerufen"
+    },
+    {
+      "id": "la007",
+      "scope": "server",
+      "group": "language",
+      "input": "Comprei um carro novo",
+      "expected": "Comprei um carro novo"
+    },
+    {
+      "id": "la008",
+      "scope": "server",
+      "group": "language",
+      "input": "um carro",
+      "expected": "um carro"
+    },
+    {
+      "id": "la009",
+      "scope": "server",
+      "group": "language",
+      "input": "Ela tem um gato",
+      "expected": "Ela tem um gato"
+    },
+    {
+      "id": "la010",
+      "scope": "server",
+      "group": "language",
+      "input": "Vamos sair um pouco",
+      "expected": "Vamos sair um pouco"
+    },
+    {
+      "id": "la011",
+      "scope": "server",
+      "group": "language",
+      "input": "Isso custa um real",
+      "expected": "Isso custa um real"
+    },
+    {
+      "id": "la012",
+      "scope": "server",
+      "group": "language",
+      "input": "Han er hjemme nu",
+      "expected": "Han er hjemme nu"
+    },
+    {
+      "id": "la013",
+      "scope": "server",
+      "group": "language",
+      "input": "Det er fint",
+      "expected": "Det er fint"
+    },
+    {
+      "id": "la014",
+      "scope": "server",
+      "group": "language",
+      "input": "Er is een probleem",
+      "expected": "Er is een probleem"
+    },
+    {
+      "id": "la015",
+      "scope": "server",
+      "group": "language",
+      "input": "Er komt morgen",
+      "expected": "Er komt morgen"
+    },
+    {
+      "id": "la016",
+      "scope": "server",
+      "group": "language",
+      "input": "ship it er tomorrow",
+      "expected": "ship it tomorrow"
+    },
+    {
+      "id": "la017",
+      "scope": "server",
+      "group": "language",
+      "input": "We need um the deck by Friday",
+      "expected": "We need the deck by Friday"
+    },
+    {
+      "id": "la018",
+      "scope": "server",
+      "group": "language",
+      "input": "Um, sure thing",
+      "expected": "Sure thing"
+    },
+    {
+      "id": "la019",
+      "scope": "server",
+      "group": "language",
+      "input": "er, the plan works",
+      "expected": "the plan works"
+    },
+    {
+      "id": "la020",
+      "scope": "server",
+      "group": "language",
+      "input": "Ask Marco um about the pricing",
+      "expected": "Ask Marco about the pricing"
+    },
+    {
+      "id": "la021",
+      "scope": "server",
+      "group": "language",
+      "input": "um the MIT report",
+      "expected": "the MIT report"
+    },
+    {
+      "id": "la022",
+      "scope": "server",
+      "group": "language",
+      "input": "Send the deck to Dana, um, por favor",
+      "expected": "Send the deck to Dana, por favor"
+    },
+    {
+      "id": "la023",
+      "scope": "server",
+      "group": "language",
+      "input": "um 5 pm works",
+      "expected": "um 5 pm works"
+    }
+  ]
+}

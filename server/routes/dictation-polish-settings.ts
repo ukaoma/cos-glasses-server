@@ -46,6 +46,7 @@ import {
 } from '../lib/dictation-polish-options.js'
 import { LEARNED_STYLE_INTRO, LEARNED_STYLE_LIMITS, learnedStyleBlock, LITERAL_REGISTER_RULES, V4_CLOSING_RULE, V4_LITERAL_CLOSING_RULE } from '../lib/dictation-clean.js'
 import { publishedRegisters, registersEnabled } from '../lib/dictation-register.js'
+import { meaningGuardEnabled } from '../lib/dictation-meaning-guard.js'
 
 /** Where the instructions apply (prompt-drafts.ts polishInstructionsFor): never meeting lines. */
 export const CUSTOM_INSTRUCTIONS_APPLY_TO = ['message', 'prompt_draft'] as const
@@ -248,11 +249,17 @@ dictationPolishSettingsRouter.delete('/dictation/learned-style', (_req, res) => 
 function optionsView() {
   const stored = readPolishOptions()
   const choice = dictationPolishPromptChoice()
+  const effectiveByModel = Object.fromEntries(POLISH_MODEL_DEFAULTS.map(model => [model, dictationPolishPromptChoice(process.env, model).version]))
   return {
     promptVersion: stored.promptVersion,
     effectiveVersion: choice.version,
     // 6.91.0 option C: the prompt each model actually gets.
-    effectiveByModel: Object.fromEntries(POLISH_MODEL_DEFAULTS.map(model => [model, dictationPolishPromptChoice(process.env, model).version])),
+    effectiveByModel,
+    // 6.92.0 (plan r3, A-W2): what Control's picker line needs, additive. The pairs the meaning guard,
+    // Your style and the register apply to (the same list GET /rules computes), and whether the
+    // meaning guard is on (COS_DICTATION_MEANING_GUARD). Older servers omit both.
+    stylePairs: POLISH_MODEL_DEFAULTS.filter(model => styleAndRegisterApply(model, effectiveByModel[model])).map(model => ({ model, prompt: effectiveByModel[model] })),
+    meaningGuard: meaningGuardEnabled(),
     source: choice.source,
     // The environment named a version, so this option has no effect until it is removed.
     envOverride: choice.source === 'env',
