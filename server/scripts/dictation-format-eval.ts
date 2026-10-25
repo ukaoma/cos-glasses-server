@@ -145,7 +145,7 @@ async function applyDictionary(text: string, dictionary: Record<string, string>)
   writeFileSync(path, JSON.stringify({ vocabulary: VOCABULARY, whisper_corrections: JSON.stringify(dictionary) }))
   clearProfileCache()
   resetDecoderCaches()
-  return applyCorrections(text)
+  return text ? applyCorrections(text) : text
 }
 
 async function main() {
@@ -164,7 +164,8 @@ async function main() {
   const maxCalls = Number(arg('max-calls', '40'))
   const outFile = arg('out', `dictation-format-eval-${arm}-${set}.json`)
   const model = arg('model', 'haiku')
-  const version: DictationPolishPromptVersion = arm === 'before' ? 'v2' : 'v3'
+  // 6.91.0: --prompt v3|v4 picks the after arm's prompt (default v3, the 6.83.1 arm).
+  const version: DictationPolishPromptVersion = arm === 'before' ? 'v2' : (arg('prompt', 'v3') as DictationPolishPromptVersion)
   process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = String(maxCalls)
   if (!process.env.COS_DATA_DIR) throw new Error('Set COS_DATA_DIR to a scratch directory')
 
@@ -186,9 +187,41 @@ async function main() {
   }
   const rows: Array<RunRow & { pre: string; deterministic: string; refused?: string; polished?: string }> = []
   let consecutiveFailures = 0
+  if (arm === 'after') {
+    // 6.91.0: the after arm runs the route's own pipeline (lib/dictation-polish-pipeline.ts): the
+    // dictionary, filler pass, spoken paths, the model, then every guard. `output` is the model's
+    // answer with only the link guard applied (the 6.83.1 scoring); `final` is what would go out.
+    if (!process.env.COS_SCRIPTS_DIR) throw new Error('Set COS_SCRIPTS_DIR to a scratch directory (the token audit)')
+    const pipeline = await import('../lib/dictation-polish-pipeline.js')
+    for (const job of jobs) {
+      await applyDictionary('', job.dictionary ?? {})
+      const pre = pipeline.prepareOutboundDictation(job.input, 'message')
+      if (consecutiveFailures >= 3) { rows.push({ id: job.id, arm, output: null, error: 'stopped: 3 consecutive failures', ms: 0, pre, deterministic: pre }); continue }
+      const started = Date.now()
+      const result = await pipeline.cleanOutboundDictation(job.input, { enabled: true, model: model as any, bucket: 'message', promptVersion: version })
+      const ms = Date.now() - started
+      if (result.modelText === undefined) {
+        consecutiveFailures++
+        rows.push({ id: job.id, arm, output: null, error: result.polishSkipped ?? 'no answer', ms, pre, deterministic: pre })
+      } else {
+        consecutiveFailures = 0
+        const refused = result.guard === 'link' ? 'link_guard' : undefined
+        rows.push({
+          id: job.id, arm, output: refused ? pre : result.modelText, ms, pre, deterministic: pre, final: result.text,
+          outcome: result.polishOutcome, ...(result.guard ? { guard: result.guard } : {}), ...(refused ? { refused, polished: result.modelText } : {}),
+        })
+      }
+      writeFileSync(outFile, JSON.stringify(rows, null, 2))
+      process.stderr.write(`${rows.length}/${jobs.length}\r`)
+    }
+    writeFileSync(outFile, JSON.stringify(rows, null, 2))
+    if (set === 'canary') console.log(JSON.stringify({ arm, model, version, ...scoreCanary(rows) }, null, 2))
+    else console.log(JSON.stringify(summarize(rows.map(r => ({ ...r, arm: `${model}-${version}` }))), null, 2))
+    process.exit(0)
+  }
+  // The before arm (6.83.0 behaviour): no spoken paths and no link guard.
   for (const job of jobs) {
-    let pre = stripDisfluencies(await applyDictionary(job.input, job.dictionary ?? {}))
-    if (arm === 'after') pre = renderSpokenPaths(pre)
+    const pre = stripDisfluencies(await applyDictionary(job.input, job.dictionary ?? {}))
     if (consecutiveFailures >= 3) { rows.push({ id: job.id, arm, output: null, error: 'stopped: 3 consecutive failures', ms: 0, pre, deterministic: pre }); continue }
     if (polishBudgetExhausted('message')) { rows.push({ id: job.id, arm, output: null, error: 'daily_cap', ms: 0, pre, deterministic: pre }); continue }
     recordPolishCall('message')
@@ -196,12 +229,8 @@ async function main() {
     try {
       const polished = (await autoCleanDictation(pre, VOCABULARY, { model, promptVersion: version })).trim()
       consecutiveFailures = 0
-      let output = polished || pre
-      let refused: string | undefined
-      if (arm === 'after') {
-        const problem = polishLinkProblem(pre, polished, correctionOnlyForms(job.dictionary ?? {}), VOCABULARY)
-        if (problem) { refused = problem; output = pre }
-      }
+      const output = polished || pre
+      const refused: string | undefined = undefined
       rows.push({ id: job.id, arm, output, ms: Date.now() - started, pre, deterministic: pre, ...(refused ? { refused, polished } : {}) })
     } catch (err: any) {
       consecutiveFailures++

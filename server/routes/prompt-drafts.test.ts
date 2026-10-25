@@ -1,9 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+// 6.91.0: this file writes the learned-style, instructions and options stores. A private data dir
+// (under the run's isolated one) keeps a file running in another worker from reading them.
+const SHARED_DATA_DIR = vi.hoisted(() => {
+  const shared = process.env.COS_DATA_DIR
+  process.env.COS_DATA_DIR = `${shared ?? '/tmp'}/private-${process.pid}-${Math.random().toString(36).slice(2)}`
+  return shared
+})
+afterAll(() => { if (SHARED_DATA_DIR === undefined) delete process.env.COS_DATA_DIR; else process.env.COS_DATA_DIR = SHARED_DATA_DIR })
 
 let draftDir = ''
 let server: Server | null = null
@@ -20,7 +28,8 @@ class MockPrewarmUnavailableError extends Error {}
 const WARM_TOKEN = '11111111-2222-3333-4444-555555555555'
 const POLISH_ENV = ['COS_DICTATION_AUTOCLEAN_MAX_PER_DAY', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE',
   'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT', 'COS_DICTATION_FILLER_PASS', 'COS_DICTATION_AUTOCLEAN',
-  'COS_DICTATION_PREWARM', 'COS_DICTATION_POLISH_SKIP_CLEAN']
+  'COS_DICTATION_PREWARM', 'COS_DICTATION_POLISH_SKIP_CLEAN', 'COS_DICTATION_MEANING_GUARD', 'COS_DICTATION_LEARNED_STYLE',
+  'COS_DICTATION_REGISTERS', 'COS_DICTATION_POLISH_PROMPT', 'COS_DICTATION_PROMPT_VERSION']
 
 class MockNoSpeechDetectedError extends Error {
   constructor(readonly rawText = '') { super('No speech detected') }
@@ -206,12 +215,21 @@ describe('public prompt draft recovery contract', () => {
       text: 'Ask Silas about the plan [haiku]',
       surface: 'message',
       polished: true,
+      // 6.91.0, additive: what the model step did and which prompt ran. Haiku runs v3 (canary C1
+      // passed on Sonnet only), with no register and no learned style.
+      polishOutcome: 'polished',
+      polishPrompt: 'v3',
+      learnedStyle: false,
     })
     expect(meeting.status).toBe(200)
     expect(meeting.json).toEqual({
       text: 'The forecast is ready [sonnet]',
       surface: 'meeting',
       polished: true,
+      // 6.91.0: meeting lines take v3 and no register.
+      polishOutcome: 'polished',
+      polishPrompt: 'v3',
+      learnedStyle: false,
     })
     expect(autoCleanDictation).toHaveBeenCalledTimes(2)
   })
@@ -287,7 +305,7 @@ describe('public prompt draft recovery contract', () => {
     expect(meeting.map(r => r.json.polishSkipped)).toEqual([undefined, undefined, 'daily_cap'])
     expect(meeting[2].json).toEqual({ text: 'The forecast is ready', surface: 'meeting', polished: false, polishSkipped: 'daily_cap' })
     const message = await finalizeText('Ask Dana about the plan', 'message')
-    expect(message.json).toEqual({ text: 'Ask Dana about the plan Polished.', surface: 'message', polished: true })
+    expect(message.json).toEqual({ text: 'Ask Dana about the plan Polished.', surface: 'message', polished: true, polishOutcome: 'polished', polishRegister: 'default', polishPrompt: 'v4', learnedStyle: false })
     expect(autoCleanDictation).toHaveBeenCalledTimes(3)
   })
 
@@ -331,7 +349,8 @@ describe('public prompt draft recovery contract', () => {
 
     autoCleanDictation.mockImplementation(async () => { throw new Error('provider down') })
     const failed = await finalizeText('Keep this draft.', 'message', 'luna-5.6-fast')
-    expect(failed.json).toEqual({ text: 'Keep this draft.', surface: 'message', polished: false, polishSkipped: 'failed' })
+    // 6.91.0: a failed model call says the register it was given, and no polishOutcome.
+    expect(failed.json).toEqual({ text: 'Keep this draft.', surface: 'message', polished: false, polishSkipped: 'failed', polishPrompt: 'v3', learnedStyle: false })
     let skipped: string | undefined
     for (let i = 0; i < 10 && skipped !== 'breaker_open'; i++) skipped = (await finalizeText('Keep this draft.', 'message', 'luna-5.6-fast')).json.polishSkipped
     expect(skipped).toBe('breaker_open')
@@ -397,11 +416,15 @@ describe('public prompt draft recovery contract', () => {
   it('6.83.1: a polish that invents a link is refused and the pre-polish text goes out', async () => {
     autoCleanDictation.mockImplementation(async () => 'Check quilt.com for details.')
     const invented = await finalizeText('check our website for details', 'message')
-    expect(invented.json).toEqual({ text: 'check our website for details', surface: 'message', polished: false, polishSkipped: 'link_guard' })
+    expect(invented.json).toEqual({
+      text: 'check our website for details', surface: 'message', polished: false, polishSkipped: 'link_guard',
+      // 6.91.0: the link guard is a guard like the others.
+      polishOutcome: 'guarded', guard: 'link', polishRegister: 'default', polishPrompt: 'v4', learnedStyle: false,
+    })
     // A link the speaker spelled out is kept.
     autoCleanDictation.mockImplementation(async () => 'Mail sam@example.com today.')
     const spelled = await finalizeText('mail sam at example dot com today', 'message')
-    expect(spelled.json).toEqual({ text: 'Mail sam@example.com today.', surface: 'message', polished: true })
+    expect(spelled.json).toEqual({ text: 'Mail sam@example.com today.', surface: 'message', polished: true, polishOutcome: 'polished', polishRegister: 'default', polishPrompt: 'v4', learnedStyle: false })
   })
 
   it('6.83.1: a polish that drops a link the dictionary wrote is refused', async () => {
@@ -425,7 +448,7 @@ describe('public prompt draft recovery contract', () => {
       // The vocabulary handed to the model holds no path: the known spellings are vocabulary only.
       expect(autoCleanDictation).toHaveBeenCalledWith('go to /pricing', ['Quilt'], expect.anything())
       autoCleanDictation.mockImplementation(async () => 'Go to /pricing.')
-      expect((await finalizeText('go to /pricing', 'message')).json).toEqual({ text: 'Go to /pricing.', surface: 'message', polished: true })
+      expect((await finalizeText('go to /pricing', 'message')).json).toEqual({ text: 'Go to /pricing.', surface: 'message', polished: true, polishOutcome: 'polished', polishRegister: 'default', polishPrompt: 'v4', learnedStyle: false })
     } finally {
       const { rmSync: rm } = await import('node:fs')
       rm(process.env.COS_PROFILE_PATH!, { force: true })
@@ -443,7 +466,7 @@ describe('public prompt draft recovery contract', () => {
     expect(warm.json).toEqual({ token: WARM_TOKEN, expiresMs: 150000 })
     expect(prewarm.start).toHaveBeenCalledWith('haiku')
     const used = await finalizeWarm({ text: 'Send the deck to Dana', prewarmToken: WARM_TOKEN })
-    expect(used.json).toEqual({ text: 'Send the deck to Dana Warm.', surface: 'message', polished: true, prewarm: 'used' })
+    expect(used.json).toEqual({ text: 'Send the deck to Dana Warm.', surface: 'message', polished: true, prewarm: 'used', polishOutcome: 'polished', polishPrompt: 'v3', learnedStyle: false })
     expect(prewarm.take).toHaveBeenCalledWith(WARM_TOKEN, 'haiku')
     expect(prewarm.run).toHaveBeenCalledWith({ token: WARM_TOKEN, model: 'haiku' }, 'Send the deck to Dana', expect.any(Array), expect.anything())
     expect(autoCleanDictation).not.toHaveBeenCalled()
@@ -455,7 +478,8 @@ describe('public prompt draft recovery contract', () => {
   it('6.79.2: a dead warm process falls back to one cold call; a failure after sending does not', async () => {
     prewarm.run.mockRejectedValueOnce(new MockPrewarmUnavailableError('gone'))
     const missed = await finalizeWarm({ text: 'Send the deck', prewarmToken: WARM_TOKEN })
-    expect(missed.json).toEqual({ text: 'Send the deck', surface: 'message', polished: false, prewarm: 'missed' })
+    // 6.91.0: the model returned its input, which is "unchanged", not a failure.
+    expect(missed.json).toEqual({ text: 'Send the deck', surface: 'message', polished: false, prewarm: 'missed', polishOutcome: 'unchanged', polishPrompt: 'v3', learnedStyle: false })
     expect(autoCleanDictation).toHaveBeenCalledTimes(1)
 
     prewarm.run.mockRejectedValueOnce(new Error('Warm polish returned an unsuccessful result'))
@@ -856,6 +880,7 @@ describe('public prompt draft recovery contract', () => {
       expect(cold.json).toEqual({
         text: 'Send the deck, notes, and plan.', surface: 'message', polished: true,
         customInstructions: true, instructionsHash: customInstructionsHash('Use Oxford commas.'),
+        polishOutcome: 'polished', polishPrompt: 'v3', learnedStyle: false,
       })
       expect(JSON.stringify(cold.json)).not.toContain('Oxford')
       // The audit row says the instructions were sent, by hash, never their words.
@@ -873,7 +898,7 @@ describe('public prompt draft recovery contract', () => {
     await withInstructions('Use Oxford commas.', async () => {
       const meeting = await finalizeText('The forecast is ready', 'meeting')
       expect(autoCleanDictation).toHaveBeenCalledWith('The forecast is ready', expect.any(Array), expect.objectContaining({ customInstructions: '' }))
-      expect(meeting.json).toEqual({ text: 'The forecast is ready', surface: 'meeting', polished: false })
+      expect(meeting.json).toEqual({ text: 'The forecast is ready', surface: 'meeting', polished: false, polishOutcome: 'unchanged', polishPrompt: 'v3', learnedStyle: false })
     })
   })
 
@@ -894,7 +919,7 @@ describe('public prompt draft recovery contract', () => {
     autoCleanDictation.mockImplementation(async (text: string) => `${text} Polished.`)
     const message = await finalizeText('Ask Dana', 'message')
     expect(autoCleanDictation).toHaveBeenCalledWith('Ask Dana', expect.any(Array), expect.objectContaining({ customInstructions: '' }))
-    expect(message.json).toEqual({ text: 'Ask Dana Polished.', surface: 'message', polished: true })
+    expect(message.json).toEqual({ text: 'Ask Dana Polished.', surface: 'message', polished: true, polishOutcome: 'polished', polishRegister: 'default', polishPrompt: 'v4', learnedStyle: false })
     expect(logTokenAudit).toHaveBeenCalledWith(expect.objectContaining({ polishInstructions: { on: false, hash: '' } }))
   })
 
@@ -908,5 +933,213 @@ describe('public prompt draft recovery contract', () => {
       autoCleanDictation.mockImplementation(async () => { throw new Error('down') })
       expect((await finalizeText('Third', 'message')).json).toMatchObject({ polishSkipped: 'failed', customInstructions: true })
     })
+  })
+
+  // 6.91.0 (plan r2): registers, the meaning guard, the learned style and polishOutcome. Synthetic text only.
+  const finalizeWith = (body: Record<string, unknown>) =>
+    httpRequest('POST', '/api/dictation/finalize', JSON.stringify({ surface: 'message', autocleanModel: 'sonnet', ...body }))
+  async function withStyle(rules: unknown[], run: () => Promise<void>, enabled = true) {
+    const store = await import('../lib/dictation-learned-style.js')
+    store.writeLearnedStyle(enabled, rules as any)
+    try { await run() } finally { store.writeLearnedStyle(true, []) }
+  }
+  const HONESTLY = { id: 'drop-honestly', kind: 'drop_phrase', register: 'all', param: 'honestly', count: 2, lastSeen: null }
+
+  it('6.91.0: a terminal is literal; the model gets the register, the answer gets the input casing and no added period', async () => {
+    autoCleanDictation.mockImplementation(async () => 'Git status.')
+    const result = await finalizeWith({ text: 'git status', context: { app: 'iTerm2' } })
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('git status', expect.any(Array), expect.objectContaining({ register: 'literal', learnedStyle: '' }))
+    expect(result.json).toEqual({ text: 'git status', surface: 'message', polished: false, polishOutcome: 'unchanged', polishRegister: 'literal', polishPrompt: 'v4', learnedStyle: false })
+  })
+
+  it('6.91.0: a terminal answer that changed a word is refused: the input goes out, guard literal, polishSkipped failed', async () => {
+    autoCleanDictation.mockImplementation(async () => 'npm run build --watch')
+    const result = await finalizeWith({ text: 'npm run build dash dash watch', context: { app: 'Terminal' } })
+    expect(result.json).toEqual({
+      text: 'npm run build dash dash watch', surface: 'message', polished: false,
+      polishSkipped: 'failed', polishOutcome: 'guarded', guard: 'literal', polishRegister: 'literal', polishPrompt: 'v4', learnedStyle: false,
+    })
+  })
+
+  it('6.91.0: Claude, Cursor, an unknown app and no app are all default, with the same model call', async () => {
+    autoCleanDictation.mockImplementation(async (text: string) => text)
+    for (const context of [{ app: 'Claude' }, { app: 'Cursor' }, { app: 'Some App' }, undefined, { app: 42 }]) {
+      const result = await finalizeWith({ text: 'Send it to Dana.', ...(context ? { context } : {}) })
+      expect(result.json.polishRegister, JSON.stringify(context)).toBe('default')
+      expect(autoCleanDictation).toHaveBeenLastCalledWith('Send it to Dana.', expect.any(Array), expect.objectContaining({ register: 'default' }))
+    }
+    // COS_DICTATION_REGISTERS=0: a terminal is default too.
+    process.env.COS_DICTATION_REGISTERS = '0'
+    expect((await finalizeWith({ text: 'git status', context: { app: 'iTerm2' } })).json.polishRegister).toBe('default')
+  })
+
+  it('6.91.0: an answer that lost a negation is refused; the log carries counts, never words', async () => {
+    const warn = vi.spyOn(console, 'warn')
+    autoCleanDictation.mockImplementation(async () => 'Merge to main before the review.')
+    const result = await finalizeWith({ text: 'never merge to main before the review' })
+    expect(result.json).toEqual({
+      text: 'never merge to main before the review', surface: 'message', polished: false,
+      polishSkipped: 'failed', polishOutcome: 'guarded', guard: 'negation', polishRegister: 'default', polishPrompt: 'v4', learnedStyle: false,
+    })
+    expect(warn.mock.calls.flat().join(' ')).toContain('auto-clean answer guarded: negation=1/0')
+    expect(warn.mock.calls.flat().join(' ')).not.toMatch(/merge|review/i)
+    expect(logTokenAudit).toHaveBeenLastCalledWith(expect.objectContaining({ polishOutcome: 'guarded', polishGuard: 'negation', polishRegister: 'default' }))
+    // Dropped numbers, dates and names too.
+    autoCleanDictation.mockImplementation(async () => 'Order cases for Lena.')
+    expect((await finalizeWith({ text: 'order 12 cases for Lena' })).json.guard).toBe('number')
+    autoCleanDictation.mockImplementation(async () => 'Send it.')
+    expect((await finalizeWith({ text: 'send it on Friday' })).json.guard).toBe('date')
+    expect((await finalizeWith({ text: 'send it to Priya' })).json.guard).toBe('name')
+    // A self-correction is not a drop.
+    autoCleanDictation.mockImplementation(async () => 'Order six cases.')
+    expect((await finalizeWith({ text: 'order five actually six cases' })).json).toMatchObject({ text: 'Order six cases.', polishOutcome: 'polished' })
+    warn.mockRestore()
+  })
+
+  it('6.91.0: COS_DICTATION_MEANING_GUARD=0 turns the guard off', async () => {
+    process.env.COS_DICTATION_MEANING_GUARD = '0'
+    autoCleanDictation.mockImplementation(async () => 'Merge to main.')
+    expect((await finalizeWith({ text: 'never merge to main' })).json).toMatchObject({ text: 'Merge to main.', polishOutcome: 'polished' })
+  })
+
+  it('6.91.0: meeting lines are untouched: prompt v3, no register, no learned style, no meaning guard', async () => {
+    await withStyle([HONESTLY], async () => {
+      autoCleanDictation.mockImplementation(async () => 'Merge to main.')
+      const meeting = await finalizeWith({ text: 'never merge to main', surface: 'meeting', context: { app: 'iTerm2' } })
+      expect(autoCleanDictation).toHaveBeenLastCalledWith('never merge to main', expect.any(Array), expect.objectContaining({ promptVersion: 'v3', register: 'default', learnedStyle: '', customInstructions: '' }))
+      expect(meeting.json).toEqual({ text: 'Merge to main.', surface: 'meeting', polished: true, polishOutcome: 'polished', polishPrompt: 'v3', learnedStyle: false })
+    })
+  })
+
+  it('6.91.0: messages use the configured prompt (v4 by default, v3 when rolled back)', async () => {
+    autoCleanDictation.mockImplementation(async (text: string) => text)
+    await finalizeWith({ text: 'Send it.' })
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('Send it.', expect.any(Array), expect.objectContaining({ promptVersion: 'v4' }))
+    process.env.COS_DICTATION_POLISH_PROMPT = 'v3'
+    await finalizeWith({ text: 'Send it.' })
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('Send it.', expect.any(Array), expect.objectContaining({ promptVersion: 'v3' }))
+  })
+
+  it('6.91.0: the learned style reaches the model by its lines and the answer by its hash only', async () => {
+    const store = await import('../lib/dictation-learned-style.js')
+    await withStyle([HONESTLY], async () => {
+      const { hash } = store.readLearnedStyle()
+      autoCleanDictation.mockImplementation(async () => 'The layout is easier to read.')
+      const result = await finalizeWith({ text: 'honestly the layout is easier to read' })
+      expect(autoCleanDictation).toHaveBeenLastCalledWith(expect.any(String), expect.any(Array), expect.objectContaining({ learnedStyle: '- Drop "honestly" where the speaker used it as filler.' }))
+      expect(result.json).toEqual({
+        text: 'The layout is easier to read.', surface: 'message', polished: true,
+        polishOutcome: 'polished', polishRegister: 'default', polishPrompt: 'v4', learnedStyle: true, learnedStyleHash: hash,
+      })
+      expect(logTokenAudit).toHaveBeenLastCalledWith(expect.objectContaining({ learnedStyle: { on: true, hash } }))
+      expect(JSON.stringify(logTokenAudit.mock.calls)).not.toContain('honestly')
+      // Never on a terminal.
+      autoCleanDictation.mockImplementation(async (text: string) => text)
+      const literal = await finalizeWith({ text: 'git status', context: { app: 'kitty' } })
+      expect(autoCleanDictation).toHaveBeenLastCalledWith('git status', expect.any(Array), expect.objectContaining({ learnedStyle: '' }))
+      expect(literal.json.learnedStyle).toBe(false)
+      // The server switch turns it off for real.
+      process.env.COS_DICTATION_LEARNED_STYLE = '0'
+      await finalizeWith({ text: 'honestly send it' })
+      expect(autoCleanDictation).toHaveBeenLastCalledWith('honestly send it', expect.any(Array), expect.objectContaining({ learnedStyle: '' }))
+      delete process.env.COS_DICTATION_LEARNED_STYLE
+    })
+    // The person's own switch too, with the rules kept.
+    await withStyle([HONESTLY], async () => {
+      autoCleanDictation.mockImplementation(async (text: string) => text)
+      const off = await finalizeWith({ text: 'honestly send it' })
+      expect(autoCleanDictation).toHaveBeenLastCalledWith('honestly send it', expect.any(Array), expect.objectContaining({ learnedStyle: '' }))
+      expect(off.json.learnedStyle).toBe(false)
+    }, false)
+  })
+
+  it('6.91.0: the warm path gets the same register and learned style as the cold one', async () => {
+    await withStyle([HONESTLY], async () => {
+      const warm = await finalizeWith({ text: 'Send the deck to Dana', prewarmToken: WARM_TOKEN, autocleanModel: 'sonnet' })
+      expect(prewarm.run).toHaveBeenCalledWith(expect.anything(), 'Send the deck to Dana', expect.any(Array), expect.objectContaining({
+        register: 'default', learnedStyle: '- Drop "honestly" where the speaker used it as filler.', promptVersion: 'v4',
+      }))
+      expect(warm.json).toMatchObject({ prewarm: 'used', learnedStyle: true, polishRegister: 'default' })
+    })
+  })
+
+  it('6.91.0: prompt drafts (G2) get the guard and the new fields too', async () => {
+    transcribeAudioBuffer.mockResolvedValue({ text: 'never merge to main', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', elapsedMs: 20, audioBytes: 3200 })
+    autoCleanDictation.mockImplementation(async () => 'Merge to main.')
+    const started = await httpRequest('POST', '/api/prompt-drafts/start')
+    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
+    const result = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast&autoclean=1&autocleanModel=haiku`)
+    // Haiku: prompt v3, no register, but the meaning guard applies to every model.
+    expect(result.json).toMatchObject({ text: 'never merge to main', polishSkipped: 'failed', polishOutcome: 'guarded', guard: 'negation', polishPrompt: 'v3', learnedStyle: false })
+    expect(result.json.polishRegister).toBeUndefined()
+  })
+
+  it('6.91.0 C6: an old client body works, and a skip path sends no polishOutcome', async () => {
+    autoCleanDictation.mockImplementation(async (text: string) => `${text} Done.`)
+    // The 0.5.325 to 0.5.343 helper body: text, surface, autocleanModel, context.app, prewarmToken.
+    expect((await finalizeWith({ text: 'Send it', context: { app: 'Slack' } })).status).toBe(200)
+    process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = '1'
+    const capped = await finalizeWith({ text: 'Send it again' })
+    expect(capped.json).toEqual({ text: 'Send it again', surface: 'message', polished: false, polishSkipped: 'daily_cap' })
+  })
+
+  it('6.91.0 C6: an old helper (0.5.343) reading a guarded answer logs fillers_only or skipped, never "applied"', async () => {
+    // A port of ProviderStatusCore DictationPolishBridge.answer (skipReasons) and MacDictationCore
+    // DictationPolish.choose at ctl-343 30f6d06, the code an old Control runs against this answer.
+    const SKIP_REASONS = new Set(['daily_cap', 'breaker_open', 'too_long', 'disabled', 'failed', 'clean', 'link_guard'])
+    const oldControl = (heard: string, body: any) => {
+      const skipped = typeof body.polishSkipped === 'string' && SKIP_REASONS.has(body.polishSkipped) ? body.polishSkipped : null
+      if (body.polished !== true) return skipped ? `skipped:${skipped}` : 'failed:not_polished'
+      if (skipped) return body.text === heard ? `skipped:${skipped}` : `fillers_only:${skipped}`
+      return body.text === heard ? 'unchanged' : 'applied'
+    }
+    autoCleanDictation.mockImplementation(async () => 'Merge to main.')
+    for (const heard of ['never merge to main', 'um, never merge to main']) {
+      const guarded = (await finalizeWith({ text: heard })).json
+      expect(guarded.polishOutcome).toBe('guarded')
+      const logged = oldControl(heard, guarded)
+      expect(logged, heard).toMatch(/^(fillers_only|skipped):failed$/)
+    }
+    // The filler pass changed it and the guard refused the model: fillers_only:failed, the plan's C6 line.
+    expect(oldControl('um, never merge to main', (await finalizeWith({ text: 'um, never merge to main' })).json)).toBe('fillers_only:failed')
+  })
+
+  it('6.91.0 option C: Haiku, Luna and an unnamed model run v3 with no register and no learned style, even in a terminal with rules saved', async () => {
+    await withStyle([HONESTLY], async () => {
+      autoCleanDictation.mockImplementation(async (text: string) => text)
+      for (const model of ['haiku', 'luna-5.6-fast', undefined]) {
+        const result = await finalizeWith({ text: 'honestly git status', context: { app: 'iTerm2' }, autocleanModel: model })
+        expect(autoCleanDictation, String(model)).toHaveBeenLastCalledWith('honestly git status', expect.any(Array), expect.objectContaining({ promptVersion: 'v3', register: 'default', learnedStyle: '' }))
+        expect(result.json, String(model)).toMatchObject({ polishPrompt: 'v3', learnedStyle: false })
+        expect(result.json.polishRegister, String(model)).toBeUndefined()
+      }
+      // Sonnet takes v4, the register and the style.
+      const sonnet = await finalizeWith({ text: 'honestly git status', context: { app: 'iTerm2' } })
+      expect(sonnet.json).toMatchObject({ polishPrompt: 'v4', polishRegister: 'literal', learnedStyle: false })
+      const chat = await finalizeWith({ text: 'honestly send it' })
+      expect(chat.json).toMatchObject({ polishPrompt: 'v4', polishRegister: 'default', learnedStyle: true })
+    })
+  })
+
+  it('6.91.0 option C: the environment and Previous polish override every model; Sonnet on v3 gets no style or register', async () => {
+    autoCleanDictation.mockImplementation(async (text: string) => text)
+    process.env.COS_DICTATION_POLISH_PROMPT = 'v4'
+    expect((await finalizeWith({ text: 'Send it.', autocleanModel: 'haiku' })).json.polishPrompt).toBe('v4')
+    // Haiku on v4 is not a canaried pair: still no register.
+    expect((await finalizeWith({ text: 'git status', autocleanModel: 'haiku', context: { app: 'iTerm2' } })).json.polishRegister).toBeUndefined()
+    process.env.COS_DICTATION_POLISH_PROMPT = 'v3'
+    const sonnetV3 = await finalizeWith({ text: 'git status', context: { app: 'iTerm2' } })
+    expect(sonnetV3.json).toMatchObject({ polishPrompt: 'v3', learnedStyle: false })
+    expect(sonnetV3.json.polishRegister).toBeUndefined()
+    delete process.env.COS_DICTATION_POLISH_PROMPT
+    const options = await import('../lib/dictation-polish-options.js')
+    options.writePolishOptions('v3')
+    try {
+      expect((await finalizeWith({ text: 'Send it.' })).json.polishPrompt).toBe('v3')
+    } finally { options.writePolishOptions('default') }
+    // v1 and v2 are not in the closed set: no polishPrompt at all.
+    process.env.COS_DICTATION_POLISH_PROMPT = 'v2'
+    expect((await finalizeWith({ text: 'Send it.' })).json.polishPrompt).toBeUndefined()
   })
 })

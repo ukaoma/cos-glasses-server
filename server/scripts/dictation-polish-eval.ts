@@ -1,11 +1,14 @@
 /**
- * 6.79.1 offline eval: dictation polish prompt v1 vs v2, through the real autoCleanDictation
- * path (the subscription `claude -p` CLI). Synthetic dictation only; nothing here was spoken
- * by a real person. Not shipped in the npm package.
+ * 6.79.1 offline eval: dictation polish prompts, through the real polish caller (the subscription
+ * `claude -p` CLI). Synthetic dictation only; nothing here was spoken by a real person. Not
+ * shipped in the npm package. 6.91.0: every call goes through the route's own pipeline
+ * (lib/dictation-polish-pipeline.ts cleanOutboundDictation), so the filler pass, the prompt and
+ * the guards are the shipped ones; `output` is the model's own answer, `final` what would go out.
  *
- *   COS_DATA_DIR=$(mktemp -d) npx tsx server/scripts/dictation-polish-eval.ts [--models haiku,sonnet]
- *     [--prompts v1,v2] [--max-calls 200] [--concurrency 2] [--out results.json] [--resume results.json]
- *     [--score-only results.json]
+ *   COS_DATA_DIR=<scratch> COS_PROFILE_PATH=<scratch>/p.json COS_SCRIPTS_DIR=<scratch> \
+ *   npx tsx server/scripts/dictation-polish-eval.ts [--models haiku,sonnet] [--prompts v3,v4]
+ *     [--runs 1 | 2,3] [--ids repeat | b01,b02] [--warm] [--stacked] [--max-calls 200]
+ *     [--concurrency 2] [--out results.json] [--resume results.json] [--score-only results.json] [--dry]
  *
  * Scoring is deterministic (no judge model):
  * - fillers left: filler tokens (um, uh, ...) plus each case's listed filler phrases still present.
@@ -16,7 +19,7 @@
  * - preserved: "must not change" cases whose words match the reference exactly.
  */
 import { writeFileSync, readFileSync } from 'node:fs'
-import { autoCleanDictation, type DictationPolishPromptVersion } from '../lib/dictation-clean.js'
+import type { DictationPolishPromptVersion } from '../lib/dictation-clean.js'
 import { stripDisfluencies } from '../lib/dictation-fillers.js'
 
 export type EvalCategory = 'filler' | 'backtrack' | 'format' | 'names' | 'preserve'
@@ -85,7 +88,22 @@ export const CASES: EvalCase[] = [
   { id: 'p09', category: 'preserve', input: 'what kind of car should I rent for the trip', expected: 'What kind of car should I rent for the trip?', keep: ['kind of car'] },
   { id: 'p10', category: 'preserve', input: 'tell me a joke', expected: 'Tell me a joke.' },
   { id: 'p11', category: 'preserve', input: 'the ER visit cost two hundred dollars', expected: 'The ER visit cost two hundred dollars.', keep: ['er'] },
+  // 6.91.0 (plan r2): "never mind" as a correction, and four cases where the marker words carry meaning.
+  { id: 'b11', category: 'backtrack', input: 'set the reminder for nine never mind make it ten', expected: 'Set the reminder for ten.', keep: ['ten'], drop: ['nine', 'never mind'] },
+  { id: 'p12', category: 'preserve', input: 'I actually think the first draft was better', expected: 'I actually think the first draft was better.', keep: ['actually'] },
+  { id: 'p13', category: 'preserve', input: 'never mind the cost we need the faster laptop', expected: 'Never mind the cost, we need the faster laptop.', keep: ['never mind the cost'] },
+  { id: 'p14', category: 'preserve', input: 'my answer to the vendor is no', expected: 'My answer to the vendor is no.', keep: ['is no'] },
+  { id: 'p15', category: 'preserve', input: 'when I say the deadline is firm I mean it', expected: 'When I say the deadline is firm, I mean it.', keep: ['i mean it'] },
 ]
+
+/** 6.91.0: the slice run three times (plan r2 C1): every backtrack case and the four new preserve cases. */
+export const REPEAT_IDS = [...CASES.filter(c => c.category === 'backtrack').map(c => c.id), 'p12', 'p13', 'p14', 'p15']
+
+/** 6.91.0: an em dash, en dash or arrow the input did not have (the v4 house rule). */
+const DASHES = /[\u2014\u2013\u2192\u21d2]|->|=>/g
+export function dashesAdded(input: string, output: string): number {
+  return Math.max(0, (output.match(DASHES) ?? []).length - (input.match(DASHES) ?? []).length)
+}
 
 const FILLER_TOKENS = new Set(['um', 'umm', 'uh', 'uhh', 'uhm', 'er', 'erm', 'ah', 'ahh', 'hmm', 'hm', 'mm', 'mhm'])
 const STOP = new Set(('a an the and or but so to of in on at for with by from is are was were be been am it its this that '
@@ -140,7 +158,17 @@ export function scoreCase(c: EvalCase, output: string): CaseScore {
   }
 }
 
-export interface RunRow { id: string; arm: string; output: string | null; error?: string; ms: number }
+export interface RunRow {
+  id: string; arm: string; output: string | null; error?: string; ms: number
+  /** 6.91.0: the pipeline's final text (after the guards) and the guard that refused, if any. */
+  final?: string; guard?: string; outcome?: string; run?: number; prewarm?: string
+}
+
+export function percentile(values: number[], q: number): number {
+  const sorted = [...values].sort((a, b) => a - b)
+  if (!sorted.length) return 0
+  return sorted[Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1)]
+}
 
 export function summarize(rows: RunRow[]) {
   const byArm = new Map<string, RunRow[]>()
@@ -163,11 +191,37 @@ export function summarize(rows: RunRow[]) {
       addedWords: ok.reduce((n, x) => n + x.s!.addedWords.length, 0),
       keepFailures: ok.filter(x => !x.s!.keepOk).length,
       preserved: `${pres.filter(x => x.s!.preserved).length}/${pres.length}`,
-      medianMs: armRows.map(r => r.ms).sort((a, b) => a - b)[Math.floor(armRows.length / 2)] ?? 0,
+      dashesAdded: ok.reduce((n, x) => n + dashesAdded(x.c.input, x.r.output!), 0),
+      guarded: armRows.filter(r => r.outcome === 'guarded').length,
+      medianMs: percentile(ok.map(r => r.r.ms), 0.5),
+      p90Ms: percentile(ok.map(r => r.r.ms), 0.9),
     }
   }
   return out
 }
+
+/**
+ * A ~1,000-character instruction set and the largest learned style, for the C5 stacked arm. Synthetic.
+ * Since option C (6.91.0) the pipeline gives the learned style only to Sonnet with v4, so a Haiku
+ * stacked arm now carries the instructions alone; the 6.91.0 CHANGELOG numbers predate that.
+ */
+export const STACKED_INSTRUCTIONS = [
+  'Use Oxford commas in every list of three or more items.',
+  'Write product names exactly as Bottle POS, IT Retail, HubSpot, Tableau and Jewel360.',
+  'Prefer American spelling over British spelling.',
+  'Write numbers of ten or more as digits, and spell out one through nine.',
+  'Use sentence case for anything that looks like a heading.',
+  'When I list three or more things in a row, format them as a dash list.',
+  'Keep my sentences short and direct, and never add a greeting or a sign-off.',
+  'Write times in the form 10:30 am, and dates in the form October 3.',
+  'Spell the names of my teammates the way the known spellings show them.',
+  'If I dictate a question, end it with a question mark and keep it a question.',
+  'Never add exclamation marks I did not say, and keep my own word choice.',
+  'Use a colon before a list that follows a short lead-in sentence.',
+  'Write percentages with the percent sign, like 15%, rather than the word.',
+  'Do not add bold, italics, headings or any markdown I did not ask for.',
+  'Keep any acronym I say in capital letters, for example CRM, SEO and API.',
+].join('\n')
 
 async function main() {
   const arg = (name: string, fallback: string) => {
@@ -179,29 +233,71 @@ async function main() {
     console.log(JSON.stringify(summarize(JSON.parse(readFileSync(scoreOnly, 'utf8'))), null, 2))
     return
   }
+  // 6.91.0: every call goes through the route's own pipeline (lib/dictation-polish-pipeline.ts),
+  // so the scratch data dir and profile are required: the pipeline reads both.
+  if (!process.env.COS_DATA_DIR || !process.env.COS_PROFILE_PATH || !process.env.COS_SCRIPTS_DIR) {
+    throw new Error('Set COS_DATA_DIR, COS_PROFILE_PATH and COS_SCRIPTS_DIR to scratch paths')
+  }
   const models = arg('models', 'haiku,sonnet').split(',')
-  const prompts = arg('prompts', 'v1,v2').split(',') as DictationPolishPromptVersion[]
+  const prompts = arg('prompts', 'v3,v4').split(',') as DictationPolishPromptVersion[]
   const maxCalls = Number(arg('max-calls', '200'))
   const concurrency = Number(arg('concurrency', '2'))
   const outFile = arg('out', 'dictation-polish-eval-results.json')
+  const runs = (arg('runs', '1').split(',')).map(Number)
+  const ids = arg('ids', '') === 'repeat' ? new Set(REPEAT_IDS) : arg('ids', '') ? new Set(arg('ids', '').split(',')) : null
+  const stacked = process.argv.includes('--stacked')
+  const warm = process.argv.includes('--warm')
+  const warmWaitMs = Number(arg('warm-wait-ms', '3000'))
+  process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = String(maxCalls)
+  writeFileSync(process.env.COS_PROFILE_PATH, JSON.stringify({ vocabulary: VOCABULARY }))
+  const { clearProfileCache } = await import('../lib/profile.js')
+  clearProfileCache()
+  const pipeline = await import('../lib/dictation-polish-pipeline.js')
+  const prewarm = await import('../lib/dictation-prewarm.js')
+  const instructions = await import('../lib/dictation-polish-instructions.js')
+  const style = await import('../lib/dictation-learned-style.js')
+  if (stacked) {
+    instructions.writeCustomInstructions(STACKED_INSTRUCTIONS)
+    style.writeLearnedStyle(true, [
+      ...style.LEARNED_STYLE_ALLOWLIST.map((param, i) => ({ id: `stack-${i}`, kind: 'drop_phrase' as const, register: 'all' as const, param, count: 2, lastSeen: null })),
+      { id: 'stack-contractions', kind: 'contractions' as const, register: 'all' as const, param: 'use', count: 2, lastSeen: null },
+    ])
+  }
   // --resume keeps the answered rows of an earlier run and asks only for the rest.
   const resume = arg('resume', '')
   const kept: RunRow[] = resume ? (JSON.parse(readFileSync(resume, 'utf8')) as RunRow[]).filter(r => r.output !== null && r.arm !== 'deterministic') : []
-  const done = new Set(kept.map(r => `${r.arm}:${r.id}`))
-  const jobs = models.flatMap(model => prompts.flatMap(prompt => CASES.map(c => ({ c, model, prompt }))))
-    .filter(job => !done.has(`${job.model}-${job.prompt}:${job.c.id}`))
+  const done = new Set(kept.map(r => `${r.arm}:${r.run ?? 1}:${r.id}`))
+  const armName = (model: string, prompt: string) => `${model}-${prompt}${stacked ? '-stacked' : ''}`
+  // Cases outermost, arms inner: v3 and v4 alternate, so a slow minute hits both alike.
+  const jobs = runs.flatMap(run => CASES.filter(c => !ids || ids.has(c.id)).flatMap(c => models.flatMap(model => prompts.map(prompt => ({ c, model, prompt, run })))))
+    .filter(job => !done.has(`${armName(job.model, job.prompt)}:${job.run}:${job.c.id}`))
   if (jobs.length > maxCalls) throw new Error(`${jobs.length} calls exceeds --max-calls ${maxCalls}`)
+  if (process.argv.includes('--dry')) { console.log(JSON.stringify({ calls: jobs.length })); return }
   const rows: RunRow[] = [...CASES.map(c => ({ id: c.id, arm: 'deterministic', output: stripDisfluencies(c.input), ms: 0 })), ...kept]
   let next = 0
+  let consecutiveFailures = 0
   const worker = async () => {
     while (next < jobs.length) {
-      const { c, model, prompt } = jobs[next++]
+      const { c, model, prompt, run } = jobs[next++]
+      const arm = armName(model, prompt)
+      if (consecutiveFailures >= 3) { rows.push({ id: c.id, arm, run, output: null, error: 'stopped: 3 consecutive failures', ms: 0 }); continue }
+      let prewarmToken: string | undefined
+      if (warm && prewarm.isPrewarmModel(model)) {
+        try { prewarmToken = prewarm.startPolishPrewarm(model, prompt).token } catch { prewarmToken = undefined }
+        // A dictation lasts a few seconds: the process is warm by the time the text arrives.
+        await new Promise(resolve => setTimeout(resolve, warmWaitMs))
+      }
       const started = Date.now()
-      try {
-        const output = await autoCleanDictation(c.input, VOCABULARY, { model, promptVersion: prompt })
-        rows.push({ id: c.id, arm: `${model}-${prompt}`, output, ms: Date.now() - started })
-      } catch (err: any) {
-        rows.push({ id: c.id, arm: `${model}-${prompt}`, output: null, error: String(err?.message ?? err), ms: Date.now() - started })
+      const result = await pipeline.cleanOutboundDictation(c.input, {
+        enabled: true, model: model as any, bucket: 'message', promptVersion: prompt, ...(prewarmToken ? { prewarmToken } : {}),
+      })
+      const ms = Date.now() - started
+      if (result.modelText === undefined) {
+        consecutiveFailures++
+        rows.push({ id: c.id, arm, run, output: null, error: result.polishSkipped ?? 'no answer', ms })
+      } else {
+        consecutiveFailures = 0
+        rows.push({ id: c.id, arm, run, output: result.modelText, final: result.text, outcome: result.polishOutcome, ...(result.guard ? { guard: result.guard } : {}), ...(result.prewarm ? { prewarm: result.prewarm } : {}), ms })
       }
       writeFileSync(outFile, JSON.stringify(rows, null, 2))
       process.stderr.write(`${rows.length - CASES.length - kept.length}/${jobs.length}\r`)
@@ -210,6 +306,7 @@ async function main() {
   await Promise.all(Array.from({ length: concurrency }, worker))
   writeFileSync(outFile, JSON.stringify(rows, null, 2))
   console.log(JSON.stringify(summarize(rows), null, 2))
+  process.exit(0)
 }
 
 if (process.argv[1]?.endsWith('dictation-polish-eval.ts')) void main()

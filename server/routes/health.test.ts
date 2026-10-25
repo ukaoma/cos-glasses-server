@@ -337,7 +337,11 @@ describe('display-stream capability advertisement', () => {
     // detects support at all.
     const body = await (await fetch(`${base}/api/health`)).json() as any
     // 6.85.0: Your polish instructions. Codes and numbers only (this route is public).
-    expect(body.capabilities?.dictationCleanup).toEqual({ models: ['haiku', 'sonnet', 'luna-5.6-fast'], customInstructions: { protocol: 1, maxChars: 1000 } })
+    // 6.91.0: learnedStyle ("Your style", enabled = the server switch) and polishOptions ("Previous polish").
+    expect(body.capabilities?.dictationCleanup).toEqual({
+      models: ['haiku', 'sonnet', 'luna-5.6-fast'], customInstructions: { protocol: 1, maxChars: 1000 },
+      learnedStyle: { protocol: 1, maxChars: 1500, maxRules: 20, enabled: true }, polishOptions: { protocol: 1 },
+    })
     // The same block on /api/models, which COS Control and the phone poll with a token.
     const models = await (await fetch(`${base}/api/models`)).json() as any
     expect(models.capabilities?.dictationCleanup).toEqual(body.capabilities.dictationCleanup)

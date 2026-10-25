@@ -6,8 +6,8 @@ import { join } from 'node:path'
 import { resolveProviderBinary } from './provider-binary.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import {
-  buildDictationPolishPrompt, claudePolishArgs, dictationChildEnv, dictationPolishPromptVersion,
-  type DictationPolishPromptVersion,
+  buildDictationPolishPrompt, claudePolishArgs, DICTATION_POLISH_SYSTEM_PROMPTS, dictationChildEnv, dictationPolishPromptVersion,
+  type DictationPolishPromptVersion, type DictationPromptExtras,
 } from './dictation-clean.js'
 
 /**
@@ -67,11 +67,11 @@ function retire(entry: WarmPolish): void {
   if (!entry.exited) void terminateProviderProcess(entry.proc).catch(() => {})
 }
 
-export function startPolishPrewarm(model: PrewarmModel): { token: string; expiresMs: number } {
+/** `version` defaults to the configured prompt; only the offline evals pass one (6.91.0). */
+export function startPolishPrewarm(model: PrewarmModel, version: DictationPolishPromptVersion = dictationPolishPromptVersion(process.env, model)): { token: string; expiresMs: number } {
   const binary = resolveProviderBinary('claude')
   if (!binary.ok) throw new PrewarmUnavailableError('Dictation cleanup Claude CLI unavailable')
   while (warm.size >= PREWARM_MAX) retire(warm.values().next().value!)
-  const version = dictationPolishPromptVersion()
   const scratch = mkdtempSync(join(tmpdir(), 'cos-dictation-prewarm-'))
   const workspace = join(scratch, 'workspace')
   mkdirSync(workspace, { mode: 0o700 })
@@ -135,6 +135,15 @@ export function takePolishPrewarm(token: string | undefined, model: string): War
 }
 
 /**
+ * 6.91.0: the version the one message is built with. A caller may ask for another version (meeting
+ * lines stay on v3 while dictation runs v4) only when both share the system prompt the process was
+ * started with; otherwise the process's own version is used, as before.
+ */
+export function messageVersion(started: DictationPolishPromptVersion, wanted: DictationPolishPromptVersion | undefined): DictationPolishPromptVersion {
+  return wanted && DICTATION_POLISH_SYSTEM_PROMPTS[wanted] === DICTATION_POLISH_SYSTEM_PROMPTS[started] ? wanted : started
+}
+
+/**
  * Write the one message and read the one result. PrewarmUnavailableError means nothing was
  * sent (the process had already gone), so the caller may spawn cold. Any later failure means
  * the model may have run, so it is a real polish failure.
@@ -143,7 +152,7 @@ export async function runWarmPolish(
   entry: WarmPolish,
   text: string,
   terms: string[],
-  opts: { signal?: AbortSignal; customInstructions?: string } = {},
+  opts: { signal?: AbortSignal; customInstructions?: string; promptVersion?: DictationPolishPromptVersion } & DictationPromptExtras = {},
 ): Promise<string> {
   if (entry.exited || !entry.proc.stdin || entry.proc.stdin.destroyed) {
     retire(entry)
@@ -180,7 +189,10 @@ export async function runWarmPolish(
     opts.signal?.addEventListener('abort', abort, { once: true })
     const message = JSON.stringify({
       type: 'user',
-      message: { role: 'user', content: buildDictationPolishPrompt(text, terms, entry.version, opts.customInstructions ?? '') },
+      message: {
+        role: 'user',
+        content: buildDictationPolishPrompt(text, terms, messageVersion(entry.version, opts.promptVersion), opts.customInstructions ?? '', { learnedStyle: opts.learnedStyle, register: opts.register }),
+      },
     })
     try {
       entry.proc.stdin!.write(message + '\n')

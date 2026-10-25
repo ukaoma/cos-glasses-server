@@ -26,9 +26,9 @@ export const CUSTOM_INSTRUCTIONS_PROTOCOL = 1
 /**
  * The prompt's own delimiters. A preference that contains one could close its block early and
  * write text the model would read as COS's, so every one of them is removed, in any case and
- * with any spacing or attributes.
+ * with any spacing or attributes. 6.91.0: the learned-style block's tag too.
  */
-const RESERVED_TAG = /<\s*\/?\s*(?:user-style-preferences|known-spellings|dictation)\b[^>]*>/gi
+const RESERVED_TAG = /<\s*\/?\s*(?:user-style-preferences|learned-style|known-spellings|dictation)\b[^>]*>/gi
 /** C0 and C1 controls other than line feed and tab, plus DEL. */
 const CONTROL = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g
 /** Invisible format characters: zero-width, bidi embeddings, overrides and isolates, BOM, soft hyphen. */

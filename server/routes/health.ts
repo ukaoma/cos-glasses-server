@@ -1,5 +1,5 @@
 import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
-import { customInstructionsCapability } from './dictation-polish-settings.js'
+import { customInstructionsCapability, learnedStyleCapability, polishOptionsCapability } from './dictation-polish-settings.js'
 import { PAIRING_PROTOCOL_VERSION } from '../lib/glasses-pairing.js'
 import { taskBridgeAvailable } from '../lib/task-bridge.js'
 import { Router } from 'express'
@@ -491,7 +491,11 @@ healthRouter.get('/health', async (_req, res) => {
     ...(voiceProvenance ? { voice_provenance: voiceProvenance } : {}),
     capabilities: {
       meetingAsk: { ...meetingAskCapabilities(), webRetrieval: meetingWebCapability().available },
-      dictationCleanup: { models: DICTATION_CLEAN_MODELS, customInstructions: customInstructionsCapability() },
+      // 6.91.0: learnedStyle ("Your style", enabled = the server switch) and polishOptions ("Previous polish").
+      dictationCleanup: {
+        models: DICTATION_CLEAN_MODELS, customInstructions: customInstructionsCapability(),
+        learnedStyle: learnedStyleCapability(), polishOptions: polishOptionsCapability(),
+      },
       // 6.67.0: glasses pairing (docs/pairing-contract.md). Public on purpose: the phone
       // reads it before it holds a token, and an older server omits it, which is how
       // the phone knows to say "Update COS on your Mac (server 6.67 or newer)".
@@ -679,7 +683,11 @@ healthRouter.get('/models', async (req, res) => {
     ...(apiToken ? { displayStreamTicket: mintDisplayTicket(apiToken) } : {}),
     capabilities: {
       meetingAsk: { ...meetingAskCapabilities(), webRetrieval: meetingWebCapability().available },
-      dictationCleanup: { models: DICTATION_CLEAN_MODELS, customInstructions: customInstructionsCapability() },
+      // 6.91.0: learnedStyle ("Your style", enabled = the server switch) and polishOptions ("Previous polish").
+      dictationCleanup: {
+        models: DICTATION_CLEAN_MODELS, customInstructions: customInstructionsCapability(),
+        learnedStyle: learnedStyleCapability(), polishOptions: polishOptionsCapability(),
+      },
       durableQueryJobs: {
         enabled: durableJobs.enabled,
         protocolVersion: durableJobs.protocolVersion,

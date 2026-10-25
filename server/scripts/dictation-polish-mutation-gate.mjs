@@ -21,6 +21,8 @@ const tests = ['server/lib/dictation-fillers.test.ts', 'server/lib/dictation-pol
   'server/routes/prompt-drafts.test.ts', 'server/routes/dictation-fuzzy-wiring.test.ts']
 const N = 'server/lib/dictation-polish-need.ts', P = 'server/lib/dictation-prewarm.ts'
 const F = 'server/lib/dictation-fillers.ts', B = 'server/lib/dictation-polish-budget.ts', PD = 'server/routes/prompt-drafts.ts', C = 'server/lib/dictation-clean.ts'
+// 6.91.0: the outbound polish pipeline moved out of routes/prompt-drafts.ts.
+const PL = 'server/lib/dictation-polish-pipeline.ts', O = 'server/lib/dictation-polish-options.ts'
 const mutations = [
   // Filler pass: what it must leave alone.
   ['all-caps-kept', F, '(token.length > 1 && token === token.toUpperCase())', '(false)'],
@@ -63,27 +65,28 @@ const mutations = [
   ['count-validated', B, '      if (Number.isInteger(value) && value > 0) counts[bucket] = value', '      counts[bucket] = value'],
   ['exhausted-at-cap', B, '  return polishCountToday(bucket) >= polishDailyCap(bucket)', '  return polishCountToday(bucket) > polishDailyCap(bucket)'],
   // Route wiring.
-  ['meeting-skips-filler-pass', PD, "  if (opts.bucket !== 'meeting' && fillerPassEnabled())", '  if (fillerPassEnabled())'],
-  ['filler-pass-switch', PD, "  if (opts.bucket !== 'meeting' && fillerPassEnabled())", "  if (opts.bucket !== 'meeting')"],
+  ['meeting-skips-filler-pass', PL, "  if (bucket !== 'meeting' && fillerPassEnabled())", '  if (fillerPassEnabled())'],
+  ['filler-pass-switch', PL, "  if (bucket !== 'meeting' && fillerPassEnabled())", "  if (bucket !== 'meeting')"],
   ['finalize-spends-surface-bucket', PD, '    bucket: surface,\n', "    bucket: 'message',\n"],
   ['drafts-spend-own-bucket', PD, "bucket: 'prompt_draft', signal })", "bucket: 'message', signal })"],
-  ['budget-checked', PD, '  if (polishBudgetExhausted(opts.bucket))', '  if (false)'],
-  ['call-recorded', PD, '  recordPolishCall(opts.bucket)\n', ''],
-  ['reason-disabled', PD, "polishSkipped: 'disabled' }", '}'],
-  ['reason-too-long', PD, "polishSkipped: 'too_long' }", '}'],
-  ['reason-breaker', PD, "polishSkipped: 'breaker_open' }", '}'],
-  ['reason-daily-cap', PD, "polishSkipped: 'daily_cap' }", '}'],
-  ['reason-failed', PD, "polishSkipped: 'failed', ...(prewarm", '...(prewarm'],
+  ['budget-checked', PL, '  if (polishBudgetExhausted(opts.bucket))', '  if (false)'],
+  ['call-recorded', PL, '  recordPolishCall(opts.bucket)\n', ''],
+  ['reason-disabled', PL, "polishSkipped: 'disabled' }", '}'],
+  ['reason-too-long', PL, "polishSkipped: 'too_long' }", '}'],
+  ['reason-breaker', PL, "polishSkipped: 'breaker_open' }", '}'],
+  ['reason-daily-cap', PL, "polishSkipped: 'daily_cap' }", '}'],
+  ['reason-failed', PL, "polishSkipped: 'failed', ...(prewarm", '...(prewarm'],
   ['finalize-reports-reason', PD, '    ...(polishSkipped ? { polishSkipped } : {}), ...(prewarm', '    ...(prewarm'],
   ['finalize-reports-prewarm', PD, ', ...(prewarm ? { prewarm } : {}),\n    // 6.85.0', ',\n    // 6.85.0'],
   ['draft-reports-reason', PD, '    ...(polishSkipped ? { polishSkipped } : {}),\n', ''],
   // Prompt switch.
-  ['env-selects-version', C, "  return raw === 'v1' || raw === 'v2' || raw === 'v3' ? raw : DEFAULT_DICTATION_POLISH_PROMPT", '  return DEFAULT_DICTATION_POLISH_PROMPT'],
-  ['explicit-version-wins', C, '  const version = opts.promptVersion ?? dictationPolishPromptVersion()', '  const version = dictationPolishPromptVersion()'],
+  ['env-selects-version', O, "  if ((DICTATION_POLISH_PROMPT_VERSIONS as readonly string[]).includes(raw)) return { version: raw as DictationPolishPromptVersion, source: 'env' }", ''],
+  ['explicit-version-wins', C, '  const version = opts.promptVersion ?? dictationPolishPromptVersion(process.env, model)', '  const version = dictationPolishPromptVersion(process.env, model)'],
   ['system-prompt-follows-version', C, 'DICTATION_POLISH_SYSTEM_PROMPTS[version]', 'DICTATION_POLISH_SYSTEM_PROMPTS.v2'],
   ['v1-is-byte-identical', C, "doubled words, stray filler, and the known spellings below.'", "doubled words, stray filler, fillers, and the known spellings below.'"],
   // 6.83.1: v3 is the default; v2 stays selectable byte for byte.
-  ['default-is-v3', C, "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v3'", "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v2'"],
+  // 6.91.0: the default is v4, and it lives with the options.
+  ['default-is-v4', O, "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v4'", "export const DEFAULT_DICTATION_POLISH_PROMPT: DictationPolishPromptVersion = 'v3'"],
   // 6.79.2: skip when clean.
   ['need-backtrack', N, "  if (BACKTRACK.test(trimmed)) return 'backtrack'\n", ''],
   ['need-comma-no-comma', N, "|i meant|no no)\\b|,\\s*no\\s*,/i", "|i meant|no no)\\b/i"],
@@ -96,8 +99,8 @@ const mutations = [
   ['need-unfinished', N, "  if (!/^[\"“'‘(]?[\\p{Lu}\\p{N}]/u.test(trimmed) || !/[.?!][\"”’)]*$/.test(trimmed)) return 'unfinished'", "  if (false) return 'unfinished'"],
   ['need-long-boundary', N, '  if (trimmed.split(/\\s+/).length > MAX_WORDS)', '  if (trimmed.split(/\\s+/).length >= MAX_WORDS)'],
   ['skip-clean-default-off', N, "  return ['1', 'true', 'on'].includes((env.COS_DICTATION_POLISH_SKIP_CLEAN", "  return !['0', 'false', 'off'].includes((env.COS_DICTATION_POLISH_SKIP_CLEAN"],
-  ['skip-clean-wired', PD, '  if (skipCleanEnabled() && polishNeed(cleaned) === null)', '  if (false)'],
-  ['skip-clean-switch', PD, '  if (skipCleanEnabled() && polishNeed(cleaned) === null)', '  if (polishNeed(cleaned) === null)'],
+  ['skip-clean-wired', PL, '  if (skipCleanEnabled() && polishNeed(cleaned) === null)', '  if (false)'],
+  ['skip-clean-switch', PL, '  if (skipCleanEnabled() && polishNeed(cleaned) === null)', '  if (polishNeed(cleaned) === null)'],
   // 6.79.2: prewarm.
   ['stream-json-input', C, "['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']", "['--output-format', 'stream-json', '--verbose']"],
   ['evict-oldest', P, '  while (warm.size >= PREWARM_MAX) retire(', '  while (false) retire('],
@@ -116,10 +119,10 @@ const mutations = [
   ['prewarm-claude-only', PD, "  if (!isPrewarmModel(model)) return res.status(409)", "  if (false) return res.status(409)"],
   ['prewarm-breaker', PD, "  if (autoCleanBreakers[model].isOpen()) return res.status(409)", "  if (false) return res.status(409)"],
   ['prewarm-budget', PD, "  if (polishBudgetExhausted(surface)) return res.status(409)", "  if (false) return res.status(409)"],
-  ['finalize-takes-warm', PD, '  const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null', '  const warmEntry = null as any'],
-  ['unavailable-falls-back-cold', PD, '        if (!(err instanceof PrewarmUnavailableError)) throw err', '        throw err'],
-  ['sent-failure-is-not-retried', PD, '        if (!(err instanceof PrewarmUnavailableError)) throw err\n', ''],
-  ['unused-warm-discarded', PD, "prewarm: discardPolishPrewarm(opts.prewarmToken) ? 'discarded' : 'missed' }", "prewarm: 'missed' }"],
+  ['finalize-takes-warm', PL, '  const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null', '  const warmEntry = null as any'],
+  ['unavailable-falls-back-cold', PL, '        if (!(err instanceof PrewarmUnavailableError)) throw err', '        throw err'],
+  ['sent-failure-is-not-retried', PL, '        if (!(err instanceof PrewarmUnavailableError)) throw err\n', ''],
+  ['unused-warm-discarded', PL, "prewarm: discardPolishPrewarm(opts.prewarmToken) ? 'discarded' : 'missed' }", "prewarm: 'missed' }"],
   ['prewarm-token-validated', PD, "(typeof rawToken !== 'string' || !PREWARM_TOKEN.test(rawToken))", "(typeof rawToken !== 'string')"],
   ['delete-discards', PD, '  res.json({ discarded: discardPolishPrewarm(req.params.token) })', '  res.json({ discarded: false })'],
 ]

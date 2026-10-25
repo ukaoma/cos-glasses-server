@@ -24,6 +24,8 @@ const tests = ['server/lib/glossary-learn.test.ts', 'server/routes/glossary-corr
 const GL = 'server/lib/glossary-learn.ts', GR = 'server/routes/glossary.ts', W = 'server/lib/whisper-local.ts'
 const H = 'server/lib/hallucination-filter.ts', DF = 'server/lib/dictation-format.ts', PD = 'server/routes/prompt-drafts.ts'
 const C = 'server/lib/dictation-clean.ts', N = 'server/lib/dictation-polish-need.ts'
+// 6.91.0: the outbound polish pipeline moved out of routes/prompt-drafts.ts.
+const PL = 'server/lib/dictation-polish-pipeline.ts', O = 'server/lib/dictation-polish-options.ts'
 const mutations = [
   // Dictionary: a link, email or path is a correction only.
   ['correction-only-detected', GL, '  const correctionOnly = isCorrectionOnly(written)\n', '  const correctionOnly = false\n'],
@@ -81,14 +83,14 @@ const mutations = [
   ['slug-request-allows-paths', DF, " && !spoken(inputFold, ASKS_FOR_PATHS)) return 'invented_link'", ") return 'invented_link'"],
   ['path-request-is-explicit', DF, 'const ASKS_FOR_PATHS = /\\bas\\s+(?:an?\\s+)?(?:slugs?|paths?|urls?)\\b/u', 'const ASKS_FOR_PATHS = /\\b(?:slugs?|paths?|urls?)\\b/u'],
   ['handle-token', DF, '  HANDLE.source,\n', ''],
-  ['guard-gets-dictionary-links', PD, 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary())', 'polishLinkProblem(cleaned, polished, [], getVocabulary())'],
-  ['guard-gets-vocabulary', PD, 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary())', 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()))'],
-  ['guard-reason-named', PD, "polishSkipped: 'link_guard', ...used }", "polishSkipped: 'failed', ...used }"],
+  ['guard-gets-dictionary-links', PL, 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary())', 'polishLinkProblem(cleaned, polished, [], getVocabulary())'],
+  ['guard-gets-vocabulary', PL, 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary())', 'polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()))'],
+  ['guard-reason-named', PL, "guard: 'link', polishSkipped: 'link_guard' }", "guard: 'link', polishSkipped: 'failed' }"],
   ['vocabulary-never-links', 'server/lib/profile.ts', ' || seen.has(key) || looksLikeUrlEmailPath(term)) return []', ' || seen.has(key)) return []'],
   // Route wiring.
-  ['guard-wired', PD, '    if (linkProblem) {', '    if (false) {'],
-  ['spoken-paths-skip-meetings', PD, "  if (opts.bucket !== 'meeting' && spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)", '  if (spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)'],
-  ['spoken-paths-switch-wired', PD, "  if (opts.bucket !== 'meeting' && spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)", "  if (opts.bucket !== 'meeting') cleaned = renderSpokenPaths(cleaned)"],
+  ['guard-wired', PL, '  if (linkProblem) {', '  if (false) {'],
+  ['spoken-paths-skip-meetings', PL, "  if (bucket !== 'meeting' && spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)", '  if (spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)'],
+  ['spoken-paths-switch-wired', PL, "  if (bucket !== 'meeting' && spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)", "  if (bucket !== 'meeting') cleaned = renderSpokenPaths(cleaned)"],
   // v3 prompt.
   ['v3-has-link-rules', C, "    ...(version === 'v3' ? [...SPOKEN_LINK_RULES, ''] : []),", '    ...([] as string[]),'],
   ['v2-has-no-link-rules', C, "    ...(version === 'v3' ? [...SPOKEN_LINK_RULES, ''] : []),", "    ...[...SPOKEN_LINK_RULES, ''],"],

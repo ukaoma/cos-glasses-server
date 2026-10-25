@@ -97,6 +97,28 @@ describe('6.89.0: /api/health is 6.87.0 plus tailscaleNudge', () => {
   }, 20_000)
 })
 
+describe('6.91.0: dictationCleanup.learnedStyle and polishOptions on both surfaces', () => {
+  it('the same block on /api/health (public) and /api/models; enabled follows COS_DICTATION_LEARNED_STYLE', async () => {
+    const saved = process.env.COS_DICTATION_LEARNED_STYLE
+    try {
+      delete process.env.COS_DICTATION_LEARNED_STYLE
+      const on = (await health()).capabilities.dictationCleanup
+      expect(on.learnedStyle).toEqual({ protocol: 1, maxChars: 1500, maxRules: 20, enabled: true })
+      expect(on.polishOptions).toEqual({ protocol: 1 })
+      expect((await models()).capabilities.dictationCleanup).toEqual(on)
+      // The old keys are unchanged, and nothing new sits at the top level of capabilities.
+      expect(on.customInstructions).toEqual({ protocol: 1, maxChars: 1000 })
+      expect((await health()).capabilities.dictationLearnedStyle).toBeUndefined()
+      process.env.COS_DICTATION_LEARNED_STYLE = '0'
+      expect((await health()).capabilities.dictationCleanup.learnedStyle).toEqual({ protocol: 1, maxChars: 1500, maxRules: 20, enabled: false })
+      expect((await models()).capabilities.dictationCleanup.learnedStyle.enabled).toBe(false)
+    } finally {
+      if (saved === undefined) delete process.env.COS_DICTATION_LEARNED_STYLE
+      else process.env.COS_DICTATION_LEARNED_STYLE = saved
+    }
+  }, 20_000)
+})
+
 describe('6.89.0: the route proof door is closed', () => {
   it('GET /api/route-proof is no longer a public path', () => {
     expect(isPublicApiRequest('GET', '/route-proof')).toBe(false)
@@ -318,6 +340,14 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.dictationCleanup.customInstructions',
   '.capabilities.dictationCleanup.customInstructions.protocol',
   '.capabilities.dictationCleanup.customInstructions.maxChars',
+  // 6.91.0: Your style and Previous polish, next to customInstructions (plan r2 contract).
+  '.capabilities.dictationCleanup.learnedStyle',
+  '.capabilities.dictationCleanup.learnedStyle.protocol',
+  '.capabilities.dictationCleanup.learnedStyle.maxChars',
+  '.capabilities.dictationCleanup.learnedStyle.maxRules',
+  '.capabilities.dictationCleanup.learnedStyle.enabled',
+  '.capabilities.dictationCleanup.polishOptions',
+  '.capabilities.dictationCleanup.polishOptions.protocol',
   '.capabilities.durableQueryJobs',
   '.capabilities.durableQueryJobs.enabled',
   '.capabilities.durableQueryJobs.protocolVersion',

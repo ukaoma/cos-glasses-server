@@ -1,3 +1,107 @@
+## 6.91.0 - Dictation that learns your voice: prompt v4 on Sonnet, the literal register, Your style, the meaning guard
+
+Miles, 2026-10-24 22:45: extend AI polish into "a Grammarly but further for voice dictation", remove ungrammatical spoken
+segments, and steer polish toward his own voice from the corrections he makes. Plan r2 (23:30) and option C (00:40,
+after canary C1 split by model). Server half only; COS Control 0.5.344 builds the capture, the classifier and Your style.
+
+- **Prompt v4, the default on Sonnet only** (`server/lib/dictation-clean.ts`). v3 plus self-corrections first, with
+  worked examples that are not the eval's cases ("actually", "no wait", "I mean", "sorry", "or rather", "make that",
+  "scratch that", and now "never mind"), restarts and repetition, grammar fixed in the speaker's own words (no synonyms,
+  no added formality), "never add an em dash or an arrow", and a closing checklist next to the dictation. The link and
+  safety rules are v3's word for word. **Haiku, Luna and any other model keep v3**, byte for byte the 6.90.0 prompt
+  (golden), because v4 failed canary C1 on Haiku (below). `COS_DICTATION_POLISH_PROMPT` (v1 to v4, or the alias
+  `COS_DICTATION_PROMPT_VERSION=3`) and the new "Previous polish" option override every model. Meeting lines stay on v3.
+- **Registers** (`server/lib/dictation-register.ts`), from the `context.app` Control has sent since 0.5.325 and the
+  server never read: `literal` for terminals (iTerm2, Terminal, Ghostty, Warp, WezTerm, Alacritty, kitty), `default`
+  for everything else (Claude, Cursor and Codex included). Literal keeps every word but fillers and stutters, adds no
+  capital and no closing period, and a deterministic word check sends the input instead when the model changed a word
+  (`guard: "literal"`). One table, published to Control by `GET /api/dictation/learned-style` (`registers`). The app
+  name is never logged. `COS_DICTATION_REGISTERS=0` makes every app default.
+- **Your style, the learned style** (`server/lib/dictation-learned-style.ts`, `GET/PUT/DELETE
+  /api/dictation/learned-style`). Codes only on the wire: `drop_phrase` with a phrase from a closed allowlist (no
+  negation, scope word, number, built-in filler or word that often carries meaning) or `contractions` use/avoid,
+  register `all`. The server renders the words from its own templates, owns `text`, `hash` and `updatedAt` (400 if a
+  client sends them), refuses over 20 rules or 1,500 characters (413), and takes `baseHash` (409 when stale).
+  `enabled: false` stops it applying and keeps the rules. Stored 0600 in `<data>/dictation-learned-style.json`,
+  validated again on every read; a bad file reads as empty and logs a code only. The `learned-style` tag is stripped by
+  both sanitizers. Prompt order: built-in rules, the literal block, your instructions, the learned style (framed as
+  observed from your edits, with its limits after it), the closing line, known spellings, the dictation. The learned
+  style and the literal register apply **only to Sonnet with v4**, the one pair canaries C2 and C3 ran on; every other
+  pair gets neither and answers `learnedStyle: false` with no `polishRegister`. `COS_DICTATION_LEARNED_STYLE=0` stops
+  it everywhere (the capability then says `enabled: false`). Never for meeting lines or a terminal.
+- **Meaning guard** (`server/lib/dictation-meaning-guard.ts`), deterministic, after the model and the link guard, on
+  `message` and `prompt_draft` only, every model. On the text the model was given (`cleaned`), it compares sets of
+  negations (not, n't and cannot fold to one token; never, no, none, nothing, nobody, neither, nor, without, unless,
+  except), numbers (digits, number words, ordinals, %, $, k, thousand, clock times, am/pm, digits inside a word),
+  weekdays and months, and names (mid-sentence capitals, dictionary terms, speaker names; sentence-initial words and
+  "I" are not names). A dropped token, or an added negation or number, refuses the answer: the pre-polish text goes out
+  with `polishOutcome: "guarded"`, `guard: "<kind>"` and `polishSkipped: "failed"`, so Controls 0.5.325 to 0.5.343 log
+  `fillers_only:failed` or `skipped:failed` and never claim polish. A dropped token is excused only when a correction
+  marker follows it and a same-kind token replaces it; a negation never is (only the words of "no wait", "wait no",
+  ", no," and "never mind" are not negations). Name re-spellings to a dictionary term or a near form count as kept;
+  a dictation that is not English skips the name check. Counts-only log line. Known gaps, not claimed: reordering, and
+  before/after/only. `COS_DICTATION_MEANING_GUARD=0` turns it off.
+- **Finalize answers** add, all optional: `polishOutcome` (`polished`, `unchanged`, `guarded`, about the model step;
+  `unchanged` is the model returning its input, which Control logged as `failed:not_polished`), `guard` (`negation`,
+  `number`, `date`, `name`, `link`, `literal`; the link guard keeps `polishSkipped: "link_guard"`), `polishPrompt`
+  (`v3` or `v4`), `learnedStyle` (true with `learnedStyleHash`, or false) and `polishRegister` (Sonnet with v4 only).
+  Skip paths send no `polishOutcome`. The token audit row adds the same codes; never a word or the app name.
+- **Previous polish** (`GET/PUT /api/dictation/polish/options {promptVersion: "default" | "v3"}`): Control can roll
+  back without a terminal, and G2 follows. The environment wins when it names a version.
+- **Capability:** `capabilities.dictationCleanup.learnedStyle {protocol: 1, maxChars: 1500, maxRules: 20, enabled}`
+  and `capabilities.dictationCleanup.polishOptions {protocol: 1}`, next to `customInstructions`, on `/api/health` and
+  `/api/models`. `GET /api/dictation/polish/rules` adds `promptByModel`, `rulesByPrompt`, `stylePairs`, the learned and
+  register blocks exactly as the model sees them, and `?model=`.
+- **Refactor:** the outbound polish pipeline moved from `routes/prompt-drafts.ts` to `lib/dictation-polish-pipeline.ts`
+  unchanged in order, so the evals call it instead of a copy. The three polish mutation gates were retargeted.
+- **Switches** `COS_DICTATION_PROMPT_VERSION`, `COS_DICTATION_LEARNED_STYLE`, `COS_DICTATION_MEANING_GUARD` and
+  `COS_DICTATION_REGISTERS` are forwarded by the managed runtime contract. With `COS_DICTATION_POLISH_PROMPT=v3`,
+  `COS_DICTATION_REGISTERS=0`, `COS_DICTATION_LEARNED_STYLE=0` and `COS_DICTATION_MEANING_GUARD=0` the prompt is
+  byte-identical to 6.90.0 (golden).
+
+**Canaries** (445 `claude -p` calls of a 450 cap, subscription CLI, warm path where noted; synthetic text only except C4):
+- **C1 Sonnet: PROVEN.** 50-case set (45 plus "never mind" b11 and four preserve cases: plain "actually", "never mind
+  the cost", "no" as an answer, "I mean it"), warm, v3 vs v4 interleaved: v4 backtracks 11/11, preserve 15/15, every
+  category recall 1.000, 0 fillers left, 0 added words, 0 dashes; v3 had backtrack recall 0.977 and 2 added words.
+  Backtrack plus new-preserve slice runs 2 and 3: 11/11 and 4/4 both. Format canary (v4, 40 cases): 40/40, so v3 was
+  not rerun (adaptive rule). Run 1 used the pre-tuning closing line; runs 2 and 3 and the format canary the final one.
+- **C1 Haiku: DISPROVEN** (why v4 is Sonnet only). Run 1, before tuning: v4 backtracks 10/11, b01 came back
+  "order five, actually six cases of the red" (correction kept, lowercase); format fillers 2 vs v3's 0, l03 kept
+  "numbered list" ("numbered list\n1. draft the brief..."); v3 itself missed b10. Tuning round 1 (closing line made a
+  checklist; failing slice rerun, 17 calls): backtracks 11/11, but b05 came back "The meeting moved to three." (dropped
+  "tell the team", backtrack recall 0.964 vs v3's 1.000) and l03 "Numbered list:\n1. Draft the brief..." (fillers 1).
+  Runs 2 and 3: backtracks 11/11 both; new preserve 4/4 then 3/4, p12 "I think the first draft was better." (dropped
+  the meaningful "actually"). The next tuning round starts from these four.
+- **C1b: PROVEN.** Unit cases for every normalization class and kind (69 tests): every planted drop and addition
+  caught; "five, actually six", "Priya ... actually Dana", "never mind" and ", no," do not trip. Over good outputs with
+  the final guard: 0 false trips in 320 synthetic (C1 runs, tuning, x3, stacked, format) and 1 in 39 judged-good real
+  C4 outputs per arm, 1/359 overall (0.28%). Found and fixed on the way: "three sixty" written "Jewel360" (digits
+  inside a word), and "Bottle POS" written "bottlepos.com" (a plural fold).
+- **C2: PROVEN** (Sonnet, v4). No-rule arm vs rule arm, k=3, inputs where the base does the opposite: applied 0/12 vs
+  12/12 (drop "honestly" 0/6 vs 6/6, contractions 0/6 vs 6/6), +100 points, 0 meaning changes; probes "I like it" and
+  "what kind of car" kept 6/6.
+- **C3: PROVEN** (Sonnet, v4, learned style saved and on). "git status", "cd into the server folder", "npm run build
+  dash dash watch" from iTerm2 and Terminal: 0 added capitals, 0 trailing periods, 0 word changes, learned style
+  applied 0/3. An unknown app's prompt equals the no-app prompt (golden).
+- **C4: PROVEN** (private replay of the 40 most recent real records with heard text, Sonnet, cold, scores only, no
+  text kept). v3 vs v4 with fictional rules (drop "honestly", drop "literally", contractions): meaning kept by the
+  normalizer 38/40 vs 38/40, after the enum judge (1 call, 4 flagged) 39/40 vs 39/40, and the one change was refused by
+  the guard in both; fillers left 1 of 11 vs 1 of 11; 0 dashes both; guard trips 2 vs 2 (1 false each); learned style
+  applied 40/40 in the v4 arm. Backtracks: 2 records hold a marker word and both arms kept it, so the proxy is
+  inconclusive, not a regression. No terminal record was among the 40.
+- **C5: PROVEN** (relative). Same run, warm, v4 vs v3: Haiku p50 3,326 vs 2,992 ms (+11.2%), p90 4,396 vs 4,261
+  (+3.2%); Sonnet p50 3,024 vs 2,949 (+2.5%), p90 4,460 vs 3,997 (+11.6%). Stacked arm (Haiku, v4 + 1,033-character
+  instructions + the largest learned style, 767 characters): p50 3,147 vs 2,794 (+12.6%), p90 3,646 vs 3,520 (+3.6%),
+  backtracks 11/11. C4 cold, Sonnet: v4 p50 4,346 vs v3 4,713. The absolute Haiku bar is measured after install.
+- **C6: PROVEN** (route and golden tests). Every new route is 401 without the token; an old client body works; a skip
+  path sends no `polishOutcome`; a port of the 0.5.343 helper and `choose` logs a guarded answer as
+  `fillers_only:failed` or `skipped:failed`, never applied; all four switches off, and Haiku outside a terminal, give the
+  6.90.0 prompt byte for byte.
+
+**Known issue (pre-existing, not changed here):** Haiku starts about 1 output in 3 in lowercase, on v3 and v4 alike
+(12 of 50 v3 and 16 of 50 v4 outputs in C1 run 1). The 45-case scorer does not see case; follow-up: score sentence
+capitals in the eval, then decide a fix, which would change behaviour for every Haiku user.
+
 ## 6.90.0 - Mac recordings tell voices apart: unnamed Voice 1, Voice 2, renamed as text only
 
 Miles, 2026-10-23 09:35: "Voice 1/2 + rename", split out of 6.87.0 at 10:06. Every saved Mac recording was 100% `Ext`:

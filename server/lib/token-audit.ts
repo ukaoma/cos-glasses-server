@@ -36,6 +36,15 @@ export interface TokenAuditEntry extends TokenAuditKeyFields {
   usageKind?: 'provider_final' | 'estimated'
   /** 6.85.0, dictation polish only: whether the user's polish instructions were in the prompt, and their hash. */
   polishInstructions?: { on: boolean; hash: string }
+  /** 6.91.0, dictation polish only: whether the learned style was in the prompt, and its hash. */
+  learnedStyle?: { on: boolean; hash: string }
+  /** 6.91.0, dictation polish only: the register code (literal or default). Never the app name. */
+  polishRegister?: string
+  /** 6.91.0, dictation polish only: the prompt that ran (v3 or v4). */
+  polishPrompt?: string
+  /** 6.91.0, dictation polish only: what became of the model's answer (polished, unchanged, guarded) and the guard kind. */
+  polishOutcome?: string
+  polishGuard?: string
 }
 
 /**
@@ -68,6 +77,15 @@ export function buildTokenAuditRecord(entry: TokenAuditEntry, now: Date = new Da
       custom_instructions: entry.polishInstructions.on,
       ...(entry.polishInstructions.hash ? { instructions_hash: entry.polishInstructions.hash } : {}),
     } : {}),
+    // 6.91.0: codes and a hash only, set only by the dictation polish caller.
+    ...(entry.learnedStyle ? {
+      learned_style: entry.learnedStyle.on,
+      ...(entry.learnedStyle.hash ? { learned_style_hash: entry.learnedStyle.hash } : {}),
+    } : {}),
+    ...(entry.polishRegister ? { polish_register: entry.polishRegister } : {}),
+    ...(entry.polishPrompt ? { polish_prompt: entry.polishPrompt } : {}),
+    ...(entry.polishOutcome ? { polish_outcome: entry.polishOutcome } : {}),
+    ...(entry.polishGuard ? { polish_guard: entry.polishGuard } : {}),
   }
 }
 

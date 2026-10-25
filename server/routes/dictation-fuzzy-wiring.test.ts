@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { applyFuzzyCorrections } from '../lib/fuzzy-correct.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const routeSrc = () => readFileSync(resolve(here, 'prompt-drafts.ts'), 'utf8')
+// 6.91.0: the outbound pipeline moved out of the route into lib/dictation-polish-pipeline.ts.
+const routeSrc = () => readFileSync(resolve(here, '../lib/dictation-polish-pipeline.ts'), 'utf8')
 
 // Miles's 344 report: phone Moonshine dictation renders Ilona and Ukaoma wrong. The exact
 // correction map only fixes hand-authored misspellings, so a novel miss sails through.
@@ -16,13 +17,13 @@ const routeSrc = () => readFileSync(resolve(here, 'prompt-drafts.ts'), 'utf8')
 describe('fuzzy corrections reach the dictation finalize path (6.27.4)', () => {
   it('is wired into cleanOutboundDictation, not just the transcribe route', () => {
     const src = routeSrc()
-    expect(src).toMatch(/import \{ applyFuzzyCorrections \} from '\.\.\/lib\/fuzzy-correct\.js'/)
+    expect(src).toMatch(/import \{ applyFuzzyCorrections \} from '\.\/fuzzy-correct\.js'/)
     // Inside cleanOutboundDictation, and BEFORE the autoclean LLM call, so the model sees
     // corrected proper nouns instead of being asked to guess at them.
     // 6.79.2: the body moved to polishOutboundDictation (cleanOutboundDictation wraps it to settle a prewarm).
-    expect(src).toMatch(/async function polishOutboundDictation[\s\S]{0,1400}applyFuzzyCorrections\(cleaned, fuzzyTargets\)/)
-    // 6.79.1 and 6.79.2: the window grew for the filler pass, the budget checks and the warm path between them.
-    expect(src).toMatch(/applyFuzzyCorrections\(cleaned, fuzzyTargets\)[\s\S]{0,2600}autoCleanDictation\(/)
+    // 6.91.0: the deterministic passes are prepareOutboundDictation, which polishOutboundDictation runs first.
+    expect(src).toMatch(/export function prepareOutboundDictation[\s\S]{0,1400}applyFuzzyCorrections\(cleaned, fuzzyTargets\)/)
+    expect(src).toMatch(/async function polishOutboundDictation\([\s\S]{0,200}const cleaned = prepareOutboundDictation\(text, opts\.bucket\)[\s\S]{0,3200}autoCleanDictation\(/)
   })
 
   it('uses the same target construction as the proven call site', () => {

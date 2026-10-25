@@ -24,6 +24,8 @@ const tests = ['server/lib/dictation-polish-instructions.test.ts', 'server/lib/d
 const I = 'server/lib/dictation-polish-instructions.ts', C = 'server/lib/dictation-clean.ts', P = 'server/lib/dictation-prewarm.ts'
 const PD = 'server/routes/prompt-drafts.ts', R = 'server/routes/dictation-polish-settings.ts', T = 'server/lib/token-audit.ts'
 const H = 'server/routes/health.ts'
+// 6.91.0: the outbound polish pipeline moved out of routes/prompt-drafts.ts.
+const PL = 'server/lib/dictation-polish-pipeline.ts', O = 'server/lib/dictation-polish-options.ts'
 const mutations = [
   // Sanitizer and bounds.
   ['cap-is-1000', I, '  if (value.length > CUSTOM_INSTRUCTIONS_MAX_CHARS) {', '  if (value.length > CUSTOM_INSTRUCTIONS_MAX_CHARS + 1) {'],
@@ -47,22 +49,22 @@ const mutations = [
   ['damaged-file-reads-off', I, '      value = { customInstructions: clean.value, updatedAt:', "      value = { customInstructions: String(parsed?.customInstructions ?? clean.value), updatedAt:"],
   // Prompt assembly.
   ['block-in-prompt', C, '    ...userPreferencesBlock(customInstructions),\n', ''],
-  ['block-after-rules', C, "    ...dictationPolishRules(version),\n    '',\n    ...userPreferencesBlock(customInstructions),\n", "    ...userPreferencesBlock(customInstructions),\n    ...dictationPolishRules(version),\n    '',\n"],
+  ['block-after-rules', C, "    ...dictationPolishRules(version),\n    '',\n    ...registerBlock(version, extras.register),\n    ...userPreferencesBlock(customInstructions),\n", "    ...userPreferencesBlock(customInstructions),\n    ...dictationPolishRules(version),\n    '',\n    ...registerBlock(version, extras.register),\n"],
   ['block-sanitizes', C, "  const clean = sanitizeCustomInstructions(customInstructions ?? '')\n  if (!clean.ok || !clean.value) return []", "  const clean = { ok: true as const, value: customInstructions ?? '' }\n  if (!clean.value) return []"],
   ['block-intro', C, "    ...USER_PREFERENCES_INTRO,\n    '<user-style-preferences>',", "    '<user-style-preferences>',"],
   ['block-precedence-after', C, "    '</user-style-preferences>',\n    USER_PREFERENCES_PRECEDENCE,\n", "    '</user-style-preferences>',\n"],
   ['intro-names-invariants', C, 'never drop or alter a link, path, email, number or name the speaker said', 'never drop a link'],
-  ['cold-call-sends-them', C, "buildDictationPolishPrompt(text, terms, version, opts.customInstructions ?? '')", 'buildDictationPolishPrompt(text, terms, version)'],
-  ['warm-call-sends-them', P, "buildDictationPolishPrompt(text, terms, entry.version, opts.customInstructions ?? '')", 'buildDictationPolishPrompt(text, terms, entry.version)'],
+  ['cold-call-sends-them', C, "buildDictationPolishPrompt(text, terms, version, opts.customInstructions ?? '', {", "buildDictationPolishPrompt(text, terms, version, '', {"],
+  ['warm-call-sends-them', P, "messageVersion(entry.version, opts.promptVersion), opts.customInstructions ?? ''", "messageVersion(entry.version, opts.promptVersion), ''"],
   // The dictation path.
-  ['meetings-excluded', PD, "  return bucket === 'meeting' ? '' : readCustomInstructions().customInstructions", '  return readCustomInstructions().customInstructions'],
-  ['route-cold-wired', PD, '{ model, signal: opts.signal, customInstructions })', '{ model, signal: opts.signal })'],
-  ['route-warm-wired', PD, '{ signal: opts.signal, customInstructions })', '{ signal: opts.signal })'],
-  ['answer-says-sent', PD, '  const used: PolishInstructionsUse = customInstructions ? { customInstructions: true, instructionsHash } : {}', '  const used: PolishInstructionsUse = {}'],
-  ['failed-still-says-sent', PD, "polishSkipped: 'failed', ...(prewarm ? { prewarm } : {}), ...used }", "polishSkipped: 'failed', ...(prewarm ? { prewarm } : {}) }"],
-  ['finalize-answer-field', PD, '    ...(customInstructions ? { customInstructions, instructionsHash } : {}),\n  })', '  })'],
+  ['meetings-excluded', PL, "  return bucket === 'meeting' ? '' : readCustomInstructions().customInstructions", '  return readCustomInstructions().customInstructions'],
+  ['route-cold-wired', PL, '{ model, signal: opts.signal, ...promptExtras })', "{ model, signal: opts.signal, ...promptExtras, customInstructions: '' })"],
+  ['route-warm-wired', PL, '{ signal: opts.signal, ...promptExtras })', "{ signal: opts.signal, ...promptExtras, customInstructions: '' })"],
+  ['answer-says-sent', PL, '    ...(customInstructions ? { customInstructions: true, instructionsHash } : {}),\n    ...(style.lines', '    ...(style.lines'],
+  ['failed-still-says-sent', PL, "polishSkipped: 'failed', ...(prewarm ? { prewarm } : {}), ...used }", "polishSkipped: 'failed', ...(prewarm ? { prewarm } : {}) }"],
+  ['finalize-answer-field', PD, '    ...(customInstructions ? { customInstructions, instructionsHash } : {}),\n    ...polishFields(result),', '    ...polishFields(result),'],
   ['prompt-draft-answer-field', PD, '    // 6.85.0, additive.\n    ...(customInstructions ? { customInstructions, instructionsHash } : {}),\n', ''],
-  ['audit-wired', PD, '      polishInstructions: { on: Boolean(customInstructions), hash: instructionsHash },\n', ''],
+  ['audit-wired', PL, '      polishInstructions: { on: Boolean(customInstructions), hash: instructionsHash },\n', ''],
   ['audit-row-flag', T, '      custom_instructions: entry.polishInstructions.on,', '      custom_instructions: true,'],
   ['audit-row-hash', T, '...(entry.polishInstructions.hash ? { instructions_hash: entry.polishInstructions.hash } : {}),', ''],
   // Routes and capability.
@@ -71,10 +73,10 @@ const mutations = [
   ['delete-clears', R, "    res.json(view(writeCustomInstructions('')))", '    res.json(view(readCustomInstructions()))'],
   ['view-enabled', R, '    enabled: stored.customInstructions.length > 0,', '    enabled: true,'],
   ['rules-of-version-in-use', R, "    rules: dictationPolishRules(version).join('\\n'),", "    rules: dictationPolishRules('v3').join('\\n'),"],
-  ['rules-says-rolled-back', R, '    rolledBack: version !== DEFAULT_DICTATION_POLISH_PROMPT,', '    rolledBack: false,'],
+  ['rules-says-rolled-back', R, "    rolledBack: choice.source !== 'default',", '    rolledBack: false,'],
   ['capability-shape', R, '  return { protocol: CUSTOM_INSTRUCTIONS_PROTOCOL, maxChars: CUSTOM_INSTRUCTIONS_MAX_CHARS }', '  return { protocol: CUSTOM_INSTRUCTIONS_PROTOCOL }'],
-  ['capability-on-health', H, "customInstructions: customInstructionsCapability() },\n      // 6.67.0", "},\n      // 6.67.0"],
-  ['capability-on-models', H, "customInstructions: customInstructionsCapability() },\n      durableQueryJobs", "},\n      durableQueryJobs"],
+  ['capability-on-health', H, "customInstructions: customInstructionsCapability(),\n        learnedStyle: learnedStyleCapability(), polishOptions: polishOptionsCapability(),\n      },\n      // 6.67.0", "\n        learnedStyle: learnedStyleCapability(), polishOptions: polishOptionsCapability(),\n      },\n      // 6.67.0"],
+  ['capability-on-models', H, "customInstructions: customInstructionsCapability(),\n        learnedStyle: learnedStyleCapability(), polishOptions: polishOptionsCapability(),\n      },\n      durableQueryJobs", "\n        learnedStyle: learnedStyleCapability(), polishOptions: polishOptionsCapability(),\n      },\n      durableQueryJobs"],
   ['router-mounted', 'server/index.ts', "app.use('/api', dictationPolishSettingsRouter)\n", ''],
 ]
 

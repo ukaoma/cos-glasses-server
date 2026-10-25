@@ -9,7 +9,7 @@ vi.mock('./provider-binary.js', () => ({ resolveProviderBinary: mocks.binary }))
 vi.mock('./provider-process-lifecycle.js', () => ({ terminateProviderProcess: mocks.terminate }))
 import {
   _resetPrewarmsForTest, discardPolishPrewarm, killAllPrewarmsSync, livePrewarmCount, prewarmEnabled, PREWARM_MAX, PREWARM_TTL_MS,
-  PrewarmUnavailableError, runWarmPolish, startPolishPrewarm, takePolishPrewarm,
+  PrewarmUnavailableError, runWarmPolish, startPolishPrewarm, takePolishPrewarm, messageVersion,
 } from './dictation-prewarm.js'
 import { buildDictationPolishPrompt } from './dictation-clean.js'
 
@@ -82,8 +82,8 @@ describe('6.79.2 polish prewarm', () => {
   it('sends exactly one message, closes stdin at once, answers, and removes its workspace', async () => {
     const { token } = startPolishPrewarm('sonnet')
     const entry = takePolishPrewarm(token, 'sonnet')!
-    // 6.83.1: the warm process gets the default prompt, now v3.
-    const prompt = buildDictationPolishPrompt('order five actually six', ['Quilt'], 'v3')
+    // 6.83.1: the warm process gets the default prompt; 6.91.0: now v4.
+    const prompt = buildDictationPolishPrompt('order five actually six', ['Quilt'], 'v4')
     const out = await runWarmPolish(entry, 'order five actually six', ['Quilt'])
     expect(out).toBe(`Cleaned: ${prompt.length}`)
     const child = children[0]
@@ -253,7 +253,31 @@ describe('6.85.0 polish instructions on the warm call', () => {
     const entry = takePolishPrewarm(token, 'haiku')!
     await runWarmPolish(entry, 'order five actually six', ['Quilt'], { customInstructions: 'Use Oxford commas.' })
     const sent = JSON.parse(children[0].written.trim())
+    // 6.91.0 option C: a Haiku process is started for v3.
     expect(sent.message.content).toBe(buildDictationPolishPrompt('order five actually six', ['Quilt'], 'v3', 'Use Oxford commas.'))
     expect(JSON.stringify(children[0].args)).not.toContain('Oxford')
+  })
+
+  it('6.91.0: the register and learned style ride in the one message too, never in the spawn arguments; warm equals cold', async () => {
+    const style = '- Drop "honestly" where the speaker used it as filler.'
+    const { token } = startPolishPrewarm('sonnet')
+    await runWarmPolish(takePolishPrewarm(token, 'sonnet')!, 'honestly ship it', ['Quilt'], { customInstructions: 'Use Oxford commas.', learnedStyle: style, register: 'default' })
+    const sent = JSON.parse(children[0].written.trim())
+    // The same builder the cold path calls, with the same arguments: warm and cold send one prompt.
+    expect(sent.message.content).toBe(buildDictationPolishPrompt('honestly ship it', ['Quilt'], 'v4', 'Use Oxford commas.', { learnedStyle: style, register: 'default' }))
+    expect(sent.message.content).toContain('<learned-style>')
+    expect(JSON.stringify(children[0].args)).not.toContain('honestly')
+    const second = startPolishPrewarm('sonnet')
+    await runWarmPolish(takePolishPrewarm(second.token, 'sonnet')!, 'git status', [], { register: 'literal' })
+    expect(JSON.parse(children[1].written.trim()).message.content).toBe(buildDictationPolishPrompt('git status', [], 'v4', '', { register: 'literal' }))
+    // The system prompt is fixed at spawn and is the same for both: nothing per-call is in it.
+    expect(children[1].args).toEqual(children[0].args)
+  })
+
+  it('6.91.0: a message may use another version only when the system prompts match (meeting lines take v3 on a v4 process)', () => {
+    expect(messageVersion('v4', 'v3')).toBe('v3')
+    expect(messageVersion('v3', 'v4')).toBe('v4')
+    expect(messageVersion('v4', 'v1')).toBe('v4')
+    expect(messageVersion('v4', undefined)).toBe('v4')
   })
 })

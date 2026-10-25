@@ -813,8 +813,9 @@ built-in polish rules, which keep precedence.
   characters is 413 `instructions_too_long`); `""` or `DELETE` turns it off.
   Stored in `<data>/dictation-polish-instructions.json` (0600).
 - `GET /api/dictation/polish/rules` shows the built-in rules in use
-  (`version` v3, or v2 under `COS_DICTATION_POLISH_PROMPT=v2`, `rolledBack`)
-  and the block the instructions go into.
+  (`version` v4 since 6.91.0, or an older one when rolled back, `rolledBack`),
+  the block the instructions go into and (6.91.0) the learned-style, literal
+  and closing blocks exactly as the model sees them.
 - They apply to Mac dictation and G2 messages (`/api/dictation/finalize`
   surface `message`) and prompt drafts, never to meeting lines. When the model
   was given them, the finalize and prompt-draft answers add
@@ -823,6 +824,49 @@ built-in polish rules, which keep precedence.
   `instructions_hash`.
 - Clients detect it with `capabilities.dictationCleanup.customInstructions`
   (`{protocol: 1, maxChars: 1000}`) on `/api/health` and `/api/models`.
+
+### Prompt v4, the literal register, Your style and the meaning guard (6.91.0)
+
+- **Prompt v4** is the default on **Sonnet** for Mac dictation, G2 messages
+  and prompt drafts: v3 plus self-corrections first ("ship it on the third,
+  actually the fourth" keeps the fourth; "or rather", "never mind"), restarts
+  and repetition, grammar fixed in the speaker's own words (no synonyms, no
+  added formality), and no em dash or arrow the speaker did not say. Haiku,
+  Luna and any other model keep v3 (the 6.90.0 prompt byte for byte), because
+  v4 failed its canary on Haiku (CHANGELOG 6.91.0). Meeting lines stay on v3.
+  `COS_DICTATION_POLISH_PROMPT` (v1 to v4, or `COS_DICTATION_PROMPT_VERSION=3`)
+  sets every model; `PUT /api/dictation/polish/options {"promptVersion": "v3"}`
+  ("Previous polish" in COS Control) puts every model on v3, unless the
+  environment names a version. Answers say `polishPrompt: "v3" | "v4"`.
+- **Registers.** The target app Control sends as `context.app` picks one:
+  `literal` for terminals (iTerm2, Terminal, Ghostty, Warp, WezTerm, Alacritty,
+  kitty), `default` for everything else (Claude, Cursor and Codex included).
+  A literal polish keeps every word (fillers and stutters aside), adds no
+  capital, no closing period and no learned style; if the model changed a word
+  anyway, the input goes out (`guard: "literal"`). The app name is never logged.
+  `COS_DICTATION_REGISTERS=0` makes every app default. Registers and the learned
+  style apply only to Sonnet with v4, the pair their canaries ran on.
+- **Your style** (`GET/PUT/DELETE /api/dictation/learned-style`): rules COS
+  Control learns from your edits, sent as codes (`drop_phrase` with a phrase
+  from a closed allowlist, or `contractions` use/avoid), rendered by the server
+  from its own templates, at most 20 rules and 1,500 characters (413 above),
+  `baseHash` for a conditional save (409), and `enabled: false` to stop them
+  applying while keeping them. Stored in `<data>/dictation-learned-style.json`
+  (0600). Never for meeting lines or a terminal. `COS_DICTATION_LEARNED_STYLE=0`
+  stops it applying everywhere. The finalize answer says `learnedStyle: true`
+  and `learnedStyleHash` (8 hex), never the rules.
+- **Meaning guard.** After the model, for messages and prompt drafts: if a
+  negation, number, weekday or month, or name the speaker kept is missing from
+  the answer (or a negation or number appears that was never said), the
+  pre-polish text goes out with `polishOutcome: "guarded"`, `guard: "<kind>"`
+  and `polishSkipped: "failed"`. A self-correction may drop what it replaced.
+  The log line carries counts only. `COS_DICTATION_MEANING_GUARD=0` turns it off.
+- **Finalize answers** add, all optional: `polishOutcome` (`polished`,
+  `unchanged` or `guarded`, about the model step), `guard`, `polishRegister`,
+  `learnedStyle` and `learnedStyleHash`. Skip paths send no `polishOutcome`.
+- Clients detect it with `capabilities.dictationCleanup.learnedStyle`
+  (`{protocol: 1, maxChars: 1500, maxRules: 20, enabled}`) and
+  `capabilities.dictationCleanup.polishOptions` (`{protocol: 1}`).
 
 ### Parakeet (FluidAudio CoreML, offline)
 

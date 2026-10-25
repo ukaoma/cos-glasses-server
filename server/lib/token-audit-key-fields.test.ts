@@ -42,3 +42,19 @@ describe('6.85.0 dictation polish instructions on the audit row', () => {
     expect(buildTokenAuditRecord({ ...base, polishInstructions: { on: false, hash: '' } }, at)).toEqual({ ...plain, custom_instructions: false })
   })
 })
+
+describe('6.91.0 learned style, register and outcome on the audit row', () => {
+  const at = new Date('2026-10-25T05:00:00.000Z')
+  const base = { source: 'g2-dictation-autoclean', model: 'sonnet', inputChars: 40, outputChars: 38, durationMs: 900, caller: 'dictation_autoclean_message' }
+  it('codes and a hash only, after every older key, and only when the polish caller sets them', () => {
+    const plain = buildTokenAuditRecord(base, at)
+    for (const key of ['learned_style', 'learned_style_hash', 'polish_register', 'polish_outcome', 'polish_guard']) expect(Object.keys(plain)).not.toContain(key)
+    const row = buildTokenAuditRecord({
+      ...base, polishInstructions: { on: false, hash: '' }, learnedStyle: { on: true, hash: '0a1b2c3d' },
+      polishRegister: 'literal', polishOutcome: 'guarded', polishGuard: 'negation',
+    }, at)
+    expect(row).toEqual({ ...plain, custom_instructions: false, learned_style: true, learned_style_hash: '0a1b2c3d', polish_register: 'literal', polish_outcome: 'guarded', polish_guard: 'negation' })
+    expect(Object.keys(row).slice(-6)).toEqual(['custom_instructions', 'learned_style', 'learned_style_hash', 'polish_register', 'polish_outcome', 'polish_guard'])
+    expect(buildTokenAuditRecord({ ...base, learnedStyle: { on: false, hash: '' } }, at)).toEqual({ ...plain, learned_style: false })
+  })
+})

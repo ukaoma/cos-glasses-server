@@ -33,28 +33,16 @@ import {
   isCaptionCreditHallucination,
   isBrandUrlOnly,
   clearSessionHallucinationState,
-  applyNegativeRules,
 } from '../lib/hallucination-filter.js'
-import { applyCorrections } from '../lib/whisper-local.js'
-import { applyFuzzyCorrections } from '../lib/fuzzy-correct.js'
-import { getAllSpeakerNames } from '../lib/speaker-embeddings.js'
 import { transcribeWhisperPreview } from '../lib/whisper-preview.js'
 import { currentDictationPlan, runParakeetDictation } from '../lib/dictation-stt.js'
 import { dictationSlotForMode, legacyDictationKey, type DictationPlan } from '../lib/stt-settings.js'
-import { autoCleanDictation, AUTOCLEAN_MAX_CHARS } from '../lib/dictation-clean.js'
-import { fillerPassEnabled, stripDisfluencies } from '../lib/dictation-fillers.js'
-import { polishBudgetExhausted, recordPolishCall, type PolishBucket } from '../lib/dictation-polish-budget.js'
-import { polishNeed, skipCleanEnabled } from '../lib/dictation-polish-need.js'
-import {
-  discardPolishPrewarm, isPrewarmModel, prewarmEnabled, PrewarmUnavailableError, runWarmPolish,
-  startPolishPrewarm, takePolishPrewarm,
-} from '../lib/dictation-prewarm.js'
-import { getVocabulary, getWhisperCorrections } from '../lib/profile.js'
-import { correctionOnlyForms } from '../lib/glossary-learn.js'
-import { polishLinkProblem, renderSpokenPaths, spokenPathsEnabled } from '../lib/dictation-format.js'
-import { customInstructionsHash, readCustomInstructions } from '../lib/dictation-polish-instructions.js'
-import { createBreaker } from '../lib/claude-circuit.js'
-import { logTokenAudit } from '../lib/token-audit.js'
+import { AUTOCLEAN_MAX_CHARS } from '../lib/dictation-clean.js'
+import { polishBudgetExhausted } from '../lib/dictation-polish-budget.js'
+import { discardPolishPrewarm, isPrewarmModel, prewarmEnabled, startPolishPrewarm } from '../lib/dictation-prewarm.js'
+import { applyCorrections } from '../lib/whisper-local.js'
+import { registerFromContext } from '../lib/dictation-register.js'
+import { autoCleanBreakers, cleanOutboundDictation, type AutoCleanRequest, type PolishResult } from '../lib/dictation-polish-pipeline.js'
 import { emitDisplay } from '../lib/display-bus.js'
 import {
   acquireMaintenanceWork,
@@ -85,19 +73,8 @@ function speculativeHqWarmEnabled(): boolean {
   return !['0', 'false', 'off'].includes((process.env.COS_HQ_SPECULATIVE_WARM ?? '1').toLowerCase())
 }
 
-const autoCleanBreakers = {
-  sonnet: createBreaker({ label: 'dictation-autoclean-sonnet' }),
-  'luna-5.6-fast': createBreaker({ label: 'dictation-autoclean-luna' }),
-  haiku: createBreaker({ label: 'dictation-autoclean-haiku' }),
-}
-const autoCleanDefaultEnabled = () => ['1', 'true', 'on'].includes((process.env.COS_DICTATION_AUTOCLEAN ?? '').toLowerCase())
-
-/** 6.79.1, additive on finalize answers: why the polish model did not run (or did not finish). */
-export type PolishSkipped = 'disabled' | 'too_long' | 'breaker_open' | 'daily_cap' | 'failed' | 'clean' | 'link_guard'
-/** 6.79.2, additive when finalize was given a prewarmToken: what became of that warm process. */
-export type PrewarmOutcome = 'used' | 'missed' | 'discarded'
-
-interface AutoCleanRequest { enabled?: boolean; model?: DictationCleanModel }
+// 6.91.0: the outbound polish pipeline (breakers, gates, model, guards) lives in
+// lib/dictation-polish-pipeline.ts, so the offline evals call it rather than a copy.
 function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
   const rawEnabled = req.body?.autoclean ?? req.query?.autoclean
   const enabled = rawEnabled === undefined ? undefined : ['1', 'true', 'on'].includes(String(rawEnabled).toLowerCase())
@@ -105,113 +82,6 @@ function routeAutoClean(req: { body?: any; query?: any }): AutoCleanRequest {
   // An unknown model must never silently select another provider.
   if (rawModel && !isDictationCleanModel(rawModel)) return { enabled: false }
   return { enabled, model: isDictationCleanModel(rawModel) ? rawModel : undefined }
-}
-
-async function cleanOutboundDictation(
-  text: string,
-  opts: AutoCleanRequest & { bucket: PolishBucket; signal?: AbortSignal; prewarmToken?: string },
-): Promise<PolishResult> {
-  const result = await polishOutboundDictation(text, opts)
-  // A warm process the model call did not take must not sit until its TTL.
-  if (opts.prewarmToken && !result.prewarm) {
-    return { ...result, prewarm: discardPolishPrewarm(opts.prewarmToken) ? 'discarded' : 'missed' }
-  }
-  return result
-}
-
-/** 6.85.0, additive and present only when the model was given the user's polish instructions. */
-interface PolishInstructionsUse { customInstructions?: true; instructionsHash?: string }
-type PolishResult = { text: string; polishSkipped?: PolishSkipped; prewarm?: PrewarmOutcome } & PolishInstructionsUse
-
-/**
- * 6.85.0: the user's polish instructions apply to dictation (Mac dictation and G2 messages, which
- * are surface "message", and prompt drafts). Meeting lines are a faithful record, so they stay on
- * the built-in rules alone, the same way they skip the filler pass and spoken paths.
- */
-export function polishInstructionsFor(bucket: PolishBucket): string {
-  return bucket === 'meeting' ? '' : readCustomInstructions().customInstructions
-}
-
-async function polishOutboundDictation(
-  text: string,
-  opts: AutoCleanRequest & { bucket: PolishBucket; signal?: AbortSignal; prewarmToken?: string },
-): Promise<PolishResult> {
-  let cleaned = applyNegativeRules(applyCorrections(text)).replace(/\s+/g, ' ').trim() || text
-  // applyCorrections above is an EXACT string map, so it only fixes misspellings someone
-  // already hand-authored. A novel miss ("Rileyy" for Riley, "Exampel" for Example) sails
-  // through it. The Levenshtein pass is what catches those, and until now it had exactly
-  // ONE call site — transcribe-audio.ts:252, the server-transcription route — so phone
-  // Moonshine dictation, which arrives here as text, never got it. Same construction and
-  // same non-fatal posture as that site, deliberately: targets are speaker names plus
-  // vocabulary, and a throw must never cost the user their transcript.
-  //
-  // Runs BEFORE the autoclean LLM so the model sees corrected proper nouns rather than
-  // being asked to guess at them, and it still helps on every path where autoclean is
-  // off, over the char cap, or breaker-open.
-  try {
-    const fuzzyTargets = [...getAllSpeakerNames(), ...getVocabulary()]
-    const { text: corrected, replacements } = applyFuzzyCorrections(cleaned, fuzzyTargets)
-    if (replacements > 0) {
-      console.log(`[prompt-draft] Fuzzy corrected ${replacements} word(s)`)
-      cleaned = corrected
-    }
-  } catch (fuzzyErr: any) {
-    console.warn(`[prompt-draft] Fuzzy correction failed (non-fatal): ${fuzzyErr?.message ?? fuzzyErr}`)
-  }
-  // 6.79.1: um/uh never survive a skipped polish. Meeting lines stay faithful.
-  if (opts.bucket !== 'meeting' && fillerPassEnabled()) cleaned = stripDisfluencies(cleaned)
-  // 6.83.1: "forward slash pricing," is "/pricing," even when the model is skipped. One word
-  // at a phrase end only; slugs of several words are the model's (dictation-format.ts).
-  if (opts.bucket !== 'meeting' && spokenPathsEnabled()) cleaned = renderSpokenPaths(cleaned)
-  if (!(opts.enabled ?? autoCleanDefaultEnabled())) return { text: cleaned, polishSkipped: 'disabled' }
-  const model = opts.model ?? 'haiku'
-  const autoCleanBreaker = autoCleanBreakers[model]
-  if (cleaned.length > AUTOCLEAN_MAX_CHARS) return { text: cleaned, polishSkipped: 'too_long' }
-  // 6.79.2, off by default: nothing for the model to fix (see dictation-polish-need.ts).
-  if (skipCleanEnabled() && polishNeed(cleaned) === null) return { text: cleaned, polishSkipped: 'clean' }
-  if (autoCleanBreaker.isOpen()) return { text: cleaned, polishSkipped: 'breaker_open' }
-  if (polishBudgetExhausted(opts.bucket)) return { text: cleaned, polishSkipped: 'daily_cap' }
-  const startedAt = Date.now()
-  recordPolishCall(opts.bucket)
-  // Read once per polish: the warm and cold paths see the same instructions.
-  const customInstructions = polishInstructionsFor(opts.bucket)
-  const instructionsHash = customInstructionsHash(customInstructions)
-  const used: PolishInstructionsUse = customInstructions ? { customInstructions: true, instructionsHash } : {}
-  // 6.79.2: a warm process started at key press answers without the CLI's start-up cost.
-  const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null
-  let prewarm: PrewarmOutcome | undefined = opts.prewarmToken ? 'missed' : undefined
-  try {
-    let polished: string | null = null
-    if (warmEntry) {
-      try {
-        polished = (await runWarmPolish(warmEntry, cleaned, getVocabulary(), { signal: opts.signal, customInstructions })).trim()
-        prewarm = 'used'
-      } catch (err) {
-        // Nothing was sent: the cold path below is the same call, not a second one.
-        if (!(err instanceof PrewarmUnavailableError)) throw err
-      }
-    }
-    if (polished === null) polished = (await autoCleanDictation(cleaned, getVocabulary(), { model, signal: opts.signal, customInstructions })).trim()
-    autoCleanBreaker.recordSuccess()
-    logTokenAudit({
-      source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: polished.length,
-      durationMs: Date.now() - startedAt, caller: `dictation_autoclean_${opts.bucket}`,
-      polishInstructions: { on: Boolean(customInstructions), hash: instructionsHash },
-    })
-    // 6.83.1: the model never invents a link and never drops one the dictionary wrote. Its
-    // answer is refused (the pre-polish text goes out, polishSkipped "link_guard") rather than
-    // pasting a URL nobody said. The call still counted: it ran.
-    const linkProblem = polished ? polishLinkProblem(cleaned, polished, correctionOnlyForms(getWhisperCorrections()), getVocabulary()) : null
-    if (linkProblem) {
-      console.warn(`[prompt-draft] auto-clean answer refused: ${linkProblem}`)
-      return { text: cleaned, ...(prewarm ? { prewarm } : {}), polishSkipped: 'link_guard', ...used }
-    }
-    return { text: polished || cleaned, ...(prewarm ? { prewarm } : {}), ...used }
-  } catch (err: any) {
-    autoCleanBreaker.recordFailure()
-    console.warn(`[prompt-draft] auto-clean failed (glossary-only): ${err?.message ?? err}`)
-    return { text: cleaned, polishSkipped: 'failed', ...(prewarm ? { prewarm } : {}), ...used }
-  }
 }
 
 /** Finalize already-transcribed phone text through the same glossary + optional
@@ -238,13 +108,17 @@ promptDraftsRouter.post('/dictation/finalize', async (req, res) => {
 
   const abort = new AbortController()
   res.on('close', () => { if (!res.writableEnded) abort.abort() })
-  const { text: finalText, polishSkipped, prewarm, customInstructions, instructionsHash } = await cleanOutboundDictation(text, {
+  const result = await cleanOutboundDictation(text, {
     enabled: true,
     model,
     bucket: surface,
     signal: abort.signal,
     prewarmToken: rawToken,
+    // 6.91.0: the target app (Control has sent it since 0.5.325) picks the register. Read here,
+    // never logged or echoed; anything that is not a short one-line name is the default register.
+    register: registerFromContext(req.body?.context),
   })
+  const { text: finalText, polishSkipped, prewarm, customInstructions, instructionsHash } = result
   // 6.79.1: polishSkipped only when the model did not polish, so a polished answer is unchanged.
   // 6.79.2: prewarm only when the request carried a prewarmToken.
   res.json({
@@ -252,8 +126,26 @@ promptDraftsRouter.post('/dictation/finalize', async (req, res) => {
     ...(polishSkipped ? { polishSkipped } : {}), ...(prewarm ? { prewarm } : {}),
     // 6.85.0: only when the model was given the user's polish instructions (a hash, never the text).
     ...(customInstructions ? { customInstructions, instructionsHash } : {}),
+    ...polishFields(result),
   })
 })
+
+/**
+ * 6.91.0, additive on both finalize answers, every field optional (old clients ignore them):
+ * polishOutcome (only when the model answered: polished, unchanged or guarded, about the model
+ * step), guard (the guard that refused it), and whenever the model was called: polishPrompt (v3
+ * or v4), learnedStyle (true with its hash, or false), and polishRegister on the one pair it was
+ * canaried on (Sonnet with v4). Never the model's own text.
+ */
+function polishFields(result: PolishResult) {
+  return {
+    ...(result.polishOutcome ? { polishOutcome: result.polishOutcome } : {}),
+    ...(result.guard ? { guard: result.guard } : {}),
+    ...(result.polishRegister ? { polishRegister: result.polishRegister } : {}),
+    ...(result.polishPrompt ? { polishPrompt: result.polishPrompt } : {}),
+    ...(result.learnedStyle ? { learnedStyle: true, learnedStyleHash: result.learnedStyleHash } : result.learnedStyleOff ? { learnedStyle: false } : {}),
+  }
+}
 
 const PREWARM_TOKEN = /^[0-9a-f-]{36}$/
 
@@ -539,7 +431,8 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
     await markPromptDraftError(draftId, 'No speech detected')
     throw new NoSpeechDetectedError()
   }
-  const { text: finalText, polishSkipped, customInstructions, instructionsHash } = await cleanOutboundDictation(text, { ...autoClean, bucket: 'prompt_draft', signal })
+  const polish = await cleanOutboundDictation(text, { ...autoClean, bucket: 'prompt_draft', signal })
+  const { text: finalText, polishSkipped, customInstructions, instructionsHash } = polish
   const finalized = await markPromptDraftFinalized(draftId, finalText)
   const qualities = transcriptRecords.map(record => record.actualQuality)
   const actualQuality: 'hq' | 'fast' | 'cloud' = qualities.includes('cloud')
@@ -571,6 +464,8 @@ async function finalizeDraft(draftId: string, mode: 'hq' | 'fast', autoClean: Au
     ...(polishSkipped ? { polishSkipped } : {}),
     // 6.85.0, additive.
     ...(customInstructions ? { customInstructions, instructionsHash } : {}),
+    // 6.91.0, additive.
+    ...polishFields(polish),
   }
 }
 
