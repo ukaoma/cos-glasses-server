@@ -142,6 +142,7 @@ dictationPolishSettingsRouter.get('/dictation/polish/rules', (req, res) => {
     promptByModel,
     rulesByPrompt: Object.fromEntries([...new Set(Object.values(promptByModel))].map(v => [v, dictationPolishRules(v).join('\n')])),
     stylePairs,
+    registersEnabled: registersEnabled(),
     // The other blocks exactly as the model sees them. The learned style is the saved rules rendered
     // from the server's templates ('' when none apply); the literal block goes to terminals only
     // (none with COS_DICTATION_REGISTERS=0); the closing line is v4's.
@@ -165,8 +166,10 @@ function styleView(stored: StoredLearnedStyle) {
     text: stored.text,
     hash: stored.hash,
     updatedAt: stored.updatedAt,
-    // Control reads the app-to-register map here, so it never keeps a second table.
+    // Control reads the app-to-register map here, so it never keeps a second table. The literal
+    // register is opt-in (COS_DICTATION_REGISTERS=1); `registersEnabled` says whether it applies.
     registers: publishedRegisters(),
+    registersEnabled: registersEnabled(),
     kinds: LEARNED_STYLE_KINDS,
     registerValues: LEARNED_STYLE_REGISTERS,
     allowlist: LEARNED_STYLE_ALLOWLIST,

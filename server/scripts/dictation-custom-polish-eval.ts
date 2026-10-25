@@ -275,6 +275,8 @@ async function main() {
   const suite = arg('suite', '')
   if (suite === 'style' || suite === 'literal') {
     if (!process.env.COS_DATA_DIR) throw new Error('Set COS_DATA_DIR to a scratch directory')
+    // The literal register is opt-in (6.91.0): the literal suite turns it on for itself.
+    if (suite === 'literal') process.env.COS_DICTATION_REGISTERS = '1'
     const maxCalls = Number(arg('max-calls', '40'))
     process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE = String(maxCalls)
     await styleSuites(suite, arg('model', 'sonnet'), Number(arg('k', '3')), maxCalls, arg('out', `dictation-${suite}-eval.json`))

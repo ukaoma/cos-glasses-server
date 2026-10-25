@@ -136,6 +136,20 @@ describe('6.91.0 through the real pipeline', () => {
     expect(terminal).toBe(buildDictationPolishPrompt('git status', [], 'v3'))
   })
 
+  it('golden (opt-in literal): Sonnet in a terminal with registers at the default gets the no-app prompt; with COS_DICTATION_REGISTERS=1 the literal prompt', async () => {
+    const { registerFromContext } = await import('./dictation-register.js')
+    const [noApp, terminal] = await promptsFor([
+      { text: 'ask Lena to review the pull request', register: registerFromContext(undefined) },
+      { text: 'ask Lena to review the pull request', register: registerFromContext({ app: 'iTerm2' }) },
+    ])
+    expect(terminal).toBe(noApp)
+    expect(terminal).toBe(buildDictationPolishPrompt('ask Lena to review the pull request', [], 'v4'))
+    vi.stubEnv('COS_DICTATION_REGISTERS', '1')
+    const [literal] = await promptsFor([{ text: 'ask Lena to review the pull request', register: registerFromContext({ app: 'iTerm2' }) }])
+    expect(literal).toBe(buildDictationPolishPrompt('ask Lena to review the pull request', [], 'v4', '', { register: 'literal' }))
+    expect(literal).not.toBe(noApp)
+  })
+
   it('golden: an unknown app gives exactly the prompt no app gives', async () => {
     const { registerFromContext } = await import('./dictation-register.js')
     const [none, unknown, claude] = await promptsFor([

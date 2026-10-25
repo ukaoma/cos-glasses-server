@@ -108,7 +108,9 @@ describe('6.85.0 GET /api/dictation/polish/rules', () => {
       maxChars: 1000,
       learnedStyleBlock: '',
       learnedStyleFrame: [LEARNED_STYLE_INTRO, '<learned-style>', LEARNED_STYLE_PLACEHOLDER, '</learned-style>', LEARNED_STYLE_LIMITS].join('\n'),
-      registerBlocks: { literal: LITERAL_REGISTER_RULES.join('\n') },
+      // The literal register is opt-in (COS_DICTATION_REGISTERS=1): off, the model sees no register block.
+      registerBlocks: {},
+      registersEnabled: false,
       closingRules: { default: V4_CLOSING_RULE, literal: V4_LITERAL_CLOSING_RULE },
       // 6.91.0 option C: v4 on Sonnet only, and the style and register where they were canaried.
       promptByModel: { haiku: 'v3', sonnet: 'v4', 'luna-5.6-fast': 'v3' },
@@ -119,7 +121,9 @@ describe('6.85.0 GET /api/dictation/polish/rules', () => {
     // One model's view: Haiku gets v3, no learned style and no register.
     const haiku = (await call('GET', '/dictation/polish/rules?model=haiku')).json
     expect(haiku).toMatchObject({ model: 'haiku', version: 'v3', rolledBack: false, rules: dictationPolishRules('v3').join('\n'), registerBlocks: {}, closingRules: {}, learnedStyleBlock: '' })
-    expect((await call('GET', '/dictation/polish/rules?model=sonnet')).json).toMatchObject({ model: 'sonnet', version: 'v4', registerBlocks: { literal: expect.any(String) } })
+    expect((await call('GET', '/dictation/polish/rules?model=sonnet')).json).toMatchObject({ model: 'sonnet', version: 'v4', registerBlocks: {}, registersEnabled: false })
+    vi.stubEnv('COS_DICTATION_REGISTERS', '1')
+    expect((await call('GET', '/dictation/polish/rules?model=sonnet')).json).toMatchObject({ registerBlocks: { literal: LITERAL_REGISTER_RULES.join('\n') }, registersEnabled: true })
     // 6.91.0: the saved rules show exactly as the prompt carries them.
     await call('PUT', '/dictation/learned-style', { rules: [{ id: 'drop-honestly', kind: 'drop_phrase', register: 'all', param: 'honestly', count: 2, lastSeen: null }] })
     const withStyle = (await call('GET', '/dictation/polish/rules')).json
@@ -136,8 +140,10 @@ describe('6.85.0 GET /api/dictation/polish/rules', () => {
     // v3 on every model: no pair the style and register were canaried on.
     expect((await call('GET', '/dictation/polish/rules')).json).toMatchObject({ version: 'v3', rolledBack: true, registerBlocks: {}, closingRules: {}, stylePairs: [], promptByModel: { haiku: 'v3', sonnet: 'v3', 'luna-5.6-fast': 'v3' } })
     vi.stubEnv('COS_DICTATION_POLISH_PROMPT', '')
+    vi.stubEnv('COS_DICTATION_REGISTERS', '1')
+    expect((await call('GET', '/dictation/polish/rules')).json.registerBlocks).toEqual({ literal: LITERAL_REGISTER_RULES.join('\n') })
     vi.stubEnv('COS_DICTATION_REGISTERS', '0')
-    expect((await call('GET', '/dictation/polish/rules')).json.registerBlocks).toEqual({})
+    expect((await call('GET', '/dictation/polish/rules')).json).toMatchObject({ registerBlocks: {}, registersEnabled: false })
   })
 
   it('never includes the saved instructions', async () => {
@@ -172,8 +178,12 @@ describe('6.91.0 /api/dictation/learned-style', () => {
       enabled: true, rules: [], text: '', hash: '', updatedAt: null, serverEnabled: true,
       kinds: ['drop_phrase', 'contractions'], allowlist: [...LEARNED_STYLE_ALLOWLIST], maxChars: 1500, maxRules: 20,
       registers: { iTerm2: 'literal', Terminal: 'literal', Ghostty: 'literal', Warp: 'literal', WezTerm: 'literal', Alacritty: 'literal', kitty: 'literal' },
+      // The map is published either way; the literal register is opt-in.
+      registersEnabled: false,
     })
     expect(json.registers).not.toHaveProperty('Claude')
+    vi.stubEnv('COS_DICTATION_REGISTERS', '1')
+    expect((await call('GET', '/dictation/learned-style')).json).toMatchObject({ registersEnabled: true, registers: { iTerm2: 'literal' } })
   })
 
   it('PUT saves codes, the server renders text and hash, GET reads it back, DELETE resets', async () => {

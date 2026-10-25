@@ -945,14 +945,16 @@ describe('public prompt draft recovery contract', () => {
   }
   const HONESTLY = { id: 'drop-honestly', kind: 'drop_phrase', register: 'all', param: 'honestly', count: 2, lastSeen: null }
 
-  it('6.91.0: a terminal is literal; the model gets the register, the answer gets the input casing and no added period', async () => {
+  it('6.91.0: with COS_DICTATION_REGISTERS=1 a terminal is literal; the model gets the register, the answer gets the input casing and no added period', async () => {
+    process.env.COS_DICTATION_REGISTERS = '1'
     autoCleanDictation.mockImplementation(async () => 'Git status.')
     const result = await finalizeWith({ text: 'git status', context: { app: 'iTerm2' } })
     expect(autoCleanDictation).toHaveBeenLastCalledWith('git status', expect.any(Array), expect.objectContaining({ register: 'literal', learnedStyle: '' }))
     expect(result.json).toEqual({ text: 'git status', surface: 'message', polished: false, polishOutcome: 'unchanged', polishRegister: 'literal', polishPrompt: 'v4', learnedStyle: false })
   })
 
-  it('6.91.0: a terminal answer that changed a word is refused: the input goes out, guard literal, polishSkipped failed', async () => {
+  it('6.91.0: with registers on, a terminal answer that changed a word is refused: the input goes out, guard literal, polishSkipped failed', async () => {
+    process.env.COS_DICTATION_REGISTERS = '1'
     autoCleanDictation.mockImplementation(async () => 'npm run build --watch')
     const result = await finalizeWith({ text: 'npm run build dash dash watch', context: { app: 'Terminal' } })
     expect(result.json).toEqual({
@@ -968,7 +970,10 @@ describe('public prompt draft recovery contract', () => {
       expect(result.json.polishRegister, JSON.stringify(context)).toBe('default')
       expect(autoCleanDictation).toHaveBeenLastCalledWith('Send it to Dana.', expect.any(Array), expect.objectContaining({ register: 'default' }))
     }
-    // COS_DICTATION_REGISTERS=0: a terminal is default too.
+    // Registers are opt-in: by default a terminal is default too, with the same model call as no app.
+    const terminal = await finalizeWith({ text: 'Send it to Dana.', context: { app: 'iTerm2' } })
+    expect(terminal.json.polishRegister).toBe('default')
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('Send it to Dana.', expect.any(Array), expect.objectContaining({ register: 'default' }))
     process.env.COS_DICTATION_REGISTERS = '0'
     expect((await finalizeWith({ text: 'git status', context: { app: 'iTerm2' } })).json.polishRegister).toBe('default')
   })
@@ -1003,6 +1008,8 @@ describe('public prompt draft recovery contract', () => {
   })
 
   it('6.91.0: meeting lines are untouched: prompt v3, no register, no learned style, no meaning guard', async () => {
+    // Registers on, so "no register" is about meetings, not the opt-in default.
+    process.env.COS_DICTATION_REGISTERS = '1'
     await withStyle([HONESTLY], async () => {
       autoCleanDictation.mockImplementation(async () => 'Merge to main.')
       const meeting = await finalizeWith({ text: 'never merge to main', surface: 'meeting', context: { app: 'iTerm2' } })
@@ -1033,11 +1040,15 @@ describe('public prompt draft recovery contract', () => {
       })
       expect(logTokenAudit).toHaveBeenLastCalledWith(expect.objectContaining({ learnedStyle: { on: true, hash } }))
       expect(JSON.stringify(logTokenAudit.mock.calls)).not.toContain('honestly')
-      // Never on a terminal.
+      // A terminal gets the style by default (registers are opt-in), and never with the literal register.
       autoCleanDictation.mockImplementation(async (text: string) => text)
+      const terminalDefault = await finalizeWith({ text: 'git status', context: { app: 'kitty' } })
+      expect(terminalDefault.json).toMatchObject({ polishRegister: 'default', learnedStyle: true })
+      process.env.COS_DICTATION_REGISTERS = '1'
       const literal = await finalizeWith({ text: 'git status', context: { app: 'kitty' } })
       expect(autoCleanDictation).toHaveBeenLastCalledWith('git status', expect.any(Array), expect.objectContaining({ learnedStyle: '' }))
       expect(literal.json.learnedStyle).toBe(false)
+      delete process.env.COS_DICTATION_REGISTERS
       // The server switch turns it off for real.
       process.env.COS_DICTATION_LEARNED_STYLE = '0'
       await finalizeWith({ text: 'honestly send it' })
@@ -1114,9 +1125,13 @@ describe('public prompt draft recovery contract', () => {
         expect(result.json, String(model)).toMatchObject({ polishPrompt: 'v3', learnedStyle: false })
         expect(result.json.polishRegister, String(model)).toBeUndefined()
       }
-      // Sonnet takes v4, the register and the style.
+      // Sonnet takes v4 and the style; a terminal is default unless registers are on.
+      const sonnetTerminal = await finalizeWith({ text: 'honestly git status', context: { app: 'iTerm2' } })
+      expect(sonnetTerminal.json).toMatchObject({ polishPrompt: 'v4', polishRegister: 'default', learnedStyle: true })
+      process.env.COS_DICTATION_REGISTERS = '1'
       const sonnet = await finalizeWith({ text: 'honestly git status', context: { app: 'iTerm2' } })
       expect(sonnet.json).toMatchObject({ polishPrompt: 'v4', polishRegister: 'literal', learnedStyle: false })
+      delete process.env.COS_DICTATION_REGISTERS
       const chat = await finalizeWith({ text: 'honestly send it' })
       expect(chat.json).toMatchObject({ polishPrompt: 'v4', polishRegister: 'default', learnedStyle: true })
     })
@@ -1125,6 +1140,8 @@ describe('public prompt draft recovery contract', () => {
   it('6.91.0 option C: the environment and Previous polish override every model; Sonnet on v3 gets no style or register', async () => {
     autoCleanDictation.mockImplementation(async (text: string) => text)
     process.env.COS_DICTATION_POLISH_PROMPT = 'v4'
+    // Registers on, so "no register" below is about the model and prompt pair, not the opt-in default.
+    process.env.COS_DICTATION_REGISTERS = '1'
     expect((await finalizeWith({ text: 'Send it.', autocleanModel: 'haiku' })).json.polishPrompt).toBe('v4')
     // Haiku on v4 is not a canaried pair: still no register.
     expect((await finalizeWith({ text: 'git status', autocleanModel: 'haiku', context: { app: 'iTerm2' } })).json.polishRegister).toBeUndefined()

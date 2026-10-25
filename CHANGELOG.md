@@ -1,4 +1,4 @@
-## 6.91.0 - Dictation that learns your voice: prompt v4 on Sonnet, the literal register, Your style, the meaning guard
+## 6.91.0 - Dictation that learns your voice: prompt v4 on Sonnet, Your style, the meaning guard, an opt-in literal register
 
 Miles, 2026-10-24 22:45: extend AI polish into "a Grammarly but further for voice dictation", remove ungrammatical spoken
 segments, and steer polish toward his own voice from the corrections he makes. Plan r2 (23:30) and option C (00:40,
@@ -12,11 +12,14 @@ after canary C1 split by model). Server half only; COS Control 0.5.344 builds th
   (golden), because v4 failed canary C1 on Haiku (below). `COS_DICTATION_POLISH_PROMPT` (v1 to v4, or the alias
   `COS_DICTATION_PROMPT_VERSION=3`) and the new "Previous polish" option override every model. Meeting lines stay on v3.
 - **Registers** (`server/lib/dictation-register.ts`), from the `context.app` Control has sent since 0.5.325 and the
-  server never read: `literal` for terminals (iTerm2, Terminal, Ghostty, Warp, WezTerm, Alacritty, kitty), `default`
-  for everything else (Claude, Cursor and Codex included). Literal keeps every word but fillers and stutters, adds no
-  capital and no closing period, and a deterministic word check sends the input instead when the model changed a word
-  (`guard: "literal"`). One table, published to Control by `GET /api/dictation/learned-style` (`registers`). The app
-  name is never logged. `COS_DICTATION_REGISTERS=0` makes every app default.
+  server never read. **The literal register is opt-in** (`COS_DICTATION_REGISTERS=1`), because terminal targets are
+  mostly AI prompts in prose, not shell commands, and literal would stop resolving their corrections, fixing their
+  grammar and capitalizing them. By default every app, terminals included, gets the `default` register (on Sonnet:
+  v4 plus the learned style). Opted in, `literal` covers terminals (iTerm2, Terminal, Ghostty, Warp, WezTerm,
+  Alacritty, kitty): it keeps every word but fillers and stutters, adds no capital and no closing period, and a
+  deterministic word check sends the input instead when the model changed a word (`guard: "literal"`). One table,
+  published to Control by `GET /api/dictation/learned-style` (`registers`) whether or not it applies; that route and
+  `/rules` say `registersEnabled`. The app name is never logged.
 - **Your style, the learned style** (`server/lib/dictation-learned-style.ts`, `GET/PUT/DELETE
   /api/dictation/learned-style`). Codes only on the wire: `drop_phrase` with a phrase from a closed allowlist (no
   negation, scope word, number, built-in filler or word that often carries meaning) or `contractions` use/avoid,
@@ -56,8 +59,9 @@ after canary C1 split by model). Server half only; COS Control 0.5.344 builds th
   unchanged in order, so the evals call it instead of a copy. The three polish mutation gates were retargeted.
 - **Switches** `COS_DICTATION_PROMPT_VERSION`, `COS_DICTATION_LEARNED_STYLE`, `COS_DICTATION_MEANING_GUARD` and
   `COS_DICTATION_REGISTERS` are forwarded by the managed runtime contract. With `COS_DICTATION_POLISH_PROMPT=v3`,
-  `COS_DICTATION_REGISTERS=0`, `COS_DICTATION_LEARNED_STYLE=0` and `COS_DICTATION_MEANING_GUARD=0` the prompt is
-  byte-identical to 6.90.0 (golden).
+  `COS_DICTATION_REGISTERS` unset or 0, `COS_DICTATION_LEARNED_STYLE=0` and `COS_DICTATION_MEANING_GUARD=0` the
+  prompt is byte-identical to 6.90.0 (golden). Golden too: Sonnet with a terminal app and registers at the default
+  gets exactly the no-app prompt; with `COS_DICTATION_REGISTERS=1` it gets the literal prompt.
 
 **Canaries** (445 `claude -p` calls of a 450 cap, subscription CLI, warm path where noted; synthetic text only except C4):
 - **C1 Sonnet: PROVEN.** 50-case set (45 plus "never mind" b11 and four preserve cases: plain "actually", "never mind
@@ -80,7 +84,7 @@ after canary C1 split by model). Server half only; COS Control 0.5.344 builds th
 - **C2: PROVEN** (Sonnet, v4). No-rule arm vs rule arm, k=3, inputs where the base does the opposite: applied 0/12 vs
   12/12 (drop "honestly" 0/6 vs 6/6, contractions 0/6 vs 6/6), +100 points, 0 meaning changes; probes "I like it" and
   "what kind of car" kept 6/6.
-- **C3: PROVEN** (Sonnet, v4, learned style saved and on). "git status", "cd into the server folder", "npm run build
+- **C3: PROVEN** (Sonnet, v4, registers opted in, learned style saved and on). "git status", "cd into the server folder", "npm run build
   dash dash watch" from iTerm2 and Terminal: 0 added capitals, 0 trailing periods, 0 word changes, learned style
   applied 0/3. An unknown app's prompt equals the no-app prompt (golden).
 - **C4: PROVEN** (private replay of the 40 most recent real records with heard text, Sonnet, cold, scores only, no

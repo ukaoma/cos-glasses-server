@@ -16,8 +16,13 @@ import { readSwitch } from './env-switch.js'
  *
  * ONE table, matched on the exact name (case and surrounding space ignored), published to Control
  * by GET /api/dictation/learned-style (`registers`) so Control never keeps a second copy. The app
- * name is read here, never logged, audited or echoed. COS_DICTATION_REGISTERS=0 makes every app
- * default, so the prompt carries no register block at all.
+ * name is read here, never logged, audited or echoed.
+ *
+ * The literal register is OPT-IN (COS_DICTATION_REGISTERS=1): terminal targets are mostly AI
+ * prompts in prose (Claude Code, Codex), not shell commands, and literal would stop resolving
+ * corrections, fixing grammar and capitalizing them. Off (the default), a terminal gets the
+ * default register, and the prompt carries no register block at all. The map is published either
+ * way; `registersEnabled` says whether it is applied.
  */
 export type DictationRegister = 'literal' | 'default'
 export const DICTATION_REGISTERS: readonly DictationRegister[] = ['literal', 'default']
@@ -26,8 +31,9 @@ export const LITERAL_APPS: readonly string[] = ['iTerm2', 'Terminal', 'Ghostty',
 
 const LITERAL = new Set(LITERAL_APPS.map(app => app.toLowerCase()))
 
+/** Off unless COS_DICTATION_REGISTERS is 1, true or on. */
 export function registersEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return readSwitch(env.COS_DICTATION_REGISTERS, true)
+  return readSwitch(env.COS_DICTATION_REGISTERS, false)
 }
 
 /**
@@ -45,9 +51,9 @@ export function registerFromContext(context: unknown, env: NodeJS.ProcessEnv = p
   return registerForApp((context as { app?: unknown } | null | undefined)?.app, env)
 }
 
-/** What GET /api/dictation/learned-style publishes: every app that is not default. Empty when switched off. */
-export function publishedRegisters(env: NodeJS.ProcessEnv = process.env): Record<string, 'literal'> {
-  return registersEnabled(env) ? Object.fromEntries(LITERAL_APPS.map(app => [app, 'literal' as const])) : {}
+/** What GET /api/dictation/learned-style publishes: every app that is not default, applied or not. */
+export function publishedRegisters(): Record<string, 'literal'> {
+  return Object.fromEntries(LITERAL_APPS.map(app => [app, 'literal' as const]))
 }
 
 /** Verbal tics the literal check lets the model drop (one word or two). Never a negation or number. */

@@ -838,13 +838,15 @@ built-in polish rules, which keep precedence.
   sets every model; `PUT /api/dictation/polish/options {"promptVersion": "v3"}`
   ("Previous polish" in COS Control) puts every model on v3, unless the
   environment names a version. Answers say `polishPrompt: "v3" | "v4"`.
-- **Registers.** The target app Control sends as `context.app` picks one:
-  `literal` for terminals (iTerm2, Terminal, Ghostty, Warp, WezTerm, Alacritty,
-  kitty), `default` for everything else (Claude, Cursor and Codex included).
-  A literal polish keeps every word (fillers and stutters aside), adds no
-  capital, no closing period and no learned style; if the model changed a word
-  anyway, the input goes out (`guard: "literal"`). The app name is never logged.
-  `COS_DICTATION_REGISTERS=0` makes every app default. Registers and the learned
+- **Registers (literal is opt-in).** By default every app, terminals
+  included, gets the `default` register, because terminal targets are mostly AI
+  prompts in prose. With `COS_DICTATION_REGISTERS=1`, the target app Control
+  sends as `context.app` picks `literal` for terminals (iTerm2, Terminal,
+  Ghostty, Warp, WezTerm, Alacritty, kitty): a literal polish keeps every word
+  (fillers and stutters aside), adds no capital, no closing period and no
+  learned style, and if the model changed a word anyway the input goes out
+  (`guard: "literal"`). The map is published either way, with
+  `registersEnabled`. The app name is never logged. Registers and the learned
   style apply only to Sonnet with v4, the pair their canaries ran on.
 - **Your style** (`GET/PUT/DELETE /api/dictation/learned-style`): rules COS
   Control learns from your edits, sent as codes (`drop_phrase` with a phrase
