@@ -1074,16 +1074,60 @@ describe('public prompt draft recovery contract', () => {
     })
   })
 
-  it('6.91.0: prompt drafts (G2) get the guard and the new fields too', async () => {
+  it('6.91.0: prompt drafts (G2) get the new fields; the guard only on Sonnet v4, so G2 Haiku answers are 6.90.0\'s', async () => {
     transcribeAudioBuffer.mockResolvedValue({ text: 'never merge to main', backend: 'fast-local-test', mode: 'fast', requestedMode: 'fast', actualQuality: 'fast', elapsedMs: 20, audioBytes: 3200 })
     autoCleanDictation.mockImplementation(async () => 'Merge to main.')
-    const started = await httpRequest('POST', '/api/prompt-drafts/start')
-    await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
-    await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
-    const result = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast&autoclean=1&autocleanModel=haiku`)
-    // Haiku: prompt v3, no register, but the meaning guard applies to every model.
-    expect(result.json).toMatchObject({ text: 'never merge to main', polishSkipped: 'failed', polishOutcome: 'guarded', guard: 'negation', polishPrompt: 'v3', learnedStyle: false })
-    expect(result.json.polishRegister).toBeUndefined()
+    const draft = async (model: string) => {
+      const started = await httpRequest('POST', '/api/prompt-drafts/start')
+      emitDisplay.mockClear()
+      await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
+      await vi.waitFor(() => expect(emitDisplay).toHaveBeenCalled())
+      return httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast&autoclean=1&autocleanModel=${model}`)
+    }
+    // Haiku (the G2 default): prompt v3, no register and no meaning guard: the model's answer goes out.
+    const haiku = await draft('haiku')
+    expect(haiku.json).toMatchObject({ text: 'Merge to main.', polishOutcome: 'polished', polishPrompt: 'v3', learnedStyle: false })
+    expect(haiku.json.guard).toBeUndefined()
+    expect(haiku.json.polishSkipped).toBeUndefined()
+    expect(haiku.json.polishRegister).toBeUndefined()
+    // Sonnet: prompt v4, and the guard refuses the lost negation.
+    const sonnet = await draft('sonnet')
+    expect(sonnet.json).toMatchObject({ text: 'never merge to main', polishSkipped: 'failed', polishOutcome: 'guarded', guard: 'negation', polishPrompt: 'v4', polishRegister: 'default' })
+  })
+
+  it('6.91.0 S1: the meaning guard runs only where v4 runs on Sonnet; every other pair gets 6.90.0\'s answer', async () => {
+    // The v3 answer drops a number: never guarded off the canaried pair.
+    autoCleanDictation.mockImplementation(async () => 'Order cases for Lena.')
+    for (const model of ['haiku', 'luna-5.6-fast', undefined]) {
+      const result = await finalizeWith({ text: 'order 12 cases for Lena', autocleanModel: model })
+      expect(result.json, String(model)).toEqual({ text: 'Order cases for Lena.', surface: 'message', polished: true, polishOutcome: 'polished', polishPrompt: 'v3', learnedStyle: false })
+    }
+    // The same answer on Sonnet v4 IS guarded.
+    expect((await finalizeWith({ text: 'order 12 cases for Lena' })).json).toMatchObject({ text: 'order 12 cases for Lena', polishOutcome: 'guarded', guard: 'number', polishPrompt: 'v4' })
+    // Sonnet on v3 (the environment, or Previous polish) is not canaried either.
+    process.env.COS_DICTATION_POLISH_PROMPT = 'v3'
+    expect((await finalizeWith({ text: 'order 12 cases for Lena' })).json).toMatchObject({ text: 'Order cases for Lena.', polishOutcome: 'polished', polishPrompt: 'v3' })
+    delete process.env.COS_DICTATION_POLISH_PROMPT
+    const options = await import('../lib/dictation-polish-options.js')
+    options.writePolishOptions('v3')
+    try {
+      expect((await finalizeWith({ text: 'order 12 cases for Lena' })).json).toMatchObject({ text: 'Order cases for Lena.', polishOutcome: 'polished', polishPrompt: 'v3' })
+    } finally { options.writePolishOptions('default') }
+    // Haiku forced onto v4 is still not the canaried pair: no guard.
+    process.env.COS_DICTATION_POLISH_PROMPT = 'v4'
+    expect((await finalizeWith({ text: 'order 12 cases for Lena', autocleanModel: 'haiku' })).json).toMatchObject({ text: 'Order cases for Lena.', polishOutcome: 'polished', polishPrompt: 'v4' })
+    // The link guard still runs on every pair, as in 6.83.1.
+    delete process.env.COS_DICTATION_POLISH_PROMPT
+    autoCleanDictation.mockImplementation(async () => 'Open example.com/pricing now.')
+    expect((await finalizeWith({ text: 'open the pricing page now', autocleanModel: 'haiku' })).json).toMatchObject({ text: 'open the pricing page now', polishSkipped: 'link_guard', polishOutcome: 'guarded', guard: 'link' })
+  })
+
+  it('6.91.0 S6: an empty model answer is a failed polish, never "unchanged"', async () => {
+    autoCleanDictation.mockImplementation(async () => '   ')
+    const result = await finalizeWith({ text: 'scratch that' })
+    expect(result.json).toMatchObject({ text: 'scratch that', polished: false, polishSkipped: 'failed' })
+    expect(result.json.polishOutcome).toBeUndefined()
+    expect(logTokenAudit).not.toHaveBeenCalledWith(expect.objectContaining({ polishOutcome: 'unchanged' }))
   })
 
   it('6.91.0 C6: an old client body works, and a skip path sends no polishOutcome', async () => {

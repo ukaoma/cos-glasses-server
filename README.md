@@ -790,8 +790,9 @@ VOICE) follow the same settings. Contract and measurements:
   comma follows it, a Titlecase token after a title or abbreviation (Mr. Ah,
   Dr. Er) and quoted mentions.
   `COS_DICTATION_FILLER_PASS=0` turns the pass off.
-- `COS_DICTATION_POLISH_PROMPT=v1` restores the 6.79.0 polish prompt (default
-  `v2`).
+- `COS_DICTATION_POLISH_PROMPT=v1` restores the 6.79.0 polish prompt. It takes
+  `v1` to `v4`; unset, the prompt is v4 on Sonnet and v3 on every other model
+  (6.91.0, below).
 - 6.79.2: `POST /api/dictation/polish/prewarm` `{model}` starts the polish
   process at key press and answers `{token, expiresMs}`. Pass the token as
   `prewarmToken` to `/api/dictation/finalize` and the polish skips the CLI's
@@ -837,7 +838,9 @@ built-in polish rules, which keep precedence.
   `COS_DICTATION_POLISH_PROMPT` (v1 to v4, or `COS_DICTATION_PROMPT_VERSION=3`)
   sets every model; `PUT /api/dictation/polish/options {"promptVersion": "v3"}`
   ("Previous polish" in COS Control) puts every model on v3, unless the
-  environment names a version. Answers say `polishPrompt: "v3" | "v4"`.
+  environment names a version; it is stored in
+  `<data>/dictation-polish-options.json` (0600), and `"default"` deletes the
+  file. Answers say `polishPrompt: "v3" | "v4"`.
 - **Registers (literal is opt-in).** By default every app, terminals
   included, gets the `default` register, because terminal targets are mostly AI
   prompts in prose. With `COS_DICTATION_REGISTERS=1`, the target app Control
@@ -846,26 +849,39 @@ built-in polish rules, which keep precedence.
   (fillers and stutters aside), adds no capital, no closing period and no
   learned style, and if the model changed a word anyway the input goes out
   (`guard: "literal"`). The map is published either way, with
-  `registersEnabled`. The app name is never logged. Registers and the learned
-  style apply only to Sonnet with v4, the pair their canaries ran on.
+  `registersEnabled`. The app name is never logged. Registers, the learned
+  style and the meaning guard apply only to Sonnet with v4, the pair their
+  canaries ran on.
 - **Your style** (`GET/PUT/DELETE /api/dictation/learned-style`): rules COS
   Control learns from your edits, sent as codes (`drop_phrase` with a phrase
   from a closed allowlist, or `contractions` use/avoid), rendered by the server
   from its own templates, at most 20 rules and 1,500 characters (413 above),
-  `baseHash` for a conditional save (409), and `enabled: false` to stop them
-  applying while keeping them. Stored in `<data>/dictation-learned-style.json`
-  (0600). Never for meeting lines or a terminal. `COS_DICTATION_LEARNED_STYLE=0`
-  stops it applying everywhere. The finalize answer says `learnedStyle: true`
-  and `learnedStyleHash` (8 hex), never the rules.
-- **Meaning guard.** After the model, for messages and prompt drafts: if a
-  negation, number, weekday or month, or name the speaker kept is missing from
-  the answer (or a negation or number appears that was never said), the
-  pre-polish text goes out with `polishOutcome: "guarded"`, `guard: "<kind>"`
-  and `polishSkipped: "failed"`. A self-correction may drop what it replaced.
-  The log line carries counts only. `COS_DICTATION_MEANING_GUARD=0` turns it off.
+  and `enabled: false` to stop them applying while keeping them. Answers carry
+  `hash` (8 hex of the rendered text) and `revision` (8 hex of the text and
+  the switch); a PUT with `baseRevision` is conditional (409
+  `base_revision_mismatch` when stale, so a stale save undoes neither newer
+  rules nor a newer Off). `DELETE` clears the rules and keeps the switch as it
+  was. Stored in `<data>/dictation-learned-style.json` (0600). Never for
+  meeting lines, and never for a terminal when `COS_DICTATION_REGISTERS=1`
+  makes it literal (by default a terminal gets it like any app).
+  `COS_DICTATION_LEARNED_STYLE=0` stops it applying everywhere. The finalize
+  answer says `learnedStyle: true` and `learnedStyleHash` (8 hex), never the
+  rules.
+- **Meaning guard.** After the model, for messages and prompt drafts, and only
+  where v4 runs on Sonnet (Haiku, Luna, any other model and prompt v3 get no
+  guard, so their answers are 6.90.0's): if a negation, number, weekday or
+  month, or name the speaker kept is missing from the answer (or a negation or
+  number appears that was never said), the pre-polish text goes out with
+  `polishOutcome: "guarded"`, `guard: "<kind>"` and `polishSkipped: "failed"`.
+  A self-correction may drop what it replaced. "2 million", "25th",
+  "dont", "half past ten" and a numbered list you asked for read as what you
+  said. The log line carries counts only. `COS_DICTATION_MEANING_GUARD=0` turns
+  it off.
 - **Finalize answers** add, all optional: `polishOutcome` (`polished`,
-  `unchanged` or `guarded`, about the model step), `guard`, `polishRegister`,
-  `learnedStyle` and `learnedStyleHash`. Skip paths send no `polishOutcome`.
+  `unchanged` or `guarded`, about the model step; an empty model answer is a
+  failed polish, never `unchanged`), `guard`, `polishPrompt` (`v3` or `v4`,
+  whenever the model ran), `polishRegister`, `learnedStyle` and
+  `learnedStyleHash`. Skip paths send no `polishOutcome`.
 - Clients detect it with `capabilities.dictationCleanup.learnedStyle`
   (`{protocol: 1, maxChars: 1500, maxRules: 20, enabled}`) and
   `capabilities.dictationCleanup.polishOptions` (`{protocol: 1}`).

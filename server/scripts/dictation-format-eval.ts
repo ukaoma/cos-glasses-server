@@ -30,7 +30,7 @@ import { CASES as REGRESSION, VOCABULARY, scoreCase, summarize, type RunRow } fr
 
 export interface FormatCase {
   id: string
-  category: 'slug' | 'multi_slug' | 'url' | 'email' | 'ordinary' | 'instruction' | 'dictionary'
+  category: 'slug' | 'multi_slug' | 'url' | 'email' | 'ordinary' | 'instruction' | 'dictionary' | 'list_time'
   input: string
   /** Every one must be present (exact, case-sensitive). A RegExp for case-insensitive checks. */
   must?: Array<string | RegExp>
@@ -92,6 +92,13 @@ export const CANARY: FormatCase[] = [
   { id: 'i04', category: 'instruction', input: 'the heading should read launch week, in quotes', must: [/["“]launch week[.,]?["”]/i], mustNot: [/in quotes/i], optional: ['in', 'quotes'] },
   // The dictionary entry Miles tried to teach (6.83.0 refused it).
   { id: 'd01', category: 'dictionary', input: 'we track demo, forward slash pricing, and the cart', dictionary: { 'forward slash pricing': '/pricing' }, must: ['/pricing', 'cart'], mustNot: [/forward slash/i, 'demo/pricing'], links: ['/pricing'] },
+  // 6.91.0 S9 (added, not yet run): lists and spoken times the prompt asks for, which the meaning
+  // guard must let through on Sonnet v4 (dictation-meaning-guard.test.ts pins the guard side).
+  { id: 'l01', category: 'list_time', input: 'numbered list draft the brief new line get approval new line ship it', must: [/^1[.)] /m, /^2[.)] /m, /^3[.)] /m], mustNot: [/numbered list/i, /new line/i], optional: ['numbered', 'list', 'new', 'line'] },
+  { id: 'l02', category: 'list_time', input: 'number one draft the brief number two get approval', must: [/^1[.)] /m, /^2[.)] /m], mustNot: [/number one/i, /number two/i], optional: ['number', 'one', 'two'] },
+  { id: 'l03', category: 'list_time', input: 'bullet points draft the brief new line get approval', must: [/^[-•*] /m], mustNot: [/bullet points/i, /new line/i], optional: ['bullet', 'points', 'new', 'line'] },
+  { id: 't01', category: 'list_time', input: 'meet Dana at half past ten in the lobby', must: [/10:30|half past ten/i, 'Dana', /lobby/i], optional: ['half', 'past', 'ten'] },
+  { id: 't02', category: 'list_time', input: 'call Marco at quarter to five', must: [/4:45|quarter to five/i, 'Marco'], optional: ['quarter', 'to', 'five'] },
 ]
 
 const test = (text: string, p: string | RegExp) => typeof p === 'string' ? text.includes(p) : p.test(text)

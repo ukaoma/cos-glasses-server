@@ -27,8 +27,8 @@ import { logTokenAudit } from './token-audit.js'
  *   dictionary (exact corrections and negative rules), the fuzzy name pass, the filler pass and
  *   spoken paths (not for meeting lines), the gates (disabled, too long, clean, breaker, daily
  *   cap), the model (warm when a prewarm token matches, else cold), then the guards: the link
- *   guard on every surface; for message and prompt_draft only, the literal register's word check
- *   and the meaning guard.
+ *   guard on every surface; for message and prompt_draft on the canaried pair only (Sonnet with
+ *   prompt v4), the literal register's word check and the meaning guard.
  *
  * Meeting lines are a faithful record and stay as 6.90.0 had them: prompt v3 (or older), no
  * register, no instructions, no learned style, no meaning guard.
@@ -165,10 +165,13 @@ export function prepareOutboundDictation(text: string, bucket: PolishBucket): st
 /**
  * 6.91.0: the guards after the model, for one answer. Pure apart from reading the dictionary.
  * `text` is what goes out: the answer (repaired for a literal target), or `cleaned` when a guard
- * refused it.
+ * refused it. The link guard runs on every answer, as in 6.83.1. The literal check and the meaning
+ * guard run only on the canaried pair (Sonnet with prompt v4, `canaried`), never on meeting lines:
+ * Haiku, Luna, any other model and prompt v3 (the environment or "Previous polish") get 6.90.0's
+ * answer, guard for guard.
  */
 export function guardPolishAnswer(
-  cleaned: string, polished: string, bucket: PolishBucket, register: DictationRegister,
+  cleaned: string, polished: string, bucket: PolishBucket, register: DictationRegister, canaried: boolean,
 ): { text: string; outcome: PolishOutcome; guard?: PolishGuard; polishSkipped?: PolishSkipped } {
   // 6.83.1: the model never invents a link and never drops one the dictionary wrote. Its
   // answer is refused (the pre-polish text goes out, polishSkipped "link_guard") rather than
@@ -179,7 +182,7 @@ export function guardPolishAnswer(
     return { text: cleaned, outcome: 'guarded', guard: 'link', polishSkipped: 'link_guard' }
   }
   let answer = polished || cleaned
-  if (bucket !== 'meeting') {
+  if (canaried && bucket !== 'meeting') {
     // 6.91.0: a terminal gets the speaker's words. Anything but fillers, stutters, punctuation and
     // case changed means the input goes out; otherwise the input's casing is put back and no
     // closing period is added (dictation-register.ts literalAnswer).
@@ -231,9 +234,9 @@ export async function polishOutboundDictation(
   const promptVersion = polishPromptVersionFor(opts.bucket, opts.promptVersion, model)
   const customInstructions = polishInstructionsFor(opts.bucket)
   const instructionsHash = customInstructionsHash(customInstructions)
-  // 6.91.0: the register and the learned style only where they were canaried (Sonnet with v4);
-  // every other pair gets neither, so its prompt is 6.90.0's. Meeting lines never reach v4
-  // (polishPromptVersionFor), so they never get either.
+  // 6.91.0: the register, the learned style and the meaning guard only where they were canaried
+  // (Sonnet with v4); every other pair gets none of them, so its prompt and its answer are 6.90.0's.
+  // Meeting lines never reach v4 (polishPromptVersionFor), so they never get any.
   const canaried = styleAndRegisterApply(model, promptVersion)
   const register: DictationRegister = canaried ? opts.register ?? 'default' : 'default'
   const style = canaried ? learnedStyleFor(opts.bucket, register) : { lines: '', hash: '' }
@@ -259,8 +262,12 @@ export async function polishOutboundDictation(
       }
     }
     if (polished === null) polished = (await autoCleanDictation(cleaned, getVocabulary(), { model, signal: opts.signal, ...promptExtras })).trim()
+    // An empty answer is a failed polish, as 6.90.0 reported it (both model paths already refuse
+    // one; this holds if either ever stops): the input goes out, polishSkipped "failed", and the
+    // breaker counts it. Never "unchanged".
+    if (!polished) throw new Error('Auto-clean returned empty text')
     autoCleanBreaker.recordSuccess()
-    const guarded = guardPolishAnswer(cleaned, polished, opts.bucket, register)
+    const guarded = guardPolishAnswer(cleaned, polished, opts.bucket, register, canaried)
     logTokenAudit({
       source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: polished.length,
       durationMs: Date.now() - startedAt, caller: `dictation_autoclean_${opts.bucket}`,

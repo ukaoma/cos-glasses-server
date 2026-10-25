@@ -75,7 +75,7 @@ describe('6.91.0 meaning guard: normalization classes do not trip', () => {
     ['spoken digits joined into a product name', 'pull the tablo numbers for jewel three sixty', 'Pull the Tableau numbers for Jewel360.'],
     ['digits inside a word on both sides', 'the Q4 plan for iTerm2', 'The Q4 plan for iTerm2.'],
     ['a name re-spelled to the dictionary', 'ask Preeya about the form', 'Ask Priya about the form.'],
-    ['a near re-spelling of a mis-heard name', 'ask Silus about the plan', 'Ask Silas about the plan.'],
+    ['a near re-spelling of a mis-heard name', 'ask Lenna about the plan', 'Ask Lena about the plan.'],
     ['a false start without guarded words', 'we should, the plan is to ship it', 'The plan is to ship it.'],
     ['fillers and stutters', 'um the the pricing page is is broken', 'The pricing page is broken.'],
     ['"may" the verb is not a date', 'we may ship it', 'We might ship it.'],
@@ -135,6 +135,9 @@ describe('6.91.0 meaning guard: language, switch, robustness', () => {
   it('a dictation that is not English skips the name check, never the others', () => {
     expect(looksEnglish('the plan is ready and we ship it on Friday')).toBe(true)
     expect(looksEnglish('der Plan ist fertig und wir liefern ihn am Freitag mit Marco aus')).toBe(false)
+    // A short command has few function words; it is assumed English, so its names are still checked.
+    expect(looksEnglish('ping Marco re pricing')).toBe(true)
+    expect(kind('ping Marco re pricing', 'Ping re pricing.')).toBe('name')
     expect(kind('der Plan ist fertig und wir liefern ihn am Freitag mit Marco aus', 'Der Plan ist fertig und wir liefern ihn am Freitag aus.')).toBeNull()
     expect(meaningGuardProblem('der Plan ist fertig und wir liefern 5 Kisten mit Marco heute aus', 'Der Plan ist fertig.')!.namesSkipped).toBe(true)
     expect(kind('der Plan ist fertig und wir liefern 5 Kisten mit Marco heute aus', 'Der Plan ist fertig.')).toBe('number')
@@ -151,5 +154,118 @@ describe('6.91.0 meaning guard: language, switch, robustness', () => {
       expect(() => meaningGuardProblem(a, b)).not.toThrow()
     }
     expect(meaningGuardProblem(undefined as any, 'x')).toBeNull()
+  })
+})
+
+describe('6.91.0 S2: number formats and apostrophe-less negations do not trip', () => {
+  it.each([
+    ['a digit and a scale word (2 million dollars)', 'we raised two million dollars', 'We raised $2 million.'],
+    ['twenty million as 20 million', 'revenue was twenty million', 'Revenue was 20 million.'],
+    ['one point five million as 1.5 million', 'about one point five million users', 'About 1.5 million users.'],
+    ['a scale word on its own still multiplies', 'about five hundred people', 'About 500 people.'],
+    ['two hundred thousand as 200,000', 'the budget is two hundred thousand', 'The budget is 200,000.'],
+    ['a compound ordinal (October 25th)', 'october twenty fifth', 'October 25th.'],
+    ['twenty first as 21st', 'the twenty first', 'The 21st.'],
+    ['March 31st', 'due march thirty first', 'Due March 31st.'],
+    ['a teen ordinal', 'the thirteenth of may', 'The 13th of May.'],
+    ['a tens ordinal', 'her fortieth birthday', 'Her 40th birthday.'],
+    ['an ordinal after a scale word', 'the one hundred and first visitor', 'The 101st visitor.'],
+    ['"cant" as can\'t', 'I cant make it', "I can't make it."],
+    ['"dont" as don\'t', 'we dont ship on Fridays', "We don't ship on Fridays."],
+    ['"isnt" as is not', 'the build isnt ready', 'The build is not ready.'],
+  ])('%s', (_label, input, output) => {
+    expect(meaningGuardProblem(input, output, [])).toBeNull()
+  })
+
+  it('still catches a changed or dropped value in those formats', () => {
+    expect(kind('we raised two million dollars', 'We raised $3 million.')).toBe('number')
+    expect(kind('revenue was twenty million', 'Revenue was 20.')).toBe('number')
+    expect(kind('october twenty fifth', 'October 24th.')).toBe('number')
+    expect(kind('the twenty first', 'The 20th.')).toBe('number')
+    // "2 million" is one number, not 2 and a million: dropping the scale is a changed number.
+    expect(meaningGuardProblem('we raised 2 million', 'We raised 2.')!.dropped.number).toBe(1)
+  })
+
+  it('every apostrophe-less form is the same NEG token as the written one', () => {
+    for (const [bare, written] of [['dont', "don't"], ['cant', "can't"], ['wont', "won't"], ['isnt', "isn't"], ['arent', "aren't"], ['doesnt', "doesn't"],
+      ['didnt', "didn't"], ['wasnt', "wasn't"], ['werent', "weren't"], ['shouldnt', "shouldn't"], ['wouldnt', "wouldn't"], ['couldnt', "couldn't"],
+      ['havent', "haven't"], ['hasnt', "hasn't"]]) {
+      expect(meaningGuardProblem(`we ${bare} go`, `We ${written} go.`), bare).toBeNull()
+      expect(kind(`we ${bare} go`, 'We go.'), bare).toBe('negation')
+    }
+  })
+})
+
+describe('6.91.0 S3: negation counts and bare markers', () => {
+  it('with no correction marker, negations are counted: losing one of two trips', () => {
+    expect(kind('I am not saying we should not ship', 'I am not saying we should ship.')).toBe('negation')
+    expect(meaningGuardProblem('I am not saying we should not ship', 'I am not saying we should ship.')!.dropped.negation).toBe(1)
+    expect(kind('we dont need the deck', 'We need the deck.')).toBe('negation')
+    // An added second negation trips too.
+    expect(meaningGuardProblem('I am not sure we ship', 'I am not sure we do not ship.')!.added.negation).toBe(1)
+  })
+
+  it('a stutter (the same negation twice in a row) counts once', () => {
+    expect(meaningGuardProblem('I dont dont know', "I don't know.")).toBeNull()
+    expect(meaningGuardProblem('no no no that is wrong', 'No, that is wrong.')).toBeNull()
+  })
+
+  it('with a correction marker, negations are compared as sets (a correction may drop a repeat)', () => {
+    expect(meaningGuardProblem("we can't, no wait, we can't do Friday", "We can't do Friday.")).toBeNull()
+    // A negation the speaker never said still trips with a marker in the dictation.
+    expect(meaningGuardProblem('ship it Tuesday, actually Wednesday', 'Do not ship it Wednesday.')!.added.negation).toBe(1)
+  })
+
+  it('a bare "wait" is an ordinary verb and excuses nothing; set off by punctuation it is a marker', () => {
+    expect(kind('tell Marco to wait for Dana', 'Tell to wait for Dana.')).toBe('name')
+    expect(kind('send it Tuesday wait Wednesday', 'Send it Wednesday.')).toBe('date')
+    expect(meaningGuardProblem('send it Tuesday, wait, Wednesday', 'Send it Wednesday.')).toBeNull()
+    expect(meaningGuardProblem('send it Tuesday wait, Wednesday', 'Send it Wednesday.')).toBeNull()
+  })
+
+  it('a bare "actually" excuses a drop only with the replacement within 3 words', () => {
+    expect(meaningGuardProblem('send it to Priya, actually Dana', 'Send it to Dana.')).toBeNull()
+    expect(meaningGuardProblem('we need five, actually six', 'We need six.')).toBeNull()
+    expect(meaningGuardProblem('we need five actually six', 'We need six.')).toBeNull()
+    expect(kind('ask Marco actually I think we should ask Dana', 'I think we should ask Dana.')).toBe('name')
+    // The same words with a comma: a marker, so the wider window applies.
+    expect(meaningGuardProblem('ask Marco, actually I think we should ask Dana', 'I think we should ask Dana.')).toBeNull()
+  })
+
+  it('"I actually think" is an adverb, not a marker, so negations are still counted', () => {
+    expect(kind('I actually think we should not ship, not yet', 'I actually think we should ship, not yet.')).toBe('negation')
+  })
+})
+
+describe('6.91.0 S9: lists and spoken times the prompt asks for', () => {
+  it('a numbered list the speaker asked for: its line-start numbers are not added numbers', () => {
+    expect(meaningGuardProblem('numbered list draft the brief new line get approval new line ship it', '1. Draft the brief\n2. Get approval\n3. Ship it')).toBeNull()
+    expect(meaningGuardProblem('number one draft the brief number two get approval', '1. Draft the brief\n2. Get approval')).toBeNull()
+    expect(meaningGuardProblem('numbered list draft the brief new line get approval', '1) Draft the brief\n2) Get approval')).toBeNull()
+  })
+
+  it('the same for bullets', () => {
+    expect(meaningGuardProblem('bullet points draft the brief new line get approval', '- Draft the brief\n- Get approval')).toBeNull()
+    expect(meaningGuardProblem('bullet list draft the brief new line get approval', '1. Draft the brief\n2. Get approval')).toBeNull()
+  })
+
+  it('without a list ask, or anywhere but a line start, a new number still trips', () => {
+    expect(kind('draft the brief new line get approval', '1. Draft the brief\n2. Get approval')).toBe('number')
+    expect(kind('numbered list order cases new line call Dana', '1. Order 6 cases\n2. Call Dana')).toBe('number')
+    expect(kind('numbered list buy three apples new line call Dana', '1. Buy apples\n2. Call Dana')).toBe('number')
+    // A number with a period mid-line is not a list number.
+    expect(kind('numbered list order cases new line call Dana', '1. Order cases by 6.\n2. Call Dana')).toBe('number')
+    // A number that is a list number on one line and content on another is still added content.
+    expect(kind('numbered list order cases new line call Dana', '1. Order 2 cases\n2. Call Dana')).toBe('number')
+  })
+
+  it('spoken clock times match their digits', () => {
+    expect(meaningGuardProblem('meet at half past ten', 'Meet at 10:30.')).toBeNull()
+    expect(meaningGuardProblem('call at quarter to five', 'Call at 4:45.')).toBeNull()
+    expect(meaningGuardProblem('call at a quarter past nine', 'Call at 9:15.')).toBeNull()
+    expect(meaningGuardProblem('the call is at quarter to one', 'The call is at 12:45.')).toBeNull()
+    expect(meaningGuardProblem('meet at half past 10', 'Meet at 10:30.')).toBeNull()
+    expect(kind('meet at half past ten', 'Meet at 10:15.')).toBe('number')
+    expect(kind('call at quarter to five', 'Call at 5:45.')).toBe('number')
   })
 })

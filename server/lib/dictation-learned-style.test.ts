@@ -3,7 +3,7 @@ import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:
 import { dataPath } from './data-dir.js'
 import {
   __resetLearnedStyleCacheForTests, LEARNED_STYLE_ALLOWLIST, LEARNED_STYLE_FILE, LEARNED_STYLE_MAX_CHARS, learnedStyleEnabled, learnedStyleHash,
-  learnedStyleLinesFor, readLearnedStyle, renderLearnedStyle, ruleText, validateLearnedStyleRules, writeLearnedStyle,
+  learnedStyleLinesFor, learnedStyleRevision, readLearnedStyle, renderLearnedStyle, ruleText, validateLearnedStyleRules, writeLearnedStyle,
 } from './dictation-learned-style.js'
 // 6.91.0: this file writes the learned-style, instructions and options stores. A private data dir
 // (under the run's isolated one) keeps a file running in another worker from reading them.
@@ -80,7 +80,21 @@ describe('6.91.0 the stored setting', () => {
     expect(readLearnedStyle()).toMatchObject({ enabled: true, rules: [expect.objectContaining({ id: 'drop-honestly' })], hash: saved.hash })
     writeLearnedStyle(true, [])
     expect(existsSync(file())).toBe(false)
-    expect(readLearnedStyle()).toEqual({ enabled: true, rules: [], text: '', hash: '', updatedAt: null })
+    expect(readLearnedStyle()).toEqual({ enabled: true, rules: [], text: '', hash: '', revision: learnedStyleRevision('', true), updatedAt: null })
+  })
+
+  it('S4: the revision is 8 hex of the text and the switch, so Off is a new revision with the same hash', () => {
+    const on = writeLearnedStyle(true, [drop('honestly')] as any)
+    const off = writeLearnedStyle(false, [drop('honestly')] as any)
+    expect(on.revision).toMatch(/^[0-9a-f]{8}$/)
+    expect(off.hash).toBe(on.hash)
+    expect(off.revision).not.toBe(on.revision)
+    expect(readLearnedStyle().revision).toBe(off.revision)
+    expect(learnedStyleRevision('', true)).not.toBe(learnedStyleRevision('', false))
+    // An Off with no rules is kept (a file), so Reset can keep the switch.
+    expect(writeLearnedStyle(false, [])).toMatchObject({ enabled: false, rules: [], revision: learnedStyleRevision('', false) })
+    expect(existsSync(file())).toBe(true)
+    expect(readLearnedStyle()).toMatchObject({ enabled: false, rules: [] })
   })
 
   it('enabled:false keeps the rules and stops them applying', () => {

@@ -1,13 +1,19 @@
 /**
  * 6.91.0: the meaning guard (plan r2). Deterministic, after the polish model, beside the link
- * guard (dictation-format.ts polishLinkProblem), on the `message` and `prompt_draft` buckets only.
+ * guard (dictation-format.ts polishLinkProblem), on the `message` and `prompt_draft` buckets, and
+ * only where prompt v4 runs on Sonnet (the canaried pair; dictation-polish-pipeline.ts). Haiku,
+ * Luna, any other model and prompt v3 get no guard, so their answers are 6.90.0's.
  *
  * Its input is `cleaned`, the text the model was given (after the dictionary, fuzzy and filler
  * passes), never the raw heard text, the same input the link guard uses. It compares SETS of
  * guarded tokens, in four kinds:
- * - negation: not / n't / cannot (one NEG token), never, no, none, nothing, nobody, neither, nor,
- *   without, unless, except;
- * - number: digits, number words, ordinals, %, $, k and thousand, clock times and am/pm;
+ * - negation: not / n't / cannot and the forms speech-to-text writes without an apostrophe ("dont",
+ *   "cant"), all one NEG token; never, no, none, nothing, nobody, neither, nor, without, unless,
+ *   except;
+ * - number: digits, number words, ordinals ("twenty fifth" is 25, like "25th"), %, $, a digit with a
+ *   scale word ("2 million" is two million, like "two million"), clock times ("half past ten" is
+ *   10:30, "quarter to five" 4:45) and am/pm. A decimal point splits a number on both sides ("one
+ *   point five" and "1.5" are both 1 then 5);
  * - date: a weekday or a month;
  * - name: a mid-sentence capital, a dictionary term or a speaker name. A sentence-initial word and
  *   "I" are not names unless they are dictionary terms. Skipped for a dictation that is not English.
@@ -16,12 +22,19 @@
  * digits ("twenty twenty six" may come back as "2026"); possessives and plurals fold; a name
  * re-spelled to a dictionary term (or to a near form the model was asked to fix) counts as kept.
  *
- * It trips on a DROPPED token of any kind, and on an ADDED negation or number. A dropped token is
- * exempt only when a correction marker follows it and a token of the SAME kind replaces it within
- * a few words ("five, actually six"; "Priya ... actually Dana"; "Tuesday, no wait, Wednesday").
- * A negation is never exempt; only a marker phrase's own words ("no wait", "wait no", ", no,",
- * "never mind") are not negations. Known gaps, stated and not claimed: reordering, and
- * before/after/only. Pure; it never throws on strings and logs nothing.
+ * It trips on a DROPPED token of any kind, and on an ADDED negation or number. With no correction
+ * marker in the dictation, negations are COUNTED ("not saying we should not ship" losing one "not"
+ * trips; a stutter, the same negation twice in a row, counts once); with one, they are compared as
+ * sets. A dropped token is exempt only when a correction marker follows it and a token of the SAME
+ * kind replaces it within a few words ("five, actually six"; "Priya ... actually Dana"; "Tuesday,
+ * no wait, Wednesday"). "actually" alone is a marker only when punctuation sets it off or the
+ * replacement follows within 3 words; "wait" alone only when punctuation sets it off, because it is
+ * an ordinary verb ("tell Marco to wait for Dana"). A negation is never exempt; only a marker
+ * phrase's own words ("no wait", "wait no", ", no,", "never mind") are not negations. When the
+ * speaker asked for a list ("numbered list", "number one", "bullet points"), a list number at the
+ * start of a line ("1." or "2)") is never an added number. Known gaps, stated and not claimed:
+ * reordering, before/after/only, and a list number standing in for a dropped number of the same
+ * value. Pure; it never throws on strings and logs nothing.
  */
 export type MeaningGuardKind = 'negation' | 'number' | 'date' | 'name'
 export const MEANING_GUARD_KINDS: readonly MeaningGuardKind[] = ['negation', 'number', 'date', 'name']
@@ -39,15 +52,17 @@ export function meaningGuardEnabled(env: NodeJS.ProcessEnv = process.env): boole
   return !(raw === '0' || raw === 'false' || raw === 'off')
 }
 
-interface Tok { raw: string; low: string; sentenceStart: boolean; pause: boolean }
-interface Item { kind: MeaningGuardKind; key: string; pos: number }
+interface Tok { raw: string; low: string; sentenceStart: boolean; pause: boolean; listMarker: boolean }
+interface Item { kind: MeaningGuardKind; key: string; pos: number; list?: boolean }
 
 const ONES = new Map(['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
   'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'].map((w, i) => [w, i]))
 const TENS = new Map([['twenty', 20], ['thirty', 30], ['forty', 40], ['fourty', 40], ['fifty', 50], ['sixty', 60], ['seventy', 70], ['eighty', 80], ['ninety', 90]])
 const SCALES = new Map([['hundred', 100], ['thousand', 1_000], ['k', 1_000], ['million', 1_000_000], ['billion', 1_000_000_000]])
 const ORDINALS = new Map([['first', 1], ['second', 2], ['third', 3], ['fourth', 4], ['fifth', 5], ['sixth', 6], ['seventh', 7], ['eighth', 8],
-  ['ninth', 9], ['tenth', 10], ['eleventh', 11], ['twelfth', 12], ['twentieth', 20], ['thirtieth', 30]])
+  ['ninth', 9], ['tenth', 10], ['eleventh', 11], ['twelfth', 12], ['thirteenth', 13], ['fourteenth', 14], ['fifteenth', 15],
+  ['sixteenth', 16], ['seventeenth', 17], ['eighteenth', 18], ['nineteenth', 19], ['twentieth', 20], ['thirtieth', 30], ['fortieth', 40],
+  ['fiftieth', 50], ['sixtieth', 60], ['seventieth', 70], ['eightieth', 80], ['ninetieth', 90]])
 /** Unit and time words that are part of a number item. */
 const NUMBER_WORDS = new Map([['percent', 'percent'], ['percentage', 'percent'], ['dollar', 'dollar'], ['dollars', 'dollar'], ['buck', 'dollar'],
   ['bucks', 'dollar'], ['euro', 'euro'], ['euros', 'euro'], ['pound', 'pound'], ['pounds', 'pound'], ['cent', 'cent'], ['cents', 'cent'],
@@ -55,6 +70,9 @@ const NUMBER_WORDS = new Map([['percent', 'percent'], ['percentage', 'percent'],
 const SYMBOLS = new Map([['%', 'percent'], ['$', 'dollar'], ['€', 'euro'], ['£', 'pound'], ['¢', 'cent']])
 
 const NEG_WORDS = new Set(['never', 'no', 'none', 'nothing', 'nobody', 'neither', 'nor', 'without', 'unless', 'except'])
+/** "n't" forms speech-to-text writes without the apostrophe: the same NEG token as "don't". */
+const BARE_NT = new Set(['dont', 'cant', 'wont', 'isnt', 'arent', 'doesnt', 'didnt', 'wasnt', 'werent', 'shouldnt', 'wouldnt', 'couldnt',
+  'havent', 'hasnt', 'hadnt', 'mustnt', 'neednt', 'aint'])
 
 const WEEKDAYS = new Map([['monday', 'monday'], ['tuesday', 'tuesday'], ['wednesday', 'wednesday'], ['thursday', 'thursday'], ['friday', 'friday'],
   ['saturday', 'saturday'], ['sunday', 'sunday'], ['mon', 'monday'], ['tue', 'tuesday'], ['tues', 'tuesday'], ['wed', 'wednesday'],
@@ -74,15 +92,41 @@ const MARKERS: string[][] = [['actually'], ['i', 'mean'], ['i', 'meant'], ['no',
   ['or', 'rather'], ['make', 'that'], ['scratch', 'that'], ['never', 'mind'], ['nevermind'], ['correction']]
 /** Marker phrases whose words are not negations, on either side. */
 const NEG_MARKER_PHRASES: string[][] = [['no', 'wait'], ['wait', 'no'], ['never', 'mind'], ['nevermind']]
+/** One-word markers that are also ordinary words: a marker only when set off (see markers()). */
+const BARE_ACTUALLY = 'actually'
+const BARE_WAIT = 'wait'
 const DROP_TO_MARKER = 8
 const MARKER_TO_REPLACEMENT = 6
+/** A bare "actually" (no punctuation around it) excuses a drop only with a replacement this close. */
+const BARE_MARKER_TO_REPLACEMENT = 3
+/** The speaker asked for a list, so line-start list numbers are formatting, not added numbers. */
+const LIST_ASKED = /\b(?:numbered list|number one|bullet(?:ed)? (?:list|points?)|bullets)\b/i
 
 const ENGLISH = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'to', 'of', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were', 'be', 'it', 'this',
   'that', 'i', 'you', 'we', 'they', 'he', 'she', 'my', 'our', 'your', 'their', 'can', 'will', 'do', 'does', 'not', 'at', 'from', 'have', 'has',
   'me', 'us', 'so', 'if', 'what', 'just', 'about', 'there', 'here', 'all', 'some', 'any', 'how', 'why', 'when', 'need', 'want', 'get', 'make'])
 
-function normalize(text: string): string {
+const HOUR = '(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\\d{1,2})'
+const HALF_PAST = new RegExp(`\\bhalf past ${HOUR}\\b`, 'gi')
+const QUARTER_PAST = new RegExp(`\\b(?:a )?quarter (?:past|after) ${HOUR}\\b`, 'gi')
+const QUARTER_TO = new RegExp(`\\b(?:a )?quarter (?:to|of|till|til) ${HOUR}\\b`, 'gi')
+
+/** An hour from 1 to 12, as a word or digits, or null. */
+function hourOf(word: string): number | null {
+  const value = ONES.get(word.toLowerCase()) ?? (/^\d+$/.test(word) ? Number.parseInt(word, 10) : -1)
+  return value >= 1 && value <= 12 ? value : null
+}
+
+/** "half past ten" is 10:30, "quarter past ten" 10:15, "quarter to five" 4:45 (and "quarter to one" 12:45). */
+function spokenTimes(text: string): string {
   return text
+    .replace(HALF_PAST, (all, h: string) => { const hour = hourOf(h); return hour === null ? all : `${hour}:30` })
+    .replace(QUARTER_PAST, (all, h: string) => { const hour = hourOf(h); return hour === null ? all : `${hour}:15` })
+    .replace(QUARTER_TO, (all, h: string) => { const hour = hourOf(h); return hour === null ? all : `${hour === 1 ? 12 : hour - 1}:45` })
+}
+
+function normalize(text: string): string {
+  return spokenTimes(text)
     .replace(/[’‘ʼ]/g, "'")
     .replace(/\b([ap])\.\s?m\b\.?/gi, '$1m')
     .replace(/(\d)\s?(am|pm)\b/gi, '$1 $2')
@@ -102,7 +146,9 @@ function tokenize(text: string): Tok[] {
     const gap = text.slice(last, m.index)
     const before = text.slice(0, m.index).replace(/[\s"'“”()[\]{}*_-]+$/u, '')
     const sentenceStart = before.length === 0 || /[.!?:\n•]$/.test(before) || /\n\s*(?:[-*•]|\d+[.)])?\s*$/.test(text.slice(0, m.index))
-    out.push({ raw: m[0], low: m[0].toLowerCase(), sentenceStart, pause: /[,;.!?—–()]/.test(gap) })
+    // "1." or "2)" at the start of a line: a list number.
+    const listMarker = /^\d+$/.test(m[0]) && /(?:^|\n)[ \t]*$/.test(text.slice(0, m.index)) && /^[.)]/.test(text.slice(m.index + m[0].length))
+    out.push({ raw: m[0], low: m[0].toLowerCase(), sentenceStart, pause: /[,;.!?—–()]/.test(gap), listMarker })
     last = m.index + m[0].length
   }
   return out
@@ -118,36 +164,55 @@ function startsWith(tokens: Tok[], at: number, phrase: string[]): boolean {
   return phrase.every((w, i) => tokens[at + i]?.low === w)
 }
 
-/** Positions covered by a marker phrase, and where each marker ends. */
-function markers(tokens: Tok[]): { cover: Set<number>; negCover: Set<number>; spans: Array<[number, number]> } {
-  const cover = new Set<number>()
+/** A correction marker: where it starts and ends, how close its replacement must follow, and whether it stood alone. */
+interface Span { start: number; end: number; reach: number; bare: boolean }
+
+/** The correction markers, and the positions of the ones whose own words are not negations. */
+function markers(tokens: Tok[]): { negCover: Set<number>; spans: Span[] } {
   const negCover = new Set<number>()
-  const spans: Array<[number, number]> = []
+  const spans: Span[] = []
   for (let i = 0; i < tokens.length; i++) {
     const phrase = MARKERS.find(p => startsWith(tokens, i, p))
     if (phrase) {
-      spans.push([i, i + phrase.length - 1])
-      for (let k = 0; k < phrase.length; k++) cover.add(i + k)
+      // "actually" and "wait" alone are ordinary words unless punctuation sets them off
+      // ("Priya, actually Dana"; "Tuesday wait, Wednesday"). A bare "actually" still counts when the
+      // replacement follows within BARE_MARKER_TO_REPLACEMENT words ("five actually six"); a bare
+      // "wait" never does ("tell Marco to wait for Dana" keeps Marco).
+      const bare = phrase.length === 1 && (phrase[0] === BARE_ACTUALLY || phrase[0] === BARE_WAIT)
+        && !tokens[i].pause && !tokens[i + 1]?.pause
+      if (bare && phrase[0] === BARE_WAIT) continue
+      spans.push({ start: i, end: i + phrase.length - 1, reach: bare ? BARE_MARKER_TO_REPLACEMENT : MARKER_TO_REPLACEMENT, bare })
       if (NEG_MARKER_PHRASES.some(p => p.length === phrase.length && startsWith(tokens, i, p))) for (let k = 0; k < phrase.length; k++) negCover.add(i + k)
       i += phrase.length - 1
       continue
     }
     // ", no," : a "no" set off by pause marks on both sides is a correction ("the blue, no, the green").
     if (tokens[i].low === 'no' && i > 0 && tokens[i].pause && tokens[i + 1]?.pause) {
-      spans.push([i, i]); cover.add(i); negCover.add(i)
+      spans.push({ start: i, end: i, reach: MARKER_TO_REPLACEMENT, bare: false }); negCover.add(i)
     }
   }
-  return { cover, negCover, spans }
+  return { negCover, spans }
 }
 
-/** Spoken numbers to digits: "twenty five" is 25, "twenty twenty six" is 20 then 26. */
+/**
+ * Spoken numbers to digits: "twenty five" is 25, "twenty twenty six" is 20 then 26. An ordinal
+ * ends a run: "twenty fifth" is 25 (as "25th" is), "one hundred and first" 101.
+ */
 function numberRun(tokens: Tok[], i: number): { value: number; end: number } | null {
   const first = tokens[i].low
   if (!ONES.has(first) && !TENS.has(first) && !(SCALES.has(first) && first !== 'k')) return null
   let total = 0, group = 0, last: 'ones' | 'tens' | 'scale' | null = null, teen = false, j = i
   for (; j < tokens.length; j++) {
     const w = tokens[j].low
-    if (w === 'and' && last === 'scale' && (ONES.has(tokens[j + 1]?.low ?? '') || TENS.has(tokens[j + 1]?.low ?? ''))) continue
+    const next = tokens[j + 1]?.low ?? ''
+    if (w === 'and' && last === 'scale' && (ONES.has(next) || TENS.has(next) || ORDINALS.has(next))) continue
+    if (ORDINALS.has(w)) {
+      const v = ORDINALS.get(w)!
+      if (!((last === 'tens' && v < 10) || last === 'scale')) break
+      group += v
+      j++
+      break
+    }
     if (TENS.has(w)) {
       if (last === 'ones' || last === 'tens') break
       group += TENS.get(w)!; last = 'tens'
@@ -176,14 +241,16 @@ function extract(text: string, knownPhrases: string[][], withNames: boolean): Ex
     const t = tokens[i]
     // Negations.
     if (!negCover.has(i)) {
-      if (t.low === 'not' || t.low === 'cannot' || /n't$/.test(t.low)) items.push({ kind: 'negation', key: 'NEG', pos: i })
+      if (t.low === 'not' || t.low === 'cannot' || /n't$/.test(t.low) || BARE_NT.has(t.low)) items.push({ kind: 'negation', key: 'NEG', pos: i })
       else if (NEG_WORDS.has(t.low)) items.push({ kind: 'negation', key: t.low, pos: i })
     }
     // Numbers.
     if (/^\d+$/.test(t.low)) {
       let value = Number.parseInt(t.low, 10)
-      if (tokens[i + 1]?.low === 'k') value *= 1000
-      items.push({ kind: 'number', key: String(value), pos: i })
+      const pos = i
+      // A digit and a scale word are one number: "2 million" is two million, as "two million" is.
+      while (SCALES.has(tokens[i + 1]?.low ?? '')) { value *= SCALES.get(tokens[i + 1].low)!; i++ }
+      items.push({ kind: 'number', key: String(value), pos, ...(t.listMarker ? { list: true } : {}) })
       continue
     }
     const suffixed = /^(\d+)(st|nd|rd|th)$/.exec(t.low)
@@ -252,6 +319,17 @@ export function looksEnglish(text: string): boolean {
 
 const zero = (): Record<MeaningGuardKind, number> => ({ negation: 0, number: 0, date: 0, name: 0 })
 
+/** How many of each negation, a stutter (the same one twice in a row) counted once. */
+function negationCounts(items: Item[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  let previous: Item | null = null
+  for (const item of items.filter(i => i.kind === 'negation').sort((a, b) => a.pos - b.pos)) {
+    if (!(previous && previous.key === item.key && item.pos === previous.pos + 1)) counts.set(item.key, (counts.get(item.key) ?? 0) + 1)
+    previous = item
+  }
+  return counts
+}
+
 /**
  * The first kind the answer lost or added, with counts, or null when every guarded token the
  * speaker kept is still there. `known` is the dictionary (vocabulary) and the speaker names.
@@ -265,7 +343,10 @@ export function meaningGuardProblem(cleaned: string, answer: string, known: stri
   const output = extract(answer, knownPhrases, withNames)
   const outKeys = new Map<MeaningGuardKind, Set<string>>(MEANING_GUARD_KINDS.map(k => [k, new Set(output.items.filter(i => i.kind === k).map(i => i.key))]))
   const inKeys = new Map<MeaningGuardKind, Set<string>>(MEANING_GUARD_KINDS.map(k => [k, new Set(input.items.filter(i => i.kind === k).map(i => i.key))]))
-  const { spans } = markers(input.tokens)
+  // A bare "actually" is a marker only with a guarded word right after it ("five actually six");
+  // "I actually think" is an ordinary adverb, so it neither excuses a drop nor stops the counts.
+  const spans = markers(input.tokens).spans
+    .filter(span => !span.bare || input.items.some(r => r.kind !== 'negation' && r.pos > span.end && r.pos - span.end <= span.reach))
 
   // Spoken digits joined in the answer ("twenty twenty six" as "2026", "nineteen ninety" as "1990").
   const inNumbers = input.items.filter(i => i.kind === 'number' && /^\d+$/.test(i.key)).sort((a, b) => a.pos - b.pos)
@@ -312,14 +393,19 @@ export function meaningGuardProblem(cleaned: string, answer: string, known: stri
   // A dropped token with a correction marker after it and a same-kind replacement the answer kept.
   const exempt = (item: Item): boolean => {
     if (item.kind === 'negation') return false
-    for (const [start, end] of spans) {
+    for (const { start, end, reach } of spans) {
       if (start <= item.pos || start - item.pos > DROP_TO_MARKER) continue
-      const replaced = input.items.some(r => r.kind === item.kind && r.key !== item.key && r.pos > end && r.pos - end <= MARKER_TO_REPLACEMENT
+      const replaced = input.items.some(r => r.kind === item.kind && r.key !== item.key && r.pos > end && r.pos - end <= reach
         && (r.kind === 'name' ? nameKept(r.key) : outKeys.get(r.kind)!.has(r.key)))
       if (replaced) return true
     }
     return false
   }
+
+  // With no correction marker, negations are counted, so losing one of two "not"s trips. A
+  // correction can legitimately drop a repeated negation ("can't, no wait, can't do Friday"), so
+  // with a marker they are compared as sets, like every other kind.
+  const countNegations = spans.length === 0
 
   const dropped = zero()
   const added = zero()
@@ -327,6 +413,7 @@ export function meaningGuardProblem(cleaned: string, answer: string, known: stri
   for (const item of input.items) {
     const id = `${item.kind}:${item.key}`
     if (seen.has(id)) continue
+    if (item.kind === 'negation' && countNegations) continue
     const kept = item.kind === 'name' ? nameKept(item.key)
       : outKeys.get(item.kind)!.has(item.key) || (item.kind === 'number' && keptByJoin.has(item.key))
     if (kept) { seen.add(id); continue }
@@ -336,8 +423,21 @@ export function meaningGuardProblem(cleaned: string, answer: string, known: stri
     if (occurrences.every(exempt)) continue
     dropped[item.kind]++
   }
-  for (const key of outKeys.get('negation')!) if (!inKeys.get('negation')!.has(key)) added.negation++
-  for (const key of outNumbers) if (!inKeys.get('number')!.has(key) && !joinedOut.has(key)) added.number++
+  if (countNegations) {
+    const inCounts = negationCounts(input.items)
+    const outCounts = negationCounts(output.items)
+    for (const [key, n] of inCounts) if ((outCounts.get(key) ?? 0) < n) dropped.negation += n - (outCounts.get(key) ?? 0)
+    for (const [key, n] of outCounts) if ((inCounts.get(key) ?? 0) < n) added.negation += n - (inCounts.get(key) ?? 0)
+  } else {
+    for (const key of outKeys.get('negation')!) if (!inKeys.get('negation')!.has(key)) added.negation++
+  }
+  // A list the speaker asked for: its line-start numbers are formatting, never added numbers.
+  const listOnly = new Set<string>()
+  if (LIST_ASKED.test(cleaned)) {
+    const outNumberItems = output.items.filter(i => i.kind === 'number')
+    for (const key of outNumbers) if (outNumberItems.filter(i => i.key === key).every(i => i.list)) listOnly.add(key)
+  }
+  for (const key of outNumbers) if (!inKeys.get('number')!.has(key) && !joinedOut.has(key) && !listOnly.has(key)) added.number++
 
   const kind = MEANING_GUARD_KINDS.find(k => dropped[k] > 0 || added[k] > 0)
   return kind ? { kind, dropped, added, namesSkipped: !withNames } : null

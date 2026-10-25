@@ -170,10 +170,69 @@ describe('6.91.0 through the real pipeline', () => {
     expect(pipeline.learnedStyleFor('prompt_draft', 'default').lines).toContain('honestly')
   })
 
+  it('guardPolishAnswer never guards a meeting line, even when called as the canaried pair', async () => {
+    const pipeline = await import('./dictation-polish-pipeline.js')
+    expect(pipeline.guardPolishAnswer('never merge to main', 'Merge to main.', 'meeting', 'default', true)).toEqual({ text: 'Merge to main.', outcome: 'polished' })
+    expect(pipeline.guardPolishAnswer('never merge to main', 'Merge to main.', 'message', 'default', true)).toMatchObject({ outcome: 'guarded', guard: 'negation' })
+    expect(pipeline.guardPolishAnswer('never merge to main', 'Merge to main.', 'message', 'default', false)).toEqual({ text: 'Merge to main.', outcome: 'polished' })
+  })
+
   it('meeting lines get the v3 prompt with no blocks, even with a style saved and v4 configured', async () => {
     const store = await import('./dictation-learned-style.js')
     store.writeLearnedStyle(true, [{ id: 'drop-honestly', kind: 'drop_phrase', register: 'all', param: 'honestly', count: 2, lastSeen: null }])
     const [meeting] = await promptsFor([{ text: 'the forecast is ready', bucket: 'meeting', register: 'literal' }])
     expect(meeting).toBe(buildDictationPolishPrompt('the forecast is ready', [], 'v3'))
+  })
+})
+
+describe('6.91.0 S11: each server switch on its own, through the real pipeline (Sonnet, v4)', () => {
+  const HONESTLY = { id: 'drop-honestly', kind: 'drop_phrase', register: 'all', param: 'honestly', count: 2, lastSeen: null } as const
+  async function run(text: string, answer: (text: string) => string, context?: { app: string }) {
+    vi.resetModules()
+    const calls: any[] = []
+    vi.doMock('./dictation-clean.js', async (original) => ({
+      ...(await original<object>()),
+      autoCleanDictation: vi.fn(async (t: string, terms: string[], opts: any) => { calls.push({ t, terms, opts }); return answer(t) }),
+    }))
+    const pipeline = await import('./dictation-polish-pipeline.js')
+    const clean = await import('./dictation-clean.js')
+    const { registerFromContext } = await import('./dictation-register.js')
+    const result = await pipeline.cleanOutboundDictation(text, { enabled: true, model: 'sonnet', bucket: 'message', register: registerFromContext(context) })
+    const c = calls.at(-1)
+    const prompt = clean.buildDictationPolishPrompt(c.t, c.terms, c.opts.promptVersion, c.opts.customInstructions, { learnedStyle: c.opts.learnedStyle, register: c.opts.register })
+    return { result, prompt }
+  }
+  const saveStyle = async () => (await import('./dictation-learned-style.js')).writeLearnedStyle(true, [HONESTLY as any])
+
+  it('COS_DICTATION_LEARNED_STYLE=0 alone: rules saved and on, yet no style block and learnedStyle false', async () => {
+    await saveStyle()
+    const on = await run('honestly send it to Dana', t => t)
+    expect(on.prompt).toContain('<learned-style>')
+    expect(on.result).toMatchObject({ learnedStyle: true, polishPrompt: 'v4' })
+    vi.stubEnv('COS_DICTATION_LEARNED_STYLE', '0')
+    const off = await run('honestly send it to Dana', t => t)
+    expect(off.prompt).not.toContain('<learned-style>')
+    expect(off.prompt).toBe(buildDictationPolishPrompt('honestly send it to Dana', [], 'v4'))
+    expect(off.result).toMatchObject({ learnedStyleOff: true, polishPrompt: 'v4', polishRegister: 'default' })
+    expect(off.result.learnedStyle).toBeUndefined()
+  })
+
+  it('COS_DICTATION_MEANING_GUARD=0 alone: the answer that lost a negation goes out', async () => {
+    const guarded = await run('never merge to main', () => 'Merge to main.')
+    expect(guarded.result).toMatchObject({ text: 'never merge to main', polishOutcome: 'guarded', guard: 'negation', polishSkipped: 'failed' })
+    vi.stubEnv('COS_DICTATION_MEANING_GUARD', '0')
+    const off = await run('never merge to main', () => 'Merge to main.')
+    expect(off.result).toMatchObject({ text: 'Merge to main.', polishOutcome: 'polished', polishPrompt: 'v4' })
+    expect(off.result.guard).toBeUndefined()
+  })
+
+  it('COS_DICTATION_REGISTERS=1 alone: a terminal gets the literal register (and no style); unset, the default one with the style', async () => {
+    await saveStyle()
+    const unset = await run('git status', t => t, { app: 'iTerm2' })
+    expect(unset.result).toMatchObject({ polishRegister: 'default', learnedStyle: true })
+    vi.stubEnv('COS_DICTATION_REGISTERS', '1')
+    const on = await run('git status', t => t, { app: 'iTerm2' })
+    expect(on.result).toMatchObject({ polishRegister: 'literal', learnedStyleOff: true, polishPrompt: 'v4' })
+    expect(on.prompt).toBe(buildDictationPolishPrompt('git status', [], 'v4', '', { register: 'literal' }))
   })
 })

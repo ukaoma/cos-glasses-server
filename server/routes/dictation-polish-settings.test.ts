@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Server } from 'node:http'
 import { dictationPolishSettingsRouter, INSTRUCTIONS_PLACEHOLDER, LEARNED_STYLE_PLACEHOLDER, learnedStyleCapability, polishOptionsCapability } from './dictation-polish-settings.js'
@@ -8,7 +8,7 @@ import {
   buildDictationPolishPrompt, dictationPolishRules, DICTATION_POLISH_SYSTEM_PROMPTS, LEARNED_STYLE_INTRO, LEARNED_STYLE_LIMITS, learnedStyleBlock,
   LITERAL_REGISTER_RULES, USER_PREFERENCES_INTRO, USER_PREFERENCES_PRECEDENCE, V4_CLOSING_RULE, V4_LITERAL_CLOSING_RULE,
 } from '../lib/dictation-clean.js'
-import { __resetLearnedStyleCacheForTests, LEARNED_STYLE_ALLOWLIST, LEARNED_STYLE_FILE } from '../lib/dictation-learned-style.js'
+import { __resetLearnedStyleCacheForTests, LEARNED_STYLE_ALLOWLIST, LEARNED_STYLE_FILE, learnedStyleHash, learnedStyleRevision } from '../lib/dictation-learned-style.js'
 import { __resetPolishOptionsCacheForTests, POLISH_OPTIONS_FILE } from '../lib/dictation-polish-options.js'
 import { requireApiToken } from '../lib/api-auth.js'
 import { __resetCustomInstructionsCacheForTests, CUSTOM_INSTRUCTIONS_FILE, customInstructionsHash, readCustomInstructions } from '../lib/dictation-polish-instructions.js'
@@ -195,7 +195,19 @@ describe('6.91.0 /api/dictation/learned-style', () => {
     expect(put.json.updatedAt).toEqual(expect.any(String))
     expect((await call('GET', '/dictation/learned-style')).json).toEqual(put.json)
     const reset = await call('DELETE', '/dictation/learned-style')
-    expect(reset.json).toMatchObject({ enabled: true, rules: [], hash: '' })
+    expect(reset.json).toMatchObject({ enabled: true, rules: [], hash: '', revision: learnedStyleRevision('', true) })
+    expect(existsSync(dataPath(LEARNED_STYLE_FILE))).toBe(false)
+  })
+
+  it('S5: Reset clears the rules and keeps the switch as it was: an Off stays off', async () => {
+    await call('PUT', '/dictation/learned-style', { rules: [rule('honestly')], enabled: false })
+    const reset = await call('DELETE', '/dictation/learned-style')
+    expect(reset.status).toBe(200)
+    expect(reset.json).toMatchObject({ enabled: false, rules: [], text: '', hash: '' })
+    expect((await call('GET', '/dictation/learned-style')).json).toMatchObject({ enabled: false, rules: [] })
+    // On stays on, and the empty "on" state is no file at all.
+    await call('PUT', '/dictation/learned-style', { rules: [rule('honestly')], enabled: true })
+    expect((await call('DELETE', '/dictation/learned-style')).json).toMatchObject({ enabled: true, rules: [] })
     expect(existsSync(dataPath(LEARNED_STYLE_FILE))).toBe(false)
   })
 
@@ -207,13 +219,17 @@ describe('6.91.0 /api/dictation/learned-style', () => {
   })
 
   it('server-owned fields are 400; unknown keys are 400; a bad rule is 400 with its index', async () => {
-    for (const field of ['text', 'hash', 'updatedAt']) {
+    for (const field of ['text', 'hash', 'revision', 'updatedAt']) {
       const result = await call('PUT', '/dictation/learned-style', { rules: [], [field]: 'x' })
       expect(result, field).toEqual({ status: 400, json: { error: 'server_owned_field', field } })
     }
-    for (const body of [{}, { rules: [], extra: 1 }, ['x'], { enabled: 'yes' }, { rules: [], baseHash: 'XYZ' }]) {
+    for (const body of [{}, { rules: [], extra: 1 }, ['x'], { enabled: 'yes' }, { rules: [], baseRevision: 'XYZ' }, { rules: [], baseRevision: '' },
+      { rules: [], baseRevision: '0123456' }, { rules: [], baseRevision: 12345678 }]) {
       expect((await call('PUT', '/dictation/learned-style', body)).status, JSON.stringify(body)).toBe(400)
     }
+    expect((await call('PUT', '/dictation/learned-style', { rules: [], baseRevision: 'ABCDEF01' })).json).toEqual({ error: 'invalid_base_revision' })
+    // 6.91.0 S4: baseHash (text only) was never released; it is an unknown key now.
+    expect(await call('PUT', '/dictation/learned-style', { rules: [], baseHash: '00000000' })).toMatchObject({ status: 400, json: { error: 'invalid_body' } })
     expect(await call('PUT', '/dictation/learned-style', { rules: [rule('honestly'), rule('like')] }))
       .toEqual({ status: 400, json: { error: 'invalid_rule_param', index: 1 } })
     expect(existsSync(dataPath(LEARNED_STYLE_FILE))).toBe(false)
@@ -225,12 +241,59 @@ describe('6.91.0 /api/dictation/learned-style', () => {
     expect(existsSync(dataPath(LEARNED_STYLE_FILE))).toBe(false)
   })
 
-  it('baseHash: a match saves, a stale one is 409 with the current hash', async () => {
-    const first = await call('PUT', '/dictation/learned-style', { rules: [rule('honestly')], baseHash: '' })
+  it('S4: revision covers the rules AND the switch; hash stays the text alone', async () => {
+    const empty = (await call('GET', '/dictation/learned-style')).json
+    expect(empty.revision).toBe(learnedStyleRevision('', true))
+    expect(empty.revision).toMatch(/^[0-9a-f]{8}$/)
+    const on = (await call('PUT', '/dictation/learned-style', { rules: [rule('honestly')] })).json
+    const off = (await call('PUT', '/dictation/learned-style', { enabled: false })).json
+    expect(off.hash).toBe(on.hash)
+    expect(on.hash).toBe(learnedStyleHash(on.text))
+    expect(off.revision).not.toBe(on.revision)
+    expect(on.revision).toBe(learnedStyleRevision(on.text, true))
+    expect(off.revision).toBe(learnedStyleRevision(on.text, false))
+    expect((await call('GET', '/dictation/learned-style')).json.revision).toBe(off.revision)
+  })
+
+  it('S4: baseRevision: a match saves, a stale one is 409 with the current revision, and a stale "on" cannot undo a newer Off', async () => {
+    const empty = (await call('GET', '/dictation/learned-style')).json
+    const first = await call('PUT', '/dictation/learned-style', { rules: [rule('honestly')], baseRevision: empty.revision })
     expect(first.status).toBe(200)
-    const stale = await call('PUT', '/dictation/learned-style', { rules: [], baseHash: '00000000' })
-    expect(stale).toEqual({ status: 409, json: { error: 'base_hash_mismatch', hash: first.json.hash } })
-    expect((await call('PUT', '/dictation/learned-style', { rules: [rule('literally')], baseHash: first.json.hash })).status).toBe(200)
+    const stale = await call('PUT', '/dictation/learned-style', { rules: [], baseRevision: empty.revision })
+    expect(stale).toEqual({ status: 409, json: { error: 'base_revision_mismatch', revision: first.json.revision } })
+    // Another client turns it off; this one, still holding the "on" revision, re-sends on.
+    const off = await call('PUT', '/dictation/learned-style', { enabled: false, baseRevision: first.json.revision })
+    expect(off.status).toBe(200)
+    expect(await call('PUT', '/dictation/learned-style', { enabled: true, baseRevision: first.json.revision }))
+      .toEqual({ status: 409, json: { error: 'base_revision_mismatch', revision: off.json.revision } })
+    expect((await call('GET', '/dictation/learned-style')).json.enabled).toBe(false)
+    expect((await call('PUT', '/dictation/learned-style', { enabled: true, baseRevision: off.json.revision })).json.enabled).toBe(true)
+  })
+
+  it('S12: a save that fails is 500 and logs one line with a code only, never the path or a rule', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const blocked = (name: string) => { mkdirSync(dataPath(name), { recursive: true }); writeFileSync(`${dataPath(name)}/keep`, 'x') }
+    const code = /\((?:[A-Z][A-Z0-9_]+|error)\)$/
+    try {
+      blocked(LEARNED_STYLE_FILE)
+      expect(await call('PUT', '/dictation/learned-style', { rules: [rule('honestly')] })).toEqual({ status: 500, json: { error: 'learned_style_not_saved' } })
+      expect(await call('DELETE', '/dictation/learned-style')).toEqual({ status: 500, json: { error: 'learned_style_not_saved' } })
+      blocked(POLISH_OPTIONS_FILE)
+      expect(await call('PUT', '/dictation/polish/options', { promptVersion: 'v3' })).toEqual({ status: 500, json: { error: 'options_not_saved' } })
+      const lines = warn.mock.calls.map(args => args.join(' ')).filter(line => /not_saved/.test(line))
+      expect(lines).toHaveLength(3)
+      expect(lines[0]).toMatch(/^\[dictation-polish\] learned_style_not_saved put /)
+      expect(lines[1]).toMatch(/^\[dictation-polish\] learned_style_not_saved delete /)
+      expect(lines[2]).toMatch(/^\[dictation-polish\] options_not_saved /)
+      for (const line of lines) {
+        expect(line).toMatch(code)
+        expect(line).not.toContain(dataPath(''))
+        expect(line).not.toMatch(/honestly/)
+      }
+    } finally {
+      rmSync(dataPath(LEARNED_STYLE_FILE), { recursive: true, force: true })
+      rmSync(dataPath(POLISH_OPTIONS_FILE), { recursive: true, force: true })
+    }
   })
 
   it('COS_DICTATION_LEARNED_STYLE=0: the routes still answer and say so; the capability says enabled false', async () => {

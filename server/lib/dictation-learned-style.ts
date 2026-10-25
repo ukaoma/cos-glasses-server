@@ -19,8 +19,12 @@ import type { DictationRegister } from './dictation-register.js'
  * - register: `all` only in the MVP. A literal target (a terminal) never gets learned style.
  * - At most LEARNED_STYLE_MAX_RULES rules, rendered to at most LEARNED_STYLE_MAX_CHARS. Over either
  *   is refused (413), never silently dropped or turned off.
- * - The server owns `text`, `hash` and `updatedAt`. `baseHash` makes a PUT conditional (409).
- * - `enabled: false` (the person's switch) stops it applying everywhere and keeps the rules.
+ * - The server owns `text`, `hash`, `revision` and `updatedAt`. `revision` is 8 hex of the rendered
+ *   text AND the person's switch, and `baseRevision` makes a PUT conditional (409), so a stale save
+ *   can undo neither a newer rule list nor a newer Off. `hash` (the text alone) is what finalize
+ *   answers and telemetry carry.
+ * - `enabled: false` (the person's switch) stops it applying everywhere and keeps the rules. Reset
+ *   (DELETE) clears the rules and leaves the switch as it was.
  *   COS_DICTATION_LEARNED_STYLE=0 (the server's switch) does the same, whatever the file says.
  * - Stored atomically in the data dir, mode 0600, re-validated on every read; a corrupt file reads
  *   as empty and is logged as a code only. The rules are never logged; telemetry carries a flag
@@ -76,6 +80,11 @@ export function renderLearnedStyle(rules: Array<Pick<LearnedStyleRule, 'kind' | 
 /** 8 hex characters: enough to tell two settings apart in a log, never the rules. '' for none. */
 export function learnedStyleHash(text: string): string {
   return text ? createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 8) : ''
+}
+
+/** 8 hex of the rendered text and the switch: what a conditional PUT names as its base. Always 8. */
+export function learnedStyleRevision(text: string, enabled: boolean): string {
+  return createHash('sha256').update(`${enabled ? 'on' : 'off'}\n${text}`, 'utf8').digest('hex').slice(0, 8)
 }
 
 const RULE_ID = /^[a-z0-9_-]{1,40}$/
@@ -136,8 +145,10 @@ export function learnedStyleLinesFor(stored: StoredLearnedStyle, register: Dicta
 
 const filePath = () => dataPath(LEARNED_STYLE_FILE)
 
-export interface StoredLearnedStyle { enabled: boolean; rules: LearnedStyleRule[]; text: string; hash: string; updatedAt: string | null }
-const empty = (): StoredLearnedStyle => ({ enabled: true, rules: [], text: '', hash: '', updatedAt: null })
+export interface StoredLearnedStyle {
+  enabled: boolean; rules: LearnedStyleRule[]; text: string; hash: string; revision: string; updatedAt: string | null
+}
+const empty = (): StoredLearnedStyle => ({ enabled: true, rules: [], text: '', hash: '', revision: learnedStyleRevision('', true), updatedAt: null })
 
 let cache: { mtimeMs: number; size: number; value: StoredLearnedStyle } | null = null
 let warned = false
@@ -153,7 +164,7 @@ const copy = (value: StoredLearnedStyle): StoredLearnedStyle => ({ ...value, rul
 
 function build(enabled: boolean, rules: LearnedStyleRule[], updatedAt: string | null): StoredLearnedStyle {
   const text = renderLearnedStyle(rules)
-  return { enabled, rules, text, hash: learnedStyleHash(text), updatedAt }
+  return { enabled, rules, text, hash: learnedStyleHash(text), revision: learnedStyleRevision(text, enabled), updatedAt }
 }
 
 /** The stored setting, validated again on every read. Missing or corrupt reads as empty. mtime-cached. */

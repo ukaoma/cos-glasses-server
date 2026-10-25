@@ -12,11 +12,12 @@
 //
 // 6.91.0 (plan r2, contract frozen 2026-10-24). Token-protected too:
 //
-//   GET    /api/dictation/learned-style   {enabled, rules, text, hash, updatedAt, registers, kinds, allowlist, ...}
-//   PUT    /api/dictation/learned-style   {enabled?, rules?: [{id, kind, register, param?, count, lastSeen}], baseHash?}
-//                                         Strict keys. text, hash and updatedAt are the server's (400);
-//                                         a stale baseHash is 409; over 20 rules or 1,500 characters is 413.
-//   DELETE /api/dictation/learned-style   Reset: the rules go, the switch returns to on
+//   GET    /api/dictation/learned-style   {enabled, rules, text, hash, revision, updatedAt, registers, kinds, allowlist, ...}
+//   PUT    /api/dictation/learned-style   {enabled?, rules?: [{id, kind, register, param?, count, lastSeen}], baseRevision?}
+//                                         Strict keys. text, hash, revision and updatedAt are the server's
+//                                         (400); a stale baseRevision (it covers the rules AND the switch)
+//                                         is 409; over 20 rules or 1,500 characters is 413.
+//   DELETE /api/dictation/learned-style   Reset: the rules go, the switch stays as it was
 //   GET    /api/dictation/polish/options  {promptVersion, effectiveVersion, source, envOverride, updatedAt}
 //   PUT    /api/dictation/polish/options  {promptVersion: "default" | "v3"}: Control's "Previous polish"
 //
@@ -165,6 +166,7 @@ function styleView(stored: StoredLearnedStyle) {
     rules: stored.rules,
     text: stored.text,
     hash: stored.hash,
+    revision: stored.revision,
     updatedAt: stored.updatedAt,
     // Control reads the app-to-register map here, so it never keeps a second table. The literal
     // register is opt-in (COS_DICTATION_REGISTERS=1); `registersEnabled` says whether it applies.
@@ -181,8 +183,14 @@ function styleView(stored: StoredLearnedStyle) {
   }
 }
 
-const STYLE_PUT_KEYS = new Set(['enabled', 'rules', 'baseHash'])
-const SERVER_OWNED = new Set(['text', 'hash', 'updatedAt'])
+const STYLE_PUT_KEYS = new Set(['enabled', 'rules', 'baseRevision'])
+const SERVER_OWNED = new Set(['text', 'hash', 'revision', 'updatedAt'])
+
+/** A Node error code ("EACCES") for the log, never a message (a message can carry the path). */
+function errorCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,23}$/.test(code) ? code : 'error'
+}
 
 dictationPolishSettingsRouter.get('/dictation/learned-style', (_req, res) => {
   res.json(styleView(readLearnedStyle()))
@@ -195,16 +203,16 @@ dictationPolishSettingsRouter.put('/dictation/learned-style', (req, res) => {
   const owned = keys.find(key => SERVER_OWNED.has(key))
   if (owned) return res.status(400).json({ error: 'server_owned_field', field: owned })
   if (!keys.every(key => STYLE_PUT_KEYS.has(key)) || !('rules' in body || 'enabled' in body)) {
-    return res.status(400).json({ error: 'invalid_body', expected: { enabled: 'boolean?', rules: '[{id, kind, register, param, count, lastSeen}]?', baseHash: 'string?' } })
+    return res.status(400).json({ error: 'invalid_body', expected: { enabled: 'boolean?', rules: '[{id, kind, register, param, count, lastSeen}]?', baseRevision: 'string?' } })
   }
   if ('enabled' in body && typeof body.enabled !== 'boolean') return res.status(400).json({ error: 'invalid_enabled' })
-  if ('baseHash' in body && (typeof body.baseHash !== 'string' || !/^(?:[0-9a-f]{8})?$/.test(body.baseHash))) {
-    return res.status(400).json({ error: 'invalid_base_hash' })
+  if ('baseRevision' in body && (typeof body.baseRevision !== 'string' || !/^[0-9a-f]{8}$/.test(body.baseRevision))) {
+    return res.status(400).json({ error: 'invalid_base_revision' })
   }
   const current = readLearnedStyle()
-  if (typeof body.baseHash === 'string' && body.baseHash !== current.hash) {
-    // Someone else saved first: re-GET and merge.
-    return res.status(409).json({ error: 'base_hash_mismatch', hash: current.hash })
+  if (typeof body.baseRevision === 'string' && body.baseRevision !== current.revision) {
+    // Someone else saved first (rules or the switch): re-GET and merge.
+    return res.status(409).json({ error: 'base_revision_mismatch', revision: current.revision })
   }
   let rules = current.rules
   if ('rules' in body) {
@@ -220,16 +228,19 @@ dictationPolishSettingsRouter.put('/dictation/learned-style', (req, res) => {
   }
   try {
     res.json(styleView(writeLearnedStyle(typeof body.enabled === 'boolean' ? body.enabled : current.enabled, rules)))
-  } catch {
+  } catch (err) {
     // The reason stays generic: an fs error can carry the path, never the rules, but say less.
+    console.warn(`[dictation-polish] learned_style_not_saved put (${errorCode(err)})`)
     res.status(500).json({ error: 'learned_style_not_saved' })
   }
 })
 
 dictationPolishSettingsRouter.delete('/dictation/learned-style', (_req, res) => {
   try {
-    res.json(styleView(writeLearnedStyle(true, [])))
-  } catch {
+    // Reset clears the rules and leaves the person's switch as it was: an Off stays off.
+    res.json(styleView(writeLearnedStyle(readLearnedStyle().enabled, [])))
+  } catch (err) {
+    console.warn(`[dictation-polish] learned_style_not_saved delete (${errorCode(err)})`)
     res.status(500).json({ error: 'learned_style_not_saved' })
   }
 })
@@ -263,7 +274,8 @@ dictationPolishSettingsRouter.put('/dictation/polish/options', (req, res) => {
   try {
     writePolishOptions(body.promptVersion as PolishPromptOption)
     res.json(optionsView())
-  } catch {
+  } catch (err) {
+    console.warn(`[dictation-polish] options_not_saved (${errorCode(err)})`)
     res.status(500).json({ error: 'options_not_saved' })
   }
 })
