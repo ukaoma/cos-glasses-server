@@ -133,8 +133,14 @@ builds the capture, the classifier and Your style.
   (+3.2%); Sonnet p50 3,024 vs 2,949 (+2.5%), p90 4,460 vs 3,997 (+11.6%). Stacked arm (Haiku, v4 + 1,033-character
   instructions + the largest learned style, 767 characters): p50 3,147 vs 2,794 (+12.6%), p90 3,646 vs 3,520 (+3.6%),
   backtracks 11/11. C4 cold, Sonnet: v4 p50 4,346 vs v3 4,713. The absolute Haiku bar is measured after install.
-  **Pending before npm latest:** the stacked arm on the pair that ships, Sonnet with v4, instructions and the learned
-  style (about 15 calls). The stacked number above is Haiku, which does not get v4 or the style.
+  **Pending before npm latest, run 2026-10-25: DISPROVEN (p90).** The stacked arm on the pair that ships, Sonnet with
+  v4, 985-character instructions and the largest learned style (13 rules, 767 characters), against plain Sonnet v4, on
+  the 15-case backtrack and new-preserve slice, interleaved, warm (29 of 30 warm; 30 calls, 1 plain call timed out at
+  20 s): p50 4,968 vs 4,762 ms (+4.3%), p90 9,260 vs 6,311 ms (+46.7%, over the +25% bar; 4 of 15 stacked calls took
+  7.9 to 18.0 s, 1 of 14 plain). Backtracks 11/11 in the model's answers on both arms; new preserve 4/4 stacked, 3/3
+  plain. What would go out: 9/11 stacked, because the meaning guard refused two answers that followed the instruction
+  "write times in the form 10:30 am" ("at ten" as "10:00 am" adds "am" and "00"). The Haiku stacked number above ran
+  without its instructions: that set is 1,033 characters, over the 1,000 cap, so the reader refused it.
 - **C6: PROVEN** (route and golden tests). Every new route is 401 without the token; an old client body works; a skip
   path sends no `polishOutcome`; a port of the 0.5.343 helper and `choose` logs a guarded answer as
   `fillers_only:failed` or `skipped:failed`, never applied; all four switches off, and Haiku outside a terminal, give the
