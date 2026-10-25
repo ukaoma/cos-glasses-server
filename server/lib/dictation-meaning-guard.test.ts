@@ -264,8 +264,74 @@ describe('6.91.0 S9: lists and spoken times the prompt asks for', () => {
     expect(meaningGuardProblem('call at quarter to five', 'Call at 4:45.')).toBeNull()
     expect(meaningGuardProblem('call at a quarter past nine', 'Call at 9:15.')).toBeNull()
     expect(meaningGuardProblem('the call is at quarter to one', 'The call is at 12:45.')).toBeNull()
+    // "quarter to one" is 12:45 either way of the day, not only just after midnight.
+    expect(meaningGuardProblem('the call is at quarter to one', 'The call is at 12:45 pm.')).toBeNull()
     expect(meaningGuardProblem('meet at half past 10', 'Meet at 10:30.')).toBeNull()
     expect(kind('meet at half past ten', 'Meet at 10:15.')).toBe('number')
     expect(kind('call at quarter to five', 'Call at 5:45.')).toBe('number')
+  })
+})
+
+describe('6.91.1: clock times are compared as minutes since midnight', () => {
+  // Each case its own test: am, pm and ":00" are format only, and either clock reading of an hour counts.
+  it('"at ten" written "at 10:00 am" is kept', () => {
+    expect(meaningGuardProblem('at ten', 'At 10:00 am.')).toBeNull()
+  })
+  it('"ten thirty Central" written "10:30 am Central" is kept', () => {
+    expect(meaningGuardProblem('the call is ten thirty Central', 'The call is 10:30 am Central.')).toBeNull()
+  })
+  it('"ten thirty pm" written "22:30" is kept', () => {
+    expect(meaningGuardProblem('ten thirty pm', '22:30')).toBeNull()
+  })
+  it('without am or pm an hour reads both ways: "ten thirty" written "22:30" is kept', () => {
+    expect(meaningGuardProblem('ten thirty', '22:30')).toBeNull()
+  })
+  it('an hour with pm is a time: "seven pm" written "19:00" is kept', () => {
+    expect(meaningGuardProblem('seven pm', '19:00')).toBeNull()
+  })
+  it('"meet at 9" written "meet at 9:00" is kept', () => {
+    expect(meaningGuardProblem('meet at 9', 'Meet at 9:00.')).toBeNull()
+  })
+  it('"ten thirty" written "11:30" is a changed number', () => {
+    expect(kind('ten thirty', '11:30')).toBe('number')
+  })
+  it('C5 b02 with the time-format instruction: "at ten" as "10:00 am" after a correction is kept', () => {
+    expect(meaningGuardProblem('schedule it for Tuesday no wait Wednesday at ten', 'Schedule it for Wednesday at 10:00 am.')).toBeNull()
+  })
+  it('C5 b09 with the time-format instruction: the corrected time as "10:30 am" is kept', () => {
+    expect(meaningGuardProblem('the call is at nine thirty I mean ten thirty Central', 'The call is at 10:30 am Central.')).toBeNull()
+  })
+  it('a bare hour written in 24-hour form is kept', () => {
+    expect(meaningGuardProblem('meet at ten', 'Meet at 22:00.')).toBeNull()
+  })
+  it('a trailing ":00" may go: "3:00" written "3" is kept, but a dropped pm is not', () => {
+    expect(meaningGuardProblem('call at 3:00', 'Call at 3.')).toBeNull()
+    expect(kind('call at 3:00 pm', 'Call at 3.')).toBe('number')
+  })
+  it('"twenty two thirty" is 22:30: "10:30 pm" is kept, "10:30 am" is a change', () => {
+    expect(meaningGuardProblem('twenty two thirty', '10:30 pm')).toBeNull()
+    expect(kind('twenty two thirty', '10:30 am')).toBe('number')
+  })
+  it('"ten o\'clock" and "ten oh five" are times', () => {
+    expect(meaningGuardProblem("ten o'clock", '10 am')).toBeNull()
+    // "o'clock" makes it a time, so its pm is part of it.
+    expect(kind("ten o'clock pm", '10:00 am')).toBe('number')
+    expect(meaningGuardProblem('ten oh five', '10:05')).toBeNull()
+    expect(meaningGuardProblem('ten oh five pm', '22:05')).toBeNull()
+    expect(kind('ten oh five', '10:15')).toBe('number')
+  })
+  it('a year or a pair of numbers that reads like a time still matches its plain form', () => {
+    expect(meaningGuardProblem('built in nineteen fifty', 'Built in 1950.')).toBeNull()
+    expect(meaningGuardProblem('meet at 10 30', 'Meet at 10:30.')).toBeNull()
+    // Its am is format only too.
+    expect(meaningGuardProblem('meet at 10 30', 'Meet at 10:30 am.')).toBeNull()
+  })
+  it('a new time, or am turned pm, still trips', () => {
+    expect(meaningGuardProblem('meet Dana', 'Meet Dana at 10:00.')!.added.number).toBe(1)
+    expect(kind('at 7 am', 'At 7 pm.')).toBe('number')
+    expect(kind('meet at ten', 'Meet at 11:00.')).toBe('number')
+    // A 24-hour time is explicit: written as a bare "3" it loses its afternoon.
+    expect(kind('call at 15:00', 'Call at 3.')).toBe('number')
+    expect(kind('book the 15:00 slot for 3 people', 'Book the 3 slot for 3 people.')).toBe('number')
   })
 })

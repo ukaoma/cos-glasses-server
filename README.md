@@ -875,7 +875,10 @@ built-in polish rules, which keep precedence.
   `polishOutcome: "guarded"`, `guard: "<kind>"` and `polishSkipped: "failed"`.
   A self-correction may drop what it replaced. "2 million", "25th",
   "dont", "half past ten" and a numbered list you asked for read as what you
-  said. The log line carries counts only. `COS_DICTATION_MEANING_GUARD=0` turns
+  said. 6.91.1: clock times compare as minutes since midnight, so "at ten"
+  written "10:00 am" and "ten thirty pm" written "22:30" are kept (am, pm and
+  ":00" are format only), while "ten thirty" written "11:30" trips. The log
+  line carries counts only. `COS_DICTATION_MEANING_GUARD=0` turns
   it off.
 - **Finalize answers** add, all optional: `polishOutcome` (`polished`,
   `unchanged` or `guarded`, about the model step; an empty model answer is a

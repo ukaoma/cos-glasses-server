@@ -1,3 +1,29 @@
+## 6.91.1 - The meaning guard reads clock times, so a time format you asked for is not refused
+
+2026-10-25: canary C5 on the pair that ships (Sonnet, v4, instructions and the learned style) found the 6.91.0 guard
+refusing answers that followed the person's own instruction "write times in the form 10:30 am": "at ten" written
+"10:00 am" counted "am" and "00" as added numbers, and the unpolished text went out. 6.90.0 pasted that formatting, so
+this was a step backward for any Sonnet user with a time-format instruction. Fixed before npm latest moves. Zero
+`claude -p` calls.
+
+- **Clock times** (`server/lib/dictation-meaning-guard.ts`): every time, spoken or written, in the dictation and in the
+  answer, is read as minutes since midnight: "ten", "ten thirty", "half past ten", "quarter to five", "ten o'clock",
+  "ten oh five", 10, 10:00, 10:30, am, pm, a.m., p.m., "22:30" and "twenty two thirty". Without am or pm an hour from
+  1 to 12 reads both ways, so "ten thirty pm" written "22:30" and "ten thirty" written "22:30" are kept. am, pm and a
+  trailing ":00" are format only and never count as added numbers: "at ten" written "at 10:00 am", "ten thirty
+  Central" written "10:30 am Central" and "meet at 9" written "meet at 9:00" are kept. A real change still trips:
+  "ten thirty" written "11:30", "7 am" written "7 pm", "3:00 pm" written "3", and a time the speaker never said. A year
+  that reads like a time ("nineteen fifty" as "1950") still matches its plain form.
+- **C5 re-checked offline:** the 30 stored C5 answers (synthetic) run through the 6.91.1 guard: 0 of 15 stacked and 0
+  of 14 plain refused (6.91.0 refused b02 and b09), so what would go out is 11/11 backtracks on both arms. Every other
+  stored synthetic output: still 0 false trips in 356. Route test: on Sonnet v4 with the time-format instruction saved,
+  b02 and b09 go out polished, and a changed time is still refused.
+- **Eval:** `STACKED_INSTRUCTIONS` is 985 characters (it was 1,033, over the 1,000 cap, so the reader refused it and
+  the 6.91.0 Haiku stacked arm ran without instructions), and the eval now stops if the reader would refuse the set.
+- **Known limit, kept:** the largest possible stack (985-character instructions and all 13 learned-style rules) costs
+  Sonnet v4 +4.3% at p50 and **+46.7% at p90** (9,260 vs 6,311 ms, C5 2026-10-25, n=15). No user has that today: the
+  learned style starts empty and grows a rule at a time. Prompts are unchanged for it.
+
 ## 6.91.0 - Dictation that learns your voice: prompt v4 on Sonnet, Your style, the meaning guard, an opt-in literal register
 
 2026-10-24 22:45: extend AI polish into "a Grammarly but further for voice dictation", remove ungrammatical spoken

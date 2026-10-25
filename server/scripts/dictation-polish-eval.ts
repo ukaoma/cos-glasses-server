@@ -202,13 +202,14 @@ export function summarize(rows: RunRow[]) {
 
 /**
  * A ~1,000-character instruction set and the largest learned style, for the C5 stacked arm. Synthetic.
+ * 6.91.1: 985 characters. It was 1,033, over the 1,000 cap, so the reader refused it and the 6.91.0
+ * Haiku stacked arm ran without instructions; main() now refuses a set the reader would refuse.
  * Since option C (6.91.0) the pipeline gives the learned style only to Sonnet with v4, so a Haiku
  * stacked arm now carries the instructions alone; the 6.91.0 CHANGELOG numbers predate that.
  */
 export const STACKED_INSTRUCTIONS = [
   'Use Oxford commas in every list of three or more items.',
   'Write product names exactly as Bottle POS, IT Retail, HubSpot, Tableau and Jewel360.',
-  'Prefer American spelling over British spelling.',
   'Write numbers of ten or more as digits, and spell out one through nine.',
   'Use sentence case for anything that looks like a heading.',
   'When I list three or more things in a row, format them as a dash list.',
@@ -258,6 +259,10 @@ async function main() {
   const style = await import('../lib/dictation-learned-style.js')
   if (stacked) {
     instructions.writeCustomInstructions(STACKED_INSTRUCTIONS)
+    // The store writes anything; its reader refuses a set over the cap. Test what ships, or stop.
+    if (instructions.readCustomInstructions().customInstructions !== STACKED_INSTRUCTIONS) {
+      throw new Error(`STACKED_INSTRUCTIONS (${STACKED_INSTRUCTIONS.length} characters) would not reach the model`)
+    }
     style.writeLearnedStyle(true, [
       ...style.LEARNED_STYLE_ALLOWLIST.map((param, i) => ({ id: `stack-${i}`, kind: 'drop_phrase' as const, register: 'all' as const, param, count: 2, lastSeen: null })),
       { id: 'stack-contractions', kind: 'contractions' as const, register: 'all' as const, param: 'use', count: 2, lastSeen: null },

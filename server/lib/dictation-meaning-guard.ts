@@ -11,9 +11,16 @@
  *   "cant"), all one NEG token; never, no, none, nothing, nobody, neither, nor, without, unless,
  *   except;
  * - number: digits, number words, ordinals ("twenty fifth" is 25, like "25th"), %, $, a digit with a
- *   scale word ("2 million" is two million, like "two million"), clock times ("half past ten" is
- *   10:30, "quarter to five" 4:45) and am/pm. A decimal point splits a number on both sides ("one
- *   point five" and "1.5" are both 1 then 5);
+ *   scale word ("2 million" is two million, like "two million"), and clock times. A decimal point
+ *   splits a number on both sides ("one point five" and "1.5" are both 1 then 5);
+ * - times (6.91.1): every clock time, spoken or written, in the dictation and in the answer, is read
+ *   as minutes since midnight: "ten thirty", "half past ten", "quarter to five", "ten o'clock",
+ *   "10:30", "10:30 am", "ten thirty pm", "22:30", "twenty two thirty". Without am or pm an hour
+ *   from 1 to 12 reads both ways, so "ten thirty pm" written "22:30" is kept and "ten thirty" written
+ *   "11:30" is a changed number. am, pm and a trailing ":00" are format only: "at ten" written
+ *   "at 10:00 am" is kept. A time is kept when the answer has the same time, when it is on the hour
+ *   and the answer says just that hour (and the dictation said no am or pm), or when every part of
+ *   it survives as a plain number ("nineteen fifty" written "1950");
  * - date: a weekday or a month;
  * - name: a mid-sentence capital, a dictionary term or a speaker name. A sentence-initial word and
  *   "I" are not names unless they are dictionary terms. Skipped for a dictation that is not English.
@@ -52,8 +59,10 @@ export function meaningGuardEnabled(env: NodeJS.ProcessEnv = process.env): boole
   return !(raw === '0' || raw === 'false' || raw === 'off')
 }
 
-interface Tok { raw: string; low: string; sentenceStart: boolean; pause: boolean; listMarker: boolean }
-interface Item { kind: MeaningGuardKind; key: string; pos: number; list?: boolean }
+interface Tok { raw: string; low: string; sentenceStart: boolean; pause: boolean; listMarker: boolean; colonNext: boolean }
+interface Item { kind: MeaningGuardKind; key: string; pos: number; list?: boolean; inTime?: boolean; time?: TimeSpan }
+/** A clock time: the tokens it covers, its minutes since midnight (two readings without am/pm), its parts. */
+interface TimeSpan { start: number; end: number; times: number[]; explicit: boolean; parts: string[] }
 
 const ONES = new Map(['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
   'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'].map((w, i) => [w, i]))
@@ -148,7 +157,8 @@ function tokenize(text: string): Tok[] {
     const sentenceStart = before.length === 0 || /[.!?:\n•]$/.test(before) || /\n\s*(?:[-*•]|\d+[.)])?\s*$/.test(text.slice(0, m.index))
     // "1." or "2)" at the start of a line: a list number.
     const listMarker = /^\d+$/.test(m[0]) && /(?:^|\n)[ \t]*$/.test(text.slice(0, m.index)) && /^[.)]/.test(text.slice(m.index + m[0].length))
-    out.push({ raw: m[0], low: m[0].toLowerCase(), sentenceStart, pause: /[,;.!?—–()]/.test(gap), listMarker })
+    const colonNext = /^:\d/.test(text.slice(m.index + m[0].length))
+    out.push({ raw: m[0], low: m[0].toLowerCase(), sentenceStart, pause: /[,;.!?—–()]/.test(gap), listMarker, colonNext })
     last = m.index + m[0].length
   }
   return out
@@ -230,6 +240,74 @@ function numberRun(tokens: Tok[], i: number): { value: number; end: number } | n
   return { value: total + group, end: j - 1 }
 }
 
+const MERIDIEM = new Set(['am', 'pm'])
+
+/** Minutes since midnight: one reading with am/pm or a 24-hour hour, both readings for 1 to 12 without. */
+function clockMinutes(hour: number, minute: number, meridiem: string | undefined): { times: number[]; explicit: boolean } {
+  if (meridiem && hour >= 1 && hour <= 12) return { times: [((hour % 12) + (meridiem === 'pm' ? 12 : 0)) * 60 + minute], explicit: true }
+  if (hour >= 1 && hour <= 12) return { times: [(hour % 12) * 60 + minute, ((hour % 12) + 12) * 60 + minute], explicit: false }
+  return { times: [hour * 60 + minute], explicit: true }
+}
+
+/** The readings of a bare hour ("ten" or "10") as a time on the hour. */
+function hourReadings(n: number): number[] {
+  if (n >= 1 && n <= 12) return [(n % 12) * 60, ((n % 12) + 12) * 60]
+  return n === 0 || (n >= 13 && n <= 23) ? [n * 60] : []
+}
+
+/** A spoken hour: one to nineteen, twenty, twenty one to twenty three. */
+function spokenHour(tokens: Tok[], i: number): { value: number; end: number } | null {
+  const w = tokens[i]?.low ?? ''
+  const v = ONES.get(w)
+  if (v !== undefined) return v >= 1 ? { value: v, end: i } : null
+  if (w !== 'twenty') return null
+  const ones = ONES.get(tokens[i + 1]?.low ?? '')
+  return ones !== undefined && ones >= 1 && ones <= 3 ? { value: 20 + ones, end: i + 1 } : { value: 20, end: i }
+}
+
+/** Spoken minutes after an hour: "oh five", ten to nineteen, twenty to fifty nine. */
+function spokenMinutes(tokens: Tok[], i: number): { value: number; end: number } | null {
+  const w = tokens[i]?.low ?? ''
+  const next = ONES.get(tokens[i + 1]?.low ?? '')
+  if (w === 'oh' || w === 'o') return next !== undefined && next >= 1 && next <= 9 ? { value: next, end: i + 1 } : null
+  const v = ONES.get(w)
+  if (v !== undefined) return v >= 10 ? { value: v, end: i } : null
+  const tens = TENS.get(w)
+  if (tens === undefined || tens > 50) return null
+  return next !== undefined && next >= 1 && next <= 9 ? { value: tens + next, end: i + 1 } : { value: tens, end: i }
+}
+
+/** One clock time starting at token i, or null. An hour alone is not a time; it needs minutes or am/pm. */
+function timeAt(tokens: Tok[], i: number): Omit<TimeSpan, 'parts'> | null {
+  const t = tokens[i]
+  let hour: number, end: number
+  if (/^\d{1,2}$/.test(t.low)) { hour = Number.parseInt(t.low, 10); end = i }
+  else { const h = spokenHour(tokens, i); if (!h) return null; hour = h.value; end = h.end }
+  let minute = 0, hasMinutes = false
+  const next = tokens[end + 1]?.low ?? ''
+  if (tokens[end].colonNext && /^\d{2}$/.test(next)) { minute = Number.parseInt(next, 10); end++; hasMinutes = true }
+  else if (!/^\d/.test(t.low)) { const m = spokenMinutes(tokens, end + 1); if (m) { minute = m.value; end = m.end; hasMinutes = true } }
+  const meridiem = MERIDIEM.has(tokens[end + 1]?.low ?? '') ? tokens[end + 1].low : undefined
+  if (!hasMinutes && !meridiem) return null
+  if (meridiem) end++
+  if (hour > 23 || minute > 59) return null
+  const { times, explicit } = clockMinutes(hour, minute, meridiem)
+  return { start: i, end, times, explicit }
+}
+
+/** Every clock time in the text, as time items; the number items inside one become its parts. */
+function addTimes(tokens: Tok[], items: Item[]): void {
+  for (let i = 0; i < tokens.length; i++) {
+    const found = timeAt(tokens, i)
+    if (!found) continue
+    const parts = items.filter(it => it.kind === 'number' && it.pos >= found.start && it.pos <= found.end)
+    parts.forEach(it => { it.inTime = true })
+    const time: TimeSpan = { ...found, parts: parts.map(it => it.key) }
+    items.push({ kind: 'number', key: `time:${time.times.join('/')}`, pos: found.start, time })
+    i = found.end
+  }
+}
+
 interface Extract { items: Item[]; tokens: Tok[] }
 
 function extract(text: string, knownPhrases: string[][], withNames: boolean): Extract {
@@ -281,6 +359,7 @@ function extract(text: string, knownPhrases: string[][], withNames: boolean): Ex
       if (!t.sentenceStart || midCapital.has(fold(t.low))) items.push({ kind: 'name', key: fold(t.low), pos: i })
     }
   }
+  addTimes(tokens, items)
   // Dictionary terms and speaker names, in any case and position, as whole phrases.
   if (withNames) {
     for (const phrase of knownPhrases) {
@@ -390,13 +469,35 @@ export function meaningGuardProblem(cleaned: string, answer: string, known: stri
     return respelled
   }
 
+  // 6.91.1: clock times, compared as minutes since midnight (see the header).
+  const inTimes = input.items.filter(i => i.time).map(i => i.time!)
+  const outTimes = output.items.filter(i => i.time).map(i => i.time!)
+  const bareHours = (items: Item[]) => items.filter(i => i.kind === 'number' && !i.time && !i.inTime && /^\d+$/.test(i.key)).map(i => Number(i.key))
+  const inBare = bareHours(input.items)
+  const outBare = bareHours(output.items)
+  const sameTime = (a: TimeSpan, b: TimeSpan) => a.times.some(t => b.times.includes(t))
+  // A bare hour matches a time only on that hour: its readings are all on the hour.
+  const onTheHour = (time: TimeSpan, n: number) => hourReadings(n).some(t => time.times.includes(t))
+  const numberKept = (key: string) => outKeys.get('number')!.has(key) || keptByJoin.has(key)
+  const timeKept = (time: TimeSpan) => outTimes.some(o => sameTime(time, o))
+    || (!time.explicit && outBare.some(n => onTheHour(time, n)))
+    || time.parts.every(numberKept)
+  // A time in the answer is not new when the dictation had it, had its hour ("at ten" as "10:00 am"),
+  // or had its parts as numbers. am, pm and ":00" are format only.
+  const timeAccounted = (time: TimeSpan) => inTimes.some(i => sameTime(i, time))
+    || inBare.some(n => onTheHour(time, n))
+    || time.parts.filter(p => !MERIDIEM.has(p) && p !== '0').every(p => inKeys.get('number')!.has(p))
+  const kept = (item: Item): boolean => item.kind === 'name' ? nameKept(item.key)
+    : item.time ? timeKept(item.time)
+    : item.kind === 'number' ? numberKept(item.key) || (/^\d+$/.test(item.key) && outTimes.some(o => onTheHour(o, Number(item.key))))
+    : outKeys.get(item.kind)!.has(item.key)
+
   // A dropped token with a correction marker after it and a same-kind replacement the answer kept.
   const exempt = (item: Item): boolean => {
     if (item.kind === 'negation') return false
     for (const { start, end, reach } of spans) {
       if (start <= item.pos || start - item.pos > DROP_TO_MARKER) continue
-      const replaced = input.items.some(r => r.kind === item.kind && r.key !== item.key && r.pos > end && r.pos - end <= reach
-        && (r.kind === 'name' ? nameKept(r.key) : outKeys.get(r.kind)!.has(r.key)))
+      const replaced = input.items.some(r => r.kind === item.kind && r.key !== item.key && r.pos > end && r.pos - end <= reach && kept(r))
       if (replaced) return true
     }
     return false
@@ -414,9 +515,9 @@ export function meaningGuardProblem(cleaned: string, answer: string, known: stri
     const id = `${item.kind}:${item.key}`
     if (seen.has(id)) continue
     if (item.kind === 'negation' && countNegations) continue
-    const kept = item.kind === 'name' ? nameKept(item.key)
-      : outKeys.get(item.kind)!.has(item.key) || (item.kind === 'number' && keptByJoin.has(item.key))
-    if (kept) { seen.add(id); continue }
+    // A number inside a clock time is judged with its time.
+    if (item.inTime) continue
+    if (kept(item)) { seen.add(id); continue }
     // Every occurrence must be exempt for a drop to be excused.
     const occurrences = input.items.filter(i => i.kind === item.kind && i.key === item.key)
     seen.add(id)
@@ -437,7 +538,9 @@ export function meaningGuardProblem(cleaned: string, answer: string, known: stri
     const outNumberItems = output.items.filter(i => i.kind === 'number')
     for (const key of outNumbers) if (outNumberItems.filter(i => i.key === key).every(i => i.list)) listOnly.add(key)
   }
-  for (const key of outNumbers) if (!inKeys.get('number')!.has(key) && !joinedOut.has(key) && !listOnly.has(key)) added.number++
+  const plainOut = new Set(output.items.filter(i => i.kind === 'number' && !i.time && !i.inTime).map(i => i.key))
+  for (const key of plainOut) if (!inKeys.get('number')!.has(key) && !joinedOut.has(key) && !listOnly.has(key)) added.number++
+  for (const time of outTimes) if (!timeAccounted(time)) added.number++
 
   const kind = MEANING_GUARD_KINDS.find(k => dropped[k] > 0 || added[k] > 0)
   return kind ? { kind, dropped, added, namesSkipped: !withNames } : null

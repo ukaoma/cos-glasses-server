@@ -1122,6 +1122,21 @@ describe('public prompt draft recovery contract', () => {
     expect((await finalizeWith({ text: 'open the pricing page now', autocleanModel: 'haiku' })).json).toMatchObject({ text: 'open the pricing page now', polishSkipped: 'link_guard', polishOutcome: 'guarded', guard: 'link' })
   })
 
+  it('6.91.1: on Sonnet v4 with a time-format instruction, the formatted times of C5 b02 and b09 are not guarded', async () => {
+    await withInstructions('Write times in the form 10:30 am.', async () => {
+      autoCleanDictation.mockImplementation(async () => 'Schedule it for Wednesday at 10:00 am.')
+      expect((await finalizeWith({ text: 'schedule it for Tuesday no wait Wednesday at ten' })).json)
+        .toMatchObject({ text: 'Schedule it for Wednesday at 10:00 am.', polished: true, polishOutcome: 'polished', polishPrompt: 'v4', customInstructions: true })
+      autoCleanDictation.mockImplementation(async () => 'The call is at 10:30 am Central.')
+      const b09 = await finalizeWith({ text: 'the call is at nine thirty I mean ten thirty Central' })
+      expect(b09.json).toMatchObject({ text: 'The call is at 10:30 am Central.', polishOutcome: 'polished' })
+      expect(b09.json.guard).toBeUndefined()
+      // A real change of time is still refused.
+      autoCleanDictation.mockImplementation(async () => 'The call is at 11:30 am Central.')
+      expect((await finalizeWith({ text: 'the call is at ten thirty Central' })).json).toMatchObject({ polishOutcome: 'guarded', guard: 'number' })
+    })
+  })
+
   it('6.91.0 S6: an empty model answer is a failed polish, never "unchanged"', async () => {
     autoCleanDictation.mockImplementation(async () => '   ')
     const result = await finalizeWith({ text: 'scratch that' })
