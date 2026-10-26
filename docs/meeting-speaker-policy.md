@@ -24,8 +24,9 @@ This is backend qualification. The candidate still needs the Control helper/UI i
 ## Live Mac anonymous voices
 
 Mac recordings retain the fixed High-confidence named identity floor (0.88).
-With the existing `COS_MAC_VOICE_LABELS` switch enabled, successful live Nemotron
-tracks can additionally carry anonymous `Voice N` labels at identity similarity
+Live `Voice N` is off by default (every live Mac chunk reads `Ext`, as 6.92.0).
+With `COS_MAC_LIVE_VOICES=anchors` (and `COS_MAC_VOICE_LABELS` not off), successful
+live Nemotron tracks can carry anonymous `Voice N` labels at identity similarity
 zero. These labels mean acoustic continuity inside this capture, never a person.
 The chunk receipt and live transcript retain the existing `speaker` and
 `segments[].speaker` fields; clients should display these distinct anonymous
@@ -49,8 +50,11 @@ saved recordings are untouched; final whole-meeting anonymous diarization
 retains its current quality gates. When live labels exist, a clean, exclusive
 window must prove each final-channel crosswalk to the existing Voice N.
 Contradictory/split crosswalks cannot transfer a label to other chunks; existing
-local turns retain their evidence. That pass cannot renumber known voices or
-allocate new numbers to other channels. These conservative guards are
+local turns retain their evidence. That pass cannot renumber known voices. A final
+channel that no live `Voice N` turn touches (a voice the live path never proved) is
+numbered above every live number, so a saved meeting is never worse than the
+6.92.0 pass; a channel a live turn contradicts stays `Ext`. With no live `Voice N`
+at all (the default) nothing is restricted. These conservative guards are
 not an acoustic calibration claim; real playback audio still needs qualification.
 
 Mac renames remain text-only: `enrolNamedVoice` returns `mac_capture`. Neither
@@ -63,15 +67,24 @@ and provenance/retraction support; ordinary relabeling is not that consent.
 
 ## Live Mac window replay (6.93.0, opt-in)
 
-`COS_MAC_LIVE_VOICES=window` replaces the per-chunk anchors with window replay
+`COS_MAC_LIVE_VOICES=window` (default off; `anchors` is the per-chunk path above)
+replaces the per-chunk anchors with window replay
 (`server/lib/mac-window-voices.ts`, `server/lib/mac-window-replay.ts`). Chunk k is
 diarized together with the durable chunks before it (contiguous, at most 5 chunks
 and 30 s), so the model's slots are consistent across the boundary inside that
 window. A slot inherits a capture track only through frames the capture already
 attributed: one to one, at least 1 s of exclusive overlap, at least 80% of that
 slot's overlap on one track. A slot with attributed overlap that fails those
-tests gets no track and cannot mint a number. A track becomes `Voice N` after two
-clean proof chunks (2 s alone, purity 0.9, distinct chunk and audio hash).
+tests gets no track and cannot mint a number. A carried slot is used only when the
+chunk diarized alone agrees (at least half of the slot's exclusive frames placed, at
+least 90% of those on one channel): a window model that merged a new voice into an old
+slot is not carried, and its frames are stored untracked so the error cannot feed the
+next window. A track becomes `Voice N` after two clean proof chunks (2 s alone,
+purity 0.9, distinct chunk and audio hash). A track no remembered frame refers to is
+evicted and its id reused (12 live ids), so a long meeting cannot exhaust them; its
+number stays spent. The window run's timeout is sized from its length (1.5 s per 6 s
+of audio, 7.5 s for 30 s), a timeout never counts toward the breaker shared with G2,
+and a timeout or refused geometry falls back to the plain per-chunk run.
 
 The state is per-frame track ids for the last 4 chunks plus track proofs and the
 number high-water. It lives in the private active-session file, is validated on

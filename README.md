@@ -656,19 +656,28 @@ and counts only, never a speaker name, path or error text; those stay in
 
 ### Live Mac voices (6.92.1, 6.93.0)
 
-A live Mac recording used to show every chunk as one `Ext` speaker until it was
-saved. Two switches change that, both anonymous: a `Voice N` is never a name,
-never enrolled and never trained, and renaming one is text only.
+A live Mac recording shows every chunk as one `Ext` speaker until it is saved, as in
+6.92.0. Live `Voice N` is **off by default** and has one switch,
+`COS_MAC_LIVE_VOICES`, with two opt-in values. Both are anonymous: a `Voice N` is
+never a name, never enrolled and never trained, and renaming one is text only.
 
-- **`COS_MAC_VOICE_LABELS`** (on by default, 6.92.1): a chunk reads `Voice N` after
-  two independent clean observations agree. On natural audio this rarely fires.
-- **`COS_MAC_LIVE_VOICES=window`** (off by default, 6.93.0): each chunk is diarized
-  inside the last five durable chunks (30 s) with the same pinned CLI and live
-  budget, so a voice keeps its number across chunk boundaries. A voice silent for
-  longer than the window comes back unidentified, never under another voice's
-  number. Set it in `~/.cos-glasses/.env` and restart when nothing is recording.
+- **`COS_MAC_LIVE_VOICES=anchors`** (6.92.1 path): a chunk reads `Voice N` after two
+  independent clean observations agree. On natural audio this rarely fires.
+- **`COS_MAC_LIVE_VOICES=window`** (6.93.0 path, replaces the anchors): each chunk is
+  diarized inside the last five durable chunks (30 s) with the same pinned CLI, with a
+  timeout sized from the window. A carried voice is used only when the chunk diarized
+  alone agrees. A timeout or refused window falls back to the plain per-chunk run. A
+  voice silent for longer than the window comes back unidentified, never under
+  another voice's number.
+- **`COS_MAC_VOICE_LABELS`** (on by default) governs the after-save pass; `0` also
+  turns both live modes off. Setting it to `1` is the default, not an opt-in.
 
-The saved meeting is still relabeled by the whole-meeting pass.
+Set `COS_MAC_LIVE_VOICES` in `~/.cos-glasses/.env` and restart when nothing is
+recording. `GET /api/health` reports `capabilities.macLiveVoices.mode`
+(`off`, `anchors` or `window`) and, for `window`, counts only.
+
+The saved meeting is relabeled by the whole-meeting pass. Live numbers are kept;
+voices the live path did not prove are numbered above them at save.
 
 ### iPhone microphone meetings (6.93.0, off by default)
 
