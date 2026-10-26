@@ -654,6 +654,35 @@ the warm-up and the final passes. `/api/health` is public, so this carries codes
 and counts only, never a speaker name, path or error text; those stay in
 `server.log`. A Nemotron fallback never degrades `readiness.status`.
 
+### Live Mac voices (6.92.1, 6.93.0)
+
+A live Mac recording used to show every chunk as one `Ext` speaker until it was
+saved. Two switches change that, both anonymous: a `Voice N` is never a name,
+never enrolled and never trained, and renaming one is text only.
+
+- **`COS_MAC_VOICE_LABELS`** (on by default, 6.92.1): a chunk reads `Voice N` after
+  two independent clean observations agree. On natural audio this rarely fires.
+- **`COS_MAC_LIVE_VOICES=window`** (off by default, 6.93.0): each chunk is diarized
+  inside the last five durable chunks (30 s) with the same pinned CLI and live
+  budget, so a voice keeps its number across chunk boundaries. A voice silent for
+  longer than the window comes back unidentified, never under another voice's
+  number. Set it in `~/.cos-glasses/.env` and restart when nothing is recording.
+
+The saved meeting is still relabeled by the whole-meeting pass.
+
+### iPhone microphone meetings (6.93.0, off by default)
+
+With `COS_IPHONE_MICROPHONE_MEETINGS=1`, HQ set to Parakeet Ultra and Parakeet
+installed, `GET /api/health` reports `capabilities.phoneMicrophoneMeetings.enabled`,
+and COS Glasses 6.10.655 can record a meeting from the iPhone microphone without
+the glasses connected. Chunks upload through `POST /api/transcribe-stream` with
+`sourceType=iphone_microphone&speakerPolicy=anonymous`, transcribe with Parakeet
+Ultra and the profile dictionary (no Whisper or cloud fallback), and save like any
+meeting. Every line is `Ext`: no wearer label, no voice matching, no training.
+This is the microphone only, not iOS system audio, so it cannot record Zoom,
+YouTube or call audio playing on the phone. COS Control must be 0.5.351 or newer
+before this is switched on. Protocol: `docs/iphone-microphone-protocol.md`.
+
 ## Speech-to-text settings (6.72.0)
 
 One settings object chooses which engine previews live meeting speech, which
