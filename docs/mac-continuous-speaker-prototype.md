@@ -1,0 +1,47 @@
+# Isolated continuous Mac speaker state — no live integration
+
+This increment introduces two dependency-injected modules only. Nothing imports them from recording ingress, capabilities, finalization, Ask, Control or server startup. It does not discover/spawn a native helper, load a model, open a socket, change settings, name people, enroll voices or write profiles. Existing Mac/G2/phone behavior is untouched. This is not a shipped speaker-continuity fix or an accuracy qualification.
+
+## Protocol and bridge
+
+`server/lib/mac-stream-diarizer.ts` uses the separately prepared native prototype's version-1 contract:
+
+- Envelope: `version:1`, `op`, lowercase UUID `captureId` prefixed `mac_`, lowercase UUID `generation`, lowercase UUID `requestId`.
+- `open`: `startSample` aligned to160 samples, `firstChunkIndex`.
+- `append`: `originalChunkIndex`, `startSample`, `sampleCount`, original WAV `audioSHA256`, normalized `pcmSHA256`, `pcmS16LEBase64`.
+- `finish`/`abort`: envelope only.
+- Receipt: matching envelope, `state`, `consumedThroughSample`, `consumedThroughChunkIndex`, absolute10ms `frameStart`, `frameCount`, `numSpeakers:8`, finite `[0,1]` probability array of exactly `frameCount*8`. Native prototype instrumentation is ignored and not retained.
+
+PCM is signed16LE mono16kHz. The server verifies canonical base64, byte length and PCM SHA256 before exchange. WAV SHA is separate provenance, never independent acoustic confirmation. Initial isolated scope permits at most96000 samples/192000 PCM bytes per append, one exchange plus one queued request,4096 appends,900 emitted frames per response, and a1–30000ms injected-transport deadline. Request/PCM identity ledgers contain bounded metadata, not audio or probability history. Only the latest receipt is replayable; earlier request IDs reject after eviction without exchange. A repeated canonical PCM digest at a new index also rejects before exchange, even if the WAV header/hash changes. This deliberately conservative slice does not yet handle legitimate identical silence chunks without a generation reset; live integration must define that policy before wiring.
+
+A successful finish requires exact centered-mel coverage: for `N>0` received samples, `1+floor((N+512-400)/160)` output frames, translated by the generation's absolute aligned origin. The documented end-boundary frame is accounted for, not attributed outside original audio by this module. Finish/idle-abort receipts replay until this object is discarded. Process death is not resumable; the future integration must persist terminal receipts independently.
+
+`exchange(request, AbortSignal)` is injected. The bridge supplies no native process implementation or process cleanup guarantee. Timeout, malformed output, queue overflow and cancellation end the generation; late callbacks cannot publish. An abort during an active exchange cancels/invalidates it and returns a cancellation error rather than claiming a native abort receipt. An idle abort may exchange/cache its terminal receipt. New objects/generations never inherit private native state. Wrong capture/generation requests cannot cancel the admitted capture.
+
+`accept(request, receipt)` is a **synchronous atomic durable transaction** supplied by a future owner. It must not publish externally until its durable write succeeds. A throw retains exactly one staged receipt: exact retry attempts persistence without another native append; other input cannot advance. An accidentally Promise-returning callback is rejected and ends the bridge generation. Actual raw-ledger durability, atomic filesystem replacement, signed helper trust, process-tree bounds, CAS/epoch fencing across processes and startup recovery are not implemented here.
+
+## Anonymous projection and read contract
+
+`server/lib/mac-speaker-projection.ts` owns a separate version1 projection and accepts only anonymous `Ext`/`Voice1..99` labels with similarity0. It cannot accept strict named recognition evidence. Strict naming/training remains in existing code and must be reviewed separately during integration.
+
+The provisional confirmation rule requires three distinct original chunk indexes and canonical PCM digests in one uninterrupted generation, each providing at least32000 exclusive samples (2s) and purity≥.90. The owner must derive these observations from validated native probabilities and durable original audio. **This module validates supplied proof geometry, not acoustic truth.** Retries, changed WAV wrappers, repeated PCM, overlapping original chunks and overlapping mixed-slot evidence cannot add support. One mixed original may support different slots only on disjoint clean spans. Keep at most three proofs per slot/eight slots. These conservative anonymous thresholds are new and uncalibrated; they do not certify a person or a returning speaker.
+
+Every transaction atomically persists the generation, monotonic revision, Voice-number high-water, compact support proofs and latest chunk projections before updating in-memory state. Persistence is injected and synchronous; Promise callbacks are refused. An uncertain write failure retains one tentative transaction and blocks different mutations until its exact retry succeeds; reentrant mutation from the persistence callback is refused. Missing/corrupt snapshots fail closed, including sparse arrays, unknown identity metadata, repeated support and reused historical labels. Starting a fresh UUID generation clears active slot anchors and preserves older accepted projections plus the label high-water. Ending it fences later old-generation observations/updates. A restored object must explicitly begin a new unique generation; existing native state cannot be reconstructed from these proofs. Historical generations≤100, chunks≤4096, total segments≤8192, serialized projection≤4MiB. Exceeding a bound rejects the tentative transaction; no automatic eviction/renumbering.
+
+**Immutable ASR:** `canonicalTextBinding` hashes exact text and ordered word/timing anchors. Each chunk projection pins its chunk ID, original audio hash, binding, word count and original sample interval. Replacement cannot alter those anchors or generation. Segment word ranges must partition the original word indexes in order, preserving all words exactly once; samples stay within the chunk and anonymous labels cannot extend beyond emitted coverage. No transcript text or Ask citation ID is rewritten.
+
+**Full replacement/clear:** every changed chunk is returned as its complete replacement, never a patch to its previous segment array. `segments:[]` explicitly removes all derived segments and means use immutable canonical labels. Exact replacement retry is idempotent. A late label for an already settled ASR index gets its own `changedAtRevision`; no text-cursor rewind or fake new chunk is required.
+
+`read({generation,speakerRevision})` returns changed latest chunks independently of the ASR cursor. Missing/foreign-generation/future/invalid cursors receive `reset:true` and a full snapshot including accepted historical-generation chunks. A matching cursor gets only latest entries changed after that revision, including explicit clears. No revision event history is needed for this full-replacement model. The future client reducer must reject stale responses by capture+generation+revision and retain immutable word/scroll/citation anchors. This increment does not implement that reducer or transport.
+
+## Ownership and qualification still required
+
+Native prototype owner retains its isolated Swift executable, source/build receipts and six-append parity qualification. Server follow-up owns durable raw admission/order, per-generation process lifetime, source negotiation, cancellation-aware atomic storage, projection/source adapters, normal finish versus abort, final mixed-Voice conflict handling and recovery. Control follow-up owns signed helper packaging/trust, separate revision cursor, validated segment rendering and stale-response rejection. These must be qualified together before advertising a capability or changing existing captures.
+
+Required next gates include actual six-append native parity/coverage; cold/warm latency and process-tree RSS ceilings; crash during native append or durable commit; queue overflow/ASR lag; raw receipt replay across restart; final save failure/retention; unchanged strict recognition/enrollment guards; old-client compatibility; and an independently annotated natural A→B→A/return/silence/overlap fixture. Current continuous36s clustering is not independent speaker truth.
+
+## Checks
+
+The two focused suites exercise the actual injected bridge/projection classes without native/model/network dependencies. Run them with one worker through MU's `release_lane.py`, private HOME/data/profile/scripts/cache/temp and a scrubbed environment; focused strict TypeScript checking includes only these four new source/test files. Evidence is retained separately under `~/cos-release-candidates/mac-continuous-server-20261026`. No full suite, native build/model run, release/version allocation, publication, install or global flag change is part of this increment.
+
+Final bounded check:73 focused tests (34bridge,39projection) plus strict focused TypeScript checking passed. Lane receipt `lane-4.json` records the final checked source. Earlier `lane-1.json` records a corrected optional-field type error; its62 tests had passed. No native or model was invoked.
