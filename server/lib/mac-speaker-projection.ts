@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 const SHA = /^[a-f0-9]{64}$/
 const TOKEN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const MAC = /^mac_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
+const matches = (value: unknown, pattern: RegExp): value is string => typeof value === 'string' && pattern.test(value)
 const MAX_CHUNKS = 4096
 const MAX_WORDS = 8192
 const MAX_GENERATIONS = 100
@@ -47,7 +48,7 @@ export function canonicalTextBinding(text: string, words: readonly { text: strin
   return createHash('sha256').update(JSON.stringify({ text, words })).digest('hex')
 }
 export function newProjectionState(captureId: string): ProjectionState {
-  if (!MAC.test(captureId)) fail('capture')
+  if (!matches(captureId, MAC)) fail('capture')
   return { version: 1, captureId, generation: null, generations: [], speakerRevision: 0, labelHighWater: 0, slots: [], chunks: [] }
 }
 function dense<T>(value: T[], max: number): boolean {
@@ -56,7 +57,7 @@ function dense<T>(value: T[], max: number): boolean {
   return true
 }
 function proofValid(p: ConfirmationProof): boolean {
-  return !!p && keys(p, ['originalChunkIndex', 'audioSHA256', 'pcmSHA256', 'chunkStartSample', 'chunkSampleCount', 'startSample', 'endSample', 'exclusiveSamples', 'purity']) && uint(p.originalChunkIndex) && SHA.test(p.audioSHA256) && SHA.test(p.pcmSHA256)
+  return !!p && keys(p, ['originalChunkIndex', 'audioSHA256', 'pcmSHA256', 'chunkStartSample', 'chunkSampleCount', 'startSample', 'endSample', 'exclusiveSamples', 'purity']) && uint(p.originalChunkIndex) && matches(p.audioSHA256, SHA) && matches(p.pcmSHA256, SHA)
     && uint(p.chunkStartSample) && uint(p.chunkSampleCount) && p.chunkSampleCount > 0 && p.chunkSampleCount <= 480_000
     && uint(p.startSample) && uint(p.endSample) && p.startSample >= p.chunkStartSample
     && p.endSample > p.startSample && p.endSample <= p.chunkStartSample + p.chunkSampleCount
@@ -64,7 +65,7 @@ function proofValid(p: ConfirmationProof): boolean {
     && Number.isFinite(p.purity) && p.purity >= 0.9 && p.purity <= 1
 }
 function chunkValid(c: ChunkProjection, state: ProjectionState): boolean {
-  if (!c || !keys(c, ['chunkIndex', 'generation', 'audioSHA256', 'canonicalBinding', 'wordCount', 'startSample', 'endSample', 'coveredThroughSample', 'changedAtRevision', 'segments']) || !uint(c.chunkIndex) || !state.generations.includes(c.generation) || !SHA.test(c.audioSHA256) || !SHA.test(c.canonicalBinding)
+  if (!c || !keys(c, ['chunkIndex', 'generation', 'audioSHA256', 'canonicalBinding', 'wordCount', 'startSample', 'endSample', 'coveredThroughSample', 'changedAtRevision', 'segments']) || !uint(c.chunkIndex) || !state.generations.includes(c.generation) || !matches(c.audioSHA256, SHA) || !matches(c.canonicalBinding, SHA)
     || !uint(c.wordCount) || c.wordCount > MAX_WORDS || !uint(c.startSample) || !uint(c.endSample) || c.endSample < c.startSample
     || !uint(c.coveredThroughSample) || c.coveredThroughSample < c.startSample || c.coveredThroughSample > c.endSample
     || !uint(c.changedAtRevision) || c.changedAtRevision < 1 || c.changedAtRevision > state.speakerRevision || !dense(c.segments, MAX_WORDS)) return false
@@ -73,7 +74,7 @@ function chunkValid(c: ChunkProjection, state: ProjectionState): boolean {
     if (!segment || !keys(segment, ['wordStart', 'wordEnd', 'startSample', 'endSample', 'speaker', 'similarity']) || segment.wordStart !== word || !uint(segment.wordEnd) || segment.wordEnd <= word || segment.wordEnd > c.wordCount
       || !uint(segment.startSample) || !uint(segment.endSample) || segment.startSample < sample || segment.endSample < segment.startSample
       || segment.endSample > c.endSample || (segment.speaker !== 'Ext' && segment.endSample > c.coveredThroughSample) || segment.similarity !== 0
-      || (segment.speaker !== 'Ext' && !/^Voice [1-9]\d?$/.test(segment.speaker))
+      || (segment.speaker !== 'Ext' && !matches(segment.speaker, /^Voice [1-9]\d?$/))
       || (segment.speaker !== 'Ext' && Number(segment.speaker.slice(6)) > state.labelHighWater)) return false
     word = segment.wordEnd; sample = segment.endSample
   }
@@ -82,9 +83,9 @@ function chunkValid(c: ChunkProjection, state: ProjectionState): boolean {
 }
 /** Strict restore: missing/corrupt high-water or partial arrays never reset numbering. */
 export function validateProjectionState(state: ProjectionState): void {
-  if (!state || !keys(state, ['version', 'captureId', 'generation', 'generations', 'speakerRevision', 'labelHighWater', 'slots', 'chunks']) || state.version !== 1 || !MAC.test(state.captureId) || !uint(state.speakerRevision) || !uint(state.labelHighWater) || state.labelHighWater > 99
+  if (!state || !keys(state, ['version', 'captureId', 'generation', 'generations', 'speakerRevision', 'labelHighWater', 'slots', 'chunks']) || state.version !== 1 || !matches(state.captureId, MAC) || !uint(state.speakerRevision) || !uint(state.labelHighWater) || state.labelHighWater > 99
     || !dense(state.generations, MAX_GENERATIONS) || new Set(state.generations).size !== state.generations.length
-    || state.generations.some(g => typeof g !== 'string' || !TOKEN.test(g))
+    || state.generations.some(g => typeof g !== 'string' || !matches(g, TOKEN))
     || (state.generation !== null && !state.generations.includes(state.generation)) || !dense(state.slots, 8) || !dense(state.chunks, MAX_CHUNKS)
     || new Set(state.slots.map(s => s?.slot)).size !== state.slots.length || new Set(state.chunks.map(c => c?.chunkIndex)).size !== state.chunks.length) fail('corrupt_state')
   const labels = new Set<string>()
@@ -92,7 +93,7 @@ export function validateProjectionState(state: ProjectionState): void {
     if (!slot || !keys(slot, slot.label === undefined ? ['slot', 'proofs'] : ['slot', 'proofs', 'label']) || !uint(slot.slot) || slot.slot > 7 || !dense(slot.proofs, 3) || slot.proofs.some(p => !proofValid(p))
       || new Set(slot.proofs.map(p => p.originalChunkIndex)).size !== slot.proofs.length
       || new Set(slot.proofs.map(p => p.pcmSHA256)).size !== slot.proofs.length
-      || (slot.label !== undefined && (slot.proofs.length !== 3 || !/^Voice [1-9]\d?$/.test(slot.label)
+      || (slot.label !== undefined && (slot.proofs.length !== 3 || !matches(slot.label, /^Voice [1-9]\d?$/)
         || Number(slot.label.slice(6)) > state.labelHighWater || labels.has(slot.label)))) fail('corrupt_slot')
     if (slot.label) labels.add(slot.label)
   }
@@ -145,7 +146,7 @@ export class MacSpeakerProjection {
     } finally { this.committing = false }
   }
   beginGeneration(generation: string): void {
-    if (!TOKEN.test(generation) || this.state.generations.includes(generation) || this.state.generations.length >= MAX_GENERATIONS) fail('generation')
+    if (!matches(generation, TOKEN) || this.state.generations.includes(generation) || this.state.generations.length >= MAX_GENERATIONS) fail('generation')
     this.commit(s => { s.generation = generation; s.generations.push(generation); s.slots = [] })
     this.admittedGeneration = generation
   }

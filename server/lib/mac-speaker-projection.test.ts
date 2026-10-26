@@ -203,3 +203,20 @@ it('rejects conflicting/repeated support in a restored cross-slot state', () => 
   const s = p.snapshot(); s.slots.push({ slot: 1, proofs: [proof(0)] })
   expect(() => validateProjectionState(s)).toThrow('corrupt_repeated_support')
 })
+
+it('refuses coercible array identifiers/digests/labels in projection inputs and restored snapshots', () => {
+  expect(() => newProjectionState([capture] as unknown as string)).toThrow('capture')
+  const { projection: p } = fixture()
+  expect(() => p.beginGeneration(['00000000-0000-4000-8000-000000000012'] as unknown as string)).toThrow('generation')
+  expect(() => p.observe('00000000-0000-4000-8000-000000000011', 0, { ...proof(0), audioSHA256: [proof(0).audioSHA256] as unknown as string })).toThrow('proof')
+  confirm(p); p.replaceChunk('00000000-0000-4000-8000-000000000011', chunk())
+  for (const field of ['captureId', 'slotLabel', 'segmentLabel', 'audioSHA256', 'canonicalBinding']) {
+    const state = p.snapshot()
+    if (field === 'captureId') state.captureId = [state.captureId] as unknown as string
+    if (field === 'slotLabel') state.slots[0].label = [state.slots[0].label] as unknown as string
+    if (field === 'segmentLabel') state.chunks[0].segments[0].speaker = ['Voice 1'] as unknown as string
+    if (field === 'audioSHA256') state.chunks[0].audioSHA256 = [state.chunks[0].audioSHA256] as unknown as string
+    if (field === 'canonicalBinding') state.chunks[0].canonicalBinding = [state.chunks[0].canonicalBinding] as unknown as string
+    expect(() => validateProjectionState(state)).toThrow()
+  }
+})

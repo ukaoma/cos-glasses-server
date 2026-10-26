@@ -24,14 +24,15 @@ export interface StreamDependencies {
 const SHA = /^[a-f0-9]{64}$/
 const CAPTURE = /^mac_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const TOKEN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
+const matches = (value: unknown, pattern: RegExp): value is string => typeof value === 'string' && pattern.test(value)
 const ENVELOPE = ['version', 'op', 'captureId', 'generation', 'requestId']
 const fields = (op: StreamOp): string[] => [...ENVELOPE, ...(op === 'open' ? ['startSample', 'firstChunkIndex'] : op === 'append' ? ['originalChunkIndex', 'startSample', 'sampleCount', 'audioSHA256', 'pcmSHA256', 'pcmS16LEBase64'] : [])]
 const requestKey = (r: StreamRequest): string => JSON.stringify(Object.fromEntries(fields(r.op).map(k => [k, r[k as keyof StreamRequest]])))
 const integer = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0
 const fail = (reason: string): never => { throw new Error(`mac_stream_${reason}`) }
 export function validateStreamRequest(request: StreamRequest): void {
-  if (!request || request.version !== 1 || !['open', 'append', 'finish', 'abort'].includes(request.op)
-    || !CAPTURE.test(request.captureId) || !TOKEN.test(request.generation) || !TOKEN.test(request.requestId)) fail('request')
+  if (!request || typeof request !== 'object' || Array.isArray(request) || request.version !== 1 || !['open', 'append', 'finish', 'abort'].includes(request.op)
+    || !matches(request.captureId, CAPTURE) || !matches(request.generation, TOKEN) || !matches(request.requestId, TOKEN)) fail('request')
   if (Object.keys(request).length !== fields(request.op).length || fields(request.op).some(k => !Object.hasOwn(request, k))) fail('fields')
   if (request.op === 'open') {
     if (!integer(request.startSample) || request.startSample % 160 !== 0 || request.startSample > 1_382_400_000 || !integer(request.firstChunkIndex) || request.firstChunkIndex >= 10_000_000) fail('start_sample')
@@ -39,7 +40,7 @@ export function validateStreamRequest(request: StreamRequest): void {
     if (!integer(request.originalChunkIndex) || !integer(request.startSample) || !integer(request.sampleCount)
       || request.sampleCount < 1 || request.sampleCount > STREAM_MAX_SAMPLES
       || !Number.isSafeInteger(request.startSample + request.sampleCount)
-      || !SHA.test(request.audioSHA256 ?? '') || !SHA.test(request.pcmSHA256 ?? '')) fail('append_metadata')
+      || !matches(request.audioSHA256, SHA) || !matches(request.pcmSHA256, SHA)) fail('append_metadata')
     const encoded = request.pcmS16LEBase64
     if (typeof encoded !== 'string' || encoded.length > Math.ceil(STREAM_MAX_PCM_BYTES / 3) * 4
       || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) fail('pcm')

@@ -178,3 +178,13 @@ it('retains only validated wire fields, ignoring prototype instrumentation and a
   expect(Object.hasOwn(receipt, 'unwanted')).toBe(false)
   expect(Object.hasOwn(receipt, 'appendCallCount')).toBe(false)
 })
+
+describe.each(['captureId', 'generation', 'requestId', 'audioSHA256', 'pcmSHA256', 'pcmS16LEBase64'] as const)('strict JSON string boundary: %s', field => {
+  it.each(['array', 'null', 'number', 'boolean', 'object'])('rejects %s without invoking native exchange', async kind => {
+    const f = fixture(); const valid = append()[field]
+    const value = kind === 'array' ? [valid] : kind === 'null' ? null : kind === 'number' ? 42 : kind === 'boolean' ? true : { value: valid }
+    const request = { ...append(), [field]: value } as unknown as StreamRequest
+    await expect(f.bridge.request(request)).rejects.toThrow()
+    expect(f.exchange).not.toHaveBeenCalled(); expect(f.accept).not.toHaveBeenCalled()
+  })
+})
