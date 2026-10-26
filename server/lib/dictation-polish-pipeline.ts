@@ -16,7 +16,7 @@ import { customInstructionsHash, readCustomInstructions } from './dictation-poli
 import { learnedStyleEnabled, learnedStyleLinesFor, readLearnedStyle } from './dictation-learned-style.js'
 import { literalAnswer, type DictationRegister } from './dictation-register.js'
 import { meaningGuardCounts, meaningGuardEnabled, meaningGuardProblem, type MeaningGuardKind } from './dictation-meaning-guard.js'
-import { createBreaker } from './claude-circuit.js'
+import { createBreaker, type ClaudeBreaker } from './claude-circuit.js'
 import { logTokenAudit } from './token-audit.js'
 
 /**
@@ -34,10 +34,60 @@ import { logTokenAudit } from './token-audit.js'
  * register, no instructions, no learned style, no meaning guard.
  */
 
-export const autoCleanBreakers = {
-  sonnet: createBreaker({ label: 'dictation-autoclean-sonnet' }),
-  'luna-5.6-fast': createBreaker({ label: 'dictation-autoclean-luna' }),
-  haiku: createBreaker({ label: 'dictation-autoclean-haiku' }),
+/**
+ * 6.92.0 (plan r3, A-W0a): the breakers are keyed by (model, bucket group). Meeting lines have their
+ * own, so a G2 meeting that fails can no longer turn off Mac dictation and G2 message polish; message
+ * and prompt_draft share the `dictation` group. Each key has two breakers:
+ *
+ * - failure: 2 consecutive CLI failures open it for 30 minutes, as before. A client abort (the
+ *   request closed, `signal.aborted`) is neutral: it neither counts nor resets.
+ * - slow: COS_DICTATION_SLOW_BREAKER_ABORTS (default 4) consecutive aborts, each after at least
+ *   SLOW_ABORT_MIN_MODEL_MS of model time, with no success between, open it for
+ *   COS_DICTATION_SLOW_BREAKER_MS (default 300000, 5 minutes). An abort sooner than that (a disconnect
+ *   right after a sidecar restart) does not count.
+ *
+ * Either one open skips the polish as `breaker_open`; any success closes both.
+ */
+export type PolishBreakerGroup = 'dictation' | 'meeting'
+export const SLOW_ABORT_MIN_MODEL_MS = 4_000
+
+export function breakerGroupFor(bucket: PolishBucket): PolishBreakerGroup {
+  return bucket === 'meeting' ? 'meeting' : 'dictation'
+}
+
+function envPositiveInt(raw: string | undefined, fallback: number): number {
+  const trimmed = raw?.trim() ?? ''
+  if (!/^\d+$/.test(trimmed)) return fallback
+  const value = Number(trimmed)
+  return value > 0 ? value : fallback
+}
+export const slowBreakerAborts = (env: NodeJS.ProcessEnv = process.env) => envPositiveInt(env.COS_DICTATION_SLOW_BREAKER_ABORTS, 4)
+export const slowBreakerMs = (env: NodeJS.ProcessEnv = process.env) => envPositiveInt(env.COS_DICTATION_SLOW_BREAKER_MS, 300_000)
+
+interface PolishBreakers { failure: ClaudeBreaker; slow: ClaudeBreaker }
+const BREAKER_MODELS = ['sonnet', 'luna-5.6-fast', 'haiku'] as const
+function breakersFor(group: PolishBreakerGroup): Record<DictationCleanModel, PolishBreakers> {
+  return Object.fromEntries(BREAKER_MODELS.map(model => {
+    const label = `dictation-autoclean-${model === 'luna-5.6-fast' ? 'luna' : model}${group === 'meeting' ? '-meeting' : ''}`
+    return [model, {
+      failure: createBreaker({ label }),
+      slow: createBreaker({ label: `${label}-slow`, maxFailures: () => slowBreakerAborts(), cooldownMs: () => slowBreakerMs() }),
+    }]
+  })) as Record<DictationCleanModel, PolishBreakers>
+}
+export const autoCleanBreakers: Record<PolishBreakerGroup, Record<DictationCleanModel, PolishBreakers>> = {
+  dictation: breakersFor('dictation'),
+  meeting: breakersFor('meeting'),
+}
+
+export function polishBreakersFor(model: DictationCleanModel, bucket: PolishBucket): PolishBreakers {
+  return autoCleanBreakers[breakerGroupFor(bucket)][model]
+}
+
+/** The keyed breakers for this model and bucket: open when either is. The prewarm route asks this too. */
+export function polishBreakerOpen(model: DictationCleanModel, bucket: PolishBucket): boolean {
+  const breakers = polishBreakersFor(model, bucket)
+  return breakers.failure.isOpen() || breakers.slow.isOpen()
 }
 const autoCleanDefaultEnabled = () => ['1', 'true', 'on'].includes((process.env.COS_DICTATION_AUTOCLEAN ?? '').toLowerCase())
 
@@ -222,11 +272,11 @@ export async function polishOutboundDictation(
   const cleaned = prepareOutboundDictation(text, opts.bucket)
   if (!(opts.enabled ?? autoCleanDefaultEnabled())) return { text: cleaned, polishSkipped: 'disabled' }
   const model = opts.model ?? 'haiku'
-  const autoCleanBreaker = autoCleanBreakers[model]
+  const breakers = polishBreakersFor(model, opts.bucket)
   if (cleaned.length > AUTOCLEAN_MAX_CHARS) return { text: cleaned, polishSkipped: 'too_long' }
   // 6.79.2, off by default: nothing for the model to fix (see dictation-polish-need.ts).
   if (skipCleanEnabled() && polishNeed(cleaned) === null) return { text: cleaned, polishSkipped: 'clean' }
-  if (autoCleanBreaker.isOpen()) return { text: cleaned, polishSkipped: 'breaker_open' }
+  if (polishBreakerOpen(model, opts.bucket)) return { text: cleaned, polishSkipped: 'breaker_open' }
   if (polishBudgetExhausted(opts.bucket)) return { text: cleaned, polishSkipped: 'daily_cap' }
   const startedAt = Date.now()
   recordPolishCall(opts.bucket)
@@ -267,7 +317,8 @@ export async function polishOutboundDictation(
     // one; this holds if either ever stops): the input goes out, polishSkipped "failed", and the
     // breaker counts it. Never "unchanged".
     if (!polished) throw new Error('Auto-clean returned empty text')
-    autoCleanBreaker.recordSuccess()
+    breakers.failure.recordSuccess()
+    breakers.slow.recordSuccess()
     const guarded = guardPolishAnswer(cleaned, polished, opts.bucket, register, canaried)
     logTokenAudit({
       source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: polished.length,
@@ -286,8 +337,27 @@ export async function polishOutboundDictation(
       modelText: polished, ...used,
     }
   } catch (err: any) {
-    autoCleanBreaker.recordFailure()
-    console.warn(`[prompt-draft] auto-clean failed (glossary-only): ${err?.message ?? err}`)
+    if (opts.signal?.aborted) {
+      // 6.92.0: the client went away (Control stopped waiting, the phone closed the request). Not a
+      // CLI failure: only the slow breaker hears it, and only after real model time. The audit row
+      // says `aborted`, codes only; the answer (nobody reads it) keeps PolishOutcome's three values.
+      const durationMs = Date.now() - startedAt
+      if (durationMs >= SLOW_ABORT_MIN_MODEL_MS) breakers.slow.recordFailure()
+      logTokenAudit({
+        source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: 0,
+        durationMs, caller: `dictation_autoclean_${opts.bucket}`,
+        // Key order differs from the answered row's on purpose: each gate anchor matches one row.
+        polishInstructions: { hash: instructionsHash, on: Boolean(customInstructions) },
+        learnedStyle: { hash: style.hash, on: Boolean(style.lines) },
+        ...(canaried ? { polishRegister: register } : {}),
+        ...(used.polishPrompt ? { polishPrompt: used.polishPrompt } : {}),
+        polishOutcome: 'aborted',
+      })
+      console.warn('[prompt-draft] auto-clean aborted by the client (glossary-only)')
+    } else {
+      breakers.failure.recordFailure()
+      console.warn(`[prompt-draft] auto-clean failed (glossary-only): ${err?.message ?? err}`)
+    }
     return { text: cleaned, polishSkipped: 'failed', ...(prewarm ? { prewarm } : {}), ...used }
   }
 }

@@ -5,7 +5,7 @@
  * nothing here was spoken by a real person. Not shipped in the npm package.
  *
  *   COS_DATA_DIR=$(mktemp -d) COS_PROFILE_PATH=<scratch>/p.json npx tsx server/scripts/dictation-custom-polish-eval.ts \
- *     [--model haiku] [--max-calls 200] [--concurrency 3] [--out results.json] [--score-only results.json] [--dry]
+ *     [--model haiku] [--max-calls 205] [--concurrency 3] [--out results.json] [--score-only results.json] [--dry]
  *
  * Arms (prompt v3, the default):
  * - none: no instructions. The 45 cases of the 6.79.1 eval plus 4 link cases of the 6.83.1 canary.
@@ -267,6 +267,13 @@ export function scoreStyleSuites(rows: Array<{ arm: string; id: string; input: s
   return out
 }
 
+/**
+ * 6.92.0 (plan r3, A-W0c): the default --max-calls fits the default run. It was 200 while jobs() is
+ * 201 (the regression set grew from 45 to 50), so a default run refused itself. Pinned by
+ * dictation-eval-harness.test.ts.
+ */
+export const CUSTOM_POLISH_DEFAULT_MAX_CALLS = 205
+
 async function main() {
   const arg = (name: string, fallback: string) => {
     const i = process.argv.indexOf(`--${name}`)
@@ -288,7 +295,7 @@ async function main() {
     return
   }
   const model = arg('model', 'haiku')
-  const maxCalls = Number(arg('max-calls', '200'))
+  const maxCalls = Number(arg('max-calls', String(CUSTOM_POLISH_DEFAULT_MAX_CALLS)))
   const concurrency = Number(arg('concurrency', '3'))
   const outFile = arg('out', 'dictation-custom-polish-eval.json')
   if (!process.env.COS_DATA_DIR) throw new Error('Set COS_DATA_DIR to a scratch directory')

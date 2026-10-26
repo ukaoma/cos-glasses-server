@@ -357,6 +357,29 @@ describe('public prompt draft recovery contract', () => {
     const calls = autoCleanDictation.mock.calls.length
     expect((await finalizeText('Keep this draft.', 'message', 'luna-5.6-fast')).json.polishSkipped).toBe('breaker_open')
     expect(autoCleanDictation).toHaveBeenCalledTimes(calls)
+    // 6.92.0: the breakers are keyed by bucket group; meeting lines on the same model still call it.
+    expect((await finalizeText('Keep this draft.', 'meeting', 'luna-5.6-fast')).json.polishSkipped).toBe('failed')
+    expect(autoCleanDictation).toHaveBeenCalledTimes(calls + 1)
+  })
+
+  it('6.92.0: a client that disconnects mid-polish does not open the breaker', async () => {
+    let started: () => void = () => {}
+    autoCleanDictation.mockImplementation(async (_text: string, _terms: string[], opts: { signal?: AbortSignal }) => {
+      started()
+      await new Promise((_resolve, reject) => opts.signal?.addEventListener('abort', () => reject(new Error('Auto-clean aborted')), { once: true }))
+    })
+    for (let i = 0; i < 3; i++) {
+      const inFlight = new Promise<void>(resolve => { started = resolve })
+      const req = request(`${baseUrl}/api/dictation/finalize`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+      req.on('error', () => {})
+      req.end(JSON.stringify({ text: 'Keep this draft.', surface: 'message', autocleanModel: 'sonnet' }))
+      await inFlight
+      req.destroy()
+      await new Promise(resolve => setTimeout(resolve, 30))
+    }
+    autoCleanDictation.mockImplementation(async (text: string) => `${text} Polished.`)
+    expect((await finalizeText('Keep this draft.', 'message', 'sonnet')).json).toMatchObject({ text: 'Keep this draft. Polished.' })
+    expect(logTokenAudit.mock.calls.filter(([row]) => row.polishOutcome === 'aborted').length).toBe(3)
   })
 
   it('6.79.1: prompt drafts over the polish size say too_long', async () => {
@@ -386,6 +409,15 @@ describe('public prompt draft recovery contract', () => {
     await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/chunks?chunkIndex=0&mode=fast`, Buffer.alloc(3200, 1))
     const draft = await httpRequest('POST', `/api/prompt-drafts/${started.json.draftId}/finalize?mode=fast`)
     expect(draft.json).toMatchObject({ text: 'Send the deck to Chris.', polishSkipped: 'disabled' })
+  })
+
+  it('6.92.0: a German or Portuguese message reaches the model as said; paths and handles keep their um', async () => {
+    for (const said of ['Wir treffen uns um 5 Uhr', 'Comprei um carro novo', 'Er kommt morgen.', 'open src/um.txt and ping @uh']) {
+      await finalizeText(said, 'message')
+      expect(autoCleanDictation, said).toHaveBeenLastCalledWith(said, expect.any(Array), expect.anything())
+    }
+    await finalizeText('ship it er tomorrow', 'message')
+    expect(autoCleanDictation).toHaveBeenLastCalledWith('ship it tomorrow', expect.any(Array), expect.anything())
   })
 
   it('6.79.1: COS_DICTATION_FILLER_PASS=0 sends the text to the model as heard', async () => {
@@ -527,6 +559,12 @@ describe('public prompt draft recovery contract', () => {
     for (let i = 0; i < 10; i++) await finalizeText('Note', 'message', 'sonnet')
     expect((await ask({ model: 'sonnet' })).json).toEqual({ error: 'prewarm_unavailable', reason: 'breaker_open' })
     expect(prewarm.start).not.toHaveBeenCalled()
+    // 6.92.0: prewarm asks the same keyed breaker as the finalize for its surface.
+    delete process.env.COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING
+    expect((await ask({ model: 'sonnet', surface: 'meeting' })).json).toEqual({ token: WARM_TOKEN, expiresMs: 150000 })
+    for (let i = 0; i < 10; i++) await finalizeText('Note', 'meeting', 'haiku')
+    expect((await ask({ model: 'haiku', surface: 'meeting' })).json).toEqual({ error: 'prewarm_unavailable', reason: 'breaker_open' })
+    expect((await ask({ model: 'haiku', surface: 'message' })).json).toEqual({ token: WARM_TOKEN, expiresMs: 150000 })
     prewarm.start.mockImplementationOnce(() => { throw new Error('no cli') })
     expect((await ask({})).json).toEqual({ error: 'prewarm_unavailable', reason: 'cli' })
     expect(prewarm.start).toHaveBeenCalledWith('haiku')

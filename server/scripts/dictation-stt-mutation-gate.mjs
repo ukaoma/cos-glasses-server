@@ -26,9 +26,10 @@ const mutations = [
   ['transcribe-plans-its-slot', T, '  const slot = dictationSlotForMode(effectiveMode)', "  const slot = dictationSlotForMode('hq')"],
   ['parakeet-hq-is-hq-quality', T, '      actualQuality = effectiveMode\n', "      actualQuality = 'fast'\n"],
   // Fallback when cold, missing, broken or failed.
-  ['cold-parakeet-is-whisper', S, '      : c.parakeetPreviewWarm ? null', '      : true ? null'],
+  // 6.92.0: a leading newline pins the first plan's line; the deeper-indented second one also contained it.
+  ['cold-parakeet-is-whisper', S, '\n      : c.parakeetPreviewWarm ? null', '\n      : true ? null'],
   ['missing-parakeet-is-whisper', S, "  const reason = !c.parakeetInstalled ? 'parakeet_not_installed'", "  const reason = false ? 'parakeet_not_installed'"],
-  ['open-breaker-is-whisper', S, "    : c.parakeetPreviewBreakerOpen ? 'parakeet_breaker_open'", "    : false ? 'parakeet_breaker_open'"],
+  ['open-breaker-is-whisper', S, "\n    : c.parakeetPreviewBreakerOpen ? 'parakeet_breaker_open'", "\n    : false ? 'parakeet_breaker_open'"],
   ['env-switch-holds-whisper', S, '  if (c.dictationDisabledByEnv) {', '  if (false) {'],
   ['parakeet-only-when-planned', T, "  if (plan.engine === 'parakeet-ultra') {\n    const outcome", '  if (true) {\n    const outcome'],
   ['failed-parakeet-decodes-whisper', T, '  if (decoded) {', '  if (true) {'],

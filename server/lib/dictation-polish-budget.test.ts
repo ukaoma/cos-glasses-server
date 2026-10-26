@@ -94,13 +94,25 @@ describe('6.79.1 per-caller polish budgets', () => {
   })
 })
 
+/** Every dictation polish and prompt-edit variable a managed install must forward. */
+const DICTATION_KEYS = ['COS_DICTATION_AUTOCLEAN_MAX_PER_DAY', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING',
+  'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT', 'COS_DICTATION_POLISH_PROMPT', 'COS_DICTATION_FILLER_PASS',
+  'COS_DICTATION_PREWARM', 'COS_DICTATION_POLISH_SKIP_CLEAN',
+  // 6.92.0: the five 6.83.1 and 6.91.0 keys this test missed.
+  'COS_DICTATION_SPOKEN_PATHS', 'COS_DICTATION_PROMPT_VERSION', 'COS_DICTATION_LEARNED_STYLE', 'COS_DICTATION_MEANING_GUARD', 'COS_DICTATION_REGISTERS',
+  // 6.92.0: the slow breaker and prompt edit's switch, cap and existing settings.
+  'COS_DICTATION_SLOW_BREAKER_ABORTS', 'COS_DICTATION_SLOW_BREAKER_MS',
+  'COS_PROMPT_EDIT', 'COS_PROMPT_EDIT_DAILY_CAP', 'COS_PROMPT_EDIT_MODEL', 'COS_PROMPT_EDIT_EFFORT', 'COS_PROMPT_EDIT_TIMEOUT_MS']
+
 describe('6.79.1 managed runtime forwarding', () => {
   it('lists every dictation polish variable in optionalEnvironment', () => {
     const contract = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }
-    for (const key of ['COS_DICTATION_AUTOCLEAN_MAX_PER_DAY', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MESSAGE', 'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_MEETING',
-      'COS_DICTATION_AUTOCLEAN_MAX_PER_DAY_PROMPT_DRAFT', 'COS_DICTATION_POLISH_PROMPT', 'COS_DICTATION_FILLER_PASS',
-      'COS_DICTATION_PREWARM', 'COS_DICTATION_POLISH_SKIP_CLEAN']) {
-      expect(contract.optionalEnvironment, key).toContain(key)
-    }
+    expect(DICTATION_KEYS).toHaveLength(20)
+    for (const key of DICTATION_KEYS) expect(contract.optionalEnvironment, key).toContain(key)
+  })
+
+  it('6.92.0: documents every one in .env.example', () => {
+    const example = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8')
+    for (const key of DICTATION_KEYS) expect(example, key).toMatch(new RegExp(`^# ${key}=`, 'm'))
   })
 })

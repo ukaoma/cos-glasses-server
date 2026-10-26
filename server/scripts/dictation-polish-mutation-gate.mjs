@@ -117,7 +117,8 @@ const mutations = [
   ['claimed-tracked', P, '    alive.delete(entry)\n', ''],
   ['prewarm-switch', PD, "  if (!prewarmEnabled()) return res.status(409)", "  if (false) return res.status(409)"],
   ['prewarm-claude-only', PD, "  if (!isPrewarmModel(model)) return res.status(409)", "  if (false) return res.status(409)"],
-  ['prewarm-breaker', PD, "  if (autoCleanBreakers[model].isOpen()) return res.status(409)", "  if (false) return res.status(409)"],
+  // 6.92.0: prewarm asks the keyed breaker (model, bucket group) of its surface.
+  ['prewarm-breaker', PD, "  if (polishBreakerOpen(model, surface)) return res.status(409)", "  if (false) return res.status(409)"],
   ['prewarm-budget', PD, "  if (polishBudgetExhausted(surface)) return res.status(409)", "  if (false) return res.status(409)"],
   ['finalize-takes-warm', PL, '  const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null', '  const warmEntry = null as any'],
   ['unavailable-falls-back-cold', PL, '        if (!(err instanceof PrewarmUnavailableError)) throw err', '        throw err'],
@@ -152,6 +153,8 @@ try {
   cpSync(join(root, 'vitest.config.ts'), join(scratch, 'vitest.config.ts'))
   cpSync(join(root, 'package.json'), join(scratch, 'package.json'))
   cpSync(join(root, 'managed-runtime-contract.json'), join(scratch, 'managed-runtime-contract.json'))
+  // 6.92.0: dictation-polish-budget.test.ts checks every key is documented there.
+  cpSync(join(root, '.env.example'), join(scratch, '.env.example'))
   symlinkSync(join(root, 'node_modules'), join(scratch, 'node_modules'), 'dir')
   const run = () => spawnSync(process.execPath, [join(root, 'node_modules/vitest/vitest.mjs'), 'run', '--maxWorkers=1', ...tests], {
     cwd: scratch,

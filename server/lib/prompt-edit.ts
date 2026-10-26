@@ -1,5 +1,13 @@
 import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
+import { runClaudeText } from './claude-text-runner.js'
+import { createBreaker } from './claude-circuit.js'
+import { readSwitch } from './env-switch.js'
+import { atomicWriteFileSync } from './atomic-fs.js'
+import { dataPath } from './data-dir.js'
+import { localDay } from './dictation-polish-budget.js'
 
 export const PROMPT_EDIT_DRAFT_MAX_CHARS = 24_000
 export const PROMPT_EDIT_INSTRUCTION_MAX_CHARS = 2_000
@@ -178,15 +186,88 @@ export function spawnClaudeText(prompt: string, opts: SpawnClaudeTextOptions = {
   })
 }
 
+export const PROMPT_EDIT_SYSTEM_PROMPT = 'You revise dictated prompt drafts. Output only the revised prompt text.'
+export const promptEditModel = (env: NodeJS.ProcessEnv = process.env) => env.COS_PROMPT_EDIT_MODEL || 'sonnet'
+
+/**
+ * G2's prompt edit (POST /api/prompt-edit). 6.92.0: through the isolated text runner
+ * (claude-text-runner.ts: no tools, MCP, hooks or session, a scratch directory), with the same
+ * model, effort and 45 s timeout settings as before.
+ */
 export async function applyPromptEdit(input: PromptEditInput, signal?: AbortSignal): Promise<string> {
-  return spawnClaudeText(buildPromptEditPrompt(input), {
-    model: process.env.COS_PROMPT_EDIT_MODEL || 'sonnet',
+  return runClaudeText(buildPromptEditPrompt(input), {
+    model: promptEditModel(),
     effort: process.env.COS_PROMPT_EDIT_EFFORT || 'low',
     timeoutMs: Number.parseInt(process.env.COS_PROMPT_EDIT_TIMEOUT_MS || '45000', 10),
-    systemPrompt: 'You revise dictated prompt drafts. Output only the revised prompt text.',
+    systemPrompt: PROMPT_EDIT_SYSTEM_PROMPT,
     label: 'Prompt edit',
     signal,
   })
+}
+
+// ── 6.92.0 (plan r3, A-W0b): how prompt edit stops ───────────────────
+//
+// Every `claude -p` caller answers how it stops. Prompt edit had no answer through 6.91.1:
+// - master switch: COS_PROMPT_EDIT (readSwitch; on by default, 0/false/off answers 503);
+// - daily cap: COS_PROMPT_EDIT_DAILY_CAP (default 200 a local day) in its OWN counter file, never
+//   the dictation polish counter, so editing a prompt never spends Mac dictation's budget;
+// - breaker: 3 consecutive CLI failures open it for 10 minutes; a client abort is neutral;
+// - an audit row per call that ran (caller prompt_edit, codes and sizes only).
+// Refusals are text/plain bodies of 24 characters or fewer, so G2 6.10.654 renders
+// "Edit failed.\nAPI <status>: <body>" in 40 characters or fewer.
+
+export const PROMPT_EDIT_REFUSALS = {
+  cap: { status: 429, body: 'Edit limit reached' },
+  off: { status: 503, body: 'Edit is off' },
+  paused: { status: 503, body: 'Edit paused' },
+  failed: { status: 500, body: 'Edit failed' },
+} as const
+export type PromptEditRefusal = keyof typeof PROMPT_EDIT_REFUSALS
+
+export const PROMPT_EDIT_DEFAULT_DAILY_CAP = 200
+export const PROMPT_EDIT_BREAKER_FAILURES = 3
+export const PROMPT_EDIT_BREAKER_MS = 10 * 60 * 1000
+export const PROMPT_EDIT_COUNT_FILE = '.prompt_edit_count.json'
+
+export function promptEditEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return readSwitch(env.COS_PROMPT_EDIT, true)
+}
+
+export function promptEditDailyCap(env: NodeJS.ProcessEnv = process.env): number {
+  const trimmed = env.COS_PROMPT_EDIT_DAILY_CAP?.trim() ?? ''
+  if (!/^\d+$/.test(trimmed)) return PROMPT_EDIT_DEFAULT_DAILY_CAP
+  const value = Number(trimmed)
+  return value > 0 ? value : PROMPT_EDIT_DEFAULT_DAILY_CAP
+}
+
+export const promptEditBreaker = createBreaker({
+  label: 'prompt-edit', maxFailures: PROMPT_EDIT_BREAKER_FAILURES, cooldownMs: PROMPT_EDIT_BREAKER_MS,
+})
+
+const countFile = () => dataPath(PROMPT_EDIT_COUNT_FILE)
+
+export function promptEditCountToday(): number {
+  try {
+    const raw = JSON.parse(readFileSync(countFile(), 'utf8'))
+    if (raw?.date !== localDay() || !Number.isInteger(raw.count) || raw.count < 0) return 0
+    return raw.count
+  } catch { return 0 }
+}
+
+export function recordPromptEditCall(): void {
+  try {
+    const file = countFile()
+    if (!existsSync(dirname(file))) mkdirSync(dirname(file), { recursive: true })
+    atomicWriteFileSync(file, JSON.stringify({ date: localDay(), count: promptEditCountToday() + 1 }), { mode: 0o600 })
+  } catch {}
+}
+
+/** The refusal for this request, before any call, or null when the edit may run. Switch, breaker, cap. */
+export function promptEditRefusal(env: NodeJS.ProcessEnv = process.env): PromptEditRefusal | null {
+  if (!promptEditEnabled(env)) return 'off'
+  if (promptEditBreaker.isOpen()) return 'paused'
+  if (promptEditCountToday() >= promptEditDailyCap(env)) return 'cap'
+  return null
 }
 
 // ── Outbound dictation auto-clean ────────────────────────────────────

@@ -64,6 +64,8 @@ describe('6.92.0 filler pass: token exemptions (F1b)', () => {
 describe('6.92.0 filler pass: language gate (F1b)', () => {
   it('a short text with foreign function words is not English, unless English ones outnumber them', () => {
     expect(looksEnglish('Wir treffen uns um 5 Uhr')).toBe(false)
+    // No um or er at all: only the foreign words decide.
+    expect(looksEnglish('der Plan ist fertig')).toBe(false)
     expect(stripFillersIfEnglish('Wir treffen uns um 5 Uhr')).toBe('Wir treffen uns um 5 Uhr')
     expect(looksEnglish('Send the deck to Dana, um, por favor')).toBe(true)
     // An all-caps token is an acronym, never foreign evidence.

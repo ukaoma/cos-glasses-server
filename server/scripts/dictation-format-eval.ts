@@ -155,6 +155,13 @@ async function applyDictionary(text: string, dictionary: Record<string, string>)
   return text ? applyCorrections(text) : text
 }
 
+/**
+ * 6.92.0 (plan r3, A-W0c): the default --max-calls covers the largest set (regression, 50 cases), so
+ * a default run never refuses itself (it was 40, under the canary's 45). Pinned by
+ * dictation-eval-harness.test.ts.
+ */
+export const FORMAT_DEFAULT_MAX_CALLS = 50
+
 async function main() {
   const arg = (name: string, fallback: string) => {
     const i = process.argv.indexOf(`--${name}`)
@@ -168,7 +175,7 @@ async function main() {
   }
   const arm = arg('arm', 'after') as 'before' | 'after'
   const set = arg('set', 'canary')
-  const maxCalls = Number(arg('max-calls', '40'))
+  const maxCalls = Number(arg('max-calls', String(FORMAT_DEFAULT_MAX_CALLS)))
   const outFile = arg('out', `dictation-format-eval-${arm}-${set}.json`)
   const model = arg('model', 'haiku')
   // 6.91.0: --prompt v3|v4 picks the after arm's prompt (default v3, the 6.83.1 arm).

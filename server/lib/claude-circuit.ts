@@ -15,16 +15,18 @@ export interface ClaudeBreaker {
 
 export function createBreaker(opts: {
   label: string
-  maxFailures?: number
-  cooldownMs?: number
+  /** 6.92.0: a function is read at each check, so an environment value applies after a restart. */
+  maxFailures?: number | (() => number)
+  cooldownMs?: number | (() => number)
 }): ClaudeBreaker {
-  const maxFailures = opts.maxFailures ?? 2
-  const cooldownMs = opts.cooldownMs ?? 30 * 60 * 1000 // 30 minutes
+  const read = (value: number | (() => number) | undefined, fallback: number) => typeof value === 'function' ? value() : value ?? fallback
   let consecutiveFailures = 0
   let openedAt = 0
 
   return {
     isOpen(): boolean {
+      const maxFailures = read(opts.maxFailures, 2)
+      const cooldownMs = read(opts.cooldownMs, 30 * 60 * 1000) // 30 minutes
       if (consecutiveFailures < maxFailures) return false
       const elapsed = Date.now() - openedAt
       if (elapsed >= cooldownMs) {
@@ -35,6 +37,8 @@ export function createBreaker(opts: {
       return true
     },
     recordFailure(): void {
+      const maxFailures = read(opts.maxFailures, 2)
+      const cooldownMs = read(opts.cooldownMs, 30 * 60 * 1000)
       consecutiveFailures++
       if (consecutiveFailures >= maxFailures) {
         openedAt = Date.now()

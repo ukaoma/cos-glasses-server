@@ -42,9 +42,12 @@ export interface TokenAuditEntry extends TokenAuditKeyFields {
   polishRegister?: string
   /** 6.91.0, dictation polish only: the prompt that ran (v3 or v4). */
   polishPrompt?: string
-  /** 6.91.0, dictation polish only: what became of the model's answer (polished, unchanged, guarded) and the guard kind. */
+  /** 6.91.0, dictation polish only: what became of the model's answer (polished, unchanged, guarded) and the guard kind.
+   * 6.92.0: `aborted` (audit only, never in a finalize answer) when the client went away mid-call. */
   polishOutcome?: string
   polishGuard?: string
+  /** 6.92.0, prompt edit only: ok, failed or aborted. */
+  promptEditOutcome?: 'ok' | 'failed' | 'aborted'
 }
 
 /**
@@ -86,6 +89,8 @@ export function buildTokenAuditRecord(entry: TokenAuditEntry, now: Date = new Da
     ...(entry.polishPrompt ? { polish_prompt: entry.polishPrompt } : {}),
     ...(entry.polishOutcome ? { polish_outcome: entry.polishOutcome } : {}),
     ...(entry.polishGuard ? { polish_guard: entry.polishGuard } : {}),
+    // 6.92.0: set only by the prompt-edit caller.
+    ...(entry.promptEditOutcome ? { prompt_edit_outcome: entry.promptEditOutcome } : {}),
   }
 }
 

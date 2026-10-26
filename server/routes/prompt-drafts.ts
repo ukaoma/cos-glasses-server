@@ -42,7 +42,7 @@ import { polishBudgetExhausted } from '../lib/dictation-polish-budget.js'
 import { discardPolishPrewarm, isPrewarmModel, prewarmEnabled, startPolishPrewarm } from '../lib/dictation-prewarm.js'
 import { applyCorrections } from '../lib/whisper-local.js'
 import { registerFromContext } from '../lib/dictation-register.js'
-import { autoCleanBreakers, cleanOutboundDictation, type AutoCleanRequest, type PolishResult } from '../lib/dictation-polish-pipeline.js'
+import { cleanOutboundDictation, polishBreakerOpen, type AutoCleanRequest, type PolishResult } from '../lib/dictation-polish-pipeline.js'
 import { emitDisplay } from '../lib/display-bus.js'
 import {
   acquireMaintenanceWork,
@@ -158,7 +158,8 @@ promptDraftsRouter.post('/dictation/polish/prewarm', (req, res) => {
   if (surface !== 'message' && surface !== 'meeting') return res.status(400).json({ error: 'invalid_surface' })
   if (!prewarmEnabled()) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'disabled' })
   if (!isPrewarmModel(model)) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'model' })
-  if (autoCleanBreakers[model].isOpen()) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'breaker_open' })
+  // 6.92.0: the same keyed breaker (model, bucket group) the finalize for this surface would ask.
+  if (polishBreakerOpen(model, surface)) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'breaker_open' })
   if (polishBudgetExhausted(surface)) return res.status(409).json({ error: 'prewarm_unavailable', reason: 'daily_cap' })
   try {
     res.json(startPolishPrewarm(model))
