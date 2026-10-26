@@ -72,6 +72,8 @@ describe('6.92.0 filler pass: language gate (F1b)', () => {
     expect(fillerTextLooksEnglish('Send the deck to Dana, um, por favor')).toBe(true)
     // An all-caps token is an acronym, never foreign evidence.
     expect(fillerTextLooksEnglish('Send the MIT deck')).toBe(true)
+    // One English word against "MIT" alone: the acronym must not count as foreign.
+    expect(fillerTextLooksEnglish('um the MIT report')).toBe(true)
   })
 
   it('a short English reply or command counts as English evidence (QA: 6.91.1 stripped these)', () => {
@@ -99,8 +101,9 @@ describe('6.92.0 filler pass: language gate (F1b)', () => {
     expect(stripFillersIfEnglish('Comprei um carro novo')).toBe('Comprei um carro novo')
     expect(stripFillersIfEnglish('Han er hjemme nu')).toBe('Han er hjemme nu')
     expect(stripFillersIfEnglish('ship it er tomorrow')).toBe('ship it tomorrow')
-    // A paused filler ("Um, sure thing") is a hesitation in any case.
+    // A paused filler ("Um, sure thing") is a hesitation in any case, even beside only a name.
     expect(stripFillersIfEnglish('Um, sure thing')).toBe('Sure thing')
+    expect(stripFillersIfEnglish('Um, Dana')).toBe('Dana')
   })
 
   it('the server filler step is gated; the token rules alone are not', () => {

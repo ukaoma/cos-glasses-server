@@ -76,20 +76,22 @@ change is proven by execution tests, a fake CLI and mutation gates.
   the suite) still show prompt edit's 6.91.1 argv; a re-recording will show the runner's.
 
 **Gates:** mutation gates, each from a green baseline:
-- new `server/scripts/dictation-parity-6920-mutation-gate.mjs`: **60 of 60**, each killed by its named test (baseline
-  355 tests in 13 files): abort-neutral, abort then error counts one, the slow threshold, open time and env read, the
+- new `server/scripts/dictation-parity-6920-mutation-gate.mjs`: **64 of 64**, each killed by its named test (baseline
+  360 tests in 13 files): abort-neutral, abort then error counts one, the slow threshold, open time and env read, the
   4 s model-time rule and its boundary, the slow breaker consulted and reset, the aborted audit row, the bucket key
   (meeting apart, prompt drafts with messages), prewarm keyed, prompt edit's switch and default, cap, cap boundary and
   default, call counted, own counter, breaker, threshold, failure and success, abort neutral, text/plain refusal, no
   CLI tails, the 24-character refusal, the runner (no tools, scratch directory, environment kept), the language gate
-  (wired in the filler step and the pipeline, foreign words, all-caps, inline um/er, a pause makes a hesitation), each
+  (wired in the filler step and the pipeline, its own function with the long-text ratio and the short-reply words,
+  foreign words, all-caps, inline um/er, a pause makes a hesitation, and the meaning guard keeping 6.91.1's check), each
   token exemption character before and after, the dot and colon needing a letter or digit, both exemption checks
   wired, the options `meaningGuard` and `stylePairs`, and both harness defaults;
 - dictation polish 92 of 92 (`prewarm-breaker` retargeted to the keyed breaker), format 63 of 63, custom polish 46 of
-  46, voice style 183 of 183 (`guard-short-text-is-english` retargeted to the long-text branch);
+  46, voice style 183 of 183 (its anchors unchanged from 6.91.1);
 - dictation STT 21 of 22: its two anchors in `stt-settings.ts` already matched twice at 6.91.1, so the gate stopped
   before its first mutant; a leading newline now pins each. The survivor, `hq-parakeet-warms`
   (`server/lib/stt-runtime.ts`), is in code this release does not touch and was hidden by that stop;
+- full suite, 4 workers, scratch HOME, COS_DATA_DIR and COS_PROFILE_PATH: 9,180 passed, 14 skipped, 0 failed;
 - `check-gate-anchors.mjs --base 96be0b8`: every anchor in a changed file matches once (the one pre-existing
   `manifest-lock-version-drift` miss is unchanged); `tsc --noEmit` clean.
 
