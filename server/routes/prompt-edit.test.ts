@@ -7,11 +7,18 @@ import { dataPath } from '../lib/data-dir.js'
 
 // 6.92.0: the prompt-edit counter lives in the data dir; a private one keeps another worker's file out.
 const SHARED_DATA_DIR = vi.hoisted(() => {
-  const shared = process.env.COS_DATA_DIR
-  process.env.COS_DATA_DIR = `${shared ?? '/tmp'}/private-edit-${process.pid}-${Math.random().toString(36).slice(2)}`
+  const shared = { dataDir: process.env.COS_DATA_DIR, profile: process.env.COS_PROFILE_PATH }
+  process.env.COS_DATA_DIR = `${shared.dataDir ?? '/tmp'}/private-edit-${process.pid}-${Math.random().toString(36).slice(2)}`
+  // 6.92.0: the profile (vocabulary, corrections) too. Other files write the shared one (a
+  // vocabulary term there reached this file's prompts as a known spelling in a 4-worker run).
+  process.env.COS_PROFILE_PATH = `${process.env.COS_DATA_DIR}/.cos-profile.json`
   return shared
 })
-afterAll(() => { if (SHARED_DATA_DIR === undefined) delete process.env.COS_DATA_DIR; else process.env.COS_DATA_DIR = SHARED_DATA_DIR })
+afterAll(() => {
+  for (const [key, value] of [['COS_DATA_DIR', SHARED_DATA_DIR.dataDir], ['COS_PROFILE_PATH', SHARED_DATA_DIR.profile]] as const) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value
+  }
+})
 
 let server: Server | null = null
 let baseUrl = ''

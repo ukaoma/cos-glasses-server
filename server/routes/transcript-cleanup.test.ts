@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import type { AddressInfo } from 'node:net'
 import type { Server } from 'node:http'
@@ -15,6 +15,20 @@ import { TranscriptCleanupBudget, TranscriptCleanupSettings } from '../lib/trans
 import { SuggestionStore } from '../lib/transcript-cleanup-suggestions.js'
 import { appendLedger, newEditId, sha256 } from '../lib/transcript-cleanup-ledger.js'
 import { readScreenContext, sweepTranscriptCleanupData, sessionFile } from '../lib/transcript-cleanup-screen.js'
+// 6.92.0: a private data dir and profile, so another worker's files never reach this one and this
+// one's never reach another (all workers share the run's COS_DATA_DIR and COS_PROFILE_PATH).
+const SHARED_DATA_DIR = vi.hoisted(() => {
+  const shared = { dataDir: process.env.COS_DATA_DIR, profile: process.env.COS_PROFILE_PATH }
+  process.env.COS_DATA_DIR = `${shared.dataDir ?? '/tmp'}/private-cleanup-${process.pid}-${Math.random().toString(36).slice(2)}`
+  process.env.COS_PROFILE_PATH = `${process.env.COS_DATA_DIR}/.cos-profile.json`
+  return shared
+})
+afterAll(() => {
+  for (const [key, value] of [['COS_DATA_DIR', SHARED_DATA_DIR.dataDir], ['COS_PROFILE_PATH', SHARED_DATA_DIR.profile]] as const) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value
+  }
+})
+
 
 const TOKEN = 'test-token-transcript-cleanup'
 const SESSION = 'meeting_route_cleanup'
@@ -24,6 +38,7 @@ let servers: Server[] = []
 let roots: string[] = []
 beforeEach(() => {
   rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true })
+  mkdirSync(dirname(process.env.COS_PROFILE_PATH!), { recursive: true })
   writeFileSync(process.env.COS_PROFILE_PATH!, JSON.stringify({ owner_name: 'Miles Ukaoma', vocabulary: ['Jewel360'], whisper_corrections: '{}' }))
   clearProfileCache()
   resetDecoderCaches()

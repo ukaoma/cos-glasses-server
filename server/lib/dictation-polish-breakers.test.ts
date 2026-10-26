@@ -1,10 +1,24 @@
 // 6.92.0 (plan r3, A-W0a): client aborts are neutral to the failure breaker, a slow breaker opens after
 // 4 aborts with real model time, and the breakers are keyed by (model, bucket group). Execution tests
 // over the real pipeline with the model call faked; nothing is spawned.
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+// 6.92.0: a private data dir and profile, so another worker's files never reach this one and this
+// one's never reach another (all workers share the run's COS_DATA_DIR and COS_PROFILE_PATH).
+const SHARED_DATA_DIR = vi.hoisted(() => {
+  const shared = { dataDir: process.env.COS_DATA_DIR, profile: process.env.COS_PROFILE_PATH }
+  process.env.COS_DATA_DIR = `${shared.dataDir ?? '/tmp'}/private-breakers-${process.pid}-${Math.random().toString(36).slice(2)}`
+  process.env.COS_PROFILE_PATH = `${process.env.COS_DATA_DIR}/.cos-profile.json`
+  return shared
+})
+afterAll(() => {
+  for (const [key, value] of [['COS_DATA_DIR', SHARED_DATA_DIR.dataDir], ['COS_PROFILE_PATH', SHARED_DATA_DIR.profile]] as const) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value
+  }
+})
+
 
 let dir = ''
 let model: ReturnType<typeof vi.fn>

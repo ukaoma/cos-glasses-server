@@ -10,11 +10,18 @@ import { __resetLearnedStyleCacheForTests, LEARNED_STYLE_FILE } from './dictatio
 // 6.91.0: this file writes the learned-style, instructions and options stores. A private data dir
 // (under the run's isolated one) keeps a file running in another worker from reading them.
 const SHARED_DATA_DIR = vi.hoisted(() => {
-  const shared = process.env.COS_DATA_DIR
-  process.env.COS_DATA_DIR = `${shared ?? '/tmp'}/private-${process.pid}-${Math.random().toString(36).slice(2)}`
+  const shared = { dataDir: process.env.COS_DATA_DIR, profile: process.env.COS_PROFILE_PATH }
+  process.env.COS_DATA_DIR = `${shared.dataDir ?? '/tmp'}/private-${process.pid}-${Math.random().toString(36).slice(2)}`
+  // 6.92.0: the profile (vocabulary, corrections) too. Other files write the shared one (a
+  // vocabulary term there reached this file's prompts as a known spelling in a 4-worker run).
+  process.env.COS_PROFILE_PATH = `${process.env.COS_DATA_DIR}/.cos-profile.json`
   return shared
 })
-afterAll(() => { if (SHARED_DATA_DIR === undefined) delete process.env.COS_DATA_DIR; else process.env.COS_DATA_DIR = SHARED_DATA_DIR })
+afterAll(() => {
+  for (const [key, value] of [['COS_DATA_DIR', SHARED_DATA_DIR.dataDir], ['COS_PROFILE_PATH', SHARED_DATA_DIR.profile]] as const) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value
+  }
+})
 
 // 6.91.0 prompt v4, the literal register and the learned style block (plan r2). Synthetic text only.
 const g683 = JSON.parse(readFileSync(join(import.meta.dirname, '__fixtures__', 'dictation-polish-prompt-golden-6.83.1.json'), 'utf8'))
