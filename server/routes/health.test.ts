@@ -103,7 +103,7 @@ describe('health capability contract', () => {
       process.env.COS_MAC_LIVE_VOICES = 'window'
       const on = (await (await fetch(`${base}/api/health`)).json() as any).capabilities.macLiveVoices
       expect(on.mode).toBe('window')
-      expect(Object.keys(on.window).sort()).toEqual(['agreementUnavailable', 'capped', 'carried', 'confirmed', 'created', 'evicted', 'fallbacks', 'runs', 'stateWithheld', 'withheld'])
+      expect(Object.keys(on.window).sort()).toEqual(['agreementUnavailable', 'capped', 'carried', 'confirmed', 'created', 'disabledCaptures', 'evicted', 'fallbacks', 'runs', 'stateWithheld', 'withheld'])
       expect(Object.values(on.window).every(v => typeof v === 'number' || (typeof v === 'object' && Object.values(v as object).every(n => typeof n === 'number')))).toBe(true)
     } finally {
       if (saved.live === undefined) delete process.env.COS_MAC_LIVE_VOICES; else process.env.COS_MAC_LIVE_VOICES = saved.live

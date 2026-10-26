@@ -1130,6 +1130,15 @@ export function mapChannelsToVoices(windows: TimelineWindow[], a: Activity, opti
   return { channels: evidence.filter(row => row.accepted).map(row => row.channel), evidence, eligible }
 }
 
+/**
+ * The label a chunk had LIVE. A final pass rewrites `speaker` and keeps the live one in
+ * `originalSpeaker`, so a re-run (resumed finalization, nemotron-replay) must read that,
+ * or it takes its own earlier numbers for live evidence and numbers from max + 1.
+ */
+function liveLabelOf(chunk: { speaker?: unknown; originalSpeaker?: unknown } | null | undefined): unknown {
+  return typeof chunk?.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk?.speaker
+}
+
 /** Which final channels each established live turn overlaps (a turn is a claim on every channel active inside it). */
 function liveClaims(windows: TimelineWindow[], a: Activity): Map<number, Set<string>> {
   const claims = new Map<number, Set<string>>()
@@ -1159,7 +1168,8 @@ export function mapChannelsToLiveVoices(windows: TimelineWindow[], a: Activity):
   const votes = new Map<number, Set<string>>()
   for (const window of windows) {
     const chunk = window.chunk
-    if (!isVoiceLabel(chunk.speaker) || !chunk.segments?.length || chunk.segments.some(s => s.speaker !== chunk.speaker)) continue
+    const liveLabel = liveLabelOf(chunk) as string
+    if (!isVoiceLabel(liveLabel) || !chunk.segments?.length || chunk.segments.some(s => s.speaker !== liveLabel)) continue
     const [f0,f1] = frameRange(a, window.start, window.end)
     let speech = 0
     const exclusive = new Array<number>(NEMOTRON_CHANNELS).fill(0)
@@ -1172,7 +1182,7 @@ export function mapChannelsToLiveVoices(windows: TimelineWindow[], a: Activity):
     const channel = exclusive.indexOf(Math.max(...exclusive))
     if(!speech || exclusive[channel]/speech < 0.9) continue
     const labels = votes.get(channel) ?? new Set<string>()
-    labels.add(chunk.speaker); votes.set(channel,labels)
+    labels.add(liveLabel); votes.set(channel,labels)
   }
   // A mixed live chunk cannot establish a crosswalk, but every established
   // turn in it CAN contradict one. A final diarizer that merges two live
@@ -1306,7 +1316,7 @@ async function unnamedVoicePass(input: UnnamedInput): Promise<FinalPassOutcome> 
 
   // With no live Voice label (the default: live voices are opt-in) nothing is
   // restricted and every confident channel is numbered, exactly as 6.92.0.
-  const liveNumbers = entries.flatMap(entry => [entry.chunk?.speaker, ...(Array.isArray(entry.chunk?.segments) ? entry.chunk.segments : []).map(segment => segment?.speaker)])
+  const liveNumbers = entries.flatMap(entry => [liveLabelOf(entry.chunk), ...(Array.isArray(entry.chunk?.segments) ? entry.chunk.segments : []).map(segment => segment?.speaker)])
     .filter(isVoiceLabel).map(label => Number(String(label).slice(6)))
   const liveMap = liveNumbers.length ? mapChannelsToLiveVoices(timeline.windows, activity) : null
   // W3: a channel the live path never proved is numbered above every live number

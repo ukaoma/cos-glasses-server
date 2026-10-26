@@ -58,6 +58,15 @@ const mutations = [
   m('agreement-purity-ignored', W, ['return Math.max(...perChannel.values()) / covered >= MAC_WINDOW_AGREE_PURITY', 'return true'], UNIT_T),
   m('withheld-slot-still-coded-tracked', W, ['slotTrack.delete(slot)\n    withheld++', 'withheld++'], UNIT_T),
   m('silent-carried-slot-counted-as-disagreement', W, ['    if ((exclusiveNew.get(slot) ?? 0) === 0) { slotTrack.delete(slot); continue }\n', ''], UNIT_T),
+  // ── Repeated window timeouts stop the window for the capture (QA R3) ──
+  m('disable-threshold-off-by-one', RP, ['streak >= MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW && !windowDisabled.has(sessionId)', 'streak > MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW && !windowDisabled.has(sessionId)'], [...REPLAY_T, ...MAC_T]),
+  m('timeout-streak-never-reset', RP, ['if (!timedOut) { timeoutStreak.delete(sessionId); return }', 'if (!timedOut) return'], REPLAY_T),
+  m('timeout-not-counted', RP, ['    noteWindowRun(input.sessionId, !outcome.ok && outcome.reason === \'timeout\', log)\n', ''], [...REPLAY_T, ...MAC_T]),
+  m('disable-logged-every-time', RP, ['streak >= MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW && !windowDisabled.has(sessionId)', 'streak >= MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW'], REPLAY_T),
+  m('route-ignores-disabled-window', TS, [' && !macWindowDisabledFor(sessionId)\n', '\n'], MAC_T),
+  // ── A re-run over the pass's own output reads the live label, not its own (QA R-N2) ──
+  m('rerun-reads-speaker', NF, ["return typeof chunk?.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk?.speaker", 'return chunk?.speaker'], FINAL_T),
+  m('rerun-numbers-read-speaker', NF, ['entries.flatMap(entry => [liveLabelOf(entry.chunk), ', 'entries.flatMap(entry => [entry.chunk?.speaker, '], FINAL_T),
   m('agreement-view-dropped', RP, ['crossed = cross(outcome.run, solo.ok ? solo.run : null, plan)', 'crossed = cross(outcome.run, null, plan)'], [...REPLAY_T, ...MAC_T]),
   m('agreement-run-unconditional', RP, ['if (crossed.stats.carried > 0) {', 'if (true) {'], REPLAY_T),
   m('agreement-run-failure-allowed', RP, ['crossed = cross(outcome.run, solo.ok ? solo.run : null, plan)', 'crossed = cross(outcome.run, solo.ok ? solo.run : soloOf(outcome.run, plan), plan)\n      function soloOf(run, p) { const before = p.chunks.slice(0, -1).reduce((n, c) => n + c.samples, 0); const f0 = Math.floor(before / 160); const n = run.frames - f0; return { frames: n, probs: run.probs.slice(f0 * 8, (f0 + n) * 8) } }'], REPLAY_T),
@@ -125,6 +134,10 @@ const selected = args.length ? mutations.filter(({ name }) => args.includes(name
 if (args.length && selected.length !== args.length) throw new Error('Unknown mutation name in: ' + args.join(' '))
 if (new Set(mutations.map(x => x.name)).size !== mutations.length) throw new Error('Duplicate mutation name')
 
+// Record exactly which code this run proved (QA R-N1): the commit, and whether the tree matched it.
+const rev = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+const modified = spawnSync('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean).length
+console.log(`commit ${rev || 'unknown'} (${modified ? `${modified} modified files: NOT the committed code` : 'clean tree'})`)
 const scratch = mkdtempSync(join(tmpdir(), 'mac-window-voices-6930-mutations-'))
 try {
   const skip = new Set(['data', 'models', 'certs', 'node_modules'])

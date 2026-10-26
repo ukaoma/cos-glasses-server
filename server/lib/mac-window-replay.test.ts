@@ -10,6 +10,8 @@ import { emptyMacWindowVoices, type MacWindowResult } from './mac-window-voices.
 import {
   __resetMacWindowCountersForTests,
   macLiveVoicesSnapshot,
+  macWindowDisabledFor,
+  MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW,
   macWindowStateFor,
   macWindowWithheldReason,
   noteMacWindowWithheld,
@@ -50,6 +52,7 @@ async function drive(opts: {
   windowRun?: (path: string, timeoutMs: number) => Promise<LiveDiarizeOutcome>
   chunkRun?: (path: string) => Promise<LiveDiarizeOutcome>
   upTo?: number
+  sessionId?: string
 }) {
   const { dir, wavs } = session(opts.signs)
   const lines: string[] = []
@@ -60,6 +63,7 @@ async function drive(opts: {
   const upTo = opts.upTo ?? opts.signs.length
   for (let k = 0; k < upTo; k++) {
     const job = startMacWindowDiarize({
+      sessionId: opts.sessionId ?? 'mac_test',
       sessionDir: dir, chunkIndex: k, audio: wavs[k], audioSha256: sha(wavs[k]), state,
       diarizeWindow: async (path, timeoutMs) => {
         windowCalls.push({ path, timeoutMs, existed: existsSync(path) })
@@ -162,9 +166,48 @@ describe('startMacWindowDiarize', () => {
     const dir = temp('mac-window-empty-')
     mkdirSync(dir, { recursive: true })
     expect(startMacWindowDiarize({
-      sessionDir: dir, chunkIndex: 0, audio: Buffer.alloc(10), audioSha256: sha(Buffer.alloc(1)), state: emptyMacWindowVoices(),
+      sessionId: 'mac_empty', sessionDir: dir, chunkIndex: 0, audio: Buffer.alloc(10), audioSha256: sha(Buffer.alloc(1)), state: emptyMacWindowVoices(),
       diarizeWindow: async () => ({ ok: false, reason: 'busy' }), diarizeChunk: async () => ({ ok: false, reason: 'busy' }),
     })).toBeNull()
+  })
+})
+
+describe('repeated window timeouts stop the window for that capture (QA R3)', () => {
+  const timeout = async (_path: string, ms: number): Promise<LiveDiarizeOutcome> => ({ ok: false, reason: 'timeout', ms })
+
+  it('two window timeouts in a row disable the window for the capture, once, with a counts-only line', async () => {
+    expect(MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW).toBe(2)
+    const r = await drive({ signs: [1, 1, 1], upTo: 1, windowRun: timeout, sessionId: 'mac_slow' })
+    expect(macWindowDisabledFor('mac_slow')).toBe(false) // one is not enough
+    const second = await drive({ signs: [1, 1, 1], upTo: 2, windowRun: timeout, sessionId: 'mac_slow' })
+    expect(macWindowDisabledFor('mac_slow')).toBe(true)
+    expect(second.lines.filter(l => l.includes('window disabled after 2 window timeouts in a row'))).toHaveLength(1)
+    expect(second.lines.join('\n')).toMatch(/\[mac-window\] capture mac_slow window disabled after 2 window timeouts in a row; per-chunk runs only/)
+    expect(r.lines.some(l => l.includes('disabled'))).toBe(false)
+    // A third timeout is not logged again.
+    const third = await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_slow' })
+    expect(third.lines.some(l => l.includes('disabled'))).toBe(false)
+    expect(macLiveVoicesSnapshot({ COS_MAC_LIVE_VOICES: 'window' }).window?.disabledCaptures).toBe(1)
+  })
+
+  it('a window run that finishes resets the streak, and one capture never disables another', async () => {
+    await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_a' })
+    await drive({ signs: [1], sessionId: 'mac_a' }) // a clean window run
+    await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_a' })
+    expect(macWindowDisabledFor('mac_a')).toBe(false)
+    await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_b' })
+    expect(macWindowDisabledFor('mac_a')).toBe(false)
+    expect(macWindowDisabledFor('mac_b')).toBe(false)
+    await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_b' })
+    expect(macWindowDisabledFor('mac_b')).toBe(true)
+    expect(macWindowDisabledFor('mac_a')).toBe(false)
+  })
+
+  it('another failure between two timeouts also breaks the streak (in a row means in a row)', async () => {
+    await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_c' })
+    await drive({ signs: [1], windowRun: async () => ({ ok: false, reason: 'busy' }), sessionId: 'mac_c' })
+    await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_c' })
+    expect(macWindowDisabledFor('mac_c')).toBe(false)
   })
 })
 

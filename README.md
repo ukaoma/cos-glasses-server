@@ -666,9 +666,10 @@ never a name, never enrolled and never trained, and renaming one is text only.
 - **`COS_MAC_LIVE_VOICES=window`** (6.93.0 path, replaces the anchors): each chunk is
   diarized inside the last five durable chunks (30 s) with the same pinned CLI, with a
   timeout sized from the window. A carried voice is used only when the chunk diarized
-  alone agrees. A timeout or refused window falls back to the plain per-chunk run. A
-  voice silent for longer than the window comes back unidentified, never under
-  another voice's number.
+  alone agrees, which catches a merge of two voices speaking in the same chunk but not
+  yet a clean hand-over to a new voice at a chunk boundary. A timeout or refused window
+  falls back to the plain per-chunk run, and two timeouts in a row stop the window for
+  that capture. A voice silent for longer than the window comes back unidentified.
 - **`COS_MAC_VOICE_LABELS`** (on by default) governs the after-save pass; `0` also
   turns both live modes off. Setting it to `1` is the default, not an opt-in.
 

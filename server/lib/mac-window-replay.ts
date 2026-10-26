@@ -60,7 +60,40 @@ const counters = {
   confirmed: 0,
   evicted: 0,
   capped: 0,
+  disabledCaptures: 0,
   stateWithheld: { corrupt_state: 0, earlier_voice_labels: 0 } as Record<MacWindowWithheld, number>,
+}
+
+/**
+ * QA R3: a window run is allowed MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW timeouts in one capture. After that the capture
+ * stops using the window (per-chunk runs only, `Ext`) until the server restarts, because a window timeout is
+ * exempt from the shared breaker and would otherwise cost its full wait on every chunk, for ever.
+ */
+export const MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW = 2
+const timeoutStreak = new Map<string, number>()
+const windowDisabled = new Set<string>()
+const CAPTURE_MEMORY_MAX = 256
+
+function remember<T>(set: Set<T>, value: T): void {
+  if (set.size >= CAPTURE_MEMORY_MAX) set.delete(set.values().next().value as T)
+  set.add(value)
+}
+
+/** True once this capture's window has timed out too often in a row. */
+export function macWindowDisabledFor(sessionId: string): boolean {
+  return windowDisabled.has(sessionId)
+}
+
+function noteWindowRun(sessionId: string, timedOut: boolean, log: (line: string) => void): void {
+  if (!timedOut) { timeoutStreak.delete(sessionId); return }
+  const streak = (timeoutStreak.get(sessionId) ?? 0) + 1
+  if (!timeoutStreak.has(sessionId) && timeoutStreak.size >= CAPTURE_MEMORY_MAX) timeoutStreak.delete(timeoutStreak.keys().next().value as string)
+  timeoutStreak.set(sessionId, streak)
+  if (streak >= MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW && !windowDisabled.has(sessionId)) {
+    remember(windowDisabled, sessionId)
+    counters.disabledCaptures++
+    log(`[mac-window] capture ${sessionId} window disabled after ${streak} window timeouts in a row; per-chunk runs only for the rest of this capture (Ext)`)
+  }
 }
 
 export function __resetMacWindowCountersForTests(): void {
@@ -69,6 +102,8 @@ export function __resetMacWindowCountersForTests(): void {
     else (counters[key] as number) = 0
   }
   seenWithheld.clear()
+  timeoutStreak.clear()
+  windowDisabled.clear()
 }
 
 const seenWithheld = new Set<string>()
@@ -98,6 +133,8 @@ export interface MacLiveVoicesSnapshot {
     confirmed: number
     evicted: number
     capped: number
+    /** Captures that stopped using the window after repeated window timeouts (QA R3). */
+    disabledCaptures: number
     stateWithheld: Record<MacWindowWithheld, number>
   }
 }
@@ -118,6 +155,7 @@ export function macLiveVoicesSnapshot(env: NodeJS.ProcessEnv = process.env): Mac
       confirmed: counters.confirmed,
       evicted: counters.evicted,
       capped: counters.capped,
+      disabledCaptures: counters.disabledCaptures,
       stateWithheld: { ...counters.stateWithheld },
     },
   }
@@ -140,6 +178,7 @@ const chunkName = (index: number): string => `chunk_${String(index).padStart(4, 
  *    the agreement view, and the fallback after a window timeout or refusal.
  */
 export function startMacWindowDiarize(input: {
+  sessionId: string
   sessionDir: string
   chunkIndex: number
   audio: Buffer
@@ -201,6 +240,7 @@ export function startMacWindowDiarize(input: {
   const go = async (): Promise<LiveDiarizeOutcome> => {
     let outcome: LiveDiarizeOutcome
     try { outcome = await input.diarizeWindow(wavPath, timeoutMs) } finally { cleanup() }
+    noteWindowRun(input.sessionId, !outcome.ok && outcome.reason === 'timeout', log)
     if (!outcome.ok) return outcome.reason === 'timeout' ? fallback('timeout', outcome.ms) : outcome
     let crossed = cross(outcome.run, null, plan)
     if (!crossed) return fallback('geometry', undefined)

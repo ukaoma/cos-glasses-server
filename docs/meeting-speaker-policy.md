@@ -77,13 +77,17 @@ attributed: one to one, at least 1 s of exclusive overlap, at least 80% of that
 slot's overlap on one track. A slot with attributed overlap that fails those
 tests gets no track and cannot mint a number. A carried slot is used only when the
 chunk diarized alone agrees (at least half of the slot's exclusive frames placed, at
-least 90% of those on one channel): a window model that merged a new voice into an old
-slot is not carried, and its frames are stored untracked so the error cannot feed the
-next window. A track becomes `Voice N` after two clean proof chunks (2 s alone,
-purity 0.9, distinct chunk and audio hash). A track no remembered frame refers to is
-evicted and its id reused (12 live ids), so a long meeting cannot exhaust them; its
-number stays spent. The window run's timeout is sized from its length (1.5 s per 6 s
-of audio, 7.5 s for 30 s), a timeout never counts toward the breaker shared with G2,
+least 90% of those on one channel). This catches a window model that merged two voices
+that both speak in the current chunk: that slot is not carried and its frames are stored
+untracked, so the error does not feed the next window. It does not yet catch a clean
+hand-over at a chunk boundary (a new voice alone in the chunk, put on an old voice's slot
+by the window model): the chunk alone shows one clean voice and agrees. Catching that
+needs evidence from more than one chunk, which is why the window stays opt-in. A track
+becomes `Voice N` after two clean proof chunks (2 s alone, purity 0.9, distinct chunk and
+audio hash). A track no remembered frame refers to is evicted and its id reused (12 live
+ids), so a long meeting cannot exhaust them; its number stays spent. The window run's
+timeout is sized from its length (1.5 s per 6 s of audio, 7.5 s for 30 s), a timeout never
+counts toward the breaker shared with G2 (two in a row stop the window for that capture),
 and a timeout or refused geometry falls back to the plain per-chunk run.
 
 The state is per-frame track ids for the last 4 chunks plus track proofs and the

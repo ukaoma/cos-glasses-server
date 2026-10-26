@@ -16,10 +16,13 @@
 // A carried slot is used only if the current chunk AGREES (QA W1): the same chunk
 // diarized alone (the per-chunk run, an independent view) must put the slot's
 // exclusive frames on one channel (MAC_WINDOW_AGREE_PURITY of the frames it can
-// place, MAC_WINDOW_AGREE_COVERAGE of them placed). A window model that merged a
-// new voice into an old slot is therefore not carried: the slot gets no label and
-// no proof this chunk, and its frames are stored as untracked so the error cannot
-// feed the next window.
+// place, MAC_WINDOW_AGREE_COVERAGE of them placed). A window model that merged two
+// voices which BOTH speak in this chunk is therefore not carried: the slot gets no
+// label and no proof this chunk, and its frames are stored as untracked so the error
+// does not feed the next window. NOT caught (QA R1): a clean hand-over at the chunk
+// boundary, a new voice alone in this chunk that the window model put on an old
+// voice's slot. The chunk alone shows one clean voice and agrees. Catching it needs
+// evidence from more than one chunk, so the window stays opt-in.
 //
 // A track is shown as `Voice N` only after clean proof in TWO distinct original
 // chunks with distinct audio (each: MAC_WINDOW_PROOF_FRAMES exclusive, purity at
@@ -28,7 +31,8 @@
 // so a long meeting cannot spend the MAC_WINDOW_MAX_TRACKS ids; its number stays
 // spent. A voice silent for longer than the window cannot be crosswalked: it reads
 // `Ext` or, after its own two proofs, a NEW number (the saved meeting's final pass
-// numbers what live did not prove). It is never given another voice's number.
+// numbers what live did not prove). The carry rules do not hand it another voice's number
+// (the clean hand-over above is the exception).
 //
 // A `Voice N` is capture-local acoustic continuity, never a person: similarity 0,
 // never a profile, never enrolled or trained. No audio, embedding or probability

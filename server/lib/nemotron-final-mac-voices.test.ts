@@ -389,6 +389,38 @@ describe('final pass preserves live anonymous label numbers', () => {
 })
 
 
+describe('a re-run over the pass\'s own output is not live evidence (QA R-N2)', () => {
+  it.each([true, false])('reads originalSpeaker, so its own Voice N is not taken for a live label (batch=%s)', async batch => {
+    const f = macMeeting({ batch })
+    expect(await runNemotronFinalPass(opts(f, fakeRun(TWO_VOICES)))).toMatchObject({ status: 'applied', mapped: { 0: 'Voice 1', 1: 'Voice 2' } })
+    const sidecar = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
+    expect(sidecar.chunks.every((c: any) => c.originalSpeaker === 'Ext')).toBe(true)
+    // A resumed finalization: the same audio, the transcript already labelled, `already_applied` no longer guards it.
+    delete sidecar.diarization
+    writeFileSync(f.sidecarPath, JSON.stringify(sidecar, null, 2))
+    const afterFirst = { sidecar: readFileSync(f.sidecarPath, 'utf8'), meeting: readFileSync(f.meetingPath, 'utf8') }
+    // 6.92.0: with no live label the pass numbers from scratch and changes nothing. Reading its own labels as live
+    // numbered the unclaimed channels Voice 3 and Voice 4 and rewrote the transcript.
+    expect(await runNemotronFinalPass(opts(f, fakeRun(TWO_VOICES)))).toMatchObject({ status: 'skipped', reason: 'no_change' })
+    expect(readFileSync(f.sidecarPath, 'utf8')).toBe(afterFirst.sidecar)
+    expect(readFileSync(f.meetingPath, 'utf8')).toBe(afterFirst.meeting)
+    expect(readFileSync(f.meetingPath, 'utf8')).not.toMatch(/Voice [34]/)
+  })
+  it('a chunk\'s live label survives the pass in originalSpeaker, and a re-run still keeps it', async () => {
+    const f = macMeeting({ batch: false, mutate: (chunk, i) => {
+      if (![0, 1, 4].includes(i)) return
+      chunk.speaker = 'Voice 3'; chunk.segments = [{ speaker: 'Voice 3', text: chunk.text, startSec: 0, endSec: 6, similarity: 0 }]
+    } })
+    expect(await runNemotronFinalPass(opts(f, fakeRun(TWO_VOICES)))).toMatchObject({ status: 'applied', mapped: { 0: 'Voice 3', 1: 'Voice 4' } })
+    const sidecar = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
+    delete sidecar.diarization
+    writeFileSync(f.sidecarPath, JSON.stringify(sidecar, null, 2))
+    const before = readFileSync(f.meetingPath, 'utf8')
+    expect(await runNemotronFinalPass(opts(f, fakeRun(TWO_VOICES)))).toMatchObject({ status: 'skipped', reason: 'no_change' })
+    expect(readFileSync(f.meetingPath, 'utf8')).toBe(before)
+  })
+})
+
 describe('final channels cannot erase established voices in mixed live chunks', () => {
   it.each([true,false])('withholds a merged channel crosswalk and preserves both live voices (batch=%s)',async batch=>{
     const f=macMeeting({batch,mutate:(chunk,i)=>{

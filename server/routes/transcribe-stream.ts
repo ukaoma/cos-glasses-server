@@ -1,7 +1,7 @@
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, admitPhoneRecording, phoneQueryInteger, requirePhoneRecording, readPhoneRecording, validatePhoneWav, persistPhoneChunkReceipt } from '../lib/phone-recording.js'
 import { matchMacLiveVoice, macAnonymousProjection, type MacLiveVoiceState } from '../lib/mac-live-voices.js'
 import { chunkShowsVoiceLabel, macLiveVoicesMode } from '../lib/mac-voice-labels.js'
-import { macWindowStateFor, macWindowWithheldReason, noteMacWindowWithheld, startMacWindowDiarize } from '../lib/mac-window-replay.js'
+import { macWindowDisabledFor, macWindowStateFor, macWindowWithheldReason, noteMacWindowWithheld, startMacWindowDiarize } from '../lib/mac-window-replay.js'
 import { macWindowVoicesEnabled, type MacWindowVoiceState } from '../lib/mac-window-voices.js'
 import { MacParakeetUnavailableError, transcribeMacParakeet, transcribePhoneParakeet } from '../lib/mac-recording-asr.js'
 import { getMeetingStore } from '../lib/meeting-store.js'
@@ -2472,13 +2472,15 @@ async function processStreamChunk(opts: {
   // contiguous run after the gap). With the switch off, or no window to run (an
   // unplannable chunk, corrupt state, earlier Voice labels), the chunk takes the plain
   // per-chunk run with no anchors: `Ext`, as 6.92.0. A window run that times out or is
-  // refused falls back to that per-chunk run too (mac-window-replay.ts).
-  const macWindowOn = MAC_CAPTURE_ID.test(sessionId) && macWindowVoicesEnabled()
+  // refused falls back to that per-chunk run too, and two window timeouts in a row stop the
+  // window for the rest of the capture (mac-window-replay.ts).
+  const macWindowOn = MAC_CAPTURE_ID.test(sessionId) && macWindowVoicesEnabled() && !macWindowDisabledFor(sessionId)
   const macWindowWithheld = macWindowOn ? macWindowWithheldReason(session.macWindowVoices, session.chunks) : null
   if (macWindowWithheld) noteMacWindowWithheld(sessionId, macWindowWithheld)
   const macWindowState = macWindowOn ? macWindowStateFor(session.macWindowVoices, session.chunks) : null
   const macWindow = macWindowState
     ? startMacWindowDiarize({
+        sessionId,
         sessionDir: resolve(SESSION_AUDIO_DIR, sessionId),
         chunkIndex,
         audio: audioBuffer,

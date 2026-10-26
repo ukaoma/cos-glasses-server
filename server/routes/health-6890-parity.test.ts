@@ -1,7 +1,9 @@
 // 6.89.0: LAN first is gone (Miles, 2026-10-23 19:57). /api/health and /api/models are the 6.87.0
 // shape again, checked path for path against goldens captured from the unmodified 6.87.0 base
-// (601d807). The one new key is /api/health `tailscaleNudge` (lib/tailscale-nudge.ts), which
-// carries no address. /api/route-proof is an ordinary unknown path behind the token again, and
+// (601d807). The 6.89.0 change was one new key, /api/health `tailscaleNudge` (lib/tailscale-nudge.ts),
+// which carries no address. Two later additive capabilities are in the goldens below:
+// `phoneMicrophoneMeetings` (iPhone microphone, 6.93.0) and `macLiveVoices` (the live Mac voice
+// switch and window counts, 6.93.0). /api/route-proof is an ordinary unknown path behind the token again, and
 // COS_LAN_FIRST is read by nothing.
 import express from 'express'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
