@@ -122,5 +122,5 @@ try {
     killed += 1
     console.log(`${name} KILLED by ${killers.slice(0, 2).join(' | ')}${killers.length > 2 ? ` (+${killers.length - 2} more)` : ''}`)
   }
-  console.log(`${killed} of ${selected.length} Mac window replay 6.93.0 mutations killed`)
+  console.log(`${killed} of ${selected.length} Mac voice assignment 6.93.0 mutations killed`)
 } finally { rmSync(scratch, { recursive: true, force: true }) }

@@ -677,7 +677,16 @@ profile (see below).
 
 Known limit: a clean hand-over between two people exactly at a chunk boundary can give
 the new speaker the previous number. Set `COS_MAC_LIVE_VOICES=off` in
-`~/.cos-glasses/.env` and restart when nothing is recording to turn it off. `GET /api/health` reports `capabilities.macLiveVoices.mode`
+`~/.cos-glasses/.env` and restart when nothing is recording to turn it off.
+
+**Assigning a Mac voice to a voice profile (6.93.0).** `POST /api/meeting/:sessionId/relabel`
+with `assignVoiceProfile: true` adds a Mac recording `Voice N`'s audio to an already
+enrolled person. A Mac recording banks no embeddings, so the server extracts them from the
+retained chunk audio (7 days), keeps only that voice, and applies the same coherence and
+diversity gates as a glasses rename. A dry run (`dryRun: true`) reports the person, the most
+samples it would add and the similarity to the stored profile, and writes nothing; a
+confirm that would add nothing is refused whole (`422 nothing_to_enrol`). Without the flag a
+Mac rename is text only. `GET /api/health` reports `capabilities.macLiveVoices.mode`
 (`off`, `anchors` or `window`) and, for `window`, counts only.
 
 The saved meeting is relabeled by the whole-meeting pass. Live numbers are kept;
