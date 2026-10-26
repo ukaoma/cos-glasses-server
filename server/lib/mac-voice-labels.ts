@@ -3,7 +3,10 @@
 // A Mac recording hears call audio, video and podcasts through one global tap.
 // Naming a voice from that audio is not safe (no calibration exists, see
 // CHANGELOG 6.73.6 and the 2026-10-14 Mac plan section 5), so every Mac chunk is
-// `Ext`. What IS safe is telling voices apart: one Nemotron pass over the whole
+// `Ext` when identity is unknown. Live anonymous continuity now uses clean
+// isolated acoustic tracks via mac-live-voices.ts; it never uses chunk-local
+// channel IDs as meeting identities. The final pass can also tell voices apart:
+// one Nemotron pass over the whole
 // saved meeting gives channels that are consistent for the call, and each
 // confident channel becomes `Voice 1`, `Voice 2`, ... in order of first speech.
 //

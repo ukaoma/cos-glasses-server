@@ -1,9 +1,9 @@
 import express from 'express'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { wavOf } from '../lib/__fixtures__/nemotron-helpers.js'
+import { activityOf, wavOf } from '../lib/__fixtures__/nemotron-helpers.js'
 import type { Server } from 'node:http'
 let root:string, server:Server, base:string
 let stream:typeof import('./transcribe-stream.js')
@@ -14,7 +14,7 @@ beforeEach(async()=>{
  vi.doMock('../lib/server-instance-id.js',()=>({getServerInstanceId:()=> 'server-mac'}))
  vi.doMock('../lib/parakeet.js',async original=>({...await original<typeof import('../lib/parakeet.js')>(),transcribeParakeet:vi.fn(async()=>({model:'parakeet-ultra',text:'Parakeet heard the selected local engine clearly.',words:[{word:'Parakeet',start:0,end:0.4}],processingSec:0.1,wallMs:120}))}))
  vi.doMock('../lib/whisper-local.js',()=>({transcribeLocal:vi.fn(async()=>({text:'We reviewed the launch plan and agreed on a decision.',backend:'server'})),applyCorrections:(s:string)=>s}))
- vi.doMock('../lib/speaker-embeddings.js',async original=>({...await original<typeof import('../lib/speaker-embeddings.js')>(),AUTO_ENROLL_CANDIDATE_SIMILARITY:0.72,AUTO_ENROLL_THRESHOLD:0.88,identifySpeaker:identify,isEmbeddingAvailable:()=>true,autoEnroll:enroll,getEmbeddingCount:()=>3}))
+ vi.doMock('../lib/speaker-embeddings.js',async original=>({...await original<typeof import('../lib/speaker-embeddings.js')>(),AUTO_ENROLL_CANDIDATE_SIMILARITY:0.72,AUTO_ENROLL_THRESHOLD:0.88,identifySpeaker:identify,extractEmbedding:vi.fn((wav:Buffer)=>new Float32Array(wav.readInt16LE(44)>=0?[1,0]:[0,1])),isEmbeddingAvailable:()=>true,autoEnroll:enroll,getEmbeddingCount:()=>3}))
  vi.doMock('../lib/profile.js',()=>({loadProfileObject:()=>({}),getDomainKeywords:()=>({}),getVocabulary:()=>[],getOwnerName:()=> 'COS',getOwnerSpeakerLabel:()=> 'MU',getWhisperCorrections:()=>''}))
  vi.doMock('../lib/vad-silero.js',()=>({isSileroAvailable:()=>false,measureSpeechSeconds:()=>null,trimSilence:vi.fn()}))
  vi.doMock('../lib/stt-live.js',async original=>({...await original<typeof import('../lib/stt-live.js')>(),decideQuiet:()=>({isQuiet:false,rms:400,speechSec:3,gate:'rms'}),asrFrontEnd:async(b:Buffer)=>b}))
@@ -254,4 +254,84 @@ it('6.90.0: Mac Nemotron tracks skip the wearer check and are tagged as Mac, whi
  // The 0.64 track matches stay below the 0.88 floor: every label is Ext and nothing trains.
  const chunk=stream.getSessionChunks(id)?.[0]; expect(chunk?.speaker).toBe('Ext'); for(const segment of chunk?.segments??[]) expect(segment.speaker).toBe('Ext')
  expect(enroll).not.toHaveBeenCalled(); expect(existsSync(join(root,'chunk-embeddings',id+'.jsonl'))).toBe(false)
+})
+
+
+it('keeps anonymous live voices stable across channel permutations, replay, durable restart and save without training',async()=>{
+ await start()
+ const nemotron=await import('../lib/nemotron-live.js')
+ const run=(channel:number)=>vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[channel,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
+ const post=(index:number,value:number)=>call('/mac-recording/'+id+'/chunks?chunkIndex='+index+'&elapsed='+((index+1)*6000),wavOf(6,()=>value))
+ run(7); expect((await post(0,400)).json.speaker).toBe('Ext')
+ run(2); const named=await post(1,420)
+ expect(named.json).toMatchObject({speaker:'Voice 1',segments:[{speaker:'Voice 1',similarity:0}]})
+ expect((await post(1,420)).json).toEqual(named.json)
+ run(2);expect((await post(2,-400)).json.speaker).toBe('Ext')
+ run(7);expect((await post(3,-420)).json.speaker).toBe('Voice 2')
+ run(0);expect((await post(4,430)).json.speaker).toBe('Voice 1')
+ const privateSession=JSON.parse(readFileSync(join(root,'active-sessions',id+'.json'),'utf8'))
+ expect(privateSession.macLiveVoices.anchors).toHaveLength(2)
+ vi.resetModules();const recovered=await import('./transcribe-stream.js')
+ expect(recovered.getSession(id).macLiveVoices).toEqual(privateSession.macLiveVoices)
+ expect(recovered.getSessionChunks(id)?.[4]).toMatchObject({speaker:'Voice 1',speakerPolicy:'high-confidence',similarity:0})
+ expect(enroll).not.toHaveBeenCalled()
+ expect(existsSync(join(root,'chunk-embeddings',id+'.jsonl'))).toBe(false)
+ expect(readdirSync(join(root,'training-audio'),{recursive:true})).toEqual([])
+ const saved=await call('/meeting/save',{sessionId:id,expectedChunkCount:5,domain:'personal'})
+ expect(saved.status).toBe(200);await Promise.allSettled(background.splice(0))
+ expect(existsSync(join(root,'active-sessions',id+'.json'))).toBe(false)
+ const sidecar=JSON.parse(readFileSync(join(root,saved.json.filepath.replace(/\.md$/,'.g2-chunks.json')),'utf8'))
+ expect(sidecar.chunks[4]).toMatchObject({speaker:'Voice 1',similarity:0,speakerPolicy:'high-confidence'})
+ expect(sidecar.macLiveVoices).toBeUndefined() // acoustic anchors are active-capture only
+})
+it('withholds anonymous continuity when acoustic extraction fails and preserves strict named identity',async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js'),embeddings=await import('../lib/speaker-embeddings.js')
+ vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
+ vi.mocked(embeddings.extractEmbedding).mockReturnValue(null)
+ for(let i=0;i<2;i++)expect((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400))).json.speaker).toBe('Ext')
+ identify.mockReturnValueOnce({speaker:'Dana',similarity:0.94,embedding:new Float32Array(192).fill(0.1)})
+ expect((await call('/mac-recording/'+id+'/chunks?chunkIndex=2&elapsed=18000',wavOf(6,()=>400))).json.speaker).toBe('Dana')
+ expect(enroll).not.toHaveBeenCalled()
+})
+
+it('repeated audio at a different raw index is not independent voice evidence; flag-off leaves no anchors',async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js')
+ vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
+ const post=(i:number,value:number)=>call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>value))
+ expect((await post(0,400)).json.speaker).toBe('Ext')
+ expect((await post(1,400)).json.speaker).toBe('Ext')
+ expect((await post(2,420)).json.speaker).toBe('Voice 1')
+ const old=process.env.COS_MAC_VOICE_LABELS;process.env.COS_MAC_VOICE_LABELS='0'
+ try{expect((await post(3,440)).json.speaker).toBe('Ext')}finally{if(old===undefined)delete process.env.COS_MAC_VOICE_LABELS;else process.env.COS_MAC_VOICE_LABELS=old}
+})
+it('corrupt recovered continuity stays unknown instead of reusing an existing voice number',async()=>{
+ await start();stream.getSession(id).macLiveVoices={version:2,anchors:[]} as any
+ const nemotron=await import('../lib/nemotron-live.js')
+ vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
+ for(let i=0;i<2;i++)expect((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400+i))).json.speaker).toBe('Ext')
+ expect(stream.getSession(id).macLiveVoices).toEqual({version:2,anchors:[]})
+})
+
+it('does not acknowledge a non-durable voice promotion and replays the same canonical label without another model pass',async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js')
+ vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
+ const post=(i:number,value:number)=>call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>value))
+ await post(0,400)
+ const atomic=await import('../lib/atomic-fs.js'),write=atomic.durableAtomicWriteFileSync
+ let failed=false
+ const spy=vi.spyOn(atomic,'durableAtomicWriteFileSync').mockImplementation((path,data,options)=>{
+   if(!failed && String(path).endsWith('/active-sessions/'+id+'.json') && String(data).includes('"speaker":"Voice 1"')) {failed=true;throw new Error('injected durable voice promotion failure')}
+   return write(path,data,options)
+ })
+ try{
+  expect((await post(1,420)).status).toBe(503)
+  const before=JSON.parse(readFileSync(join(root,'active-sessions',id+'.json'),'utf8'))
+  expect(before.chunks).toHaveLength(1)
+  expect(before.macLiveVoices.anchors[0].confirmed).toBe(false)
+  expect((await post(1,420)).json.speaker).toBe('Voice 1')
+  expect(vi.mocked(nemotron.nemotronLive.diarize)).toHaveBeenCalledTimes(2)
+  const after=JSON.parse(readFileSync(join(root,'active-sessions',id+'.json'),'utf8'))
+  expect(after.chunks[1].speaker).toBe('Voice 1')
+  expect(after.macLiveVoices.anchors[0].confirmed).toBe(true)
+ }finally{spy.mockRestore()}
 })

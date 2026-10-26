@@ -19,3 +19,43 @@ The final Nemotron pass builds meeting-wide channel/name mappings. It therefore 
 The isolated 13-file canary passed 180 tests, using mocked ASR/identity models and injected final runners. It covers policy persistence and permissions, compare-and-swap rejection, corrupt policy repair, collision-resistant capture IDs, shared confidence gates, real stream/meeting HTTP routes, delayed ASR policy changes, no strict automatic training, raw/saved/recovered markers, batch transition/fallback behavior, checkpoint invalidation, and final-pass refusal with no native runner call or canonical byte change. Existing Standard and speaker-review regressions passed. TypeScript typecheck passed.
 
 This is backend qualification. The candidate still needs the Control helper/UI integration, actual policy selection and confirmation shortcuts, full applicable release checks, and artifact/signing gates before promotion. No live setting, transcription flag, cue flag, native worker, installed server or public package was changed by these canaries.
+
+
+## Live Mac anonymous voices
+
+Mac recordings retain the fixed High-confidence named identity floor (0.88).
+With the existing `COS_MAC_VOICE_LABELS` switch enabled, successful live Nemotron
+tracks can additionally carry anonymous `Voice N` labels at identity similarity
+zero. These labels mean acoustic continuity inside this capture, never a person.
+The chunk receipt and live transcript retain the existing `speaker` and
+`segments[].speaker` fields; clients should display these distinct anonymous
+labels instead of collapsing them into one unidentified row.
+
+A label requires at least two seconds of isolated speech with at least 90% of the
+track exclusive, a valid acoustic embedding, and a second agreeing observation
+from a different raw chunk with different audio bytes. Replaying the same window
+under another index does not count as new evidence. Matching uses fixed capture-local anchors at 0.88
+with a 0.1 separation margin; intermediate similarities remain `Ext` and cannot
+allocate new voices. Channel numbers are never used as cross-chunk identities.
+Missing models, warming, busy, failed diarization, unavailable embeddings, short
+tracks and uncertain matches keep existing `Ext` behavior. Named recognition is
+unchanged. The switch disables new anonymous labels without changing ASR.
+
+At most six acoustic anchors are held in the existing private active-session
+file. They survive recovery with their label numbers, are never exposed through
+the transcript DTO or saved sidecar, and are removed when that session closes.
+Malformed continuity fails closed instead of restarting numbering. Existing
+saved recordings are untouched; final whole-meeting anonymous diarization
+retains its current quality gates. When live labels exist, a clean, exclusive
+window must prove each final-channel crosswalk to the existing Voice N.
+Contradictory/split crosswalks cannot transfer a label to other chunks; existing
+local turns retain their evidence. That pass cannot renumber known voices or
+allocate new numbers to other channels. These conservative guards are
+not an acoustic calibration claim; real playback audio still needs qualification.
+
+Mac renames remain text-only: `enrolNamedVoice` returns `mac_capture`. Neither
+anonymous continuity nor a guessed name creates a global voice profile, banks
+correction-training embeddings, or copies training WAVs. User-confirmed training
+from Mac playback requires a separate explicit source-scoped enrollment flow,
+with selected isolated acoustic evidence, raw-index mapping, preview/confirmation
+and provenance/retraction support; ordinary relabeling is not that consent.

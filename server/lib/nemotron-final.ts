@@ -1121,6 +1121,34 @@ export function mapChannelsToVoices(windows: TimelineWindow[], a: Activity, opti
   return { channels: evidence.filter(row => row.accepted).map(row => row.channel), evidence, eligible }
 }
 
+/** Crosswalk final channels to EXISTING live placeholders. A pure live chunk
+ * must belong overwhelmingly to one final channel. Contradictory channels or a
+ * live label split across channels are withheld; no numbers are reassigned. */
+export function mapChannelsToLiveVoices(windows: TimelineWindow[], a: Activity): Map<number, string> {
+  const votes = new Map<number, Set<string>>()
+  for (const window of windows) {
+    const chunk = window.chunk
+    if (!isVoiceLabel(chunk.speaker) || !chunk.segments?.length || chunk.segments.some(s => s.speaker !== chunk.speaker)) continue
+    const [f0,f1] = frameRange(a, window.start, window.end)
+    let speech = 0
+    const exclusive = new Array<number>(NEMOTRON_CHANNELS).fill(0)
+    for (let f=f0;f<f1;f++) {
+      const active: number[]=[]
+      for (let c=0;c<NEMOTRON_CHANNELS;c++) if(isActive(a,f,c)) active.push(c)
+      if(active.length) speech++
+      if(active.length===1) exclusive[active[0]]++
+    }
+    const channel = exclusive.indexOf(Math.max(...exclusive))
+    if(!speech || exclusive[channel]/speech < 0.9) continue
+    const labels = votes.get(channel) ?? new Set<string>()
+    labels.add(chunk.speaker); votes.set(channel,labels)
+  }
+  const proposed = [...votes].filter(([,labels])=>labels.size===1).map(([channel,labels])=>[channel,[...labels][0]] as const)
+  // Count claims on conflicting channels too. Dropping a contradictory channel
+  // must not make its label appear exclusive to a different channel.
+  return new Map(proposed.filter(([,label])=>[...votes.values()].filter(labels=>labels.has(label)).length===1))
+}
+
 /** `Voice 1` for the first channel, `Voice 2` for the next, and so on. */
 export function numberVoices(channels: number[]): Map<number, string> {
   return new Map(channels.map((channel, i) => [channel, voiceLabel(i + 1)]))
@@ -1226,11 +1254,14 @@ async function unnamedVoicePass(input: UnnamedInput): Promise<FinalPassOutcome> 
   const aligned = textNext.length === chunks.length && textNext.every((entry, i) => entry.chunk.text === chunks[i]?.text)
   if (!aligned) return { status: 'skipped', reason: 'chunk_map_ambiguous', unnamed: true, mode, excluded }
 
-  let channels = [...found.channels]
-  let map = numberVoices(channels)
+  const hasLiveVoices = entries.some(entry => isVoiceLabel(entry.chunk?.speaker) || entry.chunk?.segments?.some(segment => isVoiceLabel(segment.speaker)))
+  const liveMap = hasLiveVoices ? mapChannelsToLiveVoices(timeline.windows, activity) : null
+  let channels = found.channels.filter(channel => !liveMap || liveMap.has(channel))
+  const labelsFor = (kept: number[]) => liveMap ? new Map(kept.map(channel => [channel, liveMap.get(channel)!])) : numberVoices(kept)
+  let map = labelsFor(channels)
   let labelled: UnnamedLabelling | null = null
   for (let round = 0; round <= NEMOTRON_CHANNELS && channels.length; round++) {
-    map = numberVoices(channels)
+    map = labelsFor(channels)
     const attempt = labelUnnamed(input, mode, map)
     if ('status' in attempt) return { ...attempt, unnamed: true, mode, excluded }
     const inTurns = voicesIn(attempt.next)

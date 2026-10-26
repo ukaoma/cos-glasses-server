@@ -1,3 +1,5 @@
+import { matchMacLiveVoice, macAnonymousProjection, type MacLiveVoiceState } from '../lib/mac-live-voices.js'
+import { isVoiceLabel, macVoiceLabelsEnabled } from '../lib/mac-voice-labels.js'
 import { MacParakeetUnavailableError, transcribeMacParakeet } from '../lib/mac-recording-asr.js'
 import { getMeetingStore } from '../lib/meeting-store.js'
 import { appendAutonomousSaveLog, getStopIntentStore, savedChunkReplay, type StopIntent } from '../lib/meeting-stop-intents.js'
@@ -46,7 +48,7 @@ import { emitDisplay } from '../lib/display-bus.js'
 import { errMsg } from '../lib/utils.js'
 import { transcribeLocal, applyCorrections, type WhisperWord } from '../lib/whisper-local.js'
 import { trimSilence, isSileroAvailable } from '../lib/vad-silero.js'
-import { identifySpeaker, isEmbeddingAvailable, autoEnroll, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
+import { identifySpeaker, extractEmbedding, isEmbeddingAvailable, autoEnroll, AUTO_ENROLL_CANDIDATE_SIMILARITY } from '../lib/speaker-embeddings.js'
 import { nemotronLive, resolveLiveLabels, resplitSegments, type ChunkSpeakerSegment } from '../lib/nemotron-live.js'
 import { VOICEPRINT_MIN_AUDIO_SEC } from '../lib/voiceprint-floor.js'
 import {
@@ -334,6 +336,8 @@ export interface ProviderCandidateRecord {
 
 interface TranscriptSession {
   chunks: TranscriptChunk[]
+  /** Bounded anonymous acoustic anchors; active capture only, never training. */
+  macLiveVoices?: MacLiveVoiceState
   startTime: number
   title: string
   providerCandidates?: Record<string, ProviderCandidateRecord>
@@ -717,6 +721,7 @@ function persistSessionRequired(sessionId: string): void {
       maxChunkIndex: session.maxChunkIndex ?? -1,
       providerCandidates: session.providerCandidates ?? {},
       chunkLevels: session.chunkLevels ?? [],
+      ...(session.macLiveVoices !== undefined ? { macLiveVoices: session.macLiveVoices } : {}),
     })
   try {
     durableAtomicWriteFileSync(filePath, data, { mode: 0o600 })
@@ -906,6 +911,7 @@ function recoverSessions(): void {
                 ? data.providerCandidates
                 : {},
               chunkLevels: restoreChunkLevels(data.chunkLevels),
+              ...(data.macLiveVoices !== undefined && MAC_CAPTURE_ID.test(data.sessionId) ? { macLiveVoices: data.macLiveVoices } : {}),
             }
             // Retroactively strip inline hallucinations from recovered chunks.
             // Two-pass: (1) scan all chunks to build frequency/blocklist,
@@ -2526,6 +2532,10 @@ async function processStreamChunk(opts: {
     : Date.now() - session.startTime
   const trimmedText = sanitized.text
 
+  // Stage continuity alongside this chunk. Empty/losing results cannot mutate
+  // the session's anchors. Accepted canonical chunks commit both in one durable
+  // active-session write; a failed write returns non-2xx and replay retries it.
+  let nextMacLiveVoices = session.macLiveVoices === undefined ? undefined : structuredClone(session.macLiveVoices)
   // Nemotron separates the voices; the voiceprint names each one. Any fallback
   // keeps today's whole-chunk voiceprint label. Only chunks with text count.
   const labels = trimmedText
@@ -2538,6 +2548,15 @@ async function processStreamChunk(opts: {
         voiceprint,
         clientSpeaker,
         owner: ownerLabelOrNull(),
+        ...(MAC_CAPTURE_ID.test(sessionId) && macVoiceLabelsEnabled() ? {
+          anonymousVoice: (wav: Buffer) => {
+            // Fail closed after an upgrade/recovery lacking acoustic anchors:
+            // never reuse Voice 1 for an unrelated person from a later chunk.
+            if (!nextMacLiveVoices && session.chunks.some(c => isVoiceLabel(c?.speaker) || c?.segments?.some(s => isVoiceLabel(s.speaker)))) return null
+            nextMacLiveVoices ??= { version: 1, anchors: [] }
+            return matchMacLiveVoice(nextMacLiveVoices, extractEmbedding(wav), chunkIndex, audioSha256)
+          },
+        } : {}),
         identify: wav => {
           const policy = capturePolicy
           if (policy === 'anonymous') return { speaker: 'Ext', similarity: 0 }
@@ -2554,8 +2573,15 @@ async function processStreamChunk(opts: {
       })
     : { speaker: voiceprint.speaker, similarity: voiceprint.similarity }
   if (labels.record) nemotronLive.record({ sessionId, chunkIndex }, labels.record)
-  const { speaker, similarity } = policyLabel(labels, capturePolicy)
-  if (labels.segments) labels.segments = labels.segments.map(segment => policyLabel(segment, capturePolicy))
+  // Strict named identity is unchanged. Only this server's successful Mac
+  // Nemotron path can retain an anonymous label at similarity zero.
+  const project = <T extends { speaker: string; similarity?: number }>(value: T): T => {
+    const strict = policyLabel(value, capturePolicy)
+    return MAC_CAPTURE_ID.test(sessionId) && labels.diarizer?.engine === 'nemotron' && macVoiceLabelsEnabled()
+      ? macAnonymousProjection(value, strict) : strict
+  }
+  const { speaker, similarity } = project(labels)
+  if (labels.segments) labels.segments = labels.segments.map(project)
 
   if (!trimmedText) {
     console.log(`[hallucination] Filtered (${sanitized.fallbackReason || fallbackReason || 'empty'}): chars=${rawText.length}`)
@@ -2617,6 +2643,7 @@ async function processStreamChunk(opts: {
     return canonicalChunkResponse(finalExisting, sessionId, chunkIndex)
   }
   session.chunks[chunkIndex] = chunk
+  if (nextMacLiveVoices !== undefined) session.macLiveVoices = nextMacLiveVoices
   recordAsrCompleted(session, chunkIndex, sessionId)
   if (candidate && candidateRecordKey) {
     if (session.providerCandidates?.[candidateRecordKey]) {

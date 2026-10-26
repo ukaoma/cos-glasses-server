@@ -15,6 +15,7 @@ import type { RunNemotronOptions } from './nemotron-cli.js'
 import {
   buildMeetingTimeline,
   mapChannelsToVoices,
+  mapChannelsToLiveVoices,
   numberVoices,
   readTranscriptSection,
   runNemotronFinalPass,
@@ -307,5 +308,51 @@ describe('the pieces', () => {
     expect(found.eligible).toBe(7)
     expect([...numberVoices(found.channels)]).toEqual([[5, 'Voice 1'], [2, 'Voice 2']])
     expect(mapChannelsToVoices(timeline.windows, a, { minSupport: 4 }).channels).toEqual([2])
+  })
+})
+
+
+describe('final pass preserves live anonymous label numbers', () => {
+  it.each([true,false])('never renumbers established voices after save (batch=%s)',async batch=>{
+    const f=macMeeting({batch,mutate:(chunk,i)=>{
+      const label=[0,1,4,5].includes(i)?'Voice 2':'Voice 1'
+      chunk.speaker=label
+      chunk.segments=[{speaker:label,text:chunk.text,startSec:0,endSec:6,similarity:0}]
+    }})
+    const outcome=await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))
+    expect(outcome).toMatchObject({status:'applied',mapped:{0:'Voice 2',1:'Voice 1'}})
+    const sidecar=JSON.parse(readFileSync(f.sidecarPath,'utf8'))
+    expect(sidecar.chunks[0].speaker).toBe('Voice 2')
+    expect(sidecar.chunks[2].speaker).toBe('Voice 1')
+    expect(sidecar.speakers).toEqual([])
+  })
+  it('withholds conflicting channel claims and a live voice split across channels',async()=>{
+    const f=macMeeting({batch:false,mutate:(chunk,i)=>{
+      chunk.speaker=i%2?'Voice 2':'Voice 1'
+      chunk.segments=[{speaker:chunk.speaker,text:chunk.text,startSec:0,endSec:6,similarity:0}]
+    }})
+    const sidecar=JSON.parse(f.sidecarText)
+    const timeline=await buildMeetingTimeline(sidecar.chunkEntries,f.audioDir)
+    expect([...mapChannelsToLiveVoices(timeline.windows,activityOf(49,TWO_VOICES))]).toEqual([])
+    expect(await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))).toMatchObject({status:'skipped',reason:'voices_unconfident'})
+    unchanged(f)
+    for(const w of timeline.windows){
+      const label=w.chunkIndex===1||w.chunkIndex===4?'Voice 2':'Voice 1'
+      w.chunk.speaker=label;w.chunk.segments=[{speaker:label,text:w.chunk.text}]
+    }
+    // Channel 0 conflicts between both voices. Voice 1 is therefore NOT safe to
+    // promote on channel 1 just because that channel alone has no contradiction.
+    expect([...mapChannelsToLiveVoices(timeline.windows,activityOf(49,TWO_VOICES))]).toEqual([])
+    for(const w of timeline.windows){w.chunk.speaker='Voice 1';w.chunk.segments=[{speaker:'Voice 1',text:w.chunk.text}]}
+    expect([...mapChannelsToLiveVoices(timeline.windows,activityOf(49,TWO_VOICES))]).toEqual([])
+  })
+  it('never numbers an unproven final channel in a capture with a live voice',async()=>{
+    const f=macMeeting({batch:true,mutate:(chunk,i)=>{
+      if(![0,1,4].includes(i))return
+      chunk.speaker='Voice 3';chunk.segments=[{speaker:'Voice 3',text:chunk.text,startSec:0,endSec:6,similarity:0}]
+    }})
+    expect(await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))).toMatchObject({status:'applied',mapped:{0:'Voice 3'},voices:1})
+    const after=readTranscriptSection(readFileSync(f.meetingPath,'utf8'))!
+    expect(after).toContain('[Voice 3]');expect(after).not.toContain('[Voice 1]');expect(after).not.toContain('[Voice 2]')
   })
 })

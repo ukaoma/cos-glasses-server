@@ -85,6 +85,8 @@ export interface LiveNamingInput {
   /** The wearer's label (`owner_speaker_label`), for the owner guard. */
   owner?: string | null
   identify: (wav: Buffer) => VoiceprintResult | null
+  /** Mac-only capture-local continuity; never an identity or a channel ID. */
+  anonymousVoice?: (wav: Buffer) => string | null
 }
 
 export type LiveNamingResult =
@@ -181,6 +183,19 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
     }
   }
 
+  // Only clean, sufficiently long isolated tracks may establish continuity.
+  // A one-track chunk also passes through this gate; short/mixed chunks cannot
+  // inherit the dominant chunk's anonymous identity.
+  if (input.anonymousVoice && pcm) for (const track of ordered) {
+    const current = names.get(track.channel)
+    if (current && isRealLabel(current.speaker)) continue
+    if (track.exclusiveSec < NAME_TRACK_MIN_SEC || track.exclusiveSec / track.activeSec < 0.9) continue
+    const isolated = exclusiveTrackWav(activity, track.channel, pcm)
+    if (!isolated) continue
+    const label = input.anonymousVoice(isolated)
+    if (label && isVoiceLabel(label)) names.set(track.channel, { speaker: label, similarity: 0 })
+  }
+
   const segments: ChunkSpeakerSegment[] = []
   const nameOf = (channel: number): VoiceprintResult => names.get(channel) ?? input.chunkVoiceprint
   for (const run of runsOf(labels)) {
@@ -269,6 +284,8 @@ export interface LiveLabelInput {
   /** The wearer's label, for the owner guard on split chunks. */
   owner?: string | null
   identify: (wav: Buffer) => VoiceprintResult | null
+  /** Mac-only capture-local continuity; never an identity or a channel ID. */
+  anonymousVoice?: (wav: Buffer) => string | null
   clock?: () => number
 }
 
@@ -334,6 +351,7 @@ export async function resolveLiveLabels(input: LiveLabelInput): Promise<LiveLabe
       clientSpeaker: input.clientSpeaker,
       owner: input.owner,
       identify: input.identify,
+      anonymousVoice: input.anonymousVoice,
     })
     if (!named.ok) return voiceprintOnly(named.reason, ms)
     const changed = named.speaker !== input.voiceprint.speaker

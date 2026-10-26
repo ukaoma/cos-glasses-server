@@ -589,3 +589,33 @@ describe('6.61.1 owner guard: the field chunks of 2026-10-02 (meeting_1790953219
     expect(runtime.snapshot().ownerGuard).toEqual({ client_label: 1, weak_owner: 0 })
   })
 })
+
+
+describe('anonymous Mac continuity requires reliable isolated acoustic tracks', () => {
+  const base = {text:'The first person is speaking. The second person answers clearly.',audio:wavOf(6,t=>t<3?400:-400),chunkVoiceprint:{speaker:'Ext',similarity:0},clientSpeaker:'Ext',identify:()=>({speaker:'Ext',similarity:0})}
+  it('labels clean single and multiple tracks without asserting a name', () => {
+    const anonymousVoice=vi.fn((wav:Buffer)=>wav.readInt16LE(44)>0?'Voice 1':'Voice 2')
+    const single=nameChunkSegments({...base,activity:activityOf(6,[[7,0,6]]),anonymousVoice})
+    expect(single).toMatchObject({ok:true,speaker:'Voice 1',similarity:0})
+    const split=nameChunkSegments({...base,activity:activityOf(6,[[5,0,3],[1,3,6]]),anonymousVoice})
+    if(!split.ok)throw new Error(split.reason)
+    expect(split.segments.map(s=>s.speaker)).toEqual(['Voice 1','Voice 2'])
+    expect(split.segments.map(s=>s.text).join(' ')).toBe(base.text)
+    expect(split.identified).toBe(2) // existing identity attempts, not anonymous identity claims
+  })
+  it('refuses short and overlapping tracks, and never replaces a high confidence name', () => {
+    const anonymousVoice=vi.fn(()=> 'Voice 1')
+    nameChunkSegments({...base,activity:activityOf(6,[[0,0,6],[1,0,6]]),anonymousVoice})
+    expect(anonymousVoice).not.toHaveBeenCalled()
+    nameChunkSegments({...base,activity:activityOf(6,[[0,0,1.9]]),anonymousVoice})
+    expect(anonymousVoice).not.toHaveBeenCalled()
+    const known=nameChunkSegments({...base,chunkVoiceprint:{speaker:'Dana',similarity:0.94},activity:activityOf(6,[[0,0,6]]),anonymousVoice})
+    expect(known).toMatchObject({speaker:'Dana',similarity:0.94})
+    expect(anonymousVoice).not.toHaveBeenCalled()
+  })
+  it.each(['embedding_requested','warming','timeout','bad_output'] as const)('does not allocate anonymous labels on Nemotron %s',async reason=>{
+    const anonymousVoice=vi.fn(()=> 'Voice 1')
+    const result=await resolveLiveLabels({...base,voiceprint:base.chunkVoiceprint,diarize:Promise.resolve({ok:false,reason} as any),startedAt:0,anonymousVoice})
+    expect(result.speaker).toBe('Ext');expect(anonymousVoice).not.toHaveBeenCalled()
+  })
+})
