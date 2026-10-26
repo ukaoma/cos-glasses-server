@@ -1,4 +1,5 @@
 import { phoneMicrophoneMeetingsCapability } from '../lib/phone-recording.js'
+import { macLiveVoicesSnapshot } from '../lib/mac-window-replay.js'
 import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
 import { customInstructionsCapability, learnedStyleCapability, polishOptionsCapability } from './dictation-polish-settings.js'
 import { PAIRING_PROTOCOL_VERSION } from '../lib/glasses-pairing.js'
@@ -552,6 +553,8 @@ healthRouter.get('/health', async (_req, res) => {
       },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
       phoneMicrophoneMeetings: phoneMicrophoneMeetingsCapability(getServerInstanceId()),
+      // 6.93.0 W8: which live Mac Voice N path is on (off by default; anchors; window) and the window path's counts.
+      macLiveVoices: macLiveVoicesSnapshot(),
       ...(morningBrief ? { morningBrief } : {}),
       tasks: {
         gate: taskBridgeAvailable() ? 'ready' : 'disabled',
@@ -744,6 +747,8 @@ healthRouter.get('/models', async (req, res) => {
       },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
       phoneMicrophoneMeetings: phoneMicrophoneMeetingsCapability(getServerInstanceId()),
+      // 6.93.0 W8: which live Mac Voice N path is on (off by default; anchors; window) and the window path's counts.
+      macLiveVoices: macLiveVoicesSnapshot(),
       tasks: {
         gate: taskBridgeAvailable() ? 'ready' : 'disabled',
       },

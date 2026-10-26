@@ -15,6 +15,16 @@
 //
 // Switch: COS_MAC_VOICE_LABELS, on by default; 0, false, off or no turns it off
 // and unknown Mac speech stays `Ext`; strict named matching keeps its policy.
+// It governs ONLY the after-save pass (6.90.0) and is the master off for the live
+// paths below. An explicit `1` is the default, not an opt-in to anything live.
+//
+// Live voices (6.93.0 fix, QA B1): `Voice N` while a Mac recording is running is
+// OPT-IN, one switch with three values, default off:
+//   COS_MAC_LIVE_VOICES unset / empty / anything else  off: every live Mac chunk is
+//                       `Ext`, exactly as 6.92.0; the saved pass numbers all voices.
+//   COS_MAC_LIVE_VOICES=anchors   the 6.92.1 per-chunk acoustic anchors.
+//   COS_MAC_LIVE_VOICES=window    the 6.93.0 window replay (replaces the anchors).
+// COS_MAC_VOICE_LABELS off also turns both live modes off.
 
 // No imports on purpose: placeholder checks are read from the speaker-review,
 // relabel and store layers, and this must never pull the Mac registry into them.
@@ -36,6 +46,29 @@ export function voiceLabel(n: number): string {
 export function macVoiceLabelsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = String(env.COS_MAC_VOICE_LABELS ?? '').trim().toLowerCase()
   return !['0', 'false', 'off', 'no'].includes(raw)
+}
+
+/**
+ * True when a stored chunk (or any of its turns) already carries a `Voice N`.
+ * `segments` is shape-checked: a recovered chunk with a malformed field must not
+ * throw into the chunk route (QA N3).
+ */
+export function chunkShowsVoiceLabel(chunk: { speaker?: unknown; segments?: unknown } | null | undefined): boolean {
+  if (isVoiceLabel(chunk?.speaker)) return true
+  const segments = chunk?.segments
+  return Array.isArray(segments) && segments.some(segment => isVoiceLabel((segment as { speaker?: unknown } | null)?.speaker))
+}
+
+export type MacLiveVoicesMode = 'off' | 'anchors' | 'window'
+
+/**
+ * Which live `Voice N` path may run for a Mac chunk. Off unless COS_MAC_LIVE_VOICES
+ * names one AND COS_MAC_VOICE_LABELS is not off. Read at use, like the switch above.
+ */
+export function macLiveVoicesMode(env: NodeJS.ProcessEnv = process.env): MacLiveVoicesMode {
+  if (!macVoiceLabelsEnabled(env)) return 'off'
+  const raw = String(env.COS_MAC_LIVE_VOICES ?? '').trim().toLowerCase()
+  return raw === 'anchors' || raw === 'window' ? raw : 'off'
 }
 
 /**

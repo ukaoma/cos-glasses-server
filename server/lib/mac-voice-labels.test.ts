@@ -2,7 +2,7 @@
 // per site, each driving the real function, so dropping the Voice clause from any
 // one of them fails a named test here.
 import { describe, expect, it } from 'vitest'
-import { isMacCaptureSidecar, isVoiceLabel, macVoiceLabelsEnabled, voiceLabel } from './mac-voice-labels.js'
+import { chunkShowsVoiceLabel, isMacCaptureSidecar, isVoiceLabel, macLiveVoicesMode, macVoiceLabelsEnabled, voiceLabel } from './mac-voice-labels.js'
 import { isUnattributed } from './meeting-speaker-review.js'
 import { isPlaceholderLabel } from './meeting-relabel-enrolment.js'
 import { isNamedSegmentSpeaker, segmentTranscriptChunks } from './meeting-batch-transcribe.js'
@@ -26,6 +26,29 @@ describe('the label', () => {
     expect(macVoiceLabelsEnabled({ COS_MAC_VOICE_LABELS: '1' })).toBe(true)
     expect(macVoiceLabelsEnabled({ COS_MAC_VOICE_LABELS: 'yes' })).toBe(true)
     for (const off of ['0', 'false', 'off', 'no', 'FALSE', ' Off ']) expect(macVoiceLabelsEnabled({ COS_MAC_VOICE_LABELS: off })).toBe(false)
+  })
+
+  it('live Voice N is opt-in (6.93.0 QA B1): off unless COS_MAC_LIVE_VOICES names anchors or window', () => {
+    expect(macLiveVoicesMode({})).toBe('off')
+    // COS_MAC_VOICE_LABELS=1 is the default for the after-save pass; it is not an opt-in to anything live.
+    expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: '1' })).toBe('off')
+    expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: 'on' })).toBe('off')
+    for (const raw of ['', '1', 'true', 'on', 'yes', 'both', 'windows', 'anchor']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: raw })).toBe('off')
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'anchors' })).toBe('anchors')
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: ' Anchors ' })).toBe('anchors')
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'window' })).toBe('window')
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'WINDOW', COS_MAC_VOICE_LABELS: '1' })).toBe('window')
+    // COS_MAC_VOICE_LABELS off wins over both.
+    for (const mode of ['anchors', 'window']) for (const off of ['0', 'false', 'off', 'no']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: mode, COS_MAC_VOICE_LABELS: off })).toBe('off')
+  })
+
+  it('chunkShowsVoiceLabel: a chunk or any turn showing Voice N, and a malformed segments field is never thrown on (QA N3)', () => {
+    expect(chunkShowsVoiceLabel({ speaker: 'Voice 2' })).toBe(true)
+    expect(chunkShowsVoiceLabel({ speaker: 'Ext', segments: [{ speaker: 'Ext' }, { speaker: 'Voice 1' }] })).toBe(true)
+    expect(chunkShowsVoiceLabel({ speaker: 'Ext', segments: [{ speaker: 'Ext' }] })).toBe(false)
+    expect(chunkShowsVoiceLabel(null)).toBe(false)
+    expect(chunkShowsVoiceLabel(undefined)).toBe(false)
+    for (const segments of ['Voice 1', 7, {}, { some: () => true }, [null], [undefined], [{ speaker: 3 }]]) expect(chunkShowsVoiceLabel({ speaker: 'Ext', segments })).toBe(false)
   })
 
   it('a Mac capture is a mac_ id or a mac_system_audio sidecar, and fails closed on a malformed mac_ id', () => {

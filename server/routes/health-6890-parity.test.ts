@@ -183,6 +183,9 @@ const GOLDEN_MODELS_CAPS = [
   'liveMeeting',
   'richMedia',
   'localFirstMeetings',
+  // Added after 6.87.0, additive: the iPhone microphone capability (6.93.0) and the live Mac voice switch (6.93.0 QA W8).
+  'phoneMicrophoneMeetings',
+  'macLiveVoices',
   'tasks',
 ]
 const GOLDEN_MODELS_PATHS = [
@@ -479,6 +482,16 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.localFirstMeetings.pinnedServerIdentity',
   '.capabilities.localFirstMeetings.asrCompletionStatus',
   '.capabilities.localFirstMeetings.retentionMs',
+  '.capabilities.phoneMicrophoneMeetings',
+  '.capabilities.phoneMicrophoneMeetings.enabled',
+  '.capabilities.phoneMicrophoneMeetings.protocolVersion',
+  '.capabilities.phoneMicrophoneMeetings.sourceType',
+  '.capabilities.phoneMicrophoneMeetings.speakerPolicy',
+  '.capabilities.phoneMicrophoneMeetings.asrModel',
+  '.capabilities.phoneMicrophoneMeetings.dictionary',
+  '.capabilities.phoneMicrophoneMeetings.reason',
+  '.capabilities.macLiveVoices',
+  '.capabilities.macLiveVoices.mode',
   '.capabilities.tasks',
   '.capabilities.tasks.gate',
 ]
@@ -550,6 +563,9 @@ const GOLDEN_HEALTH_CAPS_6870 = [
   'richMedia',
   'meetingLifecycle',
   'localFirstMeetings',
+  // Added after 6.87.0, additive: the iPhone microphone capability (6.93.0) and the live Mac voice switch (6.93.0 QA W8).
+  'phoneMicrophoneMeetings',
+  'macLiveVoices',
   'morningBrief',
   'tasks',
 ]

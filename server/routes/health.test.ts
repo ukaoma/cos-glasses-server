@@ -92,6 +92,25 @@ describe('health capability contract', () => {
     expect(body.capabilities?.pairing).toEqual({ version: 1 })
   }, 20_000)
 
+  // 6.93.0 W8: Miles can see whether COS_MAC_LIVE_VOICES took effect without reading a label. Public route: a mode and counts, nothing else.
+  it('advertises the live Mac voice switch, off by default, and counts only while the window path is on', async () => {
+    const saved = { live: process.env.COS_MAC_LIVE_VOICES, labels: process.env.COS_MAC_VOICE_LABELS }
+    try {
+      delete process.env.COS_MAC_LIVE_VOICES; delete process.env.COS_MAC_VOICE_LABELS
+      expect((await (await fetch(`${base}/api/health`)).json() as any).capabilities.macLiveVoices).toEqual({ mode: 'off' })
+      process.env.COS_MAC_LIVE_VOICES = 'anchors'
+      expect((await (await fetch(`${base}/api/health`)).json() as any).capabilities.macLiveVoices).toEqual({ mode: 'anchors' })
+      process.env.COS_MAC_LIVE_VOICES = 'window'
+      const on = (await (await fetch(`${base}/api/health`)).json() as any).capabilities.macLiveVoices
+      expect(on.mode).toBe('window')
+      expect(Object.keys(on.window).sort()).toEqual(['agreementUnavailable', 'capped', 'carried', 'confirmed', 'created', 'evicted', 'fallbacks', 'runs', 'stateWithheld', 'withheld'])
+      expect(Object.values(on.window).every(v => typeof v === 'number' || (typeof v === 'object' && Object.values(v as object).every(n => typeof n === 'number')))).toBe(true)
+    } finally {
+      if (saved.live === undefined) delete process.env.COS_MAC_LIVE_VOICES; else process.env.COS_MAC_LIVE_VOICES = saved.live
+      if (saved.labels === undefined) delete process.env.COS_MAC_VOICE_LABELS; else process.env.COS_MAC_VOICE_LABELS = saved.labels
+    }
+  }, 20_000)
+
   // 6.77.0: public route, so only the protocol and the switch; off until Miles turns it on.
   it('advertises transcript cleanup as codes only, off by default', async () => {
     const body = await (await fetch(`${base}/api/health`)).json() as any

@@ -1130,6 +1130,28 @@ export function mapChannelsToVoices(windows: TimelineWindow[], a: Activity, opti
   return { channels: evidence.filter(row => row.accepted).map(row => row.channel), evidence, eligible }
 }
 
+/** Which final channels each established live turn overlaps (a turn is a claim on every channel active inside it). */
+function liveClaims(windows: TimelineWindow[], a: Activity): Map<number, Set<string>> {
+  const claims = new Map<number, Set<string>>()
+  for (const window of windows) for (const segment of window.chunk.segments ?? []) {
+    if (!isVoiceLabel(segment.speaker)) continue
+    const timed = Number.isFinite(segment.startSec) && Number.isFinite(segment.endSec)
+      && Number(segment.startSec) >= 0 && Number(segment.endSec) <= window.end - window.start
+      && Number(segment.endSec) > Number(segment.startSec)
+    const start = timed ? window.start + Math.max(0, Number(segment.startSec)) : window.start
+    const end = timed ? Math.min(window.end, window.start + Number(segment.endSec)) : window.end
+    const [f0,f1] = frameRange(a, start, end)
+    for (let channel = 0; channel < NEMOTRON_CHANNELS; channel++) {
+      let overlaps = false
+      for (let f=f0;f<f1;f++) if (isActive(a,f,channel)) { overlaps = true; break }
+      if (!overlaps) continue
+      const labels = claims.get(channel) ?? new Set<string>()
+      labels.add(segment.speaker); claims.set(channel, labels)
+    }
+  }
+  return claims
+}
+
 /** Crosswalk final channels to EXISTING live placeholders. A pure live chunk
  * must belong overwhelmingly to one final channel. Contradictory channels or a
  * live label split across channels are withheld; no numbers are reassigned. */
@@ -1155,23 +1177,7 @@ export function mapChannelsToLiveVoices(windows: TimelineWindow[], a: Activity):
   // A mixed live chunk cannot establish a crosswalk, but every established
   // turn in it CAN contradict one. A final diarizer that merges two live
   // voices into one channel must not transfer one voice's label to the other.
-  const claims = new Map<number, Set<string>>()
-  for (const window of windows) for (const segment of window.chunk.segments ?? []) {
-    if (!isVoiceLabel(segment.speaker)) continue
-    const timed = Number.isFinite(segment.startSec) && Number.isFinite(segment.endSec)
-      && Number(segment.startSec) >= 0 && Number(segment.endSec) <= window.end - window.start
-      && Number(segment.endSec) > Number(segment.startSec)
-    const start = timed ? window.start + Math.max(0, Number(segment.startSec)) : window.start
-    const end = timed ? Math.min(window.end, window.start + Number(segment.endSec)) : window.end
-    const [f0,f1] = frameRange(a, start, end)
-    for (let channel = 0; channel < NEMOTRON_CHANNELS; channel++) {
-      let overlaps = false
-      for (let f=f0;f<f1;f++) if (isActive(a,f,channel)) { overlaps = true; break }
-      if (!overlaps) continue
-      const labels = claims.get(channel) ?? new Set<string>()
-      labels.add(segment.speaker); claims.set(channel, labels)
-    }
-  }
+  const claims = liveClaims(windows, a)
   const proposed = [...votes].filter(([,labels])=>labels.size===1).map(([channel,labels])=>[channel,[...labels][0]] as const)
   // Count claims on conflicting channels too. Dropping a contradictory channel
   // must not make its label appear exclusive to a different channel.
@@ -1179,6 +1185,18 @@ export function mapChannelsToLiveVoices(windows: TimelineWindow[], a: Activity):
     [...votes.values()].filter(labels=>labels.has(label)).length===1
       && [...(claims.get(channel) ?? [])].every(claim => claim === label)
       && [...claims.values()].filter(labels=>labels.has(label)).length===1))
+}
+
+/**
+ * 6.93.0 QA W3: confident final channels that NO established live turn touches.
+ * A capture whose live labels missed a voice (a track the live path never proved,
+ * or one it lost) still gets that voice numbered at save, above every live number,
+ * as 6.92.0 would have numbered it. A channel any live `Voice N` turn overlaps is
+ * never in this set: its words keep the live label, and the rest stay `Ext`.
+ */
+export function unclaimedFinalChannels(windows: TimelineWindow[], a: Activity, channels: number[]): number[] {
+  const claims = liveClaims(windows, a)
+  return channels.filter(channel => !claims.has(channel))
 }
 
 /** `Voice 1` for the first channel, `Voice 2` for the next, and so on. */
@@ -1286,10 +1304,24 @@ async function unnamedVoicePass(input: UnnamedInput): Promise<FinalPassOutcome> 
   const aligned = textNext.length === chunks.length && textNext.every((entry, i) => entry.chunk.text === chunks[i]?.text)
   if (!aligned) return { status: 'skipped', reason: 'chunk_map_ambiguous', unnamed: true, mode, excluded }
 
-  const hasLiveVoices = entries.some(entry => isVoiceLabel(entry.chunk?.speaker) || entry.chunk?.segments?.some(segment => isVoiceLabel(segment.speaker)))
-  const liveMap = hasLiveVoices ? mapChannelsToLiveVoices(timeline.windows, activity) : null
-  let channels = found.channels.filter(channel => !liveMap || liveMap.has(channel))
-  const labelsFor = (kept: number[]) => liveMap ? new Map(kept.map(channel => [channel, liveMap.get(channel)!])) : numberVoices(kept)
+  // With no live Voice label (the default: live voices are opt-in) nothing is
+  // restricted and every confident channel is numbered, exactly as 6.92.0.
+  const liveNumbers = entries.flatMap(entry => [entry.chunk?.speaker, ...(Array.isArray(entry.chunk?.segments) ? entry.chunk.segments : []).map(segment => segment?.speaker)])
+    .filter(isVoiceLabel).map(label => Number(String(label).slice(6)))
+  const liveMap = liveNumbers.length ? mapChannelsToLiveVoices(timeline.windows, activity) : null
+  // W3: a channel the live path never proved is numbered above every live number
+  // unless a live turn contradicts it. Words that already carry a live number keep it.
+  const unproven = liveMap
+    ? unclaimedFinalChannels(timeline.windows, activity, found.channels.filter(channel => !liveMap.has(channel))).slice(0, Math.max(0, 99 - Math.max(...liveNumbers)))
+    : []
+  let channels = found.channels.filter(channel => !liveMap || liveMap.has(channel) || unproven.includes(channel))
+  const labelsFor = (kept: number[]) => {
+    if (!liveMap) return numberVoices(kept)
+    const out = new Map<number, string>()
+    let next = Math.max(...liveNumbers)
+    for (const channel of kept) out.set(channel, liveMap.get(channel) ?? voiceLabel(++next))
+    return out
+  }
   let map = labelsFor(channels)
   let labelled: UnnamedLabelling | null = null
   for (let round = 0; round <= NEMOTRON_CHANNELS && channels.length; round++) {

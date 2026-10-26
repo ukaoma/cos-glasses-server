@@ -1,7 +1,7 @@
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, admitPhoneRecording, phoneQueryInteger, requirePhoneRecording, readPhoneRecording, validatePhoneWav, persistPhoneChunkReceipt } from '../lib/phone-recording.js'
 import { matchMacLiveVoice, macAnonymousProjection, type MacLiveVoiceState } from '../lib/mac-live-voices.js'
-import { isVoiceLabel, macVoiceLabelsEnabled } from '../lib/mac-voice-labels.js'
-import { macWindowStateFor, startMacWindowDiarize } from '../lib/mac-window-replay.js'
+import { chunkShowsVoiceLabel, macLiveVoicesMode } from '../lib/mac-voice-labels.js'
+import { macWindowStateFor, macWindowWithheldReason, noteMacWindowWithheld, startMacWindowDiarize } from '../lib/mac-window-replay.js'
 import { macWindowVoicesEnabled, type MacWindowVoiceState } from '../lib/mac-window-voices.js'
 import { MacParakeetUnavailableError, transcribeMacParakeet, transcribePhoneParakeet } from '../lib/mac-recording-asr.js'
 import { getMeetingStore } from '../lib/meeting-store.js'
@@ -2466,12 +2466,17 @@ async function processStreamChunk(opts: {
   // the synchronous voiceprint so the process is already running while that
   // blocks. diarize() never throws; a fallback returns a reason.
   const diarizeStartedAt = performance.now()
-  // 6.93.0 (COS_MAC_LIVE_VOICES=window): a Mac chunk is diarized inside a window of
-  // the durable chunks before it, so voices keep their number across boundaries.
-  // No window (first chunk, gap, corrupt state) is today's per-chunk run.
-  const macWindowState = MAC_CAPTURE_ID.test(sessionId) && macWindowVoicesEnabled()
-    ? macWindowStateFor(session.macWindowVoices, session.chunks)
-    : null
+  // 6.93.0 (COS_MAC_LIVE_VOICES=window, default off): a Mac chunk is diarized inside a
+  // window of the durable chunks before it, so voices keep their number across
+  // boundaries (the first chunk and a gap run a window of their own, one chunk or the
+  // contiguous run after the gap). With the switch off, or no window to run (an
+  // unplannable chunk, corrupt state, earlier Voice labels), the chunk takes the plain
+  // per-chunk run with no anchors: `Ext`, as 6.92.0. A window run that times out or is
+  // refused falls back to that per-chunk run too (mac-window-replay.ts).
+  const macWindowOn = MAC_CAPTURE_ID.test(sessionId) && macWindowVoicesEnabled()
+  const macWindowWithheld = macWindowOn ? macWindowWithheldReason(session.macWindowVoices, session.chunks) : null
+  if (macWindowWithheld) noteMacWindowWithheld(sessionId, macWindowWithheld)
+  const macWindowState = macWindowOn ? macWindowStateFor(session.macWindowVoices, session.chunks) : null
   const macWindow = macWindowState
     ? startMacWindowDiarize({
         sessionDir: resolve(SESSION_AUDIO_DIR, sessionId),
@@ -2479,7 +2484,9 @@ async function processStreamChunk(opts: {
         audio: audioBuffer,
         audioSha256,
         state: macWindowState,
-        diarize: wavPath => nemotronLive.diarize(wavPath),
+        // A window timeout has a per-chunk fallback, so it must not cool Nemotron for every capture.
+        diarizeWindow: (wavPath, timeoutMs) => nemotronLive.diarize(wavPath, { timeoutMs, timeoutTripsBreaker: false }),
+        diarizeChunk: wavPath => nemotronLive.diarize(wavPath),
       })
     : null
   const diarizePromise = phoneCapture ? Promise.resolve({ ok: false as const, reason: 'embedding_requested' as const }) : macWindow?.diarize ?? nemotronLive.diarize(
@@ -2594,11 +2601,11 @@ async function processStreamChunk(opts: {
         owner: ownerLabelOrNull(),
         ...(macWindow ? {
           anonymousChannel: (channel: number) => macWindow.result()?.labelOf(channel) ?? null,
-        } : MAC_CAPTURE_ID.test(sessionId) && macVoiceLabelsEnabled() && !macWindowVoicesEnabled() ? {
+        } : MAC_CAPTURE_ID.test(sessionId) && macLiveVoicesMode() === 'anchors' ? {
           anonymousVoice: (wav: Buffer) => {
             // Fail closed after an upgrade/recovery lacking acoustic anchors:
             // never reuse Voice 1 for an unrelated person from a later chunk.
-            if (!nextMacLiveVoices && session.chunks.some(c => isVoiceLabel(c?.speaker) || c?.segments?.some(s => isVoiceLabel(s.speaker)))) return null
+            if (!nextMacLiveVoices && session.chunks.some(chunkShowsVoiceLabel)) return null
             nextMacLiveVoices ??= { version: 1, anchors: [] }
             return matchMacLiveVoice(nextMacLiveVoices, extractEmbedding(wav), chunkIndex, audioSha256)
           },
@@ -2623,7 +2630,7 @@ async function processStreamChunk(opts: {
   // Nemotron path can retain an anonymous label at similarity zero.
   const project = <T extends { speaker: string; similarity?: number }>(value: T): T => {
     const strict = policyLabel(value, capturePolicy)
-    return MAC_CAPTURE_ID.test(sessionId) && labels.diarizer?.engine === 'nemotron' && macVoiceLabelsEnabled()
+    return MAC_CAPTURE_ID.test(sessionId) && labels.diarizer?.engine === 'nemotron' && macLiveVoicesMode() !== 'off'
       ? macAnonymousProjection(value, strict) : strict
   }
   const { speaker, similarity } = project(labels)

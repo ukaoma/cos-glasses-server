@@ -189,9 +189,13 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
     }
   }
 
-  // Only clean, sufficiently long isolated tracks may establish continuity.
-  // A one-track chunk also passes through this gate; short/mixed chunks cannot
-  // inherit the dominant chunk's anonymous identity.
+  // Live anonymous labels, one of two paths (never both, window wins):
+  //  - anonymousChannel (6.93.0 window replay): every track takes the label its
+  //    channel was already proven to hold, short turns included, because the
+  //    crosswalk (not this gate) required the clean proof;
+  //  - anonymousVoice (6.92.1 anchors, below): only a clean, sufficiently long
+  //    isolated track may establish continuity; short or mixed tracks cannot
+  //    inherit the dominant chunk's anonymous identity.
   if (input.anonymousChannel) for (const track of ordered) {
     // The window crosswalk already required clean overlap and two clean proof
     // chunks for this track, so a short turn by a confirmed voice keeps its label.
@@ -443,6 +447,15 @@ export interface NemotronLiveDeps {
 }
 
 export const LIVE_BUDGET_MS = 1500
+/** The audio length LIVE_BUDGET_MS was sized for: one 6 s chunk (both transports cut 6 s chunks). */
+export const LIVE_BUDGET_REFERENCE_AUDIO_SEC = 6
+/**
+ * The budget for a run over `audioSec` of audio: LIVE_BUDGET_MS per reference chunk,
+ * never less than one chunk's budget. A 30 s window is five chunks' worth, not one.
+ */
+export function liveBudgetForAudioSec(audioSec: number): number {
+  return Math.max(LIVE_BUDGET_MS, Math.ceil(LIVE_BUDGET_MS * (Number.isFinite(audioSec) ? audioSec : 0) / LIVE_BUDGET_REFERENCE_AUDIO_SEC))
+}
 export const LIVE_MAX_CONCURRENT = 2
 export const WARM_TIMEOUT_MS = 180_000
 export const WARM_RETRY_DELAYS_MS = [5_000, 30_000]
@@ -634,8 +647,13 @@ export class NemotronLiveRuntime {
     return null
   }
 
-  /** Run Nemotron on one chunk WAV within the live budget. Never throws. */
-  async diarize(wavPath: string): Promise<LiveDiarizeOutcome> {
+  /**
+   * Run Nemotron on one chunk WAV within the live budget. Never throws.
+   * `timeoutMs` replaces the per-chunk budget (a longer clip). `timeoutTripsBreaker: false`
+   * keeps a timeout of THIS run out of the shared breaker (6.93.0: a window timeout has a
+   * per-chunk fallback and must not cool Nemotron for G2 and every other capture).
+   */
+  async diarize(wavPath: string, options: { timeoutMs?: number; timeoutTripsBreaker?: boolean } = {}): Promise<LiveDiarizeOutcome> {
     const blocked = this.gate()
     if (blocked) return { ok: false, reason: blocked }
     this.inFlight++
@@ -645,7 +663,7 @@ export class NemotronLiveRuntime {
         cli: this.cli!,
         modelsDir: this.modelsDir!,
         wavPath,
-        timeoutMs: this.budget(),
+        timeoutMs: options.timeoutMs ?? this.budget(),
         computeUnits: 'ane',
         niceness: 10,
         tmpRoot: this.deps.tmpRoot?.(),
@@ -655,7 +673,7 @@ export class NemotronLiveRuntime {
       return { ok: true, run }
     } catch (error) {
       const reason: LiveFallbackReason = error instanceof NemotronRunError ? error.reason : 'error'
-      if (RUN_FAILURES.has(reason)) {
+      if (RUN_FAILURES.has(reason) && !(reason === 'timeout' && options.timeoutTripsBreaker === false)) {
         this.consecutiveFailures++
         if (this.consecutiveFailures >= BREAKER_FAILURES && this.state === 'ready') {
           // The breaker (QA 6.61.0): stop spawning. Every chunk takes the voiceprint

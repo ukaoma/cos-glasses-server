@@ -22,6 +22,7 @@ import {
   relabelStreamingChunks,
   runNemotronFinalPass,
   sameWords,
+  unclaimedFinalChannels,
   unnamedVoicesEligible,
   VOICE_MIN_SUPPORT,
   type SidecarBatchSegment,
@@ -351,14 +352,39 @@ describe('final pass preserves live anonymous label numbers', () => {
     for(const w of timeline.windows){w.chunk.speaker='Voice 1';w.chunk.segments=[{speaker:'Voice 1',text:w.chunk.text}]}
     expect([...mapChannelsToLiveVoices(timeline.windows,activityOf(49,TWO_VOICES))]).toEqual([])
   })
-  it('never numbers an unproven final channel in a capture with a live voice',async()=>{
+  it('numbers a final channel the live path never proved, above every live number, and keeps the live numbers (QA W3)',async()=>{
     const f=macMeeting({batch:true,mutate:(chunk,i)=>{
       if(![0,1,4].includes(i))return
       chunk.speaker='Voice 3';chunk.segments=[{speaker:'Voice 3',text:chunk.text,startSec:0,endSec:6,similarity:0}]
     }})
-    expect(await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))).toMatchObject({status:'applied',mapped:{0:'Voice 3'},voices:1})
+    expect(await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))).toMatchObject({status:'applied',mapped:{0:'Voice 3',1:'Voice 4'},voices:2})
     const after=readTranscriptSection(readFileSync(f.meetingPath,'utf8'))!
-    expect(after).toContain('[Voice 3]');expect(after).not.toContain('[Voice 1]');expect(after).not.toContain('[Voice 2]')
+    expect(after).toContain('[Voice 3]: alpha0');expect(after).toContain('[Voice 4]: alpha2')
+    expect(after).not.toContain('[Voice 1]');expect(after).not.toContain('[Voice 2]')
+    const sidecar=JSON.parse(readFileSync(f.sidecarPath,'utf8'))
+    expect(sidecar.chunks.map((c:any)=>c.speaker)).toEqual(['Voice 3','Voice 3','Voice 4','Voice 4','Voice 3','Voice 3','Voice 4','Voice 4'])
+    expect(sidecar.speakers).toEqual([])
+  })
+  it('does not number a final channel that a live turn contradicts: it stays Ext',async()=>{
+    // Channel 1's chunk 2 is a mixed live chunk (Voice 5 then Ext): it claims channel 1 but cannot prove it.
+    const f=macMeeting({batch:true,mutate:(chunk,i)=>{
+      if([0,1,4].includes(i)){chunk.speaker='Voice 3';chunk.segments=[{speaker:'Voice 3',text:chunk.text,startSec:0,endSec:6,similarity:0}]}
+      if(i===2){chunk.speaker='Voice 5';chunk.segments=[{speaker:'Voice 5',text:wordsOf(i).slice(0,2).join(' '),startSec:0,endSec:3,similarity:0},{speaker:'Ext',text:wordsOf(i).slice(2).join(' '),startSec:3,endSec:6,similarity:0}]}
+    }})
+    expect(await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))).toMatchObject({status:'applied',mapped:{0:'Voice 3'}}) // voices counts Voice 3 and the live Voice 5 turn
+    const after=readTranscriptSection(readFileSync(f.meetingPath,'utf8'))!
+    expect(after).not.toContain('Voice 6');expect(after).not.toContain('Voice 4')
+    expect(after).toContain('[Ext]: charlie2 delta2 alpha3 bravo3 charlie3 delta3') // the channel stays Ext after the live turn
+  })
+  it('with no live Voice label nothing is restricted: every confident channel is numbered from Voice 1, as 6.92.0',async()=>{
+    const f=macMeeting({batch:false})
+    expect(await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))).toMatchObject({status:'applied',mapped:{0:'Voice 1',1:'Voice 2'},voices:2})
+  })
+  it('unclaimedFinalChannels: only channels no live Voice turn touches',async()=>{
+    const f=macMeeting({batch:false,mutate:(chunk,i)=>{if(i===2){chunk.speaker='Voice 5';chunk.segments=[{speaker:'Voice 5',text:chunk.text,startSec:0,endSec:6,similarity:0}]}}})
+    const doc=JSON.parse(f.sidecarText),timeline=await buildMeetingTimeline(doc.chunkEntries,f.audioDir)
+    expect(unclaimedFinalChannels(timeline.windows,activityOf(49,TWO_VOICES),[0,1])).toEqual([0]) // chunk 2's live turn sits on channel 1
+    expect(unclaimedFinalChannels(timeline.windows,activityOf(49,TWO_VOICES),[])).toEqual([])
   })
 })
 

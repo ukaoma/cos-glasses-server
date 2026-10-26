@@ -7,6 +7,8 @@ import {
   BREAKER_BACKOFF_MS,
   BREAKER_FAILURES,
   LIVE_BUDGET_MS,
+  LIVE_BUDGET_REFERENCE_AUDIO_SEC,
+  liveBudgetForAudioSec,
   LIVE_MAX_CONCURRENT,
   NemotronLiveRuntime,
   nameChunkSegments,
@@ -298,6 +300,47 @@ describe('the live runtime', () => {
     for (let i = 0; i < 3; i++) await runtime.diarize('/a.wav')
     expect(runtime.snapshot().breaker).toMatchObject({ open: true, trips: 2 })
     expect(new Date(runtime.snapshot().breaker.retryAt!).getTime() - now).toBe(BREAKER_BACKOFF_MS[1])
+  })
+
+  it('6.93.0 W4: a window run takes the timeout it is given, and its timeouts never open the breaker shared with G2', async () => {
+    const { home, env } = fakeHome()
+    const budgets: number[] = []
+    const run = vi.fn((options: RunNemotronOptions) => {
+      if (options.timeoutMs > 100_000) return Promise.resolve(runOf(1, []))
+      budgets.push(options.timeoutMs)
+      return Promise.reject(new NemotronRunError('timeout', 'no result in time'))
+    })
+    const runtime = new NemotronLiveRuntime({ env: () => env, home: () => home, run, log: () => {} })
+    await runtime.startWarmup()
+    for (let i = 0; i < BREAKER_FAILURES + 2; i++) {
+      expect(await runtime.diarize('/window.wav', { timeoutMs: 7500, timeoutTripsBreaker: false })).toMatchObject({ ok: false, reason: 'timeout' })
+    }
+    expect(budgets).toEqual(Array(BREAKER_FAILURES + 2).fill(7500))
+    expect(runtime.snapshot().breaker).toMatchObject({ open: false, trips: 0, consecutiveFailures: 0 })
+    // The same timeouts without the exemption (a per-chunk run) still open it.
+    for (let i = 0; i < BREAKER_FAILURES; i++) await runtime.diarize('/a.wav')
+    expect(budgets.slice(-BREAKER_FAILURES)).toEqual(Array(BREAKER_FAILURES).fill(LIVE_BUDGET_MS))
+    expect(runtime.snapshot().breaker).toMatchObject({ open: true, trips: 1 })
+  })
+
+  it('6.93.0 W4: a window that fails for any other reason still counts toward the breaker', async () => {
+    const { home, env } = fakeHome()
+    const run = vi.fn((options: RunNemotronOptions) => options.timeoutMs > 100_000
+      ? Promise.resolve(runOf(1, []))
+      : Promise.reject(new NemotronRunError('cli_failed', 'exit 1')))
+    const runtime = new NemotronLiveRuntime({ env: () => env, home: () => home, run, log: () => {} })
+    await runtime.startWarmup()
+    for (let i = 0; i < BREAKER_FAILURES; i++) await runtime.diarize('/window.wav', { timeoutMs: 7500, timeoutTripsBreaker: false })
+    expect(runtime.snapshot().breaker.open).toBe(true)
+  })
+
+  it('6.93.0 W4: the budget scales with the audio, never below one chunk', () => {
+    expect(LIVE_BUDGET_REFERENCE_AUDIO_SEC).toBe(6)
+    expect(liveBudgetForAudioSec(6)).toBe(LIVE_BUDGET_MS)
+    expect(liveBudgetForAudioSec(30)).toBe(7500)
+    expect(liveBudgetForAudioSec(12)).toBe(3000)
+    expect(liveBudgetForAudioSec(1)).toBe(LIVE_BUDGET_MS)
+    expect(liveBudgetForAudioSec(Number.NaN)).toBe(LIVE_BUDGET_MS)
   })
 
   it('pins the real defaults: 1.5 s budget, a lane of two, the backoff schedule', () => {

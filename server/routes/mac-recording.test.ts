@@ -1,5 +1,5 @@
 import express from 'express'
-import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'node:fs'
+import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -34,6 +34,12 @@ async function call(path:string,body?:unknown,pin='server-mac'){
  if(body!==undefined) headers['Content-Type']=Buffer.isBuffer(body)?'audio/wav':'application/json'
  const response=await fetch(base+path,{method:body===undefined?'GET':'POST',headers,body:body===undefined?undefined:Buffer.isBuffer(body)?new Uint8Array(body).buffer:JSON.stringify(body)})
  return {status:response.status,json:await response.json() as any}
+}
+/** Run `fn` with the live-voice switches set (undefined = unset), restoring them after. */
+async function withLiveVoices<T>(env:{COS_MAC_LIVE_VOICES?:string;COS_MAC_VOICE_LABELS?:string},fn:()=>Promise<T>):Promise<T>{
+ const keys=['COS_MAC_LIVE_VOICES','COS_MAC_VOICE_LABELS'] as const,saved=Object.fromEntries(keys.map(k=>[k,process.env[k]]))
+ for(const k of keys){if(env[k]===undefined)delete process.env[k];else process.env[k]=env[k]}
+ try{return await fn()}finally{for(const k of keys){if(saved[k]===undefined)delete process.env[k];else process.env[k]=saved[k]}}
 }
 function start(pin='server-mac'){return call('/mac-recording/start',{captureId:id,startTime:1700000000000,sourceType:'mac_system_audio'},pin)}
 it('discovers capability without starting recording and rejects missing/wrong pins without registry writes',async()=>{
@@ -257,7 +263,7 @@ it('6.90.0: Mac Nemotron tracks skip the wearer check and are tagged as Mac, whi
 })
 
 
-it('keeps anonymous live voices stable across channel permutations, replay, durable restart and save without training',async()=>{
+it('keeps anonymous live voices stable across channel permutations, replay, durable restart and save without training',()=>withLiveVoices({COS_MAC_LIVE_VOICES:'anchors'},async()=>{
  await start()
  const nemotron=await import('../lib/nemotron-live.js')
  const run=(channel:number)=>vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[channel,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
@@ -283,8 +289,9 @@ it('keeps anonymous live voices stable across channel permutations, replay, dura
  const sidecar=JSON.parse(readFileSync(join(root,saved.json.filepath.replace(/\.md$/,'.g2-chunks.json')),'utf8'))
  expect(sidecar.chunks[4]).toMatchObject({speaker:'Voice 1',similarity:0,speakerPolicy:'high-confidence'})
  expect(sidecar.macLiveVoices).toBeUndefined() // acoustic anchors are active-capture only
-})
-it('withholds anonymous continuity when acoustic extraction fails and preserves strict named identity',async()=>{
+}))
+
+it('withholds anonymous continuity when acoustic extraction fails and preserves strict named identity',()=>withLiveVoices({COS_MAC_LIVE_VOICES:'anchors'},async()=>{
  await start();const nemotron=await import('../lib/nemotron-live.js'),embeddings=await import('../lib/speaker-embeddings.js')
  vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
  vi.mocked(embeddings.extractEmbedding).mockReturnValue(null)
@@ -292,9 +299,9 @@ it('withholds anonymous continuity when acoustic extraction fails and preserves 
  identify.mockReturnValueOnce({speaker:'Dana',similarity:0.94,embedding:new Float32Array(192).fill(0.1)})
  expect((await call('/mac-recording/'+id+'/chunks?chunkIndex=2&elapsed=18000',wavOf(6,()=>400))).json.speaker).toBe('Dana')
  expect(enroll).not.toHaveBeenCalled()
-})
+}))
 
-it('repeated audio at a different raw index is not independent voice evidence; flag-off leaves no anchors',async()=>{
+it('repeated audio at a different raw index is not independent voice evidence; flag-off leaves no anchors',()=>withLiveVoices({COS_MAC_LIVE_VOICES:'anchors'},async()=>{
  await start();const nemotron=await import('../lib/nemotron-live.js')
  vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
  const post=(i:number,value:number)=>call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>value))
@@ -303,16 +310,17 @@ it('repeated audio at a different raw index is not independent voice evidence; f
  expect((await post(2,420)).json.speaker).toBe('Voice 1')
  const old=process.env.COS_MAC_VOICE_LABELS;process.env.COS_MAC_VOICE_LABELS='0'
  try{expect((await post(3,440)).json.speaker).toBe('Ext')}finally{if(old===undefined)delete process.env.COS_MAC_VOICE_LABELS;else process.env.COS_MAC_VOICE_LABELS=old}
-})
-it('corrupt recovered continuity stays unknown instead of reusing an existing voice number',async()=>{
+}))
+
+it('corrupt recovered continuity stays unknown instead of reusing an existing voice number',()=>withLiveVoices({COS_MAC_LIVE_VOICES:'anchors'},async()=>{
  await start();stream.getSession(id).macLiveVoices={version:2,anchors:[]} as any
  const nemotron=await import('../lib/nemotron-live.js')
  vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
  for(let i=0;i<2;i++)expect((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400+i))).json.speaker).toBe('Ext')
  expect(stream.getSession(id).macLiveVoices).toEqual({version:2,anchors:[]})
-})
+}))
 
-it('does not acknowledge a non-durable voice promotion and replays the same canonical label without another model pass',async()=>{
+it('does not acknowledge a non-durable voice promotion and replays the same canonical label without another model pass',()=>withLiveVoices({COS_MAC_LIVE_VOICES:'anchors'},async()=>{
  await start();const nemotron=await import('../lib/nemotron-live.js')
  vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
  const post=(i:number,value:number)=>call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>value))
@@ -334,7 +342,7 @@ it('does not acknowledge a non-durable voice promotion and replays the same cano
   expect(after.chunks[1].speaker).toBe('Voice 1')
   expect(after.macLiveVoices.anchors[0].confirmed).toBe(true)
  }finally{spy.mockRestore()}
-})
+}))
 
 it('6.93.0 window replay: numbers survive chunk boundaries and slot permutations, state is private, bounded and never trains',async()=>{
  const old=process.env.COS_MAC_LIVE_VOICES;process.env.COS_MAC_LIVE_VOICES='window'
@@ -353,8 +361,12 @@ it('6.93.0 window replay: numbers survive chunk boundaries and slot permutations
   const spoken=[]
   for(const [i,v] of [[0,400],[1,420],[2,-400],[3,-420],[4,430],[5,-430]] as const) spoken.push((await post(i,v)).json.speaker)
   expect(spoken).toEqual(['Ext','Voice 1','Ext','Voice 2','Voice 1','Voice 2'])
-  expect(paths.every(p=>p.endsWith('/window.wav'))).toBe(true)
-  expect(paths.some(p=>existsSync(p))).toBe(false) // window WAVs are removed after each run
+  // One window run per chunk, plus the chunk diarized alone (the agreement view) once a slot is carried: chunks 1 to 5.
+  const windows=paths.filter(p=>p.endsWith('/window.wav')),singles=paths.filter(p=>!p.endsWith('/window.wav'))
+  expect(windows).toHaveLength(6)
+  expect(singles).toHaveLength(5)
+  expect(singles.every(p=>/\/chunk_000[1-5]\.wav$/.test(p))).toBe(true)
+  expect(paths.some(p=>existsSync(p)&&p.endsWith('/window.wav'))).toBe(false) // window WAVs are removed after each run
   expect(readFileSync(join(root,'session-audio',id,'chunk_0005.wav')).length).toBe(192044)
   const privateSession=JSON.parse(readFileSync(join(root,'active-sessions',id+'.json'),'utf8'))
   expect(privateSession.macWindowVoices).toMatchObject({version:1,kind:'window',voices:2,nextTrack:2})
@@ -400,3 +412,99 @@ it('6.93.0 window replay withholds numbers on corrupt state, after earlier Voice
   if(oldLabels===undefined)delete process.env.COS_MAC_VOICE_LABELS;else process.env.COS_MAC_VOICE_LABELS=oldLabels
  }
 })
+
+
+// ── 6.93.0 QA B1: every new switch off is 6.92.0 for a Mac recording ──────────────
+// The same eight clean one-voice chunks would be `Voice 1` / `Voice 2` live under either opt-in.
+const TWO_VOICE_SIGNS=[1,1,-1,-1,1,-1,-1,-1] as const
+for(const labels of [undefined,'1'] as const) it('6.93.0 B1: with COS_MAC_LIVE_VOICES unset'+(labels?' and COS_MAC_VOICE_LABELS=1':'')+' live and saved labels are 6.92.0: Ext live, no anchors, no window, every voice numbered at save',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:undefined,COS_MAC_VOICE_LABELS:labels},async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js'),embeddings=await import('../lib/speaker-embeddings.js')
+ const diarize=vi.mocked(nemotron.nemotronLive.diarize)
+ diarize.mockImplementation(async()=>({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any))
+ for(let i=0;i<TWO_VOICE_SIGNS.length;i++){
+  const done=await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>TWO_VOICE_SIGNS[i]*(400+i)))
+  expect(done.status).toBe(200);expect(done.json.speaker).toBe('Ext');expect(done.json.segments?.every((x:any)=>x.speaker==='Ext')??true).toBe(true)
+ }
+ // The 6.92.0 per-chunk run: one argument (the chunk's own WAV), no window, no anchors, no embedding work.
+ expect(diarize).toHaveBeenCalledTimes(8)
+ for(const call of diarize.mock.calls){expect(call).toHaveLength(1);expect(String(call[0])).toMatch(/\/chunk_000\d\.wav$/)}
+ expect(vi.mocked(embeddings.extractEmbedding)).not.toHaveBeenCalled()
+ const privateSession=JSON.parse(readFileSync(join(root,'active-sessions',id+'.json'),'utf8'))
+ expect(privateSession.macLiveVoices).toBeUndefined();expect(privateSession.macWindowVoices).toBeUndefined()
+ expect(privateSession.chunks.every((c:any)=>c.speaker==='Ext'&&c.similarity===0&&(c.segments??[]).every((x:any)=>x.speaker==='Ext'))).toBe(true)
+ // Saved: the whole-meeting pass sees only Ext chunks and numbers EVERY voice it is confident of, as 6.92.0 did.
+ const audioCopy=mkdtempSync(join(tmpdir(),'cos-b1-audio-'));cpSync(join(root,'session-audio',id),audioCopy,{recursive:true})
+ try{
+  const saved=await call('/meeting/save',{sessionId:id,expectedChunkCount:8,domain:'personal'});expect(saved.status).toBe(200);await Promise.allSettled(background.splice(0))
+  const meetingPath=join(root,saved.json.filepath),sidecarPath=meetingPath.replace(/\.md$/,'.g2-chunks.json')
+  const sidecar=JSON.parse(readFileSync(sidecarPath,'utf8'));expect(sidecar.chunks.every((c:any)=>c.speaker==='Ext')).toBe(true)
+  const {runNemotronFinalPass}=await import('../lib/nemotron-final.js'),{fakeNemotronHome}=await import('../lib/__fixtures__/nemotron-helpers.js')
+  const outcome=await runNemotronFinalPass({meetingPath,sidecarPath,audioDir:audioCopy,env:{COS_DIARIZER:'nemotron'},home:fakeNemotronHome(),log:()=>{},
+   run:async()=>activityOf(49,[[0,0,12],[1,12,24],[0,24,32.5],[1,32.5,48]])})
+  expect(outcome).toMatchObject({status:'applied',unnamed:true,voices:2,mapped:{0:'Voice 1',1:'Voice 2'}})
+ }finally{rmSync(audioCopy,{recursive:true,force:true})}
+}))
+it('6.93.0 B1: with the live switch off a profile that happens to be called Voice 1 is a name at its real similarity, exactly as 6.92.0',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:undefined,COS_MAC_VOICE_LABELS:undefined},async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js')
+ vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
+ identify.mockReturnValueOnce({speaker:'Voice 1',similarity:0.94,embedding:new Float32Array(192).fill(0.1)})
+ expect((await call('/mac-recording/'+id+'/chunks?chunkIndex=0&elapsed=6000',wavOf(6,()=>400))).json).toMatchObject({speaker:'Voice 1',segments:[{speaker:'Voice 1',similarity:0.94}]})
+}))
+it('6.93.0 B1: COS_MAC_LIVE_VOICES is the only live switch: anchors and window are each opt-in, an unknown value is off, COS_MAC_VOICE_LABELS=0 turns both off',async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js')
+ vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
+ const spoken:string[]=[];let i=0
+ for(const [live,labels] of [['anchors',undefined],['yes',undefined],['anchors','0'],['',undefined]] as const) await withLiveVoices({COS_MAC_LIVE_VOICES:live,COS_MAC_VOICE_LABELS:labels},async()=>{
+  for(let n=0;n<2;n++,i++) spoken.push((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400+i))).json.speaker)
+ })
+ // Only the first pair (anchors) can name a voice; "yes", COS_MAC_VOICE_LABELS=0 and an empty value stay Ext.
+ expect(spoken.slice(2)).toEqual(Array(6).fill('Ext'))
+ expect(spoken[1]).toBe('Voice 1')
+})
+
+// ── 6.93.0 QA N9: G2 and phone are untouched by the Mac window ────────────────────
+it('6.93.0: a G2 chunk never takes the Mac window path, even with COS_MAC_LIVE_VOICES=window',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:'window',COS_MAC_VOICE_LABELS:undefined},async()=>{
+ const nemotron=await import('../lib/nemotron-live.js'),diarize=vi.mocked(nemotron.nemotronLive.diarize)
+ diarize.mockImplementation(async()=>({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any))
+ const g2='g2_test_session'
+ for(let i=0;i<3;i++) expect((await call('/transcribe-stream?sessionId='+g2+'&chunkIndex='+i+'&elapsed='+((i+1)*6000)+'&speaker=Ext',wavOf(6,()=>400+i))).status).toBe(200)
+ expect(diarize).toHaveBeenCalledTimes(3)
+ for(const c of diarize.mock.calls){expect(c).toHaveLength(1);expect(String(c[0])).toMatch(new RegExp('/'+g2+'/chunk_000\\d\\.wav$'))}
+ expect(stream.getSession(g2).macWindowVoices).toBeUndefined();expect(stream.getSession(g2).macLiveVoices).toBeUndefined()
+ expect(stream.getSessionChunks(g2)?.every(c=>!/^Voice \d/.test(c.speaker))).toBe(true)
+}))
+
+// ── 6.93.0 QA W4/W8 ───────────────────────────────────────────────────────────────
+it('6.93.0 W4: a window timeout falls back to the per-chunk run for that chunk, commits no window state and leaves the breaker alone',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:'window',COS_MAC_VOICE_LABELS:undefined},async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js'),diarize=vi.mocked(nemotron.nemotronLive.diarize)
+ const seen:Array<{path:string;opts:any}>=[]
+ diarize.mockImplementation((async(path:string,opts?:any)=>{
+  seen.push({path,opts})
+  if(path.endsWith('/window.wav'))return {ok:false,reason:'timeout',ms:opts?.timeoutMs,detail:'budget'}
+  return {ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}}
+ }) as any)
+ const lines:string[]=[];const log=vi.spyOn(console,'log').mockImplementation((...a:unknown[])=>{lines.push(a.join(' '))})
+ try{
+  for(let i=0;i<2;i++) expect((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400+i))).json.speaker).toBe('Ext')
+ }finally{log.mockRestore()}
+ const windowCalls=seen.filter(c=>c.path.endsWith('/window.wav'))
+ expect(windowCalls).toHaveLength(2);expect(windowCalls[0].opts).toEqual({timeoutMs:1500,timeoutTripsBreaker:false});expect(windowCalls[1].opts).toEqual({timeoutMs:3000,timeoutTripsBreaker:false})
+ expect(seen.filter(c=>!c.path.endsWith('/window.wav')).map(c=>c.opts)).toEqual([undefined,undefined]) // the fallbacks are ordinary per-chunk runs
+ expect(stream.getSession(id).macWindowVoices).toBeUndefined()
+ expect(lines.filter(l=>l.includes('[mac-window] chunk #')&&l.includes('fallback=timeout'))).toHaveLength(2)
+ expect(lines.join('\n')).not.toContain('bad_output')
+}))
+it('6.93.0 W8: a capture whose window labels are withheld says so once, and /api/health-side state reports the switch and counts',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:'window',COS_MAC_VOICE_LABELS:undefined},async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js'),replay=await import('../lib/mac-window-replay.js')
+ replay.__resetMacWindowCountersForTests()
+ vi.mocked(nemotron.nemotronLive.diarize).mockImplementation((async(path:string)=>{
+  const samples=(readFileSync(path).length-44)/2,frames=1+Math.floor((samples+112)/160),probs=new Float32Array(frames*8).fill(0.02)
+  for(let f=0;f<frames-1;f++)probs[f*8+3]=0.9
+  return {ok:true,run:{frames,probs,wallMs:20,loadSec:0,audioSec:samples/16000}}
+ }) as any)
+ stream.getSession(id).macWindowVoices={version:1,kind:'window',nextTrack:0,voices:7,tracks:[],recent:[{chunk:9,frames:'AA=='}]} as any
+ const lines:string[]=[];const log=vi.spyOn(console,'log').mockImplementation((...a:unknown[])=>{lines.push(a.join(' '))})
+ try{for(let i=0;i<3;i++)expect((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400+i))).json.speaker).toBe('Ext')}finally{log.mockRestore()}
+ expect(lines.filter(l=>l.includes('window labels withheld (corrupt_state)'))).toHaveLength(1)
+ expect(replay.macLiveVoicesSnapshot().window).toMatchObject({stateWithheld:{corrupt_state:1,earlier_voice_labels:0},runs:0})
+}))
