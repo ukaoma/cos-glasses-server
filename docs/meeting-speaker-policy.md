@@ -59,3 +59,23 @@ correction-training embeddings, or copies training WAVs. User-confirmed training
 from Mac playback requires a separate explicit source-scoped enrollment flow,
 with selected isolated acoustic evidence, raw-index mapping, preview/confirmation
 and provenance/retraction support; ordinary relabeling is not that consent.
+
+
+## Live Mac window replay (6.93.0, opt-in)
+
+`COS_MAC_LIVE_VOICES=window` replaces the per-chunk anchors with window replay
+(`server/lib/mac-window-voices.ts`, `server/lib/mac-window-replay.ts`). Chunk k is
+diarized together with the durable chunks before it (contiguous, at most 5 chunks
+and 30 s), so the model's slots are consistent across the boundary inside that
+window. A slot inherits a capture track only through frames the capture already
+attributed: one to one, at least 1 s of exclusive overlap, at least 80% of that
+slot's overlap on one track. A slot with attributed overlap that fails those
+tests gets no track and cannot mint a number. A track becomes `Voice N` after two
+clean proof chunks (2 s alone, purity 0.9, distinct chunk and audio hash).
+
+The state is per-frame track ids for the last 4 chunks plus track proofs and the
+number high-water. It lives in the private active-session file, is validated on
+every use, and is never written to the saved sidecar. A returning voice beyond the
+window reads `Ext` or a new number; a wrong merge is the failure this design
+refuses to risk. The session-wide fix is a persistent native diarizer per capture
+(the append-session prototype), which is not part of this release.

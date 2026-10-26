@@ -87,6 +87,12 @@ export interface LiveNamingInput {
   identify: (wav: Buffer) => VoiceprintResult | null
   /** Mac-only capture-local continuity; never an identity or a channel ID. */
   anonymousVoice?: (wav: Buffer) => string | null
+  /**
+   * 6.93.0 window replay (mac-window-voices.ts): the confirmed `Voice N` for an
+   * activity channel, already carried across chunk boundaries, or null. When set it
+   * replaces `anonymousVoice`; a real name from `identify` still wins.
+   */
+  anonymousChannel?: (channel: number) => string | null
 }
 
 export type LiveNamingResult =
@@ -186,7 +192,14 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
   // Only clean, sufficiently long isolated tracks may establish continuity.
   // A one-track chunk also passes through this gate; short/mixed chunks cannot
   // inherit the dominant chunk's anonymous identity.
-  if (input.anonymousVoice && pcm) for (const track of ordered) {
+  if (input.anonymousChannel) for (const track of ordered) {
+    // The window crosswalk already required clean overlap and two clean proof
+    // chunks for this track, so a short turn by a confirmed voice keeps its label.
+    const current = names.get(track.channel)
+    if (current && isRealLabel(current.speaker)) continue
+    const label = input.anonymousChannel(track.channel)
+    if (label && isVoiceLabel(label)) names.set(track.channel, { speaker: label, similarity: 0 })
+  } else if (input.anonymousVoice && pcm) for (const track of ordered) {
     const current = names.get(track.channel)
     if (current && isRealLabel(current.speaker)) continue
     if (track.exclusiveSec < NAME_TRACK_MIN_SEC || track.exclusiveSec / track.activeSec < 0.9) continue
@@ -286,6 +299,8 @@ export interface LiveLabelInput {
   identify: (wav: Buffer) => VoiceprintResult | null
   /** Mac-only capture-local continuity; never an identity or a channel ID. */
   anonymousVoice?: (wav: Buffer) => string | null
+  /** 6.93.0 window replay; see LiveNamingInput. */
+  anonymousChannel?: (channel: number) => string | null
   clock?: () => number
 }
 
@@ -352,6 +367,7 @@ export async function resolveLiveLabels(input: LiveLabelInput): Promise<LiveLabe
       owner: input.owner,
       identify: input.identify,
       anonymousVoice: input.anonymousVoice,
+      anonymousChannel: input.anonymousChannel,
     })
     if (!named.ok) return voiceprintOnly(named.reason, ms)
     const changed = named.speaker !== input.voiceprint.speaker

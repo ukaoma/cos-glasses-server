@@ -1,3 +1,15 @@
+## 6.93.0 - Live Mac voice continuity by window replay (opt-in), plus the unpublished 6.92.1
+
+2026-10-26. Pairs with COS Control 0.5.351. Includes everything in 6.92.1 (never published on its own): per-chunk anonymous anchors, final-pass crosswalk of live numbers, the body-parser floor, and the isolated continuous-speaker protocol modules (still unwired).
+
+- **Why:** live Mac chunks were diarized one 6 s file at a time, so the model forgot every voice at each boundary. On a natural 36 s capture the 6.92.1 anchors produced no live labels at all (6 of 6 chunks `Ext`).
+- **What:** with `COS_MAC_LIVE_VOICES=window` (and `COS_MAC_VOICE_LABELS` on), each Mac chunk is diarized inside a window of the durable chunks before it (at most 5 chunks, 30 s), with the same pinned CLI and the same live budget. Window slots are carried to capture tracks only through frames this capture already attributed: one to one, at least 1 s of exclusive overlap, at least 80% agreement. A track reads `Voice N` after clean proof in two distinct chunks with distinct audio (2 s alone, purity 0.9). Numbers only grow. Corrupt state, or Voice labels with no window state, withhold labels instead of restarting at Voice 1.
+- **Limit:** a voice silent for longer than the window cannot be carried. It reads `Ext`, or a new number after its own two proofs. It is never given another voice's number. Settled chunks are not relabeled live; the save-time whole-meeting pass relabels the saved meeting as before.
+- **Unchanged:** strict named identity (0.88 floor), text-only Mac renames, no enrollment or training, G2 and phone paths, the final pass. No audio, embedding or probability matrix is stored: only per-frame track ids for the last 4 chunks in the private active-session file.
+- **Cost (measured on the pinned CLI, warm):** about 0.26 s wall (max 0.30 s) and 0.1 s CPU per 6 s chunk for a 30 s window, about 46 MB peak RSS for the CLI process.
+- **Switch:** `COS_MAC_LIVE_VOICES`, default off; `window` turns it on. Forwarded by the managed runtime contract. Off keeps the 6.92.1 anchors.
+- **Qualification (private fixtures, counts only):** natural 6 chunk capture: 2 voices, 75% of speech labeled live, 100% agreement with one continuous pass on labeled frames. Synthetic A B A B (known voices): 0% wrong-voice frames, 2 of 2 returns kept, 25% of speech unlabeled live (first chunk of each voice). Synthetic return after 31.5 s of silence: 0% wrong-voice, the returning voice stays unlabeled. No independently annotated natural meeting exists yet, so natural accuracy is not established. `server/scripts/mac-window-voices-6930-mutation-gate.mjs` kills every listed mutant from a green baseline.
+
 ## 6.92.1 - Conservative anonymous voice continuity for live Mac meetings
 
 - Successful live Nemotron tracks can carry capture-local Voice N labels after two independent clean audio observations agree. Uncertain, overlapping or short evidence remains Ext. The existing named-identity threshold, ASR choices and feature settings are unchanged.

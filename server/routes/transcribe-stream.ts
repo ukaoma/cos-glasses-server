@@ -1,5 +1,7 @@
 import { matchMacLiveVoice, macAnonymousProjection, type MacLiveVoiceState } from '../lib/mac-live-voices.js'
 import { isVoiceLabel, macVoiceLabelsEnabled } from '../lib/mac-voice-labels.js'
+import { macWindowStateFor, startMacWindowDiarize } from '../lib/mac-window-replay.js'
+import { macWindowVoicesEnabled, type MacWindowVoiceState } from '../lib/mac-window-voices.js'
 import { MacParakeetUnavailableError, transcribeMacParakeet } from '../lib/mac-recording-asr.js'
 import { getMeetingStore } from '../lib/meeting-store.js'
 import { appendAutonomousSaveLog, getStopIntentStore, savedChunkReplay, type StopIntent } from '../lib/meeting-stop-intents.js'
@@ -338,6 +340,8 @@ interface TranscriptSession {
   chunks: TranscriptChunk[]
   /** Bounded anonymous acoustic anchors; active capture only, never training. */
   macLiveVoices?: MacLiveVoiceState
+  /** 6.93.0 window-replay continuity (per-frame track ids, no audio); active capture only. */
+  macWindowVoices?: MacWindowVoiceState
   startTime: number
   title: string
   providerCandidates?: Record<string, ProviderCandidateRecord>
@@ -722,6 +726,7 @@ function persistSessionRequired(sessionId: string): void {
       providerCandidates: session.providerCandidates ?? {},
       chunkLevels: session.chunkLevels ?? [],
       ...(session.macLiveVoices !== undefined ? { macLiveVoices: session.macLiveVoices } : {}),
+      ...(session.macWindowVoices !== undefined ? { macWindowVoices: session.macWindowVoices } : {}),
     })
   try {
     durableAtomicWriteFileSync(filePath, data, { mode: 0o600 })
@@ -912,6 +917,7 @@ function recoverSessions(): void {
                 : {},
               chunkLevels: restoreChunkLevels(data.chunkLevels),
               ...(data.macLiveVoices !== undefined && MAC_CAPTURE_ID.test(data.sessionId) ? { macLiveVoices: data.macLiveVoices } : {}),
+              ...(data.macWindowVoices !== undefined && MAC_CAPTURE_ID.test(data.sessionId) ? { macWindowVoices: data.macWindowVoices } : {}),
             }
             // Retroactively strip inline hallucinations from recovered chunks.
             // Two-pass: (1) scan all chunks to build frequency/blocklist,
@@ -2441,7 +2447,23 @@ async function processStreamChunk(opts: {
   // the synchronous voiceprint so the process is already running while that
   // blocks. diarize() never throws; a fallback returns a reason.
   const diarizeStartedAt = performance.now()
-  const diarizePromise = nemotronLive.diarize(
+  // 6.93.0 (COS_MAC_LIVE_VOICES=window): a Mac chunk is diarized inside a window of
+  // the durable chunks before it, so voices keep their number across boundaries.
+  // No window (first chunk, gap, corrupt state) is today's per-chunk run.
+  const macWindowState = MAC_CAPTURE_ID.test(sessionId) && macWindowVoicesEnabled()
+    ? macWindowStateFor(session.macWindowVoices, session.chunks)
+    : null
+  const macWindow = macWindowState
+    ? startMacWindowDiarize({
+        sessionDir: resolve(SESSION_AUDIO_DIR, sessionId),
+        chunkIndex,
+        audio: audioBuffer,
+        audioSha256,
+        state: macWindowState,
+        diarize: wavPath => nemotronLive.diarize(wavPath),
+      })
+    : null
+  const diarizePromise = macWindow?.diarize ?? nemotronLive.diarize(
     resolve(SESSION_AUDIO_DIR, sessionId, `chunk_${String(chunkIndex).padStart(4, '0')}.wav`),
   )
 
@@ -2548,7 +2570,9 @@ async function processStreamChunk(opts: {
         voiceprint,
         clientSpeaker,
         owner: ownerLabelOrNull(),
-        ...(MAC_CAPTURE_ID.test(sessionId) && macVoiceLabelsEnabled() ? {
+        ...(macWindow ? {
+          anonymousChannel: (channel: number) => macWindow.result()?.labelOf(channel) ?? null,
+        } : MAC_CAPTURE_ID.test(sessionId) && macVoiceLabelsEnabled() && !macWindowVoicesEnabled() ? {
           anonymousVoice: (wav: Buffer) => {
             // Fail closed after an upgrade/recovery lacking acoustic anchors:
             // never reuse Voice 1 for an unrelated person from a later chunk.
@@ -2644,6 +2668,8 @@ async function processStreamChunk(opts: {
   }
   session.chunks[chunkIndex] = chunk
   if (nextMacLiveVoices !== undefined) session.macLiveVoices = nextMacLiveVoices
+  const macWindowNext = macWindow?.result()?.state
+  if (macWindowNext !== undefined) session.macWindowVoices = macWindowNext
   recordAsrCompleted(session, chunkIndex, sessionId)
   if (candidate && candidateRecordKey) {
     if (session.providerCandidates?.[candidateRecordKey]) {

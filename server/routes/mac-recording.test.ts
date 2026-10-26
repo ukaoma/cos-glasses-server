@@ -335,3 +335,68 @@ it('does not acknowledge a non-durable voice promotion and replays the same cano
   expect(after.macLiveVoices.anchors[0].confirmed).toBe(true)
  }finally{spy.mockRestore()}
 })
+
+it('6.93.0 window replay: numbers survive chunk boundaries and slot permutations, state is private, bounded and never trains',async()=>{
+ const old=process.env.COS_MAC_LIVE_VOICES;process.env.COS_MAC_LIVE_VOICES='window'
+ try{
+  await start();const nemotron=await import('../lib/nemotron-live.js')
+  const paths:string[]=[];let calls=0
+  // A fake window run: each frame's slot comes from the sign of that frame's samples; the
+  // positive voice's slot moves every call, so a number can only come from the crosswalk.
+  vi.mocked(nemotron.nemotronLive.diarize).mockImplementation(async(path:string)=>{
+   paths.push(path);const wav=readFileSync(path);const samples=(wav.length-44)/2;const frames=1+Math.floor((samples+112)/160)
+   const probs=new Float32Array(frames*8).fill(0.02);const pos=calls++%3
+   for(let f=0;f<frames-1;f++){const v=wav.readInt16LE(44+f*320);probs[f*8+(v>=0?pos:5)]=0.9}
+   return {ok:true,run:{frames,probs,wallMs:20,loadSec:0,audioSec:samples/16000}} as any
+  })
+  const post=(index:number,value:number)=>call('/mac-recording/'+id+'/chunks?chunkIndex='+index+'&elapsed='+((index+1)*6000),wavOf(6,()=>value))
+  const spoken=[]
+  for(const [i,v] of [[0,400],[1,420],[2,-400],[3,-420],[4,430],[5,-430]] as const) spoken.push((await post(i,v)).json.speaker)
+  expect(spoken).toEqual(['Ext','Voice 1','Ext','Voice 2','Voice 1','Voice 2'])
+  expect(paths.every(p=>p.endsWith('/window.wav'))).toBe(true)
+  expect(paths.some(p=>existsSync(p))).toBe(false) // window WAVs are removed after each run
+  expect(readFileSync(join(root,'session-audio',id,'chunk_0005.wav')).length).toBe(192044)
+  const privateSession=JSON.parse(readFileSync(join(root,'active-sessions',id+'.json'),'utf8'))
+  expect(privateSession.macWindowVoices).toMatchObject({version:1,kind:'window',voices:2,nextTrack:2})
+  expect(privateSession.macWindowVoices.recent).toHaveLength(4)
+  expect(privateSession.macLiveVoices).toBeUndefined() // the per-chunk anchors do not also run
+  vi.resetModules();const recovered=await import('./transcribe-stream.js')
+  expect(recovered.getSession(id).macWindowVoices).toEqual(privateSession.macWindowVoices)
+  expect(enroll).not.toHaveBeenCalled();expect(existsSync(join(root,'chunk-embeddings',id+'.jsonl'))).toBe(false)
+  const saved=await call('/meeting/save',{sessionId:id,expectedChunkCount:6,domain:'personal'})
+  expect(saved.status).toBe(200);await Promise.allSettled(background.splice(0))
+  const sidecar=JSON.parse(readFileSync(join(root,saved.json.filepath.replace(/\.md$/,'.g2-chunks.json')),'utf8'))
+  expect(sidecar.chunks[4]).toMatchObject({speaker:'Voice 1',similarity:0,speakerPolicy:'high-confidence'})
+  expect(sidecar.macWindowVoices).toBeUndefined()
+ }finally{if(old===undefined)delete process.env.COS_MAC_LIVE_VOICES;else process.env.COS_MAC_LIVE_VOICES=old}
+})
+it('6.93.0 window replay withholds numbers on corrupt state, after earlier Voice labels, and when COS_MAC_VOICE_LABELS is off',async()=>{
+ const old=process.env.COS_MAC_LIVE_VOICES,oldLabels=process.env.COS_MAC_VOICE_LABELS;process.env.COS_MAC_LIVE_VOICES='window'
+ try{
+  await start();const nemotron=await import('../lib/nemotron-live.js')
+  vi.mocked(nemotron.nemotronLive.diarize).mockImplementation(async(path:string)=>{
+   const samples=(readFileSync(path).length-44)/2;const frames=1+Math.floor((samples+112)/160);const probs=new Float32Array(frames*8).fill(0.02)
+   for(let f=0;f<frames-1;f++)probs[f*8+3]=0.9
+   return {ok:true,run:{frames,probs,wallMs:20,loadSec:0,audioSec:samples/16000}} as any
+  })
+  const post=(i:number,v:number)=>call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>v))
+  stream.getSession(id).macWindowVoices={version:1,kind:'window',nextTrack:0,voices:7,tracks:[],recent:[{chunk:9,frames:'AA=='}]} as any
+  for(let i=0;i<3;i++)expect((await post(i,400+i)).json.speaker).toBe('Ext')
+  expect(stream.getSession(id).macWindowVoices?.voices).toBe(7) // corrupt state is left as it is, never restarted
+  delete stream.getSession(id).macWindowVoices;stream.getSession(id).chunks[0].speaker='Voice 4'
+  expect((await post(3,410)).json.speaker).toBe('Ext');expect((await post(4,411)).json.speaker).toBe('Ext')
+  expect(stream.getSession(id).macWindowVoices).toBeUndefined()
+  stream.getSession(id).chunks[0].speaker='Ext';process.env.COS_MAC_VOICE_LABELS='0'
+  expect((await post(5,412)).json.speaker).toBe('Ext');expect((await post(6,413)).json.speaker).toBe('Ext')
+  expect(stream.getSession(id).macWindowVoices).toBeUndefined()
+  // A strict name (0.88 floor) still wins over a confirmed anonymous number.
+  delete process.env.COS_MAC_VOICE_LABELS
+  expect((await post(7,414)).json.speaker).toBe('Ext');expect((await post(8,415)).json.speaker).toBe('Voice 1')
+  identify.mockReturnValueOnce({speaker:'Dana',similarity:0.94,embedding:new Float32Array(192).fill(0.1)})
+  expect((await post(9,416)).json.speaker).toBe('Dana');expect((await post(10,417)).json.speaker).toBe('Voice 1')
+  expect(enroll).not.toHaveBeenCalled()
+ }finally{
+  if(old===undefined)delete process.env.COS_MAC_LIVE_VOICES;else process.env.COS_MAC_LIVE_VOICES=old
+  if(oldLabels===undefined)delete process.env.COS_MAC_VOICE_LABELS;else process.env.COS_MAC_VOICE_LABELS=oldLabels
+ }
+})
