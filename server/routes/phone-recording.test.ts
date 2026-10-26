@@ -269,3 +269,11 @@ it('refuses Ask access to unadmitted, forged active or corrupt saved phone evide
  const saved=getMeetingStore().findBySessionId(id)!,sidecar=JSON.parse(readFileSync(saved.sidecarPath,'utf8'));sidecar.captureSource.startTime++;writeFileSync(saved.sidecarPath,JSON.stringify(sidecar))
  expect(()=>resolveAskTranscript(id,sources)).toThrow('phone_transcript_provenance_unreadable');expect(existsSync(saved.filepath)).toBe(true)
 })
+
+it('does not route phone remote Stop through the G2 glasses claim/display bus',async()=>{
+ await upload()
+ for(const [path,body] of [['/stop-request',{}],['/stop-request/request_12345678/claim',{decision:'accept'}],['/stop-request/request_12345678',undefined]] as const){
+  const result=await call('/meeting/sessions/'+id+path,body);expect(result.status).toBe(400);expect(result.json.reason).toBe('phone_capture_stop_on_iphone')
+ }
+ expect(stream.getSessionChunks(id)).toHaveLength(1)
+})

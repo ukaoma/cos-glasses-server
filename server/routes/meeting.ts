@@ -914,6 +914,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return null
     }
+    if (sessionId.startsWith('phone_')) {
+      res.status(400).json({ error: 'Stop this recording on iPhone', reason: 'phone_capture_stop_on_iphone' })
+      return null
+    }
     if (MAC_CAPTURE_ID.test(sessionId)) {
       // A Mac recording stops from Control itself; it has no glasses to ask.
       res.status(400).json({ error: 'A Mac recording stops from Record on Mac', reason: 'mac_capture' })
