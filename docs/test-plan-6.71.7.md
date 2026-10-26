@@ -9,7 +9,7 @@ Candidate only. Server base is public 6.71.5; 6.71.6 is reserved by the separate
 - New broker tests compare 144 approval/unstamped admission and tick cases to the actual 6.71.5 implementation. Stamped questions cover connected/no-client, active/idle/unknown desk, 90-second visibility latch, timeout ceilings, canceled hooks, session boundaries/Interrupt, child events, background requests, parallel questions and first-answer races. A desk completion may add either string or array answers to its input without changing which question it settles.
 - Eleven isolated guard mutations are killed by their named assertions after a green baseline. Original source bytes are restored and the release checkout is never mutated.
 - Companion status probe measures 20 updates per Ask/Transcript case at 390x844, 320x568 and 390x420, with long content scrolled above the bottom. Composer position, reading height, scroll position and status height must stay within 0.5 px. The private old-CSS control must fail. Standard/full WebKit-strict tests, release typechecks, manufacturer contracts, startup timer quarantine and package asset hashes must pass on final bundles.
-- Receipts/logs: `/Users/ukaoma/cos-release-candidates/glasses-question-answering-2026-10-11/`. Local automated evidence does not prove stability inside the physical Even host.
+- Receipts/logs: the release owner's local `glasses-question-answering-2026-10-11` evidence directory (not bundled). Local automated evidence does not prove stability inside the physical Even host.
 
 ## Phone status canary (629 on the current server)
 

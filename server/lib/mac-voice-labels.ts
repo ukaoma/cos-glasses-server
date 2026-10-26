@@ -1,14 +1,12 @@
 // 6.90.0: unnamed, meeting-stable voice labels for Mac recordings.
 //
 // A Mac recording hears call audio, video and podcasts through one global tap.
-// Naming a voice from that audio is not safe (no calibration exists, see
-// CHANGELOG 6.73.6 and the 2026-10-14 Mac plan section 5), so every Mac chunk is
-// `Ext` when identity is unknown. Live anonymous continuity now uses clean
-// isolated acoustic tracks via mac-live-voices.ts; it never uses chunk-local
-// channel IDs as meeting identities. The final pass can also tell voices apart:
-// one Nemotron pass over the whole
-// saved meeting gives channels that are consistent for the call, and each
-// confident channel becomes `Voice 1`, `Voice 2`, ... in order of first speech.
+// Named identity still requires the existing strict matching policy. Unknown
+// speech stays `Ext` unless clean, independent acoustic observations establish
+// capture-local continuity through mac-live-voices.ts. Chunk-local channel IDs
+// never become meeting identities. Finalization preserves established live
+// numbers; when no live numbers exist, confident final channels can become
+// `Voice 1`, `Voice 2`, ... in order of first supporting speech.
 //
 // A `Voice N` label asserts NO identity. Everywhere a real name is checked it is
 // a placeholder, exactly like `Ext` and `Unidentified N`: it is never a profile
@@ -16,7 +14,7 @@
 // `speakers` list. A person may rename it (text only) through the relabel route.
 //
 // Switch: COS_MAC_VOICE_LABELS, on by default; 0, false, off or no turns it off
-// and Mac recordings stay all `Ext` exactly as 6.89.0 saved them.
+// and unknown Mac speech stays `Ext`; strict named matching keeps its policy.
 
 // No imports on purpose: placeholder checks are read from the speaker-review,
 // relabel and store layers, and this must never pull the Mac registry into them.
