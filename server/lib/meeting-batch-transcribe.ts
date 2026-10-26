@@ -1,3 +1,4 @@
+import { PHONE_CAPTURE_ID, requirePhoneRecording } from './phone-recording.js'
 // Generic post-meeting transcription. Raw WAV chunks are concatenated into
 // larger windows so Whisper gets enough context to improve the live stream.
 // The candidate is never canonical until batch-transcript-quality accepts it.
@@ -466,12 +467,16 @@ export interface HqJobPlan {
   secondOpinion: SecondOpinionId
   resolver: boolean
   frontEnd: FrontEndId
-  /** Mac canonical Parakeet must never silently substitute Whisper. */
+  /** Canonical Mac/phone Parakeet must never silently substitute Whisper. */
   strictPrimary?: true
 }
 
 export function currentHqJobPlan(sessionId?: string): HqJobPlan {
   const selected = readSttSettings()
+  if (sessionId && PHONE_CAPTURE_ID.test(sessionId)) {
+    requirePhoneRecording(sessionId)
+    return { engine: 'parakeet-ultra', secondOpinion: 'off', resolver: false, frontEnd: selected.frontEnd, strictPrimary: true }
+  }
   if (sessionId && MAC_CAPTURE_ID.test(sessionId) && selected.hq === 'parakeet-ultra') {
     return { engine: selected.hq, secondOpinion: selected.secondOpinion, resolver: selected.resolver, frontEnd: selected.frontEnd, strictPrimary: true }
   }
@@ -789,6 +794,7 @@ export async function transcribeSegments(
   plan: HqJobPlan,
   deps: HqDecodeDeps = defaultHqDeps,
 ): Promise<BatchResult[]> {
+  if (expectedSessionId?.startsWith('phone_')) { requirePhoneRecording(expectedSessionId); plan = { ...plan, engine: 'parakeet-ultra', secondOpinion: 'off', resolver: false, strictPrimary: true } }
   if (expectedSessionId && MAC_CAPTURE_ID.test(expectedSessionId) && plan.engine === 'parakeet-ultra') plan = { ...plan, strictPrimary: true }
   const results: BatchResult[] = []
   const meetingId = basename(audioDir)

@@ -9,13 +9,13 @@ export class MacParakeetUnavailableError extends Error {
   readonly status = 503
   readonly retryable = true
   readonly model = 'parakeet-ultra'
-  readonly reason: `mac_parakeet_${ParakeetFailure}`
+  readonly reason: `mac_parakeet_${ParakeetFailure}` | `phone_parakeet_${ParakeetFailure}`
 
-  constructor(cause: unknown) {
+  constructor(cause: unknown, source: 'Mac' | 'iPhone' = 'Mac') {
     const reason = cause instanceof ParakeetError ? cause.reason : 'cli_failed'
-    super(`Selected Parakeet Ultra could not transcribe this Mac chunk (${reason}); audio is preserved for retry`)
+    super(`Selected Parakeet Ultra could not transcribe this ${source} chunk (${reason}); audio is preserved for retry`)
     this.name = 'MacParakeetUnavailableError'
-    this.reason = `mac_parakeet_${reason}`
+    this.reason = `${source === 'Mac' ? 'mac' : 'phone'}_parakeet_${reason}`
   }
 }
 
@@ -30,6 +30,14 @@ export async function transcribeMacParakeet(audio: Buffer, speechSeconds: number
   asrProvider: 'server-parakeet'
   latencyMs: number
 }> {
+  return transcribeCaptureParakeet(audio, speechSeconds, 'Mac')
+}
+
+/** Source-aware wrapper over the same offline Parakeet worker; no alternate engine. */
+export function transcribePhoneParakeet(audio: Buffer, speechSeconds: number | null) {
+  return transcribeCaptureParakeet(audio, speechSeconds, 'iPhone')
+}
+async function transcribeCaptureParakeet(audio: Buffer, speechSeconds: number | null, source: 'Mac' | 'iPhone') {
   try {
     const result = await transcribeParakeet(audio, {
       model: 'parakeet-ultra',
@@ -43,17 +51,17 @@ export async function transcribeMacParakeet(audio: Buffer, speechSeconds: number
     // 503 it replayed the same audio forever and froze every later chunk of a live meeting (2026-10-15, chunk 51).
     // The saved meeting re-transcribes the full audio with strict Parakeet, so these words are not lost.
     if (!result.text.trim() && speechSeconds !== null && speechSeconds >= 0.5) {
-      console.warn(`[mac-asr] Parakeet returned no words over ${speechSeconds.toFixed(2)}s of detected speech; recorded empty`)
+      console.warn(`[${source}-asr] Parakeet returned no words over ${speechSeconds.toFixed(2)}s of detected speech; recorded empty`)
     }
     return {
       text: result.text,
       words: result.words.map(word => ({ ...word, probability: word.probability ?? 0 })),
       model: result.model,
-      backend: 'fluidaudio-coreml',
-      asrProvider: 'server-parakeet',
+      backend: 'fluidaudio-coreml' as const,
+      asrProvider: 'server-parakeet' as const,
       latencyMs: result.wallMs,
     }
   } catch (error) {
-    throw new MacParakeetUnavailableError(error)
+    throw new MacParakeetUnavailableError(error, source)
   }
 }

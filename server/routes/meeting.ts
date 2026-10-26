@@ -1,3 +1,5 @@
+import { dataPath } from '../lib/data-dir.js'
+import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
 import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
 import { readSpeakerPolicy, writeSpeakerPolicy, isSpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/meeting/save — finalize an existing transcribe-stream session into
@@ -439,7 +441,7 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
     // summary describes, the cleaned text. Off unless Miles turns it on.
     await runCleanupStage(runtime.transcriptCleanup, { sessionId: current.sessionId, meetingPath: current.meetingPath, sidecarPath: current.sidecarPath }, runtime.sessions)
 
-    if (cosOpsPipelineConfigured() && !MAC_CAPTURE_ID.test(current.sessionId)) {
+    if (cosOpsPipelineConfigured() && !MAC_CAPTURE_ID.test(current.sessionId) && !PHONE_CAPTURE_ID.test(current.sessionId)) {
       await handoffMeetingToOperations(current.meetingPath)
     } else {
       // Standalone: no sync_meetings.py to produce summary/topics/decisions.
@@ -452,7 +454,7 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
     // The capture is finished and its files are durable, so the merge engine may score it.
     // Fire-and-forget by contract: the runner queues, defers under a drain or a live
     // capture, and never throws back at the finalization path.
-    if (!MAC_CAPTURE_ID.test(current.sessionId)) triggerMeetingMergeRun('g2_finalized')
+    if (!MAC_CAPTURE_ID.test(current.sessionId) && !PHONE_CAPTURE_ID.test(current.sessionId)) triggerMeetingMergeRun('g2_finalized')
     runtime.finalizationJobs.remove(current.sessionId)
     // 6.78.0: finished, so its crash-loop count (lib/boot-resume.ts) is done.
     bootResumeGate().forget('meeting_finalization', current.sessionId)
@@ -559,7 +561,7 @@ function publicSaveResponse(saved: SavedMeeting, replayed = false): Record<strin
     : 100
   return {
     receiptVersion: 1,
-    ...(saved.sourceType === 'mac_system_audio' ? { sourceType: saved.sourceType, sessionId: saved.captureId, captureId: saved.captureId } : {}),
+    ...(saved.sourceType ? { sourceType: saved.sourceType, sessionId: saved.captureId, captureId: saved.captureId, ...(saved.sourceType === PHONE_SOURCE_TYPE ? { speakerPolicy: 'anonymous' } : {}) } : {}),
     serverInstanceId: getServerInstanceId(),
     saved: true,
     // Keep the build199 string field without leaking an absolute host path.
@@ -740,6 +742,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   let recoveryPendingLogged = false
   router.get('/meeting/sessions/:sessionId/status', (req, res) => {
     const sessionId = String(req.params.sessionId ?? '')
+    let phoneProvenanceState: 'admitted' | 'not_admitted' | undefined
+    if (sessionId.startsWith('phone_')) {
+      try {
+        if (readPhoneRecording(sessionId)) { requirePhoneRecording(sessionId); phoneProvenanceState = 'admitted' }
+        else if (existsSync(dataPath('session-audio', sessionId)) || existsSync(dataPath('meeting-audio', sessionId)) || existsSync(dataPath('pending-batch', sessionId)) || existsSync(dataPath('active-sessions', sessionId + '.json')) || findQuarantineDir(sessionId)) requirePhoneRecording(sessionId)
+        else { assertPhoneProvenance(sessionId, req.query); phoneProvenanceState = 'not_admitted' }
+      } catch (error) { const e = error as Error & { status?: number; reason?: string }; res.status(e.status ?? 409).json({ error: e.message, reason: e.reason }); return }
+    }
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
@@ -755,6 +765,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
     const saved = store.findBySessionId(sessionId)
+    if (phoneProvenanceState === 'admitted' && readPhoneRecording(sessionId)?.closedAt && !saved) { res.status(409).json({ error: 'Saved iPhone metadata is incomplete; audio is retained', reason: 'phone_saved_metadata_unreadable' }); return }
     // 6.71.14: before durable recovery has run (a boot behind a closed or stuck
     // maintenance gate), a persisted meeting is not in memory YET, and answering
     // `missing` would tell the phone the Mac lost it. Every phone status caller
@@ -786,6 +797,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     res.set('Cache-Control', 'private, no-store')
     res.json({
       sessionId,
+      ...(phoneProvenanceState ? { sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous', provenanceState: phoneProvenanceState } : {}),
       state,
       serverInstanceId,
       receivedRanges: live.receivedRanges,
@@ -902,6 +914,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return null
     }
+    if (sessionId.startsWith('phone_')) {
+      res.status(400).json({ error: 'Stop this recording on iPhone', reason: 'phone_capture_stop_on_iphone' })
+      return null
+    }
     if (MAC_CAPTURE_ID.test(sessionId)) {
       // A Mac recording stops from Control itself; it has no glasses to ask.
       res.status(400).json({ error: 'A Mac recording stops from Record on Mac', reason: 'mac_capture' })
@@ -995,6 +1011,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   // off screen still tells the Mac. It never closes the session and never refuses a chunk:
   // the server saves on its own only once it holds every chunk 0..finalChunkIndex.
   router.post('/meeting/sessions/:sessionId/stop', (req, res) => {
+    try { assertPhoneProvenance(String(req.params.sessionId ?? ''), req.body) } catch (error) { const e = error as Error & { status?: number; reason?: string }; res.status(e.status ?? 400).json({ error: e.message, reason: e.reason }); return }
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
@@ -1109,6 +1126,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     try {
       // A response can be lost after both durable files were committed. Find
       // the sidecar by session ID so client retry/restart is idempotent.
+      if (sessionId.startsWith('phone_')) {
+        try { requirePhoneRecording(sessionId) } catch (error) { const failure = error as Error & { status?: number; reason?: string }; throw new MeetingStoreError(failure.message, failure.status ?? 409, failure.reason ?? 'phone_capture_provenance_missing') }
+      }
       const alreadySaved = store.findBySessionId(sessionId)
       if (alreadySaved) {
         finalizationJobs.reconcileCanonicalSidecars()
@@ -1126,6 +1146,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         respond(200, publicSaveResponse(alreadySaved, true), true)
         return alreadySaved
       }
+      if (PHONE_CAPTURE_ID.test(sessionId) && requirePhoneRecording(sessionId).closedAt) throw new MeetingStoreError('Saved iPhone source metadata is incomplete; audio is retained', 409, 'phone_saved_metadata_unreadable')
       if (MAC_CAPTURE_ID.test(sessionId)) {
         requireMacRecordingForSave(sessionId, body?.expectedChunkCount)
       }
@@ -1176,17 +1197,18 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         ?? chunks.map((chunk, chunkIndex) => ({ chunkIndex, chunk }))
       const startTime = sessions.getStartTime(sessionId) ?? Date.now()
       const macRecording = readMacRecording(sessionId)
+      const phoneRecording = readPhoneRecording(sessionId)
       const durationFromTimeline = macRecording
         ? macChunkReceipt(sessionId, Number(body?.expectedChunkCount) - 1)?.endElapsed ?? 0
         : chunks.reduce(
-        (maximum, chunk) => Math.max(maximum, chunk?.elapsed ?? 0),
+        (maximum, chunk) => Math.max(maximum, (chunk?.elapsed ?? 0) + (PHONE_CAPTURE_ID.test(sessionId) ? chunk?.audioDurationMs ?? 0 : 0)),
         0,
       )
       const durationMs = durationFromTimeline > 0
         ? durationFromTimeline
         : Math.max(0, Date.now() - startTime)
       const integrity = withPhoneFinalIndex(sessions.getIntegrity(sessionId), phoneFinal)
-      const needsOperations = cosOpsPipelineConfigured() && !macRecording
+      const needsOperations = cosOpsPipelineConfigured() && !macRecording && !phoneRecording
       // Standalone saves need a finalization pass too, for summary enrichment.
       // Before 6.37 a standalone save with no audio nulled the job below and
       // never reached the ops_pending slot, so enrichment could never run.
@@ -1301,7 +1323,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         markCanonicalFinalizationState(saved.sidecarPath, finalizationJob.phase, claimPending)
       } else if (finalizationJob) {
         markCanonicalFinalizationState(saved.sidecarPath, 'complete', false)
-        if (!readMacRecording(sessionId)) triggerMeetingMergeRun('g2_finalized')
+        if (!readMacRecording(sessionId) && !PHONE_CAPTURE_ID.test(sessionId)) triggerMeetingMergeRun('g2_finalized')
         finalizationJobs.remove(sessionId)
         bootResumeGate().forget('meeting_finalization', sessionId)
         finalizationJob = null
@@ -1361,13 +1383,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         res.status(400).json({ error: 'Invalid domain', reason: 'invalid_domain' })
         return
       }
+      try { assertPhoneProvenance(sessionId, body) } catch (error) { const e = error as Error & { status?: number; reason?: string }; respond(e.status ?? 400, { error: e.message, reason: e.reason }); return }
       const serverInstanceId = getServerInstanceId()
       if (!serverInstanceId) {
         res.status(503).json({ error: 'Server identity unavailable', reason: 'server_identity_unavailable' })
         return
       }
       const pin = suppliedServerPin(req, body?.serverInstanceId)
-      if (MAC_CAPTURE_ID.test(sessionId) && !pin) {
+      if ((MAC_CAPTURE_ID.test(sessionId) || PHONE_CAPTURE_ID.test(sessionId)) && !pin) {
         res.status(400).json({ error: 'Server identity pin required', reason: 'server_identity_pin_required' })
         return
       }
@@ -1376,7 +1399,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         return
       }
       // Only the phone pins its saves (the local-first contract); the stranded sweep does not.
-      await performSave(sessionId, body, respond, pin ? 'phone' : 'client')
+      await performSave(sessionId, body, respond, pin && req.get('X-COS-Recording-Origin') !== 'stranded-sweep' ? 'phone' : 'client')
     } catch (error) {
       console.error('[meeting/save] Finalization failed:', error)
       respond(500, { error: 'Meeting save failed', reason: 'meeting_save_error' })
@@ -2685,6 +2708,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
     const body = (req.body ?? {}) as Record<string, unknown>
+    if (sessionId.startsWith('phone_')) { try { requirePhoneRecording(sessionId) } catch (error) { const e = error as Error & { status?: number; reason?: string }; res.status(e.status ?? 409).json({ error: e.message, reason: e.reason }); return } }
     if (body.title !== undefined && typeof body.title !== 'string') {
       res.status(400).json({ error: 'Invalid title', reason: 'invalid_title' })
       return
@@ -2719,7 +2743,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     }
     const capture = synthesizeEntriesFromChunkWavs(quarantineDir)
     const macCapture = readMacRecording(sessionId)
+    const phoneCapture = readPhoneRecording(sessionId)
     const entries = capture.entries.map(entry => {
+      if (phoneCapture) return { ...entry, chunk: { ...entry.chunk, speaker: 'Ext', speakerPolicy: 'anonymous' as const, sourceType: PHONE_SOURCE_TYPE } }
       if (!macCapture) return entry
       const receipt = macChunkReceipt(sessionId, entry.chunkIndex)
       return { ...entry, chunk: { ...entry.chunk, speaker: 'Ext', speakerPolicy: 'high-confidence' as const,
@@ -2797,6 +2823,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         // retention window, so a capture wrongly judged silent is not lost.
         markRecoveredNoSpeech(quarantineDir, entries.length)
         if (macCapture) closeMacRecording(sessionId)
+        if (phoneCapture) closePhoneRecording(sessionId)
         console.log(
           `[meeting/orphans] ${sessionId} held no speech `
           + `(${entries.length} chunks, ${Math.round((Date.now() - startedAt) / 1000)}s) `
@@ -2806,7 +2833,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       }
       const recoveredChunks = results.map(item => ({
         text: item.text,
-        speaker: macCapture ? 'Ext' : 'Unknown',
+        speaker: macCapture || phoneCapture ? 'Ext' : 'Unknown',
+        ...(phoneCapture ? { speakerPolicy: 'anonymous' as const, sourceType: PHONE_SOURCE_TYPE } : {}),
         ...(macCapture ? { speakerPolicy: 'high-confidence' as const } : {}),
         elapsed: item.segment.startElapsed,
         similarity: 0,
@@ -2822,7 +2850,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           resolveCosOperationsDir(),
         ),
         transcript,
-        startTime: macCapture?.startTime ?? capture.startTime,
+        startTime: macCapture?.startTime ?? phoneCapture?.startTime ?? capture.startTime,
         durationMs: macCapture ? Math.max(...entries.map(e => e.chunk.elapsed + (e.chunk.audioDurationMs ?? 0))) : capture.durationMs,
         chunks: recoveredChunks,
         chunkEntries: recoveredChunks.map((chunk, position) => ({
@@ -2851,7 +2879,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         })
       } catch { /* display is best-effort */ }
       await runCleanupStage(transcriptCleanup, { sessionId, meetingPath: saved.filepath, sidecarPath: saved.sidecarPath }, sessions)
-      if (cosOpsPipelineConfigured() && !macCapture) {
+      if (cosOpsPipelineConfigured() && !macCapture && !phoneCapture) {
         await handoffMeetingToOperations(saved.filepath)
       } else {
         // Orphan recovery is its own path and never reaches
@@ -2862,7 +2890,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         // Control surfaces and warns on before committing a drain.
         await enrichStandaloneMeeting(saved.filepath, Date.now())
       }
-      if (!macCapture) triggerMeetingMergeRun('orphan_recovered')
+      if (!macCapture && !phoneCapture) triggerMeetingMergeRun('orphan_recovered')
     }).catch(error => {
       // The quarantined audio is untouched on failure — retry stays possible
       // until the retention clock clears it.

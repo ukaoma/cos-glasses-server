@@ -1,3 +1,4 @@
+import { PHONE_CAPTURE_ID } from '../lib/phone-recording.js'
 // Meeting archive: COS operations tree when configured, else standalone recordings.
 
 import { Router } from 'express'
@@ -73,13 +74,16 @@ export function withMeetingContext<T extends MeetingMeta>(meeting: T, source: Me
   return { ...meeting, ...readOnlyContext() }
 }
 
-/** A Mac capture's session id, as routes/meeting.ts keys the pipeline skip. */
+/** Exact Mac identity; iPhone captures never satisfy this predicate. */
 export function isMacCaptureId(sessionId: string | undefined): boolean {
   return typeof sessionId === 'string' && MAC_CAPTURE_ID.test(sessionId)
 }
+function isStandaloneCaptureId(sessionId: string | undefined): boolean {
+  return typeof sessionId === 'string' && (MAC_CAPTURE_ID.test(sessionId) || PHONE_CAPTURE_ID.test(sessionId))
+}
 
 /**
- * Operations rows plus the store's Mac recordings (6.73.14), newest first by date and time, capped at `limit`. Only Mac
+ * Operations rows plus the store's Mac recordings (6.73.14), newest first by date and time, capped at `limit`. Only Mac and admitted phone
  * rows are added: a G2 store row is the pipeline's to file, and its operations copy is the row. A Mac row is left out
  * when an operations row holds its session, or when `held` does (the sessions merged scribes declare), the same rule
  * the day count applies (imported-library-rows macStoreDayCounts). Operations rows are never deduplicated against each
@@ -90,7 +94,7 @@ export function withMacStoreRows(operations: MeetingMeta[], storeRows: MeetingMe
   const mac = storeRows
     // Keyed on the sidecar's session, as the save route keys the pipeline skip (MAC_CAPTURE_ID). The row's sourceType
     // comes from the markdown's Capture source line instead, which an edited or older record can lack.
-    .filter(row => isMacCaptureId(row.sessionId) && !sessions.has(row.sessionId) && !held.has(row.sessionId!))
+    .filter(row => isStandaloneCaptureId(row.sessionId) && (!PHONE_CAPTURE_ID.test(row.sessionId!) || row.sourceType === 'iphone_microphone') && !sessions.has(row.sessionId) && !held.has(row.sessionId!))
     .map(withStandaloneIdentity)
   if (mac.length === 0) return operations
   return [...operations, ...mac]
@@ -342,7 +346,7 @@ export function createMeetingsRouter(
           // 6.73.14 (Miles 2026-10-15): routes/meeting.ts never hands a Mac recording to the pipeline (MAC_CAPTURE_ID),
           // so on a pipeline Mac it lives only in this store and never appeared in Meetings; Control's hand-off read
           // "Saved meeting not found yet" forever. The store's Mac rows join the operations rows here.
-          const meetings = withMacStoreRows(operationsMeetings, store.list({ ...listOptions, sessionMatch: isMacCaptureId }), limit, declaredSessions)
+          const meetings = withMacStoreRows(operationsMeetings, store.list({ ...listOptions, sessionMatch: isStandaloneCaptureId }), limit, declaredSessions)
           // ONLY WHEN THE LIST SAW THE WHOLE MONTH. The row list is capped, and a capped
           // list knows about fewer merged scribes than the month holds, so handing its
           // sessions to an UNCAPPED day count would subtract too little and put the dot
@@ -356,7 +360,7 @@ export function createMeetingsRouter(
               const operationsMonths = listCosOperationsMeetingMonths(domain)
               const known = new Set(operationsMonths)
               const macOnly = store.listMonths().filter(month => !known.has(month)
-                && store.list({ month, domain, limit: 1, sessionMatch: isMacCaptureId }).length > 0)
+                && store.list({ month, domain, limit: 1, sessionMatch: isStandaloneCaptureId }).length > 0)
               return macOnly.length ? uniqueSortedMonths([operationsMonths, macOnly]) : operationsMonths
             })(),
             // The rows above already read every scribe in this month and told us which

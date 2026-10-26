@@ -111,6 +111,10 @@ export function archiveSessionAudio(sessionId: string, sourceDir: string): Archi
     }
     try { out.bytes += statSync(to).size } catch { /* counted as linked regardless */ }
   }
+  // Source metadata follows the same retained audio, without counting it as a chunk.
+  if (sessionId.startsWith('phone_')) {
+    try { copyFileSync(join(sourceDir, '_capture.json'), join(dest, '_capture.json')) } catch { /* durable registry and saved sidecar retain the source too */ }
+  }
   return out
 }
 
