@@ -291,3 +291,29 @@ it('preserves explicit anonymous G2 upload, Stop and save without treating its p
  expect(()=>assertPhoneProvenance(id,{speakerPolicy:'anonymous'})).toThrow()
  expect(()=>assertPhoneProvenance(sessionId,source)).toThrow()
 })
+it('refuses repeated or non-canonical phone query fields before admission or any model call',async()=>{
+ const repeated=await call('/transcribe-stream?'+new URLSearchParams([['sessionId',id],['sessionId',id],['chunkIndex','0'],['elapsed','0'],['startTime','1700000000000'],['sourceType','iphone_microphone'],['speakerPolicy','anonymous']]),wavOf(6,()=>400))
+ expect(repeated).toMatchObject({status:400,json:{reason:'invalid_session_id'}})
+ for(const [field,value,reason] of [['chunkIndex','0x0','invalid_chunk_index'],['chunkIndex','0e0','invalid_chunk_index'],['chunkIndex',' 0','invalid_chunk_index'],['chunkIndex','','invalid_chunk_index'],['elapsed','','invalid_elapsed'],['elapsed','0x0','invalid_elapsed'],['elapsed','1e1','invalid_elapsed'],['startTime','17e11','phone_start_time_required'],['startTime','1700000000000.0','phone_start_time_required']] as const){
+  const r=await upload({[field]:value})
+  expect([field,value,r.status,r.json?.reason]).toEqual([field,value,400,reason])
+ }
+ expect(parakeet).not.toHaveBeenCalled()
+ expect(existsSync(join(root,'phone-recordings',id+'.json'))).toBe(false)
+ expect(existsSync(join(root,'session-audio',id))).toBe(false)
+ expect((await upload()).status).toBe(200)
+})
+it('refuses a non-string phone identity in the provenance guard itself',async()=>{
+ const {assertPhoneProvenance}=await import('../lib/phone-recording.js')
+ expect(()=>assertPhoneProvenance([id],source)).toThrow(expect.objectContaining({status:400,reason:'invalid_phone_capture_id'}))
+ expect(assertPhoneProvenance([id],undefined)).toBe(false)
+ expect(assertPhoneProvenance(undefined,{speakerPolicy:'anonymous'})).toBe(false)
+})
+it('parses only canonical decimal strings and caps elapsed at one day',async()=>{
+ const {phoneQueryInteger}=await import('../lib/phone-recording.js')
+ expect(phoneQueryInteger('42','r','m')).toBe(42)
+ for(const value of [['42'],42,'042','-1','4.2',null]) expect(()=>phoneQueryInteger(value,'r','m')).toThrow(expect.objectContaining({status:400,reason:'r'}))
+ expect(await upload({elapsed:'86400001'})).toMatchObject({status:400,json:{reason:'invalid_elapsed'}})
+ expect(parakeet).not.toHaveBeenCalled()
+ expect((await upload({elapsed:'86400000'})).status).toBe(200)
+})

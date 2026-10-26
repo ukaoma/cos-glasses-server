@@ -20,7 +20,12 @@ export function phoneMicrophoneMeetingsCapability(serverInstanceId: string | nul
   return { enabled: reason === 'ready', protocolVersion: 1 as const, sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' as const, asrModel: 'parakeet-ultra', dictionary: 'server-profile-corrections', reason }
 }
 /** Phone IDs and the new source marker must agree, including on rejected/replayed requests. */
-export function assertPhoneProvenance(id: string, fields: Record<string, unknown> | undefined): boolean {
+export function assertPhoneProvenance(id: unknown, fields: Record<string, unknown> | undefined): boolean {
+  // A repeated query key arrives as an array; it is never a phone ID and never a 500.
+  if (typeof id !== 'string') {
+    if (fields?.sourceType === PHONE_SOURCE_TYPE) throw macError(400, 'invalid_phone_capture_id', 'Invalid iPhone capture ID')
+    return false
+  }
   const phone = id.startsWith('phone_')
   // Anonymous is a shared speaker policy, not evidence of a phone source.
   if (!phone && fields?.sourceType !== PHONE_SOURCE_TYPE) return false
@@ -55,7 +60,7 @@ export function requirePhoneRecording(id: string): PhoneRecording {
   if (readSpeakerPolicy(id).mode !== 'anonymous' || readSpeakerPolicy(id).revision === 'unreadable') throw macError(409, 'phone_capture_policy_changed', 'iPhone microphone capture is anonymous')
   return value
 }
-export function admitPhoneRecording(id: string, startTime: unknown, serverInstanceId: string): PhoneRecording {
+export function admitPhoneRecording(id: string, startTime: number | undefined, serverInstanceId: string): PhoneRecording {
   const capability = phoneMicrophoneMeetingsCapability(serverInstanceId)
   if (!capability.enabled) throw macError(503, 'phone_microphone_' + capability.reason, 'iPhone microphone recording is unavailable: ' + capability.reason)
   const prior = readPhoneRecording(id)
@@ -84,6 +89,12 @@ export function closePhoneRecording(id: string): void {
 }
 export function validatePhoneWav(audio: Buffer): number {
   try { return validateMacWav(audio) } catch { throw macError(400, 'invalid_phone_audio', 'Expected a bounded canonical 16-kHz mono PCM16 WAV') }
+}
+/** Phone ingress numbers are canonical decimal strings, never coerced arrays, hex, exponents or blanks. */
+const PHONE_DECIMAL = /^(?:0|[1-9][0-9]{0,15})$/
+export function phoneQueryInteger(value: unknown, reason: string, message: string): number {
+  if (typeof value !== 'string' || !PHONE_DECIMAL.test(value) || !Number.isSafeInteger(Number(value))) throw macError(400, reason, message)
+  return Number(value)
 }
 /** A receipt precedes ASR so retry after decode failure cannot overwrite accepted raw audio. */
 export function persistPhoneChunkReceipt(id: string, chunkIndex: number, audioSha256: string, elapsed: number, durationMs: number): void {

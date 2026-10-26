@@ -1,4 +1,4 @@
-import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, admitPhoneRecording, requirePhoneRecording, readPhoneRecording, validatePhoneWav, persistPhoneChunkReceipt } from '../lib/phone-recording.js'
+import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, admitPhoneRecording, phoneQueryInteger, requirePhoneRecording, readPhoneRecording, validatePhoneWav, persistPhoneChunkReceipt } from '../lib/phone-recording.js'
 import { matchMacLiveVoice, macAnonymousProjection, type MacLiveVoiceState } from '../lib/mac-live-voices.js'
 import { isVoiceLabel, macVoiceLabelsEnabled } from '../lib/mac-voice-labels.js'
 import { MacParakeetUnavailableError, transcribeMacParakeet, transcribePhoneParakeet } from '../lib/mac-recording-asr.js'
@@ -2895,6 +2895,9 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
   try {
     // Reject a wrong Mac before consuming or persisting any upload bytes.
     assertPinnedServerIdentity(req.get('X-COS-Server-Instance'), req.query.serverInstanceId)
+    // A repeated key is an array. The G2 path already refused it (its regex fails on the
+    // joined commas); say so before the phone check reads it as a string.
+    if (req.query.sessionId !== undefined && typeof req.query.sessionId !== 'string') throw makeHttpError(400, 'invalid sessionId', 'invalid_session_id')
     const sessionId = (req.query.sessionId as string) || `g2_${Date.now()}`
     const phone = assertPhoneProvenance(sessionId, req.query)
     if (phone) {
@@ -2909,7 +2912,7 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
     maintenanceLease = acquireRecordingChunkLease({
       allowDuringDrain: sessions.has(sessionId),
     })
-    const chunkIndex = phone ? Number(req.query.chunkIndex) : parseInt((req.query.chunkIndex as string) || '0', 10)
+    const chunkIndex = phone ? phoneQueryInteger(req.query.chunkIndex, 'invalid_chunk_index', 'invalid chunkIndex') : parseInt((req.query.chunkIndex as string) || '0', 10)
     const clientSpeaker = (req.query.speaker as string) || 'Unknown'
     const clientElapsedRaw = Number(req.query.elapsed)
     const clientElapsed = Number.isFinite(clientElapsedRaw) && clientElapsedRaw >= 0
@@ -2919,15 +2922,18 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
     const startTimeOverride = Number.isFinite(startTimeRaw) && startTimeRaw > 0
       ? startTimeRaw
       : undefined
+    let phoneStartTime: number | undefined
     if (phone) {
       validateChunkIndex(chunkIndex)
-      if (!Number.isFinite(clientElapsedRaw) || clientElapsedRaw < 0 || clientElapsedRaw > 86400000) throw macError(400, 'invalid_elapsed', 'Original iPhone chunk elapsed time required')
+      const phoneElapsed = phoneQueryInteger(req.query.elapsed, 'invalid_elapsed', 'Original iPhone chunk elapsed time required')
+      if (phoneElapsed > 86400000) throw macError(400, 'invalid_elapsed', 'Original iPhone chunk elapsed time required')
+      if (req.query.startTime !== undefined) phoneStartTime = phoneQueryInteger(req.query.startTime, 'phone_start_time_required', 'Original iPhone capture start time required')
     }
     const audioBuffer = phone ? await readBoundedRawBody(req, MAC_AUDIO.maxChunkBytes) : await readRawBody(req)
     let phoneDuration: number | undefined
     if (phone) {
       phoneDuration = validatePhoneWav(audioBuffer)
-      admitPhoneRecording(sessionId, req.query.startTime, requireMacPin(req))
+      admitPhoneRecording(sessionId, phoneStartTime, requireMacPin(req))
       persistPhoneChunkReceipt(sessionId, chunkIndex, sha256Hex(audioBuffer), clientElapsedRaw, phoneDuration)
       const dir = resolve(SESSION_AUDIO_DIR, sessionId); ensurePrivateDirectory(dir)
       durableAtomicWriteFileSync(resolve(dir, '_capture.json'), JSON.stringify(requirePhoneRecording(sessionId)), { mode: 0o600 })
