@@ -27,7 +27,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpat
 import { dirname, join } from 'node:path'
 
 /** A key as Control stores it. The id part is the server's own marker grammar (`G2_SESSION_MARKER`). */
-export const MEETING_CONTEXT_KEY = /^(?:(?:ff|mac):[A-Za-z0-9:_-]{3,96}|g2:(?!phone_)[A-Za-z0-9:_-]{3,96}|phone:phone_(?:[0-9]{13}_)?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/
+export const MEETING_CONTEXT_KEY = /^(?:(?:ff|mac|g2):(?!phone_)[A-Za-z0-9:_-]{3,96}|phone:phone_(?:[0-9]{13}_)?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/
 const SOURCE_ID = /^[A-Za-z0-9:_-]{3,96}$/
 
 const SIDECAR_HEAD_BYTES = 4096
@@ -103,7 +103,7 @@ export function firefliesSidecarId(monthDir: string, meetingFilename: string): s
 export function meetingContextKeys(sources: { g2SessionId?: string; firefliesId?: string; declared?: readonly string[]; sourceType?: string }): string[] {
   const keys: string[] = []
   const add = (prefix: 'g2' | 'ff' | 'mac', id: string | undefined) => {
-    if (!id || !SOURCE_ID.test(id)) return
+    if (!id || !SOURCE_ID.test(id) || (prefix !== 'g2' && id.startsWith('phone_'))) return
     if (prefix === 'g2' && (id.startsWith('phone_') || sources.sourceType === 'iphone_microphone') && (!PHONE_CAPTURE_ID.test(id) || sources.sourceType !== 'iphone_microphone')) return
     const actualPrefix = prefix === 'g2' && sources.sourceType === 'iphone_microphone' ? 'phone' : prefix === 'g2' && (sources.sourceType === 'mac_system_audio' || readMacRecording(id)) ? 'mac' : prefix
     const key = `${actualPrefix}:${id}`

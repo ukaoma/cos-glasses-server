@@ -7,13 +7,14 @@ import { wavOf } from '../lib/__fixtures__/nemotron-helpers.js'
 import type { Server } from 'node:http'
 let root:string, server:Server, base:string, installed=true
 let stream:typeof import('./transcribe-stream.js')
-let parakeet:ReturnType<typeof vi.fn>; let whisper:ReturnType<typeof vi.fn>; let diarize:ReturnType<typeof vi.fn>;
+let progressive:ReturnType<typeof vi.fn>; let parakeet:ReturnType<typeof vi.fn>; let whisper:ReturnType<typeof vi.fn>; let diarize:ReturnType<typeof vi.fn>;
 const enroll=vi.fn(); const identify=vi.fn(()=>({speaker:'MU',similarity:0.64,embedding:new Float32Array(192).fill(0.1)})); const background:Promise<void>[]=[]
 const signalListeners = new Map<NodeJS.Signals, Set<(...args:any[])=>void>>()
 const id='phone_abcdef01-2345-6789-abcd-0123456789ab'
 beforeEach(async()=>{
  for(const signal of ['SIGTERM','SIGINT'] as const)signalListeners.set(signal,new Set(process.listeners(signal)))
  root=mkdtempSync(join(tmpdir(),'cos-phone-route-')); process.env.COS_DATA_DIR=root; process.env.COS_IPHONE_MICROPHONE_MEETINGS='1'; vi.resetModules(); installed=true; enroll.mockClear(); identify.mockClear()
+ vi.doMock('../lib/meeting-batch-transcribe.js',async original=>({...await original<typeof import('../lib/meeting-batch-transcribe.js')>(),scheduleProgressiveHqCheckpoint:progressive=vi.fn()}))
  vi.doMock('../lib/server-instance-id.js',()=>({getServerInstanceId:()=> 'server-mac'}))
  vi.doMock('../lib/parakeet.js',async original=>({...await original<typeof import('../lib/parakeet.js')>(),parakeetInstalled:()=>({installed,bytes:1}),transcribeParakeet:parakeet=vi.fn(async()=>({model:'parakeet-ultra',text:'We reviewed sproket roket and agreed on the launch plan.',words:[{word:'We',start:0,end:0.4}],processingSec:0.1,wallMs:120}))}))
  vi.doMock('../lib/whisper-local.js',async original=>({...await original<typeof import('../lib/whisper-local.js')>(),transcribeLocal:whisper=vi.fn(async()=>({text:'We reviewed the launch plan and agreed on a decision.',backend:'server'})),transcribeHighQuality:vi.fn(async()=>{throw Error('Whisper HQ forbidden in phone test')})}))
@@ -32,9 +33,9 @@ async function mount(){
 }
 afterEach(async()=>{
  await Promise.allSettled(background.splice(0)); await new Promise<void>(resolve=>server?.listening ? server.close(()=>resolve()) : resolve()); vi.resetModules()
- for(const mod of ['parakeet','server-instance-id','whisper-local','speaker-embeddings','profile','vad-silero','stt-live','nemotron-live','meeting-summary-persistence']) vi.doUnmock('../lib/'+mod+'.js')
+ for(const mod of ['meeting-batch-transcribe','parakeet','server-instance-id','whisper-local','speaker-embeddings','profile','vad-silero','stt-live','nemotron-live','meeting-summary-persistence']) vi.doUnmock('../lib/'+mod+'.js')
  for(const [signal,prior] of signalListeners)for(const listener of process.listeners(signal))if(!prior.has(listener))process.removeListener(signal,listener)
- delete process.env.COS_DATA_DIR; delete process.env.COS_IPHONE_MICROPHONE_MEETINGS; rmSync(root,{recursive:true,force:true})
+ delete process.env.COS_MEETING_PROGRESSIVE_HQ; delete process.env.COS_DATA_DIR; delete process.env.COS_IPHONE_MICROPHONE_MEETINGS; rmSync(root,{recursive:true,force:true})
 })
 async function call(path:string,body?:unknown,pin='server-mac'){
  const headers:Record<string,string>={};if(pin)headers['X-COS-Server-Instance']=pin
@@ -216,9 +217,55 @@ it('keeps phone library/context identity distinct from Mac and rejects cross-sou
  const {meetingContextKeys,MEETING_CONTEXT_KEY}=await import('../lib/meeting-context-keys.js')
  expect(meetingContextKeys({g2SessionId:id})).toEqual([])
  expect(meetingContextKeys({g2SessionId:'meeting_legacy',sourceType:source.sourceType})).toEqual([])
+ for(const prefix of ['g2','mac','ff'])expect(MEETING_CONTEXT_KEY.test(prefix+':'+id)).toBe(false);
+ expect(meetingContextKeys({firefliesId:id})).toEqual([]);
  expect(MEETING_CONTEXT_KEY.test('g2:'+id)).toBe(false);expect(MEETING_CONTEXT_KEY.test('phone:meeting_legacy')).toBe(false);expect(MEETING_CONTEXT_KEY.test('phone:'+id)).toBe(true)
  const {isMacCaptureId,withMacStoreRows}=await import('./meetings.js');expect(isMacCaptureId(id)).toBe(false)
  const row={sessionId:id,filename:'2026-10-26_iPhone.md',date:'2026-10-26',sourceType:'iphone_microphone'} as any
  expect(withMacStoreRows([], [row], 10)).toMatchObject([{sessionId:id,sourceType:'iphone_microphone',librarySource:'standalone_recordings'}])
  expect(withMacStoreRows([], [{...row,sourceType:undefined}],10)).toEqual([])
+})
+
+it('never schedules Whisper progressive work when the selected engine changes during phone ASR',async()=>{
+ process.env.COS_MEETING_PROGRESSIVE_HQ='1'
+ let finish!:(value:unknown)=>void;parakeet.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}))
+ const pending=upload();await vi.waitFor(()=>expect(finish).toBeTypeOf('function'))
+ const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'large-v3'})
+ finish({model:'parakeet-ultra',text:'The launch plan is agreed.',words:[],processingSec:0.1,wallMs:120})
+ expect((await pending).status).toBe(200);expect(progressive).not.toHaveBeenCalled();expect(whisper).not.toHaveBeenCalled()
+})
+it('keeps actual shared Ask history/files isolated by full capture ID through phone live-to-saved reopening',async()=>{
+ await upload()
+ const {MeetingAskStore}=await import('../lib/meeting-ask-store.js'),{MeetingAskRuntime}=await import('../lib/meeting-ask-runtime.js')
+ const {resolveAskTranscript}=await import('../lib/meeting-ask-transcript.js'),{transcriptSources}=await import('../lib/meeting-ask-transcript-sources.js')
+ const store=new MeetingAskStore(join(root,'ask-fixture')),run=vi.fn(async()=>({text:JSON.stringify({sections:[{label:'So what',text:'The launch plan is agreed [T1].'}],searchQuery:null}),model:'sonnet'}))
+ const runtime=new MeetingAskRuntime({store,identity:()=> 'server-mac',admissions:()=>true,lease:()=>({release:()=>{},id:'test',kind:'meeting_ask'} as any),reviewAnswers:false,finalized:()=>({sources:[],notices:[]}),refine:input=>({input,notices:[]}),run,catalog:async()=>[{engine:'claude',available:true,defaultModel:'sonnet',models:['sonnet']}],wearer:()=>null,owner:()=>null,ownerArea:()=>null,logTimings:()=>{}})
+ const uuid=id.slice(6),ids=[id,'meeting_'+uuid,'mac_'+uuid]
+ for(const [i,sessionId] of ids.entries()){
+  runtime.putFiles(sessionId,'server-mac',[{id:'file_'+String(i).padStart(8,'0'),revision:'1',name:sessionId,status:'ready',text:'Context for '+sessionId}])
+  const snapshot=sessionId===id?resolveAskTranscript(id,transcriptSources):{turns:[{id:0,elapsedMs:0,speaker:'Ext',text:'A separate recording.'}],elapsedMs:1000}
+  const requestId='request_'+String(i).padStart(8,'0')
+  await runtime.submit({requestId,sessionId,serverInstanceId:'server-mac',action:'ask',question:'What was agreed?',elapsedMs:6000,turns:snapshot.turns})
+  await vi.waitFor(()=>expect(runtime.get(requestId).status).toBe('completed'))
+ }
+ const before=runtime.history(id,'server-mac');expect(before.exchanges.map(e=>e.sessionId)).toEqual([id]);expect(before.files.map(f=>f.name)).toEqual([id])
+ expect((await call('/meeting/save',{sessionId:id,...source,finalChunkIndex:0})).status).toBe(200)
+ const ended=resolveAskTranscript(id,transcriptSources);expect(ended).toMatchObject({source:'saved',ended:true});expect(ended.turns.map(t=>t.speaker)).toEqual(['Ext'])
+ const reopened=new MeetingAskRuntime({store:new MeetingAskStore(store.root),identity:()=> 'server-mac'})
+ for(const sessionId of ids){const history=reopened.history(sessionId,'server-mac');expect(history.exchanges.map(e=>e.sessionId)).toEqual([sessionId]);expect(history.files.map(f=>f.name)).toEqual([sessionId])}
+ expect(run).toHaveBeenCalledTimes(3)
+})
+it('refuses Ask access to unadmitted, forged active or corrupt saved phone evidence and retains files',async()=>{
+ const {transcriptSources}=await import('../lib/meeting-ask-transcript-sources.js'),{resolveAskTranscript}=await import('../lib/meeting-ask-transcript.js')
+ const {writeFileSync}=await import('node:fs')
+ const path=join(root,'active-sessions',id+'.json');writeFileSync(path,JSON.stringify({sessionId:id,chunks:[{speaker:'MU',text:'Unprovenanced name',elapsed:0}]}))
+ expect(()=>resolveAskTranscript(id,transcriptSources)).toThrow('phone_capture_provenance_missing');expect(existsSync(path)).toBe(true)
+ const {unlinkSync}=await import('node:fs');unlinkSync(path);await upload()
+ const original=readFileSync(path,'utf8');stream.deleteSession(id,{preserveAudio:true});const doc=JSON.parse(original);doc.chunksIndexed[0].c.speaker='MU';writeFileSync(path,JSON.stringify(doc))
+ expect(()=>resolveAskTranscript(id,transcriptSources)).toThrow('phone_transcript_provenance_unreadable');expect(existsSync(path)).toBe(true)
+ writeFileSync(path,original);await new Promise<void>(resolve=>server.close(()=>resolve()));vi.resetModules();await mount()
+ await call('/meeting/save',{sessionId:id,...source,finalChunkIndex:0})
+ const {getMeetingStore}=await import('../lib/meeting-store.js'),sources=(await import('../lib/meeting-ask-transcript-sources.js')).transcriptSources
+ const saved=getMeetingStore().findBySessionId(id)!,sidecar=JSON.parse(readFileSync(saved.sidecarPath,'utf8'));sidecar.captureSource.startTime++;writeFileSync(saved.sidecarPath,JSON.stringify(sidecar))
+ expect(()=>resolveAskTranscript(id,sources)).toThrow('phone_transcript_provenance_unreadable');expect(existsSync(saved.filepath)).toBe(true)
 })

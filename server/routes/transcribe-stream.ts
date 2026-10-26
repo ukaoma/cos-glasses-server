@@ -1605,9 +1605,10 @@ export function getSessionAsrCompletedIndices(sessionId: string): number[] {
 }
 
 function scheduleSessionProgressiveHq(sessionId: string): void {
-  // Progressive checkpoints are Whisper-only and may not bypass a Mac's
-  // explicit Parakeet choice, even if the separate HQ canary is enabled.
-  if ((MAC_CAPTURE_ID.test(sessionId) || PHONE_CAPTURE_ID.test(sessionId)) && readSttSettings().hq === 'parakeet-ultra') return
+  // Phone audio is always Parakeet, including after a global settings change.
+  // Mac retains its existing selected-engine contract.
+  if (PHONE_CAPTURE_ID.test(sessionId)) return
+  if (MAC_CAPTURE_ID.test(sessionId) && readSttSettings().hq === 'parakeet-ultra') return
   // Preserve the default-off contract at the route boundary. In addition to
   // avoiding any cache work, this keeps legacy/local-first transcription
   // independent of the progressive HQ capability surface when the canary is
