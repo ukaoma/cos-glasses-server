@@ -24,7 +24,8 @@ This is backend qualification. The candidate still needs the Control helper/UI i
 ## Live Mac anonymous voices
 
 Mac recordings retain the fixed High-confidence named identity floor (0.88).
-Live `Voice N` is off by default (every live Mac chunk reads `Ext`, as 6.92.0).
+Live `Voice N` is on by default as the window replay below; `COS_MAC_LIVE_VOICES=off`
+gives 6.92.0 (every live Mac chunk reads `Ext`).
 With `COS_MAC_LIVE_VOICES=anchors` (and `COS_MAC_VOICE_LABELS` not off), successful
 live Nemotron tracks can carry anonymous `Voice N` labels at identity similarity
 zero. These labels mean acoustic continuity inside this capture, never a person.
@@ -65,9 +66,9 @@ with selected isolated acoustic evidence, raw-index mapping, preview/confirmatio
 and provenance/retraction support; ordinary relabeling is not that consent.
 
 
-## Live Mac window replay (6.93.0, opt-in)
+## Live Mac window replay (6.93.0, on by default)
 
-`COS_MAC_LIVE_VOICES=window` (default off; `anchors` is the per-chunk path above)
+`COS_MAC_LIVE_VOICES=window`, or unset (`off` turns it off; `anchors` is the per-chunk path above)
 replaces the per-chunk anchors with window replay
 (`server/lib/mac-window-voices.ts`, `server/lib/mac-window-replay.ts`). Chunk k is
 diarized together with the durable chunks before it (contiguous, at most 5 chunks
@@ -82,7 +83,7 @@ that both speak in the current chunk: that slot is not carried and its frames ar
 untracked, so the error does not feed the next window. It does not yet catch a clean
 hand-over at a chunk boundary (a new voice alone in the chunk, put on an old voice's slot
 by the window model): the chunk alone shows one clean voice and agrees. Catching that
-needs evidence from more than one chunk, which is why the window stays opt-in. A track
+needs evidence from more than one chunk. It is a known limit now that the window is on by default: a wrong number, never a wrong name. A track
 becomes `Voice N` after two clean proof chunks (2 s alone, purity 0.9, distinct chunk and
 audio hash). A track no remembered frame refers to is evicted and its id reused (12 live
 ids), so a long meeting cannot exhaust them; its number stays spent. The window run's
@@ -96,3 +97,18 @@ every use, and is never written to the saved sidecar. A returning voice beyond t
 window reads `Ext` or a new number; a wrong merge is the failure this design
 refuses to risk. The session-wide fix is a persistent native diarizer per capture
 (the append-session prototype), which is not part of this release.
+
+
+## Assigning a Mac voice to an existing voice profile (6.93.0)
+
+A Mac `Voice N` is text only by default: it is never a profile, never enrolled and never
+trained. The one exception is an explicit assignment: `POST /api/meeting/:sessionId/relabel`
+with `assignVoiceProfile: true`, `from` an unnamed `Voice N`, and `to` an already enrolled
+profile name. The server extracts voiceprints from the retained chunk audio (7 days, the
+meeting-audio archive; a Mac recording banks no embeddings), keeps only this voice's audio,
+runs the same coherence and diversity gates as a glasses rename, and writes nothing until
+`confirm: true`. The dry run reports the person, the most samples that would be added and
+the similarity of this voice to the stored profile, as a suggestion. Nothing is created,
+and when no audio is retained the whole request is refused (`422 nothing_to_enrol`),
+rename included. Samples carry `correction:<sessionId>` provenance, so "Not in this meeting"
+retracts them.

@@ -2466,10 +2466,10 @@ async function processStreamChunk(opts: {
   // the synchronous voiceprint so the process is already running while that
   // blocks. diarize() never throws; a fallback returns a reason.
   const diarizeStartedAt = performance.now()
-  // 6.93.0 (COS_MAC_LIVE_VOICES=window, default off): a Mac chunk is diarized inside a
+  // 6.93.0 (COS_MAC_LIVE_VOICES, window by default): a Mac chunk is diarized inside a
   // window of the durable chunks before it, so voices keep their number across
   // boundaries (the first chunk and a gap run a window of their own, one chunk or the
-  // contiguous run after the gap). With the switch off, or no window to run (an
+  // contiguous run after the gap). With the switch off (COS_MAC_LIVE_VOICES=off), or no window to run (an
   // unplannable chunk, corrupt state, earlier Voice labels), the chunk takes the plain
   // per-chunk run with no anchors: `Ext`, as 6.92.0. A window run that times out or is
   // refused falls back to that per-chunk run too, and two window timeouts in a row stop the

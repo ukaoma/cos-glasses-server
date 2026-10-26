@@ -1314,8 +1314,8 @@ async function unnamedVoicePass(input: UnnamedInput): Promise<FinalPassOutcome> 
   const aligned = textNext.length === chunks.length && textNext.every((entry, i) => entry.chunk.text === chunks[i]?.text)
   if (!aligned) return { status: 'skipped', reason: 'chunk_map_ambiguous', unnamed: true, mode, excluded }
 
-  // With no live Voice label (the default: live voices are opt-in) nothing is
-  // restricted and every confident channel is numbered, exactly as 6.92.0.
+  // With no live Voice label (COS_MAC_LIVE_VOICES=off, or a capture the live path never
+  // numbered) nothing is restricted and every confident channel is numbered, exactly as 6.92.0.
   const liveNumbers = entries.flatMap(entry => [liveLabelOf(entry.chunk), ...(Array.isArray(entry.chunk?.segments) ? entry.chunk.segments : []).map(segment => segment?.speaker)])
     .filter(isVoiceLabel).map(label => Number(String(label).slice(6)))
   const liveMap = liveNumbers.length ? mapChannelsToLiveVoices(timeline.windows, activity) : null

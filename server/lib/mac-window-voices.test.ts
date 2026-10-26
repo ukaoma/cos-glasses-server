@@ -326,12 +326,14 @@ describe('window state validation fails closed', () => {
 })
 
 describe('switch', () => {
-  it('is off unless COS_MAC_LIVE_VOICES=window, and COS_MAC_VOICE_LABELS off wins', () => {
-    expect(macWindowVoicesEnabled({})).toBe(false)
-    expect(macWindowVoicesEnabled({ COS_MAC_LIVE_VOICES: '1' })).toBe(false)
-    expect(macWindowVoicesEnabled({ COS_MAC_LIVE_VOICES: 'anchors' })).toBe(false) // the 6.92.1 anchors are the other mode, not this one
+  it('is on by default; off for COS_MAC_LIVE_VOICES=off or anchors; COS_MAC_VOICE_LABELS off wins', () => {
+    expect(macWindowVoicesEnabled({})).toBe(true)
+    expect(macWindowVoicesEnabled({ COS_MAC_LIVE_VOICES: '1' })).toBe(true) // unrecognised is the default, not an opt-out
     expect(macWindowVoicesEnabled({ COS_MAC_LIVE_VOICES: ' Window ' })).toBe(true)
+    expect(macWindowVoicesEnabled({ COS_MAC_LIVE_VOICES: 'anchors' })).toBe(false) // the 6.92.1 anchors are the other mode, not this one
+    for (const off of ['off', '0', 'false', 'no']) expect(macWindowVoicesEnabled({ COS_MAC_LIVE_VOICES: off })).toBe(false)
     expect(macWindowVoicesEnabled({ COS_MAC_LIVE_VOICES: 'window', COS_MAC_VOICE_LABELS: 'off' })).toBe(false)
+    expect(macWindowVoicesEnabled({ COS_MAC_VOICE_LABELS: 'off' })).toBe(false)
   })
   it('reaches a managed install: the managed runtime contract forwards COS_MAC_LIVE_VOICES', () => {
     const contract = JSON.parse(readFileSync(new URL('../../managed-runtime-contract.json', import.meta.url), 'utf8')) as { optionalEnvironment: string[] }

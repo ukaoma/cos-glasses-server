@@ -44,6 +44,8 @@ import {
 } from '../lib/meeting-audio-archive.js'
 import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
 import { enrolNamedVoice } from '../lib/meeting-relabel-enrolment.js'
+import { commitMacVoiceAssignment, planMacVoiceAssignment, type MacAssignPlan } from '../lib/mac-voice-assignment.js'
+import { isMacCaptureSidecar, isVoiceLabel } from '../lib/mac-voice-labels.js'
 
 function requireMacRecordingForSave(sessionId: string, expectedChunkCount: unknown): void {
   try {
@@ -2033,6 +2035,32 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
+    // 6.93.0: a Mac recording voice assigned to an EXISTING voice profile. Opt-in per
+    // request (`assignVoiceProfile: true`); without it a Mac rename stays text only.
+    // Planned BEFORE anything is written: the preview shows exactly what would be added,
+    // and a confirm that would add nothing is refused with the rename unapplied.
+    let macAssign: MacAssignPlan | null = null
+    if (req.body?.assignVoiceProfile === true) {
+      let parsedForAssign: Record<string, unknown> = {}
+      try {
+        const doc = JSON.parse(sidecarRaw) as unknown
+        if (doc && typeof doc === 'object' && !Array.isArray(doc)) parsedForAssign = doc as Record<string, unknown>
+      } catch { /* relabelSidecarJson already parsed it */ }
+      if (!isMacCaptureSidecar(parsedForAssign, sessionId)) {
+        res.status(400).json({ error: 'assignVoiceProfile applies to Mac recordings only; a glasses rename already trains the profile', reason: 'not_mac_capture' })
+        return
+      }
+      if (!isVoiceLabel(from)) {
+        res.status(400).json({ error: 'Only an unnamed Voice N can be assigned to a voice profile', reason: 'not_a_voice_label' })
+        return
+      }
+      macAssign = planMacVoiceAssignment({ sessionId, from, to, changed: plan.value.changed, sidecar: parsedForAssign })
+      if (macAssign.report.skipped === 'unknown_profile') {
+        res.status(404).json({ error: `"${to}" is not an enrolled voice profile, so nothing was changed`, reason: 'unknown_profile', enrolment: macAssign.report })
+        return
+      }
+    }
+
     // The markdown may only be rewritten when EVERY chunk carrying `from` is
     // covered. Its turn segmentation does not match the sidecar's, so a partial
     // relabel has no way to know which turns the selected chunks became.
@@ -2074,13 +2102,30 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     if (req.body?.dryRun === true || req.body?.confirm !== true) {
       res.status(req.body?.dryRun === true ? 200 : 400).json({
         ...(req.body?.dryRun === true ? {} : { error: 'confirmation required', reason: 'confirmation_required' }),
+        ...(macAssign ? { enrolment: macAssign.report } : {}),
         message: `Relabelling ${surfaces.sidecar} chunk(s) from "${from}" to "${to}" in this meeting`
+          + (macAssign
+            ? macAssign.report.skipped === null
+              ? `, and adding up to ${macAssign.report.enrolled} voice sample(s) to ${to}'s profile`
+              : ', with no voice samples added'
+            : '')
           + (preview.proseStale
             ? '. The summary and decisions still name the old speaker and are NOT rewritten — '
               + `prose refers to people by first name (${preview.proseHits.join(', ')}), `
               + 'so substituting it could rewrite a sentence about someone else.'
             : '.'),
         ...preview,
+      })
+      return
+    }
+
+    // Assigning to a profile with nothing to add is refused whole: the person asked for
+    // samples, so a rename that silently adds none is not what they confirmed.
+    if (macAssign && macAssign.report.skipped !== null) {
+      res.status(422).json({
+        error: 'No usable audio from this voice can be added to that profile, so nothing was changed',
+        reason: 'nothing_to_enrol',
+        enrolment: macAssign.report,
       })
       return
     }
@@ -2148,7 +2193,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       if (doc && typeof doc === 'object' && !Array.isArray(doc)) parsedSidecar = doc as Record<string, unknown>
     } catch { /* enrolment refuses on an unusable sidecar; the rename already landed */ }
 
-    const enrolment = enrolNamedVoice({ sessionId, from, to, changed: plan.value.changed, sidecar: parsedSidecar })
+    const enrolment = macAssign
+      ? commitMacVoiceAssignment(sessionId, macAssign)
+      : enrolNamedVoice({ sessionId, from, to, changed: plan.value.changed, sidecar: parsedSidecar })
     res.json({
       ok: true,
       correctionId: id,

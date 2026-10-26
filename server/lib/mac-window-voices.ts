@@ -22,7 +22,8 @@
 // does not feed the next window. NOT caught (QA R1): a clean hand-over at the chunk
 // boundary, a new voice alone in this chunk that the window model put on an old
 // voice's slot. The chunk alone shows one clean voice and agrees. Catching it needs
-// evidence from more than one chunk, so the window stays opt-in.
+// evidence from more than one chunk. It is a known limit now that the window is on by
+// default: a wrong NUMBER, never a wrong name, and the saved pass numbers the meeting again.
 //
 // A track is shown as `Voice N` only after clean proof in TWO distinct original
 // chunks with distinct audio (each: MAC_WINDOW_PROOF_FRAMES exclusive, purity at
@@ -38,9 +39,9 @@
 // never a profile, never enrolled or trained. No audio, embedding or probability
 // matrix is stored: only per-frame track ids for the last few chunks.
 //
-// Switch: COS_MAC_LIVE_VOICES=window (default off; see mac-voice-labels.ts). It also
+// Switch: COS_MAC_LIVE_VOICES, window by default (see mac-voice-labels.ts). It also
 // needs COS_MAC_VOICE_LABELS not off. `anchors` runs the 6.92.1 per-chunk anchors
-// instead; unset or anything else runs neither, so every live Mac chunk is `Ext`.
+// instead; `off` (also 0, false, no) runs neither, so every live Mac chunk is `Ext`.
 import { MAC_AUDIO } from './mac-recording.js'
 import { NEMOTRON_CHANNELS, NEMOTRON_FRAME_SEC } from './nemotron-cli.js'
 import { ACTIVE_THRESHOLD, type Activity } from './nemotron-segments.js'

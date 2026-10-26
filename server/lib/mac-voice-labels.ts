@@ -18,13 +18,17 @@
 // It governs ONLY the after-save pass (6.90.0) and is the master off for the live
 // paths below. An explicit `1` is the default, not an opt-in to anything live.
 //
-// Live voices (6.93.0 fix, QA B1): `Voice N` while a Mac recording is running is
-// OPT-IN, one switch with three values, default off:
-//   COS_MAC_LIVE_VOICES unset / empty / anything else  off: every live Mac chunk is
-//                       `Ext`, exactly as 6.92.0; the saved pass numbers all voices.
+// Live voices (6.93.0, on by default): `Voice N` while a Mac recording is running.
+// One switch with three modes:
+//   COS_MAC_LIVE_VOICES unset / empty / window / any value not named below  window:
+//                       the 6.93.0 window replay (bounded timeout budget, back-off
+//                       to per-chunk after two timeouts in a row). THE DEFAULT.
 //   COS_MAC_LIVE_VOICES=anchors   the 6.92.1 per-chunk acoustic anchors.
-//   COS_MAC_LIVE_VOICES=window    the 6.93.0 window replay (replaces the anchors).
+//   COS_MAC_LIVE_VOICES=off (also 0, false, no)  the opt-out: every live Mac chunk is
+//                       `Ext`, exactly as 6.92.0; the saved pass numbers all voices.
 // COS_MAC_VOICE_LABELS off also turns both live modes off.
+// Known limit: a clean hand-over between two people exactly at a chunk boundary can
+// give the new speaker the previous number (R1). It is a numbering limit, never a name.
 
 // No imports on purpose: placeholder checks are read from the speaker-review,
 // relabel and store layers, and this must never pull the Mac registry into them.
@@ -62,13 +66,15 @@ export function chunkShowsVoiceLabel(chunk: { speaker?: unknown; segments?: unkn
 export type MacLiveVoicesMode = 'off' | 'anchors' | 'window'
 
 /**
- * Which live `Voice N` path may run for a Mac chunk. Off unless COS_MAC_LIVE_VOICES
- * names one AND COS_MAC_VOICE_LABELS is not off. Read at use, like the switch above.
+ * Which live `Voice N` path may run for a Mac chunk. `window` unless COS_MAC_LIVE_VOICES
+ * says `off` (or 0, false, no) or `anchors`, or COS_MAC_VOICE_LABELS is off. Read at use,
+ * like the switch above, so turning it off needs no managed restart.
  */
 export function macLiveVoicesMode(env: NodeJS.ProcessEnv = process.env): MacLiveVoicesMode {
   if (!macVoiceLabelsEnabled(env)) return 'off'
   const raw = String(env.COS_MAC_LIVE_VOICES ?? '').trim().toLowerCase()
-  return raw === 'anchors' || raw === 'window' ? raw : 'off'
+  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'
+  return raw === 'anchors' ? 'anchors' : 'window'
 }
 
 /**

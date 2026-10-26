@@ -417,7 +417,8 @@ it('6.93.0 window replay withholds numbers on corrupt state, after earlier Voice
 // ── 6.93.0 QA B1: every new switch off is 6.92.0 for a Mac recording ──────────────
 // The same eight clean one-voice chunks would be `Voice 1` / `Voice 2` live under either opt-in.
 const TWO_VOICE_SIGNS=[1,1,-1,-1,1,-1,-1,-1] as const
-for(const labels of [undefined,'1'] as const) it('6.93.0 B1: with COS_MAC_LIVE_VOICES unset'+(labels?' and COS_MAC_VOICE_LABELS=1':'')+' live and saved labels are 6.92.0: Ext live, no anchors, no window, every voice numbered at save',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:undefined,COS_MAC_VOICE_LABELS:labels},async()=>{
+// 6.93.0 (Miles 2026-10-26): the window is ON by default. Explicit COS_MAC_LIVE_VOICES=off, or COS_MAC_VOICE_LABELS off, is the 6.92.0 parity case below.
+for(const [live,labels] of [['off',undefined],['off','1'],['0',undefined],['false',undefined],['no',undefined],[undefined,'0']] as const) it('6.93.0: with COS_MAC_LIVE_VOICES='+(live??'unset')+(labels?' and COS_MAC_VOICE_LABELS='+labels:'')+' live and saved labels are 6.92.0: Ext live, no anchors, no window, every voice numbered at save',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:live,COS_MAC_VOICE_LABELS:labels},async()=>{
  await start();const nemotron=await import('../lib/nemotron-live.js'),embeddings=await import('../lib/speaker-embeddings.js')
  const diarize=vi.mocked(nemotron.nemotronLive.diarize)
  diarize.mockImplementation(async()=>({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any))
@@ -444,23 +445,41 @@ for(const labels of [undefined,'1'] as const) it('6.93.0 B1: with COS_MAC_LIVE_V
   expect(outcome).toMatchObject({status:'applied',unnamed:true,voices:2,mapped:{0:'Voice 1',1:'Voice 2'}})
  }finally{rmSync(audioCopy,{recursive:true,force:true})}
 }))
-it('6.93.0 B1: with the live switch off a profile that happens to be called Voice 1 is a name at its real similarity, exactly as 6.92.0',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:undefined,COS_MAC_VOICE_LABELS:undefined},async()=>{
+it('6.93.0 B1: with the live switch explicitly off a profile that happens to be called Voice 1 is a name at its real similarity, exactly as 6.92.0',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:'off',COS_MAC_VOICE_LABELS:undefined},async()=>{
  await start();const nemotron=await import('../lib/nemotron-live.js')
  vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
  identify.mockReturnValueOnce({speaker:'Voice 1',similarity:0.94,embedding:new Float32Array(192).fill(0.1)})
  expect((await call('/mac-recording/'+id+'/chunks?chunkIndex=0&elapsed=6000',wavOf(6,()=>400))).json).toMatchObject({speaker:'Voice 1',segments:[{speaker:'Voice 1',similarity:0.94}]})
 }))
-it('6.93.0 B1: COS_MAC_LIVE_VOICES is the only live switch: anchors and window are each opt-in, an unknown value is off, COS_MAC_VOICE_LABELS=0 turns both off',async()=>{
+it('6.93.0: COS_MAC_LIVE_VOICES is the only live switch: anchors still names a voice, explicit off and COS_MAC_VOICE_LABELS=0 turn both off',async()=>{
  await start();const nemotron=await import('../lib/nemotron-live.js')
  vi.mocked(nemotron.nemotronLive.diarize).mockResolvedValue({ok:true,run:{...activityOf(6,[[3,0,6]]),wallMs:20,loadSec:0,audioSec:6}} as any)
- const spoken:string[]=[];let i=0
- for(const [live,labels] of [['anchors',undefined],['yes',undefined],['anchors','0'],['',undefined]] as const) await withLiveVoices({COS_MAC_LIVE_VOICES:live,COS_MAC_VOICE_LABELS:labels},async()=>{
-  for(let n=0;n<2;n++,i++) spoken.push((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400+i))).json.speaker)
+ const spoken:Record<string,string[]>={};let i=0
+ for(const [key,live,labels] of [['anchors','anchors',undefined],['off','off',undefined],['anchors-labels-off','anchors','0']] as const) await withLiveVoices({COS_MAC_LIVE_VOICES:live,COS_MAC_VOICE_LABELS:labels},async()=>{
+  spoken[key]=[]
+  for(let n=0;n<2;n++,i++) spoken[key].push((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400+i))).json.speaker)
  })
- // Only the first pair (anchors) can name a voice; "yes", COS_MAC_VOICE_LABELS=0 and an empty value stay Ext.
- expect(spoken.slice(2)).toEqual(Array(6).fill('Ext'))
- expect(spoken[1]).toBe('Voice 1')
+ // The anchors name a voice on their second chunk; explicit off and COS_MAC_VOICE_LABELS=0 stay Ext.
+ expect(spoken.anchors[1]).toBe('Voice 1')
+ expect(spoken.off).toEqual(['Ext','Ext']);expect(spoken['anchors-labels-off']).toEqual(['Ext','Ext'])
+ // Unset and an unrecognised value take the default window path (the next test drives it; earlier Voice labels from the anchors phase would withhold it here).
 })
+it('6.93.0: with the switch unset the window path runs and a voice keeps its number across chunks',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:undefined,COS_MAC_VOICE_LABELS:undefined},async()=>{
+ await start();const nemotron=await import('../lib/nemotron-live.js')
+ const paths:string[]=[]
+ vi.mocked(nemotron.nemotronLive.diarize).mockImplementation(async(path:string)=>{
+  paths.push(path);const samples=(readFileSync(path).length-44)/2;const frames=1+Math.floor((samples+112)/160);const probs=new Float32Array(frames*8).fill(0.02)
+  for(let f=0;f<frames-1;f++)probs[f*8+3]=0.9
+  return {ok:true,run:{frames,probs,wallMs:20,loadSec:0,audioSec:samples/16000}} as any
+ })
+ const spoken:string[]=[]
+ for(let n=0;n<3;n++) spoken.push((await call('/mac-recording/'+id+'/chunks?chunkIndex='+n+'&elapsed='+((n+1)*6000),wavOf(6,()=>400+n))).json.speaker)
+ expect(spoken).toEqual(['Ext','Voice 1','Voice 1'])
+ expect(paths.filter(p=>p.endsWith('/window.wav')).length).toBe(3)
+ const session=JSON.parse(readFileSync(join(root,'active-sessions',id+'.json'),'utf8'))
+ expect(session.macWindowVoices).toMatchObject({version:1,kind:'window',voices:1});expect(session.macLiveVoices).toBeUndefined()
+ expect(enroll).not.toHaveBeenCalled()
+}))
 
 // ── 6.93.0 QA N9: G2 and phone are untouched by the Mac window ────────────────────
 it('6.93.0: a G2 chunk never takes the Mac window path, even with COS_MAC_LIVE_VOICES=window',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:'window',COS_MAC_VOICE_LABELS:undefined},async()=>{

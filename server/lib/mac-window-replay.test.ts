@@ -236,7 +236,9 @@ describe('withheld state is never silent (QA W8) and never throws (QA N3)', () =
   })
 
   it('health: the switch state, and the window counts only while the window path is on', () => {
-    expect(macLiveVoicesSnapshot({})).toEqual({ mode: 'off' })
+    expect(macLiveVoicesSnapshot({}).mode).toBe('window') // on by default (6.93.0)
+    expect(macLiveVoicesSnapshot({})).toHaveProperty('window')
+    expect(macLiveVoicesSnapshot({ COS_MAC_LIVE_VOICES: 'off' })).toEqual({ mode: 'off' })
     expect(macLiveVoicesSnapshot({ COS_MAC_LIVE_VOICES: 'anchors' })).toEqual({ mode: 'anchors' })
     expect(macLiveVoicesSnapshot({ COS_MAC_LIVE_VOICES: 'window', COS_MAC_VOICE_LABELS: '0' })).toEqual({ mode: 'off' })
     expect(macLiveVoicesSnapshot({ COS_MAC_LIVE_VOICES: 'window' }).window).toMatchObject({ runs: 0, fallbacks: { timeout: 0, geometry: 0 } })

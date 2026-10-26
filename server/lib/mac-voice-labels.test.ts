@@ -28,18 +28,24 @@ describe('the label', () => {
     for (const off of ['0', 'false', 'off', 'no', 'FALSE', ' Off ']) expect(macVoiceLabelsEnabled({ COS_MAC_VOICE_LABELS: off })).toBe(false)
   })
 
-  it('live Voice N is opt-in (6.93.0 QA B1): off unless COS_MAC_LIVE_VOICES names anchors or window', () => {
-    expect(macLiveVoicesMode({})).toBe('off')
-    // COS_MAC_VOICE_LABELS=1 is the default for the after-save pass; it is not an opt-in to anything live.
-    expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: '1' })).toBe('off')
-    expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: 'on' })).toBe('off')
-    for (const raw of ['', '1', 'true', 'on', 'yes', 'both', 'windows', 'anchor']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: raw })).toBe('off')
-    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'anchors' })).toBe('anchors')
-    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: ' Anchors ' })).toBe('anchors')
+  it('live Voice N is ON by default (6.93.0): window unless COS_MAC_LIVE_VOICES says anchors or off', () => {
+    // Unset is the default: the 6.93.0 window replay.
+    expect(macLiveVoicesMode({})).toBe('window')
+    expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: '1' })).toBe('window')
+    expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: 'on' })).toBe('window')
+    // An empty or unrecognised value is the default too, never a silent opt-out.
+    for (const raw of ['', ' ', '1', 'true', 'on', 'yes', 'both', 'windows', 'anchor']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: raw })).toBe('window')
     expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'window' })).toBe('window')
     expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'WINDOW', COS_MAC_VOICE_LABELS: '1' })).toBe('window')
-    // COS_MAC_VOICE_LABELS off wins over both.
-    for (const mode of ['anchors', 'window']) for (const off of ['0', 'false', 'off', 'no']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: mode, COS_MAC_VOICE_LABELS: off })).toBe('off')
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'anchors' })).toBe('anchors')
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: ' Anchors ' })).toBe('anchors')
+    // The opt-out: explicit off (0, false, no too) is 6.92.0 for a Mac recording.
+    for (const off of ['off', 'OFF', ' Off ', '0', 'false', 'FALSE', 'no']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: off })).toBe('off')
+    // COS_MAC_VOICE_LABELS off wins over every live value, including the default.
+    for (const off of ['0', 'false', 'off', 'no']) {
+      expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: off })).toBe('off')
+      for (const mode of ['anchors', 'window', '']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: mode, COS_MAC_VOICE_LABELS: off })).toBe('off')
+    }
   })
 
   it('chunkShowsVoiceLabel: a chunk or any turn showing Voice N, and a malformed segments field is never thrown on (QA N3)', () => {
