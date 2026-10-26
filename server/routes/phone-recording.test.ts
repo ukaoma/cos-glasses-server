@@ -277,3 +277,17 @@ it('does not route phone remote Stop through the G2 glasses claim/display bus',a
  }
  expect(stream.getSessionChunks(id)).toHaveLength(1)
 })
+
+it('preserves explicit anonymous G2 upload, Stop and save without treating its policy as phone provenance',async()=>{
+ const sessionId='meeting_explicit_anonymous',{writeSpeakerPolicy,readSpeakerPolicy}=await import('../lib/meeting-speaker-policy.js')
+ writeSpeakerPolicy(sessionId,'anonymous',readSpeakerPolicy(sessionId).revision)
+ const legacy=await call('/transcribe-stream?'+new URLSearchParams({sessionId,chunkIndex:'0',speaker:'Ext',elapsed:'0',speakerPolicy:'anonymous'}),wavOf(6,()=>400))
+ expect(legacy.status).toBe(200);expect(legacy.json.speaker).toBe('Ext');expect(legacy.json.sourceType).not.toBe('iphone_microphone')
+ expect((await call('/meeting/sessions/'+sessionId+'/stop',{finalChunkIndex:0,serverInstanceId:'server-mac',speakerPolicy:'anonymous'})).status).toBe(202)
+ const saved=await call('/meeting/save',{sessionId,speakerPolicy:'anonymous'});expect(saved.status).toBe(200);expect(saved.json.saved).toBe(true);expect(saved.json.sourceType).not.toBe('iphone_microphone')
+ expect(existsSync(join(root,'phone-recordings',sessionId+'.json'))).toBe(false);expect(whisper).toHaveBeenCalled()
+ const {assertPhoneProvenance}=await import('../lib/phone-recording.js')
+ expect(assertPhoneProvenance('mac_abcdef01-2345-6789-abcd-0123456789ab',{sourceType:'mac_system_audio',speakerPolicy:'anonymous'})).toBe(false)
+ expect(()=>assertPhoneProvenance(id,{speakerPolicy:'anonymous'})).toThrow()
+ expect(()=>assertPhoneProvenance(sessionId,source)).toThrow()
+})

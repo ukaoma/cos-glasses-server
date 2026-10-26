@@ -22,7 +22,8 @@ export function phoneMicrophoneMeetingsCapability(serverInstanceId: string | nul
 /** Phone IDs and the new source marker must agree, including on rejected/replayed requests. */
 export function assertPhoneProvenance(id: string, fields: Record<string, unknown> | undefined): boolean {
   const phone = id.startsWith('phone_')
-  if (!phone && fields?.sourceType !== PHONE_SOURCE_TYPE && fields?.speakerPolicy !== 'anonymous') return false
+  // Anonymous is a shared speaker policy, not evidence of a phone source.
+  if (!phone && fields?.sourceType !== PHONE_SOURCE_TYPE) return false
   if (!PHONE_CAPTURE_ID.test(id) || fields?.sourceType !== PHONE_SOURCE_TYPE || fields?.speakerPolicy !== 'anonymous') throw macError(400, 'phone_provenance_required', 'iPhone microphone capture requires its phone ID, source type and anonymous policy')
   return true
 }
