@@ -1,3 +1,11 @@
+## 6.92.1 - Conservative anonymous voice continuity for live Mac meetings
+
+- Successful live Nemotron tracks can carry capture-local Voice N labels after two independent clean audio observations agree. Uncertain, overlapping or short evidence remains Ext. The existing named-identity threshold, ASR choices and feature settings are unchanged.
+- Private continuity anchors survive capture recovery, reject duplicate audio as independent support, and never enter the global profile store or public DTOs.
+- Finalization preserves established live voice numbers and withholds channel mappings that contradict mixed live turns. Mac meeting-only renames still do not train profiles.
+- Synthetic real-model qualification distinguishes two known voices at unchanged thresholds; six short natural archived chunks remained unidentified. This is conservative continuity, not a general speaker-accuracy guarantee.
+- Companion and old Control DTOs remain compatible. Control 0.5.350 displays distinct anonymous participant badges. No iPhone microphone capability is advertised by this release.
+
 ## 6.92.0 - Dictation parity, Wave A (server): breakers that tell an abort from a failure, bounded prompt edit, a filler pass that leaves other languages and paths alone
 
 2026-10-25, plan r3 ("dictation parity", Wave A; pairs with COS Control 0.5.345). Zero `claude -p` calls: every
