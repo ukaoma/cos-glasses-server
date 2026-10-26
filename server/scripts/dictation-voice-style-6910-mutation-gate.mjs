@@ -68,8 +68,7 @@ const mutations = [
   ['guard-i-forms-not-names', G, "const NOT_NAMES = new Set(['i', \"i'm\", \"i'll\", ", "const NOT_NAMES = new Set(['i', ", "\"I'm\" and \"I'll\" are not names"],
   ['guard-dictionary-names', G, "        if (phrase.every((w, k) => fold(tokens[i + k].low) === w)) items.push({ kind: 'name', key: phrase.join(' '), pos: i })", '        if (false) items.push({ kind: \'name\', key: phrase.join(\' \'), pos: i })', "name: a dictionary term in lowercase"],
   ['guard-english-skips-names', G, '  const withNames = looksEnglish(cleaned)', '  const withNames = true', "a dictation that is not English skips the name check, never the others"],
-  // 6.92.0: looksEnglish tightened for short text; the long-text ratio now starts the function.
-  ['guard-short-text-is-english', G, '  if (words.length >= 12) return', '  if (words.length >= 2) return', "a dictation that is not English skips the name check, never the others"],
+  ['guard-short-text-is-english', G, '  if (words.length < 12) return true', '  if (words.length < 2) return true', "a dictation that is not English skips the name check, never the others"],
   // Meaning guard: comparison and exemptions.
   ['guard-joined-numbers', G, '    if (parts && !inKeys.get(\'number\')!.has(key)) { parts.forEach(p => keptByJoin.add(p)); joinedOut.add(key) }', '    if (false) { parts!.forEach(p => keptByJoin.add(p)); joinedOut.add(key) }', "a year spoken in pairs"],
   ['guard-name-joined-word', G, '    if (outWords.some(w => outJoined.has(w) && w.includes(flat))) return true\n', '', "a name joined into one word"],

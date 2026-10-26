@@ -27,7 +27,7 @@ type Pipeline = typeof import('./dictation-polish-pipeline.js')
 let pipeline: Pipeline
 
 /** The model call: `fail` throws like a CLI error; `abort` aborts the request after `modelMs` of model time. */
-type Step = { kind: 'ok' } | { kind: 'fail' } | { kind: 'abort'; modelMs: number }
+type Step = { kind: 'ok' } | { kind: 'fail' } | { kind: 'abort'; modelMs: number; killMs?: number }
 let script: Step[] = []
 let controller: AbortController
 
@@ -46,6 +46,8 @@ async function load() {
       if (step.kind === 'abort') {
         vi.setSystemTime(Date.now() + step.modelMs)
         controller.abort()
+        // The reject lands only after the provider process is terminated (killMs later).
+        if (step.killMs) vi.setSystemTime(Date.now() + step.killMs)
         throw new Error('Auto-clean aborted')
       }
       return `${text} Polished.`
@@ -133,6 +135,13 @@ describe('6.92.0 dictation polish breakers', () => {
     expect(pipeline.polishBreakerOpen('sonnet', 'message')).toBe(false)
     await run([{ kind: 'abort', modelMs: 4_000 }, { kind: 'abort', modelMs: 4_000 }, { kind: 'abort', modelMs: 4_000 }, { kind: 'abort', modelMs: 4_000 }])
     expect(pipeline.polishBreakerOpen('sonnet', 'message')).toBe(true)
+  })
+
+  it('the model time is stamped at the abort, not when the reject lands after the kill', async () => {
+    const lateReject: Step = { kind: 'abort', modelMs: 2_500, killMs: 3_000 }
+    await run([lateReject, lateReject, lateReject, lateReject])
+    expect(pipeline.polishBreakerOpen('sonnet', 'message')).toBe(false)
+    expect(audit.mock.calls.map(([row]) => row.durationMs)).toEqual([2_500, 2_500, 2_500, 2_500])
   })
 
   it('COS_DICTATION_SLOW_BREAKER_ABORTS and _MS set the threshold and the open time', async () => {

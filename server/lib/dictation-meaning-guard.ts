@@ -386,6 +386,16 @@ function levenshtein(a: string, b: string): number {
   return row[b.length]
 }
 
+/** Mostly English? A short text is assumed to be; a long one with few English function words is not. */
+export function looksEnglish(text: string): boolean {
+  const letters = text.match(/\p{L}/gu) ?? []
+  if (letters.length && letters.filter(ch => !/[A-Za-z]/.test(ch)).length / letters.length > 0.2) return false
+  const words = tokenize(text).map(t => t.low)
+  // A short command ("ask Marco about the deck") has few function words; only a longer text can tell.
+  if (words.length < 12) return true
+  return words.filter(w => ENGLISH.has(w)).length / words.length >= 0.12
+}
+
 /**
  * 6.92.0: common function words of German, Portuguese, Spanish, French and Dutch that are not
  * English words, not name particles or place words ("de", "la", "von", "Los", "Las") and not words
@@ -402,23 +412,30 @@ const FOREIGN = new Set(['der', 'das', 'ein', 'eine', 'einen', 'einem', 'einer',
   'het', 'een', 'ik', 'niet', 'wij', 'voor'])
 /** 6.92.0: an English filler sound that is also a word in German, Portuguese, Danish, Norwegian or Dutch. */
 const AMBIGUOUS_FILLERS = new Set(['um', 'er'])
+/**
+ * 6.92.0 QA: English evidence beyond the function words, for short replies and commands ("um yes",
+ * "er no", "um thanks Dana", "um sounds good", "um Tuesday", "um 5 pm works"). None is a word of
+ * the languages above.
+ */
+const SHORT_REPLY_ENGLISH = new Set(['yes', 'no', 'yeah', 'yep', 'ok', 'okay', 'sure', 'thanks', 'thank', 'please', 'sorry', 'hi', 'hey',
+  'hello', 'good', 'great', 'fine', 'cool', 'done', 'right', 'maybe', 'sounds', 'call', 'send', 'tell', 'ask', 'am', 'pm',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december'])
 
 /**
- * Mostly English? A long text needs English function words (12% of its words). 6.92.0 tightens a
- * short one (under 12 words), which was always assumed English: with a foreign function word in it,
- * English function words must outnumber the foreign ones ("Wir treffen uns um 5 Uhr" is not
- * English); with "um" or "er" said inline (no pause after it), at least one English function word
- * must be there ("Comprei um carro", "Er kommt morgen." are not; "ship it er tomorrow" is). With
- * neither, a short command is still English ("ping Marco re pricing"), so its names are checked.
+ * 6.92.0: the filler pass's language gate (dictation-fillers.ts stripFillersIfEnglish), separate
+ * from looksEnglish, which the meaning guard keeps exactly as 6.91.1 had it. Not English when
+ * looksEnglish says so (a long text with few English function words, or mostly non-Latin letters).
+ * Under 12 words: with a foreign function word in it, English words (function words or the short
+ * reply list) must outnumber the foreign ones ("Wir treffen uns um 5 Uhr" is not English); with "um"
+ * or "er" said inline (no pause after it), at least one English word must be there ("Comprei um
+ * carro" and "Er kommt morgen." keep their um and er; "um yes" and "ship it er tomorrow" do not).
  */
-export function looksEnglish(text: string): boolean {
-  const letters = text.match(/\p{L}/gu) ?? []
-  if (letters.length && letters.filter(ch => !/[A-Za-z]/.test(ch)).length / letters.length > 0.2) return false
+export function fillerTextLooksEnglish(text: string): boolean {
+  if (!looksEnglish(text)) return false
   const tokens = tokenize(text)
-  const words = tokens.map(t => t.low)
-  if (words.length >= 12) return words.filter(w => ENGLISH.has(w)).length / words.length >= 0.12
-  // A short command ("ask Marco about the deck") has few function words; only evidence decides.
-  const english = words.filter(w => ENGLISH.has(w)).length
+  if (tokens.length > 11) return true
+  const english = tokens.filter(t => ENGLISH.has(t.low) || SHORT_REPLY_ENGLISH.has(t.low)).length
   const foreign = tokens.filter(t => FOREIGN.has(t.low) && !(t.raw.length > 1 && t.raw === t.raw.toUpperCase())).length
   if (foreign > 0) return english > foreign
   const inlineAmbiguous = tokens.some((t, i) => AMBIGUOUS_FILLERS.has(t.low) && i + 1 < tokens.length && !tokens[i + 1].pause)

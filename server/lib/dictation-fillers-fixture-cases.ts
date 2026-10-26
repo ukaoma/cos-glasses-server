@@ -3,7 +3,9 @@
  * filler pass and COS Control's port. `want` is written by hand, so the generated fixture is checked
  * against an expectation, never only against the function that produced it.
  *
- *   scope "both"    the token rules alone (stripDisfluencies). Control's port must match 100%.
+ *   scope "both"    the token rules alone (stripDisfluencies). Control's port must match 100%. The
+ *                   "language" rows among them (short English replies) also hold through the
+ *                   server's language gate, and must through Control's.
  *   scope "server"  the server's outbound filler step (stripFillersIfEnglish: the language gate,
  *                   then the token rules). The gate is the server's own detector, so these rows are
  *                   not a parity target; Control gates with its own detector.
@@ -155,8 +157,31 @@ const LANGUAGE: Array<[string, string]> = [
   ['Ask Marco um about the pricing', 'Ask Marco about the pricing'],
   ['um the MIT report', 'the MIT report'],
   ['Send the deck to Dana, um, por favor', 'Send the deck to Dana, por favor'],
-  // The known cost: an inline um with no English function word beside it is kept.
-  ['um 5 pm works', 'um 5 pm works'],
+  // A time said in English ("pm") is English evidence.
+  ['um 5 pm works', '5 pm works'],
+  // 6.92.0 QA: short English replies and commands lose their filler, as in 6.91.1.
+  ['um okay', 'okay'],
+  ['um sure', 'sure'],
+  ['um yeah', 'yeah'],
+  ['um no', 'no'],
+  ['um call Dana', 'call Dana'],
+  ['um Tuesday', 'Tuesday'],
+  ['ok um send', 'ok send'],
+  ['Um, thanks', 'Thanks'],
+  // The known cost: an inline um with no English word beside it is kept.
+  ['um Dana', 'um Dana'],
+]
+
+/**
+ * 6.92.0 QA: short English replies, scope "both". COS Control's port must give the same answer
+ * through its own gate and token rules; the server's gate and token rules both give it (pinned).
+ */
+const SHORT_REPLIES: Array<[string, string]> = [
+  ['um yes', 'yes'],
+  ['Um yes.', 'Yes.'],
+  ['er no', 'no'],
+  ['um thanks Dana', 'thanks Dana'],
+  ['um sounds good', 'sounds good'],
 ]
 
 const pad = (n: number) => String(n).padStart(3, '0')
@@ -164,6 +189,7 @@ export const FILLER_FIXTURE_CASES: FillerFixtureCase[] = [
   ...ENGLISH.map(([input, want], i) => ({ id: `en${pad(i + 1)}`, scope: 'both' as const, group: 'english' as const, input, want })),
   ...EXEMPTION.map(([input, want], i) => ({ id: `ex${pad(i + 1)}`, scope: 'both' as const, group: 'exemption' as const, input, want })),
   ...LANGUAGE.map(([input, want], i) => ({ id: `la${pad(i + 1)}`, scope: 'server' as const, group: 'language' as const, input, want })),
+  ...SHORT_REPLIES.map(([input, want], i) => ({ id: `sr${pad(i + 1)}`, scope: 'both' as const, group: 'language' as const, input, want })),
 ]
 
 /** The server function a row's scope names. */

@@ -131,6 +131,14 @@ describe('6.91.0 meaning guard: self-corrections', () => {
   })
 })
 
+describe('6.92.0 meaning guard: the filler gate never weakens the name check', () => {
+  it('"um thanks Dana" polished to "Thanks." is refused for the name; "merci Dana" and "gracias Marco" too, as in 6.91.1', () => {
+    expect(meaningGuardProblem('um thanks Dana', 'Thanks.')?.kind).toBe('name')
+    expect(meaningGuardProblem('merci Dana', 'Merci.')?.kind).toBe('name')
+    expect(meaningGuardProblem('gracias Marco', 'Gracias.')?.kind).toBe('name')
+  })
+})
+
 describe('6.91.0 meaning guard: language, switch, robustness', () => {
   it('a dictation that is not English skips the name check, never the others', () => {
     expect(looksEnglish('the plan is ready and we ship it on Friday')).toBe(true)

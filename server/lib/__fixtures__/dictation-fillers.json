@@ -898,7 +898,105 @@
       "scope": "server",
       "group": "language",
       "input": "um 5 pm works",
-      "expected": "um 5 pm works"
+      "expected": "5 pm works"
+    },
+    {
+      "id": "la024",
+      "scope": "server",
+      "group": "language",
+      "input": "um okay",
+      "expected": "okay"
+    },
+    {
+      "id": "la025",
+      "scope": "server",
+      "group": "language",
+      "input": "um sure",
+      "expected": "sure"
+    },
+    {
+      "id": "la026",
+      "scope": "server",
+      "group": "language",
+      "input": "um yeah",
+      "expected": "yeah"
+    },
+    {
+      "id": "la027",
+      "scope": "server",
+      "group": "language",
+      "input": "um no",
+      "expected": "no"
+    },
+    {
+      "id": "la028",
+      "scope": "server",
+      "group": "language",
+      "input": "um call Dana",
+      "expected": "call Dana"
+    },
+    {
+      "id": "la029",
+      "scope": "server",
+      "group": "language",
+      "input": "um Tuesday",
+      "expected": "Tuesday"
+    },
+    {
+      "id": "la030",
+      "scope": "server",
+      "group": "language",
+      "input": "ok um send",
+      "expected": "ok send"
+    },
+    {
+      "id": "la031",
+      "scope": "server",
+      "group": "language",
+      "input": "Um, thanks",
+      "expected": "Thanks"
+    },
+    {
+      "id": "la032",
+      "scope": "server",
+      "group": "language",
+      "input": "um Dana",
+      "expected": "um Dana"
+    },
+    {
+      "id": "sr001",
+      "scope": "both",
+      "group": "language",
+      "input": "um yes",
+      "expected": "yes"
+    },
+    {
+      "id": "sr002",
+      "scope": "both",
+      "group": "language",
+      "input": "Um yes.",
+      "expected": "Yes."
+    },
+    {
+      "id": "sr003",
+      "scope": "both",
+      "group": "language",
+      "input": "er no",
+      "expected": "no"
+    },
+    {
+      "id": "sr004",
+      "scope": "both",
+      "group": "language",
+      "input": "um thanks Dana",
+      "expected": "thanks Dana"
+    },
+    {
+      "id": "sr005",
+      "scope": "both",
+      "group": "language",
+      "input": "um sounds good",
+      "expected": "sounds good"
     }
   ]
 }

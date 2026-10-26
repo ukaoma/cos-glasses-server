@@ -71,7 +71,13 @@ const mutations = [
   ['runner-scratch-cwd', CT, 'env: claudeTextEnv(binary.path), cwd: workspace,', 'env: claudeTextEnv(binary.path), cwd: process.cwd(),', 'runs the binary with that argv in a scratch directory'],
   ['runner-keeps-env', CT, '  const out = { ...env }\n  delete out.CLAUDECODE', "  const out = { ...env }\n  delete out.ANTHROPIC_API_KEY\n  delete out.CLAUDECODE", 'keeps the environment as spawnClaudeText did'],
   // A-W10: the language gate.
-  ['gate-wired', F, '  return looksEnglish(text) ? stripDisfluencies(text) : text', '  return stripDisfluencies(text)', 'the server filler step is gated'],
+  ['gate-wired', F, '  return fillerTextLooksEnglish(text) ? stripDisfluencies(text) : text', '  return stripDisfluencies(text)', 'the server filler step is gated'],
+  // QA fix: the filler gate has its own function; the meaning guard keeps 6.91.1's looksEnglish.
+  ['gate-short-replies', G, '  const english = tokens.filter(t => ENGLISH.has(t.low) || SHORT_REPLY_ENGLISH.has(t.low)).length', '  const english = tokens.filter(t => ENGLISH.has(t.low)).length', 'a short English reply or command counts as English evidence'],
+  ['gate-long-text-ratio', G, '  if (!looksEnglish(text)) return false\n', '', 'a short text with foreign function words is not English'],
+  ['guard-names-keep-6911-language', G, '  const withNames = looksEnglish(cleaned)', '  const withNames = fillerTextLooksEnglish(cleaned)', '"um thanks Dana" polished to "Thanks." is refused for the name'],
+  // QA S1: the abort's model time is stamped in the listener.
+  ['abort-time-stamped', PL, '      const durationMs = (abortedAt ?? Date.now()) - startedAt', '      const durationMs = Date.now() - startedAt', 'the model time is stamped at the abort'],
   // Forces the gate open (an English word ahead of the text, sliced off after): the pipeline must call the gated step.
   ['gate-in-pipeline', PL, 'cleaned = stripFillersIfEnglish(cleaned)', "cleaned = stripFillersIfEnglish('the ' + cleaned).slice(4)", 'a German or Portuguese message reaches the model as said'],
   ['gate-foreign-words', G, '  if (foreign > 0) return english > foreign', '  if (false) return english > foreign', 'a short text with foreign function words is not English'],

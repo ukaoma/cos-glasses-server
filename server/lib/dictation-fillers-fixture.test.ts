@@ -5,11 +5,11 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { FILLER_FIXTURE_CASES, fillerFixtureOutput, renderFillerFixture } from './dictation-fillers-fixture-cases.js'
 import { stripDisfluencies, stripFillersIfEnglish } from './dictation-fillers.js'
-import { looksEnglish } from './dictation-meaning-guard.js'
+import { fillerTextLooksEnglish, looksEnglish } from './dictation-meaning-guard.js'
 
 const FIXTURE = new URL('./__fixtures__/dictation-fillers.json', import.meta.url)
 /** Change only by regenerating the fixture; COS Control pins the same value. */
-const FIXTURE_SHA256 = '56b5f60c49bf5e4d2ae3774496fd19e837aeb82217c2359cf541c4c614ef52b4'
+const FIXTURE_SHA256 = 'a531d0a99b4661dedcde5d81dbaa304eae73f916eb30e2efd7589e1e0a71de55'
 
 describe('6.92.0 canonical filler fixture', () => {
   it('the fixture on disk is exactly what the server functions generate, and its sha256 is pinned', () => {
@@ -26,13 +26,13 @@ describe('6.92.0 canonical filler fixture', () => {
     for (const row of rows) expect(row.expected, row.id).toBe(FILLER_FIXTURE_CASES.find(c => c.id === row.id)!.want)
   })
 
-  it('scopes and counts are pinned: 103 "both" rows for the port, 23 language rows for the server gate', () => {
+  it('scopes and counts are pinned: 108 "both" rows for the port, 32 language rows for the server gate', () => {
     const count = (scope: string) => FILLER_FIXTURE_CASES.filter(c => c.scope === scope).length
-    expect([count('both'), count('server'), count('client')]).toEqual([103, 23, 0])
+    expect([count('both'), count('server'), count('client')]).toEqual([108, 32, 0])
     expect(FILLER_FIXTURE_CASES.filter(c => c.group === 'exemption').length).toBe(25)
     expect(new Set(FILLER_FIXTURE_CASES.map(c => c.id)).size).toBe(FILLER_FIXTURE_CASES.length)
     // F1b: the exemption and non-English rows, 40 in all (25 exemptions, 15 not English).
-    const notEnglish = FILLER_FIXTURE_CASES.filter(c => c.group === 'language' && c.input === c.want && c.input !== 'um 5 pm works')
+    const notEnglish = FILLER_FIXTURE_CASES.filter(c => c.group === 'language' && c.input === c.want && c.input !== 'um Dana')
     expect(notEnglish.length).toBe(15)
   })
 })
@@ -63,13 +63,36 @@ describe('6.92.0 filler pass: token exemptions (F1b)', () => {
 // F1b: the language gate. "um" and "er" are words in German, Portuguese, Danish, Norwegian and Dutch.
 describe('6.92.0 filler pass: language gate (F1b)', () => {
   it('a short text with foreign function words is not English, unless English ones outnumber them', () => {
-    expect(looksEnglish('Wir treffen uns um 5 Uhr')).toBe(false)
+    expect(fillerTextLooksEnglish('Wir treffen uns um 5 Uhr')).toBe(false)
     // No um or er at all: only the foreign words decide.
-    expect(looksEnglish('der Plan ist fertig')).toBe(false)
+    expect(fillerTextLooksEnglish('der Plan ist fertig')).toBe(false)
+    // A long text is judged by looksEnglish's function-word ratio, as the meaning guard judges it.
+    expect(fillerTextLooksEnglish('der Plan ist fertig und wir liefern ihn am Freitag mit Marco aus um 5')).toBe(false)
     expect(stripFillersIfEnglish('Wir treffen uns um 5 Uhr')).toBe('Wir treffen uns um 5 Uhr')
-    expect(looksEnglish('Send the deck to Dana, um, por favor')).toBe(true)
+    expect(fillerTextLooksEnglish('Send the deck to Dana, um, por favor')).toBe(true)
     // An all-caps token is an acronym, never foreign evidence.
-    expect(looksEnglish('Send the MIT deck')).toBe(true)
+    expect(fillerTextLooksEnglish('Send the MIT deck')).toBe(true)
+  })
+
+  it('a short English reply or command counts as English evidence (QA: 6.91.1 stripped these)', () => {
+    for (const [input, want] of [['um yes', 'yes'], ['Um yes.', 'Yes.'], ['er no', 'no'], ['um okay', 'okay'], ['um thanks Dana', 'thanks Dana'],
+      ['um sounds good', 'sounds good'], ['um call Dana', 'call Dana'], ['um Tuesday', 'Tuesday'], ['ok um send', 'ok send'], ['um 5 pm works', '5 pm works']]) {
+      expect(stripFillersIfEnglish(input), input).toBe(want)
+    }
+    // The Portuguese and German refusals stand.
+    expect(stripFillersIfEnglish('Comprei um carro')).toBe('Comprei um carro')
+    expect(stripFillersIfEnglish('Er kommt morgen.')).toBe('Er kommt morgen.')
+  })
+
+  it('the short-reply language rows of scope "both" hold through the server gate too', () => {
+    const rows = FILLER_FIXTURE_CASES.filter(c => c.scope === 'both' && c.group === 'language')
+    expect(rows).toHaveLength(5)
+    for (const c of rows) expect(stripFillersIfEnglish(c.input), c.id).toBe(c.want)
+  })
+
+  it('the meaning guard keeps 6.91.1\'s looksEnglish: a short text is English', () => {
+    expect(looksEnglish('der Plan ist fertig')).toBe(true)
+    expect(looksEnglish('um thanks Dana')).toBe(true)
   })
 
   it('an inline um or er needs an English function word beside it', () => {

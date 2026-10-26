@@ -301,6 +301,11 @@ export async function polishOutboundDictation(
   // 6.79.2: a warm process started at key press answers without the CLI's start-up cost.
   const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null
   let prewarm: PrewarmOutcome | undefined = opts.prewarmToken ? 'missed' : undefined
+  // 6.92.0 QA S1: the model time of an abort is stamped when the abort happens, not in the catch,
+  // which runs only after the provider process is terminated (up to 4 s on the cold path).
+  let abortedAt: number | null = null
+  const onAbort = () => { abortedAt = Date.now() }
+  opts.signal?.addEventListener('abort', onAbort, { once: true })
   try {
     let polished: string | null = null
     if (warmEntry) {
@@ -341,7 +346,7 @@ export async function polishOutboundDictation(
       // 6.92.0: the client went away (Control stopped waiting, the phone closed the request). Not a
       // CLI failure: only the slow breaker hears it, and only after real model time. The audit row
       // says `aborted`, codes only; the answer (nobody reads it) keeps PolishOutcome's three values.
-      const durationMs = Date.now() - startedAt
+      const durationMs = (abortedAt ?? Date.now()) - startedAt
       if (durationMs >= SLOW_ABORT_MIN_MODEL_MS) breakers.slow.recordFailure()
       logTokenAudit({
         source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: 0,
@@ -359,5 +364,7 @@ export async function polishOutboundDictation(
       console.warn(`[prompt-draft] auto-clean failed (glossary-only): ${err?.message ?? err}`)
     }
     return { text: cleaned, polishSkipped: 'failed', ...(prewarm ? { prewarm } : {}), ...used }
+  } finally {
+    opts.signal?.removeEventListener('abort', onAbort)
   }
 }

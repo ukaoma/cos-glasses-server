@@ -34,7 +34,7 @@
  * morgen"). This function stays the pure token rules that the canonical fixture
  * (__fixtures__/dictation-fillers.json, scope "both") pins for COS Control's port.
  */
-import { looksEnglish } from './dictation-meaning-guard.js'
+import { fillerTextLooksEnglish } from './dictation-meaning-guard.js'
 
 
 const FILLER = /(?<![\p{L}\p{N}'’-])(um+|uhm|uh+|erm?|ah+|hm+|mm+|mhm)(?![\p{L}\p{N}'’-])/giu
@@ -137,10 +137,10 @@ export function stripDisfluencies(text: string): string {
 
 /**
  * 6.92.0: the server's outbound filler step. The token rules (stripDisfluencies) run only when the
- * text is mostly English (dictation-meaning-guard.ts looksEnglish), so "Wir treffen uns um 5 Uhr",
+ * text is mostly English (dictation-meaning-guard.ts fillerTextLooksEnglish), so "Wir treffen uns um 5 Uhr",
  * "Comprei um carro" and "Er kommt morgen." go out as said. COS Control gates its own port with
  * its own language detector; that is why the fixture tags these rows scope "server".
  */
 export function stripFillersIfEnglish(text: string): string {
-  return looksEnglish(text) ? stripDisfluencies(text) : text
+  return fillerTextLooksEnglish(text) ? stripDisfluencies(text) : text
 }
