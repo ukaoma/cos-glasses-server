@@ -12,7 +12,7 @@ Identity policy is pinned when the audio chunk is accepted, before any asynchron
 
 Every new canonical transcript chunk stores `speakerPolicy`; raw chunk persistence and both saved-sidecar projections retain it. Legacy chunks without markers mean Standard. Malformed markers fail closed. Batch transcription splits windows at policy transitions, preserves strict confidence gates, and withholds names for distant or defensively mixed strict windows. Progressive HQ checkpoint reuse rejects a changed identity policy.
 
-The final Nemotron pass builds meeting-wide channel/name mappings. It therefore skips any capture containing strict-policy chunk markers (`speaker_policy` reason), preserving the existing markdown and sidecar byte-for-byte. It does not reuse an earlier Standard identity to relabel later anonymous speech. Text transcription and the normal batch quality gate continue.
+The final named-identity Nemotron pass builds meeting-wide channel/name mappings. It skips non-Mac captures containing strict-policy chunk markers (`speaker_policy` reason), preserving the existing markdown and sidecar byte-for-byte. Registered Mac captures use the separate anonymous final pass described below; it does not turn anonymous labels into named identities or reuse earlier Standard identities. Text transcription and the normal batch quality gate continue.
 
 ## Canary evidence
 
