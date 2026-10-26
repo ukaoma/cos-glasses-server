@@ -120,7 +120,7 @@ export function noteMacWindowWithheld(sessionId: string, reason: MacWindowWithhe
 }
 
 export interface MacLiveVoicesSnapshot {
-  /** Which live Voice path is on: off (default), anchors (6.92.1) or window (6.93.0). */
+  /** Which live Voice path is on: window (6.93.0, the default), anchors (6.92.1) or off (COS_MAC_LIVE_VOICES=off). */
   mode: MacLiveVoicesMode
   /** Totals since this server started; present only while the window path is on. */
   window?: {

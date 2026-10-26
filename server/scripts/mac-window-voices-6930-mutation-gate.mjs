@@ -30,10 +30,17 @@ const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] ==
 
 const mutations = [
   // ── Switch (QA B1: with every switch off a Mac recording is 6.92.0) ──
-  m('live-default-anchors', VL, ["return raw === 'anchors' || raw === 'window' ? raw : 'off'", "return raw === 'anchors' || raw === 'window' ? raw : 'anchors'"], [...LABELS_T, ...MAC_T]),
-  m('live-default-window', VL, ["return raw === 'anchors' || raw === 'window' ? raw : 'off'", "return raw === 'anchors' || raw === 'window' ? raw : 'window'"], [...LABELS_T, ...UNIT_T, ...MAC_T]),
+  // Default ON (Miles 2026-10-26): unset is the window; only an explicit off (0, false, no) or COS_MAC_VOICE_LABELS off is 6.92.0.
+  m('live-default-off', VL, ["return raw === 'anchors' ? 'anchors' : 'window'", "return raw === 'anchors' ? 'anchors' : 'off'"], [...LABELS_T, ...UNIT_T, ...REPLAY_T, ...MAC_T]),
+  m('live-default-anchors', VL, ["return raw === 'anchors' ? 'anchors' : 'window'", "return raw === 'anchors' ? 'anchors' : 'anchors'"], [...LABELS_T, ...UNIT_T, ...MAC_T]),
+  m('anchors-unselectable', VL, ["return raw === 'anchors' ? 'anchors' : 'window'", "return 'window'"], [...LABELS_T, ...UNIT_T]),
+  m('explicit-off-ignored', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", ''], [...LABELS_T, ...UNIT_T, ...MAC_T]),
+  m('explicit-off-word-dropped', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", "  if (['0', 'false', 'no'].includes(raw)) return 'off'\n"], [...LABELS_T, ...MAC_T]),
+  m('explicit-zero-dropped', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", "  if (['false', 'off', 'no'].includes(raw)) return 'off'\n"], LABELS_T),
+  m('explicit-false-dropped', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", "  if (['0', 'off', 'no'].includes(raw)) return 'off'\n"], LABELS_T),
+  m('explicit-no-dropped', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", "  if (['0', 'false', 'off'].includes(raw)) return 'off'\n"], LABELS_T),
+  m('explicit-off-case-sensitive', VL, ["const raw = String(env.COS_MAC_LIVE_VOICES ?? '').trim().toLowerCase()", "const raw = String(env.COS_MAC_LIVE_VOICES ?? '').trim()"], LABELS_T),
   m('voice-labels-off-not-master', VL, ["  if (!macVoiceLabelsEnabled(env)) return 'off'\n  const raw", '  const raw'], [...LABELS_T, ...UNIT_T, ...MAC_T]),
-  m('explicit-labels-one-enables-anchors', VL, ["return raw === 'anchors' || raw === 'window' ? raw : 'off'", "return raw === 'anchors' || raw === 'window' ? raw : String(env.COS_MAC_VOICE_LABELS ?? '').trim() === '1' ? 'anchors' : 'off'"], [...LABELS_T, ...MAC_T]),
   m('voice-shape-unchecked', VL, ['return Array.isArray(segments) && segments.some(', 'return segments.some('], LABELS_T),
   m('anchors-run-when-off', TS, ["macLiveVoicesMode() === 'anchors' ? {", "macLiveVoicesMode() !== 'window' ? {"], MAC_T),
   m('anchors-run-in-window-mode', TS, ["macLiveVoicesMode() === 'anchors' ? {", "macLiveVoicesMode() !== 'off' ? {"], MAC_T),

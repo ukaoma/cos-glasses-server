@@ -93,10 +93,12 @@ describe('health capability contract', () => {
   }, 20_000)
 
   // 6.93.0 W8: Miles can see whether COS_MAC_LIVE_VOICES took effect without reading a label. Public route: a mode and counts, nothing else.
-  it('advertises the live Mac voice switch, off by default, and counts only while the window path is on', async () => {
+  it('advertises the live Mac voice switch, window by default, and counts only while the window path is on', async () => {
     const saved = { live: process.env.COS_MAC_LIVE_VOICES, labels: process.env.COS_MAC_VOICE_LABELS }
     try {
       delete process.env.COS_MAC_LIVE_VOICES; delete process.env.COS_MAC_VOICE_LABELS
+      expect((await (await fetch(`${base}/api/health`)).json() as any).capabilities.macLiveVoices.mode).toBe('window') // on by default (6.93.0)
+      process.env.COS_MAC_LIVE_VOICES = 'off'
       expect((await (await fetch(`${base}/api/health`)).json() as any).capabilities.macLiveVoices).toEqual({ mode: 'off' })
       process.env.COS_MAC_LIVE_VOICES = 'anchors'
       expect((await (await fetch(`${base}/api/health`)).json() as any).capabilities.macLiveVoices).toEqual({ mode: 'anchors' })

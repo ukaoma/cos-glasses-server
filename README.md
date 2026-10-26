@@ -656,14 +656,16 @@ and counts only, never a speaker name, path or error text; those stay in
 
 ### Live Mac voices (6.92.1, 6.93.0)
 
-A live Mac recording shows every chunk as one `Ext` speaker until it is saved, as in
-6.92.0. Live `Voice N` is **off by default** and has one switch,
-`COS_MAC_LIVE_VOICES`, with two opt-in values. Both are anonymous: a `Voice N` is
-never a name, never enrolled and never trained, and renaming one is text only.
+Live `Voice N` is **on by default** (6.93.0) and has one switch,
+`COS_MAC_LIVE_VOICES`: unset or `window` is the default, `anchors` is the older path and
+`off` (also `0`, `false`, `no`) gives every live chunk as one `Ext` speaker until it is
+saved, as in 6.92.0. A `Voice N` is anonymous: never a name, never enrolled and never
+trained on its own. Renaming one is text only unless you assign it to an existing voice
+profile (see below).
 
-- **`COS_MAC_LIVE_VOICES=anchors`** (6.92.1 path): a chunk reads `Voice N` after two
+- **`COS_MAC_LIVE_VOICES=anchors`** (6.92.1 path, opt-in): a chunk reads `Voice N` after two
   independent clean observations agree. On natural audio this rarely fires.
-- **`COS_MAC_LIVE_VOICES=window`** (6.93.0 path, replaces the anchors): each chunk is
+- **`COS_MAC_LIVE_VOICES=window`** or unset (6.93.0 path, the default, replaces the anchors): each chunk is
   diarized inside the last five durable chunks (30 s) with the same pinned CLI, with a
   timeout sized from the window. A carried voice is used only when the chunk diarized
   alone agrees, which catches a merge of two voices speaking in the same chunk but not
@@ -673,8 +675,18 @@ never a name, never enrolled and never trained, and renaming one is text only.
 - **`COS_MAC_VOICE_LABELS`** (on by default) governs the after-save pass; `0` also
   turns both live modes off. Setting it to `1` is the default, not an opt-in.
 
-Set `COS_MAC_LIVE_VOICES` in `~/.cos-glasses/.env` and restart when nothing is
-recording. `GET /api/health` reports `capabilities.macLiveVoices.mode`
+Known limit: a clean hand-over between two people exactly at a chunk boundary can give
+the new speaker the previous number. Set `COS_MAC_LIVE_VOICES=off` in
+`~/.cos-glasses/.env` and restart when nothing is recording to turn it off.
+
+**Assigning a Mac voice to a voice profile (6.93.0).** `POST /api/meeting/:sessionId/relabel`
+with `assignVoiceProfile: true` adds a Mac recording `Voice N`'s audio to an already
+enrolled person. A Mac recording banks no embeddings, so the server extracts them from the
+retained chunk audio (7 days), keeps only that voice, and applies the same coherence and
+diversity gates as a glasses rename. A dry run (`dryRun: true`) reports the person, the most
+samples it would add and the similarity to the stored profile, and writes nothing; a
+confirm that would add nothing is refused whole (`422 nothing_to_enrol`). Without the flag a
+Mac rename is text only. `GET /api/health` reports `capabilities.macLiveVoices.mode`
 (`off`, `anchors` or `window`) and, for `window`, counts only.
 
 The saved meeting is relabeled by the whole-meeting pass. Live numbers are kept;
