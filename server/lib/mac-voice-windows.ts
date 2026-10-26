@@ -38,6 +38,9 @@ const valid = (s: MacVoiceSource): boolean => !!s && typeof s === 'object' && !A
   && Number.isSafeInteger(s.startSample + s.samples)
 const total = (refs: MacVoiceSource[]) => refs.reduce((sum, s) => sum + s.samples, 0)
 function contiguous(refs: MacVoiceSource[]): boolean {
+  // Array.every/map skip holes. Require an own, valid descriptor at every
+  // index before reading neighbours or trusting serialized evidence.
+  for (let i=0; i<refs.length; i++) if (!Object.hasOwn(refs, i) || !valid(refs[i])) return false
   return refs.every((s, i) => valid(s) && (i === 0 || (s.chunkIndex === refs[i-1].chunkIndex + 1
     && s.startSample === refs[i-1].startSample + refs[i-1].samples)))
     && new Set(refs.map(s => s.audioSha256)).size === refs.length
@@ -100,7 +103,10 @@ export function planMacVoiceWindow(captureId: string, prior: MacVoiceWindowState
   return { status: 'ready', next, window, ...(reset ? { reset } : {}) }
 }
 /** Different combined hashes are insufficient: overlapping raw inputs, reused
- * audio under another index, and another capture are never independent support. */
+ * audio under another index, and another capture are never independent support.
+ * Compare against each anchor's ORIGINAL window, retained for its lifetime.
+ * The planner only retains a bounded recent history; readiness or disjointness
+ * from a more recent unrelated window cannot establish anchor confirmation. */
 export function independentMacVoiceWindows(a: MacVoiceWindow, b: MacVoiceWindow): boolean {
   return validWindow(a) && validWindow(b) && a.captureId === b.captureId
     && !a.sources.some(x => b.sources.some(y => x.chunkIndex === y.chunkIndex || x.audioSha256 === y.audioSha256

@@ -35,6 +35,31 @@ describe('candidate Mac temporal windows (no quality claim or live wiring)',()=>
   expect(independent(window(0),{...window(2),sources:[{...ref(2),startSample:0},{...ref(3),startSample:96000}]})).toBe(false)
   expect(independent(window(0),{...window(2),captureId:id.replace(/1$/,'2')})).toBe(false)
  })
+ it('rejects sparse pending, previous, window and materialization arrays without throwing',()=>{
+  const first=next(undefined,ref(0)),ready=next(first.next,ref(1))
+  for(const sparse of [new Array(1),[ref(0),,ref(2)]]){
+   expect(plan(id,{...first.next,pending:sparse} as any,ref(1))).toEqual({status:'rejected',reason:'invalid_state'})
+   expect(plan(id,{...ready.next,previous:sparse} as any,ref(2))).toEqual({status:'rejected',reason:'invalid_state'})
+   expect(independent({captureId:id,sources:sparse} as any,window(2))).toBe(false)
+   expect(assemble({captureId:id,sources:sparse} as any,[])).toBeNull()
+  }
+  const a=wav(0),b=wav(1),w={captureId:id,sources:[a.source,b.source]}
+  expect(assemble(w,new Array(2))).toBeNull()
+ })
+ it('cannot confirm replayed audio by replacing an anchor original with intervening window provenance',()=>{
+  const first=next(next(undefined,ref(0)).next,ref(1))
+  const original=structuredClone(first.window!)
+  const intervening=next(next(first.next,ref(2)).next,ref(3))
+  expect(independent(original,intervening.window!)).toBe(true)
+  const replayFirst={...ref(4),audioSha256:ref(0).audioSha256},replaySecond={...ref(5),audioSha256:ref(1).audioSha256}
+  const replay=next(next(intervening.next,replayFirst).next,replaySecond)
+  // A bounded planner can materialize this older replay. Only the anchor's
+  // retained original evidence, rather than the latest window, rejects it.
+  expect(replay.status).toBe('ready')
+  expect(independent(intervening.window!,replay.window!)).toBe(true)
+  expect(independent(original,replay.window!)).toBe(false)
+  expect(original).toEqual(first.window)
+ })
  it('fails closed on corrupt reloads and keeps a fixed descriptor/PCM budget over long captures',()=>{
   const first=next(undefined,ref(0));expect(plan(id,undefined,{...ref(0),audio:Buffer.alloc(8)} as any)).toEqual({status:'rejected',reason:'invalid_source'});for(const corrupt of [{...first.next,extra:'not metadata'},{...first.next,version:2},{...first.next,pending:[ref(0),ref(1)]},{...first.next,last:{...ref(0),samples:NaN}},{...first.next,captureId:'another'}])expect(plan(id,corrupt as any,ref(1))).toEqual({status:'rejected',reason:'invalid_state'})
   let state:MacVoiceWindowState|undefined
