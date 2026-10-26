@@ -416,14 +416,18 @@ export function relabelBatchSegments(
       const original = typeof word.originalSpeaker === 'string' ? word.originalSpeaker : word.speaker
       const start = batchWordToTimeline(segment, Number(word.start), timeline)
       const end = batchWordToTimeline(segment, Number(word.end), timeline)
-      let name: string | null = null
-      if (start) {
+      // Existing live anonymous turns are established capture evidence. A
+      // meeting-wide channel may refine unknown speech, never overwrite them.
+      const live = start ? liveSpeakerAt(start.window.chunk, start.inChunk, owner) : null
+      let name: string | null = isVoiceLabel(live) ? live : null
+      if (name === null && start) {
         const channel = channelForSpan(a, start.at, Math.max(start.at, end?.window === start.window ? end.at : start.at + 0.01))
         if (channel !== null && map.has(channel)) { name = map.get(channel)!; stats.viaChannel++ }
       }
+      if (isVoiceLabel(live)) stats.kept++
       if (name === null) {
         stats.kept++
-        name = (start && liveSpeakerAt(start.window.chunk, start.inChunk, owner))
+        name = live
           ?? (start ? guardOwnerName(original, start.window.chunk.similarity, start.window.chunk, owner) : original)
       }
       if (name !== word.speaker) stats.relabeled++
@@ -477,15 +481,20 @@ export function relabelStreamingChunks(
     const times = streamingTokenTimes(chunk, tokens, window, a)
     const base = guardOwnerName(typeof chunk.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk.speaker, chunk.similarity, chunk, owner)
     const labels: string[] = []
+    const liveTokens = (chunk.segments ?? []).flatMap(segment => splitTokens(String(segment.text ?? '')).map(token => ({ token, speaker: segment.speaker })))
+    const exactLive = liveTokens.length === tokens.length && liveTokens.every((part, i) => part.token === tokens[i]) ? liveTokens : null
     let carry: string | null = null
     for (let i = 0; i < tokens.length; i++) {
-      if (!isWordToken(tokens[i]) || !times) { labels.push(carry ?? liveSpeakerAt(chunk, 0, owner) ?? base); continue }
+      const established = exactLive?.[i].speaker
+      if (!isWordToken(tokens[i]) || !times) { labels.push(isVoiceLabel(established) ? established! : carry ?? liveSpeakerAt(chunk, 0, owner) ?? base); continue }
       stats.total++
       const span = times[i]
       const channel = channelForSpan(a, window.start + span.start, window.start + Math.max(span.end, span.start + 0.01))
       let name: string
-      if (channel !== null && map.has(channel)) { name = map.get(channel)!; stats.viaChannel++ }
-      else { name = liveSpeakerAt(chunk, span.start, owner) ?? base; stats.kept++ }
+      const live = isVoiceLabel(established) ? established! : liveSpeakerAt(chunk, span.start, owner)
+      if (isVoiceLabel(live)) { name = live!; stats.kept++ }
+      else if (channel !== null && map.has(channel)) { name = map.get(channel)!; stats.viaChannel++ }
+      else { name = live ?? base; stats.kept++ }
       labels.push(name)
       carry = name
     }
@@ -1143,10 +1152,33 @@ export function mapChannelsToLiveVoices(windows: TimelineWindow[], a: Activity):
     const labels = votes.get(channel) ?? new Set<string>()
     labels.add(chunk.speaker); votes.set(channel,labels)
   }
+  // A mixed live chunk cannot establish a crosswalk, but every established
+  // turn in it CAN contradict one. A final diarizer that merges two live
+  // voices into one channel must not transfer one voice's label to the other.
+  const claims = new Map<number, Set<string>>()
+  for (const window of windows) for (const segment of window.chunk.segments ?? []) {
+    if (!isVoiceLabel(segment.speaker)) continue
+    const timed = Number.isFinite(segment.startSec) && Number.isFinite(segment.endSec)
+      && Number(segment.startSec) >= 0 && Number(segment.endSec) <= window.end - window.start
+      && Number(segment.endSec) > Number(segment.startSec)
+    const start = timed ? window.start + Math.max(0, Number(segment.startSec)) : window.start
+    const end = timed ? Math.min(window.end, window.start + Number(segment.endSec)) : window.end
+    const [f0,f1] = frameRange(a, start, end)
+    for (let channel = 0; channel < NEMOTRON_CHANNELS; channel++) {
+      let overlaps = false
+      for (let f=f0;f<f1;f++) if (isActive(a,f,channel)) { overlaps = true; break }
+      if (!overlaps) continue
+      const labels = claims.get(channel) ?? new Set<string>()
+      labels.add(segment.speaker); claims.set(channel, labels)
+    }
+  }
   const proposed = [...votes].filter(([,labels])=>labels.size===1).map(([channel,labels])=>[channel,[...labels][0]] as const)
   // Count claims on conflicting channels too. Dropping a contradictory channel
   // must not make its label appear exclusive to a different channel.
-  return new Map(proposed.filter(([,label])=>[...votes.values()].filter(labels=>labels.has(label)).length===1))
+  return new Map(proposed.filter(([channel,label]) =>
+    [...votes.values()].filter(labels=>labels.has(label)).length===1
+      && [...(claims.get(channel) ?? [])].every(claim => claim === label)
+      && [...claims.values()].filter(labels=>labels.has(label)).length===1))
 }
 
 /** `Voice 1` for the first channel, `Voice 2` for the next, and so on. */

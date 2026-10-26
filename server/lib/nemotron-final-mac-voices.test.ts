@@ -18,6 +18,8 @@ import {
   mapChannelsToLiveVoices,
   numberVoices,
   readTranscriptSection,
+  relabelBatchSegments,
+  relabelStreamingChunks,
   runNemotronFinalPass,
   sameWords,
   unnamedVoicesEligible,
@@ -317,7 +319,10 @@ describe('final pass preserves live anonymous label numbers', () => {
     const f=macMeeting({batch,mutate:(chunk,i)=>{
       const label=[0,1,4,5].includes(i)?'Voice 2':'Voice 1'
       chunk.speaker=label
-      chunk.segments=[{speaker:label,text:chunk.text,startSec:0,endSec:6,similarity:0}]
+      chunk.segments=i===5 ? [
+        {speaker:'Voice 2',text:wordsOf(i).slice(0,2).join(' '),startSec:0,endSec:2.5,similarity:0},
+        {speaker:'Voice 1',text:wordsOf(i).slice(2).join(' '),startSec:2.5,endSec:6,similarity:0},
+      ] : [{speaker:label,text:chunk.text,startSec:0,endSec:6,similarity:0}]
     }})
     const outcome=await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))
     expect(outcome).toMatchObject({status:'applied',mapped:{0:'Voice 2',1:'Voice 1'}})
@@ -354,5 +359,40 @@ describe('final pass preserves live anonymous label numbers', () => {
     expect(await runNemotronFinalPass(opts(f,fakeRun(TWO_VOICES)))).toMatchObject({status:'applied',mapped:{0:'Voice 3'},voices:1})
     const after=readTranscriptSection(readFileSync(f.meetingPath,'utf8'))!
     expect(after).toContain('[Voice 3]');expect(after).not.toContain('[Voice 1]');expect(after).not.toContain('[Voice 2]')
+  })
+})
+
+
+describe('final channels cannot erase established voices in mixed live chunks', () => {
+  it.each([true,false])('withholds a merged channel crosswalk and preserves both live voices (batch=%s)',async batch=>{
+    const f=macMeeting({batch,mutate:(chunk,i)=>{
+      chunk.speaker='Voice 1'
+      chunk.segments=i<4 ? [{speaker:'Voice 1',text:chunk.text,startSec:0,endSec:6,similarity:0}] : [
+        {speaker:'Voice 1',text:wordsOf(i).slice(0,2).join(' '),startSec:0,endSec:3,similarity:0},
+        {speaker:'Voice 2',text:wordsOf(i).slice(2).join(' '),startSec:3,endSec:6,similarity:0},
+      ]
+    }})
+    const doc=JSON.parse(f.sidecarText),timeline=await buildMeetingTimeline(doc.chunkEntries,f.audioDir)
+    const merged=activityOf(49,[[0,0,48]])
+    expect([...mapChannelsToLiveVoices(timeline.windows,merged)]).toEqual([])
+    // Corrupt/out-of-bounds timing cannot erase a contradictory established
+    // voice. Its whole chunk is held instead of trusting that broken interval.
+    const uncertain=timeline.windows.map(w=>({...w,chunk:{...w.chunk,segments:w.chunk.segments?.map(s=>s.speaker==='Voice 2'?{...s,startSec:-2,endSec:-1}:s)}}))
+    expect([...mapChannelsToLiveVoices(uncertain,merged)]).toEqual([])
+    // Defensive projection also protects local turns if a caller supplies an
+    // unsafe map directly, independent of the crosswalk's own refusal.
+    const unsafe=new Map([[0,'Voice 1']])
+    if(batch){
+      const projected=relabelBatchSegments(doc.batchSegments,timeline,merged,unsafe)
+      const words=projected.segments.flatMap(s=>s.speakerWords)
+      expect(words.find(w=>w.word==='charlie4')?.speaker).toBe('Voice 2')
+      expect(words.find(w=>w.word==='delta7')?.speaker).toBe('Voice 2')
+    }else{
+      const projected=relabelStreamingChunks(timeline,merged,unsafe)
+      expect(projected.finals.get(4)?.segments.map(s=>[s.speaker,s.text])).toEqual([['Voice 1',wordsOf(4).slice(0,2).join(' ')],['Voice 2',wordsOf(4).slice(2).join(' ')]])
+      expect(projected.finals.get(7)?.segments.map(s=>s.speaker)).toEqual(['Voice 1','Voice 2'])
+    }
+    expect(await runNemotronFinalPass(opts(f,fakeRun([[0,0,48]])))).toMatchObject({status:'skipped',reason:'voices_unconfident'})
+    unchanged(f)
   })
 })
