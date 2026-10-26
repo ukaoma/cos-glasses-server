@@ -1,3 +1,4 @@
+import { readPhoneRecording, PHONE_SOURCE_TYPE } from './phone-recording.js'
 // Quarantine for unsaved meeting audio.
 //
 // Until 6.19.0 the session-audio purge (boot sweep + 60s interval) DELETED any
@@ -54,6 +55,8 @@ export const DISCARDED_RETENTION_MS = 24 * 60 * 60 * 1000
 export interface QuarantineReceipt { outcome: 'no_speech'; discarded: true; chunkFiles?: number; note: string }
 
 export interface UnsavedCapture {
+  sourceType?: typeof PHONE_SOURCE_TYPE
+  provenanceState?: 'admitted' | 'unverified'
   sessionId: string
   dirName: string
   quarantinedAt: string | null
@@ -250,8 +253,14 @@ export function listUnsavedCaptures(
     const manifest = readManifest(dirPath)
     const atMs = quarantinedAtMs(dirPath, manifest)
     const ownRetentionMs = effectiveRetentionMs(manifest, retentionMs)
+    const sessionId = manifest?.sessionId ?? dir.replace(/\.\d+$/, '')
+    let phoneSource: { sourceType?: typeof PHONE_SOURCE_TYPE; provenanceState?: 'admitted' | 'unverified' } = {}
+    if (sessionId.startsWith('phone_')) {
+      try { phoneSource = readPhoneRecording(sessionId) ? { sourceType: PHONE_SOURCE_TYPE, provenanceState: 'admitted' } : { provenanceState: 'unverified' } } catch { phoneSource = { provenanceState: 'unverified' } }
+    }
     captures.push({
-      sessionId: manifest?.sessionId ?? dir.replace(/\.\d+$/, ''),
+      sessionId,
+      ...phoneSource,
       dirName: dir,
       quarantinedAt: atMs != null ? new Date(atMs).toISOString() : null,
       ageHours: atMs != null ? Math.round(((Date.now() - atMs) / 3_600_000) * 10) / 10 : null,

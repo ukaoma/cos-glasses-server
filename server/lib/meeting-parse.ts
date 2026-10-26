@@ -134,7 +134,7 @@ export function parseMeeting(content: string, filename: string, month: string): 
     // codebase, disagreeing with each other.
     domainAbbr: domainAbbreviation(domain),
     source: parseField(content, 'Source'),
-    ...(parseField(content, 'Capture source') === 'mac_system_audio' ? { sourceType: 'mac_system_audio' as const } : {}),
+    ...(['mac_system_audio', 'iphone_microphone'].includes(parseField(content, 'Capture source')) ? { sourceType: parseField(content, 'Capture source') as 'mac_system_audio' | 'iphone_microphone' } : {}),
     duration,
     ...(parseDurationMinutes(duration) !== undefined ? { durationMinutes: parseDurationMinutes(duration) } : {}),
     month,

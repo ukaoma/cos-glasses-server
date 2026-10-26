@@ -1,3 +1,4 @@
+import { PHONE_CAPTURE_ID } from './phone-recording.js'
 import { readMacRecording } from './mac-recording.js'
 /**
  * Meeting context keys (6.64.0): the ids COS Control files a meeting's dropped files under.
@@ -12,6 +13,7 @@ import { readMacRecording } from './mac-recording.js'
  *   - `g2:<sessionId>` from its `.g2-chunks.json` sidecar (the speaker system's key; moves with every G2 rename);
  *   - `ff:<id>` from its `.fireflies.json` sidecar;
  *   - `mac:<captureId>` from an admitted Mac source and its saved sourceType;
+ *   - `phone:<captureId>` from an admitted iPhone microphone source;
  *   - `g2:<id>` for every `<!-- g2-session -->` the file declares, which is how a merged meeting also shows the files of
  *     the capture it absorbed.
  * Measured 2026-10-06: 649 of 656 meetings from August to October carry at least one.
@@ -25,7 +27,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpat
 import { dirname, join } from 'node:path'
 
 /** A key as Control stores it. The id part is the server's own marker grammar (`G2_SESSION_MARKER`). */
-export const MEETING_CONTEXT_KEY = /^(?:g2|ff|mac):[A-Za-z0-9:_-]{3,96}$/
+export const MEETING_CONTEXT_KEY = /^(?:(?:ff|mac):[A-Za-z0-9:_-]{3,96}|g2:(?!phone_)[A-Za-z0-9:_-]{3,96}|phone:phone_(?:[0-9]{13}_)?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/
 const SOURCE_ID = /^[A-Za-z0-9:_-]{3,96}$/
 
 const SIDECAR_HEAD_BYTES = 4096
@@ -102,7 +104,8 @@ export function meetingContextKeys(sources: { g2SessionId?: string; firefliesId?
   const keys: string[] = []
   const add = (prefix: 'g2' | 'ff' | 'mac', id: string | undefined) => {
     if (!id || !SOURCE_ID.test(id)) return
-    const actualPrefix = prefix === 'g2' && (sources.sourceType === 'mac_system_audio' || readMacRecording(id)) ? 'mac' : prefix
+    if (prefix === 'g2' && (id.startsWith('phone_') || sources.sourceType === 'iphone_microphone') && (!PHONE_CAPTURE_ID.test(id) || sources.sourceType !== 'iphone_microphone')) return
+    const actualPrefix = prefix === 'g2' && sources.sourceType === 'iphone_microphone' ? 'phone' : prefix === 'g2' && (sources.sourceType === 'mac_system_audio' || readMacRecording(id)) ? 'mac' : prefix
     const key = `${actualPrefix}:${id}`
     if (!keys.includes(key)) keys.push(key)
   }

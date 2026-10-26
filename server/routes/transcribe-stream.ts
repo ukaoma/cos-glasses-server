@@ -1,6 +1,7 @@
+import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, admitPhoneRecording, requirePhoneRecording, readPhoneRecording, validatePhoneWav, persistPhoneChunkReceipt } from '../lib/phone-recording.js'
 import { matchMacLiveVoice, macAnonymousProjection, type MacLiveVoiceState } from '../lib/mac-live-voices.js'
 import { isVoiceLabel, macVoiceLabelsEnabled } from '../lib/mac-voice-labels.js'
-import { MacParakeetUnavailableError, transcribeMacParakeet } from '../lib/mac-recording-asr.js'
+import { MacParakeetUnavailableError, transcribeMacParakeet, transcribePhoneParakeet } from '../lib/mac-recording-asr.js'
 import { getMeetingStore } from '../lib/meeting-store.js'
 import { appendAutonomousSaveLog, getStopIntentStore, savedChunkReplay, type StopIntent } from '../lib/meeting-stop-intents.js'
 import { MAC_AUDIO, MAC_CAPTURE_ID, closeMacRecording, persistMacChunkReceipt, macError, registerMacRecording, requireMacRecording, readMacRecording, validateMacWav } from '../lib/mac-recording.js'
@@ -288,6 +289,7 @@ export interface TranscriptChunk {
   elapsed: number    // ms since session start
   similarity: number // speaker identification confidence (0-1)
   /** Capture-time policy survives batch and final passes; absent means legacy Standard. */
+  sourceType?: typeof PHONE_SOURCE_TYPE
   speakerPolicy?: SpeakerMode
   words?: WhisperWord[] // word-level timestamps from DTW alignment
   asrProvider?: 'server-whisper' | 'server-parakeet' | 'iphone-whisperkit-beta'
@@ -396,6 +398,8 @@ interface StreamChunkCompletionResponse {
   chunkIndex: number
   elapsed: number
   sessionId: string
+  sourceType?: typeof PHONE_SOURCE_TYPE
+  speakerPolicy?: 'anonymous'
   serverInstanceId: string
   asrCompleted: true
   canonical: boolean
@@ -503,6 +507,7 @@ export const __sessionsForTests = sessions
 export const __closedSessionRecordsForTests = closedSessionRecords
 
 export interface StrandedCapture {
+  sourceType?: typeof PHONE_SOURCE_TYPE
   sessionId: string
   /** Minutes since the last ACK'd chunk. */
   idleMinutes: number
@@ -546,6 +551,7 @@ export function getStrandedCaptures(now = Date.now()): StrandedCapture[] {
     const transcriptState: StrandedCapture['transcriptState'] = stale.chunks ? 'ready' : noSpeech ? 'no_speech' : 'processing'
     return [{
       sessionId: stale.sessionId,
+      ...(PHONE_CAPTURE_ID.test(stale.sessionId) ? { sourceType: PHONE_SOURCE_TYPE } : {}),
       idleMinutes: Math.round(stale.silentForMs / 60_000),
       capturedMinutes: Math.round(
         Math.max(0, lastActivityAt - (session?.startTime ?? lastActivityAt)) / 60_000,
@@ -707,6 +713,7 @@ function persistSessionRequired(sessionId: string): void {
     }
   const data = JSON.stringify({
       sessionId,
+      ...(PHONE_CAPTURE_ID.test(sessionId) ? { captureSource: requirePhoneRecording(sessionId), sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' } : {}),
       startTime: session.startTime,
       lastActivityAt: session.lastActivityAt,
       title: session.title,
@@ -830,6 +837,12 @@ function recoverSessions(): void {
           if (target) console.warn(`[session-recovery] ${data.sessionId} was already ${terminal.kind}; moved its active-session file aside: ${target}`)
           else logStaleMoveFailure(data.sessionId, `[session-recovery] Could not move the active-session file aside for ${data.sessionId} (already ${terminal.kind}); left in place, not adopted`)
           continue
+        }
+        if (String(data.sessionId).startsWith('phone_')) {
+          const phone = requirePhoneRecording(data.sessionId)
+          if (data.sourceType !== PHONE_SOURCE_TYPE || data.speakerPolicy !== 'anonymous' || data.captureSource?.version !== 1 || data.captureSource?.sessionId !== phone.sessionId || data.captureSource?.startTime !== phone.startTime || data.captureSource?.captureId !== phone.captureId || data.captureSource?.sourceType !== PHONE_SOURCE_TYPE || data.captureSource?.speakerPolicy !== 'anonymous' || data.startTime !== phone.startTime) throw Error('Missing iPhone session provenance')
+          const held = [...(data.chunksIndexed ?? []).map((e: { c: TranscriptChunk }) => e.c), ...(data.chunks ?? [])]
+          if (held.some((c: TranscriptChunk) => c && (c.speakerPolicy !== 'anonymous' || c.speaker !== 'Ext' || c.segments?.some(seg => seg.speaker !== 'Ext')))) throw Error('Invalid iPhone anonymous transcript')
         }
         // Reconstruct the (sparse) chunk array. New format keeps original
         // indices via chunksIndexed; legacy format stored a dense `chunks`.
@@ -1367,12 +1380,13 @@ setInterval(() => {
 
 /** Get or create a transcript session */
 export function getSession(sessionId: string): TranscriptSession {
+  const phone = sessionId.startsWith('phone_') ? requirePhoneRecording(sessionId) : null
   let session = sessions.get(sessionId)
   if (!session) {
     const now = Date.now()
     session = {
       chunks: [],
-      startTime: now,
+      startTime: phone?.startTime ?? now,
       lastActivityAt: now,
       title: '',
       providerCandidates: {},
@@ -1556,6 +1570,7 @@ export function getSessionChunkEntries(sessionId: string): IndexedTranscriptChun
         chunk: {
           text: '',
           speaker: empty.speaker || 'Ext',
+          ...(PHONE_CAPTURE_ID.test(sessionId) ? { sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' as const } : {}),
           elapsed: empty.elapsed,
           similarity: 0,
           backend: empty.backend,
@@ -1592,7 +1607,7 @@ export function getSessionAsrCompletedIndices(sessionId: string): number[] {
 function scheduleSessionProgressiveHq(sessionId: string): void {
   // Progressive checkpoints are Whisper-only and may not bypass a Mac's
   // explicit Parakeet choice, even if the separate HQ canary is enabled.
-  if (MAC_CAPTURE_ID.test(sessionId) && readSttSettings().hq === 'parakeet-ultra') return
+  if ((MAC_CAPTURE_ID.test(sessionId) || PHONE_CAPTURE_ID.test(sessionId)) && readSttSettings().hq === 'parakeet-ultra') return
   // Preserve the default-off contract at the route boundary. In addition to
   // avoiding any cache work, this keeps legacy/local-first transcription
   // independent of the progressive HQ capability surface when the canary is
@@ -2171,6 +2186,7 @@ function canonicalChunkResponse(
     elapsed: existing.elapsed,
     sessionId,
     serverInstanceId,
+    ...(PHONE_CAPTURE_ID.test(sessionId) ? { sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' as const } : {}),
     asrCompleted: true,
     canonical: true,
     backend: existing.backend,
@@ -2193,6 +2209,7 @@ function emptyChunkResponse(
     chunkIndex,
     sessionId,
     serverInstanceId,
+    ...(PHONE_CAPTURE_ID.test(sessionId) ? { sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' as const } : {}),
     asrCompleted: true,
     canonical: false,
   }
@@ -2365,7 +2382,8 @@ async function processStreamChunk(opts: {
   evenHubSpeakerRole?: EvenSpeakerRoleHistogram
 }): Promise<StreamChunkCompletionResponse> {
   const { sessionId, chunkIndex, clientSpeaker, audioBuffer, candidate } = opts
-  const evenHubSpeakerRole = evenSpeakerRoleMode() === 'off' ? undefined : opts.evenHubSpeakerRole
+  const phoneCapture = sessionId.startsWith('phone_') ? requirePhoneRecording(sessionId) : null
+  const evenHubSpeakerRole = phoneCapture || evenSpeakerRoleMode() === 'off' ? undefined : opts.evenHubSpeakerRole
   if (evenHubSpeakerRole) warnEvenSpeakerRoleApplyNotImplemented()
   const tReq = performance.now()
   validateSessionId(sessionId)
@@ -2428,7 +2446,7 @@ async function processStreamChunk(opts: {
 
   // Pin identity policy at acceptance, before persistence, ASR or diarization
   // yields. A later loosening applies to the next chunk, never this audio.
-  const capturePolicy = MAC_CAPTURE_ID.test(sessionId) ? (requireMacRecording(sessionId), 'high-confidence' as const) : readSpeakerPolicy(sessionId).mode
+  const capturePolicy = phoneCapture ? 'anonymous' as const : MAC_CAPTURE_ID.test(sessionId) ? (requireMacRecording(sessionId), 'high-confidence' as const) : readSpeakerPolicy(sessionId).mode
   await persistRawSessionAudioChunk(sessionId, chunkIndex, audioBuffer)
   // Commit the received-index ledger only after the canonical raw WAV is
   // durable. A failure is typed non-2xx and a retry remains safe.
@@ -2441,7 +2459,7 @@ async function processStreamChunk(opts: {
   // the synchronous voiceprint so the process is already running while that
   // blocks. diarize() never throws; a fallback returns a reason.
   const diarizeStartedAt = performance.now()
-  const diarizePromise = nemotronLive.diarize(
+  const diarizePromise = phoneCapture ? Promise.resolve({ ok: false as const, reason: 'embedding_requested' as const }) : nemotronLive.diarize(
     resolve(SESSION_AUDIO_DIR, sessionId, `chunk_${String(chunkIndex).padStart(4, '0')}.wav`),
   )
 
@@ -2478,6 +2496,9 @@ async function processStreamChunk(opts: {
     model = candidate.model
     mode = candidate.mode
     latencyMs = candidate.latencyMs
+  } else if (phoneCapture) {
+    const result = await transcribePhoneParakeet(whisperAudio, quiet.speechSec)
+    rawText = result.text; words = result.words; backend = result.backend; asrProvider = result.asrProvider; model = result.model; latencyMs = result.latencyMs
   } else if (MAC_CAPTURE_ID.test(sessionId) && stt.hq === 'parakeet-ultra') {
     // Use the stored choice directly. effectiveStt/preview intentionally fall
     // back when unavailable, which is not an acceptable canonical Mac commit.
@@ -2538,7 +2559,7 @@ async function processStreamChunk(opts: {
   let nextMacLiveVoices = session.macLiveVoices === undefined ? undefined : structuredClone(session.macLiveVoices)
   // Nemotron separates the voices; the voiceprint names each one. Any fallback
   // keeps today's whole-chunk voiceprint label. Only chunks with text count.
-  const labels = trimmedText
+  const labels = trimmedText && !phoneCapture
     ? await resolveLiveLabels({
         diarize: diarizePromise,
         startedAt: diarizeStartedAt,
@@ -2591,7 +2612,7 @@ async function processStreamChunk(opts: {
     }
     const emptyCompletion: EmptyTranscriptCompletion = {
       text: '',
-      speaker: clientSpeaker,
+      speaker: phoneCapture ? 'Ext' : clientSpeaker,
       elapsed,
       backend,
       asrProvider,
@@ -2611,6 +2632,7 @@ async function processStreamChunk(opts: {
 
   const chunk: TranscriptChunk = {
     text: trimmedText,
+    ...(phoneCapture ? { sourceType: PHONE_SOURCE_TYPE } : {}),
     speakerPolicy: capturePolicy,
     ...(opts.audioDurationMs !== undefined ? { audioDurationMs: opts.audioDurationMs } : {}),
     speaker,
@@ -2713,6 +2735,7 @@ function sendStreamError(res: { status: (code: number) => { json: (body: unknown
  */
 transcribeStreamRouter.post('/transcribe-stream/preview', async (req, res) => {
   try {
+    if (assertPhoneProvenance(String(req.query.sessionId ?? ''), req.query)) return void res.status(204).send()
     if (!meetingTurboPreviewEnabled() || !maintenanceAdmissionsOpen()) {
       return void res.status(204).send()
     }
@@ -2864,17 +2887,28 @@ transcribeStreamRouter.post('/mac-recording/:captureId/chunks', async (req, res)
   } catch (error) { sendStreamError(res, error) } finally { if (locked) macChunkLocks.delete(id); lease?.release() }
 })
 
+const phoneChunkLocks = new Set<string>()
 transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
+  let phoneLocked: string | undefined
   let maintenanceLease: MaintenanceWorkLease | undefined
   try {
     // Reject a wrong Mac before consuming or persisting any upload bytes.
     assertPinnedServerIdentity(req.get('X-COS-Server-Instance'), req.query.serverInstanceId)
     const sessionId = (req.query.sessionId as string) || `g2_${Date.now()}`
+    const phone = assertPhoneProvenance(sessionId, req.query)
+    if (phone) {
+      requireMacPin(req)
+      if (getMeetingStore().findBySessionId(sessionId) || isSessionDeleted(sessionId)) throw macError(410, 'session_closed', 'iPhone capture is already saved or closed')
+      if (!readPhoneRecording(sessionId) && listUnsavedCaptures().some(capture => capture.sessionId === sessionId)) throw macError(409, 'phone_capture_provenance_missing', 'Quarantined audio has no admitted iPhone provenance')
+      if (req.query.eh !== undefined || (req.query.speaker !== undefined && req.query.speaker !== 'Ext')) throw macError(400, 'phone_speaker_metadata_forbidden', 'iPhone microphone has no Even/wearer speaker metadata')
+      if (phoneChunkLocks.has(sessionId)) throw macError(409, 'phone_chunk_in_progress', 'Another chunk is processing; retry after its receipt')
+      phoneChunkLocks.add(sessionId); phoneLocked = sessionId
+    }
     if (sessionId.startsWith('mac_')) throw macError(400, 'mac_transport_required', 'Use the Mac recording transport for Mac captures')
     maintenanceLease = acquireRecordingChunkLease({
       allowDuringDrain: sessions.has(sessionId),
     })
-    const chunkIndex = parseInt((req.query.chunkIndex as string) || '0', 10)
+    const chunkIndex = phone ? Number(req.query.chunkIndex) : parseInt((req.query.chunkIndex as string) || '0', 10)
     const clientSpeaker = (req.query.speaker as string) || 'Unknown'
     const clientElapsedRaw = Number(req.query.elapsed)
     const clientElapsed = Number.isFinite(clientElapsedRaw) && clientElapsedRaw >= 0
@@ -2884,12 +2918,25 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
     const startTimeOverride = Number.isFinite(startTimeRaw) && startTimeRaw > 0
       ? startTimeRaw
       : undefined
-    const audioBuffer = await readRawBody(req)
+    if (phone) {
+      validateChunkIndex(chunkIndex)
+      if (!Number.isFinite(clientElapsedRaw) || clientElapsedRaw < 0 || clientElapsedRaw > 86400000) throw macError(400, 'invalid_elapsed', 'Original iPhone chunk elapsed time required')
+    }
+    const audioBuffer = phone ? await readBoundedRawBody(req, MAC_AUDIO.maxChunkBytes) : await readRawBody(req)
+    let phoneDuration: number | undefined
+    if (phone) {
+      phoneDuration = validatePhoneWav(audioBuffer)
+      admitPhoneRecording(sessionId, req.query.startTime, requireMacPin(req))
+      persistPhoneChunkReceipt(sessionId, chunkIndex, sha256Hex(audioBuffer), clientElapsedRaw, phoneDuration)
+      const dir = resolve(SESSION_AUDIO_DIR, sessionId); ensurePrivateDirectory(dir)
+      durableAtomicWriteFileSync(resolve(dir, '_capture.json'), JSON.stringify(requirePhoneRecording(sessionId)), { mode: 0o600 })
+    }
     res.json(await processStreamChunk({
       sessionId,
       chunkIndex,
-      clientSpeaker,
+      clientSpeaker: phone ? 'Ext' : clientSpeaker,
       audioBuffer,
+      ...(phoneDuration !== undefined ? { audioDurationMs: phoneDuration } : {}),
       clientElapsed,
       startTimeOverride,
       evenHubSpeakerRole: parseEvenHubSpeakerRoleQuery(req.query.eh),
@@ -2897,6 +2944,7 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
   } catch (err: unknown) {
     sendStreamError(res, err)
   } finally {
+    if (phoneLocked) phoneChunkLocks.delete(phoneLocked)
     maintenanceLease?.release()
   }
 })
@@ -2904,6 +2952,8 @@ transcribeStreamRouter.post('/transcribe-stream', async (req, res) => {
 transcribeStreamRouter.post('/transcribe-stream/offline-sessions/start', async (req, res) => {
   let maintenanceLease: MaintenanceWorkLease | undefined
   try {
+    const phoneId = String((req.params as Record<string, string>).sessionId ?? req.body?.sessionId ?? req.query.sessionId ?? '')
+    if (phoneId.startsWith('phone_') || req.body?.sourceType === PHONE_SOURCE_TYPE || req.query.sourceType === PHONE_SOURCE_TYPE) throw macError(400, 'phone_indexed_transport_required', 'Use canonical indexed iPhone microphone uploads')
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const body = req.body ?? {}
     const sessionId = String(body.sessionId ?? '')
@@ -2931,6 +2981,8 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/start', async (
 transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/chunks', async (req, res) => {
   let maintenanceLease: MaintenanceWorkLease | undefined
   try {
+    const phoneId = String((req.params as Record<string, string>).sessionId ?? req.body?.sessionId ?? req.query.sessionId ?? '')
+    if (phoneId.startsWith('phone_') || req.body?.sourceType === PHONE_SOURCE_TYPE || req.query.sourceType === PHONE_SOURCE_TYPE) throw macError(400, 'phone_indexed_transport_required', 'Use canonical indexed iPhone microphone uploads')
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const sessionId = String(req.params.sessionId ?? '')
     validateSessionId(sessionId)
@@ -2978,6 +3030,8 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/chun
 transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/finalize', async (req, res) => {
   let maintenanceLease: MaintenanceWorkLease | undefined
   try {
+    const phoneId = String((req.params as Record<string, string>).sessionId ?? req.body?.sessionId ?? req.query.sessionId ?? '')
+    if (phoneId.startsWith('phone_') || req.body?.sourceType === PHONE_SOURCE_TYPE || req.query.sourceType === PHONE_SOURCE_TYPE) throw macError(400, 'phone_indexed_transport_required', 'Use canonical indexed iPhone microphone uploads')
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const sessionId = String(req.params.sessionId ?? '')
     validateSessionId(sessionId)
@@ -3010,6 +3064,8 @@ transcribeStreamRouter.post('/transcribe-stream/offline-sessions/:sessionId/fina
 transcribeStreamRouter.post('/transcribe-stream/candidates', async (req, res) => {
   let maintenanceLease: MaintenanceWorkLease | undefined
   try {
+    const phoneId = String((req.params as Record<string, string>).sessionId ?? req.body?.sessionId ?? req.query.sessionId ?? '')
+    if (phoneId.startsWith('phone_') || req.body?.sourceType === PHONE_SOURCE_TYPE || req.query.sourceType === PHONE_SOURCE_TYPE) throw macError(400, 'phone_indexed_transport_required', 'Use canonical indexed iPhone microphone uploads')
     if (!isIosAsrCandidateEnabled()) throw makeHttpError(403, 'iPhone ASR candidates disabled', 'iphone_asr_disabled')
     const body = req.body ?? {}
     const sessionId = String(body.sessionId ?? '')

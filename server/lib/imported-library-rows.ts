@@ -1,3 +1,4 @@
+import { PHONE_CAPTURE_ID } from './phone-recording.js'
 /**
  * Rows for the imported library, and the supersession rule (6.47.0, WS5).
  *
@@ -573,11 +574,12 @@ export function macStoreDayCounts(
 ): Array<{ date: string; count: number }> {
   const counts = new Map<string, number>()
   let heldSessions: ReadonlySet<string> | undefined
-  const sessionMatch = (id: string | undefined) => typeof id === 'string' && MAC_CAPTURE_ID.test(id) && !(heldSessions ??= held()).has(id)
+  const sessionMatch = (id: string | undefined) => typeof id === 'string' && (MAC_CAPTURE_ID.test(id) || PHONE_CAPTURE_ID.test(id)) && !(heldSessions ??= held()).has(id)
   for (const row of store.list({ month, domain, limit: MEETING_LIST_CAP_SCOPED, sessionMatch })) {
     // The day from the filename, as the store's own day dots read it (MeetingStore.listDayCounts).
     const date = /^(\d{4}-\d{2}-\d{2})_/.exec(row.filename)?.[1]
-    if (!row.sessionId || !MAC_CAPTURE_ID.test(row.sessionId) || !date) continue
+    if (!row.sessionId || !(MAC_CAPTURE_ID.test(row.sessionId) || PHONE_CAPTURE_ID.test(row.sessionId)) || !date) continue
+    if (PHONE_CAPTURE_ID.test(row.sessionId) && row.sourceType !== 'iphone_microphone') continue
     counts.set(date, (counts.get(date) ?? 0) + 1)
   }
   return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([date, count]) => ({ date, count }))

@@ -1,3 +1,5 @@
+import { requirePhoneRecording, PHONE_SOURCE_TYPE } from './phone-recording.js'
+import { getServerInstanceId } from './server-instance-id.js'
 // What the sweeper DOES about a stranded session: draft it, then promote it.
 //
 // Two actions, deliberately asymmetric.
@@ -295,10 +297,13 @@ export async function promoteStrandedSession(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 600_000)
   try {
+    const phone = sessionId.startsWith('phone_') ? requirePhoneRecording(sessionId) : null
+    const pin = phone ? getServerInstanceId() : null
+    if (phone && !pin) return { ok: false, status: 0, reason: 'server_identity_unavailable' }
     const res = await doFetch(`http://127.0.0.1:${options.port}/api/meeting/save`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Cos-Token': options.token },
-      body: JSON.stringify({ sessionId, title: STRANDED_PROMOTE_TITLE }),
+      headers: { 'Content-Type': 'application/json', 'X-Cos-Token': options.token, ...(pin ? { 'X-COS-Server-Instance': pin, 'X-COS-Recording-Origin': 'stranded-sweep' } : {}) },
+      body: JSON.stringify({ sessionId, title: STRANDED_PROMOTE_TITLE, ...(phone ? { sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' } : {}) }),
       signal: controller.signal,
     })
     let payload: Record<string, unknown> = {}

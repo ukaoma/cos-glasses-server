@@ -29,7 +29,7 @@ export const IMPORTED_EVIDENCE_ID_PATTERN = /^(imported|blended):/
 /** The two sidecars of the imported library. Never chunk audio, never `.g2-chunks.json`. */
 export const IMPORTED_EVIDENCE_PATH_PATTERN = /\.(?:import|derived)\.json$/i
 
-export type VoiceEvidenceReason = 'imported_read_only' | 'blended_derived_record'
+export type VoiceEvidenceReason = 'imported_read_only' | 'blended_derived_record' | 'phone_anonymous_capture'
 
 export interface VoiceEvidenceRefusal {
   status: 409
@@ -66,6 +66,7 @@ export function isImportedVoiceEvidence(value: unknown): boolean {
  */
 export function assertVoiceEvidenceSource(values: ReadonlyArray<unknown>): VoiceEvidenceRefusal | null {
   for (const value of values) {
+    if (typeof value === 'string' && /(?:^|[:/])phone_/.test(value)) return { status: 409, body: { error: 'iPhone microphone recordings are anonymous and cannot name or train voices', reason: 'phone_anonymous_capture', source: value } }
     const kind = importedEvidenceKind(value)
     if (!kind) continue
     return {

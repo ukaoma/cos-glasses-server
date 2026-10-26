@@ -1,3 +1,4 @@
+import { phoneMicrophoneMeetingsCapability } from '../lib/phone-recording.js'
 import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
 import { customInstructionsCapability, learnedStyleCapability, polishOptionsCapability } from './dictation-polish-settings.js'
 import { PAIRING_PROTOCOL_VERSION } from '../lib/glasses-pairing.js'
@@ -550,6 +551,7 @@ healthRouter.get('/health', async (_req, res) => {
         finalization: getMeetingFinalizationSnapshot(),
       },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
+      phoneMicrophoneMeetings: phoneMicrophoneMeetingsCapability(getServerInstanceId()),
       ...(morningBrief ? { morningBrief } : {}),
       tasks: {
         gate: taskBridgeAvailable() ? 'ready' : 'disabled',
@@ -741,6 +743,7 @@ healthRouter.get('/models', async (req, res) => {
         },
       },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
+      phoneMicrophoneMeetings: phoneMicrophoneMeetingsCapability(getServerInstanceId()),
       tasks: {
         gate: taskBridgeAvailable() ? 'ready' : 'disabled',
       },
