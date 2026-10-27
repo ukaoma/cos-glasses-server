@@ -396,6 +396,8 @@ export interface CapabilityProbeResult {
 export type CapabilityProbe = (pythonBin: string, syncScript: string, cwd: string) => Promise<CapabilityProbeResult>
 
 const CAPABILITY_PROBE_TIMEOUT_MS = 30_000
+/** sync_meetings.py `mac_twins` version the server needs: 2 = twins of G2 recordings AND cloud scribes. */
+export const MAC_TWINS_REQUIRED = 2
 const capabilityCache = new Map<string, SyncCapabilities>()
 
 function spawnCapabilityProbe(pythonBin: string, syncScript: string, cwd: string): Promise<CapabilityProbeResult> {
@@ -419,7 +421,7 @@ export function resetSyncCapabilitiesCache(): void {
 
 /**
  * What the installed sync_meetings.py can do, read from `--capabilities` rather than guessed.
- * Mac filing needs `mac_import: 1` and `mac_twins: 1`.
+ * Mac filing needs `mac_import: 1` and `mac_twins: 2` or later.
  *
  * Cached per python + script + mtime + size, so an upgraded script is probed again. A script
  * whose text never mentions `--capabilities` is an older one: it would take the sync lock
@@ -452,10 +454,11 @@ export async function readSyncCapabilities(
   const line = probed.stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? ''
   let parsed: unknown
   try { parsed = JSON.parse(line) } catch { return { macImport: false, reason: 'capability_probe_unreadable' } }
-  // Both: the import, AND the twin rule that keeps a Mac copy of a G2-recorded meeting out of
-  // LightRAG and Work. A script with the import but not the twin rule would file that meeting twice.
+  // Both: the import, AND the twin rule (version 2: G2 recordings and Fireflies/Granola scribes)
+  // that keeps a Mac copy of an already-recorded meeting out of LightRAG and Work. A script with
+  // the import but an older twin rule would file a Mac + Fireflies meeting twice.
   const caps = !!parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
-  const macImport = caps.mac_import === 1 && caps.mac_twins === 1
+  const macImport = caps.mac_import === 1 && typeof caps.mac_twins === 'number' && caps.mac_twins >= MAC_TWINS_REQUIRED
   const result = { macImport, reason: macImport ? null : 'sync_script_upgrade_required' }
   capabilityCache.set(key, result)
   return result

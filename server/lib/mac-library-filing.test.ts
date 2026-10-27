@@ -17,7 +17,7 @@ let handoff: typeof import('./g2-ops-handoff.js')
 let runner: typeof import('./g2-enrichment-runner.js')
 
 const SESSION = 'mac_8743a230-7f8f-4d59-a0de-5ffdfdcd5801'
-const CAPS = { schema: 1, g2_import: 1, mac_import: 1, mac_twins: 1 }
+const CAPS = { schema: 1, g2_import: 1, mac_import: 1, mac_twins: 2 }
 
 function macMarkdown(source = '| **Source** | Mac System Audio |'): string {
   return [
@@ -125,7 +125,7 @@ describe('sync capability probe', () => {
     expect(failing).toHaveBeenCalledTimes(2)
     const garbage = vi.fn(async () => ({ code: 0, stdout: 'not json' }))
     expect(await handoff.readSyncCapabilities('py', script, garbage)).toEqual({ macImport: false, reason: 'capability_probe_unreadable' })
-    const ok = vi.fn(async () => ({ code: 0, stdout: 'noise\n{"mac_import": 1, "mac_twins": 1}\n' }))
+    const ok = vi.fn(async () => ({ code: 0, stdout: 'noise\n{"mac_import": 1, "mac_twins": 2}\n' }))
     expect(await handoff.readSyncCapabilities('py', script, ok)).toEqual({ macImport: true, reason: null })
   })
 
@@ -138,9 +138,16 @@ describe('sync capability probe', () => {
     process.env.COS_SCRIPTS_DIR = tree.scripts
     expect(await handoff.fileMacRecordingInLibrary(local)).toEqual({ outcome: 'standalone', reason: 'sync_script_upgrade_required' })
     expect(readFakeInvocations(tree.scripts).filter(call => call.args[0] === '--mac-import-file')).toEqual([])
-    const twinsOnly = vi.fn(async () => ({ code: 0, stdout: '{"mac_twins": 1}\n' }))
+    const twinsOnly = vi.fn(async () => ({ code: 0, stdout: '{"mac_twins": 2}\n' }))
     handoff.resetSyncCapabilitiesCache()
     expect(await handoff.readSyncCapabilities('py', script, twinsOnly)).toEqual({ macImport: false, reason: 'sync_script_upgrade_required' })
+    // mac_twins 1 knew G2 twins only: a Mac + Fireflies meeting would be filed twice.
+    const g2TwinsOnly = vi.fn(async () => ({ code: 0, stdout: '{"mac_import": 1, "mac_twins": 1}\n' }))
+    handoff.resetSyncCapabilitiesCache()
+    expect(await handoff.readSyncCapabilities('py', script, g2TwinsOnly)).toEqual({ macImport: false, reason: 'sync_script_upgrade_required' })
+    const later = vi.fn(async () => ({ code: 0, stdout: '{"mac_import": 1, "mac_twins": 3}\n' }))
+    handoff.resetSyncCapabilitiesCache()
+    expect(await handoff.readSyncCapabilities('py', script, later)).toEqual({ macImport: true, reason: null })
   })
 })
 
