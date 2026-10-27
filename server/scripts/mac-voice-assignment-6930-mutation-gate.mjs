@@ -103,7 +103,7 @@ const mutations = [
   m('env-deadline-unbounded', A, ['raw >= 1000 && raw <= 25_000', 'raw >= 0'], LIB_T),
   m('vectors-not-reused', A, ['    const hit = cacheGet(key)\n', '    const hit = undefined as ReturnType<typeof cacheGet>\n'], [...LIB_T, ...ROUTE_T]),
   m('vector-key-ignores-file', A, ['|${info.size}|${Math.round(info.mtimeMs)}`', '`'], LIB_T),
-  m('vector-key-ignores-slice', A, ["${unit.slice ? `${unit.slice.startSec.toFixed(3)}-${unit.slice.endSec.toFixed(3)}` : 'whole'}", "whole"], ROUTE_T),
+  m('vector-key-ignores-slice', A, ["${unit.slice ? `${unit.slice.startSec.toFixed(3)}-${unit.slice.endSec.toFixed(3)}` : 'whole'}", "whole"], LIB_T),
   m('apply-writes-per-sample', A, ['const result = enrollEmbeddingsBatch(plan.report.person, plan.selected.map(embedding => ({ embedding, source })))', 'const result = plan.selected.map(embedding => enrollEmbeddingsBatch(plan.report.person, [{ embedding, source }])).reduce((a, r) => ({ enrolled: a.enrolled + r.enrolled, declined: a.declined + r.declined, persisted: a.persisted && r.persisted }), { enrolled: 0, declined: 0, persisted: true })'], LIB_T),
   // ── Commit ──
   m('commit-ignores-refusal', A, ["  if (plan.report.skipped !== null || plan.selected.length === 0) return { ...plan.report, enrolled: 0 }\n", ''], LIB_T),

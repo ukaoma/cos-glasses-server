@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -128,9 +128,11 @@ let extractFails = false
 let extractCalls = 0
 let runtimeAvailable = true
 let captureLive = false
+let defaultCaptureProbe = false
+let liveTranscriptionSessions = 0
 let onFirstExtract: (() => void) | null = null
 
-async function startServer(): Promise<void> {
+async function startServer(opts: { defaultProbe?: boolean } = {}): Promise<void> {
   vi.resetModules()
   vi.doMock('../lib/profile.js', () => ({ getOwnerSpeakerLabel: () => 'MU', getVocabulary: () => [], getOwnerName: () => 'Miles', getTranscriptionProfileStatus: () => ({}) }))
   enrolCalls.length = 0
@@ -138,6 +140,8 @@ async function startServer(): Promise<void> {
   extractFails = false
   extractCalls = 0
   captureLive = false
+  defaultCaptureProbe = opts.defaultProbe === true
+  liveTranscriptionSessions = 0
   onFirstExtract = null
   runtimeAvailable = true
   vi.doMock('../lib/speaker-embeddings.js', async () => {
@@ -170,11 +174,16 @@ async function startServer(): Promise<void> {
       },
     }
   })
+  // The router's own probe is getTranscriptionSessionLiveness().live > 0. Tests that exercise it set `defaultCaptureProbe`.
+  vi.doMock('./transcribe-stream.js', async () => {
+    const actual = await vi.importActual<Record<string, unknown>>('./transcribe-stream.js')
+    return { ...actual, getTranscriptionSessionLiveness: () => ({ live: liveTranscriptionSessions, stale: 0, staleSessions: [] }) }
+  })
   const { MeetingStore } = await import('../lib/meeting-store.js')
   const { createMeetingRouter } = await import('./meeting.js')
   const app = express()
   app.use(express.json())
-  app.use('/api', createMeetingRouter({ store: new MeetingStore(root), captureActive: () => captureLive }))
+  app.use('/api', createMeetingRouter(defaultCaptureProbe ? { store: new MeetingStore(root) } : { store: new MeetingStore(root), captureActive: () => captureLive }))
   await new Promise<void>(resolve => {
     server = app.listen(0, '127.0.0.1', () => {
       const a = server!.address()
@@ -204,11 +213,13 @@ beforeEach(() => {
   process.env.COS_DATA_DIR = dataDir
 })
 afterEach(async () => {
+  try { chmodSync(dataDir, 0o700) } catch { /* already gone */ }
   await new Promise<void>(r => server ? server.close(() => r()) : r())
   server = null
   vi.resetModules()
   vi.doUnmock('../lib/profile.js')
   vi.doUnmock('../lib/speaker-embeddings.js')
+  vi.doUnmock('./transcribe-stream.js')
   delete process.env.COS_DATA_DIR
   for (const d of [root, dataDir]) if (d) rmSync(d, { recursive: true, force: true })
 })
@@ -446,23 +457,23 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(res.json.enrolment).toMatchObject({ enrolled: 0, skipped: 'store_unavailable' })
   }, T)
 
-  it('a REAL disk failure: the rename stays, enrolled is 0, store_unavailable is named, and the profile is exactly as it was', async () => {
+  it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)('a REAL disk failure: the rename stays, enrolled is 0, store_unavailable is named, and the profile is exactly as it was', async () => {
     standardMeeting(); seedProfile('Dana Reyes'); await startServer()
-    const before = readFileSync(join(dataDir, 'voice-profiles.json'), 'utf-8')
-    // Prime the store cache, then make the file path a directory: the durable rename-over fails with a genuine EISDIR/ENOTEMPTY.
+    // Prime the store cache, then stop the data directory accepting new files: the store's temp-file-then-rename write fails with a
+    // genuine EACCES while the store stays readable. The correction ledger directory is created first so the rename itself can land.
     const lib = await import('../lib/speaker-embeddings.js')
     expect(lib.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
-    rmSync(join(dataDir, 'voice-profiles.json'))
-    mkdirSync(join(dataDir, 'voice-profiles.json'))
-    const res = await post(url, { ...ASSIGN, confirm: true })
+    mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
+    chmodSync(dataDir, 0o500)
+    let res
+    try { res = await post(url, { ...ASSIGN, confirm: true }) } finally { chmodSync(dataDir, 0o700) }
     expect(res.status).toBe(200)
     expect(sidecarNow().labels[1]).toBe('Dana Reyes')
     expect(res.json.enrolment).toMatchObject({ enrolled: 0, skipped: 'store_unavailable' })
     expect(res.json.enrolledEmbeddings).toBe(0)
-    // Nothing from the failed batch is left in memory either: restore the file and the cache must agree with it.
-    rmSync(join(dataDir, 'voice-profiles.json'), { recursive: true })
-    writeFileSync(join(dataDir, 'voice-profiles.json'), before)
-    lib.__installSpeakerRuntimeForTests(fakeSpeakerRuntime())
+    // Nothing from the failed batch is left in memory either: the cache must agree with the untouched file.
+    expect(storeNow()[0].embeddings).toHaveLength(1)
+    // No runtime reinstall: that would drop the cache and hide a cache that kept the failed samples.
     expect(lib.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
   }, T)
 
@@ -694,6 +705,17 @@ describe('B4: it never competes with a live recording, and never lets the meetin
     expect(sidecarNow().labels[1]).toBe('Voice 2')
   }, T)
 
+  it('the router\'s own probe (live transcription sessions) refuses too, and a stale-only server does not', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer({ defaultProbe: true })
+    liveTranscriptionSessions = 1
+    const refused = await post(url, { ...ASSIGN, dryRun: true })
+    expect(refused.status).toBe(409)
+    expect(refused.json.reason).toBe('capture_active')
+    expect(extractCalls).toBe(0)
+    liveTranscriptionSessions = 0
+    expect((await post(url, { ...ASSIGN, dryRun: true })).status).toBe(200)
+  }, T)
+
   it('a text-only rename is NOT held up by a live capture', async () => {
     standardMeeting(); seedProfile('Dana Reyes'); await startServer()
     captureLive = true
@@ -824,6 +846,28 @@ describe('B2: Mac-assigned samples never displace anything else (real store, rea
     expect(sources.filter(s => s === 'g2-training')).toHaveLength(11) // the seed sample plus ten
     expect(sources.filter(s => s.startsWith('mac-assign:mac_old'))).toHaveLength(7)
     expect(sources.filter(s => s === `mac-assign:${MAC_ID}`)).toHaveLength(3)
+  }, T)
+
+  it('a full profile whose Mac-assigned samples can be replaced still takes the new ones, and nothing else is displaced', async () => {
+    standardMeeting()
+    const fill = [
+      ...Array.from({ length: 3 }, (_, i) => ({ marker: 10 + i, axis: 'a' as Axis, source: `mac-assign:mac_old${i}` })),
+      ...Array.from({ length: 36 }, (_, i) => ({ marker: 20 + (i % 30), axis: 'a' as Axis, source: i < 12 ? `correction:meeting_x${i}` : i < 24 ? 'g2-training' : 'fireflies' })),
+    ]
+    seedProfile('Dana Reyes', 'a', fill); await startServer()
+    const before = storeNow()[0]
+    expect(before.embeddings).toHaveLength(40)
+    const preview = await post(url, { ...ASSIGN, dryRun: true })
+    expect(preview.json.enrolment).toMatchObject({ skipped: null, enrolled: 3 })
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment.enrolled).toBe(3)
+    const after = storeNow()[0]
+    expect(after.embeddings).toHaveLength(40)
+    expect(after.sources.filter(s => s === `mac-assign:${MAC_ID}`)).toHaveLength(3)
+    expect(after.sources.filter(s => s.startsWith('mac-assign:mac_old'))).toHaveLength(0)
+    expect(after.sources.filter(s => s.startsWith('correction:'))).toHaveLength(12)
+    expect(after.sources.filter(s => s === 'fireflies')).toHaveLength(12)
   }, T)
 
   it('"Not in this meeting" still retracts the Mac-assigned samples by session', async () => {

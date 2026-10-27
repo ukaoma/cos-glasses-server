@@ -1044,6 +1044,9 @@ function restoreProfileFromDisk(name: string): void {
     else if (manager?.contains(name)) manager.remove(name)
   } catch (err: unknown) {
     console.error(`[speaker] Could not restore "${name}" from disk after a failed write:`, errMsg(err))
+  } finally {
+    // Whatever that load saw (a store that was unreadable at that instant included) must not be pinned: the next reader reloads.
+    invalidateProfileCache()
   }
 }
 

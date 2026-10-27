@@ -3,7 +3,7 @@
 // eviction, the single batched write and the write-failure handling are the production code.
 // Fictional names only: this file is in a public repository.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fakeSpeakerRuntime, type FakeSpeakerRuntime } from './__fixtures__/fake-speaker-runtime.js'
@@ -20,6 +20,11 @@ function vec(lane: number, texture: number): Float32Array {
   return v
 }
 const storePath = () => join(dataDir, 'voice-profiles.json')
+// A REAL filesystem failure: the data directory stops accepting new files, so the store's temp-file-then-rename write
+// fails with EACCES while the store itself stays readable. Root ignores the mode, so those tests skip there.
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
+const refuseWrites = (): void => chmodSync(dataDir, 0o500)
+const allowWrites = (): void => chmodSync(dataDir, 0o700)
 const onDisk = () => JSON.parse(readFileSync(storePath(), 'utf-8')).profiles as Array<{ name: string; embeddings: number[][]; sources: string[] }>
 
 function seed(name: string, sources: string[]): void {
@@ -50,6 +55,7 @@ beforeEach(() => {
   process.env.COS_DATA_DIR = dataDir
 })
 afterEach(() => {
+  try { allowWrites() } catch { /* already gone */ }
   vi.resetModules()
   vi.doUnmock('./atomic-fs.js')
   delete process.env.COS_DATA_DIR
@@ -65,30 +71,45 @@ describe('enrollEmbedding, real store', () => {
     expect(onDisk()[0].sources).toEqual(['manual', 'correction:meeting_a'])
   })
 
-  it('W8: a write the disk refuses is reported as a failure, not success, and leaves memory and the manager as the disk is', async () => {
+  it.skipIf(isRoot)('W8: a write the disk refuses is reported as a failure, not success, and leaves memory and the manager as the disk is', async () => {
     seed('Dana Reyes', ['manual', 'g2-training'])
     const speaker = await lib()
     expect(speaker.readVoiceProfiles().profiles[0].embeddings).toHaveLength(2) // primes the in-memory cache
-    const original = readFileSync(storePath(), 'utf-8')
-    rmSync(storePath()); mkdirSync(storePath()) // a real filesystem failure: the durable rename-over a directory fails
+    refuseWrites()
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const result = speaker.enrollEmbedding('Dana Reyes', vec(0, 7), 'manual')
       expect(result.success).toBe(false)
       expect(result.error).toContain('Profile store write failed')
-    } finally { errors.mockRestore() }
-    rmSync(storePath(), { recursive: true }); writeFileSync(storePath(), original)
-    speaker.__installSpeakerRuntimeForTests(runtime) // drops the cache so the next read is the disk
+    } finally { errors.mockRestore(); allowWrites() }
+    // No runtime reinstall here: that would drop the cache and hide a cache that kept the failed sample.
+    expect(onDisk()[0].embeddings).toHaveLength(2)
     expect(speaker.readVoiceProfiles().profiles[0].embeddings).toHaveLength(2)
+    expect(runtime.speakers.has('Dana Reyes')).toBe(true)
   })
 
-  it('W8: the same failure for a NEW name leaves no phantom speaker in the manager', async () => {
+  it.skipIf(isRoot)('W8: the force-add path (the name is already in the manager) reports a refused disk write too', async () => {
+    seed('Dana Reyes', ['manual'])
+    const speaker = await lib()
+    expect(speaker.enrollEmbedding('Dana Reyes', vec(0, 7), 'manual').success).toBe(true) // registers the name in the manager
+    refuseWrites()
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const result = speaker.enrollEmbedding('Dana Reyes', vec(0, 9), 'manual') // manager.add is false now: persist, then rebuild
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('Profile store write failed')
+    } finally { errors.mockRestore(); allowWrites() }
+    expect(speaker.readVoiceProfiles().profiles[0].embeddings).toHaveLength(2)
+    expect(onDisk()[0].embeddings).toHaveLength(2)
+  })
+
+  it.skipIf(isRoot)('W8: the same failure for a NEW name leaves no phantom speaker in the manager', async () => {
     seed('Dana Reyes', ['manual'])
     const speaker = await lib()
     speaker.readVoiceProfiles()
-    rmSync(storePath()); mkdirSync(storePath())
+    refuseWrites()
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try { expect(speaker.enrollEmbedding('Casey Lin', vec(1, 3), 'manual').success).toBe(false) } finally { errors.mockRestore() }
+    try { expect(speaker.enrollEmbedding('Casey Lin', vec(1, 3), 'manual').success).toBe(false) } finally { errors.mockRestore(); allowWrites() }
     expect(runtime.manager.contains('Casey Lin')).toBe(false)
   })
 
@@ -161,19 +182,18 @@ describe('enrollEmbeddingsBatch, real store', () => {
     expect(storeWrites).toBe(0)
   })
 
-  it('a refused write is reported, enrolled is 0, and nothing from the batch remains in memory', async () => {
+  it.skipIf(isRoot)('a refused write is reported, enrolled is 0, and nothing from the batch remains in memory', async () => {
     seed('Dana Reyes', ['manual'])
     const speaker = await lib()
     speaker.readVoiceProfiles()
-    rmSync(storePath()); mkdirSync(storePath())
+    refuseWrites()
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     let result
-    try { result = speaker.enrollEmbeddingsBatch('Dana Reyes', [{ embedding: vec(0, 7), source: 'mac-assign:mac_x' }, { embedding: vec(0, 8), source: 'mac-assign:mac_x' }]) } finally { errors.mockRestore() }
+    try { result = speaker.enrollEmbeddingsBatch('Dana Reyes', [{ embedding: vec(0, 7), source: 'mac-assign:mac_x' }, { embedding: vec(0, 8), source: 'mac-assign:mac_x' }]) } finally { errors.mockRestore(); allowWrites() }
     expect(result).toMatchObject({ enrolled: 0, persisted: false })
     expect(result.error).toContain('Profile store write failed')
-    expect(existsSync(storePath())).toBe(true)
-    rmSync(storePath(), { recursive: true }); seed('Dana Reyes', ['manual'])
-    speaker.__installSpeakerRuntimeForTests(runtime)
+    expect(onDisk()[0].embeddings).toHaveLength(1)
+    // No runtime reinstall: the in-memory store must already agree with the disk it failed to write.
     expect(speaker.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
   })
 
@@ -184,5 +204,52 @@ describe('enrollEmbeddingsBatch, real store', () => {
     speaker.__installSpeakerRuntimeForTests(null)
     expect(speaker.enrollEmbeddingsBatch('Dana Reyes', [{ embedding: vec(0, 1), source: 'mac-assign:x' }])).toMatchObject({ enrolled: 0, persisted: false })
     expect(storeWrites).toBe(0)
+  })
+})
+
+// The store can also ANSWER that it did not write (saveVoiceProfileStore returns written: false, e.g. it refuses to
+// overwrite a populated file with an empty one). That is a documented return of the real function, not an invented throw.
+describe('a store that refuses the write by returning written:false', () => {
+  async function libRefusing() {
+    vi.resetModules()
+    vi.doMock('./voice-profile-store.js', async () => {
+      const actual = await vi.importActual<Record<string, unknown>>('./voice-profile-store.js')
+      return { ...actual, saveVoiceProfileStore: () => ({ written: false, backup: null, refusedReason: 'refusing to overwrite 1 stored profile(s) with an empty store' }) }
+    })
+    const speaker = await import('./speaker-embeddings.js')
+    runtime = fakeSpeakerRuntime()
+    speaker.__installSpeakerRuntimeForTests(runtime)
+    return speaker
+  }
+  afterEach(() => { vi.doUnmock('./voice-profile-store.js') })
+
+  it('enrollEmbedding does not report success', async () => {
+    seed('Dana Reyes', ['manual'])
+    const speaker = await libRefusing()
+    speaker.readVoiceProfiles()
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try { expect(speaker.enrollEmbedding('Dana Reyes', vec(0, 7), 'manual')).toMatchObject({ success: false, error: expect.stringContaining('Profile store write failed') }) } finally { errors.mockRestore() }
+    expect(speaker.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
+  })
+
+  it('the force-add path does not report success either', async () => {
+    seed('Dana Reyes', ['manual'])
+    const speaker = await libRefusing()
+    runtime.manager.add({ name: 'Dana Reyes', v: vec(0, 1) }) // the name is already registered, so manager.add is false
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try { expect(speaker.enrollEmbedding('Dana Reyes', vec(0, 7), 'manual').success).toBe(false) } finally { errors.mockRestore() }
+    expect(speaker.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
+  })
+
+  it('enrollEmbeddingsBatch reports persisted:false and enrolled 0, and the cache is the disk again', async () => {
+    seed('Dana Reyes', ['manual'])
+    const speaker = await libRefusing()
+    speaker.readVoiceProfiles()
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let result
+    try { result = speaker.enrollEmbeddingsBatch('Dana Reyes', [{ embedding: vec(0, 7), source: 'mac-assign:mac_x' }, { embedding: vec(0, 8), source: 'mac-assign:mac_x' }]) } finally { errors.mockRestore() }
+    expect(result).toMatchObject({ enrolled: 0, persisted: false })
+    expect(result.error).toContain('Profile store write failed')
+    expect(speaker.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
   })
 })

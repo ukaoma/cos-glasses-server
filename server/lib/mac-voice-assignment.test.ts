@@ -3,7 +3,7 @@
 // boundary, so a caller other than the relabel route cannot skip one. Fictional names only.
 // commitMacVoiceAssignment runs the REAL batched enrolment against a temp store (fake sherpa runtime).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fakeSpeakerRuntime } from './__fixtures__/fake-speaker-runtime.js'
@@ -48,6 +48,7 @@ beforeEach(() => {
   writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({ profiles: [{ name: 'Dana Reyes', embeddings: [new Array(192).fill(0.1)], sources: ['g2-training'] }, { name: 'Voice 1', embeddings: [new Array(192).fill(0.1)], sources: ['g2-training'] }] }))
 })
 afterEach(() => {
+  try { chmodSync(dataDir, 0o700) } catch { /* already gone */ }
   vi.resetModules()
   vi.doUnmock('./speaker-embeddings.js')
   delete process.env.COS_DATA_DIR
@@ -199,17 +200,44 @@ describe('B4: the plan yields, has a deadline, and keeps its vectors', () => {
     expect(extractCalls).toBe(4)
   })
 
-  it('an env deadline outside 1 s to 25 s is ignored', async () => {
+  it('an env deadline outside 1 s to 25 s is ignored (too small and too large both fall back to 12 s)', async () => {
     const { planMacVoiceAssignment, MAC_ASSIGN_DEADLINE_MS } = await lib()
     expect(MAC_ASSIGN_DEADLINE_MS).toBe(12_000)
-    process.env.COS_MAC_ASSIGN_DEADLINE_MS = '5'
-    const raws = [0, 2]
+    const raws = [0, 2, 4, 6, 8, 10]
     archiveChunks(raws)
     const t = nextTexture(); extract = () => axisVector(0, t())
-    try {
-      const plan = await planMacVoiceAssignment(input({ changed: [0, 1], sidecar: meeting(raws) }))
-      expect(plan.report.skipped).toBeNull() // 5 ms would have tripped the deadline on the first unit
-    } finally { delete process.env.COS_MAC_ASSIGN_DEADLINE_MS }
+    const run = async (envValue: string, step: number) => {
+      process.env.COS_MAC_ASSIGN_DEADLINE_MS = envValue
+      let clock = 0
+      try { return await planMacVoiceAssignment(input({ changed: raws.map((_, i) => i), sidecar: meeting(raws), now: () => { clock += step; return clock } })) } finally { delete process.env.COS_MAC_ASSIGN_DEADLINE_MS }
+    }
+    // 5 ms would trip on the second clock read (100 ms apart); ignored, the 12 s default lets all six units run.
+    expect((await run('5', 100)).report.skipped).toBeNull()
+    // 60 s would let six reads 3 s apart finish; ignored, the 12 s default trips on the fifth.
+    expect((await run('60000', 3000)).report.skipped).toBe('deadline')
+    // A value inside the range is honoured: 2 s trips at once with a 1 s clock.
+    expect((await run('2000', 1000)).report.skipped).toBe('deadline')
+  })
+
+  it('the same chunk with a different slice is embedded again, never served another slice\'s vector', async () => {
+    const { planMacVoiceAssignment } = await lib()
+    archiveChunks([0, 2])
+    const t = nextTexture(); extract = () => axisVector(0, t())
+    const withTurn = (start: number, end: number) => ({
+      sessionId: MAC_ID,
+      chunks: [{ text: 'a', speaker: 'Voice 2' }, { text: 'a', speaker: 'Voice 2' }],
+      chunkEntries: [
+        { chunkIndex: 0, chunk: { text: 'a', speaker: 'Voice 2', segments: [{ speaker: 'Voice 2', startSec: start, endSec: end }, { speaker: 'Voice 1', startSec: end, endSec: 6 }] } },
+        { chunkIndex: 2, chunk: { text: 'a', speaker: 'Voice 2' } },
+      ],
+    })
+    await planMacVoiceAssignment(input({ changed: [0, 1], sidecar: withTurn(0, 3.4) }))
+    expect(extractCalls).toBe(2) // one slice of chunk 0, plus chunk 2
+    await planMacVoiceAssignment(input({ changed: [0, 1], sidecar: withTurn(0, 3.4) }))
+    expect(extractCalls).toBe(2) // nothing re-embedded
+    // The same files, a different stretch of chunk 0: only that slice is embedded; chunk 2 is reused.
+    await planMacVoiceAssignment(input({ changed: [0, 1], sidecar: withTurn(0.4, 3.9) }))
+    expect(extractCalls).toBe(3)
   })
 })
 
@@ -247,6 +275,12 @@ describe('B1 at the library boundary: gates are reported, never silently passed'
     expect(under.report.gates).toEqual(['mixed_voice'])
   })
 
+  it('groupSec counts only the kept group, not the units thrown out', async () => {
+    const plan = await planWith([[0, 1], [0, 2], [1, 3]]) // 4 s each; the third is another voice
+    expect(plan.report).toMatchObject({ attempted: 3, groupSize: 2, clusterSkipped: 1 })
+    expect(plan.report.groupSec).toBe(8)
+  })
+
   it('a unit count of one passes only at 6 s or more', async () => {
     expect((await planWith([[0, 1]], 5.9)).report.gates).toEqual(['too_little_audio'])
     expect((await planWith([[0, 1]], 6)).report.gates).toEqual([])
@@ -276,17 +310,17 @@ describe('commitMacVoiceAssignment', () => {
     expect(stored.sources.some((src: string) => src.startsWith('correction'))).toBe(false)
   })
 
-  it('a store that cannot be written reports 0 enrolled and store_unavailable, and the profile is unchanged', async () => {
+  it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)('a store that cannot be written reports 0 enrolled and store_unavailable, and the profile is unchanged', async () => {
     const { commitMacVoiceAssignment } = await lib()
     const path = join(dataDir, 'voice-profiles.json')
-    const before = readFileSync(path, 'utf-8')
     const speaker = await import('./speaker-embeddings.js')
     expect(speaker.readVoiceProfiles().profiles.find(p => p.name === 'Dana Reyes')?.embeddings).toHaveLength(1)
-    rmSync(path); mkdirSync(path)
-    const out = commitMacVoiceAssignment(MAC_ID, { report: report({ enrolled: 2 }), selected: [axisVector(1, 1), axisVector(2, 2)], stats })
+    chmodSync(dataDir, 0o500) // a real filesystem failure: no new file can be created, so the store's temp-file-then-rename write fails
+    let out
+    try { out = commitMacVoiceAssignment(MAC_ID, { report: report({ enrolled: 2 }), selected: [axisVector(1, 1), axisVector(2, 2)], stats }) } finally { chmodSync(dataDir, 0o700) }
     expect(out).toMatchObject({ enrolled: 0, skipped: 'store_unavailable' })
-    rmSync(path, { recursive: true }); writeFileSync(path, before)
-    ;(speaker as unknown as { __installSpeakerRuntimeForTests: (r: unknown) => void }).__installSpeakerRuntimeForTests(fakeSpeakerRuntime())
+    expect(JSON.parse(readFileSync(path, 'utf-8')).profiles.find((p: { name: string }) => p.name === 'Dana Reyes').embeddings).toHaveLength(1)
+    // No runtime reinstall: the in-memory store must already agree with the disk the write failed on.
     expect(speaker.readVoiceProfiles().profiles.find(p => p.name === 'Dana Reyes')?.embeddings).toHaveLength(1)
   })
 })
