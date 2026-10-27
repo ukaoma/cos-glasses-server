@@ -10,7 +10,8 @@
 //      lets sync_meetings reclassify).
 //   3. Run sync_meetings.py --g2-only --g2-file with the private-app retry helper.
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { execFile } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { resolveCosOperationsDir } from './cos-operations-meetings.js'
@@ -77,10 +78,38 @@ export interface G2StageOptions {
   revision?: number
 }
 
+/** Sources that share the `.g2-chunks.json` sidecar shape but are not G2 glasses audio. */
+const NON_G2_SOURCE_TYPES = new Set(['mac_system_audio', 'iphone_microphone'])
+const NON_G2_HEADER = /\|\s*\*\*(?:Source\*\*\s*\|\s*(?:Mac System Audio|iPhone Microphone)|Capture source\*\*\s*\|\s*(?:mac_system_audio|iphone_microphone))\s*\|/i
+
+function sidecarSourceType(sidecar: Record<string, unknown> | null): string | null {
+  if (!sidecar) return null
+  if (typeof sidecar.sourceType === 'string') return sidecar.sourceType
+  const capture = sidecar.captureSource
+  if (capture && typeof capture === 'object' && typeof (capture as Record<string, unknown>).sourceType === 'string') {
+    return (capture as Record<string, unknown>).sourceType as string
+  }
+  return null
+}
+
+/**
+ * A Mac or iPhone capture, read from its markdown header or its sidecar. Neither is G2 audio,
+ * so neither may be relabelled "G2 Glasses" or handed to the G2 import, where sync_meetings
+ * would make it a candidate to blend into a Fireflies or Granola meeting.
+ */
+export function isNonG2CaptureRecording(markdown: string, sidecar: Record<string, unknown> | null = null): boolean {
+  if (NON_G2_HEADER.test(markdown)) return true
+  const sourceType = sidecarSourceType(sidecar)
+  return sourceType !== null && NON_G2_SOURCE_TYPES.has(sourceType)
+}
+
 export function patchRecordingForG2Pipeline(
   markdown: string,
   options: G2StageOptions = {},
 ): string {
+  if (isNonG2CaptureRecording(markdown)) {
+    throw new Error('Refusing to relabel a Mac or iPhone recording as G2 Glasses')
+  }
   let text = markdown.replace(/\r\n?/g, '\n')
   if (!/\|\s*\*\*Source\*\*\s*\|\s*G2 Glasses\s*\|/i.test(text) && !text.includes('| G2 Glasses')) {
     text = text.replace(
@@ -113,6 +142,11 @@ export function patchRecordingForG2Pipeline(
       : `${text.trimEnd()}\n\n${HQ_PENDING_MARKER}\n`
   }
   return text
+}
+
+/** A missing or unreadable file reads as empty: the guard only refuses on positive evidence. */
+function readTextOrEmpty(path: string): string {
+  try { return readFileSync(path, 'utf8') } catch { return '' }
 }
 
 function parseSidecar(path: string): Record<string, unknown> | null {
@@ -199,10 +233,13 @@ export function stageRecordingIntoOperations(
     return null
   }
 
+  const sourceSidecar = parseSidecar(localMeetingPath.replace(/\.md$/, '.g2-chunks.json'))
+  if (isNonG2CaptureRecording(readFileSync(localMeetingPath, 'utf8'), sourceSidecar)) {
+    throw new Error('Refusing to stage a Mac or iPhone recording through the G2 import')
+  }
   const destDir = join(operationsDir, 'personal', 'meetings', month)
   mkdirSync(destDir, { recursive: true })
   const destPath = join(destDir, basename(localMeetingPath))
-  const sourceSidecar = parseSidecar(localMeetingPath.replace(/\.md$/, '.g2-chunks.json'))
   const destinationSidecar = parseSidecar(destPath.replace(/\.md$/, '.g2-chunks.json'))
   const keepMarkdown = g2Revision(destinationSidecar?.correctionRevision) > g2Revision(sourceSidecar?.correctionRevision)
   if (keepMarkdown && !existsSync(destPath)) throw new Error('Corrected operations markdown missing; refusing stale import')
@@ -240,6 +277,10 @@ async function runOperationsSync(localMeetingPath: string, claimOnly: boolean): 
   if (!COS_SCRIPTS_DIR) {
     console.log('[meeting/save] Standalone mode — skipping G2 sync pipeline')
     return
+  }
+  // 6.94.0: a Mac or iPhone capture never takes the G2 import, whatever the caller asked.
+  if (isNonG2CaptureRecording(readTextOrEmpty(localMeetingPath), parseSidecar(localMeetingPath.replace(/\.md$/, '.g2-chunks.json')))) {
+    throw new Error('Refusing a Mac or iPhone recording on the G2 import; it has its own import')
   }
   if (!PYTHON_BIN) throw new Error('COS operations configured but Python bridge is unavailable')
   if (!existsSync(PYTHON_BIN)) {
@@ -330,4 +371,158 @@ export async function handoffMeetingToOperations(localMeetingPath: string): Prom
   earlySyncRuntime.lastOutcome = 'finalized'
   earlySyncRuntime.lastError = null
   earlySyncRuntime.lastAt = new Date().toISOString()
+}
+
+// ── 6.94.0: Mac recordings into the COS meeting library ─────────────────────
+//
+// A saved Mac system-audio recording is filed through the same pipeline as a G2 one
+// (sync_meetings.py stages it, runs the LLM summary/title/domain step, renames and moves
+// it), but through its own import, `--mac-import-file`, which never takes part in G2 to
+// Fireflies/Granola matching. The server uses it only when the installed sync_meetings.py
+// says it can (`--capabilities`); an older script leaves the recording standalone, exactly
+// as before 6.94.0, and is never given a Mac file on the G2 import.
+
+export interface SyncCapabilities {
+  macImport: boolean
+  /** Why Mac filing is unavailable; null when it is available. */
+  reason: string | null
+}
+
+export interface CapabilityProbeResult {
+  code: number | null
+  stdout: string
+}
+
+export type CapabilityProbe = (pythonBin: string, syncScript: string, cwd: string) => Promise<CapabilityProbeResult>
+
+const CAPABILITY_PROBE_TIMEOUT_MS = 30_000
+const capabilityCache = new Map<string, SyncCapabilities>()
+
+function spawnCapabilityProbe(pythonBin: string, syncScript: string, cwd: string): Promise<CapabilityProbeResult> {
+  return new Promise(resolvePromise => {
+    execFile(
+      pythonBin,
+      [syncScript, '--capabilities'],
+      { cwd, timeout: CAPABILITY_PROBE_TIMEOUT_MS, maxBuffer: 64 * 1024, env: { ...process.env, PYTHONUNBUFFERED: '1' } },
+      (error, stdout) => {
+        const code = error ? (typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === 'number' ? (error as unknown as { code: number }).code : null) : 0
+        resolvePromise({ code, stdout: String(stdout ?? '') })
+      },
+    )
+  })
+}
+
+/** Test seam: forget probed capabilities. */
+export function resetSyncCapabilitiesCache(): void {
+  capabilityCache.clear()
+}
+
+/**
+ * What the installed sync_meetings.py can do, read from `--capabilities` rather than guessed.
+ *
+ * Cached per python + script + mtime + size, so an upgraded script is probed again. A script
+ * whose text never mentions `--capabilities` is an older one: it would take the sync lock
+ * before rejecting the flag, so it is never spawned and reads as "no Mac import". A failed or
+ * unreadable probe is not cached, so a transient failure is retried on the next recording.
+ */
+export async function readSyncCapabilities(
+  pythonBin: string,
+  syncScript: string,
+  probe: CapabilityProbe = spawnCapabilityProbe,
+): Promise<SyncCapabilities> {
+  let key: string
+  let text: string
+  try {
+    const stat = statSync(syncScript)
+    key = `${pythonBin}\0${syncScript}\0${stat.mtimeMs}\0${stat.size}`
+    text = readFileSync(syncScript, 'utf8')
+  } catch {
+    return { macImport: false, reason: 'sync_script_missing' }
+  }
+  const cached = capabilityCache.get(key)
+  if (cached) return cached
+  if (!text.includes('--capabilities')) {
+    const result = { macImport: false, reason: 'sync_script_upgrade_required' }
+    capabilityCache.set(key, result)
+    return result
+  }
+  const probed = await probe(pythonBin, syncScript, dirname(syncScript))
+  if (probed.code !== 0) return { macImport: false, reason: 'capability_probe_failed' }
+  const line = probed.stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? ''
+  let parsed: unknown
+  try { parsed = JSON.parse(line) } catch { return { macImport: false, reason: 'capability_probe_unreadable' } }
+  const macImport = !!parsed && typeof parsed === 'object' && (parsed as Record<string, unknown>).mac_import === 1
+  const result = { macImport, reason: macImport ? null : 'sync_script_upgrade_required' }
+  capabilityCache.set(key, result)
+  return result
+}
+
+export type MacLibraryFiling =
+  | { outcome: 'filed'; path: string; status: string }
+  | { outcome: 'standalone'; reason: string }
+
+export interface MacLibraryDependencies {
+  probe?: CapabilityProbe
+  runEnrichment?: typeof runG2EnrichmentWithRetry
+}
+
+/** True only for a Mac capture: the sidecar says mac_system_audio AND the header says Mac System Audio. */
+export function isMacSystemAudioRecording(markdown: string, sidecar: Record<string, unknown> | null): boolean {
+  return sidecarSourceType(sidecar) === 'mac_system_audio'
+    && /\|\s*\*\*Source\*\*\s*\|\s*Mac System Audio\s*\|/i.test(markdown)
+}
+
+/**
+ * File one saved Mac recording into the COS meeting library, or say why it stays standalone.
+ *
+ * Reads the operations env live (like cosOpsPipelineConfigured), so a Control-updated env is
+ * seen. Throws when the pipeline ran and failed; returns `standalone` when it never could run.
+ */
+export async function fileMacRecordingInLibrary(
+  localMeetingPath: string,
+  deps: MacLibraryDependencies = {},
+): Promise<MacLibraryFiling> {
+  const raw = process.env.COS_SCRIPTS_DIR?.trim()
+  if (!raw) return { outcome: 'standalone', reason: 'operations_not_configured' }
+  const scriptsDir = resolve(raw)
+  const pythonBin = resolve(scriptsDir, 'venv/bin/python3')
+  const syncScript = join(scriptsDir, 'sync_meetings.py')
+  if (!existsSync(pythonBin)) return { outcome: 'standalone', reason: 'python_unavailable' }
+  if (!existsSync(syncScript)) return { outcome: 'standalone', reason: 'sync_script_missing' }
+
+  const markdown = readFileSync(localMeetingPath, 'utf8')
+  const sidecar = parseSidecar(localMeetingPath.replace(/\.md$/, '.g2-chunks.json'))
+  if (!isMacSystemAudioRecording(markdown, sidecar)) {
+    throw new Error(`Not a Mac system-audio recording: ${basename(localMeetingPath)}`)
+  }
+
+  const capabilities = await readSyncCapabilities(pythonBin, syncScript, deps.probe)
+  if (!capabilities.macImport) return { outcome: 'standalone', reason: capabilities.reason ?? 'sync_script_upgrade_required' }
+
+  const spawnPath = process.env.PATH?.includes('/opt/homebrew/bin')
+    ? process.env.PATH
+    : `/opt/homebrew/bin:${process.env.PATH || ''}`
+  const enrichment = await (deps.runEnrichment ?? runG2EnrichmentWithRetry)({
+    pythonBin,
+    syncScript,
+    scriptsDir,
+    meetingFile: localMeetingPath,
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+      PATH: spawnPath,
+      COS_G2_IMPORT_ROOT: dirname(dirname(localMeetingPath)),
+      COS_SERVER_INSTANCE_ID: getServerInstanceId() ?? '',
+    },
+    importLocal: true,
+    macImport: true,
+    onAttempt: message => console.log(`[meeting/save] Mac library filing: ${message}`),
+  })
+  if (!enrichment.ok || !enrichment.outcome) {
+    throw new Error(
+      `Mac library filing failed after ${enrichment.attempts} attempt(s): `
+      + `${enrichment.error ?? 'unknown exact-file sync failure'}`,
+    )
+  }
+  return { outcome: 'filed', path: enrichment.outcome.path, status: enrichment.outcome.status }
 }

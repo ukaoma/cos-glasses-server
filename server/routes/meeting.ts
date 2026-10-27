@@ -187,6 +187,7 @@ import {
 import {
   claimMeetingInOperations,
   earlyMeetingSyncEnabled,
+  fileMacRecordingInLibrary,
   handoffMeetingToOperations,
 } from '../lib/g2-ops-handoff.js'
 import {
@@ -213,6 +214,32 @@ function cosOpsPipelineConfigured(): boolean {
   // Read env live (not the module-load COS_SCRIPTS_DIR const) so unit tests that
   // clear ops env stay standalone, and Control-updated env is visible.
   return Boolean(process.env.COS_SCRIPTS_DIR?.trim())
+}
+
+/**
+ * 6.94.0: file a finished Mac recording into the COS meeting library.
+ *
+ * Runs AFTER the standalone enrichment, so the local recording is exactly what 6.93.0 left
+ * whether or not filing works. A Mac recording is never handed to the G2 import: it takes
+ * sync_meetings.py --mac-import-file, and only when that script reports the capability.
+ * A failure is logged and never fails the capture's own finalization, because a retry would
+ * re-run the standalone summary; mac_library_backfill.py files it later, idempotently.
+ */
+async function fileFinishedMacRecording(sessionId: string, meetingPath: string, label: string): Promise<void> {
+  if (!cosOpsPipelineConfigured() || !MAC_CAPTURE_ID.test(sessionId)) return
+  try {
+    const filing = await fileMacRecordingInLibrary(meetingPath)
+    if (filing.outcome === 'filed') {
+      console.log(`[${label}] Mac recording ${sessionId} filed into the library (${filing.status}): ${filing.path}`)
+    } else {
+      console.log(`[${label}] Mac recording ${sessionId} stays standalone: ${filing.reason}`)
+    }
+  } catch (error) {
+    console.warn(
+      `[${label}] Mac recording ${sessionId} was not filed into the library: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
 }
 
 /**
@@ -453,6 +480,7 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
       // transcript (meeting-batch-persistence.ts:7-12) — summarising earlier
       // would describe text the file no longer contains.
       await enrichStandaloneMeeting(current.meetingPath, jobStartedAt)
+      await fileFinishedMacRecording(current.sessionId, current.meetingPath, 'meeting/save')
     }
     markCanonicalFinalizationState(current.sidecarPath, 'complete', false)
     // The capture is finished and its files are durable, so the merge engine may score it.
@@ -3031,6 +3059,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         // already holds the long-running orphan_recovery lease that COS
         // Control surfaces and warns on before committing a drain.
         await enrichStandaloneMeeting(saved.filepath, Date.now())
+        if (macCapture) await fileFinishedMacRecording(sessionId, saved.filepath, 'meeting/orphans')
       }
       if (!macCapture && !phoneCapture) triggerMeetingMergeRun('orphan_recovered')
     }).catch(error => {

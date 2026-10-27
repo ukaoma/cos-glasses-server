@@ -712,6 +712,16 @@ This is the microphone only, not iOS system audio, so it cannot record Zoom,
 YouTube or call audio playing on the phone. COS Control must be 0.5.351 or newer
 before this is switched on. Protocol: `docs/iphone-microphone-protocol.md`.
 
+### Mac recordings in the COS meeting library (6.94.0)
+
+With COS operations configured (`COS_SCRIPTS_DIR`), a saved Mac recording is filed
+into `operations/{domain}/meetings/YYYY-MM/` after its standalone summary, through
+`sync_meetings.py --mac-import-file`: the same summary, title and domain step as a
+glasses meeting, titled `... (Mac)`, never matched or blended into a Fireflies or
+Granola meeting. The server checks `sync_meetings.py --capabilities` first; an older
+script leaves Mac recordings standalone. Recordings saved before 6.94.0 are filed with
+`operations/scripts/mac_library_backfill.py` (dry run by default, `--apply` to file).
+
 ## Speech-to-text settings (6.72.0)
 
 One settings object chooses which engine previews live meeting speech, which

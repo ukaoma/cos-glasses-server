@@ -36,6 +36,8 @@ export interface G2EnrichmentOptions {
   onAttempt?: (message: string) => void
   claimOnly?: boolean
   importLocal?: boolean
+  /** 6.94.0: file a saved Mac recording (`--mac-import-file`). Never combined with claimOnly. */
+  macImport?: boolean
 }
 
 export interface G2EnrichmentDependencies {
@@ -79,7 +81,11 @@ export function buildExactG2SyncArgs(
   meetingFile: string,
   claimOnly = false,
   importLocal = false,
+  macImport = false,
 ): string[] {
+  // A Mac recording has its own import mode in sync_meetings.py: it never runs
+  // the G2 paths, so it never takes --g2-only, --g2-file or --g2-claim-only.
+  if (macImport) return [syncScript, '--mac-import-file', meetingFile, '--quiet']
   return [
     syncScript,
     '--g2-only',
@@ -109,6 +115,7 @@ export async function spawnG2SyncAttempt(options: G2EnrichmentOptions): Promise<
         options.meetingFile,
         options.claimOnly,
         options.importLocal,
+        options.macImport,
       ),
       {
         cwd: options.scriptsDir,
