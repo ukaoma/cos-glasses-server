@@ -608,6 +608,15 @@ describe('/voice/profiles exposes the store for review', () => {
     expect(res.json.profiles[0].name).toBe('MU')    // sorted by sample count
   })
 
+  it('collapses mac-assign:<sessionId> to one mac-assign bucket, like auto:, so no session id is listed per row', async () => {
+    profiles[1].sources = ['mac-assign:mac_aaaa1111', 'mac-assign:mac_bbbb2222', 'mac-assign:mac_aaaa1111', 'auto:s1', ...Array(10).fill('manual')]
+    await startServer()
+    const res = await httpRequest('GET', '/api/voice/profiles')
+    const clem = res.json.profiles.find((p: any) => p.name === 'Clem Ukaoma')
+    expect(clem.sources).toEqual({ 'mac-assign': 3, auto: 1, manual: 10 })
+    expect(JSON.stringify(res.json)).not.toContain('mac_aaaa1111')
+  })
+
   it('flags a misaligned sources[] instead of hiding it', async () => {
     profiles[1].sources = ['fireflies']
     await startServer()

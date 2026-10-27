@@ -15,7 +15,7 @@ import { checkSpeakerName, type SpeakerNameRejection } from './speaker-name.js'
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
-import { EVICTION_ORDER, provenanceTier } from './embedding-eviction.js'
+import { EVICTION_ORDER, isMacAssign, macAssignCapFor, provenanceTier } from './embedding-eviction.js'
 
 export interface VoiceProfile {
   name: string
@@ -555,9 +555,15 @@ export function mergeProfilesInStore(
 
   // Preserve stronger label provenance. Within one
   // source tier retain newer evidence, matching weakest-first/oldest eviction.
-  const keep = embeddings.map((_, i) => i).sort((a, b) =>
-    EVICTION_ORDER.indexOf(provenanceTier(sources[b])) - EVICTION_ORDER.indexOf(provenanceTier(sources[a])) || b - a,
-  ).slice(0, cap).sort((a, b) => a - b)
+  // A Mac-assigned sample ranks BELOW every other tier, the same rule chooseEviction applies (embedding-eviction.ts).
+  const rank = (i: number): number => isMacAssign(sources[i]) ? -1 : EVICTION_ORDER.indexOf(provenanceTier(sources[i]))
+  const kept = embeddings.map((_, i) => i).sort((a, b) => rank(b) - rank(a) || b - a).slice(0, cap)
+  // The merged profile obeys the Mac cap too: no more than 10, and never more than its other samples. Surplus Mac
+  // samples go oldest first, which is what chooseEviction does, so a merge cannot hold what an enrolment would refuse.
+  const macKept = kept.filter(i => isMacAssign(sources[i])).sort((a, b) => a - b)
+  const macAllowed = macAssignCapFor(kept.length, macKept.length)
+  const trimmed = new Set(macKept.slice(0, Math.max(0, macKept.length - macAllowed)))
+  const keep = kept.filter(i => !trimmed.has(i)).sort((a, b) => a - b)
   outcome.droppedToCap = embeddings.length - keep.length
   target.embeddings = keep.map(i => embeddings[i])
   target.sources = keep.map(i => sources[i])

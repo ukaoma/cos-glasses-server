@@ -61,7 +61,7 @@ import { isMacCaptureSidecar, isVoiceLabel } from './mac-voice-labels.js'
 import { meetingAudioChunkPath } from './meeting-audio-archive.js'
 import { isPlaceholderLabel, resolveRawChunkIndices } from './meeting-relabel-enrolment.js'
 import { pcm16ToWav, readPcm16Mono } from './nemotron-segments.js'
-import { MAC_ASSIGN_PROFILE_CAP, MAC_ASSIGN_SOURCE, isMacAssign } from './embedding-eviction.js'
+import { MAC_ASSIGN_SOURCE, isMacAssign, macAssignCapFor } from './embedding-eviction.js'
 import {
   MAX_EMBEDDINGS_PER_SPEAKER,
   MERGE_SIMILARITY_FLOOR,
@@ -247,7 +247,7 @@ export async function planMacVoiceAssignment(input: MacAssignInput): Promise<Mac
   const stored = centroid(profile.embeddings.map(e => new Float32Array(e)))
   if (!stored) return none('no_stored_voice')
   const macCount = (profile.sources ?? []).filter(src => isMacAssign(src)).length
-  const capacity = Math.min(MAC_ASSIGN_PROFILE_CAP, Math.max(0, MAX_EMBEDDINGS_PER_SPEAKER - profile.embeddings.length) + macCount)
+  const capacity = Math.min(macAssignCapFor(profile.embeddings.length, macCount), Math.max(0, MAX_EMBEDDINGS_PER_SPEAKER - profile.embeddings.length) + macCount)
   if (capacity <= 0) return none('profile_full')
 
   const rawIndices = resolveRawChunkIndices(sidecar, changed)
@@ -295,7 +295,7 @@ export async function planMacVoiceAssignment(input: MacAssignInput): Promise<Mac
     let key: string
     try {
       const info = statSync(path)
-      key = `${sessionId}|${unit.raw}|${unit.slice ? `${unit.slice.startSec.toFixed(3)}-${unit.slice.endSec.toFixed(3)}` : 'whole'}|${info.size}|${Math.round(info.mtimeMs)}`
+      key = `${sessionId}|${unit.raw}|${unit.slice ? `${unit.slice.startSec.toFixed(3)}-${unit.slice.endSec.toFixed(3)}` : 'whole'}|${info.size}|${Math.round(info.mtimeMs)}|${info.ino}|${Math.round(info.ctimeMs)}`
     } catch { report.missingAudio += 1; continue }
     foundAudio += 1
     const hit = cacheGet(key)

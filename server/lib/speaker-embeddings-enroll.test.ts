@@ -136,13 +136,13 @@ describe('enrollEmbedding, real store', () => {
 
 describe('enrollEmbeddingsBatch, real store', () => {
   it('writes the store ONCE for many samples; per-sample enrolment writes once each', async () => {
-    seed('Dana Reyes', ['manual'])
+    seed('Dana Reyes', Array(8).fill('manual')) // eight ordinary samples, so eight Mac-assigned ones are inside the cap
     const speaker = await lib()
     const items = Array.from({ length: 8 }, (_, i) => ({ embedding: vec(0, i + 1), source: 'mac-assign:mac_x' }))
     const result = speaker.enrollEmbeddingsBatch('Dana Reyes', items)
     expect(result).toMatchObject({ enrolled: 8, declined: 0, persisted: true })
     expect(storeWrites).toBe(1)
-    expect(onDisk()[0].embeddings).toHaveLength(9)
+    expect(onDisk()[0].embeddings).toHaveLength(16)
 
     seed('Casey Lin', ['manual'])
     const other = await lib()
@@ -172,6 +172,39 @@ describe('enrollEmbeddingsBatch, real store', () => {
     expect(sources.filter(s => s === 'mac-assign:new')).toHaveLength(3)
     expect(sources.filter(s => s.startsWith('mac-assign:old'))).toHaveLength(7)
     expect(sources).not.toContain('mac-assign:old0')
+  })
+
+  it('never more Mac-assigned samples than the profile\'s other samples: two ordinary samples hold two, not ten', async () => {
+    seed('Dana Reyes', ['manual', 'g2-training'])
+    const speaker = await lib()
+    const result = speaker.enrollEmbeddingsBatch('Dana Reyes', Array.from({ length: 6 }, (_, i) => ({ embedding: vec(0, i + 1), source: `mac-assign:new${i}` })))
+    expect(result).toMatchObject({ persisted: true })
+    const sources = onDisk()[0].sources
+    expect(sources.filter(s => s.startsWith('mac-assign:'))).toHaveLength(2)
+    expect(sources.slice(0, 2)).toEqual(['manual', 'g2-training'])
+    expect(sources).toEqual(['manual', 'g2-training', 'mac-assign:new4', 'mac-assign:new5']) // the oldest Mac samples were replaced
+  })
+
+  it('a profile with no ordinary sample at all cannot grow its Mac-assigned samples', async () => {
+    seed('Dana Reyes', ['mac-assign:old0'])
+    const speaker = await lib()
+    const result = speaker.enrollEmbeddingsBatch('Dana Reyes', [{ embedding: vec(0, 7), source: 'mac-assign:new' }])
+    // One Mac sample, zero others: the cap is zero, so it replaces the existing Mac sample rather than growing.
+    expect(onDisk()[0].sources.filter(s => s.startsWith('mac-assign:'))).toHaveLength(1)
+    expect(result.persisted).toBe(true)
+  })
+
+  it('a full profile gives up a Mac-assigned sample before an auto:, unknown or fireflies one, whatever kind arrives', async () => {
+    for (const incoming of ['g2-training', 'auto:meeting_9', 'manual', 'fireflies']) {
+      seed('Dana Reyes', ['auto:meeting_1', 'unknown', 'fireflies', 'mac-assign:old', ...Array(36).fill('g2-training')])
+      const speaker = await lib()
+      speaker.enrollEmbeddingsBatch('Dana Reyes', [{ embedding: vec(1, 7), source: incoming }])
+      const sources = onDisk()[0].sources
+      expect(sources, incoming).toHaveLength(40)
+      expect(sources, incoming).not.toContain('mac-assign:old')
+      expect(sources, incoming).toContain('auto:meeting_1')
+      expect(sources, incoming).toContain('fireflies')
+    }
   })
 
   it('into a full profile with nothing to replace: declined, no write at all', async () => {

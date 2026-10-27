@@ -32,6 +32,15 @@ export const MAC_ASSIGN_SOURCE = 'mac-assign'
 /** Most Mac-assigned samples one profile may carry. Past this a new one replaces the oldest Mac-assigned one. */
 export const MAC_ASSIGN_PROFILE_CAP = 10
 
+/**
+ * Most Mac-assigned samples a profile holding these sources may carry: the flat cap, and never more than the
+ * profile's OTHER samples. Playback audio from a call must not outnumber what was heard on the wearer's own
+ * microphone, so a profile with 2 other samples carries at most 2 Mac ones, not 10.
+ */
+export function macAssignCapFor(sampleCount: number, macCount: number): number {
+  return Math.min(MAC_ASSIGN_PROFILE_CAP, Math.max(0, sampleCount - macCount))
+}
+
 /** Ordered weakest-first: eviction walks this list and takes from the first
  *  non-empty tier. */
 export const EVICTION_ORDER = ['automatic', 'unknown', 'metadata', 'assisted', 'human'] as const
@@ -148,7 +157,7 @@ export function chooseEviction(
       return {
         index: macIdx[0],
         tier: 'assisted',
-        reason: `Mac-assigned samples at ${macIdx.length}/${MAC_ASSIGN_PROFILE_CAP} or the profile is full, replacing the oldest Mac-assigned sample`,
+        reason: `Mac-assigned samples at ${macIdx.length}/${macAssignCapFor(sources.length, macIdx.length)} or the profile is full, replacing the oldest Mac-assigned sample`,
       }
     }
     return { index: -1, tier: 'assisted', reason: 'profile is full and holds no Mac-assigned sample to replace, refusing the Mac-assigned sample', refuse: true }
@@ -165,9 +174,21 @@ export function chooseEviction(
     }
   }
 
+  // A Mac-assigned sample is the weakest evidence a profile holds, so any other incoming sample displaces the oldest one
+  // BEFORE it displaces an `auto:`, unknown or `fireflies` sample (6.93.0 polish; the first cut ranked it only inside the
+  // assisted tier, which let it outlive all three). Why it is weaker than an `auto:` sample: that one was heard on the
+  // wearer's own microphone, the same channel identification runs on, while a Mac sample is call or video playback that
+  // a person labelled in bulk and nobody listened to. Reaching here means the profile is full or the Mac cap bound.
+  if (macIdx.length > 0) {
+    return {
+      index: macIdx[0],
+      tier: 'assisted',
+      reason: `dropping the oldest Mac-assigned sample (${String(sources[macIdx[0]])}) before any other kind, it is the weakest evidence`,
+    }
+  }
+
   for (const tier of EVICTION_ORDER) {
-    // Inside the assisted tier a Mac-assigned sample goes first: it is the least verified of them.
-    const idx = tier === 'assisted' && macIdx.length > 0 ? macIdx[0] : sources.findIndex(s => provenanceTier(s) === tier)
+    const idx = sources.findIndex(s => provenanceTier(s) === tier)
     if (idx === -1) continue
     // Reached only when the profile is entirely human-supplied. Age decides,
     // because there is no weaker sample to give up.

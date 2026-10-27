@@ -1,5 +1,5 @@
 // Speaker embedding extraction and verification using sherpa-onnx
-import { MAC_ASSIGN_PROFILE_CAP, chooseEviction, isMacAssign, tierBreakdown } from './embedding-eviction.js'
+import { chooseEviction, isMacAssign, macAssignCapFor, tierBreakdown } from './embedding-eviction.js'
 // Wraps ECAPA-TDNN model for voiceprint-based speaker classification.
 // Falls back gracefully if model is missing — amplitude classification continues.
 //
@@ -366,7 +366,7 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
  */
 function makeRoomForSample(name: string, profile: VoiceProfile, source: string): { ok: true } | { ok: false; error: string } {
   const macCount = isMacAssign(source) ? alignedSources(profile).filter(s => isMacAssign(s)).length : 0
-  const macAtCap = macCount >= MAC_ASSIGN_PROFILE_CAP
+  const macAtCap = isMacAssign(source) && macCount >= macAssignCapFor(profile.embeddings.length, macCount)
   if (profile.embeddings.length < MAX_EMBEDDINGS_PER_SPEAKER && !macAtCap) return { ok: true }
   // Weakest PROVENANCE goes, not the oldest sample. Age is the wrong axis:
   // four profiles at cap would lose their only human-supplied sample to

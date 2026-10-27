@@ -671,8 +671,9 @@ voiceRouter.get('/voice/profiles', (_req, res) => {
           const bySource: Record<string, number> = {}
           for (const source of p.sources ?? []) {
             // Collapse auto:<sessionId> so one poisoned session is visible
-            // without leaking a session id per row.
-            const key = source.startsWith('auto:') ? 'auto' : source
+            // without leaking a session id per row. mac-assign:<sessionId> (6.93.0)
+            // collapses the same way, as voice-directory.ts does.
+            const key = source.startsWith('auto:') ? 'auto' : source.startsWith('mac-assign:') ? 'mac-assign' : source
             bySource[key] = (bySource[key] ?? 0) + 1
           }
           return {
