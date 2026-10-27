@@ -19,6 +19,7 @@ const id = 'mac_abcdef01-2345-6789-abcd-0123456789ab'
 const CAPS = { schema: 1, g2_import: 1, mac_import: 1, mac_twins: 2 }
 const savedEnv = { ...process.env }
 let root: string, ops: string, scripts: string, server: Server, base: string
+let stream: typeof import('./transcribe-stream.js')
 const background: Promise<void>[] = []
 const order: string[] = []
 
@@ -29,7 +30,12 @@ async function boot(options: { phone?: boolean } = {}): Promise<void> {
     vi.doMock('../lib/parakeet.js', async original => ({ ...await original<typeof import('../lib/parakeet.js')>(), parakeetInstalled: () => ({ installed: true, bytes: 1 }), transcribeParakeet: vi.fn(async () => ({ model: 'parakeet-ultra', text: 'We reviewed the launch plan.', words: [{ word: 'We', start: 0, end: 0.4 }], processingSec: 0.1, wallMs: 120 })) }))
   }
   vi.doMock('../lib/server-instance-id.js', () => ({ getServerInstanceId: () => 'server-mac' }))
-  vi.doMock('../lib/whisper-local.js', () => ({ transcribeLocal: vi.fn(async () => ({ text: 'ARR passed one hundred million and EBITDA is on plan.', backend: 'server' })), applyCorrections: (s: string) => s }))
+  vi.doMock('../lib/whisper-local.js', async original => ({
+    ...await original<typeof import('../lib/whisper-local.js')>(),
+    transcribeLocal: vi.fn(async () => ({ text: 'ARR passed one hundred million and EBITDA is on plan.', backend: 'server' })),
+    transcribeHighQuality: vi.fn(async () => ({ text: 'ARR passed one hundred million and EBITDA is on plan.', backend: 'server' })),
+    applyCorrections: (s: string) => s,
+  }))
   vi.doMock('../lib/speaker-embeddings.js', async original => ({ ...await original<typeof import('../lib/speaker-embeddings.js')>(), identifySpeaker: vi.fn(() => ({ speaker: 'Ext', similarity: 0.2, embedding: new Float32Array(192) })), extractEmbedding: vi.fn(() => new Float32Array([1, 0])), isEmbeddingAvailable: () => true, autoEnroll: vi.fn(), getEmbeddingCount: () => 0 }))
   vi.doMock('../lib/profile.js', () => ({ loadProfileObject: () => ({}), getDomainKeywords: () => ({}), getVocabulary: () => [], getOwnerName: () => 'COS', getOwnerSpeakerLabel: () => 'MU', getWhisperCorrections: () => '' }))
   vi.doMock('../lib/vad-silero.js', () => ({ isSileroAvailable: () => false, measureSpeechSeconds: () => null, trimSilence: vi.fn() }))
@@ -41,7 +47,7 @@ async function boot(options: { phone?: boolean } = {}): Promise<void> {
     const stt = await import('../lib/stt-settings.js')
     stt.writeSttSettings({ ...stt.readSttSettings(), hq: 'parakeet-ultra' })
   }
-  const stream = await import('./transcribe-stream.js')
+  stream = await import('./transcribe-stream.js')
   const app = express(); app.use(express.json()); app.use('/api', stream.transcribeStreamRouter)
   const { createMeetingRouter } = await import('./meeting.js')
   app.use('/api', createMeetingRouter({ runBatch: async () => ({ transcriptionQuality: 'streaming' }), finalDiarize: vi.fn(async () => ({ applied: false, reason: 'test' } as never)), scheduleBackground: task => { background.push(task) }, emit: vi.fn() }))
@@ -226,3 +232,23 @@ it('an iPhone microphone meeting is never offered to the Mac filing, with operat
     log.mockRestore(); warn.mockRestore()
   }
 })
+
+it('files a recovered Mac capture only after the recovery has finished and released its lease', async () => {
+  setup(CAPS)
+  process.env.FAKE_SYNC_DELAY_MS = '1500'
+  await boot()
+  expect((await call('/mac-recording/start', { captureId: id, startTime: 1793113331911, sourceType: 'mac_system_audio' })).status).toBe(200)
+  expect((await call(`/mac-recording/${id}/chunks?chunkIndex=0&elapsed=6000`, wavOf(6, () => 400))).status).toBe(200)
+  stream.deleteSession(id, { preserveAudio: true })
+  const quarantine = await import('../lib/unsaved-audio-quarantine.js')
+  expect(quarantine.quarantineSessionAudio(join(process.env.COS_DATA_DIR!, 'session-audio', id), 'test_mac_recovery')).toBeTruthy()
+  const recovery = await call(`/meeting/orphans/${id}/recover`, {})
+  expect(recovery.status).toBe(202)
+  await vi.waitFor(() => expect(readFakeInvocations(scripts).some(call => call.args[0] === '--mac-import-file')).toBe(true), { timeout: 20_000, interval: 50 })
+  // The filing is running now: the recovery is no longer active and holds no lease.
+  expect(quarantine.listActiveRecoveries().filter(entry => entry.sessionId === id)).toEqual([])
+  const maintenance = await import('../lib/maintenance-lifecycle.js')
+  expect(maintenance.maintenanceLifecycle.snapshot().activeByKind.orphan_recovery ?? 0).toBe(0)
+  await Promise.allSettled(background.splice(0))
+  expect(library().filter(name => name.endsWith('(Mac).md'))).toHaveLength(1)
+}, 60_000)

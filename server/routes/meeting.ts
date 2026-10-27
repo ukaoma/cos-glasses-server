@@ -2961,6 +2961,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         + 'ran for this capture. The capture leaves the unsaved count once its scribe is durable.',
     })
 
+    let macFilingPath: string | null = null
     const task = Promise.resolve().then(async () => {
       lease.setPhase('active')
       const startedAt = Date.now()
@@ -3066,7 +3067,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         // already holds the long-running orphan_recovery lease that COS
         // Control surfaces and warns on before committing a drain.
         await enrichStandaloneMeeting(saved.filepath, Date.now())
-        if (macCapture) await fileFinishedMacRecording(sessionId, saved.filepath, 'meeting/orphans')
+        if (macCapture) macFilingPath = saved.filepath
       }
       if (!macCapture && !phoneCapture) triggerMeetingMergeRun('orphan_recovered')
     }).catch(error => {
@@ -3086,7 +3087,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       recoveringOrphans.delete(sessionId)
       lease.release()
     })
-    scheduleBackground(task)
+    // As on the save path: a recovered Mac capture is filed only after the recovery has
+    // finished and released its orphan_recovery lease, so a drain never waits on it.
+    scheduleBackground(task.then(() => macFilingPath
+      ? fileFinishedMacRecording(sessionId, macFilingPath, 'meeting/orphans')
+      : undefined))
   })
 
   return router

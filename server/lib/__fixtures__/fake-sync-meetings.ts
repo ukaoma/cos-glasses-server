@@ -46,6 +46,10 @@ const probe = probeDir ? (fs.existsSync(probeDir) ? fs.readdirSync(probeDir).sor
 fs.appendFileSync(path.join(__dirname, 'invocations.jsonl'), JSON.stringify(Object.assign({ args, importRoot: process.env.COS_G2_IMPORT_ROOT || null }, probe ? { probe } : {})) + '\\n')
 ${capabilityBranch}
 const at = args.indexOf('--mac-import-file')
+if (at >= 0 && process.env.FAKE_SYNC_DELAY_MS) {
+  const until = Date.now() + Number(process.env.FAKE_SYNC_DELAY_MS)
+  while (Date.now() < until) { /* hold the filing open so a test can look at the server meanwhile */ }
+}
 if (at >= 0) {
   if (${options.macImportExit ?? 0} !== 0) process.exit(${options.macImportExit ?? 0})
   const source = args[at + 1]
