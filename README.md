@@ -670,7 +670,7 @@ profile (see below).
   timeout sized from the window. A carried voice is used only when the chunk diarized
   alone agrees, which catches a merge of two voices speaking in the same chunk but not
   yet a clean hand-over to a new voice at a chunk boundary. A timeout or refused window
-  falls back to the plain per-chunk run, and two timeouts in a row stop the window for
+  falls back to the plain per-chunk run, and two of the last three window timeouts stop the window for
   that capture. A voice silent for longer than the window comes back unidentified.
 - **`COS_MAC_VOICE_LABELS`** (on by default) governs the after-save pass; `0` also
   turns both live modes off. Setting it to `1` is the default, not an opt-in.
@@ -681,12 +681,19 @@ the new speaker the previous number. Set `COS_MAC_LIVE_VOICES=off` in
 
 **Assigning a Mac voice to a voice profile (6.93.0).** `POST /api/meeting/:sessionId/relabel`
 with `assignVoiceProfile: true` adds a Mac recording `Voice N`'s audio to an already
-enrolled person. A Mac recording banks no embeddings, so the server extracts them from the
-retained chunk audio (7 days), keeps only that voice, and applies the same coherence and
-diversity gates as a glasses rename. A dry run (`dryRun: true`) reports the person, the most
-samples it would add and the similarity to the stored profile, and writes nothing; a
-confirm that would add nothing is refused whole (`422 nothing_to_enrol`). Without the flag a
-Mac rename is text only. `GET /api/health` reports `capabilities.macLiveVoices.mode`
+enrolled person (never the wearer's own profile: `409 owner_profile`). A Mac recording banks
+no embeddings, so the server extracts them from the retained chunk audio (7 days), keeps only
+that voice, and applies the same coherence and diversity gates as a glasses rename. A dry run
+(`dryRun: true`) reports the person, the most samples it would add, how many units were
+embedded and thrown out as a different voice, and the similarity to the stored profile, and
+writes nothing. A confirm is refused with `409` when the voice sounds unlike the stored
+profile (`below_floor`, under 0.55), the label holds more than one voice (`mixed_voice`) or
+there is too little audio (`too_little_audio`), unless the request carries `force: true`; a
+confirm that would add nothing is refused whole (`422 nothing_to_enrol`). Samples are tagged
+`mac-assign:<sessionId>`: assisted, capped at 10 per profile, never evicting any other kind of
+sample, retracted by "Not in this meeting". It is refused (`409 capture_active`) while any
+meeting is being recorded, and it yields to the event loop while it reads audio. Without the
+flag a Mac rename is text only. `GET /api/health` reports `capabilities.macLiveVoices.mode`
 (`off`, `anchors` or `window`) and, for `window`, counts only.
 
 The saved meeting is relabeled by the whole-meeting pass. Live numbers are kept;

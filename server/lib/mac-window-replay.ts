@@ -65,12 +65,15 @@ const counters = {
 }
 
 /**
- * QA R3: a window run is allowed MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW timeouts in one capture. After that the capture
- * stops using the window (per-chunk runs only, `Ext`) until the server restarts, because a window timeout is
- * exempt from the shared breaker and would otherwise cost its full wait on every chunk, for ever.
+ * QA R3 and W11: the window is switched off for a capture when MAC_WINDOW_BACKOFF_TIMEOUTS of its last
+ * MAC_WINDOW_BACKOFF_OF_LAST window runs timed out. After that the capture uses per-chunk runs only (`Ext`) until
+ * the server restarts, because a window timeout is exempt from the shared breaker and would otherwise cost its full
+ * wait on every chunk, for ever. A rolling count, not a streak: a loaded Mac that alternates a timeout with a
+ * run that just fits still pays most of a 6 s cadence on every other chunk, and a streak never trips on it.
  */
-export const MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW = 2
-const timeoutStreak = new Map<string, number>()
+export const MAC_WINDOW_BACKOFF_TIMEOUTS = 2
+export const MAC_WINDOW_BACKOFF_OF_LAST = 3
+const recentWindowRuns = new Map<string, boolean[]>()
 const windowDisabled = new Set<string>()
 const CAPTURE_MEMORY_MAX = 256
 
@@ -79,20 +82,20 @@ function remember<T>(set: Set<T>, value: T): void {
   set.add(value)
 }
 
-/** True once this capture's window has timed out too often in a row. */
+/** True once this capture's window has timed out too often. */
 export function macWindowDisabledFor(sessionId: string): boolean {
   return windowDisabled.has(sessionId)
 }
 
 function noteWindowRun(sessionId: string, timedOut: boolean, log: (line: string) => void): void {
-  if (!timedOut) { timeoutStreak.delete(sessionId); return }
-  const streak = (timeoutStreak.get(sessionId) ?? 0) + 1
-  if (!timeoutStreak.has(sessionId) && timeoutStreak.size >= CAPTURE_MEMORY_MAX) timeoutStreak.delete(timeoutStreak.keys().next().value as string)
-  timeoutStreak.set(sessionId, streak)
-  if (streak >= MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW && !windowDisabled.has(sessionId)) {
+  if (!recentWindowRuns.has(sessionId) && recentWindowRuns.size >= CAPTURE_MEMORY_MAX) recentWindowRuns.delete(recentWindowRuns.keys().next().value as string)
+  const recent = [...(recentWindowRuns.get(sessionId) ?? []), timedOut].slice(-MAC_WINDOW_BACKOFF_OF_LAST)
+  recentWindowRuns.set(sessionId, recent)
+  const timeouts = recent.filter(Boolean).length
+  if (timeouts >= MAC_WINDOW_BACKOFF_TIMEOUTS && !windowDisabled.has(sessionId)) {
     remember(windowDisabled, sessionId)
     counters.disabledCaptures++
-    log(`[mac-window] capture ${sessionId} window disabled after ${streak} window timeouts in a row; per-chunk runs only for the rest of this capture (Ext)`)
+    log(`[mac-window] capture ${sessionId} window disabled after ${timeouts} of the last ${recent.length} window runs timed out; per-chunk runs only for the rest of this capture (Ext)`)
   }
 }
 
@@ -102,7 +105,7 @@ export function __resetMacWindowCountersForTests(): void {
     else (counters[key] as number) = 0
   }
   seenWithheld.clear()
-  timeoutStreak.clear()
+  recentWindowRuns.clear()
   windowDisabled.clear()
 }
 

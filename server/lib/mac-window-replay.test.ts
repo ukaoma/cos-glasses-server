@@ -11,7 +11,8 @@ import {
   __resetMacWindowCountersForTests,
   macLiveVoicesSnapshot,
   macWindowDisabledFor,
-  MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW,
+  MAC_WINDOW_BACKOFF_OF_LAST,
+  MAC_WINDOW_BACKOFF_TIMEOUTS,
   macWindowStateFor,
   macWindowWithheldReason,
   noteMacWindowWithheld,
@@ -172,17 +173,17 @@ describe('startMacWindowDiarize', () => {
   })
 })
 
-describe('repeated window timeouts stop the window for that capture (QA R3)', () => {
+describe('repeated window timeouts stop the window for that capture (QA R3, W11)', () => {
   const timeout = async (_path: string, ms: number): Promise<LiveDiarizeOutcome> => ({ ok: false, reason: 'timeout', ms })
 
-  it('two window timeouts in a row disable the window for the capture, once, with a counts-only line', async () => {
-    expect(MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW).toBe(2)
+  it('2 of the last 3 window runs timing out disable the window for the capture, once, with a counts-only line', async () => {
+    expect([MAC_WINDOW_BACKOFF_TIMEOUTS, MAC_WINDOW_BACKOFF_OF_LAST]).toEqual([2, 3])
     const r = await drive({ signs: [1, 1, 1], upTo: 1, windowRun: timeout, sessionId: 'mac_slow' })
     expect(macWindowDisabledFor('mac_slow')).toBe(false) // one is not enough
     const second = await drive({ signs: [1, 1, 1], upTo: 2, windowRun: timeout, sessionId: 'mac_slow' })
     expect(macWindowDisabledFor('mac_slow')).toBe(true)
-    expect(second.lines.filter(l => l.includes('window disabled after 2 window timeouts in a row'))).toHaveLength(1)
-    expect(second.lines.join('\n')).toMatch(/\[mac-window\] capture mac_slow window disabled after 2 window timeouts in a row; per-chunk runs only/)
+    expect(second.lines.filter(l => l.includes('window disabled after 2 of the last 2 window runs timed out'))).toHaveLength(1)
+    expect(second.lines.join('\n')).toMatch(/\[mac-window\] capture mac_slow window disabled after 2 of the last 2 window runs timed out; per-chunk runs only/)
     expect(r.lines.some(l => l.includes('disabled'))).toBe(false)
     // A third timeout is not logged again.
     const third = await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_slow' })
@@ -190,9 +191,20 @@ describe('repeated window timeouts stop the window for that capture (QA R3)', ()
     expect(macLiveVoicesSnapshot({ COS_MAC_LIVE_VOICES: 'window' }).window?.disabledCaptures).toBe(1)
   })
 
-  it('a window run that finishes resets the streak, and one capture never disables another', async () => {
+  it('alternating timeout, clean, timeout also disables it (W11: a streak would never trip on this)', async () => {
+    await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_alt' })
+    await drive({ signs: [1], sessionId: 'mac_alt' }) // a clean window run
+    expect(macWindowDisabledFor('mac_alt')).toBe(false)
+    const r = await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_alt' })
+    expect(macWindowDisabledFor('mac_alt')).toBe(true)
+    expect(r.lines.join('\n')).toContain('window disabled after 2 of the last 3 window runs timed out')
+  })
+
+  it('a timeout that has left the last three runs no longer counts, and one capture never disables another', async () => {
     await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_a' })
-    await drive({ signs: [1], sessionId: 'mac_a' }) // a clean window run
+    await drive({ signs: [1], sessionId: 'mac_a' })
+    await drive({ signs: [1], sessionId: 'mac_a' })
+    await drive({ signs: [1], sessionId: 'mac_a' }) // the first timeout is now 4 runs back
     await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_a' })
     expect(macWindowDisabledFor('mac_a')).toBe(false)
     await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_b' })
@@ -203,11 +215,13 @@ describe('repeated window timeouts stop the window for that capture (QA R3)', ()
     expect(macWindowDisabledFor('mac_a')).toBe(false)
   })
 
-  it('another failure between two timeouts also breaks the streak (in a row means in a row)', async () => {
+  it('a non-timeout failure counts as a run but not as a timeout', async () => {
     await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_c' })
     await drive({ signs: [1], windowRun: async () => ({ ok: false, reason: 'busy' }), sessionId: 'mac_c' })
+    await drive({ signs: [1], sessionId: 'mac_c' })
+    await drive({ signs: [1], windowRun: async () => ({ ok: false, reason: 'busy' }), sessionId: 'mac_c' })
     await drive({ signs: [1], windowRun: timeout, sessionId: 'mac_c' })
-    expect(macWindowDisabledFor('mac_c')).toBe(false)
+    expect(macWindowDisabledFor('mac_c')).toBe(false) // the earlier timeout is out of the last three
   })
 })
 

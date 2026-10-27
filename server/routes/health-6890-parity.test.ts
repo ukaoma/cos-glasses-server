@@ -64,7 +64,10 @@ describe('6.89.0: /api/models is the 6.87.0 shape exactly', () => {
     const body = await models()
     expect(Object.keys(body)).toEqual(GOLDEN_MODELS_TOP)
     expect(Object.keys(body.capabilities)).toEqual(GOLDEN_MODELS_CAPS)
-    expect(paths(body)).toEqual(GOLDEN_MODELS_PATHS)
+    // `.cursor.refreshError` exists only while the Cursor model-list refresh is failing on the machine running the test (the
+    // golden was taken on one where it was), so it is machine state, not part of the shape.
+    const machineState = (list: string[]) => list.filter(path => path !== '.cursor.refreshError')
+    expect(machineState(paths(body))).toEqual(machineState(GOLDEN_MODELS_PATHS))
     expect('routes' in body).toBe(false)
   }, 20_000)
 
@@ -494,6 +497,23 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.phoneMicrophoneMeetings.reason',
   '.capabilities.macLiveVoices',
   '.capabilities.macLiveVoices.mode',
+  // 6.93.0: the window path is the default, so its counts are part of the shape unless COS_MAC_LIVE_VOICES turns it off.
+  '.capabilities.macLiveVoices.window',
+  '.capabilities.macLiveVoices.window.runs',
+  '.capabilities.macLiveVoices.window.fallbacks',
+  '.capabilities.macLiveVoices.window.fallbacks.timeout',
+  '.capabilities.macLiveVoices.window.fallbacks.geometry',
+  '.capabilities.macLiveVoices.window.agreementUnavailable',
+  '.capabilities.macLiveVoices.window.carried',
+  '.capabilities.macLiveVoices.window.withheld',
+  '.capabilities.macLiveVoices.window.created',
+  '.capabilities.macLiveVoices.window.confirmed',
+  '.capabilities.macLiveVoices.window.evicted',
+  '.capabilities.macLiveVoices.window.capped',
+  '.capabilities.macLiveVoices.window.disabledCaptures',
+  '.capabilities.macLiveVoices.window.stateWithheld',
+  '.capabilities.macLiveVoices.window.stateWithheld.corrupt_state',
+  '.capabilities.macLiveVoices.window.stateWithheld.earlier_voice_labels',
   '.capabilities.tasks',
   '.capabilities.tasks.gate',
 ]

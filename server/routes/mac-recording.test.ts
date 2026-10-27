@@ -528,7 +528,7 @@ it('6.93.0 W8: a capture whose window labels are withheld says so once, and /api
  expect(replay.macLiveVoicesSnapshot().window).toMatchObject({stateWithheld:{corrupt_state:1,earlier_voice_labels:0},runs:0})
 }))
 
-it('6.93.0 R3: after two window timeouts in a row the capture stops using the window and runs per-chunk only',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:'window',COS_MAC_VOICE_LABELS:undefined},async()=>{
+it('6.93.0 R3: after two window timeouts the capture stops using the window and runs per-chunk only',async()=>withLiveVoices({COS_MAC_LIVE_VOICES:'window',COS_MAC_VOICE_LABELS:undefined},async()=>{
  await start();const nemotron=await import('../lib/nemotron-live.js'),replay=await import('../lib/mac-window-replay.js'),diarize=vi.mocked(nemotron.nemotronLive.diarize)
  replay.__resetMacWindowCountersForTests()
  const seen:string[]=[]
@@ -541,7 +541,7 @@ it('6.93.0 R3: after two window timeouts in a row the capture stops using the wi
  try{for(let i=0;i<5;i++) expect((await call('/mac-recording/'+id+'/chunks?chunkIndex='+i+'&elapsed='+((i+1)*6000),wavOf(6,()=>400+i))).json.speaker).toBe('Ext')}finally{log.mockRestore()}
  expect(seen.filter(p=>p.endsWith('/window.wav'))).toHaveLength(2) // chunks 0 and 1 only; 2 to 4 never start a window
  expect(seen.filter(p=>!p.endsWith('/window.wav'))).toHaveLength(5) // every chunk still gets its per-chunk run
- expect(lines.filter(l=>l.includes('window disabled after 2 window timeouts in a row'))).toHaveLength(1)
+ expect(lines.filter(l=>l.includes('window disabled after 2 of the last 2 window runs timed out'))).toHaveLength(1)
  expect(replay.macWindowDisabledFor(id)).toBe(true)
  expect(replay.macLiveVoicesSnapshot().window).toMatchObject({disabledCaptures:1,fallbacks:{timeout:2,geometry:0}})
 }))

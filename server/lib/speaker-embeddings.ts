@@ -1,5 +1,5 @@
 // Speaker embedding extraction and verification using sherpa-onnx
-import { chooseEviction, tierBreakdown } from './embedding-eviction.js'
+import { MAC_ASSIGN_PROFILE_CAP, chooseEviction, isMacAssign, tierBreakdown } from './embedding-eviction.js'
 // Wraps ECAPA-TDNN model for voiceprint-based speaker classification.
 // Falls back gracefully if model is missing — amplitude classification continues.
 //
@@ -323,27 +323,8 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
     // dropOldestEmbedding keeps sources[] in lockstep — the old inline
     // `sources?.shift()` no-opped whenever sources was undefined or short,
     // permanently offsetting provenance from the samples it described.
-    if (profile.embeddings.length >= MAX_EMBEDDINGS_PER_SPEAKER) {
-      // Weakest PROVENANCE goes, not the oldest sample. Age is the wrong axis:
-      // four profiles at cap would lose their only human-supplied sample to
-      // FIFO while unverified attendee-metadata samples sat untouched.
-      // alignedSources is defence-in-depth here, not load-bearing: loadProfileStore
-      // already pads sources[] to match embeddings[], so a ragged array cannot
-      // reach this line (mutation-verified — swapping it for profile.sources is
-      // unobservable through this path). It is kept for any future caller that
-      // builds a profile without going through the loader, and is unit-tested
-      // directly in voice-profile-store.test.ts.
-      const choice = chooseEviction(alignedSources(profile), source, MAX_EMBEDDINGS_PER_SPEAKER)
-      const { droppedSource } = choice
-        ? dropEmbeddingAt(profile, choice.index)
-        : dropOldestEmbedding(profile)
-      console.log(
-        `[speaker] Profile full for "${name}" (${MAX_EMBEDDINGS_PER_SPEAKER}) — `
-        + `${choice ? choice.reason : 'no provenance available, dropping the oldest'} `
-        + `[dropped ${droppedSource ?? 'unknown'}, incoming ${source}]`,
-      )
-      rebuildSpeakerInManager(name, profile.embeddings)
-    }
+    const room = makeRoomForSample(name, profile, source)
+    if (!room.ok) return { success: false, dim: extractor.dim, error: room.error }
   }
 
   // Add to manager — if manager rejects (internal dedup), force via remove+readd
@@ -351,7 +332,11 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
   if (!added) {
     // Manager's internal dedup rejected it — force-add by rebuilding
     // Persist first so we have the complete embedding list
-    persistProfile(name, embedding, source)
+    try {
+      persistProfile(name, embedding, source)
+    } catch (err: unknown) {
+      return { success: false, dim: extractor.dim, error: `Profile store write failed: ${errMsg(err)}` }
+    }
     const updatedStore = loadProfileStore()
     const updatedProfile = updatedStore.profiles.find(p => p.name === name)
     if (updatedProfile) {
@@ -363,10 +348,97 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
   }
 
   // Persist to disk with provenance
-  persistProfile(name, embedding, source)
+  try {
+    persistProfile(name, embedding, source)
+  } catch (err: unknown) {
+    return { success: false, dim: extractor.dim, error: `Profile store write failed: ${errMsg(err)}` }
+  }
 
   console.log(`[speaker] Enrolled "${name}" (${extractor.dim}-dim, source: ${source})`)
   return { success: true, dim: extractor.dim }
+}
+
+/**
+ * Make room in a full profile for one incoming sample, by the provenance policy.
+ * Also enforces the per-profile cap on Mac-assigned samples (6.93.0), which can bind
+ * below the profile cap. Returns not-ok only when a Mac-assigned sample would have to
+ * displace something other than another Mac-assigned sample.
+ */
+function makeRoomForSample(name: string, profile: VoiceProfile, source: string): { ok: true } | { ok: false; error: string } {
+  const macCount = isMacAssign(source) ? alignedSources(profile).filter(s => isMacAssign(s)).length : 0
+  const macAtCap = macCount >= MAC_ASSIGN_PROFILE_CAP
+  if (profile.embeddings.length < MAX_EMBEDDINGS_PER_SPEAKER && !macAtCap) return { ok: true }
+  // Weakest PROVENANCE goes, not the oldest sample. Age is the wrong axis:
+  // four profiles at cap would lose their only human-supplied sample to
+  // FIFO while unverified attendee-metadata samples sat untouched.
+  // alignedSources is defence-in-depth here, not load-bearing: loadProfileStore
+  // already pads sources[] to match embeddings[], so a ragged array cannot
+  // reach this line (mutation-verified — swapping it for profile.sources is
+  // unobservable through this path). It is kept for any future caller that
+  // builds a profile without going through the loader, and is unit-tested
+  // directly in voice-profile-store.test.ts.
+  const choice = chooseEviction(alignedSources(profile), source, MAX_EMBEDDINGS_PER_SPEAKER)
+  if (choice?.refuse) {
+    console.log(`[speaker] Profile "${name}" full (${profile.embeddings.length}/${MAX_EMBEDDINGS_PER_SPEAKER}): ${choice.reason} [incoming ${source}]`)
+    return { ok: false, error: 'Profile is full and holds no Mac-assigned sample to replace' }
+  }
+  const { droppedSource } = choice
+    ? dropEmbeddingAt(profile, choice.index)
+    : dropOldestEmbedding(profile)
+  console.log(
+    `[speaker] Profile full for "${name}" (${MAX_EMBEDDINGS_PER_SPEAKER}) — `
+    + `${choice ? choice.reason : 'no provenance available, dropping the oldest'} `
+    + `[dropped ${droppedSource ?? 'unknown'}, incoming ${source}]`,
+  )
+  rebuildSpeakerInManager(name, profile.embeddings)
+  return { ok: true }
+}
+
+export interface BatchEnrollItem { embedding: Float32Array; source: string }
+export interface BatchEnrollResult {
+  /** Samples that landed AND were written to disk. Zero when the write failed. */
+  enrolled: number
+  /** Samples dropped before the write (too close to an existing one, or a Mac-assigned sample with nothing it may replace). */
+  declined: number
+  /** False when the store refused or failed the single write; nothing from this batch is then in memory or on disk. */
+  persisted: boolean
+  error?: string
+}
+
+/**
+ * 6.93.0: add several samples to an EXISTING profile with ONE read-modify-write of the store.
+ * Calling `enrollEmbedding` per sample re-parsed and durably rewrote the whole store each
+ * time (about 10 MB, up to 20 times, on the event loop). Same dedup, same provenance
+ * eviction, same Mac-assigned cap. A write failure is reported, never swallowed, and the
+ * in-memory store and the speaker manager are put back to what is on disk.
+ */
+export function enrollEmbeddingsBatch(name: string, items: BatchEnrollItem[]): BatchEnrollResult {
+  if (!extractor || !manager) return { enrolled: 0, declined: items.length, persisted: false, error: 'Speaker embeddings not initialized' }
+  const store = loadProfileStore()
+  const profile = store.profiles.find(p => p.name === name)
+  if (!profile) return { enrolled: 0, declined: items.length, persisted: false, error: 'No such profile' }
+  let added = 0
+  let declined = 0
+  for (const item of items) {
+    if (profile.embeddings.some(existing => rawCosineSimilarity(item.embedding, new Float32Array(existing)) > 0.95)) { declined++; continue }
+    const room = makeRoomForSample(name, profile, item.source)
+    if (!room.ok) { declined++; continue }
+    appendEmbedding(profile, Array.from(item.embedding), item.source)
+    added++
+  }
+  if (added === 0) {
+    // Nothing was appended, but makeRoom may have rebuilt the manager; disk is still the truth.
+    return { enrolled: 0, declined, persisted: true }
+  }
+  try {
+    if (!writeProfileStore(store)) throw new Error('the store refused the write')
+  } catch (err: unknown) {
+    restoreProfileFromDisk(name)
+    return { enrolled: 0, declined: items.length, persisted: false, error: `Profile store write failed: ${errMsg(err)}` }
+  }
+  rebuildSpeakerInManager(name, profile.embeddings)
+  console.log(`[speaker] Batch-enrolled ${added} sample(s) for "${name}" (${profile.embeddings.length} total, one write)`)
+  return { enrolled: added, declined, persisted: true }
 }
 
 /** Identify speaker from WAV audio buffer.
@@ -659,6 +731,17 @@ export function extractEmbedding(wavBuffer: Buffer): Float32Array | null {
   return extractEmbeddingFromWav(wavBuffer)
 }
 
+/**
+ * Test seam: install a fake runtime (see __fixtures__/fake-speaker-runtime.ts) so the real enrolment, eviction and store-write
+ * code runs without the model. Pass null to remove it. Never called by the server.
+ */
+export function __installSpeakerRuntimeForTests(runtime: { extractor: unknown; manager: unknown } | null): void {
+  extractor = runtime ? runtime.extractor : null
+  manager = runtime ? runtime.manager : null
+  initialized = runtime !== null
+  _cachedProfileStore = null
+}
+
 /** Check if the embedding system is available */
 export function isEmbeddingAvailable(): boolean {
   return extractor !== null && manager !== null
@@ -948,7 +1031,24 @@ function invalidateProfileCache(): void {
   _cachedProfileStore = null
 }
 
-/** Persist a speaker profile to disk with provenance tracking */
+/**
+ * Put the in-memory store and the speaker manager back to what is on disk after a failed write.
+ * Without this the cache keeps samples the disk never received: `enrolled` would overstate
+ * what survives a restart, and the identifier would match on voiceprints that are not stored.
+ */
+function restoreProfileFromDisk(name: string): void {
+  invalidateProfileCache()
+  try {
+    const fresh = loadProfileStore().profiles.find(p => p.name === name)
+    if (fresh && fresh.embeddings.length > 0) rebuildSpeakerInManager(name, fresh.embeddings)
+    else if (manager?.contains(name)) manager.remove(name)
+  } catch (err: unknown) {
+    console.error(`[speaker] Could not restore "${name}" from disk after a failed write:`, errMsg(err))
+  }
+}
+
+/** Persist a speaker profile to disk with provenance tracking. THROWS when the store cannot be written
+ *  (6.93.0: it used to log and swallow, so `enrollEmbedding` reported success for a sample only in memory). */
 function persistProfile(name: string, embedding: Float32Array, source: string = 'manual'): void {
   try {
     const store = loadProfileStore()
@@ -960,9 +1060,11 @@ function persistProfile(name: string, embedding: Float32Array, source: string = 
     }
     appendEmbedding(profile, Array.from(embedding), source)
 
-    writeProfileStore(store)
+    if (!writeProfileStore(store)) throw new Error('the store refused the write')
   } catch (err: unknown) {
     console.error('[speaker] Profile persist error:', errMsg(err))
+    restoreProfileFromDisk(name)
+    throw err instanceof Error ? err : new Error(errMsg(err))
   }
 }
 
