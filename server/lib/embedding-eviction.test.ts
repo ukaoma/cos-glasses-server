@@ -13,12 +13,15 @@
 // shape.
 import { describe, expect, it } from 'vitest'
 import {
+  MAC_ASSIGN_PROFILE_CAP,
   chooseEviction,
   correctionQuota,
   EVICTION_ORDER,
   isCorrection,
+  isMacAssign,
   provenanceTier,
   tierBreakdown,
+  vouchesForIdentity,
 } from './embedding-eviction.js'
 
 /** MU as stored today: no human-verified sample anywhere. */
@@ -219,5 +222,59 @@ describe('tier breakdown', () => {
     expect(tierBreakdown([])).toEqual({
       human: 0, assisted: 0, metadata: 0, automatic: 0, unknown: 0,
     })
+  })
+})
+
+// 6.93.0 B2: a Mac-assigned sample is assisted, not a correction, does not vouch, and may only replace its own kind.
+describe('mac-assign:<session> provenance', () => {
+  it('ranks as assisted, is not a correction, is recognised, and never vouches for identity', () => {
+    expect(provenanceTier('mac-assign:mac_1')).toBe('assisted')
+    expect(isCorrection('mac-assign:mac_1')).toBe(false)
+    expect(isMacAssign('mac-assign:mac_1')).toBe(true)
+    expect(isMacAssign('correction:mac_1')).toBe(false)
+    expect(isMacAssign('g2-training')).toBe(false)
+    expect(vouchesForIdentity('mac-assign:mac_1')).toBe(false)
+    expect(vouchesForIdentity('correction:mac_1')).toBe(true) // the contrast that mattered
+    expect(tierBreakdown(['mac-assign:a', 'mac-assign:b', 'correction:c']).assisted).toBe(2)
+  })
+
+  it('replaces the OLDEST Mac-assigned sample, whatever else the profile holds', () => {
+    const sources = ['correction:a', 'fireflies', 'mac-assign:old', 'g2-training', 'unknown', 'mac-assign:newer', 'auto:x']
+    const choice = chooseEviction(sources, 'mac-assign:incoming', 40)!
+    expect(choice.index).toBe(2)
+    expect(choice.refuse).toBeUndefined()
+  })
+
+  it('is REFUSED, evicting nothing, when the profile holds no Mac-assigned sample to replace', () => {
+    for (const sources of [
+      Array(40).fill('g2-training'),
+      Array(40).fill('fireflies'),
+      [...Array(20).fill('correction:m'), ...Array(20).fill('manual')],
+      ['unknown', 'auto:x', 'fireflies', 'g2-training', 'correction:m'],
+    ]) {
+      const choice = chooseEviction(sources, 'mac-assign:incoming', 40)!
+      expect(choice.refuse).toBe(true)
+      expect(choice.index).toBe(-1)
+    }
+  })
+
+  it('never uses the correction quota path: it is not a correction, so 20 corrections do not make it replace one', () => {
+    const sources = [...Array(20).fill('correction:m'), ...Array(20).fill('g2-training')]
+    expect(chooseEviction(sources, 'mac-assign:incoming', 40)!.refuse).toBe(true)
+  })
+
+  it('a G2 correction or g2-training sample evicts a Mac-assigned sample before an older g2-training one', () => {
+    const sources = ['g2-training', 'g2-training', 'mac-assign:m', 'g2-training']
+    expect(chooseEviction(sources, 'correction:new', 4)!.index).toBe(2)
+    expect(chooseEviction(sources, 'g2-training:new', 4)!.index).toBe(2)
+  })
+
+  it('does not change what a fireflies or automatic sample costs: those still go first', () => {
+    const sources = ['mac-assign:m', 'fireflies', 'g2-training']
+    expect(chooseEviction(sources, 'correction:new', 40)!.index).toBe(1)
+  })
+
+  it('the per-profile cap is ten', () => {
+    expect(MAC_ASSIGN_PROFILE_CAP).toBe(10)
   })
 })

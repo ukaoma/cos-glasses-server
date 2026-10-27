@@ -31,14 +31,22 @@ const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] ==
 const mutations = [
   // ── Switch (QA B1: with every switch off a Mac recording is 6.92.0) ──
   // Default ON (Miles 2026-10-26): unset is the window; only an explicit off (0, false, no) or COS_MAC_VOICE_LABELS off is 6.92.0.
-  m('live-default-off', VL, ["return raw === 'anchors' ? 'anchors' : 'window'", "return raw === 'anchors' ? 'anchors' : 'off'"], [...LABELS_T, ...UNIT_T, ...REPLAY_T, ...MAC_T]),
-  m('live-default-anchors', VL, ["return raw === 'anchors' ? 'anchors' : 'window'", "return raw === 'anchors' ? 'anchors' : 'anchors'"], [...LABELS_T, ...UNIT_T, ...MAC_T]),
-  m('anchors-unselectable', VL, ["return raw === 'anchors' ? 'anchors' : 'window'", "return 'window'"], [...LABELS_T, ...UNIT_T]),
-  m('explicit-off-ignored', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", ''], [...LABELS_T, ...UNIT_T, ...MAC_T]),
-  m('explicit-off-word-dropped', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", "  if (['0', 'false', 'no'].includes(raw)) return 'off'\n"], [...LABELS_T, ...MAC_T]),
-  m('explicit-zero-dropped', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", "  if (['false', 'off', 'no'].includes(raw)) return 'off'\n"], LABELS_T),
-  m('explicit-false-dropped', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", "  if (['0', 'off', 'no'].includes(raw)) return 'off'\n"], LABELS_T),
-  m('explicit-no-dropped', VL, ["  if (['0', 'false', 'off', 'no'].includes(raw)) return 'off'\n", "  if (['0', 'false', 'off'].includes(raw)) return 'off'\n"], LABELS_T),
+  m('live-default-off', VL, ["  }\n  return 'window'\n}", "  }\n  return 'off'\n}"], [...LABELS_T, ...UNIT_T, ...REPLAY_T, ...MAC_T]),
+  m('live-default-anchors', VL, ["  }\n  return 'window'\n}", "  }\n  return 'anchors'\n}"], [...LABELS_T, ...UNIT_T, ...MAC_T]),
+  m('anchors-unselectable', VL, ["  if (raw === 'anchors') return 'anchors'\n", ''], [...LABELS_T, ...UNIT_T]),
+  m('explicit-off-ignored', VL, ["  if (OFF_WORDS.includes(raw)) return 'off'\n", ''], [...LABELS_T, ...UNIT_T, ...MAC_T]),
+  // Every spelling of off is its own guard (6.93.0 added none, disable, disabled, never).
+  ...['0', 'false', 'off', 'no', 'none', 'disable', 'disabled', 'never'].map(word => {
+    const list = ['0', 'false', 'off', 'no', 'none', 'disable', 'disabled', 'never']
+    const quote = items => '[' + items.map(x => `'${x}'`).join(', ') + ']'
+    return m(`off-word-${word}-dropped`, VL, [`export const OFF_WORDS: readonly string[] = ${quote(list)}`, `export const OFF_WORDS: readonly string[] = ${quote(list.filter(x => x !== word))}`], LABELS_T)
+  }),
+  // ── W9: an unrecognised value is window and says so once ──
+  m('unrecognised-not-warned', VL, ['    warn(`[mac-voices] mac_live_voices_unrecognised', '    void(`[mac-voices] mac_live_voices_unrecognised'], LABELS_T),
+  m('unrecognised-warned-every-time', VL, ["raw !== 'window' && !warnedUnrecognised.has(raw)) {", "raw !== 'window') {"], LABELS_T),
+  m('window-value-warned', VL, ["if (raw !== '' && raw !== 'window' && !warnedUnrecognised", "if (raw !== '' && !warnedUnrecognised"], LABELS_T),
+  m('empty-value-warned', VL, ["if (raw !== '' && raw !== 'window' && !warnedUnrecognised", "if (raw !== 'window' && !warnedUnrecognised"], LABELS_T),
+  m('anchors-value-warned', VL, ["  if (raw === 'anchors') return 'anchors'\n  if (raw !==", "  if (raw !=="], LABELS_T),
   m('explicit-off-case-sensitive', VL, ["const raw = String(env.COS_MAC_LIVE_VOICES ?? '').trim().toLowerCase()", "const raw = String(env.COS_MAC_LIVE_VOICES ?? '').trim()"], LABELS_T),
   m('voice-labels-off-not-master', VL, ["  if (!macVoiceLabelsEnabled(env)) return 'off'\n  const raw", '  const raw'], [...LABELS_T, ...UNIT_T, ...MAC_T]),
   m('voice-shape-unchecked', VL, ['return Array.isArray(segments) && segments.some(', 'return segments.some('], LABELS_T),
@@ -66,10 +74,12 @@ const mutations = [
   m('withheld-slot-still-coded-tracked', W, ['slotTrack.delete(slot)\n    withheld++', 'withheld++'], UNIT_T),
   m('silent-carried-slot-counted-as-disagreement', W, ['    if ((exclusiveNew.get(slot) ?? 0) === 0) { slotTrack.delete(slot); continue }\n', ''], UNIT_T),
   // ── Repeated window timeouts stop the window for the capture (QA R3) ──
-  m('disable-threshold-off-by-one', RP, ['streak >= MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW && !windowDisabled.has(sessionId)', 'streak > MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW && !windowDisabled.has(sessionId)'], [...REPLAY_T, ...MAC_T]),
-  m('timeout-streak-never-reset', RP, ['if (!timedOut) { timeoutStreak.delete(sessionId); return }', 'if (!timedOut) return'], REPLAY_T),
+  m('disable-threshold-off-by-one', RP, ['timeouts >= MAC_WINDOW_BACKOFF_TIMEOUTS && !windowDisabled.has(sessionId)', 'timeouts > MAC_WINDOW_BACKOFF_TIMEOUTS && !windowDisabled.has(sessionId)'], [...REPLAY_T, ...MAC_T]),
+  m('backoff-window-of-one', RP, ['.slice(-MAC_WINDOW_BACKOFF_OF_LAST)', '.slice(-1)'], REPLAY_T),
+  m('backoff-window-unbounded', RP, ['.slice(-MAC_WINDOW_BACKOFF_OF_LAST)', '.slice(-1000)'], REPLAY_T),
+  m('backoff-counts-non-timeout', RP, ['const timeouts = recent.filter(Boolean).length', 'const timeouts = recent.length'], REPLAY_T),
   m('timeout-not-counted', RP, ['    noteWindowRun(input.sessionId, !outcome.ok && outcome.reason === \'timeout\', log)\n', ''], [...REPLAY_T, ...MAC_T]),
-  m('disable-logged-every-time', RP, ['streak >= MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW && !windowDisabled.has(sessionId)', 'streak >= MAC_WINDOW_MAX_TIMEOUTS_IN_A_ROW'], REPLAY_T),
+  m('disable-logged-every-time', RP, ['timeouts >= MAC_WINDOW_BACKOFF_TIMEOUTS && !windowDisabled.has(sessionId)', 'timeouts >= MAC_WINDOW_BACKOFF_TIMEOUTS'], REPLAY_T),
   m('route-ignores-disabled-window', TS, [' && !macWindowDisabledFor(sessionId)\n', '\n'], MAC_T),
   // ── A re-run over the pass's own output reads the live label, not its own (QA R-N2) ──
   m('rerun-reads-speaker', NF, ["return typeof chunk?.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk?.speaker", 'return chunk?.speaker'], FINAL_T),

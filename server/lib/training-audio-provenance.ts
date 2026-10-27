@@ -13,6 +13,7 @@
 //
 //   auto:<sessionId>           traceable — autoEnroll stamps it
 //   correction:<sessionId>     traceable — the relabel ledger stamps it
+//   mac-assign:<sessionId>     traceable, a Mac recording voice assigned to a profile (6.93.0)
 //   g2-training:<sessionId>    traceable ONLY from 2026-08-06 onward (see below)
 //   g2-training                NOT traceable — every sample written before that
 //   fireflies / manual / …     NOT traceable — no session concept
@@ -49,7 +50,7 @@ export function trainingSourceFor(filename: string): string {
 export function isSampleFromSession(source: string | undefined | null, sessionId: string): boolean {
   const s = String(source ?? '')
   if (!sessionId) return false
-  for (const prefix of ['auto:', 'correction:', 'g2-training:', 'ext-group:']) {
+  for (const prefix of ['auto:', 'correction:', 'g2-training:', 'ext-group:', 'mac-assign:']) {
     if (s.startsWith(prefix) && s.slice(prefix.length) === sessionId) return true
   }
   return false

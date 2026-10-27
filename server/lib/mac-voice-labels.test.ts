@@ -2,7 +2,7 @@
 // per site, each driving the real function, so dropping the Voice clause from any
 // one of them fails a named test here.
 import { describe, expect, it } from 'vitest'
-import { chunkShowsVoiceLabel, isMacCaptureSidecar, isVoiceLabel, macLiveVoicesMode, macVoiceLabelsEnabled, voiceLabel } from './mac-voice-labels.js'
+import { __resetMacLiveVoicesWarningsForTests, chunkShowsVoiceLabel, isMacCaptureSidecar, isVoiceLabel, macLiveVoicesMode, macVoiceLabelsEnabled, voiceLabel } from './mac-voice-labels.js'
 import { isUnattributed } from './meeting-speaker-review.js'
 import { isPlaceholderLabel } from './meeting-relabel-enrolment.js'
 import { isNamedSegmentSpeaker, segmentTranscriptChunks } from './meeting-batch-transcribe.js'
@@ -25,7 +25,7 @@ describe('the label', () => {
     expect(macVoiceLabelsEnabled({})).toBe(true)
     expect(macVoiceLabelsEnabled({ COS_MAC_VOICE_LABELS: '1' })).toBe(true)
     expect(macVoiceLabelsEnabled({ COS_MAC_VOICE_LABELS: 'yes' })).toBe(true)
-    for (const off of ['0', 'false', 'off', 'no', 'FALSE', ' Off ']) expect(macVoiceLabelsEnabled({ COS_MAC_VOICE_LABELS: off })).toBe(false)
+    for (const off of ['0', 'false', 'off', 'no', 'FALSE', ' Off ', 'none', 'disable', 'disabled', 'never']) expect(macVoiceLabelsEnabled({ COS_MAC_VOICE_LABELS: off })).toBe(false)
   })
 
   it('live Voice N is ON by default (6.93.0): window unless COS_MAC_LIVE_VOICES says anchors or off', () => {
@@ -34,13 +34,13 @@ describe('the label', () => {
     expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: '1' })).toBe('window')
     expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: 'on' })).toBe('window')
     // An empty or unrecognised value is the default too, never a silent opt-out.
-    for (const raw of ['', ' ', '1', 'true', 'on', 'yes', 'both', 'windows', 'anchor']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: raw })).toBe('window')
+    for (const raw of ['', ' ', '1', 'true', 'on', 'yes', 'both', 'windows', 'anchor']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: raw }, () => {})).toBe('window')
     expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'window' })).toBe('window')
     expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'WINDOW', COS_MAC_VOICE_LABELS: '1' })).toBe('window')
     expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'anchors' })).toBe('anchors')
     expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: ' Anchors ' })).toBe('anchors')
     // The opt-out: explicit off (0, false, no too) is 6.92.0 for a Mac recording.
-    for (const off of ['off', 'OFF', ' Off ', '0', 'false', 'FALSE', 'no']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: off })).toBe('off')
+    for (const off of ['off', 'OFF', ' Off ', '0', 'false', 'FALSE', 'no', 'none', 'disable', 'Disabled', 'never']) expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: off })).toBe('off')
     // COS_MAC_VOICE_LABELS off wins over every live value, including the default.
     for (const off of ['0', 'false', 'off', 'no']) {
       expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: off })).toBe('off')
@@ -64,6 +64,28 @@ describe('the label', () => {
     expect(isMacCaptureSidecar({ sessionId: 'mac_whatever' })).toBe(true)
     expect(isMacCaptureSidecar({ sessionId: 'meeting_x' }, 'meeting_x')).toBe(false)
     expect(isMacCaptureSidecar(null)).toBe(false)
+  })
+})
+
+describe('W9: an unrecognised COS_MAC_LIVE_VOICES value means window and says so once', () => {
+  it('logs mac_live_voices_unrecognised once per value, never for a real mode or an empty one', () => {
+    __resetMacLiveVoicesWarningsForTests()
+    const lines: string[] = []
+    const warn = (line: string) => lines.push(line)
+    for (const ok of [undefined, '', 'window', 'ANCHORS', 'off', 'none']) macLiveVoicesMode(ok === undefined ? {} : { COS_MAC_LIVE_VOICES: ok }, warn)
+    expect(lines).toEqual([])
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'windw' }, warn)).toBe('window')
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'windw' }, warn)).toBe('window')
+    expect(macLiveVoicesMode({ COS_MAC_LIVE_VOICES: 'bogus' }, warn)).toBe('window')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toContain('mac_live_voices_unrecognised')
+    expect(lines[0]).toContain('windw')
+  })
+  it('COS_MAC_VOICE_LABELS off wins first and logs nothing about the live value', () => {
+    __resetMacLiveVoicesWarningsForTests()
+    const lines: string[] = []
+    expect(macLiveVoicesMode({ COS_MAC_VOICE_LABELS: 'never', COS_MAC_LIVE_VOICES: 'bogus' }, l => lines.push(l))).toBe('off')
+    expect(lines).toEqual([])
   })
 })
 

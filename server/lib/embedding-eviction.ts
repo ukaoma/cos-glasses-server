@@ -21,6 +21,17 @@
 // protected from eviction but capped at half a profile, keeping typical-voice
 // mass in the centroid.
 
+// 6.93.0: `mac-assign:<sessionId>` is a sample a person ASSIGNED from a Mac recording's
+// `Voice N` (mac-voice-assignment.ts). Nobody listened to each sample, the audio is
+// call or video playback through a digital tap rather than the wearer's microphone,
+// and the voice can be a merge of two people (R1). So it ranks as `assisted`, is NOT a
+// correction (no quota, no protection), never vouches for identity, and may only ever
+// replace another Mac-assigned sample, never a G2 correction, g2-training or fireflies
+// one. Retraction by session still works (training-audio-provenance.ts).
+export const MAC_ASSIGN_SOURCE = 'mac-assign'
+/** Most Mac-assigned samples one profile may carry. Past this a new one replaces the oldest Mac-assigned one. */
+export const MAC_ASSIGN_PROFILE_CAP = 10
+
 /** Ordered weakest-first: eviction walks this list and takes from the first
  *  non-empty tier. */
 export const EVICTION_ORDER = ['automatic', 'unknown', 'metadata', 'assisted', 'human'] as const
@@ -47,6 +58,8 @@ export function provenanceTier(source: string | undefined | null): ProvenanceTie
       return 'human'
     // The identifier chose the label; a human approved the batch run.
     case 'g2-training':
+    // 6.93.0: a person picked the name for a Mac `Voice N`; nobody heard each sample.
+    case MAC_ASSIGN_SOURCE:
       return 'assisted'
     // Label came from attendee metadata and was never acoustically verified.
     case 'fireflies':
@@ -76,6 +89,12 @@ export function vouchesForIdentity(source: string | undefined | null): boolean {
     || head === 'g2-training' || head === 'correction' || head === 'ext-group'
 }
 
+/** True for a sample added by assigning a Mac recording voice to a profile. */
+export function isMacAssign(source: string | undefined | null): boolean {
+  return String(source ?? '').trim().toLowerCase().startsWith(`${MAC_ASSIGN_SOURCE}:`)
+    || String(source ?? '').trim().toLowerCase() === MAC_ASSIGN_SOURCE
+}
+
 /** True for a sample created by a human correcting a specific meeting. */
 export function isCorrection(source: string | undefined | null): boolean {
   return String(source ?? '').trim().toLowerCase().startsWith('correction')
@@ -98,6 +117,9 @@ export interface EvictionChoice {
   tier: ProvenanceTier
   /** Human-readable justification, logged so an eviction is never silent. */
   reason: string
+  /** 6.93.0: the incoming sample may displace nothing here (a Mac-assigned sample into a full profile with no Mac-assigned
+   *  sample to replace). The caller must refuse it; `index` is -1 and must not be dropped. */
+  refuse?: boolean
 }
 
 /**
@@ -117,6 +139,20 @@ export function chooseEviction(
   // fire because the quota floor is 1. Verified by mutation — an explicit
   // guard here is unreachable in effect.
   const correctionIdx = sources.map((s, i) => ({ s, i })).filter(x => isCorrection(x.s)).map(x => x.i)
+  const macIdx = sources.map((s, i) => ({ s, i })).filter(x => isMacAssign(x.s)).map(x => x.i)
+
+  // 6.93.0: a Mac-assigned sample replaces the oldest Mac-assigned one or is refused. It never takes a slot
+  // from a correction, g2-training, fireflies or any other sample, whatever the profile's mix.
+  if (isMacAssign(incomingSource)) {
+    if (macIdx.length > 0) {
+      return {
+        index: macIdx[0],
+        tier: 'assisted',
+        reason: `Mac-assigned samples at ${macIdx.length}/${MAC_ASSIGN_PROFILE_CAP} or the profile is full, replacing the oldest Mac-assigned sample`,
+      }
+    }
+    return { index: -1, tier: 'assisted', reason: 'profile is full and holds no Mac-assigned sample to replace, refusing the Mac-assigned sample', refuse: true }
+  }
 
   // A correction arriving at or above quota replaces the OLDEST CORRECTION, not
   // a typical-voice sample. Corrections stay protected as a class while the
@@ -130,7 +166,8 @@ export function chooseEviction(
   }
 
   for (const tier of EVICTION_ORDER) {
-    const idx = sources.findIndex(s => provenanceTier(s) === tier)
+    // Inside the assisted tier a Mac-assigned sample goes first: it is the least verified of them.
+    const idx = tier === 'assisted' && macIdx.length > 0 ? macIdx[0] : sources.findIndex(s => provenanceTier(s) === tier)
     if (idx === -1) continue
     // Reached only when the profile is entirely human-supplied. Age decides,
     // because there is no weaker sample to give up.

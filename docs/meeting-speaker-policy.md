@@ -61,9 +61,9 @@ not an acoustic calibration claim; real playback audio still needs qualification
 Mac renames remain text-only: `enrolNamedVoice` returns `mac_capture`. Neither
 anonymous continuity nor a guessed name creates a global voice profile, banks
 correction-training embeddings, or copies training WAVs. User-confirmed training
-from Mac playback requires a separate explicit source-scoped enrollment flow,
-with selected isolated acoustic evidence, raw-index mapping, preview/confirmation
-and provenance/retraction support; ordinary relabeling is not that consent.
+from Mac playback is the separate explicit flow below (`assignVoiceProfile`), with
+selected isolated acoustic evidence, raw-index mapping, preview/confirmation and
+provenance/retraction support; ordinary relabeling is not that consent.
 
 
 ## Live Mac window replay (6.93.0, on by default)
@@ -83,7 +83,7 @@ that both speak in the current chunk: that slot is not carried and its frames ar
 untracked, so the error does not feed the next window. It does not yet catch a clean
 hand-over at a chunk boundary (a new voice alone in the chunk, put on an old voice's slot
 by the window model): the chunk alone shows one clean voice and agrees. Catching that
-needs evidence from more than one chunk. It is a known limit now that the window is on by default: a wrong number, never a wrong name. A track
+needs evidence from more than one chunk. It is a known limit now that the window is on by default: a wrong number in the live and saved transcript. It becomes a wrong name only if a person assigns that `Voice N` to someone, and that assignment is gated (below). A track
 becomes `Voice N` after two clean proof chunks (2 s alone, purity 0.9, distinct chunk and
 audio hash). A track no remembered frame refers to is evicted and its id reused (12 live
 ids), so a long meeting cannot exhaust them; its number stays spent. The window run's
@@ -110,5 +110,12 @@ runs the same coherence and diversity gates as a glasses rename, and writes noth
 `confirm: true`. The dry run reports the person, the most samples that would be added and
 the similarity of this voice to the stored profile, as a suggestion. Nothing is created,
 and when no audio is retained the whole request is refused (`422 nothing_to_enrol`),
-rename included. Samples carry `correction:<sessionId>` provenance, so "Not in this meeting"
+rename included. Gates (6.93.0): the wearer's own profile is never a target (`409 owner_profile`);
+a voice that sounds unlike the stored profile (under the 0.55 merge floor, `below_floor`), a
+`Voice N` that holds more than one voice (`mixed_voice`: units were thrown out as a different
+voice and the kept group is under two thirds of what was embedded) and one coherent unit under
+6 s (`too_little_audio`) are each `409` unless the request carries `force: true`. It is refused
+while any meeting is being recorded (`409 capture_active`). Samples carry `mac-assign:<sessionId>`
+provenance, not `correction:`: they rank as assisted, are capped at 10 per profile, never vouch
+for identity, may only replace another Mac-assigned sample, and "Not in this meeting"
 retracts them.

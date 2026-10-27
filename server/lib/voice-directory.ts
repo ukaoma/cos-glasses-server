@@ -117,7 +117,7 @@ let building: Promise<VoiceDirectorySnapshot> | null = null
 function sourceCounts(profile: VoiceProfile): Record<string, number> {
   const counts: Record<string, number> = {}
   for (const source of profile.sources ?? []) {
-    const key = source.startsWith('auto:') ? 'auto' : source
+    const key = source.startsWith('auto:') ? 'auto' : source.startsWith('mac-assign:') ? 'mac-assign' : source
     counts[key] = (counts[key] ?? 0) + 1
   }
   return counts

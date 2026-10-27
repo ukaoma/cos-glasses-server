@@ -44,7 +44,7 @@ import {
 } from '../lib/meeting-audio-archive.js'
 import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
 import { enrolNamedVoice } from '../lib/meeting-relabel-enrolment.js'
-import { commitMacVoiceAssignment, planMacVoiceAssignment, type MacAssignPlan } from '../lib/mac-voice-assignment.js'
+import { commitMacVoiceAssignment, planMacVoiceAssignment, type MacAssignGate, type MacAssignPlan, type MacAssignSkip } from '../lib/mac-voice-assignment.js'
 import { isMacCaptureSidecar, isVoiceLabel } from '../lib/mac-voice-labels.js'
 
 function requireMacRecordingForSave(sessionId: string, expectedChunkCount: unknown): void {
@@ -268,6 +268,8 @@ function defaultSessionLedger(sessionId: string): SessionLedger {
 
 export interface MeetingRouteDependencies {
   store?: MeetingStore
+  /** 6.93.0: is any meeting capture (glasses, Mac or iPhone) live right now? Assigning a Mac voice to a profile is refused while one is. */
+  captureActive?: () => boolean
   sessions?: MeetingSessionSource
   runBatch?: (
     audioDir: string,
@@ -650,6 +652,31 @@ function suppliedServerPin(
   return header || secondary || null
 }
 
+const MAC_ASSIGN_SKIP_TEXT: Record<string, string> = {
+  not_mac_capture: 'this is not a Mac recording',
+  not_a_voice_label: 'only an unnamed Voice N can be assigned',
+  unknown_profile: 'that name is not an enrolled voice profile',
+  disabled: 'voice samples are switched off on this server (COS_CHUNK_EMBEDDINGS)',
+  store_unavailable: 'the speaker model is not loaded on this Mac, or the voice profile store could not be written',
+  no_index_mapping: 'this recording has no chunk index map to find its audio',
+  audio_not_retained: 'the recording audio is no longer retained (it is kept for 7 days)',
+  no_usable_audio: 'no usable audio from this voice, or the audio does not sound like one person',
+  owner_profile: 'that is the wearer profile, and a Mac recording has no wearer microphone',
+  no_stored_voice: 'that profile has no stored voice to compare against',
+  profile_full: 'that profile is full and holds no Mac-assigned sample to replace',
+  deadline: 'reading the audio took longer than the time limit; ask again to continue where it stopped',
+}
+const macAssignSkipText = (skipped: MacAssignSkip): string => (skipped && MAC_ASSIGN_SKIP_TEXT[skipped]) || String(skipped)
+
+const MAC_ASSIGN_GATE_TEXT: Record<MacAssignGate, string> = {
+  below_floor: 'this voice sounds unlike that profile (under the 0.55 floor a voice merge also refuses at)',
+  mixed_voice: 'this Voice N holds more than one voice, so the dominant one may not be the person you picked',
+  too_little_audio: 'there is too little clean audio from this voice to trust one short sample',
+}
+
+/** Meetings with an assignment plan running now. One at a time per meeting, so two requests cannot interleave their reads and writes. */
+const macAssignInFlight = new Set<string>()
+
 export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router {
   const store = deps.store ?? getMeetingStore()
   const sessions = deps.sessions ?? defaultSessionSource
@@ -660,6 +687,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const finalDiarize = deps.finalDiarize ?? runNemotronFinalPass
   const transcriptCleanup = deps.transcriptCleanup
   const router = Router()
+  const captureActive = deps.captureActive ?? (() => getTranscriptionSessionLiveness().live > 0)
   const savingSessions = new Set<string>()
   const stopRequests = deps.stopRequests ?? createStopRequestStore()
   setNamingSessionLiveness(id => sessions.getStartTime(id) !== null || savingSessions.has(id) || activeFinalizationJobs.has(id))
@@ -1949,7 +1977,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     })
   })
 
-  router.post('/meeting/:sessionId/relabel', (req, res) => {
+  router.post('/meeting/:sessionId/relabel', async (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
@@ -2039,6 +2067,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // request (`assignVoiceProfile: true`); without it a Mac rename stays text only.
     // Planned BEFORE anything is written: the preview shows exactly what would be added,
     // and a confirm that would add nothing is refused with the rename unapplied.
+    // 6.93.0: refusals first (owner, a live capture), then an async plan that yields to the
+    // event loop, then a re-check that nothing moved while it ran.
     let macAssign: MacAssignPlan | null = null
     if (req.body?.assignVoiceProfile === true) {
       let parsedForAssign: Record<string, unknown> = {}
@@ -2054,7 +2084,36 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         res.status(400).json({ error: 'Only an unnamed Voice N can be assigned to a voice profile', reason: 'not_a_voice_label' })
         return
       }
-      macAssign = planMacVoiceAssignment({ sessionId, from, to, changed: plan.value.changed, sidecar: parsedForAssign })
+      // The wearer's own profile is refused inside the plan (`owner_profile`): a Mac recording has no wearer microphone, and a wrong
+      // sample there would poison owner detection. The route only has to pass the label and map the answer.
+      const ownerLabel = getOwnerSpeakerLabel()
+      // Embedding and the profile write share this server with a live recording. Never while one runs.
+      if (captureActive()) {
+        res.status(409).json({ error: 'A meeting is being recorded right now. Assign the voice after it ends, so the recording is never held up', reason: 'capture_active', retryable: true })
+        return
+      }
+      if (macAssignInFlight.has(sessionId)) {
+        res.status(409).json({ error: 'Another voice assignment for this meeting is still running', reason: 'assign_in_progress', retryable: true })
+        return
+      }
+      macAssignInFlight.add(sessionId)
+      try {
+        macAssign = await planMacVoiceAssignment({ sessionId, from, to, changed: plan.value.changed, sidecar: parsedForAssign, ownerLabel })
+      } finally {
+        macAssignInFlight.delete(sessionId)
+      }
+      // Other requests ran while the plan yielded. Nothing may have moved: the meeting's bytes, the caller's revision, or a new capture.
+      let sidecarAfter: string | null = null
+      try { sidecarAfter = readFileSync(sidecarPath, 'utf-8') } catch { sidecarAfter = null }
+      const revisionAfter = sourceRevisionRefusal(sessionId, req.body)
+      if (sidecarAfter !== sidecarRaw || revisionAfter) {
+        res.status(409).json({ error: 'The meeting changed while the voice was being read. Reopen it and try again; nothing was changed', reason: 'meeting_changed', retryable: true })
+        return
+      }
+      if (macAssign.report.skipped === 'owner_profile') {
+        res.status(409).json({ error: 'That is the wearer profile. A Mac recording cannot add voice samples to it, so nothing was changed', reason: 'owner_profile' })
+        return
+      }
       if (macAssign.report.skipped === 'unknown_profile') {
         res.status(404).json({ error: `"${to}" is not an enrolled voice profile, so nothing was changed`, reason: 'unknown_profile', enrolment: macAssign.report })
         return
@@ -2107,7 +2166,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           + (macAssign
             ? macAssign.report.skipped === null
               ? `, and adding up to ${macAssign.report.enrolled} voice sample(s) to ${to}'s profile`
-              : ', with no voice samples added'
+                + (macAssign.report.gates.length > 0
+                  ? `. The server will refuse that unless you confirm adding it anyway: ${macAssign.report.gates.map(g => MAC_ASSIGN_GATE_TEXT[g]).join('; ')}`
+                  : '')
+              : `. Assigning is not possible: ${macAssignSkipText(macAssign.report.skipped)}. Send without assignVoiceProfile for a text-only rename`
             : '')
           + (preview.proseStale
             ? '. The summary and decisions still name the old speaker and are NOT rewritten — '
@@ -2123,22 +2185,45 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // samples, so a rename that silently adds none is not what they confirmed.
     if (macAssign && macAssign.report.skipped !== null) {
       res.status(422).json({
-        error: 'No usable audio from this voice can be added to that profile, so nothing was changed',
+        error: `Nothing was changed. Assigning is not possible: ${macAssignSkipText(macAssign.report.skipped)}`,
         reason: 'nothing_to_enrol',
         enrolment: macAssign.report,
       })
       return
     }
 
+    // 6.93.0: a wrong voice is never written into a real person's profile on a warning alone. Below the floor,
+    // a mixed group or too little audio is a 409 unless the caller sends `force: true` (COS Control's separate
+    // "Add anyway"). The plan was just recomputed against the profile as it is now, so a change since the preview counts.
+    if (macAssign && macAssign.report.gates.length > 0 && req.body?.force !== true) {
+      const gate = macAssign.report.gates[0]
+      res.status(409).json({
+        error: `Nothing was changed. ${MAC_ASSIGN_GATE_TEXT[gate].replace(/^./, c => c.toUpperCase())}. Add it anyway only if you are sure`,
+        reason: gate,
+        gates: macAssign.report.gates,
+        enrolment: macAssign.report,
+      })
+      return
+    }
+
+    // A capture that started while the plan ran must not meet the profile write.
+    if (macAssign && captureActive()) {
+      res.status(409).json({ error: 'A meeting started recording while the voice was being read. Assign the voice after it ends; nothing was changed', reason: 'capture_active', retryable: true })
+      return
+    }
+
     // A prior correction that never closed means this meeting's files may already
     // be half-written. Refuse rather than layering a second rewrite on top.
+    // `force` on an assignment means "add this voice anyway" (above). It must not also skip this guard.
     const stalled = pendingCorrections(sessionId)
-    if (stalled.length > 0 && req.body?.force !== true) {
+    if (stalled.length > 0 && (req.body?.force !== true || macAssign)) {
       res.status(409).json({
         error: 'a previous correction on this meeting never completed',
         reason: 'correction_pending',
         pending: stalled.map(r => ({ id: r.id, at: r.at, from: r.from, to: r.to })),
-        message: 'Its files may be partly rewritten. Re-check the meeting, then pass { force: true } to proceed.',
+        message: macAssign
+          ? 'Its files may be partly rewritten. Re-check the meeting, or do a text-only rename with { force: true } first.'
+          : 'Its files may be partly rewritten. Re-check the meeting, then pass { force: true } to proceed.',
       })
       return
     }

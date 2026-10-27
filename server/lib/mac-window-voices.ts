@@ -23,7 +23,7 @@
 // boundary, a new voice alone in this chunk that the window model put on an old
 // voice's slot. The chunk alone shows one clean voice and agrees. Catching it needs
 // evidence from more than one chunk. It is a known limit now that the window is on by
-// default: a wrong NUMBER, never a wrong name, and the saved pass numbers the meeting again.
+// default: a wrong NUMBER that the saved pass keeps (it never renumbers live labels). It reaches a profile only through an explicit assignment, which is gated (mac-voice-assignment.ts).
 //
 // A track is shown as `Voice N` only after clean proof in TWO distinct original
 // chunks with distinct audio (each: MAC_WINDOW_PROOF_FRAMES exclusive, purity at

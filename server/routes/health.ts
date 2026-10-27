@@ -553,7 +553,7 @@ healthRouter.get('/health', async (_req, res) => {
       },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
       phoneMicrophoneMeetings: phoneMicrophoneMeetingsCapability(getServerInstanceId()),
-      // 6.93.0 W8: which live Mac Voice N path is on (off by default; anchors; window) and the window path's counts.
+      // 6.93.0 W8: which live Mac Voice N path is on (window by default since 6.93.0; anchors; off) and the window path's counts.
       macLiveVoices: macLiveVoicesSnapshot(),
       ...(morningBrief ? { morningBrief } : {}),
       tasks: {
@@ -747,7 +747,7 @@ healthRouter.get('/models', async (req, res) => {
       },
       ...(localFirstMeetings ? { localFirstMeetings } : {}),
       phoneMicrophoneMeetings: phoneMicrophoneMeetingsCapability(getServerInstanceId()),
-      // 6.93.0 W8: which live Mac Voice N path is on (off by default; anchors; window) and the window path's counts.
+      // 6.93.0 W8: which live Mac Voice N path is on (window by default since 6.93.0; anchors; off) and the window path's counts.
       macLiveVoices: macLiveVoicesSnapshot(),
       tasks: {
         gate: taskBridgeAvailable() ? 'ready' : 'disabled',

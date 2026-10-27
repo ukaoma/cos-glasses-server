@@ -2,18 +2,22 @@
 // `Voice N` assigned to an EXISTING voice profile (6.93.0).
 //
 // Driven over real HTTP against real files. The archived chunk WAVs are real files
-// under COS_DATA_DIR/meeting-audio; only two seams are faked: the embedding
-// extractor (it reads a marker out of the WAV bytes, so a wrong slice or a wrong
-// chunk shows up as the wrong vector) and enrollEmbedding (a recorder). Everything
-// else, including the join from sidecar position to raw capture index, is real.
+// under COS_DATA_DIR/meeting-audio; the faked seams are the embedding extractor (it reads
+// a marker out of the WAV bytes, so a wrong slice or a wrong chunk shows up as the wrong
+// vector) and the sherpa runtime (fake-speaker-runtime.ts). The profile store, the
+// provenance eviction and the single batched write are the REAL code on a real temp
+// store; `enrolCalls` only records what was handed to it. Everything else, including the
+// join from sidecar position to raw capture index, is real.
 //
 // Fictional people only: this file is in a public repository.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fakeSpeakerRuntime } from '../lib/__fixtures__/fake-speaker-runtime.js'
 
 const MAC_ID = 'mac_1b2c3d4e-0000-4000-8000-00000000abcd'
 const MONTH = '2026-10'
@@ -43,13 +47,18 @@ const SCRIBE = `# Vendor call
 [Voice 2]: We can hold the price until then.
 `
 
-/** Axes 'a'..'d' are orthogonal voices (every fourth dimension each); the last component carries the raw chunk index. */
+/**
+ * Axes 'a'..'d' are orthogonal voices (every fourth of the first 128 dimensions each). A per-marker "texture" dimension
+ * keeps two samples of the SAME voice distinct enough (cosine about 0.89) to pass the store's real 0.95 near-duplicate
+ * gate, while two samples with the same marker modulo 63 are identical to it. The last component carries the marker.
+ */
 type Axis = 'a' | 'b' | 'c' | 'd'
 const AXES: Axis[] = ['a', 'b', 'c', 'd']
 function voiceprint(marker: number, axis: Axis): Float32Array {
   const v = new Float32Array(DIM)
   const lane = AXES.indexOf(axis)
-  for (let k = lane; k < DIM - 4; k += 4) v[k] = 100
+  for (let k = lane; k < 128; k += 4) v[k] = 100
+  v[128 + (marker % 63)] = 200
   v[DIM - 1] = marker
   return v
 }
@@ -96,8 +105,13 @@ function archive(sessionId: string, raw: number, audio: Buffer): void {
   writeFileSync(join(dir, `chunk_${String(raw).padStart(4, '0')}.wav`), audio)
 }
 
-function seedProfile(name: string, axis: Axis = 'a'): void {
-  writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({ profiles: [{ name, embeddings: [Array.from(voiceprint(900, axis))], sources: ['g2-training'] }] }))
+function seedProfile(name: string, axis: Axis = 'a', more: Array<{ marker: number; axis: Axis; source: string }> = []): void {
+  writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({ profiles: [
+    { name, embeddings: [Array.from(voiceprint(60, axis)), ...more.map(m => Array.from(voiceprint(m.marker, m.axis)))], sources: ['g2-training', ...more.map(m => m.source)] },
+  ] }))
+}
+function storeNow(): Array<{ name: string; embeddings: number[][]; sources: string[] }> {
+  return JSON.parse(readFileSync(join(dataDir, 'voice-profiles.json'), 'utf-8')).profiles
 }
 
 const sidecarNow = (): { labels: string[]; raw: string } => {
@@ -109,27 +123,38 @@ function ledgerNow(sessionId: string): unknown[] {
 }
 
 const enrolCalls: Array<{ name: string; source: string; marker: number; axis: Axis }> = []
-let enrolThrowsOnCall = 0
-let enrolFailsOnCall = 0
+let batchThrows = false
 let extractFails = false
+let extractCalls = 0
 let runtimeAvailable = true
+let captureLive = false
+let defaultCaptureProbe = false
+let liveTranscriptionSessions = 0
+let onFirstExtract: (() => void) | null = null
 
-async function startServer(): Promise<void> {
+async function startServer(opts: { defaultProbe?: boolean } = {}): Promise<void> {
   vi.resetModules()
   vi.doMock('../lib/profile.js', () => ({ getOwnerSpeakerLabel: () => 'MU', getVocabulary: () => [], getOwnerName: () => 'Miles', getTranscriptionProfileStatus: () => ({}) }))
   enrolCalls.length = 0
-  enrolThrowsOnCall = 0
-  enrolFailsOnCall = 0
+  batchThrows = false
   extractFails = false
+  extractCalls = 0
+  captureLive = false
+  defaultCaptureProbe = opts.defaultProbe === true
+  liveTranscriptionSessions = 0
+  onFirstExtract = null
   runtimeAvailable = true
   vi.doMock('../lib/speaker-embeddings.js', async () => {
     const actual = await vi.importActual<Record<string, unknown>>('../lib/speaker-embeddings.js')
+    ;(actual.__installSpeakerRuntimeForTests as (r: unknown) => void)(fakeSpeakerRuntime())
     return {
       ...actual,
       isEmbeddingAvailable: () => runtimeAvailable,
       // Reads the first sample: axis * 100 + marker. A wrong slice reads the wrong voice. If any
       // later sample is on another axis the audio is contaminated: marker 99, a mix of both voices.
       extractEmbedding: (audio: Buffer) => {
+        extractCalls += 1
+        if (onFirstExtract) { const fire = onFirstExtract; onFirstExtract = null; fire() }
         if (extractFails) return null
         const first = audio.readInt16LE(44)
         for (let at = 44; at + 1 < audio.length; at += 2) {
@@ -141,20 +166,24 @@ async function startServer(): Promise<void> {
         }
         return voiceprint(first % 100, AXES[Math.floor(first / 100) - 1])
       },
-      enrollEmbedding: (name: string, e: Float32Array, source: string) => {
-        enrolCalls.push({ name, source, marker: e[DIM - 1], axis: AXES[[0, 1, 2, 3].find(l => e[l] > 0) ?? 0] })
-        if (enrolThrowsOnCall > 0 && enrolCalls.length === enrolThrowsOnCall) throw new Error('voice profile store refused the write')
-        // The store's near-duplicate gate says no without throwing.
-        if (enrolFailsOnCall > 0 && enrolCalls.length === enrolFailsOnCall) return { success: false, dim: e.length, error: 'too similar to an existing sample' }
-        return { success: true, dim: e.length }
+      // Records what the route hands over, then runs the REAL batched enrolment against the temp store.
+      enrollEmbeddingsBatch: (name: string, items: Array<{ embedding: Float32Array; source: string }>) => {
+        for (const it of items) enrolCalls.push({ name, source: it.source, marker: it.embedding[DIM - 1], axis: AXES[[0, 1, 2, 3].find(l => it.embedding[l] > 0) ?? 0] })
+        if (batchThrows) throw new Error('voice profile store refused the write')
+        return (actual.enrollEmbeddingsBatch as (n: string, i: unknown) => unknown)(name, items)
       },
     }
+  })
+  // The router's own probe is getTranscriptionSessionLiveness().live > 0. Tests that exercise it set `defaultCaptureProbe`.
+  vi.doMock('./transcribe-stream.js', async () => {
+    const actual = await vi.importActual<Record<string, unknown>>('./transcribe-stream.js')
+    return { ...actual, getTranscriptionSessionLiveness: () => ({ live: liveTranscriptionSessions, stale: 0, staleSessions: [] }) }
   })
   const { MeetingStore } = await import('../lib/meeting-store.js')
   const { createMeetingRouter } = await import('./meeting.js')
   const app = express()
   app.use(express.json())
-  app.use('/api', createMeetingRouter({ store: new MeetingStore(root) }))
+  app.use('/api', createMeetingRouter(defaultCaptureProbe ? { store: new MeetingStore(root) } : { store: new MeetingStore(root), captureActive: () => captureLive }))
   await new Promise<void>(resolve => {
     server = app.listen(0, '127.0.0.1', () => {
       const a = server!.address()
@@ -184,11 +213,13 @@ beforeEach(() => {
   process.env.COS_DATA_DIR = dataDir
 })
 afterEach(async () => {
+  try { chmodSync(dataDir, 0o700) } catch { /* already gone */ }
   await new Promise<void>(r => server ? server.close(() => r()) : r())
   server = null
   vi.resetModules()
   vi.doUnmock('../lib/profile.js')
   vi.doUnmock('../lib/speaker-embeddings.js')
+  vi.doUnmock('./transcribe-stream.js')
   delete process.env.COS_DATA_DIR
   for (const d of [root, dataDir]) if (d) rmSync(d, { recursive: true, force: true })
 })
@@ -247,7 +278,7 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(sidecarNow().labels).toEqual(['Voice 1', 'Dana Reyes', 'Voice 1', 'Dana Reyes', 'Dana Reyes'])
     // raw 2, 6 whole; raw 8 only its first 5 s (axis a). Never raw 0 or 4, never the axis-b half of raw 8.
     expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([2, 6, 8]) // 99 would be a slice that kept the other voice's edge
-    expect(enrolCalls.every(c => c.axis === 'a' && c.name === 'Dana Reyes' && c.source === `correction:${MAC_ID}`)).toBe(true)
+    expect(enrolCalls.every(c => c.axis === 'a' && c.name === 'Dana Reyes' && c.source === `mac-assign:${MAC_ID}`)).toBe(true)
     expect(res.json.enrolment).toMatchObject({ person: 'Dana Reyes', enrolled: 3, created: false, skipped: null })
     expect(res.json.enrolledEmbeddings).toBe(3)
     expect(readFileSync(join(root, MONTH, `${STEM}.md`), 'utf-8')).toContain('[Dana Reyes]: We can hold the price until then.')
@@ -302,15 +333,36 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([0, 2, 4])
   }, T)
 
-  it('a voice that sounds unlike the stored profile is reported below the floor, and the person still decides', async () => {
+  it('a voice that sounds unlike the stored profile is reported below the floor in the preview, and the confirm is refused', async () => {
     standardMeeting(); seedProfile('Dana Reyes', 'b'); await startServer()
-    const res = await post(url, { ...ASSIGN, dryRun: true })
-    expect(res.json.enrolment.belowFloor).toBe(true)
-    expect(res.json.enrolment.similarity).toBeLessThan(0.55)
-    expect(res.json.enrolment.enrolled).toBe(3)
+    const preview = await post(url, { ...ASSIGN, dryRun: true })
+    expect(preview.status).toBe(200)
+    expect(preview.json.enrolment.belowFloor).toBe(true)
+    expect(preview.json.enrolment.similarity).toBeLessThan(0.55)
+    expect(preview.json.enrolment.gates).toEqual(['below_floor'])
+    expect(preview.json.message).toContain('refuse that unless you confirm adding it anyway')
+    const refused = await post(url, { ...ASSIGN, confirm: true })
+    expect(refused.status).toBe(409)
+    expect(refused.json.reason).toBe('below_floor')
+    expect(refused.json.enrolment).toMatchObject({ attempted: 3, groupSize: 3, similarity: preview.json.enrolment.similarity })
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels).toEqual(['Voice 1', 'Voice 2', 'Voice 1', 'Voice 2', 'Voice 2'])
+    expect(ledgerNow(MAC_ID)).toEqual([])
+    expect(storeNow()[0].embeddings).toHaveLength(1)
   }, T)
 
-  it('more audio than the cap is spread across the whole meeting, bounded at 40 units and 20 samples', async () => {
+  it('force: true adds it anyway, as Mac-assigned samples, and says what it added', async () => {
+    standardMeeting(); seedProfile('Dana Reyes', 'b'); await startServer()
+    const res = await post(url, { ...ASSIGN, confirm: true, force: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment).toMatchObject({ enrolled: 3, belowFloor: true, gates: ['below_floor'] })
+    expect(sidecarNow().labels[1]).toBe('Dana Reyes')
+    const profile = storeNow()[0]
+    expect(profile.embeddings).toHaveLength(4)
+    expect(profile.sources.slice(1)).toEqual([`mac-assign:${MAC_ID}`, `mac-assign:${MAC_ID}`, `mac-assign:${MAC_ID}`])
+  }, T)
+
+  it('more audio than the cap is spread across the whole meeting, bounded at 40 units and 10 Mac-assigned samples', async () => {
     const raws = Array.from({ length: 55 }, (_, i) => i)
     seed(MAC_ID, raws.map(raw => ({ raw, speaker: 'Voice 2' })))
     for (const raw of raws) archive(MAC_ID, raw, wav([{ sec: 2.5, axis: 1, marker: raw }]))
@@ -318,8 +370,9 @@ describe('apply: renames, then writes the previewed samples once', () => {
     const preview = await post(url, { ...ASSIGN, dryRun: true })
     expect(preview.json.enrolment.attempted).toBe(40)
     const res = await post(url, { ...ASSIGN, confirm: true })
-    expect(res.json.enrolment.enrolled).toBe(20)
-    expect(enrolCalls).toHaveLength(20)
+    expect(res.json.enrolment.enrolled).toBe(10)
+    expect(enrolCalls).toHaveLength(10)
+    expect(storeNow()[0].embeddings).toHaveLength(11)
     // The first 40 chunks alone could not reach past marker 39: the spread reaches the end of the meeting.
     expect(Math.max(...enrolCalls.map(c => c.marker))).toBeGreaterThan(45)
   }, T)
@@ -348,13 +401,14 @@ describe('apply: renames, then writes the previewed samples once', () => {
   }, T)
 
   it('audio that is not 16 kHz is never embedded', async () => {
-    seed(MAC_ID, [{ raw: 0, speaker: 'Voice 2' }, { raw: 2, speaker: 'Voice 2' }])
+    seed(MAC_ID, [{ raw: 0, speaker: 'Voice 2' }, { raw: 2, speaker: 'Voice 2' }, { raw: 4, speaker: 'Voice 2' }])
     archive(MAC_ID, 0, wav([{ sec: 4, axis: 1, marker: 0 }], 8000))
     archive(MAC_ID, 2, wav([{ sec: 4, axis: 1, marker: 2 }]))
+    archive(MAC_ID, 4, wav([{ sec: 4, axis: 1, marker: 4 }]))
     seedProfile('Dana Reyes'); await startServer()
     const res = await post(url, { ...ASSIGN, confirm: true })
-    expect(enrolCalls.map(c => c.marker)).toEqual([2])
-    expect(res.json.enrolment.attempted).toBe(1)
+    expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([2, 4])
+    expect(res.json.enrolment.attempted).toBe(2)
   }, T)
 
   it('a crowd that agrees on nothing has no voice to learn: nothing is written and the rename is refused', async () => {
@@ -376,13 +430,16 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(res.json.enrolment).toMatchObject({ attempted: 0, enrolled: 0, skipped: 'no_usable_audio' })
   }, T)
 
-  it('a sample the store declines is not counted as added', async () => {
-    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
-    enrolFailsOnCall = 2
+  it('a sample the store declines (a near duplicate of one already stored) is not counted as added', async () => {
+    standardMeeting()
+    // The store already holds an almost identical sample to raw chunk 6's vector (marker 6), so the REAL dedup gate says no.
+    seedProfile('Dana Reyes', 'a', [{ marker: 6, axis: 'a', source: 'manual' }])
+    await startServer()
     const res = await post(url, { ...ASSIGN, confirm: true })
     expect(enrolCalls).toHaveLength(3)
     expect(res.json.enrolment.enrolled).toBe(2)
     expect(res.json.enrolledEmbeddings).toBe(2)
+    expect(storeNow()[0].embeddings).toHaveLength(2 + 2)
   }, T)
 
   it('the report carries the merge floor it measured against', async () => {
@@ -391,13 +448,43 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(res.json.enrolment.floor).toBe(0.55)
   }, T)
 
-  it('a store that throws mid-write leaves the rename in place and reports what landed', async () => {
+  it('a store that throws leaves the rename in place and reports nothing landed', async () => {
     standardMeeting(); seedProfile('Dana Reyes'); await startServer()
-    enrolThrowsOnCall = 2
+    batchThrows = true
     const res = await post(url, { ...ASSIGN, confirm: true })
     expect(res.status).toBe(200)
     expect(sidecarNow().labels[1]).toBe('Dana Reyes')
-    expect(res.json.enrolment).toMatchObject({ enrolled: 1, skipped: 'store_unavailable' })
+    expect(res.json.enrolment).toMatchObject({ enrolled: 0, skipped: 'store_unavailable' })
+  }, T)
+
+  it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)('a REAL disk failure: the rename stays, enrolled is 0, store_unavailable is named, and the profile is exactly as it was', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    // Prime the store cache, then stop the data directory accepting new files: the store's temp-file-then-rename write fails with a
+    // genuine EACCES while the store stays readable. The correction ledger directory is created first so the rename itself can land.
+    const lib = await import('../lib/speaker-embeddings.js')
+    expect(lib.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
+    mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
+    chmodSync(dataDir, 0o500)
+    let res
+    try { res = await post(url, { ...ASSIGN, confirm: true }) } finally { chmodSync(dataDir, 0o700) }
+    expect(res.status).toBe(200)
+    expect(sidecarNow().labels[1]).toBe('Dana Reyes')
+    expect(res.json.enrolment).toMatchObject({ enrolled: 0, skipped: 'store_unavailable' })
+    expect(res.json.enrolledEmbeddings).toBe(0)
+    // Nothing from the failed batch is left in memory either: the cache must agree with the untouched file.
+    expect(storeNow()[0].embeddings).toHaveLength(1)
+    // No runtime reinstall: that would drop the cache and hide a cache that kept the failed samples.
+    expect(lib.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
+  }, T)
+
+  it('apply re-embeds nothing the preview already embedded', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    await post(url, { ...ASSIGN, dryRun: true })
+    const afterPreview = extractCalls
+    expect(afterPreview).toBe(3)
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.json.enrolment.enrolled).toBe(3)
+    expect(extractCalls).toBe(afterPreview)
   }, T)
 })
 
@@ -487,5 +574,308 @@ describe('unchanged defaults', () => {
     standardMeeting(); seedProfile('Dana Reyes'); await startServer()
     const res = await post(url, { from: 'Voice 2', to: 'Dana Reyes', dryRun: true })
     expect(res.json.enrolment).toBeUndefined()
+  }, T)
+})
+
+// ── 6.93.0: the gates that keep a wrong voice out of a real person's profile (QA B1) ──────────────────────
+
+/** The R1 shape: the saved pass kept ONE number, `Voice 1`, over chunks that hold two people (axes 1 and 2). */
+function r1Meeting(heard: Array<[number, 1 | 2 | 3 | 4]>): void {
+  seed(MAC_ID, heard.map(([raw]) => ({ raw, speaker: 'Voice 1' })))
+  for (const [raw, axis] of heard) archive(MAC_ID, raw, wav([{ sec: 4, axis, marker: raw }]))
+}
+const ASSIGN1 = { from: 'Voice 1', to: 'Dana Reyes', assignVoiceProfile: true }
+
+describe('B1: below the floor, a mixed Voice N, or too little audio is refused unless forced', () => {
+  it('R1 to assign: one number over two people, the other person dominant, Dana is the first person. Refused with the counts, nothing written', async () => {
+    r1Meeting([[0, 2], [2, 2], [4, 2], [6, 1], [8, 1]]) // three of the second person, two of Dana's voice
+    seedProfile('Dana Reyes', 'a'); await startServer()
+    const preview = await post(url, { ...ASSIGN1, dryRun: true })
+    expect(preview.json.enrolment).toMatchObject({ attempted: 5, groupSize: 3, clusterSkipped: 2, belowFloor: true, gates: ['below_floor', 'mixed_voice'] })
+    expect(preview.json.enrolment.similarity).toBeLessThan(0.55)
+    const refused = await post(url, { ...ASSIGN1, confirm: true })
+    expect(refused.status).toBe(409)
+    expect(refused.json.reason).toBe('below_floor')
+    expect(refused.json.gates).toEqual(['below_floor', 'mixed_voice'])
+    expect(refused.json.enrolment).toMatchObject({ attempted: 5, clusterSkipped: 2 })
+    expect(enrolCalls).toEqual([])
+    expect(storeNow()[0].embeddings).toHaveLength(1)
+    expect(sidecarNow().labels.every(l => l === 'Voice 1')).toBe(true)
+    expect(ledgerNow(MAC_ID)).toEqual([])
+  }, T)
+
+  it('a mixed Voice N is refused as mixed_voice even when the dominant voice does match the person', async () => {
+    r1Meeting([[0, 1], [2, 1], [4, 1], [6, 2], [8, 2]]) // Dana's voice dominates 3 of 5
+    seedProfile('Dana Reyes', 'a'); await startServer()
+    const refused = await post(url, { ...ASSIGN1, confirm: true })
+    expect(refused.status).toBe(409)
+    expect(refused.json.reason).toBe('mixed_voice')
+    expect(refused.json.enrolment).toMatchObject({ belowFloor: false, groupSize: 3, attempted: 5, clusterSkipped: 2, gates: ['mixed_voice'] })
+    expect(enrolCalls).toEqual([])
+  }, T)
+
+  it('a kept group of two thirds or more is not mixed: one stray unit among four is reported but allowed', async () => {
+    r1Meeting([[0, 1], [2, 1], [4, 1], [6, 2]])
+    seedProfile('Dana Reyes', 'a'); await startServer()
+    const res = await post(url, { ...ASSIGN1, confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment).toMatchObject({ attempted: 4, clusterSkipped: 1, gates: [], enrolled: 3 })
+  }, T)
+
+  it('force: true writes it, from the same previewed vectors', async () => {
+    r1Meeting([[0, 1], [2, 1], [4, 1], [6, 2], [8, 2]])
+    seedProfile('Dana Reyes', 'a'); await startServer()
+    const res = await post(url, { ...ASSIGN1, confirm: true, force: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment).toMatchObject({ enrolled: 3, gates: ['mixed_voice'] })
+    expect(storeNow()[0].sources.slice(1)).toEqual(new Array(3).fill(`mac-assign:${MAC_ID}`))
+  }, T)
+
+  it('one short unit is too_little_audio: refused, then allowed with force', async () => {
+    seed(MAC_ID, [{ raw: 0, speaker: 'Voice 2' }])
+    archive(MAC_ID, 0, wav([{ sec: 2.5, axis: 1, marker: 0 }]))
+    seedProfile('Dana Reyes'); await startServer()
+    const preview = await post(url, { ...ASSIGN, dryRun: true })
+    expect(preview.json.enrolment).toMatchObject({ groupSize: 1, gates: ['too_little_audio'] })
+    const refused = await post(url, { ...ASSIGN, confirm: true })
+    expect(refused.status).toBe(409)
+    expect(refused.json.reason).toBe('too_little_audio')
+    expect(enrolCalls).toEqual([])
+    const forced = await post(url, { ...ASSIGN, confirm: true, force: true })
+    expect(forced.status).toBe(200)
+    expect(forced.json.enrolment.enrolled).toBe(1)
+  }, T)
+
+  it('one unit that is a full 6 s chunk is enough on its own', async () => {
+    seed(MAC_ID, [{ raw: 0, speaker: 'Voice 2' }])
+    archive(MAC_ID, 0, wav([{ sec: 6, axis: 1, marker: 0 }]))
+    seedProfile('Dana Reyes'); await startServer()
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment).toMatchObject({ groupSize: 1, groupSec: 6, gates: [], enrolled: 1 })
+  }, T)
+
+  it('force does not skip the stalled-correction guard on an assignment', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
+    writeFileSync(join(dataDir, 'meeting-corrections', `${MAC_ID}.jsonl`), JSON.stringify({ id: 'x:Voice 2>Someone:1', phase: 'intent', at: new Date().toISOString(), from: 'Voice 2', to: 'Someone', chunks: [1], scope: 'meeting' }) + '\n')
+    const res = await post(url, { ...ASSIGN, confirm: true, force: true })
+    expect(res.status).toBe(409)
+    expect(res.json.reason).toBe('correction_pending')
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels[1]).toBe('Voice 2')
+  }, T)
+})
+
+describe('B3: the wearer profile is never a target', () => {
+  it('preview and confirm both refuse with owner_profile, and nothing is read or written', async () => {
+    standardMeeting(); seedProfile('MU'); await startServer()
+    for (const mode of [{ dryRun: true }, { confirm: true }, { confirm: true, force: true }]) {
+      const res = await post(url, { from: 'Voice 2', to: 'MU', assignVoiceProfile: true, ...mode })
+      expect(res.status).toBe(409)
+      expect(res.json.reason).toBe('owner_profile')
+    }
+    expect(extractCalls).toBe(0)
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels[1]).toBe('Voice 2')
+    expect(storeNow()[0].embeddings).toHaveLength(1)
+  }, T)
+
+  it('the match ignores case and surrounding space', async () => {
+    standardMeeting(); seedProfile('MU'); await startServer()
+    const res = await post(url, { from: 'Voice 2', to: 'mu', assignVoiceProfile: true, confirm: true })
+    expect(res.status).toBe(409)
+    expect(res.json.reason).toBe('owner_profile')
+    expect(enrolCalls).toEqual([])
+  }, T)
+})
+
+describe('B4: it never competes with a live recording, and never lets the meeting change under it', () => {
+  it('capture_active: refused before any audio is read, on preview and confirm, with nothing changed', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    captureLive = true
+    for (const mode of [{ dryRun: true }, { confirm: true }]) {
+      const res = await post(url, { ...ASSIGN, ...mode })
+      expect(res.status).toBe(409)
+      expect(res.json.reason).toBe('capture_active')
+      expect(res.json.retryable).toBe(true)
+    }
+    expect(extractCalls).toBe(0)
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels[1]).toBe('Voice 2')
+  }, T)
+
+  it('the router\'s own probe (live transcription sessions) refuses too, and a stale-only server does not', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer({ defaultProbe: true })
+    liveTranscriptionSessions = 1
+    const refused = await post(url, { ...ASSIGN, dryRun: true })
+    expect(refused.status).toBe(409)
+    expect(refused.json.reason).toBe('capture_active')
+    expect(extractCalls).toBe(0)
+    liveTranscriptionSessions = 0
+    expect((await post(url, { ...ASSIGN, dryRun: true })).status).toBe(200)
+  }, T)
+
+  it('a text-only rename is NOT held up by a live capture', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    captureLive = true
+    const res = await post(url, { from: 'Voice 2', to: 'Dana Reyes', confirm: true })
+    expect(res.status).toBe(200)
+  }, T)
+
+  it('a capture that starts while the audio is being read stops the write', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    onFirstExtract = () => { captureLive = true }
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(409)
+    expect(res.json.reason).toBe('capture_active')
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels[1]).toBe('Voice 2')
+  }, T)
+
+  it('meeting_changed: another write to the meeting while the plan yielded refuses the apply, and nothing is written', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    onFirstExtract = () => {
+      const path = join(root, MONTH, `${STEM}.g2-chunks.json`)
+      const doc = JSON.parse(readFileSync(path, 'utf-8'))
+      doc.speakers = [...doc.speakers, 'Someone Else']
+      writeFileSync(path, JSON.stringify(doc, null, 2))
+    }
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(409)
+    expect(res.json.reason).toBe('meeting_changed')
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels[1]).toBe('Voice 2')
+    expect(ledgerNow(MAC_ID)).toEqual([])
+  }, T)
+
+  it('a change to the transcript file alone, while the audio is read, fails the caller\'s expectedRevision: meeting_changed', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    const md = join(root, MONTH, `${STEM}.md`)
+    const sidecar = join(root, MONTH, `${STEM}.g2-chunks.json`)
+    // The same digest the review panel hands back as expectedRevision: sha256 over JSON.stringify of each file's text.
+    const revision = () => {
+      const hash = createHash('sha256')
+      for (const path of [md, sidecar]) hash.update(JSON.stringify(readFileSync(path, 'utf-8')))
+      return hash.digest('hex')
+    }
+    const expectedRevision = revision()
+    onFirstExtract = () => writeFileSync(md, readFileSync(md, 'utf-8') + '\nA note added by someone else.\n')
+    const res = await post(url, { ...ASSIGN, confirm: true, expectedRevision })
+    expect(res.status).toBe(409)
+    expect(res.json.reason).toBe('meeting_changed')
+    expect(enrolCalls).toEqual([])
+    expect(sidecarNow().labels[1]).toBe('Voice 2')
+  }, T)
+
+  it('assign_in_progress: a second request on the same meeting while the first is still reading is refused', async () => {
+    const raws = Array.from({ length: 55 }, (_, i) => i)
+    seed(MAC_ID, raws.map(raw => ({ raw, speaker: 'Voice 2' })))
+    for (const raw of raws) archive(MAC_ID, raw, wav([{ sec: 2.5, axis: 1, marker: raw }]))
+    seedProfile('Dana Reyes'); await startServer()
+    const [a, b] = await Promise.all([post(url, { ...ASSIGN, dryRun: true }), post(url, { ...ASSIGN, dryRun: true })])
+    const statuses = [a.status, b.status].sort()
+    expect(statuses).toEqual([200, 409])
+    expect([a, b].find(r => r.status === 409)!.json.reason).toBe('assign_in_progress')
+    // Once the first has finished the meeting can be planned again.
+    expect((await post(url, { ...ASSIGN, dryRun: true })).status).toBe(200)
+  }, T)
+
+  it('a wrong expectedRevision is refused up front, before any audio is read', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    const res = await post(url, { ...ASSIGN, confirm: true, expectedRevision: 'not-the-revision' })
+    expect(res.status).toBe(409)
+    expect(enrolCalls).toEqual([])
+  }, T)
+
+  it('the event loop keeps turning while the audio is read: other callbacks run between units', async () => {
+    const raws = Array.from({ length: 30 }, (_, i) => i)
+    seed(MAC_ID, raws.map(raw => ({ raw, speaker: 'Voice 2' })))
+    for (const raw of raws) archive(MAC_ID, raw, wav([{ sec: 2.5, axis: 1, marker: raw }]))
+    seedProfile('Dana Reyes'); await startServer()
+    let ticks = 0
+    const timer = setInterval(() => { ticks += 1 }, 0)
+    try { await post(url, { ...ASSIGN, dryRun: true }) } finally { clearInterval(timer) }
+    expect(extractCalls).toBe(30)
+    expect(ticks).toBeGreaterThan(5)
+  }, T)
+})
+
+describe('B2: Mac-assigned samples never displace anything else (real store, real eviction)', () => {
+  it('into a full profile with no Mac-assigned sample to replace: refused whole, with the reason, nothing changed', async () => {
+    standardMeeting()
+    const fill = Array.from({ length: 39 }, (_, i) => ({ marker: 20 + (i % 30), axis: 'a' as Axis, source: i < 12 ? `correction:meeting_x${i}` : i < 24 ? 'g2-training' : 'fireflies' }))
+    seedProfile('Dana Reyes', 'a', fill); await startServer()
+    const before = storeNow()[0]
+    const preview = await post(url, { ...ASSIGN, dryRun: true })
+    expect(preview.json.enrolment.skipped).toBe('profile_full')
+    expect(preview.json.message).toContain('Assigning is not possible')
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(422)
+    expect(res.json.enrolment.skipped).toBe('profile_full')
+    expect(storeNow()[0]).toEqual(before)
+    expect(sidecarNow().labels[1]).toBe('Voice 2')
+  }, T)
+
+  it('into a nearly full profile it uses the free slots only, and every correction, g2-training and fireflies sample survives', async () => {
+    standardMeeting()
+    const fill = Array.from({ length: 38 }, (_, i) => ({ marker: 20 + (i % 30), axis: 'a' as Axis, source: i < 12 ? `correction:meeting_x${i}` : i < 24 ? 'g2-training' : 'fireflies' }))
+    seedProfile('Dana Reyes', 'a', fill); await startServer()
+    const before = storeNow()[0]
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment.enrolled).toBe(1) // one free slot
+    const after = storeNow()[0]
+    expect(after.embeddings).toHaveLength(40)
+    expect(after.sources.slice(0, 39)).toEqual(before.sources)
+    expect(after.sources[39]).toBe(`mac-assign:${MAC_ID}`)
+  }, T)
+
+  it('with Mac-assigned samples already at the profile cap, a new assignment replaces the oldest of THEM, not a correction', async () => {
+    standardMeeting()
+    const fill = [
+      ...Array.from({ length: 10 }, (_, i) => ({ marker: 10 + i, axis: 'a' as Axis, source: `mac-assign:mac_old${i}` })),
+      ...Array.from({ length: 20 }, (_, i) => ({ marker: 20 + i, axis: 'a' as Axis, source: i < 10 ? `correction:meeting_x${i}` : 'g2-training' })),
+    ]
+    seedProfile('Dana Reyes', 'a', fill); await startServer()
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment.enrolled).toBe(3)
+    const sources = storeNow()[0].sources
+    expect(sources.filter(s => s.startsWith('correction:'))).toHaveLength(10)
+    expect(sources.filter(s => s === 'g2-training')).toHaveLength(11) // the seed sample plus ten
+    expect(sources.filter(s => s.startsWith('mac-assign:mac_old'))).toHaveLength(7)
+    expect(sources.filter(s => s === `mac-assign:${MAC_ID}`)).toHaveLength(3)
+  }, T)
+
+  it('a full profile whose Mac-assigned samples can be replaced still takes the new ones, and nothing else is displaced', async () => {
+    standardMeeting()
+    const fill = [
+      ...Array.from({ length: 3 }, (_, i) => ({ marker: 10 + i, axis: 'a' as Axis, source: `mac-assign:mac_old${i}` })),
+      ...Array.from({ length: 36 }, (_, i) => ({ marker: 20 + (i % 30), axis: 'a' as Axis, source: i < 12 ? `correction:meeting_x${i}` : i < 24 ? 'g2-training' : 'fireflies' })),
+    ]
+    seedProfile('Dana Reyes', 'a', fill); await startServer()
+    const before = storeNow()[0]
+    expect(before.embeddings).toHaveLength(40)
+    const preview = await post(url, { ...ASSIGN, dryRun: true })
+    expect(preview.json.enrolment).toMatchObject({ skipped: null, enrolled: 3 })
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment.enrolled).toBe(3)
+    const after = storeNow()[0]
+    expect(after.embeddings).toHaveLength(40)
+    expect(after.sources.filter(s => s === `mac-assign:${MAC_ID}`)).toHaveLength(3)
+    expect(after.sources.filter(s => s.startsWith('mac-assign:mac_old'))).toHaveLength(0)
+    expect(after.sources.filter(s => s.startsWith('correction:'))).toHaveLength(12)
+    expect(after.sources.filter(s => s === 'fireflies')).toHaveLength(12)
+  }, T)
+
+  it('"Not in this meeting" still retracts the Mac-assigned samples by session', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    await post(url, { ...ASSIGN, confirm: true })
+    expect(storeNow()[0].sources.filter(s => s === `mac-assign:${MAC_ID}`)).toHaveLength(3)
+    const { isSampleFromSession } = await import('../lib/training-audio-provenance.js')
+    expect(storeNow()[0].sources.filter(s => isSampleFromSession(s, MAC_ID))).toHaveLength(3)
+    expect(isSampleFromSession(`mac-assign:${MAC_ID}x`, MAC_ID)).toBe(false)
   }, T)
 })

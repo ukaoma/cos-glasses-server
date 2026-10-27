@@ -118,3 +118,15 @@ describe('reporting what cannot be reached', () => {
     expect(untraceableSampleCount(['auto:m1', 'correction:m2', 'g2-training:m3'])).toBe(0)
   })
 })
+
+describe('6.93.0: mac-assign:<session> is retractable by session', () => {
+  it('matches its own session exactly, and no other', () => {
+    expect(isSampleFromSession('mac-assign:mac_1b2c', 'mac_1b2c')).toBe(true)
+    expect(isSampleFromSession('mac-assign:mac_1b2c_extra', 'mac_1b2c')).toBe(false)
+    expect(isSampleFromSession('mac-assign:', '')).toBe(false)
+    expect(isSampleFromSession('mac-assign', 'mac_1b2c')).toBe(false)
+  })
+  it('is traceable, so a retraction does not count it as unreachable', () => {
+    expect(untraceableSampleCount(['mac-assign:mac_1b2c'])).toBe(0)
+  })
+})
