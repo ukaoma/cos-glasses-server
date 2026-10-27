@@ -17,7 +17,7 @@ let handoff: typeof import('./g2-ops-handoff.js')
 let runner: typeof import('./g2-enrichment-runner.js')
 
 const SESSION = 'mac_8743a230-7f8f-4d59-a0de-5ffdfdcd5801'
-const CAPS = { schema: 1, g2_import: 1, mac_import: 1 }
+const CAPS = { schema: 1, g2_import: 1, mac_import: 1, mac_twins: 1 }
 
 function macMarkdown(source = '| **Source** | Mac System Audio |'): string {
   return [
@@ -125,8 +125,22 @@ describe('sync capability probe', () => {
     expect(failing).toHaveBeenCalledTimes(2)
     const garbage = vi.fn(async () => ({ code: 0, stdout: 'not json' }))
     expect(await handoff.readSyncCapabilities('py', script, garbage)).toEqual({ macImport: false, reason: 'capability_probe_unreadable' })
-    const ok = vi.fn(async () => ({ code: 0, stdout: 'noise\n{"mac_import": 1}\n' }))
+    const ok = vi.fn(async () => ({ code: 0, stdout: 'noise\n{"mac_import": 1, "mac_twins": 1}\n' }))
     expect(await handoff.readSyncCapabilities('py', script, ok)).toEqual({ macImport: true, reason: null })
+  })
+
+  it('refuses a script that can import Mac recordings but has no twin rule', async () => {
+    const tree = makeTree()
+    const script = writeFakeSyncMeetings(tree.scripts, { capabilities: { schema: 1, g2_import: 1, mac_import: 1 } })
+    expect(await handoff.readSyncCapabilities(join(tree.scripts, 'venv/bin/python3'), script))
+      .toEqual({ macImport: false, reason: 'sync_script_upgrade_required' })
+    const local = writeRecording(tree, '2026-10-27_Mac_recording_t.md', macMarkdown(), macSidecar)
+    process.env.COS_SCRIPTS_DIR = tree.scripts
+    expect(await handoff.fileMacRecordingInLibrary(local)).toEqual({ outcome: 'standalone', reason: 'sync_script_upgrade_required' })
+    expect(readFakeInvocations(tree.scripts).filter(call => call.args[0] === '--mac-import-file')).toEqual([])
+    const twinsOnly = vi.fn(async () => ({ code: 0, stdout: '{"mac_twins": 1}\n' }))
+    handoff.resetSyncCapabilitiesCache()
+    expect(await handoff.readSyncCapabilities('py', script, twinsOnly)).toEqual({ macImport: false, reason: 'sync_script_upgrade_required' })
   })
 })
 

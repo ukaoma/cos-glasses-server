@@ -16,7 +16,7 @@ import { wavOf } from '../lib/__fixtures__/nemotron-helpers.js'
 import { readFakeInvocations, writeFakeSyncMeetings } from '../lib/__fixtures__/fake-sync-meetings.js'
 
 const id = 'mac_abcdef01-2345-6789-abcd-0123456789ab'
-const CAPS = { schema: 1, g2_import: 1, mac_import: 1 }
+const CAPS = { schema: 1, g2_import: 1, mac_import: 1, mac_twins: 1 }
 const savedEnv = { ...process.env }
 let root: string, ops: string, scripts: string, server: Server, base: string
 const background: Promise<void>[] = []

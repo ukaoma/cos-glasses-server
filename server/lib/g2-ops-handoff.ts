@@ -419,6 +419,7 @@ export function resetSyncCapabilitiesCache(): void {
 
 /**
  * What the installed sync_meetings.py can do, read from `--capabilities` rather than guessed.
+ * Mac filing needs `mac_import: 1` and `mac_twins: 1`.
  *
  * Cached per python + script + mtime + size, so an upgraded script is probed again. A script
  * whose text never mentions `--capabilities` is an older one: it would take the sync lock
@@ -451,7 +452,10 @@ export async function readSyncCapabilities(
   const line = probed.stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? ''
   let parsed: unknown
   try { parsed = JSON.parse(line) } catch { return { macImport: false, reason: 'capability_probe_unreadable' } }
-  const macImport = !!parsed && typeof parsed === 'object' && (parsed as Record<string, unknown>).mac_import === 1
+  // Both: the import, AND the twin rule that keeps a Mac copy of a G2-recorded meeting out of
+  // LightRAG and Work. A script with the import but not the twin rule would file that meeting twice.
+  const caps = !!parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
+  const macImport = caps.mac_import === 1 && caps.mac_twins === 1
   const result = { macImport, reason: macImport ? null : 'sync_script_upgrade_required' }
   capabilityCache.set(key, result)
   return result
