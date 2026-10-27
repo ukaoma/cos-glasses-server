@@ -24,6 +24,8 @@ const MONTH = '2026-10'
 const STEM = '2026-10-26_Vendor_Call_abc12345'
 const SR = 16_000
 const DIM = 192
+/** Samples a default-seeded profile holds: its own voiceprint plus eleven ordinary G2 samples (see seedProfile). */
+const BASE = 12
 
 let root = ''
 let dataDir = ''
@@ -105,7 +107,11 @@ function archive(sessionId: string, raw: number, audio: Buffer): void {
   writeFileSync(join(dir, `chunk_${String(raw).padStart(4, '0')}.wav`), audio)
 }
 
-function seedProfile(name: string, axis: Axis = 'a', more: Array<{ marker: number; axis: Axis; source: string }> = []): void {
+// A profile may carry at most as many Mac-assigned samples as it has OTHER samples (6.93.0 polish), so a profile that is
+// not seeded explicitly gets twelve ordinary G2 samples; a test that passes ten or more `more` samples chose its own mix.
+function seedProfile(name: string, axis: Axis = 'a', moreIn: Array<{ marker: number; axis: Axis; source: string }> = [], withBase = moreIn.length < 10): void {
+  const base = withBase ? Array.from({ length: 11 }, (_, i) => ({ marker: 30 + i, axis, source: 'g2-training' })) : []
+  const more = [...moreIn, ...base]
   writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({ profiles: [
     { name, embeddings: [Array.from(voiceprint(60, axis)), ...more.map(m => Array.from(voiceprint(m.marker, m.axis)))], sources: ['g2-training', ...more.map(m => m.source)] },
   ] }))
@@ -348,7 +354,7 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(enrolCalls).toEqual([])
     expect(sidecarNow().labels).toEqual(['Voice 1', 'Voice 2', 'Voice 1', 'Voice 2', 'Voice 2'])
     expect(ledgerNow(MAC_ID)).toEqual([])
-    expect(storeNow()[0].embeddings).toHaveLength(1)
+    expect(storeNow()[0].embeddings).toHaveLength(BASE)
   }, T)
 
   it('force: true adds it anyway, as Mac-assigned samples, and says what it added', async () => {
@@ -358,8 +364,8 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(res.json.enrolment).toMatchObject({ enrolled: 3, belowFloor: true, gates: ['below_floor'] })
     expect(sidecarNow().labels[1]).toBe('Dana Reyes')
     const profile = storeNow()[0]
-    expect(profile.embeddings).toHaveLength(4)
-    expect(profile.sources.slice(1)).toEqual([`mac-assign:${MAC_ID}`, `mac-assign:${MAC_ID}`, `mac-assign:${MAC_ID}`])
+    expect(profile.embeddings).toHaveLength(BASE + 3)
+    expect(profile.sources.slice(BASE)).toEqual([`mac-assign:${MAC_ID}`, `mac-assign:${MAC_ID}`, `mac-assign:${MAC_ID}`])
   }, T)
 
   it('more audio than the cap is spread across the whole meeting, bounded at 40 units and 10 Mac-assigned samples', async () => {
@@ -372,7 +378,7 @@ describe('apply: renames, then writes the previewed samples once', () => {
     const res = await post(url, { ...ASSIGN, confirm: true })
     expect(res.json.enrolment.enrolled).toBe(10)
     expect(enrolCalls).toHaveLength(10)
-    expect(storeNow()[0].embeddings).toHaveLength(11)
+    expect(storeNow()[0].embeddings).toHaveLength(BASE + 10)
     // The first 40 chunks alone could not reach past marker 39: the spread reaches the end of the meeting.
     expect(Math.max(...enrolCalls.map(c => c.marker))).toBeGreaterThan(45)
   }, T)
@@ -439,7 +445,7 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(enrolCalls).toHaveLength(3)
     expect(res.json.enrolment.enrolled).toBe(2)
     expect(res.json.enrolledEmbeddings).toBe(2)
-    expect(storeNow()[0].embeddings).toHaveLength(2 + 2)
+    expect(storeNow()[0].embeddings).toHaveLength(BASE + 1 + 2)
   }, T)
 
   it('the report carries the merge floor it measured against', async () => {
@@ -462,7 +468,7 @@ describe('apply: renames, then writes the previewed samples once', () => {
     // Prime the store cache, then stop the data directory accepting new files: the store's temp-file-then-rename write fails with a
     // genuine EACCES while the store stays readable. The correction ledger directory is created first so the rename itself can land.
     const lib = await import('../lib/speaker-embeddings.js')
-    expect(lib.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
+    expect(lib.readVoiceProfiles().profiles[0].embeddings).toHaveLength(BASE)
     mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
     chmodSync(dataDir, 0o500)
     let res
@@ -472,9 +478,9 @@ describe('apply: renames, then writes the previewed samples once', () => {
     expect(res.json.enrolment).toMatchObject({ enrolled: 0, skipped: 'store_unavailable' })
     expect(res.json.enrolledEmbeddings).toBe(0)
     // Nothing from the failed batch is left in memory either: the cache must agree with the untouched file.
-    expect(storeNow()[0].embeddings).toHaveLength(1)
+    expect(storeNow()[0].embeddings).toHaveLength(BASE)
     // No runtime reinstall: that would drop the cache and hide a cache that kept the failed samples.
-    expect(lib.readVoiceProfiles().profiles[0].embeddings).toHaveLength(1)
+    expect(lib.readVoiceProfiles().profiles[0].embeddings).toHaveLength(BASE)
   }, T)
 
   it('apply re-embeds nothing the preview already embedded', async () => {
@@ -599,7 +605,7 @@ describe('B1: below the floor, a mixed Voice N, or too little audio is refused u
     expect(refused.json.gates).toEqual(['below_floor', 'mixed_voice'])
     expect(refused.json.enrolment).toMatchObject({ attempted: 5, clusterSkipped: 2 })
     expect(enrolCalls).toEqual([])
-    expect(storeNow()[0].embeddings).toHaveLength(1)
+    expect(storeNow()[0].embeddings).toHaveLength(BASE)
     expect(sidecarNow().labels.every(l => l === 'Voice 1')).toBe(true)
     expect(ledgerNow(MAC_ID)).toEqual([])
   }, T)
@@ -628,7 +634,7 @@ describe('B1: below the floor, a mixed Voice N, or too little audio is refused u
     const res = await post(url, { ...ASSIGN1, confirm: true, force: true })
     expect(res.status).toBe(200)
     expect(res.json.enrolment).toMatchObject({ enrolled: 3, gates: ['mixed_voice'] })
-    expect(storeNow()[0].sources.slice(1)).toEqual(new Array(3).fill(`mac-assign:${MAC_ID}`))
+    expect(storeNow()[0].sources.slice(BASE)).toEqual(new Array(3).fill(`mac-assign:${MAC_ID}`))
   }, T)
 
   it('one short unit is too_little_audio: refused, then allowed with force', async () => {
@@ -678,7 +684,7 @@ describe('B3: the wearer profile is never a target', () => {
     expect(extractCalls).toBe(0)
     expect(enrolCalls).toEqual([])
     expect(sidecarNow().labels[1]).toBe('Voice 2')
-    expect(storeNow()[0].embeddings).toHaveLength(1)
+    expect(storeNow()[0].embeddings).toHaveLength(BASE)
   }, T)
 
   it('the match ignores case and surrounding space', async () => {
@@ -731,6 +737,26 @@ describe('B4: it never competes with a live recording, and never lets the meetin
     expect(res.json.reason).toBe('capture_active')
     expect(enrolCalls).toEqual([])
     expect(sidecarNow().labels[1]).toBe('Voice 2')
+  }, T)
+
+  it('a finalization job that appears while the audio is read stops the write: meeting_finalizing, nothing changed', async () => {
+    standardMeeting(); seedProfile('Dana Reyes'); await startServer()
+    // Imported after startServer, which reset the module registry: the store's root is fixed when its module loads.
+    const { MeetingFinalizationJobStore } = await import('../lib/meeting-finalization-jobs.js')
+    const before = storeNow()[0]
+    onFirstExtract = () => {
+      new MeetingFinalizationJobStore().save({
+        sessionId: MAC_ID, meetingPath: join(dataDir, 'recordings', 'x.md'), sidecarPath: join(dataDir, 'recordings', 'x.g2-chunks.json'),
+        audioDir: null, streamingWordCount: 0, phase: 'capture_pending', claimPending: false,
+      })
+    }
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(409)
+    expect(res.json.reason).toBe('meeting_finalizing')
+    expect(enrolCalls).toEqual([])
+    expect(storeNow()[0]).toEqual(before)
+    expect(sidecarNow().labels[1]).toBe('Voice 2')
+    expect(ledgerNow(MAC_ID)).toEqual([])
   }, T)
 
   it('meeting_changed: another write to the meeting while the plan yielded refuses the apply, and nothing is written', async () => {
@@ -868,6 +894,41 @@ describe('B2: Mac-assigned samples never displace anything else (real store, rea
     expect(after.sources.filter(s => s.startsWith('mac-assign:mac_old'))).toHaveLength(0)
     expect(after.sources.filter(s => s.startsWith('correction:'))).toHaveLength(12)
     expect(after.sources.filter(s => s === 'fireflies')).toHaveLength(12)
+  }, T)
+
+  it('a small profile takes at most as many Mac-assigned samples as it has other samples, never the flat ten', async () => {
+    standardMeeting()
+    seedProfile('Dana Reyes', 'a', [{ marker: 31, axis: 'a', source: 'manual' }], false) // two ordinary samples
+    await startServer()
+    const preview = await post(url, { ...ASSIGN, dryRun: true })
+    expect(preview.json.enrolment.enrolled).toBe(2) // three selectable, capacity two
+    const res = await post(url, { ...ASSIGN, confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.enrolment.enrolled).toBe(2)
+    const sources = storeNow()[0].sources
+    expect(sources.filter(s => s.startsWith('mac-assign:'))).toHaveLength(2)
+    expect(sources.filter(s => !s.startsWith('mac-assign:'))).toHaveLength(2)
+  }, T)
+
+  it('end to end: "Not in this meeting" on the named row removes this meeting\'s Mac-assigned samples and nobody else\'s', async () => {
+    standardMeeting()
+    const other = { marker: 50, axis: 'a' as Axis, source: 'mac-assign:mac_9f9f9f9f-0000-4000-8000-000000000001' }
+    seedProfile('Dana Reyes', 'a', [other])
+    await startServer()
+    const assigned = await post(url, { ...ASSIGN, confirm: true })
+    expect(assigned.status).toBe(200)
+    expect(sidecarNow().labels[1]).toBe('Dana Reyes')
+    expect(storeNow()[0].sources.filter(s => s === `mac-assign:${MAC_ID}`)).toHaveLength(3)
+    const nonMacBefore = storeNow()[0].sources.filter(s => !s.startsWith('mac-assign:'))
+
+    const res = await post(`/api/meeting/${MAC_ID}/deattribute`, { from: 'Dana Reyes', confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.training.retracted).toBe(3)
+    const after = storeNow()[0].sources
+    expect(after.filter(s => s === `mac-assign:${MAC_ID}`)).toHaveLength(0)
+    expect(after.filter(s => s === other.source)).toHaveLength(1) // another meeting's assignment is untouched
+    expect(after.filter(s => !s.startsWith('mac-assign:'))).toEqual(nonMacBefore)
+    expect(sidecarNow().labels[1]).not.toBe('Dana Reyes')
   }, T)
 
   it('"Not in this meeting" still retracts the Mac-assigned samples by session', async () => {

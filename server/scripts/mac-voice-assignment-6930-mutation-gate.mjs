@@ -23,8 +23,11 @@ const G2_T = ['server/routes/meeting-relabel-route.test.ts']
 const EV_T = ['server/lib/embedding-eviction.test.ts', 'server/lib/embedding-eviction-integration.test.ts']
 const SE_T = ['server/lib/speaker-embeddings-enroll.test.ts']
 const TP_T = ['server/lib/training-audio-provenance.test.ts']
-const ALL = [...LIB_T, ...ROUTE_T, ...G2_T, ...EV_T, ...SE_T, ...TP_T]
+const MERGE_T = ['server/lib/voice-profile-merge.test.ts']
+const VS_T = ['server/routes/voice-safety.test.ts']
+const ALL = [...LIB_T, ...ROUTE_T, ...G2_T, ...EV_T, ...SE_T, ...TP_T, ...MERGE_T, ...VS_T]
 const A = 'server/lib/mac-voice-assignment.ts', M = 'server/routes/meeting.ts'
+const VP = 'server/lib/voice-profile-store.ts', VR = 'server/routes/voice.ts'
 const EV = 'server/lib/embedding-eviction.ts', SE = 'server/lib/speaker-embeddings.ts', TP = 'server/lib/training-audio-provenance.ts'
 const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests })
 
@@ -102,7 +105,10 @@ const mutations = [
   m('plan-deadline-not-a-refusal', A, ["      report.skipped = 'deadline'\n", ''], LIB_T),
   m('env-deadline-unbounded', A, ['raw >= 1000 && raw <= 25_000', 'raw >= 0'], LIB_T),
   m('vectors-not-reused', A, ['    const hit = cacheGet(key)\n', '    const hit = undefined as ReturnType<typeof cacheGet>\n'], [...LIB_T, ...ROUTE_T]),
-  m('vector-key-ignores-file', A, ['|${info.size}|${Math.round(info.mtimeMs)}`', '`'], LIB_T),
+  m('vector-key-ignores-file', A, ['|${info.size}|${Math.round(info.mtimeMs)}|${info.ino}|${Math.round(info.ctimeMs)}`', '`'], LIB_T),
+  m('vector-key-ignores-mtime', A, ['|${Math.round(info.mtimeMs)}|${info.ino}', '|${info.ino}'], LIB_T),
+  m('vector-key-ignores-inode', A, ['|${info.ino}|${Math.round(info.ctimeMs)}`', '|${Math.round(info.ctimeMs)}`'], LIB_T),
+  m('vector-key-ignores-ctime', A, ['|${info.ino}|${Math.round(info.ctimeMs)}`', '|${info.ino}`'], LIB_T),
   m('vector-key-ignores-slice', A, ["${unit.slice ? `${unit.slice.startSec.toFixed(3)}-${unit.slice.endSec.toFixed(3)}` : 'whole'}", "whole"], LIB_T),
   m('apply-writes-per-sample', A, ['const result = enrollEmbeddingsBatch(plan.report.person, plan.selected.map(embedding => ({ embedding, source })))', 'const result = plan.selected.map(embedding => enrollEmbeddingsBatch(plan.report.person, [{ embedding, source }])).reduce((a, r) => ({ enrolled: a.enrolled + r.enrolled, declined: a.declined + r.declined, persisted: a.persisted && r.persisted }), { enrolled: 0, declined: 0, persisted: true })'], LIB_T),
   // ── Commit ──
@@ -130,7 +136,24 @@ const mutations = [
   m('mac-assign-is-a-correction', EV, ["return String(source ?? '').trim().toLowerCase().startsWith('correction')", "return String(source ?? '').trim().toLowerCase().startsWith('correction') || isMacAssign(source)"], EV_T),
   m('mac-assign-evicts-others', EV, ["    if (macIdx.length > 0) {\n      return {\n        index: macIdx[0],", "    if (false) {\n      return {\n        index: macIdx[0],"], [...EV_T, ...SE_T, ...ROUTE_T]),
   m('mac-assign-refusal-evicts-index-zero', EV, ["return { index: -1, tier: 'assisted', reason: 'profile is full and holds no Mac-assigned sample to replace, refusing the Mac-assigned sample', refuse: true }", "return { index: 0, tier: 'assisted', reason: 'profile is full and holds no Mac-assigned sample to replace, refusing the Mac-assigned sample' }"], [...EV_T, ...SE_T, ...ROUTE_T]),
-  m('mac-assign-evicted-after-g2-training', EV, ["const idx = tier === 'assisted' && macIdx.length > 0 ? macIdx[0] : sources.findIndex(s => provenanceTier(s) === tier)", "const idx = sources.findIndex(s => provenanceTier(s) === tier)"], EV_T),
+  m('mac-assign-outlives-auto', EV, ["  if (macIdx.length > 0) {\n    return {\n      index: macIdx[0],\n      tier: 'assisted',\n      reason: `dropping the oldest Mac-assigned sample", "  if (false) {\n    return {\n      index: macIdx[0],\n      tier: 'assisted',\n      reason: `dropping the oldest Mac-assigned sample"], [...EV_T, ...SE_T]),
+  m('mac-assign-evicted-only-within-assisted', EV, [[
+    "  if (macIdx.length > 0) {\n    return {\n      index: macIdx[0],\n      tier: 'assisted',\n      reason: `dropping the oldest Mac-assigned sample (${String(sources[macIdx[0]])}) before any other kind, it is the weakest evidence`,\n    }\n  }\n", ''],
+    ["    const idx = sources.findIndex(s => provenanceTier(s) === tier)", "    const idx = tier === 'assisted' && macIdx.length > 0 ? macIdx[0] : sources.findIndex(s => provenanceTier(s) === tier)"]], [...EV_T, ...SE_T]),
+  // ── 6.93.0 polish: the cap is min(10, the profile's other samples), at plan time, at write time and in a merge ──
+  m('cap-is-flat-ten', EV, ['return Math.min(MAC_ASSIGN_PROFILE_CAP, Math.max(0, sampleCount - macCount))', 'return MAC_ASSIGN_PROFILE_CAP'], [...EV_T, ...SE_T, ...LIB_T, ...ROUTE_T, ...MERGE_T]),
+  m('cap-counts-mac-as-other', EV, ['return Math.min(MAC_ASSIGN_PROFILE_CAP, Math.max(0, sampleCount - macCount))', 'return Math.min(MAC_ASSIGN_PROFILE_CAP, sampleCount)'], [...EV_T, ...SE_T, ...LIB_T, ...ROUTE_T, ...MERGE_T]),
+  m('plan-capacity-flat-ten', A, ['Math.min(macAssignCapFor(profile.embeddings.length, macCount), Math.max(0,', 'Math.min(10, Math.max(0,'], ROUTE_T),
+  m('store-guard-flat-ten', SE, ['macCount >= macAssignCapFor(profile.embeddings.length, macCount)', 'macCount >= 10'], [...SE_T, ...LIB_T]),
+  m('store-guard-not-for-mac-incoming', SE, ['const macAtCap = isMacAssign(source) && macCount >= macAssignCapFor(profile.embeddings.length, macCount)', 'const macAtCap = false'], [...SE_T, ...LIB_T]),
+  m('merge-mac-not-trimmed', VP, ['const trimmed = new Set(macKept.slice(0, Math.max(0, macKept.length - macAllowed)))', 'const trimmed = new Set<number>()'], MERGE_T),
+  m('merge-trims-newest-mac', VP, ['const trimmed = new Set(macKept.slice(0, Math.max(0, macKept.length - macAllowed)))', 'const trimmed = new Set(macKept.slice(macAllowed))'], MERGE_T),
+  m('merge-mac-cap-flat-ten', VP, ['macAssignCapFor(kept.length, macKept.length)', 'Math.min(10, kept.length)'], MERGE_T),
+  m('merge-mac-ranked-as-assisted', VP, ['isMacAssign(sources[i]) ? -1 : EVICTION_ORDER', 'false ? -1 : EVICTION_ORDER'], MERGE_T),
+  m('profiles-listing-mac-assign-uncollapsed', VR, [": source.startsWith('mac-assign:') ? 'mac-assign' : source", ': source'], VS_T),
+  m('route-finalizing-post-check-dropped', M, ['      const finalizingAfter = finalizingRefusal(sessionId)\n', '      const finalizingAfter = null as ReturnType<typeof finalizingRefusal>\n'], ROUTE_T),
+  m('deattribute-retracts-nothing', M, ['retracted = retractEmbeddingsBySource(from, s => isSampleFromSession(s, sessionId)).removed', 'retracted = 0'], ROUTE_T),
+  m('deattribute-retracts-every-sample', M, ['retracted = retractEmbeddingsBySource(from, s => isSampleFromSession(s, sessionId)).removed', 'retracted = retractEmbeddingsBySource(from, () => true).removed'], ROUTE_T),
   m('mac-assign-cap-changed', EV, ['export const MAC_ASSIGN_PROFILE_CAP = 10', 'export const MAC_ASSIGN_PROFILE_CAP = 20'], [...EV_T, ...SE_T, ...ROUTE_T]),
   m('mac-assign-not-retractable', TP, ["['auto:', 'correction:', 'g2-training:', 'ext-group:', 'mac-assign:']", "['auto:', 'correction:', 'g2-training:', 'ext-group:']"], [...TP_T, ...ROUTE_T]),
   // ── B2/B4/W8: the real store code ──

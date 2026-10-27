@@ -19,6 +19,7 @@ import {
   EVICTION_ORDER,
   isCorrection,
   isMacAssign,
+  macAssignCapFor,
   provenanceTier,
   tierBreakdown,
   vouchesForIdentity,
@@ -269,9 +270,29 @@ describe('mac-assign:<session> provenance', () => {
     expect(chooseEviction(sources, 'g2-training:new', 4)!.index).toBe(2)
   })
 
-  it('does not change what a fireflies or automatic sample costs: those still go first', () => {
-    const sources = ['mac-assign:m', 'fireflies', 'g2-training']
-    expect(chooseEviction(sources, 'correction:new', 40)!.index).toBe(1)
+  it('a Mac-assigned sample is evicted BEFORE an auto:, unknown or fireflies one, whatever arrives', () => {
+    const sources = ['auto:old', 'unknown', 'fireflies', 'mac-assign:m', 'g2-training']
+    for (const incoming of ['correction:new', 'g2-training', 'auto:meeting_1', 'fireflies', 'manual']) {
+      // correction:new is below its quota here, so it goes through the ordinary walk like the rest.
+      const choice = chooseEviction(sources, incoming, 40)!
+      expect(choice.index, incoming).toBe(3)
+      expect(choice.tier).toBe('assisted')
+    }
+  })
+
+  it('without a Mac-assigned sample the order is unchanged: automatic, unknown, metadata, assisted, human', () => {
+    expect(chooseEviction(['g2-training', 'fireflies', 'unknown', 'auto:x', 'manual'], 'g2-training', 40)!.index).toBe(3)
+    expect(chooseEviction(['g2-training', 'fireflies', 'unknown', 'manual'], 'g2-training', 40)!.index).toBe(2)
+    expect(chooseEviction(['g2-training', 'fireflies', 'manual'], 'g2-training', 40)!.index).toBe(1)
+  })
+
+  it('macAssignCapFor never exceeds ten, and never exceeds the profile\'s other samples', () => {
+    expect(macAssignCapFor(2, 0)).toBe(2)
+    expect(macAssignCapFor(12, 10)).toBe(2)
+    expect(macAssignCapFor(40, 0)).toBe(10)
+    expect(macAssignCapFor(40, 30)).toBe(10)
+    expect(macAssignCapFor(5, 5)).toBe(0)
+    expect(macAssignCapFor(3, 9)).toBe(0) // more Mac samples than total: never negative
   })
 
   it('the per-profile cap is ten', () => {

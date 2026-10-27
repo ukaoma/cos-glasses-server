@@ -122,6 +122,57 @@ describe('merging in the store', () => {
     expect(sources.some(s => s.startsWith('merged'))).toBe(false)
   })
 
+  describe('the merged profile obeys the Mac-assigned cap (6.93.0 polish)', () => {
+    const macs = (n: number, tag: string) => Array.from({ length: n }, (_, i) => `mac-assign:mac_${tag}${i}`)
+    const isMac = (src: string | undefined) => (src ?? '').startsWith('mac-assign:')
+
+    it('two profiles with ten Mac-assigned samples each do not merge to twenty: ten stay, the oldest go', () => {
+      const store: ProfileStore = {
+        profiles: [
+          { name: 'Luke Henry', embeddings: cluster(0, 15), sources: [...macs(10, 'a'), ...Array(5).fill('g2-training')] },
+          { name: 'Luke H', embeddings: cluster(0, 15, 0.07), sources: [...macs(10, 'b'), ...Array(5).fill('g2-training')] },
+        ],
+      }
+      const out = mergeProfilesInStore(store, 'Luke Henry', ['Luke H'], { cap: 40 })
+      const kept = store.profiles[0].sources!
+      expect(kept.filter(isMac)).toHaveLength(10)
+      expect(kept.filter(s => s === 'g2-training')).toHaveLength(10)
+      // Oldest first: everything from the target's own list (a0..a9) goes before any of the absorbed list (b0..b9).
+      expect(kept.filter(isMac)).toEqual(macs(10, 'b'))
+      expect(out.samplesAfter).toBe(20)
+      expect(out.droppedToCap).toBe(10)
+      expect(store.profiles[0].embeddings).toHaveLength(kept.length)
+    })
+
+    it('never more Mac-assigned samples than the profile\'s other samples', () => {
+      const store: ProfileStore = {
+        profiles: [
+          { name: 'Luke Henry', embeddings: cluster(0, 3), sources: ['manual', 'g2-training', 'mac-assign:mac_a0'] },
+          { name: 'Luke H', embeddings: cluster(0, 5, 0.07), sources: macs(5, 'b') },
+        ],
+      }
+      const out = mergeProfilesInStore(store, 'Luke Henry', ['Luke H'], { cap: 40 })
+      const kept = store.profiles[0].sources!
+      expect(kept.filter(isMac)).toHaveLength(2) // two other samples
+      expect(kept.filter(s => !isMac(s))).toEqual(['manual', 'g2-training'])
+      expect(out.samplesAfter).toBe(4)
+      expect(out.droppedToCap).toBe(4)
+    })
+
+    it('under cap pressure a Mac-assigned sample ranks below even an auto: one', () => {
+      const store: ProfileStore = {
+        profiles: [
+          { name: 'Luke Henry', embeddings: cluster(0, 6), sources: macs(6, 'a') },
+          { name: 'Luke H', embeddings: cluster(0, 6, 0.07), sources: Array.from({ length: 6 }, (_, i) => `auto:meeting_${i}`) },
+        ],
+      }
+      mergeProfilesInStore(store, 'Luke Henry', ['Luke H'], { cap: 8 })
+      const kept = store.profiles[0].sources!
+      expect(kept.filter(s => s.startsWith('auto:'))).toHaveLength(6)
+      expect(kept.filter(isMac)).toHaveLength(2)
+    })
+  })
+
   it('caps the union and reports what the CAP dropped, not the merge', () => {
     const store: ProfileStore = {
       profiles: [profile('Luke Henry', cluster(0, 20)), profile('Luke H', cluster(0, 20, 0.09))],

@@ -15,6 +15,8 @@ let runtime = true
 let batchCalls = 0
 let extract: (audio: Buffer) => Float32Array | null = () => null
 let extractCalls = 0
+/** Overrides what stat reports for an archived chunk: a rewrite that keeps the size and the mtime cannot be built from user space. */
+let statTweak: Partial<{ ino: number; ctimeMs: number }> | null = null
 
 const MAC_SIDECAR = { sessionId: MAC_ID, chunks: [{ text: 'a', speaker: 'Voice 2' }], chunkEntries: [{ chunkIndex: 0, chunk: { text: 'a', speaker: 'Voice 2' } }] }
 
@@ -23,8 +25,21 @@ async function lib() {
   written.length = 0
   batchCalls = 0
   extractCalls = 0
+  statTweak = null
   extract = () => null
   runtime = true
+  vi.doMock('node:fs', async () => {
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+    return {
+      ...actual,
+      statSync: ((path: string, ...rest: unknown[]) => {
+        const st = (actual.statSync as (...a: unknown[]) => import('node:fs').Stats)(path, ...rest)
+        if (!statTweak || typeof path !== 'string' || !path.includes('meeting-audio')) return st
+        const out = Object.create(Object.getPrototypeOf(st)) as import('node:fs').Stats
+        return Object.assign(out, st, statTweak)
+      }) as typeof actual.statSync,
+    }
+  })
   vi.doMock('./speaker-embeddings.js', async () => {
     const actual = await vi.importActual<Record<string, unknown>>('./speaker-embeddings.js')
     ;(actual.__installSpeakerRuntimeForTests as (r: unknown) => void)(fakeSpeakerRuntime())
@@ -51,6 +66,7 @@ afterEach(() => {
   try { chmodSync(dataDir, 0o700) } catch { /* already gone */ }
   vi.resetModules()
   vi.doUnmock('./speaker-embeddings.js')
+  vi.doUnmock('node:fs')
   delete process.env.COS_DATA_DIR
   delete process.env.COS_CHUNK_EMBEDDINGS
   rmSync(dataDir, { recursive: true, force: true })
@@ -200,6 +216,29 @@ describe('B4: the plan yields, has a deadline, and keeps its vectors', () => {
     expect(extractCalls).toBe(4)
   })
 
+  it('the vector cache key includes the inode and the change time: every Mac chunk is the same size, so size and mtime alone cannot tell a rewrite', async () => {
+    const { planMacVoiceAssignment } = await lib()
+    const raws = [0, 2, 4]
+    archiveChunks(raws) // three chunks of identical byte length, as every Mac chunk is
+    const t = nextTexture(); extract = () => axisVector(0, t())
+    const args = () => input({ changed: raws.map((_, i) => i), sidecar: meeting(raws) })
+    await planMacVoiceAssignment(args())
+    expect(extractCalls).toBe(3)
+    await planMacVoiceAssignment(args())
+    expect(extractCalls).toBe(3) // same stat: all served from the cache
+    // Same path, same size, same mtime, but another file in its place (a restore or an rsync -t): different inode.
+    statTweak = { ino: 987_654_321 }
+    await planMacVoiceAssignment(args())
+    expect(extractCalls).toBe(6)
+    // Same inode and mtime, but written to in place since: the change time moved.
+    statTweak = { ino: 987_654_321, ctimeMs: Date.now() + 86_400_000 }
+    await planMacVoiceAssignment(args())
+    expect(extractCalls).toBe(9)
+    // And an unchanged repeat of that stat hits the cache again, so the key is stable, not merely always new.
+    await planMacVoiceAssignment(args())
+    expect(extractCalls).toBe(9)
+  })
+
   it('an env deadline outside 1 s to 25 s is ignored (too small and too large both fall back to 12 s)', async () => {
     const { planMacVoiceAssignment, MAC_ASSIGN_DEADLINE_MS } = await lib()
     expect(MAC_ASSIGN_DEADLINE_MS).toBe(12_000)
@@ -244,7 +283,8 @@ describe('B4: the plan yields, has a deadline, and keeps its vectors', () => {
 describe('B1 at the library boundary: gates are reported, never silently passed', () => {
   async function planWith(vectors: Array<[number, number]>, sec = 4, stored: Float32Array = axisVector(0, 60)) {
     const { planMacVoiceAssignment } = await lib()
-    writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({ profiles: [{ name: 'Dana Reyes', embeddings: [Array.from(stored)], sources: ['manual'] }] }))
+    // A profile carries at most as many Mac-assigned samples as it has other samples, so it holds twelve ordinary ones.
+    writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({ profiles: [{ name: 'Dana Reyes', embeddings: [Array.from(stored), ...Array.from({ length: 11 }, (_, k) => Array.from(axisVector(0, 20 + k)))], sources: ['manual', ...Array(11).fill('g2-training')] }] }))
     const raws = vectors.map((_, i) => i * 2)
     archiveChunks(raws, sec)
     let i = 0; extract = () => axisVector(vectors[i][0], vectors[i++][1])
@@ -288,6 +328,10 @@ describe('B1 at the library boundary: gates are reported, never silently passed'
 })
 
 describe('commitMacVoiceAssignment', () => {
+  // Three ordinary samples, so a two-sample assignment is inside the cap of min(10, other samples).
+  beforeEach(() => {
+    writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({ profiles: [{ name: 'Dana Reyes', embeddings: [3, 4, 5].map(t => Array.from(axisVector(3, t))), sources: ['g2-training', 'g2-training', 'g2-training'] }] }))
+  })
   const report = (over: Record<string, unknown> = {}) => ({ person: 'Dana Reyes', enrolled: 1, attempted: 1, created: false as const, clusterSkipped: 0, multiVoiceSkipped: 0, shortSkipped: 0, missingAudio: 0, similarity: null, belowFloor: false, floor: 0.55, groupSize: 1, groupSec: 6, gates: [], skipped: null, ...over })
   const stats = { units: 0, embedded: 0, reused: 0, ms: 0 }
 
@@ -310,17 +354,28 @@ describe('commitMacVoiceAssignment', () => {
     expect(stored.sources.some((src: string) => src.startsWith('correction'))).toBe(false)
   })
 
+  it('write-time guard: a profile never takes more Mac-assigned samples than its other samples, even if a caller hands it more', async () => {
+    const { commitMacVoiceAssignment } = await lib()
+    // Three ordinary samples (beforeEach). Five selected: the fourth and fifth each replace the oldest Mac sample.
+    const out = commitMacVoiceAssignment(MAC_ID, { report: report({ enrolled: 5 }), selected: [1, 2, 3, 4, 5].map(t => axisVector(1, t)), stats })
+    expect(out.skipped).toBeNull()
+    const stored = JSON.parse(readFileSync(join(dataDir, 'voice-profiles.json'), 'utf-8')).profiles.find((p: { name: string }) => p.name === 'Dana Reyes')
+    expect(stored.sources.filter((s: string) => s.startsWith('mac-assign:'))).toHaveLength(3)
+    expect(stored.sources.filter((s: string) => s === 'g2-training')).toHaveLength(3)
+    expect(stored.embeddings).toHaveLength(6)
+  })
+
   it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)('a store that cannot be written reports 0 enrolled and store_unavailable, and the profile is unchanged', async () => {
     const { commitMacVoiceAssignment } = await lib()
     const path = join(dataDir, 'voice-profiles.json')
     const speaker = await import('./speaker-embeddings.js')
-    expect(speaker.readVoiceProfiles().profiles.find(p => p.name === 'Dana Reyes')?.embeddings).toHaveLength(1)
+    expect(speaker.readVoiceProfiles().profiles.find(p => p.name === 'Dana Reyes')?.embeddings).toHaveLength(3)
     chmodSync(dataDir, 0o500) // a real filesystem failure: no new file can be created, so the store's temp-file-then-rename write fails
     let out
     try { out = commitMacVoiceAssignment(MAC_ID, { report: report({ enrolled: 2 }), selected: [axisVector(1, 1), axisVector(2, 2)], stats }) } finally { chmodSync(dataDir, 0o700) }
     expect(out).toMatchObject({ enrolled: 0, skipped: 'store_unavailable' })
-    expect(JSON.parse(readFileSync(path, 'utf-8')).profiles.find((p: { name: string }) => p.name === 'Dana Reyes').embeddings).toHaveLength(1)
+    expect(JSON.parse(readFileSync(path, 'utf-8')).profiles.find((p: { name: string }) => p.name === 'Dana Reyes').embeddings).toHaveLength(3)
     // No runtime reinstall: the in-memory store must already agree with the disk the write failed on.
-    expect(speaker.readVoiceProfiles().profiles.find(p => p.name === 'Dana Reyes')?.embeddings).toHaveLength(1)
+    expect(speaker.readVoiceProfiles().profiles.find(p => p.name === 'Dana Reyes')?.embeddings).toHaveLength(3)
   })
 })

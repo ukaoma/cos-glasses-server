@@ -2212,6 +2212,16 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
+    // The plan awaited, so a finalization pass may have started for this meeting since the check at the top of the route.
+    // A job record exists from save to completion, which makes that unlikely today; this keeps it from depending on it.
+    if (macAssign) {
+      const finalizingAfter = finalizingRefusal(sessionId)
+      if (finalizingAfter) {
+        res.status(finalizingAfter.status).json(finalizingAfter.body)
+        return
+      }
+    }
+
     // A prior correction that never closed means this meeting's files may already
     // be half-written. Refuse rather than layering a second rewrite on top.
     // `force` on an assignment means "add this voice anyway" (above). It must not also skip this guard.
