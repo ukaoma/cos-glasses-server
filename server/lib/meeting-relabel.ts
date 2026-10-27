@@ -7,7 +7,7 @@
 // index-parallel rendering of the chunk sidecar. Measured on a real meeting
 // (2026-08-06 Health Score V2): 135 sidecar chunks collapse to 46 speaker runs,
 // while the markdown carries 70 turns — and they disagree on who spoke, with the
-// markdown's 4th turn attributed to Joe Karbowski where the sidecar's 4th run
+// markdown's 4th turn attributed to Jonas Karlin where the sidecar's 4th run
 // says Riley Example. The transcript was rendered from a different
 // segmentation pass. So:
 //
@@ -213,8 +213,8 @@ export function relabelMeetingMarkdown(
   if (att) {
     const body = out.slice(att.start, att.end)
     // Anchored at BOTH ends, and `[ \t]` rather than `\s` so a pattern can never
-    // run past its own line. Without the end anchor, `- Luke H` matches the
-    // PREFIX of `- Luke Henry` and deleting it leaves the fragment `enry`.
+    // run past its own line. Without the end anchor, `- Theo M` matches the
+    // PREFIX of `- Theo Marsh` and deleting it leaves the fragment `enry`.
     const line = (label: string) => `^-[ \t]+${escapeRegExp(label)}[ \t]*$`
     // A de-attribution must DELETE the attendee bullet, never rename it. Renaming
     // writes `- Unidentified 2` into the attendee list as though it were a

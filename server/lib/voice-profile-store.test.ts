@@ -59,7 +59,7 @@ describe('sources[] stays aligned with embeddings', () => {
     // The live store shape: 3 embeddings, 1 source. Every provenance lookup
     // past index 0 was reading the wrong sample.
     const { store, repairs } = normalizeProfileStore({
-      profiles: [profile('Clem Ukaoma', 3, ['manual'])],
+      profiles: [profile('Robin Vale', 3, ['manual'])],
     })
     expect(store.profiles[0].embeddings).toHaveLength(3)
     expect(store.profiles[0].sources).toEqual(['manual', 'unknown', 'unknown'])
@@ -69,7 +69,7 @@ describe('sources[] stays aligned with embeddings', () => {
 
   it('truncates a long sources[]', () => {
     const { store, repairs } = normalizeProfileStore({
-      profiles: [profile('Justin', 2, ['manual', 'fireflies', 'g2-training', 'auto:x'])],
+      profiles: [profile('Julian', 2, ['manual', 'fireflies', 'g2-training', 'auto:x'])],
     })
     expect(store.profiles[0].sources).toEqual(['manual', 'fireflies'])
     expect(repairs.sourcesRealigned).toBe(1)
@@ -79,7 +79,7 @@ describe('sources[] stays aligned with embeddings', () => {
     // A null WAS found inside a live sources array. Filtering it out would
     // silently re-map source[2] onto embedding[1].
     const { store, repairs } = normalizeProfileStore({
-      profiles: [profile('Nate Williams', 3, ['manual', null, 'auto:s1'])],
+      profiles: [profile('Nate Wells', 3, ['manual', null, 'auto:s1'])],
     })
     expect(store.profiles[0].sources).toEqual(['manual', 'unknown', 'auto:s1'])
     expect(repairs.sourcesCoerced).toBe(1)
@@ -90,7 +90,7 @@ describe('sources[] stays aligned with embeddings', () => {
   it('drops an unusable embedding row AND its source together', () => {
     const { store, repairs } = normalizeProfileStore({
       profiles: [{
-        name: 'Joe Karbowski',
+        name: 'Jonas Karlin',
         embeddings: [row(1), 'not-an-embedding' as unknown as number[], row(3)],
         sources: ['manual', 'bad', 'g2-training'],
       }],
@@ -285,7 +285,7 @@ describe('FIFO eviction keeps both arrays in lockstep', () => {
 
 describe('per-source retraction', () => {
   it('removes only the matching provenance and returns the count', () => {
-    const p = profile('Clem Ukaoma', 4, ['manual', 'auto:s1', 'auto:s1', 'fireflies'])
+    const p = profile('Robin Vale', 4, ['manual', 'auto:s1', 'auto:s1', 'fireflies'])
     expect(removeEmbeddingsBySource(p, s => s.startsWith('auto:'))).toBe(2)
     expect(p.embeddings).toHaveLength(2)
     expect(p.sources).toEqual(['manual', 'fireflies'])
@@ -423,9 +423,9 @@ describe('loading distinguishes missing, ok, and corrupt', () => {
 describe('delete-person is auditable', () => {
   it('returns per-store counts rather than a bare boolean', () => {
     const store: ProfileStore = {
-      profiles: [profile('Clem Ukaoma', 14, undefined), profile('MU', 20, undefined)],
+      profiles: [profile('Robin Vale', 14, undefined), profile('MU', 20, undefined)],
     }
-    const result = deleteProfileFromStore(store, 'Clem Ukaoma')
+    const result = deleteProfileFromStore(store, 'Robin Vale')
     expect(result).toEqual({ removedProfiles: 1, removedEmbeddings: 14 })
     expect(store.profiles.map(p => p.name)).toEqual(['MU'])
   })
@@ -441,16 +441,16 @@ describe('delete-person is auditable', () => {
 describe('junk profile names (6.44.15)', () => {
   const emb = [[0.1, 0.2, 0.3]]
   it('renames a profile whose name is a spoken sentence, keeps its training, and flags it', () => {
-    const spoken = 'My Voice My Name Is Chelsie Hodgkiss And I Am The Director Of Operations At Quilt Software And I Am Recording This So The Glasses Know Me'
+    const spoken = 'My Voice My Name Is Cassie Holloway And I Am The Director Of Operations At Quilt Software And I Am Recording This So The Glasses Know Me'
     const { store, repairs } = normalizeProfileStore({ profiles: [
       { name: spoken, embeddings: emb, sources: ['manual'] },
-      { name: 'Chelsie Hodgkiss', embeddings: emb, sources: ['manual'] },
+      { name: 'Cassie Holloway', embeddings: emb, sources: ['manual'] },
       { name: 'MU', embeddings: emb, sources: ['manual'] },
       { name: 'Speaker 2', embeddings: emb, sources: ['manual'] },
       { name: 'Another sentence, with punctuation.', embeddings: emb, sources: ['manual'] },
     ] })
     const names = store.profiles.map(p => p.name)
-    expect(names).toEqual(['Unnamed voice 1', 'Chelsie Hodgkiss', 'MU', 'Speaker 2', 'Unnamed voice 2'])
+    expect(names).toEqual(['Unnamed voice 1', 'Cassie Holloway', 'MU', 'Speaker 2', 'Unnamed voice 2'])
     expect(store.profiles[0]).toMatchObject({ needsName: true, renamedFrom: spoken.slice(0, 60), embeddings: emb, sources: ['manual'] })
     expect(store.profiles[1].needsName).toBeUndefined()
     expect(repairs.profilesRenamed).toBe(2)
@@ -467,7 +467,7 @@ describe('junk profile names (6.44.15)', () => {
     expect(repairs.profilesRenamed).toBe(1)
     expect(junkNameReason('MU')).toBeNull()
     expect(junkNameReason('Me')).toBeNull()
-    expect(junkNameReason('Luke H.')).toBeNull()
+    expect(junkNameReason('Theo M.')).toBeNull()
     expect(junkNameReason('x'.repeat(41))).toBe('too_long')
   })
 })

@@ -1104,7 +1104,7 @@ describe('an accepted merge carries its evidence', () => {
     const phrases = [phrase('acceptw', 15, 60)]
     const meeting = firefliesMeeting({ id: 'f1', startMs: START, durationS: 1800, phrases, title: 'Synthetic meeting' })
     const capture = {
-      ...g2Capture({ sessionId: 's1', startMs: START, durationMs: 1_800_000, phrases, offsetMs: 42_000, labels: [{ speaker: 'Nadia Okonkwo', startS: 0, similarity: 0.9 }] }),
+      ...g2Capture({ sessionId: 's1', startMs: START, durationMs: 1_800_000, phrases, offsetMs: 42_000, labels: [{ speaker: 'Odette Marlowe', startS: 0, similarity: 0.9 }] }),
       finalizedAtMs: START + 1_800_000,
     }
     const inputs: EngineInputs = {
@@ -1436,15 +1436,15 @@ describe('the queue', () => {
 
 describe('reading sentences from either sidecar shape', () => {
   it('reads the vendor raw snake_case shape', () => {
-    expect(toEngineSentences([{ text: 'a', speaker_name: 'Nadia', start_time: 1, end_time: 2 }]))
-      .toEqual([{ text: 'a', speaker_name: 'Nadia', start_time: 1, end_time: 2 }])
+    expect(toEngineSentences([{ text: 'a', speaker_name: 'Odette', start_time: 1, end_time: 2 }]))
+      .toEqual([{ text: 'a', speaker_name: 'Odette', start_time: 1, end_time: 2 }])
   })
 
   it('reads the importer camelCase shape', () => {
     // `.import.json` stores the client's normalization; `.fireflies.json` stores the
     // vendor's raw rows. One engine has to score both modes.
-    expect(toEngineSentences([{ text: 'a', speakerName: 'Nadia', startTime: 1, endTime: 2 }]))
-      .toEqual([{ text: 'a', speaker_name: 'Nadia', start_time: 1, end_time: 2 }])
+    expect(toEngineSentences([{ text: 'a', speakerName: 'Odette', startTime: 1, endTime: 2 }]))
+      .toEqual([{ text: 'a', speaker_name: 'Odette', start_time: 1, end_time: 2 }])
   })
 
   it('survives rows that are not objects at all', () => {

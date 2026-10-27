@@ -44,7 +44,7 @@ describe('meetingVoiceReview', () => {
   })
 
   it('counts Unidentified N as unattributed', () => {
-    expect(meetingVoiceReview(['Unidentified 1', 'Gina']).unattributedVoices).toBe(1)
+    expect(meetingVoiceReview(['Unidentified 1', 'Mira']).unattributedVoices).toBe(1)
   })
 
   it('marks a meeting touched when the ledger has an applied row', async () => {
@@ -56,14 +56,14 @@ describe('meetingVoiceReview', () => {
         phase: 'applied',
         at: '2026-08-21T14:00:00.000Z',
         from: 'Ext',
-        to: 'Milo LeBaron',
+        to: 'Leo Ashby',
         chunks: [1],
         scope: 'meeting',
       })}\n`,
     )
     vi.resetModules()
     const fresh = await import('./meeting-voice-review.js')
-    expect(fresh.meetingVoiceReview(['Milo LeBaron', 'MU'], 'meeting_t').humanTouched).toBe(true)
+    expect(fresh.meetingVoiceReview(['Leo Ashby', 'MU'], 'meeting_t').humanTouched).toBe(true)
   })
 
   it('does not treat a lone intent as a completed review', async () => {
@@ -75,7 +75,7 @@ describe('meetingVoiceReview', () => {
         phase: 'intent',
         at: '2026-08-21T14:00:00.000Z',
         from: 'Ext',
-        to: 'Milo LeBaron',
+        to: 'Leo Ashby',
         chunks: [1],
         scope: 'meeting',
       })}\n`,

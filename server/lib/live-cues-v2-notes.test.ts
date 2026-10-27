@@ -3,8 +3,8 @@ import { NOTES_BUDGET_MS, localDateOf, normalizeBridgeMemories, notesMemory, not
 import type { ContextSearchHit } from './context-library-search.js'
 import type { MeetingSearchHit } from './meeting-library-search.js'
 
-const WINDOW = 'Okay so we talked about the weather for a bit. Then Delgado came by about the pool.\n'
-  + 'Delgado quoted the resurfacing and he wants the deposit by Friday. Grace likes the pebble finish for the pool.'
+const WINDOW = 'Okay so we talked about the weather for a bit. Then Delmar came by about the pool.\n'
+  + 'Delmar quoted the resurfacing and he wants the deposit by Friday. Faith likes the pebble finish for the pool.'
 
 const memHit = (id: string, title: string, created_at = '2026-10-01T10:00:00Z'): ContextSearchHit =>
   ({ id, title, snippet: `${title} snippet`, kind: 'memory', created_at, keywordScore: 0.8, semanticScore: 0, match: 'keyword' })
@@ -16,7 +16,7 @@ function searchers(over: Partial<NotesSearchers> = {}, log: string[] = []): Note
     memories: async q => { log.push(`memories:${q}`); return [memHit('mem_pool', 'Pool contractor'), memHit('mem_future', 'Tomorrow note', '2026-10-19T09:00:00Z')] },
     meetings: async q => { log.push(`meetings:${q}`); return [mtgHit('standalone:a', 'Backyard planning', '2026-09-30'), mtgHit('standalone:live', 'This meeting', '2026-10-17', 'meeting_live')] },
     bridge: async () => { log.push('bridge'); return [
-      { id: 'jr_1', content: 'Delgado wants the deposit by Friday for the pool resurfacing.', created_at: '2026-10-10T12:00:00+00:00' },
+      { id: 'jr_1', content: 'Delmar wants the deposit by Friday for the pool resurfacing.', created_at: '2026-10-10T12:00:00+00:00' },
       { id: 'jr_2', content: 'Talia has swim practice on Tuesdays.', created_at: '2026-10-11T12:00:00+00:00' },
     ] },
     ...over,
@@ -26,7 +26,7 @@ function searchers(over: Partial<NotesSearchers> = {}, log: string[] = []): Note
 describe('notes query terms', () => {
   it('takes the salient words (names and the current topic first), never stopwords or filler', () => {
     const terms = notesQueryTerms(WINDOW)
-    expect(terms.slice(0, 2).sort()).toEqual(['delgado', 'pool'])
+    expect(terms.slice(0, 2).sort()).toEqual(['delmar', 'pool'])
     for (const t of ['the', 'about', 'okay', 'and', 'wants']) expect(terms).not.toContain(t)
     expect(terms.length).toBeLessThanOrEqual(6)
     expect(notesQueryTerms('um yeah so like okay the and')).toEqual([])
@@ -52,9 +52,9 @@ describe('notesMemory', () => {
     expect(keys).not.toContain('memory:mem_future')                 // dated on or after `before`
     expect(keys).not.toContain('meeting:standalone:live')           // the meeting being recorded
     const pool = r.notes.find(n => n.key === 'memory:jr_1')!
-    expect(pool).toMatchObject({ date: '2026-10-10', notes: 'Delgado wants the deposit by Friday for the pool resurfacing.' })
+    expect(pool).toMatchObject({ date: '2026-10-10', notes: 'Delmar wants the deposit by Friday for the pool resurfacing.' })
     expect(log.filter(x => x === 'bridge')).toHaveLength(1)          // listed once, scored per query
-    expect(log.some(x => x.startsWith('memories:') && x.includes('delgado'))).toBe(true)
+    expect(log.some(x => x.startsWith('memories:') && x.includes('delmar'))).toBe(true)
     expect(log.every(x => x === 'bridge' || x.split(':')[1].split(' ').length <= 4)).toBe(true)   // the window itself is never a query
   })
   it('never more than four candidates, however many match', async () => {

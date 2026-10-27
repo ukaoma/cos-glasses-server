@@ -236,7 +236,7 @@ describe('provider observation on health (6.62.0)', () => {
     const keys = ['CODEX_HOME', 'CURSOR_CONFIG_DIR', 'COS_GLASSES_HOME', 'CLAUDE_CONFIG_DIR', 'COS_SESSION_HOOKS', 'COS_CODEX_BIN'] as const
     const prev = Object.fromEntries(keys.map(k => [k, process.env[k]]))
     const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-health-observe-')))
-    const home = join(root, 'Ukaoma Chief Of Staff')
+    const home = join(root, 'Ukamya Chief Of Staff')
     // A stand-in Codex binary, so "Codex is present" does not depend on this Mac. It is never run.
     const fakeCodex = join(home, 'Fake Codex', 'codex')
     mkdirSync(dirname(fakeCodex), { recursive: true })

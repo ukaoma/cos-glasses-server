@@ -12,7 +12,7 @@ import { UNATTRIBUTED } from '../meeting-speaker-review.js'
 import { type CaptureLabel, firefliesMeeting, g2Capture, phrase } from './__fixtures__/synthetic.js'
 
 const START = Date.UTC(2026, 7, 20, 15, 0, 0)
-const G2_NAME = 'Nadia Okonkwo'
+const G2_NAME = 'Odette Marlowe'
 
 /**
  * Ten sentences (enough to align) whose speaker label the test chooses, with G2 chunk
@@ -95,7 +95,7 @@ describe('the share gate', () => {
     const alignment = { aligned: true, anchors: 8, madMs: 0, offsetMs: 0, samples: [], windows: new Map<number, number>() }
     const labels = [
       { startMs: 100_000, endMs: splitS * 1000, speaker: G2_NAME, similarity: 0.9, humanConfirmed: false },
-      { startMs: splitS * 1000, endMs: 110_000, speaker: 'Marcus Bell', similarity: 0.9, humanConfirmed: false },
+      { startMs: splitS * 1000, endMs: 110_000, speaker: 'Marlon Bright', similarity: 0.9, humanConfirmed: false },
     ]
     return attributeSentences(sentences, [{ sessionId: 's1', alignment, labels }]).labels[0]
   }
@@ -113,29 +113,29 @@ describe('the share gate', () => {
 
 describe('when both sides have a name', () => {
   it('records agreement on a shared name token', () => {
-    expect(namesAgree('Nadia Okonkwo', 'nadia.okonkwo')).toBe(true)
-    expect(namesAgree('Nadia Okonkwo', 'Marcus Bell')).toBe(false)
-    const { meeting, capture } = scene({ ffLabel: 'Nadia O', labels: [{ speaker: G2_NAME, startS: 0, similarity: 0.9 }] })
+    expect(namesAgree('Odette Marlowe', 'odette.marlowe')).toBe(true)
+    expect(namesAgree('Odette Marlowe', 'Marlon Bright')).toBe(false)
+    const { meeting, capture } = scene({ ffLabel: 'Odette O', labels: [{ speaker: G2_NAME, startS: 0, similarity: 0.9 }] })
     const result = attribute(meeting, capture)
     expect(result.labels[0].outcome).toBe('agree')
-    expect(result.labels[0].resolvedLabel).toBe('Nadia O')
+    expect(result.labels[0].resolvedLabel).toBe('Odette O')
   })
 
   it('does not call two people the same on a one-letter token', () => {
-    // "Marcus O" and "Nadia O" share only "o". A name token has to be three characters
+    // "Marlon O" and "Odette O" share only "o". A name token has to be three characters
     // before it may stand for a person.
-    const { meeting, capture } = scene({ ffLabel: 'Marcus O', labels: [{ speaker: 'Nadia O', startS: 0, similarity: 0.95 }] })
+    const { meeting, capture } = scene({ ffLabel: 'Marlon O', labels: [{ speaker: 'Odette O', startS: 0, similarity: 0.95 }] })
     const result = attribute(meeting, capture)
-    expect(namesAgree('Nadia O', 'Marcus O')).toBe(false)
+    expect(namesAgree('Odette O', 'Marlon O')).toBe(false)
     expect(result.labels[0].outcome).toBe('conflict')
-    expect(result.labels[0].resolvedLabel).toBe('Marcus O')
+    expect(result.labels[0].resolvedLabel).toBe('Marlon O')
   })
 
   it('keeps the Fireflies label on a conflict and records it', () => {
-    const { meeting, capture } = scene({ ffLabel: 'Marcus Bell', labels: [{ speaker: G2_NAME, startS: 0, similarity: 0.95 }] })
+    const { meeting, capture } = scene({ ffLabel: 'Marlon Bright', labels: [{ speaker: G2_NAME, startS: 0, similarity: 0.95 }] })
     const result = attribute(meeting, capture)
     expect(result.labels[0].outcome).toBe('conflict')
-    expect(result.labels[0].resolvedLabel).toBe('Marcus Bell')
+    expect(result.labels[0].resolvedLabel).toBe('Marlon Bright')
     expect(result.labels[0].g2Label).toBe(G2_NAME)
     expect(result.conflicts).toHaveLength(10)
   })

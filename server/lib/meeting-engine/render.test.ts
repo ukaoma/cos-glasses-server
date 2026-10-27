@@ -26,7 +26,7 @@ function scene() {
     durationS: 1800,
     phrases,
     title: 'Quarterly review',
-    participants: ['nadia@example.test'],
+    participants: ['odette@example.test'],
     summary: 'A synthetic summary.',
     actionItems: ['Send the synthetic follow-up'],
     sha256: 'ff-primary-sha',
@@ -35,7 +35,7 @@ function scene() {
     id: 'ff-alternate',
     startMs: START + 60_000,
     durationS: 1800,
-    phrases: [{ ...phrase('alt', 6, 120, 10), speaker: 'Marcus Bell' }],
+    phrases: [{ ...phrase('alt', 6, 120, 10), speaker: 'Marlon Bright' }],
     title: 'Quarterly review',
     sha256: 'ff-alternate-sha',
   })
@@ -45,7 +45,7 @@ function scene() {
     durationMs: 1_800_000,
     phrases,
     offsetMs: 0,
-    labels: [{ speaker: 'Nadia Okonkwo', startS: 0, similarity: 0.72 }, { speaker: 'Closing Speaker', startS: 1000 }],
+    labels: [{ speaker: 'Odette Marlowe', startS: 0, similarity: 0.72 }, { speaker: 'Closing Speaker', startS: 1000 }],
     sha256: 'g2-sha',
     correctionRevision: 4,
     batchApplied: true,
@@ -102,15 +102,15 @@ describe('the merged record is additive', () => {
   it('reports each name with its voice match and sentence count', () => {
     const result = render()
     if (!result.ok) throw new Error('expected a record')
-    expect(result.record.markdown).toContain('| **Speaker Verification** | Nadia Okonkwo (voice match 0.72, 10 sentences) |')
-    expect(result.record.verification[0]).toMatchObject({ name: 'Nadia Okonkwo', sentences: 10 })
+    expect(result.record.markdown).toContain('| **Speaker Verification** | Odette Marlowe (voice match 0.72, 10 sentences) |')
+    expect(result.record.verification[0]).toMatchObject({ name: 'Odette Marlowe', sentences: 10 })
   })
 
   it('applies the G2 name to the Fireflies transcript when it may', () => {
     const result = render()
     if (!result.ok) throw new Error('expected a record')
     const transcript = result.record.markdown.slice(result.record.markdown.indexOf('## Transcript'))
-    expect(transcript).toContain('Nadia Okonkwo:')
+    expect(transcript).toContain('Odette Marlowe:')
     expect(transcript).not.toContain('Speaker 1:')
   })
 })
@@ -126,7 +126,7 @@ describe('the sidecar', () => {
     expect(sidecar.evidence).toEqual({ K1: 120, K2: 4 })
     expect(sidecar.attribution).toBe('aligned')
     expect(sidecar.labels).toHaveLength(10)
-    expect(sidecar.labels[0]).toMatchObject({ index: 0, ffLabel: 'Speaker 1', g2Label: 'Nadia Okonkwo', outcome: 'replaced_generic' })
+    expect(sidecar.labels[0]).toMatchObject({ index: 0, ffLabel: 'Speaker 1', g2Label: 'Odette Marlowe', outcome: 'replaced_generic' })
     expect(sidecar.inputs).toEqual([
       { kind: 'fireflies', id: 'ff-primary', sha256: 'ff-primary-sha' },
       { kind: 'fireflies', id: 'ff-alternate', sha256: 'ff-alternate-sha' },

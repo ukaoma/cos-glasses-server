@@ -1032,7 +1032,7 @@ describe('6.62.0: where a Cursor fork runs (W9)', () => {
 
   it('signal cwd first, then the composer folder, then the spawn spelling; a path with spaces works', async () => {
     root = mkdtempSync(join(tmpdir(), 'fork ws '))
-    const spaced = join(root, 'Ukaoma Chief Of Staff', 'MU-Chief-Staff')
+    const spaced = join(root, 'Ukamya Chief Of Staff', 'MU-Chief-Staff')
     mkdirSync(spaced, { recursive: true })
     const exists = (path: string) => path === spaced
     const base = { signalCwd: () => null, composerWorkspace: async () => null, spawnWorkspace: () => null, dirExists: exists }

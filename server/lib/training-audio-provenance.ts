@@ -5,7 +5,7 @@
 // those segments into that person's profile — so the wrong voice is now part of
 // what the system thinks they sound like, and it will keep matching. Removing the
 // label without removing the samples fixes the transcript and leaves the profile
-// poisoned. That is the mechanism behind the phantom "Erick Hernandez": three
+// poisoned. That is the mechanism behind the phantom "Evan Hartwell": three
 // mislabelled seeds compounded to eighteen samples through self-training.
 //
 // WHAT CAN AND CANNOT BE TRACED. Provenance strings differ in whether they name

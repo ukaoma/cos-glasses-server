@@ -14,7 +14,7 @@ import type { OwnerCard } from './meeting-ask-owner.js'
 const START = Date.UTC(2026, 9, 18, 2, 32, 0)
 const SESSION = 'meeting_cleanup_001'
 
-const OWNER: OwnerCard = { name: 'Miles Ukaoma', speakerLabel: 'MU', homeArea: null, notes: 'Married to Grace Ukaoma.' }
+const OWNER: OwnerCard = { name: 'Jordan Ukamya', speakerLabel: 'MU', homeArea: null, notes: 'Married to Faith Ukamya.' }
 
 let roots: string[] = []
 beforeEach(() => { rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true }) })
@@ -52,12 +52,12 @@ function meeting(lines: Array<[string, Word[]]>, engine = 'parakeet-ultra') {
 const w = (text: string, t0: number, p = 0.95): Word[] => text.split(' ').map((word, i) => ({ word, p, t: t0 + i * 0.4 }))
 const section = (path: string) => readFileSync(path, 'utf8').split('## Transcript\n\n')[1].trimEnd()
 
-/** The reported Ukoma, Yukoma, eucoma and U coma meeting (Miles, 2026-10-17). */
-function ukaomaMeeting() {
+/** The reported Ukmya, Yukmya, eucmya and U cmya meeting (Miles, 2026-10-17). */
+function ukamyaMeeting() {
   return meeting([
-    ['MU', [...w('I talked to Grace', 1), { word: 'Ukoma', p: 0.62, t: 2.6 }, ...w('about the trip.', 3)]],
-    ['Ext', [{ word: 'Yukoma', p: 0.41, t: 20 }, ...w('said the flight leaves at 6 and', 20.5), { word: 'eucoma', p: 0.38, t: 24 }, ...w('will not be late.', 24.5)]],
-    ['MU', [...w('Then', 40), { word: 'U', p: 0.33, t: 40.5 }, { word: 'coma', p: 0.44, t: 40.8 }, ...w('called back.', 41.2)]],
+    ['MU', [...w('I talked to Faith', 1), { word: 'Ukmya', p: 0.62, t: 2.6 }, ...w('about the trip.', 3)]],
+    ['Ext', [{ word: 'Yukmya', p: 0.41, t: 20 }, ...w('said the flight leaves at 6 and', 20.5), { word: 'eucmya', p: 0.38, t: 24 }, ...w('will not be late.', 24.5)]],
+    ['MU', [...w('Then', 40), { word: 'U', p: 0.33, t: 40.5 }, { word: 'cmya', p: 0.44, t: 40.8 }, ...w('called back.', 41.2)]],
   ])
 }
 
@@ -97,7 +97,7 @@ function harness(opts: {
       if (opts.fail) throw opts.fail
       return { text: opts.reply ? await opts.reply(prompt) : '{"edits":[]}', inputTokens: 1200, outputTokens: 80, model }
     },
-    speakers: () => opts.speakers ?? ['Graham Smith', 'Ilona Jones'],
+    speakers: () => opts.speakers ?? ['Gordon Smith', 'Ilona Jones'],
     vocabulary: () => opts.vocabulary ?? [],
     corrections: () => ({}),
     owner: () => (opts.owner === undefined ? OWNER : opts.owner),
@@ -109,37 +109,37 @@ function harness(opts: {
   return { deps, calls, traces, budget, settings, suggestions }
 }
 
-/** Reply "Ukaoma" for every span that is near Ukaoma, keep the rest. */
-function replyUkaoma(prompt: string): string {
+/** Reply "Ukamya" for every span that is near Ukamya, keep the rest. */
+function replyUkamya(prompt: string): string {
   const edits = [...prompt.matchAll(/^(S\d+)[^\n]*\n {2}[^\n]*\[\[([^\]]+)\]\]/gm)].map(m => (
-    /ukaoma/i.test(m[0].split('\n')[0]) ? { id: m[1], action: 'replace', text: 'Ukaoma' } : { id: m[1], action: 'keep' }))
+    /ukamya/i.test(m[0].split('\n')[0]) ? { id: m[1], action: 'replace', text: 'Ukamya' } : { id: m[1], action: 'keep' }))
   return `Here you go:\n\`\`\`json\n${JSON.stringify({ edits })}\n\`\`\`\nAll set.`
 }
 
 describe('transcript cleanup end to end (fake Claude provider)', () => {
-  it('resolves Ukoma, Yukoma, eucoma and U coma to Ukaoma with the owner card and a screen line', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma, screen: [{ at: START + 21_000, text: 'Grace Ukaoma | Zoom', app: 'Zoom' }] })
+  it('resolves Ukmya, Yukmya, eucmya and U cmya to Ukamya with the owner card and a screen line', async () => {
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya, screen: [{ at: START + 21_000, text: 'Faith Ukamya | Zoom', app: 'Zoom' }] })
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(out.status).toBe('done')
     expect(section(m.meetingPath)).toBe([
-      '[MU]: I talked to Grace Ukaoma about the trip.',
-      '[Ext]: Ukaoma said the flight leaves at 6 and Ukaoma will not be late.',
-      '[MU]: Then Ukaoma called back.',
+      '[MU]: I talked to Faith Ukamya about the trip.',
+      '[Ext]: Ukamya said the flight leaves at 6 and Ukamya will not be late.',
+      '[MU]: Then Ukamya called back.',
     ].join('\n'))
-    // Ukoma is one edit from the owner's surname: fixed for free, never sent.
+    // Ukmya is one edit from the owner's surname: fixed for free, never sent.
     expect(h.calls).toHaveLength(1)
-    expect(h.calls[0].prompt).not.toMatch(/\[\[Ukoma\]\]/)
-    expect(h.calls[0].prompt).toMatch(/\[\[Yukoma\]\]/)
-    expect(h.calls[0].prompt).toMatch(/\[\[eucoma\]\]/)
-    expect(h.calls[0].prompt).toMatch(/\[\[U coma\]\]/)
+    expect(h.calls[0].prompt).not.toMatch(/\[\[Ukmya\]\]/)
+    expect(h.calls[0].prompt).toMatch(/\[\[Yukmya\]\]/)
+    expect(h.calls[0].prompt).toMatch(/\[\[eucmya\]\]/)
+    expect(h.calls[0].prompt).toMatch(/\[\[U cmya\]\]/)
     // Textual and screen awareness reached the model.
-    expect(h.calls[0].prompt).toContain('this COS belongs to Miles Ukaoma')
-    expect(h.calls[0].prompt).toMatch(/screen at 0:21 Zoom: "Grace Ukaoma \| Zoom"/)
+    expect(h.calls[0].prompt).toContain('this COS belongs to Jordan Ukamya')
+    expect(h.calls[0].prompt).toMatch(/screen at 0:21 Zoom: "Faith Ukamya \| Zoom"/)
     expect(h.calls[0].model).toBe('claude-haiku-5-5')
     const ledger = ledgerView(SESSION)
     expect(ledger.edits.map(e => [e.source, e.original, e.replacement])).toEqual([
-      ['fuzzy', 'Ukoma', 'Ukaoma'], ['model', 'Yukoma', 'Ukaoma'], ['model', 'eucoma', 'Ukaoma'], ['model', 'U coma', 'Ukaoma'],
+      ['fuzzy', 'Ukmya', 'Ukamya'], ['model', 'Yukmya', 'Ukamya'], ['model', 'eucmya', 'Ukamya'], ['model', 'U cmya', 'Ukamya'],
     ])
     const sidecar = JSON.parse(readFileSync(m.sidecarPath, 'utf8'))
     expect(sidecar.batchTranscript).toBe(section(m.meetingPath))
@@ -148,20 +148,20 @@ describe('transcript cleanup end to end (fake Claude provider)', () => {
   })
 
   it('the trace carries counts, tokens and milliseconds, never transcript or screen text', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma, screen: [{ at: START + 21_000, text: 'Grace Ukaoma | Zoom' }] })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya, screen: [{ at: START + 21_000, text: 'Faith Ukamya | Zoom' }] })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(h.traces).toHaveLength(1)
     const row = h.traces[0]
     expect(row).toMatchObject({ status: 'done', spansSent: 3, accepted: 3, fixes: 1, inputTokens: 1200, outputTokens: 80, screenLines: 1 })
     expect(row.spansFound).toBeGreaterThanOrEqual(3)
     const text = JSON.stringify(row)
-    for (const word of ['Ukoma', 'Yukoma', 'eucoma', 'coma', 'Grace', 'flight', 'Zoom', 'Ukaoma']) expect(text, word).not.toContain(word)
+    for (const word of ['Ukmya', 'Yukmya', 'eucmya', 'cmya', 'Faith', 'flight', 'Zoom', 'Ukamya']) expect(text, word).not.toContain(word)
   })
 
   it('a second run on the cleaned meeting is a no-op (idempotent finalization retry)', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     const after = readFileSync(m.meetingPath, 'utf8')
     const again = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
@@ -171,14 +171,14 @@ describe('transcript cleanup end to end (fake Claude provider)', () => {
   })
 
   it('Sonnet is selectable and the model id is always pinned', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya })
     h.settings.save({ model: 'sonnet' })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(h.calls[0].model).toBe('claude-sonnet-5-5')
-    const env = harness({ reply: replyUkaoma, env: { COS_TRANSCRIPT_CLEANUP_MODEL: 'haiku' } })
+    const env = harness({ reply: replyUkamya, env: { COS_TRANSCRIPT_CLEANUP_MODEL: 'haiku' } })
     env.settings.save({ model: 'sonnet' })
-    const m2 = ukaomaMeeting()
+    const m2 = ukamyaMeeting()
     rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m2.meetingPath, sidecarPath: m2.sidecarPath }, env.deps)
     expect(env.calls[0].model).toBe('claude-haiku-5-5')
@@ -189,27 +189,27 @@ describe('local notes for the names spans are near', () => {
   it('memories and earlier meetings by keyword, the bridge listing when memory finds nothing, never this meeting', async () => {
     const asked: string[] = []
     const search = createNotesSearch({
-      memories: async q => { asked.push(`memories:${q}`); return q === 'Ukaoma' ? [] : [{ id: 'mem_1', title: 'Graham note', snippet: 'Graham Smith runs demand' }] },
-      meetings: async q => { asked.push(`meetings:${q}`); return [{ recordId: 'r1', sessionId: SESSION, title: 'this meeting' }, { recordId: 'r2', sessionId: 'other', title: 'Family sync', snippet: 'Grace Ukaoma flight' }] },
-      bridge: async () => { asked.push('bridge'); return [{ id: 'mem_9', content: 'Grace Ukaoma is Miles\'s wife', summary: 'Grace Ukaoma' }, { id: 'mem_8', content: 'unrelated' }] },
+      memories: async q => { asked.push(`memories:${q}`); return q === 'Ukamya' ? [] : [{ id: 'mem_1', title: 'Gordon note', snippet: 'Gordon Smith runs demand' }] },
+      meetings: async q => { asked.push(`meetings:${q}`); return [{ recordId: 'r1', sessionId: SESSION, title: 'this meeting' }, { recordId: 'r2', sessionId: 'other', title: 'Family sync', snippet: 'Faith Ukamya flight' }] },
+      bridge: async () => { asked.push('bridge'); return [{ id: 'mem_9', content: 'Faith Ukamya is Miles\'s wife', summary: 'Faith Ukamya' }, { id: 'mem_8', content: 'unrelated' }] },
       score: (rows, q) => rows.filter(r => r.content.includes(q)).map(row => ({ row })),
     })
-    const notes = await search(['Graham', 'Ukaoma'], SESSION, new AbortController().signal)
+    const notes = await search(['Gordon', 'Ukamya'], SESSION, new AbortController().signal)
     expect(notes.map(n => [n.ref, n.kind, n.query])).toEqual([
-      ['memory:mem_1', 'memory', 'Graham'], ['meeting:r2', 'meeting', 'Graham'], ['memory:mem_9', 'memory', 'Ukaoma'],
+      ['memory:mem_1', 'memory', 'Gordon'], ['meeting:r2', 'meeting', 'Gordon'], ['memory:mem_9', 'memory', 'Ukamya'],
     ])
     // The listing is read only for the name memory search found nothing for.
-    expect(asked).toEqual(['memories:Graham', 'meetings:Graham', 'memories:Ukaoma', 'bridge', 'meetings:Ukaoma'])
+    expect(asked).toEqual(['memories:Gordon', 'meetings:Gordon', 'memories:Ukamya', 'bridge', 'meetings:Ukamya'])
   })
 
   it('notes reach the prompt beside the spans, bounded', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya })
     let queries: string[] = []
-    h.deps.searchNotes = async q => { queries = q; return [{ id: '', ref: 'memory:mem_9', kind: 'memory', title: 'Grace Ukaoma', snippet: 'x'.repeat(2000), query: q[0] }] }
+    h.deps.searchNotes = async q => { queries = q; return [{ id: '', ref: 'memory:mem_9', kind: 'memory', title: 'Faith Ukamya', snippet: 'x'.repeat(2000), query: q[0] }] }
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(queries).toEqual(['Ukaoma'])
-    expect(h.calls[0].prompt).toMatch(/Note N1 \(memory\) "Grace Ukaoma": x{200,280}/)
+    expect(queries).toEqual(['Ukamya'])
+    expect(h.calls[0].prompt).toMatch(/Note N1 \(memory\) "Faith Ukamya": x{200,280}/)
     expect(h.calls[0].prompt).not.toMatch(/x{300}/)
     expect(h.traces[0].notes).toBe(1)
   })
@@ -217,8 +217,8 @@ describe('local notes for the names spans are near', () => {
 
 describe('stop conditions', () => {
   it('switch off: no call, no file written, the meeting is byte-identical', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ enabled: false, reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const h = harness({ enabled: false, reply: replyUkamya })
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(out).toEqual({ status: 'skipped', reason: 'switch_off', applied: 0 })
     expect(h.calls).toHaveLength(0)
@@ -229,43 +229,43 @@ describe('stop conditions', () => {
   })
 
   it('env COS_TRANSCRIPT_CLEANUP=0 beats a saved on; =1 beats a saved off', async () => {
-    const m = ukaomaMeeting()
-    const off = harness({ env: { COS_TRANSCRIPT_CLEANUP: '0' }, reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const off = harness({ env: { COS_TRANSCRIPT_CLEANUP: '0' }, reply: replyUkamya })
     expect((await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, off.deps)).reason).toBe('switch_off')
     expect(off.calls).toHaveLength(0)
-    const on = harness({ enabled: false, env: { COS_TRANSCRIPT_CLEANUP: '1' }, reply: replyUkaoma })
+    const on = harness({ enabled: false, env: { COS_TRANSCRIPT_CLEANUP: '1' }, reply: replyUkamya })
     on.settings.save({ enabled: false })
     expect((await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, on.deps)).status).toBe('done')
     expect(on.calls).toHaveLength(1)
   })
 
   it('a live session is never cleaned', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ live: true, reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const h = harness({ live: true, reply: replyUkamya })
     expect(await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)).toMatchObject({ status: 'skipped', reason: 'session_live' })
     expect(h.calls).toHaveLength(0)
     expect(readFileSync(m.meetingPath, 'utf8')).toBe(m.markdown)
   })
 
   it('daily call cap: the model is not asked, fuzzy fixes still apply (correction_skipped style)', async () => {
-    const h = harness({ reply: replyUkaoma, env: { COS_TRANSCRIPT_CLEANUP_DAILY: '1' } })
-    const first = ukaomaMeeting()
+    const h = harness({ reply: replyUkamya, env: { COS_TRANSCRIPT_CLEANUP_DAILY: '1' } })
+    const first = ukamyaMeeting()
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: first.meetingPath, sidecarPath: first.sidecarPath }, h.deps)
     expect(h.calls).toHaveLength(1)
-    const second = ukaomaMeeting()
+    const second = ukamyaMeeting()
     const out = await runTranscriptCleanup({ sessionId: 'meeting_cleanup_002', meetingPath: second.meetingPath, sidecarPath: second.sidecarPath }, h.deps)
     expect(out).toMatchObject({ status: 'done', modelSkipped: 'daily_calls', applied: 1 })
     expect(h.calls).toHaveLength(1)
-    expect(section(second.meetingPath)).toContain('Grace Ukaoma about')
-    expect(section(second.meetingPath)).toContain('Yukoma said')
+    expect(section(second.meetingPath)).toContain('Faith Ukamya about')
+    expect(section(second.meetingPath)).toContain('Yukmya said')
     expect(JSON.parse(readFileSync(second.sidecarPath, 'utf8')).transcriptCleanup.modelSkipped).toBe('daily_calls')
   })
 
   it('daily token cap stops the next call', async () => {
-    const h = harness({ reply: replyUkaoma, env: { COS_TRANSCRIPT_CLEANUP_DAILY_TOKENS: '1000' } })
-    const first = ukaomaMeeting()
+    const h = harness({ reply: replyUkamya, env: { COS_TRANSCRIPT_CLEANUP_DAILY_TOKENS: '1000' } })
+    const first = ukamyaMeeting()
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: first.meetingPath, sidecarPath: first.sidecarPath }, h.deps)
-    const second = ukaomaMeeting()
+    const second = ukamyaMeeting()
     expect((await runTranscriptCleanup({ sessionId: 'meeting_cleanup_002', meetingPath: second.meetingPath, sidecarPath: second.sidecarPath }, h.deps)).modelSkipped).toBe('daily_tokens')
     expect(h.calls).toHaveLength(1)
   })
@@ -274,27 +274,27 @@ describe('stop conditions', () => {
     let clock = START + 3_600_000
     const h = harness({ fail: new Error('claude exited 1'), now: () => new Date(clock) })
     for (let i = 0; i < 3; i++) {
-      const m = ukaomaMeeting()
+      const m = ukamyaMeeting()
       const out = await runTranscriptCleanup({ sessionId: `meeting_cleanup_10${i}`, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
       expect(out.modelSkipped).toBe('model_failed')
       // A failed call never costs the free fixes.
-      expect(section(m.meetingPath)).toContain('Grace Ukaoma about')
+      expect(section(m.meetingPath)).toContain('Faith Ukamya about')
     }
     expect(h.calls).toHaveLength(3)
-    const blocked = ukaomaMeeting()
+    const blocked = ukamyaMeeting()
     expect((await runTranscriptCleanup({ sessionId: 'meeting_cleanup_200', meetingPath: blocked.meetingPath, sidecarPath: blocked.sidecarPath }, h.deps)).modelSkipped).toBe('breaker_open')
     expect(h.calls).toHaveLength(3)
     clock += 31 * 60_000
-    const trial = ukaomaMeeting()
+    const trial = ukamyaMeeting()
     expect((await runTranscriptCleanup({ sessionId: 'meeting_cleanup_201', meetingPath: trial.meetingPath, sidecarPath: trial.sidecarPath }, h.deps)).modelSkipped).toBe('model_failed')
     expect(h.calls).toHaveLength(4)
-    const again = ukaomaMeeting()
+    const again = ukamyaMeeting()
     expect((await runTranscriptCleanup({ sessionId: 'meeting_cleanup_202', meetingPath: again.meetingPath, sidecarPath: again.sidecarPath }, h.deps)).modelSkipped).toBe('breaker_open')
   })
 
   it('a provider limit opens the breaker at once; a success closes it', async () => {
     const h = harness({ fail: new LensGistLimitError('claude: usage limit reached') })
-    const m = ukaomaMeeting()
+    const m = ukamyaMeeting()
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(h.budget.gate(cleanupLimits({}))).toBe('breaker_open')
     const b = new TranscriptCleanupBudget(join(roots[0], 'x-state.json'), () => new Date(START))
@@ -306,28 +306,28 @@ describe('stop conditions', () => {
   })
 
   it('a reply that is not JSON counts as a failure, and nothing from it is applied', async () => {
-    const h = harness({ reply: () => 'Sure! Ukaoma everywhere.' })
-    const m = ukaomaMeeting()
+    const h = harness({ reply: () => 'Sure! Ukamya everywhere.' })
+    const m = ukamyaMeeting()
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(out.modelSkipped).toBe('model_failed')
     expect(h.traces[0].modelError).toBe('bad_reply')
     expect(h.budget.read().consecutiveFailures).toBe(1)
-    expect(section(m.meetingPath)).toContain('Yukoma said')
+    expect(section(m.meetingPath)).toContain('Yukmya said')
   })
 
   it('ANTHROPIC_API_KEY without COS_ALLOW_API_FALLBACK=1, or no Claude CLI, never calls', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma, env: { ANTHROPIC_API_KEY: 'test-key-not-real' } })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya, env: { ANTHROPIC_API_KEY: 'test-key-not-real' } })
     expect((await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)).modelSkipped).toBe('api_key_in_env')
     expect(h.calls).toHaveLength(0)
-    const allowed = harness({ reply: replyUkaoma, env: { ANTHROPIC_API_KEY: 'test-key-not-real', COS_ALLOW_API_FALLBACK: '1' } })
-    const m2 = ukaomaMeeting()
+    const allowed = harness({ reply: replyUkamya, env: { ANTHROPIC_API_KEY: 'test-key-not-real', COS_ALLOW_API_FALLBACK: '1' } })
+    const m2 = ukamyaMeeting()
     rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m2.meetingPath, sidecarPath: m2.sidecarPath }, allowed.deps)
     expect(allowed.calls).toHaveLength(1)
-    const nocli = harness({ reply: replyUkaoma })
+    const nocli = harness({ reply: replyUkamya })
     nocli.deps.claudeAvailable = () => false
-    const m3 = ukaomaMeeting()
+    const m3 = ukamyaMeeting()
     rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true })
     expect((await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m3.meetingPath, sidecarPath: m3.sidecarPath }, nocli.deps)).modelSkipped).toBe('claude_not_found')
     expect(nocli.calls).toHaveLength(0)
@@ -364,14 +364,14 @@ describe('stop conditions', () => {
 
 describe('ledger undo', () => {
   it('restores one span, then the rest of its run, and refuses a stale edit', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya })
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     const edits = ledgerView(SESSION).edits
-    const eucoma = edits.find(e => e.original === 'eucoma')!
-    expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, editId: eucoma.id })).toEqual({ ok: true, reverted: [eucoma.id] })
-    expect(section(m.meetingPath)).toContain('[Ext]: Ukaoma said the flight leaves at 6 and eucoma will not be late.')
-    expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, editId: eucoma.id })).toMatchObject({ ok: false, status: 409, error: 'already_reverted' })
+    const eucmya = edits.find(e => e.original === 'eucmya')!
+    expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, editId: eucmya.id })).toEqual({ ok: true, reverted: [eucmya.id] })
+    expect(section(m.meetingPath)).toContain('[Ext]: Ukamya said the flight leaves at 6 and eucmya will not be late.')
+    expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, editId: eucmya.id })).toMatchObject({ ok: false, status: 409, error: 'already_reverted' })
     const all = undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, runId: out.runId })
     expect(all.ok && all.reverted.length).toBe(3)
     expect(section(m.meetingPath)).toBe(m.markdown.split('## Transcript\n\n')[1].trimEnd())
@@ -380,17 +380,17 @@ describe('ledger undo', () => {
   })
 
   it('undoes a whole run whose edits sit side by side in one line, by their exact offsets', async () => {
-    const m = meeting([['Ext', [{ word: 'Hi', p: 0.99, t: 1 }, { word: 'Yukoma,', p: 0.4, t: 1.5 }, { word: 'and', p: 0.99, t: 2 }, { word: 'eucoma.', p: 0.4, t: 2.5 }]]])
-    const h = harness({ reply: replyUkaoma })
+    const m = meeting([['Ext', [{ word: 'Hi', p: 0.99, t: 1 }, { word: 'Yukmya,', p: 0.4, t: 1.5 }, { word: 'and', p: 0.99, t: 2 }, { word: 'eucmya.', p: 0.4, t: 2.5 }]]])
+    const h = harness({ reply: replyUkamya })
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(section(m.meetingPath)).toBe('[Ext]: Hi Ukaoma, and Ukaoma.')
+    expect(section(m.meetingPath)).toBe('[Ext]: Hi Ukamya, and Ukamya.')
     expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, runId: out.runId })).toMatchObject({ ok: true })
-    expect(section(m.meetingPath)).toBe('[Ext]: Hi Yukoma, and eucoma.')
+    expect(section(m.meetingPath)).toBe('[Ext]: Hi Yukmya, and eucmya.')
   })
 
   it('a markdown write that fails puts the sidecar back, and the run is recorded as failed', async () => {
     const { commitCleanTranscript } = await import('./transcript-cleanup-ledger.js')
-    const m = ukaomaMeeting()
+    const m = ukamyaMeeting()
     const writes: string[] = []
     expect(() => commitCleanTranscript({
       meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, markdown: m.markdown, sidecarText: m.sidecarText, transcript: '[MU]: x', summary: {},
@@ -405,27 +405,27 @@ describe('ledger undo', () => {
     rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true })
     mkdirSync(dataPath('transcript-cleanup'), { recursive: true })
     writeFileSync(dataPath('transcript-cleanup', 'ledger'), 'not a directory')
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya })
     expect(await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)).toMatchObject({ status: 'failed', reason: 'ledger_unwritable' })
     expect(h.calls).toHaveLength(0)
     expect(readFileSync(m.meetingPath, 'utf8')).toBe(m.markdown)
   })
 
   it('refuses (409 stale) when the cleaned words were changed since', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    const edit = ledgerView(SESSION).edits.find(e => e.original === 'U coma')!
-    writeFileSync(m.meetingPath, readFileSync(m.meetingPath, 'utf8').replace('Then Ukaoma called back.', 'Then Grace called back.'))
+    const edit = ledgerView(SESSION).edits.find(e => e.original === 'U cmya')!
+    writeFileSync(m.meetingPath, readFileSync(m.meetingPath, 'utf8').replace('Then Ukamya called back.', 'Then Faith called back.'))
     expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, editId: edit.id })).toEqual({ ok: false, status: 409, error: 'stale' })
     expect(undoCleanupEdits({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath, editId: 'te_0000000000000000' })).toMatchObject({ status: 404 })
   })
 
   it('writes nothing when a file changed while the model was answering', async () => {
-    const m = ukaomaMeeting()
+    const m = ukamyaMeeting()
     const h = harness({
-      reply: prompt => { writeFileSync(m.sidecarPath, readFileSync(m.sidecarPath, 'utf8').replace('"lifecycleRevision": 3', '"lifecycleRevision": 9')); return replyUkaoma(prompt) },
+      reply: prompt => { writeFileSync(m.sidecarPath, readFileSync(m.sidecarPath, 'utf8').replace('"lifecycleRevision": 3', '"lifecycleRevision": 9')); return replyUkamya(prompt) },
     })
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
     expect(out).toMatchObject({ status: 'failed', reason: 'changed_during_cleanup' })
@@ -435,35 +435,35 @@ describe('ledger undo', () => {
 })
 
 describe('per-meeting vocabulary and dictionary suggestions', () => {
-  it('a screen line naming Ukaoma corrects Ukoma to Ukaoma with no dictionary entry and no model call', async () => {
-    const m = meeting([['MU', [...w('I talked to Grace', 1), { word: 'Ukoma', p: 0.9, t: 2.6 }, ...w('about the trip.', 3)]]])
-    const h = harness({ owner: null, speakers: [], vocabulary: [], screen: [{ at: START + 2_000, text: 'Grace Ukaoma joined the meeting', app: 'Zoom' }] })
+  it('a screen line naming Ukamya corrects Ukmya to Ukamya with no dictionary entry and no model call', async () => {
+    const m = meeting([['MU', [...w('I talked to Faith', 1), { word: 'Ukmya', p: 0.9, t: 2.6 }, ...w('about the trip.', 3)]]])
+    const h = harness({ owner: null, speakers: [], vocabulary: [], screen: [{ at: START + 2_000, text: 'Faith Ukamya joined the meeting', app: 'Zoom' }] })
     const out = await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(section(m.meetingPath)).toBe('[MU]: I talked to Grace Ukaoma about the trip.')
+    expect(section(m.meetingPath)).toBe('[MU]: I talked to Faith Ukamya about the trip.')
     expect(out).toMatchObject({ status: 'done', modelSkipped: 'no_spans', applied: 1 })
     expect(h.calls).toHaveLength(0)
-    expect(ledgerView(SESSION).edits[0]).toMatchObject({ source: 'fuzzy', original: 'Ukoma', replacement: 'Ukaoma', reasons: ['meeting_term'] })
+    expect(ledgerView(SESSION).edits[0]).toMatchObject({ source: 'fuzzy', original: 'Ukmya', replacement: 'Ukamya', reasons: ['meeting_term'] })
     // ...and the screen's spelling becomes a dictionary SUGGESTION, never an addition.
     const list = h.suggestions.list()
     expect(list).toHaveLength(1)
-    expect(list[0]).toMatchObject({ written: 'Ukaoma', heard: ['Ukoma'], status: 'pending', count: 1 })
-    expect(list[0].evidence).toEqual([{ source: 'screen', sessionId: SESSION, heard: 'Ukoma', at: new Date(START + 3_600_000).toISOString(), detail: 'Zoom' }])
+    expect(list[0]).toMatchObject({ written: 'Ukamya', heard: ['Ukmya'], status: 'pending', count: 1 })
+    expect(list[0].evidence).toEqual([{ source: 'screen', sessionId: SESSION, heard: 'Ukmya', at: new Date(START + 3_600_000).toISOString(), detail: 'Zoom' }])
   })
 
   it('a model edit writing a phrase from the screen suggests the phrase once, not its words again', async () => {
-    const m = meeting([['MU', [...w('I met', 1), { word: 'Grays', p: 0.3, t: 2 }, { word: 'Yukoma', p: 0.4, t: 2.4 }, ...w('today.', 3)]]])
-    const h = harness({ owner: null, speakers: [], vocabulary: [], screen: [{ at: START + 2_000, text: 'Grace Ukaoma joined' }],
-      reply: () => '{"edits":[{"id":"S1","action":"replace","text":"Grace Ukaoma"}]}' })
+    const m = meeting([['MU', [...w('I met', 1), { word: 'Grays', p: 0.3, t: 2 }, { word: 'Yukmya', p: 0.4, t: 2.4 }, ...w('today.', 3)]]])
+    const h = harness({ owner: null, speakers: [], vocabulary: [], screen: [{ at: START + 2_000, text: 'Faith Ukamya joined' }],
+      reply: () => '{"edits":[{"id":"S1","action":"replace","text":"Faith Ukamya"}]}' })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(section(m.meetingPath)).toBe('[MU]: I met Grace Ukaoma today.')
-    expect(h.suggestions.list().map(x => [x.written, x.heard, x.evidence.map(e => e.source)])).toEqual([['Grace Ukaoma', ['Grays Yukoma'], ['screen']]])
+    expect(section(m.meetingPath)).toBe('[MU]: I met Faith Ukamya today.')
+    expect(h.suggestions.list().map(x => [x.written, x.heard, x.evidence.map(e => e.source)])).toEqual([['Faith Ukamya', ['Grays Yukmya'], ['screen']]])
   })
 
   it('without the screen line the same meeting is left alone', async () => {
-    const m = meeting([['MU', [...w('I talked to Grace', 1), { word: 'Ukoma', p: 0.9, t: 2.6 }, ...w('about the trip.', 3)]]])
+    const m = meeting([['MU', [...w('I talked to Faith', 1), { word: 'Ukmya', p: 0.9, t: 2.6 }, ...w('about the trip.', 3)]]])
     const h = harness({ owner: null, speakers: [], vocabulary: [] })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(section(m.meetingPath)).toBe('[MU]: I talked to Grace Ukoma about the trip.')
+    expect(section(m.meetingPath)).toBe('[MU]: I talked to Faith Ukmya about the trip.')
     expect(h.suggestions.list()).toHaveLength(0)
   })
 
@@ -487,10 +487,10 @@ describe('per-meeting vocabulary and dictionary suggestions', () => {
   })
 
   it('no suggestion without context evidence: a dictionary word or a plain model fix records none', async () => {
-    const m = ukaomaMeeting()
-    const h = harness({ reply: replyUkaoma, vocabulary: ['Ukaoma'] })
+    const m = ukamyaMeeting()
+    const h = harness({ reply: replyUkamya, vocabulary: ['Ukamya'] })
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    expect(section(m.meetingPath)).toContain('Then Ukaoma called back.')
+    expect(section(m.meetingPath)).toContain('Then Ukamya called back.')
     expect(h.suggestions.list()).toHaveLength(0)
     // A low-confidence word fixed to a spelling no context source holds: still no suggestion.
     const m2 = meeting([['MU', [...w('We met at the', 1), { word: 'resturant', p: 0.2, t: 3 }, ...w('downtown.', 3.5)]]])
@@ -502,16 +502,16 @@ describe('per-meeting vocabulary and dictionary suggestions', () => {
   })
 
   it('owner card and COS people are evidence too, and suggestions dedupe by written form', async () => {
-    const h = harness({ reply: replyUkaoma, owner: OWNER, vocabulary: [] })
-    const m = ukaomaMeeting()
+    const h = harness({ reply: replyUkamya, owner: OWNER, vocabulary: [] })
+    const m = ukamyaMeeting()
     await runTranscriptCleanup({ sessionId: SESSION, meetingPath: m.meetingPath, sidecarPath: m.sidecarPath }, h.deps)
-    const m2 = ukaomaMeeting()
+    const m2 = ukamyaMeeting()
     await runTranscriptCleanup({ sessionId: 'meeting_cleanup_002', meetingPath: m2.meetingPath, sidecarPath: m2.sidecarPath }, h.deps)
     const list = h.suggestions.list()
     expect(list).toHaveLength(1)
-    expect(list[0].written).toBe('Ukaoma')
+    expect(list[0].written).toBe('Ukamya')
     expect(list[0].count).toBe(8)
-    expect(list[0].heard).toEqual(['Ukoma', 'Yukoma', 'eucoma', 'U coma'])
+    expect(list[0].heard).toEqual(['Ukmya', 'Yukmya', 'eucmya', 'U cmya'])
     expect(new Set(list[0].evidence.map(e => e.source))).toEqual(new Set(['owner']))
     expect(list[0].evidence.length).toBeLessThanOrEqual(5)
   })
@@ -521,8 +521,8 @@ describe('screen context store', () => {
   it('bounds, dedupes, holds secrets and refuses bad clocks', () => {
     const now = START + 600_000
     const r = appendScreenContext(SESSION, { lines: [
-      { at: START + 1_000, text: 'Grace Ukaoma joined' },
-      { at: START + 5_000, text: 'Grace  Ukaoma joined' },
+      { at: START + 1_000, text: 'Faith Ukamya joined' },
+      { at: START + 5_000, text: 'Faith  Ukamya joined' },
       { at: new Date(START + 60_000).toISOString(), text: 'x'.repeat(500), app: 'Keynote<script>' },
       { at: START + 2_000, text: 'API_KEY=sk-live-abcdefghijklmnop1234' },
       { at: START + 2_000, text: 'password: Hunter2!Hunter2!' },

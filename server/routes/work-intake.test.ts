@@ -16,7 +16,7 @@ afterEach(async () => {
 })
 const meeting = { domain: 'quilt', month: '2026-09', filename: '2026-09-24_Bottle_QA.md', recordId: 'ops:quilt:2026-09:2026-09-24_Bottle_QA.md', title: 'Producer title' }
 const id = (n: number) => 'wi_' + n.toString(16).padStart(32, '0')
-const ask = (n = 1) => ({ id: id(n), kind: 'ask', status: 'ask', meeting, confidence: 0.9, model: 'jev-1.13.0', text: 'Fix the H1', owner: 'Ryan Hopkins', ownerIsMiles: false, pull: null })
+const ask = (n = 1) => ({ id: id(n), kind: 'ask', status: 'ask', meeting, confidence: 0.9, model: 'jev-1.13.0', text: 'Fix the H1', owner: 'Reid Hollis', ownerIsMiles: false, pull: null })
 const link = (n = 2) => ({ id: id(n), kind: 'link', status: 'suggested', meeting, confidence: 0.7, model: 'jev-1.13.0',
   task: { domain: 'quilt', id: 'a'.repeat(12), workIdentity: 'b'.repeat(12), text: 'Monitor launch' }, relation: 'advanced' })
 const row = (extra: Record<string, unknown> = {}) => ({ domain: 'quilt', id: 'e'.repeat(12), workIdentity: 'b'.repeat(12), text: 'Monitor launch Monday (renamed)',
@@ -100,7 +100,7 @@ it('accepting an ask creates one linked card in the meeting domain; collisions w
   const s = await setup(); s.store!.upsert([ask()])
   const res = await s.call(`/${id(1)}/resolve`, { action: 'accept' })
   expect((await res.json()).item).toMatchObject({ status: 'accepted', resolution: { taskId: 'c'.repeat(12) } })
-  expect(s.deps.capture).toHaveBeenCalledExactlyOnceWith('quilt', 'Fix the H1 (from Ryan Hopkins)', expect.objectContaining({ recordId: meeting.recordId, title: 'Canonical title' }))
+  expect(s.deps.capture).toHaveBeenCalledExactlyOnceWith('quilt', 'Fix the H1 (from Reid Hollis)', expect.objectContaining({ recordId: meeting.recordId, title: 'Canonical title' }))
   const clash = await setup({ capture: vi.fn(async () => ({ created: false, id: 'c'.repeat(12), linked: false, checked: true, archived: false, delegated: false })) })
   clash.store!.upsert([ask()])
   const refused = await clash.call(`/${id(1)}/resolve`, { action: 'accept' })
@@ -121,10 +121,10 @@ it('dismiss needs no bridge, and bad actions are refused', async () => {
 
 it('an ask whose words are already an open task links that task instead of refusing; a linked twin is success', async () => {
   const open = await setup({ capture: vi.fn(async () => ({ created: false, id: 'c'.repeat(12), linked: false, checked: false, archived: false, delegated: false })),
-    list: vi.fn(async () => [row({ id: 'c'.repeat(12), workIdentity: 'c'.repeat(12), text: 'Fix the H1 (from Ryan Hopkins)' })]) })
+    list: vi.fn(async () => [row({ id: 'c'.repeat(12), workIdentity: 'c'.repeat(12), text: 'Fix the H1 (from Reid Hollis)' })]) })
   open.store!.upsert([ask()])
   expect((await (await open.call(`/${id(1)}/resolve`, { action: 'accept' })).json()).item.resolution.taskId).toBe('c'.repeat(12))
-  expect(open.deps.link).toHaveBeenCalledExactlyOnceWith('quilt', 'c'.repeat(12), 'Fix the H1 (from Ryan Hopkins)', 'f'.repeat(64), expect.objectContaining({ recordId: meeting.recordId }))
+  expect(open.deps.link).toHaveBeenCalledExactlyOnceWith('quilt', 'c'.repeat(12), 'Fix the H1 (from Reid Hollis)', 'f'.repeat(64), expect.objectContaining({ recordId: meeting.recordId }))
   const twin = await setup({ capture: vi.fn(async () => ({ created: false, id: 'c'.repeat(12), linked: true, checked: false, archived: false, delegated: false })) })
   twin.store!.upsert([ask()])
   expect((await twin.call(`/${id(1)}/resolve`, { action: 'accept' })).status).toBe(200)
@@ -177,7 +177,7 @@ it('maps a missing task to 404, and logs an unexpected failure as a 503', async 
 })
 
 it('writes whose item an accepted ask was, ahead of any due date', () => {
-  expect(intakeCardText({ text: 'Fix the H1', owner: 'Ryan Hopkins', ownerIsMiles: false })).toBe('Fix the H1 (from Ryan Hopkins)')
+  expect(intakeCardText({ text: 'Fix the H1', owner: 'Reid Hollis', ownerIsMiles: false })).toBe('Fix the H1 (from Reid Hollis)')
   expect(intakeCardText({ text: 'Fix the H1 — Due: 2026-09-24', owner: 'Ryan', ownerIsMiles: false })).toBe('Fix the H1 (from Ryan) — Due: 2026-09-24')
   expect(intakeCardText({ text: 'Build the strip', owner: 'MU', ownerIsMiles: true })).toBe('Build the strip')
   expect(intakeCardText({ text: 'Book the venue', owner: null, ownerIsMiles: false })).toBe('Book the venue')

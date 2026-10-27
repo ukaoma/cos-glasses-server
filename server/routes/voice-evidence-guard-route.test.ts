@@ -88,15 +88,15 @@ function seedCapture(): void {
     '| **Date** | 2026-08-05 |',
     '',
     '## Attendees',
-    '- Chris Krubeck',
+    '- Alex Kellar',
     '',
     '## Summary',
-    'Chris Krubeck owns the follow-up.',
+    'Alex Kellar owns the follow-up.',
     '',
   ].join('\n'))
   writeFileSync(
     join(dir, `${STEM}.g2-chunks.json`),
-    JSON.stringify({ sessionId: SESSION, chunks: turns('MU', 'Chris Krubeck', 8, 30) }),
+    JSON.stringify({ sessionId: SESSION, chunks: turns('MU', 'Alex Kellar', 8, 30) }),
   )
 }
 
@@ -116,7 +116,7 @@ async function seedMergedRecord(): Promise<string> {
     '',
     '## Transcript',
     '',
-    '[00:00:05] Chris Krubeck: under plan.',
+    '[00:00:05] Alex Kellar: under plan.',
     '',
   ].join('\n')
   library.writeRecord({
@@ -281,33 +281,33 @@ describe('voice evidence guard', () => {
       {
         name: 'relabel (derived recordId)',
         reason: 'blended_derived_record',
-        result: await call('POST', `/api/meeting/${SESSION}/relabel`, { from: 'Chris Krubeck', to: 'Chris', recordId: mergedRecordId }),
+        result: await call('POST', `/api/meeting/${SESSION}/relabel`, { from: 'Alex Kellar', to: 'Chris', recordId: mergedRecordId }),
       },
       {
         name: 'confirm (imported recordId)',
         reason: 'imported_read_only',
-        result: await call('POST', `/api/meeting/${SESSION}/confirm`, { label: 'Chris Krubeck', recordId: importedRecordId }),
+        result: await call('POST', `/api/meeting/${SESSION}/confirm`, { label: 'Alex Kellar', recordId: importedRecordId }),
       },
       {
         name: 'deattribute (derived sessionId)',
         reason: 'blended_derived_record',
-        result: await call('POST', `/api/meeting/${mergedRecordId}/deattribute`, { from: 'Chris Krubeck' }),
+        result: await call('POST', `/api/meeting/${mergedRecordId}/deattribute`, { from: 'Alex Kellar' }),
       },
       {
         name: 'backfill-enrolment (imported sessionId)',
         reason: 'imported_read_only',
-        result: await call('POST', `/api/meeting/${importedRecordId}/backfill-enrolment`, { speaker: 'Chris Krubeck', confirm: true }),
+        result: await call('POST', `/api/meeting/${importedRecordId}/backfill-enrolment`, { speaker: 'Alex Kellar', confirm: true }),
       },
       {
         name: 'enroll-ext (derived sessionId)',
         reason: 'blended_derived_record',
-        result: await call('POST', '/api/voice/enroll-ext', { name: 'Chris Krubeck', sessionId: mergedRecordId }),
+        result: await call('POST', '/api/voice/enroll-ext', { name: 'Alex Kellar', sessionId: mergedRecordId }),
       },
       {
         name: 'held-groups enroll (derived member)',
         reason: 'blended_derived_record',
         result: await call('POST', '/api/voice/held-groups/enroll', {
-          name: 'Chris Krubeck',
+          name: 'Alex Kellar',
           members: [{ sessionId: mergedRecordId, chunkIndex: 0 }],
           confirm: true,
           previewHash: 'a'.repeat(32),
@@ -338,7 +338,7 @@ describe('voice evidence guard', () => {
     // The merged record exists and holds this session. The capture is untouched
     // by that, so the correction lands.
     const relabel = await call('POST', `/api/meeting/${SESSION}/relabel`, {
-      from: 'Chris Krubeck', to: 'Chris Kay', confirm: true,
+      from: 'Alex Kellar', to: 'Chris Kay', confirm: true,
     })
     expect(relabel.status).toBe(200)
     expect(relabel.json.sessionId).toBe(SESSION)

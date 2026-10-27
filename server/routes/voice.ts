@@ -341,7 +341,7 @@ voiceRouter.get('/voice/ext-audio', (_req, res) => {
         ageHours: parseFloat(ageHours),
         expiresIn: `${Math.max(0, 72 - parseFloat(ageHours)).toFixed(1)}h`,
         // 6.45.3 — the chunk indices a reviewer can ask to hear (`?chunk=` on
-        // the sample route). Grace, 2026-09-12: the Add-a-voice panel let her
+        // the sample route). Faith, 2026-09-12: the Add-a-voice panel let her
         // name a session but not listen to it; naming is a guess without this.
         chunkIndices: listExtAudioChunks(d.name),
       }
@@ -747,7 +747,7 @@ voiceRouter.get('/voice/directory', async (req, res) => {
  * `enrolNamedVoice`, which is right when a human names a voice and wrong here: the
  * merge has ALREADY absorbed those embeddings, so re-enrolling the same audio across
  * every affected meeting would double-count it and drag the centroid. That matters
- * concretely -- the Luke merge moved a neighbouring speaker from 0.818 to 0.842, close
+ * concretely -- the Theo merge moved a neighbouring speaker from 0.818 to 0.842, close
  * enough to the identification threshold to start producing wrong attributions.
  *
  * NEVER THROWS. A merge that succeeded in the store must not report failure because a
@@ -839,6 +839,13 @@ voiceRouter.post('/voice/merge-profiles', async (req, res) => {
 
     if (report.missing.length > 0 && report.merged.length === 0) {
       return res.status(404).json({ error: 'no such profile(s)', missing: report.missing, report })
+    }
+    if (report.refusal) {
+      return res.status(409).json({
+        error: report.refusal.code,
+        message: report.refusal.message,
+        report,
+      })
     }
     if (report.refused && report.merged.length === 0) {
       return res.status(409).json({

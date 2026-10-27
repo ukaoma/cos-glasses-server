@@ -40,7 +40,7 @@ afterEach(async () => {
 function home(): string {
   const root = mkdtempSync(join(tmpdir(), 'cos-parity-'))
   roots.push(root)
-  const h = join(root, 'Ukaoma Chief Of Staff')
+  const h = join(root, 'Ukamya Chief Of Staff')
   mkdirSync(join(h, '.claude', 'projects'), { recursive: true })
   mkdirSync(join(h, '.codex', 'sessions'), { recursive: true })
   mkdirSync(join(h, '.cursor', 'projects'), { recursive: true })

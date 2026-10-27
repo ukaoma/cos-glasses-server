@@ -46,18 +46,18 @@ describe('rule (a): whole-sentence fillers', () => {
       'Move the pricing table to the end.',
       'Reply to Ilona and say I will see you next time we are both in Austin.',
       'Write the intro for the webinar about thanks for watching screens.',
-      'Tell Silas I will send the model tonight. See you later.',
+      'Tell Elliot I will send the model tonight. See you later.',
       'Remind me to book the flight. That is the end.',
-      'Ask Graham for the demand gen plan. I will see you in the morning.',
+      'Ask Gordon for the demand gen plan. I will see you in the morning.',
       "Remind me I'm going to go to the bathroom before the call.",
       'Send the deck to Chris. Thanks.',
       // the re-validation's eight (2026-09-12): a filler's opening words in a real sentence
-      'Transcript from the Silas call is in the folder.',
+      'Transcript from the Elliot call is in the folder.',
       'Captions from the webinar are attached.',
       'Transcription by the end of day please.',
       'Translated by Friday.',
       'Subscribe me to the newsletter.',
-      'Please subscribe Gina to the Tableau license.',
+      'Please subscribe Mira to the Tableau license.',
       'Share and subscribe the deck with Ryan.',
       'Thanks for watching the demo.',
     ]
@@ -148,8 +148,8 @@ describe('rule (b): silence plus low confidence, on whisper TOKENS', () => {
 
 describe('splitSentences', () => {
   it('does not split decimals, abbreviations or initials', () => {
-    expect(splitSentences('Set the budget to 1.5 million. Tell Dr. Smith at 9 a.m. tomorrow. J. Sokolic signs.'))
-      .toEqual(['Set the budget to 1.5 million.', 'Tell Dr. Smith at 9 a.m. tomorrow.', 'J. Sokolic signs.'])
+    expect(splitSentences('Set the budget to 1.5 million. Tell Dr. Smith at 9 a.m. tomorrow. J. Quillen signs.'))
+      .toEqual(['Set the budget to 1.5 million.', 'Tell Dr. Smith at 9 a.m. tomorrow.', 'J. Quillen signs.'])
     expect(splitSentences('One! Two? Three.')).toEqual(['One!', 'Two?', 'Three.'])
   })
 })

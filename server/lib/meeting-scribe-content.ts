@@ -14,7 +14,7 @@
 //      whose verdict we would be applying — rewriting them is circular and
 //      destroys the raw record the reviewer needs to judge for themselves.
 //   2. A name in the prose is frequently a person MENTIONED, not one who SPOKE.
-//      An action item naming Jessica Thompson does not claim she was in the room.
+//      An action item naming Joanna Thornley does not claim she was in the room.
 //      Stripping it would replace one wrong claim with a different one.
 //
 // So the output carries an ALLOWLIST: who voice matching confirmed, plus a plain

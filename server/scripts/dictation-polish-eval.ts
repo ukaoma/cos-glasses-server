@@ -35,7 +35,7 @@ export interface EvalCase {
   keep?: string[]
 }
 
-export const VOCABULARY = ['Quilt', 'HubSpot', 'Bottle POS', 'Priya', 'Okonkwo', 'Tableau', 'Jewel360']
+export const VOCABULARY = ['Quilt', 'HubSpot', 'Bottle POS', 'Priya', 'Marlowe', 'Tableau', 'Jewel360']
 
 export const CASES: EvalCase[] = [
   // Fillers and tics.
@@ -73,7 +73,7 @@ export const CASES: EvalCase[] = [
   { id: 'n01', category: 'names', input: 'pull the tablo numbers for jewel three sixty', expected: 'Pull the Tableau numbers for Jewel360.' },
   { id: 'n02', category: 'names', input: 'ask preeya to update the hub spot form', expected: 'Ask Priya to update the HubSpot form.' },
   { id: 'n03', category: 'names', input: 'the bottle p o s demo is at noon with the CFO', expected: 'The Bottle POS demo is at noon with the CFO.', keep: ['cfo'] },
-  { id: 'n04', category: 'names', input: 'loop in okonkwo on the SEO and CRO tests', expected: 'Loop in Okonkwo on the SEO and CRO tests.', keep: ['seo', 'cro'] },
+  { id: 'n04', category: 'names', input: 'loop in marlowe on the SEO and CRO tests', expected: 'Loop in Marlowe on the SEO and CRO tests.', keep: ['seo', 'cro'] },
   { id: 'n05', category: 'names', input: 'the API returns a 404 on the v2 endpoint', expected: 'The API returns a 404 on the v2 endpoint.', keep: ['404', 'v2'] },
   { id: 'n06', category: 'names', input: 'um quilt Q3 OKRs are due Friday', expected: 'Quilt Q3 OKRs are due Friday.', keep: ['q3', 'okrs'], drop: ['um'] },
   // Must not change (beyond punctuation and capitals).

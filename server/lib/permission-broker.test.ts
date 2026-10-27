@@ -325,8 +325,8 @@ describe('reading the envelope', () => {
 
 describe('answers', () => {
   it('keys each list by the ORIGINAL question text, labels in option order, Other verbatim and last', () => {
-    const v = validateQuestionAnswers(QUESTIONS, [{ labels: ['Publish', 'Bump'], other: '  also notify Gina ' }, { labels: ['Blue'] }])
-    expect(v).toEqual({ ok: true, answers: { [Q1]: ['Bump', 'Publish', '  also notify Gina '], [Q2]: ['Blue'] } })
+    const v = validateQuestionAnswers(QUESTIONS, [{ labels: ['Publish', 'Bump'], other: '  also notify Mira ' }, { labels: ['Blue'] }])
+    expect(v).toEqual({ ok: true, answers: { [Q1]: ['Bump', 'Publish', '  also notify Mira '], [Q2]: ['Blue'] } })
     // Other alone answers a single-select question.
     expect(validateQuestionAnswers(QUESTIONS, [{ labels: ['Tag'] }, { other: 'Green' }])).toEqual({ ok: true, answers: { [Q1]: ['Tag'], [Q2]: ['Green'] } })
   })

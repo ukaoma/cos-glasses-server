@@ -1398,7 +1398,7 @@ function buildCorrections(): Array<[RegExp, string]> {
  * The profile's order, except that a key goes ahead of any earlier key whose words it
  * contains (6.83.1): "forward slash build and price" runs before "forward slash build", or
  * the shorter key would cut the longer phrase short. Chains the person relies on
- * ("Myles" then "Miles Ukoma") keep their order, since neither key contains the other.
+ * ("Myles" then "Miles Ukmya") keep their order, since neither key contains the other.
  */
 export function correctionOrder(corrections: Record<string, string>): Array<[string, string]> {
   const norm = (key: string) => ` ${key.trim().toLowerCase().split(/[\s-]+/).join(' ')} `

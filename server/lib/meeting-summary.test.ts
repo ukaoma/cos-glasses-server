@@ -236,19 +236,19 @@ describe('response validation', () => {
     for (const label of ['Speaker 2', 'speaker2', 'Ext', 'MU', 'Me', 'Unknown']) {
       expect(isDiarisationLabel(label)).toBe(true)
     }
-    for (const name of ['Silas', 'Adrianna', 'Gina Torres']) {
+    for (const name of ['Elliot', 'Marisol', 'Mira Tarrant']) {
       expect(isDiarisationLabel(name)).toBe(false)
     }
     const parsed = parseSummaryResponse(JSON.stringify({
       summary: 'ok',
       actionItems: [
         { task: 'draft comms', owner: 'Speaker 2' },
-        { task: 'confirm timeline', owner: 'Silas' },
+        { task: 'confirm timeline', owner: 'Elliot' },
       ],
     }))
     expect(parsed?.actionItems).toEqual([
       { task: 'draft comms', owner: '' },
-      { task: 'confirm timeline', owner: 'Silas' },
+      { task: 'confirm timeline', owner: 'Elliot' },
     ])
   })
 
@@ -379,10 +379,10 @@ describe('markdown splice', () => {
     const path = join(root, 'meeting.md')
     writeFileSync(path, base)
     // Simulate a speaker relabel landing while the LLM call was in flight.
-    writeFileSync(path, base.replace('[MU]: hello', '[Miles Ukaoma]: hello'))
-    expect(writeMeetingEnrichment(path, result, ['Miles Ukaoma'])).toBe(true)
+    writeFileSync(path, base.replace('[MU]: hello', '[Jordan Ukamya]: hello'))
+    expect(writeMeetingEnrichment(path, result, ['Jordan Ukamya'])).toBe(true)
     const out = readFileSync(path, 'utf-8')
-    expect(out).toContain('[Miles Ukaoma]: hello')
+    expect(out).toContain('[Jordan Ukamya]: hello')
     expect(out).not.toContain('[MU]: hello')
     expect(out).toContain('A real summary.')
   })

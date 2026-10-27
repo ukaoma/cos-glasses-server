@@ -1882,7 +1882,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
    * Replay a recorded correction's enrolment — the retroactive path.
    *
    * WHY. Enrolment fires inside `POST /relabel`, so a voice named BEFORE that shipped
-   * has a correct transcript and no profile. Kirstyn Blum is the live case: named
+   * has a correct transcript and no profile. Wren Hale is the live case: named
    * across two meetings (60 and 109 chunks), 182 mentions in the sidecars, absent from
    * a 77-profile store. Re-running the rename cannot help — she is already a real
    * name there, so the placeholder guard correctly declines.
@@ -1900,7 +1900,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
    * refusal when unmappable, voice coherence, the diversity cap and the
    * `correction:<sessionId>` tag all apply identically. A named `from` is still
    * enrolled when `to` is a real person — that is how a wrong existing match
-   * becomes a new profile (Nick Gurney → Milo LeBaron). Placeholder targets
+   * becomes a new profile (Cole Garner → Leo Ashby). Placeholder targets
    * stay idle.
    *
    * FAILS CLOSED. Without `confirm: true` it reports what it would enrol and writes
@@ -2169,7 +2169,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
                 + (macAssign.report.gates.length > 0
                   ? `. The server will refuse that unless you confirm adding it anyway: ${macAssign.report.gates.map(g => MAC_ASSIGN_GATE_TEXT[g]).join('; ')}`
                   : '')
-              : `. Assigning is not possible: ${macAssignSkipText(macAssign.report.skipped)}. Send without assignVoiceProfile for a text-only rename`
+              : `. Assigning is not possible: ${macAssignSkipText(macAssign.report.skipped)}. You can still rename the speaker in the transcript without adding any voice samples`
             : '')
           + (preview.proseStale
             ? '. The summary and decisions still name the old speaker and are NOT rewritten — '
@@ -2318,7 +2318,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   // profile, so the wrong voice is now part of what the system thinks they sound
   // like and will keep matching. Removing only the label fixes the transcript and
   // leaves the profile poisoned — the exact mechanism that grew the phantom
-  // "Erick Hernandez" from 3 mislabelled seeds to 18 samples.
+  // "Evan Hartwell" from 3 mislabelled seeds to 18 samples.
   /**
    * Confirm the identifier was RIGHT about a label the display floor demoted.
    *

@@ -405,7 +405,7 @@ export function recordSuggestions(applied: readonly AppliedEdit[], pack: Context
   for (const edit of applied) {
     const heardKeys = new Set([...edit.original.matchAll(WORDS)].map(m => fold(m[0])))
     const ws = [...edit.replacement.matchAll(WORDS)].map(m => m[0])
-    // Longest first: "Grace Ukaoma" is one suggestion, not that plus "Ukaoma".
+    // Longest first: "Faith Ukamya" is one suggestion, not that plus "Ukamya".
     const candidates = [...new Set<string>([edit.replacement, ...ws.slice(0, -1).map((w, i) => `${w} ${ws[i + 1]}`), ...ws])]
       .sort((a, b) => b.split(' ').length - a.split(' ').length)
     const covered = new Set<string>()

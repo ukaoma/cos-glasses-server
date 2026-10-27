@@ -126,14 +126,14 @@ describe('suggestions', () => {
   it('scores the seed SAMPLE, never a centroid: the bar means what it says on one chunk', () => {
     // Twenty noisy samples of one voice; the profile sits at 0.87 to EACH of
     // them (just under the 0.88 bar) but their centroid averages the noise away
-    // and would clear it. Measured on the live store 2026-09-12 (Tina Hetzler
-    // vs Allison Kelley: centroid 0.76 against a best single pair of 0.70).
+    // and would clear it. Measured on the live store 2026-09-12 (Tessa Holt
+    // vs Avery Kemp: centroid 0.76 against a best single pair of 0.70).
     const samples = Array.from({ length: 20 }, (_, k) => ({ sessionId: 'meeting_n', chunkIndex: k, embedding: voiceSample(0, 40 + k, 0.5) }))
     const near = voiceSample(0, 70, 0.35)  // cos to each sample = 1/(1.118*1.059) ≈ 0.84; to their centroid ≈ 0.94
     expect(rawCosineSimilarity(near, samples[0].embedding)).toBeLessThan(HELD_GROUP_HIGH_CONFIDENCE)
     const centroid = new Float32Array(DIM); for (const s of samples) for (let d = 0; d < DIM; d++) centroid[d] += s.embedding[d] / samples.length
     expect(rawCosineSimilarity(near, centroid)).toBeGreaterThan(HELD_GROUP_HIGH_CONFIDENCE)
-    const p = profile('Allison', [near, voiceSample(0, 71, 0.36)], ['manual', 'manual'])
+    const p = profile('Avery', [near, voiceSample(0, 71, 0.36)], ['manual', 'manual'])
     const { groups } = buildHeldVoiceGroups(samples, [p])
     expect(groups).toHaveLength(1)
     expect(groups[0].suggestion?.tier).toBe('likely')
@@ -155,7 +155,7 @@ describe('suggestions', () => {
   it('samples from a bulk session enrol cannot vouch on their own, and the runner-up is not offered instead', () => {
     // Five ext-retroactive samples agree with voice 0 — the household voice an
     // earlier "name this session" wrote into somebody's profile.
-    const bulk = profile('Jessie', [0.75, 0.8, 0.85, 0.9, 1.0].map((w, k) => voiceSample(0, 40 + k, w)),
+    const bulk = profile('Willa', [0.75, 0.8, 0.85, 0.9, 1.0].map((w, k) => voiceSample(0, 40 + k, w)),
       ['ext-retroactive', 'ext-retroactive', 'ext-retroactive:meeting_9', 'ext-retroactive', 'ext-retroactive'])
     expect(buildHeldVoiceGroups(crowd(), [bulk]).groups[0].suggestion).toBeNull()
     // A weaker but anchored profile does NOT become the suggestion: the voice
@@ -166,7 +166,7 @@ describe('suggestions', () => {
     expect(buildHeldVoiceGroups(crowd(), [runnerUp]).groups[0].suggestion).toMatchObject({ name: 'Pat' })
     // One agreeing sample from an anchored source, and the profile can vouch.
     const anchored = { ...bulk, embeddings: [...bulk.embeddings, Array.from(voiceSample(0, 45, 0.7))], sources: [...bulk.sources, 'Correction:meeting_3'] }
-    expect(buildHeldVoiceGroups(crowd(), [anchored]).groups[0].suggestion).toMatchObject({ name: 'Jessie', agreeing: 6, of: 6, anchor: 'Correction' })
+    expect(buildHeldVoiceGroups(crowd(), [anchored]).groups[0].suggestion).toMatchObject({ name: 'Willa', agreeing: 6, of: 6, anchor: 'Correction' })
     // An auto-enrolled or unknown-provenance sample is not an anchor either.
     for (const src of ['auto:meeting_1', 'unknown']) {
       const weak = { ...bulk, embeddings: anchored.embeddings, sources: [...bulk.sources, src] }

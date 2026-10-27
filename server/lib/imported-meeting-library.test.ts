@@ -70,10 +70,10 @@ function render(overrides: Partial<Parameters<typeof renderImportMarkdown>[0]> =
     title: 'Weekly planning',
     dateMs: DATE_MS,
     durationSeconds: 47 * 60,
-    attendees: ['miles@example.com', 'gina@example.com'],
+    attendees: ['miles@example.com', 'mira@example.com'],
     sentences: [
       { speakerName: 'Miles', text: 'Lets start with the launch.', startTime: 65 },
-      { speakerName: 'Gina', text: 'I will own the brief.', startTime: 3725 },
+      { speakerName: 'Mira', text: 'I will own the brief.', startTime: 3725 },
     ],
     ...overrides,
   })
@@ -101,7 +101,7 @@ describe('template', () => {
     expect(detail.source).toBe('Fireflies')
     expect(detail.domain).toBe('imported')
     expect(detail.transcript).toContain('[00:01:05] Miles: Lets start with the launch.')
-    expect(detail.transcript).toContain('[01:02:05] Gina: I will own the brief.')
+    expect(detail.transcript).toContain('[01:02:05] Mira: I will own the brief.')
 
     const markdown = readFileSync(result.filepath, 'utf8')
     expect(markdown.match(PIPELINE_DURATION)?.[1]).toBe('47')
@@ -153,11 +153,11 @@ describe('template', () => {
 describe('the vendor summary', () => {
   const OVERVIEW = 'The team agreed the launch date and split the follow-ups.'
   // The vendor hands these back as ONE string with newlines in it.
-  const ACTION_ITEMS = '**Miles**\nSend the brief\n\n**Gina**\n- Draft the post\n  \n1. Book the room\n'
+  const ACTION_ITEMS = '**Miles**\nSend the brief\n\n**Mira**\n- Draft the post\n  \n1. Book the room\n'
 
   it('splits action items into one bullet per line', () => {
     expect(actionItemLines(ACTION_ITEMS)).toEqual([
-      '**Miles**', 'Send the brief', '**Gina**', 'Draft the post', 'Book the room',
+      '**Miles**', 'Send the brief', '**Mira**', 'Draft the post', 'Book the room',
     ])
     // Every bullet shape the vendor has been seen to use, so the character
     // class is covered rather than merely present. A literal bullet here would
@@ -181,7 +181,7 @@ describe('the vendor summary', () => {
 
     expect(detail.summary).toBe(OVERVIEW)
     expect(detail.actionItems.map(item => item.task)).toEqual([
-      '*Miles*', 'Send the brief', '*Gina*', 'Draft the post', 'Book the room',
+      '*Miles*', 'Send the brief', '*Mira*', 'Draft the post', 'Book the room',
     ])
     // The rest of the round trip is unchanged by the new sections.
     expect(detail.date).toBe('2026-09-10')

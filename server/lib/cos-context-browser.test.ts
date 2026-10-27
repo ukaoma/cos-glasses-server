@@ -147,7 +147,7 @@ describe('COS memory and thread projections', () => {
       'ghp_abcdefghijklmnopqrstuvwxyz123456',
       'DATABASE_URL=postgres://user:pass@host/db',
       'https://user:pass@example.com/path?access_token=abcdef1234567890',
-      'C:\\Users\\Grace\\private.txt',
+      'C:\\Users\\Faith\\private.txt',
       '-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----',
     ].join('\n')
     const cleaned = cleanContextText(source, 4000)

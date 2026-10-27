@@ -350,7 +350,7 @@ describe('summary', () => {
   // `action_items` are STRINGS and `keywords` is a list.
   const SUMMARY = {
     overview: 'The team agreed the launch date and split the follow-ups.',
-    action_items: '**Miles**\nSend the brief\n\n**Gina**\n- Draft the post\n',
+    action_items: '**Miles**\nSend the brief\n\n**Mira**\n- Draft the post\n',
     keywords: ['launch', 'brief'],
   }
 

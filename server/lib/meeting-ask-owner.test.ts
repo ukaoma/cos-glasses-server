@@ -10,51 +10,51 @@ import { MeetingAskStore } from './meeting-ask-store.js'
 import { exportMeetingAsk, meetingPosition } from '../routes/meeting-ask.js'
 import { meetingAskFromLine } from '../../shared/meeting-ask.js'
 
-// 6.76.0 field report (Grace, 2026-10-17): "Who is Grace Ukaoma?" on her own COS, heard as "Grace Ukoma",
-// was answered "These sources say nothing about who Grace Ukaoma is" from one transcript passage.
-const GRACE: OwnerCard = { name: 'Grace Ukaoma', speakerLabel: 'GU', homeArea: 'Austin, TX', notes: null }
-const input = (question: string, extra: Record<string, unknown> = {}): AskInput => normalizeAsk({ sessionId: 'meeting_owner_test', action: 'ask', question, elapsedMs: 210666, turns: [{ id: 1, speaker: 'You', elapsedMs: 200000, text: 'So who is Grace Ukoma anyway, the glasses keep asking.' }], ...extra })
+// 6.76.0 field report (Faith, 2026-10-17): "Who is Faith Ukamya?" on her own COS, heard as "Faith Ukmya",
+// was answered "These sources say nothing about who Faith Ukamya is" from one transcript passage.
+const GRACE: OwnerCard = { name: 'Faith Ukamya', speakerLabel: 'GU', homeArea: 'Austin, TX', notes: null }
+const input = (question: string, extra: Record<string, unknown> = {}): AskInput => normalizeAsk({ sessionId: 'meeting_owner_test', action: 'ask', question, elapsedMs: 210666, turns: [{ id: 1, speaker: 'You', elapsedMs: 200000, text: 'So who is Faith Ukmya anyway, the glasses keep asking.' }], ...extra })
 const answer = (text: string) => ({ text: JSON.stringify({ sections: [{ label: 'So what', text }], confidence: { level: 'limited', reason: 'Profile only.' }, searchQuery: null }), model: 'claude-sonnet-5-5' })
-const memory = (text: string): AskSource => ({ id: 'H1', kind: 'memory', title: 'Pregnancy with Rafael', text, memoryId: 'm1', domain: 'personal' })
+const memory = (text: string): AskSource => ({ id: 'H1', kind: 'memory', title: 'Pregnancy with Felix', text, memoryId: 'm1', domain: 'personal' })
 
 describe('owner name matching (ASR variants)', () => {
-  it('reads Ukoma, Yukoma and Ukaoma as the owner surname, and refuses unrelated words', () => {
-    for (const heard of ['Ukaoma', 'Ukoma', 'Yukoma', 'UKAOMA', 'Ukaomá']) expect(nameWordMatches(heard, 'Ukaoma'), heard).toBe(true)
-    for (const heard of ['Uma', 'Yoga', 'Okra', 'Kumar', 'Yukomaxx', 'Graces']) expect(nameWordMatches(heard, 'Ukaoma'), heard).toBe(false)
+  it('reads Ukmya, Yukmya and Ukamya as the owner surname, and refuses unrelated words', () => {
+    for (const heard of ['Ukamya', 'Ukmya', 'Yukmya', 'UKAMYA', 'Ukamyá']) expect(nameWordMatches(heard, 'Ukamya'), heard).toBe(true)
+    for (const heard of ['Uma', 'Yoga', 'Okra', 'Kumar', 'Yukmyaxx', 'Faiths']) expect(nameWordMatches(heard, 'Ukamya'), heard).toBe(false)
     // Names shorter than four letters must match exactly: Ann is not Anne, Ian is not Jan.
-    // One edit below seven letters, two from seven: Okama is two edits from Ukaoma; Swarup two from Swaroop.
-    expect(nameWordMatches('Okama', 'Ukaoma')).toBe(false); expect(nameWordMatches('Swarup', 'Swaroop')).toBe(true)
+    // One edit below seven letters, two from seven: Okama is two edits from Ukamya; Swarup two from Swaroop.
+    expect(nameWordMatches('Okama', 'Ukamya')).toBe(false); expect(nameWordMatches('Swarup', 'Swaroop')).toBe(true)
     expect(nameWordMatches('Ann', 'Anne')).toBe(false); expect(nameWordMatches('Ian', 'Jan')).toBe(false); expect(nameWordMatches('ann', 'Ann')).toBe(true)
   })
   it('matches the full name, a lead-in surname, and an exact first-name subject, never another person', () => {
-    expect(matchOwnerName('Who is Grace Ukoma?', 'Grace Ukaoma')).toEqual({ heard: 'Grace Ukoma', owner: 'Grace Ukaoma' })
-    expect(matchOwnerName('who is Yukoma', 'Grace Ukaoma')?.owner).toBe('Grace Ukaoma')
-    expect(matchOwnerName('Who is Grace?', 'Grace Ukaoma')?.heard).toBe('Grace')
-    expect(matchOwnerName('Grace Ukaoma, what did she say?', 'Grace Ukaoma')?.owner).toBe('Grace Ukaoma')
+    expect(matchOwnerName('Who is Faith Ukmya?', 'Faith Ukamya')).toEqual({ heard: 'Faith Ukmya', owner: 'Faith Ukamya' })
+    expect(matchOwnerName('who is Yukmya', 'Faith Ukamya')?.owner).toBe('Faith Ukamya')
+    expect(matchOwnerName('Who is Faith?', 'Faith Ukamya')?.heard).toBe('Faith')
+    expect(matchOwnerName('Faith Ukamya, what did she say?', 'Faith Ukamya')?.owner).toBe('Faith Ukamya')
     // Same surname, different first name: a family member, not the owner.
-    expect(matchOwnerName('Who is Rafael Ukaoma?', 'Grace Ukaoma')).toBeNull()
-    // Miles's COS: Grace is not the owner there.
-    expect(matchOwnerName('Who is Grace Ukaoma?', 'Miles Ukaoma')).toBeNull()
-    expect(matchOwnerName('Say grace before dinner', 'Grace Ukaoma')).toBeNull()
-    expect(matchOwnerName('Who is Grace Ukoma?', null)).toBeNull()
-    expect(matchOwnerName('Who is Grace Ukoma?', '')).toBeNull()
+    expect(matchOwnerName('Who is Felix Ukamya?', 'Faith Ukamya')).toBeNull()
+    // Miles's COS: Faith is not the owner there.
+    expect(matchOwnerName('Who is Faith Ukamya?', 'Jordan Ukamya')).toBeNull()
+    expect(matchOwnerName('Say grace before dinner', 'Faith Ukamya')).toBeNull()
+    expect(matchOwnerName('Who is Faith Ukmya?', null)).toBeNull()
+    expect(matchOwnerName('Who is Faith Ukmya?', '')).toBeNull()
   })
 })
 
 describe('person and self-history questions', () => {
   it('finds who questions and the owner\'s own history, not role or process questions', () => {
-    expect(personQuestion('Who is Grace Ukoma?')).toEqual({ kind: 'who', subject: 'Grace Ukoma' })
+    expect(personQuestion('Who is Faith Ukmya?')).toEqual({ kind: 'who', subject: 'Faith Ukmya' })
     expect(personQuestion("Who's Nate from 119?")).toEqual({ kind: 'who', subject: 'Nate from 119' })
     expect(personQuestion('Tell me about Swaroop')).toEqual({ kind: 'who', subject: 'Swaroop' })
-    expect(personQuestion('What was going on with me when I was pregnant with Rafael?')).toEqual({ kind: 'self' })
+    expect(personQuestion('What was going on with me when I was pregnant with Felix?')).toEqual({ kind: 'self' })
     expect(personQuestion('Who am I?')).toEqual({ kind: 'self' })
     for (const q of ['Who is speaking right now?', 'Who is responsible for the draft?', 'Who is going to send it?', 'What did Maya commit to?', 'Who is the client?']) expect(personQuestion(q), q).toBeNull()
   })
   it('searches the owner by the profile spelling and a self question by its content words', () => {
-    const owner = matchOwnerName('Who is Grace Ukoma?', 'Grace Ukaoma')
-    expect(personLookupQuery('Who is Grace Ukoma?', personQuestion('Who is Grace Ukoma?')!, owner, 'Grace Ukaoma')).toBe('Grace Ukaoma')
-    expect(personLookupQuery('What was going on with me when I was pregnant with Rafael?', { kind: 'self' }, null, 'Grace Ukaoma')).toBe('pregnant Rafael')
-    expect(personLookupQuery('Who am I?', { kind: 'self' }, null, 'Grace Ukaoma')).toBe('Grace Ukaoma')
+    const owner = matchOwnerName('Who is Faith Ukmya?', 'Faith Ukamya')
+    expect(personLookupQuery('Who is Faith Ukmya?', personQuestion('Who is Faith Ukmya?')!, owner, 'Faith Ukamya')).toBe('Faith Ukamya')
+    expect(personLookupQuery('What was going on with me when I was pregnant with Felix?', { kind: 'self' }, null, 'Faith Ukamya')).toBe('pregnant Felix')
+    expect(personLookupQuery('Who am I?', { kind: 'self' }, null, 'Faith Ukamya')).toBe('Faith Ukamya')
     expect(personLookupQuery('Who is Nate?', { kind: 'who', subject: 'Nate' }, null, null)).toBe('Nate')
   })
 })
@@ -68,14 +68,14 @@ describe('owner card from the profile', () => {
     writeFileSync(path, JSON.stringify({ owner_name: 'Your Name' })); clearProfileCache(); expect(ownerCardFromProfile()).toBeNull()
   })
   it('carries the name, label, home area and notes, and drops address, phone and email sentences', () => {
-    writeFileSync(path, JSON.stringify({ owner_name: 'Grace Ukaoma', owner_speaker_label: 'GU', home_city: 'Austin, TX', system_prompt_context: 'Married to Miles. Mother of Talia and Rafael. Lives at 1204 Oak Hollow Drive. Doctoral candidate, finishing in December. Call 512 555 0199 anytime. Email grace@example.com.' }))
+    writeFileSync(path, JSON.stringify({ owner_name: 'Faith Ukamya', owner_speaker_label: 'GU', home_city: 'Austin, TX', system_prompt_context: 'Married to Jordan. Mother of Talia and Felix. Lives at 1204 Oak Hollow Drive. Doctoral candidate, finishing in December. Call 512 555 0199 anytime. Email grace@example.com.' }))
     clearProfileCache()
     const card = ownerCardFromProfile()!
-    expect(card).toMatchObject({ name: 'Grace Ukaoma', speakerLabel: 'GU', homeArea: 'Austin, TX' })
-    expect(card.notes).toBe('Married to Miles. Mother of Talia and Rafael. Doctoral candidate, finishing in December.')
+    expect(card).toMatchObject({ name: 'Faith Ukamya', speakerLabel: 'GU', homeArea: 'Austin, TX' })
+    expect(card.notes).toBe('Married to Jordan. Mother of Talia and Felix. Doctoral candidate, finishing in December.')
     const source = ownerCardSource(card, 'H1')
     expect(source).toMatchObject({ id: 'H1', kind: 'profile' })
-    expect(source.text).toContain('This COS belongs to Grace Ukaoma.')
+    expect(source.text).toContain('This COS belongs to Faith Ukamya.')
     expect(source.text).not.toMatch(/Oak Hollow|555|example\.com/)
     expect(ownerNotes('Zip 78641 is home. Loves tea.')).toBe('Loves tea.')
   })
@@ -87,14 +87,14 @@ describe('owner card from the profile', () => {
 describe('Live COS Ask with the owner card', () => {
   it('passes the card as a citable profile source, reads the ASR spelling as the owner, and returns the cited card', async () => {
     const search = vi.fn(async () => ({ sources: [], notices: [] }))
-    const run = vi.fn(async (_p: string) => answer('Grace Ukaoma owns this COS and is the wearer [H1].'))
-    const result = await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000, owner: () => GRACE })(input('Who is Grace Ukoma?'))
+    const run = vi.fn(async (_p: string) => answer('Faith Ukamya owns this COS and is the wearer [H1].'))
+    const result = await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000, owner: () => GRACE })(input('Who is Faith Ukmya?'))
     const prompt = JSON.parse(run.mock.calls[0][0])
-    expect(prompt.owner).toEqual({ name: 'Grace Ukaoma', sourceId: 'H1' })
-    expect(prompt.ownerMatch).toEqual({ heard: 'Grace Ukoma', readAs: 'Grace Ukaoma' })
+    expect(prompt.owner).toEqual({ name: 'Faith Ukamya', sourceId: 'H1' })
+    expect(prompt.ownerMatch).toEqual({ heard: 'Faith Ukmya', readAs: 'Faith Ukamya' })
     expect(prompt.evidence.find((s: AskSource) => s.id === 'H1')).toMatchObject({ kind: 'profile' })
     expect(result.sources.map(s => s.kind)).toEqual(['profile'])
-    expect(result.notices).toContain('Read "Grace Ukoma" in your question as Grace Ukaoma, the owner of this COS.')
+    expect(result.notices).toContain('Read "Faith Ukmya" in your question as Faith Ukamya, the owner of this COS.')
   })
   it('without a profile name changes nothing: no card, no owner keys', async () => {
     const run = vi.fn(async (_p: string) => answer('Maya will send the draft [T1].'))
@@ -113,20 +113,20 @@ describe('Live COS Ask with the owner card', () => {
 describe('person questions always look in COS first', () => {
   it('searches COS for the owner before the first model call, in every domain, and saves the planner hop', async () => {
     const calls: string[] = []
-    const search = vi.fn(async (q: string, _s?: string, scope?: string, options?: { anyDomain?: boolean }) => { calls.push(`search:${q}:${scope}:${options?.anyDomain}`); return { sources: [memory('Grace keeps the family calendar.')], notices: [] } })
-    const run = vi.fn(async (_p: string) => { calls.push('answer'); return answer('Grace Ukaoma owns this COS [H1] and keeps the family calendar [H2].') })
-    const result = await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000, owner: () => GRACE })(input('Who is Grace Ukoma?'))
-    expect(calls).toEqual(['search:Grace Ukaoma:cos:true', 'answer'])
+    const search = vi.fn(async (q: string, _s?: string, scope?: string, options?: { anyDomain?: boolean }) => { calls.push(`search:${q}:${scope}:${options?.anyDomain}`); return { sources: [memory('Faith keeps the family calendar.')], notices: [] } })
+    const run = vi.fn(async (_p: string) => { calls.push('answer'); return answer('Faith Ukamya owns this COS [H1] and keeps the family calendar [H2].') })
+    const result = await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000, owner: () => GRACE })(input('Who is Faith Ukmya?'))
+    expect(calls).toEqual(['search:Faith Ukamya:cos:true', 'answer'])
     const prompt = JSON.parse(run.mock.calls[0][0])
-    expect(prompt.cosLookups).toEqual([{ query: 'Grace Ukaoma', searched: 'COS memories and earlier meetings', results: 1 }])
+    expect(prompt.cosLookups).toEqual([{ query: 'Faith Ukamya', searched: 'COS memories and earlier meetings', results: 1 }])
     expect(prompt.searchAllowed).toBe(true)
     expect(result.sources.map(s => s.kind).sort()).toEqual(['memory', 'profile'])
   })
   it('runs for a self-history question with the owner\'s words, and for another person without a profile', async () => {
-    const search = vi.fn(async () => ({ sources: [memory('In spring 2023 Grace was pregnant with Rafael and writing her proposal.')], notices: [] }))
-    const run = vi.fn(async () => answer('You were pregnant with Rafael while writing your proposal [H2].'))
-    await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000, owner: () => GRACE })(input('What was going on with me when I was pregnant with Rafael?'))
-    expect(search).toHaveBeenCalledWith('pregnant Rafael', 'meeting_owner_test', 'cos', { anyDomain: true })
+    const search = vi.fn(async () => ({ sources: [memory('In spring 2023 Faith was pregnant with Felix and writing her proposal.')], notices: [] }))
+    const run = vi.fn(async () => answer('You were pregnant with Felix while writing your proposal [H2].'))
+    await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000, owner: () => GRACE })(input('What was going on with me when I was pregnant with Felix?'))
+    expect(search).toHaveBeenCalledWith('pregnant Felix', 'meeting_owner_test', 'cos', { anyDomain: true })
     const other = vi.fn(async () => ({ sources: [], notices: [] }))
     await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer('Nate is not described here [T1].')), search: other, now: () => 5000 })(input('Who is Nate?'))
     expect(other).toHaveBeenCalledWith('Nate', 'meeting_owner_test', 'cos', { anyDomain: true })
@@ -148,11 +148,11 @@ describe('person questions always look in COS first', () => {
   })
   it('the forced lookup takes one of the two lookups, and never reaches the web', async () => {
     // Lookups that find something, so emptyCosLookup cannot be what closes the budget.
-    const search = vi.fn(async () => ({ sources: [memory('Grace hosts the family dinners.')], notices: [] }))
+    const search = vi.fn(async () => ({ sources: [memory('Faith hosts the family dinners.')], notices: [] }))
     const run = vi.fn()
-      .mockResolvedValueOnce({ text: JSON.stringify({ sections: [], searchQuery: 'Grace family', searchScope: 'cos' }) })
-      .mockResolvedValue(answer('Grace Ukaoma owns this COS [H1].'))
-    const result = await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000, owner: () => GRACE, webAvailable: false })(input('Who is Grace Ukoma?'))
+      .mockResolvedValueOnce({ text: JSON.stringify({ sections: [], searchQuery: 'Faith family', searchScope: 'cos' }) })
+      .mockResolvedValue(answer('Faith Ukamya owns this COS [H1].'))
+    const result = await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000, owner: () => GRACE, webAvailable: false })(input('Who is Faith Ukmya?'))
     expect(search.mock.calls.map(c => (c as unknown[])[2])).toEqual(['cos', 'cos'])
     expect(JSON.parse(run.mock.calls[1][0]).searchAllowed).toBe(false)
     expect(result.timings!.phases.map(p => p.phase)).toEqual(['cos_search', 'plan', 'cos_search', 'answer'])
@@ -162,25 +162,25 @@ describe('person questions always look in COS first', () => {
 describe('an empty COS lookup is never proof of absence', () => {
   it('says what was searched in the answer and the notices', async () => {
     const search = vi.fn(async () => ({ sources: [], notices: ['No relevant COS history was found.'] }))
-    const run = vi.fn(async () => answer('These sources say nothing about who Grace Ukaoma is [T1].'))
-    const result = await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000 })(input('Who is Grace Ukaoma?'))
+    const run = vi.fn(async () => answer('These sources say nothing about who Faith Ukamya is [T1].'))
+    const result = await createLiveAsk({ requireHaiku: false, run, search, now: () => 5000 })(input('Who is Faith Ukamya?'))
     const lead = result.sections.find(s => s.label === 'So what')!
-    expect(lead.text).toContain(searchedDisclosure(['Grace Ukaoma']))
-    expect(lead.text).toContain('COS searched memories and earlier meetings for "Grace Ukaoma" and found no match')
-    expect(result.notices).toContain(searchedDisclosure(['Grace Ukaoma']))
+    expect(lead.text).toContain(searchedDisclosure(['Faith Ukamya']))
+    expect(lead.text).toContain('COS searched memories and earlier meetings for "Faith Ukamya" and found no match')
+    expect(result.notices).toContain(searchedDisclosure(['Faith Ukamya']))
     expect(result.notices).not.toContain('No relevant COS history was found.')
   })
   it('does not repeat the disclosure when the answer already says what COS searched', async () => {
-    const text = 'COS searched for Grace Ukaoma and these sources say nothing about her [T1].'
-    const result = await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer(text)), search: vi.fn(async () => ({ sources: [], notices: [] })), now: () => 5000 })(input('Who is Grace Ukaoma?'))
+    const text = 'COS searched for Faith Ukamya and these sources say nothing about her [T1].'
+    const result = await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer(text)), search: vi.fn(async () => ({ sources: [], notices: [] })), now: () => 5000 })(input('Who is Faith Ukamya?'))
     expect(result.sections[0].text).toBe(text)
   })
   it('leaves an answer that does not claim absence alone, and adds nothing when the lookup found something', async () => {
     const empty = vi.fn(async () => ({ sources: [], notices: [] }))
-    const plain = await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer('The speaker asked about Grace Ukoma [T1].')), search: empty, now: () => 5000 })(input('Who is Grace Ukaoma?'))
-    expect(plain.sections[0].text).toBe('The speaker asked about Grace Ukoma [T1].')
-    expect(plain.notices).toContain(searchedDisclosure(['Grace Ukaoma']))
-    const found = await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer('These sources say nothing about her job [H1].')), search: vi.fn(async () => ({ sources: [memory('Grace is a doctoral candidate.')], notices: [] })), now: () => 5000 })(input('Who is Grace Ukaoma?'))
+    const plain = await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer('The speaker asked about Faith Ukmya [T1].')), search: empty, now: () => 5000 })(input('Who is Faith Ukamya?'))
+    expect(plain.sections[0].text).toBe('The speaker asked about Faith Ukmya [T1].')
+    expect(plain.notices).toContain(searchedDisclosure(['Faith Ukamya']))
+    const found = await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer('These sources say nothing about her job [H1].')), search: vi.fn(async () => ({ sources: [memory('Faith is a doctoral candidate.')], notices: [] })), now: () => 5000 })(input('Who is Faith Ukamya?'))
     expect(found.sections[0].text).not.toContain('COS searched')
   })
   it('still lets the planner reach the gated web after an empty forced lookup', async () => {
@@ -198,13 +198,13 @@ describe('per-phase timing', () => {
   it('times every phase, marks the forced lookup, and keeps a failed phase in the caller\'s list', async () => {
     let t = 0
     const clock = () => (t += 100)
-    const search = vi.fn(async () => ({ sources: [memory('Grace keeps the calendar.')], notices: [] }))
-    const review = vi.fn(async () => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'Grace Ukaoma owns this COS [H1].' }], confidence: { level: 'supported', reason: 'Profile states it.' }, support: [{ id: 'H1', quote: 'This COS belongs to Grace Ukaoma.' }] }) }))
-    const result = await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer('Grace Ukaoma owns this COS [H1].')), review, search, now: () => 5000, clock, owner: () => GRACE })(input('Who is Grace Ukoma?'))
+    const search = vi.fn(async () => ({ sources: [memory('Faith keeps the calendar.')], notices: [] }))
+    const review = vi.fn(async () => ({ text: JSON.stringify({ sections: [{ label: 'So what', text: 'Faith Ukamya owns this COS [H1].' }], confidence: { level: 'supported', reason: 'Profile states it.' }, support: [{ id: 'H1', quote: 'This COS belongs to Faith Ukamya.' }] }) }))
+    const result = await createLiveAsk({ requireHaiku: false, run: vi.fn(async () => answer('Faith Ukamya owns this COS [H1].')), review, search, now: () => 5000, clock, owner: () => GRACE })(input('Who is Faith Ukmya?'))
     expect(result.timings!.phases.map(p => [p.phase, p.ms, p.forced ?? false, p.results])).toEqual([['cos_search', 100, true, 1], ['answer', 100, false, undefined], ['review', 100, false, undefined]])
     expect(result.timings!.totalMs).toBeGreaterThan(300)
     const phases: any[] = []
-    await expect(createLiveAsk({ requireHaiku: false, run: vi.fn(async () => { throw new Error('provider_timeout') }), search, now: () => 5000, clock, phases })(input('Who is Grace Ukaoma?'))).rejects.toThrow('provider_timeout')
+    await expect(createLiveAsk({ requireHaiku: false, run: vi.fn(async () => { throw new Error('provider_timeout') }), search, now: () => 5000, clock, phases })(input('Who is Faith Ukamya?'))).rejects.toThrow('provider_timeout')
     expect(phases.map(p => [p.phase, p.failed ?? false])).toEqual([['cos_search', false], ['answer', true]])
   })
   it('labels a model call that led to an explicit web lookup as plan, and a cached reply carries no timings', async () => {
@@ -220,18 +220,18 @@ describe('per-phase timing', () => {
     try {
       const make = (run: any) => new MeetingAskRuntime({ reviewAnswers: false, finalized: () => ({ sources: [], notices: [] }), store: new MeetingAskStore(dir), identity: () => 'server-one', admissions: () => true, lease: () => ({ release() {} } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'sonnet', models: ['sonnet'] }] as any, run, search: async () => ({ sources: [], notices: [] }), webCapability: () => ({ available: false, reason: 'test' }) as any, owner: () => GRACE, logTimings: (l: string) => lines.push(l) })
       const settle = async (rt: MeetingAskRuntime, id: string) => { for (let i = 0; i < 200 && ['pending', 'running'].includes(rt.get(id).status); i++) await new Promise(r => setTimeout(r, 2)); return rt.get(id) }
-      const ok = make(vi.fn(async () => answer('Grace Ukaoma owns this COS [H1].')))
-      const question = 'Who is Grace Ukoma?'
-      await ok.submit({ requestId: 'request_owner_ok', sessionId: 'meeting_owner_rt', serverInstanceId: 'server-one', action: 'ask', question, elapsedMs: 210666, turns: [{ id: 0, elapsedMs: 0, speaker: 'You', text: 'Who is Grace Ukoma anyway.' }] } as any)
+      const ok = make(vi.fn(async () => answer('Faith Ukamya owns this COS [H1].')))
+      const question = 'Who is Faith Ukmya?'
+      await ok.submit({ requestId: 'request_owner_ok', sessionId: 'meeting_owner_rt', serverInstanceId: 'server-one', action: 'ask', question, elapsedMs: 210666, turns: [{ id: 0, elapsedMs: 0, speaker: 'You', text: 'Who is Faith Ukmya anyway.' }] } as any)
       const done = await settle(ok, 'request_owner_ok')
       expect(done.status).toBe('completed')
       expect(done.sources.some(s => s.kind === 'profile')).toBe(true)
       expect(done.timings!.phases.map(p => p.phase)).toEqual(['cos_search', 'answer'])
       expect(lines).toHaveLength(1)
       expect(lines[0]).toMatch(/^\[meeting-ask\] timing request_owner_ok ask completed total=\d+ms cos_search\(forced\)=\d+\/0 answer=\d+$/)
-      expect(lines[0]).not.toContain('Grace')
+      expect(lines[0]).not.toContain('Faith')
       const bad = make(vi.fn(async () => { throw new Error('boom') }))
-      await bad.submit({ requestId: 'request_owner_bad', sessionId: 'meeting_owner_rt', serverInstanceId: 'server-one', action: 'ask', question, elapsedMs: 220000, turns: [{ id: 0, elapsedMs: 0, speaker: 'You', text: 'Who is Grace Ukoma anyway.' }] } as any)
+      await bad.submit({ requestId: 'request_owner_bad', sessionId: 'meeting_owner_rt', serverInstanceId: 'server-one', action: 'ask', question, elapsedMs: 220000, turns: [{ id: 0, elapsedMs: 0, speaker: 'You', text: 'Who is Faith Ukmya anyway.' }] } as any)
       const failed = await settle(bad, 'request_owner_bad')
       expect(failed.status).toBe('failed')
       expect(failed.timings!.phases.map(p => [p.phase, p.failed ?? false])).toEqual([['cos_search', false], ['answer', true]])
@@ -244,11 +244,11 @@ describe('per-phase timing', () => {
       const store = new MeetingAskStore(dir)
       store.putOrientation('meeting_owner_dom', { revision: 1, domain: 'quilt', calendar: null } as any)
       const search = vi.fn(async (..._a: unknown[]) => ({ sources: [], notices: [] }))
-      const run = vi.fn().mockResolvedValueOnce({ text: JSON.stringify({ sections: [], searchQuery: 'Grace pricing', searchScope: 'cos' }) }).mockResolvedValue(answer('Grace Ukaoma owns this COS [H1].'))
+      const run = vi.fn().mockResolvedValueOnce({ text: JSON.stringify({ sections: [], searchQuery: 'Faith pricing', searchScope: 'cos' }) }).mockResolvedValue(answer('Faith Ukamya owns this COS [H1].'))
       const rt = new MeetingAskRuntime({ reviewAnswers: false, finalized: () => ({ sources: [], notices: [] }), domains: () => [{ id: 'quilt', label: 'Quilt' }], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release() {} } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'sonnet', models: ['sonnet'] }] as any, run, search: search as any, webCapability: () => ({ available: false, reason: 'test' }) as any, owner: () => GRACE, logTimings: () => {} })
-      await rt.submit({ requestId: 'request_owner_dom', sessionId: 'meeting_owner_dom', serverInstanceId: 'server-one', action: 'ask', question: 'Who is Grace Ukoma?', elapsedMs: 1000, turns: [{ id: 0, elapsedMs: 0, speaker: 'You', text: 'Pricing again.' }] } as any)
+      await rt.submit({ requestId: 'request_owner_dom', sessionId: 'meeting_owner_dom', serverInstanceId: 'server-one', action: 'ask', question: 'Who is Faith Ukmya?', elapsedMs: 1000, turns: [{ id: 0, elapsedMs: 0, speaker: 'You', text: 'Pricing again.' }] } as any)
       for (let i = 0; i < 200 && ['pending', 'running'].includes(rt.get('request_owner_dom').status); i++) await new Promise(r => setTimeout(r, 2))
-      expect(search.mock.calls.map(c => [c[0], c[4]])).toEqual([['Grace Ukaoma', undefined], ['Grace pricing', 'quilt']])
+      expect(search.mock.calls.map(c => [c[0], c[4]])).toEqual([['Faith Ukamya', undefined], ['Faith pricing', 'quilt']])
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })
@@ -256,7 +256,7 @@ describe('per-phase timing', () => {
 describe('the export says what throughMs is', () => {
   it('reads the meeting position as a clock and the answer time separately', () => {
     expect(meetingPosition(210666)).toBe('3:30'); expect(meetingPosition(288457)).toBe('4:48'); expect(meetingPosition(3_723_000)).toBe('1:02:03')
-    const text = exportMeetingAsk([{ requestId: 'r1', sessionId: 'meeting_x', serverInstanceId: 's', action: 'ask', question: 'Who is Grace Ukoma?', status: 'completed', createdAt: 'c', updatedAt: 'u', selectedModel: { engine: 'claude', model: 'sonnet' }, model: 'claude-sonnet-5-5', sources: [], notices: [], throughMs: 210666, files: [], timings: { totalMs: 6400, phases: [{ phase: 'cos_search', ms: 900, forced: true, results: 0 }, { phase: 'answer', ms: 5500 }] } } as any], [])
+    const text = exportMeetingAsk([{ requestId: 'r1', sessionId: 'meeting_x', serverInstanceId: 's', action: 'ask', question: 'Who is Faith Ukmya?', status: 'completed', createdAt: 'c', updatedAt: 'u', selectedModel: { engine: 'claude', model: 'sonnet' }, model: 'claude-sonnet-5-5', sources: [], notices: [], throughMs: 210666, files: [], timings: { totalMs: 6400, phases: [{ phase: 'cos_search', ms: 900, forced: true, results: 0 }, { phase: 'answer', ms: 5500 }] } } as any], [])
     expect(text).toContain('Transcript through: 3:30 into the meeting')
     expect(text).toContain('Answer time: 6.4 s (cos search (always for person questions) 0.9 s, answer 5.5 s)')
     expect(text).not.toContain('210666 ms')

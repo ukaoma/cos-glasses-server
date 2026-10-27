@@ -269,7 +269,7 @@ export function fuzzyReplacementFor(word: string, canonical: string[], targetLow
  *     AND mixed-case names like GitHub/OpenAI)
  *   - Word must NOT be in COMMON_ENGLISH_WORDS stop-list (primary defense)
  *   - Target must start with uppercase (canonical proper noun)
- *   - Target token length ≥ 4 chars (allows short names like Anna, Ryan, Luke as targets)
+ *   - Target token length ≥ 4 chars (allows short names like Anna, Ryan, Theo as targets)
  *   - Length difference ≤ 2 chars
  *   - Distance within length-scaled threshold:
  *       5-8 chars  → 1

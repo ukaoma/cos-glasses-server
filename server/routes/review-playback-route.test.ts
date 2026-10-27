@@ -273,33 +273,33 @@ describe('playing a stored profile — no retention change needed', () => {
     // Names chosen so ALPHABETICAL order is the OPPOSITE of mtime order: `aaa`
     // is the OLDER file. With them the other way round, "take the first entry"
     // and "take the newest" happen to agree and the test proves nothing.
-    seedSpeakerAudio('training-audio', 'Navaz Sharif', [
+    seedSpeakerAudio('training-audio', 'Neva Sharpe', [
       ['aaa_meeting_old_chunk1_sim0.60.wav', 1],
       ['zzz_meeting_new_chunk2_sim0.71.wav', 2],
     ])
-    const dir = join(dataDir, 'training-audio', 'Navaz_Sharif')
+    const dir = join(dataDir, 'training-audio', 'Neva_Sharpe')
     const { utimesSync } = await import('node:fs')
     utimesSync(join(dir, 'aaa_meeting_old_chunk1_sim0.60.wav'), 1000, 1000)
     utimesSync(join(dir, 'zzz_meeting_new_chunk2_sim0.71.wav'), 2_000_000, 2_000_000)
     await startServer()
 
-    const res = await get('/api/voice/profiles/Navaz%20Sharif/sample')
+    const res = await get('/api/voice/profiles/Neva%20Sharpe/sample')
     expect(res.status).toBe(200)
     expect(res.type).toContain('audio/wav')
     expect(res.body).toEqual(Buffer.alloc(48, 2))
   })
 
   it('handles a name with a space, matching the on-disk directory form', async () => {
-    seedSpeakerAudio('training-audio', 'Chris Krubeck', [['meeting_a_chunk1_sim0.8.wav', 7]])
+    seedSpeakerAudio('training-audio', 'Alex Kellar', [['meeting_a_chunk1_sim0.8.wav', 7]])
     await startServer()
-    expect((await get('/api/voice/profiles/Chris%20Krubeck/sample')).status).toBe(200)
+    expect((await get('/api/voice/profiles/Alex%20Kellar/sample')).status).toBe(200)
   })
 
   it('404s a profile with no retained audio and says why', async () => {
     // A profile built from Fireflies seeds has no audio at all. Reporting that
     // as an unknown person would be wrong — the profile exists.
     await startServer()
-    const res = await get('/api/voice/profiles/Gina%20Obert/sample')
+    const res = await get('/api/voice/profiles/Mira%20Orlen/sample')
     expect(res.status).toBe(404)
     expect(json(res).reason).toBe('no_sample_audio')
     expect(json(res)).toHaveProperty('embeddings')

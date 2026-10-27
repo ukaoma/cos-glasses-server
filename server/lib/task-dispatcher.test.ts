@@ -53,10 +53,10 @@ function row(overrides: Partial<BridgeTaskRow> = {}): BridgeTaskRow {
     ref: 'quilt-1',
     id: 'aaaaaaaaaaaa',
     domain: 'quilt',
-    description: 'Call Jeremy about Q3',
+    description: 'Call Jasper about Q3',
     // Dispatch requires a finish line, so the runnable fixture carries one.
     // The refusal path is covered by its own test below.
-    done_when: 'Jeremy confirms the Q3 number',
+    done_when: 'Jasper confirms the Q3 number',
     priority: 'inbox',
     is_checked: false,
     archived: false,
@@ -235,7 +235,7 @@ describe('projectTaskRun', () => {
       taskId: 'aaaaaaaaaaaa',
       ref: 'quilt-1',
       domain: 'quilt',
-      line: 'Call Jeremy about Q3',
+      line: 'Call Jasper about Q3',
       day: DAY,
       attempt: 1,
       trigger: 'manual',

@@ -598,11 +598,17 @@ export interface MergeReport {
   samplesAfter: number
   droppedToCap: number
   refused?: { name: string; similarity: number; floor: number }[]
+  /** Set when the merge was refused because it would leave the target with no
+   *  samples at all. Nothing is written when this is present. */
+  refusal?: { code: 'merge_would_empty_profile'; message: string }
 }
 
+/** The code a merge reports when it would leave an empty profile. */
+export const MERGE_WOULD_EMPTY_PROFILE = 'merge_would_empty_profile'
+
 /**
- * Fold profiles together — two names for one person, e.g. "Luke H" and
- * "Luke Henry" at 0.843.
+ * Fold profiles together — two names for one person, e.g. "Theo M" and
+ * "Theo Marsh" at 0.843.
  *
  * Fails closed below MERGE_SIMILARITY_FLOOR unless `force`. That guard is the
  * whole safety story: a wrong merge destroys BOTH identities at once, and the
@@ -648,6 +654,21 @@ export function mergeSpeakerProfiles(
   }
   if (refused.length > 0) report.refused = refused
   if (eligible.length === 0) return report
+
+  // A merge may never leave the target with nothing. Mac-assigned samples are
+  // trimmed to the person's other samples, so two profiles that hold only Mac
+  // samples would merge down to zero and the person would stop being recognised.
+  // Checked on a throwaway copy so a dry run and a real merge refuse identically.
+  const wouldBe = mergeProfilesInStore(
+    JSON.parse(JSON.stringify(store)) as ProfileStore, into, eligible, { cap: MAX_EMBEDDINGS_PER_SPEAKER },
+  )
+  if (wouldBe.mergedFrom.length > 0 && wouldBe.samplesAfter === 0) {
+    report.refusal = {
+      code: MERGE_WOULD_EMPTY_PROFILE,
+      message: `Merging into "${into}" would leave it with no voice samples. Nothing was changed.`,
+    }
+    return report
+  }
 
   if (options.dryRun) {
     // Report on a throwaway copy so nothing is mutated by a preview.

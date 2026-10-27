@@ -291,7 +291,7 @@ describe('the Cursor observer and the spool (6.62.0)', () => {
   const CURSOR = '8c149bba-82b6-4b73-9f2f-eb26e72a72a9'
   function realSpool(): string {
     const root = trackedTemp(mkdtempSync(join(tmpdir(), 'cos-spool-observer-')))
-    const dir = join(root, 'Ukaoma Chief Of Staff', '.cos-glasses', 'data', 'hook-spool')
+    const dir = join(root, 'Ukamya Chief Of Staff', '.cos-glasses', 'data', 'hook-spool')
     mkdirSync(dir, { recursive: true })
     return dir
   }

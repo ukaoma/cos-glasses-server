@@ -24,7 +24,7 @@ afterEach(async () => {
 })
 
 const TEXT = 'Yeah I agree with that. So the bookings month came in light again.'
-// MU speaks the first 2.6 s (positive samples), Silas the rest (negative samples).
+// MU speaks the first 2.6 s (positive samples), Elliot the rest (negative samples).
 const AUDIO = wavOf(6, t => (t < 2.8 ? 400 : -400))
 
 async function mount(outcome: LiveDiarizeOutcome, trackSimilarity = 0.83, transcribe = async () => ({ text: TEXT, backend: 'server' })) {
@@ -39,7 +39,7 @@ async function mount(outcome: LiveDiarizeOutcome, trackSimilarity = 0.83, transc
   vi.doMock('../lib/audio-enhance.js', () => ({ enhanceAudio: async (audio: Buffer) => audio }))
   const identify = vi.fn((wav: Buffer) => wav.length >= 44 + 5 * 32_000
     ? { speaker: 'MU', similarity: 0.61 }
-    : wav.readInt16LE(44) >= 0 ? { speaker: 'MU', similarity: trackSimilarity } : { speaker: 'Silas Larson', similarity: 0.77 })
+    : wav.readInt16LE(44) >= 0 ? { speaker: 'MU', similarity: trackSimilarity } : { speaker: 'Elliot Sterling', similarity: 0.77 })
   vi.doMock('../lib/speaker-embeddings.js', () => ({
     AUTO_ENROLL_CANDIDATE_SIMILARITY: 0.72,
     AUTO_ENROLL_THRESHOLD: 0.88,
@@ -100,12 +100,12 @@ describe('the live chunk response with Nemotron', () => {
     // Legacy fields, exactly as 6.60 returned them.
     expect(body).toMatchObject({ text: TEXT, chunkIndex: 0, elapsed: 0, sessionId: 'nemotron_route_a', asrCompleted: true, canonical: true })
     expect(typeof body.speaker).toBe('string')
-    // `speaker` is the dominant track's name (Silas holds 3.0 s against 2.6 s).
-    expect(body.speaker).toBe('Silas Larson')
+    // `speaker` is the dominant track's name (Elliot holds 3.0 s against 2.6 s).
+    expect(body.speaker).toBe('Elliot Sterling')
     // The contract shared with COS Glasses 6.9.567.
     expect(body.segments).toEqual([
       { speaker: 'MU', text: expect.any(String), startSec: expect.any(Number), endSec: expect.any(Number), similarity: 0.83 },
-      { speaker: 'Silas Larson', text: expect.any(String), startSec: expect.any(Number), endSec: expect.any(Number), similarity: 0.77 },
+      { speaker: 'Elliot Sterling', text: expect.any(String), startSec: expect.any(Number), endSec: expect.any(Number), similarity: 0.77 },
     ])
     expect(body.segments.map((s: any) => s.text).join(' ')).toBe(body.text)
     expect(body.segments[0].endSec).toBeLessThanOrEqual(body.segments[1].startSec)
@@ -117,11 +117,11 @@ describe('the live chunk response with Nemotron', () => {
     expect(stored.segments).toEqual(body.segments)
     // The whole-chunk voiceprint said MU; it stays recoverable on the chunk.
     expect(stored.diarizer).toMatchObject({ engine: 'nemotron', tracks: 2, timing: 'estimated', voiceprintSpeaker: 'MU', voiceprintSimilarity: 0.61 })
-    expect(stored.speaker).toBe('Silas Larson')
+    expect(stored.speaker).toBe('Elliot Sterling')
     expect(stored.similarity).toBe(0.77)
     // The HUD event carries the same turns.
-    expect(displayed.find(event => event.type === 'transcript_chunk')?.data).toMatchObject({ speaker: 'Silas Larson', segments: body.segments })
-    expect(stream.getSessionTranscript('nemotron_route_a')).toBe(`[Silas Larson]: ${TEXT}`)
+    expect(displayed.find(event => event.type === 'transcript_chunk')?.data).toMatchObject({ speaker: 'Elliot Sterling', segments: body.segments })
+    expect(stream.getSessionTranscript('nemotron_route_a')).toBe(`[Elliot Sterling]: ${TEXT}`)
     // A replayed upload of the same canonical chunk returns the same segments.
     const replay = await post(base, 'nemotron_route_a', 0)
     expect(replay.segments).toEqual(body.segments)
@@ -130,7 +130,7 @@ describe('the live chunk response with Nemotron', () => {
   it('6.61.1: the wearer\'s own profile (owner_speaker_label) guards a split chunk: a weak wearer match is Ext', async () => {
     const { base, stream, record } = await mount({ ok: true, run: run() }, 0.6)
     const body = await post(base, 'nemotron_route_guard', 0)
-    expect(body.segments.map((s: any) => s.speaker)).toEqual(['Ext', 'Silas Larson'])
+    expect(body.segments.map((s: any) => s.speaker)).toEqual(['Ext', 'Elliot Sterling'])
     expect(stream.getSessionChunks('nemotron_route_guard')![0].diarizer).toMatchObject({ ownerGuard: ['weak_owner'] })
     expect(record).toHaveBeenCalledWith({ sessionId: 'nemotron_route_guard', chunkIndex: 0 }, expect.objectContaining({ ownerGuard: { client_label: 0, weak_owner: 1 } }))
   })
@@ -184,7 +184,7 @@ describe('accepted audio keeps its identity policy during asynchronous work', ()
     }
     // The next accepted chunk may use the user's newly selected Standard mode.
     const next = await post(base, id, 1)
-    expect(next.speaker).toBe('Silas Larson')
+    expect(next.speaker).toBe('Elliot Sterling')
     expect(stream.getSessionChunks(id)![1].speakerPolicy).toBe('standard')
     stream.deleteSession(id)
   })

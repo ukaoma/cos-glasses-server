@@ -17,7 +17,7 @@ function row(overrides: Partial<CorrectionRow> = {}): CorrectionRow {
     phase: 'applied',
     at: new Date().toISOString(),
     from: 'Speaker 1',
-    to: 'Nadia Okonkwo',
+    to: 'Odette Marlowe',
     chunks: [0, 1],
     scope: 'meeting',
     ...overrides,

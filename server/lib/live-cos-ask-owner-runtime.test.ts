@@ -1,4 +1,4 @@
-// 6.76.2: a person question on a Mac set up like Grace's. The REAL public memory runtime this package ships
+// 6.76.2: a person question on a Mac set up like Faith's. The REAL public memory runtime this package ships
 // (memory-runtime/cos-memory-runtime-0.1.0.tar.gz) is installed in a scratch dir with one accepted note, and the Live COS
 // Ask runs its default COS search against it. Before 6.76.2 searchMemories found nothing there: the runtime's
 // bot_memory.py has no `search` command (meaning: memory_parse_error) and the note is not a markdown file (keyword: none).
@@ -26,10 +26,10 @@ function sh(cmd: string, args: string[], input?: string): string {
 }
 sh('python3', [join(runtime, 'install.py'), '--data-root', notes])
 const py = join(runtime, 'venv', 'bin', 'python3')
-const captured = JSON.parse(sh(py, ['cos_api_bridge.py', 'memory-capture'], JSON.stringify({ id: 'mem_delgado', idempotency_key: 'k1', source_refs: [],
-  content: 'Delgado is the pool contractor for the backyard. He quoted 18500 for the resurfacing and wants a deposit by Friday.' }))) as { revision?: number; error?: string }
+const captured = JSON.parse(sh(py, ['cos_api_bridge.py', 'memory-capture'], JSON.stringify({ id: 'mem_delmar', idempotency_key: 'k1', source_refs: [],
+  content: 'Delmar is the pool contractor for the backyard. He quoted 18500 for the resurfacing and wants a deposit by Friday.' }))) as { revision?: number; error?: string }
 if (captured.error) throw new Error('capture refused: ' + captured.error)
-const accepted = JSON.parse(sh(py, ['cos_api_bridge.py', 'memory-workspace'], JSON.stringify({ action: 'review_memory', id: 'mem_delgado', decision: 'accept', expected_revision: captured.revision ?? 1, idempotency_key: 'r1' }))) as { error?: string }
+const accepted = JSON.parse(sh(py, ['cos_api_bridge.py', 'memory-workspace'], JSON.stringify({ action: 'review_memory', id: 'mem_delmar', decision: 'accept', expected_revision: captured.revision ?? 1, idempotency_key: 'r1' }))) as { error?: string }
 if (accepted.error) throw new Error('accept refused: ' + accepted.error)
 const saved = { ...process.env }
 Object.assign(process.env, { COS_SCRIPTS_DIR: runtime, HOME: home, COS_DATA_DIR: data, COS_PROFILE_PATH: join(data, '.cos-profile.json') })
@@ -41,27 +41,27 @@ afterAll(() => { process.env = saved; rmSync(root, { recursive: true, force: tru
 
 describe('Live COS Ask on the public memory runtime', () => {
   it('searchMemories alone still finds nothing there (the gap 6.76.2 closes)', async () => {
-    const meaning = await searchMemories({ query: 'Delgado', limit: 3 })
+    const meaning = await searchMemories({ query: 'Delmar', limit: 3 })
     expect(meaning).toMatchObject({ hits: [], semanticAvailable: false, semanticReason: 'memory_parse_error' })
-    expect((await searchMemories({ query: 'Delgado', limit: 3, semantic: false })).hits).toEqual([])
+    expect((await searchMemories({ query: 'Delmar', limit: 3, semantic: false })).hits).toEqual([])
   })
 
   it('a person question is answered from the owner\'s note, cited as COS memory, timed and disclosed', async () => {
     const prompts: Array<Record<string, any>> = []
     const run = async (prompt: string) => {
       prompts.push(JSON.parse(prompt))
-      return { text: JSON.stringify({ sections: [{ label: 'So what', text: 'Delgado is your pool contractor; he quoted 18500 for the resurfacing and wants a deposit by Friday [H1].' }],
+      return { text: JSON.stringify({ sections: [{ label: 'So what', text: 'Delmar is your pool contractor; he quoted 18500 for the resurfacing and wants a deposit by Friday [H1].' }],
         confidence: { level: 'supported', reason: 'From your COS memory note.' } }), model: 'claude-haiku' }
     }
     const phases: Array<{ phase: string; ms: number; results?: number; forced?: true }> = []
     const ask = createLiveAsk({ run, now: () => 5000, phases: phases as never })
-    const result = await ask(normalizeAsk({ sessionId: 'meeting_grace_1', action: 'ask', question: 'Who is Delgado?', elapsedMs: 60_000,
-      turns: [{ id: 1, speaker: 'Person A', elapsedMs: 30_000, text: 'Delgado is coming by Friday about the deposit.' }] }))
+    const result = await ask(normalizeAsk({ sessionId: 'meeting_grace_1', action: 'ask', question: 'Who is Delmar?', elapsedMs: 60_000,
+      turns: [{ id: 1, speaker: 'Person A', elapsedMs: 30_000, text: 'Delmar is coming by Friday about the deposit.' }] }))
     const evidence = prompts[0].evidence as Array<{ id: string; kind: string; text: string; memoryId?: string }>
-    expect(evidence.find(s => s.id === 'H1')).toMatchObject({ kind: 'memory', memoryId: 'mem_delgado', text: expect.stringContaining('pool contractor') })
-    expect(prompts[0].cosLookups).toEqual([{ query: 'Delgado', searched: 'COS memories and earlier meetings', results: 1 }])
+    expect(evidence.find(s => s.id === 'H1')).toMatchObject({ kind: 'memory', memoryId: 'mem_delmar', text: expect.stringContaining('pool contractor') })
+    expect(prompts[0].cosLookups).toEqual([{ query: 'Delmar', searched: 'COS memories and earlier meetings', results: 1 }])
     expect(result.answer).toContain('pool contractor')
-    expect(result.sources).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'H1', kind: 'memory', memoryId: 'mem_delgado' })]))
+    expect(result.sources).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'H1', kind: 'memory', memoryId: 'mem_delmar' })]))
     expect(result.notices).toContain('COS also searched the notes in its memory list by keyword.')
     expect(phases.find(p => p.phase === 'cos_search')).toMatchObject({ forced: true, results: 1 })
   })

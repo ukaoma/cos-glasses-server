@@ -197,7 +197,7 @@ describe('a successful import', () => {
 describe('the vendor summary end to end', () => {
   const SUMMARY = {
     overview: 'The team agreed the launch date and split the follow-ups.',
-    action_items: '**Miles**\nSend the brief\n\n**Gina**\nDraft the post\n',
+    action_items: '**Miles**\nSend the brief\n\n**Mira**\nDraft the post\n',
     keywords: ['launch', 'brief'],
   }
 

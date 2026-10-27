@@ -65,8 +65,8 @@ function distance(a: string, b: string): number {
 }
 /**
  * One heard word against one name word. Short words must match exactly. Otherwise one edit (two from
- * seven letters), or one edit after a leading y the recognizer added before a vowel: Ukoma and Yukoma
- * both read as Ukaoma.
+ * seven letters), or one edit after a leading y the recognizer added before a vowel: Ukmya and Yukmya
+ * both read as Ukamya.
  */
 export function nameWordMatches(heard: string, name: string): boolean {
   const a = fold(heard), b = fold(name)
@@ -82,8 +82,8 @@ const LEAD_IN = new Set(['is', 'was', 'about', 'with', 'for', 'from', 'to', 'of'
 export interface OwnerMatch { heard: string; owner: string }
 /**
  * Whether the question names the owner, allowing ASR spellings. Full name: first and last words, in
- * order and adjacent. Surname alone: only after a lead-in word ("who is Ukoma"), never after another
- * first name ("Rafael Ukaoma" is someone else). First name alone: only when it is the whole subject of
+ * order and adjacent. Surname alone: only after a lead-in word ("who is Ukmya"), never after another
+ * first name ("Felix Ukamya" is someone else). First name alone: only when it is the whole subject of
  * a who question, compared exactly.
  */
 export function matchOwnerName(question: string, ownerName: string | null | undefined): OwnerMatch | null {

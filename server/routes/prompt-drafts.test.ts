@@ -203,7 +203,7 @@ describe('public prompt draft recovery contract', () => {
 
   it('finalizes phone-local Message and Meeting text through the existing polish engine', async () => {
     autoCleanDictation.mockImplementation(async (text: string, _vocabulary: unknown, opts: { model?: string }) => {
-      return `${text.replace('Silus', 'Silas')} [${opts.model}]`
+      return `${text.replace('Silus', 'Elliot')} [${opts.model}]`
     })
 
     const message = await httpRequest('POST', '/api/dictation/finalize', JSON.stringify({
@@ -219,7 +219,7 @@ describe('public prompt draft recovery contract', () => {
 
     expect(message.status).toBe(200)
     expect(message.json).toEqual({
-      text: 'Ask Silas about the plan [haiku]',
+      text: 'Ask Elliot about the plan [haiku]',
       surface: 'message',
       polished: true,
       // 6.91.0, additive: what the model step did and which prompt ran. Haiku runs v3 (canary C1

@@ -796,7 +796,7 @@ describe('engine', () => {
   })
 
   // ── 6.76.2: notes fallback ────────────────────────────────────────────────
-  const POOL = { id: 'M1', date: '2026-10-10', title: 'Pool resurfacing', notes: 'Delgado quoted 18500 and wants a deposit by Friday.', key: 'memory:mem_pool_1' }
+  const POOL = { id: 'M1', date: '2026-10-10', title: 'Pool resurfacing', notes: 'Delmar quoted 18500 and wants a deposit by Friday.', key: 'memory:mem_pool_1' }
   const OTHER = { id: 'M2', date: '2026-10-02', title: 'Unrelated', notes: 'School pickup rota.', key: 'meeting:standalone:x' }
   const notesJudge = async (_t: string, _w: string, notes: Array<{ title: string }>, _s: AbortSignal, p: string) => {
     calls.judge++; calls.providers.push(`judge:${p}`); calls.judged.push(notes.map(n => n.title)); return { probs: { M1: 0.93, M2: 0.1, none: 0.05 }, tokens: 1 }
@@ -807,7 +807,7 @@ describe('engine', () => {
     expect([...mod.CUE_MEMORY_FAILURES].sort()).toEqual(['bad_output', 'memory_threw', 'memory_timeout', 'no_cue_memory_script', 'output_limit', 'spawn_failed'])
     for (const [i, failure] of failures.entries()) {
       notesFound = [POOL, OTHER]
-      writerText = async () => JSON.stringify({ cue: 'Delgado wants the deposit by Friday. Decide on the pebble finish first.', kind: 'challenge', memoryIds: ['M1'] })
+      writerText = async () => JSON.stringify({ cue: 'Delmar wants the deposit by Friday. Decide on the pebble finish first.', kind: 'challenge', memoryIds: ['M1'] })
       const asked: Array<[string, string]> = []
       const e = engine({ memory: async () => { calls.memory++; if (failure === 'THROW') throw new Error('boom'); return { notes: [], denseError: failure } }, judge: notesJudge,
         notes: async (_w, before, _s, sessionId) => { calls.notes++; asked.push([before, sessionId]); return { notes: notesFound } } })
@@ -993,7 +993,7 @@ describe('decision provider selection and clients (6.76.2)', () => {
     kind: { type: 'choice', choice: 'reinforce', probabilities: { reinforce: 0.6, challenge: 0.4 }, confidence: 0.6 },
   }
   const judgeAnswers = { same: { type: 'choice', choice: 'M1', probabilities: { M1: 0.85, M2: 0.1, none: 0.05 }, confidence: 0.85 } }
-  const notes = [{ id: 'M1', date: '2026-10-10', title: 'Pool resurfacing', notes: 'Delgado quoted 18500' }, { id: 'M2', date: '2026-10-02', title: 'Other', notes: 'x' }]
+  const notes = [{ id: 'M1', date: '2026-10-10', title: 'Pool resurfacing', notes: 'Delmar quoted 18500' }, { id: 'M2', date: '2026-10-02', title: 'Other', notes: 'x' }]
   function recordingFetch(answers: () => unknown, extra: Record<string, unknown>) {
     const bodies: Array<Record<string, unknown>> = []
     const f = (async (_url: string, init: { body: string }) => {

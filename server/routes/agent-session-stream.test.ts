@@ -291,7 +291,7 @@ describe('GET /api/agent-sessions/{codex,cursor}/:id/stream (6.62.0)', () => {
 
   beforeEach(() => {
     for (const k of KEYS) saved[k] = process.env[k]
-    const home = join(trackedTemp(mkdtempSync(join(tmpdir(), 'cos-stream-parity-'))), 'Ukaoma Chief Of Staff')
+    const home = join(trackedTemp(mkdtempSync(join(tmpdir(), 'cos-stream-parity-'))), 'Ukamya Chief Of Staff')
     const cursorDir = join(home, '.cursor', 'projects', 'Users-me-Ukaoma-Chief-Of-Staff', 'agent-transcripts', CURSOR)
     mkdirSync(cursorDir, { recursive: true })
     writeFileSync(join(cursorDir, `${CURSOR}.jsonl`), [

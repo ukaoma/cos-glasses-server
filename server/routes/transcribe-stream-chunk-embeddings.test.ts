@@ -120,14 +120,14 @@ describe('a chunk upload banks its voiceprint', () => {
     process.env.COS_DATA_DIR = root
     const embedding = fingerprint(7)
     const { base, stream } = await mountRoute({
-      identify: vi.fn().mockReturnValue({ speaker: 'Clem Ukaoma', similarity: 0.72, embedding }),
+      identify: vi.fn().mockReturnValue({ speaker: 'Robin Vale', similarity: 0.72, embedding }),
     })
 
     expect(await postChunk(base, 'wire_001', 0)).toBe(200)
 
     const rows = storedRows('wire_001')
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ i: 0, speaker: 'Clem Ukaoma', similarity: 0.72, dim: 192 })
+    expect(rows[0]).toMatchObject({ i: 0, speaker: 'Robin Vale', similarity: 0.72, dim: 192 })
     // Prove it is THIS chunk's vector, not a placeholder. Decoded through the
     // store's own reader: a hand-rolled `Buffer.from(v).buffer.slice(0)` reads
     // from the POOL SLAB's start, not the embedding's byteOffset, and silently

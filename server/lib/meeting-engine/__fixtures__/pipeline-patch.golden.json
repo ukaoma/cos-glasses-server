@@ -1,11 +1,11 @@
 {
   "sections": [
-    "## G2 Capture\n\n### Capture 1, 15:00, 30 min\n\n[00:00:00] Nadia Okonkwo: chunk Nadia Okonkwo\n[00:15:00] Closing Speaker: chunk Closing Speaker\n",
-    "## Alternate Transcript\n\n### Fireflies ff-golden-alternate\n\n[00:02:00] Marcus Bell: galt0 galt1 galt2 galt3 galt4 galt5 galt6 galt7\n"
+    "## G2 Capture\n\n### Capture 1, 15:00, 30 min\n\n[00:00:00] Odette Marlowe: chunk Odette Marlowe\n[00:15:00] Closing Speaker: chunk Closing Speaker\n",
+    "## Alternate Transcript\n\n### Fireflies ff-golden-alternate\n\n[00:02:00] Marlon Bright: galt0 galt1 galt2 galt3 galt4 galt5 galt6 galt7\n"
   ],
   "rows": [
     "| **Sources** | Fireflies + G2 Glasses |",
-    "| **Speaker Verification** | Nadia Okonkwo (voice match 0.72, 8 sentences) |"
+    "| **Speaker Verification** | Odette Marlowe (voice match 0.72, 8 sentences) |"
   ],
   "markers": [
     "<!-- g2-transcript-blended -->",
@@ -15,14 +15,14 @@
   ],
   "speakerMap": {
     "Speaker 1": {
-      "name": "Nadia Okonkwo",
+      "name": "Odette Marlowe",
       "similarity": 0.72,
       "sentences": 8
     }
   },
   "verification": [
     {
-      "name": "Nadia Okonkwo",
+      "name": "Odette Marlowe",
       "medianSimilarity": 0.72,
       "sentences": 8,
       "humanConfirmed": false

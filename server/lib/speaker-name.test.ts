@@ -5,21 +5,21 @@ import {
   MAX_SPEAKER_NAME_WORDS,
 } from './speaker-name.js'
 
-// Chelsie Hodgkiss, first-time user, 2026-08-25: saying "enroll my voice" and
+// Cassie Holloway, first-time user, 2026-08-25: saying "enroll my voice" and
 // continuing to talk wrote the whole ~40s transcript in as the profile name.
-const CHELSIE_UTTERANCE =
+const CASSIE_UTTERANCE =
   'My Voice. Okay So I Am Just Going To Read Something Aloud Here For About '
   + 'Thirty Seconds So The System Can Hear What I Sound Like Naturally'
 
 describe('checkSpeakerName', () => {
   it('accepts ordinary names', () => {
-    for (const name of ['Chelsie', 'Miles Ukaoma', 'Maria del Carmen Ruiz', "O'Brien", 'Jean-Luc', 'MU', 'Renée']) {
+    for (const name of ['Cassie', 'Jordan Ukamya', 'Maria del Cora Ruiz', "O'Brien", 'Jean-Luc', 'MU', 'Renée']) {
       expect(checkSpeakerName(name), name).toMatchObject({ ok: true })
     }
   })
 
   it('REJECTS the reported 40-second transcript', () => {
-    const result = checkSpeakerName(CHELSIE_UTTERANCE)
+    const result = checkSpeakerName(CASSIE_UTTERANCE)
     expect(result.ok).toBe(false)
     // It trips the leading-word rule before the length rule. Either would
     // reject it; assert the rejection, not the order the rules happen to run.
@@ -43,7 +43,7 @@ describe('checkSpeakerName', () => {
   })
 
   it('rejects a sentence that keeps its punctuation', () => {
-    expect(checkSpeakerName('Chelsie, can you hear')).toMatchObject({
+    expect(checkSpeakerName('Cassie, can you hear')).toMatchObject({
       ok: false, reason: 'sentence_like',
     })
   })

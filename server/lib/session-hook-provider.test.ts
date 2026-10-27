@@ -19,7 +19,7 @@ afterAll(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: t
 function dataDir(): string {
   const root = mkdtempSync(join(tmpdir(), 'cos-hook-provider-'))
   roots.push(root)
-  const dir = join(root, 'Ukaoma Chief Of Staff', '.cos-glasses', 'data')
+  const dir = join(root, 'Ukamya Chief Of Staff', '.cos-glasses', 'data')
   mkdirSync(dir, { recursive: true })
   return dir
 }

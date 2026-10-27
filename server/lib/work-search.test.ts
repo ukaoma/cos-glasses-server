@@ -43,7 +43,7 @@ describe('option text', () => {
 })
 
 describe('what leaves for TypeSafe (S-W6)', () => {
-  const EMAIL = 'jessie.smith+cos@gmail.com'
+  const EMAIL = 'willa.reed+cos@example.com'
   const DOC = 'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abc/edit?usp=sharing'
   const KEYS = ['sk-proj-AbCdEfGh12345678ZyXw', 'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8', 'AKIA' + 'ABCDEFGHIJKLMNOP']
   it('removes email addresses, URLs, key-shaped strings and opaque ids; keeps the words, link labels and bare domains', () => {

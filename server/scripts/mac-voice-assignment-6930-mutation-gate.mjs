@@ -127,7 +127,7 @@ const mutations = [
   m('route-nothing-to-enrol-refusal', M, ['    if (macAssign && macAssign.report.skipped !== null) {', '    if (false) {'], ROUTE_T),
   m('route-preview-hides-enrolment', M, ['        ...(macAssign ? { enrolment: macAssign.report } : {}),\n', ''], ROUTE_T),
   m('route-preview-message', M, ['              ? `, and adding up to ${macAssign.report.enrolled} voice sample(s) to ${to}\'s profile`', '              ? ``'], ROUTE_T),
-  m('route-preview-hides-refusal-reason', M, ['              : `. Assigning is not possible: ${macAssignSkipText(macAssign.report.skipped)}. Send without assignVoiceProfile for a text-only rename`', '              : \'\''], ROUTE_T),
+  m('route-preview-hides-refusal-reason', M, ['              : `. Assigning is not possible: ${macAssignSkipText(macAssign.report.skipped)}. You can still rename the speaker in the transcript without adding any voice samples`', '              : \'\''], ROUTE_T),
   m('route-apply-uses-glasses-path', M, ['    const enrolment = macAssign\n      ? commitMacVoiceAssignment(sessionId, macAssign)\n      : enrolNamedVoice(', '    const enrolment = false\n      ? commitMacVoiceAssignment(sessionId, macAssign!)\n      : enrolNamedVoice('], ROUTE_T),
   m('route-plan-uses-renamed-sidecar', M, ['macAssign = await planMacVoiceAssignment({ sessionId, from, to, changed: plan.value.changed, sidecar: parsedForAssign, ownerLabel })', 'macAssign = await planMacVoiceAssignment({ sessionId, from, to, changed: [], sidecar: parsedForAssign, ownerLabel })'], ROUTE_T),
   // ── B2 policy (embedding-eviction.ts) ──
@@ -156,6 +156,10 @@ const mutations = [
   m('deattribute-retracts-every-sample', M, ['retracted = retractEmbeddingsBySource(from, s => isSampleFromSession(s, sessionId)).removed', 'retracted = retractEmbeddingsBySource(from, () => true).removed'], ROUTE_T),
   m('mac-assign-cap-changed', EV, ['export const MAC_ASSIGN_PROFILE_CAP = 10', 'export const MAC_ASSIGN_PROFILE_CAP = 20'], [...EV_T, ...SE_T, ...ROUTE_T]),
   m('mac-assign-not-retractable', TP, ["['auto:', 'correction:', 'g2-training:', 'ext-group:', 'mac-assign:']", "['auto:', 'correction:', 'g2-training:', 'ext-group:']"], [...TP_T, ...ROUTE_T]),
+  // ── 6.93.0 final: a merge never leaves an empty profile; a correction at quota runs before the Mac step ──
+  m('merge-allows-empty-profile', SE, ["if (wouldBe.mergedFrom.length > 0 && wouldBe.samplesAfter === 0) {", 'if (false) {'], MERGE_T),
+  m('merge-empty-refusal-not-409', VR, ['    if (report.refusal) {\n', '    if (false) {\n'], VS_T),
+  m('correction-quota-after-mac-step', EV, ['if (isCorrection(incomingSource) && correctionIdx.length >= correctionQuota(cap)) {', 'if (isCorrection(incomingSource) && correctionIdx.length >= correctionQuota(cap) && macIdx.length === 0) {'], [...EV_T, ...SE_T]),
   // ── B2/B4/W8: the real store code ──
   m('batch-writes-per-sample', SE, ['    appendEmbedding(profile, Array.from(item.embedding), item.source)\n    added++\n', '    appendEmbedding(profile, Array.from(item.embedding), item.source)\n    added++\n    writeProfileStore(store)\n'], SE_T),
   m('batch-dedup-dropped', SE, ['    if (profile.embeddings.some(existing => rawCosineSimilarity(item.embedding, new Float32Array(existing)) > 0.95)) { declined++; continue }\n', ''], SE_T),

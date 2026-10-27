@@ -43,7 +43,7 @@ Values are illustrative.
       "model": "opus",
       "resolvedModel": "claude-opus-4-8",
       "messageNo": 1287,
-      "title": "What did Graham say about the October webinar numbers?"
+      "title": "What did Gordon say about the October webinar numbers?"
     },
     {
       "jobId": "9b2a7d40-1c3e-4f58-8e2d-6a0c4b9e7f21",

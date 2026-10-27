@@ -74,7 +74,7 @@ describe('cos operations meetings path resolution', () => {
       mkdirSync(join(root, '2026-03'), { recursive: true })
       mkdirSync(join(root, '2026-08'), { recursive: true })
       writeFileSync(join(root, '2026-03', '2026-03-01_Older.md'), '# Older\n\n**Date** | 2026-03-01 |\n')
-      writeFileSync(join(root, '2026-08', '2026-08-08_Grace.md'), '# Grace Meeting\n\n**Date** | 2026-08-08 18:00 |\n\n## Summary\nVisible\n')
+      writeFileSync(join(root, '2026-08', '2026-08-08_Faith.md'), '# Faith Meeting\n\n**Date** | 2026-08-08 18:00 |\n\n## Summary\nVisible\n')
       delete process.env.COS_OPERATIONS_DIR
       delete process.env.COS_SCRIPTS_DIR
       process.env.COS_MEETINGS_ROOT = root
@@ -82,10 +82,10 @@ describe('cos operations meetings path resolution', () => {
       expect(resolveCosOperationsDir()).toBeNull()
       expect(resolveMeetingLibrary().layout).toBe('direct')
       const rows = listDirectLibraryMeetings({ limit: 10 })
-      expect(rows.map(row => row.title)).toEqual(['Grace Meeting', 'Older'])
+      expect(rows.map(row => row.title)).toEqual(['Faith Meeting', 'Older'])
       expect(rows.every(row => row.mutable === false && row.librarySource === 'direct_library')).toBe(true)
       expect(rows.every(row => row.canonicalRecord == null)).toBe(true)
-      expect(getDirectLibraryMeetingDetail('2026-08', '2026-08-08_Grace.md')?.summary).toBe('Visible')
+      expect(getDirectLibraryMeetingDetail('2026-08', '2026-08-08_Faith.md')?.summary).toBe('Visible')
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
@@ -100,7 +100,7 @@ describe('cos operations meetings path resolution', () => {
 /**
  * Domains are DISCOVERED, not enumerated.
  *
- * Grace set up her own COS on 2026-08-08 and every folder she picked was
+ * Faith set up her own COS on 2026-08-08 and every folder she picked was
  * rejected, because both the Control validator and this module carried
  * `['quilt','sprocket_rocket','hermit_crabs','personal']` — one user's business
  * domains, shipped as a requirement. Her tree has none of them.
@@ -252,13 +252,13 @@ describe('sessionId fallback to the server\'s own recordings root (6.44.16)', ()
  * the list row advertised. Work's meeting link compares the two, so a detail
  * without recordId refused every real meeting as "meeting changed". The root
  * has a space and a dot and the filename an apostrophe and parentheses, like
- * the production tree ("Ukaoma Chief Of Staff", "Grace's ... (G2).md").
+ * the production tree ("Ukamya Chief Of Staff", "Faith's ... (G2).md").
  */
 describe('operations meeting detail keeps the list row identity', () => {
   it('returns the list recordId, source, mutability and canonical record', () => {
     const base = mkdtempSync(join(tmpdir(), 'cos-ops-identity-'))
     const root = join(base, 'Chief Of Staff.v2', 'operations')
-    const file = "2026-09-25_Grace's_IRA_1099-R_(G2).md"
+    const file = "2026-09-25_Faith's_IRA_1099-R_(G2).md"
     try {
       mkdirSync(join(root, 'hermit_crabs', 'meetings', '2026-09'), { recursive: true })
       writeFileSync(join(root, 'hermit_crabs', 'meetings', '2026-09', file),

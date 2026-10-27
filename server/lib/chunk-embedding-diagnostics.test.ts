@@ -86,7 +86,7 @@ describe('chunkDiagnostics', () => {
   })
 
   it('scores a retained chunk against the enrolled profiles', async () => {
-    seedProfiles([{ name: 'Grace Ukaoma', seeds: [1] }, { name: 'Clem Ukaoma', seeds: [9] }])
+    seedProfiles([{ name: 'Faith Ukamya', seeds: [1] }, { name: 'Robin Vale', seeds: [9] }])
     const store = await import('./chunk-embedding-store.js')
 
     const session = 'meeting_scored_1'
@@ -106,7 +106,7 @@ describe('chunkDiagnostics', () => {
     expect(chunk.chosen).toBe('Ext')
     expect(chunk.chosenSimilarity).toBeCloseTo(0.42, 3)
     // Scored against the current store: the identical vector is the top match.
-    expect(chunk.matches[0].speaker).toBe('Grace Ukaoma')
+    expect(chunk.matches[0].speaker).toBe('Faith Ukamya')
     expect(chunk.matches[0].similarity).toBeGreaterThan(0.99)
     expect(chunk.matches[0].embeddings).toBeGreaterThan(0)
   })

@@ -17,7 +17,7 @@ const T = '2026-08-06T15:00:00.000Z'
 function row(over: Partial<import('./meeting-corrections.js').CorrectionRow> = {}) {
   return {
     id: 'c1', phase: 'intent' as const, at: T,
-    from: 'Ext', to: 'Luke Henry', chunks: [] as number[], scope: 'meeting' as const,
+    from: 'Ext', to: 'Theo Marsh', chunks: [] as number[], scope: 'meeting' as const,
     ...over,
   }
 }
@@ -39,7 +39,7 @@ describe('recording a correction', () => {
     const out = store.readCorrections('meeting_a')
     expect(out.missing).toBe(false)
     expect(out.rows).toHaveLength(1)
-    expect(out.rows[0]).toMatchObject({ id: 'c1', phase: 'intent', from: 'Ext', to: 'Luke Henry', chunks: [3, 4, 9] })
+    expect(out.rows[0]).toMatchObject({ id: 'c1', phase: 'intent', from: 'Ext', to: 'Theo Marsh', chunks: [3, 4, 9] })
   })
 
   it('is append-only — a second correction never overwrites the first', () => {
@@ -47,7 +47,7 @@ describe('recording a correction', () => {
     // and audit would both be impossible.
     store.appendCorrection('meeting_b', row({ id: 'c1' }))
     store.appendCorrection('meeting_b', row({ id: 'c1', phase: 'applied', surfaces: { sidecar: 3, attendees: 1, transcript: 3 } }))
-    store.appendCorrection('meeting_b', row({ id: 'c2', from: 'Luke Henry', to: 'Luke H' }))
+    store.appendCorrection('meeting_b', row({ id: 'c2', from: 'Theo Marsh', to: 'Theo M' }))
     expect(store.readCorrections('meeting_b').rows.map(r => `${r.id}:${r.phase}`))
       .toEqual(['c1:intent', 'c1:applied', 'c2:intent'])
   })
@@ -88,10 +88,10 @@ describe('an intent that never closed', () => {
   it('is reported as pending — the crash signal', () => {
     store.appendCorrection('meeting_e', row({ id: 'done' }))
     store.appendCorrection('meeting_e', row({ id: 'done', phase: 'applied' }))
-    store.appendCorrection('meeting_e', row({ id: 'died', from: 'MU', to: 'Clem Ukaoma' }))
+    store.appendCorrection('meeting_e', row({ id: 'died', from: 'MU', to: 'Robin Vale' }))
     const pending = store.pendingCorrections('meeting_e')
     expect(pending).toHaveLength(1)
-    expect(pending[0]).toMatchObject({ id: 'died', from: 'MU', to: 'Clem Ukaoma' })
+    expect(pending[0]).toMatchObject({ id: 'died', from: 'MU', to: 'Robin Vale' })
   })
 
   it('counts a FAILED outcome as closed, not pending', () => {
@@ -116,15 +116,15 @@ describe('an intent that never closed', () => {
 
 describe('resolving the label a voice now carries', () => {
   it('follows a chain to the end', () => {
-    store.appendCorrection('meeting_h', row({ id: '1', phase: 'applied', from: 'Ext', to: 'Luke H' }))
-    store.appendCorrection('meeting_h', row({ id: '2', phase: 'applied', from: 'Luke H', to: 'Luke Henry' }))
-    expect(store.currentLabelFor('meeting_h', 'Ext')).toBe('Luke Henry')
+    store.appendCorrection('meeting_h', row({ id: '1', phase: 'applied', from: 'Ext', to: 'Theo M' }))
+    store.appendCorrection('meeting_h', row({ id: '2', phase: 'applied', from: 'Theo M', to: 'Theo Marsh' }))
+    expect(store.currentLabelFor('meeting_h', 'Ext')).toBe('Theo Marsh')
   })
 
   it('ignores unapplied hops', () => {
-    store.appendCorrection('meeting_i', row({ id: '1', phase: 'applied', from: 'Ext', to: 'Luke H' }))
-    store.appendCorrection('meeting_i', row({ id: '2', from: 'Luke H', to: 'Luke Henry' }))  // intent only
-    expect(store.currentLabelFor('meeting_i', 'Ext')).toBe('Luke H')
+    store.appendCorrection('meeting_i', row({ id: '1', phase: 'applied', from: 'Ext', to: 'Theo M' }))
+    store.appendCorrection('meeting_i', row({ id: '2', from: 'Theo M', to: 'Theo Marsh' }))  // intent only
+    expect(store.currentLabelFor('meeting_i', 'Ext')).toBe('Theo M')
   })
 
   it('does not loop on a correction reversed by hand', () => {
@@ -142,7 +142,7 @@ describe('resolving the label a voice now carries', () => {
   })
 
   it('returns the label unchanged when nothing was corrected', () => {
-    expect(store.currentLabelFor('meeting_none', 'Chris Krubeck')).toBe('Chris Krubeck')
+    expect(store.currentLabelFor('meeting_none', 'Alex Kellar')).toBe('Alex Kellar')
   })
 })
 
