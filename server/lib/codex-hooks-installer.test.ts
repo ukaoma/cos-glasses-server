@@ -39,7 +39,7 @@ afterAll(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: t
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'cos-codex-hooks-'))
   roots.push(root)
-  const home = join(root, 'Ukaoma Chief Of Staff')
+  const home = join(root, 'Ukamya Chief Of Staff')
   const codexHome = join(home, '.codex')
   const cosHome = join(home, '.cos-glasses')
   mkdirSync(codexHome, { recursive: true })

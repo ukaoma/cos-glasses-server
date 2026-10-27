@@ -11,8 +11,8 @@ let countVocabTerms: (t: string) => number
 
 beforeAll(async () => {
   writeFileSync(PROFILE_PATH, JSON.stringify({
-    owner_name: 'Miles Ukaoma',
-    vocabulary: ['POSNation', 'ThriftCart', 'IT Retail', 'Bottle POS', 'Jewel360', 'Austin', 'Miles Ukaoma'],
+    owner_name: 'Jordan Ukamya',
+    vocabulary: ['POSNation', 'ThriftCart', 'IT Retail', 'Bottle POS', 'Jewel360', 'Austin', 'Jordan Ukamya'],
     whisper_corrections: JSON.stringify({ 'POS Nation': 'POSNation', 'Thrift Cart': 'ThriftCart', 'Jewel 360': 'Jewel360', 'Myles': 'Miles' }),
     negative_rules: [],
   }))
@@ -53,7 +53,7 @@ describe('vocab-echo (prompt regurgitation) detection', () => {
     expect(isVocabEchoOnly('Austin Miles')).toBe(false)
     expect(isVocabEchoOnly('a few miles outside Austin')).toBe(false)
     // Multi-word and brand-shaped terms ARE still matched.
-    expect(countVocabTerms('Miles Ukaoma')).toBe(1)
+    expect(countVocabTerms('Jordan Ukamya')).toBe(1)
     expect(countVocabTerms('POSNation')).toBe(1)
   })
 

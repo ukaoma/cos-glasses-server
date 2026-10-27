@@ -369,9 +369,9 @@ describe('meeting Ask public web lookups', () => {
     });
     it('never sends a transcript-only name, an OCR-only word, or a name from an earlier answer', async () => {
         const cases: Array<[string, string, (f: ReturnType<typeof webFixture>) => void, Record<string, unknown>]> = [
-            ['Who are these people?', 'Joseph Wharton Charles Elliot', () => {}, { turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'Joseph Wharton and Charles Elliot founded the school.' }] }],
+            ['Who are these people?', 'Joseph Whitlock Charles Elliot', () => {}, { turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'Joseph Whitlock and Charles Elliot founded the school.' }] }],
             ['Who is alt coin daily?', 'Altcoin Daily MASSIVE WARNING', f => f.runtime.putFiles(base.sessionId, 'server-one', [{ id: 'file_12345678', revision: '1', name: 'Screenshot', status: 'ready', text: 'Altcoin Daily MASSIVE WARNING 4.9K views' }]), {}],
-            ['Run the web search', 'Joseph Wharton', f => seed(f, 'Who are these people?', { answer: 'The transcript names Joseph Wharton [T1].' }), {}],
+            ['Run the web search', 'Joseph Whitlock', f => seed(f, 'Who are these people?', { answer: 'The transcript names Joseph Whitlock [T1].' }), {}],
         ];
         for (const [question, query, prepare, extra] of cases) {
             const f = webFixture([webAsk(query), JSON.stringify({ sections: [{ label: 'So what', text: 'Not verified. [T1]' }], searchQuery: null })]);

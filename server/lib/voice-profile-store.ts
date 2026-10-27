@@ -194,7 +194,7 @@ export function junkNameReason(name: string): SpeakerNameRejection | null {
   const check = checkSpeakerName(name, { ownerLabel: name })
   if (check.ok) return null
   if (check.reason === 'too_long' || check.reason === 'too_many_words') return check.reason
-  // Sentence punctuation alone is not enough: "Luke H." is a legitimate legacy
+  // Sentence punctuation alone is not enough: "Theo M." is a legitimate legacy
   // alias. Three or more words with punctuation is speech, not a name.
   if (check.reason === 'sentence_like' && name.trim().split(/\s+/).length >= 3) return check.reason
   return null

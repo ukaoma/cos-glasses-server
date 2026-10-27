@@ -6,7 +6,7 @@
 //
 // Tokens are whitespace runs inside a line's text. Each carries its `core`: the token
 // without leading and trailing punctuation, which is what is compared, flagged and
-// replaced, so "Ukoma," becomes "Ukaoma," and the comma stays exactly where it was.
+// replaced, so "Ukmya," becomes "Ukamya," and the comma stays exactly where it was.
 //
 // No IO and no model here.
 
@@ -156,8 +156,8 @@ export function alignWordInfo(tokens: Token[], words: readonly WordInfo[]): numb
 }
 
 /**
- * A consonant skeleton: how a word sounds with its vowels unsure. Ukaoma, Yukoma,
- * eucoma and "U coma" all read "km". Only ever used together with an onset check and
+ * A consonant skeleton: how a word sounds with its vowels unsure. Ukamya, Yukmya,
+ * eucmya and "U cmya" all read "km". Only ever used together with an onset check and
  * a length bound, because a two-letter skeleton alone matches far too much.
  */
 export function skeleton(word: string): string {
@@ -168,7 +168,7 @@ export function skeleton(word: string): string {
   return s.replace(/(.)\1+/g, '$1')
 }
 
-/** Vowel onset, counting a leading y before a vowel ("Yukoma") as a vowel. */
+/** Vowel onset, counting a leading y before a vowel ("Yukmya") as a vowel. */
 export function vowelOnset(word: string): boolean {
   const f = fold(word)
   return /^[aeiou]/.test(f) || /^y[aeiou]/.test(f)

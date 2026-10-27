@@ -27,7 +27,7 @@ function homes(): string {
   for (const k of KEYS) saved[k] = process.env[k]
   const root = mkdtempSync(join(tmpdir(), 'cos-provider-observe-'))
   roots.push(root)
-  const home = join(root, 'Ukaoma Chief Of Staff')
+  const home = join(root, 'Ukamya Chief Of Staff')
   process.env.COS_CURSOR_SPAWN_ROOT = join(home, '.cos-glasses', 'cursor-cli')
   process.env.CODEX_HOME = join(home, '.codex')
   process.env.CURSOR_CONFIG_DIR = join(home, '.cursor')

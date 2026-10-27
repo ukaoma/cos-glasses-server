@@ -40,7 +40,7 @@ afterEach(() => { vi.useRealTimers() })
 
 describe('a never-read session survives until it can be reached', () => {
   it('reproduces the device timeline: every segment is readable when its turn comes', () => {
-    // Exactly the run above. Grace derived from the whole reply, as /prepare does.
+    // Exactly the run above. Faith derived from the whole reply, as /prepare does.
     const grace = initialGraceMs(6_781)
     const uuids = Array.from({ length: 9 }, () => createSession({ ...SESSION }, { graceMs: grace }))
 

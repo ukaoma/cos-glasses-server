@@ -35,18 +35,18 @@ const SCRIBE = `# Lead Ops Review
 
 ## Attendees
 
-- Luke H
+- Theo M
 - MU
 
 ## Summary
 
-Luke H walked the pipeline while MU pushed on timing. Luke owns the follow-up.
+Theo M walked the pipeline while MU pushed on timing. Theo owns the follow-up.
 
 ## Transcript
 
-[Luke H]: The Jewel360 pipeline is at thirty six percent.
-[MU]: Let us take that offline, Luke H can own it.
-[Luke H]: Agreed on the follow-up.
+[Theo M]: The Jewel360 pipeline is at thirty six percent.
+[MU]: Let us take that offline, Theo M can own it.
+[Theo M]: Agreed on the follow-up.
 `
 
 interface SeedOptions {
@@ -296,40 +296,40 @@ const HTTP_TEST_TIMEOUT = 30_000
 
 describe('nothing changes without confirmation', () => {
   it('previews and refuses with 400 when confirm is absent', async () => {
-    seed('meeting_c1', ['Luke H', 'MU', 'Luke H'])
+    seed('meeting_c1', ['Theo M', 'MU', 'Theo M'])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_c1/relabel', { from: 'Luke H', to: 'Luke Henry' })
+    const res = await post('/api/meeting/meeting_c1/relabel', { from: 'Theo M', to: 'Theo Marsh' })
     expect(res.status).toBe(400)
     expect(res.json.reason).toBe('confirmation_required')
     expect(res.json.chunks).toEqual([0, 2])
     expect(res.json.surfaces).toEqual({ sidecar: 2, attendees: 1, transcript: 2 })
 
     // The files are untouched — this is the assertion that matters.
-    expect(sidecarNow().labels).toEqual(['Luke H', 'MU', 'Luke H'])
+    expect(sidecarNow().labels).toEqual(['Theo M', 'MU', 'Theo M'])
     expect(scribeNow()).toBe(SCRIBE)
     expect(ledgerNow('meeting_c1')).toEqual([])
   })
 
   it('previews with 200 on an explicit dryRun and still changes nothing', async () => {
-    seed('meeting_c2', ['Luke H', 'MU'])
+    seed('meeting_c2', ['Theo M', 'MU'])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_c2/relabel', { from: 'Luke H', to: 'Luke Henry', dryRun: true })
+    const res = await post('/api/meeting/meeting_c2/relabel', { from: 'Theo M', to: 'Theo Marsh', dryRun: true })
     expect(res.status).toBe(200)
     expect(res.json.error).toBeUndefined()
     expect(res.json.surfaces.sidecar).toBe(1)
-    expect(sidecarNow().labels).toEqual(['Luke H', 'MU'])
+    expect(sidecarNow().labels).toEqual(['Theo M', 'MU'])
     expect(ledgerNow('meeting_c2')).toEqual([])
   })
 
   it('warns in the preview that the summary will still name the old speaker', async () => {
-    seed('meeting_c3', ['Luke H'])
+    seed('meeting_c3', ['Theo M'])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_c3/relabel', { from: 'Luke H', to: 'Luke Henry' })
+    const res = await post('/api/meeting/meeting_c3/relabel', { from: 'Theo M', to: 'Theo Marsh' })
     expect(res.json.proseStale).toBe(true)
-    expect(res.json.proseHits).toContain('Luke')
+    expect(res.json.proseHits).toContain('Theo')
     // The human has to be told BEFORE confirming, because this is the part the
     // system refuses to fix for them.
     expect(res.json.message).toContain('NOT rewritten')
@@ -339,66 +339,66 @@ describe('nothing changes without confirmation', () => {
 
 describe('applying a full-label correction', () => {
   it('rewrites the sidecar, the attendee line and every transcript turn', async () => {
-    seed('meeting_a1', ['Luke H', 'MU', 'Luke H'])
+    seed('meeting_a1', ['Theo M', 'MU', 'Theo M'])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_a1/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_a1/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
     expect(res.status).toBe(200)
     expect(res.json.ok).toBe(true)
 
     const after = sidecarNow()
-    expect(after.labels).toEqual(['Luke Henry', 'MU', 'Luke Henry'])
-    expect(after.speakers).toEqual(['Luke Henry', 'MU'])
+    expect(after.labels).toEqual(['Theo Marsh', 'MU', 'Theo Marsh'])
+    expect(after.speakers).toEqual(['Theo Marsh', 'MU'])
     expect(after.raw.endsWith('}\n')).toBe(true)          // pipeline write format kept
 
     const md = scribeNow()
-    expect(md).toContain('- Luke Henry\n')
-    expect(md).not.toContain('- Luke H\n')
-    expect(md).toContain('[Luke Henry]: The Jewel360 pipeline')
-    expect(md).toContain('[Luke Henry]: Agreed on the follow-up.')
+    expect(md).toContain('- Theo Marsh\n')
+    expect(md).not.toContain('- Theo M\n')
+    expect(md).toContain('[Theo Marsh]: The Jewel360 pipeline')
+    expect(md).toContain('[Theo Marsh]: Agreed on the follow-up.')
   })
 
   it('leaves the summary and the spoken name alone', async () => {
-    seed('meeting_a2', ['Luke H'])
+    seed('meeting_a2', ['Theo M'])
     await startServer()
-    await post('/api/meeting/meeting_a2/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    await post('/api/meeting/meeting_a2/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
 
     const md = scribeNow()
-    expect(md).toContain('Luke H walked the pipeline')          // prose untouched
-    expect(md).toContain('Luke owns the follow-up.')            // bare first name untouched
-    expect(md).toContain('Luke H can own it.')                  // spoken quote untouched
+    expect(md).toContain('Theo M walked the pipeline')          // prose untouched
+    expect(md).toContain('Theo owns the follow-up.')            // bare first name untouched
+    expect(md).toContain('Theo M can own it.')                  // spoken quote untouched
   })
 
   it('closes the ledger with an applied row carrying the surface counts', async () => {
-    seed('meeting_a3', ['Luke H', 'MU', 'Luke H'])
+    seed('meeting_a3', ['Theo M', 'MU', 'Theo M'])
     await startServer()
-    const res = await post('/api/meeting/meeting_a3/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_a3/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
 
     const rows = ledgerNow('meeting_a3')
     expect(rows.map(r => r.phase)).toEqual(['intent', 'applied'])
     expect(rows[0].id).toBe(rows[1].id)
     expect(rows[0].id).toBe(res.json.correctionId)
     expect(rows[1]).toMatchObject({
-      from: 'Luke H', to: 'Luke Henry', chunks: [0, 2], scope: 'meeting',
+      from: 'Theo M', to: 'Theo Marsh', chunks: [0, 2], scope: 'meeting',
       surfaces: { sidecar: 2, attendees: 1, transcript: 2 }, proseStale: true,
     })
   })
 
   it('records the exact chunk indices, which is what piece 3 will train on', async () => {
-    seed('meeting_a4', ['MU', 'Luke H', 'MU', 'Luke H', 'Luke H'])
+    seed('meeting_a4', ['MU', 'Theo M', 'MU', 'Theo M', 'Theo M'])
     await startServer()
-    await post('/api/meeting/meeting_a4/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    await post('/api/meeting/meeting_a4/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
     expect(ledgerNow('meeting_a4')[1].chunks).toEqual([1, 3, 4])
   })
 }, HTTP_TEST_TIMEOUT)
 
 describe('applying a PARTIAL correction', () => {
   it('changes only the named chunks and refuses to touch the markdown', async () => {
-    seed('meeting_p1', ['Luke H', 'MU', 'Luke H', 'Luke H'])
+    seed('meeting_p1', ['Theo M', 'MU', 'Theo M', 'Theo M'])
     await startServer()
 
     const res = await post('/api/meeting/meeting_p1/relabel', {
-      from: 'Luke H', to: 'Luke Henry', chunks: [0, 2], confirm: true,
+      from: 'Theo M', to: 'Theo Marsh', chunks: [0, 2], confirm: true,
     })
     expect(res.status).toBe(200)
     expect(res.json.partial).toBe(true)
@@ -407,38 +407,38 @@ describe('applying a PARTIAL correction', () => {
     // The reason is reported rather than left as silence.
     expect(res.json.markdownSkipped).toContain('cannot be mapped to chunk indices')
 
-    expect(sidecarNow().labels).toEqual(['Luke Henry', 'MU', 'Luke Henry', 'Luke H'])
+    expect(sidecarNow().labels).toEqual(['Theo Marsh', 'MU', 'Theo Marsh', 'Theo M'])
     // Untouched: relabelling by label here would rewrite turns the human never
     // selected, since 3 chunks became 3 markdown turns by a different pass.
     expect(scribeNow()).toBe(SCRIBE)
   })
 
   it('keeps both names in the sidecar speakers list', async () => {
-    seed('meeting_p2', ['Luke H', 'Luke H'])
+    seed('meeting_p2', ['Theo M', 'Theo M'])
     await startServer()
-    await post('/api/meeting/meeting_p2/relabel', { from: 'Luke H', to: 'Luke Henry', chunks: [0], confirm: true })
+    await post('/api/meeting/meeting_p2/relabel', { from: 'Theo M', to: 'Theo Marsh', chunks: [0], confirm: true })
     // Both are genuinely attributed segments now.
-    expect(sidecarNow().speakers).toEqual(['Luke H', 'Luke Henry'])
+    expect(sidecarNow().speakers).toEqual(['Theo M', 'Theo Marsh'])
   })
 
   it('refuses when a named chunk does not carry the old label', async () => {
-    seed('meeting_p3', ['Luke H', 'MU'])
+    seed('meeting_p3', ['Theo M', 'MU'])
     await startServer()
 
     const res = await post('/api/meeting/meeting_p3/relabel', {
-      from: 'Luke H', to: 'Luke Henry', chunks: [0, 1], confirm: true,
+      from: 'Theo M', to: 'Theo Marsh', chunks: [0, 1], confirm: true,
     })
     expect(res.status).toBe(422)
-    expect(res.json.error).toContain('do not carry "Luke H"')
-    expect(sidecarNow().labels).toEqual(['Luke H', 'MU'])
+    expect(res.json.error).toContain('do not carry "Theo M"')
+    expect(sidecarNow().labels).toEqual(['Theo M', 'MU'])
     expect(ledgerNow('meeting_p3')).toEqual([])   // rejected before any intent
   })
 
   it('rejects a non-integer chunk list rather than silently filtering it', async () => {
-    seed('meeting_p4', ['Luke H'])
+    seed('meeting_p4', ['Theo M'])
     await startServer()
     const res = await post('/api/meeting/meeting_p4/relabel', {
-      from: 'Luke H', to: 'Luke Henry', chunks: [0, 'two', -1], confirm: true,
+      from: 'Theo M', to: 'Theo Marsh', chunks: [0, 'two', -1], confirm: true,
     })
     expect(res.status).toBe(400)
     expect(res.json.reason).toBe('invalid_chunks')
@@ -450,49 +450,49 @@ describe('the ledger goes down first', () => {
     // An unrecorded mutation is the precise failure the ledger exists to
     // prevent, so an unwritable ledger must stop the correction — not proceed
     // and hope.
-    seed('meeting_l1', ['Luke H', 'MU'])
+    seed('meeting_l1', ['Theo M', 'MU'])
     await startServer()
     writeFileSync(join(dataDir, 'meeting-corrections'), 'a file where the directory goes')
 
-    const res = await post('/api/meeting/meeting_l1/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_l1/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
     expect(res.status).toBe(500)
     expect(res.json.reason).toBe('ledger_unwritable')
     expect(res.json.error).toContain('nothing was changed')
-    expect(sidecarNow().labels).toEqual(['Luke H', 'MU'])
+    expect(sidecarNow().labels).toEqual(['Theo M', 'MU'])
     expect(scribeNow()).toBe(SCRIBE)
   })
 
   it('refuses a new correction while an earlier one never completed', async () => {
-    seed('meeting_l2', ['Luke H', 'MU'])
+    seed('meeting_l2', ['Theo M', 'MU'])
     await startServer()
     // Exactly what a process dying mid-rewrite leaves behind.
     mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
     writeFileSync(join(dataDir, 'meeting-corrections', 'meeting_l2.jsonl'),
-      JSON.stringify({ id: 'died', phase: 'intent', at: '2026-08-06T10:00:00.000Z', from: 'Ext', to: 'Luke H', chunks: [1], scope: 'meeting' }) + '\n')
+      JSON.stringify({ id: 'died', phase: 'intent', at: '2026-08-06T10:00:00.000Z', from: 'Ext', to: 'Theo M', chunks: [1], scope: 'meeting' }) + '\n')
 
-    const res = await post('/api/meeting/meeting_l2/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_l2/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
     expect(res.status).toBe(409)
     expect(res.json.reason).toBe('correction_pending')
     expect(res.json.pending[0].id).toBe('died')
-    expect(sidecarNow().labels).toEqual(['Luke H', 'MU'])
+    expect(sidecarNow().labels).toEqual(['Theo M', 'MU'])
   })
 
   it('proceeds past a pending correction only with force', async () => {
-    seed('meeting_l3', ['Luke H', 'MU'])
+    seed('meeting_l3', ['Theo M', 'MU'])
     await startServer()
     mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
     writeFileSync(join(dataDir, 'meeting-corrections', 'meeting_l3.jsonl'),
       JSON.stringify({ id: 'died', phase: 'intent', at: '2026-08-06T10:00:00.000Z', from: 'Ext', to: 'X', chunks: [], scope: 'meeting' }) + '\n')
 
-    const res = await post('/api/meeting/meeting_l3/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true, force: true })
+    const res = await post('/api/meeting/meeting_l3/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true, force: true })
     expect(res.status).toBe(200)
-    expect(sidecarNow().labels).toEqual(['Luke Henry', 'MU'])
+    expect(sidecarNow().labels).toEqual(['Theo Marsh', 'MU'])
     // The stalled row is preserved, not tidied away — it is still evidence.
     expect(ledgerNow('meeting_l3').filter(r => r.id === 'died')).toHaveLength(1)
   })
 
   it('does not block on a correction that closed as FAILED', async () => {
-    seed('meeting_l4', ['Luke H', 'MU'])
+    seed('meeting_l4', ['Theo M', 'MU'])
     await startServer()
     mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
     const base = { at: '2026-08-06T10:00:00.000Z', from: 'Ext', to: 'X', chunks: [], scope: 'meeting' }
@@ -502,35 +502,35 @@ describe('the ledger goes down first', () => {
 
     // A known failure is a closed outcome. Only an unclosed intent means the
     // files may be half-written.
-    const res = await post('/api/meeting/meeting_l4/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_l4/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
     expect(res.status).toBe(200)
   })
 }, HTTP_TEST_TIMEOUT)
 
 describe('rejecting bad input', () => {
   it.each([
-    ['a label with a bracket that would break the transcript format', { from: 'Luke H', to: 'Bad]: Name' }, 400, 'invalid_label'],
-    ['an empty target label', { from: 'Luke H', to: '' }, 400, 'invalid_label'],
-    ['a no-op relabel', { from: 'Luke H', to: 'Luke H' }, 400, 'noop_relabel'],
+    ['a label with a bracket that would break the transcript format', { from: 'Theo M', to: 'Bad]: Name' }, 400, 'invalid_label'],
+    ['an empty target label', { from: 'Theo M', to: '' }, 400, 'invalid_label'],
+    ['a no-op relabel', { from: 'Theo M', to: 'Theo M' }, 400, 'noop_relabel'],
   ])('rejects %s', async (_name, body, status, reason) => {
-    seed('meeting_v1', ['Luke H'])
+    seed('meeting_v1', ['Theo M'])
     await startServer()
     const res = await post('/api/meeting/meeting_v1/relabel', { ...body, confirm: true })
     expect(res.status).toBe(status)
     expect(res.json.reason).toBe(reason)
-    expect(sidecarNow().labels).toEqual(['Luke H'])
+    expect(sidecarNow().labels).toEqual(['Theo M'])
   })
 
   it('404s an unknown session', async () => {
-    seed('meeting_v2', ['Luke H'])
+    seed('meeting_v2', ['Theo M'])
     await startServer()
-    const res = await post('/api/meeting/meeting_nothere/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_nothere/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
     expect(res.status).toBe(404)
     expect(res.json.reason).toBe('meeting_not_found')
   })
 
   it('400s an invalid session id without touching the filesystem', async () => {
-    seed('meeting_v3', ['Luke H'])
+    seed('meeting_v3', ['Theo M'])
     await startServer()
     const res = await post('/api/meeting/..%2F..%2Fetc/relabel', { from: 'a', to: 'b', confirm: true })
     expect(res.status).toBe(400)
@@ -540,7 +540,7 @@ describe('rejecting bad input', () => {
   it('422s when the label is absent from the meeting', async () => {
     seed('meeting_v4', ['MU'])
     await startServer()
-    const res = await post('/api/meeting/meeting_v4/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_v4/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
     expect(res.status).toBe(422)
     expect(res.json.error).toContain('no chunk carries')
     expect(ledgerNow('meeting_v4')).toEqual([])
@@ -550,14 +550,14 @@ describe('rejecting bad input', () => {
 describe('correcting an unidentified voice', () => {
   it('names Ext, the case with no other route to a name', async () => {
     seed('meeting_e1', ['Ext', 'MU', 'Ext'], {
-      scribe: SCRIBE.replace(/Luke H/g, 'Ext').replace('- Ext', '- Ext'),
+      scribe: SCRIBE.replace(/Theo M/g, 'Ext').replace('- Ext', '- Ext'),
     })
     await startServer()
 
-    const res = await post('/api/meeting/meeting_e1/relabel', { from: 'Ext', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_e1/relabel', { from: 'Ext', to: 'Theo Marsh', confirm: true })
     expect(res.status).toBe(200)
-    expect(sidecarNow().labels).toEqual(['Luke Henry', 'MU', 'Luke Henry'])
-    expect(ledgerNow('meeting_e1')[1]).toMatchObject({ from: 'Ext', to: 'Luke Henry' })
+    expect(sidecarNow().labels).toEqual(['Theo Marsh', 'MU', 'Theo Marsh'])
+    expect(ledgerNow('meeting_e1')[1]).toMatchObject({ from: 'Ext', to: 'Theo Marsh' })
   })
 
   it('does not enrol a placeholder onto a placeholder', async () => {
@@ -574,11 +574,11 @@ describe('correcting an unidentified voice', () => {
 
 // ── Enrolment: naming a placeholder is a FIRST TRAINING RUN ────────────────
 //
-// Relabel used to be text-only. Saving "Kirstyn Blum" over 109 segments labelled
+// Relabel used to be text-only. Saving "Wren Hale" over 109 segments labelled
 // one meeting and taught the system nothing — she never appeared in
 // /api/voice/profiles, the panel still offered her as `new name` inside the SAME
 // meeting, and no later meeting could match her. Verified live 2026-08-13: 70 and
-// 112 occurrences across two sidecars against 77 profiles and no Kirstyn.
+// 112 occurrences across two sidecars against 77 profiles and no Wren.
 //
 // 6.27.10 fixed that and was reverted the same night for joining COMPACTED
 // SIDECAR POSITIONS against RAW CAPTURE INDICES. Every fixture in this block is
@@ -600,7 +600,7 @@ describe('enrolling a named voice', () => {
    *  the owner: the incident wrote 22 chunks of MU into a stranger's profile. */
   const ALL_ROWS = [
     { i: 0, speaker: 'Vikas' }, { i: 1, speaker: 'Vishnu' }, { i: 2, speaker: 'MU' },
-    { i: 3, speaker: 'Ext' }, { i: 4, speaker: 'Niranjan' }, { i: 5, speaker: 'MU' },
+    { i: 3, speaker: 'Ext' }, { i: 4, speaker: 'Navin' }, { i: 5, speaker: 'MU' },
     { i: 8, speaker: 'Ext' }, { i: 13, speaker: 'MU' }, { i: 21, speaker: 'Ext' },
   ]
 
@@ -610,7 +610,7 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_gap/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.status).toBe(200)
 
     // THE ASSERTION THIS WHOLE FILE EXISTS FOR. Changed positions are [0, 2, 4];
@@ -618,19 +618,19 @@ describe('enrolling a named voice', () => {
     // mapping to positions yields [0, 2, 4] here and fails.
     expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([3, 8, 21])
     expect(enrolCalls.map(c => c.marker)).not.toContain(2)   // the device owner
-    expect(enrolCalls.every(c => c.name === 'Kirstyn Blum')).toBe(true)
+    expect(enrolCalls.every(c => c.name === 'Wren Hale')).toBe(true)
 
     expect(res.json.enrolment).toEqual({
       enrolled: 3, attempted: 3, created: true, clusterSkipped: 0, skipped: null,
     })
     expect(res.json.enrolledEmbeddings).toBe(3)
-    expect(sidecarNow().labels).toEqual(['Kirstyn Blum', 'MU', 'Kirstyn Blum', 'MU', 'Kirstyn Blum'])
+    expect(sidecarNow().labels).toEqual(['Wren Hale', 'MU', 'Wren Hale', 'MU', 'Wren Hale'])
   })
 
   it('cannot enrol the wrong person: a chunk its own voiceprint gave to someone else, or a two-voice chunk (6.61.0)', async () => {
     // Since Nemotron a chunk's label is its dominant TURN's name. Raw 8 reads Ext
     // (its dominant turn was unnamed) but its whole-chunk embedding matched MU at
-    // capture; raw 21 is two turns. Neither may teach Kirstyn's profile.
+    // capture; raw 21 is two turns. Neither may teach Wren's profile.
     seed('meeting_nemo', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
     const path = join(root, MONTH, `${STEM}.g2-chunks.json`)
     const doc = JSON.parse(readFileSync(path, 'utf-8'))
@@ -647,14 +647,14 @@ describe('enrolling a named voice', () => {
     ])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_nemo/relabel', { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    const res = await post('/api/meeting/meeting_nemo/relabel', { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.status).toBe(200)
     expect(enrolCalls.map(c => c.marker)).toEqual([3])
     expect(res.json.enrolment).toEqual({
       enrolled: 1, attempted: 3, created: true, clusterSkipped: 0, otherVoiceSkipped: 2, skipped: null,
     })
-    // The rename itself is unaffected: every Ext chunk is Kirstyn now.
-    expect(sidecarNow().labels).toEqual(['Kirstyn Blum', 'MU', 'Kirstyn Blum', 'MU', 'Kirstyn Blum'])
+    // The rename itself is unaffected: every Ext chunk is Wren now.
+    expect(sidecarNow().labels).toEqual(['Wren Hale', 'MU', 'Wren Hale', 'MU', 'Wren Hale'])
   })
 
   it('stamps correction:<sessionId>, which is what makes the samples retractable', async () => {
@@ -667,7 +667,7 @@ describe('enrolling a named voice', () => {
     writeChunkEmbeddings('meeting_src', ALL_ROWS)
     await startServer()
 
-    await post('/api/meeting/meeting_src/relabel', { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+    await post('/api/meeting/meeting_src/relabel', { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(enrolCalls.length).toBeGreaterThan(0)
     expect(new Set(enrolCalls.map(c => c.source))).toEqual(new Set(['correction:meeting_src']))
 
@@ -689,7 +689,7 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_nomap/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.status).toBe(200)
     expect(enrolCalls).toEqual([])
     expect(res.json.enrolment).toEqual({
@@ -697,7 +697,7 @@ describe('enrolling a named voice', () => {
     })
     // The rename the user asked for still landed. Refusing to TRAIN is not
     // refusing to RELABEL.
-    expect(sidecarNow().labels).toEqual(['Kirstyn Blum', 'MU', 'Kirstyn Blum', 'MU', 'Kirstyn Blum'])
+    expect(sidecarNow().labels).toEqual(['Wren Hale', 'MU', 'Wren Hale', 'MU', 'Wren Hale'])
   })
 
   it('REFUSES a chunkIndex the chunk claims for itself, with no chunkEntries to back it', async () => {
@@ -717,11 +717,11 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_selfclaim/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.status).toBe(200)
     expect(res.json.enrolment.skipped).toBe('no_index_mapping')
     expect(enrolCalls).toEqual([])
-    expect(sidecarNow().labels[0]).toBe('Kirstyn Blum')
+    expect(sidecarNow().labels[0]).toBe('Wren Hale')
   })
 
   it('REFUSES when chunkEntries disagrees with the compacted count', async () => {
@@ -736,7 +736,7 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_skew/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.json.enrolment.skipped).toBe('no_index_mapping')
     expect(enrolCalls).toEqual([])
   })
@@ -749,13 +749,13 @@ describe('enrolling a named voice', () => {
     await startServer()                                  // no embedding file at all
 
     const res = await post('/api/meeting/meeting_none/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.status).toBe(200)
     expect(res.json.enrolment).toEqual({
       enrolled: 0, attempted: 0, created: false, clusterSkipped: 0, skipped: 'no_embeddings',
     })
     expect(enrolCalls).toEqual([])
-    expect(sidecarNow().labels[0]).toBe('Kirstyn Blum')
+    expect(sidecarNow().labels[0]).toBe('Wren Hale')
   })
 
   it('reports no_embeddings when rows exist but none cover the relabelled chunks', async () => {
@@ -765,7 +765,7 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_other/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.json.enrolment.skipped).toBe('no_embeddings')
     expect(enrolCalls).toEqual([])
   })
@@ -778,7 +778,7 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_old/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.json.enrolment.skipped).toBe('expired')
   })
 
@@ -789,7 +789,7 @@ describe('enrolling a named voice', () => {
     try {
       await startServer()
       const res = await post('/api/meeting/meeting_off/relabel',
-        { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+        { from: 'Ext', to: 'Wren Hale', confirm: true })
       expect(res.json.enrolment.skipped).toBe('disabled')
       expect(enrolCalls).toEqual([])
     } finally {
@@ -807,7 +807,7 @@ describe('enrolling a named voice', () => {
     embeddingRuntimeAvailable = false
 
     const res = await post('/api/meeting/meeting_nomodel/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.json.enrolment.skipped).toBe('store_unavailable')
     expect(enrolCalls).toEqual([])
   })
@@ -850,7 +850,7 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_two/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.status).toBe(200)
     expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([3, 8, 21])
     expect(res.json.enrolment).toEqual({
@@ -874,7 +874,7 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_crowd/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(enrolCalls).toEqual([])
     // clusterSkipped === attempted is the panel's cue: "0 enrolled, 3 chunks
     // looked like different voices." No profile is invented from a crowd.
@@ -890,11 +890,11 @@ describe('enrolling a named voice', () => {
     // would repeat to the user.
     seed('meeting_append', EXT_MU, { rawIndices: RAW, startTime: ONE_HOUR_AGO() })
     writeChunkEmbeddings('meeting_append', ALL_ROWS)
-    seedVoiceProfile('Kirstyn Blum')
+    seedVoiceProfile('Wren Hale')
     await startServer()
 
     const res = await post('/api/meeting/meeting_append/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.json.enrolment).toEqual({
       enrolled: 3, attempted: 3, created: false, clusterSkipped: 0, skipped: null,
     })
@@ -926,7 +926,7 @@ describe('enrolling a named voice', () => {
     await startServer()
 
     const res = await post('/api/meeting/meeting_big/relabel',
-      { from: 'Ext', to: 'Kirstyn Blum', confirm: true })
+      { from: 'Ext', to: 'Wren Hale', confirm: true })
     expect(res.json.enrolment.attempted).toBe(40)
     expect(res.json.enrolment.enrolled).toBe(20)
     expect(enrolCalls).toHaveLength(20)
@@ -936,48 +936,48 @@ describe('enrolling a named voice', () => {
     expect(new Set(enrolCalls.map(c => c.marker)).size).toBe(20)
   })
 
-  it('enrols a NEW name from a wrong existing label — the Milo case', async () => {
-    // Live 2026-08-20: Nick Gurney → Milo LeBaron. The identifier had weakly
+  it('enrols a NEW name from a wrong existing label — the Leo case', async () => {
+    // Live 2026-08-20: Cole Garner → Leo Ashby. The identifier had weakly
     // matched 19 chunks to an enrolled profile. Relabel named the meeting and
     // created no profile, because enrolment gated on placeholder `from`. Those
     // chunks ARE the new person. Mutating that `from` placeholder-only guard
     // back in fails this test.
-    seed('meeting_milo', ['Nick Gurney', 'MU', 'Nick Gurney', 'MU', 'Nick Gurney'], {
+    seed('meeting_leo', ['Cole Garner', 'MU', 'Cole Garner', 'MU', 'Cole Garner'], {
       rawIndices: RAW, startTime: ONE_HOUR_AGO(),
     })
-    writeChunkEmbeddings('meeting_milo', [
-      { i: 3, speaker: 'Nick Gurney' }, { i: 8, speaker: 'Nick Gurney' }, { i: 21, speaker: 'Nick Gurney' },
+    writeChunkEmbeddings('meeting_leo', [
+      { i: 3, speaker: 'Cole Garner' }, { i: 8, speaker: 'Cole Garner' }, { i: 21, speaker: 'Cole Garner' },
       { i: 0, speaker: 'Vikas' }, { i: 2, speaker: 'MU' }, { i: 5, speaker: 'MU' },
     ])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_milo/relabel',
-      { from: 'Nick Gurney', to: 'Milo LeBaron', confirm: true })
+    const res = await post('/api/meeting/meeting_leo/relabel',
+      { from: 'Cole Garner', to: 'Leo Ashby', confirm: true })
     expect(res.status).toBe(200)
     expect(enrolCalls.map(c => c.marker).sort((a, b) => a - b)).toEqual([3, 8, 21])
     expect(enrolCalls.map(c => c.marker)).not.toContain(2)
-    expect(enrolCalls.every(c => c.name === 'Milo LeBaron')).toBe(true)
+    expect(enrolCalls.every(c => c.name === 'Leo Ashby')).toBe(true)
     expect(res.json.enrolment).toEqual({
       enrolled: 3, attempted: 3, created: true, clusterSkipped: 0, skipped: null,
     })
-    expect(sidecarNow().labels).toEqual(['Milo LeBaron', 'MU', 'Milo LeBaron', 'MU', 'Milo LeBaron'])
+    expect(sidecarNow().labels).toEqual(['Leo Ashby', 'MU', 'Leo Ashby', 'MU', 'Leo Ashby'])
   })
 
   it('appends onto an existing name from a wrong existing label', async () => {
-    // Second cluster in the same meeting: Richard Jenkins → Milo, after Milo
+    // Second cluster in the same meeting: Rowan Jennings → Leo, after Leo
     // already exists. Additional training, not a global merge.
-    seed('meeting_second', ['Richard Jenkins', 'MU', 'Richard Jenkins', 'MU', 'Richard Jenkins'], {
+    seed('meeting_second', ['Rowan Jennings', 'MU', 'Rowan Jennings', 'MU', 'Rowan Jennings'], {
       rawIndices: RAW, startTime: ONE_HOUR_AGO(),
     })
     writeChunkEmbeddings('meeting_second', [
-      { i: 3, speaker: 'Richard Jenkins' }, { i: 8, speaker: 'Richard Jenkins' },
-      { i: 21, speaker: 'Richard Jenkins' }, { i: 2, speaker: 'MU' },
+      { i: 3, speaker: 'Rowan Jennings' }, { i: 8, speaker: 'Rowan Jennings' },
+      { i: 21, speaker: 'Rowan Jennings' }, { i: 2, speaker: 'MU' },
     ])
-    seedVoiceProfile('Milo LeBaron')
+    seedVoiceProfile('Leo Ashby')
     await startServer()
 
     const res = await post('/api/meeting/meeting_second/relabel',
-      { from: 'Richard Jenkins', to: 'Milo LeBaron', confirm: true })
+      { from: 'Rowan Jennings', to: 'Leo Ashby', confirm: true })
     expect(res.json.enrolment).toEqual({
       enrolled: 3, attempted: 3, created: false, clusterSkipped: 0, skipped: null,
     })
@@ -989,37 +989,37 @@ describe('chained corrections', () => {
   it('lets a second correction refine the first', async () => {
     // Ext to a rough name to the right name — the realistic sequence when a
     // human recognises a voice but not the exact spelling.
-    seed('meeting_ch1', ['Ext', 'MU'], { scribe: SCRIBE.replace(/Luke H/g, 'Ext') })
+    seed('meeting_ch1', ['Ext', 'MU'], { scribe: SCRIBE.replace(/Theo M/g, 'Ext') })
     await startServer()
 
-    expect((await post('/api/meeting/meeting_ch1/relabel', { from: 'Ext', to: 'Luke H', confirm: true })).status).toBe(200)
-    expect((await post('/api/meeting/meeting_ch1/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })).status).toBe(200)
+    expect((await post('/api/meeting/meeting_ch1/relabel', { from: 'Ext', to: 'Theo M', confirm: true })).status).toBe(200)
+    expect((await post('/api/meeting/meeting_ch1/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })).status).toBe(200)
 
-    expect(sidecarNow().labels).toEqual(['Luke Henry', 'MU'])
+    expect(sidecarNow().labels).toEqual(['Theo Marsh', 'MU'])
     const { currentLabelFor } = await import('../lib/meeting-corrections.js')
-    expect(currentLabelFor('meeting_ch1', 'Ext')).toBe('Luke Henry')
+    expect(currentLabelFor('meeting_ch1', 'Ext')).toBe('Theo Marsh')
   })
 
   it('merges a split identity without leaving a duplicate attendee', async () => {
-    // The live failure this whole feature exists for: Luke H and Luke Henry are
+    // The live failure this whole feature exists for: Theo M and Theo Marsh are
     // one person split across two profiles.
-    seed('meeting_ch2', ['Luke H', 'Luke Henry', 'MU'], {
-      scribe: SCRIBE.replace('- Luke H\n', '- Luke H\n- Luke Henry\n'),
+    seed('meeting_ch2', ['Theo M', 'Theo Marsh', 'MU'], {
+      scribe: SCRIBE.replace('- Theo M\n', '- Theo M\n- Theo Marsh\n'),
     })
     await startServer()
 
-    const res = await post('/api/meeting/meeting_ch2/relabel', { from: 'Luke H', to: 'Luke Henry', confirm: true })
+    const res = await post('/api/meeting/meeting_ch2/relabel', { from: 'Theo M', to: 'Theo Marsh', confirm: true })
     expect(res.status).toBe(200)
-    expect(sidecarNow().speakers).toEqual(['Luke Henry', 'MU'])
+    expect(sidecarNow().speakers).toEqual(['Theo Marsh', 'MU'])
     const attendees = scribeNow().split('## Summary')[0]
-    expect(attendees.match(/^- Luke Henry$/gm)).toHaveLength(1)
+    expect(attendees.match(/^- Theo Marsh$/gm)).toHaveLength(1)
   })
 }, HTTP_TEST_TIMEOUT)
 
 describe('backfilling enrolment from a recorded correction', () => {
   // The retroactive path. A voice named BEFORE enrolment shipped has a correct
   // transcript and no profile, and re-running the rename cannot help — she is already
-  // a real name, so the placeholder guard declines. Kirstyn Blum is the live case:
+  // a real name, so the placeholder guard declines. Wren Hale is the live case:
   // 60 + 109 chunks across two meetings, absent from a 77-profile store.
   //
   // It must run IN-PROCESS: the voice store is owned by the running server and
@@ -1044,23 +1044,23 @@ describe('backfilling enrolment from a recorded correction', () => {
     expect(applied.json.confirmed).toBe(true)
   })
 
-  it('backfills a named-source new-name correction — the Milo hole', async () => {
-    // Today's live ledger: Nick Gurney → Milo LeBaron already applied, no
-    // profile. Re-running the rename cannot help (Milo is already the label),
+  it('backfills a named-source new-name correction — the Leo hole', async () => {
+    // Today's live ledger: Cole Garner → Leo Ashby already applied, no
+    // profile. Re-running the rename cannot help (Leo is already the label),
     // and the old placeholder `from` guard made backfill skip too.
-    seed('meeting_bf2', ['Nick Gurney', 'MU', 'Nick Gurney', 'MU', 'Nick Gurney'], {
+    seed('meeting_bf2', ['Cole Garner', 'MU', 'Cole Garner', 'MU', 'Cole Garner'], {
       rawIndices: [3, 5, 8, 13, 21], startTime: Date.now() - 3_600_000,
     })
     writeChunkEmbeddings('meeting_bf2', [
-      { i: 3, speaker: 'Nick Gurney' }, { i: 8, speaker: 'Nick Gurney' }, { i: 21, speaker: 'Nick Gurney' },
+      { i: 3, speaker: 'Cole Garner' }, { i: 8, speaker: 'Cole Garner' }, { i: 21, speaker: 'Cole Garner' },
     ])
     await startServer()
     await post('/api/meeting/meeting_bf2/relabel',
-      { from: 'Nick Gurney', to: 'Milo LeBaron', confirm: true })
+      { from: 'Cole Garner', to: 'Leo Ashby', confirm: true })
     enrolCalls.length = 0
 
     const preview = await post('/api/meeting/meeting_bf2/backfill-enrolment',
-      { speaker: 'Milo LeBaron' })
+      { speaker: 'Leo Ashby' })
     expect(preview.status).toBe(200)
     expect(preview.json.confirmed).toBe(false)
     expect(preview.json.totals.eligible).toBe(1)
@@ -1068,10 +1068,10 @@ describe('backfilling enrolment from a recorded correction', () => {
     expect(enrolCalls).toEqual([])
 
     const applied = await post('/api/meeting/meeting_bf2/backfill-enrolment',
-      { speaker: 'Milo LeBaron', confirm: true })
+      { speaker: 'Leo Ashby', confirm: true })
     expect(applied.status).toBe(200)
     expect(applied.json.totals.enrolled).toBeGreaterThan(0)
-    expect(enrolCalls.every(c => c.name === 'Milo LeBaron')).toBe(true)
+    expect(enrolCalls.every(c => c.name === 'Leo Ashby')).toBe(true)
   })
 
   it('404s for a speaker with no applied correction here', async () => {

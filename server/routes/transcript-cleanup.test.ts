@@ -39,7 +39,7 @@ let roots: string[] = []
 beforeEach(() => {
   rmSync(dataPath('transcript-cleanup'), { recursive: true, force: true })
   mkdirSync(dirname(process.env.COS_PROFILE_PATH!), { recursive: true })
-  writeFileSync(process.env.COS_PROFILE_PATH!, JSON.stringify({ owner_name: 'Miles Ukaoma', vocabulary: ['Jewel360'], whisper_corrections: '{}' }))
+  writeFileSync(process.env.COS_PROFILE_PATH!, JSON.stringify({ owner_name: 'Jordan Ukamya', vocabulary: ['Jewel360'], whisper_corrections: '{}' }))
   clearProfileCache()
   resetDecoderCaches()
 })
@@ -107,7 +107,7 @@ describe('screen context route', () => {
   it('stores bounded lines for a live meeting and answers counts, never text', async () => {
     const h = await start()
     const res = await h.api(`/api/meeting/${SESSION}/screen-context`, post({ lines: [
-      { at: NOW - 60_000, text: 'Grace Ukaoma joined', app: 'Zoom' },
+      { at: NOW - 60_000, text: 'Faith Ukamya joined', app: 'Zoom' },
       { at: new Date(NOW - 30_000).toISOString(), text: 'Agenda: travel' },
       { at: NOW - 20_000, text: 'token=ghp_abcdefghijklmnopqrstuvwxyz0123456789' },
     ] }))
@@ -115,8 +115,8 @@ describe('screen context route', () => {
     expect(await res.json()).toEqual({ ok: true, protocol: 1, accepted: 2, duplicates: 0, held: 1, truncated: 0, invalid: 0, dropped: 0, stored: 2 })
     const stats = await (await h.api(`/api/meeting/${SESSION}/screen-context`)).json() as Record<string, unknown>
     expect(stats).toMatchObject({ protocol: 1, lines: 2, firstAt: NOW - 60_000, lastAt: NOW - 30_000 })
-    expect(JSON.stringify(stats)).not.toMatch(/Ukaoma|Agenda/)
-    expect(readScreenContext(SESSION).map(l => l.text)).toEqual(['Grace Ukaoma joined', 'Agenda: travel'])
+    expect(JSON.stringify(stats)).not.toMatch(/Ukamya|Agenda/)
+    expect(readScreenContext(SESSION).map(l => l.text)).toEqual(['Faith Ukamya joined', 'Agenda: travel'])
   })
 
   it('refuses oversized requests, bad bodies and bad ids', async () => {
@@ -167,7 +167,7 @@ describe('settings route', () => {
 })
 
 describe('dictionary suggestions', () => {
-  function seed(h: Awaited<ReturnType<typeof start>>, written = 'Ukaoma', heard = 'Ukoma') {
+  function seed(h: Awaited<ReturnType<typeof start>>, written = 'Ukamya', heard = 'Ukmya') {
     return h.suggestions.record({ written, heard, evidence: [{ source: 'screen', detail: 'Zoom' }], sessionId: SESSION, at: new Date(NOW).toISOString(), inDictionary: () => false })!
   }
 
@@ -182,11 +182,11 @@ describe('dictionary suggestions', () => {
 
   it('dedupes by written form, case-insensitively, and never needs context-free evidence', async () => {
     const h = await start()
-    const a = seed(h, 'Ukaoma', 'Ukoma')
-    const b = seed(h, 'ukaoma', 'Yukoma')
+    const a = seed(h, 'Ukamya', 'Ukmya')
+    const b = seed(h, 'ukamya', 'Yukmya')
     expect(b.id).toBe(a.id)
     expect(h.suggestions.list()).toHaveLength(1)
-    expect(h.suggestions.list()[0]).toMatchObject({ written: 'Ukaoma', heard: ['Ukoma', 'Yukoma'], count: 2 })
+    expect(h.suggestions.list()[0]).toMatchObject({ written: 'Ukamya', heard: ['Ukmya', 'Yukmya'], count: 2 })
     expect(h.suggestions.record({ written: 'Zebulon', heard: 'Zeb', evidence: [], sessionId: SESSION, at: 'x', inDictionary: () => false })).toBeNull()
     expect(h.suggestions.record({ written: 'Jewel360', heard: 'Joule', evidence: [{ source: 'file', detail: null }], sessionId: SESSION, at: 'x', inDictionary: w => w === 'Jewel360' })).toBeNull()
   })
@@ -198,11 +198,11 @@ describe('dictionary suggestions', () => {
     expect(res.status).toBe(200)
     const body = await res.json() as Record<string, any>
     expect(body).toMatchObject({ unchanged: false, entry: null, suggestion: { id: s.id, status: 'accepted', inVocabulary: true } })
-    expect(body.glossary.vocabulary).toEqual(['Jewel360', 'Ukaoma'])
-    expect(getVocabulary()).toEqual(['Jewel360', 'Ukaoma'])
+    expect(body.glossary.vocabulary).toEqual(['Jewel360', 'Ukamya'])
+    expect(getVocabulary()).toEqual(['Jewel360', 'Ukamya'])
     expect(getWhisperCorrections()).toEqual({})
     // The glossary's own route reads the same store.
-    expect((await (await h.api('/api/transcription-glossary')).json() as any).vocabulary).toEqual(['Jewel360', 'Ukaoma'])
+    expect((await (await h.api('/api/transcription-glossary')).json() as any).vocabulary).toEqual(['Jewel360', 'Ukamya'])
     // An accepted form is never suggested again.
     expect(seed(h)).toBeNull()
   })
@@ -211,10 +211,10 @@ describe('dictionary suggestions', () => {
     const h = await start()
     const s = seed(h)
     const body = await (await h.api(`/api/transcript-cleanup/suggestions/${s.id}/accept`, post({ correction: true }))).json() as Record<string, any>
-    expect(body.entry).toMatchObject({ heard: 'Ukoma', written: 'Ukaoma', source: 'meeting', addedVocabulary: true })
-    expect(getWhisperCorrections()).toEqual({ Ukoma: 'Ukaoma' })
+    expect(body.entry).toMatchObject({ heard: 'Ukmya', written: 'Ukamya', source: 'meeting', addedVocabulary: true })
+    expect(getWhisperCorrections()).toEqual({ Ukmya: 'Ukamya' })
     const recent = await (await h.api('/api/transcription-glossary/recent')).json() as any
-    expect(recent.entries[0]).toMatchObject({ id: body.entry.id, heard: 'Ukoma' })
+    expect(recent.entries[0]).toMatchObject({ id: body.entry.id, heard: 'Ukmya' })
     expect((await h.api('/api/transcription-glossary/correction/undo', post({ id: body.entry.id }))).status).toBe(200)
     expect(getWhisperCorrections()).toEqual({})
   })
@@ -238,21 +238,21 @@ describe('undo route and the sweep', () => {
   it('undoes one edit by id', async () => {
     const h = await start()
     h.state.saved.add(SESSION)
-    const line = 'Then Ukaoma called back.'
+    const line = 'Then Ukamya called back.'
     writeFileSync(h.meetingPath, `# M\n\n## Transcript\n\n[MU]: ${line}\n`)
     writeFileSync(h.sidecarPath, JSON.stringify({ sessionId: SESSION, batchTranscript: `[MU]: ${line}` }))
     const id = newEditId()
     appendLedger(SESSION, [
-      { kind: 'run', runId: 'tc_00000000000000aa', phase: 'intent', at: 'a', inputSha: sha256('[MU]: Then U coma called back.') },
-      { kind: 'edit', id, runId: 'tc_00000000000000aa', at: 'a', line: 0, offset: 5, original: 'U coma', replacement: 'Ukaoma', before: 'Then ', after: ' called back.', lineSha: sha256(line), source: 'model' },
-      { kind: 'run', runId: 'tc_00000000000000aa', phase: 'done', at: 'a', inputSha: sha256('[MU]: Then U coma called back.'), outputSha: sha256(`[MU]: ${line}`) },
+      { kind: 'run', runId: 'tc_00000000000000aa', phase: 'intent', at: 'a', inputSha: sha256('[MU]: Then U cmya called back.') },
+      { kind: 'edit', id, runId: 'tc_00000000000000aa', at: 'a', line: 0, offset: 5, original: 'U cmya', replacement: 'Ukamya', before: 'Then ', after: ' called back.', lineSha: sha256(line), source: 'model' },
+      { kind: 'run', runId: 'tc_00000000000000aa', phase: 'done', at: 'a', inputSha: sha256('[MU]: Then U cmya called back.'), outputSha: sha256(`[MU]: ${line}`) },
     ])
     const view = await (await h.api(`/api/meeting/${SESSION}/transcript-cleanup`)).json() as any
     expect(view).toMatchObject({ protocol: 1, cleanedCurrent: true, edits: [{ id, reverted: false }] })
     expect((await h.api(`/api/meeting/${SESSION}/transcript-cleanup/undo`, post({}))).status).toBe(400)
     expect(await (await h.api(`/api/meeting/${SESSION}/transcript-cleanup/undo`, post({ editId: id }))).json()).toEqual({ reverted: [id] })
-    expect(readFileSync(h.meetingPath, 'utf8')).toContain('[MU]: Then U coma called back.')
-    expect(JSON.parse(readFileSync(h.sidecarPath, 'utf8')).batchTranscript).toBe('[MU]: Then U coma called back.')
+    expect(readFileSync(h.meetingPath, 'utf8')).toContain('[MU]: Then U cmya called back.')
+    expect(JSON.parse(readFileSync(h.sidecarPath, 'utf8')).batchTranscript).toBe('[MU]: Then U cmya called back.')
   })
 
   it('deletes cleanup data whose meeting is gone after the grace period, and screen text past retention', () => {

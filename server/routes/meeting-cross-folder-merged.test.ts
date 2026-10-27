@@ -58,7 +58,7 @@ function mergedScribe(sessionId = SESSION): string {
     '',
     '- MU',
     '- Speaker 2',
-    '- Kyle Payton',
+    '- Corin Pace',
     '',
     '## Summary',
     '',
@@ -68,7 +68,7 @@ function mergedScribe(sessionId = SESSION): string {
     '',
     '[MU]: The pets keep track of every project.',
     '[Speaker 2]: It is becoming its own thing.',
-    '[Kyle Payton]: Have a good weekend.',
+    '[Corin Pace]: Have a good weekend.',
     '',
     '<!-- g2-transcript-blended -->',
     `<!-- g2-source: ${CAPTURE_STEM}.g2-chunks.json -->`,
@@ -82,7 +82,7 @@ function mergedScribe(sessionId = SESSION): string {
 }
 
 function sidecar(sessionId = SESSION): string {
-  const labels = ['MU', 'Speaker 2', 'Kyle Payton', 'Speaker 2']
+  const labels = ['MU', 'Speaker 2', 'Corin Pace', 'Speaker 2']
   return JSON.stringify({
     schemaVersion: 2,
     sessionId,
@@ -247,14 +247,14 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     await startServer()
     const row = await listRow()
     const res = await call('POST', `/api/meeting/${SESSION}/relabel`, {
-      from: 'Speaker 2', to: 'Chris Dubois', recordId: row.recordId, confirm: true,
+      from: 'Speaker 2', to: 'Morgan Devlin', recordId: row.recordId, confirm: true,
     })
     expect(res.status).toBe(200)
     expect(res.json.markdownSkipped ?? null).toBeNull()
-    expect(sidecarNow().chunks.map(c => c.speaker)).toEqual(['MU', 'Chris Dubois', 'Kyle Payton', 'Chris Dubois'])
+    expect(sidecarNow().chunks.map(c => c.speaker)).toEqual(['MU', 'Morgan Devlin', 'Corin Pace', 'Morgan Devlin'])
     const md = scribeNow()
-    expect(md).toContain('[Chris Dubois]: It is becoming its own thing.')
-    expect(md).toContain('- Chris Dubois')
+    expect(md).toContain('[Morgan Devlin]: It is becoming its own thing.')
+    expect(md).toContain('- Morgan Devlin')
     expect(md).not.toContain('[Speaker 2]:')
     // The marker that makes this resolution possible survives the rewrite.
     expect(md).toContain(`<!-- g2-session: ${SESSION} -->`)
@@ -265,12 +265,12 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     await startServer()
     const review = await call('GET', `/api/meeting/${SESSION}/speakers`)
     const res = await call('POST', `/api/meeting/${SESSION}/relabel`, {
-      from: 'Speaker 2', to: 'Chris Dubois', recordId: review.json.recordId, confirm: true,
+      from: 'Speaker 2', to: 'Morgan Devlin', recordId: review.json.recordId, confirm: true,
     })
     expect(res.status).toBe(200)
     expect(res.json.surfaces).toMatchObject({ sidecar: 2, attendees: 1, transcript: 1 })
     expect(res.json.markdownSkipped ?? null).toBeNull()
-    expect(scribeNow()).toContain('[Chris Dubois]: It is becoming its own thing.')
+    expect(scribeNow()).toContain('[Morgan Devlin]: It is becoming its own thing.')
   }, HTTP_TEST_TIMEOUT)
 
   it('cross-folder: a deattribution sent with the list row recordId is applied to the merged scribe', async () => {
@@ -278,13 +278,13 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     await startServer()
     const row = await listRow()
     const res = await call('POST', `/api/meeting/${SESSION}/deattribute`, {
-      from: 'Kyle Payton', recordId: row.recordId, confirm: true, retractTraining: false,
+      from: 'Corin Pace', recordId: row.recordId, confirm: true, retractTraining: false,
     })
     expect(res.status).toBe(200)
     expect(res.json.markdownSkipped ?? null).toBeNull()
-    expect(scribeNow()).not.toContain('[Kyle Payton]:')
-    expect(scribeNow()).not.toContain('- Kyle Payton')
-    expect(sidecarNow().chunks.map(c => c.speaker)).not.toContain('Kyle Payton')
+    expect(scribeNow()).not.toContain('[Corin Pace]:')
+    expect(scribeNow()).not.toContain('- Corin Pace')
+    expect(sidecarNow().chunks.map(c => c.speaker)).not.toContain('Corin Pace')
   }, HTTP_TEST_TIMEOUT)
 
   it('cross-folder: a confirmation sent with the list row recordId is accepted', async () => {
@@ -314,10 +314,10 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     const review = await call('GET', `/api/meeting/${SESSION}/speakers`)
     expect(review.json.recordId).toBe(row.recordId)
     const res = await call('POST', `/api/meeting/${SESSION}/relabel`, {
-      from: 'Speaker 2', to: 'Chris Dubois', recordId: row.recordId, confirm: true,
+      from: 'Speaker 2', to: 'Morgan Devlin', recordId: row.recordId, confirm: true,
     })
     expect(res.status).toBe(200)
-    expect(readFileSync(join(monthDir(SIDECAR_DOMAIN), SCRIBE), 'utf8')).toContain('[Chris Dubois]:')
+    expect(readFileSync(join(monthDir(SIDECAR_DOMAIN), SCRIBE), 'utf8')).toContain('[Morgan Devlin]:')
   }, HTTP_TEST_TIMEOUT)
 
   it('two scribes claim one session: fails closed, rewrites neither, and says why', async () => {
@@ -332,7 +332,7 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     // No merge resolution: the review describes the capture itself.
     expect(review.json.recordId).toBe(RETIRED_RECORD_ID)
     const res = await call('POST', `/api/meeting/${SESSION}/relabel`, {
-      from: 'Speaker 2', to: 'Chris Dubois', recordId: review.json.recordId, confirm: true,
+      from: 'Speaker 2', to: 'Morgan Devlin', recordId: review.json.recordId, confirm: true,
     })
     expect(review.json.mutable).toBe(false)
     expect(res.status).toBe(409)
@@ -342,7 +342,7 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
     expect(readFileSync(rival, 'utf8')).toBe(before.rival)
     // A client holding either list row's recordId is refused rather than pointed at one of them.
     const refused = await call('POST', `/api/meeting/${SESSION}/relabel`, {
-      from: 'Chris Dubois', to: 'Speaker 2', recordId: LIST_RECORD_ID, confirm: true,
+      from: 'Morgan Devlin', to: 'Speaker 2', recordId: LIST_RECORD_ID, confirm: true,
     })
     expect(refused.status).toBe(409)
     expect(refused.json.reason).toBe('record_source_mismatch')
@@ -361,9 +361,9 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
       expect(res.json.sourceRevision).toMatch(/^[a-f0-9]{64}$/)
       expect(res.json.reviewIdentityVersion).toBe(1)
     }
-    const res = await call('POST', `/api/meeting/${SESSION}/relabel`, { from:'Speaker 2', to:'Chris Dubois', recordId:row.recordId, confirm:true })
+    const res = await call('POST', `/api/meeting/${SESSION}/relabel`, { from:'Speaker 2', to:'Morgan Devlin', recordId:row.recordId, confirm:true })
     expect(res.status).toBe(200)
-    expect(scribeNow()).toContain('[Chris Dubois]:')
+    expect(scribeNow()).toContain('[Morgan Devlin]:')
     expect(readFileSync(raw, 'utf8')).toBe(before)
   }, HTTP_TEST_TIMEOUT)
 
@@ -384,7 +384,7 @@ describe('a merged meeting whose capture sits in another domain folder (6.61.2)'
       const path = changeSidecar ? join(monthDir(SIDECAR_DOMAIN), `${CAPTURE_STEM}.g2-chunks.json`) : join(monthDir(SCRIBE_DOMAIN), SCRIBE)
       writeFileSync(path, readFileSync(path, 'utf8') + '\n')
       const before = { scribe:scribeNow(), sidecar:sidecarNow() }
-      for (const [route, body] of [['relabel',{from:'Speaker 2',to:'Chris Dubois',confirm:true}],['deattribute',{from:'Speaker 2',confirm:true}],['confirm',{label:'Speaker 2'}]] as const) {
+      for (const [route, body] of [['relabel',{from:'Speaker 2',to:'Morgan Devlin',confirm:true}],['deattribute',{from:'Speaker 2',confirm:true}],['confirm',{label:'Speaker 2'}]] as const) {
         const res = await call('POST', `/api/meeting/${SESSION}/${route}`, {...body,recordId:review.json.recordId,expectedRevision:review.json.sourceRevision})
         expect(res.status).toBe(409)
         expect(res.json.reason).toBe('record_source_mismatch')

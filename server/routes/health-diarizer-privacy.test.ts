@@ -20,13 +20,13 @@ afterAll(() => { for (const root of roots.splice(0)) { try { chmodSync(root, 0o7
 function boardPrepMeeting() {
   const dir = mkdtempSync(join(tmpdir(), 'qa-health-')); roots.push(dir)
   const audioDir = join(dir, 'pending'); mkdirSync(audioDir)
-  const who = ['Silas Larson', 'Silas Larson', 'Silas Larson', 'Jeremy Sokolic', 'Jeremy Sokolic', 'Jeremy Sokolic']
+  const who = ['Elliot Sterling', 'Elliot Sterling', 'Elliot Sterling', 'Jasper Quillen', 'Jasper Quillen', 'Jasper Quillen']
   const entries = who.map((speaker, i) => {
     const wav = wavOf(6, () => 10)
     writeFileSync(join(audioDir, `chunk_${String(i).padStart(4, '0')}.wav`), wav)
     return { chunkIndex: i, chunk: { text: `w${i}a w${i}b`, speaker, elapsed: i * 6000, similarity: 0.8, audioSha256: createHash('sha256').update(wav).digest('hex') } }
   })
-  const meetingPath = join(dir, '2026-10-02_Board_Prep_with_Jeremy.md')
+  const meetingPath = join(dir, '2026-10-02_Board_Prep_with_Jasper.md')
   const sidecarPath = meetingPath.replace(/\.md$/, '.g2-chunks.json')
   writeFileSync(sidecarPath, JSON.stringify({ chunks: entries.map(e => e.chunk), chunkEntries: entries, batchApplied: false }))
   writeFileSync(meetingPath, `# m\n\n## Transcript\n\n${entries.map(e => `[Ext]: ${e.chunk.text}`).join('\n')}\n`)
@@ -49,14 +49,14 @@ async function publicHealth(): Promise<{ status: number; text: string; body: any
   }
 }
 
-const LEAKS = ['Silas', 'Jeremy', 'Sokolic', 'Board_Prep', tmpdir(), 'qa-health-', 'EACCES', 'permission denied', '.g2-chunks.json']
+const LEAKS = ['Elliot', 'Jasper', 'Quillen', 'Board_Prep', tmpdir(), 'qa-health-', 'EACCES', 'permission denied', '.g2-chunks.json']
 
 it('unauthenticated /api/health after a final pass carries no speaker name, no path and no raw error text', async () => {
   const applied = boardPrepMeeting()
   const outcome = await runNemotronFinalPass({ ...applied, env: { COS_DIARIZER: 'nemotron' }, log: () => {},
     run: async () => activityOf(37, [[0, 0, 18], [1, 18, 36]]) as never })
   expect(outcome.status).toBe('applied')
-  expect(outcome.mapped).toEqual({ 0: 'Silas Larson', 1: 'Jeremy Sokolic' }) // the server log still has it
+  expect(outcome.mapped).toEqual({ 0: 'Elliot Sterling', 1: 'Jasper Quillen' }) // the server log still has it
 
   const first = await publicHealth()
   expect(first.status).toBe(200)

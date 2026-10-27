@@ -44,50 +44,50 @@ describe('unionMs', () => {
 describe('speakerWordMs', () => {
   it('applies the segment offset, because word times are segment-relative', () => {
     const segs: SpeakerWordSegment[] = [
-      { startElapsed: 60_000, speakerWords: [{ start: 0, end: 2, speaker: 'Gina' }] },
+      { startElapsed: 60_000, speakerWords: [{ start: 0, end: 2, speaker: 'Mira' }] },
     ]
     // 2 seconds of voice, regardless of sitting a minute into the meeting.
-    expect(speakerWordMs(segs).get('Gina')).toBe(2000)
+    expect(speakerWordMs(segs).get('Mira')).toBe(2000)
   })
 
   it('counts overlapping words ONCE (the 1.2x-1.5x over-count)', () => {
     const segs: SpeakerWordSegment[] = [{
       startElapsed: 0,
       speakerWords: [
-        { start: 0, end: 6, speaker: 'Gina' },   // a bogus 6s "word"
-        { start: 1, end: 2, speaker: 'Gina' },   // contained
-        { start: 5, end: 8, speaker: 'Gina' },   // overlaps the tail
+        { start: 0, end: 6, speaker: 'Mira' },   // a bogus 6s "word"
+        { start: 1, end: 2, speaker: 'Mira' },   // contained
+        { start: 5, end: 8, speaker: 'Mira' },   // overlaps the tail
       ],
     }]
     // Naive sum = 6 + 1 + 3 = 10s. Union = 8s.
-    expect(speakerWordMs(segs).get('Gina')).toBe(8000)
+    expect(speakerWordMs(segs).get('Mira')).toBe(8000)
   })
 
   it('keeps speakers separate and lets them overlap each other', () => {
     const segs: SpeakerWordSegment[] = [{
       startElapsed: 0,
       speakerWords: [
-        { start: 0, end: 4, speaker: 'Gina' },
-        { start: 2, end: 6, speaker: 'Graham' },
+        { start: 0, end: 4, speaker: 'Mira' },
+        { start: 2, end: 6, speaker: 'Gordon' },
       ],
     }]
     const m = speakerWordMs(segs)
     // Crosstalk is real: both spoke during 2-4s and both are credited.
-    expect(m.get('Gina')).toBe(4000)
-    expect(m.get('Graham')).toBe(4000)
+    expect(m.get('Mira')).toBe(4000)
+    expect(m.get('Gordon')).toBe(4000)
   })
 
   it('discards malformed word times rather than producing negatives', () => {
     const segs: SpeakerWordSegment[] = [{
       startElapsed: 0,
       speakerWords: [
-        { start: 5, end: 3, speaker: 'Gina' },              // backwards
-        { start: 1, end: 1, speaker: 'Gina' },              // zero width
-        { start: undefined, end: 3, speaker: 'Gina' },      // missing
-        { start: 0, end: 2, speaker: 'Gina' },              // the only good one
+        { start: 5, end: 3, speaker: 'Mira' },              // backwards
+        { start: 1, end: 1, speaker: 'Mira' },              // zero width
+        { start: undefined, end: 3, speaker: 'Mira' },      // missing
+        { start: 0, end: 2, speaker: 'Mira' },              // the only good one
       ],
     }]
-    expect(speakerWordMs(segs).get('Gina')).toBe(2000)
+    expect(speakerWordMs(segs).get('Mira')).toBe(2000)
   })
 
   it('is empty when the batch pass never ran', () => {
@@ -122,11 +122,11 @@ function namedChunks(label: string, n: number, similarity = 0.8): ReviewChunk[] 
 
 describe('speaking time on the review', () => {
   it('prefers word timings and says so', () => {
-    const chunks = namedChunks('Gina Torres', 4)
+    const chunks = namedChunks('Mira Tarrant', 4)
     const review = reviewMeetingSpeakers(chunks, {
       owner: 'MU',
       durationMs: 24_000,
-      batchSegments: [{ startElapsed: 0, speakerWords: [{ start: 0, end: 9, speaker: 'Gina Torres' }] }],
+      batchSegments: [{ startElapsed: 0, speakerWords: [{ start: 0, end: 9, speaker: 'Mira Tarrant' }] }],
     })
     expect(review.speakingTimeSource).toBe('words')
     // 9s of voice inside a 24s meeting — the silence is NOT credited.
@@ -136,7 +136,7 @@ describe('speaking time on the review', () => {
   })
 
   it('falls back to capped chunk deltas with no batch segments', () => {
-    const review = reviewMeetingSpeakers(namedChunks('Gina Torres', 4), {
+    const review = reviewMeetingSpeakers(namedChunks('Mira Tarrant', 4), {
       owner: 'MU',
       durationMs: 24_000,
     })
@@ -148,10 +148,10 @@ describe('speaking time on the review', () => {
   // does not show its name, so the header must not count it either.
   it('splits by nameAsserted PER VOICE, so header and rows agree', () => {
     const chunks = [
-      ...namedChunks('Gina Torres', 6),
+      ...namedChunks('Mira Tarrant', 6),
       // 2 segments at 0.58: under both ASSERT_MIN_SEGMENTS and the similarity floor.
-      { speaker: 'Navaz Sharif', text: 'a short weak interjection about pricing', elapsed: 42_000, similarity: 0.58 },
-      { speaker: 'Navaz Sharif', text: 'another short weak one about the migration', elapsed: 48_000, similarity: 0.58 },
+      { speaker: 'Neva Sharpe', text: 'a short weak interjection about pricing', elapsed: 42_000, similarity: 0.58 },
+      { speaker: 'Neva Sharpe', text: 'another short weak one about the migration', elapsed: 48_000, similarity: 0.58 },
     ] as ReviewChunk[]
     const review = reviewMeetingSpeakers(chunks, {
       owner: 'MU',
@@ -159,12 +159,12 @@ describe('speaking time on the review', () => {
       batchSegments: [{
         startElapsed: 0,
         speakerWords: [
-          { start: 0, end: 30, speaker: 'Gina Torres' },
-          { start: 30, end: 40, speaker: 'Navaz Sharif' },
+          { start: 0, end: 30, speaker: 'Mira Tarrant' },
+          { start: 30, end: 40, speaker: 'Neva Sharpe' },
         ],
       }],
     })
-    expect(review.voices.find(v => v.label === 'Navaz Sharif')!.nameAsserted).toBe(false)
+    expect(review.voices.find(v => v.label === 'Neva Sharpe')!.nameAsserted).toBe(false)
     expect(review.attributedSpeakingMs).toBe(30_000)
     expect(review.unattributedSpeakingMs).toBe(10_000)
   })
@@ -184,17 +184,17 @@ describe('speaking time on the review', () => {
   // is what broke the first version of the arithmetic: verified against a real
   // 5.2-minute capture whose per-speaker figures summed to 6.0 minutes.
   it('credits BOTH speakers for crosstalk, and voiced counts it once', () => {
-    const chunks = [...namedChunks('Gina Torres', 3), ...namedChunks('Graham Reid', 3)] as ReviewChunk[]
+    const chunks = [...namedChunks('Mira Tarrant', 3), ...namedChunks('Gordon Reid', 3)] as ReviewChunk[]
     const review = reviewMeetingSpeakers(chunks, {
       owner: 'MU',
       durationMs: 60_000,
       batchSegments: [{ startElapsed: 0, speakerWords: [
-        { start: 0, end: 30, speaker: 'Gina Torres' },
-        { start: 20, end: 40, speaker: 'Graham Reid' },   // 10s of overlap
+        { start: 0, end: 30, speaker: 'Mira Tarrant' },
+        { start: 20, end: 40, speaker: 'Gordon Reid' },   // 10s of overlap
       ] }],
     })
-    expect(review.voices.find(v => v.label === 'Gina Torres')!.speakingMs).toBe(30_000)
-    expect(review.voices.find(v => v.label === 'Graham Reid')!.speakingMs).toBe(20_000)
+    expect(review.voices.find(v => v.label === 'Mira Tarrant')!.speakingMs).toBe(30_000)
+    expect(review.voices.find(v => v.label === 'Gordon Reid')!.speakingMs).toBe(20_000)
     // Per-speaker sums to 50s; the meeting only had 40s of voice.
     expect(review.voicedMs).toBe(40_000)
     expect(review.attributedSpeakingMs).toBe(40_000)
@@ -203,12 +203,12 @@ describe('speaking time on the review', () => {
 
   it('holds THE invariant: voiced + notCaptured = duration', () => {
     const chunks = [
-      ...namedChunks('Gina Torres', 5),
+      ...namedChunks('Mira Tarrant', 5),
       { speaker: 'Ext', text: 'someone unenrolled said a long enough thing here', elapsed: 36_000, similarity: 0 },
     ] as ReviewChunk[]
     for (const batch of [
       [{ startElapsed: 0, speakerWords: [
-        { start: 0, end: 20, speaker: 'Gina Torres' },
+        { start: 0, end: 20, speaker: 'Mira Tarrant' },
         { start: 20, end: 26, speaker: 'Ext' },
       ] }],
       undefined,
@@ -220,10 +220,10 @@ describe('speaking time on the review', () => {
 
   it('never reports negative notCaptured when voice exceeds the stated duration', () => {
     // A short/absent durationMs must not produce a negative residue.
-    const review = reviewMeetingSpeakers(namedChunks('Gina Torres', 3), {
+    const review = reviewMeetingSpeakers(namedChunks('Mira Tarrant', 3), {
       owner: 'MU',
       durationMs: 1000,
-      batchSegments: [{ startElapsed: 0, speakerWords: [{ start: 0, end: 60, speaker: 'Gina Torres' }] }],
+      batchSegments: [{ startElapsed: 0, speakerWords: [{ start: 0, end: 60, speaker: 'Mira Tarrant' }] }],
     })
     expect(review.notCapturedMs).toBe(0)
   })

@@ -316,13 +316,13 @@ describe('search scan budget', () => {
     }
     const needle = join(roots.claudeProjects, '-Users-ukaoma-repo-b', 'ffffffff-9999-8888-7777-000000000001.jsonl')
     writeJsonl(needle, [
-      '{"type":"custom-title","customTitle":"Luke Henry merge"}',
-      '{"type":"user","message":{"role":"user","content":"fold Luke H into Luke Henry"}}',
+      '{"type":"custom-title","customTitle":"Theo Marsh merge"}',
+      '{"type":"user","message":{"role":"user","content":"fold Theo M into Theo Marsh"}}',
     ])
     touch(needle, new Date('2026-08-18T20:00:00Z'))
 
     const docs = await collectAgentSessionSearchDocs(roots, CAP, listingNow)
-    expect(docs.some(doc => doc.title === 'Luke Henry merge')).toBe(true)
+    expect(docs.some(doc => doc.title === 'Theo Marsh merge')).toBe(true)
   })
 
   it('reaches the newest Codex rollout even when it is behind older ones', async () => {
@@ -341,12 +341,12 @@ describe('search scan budget', () => {
     const needle = join(roots.codexSessions, '2026/08/18', `rollout-2026-08-18T20-00-00-${id}.jsonl`)
     writeJsonl(needle, [
       `{"type":"session_meta","payload":{"id":"${id}","cwd":"/repo","timestamp":"2026-08-18T20:00:00.000Z"}}`,
-      '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Luke Henry merge"}]}}',
+      '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Theo Marsh merge"}]}}',
     ])
     touch(needle, new Date('2026-08-18T20:00:00Z'))
 
     const docs = await collectAgentSessionSearchDocs(roots, CAP, listingNow)
-    expect(docs.some(doc => doc.title === 'Luke Henry merge')).toBe(true)
+    expect(docs.some(doc => doc.title === 'Theo Marsh merge')).toBe(true)
   })
 
   /**
@@ -377,7 +377,7 @@ describe('machine-title predicate', () => {
   const MACHINE: Array<[string, string]> = [
     ['claude', 'You are the COS Slack Bridge proxy serving method conversations.list'],
     ['claude', 'You are a post-processing editor for a meeting transcript.'],
-    ['claude', 'Call mcp__claude_ai_Slack__slack_search_users with arguments {"query":"Luke"}'],
+    ['claude', 'Call mcp__claude_ai_Slack__slack_search_users with arguments {"query":"Theo"}'],
     ['codex',  'Reply with the single word READY.'],
     ['claude', 'Reply with the single word READY.'],
     ['claude', 'Reply with exactly OK and nothing else'],
@@ -393,7 +393,7 @@ describe('machine-title predicate', () => {
     ['claude', 'You are the only one who can approve the HubDB push'],
     ['claude', 'Reply with the customer quotes from the Bottle POS deck'],
     ['claude', 'say ok to the Quilt MSA and tell me why'],
-    ['codex',  'Luke Henry merge'],
+    ['codex',  'Theo Marsh merge'],
     ['claude', 'Jewel360 lead gen review'],
     ['claude', 'ready to ship 6.36.11?'],
   ]

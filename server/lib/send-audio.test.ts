@@ -103,7 +103,7 @@ describe('sendAudioFile', () => {
   it('still serves a WAV from a path with no dot component', async () => {
     // The pre-fix behaviour, which is what made the bug look like it did not
     // exist. This must keep working.
-    const dir = join(root, 'plain', 'voice-audio', 'Grace Ukaoma')
+    const dir = join(root, 'plain', 'voice-audio', 'Faith Ukamya')
     mkdirSync(dir, { recursive: true })
     const path = join(dir, 'sample.wav')
     writeFileSync(path, wavBytes())

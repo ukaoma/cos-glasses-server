@@ -29,7 +29,7 @@ function chunks(seq: string[], similarity = 0.8): ReviewChunk[] {
 
 describe('assertedSegments', () => {
   it('counts every segment when all voices clear the floor', () => {
-    const review = reviewMeetingSpeakers(chunks(Array(12).fill('Gina Torres')), { owner: 'MU' })
+    const review = reviewMeetingSpeakers(chunks(Array(12).fill('Mira Tarrant')), { owner: 'MU' })
     expect(review.voices[0].nameAsserted).toBe(true)
     expect(review.assertedSegments).toBe(12)
     expect(review.assertedSegments).toBe(review.segments)
@@ -46,17 +46,17 @@ describe('assertedSegments', () => {
   // through, so a label-based count scores it. The panel does not.
   it('EXCLUDES a named voice that failed the floor', () => {
     // 2 segments at 0.58: under ASSERT_MIN_SEGMENTS (3) and ASSERT_MIN_SIMILARITY (0.65).
-    const seq = [...Array(10).fill('Gina Torres'), 'Navaz Sharif', 'Navaz Sharif']
+    const seq = [...Array(10).fill('Mira Tarrant'), 'Neva Sharpe', 'Neva Sharpe']
     const review = reviewMeetingSpeakers(
       seq.map((s, i) => ({
         speaker: s,
         text: `${s} covered the Jewel360 migration numbers in segment ${i}`,
         elapsed: i * 7000,
-        similarity: s === 'Navaz Sharif' ? 0.58 : 0.8,
+        similarity: s === 'Neva Sharpe' ? 0.58 : 0.8,
       })),
       { owner: 'MU' },
     )
-    const navaz = review.voices.find(v => v.label === 'Navaz Sharif')!
+    const navaz = review.voices.find(v => v.label === 'Neva Sharpe')!
     expect(navaz.nameAsserted).toBe(false)
     expect(navaz.segments).toBe(2)
     // 12 segments, 12 carry a person-shaped label, but only 10 are asserted.
@@ -65,18 +65,18 @@ describe('assertedSegments', () => {
   })
 
   it('counts a voice a human confirmed, even though it failed the floor', () => {
-    const seq = [...Array(10).fill('Gina Torres'), 'Grace Ukaoma', 'Grace Ukaoma']
+    const seq = [...Array(10).fill('Mira Tarrant'), 'Faith Ukamya', 'Faith Ukamya']
     const cs = seq.map((s, i) => ({
       speaker: s,
       text: `${s} covered the Jewel360 migration numbers in segment ${i}`,
       elapsed: i * 7000,
-      similarity: s === 'Grace Ukaoma' ? 0.56 : 0.8,
+      similarity: s === 'Faith Ukamya' ? 0.56 : 0.8,
     }))
     const before = reviewMeetingSpeakers(cs, { owner: 'MU' })
     expect(before.assertedSegments).toBe(10)
 
-    const after = reviewMeetingSpeakers(cs, { owner: 'MU', confirmed: new Set(['Grace Ukaoma']) })
-    expect(after.voices.find(v => v.label === 'Grace Ukaoma')!.nameAsserted).toBe(true)
+    const after = reviewMeetingSpeakers(cs, { owner: 'MU', confirmed: new Set(['Faith Ukamya']) })
+    expect(after.voices.find(v => v.label === 'Faith Ukamya')!.nameAsserted).toBe(true)
     expect(after.assertedSegments).toBe(12)
   })
 
@@ -90,13 +90,13 @@ describe('assertedSegments', () => {
   it('excludes every unattributed label shape', () => {
     // Speaker N and '' are in UNATTRIBUTED; 'Unidentified 3' matches the
     // prefix-aware branch of isUnattributed.
-    const seq = [...Array(6).fill('Gina Torres'), 'Speaker 1', 'Unknown', 'Unidentified 3', 'Ext']
+    const seq = [...Array(6).fill('Mira Tarrant'), 'Speaker 1', 'Unknown', 'Unidentified 3', 'Ext']
     const review = reviewMeetingSpeakers(chunks(seq), { owner: 'MU' })
     expect(review.assertedSegments).toBe(6)
   })
 
   it('never exceeds segments, and matches the sum of asserted voice rows', () => {
-    const seq = [...Array(9).fill('Gina Torres'), 'Ext', 'Ext', 'Speaker 2', '']
+    const seq = [...Array(9).fill('Mira Tarrant'), 'Ext', 'Ext', 'Speaker 2', '']
     const review = reviewMeetingSpeakers(chunks(seq), { owner: 'MU' })
     const fromRows = review.voices
       .filter(v => v.nameAsserted)

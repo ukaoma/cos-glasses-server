@@ -24,26 +24,26 @@ const { searchAskHistory } = await import('./live-cos-ask.js')
 afterAll(() => rmSync(fixture.scripts, { recursive: true, force: true }))
 beforeEach(() => { fixture.memory = '[]'; fixture.meetings = '[]' })
 const signal = () => new AbortController().signal
-const NOTE = { id: 'mem_delgado', content: 'Delgado is the pool contractor. He quoted 18500 for the resurfacing and wants a deposit by Friday.', created_at: '2026-10-10T12:00:00+00:00' }
+const NOTE = { id: 'mem_delmar', content: 'Delmar is the pool contractor. He quoted 18500 for the resurfacing and wants a deposit by Friday.', created_at: '2026-10-10T12:00:00+00:00' }
 const OTHER = { id: 'mem_swim', content: 'Talia has swim practice on Tuesdays.', created_at: '2026-10-11T12:00:00+00:00' }
 const LISTED = 'COS also searched the notes in its memory list by keyword.'
 
 describe('Ask COS search: the memory bridge fallback', () => {
   it('a memory search that answers is used exactly as before and the listing is never read', async () => {
-    fixture.memory = JSON.stringify([{ id: 'mem_1', summary: 'Delgado quote', content: 'Delgado quoted the pool', score: 0.9 }])
+    fixture.memory = JSON.stringify([{ id: 'mem_1', summary: 'Delmar quote', content: 'Delmar quoted the pool', score: 0.9 }])
     const bridge = vi.fn(async () => [NOTE])
-    const r = await searchAskHistory('Delgado', undefined, signal(), 'meaning', undefined, bridge)
+    const r = await searchAskHistory('Delmar', undefined, signal(), 'meaning', undefined, bridge)
     expect(bridge).not.toHaveBeenCalled()
-    expect(JSON.stringify(r.sources)).toBe(JSON.stringify([{ id: 'H1', kind: 'memory', title: 'Delgado quote', text: 'Delgado quoted the pool', memoryId: 'mem_1' }]))   // 6.76.1 bytes, key order included
+    expect(JSON.stringify(r.sources)).toBe(JSON.stringify([{ id: 'H1', kind: 'memory', title: 'Delmar quote', text: 'Delmar quoted the pool', memoryId: 'mem_1' }]))   // 6.76.1 bytes, key order included
     expect(r.notices).toEqual([])
   })
   it('memory search that fails (the public runtime: no bot_memory.py search) reads the listing and cites the matching note', async () => {
     fixture.memory = new Error('memory_parse_error')
     const bridge = vi.fn(async () => [OTHER, NOTE])
-    const r = await searchAskHistory('Delgado', 'meeting_live', signal(), 'meaning', undefined, bridge)
+    const r = await searchAskHistory('Delmar', 'meeting_live', signal(), 'meaning', undefined, bridge)
     expect(bridge).toHaveBeenCalledTimes(1)
-    expect(r.sources).toEqual([{ id: 'H1', kind: 'memory', title: 'Delgado is the pool contractor. He quoted 18500 for the resurfacing and wants a deposit by Friday. · 2026-10-10',
-      text: NOTE.content, memoryId: 'mem_delgado' }])
+    expect(r.sources).toEqual([{ id: 'H1', kind: 'memory', title: 'Delmar is the pool contractor. He quoted 18500 for the resurfacing and wants a deposit by Friday. · 2026-10-10',
+      text: NOTE.content, memoryId: 'mem_delmar' }])
     expect(r.notices).toContain(LISTED)
     expect(r.notices).not.toContain('No relevant COS history was found.')
   })
@@ -52,20 +52,20 @@ describe('Ask COS search: the memory bridge fallback', () => {
     const { tmpdir } = await import('node:os')
     const context = mkdtempSync(join(tmpdir(), 'ask-fallback-context-'))
     mkdirSync(join(context, 'memory'))
-    writeFileSync(join(context, 'memory', 'delgado.md'), '# Delgado visit\n\nDelgado measured the pool on Monday.\n')
+    writeFileSync(join(context, 'memory', 'delmar.md'), '# Delmar visit\n\nDelmar measured the pool on Monday.\n')
     const prior = process.env.COS_CONTEXT_DIR
     process.env.COS_CONTEXT_DIR = context
     try {
       fixture.memory = new Error('memory_parse_error')
       const bridge = vi.fn(async () => [NOTE])
-      const r = await searchAskHistory('Delgado', undefined, signal(), 'meaning', undefined, bridge)
+      const r = await searchAskHistory('Delmar', undefined, signal(), 'meaning', undefined, bridge)
       expect(bridge).toHaveBeenCalledTimes(1)
-      expect(r.sources.map(s => s.title)).toEqual(['Delgado visit', expect.stringContaining('Delgado is the pool contractor')])
+      expect(r.sources.map(s => s.title)).toEqual(['Delmar visit', expect.stringContaining('Delmar is the pool contractor')])
       fixture.memory = '[]'
       bridge.mockClear()
-      const keywordOnly = await searchAskHistory('Delgado', undefined, signal(), 'keyword', undefined, bridge)  // keyword mode answered: no listing
+      const keywordOnly = await searchAskHistory('Delmar', undefined, signal(), 'keyword', undefined, bridge)  // keyword mode answered: no listing
       expect(bridge).not.toHaveBeenCalled()
-      expect(keywordOnly.sources.map(s => s.title)).toEqual(['Delgado visit'])
+      expect(keywordOnly.sources.map(s => s.title)).toEqual(['Delmar visit'])
     } finally {
       if (prior === undefined) delete process.env.COS_CONTEXT_DIR; else process.env.COS_CONTEXT_DIR = prior
       rmSync(context, { recursive: true, force: true })
@@ -74,38 +74,38 @@ describe('Ask COS search: the memory bridge fallback', () => {
   it('memory search that answers with nothing reads the listing too, in keyword mode as well', async () => {
     const bridge = vi.fn(async () => [NOTE])
     for (const mode of ['meaning', 'keyword'] as const) {
-      const r = await searchAskHistory('Delgado', undefined, signal(), mode, undefined, bridge)
-      expect(r.sources.map(s => s.memoryId), mode).toEqual(['mem_delgado'])
+      const r = await searchAskHistory('Delmar', undefined, signal(), mode, undefined, bridge)
+      expect(r.sources.map(s => s.memoryId), mode).toEqual(['mem_delmar'])
     }
     expect(bridge).toHaveBeenCalledTimes(2)
   })
   it('nothing in either: the existing empty wording, word for word, and no listing notice', async () => {
     const bridge = vi.fn(async () => [OTHER])
-    const r = await searchAskHistory('Delgado', undefined, signal(), 'meaning', undefined, bridge)
+    const r = await searchAskHistory('Delmar', undefined, signal(), 'meaning', undefined, bridge)
     expect(bridge).toHaveBeenCalledTimes(1)
     expect(r).toEqual({ sources: [], notices: ['No relevant COS history was found.'] })
-    const failing = await searchAskHistory('Delgado', undefined, signal(), 'meaning', undefined, async () => { throw new Error('bridge down') })
+    const failing = await searchAskHistory('Delmar', undefined, signal(), 'meaning', undefined, async () => { throw new Error('bridge down') })
     expect(failing).toEqual({ sources: [], notices: ['No relevant COS history was found.'] })
   })
   it('a listed note must match as well as any COS hit (0.35), and keeps to a confirmed domain', async () => {
-    const half = { id: 'mem_half', content: 'Delgado called.' }                       // shares one of two query words: 0.325
-    const both = { id: 'mem_both', content: 'Delgado wants the deposit.', domain: 'personal' }
-    const r = await searchAskHistory('Delgado deposit', undefined, signal(), 'meaning', undefined, async () => [half, both])
+    const half = { id: 'mem_half', content: 'Delmar called.' }                       // shares one of two query words: 0.325
+    const both = { id: 'mem_both', content: 'Delmar wants the deposit.', domain: 'personal' }
+    const r = await searchAskHistory('Delmar deposit', undefined, signal(), 'meaning', undefined, async () => [half, both])
     expect(r.sources.map(s => s.memoryId)).toEqual(['mem_both'])
-    expect((await searchAskHistory('Delgado deposit', undefined, signal(), 'meaning', 'quilt', async () => [half, both])).sources).toEqual([])
-    expect((await searchAskHistory('Delgado deposit', undefined, signal(), 'meaning', 'personal', async () => [half, both])).sources.map(s => s.memoryId)).toEqual(['mem_both'])
+    expect((await searchAskHistory('Delmar deposit', undefined, signal(), 'meaning', 'quilt', async () => [half, both])).sources).toEqual([])
+    expect((await searchAskHistory('Delmar deposit', undefined, signal(), 'meaning', 'personal', async () => [half, both])).sources.map(s => s.memoryId)).toEqual(['mem_both'])
   })
   it('at most three memory sources, fused with any memory hits by rank', async () => {
     fixture.memory = new Error('memory_parse_error')
-    const rows = Array.from({ length: 5 }, (_, i) => ({ id: `mem_${i}`, content: `Delgado note ${i}` }))
-    const r = await searchAskHistory('Delgado', undefined, signal(), 'meaning', undefined, async () => rows)
+    const rows = Array.from({ length: 5 }, (_, i) => ({ id: `mem_${i}`, content: `Delmar note ${i}` }))
+    const r = await searchAskHistory('Delmar', undefined, signal(), 'meaning', undefined, async () => rows)
     expect(r.sources.map(s => s.id)).toEqual(['H1', 'H2', 'H3'])
     expect(r.sources.map(s => s.memoryId)).toEqual(['mem_0', 'mem_1', 'mem_2'])
   })
   it('an aborted search never reads the listing', async () => {
     const ac = new AbortController(); ac.abort()
     const bridge = vi.fn(async () => [NOTE])
-    await searchAskHistory('Delgado', undefined, ac.signal, 'keyword', undefined, bridge)
+    await searchAskHistory('Delmar', undefined, ac.signal, 'keyword', undefined, bridge)
     expect(bridge).not.toHaveBeenCalled()
   })
 })

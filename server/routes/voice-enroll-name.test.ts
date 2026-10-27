@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { voiceRouter } from './voice.js'
 
 // Guards POST /api/voice/enroll against the reported first-time-user failure
-// (Chelsie Hodgkiss, 2026-08-25): an old client can still send a whole spoken
+// (Cassie Holloway, 2026-08-25): an old client can still send a whole spoken
 // sentence as ?name=, and a junk profile can never match owner_speaker_label,
 // so /api/voice/status would report enrolled:false forever.
 
@@ -62,7 +62,7 @@ describe('POST /api/voice/enroll name validation', () => {
     const base = await harness()
     // Deliberately under the audio floor: reaching the DIFFERENT error proves
     // the name was accepted and execution continued.
-    const { status, json } = await enroll(base, 'Chelsie Hodgkiss', Buffer.alloc(10))
+    const { status, json } = await enroll(base, 'Cassie Holloway', Buffer.alloc(10))
     expect(status).toBe(400)
     expect(json.reason).toBeUndefined()
     expect(String(json.error)).toContain('Audio too short')

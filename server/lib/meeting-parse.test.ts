@@ -25,12 +25,12 @@ const RECORD = [
   '',
   '## Action Items',
   '',
-  '- Send the brief (**Gina**)',
+  '- Send the brief (**Mira**)',
   '',
   '## Attendees',
   '',
   '- Miles',
-  '- Gina',
+  '- Mira',
   '',
   '## Transcript',
   '',
@@ -53,8 +53,8 @@ describe('fields', () => {
     expect(detail.source).toBe('Fireflies')
     expect(detail.durationMinutes).toBe(47)
     expect(detail.summary).toBe('We agreed the launch date.')
-    expect(detail.actionItems).toEqual([{ task: 'Send the brief', owner: 'Gina' }])
-    expect(detail.attendees).toEqual(['Miles', 'Gina'])
+    expect(detail.actionItems).toEqual([{ task: 'Send the brief', owner: 'Mira' }])
+    expect(detail.attendees).toEqual(['Miles', 'Mira'])
     expect(detail.transcript).toBe('[00:01:05] Miles: Lets start.')
   })
 

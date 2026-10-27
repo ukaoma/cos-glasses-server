@@ -12,7 +12,7 @@ function open(dir = root(), now = () => new Date('2026-09-28T15:00:00Z')): WorkI
 const meeting = { domain: 'quilt', month: '2026-09', filename: '2026-09-24_Bottle_QA.md', recordId: 'ops:quilt:2026-09:2026-09-24_Bottle_QA.md', title: 'Bottle QA' }
 const id = (n: number) => 'wi_' + n.toString(16).padStart(32, '0')
 const ask = (n = 1, extra: Record<string, unknown> = {}) => ({ id: id(n), kind: 'ask', status: 'ask', meeting, confidence: 0.9, model: 'jev-1.13.0',
-  text: 'Fix the H1 (Ryan Hopkins)', owner: 'Ryan Hopkins', ownerIsMiles: false, pull: null, ...extra })
+  text: 'Fix the H1 (Reid Hollis)', owner: 'Reid Hollis', ownerIsMiles: false, pull: null, ...extra })
 const link = (n = 2, extra: Record<string, unknown> = {}) => ({ id: id(n), kind: 'link', status: 'suggested', meeting, confidence: 0.7, model: 'jev-1.13.0',
   task: { domain: 'quilt', id: 'a'.repeat(12), workIdentity: 'b'.repeat(12), text: 'Monitor launch' }, relation: 'advanced', ...extra })
 

@@ -53,9 +53,9 @@ const OBSERVED_ALLOWED: Array<[name: string, question: string, query: string, pr
     ['6.69.0 allowed case still allowed', 'Search web for Apple documentation', 'Apple documentation', [], 'Apple documentation'],
 ];
 const WITHHELD: Array<[name: string, question: string, query: string, prior: string[], reason: WebGateReason]> = [
-    ['transcript-only name in query', 'Who are these people?', 'Joseph Wharton Charles Elliot', [], 'not_user_words'],
+    ['transcript-only name in query', 'Who are these people?', 'Joseph Whitlock Charles Elliot', [], 'not_user_words'],
     ['screenshot OCR-only words in query', 'Who is alt coin daily?', 'Altcoin Daily MASSIVE WARNING', [], 'not_user_words'],
-    ['follow-up never lends transcript names', 'Run the web search', 'Joseph Wharton', ['Who are these people?', 'Who is alt coin daily?'], 'not_user_words'],
+    ['follow-up never lends transcript names', 'Run the web search', 'Joseph Whitlock', ['Who are these people?', 'Who is alt coin daily?'], 'not_user_words'],
     ['follow-up reads only the last three questions', 'Run the web search', 'Acme', ['Who is Acme?', 'Who are they?', 'Who is that?', 'And them?'], 'not_user_words'],
     ['a question that names something does not borrow', 'Who is Shopify?', 'Altcoin Daily', ['Who is alt coin daily?'], 'not_user_words'],
     ['6.69.0 meeting question still withheld', 'What did we decide?', 'Apple documentation', [], 'not_user_words'],

@@ -8,13 +8,13 @@
 // It also carries the diagnostic that actually catches a broken profile.
 // Similarity between profile centroids does NOT distinguish "two people who
 // sound alike" from "one voice split across two labels" — measured on the live
-// store, Chris Krubeck and Luke Henry sat at 0.85 while genuinely being
+// store, Alex Kellar and Theo Marsh sat at 0.85 while genuinely being
 // separate rows. What discriminates is RUN LENGTH within a single meeting:
 //
-//   MU + Chris Krubeck (known two people) : flip rate 0.069, mean run 30.0
-//   Luke H + Luke Henry                   : flip rate 0.361, mean run 2.79
-//   Chris Krubeck + Luke Henry            : flip rate 0.381, mean run 3.47
-//   Scott Taylor + Dylan Jackson          : flip rate 0.344, mean run 2.80
+//   MU + Alex Kellar (known two people) : flip rate 0.069, mean run 30.0
+//   Theo M + Theo Marsh                   : flip rate 0.361, mean run 2.79
+//   Alex Kellar + Theo Marsh            : flip rate 0.381, mean run 3.47
+//   Scott Taylor + Dalton Jaynes          : flip rate 0.344, mean run 2.80
 //
 // Real conversation holds the floor for ~30 consecutive segments. A pair that
 // swaps every ~3 is the identifier oscillating mid-turn, which means those two
@@ -84,8 +84,8 @@ export const CONFIDENT_SIMILARITY = 0.65
  * The identifier accepts a match at SEARCH_THRESHOLD = 0.55, so a single segment
  * scoring 0.55 currently arrives in the panel wearing somebody's full name. On
  * the user's 2026-08-06 Ditto meeting that produced Riley Example (1 segment,
- * 0.60), Luke Henry (1 segment, 0.55), Dylan Jackson (2 segments, 0.58) and
- * Jamie Sharif (3 segments, 0.58) — and he confirmed none of them were in the
+ * 0.60), Theo Marsh (1 segment, 0.55), Dalton Jaynes (2 segments, 0.58) and
+ * Jamie Sharpe (3 segments, 0.58) — and he confirmed none of them were in the
  * room. Presenting those as names is the defect; the reviewer then has to undo
  * an assertion the system should never have made.
  *
@@ -374,7 +374,7 @@ const FILLER = /^(?:yeah|yep|okay|ok|right|sure|mm+|uh+|um+|hmm+|got it|exactly|
  *
  * Length matters (a longer line carries more voice), but so does specificity:
  * a proper noun, a number, or a domain term is what makes someone say "that's
- * Graham." A long line of pleasantries scores lower than a short line naming a
+ * Gordon." A long line of pleasantries scores lower than a short line naming a
  * brand and a figure.
  */
 export function phraseScore(text: string): number {

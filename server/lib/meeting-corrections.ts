@@ -4,7 +4,7 @@
 // chunk sidecar, the attendee list, the transcript turn labels. If that is all
 // that happens, three things become impossible:
 //
-//   1. UNDO. Once "Luke H" has become "Luke Henry" in the sidecar, nothing
+//   1. UNDO. Once "Theo M" has become "Theo Marsh" in the sidecar, nothing
 //      remembers it was ever anything else. A mistaken correction is permanent.
 //   2. CRASH RECOVERY. A rewrite touches several files. Die between them and the
 //      meeting is half-corrected with no trace of what was intended.
@@ -18,7 +18,7 @@
 //
 // WHAT IS DELIBERATELY NOT CORRECTED. The meeting markdown's Summary, Topics,
 // Decisions and Action Items are LLM prose that refers to people by BARE FIRST
-// NAME ("Jeremy pushed back", "Chris raised Beamer sentiment"). Verified on a
+// NAME ("Jasper pushed back", "Chris raised Beamer sentiment"). Verified on a
 // real scribe: 6 of 12 speakers appear that way. This org has two Alexes, two
 // Jordans and two Chrises, so a find/replace on a first name in narrative text
 // would silently rewrite a sentence about a different person. Prose is left
@@ -255,8 +255,8 @@ export function appliedCorrections(sessionId: string): CorrectionRow[] {
 /**
  * Follow a chain of applied corrections to the label a voice now carries.
  *
- * Chains happen: a voice labelled 'Ext' is corrected to 'Luke H', then later to
- * 'Luke Henry'. Asking "what is Ext now?" must answer 'Luke Henry', not stop at
+ * Chains happen: a voice labelled 'Ext' is corrected to 'Theo M', then later to
+ * 'Theo Marsh'. Asking "what is Ext now?" must answer 'Theo Marsh', not stop at
  * the first hop. Cycles are possible if a human corrects A→B then B→A, so the
  * walk is bounded by the number of corrections and returns the last label
  * reached rather than looping.

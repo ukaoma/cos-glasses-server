@@ -3,8 +3,8 @@
 // The fixtures encode the measurements taken off the live store on 2026-08-05,
 // so the thresholds are calibrated against real behaviour rather than guessed:
 //
-//   MU + Chris Krubeck (known two people) : flip 0.069, mean run 30.0
-//   Luke H + Luke Henry                   : flip 0.361, mean run 2.79
+//   MU + Alex Kellar (known two people) : flip 0.069, mean run 30.0
+//   Theo M + Theo Marsh                   : flip 0.361, mean run 2.79
 //
 // A change that lets the control pair read as "unreliable" is a false positive
 // on the most common case in the store, and a change that lets the thrashing
@@ -104,15 +104,15 @@ describe('run lengths', () => {
 
 describe('the pair flip rate separates conversation from label thrash', () => {
   it('reads a real two-person conversation as low-flip, long-run', () => {
-    // The MU + Chris Krubeck control: ~30-segment runs.
-    const p = pairFlipRate(turnTaking('MU', 'Chris Krubeck', 8, 30), 'MU', 'Chris Krubeck')!
+    // The MU + Alex Kellar control: ~30-segment runs.
+    const p = pairFlipRate(turnTaking('MU', 'Alex Kellar', 8, 30), 'MU', 'Alex Kellar')!
     expect(p.flipRate).toBeLessThan(THRASH_FLIP_RATE)
     expect(p.meanRun).toBeGreaterThan(THRASH_MEAN_RUN)
   })
 
   it('reads a split identity as high-flip, short-run', () => {
-    // Luke H + Luke Henry: ~3-segment runs.
-    const p = pairFlipRate(turnTaking('Luke H', 'Luke Henry', 24, 3), 'Luke H', 'Luke Henry')!
+    // Theo M + Theo Marsh: ~3-segment runs.
+    const p = pairFlipRate(turnTaking('Theo M', 'Theo Marsh', 24, 3), 'Theo M', 'Theo Marsh')!
     expect(p.flipRate).toBeGreaterThan(THRASH_FLIP_RATE)
     expect(p.meanRun).toBeLessThan(THRASH_MEAN_RUN)
   })
@@ -163,7 +163,7 @@ describe('phrase selection spreads across the meeting', () => {
       { speaker: 'A', elapsed: 10_000, text: 'Jewel360 pipeline is the thing I keep coming back to here' },
       { speaker: 'A', elapsed: 14_000, text: 'Jewel360 pipeline is the thing I keep coming back to again' },
       { speaker: 'A', elapsed: 18_000, text: 'Jewel360 pipeline is the thing I keep coming back to once more' },
-      { speaker: 'A', elapsed: 600_000, text: 'Bottle POS surcharging needs a decision before the Graham review' },
+      { speaker: 'A', elapsed: 600_000, text: 'Bottle POS surcharging needs a decision before the Gordon review' },
       { speaker: 'A', elapsed: 1_180_000, text: 'MarktPOS demos converted at 36 percent across eight quarters' },
     ]
     const picked = selectPhrases(cs, 'A', 3, 1_200_000)
@@ -176,7 +176,7 @@ describe('phrase selection spreads across the meeting', () => {
 
   it('still returns something on a short burst where the gap rule excludes everything', () => {
     const cs: ReviewChunk[] = Array.from({ length: 4 }, (_, i) => ({
-      speaker: 'A', elapsed: i * 1000, text: `Bottle POS surcharging conversion review number ${i} with Graham`,
+      speaker: 'A', elapsed: i * 1000, text: `Bottle POS surcharging conversion review number ${i} with Gordon`,
     }))
     expect(selectPhrases(cs, 'A', 3, 4000).length).toBeGreaterThan(0)
   })
@@ -327,7 +327,7 @@ describe('the meeting\'s true end', () => {
 
 describe('the whole review', () => {
   it('marks a genuine two-person meeting confident, with no thrash', () => {
-    const review = reviewMeetingSpeakers(chunks(turnTaking('MU', 'Chris Krubeck', 8, 30)), { owner: 'MU' })
+    const review = reviewMeetingSpeakers(chunks(turnTaking('MU', 'Alex Kellar', 8, 30)), { owner: 'MU' })
     expect(review.attributed).toBe(true)
     expect(review.voices).toHaveLength(2)
     for (const v of review.voices) {
@@ -339,19 +339,19 @@ describe('the whole review', () => {
   })
 
   it('marks BOTH halves of a split identity unreliable and names the partner', () => {
-    const review = reviewMeetingSpeakers(chunks(turnTaking('Luke H', 'Luke Henry', 24, 3)), { owner: 'MU' })
+    const review = reviewMeetingSpeakers(chunks(turnTaking('Theo M', 'Theo Marsh', 24, 3)), { owner: 'MU' })
     for (const v of review.voices) {
       expect(v.reliability).toBe('unreliable')
       expect(v.thrashesWith.map(t => t.speaker)).toEqual([
-        v.label === 'Luke H' ? 'Luke Henry' : 'Luke H',
+        v.label === 'Theo M' ? 'Theo Marsh' : 'Theo M',
       ])
       expect(v.thrashesWith[0].meanRun).toBeLessThan(THRASH_MEAN_RUN)
     }
   })
 
   it('unreliable OUTRANKS a high similarity score', () => {
-    // The Krubeck case exactly: confident-looking numbers, unusable attribution.
-    const cs = chunks(turnTaking('Luke H', 'Luke Henry', 24, 3)).map(c => ({ ...c, similarity: 0.95 }))
+    // The Kellar case exactly: confident-looking numbers, unusable attribution.
+    const cs = chunks(turnTaking('Theo M', 'Theo Marsh', 24, 3)).map(c => ({ ...c, similarity: 0.95 }))
     const review = reviewMeetingSpeakers(cs, { owner: 'MU' })
     expect(review.voices[0].meanSimilarity).toBeGreaterThan(CONFIDENT_SIMILARITY)
     expect(review.voices[0].reliability).toBe('unreliable')
@@ -425,21 +425,21 @@ describe('a name must be EARNED before it is presented as a name', () => {
     return review.voices.find(v => v.label === label)!
   }
 
-  it('refuses a 1-segment match at 0.60 — Richard Jenkins in the real meeting', () => {
-    const v = voiceOf('Richard Jenkins', 1, 0.60)
+  it('refuses a 1-segment match at 0.60 — Rowan Jennings in the real meeting', () => {
+    const v = voiceOf('Rowan Jennings', 1, 0.60)
     expect(v.nameAsserted).toBe(false)
     expect(v.assertionBlockers.join(' ')).toContain('1 segment')
     expect(v.assertionBlockers.join(' ')).toContain('0.60')
   })
 
-  it('refuses a 1-segment match at 0.55 — Luke Henry, the split-identity label', () => {
-    expect(voiceOf('Luke Henry', 1, 0.55).nameAsserted).toBe(false)
+  it('refuses a 1-segment match at 0.55 — Theo Marsh, the split-identity label', () => {
+    expect(voiceOf('Theo Marsh', 1, 0.55).nameAsserted).toBe(false)
   })
 
-  it('refuses a 3-segment match at 0.58 — Navaz Sharif, over the segment floor but under similarity', () => {
+  it('refuses a 3-segment match at 0.58 — Neva Sharpe, over the segment floor but under similarity', () => {
     // Segment count alone is not enough: this row CLEARS the segment floor and
     // must still be refused on similarity.
-    const v = voiceOf('Navaz Sharif', ASSERT_MIN_SEGMENTS, 0.58)
+    const v = voiceOf('Neva Sharpe', ASSERT_MIN_SEGMENTS, 0.58)
     expect(v.segments).toBe(ASSERT_MIN_SEGMENTS)
     expect(v.nameAsserted).toBe(false)
     expect(v.assertionBlockers.some(b => b.includes('similarity'))).toBe(true)
@@ -448,7 +448,7 @@ describe('a name must be EARNED before it is presented as a name', () => {
 
   it('refuses a high-similarity match that is only 2 segments long', () => {
     // The inverse: strong score, not enough evidence.
-    const v = voiceOf('Ryan Hopkins', 2, 0.91)
+    const v = voiceOf('Reid Hollis', 2, 0.91)
     expect(v.nameAsserted).toBe(false)
     expect(v.assertionBlockers.some(b => b.includes('segment'))).toBe(true)
     expect(v.assertionBlockers.some(b => b.includes('similarity'))).toBe(false)
@@ -463,7 +463,7 @@ describe('a name must be EARNED before it is presented as a name', () => {
   it('refuses a name that thrashes, however strong its score', () => {
     // Already surfaced as `unreliable`; the panel says a name here is a guess,
     // so it must not also be presented AS a name.
-    const seq = turnTaking('Luke H', 'Luke Henry', 60, 2)
+    const seq = turnTaking('Theo M', 'Theo Marsh', 60, 2)
     const review = reviewMeetingSpeakers(chunks(seq), { owner: 'MU' })
     for (const v of review.voices) {
       expect(v.reliability).toBe('unreliable')
@@ -521,8 +521,8 @@ describe('a name must be EARNED before it is presented as a name', () => {
   it('keeps the label available as a candidate rather than discarding it', () => {
     // The reviewer still needs to see WHO the system guessed — that is often the
     // clue that identifies the voice. The floor governs presentation, not data.
-    const v = voiceOf('Navaz Sharif', 1, 0.58)
-    expect(v.label).toBe('Navaz Sharif')
+    const v = voiceOf('Neva Sharpe', 1, 0.58)
+    expect(v.label).toBe('Neva Sharpe')
     expect(v.meanSimilarity).toBeCloseTo(0.58, 2)
   })
 
@@ -594,7 +594,7 @@ describe('the timeline that makes a ribbon a timeline', () => {
   })
 
   it('is returned by the full review, with segments summing to the chunk count', () => {
-    const review = reviewMeetingSpeakers(chunks(turnTaking('MU', 'Chris Krubeck', 8, 30)), { owner: 'MU' })
+    const review = reviewMeetingSpeakers(chunks(turnTaking('MU', 'Alex Kellar', 8, 30)), { owner: 'MU' })
     expect(review.timeline.length).toBe(8)
     expect(review.timeline.reduce((n, s) => n + s.segments, 0)).toBe(review.segments)
   })

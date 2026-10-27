@@ -6,7 +6,7 @@ import { buildCleanupPrompt, parseCleanupReply, validateCleanupEdits } from './t
 import { applyPlannedEdits } from './transcript-cleanup-ledger.js'
 
 function pack(over: Partial<Parameters<typeof buildContextPack>[0]> = {}): ContextPack {
-  return buildContextPack({ title: 'Sync', date: '2026-10-17', attendees: [], speakers: ['Grace Ukaoma', 'Graham Smith'], owner: null, vocabulary: ['Jewel360', 'Bottle POS'], corrections: {}, files: [], screen: [], ...over })
+  return buildContextPack({ title: 'Sync', date: '2026-10-17', attendees: [], speakers: ['Faith Ukamya', 'Gordon Smith'], owner: null, vocabulary: ['Jewel360', 'Bottle POS'], corrections: {}, files: [], screen: [], ...over })
 }
 
 function setup(section: string, probability?: (t: Token) => number | undefined, p: ContextPack = pack()) {
@@ -37,18 +37,18 @@ describe('span selection (no model)', () => {
     expect(texts(setup('[MU]: we um went. Uh. yesterday', t => (t.key === 'um' || t.key === 'uh' ? 0.1 : t.key === 'we' || t.key === 'went' ? 0.2 : 0.99)))).toEqual(['we um went'])
   })
 
-  it('near names: Yukoma, eucoma and the split "U coma"; common words never', () => {
-    const s = setup('[MU]: Yukoma and eucoma, then U coma, and a comma, right?')
+  it('near names: Yukmya, eucmya and the split "U cmya"; common words never', () => {
+    const s = setup('[MU]: Yukmya and eucmya, then U cmya, and a comma, right?')
     // One word apart merges; a comma ends the passage.
-    expect(texts(s)).toEqual(['Yukoma and eucoma', 'U coma'])
-    expect(s.sel.spans.every(x => x.reasons.includes('near_name') && x.near.includes('Ukaoma'))).toBe(true)
-    expect(skeleton('Ukaoma')).toBe('km')
-    expect(soundsAlike('comma', 'Ukaoma')).toBe(false)
-    expect(soundsAlike('eucoma', 'Ukaoma')).toBe(true)
+    expect(texts(s)).toEqual(['Yukmya and eucmya', 'U cmya'])
+    expect(s.sel.spans.every(x => x.reasons.includes('near_name') && x.near.includes('Ukamya'))).toBe(true)
+    expect(skeleton('Ukamya')).toBe('km')
+    expect(soundsAlike('comma', 'Ukamya')).toBe(false)
+    expect(soundsAlike('eucmya', 'Ukamya')).toBe(true)
   })
 
   it('an out-of-vocabulary capital beside a known name is doubtful; at a sentence start it is not', () => {
-    const s = setup('[MU]: I saw Grace Zebulona there. Zebulona left, and Graham Fennimore stayed.')
+    const s = setup('[MU]: I saw Faith Zebulona there. Zebulona left, and Gordon Fennimore stayed.')
     expect(texts(s)).toEqual(['Zebulona', 'Fennimore'])
     expect(s.sel.spans[0].reasons).toEqual(['oov_capitalized'])
   })
@@ -70,17 +70,17 @@ describe('span selection (no model)', () => {
   })
 
   it('the cap keeps names first, then the least confident, and ids follow transcript order', () => {
-    const lines = parseTranscriptLines('[MU]: alpha x x bravo x x Yukoma x x charlie')
+    const lines = parseTranscriptLines('[MU]: alpha x x bravo x x Yukmya x x charlie')
     const tokens = tokenize(lines)
     const p = { alpha: 0.3, bravo: 0.1, charlie: 0.44 } as Record<string, number>
     for (const t of tokens) t.probability = p[t.key] ?? 0.99
     const sel = selectSpans(lines, tokens, nameTargets(pack()), knownKeys(pack()), { maxSpans: 2 })
     expect(sel.found).toBe(4)
-    expect(sel.spans.map(s => [s.id, s.text])).toEqual([['S1', 'bravo'], ['S2', 'Yukoma']])
+    expect(sel.spans.map(s => [s.id, s.text])).toEqual([['S1', 'bravo'], ['S2', 'Yukmya']])
   })
 
   it('a word the engine was sure of is not near a name; the same word unsure is', () => {
-    const p = pack({ speakers: ['Nate Diaz'] })
+    const p = pack({ speakers: ['Nate Dunn'] })
     expect(texts(setup('[MU]: the Rates went up', () => 0.99, p))).toEqual([])
     const unsure = setup('[MU]: the Rates went up', t => (t.key === 'rates' ? 0.6 : 0.99), p)
     expect(unsure.sel.spans.map(x => [x.text, x.reasons, x.near])).toEqual([['Rates', ['near_name'], ['Nate']]])
@@ -93,7 +93,7 @@ describe('span selection (no model)', () => {
   })
 
   it('joined pieces: an exact join is a split name; function words and long pieces never join', () => {
-    expect(texts(setup('[MU]: I saw Uka oma today'))).toEqual(['Uka oma'])
+    expect(texts(setup('[MU]: I saw Uka mya today'))).toEqual(['Uka mya'])
     expect(texts(setup('[MU]: we went to the on ramp', undefined, pack({ speakers: ['Theon Ruiz'] })))).toEqual([])
     const long = setup('[MU]: then Amberly x said', t => (t.key === 'amberly' || t.key === 'x' ? 0.5 : 0.99), pack({ speakers: ['Amberlyx Stone'] }))
     expect(texts(long)).toEqual(['Amberly'])
@@ -103,22 +103,22 @@ describe('span selection (no model)', () => {
   it('two repetitions are speech, not a loop; a capital that opens a sentence is not out of vocabulary', () => {
     const lines = parseTranscriptLines('[MU]: we went we went home')
     expect(repeatRuns(tokenize(lines))).toEqual([])
-    expect(texts(setup('[MU]: I saw them there. Ozmanda and Grace left.'))).toEqual([])
+    expect(texts(setup('[MU]: I saw them there. Ozmanda and Faith left.'))).toEqual([])
   })
 
   it('a known exact spelling is never doubtful', () => {
-    expect(texts(setup('[MU]: Grace Ukaoma uses Jewel360 and Bottle POS.'))).toEqual([])
+    expect(texts(setup('[MU]: Faith Ukamya uses Jewel360 and Bottle POS.'))).toEqual([])
   })
 
   it('aligns batch words to tokens greedily, and an unmatched token stays unscored', () => {
-    const lines = parseTranscriptLines('[MU]: Hello, Grace Ukaoma.\n[Ext]: Hi there')
+    const lines = parseTranscriptLines('[MU]: Hello, Faith Ukamya.\n[Ext]: Hi there')
     const tokens = tokenize(lines)
     const words = wordInfoFromSidecar({ startTime: 1_000_000, batchSegments: [{ startElapsed: 2_000, stt: { engine: 'parakeet-ultra' }, words: [
-      { word: 'Hello,', start: 0, probability: 0.9 }, { word: 'Grace', start: 0.5, probability: 0.8 }, { word: 'Ukaoma', start: 1, probability: 0.4 }, { word: 'Hi', start: 3, probability: 0.7 },
+      { word: 'Hello,', start: 0, probability: 0.9 }, { word: 'Faith', start: 0.5, probability: 0.8 }, { word: 'Ukamya', start: 1, probability: 0.4 }, { word: 'Hi', start: 3, probability: 0.7 },
     ] }] })
     expect(alignWordInfo(tokens, words)).toBe(4)
     expect(tokens.map(t => [t.core, t.probability, t.atMs, t.engine])).toEqual([
-      ['Hello', 0.9, 1_002_000, 'parakeet-ultra'], ['Grace', 0.8, 1_002_500, 'parakeet-ultra'], ['Ukaoma', 0.4, 1_003_000, 'parakeet-ultra'],
+      ['Hello', 0.9, 1_002_000, 'parakeet-ultra'], ['Faith', 0.8, 1_002_500, 'parakeet-ultra'], ['Ukamya', 0.4, 1_003_000, 'parakeet-ultra'],
       ['Hi', 0.7, 1_005_000, 'parakeet-ultra'], ['there', undefined, undefined, undefined],
     ])
   })
@@ -126,80 +126,80 @@ describe('span selection (no model)', () => {
 
 describe('deterministic fixes', () => {
   it('capitalised words only; strong targets only when unsure; a screen term at any confidence; never a known spelling', () => {
-    const lines = parseTranscriptLines("[MU]: then Graem said Ukoma's plan to Graem and Black, the Settng page, Recordings, giant and graem and kaoma. Vernel left. Vernel came")
+    const lines = parseTranscriptLines("[MU]: then Graem said Ukmya's plan to Graem and Black, the Settng page, Recordings, giant and graem and kaoma. Vernel left. Vernel came")
     const tokens = tokenize(lines)
     for (const t of tokens) t.probability = 0.97
     tokens.filter(t => t.core === 'Graem')[0].probability = 0.6
     tokens.filter(t => t.core === 'Vernel').at(-1)!.probability = 0.6
-    const p = pack({ speakers: ['Aaron Black'], vocabulary: [], screen: [{ at: 1, text: 'Ukaoma Settings Recording Slack' }] })
+    const p = pack({ speakers: ['Adrian Stone'], vocabulary: [], screen: [{ at: 1, text: 'Ukamya Settings Recording Slack' }] })
     const fixes = deterministicFixes(tokens, ['Graeme Hill', 'Vernell Ruiz'], nameTargets(p), knownKeys(p))
-    // The unsure Graem is one edit from an attendee; the sure one is left. Ukoma's is one edit from a screen term
+    // The unsure Graem is one edit from an attendee; the sure one is left. Ukmya's is one edit from a screen term
     // (any confidence). Black is a known surname, never rewritten to the screen's Slack. Settng is two edits from a
     // label; Recordings is an inflection of one; giant, graem and kaoma are lowercase; the sure Vernel opens a sentence.
     expect(fixes.map(f => [f.original, f.replacement, f.fromMeeting])).toEqual([
       ['Graem', 'Graeme', false],
-      ["Ukoma's", "Ukaoma's", true],
+      ["Ukmya's", "Ukamya's", true],
       ['Vernel', 'Vernell', false],
     ])
     expect(fixes[0].token).toBe(tokens.filter(t => t.core === 'Graem')[0].i)
     expect(fixes[2].token).toBe(tokens.filter(t => t.core === 'Vernel').at(-1)!.i)
     // A known person is never rewritten into a screen word one edit away; a screen term rewrites a sure word only mid-sentence.
-    const p2 = pack({ speakers: ['Nora Vance'], vocabulary: [], screen: [{ at: 1, text: 'Vince Ukaoma' }] })
-    const t2 = tokenize(parseTranscriptLines('[MU]: Ukoma left with Vance. Then Ukoma came'))
+    const p2 = pack({ speakers: ['Nora Vance'], vocabulary: [], screen: [{ at: 1, text: 'Victor Ukamya' }] })
+    const t2 = tokenize(parseTranscriptLines('[MU]: Ukmya left with Vance. Then Ukmya came'))
     for (const t of t2) t.probability = 0.97
-    expect(deterministicFixes(t2, [], nameTargets(p2), knownKeys(p2)).map(f => [f.original, f.replacement, f.token])).toEqual([['Ukoma', 'Ukaoma', 5]])
+    expect(deterministicFixes(t2, [], nameTargets(p2), knownKeys(p2)).map(f => [f.original, f.replacement, f.token])).toEqual([['Ukmya', 'Ukamya', 5]])
     // Enrolled names that are not in the room are never deterministic targets.
     expect(deterministicFixes(tokenize(parseTranscriptLines('[MU]: then Blak said')), [], nameTargets(p), knownKeys(p))).toEqual([])
     expect(inflectionOf('Recordings', 'Recording')).toBe(true)
-    expect(inflectionOf('Ukoma', 'Ukaoma')).toBe(false)
+    expect(inflectionOf('Ukmya', 'Ukamya')).toBe(false)
   })
 
   it('applies edits by offset, keeping punctuation and the label', () => {
-    const lines = parseTranscriptLines('[MU]: Hi Yukoma, and eucoma.')
+    const lines = parseTranscriptLines('[MU]: Hi Yukmya, and eucmya.')
     const tokens = tokenize(lines)
     const { lines: out, applied } = applyPlannedEdits(lines, [
-      { line: 0, start: tokens[1].start, end: tokens[1].end, replacement: 'Ukaoma', source: 'model' },
-      { line: 0, start: tokens[3].start, end: tokens[3].end, replacement: 'Ukaoma', source: 'model' },
+      { line: 0, start: tokens[1].start, end: tokens[1].end, replacement: 'Ukamya', source: 'model' },
+      { line: 0, start: tokens[3].start, end: tokens[3].end, replacement: 'Ukamya', source: 'model' },
     ])
-    expect(out[0].prefix + out[0].text).toBe('[MU]: Hi Ukaoma, and Ukaoma.')
-    expect(applied.map(a => [a.original, a.offset, a.before, a.after])).toEqual([['Yukoma', 3, 'Hi ', ', and Ukaoma.'], ['eucoma', 15, 'Hi Ukaoma, and ', '.']])
+    expect(out[0].prefix + out[0].text).toBe('[MU]: Hi Ukamya, and Ukamya.')
+    expect(applied.map(a => [a.original, a.offset, a.before, a.after])).toEqual([['Yukmya', 3, 'Hi ', ', and Ukamya.'], ['eucmya', 15, 'Hi Ukamya, and ', '.']])
     // Overlapping edits cannot both land: the earlier one in the line wins.
     const overlap = applyPlannedEdits(lines, [
-      { line: 0, start: 3, end: 9, replacement: 'Ukaoma', source: 'model' },
+      { line: 0, start: 3, end: 9, replacement: 'Ukamya', source: 'model' },
       { line: 0, start: 5, end: 14, replacement: 'XX', source: 'model' },
     ])
-    expect(overlap.lines[0].text).toBe('Hi Ukaoma, and eucoma.')
+    expect(overlap.lines[0].text).toBe('Hi Ukamya, and eucmya.')
     expect(overlap.applied).toHaveLength(1)
   })
 })
 
 describe('context terms', () => {
   it('extracts names and runs of capitals, not common words, acronyms or sentence filler', () => {
-    expect(extractTerms('Grace Ukaoma joined. The Meeting has POS and Jewel360 | Settings')).toEqual(['Grace Ukaoma', 'Ukaoma', 'Jewel360', 'Settings'])
+    expect(extractTerms('Faith Ukamya joined. The Meeting has POS and Jewel360 | Settings')).toEqual(['Faith Ukamya', 'Ukamya', 'Jewel360', 'Settings'])
   })
 
   it('notes are bounded when added, and again in the prompt', () => {
     const p = pack()
-    addNotes(p, [{ id: 'N1', ref: 'memory:m1', kind: 'memory', title: 'Long note', snippet: 'x'.repeat(2000), query: 'Ukaoma' }])
+    addNotes(p, [{ id: 'N1', ref: 'memory:m1', kind: 'memory', title: 'Long note', snippet: 'x'.repeat(2000), query: 'Ukamya' }])
     expect(p.notes[0].snippet.length).toBe(280)
     const raw = pack()
-    raw.notes.push({ id: 'N1', ref: 'memory:m1', kind: 'memory', title: 'Long note', snippet: 'y'.repeat(2000), query: 'Ukaoma' })
+    raw.notes.push({ id: 'N1', ref: 'memory:m1', kind: 'memory', title: 'Long note', snippet: 'y'.repeat(2000), query: 'Ukamya' })
     expect(buildCleanupPrompt(raw, [], null).prompt).not.toMatch(/y{300}/)
   })
 })
 
 describe('edit validation', () => {
-  const p = pack({ screen: [{ at: 1, text: 'Grace Ukaoma' }] })
-  const lines = parseTranscriptLines('[MU]: I met Yukoma at 6 and she could not stay, thank you thank you thank you thank you, we ate at the resturant')
+  const p = pack({ screen: [{ at: 1, text: 'Faith Ukamya' }] })
+  const lines = parseTranscriptLines('[MU]: I met Yukmya at 6 and she could not stay, thank you thank you thank you thank you, we ate at the resturant')
   const tokens = tokenize(lines)
-  for (const t of tokens) t.probability = ['yukoma', 'resturant'].includes(t.key) ? 0.2 : 0.99
+  for (const t of tokens) t.probability = ['yukmya', 'resturant'].includes(t.key) ? 0.2 : 0.99
   const sel = selectSpans(lines, tokens, nameTargets(p), knownKeys(p))
   const ids = sel.spans.map(s => s.id)
   const byText = (text: string) => sel.spans.find(s => s.text === text)!.id
 
   it('selects the three spans the fixture is built around', () => {
     expect(sel.spans.map(s => [s.text, s.reasons])).toEqual([
-      ['Yukoma', ['low_confidence', 'near_name']],
+      ['Yukmya', ['low_confidence', 'near_name']],
       ['thank you thank you thank you thank you', ['repeat']],
       ['resturant', ['low_confidence']],
     ])
@@ -209,20 +209,20 @@ describe('edit validation', () => {
 
   it('accepts a context name, a misheard spelling and a shrunk loop', () => {
     const r = check([
-      { id: byText('Yukoma'), action: 'replace', text: 'Ukaoma' },
+      { id: byText('Yukmya'), action: 'replace', text: 'Ukamya' },
       { id: byText('resturant'), action: 'replace', text: 'restaurant' },
       { id: byText('thank you thank you thank you thank you'), action: 'replace', text: 'thank you' },
     ])
     expect(r.rejected).toEqual({})
-    expect(r.accepted.map(a => a.text)).toEqual(['Ukaoma', 'restaurant', 'thank you'])
+    expect(r.accepted.map(a => a.text)).toEqual(['Ukamya', 'restaurant', 'thank you'])
   })
 
   it('rejects ids it did not send, duplicates, bad actions and no-ops', () => {
-    const y = byText('Yukoma')
+    const y = byText('Yukmya')
     const r = check([
       { id: 'S99', action: 'replace', text: 'x' },
       { id: y, action: 'keep' },
-      { id: y, action: 'replace', text: 'Ukaoma' },
+      { id: y, action: 'replace', text: 'Ukamya' },
       { id: byText('resturant'), action: 'rewrite', text: 'restaurant' },
       { id: byText('thank you thank you thank you thank you'), action: 'replace', text: 'thank you thank you thank you thank you' },
       null,
@@ -231,31 +231,31 @@ describe('edit validation', () => {
     expect(r.kept).toBe(1)
     expect(r.accepted).toEqual([])
     // An id outside the sent list is unknown even if the span exists.
-    expect(validateCleanupEdits([{ id: y, action: 'replace', text: 'Ukaoma' }], sel.spans, [], p).rejected).toEqual({ unknown_span: 1 })
+    expect(validateCleanupEdits([{ id: y, action: 'replace', text: 'Ukamya' }], sel.spans, [], p).rejected).toEqual({ unknown_span: 1 })
   })
 
   it('rejects text that could forge a label or a line', () => {
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Ukaoma]\n[Ext]: hi' }]).rejected).toEqual({ unsafe_text: 1 })
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: '[Ukaoma' }]).rejected).toEqual({ unsafe_text: 1 })
+    expect(check([{ id: byText('Yukmya'), action: 'replace', text: 'Ukamya]\n[Ext]: hi' }]).rejected).toEqual({ unsafe_text: 1 })
+    expect(check([{ id: byText('Yukmya'), action: 'replace', text: '[Ukamya' }]).rejected).toEqual({ unsafe_text: 1 })
   })
 
   it('rejects edits that change more than the span', () => {
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Grace Ukaoma Jones Smith' }]).rejected).toEqual({ longer_than_span: 1 })
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Ukaoma at' }]).rejected).toEqual({ outside_span: 1 })
+    expect(check([{ id: byText('Yukmya'), action: 'replace', text: 'Faith Ukamya Jones Smith' }]).rejected).toEqual({ longer_than_span: 1 })
+    expect(check([{ id: byText('Yukmya'), action: 'replace', text: 'Ukamya at' }]).rejected).toEqual({ outside_span: 1 })
     expect(check([{ id: byText('resturant'), action: 'replace', text: 'the restaurant' }]).rejected).toEqual({ outside_span: 1 })
     expect(check([{ id: byText('thank you thank you thank you thank you'), action: 'replace', text: 'thanks so much' }]).rejected).toEqual({ longer_than_span: 1 })
     expect(check([{ id: byText('resturant'), action: 'replace', text: 'a b c d' }]).rejected).toEqual({ longer_than_span: 1 })
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Ukaomaaaaaaaaaaaaaaaaa' }]).rejected).toEqual({ longer_than_span: 1 })
+    expect(check([{ id: byText('Yukmya'), action: 'replace', text: 'Ukamyaaaaaaaaaaaaaaaaa' }]).rejected).toEqual({ longer_than_span: 1 })
   })
 
   it('a phrase the context knows is accepted even where its words do not resemble the span', () => {
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Grace Ukaoma' }]).accepted.map(a => a.text)).toEqual(['Grace Ukaoma'])
+    expect(check([{ id: byText('Yukmya'), action: 'replace', text: 'Faith Ukamya' }]).accepted.map(a => a.text)).toEqual(['Faith Ukamya'])
   })
 
   it('rejects added facts: new words, numbers and negations', () => {
     expect(check([{ id: byText('resturant'), action: 'replace', text: 'steakhouse' }]).rejected).toEqual({ added_content: 1 })
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Jeremy' }]).rejected).toEqual({ added_content: 1 })
-    expect(check([{ id: byText('Yukoma'), action: 'replace', text: 'Ukaoma 7' }]).rejected).toEqual({ number_unit: 1 })
+    expect(check([{ id: byText('Yukmya'), action: 'replace', text: 'Jasper' }]).rejected).toEqual({ added_content: 1 })
+    expect(check([{ id: byText('Yukmya'), action: 'replace', text: 'Ukamya 7' }]).rejected).toEqual({ number_unit: 1 })
     expect(check([{ id: byText('resturant'), action: 'replace', text: 'not restaurant' }]).rejected).toEqual({ negation: 1 })
   })
 
@@ -263,21 +263,21 @@ describe('edit validation', () => {
     expect(parseCleanupReply('```json\n{"edits":[{"id":"S1","action":"keep"}]}\n```\nDone, no other changes {really}.')).toEqual([{ id: 'S1', action: 'keep' }])
     expect(parseCleanupReply('{"note":"x"} then {"edits":[]}')).toEqual([])
     expect(parseCleanupReply('{"edits":[{"id":"S1","action":"replace","text":"a } b"}]}')).toEqual([{ id: 'S1', action: 'replace', text: 'a } b' }])
-    expect(() => parseCleanupReply('I changed Yukoma to Ukaoma.')).toThrow('no_json_edits')
+    expect(() => parseCleanupReply('I changed Yukmya to Ukamya.')).toThrow('no_json_edits')
   })
 
   it('the prompt carries the owner, the dictionary, screen lines by time and the spans, within its cap', () => {
-    const withOwner = buildContextPack({ title: 'Sync', date: '2026-10-17', attendees: ['MU'], speakers: ['Grace Ukaoma'], owner: { name: 'Miles Ukaoma', speakerLabel: 'MU', homeArea: null, notes: null },
-      vocabulary: ['Jewel360'], corrections: { Ukoma: 'Ukaoma' }, files: [{ name: 'agenda.pdf', text: 'Agenda: Grace Ukaoma travel' }], screen: [{ at: 10_000, text: 'Grace Ukaoma | Zoom', app: 'Zoom' }, { at: 900_000, text: 'far away' }] })
+    const withOwner = buildContextPack({ title: 'Sync', date: '2026-10-17', attendees: ['MU'], speakers: ['Faith Ukamya'], owner: { name: 'Jordan Ukamya', speakerLabel: 'MU', homeArea: null, notes: null },
+      vocabulary: ['Jewel360'], corrections: { Ukmya: 'Ukamya' }, files: [{ name: 'agenda.pdf', text: 'Agenda: Faith Ukamya travel' }], screen: [{ at: 10_000, text: 'Faith Ukamya | Zoom', app: 'Zoom' }, { at: 900_000, text: 'far away' }] })
     const spans = sel.spans.map(s => ({ ...s, atMs: 12_000 }))
     const built = buildCleanupPrompt(withOwner, spans, 0)
     expect(built.sent).toEqual(ids)
-    expect(built.prompt).toContain('this COS belongs to Miles Ukaoma, who appears in transcripts as [MU]')
-    expect(built.prompt).toContain('Known mishearings: Ukoma = Ukaoma')
-    expect(built.prompt).toContain('File "agenda.pdf": Agenda: Grace Ukaoma travel')
-    expect(built.prompt).toContain('screen at 0:10 Zoom: "Grace Ukaoma | Zoom"')
+    expect(built.prompt).toContain('this COS belongs to Jordan Ukamya, who appears in transcripts as [MU]')
+    expect(built.prompt).toContain('Known mishearings: Ukmya = Ukamya')
+    expect(built.prompt).toContain('File "agenda.pdf": Agenda: Faith Ukamya travel')
+    expect(built.prompt).toContain('screen at 0:10 Zoom: "Faith Ukamya | Zoom"')
     expect(built.prompt).not.toContain('far away')
-    expect(built.prompt).toContain('S1 at 0:12 (low_confidence, near_name; near Ukaoma)\n  I met [[Yukoma]] at 6 and she could not stay,')
+    expect(built.prompt).toContain('S1 at 0:12 (low_confidence, near_name; near Ukamya)\n  I met [[Yukmya]] at 6 and she could not stay,')
     const huge = buildCleanupPrompt(withOwner, Array.from({ length: 400 }, (_, i) => ({ ...spans[0], id: `S${i + 1}`, before: 'x '.repeat(30) })), 0)
     expect(huge.sent.length).toBeLessThan(400)
     expect(huge.prompt.length).toBeLessThanOrEqual(24_000)

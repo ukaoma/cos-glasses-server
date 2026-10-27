@@ -79,7 +79,7 @@ describe('claim admission', () => {
     expect(one({ query: 'elephant weight car', evidenceTurnIds: [99] })).toBe(0)
     expect(one({ query: 'elephant weight' })).toBe(0)
     expect(one({ query: 'elephant weight car', category: 'gossip' })).toBe(0)
-    expect(one({ query: 'elephant weight car miles' }, { nameWords: ['Miles Ukaoma'] })).toBe(0)
+    expect(one({ query: 'elephant weight car hunter' }, { nameWords: ['Hunter Ukamya'] })).toBe(0)
     // Words not in the passages are dropped, not admitted.
     expect(admitFactCheckClaims({ claims: [{ category: 'nature', evidenceTurnIds: [1, 2], claim: 'x', query: 'african elephant weight car' }] }, input('Fact check'), scanned).claims[0].query).toBe('elephant weight car')
   })
@@ -132,7 +132,7 @@ describe('claim admission', () => {
 
 describe('pending fact-check continuation', () => {
   const pending = { place: 'implicit_origin' as const, category: 'travel_time', places: ['Kansas City'] }
-  const ctx = { ownerArea: { text: 'Austin, TX', source: 'profile' as const }, blockedNames: new Set(['gina', 'silas', 'larson', 'miles', 'ukaoma']), ownerWords: new Set(['miles', 'ukaoma', 'mu']) }
+  const ctx = { ownerArea: { text: 'Austin, TX', source: 'profile' as const }, blockedNames: new Set(['mira', 'elliot', 'sterling', 'hunter', 'ukamya']), ownerWords: new Set(['hunter', 'ukamya', 'mu']) }
   const withClaim = { ...ctx, places: pending.places }
   it('takes a starting place only from a pure clarification, never a name or an ordinary question (QA B1)', () => {
     expect(originClarification('From ATX where mu is based', withClaim)).toEqual({ text: 'ATX (Austin, TX)', source: 'user' })
@@ -142,39 +142,39 @@ describe('pending fact-check continuation', () => {
     expect(originClarification('Austin to KC', withClaim)).toEqual({ text: 'Austin', source: 'user' })
     expect(originClarification('from Austin, TX', withClaim)).toEqual({ text: 'Austin TX', source: 'user' })
     // A state suffix must be a real state code, the city a listed one; people, labels and ordinary words are not places.
-    for (const q of ['Silas PM to KC', 'from Talia TX', 'HR to KC', 'time to Kansas', 'from MU', 'MU to KC', 'from Dallas, ZZ'])
+    for (const q of ['Elliot PM to KC', 'from Talia TX', 'HR to KC', 'time to Kansas', 'from MU', 'MU to KC', 'from Dallas, ZZ'])
       expect(originClarification(q, withClaim)).toBeNull()
-    for (const q of ['Gina to send the deck by Friday?', 'What did we hear from Silas Larson today?', 'From Silas', 'From Gina where mu is based', 'from here', 'What did we decide?', 'Dallas to KC', 'ATX to the deck', 'From ATX and send the deck', 'Send the deck from ATX', 'ATX to Paris is the request'])
+    for (const q of ['Mira to send the deck by Friday?', 'What did we hear from Elliot Sterling today?', 'From Elliot', 'From Mira where mu is based', 'from here', 'What did we decide?', 'Dallas to KC', 'ATX to the deck', 'From ATX and send the deck', 'Send the deck from ATX', 'ATX to Paris is the request'])
       expect(originClarification(q, withClaim)).toBeNull()
     // Without a known owner area, an abbreviation is not a place.
     expect(originClarification('From ATX where mu is based', { ...withClaim, ownerArea: null })).toBeNull()
   })
   it('accepts only place-like origins in a named request', () => {
     expect(namedOrigin('Fact check the flight from Dallas, TX to KC', { ...ctx, places: [] })).toEqual({ text: 'Dallas TX', source: 'user' })
-    expect(namedOrigin('Fact check what Gina said from Silas', { ...ctx, places: [] })).toBeNull()
+    expect(namedOrigin('Fact check what Mira said from Elliot', { ...ctx, places: [] })).toBeNull()
     expect(namedOrigin('Fact check the flight to kc', { ...ctx, places: [] })).toBeNull()
     expect(placeOrigin('DFW', withClaim)).toBeNull()
     expect(placeOrigin('ABQ', withClaim)).toBeNull()
     expect(placeOrigin('KC', withClaim)).toEqual({ text: 'KC', source: 'user' })
     expect(placeOrigin('Kansas', withClaim)).toEqual({ text: 'Kansas', source: 'user' })
-    expect(placeOrigin('Gina', { ...withClaim, places: [], blockedNames: new Set(['gina']) })).toBeNull()
+    expect(placeOrigin('Mira', { ...withClaim, places: [], blockedNames: new Set(['mira']) })).toBeNull()
     expect(placeOrigin('time', { ...withClaim, places: [] })).toBeNull()
     expect(placeOrigin('KC', { ...withClaim, places: [] })).toBeNull()
     expect(placeCodes('Austin, TX')).toEqual(new Set(['ATX'])); expect(placeCodes('Kansas City, MO')).toEqual(new Set(['KC', 'KCMO']))
     expect(placeCodes('Austin, ZZ')).toEqual(new Set())
     // Initials only: "KS" is not a code of Kansas City. The owner's own name is never a place, even if tagged.
     expect(placeOrigin('KS', withClaim)).toBeNull()
-    expect(placeOrigin('Miles', { ownerArea: null, places: ['Miles'], blockedNames: new Set(), ownerWords: new Set(['miles']) })).toBeNull()
-    expect(placeOrigin('Miles', { ownerArea: null, places: ['Miles'], blockedNames: new Set() })).toEqual({ text: 'Miles', source: 'user' })
-    expect(placeOrigin('Gina', { ownerArea: null, places: ['Gina'], blockedNames: new Set(['gina']) })).toBeNull()
+    expect(placeOrigin('Hunter', { ownerArea: null, places: ['Hunter'], blockedNames: new Set(), ownerWords: new Set(['hunter']) })).toBeNull()
+    expect(placeOrigin('Hunter', { ownerArea: null, places: ['Hunter'], blockedNames: new Set() })).toEqual({ text: 'Hunter', source: 'user' })
+    expect(placeOrigin('Mira', { ownerArea: null, places: ['Mira'], blockedNames: new Set(['mira']) })).toBeNull()
     expect(originQuery('to kansas city flight time', { text: 'ATX (Austin, TX)', source: 'user' })).toBe('atx austin tx to kansas city flight time')
   })
   it('re-runs on request words, clarifies a route origin, and leaves real questions alone', () => {
     for (const q of ['Check it now you', 'Run it omg', "I'm asking you to fact check the claim", 'Do it', 'go ahead and check again'])
       expect(continuationIntent(q, pending, ctx)).toEqual({ kind: 'rerun' })
     expect(continuationIntent('From ATX where mu is based', pending, ctx)).toEqual({ kind: 'clarify', origin: { text: 'ATX (Austin, TX)', source: 'user' } })
-    expect(continuationIntent('Gina to send the deck by Friday?', pending, ctx)).toBeNull()
-    expect(continuationIntent('What did we hear from Silas Larson today?', pending, ctx)).toBeNull()
+    expect(continuationIntent('Mira to send the deck by Friday?', pending, ctx)).toBeNull()
+    expect(continuationIntent('What did we hear from Elliot Sterling today?', pending, ctx)).toBeNull()
     expect(continuationIntent('From ATX where mu is based', { ...pending, place: undefined, category: 'travel_time' }, ctx)).toBeNull()
     expect(continuationIntent('Can you fact check this', pending, ctx)).toBeNull()
     expect(continuationIntent('What did the caller say about pricing?', pending, ctx)).toBeNull()
@@ -200,7 +200,7 @@ describe('pending fact-check continuation', () => {
     expect(lastFactCheckLookup([old], at(650_000))?.claim.claim).toBe('old')
     expect(lastFactCheckLookup([{ ...recent, exchange: { ...recent.exchange, status: 'failed' } }], at(650_000))).toBeNull()
     // An unrelated ask after the check ends the pending check (QA W3).
-    const unrelated = { exchange: ex({ createdAt: '2026-10-13T02:06:00.000Z', throughMs: 620_000, question: 'What did Gina say?' }) }
+    const unrelated = { exchange: ex({ createdAt: '2026-10-13T02:06:00.000Z', throughMs: 620_000, question: 'What did Mira say?' }) }
     expect(lastFactCheckLookup([old, recent, unrelated], at(650_000))).toBeNull()
     expect(alreadyCheckedClaims([recent], at(650_000))).toEqual([])
     expect(alreadyCheckedClaims([{ ...recent, exchange: { ...recent.exchange, factCheckRange: { fromMs: 0, throughMs: 600_000, full: true, claims: 3 } } }], at(650_000))).toEqual(['first', 'second', 'pending'])
@@ -311,7 +311,7 @@ describe('hedged model calls', () => {
 
 describe('medical dosing', () => {
   it('needs a named medicine plus dosing intent; POS work talk, money, counts and schedules never trigger it (QA W4)', () => {
-    for (const q of ['whats the dose of tylenol for a child', 'How much Tylenol for Rafael?', "how much children's tylenol for 3 year old", 'Can I take 800 mg of ibuprofen?', 'how many advil is safe',
+    for (const q of ['whats the dose of tylenol for a child', 'How much Tylenol for Felix?', "how much children's tylenol for 3 year old", 'Can I take 800 mg of ibuprofen?', 'how many advil is safe',
       "How much pain medication for a 400 lb, 5'5 man", 'How much Tylenol can I take?', 'What dose of ibuprofen for my kid?', 'How many mg of Benadryl should I give a 30 lb toddler?', 'How much amoxicillin for a 40 pound child'])
       expect(medicalDosingRequest(q), q).toBe(true)
     for (const q of ['how many tablets should we give the sales team for demos', 'how many units can we give each rep', 'how many units should I take for the demo',

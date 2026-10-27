@@ -30,12 +30,12 @@ const roots: string[] = []
 afterAll(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const temp = (prefix: string) => { const dir = mkdtempSync(join(tmpdir(), prefix)); roots.push(dir); return dir }
 
-// Eight 6 s chunks. MU on channel 0, Silas on channel 1, every time.
-//   chunks 0,1,4: MU, sure, one-sided (self)      chunks 2,3,6: Silas, sure, one-sided (other)
-//   chunk 5: MU 0-2.5 s then Silas 2.5-6 s, labelled MU (Even Hub mixed, so not mapping evidence)
-//   chunk 7: Silas, but the voiceprint was unsure (Ext, 0)
+// Eight 6 s chunks. MU on channel 0, Elliot on channel 1, every time.
+//   chunks 0,1,4: MU, sure, one-sided (self)      chunks 2,3,6: Elliot, sure, one-sided (other)
+//   chunk 5: MU 0-2.5 s then Elliot 2.5-6 s, labelled MU (Even Hub mixed, so not mapping evidence)
+//   chunk 7: Elliot, but the voiceprint was unsure (Ext, 0)
 const SPANS: Array<[number, number, number]> = [[0, 0, 12], [1, 12, 24], [0, 24, 32.5], [1, 32.5, 48]]
-const WHO = ['MU', 'MU', 'Silas Larson', 'Silas Larson', 'MU', 'MU', 'Silas Larson', 'Ext']
+const WHO = ['MU', 'MU', 'Elliot Sterling', 'Elliot Sterling', 'MU', 'MU', 'Elliot Sterling', 'Ext']
 const SIM = [0.8, 0.78, 0.71, 0.74, 0.9, 0.82, 0.7, 0]
 const ROLE = (i: number) => i === 5 ? { schema: 1, frames: 120, self: 60, other: 60 } : i === 7 ? { schema: 1, frames: 120, self: 10, other: 110 }
   : { schema: 1, frames: 120, self: WHO[i] === 'MU' ? 110 : 8, other: WHO[i] === 'MU' ? 10 : 112 }
@@ -73,7 +73,7 @@ function meeting(options: { batch: boolean; correctionRevision?: number; tamperW
     if (options.liveSegments && i === 5) {
       chunk.segments = [
         { speaker: 'MU', text: 'alpha5 bravo5', startSec: 0, endSec: 3, similarity: 0.82 },
-        { speaker: 'Silas Larson', text: 'charlie5 delta5', startSec: 3, endSec: 6, similarity: 0.7 },
+        { speaker: 'Elliot Sterling', text: 'charlie5 delta5', startSec: 3, endSec: 6, similarity: 0.7 },
       ]
     }
     entries.push({ chunkIndex: i, chunk: chunk as never })
@@ -97,7 +97,7 @@ function meeting(options: { batch: boolean; correctionRevision?: number; tamperW
   const sidecar = {
     schemaVersion: 2,
     sessionId: 'meeting_final_fixture',
-    speakers: ['MU', 'Silas Larson'],
+    speakers: ['MU', 'Elliot Sterling'],
     chunks: entries.map(e => e.chunk),
     chunkEntries: entries,
     batchApplied: options.batch,
@@ -134,7 +134,7 @@ describe('the save-time final pass', () => {
     const f = meeting({ batch: true })
     const seen: { wavSec?: number; options?: RunNemotronOptions } = {}
     const outcome = await runNemotronFinalPass(opts(f, fakeRun(seen)))
-    expect(outcome).toMatchObject({ status: 'applied', mode: 'batch', mapped: { 0: 'MU', 1: 'Silas Larson' } })
+    expect(outcome).toMatchObject({ status: 'applied', mode: 'batch', mapped: { 0: 'MU', 1: 'Elliot Sterling' } })
     expect(seen.wavSec).toBeCloseTo(49, 3)
     expect(seen.options).toMatchObject({ computeUnits: 'ane' })
     expect(seen.options!.modelsDir).toBe(join(f.home, '.cos-glasses', 'models', 'nemotron-3-diarization'))
@@ -142,12 +142,12 @@ describe('the save-time final pass', () => {
     const sidecar = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
     const words = sidecar.batchSegments.flatMap((s: any) => s.speakerWords)
     const label = (w: string) => words.find((x: any) => x.word === w)
-    // The second half of chunk 5 was Silas all along; chunk 7's unsure Ext is Silas's channel.
-    expect(label('charlie5')).toMatchObject({ speaker: 'Silas Larson', originalSpeaker: 'MU' })
-    expect(label('delta5')).toMatchObject({ speaker: 'Silas Larson', originalSpeaker: 'MU' })
+    // The second half of chunk 5 was Elliot all along; chunk 7's unsure Ext is Elliot's channel.
+    expect(label('charlie5')).toMatchObject({ speaker: 'Elliot Sterling', originalSpeaker: 'MU' })
+    expect(label('delta5')).toMatchObject({ speaker: 'Elliot Sterling', originalSpeaker: 'MU' })
     expect(label('alpha5')).toEqual(expect.objectContaining({ speaker: 'MU' }))
     expect(label('alpha5').originalSpeaker).toBeUndefined()
-    for (const w of wordsOf(7)) expect(label(w)).toMatchObject({ speaker: 'Silas Larson', originalSpeaker: 'Ext' })
+    for (const w of wordsOf(7)) expect(label(w)).toMatchObject({ speaker: 'Elliot Sterling', originalSpeaker: 'Ext' })
     // Everything the voiceprint was sure of is untouched.
     for (const i of [0, 1, 2, 3, 4, 6]) for (const w of wordsOf(i)) expect(label(w)).toMatchObject({ speaker: WHO[i] })
     expect(outcome.words).toMatchObject({ total: 32, relabeled: 6 })
@@ -156,17 +156,17 @@ describe('the save-time final pass', () => {
     // Line breaks are kept: a line splits where its speaker changes and is never merged into its neighbour.
     expect(readTranscriptSection(markdown)).toBe([
       '[MU]: alpha0 bravo0 charlie0 delta0 alpha1 bravo1 charlie1 delta1',
-      '[Silas Larson]: alpha2 bravo2 charlie2 delta2 alpha3 bravo3 charlie3 delta3',
+      '[Elliot Sterling]: alpha2 bravo2 charlie2 delta2 alpha3 bravo3 charlie3 delta3',
       '[MU]: alpha4 bravo4 charlie4 delta4 alpha5 bravo5',
-      '[Silas Larson]: charlie5 delta5',
-      '[Silas Larson]: alpha6 bravo6 charlie6 delta6',
-      '[Silas Larson]: alpha7 bravo7 charlie7 delta7',
+      '[Elliot Sterling]: charlie5 delta5',
+      '[Elliot Sterling]: alpha6 bravo6 charlie6 delta6',
+      '[Elliot Sterling]: alpha7 bravo7 charlie7 delta7',
     ].join('\n'))
     expect(markdown).toContain('| **Transcription quality** | batch |')
     expect(sameWords(f.transcript, markdown.split('## Transcript\n\n')[1])).toBe(true)
     expect(sidecar.diarization).toMatchObject({
       engine: 'nemotron3', variant: 'fast32', status: 'applied', mode: 'batch',
-      channelMap: { 0: 'MU', 1: 'Silas Larson' }, originalTranscript: f.transcript,
+      channelMap: { 0: 'MU', 1: 'Elliot Sterling' }, originalTranscript: f.transcript,
     })
     expect(sidecar.batchTranscript).toBe(markdown.split('## Transcript\n\n')[1].replace(/\n$/, ''))
     expect(sidecar.lifecycleRevision).toBe(1)
@@ -194,8 +194,8 @@ describe('the save-time final pass', () => {
     expect(await runNemotronFinalPass(opts(f, fakeRun()))).toMatchObject({ status: 'applied' })
     const after = readTranscriptSection(readFileSync(f.meetingPath, 'utf8'))!
     expect(transcriptWords(after)).toEqual(transcriptWords(edited))
-    expect(after).toContain('[Silas Larson]: alpha2 bravo2 charlie2 delta2 alpha3 inserted bravo3')
-    expect(after).toContain('[MU]: alpha4 bravo4 charlie4 delta4 alpha5 added bravo5\n[Silas Larson]: charlie5 delta5')
+    expect(after).toContain('[Elliot Sterling]: alpha2 bravo2 charlie2 delta2 alpha3 inserted bravo3')
+    expect(after).toContain('[MU]: alpha4 bravo4 charlie4 delta4 alpha5 added bravo5\n[Elliot Sterling]: charlie5 delta5')
 
     // Sixteen words cleaning removed (more than the match window): never resurrected,
     // and the words after them still take their own channel's name.
@@ -210,7 +210,7 @@ describe('the save-time final pass', () => {
     expect(await runNemotronFinalPass(opts(g, fakeRun()))).toMatchObject({ status: 'applied' })
     const relabelled = readTranscriptSection(readFileSync(g.meetingPath, 'utf8'))!
     expect(transcriptWords(relabelled)).toEqual(transcriptWords(trimmed))
-    expect(relabelled).toBe('[MU]: alpha0 bravo0 charlie0 delta0 alpha1 bravo1 charlie1 delta1\n[Silas Larson]: alpha6 bravo6 charlie6 delta6\n[Silas Larson]: alpha7 bravo7 charlie7 delta7')
+    expect(relabelled).toBe('[MU]: alpha0 bravo0 charlie0 delta0 alpha1 bravo1 charlie1 delta1\n[Elliot Sterling]: alpha6 bravo6 charlie6 delta6\n[Elliot Sterling]: alpha7 bravo7 charlie7 delta7')
   })
 
   it.each(['anonymous', 'high-confidence'])('a late %s capture prevents meeting-wide name propagation after Standard audio', async mode => {
@@ -248,14 +248,14 @@ describe('the save-time final pass', () => {
     const outcome = await runNemotronFinalPass(opts(f, fakeRun()))
     expect(outcome).toMatchObject({ status: 'applied', mode: 'streaming' })
     const markdown = readFileSync(f.meetingPath, 'utf8')
-    expect(markdown).toContain('[MU]: alpha5 bravo5\n[Silas Larson]: charlie5 delta5\n[Silas Larson]: alpha6')
-    expect(markdown).toContain('[Silas Larson]: alpha7 bravo7 charlie7 delta7')
+    expect(markdown).toContain('[MU]: alpha5 bravo5\n[Elliot Sterling]: charlie5 delta5\n[Elliot Sterling]: alpha6')
+    expect(markdown).toContain('[Elliot Sterling]: alpha7 bravo7 charlie7 delta7')
     expect(markdown).toContain('| **Transcription quality** | streaming |')
     const sidecar = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
     const chunk7 = sidecar.chunkEntries[7].chunk
-    expect(chunk7).toMatchObject({ speaker: 'Silas Larson', originalSpeaker: 'Ext' })
-    expect(sidecar.chunks[7]).toMatchObject({ speaker: 'Silas Larson', originalSpeaker: 'Ext' })
-    expect(sidecar.chunkEntries[5].chunk.finalSegments.map((s: any) => s.speaker)).toEqual(['MU', 'Silas Larson'])
+    expect(chunk7).toMatchObject({ speaker: 'Elliot Sterling', originalSpeaker: 'Ext' })
+    expect(sidecar.chunks[7]).toMatchObject({ speaker: 'Elliot Sterling', originalSpeaker: 'Ext' })
+    expect(sidecar.chunkEntries[5].chunk.finalSegments.map((s: any) => s.speaker)).toEqual(['MU', 'Elliot Sterling'])
     expect(sidecar.chunkEntries[0].chunk.originalSpeaker).toBeUndefined()
   })
 })
@@ -269,8 +269,8 @@ describe('a crowded room', () => {
     expect(outcome).toMatchObject({ status: 'applied', crowded: true, mapped: {} })
     const words = JSON.parse(readFileSync(f.sidecarPath, 'utf8')).batchSegments.flatMap((s: any) => s.speakerWords)
     const label = (w: string) => words.find((x: any) => x.word === w)
-    // The live turns of chunk 5 apply; chunk 7's unsure Ext has no map to become Silas.
-    expect(label('charlie5')).toMatchObject({ speaker: 'Silas Larson', originalSpeaker: 'MU' })
+    // The live turns of chunk 5 apply; chunk 7's unsure Ext has no map to become Elliot.
+    expect(label('charlie5')).toMatchObject({ speaker: 'Elliot Sterling', originalSpeaker: 'MU' })
     expect(label('alpha7')).toMatchObject({ speaker: 'Ext' })
     expect(label('alpha7').originalSpeaker).toBeUndefined()
   })
@@ -320,7 +320,7 @@ describe('the meeting timeline and the channel map', () => {
   it('a channel two people share stays unmapped, and too little evidence maps nothing', () => {
     const a = activityOf(30, [[0, 0, 30]])
     const window = (i: number, speaker: string) => ({ chunkIndex: i, start: i * 6, end: i * 6 + 6, chunk: { text: 'x', speaker, similarity: 0.8, elapsed: i * 6000 } as never })
-    const shared = mapChannelsToNames([window(0, 'MU'), window(1, 'MU'), window(2, 'Silas Larson'), window(3, 'MU'), window(4, 'Silas Larson')], a)
+    const shared = mapChannelsToNames([window(0, 'MU'), window(1, 'MU'), window(2, 'Elliot Sterling'), window(3, 'MU'), window(4, 'Elliot Sterling')], a)
     expect(shared.map.size).toBe(0)
     expect(shared.evidence[0]).toMatchObject({ channel: 0, name: null, support: 5, top: 'MU' })
     const thin = mapChannelsToNames([window(0, 'MU'), window(1, 'MU')], a)
@@ -341,18 +341,18 @@ describe('QA 6.61.0: the final pass under real-world pressure', () => {
       // What POST /meeting/:id/relabel does to these files.
       const doc = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
       doc.correctionRevision = 1
-      doc.chunks[7].speaker = 'Kirstyn Blum'
-      doc.chunkEntries[7].chunk.speaker = 'Kirstyn Blum'
+      doc.chunks[7].speaker = 'Wren Hale'
+      doc.chunkEntries[7].chunk.speaker = 'Wren Hale'
       relabelled = JSON.stringify(doc, null, 2)
       writeFileSync(f.sidecarPath, relabelled)
-      writeFileSync(f.meetingPath, readFileSync(f.meetingPath, 'utf8').replace('[Ext]: alpha7', '[Kirstyn Blum]: alpha7'))
+      writeFileSync(f.meetingPath, readFileSync(f.meetingPath, 'utf8').replace('[Ext]: alpha7', '[Wren Hale]: alpha7'))
       return activityOf(49, SPANS)
     })
     const lines: string[] = []
     const outcome = await runNemotronFinalPass(opts(f, run as never, { log: (l: string) => lines.push(l) }))
     expect(outcome).toMatchObject({ status: 'skipped', reason: 'changed_during_pass' })
     expect(readFileSync(f.sidecarPath, 'utf8')).toBe(relabelled)
-    expect(readFileSync(f.meetingPath, 'utf8')).toContain('[Kirstyn Blum]: alpha7')
+    expect(readFileSync(f.meetingPath, 'utf8')).toContain('[Wren Hale]: alpha7')
     expect(lines).toEqual(['[diarizer] final pass skipped: changed_during_pass (sidecar changed); the saved transcript is unchanged'])
   })
 
@@ -444,7 +444,7 @@ describe('QA 6.61.0: the final pass under real-world pressure', () => {
     await runNemotronFinalPass(opts(f, vi.fn(async () => { throw new NemotronRunError('timeout', 'no result within 1 ms') }) as never, { log: (l: string) => lines.push(l) }))
     expect(lines.at(-1)).toBe('[diarizer] final pass failed: nemotron_timeout (no result within 1 ms); chunks left off the timeline: 0 missing, 1 hash mismatch, 0 unreadable; the saved transcript is unchanged')
     await runNemotronFinalPass(opts(f, fakeRun(), { log: (l: string) => lines.push(l) }))
-    expect(lines.at(-1)).toMatch(/^\[diarizer\] final pass applied \(batch\) in \d+ ms: 2 channels, mapped \{"1":"Silas Larson"\}, \d+\/32 words relabelled, speakers 3 -> 2; chunks left off the timeline: 0 missing, 1 hash mismatch, 0 unreadable$/)
+    expect(lines.at(-1)).toMatch(/^\[diarizer\] final pass applied \(batch\) in \d+ ms: 2 channels, mapped \{"1":"Elliot Sterling"\}, \d+\/32 words relabelled, speakers 3 -> 2; chunks left off the timeline: 0 missing, 1 hash mismatch, 0 unreadable$/)
   })
 
   it('pins the timeout formula: 20x realtime plus two minutes for a cold compile', () => {
@@ -458,7 +458,7 @@ describe('QA 6.61.0: the final pass under real-world pressure', () => {
     // Two people, plus six 10 ms blips on the other channels.
     const blips = [2, 3, 4, 5, 6, 7].map(c => [c, 48 + c * 0.05, 48 + c * 0.05 + 0.01] as [number, number, number])
     const outcome = await runNemotronFinalPass(opts(f, vi.fn(async () => activityOf(49, [...SPANS, ...blips])) as never))
-    expect(outcome).toMatchObject({ status: 'applied', crowded: false, channels: 2, mapped: { 0: 'MU', 1: 'Silas Larson' } })
+    expect(outcome).toMatchObject({ status: 'applied', crowded: false, channels: 2, mapped: { 0: 'MU', 1: 'Elliot Sterling' } })
   })
 })
 
@@ -494,7 +494,7 @@ describe('QA 6.61.0: a pass the save path declines is still counted', () => {
 
 describe('6.61.1 owner guard in the final pass', () => {
   it('a split chunk 6.61.0 named MU from the glasses label is not carried into the final transcript', async () => {
-    // Chunk 2's audio does not match its hash, so Silas's channel has too little evidence to map:
+    // Chunk 2's audio does not match its hash, so Elliot's channel has too little evidence to map:
     // chunk 7's words fall back to their per-chunk turns, where 6.61.0 put a similarity-0 MU.
     const f = meeting({ batch: true, tamperWav: 2 })
     const doc = JSON.parse(f.sidecarText)
@@ -519,7 +519,7 @@ describe('6.61.1 owner guard in the final pass', () => {
     expect(guardOwnerName('MU', 0.612, split, 'MU')).toBe('Ext')
     expect(guardOwnerName('MU', 0, split, 'MU')).toBe('Ext')
     expect(guardOwnerName('MU', 0.65, split, 'MU')).toBe('MU')
-    expect(guardOwnerName('Jeremy Sokolic', 0.56, split, 'MU')).toBe('Jeremy Sokolic')
+    expect(guardOwnerName('Jasper Quillen', 0.56, split, 'MU')).toBe('Jasper Quillen')
     expect(guardOwnerName('MU', 0.6, { ...split, segments: [{ speaker: 'MU', text: 'a b' }] }, 'MU')).toBe('MU')
   })
 })

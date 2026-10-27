@@ -47,32 +47,32 @@ describe('naming the tracks of one chunk', () => {
       activity: activityOf(6, [[0, 0.2, 5.8]]),
       text: 'The bookings month came in light.',
       audio: wavOf(6, () => 50),
-      chunkVoiceprint: { speaker: 'Silas Larson', similarity: 0.7 },
+      chunkVoiceprint: { speaker: 'Elliot Sterling', similarity: 0.7 },
       clientSpeaker: 'MU',
       identify,
     })
-    expect(result).toMatchObject({ ok: true, speaker: 'Silas Larson', tracks: 1 })
+    expect(result).toMatchObject({ ok: true, speaker: 'Elliot Sterling', tracks: 1 })
     if (!result.ok) throw new Error('unreachable')
-    expect(result.segments).toEqual([expect.objectContaining({ speaker: 'Silas Larson', text: 'The bookings month came in light.', similarity: 0.7 })])
+    expect(result.segments).toEqual([expect.objectContaining({ speaker: 'Elliot Sterling', text: 'The bookings month came in light.', similarity: 0.7 })])
     expect(identify).not.toHaveBeenCalled()
   })
 
   it('two long tracks are each named by the voiceprint on their own audio, in time order', () => {
-    // MU 0-2.6 s (positive samples), Silas 3-6 s (negative samples).
+    // MU 0-2.6 s (positive samples), Elliot 3-6 s (negative samples).
     const result = nameChunkSegments({
       activity: activityOf(6, [[0, 0, 2.6], [5, 3, 6]]),
       text: 'Yeah I agree with that. So the bookings month came in light again.',
       audio: wavOf(6, t => (t < 2.8 ? 400 : -400)),
-      chunkVoiceprint: { speaker: 'Silas Larson', similarity: 0.6 },
+      chunkVoiceprint: { speaker: 'Elliot Sterling', similarity: 0.6 },
       clientSpeaker: 'MU',
-      identify: signVoiceprint({ positive: 'MU', negative: 'Silas Larson' }),
+      identify: signVoiceprint({ positive: 'MU', negative: 'Elliot Sterling' }),
     })
     if (!result.ok) throw new Error(result.reason)
-    expect(result.segments.map(s => s.speaker)).toEqual(['MU', 'Silas Larson'])
+    expect(result.segments.map(s => s.speaker)).toEqual(['MU', 'Elliot Sterling'])
     expect(result.segments.map(s => s.text).join(' ')).toBe('Yeah I agree with that. So the bookings month came in light again.')
     expect(result.segments[0].startSec!).toBeLessThan(result.segments[1].startSec!)
     expect(result.identified).toBe(2)
-    expect(result.speaker).toBe('Silas Larson')
+    expect(result.speaker).toBe('Elliot Sterling')
   })
 
   it('naming a short track: the dominant takes the chunk voiceprint, any other short track is Ext, never the client label (6.61.1)', () => {
@@ -81,21 +81,21 @@ describe('naming the tracks of one chunk', () => {
       activity: activityOf(6, [[2, 0, 4.5], [6, 5, 5.8]]),
       text: 'We should hold the budget until Monday. Right.',
       audio: wavOf(6, () => 300),
-      identify: signVoiceprint({ positive: 'Silas Larson', negative: 'MU' }),
+      identify: signVoiceprint({ positive: 'Elliot Sterling', negative: 'MU' }),
       owner: 'MU',
     }
     // The glasses send their default wearer label; it is not evidence of who spoke.
-    const withClient = nameChunkSegments({ ...base, chunkVoiceprint: { speaker: 'Silas Larson', similarity: 0.7 }, clientSpeaker: 'MU' })
+    const withClient = nameChunkSegments({ ...base, chunkVoiceprint: { speaker: 'Elliot Sterling', similarity: 0.7 }, clientSpeaker: 'MU' })
     if (!withClient.ok) throw new Error(withClient.reason)
     expect(withClient.segments.map(s => [s.speaker, s.text])).toEqual([
-      ['Silas Larson', 'We should hold the budget until Monday.'],
+      ['Elliot Sterling', 'We should hold the budget until Monday.'],
       ['Ext', 'Right.'],
     ])
     expect(withClient.ownerGuard).toEqual({ client_label: 1, weak_owner: 0 })
-    for (const clientSpeaker of ['Silas Larson', 'Unknown', 'Ext']) {
-      const other = nameChunkSegments({ ...base, chunkVoiceprint: { speaker: 'Silas Larson', similarity: 0.7 }, clientSpeaker })
+    for (const clientSpeaker of ['Elliot Sterling', 'Unknown', 'Ext']) {
+      const other = nameChunkSegments({ ...base, chunkVoiceprint: { speaker: 'Elliot Sterling', similarity: 0.7 }, clientSpeaker })
       if (!other.ok) throw new Error(other.reason)
-      expect(other.segments.map(s => s.speaker)).toEqual(['Silas Larson', 'Ext'])
+      expect(other.segments.map(s => s.speaker)).toEqual(['Elliot Sterling', 'Ext'])
       expect(other.ownerGuard).toEqual({ client_label: 0, weak_owner: 0 })
     }
   })
@@ -123,12 +123,12 @@ describe('naming the tracks of one chunk', () => {
       audio: wavOf(6, t => (t < 3.1 ? 400 : -400)),
       chunkVoiceprint: MU,
       clientSpeaker: 'MU',
-      identify: signVoiceprint({ positive: 'MU', negative: 'Silas Larson' }),
+      identify: signVoiceprint({ positive: 'MU', negative: 'Elliot Sterling' }),
     })
     if (!result.ok) throw new Error(result.reason)
     expect(result.timing).toBe('words')
     // Estimated by length this would split three and three; the clocks say five and one.
-    expect(result.segments.map(s => [s.speaker, s.text])).toEqual([['MU', 'one two three four five'], ['Silas Larson', 'six']])
+    expect(result.segments.map(s => [s.speaker, s.text])).toEqual([['MU', 'one two three four five'], ['Elliot Sterling', 'six']])
   })
 
   it('the chunk speaker is the voice that carries the words, not a louder voice with none', () => {
@@ -141,11 +141,11 @@ describe('naming the tracks of one chunk', () => {
       audio: wavOf(6, () => 300),
       chunkVoiceprint: MU,
       clientSpeaker: 'MU',
-      identify: () => ({ speaker: 'Silas Larson', similarity: 0.7 }),
+      identify: () => ({ speaker: 'Elliot Sterling', similarity: 0.7 }),
     })
     if (!result.ok) throw new Error(result.reason)
     // Channel 0 carries every word but has no audio of its own to name: Ext, not
-    // the client's MU (6.61.1) and not the louder wordless Silas.
+    // the client's MU (6.61.1) and not the louder wordless Elliot.
     expect(result.segments.map(s => s.speaker)).toEqual(['Ext'])
     expect(result.speaker).toBe('Ext')
   })
@@ -164,15 +164,15 @@ describe('live labels never block or lose a chunk', () => {
     clock: () => 150,
     text: 'Yeah I agree with that. So the bookings month came in light again.',
     audio: wavOf(6, t => (t < 2.8 ? 400 : -400)),
-    voiceprint: { speaker: 'Silas Larson', similarity: 0.6 },
+    voiceprint: { speaker: 'Elliot Sterling', similarity: 0.6 },
     clientSpeaker: 'MU',
-    identify: signVoiceprint({ positive: 'MU', negative: 'Silas Larson' }),
+    identify: signVoiceprint({ positive: 'MU', negative: 'Elliot Sterling' }),
   })
 
   it('a clean run gives segments with the dominant name as speaker', async () => {
     const labels = await resolveLiveLabels(input(Promise.resolve({ ok: true, run: runOf(6, [[0, 0, 2.6], [5, 3, 6]]) })))
-    expect(labels.speaker).toBe('Silas Larson')
-    expect(labels.segments?.map(s => s.speaker)).toEqual(['MU', 'Silas Larson'])
+    expect(labels.speaker).toBe('Elliot Sterling')
+    expect(labels.segments?.map(s => s.speaker)).toEqual(['MU', 'Elliot Sterling'])
     // Nemotron's own run time (140 ms), not the 150 ms the chunk waited.
     expect(labels.diarizer).toMatchObject({ engine: 'nemotron', tracks: 2, ms: 140 })
     expect(labels.record).toMatchObject({ outcome: 'nemotron', segments: 2 })
@@ -180,35 +180,35 @@ describe('live labels never block or lose a chunk', () => {
 
   it('keeps the whole-chunk voiceprint label recoverable when the dominant track is someone else', async () => {
     const labels = await resolveLiveLabels({ ...input(Promise.resolve({ ok: true, run: runOf(6, [[0, 0, 2.6], [5, 3, 6]]) })), voiceprint: { speaker: 'MU', similarity: 0.66 } })
-    expect(labels.speaker).toBe('Silas Larson')
+    expect(labels.speaker).toBe('Elliot Sterling')
     expect(labels.diarizer).toMatchObject({ voiceprintSpeaker: 'MU', voiceprintSimilarity: 0.66 })
   })
 
   it('fallback on timeout: the voiceprint label, no segments, the reason recorded', async () => {
     const labels = await resolveLiveLabels(input(Promise.resolve({ ok: false, reason: 'timeout', detail: 'no result within 1500 ms', ms: 1500 })))
-    expect(labels).toMatchObject({ speaker: 'Silas Larson', similarity: 0.6, diarizer: { engine: 'voiceprint', fallback: 'timeout' } })
+    expect(labels).toMatchObject({ speaker: 'Elliot Sterling', similarity: 0.6, diarizer: { engine: 'voiceprint', fallback: 'timeout' } })
     expect(labels.segments).toBeUndefined()
     expect(labels.record).toMatchObject({ outcome: 'voiceprint', reason: 'timeout', ms: 1500 })
   })
 
   it('fallback on failure: a crashed CLI or a rejected promise keeps the voiceprint', async () => {
     const crashed = await resolveLiveLabels(input(Promise.resolve({ ok: false, reason: 'cli_failed', detail: 'exit 1' })))
-    expect(crashed).toMatchObject({ speaker: 'Silas Larson', diarizer: { fallback: 'cli_failed' } })
+    expect(crashed).toMatchObject({ speaker: 'Elliot Sterling', diarizer: { fallback: 'cli_failed' } })
     const rejected = await resolveLiveLabels(input(Promise.reject(new Error('boom'))))
-    expect(rejected).toMatchObject({ speaker: 'Silas Larson', diarizer: { fallback: 'error' } })
+    expect(rejected).toMatchObject({ speaker: 'Elliot Sterling', diarizer: { fallback: 'error' } })
   })
 
   it('fallback on a missing CLI or models: the voiceprint label, no per-chunk stamp and no per-chunk log', async () => {
     // An install without the CLI is the public default: the warm-up says so once (QA N5).
     for (const reason of ['cli_missing', 'models_missing'] as const) {
       const labels = await resolveLiveLabels(input(Promise.resolve({ ok: false, reason })))
-      expect(labels).toEqual({ speaker: 'Silas Larson', similarity: 0.6 })
+      expect(labels).toEqual({ speaker: 'Elliot Sterling', similarity: 0.6 })
     }
   })
 
   it('the voiceprint chosen by config is not a fallback and records nothing', async () => {
     const labels = await resolveLiveLabels(input(Promise.resolve({ ok: false, reason: 'embedding_requested' })))
-    expect(labels).toEqual({ speaker: 'Silas Larson', similarity: 0.6 })
+    expect(labels).toEqual({ speaker: 'Elliot Sterling', similarity: 0.6 })
   })
 })
 
@@ -493,7 +493,7 @@ describe('the live runtime', () => {
 describe('turns always join to the text', () => {
   it('punctuation-only tokens, a double space and two tracks with one name merge into one exact turn', () => {
     const text = 'Yeah , so - we ...  agree. Right'
-    for (const names of [{ positive: 'MU', negative: 'MU' }, { positive: 'MU', negative: 'Silas Larson' }]) {
+    for (const names of [{ positive: 'MU', negative: 'MU' }, { positive: 'MU', negative: 'Elliot Sterling' }]) {
       const result = nameChunkSegments({
         activity: activityOf(6, [[0, 0, 2.6], [5, 3, 6]]),
         text,
@@ -511,11 +511,11 @@ describe('turns always join to the text', () => {
   it('refits turns to a text recovery stripped, or drops them when the words no longer line up', () => {
     const turns = [
       { speaker: 'MU', text: 'alpha bravo noise', startSec: 0, endSec: 2, similarity: 0.8 },
-      { speaker: 'Silas Larson', text: 'phrase charlie', startSec: 2, endSec: 5, similarity: 0.7 },
+      { speaker: 'Elliot Sterling', text: 'phrase charlie', startSec: 2, endSec: 5, similarity: 0.7 },
     ]
     expect(resplitSegments(turns, 'alpha bravo charlie')).toEqual([
       { speaker: 'MU', text: 'alpha bravo', startSec: 0, endSec: 2, similarity: 0.8 },
-      { speaker: 'Silas Larson', text: 'charlie', startSec: 2, endSec: 5, similarity: 0.7 },
+      { speaker: 'Elliot Sterling', text: 'charlie', startSec: 2, endSec: 5, similarity: 0.7 },
     ])
     // A whole turn stripped away: its neighbours of one name merge.
     expect(resplitSegments([turns[0], turns[1], { speaker: 'MU', text: 'delta', startSec: 5, endSec: 6, similarity: 0.9 }], 'alpha bravo noise delta'))
@@ -546,17 +546,17 @@ describe('6.61.1 owner guard: the field chunks of 2026-10-02 (meeting_1790953219
     expect(result.ownerGuard.client_label).toBe(1)
   })
 
-  it('chunk 157 "I can send a message. Yeah." (self 3/125): not the wearer; Kyle keeps his own track', () => {
+  it('chunk 157 "I can send a message. Yeah." (self 3/125): not the wearer; Corin keeps his own track', () => {
     const result = nameChunkSegments({
       activity: activityOf(6.26, [[1, 0, 1.9], [0, 2.3, 6.26]]),
-      text: 'I can send a message. Yeah. There is still time on this. I pinged you and Silas earlier on at this meeting.',
+      text: 'I can send a message. Yeah. There is still time on this. I pinged you and Elliot earlier on at this meeting.',
       audio: wavOf(6.26, t => (t < 2.1 ? -400 : 400)),
       chunkVoiceprint: EXT, clientSpeaker: 'MU', owner: 'MU',
-      identify: identifyAs({ speaker: 'Kyle Johnson', similarity: 0.626 }, EXT),
+      identify: identifyAs({ speaker: 'Corin Hale', similarity: 0.626 }, EXT),
     })
     if (!result.ok) throw new Error(result.reason)
-    expect(result.segments.map(s => s.speaker)).toEqual(['Ext', 'Kyle Johnson'])
-    expect(result.speaker).toBe('Kyle Johnson')
+    expect(result.segments.map(s => s.speaker)).toEqual(['Ext', 'Corin Hale'])
+    expect(result.speaker).toBe('Corin Hale')
   })
 
   it('chunk 132 "Of course. All right." at 0.612 (self 42/124): a weak wearer match is Ext', () => {
@@ -587,10 +587,10 @@ describe('6.61.1 owner guard: the field chunks of 2026-10-02 (meeting_1790953219
       text: "That's it. We've, uh, we've done the full rollout. Over to you on the next one.",
       audio: wavOf(6.3, t => (t < 3.5 ? 400 : -400)),
       chunkVoiceprint: { speaker: 'MU', similarity: 0.716 }, clientSpeaker: 'MU', owner: 'MU',
-      identify: identifyAs({ speaker: 'MU', similarity: 0.716 }, { speaker: 'Jeremy Sokolic', similarity: 0.7 }),
+      identify: identifyAs({ speaker: 'MU', similarity: 0.716 }, { speaker: 'Jasper Quillen', similarity: 0.7 }),
     })
     if (!split.ok) throw new Error(split.reason)
-    expect(split.segments.map(s => s.speaker)).toEqual(['MU', 'Jeremy Sokolic'])
+    expect(split.segments.map(s => s.speaker)).toEqual(['MU', 'Jasper Quillen'])
     expect(split.ownerGuard).toEqual({ client_label: 0, weak_owner: 0 })
   })
 

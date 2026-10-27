@@ -26,8 +26,8 @@ function label(overrides: Partial<SentenceLabel>): SentenceLabel {
   return {
     index: 0,
     ffLabel: 'Speaker 1',
-    g2Label: 'Nadia Okonkwo',
-    resolvedLabel: 'Nadia Okonkwo',
+    g2Label: 'Odette Marlowe',
+    resolvedLabel: 'Odette Marlowe',
     share: 0.9,
     similarity: 0.8,
     windowOffsetMs: 0,
@@ -217,7 +217,7 @@ describe('what the patch must NOT contain', () => {
       title: 'Quarterly planning',
       summary: 'A summary the pipeline wrote',
       actionItems: ['An item the pipeline extracted'],
-      participants: ['Nadia Okonkwo'],
+      participants: ['Odette Marlowe'],
     }),
     captures: [pair.capture],
     evidence: { k1: 40, k2: 0 },
@@ -251,7 +251,7 @@ describe('what the patch must NOT contain', () => {
 describe('the speaker map', () => {
   it('maps a generic label held outright by one G2 name', () => {
     const labels = Array.from({ length: 10 }, (_, index) => label({ index, similarity: 0.8 }))
-    expect(speakerMapFrom(labels)).toEqual({ 'Speaker 1': { name: 'Nadia Okonkwo', similarity: 0.8, sentences: 10 } })
+    expect(speakerMapFrom(labels)).toEqual({ 'Speaker 1': { name: 'Odette Marlowe', similarity: 0.8, sentences: 10 } })
   })
 
   it('never maps a label that already names a person', () => {

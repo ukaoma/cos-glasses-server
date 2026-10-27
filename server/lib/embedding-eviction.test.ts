@@ -5,9 +5,9 @@
 // shapes are real:
 //
 //   MU            20/20 — fireflies 10, g2-training 9, unknown 1  (no human sample)
-//   Grace Ukaoma  20/20 — manual at index 0, 17 weaker samples available
+//   Faith Ukamya  20/20 — manual at index 0, 17 weaker samples available
 //
-// Grace's profile is the concrete case this policy exists for: under plain FIFO
+// Faith's profile is the concrete case this policy exists for: under plain FIFO
 // the next correction deletes the only deliberately-enrolled sample of her voice
 // while seventeen weaker samples sit untouched. Four profiles at cap share that
 // shape.
@@ -31,7 +31,7 @@ const MU = [
   ...Array(9).fill('g2-training'),
   'unknown',
 ]
-/** Grace as stored today: the deliberate enrollment is the OLDEST sample. */
+/** Faith as stored today: the deliberate enrollment is the OLDEST sample. */
 const GRACE = [
   'manual',
   ...Array(14).fill('fireflies'),
@@ -102,7 +102,7 @@ describe('eviction order', () => {
 
   it('takes unverified attendee-metadata before an identifier-labelled sample', () => {
     // fireflies labels come from attendee metadata and were never acoustically
-    // verified — the chain that manufactured the phantom Erick Hernandez profile.
+    // verified — the chain that manufactured the phantom Evan Hartwell profile.
     const c = chooseEviction(['manual', 'g2-training', 'fireflies'], 'correction:m', 40)
     expect(c?.index).toBe(2)
     expect(c?.tier).toBe('metadata')
@@ -128,7 +128,7 @@ describe('eviction order', () => {
 })
 
 describe('the live profiles this policy was written for', () => {
-  it("protects Grace's only deliberate enrollment, which FIFO would delete first", () => {
+  it("protects Faith's only deliberate enrollment, which FIFO would delete first", () => {
     const c = chooseEviction(GRACE, 'correction:meeting_new', 40)
     expect(c).not.toBeNull()
     expect(c!.index).not.toBe(0)              // index 0 is the `manual` sample
@@ -262,6 +262,16 @@ describe('mac-assign:<session> provenance', () => {
   it('never uses the correction quota path: it is not a correction, so 20 corrections do not make it replace one', () => {
     const sources = [...Array(20).fill('correction:m'), ...Array(20).fill('g2-training')]
     expect(chooseEviction(sources, 'mac-assign:incoming', 40)!.refuse).toBe(true)
+  })
+
+  it('a correction at quota replaces the oldest correction BEFORE the Mac step runs', () => {
+    // 20 corrections is the quota at cap 40. Swapping the two branches would drop the Mac sample here and
+    // leave 21 corrections in a profile that is only allowed 20.
+    const sources = [...Array(20).fill('correction:m'), 'mac-assign:m', ...Array(19).fill('g2-training')]
+    const choice = chooseEviction(sources, 'correction:new', 40)!
+    expect(choice.index).toBe(0)
+    expect(choice.tier).toBe('human')
+    expect(choice.reason).toContain('quota')
   })
 
   it('a G2 correction or g2-training sample evicts a Mac-assigned sample before an older g2-training one', () => {

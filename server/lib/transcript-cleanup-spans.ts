@@ -16,10 +16,10 @@
 //    near_name        a word the engine was unsure of (below 0.9) that is a capitalised word
 //                     one edit past fuzzy-correct's limit from a known name, or that sounds
 //                     like one (same consonant skeleton and onset); two or three short
-//                     adjacent pieces joined ("U coma"), none a function word; or the
-//                     leading-y rule at any confidence ("Yukoma" for Ukaoma)
+//                     adjacent pieces joined ("U cmya"), none a function word; or the
+//                     leading-y rule at any confidence ("Yukmya" for Ukamya)
 //    oov_capitalized  a capitalised word mid-sentence that is no known name and no common
-//                     word, within two words of a known name ("Grace Eucoma")
+//                     word, within two words of a known name ("Faith Eucmya")
 //    repeat           a phrase of 2 to 4 words (or one long word) said three or more
 //                     times in a row: the classic decoder loop
 //    Flagged words one word apart merge; a span holds at most 6 words (12 for a repeat)
@@ -104,7 +104,7 @@ const POSSESSIVE = /(['’]s)$/i
  *     attendees as targets Slack still became Black twice; they reach the model as context
  *     and drive near-name spans instead), and the curated dictionary and the owner
  *     ("strong" targets) rewrite only a word the engine was unsure of. With those rules the
- *     68 meetings got 27 fixes, all real (Manuj to Manoj 9 times, MarketPOS to MarktPOS).
+ *     68 meetings got 27 fixes, all real (Mohun to Mohan 9 times, MarketPOS to MarktPOS).
  *   - a term from THIS meeting's screen or files (the per-meeting vocabulary) may rewrite a
  *     capitalised word at any confidence: it is what was on screen while it was said.
  * Never into an inflection of the word, and a word that only opens a sentence only when the
@@ -159,11 +159,11 @@ interface NearInput { key: string; capitalized: boolean; probability?: number; j
 
 /**
  * The known name `key` is plausibly a mishearing of, or null.
- *   - the leading-y rule (meeting-ask-owner.ts): "Yukoma" is one edit from "Ukaoma" once its y goes
+ *   - the leading-y rule (meeting-ask-owner.ts): "Yukmya" is one edit from "Ukamya" once its y goes
  *   - otherwise only for a word the engine was unsure of (below NEAR_NAME_UNSURE, or unscored):
  *       a capitalised single word one edit past fuzzy-correct's own limit, or
  *       any word (or short joined pieces) that sounds like the name (soundsAlike)
- *   - joined pieces may also be within fuzzy-correct's own limit ("U coma" read as one word)
+ *   - joined pieces may also be within fuzzy-correct's own limit ("U cmya" read as one word)
  */
 function nearName(input: NearInput, targets: readonly NameTarget[], known: ReadonlySet<string>): string | null {
   const { key } = input
@@ -174,7 +174,7 @@ function nearName(input: NearInput, targets: readonly NameTarget[], known: Reado
   for (const t of targets) {
     if (Math.abs(t.key.length - key.length) > 2) continue
     const d = levenshtein(key, t.key)
-    // A single word spelled exactly like a name is the name. Pieces that join into one exactly ("Uka oma") are the
+    // A single word spelled exactly like a name is the name. Pieces that join into one exactly ("Uka mya") are the
     // strongest sign of a split name there is.
     if (d === 0 && !input.join) return null
     // "setting" next to a "Settings" label is the same word, not a misheard name.
@@ -260,12 +260,12 @@ export function selectSpans(
       if (near) flag(t.i, 'near_name', near)
     }
   }
-  // Two or three adjacent words joined: "U coma", "Yu ko ma". One of them must be short (a split fragment).
+  // Two or three adjacent words joined: "U cmya", "Yu ko ma". One of them must be short (a split fragment).
   for (let i = 0; i + 1 < tokens.length; i++) {
     for (const width of [2, 3]) {
       const group = tokens.slice(i, i + width)
       if (group.length < width || group.some(g => g.line !== tokens[i].line || !g.key || fixed.has(g.i) || known.has(g.key))) continue
-      // A split name is short pieces ("U coma", "Yu ko ma"); a long word plus a short one is just two words,
+      // A split name is short pieces ("U cmya", "Yu ko ma"); a long word plus a short one is just two words,
       // and a function word is never a piece of a name.
       if (!group.some(g => g.key.length <= 3) || group.some(g => g.key.length > 5 || FUNCTION_WORDS.has(g.key))) continue
       const joined = group.map(g => g.key).join('')
@@ -303,7 +303,7 @@ export function selectSpans(
     while (k < flagged.length) {
       const next = flagged[k]
       if (tokens[next].line !== tokens[from].line || next - to > 1 || next + 1 - from > SPAN_LIMITS.maxSpanWords) break
-      // Never across a clause: "Yukoma and eucoma, then U coma" is two passages, not one.
+      // Never across a clause: "Yukmya and eucmya, then U cmya" is two passages, not one.
       if (tokens.slice(to - 1, next).some(t => /[,.;:!?]["')\]]*$/.test(t.raw))) break
       if ([...Array(next - to).keys()].some(g => repeatTokens.has(to + g))) break
       for (const r of flags.get(next)!.reasons) reasons.add(r)

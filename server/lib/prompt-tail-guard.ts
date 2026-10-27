@@ -55,7 +55,7 @@ export const TAIL_WINDOW_SEC = 10
  * no free-text tail — so it matches a sentence that IS the filler and nothing
  * that merely starts with its words. The re-validation of 2026-09-12 caught
  * `.{0,30}` tails letting "Thanks for watching the demo.", "Transcript from the
- * Silas call is in the folder." and "Subscribe me to the newsletter." through.
+ * Elliot call is in the folder." and "Subscribe me to the newsletter." through.
  * "See you later", "the end", "transcribed by" and "translated by" are
  * deliberately absent: each occurs in real dictation ("Translated by Friday."),
  * and whisper's inventions are the caption-credit shapes below. A filler this

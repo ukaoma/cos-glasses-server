@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { TASK_DATE_LIMITS, TaskDateResolver, findGitWorkTree, isGitTimeout, lineHolds, parseBlamePorcelain, pickaxeNeedle, realDateGitRunner,
   resolveTaskDatesWithin, sourceDate, taskDateKey, type DateGitRunner, type DateSourceRow } from './task-dates.js'
 
-// Real paths carry spaces and dots ("Ukaoma Chief Of Staff", "~/.cos-glasses"); so does every fixture here.
+// Real paths carry spaces and dots ("Ukamya Chief Of Staff", "~/.cos-glasses"); so does every fixture here.
 let base = '', repo = '', ops = ''
 const C1 = '2026-03-01T10:00:00Z', C2 = '2026-04-15T12:00:00Z', C3 = '2026-05-20T08:30:00Z'
 function git(args: string[], at = C1, cwd = repo): string {

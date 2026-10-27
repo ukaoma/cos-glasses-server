@@ -1,7 +1,7 @@
 // What leaves the machine when Miles clicks Copy.
 //
 // THE FIXTURE IS THE POINT. v1's fixture put the confirmed-absent name ONLY in
-// `## Attendees`, so `expect(out).not.toContain('Richard Jenkins')` passed while
+// `## Attendees`, so `expect(out).not.toContain('Rowan Jennings')` passed while
 // 14 unasserted names shipped in the transcript of every real meeting. Third time
 // in one day a green suite hid a defect because the fixture could not reproduce
 // production, so this one carries the real shapes: a `[Name]:` transcript label
@@ -28,11 +28,11 @@ const SCRIBE = `# IJO Post-Mortem, Edge Saturation Stalls Deals (G2)
 | Duration | 26 minutes |
 
 ## Attendees
-- Richard Jenkins
+- Rowan Jennings
 - Fourteen others the review never confirmed
 
 ## Summary
-Reviewed the IJO outcome. Jessica Thompson owns the booth follow-up.
+Reviewed the IJO outcome. Joanna Thornley owns the booth follow-up.
 
 ## Topics Discussed
 - Edge saturation
@@ -44,7 +44,7 @@ Reviewed the IJO outcome. Jessica Thompson owns the booth follow-up.
 ## Action Items
 
 ### High Confidence
-- [ ] Add a booth-placement requirement (Jessica Thompson)
+- [ ] Add a booth-placement requirement (Joanna Thornley)
 
 ### Needs Review
 - [ ] \`[REVIEW]\` Chase the pricing source
@@ -57,7 +57,7 @@ Miles's own write-up, which v1 threw away.
 <summary>Click to expand transcript</summary>
 
 [MU]: So where did IJO land.
-[Richard Jenkins]: Edge was everywhere on the floor.
+[Rowan Jennings]: Edge was everywhere on the floor.
 
 </details>
 
@@ -143,8 +143,8 @@ describe('cleanBody', () => {
 
 const VOICES: AttendeeLine[] = [
   { label: 'MU', asserted: true, speakingMs: 600_000, share: 0.6, isOwner: false, confirmedByHuman: false },
-  { label: 'Gina Obert', asserted: true, speakingMs: 400_000, share: 0.4, isOwner: false, confirmedByHuman: false },
-  { label: 'Richard Jenkins', asserted: false, speakingMs: 30_000, share: null, isOwner: false, confirmedByHuman: false },
+  { label: 'Mira Orlen', asserted: true, speakingMs: 400_000, share: 0.4, isOwner: false, confirmedByHuman: false },
+  { label: 'Rowan Jennings', asserted: false, speakingMs: 30_000, share: null, isOwner: false, confirmedByHuman: false },
   { label: 'Ext', asserted: false, speakingMs: 120_000, share: null, isOwner: false, confirmedByHuman: false },
 ]
 /** The review's UNION for the unnamed voices — deliberately LESS than 30+120. */
@@ -156,12 +156,12 @@ describe('renderAttendees', () => {
   it('names only asserted voices, with time and share', () => {
     const out = renderAttendees(VOICES, HIGH)
     expect(out).toContain('- MU: 10m · 60% of identified speech')
-    expect(out).toContain('- Gina Obert: 6m 40s · 40% of identified speech')
+    expect(out).toContain('- Mira Orlen: 6m 40s · 40% of identified speech')
   })
 
   it('NEVER names an unasserted voice in the attendee block', () => {
     const out = renderAttendees(VOICES, HIGH)
-    expect(out).not.toContain('Richard Jenkins')
+    expect(out).not.toContain('Rowan Jennings')
     expect(out).not.toContain('Ext')
   })
 
@@ -209,7 +209,7 @@ describe('renderProvenance', () => {
     const out = renderProvenance(VOICES, 0.9)
     expect(out).toContain('Names established here:')
     expect(out).toMatch(/"MU"/)
-    expect(out).toMatch(/"Gina Obert"/)
+    expect(out).toMatch(/"Mira Orlen"/)
   })
 
   it('warns that any other name is unconfirmed, and may be merely mentioned', () => {
@@ -349,23 +349,23 @@ describe('provenance names the WARRANT, not "voice matching" for all three', () 
   })
 
   it('credits a human-typed name to the human', () => {
-    const out = renderProvenance([A('Luke Henry', { confirmedByHuman: true })], 0.9)
-    expect(out).toMatch(/"Luke Henry" because a human named that voice/)
-    expect(out).not.toMatch(/"Luke Henry" by voice match/)
+    const out = renderProvenance([A('Theo Marsh', { confirmedByHuman: true })], 0.9)
+    expect(out).toMatch(/"Theo Marsh" because a human named that voice/)
+    expect(out).not.toMatch(/"Theo Marsh" by voice match/)
   })
 
   it('credits only a real cosine match to voice matching', () => {
-    const out = renderProvenance([A('Ilona Halvorsen')], 0.9)
-    expect(out).toMatch(/"Ilona Halvorsen" by voice match/)
+    const out = renderProvenance([A('Ilona Haldane')], 0.9)
+    expect(out).toMatch(/"Ilona Haldane" by voice match/)
   })
 
   it('separates all three warrants in one meeting', () => {
     const out = renderProvenance([
       A('MU', { isOwner: true }),
-      A('Ilona Halvorsen'),
-      A('Luke Henry', { confirmedByHuman: true }),
+      A('Ilona Haldane'),
+      A('Theo Marsh', { confirmedByHuman: true }),
     ], 0.9)
-    expect(out).toMatch(/"MU" by wearing the device; "Ilona Halvorsen" by voice match; "Luke Henry" because a human named that voice/)
+    expect(out).toMatch(/"MU" by wearing the device; "Ilona Haldane" by voice match; "Theo Marsh" because a human named that voice/)
   })
 
   it('quotes labels so a comma inside one cannot read as two people', () => {
@@ -374,7 +374,7 @@ describe('provenance names the WARRANT, not "voice matching" for all three', () 
 
   it('warns that a different SPELLING of a confirmed name is still unconfirmed', () => {
     // Labels are `MU` while the prose says "Miles"; the correction chain is
-    // documented as Ext -> Luke H -> Luke Henry. A reader applying a
+    // documented as Ext -> Theo M -> Theo Marsh. A reader applying a
     // names-only rule literally would mis-read both.
     expect(renderProvenance([A('MU', { isOwner: true })], 0.9))
       .toMatch(/any different spelling of the ones just listed/)
@@ -442,7 +442,7 @@ describe('the compact form stays compact', () => {
 describe('a derived note is never relabelled as the transcript', () => {
   it('prints the section\'s own heading', () => {
     const scribe = parseScribe([
-      '# Pete Silas 1-1', '## Summary', 's',
+      '# Owen Elliot 1-1', '## Summary', 's',
       '## Transcript Enrichment (from raw recording)', 'derived analysis, not speech',
     ].join('\n'))
     const full = clipboardFull({ ...BASE, scribe })
@@ -489,22 +489,22 @@ describe('time and date edges', () => {
 })
 
 describe('a name the human explicitly removed', () => {
-  // 2026-08-07: Miles removed "Clem Ukaoma" from a call that was only him and
-  // Grace. All 8 label sites were rewritten; the summary still opened
-  // "Miles, Grace, and Clem talk through..." and the payload said nothing.
+  // 2026-08-07: Miles removed "Robin Vale" from a call that was only him and
+  // Faith. All 8 label sites were rewritten; the summary still opened
+  // "Miles, Faith, and Robin talk through..." and the payload said nothing.
   const scribe = parseScribe([
     '# Generational Trauma And Parenting Fears (G2)',
-    '## Summary', 'Miles, Grace, and Clem talk through the fallout.',
+    '## Summary', 'Miles, Faith, and Robin talk through the fallout.',
     '## Transcript', '[Unidentified 1]: reclose that is how you close it',
   ].join('\n'))
-  const removed = [{ label: 'Clem Ukaoma', proseStale: true }]
+  const removed = [{ label: 'Robin Vale', proseStale: true }]
 
   it('states the removal, in both forms', () => {
     for (const out of [
       clipboardSummary({ ...BASE, scribe, removed }),
       clipboardFull({ ...BASE, scribe, removed }),
     ]) {
-      expect(out).toMatch(/You removed "Clem Ukaoma" from this meeting/)
+      expect(out).toMatch(/You removed "Robin Vale" from this meeting/)
       expect(out).toMatch(/treat every mention of it as a capture error/)
     }
   })
@@ -512,14 +512,14 @@ describe('a name the human explicitly removed', () => {
   it('does NOT rewrite the prose', () => {
     // Substituting into a written sentence mangles grammar and can hit the wrong
     // person. The record stays; the correction travels beside it.
-    expect(clipboardSummary({ ...BASE, scribe, removed })).toMatch(/Miles, Grace, and Clem talk through/)
+    expect(clipboardSummary({ ...BASE, scribe, removed })).toMatch(/Miles, Faith, and Robin talk through/)
   })
 
   it('is quieter when the prose does not carry the name', () => {
     const out = clipboardSummary({
-      ...BASE, scribe, removed: [{ label: 'Clem Ukaoma', proseStale: false }],
+      ...BASE, scribe, removed: [{ label: 'Robin Vale', proseStale: false }],
     })
-    expect(out).toMatch(/You also removed "Clem Ukaoma"/)
+    expect(out).toMatch(/You also removed "Robin Vale"/)
     expect(out).not.toMatch(/still uses the name/)
   })
 
@@ -531,7 +531,7 @@ describe('a name the human explicitly removed', () => {
 describe('the overlap note is gated on meeting LENGTH, not voiced time', () => {
   const two = (a: number, b: number): AttendeeLine[] => [
     { label: 'MU', asserted: true, speakingMs: a, share: 0.6, isOwner: true, confirmedByHuman: false },
-    { label: 'Grace Ukaoma', asserted: true, speakingMs: b, share: 0.4, isOwner: false, confirmedByHuman: false },
+    { label: 'Faith Ukamya', asserted: true, speakingMs: b, share: 0.4, isOwner: false, confirmedByHuman: false },
   ]
 
   it('stays QUIET on ordinary overlap inside the meeting length', () => {
@@ -549,8 +549,8 @@ describe('the overlap note is gated on meeting LENGTH, not voiced time', () => {
     // The real 66-minute meeting whose displayed rows totalled 71m9s:
     // 23m29 + 18m6 + 15m29 + 5m2 named = 62m6, plus 9m3 unidentified.
     const real: AttendeeLine[] = [
-      ['Jeremy Sokolic', 23 * 60_000 + 29_000], ['Graham Hoffman', 18 * 60_000 + 6_000],
-      ['MU', 15 * 60_000 + 29_000], ['Silas Larson', 5 * 60_000 + 2_000],
+      ['Jasper Quillen', 23 * 60_000 + 29_000], ['Gordon Hoffman', 18 * 60_000 + 6_000],
+      ['MU', 15 * 60_000 + 29_000], ['Elliot Sterling', 5 * 60_000 + 2_000],
     ].map(([label, ms]) => ({
       label: label as string, asserted: true, speakingMs: ms as number,
       share: 0.25, isOwner: label === 'MU', confirmedByHuman: false,

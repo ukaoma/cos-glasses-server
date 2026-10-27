@@ -80,7 +80,7 @@ const entry = (over: Record<string, unknown> = {}) => ({
   total_input_tokens: 100,
   total_output_tokens: 50,
   file_size_bytes: 2048,
-  device_id: 'Ukaoma-Mac-Studio',
+  device_id: 'Example-Mac-Studio',
   ...over,
 })
 
@@ -120,7 +120,7 @@ describe('reading the caches', () => {
     const base = await startTestServer()
     const body = await (await fetch(`${base}/api/session-index`)).json() as any
     expect(body.total).toBe(1)
-    expect(body.devices).toEqual(['Ukaoma-Mac-Studio'])
+    expect(body.devices).toEqual(['Example-Mac-Studio'])
     expect(body.sessions[0]).toMatchObject({
       session_id: 'sess_a', domain: 'personal', message_count: 8,
       first_prompt: 'How are we starting August?',
@@ -158,7 +158,7 @@ describe('reading the caches', () => {
 
 describe('the iCloud sync-conflict duplicate, measured on the real machine', () => {
   it('serves a session ONCE when two cache files hold it', async () => {
-    // Measured 2026-08-10: `.session_index_cache_Ukaoma-Mac-Studio 3.json` shared
+    // Measured 2026-08-10: `.session_index_cache_Example-Mac-Studio 3.json` shared
     // 543 of its 602 rows with the canonical file. The original filter read both, so
     // the merged list served 543 duplicates.
     writeCache('.session_index_cache_Studio.json', [entry({ modified: '2026-08-01T11:00:00Z' })])
@@ -195,7 +195,7 @@ describe('filters, ordering and bounds', () => {
   beforeEach(() => {
     writeCache('.session_index_cache_Studio.json', [
       entry({ session_id: 'p1', domain: 'personal', modified: '2026-08-03T10:00:00Z' }),
-      entry({ session_id: 'q1', domain: 'quilt', modified: '2026-08-05T10:00:00Z', device_id: 'MilesUkaoma-Air' }),
+      entry({ session_id: 'q1', domain: 'quilt', modified: '2026-08-05T10:00:00Z', device_id: 'JordanUkamya-Air' }),
       entry({ session_id: 'i1', domain: 'infrastructure', modified: '2026-08-04T10:00:00Z' }),
     ])
   })
@@ -210,7 +210,7 @@ describe('filters, ordering and bounds', () => {
     const base = await startTestServer()
     const byDomain = await (await fetch(`${base}/api/session-index?domain=quilt`)).json() as any
     expect(byDomain.sessions.map((s: any) => s.session_id)).toEqual(['q1'])
-    const byDevice = await (await fetch(`${base}/api/session-index?device=MilesUkaoma-Air`)).json() as any
+    const byDevice = await (await fetch(`${base}/api/session-index?device=JordanUkamya-Air`)).json() as any
     expect(byDevice.sessions.map((s: any) => s.session_id)).toEqual(['q1'])
   })
 
@@ -314,7 +314,7 @@ describe('detail lookup', () => {
       file_size_bytes: 2048,
       user_message_count: 4,
       domain: 'personal',
-      device_id: 'Ukaoma-Mac-Studio',
+      device_id: 'Example-Mac-Studio',
     })
   })
 

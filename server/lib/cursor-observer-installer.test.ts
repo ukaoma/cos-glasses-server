@@ -8,7 +8,7 @@ import {AGENT_THOUGHT_MAX} from './session-hook-events.js'
 const dirs:string[]=[]
 afterEach(()=>dirs.splice(0).forEach(p=>rmSync(p,{recursive:true,force:true})))
 // 6.62.0: a space and a dot directory in every path, as the real ones have.
-function fixture(){const root=mkdtempSync(join(tmpdir(),'cos-observe-'));dirs.push(root);const home=join(root,'Ukaoma Chief Of Staff');return{root:home,settingsPath:join(home,'.cursor','hooks.json'),scriptPath:join(home,'.cos-glasses','bin','cos-cursor-observer.cjs'),spool:join(home,'.cos-glasses','data','hook-spool')}}
+function fixture(){const root=mkdtempSync(join(tmpdir(),'cos-observe-'));dirs.push(root);const home=join(root,'Ukamya Chief Of Staff');return{root:home,settingsPath:join(home,'.cursor','hooks.json'),scriptPath:join(home,'.cos-glasses','bin','cos-cursor-observer.cjs'),spool:join(home,'.cos-glasses','data','hook-spool')}}
 it('merges idempotently, preserves user hooks, and removes only its own observers',()=>{
  const f=fixture();mkdirSync(join(f.root,'.cursor'),{recursive:true});writeFileSync(f.settingsPath,JSON.stringify({version:1,hooks:{subagentStart:[{command:'my-review'}]}}))
  expect(installCursorObserver(f).ok).toBe(true)

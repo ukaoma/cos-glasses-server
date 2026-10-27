@@ -123,6 +123,21 @@ describe('enrollEmbedding, real store', () => {
     expect(onDisk()[0].sources).toEqual(before)
   })
 
+  it('a correction arriving at quota replaces the oldest correction and leaves the Mac-assigned sample alone', async () => {
+    // 20 corrections is the quota at cap 40. The Mac step must not run first: taking the Mac sample would
+    // leave 21 corrections in the profile.
+    const corrections = Array.from({ length: 20 }, (_, i) => `correction:c${i}`)
+    seed('Dana Reyes', [...corrections, 'mac-assign:mac_x', ...Array(19).fill('g2-training')])
+    const speaker = await lib()
+    expect(speaker.enrollEmbedding('Dana Reyes', vec(0, 400), 'correction:c20').success).toBe(true)
+    const sources = onDisk()[0].sources
+    expect(sources).toHaveLength(40)
+    expect(sources).toContain('mac-assign:mac_x')
+    expect(sources).not.toContain('correction:c0')
+    expect(sources.filter(s => s.startsWith('correction:'))).toHaveLength(20)
+    expect(sources).toContain('correction:c20')
+  })
+
   it('a G2 correction into a full profile evicts a Mac-assigned sample before an older g2-training one', async () => {
     seed('Dana Reyes', ['g2-training', 'mac-assign:mac_x', ...Array(38).fill('g2-training')])
     const speaker = await lib()
@@ -162,13 +177,16 @@ describe('enrollEmbeddingsBatch, real store', () => {
   })
 
   it('caps Mac-assigned samples at ten per profile by replacing the oldest of them, and touches nothing else', async () => {
-    seed('Dana Reyes', ['correction:m', 'g2-training', ...Array.from({ length: 10 }, (_, i) => `mac-assign:old${i}`)])
+    // Ten ordinary samples, so the binding cap really is ten and not the smaller "other samples" rule.
+    const others = ['correction:m', 'g2-training', ...Array(8).fill('manual')]
+    seed('Dana Reyes', [...others, ...Array.from({ length: 10 }, (_, i) => `mac-assign:old${i}`)])
     const speaker = await lib()
     const result = speaker.enrollEmbeddingsBatch('Dana Reyes', Array.from({ length: 3 }, (_, i) => ({ embedding: vec(0, i + 1), source: 'mac-assign:new' })))
     expect(result.enrolled).toBe(3)
     const sources = onDisk()[0].sources
-    expect(sources).toHaveLength(12)
-    expect(sources.slice(0, 2)).toEqual(['correction:m', 'g2-training'])
+    expect(sources).toHaveLength(20)
+    expect(sources.filter(s => s.startsWith('mac-assign:'))).toHaveLength(10)
+    expect(sources.slice(0, 10)).toEqual(others)
     expect(sources.filter(s => s === 'mac-assign:new')).toHaveLength(3)
     expect(sources.filter(s => s.startsWith('mac-assign:old'))).toHaveLength(7)
     expect(sources).not.toContain('mac-assign:old0')

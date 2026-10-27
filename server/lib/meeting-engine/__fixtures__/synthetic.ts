@@ -183,7 +183,7 @@ export function goldenPatchScene(): {
       durationS: 1800,
       phrases,
       title: 'Golden synthetic review',
-      participants: ['nadia@example.test'],
+      participants: ['odette@example.test'],
       summary: 'A synthetic summary.',
       actionItems: ['Send the synthetic follow-up'],
       sha256: 'ff-golden-primary-sha',
@@ -192,7 +192,7 @@ export function goldenPatchScene(): {
       id: 'ff-golden-alternate',
       startMs: GOLDEN_PATCH_START_MS + 60_000,
       durationS: 1800,
-      phrases: [{ ...phrase('galt', 6, 120, 15), speaker: 'Marcus Bell' }],
+      phrases: [{ ...phrase('galt', 6, 120, 15), speaker: 'Marlon Bright' }],
       title: 'Golden synthetic review',
       sha256: 'ff-golden-alternate-sha',
     }),
@@ -205,7 +205,7 @@ export function goldenPatchScene(): {
       // TWO labels, deliberately. `labelIntervals` closes the last one after a short tail, so
       // a single label would not reach the phrases and the golden would pin an empty speaker
       // map and an empty verification list: a fixture that pins nothing anybody reads.
-      labels: [{ speaker: 'Nadia Okonkwo', startS: 0, similarity: 0.72 }, { speaker: 'Closing Speaker', startS: 900 }],
+      labels: [{ speaker: 'Odette Marlowe', startS: 0, similarity: 0.72 }, { speaker: 'Closing Speaker', startS: 900 }],
       sha256: 'g2-golden-sha',
       correctionRevision: 4,
       batchApplied: true,
@@ -234,7 +234,7 @@ export function matchingPair(options: {
       durationMs: durationS * 1000,
       phrases,
       offsetMs: 0,
-      labels: options.labels ?? [{ speaker: 'Nadia Okonkwo', startS: 0, similarity: 0.9 }],
+      labels: options.labels ?? [{ speaker: 'Odette Marlowe', startS: 0, similarity: 0.9 }],
     }),
     meeting: firefliesMeeting({
       id: options.firefliesId ?? 'f1',

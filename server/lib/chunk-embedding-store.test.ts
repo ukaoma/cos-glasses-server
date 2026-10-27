@@ -90,7 +90,7 @@ describe('append and read', () => {
   it('appends without rewriting, so order and count are preserved', () => {
     for (let i = 0; i < 40; i++) {
       store.appendChunkEmbedding('meeting_abc_2', {
-        i, speaker: i % 2 ? 'MU' : 'Clem Ukaoma', similarity: 0.6, embedding: realisticEmbedding(i),
+        i, speaker: i % 2 ? 'MU' : 'Robin Vale', similarity: 0.6, embedding: realisticEmbedding(i),
       })
     }
     const out = store.readChunkEmbeddings('meeting_abc_2')
@@ -159,13 +159,13 @@ describe('append and read', () => {
 
 describe('selecting the evidence for a correction', () => {
   beforeEach(() => {
-    const labels = ['MU', 'Clem Ukaoma', 'Clem Ukaoma', 'Ext', 'MU', 'Clem Ukaoma']
+    const labels = ['MU', 'Robin Vale', 'Robin Vale', 'Ext', 'MU', 'Robin Vale']
     labels.forEach((speaker, i) =>
       store.appendChunkEmbedding('meeting_sel', { i, speaker, similarity: 0.6, embedding: realisticEmbedding(i) }))
   })
 
   it('returns every chunk a label claimed', () => {
-    expect(store.chunkEmbeddingsForSpeaker('meeting_sel', 'Clem Ukaoma').map(r => r.i)).toEqual([1, 2, 5])
+    expect(store.chunkEmbeddingsForSpeaker('meeting_sel', 'Robin Vale').map(r => r.i)).toEqual([1, 2, 5])
   })
 
   it('keeps Ext, the case with no other route to training', () => {

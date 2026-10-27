@@ -155,7 +155,7 @@ const mutations = [
   ['excluded-not-logged', FINAL, "  if (!e || e.missing + e.hashMismatch + e.unreadable === 0) return ''\n", "  return ''\n", 'logs every outcome: a failed CLI, excluded chunks', FINAL_T],
   ['final-timeout-changed', FINAL, '  return 120_000 + Math.round((durationSec * 1000) / 20)\n', '  return 120_000 + Math.round((durationSec * 1000) / 10)\n', 'pins the timeout formula', FINAL_T],
   ['declined-pass-uncounted', FINAL, '  finalCounts[key] = (finalCounts[key] ?? 0) + 1\n  lastFinal = published\n', '', 'records metadata_not_persisted as a code', FINAL_T],
-  // 6.61.1 owner guard (field bug 2026-10-02: Jeremy and Kyle labelled MU)
+  // 6.61.1 owner guard (field bug 2026-10-02: Jasper and Corin labelled MU)
   ['client-label-names-track', LIVE, "      names.set(track.channel, { speaker: 'Ext', similarity: 0 })\n", "      names.set(track.channel, { speaker: isRealLabel(client) && client !== dominantName ? client : 'Ext', similarity: 0 })\n", 'chunk 150 "Okay."', LIVE_T],
   ['weak-owner-accepted', LIVE, '      if (!owner || named.speaker !== owner || named.similarity >= OWNER_VERIFY_SIMILARITY) return named\n', '      return named\n', 'chunk 132 "Of course. All right." at 0.612', LIVE_T],
   ['owner-threshold-is-search', FLOOR, 'export const OWNER_VERIFY_SIMILARITY = 0.65\n', 'export const OWNER_VERIFY_SIMILARITY = 0.55\n', 'chunk 132 "Of course. All right." at 0.612', LIVE_T],

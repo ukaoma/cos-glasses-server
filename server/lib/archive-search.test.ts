@@ -22,7 +22,7 @@ beforeAll(() => {
   // dotless mktemp fixture has hidden a production 404 in this codebase before.
   dir = mkdtempSync(join(tmpdir(), 'arch.search.'))
   day('2026-08-24', JSON.stringify({ date: '2026-08-24', chats: [{ exchanges: [{ content: 'the voiceprint model is missing' }] }] }))
-  day('2026-08-20', JSON.stringify({ date: '2026-08-20', chats: [{ exchanges: [{ content: 'Chelsie asked about enrolment' }] }] }))
+  day('2026-08-20', JSON.stringify({ date: '2026-08-20', chats: [{ exchanges: [{ content: 'Cassie asked about enrolment' }] }] }))
   day('2026-06-01', JSON.stringify({ date: '2026-06-01', chats: [{ exchanges: [{ content: 'older mention of voiceprint here' }] }] }))
   day('2026-03-02', JSON.stringify({ date: '2026-03-02', chats: [{ exchanges: [{ content: 'nothing relevant' }] }] }))
 })
@@ -54,7 +54,7 @@ describe('searchArchive', () => {
   })
 
   it('is case-insensitive', async () => {
-    const r = await searchArchive({ dir, dates, query: 'CHELSIE' })
+    const r = await searchArchive({ dir, dates, query: 'CASSIE' })
     expect(r.hits.map(h => h.date)).toEqual(['2026-08-20'])
   })
 
@@ -97,11 +97,11 @@ describe('snippet casing', () => {
   it('returns the snippet in its original casing', async () => {
     const sdir = mkdtempSync(join(tmpdir(), 'arch.case.'))
     try {
-      writeFileSync(join(sdir, '2026-08-05.json'), 'Chelsie owes the Sales-vs-Education split to Jeremy', 'utf8')
-      const r = await searchArchive({ dir: sdir, dates: ['2026-08-05'], query: 'chelsie' })
-      expect(r.hits[0].snippets[0]).toContain('Chelsie')
+      writeFileSync(join(sdir, '2026-08-05.json'), 'Cassie owes the Sales-vs-Education split to Jasper', 'utf8')
+      const r = await searchArchive({ dir: sdir, dates: ['2026-08-05'], query: 'cassie' })
+      expect(r.hits[0].snippets[0]).toContain('Cassie')
       expect(r.hits[0].snippets[0]).toContain('Sales-vs-Education')
-      expect(r.hits[0].snippets[0]).not.toContain('chelsie owes')
+      expect(r.hits[0].snippets[0]).not.toContain('cassie owes')
     } finally {
       rmSync(sdir, { recursive: true, force: true })
     }

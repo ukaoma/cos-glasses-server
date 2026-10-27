@@ -42,7 +42,7 @@ describe('prepareRichMedia', () => {
   it('extracts PDF text and bounded page stills when Poppler is available', async () => {
     const root = tempRoot()
     const textPath = join(root, 'source.txt')
-    writeFileSync(textPath, 'Grace PDF test\nSecond line\n')
+    writeFileSync(textPath, 'Faith PDF test\nSecond line\n')
     let pdf: Buffer
     try {
       pdf = execFileSync('/usr/sbin/cupsfilter', ['-m', 'application/pdf', textPath], {
@@ -58,7 +58,7 @@ describe('prepareRichMedia', () => {
     expect(prepared.category).toBe('document')
     if (prepared.category !== 'document') return
     expect(prepared.mime).toBe('application/pdf')
-    expect(prepared.extractedText).toContain('Grace PDF test')
+    expect(prepared.extractedText).toContain('Faith PDF test')
     expect(prepared.pageImages.length).toBeGreaterThanOrEqual(1)
     expect(prepared.pageImages.length).toBeLessThanOrEqual(8)
     expect(prepared.pageImages[0].subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]))

@@ -1,4 +1,4 @@
-// Turning "that unidentified voice was Kirstyn Blum" into a real voice profile.
+// Turning "that unidentified voice was Wren Hale" into a real voice profile.
 //
 // WHY THIS EXISTS. Relabelling was TEXT ONLY: it rewrote `speaker` strings in the
 // meeting sidecar and never touched the voice store. Naming a voice over 109
@@ -6,8 +6,8 @@
 // appeared in /api/voice/profiles, the review panel still offered her as `new
 // name` inside the SAME meeting, no later meeting could match her, and there was
 // no profile to accumulate further chunks against. Verified live 2026-08-13:
-// `Kirstyn Blum` appears 70x in one sidecar and 112x in another while
-// voice-profiles.json held 77 profiles and no Kirstyn.
+// `Wren Hale` appears 70x in one sidecar and 112x in another while
+// voice-profiles.json held 77 profiles and no Wren.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // WHY THIS IS ITS OWN MODULE AND WHY IT IS THIS PARANOID
@@ -189,12 +189,12 @@ export interface EnrolNamedVoiceInput {
  * Enrol the voice a human just named.
  *
  * SCOPED to a real target name. The reviewer is assigning THESE chunks to `to`.
- * That is a first training run when `to` has no profile (the live case: Nick
- * Gurney → Milo LeBaron, 2026-08-20 — 19 chunks relabelled, 78 profiles, no
- * Milo) and an append when the profile already exists. Global fold of two
+ * That is a first training run when `to` has no profile (the live case: Cole
+ * Garner → Leo Ashby, 2026-08-20 — 19 chunks relabelled, 78 profiles, no
+ * Leo) and an append when the profile already exists. Global fold of two
  * identities remains `merge-profiles`. Per-meeting chunk assignment is not
  * that, and gating on `from` being a placeholder made a wrong existing label
- * (the identifier's 0.55 Nick match) create no profile at all.
+ * (the identifier's 0.55 Cole match) create no profile at all.
  *
  * Still skipped: a placeholder `to` (Ext → Unidentified 2), and an empty
  * `changed` list. An EXISTING name is appended to without a prompt, and
@@ -217,7 +217,7 @@ export function enrolNamedVoice(input: EnrolNamedVoiceInput): EnrolmentReport {
   // Not an enrolment at all. `attempted: 0` with `skipped: null` is how the
   // caller tells this apart from an enrolment that found no candidates.
   // `from` is deliberately NOT gated: a wrong existing label is how a new
-  // person first appears in review (Nick Gurney → Milo LeBaron). Gating on
+  // person first appears in review (Cole Garner → Leo Ashby). Gating on
   // placeholder-only `from` labelled the meeting and taught the store nothing.
   if (isPlaceholderLabel(to) || changed.length === 0) return IDLE
 

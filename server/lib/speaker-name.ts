@@ -19,7 +19,7 @@
 
 /** Longest plausible human name we will store. */
 export const MAX_SPEAKER_NAME_CHARS = 40
-/** Most words a name may have ("Maria del Carmen Ruiz" is four). */
+/** Most words a name may have ("Maria del Cora Ruiz" is four). */
 export const MAX_SPEAKER_NAME_WORDS = 4
 
 /** Words that mean "the wearer", never a third party's name. */

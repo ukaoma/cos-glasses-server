@@ -836,6 +836,9 @@ describe('B2: Mac-assigned samples never displace anything else (real store, rea
     const preview = await post(url, { ...ASSIGN, dryRun: true })
     expect(preview.json.enrolment.skipped).toBe('profile_full')
     expect(preview.json.message).toContain('Assigning is not possible')
+    // The person reads this sentence word for word: plain language, no request field names.
+    expect(preview.json.message).toContain('You can still rename the speaker in the transcript without adding any voice samples')
+    expect(preview.json.message).not.toMatch(/assignVoiceProfile|\bforce\b/)
     const res = await post(url, { ...ASSIGN, confirm: true })
     expect(res.status).toBe(422)
     expect(res.json.enrolment.skipped).toBe('profile_full')

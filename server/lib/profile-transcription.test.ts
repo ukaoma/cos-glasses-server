@@ -56,11 +56,11 @@ describe('transcription profile safeguards', () => {
 
   it('trims, deduplicates, and keeps real names and corrections', async () => {
     const profile = await loadProfile({
-      owner_name: ' Grace ',
+      owner_name: ' Faith ',
       vocabulary: [' tacrolimus ', 'Tacrolimus', 'Ascension Seton', 42],
       whisper_corrections: { Takrelimus: 'tacrolimus' },
     })
-    expect(profile.getOwnerName()).toBe('Grace')
+    expect(profile.getOwnerName()).toBe('Faith')
     expect(profile.getVocabulary()).toEqual(['tacrolimus', 'Ascension Seton'])
     expect(profile.getWhisperCorrections()).toEqual({ Takrelimus: 'tacrolimus' })
     expect(profile.getTranscriptionProfileStatus()).toMatchObject({

@@ -8,8 +8,8 @@
 //   MU: 20/20 — fireflies 10, g2-training 9, unknown 1     (zero human-verified)
 //
 // `fireflies` labels come from meeting ATTENDEE METADATA, never acoustically
-// verified. That is exactly the chain that manufactured the phantom "Erick
-// Hernandez" profile: 3 fireflies seeds compounding to 18 via g2-training. Under
+// verified. That is exactly the chain that manufactured the phantom "Evan
+// Hartwell" profile: 3 fireflies seeds compounding to 18 via g2-training. Under
 // plain FIFO, a human correction could evict the single `manual` sample while
 // ten unverified metadata seeds sat untouched. Age is the wrong axis. Who
 // supplied the label is the right one.

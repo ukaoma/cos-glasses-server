@@ -130,7 +130,7 @@ function isRealLabel(label: string): boolean {
  *  - in a split chunk the WEARER is named only at owner-verify confidence
  *    (OWNER_VERIFY_SIMILARITY). A full search can return the wearer from 0.55,
  *    and the client's label is the glasses' default wearer label, not identity
- *    evidence: on 2026-10-02 both named other people (Jeremy, Kyle) as the
+ *    evidence: on 2026-10-02 both named other people (Jasper, Corin) as the
  *    wearer. Either becomes Ext and is counted (`ownerGuard`).
  * A name is never invented.
  * The segments' texts joined with one space equal `text` exactly.
@@ -181,7 +181,7 @@ export function nameChunkSegments(input: LiveNamingInput): LiveNamingResult {
       }
       if (track.channel === dominant) { names.set(track.channel, ownerSafe(input.chunkVoiceprint)); continue }
       // The client's label is the glasses' default wearer label, not evidence of
-      // who this voice is (6.61.0 named Jeremy Sokolic as MU through it).
+      // who this voice is (6.61.0 named Jasper Quillen as MU through it).
       const dominantName = names.get(dominant)?.speaker ?? input.chunkVoiceprint.speaker
       const client = input.clientSpeaker.trim()
       if (isRealLabel(client) && client !== dominantName) ownerGuard.client_label++

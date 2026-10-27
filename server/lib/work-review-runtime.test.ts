@@ -11,8 +11,8 @@ afterEach(async () => { await Promise.all(runtimes.splice(0).map(r => r.close())
 const descriptor = { domain: 'quilt', month: '2026-09', filename: '2026-09-27_Review Café.md', recordId: 'ops:quilt:meeting-one' }
 function setup() {
   const root = mkdtempSync(join(tmpdir(),'work-review-')); roots.push(root)
-  let detail = { ...descriptor, title: 'Website review', recordId: descriptor.recordId, sourceContent: 'Review the website launch. Gina owns copy.', sourceTruncated:false,
-    transcript:'Review the website launch.', attendees:['Gina'], actionItems:[], decisions:[], topics:[], summary:'Website review', date:'2026-09-27', source:'meeting', duration:'1m', domainAbbr:'Q' } as MeetingDetail
+  let detail = { ...descriptor, title: 'Website review', recordId: descriptor.recordId, sourceContent: 'Review the website launch. Mira owns copy.', sourceTruncated:false,
+    transcript:'Review the website launch.', attendees:['Mira'], actionItems:[], decisions:[], topics:[], summary:'Website review', date:'2026-09-27', source:'meeting', duration:'1m', domainAbbr:'Q' } as MeetingDetail
   const jobs = new Map<string, QueryJobSnapshot>(); const submissions: any[] = []
   const models = vi.fn(async () => [{ id:'ollama', provider:'ollama', title:'Local', available:true }, { id:'sonnet', provider:'claude',title:'Claude',available:true }, {id:'cursor-grok',provider:'cursor',title:'Cursor',available:false}])
   const deps = { store:new WorkReviewStore(root), resolveMeeting:vi.fn(async () => structuredClone(detail)), models,
@@ -117,7 +117,7 @@ it('store refuses second writer and corrupt history instead of losing accepted i
 })
 
 it('exact action links remain same-domain proposals and preserve checked-state evidence',async()=>{
-  const s=setup();s.setDetail({actionItems:[{task:'Draft the homepage call to action',owner:'Gina'},{task:'Follow up',owner:'Gina'}]})
+  const s=setup();s.setDetail({actionItems:[{task:'Draft the homepage call to action',owner:'Mira'},{task:'Follow up',owner:'Mira'}]})
   const detail=await s.deps.resolveMeeting()
   const links=proposeReviewTaskLinks(detail,[
     {id:'match',domain:'quilt',text:'Draft the homepage call-to-action!',checked:true},

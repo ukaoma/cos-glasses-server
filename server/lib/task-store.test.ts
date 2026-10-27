@@ -173,8 +173,8 @@ describe('taskTitle', () => {
   })
 
   it('passes a short title through untouched and collapses stray whitespace', () => {
-    expect(taskTitle('Call Silas')).toBe('Call Silas')
-    expect(taskTitle('  Call   Silas  ')).toBe('Call Silas')
+    expect(taskTitle('Call Elliot')).toBe('Call Elliot')
+    expect(taskTitle('  Call   Elliot  ')).toBe('Call Elliot')
   })
 
   it('does not leave dangling punctuation before the ellipsis', () => {
@@ -216,7 +216,7 @@ describe('projectRow context fields', () => {
   it('reports checked state, owner, delegation and agent state', () => {
     expect(project({ is_checked: true })!.checked).toBe(true)
     expect(project()!.checked).toBe(false)
-    expect(project({ owner: 'Gina' })!.owner).toBe('Gina')
+    expect(project({ owner: 'Mira' })!.owner).toBe('Mira')
     expect(project({ agent_state: 'running' })!.agentState).toBe('running')
     expect(project({ agent_state: 'done', agent_no: 3 })!.agentNo).toBe(3)
   })

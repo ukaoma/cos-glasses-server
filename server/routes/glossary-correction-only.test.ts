@@ -40,7 +40,7 @@ describe('correction-only learn, end to end', () => {
     writeFileSync(profilePath, JSON.stringify({
       owner_name: 'Sam Example',
       vocabulary: ['Quilt', 'Bottle POS'],
-      whisper_corrections: JSON.stringify({ Myles: 'Miles', 'Miles Ukoma': 'Miles Ukaoma' }),
+      whisper_corrections: JSON.stringify({ Myles: 'Miles', 'Miles Ukmya': 'Jordan Ukamya' }),
     }))
     process.env.COS_PROFILE_PATH = profilePath
     process.env.COS_DATA_DIR = join(tmpDir, 'data')
@@ -158,8 +158,8 @@ describe('correction-only learn, end to end', () => {
     expect(whisper.applyCorrections('forward slash pricingly')).toBe('forward slash pricingly')
     // A written form is literal: "$&" is not a replacement pattern.
     expect(whisper.applyCorrections('the price tag')).toBe('the $&price')
-    // A chain the profile relies on keeps its order ("Myles" first, then "Miles Ukoma").
-    expect(whisper.applyCorrections('Myles Ukoma said hi')).toBe('Miles Ukaoma said hi')
+    // A chain the profile relies on keeps its order ("Myles" first, then "Miles Ukmya").
+    expect(whisper.applyCorrections('Myles Ukmya said hi')).toBe('Jordan Ukamya said hi')
   })
 
   it('a chunk of just the spoken path is speech, not a prompt echo', async () => {
@@ -177,7 +177,7 @@ describe('correctionOrder', () => {
     const { correctionOrder } = await import('../lib/whisper-local.js')
     expect(correctionOrder({ a: '1', 'forward slash build': '/build', 'x y': '2', 'forward slash build and price': '/b' }).map(([k]) => k))
       .toEqual(['a', 'forward slash build and price', 'forward slash build', 'x y'])
-    expect(correctionOrder({ Myles: 'Miles', 'Miles Ukoma': 'Miles Ukaoma' }).map(([k]) => k)).toEqual(['Myles', 'Miles Ukoma'])
+    expect(correctionOrder({ Myles: 'Miles', 'Miles Ukmya': 'Jordan Ukamya' }).map(([k]) => k)).toEqual(['Myles', 'Miles Ukmya'])
     // Word-bounded: "build" is not inside "rebuild".
     expect(correctionOrder({ build: 'B', rebuild: 'R' }).map(([k]) => k)).toEqual(['build', 'rebuild'])
   })

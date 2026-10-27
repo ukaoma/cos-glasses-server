@@ -48,10 +48,10 @@ const RICH_SCRIBE = [
   '| **Date** | 2026-08-05 |',
   '',
   '## Attendees',
-  '- Navaz Sharif',
+  '- Neva Sharpe',
   '',
   '## Summary',
-  'Navaz Sharif owns the follow-up.',
+  'Neva Sharpe owns the follow-up.',
   '',
   '## Granola Structured Notes (canonical)',
   'The canonical notes.',
@@ -61,7 +61,7 @@ const RICH_SCRIBE = [
   '<summary>Click to expand transcript</summary>',
   '',
   '[MU]: where did it land.',
-  '[Navaz Sharif]: under plan.',
+  '[Neva Sharpe]: under plan.',
   '',
   '</details>',
   '',
@@ -177,7 +177,7 @@ const HTTP_TEST_TIMEOUT = 30_000
 
 describe('speaker review over HTTP', () => {
   it('returns voices, phrases, and the owner flag for a real conversation', async () => {
-    seedMeeting('meeting_1_abc', turns('MU', 'Chris Krubeck', 8, 30))
+    seedMeeting('meeting_1_abc', turns('MU', 'Alex Kellar', 8, 30))
     await startServer()
 
     const res = await get('/api/meeting/meeting_1_abc/speakers')
@@ -197,7 +197,7 @@ describe('speaker review over HTTP', () => {
   })
 
   it('flags a thrashing pair as unreliable and names the partner', async () => {
-    seedMeeting('meeting_2_abc', turns('Luke H', 'Luke Henry', 24, 3))
+    seedMeeting('meeting_2_abc', turns('Theo M', 'Theo Marsh', 24, 3))
     await startServer()
     const res = await get('/api/meeting/meeting_2_abc/speakers')
     expect(res.status).toBe(200)
@@ -218,7 +218,7 @@ describe('speaker review over HTTP', () => {
   })
 
   it('honours the phrases count and clamps it', async () => {
-    seedMeeting('meeting_4_abc', turns('MU', 'Chris Krubeck', 8, 30))
+    seedMeeting('meeting_4_abc', turns('MU', 'Alex Kellar', 8, 30))
     await startServer()
     expect((await get('/api/meeting/meeting_4_abc/speakers?phrases=1')).json.voices[0].phrases).toHaveLength(1)
     const clamped = (await get('/api/meeting/meeting_4_abc/speakers?phrases=999')).json.voices[0].phrases
@@ -253,7 +253,7 @@ describe('speaker review over HTTP', () => {
   })
 
   it('404s an unknown session and 400s a malformed id', async () => {
-    seedMeeting('meeting_7_abc', turns('MU', 'Chris Krubeck', 8, 30))
+    seedMeeting('meeting_7_abc', turns('MU', 'Alex Kellar', 8, 30))
     await startServer()
     expect((await get('/api/meeting/meeting_nope/speakers')).status).toBe(404)
     const bad = await get('/api/meeting/..%2F..%2Fetc/speakers')
@@ -261,7 +261,7 @@ describe('speaker review over HTTP', () => {
   })
 
   it('never caches — a name applied elsewhere must not be masked by a stale read', async () => {
-    seedMeeting('meeting_8_abc', turns('MU', 'Chris Krubeck', 8, 30))
+    seedMeeting('meeting_8_abc', turns('MU', 'Alex Kellar', 8, 30))
     await startServer()
     const res = await new Promise<string | undefined>((resolve, reject) => {
       const req = request(`${baseUrl}/api/meeting/meeting_8_abc/speakers`, { method: 'GET' }, r => {
@@ -300,7 +300,7 @@ describe('COS operations mode', () => {
 
   it('resolves a review from the operations tree, not the standalone store', async () => {
     seedOps('personal', '2026-08-05_Family_Dinner_aaa11111', 'Family Dinner And Commonwealth Games',
-      'meeting_ops_1', turns('MU', 'Chris Krubeck', 8, 30))
+      'meeting_ops_1', turns('MU', 'Alex Kellar', 8, 30))
     await startServer()
 
     const res = await get('/api/meeting/meeting_ops_1/speakers')
@@ -315,9 +315,9 @@ describe('COS operations mode', () => {
   it('prefers operations even when the standalone store holds the same session', async () => {
     // Both trees really do hold every G2 save, under different names. Resolving
     // the store first shows one title on the list row and another in the panel.
-    seedMeeting('meeting_both_1', turns('MU', 'Chris Krubeck', 8, 30))
+    seedMeeting('meeting_both_1', turns('MU', 'Alex Kellar', 8, 30))
     seedOps('personal', '2026-08-05_Titled_Copy_bbb22222', 'The Titled Copy',
-      'meeting_both_1', turns('MU', 'Chris Krubeck', 8, 30))
+      'meeting_both_1', turns('MU', 'Alex Kellar', 8, 30))
     await startServer()
 
     const res = await get('/api/meeting/meeting_both_1/speakers')
@@ -328,7 +328,7 @@ describe('COS operations mode', () => {
 
   it('searches every domain, not just personal', async () => {
     seedOps('quilt', '2026-08-05_Lead_Ops_ccc33333', 'Lead Ops Review',
-      'meeting_quilt_1', turns('MU', 'Graham Hoffman', 8, 30))
+      'meeting_quilt_1', turns('MU', 'Gordon Hoffman', 8, 30))
     await startServer()
     const res = await get('/api/meeting/meeting_quilt_1/speakers')
     expect(res.status).toBe(200)
@@ -337,7 +337,7 @@ describe('COS operations mode', () => {
 
   it('404s a session that is in neither tree', async () => {
     seedOps('personal', '2026-08-05_Something_ddd44444', 'Something',
-      'meeting_ops_2', turns('MU', 'Chris Krubeck', 8, 30))
+      'meeting_ops_2', turns('MU', 'Alex Kellar', 8, 30))
     await startServer()
     expect((await get('/api/meeting/meeting_absent/speakers')).status).toBe(404)
   })
@@ -354,7 +354,7 @@ describe('direct read-only meeting library', () => {
     mkdirSync(month, { recursive: true })
     writeFileSync(join(month, filename), RICH_SCRIBE)
     writeFileSync(join(month, filename.replace(/\.md$/, '.g2-chunks.json')),
-      JSON.stringify({ sessionId, chunks: turns('MU', 'Chris Krubeck', 8, 30) }))
+      JSON.stringify({ sessionId, chunks: turns('MU', 'Alex Kellar', 8, 30) }))
     process.env.COS_MEETINGS_ROOT = direct
   })
   afterEach(() => {
@@ -381,9 +381,9 @@ describe('direct read-only meeting library', () => {
 
     const recordId = review.json.recordId
     const attempts = [
-      post(`/api/meeting/${sessionId}/relabel`, { from: 'Chris Krubeck', to: 'Chris', recordId }),
-      post(`/api/meeting/${sessionId}/confirm`, { label: 'Chris Krubeck', recordId }),
-      post(`/api/meeting/${sessionId}/deattribute`, { from: 'Chris Krubeck', recordId }),
+      post(`/api/meeting/${sessionId}/relabel`, { from: 'Alex Kellar', to: 'Chris', recordId }),
+      post(`/api/meeting/${sessionId}/confirm`, { label: 'Alex Kellar', recordId }),
+      post(`/api/meeting/${sessionId}/deattribute`, { from: 'Alex Kellar', recordId }),
     ]
     for (const result of await Promise.all(attempts)) {
       expect(result.status).toBe(409)
@@ -397,7 +397,7 @@ describe('direct read-only meeting library', () => {
 
 describe('meeting content over HTTP', () => {
   it('rejects a malformed sessionId before touching disk', async () => {
-    seedMeeting('meeting_content_1', turns('MU', 'Gina Obert', 6, 12))
+    seedMeeting('meeting_content_1', turns('MU', 'Mira Orlen', 6, 12))
     await startServer()
     const r = await get('/api/meeting/not%20a%20session/content')
     expect(r.status).toBe(400)
@@ -405,7 +405,7 @@ describe('meeting content over HTTP', () => {
   })
 
   it('404s a session that does not exist', async () => {
-    seedMeeting('meeting_content_2', turns('MU', 'Gina Obert', 6, 12))
+    seedMeeting('meeting_content_2', turns('MU', 'Mira Orlen', 6, 12))
     await startServer()
     const r = await get('/api/meeting/meeting_absent_xyz/content')
     expect(r.status).toBe(404)
@@ -437,7 +437,7 @@ describe('meeting content over HTTP', () => {
   })
 
   it('finds a transcript under a decorated heading and strips its scaffolding', async () => {
-    seedMeeting('meeting_content_4', turns('MU', 'Gina Obert', 6, 12))
+    seedMeeting('meeting_content_4', turns('MU', 'Mira Orlen', 6, 12))
     await startServer()
     const r = await get('/api/meeting/meeting_content_4/content')
     expect(r.status).toBe(200)
@@ -449,7 +449,7 @@ describe('meeting content over HTTP', () => {
   })
 
   it('carries unrecognised sections and drops the unfloored Attendees list', async () => {
-    seedMeeting('meeting_content_5', turns('MU', 'Gina Obert', 6, 12))
+    seedMeeting('meeting_content_5', turns('MU', 'Mira Orlen', 6, 12))
     await startServer()
     const r = await get('/api/meeting/meeting_content_5/content')
     expect(r.json.extras.map((x: any) => x.heading)).toContain('Granola Structured Notes (canonical)')
@@ -459,11 +459,11 @@ describe('meeting content over HTTP', () => {
   })
 
   it('always carries the provenance allowlist, so an unasserted name cannot pass as verified', async () => {
-    seedMeeting('meeting_content_6', turns('MU', 'Gina Obert', 6, 12))
+    seedMeeting('meeting_content_6', turns('MU', 'Mira Orlen', 6, 12))
     await startServer()
     const r = await get('/api/meeting/meeting_content_6/content')
-    // Navaz Sharif appears in the prose and as a transcript label, legitimately.
-    expect(r.json.clipboardFull).toContain('Navaz Sharif')
+    // Neva Sharpe appears in the prose and as a transcript label, legitimately.
+    expect(r.json.clipboardFull).toContain('Neva Sharpe')
     // So the correction has to travel with it.
     expect(r.json.clipboardFull).toContain('was NOT confirmed')
     // The allowlist now names the WARRANT per person rather than crediting
@@ -472,7 +472,7 @@ describe('meeting content over HTTP', () => {
   })
 
   it('reports both clipboard sizes from the real strings', async () => {
-    seedMeeting('meeting_content_7', turns('MU', 'Gina Obert', 6, 12))
+    seedMeeting('meeting_content_7', turns('MU', 'Mira Orlen', 6, 12))
     await startServer()
     const r = await get('/api/meeting/meeting_content_7/content')
     expect(r.json.summaryChars).toBe(r.json.clipboardSummary.length)
@@ -482,37 +482,37 @@ describe('meeting content over HTTP', () => {
 
   // THE DEFECT, over HTTP. The de-attribution ledger has recorded `proseStale`
   // on every applied removal since the feature shipped, and this route never read
-  // it: on 2026-08-07 Miles removed "Clem Ukaoma" from a call that was only him
-  // and Grace, all 8 label sites were rewritten, and the summary still opened
-  // "Miles, Grace, and Clem talk through..." with nothing anywhere in the payload.
+  // it: on 2026-08-07 Miles removed "Robin Vale" from a call that was only him
+  // and Faith, all 8 label sites were rewritten, and the summary still opened
+  // "Miles, Faith, and Robin talk through..." with nothing anywhere in the payload.
   // Mutating the ledger read to `[]` passed every test before this one existed.
   it('reports a name the human removed, and says the prose is stale', async () => {
-    seedMeeting('meeting_content_rm', turns('MU', 'Grace Ukaoma', 6, 12), {
+    seedMeeting('meeting_content_rm', turns('MU', 'Faith Ukamya', 6, 12), {
       scribe: ['# Generational Trauma And Parenting Fears (G2)', '',
-               '## Summary', 'Miles, Grace, and Clem talk through the fallout.', '',
+               '## Summary', 'Miles, Faith, and Robin talk through the fallout.', '',
                '## Transcript', '[Unidentified 1]: reclose that is how you close it'].join('\n'),
     })
     mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
     writeFileSync(join(dataDir, 'meeting-corrections', 'meeting_content_rm.jsonl'),
       JSON.stringify({
-        id: 'meeting_content_rm:Clem Ukaoma>deattributed:x', phase: 'applied',
-        at: '2026-08-08T02:26:47.268Z', from: 'Clem Ukaoma', to: 'Unidentified 1',
+        id: 'meeting_content_rm:Robin Vale>deattributed:x', phase: 'applied',
+        at: '2026-08-08T02:26:47.268Z', from: 'Robin Vale', to: 'Unidentified 1',
         chunks: [79, 81], scope: 'meeting', proseStale: true,
       }) + '\n')
     await startServer()
     const r = await get('/api/meeting/meeting_content_rm/content')
     expect(r.status).toBe(200)
-    expect(r.json.removedNames).toEqual([{ label: 'Clem Ukaoma', proseStale: true }])
+    expect(r.json.removedNames).toEqual([{ label: 'Robin Vale', proseStale: true }])
     for (const form of [r.json.clipboardSummary, r.json.clipboardFull]) {
-      expect(form).toContain('You removed "Clem Ukaoma" from this meeting')
+      expect(form).toContain('You removed "Robin Vale" from this meeting')
     }
     // The prose is preserved, not rewritten. Substituting into a written sentence
     // mangles grammar and can hit the wrong person.
-    expect(r.json.clipboardSummary).toContain('Miles, Grace, and Clem talk through')
+    expect(r.json.clipboardSummary).toContain('Miles, Faith, and Robin talk through')
   })
 
   it('says nothing about removals when the ledger is empty', async () => {
-    seedMeeting('meeting_content_rm2', turns('MU', 'Gina Obert', 6, 12))
+    seedMeeting('meeting_content_rm2', turns('MU', 'Mira Orlen', 6, 12))
     await startServer()
     const r = await get('/api/meeting/meeting_content_rm2/content')
     expect(r.json.removedNames).toEqual([])
@@ -527,13 +527,13 @@ describe('meeting content over HTTP', () => {
   it('carries the meeting duration through to the overlap gate', async () => {
     // Overlap must be expressed in WORD TIMINGS. Measured: the chunk-estimate
     // path credits a contested wall-clock second to ONE speaker (identical
-    // timestamps gave MU 273s and Gina 0s), so it can never overflow. The real
+    // timestamps gave MU 273s and Mira 0s), so it can never overflow. The real
     // 71m-in-66m meeting was `speakingTimeSource: words`, and only that path
     // credits both people for the same second — which is the whole point.
     // Word timings arrive on the sidecar's `batchSegments`, not on the chunks —
     // measured, not assumed: putting speakerWords on chunks left the review on
     // `speakingTimeSource: chunks`, and that path credits a contested second to
-    // ONE speaker (identical timestamps gave MU 273s and Gina 0s), so it can never
+    // ONE speaker (identical timestamps gave MU 273s and Mira 0s), so it can never
     // overflow. The real 71m-in-66m meeting was word-sourced.
     const segs: unknown[] = []
     for (let i = 0; i < 40; i++) {
@@ -541,11 +541,11 @@ describe('meeting content over HTTP', () => {
         startElapsed: i * 7000,
         speakerWords: [
           { speaker: 'MU', start: 0, end: 6.5 },
-          { speaker: 'Gina Obert', start: 0, end: 6.5 },
+          { speaker: 'Mira Orlen', start: 0, end: 6.5 },
         ],
       })
     }
-    seedMeeting('meeting_content_dur', turns('MU', 'Gina Obert', 20, 2), { batchSegments: segs })
+    seedMeeting('meeting_content_dur', turns('MU', 'Mira Orlen', 20, 2), { batchSegments: segs })
     await startServer()
     const r = await get('/api/meeting/meeting_content_dur/content')
     expect(r.json.durationMin).toBeGreaterThan(0)
@@ -554,14 +554,14 @@ describe('meeting content over HTTP', () => {
   })
 
   it('leaves an ordinary sequential meeting quiet', async () => {
-    seedMeeting('meeting_content_seq', turns('MU', 'Gina Obert', 6, 12))
+    seedMeeting('meeting_content_seq', turns('MU', 'Mira Orlen', 6, 12))
     await startServer()
     const r = await get('/api/meeting/meeting_content_seq/content')
     expect(r.json.clipboardSummary).not.toContain('these overlap')
   })
 
   it('serves a meeting whose scribe is missing without failing', async () => {
-    seedMeeting('meeting_content_8', turns('MU', 'Gina Obert', 6, 12), { scribe: '' })
+    seedMeeting('meeting_content_8', turns('MU', 'Mira Orlen', 6, 12), { scribe: '' })
     await startServer()
     const r = await get('/api/meeting/meeting_content_8/content')
     expect(r.status).toBe(200)

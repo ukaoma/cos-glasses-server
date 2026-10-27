@@ -183,11 +183,11 @@ describe('threads from plain markdown', () => {
   })
 
   it('reads topics, stakeholders and status from front matter', () => {
-    note('threads/x.md', '---\nname: Sean backfill\ntopics: hiring, content\nstakeholders: Gina\nstatus: resolved\n---\nbody')
+    note('threads/x.md', '---\nname: Sean backfill\ntopics: hiring, content\nstakeholders: Mira\nstatus: resolved\n---\nbody')
     const [t] = readFileThreads(root)
     expect(t.name).toBe('Sean backfill')
     expect(t.topics).toEqual(['hiring', 'content'])
-    expect(t.stakeholders).toEqual(['Gina'])
+    expect(t.stakeholders).toEqual(['Mira'])
     expect(t.is_resolved).toBe(true)
   })
 
@@ -232,7 +232,7 @@ describe('tier state distinguishes healthy-empty from absent', () => {
 })
 
 describe('notes attached from elsewhere by symlink', () => {
-  // Grace wired `operations/memory` at her real store on 2026-08-09. It worked, but
+  // Faith wired `operations/memory` at her real store on 2026-08-09. It worked, but
   // only by luck: findDir uses statSync (follows links) while the WALK used
   // Dirent.isDirectory(), which is FALSE for a symlink. Anything linked a level
   // deeper vanished with no error. Attaching an existing store is a primary use

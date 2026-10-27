@@ -27,6 +27,7 @@ let profiles: Array<{ name: string; embeddings: number[][]; sources: string[] }>
 let removedNames: string[] = []
 let mergeCalls: Array<{ into: string; from: string[]; force?: boolean; dryRun?: boolean }> = []
 let mergeSimilarity: Record<string, number> = {}
+let mergeWouldEmpty = false
 let directoryForceCalls: boolean[] = []
 let opsDir = ''
 let savedOperationsDir: string | undefined
@@ -100,6 +101,13 @@ async function startServer(opts: { extractionFails?: boolean; enrollFails?: bool
       mergeCalls.push({ into, from: [...from], ...o })
       const target = profiles.find(p => p.name === into)
       if (!target) return { into, merged: [], missing: [into], similarity: {}, samplesBefore: 0, samplesAfter: 0, droppedToCap: 0 }
+      if (mergeWouldEmpty) {
+        return {
+          into, merged: [], missing: [], similarity: {},
+          samplesBefore: target.embeddings.length, samplesAfter: target.embeddings.length, droppedToCap: 0,
+          refusal: { code: 'merge_would_empty_profile', message: 'Merging would leave it with no voice samples. Nothing was changed.' },
+        }
+      }
       const merged: string[] = []
       const missing: string[] = []
       const similarity: Record<string, number> = {}
@@ -152,7 +160,7 @@ async function startServer(opts: { extractionFails?: boolean; enrollFails?: bool
             firstSeen: '2026-08-01', lastSeen: '2026-08-11', appearances: [],
           },
           {
-            name: 'Clem Ukaoma', isOwner: false, embeddings: 14, sources: { fireflies: 14 }, sourcesAligned: true,
+            name: 'Robin Vale', isOwner: false, embeddings: 14, sources: { fireflies: 14 }, sourcesAligned: true,
             assertedSegments: 12, candidateSegments: 3, assertedSpeakingMs: 22_000, candidateSpeakingMs: 5_000,
             speakingTimeSources: { words: 27_000, chunks: 0 }, meetingCount: 2, reviewMeetingCount: 1,
             observedMatch: 0.68, observedMatchSegments: 15,
@@ -215,9 +223,10 @@ beforeEach(() => {
   delete process.env.COS_MEETINGS_ROOT
   delete process.env.COS_SCRIPTS_DIR
   mergeSimilarity = {}
+  mergeWouldEmpty = false
   profiles = [
     { name: 'MU', embeddings: Array.from({ length: 20 }, () => [1, 0, 0, 0]), sources: Array(20).fill('manual') },
-    { name: 'Clem Ukaoma', embeddings: Array.from({ length: 14 }, () => [0, 1, 0, 0]), sources: Array(14).fill('fireflies') },
+    { name: 'Robin Vale', embeddings: Array.from({ length: 14 }, () => [0, 1, 0, 0]), sources: Array(14).fill('fireflies') },
   ]
 })
 
@@ -244,14 +253,14 @@ describe('the reader path reaches the data home, where the writer actually saves
   it('sees training audio written under COS_DATA_DIR', async () => {
     // transcribe-stream.ts writes exactly here. voice.ts used to look inside the
     // installed package instead, so this returned { speakers: [] } forever.
-    writeWav(trainingDir('Clem Ukaoma'), 'chunk1.wav', 1)
-    writeWav(trainingDir('Clem Ukaoma'), 'chunk2.wav', 2)
+    writeWav(trainingDir('Robin Vale'), 'chunk1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'chunk2.wav', 2)
     await startServer()
 
     const res = await httpRequest('GET', '/api/voice/saved-audio')
     expect(res.status).toBe(200)
     expect(res.json.speakers).toEqual([
-      { name: 'Clem Ukaoma', chunks: 2, currentEmbeddings: 14 },
+      { name: 'Robin Vale', chunks: 2, currentEmbeddings: 14 },
     ])
   })
 
@@ -266,8 +275,8 @@ describe('the reader path reaches the data home, where the writer actually saves
 
 describe('train-g2 fails closed on the unscoped form', () => {
   it('returns 400 with an inventory and changes NOTHING', async () => {
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
-    writeWav(trainingDir('Nate Williams'), 'c1.wav', 2)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
+    writeWav(trainingDir('Nate Wells'), 'c1.wav', 2)
     await startServer()
 
     const res = await httpRequest('POST', '/api/voice/train-g2', {})
@@ -275,36 +284,36 @@ describe('train-g2 fails closed on the unscoped form', () => {
     expect(res.json.error).toBe('confirmation required')
     expect(res.json.totalSpeakers).toBe(2)
     expect(res.json.wouldTrain).toEqual(expect.arrayContaining([
-      { speaker: 'Clem Ukaoma', chunks: 1, currentEmbeddings: 14 },
+      { speaker: 'Robin Vale', chunks: 1, currentEmbeddings: 14 },
     ]))
     // The two things that make this endpoint dangerous, both verified absent.
     expect(enrollCalls).toEqual([])
-    expect(existsSync(join(trainingDir('Clem Ukaoma'), 'c1.wav'))).toBe(true)
+    expect(existsSync(join(trainingDir('Robin Vale'), 'c1.wav'))).toBe(true)
   })
 
   it('proceeds when confirmAllSpeakers is passed', async () => {
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
     await startServer()
     const res = await httpRequest('POST', '/api/voice/train-g2', { confirmAllSpeakers: true })
     expect(res.status).toBe(200)
     expect(res.json.trained).toBe(1)
-    expect(enrollCalls).toEqual([{ name: 'Clem Ukaoma', source: 'g2-training' }])
-    expect(existsSync(trainingDir('Clem Ukaoma'))).toBe(false)   // cleaned up
+    expect(enrollCalls).toEqual([{ name: 'Robin Vale', source: 'g2-training' }])
+    expect(existsSync(trainingDir('Robin Vale'))).toBe(false)   // cleaned up
   })
 
   it('a scoped call needs no confirmation and touches only that speaker', async () => {
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
-    writeWav(trainingDir('Nate Williams'), 'c1.wav', 2)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
+    writeWav(trainingDir('Nate Wells'), 'c1.wav', 2)
     await startServer()
 
-    const res = await httpRequest('POST', '/api/voice/train-g2', { speaker: 'Clem Ukaoma' })
+    const res = await httpRequest('POST', '/api/voice/train-g2', { speaker: 'Robin Vale' })
     expect(res.status).toBe(200)
-    expect(enrollCalls.map(c => c.name)).toEqual(['Clem Ukaoma'])
-    expect(existsSync(join(trainingDir('Nate Williams'), 'c1.wav'))).toBe(true)
+    expect(enrollCalls.map(c => c.name)).toEqual(['Robin Vale'])
+    expect(existsSync(join(trainingDir('Nate Wells'), 'c1.wav'))).toBe(true)
   })
 
   it('404s a scoped call for a speaker with no saved audio', async () => {
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
     await startServer()
     const res = await httpRequest('POST', '/api/voice/train-g2', { speaker: 'Nobody Here' })
     expect(res.status).toBe(404)
@@ -312,7 +321,7 @@ describe('train-g2 fails closed on the unscoped form', () => {
   })
 
   it('rejects a speaker name that tries to escape the audio root', async () => {
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
     await startServer()
     for (const speaker of ['../..', 'a/../../etc', '..']) {
       const res = await httpRequest('POST', '/api/voice/train-g2', { speaker })
@@ -326,9 +335,9 @@ describe('train-g2 fails closed on the unscoped form', () => {
     // this is the case the name validation itself has to catch. Asserting 400
     // rather than 404 is what distinguishes "rejected the name" from "looked for
     // it and found nothing", and is why the two guards are not redundant.
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
     await startServer()
-    for (const speaker of ['a/b', 'Clem_Ukaoma/nested']) {
+    for (const speaker of ['a/b', 'Robin_Vale/nested']) {
       const res = await httpRequest('POST', '/api/voice/train-g2', { speaker })
       expect(res.status, `"${speaker}" must be rejected by name validation`).toBe(400)
       expect(res.json.error).toBe('invalid speaker name')
@@ -341,7 +350,7 @@ describe('train-g2 cannot evict an existing profile by volume', () => {
   it('caps enrollment well below the 20-embedding FIFO limit', async () => {
     // 30 saved chunks x enroll = 30 evictions from a cap-20 profile, i.e. every
     // pre-existing embedding replaced by one meeting's audio.
-    for (let i = 0; i < 30; i++) writeWav(trainingDir('Clem Ukaoma'), `c${i}.wav`, i)
+    for (let i = 0; i < 30; i++) writeWav(trainingDir('Robin Vale'), `c${i}.wav`, i)
     await startServer()
 
     const res = await httpRequest('POST', '/api/voice/train-g2', { confirmAllSpeakers: true })
@@ -352,7 +361,7 @@ describe('train-g2 cannot evict an existing profile by volume', () => {
   })
 
   it('honours an explicit maxPerSpeaker and clamps it to the FIFO cap', async () => {
-    for (let i = 0; i < 30; i++) writeWav(trainingDir('Clem Ukaoma'), `c${i}.wav`, i)
+    for (let i = 0; i < 30; i++) writeWav(trainingDir('Robin Vale'), `c${i}.wav`, i)
     await startServer()
     await httpRequest('POST', '/api/voice/train-g2', { confirmAllSpeakers: true, maxPerSpeaker: 999 })
     expect(enrollCalls.length).toBe(20)
@@ -361,7 +370,7 @@ describe('train-g2 cannot evict an existing profile by volume', () => {
 
 describe('train-g2 dry run and the empty-extraction case', () => {
   it('dryRun reports what would happen and deletes nothing', async () => {
-    for (let i = 0; i < 5; i++) writeWav(trainingDir('Clem Ukaoma'), `c${i}.wav`, i)
+    for (let i = 0; i < 5; i++) writeWav(trainingDir('Robin Vale'), `c${i}.wav`, i)
     await startServer()
 
     const res = await httpRequest('POST', '/api/voice/train-g2', { dryRun: true })
@@ -370,17 +379,17 @@ describe('train-g2 dry run and the empty-extraction case', () => {
     expect(res.json.trained).toBe(0)
     expect(res.json.speakers[0].selected).toBe(5)
     expect(enrollCalls).toEqual([])
-    expect(readdirSync(trainingDir('Clem Ukaoma'))).toHaveLength(5)
+    expect(readdirSync(trainingDir('Robin Vale'))).toHaveLength(5)
   })
 
   it('RETAINS the audio when no embedding could be extracted', async () => {
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
     await startServer({ extractionFails: true })
 
     const res = await httpRequest('POST', '/api/voice/train-g2', { confirmAllSpeakers: true })
     expect(res.json.trained).toBe(0)
     expect(res.json.speakers[0].audioRetained).toBe(true)
-    expect(existsSync(join(trainingDir('Clem Ukaoma'), 'c1.wav'))).toBe(true)
+    expect(existsSync(join(trainingDir('Robin Vale'), 'c1.wav'))).toBe(true)
   })
 
   it('RETAINS the audio when extraction worked but every enrollment was refused', async () => {
@@ -389,26 +398,26 @@ describe('train-g2 dry run and the empty-extraction case', () => {
     // unconditionally, so the source audio was destroyed having enrolled
     // nothing — the one outcome from which there is no recovery. The
     // extraction-failure test above cannot reach this branch: it returns early.
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
-    writeWav(trainingDir('Clem Ukaoma'), 'c2.wav', 2)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c2.wav', 2)
     await startServer({ enrollFails: true })
 
     const res = await httpRequest('POST', '/api/voice/train-g2', { confirmAllSpeakers: true })
     expect(res.json.trained).toBe(0)
     expect(enrollCalls.length).toBe(2)              // it really did try
     expect(res.json.speakers[0].audioRetained).toBe(true)
-    expect(readdirSync(trainingDir('Clem Ukaoma'))).toHaveLength(2)
+    expect(readdirSync(trainingDir('Robin Vale'))).toHaveLength(2)
   })
 
   it('deletes the audio only once something was actually enrolled', async () => {
     // The positive half of the same guard, so "retain always" is not a passing
     // implementation either.
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
     await startServer()
     const res = await httpRequest('POST', '/api/voice/train-g2', { confirmAllSpeakers: true })
     expect(res.json.trained).toBe(1)
     expect(res.json.speakers[0].audioRetained).toBeUndefined()
-    expect(existsSync(trainingDir('Clem Ukaoma'))).toBe(false)
+    expect(existsSync(trainingDir('Robin Vale'))).toBe(false)
   })
 })
 
@@ -450,45 +459,45 @@ describe('enroll-ext fails closed across sessions', () => {
 
 describe('delete-person is confirmed and auditable', () => {
   it('refuses without confirm and reports what would go', async () => {
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
     writeFileSync(join(dataDir, 'speaker-calibration.jsonl'),
       [
-        JSON.stringify({ ts: 't1', speaker: 'Clem Ukaoma', similarity: 0.6, matched: true }),
+        JSON.stringify({ ts: 't1', speaker: 'Robin Vale', similarity: 0.6, matched: true }),
         JSON.stringify({ ts: 't2', speaker: 'MU', similarity: 0.9, matched: true }),
-        JSON.stringify({ ts: 't3', speaker: 'Clem Ukaoma', similarity: 0.58, matched: true }),
+        JSON.stringify({ ts: 't3', speaker: 'Robin Vale', similarity: 0.58, matched: true }),
       ].join('\n') + '\n')
     await startServer()
 
-    const res = await httpRequest('POST', '/api/voice/delete-person', { name: 'Clem Ukaoma' })
+    const res = await httpRequest('POST', '/api/voice/delete-person', { name: 'Robin Vale' })
     expect(res.status).toBe(400)
     expect(res.json.wouldRemove).toEqual({
       profile: 1, embeddings: 14, trainingAudioFiles: 1, calibrationRows: 2,
     })
     // Nothing removed on the refusal path.
     expect(removedNames).toEqual([])
-    expect(existsSync(join(trainingDir('Clem Ukaoma'), 'c1.wav'))).toBe(true)
-    expect(readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')).toContain('Clem Ukaoma')
+    expect(existsSync(join(trainingDir('Robin Vale'), 'c1.wav'))).toBe(true)
+    expect(readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')).toContain('Robin Vale')
   })
 
   it('sweeps every attributable store and returns per-store counts', async () => {
-    writeWav(trainingDir('Clem Ukaoma'), 'c1.wav', 1)
-    writeWav(trainingDir('Clem Ukaoma'), 'c2.wav', 2)
+    writeWav(trainingDir('Robin Vale'), 'c1.wav', 1)
+    writeWav(trainingDir('Robin Vale'), 'c2.wav', 2)
     writeFileSync(join(dataDir, 'speaker-calibration.jsonl'),
       [
-        JSON.stringify({ ts: 't1', speaker: 'Clem Ukaoma', similarity: 0.6, matched: true }),
+        JSON.stringify({ ts: 't1', speaker: 'Robin Vale', similarity: 0.6, matched: true }),
         JSON.stringify({ ts: 't2', speaker: 'MU', similarity: 0.9, matched: true }),
       ].join('\n') + '\n')
     await startServer()
 
-    const res = await httpRequest('POST', '/api/voice/delete-person', { name: 'Clem Ukaoma', confirm: true })
+    const res = await httpRequest('POST', '/api/voice/delete-person', { name: 'Robin Vale', confirm: true })
     expect(res.status).toBe(200)
     expect(res.json.removed).toEqual({
       profiles: 1, embeddings: 14, trainingAudioFiles: 2, calibrationRows: 1,
     })
-    expect(removedNames).toEqual(['Clem Ukaoma'])
-    expect(existsSync(trainingDir('Clem Ukaoma'))).toBe(false)
+    expect(removedNames).toEqual(['Robin Vale'])
+    expect(existsSync(trainingDir('Robin Vale'))).toBe(false)
     const log = readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')
-    expect(log).not.toContain('Clem Ukaoma')
+    expect(log).not.toContain('Robin Vale')
     expect(log).toContain('MU')       // the other person's rows survive
     // Names the stores it CANNOT attribute, rather than implying a full sweep.
     expect(res.json.notAttributable).toHaveProperty('extAudio')
@@ -505,52 +514,62 @@ describe('delete-person is confirmed and auditable', () => {
 describe('merge-profiles fails closed', () => {
   it('refuses without confirm and returns a preview, merging nothing', async () => {
     await startServer()
-    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma' })
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Robin Vale' })
     expect(res.status).toBe(400)
     expect(res.json.error).toBe('confirmation required')
-    expect(res.json.preview.similarity['Clem Ukaoma']).toBeDefined()
+    expect(res.json.preview.similarity['Robin Vale']).toBeDefined()
     // The preview must be a DRY RUN — a confirmation gate that already merged
     // would be decoration.
-    expect(mergeCalls).toEqual([{ into: 'MU', from: ['Clem Ukaoma'], force: false, dryRun: true }])
-    expect(profiles.map(p => p.name)).toContain('Clem Ukaoma')
+    expect(mergeCalls).toEqual([{ into: 'MU', from: ['Robin Vale'], force: false, dryRun: true }])
+    expect(profiles.map(p => p.name)).toContain('Robin Vale')
   })
 
   it('merges on confirm and relabels the absorbed calibration history', async () => {
     writeFileSync(join(dataDir, 'speaker-calibration.jsonl'),
       [
-        JSON.stringify({ ts: 't1', speaker: 'Clem Ukaoma', similarity: 0.61 }),
+        JSON.stringify({ ts: 't1', speaker: 'Robin Vale', similarity: 0.61 }),
         JSON.stringify({ ts: 't2', speaker: 'MU', similarity: 0.93 }),
       ].join('\n') + '\n')
     await startServer()
 
-    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Robin Vale', confirm: true })
     expect(res.status).toBe(200)
-    expect(res.json.merged).toEqual(['Clem Ukaoma'])
-    expect(res.json.calibrationRowsRelabeled).toEqual({ 'Clem Ukaoma': 1 })
+    expect(res.json.merged).toEqual(['Robin Vale'])
+    expect(res.json.calibrationRowsRelabeled).toEqual({ 'Robin Vale': 1 })
     // Relabeled, NOT deleted: after a merge it is one person's history.
     const log = readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')
-    expect(log).not.toContain('Clem Ukaoma')
+    expect(log).not.toContain('Robin Vale')
     expect(log.match(/"speaker":"MU"/g)).toHaveLength(2)
   })
 
   it('409s below the similarity floor and leaves both profiles alone', async () => {
-    mergeSimilarity = { 'Clem Ukaoma': 0.41 }
+    mergeSimilarity = { 'Robin Vale': 0.41 }
     await startServer()
-    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Robin Vale', confirm: true })
     expect(res.status).toBe(409)
     expect(res.json.error).toBe('similarity below the merge floor')
-    expect(res.json.report.refused[0]).toMatchObject({ name: 'Clem Ukaoma', similarity: 0.41 })
-    expect(profiles.map(p => p.name).sort()).toEqual(['Clem Ukaoma', 'MU'])
+    expect(res.json.report.refused[0]).toMatchObject({ name: 'Robin Vale', similarity: 0.41 })
+    expect(profiles.map(p => p.name).sort()).toEqual(['MU', 'Robin Vale'])
+  })
+
+  it('409s with a plain code when the merge would leave an empty profile, and changes nothing', async () => {
+    mergeWouldEmpty = true
+    await startServer()
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Robin Vale', confirm: true })
+    expect(res.status).toBe(409)
+    expect(res.json.error).toBe('merge_would_empty_profile')
+    expect(res.json.message).toMatch(/no voice samples/)
+    expect(profiles.map(p => p.name).sort()).toEqual(['MU', 'Robin Vale'])
   })
 
   it('force overrides the floor and records that it was forced', async () => {
-    mergeSimilarity = { 'Clem Ukaoma': 0.41 }
+    mergeSimilarity = { 'Robin Vale': 0.41 }
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: 'Clem Ukaoma', confirm: true, force: true })
+      { into: 'MU', from: 'Robin Vale', confirm: true, force: true })
     expect(res.status).toBe(200)
     expect(res.json.forced).toBe(true)
-    expect(res.json.merged).toEqual(['Clem Ukaoma'])
+    expect(res.json.merged).toEqual(['Robin Vale'])
   })
 
   it('refuses to ABSORB the owner label', async () => {
@@ -558,7 +577,7 @@ describe('merge-profiles fails closed', () => {
     // absorbing it away would silently break identification for the wearer.
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'Clem Ukaoma', from: 'MU', confirm: true })
+      { into: 'Robin Vale', from: 'MU', confirm: true })
     expect(res.status).toBe(400)
     expect(res.json.error).toMatch(/owner label "MU"/)
     expect(mergeCalls).toEqual([])
@@ -580,10 +599,10 @@ describe('merge-profiles fails closed', () => {
   })
 
   it('dryRun does not relabel the calibration log', async () => {
-    const original = JSON.stringify({ ts: 't1', speaker: 'Clem Ukaoma', similarity: 0.61 }) + '\n'
+    const original = JSON.stringify({ ts: 't1', speaker: 'Robin Vale', similarity: 0.61 }) + '\n'
     writeFileSync(join(dataDir, 'speaker-calibration.jsonl'), original)
     await startServer()
-    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma', dryRun: true })
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Robin Vale', dryRun: true })
     expect(res.status).toBe(200)
     expect(res.json.calibrationRowsRelabeled).toEqual({})
     expect(readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')).toBe(original)
@@ -600,11 +619,11 @@ describe('/voice/profiles exposes the store for review', () => {
     expect(res.json.owner).toBe('MU')
     expect(res.json.count).toBe(2)
     expect(res.json.totalEmbeddings).toBe(34)
-    const clem = res.json.profiles.find((p: any) => p.name === 'Clem Ukaoma')
+    const robin = res.json.profiles.find((p: any) => p.name === 'Robin Vale')
     // auto:<sessionId> collapses to one bucket — a poisoned session is visible
     // without publishing session ids.
-    expect(clem.sources).toEqual({ fireflies: 1, auto: 2, manual: 11 })
-    expect(clem.sourcesAligned).toBe(true)
+    expect(robin.sources).toEqual({ fireflies: 1, auto: 2, manual: 11 })
+    expect(robin.sourcesAligned).toBe(true)
     expect(res.json.profiles[0].name).toBe('MU')    // sorted by sample count
   })
 
@@ -612,8 +631,8 @@ describe('/voice/profiles exposes the store for review', () => {
     profiles[1].sources = ['mac-assign:mac_aaaa1111', 'mac-assign:mac_bbbb2222', 'mac-assign:mac_aaaa1111', 'auto:s1', ...Array(10).fill('manual')]
     await startServer()
     const res = await httpRequest('GET', '/api/voice/profiles')
-    const clem = res.json.profiles.find((p: any) => p.name === 'Clem Ukaoma')
-    expect(clem.sources).toEqual({ 'mac-assign': 3, auto: 1, manual: 10 })
+    const robin = res.json.profiles.find((p: any) => p.name === 'Robin Vale')
+    expect(robin.sources).toEqual({ 'mac-assign': 3, auto: 1, manual: 10 })
     expect(JSON.stringify(res.json)).not.toContain('mac_aaaa1111')
   })
 
@@ -621,7 +640,7 @@ describe('/voice/profiles exposes the store for review', () => {
     profiles[1].sources = ['fireflies']
     await startServer()
     const res = await httpRequest('GET', '/api/voice/profiles')
-    expect(res.json.profiles.find((p: any) => p.name === 'Clem Ukaoma').sourcesAligned).toBe(false)
+    expect(res.json.profiles.find((p: any) => p.name === 'Robin Vale').sourcesAligned).toBe(false)
   })
 })
 
@@ -642,7 +661,7 @@ describe('/voice/directory exposes honest bounded cross-meeting evidence', () =>
     expect(directoryForceCalls).toEqual([true])
     expect(res.json.profiles).toHaveLength(1)
     expect(res.json.profiles[0]).toMatchObject({
-      name: 'Clem Ukaoma',
+      name: 'Robin Vale',
       embeddings: 14,
       assertedSegments: 12,
       candidateSegments: 3,
@@ -667,7 +686,7 @@ describe('/voice/directory exposes honest bounded cross-meeting evidence', () =>
 // ---------------------------------------------------------------------------
 // A merge must reach the MEETINGS, not just the store.
 //
-// The gap this closes, measured on the real library: the Luke H / Luke Henry split
+// The gap this closes, measured on the real library: the Theo M / Theo Marsh split
 // had been live since 2026-03-25, the merge fixed identification going forward, and
 // 42 meeting records kept rendering two Lukes forever because nothing ever rewrote
 // them. The review panel re-reads those strings from disk on every request.
@@ -709,37 +728,37 @@ describe('a merge carries the rename out to the meeting library', () => {
     // The confirm gate exists so a human sees what a merge does before it happens.
     // Rewriting production meeting records is the largest thing it does, so a preview
     // that omitted it would be hiding the part that matters.
-    const { md, sidecar, localMd, localSidecar } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    const { md, sidecar, localMd, localSidecar } = meeting('quilt', '2026-08', 'sync', 'Robin Vale')
     await startServer()
 
-    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Clem Ukaoma' })
+    const res = await httpRequest('POST', '/api/voice/merge-profiles', { into: 'MU', from: 'Robin Vale' })
     expect(res.status).toBe(400)
     expect(res.json.error).toBe('confirmation required')
     expect(res.json.meetingRewrite.files).toBe(4)
     expect(res.json.meetingRewrite.labels).toBeGreaterThan(0)
     expect(res.json.meetingRewrite.dryRun).toBe(true)
 
-    expect(readFileSync(md, 'utf-8')).toContain('[Clem Ukaoma]:')
-    expect(readFileSync(sidecar, 'utf-8')).toContain('Clem Ukaoma')
+    expect(readFileSync(md, 'utf-8')).toContain('[Robin Vale]:')
+    expect(readFileSync(sidecar, 'utf-8')).toContain('Robin Vale')
     expect(readFileSync(localMd, 'utf-8')).toBe(readFileSync(md, 'utf-8'))
     expect(readFileSync(localSidecar, 'utf-8')).toBe(readFileSync(sidecar, 'utf-8'))
     expect(existsSync(join(dataDir, 'meeting-corrections'))).toBe(false)
   })
 
   it('rewrites both the transcript and the sidecar on confirm, and names the files', async () => {
-    const { md, sidecar, localMd, localSidecar } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    const { md, sidecar, localMd, localSidecar } = meeting('quilt', '2026-08', 'sync', 'Robin Vale')
     await startServer()
 
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+      { into: 'MU', from: 'Robin Vale', confirm: true })
     expect(res.status).toBe(200)
 
     expect(res.json.meetingRewrite.skipped).toEqual([])
     const after = readFileSync(md, 'utf-8')
     expect(after).toContain('[MU]:')
-    expect(after).not.toContain('[Clem Ukaoma]:')
+    expect(after).not.toContain('[Robin Vale]:')
     // v2 preserves attendee evidence; only the proven transcript positions move.
-    expect(after).toContain('- Clem Ukaoma')
+    expect(after).toContain('- Robin Vale')
     expect(JSON.parse(readFileSync(sidecar, 'utf-8')).chunks.map((c: {speaker: string}) => c.speaker))
       .toEqual(['MU', 'MU'])
     expect(readFileSync(localMd, 'utf-8')).toBe(after)
@@ -755,42 +774,42 @@ describe('a merge carries the rename out to the meeting library', () => {
 
   it('leaves the library untouched on dryRun, all the way down', async () => {
     // Otherwise `dryRun: true` becomes the most dangerous parameter in the API.
-    const { md } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    const { md } = meeting('quilt', '2026-08', 'sync', 'Robin Vale')
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: 'Clem Ukaoma', dryRun: true })
+      { into: 'MU', from: 'Robin Vale', dryRun: true })
     expect(res.status).toBe(200)
     expect(res.json.meetingRewrite.dryRun).toBe(true)
-    expect(readFileSync(md, 'utf-8')).toContain('[Clem Ukaoma]:')
+    expect(readFileSync(md, 'utf-8')).toContain('[Robin Vale]:')
   })
 
   it('rewrites NOTHING when the merge itself was refused below the floor', async () => {
     // The rename is only correct BECAUSE the merge concluded they are one person.
     // A 409 means we concluded the opposite.
-    mergeSimilarity = { 'Clem Ukaoma': 0.41 }
-    const { md } = meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
+    mergeSimilarity = { 'Robin Vale': 0.41 }
+    const { md } = meeting('quilt', '2026-08', 'sync', 'Robin Vale')
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+      { into: 'MU', from: 'Robin Vale', confirm: true })
     expect(res.status).toBe(409)
-    expect(readFileSync(md, 'utf-8')).toContain('[Clem Ukaoma]:')
+    expect(readFileSync(md, 'utf-8')).toContain('[Robin Vale]:')
   })
 
   it('sweeps every domain and month, and skips iCloud conflict copies', async () => {
     // Desktop-and-Documents sync creates `2026-08 2/` and `sync 2.md`. Rewriting one
     // of those edits a file nothing reads while leaving the real one stale.
-    meeting('quilt', '2026-08', 'sync', 'Clem Ukaoma')
-    meeting('personal', '2026-07', 'other', 'Clem Ukaoma')
-    const conflictMonth = meeting('quilt', '2026-08 2', 'sync', 'Clem Ukaoma')
-    const conflictFile = meeting('quilt', '2026-08', 'sync 2', 'Clem Ukaoma')
+    meeting('quilt', '2026-08', 'sync', 'Robin Vale')
+    meeting('personal', '2026-07', 'other', 'Robin Vale')
+    const conflictMonth = meeting('quilt', '2026-08 2', 'sync', 'Robin Vale')
+    const conflictFile = meeting('quilt', '2026-08', 'sync 2', 'Robin Vale')
     await startServer()
 
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+      { into: 'MU', from: 'Robin Vale', confirm: true })
     expect(res.status).toBe(200)
     expect(res.json.meetingRewrite.files).toBe(8)   // two meetings x two copies x (md + sidecar)
-    expect(readFileSync(conflictMonth.md, 'utf-8')).toContain('[Clem Ukaoma]:')
-    expect(readFileSync(conflictFile.md, 'utf-8')).toContain('[Clem Ukaoma]:')
+    expect(readFileSync(conflictMonth.md, 'utf-8')).toContain('[Robin Vale]:')
+    expect(readFileSync(conflictFile.md, 'utf-8')).toContain('[Robin Vale]:')
   })
 
   it('still merges when no COS library is configured', async () => {
@@ -798,9 +817,9 @@ describe('a merge carries the rename out to the meeting library', () => {
     delete process.env.COS_OPERATIONS_DIR
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+      { into: 'MU', from: 'Robin Vale', confirm: true })
     expect(res.status).toBe(200)
-    expect(res.json.merged).toEqual(['Clem Ukaoma'])
+    expect(res.json.merged).toEqual(['Robin Vale'])
     expect(res.json.meetingRewrite.files).toBe(0)
     expect(res.json.meetingRewrite.error).toBeUndefined()
   })
@@ -814,19 +833,19 @@ describe('a merge carries the rename out to the meeting library', () => {
     // meeting they appear in, off the back of a typo.
     //
     // Found by mutation: swapping `report.merged` for `from` passed all 51 tests.
-    const other = meeting('quilt', '2026-08', 'unrelated', 'Ilona Boodhoo')
+    const other = meeting('quilt', '2026-08', 'unrelated', 'Ilona Boone')
 
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: ['Clem Ukaoma', 'Ilona Boodhoo'], confirm: true })
+      { into: 'MU', from: ['Robin Vale', 'Ilona Boone'], confirm: true })
 
     expect(res.status).toBe(200)
-    expect(res.json.merged).toEqual(['Clem Ukaoma'])
-    expect(res.json.missing).toEqual(['Ilona Boodhoo'])
+    expect(res.json.merged).toEqual(['Robin Vale'])
+    expect(res.json.missing).toEqual(['Ilona Boone'])
     // Her name survives untouched. She was never merged into anything.
-    for (const path of [other.md, other.localMd]) expect(readFileSync(path, 'utf-8')).toContain('[Ilona Boodhoo]:')
+    for (const path of [other.md, other.localMd]) expect(readFileSync(path, 'utf-8')).toContain('[Ilona Boone]:')
     for (const path of [other.sidecar, other.localSidecar]) {
-      expect(JSON.parse(readFileSync(path, 'utf-8')).chunks[0].speaker).toBe('Ilona Boodhoo')
+      expect(JSON.parse(readFileSync(path, 'utf-8')).chunks[0].speaker).toBe('Ilona Boone')
     }
   })
 
@@ -835,15 +854,15 @@ describe('a merge carries the rename out to the meeting library', () => {
     // as a number, which would have reported 0 labels for every sidecar -- a fan-out
     // announcing success while rewriting nothing. Mutation-proven: hardcoding the
     // count to 1 passed the whole suite before this existed.
-    meeting('quilt', '2026-08', 'many', 'Clem Ukaoma', [
-        { speaker: 'Clem Ukaoma', text: 'one' },
+    meeting('quilt', '2026-08', 'many', 'Robin Vale', [
+        { speaker: 'Robin Vale', text: 'one' },
         { speaker: 'MU', text: 'two' },
-        { speaker: 'Clem Ukaoma', text: 'three' },
-        { speaker: 'Clem Ukaoma', text: 'four' },
+        { speaker: 'Robin Vale', text: 'three' },
+        { speaker: 'Robin Vale', text: 'four' },
     ])
     await startServer()
     const res = await httpRequest('POST', '/api/voice/merge-profiles',
-      { into: 'MU', from: 'Clem Ukaoma', confirm: true })
+      { into: 'MU', from: 'Robin Vale', confirm: true })
     expect(res.status).toBe(200)
     expect(res.json.meetingRewrite.sidecars.map((file: any) => file.labels)).toEqual([3, 3])
     expect(res.json.meetingRewrite.markdown.map((file: any) => file.labels)).toEqual([3, 3])

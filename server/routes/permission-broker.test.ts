@@ -284,8 +284,8 @@ describe('a parked question or approval', () => {
     expect(item).toMatchObject({ sessionId: SESSION, provider: 'claude', kind: 'question', tool: 'AskUserQuestion', questions: QUESTIONS })
     expect(item.id).toMatch(/^pq_[0-9a-f]{24}$/)
     expect(Date.parse(item.deadlineAt) - Date.parse(item.createdAt)).toBeLessThanOrEqual(4_000)
-    const a = await answer(h, item.id, { clientAnswerId: 'lens-1', answers: [{ labels: ['Publish', 'Bump'], other: 'and tell Gina' }, { labels: ['Blue'] }] })
-    const answers = { [Q1]: ['Bump', 'Publish', 'and tell Gina'], [Q2]: ['Blue'] }
+    const a = await answer(h, item.id, { clientAnswerId: 'lens-1', answers: [{ labels: ['Publish', 'Bump'], other: 'and tell Mira' }, { labels: ['Blue'] }] })
+    const answers = { [Q1]: ['Bump', 'Publish', 'and tell Mira'], [Q2]: ['Blue'] }
     expect(a).toEqual({ status: 200, body: { ok: true, id: item.id, kind: 'question', answers } })
     const hook = await reply
     expect(hook.status).toBe(200)

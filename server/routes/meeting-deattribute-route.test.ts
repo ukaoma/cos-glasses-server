@@ -32,18 +32,18 @@ const SCRIBE = `# Lead Ops Review
 
 ## Attendees
 
-- Luke H
+- Theo M
 - MU
 
 ## Summary
 
-Luke H walked the pipeline while MU pushed on timing. Luke owns the follow-up.
+Theo M walked the pipeline while MU pushed on timing. Theo owns the follow-up.
 
 ## Transcript
 
-[Luke H]: The Jewel360 pipeline is at thirty six percent.
-[MU]: Let us take that offline, Luke H can own it.
-[Luke H]: Agreed on the follow-up.
+[Theo M]: The Jewel360 pipeline is at thirty six percent.
+[MU]: Let us take that offline, Theo M can own it.
+[Theo M]: Agreed on the follow-up.
 `
 
 function seed(sessionId: string, labels: string[], opts: { scribe?: string } = {}): void {
@@ -161,11 +161,11 @@ const HTTP_TEST_TIMEOUT = 30_000
 
 describe('de-attribution changes nothing without confirmation', () => {
   it('previews the label change AND the training retraction', async () => {
-    seed('meeting_d1', ['Navaz Sharif', 'MU', 'Navaz Sharif'])
-    seedProfile('Navaz Sharif', ['manual', 'auto:meeting_d1', 'g2-training:meeting_d1', 'fireflies'])
+    seed('meeting_d1', ['Neva Sharpe', 'MU', 'Neva Sharpe'])
+    seedProfile('Neva Sharpe', ['manual', 'auto:meeting_d1', 'g2-training:meeting_d1', 'fireflies'])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_d1/deattribute', { from: 'Navaz Sharif' })
+    const res = await post('/api/meeting/meeting_d1/deattribute', { from: 'Neva Sharpe' })
     expect(res.status).toBe(400)
     expect(res.json.reason).toBe('confirmation_required')
     expect(res.json.to).toBe('Unidentified 1')
@@ -174,17 +174,17 @@ describe('de-attribution changes nothing without confirmation', () => {
     expect(res.json.training.wouldRetract).toBe(2)
     expect(res.json.training.untraceable).toBe(2)
 
-    expect(sidecarNow().labels).toEqual(['Navaz Sharif', 'MU', 'Navaz Sharif'])
-    expect(profileSources('Navaz Sharif')).toHaveLength(4)
+    expect(sidecarNow().labels).toEqual(['Neva Sharpe', 'MU', 'Neva Sharpe'])
+    expect(profileSources('Neva Sharpe')).toHaveLength(4)
     expect(ledgerNow('meeting_d1')).toEqual([])
   })
 
   it('says plainly what it cannot reach', async () => {
-    seed('meeting_d2', ['Navaz Sharif'])
-    seedProfile('Navaz Sharif', ['g2-training', 'g2-training', 'fireflies'])
+    seed('meeting_d2', ['Neva Sharpe'])
+    seedProfile('Neva Sharpe', ['g2-training', 'g2-training', 'fireflies'])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_d2/deattribute', { from: 'Navaz Sharif' })
+    const res = await post('/api/meeting/meeting_d2/deattribute', { from: 'Neva Sharpe' })
     // Every sample predates session stamping, so the profile cannot be cleaned.
     // Silence here would imply it had been.
     expect(res.json.training.wouldRetract).toBe(0)
@@ -199,89 +199,89 @@ describe('de-attribution changes nothing without confirmation', () => {
 
 describe('applying a de-attribution', () => {
   it('turns the voice into Ext across the sidecar and the markdown', async () => {
-    seed('meeting_d3', ['Luke H', 'MU', 'Luke H'])
+    seed('meeting_d3', ['Theo M', 'MU', 'Theo M'])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_d3/deattribute', { from: 'Luke H', confirm: true })
+    const res = await post('/api/meeting/meeting_d3/deattribute', { from: 'Theo M', confirm: true })
     expect(res.status).toBe(200)
     // A NUMBERED label, not a shared `Ext`: de-attributing several wrong names
     // must not merge those voices into one row.
     expect(sidecarNow().labels).toEqual(['Unidentified 1', 'MU', 'Unidentified 1'])
     const md = scribeNow()
     expect(md).toContain('[Unidentified 1]: The Jewel360 pipeline')
-    expect(md).not.toContain('[Luke H]:')
+    expect(md).not.toContain('[Theo M]:')
     // The attendee bullet is DELETED, never renamed — writing
     // `- Unidentified 1` would inject a phantom attendee that every downstream
     // reader takes at face value.
     const attendees = md.split('## Summary')[0]
-    expect(attendees).not.toContain('Luke H')
+    expect(attendees).not.toContain('Theo M')
     expect(attendees).not.toContain('Unidentified')
   })
 
   it('RETRACTS the training samples that meeting contributed', async () => {
     // The point of the whole feature: a false attribution that auto-enrolled has
     // poisoned the profile, and removing only the label leaves it poisoned.
-    seed('meeting_d4', ['Navaz Sharif', 'MU'])
-    seedProfile('Navaz Sharif', ['manual', 'auto:meeting_d4', 'g2-training:meeting_d4', 'auto:meeting_other'])
+    seed('meeting_d4', ['Neva Sharpe', 'MU'])
+    seedProfile('Neva Sharpe', ['manual', 'auto:meeting_d4', 'g2-training:meeting_d4', 'auto:meeting_other'])
     await startServer()
 
-    const res = await post('/api/meeting/meeting_d4/deattribute', { from: 'Navaz Sharif', confirm: true })
+    const res = await post('/api/meeting/meeting_d4/deattribute', { from: 'Neva Sharpe', confirm: true })
     expect(res.status).toBe(200)
     expect(res.json.training.retracted).toBe(2)
 
-    const after = profileSources('Navaz Sharif')
+    const after = profileSources('Neva Sharpe')
     expect(after).toEqual(['manual', 'auto:meeting_other'])
     // Another meeting's evidence is untouched — de-attribution is per-meeting.
     expect(after).toContain('auto:meeting_other')
   })
 
   it('leaves the profile alone when retractTraining is false', async () => {
-    seed('meeting_d5', ['Navaz Sharif'])
-    seedProfile('Navaz Sharif', ['auto:meeting_d5', 'manual'])
+    seed('meeting_d5', ['Neva Sharpe'])
+    seedProfile('Neva Sharpe', ['auto:meeting_d5', 'manual'])
     await startServer()
 
     const res = await post('/api/meeting/meeting_d5/deattribute', {
-      from: 'Navaz Sharif', retractTraining: false, confirm: true,
+      from: 'Neva Sharpe', retractTraining: false, confirm: true,
     })
     expect(res.status).toBe(200)
     expect(res.json.training.retracted).toBe(0)
-    expect(profileSources('Navaz Sharif')).toEqual(['auto:meeting_d5', 'manual'])
+    expect(profileSources('Neva Sharpe')).toEqual(['auto:meeting_d5', 'manual'])
     expect(sidecarNow().labels).toEqual(['Unidentified 1'])   // transcript still corrected
   })
 
   it('de-attributes only the named chunks on a partial call', async () => {
-    seed('meeting_d6', ['Navaz Sharif', 'MU', 'Navaz Sharif'])
+    seed('meeting_d6', ['Neva Sharpe', 'MU', 'Neva Sharpe'])
     await startServer()
 
     const res = await post('/api/meeting/meeting_d6/deattribute', {
-      from: 'Navaz Sharif', chunks: [0], confirm: true,
+      from: 'Neva Sharpe', chunks: [0], confirm: true,
     })
     expect(res.status).toBe(200)
-    expect(sidecarNow().labels).toEqual(['Unidentified 1', 'MU', 'Navaz Sharif'])
+    expect(sidecarNow().labels).toEqual(['Unidentified 1', 'MU', 'Neva Sharpe'])
     expect(res.json.partial).toBe(true)
   })
 
   it('records the de-attribution in the ledger, intent first', async () => {
-    seed('meeting_d7', ['Navaz Sharif'])
+    seed('meeting_d7', ['Neva Sharpe'])
     await startServer()
-    await post('/api/meeting/meeting_d7/deattribute', { from: 'Navaz Sharif', confirm: true })
+    await post('/api/meeting/meeting_d7/deattribute', { from: 'Neva Sharpe', confirm: true })
 
     const rows = ledgerNow('meeting_d7')
     expect(rows.map(r => r.phase)).toEqual(['intent', 'applied'])
-    expect(rows[1]).toMatchObject({ from: 'Navaz Sharif', to: 'Unidentified 1', scope: 'meeting' })
+    expect(rows[1]).toMatchObject({ from: 'Neva Sharpe', to: 'Unidentified 1', scope: 'meeting' })
   })
 
   it('aborts with the files AND the profile untouched when the ledger fails', async () => {
-    seed('meeting_d8', ['Navaz Sharif'])
-    seedProfile('Navaz Sharif', ['auto:meeting_d8'])
+    seed('meeting_d8', ['Neva Sharpe'])
+    seedProfile('Neva Sharpe', ['auto:meeting_d8'])
     await startServer()
     writeFileSync(join(dataDir, 'meeting-corrections'), 'a file where the directory goes')
 
-    const res = await post('/api/meeting/meeting_d8/deattribute', { from: 'Navaz Sharif', confirm: true })
+    const res = await post('/api/meeting/meeting_d8/deattribute', { from: 'Neva Sharpe', confirm: true })
     expect(res.status).toBe(500)
     expect(res.json.reason).toBe('ledger_unwritable')
-    expect(sidecarNow().labels).toEqual(['Navaz Sharif'])
-    expect(profileSources('Navaz Sharif')).toEqual(['auto:meeting_d8'])
+    expect(sidecarNow().labels).toEqual(['Neva Sharpe'])
+    expect(profileSources('Neva Sharpe')).toEqual(['auto:meeting_d8'])
   })
 }, HTTP_TEST_TIMEOUT)
 
@@ -297,7 +297,7 @@ describe('de-attribution rejects nonsense', () => {
   it('422s a label absent from the meeting', async () => {
     seed('meeting_r2', ['MU'])
     await startServer()
-    const res = await post('/api/meeting/meeting_r2/deattribute', { from: 'Navaz Sharif', confirm: true })
+    const res = await post('/api/meeting/meeting_r2/deattribute', { from: 'Neva Sharpe', confirm: true })
     expect(res.status).toBe(422)
     expect(res.json.error).toContain('no chunk carries')
   })
