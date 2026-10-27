@@ -124,6 +124,16 @@ it('files a saved Mac recording after its standalone summary, once, through --ma
   expect(markdown).not.toContain('g2-needs-domain-review')
 })
 
+it('files only after the capture finalization is complete and its job removed', async () => {
+  setup(CAPS)
+  process.env.FAKE_SYNC_PROBE_DIR = join(process.env.COS_DATA_DIR!, 'meeting-finalization-jobs')
+  await boot()
+  await recordAndSave()
+  const filing = readFakeInvocations(scripts).filter(call => call.args[0] === '--mac-import-file')
+  expect(filing).toHaveLength(1)
+  expect(filing[0].probe).toEqual([])
+})
+
 it('never files twice across a re-save and a restart', async () => {
   setup(CAPS)
   await boot()

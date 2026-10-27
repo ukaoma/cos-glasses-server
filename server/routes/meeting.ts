@@ -226,7 +226,8 @@ function cosOpsPipelineConfigured(): boolean {
  * re-run the standalone summary; mac_library_backfill.py files it later, idempotently.
  */
 async function fileFinishedMacRecording(sessionId: string, meetingPath: string, label: string): Promise<void> {
-  if (!cosOpsPipelineConfigured() || !MAC_CAPTURE_ID.test(sessionId)) return
+  // Callers pass Mac captures only (finalization and orphan recovery both check MAC_CAPTURE_ID).
+  if (!cosOpsPipelineConfigured()) return
   try {
     const filing = await fileMacRecordingInLibrary(meetingPath)
     if (filing.outcome === 'filed') {
@@ -480,7 +481,6 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
       // transcript (meeting-batch-persistence.ts:7-12) — summarising earlier
       // would describe text the file no longer contains.
       await enrichStandaloneMeeting(current.meetingPath, jobStartedAt)
-      await fileFinishedMacRecording(current.sessionId, current.meetingPath, 'meeting/save')
     }
     markCanonicalFinalizationState(current.sidecarPath, 'complete', false)
     // The capture is finished and its files are durable, so the merge engine may score it.
@@ -491,6 +491,13 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
     // 6.78.0: finished, so its crash-loop count (lib/boot-resume.ts) is done.
     bootResumeGate().forget('meeting_finalization', current.sessionId)
     finalizationRetryCounts.delete(key)
+    // Filed AFTER the capture's own finalization is complete and its job removed: the
+    // filing holds no maintenance lease (a restart drain never waits on it) and a restart
+    // mid-filing never re-runs the standalone summary. An interrupted filing leaves the
+    // staged copy unfinished, and sync_meetings' broad sync retries it.
+    if (MAC_CAPTURE_ID.test(current.sessionId)) {
+      runtime.scheduleBackground(fileFinishedMacRecording(current.sessionId, current.meetingPath, 'meeting/save'))
+    }
   }).catch(error => {
     const current = runtime.finalizationJobs.get(job.sessionId) ?? job
     try {

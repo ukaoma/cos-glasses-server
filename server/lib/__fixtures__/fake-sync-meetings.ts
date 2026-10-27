@@ -25,6 +25,8 @@ export interface FakeSyncOptions {
 export interface FakeInvocation {
   args: string[]
   importRoot: string | null
+  /** With FAKE_SYNC_PROBE_DIR set: that directory's entries when the script ran. */
+  probe?: string[]
 }
 
 export function writeFakeSyncMeetings(scriptsDir: string, options: FakeSyncOptions = {}): string {
@@ -39,7 +41,9 @@ export function writeFakeSyncMeetings(scriptsDir: string, options: FakeSyncOptio
   const body = `
 const fs = require('fs'), path = require('path')
 const args = process.argv.slice(2)
-fs.appendFileSync(path.join(__dirname, 'invocations.jsonl'), JSON.stringify({ args, importRoot: process.env.COS_G2_IMPORT_ROOT || null }) + '\\n')
+const probeDir = process.env.FAKE_SYNC_PROBE_DIR
+const probe = probeDir ? (fs.existsSync(probeDir) ? fs.readdirSync(probeDir).sort() : []) : undefined
+fs.appendFileSync(path.join(__dirname, 'invocations.jsonl'), JSON.stringify(Object.assign({ args, importRoot: process.env.COS_G2_IMPORT_ROOT || null }, probe ? { probe } : {})) + '\\n')
 ${capabilityBranch}
 const at = args.indexOf('--mac-import-file')
 if (at >= 0) {
