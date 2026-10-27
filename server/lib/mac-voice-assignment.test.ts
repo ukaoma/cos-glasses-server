@@ -16,7 +16,7 @@ let batchCalls = 0
 let extract: (audio: Buffer) => Float32Array | null = () => null
 let extractCalls = 0
 /** Overrides what stat reports for an archived chunk: a rewrite that keeps the size and the mtime cannot be built from user space. */
-let statTweak: Partial<{ ino: number; ctimeMs: number }> | null = null
+let statTweak: Partial<{ ino: number; ctimeMs: number; mtimeMs: number }> | null = null
 
 const MAC_SIDECAR = { sessionId: MAC_ID, chunks: [{ text: 'a', speaker: 'Voice 2' }], chunkEntries: [{ chunkIndex: 0, chunk: { text: 'a', speaker: 'Voice 2' } }] }
 
@@ -226,17 +226,21 @@ describe('B4: the plan yields, has a deadline, and keeps its vectors', () => {
     expect(extractCalls).toBe(3)
     await planMacVoiceAssignment(args())
     expect(extractCalls).toBe(3) // same stat: all served from the cache
+    // Same size, but modified at another time.
+    statTweak = { mtimeMs: Date.now() + 3_600_000 }
+    await planMacVoiceAssignment(args())
+    expect(extractCalls).toBe(6)
     // Same path, same size, same mtime, but another file in its place (a restore or an rsync -t): different inode.
     statTweak = { ino: 987_654_321 }
     await planMacVoiceAssignment(args())
-    expect(extractCalls).toBe(6)
+    expect(extractCalls).toBe(9)
     // Same inode and mtime, but written to in place since: the change time moved.
     statTweak = { ino: 987_654_321, ctimeMs: Date.now() + 86_400_000 }
     await planMacVoiceAssignment(args())
-    expect(extractCalls).toBe(9)
+    expect(extractCalls).toBe(12)
     // And an unchanged repeat of that stat hits the cache again, so the key is stable, not merely always new.
     await planMacVoiceAssignment(args())
-    expect(extractCalls).toBe(9)
+    expect(extractCalls).toBe(12)
   })
 
   it('an env deadline outside 1 s to 25 s is ignored (too small and too large both fall back to 12 s)', async () => {
