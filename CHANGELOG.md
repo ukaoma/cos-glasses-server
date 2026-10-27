@@ -1,3 +1,13 @@
+## 6.94.1 - Mac filing waits for a pipeline that can title a Mac recording
+
+2026-10-27. Pairs with COS operations `sync_meetings.py` on branch `claude/mac-library-cos` (the `mac_title: 1` capability). Works with COS Control 0.5.351; Control needs no change.
+
+- **Why:** after 6.94.0 and COS d51abbff2 went live, every Mac import came back untitled. The pipeline's model prompt said the title was "ONLY for G2 source, null otherwise", and a Mac recording's prompt reads `Source: mac_system_audio`, so the model answered with no title. The pipeline then refused to write the import, so it stayed a staged copy under `personal/` with its review marker. On 2026-10-27 the hourly sync spent two Opus calls an hour on the same two recordings. The model step itself ran: it classified both as quilt.
+- **What:** the server files a Mac recording only when `sync_meetings.py --capabilities` also reports `mac_title: 1` or later. That is the script whose prompt asks a Mac recording for its title. A server paired with the d51abbff2 script no longer spends three model calls per save on an import that cannot be written: the recording stays standalone and is filed later by the hourly sync or `mac_library_backfill.py` once the script is updated.
+- **COS side (same branch):** the prompt asks a Mac recording for its title, and G2 and cloud prompts stay byte for byte the same. The hourly sync's Mac catch-up runs with the explicit save's model allowance (`COS_MEETING_LLM` off does not stop it; `--no-llm` or a missing model does), stages nothing in a run without a model, and counts an attempt only when the model is called. Attempts spent under the old prompt are not held against a recording.
+- **Unchanged:** G2 saves (pinned by `server/routes/g2-filing-golden.test.ts`), the import itself, twins, and the 6.94.0 retry and catch-up budgets.
+- **Publish order:** either order is safe. This server against the d51abbff2 script leaves Mac recordings standalone; the 6.94.0 server against the new script files them as before, now titled.
+
 ## 6.94.0 - Saved Mac recordings are filed into the COS meeting library
 
 2026-10-27. Pairs with COS operations `sync_meetings.py` on branch `claude/mac-library-cos` (the `--mac-import-file` import and `--capabilities`). Works with COS Control 0.5.351; Control needs no change.

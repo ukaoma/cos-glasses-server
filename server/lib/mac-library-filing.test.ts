@@ -17,7 +17,7 @@ let handoff: typeof import('./g2-ops-handoff.js')
 let runner: typeof import('./g2-enrichment-runner.js')
 
 const SESSION = 'mac_8743a230-7f8f-4d59-a0de-5ffdfdcd5801'
-const CAPS = { schema: 1, g2_import: 1, mac_import: 1, mac_twins: 2 }
+const CAPS = { schema: 1, g2_import: 1, mac_import: 1, mac_twins: 2, mac_title: 1 }
 
 function macMarkdown(source = '| **Source** | Mac System Audio |'): string {
   return [
@@ -125,7 +125,7 @@ describe('sync capability probe', () => {
     expect(failing).toHaveBeenCalledTimes(2)
     const garbage = vi.fn(async () => ({ code: 0, stdout: 'not json' }))
     expect(await handoff.readSyncCapabilities('py', script, garbage)).toEqual({ macImport: false, reason: 'capability_probe_unreadable' })
-    const ok = vi.fn(async () => ({ code: 0, stdout: 'noise\n{"mac_import": 1, "mac_twins": 2}\n' }))
+    const ok = vi.fn(async () => ({ code: 0, stdout: 'noise\n{"mac_import": 1, "mac_twins": 2, "mac_title": 1}\n' }))
     expect(await handoff.readSyncCapabilities('py', script, ok)).toEqual({ macImport: true, reason: null })
   })
 
@@ -138,16 +138,36 @@ describe('sync capability probe', () => {
     process.env.COS_SCRIPTS_DIR = tree.scripts
     expect(await handoff.fileMacRecordingInLibrary(local)).toEqual({ outcome: 'standalone', reason: 'sync_script_upgrade_required' })
     expect(readFakeInvocations(tree.scripts).filter(call => call.args[0] === '--mac-import-file')).toEqual([])
-    const twinsOnly = vi.fn(async () => ({ code: 0, stdout: '{"mac_twins": 2}\n' }))
+    const twinsOnly = vi.fn(async () => ({ code: 0, stdout: '{"mac_twins": 2, "mac_title": 1}\n' }))
     handoff.resetSyncCapabilitiesCache()
     expect(await handoff.readSyncCapabilities('py', script, twinsOnly)).toEqual({ macImport: false, reason: 'sync_script_upgrade_required' })
     // mac_twins 1 knew G2 twins only: a Mac + Fireflies meeting would be filed twice.
-    const g2TwinsOnly = vi.fn(async () => ({ code: 0, stdout: '{"mac_import": 1, "mac_twins": 1}\n' }))
+    const g2TwinsOnly = vi.fn(async () => ({ code: 0, stdout: '{"mac_import": 1, "mac_twins": 1, "mac_title": 1}\n' }))
     handoff.resetSyncCapabilitiesCache()
     expect(await handoff.readSyncCapabilities('py', script, g2TwinsOnly)).toEqual({ macImport: false, reason: 'sync_script_upgrade_required' })
-    const later = vi.fn(async () => ({ code: 0, stdout: '{"mac_import": 1, "mac_twins": 3}\n' }))
+    const later = vi.fn(async () => ({ code: 0, stdout: '{"mac_import": 1, "mac_twins": 3, "mac_title": 1}\n' }))
     handoff.resetSyncCapabilitiesCache()
     expect(await handoff.readSyncCapabilities('py', script, later)).toEqual({ macImport: true, reason: null })
+  })
+
+  it('refuses the script whose prompt could not title a Mac recording', async () => {
+    // COS d51abbff2: mac_import 1 and mac_twins 2, but its prompt asked a Mac recording for no
+    // title, so every import came back untitled after three model calls (2026-10-27).
+    const tree = makeTree()
+    const script = writeFakeSyncMeetings(tree.scripts, { capabilities: { schema: 1, g2_import: 1, mac_import: 1, mac_twins: 2 } })
+    const local = writeRecording(tree, '2026-10-27_Mac_recording_t.md', macMarkdown(), macSidecar)
+    process.env.COS_SCRIPTS_DIR = tree.scripts
+    expect(await handoff.fileMacRecordingInLibrary(local)).toEqual({ outcome: 'standalone', reason: 'sync_script_upgrade_required' })
+    expect(readFakeInvocations(tree.scripts).filter(call => call.args[0] === '--mac-import-file')).toEqual([])
+    for (const [stdout, macImport] of [
+      ['{"mac_import": 1, "mac_twins": 2, "mac_title": 0}\n', false],
+      ['{"mac_import": 1, "mac_twins": 2, "mac_title": "1"}\n', false],
+      ['{"mac_import": 1, "mac_twins": 2, "mac_title": 2}\n', true],
+    ] as const) {
+      handoff.resetSyncCapabilitiesCache()
+      const probe = vi.fn(async () => ({ code: 0, stdout }))
+      expect((await handoff.readSyncCapabilities('py', script, probe)).macImport).toBe(macImport)
+    }
   })
 })
 

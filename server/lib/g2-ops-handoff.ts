@@ -398,6 +398,13 @@ export type CapabilityProbe = (pythonBin: string, syncScript: string, cwd: strin
 const CAPABILITY_PROBE_TIMEOUT_MS = 30_000
 /** sync_meetings.py `mac_twins` version the server needs: 2 = twins of G2 recordings AND cloud scribes. */
 export const MAC_TWINS_REQUIRED = 2
+/**
+ * sync_meetings.py `mac_title` version the server needs: 1 = its model prompt asks a Mac recording
+ * for a title. The script that first shipped `mac_import` (COS d51abbff2) told the model the title
+ * was "ONLY for G2 source, null otherwise", so every Mac import came back untitled and was never
+ * written, after three model calls per save (2026-10-27).
+ */
+export const MAC_TITLE_REQUIRED = 1
 const capabilityCache = new Map<string, SyncCapabilities>()
 
 function spawnCapabilityProbe(pythonBin: string, syncScript: string, cwd: string): Promise<CapabilityProbeResult> {
@@ -421,7 +428,7 @@ export function resetSyncCapabilitiesCache(): void {
 
 /**
  * What the installed sync_meetings.py can do, read from `--capabilities` rather than guessed.
- * Mac filing needs `mac_import: 1` and `mac_twins: 2` or later.
+ * Mac filing needs `mac_import: 1`, `mac_twins: 2` or later and `mac_title: 1` or later.
  *
  * Cached per python + script + mtime + size, so an upgraded script is probed again. A script
  * whose text never mentions `--capabilities` is an older one: it would take the sync lock
@@ -458,7 +465,9 @@ export async function readSyncCapabilities(
   // that keeps a Mac copy of an already-recorded meeting out of LightRAG and Work. A script with
   // the import but an older twin rule would file a Mac + Fireflies meeting twice.
   const caps = !!parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
-  const macImport = caps.mac_import === 1 && typeof caps.mac_twins === 'number' && caps.mac_twins >= MAC_TWINS_REQUIRED
+  const macImport = caps.mac_import === 1
+    && typeof caps.mac_twins === 'number' && caps.mac_twins >= MAC_TWINS_REQUIRED
+    && typeof caps.mac_title === 'number' && caps.mac_title >= MAC_TITLE_REQUIRED
   const result = { macImport, reason: macImport ? null : 'sync_script_upgrade_required' }
   capabilityCache.set(key, result)
   return result

@@ -719,7 +719,7 @@ into `operations/{domain}/meetings/YYYY-MM/` after its standalone summary, throu
 `sync_meetings.py --mac-import-file`: the same summary, title and domain step as a
 glasses meeting, titled `... (Mac)`, never matched or blended into a Fireflies or
 Granola meeting. The server checks `sync_meetings.py --capabilities` first (it needs
-`mac_import` and `mac_twins` 2); an older script leaves Mac recordings standalone. A Mac
+`mac_import`, `mac_twins` 2 and, from 6.94.1, `mac_title` 1); an older script leaves Mac recordings standalone. A Mac
 recording of a meeting the glasses or Fireflies also recorded is filed as a twin:
 searchable, but kept out of LightRAG, task scans and Work (`operations/scripts/mac_twins.py`). Recordings saved before 6.94.0 are filed with
 `operations/scripts/mac_library_backfill.py` (dry run by default, `--apply` to file).
