@@ -1,0 +1,35 @@
+{
+  "version": "6.94.2",
+  "status": "published_verified",
+  "tag": "latest",
+  "artifact": "gotcos-glasses-server-6.94.2.tgz",
+  "integrity": "sha512-EeHXN3t8SSUD8EOAPde+e2NDWgPf0SW/XZDNFUDe0IYQRh2G9U24TGzQYFzAmE5yxUj9AvFU1CZZ4mef6Ld+Wg==",
+  "registry_integrity": "sha512-EeHXN3t8SSUD8EOAPde+e2NDWgPf0SW/XZDNFUDe0IYQRh2G9U24TGzQYFzAmE5yxUj9AvFU1CZZ4mef6Ld+Wg==",
+  "sha256": "83db078ea321a9cff85158dde380cd730bbee5f6045b0a1dc4d4d654af3adfa8",
+  "files": 578,
+  "bytes": 4791058,
+  "source_commit": "bf1040e3aa4abd983336c0ae14717f855e3f51dd",
+  "validation": {
+    "test_files_passed": 618,
+    "test_files_skipped": 1,
+    "tests_passed": 9740,
+    "tests_skipped": 14,
+    "typecheck": "passed",
+    "production_audit_vulnerabilities": 0,
+    "registry_fresh_cache_cli": "passed",
+    "public_download_sha256": "matched"
+  },
+  "verified_at": "2026-10-28T22:08:58.293347+00:00",
+  "dist_tags": {
+    "next": "6.91.0",
+    "latest": "6.94.2"
+  },
+  "control": {
+    "version": "0.5.352",
+    "build": 406,
+    "rebuild_required": false,
+    "reason": "Existing additive saved speaker proof and correction semantics remain compatible."
+  },
+  "scope": "Bounded post-save high-confidence profile matching. Does not resolve meeting-wide anonymous speaker fragmentation. No automatic voice-profile enrollment.",
+  "rollback_server": "6.94.1"
+}
