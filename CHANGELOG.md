@@ -1,3 +1,13 @@
+## 6.94.2 - Scoped profile matches for saved Mac recordings
+
+2026-10-28. Compatible with COS Control 0.5.352; no Control or glasses package change required.
+
+- Saved Mac recordings can match existing profiles using two independent, coherent long audio windows. Names apply only to supported spans at the unchanged .88 identity floor and .05 separation margin. This does not enroll or train profiles.
+- Durable repair evidence distinguishes machine matches from human confirmations and protects words, timestamps, existing corrections, retained audio and interrupted-save recovery. The review no longer treats one scored occurrence as proof for every repaired occurrence.
+- Existing named spans no longer prevent anonymous refinement of the remainder of a strict Mac recording. Historical recordings require explicit validated repair; upgrading does not silently rewrite them.
+- Known limitation: live numbering still loses continuity across long gaps, and some anonymous groups contain mixed voices. This release does not claim full-call deduplication, an attendee count, or recognition of every speaker.
+- Qualification: 9,704 tests passed, 14 skipped, zero failed; typecheck passed. Isolated natural-recording runs preserved all speech and timestamps, accepted exact supported spans, and withheld incoherent or insufficient matches.
+
 ## 6.94.1 - Mac filing waits for a pipeline that can title a Mac recording
 
 2026-10-27. Pairs with COS operations `sync_meetings.py` on branch `claude/mac-library-cos` (the `mac_title: 1` capability). Works with COS Control 0.5.351; Control needs no change.
