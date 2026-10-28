@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { selectBatchTranscriptForPersistence } from './batch-transcript-quality.js'
 import { cleanTranscriptLines } from './hallucination-filter.js'
+import { appendCorrection } from './meeting-corrections.js'
 import type { RunNemotronOptions } from './nemotron-cli.js'
 import {
   buildMeetingTimeline,
@@ -228,12 +229,100 @@ describe('6.90.0 Mac recordings: unnamed meeting-stable voices', () => {
     expect(after).toContain('[Voice 1]: alpha3')
   })
 
-  it('a Mac chunk that already carries a real name is never overwritten with a placeholder', async () => {
-    const f = macMeeting({ batch: true, mutate: (chunk, i) => { if (i === 3) { chunk.speaker = 'Dana Reyes'; chunk.similarity = 0.91 } } })
+  it.each([true, false])('an existing strict Mac name protects its chunk while other speech gets anonymous refinement (batch=%s)', async batch => {
+    const f = macMeeting({ batch, sidecarExtra: { speakers: ['Dana Reyes'] }, mutate: (chunk, i) => { if (i === 3) { chunk.speaker = 'Dana Reyes'; chunk.similarity = 0.91; chunk.segments = [{ speaker: 'Dana Reyes', text: chunk.text, startSec: 0, endSec: 6, similarity: .91 }] } } })
     const run = fakeRun(TWO_VOICES)
-    expect(await runNemotronFinalPass(opts(f, run))).toMatchObject({ status: 'skipped', reason: 'speaker_policy' })
+    expect(await runNemotronFinalPass(opts(f, run))).toMatchObject({ status: 'applied', unnamed: true })
+    expect(run).toHaveBeenCalledTimes(1)
+    const sidecar = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
+    expect(sidecar.chunks[3].speaker).toBe('Dana Reyes')
+    expect(sidecar.chunkEntries[3].chunk.speaker).toBe('Dana Reyes')
+    expect(sidecar.chunks[3].similarity).toBe(.91)
+    expect(sidecar.speakers).toEqual(['Dana Reyes'])
+    const after = readTranscriptSection(readFileSync(f.meetingPath, 'utf8'))!
+    expect(sameWords(f.transcript, after)).toBe(true)
+    expect(after).toContain('[Dana Reyes]: alpha3 bravo3 charlie3 delta3')
+    expect(after).toContain('[Voice 1]: alpha0')
+    if (batch) expect(sidecar.batchSegments.flatMap((s: any) => s.speakerWords).filter((w: any) => wordsOf(3).includes(w.word)).map((w: any) => w.speaker)).toEqual(Array(4).fill('Dana Reyes'))
+  })
+
+  it.each([true, false])('does not propagate a named chunk head into explicit unnamed turns (batch=%s)', async batch => {
+    const f = macMeeting({ batch, mutate: (chunk, i) => { if (i === 3) { chunk.speaker = 'Dana Reyes'; chunk.similarity = .91 } } })
+    expect(await runNemotronFinalPass(opts(f, fakeRun(TWO_VOICES)))).toMatchObject({ status: 'applied' })
+    const sidecar = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
+    expect(sidecar.chunks[3].speaker).toBe('Dana Reyes')
+    const after = readTranscriptSection(readFileSync(f.meetingPath, 'utf8'))!
+    expect(after).not.toContain('[Dana Reyes]:')
+    expect(sameWords(f.transcript, after)).toBe(true)
+    if (batch) expect(sidecar.batchSegments.flatMap((s: any) => s.speakerWords).filter((w: any) => wordsOf(3).includes(w.word)).every((w: any) => w.speaker === 'Voice 2')).toBe(true)
+    else expect(sidecar.chunks[3].finalSegments.every((s: any) => s.speaker === 'Voice 2')).toBe(true)
+  })
+
+  it.each([true, false])('preserves an exact named turn inside a mixed chunk without naming the rest of its channel (batch=%s)', async batch => {
+    const f = macMeeting({ batch, mutate: (chunk, i) => {
+      if (i !== 5) return
+      chunk.segments = [
+        { speaker: 'Dana Reyes', text: wordsOf(i).slice(0, 2).join(' '), startSec: 0, endSec: 2.5, similarity: .92 },
+        { speaker: 'Ext', text: wordsOf(i).slice(2).join(' '), startSec: 2.5, endSec: 6, similarity: 0 },
+      ]
+      chunk.words = wordsOf(i).map((word, k) => ({ word, start: WORD_AT[k], end: WORD_AT[k] + .6 }))
+    } })
+    expect(await runNemotronFinalPass(opts(f, fakeRun(TWO_VOICES)))).toMatchObject({ status: 'applied' })
+    const sidecar = JSON.parse(readFileSync(f.sidecarPath, 'utf8'))
+    const after = readTranscriptSection(readFileSync(f.meetingPath, 'utf8'))!
+    expect(sameWords(f.transcript, after)).toBe(true)
+    expect(after).toContain('[Dana Reyes]: alpha5 bravo5')
+    expect(after).toContain('[Voice 2]: charlie5 delta5')
+    expect(after).not.toContain('[Dana Reyes]: alpha4')
+    expect(sidecar.chunks[5].segments).toEqual(JSON.parse(f.sidecarText).chunks[5].segments)
+    expect(sidecar.chunks[5].words).toEqual(JSON.parse(f.sidecarText).chunks[5].words)
+  })
+
+  it('a ledger-only legacy manual de-attribution is protected before model invocation', async () => {
+    const sessionId = 'mac_0a1b2c3d-0000-4000-8000-000000000002'
+    const f = macMeeting({ batch: true, sidecarExtra: { sessionId, correctionRevision: 0 } })
+    expect(appendCorrection(sessionId, { id: 'legacy-manual-proof', phase: 'confirmed-chunks', at: '2026-10-28T00:00:00Z', from: 'Ext', to: 'Unidentified 3', chunks: [0], scope: 'meeting' })).toBe(true)
+    const run = fakeRun(TWO_VOICES)
+    expect(await runNemotronFinalPass(opts(f, run))).toMatchObject({ status: 'skipped', reason: 'human_corrected' })
     expect(run).not.toHaveBeenCalled()
     unchanged(f)
+  })
+
+  it('withholds unmatched streaming text when named turns have no usable token clock', async () => {
+    const f = macMeeting({ batch: false, mutate: (chunk, i) => {
+      if (i === 0) chunk.segments = [{ speaker: 'Dana Reyes', text: 'different stored text', startSec: 0, endSec: 1, similarity: .91 }]
+    } })
+    const doc = JSON.parse(f.sidecarText)
+    const timeline = await buildMeetingTimeline(doc.chunkEntries, f.audioDir)
+    expect(relabelStreamingChunks(timeline, activityOf(49, []), new Map()).finals.has(0)).toBe(false)
+  })
+
+  it('a ledger-only correction arriving during the run invalidates the write', async () => {
+    const sessionId = 'mac_0a1b2c3d-0000-4000-8000-000000000003'
+    const f = macMeeting({ batch: true, sidecarExtra: { sessionId, correctionRevision: 0 } })
+    const run = vi.fn(async (_options: RunNemotronOptions) => {
+      expect(appendCorrection(sessionId, { id: 'late-manual-proof', phase: 'confirmed', at: '2026-10-28T00:00:00Z', from: 'Ext', to: 'Dana Reyes', chunks: [0], scope: 'meeting' })).toBe(true)
+      return activityOf(49, TWO_VOICES)
+    })
+    expect(await runNemotronFinalPass(opts(f, run))).toMatchObject({ status: 'skipped', reason: 'changed_during_pass' })
+    unchanged(f)
+  })
+
+  it('does not spread a named turn to nearby unclaimed batch words when the final channel is unmapped', async () => {
+    const f = macMeeting({ batch: true, mutate: (chunk, i) => {
+      if (i !== 0) return
+      chunk.segments = [
+        { speaker: 'Dana Reyes', text: wordsOf(i)[0], startSec: 0, endSec: 1, similarity: .92 },
+        { speaker: 'Ext', text: wordsOf(i).slice(1).join(' '), startSec: 3, endSec: 6, similarity: 0 },
+      ]
+    } })
+    const doc = JSON.parse(f.sidecarText)
+    const timeline = await buildMeetingTimeline(doc.chunkEntries, f.audioDir)
+    const projected = relabelBatchSegments(doc.batchSegments, timeline, activityOf(49, []), new Map())
+    const words = projected.segments.flatMap(s => s.speakerWords)
+    expect(words.find(w => w.word === 'alpha0')?.speaker).toBe('Dana Reyes')
+    expect(words.find(w => w.word === 'bravo0')?.speaker).toBe('Ext')
+    expect(words.map(w => [w.word, w.start, w.end])).toEqual(doc.batchSegments.flatMap((s: any) => s.speakerWords).map((w: any) => [w.word, w.start, w.end]))
   })
 
   it('a Mac sidecar with a Standard chunk is not a Mac strict capture: the 6.73.6 skip holds', async () => {
@@ -260,7 +349,7 @@ describe('6.90.0 Mac recordings: unnamed meeting-stable voices', () => {
 })
 
 describe('the pieces', () => {
-  it('eligibility: Mac, switch on, every chunk strict, no real name', () => {
+  it('eligibility: Mac, switch on, every spoken chunk strict; local names do not skip anonymous refinement', () => {
     const chunk = (over: Record<string, unknown> = {}) => ({ text: 'x', speaker: 'Ext', elapsed: 0, similarity: 0, speakerPolicy: 'high-confidence', ...over }) as never
     const entries = [{ chunkIndex: 0, chunk: chunk() }]
     const mac = { sourceType: 'mac_system_audio' }
@@ -269,7 +358,7 @@ describe('the pieces', () => {
     expect(unnamedVoicesEligible({ sessionId: 'meeting_x' }, entries, [chunk()], {})).toBe(false)
     expect(unnamedVoicesEligible(mac, entries, [chunk()], { COS_MAC_VOICE_LABELS: '0' })).toBe(false)
     expect(unnamedVoicesEligible(mac, entries, [chunk({ speakerPolicy: 'anonymous' })], {})).toBe(false)
-    expect(unnamedVoicesEligible(mac, entries, [chunk({ speaker: 'Dana Reyes' })], {})).toBe(false)
+    expect(unnamedVoicesEligible(mac, entries, [chunk({ speaker: 'Dana Reyes' })], {})).toBe(true)
     // Placeholders are not names: Unknown, Unidentified 2 and an earlier Voice label all pass.
     for (const speaker of ['Unknown', 'Unidentified 2', 'Voice 3']) expect(unnamedVoicesEligible(mac, entries, [chunk({ speaker })], {})).toBe(true)
     expect(unnamedVoicesEligible(mac, [], [], {})).toBe(false)

@@ -22,6 +22,7 @@
 //
 // Everything here is pure over a chunk array so it can be tested by execution.
 
+import type { QualifiedMachinePosition } from './mac-speaker-machine-evidence.js'
 import { isVoiceLabel } from './mac-voice-labels.js'
 
 /** One transcript chunk as stored in the `.g2-chunks.json` sidecar. */
@@ -152,6 +153,10 @@ export interface VoiceReview {
   isOwner: boolean
   /** A human confirmed this label for this meeting; the floor is waived. */
   confirmedByHuman: boolean
+  /** Independent long-window profile evidence, never a human confirmation. */
+  machineQualified: boolean
+  machineQualifiedSegments: number
+  assertionSource: 'owner' | 'human' | 'qualified-profile' | 'capture-and-qualified-profile' | 'capture-match' | null
   reliability: Reliability
   /**
    * Whether `label` may be shown to a human AS A NAME.
@@ -588,6 +593,9 @@ export function reviewMeetingSpeakers(
      */
     confirmed?: Set<string>
     confirmedChunks?: Map<number, string>
+    /** Reader-validated exact compacted positions from current bound raw audio. */
+    machineEvidenceStatus?: 'absent' | 'qualified' | 'invalid'
+    machineQualifiedPositions?: ReadonlyMap<number, QualifiedMachinePosition>
     /**
      * The sidecar's `batchSegments`, when the HQ pass has run. Their word
      * timings give real voiced time; without them speaking time falls back to
@@ -646,6 +654,24 @@ export function reviewMeetingSpeakers(
   const voices: VoiceReview[] = labels.map(label => {
     const own = chunks.filter(c => (c.speaker ?? '') === label)
     const sims = own.map(c => c.similarity).filter((s): s is number => typeof s === 'number' && s > 0)
+    const machineQualifiedSegments = chunks.reduce((n, c, i) => {
+      const proof = options.machineQualifiedPositions?.get(i)
+      return n + Number(c.speaker === label && !!proof && proof.label === label
+        && (c.chunkIndex === undefined || c.chunkIndex === proof.rawChunkIndex)
+        && proof.independentWindows >= 2 && proof.minimumSimilarity >= .88 && proof.minimumMargin >= .05)
+    }, 0)
+    const machineQualified = own.length > 0 && machineQualifiedSegments === own.length
+    // Repaired records require support for every occurrence. A legacy mean
+    // from one positive row cannot vouch for repaired zero-score positions.
+    const scopedMachineRecord = (options.machineEvidenceStatus !== undefined && options.machineEvidenceStatus !== 'absent') || (options.machineQualifiedPositions?.size ?? 0) > 0
+    const unsupportedScopedSegments = scopedMachineRecord ? chunks.reduce((n, c, i) => {
+      if (c.speaker !== label) return n
+      const proof = options.machineQualifiedPositions?.get(i)
+      const machine = proof?.label === label && (c.chunkIndex === undefined || c.chunkIndex === proof.rawChunkIndex) && proof.independentWindows >= 2 && proof.minimumSimilarity >= .88 && proof.minimumMargin >= .05
+      const human = confirmed.has(label) || options.confirmedChunks?.get(i) === label
+      const capture = typeof c.similarity === 'number' && Number.isFinite(c.similarity) && c.similarity >= ASSERT_MIN_SIMILARITY
+      return n + Number(!machine && !human && !capture)
+    }, 0) : 0
     const runs = speakerRuns(sequence, label)
     const unattributed = isUnattributed(label)
     const confirmedSegments = unattributed ? 0 : confirmed.has(label) ? own.length
@@ -674,7 +700,7 @@ export function reviewMeetingSpeakers(
       ? 'unattributed'
       : thrashesWith.length > 0
         ? 'unreliable'
-        : (meanSim ?? 0) >= CONFIDENT_SIMILARITY ? 'confident' : 'weak'
+        : machineQualified || (meanSim ?? 0) >= CONFIDENT_SIMILARITY ? 'confident' : 'weak'
 
     // What stops this label being presented as a name. Collected as reasons
     // rather than a bare boolean: "2 segments" and "similarity 0.58" are
@@ -688,6 +714,11 @@ export function reviewMeetingSpeakers(
       // below 0.65" under a name they personally confirmed would reasonably
       // conclude the confirmation had not taken. `thrashesWith` still renders,
       // so a genuinely mixed row is still visibly mixed.
+    } else if (unsupportedScopedSegments) {
+      // System-audio repairs do not identify the wearer by device ownership.
+      // This gate also precedes the legacy owner exemption.
+      assertionBlockers.push(`${unsupportedScopedSegments} segment${unsupportedScopedSegments === 1 ? '' : 's'} lack current scoped speaker evidence`)
+      if (thrashesWith.length > 0) assertionBlockers.push(`swaps with ${thrashesWith[0].speaker} every ${Math.round(thrashesWith[0].meanRun)} segments`)
     } else if (label === owner) {
       // The wearer is exempt. Their identity is established by wearing the
       // device, not by cosine — and the owner is verified at exactly this floor
@@ -696,6 +727,10 @@ export function reviewMeetingSpeakers(
       // row read "Unidentified voice" in 4 of 9 meetings, including one with 285
       // of their own segments. `thrashesWith` still renders, so a mixed row is
       // still visible — the name is asserted, the caveat is not hidden.
+    } else if (machineQualified) {
+      // Exact positions passed the independent .88/margin/long-window gate.
+      // Keep raw similarities unchanged and retain the mixed-row warning.
+      if (thrashesWith.length > 0) assertionBlockers.push(`swaps with ${thrashesWith[0].speaker} every ${Math.round(thrashesWith[0].meanRun)} segments`)
     } else {
       if (own.length < ASSERT_MIN_SEGMENTS) {
         assertionBlockers.push(`only ${own.length} segment${own.length === 1 ? '' : 's'} (needs ${ASSERT_MIN_SEGMENTS})`)
@@ -719,6 +754,9 @@ export function reviewMeetingSpeakers(
       isOwner: label === owner,
       /** True when a human vouched for this label in this meeting. */
       confirmedByHuman: confirmed.has(label),
+      machineQualified: !unattributed && machineQualified,
+      machineQualifiedSegments: unattributed ? 0 : machineQualifiedSegments,
+      assertionSource: assertionBlockers.length ? null : confirmed.has(label) ? 'human' : label === owner ? 'owner' : machineQualified ? 'qualified-profile' : machineQualifiedSegments > 0 ? 'capture-and-qualified-profile' : 'capture-match',
       reliability,
       nameAsserted: assertionBlockers.length === 0,
       assertionBlockers,

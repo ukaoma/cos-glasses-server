@@ -276,6 +276,9 @@ export interface AttendeeLine {
    */
   isOwner: boolean
   confirmedByHuman: boolean
+  /** Qualified exact-span machine evidence; raw capture scores stay unchanged. */
+  machineQualified?: boolean
+  machineQualifiedSegments?: number
 }
 
 /**
@@ -406,8 +409,12 @@ export function renderProvenance(
   const clauses: string[] = []
   const owner = named.filter(v => v.isOwner).map(q)
   const human = named.filter(v => !v.isOwner && v.confirmedByHuman).map(q)
-  const matched = named.filter(v => !v.isOwner && !v.confirmedByHuman).map(q)
+  const machine = named.filter(v => !v.isOwner && !v.confirmedByHuman && v.machineQualified).map(q)
+  const combined = named.filter(v => !v.isOwner && !v.confirmedByHuman && !v.machineQualified && (v.machineQualifiedSegments ?? 0) > 0).map(q)
+  const matched = named.filter(v => !v.isOwner && !v.confirmedByHuman && !v.machineQualified && !(v.machineQualifiedSegments ?? 0)).map(q)
   if (owner.length) clauses.push(`${owner.join(', ')} by wearing the device`)
+  if (machine.length) clauses.push(`${machine.join(', ')} by qualified independent long-window profile evidence (not human confirmation)`)
+  if (combined.length) clauses.push(`${combined.join(', ')} by capture matches plus qualified independent long-window profile evidence (not human confirmation)`)
   if (matched.length) clauses.push(`${matched.join(', ')} by voice match`)
   if (human.length) clauses.push(`${human.join(', ')} because a human named that voice`)
   const lines: string[] = [

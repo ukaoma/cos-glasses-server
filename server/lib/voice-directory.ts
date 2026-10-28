@@ -13,6 +13,7 @@
 import { lstat, readFile, readdir, realpath } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
+import { readMacSpeakerMachineEvidence } from './mac-speaker-machine-evidence.js'
 import { dataPath } from './data-dir.js'
 import { confirmedLabels, confirmedChunks } from './meeting-corrections.js'
 import { resolveCosOperationsDir, resolveMeetingLibrary } from './cos-operations-meetings.js'
@@ -294,11 +295,14 @@ export async function buildVoiceDirectorySnapshot(): Promise<VoiceDirectorySnaps
         storedTitle,
       )
 
+      const machineEvidence = readMacSpeakerMachineEvidence(record)
       const review = reviewMeetingSpeakers(chunks as ReviewChunk[], {
         owner,
         phrasesPerVoice: 1,
         confirmed: confirmedLabels(sessionId),
-      confirmedChunks: confirmedChunks(sessionId),
+        confirmedChunks: confirmedChunks(sessionId),
+        machineQualifiedPositions: machineEvidence.positions,
+        machineEvidenceStatus: machineEvidence.status,
         durationMs: typeof record.durationMs === 'number' ? record.durationMs : undefined,
         batchSegments: Array.isArray(record.batchSegments)
           ? record.batchSegments as SpeakerWordSegment[]

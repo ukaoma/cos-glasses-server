@@ -7,10 +7,11 @@
 // analysed. It has to say the sidecar is unreadable.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { qualifiedMacMachineSidecar } from '../lib/__fixtures__/mac-machine-evidence.js'
 
 let root = ''
 let server: Server | null = null
@@ -176,6 +177,39 @@ afterEach(async () => {
 const HTTP_TEST_TIMEOUT = 30_000
 
 describe('speaker review over HTTP', () => {
+  it('preserves qualified machine names across panel and clipboard without creating human evidence or changing capture scores', async () => {
+    const doc = qualifiedMacMachineSidecar()
+    seedMeeting(doc.sessionId, doc.chunks)
+    const path = join(root, MONTH, `${STEM}.g2-chunks.json`)
+    const bytes = JSON.stringify(doc)
+    writeFileSync(path, bytes)
+    await startServer()
+    const speakers = await get(`/api/meeting/${doc.sessionId}/speakers`)
+    expect(speakers.status).toBe(200)
+    expect(speakers.json.voices[0]).toMatchObject({ label: 'Qualified Person', nameAsserted: true, machineQualified: true, machineQualifiedSegments: 10, confirmedByHuman: false, confirmedSegments: 0, meanSimilarity: null, assertionSource: 'qualified-profile' })
+    const content = await get(`/api/meeting/${doc.sessionId}/content`)
+    expect(content.status).toBe(200)
+    expect(content.json.attendees[0]).toMatchObject({ label: 'Qualified Person', asserted: true, machineQualified: true, confirmedByHuman: false })
+    expect(content.json.clipboardFull).toContain('qualified independent long-window profile evidence (not human confirmation)')
+    expect(content.json.clipboardFull).toContain('Qualified Person')
+    expect(readFileSync(path, 'utf8')).toBe(bytes)
+  }, HTTP_TEST_TIMEOUT)
+
+  it('withdraws machine assertions after current speech changes', async () => {
+    const doc = qualifiedMacMachineSidecar()
+    doc.chunks[0].text = 'changed after repair'
+    seedMeeting(doc.sessionId, doc.chunks)
+    const path = join(root, MONTH, `${STEM}.g2-chunks.json`)
+    writeFileSync(path, JSON.stringify(doc))
+    await startServer()
+    const speakers = await get(`/api/meeting/${doc.sessionId}/speakers`)
+    expect(speakers.status).toBe(200)
+    expect(speakers.json.voices[0]).toMatchObject({ nameAsserted: false, machineQualified: false, confirmedByHuman: false, meanSimilarity: null })
+    const content = await get(`/api/meeting/${doc.sessionId}/content`)
+    expect(content.json.attendees[0].asserted).toBe(false)
+    expect(content.json.clipboardFull).not.toContain('qualified independent long-window profile evidence')
+  }, HTTP_TEST_TIMEOUT)
+
   it('returns voices, phrases, and the owner flag for a real conversation', async () => {
     seedMeeting('meeting_1_abc', turns('MU', 'Alex Kellar', 8, 30))
     await startServer()

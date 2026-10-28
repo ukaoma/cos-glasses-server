@@ -40,6 +40,7 @@ import {
   nemotronCliPath,
   prepareNemotronModelsDir,
 } from './diarizer-backend.js'
+import { readCorrections } from './meeting-corrections.js'
 import { CONFIDENT_SIMILARITY, isUnattributed } from './meeting-speaker-review.js'
 import { getOwnerSpeakerLabel } from './profile.js'
 import { OWNER_VERIFY_SIMILARITY } from './voiceprint-floor.js'
@@ -370,6 +371,24 @@ function liveSpeakerAt(chunk: SidecarChunk, t: number, owner?: string | null): s
   return best && typeof best.speaker === 'string' ? guardOwnerName(best.speaker, best.similarity, chunk, owner) : null
 }
 
+/** Existing strict Mac names are local immutable claims, never a name source
+ * for a global anonymous channel. Exact token/word labels win over chunk names.
+ * An unplaced named segment withholds anonymous refinement for the whole chunk. */
+function protectedMacName(chunk: SidecarChunk, t: number, exact?: string): { name: string | null; hold: boolean } {
+  if (chunk.speakerPolicy !== 'high-confidence') return { name: null, hold: false }
+  if (typeof exact === 'string' && isName(exact)) return { name: exact, hold: true }
+  const named = (chunk.segments ?? []).filter(s => isName(s.speaker))
+  for (const segment of named) {
+    if (!Number.isFinite(segment.startSec) || !Number.isFinite(segment.endSec)
+      || Number(segment.startSec) < 0 || Number(segment.endSec) <= Number(segment.startSec)) return { name: null, hold: true }
+    if (t >= Number(segment.startSec) && t < Number(segment.endSec)) return { name: segment.speaker, hold: true }
+  }
+  // A segment-less legacy chunk has only its head claim. Explicit anonymous
+  // turns, however, must never inherit a real name from the majority/head label.
+  if (isName(chunk.speaker) && !chunk.segments?.length) return { name: chunk.speaker, hold: true }
+  return { name: null, hold: false }
+}
+
 export interface RelabelStats {
   total: number
   /** Words whose label changed. */
@@ -418,13 +437,15 @@ export function relabelBatchSegments(
       const end = batchWordToTimeline(segment, Number(word.end), timeline)
       // Existing live anonymous turns are established capture evidence. A
       // meeting-wide channel may refine unknown speech, never overwrite them.
-      const live = start ? liveSpeakerAt(start.window.chunk, start.inChunk, owner) : null
-      let name: string | null = isVoiceLabel(live) ? live : null
-      if (name === null && start) {
+      const liveCandidate = start ? liveSpeakerAt(start.window.chunk, start.inChunk, owner) : null
+      const protectedName = start ? protectedMacName(start.window.chunk, start.inChunk, word.speaker) : { name: null, hold: false }
+      const live = start?.window.chunk.speakerPolicy === 'high-confidence' && isName(liveCandidate) ? protectedName.name : liveCandidate
+      let name: string | null = protectedName.name ?? (isVoiceLabel(live) ? live : null)
+      if (name === null && !protectedName.hold && start) {
         const channel = channelForSpan(a, start.at, Math.max(start.at, end?.window === start.window ? end.at : start.at + 0.01))
         if (channel !== null && map.has(channel)) { name = map.get(channel)!; stats.viaChannel++ }
       }
-      if (isVoiceLabel(live)) stats.kept++
+      if (isVoiceLabel(live) || protectedName.name !== null) stats.kept++
       if (name === null) {
         stats.kept++
         name = live
@@ -479,20 +500,34 @@ export function relabelStreamingChunks(
     if (typeof chunk.text !== 'string' || !chunk.text.trim()) continue
     const tokens = splitTokens(chunk.text)
     const times = streamingTokenTimes(chunk, tokens, window, a)
-    const base = guardOwnerName(typeof chunk.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk.speaker, chunk.similarity, chunk, owner)
+    const originalBase = guardOwnerName(typeof chunk.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk.speaker, chunk.similarity, chunk, owner)
+    const base = chunk.speakerPolicy === 'high-confidence' && chunk.segments?.length && isName(originalBase) ? 'Ext' : originalBase
     const labels: string[] = []
     const liveTokens = (chunk.segments ?? []).flatMap(segment => splitTokens(String(segment.text ?? '')).map(token => ({ token, speaker: segment.speaker })))
     const exactLive = liveTokens.length === tokens.length && liveTokens.every((part, i) => part.token === tokens[i]) ? liveTokens : null
+    // Without token alignment or a clock, preserve the original named chunk
+    // rather than spreading a nearby named turn across its unmatched text.
+    if (chunk.speakerPolicy === 'high-confidence' && chunk.segments?.some(s => isName(s.speaker)) && !exactLive && !times) continue
     let carry: string | null = null
     for (let i = 0; i < tokens.length; i++) {
       const established = exactLive?.[i].speaker
-      if (!isWordToken(tokens[i]) || !times) { labels.push(isVoiceLabel(established) ? established! : carry ?? liveSpeakerAt(chunk, 0, owner) ?? base); continue }
+      if (!isWordToken(tokens[i]) || !times) {
+        const protectedName = !times && established === undefined && chunk.segments?.length ? { name: null, hold: true } : protectedMacName(chunk, times?.[i]?.start ?? 0, established)
+        const local = liveSpeakerAt(chunk, times?.[i]?.start ?? 0, owner)
+        const safeLocal = chunk.speakerPolicy === 'high-confidence' && isName(local) ? protectedName.name : local
+        labels.push(protectedName.name ?? (chunk.speakerPolicy === 'high-confidence' && established !== undefined ? established : isVoiceLabel(established) ? established! : carry ?? safeLocal ?? base))
+        continue
+      }
       stats.total++
       const span = times[i]
       const channel = channelForSpan(a, window.start + span.start, window.start + Math.max(span.end, span.start + 0.01))
       let name: string
-      const live = isVoiceLabel(established) ? established! : liveSpeakerAt(chunk, span.start, owner)
-      if (isVoiceLabel(live)) { name = live!; stats.kept++ }
+      const liveCandidate = isVoiceLabel(established) ? established! : liveSpeakerAt(chunk, span.start, owner)
+      const protectedName = protectedMacName(chunk, span.start, established)
+      const live = chunk.speakerPolicy === 'high-confidence' && isName(liveCandidate) ? protectedName.name : liveCandidate
+      if (protectedName.name !== null) { name = protectedName.name; stats.kept++ }
+      else if (protectedName.hold) { name = live ?? base; stats.kept++ }
+      else if (isVoiceLabel(live)) { name = live!; stats.kept++ }
       else if (channel !== null && map.has(channel)) { name = map.get(channel)!; stats.viaChannel++ }
       else { name = live ?? base; stats.kept++ }
       labels.push(name)
@@ -787,6 +822,14 @@ function distinctSpeakers(transcript: string): number {
   return names.size
 }
 
+/** Legacy corrections may have a ledger without a sidecar revision. Unknown
+ * or incomplete recorded history is held, never treated as automatic evidence. */
+function hasHumanCorrectionHistory(sidecar: Record<string, unknown>): boolean {
+  if (typeof sidecar.sessionId !== 'string') return false
+  const corrections = readCorrections(sidecar.sessionId)
+  return corrections.rows.length > 0 || corrections.unusable > 0
+}
+
 async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome> {
   const started = (options.now ?? Date.now)()
   const env = options.env ?? process.env
@@ -801,6 +844,7 @@ async function finalPassNow(options: FinalPassOptions): Promise<FinalPassOutcome
   const sidecar = JSON.parse(sidecarText) as Record<string, any>
   const owner = options.owner !== undefined ? options.owner : ownerLabelOrNull()
   if (Number(sidecar.correctionRevision ?? 0) > 0) return { status: 'skipped', reason: 'human_corrected' }
+  if (hasHumanCorrectionHistory(sidecar)) return { status: 'skipped', reason: 'human_corrected' }
   const markdown = readFileSync(options.meetingPath, 'utf8')
   const transcript = readTranscriptSection(markdown)
   if (transcript === null) return { status: 'skipped', reason: 'no_transcript' }
@@ -1025,6 +1069,9 @@ function commitFinalPass(
     return { status: 'skipped', reason: 'changed_during_pass', detail: sidecarNow !== sidecarText ? 'sidecar changed' : 'markdown changed' }
   }
 
+  // A legacy confirmation can land only in its ledger while native work runs.
+  if (hasHumanCorrectionHistory(nextSidecar)) return { status: 'skipped', reason: 'changed_during_pass', detail: 'correction history changed' }
+
   // Sidecar first, markdown second, as the store does: the markdown is the
   // visible commit. If the markdown write fails, put the sidecar back, and say
   // so loudly if even that fails (the two files then disagree).
@@ -1056,8 +1103,8 @@ function commitFinalPass(
 // ── 6.90.0: unnamed, meeting-stable voices for Mac recordings ───────────────────
 //
 // The named pass above maps a channel to a name from chunks the voiceprint was
-// sure of. A Mac recording has no such chunks (every one is `Ext` at the 0.88
-// floor) and must never borrow a name, so it skips that pass (`speaker_policy`).
+// sure of. Strict Mac recordings never borrow names across a global channel;
+// rare existing names are preserved locally while other words stay anonymous.
 // This pass keeps the channels and drops the names: each channel that holds the
 // floor in enough chunks becomes `Voice 1`, `Voice 2`, ... in order of first
 // speech. No profile is read or written anywhere below; `owner` is never passed,
@@ -1070,9 +1117,9 @@ export const VOICE_MIN_SUPPORT = FINAL_MIN_SUPPORT
 
 /**
  * Unnamed mode applies to a Mac recording, with the switch on, when every chunk
- * that carries words is the Mac strict policy and none already carries a real
- * name (a 0.88 match is rare, and a pass must never overwrite one with a
- * placeholder).
+ * that carries words is the Mac strict policy. Rare existing names are protected
+ * per span by the relabellers; one match must not disable anonymous refinement
+ * for the remainder of an otherwise strict recording.
  */
 export function unnamedVoicesEligible(
   sidecar: Record<string, unknown>,
@@ -1090,7 +1137,7 @@ export function unnamedVoicesEligible(
   // strict; anything else (anonymous, a malformed marker) still refuses.
   const silentOk = entries.filter(entry => !hasText(entry.chunk))
     .every(entry => entry.chunk?.speakerPolicy === undefined || entry.chunk.speakerPolicy === 'high-confidence')
-  return silentOk && spoken.every(chunk => chunk.speakerPolicy === 'high-confidence' && !isName(chunk.speaker))
+  return silentOk && spoken.every(chunk => chunk.speakerPolicy === 'high-confidence')
 }
 
 export interface VoiceChannels {
@@ -1360,6 +1407,9 @@ async function unnamedVoicePass(input: UnnamedInput): Promise<FinalPassOutcome> 
     for (const chunk of [entry.chunk, chunks[i]]) {
       const original = typeof chunk.originalSpeaker === 'string' ? chunk.originalSpeaker : chunk.speaker
       if (final) chunk.finalSegments = final.segments
+      // A pre-existing strict name is immutable even when a legacy chunk's
+      // segments disagree. The anonymous pass never asserts a different name.
+      if (chunk.speakerPolicy === 'high-confidence' && isName(chunk.speaker)) continue
       chunk.speaker = label
       if (label !== original) chunk.originalSpeaker = original
       else delete chunk.originalSpeaker

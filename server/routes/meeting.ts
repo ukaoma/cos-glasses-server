@@ -1,3 +1,5 @@
+import { runQualifiedMacProfilePass } from '../lib/mac-speaker-profile-finalizer.js'
+import { readMacSpeakerMachineEvidence } from '../lib/mac-speaker-machine-evidence.js'
 import { dataPath } from '../lib/data-dir.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
 import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
@@ -309,6 +311,7 @@ export interface MeetingRouteDependencies {
   emit?: typeof emitDisplay
   finalizationJobs?: MeetingFinalizationJobStore
   finalDiarize?: FinalDiarize
+  qualifiedProfilePass?: typeof runQualifiedMacProfilePass
   /** Control's stop requests for live G2 meetings (lib/meeting-stop-requests.ts). */
   stopRequests?: StopRequestStore
   /** 6.77.0: the post-save transcript cleanup (lib/transcript-cleanup.ts). */
@@ -334,6 +337,7 @@ interface FinalizationRuntime {
   scheduleBackground: (task: Promise<void>) => void
   sessions?: MeetingSessionSource
   finalDiarize?: FinalDiarize
+  qualifiedProfilePass?: typeof runQualifiedMacProfilePass
   transcriptCleanup?: TranscriptCleanupRunner
 }
 
@@ -367,7 +371,7 @@ function validReplayEntries(raw: unknown[]): IndexedTranscriptChunk[] | null {
   return entries.length > 0 ? entries : null
 }
 
-function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: FinalizationRuntime): void {
+export function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: FinalizationRuntime): void {
   const key = `${runtime.finalizationJobs.root}:${job.sessionId}`
   if (activeFinalizationJobs.has(key)) return
   activeFinalizationJobs.add(key)
@@ -452,8 +456,12 @@ function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Finalizat
           sessionId: current.sessionId,
           runBatch: runtime.runBatch,
           finalDiarize: runtime.finalDiarize ?? runNemotronFinalPass,
+          qualifiedProfilePass: runtime.qualifiedProfilePass,
         })
       } else {
+        // A torn profile transaction must block filing even if pending audio
+        // vanished. Missing audio never waives journal/proof recovery gates.
+        if (MAC_CAPTURE_ID.test(current.sessionId)) await (runtime.qualifiedProfilePass ?? runQualifiedMacProfilePass)({ meetingPath: current.meetingPath, sidecarPath: current.sidecarPath, audioDir: current.audioDir ?? '', resumeOnly: true })
         console.warn(`[meeting/save] Pending HQ audio missing for ${current.sessionId}; preserving streaming canonical`)
       }
       current = runtime.finalizationJobs.save({
@@ -720,6 +728,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const emit = deps.emit ?? emitDisplay
   const finalizationJobs = deps.finalizationJobs ?? new MeetingFinalizationJobStore()
   const finalDiarize = deps.finalDiarize ?? runNemotronFinalPass
+  const qualifiedProfilePass = deps.qualifiedProfilePass ?? runQualifiedMacProfilePass
   const transcriptCleanup = deps.transcriptCleanup
   const router = Router()
   const captureActive = deps.captureActive ?? (() => getTranscriptionSessionLiveness().live > 0)
@@ -1206,6 +1215,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           scheduleBackground,
           sessions,
           finalDiarize,
+          qualifiedProfilePass,
         })
         if (origin === 'phone') notePhoneAfterAutonomousSave(sessionId, 'save_replay')
         respond(200, publicSaveResponse(alreadySaved, true), true)
@@ -1403,6 +1413,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
           scheduleBackground,
           sessions,
           finalDiarize,
+          qualifiedProfilePass,
           transcriptCleanup,
         })
       }
@@ -1659,9 +1670,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const filename = operations?.filename ?? direct?.filename ?? saved!.filename
 
     let chunks: unknown
+    let sidecar: Record<string, unknown>
     try {
-      const raw = JSON.parse(readFileSync(sidecarPath, 'utf-8')) as Record<string, unknown>
-      chunks = Array.isArray(raw) ? raw : raw.chunks
+      sidecar = JSON.parse(readFileSync(sidecarPath, 'utf-8')) as Record<string, unknown>
+      chunks = Array.isArray(sidecar) ? sidecar : sidecar.chunks
     } catch {
       // Defensive: both lookups above already read this sidecar to match the
       // session, so a corrupt file 404s and never reaches here. This covers the
@@ -1678,8 +1690,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
     // Raw capture indices, so a phrase can address its own audio. Position in
     // `chunks` is NOT the WAV number — see attachRawChunkIndices.
-    const sidecar = (JSON.parse(readFileSync(sidecarPath, 'utf-8')) ?? {}) as Record<string, unknown>
     const withIndices = attachRawChunkIndices(chunks as ReviewChunk[], sidecar.chunkEntries)
+    const machineEvidence = readMacSpeakerMachineEvidence(sidecar)
     const review = reviewMeetingSpeakers(withIndices, {
       owner: getOwnerSpeakerLabel(),
       // Labels a human already vouched for in this meeting. Without this the
@@ -1687,6 +1699,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // confirms the same voice forever.
       confirmed: confirmedLabels(sessionId),
       confirmedChunks: confirmedChunks(sessionId),
+      machineQualifiedPositions: machineEvidence.positions,
+      machineEvidenceStatus: machineEvidence.status,
       phrasesPerVoice: Math.max(1, Math.min(6, Number(req.query.phrases) || 3)),
       // The sidecar's own durationMs is the meeting's true end. Deriving it from
       // max(elapsed) uses the START of the last chunk, which made the final
@@ -1791,10 +1805,13 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     }
     const chunks = rawChunks as ReviewChunk[]
 
+    const machineEvidence = readMacSpeakerMachineEvidence(sidecar)
     const review = reviewMeetingSpeakers(attachRawChunkIndices(chunks, sidecar.chunkEntries), {
       owner: getOwnerSpeakerLabel(),
       confirmed: confirmedLabels(sessionId),
       confirmedChunks: confirmedChunks(sessionId),
+      machineQualifiedPositions: machineEvidence.positions,
+      machineEvidenceStatus: machineEvidence.status,
       // This route renders no phrases; the default of 3 per voice computed and
       // discarded 48 transcript excerpts on a 16-voice meeting.
       phrasesPerVoice: 1,
@@ -1818,6 +1835,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // "voice matching" for the wearer exemption and for names a human typed.
       isOwner: v.isOwner,
       confirmedByHuman: v.confirmedByHuman,
+      machineQualified: v.machineQualified,
+      machineQualifiedSegments: v.machineQualifiedSegments,
     }))
 
     // A missing .md is not fatal — the review and the sidecar still describe the
@@ -3152,7 +3171,7 @@ function synthesizeEntriesFromChunkWavs(audioDir: string): RecoveredCapture {
   return { entries, startTime, durationMs }
 }
 
-async function finalizeBatch(options: {
+export async function finalizeBatch(options: {
   audioDir: string
   entries: IndexedTranscriptChunk[]
   streamingWordCount: number
@@ -3161,7 +3180,11 @@ async function finalizeBatch(options: {
   sessionId?: string
   runBatch: NonNullable<MeetingRouteDependencies['runBatch']>
   finalDiarize?: FinalDiarize
+  qualifiedProfilePass?: typeof runQualifiedMacProfilePass
 }): Promise<void> {
+  const qualifiedProfilePass = options.qualifiedProfilePass ?? runQualifiedMacProfilePass
+  const mac = MAC_CAPTURE_ID.test(options.sessionId ?? '')
+  if (mac && (await qualifiedProfilePass({ ...options, resumeOnly: true })).status === 'applied') return
   const result = await options.runBatch(
     options.audioDir,
     options.entries,
@@ -3225,6 +3248,10 @@ async function finalizeBatch(options: {
       console.warn(`[diarizer] final pass threw; the saved transcript is unchanged: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
+
+  // Exact qualified profile evidence runs before raw deletion and filing.
+  // Prepared-transaction failures propagate: mixed generations cannot be filed.
+  if (mac && metadataPersisted) await qualifiedProfilePass(options)
 
   if (canDeletePendingBatchAudio(transcriptApplied, metadataPersisted)) {
     rmSync(options.audioDir, { recursive: true, force: true })

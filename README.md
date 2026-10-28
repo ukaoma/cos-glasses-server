@@ -699,6 +699,29 @@ flag a Mac rename is text only. `GET /api/health` reports `capabilities.macLiveV
 The saved meeting is relabeled by the whole-meeting pass. Live numbers are kept;
 voices the live path did not prove are numbered above them at save.
 
+### Saved Mac profile reconciliation (6.94.2)
+
+After transcription and diarization, eligible Mac recordings receive a bounded
+local voice-profile pass. It checks up to twelve 28–30 second windows across the
+call against the existing profile cohort. Two independent windows must agree;
+each needs profile similarity of at least .88, a .05 margin over alternatives,
+and coherent full/half-window voice evidence. Only the supported audio spans
+receive a name. Other occurrences of the same live Voice number remain unchanged.
+
+This pass does not train profiles, infer identities from attendees, or change the
+transcript words and timestamps. Existing human corrections are protected. A
+durable journal preserves recovery across interrupted writes; retained audio is
+not released over an unfinished repair. Unsupported or ambiguous evidence leaves
+the existing labels in place. The pass uses one bounded CPU worker and can skip
+when its budget or prerequisites are unavailable.
+
+The speaker review distinguishes qualified machine matches from human
+confirmations. A pre-existing named span no longer prevents anonymous refinement
+of the rest of a strict Mac recording. Live voice numbering still has the window
+limits above: this release does not promise meeting-wide speaker deduplication
+or an attendee count. Older recordings require an explicit, validated repair;
+they are not silently rewritten on upgrade.
+
 ### iPhone microphone meetings (6.93.0, off by default)
 
 With `COS_IPHONE_MICROPHONE_MEETINGS=1`, HQ set to Parakeet Ultra and Parakeet
