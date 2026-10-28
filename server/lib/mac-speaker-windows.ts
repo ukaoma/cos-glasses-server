@@ -2,6 +2,7 @@
 // authenticates these receipts and applies reviewed exact-span candidates.
 import { createHash } from 'node:crypto'
 import { isVoiceLabel } from './mac-voice-labels.js'
+import { hasMacSpeakerProtectedRows } from './mac-speaker-protection.js'
 import {
   createMacSpeakerMemory, matchMacSpeakerProfile, normalizedSpeakerCosine, normalizedSpeakerEmbedding,
   reconcileMacSpeakerObservation, type MacSpeakerObservation, type MacSpeakerProfile,
@@ -65,7 +66,7 @@ function sourceOf(entry: SidecarEntry, raw: VerifiedMacRawChunk | undefined): { 
     || raw.sampleRate !== SR || raw.channels !== 1 || raw.format !== 'pcm_s16le' || !uint(raw.sampleCount) || !raw.sampleCount || raw.sampleCount > 480_000
     || !SHA.test(raw.audioSHA256) || !SHA.test(raw.pcmSHA256) || c.audioSha256 !== raw.audioSHA256) return { reason: 'unverified_raw_binding' }
   if (c.speakerPolicy !== 'high-confidence' || !isVoiceLabel(c.speaker) || typeof c.text !== 'string' || !c.text.trim()) return { reason: 'not_automatic_homogeneous' }
-  if (c.speakerOrigin === 'manual' || c.speakerSource === 'manual' || c.manuallyCorrected === true) return { reason: 'human_corrected' }
+  if (hasMacSpeakerProtectedRows(c)) return { reason: 'human_corrected' }
   const segments = c.segments
   if (!Array.isArray(segments) || !segments.length || segments.length > 1024 || segments.some(s => s?.speaker !== c.speaker)
     || segments.map(s => s.text).join(' ').trim().split(/\s+/).join(' ') !== c.text.trim().split(/\s+/).join(' ')) return { reason: 'not_automatic_homogeneous' }

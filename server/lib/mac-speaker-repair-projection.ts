@@ -5,6 +5,7 @@
  */
 import { createHash } from 'node:crypto'
 import { checkSpeakerName } from './speaker-name.js'
+import { hasMacSpeakerProtectedRows, isMacSpeakerHumanProtected as isProtected } from './mac-speaker-protection.js'
 
 type Doc = Record<string, any>
 export type MacSpeakerRepairPath = Array<string | number>
@@ -99,12 +100,6 @@ const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b
 const anonymous = (label: unknown): label is string => typeof label === 'string' && /^(?:Ext|Unknown|Unidentified(?: \d+)?|Speaker \d+|Voice \d+)$/.test(label)
 const hashPattern = /^[a-f0-9]{64}$/
 function fail(message: string): never { throw new Error(`Mac speaker repair: ${message}`) }
-function isProtected(row: any): boolean {
-  if (!row || typeof row !== 'object') return false
-  if (row.speakerCorrectionBatchId || row.speakerCorrectionId || row.manualSpeaker || row.speakerManuallyAssigned || row.confirmedByHuman || row.manuallyAssigned) return true
-  return ['speakerSource', 'speakerPolicy', 'speakerProvenance', 'source'].some(key =>
-    typeof row[key] === 'string' && /(?:manual|human|correction|confirmed)/i.test(row[key]))
-}
 /** Validate compacted position -> exact ordered raw chunk, without nearest joins. */
 function rawMap(doc: Doc): Array<{ raw: number; entry: number }> {
   if (!Array.isArray(doc.chunks) || !Array.isArray(doc.chunkEntries)) fail('missing raw chunk map')
@@ -156,7 +151,7 @@ export function validateMacSpeakerTargetEvidence(input: Doc, plan: MacSpeakerRep
       if (!Number.isInteger(raw.rawChunkIndex) || rawSeen.has(raw.rawChunkIndex) || (previous >= 0 && raw.rawChunkIndex !== previous + 1) || !hashPattern.test(raw.audioSha256) || !Number.isSafeInteger(raw.sampleCount) || raw.sampleCount <= 0 || plan.rawAudioSampleCounts[String(raw.rawChunkIndex)] !== raw.sampleCount) fail('profile evidence raw bindings disagree')
       const chunk = input.chunkEntries.find((entry: Doc) => entry.chunkIndex === raw.rawChunkIndex)?.chunk
       if (!chunk || chunk.audioSha256 !== raw.audioSha256 || !Number.isFinite(chunk.elapsed) || chunk.elapsed * 16 !== window.captureStartSample + samples) fail('profile evidence capture coordinates disagree')
-      if (chunk.speakerPolicy === 'anonymous' || !anonymous(chunk.speaker) || labelRows(chunk, []).some(({row}) => isProtected(row) || row.speaker !== chunk.speaker)) fail('profile evidence contains named/manual/mixed or anonymous-policy chunks')
+      if (chunk.speakerPolicy === 'anonymous' || !anonymous(chunk.speaker) || hasMacSpeakerProtectedRows(chunk) || labelRows(chunk, []).some(({row}) => isProtected(row) || row.speaker !== chunk.speaker)) fail('profile evidence contains named/manual/mixed or anonymous-policy chunks')
       const segments = chunk.finalSegments?.length ? chunk.finalSegments : chunk.segments
       if (!Array.isArray(segments) || !segments.length) fail('profile evidence lacks automatic pure segment coverage')
       const ranges: Array<[number, number]> = segments.map((segment: Doc) => [segment.startSec, segment.endSec])
@@ -201,6 +196,7 @@ export function projectMacSpeakerRepair(input: Doc, plan: MacSpeakerRepairPlan):
     if (!Number.isFinite(chunk.elapsed) || !Number.isFinite(chunk.audioDurationMs) || chunk.audioDurationMs <= 0 || entry.elapsed !== chunk.elapsed || entry.audioDurationMs !== chunk.audioDurationMs) fail('raw chunk timing disagreement')
     // Surface identity must match, including text/times/original diagnostic fields.
     for (const key of ['speaker', 'segments', 'finalSegments', 'words']) if (!equal(chunk[key], entry[key])) fail('chunk and entry label surfaces disagree')
+    if (hasMacSpeakerProtectedRows(chunk) || hasMacSpeakerProtectedRows(entry)) fail('named or manual span is protected')
     for (const target of [{ chunk, path: ['chunks', position] }, { chunk: entry, path: ['chunkEntries', mapping[position].entry, 'chunk'] }]) {
       for (const { row, path } of labelRows(target.chunk, target.path)) {
         if (isProtected(row) || !anonymous(row.speaker)) fail('named or manual span is protected')
