@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildMacSpeakerShadowRepair, bindMacSpeakerShadowRepair, type MacShadowRepairInput, type MacShadowRepairSource } from './mac-speaker-shadow-repair.js'
-import { applyMacSpeakerRepair, projectMacSpeakerRepair } from './mac-speaker-repair-projection.js'
+import { applyMacSpeakerRepair, projectMacSpeakerRepair, hashMacSpeakerDocument, hashMacSpeakerMachineBinding } from './mac-speaker-repair-projection.js'
+import { readMacSpeakerMachineEvidence } from './mac-speaker-machine-evidence.js'
 import { SYNTHETIC_SPANS, SYNTHETIC_SECONDS, syntheticEmbeddings, syntheticNative } from './__fixtures__/speaker-shadow/synthetic-meeting.js'
 
 const H = 'a'.repeat(64)
@@ -9,7 +10,7 @@ function fixture(): MacShadowRepairSource {
   const chunkEntries: any[] = []
   for (const span of SYNTHETIC_SPANS) for (let start = span.start; start < span.end; start += 6) {
     const seconds = Math.min(6, span.end - start), raw = chunkEntries.length
-    const chunk = { text: `words for raw ${raw}`, speaker: span.label, elapsed: start * 1000, audioDurationMs: seconds * 1000, audioSha256: raw.toString(16).padStart(64, '0'), similarity: 0, segments: [{ speaker: span.label, startSec: 0, endSec: seconds }], words: [{ word: `raw${raw}`, start: 0, end: seconds }] }
+    const chunk = { text: `words for raw ${raw}`, speaker: span.label, elapsed: start * 1000, audioDurationMs: seconds * 1000, audioSha256: raw.toString(16).padStart(64, '0'), similarity: 0, segments: [{ speaker: span.label, startSec: 0, endSec: seconds }], finalSegments: [{ speaker: span.label, startSec: 0, endSec: seconds }], words: [{ word: `raw${raw}`, start: 0, end: seconds }] }
     chunkEntries.push({ chunkIndex: raw, chunk })
   }
   let offset = 0
@@ -28,8 +29,74 @@ const applied = (position: number) => [
   { id: 'human1', phase: 'intent', from: 'Voice 2', to: 'Human Name', chunks: [position] },
   { id: 'human1', phase: 'applied', from: 'Voice 2', to: 'Human Name', chunks: [position] },
 ].map(r => JSON.stringify(r)).join('\n')
+/** Positive synthetic prior192d-reader fixture, with real strict-projector
+ * receipts. Scores are fictional; no native authentication is implied. */
+function withPriorQualifiedProof(source: MacShadowRepairSource): any {
+  const original = JSON.parse(source.originalJSON), starts = [0, 11]
+  const counts = Object.fromEntries(source.rawAudio.map(a => [a.rawChunkIndex, a.sampleCount]))
+  const windows = starts.map((start, i) => ({ id: `priorwindow${i}`, captureStartSample: original.chunkEntries[start].chunk.elapsed * 16, captureEndSample: original.chunkEntries[start].chunk.elapsed * 16 + 480000, pcmSha256: String(i + 1).repeat(64), similarity: .95, runnerUpSimilarity: .1, rawChunks: Array.from({ length: 5 }, (_, j) => ({ rawChunkIndex: start + j, audioSha256: source.rawAudio[start + j].wavSHA256, sampleCount: 96000 })) }))
+  const proof = { kind: 'profile-match' as const, profileName: 'Jeremy Example', profileSha256: 'c'.repeat(64), modelSha256: 'd'.repeat(64), algorithmVersion: 'synthetic-prior-proof', crossWindowCosines: [[1, .95], [.95, 1]], windows }
+  const assignments = starts.flatMap(start => Array.from({ length: 5 }, (_, j) => start + j)).map(raw => {
+    const word = original.batchSegments[0].speakerWords[raw]
+    return { rawChunkIndex: raw, from: original.chunks[raw].speaker, to: 'Jeremy Example', evidenceId: 'prior_named', targetEvidence: proof, batchWords: [{ segmentIndex: 0, wordIndex: raw, from: word.speaker, word: word.word, start: word.start, end: word.end }] }
+  })
+  const prior = projectMacSpeakerRepair(original, { id: 'prior_named', evidenceHash: H, expectedDocumentHash: hashMacSpeakerDocument(original), protectedRawChunkIndices: [], rawAudioSampleCounts: counts, assignments })
+  const named = prior.doc
+  named.correctionRevision = 1
+  named.speakerRepair = { id: 'prior_named', evidenceHash: H, machineEvidence: { version: 1, correctionRevision: 1, documentBinding: hashMacSpeakerMachineBinding(named), receipt: prior.receipt, rawAudioSampleCounts: counts } }
+  named.speakerProfilePass = { version: 1, status: 'applied' }
+  return named
+}
 
 describe('qualified256 shadow repair pure preparation', () => {
+  it('declines a currently qualified prior proof instead of invalidating its reader assertions', () => {
+    const source = fixture(), named = withPriorQualifiedProof(source)
+    expect(readMacSpeakerMachineEvidence(named).status).toBe('qualified')
+    source.currentJSON = JSON.stringify(named)
+    const before = source.currentJSON
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/requires proof composition/)
+    expect(source.currentJSON).toBe(before)
+    expect(readMacSpeakerMachineEvidence(JSON.parse(source.currentJSON)).status).toBe('qualified')
+  })
+  for (const which of ['originalJSON', 'currentJSON'] as const) for (const key of ['speakerRepair', 'speakerProfilePass']) it(`refuses even malformed/empty ${which} ${key} receipts`, () => {
+    const source = fixture(); edit(source, which, d => { d[key] = null })
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/requires proof composition/)
+  })
+  it('rejects original root/raw segment disagreement even if current rows agree with altered original roots', () => {
+    const source = fixture(), raw = first(source)
+    edit(source, 'originalJSON', d => { d.chunks[raw].segments[0].endSec = 1 })
+    edit(source, 'currentJSON', d => { d.chunks[raw].segments[0].endSec = 1; d.chunkEntries[raw].chunk.segments[0].endSec = 1 })
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/original root\/raw source geometry/)
+  })
+  for (const key of ['segments', 'finalSegments', 'words']) it(`rejects current ${key} geometry drift on an anchor outside selected assignments`, () => {
+    const source = fixture()
+    if (key === 'finalSegments') for (const which of ['originalJSON', 'currentJSON'] as const) edit(source, which, d => {
+      for (const row of [...d.chunks, ...d.chunkEntries.map((e: any) => e.chunk)]) row.finalSegments = structuredClone(row.segments)
+    })
+    edit(source, 'currentJSON', d => {
+      for (let raw = 0; raw < 7; raw++) for (const row of [d.chunks[raw], d.chunkEntries[raw].chunk]) delete row[key]
+    })
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/current compacted source geometry/)
+  })
+  it('rejects raw-only competitor word-time drift rather than silently excluding that competitor', () => {
+    const source = fixture(), raw = first(source, 'Voice 5')
+    edit(source, 'currentJSON', d => { d.chunkEntries[raw].chunk.words[0].start = .5 })
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/current raw source geometry/)
+  })
+  it('rejects a changed top-level capture clock despite unchanged per-chunk source joins', () => {
+    const source = fixture(); edit(source, 'currentJSON', d => { d.startTime = 1234 })
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/capture clock/)
+  })
+  it('permits protected human label differences without treating them as geometry drift', () => {
+    const source = fixture(), raw = first(source)
+    edit(source, 'currentJSON', d => {
+      d.chunks[raw].speaker = 'Human Example'; d.chunks[raw].segments[0].speaker = 'Human Example'
+      d.chunks[raw].segments[0].speakerOrigin = 'manual'
+    })
+    const result = buildMacSpeakerShadowRepair(seal(source))
+    expect(result.protectedRawChunkIndices).toContain(raw)
+    expect(result.plan!.assignments.some(a => a.rawChunkIndex === raw)).toBe(false)
+  })
   it('recomputes real gates, yields strict anonymous plans and preserves source bytes/text/times', () => {
     const source = fixture(), frozen = JSON.stringify(source), result = buildMacSpeakerShadowRepair(seal(source))
     expect(result.counts.acousticAcceptedMerges).toBe(3)

@@ -39,6 +39,19 @@ function boundedJSON(text: string, max: number): any {
 }
 function closed(doc: Doc) {
   if (!doc || !Array.isArray(doc.chunks) || !Array.isArray(doc.chunkEntries) || doc.finalizationState !== 'complete' || doc.sourceType !== 'mac_system_audio' || !/^mac_/.test(doc.sessionId) || doc.active || doc.isActive || doc.claimPending || doc.status === 'recording' || doc.mergedFrom || doc.sourceSessionIds || doc.isMerged) fail('closed original Mac capture required')
+  // Even a valid prior reader proof binds the complete speech document. A new
+  // label patch would invalidate it. This adapter cannot compose those receipts.
+  if (['speakerRepair', 'speakerProfilePass'].some(key => Object.hasOwn(doc, key))) fail('prior repair/profile receipt requires proof composition')
+}
+const ANNOTATION_KEYS = new Set(['speaker', 'originalSpeaker', 'speakerCorrectionBatchId', 'speakerCorrectionId', 'manualSpeaker', 'speakerManuallyAssigned', 'confirmedByHuman', 'manuallyAssigned', 'manuallyCorrected', 'speakerOrigin', 'speakerSource', 'speakerPolicy', 'speakerProvenance', 'source'])
+/** Compare the complete source row recursively, allowing only speaker annotation
+ * changes. Annotation differences are handled by protection, never by copying
+ * labels back from ORIGINAL. Array presence, text, clocks and diagnostics remain
+ * exact on every support/competitor row, not just eventual assignments. */
+function sourceGeometry(value: any): any {
+  if (Array.isArray(value)) return value.map(sourceGeometry)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.keys(value).filter(key => !ANNOTATION_KEYS.has(key)).sort().map(key => [key, sourceGeometry(value[key])]))
 }
 function rows(chunk: Doc): Doc[] {
   const out = [chunk]
@@ -116,9 +129,14 @@ export function buildMacSpeakerShadowRepair(input: MacShadowRepairInput): MacSha
   closed(original); closed(current)
   if (original.sessionId !== current.sessionId) fail('capture mismatch')
   const oldMap = mapping(original), map = mapping(current)
+  if (oldMap.some(m => !equal(sourceGeometry(m.chunk), sourceGeometry(m.entry)))) fail('original root/raw source geometry disagreement')
+  if (['startTime', 'durationMs'].some(key => !equal(original[key], current[key]))) fail('current capture clock drift')
   if (oldMap.length !== map.length || oldMap.some((m, i) => m.raw !== map[i].raw || ['text', 'elapsed', 'audioSha256', 'audioDurationMs'].some(k => !equal(m.chunk[k], map[i].chunk[k])))) fail('current speech source drift')
+  if (oldMap.some((m, i) => !equal(sourceGeometry(m.chunk), sourceGeometry(map[i].chunk)))) fail('current compacted source geometry drift')
   const entries = shadowEntries(original), currentEntries = shadowEntries(current)
   if (entries.length !== currentEntries.length || entries.some((e, i) => ['text', 'elapsed', 'audioSha256', 'audioDurationMs'].some(k => !equal(e.chunk[k], currentEntries[i].chunk[k])))) fail('current raw source drift')
+  for (const entry of [...entries, ...currentEntries]) rows(entry.chunk)
+  if (entries.some((e, i) => !equal(sourceGeometry(e.chunk), sourceGeometry(currentEntries[i].chunk)))) fail('current raw source geometry drift')
   if (!Array.isArray(input.rawAudio) || input.rawAudio.length !== entries.length || !input.rawAudio.length) fail('all raw WAV bindings required')
   const samples: Record<string, number> = {}
   const placed = input.rawAudio.map((raw, i) => {
