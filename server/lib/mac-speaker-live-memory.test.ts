@@ -30,6 +30,23 @@ describe('capture-long source-bound Mac speaker identity memory',()=>{
   let state=appendMacSpeakerLiveEvidence(initial(),evidence(0),p);state=appendMacSpeakerLiveEvidence(state,evidence(1),p)
   expect(state.projections.every(p=>p.profileName===undefined)).toBe(true);expect(JSON.stringify(p)).toBe(before)
  })
+ it('retains MU as a full-cohort competitor without displaying it',()=>{
+  const mu={name:'MU',embeddings:[vector()],profileSHA256}
+  const winner=replayMacSpeakerLiveEvidence({captureId,generation:'x',modelSHA256,profileSHA256,evidence:[evidence(0),evidence(1)],profiles:[mu,profiles[1]]})
+  expect(winner.projections).toHaveLength(10);expect(winner.projections.every(p=>p.profileName===undefined&&p.displayLabel==='Voice 1')).toBe(true)
+  const tie=replayMacSpeakerLiveEvidence({captureId,generation:'x',modelSHA256,profileSHA256,evidence:[evidence(0),evidence(1)],profiles:[mu,profiles[0]]})
+  expect(tie.projections.every(p=>p.profileName===undefined)).toBe(true)
+ })
+ it('rejects rehashed threshold and projection-reference corruption',()=>{
+  let state=appendMacSpeakerLiveEvidence(initial(),evidence(0),[]);state=appendMacSpeakerLiveEvidence(state,evidence(1),[])
+  const reseal=(s:typeof state)=>{const{stateSHA256,...body}=s;s.stateSHA256=hashMacSpeakerLive(body);return s}
+  const changed=structuredClone(state);changed.memory.thresholds.anonymousCosine=.1
+  expect(()=>validateMacSpeakerLiveState(reseal(changed))).toThrow()
+  const forged=structuredClone(state);forged.projections[0].evidenceIds[0]=h('missing')
+  expect(()=>validateMacSpeakerLiveState(reseal(forged))).toThrow('live_projection_support')
+  const crossed=structuredClone(state);crossed.projections[0].endSample++
+  expect(()=>validateMacSpeakerLiveState(reseal(crossed))).toThrow('live_projection_source')
+ })
  it('refuses same original crops, duplicate PCM, crossed source intervals and modified receipts',()=>{
   const first=appendMacSpeakerLiveEvidence(initial(),evidence(0),[])
   expect(appendMacSpeakerLiveEvidence(first,evidence(0),[]).revision).toBe(first.revision)

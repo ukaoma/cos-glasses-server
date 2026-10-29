@@ -2,7 +2,7 @@
 import { checkSpeakerName } from './speaker-name.js'
 import { isVoiceLabel } from './mac-voice-labels.js'
 import { createHash } from 'node:crypto'
-import { createMacSpeakerMemory, validateMacSpeakerMemory, reconcileMacSpeakerObservation, matchMacSpeakerProfile, normalizedSpeakerEmbedding, normalizedSpeakerCosine,
+import { DEFAULT_MAC_SPEAKER_THRESHOLDS, createMacSpeakerMemory, validateMacSpeakerMemory, reconcileMacSpeakerObservation, matchMacSpeakerProfile, normalizedSpeakerEmbedding, normalizedSpeakerCosine,
   type MacSpeakerMemory, type MacSpeakerObservation, type MacSpeakerProfile } from './mac-speaker-reconcile.js'
 import type { PreparedMacSpeakerWindow, MacWindowEmbeddingReceipt } from './mac-speaker-windows.js'
 
@@ -48,18 +48,35 @@ function validEvidence(e:MacSpeakerLiveEvidence,state:MacSpeakerLiveState):void 
   if(at!==w.endSample||speech!==w.speechSamples||speech<320000)throw Error('live_source_speech')
 }
 export function validateMacSpeakerLiveState(state:MacSpeakerLiveState):void {
-  if(!state||state.version!==1||!state.generation||!SHA.test(state.modelSHA256)||!SHA.test(state.profileSHA256)||!Number.isSafeInteger(state.revision)||state.revision<0
+  if(!state||state.version!==1||!state.generation||!SHA.test(state.modelSHA256)||!SHA.test(state.profileSHA256)||!Number.isSafeInteger(state.revision)||state.revision<0||state.revision>=Number.MAX_SAFE_INTEGER-1
     ||!Array.isArray(state.evidence)||state.evidence.length>MAC_SPEAKER_LIVE_MAX_WINDOWS||!Array.isArray(state.identities)||state.identities.length>99||!Array.isArray(state.projections)||state.projections.length>8192
     ||!Number.isSafeInteger(state.voiceHighWater)||state.voiceHighWater<0||state.voiceHighWater>99||Buffer.byteLength(JSON.stringify(state))>8*1024*1024)throw Error('live_state_bound')
   const{stateSHA256,...body}=state;if(hashMacSpeakerLive(body)!==stateSHA256)throw Error('live_state_hash')
   validateMacSpeakerMemory(state.memory)
+  if(hashMacSpeakerLive(state.memory.thresholds)!==hashMacSpeakerLive({...DEFAULT_MAC_SPEAKER_THRESHOLDS,minimumSamples:320000}))throw Error('live_threshold_drift')
   if(state.memory.captureId!==state.captureId||state.memory.modelSHA256!==state.modelSHA256||state.memory.thresholds.dimensions!==192||state.memory.thresholds.minimumSamples!==320000)throw Error('live_memory_binding')
   const seen=new Set<string>(),raw=new Set<number>(),pcm=new Set<string>()
-  for(const e of state.evidence){validEvidence(e,state);if(seen.has(e.window.id))throw Error('live_duplicate_window');seen.add(e.window.id)
+  for(const e of state.evidence){validEvidence(e,state);if(e.cohortId!==undefined&&(!Number.isSafeInteger(e.cohortId)||!state.memory.identities.some(i=>i.id===e.cohortId)))throw Error('live_cohort_reference');if(seen.has(e.window.id))throw Error('live_duplicate_window');seen.add(e.window.id)
     for(const source of e.window.sources){if(raw.has(source.chunkIndex)||pcm.has(source.pcmSHA256))throw Error('live_duplicate_source');raw.add(source.chunkIndex);pcm.add(source.pcmSHA256)}}
   const ids=new Set<string>(),labels=new Set<string>(),cohorts=new Set<number>()
   for(const i of state.identities){if(ids.has(i.identityId)||labels.has(i.displayLabel)||cohorts.has(i.cohortId)||!/^acoustic_[a-f0-9]{64}$/.test(i.identityId)||!/^Voice [1-9]\d?$/.test(i.displayLabel)
       ||Number(i.displayLabel.slice(6))>state.voiceHighWater||!state.memory.identities.some(c=>c.id===i.cohortId)||typeof i.retired!=='boolean')throw Error('live_namespace');ids.add(i.identityId);labels.add(i.displayLabel);cohorts.add(i.cohortId)}
+  const receipts=new Map(state.evidence.map(e=>[e.nativeReceiptSHA256,e])),projected=new Set<number>()
+  for(const p of state.projections){
+    const identity=state.identities.find(i=>i.identityId===p.identityId)
+    if(!identity||identity.retired||projected.has(p.rawChunkIndex)||!Array.isArray(p.evidenceIds)||p.evidenceIds.length<2||p.evidenceIds.length>3||new Set(p.evidenceIds).size!==p.evidenceIds.length)throw Error('live_projection_identity')
+    const support=p.evidenceIds.map(id=>receipts.get(id))
+    if(support.some(e=>!e||e.cohortId!==identity.cohortId||!coherent(e)))throw Error('live_projection_support')
+    const source=support.flatMap(e=>e!.window.sources).find(s=>s.chunkIndex===p.rawChunkIndex)
+    if(!source||source.audioSHA256!==p.audioSHA256||source.pcmSHA256!==p.pcmSHA256||source.startSample!==p.startSample||source.endSample!==p.endSample)throw Error('live_projection_source')
+    if(p.profileName!==undefined?typeof p.profileName!=='string'||!checkSpeakerName(p.profileName).ok||/^(?:ext|unknown|mu|speaker[\s_-]*\d+|voice[\s_-]*\d+)$/iu.test(p.profileName)||p.displayLabel!==p.profileName:p.displayLabel!==identity.displayLabel)throw Error('live_projection_label')
+    projected.add(p.rawChunkIndex)
+  }
+  if(state.withheldReason!==null&&state.projections.length)throw Error('live_withheld_projection')
+  // Every retained native witness assigned to memory must have the same exact
+  // aggregate original as its corresponding evidence receipt.
+  const expectedOriginals=state.evidence.filter(e=>e.cohortId!==undefined).map(e=>observation(state,e).original)
+  if(hashMacSpeakerLive(expectedOriginals)!==hashMacSpeakerLive(state.memory.originals))throw Error('live_memory_lineage')
 }
 function observation(state:MacSpeakerLiveState,e:MacSpeakerLiveEvidence):MacSpeakerObservation {
   const w=e.window,r=e.receipt
@@ -100,7 +117,8 @@ function refresh(state:MacSpeakerLiveState,profiles:readonly MacSpeakerProfile[]
       identity={cohortId:cohort.id,identityId,displayLabel:`Voice ${++state.voiceHighWater}`,retired:false};state.identities.push(identity)
     }
     const named=matchMacSpeakerProfile(state.memory,group.map(e=>observation(state,e)),profiles)
-    const profileName=named.reason==='matched_profile'?named.label??undefined:undefined
+    // MU remains an enrolled full-cohort competitor, never a human display claim.
+    const profileName=named.reason==='matched_profile'&&named.label?.normalize('NFKC').trim().toLowerCase()!=='mu'?named.label??undefined:undefined
     for(const e of group)for(const s of e.window.sources)state.projections.push({rawChunkIndex:s.chunkIndex,audioSHA256:s.audioSHA256,pcmSHA256:s.pcmSHA256,startSample:s.startSample,endSample:s.endSample,
       identityId:identity.identityId,displayLabel:profileName??identity.displayLabel,...(profileName?{profileName}:{}),evidenceIds:[...new Set([...group.slice(0,2).map(x=>x.nativeReceiptSHA256),e.nativeReceiptSHA256])]})
   }
@@ -144,7 +162,7 @@ export function validateMacSpeakerLiveProfiles(profiles:readonly MacSpeakerProfi
   if(!Array.isArray(profiles)||profiles.length>1024||profiles.some(p=>!p||p.profileSHA256!==profileSHA256))throw Error('live_profile_drift')
   const aliases=new Set<string>();let count=0
   for(const p of profiles){const alias=p.name?.normalize('NFKC').trim().replace(/\s+/gu,' ').toLowerCase()
-    if(!checkSpeakerName(p.name).ok||/^(?:ext|unknown|mu|speaker[\s_-]*(?:\d+|n)|voice[\s_-]*(?:\d+|n))$/iu.test(p.name)||aliases.has(alias)||!Array.isArray(p.embeddings)||!p.embeddings.length||p.embeddings.length>128||p.embeddings.some((v:readonly number[])=>!normalizedSpeakerEmbedding(v,192)))throw Error('live_profile_cohort_invalid')
+    if(!checkSpeakerName(p.name).ok||/^(?:ext|unknown|speaker[\s_-]*(?:\d+|n)|voice[\s_-]*(?:\d+|n))$/iu.test(p.name)||aliases.has(alias)||!Array.isArray(p.embeddings)||!p.embeddings.length||p.embeddings.length>128||p.embeddings.some((v:readonly number[])=>!normalizedSpeakerEmbedding(v,192)))throw Error('live_profile_cohort_invalid')
     aliases.add(alias);count+=p.embeddings.length
   }
   if(count>8192)throw Error('live_profile_cohort_invalid')
