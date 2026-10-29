@@ -722,6 +722,42 @@ limits above: this release does not promise meeting-wide speaker deduplication
 or an attendee count. Older recordings require an explicit, validated repair;
 they are not silently rewritten on upgrade.
 
+### Speaker merge shadow mode (6.95.0, off by default, log only)
+
+Mac recordings can split one person across many `Voice N` labels. Shadow mode asks
+FluidAudio's offline Community-1 diarizer which of those labels belong together and
+**logs** the answer for every finished Mac recording, so the proposals can be checked
+against later human corrections. It changes nothing: no meeting file, label, name,
+voice profile, embedding cache or correction ledger is written.
+
+- **On:** add `COS_SPEAKER_SHADOW=1` to `~/.cos-glasses/.env` and restart the server.
+  **Off:** remove the line (or set `0`) and restart. Unset means off, and off does nothing
+  at all: no queue, no process, no file.
+- **Needs:** the Parakeet install's verified `fluidaudiocli` 0.17.4, `sandbox-exec`, and the
+  pinned models from `FluidInference/speaker-diarization-coreml` at revision `df2625ac` in
+  `~/.cos-glasses/data/speaker-shadow/models/speaker-diarization/` (or
+  `COS_SPEAKER_SHADOW_MODELS`). The server never downloads them: missing or mismatched
+  models are logged as `models_missing` or `models_mismatch`. The models are CC-BY-4.0
+  (scoped); see the repo's NOTICE.md.
+- **When:** after a Mac recording's finalization is complete. A live recording, save,
+  batch finalization, one-shot transcription or dictation defers it, and one that starts
+  mid-run stops the run and puts the meeting back in the queue.
+- **How it stops:** a daily cap (`COS_SPEAKER_SHADOW_DAILY_RUNS`, default 12), a breaker
+  (3 failures in a row pause it for 1 hour), a 180 s hard wall clock
+  (`COS_SPEAKER_SHADOW_TIMEOUT_MS` may only lower it) and an RSS cap on the whole run
+  (`COS_SPEAKER_SHADOW_RSS_MB`, default 3072). It runs in a niced child process, never on the
+  server's event loop. No LLM, and the CLI runs under `sandbox-exec` with network denied.
+- **Gates** (the research tool's, unchanged): at least 0.8 of a voice's covered speech on one
+  cluster with at least half of it covered, at least 15 s of speech, and the voice's
+  embedding centroid inside the cluster's 95th-percentile spread (leave-fragment-out). Named
+  labels and `Ext` are never merged into or out of. The anchor ratio is reported for
+  scoring and decides nothing. A named label that shares a cluster is listed as a hint
+  only ("cluster also holds 65 s of ...").
+- **Read:** `GET /api/speaker-shadow/proposals?limit=10&sessionId=mac_<uuid>` (token
+  required) returns the records, newest first; `GET /api/speaker-shadow/status` the queue,
+  cap, breaker and last error. `/api/health` carries `speaker_shadow` (codes and counts only).
+  Records are kept in `~/.cos-glasses/data/speaker-shadow/proposals.jsonl` (rotated past 8 MB).
+
 ### iPhone microphone meetings (6.93.0, off by default)
 
 With `COS_IPHONE_MICROPHONE_MEETINGS=1`, HQ set to Parakeet Ultra and Parakeet
