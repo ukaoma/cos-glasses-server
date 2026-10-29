@@ -44,6 +44,7 @@ export type MaintenanceWorkKind =
   | 'query_attachment_write'
   | 'one_shot_transcription'
   | 'recording_chunk'
+  | 'mac_speaker_live'
   | 'meeting_save'
   | 'meeting_batch_finalization'
   | 'prompt_draft_write'

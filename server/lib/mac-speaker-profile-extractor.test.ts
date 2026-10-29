@@ -18,6 +18,27 @@ describe('qualified extraction retains ownership until native close', () => {
       expect(await promise).toBeNull(); expect(settled).toBe(true)
     } finally { vi.useRealTimers() }
   })
+  it('rejects close after the absolute deadline even when its timer has not run',async()=>{
+    vi.useFakeTimers();vi.setSystemTime(10000)
+    try{const f=fakeChild(),p=extractQualifiedMacWindow(Buffer.alloc(960000),'/model',10,f.deps)
+      f.child.stdout.emit('data',Buffer.from('[[],[],[]]'));vi.setSystemTime(10011);f.child.emit('close',0)
+      expect(await p).toBeNull()
+    }finally{vi.useRealTimers()}
+  })
+  it('refuses overlapping live/saved children until the owned child closes',async()=>{
+    const first=fakeChild(),second=fakeChild()
+    const pending=extractQualifiedMacWindow(Buffer.alloc(960000),'/model',1000,first.deps)
+    expect(await extractQualifiedMacWindow(Buffer.alloc(960000),'/model',1000,second.deps)).toBeNull()
+    expect(second.deps.spawn).not.toHaveBeenCalled()
+    first.child.emit('close',1);expect(await pending).toBeNull()
+    const next=extractQualifiedMacWindow(Buffer.alloc(960000),'/model',1000,second.deps)
+    second.child.emit('close',1);expect(await next).toBeNull();expect(second.deps.spawn).toHaveBeenCalledTimes(1)
+  })
+  it('releases admission after synchronous spawn failure',async()=>{
+    expect(await extractQualifiedMacWindow(Buffer.alloc(960000),'/model',1000,{modulePath:'/module',spawn:vi.fn(()=>{throw Error('spawn')})as any})).toBeNull()
+    const f=fakeChild(),p=extractQualifiedMacWindow(Buffer.alloc(960000),'/model',1000,f.deps);f.child.emit('close',1);await p
+    expect(f.deps.spawn).toHaveBeenCalledOnce()
+  })
   it('waits for child close after bounded output overflows', async () => {
     const f = fakeChild(); let settled = false
     const promise = extractQualifiedMacWindow(Buffer.alloc(960000), '/model', 1000, f.deps).then(v => { settled = true; return v })

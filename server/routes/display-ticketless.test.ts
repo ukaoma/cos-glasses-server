@@ -123,6 +123,7 @@ const FIXTURE_BY_TYPE: Record<DisplayEvent['type'], Record<string, unknown>> = {
   chunk: { text: 'CANARY_CHUNK' },
   done: { text: 'CANARY_DONE' },
   session_restore: { sessionId: 'CANARY_SESSION' },
+  mac_speaker_live_revision: { sessionId: 'CANARY_MAC_SESSION', speakerRevision: 3 },
   coaching_nudge: { text: 'CANARY_NUDGE' },
   coaching_nudge_v2: { detail: 'CANARY_NUDGE_V2' },
   start: { model: 'CANARY_MODEL', sessionId: 's1' },

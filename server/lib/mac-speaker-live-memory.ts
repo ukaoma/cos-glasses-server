@@ -8,6 +8,8 @@ import type { PreparedMacSpeakerWindow, MacWindowEmbeddingReceipt } from './mac-
 
 const SHA=/^[a-f0-9]{64}$/
 export const MAC_SPEAKER_LIVE_MAX_WINDOWS=256
+/** Control accepts counters below10m; the last value is withdrawal-only. */
+export const MAC_SPEAKER_LIVE_TERMINAL_REVISION=9999999
 export const hashMacSpeakerLive=(value:unknown):string=>createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export interface MacSpeakerLiveSpan {
   rawChunkIndex:number;audioSHA256:string;pcmSHA256:string
@@ -26,9 +28,11 @@ export interface MacSpeakerLiveState {
   identities:Array<{cohortId:number;identityId:string;displayLabel:string;retired:boolean}>
   voiceHighWater:number;projections:MacSpeakerLiveSpan[];withheldReason:string|null;stateSHA256:string
 }
-const seal=(state:MacSpeakerLiveState):MacSpeakerLiveState=>{const{stateSHA256:_hash,...body}=state;state.stateSHA256=hashMacSpeakerLive(body);return state}
+const seal=(state:MacSpeakerLiveState):MacSpeakerLiveState=>{
+  if(state.revision>=MAC_SPEAKER_LIVE_TERMINAL_REVISION){state.revision=MAC_SPEAKER_LIVE_TERMINAL_REVISION;state.projections=[];state.voiceHighWater=99;state.withheldReason='revision_counter_exhausted';for(const identity of state.identities)identity.retired=true}
+  const{stateSHA256:_hash,...body}=state;state.stateSHA256=hashMacSpeakerLive(body);return state}
 export function createMacSpeakerLiveState(captureId:string,generation:string,modelSHA256:string,profileSHA256:string,voiceHighWater=0):MacSpeakerLiveState {
-  if(!generation||generation.length>200||!SHA.test(profileSHA256)||!Number.isSafeInteger(voiceHighWater)||voiceHighWater<0||voiceHighWater>99)throw Error('live_binding')
+  if(!generation||generation.length>128||!SHA.test(profileSHA256)||!Number.isSafeInteger(voiceHighWater)||voiceHighWater<0||voiceHighWater>99)throw Error('live_binding')
   return seal({version:1,captureId,generation,modelSHA256,profileSHA256,revision:0,memory:createMacSpeakerMemory(captureId,modelSHA256,{minimumSamples:320000}),evidence:[],identities:[],voiceHighWater,projections:[],withheldReason:null,stateSHA256:''})
 }
 function validEvidence(e:MacSpeakerLiveEvidence,state:MacSpeakerLiveState):void {
@@ -48,9 +52,10 @@ function validEvidence(e:MacSpeakerLiveEvidence,state:MacSpeakerLiveState):void 
   if(at!==w.endSample||speech!==w.speechSamples||speech<320000)throw Error('live_source_speech')
 }
 export function validateMacSpeakerLiveState(state:MacSpeakerLiveState):void {
-  if(!state||state.version!==1||!state.generation||!SHA.test(state.modelSHA256)||!SHA.test(state.profileSHA256)||!Number.isSafeInteger(state.revision)||state.revision<0||state.revision>=Number.MAX_SAFE_INTEGER-1
+  if(!state||state.version!==1||typeof state.generation!=='string'||!state.generation||state.generation.length>128||!SHA.test(state.modelSHA256)||!SHA.test(state.profileSHA256)||!Number.isSafeInteger(state.revision)||state.revision<0||state.revision>MAC_SPEAKER_LIVE_TERMINAL_REVISION
     ||!Array.isArray(state.evidence)||state.evidence.length>MAC_SPEAKER_LIVE_MAX_WINDOWS||!Array.isArray(state.identities)||state.identities.length>99||!Array.isArray(state.projections)||state.projections.length>8192
     ||!Number.isSafeInteger(state.voiceHighWater)||state.voiceHighWater<0||state.voiceHighWater>99||Buffer.byteLength(JSON.stringify(state))>8*1024*1024)throw Error('live_state_bound')
+  if(state.revision===MAC_SPEAKER_LIVE_TERMINAL_REVISION&&(state.projections.length||state.voiceHighWater!==99||!state.withheldReason||state.identities.some(i=>!i.retired)))throw Error('live_terminal_revision')
   const{stateSHA256,...body}=state;if(hashMacSpeakerLive(body)!==stateSHA256)throw Error('live_state_hash')
   validateMacSpeakerMemory(state.memory)
   if(hashMacSpeakerLive(state.memory.thresholds)!==hashMacSpeakerLive({...DEFAULT_MAC_SPEAKER_THRESHOLDS,minimumSamples:320000}))throw Error('live_threshold_drift')
@@ -77,6 +82,18 @@ export function validateMacSpeakerLiveState(state:MacSpeakerLiveState):void {
   // aggregate original as its corresponding evidence receipt.
   const expectedOriginals=state.evidence.filter(e=>e.cohortId!==undefined).map(e=>observation(state,e).original)
   if(hashMacSpeakerLive(expectedOriginals)!==hashMacSpeakerLive(state.memory.originals))throw Error('live_memory_lineage')
+  // Rebuild deterministic receipt membership, rather than trusting a caller-
+  // recomputed unkeyed state hash or arbitrary cohort references on recovery.
+  let rebuilt=createMacSpeakerMemory(state.captureId,state.modelSHA256,{minimumSamples:320000})
+  for(const e of state.evidence){
+    let expected:number|undefined
+    if(coherent(e)){const next=reconcileMacSpeakerObservation(rebuilt,observation(state,e));rebuilt=next.state;expected=next.decision.identityId}
+    if(expected!==e.cohortId)throw Error('live_receipt_membership')
+  }
+  if(hashMacSpeakerLive(rebuilt)!==hashMacSpeakerLive(state.memory))throw Error('live_memory_replay')
+  for(const identity of state.identities){const group=state.evidence.filter(e=>e.cohortId===identity.cohortId)
+    if(group.length<2||identity.identityId!==`acoustic_${hashMacSpeakerLive(group.slice(0,2).map(e=>e.nativeReceiptSHA256))}`)throw Error('live_identity_lineage')
+  }
 }
 function observation(state:MacSpeakerLiveState,e:MacSpeakerLiveEvidence):MacSpeakerObservation {
   const w=e.window,r=e.receipt
@@ -126,7 +143,8 @@ function refresh(state:MacSpeakerLiveState,profiles:readonly MacSpeakerProfile[]
 }
 /** Immutable append; exact source overlaps/crops cannot supply a second witness. */
 export function appendMacSpeakerLiveEvidence(input:MacSpeakerLiveState,evidence:MacSpeakerLiveEvidence,profiles:readonly MacSpeakerProfile[],reservedHighWater=input.voiceHighWater):MacSpeakerLiveState {
-  validateMacSpeakerLiveState(input);validEvidence(evidence,input)
+  validateMacSpeakerLiveState(input);if(input.revision===MAC_SPEAKER_LIVE_TERMINAL_REVISION)return structuredClone(input)
+  validEvidence(evidence,input)
   validateMacSpeakerLiveProfiles(profiles,input.profileSHA256)
   const state=structuredClone(input)
   if(!Number.isSafeInteger(reservedHighWater)||reservedHighWater<state.voiceHighWater||reservedHighWater>99)throw Error('live_namespace_drift')
