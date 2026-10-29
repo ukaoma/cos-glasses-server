@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { SHADOW_SAMPLE_RATE, buildShadowProposals, decide, nativeTurns, type ShadowSegment } from './speaker-shadow-decide.js'
+import { assertAnchorGateParity } from './__fixtures__/speaker-shadow/assert-anchor-gate-parity.js'
 
 const dir = process.env.COS_SPEAKER_SHADOW_PARITY_DIR?.trim()
 const meetings = dir && existsSync(dir) ? readdirSync(dir).filter(n => n.endsWith('-inputs.json')).map(n => n.replace(/-inputs\.json$/, '')) : []
@@ -35,6 +36,10 @@ describe.skipIf(!meetings.length)('speaker shadow research and Wave-1 parity (pr
       const { turns, clipped } = nativeTurns(inputs.native, inputs.total / SHADOW_SAMPLE_RATE)
       const D = decide(segs, inputs.total, turns, inputs.embeddings)
       const P = buildShadowProposals(D, segs, sources, turns)
+
+      it('executes the native replay comparison on cached evidence, including clusters that lose their anchor', () => {
+        assertAnchorGateParity(P, round3, anchorGate, { listen: hasSources })
+      })
 
       it('reproduces every per-voice gate value and reason string', () => {
         expect(clipped).toBe(pyDecide.clipped)
