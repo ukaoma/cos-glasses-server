@@ -360,6 +360,8 @@ export interface ShadowVoiceEntry {
   outlierDistance: number | null
   outlierP95: number | null
   outlierNote: string | null
+  /** Applied unrounded ratio. Optional only for older persisted proposal rows. */
+  anchorRatio?: number | null
   /** Rounded compatibility field; gate (d) uses the row's UNROUNDED ratio. */
   anchorRatioPostHoc: number | null
   eligible: boolean
@@ -434,7 +436,7 @@ export function buildShadowProposals(
       outlierDistance: 'reason' in o ? null : o.fragmentCentroidDistance,
       outlierP95: 'reason' in o ? null : o.clusterP95Distance,
       outlierNote: 'reason' in o ? o.reason : null,
-      anchorRatioPostHoc: r.anchorRatio === null ? null : pyRound(r.anchorRatio, 2), eligible: r.eligible, reasons: r.reasons,
+      anchorRatio: r.anchorRatio, anchorRatioPostHoc: r.anchorRatio === null ? null : pyRound(r.anchorRatio, 2), eligible: r.eligible, reasons: r.reasons,
       listen: listenPointers(v, byLabel),
     }
   }

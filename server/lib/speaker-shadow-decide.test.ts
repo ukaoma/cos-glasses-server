@@ -179,6 +179,17 @@ describe('speaker shadow anchor ratio: actual merge boundary and missing evidenc
     expect(wrong.rows.get('Voice 2')).toMatchObject({ outlier: { pass: true }, anchorRatioPass: false })
     expect(wrong.remap.has('Voice 2')).toBe(false)
   })
+  it('carries the raw ratio into proposal rows so a downstream 1.1 gate cannot accept rounded 1.104', () => {
+    const D = example(1.104)
+    const segs: ShadowSegment[] = [...D.voices].flatMap(([voice, intervals]) => intervals.map(([lo, hi]) => [lo, hi, voice] as const))
+    const P = buildShadowProposals(D, segs, sourcesFor(segs), [{ start: 0, end: 75, speaker: 'S1' }])
+    const entry = P.accepted[0].voices.find(row => row.voice === 'Voice 2')!
+    expect(entry.anchorRatio).toBe(D.rows.get('Voice 2')!.anchorRatio)
+    expect(entry.anchorRatio).toBeCloseTo(1.104, 12)
+    expect(entry.anchorRatioPostHoc).toBe(1.1)
+    expect(entry.anchorRatio!).toBeGreaterThan(1.1)
+    expect(P.accepted[0].voices.find(row => row.voice === 'Voice 1')!.anchorRatio).toBeNull()
+  })
   it('never admits a nonanchor without enough fragment evidence', () => {
     const D = example(.5, undefined, 2)
     expect(D.rows.get('Voice 2')).toMatchObject({ anchorRatio: null, anchorRatioPass: false, eligible: false })
