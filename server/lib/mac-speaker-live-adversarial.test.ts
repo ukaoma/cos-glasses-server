@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pcm16ToWav } from './nemotron-segments.js'
+import { prepareMacSpeakerLivePublication } from './mac-speaker-live-store.js'
 
 const roots: string[] = []
 afterEach(() => {
@@ -13,6 +14,17 @@ afterEach(() => {
 })
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
 const vector = [1, ...Array(191).fill(0)]
+
+it('advances the public revision when a missing recovered snapshot withdraws old claims', () => {
+  const original = { i: 0, c: { speaker: 'Ext', text: 'Original unchanged words', elapsed: 0 } }
+  const result = prepareMacSpeakerLivePublication({
+    captureId: 'mac_11111111-1111-4111-8111-111111111111', generation: 'adversarial',
+    chunksIndexed: [original], state: undefined, validated: false, revision: 17,
+    previousDigest: 'e'.repeat(64),
+  })
+  expect(result.speakerProjectedChunksIndexed).toEqual([original])
+  expect(result.speakerRevision).toBeGreaterThan(17)
+})
 
 describe('Mac live publication final caller-side CAS, without native inference', () => {
   for (const changed of ['profile', 'model', 'previously absent ledger'] as const) {
@@ -58,7 +70,7 @@ describe('Mac live publication final caller-side CAS, without native inference',
       expect(typeof assertBindings).toBe('function')
       const input = { captureId: 'mac_11111111-1111-4111-8111-111111111111', generation: 'adversarial', audioDir, ledgerPath, chunksIndexed, voiceHighWater: 1 }
       const extract = vi.fn(async () => [vector, vector, vector])
-      const deps = { runtime: async () => ({ modelPath, profilesPath }), extract }
+      const deps = { runtime: async () => ({ modelPath, profilesPath }), extract, admit: () => true }
       const first = await live.runMacSpeakerLivePass(input, deps)
       expect(first.state?.evidence, first.reason).toHaveLength(1)
       expect(() => assertBindings!((first as any).fileBindings)).not.toThrow()
