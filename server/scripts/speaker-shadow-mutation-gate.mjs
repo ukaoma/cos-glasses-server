@@ -106,7 +106,9 @@ try {
       PATH: process.env.PATH, HOME: scratch, COS_DATA_DIR: join(scratch, 'data'), COS_PROFILE_PATH: join(scratch, 'data', 'profile.json'),
       COS_MAINTENANCE_GATE_PATH: join(scratch, 'gate', 'maintenance-gate.json'), TMPDIR: process.env.TMPDIR,
     },
-    encoding: 'utf8', timeout: 300000,
+    // A mutant can turn every wait in the runner suite into a full timeout; a harness timeout
+    // is never counted as a kill, so give a slow (or loaded) machine room to finish.
+    encoding: 'utf8', timeout: 900000,
   })
   const baseline = run(all)
   if (baseline.status !== 0) throw new Error('Baseline failed; a gate over a red suite proves nothing:\n' + baseline.stdout + '\n' + baseline.stderr)

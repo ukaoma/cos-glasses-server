@@ -16,7 +16,18 @@ const { writeFakeCli, writePassthroughSandbox } = await import('./__fixtures__/s
 type FakeCliMode = import('./__fixtures__/speaker-shadow/fake-cli.js').FakeCliMode
 type ShadowJob = import('./speaker-shadow-worker.js').ShadowJob
 
-afterAll(() => rmSync(scratch, { recursive: true, force: true }))
+const markers: string[] = []
+afterAll(() => {
+  // A mutant that disables the CLI deadline leaves the hung fake running; never leave it behind.
+  for (const marker of markers) {
+    if (!existsSync(marker)) continue
+    for (const line of readFileSync(marker, 'utf8').split('\n').filter(Boolean)) {
+      const pid = JSON.parse(line).pid
+      if (typeof pid === 'number') { try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ } }
+    }
+  }
+  rmSync(scratch, { recursive: true, force: true })
+})
 
 const sha = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
 const okModels = async (dir: string) => ({ ok: true as const, dir, bytes: 0 })
@@ -25,6 +36,7 @@ let caseNo = 0
 function setup(mode: FakeCliMode, options: { audioRoot?: string } = {}) {
   const root = join(scratch, `case-${++caseNo}`)
   const cli = writeFakeCli(join(root, 'cli'), mode)
+  markers.push(cli.marker)
   const meeting = syntheticMeeting()
   const audioDir = join(options.audioRoot ?? join(root, 'meeting-audio'), meeting.sessionId)
   writeFileSync(join(cli.fixtures, 'probe-target.txt'), audioDir)

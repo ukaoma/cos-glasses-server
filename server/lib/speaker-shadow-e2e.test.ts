@@ -10,14 +10,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { runShadowJob } from './speaker-shadow-worker.js'
 import { round3View } from './__fixtures__/speaker-shadow/round3-view.js'
 
 const dir = process.env.COS_SPEAKER_SHADOW_PARITY_DIR?.trim()
 const configs = process.env.COS_SPEAKER_SHADOW_E2E === '1' && dir && existsSync(dir) ? readdirSync(dir).filter(n => n.endsWith('-e2e.json')) : []
-const scratch = mkdtempSync(join(tmpdir(), 'speaker-shadow-e2e-'))
-afterAll(() => rmSync(scratch, { recursive: true, force: true }))
 
 describe.skipIf(!configs.length)('speaker shadow end to end with the real CLI (private fixtures)', () => {
   for (const name of configs) {
@@ -31,22 +29,26 @@ describe.skipIf(!configs.length)('speaker shadow end to end with the real CLI (p
         const x = placed.get(e.chunkIndex)
         return { chunkIndex: e.chunkIndex, chunk: { text: '', speaker: e.speaker, elapsed: x.startSample / 16, similarity: 0, ...(x.sidecarAudioSHA256 ? { audioSha256: x.sidecarAudioSHA256 } : {}), segments: e.segments } }
       })
-      const work = mkdtempSync(join(scratch, 'run-'))
-      const sidecarPath = join(work, 'meeting.g2-chunks.json')
-      writeFileSync(sidecarPath, JSON.stringify({ sessionId: manifest.sessionId, sourceType: 'mac_system_audio', finalizationState: 'complete', chunkEntries }))
-      const tmpRoot = join(work, 'tmp')
-      mkdirSync(tmpRoot)
-      const outcome = await runShadowJob({
-        sessionId: manifest.sessionId, sidecarPath, audioDir: cfg.audioDir, expectedLabelsHash: null,
-        cliPath: cfg.cliPath, cliSha256: cfg.cliSha256, sandboxExec: '/usr/bin/sandbox-exec', modelsDir: cfg.modelsDir,
-        homeDir: join(work, 'home'), tmpRoot, cliTimeoutMs: 175_000,
-      })
-      expect(outcome.status).toBe('proposed')
-      if (outcome.status !== 'proposed') return
-      expect(outcome.facts.timelinePCMSHA256).toBe(cfg.timelinePCMSHA256)
-      expect(outcome.facts.timelineWAVSHA256).toBe(cfg.timelineWAVSHA256)
-      expect(round3View(outcome.proposals)).toEqual(round3View(JSON.parse(readFileSync(cfg.expected, 'utf8'))))
-      expect(readdirSync(tmpRoot)).toEqual([])
+      // Created here, not at import: a file whose tests are all skipped never runs afterAll.
+      const work = mkdtempSync(join(tmpdir(), 'speaker-shadow-e2e-'))
+      try {
+        const sidecarPath = join(work, 'meeting.g2-chunks.json')
+        writeFileSync(sidecarPath, JSON.stringify({ sessionId: manifest.sessionId, sourceType: 'mac_system_audio', finalizationState: 'complete', chunkEntries }))
+        const tmpRoot = join(work, 'tmp')
+        mkdirSync(tmpRoot)
+        const outcome = await runShadowJob({
+          sessionId: manifest.sessionId, sidecarPath, audioDir: cfg.audioDir, expectedLabelsHash: null,
+          cliPath: cfg.cliPath, cliSha256: cfg.cliSha256, sandboxExec: '/usr/bin/sandbox-exec', modelsDir: cfg.modelsDir,
+          // A persistent HOME in the private bundle keeps CoreML warm: a cold one leaves empty OS temp dirs.
+          homeDir: cfg.homeDir ?? join(work, 'home'), tmpRoot, cliTimeoutMs: 175_000,
+        })
+        expect(outcome.status).toBe('proposed')
+        if (outcome.status !== 'proposed') return
+        expect(outcome.facts.timelinePCMSHA256).toBe(cfg.timelinePCMSHA256)
+        expect(outcome.facts.timelineWAVSHA256).toBe(cfg.timelineWAVSHA256)
+        expect(round3View(outcome.proposals)).toEqual(round3View(JSON.parse(readFileSync(cfg.expected, 'utf8'))))
+        expect(readdirSync(tmpRoot)).toEqual([])
+      } finally { rmSync(work, { recursive: true, force: true }) }
     }, 240_000)
   }
 })

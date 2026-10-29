@@ -19,7 +19,12 @@ const { writeFakeCli, writePassthroughSandbox } = await import('./__fixtures__/s
 type FakeCliMode = import('./__fixtures__/speaker-shadow/fake-cli.js').FakeCliMode
 type SpeakerShadowDeps = import('./speaker-shadow.js').SpeakerShadowDeps
 
-afterAll(() => rmSync(scratch, { recursive: true, force: true }))
+const groups: number[] = []
+afterAll(() => {
+  // A mutant that disables the wall clock leaves a worker group running; never leave it behind.
+  for (const pgid of groups) { try { process.kill(-pgid, 'SIGKILL') } catch { /* already gone */ } }
+  rmSync(scratch, { recursive: true, force: true })
+})
 
 const TEST_WORKER = fileURLToPath(new URL('./__fixtures__/speaker-shadow/test-worker.ts', import.meta.url))
 const TSX = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm')).href
@@ -76,7 +81,7 @@ function world(mode: FakeCliMode, overrides: Partial<SpeakerShadowDeps> = {}, me
     tmpRoot: tmp,
     spawnWorker: () => {
       const child = spawn(process.execPath, ['--import', TSX, TEST_WORKER], { detached: true, stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, COS_DATA_DIR: data } })
-      if (child.pid) spawned.push(child.pid)
+      if (child.pid) { spawned.push(child.pid); groups.push(child.pid) }
       return child
     },
     limits: () => ({ dailyRuns: 12, timeoutMs: 60_000, rssBytes: 3 * 1024 ** 3 }),
@@ -90,7 +95,10 @@ function world(mode: FakeCliMode, overrides: Partial<SpeakerShadowDeps> = {}, me
   const state = () => JSON.parse(readFileSync(join(root, 'state.json'), 'utf8'))
   const cliRuns = () => existsSync(cli.marker) ? readFileSync(cli.marker, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []
   const idle = () => !(runner as any).running && !(runner as any).pumping
-  return { base, data, root, tmp, sessions, runner, records, state, cliRuns, spawned, timers, logs, idle, session: sessions[0] }
+  // Queue drained and nothing running: assert the record AFTER this, so a missing or misplaced
+  // record fails at once instead of waiting out a timeout.
+  const settled = () => existsSync(join(root, 'state.json')) && state().queue.length === 0 && idle()
+  return { base, data, root, tmp, sessions, runner, records, state, cliRuns, spawned, timers, logs, idle, settled, session: sessions[0] }
 }
 
 /** Every file under dir except speaker-shadow/, with content hash, size and mtime. */
@@ -141,7 +149,8 @@ describe('speaker shadow runner: a run', () => {
     const w = world('success')
     const before = snapshot(w.data)
     w.runner.notifyFinalized(w.session)
-    await waitFor(() => w.records().length === 1 && w.idle())
+    await waitFor(w.settled)
+    expect(w.records()).toHaveLength(1)
     const [record] = w.records()
     expect(record).toMatchObject({ schema: 1, kind: 'speaker_shadow', logOnly: true, sessionId: w.session.sessionId, status: 'proposed', reason: null })
     expect(record.proposals.accepted.map((a: any) => [a.cluster, a.keepLabel, a.merge])).toEqual([
@@ -161,7 +170,8 @@ describe('speaker shadow runner: a run', () => {
   it('runs a meeting once, however often it is announced', async () => {
     const w = world('success')
     w.runner.notifyFinalized(w.session)
-    await waitFor(() => w.records().length === 1 && w.idle())
+    await waitFor(w.settled)
+    expect(w.records()).toHaveLength(1)
     w.runner.notifyFinalized(w.session)
     await new Promise(r => setTimeout(r, 300))
     expect(w.records()).toHaveLength(1)
@@ -190,7 +200,8 @@ describe('speaker shadow runner: a run', () => {
   it('the hard wall clock kills the whole process group', async () => {
     const w = world('hang', { limits: () => ({ dailyRuns: 12, timeoutMs: 3_000, rssBytes: 3 * 1024 ** 3 }) })
     w.runner.notifyFinalized(w.session)
-    await waitFor(() => w.records().length === 1 && w.idle(), 30_000)
+    await waitFor(w.settled, 30_000)
+    expect(w.records()).toHaveLength(1)
     expect(w.records()[0]).toMatchObject({ status: 'failed', reason: 'timeout' })
     const cliPid = w.cliRuns()[0].pid
     await waitFor(() => { try { process.kill(cliPid, 0); return false } catch { return true } }, 5_000)
@@ -200,7 +211,8 @@ describe('speaker shadow runner: a run', () => {
   it('the RSS cap kills a run that grows past it', async () => {
     const w = world('memory', { limits: () => ({ dailyRuns: 12, timeoutMs: 60_000, rssBytes: 512 * 1024 * 1024 }) })
     w.runner.notifyFinalized(w.session)
-    await waitFor(() => w.records().length === 1 && w.idle(), 40_000)
+    await waitFor(w.settled, 40_000)
+    expect(w.records()).toHaveLength(1)
     expect(w.records()[0]).toMatchObject({ status: 'failed', reason: 'rss_cap' })
     expect(w.records()[0].resources.peakRssBytes).toBeGreaterThan(512 * 1024 * 1024)
   }, 45_000)
@@ -208,14 +220,16 @@ describe('speaker shadow runner: a run', () => {
   it('a worker that dies without an answer is a failure, not a hang', async () => {
     const w = world('success', { spawnWorker: () => spawn(process.execPath, ['-e', 'process.exit(5)'], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] }) })
     w.runner.notifyFinalized(w.session)
-    await waitFor(() => w.records().length === 1 && w.idle())
+    await waitFor(w.settled)
+    expect(w.records()).toHaveLength(1)
     expect(w.records()[0]).toMatchObject({ status: 'failed', reason: 'worker_crashed' })
   }, 20_000)
 
   it('missing models skip the meeting without spawning anything', async () => {
     const w = world('success', { modelsPresent: () => false })
     w.runner.notifyFinalized(w.session)
-    await waitFor(() => w.records().length === 1 && w.idle())
+    await waitFor(w.settled)
+    expect(w.records()).toHaveLength(1)
     expect(w.records()[0]).toMatchObject({ status: 'skipped', reason: 'models_missing' })
     expect(w.spawned).toEqual([])
     expect(w.state().runsToday).toBe(0)
@@ -224,7 +238,8 @@ describe('speaker shadow runner: a run', () => {
   it('no verified CLI skips the meeting', async () => {
     const w = world('success', { resolveCli: async () => null })
     w.runner.notifyFinalized(w.session)
-    await waitFor(() => w.records().length === 1 && w.idle())
+    await waitFor(w.settled)
+    expect(w.records()).toHaveLength(1)
     expect(w.records()[0]).toMatchObject({ status: 'skipped', reason: 'cli_missing' })
     expect(w.spawned).toEqual([])
   })
@@ -249,7 +264,8 @@ describe('speaker shadow runner: live work', () => {
     expect(w.runner.snapshot()).toMatchObject({ state: 'deferred', queued: 1, deferredReason: 'live_work' })
     live = false
     w.timers.splice(0).forEach(fn => fn())
-    await waitFor(() => w.records().length === 1 && w.idle(), 30_000)
+    await waitFor(w.settled, 30_000)
+    expect(w.records()).toHaveLength(1)
     expect(w.records()[0].status).toBe('proposed')
   }, 30_000)
 
@@ -268,7 +284,8 @@ describe('speaker shadow runner: live work', () => {
     expect(w.logs.some(l => l.includes('capture_live'))).toBe(true)
     live = false
     w.timers.splice(0).forEach(fn => fn())
-    await waitFor(() => w.records().length === 1 && w.idle(), 30_000)
+    await waitFor(w.settled, 30_000)
+    expect(w.records()).toHaveLength(1)
     expect(w.records()[0].status).toBe('proposed')
     expect(w.cliRuns()).toHaveLength(2)
   }, 45_000)
