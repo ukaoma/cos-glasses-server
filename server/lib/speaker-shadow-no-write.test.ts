@@ -18,8 +18,9 @@ const code = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^
 
 const NODE = ['node:child_process', 'node:crypto', 'node:fs', 'node:fs/promises', 'node:module', 'node:os', 'node:path', 'node:stream', 'node:stream/promises', 'node:url']
 const ALLOWED: Record<string, string[]> = {
-  'speaker-shadow.ts': [...NODE, './atomic-fs.js', './mac-recording.js', './maintenance-lifecycle.js', './parakeet.js', './speaker-shadow-decide.js', './speaker-shadow-models.js', './speaker-shadow-timeline.js', './speaker-shadow-worker.js'],
-  'speaker-shadow-worker.ts': [...NODE, './parakeet.js', './speaker-shadow-decide.js', './speaker-shadow-models.js', './speaker-shadow-numeric.js', './speaker-shadow-timeline.js'],
+  'speaker-shadow.ts': [...NODE, './atomic-fs.js', './mac-recording.js', './maintenance-lifecycle.js', './parakeet.js', './speaker-shadow-decide.js', './speaker-shadow-models.js', './speaker-shadow-report.js', './speaker-shadow-timeline.js', './speaker-shadow-worker.js'],
+  'speaker-shadow-worker.ts': [...NODE, './parakeet.js', './speaker-shadow-decide.js', './speaker-shadow-models.js', './speaker-shadow-numeric.js', './speaker-shadow-report.js', './speaker-shadow-timeline.js'],
+  'speaker-shadow-report.ts': ['node:path', './speaker-shadow-decide.js', './speaker-shadow-numeric.js'],
   'speaker-shadow-timeline.ts': [...NODE, './mac-speaker-protection.js', './speaker-shadow-decide.js', './speaker-shadow-numeric.js'],
   'speaker-shadow-models.ts': [...NODE, './data-dir.js'],
   'speaker-shadow-decide.ts': ['./speaker-shadow-numeric.js'],
@@ -31,7 +32,8 @@ const WRITE_CALL = /\b(writeFileSync|writeFile|appendFileSync|appendFile|renameS
 
 /** What each write is for. All of them land under speaker-shadow/, the private HOME or the run's temp dir. */
 const PINNED: Record<string, { count: number; why: string }> = {
-  'speaker-shadow.ts': { count: 9, why: 'records: mkdir root, rotate rename, temp open+write, rename into place, unlink a failed temp; state: mkdir root + atomic write; boot sweep: rm old temp dirs' },
+  'speaker-shadow.ts': { count: 13, why: 'records: mkdir root, rotate rename, temp open+write, rename into place, unlink a failed temp; state: mkdir root + atomic write; setting: mkdir root + atomic write; report: mkdir reports/<day> + atomic write; boot sweep: rm old temp dirs' },
+  'speaker-shadow-report.ts': { count: 0, why: 'pure: returns text' },
   'speaker-shadow-worker.ts': { count: 3, why: 'mkdtemp the run dir, write the timeline WAV into it, rm it' },
   'speaker-shadow-models.ts': { count: 5, why: 'private HOME model folder: mkdir, rm the old folder (links only), mkdir, symlink each entry, write the revision marker' },
   'speaker-shadow-timeline.ts': { count: 0, why: 'read only' },

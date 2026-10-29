@@ -7,9 +7,15 @@
 // computes and logs those proposals for every finished Mac meeting so they can be scored
 // against Miles's later corrections. There is no write path, and none may be added here.
 //
-// SWITCH. `COS_SPEAKER_SHADOW=1` (also true/yes/on) in ~/.cos-glasses/.env, then restart
-// the server. Anything else, or unset, is off: nothing is queued, nothing is spawned and
-// no file is created. The environment is read when the server starts.
+// SWITCH, per Mac, in the transcript-cleanup pattern (6.77.0), off for everyone by default:
+//   1. env COS_SPEAKER_SHADOW=1|true|yes|on forces it on, =0|false|no|off forces it off
+//      (source 'env'); a request to change it then answers 409 env_forced;
+//   2. the saved setting <data>/speaker-shadow/settings.json (atomic), written through the
+//      token-protected POST /api/speaker-shadow/settings {"enabled":true|false}, read at use
+//      time, so no restart is needed (source 'setting');
+//   3. off (source 'default').
+// An unreadable settings file reads as no setting, which is off. Off means nothing is queued,
+// nothing is spawned and no file is created. Turning it off mid-run stops the run.
 //
 // HOW IT STOPS.
 //   - the switch (remove it and restart);
@@ -34,7 +40,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmS
 import { open, readFile, readdir, rename, unlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { setPriority, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { Transform } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -44,7 +50,8 @@ import { maintenanceLifecycle } from './maintenance-lifecycle.js'
 import { installedCliIntact, installedCliTrust, parakeetCliPath, parakeetInstalled, SANDBOX_EXEC } from './parakeet.js'
 import { SHADOW_GATES } from './speaker-shadow-decide.js'
 import { shadowModelsPresent, speakerShadowHome, speakerShadowModelsDir, speakerShadowRoot } from './speaker-shadow-models.js'
-import { shadowEntries, shadowLabelsHash } from './speaker-shadow-timeline.js'
+import { readShadowMeetingTitle, shadowEntries, shadowLabelsHash, shadowMeetingDay } from './speaker-shadow-timeline.js'
+import { renderShadowRunFacts, renderShadowSkipReport, shadowReportRelativePath } from './speaker-shadow-report.js'
 import { SHADOW_TMP_PREFIX, type ShadowJob, type ShadowJobOutcome, type ShadowRunFacts } from './speaker-shadow-worker.js'
 import type { ShadowProposals } from './speaker-shadow-decide.js'
 
@@ -62,9 +69,50 @@ const DEFER_RETRY_MS = 60_000
 const SAMPLE_MS = 1_000
 const MAX_STDOUT = 8 * 1024 * 1024
 
-const ON = new Set(['1', 'true', 'yes', 'on'])
-export function speakerShadowEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return ON.has((env[SPEAKER_SHADOW_ENV] ?? '').trim().toLowerCase())
+export const SPEAKER_SHADOW_SETTINGS = 'settings.json'
+const ENV_ON = new Set(['1', 'true', 'yes', 'on'])
+const ENV_OFF = new Set(['0', 'false', 'no', 'off'])
+export type SpeakerShadowSwitchSource = 'env' | 'setting' | 'default'
+
+/** What the environment pins, or null when it pins nothing (unset, empty or unrecognised). */
+export function speakerShadowEnvSwitch(env: NodeJS.ProcessEnv = process.env): boolean | null {
+  const raw = (env[SPEAKER_SHADOW_ENV] ?? '').trim().toLowerCase()
+  return ENV_ON.has(raw) ? true : ENV_OFF.has(raw) ? false : null
+}
+
+const settingsCache = new Map<string, { key: string; value: boolean | null }>()
+/** The saved per-Mac setting: true, false, or null when there is none or it cannot be read. */
+export function readSpeakerShadowSetting(root: string = speakerShadowRoot()): boolean | null {
+  const file = join(root, SPEAKER_SHADOW_SETTINGS)
+  try {
+    const st = statSync(file)
+    const key = `${st.mtimeMs}:${st.size}`
+    const cached = settingsCache.get(file)
+    if (cached?.key === key) return cached.value
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+    const value = raw && typeof raw === 'object' && !Array.isArray(raw) && typeof raw.enabled === 'boolean' ? raw.enabled : null
+    settingsCache.set(file, { key, value })
+    return value
+  } catch { return null }
+}
+
+/** Atomic and durable. The only writer of the setting. */
+export function writeSpeakerShadowSetting(enabled: boolean, root: string = speakerShadowRoot(), now: Date = new Date()): void {
+  mkdirSync(root, { recursive: true, mode: 0o700 })
+  durableAtomicWriteFileSync(join(root, SPEAKER_SHADOW_SETTINGS), `${JSON.stringify({ schema: 1, enabled, updatedAt: now.toISOString() })}\n`, { mode: 0o600 })
+  settingsCache.delete(join(root, SPEAKER_SHADOW_SETTINGS))
+}
+
+export function resolveSpeakerShadowSwitch(env: NodeJS.ProcessEnv = process.env, root: string = speakerShadowRoot()): { enabled: boolean; source: SpeakerShadowSwitchSource } {
+  const pinned = speakerShadowEnvSwitch(env)
+  if (pinned !== null) return { enabled: pinned, source: 'env' }
+  const stored = readSpeakerShadowSetting(root)
+  if (stored !== null) return { enabled: stored, source: 'setting' }
+  return { enabled: false, source: 'default' }
+}
+
+export function speakerShadowEnabled(env: NodeJS.ProcessEnv = process.env, root: string = speakerShadowRoot()): boolean {
+  return resolveSpeakerShadowSwitch(env, root).enabled
 }
 
 function intEnv(env: NodeJS.ProcessEnv, key: string, fallback: number, min: number, max: number): number {
@@ -104,6 +152,8 @@ export interface SpeakerShadowRecord {
   facts?: ShadowRunFacts
   proposals?: ShadowProposals
   resources?: { wallMs: number; peakRssBytes: number | null; cliTrust: string | null }
+  /** The readable report, relative to <data>/speaker-shadow/ (reports/<day>/<title>__<session>.md). */
+  report?: string | null
 }
 
 const GATES_RECORD = { majority: SHADOW_GATES.majority, minCoveredFraction: SHADOW_GATES.minCoveredFraction, floorSeconds: SHADOW_GATES.floorSeconds, outlier: 'leave-fragment-out cluster p95', anchorRatioPostHocColumnOnly: SHADOW_GATES.anchorRatioPostHoc }
@@ -201,10 +251,23 @@ export interface SpeakerShadowDeps {
   /** The cheap scheduler-side model look (sizes only); the worker hashes every file. */
   modelsPresent: (dir: string) => boolean
   limits: () => SpeakerShadowLimits
+  /** Cheap, synchronous: is the CLI the runner would use installed, and how is it trusted. */
+  cliReadiness: () => { installed: boolean; trust: string | null }
+}
+
+export interface SpeakerShadowReadiness {
+  /** Every pinned model file is present with its size (the worker hashes them before each run). */
+  modelsPresent: boolean
+  /** The Parakeet install's fluidaudiocli is installed, and how it was trusted. */
+  cliInstalled: boolean
+  cliTrust: string | null
+  sandboxExec: boolean
 }
 
 export interface SpeakerShadowSnapshot {
   enabled: boolean
+  /** Where the switch came from: env pins it, the saved per-Mac setting, or the default (off). */
+  source: SpeakerShadowSwitchSource
   state: 'off' | 'idle' | 'queued' | 'running' | 'deferred' | 'breaker_open' | 'no_live_probe'
   queued: number
   runsToday: number
@@ -213,6 +276,7 @@ export interface SpeakerShadowSnapshot {
   lastRun: { at: string; status: SpeakerShadowStatus; reason: string | null } | null
   lastError: { at: string; reason: string } | null
   lastErrorDetail?: string | null
+  readiness?: SpeakerShadowReadiness
   deferredReason: string | null
 }
 
@@ -279,6 +343,7 @@ export function defaultSpeakerShadowDeps(): SpeakerShadowDeps {
     setTimer: (fn, ms) => setTimeout(fn, ms),
     modelsPresent: shadowModelsPresent,
     limits: () => speakerShadowLimits(process.env),
+    cliReadiness: () => { try { return { installed: parakeetInstalled().installed, trust: installedCliTrust() } } catch { return { installed: false, trust: null } } },
   }
 }
 
@@ -296,7 +361,9 @@ export class SpeakerShadowRunner {
     this.deps = { ...defaultSpeakerShadowDeps(), ...deps }
   }
 
-  enabled(): boolean { return speakerShadowEnabled(this.deps.env()) }
+  enabled(): boolean { return speakerShadowEnabled(this.deps.env(), this.deps.root()) }
+
+  switchState(): { enabled: boolean; source: SpeakerShadowSwitchSource } { return resolveSpeakerShadowSwitch(this.deps.env(), this.deps.root()) }
 
   /** Production wiring: what counts as live meeting work. Until it is set, nothing runs. */
   setCaptureProbe(probe: () => boolean, admissionsOpen?: () => boolean): void {
@@ -379,6 +446,26 @@ export class SpeakerShadowRunner {
     await appendSpeakerShadowRecord(this.deps.root(), record)
   }
 
+  /**
+   * The readable page for one finished meeting, written atomically under reports/<day>/. Every
+   * finished meeting gets one: proposals, or a short page saying why there are none. A report
+   * that cannot be written is logged and never blocks the record.
+   */
+  private async writeReport(item: QueueItem, status: SpeakerShadowStatus, reason: string | null, detail: string | null, report?: { title: string; markdown: string }): Promise<string | null> {
+    try {
+      const title = report?.title ?? await readShadowMeetingTitle(item.sidecarPath)
+      const markdown = report?.markdown ?? renderShadowSkipReport({ title, sessionId: item.sessionId, status: status === 'proposed' ? 'skipped' : status, reason, detail })
+      const rel = shadowReportRelativePath(title, item.sessionId, shadowMeetingDay(item.sidecarPath) ?? localDay(this.deps.now()))
+      const path = join(this.deps.root(), rel)
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+      durableAtomicWriteFileSync(path, markdown, { mode: 0o600 })
+      return rel
+    } catch (error) {
+      this.deps.log(`report not written for ${item.sessionId}: ${describe(error)}`)
+      return null
+    }
+  }
+
   /** Runs queued meetings one at a time until the queue is empty or something says wait. */
   async pump(): Promise<void> {
     if (this.pumping || this.running) return
@@ -390,8 +477,9 @@ export class SpeakerShadowRunner {
         const item = state.queue[0]
         if (!item) { this.deferredReason = null; return }
         const now = this.deps.now()
-        const finish = async (status: SpeakerShadowStatus, reason: string | null, detail: string | null, extra: Partial<SpeakerShadowRecord> = {}) => {
-          await this.record(item, status, reason, detail, extra)
+        const finish = async (status: SpeakerShadowStatus, reason: string | null, detail: string | null, extra: Partial<SpeakerShadowRecord> = {}, report?: { title: string; markdown: string }) => {
+          const reportPath = await this.writeReport(item, status, reason, detail, report)
+          await this.record(item, status, reason, detail, { ...extra, report: reportPath })
           const next = this.readState()
           next.queue = next.queue.filter(q => q.sessionId !== item.sessionId)
           next.done.push(item.sessionId)
@@ -447,7 +535,11 @@ export class SpeakerShadowRunner {
           this.schedule(DEFER_RETRY_MS, outcome.reason)
           return
         }
-        if (outcome.status === 'proposed') await finish('proposed', null, null, { facts: outcome.facts, proposals: outcome.proposals, resources })
+        if (outcome.status === 'proposed') {
+          const f = outcome.facts
+          const markdown = `${outcome.report.markdown}\n${renderShadowRunFacts({ rebuildMs: f.timing.rebuildMs, nativeMs: f.timing.nativeMs, wallMs: resources.wallMs, peakRssBytes: resources.peakRssBytes, osTempDirsLeft: f.osTempDirsLeft, sidecarPath: item.sidecarPath, pcmSHA256: f.timelinePCMSHA256, cliTrust: cli.trust })}`
+          await finish('proposed', null, null, { facts: outcome.facts, proposals: outcome.proposals, resources }, { title: outcome.report.title, markdown })
+        }
         else await finish(outcome.status, outcome.reason, outcome.detail, { resources })
       }
     } catch (error) {
@@ -474,6 +566,7 @@ export class SpeakerShadowRunner {
       const tick = setInterval(() => {
         if (verdict) return
         if (this.deps.now() - started > limits.timeoutMs) { stop({ status: 'failed', reason: 'timeout', detail: `no result within ${limits.timeoutMs} ms` }); return }
+        if (!this.enabled()) { stop({ status: 'deferred', reason: 'switched_off' }); return }
         if (this.deps.captureActive?.() || !this.deps.admissionsOpen()) { stop({ status: 'deferred', reason: 'capture_live' }); return }
         if (!pgid || sampling) return
         sampling = true
@@ -514,7 +607,7 @@ export class SpeakerShadowRunner {
   }
 
   snapshot(options: { detail?: boolean } = {}): SpeakerShadowSnapshot {
-    const enabled = this.enabled()
+    const { enabled, source } = this.switchState()
     const limits = this.deps.limits()
     let state: ShadowState | null = null
     try { if (existsSync(this.statePath())) state = this.readState() } catch { state = null }
@@ -526,15 +619,21 @@ export class SpeakerShadowRunner {
       : !this.deps.captureActive && state?.queue.length ? 'no_live_probe'
       : this.deferredReason && state?.queue.length ? 'deferred'
       : state?.queue.length ? 'queued' : 'idle'
+    const readiness = (): SpeakerShadowReadiness => {
+      const cli = this.deps.cliReadiness()
+      let modelsPresent = false
+      try { modelsPresent = this.deps.modelsPresent(this.deps.modelsDir()) } catch { modelsPresent = false }
+      return { modelsPresent, cliInstalled: cli.installed, cliTrust: cli.trust, sandboxExec: existsSync(this.deps.sandboxExec) }
+    }
     return {
-      enabled, state: phase,
+      enabled, source, state: phase,
       queued: state?.queue.length ?? 0,
       runsToday: state && state.day === localDay(now) ? state.runsToday : 0,
       dailyCap: limits.dailyRuns,
       breaker: { open: breakerOpen, failures: state?.consecutiveFailures ?? 0, until: breakerOpen ? new Date(state!.breakerUntil!).toISOString() : null },
       lastRun: state?.lastRun ? { at: new Date(state.lastRun.at).toISOString(), status: state.lastRun.status, reason: state.lastRun.reason } : null,
       lastError: state?.lastError ? { at: new Date(state.lastError.at).toISOString(), reason: state.lastError.reason } : null,
-      ...(options.detail ? { lastErrorDetail: state?.lastError?.detail ?? null } : {}),
+      ...(options.detail ? { lastErrorDetail: state?.lastError?.detail ?? null, readiness: readiness() } : {}),
       deferredReason: this.deferredReason,
     }
   }
@@ -612,17 +711,17 @@ export function notifySpeakerShadowFinalized(input: { sessionId: string; sidecar
  * `/api/health`: `speaker_shadow` only while shadow mode is on. Absent, never null, when off, so
  * the public health shape is unchanged by default (pinned by health-6890-parity.test.ts).
  */
-export function speakerShadowHealthFields(env: NodeJS.ProcessEnv = process.env): { speaker_shadow?: Omit<SpeakerShadowSnapshot, 'lastErrorDetail'> } {
-  if (!speakerShadowEnabled(env)) return {}
+export function speakerShadowHealthFields(env: NodeJS.ProcessEnv = process.env, root: string = speakerShadowRoot()): { speaker_shadow?: Omit<SpeakerShadowSnapshot, 'lastErrorDetail' | 'readiness'> } {
+  if (!speakerShadowEnabled(env, root)) return {}
   return { speaker_shadow: speakerShadowHealth() }
 }
 
 /** For /api/health (codes and counts only, no session ids, paths or error text). */
-export function speakerShadowHealth(): Omit<SpeakerShadowSnapshot, 'lastErrorDetail'> {
+export function speakerShadowHealth(): Omit<SpeakerShadowSnapshot, 'lastErrorDetail' | 'readiness'> {
   try {
-    const { lastErrorDetail: _detail, ...rest } = getSpeakerShadowRunner().snapshot()
+    const { lastErrorDetail: _detail, readiness: _readiness, ...rest } = getSpeakerShadowRunner().snapshot()
     return rest
   } catch {
-    return { enabled: false, state: 'off', queued: 0, runsToday: 0, dailyCap: 0, breaker: { open: false, failures: 0, until: null }, lastRun: null, lastError: null, deferredReason: null }
+    return { enabled: false, source: 'default', state: 'off', queued: 0, runsToday: 0, dailyCap: 0, breaker: { open: false, failures: 0, until: null }, lastRun: null, lastError: null, deferredReason: null }
   }
 }

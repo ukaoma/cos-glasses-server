@@ -73,6 +73,10 @@ describe('speaker shadow worker: one run', () => {
     expect(outcome.facts.minutes).toBe(5.7)
     expect(outcome.facts.tool.flags).toEqual(['--mode', 'offline', '--overlapping-segments', '--export-embeddings'])
     expect(readdirSync(t.tmpRoot)).toEqual([])
+    // The readable report: titled from the saved markdown (none here, so the file name), with chunk text.
+    expect(outcome.report.title).toBe('meeting')
+    expect(outcome.report.markdown).toContain('**13 voices would become 9.**')
+    expect(outcome.report.markdown).toContain('"synthetic chunk 4"')
     // The CLI got the private HOME and only the documented variables, never the server's.
     const [run] = t.cliRuns()
     expect(run.home).toBe(t.job.homeDir)

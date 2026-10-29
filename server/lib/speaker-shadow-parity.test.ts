@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { SHADOW_SAMPLE_RATE, buildShadowProposals, decide, nativeTurns, type ShadowSegment } from './speaker-shadow-decide.js'
 import { round3View } from './__fixtures__/speaker-shadow/round3-view.js'
+import { renderShadowReport } from './speaker-shadow-report.js'
 
 const dir = process.env.COS_SPEAKER_SHADOW_PARITY_DIR?.trim()
 const meetings = dir && existsSync(dir) ? readdirSync(dir).filter(n => n.endsWith('-inputs.json')).map(n => n.replace(/-inputs\.json$/, '')) : []
@@ -25,9 +26,12 @@ describe.skipIf(!meetings.length)('speaker shadow parity with round 3 (private f
       const pyDecide = JSON.parse(readFileSync(join(dir!, `${name}-decide.json`), 'utf8'))
       const round3 = JSON.parse(readFileSync(join(dir!, `${name}-proposals.json`), 'utf8'))
       const segs = inputs.segs as ShadowSegment[]
+      // A meeting exported without segment sources is compared on everything but listen pointers.
+      const hasSources = Array.isArray(inputs.sources)
+      const sources = hasSources ? inputs.sources : segs.map(([lo]) => ({ chunkIndex: 0, start: 0, end: 0, abs: lo / SHADOW_SAMPLE_RATE }))
       const { turns, clipped } = nativeTurns(inputs.native, inputs.total / SHADOW_SAMPLE_RATE)
       const D = decide(segs, inputs.total, turns, inputs.embeddings)
-      const P = buildShadowProposals(D, segs, inputs.sources, turns)
+      const P = buildShadowProposals(D, segs, sources, turns)
 
       it('reproduces every per-voice gate value and reason string', () => {
         expect(clipped).toBe(pyDecide.clipped)
@@ -67,9 +71,23 @@ describe.skipIf(!meetings.length)('speaker shadow parity with round 3 (private f
         expect([D.proposed, D.accepted, D.voiceBefore, D.voiceAfter]).toEqual([pyDecide.proposed, pyDecide.accepted, pyDecide.voiceBefore, pyDecide.voiceAfter])
       })
 
-      it('reproduces the round-3 proposals.json report', () => {
-        expect(round3View(P)).toEqual(round3View(round3))
+      it(`reproduces the round-3 proposals.json report${hasSources ? '' : ' (listen pointers not compared: no sources exported)'}`, () => {
+        expect(round3View(P, { listen: hasSources })).toEqual(round3View(round3, { listen: hasSources }))
         expect(P.accepted.length + P.rejected.length + P.untouched.length).toBeGreaterThan(0)
+      })
+
+      const reportFile = join(dir!, `${name}-report.md`)
+      it.skipIf(!existsSync(reportFile))('renders the same merges, gate rows, rejections and untouched voices as round 3 REPORT.md', () => {
+        const S = round3.summary
+        const md = renderShadowReport({ title: S.title, sessionId: S.sessionId, proposals: P, audioDir: '/audio', chunkText: new Map(),
+          facts: { minutes: S.minutes, originals: S.originals, verifiedAgainstSidecar: S.verifiedAgainstSidecar, unhashedOriginals: S.unhashedOriginals, unhashedWithText: S.unhashedWithText, humanProtectedVoices: [] } })
+        // Lines that carry decisions and gate values; listen lines need the chunk text (checked end to end).
+        const decisions = (text: string) => text.split('\n').filter(l => l.startsWith('### ') || (l.startsWith('| Voice ') && !l.startsWith('| Voice | Speech')) || l.startsWith('- **Voice') || /^- Voice \d+ \(/.test(l))
+        const ours = decisions(md), theirs = decisions(readFileSync(reportFile, 'utf8'))
+        expect(theirs.length).toBeGreaterThan(5)
+        expect(ours).toEqual(theirs)
+        const headline = (text: string) => /\*\*(\d+) voices would become (\d+)\.\*\* FluidAudio proposed (\d+) merges; (\d+) pass every gate, (\d+) do not/.exec(text)?.slice(1)
+        expect(headline(md)).toEqual(headline(readFileSync(reportFile, 'utf8')))
       })
     })
   }

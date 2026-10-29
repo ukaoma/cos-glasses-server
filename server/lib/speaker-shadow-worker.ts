@@ -31,9 +31,10 @@ import {
 } from './speaker-shadow-decide.js'
 import { SHADOW_MODEL_REPO, SHADOW_MODEL_REVISION, prepareShadowHome, verifyShadowModels, type ShadowModelCheck } from './speaker-shadow-models.js'
 import {
-  ShadowInputError, buildShadowTimeline, pcm16WavFile, shadowEntries, shadowHumanProtectedVoices,
+  ShadowInputError, buildShadowTimeline, pcm16WavFile, readShadowMeetingTitle, shadowEntries, shadowHumanProtectedVoices,
   shadowLabelsHash, shadowProductionSegments,
 } from './speaker-shadow-timeline.js'
+import { renderShadowReport } from './speaker-shadow-report.js'
 import { pyRound } from './speaker-shadow-numeric.js'
 
 export const SHADOW_TMP_PREFIX = 'cos-speaker-shadow-'
@@ -84,7 +85,7 @@ export interface ShadowRunFacts {
 }
 
 export type ShadowJobOutcome =
-  | { status: 'proposed'; facts: ShadowRunFacts; proposals: ShadowProposals }
+  | { status: 'proposed'; facts: ShadowRunFacts; proposals: ShadowProposals; report: { title: string; markdown: string } }
   | { status: 'skipped'; reason: ShadowSkipReason; detail: string }
   | { status: 'failed'; reason: ShadowFailReason; detail: string }
 
@@ -205,25 +206,26 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
       proposals = buildShadowProposals(D, segs, sources, turns.turns)
     } catch (error) { return fail('bad_cli_output', error instanceof Error ? error.message : String(error)) }
 
-    return {
-      status: 'proposed',
-      proposals,
-      facts: {
-        minutes: pyRound(timeline.total / SHADOW_SAMPLE_RATE / 60, 1),
-        originals: entries.length,
-        verifiedAgainstSidecar: timeline.verified,
-        unhashedOriginals: timeline.unhashed,
-        unhashedWithText: timeline.unhashedWithText,
-        timelinePCMSHA256: timeline.pcmSHA256,
-        timelineWAVSHA256,
-        labelsHash,
-        clippedTurns: clipped,
-        humanProtectedVoices: shadowHumanProtectedVoices(entries),
-        osTempDirsLeft,
-        timing: { rebuildMs, nativeMs, totalMs: now() - started },
-        tool: { cliSha256: job.cliSha256, flags: [...SHADOW_CLI_FLAGS, '--export-embeddings'], modelRepo: SHADOW_MODEL_REPO, modelRevision: SHADOW_MODEL_REVISION, modelBytes: models.bytes },
-      },
+    const humanProtectedVoices = shadowHumanProtectedVoices(entries)
+    const facts: ShadowRunFacts = {
+      minutes: pyRound(timeline.total / SHADOW_SAMPLE_RATE / 60, 1),
+      originals: entries.length,
+      verifiedAgainstSidecar: timeline.verified,
+      unhashedOriginals: timeline.unhashed,
+      unhashedWithText: timeline.unhashedWithText,
+      timelinePCMSHA256: timeline.pcmSHA256,
+      timelineWAVSHA256,
+      labelsHash,
+      clippedTurns: clipped,
+      humanProtectedVoices,
+      osTempDirsLeft,
+      timing: { rebuildMs, nativeMs, totalMs: now() - started },
+      tool: { cliSha256: job.cliSha256, flags: [...SHADOW_CLI_FLAGS, '--export-embeddings'], modelRepo: SHADOW_MODEL_REPO, modelRevision: SHADOW_MODEL_REVISION, modelBytes: models.bytes },
     }
+    const title = await readShadowMeetingTitle(job.sidecarPath)
+    const chunkText = new Map(entries.map(e => [e.chunkIndex, typeof e.chunk.text === 'string' ? e.chunk.text : '']))
+    const markdown = renderShadowReport({ title, sessionId: job.sessionId, proposals, facts, audioDir: job.audioDir, chunkText })
+    return { status: 'proposed', proposals, facts, report: { title, markdown } }
   } catch (error) {
     if (error instanceof ShadowInputError) return skip(error.reason, error.message)
     return fail('internal', error instanceof Error ? error.message : String(error))

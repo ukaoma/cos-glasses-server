@@ -119,11 +119,35 @@ function snapshot(dir: string): Record<string, string> {
 }
 
 describe('speaker shadow runner: off by default', () => {
-  it('reads the switch strictly: only 1, true, yes or on', () => {
-    expect(shadow.speakerShadowEnabled({})).toBe(false)
-    for (const v of ['1', 'true', 'YES', ' on ']) expect(shadow.speakerShadowEnabled({ COS_SPEAKER_SHADOW: v })).toBe(true)
-    for (const v of ['0', 'false', '', 'enabled', '2']) expect(shadow.speakerShadowEnabled({ COS_SPEAKER_SHADOW: v })).toBe(false)
+  it('reads the switch: env pins it, else the saved per-Mac setting, else off', () => {
+    const root = mkdtempSync(join(scratch, 'switch-'))
+    expect(shadow.resolveSpeakerShadowSwitch({}, root)).toEqual({ enabled: false, source: 'default' })
+    for (const v of ['1', 'true', 'YES', ' on ']) expect(shadow.resolveSpeakerShadowSwitch({ COS_SPEAKER_SHADOW: v }, root)).toEqual({ enabled: true, source: 'env' })
+    for (const v of ['0', 'false', 'No', 'off']) expect(shadow.resolveSpeakerShadowSwitch({ COS_SPEAKER_SHADOW: v }, root)).toEqual({ enabled: false, source: 'env' })
+    for (const v of ['', 'enabled', '2']) expect(shadow.resolveSpeakerShadowSwitch({ COS_SPEAKER_SHADOW: v }, root)).toEqual({ enabled: false, source: 'default' })
+    shadow.writeSpeakerShadowSetting(true, root)
+    expect(shadow.resolveSpeakerShadowSwitch({}, root)).toEqual({ enabled: true, source: 'setting' })
+    expect(shadow.resolveSpeakerShadowSwitch({ COS_SPEAKER_SHADOW: '0' }, root)).toEqual({ enabled: false, source: 'env' })
+    shadow.writeSpeakerShadowSetting(false, root)
+    expect(shadow.resolveSpeakerShadowSwitch({}, root)).toEqual({ enabled: false, source: 'setting' })
+    // An unreadable setting is no setting, which is off: it fails toward doing nothing.
+    writeFileSync(join(root, 'settings.json'), '{"enabled": tr')
+    expect(shadow.resolveSpeakerShadowSwitch({}, root)).toEqual({ enabled: false, source: 'default' })
+    writeFileSync(join(root, 'settings.json'), '{"enabled": "yes"}')
+    expect(shadow.resolveSpeakerShadowSwitch({}, root)).toEqual({ enabled: false, source: 'default' })
   })
+
+  it('the saved setting alone turns it on for this Mac, with no restart and no env', async () => {
+    const w = world('success', { env: () => ({}) })
+    w.runner.notifyFinalized(w.session)
+    await new Promise(r => setTimeout(r, 200))
+    expect(w.spawned).toEqual([])
+    shadow.writeSpeakerShadowSetting(true, w.root)
+    w.runner.notifyFinalized(w.session)
+    await waitFor(w.settled)
+    expect(w.records().map((r: any) => r.status)).toEqual(['proposed'])
+    expect(w.runner.snapshot()).toMatchObject({ enabled: true, source: 'setting' })
+  }, 30_000)
 
   it('with the switch off a finished meeting queues nothing, spawns nothing and creates no file', async () => {
     const w = world('success', { env: () => ({}) })
@@ -162,7 +186,17 @@ describe('speaker shadow runner: a run', () => {
     // THE GUARANTEE: every meeting file, label, profile, embedding cache and ledger is byte-identical.
     expect(snapshot(w.data)).toEqual(before)
     expect(readdirSync(w.tmp)).toEqual([])
-    expect(readdirSync(w.root).sort()).toEqual(['home', 'proposals.jsonl', 'state.json'])
+    expect(readdirSync(w.root).sort()).toEqual(['home', 'proposals.jsonl', 'reports', 'state.json'])
+    // The readable report: under reports/<meeting day>/, named after the meeting, with listen pointers Miles can play.
+    expect(record.report).toBe(`reports/2026-10-28/Mac_recording__${w.session.sessionId}.md`)
+    const md = readFileSync(join(w.root, record.report), 'utf8')
+    expect(md.split('\n')[0]).toBe('# Mac recording')
+    expect(md).toContain('**13 voices would become 9.** FluidAudio proposed 8 merges; 4 pass every gate, 4 do not.')
+    expect(md).toContain('### S1: merge Voice 2, Voice 13 into **Voice 1**')
+    expect(md).toContain('Caution: this group also holds 3 s labelled Dana Fictional. Those labels stay as they are.')
+    expect(md).toContain('- **Voice 5** would have joined Voice 1 on S1. Rejected: (c) centroid')
+    expect(md).toMatch(new RegExp(`  - Voice 2: \`${join(w.data, 'meeting-audio', w.session.sessionId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/chunk_0004\\.wav\` \\d+\\.\\d to \\d+\\.\\d s \\(call time \\d+:\\d\\d\\) "synthetic chunk 4"`))
+    expect(md).toContain('## Run facts')
     expect(w.state()).toMatchObject({ runsToday: 1, consecutiveFailures: 0, breakerUntil: null, queue: [] })
     expect(w.runner.snapshot()).toMatchObject({ enabled: true, state: 'idle', runsToday: 1, queued: 0, breaker: { open: false, failures: 0 } })
   }, 30_000)
@@ -225,12 +259,13 @@ describe('speaker shadow runner: a run', () => {
     expect(w.records()[0]).toMatchObject({ status: 'failed', reason: 'worker_crashed' })
   }, 20_000)
 
-  it('missing models skip the meeting without spawning anything', async () => {
+  it('missing models skip the meeting without spawning anything, and the report says why', async () => {
     const w = world('success', { modelsPresent: () => false })
     w.runner.notifyFinalized(w.session)
     await waitFor(w.settled)
     expect(w.records()).toHaveLength(1)
     expect(w.records()[0]).toMatchObject({ status: 'skipped', reason: 'models_missing' })
+    expect(readFileSync(join(w.root, w.records()[0].report), 'utf8')).toContain('**No proposals: skipped** (`models_missing`).')
     expect(w.spawned).toEqual([])
     expect(w.state().runsToday).toBe(0)
   })
@@ -289,6 +324,21 @@ describe('speaker shadow runner: live work', () => {
     expect(w.records()[0].status).toBe('proposed')
     expect(w.cliRuns()).toHaveLength(2)
   }, 45_000)
+
+  it('switching it off mid-run stops the run and keeps the meeting queued', async () => {
+    let on = true
+    const w = world('slow', { env: () => (on ? ON : {}) })
+    w.runner.notifyFinalized(w.session)
+    await waitFor(() => w.cliRuns().length === 1)
+    on = false
+    await waitFor(() => w.idle() && w.timers.length > 0, 10_000)
+    const cliPid = w.cliRuns()[0].pid
+    await waitFor(() => { try { process.kill(cliPid, 0); return false } catch { return true } }, 5_000)
+    expect(w.records()).toEqual([])
+    expect(w.state().queue).toHaveLength(1)
+    expect(w.logs.some(l => l.includes('switched_off'))).toBe(true)
+    expect(w.runner.snapshot().state).toBe('off')
+  }, 30_000)
 
   it('without a live-work probe nothing runs (fail closed until the server wires one)', async () => {
     const w = world('success', { captureActive: null })
@@ -360,8 +410,16 @@ describe('speaker shadow runner: restart and records', () => {
 
   it('health carries codes and counts only', () => {
     const health = shadow.speakerShadowHealth()
-    expect(Object.keys(health).sort()).toEqual(['breaker', 'dailyCap', 'deferredReason', 'enabled', 'lastError', 'lastRun', 'queued', 'runsToday', 'state'])
+    expect(Object.keys(health).sort()).toEqual(['breaker', 'dailyCap', 'deferredReason', 'enabled', 'lastError', 'lastRun', 'queued', 'runsToday', 'source', 'state'])
     expect(JSON.stringify(health)).not.toMatch(/mac_|\/Users\/|detail/)
+  })
+
+  it('the status says whether this Mac is ready: models, CLI and sandbox', () => {
+    const ready = world('success', { cliReadiness: () => ({ installed: true, trust: 'developer-id' }) })
+    expect(ready.runner.snapshot({ detail: true }).readiness).toMatchObject({ modelsPresent: true, cliInstalled: true, cliTrust: 'developer-id', sandboxExec: true })
+    const bare = world('success', { modelsPresent: () => false, cliReadiness: () => ({ installed: false, trust: null }), sandboxExec: '/no/sandbox-exec' })
+    expect(bare.runner.snapshot({ detail: true }).readiness).toEqual({ modelsPresent: false, cliInstalled: false, cliTrust: null, sandboxExec: false })
+    expect(bare.runner.snapshot()).not.toHaveProperty('readiness')
   })
 
   it('looks for chunk audio exactly where the meeting-audio archive keeps it', async () => {

@@ -11,6 +11,7 @@
 
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import { basename } from 'node:path'
 import { hasMacSpeakerProtectedRows } from './mac-speaker-protection.js'
 import { SHADOW_SAMPLE_RATE, isShadowVoiceLabel, type ShadowSegment, type ShadowSegmentSource } from './speaker-shadow-decide.js'
 import { PY_SPACE_CLASS, pyRoundInt } from './speaker-shadow-numeric.js'
@@ -190,4 +191,20 @@ export function shadowHumanProtectedVoices(entries: readonly ShadowChunkEntry[])
     for (const label of labels) if (typeof label === 'string' && isShadowVoiceLabel(label)) out.add(label)
   }
   return [...out].sort()
+}
+
+/** The meeting's title (the saved markdown's `# ` line), else the sidecar's file name. Read only. */
+export async function readShadowMeetingTitle(sidecarPath: string): Promise<string> {
+  const fallback = basename(sidecarPath).replace(/\.g2-chunks\.json$/, '')
+  try {
+    const text = await readFile(sidecarPath.replace(/\.g2-chunks\.json$/, '.md'), 'utf8')
+    const line = text.split('\n', 40).find(l => l.startsWith('# '))
+    const title = line?.slice(2).trim()
+    return title ? title.slice(0, 160) : fallback
+  } catch { return fallback }
+}
+
+/** The meeting day for the report folder: the sidecar name's YYYY-MM-DD prefix, else null. */
+export function shadowMeetingDay(sidecarPath: string): string | null {
+  return /^(\d{4}-\d{2}-\d{2})/.exec(basename(sidecarPath))?.[1] ?? null
 }

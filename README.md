@@ -726,24 +726,36 @@ they are not silently rewritten on upgrade.
 
 Mac recordings can split one person across many `Voice N` labels. Shadow mode asks
 FluidAudio's offline Community-1 diarizer which of those labels belong together and
-**logs** the answer for every finished Mac recording, so the proposals can be checked
-against later human corrections. It changes nothing: no meeting file, label, name,
-voice profile, embedding cache or correction ledger is written.
+**logs** the answer for every finished Mac recording, with a readable report per meeting,
+so the proposals can be checked by ear and against later human corrections. It changes
+nothing: no meeting file, label, name, voice profile, embedding cache or correction ledger
+is written.
 
-- **On:** add `COS_SPEAKER_SHADOW=1` to `~/.cos-glasses/.env` and restart the server.
-  **Off:** remove the line (or set `0`) and restart. Unset means off, and off does nothing
-  at all: no queue, no process, no file.
+- **On, for this Mac only** (no restart; the token is `COS_API_TOKEN` in `~/.cos-glasses/.env`):
+
+  ```sh
+  curl -s -X POST http://127.0.0.1:3141/api/speaker-shadow/settings \
+    -H "X-Cos-Token: $(sed -n 's/^COS_API_TOKEN=//p' ~/.cos-glasses/.env)" \
+    -H 'Content-Type: application/json' -d '{"enabled":true}'
+  ```
+
+  **Off:** the same with `{"enabled":false}`. The setting lives in
+  `~/.cos-glasses/data/speaker-shadow/settings.json`. `COS_SPEAKER_SHADOW=1` or `=0` in the
+  environment pins it instead (the POST then answers `409 env_forced`). With neither, it is
+  off, and off does nothing at all: no queue, no process, no file. Meetings already finished
+  when it is turned on are not queued; turning it off mid-run stops the run.
 - **Needs:** the Parakeet install's verified `fluidaudiocli` 0.17.4, `sandbox-exec`, and the
   pinned models from `FluidInference/speaker-diarization-coreml` at revision `df2625ac` in
   `~/.cos-glasses/data/speaker-shadow/models/speaker-diarization/` (or
   `COS_SPEAKER_SHADOW_MODELS`). The server never downloads them: missing or mismatched
-  models are logged as `models_missing` or `models_mismatch`. The models are CC-BY-4.0
-  (scoped); see the repo's NOTICE.md.
+  models are logged as `models_missing` or `models_mismatch`. `GET /api/speaker-shadow/status`
+  shows `readiness` (models present, CLI installed and how it is trusted, sandbox). The models
+  are CC-BY-4.0 (scoped); see the repo's NOTICE.md.
 - **When:** after a Mac recording's finalization is complete. A live recording, save,
   batch finalization, one-shot transcription or dictation defers it, and one that starts
   mid-run stops the run and puts the meeting back in the queue.
-- **How it stops:** a daily cap (`COS_SPEAKER_SHADOW_DAILY_RUNS`, default 12), a breaker
-  (3 failures in a row pause it for 1 hour), a 180 s hard wall clock
+- **How it stops:** the switch, a daily cap (`COS_SPEAKER_SHADOW_DAILY_RUNS`, default 12), a
+  breaker (3 failures in a row pause it for 1 hour), a 180 s hard wall clock
   (`COS_SPEAKER_SHADOW_TIMEOUT_MS` may only lower it) and an RSS cap on the whole run
   (`COS_SPEAKER_SHADOW_RSS_MB`, default 3072). It runs in a niced child process, never on the
   server's event loop. No LLM, and the CLI runs under `sandbox-exec` with network denied.
@@ -751,13 +763,16 @@ voice profile, embedding cache or correction ledger is written.
   cluster with at least half of it covered, at least 15 s of speech, and the voice's
   embedding centroid inside the cluster's 95th-percentile spread (leave-fragment-out). Named
   labels and `Ext` are never merged into or out of. The anchor ratio is reported for
-  scoring and decides nothing. A named label that shares a cluster is listed as a hint
-  only ("cluster also holds 65 s of ...").
-- **Read:** `GET /api/speaker-shadow/proposals?limit=10&sessionId=mac_<uuid>` (token
-  required) returns the records, newest first; `GET /api/speaker-shadow/status` the queue,
-  cap, breaker and last error. While it is on, `/api/health` carries `speaker_shadow` (codes and
-  counts only); when off the key is absent.
-  Records are kept in `~/.cos-glasses/data/speaker-shadow/proposals.jsonl` (rotated past 8 MB).
+  scoring and decides nothing.
+- **Read:** one report per finished Mac meeting in
+  `~/.cos-glasses/data/speaker-shadow/reports/<YYYY-MM-DD>/<title>__<session>.md`: "N voices
+  would become M", each accepted merge with its seconds, gate values and listen pointers
+  (chunk file, time, the chunk's words), rejections with reasons, and named labels sharing a
+  group as a hint only ("this group also holds 65 s labelled ..."). A meeting with no
+  proposals gets a one-line page saying why. The records are in `proposals.jsonl` beside it
+  (rotated past 8 MB) and `GET /api/speaker-shadow/proposals?limit=10&sessionId=mac_<uuid>`
+  (token required). While it is on, `/api/health` carries `speaker_shadow` (codes and counts
+  only); when off the key is absent.
 
 ### iPhone microphone meetings (6.93.0, off by default)
 

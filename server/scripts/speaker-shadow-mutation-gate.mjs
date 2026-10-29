@@ -24,7 +24,9 @@ const D = 'server/lib/speaker-shadow-decide.ts', N = 'server/lib/speaker-shadow-
 const T = 'server/lib/speaker-shadow-timeline.ts', M = 'server/lib/speaker-shadow-models.ts', S = 'server/lib/speaker-shadow.ts'
 const tDecide = 'server/lib/speaker-shadow-decide.test.ts', tNum = 'server/lib/speaker-shadow-numeric.test.ts', tWorker = 'server/lib/speaker-shadow-worker.test.ts'
 const tTimeline = 'server/lib/speaker-shadow-timeline.test.ts', tRunner = 'server/lib/speaker-shadow.test.ts', tNoWrite = 'server/lib/speaker-shadow-no-write.test.ts'
-const all = [tDecide, tNum, tWorker, tTimeline, tRunner, tNoWrite, 'server/routes/speaker-shadow.test.ts']
+const tReport = 'server/lib/speaker-shadow-report.test.ts', tRoute = 'server/routes/speaker-shadow.test.ts'
+const RP = 'server/lib/speaker-shadow-report.ts', RT = 'server/routes/speaker-shadow.ts'
+const all = [tDecide, tNum, tWorker, tTimeline, tRunner, tNoWrite, tReport, tRoute]
 
 // [name, file, find, replacement, tests]
 const mutations = [
@@ -64,7 +66,7 @@ const mutations = [
   ['nowrite-new-write-call', W, "    await writeFile(wavPath, wav, { mode: 0o600, flag: 'wx' })\n", "    await writeFile(wavPath, wav, { mode: 0o600, flag: 'wx' })\n    await writeFile(`${wavPath}.copy`, wav)\n", [tNoWrite]],
   ['nowrite-writer-import', S, "import { durableAtomicWriteFileSync } from './atomic-fs.js'\n", "import { durableAtomicWriteFileSync } from './atomic-fs.js'\nimport './meeting-store.js'\n", [tNoWrite]],
   // How it stops.
-  ['switch-always-on', S, 'return ON.has((env[SPEAKER_SHADOW_ENV] ?? \'\').trim().toLowerCase())', 'return true', [tRunner]],
+  ['switch-always-on', S, '  return resolveSpeakerShadowSwitch(env, root).enabled\n', '  return true\n', [tRunner]],
   ['breaker-threshold', S, 'if (next.consecutiveFailures >= SPEAKER_SHADOW_BREAKER_FAILURES)', 'if (next.consecutiveFailures > SPEAKER_SHADOW_BREAKER_FAILURES)', [tRunner]],
   ['breaker-ignored', S, "if (state.breakerUntil && now < state.breakerUntil) { this.schedule(state.breakerUntil - now, 'breaker_open'); return }", '', [tRunner]],
   ['daily-cap', S, 'if (state.runsToday >= limits.dailyRuns)', 'if (state.runsToday > limits.dailyRuns)', [tRunner]],
@@ -74,7 +76,19 @@ const mutations = [
   ['live-at-start', S, "if (this.deps.captureActive() || !this.deps.admissionsOpen()) { this.schedule(DEFER_RETRY_MS, 'live_work'); return }", '', [tRunner]],
   ['no-probe-runs', S, "if (!this.deps.captureActive) { this.schedule(DEFER_RETRY_MS, 'no_live_probe'); return }", "if (!this.deps.captureActive) this.deps.captureActive = () => false", [tRunner]],
   ['once-per-meeting', S, 'if (state.done.includes(input.sessionId) || state.queue.some(q => q.sessionId === input.sessionId)) return', '', [tRunner]],
-  ['health-key-when-off', S, '  if (!speakerShadowEnabled(env)) return {}\n  return { speaker_shadow: speakerShadowHealth() }', '  return { speaker_shadow: speakerShadowHealth() }', [tRunner]],
+  ['health-key-when-off', S, '  if (!speakerShadowEnabled(env, root)) return {}\n  return { speaker_shadow: speakerShadowHealth() }', '  return { speaker_shadow: speakerShadowHealth() }', [tRunner]],
+  // The per-Mac switch (env pins, else the saved setting, else off).
+  ['switch-setting-ignored', S, "  if (stored !== null) return { enabled: stored, source: 'setting' }\n", '', [tRunner]],
+  ['switch-default-on', S, "  return { enabled: false, source: 'default' }\n}", "  return { enabled: true, source: 'default' }\n}", [tRunner]],
+  ['switch-env-off-ignored', S, 'return ENV_ON.has(raw) ? true : ENV_OFF.has(raw) ? false : null', 'return ENV_ON.has(raw) ? true : null', [tRunner]],
+  ['switch-bad-setting-on', S, "typeof raw.enabled === 'boolean' ? raw.enabled : null", '!!raw.enabled', [tRunner]],
+  ['switched-off-mid-run', S, "        if (!this.enabled()) { stop({ status: 'deferred', reason: 'switched_off' }); return }\n", '', [tRunner]],
+  ['route-env-forced', RT, 'if (pinned !== null && pinned !== body.enabled)', 'if (false)', [tRoute]],
+  ['route-strict-body', RT, " || Object.keys(body).some(k => k !== 'enabled')", '', [tRoute]],
+  // The readable report.
+  ['report-not-written', S, '      durableAtomicWriteFileSync(path, markdown, { mode: 0o600 })\n', '', [tRunner]],
+  ['report-hint-dropped', RP, '    if (a.otherLabelsInCluster.length) {', '    if (false) {', [tReport]],
+  ['report-text-dropped', RP, '"${quote(input.chunkText.get(p.chunkIndex))}"', '""', [tReport]],
   ['lease-dictation', S, "'prompt_draft_write', 'prompt_draft_warm', 'prompt_draft_finalize',", "'prompt_draft_write', 'prompt_draft_warm',", [tRunner]],
 ]
 
