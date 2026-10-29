@@ -60,7 +60,7 @@ export interface ShadowJob {
 
 export type ShadowSkipReason =
   | 'not_finalized' | 'labels_changed' | 'no_voices' | 'audio_missing' | 'audio_drift' | 'audio_format'
-  | 'bad_sidecar' | 'too_long' | 'models_missing' | 'models_mismatch' | 'cli_changed'
+  | 'bad_sidecar' | 'too_long' | 'models_missing' | 'models_mismatch' | 'cli_changed' | 'cli_lacks_flags'
 export type ShadowFailReason = 'cli_timeout' | 'cli_failed' | 'cli_unsupported' | 'bad_cli_output' | 'sandbox_unavailable' | 'internal'
 
 export interface ShadowRunFacts {
@@ -104,6 +104,12 @@ async function sha256File(path: string): Promise<string> {
   const hash = createHash('sha256')
   await pipeline(createReadStream(path), new Transform({ transform(chunk, _e, cb) { hash.update(chunk); cb(null) } }))
   return hash.digest('hex')
+}
+
+/** The CLI flags shadow mode passes that are not in the binary's own strings. Read only. */
+export async function cliMissingFlags(cliPath: string, flags: readonly string[] = ['--export-embeddings', '--overlapping-segments']): Promise<string[]> {
+  const bytes = await readFile(cliPath)
+  return flags.filter(flag => bytes.indexOf(flag) < 0)
 }
 
 /** Foundation's item-replacement dirs for this CLI, in the per-user temp folder. Read only. */
@@ -160,6 +166,9 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
     const models = await (deps.verifyModels ?? verifyShadowModels)(job.modelsDir)
     if (!models.ok) return skip(models.reason, models.detail)
     if (!existsSync(job.cliPath) || await sha256File(job.cliPath) !== job.cliSha256) return skip('cli_changed', 'the FluidAudio CLI changed since it was verified')
+    // A build without these would fail every run and open the breaker; say so once instead.
+    const missingFlags = await cliMissingFlags(job.cliPath)
+    if (missingFlags.length) return skip('cli_lacks_flags', `the installed fluidaudiocli has no ${missingFlags.join(' or ')} (COS Control's signed helper has both)`)
     if (!existsSync(job.sandboxExec)) return fail('sandbox_unavailable', 'sandbox-exec is missing, so the CLI cannot be proven offline and does not run')
 
     // 3. The timeline, then the production segments on it.

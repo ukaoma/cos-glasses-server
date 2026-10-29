@@ -54,6 +54,7 @@ const mutations = [
   ['worker-not-finalized', W, "if (sidecar.finalizationState !== 'complete')", 'if (false)', [tWorker]],
   ['worker-models-unchecked', W, '    if (!models.ok) return skip(models.reason, models.detail)\n', '', [tWorker]],
   ['worker-cli-hash-unchecked', W, 'await sha256File(job.cliPath) !== job.cliSha256', 'false', [tWorker]],
+  ['worker-flags-unchecked', W, '    if (missingFlags.length) return skip(', '    if (false) return skip(', [tWorker]],
   ['worker-no-sandbox', W, "child = (deps.spawn ?? (spawn as unknown as SpawnLike))(job.sandboxExec, args,", "child = (deps.spawn ?? (spawn as unknown as SpawnLike))(job.cliPath, args.slice(3),", [tWorker]],
   ['worker-cli-deadline', W, 'const timer = setTimeout(() => { timedOut = true; kill() }, job.cliTimeoutMs)', 'const timer = setTimeout(() => {}, job.cliTimeoutMs)', [tWorker]],
   ['worker-temp-kept', W, "    if (work) { try { rmSync(work, { recursive: true, force: true }) } catch { /* best effort; swept at boot */ } }", '', [tWorker]],

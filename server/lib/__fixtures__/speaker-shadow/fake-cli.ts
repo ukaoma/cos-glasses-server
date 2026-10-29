@@ -59,7 +59,8 @@ export function writeFakeCli(dir: string, mode: FakeCliMode): FakeCli {
   writeFileSync(script, SCRIPT)
   const marker = join(dir, 'cli-runs.jsonl')
   const path = join(dir, `fluidaudiocli-${mode}`)
-  writeFileSync(path, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} ${mode} ${JSON.stringify(fixtures)} ${JSON.stringify(marker)} "$@"\n`)
+  // Like the real binary's help text, the file names the flags it supports (the worker checks).
+  writeFileSync(path, `#!/bin/sh\n# usage: process <wav> --mode <streaming|offline> --overlapping-segments --export-embeddings <file>\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} ${mode} ${JSON.stringify(fixtures)} ${JSON.stringify(marker)} "$@"\n`)
   chmodSync(path, 0o755)
   return { path, marker, fixtures }
 }

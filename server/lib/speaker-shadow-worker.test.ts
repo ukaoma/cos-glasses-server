@@ -153,6 +153,18 @@ describe('speaker shadow worker: one run', () => {
     expect(t.cliRuns()).toEqual([])
   })
 
+  it('a CLI build without the flags it needs is skipped once, not failed into the breaker', async () => {
+    const t = setup('success')
+    const { cliMissingFlags } = await import('./speaker-shadow-worker.js')
+    // The fake carries both flags in its wrapper text; a copy without them stands in for an old build.
+    const old = join(t.root, 'cli', 'old-fluidaudiocli')
+    writeFileSync(old, readFileSync(t.cli.path, 'utf8').replaceAll('--export-embeddings', '--x').replaceAll('--overlapping-segments', '--y'))
+    expect(await cliMissingFlags(t.cli.path)).toEqual([])
+    expect(await cliMissingFlags(old)).toEqual(['--export-embeddings', '--overlapping-segments'])
+    expect(await runShadowJob({ ...t.job, cliPath: old, cliSha256: sha(old) }, { verifyModels: okModels })).toMatchObject({ status: 'skipped', reason: 'cli_lacks_flags' })
+    expect(t.cliRuns()).toEqual([])
+  })
+
   it('no sandbox-exec, no run', async () => {
     const t = setup('success')
     expect(await runShadowJob({ ...t.job, sandboxExec: join(t.root, 'no-such-sandbox-exec') }, { verifyModels: okModels })).toMatchObject({ status: 'failed', reason: 'sandbox_unavailable' })
