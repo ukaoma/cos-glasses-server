@@ -13,7 +13,8 @@ export class MacParakeetUnavailableError extends Error {
 
   constructor(cause: unknown, source: 'Mac' | 'iPhone' = 'Mac') {
     const reason = cause instanceof ParakeetError ? cause.reason : 'cli_failed'
-    super(`Selected Parakeet Ultra could not transcribe this ${source} chunk (${reason}); audio is preserved for retry`)
+    const diagnostic = cause instanceof ParakeetError && cause.reason === 'cli_failed' ? `; ${cause.message}` : ''
+    super(`Selected Parakeet Ultra could not transcribe this ${source} chunk (${reason})${diagnostic}; audio is preserved for retry`)
     this.name = 'MacParakeetUnavailableError'
     this.reason = `${source === 'Mac' ? 'mac' : 'phone'}_parakeet_${reason}`
   }

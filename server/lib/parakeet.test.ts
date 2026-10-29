@@ -260,6 +260,30 @@ describe('Parakeet runs (offline, bounded)', () => {
     expect(child.killed).toContain('SIGKILL')
   })
 
+  it.each([{ code: 23, signal: null }, { code: null, signal: 'SIGABRT' }])('retains safe CLI diagnostics for $code/$signal without retaining native private output', async ({ code, signal }) => {
+    await installed()
+    const spawnImpl = (() => {
+      const child = new FakeChild()
+      setImmediate(() => {
+        child.stderr.write(`transcript: confidential meeting words\nAuthorization: Bearer private-token\n/Users/private/person.wav\n${'noise '.repeat(10_000)}`)
+        child.stderr.write('\n[ERROR] Batch transcription failed: invalidAudioData\n')
+        child.emit('close', code, signal)
+      })
+      return child
+    }) as any
+    const error = await P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl }).catch(error => error)
+    expect(error).toMatchObject({ reason: 'cli_failed', cliDiagnostics: { exitCode: code, signal, stderr: 'transcription failed | invalidAudioData' } })
+    expect(error.message).toContain(`exit code=${code ?? 'unknown'} signal=${signal ?? 'none'}`)
+    expect(error.message.length).toBeLessThan(340)
+    expect(JSON.stringify(error)).not.toMatch(/confidential|private-token|person.wav|noise/)
+  })
+
+  it('omits unknown stderr rather than guessing which free-form output is private', () => {
+    const error = new P.ParakeetError('cli_failed', 'exit 9: customer says their password is secret')
+    expect(error.message).toBe('exit code=9 signal=none; stderr=unrecognized stderr omitted')
+    expect(new P.ParakeetError('busy', 'batch occupied').message).toBe('batch occupied')
+  })
+
   it('rejects a CLI that complains about an option even with exit 0, and bad clocks', async () => {
     await installed()
     const make = (stderr: string, json: unknown) => ((_c: string, args: string[]) => {
@@ -267,7 +291,7 @@ describe('Parakeet runs (offline, bounded)', () => {
       setImmediate(() => { child.stderr.write(stderr); writeFileSync(args[args.indexOf('--output-json') + 1], JSON.stringify(json)); child.emit('close', 0, null) })
       return child
     }) as any
-    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('Unknown option --x', { text: 'a' }) })).rejects.toMatchObject({ reason: 'cli_failed' })
+    await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('Unknown option --x', { text: 'a' }) })).rejects.toMatchObject({ reason: 'cli_failed', cliDiagnostics: { exitCode: 0, signal: null, stderr: 'unknown option' } })
     await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('[ERROR] Batch transcription failed: invalidAudioData', { text: 'stale' }) })).rejects.toMatchObject({ reason: 'cli_failed' })
     await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('', { text: 'a', wordTimings: [{ word: 'a', startTime: -1, endTime: 1 }] }) })).rejects.toMatchObject({ reason: 'bad_output' })
     await expect(P.transcribeParakeet(P.warmupWav(), { model: 'parakeet-ultra', lane: 'batch', timeoutMs: 2000, spawnImpl: make('', { nope: 1 }) })).rejects.toMatchObject({ reason: 'bad_output' })

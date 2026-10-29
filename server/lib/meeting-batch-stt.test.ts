@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -345,6 +345,56 @@ it('surfaces selected Mac HQ failure to durable finalization while preserving th
   const fs=await import('node:fs');expect(fs.existsSync(join(dir,'chunk_0000.wav'))).toBe(true)
   expect(JSON.parse(fs.readFileSync(join(dir,'_batch_terminal.json'),'utf8'))).toMatchObject({outcome:'failed',reason:expect.stringContaining('audio is preserved for retry')})
  } finally {vi.doUnmock('./parakeet.js');vi.doUnmock('./whisper-local.js');vi.doUnmock('./stt-live.js')}
+})
+
+it.each([{ exitCode: 23, signal: null }, { exitCode: null, signal: 'SIGABRT' }])('persists bounded CLI code/signal/stderr in the actual Mac save job ($exitCode/$signal)', async diagnostics => {
+  vi.resetModules()
+  const { ParakeetError } = await import('./parakeet.js')
+  const parakeet = vi.fn(async () => { throw new ParakeetError('cli_failed', '', {
+    ...diagnostics, stderr: '[ERROR] Batch transcription failed: invalidAudioData\ntranscript: confidential meeting words\nAuthorization: Bearer private-token\n/Users/private/person.wav',
+  }) })
+  const whisper = vi.fn()
+  vi.doMock('./parakeet.js', async original => ({ ...await original<typeof import('./parakeet.js')>(), transcribeParakeet: parakeet }))
+  vi.doMock('./whisper-local.js', async original => ({ ...await original<typeof import('./whisper-local.js')>(), transcribeHighQuality: whisper }))
+  vi.doMock('./stt-live.js', async original => ({ ...await original<typeof import('./stt-live.js')>(), asrFrontEnd: async (b: Buffer) => b }))
+  const logs = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    const stt = await import('./stt-settings.js')
+    stt.writeSttSettings({ ...stt.readSttSettings(), hq: 'parakeet-ultra', secondOpinion: 'off', resolver: false })
+    const MM = await import('./meeting-batch-transcribe.js')
+    const { MeetingFinalizationJobStore } = await import('./meeting-finalization-jobs.js')
+    const { scheduleFinalizationJob } = await import('../routes/meeting.js')
+    const dataRoot = join(dir, 'save-job'), audioDir = join(dataRoot, 'pending-batch', 'capture')
+    const recordings = join(dataRoot, 'recordings')
+    mkdirSync(audioDir, { recursive: true }); mkdirSync(recordings, { recursive: true })
+    for (const i of [0, 1]) copyFileSync(join(dir, `chunk_000${i}.wav`), join(audioDir, `chunk_000${i}.wav`))
+    const sessionId = 'mac_abcdef01-2345-6789-abcd-0123456789ab'
+    const meetingPath = join(recordings, 'capture.md'), sidecarPath = join(recordings, 'capture.g2-chunks.json')
+    const before = JSON.stringify({ sessionId, chunkEntries: entries, finalizationState: 'batch_pending' })
+    writeFileSync(meetingPath, '# Capture\n\n## Transcript\n\nUnchanged canonical words\n')
+    writeFileSync(sidecarPath, before)
+    const jobs = new MeetingFinalizationJobStore(join(dataRoot, 'meeting-finalization-jobs'))
+    const job = jobs.save({ sessionId, meetingPath, sidecarPath, audioDir, streamingWordCount: 3, phase: 'batch_pending', claimPending: false })
+    const background: Promise<void>[] = []
+    scheduleFinalizationJob(job, { finalizationJobs: jobs, runBatch: MM.runMeetingBatchPipeline,
+      scheduleBackground: task => { background.push(task) }, qualifiedProfilePass: async () => ({ status: 'skipped', reason: 'test has no profile work' }) })
+    await Promise.all(background)
+    const retained = jobs.get(sessionId)!
+    expect(retained).toMatchObject({ phase: 'batch_pending', claimPending: false, audioDir })
+    expect(retained.lastError).toContain(`exit code=${diagnostics.exitCode ?? 'unknown'} signal=${diagnostics.signal ?? 'none'}`)
+    expect(retained.lastError).toContain('stderr=transcription failed | invalidAudioData')
+    expect(retained.lastError).toContain('audio is preserved for retry')
+    expect(retained.lastError!.length).toBeLessThan(500)
+    expect(JSON.stringify([retained, logs.mock.calls])).not.toMatch(/confidential|private-token|person.wav/)
+    expect(readFileSync(sidecarPath, 'utf8')).toBe(before)
+    expect(readFileSync(meetingPath, 'utf8')).toContain('Unchanged canonical words')
+    expect(readFileSync(join(audioDir, 'chunk_0000.wav'))).toEqual(wav())
+    expect(existsSync(join(audioDir, 'chunk_0001.wav'))).toBe(true)
+    expect(parakeet).toHaveBeenCalledTimes(1); expect(whisper).not.toHaveBeenCalled()
+  } finally {
+    logs.mockRestore()
+    vi.doUnmock('./parakeet.js'); vi.doUnmock('./whisper-local.js'); vi.doUnmock('./stt-live.js')
+  }
 })
 
 describe('6.83.1: the decoder window for the next segment', () => {

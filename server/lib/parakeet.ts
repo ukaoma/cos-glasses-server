@@ -454,8 +454,49 @@ export function sweepParakeetStaging(): { removed: number; restored: boolean } {
 // ── Inference ─────────────────────────────────────────────────────────────────
 
 export type ParakeetFailure = 'not_installed' | 'sandbox_unavailable' | 'busy' | 'timeout' | 'cli_failed' | 'bad_output' | 'spawn_failed' | 'aborted'
+export interface ParakeetCliDiagnostics {
+  exitCode: number | null
+  signal: string | null
+  /** Safe categories extracted from stderr, never arbitrary native output. */
+  stderr: string
+}
+
+function safeCliDiagnostics(message: string, diagnostics?: ParakeetCliDiagnostics): ParakeetCliDiagnostics {
+  const raw = (diagnostics?.stderr ?? message).slice(-32_768)
+  // Native stderr can contain paths, credentials, or recognized speech. Keep
+  // only fixed diagnostic vocabulary; redacting a few secret patterns would
+  // still leave arbitrary transcript text in the durable save error/log.
+  const categories = [
+    /unknown option/i, /not supported/i, /transcription failed/i,
+    /invalidAudioData/i, /initializationFailed/i, /modelNotFound/i,
+    /modelLoadingFailed/i, /predictionFailed/i, /invalidModel/i,
+    /failed to load model/i, /failed to initialize/i, /CoreML/i,
+    /out of memory/i, /allocation failed/i, /operation not permitted/i,
+    /permission denied/i, /no such file or directory/i, /library not loaded/i,
+    /sandbox.*deny/i, /fatal error/i, /EXC_BAD_ACCESS/, /SIGABRT/, /SIGSEGV/,
+    /NSCocoaErrorDomain/, /MLModelErrorDomain/,
+  ].filter(pattern => pattern.test(raw)).map(pattern => {
+    // The pattern itself is trusted text; never copy the matching stderr.
+    return pattern.source.replace('.*', ' ').replace(/\\/g, '')
+  })
+  const legacyExit = /\bexit\s+(-?\d+|SIG[A-Z0-9]+)\b/.exec(message.slice(0, 100))?.[1]
+  const code = diagnostics?.exitCode ?? (legacyExit && /^-?\d+$/.test(legacyExit) ? Number(legacyExit) : null)
+  const signal = diagnostics?.signal ?? (legacyExit?.startsWith('SIG') ? legacyExit : null)
+  return {
+    exitCode: Number.isSafeInteger(code) ? code : null,
+    signal: typeof signal === 'string' && /^SIG[A-Z0-9]{1,12}$/.test(signal) ? signal : null,
+    stderr: categories.join(' | ').slice(0, 240) || 'unrecognized stderr omitted',
+  }
+}
+
 export class ParakeetError extends Error {
-  constructor(readonly reason: ParakeetFailure, message: string) { super(message); this.name = 'ParakeetError' }
+  readonly cliDiagnostics?: ParakeetCliDiagnostics
+  constructor(readonly reason: ParakeetFailure, message: string, diagnostics?: ParakeetCliDiagnostics) {
+    const safe = reason === 'cli_failed' ? safeCliDiagnostics(message, diagnostics) : undefined
+    super(safe ? `exit code=${safe.exitCode ?? 'unknown'} signal=${safe.signal ?? 'none'}; stderr=${safe.stderr}` : message)
+    this.name = 'ParakeetError'
+    this.cliDiagnostics = safe
+  }
 }
 
 export interface ParakeetResult {
@@ -721,9 +762,14 @@ function runParakeetChecked(wav: Buffer, options: ParakeetRunOptions): Promise<P
     if (child.pid && options.lane !== 'preview' && options.lane !== 'interactive') {
       try { setPriority(child.pid, 10) } catch { /* runs at normal priority */ }
     }
-    let stderr = ''
+    let stderr = '', stderrTail = ''
     child.stdout?.on('data', () => { /* the JSON file is the output */ })
-    child.stderr?.on('data', (d: Buffer) => { if (stderr.length < 32_768) stderr += d.toString() })
+    child.stderr?.on('data', (d: Buffer) => {
+      // Retain the existing leading-output option-failure check; keep a
+      // separate bounded tail for diagnostics from a nonzero native exit.
+      if (stderr.length < 32_768) stderr = (stderr + d.subarray(0, 32_768).toString()).slice(0, 32_768)
+      stderrTail = (stderrTail + d.subarray(-32_768).toString()).slice(-32_768)
+    })
     timer = setTimeout(() => {
       // SIGKILL: a CoreML compile does not stop for TERM.
       try { child.kill('SIGKILL') } catch { /* gone */ }
@@ -733,8 +779,8 @@ function runParakeetChecked(wav: Buffer, options: ParakeetRunOptions): Promise<P
     child.on('error', error => finish(new ParakeetError('spawn_failed', error.message)))
     child.on('close', (code, signal) => {
       if (settled) return
-      if (code !== 0) { finish(new ParakeetError('cli_failed', `exit ${code ?? signal}: ${stderr.trim().split('\n').slice(-2).join(' | ').slice(0, 240)}`)); return }
-      if (/Unknown option|not supported|transcription failed/i.test(stderr)) { finish(new ParakeetError('cli_failed', 'the CLI rejected an option')); return }
+      if (code !== 0) { finish(new ParakeetError('cli_failed', '', { exitCode: code, signal, stderr: stderrTail })); return }
+      if (/Unknown option|not supported|transcription failed/i.test(stderr)) { finish(new ParakeetError('cli_failed', '', { exitCode: code, signal, stderr })); return }
       try {
         const parsed = parseParakeetJson(readFileSync(output, 'utf8'))
         finish(null, { model: options.model, ...parsed, wallMs: Date.now() - started })
