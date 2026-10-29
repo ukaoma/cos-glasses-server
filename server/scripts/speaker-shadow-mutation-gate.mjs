@@ -88,7 +88,7 @@ const mutations = [
   ['route-strict-body', RT, " || Object.keys(body).some(k => k !== 'enabled')", '', [tRoute]],
   // The readable report.
   ['report-not-written', S, '      durableAtomicWriteFileSync(path, markdown, { mode: 0o600 })\n', '', [tRunner]],
-  ['report-hint-dropped', RP, '    if (a.otherLabelsInCluster.length) {', '    if (false) {', [tReport]],
+  ['report-hint-dropped', RP, '    if (named.length) {', '    if (false) {', [tReport]],
   ['report-text-dropped', RP, '"${quote(input.chunkText.get(p.chunkIndex))}"', '""', [tReport]],
   ['lease-dictation', S, "'prompt_draft_write', 'prompt_draft_warm', 'prompt_draft_finalize',", "'prompt_draft_write', 'prompt_draft_warm',", [tRunner]],
 ]

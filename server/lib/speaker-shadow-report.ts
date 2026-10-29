@@ -58,8 +58,13 @@ export function renderShadowReport(input: ShadowReportInput): string {
   if (!P.accepted.length) L.push('None.')
   for (const a of P.accepted) {
     L.push(`### ${a.cluster}: merge ${a.merge.join(', ')} into **${a.keepLabel}**`)
-    if (a.otherLabelsInCluster.length) {
-      L.push(`Caution: this group also holds ${a.otherLabelsInCluster.map(o => `${pyFixed(o.seconds, 0)} s labelled ${o.label}`).join(', ')}. Those labels stay as they are.`)
+    // Names first: Ext is speech no one was attributed to, not a label anyone gave.
+    const named = a.otherLabelsInCluster.filter(o => o.label !== 'Ext'), ext = a.otherLabelsInCluster.find(o => o.label === 'Ext')
+    const extText = ext ? `${pyFixed(ext.seconds, 0)} s of Ext speech (no voice label)` : ''
+    if (named.length) {
+      L.push(`Caution: this group also holds ${named.map(o => `${pyFixed(o.seconds, 0)} s labelled ${o.label}`).join(', ')}. Those labels stay as they are.${ext ? ` It also holds ${extText}.` : ''}`)
+    } else if (ext) {
+      L.push(`Note: this group also holds ${extText}.`)
     }
     const touched = a.voices.map(m => m.voice).filter(v => F.humanProtectedVoices.includes(v))
     if (touched.length) L.push(`Human edit: ${touched.join(', ')} carries a person's correction on some chunks.`)

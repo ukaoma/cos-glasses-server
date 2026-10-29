@@ -25,7 +25,9 @@ describe('speaker shadow report (round3/propose.py render)', () => {
 
   it('names the labels sharing a group as a hint, in the words Miles asked for', () => {
     expect(md).toContain('Caution: this group also holds 3 s labelled Dana Fictional. Those labels stay as they are.')
-    expect(md).toContain('Caution: this group also holds 40 s labelled Ext. Those labels stay as they are.')
+    expect(md).toContain('Note: this group also holds 40 s of Ext speech (no voice label).')
+    const both = renderShadowReport({ title: 't', sessionId: 's', proposals: { ...P, accepted: [{ ...P.accepted[0], otherLabelsInCluster: [{ label: 'Ext', seconds: 194.9 }, { label: 'Dana Fictional', seconds: 65.2 }] }] }, facts, audioDir: '/a', chunkText: new Map() })
+    expect(both).toContain('Caution: this group also holds 65 s labelled Dana Fictional. Those labels stay as they are. It also holds 195 s of Ext speech (no voice label).')
   })
 
   it('lists rejections with reasons, and untouched voices', () => {
