@@ -19,12 +19,15 @@ const code = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^
 const NODE = ['node:child_process', 'node:crypto', 'node:fs', 'node:fs/promises', 'node:module', 'node:os', 'node:path', 'node:stream', 'node:stream/promises', 'node:url']
 const ALLOWED: Record<string, string[]> = {
   'speaker-shadow.ts': [...NODE, './atomic-fs.js', './mac-recording.js', './maintenance-lifecycle.js', './parakeet.js', './speaker-shadow-decide.js', './speaker-shadow-models.js', './speaker-shadow-report.js', './speaker-shadow-timeline.js', './speaker-shadow-worker.js'],
-  'speaker-shadow-worker.ts': [...NODE, './parakeet.js', './speaker-shadow-decide.js', './speaker-shadow-models.js', './speaker-shadow-numeric.js', './speaker-shadow-report.js', './speaker-shadow-timeline.js'],
+  'speaker-shadow-worker.ts': [...NODE, './parakeet.js', './speaker-shadow-decide.js', './speaker-shadow-models.js', './speaker-shadow-numeric.js', './speaker-shadow-report.js', './speaker-shadow-timeline.js', './speaker-shadow-pair-source.js', './speaker-shadow-paired.js'],
   'speaker-shadow-report.ts': ['node:path', './speaker-shadow-decide.js', './speaker-shadow-numeric.js'],
   'speaker-shadow-timeline.ts': [...NODE, './mac-speaker-protection.js', './speaker-shadow-decide.js', './speaker-shadow-numeric.js'],
   'speaker-shadow-models.ts': [...NODE, './data-dir.js'],
   'speaker-shadow-decide.ts': ['./speaker-shadow-numeric.js'],
   'speaker-shadow-numeric.ts': [],
+  'speaker-shadow-pair-source.ts': ['node:fs', 'node:fs/promises', 'node:path', 'node:crypto'],
+  'speaker-shadow-paired.ts': ['./speaker-name.js', './speaker-shadow-decide.js'],
+  'speaker-name.ts': [],
   '../routes/speaker-shadow.ts': ['express', '../lib/speaker-shadow.js', '../lib/speaker-shadow-models.js'],
 }
 
@@ -39,6 +42,9 @@ const PINNED: Record<string, { count: number; why: string }> = {
   'speaker-shadow-timeline.ts': { count: 0, why: 'read only' },
   'speaker-shadow-decide.ts': { count: 0, why: 'pure' },
   'speaker-shadow-numeric.ts': { count: 0, why: 'pure' },
+  'speaker-shadow-pair-source.ts': { count: 1, why: 'read-only open with O_RDONLY and O_NOFOLLOW; bounded diagnostics, no writable handle' },
+  'speaker-shadow-paired.ts': { count: 0, why: 'pure diagnostic evaluator' },
+  'speaker-name.ts': { count: 0, why: 'pure label validation' },
   '../routes/speaker-shadow.ts': { count: 0, why: 'GET only' },
 }
 
@@ -47,7 +53,7 @@ describe('speaker shadow: the log-only contract in source', () => {
     it(`${file} imports only from its allowlist`, () => {
       // `from '...'`, a bare side-effect `import '...'`, a dynamic `import('...')` and `require('...')`.
       const imports = [...code(read(file)).matchAll(/\bfrom\s+'([^']+)'|\bimport\s+'([^']+)'|\bimport\(\s*'([^']+)'\s*\)|\brequire\(\s*'([^']+)'\s*\)/g)].map(m => m[1] ?? m[2] ?? m[3] ?? m[4])
-      expect(imports.length).toBeGreaterThan(file.endsWith('numeric.ts') ? -1 : 0)
+      expect(imports.length).toBeGreaterThan((file.endsWith('numeric.ts') || file === 'speaker-name.ts') ? -1 : 0)
       expect(imports.filter(i => !allowed.includes(i))).toEqual([])
     })
   }

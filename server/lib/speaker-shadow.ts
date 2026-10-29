@@ -148,15 +148,16 @@ export interface SpeakerShadowRecord {
   status: SpeakerShadowStatus
   reason: string | null
   detail: string | null
-  gates: { majority: number; minCoveredFraction: number; floorSeconds: number; outlier: string; anchorRatioPostHocColumnOnly: number }
+  gates: { majority: number; minCoveredFraction: number; floorSeconds: number; outlier: string; anchorRatioMax: number }
   facts?: ShadowRunFacts
+  paired?: Extract<ShadowJobOutcome, { status: 'proposed' }>['paired']
   proposals?: ShadowProposals
   resources?: { wallMs: number; peakRssBytes: number | null; cliTrust: string | null }
   /** The readable report, relative to <data>/speaker-shadow/ (reports/<day>/<title>__<session>.md). */
   report?: string | null
 }
 
-const GATES_RECORD = { majority: SHADOW_GATES.majority, minCoveredFraction: SHADOW_GATES.minCoveredFraction, floorSeconds: SHADOW_GATES.floorSeconds, outlier: 'leave-fragment-out cluster p95', anchorRatioPostHocColumnOnly: SHADOW_GATES.anchorRatioPostHoc }
+const GATES_RECORD = { majority: SHADOW_GATES.majority, minCoveredFraction: SHADOW_GATES.minCoveredFraction, floorSeconds: SHADOW_GATES.floorSeconds, outlier: 'leave-fragment-out cluster p95', anchorRatioMax: SHADOW_GATES.anchorRatioMax }
 
 /** Append one record: the whole file is rewritten to a temp file, fsynced and renamed, so a reader never sees half a line. */
 export async function appendSpeakerShadowRecord(root: string, record: SpeakerShadowRecord): Promise<void> {
@@ -538,7 +539,7 @@ export class SpeakerShadowRunner {
         if (outcome.status === 'proposed') {
           const f = outcome.facts
           const markdown = `${outcome.report.markdown}\n${renderShadowRunFacts({ rebuildMs: f.timing.rebuildMs, nativeMs: f.timing.nativeMs, wallMs: resources.wallMs, peakRssBytes: resources.peakRssBytes, osTempDirsLeft: f.osTempDirsLeft, sidecarPath: item.sidecarPath, pcmSHA256: f.timelinePCMSHA256, cliTrust: cli.trust })}`
-          await finish('proposed', null, null, { facts: outcome.facts, proposals: outcome.proposals, resources }, { title: outcome.report.title, markdown })
+          await finish('proposed', null, null, { facts: outcome.facts, proposals: outcome.proposals, paired: outcome.paired, resources }, { title: outcome.report.title, markdown })
         }
         else await finish(outcome.status, outcome.reason, outcome.detail, { resources })
       }

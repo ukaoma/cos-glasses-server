@@ -36,6 +36,8 @@ import {
 } from './speaker-shadow-timeline.js'
 import { renderShadowReport } from './speaker-shadow-report.js'
 import { pyRound } from './speaker-shadow-numeric.js'
+import { findShadowPairSource } from './speaker-shadow-pair-source.js'
+import { evaluatePairedSpeakerShadow, renderPairedSpeakerShadow, type PairedShadowReport } from './speaker-shadow-paired.js'
 
 export const SHADOW_TMP_PREFIX = 'cos-speaker-shadow-'
 /** The CLI's flags, verbatim from round3/propose.py (via scripts/guard.py). */
@@ -85,7 +87,7 @@ export interface ShadowRunFacts {
 }
 
 export type ShadowJobOutcome =
-  | { status: 'proposed'; facts: ShadowRunFacts; proposals: ShadowProposals; report: { title: string; markdown: string } }
+  | { status: 'proposed'; facts: ShadowRunFacts; proposals: ShadowProposals; paired?: PairedShadowReport & { pairSessionId?: string; pairSourceSha256?: string; discoveryReason: string }; report: { title: string; markdown: string } }
   | { status: 'skipped'; reason: ShadowSkipReason; detail: string }
   | { status: 'failed'; reason: ShadowFailReason; detail: string }
 
@@ -205,6 +207,7 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
 
     // 5. The gates, exactly as the research tool applies them.
     let proposals: ShadowProposals, clipped: number
+    let paired: Extract<ShadowJobOutcome, { status: 'proposed' }>['paired']
     try {
       const turns = nativeTurns(native.segments as Array<{ speakerId: unknown; startTimeSeconds: unknown; endTimeSeconds: unknown }>, timeline.total / SHADOW_SAMPLE_RATE)
       clipped = turns.clipped
@@ -213,6 +216,19 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
       }
       const D = decide(segs, timeline.total, turns.turns, emb as ShadowEmbeddingRow[], SHADOW_GATES.floorSeconds, SHADOW_GATES.majority)
       proposals = buildShadowProposals(D, segs, sources, turns.turns)
+      // Pair scoring is advisory; an unavailable G2 must not suppress the acoustic report.
+      try {
+        const source = await findShadowPairSource(job.sidecarPath, sidecar, timeline.total / SHADOW_SAMPLE_RATE * 1000)
+        paired = { ...evaluatePairedSpeakerShadow({ macStartTime: sidecar.startTime as number, totalSamples: timeline.total,
+          segments: segs, regularTurns: turns.turns, acceptedGroups: proposals.accepted,
+          voiceEvidence: [...proposals.accepted.flatMap(group => group.voices), ...proposals.rejected],
+          g2: source.g2, alignment: { status: source.status } }),
+          pairSessionId: source.sessionId, pairSourceSha256: source.sourceSha256, discoveryReason: source.reason }
+      } catch {
+        paired = { ...evaluatePairedSpeakerShadow({ macStartTime: sidecar.startTime as number, totalSamples: timeline.total,
+          segments: segs, regularTurns: turns.turns, acceptedGroups: proposals.accepted, voiceEvidence: [],
+          alignment: { status: 'unpaired' } }), discoveryReason: 'pair discovery or scoring unavailable' }
+      }
     } catch (error) { return fail('bad_cli_output', error instanceof Error ? error.message : String(error)) }
 
     const humanProtectedVoices = shadowHumanProtectedVoices(entries)
@@ -233,8 +249,9 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
     }
     const title = await readShadowMeetingTitle(job.sidecarPath)
     const chunkText = new Map(entries.map(e => [e.chunkIndex, typeof e.chunk.text === 'string' ? e.chunk.text : '']))
-    const markdown = renderShadowReport({ title, sessionId: job.sessionId, proposals, facts, audioDir: job.audioDir, chunkText })
-    return { status: 'proposed', proposals, facts, report: { title, markdown } }
+    let markdown = renderShadowReport({ title, sessionId: job.sessionId, proposals, facts, audioDir: job.audioDir, chunkText })
+    if (paired) markdown += `\n${renderPairedSpeakerShadow(paired)}\nDiscovery: ${paired.discoveryReason}\n`
+    return { status: 'proposed', proposals, paired, facts, report: { title, markdown } }
   } catch (error) {
     if (error instanceof ShadowInputError) return skip(error.reason, error.message)
     return fail('internal', error instanceof Error ? error.message : String(error))

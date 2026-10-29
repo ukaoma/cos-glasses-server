@@ -65,7 +65,7 @@ describe('speaker shadow worker: one run', () => {
     expect(outcome.status).toBe('proposed')
     if (outcome.status !== 'proposed') return
     expect(outcome.proposals.accepted.map(a => [a.cluster, a.keepLabel, a.merge])).toEqual([
-      ['S1', 'Voice 1', ['Voice 2', 'Voice 13']], ['S2', 'Voice 3', ['Voice 10']], ['S4', 'Voice 11', ['Voice 12']],
+      ['S1', 'Voice 1', ['Voice 2', 'Voice 13']], ['S2', 'Voice 3', ['Voice 10']],
     ])
     expect(outcome.facts.originals).toBe(34)
     expect(outcome.facts.verifiedAgainstSidecar).toBe(34)
@@ -75,7 +75,10 @@ describe('speaker shadow worker: one run', () => {
     expect(readdirSync(t.tmpRoot)).toEqual([])
     // The readable report: titled from the saved markdown (none here, so the file name), with chunk text.
     expect(outcome.report.title).toBe('meeting')
-    expect(outcome.report.markdown).toContain('**13 voices would become 9.**')
+    expect(outcome.report.markdown).toContain('**13 voices would become 10.**')
+    expect(outcome.paired).toMatchObject({ alignmentStatus: 'unpaired', candidateNominationAllowed: false, accuracyClaim: false, humanTruthClaim: false })
+    expect(outcome.report.markdown).toContain('Paired G2 diagnostics')
+    expect(outcome.report.markdown).toContain('Discovery:')
     expect(outcome.report.markdown).toContain('"synthetic chunk 4"')
     // The CLI got the private HOME and only the documented variables, never the server's.
     const [run] = t.cliRuns()

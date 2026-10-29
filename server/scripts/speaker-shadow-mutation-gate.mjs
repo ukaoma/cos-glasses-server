@@ -26,10 +26,15 @@ const tDecide = 'server/lib/speaker-shadow-decide.test.ts', tNum = 'server/lib/s
 const tTimeline = 'server/lib/speaker-shadow-timeline.test.ts', tRunner = 'server/lib/speaker-shadow.test.ts', tNoWrite = 'server/lib/speaker-shadow-no-write.test.ts'
 const tReport = 'server/lib/speaker-shadow-report.test.ts', tRoute = 'server/routes/speaker-shadow.test.ts'
 const RP = 'server/lib/speaker-shadow-report.ts', RT = 'server/routes/speaker-shadow.ts'
-const all = [tDecide, tNum, tWorker, tTimeline, tRunner, tNoWrite, tReport, tRoute]
+const PA = 'server/lib/speaker-shadow-paired.ts', tPaired = 'server/lib/speaker-shadow-paired.test.ts'
+const all = [tDecide, tNum, tWorker, tTimeline, tRunner, tNoWrite, tReport, tRoute, tPaired, 'server/lib/speaker-shadow-pair-source.test.ts']
 
 // [name, file, find, replacement, tests]
 const mutations = [
+  ['gate-d-anchor-off', D, 'ratio <= SHADOW_GATES.anchorRatioMax', 'true', [tDecide]],
+  ['paired-clock-qualified', PA, 'const allow = qualified && safe', 'const allow = safe', [tPaired]],
+  ['paired-whole-cluster-ignored', PA, 'const both = result.diagnosticAllSpeechGate && wholeCluster.diagnosticAllSpeechGate && result.diagnosticTopName === wholeCluster.diagnosticTopName', 'const both = result.diagnosticAllSpeechGate', [tPaired]],
+  ['paired-short-rounded', PA, 'row.anchorRatio > PAIRED_SHADOW_GATES.shortAnchorRatio', 'row.anchorRatioPostHoc! > PAIRED_SHADOW_GATES.shortAnchorRatio', [tPaired]],
   // The four gates (hybrid.decide), each by itself.
   ['gate-a-covered', D, 'if (!(r.coveredFraction >= 0.5))', 'if (!(r.coveredFraction >= 0.4))', [tDecide]],
   ['gate-a-majority', D, 'if (!(r.majority >= majority))', 'if (!(r.majority >= 0.6))', [tDecide]],

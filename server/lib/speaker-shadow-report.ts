@@ -24,7 +24,7 @@ export interface ShadowReportInput {
 const STRIP = new RegExp(`^${PY_SPACE_CLASS}+|${PY_SPACE_CLASS}+$`, 'gu')
 const quote = (text: string | undefined) => Array.from((text ?? '').replace(STRIP, '')).slice(0, 140).join('')
 const chunkFile = (dir: string, index: number) => join(dir, `chunk_${String(index).padStart(4, '0')}.wav`)
-const HEADER = ['| Voice | Speech | Covered | Top cluster, majority | Outlier check | Anchor ratio (post-hoc) |', '|---|---:|---:|---|---|---|']
+const HEADER = ['| Voice | Speech | Covered | Top cluster, majority | Outlier check | Anchor ratio gate |', '|---|---:|---:|---|---|---|']
 
 /** propose.py fmt_voice. */
 export function shadowVoiceRow(m: ShadowVoiceEntry): string {
@@ -49,7 +49,7 @@ export function renderShadowReport(input: ShadowReportInput): string {
       : `- Meeting: ${pyFixed(F.minutes, 1)} min, ${F.originals} originals (${F.verifiedAgainstSidecar} verified against the sidecar hashes; ${F.unhashedOriginals} had no hash, all empty-text).`,
     `- FluidAudio found ${P.fluidAudioClusters} clusters. Labels never merged: ${P.frozenOtherLabels.join(', ') || 'none'}.`,
     '- Gates: majority ≥0.8 of covered speech on one cluster (and ≥50% covered), ≥15 s of speech, embedding centroid inside the cluster spread (p95).',
-    '- "Anchor ratio" is an UNVALIDATED extra check (fragment vs the kept voice\'s own spread); it decides nothing. Above 1.5x is worth a listen.',
+    '- Anchor ratio must be ≤1.5x against the kept voice\'s own spread; missing or degenerate evidence rejects a merge.',
     '- How to check: play two or three pointers for each voice in a row. Same person? The merge is right.',
     ...(F.humanProtectedVoices.length ? [`- A person already edited chunks holding ${F.humanProtectedVoices.join(', ')}. Those edits outrank any proposal here.`] : []),
     `- Session \`${input.sessionId}\`.`, '',

@@ -13,7 +13,7 @@ const md = renderShadowReport({ title: 'Avery and Blake sync', sessionId: 'mac_x
 
 describe('speaker shadow report (round3/propose.py render)', () => {
   it('leads with what would change, and says nothing was applied', () => {
-    expect(md.split('\n').slice(0, 3)).toEqual(['# Avery and Blake sync', '', '**13 voices would become 9.** FluidAudio proposed 8 merges; 4 pass every gate, 4 do not. Shadow mode only: nothing was renamed or written.'])
+    expect(md.split('\n').slice(0, 3)).toEqual(['# Avery and Blake sync', '', '**13 voices would become 10.** FluidAudio proposed 8 merges; 3 pass every gate, 5 do not. Shadow mode only: nothing was renamed or written.'])
   })
 
   it('lists each accepted merge with its gate rows and listen pointers (file, time, text)', () => {
@@ -25,7 +25,8 @@ describe('speaker shadow report (round3/propose.py render)', () => {
 
   it('names the labels sharing a group as a hint, in the words Miles asked for', () => {
     expect(md).toContain('Caution: this group also holds 3 s labelled Dana Fictional. Those labels stay as they are.')
-    expect(md).toContain('Note: this group also holds 40 s of Ext speech (no voice label).')
+    const ext = renderShadowReport({ title: 't', sessionId: 's', proposals: { ...P, accepted: [{ ...P.accepted[0], otherLabelsInCluster: [{ label: 'Ext', seconds: 40 }] }] }, facts, audioDir: '/a', chunkText: new Map() })
+    expect(ext).toContain('Note: this group also holds 40 s of Ext speech (no voice label).')
     const both = renderShadowReport({ title: 't', sessionId: 's', proposals: { ...P, accepted: [{ ...P.accepted[0], otherLabelsInCluster: [{ label: 'Ext', seconds: 194.9 }, { label: 'Dana Fictional', seconds: 65.2 }] }] }, facts, audioDir: '/a', chunkText: new Map() })
     expect(both).toContain('Caution: this group also holds 65 s labelled Dana Fictional. Those labels stay as they are. It also holds 195 s of Ext speech (no voice label).')
   })

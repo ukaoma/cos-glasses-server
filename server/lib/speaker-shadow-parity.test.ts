@@ -2,7 +2,7 @@
 // Off by default (skipped): the inputs are
 // a private meeting's labels and voice embeddings and must never enter this public repo.
 //
-//   COS_SPEAKER_SHADOW_PARITY_DIR=~/cos-release-candidates/server-6.95.0-speaker-shadow/parity \
+//   COS_SPEAKER_SHADOW_PARITY_DIR=~/cos-release-candidates/speaker-shadow-wave1-20261029/integration/private-parity \
 //     npx vitest run server/lib/speaker-shadow-parity.test.ts
 //
 // The directory holds, per meeting <name>: <name>-inputs.json (segs, sources, the CLI's
@@ -10,6 +10,8 @@
 // <name>-decide.json (hybrid.decide's own output plus the unrounded outlier distances, as
 // Python repr), <name>-proposals.json (round3, verbatim), and <name>-anchor-gate.json
 // from __fixtures__/speaker-shadow/python_anchor_gate.py over those SAME inputs.
+// Generate the new anchor-gate references in a private copy; never overwrite the
+// historical decide/proposals files or put private inputs in this repository.
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'

@@ -178,9 +178,9 @@ describe('speaker shadow runner: a run', () => {
     const [record] = w.records()
     expect(record).toMatchObject({ schema: 1, kind: 'speaker_shadow', logOnly: true, sessionId: w.session.sessionId, status: 'proposed', reason: null })
     expect(record.proposals.accepted.map((a: any) => [a.cluster, a.keepLabel, a.merge])).toEqual([
-      ['S1', 'Voice 1', ['Voice 2', 'Voice 13']], ['S2', 'Voice 3', ['Voice 10']], ['S4', 'Voice 11', ['Voice 12']],
+      ['S1', 'Voice 1', ['Voice 2', 'Voice 13']], ['S2', 'Voice 3', ['Voice 10']],
     ])
-    expect(record.gates).toEqual({ majority: 0.8, minCoveredFraction: 0.5, floorSeconds: 15, outlier: 'leave-fragment-out cluster p95', anchorRatioPostHocColumnOnly: 1.5 })
+    expect(record.gates).toEqual({ majority: 0.8, minCoveredFraction: 0.5, floorSeconds: 15, outlier: 'leave-fragment-out cluster p95', anchorRatioMax: 1.5 })
     expect(record.facts.labelsHash).toMatch(/^[0-9a-f]{64}$/)
     expect(record.resources.peakRssBytes === null || record.resources.peakRssBytes > 0).toBe(true)
     // THE GUARANTEE: every meeting file, label, profile, embedding cache and ledger is byte-identical.
@@ -191,7 +191,7 @@ describe('speaker shadow runner: a run', () => {
     expect(record.report).toBe(`reports/2026-10-28/Mac_recording__${w.session.sessionId}.md`)
     const md = readFileSync(join(w.root, record.report), 'utf8')
     expect(md.split('\n')[0]).toBe('# Mac recording')
-    expect(md).toContain('**13 voices would become 9.** FluidAudio proposed 8 merges; 4 pass every gate, 4 do not.')
+    expect(md).toContain('**13 voices would become 10.** FluidAudio proposed 8 merges; 3 pass every gate, 5 do not.')
     expect(md).toContain('### S1: merge Voice 2, Voice 13 into **Voice 1**')
     expect(md).toContain('Caution: this group also holds 3 s labelled Dana Fictional. Those labels stay as they are.')
     expect(md).toContain('- **Voice 5** would have joined Voice 1 on S1. Rejected: (c) centroid')
