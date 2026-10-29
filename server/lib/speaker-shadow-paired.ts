@@ -8,6 +8,8 @@ export type ShadowPairAlignment =
   | { status: 'unpaired' | 'ambiguous' | 'time_only' }
 export interface ShadowG2Chunk { speaker: string; elapsed: number; audioDurationMs?: number; durationMs?: number }
 export interface ShadowG2Recording { startTime: string | number; chunks: readonly ShadowG2Chunk[] }
+/** Raw anchorRatio is required for short nominations. Rounded compatibility values cannot qualify them. */
+export type PairedShadowAcousticEvidence = ShadowVoiceEntry & { anchorRatio?: number | null }
 export interface PairedShadowInput {
   macStartTime: string | number
   totalSamples: number
@@ -16,7 +18,7 @@ export interface PairedShadowInput {
   /** Final accepted groups only; rejected/co-located voices must not be added here. */
   acceptedGroups: readonly ShadowAccepted[]
   /** Existing acoustic rows, including rejected short fragments. Never recomputed from names. */
-  voiceEvidence: readonly ShadowVoiceEntry[]
+  voiceEvidence: readonly PairedShadowAcousticEvidence[]
   g2?: ShadowG2Recording
   alignment: ShadowPairAlignment
 }
@@ -35,6 +37,8 @@ export interface PairedShadowAgreement {
   diagnosticAllSpeechGate: boolean
 }
 export interface PairedShadowGroup extends PairedShadowAgreement {
+  agreementScope: 'accepted_voice_speech'
+  wholeCluster: PairedShadowAgreement & { scope: 'whole_native_cluster_speech' }
   cluster: string
   voices: string[]
   candidateName: string | null
@@ -73,7 +77,7 @@ const epoch = (value: string | number): number => typeof value === 'number' ? va
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 const SR = SHADOW_SAMPLE_RATE
 
-function accumulate(s: Stats, amount: number, production: Counts, native: Counts, g2: Counts, cluster: string | null): void {
+function accumulate(s: Stats, amount: number, production: Counts, native: Counts, g2: Counts, cluster: string | null, allowUnlabelledProduction = false): void {
   s.all += amount
   const name = g2.size === 1 ? [...g2.keys()][0] : null
   if (g2.size > 1) s.conflict += amount
@@ -83,7 +87,7 @@ function accumulate(s: Stats, amount: number, production: Counts, native: Counts
   if (!native.size) s.uncovered += amount
   else if (native.size > 1) s.nativeConflict += amount
   else if (cluster !== null && !native.has(cluster)) s.wrong += amount
-  if (production.size === 1 && native.size === 1 && cluster !== null && native.has(cluster) && name && g2.size === 1 && isPairedShadowName(name)) add(s.names, name, amount)
+  if ((production.size === 1 || (allowUnlabelledProduction && production.size === 0)) && native.size === 1 && cluster !== null && native.has(cluster) && name && g2.size === 1 && isPairedShadowName(name)) add(s.names, name, amount)
 }
 
 function agreement(s: Stats): PairedShadowAgreement {
@@ -142,15 +146,15 @@ export function evaluatePairedSpeakerShadow(input: PairedShadowInput): PairedSha
       clip(paired, lo, hi, chunk.speaker, 'G2')
     }
   }
-  const groups = new Map<string, { voices: string[]; stats: Stats }>()
+  const groups = new Map<string, { voices: string[]; stats: Stats; wholeStats: Stats }>()
   const groupOfVoice = new Map<string, string>()
   for (const group of input.acceptedGroups) {
     const voices = [group.keepLabel, ...group.merge]
     if (!group.cluster || groups.has(group.cluster) || new Set(voices).size !== voices.length || voices.some(v => !isShadowVoiceLabel(v) || groupOfVoice.has(v))) throw new Error('ambiguous accepted paired group')
-    groups.set(group.cluster, { voices, stats: stats() })
+    groups.set(group.cluster, { voices, stats: stats(), wholeStats: stats() })
     for (const voice of voices) groupOfVoice.set(voice, group.cluster)
   }
-  const evidence = new Map<string, ShadowVoiceEntry>()
+  const evidence = new Map<string, PairedShadowAcousticEvidence>()
   for (const row of input.voiceEvidence) {
     if (evidence.has(row.voice)) throw new Error('duplicate paired voice evidence')
     evidence.set(row.voice, row)
@@ -178,6 +182,12 @@ export function evaluatePairedSpeakerShadow(input: PairedShadowInput): PairedSha
       if (group) touched.add(group)
     }
     for (const cluster of touched) accumulate(groups.get(cluster)!.stats, end - at, active[0], active[1], active[2], cluster)
+    // Full native-cluster union includes Ext, rejected/named labels and no-ASR time.
+    // Concurrent different clusters/production labels remain in the denominator but cannot vote.
+    for (const cluster of active[1].keys()) {
+      const group = groups.get(cluster)
+      if (group) accumulate(group.wholeStats, end - at, active[0], active[1], active[2], cluster, true)
+    }
     if (active[0].size === 1 && active[0].has('Ext') && active[1].size === 1 && active[2].size === 1) {
       const cluster = [...active[1].keys()][0], name = [...active[2].keys()][0]
       if (groups.has(cluster) && isPairedShadowName(name)) ext.push({ lo: at, hi: end, cluster, name })
@@ -185,10 +195,13 @@ export function evaluatePairedSpeakerShadow(input: PairedShadowInput): PairedSha
   }
   const allow = qualified && safe
   const groupRows: PairedShadowGroup[] = [...groups].map(([cluster, group]) => {
-    const result = agreement(group.stats), reasons: string[] = []
+    const result = agreement(group.stats), wholeCluster = { ...agreement(group.wholeStats), scope: 'whole_native_cluster_speech' as const }, reasons: string[] = []
     if (!allow) reasons.push('paired alignment is not qualified')
-    if (!result.diagnosticAllSpeechGate) reasons.push('name requires 80% of ALL group speech and at least 30s support')
-    return { ...result, cluster, voices: group.voices, candidateName: allow && result.diagnosticAllSpeechGate ? result.diagnosticTopName : null, reasons }
+    if (!result.diagnosticAllSpeechGate) reasons.push('name requires 80% of ALL accepted-voice speech and at least 30s support')
+    if (!wholeCluster.diagnosticAllSpeechGate) reasons.push('name requires 80% of ALL native-cluster speech and at least 30s support')
+    if (result.diagnosticTopName !== wholeCluster.diagnosticTopName) reasons.push('accepted voices and whole native cluster disagree on G2 name')
+    const both = result.diagnosticAllSpeechGate && wholeCluster.diagnosticAllSpeechGate && result.diagnosticTopName === wholeCluster.diagnosticTopName
+    return { ...result, agreementScope: 'accepted_voice_speech', wholeCluster, cluster, voices: group.voices, candidateName: allow && both ? result.diagnosticTopName : null, reasons }
   })
   const named = new Map(groupRows.filter(g => g.candidateName).map(g => [g.cluster, g.candidateName!]))
   const voices = [...byVoice].map(([voice, s]) => ({ ...agreement(s), voice, cluster: evidence.get(voice)?.topCluster ?? groupOfVoice.get(voice) ?? null }))
@@ -207,7 +220,7 @@ export function evaluatePairedSpeakerShadow(input: PairedShadowInput): PairedSha
     if (!row || !finite(row.majority) || row.majority < SHADOW_GATES.majority) reasons.push('acoustic majority below 0.8')
     if (!row || !finite(row.coveredFraction) || row.coveredFraction < SHADOW_GATES.minCoveredFraction) reasons.push('acoustic coverage below 0.5')
     if (!row?.outlierPass) reasons.push('acoustic outlier check failed')
-    if (!row || !finite(row.anchorRatioPostHoc) || row.anchorRatioPostHoc < 0 || row.anchorRatioPostHoc > PAIRED_SHADOW_GATES.shortAnchorRatio) reasons.push('anchor ratio unavailable or above 1.1')
+    if (!row || !finite(row.anchorRatio) || row.anchorRatio < 0 || row.anchorRatio > PAIRED_SHADOW_GATES.shortAnchorRatio) reasons.push('raw anchor ratio unavailable or above 1.1')
     const name = voice.cluster ? named.get(voice.cluster) : undefined
     const support = voice.names.find(n => n.name === name)
     if (!name || !support || support.fractionOfAllSpeech < PAIRED_SHADOW_GATES.nameAllSpeechFraction || voice.diagnosticTopName !== name) reasons.push('fragment and group lack same-time G2 name agreement')
@@ -225,14 +238,22 @@ export function renderPairedSpeakerShadow(report: PairedShadowReport): string {
   const lines = ['## Paired G2 diagnostics', '',
     `Alignment: **${report.alignmentStatus}**. ${report.candidateNominationAllowed ? 'Provisional shadow nominations are allowed.' : 'Nominations withheld; overlap statistics are diagnostic only.'}`,
     'Saved G2 names are machine labels. This comparison makes no accuracy or human-truth claim.', '',
-    '| Cluster | All group speech | Unique known-name time | Top name support / all speech | Top name support / known-name time | Name nomination |',
+    'Accepted-voice scope: only the final accepted keep/merge voices; this is not the whole native cluster.', '',
+    '| Cluster | All accepted-voice speech | Unique known-name time | Top name support / all speech | Top name support / known-name time | Name nomination |',
     '|---|---:|---:|---|---|---|']
   for (const group of report.groups) {
     const best = group.names[0]
     const support = best ? `${esc(best.name)}: ${seconds(best.seconds)}` : 'None'
     lines.push(`| ${esc(group.cluster)} | ${seconds(group.allSpeechSeconds)} | ${seconds(group.knownNameSeconds)} | ${support}; ${((best?.fractionOfAllSpeech ?? 0) * 100).toFixed(1)}% | ${((best?.fractionOfKnownName ?? 0) * 100).toFixed(1)}% | ${group.candidateName ? esc(group.candidateName) + ' (provisional)' : 'Withheld'} |`)
   }
-  lines.push('', 'Name support requires at least 80% of ALL group speech and 30 seconds. Known-name percentages alone cannot qualify a name.', '',
+  lines.push('', 'Whole native-cluster scope includes Ext, other source labels and native speech without ASR labels.', '',
+    '| Cluster | All native-cluster speech | Unique known-name time | Top name support / all speech | Top name support / known-name time |',
+    '|---|---:|---:|---|---|')
+  for (const group of report.groups) {
+    const whole = group.wholeCluster, best = whole.names[0]
+    lines.push(`| ${esc(group.cluster)} | ${seconds(whole.allSpeechSeconds)} | ${seconds(whole.knownNameSeconds)} | ${best ? `${esc(best.name)}: ${seconds(best.seconds)}` : 'None'}; ${((best?.fractionOfAllSpeech ?? 0) * 100).toFixed(1)}% | ${((best?.fractionOfKnownName ?? 0) * 100).toFixed(1)}% |`)
+  }
+  lines.push('', 'A name must pass 80% of ALL speech and 30 seconds in BOTH scopes with the same name. Known-name percentages alone cannot qualify it.', '',
     '| Voice | All speech | Known-name time | Top name / all speech | Production conflict | Native conflict / uncovered |',
     '|---|---:|---:|---|---:|---|')
   for (const voice of report.voices) {
