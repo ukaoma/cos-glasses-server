@@ -16,7 +16,7 @@ import { localFirstMeetingsCapability } from '../lib/local-first-meetings-contra
 import { isSileroAvailable } from '../lib/vad-silero.js'
 import { profileProvenanceSummary, speakerModelState, speakerReadiness } from '../lib/speaker-embeddings.js'
 import { nemotronLive } from '../lib/nemotron-live.js'
-import { speakerShadowHealth } from '../lib/speaker-shadow.js'
+import { speakerShadowHealthFields } from '../lib/speaker-shadow.js'
 import { finalPassSnapshot } from '../lib/nemotron-final.js'
 import { chunkEmbeddingStoreStats } from '../lib/chunk-embedding-store.js'
 import { mintDisplayTicket, DISPLAY_TICKET_TTL_SECONDS } from '../lib/display-ticket.js'
@@ -580,9 +580,10 @@ healthRouter.get('/health', async (_req, res) => {
     // count only (health is public); the items and their Retry are behind the token at
     // GET /api/maintenance/status.
     crash_loop_parking: crashLoopParkingHealth(),
-    // 6.95.0: speaker merge shadow mode. Codes and counts only (health is public): the
-    // proposals and the last error's text are behind the token at /api/speaker-shadow/*.
-    speaker_shadow: speakerShadowHealth(),
+    // 6.95.0: speaker merge shadow mode, only while it is on (absent when off). Codes and counts
+    // only (health is public): the proposals and the last error's text are behind the token at
+    // /api/speaker-shadow/*.
+    ...speakerShadowHealthFields(),
     // Key lanes (plan v4 3.1): `details.keyLanes` only while enabled. Absent, never null, when off.
     ...keyLanesHealthFields(),
   })

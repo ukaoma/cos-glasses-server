@@ -80,4 +80,10 @@ describe('speaker shadow: the log-only contract in source', () => {
     expect(index).toMatch(/configureSpeakerShadow\(\{\s*captureActive: \(\) => getTranscriptionSessionLiveness\(\)\.live > 0 \|\| speakerShadowLeaseActive\(\),/)
     expect(index).toMatch(/app\.use\('\/api', createSpeakerShadowRouter\(\)\)/)
   })
+
+  it('/api/health spreads the shadow fields, so the key is absent while shadow mode is off', () => {
+    const health = read('../routes/health.ts')
+    expect(health.match(/\.\.\.speakerShadowHealthFields\(\),/g)?.length).toBe(1)
+    expect(health).not.toMatch(/speaker_shadow:/)
+  })
 })

@@ -350,6 +350,14 @@ describe('speaker shadow runner: restart and records', () => {
     expect((await shadow.readSpeakerShadowRecords(root, { limit: 5 })).map(r => r.sessionId)).toEqual(['new', 'old'])
   })
 
+  it('health has no speaker_shadow key while shadow mode is off, and codes only while on', () => {
+    expect(shadow.speakerShadowHealthFields({})).toEqual({})
+    expect(shadow.speakerShadowHealthFields({ COS_SPEAKER_SHADOW: '0' })).toEqual({})
+    const on = shadow.speakerShadowHealthFields(ON)
+    expect(Object.keys(on)).toEqual(['speaker_shadow'])
+    expect(JSON.stringify(on)).not.toMatch(/mac_|\/Users\/|detail/)
+  })
+
   it('health carries codes and counts only', () => {
     const health = shadow.speakerShadowHealth()
     expect(Object.keys(health).sort()).toEqual(['breaker', 'dailyCap', 'deferredReason', 'enabled', 'lastError', 'lastRun', 'queued', 'runsToday', 'state'])

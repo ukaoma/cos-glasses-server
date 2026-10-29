@@ -755,7 +755,8 @@ voice profile, embedding cache or correction ledger is written.
   only ("cluster also holds 65 s of ...").
 - **Read:** `GET /api/speaker-shadow/proposals?limit=10&sessionId=mac_<uuid>` (token
   required) returns the records, newest first; `GET /api/speaker-shadow/status` the queue,
-  cap, breaker and last error. `/api/health` carries `speaker_shadow` (codes and counts only).
+  cap, breaker and last error. While it is on, `/api/health` carries `speaker_shadow` (codes and
+  counts only); when off the key is absent.
   Records are kept in `~/.cos-glasses/data/speaker-shadow/proposals.jsonl` (rotated past 8 MB).
 
 ### iPhone microphone meetings (6.93.0, off by default)

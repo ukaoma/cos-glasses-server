@@ -74,6 +74,7 @@ const mutations = [
   ['live-at-start', S, "if (this.deps.captureActive() || !this.deps.admissionsOpen()) { this.schedule(DEFER_RETRY_MS, 'live_work'); return }", '', [tRunner]],
   ['no-probe-runs', S, "if (!this.deps.captureActive) { this.schedule(DEFER_RETRY_MS, 'no_live_probe'); return }", "if (!this.deps.captureActive) this.deps.captureActive = () => false", [tRunner]],
   ['once-per-meeting', S, 'if (state.done.includes(input.sessionId) || state.queue.some(q => q.sessionId === input.sessionId)) return', '', [tRunner]],
+  ['health-key-when-off', S, '  if (!speakerShadowEnabled(env)) return {}\n  return { speaker_shadow: speakerShadowHealth() }', '  return { speaker_shadow: speakerShadowHealth() }', [tRunner]],
   ['lease-dictation', S, "'prompt_draft_write', 'prompt_draft_warm', 'prompt_draft_finalize',", "'prompt_draft_write', 'prompt_draft_warm',", [tRunner]],
 ]
 

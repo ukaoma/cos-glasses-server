@@ -608,6 +608,15 @@ export function notifySpeakerShadowFinalized(input: { sessionId: string; sidecar
   try { getSpeakerShadowRunner().notifyFinalized(input) } catch (error) { console.warn('[speaker-shadow] unavailable:', describe(error)) }
 }
 
+/**
+ * `/api/health`: `speaker_shadow` only while shadow mode is on. Absent, never null, when off, so
+ * the public health shape is unchanged by default (pinned by health-6890-parity.test.ts).
+ */
+export function speakerShadowHealthFields(env: NodeJS.ProcessEnv = process.env): { speaker_shadow?: Omit<SpeakerShadowSnapshot, 'lastErrorDetail'> } {
+  if (!speakerShadowEnabled(env)) return {}
+  return { speaker_shadow: speakerShadowHealth() }
+}
+
 /** For /api/health (codes and counts only, no session ids, paths or error text). */
 export function speakerShadowHealth(): Omit<SpeakerShadowSnapshot, 'lastErrorDetail'> {
   try {
