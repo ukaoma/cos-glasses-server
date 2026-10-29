@@ -1,0 +1,5687 @@
+{
+ "source": "community-1-fluidaudio-v1/scripts/hybrid.py decide() on CPython 3.15.0",
+ "variants": {
+  "base": {
+   "segs": [
+    [
+     0,
+     160000,
+     "Voice 1"
+    ],
+    [
+     160000,
+     320000,
+     "Voice 1"
+    ],
+    [
+     320000,
+     480000,
+     "Voice 1"
+    ],
+    [
+     480000,
+     640000,
+     "Voice 1"
+    ],
+    [
+     640000,
+     800000,
+     "Voice 2"
+    ],
+    [
+     800000,
+     960000,
+     "Voice 2"
+    ],
+    [
+     960000,
+     992000,
+     "Voice 2"
+    ],
+    [
+     992000,
+     1120000,
+     "Voice 3"
+    ],
+    [
+     1120000,
+     1280000,
+     "Voice 3"
+    ],
+    [
+     1280000,
+     1440000,
+     "Voice 3"
+    ],
+    [
+     1440000,
+     1600000,
+     "Voice 3"
+    ],
+    [
+     1600000,
+     1760000,
+     "Voice 4"
+    ],
+    [
+     1760000,
+     1920000,
+     "Voice 5"
+    ],
+    [
+     1920000,
+     2080000,
+     "Voice 5"
+    ],
+    [
+     2080000,
+     2240000,
+     "Voice 6"
+    ],
+    [
+     2240000,
+     2400000,
+     "Voice 6"
+    ],
+    [
+     2400000,
+     2560000,
+     "Voice 7"
+    ],
+    [
+     2560000,
+     2720000,
+     "Voice 7"
+    ],
+    [
+     2720000,
+     2768000,
+     "Dana Fictional"
+    ],
+    [
+     2768000,
+     2880000,
+     "Voice 8"
+    ],
+    [
+     2880000,
+     3040000,
+     "Voice 8"
+    ],
+    [
+     3040000,
+     3200000,
+     "Voice 8"
+    ],
+    [
+     3200000,
+     3248000,
+     "Voice 8"
+    ],
+    [
+     3248000,
+     3360000,
+     "Voice 9"
+    ],
+    [
+     3360000,
+     3504000,
+     "Voice 9"
+    ],
+    [
+     3504000,
+     3520000,
+     "Voice 10"
+    ],
+    [
+     3520000,
+     3680000,
+     "Voice 10"
+    ],
+    [
+     3680000,
+     3760000,
+     "Voice 10"
+    ],
+    [
+     3760000,
+     3840000,
+     "Voice 11"
+    ],
+    [
+     3840000,
+     4000000,
+     "Voice 11"
+    ],
+    [
+     4000000,
+     4160000,
+     "Voice 11"
+    ],
+    [
+     4160000,
+     4240000,
+     "Voice 11"
+    ],
+    [
+     4240000,
+     4320000,
+     "Voice 12"
+    ],
+    [
+     4320000,
+     4480000,
+     "Voice 12"
+    ],
+    [
+     4480000,
+     4560000,
+     "Voice 12"
+    ],
+    [
+     4560000,
+     4640000,
+     "Ext"
+    ],
+    [
+     4640000,
+     4800000,
+     "Ext"
+    ],
+    [
+     4800000,
+     4960000,
+     "Ext"
+    ],
+    [
+     4960000,
+     5120000,
+     "Ext"
+    ],
+    [
+     5120000,
+     5200000,
+     "Ext"
+    ],
+    [
+     5200000,
+     5280000,
+     "Voice 13"
+    ],
+    [
+     5280000,
+     5440000,
+     "Voice 13"
+    ]
+   ],
+   "native": [
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 0,
+     "endTimeSeconds": 40,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 40,
+     "endTimeSeconds": 62,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 62,
+     "endTimeSeconds": 100,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 100,
+     "endTimeSeconds": 110,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 110,
+     "endTimeSeconds": 130,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 130,
+     "endTimeSeconds": 142,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 142,
+     "endTimeSeconds": 150,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 150,
+     "endTimeSeconds": 158,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 170,
+     "endTimeSeconds": 173,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 173,
+     "endTimeSeconds": 203,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 219,
+     "endTimeSeconds": 235,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 235,
+     "endTimeSeconds": 265,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 265,
+     "endTimeSeconds": 285,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 285,
+     "endTimeSeconds": 325,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 325,
+     "endTimeSeconds": 340,
+     "qualityScore": 1
+    }
+   ],
+   "dropEmbeddings": [],
+   "extraEmbeddings": [],
+   "itemVoices": [
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    null,
+    null,
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13"
+   ],
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 56,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1208,
+      "clusterP95Distance": 0.6549
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 74,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0728,
+      "clusterP95Distance": 0.7559
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 76,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.015,
+      "clusterP95Distance": 0.1855
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ]
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ]
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 58,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.009,
+      "clusterP95Distance": 0.2873
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.064,
+      "clusterP95Distance": 0.7836
+     },
+     "eligible": true,
+     "reasons": []
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2",
+      "Voice 13"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": [
+      "Voice 12"
+     ]
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 13": "Voice 1",
+    "Voice 10": "Voice 3",
+    "Voice 12": "Voice 11"
+   },
+   "proposed": 8,
+   "accepted": 4,
+   "agree": 297,
+   "withOut": 297,
+   "items": 297,
+   "voiceBefore": 13,
+   "voiceAfter": 9
+  },
+  "voice13_14995": {
+   "segs": [
+    [
+     0,
+     160000,
+     "Voice 1"
+    ],
+    [
+     160000,
+     320000,
+     "Voice 1"
+    ],
+    [
+     320000,
+     480000,
+     "Voice 1"
+    ],
+    [
+     480000,
+     640000,
+     "Voice 1"
+    ],
+    [
+     640000,
+     800000,
+     "Voice 2"
+    ],
+    [
+     800000,
+     960000,
+     "Voice 2"
+    ],
+    [
+     960000,
+     992000,
+     "Voice 2"
+    ],
+    [
+     992000,
+     1120000,
+     "Voice 3"
+    ],
+    [
+     1120000,
+     1280000,
+     "Voice 3"
+    ],
+    [
+     1280000,
+     1440000,
+     "Voice 3"
+    ],
+    [
+     1440000,
+     1600000,
+     "Voice 3"
+    ],
+    [
+     1600000,
+     1760000,
+     "Voice 4"
+    ],
+    [
+     1760000,
+     1920000,
+     "Voice 5"
+    ],
+    [
+     1920000,
+     2080000,
+     "Voice 5"
+    ],
+    [
+     2080000,
+     2240000,
+     "Voice 6"
+    ],
+    [
+     2240000,
+     2400000,
+     "Voice 6"
+    ],
+    [
+     2400000,
+     2560000,
+     "Voice 7"
+    ],
+    [
+     2560000,
+     2720000,
+     "Voice 7"
+    ],
+    [
+     2720000,
+     2768000,
+     "Dana Fictional"
+    ],
+    [
+     2768000,
+     2880000,
+     "Voice 8"
+    ],
+    [
+     2880000,
+     3040000,
+     "Voice 8"
+    ],
+    [
+     3040000,
+     3200000,
+     "Voice 8"
+    ],
+    [
+     3200000,
+     3248000,
+     "Voice 8"
+    ],
+    [
+     3248000,
+     3360000,
+     "Voice 9"
+    ],
+    [
+     3360000,
+     3504000,
+     "Voice 9"
+    ],
+    [
+     3504000,
+     3520000,
+     "Voice 10"
+    ],
+    [
+     3520000,
+     3680000,
+     "Voice 10"
+    ],
+    [
+     3680000,
+     3760000,
+     "Voice 10"
+    ],
+    [
+     3760000,
+     3840000,
+     "Voice 11"
+    ],
+    [
+     3840000,
+     4000000,
+     "Voice 11"
+    ],
+    [
+     4000000,
+     4160000,
+     "Voice 11"
+    ],
+    [
+     4160000,
+     4240000,
+     "Voice 11"
+    ],
+    [
+     4240000,
+     4320000,
+     "Voice 12"
+    ],
+    [
+     4320000,
+     4480000,
+     "Voice 12"
+    ],
+    [
+     4480000,
+     4560000,
+     "Voice 12"
+    ],
+    [
+     4560000,
+     4640000,
+     "Ext"
+    ],
+    [
+     4640000,
+     4800000,
+     "Ext"
+    ],
+    [
+     4800000,
+     4960000,
+     "Ext"
+    ],
+    [
+     4960000,
+     5120000,
+     "Ext"
+    ],
+    [
+     5120000,
+     5200000,
+     "Ext"
+    ],
+    [
+     5200000,
+     5280000,
+     "Voice 13"
+    ],
+    [
+     5280000,
+     5439920,
+     "Voice 13"
+    ]
+   ],
+   "native": [
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 0,
+     "endTimeSeconds": 40,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 40,
+     "endTimeSeconds": 62,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 62,
+     "endTimeSeconds": 100,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 100,
+     "endTimeSeconds": 110,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 110,
+     "endTimeSeconds": 130,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 130,
+     "endTimeSeconds": 142,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 142,
+     "endTimeSeconds": 150,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 150,
+     "endTimeSeconds": 158,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 170,
+     "endTimeSeconds": 173,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 173,
+     "endTimeSeconds": 203,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 219,
+     "endTimeSeconds": 235,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 235,
+     "endTimeSeconds": 265,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 265,
+     "endTimeSeconds": 285,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 285,
+     "endTimeSeconds": 325,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 325,
+     "endTimeSeconds": 340,
+     "qualityScore": 1
+    }
+   ],
+   "dropEmbeddings": [],
+   "extraEmbeddings": [],
+   "itemVoices": [
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    null,
+    null,
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13"
+   ],
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 56,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1208,
+      "clusterP95Distance": 0.6549
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 74,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0728,
+      "clusterP95Distance": 0.7559
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 76,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.015,
+      "clusterP95Distance": 0.1855
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ]
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ]
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 58,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.009,
+      "clusterP95Distance": 0.2873
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 13": {
+     "seconds": 14.99,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.064,
+      "clusterP95Distance": 0.7836
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 15.0 s < 15 s"
+     ]
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": [
+      "Voice 12"
+     ]
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    {
+     "voice": "Voice 13",
+     "cluster": "S1",
+     "reasons": [
+      "(b) 15.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 10": "Voice 3",
+    "Voice 12": "Voice 11"
+   },
+   "proposed": 8,
+   "accepted": 3,
+   "agree": 297,
+   "withOut": 297,
+   "items": 297,
+   "voiceBefore": 13,
+   "voiceAfter": 10
+  },
+  "voice6_majority_07996": {
+   "segs": [
+    [
+     0,
+     160000,
+     "Voice 1"
+    ],
+    [
+     160000,
+     320000,
+     "Voice 1"
+    ],
+    [
+     320000,
+     480000,
+     "Voice 1"
+    ],
+    [
+     480000,
+     640000,
+     "Voice 1"
+    ],
+    [
+     640000,
+     800000,
+     "Voice 2"
+    ],
+    [
+     800000,
+     960000,
+     "Voice 2"
+    ],
+    [
+     960000,
+     992000,
+     "Voice 2"
+    ],
+    [
+     992000,
+     1120000,
+     "Voice 3"
+    ],
+    [
+     1120000,
+     1280000,
+     "Voice 3"
+    ],
+    [
+     1280000,
+     1440000,
+     "Voice 3"
+    ],
+    [
+     1440000,
+     1600000,
+     "Voice 3"
+    ],
+    [
+     1600000,
+     1760000,
+     "Voice 4"
+    ],
+    [
+     1760000,
+     1920000,
+     "Voice 5"
+    ],
+    [
+     1920000,
+     2080000,
+     "Voice 5"
+    ],
+    [
+     2080000,
+     2240000,
+     "Voice 6"
+    ],
+    [
+     2240000,
+     2400000,
+     "Voice 6"
+    ],
+    [
+     2400000,
+     2560000,
+     "Voice 7"
+    ],
+    [
+     2560000,
+     2720000,
+     "Voice 7"
+    ],
+    [
+     2720000,
+     2768000,
+     "Dana Fictional"
+    ],
+    [
+     2768000,
+     2880000,
+     "Voice 8"
+    ],
+    [
+     2880000,
+     3040000,
+     "Voice 8"
+    ],
+    [
+     3040000,
+     3200000,
+     "Voice 8"
+    ],
+    [
+     3200000,
+     3248000,
+     "Voice 8"
+    ],
+    [
+     3248000,
+     3360000,
+     "Voice 9"
+    ],
+    [
+     3360000,
+     3504000,
+     "Voice 9"
+    ],
+    [
+     3504000,
+     3520000,
+     "Voice 10"
+    ],
+    [
+     3520000,
+     3680000,
+     "Voice 10"
+    ],
+    [
+     3680000,
+     3760000,
+     "Voice 10"
+    ],
+    [
+     3760000,
+     3840000,
+     "Voice 11"
+    ],
+    [
+     3840000,
+     4000000,
+     "Voice 11"
+    ],
+    [
+     4000000,
+     4160000,
+     "Voice 11"
+    ],
+    [
+     4160000,
+     4240000,
+     "Voice 11"
+    ],
+    [
+     4240000,
+     4320000,
+     "Voice 12"
+    ],
+    [
+     4320000,
+     4480000,
+     "Voice 12"
+    ],
+    [
+     4480000,
+     4560000,
+     "Voice 12"
+    ],
+    [
+     4560000,
+     4640000,
+     "Ext"
+    ],
+    [
+     4640000,
+     4800000,
+     "Ext"
+    ],
+    [
+     4800000,
+     4960000,
+     "Ext"
+    ],
+    [
+     4960000,
+     5120000,
+     "Ext"
+    ],
+    [
+     5120000,
+     5200000,
+     "Ext"
+    ],
+    [
+     5200000,
+     5280000,
+     "Voice 13"
+    ],
+    [
+     5280000,
+     5440000,
+     "Voice 13"
+    ]
+   ],
+   "native": [
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 0,
+     "endTimeSeconds": 40,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 40,
+     "endTimeSeconds": 62,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 62,
+     "endTimeSeconds": 100,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 100,
+     "endTimeSeconds": 110,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 110,
+     "endTimeSeconds": 130,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 130,
+     "endTimeSeconds": 145.992,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 145.992,
+     "endTimeSeconds": 150,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 150,
+     "endTimeSeconds": 158,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 170,
+     "endTimeSeconds": 173,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 173,
+     "endTimeSeconds": 203,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 219,
+     "endTimeSeconds": 235,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 235,
+     "endTimeSeconds": 265,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 265,
+     "endTimeSeconds": 285,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 285,
+     "endTimeSeconds": 325,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 325,
+     "endTimeSeconds": 340,
+     "qualityScore": 1
+    }
+   ],
+   "dropEmbeddings": [],
+   "extraEmbeddings": [],
+   "itemVoices": [
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    null,
+    null,
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13"
+   ],
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 56,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1208,
+      "clusterP95Distance": 0.6549
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 74,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0728,
+      "clusterP95Distance": 0.7559
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 76,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.015,
+      "clusterP95Distance": 0.1855
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.8,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ]
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ]
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 58,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.009,
+      "clusterP95Distance": 0.2873
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.064,
+      "clusterP95Distance": 0.7836
+     },
+     "eligible": true,
+     "reasons": []
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2",
+      "Voice 13"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 6",
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": [
+      "Voice 12"
+     ]
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 13": "Voice 1",
+    "Voice 6": "Voice 3",
+    "Voice 10": "Voice 3",
+    "Voice 12": "Voice 11"
+   },
+   "proposed": 8,
+   "accepted": 5,
+   "agree": 294,
+   "withOut": 297,
+   "items": 297,
+   "voiceBefore": 13,
+   "voiceAfter": 8
+  },
+  "thin_embeddings": {
+   "segs": [
+    [
+     0,
+     160000,
+     "Voice 1"
+    ],
+    [
+     160000,
+     320000,
+     "Voice 1"
+    ],
+    [
+     320000,
+     480000,
+     "Voice 1"
+    ],
+    [
+     480000,
+     640000,
+     "Voice 1"
+    ],
+    [
+     640000,
+     800000,
+     "Voice 2"
+    ],
+    [
+     800000,
+     960000,
+     "Voice 2"
+    ],
+    [
+     960000,
+     992000,
+     "Voice 2"
+    ],
+    [
+     992000,
+     1120000,
+     "Voice 3"
+    ],
+    [
+     1120000,
+     1280000,
+     "Voice 3"
+    ],
+    [
+     1280000,
+     1440000,
+     "Voice 3"
+    ],
+    [
+     1440000,
+     1600000,
+     "Voice 3"
+    ],
+    [
+     1600000,
+     1760000,
+     "Voice 4"
+    ],
+    [
+     1760000,
+     1920000,
+     "Voice 5"
+    ],
+    [
+     1920000,
+     2080000,
+     "Voice 5"
+    ],
+    [
+     2080000,
+     2240000,
+     "Voice 6"
+    ],
+    [
+     2240000,
+     2400000,
+     "Voice 6"
+    ],
+    [
+     2400000,
+     2560000,
+     "Voice 7"
+    ],
+    [
+     2560000,
+     2720000,
+     "Voice 7"
+    ],
+    [
+     2720000,
+     2768000,
+     "Dana Fictional"
+    ],
+    [
+     2768000,
+     2880000,
+     "Voice 8"
+    ],
+    [
+     2880000,
+     3040000,
+     "Voice 8"
+    ],
+    [
+     3040000,
+     3200000,
+     "Voice 8"
+    ],
+    [
+     3200000,
+     3248000,
+     "Voice 8"
+    ],
+    [
+     3248000,
+     3360000,
+     "Voice 9"
+    ],
+    [
+     3360000,
+     3504000,
+     "Voice 9"
+    ],
+    [
+     3504000,
+     3520000,
+     "Voice 10"
+    ],
+    [
+     3520000,
+     3680000,
+     "Voice 10"
+    ],
+    [
+     3680000,
+     3760000,
+     "Voice 10"
+    ],
+    [
+     3760000,
+     3840000,
+     "Voice 11"
+    ],
+    [
+     3840000,
+     4000000,
+     "Voice 11"
+    ],
+    [
+     4000000,
+     4160000,
+     "Voice 11"
+    ],
+    [
+     4160000,
+     4240000,
+     "Voice 11"
+    ],
+    [
+     4240000,
+     4320000,
+     "Voice 12"
+    ],
+    [
+     4320000,
+     4480000,
+     "Voice 12"
+    ],
+    [
+     4480000,
+     4560000,
+     "Voice 12"
+    ],
+    [
+     4560000,
+     4640000,
+     "Ext"
+    ],
+    [
+     4640000,
+     4800000,
+     "Ext"
+    ],
+    [
+     4800000,
+     4960000,
+     "Ext"
+    ],
+    [
+     4960000,
+     5120000,
+     "Ext"
+    ],
+    [
+     5120000,
+     5200000,
+     "Ext"
+    ],
+    [
+     5200000,
+     5280000,
+     "Voice 13"
+    ],
+    [
+     5280000,
+     5440000,
+     "Voice 13"
+    ]
+   ],
+   "native": [
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 0,
+     "endTimeSeconds": 40,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 40,
+     "endTimeSeconds": 62,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 62,
+     "endTimeSeconds": 100,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 100,
+     "endTimeSeconds": 110,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 110,
+     "endTimeSeconds": 130,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 130,
+     "endTimeSeconds": 142,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 142,
+     "endTimeSeconds": 150,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 150,
+     "endTimeSeconds": 158,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 170,
+     "endTimeSeconds": 173,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 173,
+     "endTimeSeconds": 203,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 219,
+     "endTimeSeconds": 235,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 235,
+     "endTimeSeconds": 265,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 265,
+     "endTimeSeconds": 285,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 285,
+     "endTimeSeconds": 325,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 325,
+     "endTimeSeconds": 340,
+     "qualityScore": 1
+    }
+   ],
+   "dropEmbeddings": [
+    200,
+    201,
+    202,
+    203,
+    204,
+    205,
+    206,
+    207,
+    208,
+    209,
+    210,
+    211,
+    212,
+    213,
+    214,
+    215,
+    216,
+    217,
+    218,
+    219,
+    220,
+    221,
+    222,
+    223,
+    224,
+    244,
+    245,
+    246,
+    247,
+    248,
+    249,
+    250,
+    251,
+    252,
+    253,
+    254,
+    255,
+    256,
+    257,
+    258,
+    259,
+    260,
+    261,
+    262,
+    263,
+    264,
+    265,
+    266,
+    267,
+    268,
+    269,
+    270,
+    271,
+    272,
+    273,
+    274,
+    275,
+    276,
+    277,
+    278,
+    279,
+    280,
+    281,
+    282,
+    285,
+    286,
+    287,
+    288,
+    289,
+    290,
+    291,
+    292,
+    293,
+    294,
+    295,
+    296
+   ],
+   "extraEmbeddings": [],
+   "itemVoices": [
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    null,
+    null,
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 13",
+    "Voice 13"
+   ],
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 44,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.2151,
+      "clusterP95Distance": 0.5279
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 62,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1039,
+      "clusterP95Distance": 0.692
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0156,
+      "clusterP95Distance": 0.1798
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.016 > p95 0.180"
+     ]
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ]
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ]
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 4,
+     "otherClusterMembers": 19,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0271,
+      "clusterP95Distance": 0.163
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 4,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 19, others 4)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) insufficient embeddings (fragment 19, others 4)"
+     ]
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 2,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 2, others 81)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) insufficient embeddings (fragment 2, others 81)"
+     ]
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": []
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.016 > p95 0.180"
+     ]
+    },
+    {
+     "voice": "Voice 13",
+     "cluster": "S1",
+     "reasons": [
+      "(c) insufficient embeddings (fragment 2, others 81)"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    {
+     "voice": "Voice 11",
+     "cluster": "S4",
+     "reasons": [
+      "no other eligible voice in this cluster"
+     ]
+    },
+    {
+     "voice": "Voice 12",
+     "cluster": "S4",
+     "reasons": [
+      "(c) insufficient embeddings (fragment 19, others 4)"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 10": "Voice 3"
+   },
+   "proposed": 8,
+   "accepted": 2,
+   "agree": 221,
+   "withOut": 221,
+   "items": 221,
+   "voiceBefore": 13,
+   "voiceAfter": 11
+  },
+  "straddling_window": {
+   "segs": [
+    [
+     0,
+     160000,
+     "Voice 1"
+    ],
+    [
+     160000,
+     320000,
+     "Voice 1"
+    ],
+    [
+     320000,
+     480000,
+     "Voice 1"
+    ],
+    [
+     480000,
+     640000,
+     "Voice 1"
+    ],
+    [
+     640000,
+     800000,
+     "Voice 2"
+    ],
+    [
+     800000,
+     960000,
+     "Voice 2"
+    ],
+    [
+     960000,
+     992000,
+     "Voice 2"
+    ],
+    [
+     992000,
+     1120000,
+     "Voice 3"
+    ],
+    [
+     1120000,
+     1280000,
+     "Voice 3"
+    ],
+    [
+     1280000,
+     1440000,
+     "Voice 3"
+    ],
+    [
+     1440000,
+     1600000,
+     "Voice 3"
+    ],
+    [
+     1600000,
+     1760000,
+     "Voice 4"
+    ],
+    [
+     1760000,
+     1920000,
+     "Voice 5"
+    ],
+    [
+     1920000,
+     2080000,
+     "Voice 5"
+    ],
+    [
+     2080000,
+     2240000,
+     "Voice 6"
+    ],
+    [
+     2240000,
+     2400000,
+     "Voice 6"
+    ],
+    [
+     2400000,
+     2560000,
+     "Voice 7"
+    ],
+    [
+     2560000,
+     2720000,
+     "Voice 7"
+    ],
+    [
+     2720000,
+     2768000,
+     "Dana Fictional"
+    ],
+    [
+     2768000,
+     2880000,
+     "Voice 8"
+    ],
+    [
+     2880000,
+     3040000,
+     "Voice 8"
+    ],
+    [
+     3040000,
+     3200000,
+     "Voice 8"
+    ],
+    [
+     3200000,
+     3248000,
+     "Voice 8"
+    ],
+    [
+     3248000,
+     3360000,
+     "Voice 9"
+    ],
+    [
+     3360000,
+     3504000,
+     "Voice 9"
+    ],
+    [
+     3504000,
+     3520000,
+     "Voice 10"
+    ],
+    [
+     3520000,
+     3680000,
+     "Voice 10"
+    ],
+    [
+     3680000,
+     3760000,
+     "Voice 10"
+    ],
+    [
+     3760000,
+     3840000,
+     "Voice 11"
+    ],
+    [
+     3840000,
+     4000000,
+     "Voice 11"
+    ],
+    [
+     4000000,
+     4160000,
+     "Voice 11"
+    ],
+    [
+     4160000,
+     4240000,
+     "Voice 11"
+    ],
+    [
+     4240000,
+     4320000,
+     "Voice 12"
+    ],
+    [
+     4320000,
+     4480000,
+     "Voice 12"
+    ],
+    [
+     4480000,
+     4560000,
+     "Voice 12"
+    ],
+    [
+     4560000,
+     4640000,
+     "Ext"
+    ],
+    [
+     4640000,
+     4800000,
+     "Ext"
+    ],
+    [
+     4800000,
+     4960000,
+     "Ext"
+    ],
+    [
+     4960000,
+     5120000,
+     "Ext"
+    ],
+    [
+     5120000,
+     5200000,
+     "Ext"
+    ],
+    [
+     5200000,
+     5280000,
+     "Voice 13"
+    ],
+    [
+     5280000,
+     5440000,
+     "Voice 13"
+    ]
+   ],
+   "native": [
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 0,
+     "endTimeSeconds": 40,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 40,
+     "endTimeSeconds": 62,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 62,
+     "endTimeSeconds": 100,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 100,
+     "endTimeSeconds": 110,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 110,
+     "endTimeSeconds": 130,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 130,
+     "endTimeSeconds": 142,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 142,
+     "endTimeSeconds": 150,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 150,
+     "endTimeSeconds": 158,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 170,
+     "endTimeSeconds": 173,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 173,
+     "endTimeSeconds": 203,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 219,
+     "endTimeSeconds": 235,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 235,
+     "endTimeSeconds": 265,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 265,
+     "endTimeSeconds": 285,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 285,
+     "endTimeSeconds": 325,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 325,
+     "endTimeSeconds": 340,
+     "qualityScore": 1
+    }
+   ],
+   "dropEmbeddings": [],
+   "extraEmbeddings": [
+    {
+     "startTime": 169.5,
+     "endTime": 171.5,
+     "cluster": 0,
+     "embedding256": [
+      -0.05327928502333758,
+      -0.023691663367653132,
+      -0.13323672186909014,
+      -0.08037010819910823,
+      -0.06422772528154191,
+      0.05411995559403186,
+      -0.059071073321979056,
+      0.06868583048386492,
+      -0.04965558455706644,
+      -0.038905177593645174,
+      0.0011079003482873453,
+      -0.060916594448653424,
+      0.08635834954796719,
+      0.032192142133144155,
+      -0.06857951628584688,
+      0.13899328719266735,
+      0.09381625316133924,
+      0.07544532704327528,
+      -0.08343626254177863,
+      -0.0435864310022876,
+      0.1253884612396915,
+      0.004144894048744071,
+      0.07082091223959353,
+      0.10720066743856528,
+      -0.05582582620672771,
+      -0.1815222384165039,
+      0.016908135156095478,
+      -0.013208785249953663,
+      -0.036984743659246366,
+      -0.03834834749887057,
+      -0.011463749894328697,
+      0.0307658960523418,
+      -0.03319640879058364,
+      -0.09501488385933118,
+      -0.0011419133368066811,
+      0.11603876399034313,
+      0.0402119726332016,
+      -0.11134042919719125,
+      0.03908460319812742,
+      -0.035957190622450966,
+      0.08460780767889137,
+      -0.020040551153331726,
+      -0.09616062615622112,
+      0.16777306241033324,
+      -0.10025672573427187,
+      0.1823552087636397,
+      -0.11801430931172102,
+      0.05589814318255207,
+      -0.056167606349455085,
+      0.023035914154540125,
+      -0.02816386201111526,
+      -0.10339475551027427,
+      -0.08756037461429547,
+      0.006089077346671731,
+      0.0172515439905636,
+      -0.05367021503690837,
+      0.03449702391022357,
+      -0.02041485457075904,
+      -0.050650681618499144,
+      0.028386486677329768,
+      -0.035434878197591266,
+      -0.029872539585838263,
+      -0.048768314227284,
+      -0.06669619898635795,
+      0.06663584702566477,
+      0.10168650577749186,
+      0.030542364798217935,
+      0.05402171264719418,
+      -0.0049190595628064195,
+      0.07348447038759748,
+      -0.08970290010435177,
+      0.08890020148577049,
+      0.16307283163282632,
+      0.026516466711522524,
+      -0.013509159291304734,
+      0.00736163100070468,
+      0.10292784075050346,
+      -0.09004396915494788,
+      -0.04958480239350078,
+      0.06987257404757816,
+      0.011272393665960811,
+      -0.01834570851919001,
+      -0.10476156313239264,
+      0.019121625033779996,
+      0.04389281614931165,
+      -0.06124521652405431,
+      -0.05600151150673145,
+      -0.03187299982146467,
+      0.14667391234317362,
+      0.04139555146872371,
+      0.08016474263129958,
+      -0.021598495441980448,
+      -0.05985612017119775,
+      -0.03800772479376352,
+      -0.0024735741217040675,
+      0.10463277958773168,
+      0.09895865715168531,
+      -0.06760205518516996,
+      -0.03559010558324828,
+      0.05102285078827868,
+      0.025461571799633057,
+      0.03892419344197272,
+      -0.10305008431950102,
+      -0.1465233557013223,
+      0.04333540146045245,
+      0.04115667084324024,
+      -0.1592539894441267,
+      0.11985366983512177,
+      -0.09211317870463538,
+      -0.004665344719746549,
+      0.08622161443446472,
+      -0.0855171664449137,
+      0.13914262016866252,
+      0.06365286406150983,
+      0.09832147082515605,
+      -0.09228443828375665,
+      0.05178214288201162,
+      0.06339542352118348,
+      0.12155087114930273,
+      -0.08195117672705178,
+      -0.14759623987683068,
+      0.1117616840330271,
+      -0.10797629384261101,
+      -0.04196817419958873,
+      -0.08056093181603552,
+      -0.07913287333283242,
+      -0.008094001326963638,
+      -0.10837460457201162,
+      0.00704837653955398,
+      0.03654863471899821,
+      0.017620142172250268,
+      -0.030150614729242395,
+      0.029155912822550124,
+      -0.05190879609635894,
+      -0.017971631345709334,
+      0.03826001540261788,
+      0.02982731640876904,
+      0.06485608889864272,
+      -0.012953648109831831,
+      0.10644722315440885,
+      0.03010040374317146,
+      -0.031103517622775374,
+      -0.04071710070430928,
+      0.006390672037415557,
+      -0.027940967736453822,
+      -0.09202047306629975,
+      0.06977010020544071,
+      -0.0037984288293241852,
+      0.022101341234376216,
+      0.08695593603412619,
+      -0.009118420119262997,
+      0.1213473703174602,
+      0.21290889170267327,
+      -0.039441345258054386,
+      -0.10823171202177524,
+      -0.014400007427045166,
+      0.08564059998324915,
+      0.027381541749701123,
+      0.0033414067820246307,
+      0.08300297304812954,
+      -0.08316374222996958,
+      -0.007006470238613928,
+      0.033514159454625055,
+      -0.03698131546987052,
+      0.01976510370106388,
+      -0.07421020871403698,
+      -0.15496692500818043,
+      0.04217311082135715,
+      0.15766376062289672,
+      0.15912314124393795,
+      0.09642126799067419,
+      0.03441558177226584,
+      0.03638983020455146,
+      -0.17027780409990284,
+      -0.028916279005488973,
+      0.139546257218422,
+      0.023128311056633842,
+      0.09024095433110177,
+      0.02613178436005663,
+      0.08870787960929162,
+      0.0462941801288539,
+      0.04769783547698322,
+      0.02564174066161782,
+      0.06428760183174603,
+      0.07571360757579083,
+      0.11714023160010281,
+      -0.0341871857877024,
+      0.10523382501336195,
+      -0.00466580114129523,
+      0.08730204863965244,
+      0.15175447018772875,
+      -0.002421174247551165,
+      -0.050374928488720064,
+      -0.04903839155731664,
+      -0.09798291054895375,
+      -0.060359447247690615,
+      -0.028520792208711992,
+      -0.05371810808501305,
+      0.08708559360726857,
+      -0.15101898143962897,
+      -0.0802787018093426,
+      -0.14525596664553944,
+      0.054908522396673,
+      -0.035209596901954236,
+      0.009667476541118126,
+      0.018459823867576223,
+      0.15753269987866783,
+      -0.15352583256517005,
+      0.021492281986076056,
+      0.050632163248815636,
+      0.015062666542923014,
+      -0.005279920035379498,
+      0.15432857033485667,
+      0.009739496316665333,
+      -0.1584956401001883,
+      -0.04244063153244907,
+      -0.08082630518473274,
+      0.024003507850226993,
+      -0.1280152542171389,
+      -0.06267060873354105,
+      0.07003373218986157,
+      -0.10688295658343659,
+      -0.02920181617352316,
+      0.06490947165432027,
+      0.1081046924415777,
+      0.08003856988533933,
+      -0.09823265665647098,
+      0.10773932648623283,
+      0.02610546045348565,
+      -0.07257143691853324,
+      0.09801975715008263,
+      -0.024041128820715192,
+      0.016227484239048143,
+      0.012692975599491355,
+      0.09950002976158613,
+      -0.024638619154752496,
+      0.14259903358543752,
+      -0.03406557568720875,
+      -0.006426569759116885,
+      -0.09541692712403,
+      0.17562611236213166,
+      -0.01962689438076673,
+      -0.09142873195792388,
+      -0.06344890249950824,
+      0.0645166505226166,
+      0.010901728684454607,
+      0.07679984125388013,
+      -0.05656772426448433,
+      -0.09880391269543579,
+      0.0011939666149237554,
+      -0.07152104915813157,
+      -0.03450971763091268,
+      -0.04840927859644822,
+      -0.09098086850404281,
+      0.10386890485602908,
+      0.04726200520739566
+     ],
+     "chunkIndex": 0,
+     "speakerIndex": 0
+    }
+   ],
+   "itemVoices": [
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    null,
+    null,
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    null
+   ],
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 57,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.115,
+      "clusterP95Distance": 0.6645
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 75,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0705,
+      "clusterP95Distance": 0.7618
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 77,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0159,
+      "clusterP95Distance": 0.1856
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.016 > p95 0.186"
+     ]
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ]
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ]
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 58,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.009,
+      "clusterP95Distance": 0.2873
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 82,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0622,
+      "clusterP95Distance": 0.7881
+     },
+     "eligible": true,
+     "reasons": []
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2",
+      "Voice 13"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": [
+      "Voice 12"
+     ]
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.016 > p95 0.186"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 13": "Voice 1",
+    "Voice 10": "Voice 3",
+    "Voice 12": "Voice 11"
+   },
+   "proposed": 8,
+   "accepted": 4,
+   "agree": 298,
+   "withOut": 298,
+   "items": 298,
+   "voiceBefore": 13,
+   "voiceAfter": 9
+  },
+  "later_longer": {
+   "segs": [
+    [
+     0,
+     160000,
+     "Voice 1"
+    ],
+    [
+     160000,
+     320000,
+     "Voice 1"
+    ],
+    [
+     320000,
+     480000,
+     "Voice 1"
+    ],
+    [
+     480000,
+     640000,
+     "Voice 1"
+    ],
+    [
+     640000,
+     800000,
+     "Voice 2"
+    ],
+    [
+     800000,
+     960000,
+     "Voice 2"
+    ],
+    [
+     960000,
+     992000,
+     "Voice 2"
+    ],
+    [
+     992000,
+     1120000,
+     "Voice 3"
+    ],
+    [
+     1120000,
+     1280000,
+     "Voice 3"
+    ],
+    [
+     1280000,
+     1440000,
+     "Voice 3"
+    ],
+    [
+     1440000,
+     1600000,
+     "Voice 3"
+    ],
+    [
+     1600000,
+     1760000,
+     "Voice 4"
+    ],
+    [
+     1760000,
+     1920000,
+     "Voice 5"
+    ],
+    [
+     1920000,
+     2080000,
+     "Voice 5"
+    ],
+    [
+     2080000,
+     2240000,
+     "Voice 6"
+    ],
+    [
+     2240000,
+     2400000,
+     "Voice 6"
+    ],
+    [
+     2400000,
+     2560000,
+     "Voice 7"
+    ],
+    [
+     2560000,
+     2720000,
+     "Voice 7"
+    ],
+    [
+     2720000,
+     2768000,
+     "Dana Fictional"
+    ],
+    [
+     2768000,
+     2880000,
+     "Voice 8"
+    ],
+    [
+     2880000,
+     3040000,
+     "Voice 8"
+    ],
+    [
+     3040000,
+     3200000,
+     "Voice 8"
+    ],
+    [
+     3200000,
+     3248000,
+     "Voice 8"
+    ],
+    [
+     3248000,
+     3360000,
+     "Voice 9"
+    ],
+    [
+     3360000,
+     3504000,
+     "Voice 9"
+    ],
+    [
+     3504000,
+     3520000,
+     "Voice 10"
+    ],
+    [
+     3520000,
+     3680000,
+     "Voice 10"
+    ],
+    [
+     3680000,
+     3760000,
+     "Voice 10"
+    ],
+    [
+     3760000,
+     3840000,
+     "Voice 11"
+    ],
+    [
+     3840000,
+     4000000,
+     "Voice 11"
+    ],
+    [
+     4240000,
+     4320000,
+     "Voice 12"
+    ],
+    [
+     4320000,
+     4480000,
+     "Voice 12"
+    ],
+    [
+     4480000,
+     4560000,
+     "Voice 12"
+    ],
+    [
+     4560000,
+     4640000,
+     "Ext"
+    ],
+    [
+     4640000,
+     4800000,
+     "Ext"
+    ],
+    [
+     4800000,
+     4960000,
+     "Ext"
+    ],
+    [
+     4960000,
+     5120000,
+     "Ext"
+    ],
+    [
+     5120000,
+     5200000,
+     "Ext"
+    ],
+    [
+     5200000,
+     5280000,
+     "Voice 13"
+    ],
+    [
+     5280000,
+     5440000,
+     "Voice 13"
+    ]
+   ],
+   "native": [
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 0,
+     "endTimeSeconds": 40,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 40,
+     "endTimeSeconds": 62,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 62,
+     "endTimeSeconds": 100,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 100,
+     "endTimeSeconds": 110,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 110,
+     "endTimeSeconds": 130,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 130,
+     "endTimeSeconds": 142,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 142,
+     "endTimeSeconds": 150,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 150,
+     "endTimeSeconds": 158,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 170,
+     "endTimeSeconds": 173,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S3",
+     "startTimeSeconds": 173,
+     "endTimeSeconds": 203,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S2",
+     "startTimeSeconds": 219,
+     "endTimeSeconds": 235,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 235,
+     "endTimeSeconds": 265,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 265,
+     "endTimeSeconds": 285,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S4",
+     "startTimeSeconds": 285,
+     "endTimeSeconds": 325,
+     "qualityScore": 1
+    },
+    {
+     "speakerId": "S1",
+     "startTimeSeconds": 325,
+     "endTimeSeconds": 340,
+     "qualityScore": 1
+    }
+   ],
+   "dropEmbeddings": [],
+   "extraEmbeddings": [],
+   "itemVoices": [
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 1",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 2",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 3",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 4",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 5",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 6",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    "Voice 7",
+    null,
+    null,
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 8",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 10",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    "Voice 11",
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    "Voice 12",
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13",
+    "Voice 13"
+   ],
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 56,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1208,
+      "clusterP95Distance": 0.6549
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 74,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0728,
+      "clusterP95Distance": 0.7559
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 76,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.015,
+      "clusterP95Distance": 0.1855
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ]
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ]
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 11": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0053,
+      "clusterP95Distance": 0.2876
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": true,
+     "reasons": []
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.064,
+      "clusterP95Distance": 0.7836
+     },
+     "eligible": true,
+     "reasons": []
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2",
+      "Voice 13"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 12",
+      "Voice 11"
+     ],
+     "anchor": "Voice 12",
+     "mergedIntoAnchor": [
+      "Voice 11"
+     ]
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 13": "Voice 1",
+    "Voice 10": "Voice 3",
+    "Voice 11": "Voice 12"
+   },
+   "proposed": 8,
+   "accepted": 4,
+   "agree": 297,
+   "withOut": 297,
+   "items": 297,
+   "voiceBefore": 13,
+   "voiceAfter": 9
+  }
+ }
+}

@@ -74,7 +74,7 @@ import { ForkJobLedger, fileForkJobPersistence } from './lib/fork-job-ledger.js'
 import { nativeHead, realNativeHeadDeps, registerClaudeTranscriptHint } from './lib/native-head.js'
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
-import { transcribeStreamRouter, getActiveTranscriptionSessionCount } from './routes/transcribe-stream.js'
+import { transcribeStreamRouter, getActiveTranscriptionSessionCount, getTranscriptionSessionLiveness } from './routes/transcribe-stream.js'
 import { meetingRouter, resumeAutonomousMeetingSaves, resumeMeetingFinalizationJobs, scheduleTranscriptCleanupSweep, transcriptCleanupRouteDeps } from './routes/meeting.js'
 import { createTranscriptCleanupRouter } from './routes/transcript-cleanup.js'
 import { meetingsRouter } from './routes/meetings.js'
@@ -110,6 +110,8 @@ import { voiceRouter } from './routes/voice.js'
 import { glossaryRouter } from './routes/glossary.js'
 import { homeAreaRouter } from './routes/home-area.js'
 import { createSttSettingsRouter } from './routes/stt-settings.js'
+import { createSpeakerShadowRouter } from './routes/speaker-shadow.js'
+import { configureSpeakerShadow, speakerShadowLeaseActive } from './lib/speaker-shadow.js'
 import { setRecordingLiveProbe, startPreviewWarmLoop, stopPreviewWarmLoop } from './lib/stt-runtime.js'
 import { findPinnedCli, killParakeetChildren, sweepParakeetStaging, sweepStaleParakeetTmp } from './lib/parakeet.js'
 import { handoffsRouter } from './routes/handoffs.js'
@@ -1229,6 +1231,8 @@ app.use('/api', voiceRouter)
 app.use('/api', glossaryRouter)
 app.use('/api', homeAreaRouter)
 app.use('/api', createSttSettingsRouter({ recordingLive: () => getActiveTranscriptionSessionCount() > 0 }))
+// 6.95.0: speaker merge shadow mode, read only (GET proposals and status).
+app.use('/api', createSpeakerShadowRouter())
 app.use('/api', handoffsRouter)
 app.use('/api', recoveryRouter)
 app.use('/api', promptEditRouter)
@@ -1540,6 +1544,14 @@ listenRequiredServers(listeners).then(() => {
     // central speaker-correction hook that re-derives affected records. Both
     // defer while a capture is live or admissions are closed.
     startMeetingMergeScheduler()
+
+    // 6.95.0: speaker merge shadow mode (off unless COS_SPEAKER_SHADOW=1; log only). Live
+    // work is a recording that is still live, or any capture or dictation lease; a drain
+    // or shutdown also holds it. Until this runs, the runner never starts a diarization.
+    configureSpeakerShadow({
+      captureActive: () => getTranscriptionSessionLiveness().live > 0 || speakerShadowLeaseActive(),
+      admissionsOpen: () => !gracefulShutdownStarted && maintenanceAdmissionsOpen(),
+    })
 
     // AFTER the imports sweep, not before: the sweep removes a killed write's
     // debris, and re-driving a pending apply into a half-written decision is

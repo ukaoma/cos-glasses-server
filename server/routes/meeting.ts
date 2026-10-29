@@ -203,6 +203,7 @@ import { enrichStandaloneMeeting } from '../lib/meeting-summary-persistence.js'
 import { bootResumeGate, type BootResumeGate } from '../lib/boot-resume.js'
 import { recordFinalPassSkip, runNemotronFinalPass, type FinalPassOptions, type FinalPassOutcome } from '../lib/nemotron-final.js'
 import { runTranscriptCleanup, type CleanupOutcome } from '../lib/transcript-cleanup.js'
+import { notifySpeakerShadowFinalized } from '../lib/speaker-shadow.js'
 import { sweepTranscriptCleanupData } from '../lib/transcript-cleanup-screen.js'
 import type { TranscriptCleanupRouteDeps } from './transcript-cleanup.js'
 
@@ -491,6 +492,9 @@ export function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Fi
       await enrichStandaloneMeeting(current.meetingPath, jobStartedAt)
     }
     markCanonicalFinalizationState(current.sidecarPath, 'complete', false)
+    // 6.95.0: speaker merge shadow mode (off unless COS_SPEAKER_SHADOW=1). Log only and
+    // fire-and-forget: it queues, defers under live work, and never throws back here.
+    if (MAC_CAPTURE_ID.test(current.sessionId)) notifySpeakerShadowFinalized({ sessionId: current.sessionId, sidecarPath: current.sidecarPath })
     // The capture is finished and its files are durable, so the merge engine may score it.
     // Fire-and-forget by contract: the runner queues, defers under a drain or a live
     // capture, and never throws back at the finalization path.
