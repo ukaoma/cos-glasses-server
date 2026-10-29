@@ -42,8 +42,11 @@ export async function findShadowPairSource(sidecarPath: string, mac: Record<stri
       if (stat.size > 16 * 1024 * 1024 || bytes + stat.size > 128 * 1024 * 1024) return { status: 'ambiguous', reason: 'day-window discovery byte limit exceeded; no pair selected' }
       const parts: Buffer[] = []
       let size = 0
-      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      // A candidate can change between lstat and open. Never wait on a FIFO/device
+      // substituted in that interval; verify the actual descriptor before reading.
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
       try {
+        if (!(await handle.stat()).isFile()) throw new Error('candidate is no longer a regular file')
         const buffer = Buffer.alloc(64 * 1024)
         while (true) {
           const { bytesRead } = await handle.read(buffer)

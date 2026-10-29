@@ -1,8 +1,31 @@
-import { it, expect } from 'vitest'
+import { it, expect, vi } from 'vitest'
+import * as fs from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { findShadowPairSource } from './speaker-shadow-pair-source.js'
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return { ...actual, lstat: vi.fn(actual.lstat) }
+})
+
+it('refuses a regular-file-to-FIFO replacement without waiting for a writer', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'shadow-pair-race-'))
+  const candidate = join(dir, 'race.g2-chunks.json')
+  const regular = join(dir, 'regular.json')
+  try {
+    await writeFile(regular, '{}')
+    const staleStat = await fs.lstat(regular)
+    execFileSync('mkfifo', [candidate])
+    // Simulate lstat observing the regular file immediately before replacement.
+    vi.mocked(fs.lstat).mockResolvedValueOnce(staleStat)
+    try {
+      const result = await findShadowPairSource(join(dir, 'mac.json'), { startTime: 100000, durationMs: 12000, chunks: [] })
+      expect(result).toMatchObject({ status: 'ambiguous', reason: expect.stringContaining('unreadable') })
+    } finally { vi.mocked(fs.lstat).mockClear() }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+}, 2000)
 it('discovers only one complete G2 pair, hashes evidence, and refuses ambiguous pairs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'shadow-pair-'))
   const mac = { startTime: 100000, durationMs: 12000, chunks: [{ elapsed: 0, audioDurationMs: 6000 }, { elapsed: 6000, audioDurationMs: 6000 }] }

@@ -5,7 +5,10 @@
 //   COS_SPEAKER_SHADOW_E2E=1 COS_SPEAKER_SHADOW_PARITY_DIR=~/cos-release-candidates/server-6.95.0-speaker-shadow/parity \
 //     npx vitest run server/lib/speaker-shadow-e2e.test.ts
 //
-// <name>-e2e.json names the research copies it reads (read only). It writes only to a temp dir.
+// <name>-e2e.json names the research copies it reads (read only). For Wave 1,
+// supply anchorGate: the independently generated <name>-anchor-gate.json in a
+// private COPY of the bundle. Historical expected remains the round-3 report.
+// It writes only to a temp dir and never changes the historical bundle.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -46,7 +49,27 @@ describe.skipIf(!configs.length)('speaker shadow end to end with the real CLI (p
         if (outcome.status !== 'proposed') return
         expect(outcome.facts.timelinePCMSHA256).toBe(cfg.timelinePCMSHA256)
         expect(outcome.facts.timelineWAVSHA256).toBe(cfg.timelineWAVSHA256)
-        expect(round3View(outcome.proposals)).toEqual(round3View(JSON.parse(readFileSync(cfg.expected, 'utf8'))))
+        const actual = round3View(outcome.proposals)
+        const historical = round3View(JSON.parse(readFileSync(cfg.expected, 'utf8')))
+        if (typeof cfg.anchorGate === 'string') {
+          const gate = JSON.parse(readFileSync(cfg.anchorGate, 'utf8'))
+          expect(outcome.proposals.productionVoices).toBe(gate.voiceBefore)
+          expect(outcome.proposals.voicesAfter).toBe(gate.voiceAfter)
+          expect(outcome.proposals.acceptedMerges).toBe(gate.accepted)
+          expect(actual.accepted.map(({ cluster, keepLabel, merge }: any) => ({ cluster, keepLabel, merge })))
+            .toEqual(gate.groups.filter((g: any) => g.mergedIntoAnchor.length).map((g: any) => ({ cluster: g.cluster, keepLabel: g.anchor, merge: g.mergedIntoAnchor })))
+          const oldVoices = new Map([...historical.accepted.flatMap((g: any) => g.voices), ...historical.rejected].map(v => [v.voice, v]))
+          for (const v of [...actual.accepted.flatMap((g: any) => g.voices), ...actual.rejected]) {
+            expect(v.eligible).toBe(gate.rows[v.voice].eligible)
+            expect(v.reasons.filter((r: string) => r !== 'no other voice on this cluster passed every gate')).toEqual(gate.rows[v.voice].reasons)
+            const old = oldVoices.get(v.voice)!
+            // Recognition geometry/listen pointers stay exact; only eligibility,
+            // refusal reasons and membership change under the new gate.
+            for (const key of ['seconds', 'coveredFraction', 'topCluster', 'majority', 'outlierPass', 'outlierDistance', 'outlierP95', 'outlierNote', 'anchorRatioPostHoc', 'listen'] as const)
+              expect(v[key]).toEqual(old[key])
+          }
+          expect(actual.untouched).toEqual(historical.untouched)
+        } else expect(actual).toEqual(historical)
         expect(readdirSync(tmpRoot)).toEqual([])
       } finally { rmSync(work, { recursive: true, force: true }) }
     }, 240_000)
