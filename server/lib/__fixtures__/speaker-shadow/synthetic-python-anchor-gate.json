@@ -1,0 +1,1989 @@
+{
+ "source": "CPython 3.9.6: research (a)-(c), independent unrounded anchor gate (d)",
+ "variants": {
+  "base": {
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 56,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1208,
+      "clusterP95Distance": 0.6549
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 74,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0728,
+      "clusterP95Distance": 0.7559
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.0879283582363802,
+     "anchorRatioPass": true
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ],
+     "anchorRatio": 0.15369514679314436,
+     "anchorRatioPass": true
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 76,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.015,
+      "clusterP95Distance": 0.1855
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ],
+     "anchorRatio": 5.70115244850815,
+     "anchorRatioPass": false
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ],
+     "anchorRatio": 0.07842720545634979,
+     "anchorRatioPass": true
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ],
+     "anchorRatio": 0.1876864935815002,
+     "anchorRatioPass": true
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11859772382560514,
+     "anchorRatioPass": true
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 58,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.009,
+      "clusterP95Distance": 0.2873
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": false,
+     "reasons": [
+      "(d) anchor ratio 11.5137 > 1.50"
+     ],
+     "anchorRatio": 11.513734477156364,
+     "anchorRatioPass": false
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.064,
+      "clusterP95Distance": 0.7836
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11016670178101773,
+     "anchorRatioPass": true
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2",
+      "Voice 13"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": []
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    {
+     "voice": "Voice 11",
+     "cluster": "S4",
+     "reasons": [
+      "no other eligible voice in this cluster"
+     ]
+    },
+    {
+     "voice": "Voice 12",
+     "cluster": "S4",
+     "reasons": [
+      "(d) anchor ratio 11.5137 > 1.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 13": "Voice 1",
+    "Voice 10": "Voice 3"
+   },
+   "accepted": 3,
+   "proposed": 8,
+   "voiceBefore": 13,
+   "voiceAfter": 10
+  },
+  "voice13_14995": {
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 56,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1208,
+      "clusterP95Distance": 0.6549
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 74,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0728,
+      "clusterP95Distance": 0.7559
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.0879283582363802,
+     "anchorRatioPass": true
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ],
+     "anchorRatio": 0.15369514679314436,
+     "anchorRatioPass": true
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 76,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.015,
+      "clusterP95Distance": 0.1855
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ],
+     "anchorRatio": 5.70115244850815,
+     "anchorRatioPass": false
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ],
+     "anchorRatio": 0.07842720545634979,
+     "anchorRatioPass": true
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ],
+     "anchorRatio": 0.1876864935815002,
+     "anchorRatioPass": true
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11859772382560514,
+     "anchorRatioPass": true
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 58,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.009,
+      "clusterP95Distance": 0.2873
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": false,
+     "reasons": [
+      "(d) anchor ratio 11.5137 > 1.50"
+     ],
+     "anchorRatio": 11.513734477156364,
+     "anchorRatioPass": false
+    },
+    "Voice 13": {
+     "seconds": 14.99,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.064,
+      "clusterP95Distance": 0.7836
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 15.0 s < 15 s"
+     ],
+     "anchorRatio": 0.11016670178101773,
+     "anchorRatioPass": true
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": []
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    {
+     "voice": "Voice 13",
+     "cluster": "S1",
+     "reasons": [
+      "(b) 15.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    {
+     "voice": "Voice 11",
+     "cluster": "S4",
+     "reasons": [
+      "no other eligible voice in this cluster"
+     ]
+    },
+    {
+     "voice": "Voice 12",
+     "cluster": "S4",
+     "reasons": [
+      "(d) anchor ratio 11.5137 > 1.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 10": "Voice 3"
+   },
+   "accepted": 2,
+   "proposed": 8,
+   "voiceBefore": 13,
+   "voiceAfter": 11
+  },
+  "voice6_majority_07996": {
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 56,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1208,
+      "clusterP95Distance": 0.6549
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 74,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0728,
+      "clusterP95Distance": 0.7559
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.0879283582363802,
+     "anchorRatioPass": true
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ],
+     "anchorRatio": 0.15369514679314436,
+     "anchorRatioPass": true
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 76,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.015,
+      "clusterP95Distance": 0.1855
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ],
+     "anchorRatio": 5.70115244850815,
+     "anchorRatioPass": false
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.8,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.07842720545634979,
+     "anchorRatioPass": true
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ],
+     "anchorRatio": 0.1876864935815002,
+     "anchorRatioPass": true
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11859772382560514,
+     "anchorRatioPass": true
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 58,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.009,
+      "clusterP95Distance": 0.2873
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": false,
+     "reasons": [
+      "(d) anchor ratio 11.5137 > 1.50"
+     ],
+     "anchorRatio": 11.513734477156364,
+     "anchorRatioPass": false
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.064,
+      "clusterP95Distance": 0.7836
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11016670178101773,
+     "anchorRatioPass": true
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2",
+      "Voice 13"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 6",
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": []
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    {
+     "voice": "Voice 11",
+     "cluster": "S4",
+     "reasons": [
+      "no other eligible voice in this cluster"
+     ]
+    },
+    {
+     "voice": "Voice 12",
+     "cluster": "S4",
+     "reasons": [
+      "(d) anchor ratio 11.5137 > 1.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 13": "Voice 1",
+    "Voice 6": "Voice 3",
+    "Voice 10": "Voice 3"
+   },
+   "accepted": 4,
+   "proposed": 8,
+   "voiceBefore": 13,
+   "voiceAfter": 9
+  },
+  "thin_embeddings": {
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 44,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.2151,
+      "clusterP95Distance": 0.5279
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 62,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1039,
+      "clusterP95Distance": 0.692
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.0879283582363802,
+     "anchorRatioPass": true
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ],
+     "anchorRatio": 0.15369514679314436,
+     "anchorRatioPass": true
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0156,
+      "clusterP95Distance": 0.1798
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.016 > p95 0.180"
+     ],
+     "anchorRatio": 5.70115244850815,
+     "anchorRatioPass": false
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ],
+     "anchorRatio": 0.07842720545634979,
+     "anchorRatioPass": true
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ],
+     "anchorRatio": 0.1876864935815002,
+     "anchorRatioPass": true
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11859772382560514,
+     "anchorRatioPass": true
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 4,
+     "otherClusterMembers": 19,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0271,
+      "clusterP95Distance": 0.163
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 4,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 19, others 4)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) insufficient embeddings (fragment 19, others 4)"
+     ],
+     "anchorRatio": 17.39842564673663,
+     "anchorRatioPass": false
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 2,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 2, others 81)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) insufficient embeddings (fragment 2, others 81)"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": false
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": []
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.016 > p95 0.180"
+     ]
+    },
+    {
+     "voice": "Voice 13",
+     "cluster": "S1",
+     "reasons": [
+      "(c) insufficient embeddings (fragment 2, others 81)"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    {
+     "voice": "Voice 11",
+     "cluster": "S4",
+     "reasons": [
+      "no other eligible voice in this cluster"
+     ]
+    },
+    {
+     "voice": "Voice 12",
+     "cluster": "S4",
+     "reasons": [
+      "(c) insufficient embeddings (fragment 19, others 4)"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 10": "Voice 3"
+   },
+   "accepted": 2,
+   "proposed": 8,
+   "voiceBefore": 13,
+   "voiceAfter": 11
+  },
+  "straddling_window": {
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 57,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.115,
+      "clusterP95Distance": 0.6645
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 75,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0705,
+      "clusterP95Distance": 0.7618
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.0879283582363802,
+     "anchorRatioPass": true
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ],
+     "anchorRatio": 0.15369514679314436,
+     "anchorRatioPass": true
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 77,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0159,
+      "clusterP95Distance": 0.1856
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.016 > p95 0.186"
+     ],
+     "anchorRatio": 5.70115244850815,
+     "anchorRatioPass": false
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ],
+     "anchorRatio": 0.07842720545634979,
+     "anchorRatioPass": true
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ],
+     "anchorRatio": 0.1876864935815002,
+     "anchorRatioPass": true
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11859772382560514,
+     "anchorRatioPass": true
+    },
+    "Voice 11": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 58,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.009,
+      "clusterP95Distance": 0.2873
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": false,
+     "reasons": [
+      "(d) anchor ratio 11.5137 > 1.50"
+     ],
+     "anchorRatio": 11.513734477156364,
+     "anchorRatioPass": false
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 82,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0622,
+      "clusterP95Distance": 0.7881
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11016670178101773,
+     "anchorRatioPass": true
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2",
+      "Voice 13"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 11",
+      "Voice 12"
+     ],
+     "anchor": "Voice 11",
+     "mergedIntoAnchor": []
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.016 > p95 0.186"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    },
+    {
+     "voice": "Voice 11",
+     "cluster": "S4",
+     "reasons": [
+      "no other eligible voice in this cluster"
+     ]
+    },
+    {
+     "voice": "Voice 12",
+     "cluster": "S4",
+     "reasons": [
+      "(d) anchor ratio 11.5137 > 1.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 13": "Voice 1",
+    "Voice 10": "Voice 3"
+   },
+   "accepted": 3,
+   "proposed": 8,
+   "voiceBefore": 13,
+   "voiceAfter": 10
+  },
+  "later_longer": {
+   "rows": {
+    "Voice 1": {
+     "seconds": 40.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 39,
+     "otherClusterMembers": 56,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.1208,
+      "clusterP95Distance": 0.6549
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 2": {
+     "seconds": 22.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 21,
+     "otherClusterMembers": 74,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0728,
+      "clusterP95Distance": 0.7559
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.0879283582363802,
+     "anchorRatioPass": true
+    },
+    "Voice 3": {
+     "seconds": 38.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 37,
+     "otherClusterMembers": 42,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0098,
+      "clusterP95Distance": 0.1765
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 4": {
+     "seconds": 10.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 9,
+     "otherClusterMembers": 70,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0241,
+      "clusterP95Distance": 0.1788
+     },
+     "eligible": false,
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ],
+     "anchorRatio": 0.15369514679314436,
+     "anchorRatioPass": true
+    },
+    "Voice 5": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 76,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.015,
+      "clusterP95Distance": 0.1855
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ],
+     "anchorRatio": 5.70115244850815,
+     "anchorRatioPass": false
+    },
+    "Voice 6": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 0.6,
+     "fragmentEmbeddings": 18,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0121,
+      "clusterP95Distance": 0.181
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ],
+     "anchorRatio": 0.07842720545634979,
+     "anchorRatioPass": true
+    },
+    "Voice 7": {
+     "seconds": 20.0,
+     "coveredFraction": 0.4,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 7,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0313,
+      "clusterP95Distance": 0.1814
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ],
+     "anchorRatio": 0.1876864935815002,
+     "anchorRatioPass": true
+    },
+    "Voice 8": {
+     "seconds": 30.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S3",
+     "majority": 1.0,
+     "fragmentEmbeddings": 29,
+     "otherClusterMembers": 7,
+     "outlier": {
+      "pass": false,
+      "fragmentCentroidDistance": 1.0568,
+      "clusterP95Distance": 0.1362
+     },
+     "eligible": false,
+     "reasons": [
+      "(c) centroid 1.057 > p95 0.136"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 9": {
+     "seconds": 16.0,
+     "coveredFraction": 0.0,
+     "topCluster": null,
+     "majority": 0.0,
+     "fragmentEmbeddings": 0,
+     "otherClusterMembers": 0,
+     "outlier": {
+      "pass": false,
+      "reason": "insufficient embeddings (fragment 0, others 0)"
+     },
+     "eligible": false,
+     "reasons": [
+      "(a) covered 0.00 < 0.50",
+      "(a) majority 0.00 < 0.80",
+      "(c) insufficient embeddings (fragment 0, others 0)"
+     ],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 10": {
+     "seconds": 16.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S2",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 64,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0194,
+      "clusterP95Distance": 0.1752
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11859772382560514,
+     "anchorRatioPass": true
+    },
+    "Voice 11": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 15,
+     "otherClusterMembers": 72,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0053,
+      "clusterP95Distance": 0.2876
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.16400265992105362,
+     "anchorRatioPass": true
+    },
+    "Voice 12": {
+     "seconds": 20.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S4",
+     "majority": 1.0,
+     "fragmentEmbeddings": 19,
+     "otherClusterMembers": 68,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.0283,
+      "clusterP95Distance": 0.2895
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": null,
+     "anchorRatioPass": null
+    },
+    "Voice 13": {
+     "seconds": 15.0,
+     "coveredFraction": 1.0,
+     "topCluster": "S1",
+     "majority": 1.0,
+     "fragmentEmbeddings": 14,
+     "otherClusterMembers": 81,
+     "outlier": {
+      "pass": true,
+      "fragmentCentroidDistance": 0.064,
+      "clusterP95Distance": 0.7836
+     },
+     "eligible": true,
+     "reasons": [],
+     "anchorRatio": 0.11016670178101773,
+     "anchorRatioPass": true
+    }
+   },
+   "groups": [
+    {
+     "cluster": "S1",
+     "voices": [
+      "Voice 1",
+      "Voice 2",
+      "Voice 5",
+      "Voice 13"
+     ],
+     "anchor": "Voice 1",
+     "mergedIntoAnchor": [
+      "Voice 2",
+      "Voice 13"
+     ]
+    },
+    {
+     "cluster": "S2",
+     "voices": [
+      "Voice 3",
+      "Voice 6",
+      "Voice 7",
+      "Voice 10",
+      "Voice 4"
+     ],
+     "anchor": "Voice 3",
+     "mergedIntoAnchor": [
+      "Voice 10"
+     ]
+    },
+    {
+     "cluster": "S4",
+     "voices": [
+      "Voice 12",
+      "Voice 11"
+     ],
+     "anchor": "Voice 12",
+     "mergedIntoAnchor": [
+      "Voice 11"
+     ]
+    }
+   ],
+   "rejected": [
+    {
+     "voice": "Voice 5",
+     "cluster": "S1",
+     "reasons": [
+      "(c) centroid 1.015 > p95 0.185"
+     ]
+    },
+    {
+     "voice": "Voice 4",
+     "cluster": "S2",
+     "reasons": [
+      "(b) 10.0 s < 15 s"
+     ]
+    },
+    {
+     "voice": "Voice 6",
+     "cluster": "S2",
+     "reasons": [
+      "(a) majority 0.60 < 0.80"
+     ]
+    },
+    {
+     "voice": "Voice 7",
+     "cluster": "S2",
+     "reasons": [
+      "(a) covered 0.40 < 0.50"
+     ]
+    }
+   ],
+   "remap": {
+    "Voice 2": "Voice 1",
+    "Voice 13": "Voice 1",
+    "Voice 10": "Voice 3",
+    "Voice 11": "Voice 12"
+   },
+   "accepted": 4,
+   "proposed": 8,
+   "voiceBefore": 13,
+   "voiceAfter": 9
+  }
+ }
+}

@@ -1,4 +1,4 @@
-// Speaker merge shadow mode (6.95.0): the gates, ported EXACTLY from the research tool.
+// Speaker merge shadow mode: the research gates plus the Wave-1 anchor gate.
 //
 // SOURCE OF TRUTH. `community-1-fluidaudio-v1/scripts/hybrid.py` `decide()` (round 2) and
 // the report assembly in `round3/propose.py`, on CPython 3.15. Production `Voice N` labels
@@ -9,21 +9,31 @@
 //   (b) it has at least `floorSeconds` (15 s) of production speech;
 //   (c) its window-embedding centroid lies inside the target cluster's own spread,
 //       measured leave-fragment-out against the 95th percentile.
+//   (d) a nonanchor's centroid distance from the kept voice must be <=1.5 times
+//       that anchor's own p95 spread. Missing evidence fails closed. The anchor
+//       remains the longest voice passing (a)-(c); a rejected fragment never
+//       causes selection of another anchor.
 // Named labels, `Ext` and every non-Voice label are frozen: never merged into or out of.
-// The post-hoc anchor ratio is computed and REPORTED ONLY. It decides nothing.
 //
 // LOG ONLY. Nothing here writes, and nothing calls a writer: the output is a proposal record.
 //
 // Order and rounding are part of the contract: Python dicts iterate in insertion order,
-// max()/most_common(1) keep the FIRST maximum, sorted() is stable, gates compare ROUNDED
-// values and reason strings use Python %-formatting. Every one of those is kept below,
+// max()/most_common(1) keep the FIRST maximum, sorted() is stable, research gates compare
+// ROUNDED values and reason strings use Python %-formatting. Gate(d) uses the raw ratio.
+// The research numerics remain unchanged below,
 // with the Python-compatible numerics in speaker-shadow-numeric.ts.
 
 import { PY_VOICE_LABEL, codePointCompare, pyClock, pyFirstInt, pyFixed, pyRound, pyRoundInt, pySum } from './speaker-shadow-numeric.js'
 
 export const SHADOW_SAMPLE_RATE = 16_000
-/** The round-2 gates, fixed before scoring (RESULT-ROUND2.md). */
-export const SHADOW_GATES = Object.freeze({ majority: 0.8, minCoveredFraction: 0.5, floorSeconds: 15, anchorRatioPostHoc: 1.5 })
+/** Existing round-2 gates plus the separately enforced Wave-1 anchor ratio. */
+export const SHADOW_GATES = Object.freeze({ majority: 0.8, minCoveredFraction: 0.5, floorSeconds: 15, anchorRatioMax: 1.5,
+  /** Compatibility alias for older report consumers; this is now enforced. */
+  anchorRatioPostHoc: 1.5 })
+
+export function passesShadowAnchorRatio(ratio: number | null): boolean {
+  return ratio !== null && Number.isFinite(ratio) && ratio >= 0 && ratio <= SHADOW_GATES.anchorRatioMax
+}
 
 /** One production segment on the reconstructed timeline: [lo, hi) samples and its label. */
 export type ShadowSegment = readonly [lo: number, hi: number, label: string]
@@ -154,12 +164,30 @@ export interface ShadowVoiceRow {
   fragmentEmbeddings: number
   otherClusterMembers: number
   outlier: ShadowOutlier
+  /** Unrounded ratio used by gate (d); null for the anchor or missing evidence. */
+  anchorRatio: number | null
+  /** null means this voice is the anchor or is not in a proposed group. */
+  anchorRatioPass: boolean | null
   eligible: boolean
   reasons: string[]
 }
 
 export interface ShadowItem { vec: number[]; exportCluster: string; outputCluster: string | null; voice: string | null }
 export interface ShadowGroup { cluster: string; voices: string[]; anchor: string | null; mergedIntoAnchor: string[] }
+
+/** The anchor spread is independent of the fragment; do not inflate it with
+ * candidate fragments, and do not accept a missing/zero spread as agreement. */
+function anchorRatio(fragment: readonly number[][], anchor: readonly number[][]): number | null {
+  if (fragment.length < 3 || anchor.length < 3 || [...fragment, ...anchor].some(v =>
+    v.length !== 256 || v.some(x => !Number.isFinite(x)) || !v.some(x => x !== 0))) return null
+  const centroid = meanDir(anchor)
+  const spread = p95(anchor.map(v => cosdist(v, centroid)))
+  const distance = cosdist(meanDir(fragment), centroid)
+  if (!Number.isFinite(spread) || !(spread > 0) || !Number.isFinite(distance) || distance < -1e-12) return null
+  // Unit-vector dot products can exceed one by a rounding ulp.
+  const ratio = Math.max(0, distance) / spread
+  return Number.isFinite(ratio) ? ratio : null
+}
 
 export interface ShadowDecision {
   voices: Map<string, Array<[number, number]>>
@@ -233,7 +261,7 @@ export function decide(
       topCluster: top,
       majority: covered ? pyRound(topN / covered, 3) : 0,
       fragmentEmbeddings: 0, otherClusterMembers: 0,
-      outlier: { pass: false, reason: '' }, eligible: false, reasons: [],
+      outlier: { pass: false, reason: '' }, anchorRatio: null, anchorRatioPass: null, eligible: false, reasons: [],
     })
   }
 
@@ -278,13 +306,30 @@ export function decide(
   const remap = new Map<string, string>()
   const rejected: ShadowDecision['rejected'] = []
   const groups: ShadowGroup[] = []
+  const vecs = new Map<string, number[][]>()
+  for (const item of items) if (item.voice) {
+    const list = vecs.get(item.voice)
+    if (list) list.push(item.vec); else vecs.set(item.voice, [item.vec])
+  }
   let proposed = 0, accepted = 0
   for (const [k, vs] of [...byCluster].sort((x, y) => codePointCompare(x[0], y[0]))) {
     if (vs.length < 2) continue
     proposed += vs.length - 1
-    const ok = longestFirst(vs.filter(v => rows.get(v)!.eligible))
-    const anchor = ok[0] ?? null
-    const merged = ok.slice(1)
+    const baseEligible = longestFirst(vs.filter(v => rows.get(v)!.eligible))
+    const anchor = baseEligible[0] ?? null
+    if (anchor) for (const v of vs) {
+      if (v === anchor) continue
+      const row = rows.get(v)!
+      row.anchorRatio = anchorRatio(vecs.get(v) ?? [], vecs.get(anchor) ?? [])
+      row.anchorRatioPass = passesShadowAnchorRatio(row.anchorRatio)
+      if (row.eligible && !row.anchorRatioPass) {
+        row.eligible = false
+        row.reasons.push(row.anchorRatio === null ? '(d) anchor ratio evidence unavailable'
+          : `(d) anchor ratio ${pyFixed(row.anchorRatio, 4)} > ${pyFixed(SHADOW_GATES.anchorRatioMax, 2)}`)
+      }
+    }
+    const ok = baseEligible.filter(v => rows.get(v)!.eligible)
+    const merged = ok.filter(v => v !== anchor)
     accepted += merged.length
     for (const v of merged) remap.set(v, anchor!)
     for (const v of vs) {
@@ -315,7 +360,7 @@ export interface ShadowVoiceEntry {
   outlierDistance: number | null
   outlierP95: number | null
   outlierNote: string | null
-  /** UNVALIDATED post-hoc check, reported only (fragment centroid vs the kept voice's spread). */
+  /** Rounded compatibility field; gate (d) uses the row's UNROUNDED ratio. */
   anchorRatioPostHoc: number | null
   eligible: boolean
   reasons: string[]
@@ -368,16 +413,6 @@ export function buildShadowProposals(
   const byLabel = new Map<string, ShadowSegmentSource[]>()
   segs.forEach(([, , label], i) => { const list = byLabel.get(label); if (list) list.push(sources[i]); else byLabel.set(label, [sources[i]]) })
 
-  const vecs = new Map<string, number[][]>()
-  for (const it of D.items) if (it.voice) { const list = vecs.get(it.voice); if (list) list.push(it.vec); else vecs.set(it.voice, [it.vec]) }
-  const ratio = (v: string, anchor: string): number | null => {
-    const A = vecs.get(anchor) ?? [], B = vecs.get(v) ?? []
-    if (v === anchor || A.length < 3 || B.length < 3) return null
-    const ca = meanDir(A)
-    const thr = p95(A.map(x => cosdist(x, ca)))
-    return thr > 0 ? pyRound(cosdist(meanDir(B), ca) / thr, 2) : null
-  }
-
   // Named / non-Voice labels sharing each FluidAudio cluster (caution only; never merged).
   const named = new Map<string, Map<string, number>>()
   for (const [lo, hi, label] of segs) {
@@ -399,7 +434,7 @@ export function buildShadowProposals(
       outlierDistance: 'reason' in o ? null : o.fragmentCentroidDistance,
       outlierP95: 'reason' in o ? null : o.clusterP95Distance,
       outlierNote: 'reason' in o ? o.reason : null,
-      anchorRatioPostHoc: ratio(v, anchor), eligible: r.eligible, reasons: r.reasons,
+      anchorRatioPostHoc: r.anchorRatio === null ? null : pyRound(r.anchorRatio, 2), eligible: r.eligible, reasons: r.reasons,
       listen: listenPointers(v, byLabel),
     }
   }
