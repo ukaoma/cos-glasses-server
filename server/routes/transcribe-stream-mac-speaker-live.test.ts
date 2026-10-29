@@ -1,3 +1,4 @@
+import{createHash}from'node:crypto'
 import express from'express'
 import type{Server}from'node:http'
 import{pcm16ToWav}from'../lib/nemotron-segments.js'
@@ -28,15 +29,22 @@ async function setup(root?:string,failRecovery=false){
  const stream=await import('./transcribe-stream.js')
  return{root,stream,schedule,path:join(root,'active-sessions',`${id}.json`)}
 }
-function attach(stream:typeof import('./transcribe-stream.js')){
+async function attach(stream:typeof import('./transcribe-stream.js'),anonymous=false){
  const s=stream.getSession(id)
  const raws=Array.from({length:10},(_,i)=>({chunkIndex:i,audioSHA256:h(['wav',i]),pcmSHA256:h(['pcm',i]),sampleRate:16000 as const,channels:1 as const,format:'pcm_s16le' as const,sampleCount:96000,verified:true as const}))
  s.chunks=raws.map(r=>({speaker:'Voice 1',text:`Exact original ${r.chunkIndex}`,elapsed:r.chunkIndex*6000,audioDurationMs:6000,audioSha256:r.audioSHA256,similarity:0,speakerPolicy:'high-confidence',words:[{word:'Exact',start:0,end:1}],segments:[{speaker:'Voice 1',text:`Exact original ${r.chunkIndex}`,startSec:0,endSec:6,similarity:0}]}))as any
  const indexed=s.chunks.map((c,i)=>({i,c})),plan=planMacSpeakerWindows({sidecar:{sessionId:id,chunkEntries:indexed.map(e=>({chunkIndex:e.i,chunk:e.c}))as any},rawChunks:raws,correctionHistory:'verified-clear'})
- let state=createMacSpeakerLiveState(id,s.speakerGeneration!,h('model'),h('profiles'),1)
- for(const window of plan.windows){const receipt={windowId:window.id,windowBindingSHA256:window.bindingSHA256,modelSHA256:h('model'),audioSHA256:h(['aggregate',window.id]),pcmSHA256:h(['aggregate-pcm',window.id]),sampleCount:window.sampleCount,embedding:v,halfEmbeddings:[v,v]as const};state=appendMacSpeakerLiveEvidence(state,{window,receipt,nativeReceiptSHA256:h({window,receipt})},[{name:'Avery Example',embeddings:[v],profileSHA256:h('profiles')}])}
+ const bytes=Buffer.from(JSON.stringify({profiles:anonymous?[]:[{name:'Avery Example',embeddings:[v]}]})),profileSHA256=createHash('sha256').update(bytes).digest('hex')
+ const profiles=anonymous?[]:[{name:'Avery Example',embeddings:[v],profileSHA256}]
+ let state=createMacSpeakerLiveState(id,s.speakerGeneration!,h('model'),profileSHA256,s.macSpeakerLive?.voiceHighWater??1)
+ for(const window of plan.windows){const receipt={windowId:window.id,windowBindingSHA256:window.bindingSHA256,modelSHA256:h('model'),audioSHA256:h(['aggregate',window.id]),pcmSHA256:h(['aggregate-pcm',window.id]),sampleCount:window.sampleCount,embedding:v,halfEmbeddings:[v,v]as const};state=appendMacSpeakerLiveEvidence(state,{window,receipt,nativeReceiptSHA256:h({window,receipt})},profiles)}
  const pin=join(process.env.COS_DATA_DIR!,'fixture-pin');writeFileSync(pin,'frozen fixture inputs')
- const outcome={fileBindings:[{path:pin,exists:true,stamp:macSpeakerLiveFileStamp(statSync(pin,{bigint:true}))}],state,reason:'qualified',latencyMs:7,plannedWindows:2,attemptedWindows:1,pendingWindows:0,completeEligibleSnapshot:true,rejectedChunks:0,sourceBindingSHA256:h(indexed)}
+ stream.__macSpeakerLiveForTests.persist(id)
+ const fileBindings=[{path:pin,exists:true,stamp:macSpeakerLiveFileStamp(statSync(pin,{bigint:true}))}]
+ const compute=await import('../lib/mac-speaker-live-compute.js')
+ const job=await compute.startMacSpeakerLiveCompute({captureId:id,generation:s.speakerGeneration!,modelSHA256:h('model'),profileSHA256,profileJSONBytes:Uint8Array.from(bytes),state,chunksIndexed:indexed as any,rawChunks:raws,sourceBindingSHA256:h(indexed),fileBindingsSHA256:h(fileBindings),revision:s.speakerRevision??0,previousDigest:s.speakerProjectionSHA256,voiceHighWater:s.macSpeakerLive?.voiceHighWater??1,humanHistory:false})
+ const completed=await job.finish()
+ const outcome={capability:completed.capability,fileBindings:[{path:pin,exists:true,stamp:macSpeakerLiveFileStamp(statSync(pin,{bigint:true}))}],state,reason:'qualified',latencyMs:7,plannedWindows:2,attemptedWindows:1,pendingWindows:0,completeEligibleSnapshot:true,rejectedChunks:0,sourceBindingSHA256:h(indexed)}
  return{s,indexed,outcome}
 }
 describe('actual Mac live route atomic publication and recovery',()=>{
@@ -63,7 +71,7 @@ describe('actual Mac live route atomic publication and recovery',()=>{
   vi.stubEnv('COS_MAC_SPEAKER_LIVE','0');expect(()=>stream.getSession(id)).toThrow('Capture state is unavailable')
  })
  it('persists a full replacement with matching revisions before publishing claims',async()=>{
-  const{stream,path}=await setup(),{s,indexed,outcome}=attach(stream),before=JSON.stringify(s.chunks)
+  const{stream,path}=await setup(),{s,indexed,outcome}=await attach(stream),before=JSON.stringify(s.chunks)
   stream.__macSpeakerLiveForTests.persist(id);expect(stream.__macSpeakerLiveForTests.commit(id,outcome)).toBe(true)
   const disk=JSON.parse(readFileSync(path,'utf8'))
   expect(disk.chunksIndexed).toEqual(indexed);expect(JSON.stringify(s.chunks)).toBe(before)
@@ -71,58 +79,61 @@ describe('actual Mac live route atomic publication and recovery',()=>{
   expect(disk.speakerProjectedChunksIndexed.every((e:any)=>e.c.similarity===0)).toBe(true)
   expect(disk.speakerRevision).toBe(disk.macSpeakerLive.revision);expect(stream.getMacSpeakerLiveSaveSnapshot(id)?.state.projections).toHaveLength(10)
  })
+ it('does not publish a certified positive if the feature closes before commit',async()=>{
+  const{stream,path}=await setup(),{outcome}=await attach(stream)
+  vi.stubEnv('COS_MAC_SPEAKER_LIVE','0');expect(stream.__macSpeakerLiveForTests.commit(id,outcome)).toBe(true)
+  const disk=JSON.parse(readFileSync(path,'utf8'));expect(disk.macSpeakerLive).toBeUndefined();expect(disk.speakerProjectedChunksIndexed).toEqual(disk.chunksIndexed);expect(disk.macSpeakerLiveStatus.completeEligibleSnapshot).toBe(false)
+ })
  it('rejects stale source snapshots and rolls state back on failed publication',async()=>{
-  const{stream,path}=await setup(),{s,outcome}=attach(stream)
+  const{stream,path}=await setup(),{s,outcome}=await attach(stream)
   stream.__macSpeakerLiveForTests.persist(id);const before=readFileSync(path,'utf8'),revision=s.speakerRevision
   s.chunks[0].text+=' edited';expect(stream.__macSpeakerLiveForTests.commit(id,outcome)).toBe(false);s.chunks[0].text=s.chunks[0].text.replace(' edited','')
   fault.write=true;expect(stream.__macSpeakerLiveForTests.commit(id,outcome)).toBe(false);fault.write=false
   expect(s.macSpeakerLive).toBeUndefined();expect(s.speakerRevision).toBe(revision);expect(readFileSync(path,'utf8')).toBe(before)
  })
  it('withdraws claims when a later source becomes human protected',async()=>{
-  const{stream,path}=await setup(),{s,outcome}=attach(stream);stream.__macSpeakerLiveForTests.commit(id,outcome)
+  const{stream,path}=await setup(),{s,outcome}=await attach(stream);stream.__macSpeakerLiveForTests.commit(id,outcome)
   const prior=s.speakerRevision!;(s.chunks[0].segments![0]as any).manuallyCorrected=true
   stream.__macSpeakerLiveForTests.persist(id)
-  const disk=JSON.parse(readFileSync(path,'utf8'));expect(disk.speakerRevision).toBeGreaterThan(prior);expect(disk.macSpeakerLive.projections).toEqual([]);expect(disk.speakerProjectedChunksIndexed[0].c.segments[0].manuallyCorrected).toBe(true)
+  const disk=JSON.parse(readFileSync(path,'utf8'));expect(disk.speakerRevision).toBeGreaterThan(prior);expect(disk.macSpeakerLive).toBeUndefined();expect(disk.speakerProjectedChunksIndexed[0].c.segments[0].manuallyCorrected).toBe(true)
  })
  it('clears the public overlay and refuses background extraction when the opt-in is disabled',async()=>{
-  const{stream,path}=await setup(),{outcome}=attach(stream);stream.__macSpeakerLiveForTests.commit(id,outcome)
+  const{stream,path}=await setup(),{outcome}=await attach(stream);stream.__macSpeakerLiveForTests.commit(id,outcome)
   const prior=JSON.parse(readFileSync(path,'utf8')).speakerRevision
   vi.stubEnv('COS_MAC_SPEAKER_LIVE','0');expect(stream.__macSpeakerLiveForTests.snapshot(id)).toBeNull()
   stream.__macSpeakerLiveForTests.persist(id);const disk=JSON.parse(readFileSync(path,'utf8'))
-  expect(disk.speakerRevision).toBeGreaterThan(prior);expect(disk.macSpeakerLive.projections).toEqual([]);expect(disk.speakerProjectedChunksIndexed).toEqual(disk.chunksIndexed);expect(stream.getMacSpeakerLiveSaveSnapshot(id)).toBeNull()
+  expect(disk.speakerRevision).toBeGreaterThan(prior);expect(disk.macSpeakerLive).toBeUndefined();expect(disk.speakerProjectedChunksIndexed).toEqual(disk.chunksIndexed);expect(stream.getMacSpeakerLiveSaveSnapshot(id)).toBeNull()
  })
  it('withdraws a conflicting projection instead of leaving the previous cached labels',async()=>{
-  const{stream,path}=await setup(),{s,outcome}=attach(stream)
-  // Anonymous target Voice2 collides with an unsupported original added later.
-  const anonymous=structuredClone(outcome.state);for(const p of anonymous.projections){delete p.profileName;p.displayLabel='Voice 2'}
-  const{stateSHA256,...body}=anonymous;anonymous.stateSHA256=h(body)
-  stream.__macSpeakerLiveForTests.commit(id,{...outcome,state:anonymous})
-  const prior=s.speakerRevision!;s.chunks.push({speaker:'Voice 2',text:'Unrelated original',elapsed:60000,similarity:0,audioDurationMs:6000,audioSha256:h('later')})
+  const{stream,path}=await setup(),{s,outcome}=await attach(stream,true)
+  stream.__macSpeakerLiveForTests.commit(id,outcome)
+  const label=s.macSpeakerLive!.projections[0].displayLabel
+  const prior=s.speakerRevision!;s.chunks.push({speaker:label,text:'Unrelated original',elapsed:60000,similarity:0,audioDurationMs:6000,audioSha256:h('later')})
   stream.__macSpeakerLiveForTests.persist(id);const disk=JSON.parse(readFileSync(path,'utf8'))
-  expect(disk.speakerRevision).toBeGreaterThan(prior);expect(disk.macSpeakerLive.projections).toEqual([]);expect(disk.speakerProjectedChunksIndexed).toEqual(disk.chunksIndexed)
+  expect(disk.speakerRevision).toBeGreaterThan(prior);expect(disk.macSpeakerLive).toBeUndefined();expect(disk.speakerProjectedChunksIndexed).toEqual(disk.chunksIndexed)
  })
  it('invalidates old completeness on newly accepted source and late resource edits',async()=>{
-  const{stream,path}=await setup(),{s,outcome}=attach(stream);stream.__macSpeakerLiveForTests.commit(id,outcome)
+  const{stream,path}=await setup(),{s,outcome}=await attach(stream);stream.__macSpeakerLiveForTests.commit(id,outcome)
   writeFileSync(outcome.fileBindings[0].path,'resource changed');expect(stream.getMacSpeakerLiveSaveSnapshot(id)).toBeNull()
-  stream.__macSpeakerLiveForTests.persist(id);expect(JSON.parse(readFileSync(path,'utf8')).macSpeakerLive.projections).toEqual([])
-  const fresh=attach(stream);stream.__macSpeakerLiveForTests.commit(id,fresh.outcome)
+  stream.__macSpeakerLiveForTests.persist(id);expect(JSON.parse(readFileSync(path,'utf8')).macSpeakerLive).toBeUndefined()
+  const fresh=await attach(stream);stream.__macSpeakerLiveForTests.commit(id,fresh.outcome)
   fresh.s.chunks.push({speaker:'Ext',text:'New accepted words',elapsed:60000,audioDurationMs:6000,similarity:0,audioSha256:h('new')})
   expect(stream.getMacSpeakerLiveSaveSnapshot(id)).toBeNull();stream.__macSpeakerLiveForTests.persist(id)
-  const disk=JSON.parse(readFileSync(path,'utf8'));expect(disk.macSpeakerLive.projections).toEqual([]);expect(disk.speakerProjectedChunksIndexed).toEqual(disk.chunksIndexed);expect(disk.macSpeakerLiveStatus.reason).toBe('new_source_pending')
+  const disk=JSON.parse(readFileSync(path,'utf8'));expect(disk.macSpeakerLive).toBeUndefined();expect(disk.speakerProjectedChunksIndexed).toEqual(disk.chunksIndexed);expect(disk.macSpeakerLiveStatus.reason).toBe('new_source_pending')
  })
  it('refuses recovery adoption when its mandatory clear cannot be persisted',async()=>{
-  const first=await setup(),{outcome}=attach(first.stream);first.stream.__macSpeakerLiveForTests.commit(id,outcome);vi.resetModules()
+  const first=await setup(),{outcome}=await attach(first.stream);first.stream.__macSpeakerLiveForTests.commit(id,outcome);vi.resetModules()
   const second=await setup(first.root,true);fault.write=false
   expect(second.stream.__sessionsForTests.has(id)).toBe(false)
   expect(()=>readFileSync(second.path)).toThrow()
  })
  it('recovers a valid original-only replacement before revalidation, including corrupt prior state',async()=>{
-  const first=await setup(),{outcome}=attach(first.stream);first.stream.__macSpeakerLiveForTests.commit(id,outcome)
+  const first=await setup(),{outcome}=await attach(first.stream);first.stream.__macSpeakerLiveForTests.commit(id,outcome)
   const disk=JSON.parse(readFileSync(first.path,'utf8'));disk.macSpeakerLive.projections[0].rawChunkIndex=999
   writeFileSync(first.path,JSON.stringify(disk));vi.resetModules()
   const second=await setup(first.root),restored=JSON.parse(readFileSync(second.path,'utf8'))
-  expect(restored.speakerRevision).toBeGreaterThan(disk.speakerRevision);expect(restored.macSpeakerLive.revision).toBe(restored.speakerRevision);expect(restored.macSpeakerLive.projections).toEqual([])
-  expect(restored.speakerProjectedChunksIndexed).toEqual(restored.chunksIndexed);expect(restored.macSpeakerLive.voiceHighWater).toBe(99)
+  expect(restored.speakerRevision).toBeGreaterThan(disk.speakerRevision);expect(restored.macSpeakerLive).toBeUndefined();expect(restored.macSpeakerLiveRetainedState.projections[0].rawChunkIndex).toBe(999)
+  expect(restored.speakerProjectedChunksIndexed).toEqual(restored.chunksIndexed);expect(restored.macSpeakerLiveStatus.completeEligibleSnapshot).toBe(false)
   expect(second.stream.getMacSpeakerLiveSaveSnapshot(id)).toBeNull()
  })
 })

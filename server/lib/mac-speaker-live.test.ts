@@ -45,18 +45,18 @@ describe('background Mac live extraction adapter without native inference',()=>{
  })
  it('checks model drift after owned child completion before publishing',async()=>{
   const f=fixture();f.extract.mockImplementation(async()=>{writeFileSync(f.modelPath,'changed');return[v,v,v]})
-  const result=await runMacSpeakerLivePass(f.input,f.deps);expect(result.reason).toBe('model_profile_or_history_changed');expect(result.completeEligibleSnapshot).toBe(false);expect(result.state!.projections).toEqual([])
+  const result=await runMacSpeakerLivePass(f.input,f.deps);expect(result.reason).toBe('model_profile_or_history_changed');expect(result.completeEligibleSnapshot).toBe(false);expect(result.state?.projections??[]).toEqual([])
  })
  it('refuses model ABA even when original bytes are restored before return',async()=>{
   const f=fixture(),bytes=readFileSync(f.modelPath)
   f.extract.mockImplementation(async()=>{writeFileSync(f.modelPath,'temporary other model');writeFileSync(f.modelPath,bytes);return[v,v,v]})
-  const result=await runMacSpeakerLivePass(f.input,f.deps);expect(result.reason).toBe('live_publication_source_changed');expect(result.completeEligibleSnapshot).toBe(false);expect(result.state!.projections).toEqual([])
+  const result=await runMacSpeakerLivePass(f.input,f.deps);expect(result.reason).toBe('live_publication_source_changed');expect(result.completeEligibleSnapshot).toBe(false);expect(result.state?.projections??[]).toEqual([])
  })
  it('invalidates historical raw pins on metadata drift',async()=>{
   const f=fixture(),first=await runMacSpeakerLivePass(f.input,f.deps)
   const path=join(f.input.audioDir,'chunk_0000.wav'),bytes=readFileSync(path);bytes[44]^=1;writeFileSync(path,bytes)
   const result=await runMacSpeakerLivePass({...f.input,state:first.state,voiceHighWater:first.state!.voiceHighWater},f.deps)
-  expect(result.reason).toBe('raw_audio_drift');expect(result.state!.projections).toEqual([]);expect(f.extract).toHaveBeenCalledTimes(1)
+  expect(result.reason).toBe('raw_audio_drift');expect(result.state?.projections??[]).toEqual([]);expect(f.extract).toHaveBeenCalledTimes(1)
  })
  it('coalesces work, drains all eligible evidence, and never overlaps extractors',async()=>{
   const f=fixture(),outcomes:any[]=[];let state=f.input.state,active=0,peak=0
@@ -77,6 +77,12 @@ describe('background Mac live extraction adapter without native inference',()=>{
   const f=fixture();let admitted=true
   const result=await runMacSpeakerLivePass(f.input,{...f.deps,admit:()=>admitted,runtime:async()=>{admitted=false;return{modelPath:f.modelPath,profilesPath:f.profilesPath}}})
   expect(result.reason).toBe('live_admission_closed');expect(f.extract).not.toHaveBeenCalled()
+ })
+ it('withdraws certification if admission closes after extraction',async()=>{
+  const f=fixture();let admitted=true
+  f.extract.mockImplementation(async()=>{admitted=false;return[v,v,v]})
+  const result=await runMacSpeakerLivePass(f.input,{...f.deps,admit:()=>admitted})
+  expect(result.reason).toBe('live_admission_closed');expect(result.capability).toBeUndefined();expect(result.completeEligibleSnapshot).toBe(false)
  })
  it('does not spin or report completeness when extraction is unavailable',async()=>{
   const f=fixture(),extract=vi.fn(async()=>null),outcomes:any[]=[]

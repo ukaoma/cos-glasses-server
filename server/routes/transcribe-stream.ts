@@ -1,6 +1,8 @@
+import { takeMacSpeakerLivePublication } from '../lib/mac-speaker-live-compute.js'
+import type { MacSpeakerLivePreparedPublication } from '../lib/mac-speaker-live-worker.js'
 import { createMacSpeakerLiveScheduler, macSpeakerLiveEnabled, assertMacSpeakerLivePublicationBindings, type MacSpeakerLiveOutcome, type MacSpeakerLiveFileBinding } from '../lib/mac-speaker-live.js'
 import { hashMacSpeakerLive, type MacSpeakerLiveState } from '../lib/mac-speaker-live-memory.js'
-import { prepareMacSpeakerLivePublication, macSpeakerLiveVoiceHighWater } from '../lib/mac-speaker-live-store.js'
+import { macSpeakerLiveOriginalOnly, macSpeakerLiveVoiceHighWater } from '../lib/mac-speaker-live-store.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, admitPhoneRecording, phoneQueryInteger, requirePhoneRecording, readPhoneRecording, validatePhoneWav, persistPhoneChunkReceipt } from '../lib/phone-recording.js'
 import { matchMacLiveVoice, macAnonymousProjection, type MacLiveVoiceState } from '../lib/mac-live-voices.js'
 import { chunkShowsVoiceLabel, macLiveVoicesMode } from '../lib/mac-voice-labels.js'
@@ -391,7 +393,7 @@ function liveSnapshot(captureId:string){
  if(!maintenanceAdmissionsOpen()||!macSpeakerLiveEnabled()||!s||s.speakerIdentityPolicy!=='mac-native-v1'||!s.speakerGeneration||isSessionDeleted(captureId)||macChunkLocks.has(captureId))return null
  return{captureId,generation:s.speakerGeneration,audioDir:resolve(SESSION_AUDIO_DIR,captureId),ledgerPath:dataPath('meeting-corrections',`${captureId}.jsonl`),
   chunksIndexed:structuredClone(liveIndexed(s)) as unknown as {i:number;c:Record<string,unknown>}[],state:s.macSpeakerLive?structuredClone(s.macSpeakerLive):undefined,
-  voiceHighWater:macSpeakerLiveVoiceHighWater(s.chunks,Math.max(s.macWindowVoices?.voices??0,s.macSpeakerLive?.voiceHighWater??0))}
+  voiceHighWater:macSpeakerLiveVoiceHighWater(s.chunks,Math.max(s.macWindowVoices?.voices??0,Number.isSafeInteger(s.macSpeakerLive?.voiceHighWater)?s.macSpeakerLive!.voiceHighWater:0)),revision:s.speakerRevision??0,previousDigest:s.speakerProjectionSHA256}
 }
 function commitMacSpeakerLive(captureId:string,outcome:MacSpeakerLiveOutcome):boolean{
  const s=sessions.get(captureId)
@@ -400,19 +402,22 @@ function commitMacSpeakerLive(captureId:string,outcome:MacSpeakerLiveOutcome):bo
  try{if(outcome.completeEligibleSnapshot)assertMacSpeakerLivePublicationBindings(outcome.fileBindings)}catch{
   s.macSpeakerLiveValidated=false;s.macSpeakerLiveStatus={reason:'publication_binding_changed',latencyMs:outcome.latencyMs,pendingWindows:0,completeEligibleSnapshot:false};persistSessionBestEffort(captureId);return false
  }
+ const certified=takeMacSpeakerLivePublication(outcome.capability,{captureId,generation:s.speakerGeneration,sourceBindingSHA256:outcome.sourceBindingSHA256,fileBindingsSHA256:hashMacSpeakerLive(outcome.fileBindings),revision:s.speakerRevision??0,
+  voiceHighWater:macSpeakerLiveVoiceHighWater(s.chunks,Math.max(s.macWindowVoices?.voices??0,Number.isSafeInteger(s.macSpeakerLive?.voiceHighWater)?s.macSpeakerLive!.voiceHighWater:0)),mode:'mac-native-v1'})
+ if(outcome.completeEligibleSnapshot&&!certified)return false
  const previous={source:s.macSpeakerLiveSourceBindingSHA256,files:s.macSpeakerLiveFileBindings,state:s.macSpeakerLive,validated:s.macSpeakerLiveValidated,status:s.macSpeakerLiveStatus,window:s.macWindowVoices?structuredClone(s.macWindowVoices):undefined,revision:s.speakerRevision,digest:s.speakerProjectionSHA256}
- if(outcome.state)s.macSpeakerLive=outcome.state
+ if(certified)s.macSpeakerLive=certified.macSpeakerLive??outcome.state
  s.macSpeakerLiveSourceBindingSHA256=outcome.sourceBindingSHA256;s.macSpeakerLiveFileBindings=outcome.fileBindings
- s.macSpeakerLiveValidated=macSpeakerLiveEnabled()&&!!outcome.state&&outcome.completeEligibleSnapshot
+ s.macSpeakerLiveValidated=maintenanceAdmissionsOpen()&&macSpeakerLiveEnabled()&&!!certified&&!!outcome.state&&outcome.completeEligibleSnapshot
  s.macSpeakerLiveStatus={reason:outcome.reason,latencyMs:outcome.latencyMs,pendingWindows:outcome.pendingWindows,completeEligibleSnapshot:outcome.completeEligibleSnapshot}
  if(s.macWindowVoices&&s.macSpeakerLive)s.macWindowVoices.voices=Math.max(s.macWindowVoices.voices,s.macSpeakerLive.voiceHighWater)
- try{persistSessionRequired(captureId)}catch{Object.assign(s,{macSpeakerLiveSourceBindingSHA256:previous.source,macSpeakerLiveFileBindings:previous.files,macSpeakerLive:previous.state,macSpeakerLiveValidated:previous.validated,macSpeakerLiveStatus:previous.status,macWindowVoices:previous.window,speakerRevision:previous.revision,speakerProjectionSHA256:previous.digest});return false}
+ try{persistSessionRequired(captureId,certified??undefined)}catch{Object.assign(s,{macSpeakerLiveSourceBindingSHA256:previous.source,macSpeakerLiveFileBindings:previous.files,macSpeakerLive:previous.state,macSpeakerLiveValidated:previous.validated,macSpeakerLiveStatus:previous.status,macWindowVoices:previous.window,speakerRevision:previous.revision,speakerProjectionSHA256:previous.digest});return false}
  // Dedicated invalidation cursor; consumers fetch the durable full replacement.
  emitDisplay({type:'mac_speaker_live_revision',data:{sessionId:captureId,speakerIdentityPolicy:'mac-native-v1',generation:s.speakerGeneration,speakerRevision:s.speakerRevision,speakerProjectionSHA256:s.speakerProjectionSHA256}})
  return true
 }
 const macSpeakerLiveScheduler=createMacSpeakerLiveScheduler({snapshot:liveSnapshot,commit:commitMacSpeakerLive,lease:()=>acquireMaintenanceWork('mac_speaker_live'),runtime:{admit:captureId=>maintenanceAdmissionsOpen()&&macSpeakerLiveEnabled()&&sessions.has(captureId)&&!isSessionDeleted(captureId)&&!macChunkLocks.has(captureId)}})
-export const __macSpeakerLiveForTests={snapshot:liveSnapshot,commit:commitMacSpeakerLive,persist:persistSessionRequired,drain:()=>macSpeakerLiveScheduler.drain()}
+export const __macSpeakerLiveForTests={snapshot:liveSnapshot,commit:commitMacSpeakerLive,persist:(id:string)=>persistSessionRequired(id),drain:()=>macSpeakerLiveScheduler.drain()}
 /** Save consumers receive only the durable, fully validated exact-source snapshot. */
 export function getMacSpeakerLiveSaveSnapshot(captureId:string):{state:MacSpeakerLiveState;sourceBindingSHA256:string}|null{
  const s=sessions.get(captureId);if(!macSpeakerLiveEnabled()||!s?.macSpeakerLiveValidated||!s.macSpeakerLive||s.macSpeakerLiveStatus?.completeEligibleSnapshot!==true||s.macSpeakerLiveSourceBindingSHA256!==hashMacSpeakerLive(liveIndexed(s)))return null
@@ -754,7 +759,7 @@ function recoverClosedSessions(): void {
 
 /** Persist a session before acknowledging any chunk. Throws on failure so a
  *  client never interprets a non-durable index as accepted. */
-function persistSessionRequired(sessionId: string): void {
+function persistSessionRequired(sessionId: string, certified?:MacSpeakerLivePreparedPublication): void {
   const session = sessions.get(sessionId)
   if (!session) throw makeHttpError(404, 'session not found', 'session_not_found')
   const filePath = resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)
@@ -773,14 +778,15 @@ function persistSessionRequired(sessionId: string): void {
     if(reason){session.macSpeakerLiveValidated=false;session.macSpeakerLiveStatus={reason,latencyMs:0,pendingWindows:0,completeEligibleSnapshot:false}}
   }
   const live = session.speakerIdentityPolicy === 'mac-native-v1' && session.speakerGeneration
-    ? prepareMacSpeakerLivePublication({captureId:sessionId,generation:session.speakerGeneration,chunksIndexed:chunksIndexed as unknown as {i:number;c:TranscriptChunk & Record<string,unknown>}[],state:session.macSpeakerLive,validated:macSpeakerLiveEnabled()&&session.macSpeakerLiveValidated===true&&session.macSpeakerLiveSourceBindingSHA256===hashMacSpeakerLive(chunksIndexed),revision:session.speakerRevision??0,previousDigest:session.speakerProjectionSHA256}) : null
+    ? (session.macSpeakerLiveValidated?certified:undefined)??macSpeakerLiveOriginalOnly({captureId:sessionId,generation:session.speakerGeneration,chunksIndexed:chunksIndexed as unknown as {i:number;c:Record<string,unknown>}[],state:session.macSpeakerLive,revision:session.speakerRevision??0,previousDigest:session.speakerProjectionSHA256}) : null
   const projectionWithdrawn=!!session.macSpeakerLive?.projections.length&&!live?.macSpeakerLive?.projections.length
   const liveStatus=live?.macSpeakerLive?.withheldReason?{reason:live.macSpeakerLive.withheldReason,latencyMs:0,pendingWindows:0,completeEligibleSnapshot:false}
     :projectionWithdrawn&&session.macSpeakerLiveValidated?{reason:'projection_binding_changed',latencyMs:0,pendingWindows:0,completeEligibleSnapshot:false}
+    :!live?.macSpeakerLive?{reason:!macSpeakerLiveEnabled()?'feature_disabled':session.macSpeakerLiveStatus?.reason??'awaiting_qualified_evidence',latencyMs:session.macSpeakerLiveStatus?.latencyMs??0,pendingWindows:session.macSpeakerLiveStatus?.pendingWindows??0,completeEligibleSnapshot:false}
     :session.macSpeakerLiveStatus??{reason:'awaiting_qualified_evidence',latencyMs:0,pendingWindows:0,completeEligibleSnapshot:false}
   const data = JSON.stringify({
       sessionId,
-      ...(live ? {speakerIdentityPolicy:live.speakerIdentityPolicy,sourceType:live.sourceType,speakerGeneration:live.speakerGeneration,speakerRevision:live.speakerRevision,speakerProjectionSHA256:live.speakerProjectionSHA256,speakerProjectedChunksIndexed:live.speakerProjectedChunksIndexed,...(live.macSpeakerLive?{macSpeakerLive:live.macSpeakerLive}:{}),...(live.macSpeakerLiveQuarantineSHA256?{macSpeakerLiveQuarantineSHA256:live.macSpeakerLiveQuarantineSHA256}:{}),...(session.macSpeakerLiveQuarantineSHA256?{macSpeakerLiveQuarantineSHA256:session.macSpeakerLiveQuarantineSHA256}:{}),macSpeakerLiveStatus:liveStatus} : {}),
+      ...(live ? {speakerIdentityPolicy:live.speakerIdentityPolicy,sourceType:live.sourceType,speakerGeneration:live.speakerGeneration,speakerRevision:live.speakerRevision,speakerProjectionSHA256:live.speakerProjectionSHA256,speakerProjectedChunksIndexed:live.speakerProjectedChunksIndexed,...(live.macSpeakerLive?{macSpeakerLive:live.macSpeakerLive}:{}),...('macSpeakerLiveRetainedState'in live?{macSpeakerLiveRetainedState:live.macSpeakerLiveRetainedState}:{}),...(('macSpeakerLiveQuarantineSHA256'in live?live.macSpeakerLiveQuarantineSHA256:undefined)?{macSpeakerLiveQuarantineSHA256:('macSpeakerLiveQuarantineSHA256'in live?live.macSpeakerLiveQuarantineSHA256:undefined)}:{}),...(session.macSpeakerLiveQuarantineSHA256?{macSpeakerLiveQuarantineSHA256:session.macSpeakerLiveQuarantineSHA256}:{}),macSpeakerLiveStatus:liveStatus} : {}),
       ...(PHONE_CAPTURE_ID.test(sessionId) ? { captureSource: requirePhoneRecording(sessionId), sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' } : {}),
       startTime: session.startTime,
       lastActivityAt: session.lastActivityAt,
@@ -800,9 +806,10 @@ function persistSessionRequired(sessionId: string): void {
       ...(session.macWindowVoices !== undefined ? { macWindowVoices: session.macWindowVoices } : {}),
     })
   try {
+    if(certified&&session.macSpeakerLiveValidated){try{assertMacSpeakerLivePublicationBindings(session.macSpeakerLiveFileBindings??[])}catch{session.macSpeakerLiveValidated=false;session.macSpeakerLiveStatus={reason:'resource_binding_changed',latencyMs:0,pendingWindows:0,completeEligibleSnapshot:false};return persistSessionRequired(sessionId)}}
     durableAtomicWriteFileSync(filePath, data, { mode: 0o600 })
-    if(live){session.macSpeakerLiveStatus=liveStatus;if(projectionWithdrawn)session.macSpeakerLiveValidated=false;session.macSpeakerLive=live.macSpeakerLive;session.speakerRevision=live.speakerRevision;session.speakerProjectionSHA256=live.speakerProjectionSHA256
-      if(live.macSpeakerLiveQuarantineSHA256)session.macSpeakerLiveQuarantineSHA256=live.macSpeakerLiveQuarantineSHA256
+    if(live){session.macSpeakerLiveStatus=liveStatus;if(projectionWithdrawn)session.macSpeakerLiveValidated=false;session.macSpeakerLive=live.macSpeakerLive??('macSpeakerLiveRetainedState'in live?live.macSpeakerLiveRetainedState as MacSpeakerLiveState:undefined);session.speakerRevision=live.speakerRevision;session.speakerProjectionSHA256=live.speakerProjectionSHA256
+      if(('macSpeakerLiveQuarantineSHA256'in live?live.macSpeakerLiveQuarantineSHA256:undefined))session.macSpeakerLiveQuarantineSHA256=('macSpeakerLiveQuarantineSHA256'in live?live.macSpeakerLiveQuarantineSHA256:undefined)
       if(live.invalid)session.macSpeakerLiveValidated=false}
   } catch (error) {
     console.error(`[transcribe-stream] Durable session write failed for ${sessionId}: ${errMsg(error)}`)
@@ -988,7 +995,7 @@ function recoverSessions(): void {
               ...(MAC_CAPTURE_ID.test(data.sessionId)&&data.speakerIdentityPolicy==='mac-native-v1'?{
                 speakerIdentityPolicy:'mac-native-v1' as const,speakerGeneration:typeof data.speakerGeneration==='string'&&data.speakerGeneration.length>0&&data.speakerGeneration.length<=128?data.speakerGeneration:randomUUID(),
                 speakerRevision:typeof data.speakerRevision==='number'?data.speakerRevision:Number.NaN,
-                speakerProjectionSHA256:data.speakerProjectionSHA256,macSpeakerLive:data.macSpeakerLive,macSpeakerLiveValidated:false,
+                speakerProjectionSHA256:data.speakerProjectionSHA256,macSpeakerLive:data.macSpeakerLiveRetainedState??data.macSpeakerLive,macSpeakerLiveValidated:false,
                 macSpeakerLiveStatus:{reason:'recovery_revalidation_pending',latencyMs:0,pendingWindows:0,completeEligibleSnapshot:false},
               }:{}),
               startTime: data.startTime,

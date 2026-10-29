@@ -53,3 +53,19 @@ export function prepareMacSpeakerLivePublication(input:{captureId:string;generat
   ...(state?{macSpeakerLive:state}:{}),...(invalid?{macSpeakerLiveQuarantineSHA256:hashMacSpeakerLive(input.state??null)}:{}),invalid,
   sourceBindingSHA256:overlay.sourceBindingSHA256}
 }
+
+/** Main-thread withdrawal path. Never validates, clones or hashes retained
+ * acoustic state. That state is private/untrusted until the worker certifies it. */
+export function macSpeakerLiveOriginalOnly(input:{captureId:string;generation:string;chunksIndexed:readonly {i:number;c:Record<string,unknown>}[];state?:MacSpeakerLiveState;revision:number;previousDigest?:string}){
+ const digest=hashMacSpeakerLive({captureId:input.captureId,generation:input.generation,changes:[]}),changed=input.previousDigest!==digest
+ if(input.revision===MAC_SPEAKER_LIVE_TERMINAL_REVISION&&changed&&input.previousDigest!==undefined)throw Error('live_revision_exhausted')
+ const unsafe=!Number.isSafeInteger(input.revision)||input.revision<0||input.revision>=MAC_SPEAKER_LIVE_TERMINAL_REVISION-1
+ const missing=!input.state&&input.previousDigest!==undefined&&changed&&input.revision>0
+ let terminal:MacSpeakerLiveState|undefined
+ if(unsafe||missing){terminal=withholdMacSpeakerLiveState(createMacSpeakerLiveState(input.captureId,input.generation,ZERO,ZERO,99),unsafe?'revision_counter_exhausted':'recovered_state_missing')
+  terminal.revision=unsafe?MAC_SPEAKER_LIVE_TERMINAL_REVISION:input.revision+1;terminal=reseal(terminal)}
+ const revision=terminal?.revision??input.revision+(changed?1:0)
+ return{speakerIdentityPolicy:'mac-native-v1' as const,sourceType:'mac_system_audio' as const,speakerGeneration:input.generation,speakerRevision:revision,speakerProjectionSHA256:digest,
+  speakerProjectedChunksIndexed:input.chunksIndexed,...(terminal?{macSpeakerLive:terminal}:{}),...(!terminal&&input.state?{macSpeakerLiveRetainedState:input.state}:{}),invalid:false,
+  sourceBindingSHA256:hashMacSpeakerLive({captureId:input.captureId,generation:input.generation,originals:input.chunksIndexed})}
+}

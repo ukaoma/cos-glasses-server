@@ -34,3 +34,19 @@ describe('atomic speaker publication preparation',()=>{
   expect(again.speakerRevision).toBe(9)
  })
 })
+
+describe('constant-cost original-only withdrawal',()=>{
+ it('never inspects or validates retained evidence on the server main thread',async()=>{
+  const{macSpeakerLiveOriginalOnly}=await import('./mac-speaker-live-store.js')
+  const retained=new Proxy({}as any,{get(){throw Error('expensive retained state inspected')}})
+  const result=macSpeakerLiveOriginalOnly({captureId,generation,chunksIndexed:[original],state:retained,revision:17,previousDigest:h('claimed')})
+  expect(result.speakerRevision).toBe(18);expect(result.speakerProjectedChunksIndexed).toEqual([original]);expect(result.macSpeakerLive).toBeUndefined();expect(result.macSpeakerLiveRetainedState).toBe(retained)
+ })
+ it('is idempotent after a clear and preserves private proof for worker revalidation',async()=>{
+  const{macSpeakerLiveOriginalOnly}=await import('./mac-speaker-live-store.js')
+  const state=createMacSpeakerLiveState(captureId,generation,h('model'),h('profiles'),19)
+  const first=macSpeakerLiveOriginalOnly({captureId,generation,chunksIndexed:[original],state,revision:7,previousDigest:h('claimed')})
+  const again=macSpeakerLiveOriginalOnly({captureId,generation,chunksIndexed:[original],state,revision:first.speakerRevision,previousDigest:first.speakerProjectionSHA256})
+  expect(again.speakerRevision).toBe(first.speakerRevision);expect(again.macSpeakerLiveRetainedState).toBe(state)
+ })
+})

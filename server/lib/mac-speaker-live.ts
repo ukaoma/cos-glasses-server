@@ -5,20 +5,19 @@ import { open } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { dataPath } from './data-dir.js'
-import { planMacSpeakerWindows, type VerifiedMacRawChunk, type MacWindowEmbeddingReceipt } from './mac-speaker-windows.js'
+import { type VerifiedMacRawChunk, type MacWindowEmbeddingReceipt } from './mac-speaker-windows.js'
 import { extractQualifiedMacWindow } from './mac-speaker-profile-extractor.js'
 import { readPcm16Mono, pcm16ToWav } from './nemotron-segments.js'
-import { hasMacSpeakerProtectedRows } from './mac-speaker-protection.js'
-import { appendMacSpeakerLiveEvidence, createMacSpeakerLiveState, hashMacSpeakerLive, refreshMacSpeakerLiveState, validateMacSpeakerLiveState, validateMacSpeakerLiveProfiles, withholdMacSpeakerLiveState, type MacSpeakerLiveState } from './mac-speaker-live-memory.js'
-import type { MacSpeakerProfile } from './mac-speaker-reconcile.js'
-import type { SidecarEntry } from './nemotron-final.js'
+import { startMacSpeakerLiveCompute, type MacSpeakerLivePublicationCapability } from './mac-speaker-live-compute.js'
+import { hashMacSpeakerLive, type MacSpeakerLiveState } from './mac-speaker-live-memory.js'
 const sha=(bytes:Buffer)=>createHash('sha256').update(bytes).digest('hex')
 const yieldLoop=()=>new Promise<void>(resolve=>setImmediate(resolve))
+async function shaYielding(bytes:Buffer):Promise<string>{const hash=createHash('sha256');for(let at=0;at<bytes.length;at+=1024*1024){hash.update(bytes.subarray(at,at+1024*1024));await yieldLoop()}return hash.digest('hex')}
 export const macSpeakerLiveEnabled=(env:NodeJS.ProcessEnv=process.env):boolean=>env.COS_MAC_SPEAKER_LIVE==='1'
 export interface MacSpeakerLiveInput {
   captureId:string;generation:string;audioDir:string;ledgerPath:string
   chunksIndexed:readonly {i:number;c:Record<string,unknown>}[]
-  state?:MacSpeakerLiveState;voiceHighWater:number
+  state?:MacSpeakerLiveState;voiceHighWater:number;revision?:number;previousDigest?:string
 }
 export interface MacSpeakerLiveFileBinding {path:string;exists:boolean;stamp?:string}
 export const macSpeakerLiveFileStamp=(s:BigIntStats)=>[s.dev,s.ino,s.mode,s.size,s.mtimeNs,s.ctimeNs].join(':')
@@ -34,7 +33,7 @@ export function assertMacSpeakerLivePublicationBindings(bindings:readonly MacSpe
 export interface MacSpeakerLiveOutcome {
   state?:MacSpeakerLiveState;reason:string;latencyMs:number;plannedWindows:number;attemptedWindows:number;pendingWindows:number
   /** Completeness of this snapshot's canonical eligible plan, never every second of speech. */
-  completeEligibleSnapshot:boolean;rejectedChunks:number;sourceBindingSHA256:string;fileBindings:MacSpeakerLiveFileBinding[]
+  completeEligibleSnapshot:boolean;rejectedChunks:number;sourceBindingSHA256:string;fileBindings:MacSpeakerLiveFileBinding[];capability?:MacSpeakerLivePublicationCapability
 }
 export interface MacSpeakerLiveDeps {
   runtime?:()=>Promise<{modelPath:string;profilesPath:string}|null>
@@ -58,7 +57,7 @@ async function pinned(path:string,max:number,raw=false):Promise<{stamp:string;ha
   const bytes=storage.subarray(0,offset),after=await f.stat({bigint:true})
   if(bytes.length!==Number(before.size)||stampOf(after)!==stamp)throw Error('source_changed_during_read')
   const pcm=raw?pcmOf(bytes):undefined
-  const value={stamp,hash:sha(bytes),...(pcm?{raw:{pcmSHA256:sha(pcm),sampleCount:pcm.length/2}}:{})}
+  const value={stamp,hash:await shaYielding(bytes),...(pcm?{raw:{pcmSHA256:sha(pcm),sampleCount:pcm.length/2}}:{})}
   if(pins.size>=10000)pins.delete(pins.keys().next().value!);pins.set(path,value);return value
  }finally{await f.close()}
 }
@@ -72,7 +71,8 @@ async function readBounded(path:string,max:number):Promise<Buffer>{
     if(offset!==Number(before.size)||stampOf(after)!==stampOf(before))throw Error('source_changed_during_read')
     const bytes=buffer.subarray(0,offset),prior=pins.get(path)
     if(pins.size>=10000)pins.delete(pins.keys().next().value!)
-    pins.set(path,{stamp:stampOf(before),hash:sha(bytes),...(prior?.hash===sha(bytes)&&prior.raw?{raw:prior.raw}:{})})
+    const hash=await shaYielding(bytes)
+    pins.set(path,{stamp:stampOf(before),hash,...(prior?.hash===hash&&prior.raw?{raw:prior.raw}:{})})
     return bytes
   }finally{await file.close()}
 }
@@ -99,27 +99,19 @@ let busy=false
  * blocking transcription. No sampled12-window plan and no first-N-success claim. */
 export async function runMacSpeakerLivePass(input:MacSpeakerLiveInput,deps:MacSpeakerLiveDeps={}):Promise<MacSpeakerLiveOutcome>{
   const now=deps.now??Date.now,start=now(),sourceBindingSHA256=hashMacSpeakerLive(input.chunksIndexed)
-  let fileBindings:MacSpeakerLiveFileBinding[]=[],state=input.state,plannedWindows=0,attemptedWindows=0,pendingWindows=0,rejectedChunks=0,owns=false
-  const result=(reason:string,completeEligibleSnapshot=false):MacSpeakerLiveOutcome=>({state,reason,latencyMs:now()-start,plannedWindows,attemptedWindows,pendingWindows,completeEligibleSnapshot,rejectedChunks,sourceBindingSHA256,fileBindings})
+  let compute:Awaited<ReturnType<typeof startMacSpeakerLiveCompute>>|undefined,capability:MacSpeakerLivePublicationCapability|undefined,fileBindings:MacSpeakerLiveFileBinding[]=[],state=input.state,plannedWindows=0,attemptedWindows=0,pendingWindows=0,rejectedChunks=0,owns=false
+  const result=(reason:string,completeEligibleSnapshot=false):MacSpeakerLiveOutcome=>({state,reason,latencyMs:now()-start,plannedWindows,attemptedWindows,pendingWindows,completeEligibleSnapshot,rejectedChunks,sourceBindingSHA256,fileBindings,capability})
   try{
     const admitted=()=> (deps.admit??(()=>macSpeakerLiveEnabled()))(input.captureId)
     if(!admitted())return result('live_admission_closed')
-    if(state){validateMacSpeakerLiveState(state);if(state.captureId!==input.captureId||state.generation!==input.generation)throw Error('capture_generation_drift')}
     if(input.chunksIndexed.length>8192)throw Error('raw_source_budget_exhausted')
     const ledger=await ledgerBytes(input.ledgerPath)
-    if(ledger?.toString().trim()||input.chunksIndexed.some(e=>hasMacSpeakerProtectedRows(e.c))){if(state)state=withholdMacSpeakerLiveState(state,'human_history');return result('human_history')}
     const runtime=await(deps.runtime??defaultRuntime)();if(!runtime)throw Error('model_unavailable')
-    const profileBytes=await readBounded(runtime.profilesPath,32*1024*1024),profileSHA256=sha(profileBytes)
+    const profileBytes=await readBounded(runtime.profilesPath,32*1024*1024),profileSHA256=await shaYielding(profileBytes)
     const initialProfileStamp=pins.get(runtime.profilesPath)!.stamp
     const modelPin=await pinned(runtime.modelPath,128*1024*1024),modelSHA256=modelPin.hash
     const initialLedgerStamp=ledger!==null?pins.get(input.ledgerPath)!.stamp:undefined
     await yieldLoop()
-    const parsed=JSON.parse(profileBytes.toString()) as {profiles?:Array<{name:string;embeddings:number[][]}>}
-    if(!Array.isArray(parsed.profiles))throw Error('profile_cohort_invalid')
-    const profiles:MacSpeakerProfile[]=parsed.profiles.map(p=>({...p,profileSHA256}));validateMacSpeakerLiveProfiles(profiles,profileSHA256)
-    if(state&&(state.modelSHA256!==modelSHA256||state.profileSHA256!==profileSHA256))throw Error('model_or_profile_drift')
-    state??=createMacSpeakerLiveState(input.captureId,input.generation,modelSHA256,profileSHA256,input.voiceHighWater)
-    if(state.withheldReason)return result(state.withheldReason)
     const raw:VerifiedMacRawChunk[]=[],bindings=new Map<number,{hash:string;stamp:string}>()
     for(const entry of input.chunksIndexed){
       if(!Number.isSafeInteger(entry.i)||entry.i<0||entry.i>=10000)throw Error('invalid_raw_index')
@@ -131,40 +123,38 @@ export async function runMacSpeakerLivePass(input:MacSpeakerLiveInput,deps:MacSp
       raw.push({chunkIndex:entry.i,audioSHA256,pcmSHA256:binding.raw!.pcmSHA256,sampleRate:16000,channels:1,format:'pcm_s16le',sampleCount:binding.raw!.sampleCount,verified:true})
       await yieldLoop();if(now()-start>15000)throw Error('live_pass_deadline')
     }
-    const plan=planMacSpeakerWindows({sidecar:{sessionId:input.captureId,chunkEntries:input.chunksIndexed.map(e=>({chunkIndex:e.i,chunk:e.c})) as unknown as SidecarEntry[]},rawChunks:raw,correctionHistory:'verified-clear'})
-    plannedWindows=plan.windows.length;rejectedChunks=plan.rejected.reduce((n,r)=>n+r.chunkIndexes.length,0)
-    // Restored evidence must remain in the recomputed canonical universe.
-    if(state.evidence.some(e=>!plan.windows.some(w=>w.id===e.window.id)))throw Error('retained_source_plan_drift')
-    const pending=plan.windows.filter(w=>!state!.evidence.some(e=>e.window.id===w.id));pendingWindows=pending.length
-    if(pending.length){
+    fileBindings=[{path:runtime.modelPath,exists:true,stamp:modelPin.stamp},{path:runtime.profilesPath,exists:true,stamp:initialProfileStamp},
+      ...[...bindings].map(([index,binding])=>({path:join(input.audioDir,`chunk_${String(index).padStart(4,'0')}.wav`),exists:true,stamp:binding.stamp}))]
+    fileBindings.push({path:input.ledgerPath,exists:ledger!==null,...(ledger!==null?{stamp:initialLedgerStamp}:{})})
+    compute=await startMacSpeakerLiveCompute({captureId:input.captureId,generation:input.generation,sourceBindingSHA256,fileBindingsSHA256:hashMacSpeakerLive(fileBindings),revision:input.revision??0,previousDigest:input.previousDigest,
+      voiceHighWater:input.voiceHighWater,state:input.state,modelSHA256,profileSHA256,profileJSONBytes:new Uint8Array(profileBytes.buffer,profileBytes.byteOffset,profileBytes.byteLength),chunksIndexed:input.chunksIndexed,rawChunks:raw,humanHistory:!!ledger?.toString().trim()},
+      {timeoutMs:Math.max(1,Math.min(5000,15000-(now()-start)))})
+    const prepared=compute.prepared;plannedWindows=prepared.plannedWindows;pendingWindows=prepared.pendingWindows;rejectedChunks=prepared.rejectedChunks
+    let receipt:MacWindowEmbeddingReceipt|undefined
+    if(prepared.window){
       if(busy)return result('native_lane_busy')
-      busy=true;owns=true;const window=pending[0],buffers:Buffer[]=[]
+      busy=true;owns=true;const window=prepared.window,buffers:Buffer[]=[]
       for(const source of window.sources){const wav=await readBounded(join(input.audioDir,`chunk_${String(source.chunkIndex).padStart(4,'0')}.wav`),960044);if(sha(wav)!==source.audioSHA256)throw Error('raw_audio_drift');buffers.push(pcmOf(wav))}
       const pcm=Buffer.concat(buffers);attemptedWindows++
       if(!admitted())return result('live_admission_closed')
       const vectors=await(deps.extract??extractQualifiedMacWindow)(pcm,runtime.modelPath,Math.max(1,Math.min(8000,15000-(now()-start))))
-      if(!vectors)return result('extraction_unavailable')
-      const receipt:MacWindowEmbeddingReceipt={windowId:window.id,windowBindingSHA256:window.bindingSHA256,modelSHA256,audioSHA256:sha(pcm16ToWav(pcm,16000)),pcmSHA256:sha(pcm),sampleCount:pcm.length/2,embedding:vectors[0],halfEmbeddings:[vectors[1],vectors[2]]}
-      state=appendMacSpeakerLiveEvidence(state,{window,receipt,nativeReceiptSHA256:hashMacSpeakerLive({window,receipt})},profiles,input.voiceHighWater)
-      pendingWindows--
-    }else state=refreshMacSpeakerLiveState(state,profiles)
+      if(vectors)receipt={windowId:window.id,windowBindingSHA256:window.bindingSHA256,modelSHA256,audioSHA256:sha(pcm16ToWav(pcm,16000)),pcmSHA256:sha(pcm),sampleCount:pcm.length/2,embedding:vectors[0],halfEmbeddings:[vectors[1],vectors[2]]}
+    }
+    const finished=await compute.finish(receipt)
+    state=finished.state;capability=finished.capability;pendingWindows=finished.pendingWindows
     // Final complete source/model/profile/history CAS, before route publication.
-    if(sha(await readBounded(runtime.profilesPath,32*1024*1024))!==profileSHA256||(await pinned(runtime.modelPath,128*1024*1024)).hash!==modelSHA256
+    if(await shaYielding(await readBounded(runtime.profilesPath,32*1024*1024))!==profileSHA256||(await pinned(runtime.modelPath,128*1024*1024)).hash!==modelSHA256
       ||hashMacSpeakerLive(await ledgerBytes(input.ledgerPath))!==hashMacSpeakerLive(ledger))throw Error('model_profile_or_history_changed')
     for(const[index,expected]of bindings){if((await pinned(join(input.audioDir,`chunk_${String(index).padStart(4,'0')}.wav`),960044,true)).hash!==expected.hash)throw Error('raw_audio_drift');await yieldLoop();if(now()-start>15000)throw Error('live_pass_deadline')}
-    // Keep INITIAL verified inode/time pins. Equal bytes restored after a
-    // mutation cannot prove what the owned native child actually loaded.
-    fileBindings=[{path:runtime.modelPath,exists:true,stamp:modelPin.stamp},{path:runtime.profilesPath,exists:true,stamp:initialProfileStamp},
-      ...[...bindings].map(([index,binding])=>({path:join(input.audioDir,`chunk_${String(index).padStart(4,'0')}.wav`),exists:true,stamp:binding.stamp}))]
-    fileBindings.push({path:input.ledgerPath,exists:ledger!==null,...(ledger!==null?{stamp:initialLedgerStamp}:{})})
     assertMacSpeakerLivePublicationBindings(fileBindings)
-    validateMacSpeakerLiveState(state)
-    return result(state.withheldReason??(pendingWindows?'eligible_evidence_pending':state.projections.length?'qualified':'no_qualified_identity'),pendingWindows===0)
+    if(!admitted())throw Error('live_admission_closed')
+    if(now()-start>15000)throw Error('live_pass_deadline')
+    return result(prepared.window&&!receipt?'extraction_unavailable':finished.reason,finished.completeEligibleSnapshot)
   }catch(error){
     const reason=error instanceof Error?error.message:'live_unavailable'
-    if(state){try{state=withholdMacSpeakerLiveState(state,reason.slice(0,200))}catch{state=undefined}}
+    state=undefined;capability=undefined
     return result(reason)
-  }finally{if(owns)busy=false}
+  }finally{await compute?.close();if(owns)busy=false}
 }
 /** Coalescing async runner; no spin on unavailable models or failed extraction. */
 export function createMacSpeakerLiveScheduler(deps:{snapshot:(captureId:string)=>MacSpeakerLiveInput|null;commit:(captureId:string,outcome:MacSpeakerLiveOutcome)=>boolean;runtime?:MacSpeakerLiveDeps;lease?:()=>{release():void}}){
