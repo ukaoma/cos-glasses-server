@@ -35,6 +35,21 @@ export interface MacCallHumanScope {
   baseSHA256: string; markdownSHA256: string; ledgerSHA256: string; annotationSHA256: string | null
   packetSHA256: string | null; generation: string; packetRevision: number
 }
+// One exact-input entry, capped independently of the per-scope field bound.
+// Frozen outputs cannot be poisoned by a caller retaining a returned reference.
+let scopeCache: { key: string; scopes: MacCallHumanScope[] } | null = null
+function cacheScopes(key: string, scopes: MacCallHumanScope[]): MacCallHumanScope[] {
+  let fields = 0
+  for (const scope of scopes) {
+    fields += scope.fields.length
+    for (const member of scope.members) Object.freeze(member)
+    for (const field of scope.fields) { Object.freeze(field.path); Object.freeze(field.rawChunkIndices); Object.freeze(field) }
+    Object.freeze(scope.members); Object.freeze(scope.fields); Object.freeze(scope)
+  }
+  Object.freeze(scopes)
+  scopeCache = fields <= 250000 ? { key, scopes } : null
+  return scopes
+}
 interface Action {
   id: string; at: string; identityId: string; to: string; scopeSHA256: string
   members: Member[]; fields: Field[]; fieldScopeSHA256: string; ledgerStart: number; ledgerEnd: number; ledgerBeforeSHA256: string; ledgerAfterSHA256: string
@@ -152,9 +167,13 @@ function requireHumanLedgerCoverage(ledger: string, annotation: Annotation | nul
 /** Select exact current automatic members. No display-label expansion and no
  * independent nested identity: the b18 source/root agreement remains mandatory. */
 export function macCallHumanScopes(input: { baseJSON: string; markdown: string; ledgerJSONL: string; annotationJSON: string | null; packet: MacSpeakerCallPacket | null; view: MacSpeakerCallView }): MacCallHumanScope[] {
-  const { packet, view } = input, base = JSON.parse(input.baseJSON), map = mapped(base)
-  const result: MacCallHumanScope[] = []
+  const { packet, view } = input
   const source = { baseSHA256: hash(input.baseJSON), markdownSHA256: hash(input.markdown), ledgerSHA256: hash(input.ledgerJSONL), annotationSHA256: input.annotationJSON === null ? null : hash(input.annotationJSON) }
+  const key = digest({ source, packet: digest(packet), status: view.metadata.status, viewPacket: view.metadata.packetSHA256 })
+  if (scopeCache?.key === key) return scopeCache.scopes
+  const base = JSON.parse(input.baseJSON), map = mapped(base)
+  const result: MacCallHumanScope[] = []
+  const finish = () => cacheScopes(key, result)
   const annotation = input.annotationJSON ? validateAnnotation(JSON.parse(input.annotationJSON), input.baseJSON, input.ledgerJSONL) : null
   if (!annotation) requireHumanLedgerCoverage(input.ledgerJSONL, null)
   const protectedRaw = new Set<number>()
@@ -171,10 +190,10 @@ export function macCallHumanScopes(input: { baseJSON: string; markdown: string; 
       result.push({ ...body, scopeSHA256: digest(body) })
     }
   }
-  if (!packet) return result
+  if (!packet) return finish()
   const { packetSHA256, ...packetBody } = packet
-  if (packetSHA256 !== digest(packetBody)) return result
-  if (view.metadata.status !== 'applied' || view.metadata.packetSHA256 !== packet.packetSHA256 || packet.admission !== 'qualified' || packet.projectionPolicy !== 'anonymous-estimate' || packet.baseSHA256 !== source.baseSHA256 || packet.ledgerSHA256 !== source.ledgerSHA256) return result
+  if (packetSHA256 !== digest(packetBody)) return finish()
+  if (view.metadata.status !== 'applied' || view.metadata.packetSHA256 !== packet.packetSHA256 || packet.admission !== 'qualified' || packet.projectionPolicy !== 'anonymous-estimate' || packet.baseSHA256 !== source.baseSHA256 || packet.ledgerSHA256 !== source.ledgerSHA256) return finish()
   for (const raw of packet.aliasProtectedRawChunkIndices) protectedRaw.add(raw)
   const acousticVoices = new Set(packet.groups.flatMap(g => g.memberVoices))
   // A human may also review an unresolved automatic label. This is NOT an
@@ -184,28 +203,39 @@ export function macCallHumanScopes(input: { baseJSON: string; markdown: string; 
     ...packet.groups.map(group => ({ group, displayLabel: packet.displayLabels[group.identityId], reviewBasis: 'accepted-acoustic-group' as const })),
     ...singletonVoices.map(voice => ({ group: { identityId: `review_${digest({ base: source.baseSHA256, voice }).slice(0, 40)}`, memberVoices: [voice] }, displayLabel: voice, reviewBasis: 'automatic-label-only' as const })),
   ]
-  for (const { group, displayLabel, reviewBasis } of groups) {
+  const owned = groups.map(({ group, displayLabel, reviewBasis }) => {
     const voices = new Set(group.memberVoices), fields: Field[] = [], members = map.filter(m => !protectedRaw.has(m.rawChunkIndex) && voices.has(m.before) && voices.has(base.chunkEntries[m.rawChunkIndex].chunk.speaker) && base.chunks[m.position].speaker === base.chunkEntries[m.rawChunkIndex].chunk.speaker && !hasMacSpeakerProtectedRows(base.chunks[m.position]) && !hasMacSpeakerProtectedRows(base.chunkEntries[m.rawChunkIndex].chunk))
     const memberRaw = new Set(members.map(m => m.rawChunkIndex))
     for (const member of members) for (const [path, row] of [[['chunks', member.position], base.chunks[member.position]], [['chunkEntries', member.rawChunkIndex, 'chunk'], base.chunkEntries[member.rawChunkIndex].chunk]] as Array<[Path, Doc]>) {
       fields.push({ path: [...path, 'speaker'], before: row.speaker, rawChunkIndices: [member.rawChunkIndex] })
       for (const key of ['segments', 'finalSegments', 'words']) for (const [i, nested] of (row[key] ?? []).entries()) if (voices.has(nested.speaker) && !isMacSpeakerHumanProtected(nested)) fields.push({ path: [...path, key, i, 'speaker'], before: nested.speaker, rawChunkIndices: [member.rawChunkIndex] })
     }
-    for (const [si, segment] of (base.batchSegments ?? []).entries()) {
+    return { group, displayLabel, reviewBasis, members, memberRaw, fields }
+  }).filter(group => group.members.length > 0)
+  const byVoice = new Map(owned.flatMap(group => group.group.memberVoices.map(voice => [voice, group] as const)))
+  // Bind each word once in its exact concatenated-RAW clock. ASR words need
+  // not be sorted, so locate the first intersected source with binary search.
+  if (owned.length) for (const [si, segment] of (base.batchSegments ?? []).entries()) {
       const clock: Array<{ raw: number; lo: number; hi: number }> = []; let offset = 0
       for (let raw = segment.startChunkIdx; raw <= segment.endChunkIdx; raw++) { const r = packet.rawBindings[raw]; if (!r) fail('batch binding'); const n = r.endSample - r.startSample; clock.push({ raw, lo: offset, hi: offset + n }); offset += n }
       for (const [wi, word] of (segment.speakerWords ?? []).entries()) {
-        if (!voices.has(word.speaker) || isMacSpeakerHumanProtected(word)) continue
-        const lo = Math.round(word.start * 16000), hi = Math.round(word.end * 16000), raw = clock.filter(c => lo < c.hi && hi > c.lo).map(c => c.raw)
-        if (Number.isSafeInteger(lo) && Number.isSafeInteger(hi) && lo >= 0 && hi > lo && hi <= offset && raw.length && raw.every(r => memberRaw.has(r))) fields.push({ path: ['batchSegments', si, 'speakerWords', wi, 'speaker'], before: word.speaker, rawChunkIndices: raw })
+        const group = byVoice.get(word.speaker)
+        if (!group || isMacSpeakerHumanProtected(word)) continue
+        const lo = Math.round(word.start * 16000), hi = Math.round(word.end * 16000)
+        if (!Number.isSafeInteger(lo) || !Number.isSafeInteger(hi) || lo < 0 || hi <= lo || hi > offset) continue
+        let left = 0, right = clock.length
+        while (left < right) { const mid = (left + right) >>> 1; if (clock[mid].hi <= lo) left = mid + 1; else right = mid }
+        const raw: number[] = []
+        for (let i = left; i < clock.length && clock[i].lo < hi; i++) raw.push(clock[i].raw)
+        if (raw.length && raw.every(r => group.memberRaw.has(r))) group.fields.push({ path: ['batchSegments', si, 'speakerWords', wi, 'speaker'], before: word.speaker, rawChunkIndices: raw })
       }
-    }
-    if (!members.length) continue
-    const body = { kind: 'automatic' as const, reviewBasis, identityId: group.identityId, displayLabel, members, fields, baseSHA256: hash(input.baseJSON), markdownSHA256: hash(input.markdown), ledgerSHA256: hash(input.ledgerJSONL), annotationSHA256: input.annotationJSON === null ? null : hash(input.annotationJSON), packetSHA256: packet.packetSHA256, generation: packet.generation, packetRevision: packet.revision }
+  }
+  for (const { group, displayLabel, reviewBasis, members, fields } of owned) {
+    const body = { kind: 'automatic' as const, reviewBasis, identityId: group.identityId, displayLabel, members, fields, ...source, packetSHA256: packet.packetSHA256, generation: packet.generation, packetRevision: packet.revision }
     if (fields.length > 40000) fail('field budget')
     result.push({ ...body, scopeSHA256: digest(body) })
   }
-  return result
+  return finish()
 }
 
 export function applyMacCallHumanAnnotation(baseJSON: string, ledger: string, annotationJSON: string | null, view: MacSpeakerCallView): MacSpeakerCallView {

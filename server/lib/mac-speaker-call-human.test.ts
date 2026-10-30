@@ -56,6 +56,29 @@ function fixture(namedProof = false, edit?: (doc: any) => void) {
 function commit(f: ReturnType<typeof fixture>, afterWrite?: (index: number) => void) { return commitMacCallHumanAnnotation({ files: f.files, captureId: f.sid, scope: f.scope, selectedRawChunkIndices: f.selected, to: 'Human Example', afterWrite }) }
 
 describe('scoped human call annotations', () => {
+  it('reuses only exact immutable scope outputs and never carries a cached grant across source, packet, or view changes', () => {
+    const f = fixture(), args = { baseJSON: f.input.currentJSON, markdown: f.markdown, ledgerJSONL: '', annotationJSON: null, packet: f.packet, view: f.view }
+    const original = macCallHumanScopes(args), snapshot = JSON.stringify(original)
+    expect(Object.isFrozen(original)).toBe(true); expect(Object.isFrozen(original[0].fields[0].path)).toBe(true)
+    expect(() => { original[0].fields[0].rawChunkIndices[0] = 9999 }).toThrow()
+    expect(JSON.stringify(macCallHumanScopes(args))).toBe(snapshot)
+    const changed = macCallHumanScopes({ ...args, markdown: f.markdown + '\n' })
+    expect(changed[0].scopeSHA256).not.toBe(original[0].scopeSHA256)
+    expect(changed[0].fields).toEqual(original[0].fields)
+    expect(macCallHumanScopes({ ...args, packet: { ...f.packet, admission: 'off' } })).toEqual([])
+    expect(macCallHumanScopes({ ...args, view: { ...f.view, metadata: { ...f.view.metadata, status: 'base' } } })).toEqual([])
+    expect(() => macCallHumanScopes({ ...args, ledgerJSONL: '{"source":"mac-speaker-call-human-v1"}\n' })).toThrow('missing prior human decisions')
+  })
+  it('builds a batch raw clock a bounded number of times regardless of the number of review groups', () => {
+    const f = fixture(); let reads = 0
+    const rawBindings = new Proxy(f.packet.rawBindings, { get(target, key, receiver) { if (typeof key === 'string' && /^\d+$/.test(key)) reads++; return Reflect.get(target, key, receiver) } })
+    const scopes = macCallHumanScopes({ baseJSON: f.input.currentJSON, markdown: f.markdown + '\nclock probe', ledgerJSONL: '', annotationJSON: null, packet: { ...f.packet, rawBindings }, view: f.view })
+    expect(scopes.length).toBeGreaterThan(4)
+    // Includes two full packet hashes as well as construction of the clock.
+    // Per-group clock construction would exceed this bound on this fixture.
+    expect(reads).toBeLessThanOrEqual(4 * rawBindings.length)
+    expect(scopes.map(s => s.fields)).toEqual(f.scopes.map(s => s.fields))
+  })
   it('rejects machine placeholders at preview, publication, and retained human evidence boundaries without changing journals', () => {
     const f = fixture()
     expect(isMacCallHumanName('Brigitta Pólya')).toBe(true)
