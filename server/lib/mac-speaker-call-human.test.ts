@@ -10,7 +10,7 @@ import { applyMacCallHumanAnnotation, commitMacCallHumanAnnotation, macCallHuman
 import { SYNTHETIC_SPANS, SYNTHETIC_SECONDS, syntheticEmbeddings, syntheticNative } from './__fixtures__/speaker-shadow/synthetic-meeting.js'
 import { projectMacSpeakerRepair, hashMacSpeakerDocument, hashMacSpeakerMachineBinding } from './mac-speaker-repair-projection.js'
 import { readMacSpeakerMachineEvidence } from './mac-speaker-machine-evidence.js'
-import { confirmedChunks } from './meeting-corrections.js'
+import { closeInterruptedCorrections, confirmedChunks, pendingCorrections } from './meeting-corrections.js'
 import { reviewMeetingSpeakers } from './meeting-speaker-review.js'
 
 await vi.hoisted(async () => { const { realpathSync } = await import('node:fs'); process.env.COS_DATA_DIR = realpathSync(process.env.COS_DATA_DIR!) })
@@ -135,6 +135,12 @@ describe('scoped human call annotations', () => {
     const f = fixture()
     expect(() => commit(f, i => { if (i === 0) throw Error('interrupted after ledger') })).toThrow('interrupted after ledger')
     expect(() => readFileSync(f.paths.annotation)).toThrow()
+    const interruptedLedger = readFileSync(f.paths.ledger, 'utf8')
+    // This is the actual startup closeout called by recoverInterruptedNaming.
+    // All rows of the human decision became visible in the same atomic rename.
+    expect(pendingCorrections(f.sid)).toHaveLength(0)
+    expect(closeInterruptedCorrections()).toBe(0)
+    expect(readFileSync(f.paths.ledger, 'utf8')).toBe(interruptedLedger)
     recoverMacCallHumanAnnotation(f.files, f.sid)
     const after = readFileSync(f.paths.annotation, 'utf8'), ledger = readFileSync(f.paths.ledger, 'utf8')
     recoverMacCallHumanAnnotation(f.files, f.sid)
@@ -142,6 +148,27 @@ describe('scoped human call annotations', () => {
     writeFileSync(f.paths.ledger, ledger + '{"later":"human"}\n')
     expect(() => recoverMacCallHumanAnnotation(f.files, f.sid)).toThrow('completed annotation changed')
     expect(readFileSync(f.paths.ledger, 'utf8')).toContain('later')
+  })
+  it('refuses a copy missing another copy’s prior human decisions even after its automatic packet is freshly prepared', () => {
+    const a = fixture(), b = fixture()
+    commit(a)
+    const ledger = readFileSync(a.paths.ledger, 'utf8'), annotationA = readFileSync(a.paths.annotation, 'utf8')
+    const { generation, sourceBindingSHA256: _oldBinding, ...oldSource } = b.input
+    const source = { ...oldSource, ledgerJSONL: ledger }, input = { ...source, generation, sourceBindingSHA256: bindMacSpeakerShadowRepair(source) }
+    const state = reconcileMacSpeaker256Snapshot(null, input), packet = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'anonymous-estimate' })
+    const view = resolveMacSpeakerCallView(input.currentJSON, ledger, packet)
+    expect(view.metadata.status).toBe('applied')
+    writeFileSync(b.paths.packet, JSON.stringify(packet))
+    expect(() => macCallHumanScopes({ baseJSON: input.currentJSON, markdown: b.markdown, ledgerJSONL: ledger, annotationJSON: null, packet, view })).toThrow('copy is missing prior human decisions')
+    // Exercise the commit fence independently of the scope-creation refusal:
+    // this previously reviewable OTHER group has current full source hashes.
+    const old = b.scopes.find(s => s.members.some(m => m.before === 'Voice 3'))!
+    const { scopeSHA256: _oldScope, ...body } = { ...old, ledgerSHA256: sha(ledger), packetSHA256: packet.packetSHA256, generation: packet.generation, packetRevision: packet.revision }
+    const scope = { ...body, scopeSHA256: sha(JSON.stringify(body)) }
+    expect(() => commitMacCallHumanAnnotation({ files: b.files, captureId: b.sid, scope, selectedRawChunkIndices: [scope.members[0].rawChunkIndex], to: 'Other Example' })).toThrow('copy is missing prior human decisions')
+    expect(readFileSync(a.paths.ledger, 'utf8')).toBe(ledger); expect(readFileSync(a.paths.annotation, 'utf8')).toBe(annotationA)
+    expect(readFileSync(b.files.sidecarPath, 'utf8')).toBe(b.input.currentJSON); expect(readFileSync(b.files.meetingPath, 'utf8')).toBe(b.markdown)
+    expect(() => readFileSync(b.paths.annotation)).toThrow(); expect(() => readFileSync(b.paths.journal)).toThrow(); expect(() => readFileSync(b.paths.lock)).toThrow()
   })
   it('refuses a source edit after the first target and preserves a foreign journal replacement', () => {
     const f = fixture()

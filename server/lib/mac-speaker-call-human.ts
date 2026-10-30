@@ -118,7 +118,29 @@ function validateAnnotation(value: unknown, baseJSON: string, ledger: string): A
     for (const member of action.members) if (!action.fields.some(f => equal(f.path, ['chunks', member.position, 'speaker']))) fail('human root field missing')
     for (const member of action.members) selected.set(member.rawChunkIndex, action.to)
   }
+  requireHumanLedgerCoverage(ledger, a)
   return a
+}
+
+/** A capture ledger is shared by its copies, but an annotation is bound to one
+ * immutable BASE. Never append from a copy that is missing earlier decisions.
+ * Only validated action ranges cover these rows; duplicated ids outside their
+ * original range cannot confer coverage. Replication is a separate operation. */
+function requireHumanLedgerCoverage(ledger: string, annotation: Annotation | null): void {
+  let offset = 0, index = 0
+  const actions = annotation?.actions ?? [], lines = ledger.split('\n')
+  if (lines.length > 20001) fail('human ledger row budget')
+  for (const line of lines) {
+    while (index < actions.length && actions[index].ledgerEnd <= offset) index++
+    if (line.trim()) {
+      const row = JSON.parse(line)
+      if (row?.source === PREFIX) {
+        const action = actions[index]
+        if (!action || offset < action.ledgerStart || offset + line.length > action.ledgerEnd) fail('copy is missing prior human decisions')
+      }
+    }
+    offset += line.length + 1
+  }
 }
 
 /** Select exact current automatic members. No display-label expansion and no
@@ -128,6 +150,7 @@ export function macCallHumanScopes(input: { baseJSON: string; markdown: string; 
   const result: MacCallHumanScope[] = []
   const source = { baseSHA256: hash(input.baseJSON), markdownSHA256: hash(input.markdown), ledgerSHA256: hash(input.ledgerJSONL), annotationSHA256: input.annotationJSON === null ? null : hash(input.annotationJSON) }
   const annotation = input.annotationJSON ? validateAnnotation(JSON.parse(input.annotationJSON), input.baseJSON, input.ledgerJSONL) : null
+  if (!annotation) requireHumanLedgerCoverage(input.ledgerJSONL, null)
   const protectedRaw = new Set<number>()
   if (annotation) {
     const latestMembers = new Map<number, { member: Member; to: string }>(), latestFields = new Map<string, { field: Field; to: string }>()
@@ -279,6 +302,7 @@ export function commitMacCallHumanAnnotation(input: { files: MacCallHumanFiles; 
     const { packetSHA256, ...packetBody } = parsedPacket ?? { packetSHA256: null }
     if (scopeSHA256 !== digest(scopeBody) || base.hash !== scope.baseSHA256 || md.hash !== scope.markdownSHA256 || hash(ledger?.text ?? '') !== scope.ledgerSHA256 || prior?.hash !== (scope.annotationSHA256 ?? undefined) || !['automatic', 'human'].includes(scope.kind) || scope.kind === 'automatic' && (packetSHA256 !== scope.packetSHA256 || packetSHA256 !== digest(packetBody) || parsedPacket?.generation !== scope.generation || parsedPacket?.revision !== scope.packetRevision)) fail('reviewed source changed')
     const existing = prior ? validateAnnotation(JSON.parse(prior.text), base.text, ledger?.text ?? '') : null
+    if (!existing) requireHumanLedgerCoverage(ledger?.text ?? '', null)
     if (scope.kind === 'human' && (!existing || existing.annotationSHA256 !== scope.generation || existing.revision !== scope.packetRevision)) fail('reviewed human annotation changed')
     const selected = new Set(input.selectedRawChunkIndices), members = scope.members.filter(m => selected.has(m.rawChunkIndex))
     if (members.length !== selected.size) fail('selection outside reviewed group')
