@@ -14,6 +14,7 @@ import { lstat, readFile, readdir, realpath } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises'
 import { readMacSpeakerMachineEvidence } from './mac-speaker-machine-evidence.js'
+import { readMacSpeakerCallView } from './mac-speaker-call-view.js'
 import { dataPath } from './data-dir.js'
 import { confirmedLabels, confirmedChunks } from './meeting-corrections.js'
 import { resolveCosOperationsDir, resolveMeetingLibrary } from './cos-operations-meetings.js'
@@ -277,7 +278,8 @@ export async function buildVoiceDirectorySnapshot(): Promise<VoiceDirectorySnaps
         continue
       }
       totalBytes += link.size
-      const raw = JSON.parse(await readFile(real, 'utf8')) as Record<string, unknown> | ReviewChunk[]
+      const baseJSON = await readFile(real, 'utf8')
+      const raw = JSON.parse(baseJSON) as Record<string, unknown> | ReviewChunk[]
       const chunks = Array.isArray(raw) ? raw : raw.chunks
       const sessionId = Array.isArray(raw) ? '' : String(raw.sessionId ?? '')
       if (!Array.isArray(chunks) || !SESSION.test(sessionId) || seenSessions.has(sessionId)) {
@@ -296,7 +298,9 @@ export async function buildVoiceDirectorySnapshot(): Promise<VoiceDirectorySnaps
       )
 
       const machineEvidence = readMacSpeakerMachineEvidence(record)
-      const review = reviewMeetingSpeakers(chunks as ReviewChunk[], {
+      const callView = readMacSpeakerCallView(real, baseJSON, candidate.markdownPath)
+      const review = reviewMeetingSpeakers((callView.doc.chunks ?? chunks) as ReviewChunk[], {
+        callViewAnonymousLabels: callView.metadata.groups.map(g => g.label),
         owner,
         phrasesPerVoice: 1,
         confirmed: confirmedLabels(sessionId),
@@ -304,8 +308,8 @@ export async function buildVoiceDirectorySnapshot(): Promise<VoiceDirectorySnaps
         machineQualifiedPositions: machineEvidence.positions,
         machineEvidenceStatus: machineEvidence.status,
         durationMs: typeof record.durationMs === 'number' ? record.durationMs : undefined,
-        batchSegments: Array.isArray(record.batchSegments)
-          ? record.batchSegments as SpeakerWordSegment[]
+        batchSegments: Array.isArray(callView.doc.batchSegments)
+          ? callView.doc.batchSegments as SpeakerWordSegment[]
           : undefined,
       })
       meetingsScanned++

@@ -1,5 +1,6 @@
 import { runQualifiedMacProfilePass } from '../lib/mac-speaker-profile-finalizer.js'
 import { readMacSpeakerMachineEvidence } from '../lib/mac-speaker-machine-evidence.js'
+import { readMacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
 import { dataPath } from '../lib/data-dir.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
 import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
@@ -1675,8 +1676,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
     let chunks: unknown
     let sidecar: Record<string, unknown>
+    let baseJSON: string
     try {
-      sidecar = JSON.parse(readFileSync(sidecarPath, 'utf-8')) as Record<string, unknown>
+      baseJSON = readFileSync(sidecarPath, 'utf-8')
+      sidecar = JSON.parse(baseJSON) as Record<string, unknown>
       chunks = Array.isArray(sidecar) ? sidecar : sidecar.chunks
     } catch {
       // Defensive: both lookups above already read this sidecar to match the
@@ -1694,9 +1697,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
     // Raw capture indices, so a phrase can address its own audio. Position in
     // `chunks` is NOT the WAV number — see attachRawChunkIndices.
-    const withIndices = attachRawChunkIndices(chunks as ReviewChunk[], sidecar.chunkEntries)
+    const callView = readMacSpeakerCallView(sidecarPath, baseJSON!, operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath)
+    const withIndices = attachRawChunkIndices(callView.doc.chunks ?? chunks as ReviewChunk[], sidecar.chunkEntries)
     const machineEvidence = readMacSpeakerMachineEvidence(sidecar)
     const review = reviewMeetingSpeakers(withIndices, {
+      callViewAnonymousLabels: callView.metadata.groups.map(g => g.label),
       owner: getOwnerSpeakerLabel(),
       // Labels a human already vouched for in this meeting. Without this the
       // floor re-demotes a confirmed name on every reload, and the reviewer
@@ -1715,8 +1720,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // measured sidecars. These give REAL voiced time per speaker; without them
       // speaking time falls back to capped chunk deltas, which still carry the
       // sub-ceiling pauses. `speakingTimeSource` on the response says which ran.
-      batchSegments: Array.isArray(sidecar.batchSegments)
-        ? (sidecar.batchSegments as SpeakerWordSegment[])
+      batchSegments: Array.isArray(callView.doc.batchSegments)
+        ? (callView.doc.batchSegments as SpeakerWordSegment[])
         : undefined,
     })
     res.set('Cache-Control', 'private, no-store')
@@ -1732,6 +1737,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),
       ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
+      speakerCallView: callView.metadata,
     })
   })
 
@@ -1792,8 +1798,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const mdPath = operations?.meetingPath ?? direct?.meetingPath ?? sidecarPath.replace(/\.g2-chunks\.json$/, '.md')
 
     let sidecar: Record<string, unknown>
+    let baseJSON: string
     try {
-      sidecar = (JSON.parse(readFileSync(sidecarPath, 'utf-8')) ?? {}) as Record<string, unknown>
+      baseJSON = readFileSync(sidecarPath, 'utf-8')
+      sidecar = (JSON.parse(baseJSON) ?? {}) as Record<string, unknown>
     } catch {
       res.status(422).json({ error: 'Chunk sidecar is missing or unreadable', reason: 'sidecar_unreadable' })
       return
@@ -1807,10 +1815,12 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(422).json({ error: 'Chunk sidecar holds no chunk array', reason: 'sidecar_empty' })
       return
     }
-    const chunks = rawChunks as ReviewChunk[]
+    const callView = readMacSpeakerCallView(sidecarPath, baseJSON!, mdPath)
+    const chunks = (callView.doc.chunks ?? rawChunks) as ReviewChunk[]
 
     const machineEvidence = readMacSpeakerMachineEvidence(sidecar)
     const review = reviewMeetingSpeakers(attachRawChunkIndices(chunks, sidecar.chunkEntries), {
+      callViewAnonymousLabels: callView.metadata.groups.map(g => g.label),
       owner: getOwnerSpeakerLabel(),
       confirmed: confirmedLabels(sessionId),
       confirmedChunks: confirmedChunks(sessionId),
@@ -1820,8 +1830,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // discarded 48 transcript excerpts on a 16-voice meeting.
       phrasesPerVoice: 1,
       durationMs: typeof sidecar.durationMs === 'number' ? sidecar.durationMs : undefined,
-      batchSegments: Array.isArray(sidecar.batchSegments)
-        ? (sidecar.batchSegments as SpeakerWordSegment[])
+      batchSegments: Array.isArray(callView.doc.batchSegments)
+        ? (callView.doc.batchSegments as SpeakerWordSegment[])
         : undefined,
     })
 
@@ -1846,7 +1856,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // A missing .md is not fatal — the review and the sidecar still describe the
     // meeting, and a reviewer would rather have who-spoke than a 404.
     let markdown = ''
-    try { markdown = readFileSync(mdPath, 'utf-8') } catch { markdown = '' }
+    try { markdown = callView.markdown ?? readFileSync(mdPath, 'utf-8') } catch { markdown = '' }
     const scribe = parseScribe(markdown)
 
     const date = meetingDate(sidecar.startTime)
@@ -1905,6 +1915,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       date,
       durationMin,
       scribeAvailable: markdown.length > 0,
+      speakerCallView: callView.metadata,
       attendees,
       speakingTimeSource: review.speakingTimeSource,
       voicedMs: review.voicedMs,

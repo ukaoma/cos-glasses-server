@@ -596,6 +596,9 @@ export function reviewMeetingSpeakers(
     /** Reader-validated exact compacted positions from current bound raw audio. */
     machineEvidenceStatus?: 'absent' | 'qualified' | 'invalid'
     machineQualifiedPositions?: ReadonlyMap<number, QualifiedMachinePosition>
+    /** Validated call-view groups only. Enumerate an anonymous label only when
+     * actual HQ words carry it; never append synthetic source chunks/positions. */
+    callViewAnonymousLabels?: readonly string[]
     /**
      * The sidecar's `batchSegments`, when the HQ pass has run. Their word
      * timings give real voiced time; without them speaking time falls back to
@@ -621,15 +624,15 @@ export function reviewMeetingSpeakers(
     ? options.durationMs
     : lastStart
 
-  const labels = [...new Set(sequence)].filter(s => s.length > 0)
-  const named = labels.filter(l => !isUnattributed(l))
-
   // Word timings when the HQ batch pass produced them (82 of 92 sidecars
   // measured), capped chunk deltas otherwise. The two are NOT interchangeable —
   // words are voiced time, deltas are wall clock with the silence capped off —
   // so the answer carries which one produced it.
   const wordIntervals = speakerWordIntervals(options.batchSegments ?? [])
   const speakingTimeSource: SpeakingTimeSource = wordIntervals.size > 0 ? 'words' : 'chunks'
+  const additional = (options.callViewAnonymousLabels ?? []).filter(label => isUnattributed(label) && wordIntervals.has(label))
+  const labels = [...new Set([...sequence, ...additional])].filter(s => s.length > 0)
+  const named = labels.filter(l => !isUnattributed(l))
 
   // The fallback expresses chunks as intervals too, so both paths decompose
   // through the same union arithmetic. `elapsed` is the chunk END, so a chunk
