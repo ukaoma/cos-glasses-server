@@ -11,18 +11,21 @@ import { reconcileMacSpeaker256Snapshot } from '../lib/mac-speaker-live-memory.j
 import { prepareMacSpeakerCallPacket, readMacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
 import { macCallHumanPaths } from '../lib/mac-speaker-call-human.js'
 import { MeetingStore } from '../lib/meeting-store.js'
-import { createMeetingRouter, fileFinishedMacRecording } from './meeting.js'
+import { MeetingFinalizationJobStore } from '../lib/meeting-finalization-jobs.js'
+import { createMeetingRouter, fileFinishedMacRecording, scheduleFinalizationJob } from './meeting.js'
 
-const control = vi.hoisted(() => ({ availability: vi.fn(), changed: vi.fn() }))
+const control = vi.hoisted(() => ({ availability: vi.fn(), changed: vi.fn(), finalized: vi.fn() }))
 vi.mock('../lib/mac-speaker-call-producer.js', async original => ({
   ...await original<typeof import('../lib/mac-speaker-call-producer.js')>(),
   macSpeakerCallCachedRefreshAvailability: control.availability,
   notifyMacSpeakerCallLedgerChanged: control.changed,
+  notifyMacSpeakerCallFinalized: control.finalized,
 }))
+vi.mock('../lib/meeting-summary-persistence.js', async original => ({ ...await original<typeof import('../lib/meeting-summary-persistence.js')>(), enrichStandaloneMeeting: async () => {} }))
 await vi.hoisted(async () => { const { realpathSync } = await import('node:fs'); process.env.COS_DATA_DIR = realpathSync(process.env.COS_DATA_DIR!) })
 const sha = (b: string) => createHash('sha256').update(b).digest('hex')
 const roots: string[] = [], ledgerPaths: string[] = [], servers: Server[] = []
-beforeEach(() => { control.availability.mockReset().mockResolvedValue({ available: true, reason: 'synthetic-test-only' }); control.changed.mockReset() })
+beforeEach(() => { control.availability.mockReset().mockResolvedValue({ available: true, reason: 'synthetic-test-only' }); control.changed.mockReset(); control.finalized.mockReset().mockResolvedValue(undefined) })
 afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections(); await new Promise<void>(done => s.close(() => done())) }; for (const p of ledgerPaths.splice(0)) rmSync(p, { force: true }); for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }) })
 
 async function fixture() {
@@ -52,7 +55,8 @@ async function fixture() {
     writeFileSync(paths.packet, JSON.stringify(prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'anonymous-estimate' })))
   }
   refresh()
-  const app = express(); app.use((req, res, next) => req.headers['x-cos-token'] === 'synthetic-only' ? next() : res.status(401).json({ reason: 'unauthorized' })); app.use(express.json()); app.use('/api', createMeetingRouter({ store }))
+  const finalizationJobs = new MeetingFinalizationJobStore(join(root, 'meeting-finalization-jobs'))
+  const app = express(); app.use((req, res, next) => req.headers['x-cos-token'] === 'synthetic-only' ? next() : res.status(401).json({ reason: 'unauthorized' })); app.use(express.json()); app.use('/api', createMeetingRouter({ store, finalizationJobs }))
   const server = await new Promise<Server>(done => { const s = app.listen(0, '127.0.0.1', () => done(s)) }); servers.push(server)
   const address = server.address(); if (!address || typeof address === 'string') throw Error('socket')
   const request = async (path: string, body?: unknown) => {
@@ -61,7 +65,7 @@ async function fixture() {
   }
   const groups = () => request('/speaker-groups')
   const selection = (g: any, scope: any, to = 'Human Example') => ({ recordId: g.recordId, expectedRevision: g.sourceRevision, scopeSHA256: scope.scopeSHA256, rawChunkIndices: [scope.members[0].rawChunkIndex], to })
-  return { sid, files, paths, markdown, source, request, groups, selection, refresh, root }
+  return { sid, files, paths, markdown, source, request, groups, selection, refresh, root, finalizationJobs }
 }
 
 describe('authenticated call-wide group correction handoff', () => {
@@ -98,6 +102,16 @@ describe('authenticated call-wide group correction handoff', () => {
     expect((await f.request(`/speaker-groups/${scope.identityId}/relabel`, { ...f.selection(g, scope), confirm: true })).status).toBe(409)
     expect(existsSync(f.paths.ledger)).toBe(false); expect(existsSync(f.paths.annotation)).toBe(false); expect(control.changed).not.toHaveBeenCalled()
   })
+  it('refuses a finalizer that starts during cached receipt admission even before source bytes change', async () => {
+    const f = await fixture(), g = (await f.groups()).body, scope = g.groupScopes[0]
+    control.availability.mockImplementation(async () => {
+      f.finalizationJobs.save({ sessionId: f.sid, ...f.files, audioDir: null, streamingWordCount: 1, phase: 'batch_pending', claimPending: false })
+      return { available: true, reason: 'synthetic' }
+    })
+    expect(await f.request(`/speaker-groups/${scope.identityId}/relabel`, { ...f.selection(g, scope), confirm: true })).toMatchObject({ status: 409, body: { reason: 'meeting_finalizing' } })
+    expect(existsSync(f.paths.ledger)).toBe(false); expect(existsSync(f.paths.annotation)).toBe(false); expect(control.changed).not.toHaveBeenCalled()
+    expect(readFileSync(f.files.sidecarPath, 'utf8')).toBe(f.source.currentJSON)
+  })
   for (const to of ['Ext', 'Unknown', 'MU', 'Unidentified', 'Speaker 2']) it(`refuses placeholder ${to} at the API boundary`, async () => {
     const f = await fixture(), g = (await f.groups()).body, scope = g.groupScopes[0]
     expect((await f.request(`/speaker-groups/${scope.identityId}/relabel`, { ...f.selection(g, scope, to), confirm: true })).status).toBe(400)
@@ -106,6 +120,24 @@ describe('authenticated call-wide group correction handoff', () => {
 })
 
 describe('saved Mac call producer lifecycle', () => {
+  for (const complete of [false, true]) it(`awaits the freeze notification before removing the ${complete ? 'already complete' : 'newly finalized'} job`, async () => {
+    const f = await fixture(), order: string[] = [], tasks: Promise<void>[] = []
+    const doc = JSON.parse(f.source.currentJSON); doc.finalizationState = complete ? 'complete' : 'ops_pending'; writeFileSync(f.files.sidecarPath, JSON.stringify(doc))
+    const job = f.finalizationJobs.save({ sessionId: f.sid, ...f.files, audioDir: null, streamingWordCount: 1, phase: 'ops_pending', claimPending: false })
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    control.finalized.mockImplementation(async input => {
+      if (input.freezeOnly) { order.push('freeze-start'); expect(f.finalizationJobs.get(f.sid)).not.toBeNull(); await blocked; order.push('freeze-return') }
+    })
+    const remove = f.finalizationJobs.remove.bind(f.finalizationJobs)
+    vi.spyOn(f.finalizationJobs, 'remove').mockImplementation(id => { order.push('job-remove'); return remove(id) })
+    scheduleFinalizationJob(job, { finalizationJobs: f.finalizationJobs, runBatch: vi.fn(), transcriptCleanup: async () => ({ skipped: true } as any), scheduleBackground: task => { tasks.push(task) } })
+    await vi.waitFor(() => expect(order).toContain('freeze-start'))
+    expect(f.finalizationJobs.get(f.sid)).not.toBeNull(); expect(order).not.toContain('job-remove')
+    release(); await Promise.all(tasks); await Promise.all(tasks)
+    expect(order.slice(0, 3)).toEqual(['freeze-start', 'freeze-return', 'job-remove'])
+    expect(f.finalizationJobs.get(f.sid)).toBeNull()
+  })
   it('registers the standalone consumer before the log-only consumer even when filing is unavailable', async () => {
     const order: string[] = [], sid = 'mac_00000000-0000-4000-8000-0000000000dd'
     await fileFinishedMacRecording(sid, '/unused/test.md', 'test', { configured: () => false, notify: async () => { order.push('producer') }, shadowNotify: () => { order.push('shadow') } })

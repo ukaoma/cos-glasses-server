@@ -1726,6 +1726,10 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       if (scope.reviewBasis !== 'human-authored') {
         const refresh = await macSpeakerCallCachedRefreshAvailability(sessionId, source.files.sidecarPath)
         if (!refresh.available) { res.status(409).json({ reason: 'group_refresh_unavailable', error: 'Speaker reconciliation is not ready. Your selection was not changed; reopen this group after it finishes.', retryable: true }); return }
+        // The cached receipt check awaits child IO. A finalization/resume job
+        // may start in that interval before it changes any source bytes.
+        const afterAdmission = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? sourceRevisionRefusal(sessionId, body) ?? finalizingRefusal(sessionId)
+        if (afterAdmission) { res.status(afterAdmission.status).json(afterAdmission.body); return }
       }
       const correction = commitMacCallHumanAnnotation({ files: source.files, captureId: sessionId, scope, selectedRawChunkIndices: body.rawChunkIndices, to: body.to })
       notifyMacSpeakerCallLedgerChanged(sessionId)
