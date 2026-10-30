@@ -46,7 +46,9 @@ import { Transform } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
-import { maintenanceLifecycle } from './maintenance-lifecycle.js'
+import { maintenanceLifecycle,acquireMaintenanceWork } from './maintenance-lifecycle.js'
+import {configureMacSpeakerCallProducer,macSpeakerCallProducerEnabled,macSpeakerCallProducerBusy,macSpeakerCallProducerRequestValid,notifyMacSpeakerCallNativeExport,sampleMacSpeakerCallResources} from './mac-speaker-call-producer.js'
+import type {MacSpeakerCallProducerRequest} from './mac-speaker-call-producer-worker.js'
 import { installedCliIntact, installedCliTrust, parakeetCliPath, parakeetInstalled, SANDBOX_EXEC } from './parakeet.js'
 import { SHADOW_GATES } from './speaker-shadow-decide.js'
 import { shadowModelsPresent, speakerShadowHome, speakerShadowModelsDir, speakerShadowRoot } from './speaker-shadow-models.js'
@@ -204,7 +206,7 @@ export async function readSpeakerShadowRecords(root: string, options: { limit?: 
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-interface QueueItem { sessionId: string; sidecarPath: string; labelsHash: string | null; enqueuedAt: number }
+interface QueueItem { sessionId: string; sidecarPath: string; labelsHash: string | null; enqueuedAt: number;producerRequest?:MacSpeakerCallProducerRequest }
 interface ShadowState {
   schema: 1
   day: string
@@ -246,6 +248,7 @@ export interface SpeakerShadowDeps {
   spawnWorker: () => ChildProcess
   /** Resident bytes of the process group led by pid, or null when it cannot be read. */
   sampleRss: (pgid: number) => Promise<number | null>
+  producerResources:typeof sampleMacSpeakerCallResources
   killGroup: (pgid: number) => void
   log: (line: string) => void
   setTimer: (fn: () => void, ms: number) => { unref?: () => void }
@@ -339,6 +342,7 @@ export function defaultSpeakerShadowDeps(): SpeakerShadowDeps {
     tmpRoot: tmpdir(),
     spawnWorker: defaultSpawnWorker,
     sampleRss: defaultSampleRss,
+    producerResources:sampleMacSpeakerCallResources,
     killGroup: pgid => { try { process.kill(-pgid, 'SIGKILL') } catch { /* gone */ } },
     log: line => console.log(`[speaker-shadow] ${line}`),
     setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -363,6 +367,12 @@ export class SpeakerShadowRunner {
   }
 
   enabled(): boolean { return speakerShadowEnabled(this.deps.env(), this.deps.root()) }
+  nativeEnabled():boolean{return this.enabled()||macSpeakerCallProducerEnabled(this.deps.env())}
+  nativeRunning():boolean{return this.running!==null}
+  async notifyConsumerFinalized(request:MacSpeakerCallProducerRequest):Promise<void> {
+    if(!macSpeakerCallProducerEnabled(this.deps.env())||!macSpeakerCallProducerRequestValid(request))throw Error('independent_consumer_request_invalid_or_disabled')
+    await this.enqueue({sessionId:request.captureId,sidecarPath:request.sidecarPath},request)
+  }
 
   switchState(): { enabled: boolean; source: SpeakerShadowSwitchSource } { return resolveSpeakerShadowSwitch(this.deps.env(), this.deps.root()) }
 
@@ -404,13 +414,15 @@ export class SpeakerShadowRunner {
     }
   }
 
-  private async enqueue(input: { sessionId: string; sidecarPath: string }): Promise<void> {
+  private async enqueue(input: { sessionId: string; sidecarPath: string },producerRequest?:MacSpeakerCallProducerRequest): Promise<void> {
     let labelsHash: string | null = null
     try { labelsHash = shadowLabelsHash(shadowEntries(JSON.parse(await readFile(input.sidecarPath, 'utf8')))) } catch { /* the worker reports the sidecar */ }
     // Read, change and write with no await in between: the pump also rewrites this file.
     const state = this.readState()
-    if (state.done.includes(input.sessionId) || state.queue.some(q => q.sessionId === input.sessionId)) return
-    state.queue.push({ sessionId: input.sessionId, sidecarPath: input.sidecarPath, labelsHash, enqueuedAt: this.deps.now() })
+    if (state.done.includes(input.sessionId)) {if(producerRequest)throw Error('native_already_completed_without_retained_export');return}
+    const existing=state.queue.find(q=>q.sessionId===input.sessionId)
+    if(existing){if(producerRequest){existing.producerRequest=producerRequest;this.writeState(state)}return}
+    state.queue.push({ sessionId: input.sessionId, sidecarPath: input.sidecarPath, labelsHash, enqueuedAt: this.deps.now(),...(producerRequest?{producerRequest}:{}) })
     const dropped = state.queue.splice(0, Math.max(0, state.queue.length - MAX_QUEUE))
     for (const item of dropped) state.done.push(item.sessionId)
     this.writeState(state)
@@ -422,7 +434,7 @@ export class SpeakerShadowRunner {
   /** Boot: pick up meetings a previous process queued but never ran. */
   resume(): void {
     try {
-      if (!this.enabled() || !existsSync(this.statePath())) return
+      if (!this.nativeEnabled() || !existsSync(this.statePath())) return
       if (this.readState().queue.length) void this.pump()
     } catch (error) { this.deps.log(`resume failed: ${describe(error)}`) }
   }
@@ -473,14 +485,17 @@ export class SpeakerShadowRunner {
     this.pumping = true
     try {
       for (;;) {
-        if (!this.enabled()) return
+        if (!this.nativeEnabled()) return
+        if(macSpeakerCallProducerBusy()){this.schedule(DEFER_RETRY_MS,'independent_consumer');return}
         const state = this.readState()
         const item = state.queue[0]
         if (!item) { this.deferredReason = null; return }
         const now = this.deps.now()
         const finish = async (status: SpeakerShadowStatus, reason: string | null, detail: string | null, extra: Partial<SpeakerShadowRecord> = {}, report?: { title: string; markdown: string }) => {
-          const reportPath = await this.writeReport(item, status, reason, detail, report)
-          await this.record(item, status, reason, detail, { ...extra, report: reportPath })
+          if(this.enabled()){
+            const reportPath = await this.writeReport(item, status, reason, detail, report)
+            await this.record(item, status, reason, detail, { ...extra, report: reportPath })
+          }
           const next = this.readState()
           next.queue = next.queue.filter(q => q.sessionId !== item.sessionId)
           next.done.push(item.sessionId)
@@ -512,9 +527,21 @@ export class SpeakerShadowRunner {
         if (!this.deps.modelsPresent(modelsDir)) { await finish('skipped', 'models_missing', 'the pinned speaker-diarization models are not on this Mac (the server never downloads them)'); continue }
         const audioDir = this.deps.audioDirFor(item.sessionId)
         if (!existsSync(audioDir)) { await finish('skipped', 'audio_missing', 'no retained chunk audio for this meeting'); continue }
+        let producerRequest=macSpeakerCallProducerEnabled(this.deps.env())?item.producerRequest:undefined
+        if(producerRequest&&(!macSpeakerCallProducerRequestValid(producerRequest)||producerRequest.captureId!==item.sessionId||producerRequest.sidecarPath!==item.sidecarPath)){await finish('skipped','bad_sidecar','untrusted independent consumer request');continue}
+        if(!this.enabled()&&!producerRequest)return
+        const resourceStart=producerRequest?await this.deps.producerResources().catch(()=>null):null
+        if(producerRequest&&(!resourceStart||resourceStart.availableBytes<16*1024**3)){this.schedule(DEFER_RETRY_MS,'producer_resource_admission');return}
+        if(this.deps.captureActive()||!this.deps.admissionsOpen()||!this.nativeEnabled())return
+        if(macSpeakerCallProducerBusy()){this.schedule(DEFER_RETRY_MS,'independent_consumer');return}
 
         // Fresh read: the awaits above let an enqueue rewrite the file since `state` was read.
         const counted = this.readState()
+        // A shared request may have joined while CLI/model checks awaited. Do
+        // not start a log-only execution that strands its admitted consumer.
+        const latest=counted.queue.find(q=>q.sessionId===item.sessionId)?.producerRequest
+        if(!producerRequest&&latest){this.schedule(0,'consumer_joined');return}
+        if(producerRequest&&JSON.stringify(latest)!==JSON.stringify(producerRequest)){this.schedule(0,'consumer_request_changed');return}
         counted.runsToday += 1
         this.writeState(counted)
         this.deferredReason = null
@@ -522,6 +549,7 @@ export class SpeakerShadowRunner {
           sessionId: item.sessionId, sidecarPath: item.sidecarPath, audioDir, expectedLabelsHash: item.labelsHash,
           cliPath: cli.path, cliSha256: cli.sha256, sandboxExec: this.deps.sandboxExec, modelsDir,
           homeDir: this.deps.homeDir(), tmpRoot: this.deps.tmpRoot, cliTimeoutMs: Math.max(5_000, limits.timeoutMs - 5_000),
+          ...(producerRequest?{callProducer:producerRequest,shadowLogRequested:this.enabled(),callProducerSwapStart:resourceStart!.swapBytes}:{}),
         }
         this.deps.log(`start ${item.sessionId}`)
         const started = this.deps.now()
@@ -537,6 +565,7 @@ export class SpeakerShadowRunner {
           return
         }
         if (outcome.status === 'proposed') {
+          if(outcome.callProducerExport&&macSpeakerCallProducerEnabled(this.deps.env()))notifyMacSpeakerCallNativeExport(outcome.callProducerExport)
           const f = outcome.facts
           const markdown = `${outcome.report.markdown}\n${renderShadowRunFacts({ rebuildMs: f.timing.rebuildMs, nativeMs: f.timing.nativeMs, wallMs: resources.wallMs, peakRssBytes: resources.peakRssBytes, osTempDirsLeft: f.osTempDirsLeft, sidecarPath: item.sidecarPath, pcmSHA256: f.timelinePCMSHA256, cliTrust: cli.trust })}`
           await finish('proposed', null, null, { facts: outcome.facts, proposals: outcome.proposals, paired: outcome.paired, resources }, { title: outcome.report.title, markdown })
@@ -552,8 +581,10 @@ export class SpeakerShadowRunner {
 
   private supervise(job: ShadowJob, limits: SpeakerShadowLimits): Promise<{ outcome: Supervised; peakRss: number | null }> {
     return new Promise(resolvePromise => {
+      let producerLease:ReturnType<typeof acquireMaintenanceWork>|null=null
       let child: ChildProcess
-      try { child = this.deps.spawnWorker() } catch (error) {
+      try {if(job.callProducer)producerLease=acquireMaintenanceWork('mac_speaker_call');child = this.deps.spawnWorker() } catch (error) {
+        producerLease?.release()
         resolvePromise({ outcome: { status: 'failed', reason: 'worker_spawn_failed', detail: describe(error) }, peakRss: null })
         return
       }
@@ -563,17 +594,25 @@ export class SpeakerShadowRunner {
       if (pgid) { try { setPriority(pgid, 10) } catch { /* runs at normal priority */ } }
       const started = this.deps.now()
       let stdout = '', stderr = '', verdict: Supervised | null = null, peak: number | null = null, sampling = false, settled = false
+      let swapStart:number|null=job.callProducerSwapStart??null
       const stop = (outcome: Supervised) => { if (!verdict) verdict = outcome; if (pgid) this.deps.killGroup(pgid) }
       const tick = setInterval(() => {
         if (verdict) return
         if (this.deps.now() - started > limits.timeoutMs) { stop({ status: 'failed', reason: 'timeout', detail: `no result within ${limits.timeoutMs} ms` }); return }
-        if (!this.enabled()) { stop({ status: 'deferred', reason: 'switched_off' }); return }
+        if (!this.nativeEnabled()||job.callProducer&&!macSpeakerCallProducerEnabled(this.deps.env())) { stop({ status: 'deferred', reason: 'switched_off' }); return }
         if (this.deps.captureActive?.() || !this.deps.admissionsOpen()) { stop({ status: 'deferred', reason: 'capture_live' }); return }
         if (!pgid || sampling) return
         sampling = true
+        if(job.callProducer)void this.deps.producerResources().catch(()=>null).then(r=>{
+          if(settled||verdict)return
+          if(!r||r.availableBytes<8*1024**3){stop({status:'deferred',reason:'producer_resource_reserve'});return}
+          swapStart??=r.swapBytes
+          if(r.swapBytes-swapStart>256*1024**2)stop({status:'deferred',reason:'producer_swap_growth'})
+        })
         void this.deps.sampleRss(pgid).then(bytes => {
           sampling = false
-          if (bytes === null || verdict) return
+          if (verdict||settled)return
+          if(bytes===null){if(job.callProducer)stop({status:'deferred',reason:'producer_rss_unavailable'});return}
           peak = Math.max(peak ?? 0, bytes)
           if (bytes > limits.rssBytes) stop({ status: 'failed', reason: 'rss_cap', detail: `the run used ${Math.round(bytes / 1048576)} MB, over the ${Math.round(limits.rssBytes / 1048576)} MB cap` })
         })
@@ -584,6 +623,8 @@ export class SpeakerShadowRunner {
         settled = true
         clearInterval(tick)
         this.running = null
+        producerLease?.release()
+        if(!verdict&&this.deps.now()-started>limits.timeoutMs)verdict={status:'failed',reason:'timeout',detail:'worker close exceeded absolute wall budget'}
         if (verdict) { resolvePromise({ outcome: verdict, peakRss: peak }); return }
         const line = stdout.trim().split('\n').pop() ?? ''
         try {
@@ -594,7 +635,7 @@ export class SpeakerShadowRunner {
       }
       child.stdout?.on('data', (d: Buffer) => { if (stdout.length < MAX_STDOUT) stdout += d.toString(); else stop({ status: 'failed', reason: 'worker_crashed', detail: 'worker output over 8 MB' }) })
       child.stderr?.on('data', (d: Buffer) => { if (stderr.length < 16_384) stderr += d.toString() })
-      child.on('error', error => { stop({ status: 'failed', reason: 'worker_spawn_failed', detail: error.message }); done(null, null) })
+      child.on('error', error => { stop({ status: 'failed', reason: 'worker_spawn_failed', detail: error.message }); if(!child.pid)done(null, null) })
       child.on('close', done)
       child.stdin?.on('error', () => { /* a crashed worker closes stdin; close reports it */ })
       child.stdin?.end(JSON.stringify(job))
@@ -693,7 +734,8 @@ export function configureSpeakerShadow(probe: { captureActive: () => boolean; ad
   try {
     const runner = getSpeakerShadowRunner()
     runner.setCaptureProbe(probe.captureActive, probe.admissionsOpen)
-    if (!runner.enabled()) return
+    configureMacSpeakerCallProducer({captureActive:()=>probe.captureActive()||runner.nativeRunning(),admissionsOpen:probe.admissionsOpen,requestNative:r=>runner.notifyConsumerFinalized(r)})
+    if (!runner.nativeEnabled()) return
     const swept = sweepStaleSpeakerShadowTmp()
     if (swept) console.log(`[speaker-shadow] removed ${swept} stale temp dir(s)`)
     console.log('[speaker-shadow] enabled (log only)')

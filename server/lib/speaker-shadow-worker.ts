@@ -6,10 +6,10 @@
 // RSS cap and kills the whole process group; this side also stops the CLI on its own
 // deadline and exits if its parent goes away.
 //
-// READ ONLY, LOG ONLY. Reads the finalized sidecar and the retained chunk WAVs; writes
-// only a private temp directory (the timeline WAV and the CLI's two JSON outputs), which
-// is removed before the outcome is printed. No meeting file, label, name, profile,
-// embedding cache or correction ledger is opened for writing anywhere in this file.
+// Shadow remains READ ONLY, LOG ONLY: its temporary native outputs are removed.
+// A separately default-off reviewed closed-call consumer may retain the SAME verified
+// execution exports in its own data directory. It never edits BASE, names, profiles or
+// corrections here; later derived-view publication has an independent queue/admission.
 //
 // The CLI is FluidAudio 0.17.4 `process --mode offline --overlapping-segments
 // --export-embeddings`, the exact invocation of round3/propose.py, run through
@@ -38,6 +38,7 @@ import { renderShadowReport } from './speaker-shadow-report.js'
 import { pyRound } from './speaker-shadow-numeric.js'
 import { findShadowPairSource } from './speaker-shadow-pair-source.js'
 import { evaluatePairedSpeakerShadow, renderPairedSpeakerShadow, type PairedShadowReport } from './speaker-shadow-paired.js'
+import { beginMacSpeakerCallNative,retainMacSpeakerCallNative,type MacSpeakerCallProducerRequest,type MacSpeakerCallNativeRef } from './mac-speaker-call-producer-worker.js'
 
 export const SHADOW_TMP_PREFIX = 'cos-speaker-shadow-'
 /** The CLI's flags, verbatim from round3/propose.py (via scripts/guard.py). */
@@ -58,6 +59,10 @@ export interface ShadowJob {
   homeDir: string
   tmpRoot: string
   cliTimeoutMs: number
+  /** Separate default-off consumer, admitted independently from log-only shadow. */
+  callProducer?: MacSpeakerCallProducerRequest
+  shadowLogRequested?: boolean
+  callProducerSwapStart?:number
 }
 
 export type ShadowSkipReason =
@@ -87,7 +92,7 @@ export interface ShadowRunFacts {
 }
 
 export type ShadowJobOutcome =
-  | { status: 'proposed'; facts: ShadowRunFacts; proposals: ShadowProposals; paired?: PairedShadowReport & { pairSessionId?: string; pairSourceSha256?: string; discoveryReason: string }; report: { title: string; markdown: string } }
+  | { status: 'proposed'; facts: ShadowRunFacts; proposals: ShadowProposals; paired?: PairedShadowReport & { pairSessionId?: string; pairSourceSha256?: string; discoveryReason: string }; report: { title: string; markdown: string };callProducerExport?:MacSpeakerCallNativeRef }
   | { status: 'skipped'; reason: ShadowSkipReason; detail: string }
   | { status: 'failed'; reason: ShadowFailReason; detail: string }
 
@@ -124,17 +129,19 @@ function nsirdDirs(): Set<string> {
 const skip = (reason: ShadowSkipReason, detail: string): ShadowJobOutcome => ({ status: 'skipped', reason, detail })
 const fail = (reason: ShadowFailReason, detail: string): ShadowJobOutcome => ({ status: 'failed', reason, detail: detail.slice(0, 300) })
 
-function runCli(job: ShadowJob, wavPath: string, nativePath: string, embPath: string, work: string, deps: ShadowWorkerDeps): Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string; timedOut: boolean; error?: string }> {
+function runCli(job: ShadowJob, wavPath: string, nativePath: string, embPath: string, work: string, deps: ShadowWorkerDeps): Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string; timedOut: boolean;closed:boolean; error?: string }> {
   const args = ['-p', parakeetSandboxProfile(work, job.homeDir), job.cliPath, 'process', wavPath, '--mode', 'offline', '--output', nativePath, '--overlapping-segments', '--export-embeddings', embPath]
   return new Promise(resolvePromise => {
+    if(deps.signal?.aborted){resolvePromise({code:null,signal:null,stderr:'',timedOut:false,closed:false,error:'cancelled before native admission'});return}
+    const deadline=Date.now()+job.cliTimeoutMs
     let child: ChildProcess
     try {
-      child = (deps.spawn ?? (spawn as unknown as SpawnLike))(job.sandboxExec, args, { stdio: ['ignore', 'ignore', 'pipe'], env: parakeetChildEnv(job.homeDir, work) })
+      child = (deps.spawn ?? (spawn as unknown as SpawnLike))(job.sandboxExec, args, { stdio: ['ignore', 'ignore', 'pipe'], env: {...parakeetChildEnv(job.homeDir, work),...(job.callProducer?{OMP_NUM_THREADS:'1',VECLIB_MAXIMUM_THREADS:'1',OPENBLAS_NUM_THREADS:'1'}:{})} })
     } catch (error) {
-      resolvePromise({ code: null, signal: null, stderr: '', timedOut: false, error: error instanceof Error ? error.message : String(error) })
+      resolvePromise({ code: null, signal: null, stderr: '', timedOut: false,closed:false, error: error instanceof Error ? error.message : String(error) })
       return
     }
-    let stderr = '', timedOut = false, settled = false
+    let stderr = '', timedOut = false, settled = false, childError:string|undefined
     const done = (value: Parameters<typeof resolvePromise>[0]) => { if (settled) return; settled = true; clearTimeout(timer); deps.signal?.removeEventListener('abort', onAbort); resolvePromise(value) }
     const kill = () => { try { child.kill('SIGKILL') } catch { /* gone */ } }
     // SIGKILL: CoreML work does not stop for TERM.
@@ -142,8 +149,8 @@ function runCli(job: ShadowJob, wavPath: string, nativePath: string, embPath: st
     const onAbort = () => kill()
     deps.signal?.addEventListener('abort', onAbort, { once: true })
     child.stderr?.on('data', (d: Buffer) => { if (stderr.length < 65_536) stderr += d.toString() })
-    child.on('error', error => done({ code: null, signal: null, stderr, timedOut, error: error.message }))
-    child.on('close', (code, signal) => done({ code, signal, stderr, timedOut }))
+    child.on('error', error => {childError=error.message;if(!child.pid)done({ code: null, signal: null, stderr, timedOut,closed:false, error: error.message });else kill()})
+    child.on('close', (code, signal) => done({ code, signal, stderr, timedOut:timedOut||Date.now()>deadline,closed:true,error:childError }))
   })
 }
 
@@ -154,8 +161,8 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
   let work: string | null = null
   try {
     // 1. The finalized meeting, unchanged since it finalized.
-    let sidecar: Record<string, unknown>
-    try { sidecar = JSON.parse(await readFile(job.sidecarPath, 'utf8')) } catch { return skip('bad_sidecar', 'the sidecar is missing or unreadable') }
+    let sidecar: Record<string, unknown>,sourceJSON:string
+    try { sourceJSON=await readFile(job.sidecarPath, 'utf8');sidecar = JSON.parse(sourceJSON) } catch { return skip('bad_sidecar', 'the sidecar is missing or unreadable') }
     if (sidecar.sessionId !== job.sessionId) return skip('bad_sidecar', 'the sidecar belongs to another session')
     if (sidecar.finalizationState !== 'complete') return skip('not_finalized', `finalizationState=${String(sidecar.finalizationState)}`)
     const entries = shadowEntries(sidecar)
@@ -185,6 +192,11 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
     await writeFile(wavPath, wav, { mode: 0o600, flag: 'wx' })
     const timelineWAVSHA256 = createHash('sha256').update(wav).digest('hex')
     prepareShadowHome(job.homeDir, models.dir)
+    let producerContext:ReturnType<typeof beginMacSpeakerCallNative>|null=null
+    if(job.callProducer){
+      try{producerContext=beginMacSpeakerCallNative(job.callProducer,{sourceJSON,audioDir:job.audioDir,cliPath:job.cliPath,modelsDir:models.dir,timeline:{rows:timeline.rows,total:timeline.total,pcmSHA256:timeline.pcmSHA256}})}
+      catch(error){if(job.shadowLogRequested===false)return skip('bad_sidecar',`independent consumer withheld: ${error instanceof Error?error.message:String(error)}`)}
+    }
 
     // 4. One offline diarization.
     const nativeStarted = now()
@@ -251,7 +263,9 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
     const chunkText = new Map(entries.map(e => [e.chunkIndex, typeof e.chunk.text === 'string' ? e.chunk.text : '']))
     let markdown = renderShadowReport({ title, sessionId: job.sessionId, proposals, facts, audioDir: job.audioDir, chunkText })
     if (paired) markdown += `\n${renderPairedSpeakerShadow(paired)}\nDiscovery: ${paired.discoveryReason}\n`
-    return { status: 'proposed', proposals, paired, facts, report: { title, markdown } }
+    let callProducerExport:MacSpeakerCallNativeRef|undefined
+    if(producerContext){try{callProducerExport=retainMacSpeakerCallNative(producerContext,{nativePath,embeddingPath:embPath,exitCode:run.code,closed:run.closed,networkDenied:true})}catch{/* A consumer refusal never turns the shadow logger into a writer. */}}
+    return { status: 'proposed', proposals, paired, facts, report: { title, markdown },...(callProducerExport?{callProducerExport}:{}) }
   } catch (error) {
     if (error instanceof ShadowInputError) return skip(error.reason, error.message)
     return fail('internal', error instanceof Error ? error.message : String(error))
