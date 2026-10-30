@@ -39,6 +39,32 @@ function twoCopies(){
   process.env.COS_OPERATIONS_DIR=ops;process.env.COS_SCRIPTS_DIR=scripts
 }
 describe('held naming execution',()=>{
+  it.each(['.speaker-call.json','.speaker-call-state.json','.speaker-call-human.json','.speaker-call-human-transaction.json'])('keeps corrupt or valid %s artifacts closed to legacy naming',async suffix=>{
+    const artifact=saved.sidecarPath.replace(/\.g2-chunks\.json$/,'')+suffix
+    writeFileSync(artifact,'not valid JSON')
+    const p=api.previewHeldNaming('Brigitta Pólya',refs)
+    expect(p.meetings[0]).toMatchObject({status:'blocked',labelled:0})
+    expect(p.meetings[0].error).toContain('Call-wide speaker review')
+    await expect(api.renameMeetingSpeaker('meeting_sample','Ext','Brigitta Pólya',{apply:true})).rejects.toThrow(/Call-wide speaker review/)
+    expect(read()).toEqual(originalDoc);expect(readFileSync(saved.filepath,'utf8')).toBe(originalMd);expect(enrollments).toBe(0)
+    expect(existsSync(join(data,'meeting-corrections','meeting_sample.jsonl'))).toBe(false)
+  })
+  it('refuses a call-wide view arriving after preview before enrollment or correction intent',async()=>{
+    const p=api.previewHeldNaming('Brigitta Pólya',refs)
+    writeFileSync(saved.sidecarPath.replace(/\.g2-chunks\.json$/,'')+'.speaker-call-human.json','{}')
+    await expect(api.applyHeldNaming('Brigitta Pólya',refs,p.previewHash,{confirm:true})).rejects.toMatchObject({reason:'meetings_changed'})
+    expect(enrollments).toBe(0);expect(read()).toEqual(originalDoc)
+    expect(existsSync(join(data,'meeting-corrections','meeting_sample.jsonl'))).toBe(false)
+  })
+  it('refuses legacy Undo before touching the ledger when a sibling has a call-wide correction',async()=>{
+    twoCopies()
+    const p=api.previewHeldNaming('Brigitta Pólya',refs),a=await api.applyHeldNaming('Brigitta Pólya',refs,p.previewHash,{confirm:true})
+    const paths=[saved.sidecarPath,saved.filepath,opSide,opMd,join(data,'meeting-corrections','meeting_sample.jsonl'),join(data,'meeting-corrections',`batch-${a.batchId}.json`)]
+    const before=paths.map(path=>readFileSync(path,'utf8'))
+    writeFileSync(opSide.replace(/\.g2-chunks\.json$/,'')+'.speaker-call-human-transaction.json','{}')
+    await expect(api.undoHeldNaming(a.batchId,true)).rejects.toThrow(/Call-wide speaker review/)
+    expect(paths.map(path=>readFileSync(path,'utf8'))).toEqual(before);expect(enrollments).toBe(1)
+  })
   it('preview mutates no labels/profiles/audio, maps raw3 to position1, never raw7',()=>{
     const p=api.previewHeldNaming('Brigitta Pólya',refs)
     expect(p.kind).toBe('preview');expect(p.previewHash).toHaveLength(64)

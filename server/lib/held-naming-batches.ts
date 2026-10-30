@@ -179,6 +179,18 @@ function checkedRevision(value:unknown):number {
   if(typeof value!=='number'||!Number.isSafeInteger(value)||value<0)throw new Error('Invalid meeting revision')
   return value
 }
+/** A call-wide view is bound to the original BASE and correction ledger. Legacy
+ * physical renames (including Undo and profile fan-out) must not silently make
+ * that view, or a later human annotation, disappear. Presence is deliberately
+ * enough: a malformed or interrupted artifact is not permission to overwrite. */
+function assertNoCallSpeakerOverlay(sidecarPath:string,sessionId:string):void {
+  const stem=sidecarPath.replace(/\.g2-chunks\.json$/,'')
+  const artifacts=[...['.speaker-call.json','.speaker-call-state.json','.speaker-call-human.json','.speaker-call-human-transaction.json'].map(suffix=>stem+suffix),join(dirname(sidecarPath),`.${sessionId}.speaker-call.lock`)]
+  for(const artifact of artifacts){
+    try{lstatSync(artifact)}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')continue;throw e}
+    throw new Error('Call-wide speaker review is active or needs recovery. Use the exact reviewed segment naming flow; legacy naming cannot change this meeting.')
+  }
+}
 function resolveCopies(sessionId:string):ResolvedCopy[] {
   if(sessionBusy(sessionId)||existsSync(dataPath('meeting-finalization-jobs',`${sessionId}.json`)))throw new Error('Meeting is recording or finalizing; retry after it finishes')
   const local = new MeetingStore().findBySessionId(sessionId)
@@ -197,6 +209,7 @@ function resolveCopies(sessionId:string):ResolvedCopy[] {
     throw new Error('Configured operations folder is unavailable; retry after sync')
   }
   return paths.map(p=>{
+    assertNoCallSpeakerOverlay(p.sidecarPath,sessionId)
     assertFile(p.sidecarPath)
     const raw=readFileSync(p.sidecarPath,'utf8'),doc=JSON.parse(raw)
     if(doc.sessionId!==sessionId) throw new Error('Meeting identity changed')
@@ -428,6 +441,9 @@ export async function undoHeldNaming(batchId:string,confirm:boolean){
   let lock:Awaited<ReturnType<typeof acquireMeetingSyncLock>>|undefined
   try{
     try{lock=await acquireMeetingSyncLock()}catch(e){throw new HeldGroupError(409,'sync_running',errorText(e))}
+    // Check every destination before even appending Undo intent: changing the
+    // shared ledger would invalidate a human overlay in another meeting copy.
+    for(const meeting of batch.meetings)if(meeting.receipts.some(r=>r.status!=='reverted'))resolveCopies(meeting.sessionId)
     for(const meeting of batch.meetings){
       if(!meeting.receipts.length)continue
       const undoId=randomUUID(),row:CorrectionRow={id:undoId,phase:'intent',at:new Date().toISOString(),from:batch.speaker,to:'prior labels',chunks:[...meeting.namedChunks,...meeting.widerChunks],scope:'meeting',batchId:batch.batchId,source:'undo'}
