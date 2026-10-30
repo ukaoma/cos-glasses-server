@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildMacSpeakerShadowRepair, bindMacSpeakerShadowRepair, type MacShadowRepairInput, type MacShadowRepairSource } from './mac-speaker-shadow-repair.js'
+import { buildMacSpeakerShadowRepair, bindMacSpeakerShadowRepair, inspectMacSpeakerShadowCallSource, type MacShadowRepairInput, type MacShadowRepairSource } from './mac-speaker-shadow-repair.js'
 import { applyMacSpeakerRepair, projectMacSpeakerRepair, hashMacSpeakerDocument, hashMacSpeakerMachineBinding } from './mac-speaker-repair-projection.js'
 import { readMacSpeakerMachineEvidence } from './mac-speaker-machine-evidence.js'
 import { SYNTHETIC_SPANS, SYNTHETIC_SECONDS, syntheticEmbeddings, syntheticNative } from './__fixtures__/speaker-shadow/synthetic-meeting.js'
@@ -49,6 +49,94 @@ function withPriorQualifiedProof(source: MacShadowRepairSource): any {
 }
 
 describe('qualified256 shadow repair pure preparation', () => {
+  it('quarantines a whole generic ASR overrun without changing any Voice decision', () => {
+    const source = fixture(), raw = first(source)
+    for (const which of ['originalJSON', 'currentJSON'] as const) edit(source, which, d => {
+      for (const c of [d.chunks[raw], d.chunkEntries[raw].chunk]) {
+        c.speaker = 'Ext'; c.segments = [{ speaker: 'Ext', startSec: .08, endSec: c.audioDurationMs / 1000 }]
+      }
+    })
+    const bounded = inspectMacSpeakerShadowCallSource(seal(source)).decision
+    for (const which of ['originalJSON', 'currentJSON'] as const) edit(source, which, d => {
+      for (const c of [d.chunks[raw], d.chunkEntries[raw].chunk]) c.segments[0].endSec += .087625
+    })
+    const before = JSON.stringify(source), view = inspectMacSpeakerShadowCallSource(seal(source))
+    expect(view.decision).toEqual(bounded)
+    expect(view.excludedProductionSegments).toEqual([expect.objectContaining({ rawChunkIndex: raw, segmentIndex: 0, startSec: .08, overrunSamples: expect.closeTo(1402, 5), reason: 'generic-segment-crosses-source-end' })])
+    expect(view.excludedProductionSegments[0].rowSHA256).toMatch(/^[a-f0-9]{64}$/)
+    expect(view.production.sources.some(s => s.chunkIndex === raw)).toBe(false)
+    expect(view.humanProtection.has(raw)).toBe(true)
+    expect(JSON.stringify(source)).toBe(before)
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/production segment coordinates/)
+  })
+  for (const kind of ['voice', 'named', 'manual', 'ledger', 'huge', 'outside'] as const) it(`refuses a malformed ${kind} production row instead of quarantining it`, () => {
+    const source = fixture(), raw = first(source)
+    for (const which of ['originalJSON', 'currentJSON'] as const) edit(source, which, d => {
+      for (const c of [d.chunks[raw], d.chunkEntries[raw].chunk]) {
+        c.speaker = kind === 'voice' ? 'Voice 2' : kind === 'named' ? 'Dana Fictional' : 'Ext'
+        c.segments = [{ speaker: c.speaker, startSec: kind === 'outside' ? 7 : .08, endSec: kind === 'outside' ? 7.1 : c.audioDurationMs / 1000 + (kind === 'huge' ? 1.1 : .087625) }]
+        if (kind === 'manual') c.confirmedByHuman = true
+      }
+    })
+    if (kind === 'ledger') source.ledgerJSONL = JSON.stringify({ id: 'kept', phase: 'confirmed-chunks', chunks: [raw], from: 'Ext', to: 'Ext' })
+    expect(() => inspectMacSpeakerShadowCallSource(seal(source))).toThrow(/production segment coordinates/)
+  })
+  it('separates inherited anonymous estimates from structural mixed/Ext abstention', () => {
+    const source = fixture(), raw = first(source)
+    for (const which of ['originalJSON', 'currentJSON'] as const) edit(source, which, d => {
+      for (const c of [d.chunks[raw], d.chunkEntries[raw].chunk]) c.segments[0].speaker = 'Ext'
+    })
+    const inspected = inspectMacSpeakerShadowCallSource(seal(source))
+    expect(inspected.protection.has(raw)).toBe(true)
+    expect(inspected.humanProtection.has(raw)).toBe(false)
+    expect(inspected.current.chunkEntries[raw].chunk.segments[0].speaker).toBe('Ext')
+  })
+  it('protects unmarked anonymous corrections and the complete human ledger in estimate aliases', () => {
+    const source = fixture(), raw = first(source)
+    edit(source, 'currentJSON', d => { d.chunks[raw].speaker = 'Voice 99' })
+    expect(inspectMacSpeakerShadowCallSource(seal(source)).humanProtection.has(raw)).toBe(true)
+    const confirmed = fixture()
+    confirmed.ledgerJSONL = JSON.stringify({ id: 'keep', phase: 'confirmed-chunks', chunks: [raw], from: 'Voice 2', to: 'Voice 2' })
+    expect(inspectMacSpeakerShadowCallSource(seal(confirmed)).humanProtection.has(raw)).toBe(true)
+  })
+  it('keeps prior named proof and named batch source intervals protected in estimate aliases', () => {
+    const source = fixture(), named = withPriorQualifiedProof(source)
+    source.currentJSON = JSON.stringify(named)
+    const inspected = inspectMacSpeakerShadowCallSource(seal(source))
+    for (const raw of [0, 1, 2, 3, 4, 11, 12, 13, 14, 15]) expect(inspected.humanProtection.has(raw)).toBe(true)
+    expect(readMacSpeakerMachineEvidence(inspected.current).status).toBe('qualified')
+  })
+  it('inspects an immutable prior proof without invalidating its base assertions', () => {
+    const source = fixture(), named = withPriorQualifiedProof(source)
+    source.currentJSON = JSON.stringify(named)
+    const before = source.currentJSON
+    const view = inspectMacSpeakerShadowCallSource(seal(source))
+    expect(view.protection.size).toBeGreaterThan(0)
+    expect(source.currentJSON).toBe(before)
+    expect(readMacSpeakerMachineEvidence(view.current).status).toBe('qualified')
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/requires proof composition/)
+  })
+  it('quarantines a complete terminal embedding window only in the explicit view protocol', () => {
+    const source = fixture(), exports = JSON.parse(source.cohort.embeddingsJSON)
+    const padded = { ...exports.at(-1), startTime: SYNTHETIC_SECONDS - 3, endTime: SYNTHETIC_SECONDS + .25 }
+    exports.push(padded); source.cohort.embeddingsJSON = JSON.stringify(exports)
+    const before = source.cohort.embeddingsJSON, view = inspectMacSpeakerShadowCallSource(seal(source))
+    expect(view.embeddings).toHaveLength(exports.length - 1)
+    expect(view.excludedEmbeddingWindows).toEqual([expect.objectContaining({ originalIndex: exports.length - 1, startTime: padded.startTime, endTime: padded.endTime, reason: 'window-crosses-capture-end' })])
+    expect(view.excludedEmbeddingWindows[0].windowSHA256).toMatch(/^[a-f0-9]{64}$/)
+    expect(source.cohort.embeddingsJSON).toBe(before)
+    expect(() => buildMacSpeakerShadowRepair(seal(source))).toThrow(/bounded finite/)
+  })
+  for (const end of [SYNTHETIC_SECONDS + 2, NaN]) it(`refuses malformed terminal export ${end}`, () => {
+    const source = fixture(), exports = JSON.parse(source.cohort.embeddingsJSON)
+    exports.push({ ...exports.at(-1), startTime: SYNTHETIC_SECONDS - 3, endTime: end }); source.cohort.embeddingsJSON = JSON.stringify(exports)
+    expect(() => inspectMacSpeakerShadowCallSource(seal(source))).toThrow(/bounded finite/)
+  })
+  it('refuses an embedding entirely beyond the source rather than discarding it as padding', () => {
+    const source = fixture(), exports = JSON.parse(source.cohort.embeddingsJSON)
+    exports.push({ ...exports.at(-1), startTime: SYNTHETIC_SECONDS + .1, endTime: SYNTHETIC_SECONDS + .2 }); source.cohort.embeddingsJSON = JSON.stringify(exports)
+    expect(() => inspectMacSpeakerShadowCallSource(seal(source))).toThrow(/bounded finite/)
+  })
   it('declines a currently qualified prior proof instead of invalidating its reader assertions', () => {
     const source = fixture(), named = withPriorQualifiedProof(source)
     expect(readMacSpeakerMachineEvidence(named).status).toBe('qualified')
@@ -232,7 +320,10 @@ describe('qualified256 shadow repair pure preparation', () => {
       const word = d.batchSegments[0].speakerWords[raw]; word.start -= .1
     })
     const result = buildMacSpeakerShadowRepair(seal(source))
-    expect(result.withheld).toContainEqual({ rawChunkIndex: raw, reason: 'batch-protected-or-crosses-unqualified-boundary' })
+    // The shared inspector now protects changed batch clocks before candidate
+    // selection, so the memory and physical writers use the same protection.
+    expect(result.withheld).toContainEqual({ rawChunkIndex: raw, reason: 'human-or-named-protected' })
+    expect(result.protectedRawChunkIndices).toContain(raw)
     expect(result.plan!.assignments.some(a => a.rawChunkIndex === raw)).toBe(false)
     const next = result.plan!.assignments.find(a => a.rawChunkIndex === raw + 1)!
     expect(next.batchWords[0].start).toBe(JSON.parse(source.currentJSON).chunkEntries[raw + 1].chunk.elapsed / 1000)

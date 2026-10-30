@@ -37,11 +37,11 @@ function boundedJSON(text: string, max: number): any {
   if (typeof text !== 'string' || Buffer.byteLength(text) > max) fail('JSON byte bound')
   return JSON.parse(text)
 }
-function closed(doc: Doc) {
+function closed(doc: Doc, immutableView = false) {
   if (!doc || !Array.isArray(doc.chunks) || !Array.isArray(doc.chunkEntries) || doc.finalizationState !== 'complete' || doc.sourceType !== 'mac_system_audio' || !/^mac_/.test(doc.sessionId) || doc.active || doc.isActive || doc.claimPending || doc.status === 'recording' || doc.mergedFrom || doc.sourceSessionIds || doc.isMerged) fail('closed original Mac capture required')
   // Even a valid prior reader proof binds the complete speech document. A new
   // label patch would invalidate it. This adapter cannot compose those receipts.
-  if (['speakerRepair', 'speakerProfilePass'].some(key => Object.hasOwn(doc, key))) fail('prior repair/profile receipt requires proof composition')
+  if (!immutableView && ['speakerRepair', 'speakerProfilePass'].some(key => Object.hasOwn(doc, key))) fail('prior repair/profile receipt requires proof composition')
 }
 const ANNOTATION_KEYS = new Set(['speaker', 'originalSpeaker', 'speakerCorrectionBatchId', 'speakerCorrectionId', 'manualSpeaker', 'speakerManuallyAssigned', 'confirmedByHuman', 'manuallyAssigned', 'manuallyCorrected', 'speakerOrigin', 'speakerSource', 'speakerPolicy', 'speakerProvenance', 'source'])
 /** Compare the complete source row recursively, allowing only speaker annotation
@@ -117,16 +117,38 @@ function ledgerProtection(text: string, map: ReturnType<typeof mapping>, origina
   }
   return protectedRaw
 }
+function batchBindings(original: Doc, current: Doc, entries: ReturnType<typeof shadowEntries>, samples: Record<string, number>, protection: Set<number>) {
+  const wordSpans: Array<{ binding: MacSpeakerWordBinding; raw: number[]; protected: boolean }> = []
+  if (current.batchSegments !== undefined && !Array.isArray(current.batchSegments)) fail('batch schema')
+  if (!equal((original.batchSegments ?? []).map((b: Doc) => [b.startChunkIdx, b.endChunkIdx, b.speakerWords?.length]), (current.batchSegments ?? []).map((b: Doc) => [b.startChunkIdx, b.endChunkIdx, b.speakerWords?.length]))) fail('current batch topology drift')
+  for (const [si, batch] of (current.batchSegments ?? []).entries()) {
+    if (!Number.isInteger(batch.startChunkIdx) || !Number.isInteger(batch.endChunkIdx) || batch.startChunkIdx < 0 || batch.endChunkIdx < batch.startChunkIdx || batch.endChunkIdx >= entries.length || !Array.isArray(batch.speakerWords)) fail('batch raw clock range')
+    let offset = 0
+    const intervals = []
+    for (let raw = batch.startChunkIdx; raw <= batch.endChunkIdx; raw++) { const end = offset + samples[String(raw)] / 16000; intervals.push({ raw, start: offset, end }); offset = end }
+    for (const [wi, word] of batch.speakerWords.entries()) {
+      if (!word || typeof word.word !== 'string' || !Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start || word.end > offset) fail('batch word clock')
+      const raw = intervals.filter(r => word.end === word.start ? word.start >= r.start && word.start < r.end : word.start < r.end && word.end > r.start).map(r => r.raw)
+      const oldWord = original.batchSegments[si].speakerWords[wi], changedWord = !equal(oldWord, word)
+      // Preserve even an anonymous, unmarked edit. An altered word clock protects
+      // both its original and current source intersections; never normalize it.
+      if (changedWord) for (const r of intervals) if (oldWord?.end === oldWord?.start ? oldWord.start >= r.start && oldWord.start < r.end : oldWord?.start < r.end && oldWord?.end > r.start) protection.add(r.raw)
+      wordSpans.push({ binding: { segmentIndex: si, wordIndex: wi, word: word.word, start: word.start, end: word.end, from: word.speaker }, raw, protected: changedWord || isMacSpeakerHumanProtected(word) || !/^(?:Voice [1-9]\d?|Ext|Unknown|Unidentified(?: \d+)?|Speaker \d+)$/.test(word.speaker) })
+    }
+  }
+  for (const word of wordSpans) if (word.protected) for (const raw of word.raw) protection.add(raw)
+  return wordSpans
+}
 /** No remap/proposal input: recompute unchanged floor15/.8/1.5 decision from the
  * entire bound export and production segments reconstructed from ORIGINAL rows. */
-export function buildMacSpeakerShadowRepair(input: MacShadowRepairInput): MacShadowRepairPreview {
+function inspectSource(input: MacShadowRepairInput, immutableView: boolean) {
   if (Object.keys(input).some(k => !['originalJSON', 'currentJSON', 'ledgerJSONL', 'rawAudio', 'timeline', 'cohort', 'sourceBindingSHA256'].includes(k))) fail('unsupported proposal/remap input')
   for (const [value, maximum] of [[input.originalJSON, 32], [input.currentJSON, 32], [input.ledgerJSONL, 8], [input.cohort?.nativeJSON, 64], [input.cohort?.embeddingsJSON, 96]] as const) if (typeof value !== 'string' || Buffer.byteLength(value) > maximum * 1024 * 1024) fail('input byte bound')
   if (!Array.isArray(input.rawAudio) || input.rawAudio.length > 6000 || !Array.isArray(input.timeline?.rows) || input.timeline.rows.length > 6000) fail('raw/timeline schema bound')
   const { sourceBindingSHA256, ...source } = input
   if (!HASH.test(sourceBindingSHA256) || bindMacSpeakerShadowRepair(source) !== sourceBindingSHA256) fail('full source binding drift')
   const original = boundedJSON(input.originalJSON, 32 * 1024 * 1024), current = boundedJSON(input.currentJSON, 32 * 1024 * 1024)
-  closed(original); closed(current)
+  closed(original, immutableView); closed(current, immutableView)
   if (original.sessionId !== current.sessionId) fail('capture mismatch')
   const oldMap = mapping(original), map = mapping(current)
   if (oldMap.some(m => !equal(sourceGeometry(m.chunk), sourceGeometry(m.entry)))) fail('original root/raw source geometry disagreement')
@@ -161,17 +183,81 @@ export function buildMacSpeakerShadowRepair(input: MacShadowRepairInput): MacSha
     if (!s || typeof s.speakerId !== 'string' || !s.speakerId || s.speakerId.length > 100 || !Number.isFinite(s.startTimeSeconds) || !Number.isFinite(s.endTimeSeconds) || s.startTimeSeconds < 0 || s.endTimeSeconds <= s.startTimeSeconds || s.endTimeSeconds > total / 16000 + 1) fail('native turn bound')
     if (s.embedding !== undefined && !vector(s.embedding)) fail('native vector must be finite nonzero256d')
   }
-  for (const e of embeddings) if (!e || !vector(e.embedding256) || !Number.isInteger(e.cluster) || e.cluster < 0 || e.cluster > 9999 || !Number.isFinite(e.startTime) || !Number.isFinite(e.endTime) || e.startTime < 0 || e.endTime <= e.startTime || e.endTime > total / 16000 + 1e-6) fail('embedding must be bounded finite nonzero256d')
+  const excludedEmbeddingWindows: Array<{ originalIndex: number; startTime: number; endTime: number; windowSHA256: string; reason: 'window-crosses-capture-end' }> = []
+  const effectiveEmbeddings: ShadowEmbeddingRow[] = []
+  for (const [originalIndex, e] of embeddings.entries()) {
+    if (!e || !vector(e.embedding256) || !Number.isInteger(e.cluster) || e.cluster < 0 || e.cluster > 9999 || !Number.isFinite(e.startTime) || !Number.isFinite(e.endTime) || e.startTime < 0 || e.endTime <= e.startTime) fail('embedding must be bounded finite nonzero256d')
+    if (e.endTime > total / 16000 + 1e-6) {
+      // A vector covering source AND terminal model padding is not a vector for
+      // a cropped source window. Never clip its time or reuse its vector. The
+      // immutable-view protocol can exclude the ENTIRE terminal window while
+      // retaining the complete export in its source binding and audit receipt.
+      // The physical writer remains strict. Windows outside the capture or an
+      // overrun beyond the native export's one-second envelope remain fatal.
+      if (!immutableView || e.startTime >= total / 16000 || e.endTime > total / 16000 + 1) fail('embedding must be bounded finite nonzero256d')
+      excludedEmbeddingWindows.push({ originalIndex, startTime: e.startTime, endTime: e.endTime, windowSHA256: sha(JSON.stringify(e)), reason: 'window-crosses-capture-end' })
+    } else effectiveEmbeddings.push(e)
+  }
   const { turns, dropped } = nativeTurns(native.segments, total / 16000)
   if (dropped) fail('malformed/dropped native turn')
-  const production = shadowProductionSegments(entries, placed, total)
+  const ledgerRawProtection = ledgerProtection(input.ledgerJSONL, map, oldMap)
+  const currentRoots = new Map(map.map(m => [m.raw, m.chunk]))
+  // Historical ASR occasionally extends a generic Ext segment past its own WAV.
+  // An immutable view can quarantine that WHOLE row, never clip it or synthesize
+  // replacement support. Keep every native/confuser row and bind the unmodified
+  // original JSON; physical writers and malformed Voice/human rows still refuse.
+  const excludedProductionSegments: Array<{ rawChunkIndex: number; segmentIndex: number; rowSHA256: string; startSec: number; endSec: number; sourceSamples: number; overrunSamples: number; reason: 'generic-segment-crosses-source-end' }> = []
+  const productionEntries = entries.map(e => ({ ...e, chunk: { ...e.chunk, segments: ((e.chunk.segments as Doc[] | undefined) ?? []).filter((s, segmentIndex) => {
+    if (!s || typeof s.speaker !== 'string' || !Number.isFinite(s.startSec) || !Number.isFinite(s.endSec) || s.startSec < 0 || s.endSec <= s.startSec) fail('production segment coordinates')
+    const sourceSamples = samples[String(e.chunkIndex)], overrunSamples = s.endSec * 16000 - sourceSamples
+    if (overrunSamples <= 1e-6) return true
+    const currentRow = currentEntries[e.chunkIndex].chunk
+    const currentRoot = currentRoots.get(e.chunkIndex)
+    if (!immutableView || s.speaker !== 'Ext' || e.chunk.speaker !== 'Ext' || currentRow.speaker !== 'Ext'
+      || currentRoot && currentRoot.speaker !== 'Ext' || s.startSec * 16000 >= sourceSamples || overrunSamples > 16000
+      || ledgerRawProtection.has(e.chunkIndex)
+      || [e.chunk, currentRow, ...(currentRoot ? [currentRoot] : [])].some(c => hasMacSpeakerProtectedRows(c) || !equal(rows(c), rows(e.chunk)) && c !== e.chunk)) fail('production segment coordinates')
+    excludedProductionSegments.push({ rawChunkIndex: e.chunkIndex, segmentIndex, rowSHA256: sha(JSON.stringify(s)), startSec: s.startSec, endSec: s.endSec, sourceSamples, overrunSamples, reason: 'generic-segment-crosses-source-end' })
+    return false
+  }) } }))
+  const production = shadowProductionSegments(productionEntries, placed, total)
   if (production.segs.length > 40000) fail('production segment bound')
-  // The port accepts historical permissive numeric inputs. This write adapter
-  // requires exact bounded segment coordinates before invoking that unchanged port.
-  for (const e of entries) for (const s of (e.chunk.segments as Doc[] | undefined) ?? []) if (!s || typeof s.speaker !== 'string' || !Number.isFinite(s.startSec) || !Number.isFinite(s.endSec) || s.startSec < 0 || s.endSec <= s.startSec || s.endSec * 16000 > samples[String(e.chunkIndex)] + 1e-6) fail('production segment coordinates')
-  const decision = decide(production.segs, total, turns, embeddings as ShadowEmbeddingRow[])
-  const protection = ledgerProtection(input.ledgerJSONL, map, oldMap)
+  const decision = decide(production.segs, total, turns, effectiveEmbeddings)
+  const protection = new Set(ledgerRawProtection)
+  for (const row of excludedProductionSegments) protection.add(row.rawChunkIndex)
   for (const m of map) if ([m.chunk, m.entry].some(c => hasMacSpeakerProtectedRows(c) || rows(c).some(r => !VOICE.test(r.speaker)))) protection.add(m.raw)
+  const wordSpans = batchBindings(original, current, entries, samples, protection)
+  // Anonymous estimate aliases inherit the original machine localization; they
+  // must not confuse a structural Ext/Voice boundary with a human correction.
+  // Keep this separate from the stronger interval-projection exclusion above.
+  // No tail or mixed boundary admitted here becomes new acoustic support.
+  const humanProtection = new Set(ledgerRawProtection)
+  for (const row of excludedProductionSegments) humanProtection.add(row.rawChunkIndex)
+  const named = (row: Doc) => typeof row.speaker === 'string' && row.speaker.trim() !== ''
+    && !/^(?:Voice [1-9]\d?|Ext|Unknown|Unidentified(?: \d+)?|Speaker \d+)$/.test(row.speaker)
+  for (const [i, m] of map.entries()) {
+    const before = oldMap[i]
+    if (!equal(rows(before.chunk), rows(m.chunk)) || !equal(rows(before.entry), rows(m.entry))
+      || [m.chunk, m.entry].some(c => hasMacSpeakerProtectedRows(c) || rows(c).some(named))) humanProtection.add(m.raw)
+  }
+  for (const word of wordSpans) if (word.protected) for (const raw of word.raw) humanProtection.add(raw)
+  // A view keeps all base bytes and previous proof receipts intact. It may use
+  // this inspection, but it is not permission to feed an old receipt into the
+  // physical-patch writer below.
+  return { original, current, oldMap, map, entries, currentEntries, samples, placed, total, native, embeddings: effectiveEmbeddings, excludedEmbeddingWindows, excludedProductionSegments, turns, production, decision, protection, humanProtection, wordSpans }
+}
+
+/** Complete immutable-source inspection for the call-wide derived view. This
+ * accepts existing proof metadata because consumers MUST validate it against
+ * the unmodified base, and MUST NOT patch that base. No native execution is
+ * authenticated by a caller-supplied hash. */
+export function inspectMacSpeakerShadowCallSource(input: MacShadowRepairInput) {
+  return inspectSource(input, true)
+}
+
+export function buildMacSpeakerShadowRepair(input: MacShadowRepairInput): MacShadowRepairPreview {
+  const { sourceBindingSHA256 } = input
+  const { original, current, oldMap, map, entries, currentEntries, samples, placed, total, native, embeddings, turns, production, decision, protection, wordSpans } = inspectSource(input, false)
   const withheld = new Map<number, string>(), chosen = new Map<number, { from: string; to: string }>()
   let candidateChunks = 0
   for (let i = 0; i < oldMap.length; i++) {
@@ -186,25 +272,6 @@ export function buildMacSpeakerShadowRepair(input: MacShadowRepairInput): MacSha
     if (row.usedSampleCount !== row.sampleCount || !segs.length || !cluster || segs.some(([lo, hi, label]) => label !== before.chunk.speaker || [...exactOverlap(lo, hi, decision.index)].some(([key]) => key !== cluster))) { withheld.set(now.raw, 'outside-fully-qualified-chunk'); continue }
     chosen.set(now.raw, { from: now.chunk.speaker, to })
   }
-  const wordSpans: Array<{ binding: MacSpeakerWordBinding; raw: number[]; protected: boolean }> = []
-  if (current.batchSegments !== undefined && !Array.isArray(current.batchSegments)) fail('batch schema')
-  if (!equal((original.batchSegments ?? []).map((b: Doc) => [b.startChunkIdx, b.endChunkIdx, b.speakerWords?.length]), (current.batchSegments ?? []).map((b: Doc) => [b.startChunkIdx, b.endChunkIdx, b.speakerWords?.length]))) fail('current batch topology drift')
-  for (const [si, batch] of (current.batchSegments ?? []).entries()) {
-    if (!Number.isInteger(batch.startChunkIdx) || !Number.isInteger(batch.endChunkIdx) || batch.startChunkIdx < 0 || batch.endChunkIdx < batch.startChunkIdx || batch.endChunkIdx >= entries.length || !Array.isArray(batch.speakerWords)) fail('batch raw clock range')
-    let offset = 0
-    const intervals = []
-    for (let raw = batch.startChunkIdx; raw <= batch.endChunkIdx; raw++) { const end = offset + samples[String(raw)] / 16000; intervals.push({ raw, start: offset, end }); offset = end }
-    for (const [wi, word] of batch.speakerWords.entries()) {
-      if (!word || typeof word.word !== 'string' || !Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start || word.end > offset) fail('batch word clock')
-      const raw = intervals.filter(r => word.end === word.start ? word.start >= r.start && word.start < r.end : word.start < r.end && word.end > r.start).map(r => r.raw)
-      const oldWord = original.batchSegments[si].speakerWords[wi], changedWord = !equal(oldWord, word)
-      // Preserve even an anonymous, unmarked edit. An altered word clock protects
-      // both its original and current source intersections; never normalize it.
-      if (changedWord) for (const r of intervals) if (oldWord?.end === oldWord?.start ? oldWord.start >= r.start && oldWord.start < r.end : oldWord?.start < r.end && oldWord?.end > r.start) protection.add(r.raw)
-      wordSpans.push({ binding: { segmentIndex: si, wordIndex: wi, word: word.word, start: word.start, end: word.end, from: word.speaker }, raw, protected: changedWord || isMacSpeakerHumanProtected(word) || !/^(?:Voice [1-9]\d?|Ext|Unknown|Unidentified(?: \d+)?|Speaker \d+)$/.test(word.speaker) })
-    }
-  }
-  for (const word of wordSpans) if (word.protected) for (const raw of word.raw) protection.add(raw)
   for (const raw of chosen.keys()) if (protection.has(raw)) { chosen.delete(raw); withheld.set(raw, 'batch-protected-or-crosses-unqualified-boundary') }
   // Remove entire chunks to a fixed point; never write a partly unqualified word.
   let changed = true
