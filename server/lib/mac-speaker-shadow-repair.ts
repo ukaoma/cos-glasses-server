@@ -118,7 +118,7 @@ function ledgerProtection(text: string, map: ReturnType<typeof mapping>, origina
   return protectedRaw
 }
 function batchBindings(original: Doc, current: Doc, entries: ReturnType<typeof shadowEntries>, samples: Record<string, number>, protection: Set<number>) {
-  const wordSpans: Array<{ binding: MacSpeakerWordBinding; raw: number[]; protected: boolean }> = []
+  const wordSpans: Array<{ binding: MacSpeakerWordBinding; raw: number[]; protectedRaw: number[]; protected: boolean }> = []
   if (current.batchSegments !== undefined && !Array.isArray(current.batchSegments)) fail('batch schema')
   if (!equal((original.batchSegments ?? []).map((b: Doc) => [b.startChunkIdx, b.endChunkIdx, b.speakerWords?.length]), (current.batchSegments ?? []).map((b: Doc) => [b.startChunkIdx, b.endChunkIdx, b.speakerWords?.length]))) fail('current batch topology drift')
   for (const [si, batch] of (current.batchSegments ?? []).entries()) {
@@ -132,11 +132,12 @@ function batchBindings(original: Doc, current: Doc, entries: ReturnType<typeof s
       const oldWord = original.batchSegments[si].speakerWords[wi], changedWord = !equal(oldWord, word)
       // Preserve even an anonymous, unmarked edit. An altered word clock protects
       // both its original and current source intersections; never normalize it.
-      if (changedWord) for (const r of intervals) if (oldWord?.end === oldWord?.start ? oldWord.start >= r.start && oldWord.start < r.end : oldWord?.start < r.end && oldWord?.end > r.start) protection.add(r.raw)
-      wordSpans.push({ binding: { segmentIndex: si, wordIndex: wi, word: word.word, start: word.start, end: word.end, from: word.speaker }, raw, protected: changedWord || isMacSpeakerHumanProtected(word) || !/^(?:Voice [1-9]\d?|Ext|Unknown|Unidentified(?: \d+)?|Speaker \d+)$/.test(word.speaker) })
+      const priorRaw = changedWord ? intervals.filter(r => oldWord?.end === oldWord?.start ? oldWord.start >= r.start && oldWord.start < r.end : oldWord?.start < r.end && oldWord?.end > r.start).map(r => r.raw) : []
+      if (changedWord) for (const r of priorRaw) protection.add(r)
+      wordSpans.push({ binding: { segmentIndex: si, wordIndex: wi, word: word.word, start: word.start, end: word.end, from: word.speaker }, raw, protectedRaw: [...new Set([...raw, ...priorRaw])], protected: changedWord || isMacSpeakerHumanProtected(word) || !/^(?:Voice [1-9]\d?|Ext|Unknown|Unidentified(?: \d+)?|Speaker \d+)$/.test(word.speaker) })
     }
   }
-  for (const word of wordSpans) if (word.protected) for (const raw of word.raw) protection.add(raw)
+  for (const word of wordSpans) if (word.protected) for (const raw of word.protectedRaw) protection.add(raw)
   return wordSpans
 }
 /** No remap/proposal input: recompute unchanged floor15/.8/1.5 decision from the
@@ -240,7 +241,7 @@ function inspectSource(input: MacShadowRepairInput, immutableView: boolean) {
     if (!equal(rows(before.chunk), rows(m.chunk)) || !equal(rows(before.entry), rows(m.entry))
       || [m.chunk, m.entry].some(c => hasMacSpeakerProtectedRows(c) || rows(c).some(named))) humanProtection.add(m.raw)
   }
-  for (const word of wordSpans) if (word.protected) for (const raw of word.raw) humanProtection.add(raw)
+  for (const word of wordSpans) if (word.protected) for (const raw of word.protectedRaw) humanProtection.add(raw)
   // A view keeps all base bytes and previous proof receipts intact. It may use
   // this inspection, but it is not permission to feed an old receipt into the
   // physical-patch writer below.

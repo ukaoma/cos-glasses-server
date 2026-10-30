@@ -13,7 +13,10 @@ describe('source-bound Mac live label projection', () => {
   it('backpatches only speaker fields, retaining capture diagnostics, words and clocks byte for byte', () => {
     const source = input(), before = JSON.stringify(source), out = projectMacSpeakerLiveChunks(source)
     expect(JSON.stringify(source)).toBe(before)
-    const expected = chunk(); expected.c.speaker = 'Qualified Person'; expected.c.segments[0].speaker = 'Qualified Person'; expected.c.finalSegments[0].speaker = 'Qualified Person'; expected.c.words[1].speaker = 'Qualified Person'
+    const original = chunk(), expected = { ...original, c: { ...original.c, speaker: 'Qualified Person',
+      segments: original.c.segments.map(s => ({ ...s, speaker: 'Qualified Person' })),
+      finalSegments: original.c.finalSegments.map(s => ({ ...s, speaker: 'Qualified Person' })),
+      words: original.c.words.map((w, i) => i === 1 ? { ...w, speaker: 'Qualified Person' } : w) } }
     expect(out.speakerProjectedChunksIndexed).toEqual([expected])
     expect(out.appliedRawChunkIndices).toEqual([0]); expect(out.withheld).toEqual([])
     expect(out.speakerProjectedChunksIndexed[0].c.similarity).toBe(0)

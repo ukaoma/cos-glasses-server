@@ -99,6 +99,17 @@ describe('qualified256 shadow repair pure preparation', () => {
     confirmed.ledgerJSONL = JSON.stringify({ id: 'keep', phase: 'confirmed-chunks', chunks: [raw], from: 'Voice 2', to: 'Voice 2' })
     expect(inspectMacSpeakerShadowCallSource(seal(confirmed)).humanProtection.has(raw)).toBe(true)
   })
+  it('protects both original and current intervals when a human changes a batch word clock', () => {
+    const source = fixture()
+    edit(source, 'currentJSON', d => {
+      d.batchSegments[0].speakerWords[0].start = 6
+      d.batchSegments[0].speakerWords[0].end = 12
+    })
+    const inspected = inspectMacSpeakerShadowCallSource(seal(source))
+    expect(inspected.humanProtection.has(0)).toBe(true)
+    expect(inspected.humanProtection.has(1)).toBe(true)
+    expect(inspected.wordSpans[0].protectedRaw).toEqual([1, 0])
+  })
   it('keeps prior named proof and named batch source intervals protected in estimate aliases', () => {
     const source = fixture(), named = withPriorQualifiedProof(source)
     source.currentJSON = JSON.stringify(named)
