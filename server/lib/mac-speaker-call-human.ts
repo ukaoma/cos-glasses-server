@@ -267,10 +267,10 @@ export function readMacCallHumanFile(path: string, max: number, missing = false)
   } finally { closeSync(fd) }
 }
 function directory(path: string) { const dir = dirname(path); if (realpathSync(dir) !== dir || !lstatSync(dir).isDirectory()) fail('canonical parent required'); return dir }
-function syncDir(path: string) { const fd = openSync(directory(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { fsyncSync(fd) } finally { closeSync(fd) } }
+function syncDir(path: string) { const fd = openSync(directory(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK); try { fsyncSync(fd) } finally { closeSync(fd) } }
 function atomic(path: string, text: string, before: () => void) {
   directory(path); const temp = `${path}.${randomUUID()}.tmp`
-  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600)
   try { writeFileSync(fd, text); fsyncSync(fd) } finally { closeSync(fd) }
   try { before(); renameSync(temp, path); syncDir(path) } finally { if (existsSync(temp)) unlinkSync(temp) }
 }
@@ -284,7 +284,7 @@ function acquire(path: string, journal: string, recover: boolean) {
     if (readMacCallHumanFile(path, 4096)!.hash !== old.hash) fail('lock drift')
     unlinkSync(path); syncDir(path)
   }
-  directory(path); const text = JSON.stringify({ pid: process.pid, token: randomUUID(), kind: PREFIX, directory: journal }), fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  directory(path); const text = JSON.stringify({ pid: process.pid, token: randomUUID(), kind: PREFIX, directory: journal }), fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600)
   try { writeFileSync(fd, text); fsyncSync(fd) } finally { closeSync(fd) }
   syncDir(path)
   const assertOwned = () => { if (readMacCallHumanFile(path, 4096, true)?.hash !== hash(text)) fail('lock drift') }

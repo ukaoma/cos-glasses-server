@@ -269,7 +269,11 @@ describe('scoped human call annotations', () => {
     expect(() => readFileSync(f.paths.annotation)).toThrow()
   })
   it('actual HTTP preview/confirm uses exact scope membership, rejects legacy/profile bypasses and refreshes the panel/copy', async () => {
-    const f = fixture(), { default: express } = await import('express'), { createMeetingRouter } = await import('../routes/meeting.js')
+    const f = fixture(), { default: express } = await import('express'), producer = await import('./mac-speaker-call-producer.js')
+    // The synthetic packet has no retained native export. Exercise both sides
+    // of that capability boundary without granting the test native inference.
+    const availability = vi.spyOn(producer, 'macSpeakerCallCachedRefreshAvailability').mockResolvedValue({ available: false, reason: 'synthetic-test-only' })
+    const { createMeetingRouter } = await import('../routes/meeting.js')
     const oldOps = process.env.COS_OPERATIONS_DIR, oldMeetings = process.env.COS_MEETINGS_ROOT; delete process.env.COS_OPERATIONS_DIR; delete process.env.COS_MEETINGS_ROOT
     const app = express(); app.use(express.json()); app.use('/api', createMeetingRouter({ store: { findBySessionId: () => ({ sidecarPath: f.files.sidecarPath, filepath: f.files.meetingPath, title: 'Human review', domain: 'personal', filename: 'record.md', durationMin: 6 }) } as any }))
     const server = app.listen(0, '127.0.0.1'); await new Promise<void>(r => server.once('listening', r))
@@ -287,7 +291,12 @@ describe('scoped human call annotations', () => {
       expect((await post({ ...payload, dryRun: true, rawChunkIndices: [9999] })).status).toBe(409)
       const preview = await post({ ...payload, dryRun: true }); expect(preview.status).toBe(200); expect((await preview.json()).preview.members).toEqual([f.member])
       expect(() => readFileSync(f.paths.ledger)).toThrow()
+      expect(availability).not.toHaveBeenCalled()
+      const unavailable = await post({ ...payload, confirm: true }); expect(unavailable.status).toBe(409); expect((await unavailable.json()).reason).toBe('group_refresh_unavailable')
+      expect(() => readFileSync(f.paths.ledger)).toThrow(); expect(() => readFileSync(f.paths.annotation)).toThrow()
+      availability.mockResolvedValue({ available: true, reason: 'synthetic-test-only' })
       const applied = await post({ ...payload, confirm: true }); expect(applied.status).toBe(200)
+      expect(availability).toHaveBeenLastCalledWith(f.sid, f.files.sidecarPath)
       expect((await post({ ...payload, confirm: true })).status).toBe(409)
       const refreshed = await (await fetch(`${origin}/speakers`)).json(), content = await (await fetch(`${origin}/content`)).json()
       expect(refreshed.sourceRevision).not.toBe(panel.sourceRevision)
@@ -298,6 +307,7 @@ describe('scoped human call annotations', () => {
       expect(authored.members.map((m: any) => m.rawChunkIndex)).toEqual(f.selected)
       const correction = await fetch(`${origin}/speaker-groups/${authored.identityId}/relabel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recordId: refreshed.recordId, expectedRevision: refreshed.sourceRevision, scopeSHA256: authored.scopeSHA256, rawChunkIndices: f.selected, to: 'Corrected Example', confirm: true }) })
       expect(correction.status).toBe(200)
+      expect(availability).toHaveBeenCalledTimes(2) // Existing human decisions do not depend on native capability.
       const corrected = await (await fetch(`${origin}/speakers`)).json()
       expect(corrected.voices.find((v: any) => v.label === 'Corrected Example')).toMatchObject({ nameAsserted: true, confirmedByHuman: true })
       writeFileSync(f.paths.annotation, 'CORRUPT HUMAN ANNOTATION')
@@ -306,6 +316,6 @@ describe('scoped human call annotations', () => {
       const legacy = await fetch(`${origin}/relabel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Voice 2', to: 'Other Example', dryRun: true }) })
       expect(legacy.status).toBe(409); expect((await legacy.json()).reason).toBe('human_annotation_invalid')
       expect(readFileSync(f.files.sidecarPath, 'utf8')).toBe(f.input.currentJSON); expect(readFileSync(f.files.meetingPath, 'utf8')).toBe(f.markdown)
-    } finally { await new Promise<void>(r => server.close(() => r())); if (oldOps === undefined) delete process.env.COS_OPERATIONS_DIR; else process.env.COS_OPERATIONS_DIR = oldOps; if (oldMeetings === undefined) delete process.env.COS_MEETINGS_ROOT; else process.env.COS_MEETINGS_ROOT = oldMeetings }
+    } finally { availability.mockRestore(); await new Promise<void>(r => server.close(() => r())); if (oldOps === undefined) delete process.env.COS_OPERATIONS_DIR; else process.env.COS_OPERATIONS_DIR = oldOps; if (oldMeetings === undefined) delete process.env.COS_MEETINGS_ROOT; else process.env.COS_MEETINGS_ROOT = oldMeetings }
   })
 })
