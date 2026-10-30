@@ -17,6 +17,28 @@ const SHA = /^[a-f0-9]{64}$/;
 const hash = (v: string | Buffer) => createHash('sha256').update(v).digest('hex');
 const seal = (v: unknown) => hash(JSON.stringify(v));
 const fail = (message: string): never => { throw Error(`mac_call_producer_${message}`); };
+let operationFence: (() => void) | null = null;
+/** Also checked synchronously at IO/publication boundaries: a busy child event
+ * loop cannot defer parent-death or absolute-deadline checks until after writes. */
+export function createMacSpeakerCallWorkerFence(input: {
+    parentPid: number;
+    deadline: number;
+    now?: () => number;
+    parentPidNow?: () => number;
+    alive?: (pid: number) => boolean;
+}): () => void {
+    return () => {
+        if ((input.now ?? Date.now)() > input.deadline)
+            fail('worker_deadline');
+        let alive = false;
+        try {
+            alive = input.alive ? input.alive(input.parentPid) : (process.kill(input.parentPid, 0), true);
+        }
+        catch { }
+        if (input.parentPid < 2 || (input.parentPidNow ?? (() => process.ppid))() !== input.parentPid || !alive)
+            fail('parent_exited');
+    };
+}
 export const MAC_CALL_PRODUCER_RUNTIME_FILES = [
     'mac-speaker-call-producer.ts', 'mac-speaker-call-producer-worker.ts', 'mac-speaker-call-store.ts', 'mac-speaker-call-view.ts',
     'mac-speaker-live-memory.ts', 'mac-speaker-shadow-repair.ts', 'mac-speaker-protection.ts', 'speaker-shadow.ts', 'speaker-shadow-worker.ts',
@@ -87,16 +109,27 @@ interface NativeArtifact extends Omit<NativeContext, 'policy' | 'sourceJSON' | '
     };
     artifactSHA256: string;
 }
-function canonical(path: string) { if (resolve(path) !== path)
-    fail('canonical_path'); let parent = dirname(path); while (!existsSync(parent)) {
-    const next = dirname(parent);
-    if (next === parent)
+function canonical(path: string) {
+    operationFence?.();
+    if (resolve(path) !== path)
         fail('canonical_path');
-    parent = next;
-} if (realpathSync(parent) !== parent)
-    fail('canonical_path'); return path; }
-function stamp(path: string) { const s = lstatSync(path); if (!s.isFile() || s.isSymbolicLink())
-    fail('regular_file'); return JSON.stringify([s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs]); }
+    let parent = dirname(path);
+    while (!existsSync(parent)) {
+        const next = dirname(parent);
+        if (next === parent)
+            fail('canonical_path');
+        parent = next;
+    }
+    if (realpathSync(parent) !== parent)
+        fail('canonical_path');
+    return path;
+}
+function stamp(path: string) {
+    const s = lstatSync(path);
+    if (!s.isFile() || s.isSymbolicLink())
+        fail('regular_file');
+    return JSON.stringify([s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs]);
+}
 function bounded(path: string, max: number, absent = false): Buffer | null {
     canonical(path);
     let fd: number;
@@ -129,28 +162,46 @@ export function validateMacSpeakerCallPending(p: any, r: MacSpeakerCallProducerR
     if (stem === r.sidecarPath || p.captureId !== r.captureId || p.sidecarPath !== r.sidecarPath || p.nativeRefSHA256 !== ref.sha256 || p.policySHA256 !== r.policySHA256 || p.cursorSHA256 !== cursorSHA256 || p.packetPath !== `${stem}.speaker-call.json` || p.statePath !== `${stem}.speaker-call-state.json` || typeof p.directory !== 'string' || dirname(p.directory) !== root || !SHA.test(p.intentSHA256) || !SHA.test(p.publication?.packetSHA256) || !SHA.test(p.publication?.stateFileSHA256))
         fail('pending_publication_target_or_source_drift');
 }
-function pin(path: string, max: number, absent = false): Pin { const before = existsSync(path) ? stamp(path) : null, b = bounded(path, max, absent), after = existsSync(path) ? stamp(path) : null; if (before !== after || (b === null) !== (after === null))
-    fail('pin_drift'); return { path, sha256: b === null ? null : hash(b), stamp: after }; }
-function checkPins(pins: Pin[]) { for (const p of pins) {
-    const q = pin(p.path, 1024 * 1024 * 1024, p.sha256 === null);
-    if (q.sha256 !== p.sha256 || q.stamp !== p.stamp)
-        fail('source_drift');
-} }
-function put(path: string, bytes: string | Buffer) { canonical(path); const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o400); try {
-    writeFileSync(fd, bytes);
-    fsyncSync(fd);
+function pin(path: string, max: number, absent = false): Pin {
+    const before = existsSync(path) ? stamp(path) : null, b = bounded(path, max, absent), after = existsSync(path) ? stamp(path) : null;
+    if (before !== after || (b === null) !== (after === null))
+        fail('pin_drift');
+    return { path, sha256: b === null ? null : hash(b), stamp: after };
 }
-finally {
-    closeSync(fd);
-} const d = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK); try {
-    fsyncSync(d);
+function checkPins(pins: Pin[]) {
+    for (const p of pins) {
+        const q = pin(p.path, 1024 * 1024 * 1024, p.sha256 === null);
+        if (q.sha256 !== p.sha256 || q.stamp !== p.stamp)
+            fail('source_drift');
+    }
 }
-finally {
-    closeSync(d);
-} }
-function captureDir(r: MacSpeakerCallProducerRequest) { if (!/^mac_[A-Za-z0-9_-]{1,100}$/.test(r.captureId) || realpathSync(r.root) !== r.root)
-    fail('capture_path'); const dir = join(r.root, r.captureId); mkdirSync(dir, { recursive: true, mode: 0o700 }); if (realpathSync(dir) !== dir)
-    fail('capture_symlink'); return dir; }
+function put(path: string, bytes: string | Buffer) {
+    canonical(path);
+    const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o400);
+    try {
+        writeFileSync(fd, bytes);
+        fsyncSync(fd);
+    }
+    finally {
+        closeSync(fd);
+    }
+    const d = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+        fsyncSync(d);
+    }
+    finally {
+        closeSync(d);
+    }
+}
+function captureDir(r: MacSpeakerCallProducerRequest) {
+    if (!/^mac_[A-Za-z0-9_-]{1,100}$/.test(r.captureId) || realpathSync(r.root) !== r.root)
+        fail('capture_path');
+    const dir = join(r.root, r.captureId);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (realpathSync(dir) !== dir)
+        fail('capture_symlink');
+    return dir;
+}
 function producerLock(r: MacSpeakerCallProducerRequest) {
     const path = join(captureDir(r), 'producer.lock'), old = bounded(path, 4096, true);
     if (old) {
@@ -171,8 +222,11 @@ function producerLock(r: MacSpeakerCallProducerRequest) {
     }
     const bytes = JSON.stringify({ kind: 'mac-speaker-call-producer', captureId: r.captureId, pid: process.pid, token: randomUUID() });
     put(path, bytes);
-    return () => { if (hash(bounded(path, 4096)!) !== hash(bytes))
-        fail('producer_lock_owner_drift'); unlinkSync(path); };
+    return () => {
+        if (hash(bounded(path, 4096)!) !== hash(bytes))
+            fail('producer_lock_owner_drift');
+        unlinkSync(path);
+    };
 }
 function guardHuman(r: MacSpeakerCallProducerRequest, ownTransaction?: string) {
     const lock = join(dirname(r.sidecarPath), `.${r.captureId}.speaker-call.lock`);
@@ -181,6 +235,22 @@ function guardHuman(r: MacSpeakerCallProducerRequest, ownTransaction?: string) {
     const j = bounded(r.humanJournalPath, 1024 * 1024, true);
     if (j && JSON.parse(j.toString()).phase !== 'complete')
         fail('human_transaction_pending');
+}
+function recoverDeadSeedLock(r:MacSpeakerCallProducerRequest,seedPath:string):void{
+    const path=join(dirname(r.sidecarPath),`.${r.captureId}.speaker-call.lock`),bytes=bounded(path,4096,true);
+    if(!bytes)return;
+    let value:any;try{value=JSON.parse(bytes.toString())}catch{fail('capture_locked')}
+    if(value.kind!=='producer_seed')fail('capture_locked');
+    if(value.version!==1||value.captureId!==r.captureId||value.policySHA256!==r.policySHA256||value.seedPath!==seedPath||!SHA.test(value.sourceSHA256)||value.seedSHA256!==value.sourceSHA256||value.ledgerSHA256!==null&&!SHA.test(value.ledgerSHA256)||!Number.isSafeInteger(value.pid)||value.pid<=0||typeof value.token!=='string'||!/^[a-f0-9-]{36}$/.test(value.token))fail('producer_seed_lock_foreign');
+    try{process.kill(value.pid,0);fail('producer_seed_lock_alive')}catch(error){if((error as NodeJS.ErrnoException).code!=='ESRCH')throw error}
+    const current=pin(r.sidecarPath,32*1024*1024),ledger=pin(r.ledgerPath,8*1024*1024,true),seed=pin(seedPath,32*1024*1024,true);
+    if(current.sha256!==value.sourceSHA256||ledger.sha256!==value.ledgerSHA256||seed.sha256!==null&&seed.sha256!==value.seedSHA256)fail('producer_seed_lock_source_drift');
+    // Never remove a human transaction/annotation or a foreign/live lock.
+    // The normal seed gate below rechecks human history before resuming.
+    readMacSpeakerCallPolicy(r);checkPins([current,ledger,seed]);
+    if(hash(bounded(path,4096)!)!==hash(bytes))fail('producer_seed_lock_drift');
+    unlinkSync(path);
+    const fd=openSync(dirname(path),constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW|constants.O_NONBLOCK);try{fsyncSync(fd)}finally{closeSync(fd)}
 }
 function human(value: unknown): boolean { return !!value && typeof value === 'object' && (isMacSpeakerHumanProtected(value) || Object.values(value).some(v => human(v))); }
 /** This is an independently supplied admission decision, NOT a self-hash grant. */
@@ -216,8 +286,8 @@ export function freezeMacSpeakerCallSeed(r: MacSpeakerCallProducerRequest): {
     generation: string;
 } {
     readMacSpeakerCallPolicy(r);
-    guardHuman(r);
     const dir = captureDir(r), seedPath = join(dir, 'original.json'), metaPath = join(dir, 'seed.json');
+    recoverDeadSeedLock(r,seedPath);guardHuman(r);
     if (existsSync(metaPath)) {
         const meta = JSON.parse(bounded(metaPath, 4096)!.toString());
         if (meta.captureId !== r.captureId || hash(bounded(seedPath, 32 * 1024 * 1024)!) !== meta.originalSHA256 || typeof meta.generation !== 'string')
@@ -232,8 +302,8 @@ export function freezeMacSpeakerCallSeed(r: MacSpeakerCallProducerRequest): {
     const orphanSeed = bounded(seedPath, 32 * 1024 * 1024, true);
     if (orphanSeed && (hash(orphanSeed) !== hash(source) || existsSync(join(dir, 'cursor.json')) || existsSync(r.sidecarPath.replace(/\.g2-chunks\.json$/, '.speaker-call-state.json'))))
         fail('orphan_seed_requires_recovery');
-    const lock = join(dirname(r.sidecarPath), `.${r.captureId}.speaker-call.lock`), token = JSON.stringify({ pid: process.pid, token: randomUUID(), kind: 'producer_seed' });
     const sourcePin = pin(r.sidecarPath, 32 * 1024 * 1024), ledgerPin = pin(r.ledgerPath, 8 * 1024 * 1024, true);
+    const lock = join(dirname(r.sidecarPath), `.${r.captureId}.speaker-call.lock`), token = JSON.stringify({version:1,pid:process.pid,token:randomUUID(),kind:'producer_seed',captureId:r.captureId,policySHA256:r.policySHA256,sourceSHA256:hash(source),ledgerSHA256:ledgerPin.sha256,seedPath,seedSHA256:hash(source)});
     put(lock, token);
     try {
         checkPins([sourcePin, ledgerPin]);
@@ -250,6 +320,34 @@ export function freezeMacSpeakerCallSeed(r: MacSpeakerCallProducerRequest): {
             fail('seed_lock_drift');
         unlinkSync(lock);
     }
+}
+/** Hash the exact native input geometry without allocating a second whole-call
+ * buffer. Gap zeros and trimmed source tails follow buildShadowTimeline. The
+ * caller must supply only bytes joined to the immutable raw/PCM pins. */
+export function verifyMacSpeakerCallTimelinePCM(timeline: NativeContext['timeline'], readRaw: (index: number) => Buffer): void {
+    if (!Array.isArray(timeline.rows) || !timeline.rows.length || timeline.rows.length > 6000 || !Number.isSafeInteger(timeline.total) || timeline.total <= 0 || timeline.total > 4 * 3600 * 16000 || !SHA.test(timeline.pcmSHA256))
+        fail('timeline_schema');
+    const digest = createHash('sha256'), zeros = Buffer.alloc(65536), seen = new Set<number>();
+    let offset = 0;
+    const gap = (samples: number) => { let bytes = samples * 2; while (bytes > 0) {
+        const n = Math.min(bytes, zeros.length);
+        digest.update(zeros.subarray(0, n));
+        bytes -= n;
+    } };
+    for (const row of timeline.rows) {
+        if (!Number.isSafeInteger(row.rawChunkIndex) || row.rawChunkIndex < 0 || seen.has(row.rawChunkIndex) || !Number.isSafeInteger(row.startSample) || row.startSample < offset || !Number.isSafeInteger(row.sampleCount) || row.sampleCount <= 0 || row.sampleCount > 480000 || !Number.isSafeInteger(row.usedSampleCount) || row.usedSampleCount <= 0 || row.usedSampleCount > row.sampleCount || row.startSample + row.usedSampleCount > timeline.total)
+            fail('timeline_geometry');
+        seen.add(row.rawChunkIndex);
+        gap(row.startSample - offset);
+        const pcm = readRaw(row.rawChunkIndex);
+        if (pcm.length !== row.sampleCount * 2)
+            fail('timeline_raw_samples');
+        digest.update(pcm.subarray(0, row.usedSampleCount * 2));
+        offset = row.startSample + row.usedSampleCount;
+    }
+    gap(timeline.total - offset);
+    if (digest.digest('hex') !== timeline.pcmSHA256)
+        fail('timeline_pcm_drift');
 }
 /** Before the shared shadow native run. Raw/model/tool stamps remain immutable
  * through child close; ABA replacement also invalidates this attempt. */
@@ -273,9 +371,26 @@ export function beginMacSpeakerCallNative(r: MacSpeakerCallProducerRequest, inpu
         fail('cli_drift');
     const rawAudio = shadowEntries(JSON.parse(input.sourceJSON)).map(e => { const path = realpathSync(join(input.audioDir, `chunk_${String(e.chunkIndex).padStart(4, '0')}.wav`)), b = bounded(path, 1024 * 1024)!, pcm = readPcm16Wav(b); pins.push(pin(path, 1024 * 1024)); return { rawChunkIndex: e.chunkIndex, wavSHA256: hash(b), pcmSHA256: hash(pcm.pcm), sampleCount: pcm.sampleCount }; });
     const rawManifest = { version: 1, captureId: r.captureId, rows: rawAudio.map((a, i) => ({ ...a, path: pins[i + 3].path, wavSHA256: a.wavSHA256 })) };
+    if (input.timeline.rows.length !== rawAudio.length)
+        fail('timeline_raw_inventory');
+    const rawByIndex = new Map(rawManifest.rows.map(row => [row.rawChunkIndex, row]));
+    verifyMacSpeakerCallTimelinePCM(input.timeline, index => {
+        const row = rawByIndex.get(index);
+        if (!row)
+            fail('timeline_raw_inventory');
+        const bytes = bounded(row!.path, 1024 * 1024)!, pcm = readPcm16Wav(bytes);
+        if (hash(bytes) !== row!.wavSHA256 || hash(pcm.pcm) !== row!.pcmSHA256 || pcm.sampleCount !== row!.sampleCount)
+            fail('timeline_raw_drift');
+        return pcm.pcm;
+    });
     const modelRows = [{ path: SHADOW_REVISION_MARKER.path, sha256: SHADOW_REVISION_MARKER.sha256 }, ...SHADOW_MODEL_FILES];
-    const modelManifest = { version: 1, modelSHA256: policy.modelSHA256, files: modelRows.map(m => { const p = pin(realpathSync(join(input.modelsDir, m.path)), 1024 * 1024 * 1024); if (p.sha256 !== m.sha256)
-            fail('model_drift'); pins.push(p); return { path: p.path, sha256: p.sha256 }; }) };
+    const modelManifest = { version: 1, modelSHA256: policy.modelSHA256, files: modelRows.map(m => {
+            const p = pin(realpathSync(join(input.modelsDir, m.path)), 1024 * 1024 * 1024);
+            if (p.sha256 !== m.sha256)
+                fail('model_drift');
+            pins.push(p);
+            return { path: p.path, sha256: p.sha256 };
+        }) };
     pins.push(pin(seed.seedPath, 32 * 1024 * 1024), pin(join(dirname(seed.seedPath), 'seed.json'), 4096));
     const ledgerJSONL = bounded(r.ledgerPath, 8 * 1024 * 1024, true)?.toString() ?? '';
     if (hash(ledgerJSONL) !== (pins[1].sha256 ?? hash('')))
@@ -362,8 +477,12 @@ function publishUnlocked(ref: MacSpeakerCallNativeRef, target?: MacSpeakerCallPr
         const intentBytes = bounded(join(pending.directory, 'intent.json'), 4 * 1024 * 1024)!, intent = JSON.parse(intentBytes.toString());
         if (hash(intentBytes) !== pending.intentSHA256 || intent.captureId !== r.captureId || intent.directory !== pending.directory || intent.root !== join(dir, 'transactions') || intent.images?.length !== 2 || intent.images[0].path !== pending.packetPath || intent.images[1].path !== pending.statePath || intent.images[0].afterSHA256 !== pending.publication.packetSHA256 || intent.images[1].afterSHA256 !== pending.publication.stateFileSHA256)
             fail('pending_intent_drift');
-        const fence = () => { readMacSpeakerCallPolicy(r); guardHuman(r, pending.directory); if (hash(bounded(pendingPath, 16384)!) !== hash(pendingBytes) || hash(bounded(cursorPath, 32768)!) !== pending.cursorSHA256 || hash(bounded(join(pending.directory, 'intent.json'), 4 * 1024 * 1024)!) !== pending.intentSHA256)
-            fail('pending_publication_drift'); };
+        const fence = () => {
+            readMacSpeakerCallPolicy(r);
+            guardHuman(r, pending.directory);
+            if (hash(bounded(pendingPath, 16384)!) !== hash(pendingBytes) || hash(bounded(cursorPath, 32768)!) !== pending.cursorSHA256 || hash(bounded(join(pending.directory, 'intent.json'), 4 * 1024 * 1024)!) !== pending.intentSHA256)
+                fail('pending_publication_drift');
+        };
         executeMacSpeakerCallPublication(pending.directory, 'apply', { resume: true, beforeWrite: fence });
         fence();
         if (hash(bounded(pending.packetPath, 16 * 1024 * 1024)!) !== pending.publication.packetSHA256 || hash(bounded(pending.statePath, 16 * 1024 * 1024)!) !== pending.publication.stateFileSHA256)
@@ -440,8 +559,12 @@ function publishUnlocked(ref: MacSpeakerCallNativeRef, target?: MacSpeakerCallPr
     put(join(candidate, 'transaction.json'), JSON.stringify({ directory: transaction }) + '\n');
     put(pendingPath, JSON.stringify({ captureId: r.captureId, policySHA256: r.policySHA256, nativeRefSHA256: ref.sha256, directory: transaction, intentSHA256: hash(bounded(join(transaction, 'intent.json'), 4 * 1024 * 1024)!), cursorSHA256: hash(bounded(cursorPath, 32768)!), sidecarPath: r.sidecarPath, packetPath, statePath, publication: { packetSHA256: hash(packetJSON), stateFileSHA256: hash(stateJSON) } }) + '\n');
     const pending = bounded(pendingPath, 16384)!, cursorHash = hash(bounded(cursorPath, 32768)!);
-    const fence = () => { readMacSpeakerCallPolicy(r); guardHuman(r, transaction); if (hash(bounded(pendingPath, 16384)!) !== hash(pending) || hash(bounded(cursorPath, 32768)!) !== cursorHash)
-        fail('publication_cursor_drift'); };
+    const fence = () => {
+        readMacSpeakerCallPolicy(r);
+        guardHuman(r, transaction);
+        if (hash(bounded(pendingPath, 16384)!) !== hash(pending) || hash(bounded(cursorPath, 32768)!) !== cursorHash)
+            fail('publication_cursor_drift');
+    };
     executeMacSpeakerCallPublication(transaction, 'apply', { beforeWrite: fence });
     fence();
     nextCursor.publications[r.sidecarPath] = { packetSHA256: hash(packetJSON), stateFileSHA256: hash(stateJSON) };
@@ -450,22 +573,42 @@ function publishUnlocked(ref: MacSpeakerCallNativeRef, target?: MacSpeakerCallPr
     return { status: 'applied', directory: transaction, packetPath, statePath };
 }
 async function main() {
+    const parentPid = process.ppid, started = Date.now();
+    let deadline = started + 10000;
+    operationFence = () => createMacSpeakerCallWorkerFence({ parentPid, deadline })();
+    const watch = setInterval(() => { try {
+        operationFence?.();
+    }
+    catch {
+        process.kill(process.pid, 'SIGKILL');
+    } }, 200);
+    watch.unref();
     let text = '';
-    for await (const b of process.stdin) {
-        text += b.toString();
-        if (Buffer.byteLength(text) > 65536)
-            fail('job_bound');
-    }
     try {
-        const job = JSON.parse(text);
-        const { macSpeakerCallProducerRequestValid } = await import('./mac-speaker-call-producer.js');
-        if (!macSpeakerCallProducerRequestValid(job.request))
-            fail('job_request_invalid');
-        const result = job.action === 'freeze' ? freezeMacSpeakerCallSeed(job.request) : job.action === 'publish' ? publishMacSpeakerCallNative(job.ref, job.request) : fail('unknown_job');
-        process.stdout.write(JSON.stringify({ status: job.action === 'freeze' ? 'frozen' : 'applied', result }) + '\n');
+        for await (const b of process.stdin) {
+            operationFence();
+            text += b.toString();
+            if (Buffer.byteLength(text) > 65536)
+                fail('job_bound');
+        }
+        try {
+            const job = JSON.parse(text);
+            if (job.action === 'publish')
+                deadline = started + 75000;
+            operationFence();
+            const { macSpeakerCallProducerRequestValid } = await import('./mac-speaker-call-producer.js');
+            if (!macSpeakerCallProducerRequestValid(job.request))
+                fail('job_request_invalid');
+            const result = job.action === 'freeze' ? freezeMacSpeakerCallSeed(job.request) : job.action === 'publish' ? publishMacSpeakerCallNative(job.ref, job.request) : fail('unknown_job');
+            process.stdout.write(JSON.stringify({ status: job.action === 'freeze' ? 'frozen' : 'applied', result }) + '\n');
+        }
+        catch (e) {
+            process.stdout.write(JSON.stringify({ status: 'withheld', reason: e instanceof Error ? e.message.slice(0, 200) : 'worker_failure' }) + '\n');
+        }
     }
-    catch (e) {
-        process.stdout.write(JSON.stringify({ status: 'withheld', reason: e instanceof Error ? e.message.slice(0, 200) : 'worker_failure' }) + '\n');
+    finally {
+        clearInterval(watch);
+        operationFence = null;
     }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))

@@ -356,7 +356,7 @@ type Supervised = ShadowJobOutcome | { status: 'deferred'; reason: string } | { 
 
 export class SpeakerShadowRunner {
   private readonly deps: SpeakerShadowDeps
-  private running: { sessionId: string; pgid: number | null } | null = null
+  private running: { sessionId: string; pgid: number | null;producerRequest?:MacSpeakerCallProducerRequest } | null = null
   private pumping = false
   private timer: { unref?: () => void } | null = null
   private deferredReason: string | null = null
@@ -371,6 +371,14 @@ export class SpeakerShadowRunner {
   nativeRunning():boolean{return this.running!==null}
   async notifyConsumerFinalized(request:MacSpeakerCallProducerRequest):Promise<void> {
     if(!macSpeakerCallProducerEnabled(this.deps.env())||!macSpeakerCallProducerRequestValid(request))throw Error('independent_consumer_request_invalid_or_disabled')
+    if(this.running?.sessionId===request.captureId){
+      const admitted=this.running.producerRequest
+      if(!admitted)throw Object.assign(Error('native_active_without_prenative_provenance'),{code:'MAC_CALL_NATIVE_PENDING'})
+      if(admitted.policySHA256!==request.policySHA256||admitted.root!==request.root)throw Object.assign(Error('native_running_other_policy'),{code:'MAC_CALL_NATIVE_UNAVAILABLE'})
+      // seedReady already durably registered this exact copy. The one
+      // admitted execution will fan out only fresh per-copy CAS publications.
+      return
+    }
     await this.enqueue({sessionId:request.captureId,sidecarPath:request.sidecarPath},request)
   }
 
@@ -419,7 +427,7 @@ export class SpeakerShadowRunner {
     try { labelsHash = shadowLabelsHash(shadowEntries(JSON.parse(await readFile(input.sidecarPath, 'utf8')))) } catch { /* the worker reports the sidecar */ }
     // Read, change and write with no await in between: the pump also rewrites this file.
     const state = this.readState()
-    if (state.done.includes(input.sessionId)) {if(producerRequest)throw Error('native_already_completed_without_retained_export');return}
+    if (state.done.includes(input.sessionId)) {if(producerRequest)throw Object.assign(Error('native_already_completed_without_retained_export'),{code:'MAC_CALL_NATIVE_UNAVAILABLE'});return}
     const existing=state.queue.find(q=>q.sessionId===input.sessionId)
     if(existing){if(producerRequest){existing.producerRequest=producerRequest;this.writeState(state)}return}
     state.queue.push({ sessionId: input.sessionId, sidecarPath: input.sidecarPath, labelsHash, enqueuedAt: this.deps.now(),...(producerRequest?{producerRequest}:{}) })
@@ -589,7 +597,7 @@ export class SpeakerShadowRunner {
         return
       }
       const pgid = child.pid ?? null
-      this.running = { sessionId: job.sessionId, pgid }
+      this.running = { sessionId: job.sessionId, pgid,...(job.callProducer?{producerRequest:job.callProducer}:{}) }
       this.installExitHook()
       if (pgid) { try { setPriority(pgid, 10) } catch { /* runs at normal priority */ } }
       const started = this.deps.now()

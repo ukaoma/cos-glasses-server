@@ -2,7 +2,7 @@
  * reports remain log-only; this queue alone may ask the reviewed store to
  * publish anonymous derived views. No model download, name or enrollment API. */
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, lstatSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -44,6 +44,7 @@ export interface MacSpeakerCallProducerDeps {
     spawn: () => ChildProcess;
     now: () => number;
     kill: (pid: number) => void;
+    parentExit: (cleanup: () => void) => () => void;
 }
 function command(path: string, args: string[]): Promise<string> { return new Promise((ok, bad) => execFile(path, args, { timeout: 1500, maxBuffer: 1024 * 1024 }, (e, s) => e ? bad(e) : ok(s))); }
 export async function sampleMacSpeakerCallResources(pid?: number): Promise<MacSpeakerCallResources | null> {
@@ -68,11 +69,14 @@ export async function runMacSpeakerCallProducerChild(job: MacSpeakerCallProducer
     reason?: string;
     result?: unknown;
 }> {
-    const deps: MacSpeakerCallProducerDeps = { enabled: macSpeakerCallProducerEnabled, admit: maintenanceAdmissionsOpen, resources: sampleMacSpeakerCallResources, spawn: spawnWorker, now: Date.now, kill: pid => { try {
-            process.kill(-pid, 'SIGKILL');
-        }
-        catch { } }, ...overrides };
+    const deps: MacSpeakerCallProducerDeps = { enabled: macSpeakerCallProducerEnabled, admit: maintenanceAdmissionsOpen, resources: sampleMacSpeakerCallResources, spawn: spawnWorker, now: Date.now, parentExit: cleanup => { process.once('exit', cleanup); return () => { process.off('exit', cleanup); }; }, kill: pid => {
+            try {
+                process.kill(-pid, 'SIGKILL');
+            }
+            catch { }
+        }, ...overrides };
     let input: string;
+    let unlisten = () => { };
     try {
         input = JSON.stringify(job);
         if (Buffer.byteLength(input) > 65536)
@@ -104,8 +108,12 @@ export async function runMacSpeakerCallProducerChild(job: MacSpeakerCallProducer
                 return resolve({ status: 'withheld', reason: 'worker_spawn_failed' });
             }
             let output = '', verdict: string | null = null, exited = false, sampling = false;
-            const stop = (reason: string) => { verdict ??= reason; if (child.pid)
-                deps.kill(child.pid); };
+            const stop = (reason: string) => {
+                verdict ??= reason;
+                if (child.pid)
+                    deps.kill(child.pid);
+            };
+            unlisten = deps.parentExit(() => stop('parent_exit'));
             const tick = setInterval(() => {
                 if (deps.now() > deadline) {
                     stop('worker_deadline');
@@ -118,22 +126,33 @@ export async function runMacSpeakerCallProducerChild(job: MacSpeakerCallProducer
                 if (sampling || !child.pid)
                     return;
                 sampling = true;
-                void deps.resources(child.pid).catch(() => null).then(r => { sampling = false; if (exited)
-                    return; if (!r || !Number.isFinite(r.availableBytes) || !Number.isFinite(r.swapBytes) || !Number.isFinite(r.rssBytes) || r.availableBytes < 8 * GIB || r.swapBytes - initial.swapBytes > 256 * 1024 ** 2 || (r.rssBytes ?? Infinity) > 3 * GIB)
-                    stop('resource_reserve'); });
+                void deps.resources(child.pid).catch(() => null).then(r => {
+                    sampling = false;
+                    if (exited)
+                        return;
+                    if (!r || !Number.isFinite(r.availableBytes) || !Number.isFinite(r.swapBytes) || !Number.isFinite(r.rssBytes) || r.availableBytes < 8 * GIB || r.swapBytes - initial.swapBytes > 256 * 1024 ** 2 || (r.rssBytes ?? Infinity) > 3 * GIB)
+                        stop('resource_reserve');
+                });
             }, 250);
             tick.unref();
-            child.stdout?.on('data', (b: Buffer) => { if (verdict)
-                return; output += b.toString(); if (Buffer.byteLength(output) > 1024 * 1024) {
-                output = output.slice(0, 1024 * 1024);
-                stop('worker_output_bound');
-            } });
+            child.stdout?.on('data', (b: Buffer) => {
+                if (verdict)
+                    return;
+                output += b.toString();
+                if (Buffer.byteLength(output) > 1024 * 1024) {
+                    output = output.slice(0, 1024 * 1024);
+                    stop('worker_output_bound');
+                }
+            });
             child.stderr?.on('data', () => { });
-            child.on('error', () => { stop('worker_error'); if (!child.pid) {
-                exited = true;
-                clearInterval(tick);
-                resolve({ status: 'withheld', reason: verdict! });
-            } });
+            child.on('error', () => {
+                stop('worker_error');
+                if (!child.pid) {
+                    exited = true;
+                    clearInterval(tick);
+                    resolve({ status: 'withheld', reason: verdict! });
+                }
+            });
             child.on('close', code => {
                 if (exited)
                     return;
@@ -161,11 +180,12 @@ export async function runMacSpeakerCallProducerChild(job: MacSpeakerCallProducer
         });
     }
     finally {
+        unlisten();
         childOwned = false;
         lease.release();
     }
 }
-type Queued = {
+type Queued = ({
     action: 'freeze';
     request: MacSpeakerCallProducerRequest;
     freezeOnly: boolean;
@@ -176,11 +196,14 @@ type Queued = {
     request: MacSpeakerCallProducerRequest;
     ref: MacSpeakerCallNativeRef;
     enqueuedAt: number;
+}) & {
+    jobId: string;
 };
 export class MacSpeakerCallProducer {
     private queue: Queued[] = [];
     private running = false;
     private blockedQueue = false;
+    private queueSHA256: string | null = null;
     private timer: ReturnType<typeof setTimeout> | null = null;
     constructor(private options: {
         root: string;
@@ -190,25 +213,120 @@ export class MacSpeakerCallProducer {
         run?: (job: MacSpeakerCallProducerJob) => ReturnType<typeof runMacSpeakerCallProducerChild>;
     }) { }
     private queuePath() { return join(this.options.root, 'producer-queue.json'); }
-    private write() { if (this.blockedQueue)
-        throw Error('producer_queue_quarantined'); durableAtomicWriteFileSync(this.queuePath(), JSON.stringify({ version: 1, queue: this.queue }) + '\n'); }
+    private write() {
+        try {
+            if (this.blockedQueue)
+                throw Error('producer_queue_quarantined');
+            const path = this.queuePath();
+            if (existsSync(path) && (lstatSync(path).isSymbolicLink() || lstatSync(path).size > 4 * 1024 * 1024))
+                throw Error('producer_queue_path');
+            const actual = existsSync(path) ? sha(readFileSync(path)) : null;
+            if (actual !== this.queueSHA256) {
+                this.blockedQueue = true;
+                throw Error('producer_queue_cas');
+            }
+            const bytes = JSON.stringify({ version: 1, queue: this.queue }) + '\n', expected = sha(bytes);
+            durableAtomicWriteFileSync(path, bytes);
+            if (sha(readFileSync(path)) !== expected) {
+                this.blockedQueue = true;
+                throw Error('producer_queue_readback_drift');
+            }
+            this.queueSHA256 = expected;
+        }
+        catch (error) {
+            this.blockedQueue = true;
+            throw error;
+        }
+    }
+    private remove(jobId: string): boolean {
+        if (!this.queue.some(q => q.jobId === jobId))
+            return false;
+        this.queue = this.queue.filter(q => q.jobId !== jobId);
+        this.write();
+        return true;
+    }
+    private async finishFreeze(q: Extract<Queued, {
+        action: 'freeze';
+    }>, result: {
+        status: string;
+        reason?: string;
+    }) {
+        if (!this.queue.some(current => current.jobId === q.jobId))
+            return;
+        if (result.status === 'deferred') {
+            this.schedule();
+            return;
+        }
+        if (result.status !== 'frozen') {
+            this.remove(q.jobId);
+            this.status(q.request.captureId, result.reason ?? 'seed_withheld');
+            return;
+        }
+        try {
+            // Keep the durable token until target registration AND the shared
+            // native notification have completed. Crash/restart repeats safely.
+            await this.seedReady(q.request, q.freezeOnly);
+            this.remove(q.jobId);
+        }
+        catch(error) {
+            const i = this.queue.findIndex(current => current.jobId === q.jobId);
+            if (i < 0)
+                return; // A newer refresh superseded this exact job.
+            if((error as NodeJS.ErrnoException)?.code==='MAC_CALL_NATIVE_PENDING'){
+                this.status(q.request.captureId,'native_active_without_prenative_provenance');this.schedule();return;
+            }
+            if((error as NodeJS.ErrnoException)?.code==='MAC_CALL_NATIVE_UNAVAILABLE'){
+                this.remove(q.jobId);this.status(q.request.captureId,error instanceof Error?error.message:'native_provenance_unavailable');return;
+            }
+            if (q.attempts < 2) {
+                this.queue[i] = { ...q, jobId: randomUUID(), attempts: q.attempts + 1 };
+                this.write();
+                this.schedule();
+            }
+            else {
+                this.remove(q.jobId);
+                this.status(q.request.captureId, 'native_request_failed');
+            }
+        }
+    }
     private path(path: unknown) { return typeof path === 'string' && path.length <= 4096 && resolve(path) === path && realpathSync(dirname(path)) === dirname(path) && (!existsSync(path) || !lstatSync(path).isSymbolicLink()); }
     private validRequest(r: MacSpeakerCallProducerRequest) { return macSpeakerCallProducerRequestValid(r, this.options.root); }
     private validRef(ref: MacSpeakerCallNativeRef) { return ref && /^mac_[A-Za-z0-9_-]{1,100}$/.test(ref.captureId) && /^[a-f0-9]{64}$/.test(ref.sha256) && typeof ref.path === 'string' && ref.path.startsWith(join(this.options.root, ref.captureId, 'native-')) && /^native-[a-f0-9-]{36}$/.test(dirname(ref.path).split('/').at(-1) ?? '') && ref.path.endsWith('/receipt.json') && this.path(ref.path); }
-    private targets(captureId: string): MacSpeakerCallProducerRequest[] { const path = join(this.options.root, captureId, 'targets.json'); if (!existsSync(path))
-        return []; if (lstatSync(path).size > 65536)
-        throw Error('producer_targets_bound'); const v = JSON.parse(readFileSync(path, 'utf8')); if (!Array.isArray(v) || v.length > 8 || new Set(v.map(r => r.sidecarPath)).size !== v.length || v.some(r => !this.validRequest(r) || r.captureId !== captureId))
-        throw Error('producer_targets_invalid'); return v; }
-    private status(id: string, reason: string) { try {
-        if (!/^mac_[A-Za-z0-9_-]{1,100}$/.test(id))
-            return;
-        const dir = join(this.options.root, id);
-        if (existsSync(dir))
-            durableAtomicWriteFileSync(join(dir, 'producer-status.json'), JSON.stringify({ status: 'withheld', reason }) + '\n');
+    private targets(captureId: string): MacSpeakerCallProducerRequest[] {
+        const path = join(this.options.root, captureId, 'targets.json');
+        if (!existsSync(path))
+            return [];
+        if (lstatSync(path).size > 65536)
+            throw Error('producer_targets_bound');
+        const v = JSON.parse(readFileSync(path, 'utf8'));
+        if (!Array.isArray(v) || v.length > 8 || new Set(v.map(r => r.sidecarPath)).size !== v.length || v.some(r => !this.validRequest(r) || r.captureId !== captureId))
+            throw Error('producer_targets_invalid');
+        return v;
     }
-    catch { /* A diagnostic failure cannot fail a saved meeting or notification. */ } }
-    private retry(request: MacSpeakerCallProducerRequest, freezeOnly: boolean, attempts = 0) { this.queue = this.queue.filter(q => q.action !== 'freeze' || q.request.sidecarPath !== request.sidecarPath); this.queue.push({ action: 'freeze', request, freezeOnly, attempts, enqueuedAt: Date.now() }); if (this.queue.length > 200)
-        throw Error('producer_queue_bound'); this.write(); this.schedule(); }
+    private status(id: string, reason: string) {
+        try {
+            if (!/^mac_[A-Za-z0-9_-]{1,100}$/.test(id))
+                return;
+            const dir = join(this.options.root, id);
+            if (existsSync(dir))
+                durableAtomicWriteFileSync(join(dir, 'producer-status.json'), JSON.stringify({ status: 'withheld', reason }) + '\n');
+        }
+        catch { /* A diagnostic failure cannot fail a saved meeting or notification. */ }
+    }
+    private retry(request: MacSpeakerCallProducerRequest, freezeOnly: boolean): Extract<Queued, {
+        action: 'freeze';
+    }> {
+        const job: Extract<Queued, {
+            action: 'freeze';
+        }> = { jobId: randomUUID(), action: 'freeze', request, freezeOnly, attempts: 0, enqueuedAt: Date.now() };
+        this.queue = this.queue.filter(q => q.action !== 'freeze' || q.request.sidecarPath !== request.sidecarPath);
+        this.queue.push(job);
+        if (this.queue.length > 200)
+            throw Error('producer_queue_bound');
+        this.write();
+        this.schedule();
+        return job;
+    }
     busy() { return this.running || childOwned; }
     async refreshAvailability(captureId: string, sidecarPath: string): Promise<{
         available: boolean;
@@ -237,19 +355,24 @@ export class MacSpeakerCallProducer {
             return { available: false, reason: 'cached_refresh_unavailable' };
         }
     }
-    resume() { if (!this.options.enabled() || !existsSync(this.queuePath()))
-        return; try {
-        if (lstatSync(this.queuePath()).size > 4 * 1024 * 1024)
-            throw Error();
-        const p = JSON.parse(readFileSync(this.queuePath(), 'utf8'));
-        if (p.version !== 1 || !Array.isArray(p.queue) || p.queue.length > 200 || p.queue.some((q: Queued) => !this.validRequest(q.request) || !Number.isSafeInteger(q.enqueuedAt) || q.action === 'freeze' && (!Number.isInteger(q.attempts) || q.attempts < 0 || q.attempts > 3 || typeof q.freezeOnly !== 'boolean') || q.action === 'publish' && (!this.validRef(q.ref) || q.ref.captureId !== q.request.captureId) || !['freeze', 'publish'].includes(q.action)))
-            throw Error();
-        this.queue = p.queue;
-        void this.pump();
+    resume() {
+        if (!this.options.enabled() || !existsSync(this.queuePath()))
+            return;
+        try {
+            if (lstatSync(this.queuePath()).isSymbolicLink() || lstatSync(this.queuePath()).size > 4 * 1024 * 1024)
+                throw Error();
+            const bytes = readFileSync(this.queuePath());
+            const p = JSON.parse(bytes.toString());
+            if (p.version !== 1 || !Array.isArray(p.queue) || p.queue.length > 200 || new Set(p.queue.map((q: Queued) => q.jobId)).size !== p.queue.length || p.queue.some((q: Queued) => !/^[a-f0-9-]{36}$/.test(q.jobId) || !this.validRequest(q.request) || !Number.isSafeInteger(q.enqueuedAt) || q.action === 'freeze' && (!Number.isInteger(q.attempts) || q.attempts < 0 || q.attempts > 3 || typeof q.freezeOnly !== 'boolean') || q.action === 'publish' && (!this.validRef(q.ref) || q.ref.captureId !== q.request.captureId) || !['freeze', 'publish'].includes(q.action)))
+                throw Error();
+            this.queue = p.queue;
+            this.queueSHA256 = sha(bytes);
+            void this.pump();
+        }
+        catch {
+            this.blockedQueue = true; /* Preserve corrupt bytes; never treat them as paths or overwrite them. */
+        }
     }
-    catch {
-        this.blockedQueue = true; /* Preserve corrupt bytes; never treat them as paths or overwrite them. */
-    } }
     async finalized(input: {
         sessionId: string;
         sidecarPath: string;
@@ -267,20 +390,19 @@ export class MacSpeakerCallProducer {
             const request: MacSpeakerCallProducerRequest = { captureId: input.sessionId, sidecarPath: input.sidecarPath, root: this.options.root, ledgerPath: dataPath('meeting-corrections', `${input.sessionId}.jsonl`), policyPath, policySHA256: sha(policy), humanJournalPath: input.sidecarPath.replace(/\.g2-chunks\.json$/, '.speaker-call-human-transaction.json') };
             if (!this.validRequest(request))
                 return;
-            const outcome = await (this.options.run ?? runMacSpeakerCallProducerChild)({ action: 'freeze', request });
-            if (outcome.status === 'deferred') {
-                this.retry(request, !!input.freezeOnly);
+            // Persist FIRST, before a child can freeze the seed or this
+            // notification can be lost in a server crash.
+            const q = this.retry(request, !!input.freezeOnly);
+            if (this.running)
                 return;
-            }
-            if (outcome.status !== 'frozen') {
-                this.status(input.sessionId, outcome.reason ?? 'seed_withheld');
-                return;
-            }
+            this.running = true;
             try {
-                await this.seedReady(request, !!input.freezeOnly);
+                const result = await (this.options.run ?? runMacSpeakerCallProducerChild)({ action: 'freeze', request });
+                await this.finishFreeze(q, result);
             }
-            catch {
-                this.retry(request, !!input.freezeOnly);
+            finally {
+                this.running = false;
+                this.schedule();
             }
         }
         catch {
@@ -318,7 +440,7 @@ export class MacSpeakerCallProducer {
             durableAtomicWriteFileSync(join(dir, 'native-latest.json'), JSON.stringify(ref) + '\n');
             for (const request of targets) {
                 this.queue = this.queue.filter(q => q.request.sidecarPath !== request.sidecarPath);
-                this.queue.push({ action: 'publish', request, ref, enqueuedAt: Date.now() });
+                this.queue.push({ jobId: randomUUID(), action: 'publish', request, ref, enqueuedAt: Date.now() });
             }
             if (this.queue.length > 200)
                 throw Error('producer_queue_bound');
@@ -331,11 +453,14 @@ export class MacSpeakerCallProducer {
             return false;
         }
     }
-    ledgerChanged(captureId: string) { if (!this.options.enabled())
-        return; try {
-        this.nativeExport(JSON.parse(readFileSync(join(this.options.root, captureId, 'native-latest.json'), 'utf8')));
+    ledgerChanged(captureId: string) {
+        if (!this.options.enabled())
+            return;
+        try {
+            this.nativeExport(JSON.parse(readFileSync(join(this.options.root, captureId, 'native-latest.json'), 'utf8')));
+        }
+        catch { /* Never rerun native merely to name/correct. */ }
     }
-    catch { /* Never rerun native merely to name/correct. */ } }
     async pump() {
         if (this.running || this.blockedQueue || !this.options.enabled() || !this.queue.length)
             return;
@@ -349,8 +474,7 @@ export class MacSpeakerCallProducer {
                 const q = this.queue[0];
                 if (Date.now() - q.enqueuedAt > 24 * 60 * 60 * 1000) {
                     this.status(q.request.captureId, 'queue_expired');
-                    this.queue.shift();
-                    this.write();
+                    this.remove(q.jobId);
                     continue;
                 }
                 const result = await (this.options.run ?? (j => runMacSpeakerCallProducerChild(j, { enabled: this.options.enabled, admit: this.options.admit })))(q.action === 'freeze' ? { action: 'freeze', request: q.request } : { action: 'publish', request: q.request, ref: q.ref });
@@ -358,20 +482,17 @@ export class MacSpeakerCallProducer {
                     this.schedule();
                     return;
                 }
-                this.queue.shift();
-                this.write();
-                if (q.action === 'freeze' && result.status === 'frozen')
-                    try {
-                        await this.seedReady(q.request, q.freezeOnly);
-                    }
-                    catch {
-                        if (q.attempts < 2)
-                            this.retry(q.request, q.freezeOnly, q.attempts + 1);
-                        else
-                            this.status(q.request.captureId, 'native_request_failed');
-                    }
-                else if (result.status === 'withheld')
-                    this.status(q.request.captureId, result.reason ?? 'worker_withheld');
+                if (q.action === 'freeze'){
+                    await this.finishFreeze(q, result);
+                    if(this.queue.some(current=>current.jobId===q.jobId))return;
+                }
+                else {
+                    // A notification may replace the head while run() awaits.
+                    // Never dequeue a newer token or another representation.
+                    this.remove(q.jobId);
+                    if (result.status === 'withheld')
+                        this.status(q.request.captureId, result.reason ?? 'worker_withheld');
+                }
                 // Fail closed without an unbounded retry loop. A new finalization,
                 // filing, correction or explicit resume may enqueue fresh valid work.
             }
@@ -383,8 +504,12 @@ export class MacSpeakerCallProducer {
             this.running = false;
         }
     }
-    private schedule() { if (this.timer)
-        return; this.timer = setTimeout(() => { this.timer = null; void this.pump(); }, 10000); this.timer.unref(); }
+    private schedule() {
+        if (this.timer)
+            return;
+        this.timer = setTimeout(() => { this.timer = null; void this.pump(); }, 10000);
+        this.timer.unref();
+    }
 }
 let instance: MacSpeakerCallProducer | null = null;
 let correctionListener = false;
