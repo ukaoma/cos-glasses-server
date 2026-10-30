@@ -1,6 +1,6 @@
 import { runQualifiedMacProfilePass } from '../lib/mac-speaker-profile-finalizer.js'
 import { readMacSpeakerMachineEvidence } from '../lib/mac-speaker-machine-evidence.js'
-import { readMacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
+import { isEffectiveMacSpeakerCallView, readMacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
 import { dataPath } from '../lib/data-dir.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
 import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
@@ -1579,12 +1579,36 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   // Keyed on sessionId so it can reuse the store's traversal-hardened readers
   function reviewRevision(meetingPath: string, sidecarPath: string): string {
     const hash = createHash('sha256')
+    let sidecarJSON: string | null = null
     for (const path of [meetingPath, sidecarPath]) {
       let text: string | null = null
       try { text = readFileSync(path, 'utf-8') } catch { /* missing content is part of the revision */ }
       hash.update(JSON.stringify(text))
+      if (path === sidecarPath) sidecarJSON = text
+    }
+    // Existing clients already round-trip this opaque 64-character revision.
+    // A packet/ledger change that withdraws a view must invalidate its preview,
+    // even when the immutable base files have not changed at all.
+    if (sidecarJSON) {
+      try {
+        const view = readMacSpeakerCallView(sidecarPath, sidecarJSON, meetingPath)
+        if (isEffectiveMacSpeakerCallView(view)) hash.update(JSON.stringify({ packetSHA256: view.metadata.packetSHA256, generation: view.metadata.generation, revision: view.metadata.revision, mode: view.metadata.mode }))
+      } catch { /* Preserve existing unreadable-base handling in each caller. */ }
     }
     return hash.digest('hex')
+  }
+
+  function callViewMutationRefusal(sessionId: string): { status: number; body: Record<string, unknown> } | null {
+    const operations = cosOperationsMeetingsConfigured() ? findCosOperationsMeetingBySessionId(sessionId) : null
+    const direct = operations ? null : findDirectLibraryMeetingBySessionId(sessionId)
+    const saved = operations || direct ? null : store.findBySessionId(sessionId)
+    if (!operations && !direct && !saved) return null
+    const sidecarPath = operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath
+    try {
+      const view = readMacSpeakerCallView(sidecarPath, readFileSync(sidecarPath, 'utf8'), operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath)
+      if (isEffectiveMacSpeakerCallView(view)) return { status: 409, body: { reason: 'derived_call_view_requires_scoped_action', error: 'This consolidated view is read-only. Naming and voice enrollment require an exact reviewed source selection; nothing was changed.', mutable: false } }
+    } catch { /* The existing route reports an unreadable base independently. */ }
+    return null
   }
 
   function selectedReadMatches(requested: unknown, sessionId: string, actual: string): boolean {
@@ -1737,6 +1761,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),
       ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
+      ...(isEffectiveMacSpeakerCallView(callView) ? { mutable: false, mutationBlockedReason: 'derived_call_view_requires_scoped_action' } : {}),
       speakerCallView: callView.metadata,
     })
   })
@@ -1931,6 +1956,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       capturedChars: clip.capturedChars,
       domain: clip.domain,
       ...identity,
+      ...(isEffectiveMacSpeakerCallView(callView) ? { mutable: false, mutationBlockedReason: 'derived_call_view_requires_scoped_action' } : {}),
       reviewIdentityVersion: 1,
       sourceRevision: reviewRevision(operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath, sidecarPath),
       ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),
@@ -1990,7 +2016,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // Enrolment writes to the voice store, so the same two gates as the other
     // corrections: the session must be a capture, and the record aimed at must
     // not be a derived one.
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? sourceRevisionRefusal(sessionId, req.body)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? callViewMutationRefusal(sessionId) ?? sourceRevisionRefusal(sessionId, req.body)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
@@ -2056,7 +2082,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     // A merged G2 session is NOT refused here: it is a real capture with real
     // audio, and relabelling it is how its profile gets better. Only an imported
     // or derived IDENTITY is refused.
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? sourceRevisionRefusal(sessionId, req.body) ?? finalizingRefusal(sessionId)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? callViewMutationRefusal(sessionId) ?? sourceRevisionRefusal(sessionId, req.body) ?? finalizingRefusal(sessionId)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
@@ -2174,7 +2200,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // Other requests ran while the plan yielded. Nothing may have moved: the meeting's bytes, the caller's revision, or a new capture.
       let sidecarAfter: string | null = null
       try { sidecarAfter = readFileSync(sidecarPath, 'utf-8') } catch { sidecarAfter = null }
-      const revisionAfter = sourceRevisionRefusal(sessionId, req.body)
+      const revisionAfter = callViewMutationRefusal(sessionId) ?? sourceRevisionRefusal(sessionId, req.body)
       if (sidecarAfter !== sidecarRaw || revisionAfter) {
         res.status(409).json({ error: 'The meeting changed while the voice was being read. Reopen it and try again; nothing was changed', reason: 'meeting_changed', retryable: true })
         return
@@ -2307,6 +2333,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
+    const viewBeforeWrite = callViewMutationRefusal(sessionId)
+    if (viewBeforeWrite) { res.status(viewBeforeWrite.status).json(viewBeforeWrite.body); return }
     const id = `${sessionId}:${from}>${to}:${Date.now().toString(36)}`
     const at = new Date().toISOString()
     // Intent first. If this cannot be written, nothing is mutated — an
@@ -2411,7 +2439,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? sourceRevisionRefusal(sessionId, req.body)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? callViewMutationRefusal(sessionId) ?? sourceRevisionRefusal(sessionId, req.body)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
@@ -2502,7 +2530,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
-    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? sourceRevisionRefusal(sessionId, req.body) ?? finalizingRefusal(sessionId)
+    const evidenceRefusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? callViewMutationRefusal(sessionId) ?? sourceRevisionRefusal(sessionId, req.body) ?? finalizingRefusal(sessionId)
     if (evidenceRefusal) {
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bindMacSpeakerShadowRepair, type MacShadowRepairSource } from './mac-speaker-shadow-repair.js'
 import { hashMacSpeakerLive, reconcileMacSpeaker256Snapshot, type MacSpeaker256SnapshotInput } from './mac-speaker-live-memory.js'
-import { prepareMacSpeakerCallPacket, readMacSpeakerCallView, renderMacSpeakerCallMarkdown, resolveMacSpeakerCallView, type MacSpeakerCallPacket } from './mac-speaker-call-view.js'
+import { isEffectiveMacSpeakerCallView, prepareMacSpeakerCallPacket, readMacSpeakerCallView, renderMacSpeakerCallMarkdown, resolveMacSpeakerCallView, type MacSpeakerCallPacket } from './mac-speaker-call-view.js'
 import { SYNTHETIC_SPANS, SYNTHETIC_SECONDS, syntheticEmbeddings, syntheticNative } from './__fixtures__/speaker-shadow/synthetic-meeting.js'
 import { dataPath } from './data-dir.js'
 import { hashMacSpeakerDocument, hashMacSpeakerMachineBinding, projectMacSpeakerRepair } from './mac-speaker-repair-projection.js'
@@ -63,6 +63,51 @@ describe('source-bound read-only call view', () => {
     const alias = resolveMacSpeakerCallView(input.currentJSON, '', off, { mode: 'alias-evaluation', allowEvaluation: true })
     expect(alias.metadata.status).toBe('applied')
     expect(alias.doc.chunks.every((c: any) => !c.speaker.startsWith('Unidentified'))).toBe(true)
+    expect(packet.projectionPolicy).toBe('strict')
+    expect(resolveMacSpeakerCallView(input.currentJSON, '', packet, { mode: 'anonymous-estimate' }).metadata.status).toBe('base')
+    const estimated = prepareMacSpeakerCallPacket(input, state, { projectionPolicy: 'anonymous-estimate' })
+    expect(resolveMacSpeakerCallView(input.currentJSON, '', estimated).metadata.reason).toBe('packet-off')
+    estimated.admission = 'qualified'; sealPacket(estimated)
+    const actual = resolveMacSpeakerCallView(input.currentJSON, '', estimated)
+    expect(actual.metadata.mode).toBe('anonymous-estimate')
+    expect(actual.metadata.localization).toBe('inherited-machine-estimate')
+    expect(actual.metadata.speakerPurityVerified).toBe(false)
+    expect(actual.metadata.changedChunks).toBeGreaterThan(0)
+    expect(resolveMacSpeakerCallView(input.currentJSON, '', { ...estimated, projectionPolicy: 'strict' }).metadata.status).toBe('base')
+  })
+  it('anonymous estimate maps existing Voice fields independently of structural Ext while leaving Ext/Unknown/names and token clocks unchanged', () => {
+    const source = sourceFixture(), raw = JSON.parse(source.originalJSON).chunks.findIndex((c: any) => c.speaker === 'Voice 2')
+    for (const key of ['originalJSON', 'currentJSON'] as const) {
+      const d = JSON.parse(source[key])
+      for (const c of [d.chunks[raw], d.chunkEntries[raw].chunk]) c.segments = [{ speaker: 'Ext', startSec: 0, endSec: 1 }, { speaker: c.speaker, startSec: 1, endSec: 6 }]
+      source[key] = JSON.stringify(d)
+    }
+    const { input, state } = prepared(source), packet = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'anonymous-estimate' })
+    expect(packet.protectedRawChunkIndices).toContain(raw)
+    expect(packet.aliasProtectedRawChunkIndices).not.toContain(raw)
+    const view = resolveMacSpeakerCallView(input.currentJSON, '', packet), base = JSON.parse(input.currentJSON)
+    const group = packet.groups.find(g => g.memberVoices.includes('Voice 2'))!, target = packet.displayLabels[group.identityId]
+    expect(target).not.toBe('Voice 2')
+    expect(view.doc.chunks[raw].speaker).toBe(target)
+    expect(view.doc.chunkEntries[raw].chunk.speaker).toBe(target)
+    expect(view.doc.chunks[raw].segments).toEqual([{ speaker: 'Ext', startSec: 0, endSec: 1 }, { speaker: target, startSec: 1, endSec: 6 }])
+    expect(view.doc.chunks[raw].finalSegments[0].speaker).toBe(target)
+    expect(view.doc.chunks[raw].words).toEqual(base.chunks[raw].words)
+    expect(view.doc.batchSegments[0].speakerWords[raw]).toEqual({ ...base.batchSegments[0].speakerWords[raw], speaker: target })
+    for (const [i, c] of base.chunks.entries()) if (['Ext', 'Dana Fictional'].includes((c as any).speaker)) expect(view.doc.chunks[i]).toEqual(c)
+    expect(view.doc.chunks.map((c: any) => [c.text, c.elapsed, c.audioSha256])).toEqual(base.chunks.map((c: any) => [c.text, c.elapsed, c.audioSha256]))
+    const strict = resolveMacSpeakerCallView(input.currentJSON, '', prepareMacSpeakerCallPacket(input, state, { admission: 'qualified' }))
+    expect(strict.doc.chunks[raw]).toEqual(base.chunks[raw])
+  })
+  it('anonymous estimate preserves unmarked root-only human label changes and manually marked nested surfaces', () => {
+    const source = sourceFixture(), base = JSON.parse(source.currentJSON), rows = base.chunks.flatMap((c: any, i: number) => c.speaker === 'Voice 2' ? [i] : [])
+    base.chunks[rows[0]].speaker = 'Voice 77'
+    base.chunkEntries[rows[1]].chunk.finalSegments[0].speakerOrigin = 'manual'
+    source.currentJSON = JSON.stringify(base)
+    const { input, state } = prepared(source), packet = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'anonymous-estimate' })
+    expect(packet.aliasProtectedRawChunkIndices).toEqual(expect.arrayContaining(rows.slice(0, 2)))
+    const view = resolveMacSpeakerCallView(input.currentJSON, '', packet)
+    for (const i of rows.slice(0, 2)) { expect(view.doc.chunks[i]).toEqual(base.chunks[i]); expect(view.doc.chunkEntries[i]).toEqual(base.chunkEntries[i]); expect(view.doc.batchSegments[0].speakerWords[i]).toEqual(base.batchSegments[0].speakerWords[i]) }
   })
   it('uses retained identity ordinals rather than group order for anonymous display labels', () => {
     const { input, packet, state } = prepared()
@@ -97,6 +142,10 @@ describe('source-bound read-only call view', () => {
     expect(view.doc.speakerRepair).toEqual(named.speakerRepair)
     for (const [i, c] of named.chunks.entries()) if (c.speaker === 'Jeremy Example') expect(view.doc.chunks[i]).toEqual(c)
     expect(readMacSpeakerMachineEvidence(JSON.parse(input.currentJSON)).status).toBe('qualified')
+    const estimated = resolveMacSpeakerCallView(input.currentJSON, '', prepareMacSpeakerCallPacket(input, reconcileMacSpeaker256Snapshot(null, input), { admission: 'qualified', projectionPolicy: 'anonymous-estimate' }))
+    expect(estimated.metadata.mode).toBe('anonymous-estimate')
+    for (const [i, c] of named.chunks.entries()) if (c.speaker === 'Jeremy Example') expect(estimated.doc.chunks[i]).toEqual(c)
+    expect(estimated.doc.speakerRepair).toEqual(named.speakerRepair)
     const drift = JSON.parse(input.currentJSON); drift.speakerRepair.machineEvidence.documentBinding = hash('wrong')
     const changed = sourceFixture(); changed.currentJSON = JSON.stringify(drift)
     const invalid = prepared(changed)
@@ -207,7 +256,7 @@ describe('source-bound read-only call view', () => {
     writeFileSync(sidecarPath, input.currentJSON); writeFileSync(filepath, markdown); writeFileSync(join(root, 'record.speaker-call.json'), JSON.stringify(packet))
     const previousOps = process.env.COS_OPERATIONS_DIR, previousMeetings = process.env.COS_MEETINGS_ROOT
     delete process.env.COS_OPERATIONS_DIR; delete process.env.COS_MEETINGS_ROOT
-    const app = express(); app.use('/api', createMeetingRouter({ store: { findBySessionId: () => ({ sidecarPath, filepath, title: 'Call View', domain: 'personal', filename: 'record.md', durationMin: 6 }) } as any }))
+    const app = express(); app.use(express.json()); app.use('/api', createMeetingRouter({ store: { findBySessionId: () => ({ sidecarPath, filepath, title: 'Call View', domain: 'personal', filename: 'record.md', durationMin: 6 }) } as any }))
     const server = app.listen(0, '127.0.0.1'); await new Promise<void>(r => server.once('listening', r))
     try {
       const address = server.address() as { port: number }, origin = `http://127.0.0.1:${address.port}/api/meeting/${base.sessionId}`
@@ -216,6 +265,42 @@ describe('source-bound read-only call view', () => {
       const panel = await panelResponse.json(), content = await contentResponse.json()
       expect(panel.speakerCallView.status).toBe('applied'); expect(content.speakerCallView.packetSHA256).toBe(panel.speakerCallView.packetSHA256)
       expect(JSON.stringify(content)).toContain('source-bound-anonymous-view')
+      expect(panel.mutable).toBe(false); expect(content.mutable).toBe(false)
+      expect(panel.mutationBlockedReason).toBe('derived_call_view_requires_scoped_action')
+      const post = (endpoint: string, body: any) => fetch(`${origin}/${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      for (const [endpoint, body] of [
+        ['relabel', { from: 'Voice 1', to: 'Named Person', dryRun: true }],
+        ['relabel', { from: 'Voice 1', to: 'Named Person', confirm: true }],
+        ['relabel', { from: 'Voice 1', to: 'Named Person', assignVoiceProfile: true, dryRun: true }],
+        ['relabel', { from: 'Voice 1', to: 'Named Person', assignVoiceProfile: true, confirm: true }],
+        ['confirm', { label: 'Voice 1' }],
+        ['deattribute', { from: 'Voice 1', dryRun: true }],
+        ['deattribute', { from: 'Voice 1', confirm: true }],
+        ['backfill-enrolment', { speaker: 'Named Person', dryRun: true }],
+        ['backfill-enrolment', { speaker: 'Named Person', confirm: true }],
+      ] as const) { const response = await post(endpoint, body); expect(response.status, `${endpoint} ${JSON.stringify(body)}`).toBe(409); expect((await response.json()).reason).toBe('derived_call_view_requires_scoped_action') }
+      const packetPath = join(root, 'record.speaker-call.json')
+      const estimated = prepareMacSpeakerCallPacket(input, reconcileMacSpeaker256Snapshot(null, input), { admission: 'qualified', projectionPolicy: 'anonymous-estimate' })
+      writeFileSync(packetPath, JSON.stringify(estimated))
+      const estimatePanel = await (await fetch(`${origin}/speakers`)).json()
+      expect(estimatePanel.mutable).toBe(false); expect(estimatePanel.speakerCallView.mode).toBe('anonymous-estimate')
+      expect(estimatePanel.sourceRevision).not.toBe(panel.sourceRevision)
+      rmSync(packetPath)
+      const absentPanel = await (await fetch(`${origin}/speakers`)).json()
+      expect(absentPanel.mutable).not.toBe(false)
+      expect(absentPanel.sourceRevision).not.toBe(panel.sourceRevision)
+      const stale = await post('relabel', { from: 'Voice 1', to: 'Named Person', dryRun: true, expectedRevision: panel.sourceRevision })
+      expect(stale.status).toBe(409); expect((await stale.json()).reason).toBe('record_source_mismatch')
+      expect((await post('relabel', { from: 'Voice 1', to: 'Named Person', dryRun: true, expectedRevision: absentPanel.sourceRevision })).status).toBe(200)
+      writeFileSync(packetPath, JSON.stringify(sealPacket({ ...packet, admission: 'off' })))
+      const offPanel = await (await fetch(`${origin}/speakers`)).json()
+      expect(offPanel.mutable).not.toBe(false); expect(offPanel.sourceRevision).toBe(absentPanel.sourceRevision)
+      const source = sourceFixture(); source.cohort.nativeJSON = '{"segments":[]}'; source.cohort.embeddingsJSON = '[]'
+      const empty = prepared(source)
+      expect(isEffectiveMacSpeakerCallView(resolveMacSpeakerCallView(empty.input.currentJSON, '', empty.packet))).toBe(false)
+      writeFileSync(packetPath, JSON.stringify(empty.packet))
+      const emptyPanel = await (await fetch(`${origin}/speakers`)).json()
+      expect(emptyPanel.mutable).not.toBe(false); expect(emptyPanel.sourceRevision).toBe(absentPanel.sourceRevision)
       expect(readFileSync(sidecarPath, 'utf8')).toBe(input.currentJSON); expect(readFileSync(filepath, 'utf8')).toBe(markdown)
     } finally { await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); if (previousOps === undefined) delete process.env.COS_OPERATIONS_DIR; else process.env.COS_OPERATIONS_DIR = previousOps; if (previousMeetings === undefined) delete process.env.COS_MEETINGS_ROOT; else process.env.COS_MEETINGS_ROOT = previousMeetings }
   })
