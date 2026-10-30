@@ -135,6 +135,18 @@ export function resolveMacSpeakerCallView(baseJSON: string, ledgerJSONL: string,
     const existingVoiceHints = new Set(base.chunks.map((c: Doc) => c.speaker).filter((label: unknown) => typeof label === 'string' && VOICE.test(label)))
     const byRaw = new Map<number, Array<{ g: MacSpeaker256Group; lo: number; hi: number; voice: string }>>()
     const aliases = new Map(packet.groups.flatMap(g => g.memberVoices.map(v => [v, g] as const)))
+    // Nested/HQ estimates must agree with their immutable source turn. A
+    // different accepted Voice in a mixed turn is not authorized by the root's
+    // aggregate recurrence decision, even if that other Voice has its own group.
+    const sourceGroups = new Map<number, string>()
+    let basePosition = 0
+    for (const e of base.chunkEntries) {
+      if (typeof e.chunk.text !== 'string' || !e.chunk.text.trim()) continue
+      const root = base.chunks[basePosition++]
+      const rawGroup = aliases.get(e.chunk.speaker)?.identityId
+      if (rawGroup && aliases.get(root?.speaker)?.identityId === rawGroup) sourceGroups.set(e.chunkIndex, rawGroup)
+    }
+    const agreesWithSource = (raw: number, voice: unknown): boolean => typeof voice === 'string' && sourceGroups.has(raw) && aliases.get(voice)?.identityId === sourceGroups.get(raw)
     for (const g of packet.groups) for (const s of g.intervals) { const list = byRaw.get(s.rawChunkIndex) ?? []; list.push({ g, lo: s.startSample, hi: s.endSample, voice: s.originalVoice }); byRaw.set(s.rawChunkIndex, list) }
     for (const list of byRaw.values()) list.sort((a, b) => a.lo - b.lo || a.hi - b.hi)
     const labelFor = (raw: number, lo: number, hi: number, voice: unknown): string | null => {
@@ -157,11 +169,16 @@ export function resolveMacSpeakerCallView(baseJSON: string, ledgerJSONL: string,
         if (!root || protectedRaw.has(raw) || hasMacSpeakerProtectedRows(c) || hasMacSpeakerProtectedRows(root)) continue
         let changed = false
         // This policy consolidates an ALREADY automatic Voice estimate. A
-        // structural Ext/Unknown row does not authorize inference or block its
-        // adjacent Voice field. Every field retains its own original meaning.
-        for (const row of [root, c]) for (const nested of [row, ...(row.segments ?? []), ...(row.finalSegments ?? []), ...(row.words ?? [])]) {
-          const to = labelFor(raw, r.startSample, r.endSample, nested.speaker)
-          if (to && to !== nested.speaker) { nested.speaker = to; changed = true }
+        // structural Ext/Unknown field stays unchanged. Nested fields may use
+        // only the source turn's accepted group, never an independent group.
+        for (const row of [root, c]) {
+          for (const nested of [...(row.segments ?? []), ...(row.finalSegments ?? []), ...(row.words ?? [])]) {
+            if (!agreesWithSource(raw, nested.speaker)) continue
+            const to = labelFor(raw, r.startSample, r.endSample, nested.speaker)
+            if (to && to !== nested.speaker) { nested.speaker = to; changed = true }
+          }
+          const to = labelFor(raw, r.startSample, r.endSample, row.speaker)
+          if (to && to !== row.speaker) { row.speaker = to; changed = true }
         }
         if (changed) changedChunks++
         continue
@@ -197,7 +214,7 @@ export function resolveMacSpeakerCallView(baseJSON: string, ledgerJSONL: string,
         while (left < right) { const mid = (left + right) >>> 1; if (clock[mid].hi <= lo) left = mid + 1; else right = mid }
         const parts: typeof clock = []
         for (let i = left; i < clock.length && clock[i].lo < hi; i++) parts.push(clock[i])
-        const targets = parts.map(c => { const r = packet.rawBindings[c.raw]; return labelFor(c.raw, r.startSample + Math.max(0, lo - c.lo), r.startSample + Math.min(c.hi - c.lo, hi - c.lo), w.speaker) })
+        const targets = parts.map(c => { const r = packet.rawBindings[c.raw]; return mode === 'anonymous-estimate' && !agreesWithSource(c.raw, w.speaker) ? null : labelFor(c.raw, r.startSample + Math.max(0, lo - c.lo), r.startSample + Math.min(c.hi - c.lo, hi - c.lo), w.speaker) })
         if (targets.length && targets[0] && targets.every(t => t === targets[0])) { if (w.speaker !== targets[0]) changedWords++; w.speaker = targets[0] }
       }
     }

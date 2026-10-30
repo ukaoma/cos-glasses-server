@@ -109,6 +109,56 @@ describe('source-bound read-only call view', () => {
     const view = resolveMacSpeakerCallView(input.currentJSON, '', packet)
     for (const i of rows.slice(0, 2)) { expect(view.doc.chunks[i]).toEqual(base.chunks[i]); expect(view.doc.chunkEntries[i]).toEqual(base.chunkEntries[i]); expect(view.doc.batchSegments[0].speakerWords[i]).toEqual(base.batchSegments[0].speakerWords[i]) }
   })
+  it('keeps a nested Voice from another group or an unaccepted/Ext root unchanged while consolidating the accepted root', () => {
+    const source = sourceFixture(), original = JSON.parse(source.originalJSON)
+    const raws = ['Voice 10', 'Voice 9', 'Ext'].map(label => original.chunks.findIndex((c: any) => c.speaker === label))
+    const sameGroupRaw = original.chunks.findIndex((c: any) => c.speaker === 'Voice 2')
+    for (const key of ['originalJSON', 'currentJSON'] as const) {
+      const d = JSON.parse(source[key])
+      for (const raw of raws) for (const c of [d.chunks[raw], d.chunkEntries[raw].chunk]) {
+        const endSec = c.audioDurationMs / 1000
+        c.segments = [{ speaker: c.speaker, startSec: 0, endSec: endSec - .25 }, { speaker: 'Voice 2', startSec: endSec - .25, endSec }]
+        c.finalSegments = [{ speaker: 'Voice 2', startSec: 0, endSec }]
+        c.words[0].speaker = 'Voice 2'
+      }
+      // Same-group secondary Voice fields remain eligible; this is not a
+      // blanket ban on mixed structural fields or on nested consolidation.
+      for (const c of [d.chunks[sameGroupRaw], d.chunkEntries[sameGroupRaw].chunk]) c.finalSegments[0].speaker = 'Voice 13'
+      source[key] = JSON.stringify(d)
+    }
+    const { input, state } = prepared(source), packet = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'anonymous-estimate' })
+    const a = packet.groups.find(g => g.memberVoices.includes('Voice 2'))!, b = packet.groups.find(g => g.memberVoices.includes('Voice 10'))!
+    expect(a.identityId).not.toBe(b.identityId)
+    const view = resolveMacSpeakerCallView(input.currentJSON, '', packet), base = JSON.parse(input.currentJSON)
+    for (const raw of raws) for (const [before, after] of [[base.chunks[raw], view.doc.chunks[raw]], [base.chunkEntries[raw].chunk, view.doc.chunkEntries[raw].chunk]]) {
+      expect(after.segments[1]).toEqual(before.segments[1])
+      expect(after.finalSegments).toEqual(before.finalSegments)
+      expect(after.words).toEqual(before.words)
+    }
+    expect(view.doc.chunks[raws[0]].speaker).toBe(packet.displayLabels[b.identityId])
+    expect(view.doc.chunks[raws[0]].speaker).not.toBe('Voice 10')
+    expect(view.doc.chunks[sameGroupRaw].finalSegments[0].speaker).toBe(packet.displayLabels[a.identityId])
+    expect(view.metadata.speakerPurityVerified).toBe(false)
+  })
+  it('requires HQ aliases to agree with every immutable overlapping raw/root group, including cross-boundary words', () => {
+    const source = sourceFixture(), original = JSON.parse(source.originalJSON)
+    const raws = ['Voice 10', 'Voice 9', 'Ext'].map(label => original.chunks.findIndex((c: any) => c.speaker === label))
+    const boundary = original.chunks.find((c: any) => c.speaker === 'Voice 3').elapsed / 1000
+    for (const key of ['originalJSON', 'currentJSON'] as const) {
+      const d = JSON.parse(source[key]), words = d.batchSegments[0].speakerWords
+      for (const raw of raws) words[raw].speaker = 'Voice 2'
+      words.push({ word: 'crossed source groups', speaker: 'Voice 2', start: boundary - .1, end: boundary + .1 })
+      source[key] = JSON.stringify(d)
+    }
+    const { input, state } = prepared(source), packet = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'anonymous-estimate' })
+    const view = resolveMacSpeakerCallView(input.currentJSON, '', packet), before = JSON.parse(input.currentJSON).batchSegments[0].speakerWords, after = view.doc.batchSegments[0].speakerWords
+    expect(view.metadata.changedWords).toBeGreaterThan(0)
+    for (const raw of raws) expect(after[raw]).toEqual(before[raw])
+    expect(after.at(-1)).toEqual(before.at(-1))
+    const same = before.findIndex((w: any) => w.speaker === 'Voice 2' && !raws.includes(before.indexOf(w)))
+    expect(after[same].speaker).not.toBe(before[same].speaker)
+    expect(after.map((w: any) => [w.word, w.start, w.end])).toEqual(before.map((w: any) => [w.word, w.start, w.end]))
+  })
   it('uses retained identity ordinals rather than group order for anonymous display labels', () => {
     const { input, packet, state } = prepared()
     expect(state.groups.length).toBeGreaterThan(1)
