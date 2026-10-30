@@ -573,6 +573,16 @@ export class SpeakerShadowRunner {
           return
         }
         if (outcome.status === 'proposed') {
+          if (producerRequest && !outcome.callProducerExport) {
+            // Native ran once: preserve terminal done/history, never re-infer to
+            // manufacture missing pre-native provenance. Expose the consumer
+            // failure even when legacy shadow logging is disabled.
+            const detail = outcome.callProducerFailure
+              ? `${outcome.callProducerFailure.stage}: ${outcome.callProducerFailure.reason}`
+              : 'admitted native completed without a retained export'
+            await finish('failed', 'consumer_export_failed', detail.slice(0, 300), { facts: outcome.facts, proposals: outcome.proposals, paired: outcome.paired, resources }, outcome.report)
+            continue
+          }
           if(outcome.callProducerExport&&macSpeakerCallProducerEnabled(this.deps.env()))notifyMacSpeakerCallNativeExport(outcome.callProducerExport)
           const f = outcome.facts
           const markdown = `${outcome.report.markdown}\n${renderShadowRunFacts({ rebuildMs: f.timing.rebuildMs, nativeMs: f.timing.nativeMs, wallMs: resources.wallMs, peakRssBytes: resources.peakRssBytes, osTempDirsLeft: f.osTempDirsLeft, sidecarPath: item.sidecarPath, pcmSHA256: f.timelinePCMSHA256, cliTrust: cli.trust })}`

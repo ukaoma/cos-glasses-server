@@ -1,10 +1,10 @@
 // One shadow run, in process, against a fake fluidaudiocli. Importing server modules runs
 // them, so the data dir is a scratch dir set before any import.
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 
 const scratch = mkdtempSync(join(tmpdir(), 'speaker-shadow-worker-'))
 process.env.COS_DATA_DIR = join(scratch, 'data')
@@ -89,6 +89,54 @@ describe('speaker shadow worker: one run', () => {
     const folder = join(t.job.homeDir, 'Library', 'Application Support', 'FluidAudio', 'Models', 'speaker-diarization')
     for (const entry of SHADOW_MODEL_ENTRIES) expect(readlinkSync(join(folder, entry))).toBe(join(t.job.modelsDir, entry))
     expect(readFileSync(join(folder, '.fluidaudio-revision'), 'utf8')).toBe(SHADOW_REVISION_MARKER.content)
+  })
+
+
+  it('retains actual fake-CLI outputs through an explicit noncanonical temp-root alias', async () => {
+    const t = setup('success')
+    const aliasRoot = join(t.root, 'tmp-root-alias')
+    symlinkSync(realpathSync(t.tmpRoot), aliasRoot, 'dir')
+    expect(realpathSync(aliasRoot)).not.toBe(aliasRoot)
+    const bridge = await import('./mac-speaker-call-producer-worker.js')
+    const begin = vi.spyOn(bridge, 'beginMacSpeakerCallNative').mockReturnValue({} as any)
+    const retainedPaths: string[] = []
+    const retain = vi.spyOn(bridge, 'retainMacSpeakerCallNative').mockImplementation((_context, outputs) => {
+      // Exercise the actual strict NOFOLLOW/fd/path reader on the real fake-CLI
+      // files, rather than accepting an in-memory export or loosening its fence.
+      expect(outputs).toMatchObject({ exitCode: 0, closed: true, networkDenied: true })
+      for (const path of [outputs.nativePath, outputs.embeddingPath]) {
+        expect(realpathSync(path)).toBe(path)
+        expect(bridge.readMacSpeakerCallProducerFile(path, (path === outputs.nativePath ? 64 : 96) * 1024 * 1024)!.length).toBeGreaterThan(0)
+        retainedPaths.push(path)
+      }
+      return { captureId: t.job.sessionId, path: '/synthetic-retained/receipt.json', sha256: 'a'.repeat(64) }
+    })
+    try {
+      const outcome = await runShadowJob({ ...t.job, tmpRoot: aliasRoot, callProducer: {} as any, shadowLogRequested: false }, { verifyModels: okModels })
+      expect(outcome.status).toBe('proposed')
+      expect(outcome.status === 'proposed' && outcome.callProducerFailure).toBeUndefined()
+      expect(outcome.status === 'proposed' && outcome.callProducerExport?.captureId).toBe(t.job.sessionId)
+      expect(retainedPaths).toHaveLength(2)
+      expect(t.cliRuns()).toHaveLength(1)
+      for (const path of retainedPaths) expect(existsSync(path)).toBe(false)
+    } finally { begin.mockRestore(); retain.mockRestore() }
+  })
+
+  it('returns the bounded export refusal after one successful native close', async () => {
+    const t = setup('success')
+    const bridge = await import('./mac-speaker-call-producer-worker.js')
+    const begin = vi.spyOn(bridge, 'beginMacSpeakerCallNative').mockReturnValue({} as any)
+    const retain = vi.spyOn(bridge, 'retainMacSpeakerCallNative').mockImplementation(() => { throw Error('PRIVATE retain refusal ' + 'x'.repeat(400)) })
+    try {
+      const outcome = await runShadowJob({ ...t.job, callProducer: {} as any, shadowLogRequested: false }, { verifyModels: okModels })
+      expect(outcome.status).toBe('proposed')
+      if (outcome.status !== 'proposed') return
+      expect(outcome.callProducerExport).toBeUndefined()
+      expect(outcome.callProducerFailure).toMatchObject({ stage: 'retain', reason: expect.stringContaining('PRIVATE retain refusal') })
+      expect(outcome.callProducerFailure!.reason.length).toBe(200)
+      expect(t.cliRuns()).toHaveLength(1)
+      expect(readdirSync(t.tmpRoot)).toEqual([])
+    } finally { begin.mockRestore(); retain.mockRestore() }
   })
 
   it('a crashing CLI is a failure with its stderr tail', async () => {

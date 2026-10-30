@@ -92,7 +92,7 @@ export interface ShadowRunFacts {
 }
 
 export type ShadowJobOutcome =
-  | { status: 'proposed'; facts: ShadowRunFacts; proposals: ShadowProposals; paired?: PairedShadowReport & { pairSessionId?: string; pairSourceSha256?: string; discoveryReason: string }; report: { title: string; markdown: string };callProducerExport?:MacSpeakerCallNativeRef }
+  | { status: 'proposed'; facts: ShadowRunFacts; proposals: ShadowProposals; paired?: PairedShadowReport & { pairSessionId?: string; pairSourceSha256?: string; discoveryReason: string }; report: { title: string; markdown: string };callProducerExport?:MacSpeakerCallNativeRef; callProducerFailure?:{stage:'retain';reason:string} }
   | { status: 'skipped'; reason: ShadowSkipReason; detail: string }
   | { status: 'failed'; reason: ShadowFailReason; detail: string }
 
@@ -187,7 +187,10 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
     const wav = pcm16WavFile(timeline.pcm)
     const rebuildMs = now() - started
 
+    // The platform temp root may spell /private/var as /var. Pin the owned
+    // directory itself; retained-output readers keep their strict canonical path fence.
     work = mkdtempSync(join(job.tmpRoot, SHADOW_TMP_PREFIX))
+    work = realpathSync(work)
     const wavPath = join(work, 'timeline.wav'), nativePath = join(work, 'native.json'), embPath = join(work, 'embeddings.json')
     await writeFile(wavPath, wav, { mode: 0o600, flag: 'wx' })
     const timelineWAVSHA256 = createHash('sha256').update(wav).digest('hex')
@@ -264,8 +267,9 @@ export async function runShadowJob(job: ShadowJob, deps: ShadowWorkerDeps = {}):
     let markdown = renderShadowReport({ title, sessionId: job.sessionId, proposals, facts, audioDir: job.audioDir, chunkText })
     if (paired) markdown += `\n${renderPairedSpeakerShadow(paired)}\nDiscovery: ${paired.discoveryReason}\n`
     let callProducerExport:MacSpeakerCallNativeRef|undefined
-    if(producerContext){try{callProducerExport=retainMacSpeakerCallNative(producerContext,{nativePath,embeddingPath:embPath,exitCode:run.code,closed:run.closed,networkDenied:true})}catch{/* A consumer refusal never turns the shadow logger into a writer. */}}
-    return { status: 'proposed', proposals, paired, facts, report: { title, markdown },...(callProducerExport?{callProducerExport}:{}) }
+    let callProducerFailure:Extract<ShadowJobOutcome,{status:'proposed'}>['callProducerFailure']
+    if(producerContext){try{callProducerExport=retainMacSpeakerCallNative(producerContext,{nativePath,embeddingPath:embPath,exitCode:run.code,closed:run.closed,networkDenied:true})}catch(error){callProducerFailure={stage:'retain',reason:(error instanceof Error?error.message:'native export retention failed').slice(0,200)}}}
+    return { status: 'proposed', proposals, paired, facts, report: { title, markdown },...(callProducerExport?{callProducerExport}:{}),...(callProducerFailure?{callProducerFailure}:{}) }
   } catch (error) {
     if (error instanceof ShadowInputError) return skip(error.reason, error.message)
     return fail('internal', error instanceof Error ? error.message : String(error))
