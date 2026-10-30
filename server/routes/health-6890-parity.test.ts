@@ -10,10 +10,17 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import type { Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildCursorModelCatalog, getCursorModelCatalog } from '../lib/cursor-model-catalog.js'
 import { isPublicApiRequest, requireApiToken } from '../lib/api-auth.js'
 import { __resetServerInstanceIdForTests, initializeServerInstanceId } from '../lib/server-instance-id.js'
 import { healthRouter } from './health.js'
+
+// Discovery is a catalog boundary, not a prerequisite for this HTTP shape test.
+vi.mock('../lib/cursor-model-catalog.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../lib/cursor-model-catalog.js')>()
+  return { ...actual, getCursorModelCatalog: vi.fn() }
+})
 
 const TOKEN = 'golden-capture-token-0123456789abcdef0123'
 const savedToken = process.env.COS_API_TOKEN
@@ -22,6 +29,12 @@ const root = new URL('../../', import.meta.url)
 
 let server: Server | null = null
 let base = ''
+const CURSOR_BINARY = '/test-fixtures/cursor-agent'
+beforeEach(() => {
+  vi.mocked(getCursorModelCatalog).mockResolvedValue(
+    buildCursorModelCatalog([], 'unavailable', '2026-10-30T00:00:00.000Z', CURSOR_BINARY, 'fixture unavailable'),
+  )
+})
 beforeAll(async () => {
   process.env.COS_API_TOKEN = TOKEN
   __resetServerInstanceIdForTests()
@@ -60,14 +73,22 @@ const healthTop6890 = (): string[] => {
 }
 
 describe('6.89.0: /api/models is the 6.87.0 shape exactly', () => {
-  it('top-level keys, capability keys and every path match the 6.87.0 golden', async () => {
+  it.each([true, false])('top-level keys, capability keys and every path match the 6.87.0 golden (Cursor binary present: %s)', async binaryPresent => {
+    vi.mocked(getCursorModelCatalog).mockResolvedValue(
+      buildCursorModelCatalog([], 'unavailable', '2026-10-30T00:00:00.000Z', binaryPresent ? CURSOR_BINARY : undefined, 'fixture unavailable'),
+    )
     const body = await models()
     expect(Object.keys(body)).toEqual(GOLDEN_MODELS_TOP)
     expect(Object.keys(body.capabilities)).toEqual(GOLDEN_MODELS_CAPS)
+    // CursorModelCatalog.agentBinary is optional when discovery finds no executable.
+    // Assert both cases explicitly while preserving every other golden path and its order.
+    if (binaryPresent) expect(body.cursor.agentBinary).toBe(CURSOR_BINARY)
+    else expect(body.cursor).not.toHaveProperty('agentBinary')
+    const expectedPaths = binaryPresent ? GOLDEN_MODELS_PATHS : GOLDEN_MODELS_PATHS.filter(path => path !== '.cursor.agentBinary')
     // `.cursor.refreshError` exists only while the Cursor model-list refresh is failing on the machine running the test (the
     // golden was taken on one where it was), so it is machine state, not part of the shape.
     const machineState = (list: string[]) => list.filter(path => path !== '.cursor.refreshError')
-    expect(machineState(paths(body))).toEqual(machineState(GOLDEN_MODELS_PATHS))
+    expect(machineState(paths(body))).toEqual(machineState(expectedPaths))
     expect('routes' in body).toBe(false)
   }, 20_000)
 

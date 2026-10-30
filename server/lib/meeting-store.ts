@@ -333,6 +333,11 @@ function canonicalProvider(chunks: TranscriptChunk[]): 'server-whisper' | 'iphon
 
 /** Enough to clear the sidecar's leading metadata keys whatever their order. */
 const SIDECAR_HEAD_BYTES = 4096
+/** Chunk, word-timing and batch evidence outgrow the markdown's 10 MiB ceiling
+ * on long calls. Keep receipt/idempotency readback bounded, with the same
+ * sidecar allowance as the imported library, and still parse the whole JSON:
+ * a matching prefix alone cannot prove a valid committed capture. */
+const SAVE_RECEIPT_SIDECAR_MAX_BYTES = 32 * 1024 * 1024
 
 export class MeetingStore {
   readonly root: string
@@ -491,7 +496,7 @@ export class MeetingStore {
         .sort()
         .reverse()
       for (const sidecarName of sidecars) {
-        const sidecarText = safeReadFile(monthDir, monthReal, sidecarName)
+        const sidecarText = safeReadFile(monthDir, monthReal, sidecarName, SAVE_RECEIPT_SIDECAR_MAX_BYTES)
         if (sidecarText === null) continue
         try {
           const sidecar = JSON.parse(sidecarText) as Record<string, unknown>
