@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bindMacSpeakerShadowRepair, type MacShadowRepairSource } from './mac-speaker-shadow-repair.js'
 import { reconcileMacSpeaker256Snapshot } from './mac-speaker-live-memory.js'
 import { prepareMacSpeakerCallPacket, readMacSpeakerCallView, resolveMacSpeakerCallView } from './mac-speaker-call-view.js'
-import { applyMacCallHumanAnnotation, commitMacCallHumanAnnotation, macCallHumanPaths, macCallHumanScopes, previewMacCallHumanAnnotation, recoverMacCallHumanAnnotation } from './mac-speaker-call-human.js'
+import { applyMacCallHumanAnnotation, commitMacCallHumanAnnotation, isMacCallHumanName, macCallHumanPaths, macCallHumanScopes, previewMacCallHumanAnnotation, recoverMacCallHumanAnnotation } from './mac-speaker-call-human.js'
 import { SYNTHETIC_SPANS, SYNTHETIC_SECONDS, syntheticEmbeddings, syntheticNative } from './__fixtures__/speaker-shadow/synthetic-meeting.js'
 import { projectMacSpeakerRepair, hashMacSpeakerDocument, hashMacSpeakerMachineBinding } from './mac-speaker-repair-projection.js'
 import { readMacSpeakerMachineEvidence } from './mac-speaker-machine-evidence.js'
@@ -56,6 +56,22 @@ function fixture(namedProof = false, edit?: (doc: any) => void) {
 function commit(f: ReturnType<typeof fixture>, afterWrite?: (index: number) => void) { return commitMacCallHumanAnnotation({ files: f.files, captureId: f.sid, scope: f.scope, selectedRawChunkIndices: f.selected, to: 'Human Example', afterWrite }) }
 
 describe('scoped human call annotations', () => {
+  it('rejects machine placeholders at preview, publication, and retained human evidence boundaries without changing journals', () => {
+    const f = fixture()
+    expect(isMacCallHumanName('Brigitta Pólya')).toBe(true)
+    for (const to of ['Ext', 'ext', 'Unknown', 'MU', 'Unidentified', 'Speaker', 'Voice 1']) {
+      expect(isMacCallHumanName(to)).toBe(false)
+      expect(() => previewMacCallHumanAnnotation(f.input.currentJSON, f.markdown, f.view, f.scope, f.selected, to)).toThrow('explicit name')
+      expect(() => commitMacCallHumanAnnotation({ files: f.files, captureId: f.sid, scope: f.scope, selectedRawChunkIndices: f.selected, to })).toThrow('explicit name')
+    }
+    expect(() => readFileSync(f.paths.ledger)).toThrow(); expect(() => readFileSync(f.paths.journal)).toThrow()
+    commit(f)
+    const journal = readFileSync(f.paths.journal, 'utf8'), annotation = readFileSync(f.paths.annotation, 'utf8'), ledger = readFileSync(f.paths.ledger, 'utf8')
+    const bad = JSON.parse(annotation); bad.actions[0].to = 'Ext'
+    const { annotationSHA256: _old, ...body } = bad; bad.annotationSHA256 = sha(JSON.stringify(body))
+    expect(() => applyMacCallHumanAnnotation(f.input.currentJSON, ledger, JSON.stringify(bad), f.view)).toThrow('annotation action')
+    expect(readFileSync(f.paths.journal, 'utf8')).toBe(journal); expect(readFileSync(f.paths.annotation, 'utf8')).toBe(annotation); expect(readFileSync(f.paths.ledger, 'utf8')).toBe(ledger)
+  })
   it('names only explicit members/fields, preserves BASE+MD and makes low-similarity names human-confirmed in actual reader output', () => {
     const f = fixture(), preview = previewMacCallHumanAnnotation(f.input.currentJSON, f.markdown, f.view, f.scope, f.selected, 'Human Example')
     expect(preview.members).toEqual([f.member]); expect(preview.fields).toBeGreaterThan(2)

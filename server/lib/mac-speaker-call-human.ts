@@ -19,6 +19,12 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const digest = (value: unknown) => hash(JSON.stringify(value))
 const fail = (reason: string): never => { throw new Error(`Mac call human: ${reason}`) }
 const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+/** Human annotations require a person's name, never a machine placeholder.
+ * Keep this local: the shared profile-name checker has other consumers. */
+export function isMacCallHumanName(value: unknown): value is string {
+  return typeof value === 'string' && value === value.trim() && checkSpeakerName(value).ok
+    && !/^(?:Ext|Unknown|Unidentified(?:\s+\d+)?|Speaker(?:\s*\d+)?|MU)$/i.test(value)
+}
 interface Member { rawChunkIndex: number; position: number; before: string; text: string; elapsedMs: number; baseBefore?: string }
 interface Field { path: Path; before: string; rawChunkIndices: number[] }
 export interface MacCallHumanScope {
@@ -72,7 +78,7 @@ function selectedFields(scope: MacCallHumanScope, selected: Set<number>): Field[
 /** Preview the same exact label renderer used after publication. A transcript
  * mismatch refuses the action before any human intent or annotation is written. */
 export function previewMacCallHumanAnnotation(baseJSON: string, markdown: string, view: MacSpeakerCallView, scope: MacCallHumanScope, selectedRawChunkIndices: number[], to: string): { members: Member[]; fields: number } {
-  if (to !== to.trim() || !checkSpeakerName(to).ok || !selectedRawChunkIndices.length || new Set(selectedRawChunkIndices).size !== selectedRawChunkIndices.length) fail('explicit name and source selection required')
+  if (!isMacCallHumanName(to) || !selectedRawChunkIndices.length || new Set(selectedRawChunkIndices).size !== selectedRawChunkIndices.length) fail('explicit name and source selection required')
   const selected = new Set(selectedRawChunkIndices), members = scope.members.filter(m => selected.has(m.rawChunkIndex)), doc = structuredClone(view.doc)
   if (members.length !== selected.size) fail('selection outside reviewed group')
   const fields = selectedFields(scope, selected)
@@ -88,7 +94,7 @@ function validateAnnotation(value: unknown, baseJSON: string, ledger: string): A
   let previousEnd = 0, fieldCount = 0
   const used = new Map<string, string>(), selected = new Map<number, string>()
   for (const action of a.actions) {
-    if (!action || typeof action.id !== 'string' || !action.id || typeof action.to !== 'string' || action.to !== action.to.trim() || !checkSpeakerName(action.to).ok || !SHA.test(action.scopeSHA256) || !Array.isArray(action.members) || !action.members.length || action.members.length > 6000 || new Set(action.members.map(m => m.rawChunkIndex)).size !== action.members.length || !Array.isArray(action.fields) || !action.fields.length || (fieldCount += action.fields.length) > 40000 || !Number.isSafeInteger(action.ledgerStart) || !Number.isSafeInteger(action.ledgerEnd) || action.ledgerStart < previousEnd || action.ledgerEnd <= action.ledgerStart || action.ledgerEnd > ledger.length || action.ledgerBeforeSHA256 !== hash(ledger.slice(0, action.ledgerStart)) || action.ledgerAfterSHA256 !== hash(ledger.slice(0, action.ledgerEnd))) fail('annotation action')
+    if (!action || typeof action.id !== 'string' || !action.id || !isMacCallHumanName(action.to) || !SHA.test(action.scopeSHA256) || !Array.isArray(action.members) || !action.members.length || action.members.length > 6000 || new Set(action.members.map(m => m.rawChunkIndex)).size !== action.members.length || !Array.isArray(action.fields) || !action.fields.length || (fieldCount += action.fields.length) > 40000 || !Number.isSafeInteger(action.ledgerStart) || !Number.isSafeInteger(action.ledgerEnd) || action.ledgerStart < previousEnd || action.ledgerEnd <= action.ledgerStart || action.ledgerEnd > ledger.length || action.ledgerBeforeSHA256 !== hash(ledger.slice(0, action.ledgerStart)) || action.ledgerAfterSHA256 !== hash(ledger.slice(0, action.ledgerEnd))) fail('annotation action')
     previousEnd = action.ledgerEnd
     const rows = ledger.slice(action.ledgerStart, action.ledgerEnd).trim().split('\n').map(line => JSON.parse(line))
     const groups = new Map<string, number[]>()
@@ -291,7 +297,7 @@ export function recoverMacCallHumanAnnotation(files: MacCallHumanFiles, captureI
   try { runJournal(files, captureId, JSON.parse(journal.text), journal.text, afterWrite, guard.assertOwned) } finally { guard.release() }
 }
 export function commitMacCallHumanAnnotation(input: { files: MacCallHumanFiles; captureId: string; scope: MacCallHumanScope; selectedRawChunkIndices: number[]; to: string; afterWrite?: (index: number) => void }): { correctionId: string; members: number; fields: number } {
-  if (input.to !== input.to.trim() || !checkSpeakerName(input.to).ok || !Array.isArray(input.selectedRawChunkIndices) || !input.selectedRawChunkIndices.length || input.selectedRawChunkIndices.length > 6000 || new Set(input.selectedRawChunkIndices).size !== input.selectedRawChunkIndices.length) fail('explicit name and source selection required')
+  if (!isMacCallHumanName(input.to) || !Array.isArray(input.selectedRawChunkIndices) || !input.selectedRawChunkIndices.length || input.selectedRawChunkIndices.length > 6000 || new Set(input.selectedRawChunkIndices).size !== input.selectedRawChunkIndices.length) fail('explicit name and source selection required')
   const paths = macCallHumanPaths(input.files, input.captureId)
   mkdirSync(dirname(paths.ledger), { recursive: true, mode: 0o700 }); directory(paths.ledger)
   const guard = acquire(paths.lock, paths.journal, false)
