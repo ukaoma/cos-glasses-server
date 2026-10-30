@@ -1,7 +1,7 @@
 import { runQualifiedMacProfilePass } from '../lib/mac-speaker-profile-finalizer.js'
 import { readMacSpeakerMachineEvidence } from '../lib/mac-speaker-machine-evidence.js'
 import { isEffectiveMacSpeakerCallView, readMacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
-import { commitMacCallHumanAnnotation, macCallHumanPaths, macCallHumanScopes, previewMacCallHumanAnnotation, readMacCallHumanFile, recoverMacCallHumanAnnotation, type MacCallHumanFiles, type MacCallHumanScope } from '../lib/mac-speaker-call-human.js'
+import { commitMacCallHumanAnnotation, isMacCallHumanName, macCallHumanPaths, macCallHumanScopes, previewMacCallHumanAnnotation, readMacCallHumanFile, recoverMacCallHumanAnnotation, type MacCallHumanFiles, type MacCallHumanScope } from '../lib/mac-speaker-call-human.js'
 import type { MacSpeakerCallPacket, MacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
 import { checkSpeakerName } from '../lib/speaker-name.js'
 import { dataPath } from '../lib/data-dir.js'
@@ -208,6 +208,7 @@ import { bootResumeGate, type BootResumeGate } from '../lib/boot-resume.js'
 import { recordFinalPassSkip, runNemotronFinalPass, type FinalPassOptions, type FinalPassOutcome } from '../lib/nemotron-final.js'
 import { runTranscriptCleanup, type CleanupOutcome } from '../lib/transcript-cleanup.js'
 import { notifySpeakerShadowFinalized } from '../lib/speaker-shadow.js'
+import { macSpeakerCallCachedRefreshAvailability, notifyMacSpeakerCallFinalized, notifyMacSpeakerCallLedgerChanged } from '../lib/mac-speaker-call-producer.js'
 import { sweepTranscriptCleanupData } from '../lib/transcript-cleanup-screen.js'
 import type { TranscriptCleanupRouteDeps } from './transcript-cleanup.js'
 
@@ -232,13 +233,31 @@ function cosOpsPipelineConfigured(): boolean {
  * A failure is logged and never fails the capture's own finalization, because a retry would
  * re-run the standalone summary; mac_library_backfill.py files it later, idempotently.
  */
-async function fileFinishedMacRecording(sessionId: string, meetingPath: string, label: string): Promise<void> {
+export async function fileFinishedMacRecording(sessionId: string, meetingPath: string, label: string, deps: {
+  configured?: () => boolean
+  file?: typeof fileMacRecordingInLibrary
+  notify?: typeof notifyMacSpeakerCallFinalized
+  shadowNotify?: typeof notifySpeakerShadowFinalized
+  operationsRoot?: () => string | null
+} = {}): Promise<void> {
   // Callers pass Mac captures only (finalization and orphan recovery both check MAC_CAPTURE_ID).
-  if (!cosOpsPipelineConfigured()) return
+  if (!MAC_CAPTURE_ID.test(sessionId)) return
+  const notify = deps.notify ?? notifyMacSpeakerCallFinalized
   try {
-    const filing = await fileMacRecordingInLibrary(meetingPath)
+    if (!(deps.configured ?? cosOpsPipelineConfigured)()) return
+    const filing = await (deps.file ?? fileMacRecordingInLibrary)(meetingPath)
     if (filing.outcome === 'filed') {
       console.log(`[${label}] Mac recording ${sessionId} filed into the library (${filing.status}): ${filing.path}`)
+      // The exact-file importer returns its chosen destination. Never guess a
+      // second copy from a title or apply one copy's packet to another BASE.
+      const root = (deps.operationsRoot ?? resolveCosOperationsDir)()
+      const filedPath = resolve(filing.path), sidecarPath = filedPath.replace(/\.md$/, '.g2-chunks.json')
+      if (root && filedPath.startsWith(`${root}/`) && filedPath.endsWith('.md')) {
+        const source = JSON.parse(readMacCallHumanFile(sidecarPath, 32 * 1024 * 1024)!.text)
+        if (source.sessionId === sessionId && source.sourceType === 'mac_system_audio') {
+          await notify({ sessionId, sidecarPath })
+        }
+      }
     } else {
       console.log(`[${label}] Mac recording ${sessionId} stays standalone: ${filing.reason}`)
     }
@@ -247,6 +266,15 @@ async function fileFinishedMacRecording(sessionId: string, meetingPath: string, 
       `[${label}] Mac recording ${sessionId} was not filed into the library: `
       + `${error instanceof Error ? error.message : String(error)}`,
     )
+  } finally {
+    // The canonical standalone recording remains a registered target when
+    // filing is unavailable or fails. Notifications never make saving fail.
+    try { await notify({ sessionId, sidecarPath: meetingPath.replace(/\.md$/, '.g2-chunks.json') }) }
+    catch { console.warn(`[${label}] Closed-call speaker reconciliation deferred for ${sessionId}`) }
+    // Register the publishing consumer before the log-only consumer can start
+    // shared inference. An already-running log-only execution cannot acquire
+    // pre-native source provenance retroactively.
+    (deps.shadowNotify ?? notifySpeakerShadowFinalized)({ sessionId, sidecarPath: meetingPath.replace(/\.md$/, '.g2-chunks.json') })
   }
 }
 
@@ -392,8 +420,10 @@ export function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Fi
     lease.setPhase('active')
     let current = runtime.finalizationJobs.get(job.sessionId) ?? job
     if (canonicalFinalizationIsComplete(current)) {
+      if (MAC_CAPTURE_ID.test(current.sessionId)) await notifyMacSpeakerCallFinalized({ sessionId: current.sessionId, sidecarPath: current.sidecarPath, freezeOnly: true })
       runtime.finalizationJobs.remove(current.sessionId)
       bootResumeGate().forget('meeting_finalization', current.sessionId)
+      if (MAC_CAPTURE_ID.test(current.sessionId)) runtime.scheduleBackground(fileFinishedMacRecording(current.sessionId, current.meetingPath, 'meeting/resume'))
       return
     }
     if (current.phase === 'capture_pending') {
@@ -496,9 +526,9 @@ export function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Fi
       await enrichStandaloneMeeting(current.meetingPath, jobStartedAt)
     }
     markCanonicalFinalizationState(current.sidecarPath, 'complete', false)
-    // 6.95.0: speaker merge shadow mode (off unless COS_SPEAKER_SHADOW=1). Log only and
-    // fire-and-forget: it queues, defers under live work, and never throws back here.
-    if (MAC_CAPTURE_ID.test(current.sessionId)) notifySpeakerShadowFinalized({ sessionId: current.sessionId, sidecarPath: current.sidecarPath })
+    // Capture the pre-correction source while the finalization guard still
+    // refuses human edits. A deferred producer keeps its own durable work item.
+    if (MAC_CAPTURE_ID.test(current.sessionId)) await notifyMacSpeakerCallFinalized({ sessionId: current.sessionId, sidecarPath: current.sidecarPath, freezeOnly: true })
     // The capture is finished and its files are durable, so the merge engine may score it.
     // Fire-and-forget by contract: the runner queues, defers under a drain or a live
     // capture, and never throws back at the finalization path.
@@ -1668,13 +1698,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       const source = callGroupSource(sessionId)
       if (req.body?.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
       recoverMacCallHumanAnnotation(source.files, sessionId)
+      notifyMacSpeakerCallLedgerChanged(sessionId)
       res.json({ ok: true, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
     } catch (error) { res.status(409).json({ reason: 'group_recovery_refused', error: String(error) }) }
   })
-  router.post('/meeting/:sessionId/speaker-groups/:identityId/relabel', (req, res) => {
+  router.post('/meeting/:sessionId/speaker-groups/:identityId/relabel', async (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? ''), identityId = String(req.params.identityId ?? ''), body = req.body
-    if (!MAC_CAPTURE_ID.test(sessionId) || !body || Object.keys(body).some(k => !['recordId', 'expectedRevision', 'scopeSHA256', 'rawChunkIndices', 'to', 'dryRun', 'confirm'].includes(k)) || typeof body.to !== 'string' || !checkSpeakerName(body.to).ok || !Array.isArray(body.rawChunkIndices) || !body.rawChunkIndices.length || body.rawChunkIndices.length > 6000 || body.rawChunkIndices.some((i: unknown) => !Number.isSafeInteger(i) || Number(i) < 0) || new Set(body.rawChunkIndices).size !== body.rawChunkIndices.length || typeof body.expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedRevision)) { res.status(400).json({ reason: 'invalid_group_selection' }); return }
+    if (!MAC_CAPTURE_ID.test(sessionId) || !body || Object.keys(body).some(k => !['recordId', 'expectedRevision', 'scopeSHA256', 'rawChunkIndices', 'to', 'dryRun', 'confirm'].includes(k)) || !isMacCallHumanName(body.to) || !Array.isArray(body.rawChunkIndices) || !body.rawChunkIndices.length || body.rawChunkIndices.length > 6000 || body.rawChunkIndices.some((i: unknown) => !Number.isSafeInteger(i) || Number(i) < 0) || new Set(body.rawChunkIndices).size !== body.rawChunkIndices.length || typeof body.expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedRevision)) { res.status(400).json({ reason: 'invalid_group_selection' }); return }
     const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? sourceRevisionRefusal(sessionId, body) ?? finalizingRefusal(sessionId)
     if (refusal) { res.status(refusal.status).json(refusal.body); return }
     try {
@@ -1688,7 +1719,16 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       const selection = previewMacCallHumanAnnotation(base, readMacCallHumanFile(source.files.meetingPath, 16 * 1024 * 1024)!.text, view, scope, body.rawChunkIndices, body.to)
       const preview = { identityId, scopeSHA256: scope.scopeSHA256, ...selection, to: body.to, enrollmentAllowed: false, sourceRevision: body.expectedRevision }
       if (body.dryRun === true || body.confirm !== true) { res.status(body.dryRun === true ? 200 : 400).json({ ...(body.dryRun === true ? {} : { reason: 'confirmation_required' }), preview }); return }
+      // A correction withdraws a packet bound to its prior ledger. Require the
+      // verified retained native export before the FIRST automatic-group edit
+      // so the remaining groups can refresh without rerunning audio inference.
+      // Revising an existing human decision remains independent of the model.
+      if (scope.reviewBasis !== 'human-authored') {
+        const refresh = await macSpeakerCallCachedRefreshAvailability(sessionId, source.files.sidecarPath)
+        if (!refresh.available) { res.status(409).json({ reason: 'group_refresh_unavailable', error: 'Speaker reconciliation is not ready. Your selection was not changed; reopen this group after it finishes.', retryable: true }); return }
+      }
       const correction = commitMacCallHumanAnnotation({ files: source.files, captureId: sessionId, scope, selectedRawChunkIndices: body.rawChunkIndices, to: body.to })
+      notifyMacSpeakerCallLedgerChanged(sessionId)
       res.json({ ok: true, confirmed: true, correction, enrollmentAllowed: false, anonymousRefreshRequired: true, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
     } catch (error) { res.status(409).json({ reason: 'group_correction_refused', error: String(error) }) }
   })
