@@ -1,6 +1,9 @@
 import { runQualifiedMacProfilePass } from '../lib/mac-speaker-profile-finalizer.js'
 import { readMacSpeakerMachineEvidence } from '../lib/mac-speaker-machine-evidence.js'
 import { isEffectiveMacSpeakerCallView, readMacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
+import { commitMacCallHumanAnnotation, macCallHumanPaths, macCallHumanScopes, previewMacCallHumanAnnotation, readMacCallHumanFile, recoverMacCallHumanAnnotation, type MacCallHumanFiles, type MacCallHumanScope } from '../lib/mac-speaker-call-human.js'
+import type { MacSpeakerCallPacket, MacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
+import { checkSpeakerName } from '../lib/speaker-name.js'
 import { dataPath } from '../lib/data-dir.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
 import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
@@ -1592,7 +1595,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     if (sidecarJSON) {
       try {
         const view = readMacSpeakerCallView(sidecarPath, sidecarJSON, meetingPath)
-        if (isEffectiveMacSpeakerCallView(view)) hash.update(JSON.stringify({ packetSHA256: view.metadata.packetSHA256, generation: view.metadata.generation, revision: view.metadata.revision, mode: view.metadata.mode }))
+        if (isEffectiveMacSpeakerCallView(view)) hash.update(JSON.stringify({ packetSHA256: view.metadata.packetSHA256, generation: view.metadata.generation, revision: view.metadata.revision, mode: view.metadata.mode, humanAnnotation: view.metadata.humanAnnotation }))
       } catch { /* Preserve existing unreadable-base handling in each caller. */ }
     }
     return hash.digest('hex')
@@ -1605,7 +1608,13 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     if (!operations && !direct && !saved) return null
     const sidecarPath = operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath
     try {
+      if (MAC_CAPTURE_ID.test(sessionId)) {
+        let pending = true
+        try { const journal = readMacCallHumanFile(macCallHumanPaths({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, sessionId).journal, 64 * 1024 * 1024, true); pending = journal !== null && JSON.parse(journal.text).phase !== 'complete' } catch { /* A malformed owned journal must not permit a competing mutation. */ }
+        if (pending) return { status: 409, body: { reason: 'human_annotation_recovery_required', error: 'Finish the interrupted scoped annotation before another correction.', mutable: false } }
+      }
       const view = readMacSpeakerCallView(sidecarPath, readFileSync(sidecarPath, 'utf8'), operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath)
+      if (view.metadata.humanAnnotationInvalid) return { status: 409, body: { reason: 'human_annotation_invalid', error: 'The saved human annotation cannot be verified; restore or recover it before another correction.', mutable: false } }
       if (isEffectiveMacSpeakerCallView(view)) return { status: 409, body: { reason: 'derived_call_view_requires_scoped_action', error: 'This consolidated view is read-only. Naming and voice enrollment require an exact reviewed source selection; nothing was changed.', mutable: false } }
     } catch { /* The existing route reports an unreadable base independently. */ }
     return null
@@ -1614,6 +1623,75 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   function selectedReadMatches(requested: unknown, sessionId: string, actual: string): boolean {
     return requestedRecordMatches(requested, actual) || blendedRecordFor(requested, sessionId) !== undefined
   }
+
+  function callGroupScopes(files: MacCallHumanFiles, baseJSON: string, view: MacSpeakerCallView): MacCallHumanScope[] {
+    const captureId = JSON.parse(baseJSON).sessionId, paths = macCallHumanPaths(files, captureId)
+    const packet = readMacCallHumanFile(paths.packet, 16 * 1024 * 1024, true)
+    let parsedPacket: MacSpeakerCallPacket | null = null
+    try { parsedPacket = packet ? JSON.parse(packet.text) as MacSpeakerCallPacket : null } catch { /* Human-authored scopes are independent of a corrupt automatic packet. */ }
+    return macCallHumanScopes({ baseJSON, view, packet: parsedPacket,
+      markdown: readMacCallHumanFile(files.meetingPath, 16 * 1024 * 1024)!.text,
+      ledgerJSONL: readMacCallHumanFile(paths.ledger, 8 * 1024 * 1024, true)?.text ?? '',
+      annotationJSON: readMacCallHumanFile(paths.annotation, 16 * 1024 * 1024, true)?.text ?? null })
+  }
+  const publicCallScope = (scope: MacCallHumanScope) => ({ identityId: scope.identityId, displayLabel: scope.displayLabel, reviewBasis: scope.reviewBasis, scopeSHA256: scope.scopeSHA256, members: scope.members, fieldCount: scope.fields.length })
+  function callGroupSource(sessionId: string) {
+    const operations = cosOperationsMeetingsConfigured() ? findCosOperationsMeetingBySessionId(sessionId) : null
+    if (operations?.mergedScribeConflict?.length) throw Error('meeting source conflict')
+    const direct = operations ? null : findDirectLibraryMeetingBySessionId(sessionId)
+    if (direct) throw Error('direct library is read-only')
+    const saved = operations ? null : store.findBySessionId(sessionId)
+    if (!operations && !saved) throw Error('meeting not found')
+    return { files: { sidecarPath: operations?.sidecarPath ?? saved!.sidecarPath, meetingPath: operations?.meetingPath ?? saved!.filepath },
+      recordId: operations ? `ops:${operations.domain}:${operations.month}:${operations.filename}` : `standalone:${sessionId}` }
+  }
+
+  // Exact reviewed source membership is a separate action from legacy from-label
+  // relabels. No caller-provided patch paths, global expansion or enrollment.
+  router.get('/meeting/:sessionId/speaker-groups', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!MAC_CAPTURE_ID.test(sessionId)) { res.status(400).json({ reason: 'not_mac_capture' }); return }
+    try {
+      const source = callGroupSource(sessionId)
+      if (!requestedRecordMatches(req.query.recordId, source.recordId)) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      const base = readMacCallHumanFile(source.files.sidecarPath, 32 * 1024 * 1024)!.text, view = readMacSpeakerCallView(source.files.sidecarPath, base, source.files.meetingPath)
+      res.json({ sessionId, recordId: source.recordId, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath), groupScopes: callGroupScopes(source.files, base, view).map(publicCallScope), humanAnnotation: view.metadata.humanAnnotation ?? null, enrollmentAllowed: false })
+    } catch (error) { res.status(409).json({ reason: 'group_review_unavailable', error: String(error) }) }
+  })
+  router.post('/meeting/:sessionId/speaker-groups/recover', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!MAC_CAPTURE_ID.test(sessionId)) { res.status(400).json({ reason: 'not_mac_capture' }); return }
+    const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.body?.recordId) ?? finalizingRefusal(sessionId)
+    if (refusal) { res.status(refusal.status).json(refusal.body); return }
+    try {
+      const source = callGroupSource(sessionId)
+      if (req.body?.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      recoverMacCallHumanAnnotation(source.files, sessionId)
+      res.json({ ok: true, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
+    } catch (error) { res.status(409).json({ reason: 'group_recovery_refused', error: String(error) }) }
+  })
+  router.post('/meeting/:sessionId/speaker-groups/:identityId/relabel', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? ''), identityId = String(req.params.identityId ?? ''), body = req.body
+    if (!MAC_CAPTURE_ID.test(sessionId) || !body || Object.keys(body).some(k => !['recordId', 'expectedRevision', 'scopeSHA256', 'rawChunkIndices', 'to', 'dryRun', 'confirm'].includes(k)) || typeof body.to !== 'string' || !checkSpeakerName(body.to).ok || !Array.isArray(body.rawChunkIndices) || !body.rawChunkIndices.length || body.rawChunkIndices.length > 6000 || body.rawChunkIndices.some((i: unknown) => !Number.isSafeInteger(i) || Number(i) < 0) || new Set(body.rawChunkIndices).size !== body.rawChunkIndices.length || typeof body.expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedRevision)) { res.status(400).json({ reason: 'invalid_group_selection' }); return }
+    const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? sourceRevisionRefusal(sessionId, body) ?? finalizingRefusal(sessionId)
+    if (refusal) { res.status(refusal.status).json(refusal.body); return }
+    try {
+      const source = callGroupSource(sessionId)
+      if (body.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      const base = readMacCallHumanFile(source.files.sidecarPath, 32 * 1024 * 1024)!.text, view = readMacSpeakerCallView(source.files.sidecarPath, base, source.files.meetingPath)
+      const scope = callGroupScopes(source.files, base, view).find(s => s.identityId === identityId && s.scopeSHA256 === body.scopeSHA256)
+      if (!scope) { res.status(409).json({ reason: 'group_scope_changed', error: 'Reopen the group before naming it' }); return }
+      const selected = new Set<number>(body.rawChunkIndices), members = scope.members.filter(m => selected.has(m.rawChunkIndex))
+      if (members.length !== selected.size) { res.status(409).json({ reason: 'group_scope_changed' }); return }
+      const selection = previewMacCallHumanAnnotation(base, readMacCallHumanFile(source.files.meetingPath, 16 * 1024 * 1024)!.text, view, scope, body.rawChunkIndices, body.to)
+      const preview = { identityId, scopeSHA256: scope.scopeSHA256, ...selection, to: body.to, enrollmentAllowed: false, sourceRevision: body.expectedRevision }
+      if (body.dryRun === true || body.confirm !== true) { res.status(body.dryRun === true ? 200 : 400).json({ ...(body.dryRun === true ? {} : { reason: 'confirmation_required' }), preview }); return }
+      const correction = commitMacCallHumanAnnotation({ files: source.files, captureId: sessionId, scope, selectedRawChunkIndices: body.rawChunkIndices, to: body.to })
+      res.json({ ok: true, confirmed: true, correction, enrollmentAllowed: false, anonymousRefreshRequired: true, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
+    } catch (error) { res.status(409).json({ reason: 'group_correction_refused', error: String(error) }) }
+  })
 
   function sourceRevisionRefusal(sessionId: string, body: any): { status: number; body: Record<string, unknown> } | null {
     const ops = cosOperationsMeetingsConfigured() ? findCosOperationsMeetingBySessionId(sessionId) : null
@@ -1761,8 +1839,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),
       ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
-      ...(isEffectiveMacSpeakerCallView(callView) ? { mutable: false, mutationBlockedReason: 'derived_call_view_requires_scoped_action' } : {}),
+      ...(isEffectiveMacSpeakerCallView(callView) || callView.metadata.humanAnnotationInvalid ? { mutable: false, mutationBlockedReason: callView.metadata.humanAnnotationInvalid ? 'human_annotation_invalid' : 'derived_call_view_requires_scoped_action' } : {}),
       speakerCallView: callView.metadata,
+      ...(() => { try { return { groupScopes: callGroupScopes({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, baseJSON, callView).map(publicCallScope) } } catch { return { groupScopes: [] } } })(),
     })
   })
 
@@ -1956,7 +2035,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       capturedChars: clip.capturedChars,
       domain: clip.domain,
       ...identity,
-      ...(isEffectiveMacSpeakerCallView(callView) ? { mutable: false, mutationBlockedReason: 'derived_call_view_requires_scoped_action' } : {}),
+      ...(isEffectiveMacSpeakerCallView(callView) || callView.metadata.humanAnnotationInvalid ? { mutable: false, mutationBlockedReason: callView.metadata.humanAnnotationInvalid ? 'human_annotation_invalid' : 'derived_call_view_requires_scoped_action' } : {}),
       reviewIdentityVersion: 1,
       sourceRevision: reviewRevision(operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath, sidecarPath),
       ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),

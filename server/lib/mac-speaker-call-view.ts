@@ -9,6 +9,7 @@ import { inspectMacSpeakerShadowCallSource } from './mac-speaker-shadow-repair.j
 import { readMacSpeakerMachineEvidence } from './mac-speaker-machine-evidence.js'
 import { hasMacSpeakerProtectedRows, isMacSpeakerHumanProtected } from './mac-speaker-protection.js'
 import { boundWords, renderMarkdown } from './mac-speaker-repair-render.js'
+import { applyMacCallHumanAnnotation, macCallHumanPaths, readMacCallHumanFile } from './mac-speaker-call-human.js'
 
 type Doc = Record<string, any>
 const HASH = /^[a-f0-9]{64}$/
@@ -37,7 +38,7 @@ export interface MacSpeakerCallPacket {
 export interface MacSpeakerCallView {
   doc: Doc
   markdown?: string
-  metadata: { status: 'base' | 'applied'; reason: string; mode: 'strict' | 'anonymous-estimate' | 'alias-evaluation'; revision?: number; generation?: string; packetSHA256?: string; changedChunks: number; changedWords: number; groups: Array<{ identityId: string; label: string; memberVoices: string[]; intervals: MacSpeaker256Group['intervals'] }>; localization: 'estimated-ASR-with-native-support' | 'inherited-machine-estimate'; speakerPurityVerified: false }
+  metadata: { status: 'base' | 'applied'; reason: string; mode: 'strict' | 'anonymous-estimate' | 'alias-evaluation'; revision?: number; generation?: string; packetSHA256?: string; changedChunks: number; changedWords: number; groups: Array<{ identityId: string; label: string; memberVoices: string[]; intervals: MacSpeaker256Group['intervals'] }>; localization: 'estimated-ASR-with-native-support' | 'inherited-machine-estimate'; speakerPurityVerified: false; humanAnnotation?: { revision: number; annotationSHA256: string; members: number }; humanAnnotationInvalid?: true }
 }
 
 /** Expensive pure preparation: call only off-thread/offline with full verified inputs. */
@@ -243,17 +244,23 @@ function boundedFile(path: string, maximum: number): string {
   } finally { closeSync(fd) }
 }
 export function readMacSpeakerCallView(sidecarPath: string, baseJSON: string, markdownPath?: string): MacSpeakerCallView {
+  let humanPresent = false
   try {
     const doc = JSON.parse(baseJSON)
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(doc.sessionId) || !sidecarPath.endsWith('.g2-chunks.json')) return resolveMacSpeakerCallView(baseJSON, '', null)
-    const packet = JSON.parse(boundedFile(sidecarPath.replace(/\.g2-chunks\.json$/, '.speaker-call.json'), MAX_PACKET)) as MacSpeakerCallPacket
+    let packet: MacSpeakerCallPacket | null = null
+    try { packet = JSON.parse(boundedFile(sidecarPath.replace(/\.g2-chunks\.json$/, '.speaker-call.json'), MAX_PACKET)) as MacSpeakerCallPacket } catch { /* Independent human annotations remain readable after automatic withdrawal. */ }
+    const mdPath = markdownPath ?? sidecarPath.replace(/\.g2-chunks\.json$/, '.md')
+    const paths = macCallHumanPaths({ sidecarPath, meetingPath: mdPath }, doc.sessionId)
+    humanPresent = true // Unreadable annotation files must refuse competing writes.
+    const annotation = readMacCallHumanFile(paths.annotation, 16 * 1024 * 1024, true)
+    humanPresent = annotation !== null
     let ledger = ''
     try { ledger = boundedFile(dataPath('meeting-corrections', `${doc.sessionId.replace(/:/g, '_')}.jsonl`), 8 * 1024 * 1024) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
-    const view = resolveMacSpeakerCallView(baseJSON, ledger, packet)
-    const mdPath = markdownPath ?? sidecarPath.replace(/\.g2-chunks\.json$/, '.md')
+    const view = applyMacCallHumanAnnotation(baseJSON, ledger, annotation?.text ?? null, resolveMacSpeakerCallView(baseJSON, ledger, packet))
     let markdown: string
     try { markdown = boundedFile(mdPath, 16 * 1024 * 1024) } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return view; throw e }
     view.markdown = renderMacSpeakerCallMarkdown(markdown, doc, view)
     return view
-  } catch { return resolveMacSpeakerCallView(baseJSON, '', null) }
+  } catch { const view = resolveMacSpeakerCallView(baseJSON, '', null); if (humanPresent) { view.metadata.humanAnnotationInvalid = true; view.metadata.reason = 'human-annotation-invalid' }; return view }
 }
