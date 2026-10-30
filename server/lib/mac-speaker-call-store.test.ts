@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { prepareMacSpeakerCallPublication, executeMacSpeakerCallPublication, hashMacSpeakerCallFileInventory, type MacSpeakerCallPublicationInput, type MacSpeakerCallQualification, type MacSpeakerCallFileRole } from './mac-speaker-call-store.js'
 import { bindMacSpeakerShadowRepair } from './mac-speaker-shadow-repair.js'
 import { reconcileMacSpeaker256Snapshot } from './mac-speaker-live-memory.js'
@@ -113,6 +114,25 @@ describe('explicitly qualified derived speaker-call transaction',()=>{
     expect(()=>executeMacSpeakerCallPublication(dir,'apply',{beforeWrite:i=>{if(i===0)writeFileSync(path,'external journal')}})).toThrow('journal drift')
     expect(readFileSync(path,'utf8')).toBe('external journal');expect(existsSync(f.input.packetPath)).toBe(false)
     expect(()=>executeMacSpeakerCallPublication(dir,'apply',{resume:true})).toThrow()
+  })
+  for(const mode of ['apply','undo'] as const)for(const saveNumber of [1,2,4])it(`preserves a journal replaced after ${mode} rename ${saveNumber} and never reports completion`,()=>{
+    const f=fixture(),dir=prepareMacSpeakerCallPublication(f.input),path=join(dir,'transaction.json')
+    if(mode==='undo')executeMacSpeakerCallPublication(dir,'apply')
+    const fs=createRequire(import.meta.url)('node:fs') as typeof import('node:fs'),realRename=fs.renameSync
+    const external='EXTERNAL JOURNAL OWNER\n';let seen=0,intercepted=false
+    fs.renameSync=(from,to)=>{
+      realRename(from,to)
+      if(to===path&&++seen===saveNumber){intercepted=true;writeFileSync(path,external)}
+    }
+    syncBuiltinESMExports()
+    try{expect(()=>executeMacSpeakerCallPublication(dir,mode)).toThrow('journal publication readback drift')}
+    finally{fs.renameSync=realRename;syncBuiltinESMExports()}
+    expect(intercepted).toBe(true);expect(readFileSync(path,'utf8')).toBe(external)
+    const published=saveNumber===1?0:saveNumber===2?1:2
+    expect(existsSync(f.input.packetPath)).toBe(mode==='apply'?published>=1:published<1)
+    expect(existsSync(f.input.statePath)).toBe(mode==='apply'?published>=2:published<2)
+    expect(()=>executeMacSpeakerCallPublication(dir,mode,{resume:true})).toThrow()
+    expect(readFileSync(path,'utf8')).toBe(external)
   })
   it('rejects a changed external qualification receipt even if its copied proof remains intact',()=>{
     const f=fixture(),dir=prepareMacSpeakerCallPublication(f.input)

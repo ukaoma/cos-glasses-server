@@ -213,7 +213,16 @@ export function executeMacSpeakerCallPublication(directory:string,mode:'apply'|'
   try{
     const assertOwned=()=>{check();if(read(intentFile,4*1024*1024,check)!.hash!==intentRead.hash||read(journalFile,65536,check)!.hash!==journalRead.hash)fail('intent/journal drift');owned(intent,check)}
     const verify=()=>{assertOwned();const verified=verifyFiles(intent.sources,check),q=read(intent.qualification.path,1024*1024,check)!;if(q.hash!==intent.qualification.sha256)fail('qualification receipt drift');verifyQualified(read(join(directory,'0.after'),MAX_ARTIFACT,check)!.bytes,read(join(directory,'1.after'),MAX_ARTIFACT,check)!.bytes,q.bytes,intent.sources,verified,intent.captureId);targets(intent,check);assertOwned();verified.stamps.set(intent.qualification.path,q.stamp);immediateFence(verified.stamps);return verified.stamps}
-    const save=(phase:Journal['phase'],completed:number[],sourceStamps?:Map<string,Stamp|null>)=>{assertOwned();journal=sealedJournal({version:1,intentSHA256:intentRead.hash,phase,completed});publish(journalFile,Buffer.from(JSON.stringify(journal)),()=>{assertOwned();if(sourceStamps)immediateFence(sourceStamps)});journalRead=read(journalFile,65536,check)!}
+    const save=(phase:Journal['phase'],completed:number[],sourceStamps?:Map<string,Stamp|null>)=>{
+      assertOwned()
+      const intended=sealedJournal({version:1,intentSHA256:intentRead.hash,phase,completed}),bytes=Buffer.from(JSON.stringify(intended))
+      publish(journalFile,bytes,()=>{assertOwned();if(sourceStamps)immediateFence(sourceStamps)})
+      const written=read(journalFile,65536,check)!
+      // A post-rename replacement belongs to another writer. Never adopt its
+      // bytes as our next CAS baseline or overwrite them in failure recovery.
+      if(written.hash!==sha(bytes))fail('journal publication readback drift')
+      journal=intended;journalRead=written
+    }
     verify()
     const initial=targets(intent,check)
     if(journal.phase==='prepared'&&initial.some((h,i)=>h!==intent.images[i].beforeSHA256)||journal.phase==='applied'&&initial.some((h,i)=>h!==intent.images[i].afterSHA256))fail('journal/target ownership CAS')
