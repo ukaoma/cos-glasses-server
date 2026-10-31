@@ -274,12 +274,15 @@ export function markCanonicalFinalizationState(
 }
 
 export function getMeetingFinalizationSnapshot(): {
-  /** Work in progress. COS Control disables Restart and Update while this is above zero. */
+  /**
+   * Work in progress. COS Control disables Restart and Update while this is above zero. 6.97.0: a
+   * stopped job is not in it, or in `failed`. It shows as a `meeting_sync.meetings` row with phase
+   * `stopped` instead, not as a new key here: this shape is pinned to 6.87.0 for older clients
+   * (health-6890-parity.test.ts), and an older client still unlocks because `pending` reads 0.
+   */
   pending: number
   /** Failed and still trying. COS Control shows this as "retrying". */
   failed: number
-  /** 6.97.0: gave up, waiting for a later start. Not in `pending` or `failed`. */
-  stopped: number
   oldestUpdatedAt: string | null
   lastError: string | null
   malformed: number
@@ -292,7 +295,6 @@ export function getMeetingFinalizationSnapshot(): {
   return {
     pending: jobs.length,
     failed: failed.length,
-    stopped: all.length - jobs.length,
     oldestUpdatedAt: oldest,
     lastError: mostRecentFailure?.lastError?.slice(0, 200) ?? null,
     malformed: new MeetingFinalizationJobStore().malformedCount(),

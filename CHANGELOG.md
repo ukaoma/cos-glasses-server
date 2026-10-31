@@ -1,9 +1,9 @@
 ## 6.97.0 - COS's token ledger records what providers report, and a stopped meeting no longer locks Update (private candidate)
 
-2026-10-31. A private candidate for one Mac, built on 6.96.4. Not published. Pairs with the COS cost view in the next COS Control build, which reads the ledger file directly; there is no new endpoint.
+2026-10-31. A private candidate for one Mac, built on 6.96.4. Pairs with the COS cost view in the next COS Control build, which reads the ledger file directly; there is no new endpoint.
 
 **Restart and Update are no longer locked by a meeting that has stopped trying.** In 6.96.4 a saved meeting waiting on HQ held `meeting_sync.active`, `meeting_sync.blocksRestart` and `finalization.pending` for as long as its job existed, up to 30 days, though retries in one process end after three attempts. COS Control disabled Restart, Update Server and Sync now on those, so a fix could not reach the Mac.
-- A job that has used its retries now records that it stopped, in its own job file, and counts in none of those three. It stays visible as a `meeting_sync.meetings` row with phase `stopped` and a label that says so, and as `finalization.stopped`. Its audio and job file stay. Nothing is deleted.
+- A job that has used its retries now records that it stopped, in its own job file, and counts in none of those three. It stays visible as a `meeting_sync.meetings` row with phase `stopped` and a label that says so. `finalization` keeps its shape, and an older COS Control unlocks too, because `pending` reads 0. Its audio and job file stay. Nothing is deleted.
 - A job that is working still blocks: while an attempt runs, and between its retries.
 - A later start does not take the lock back every time. A stopped job is tried once, with no retry timers, on a start of a different server version or a start 6 hours or more after it stopped. Its lock lasts as long as that one attempt runs, and it is the same window as the maintenance lease. Any other start runs nothing and holds nothing.
 - A job that failed before this version recorded stops is tried once at its first start on 6.97.0, then stops the same way. A job the boot gate parked for crash-looping also stops holding the lock; it keeps the gate's own second chance and Retry.

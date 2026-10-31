@@ -3,7 +3,7 @@ import { applyNegativeRules } from './hallucination-filter.js'
 import { applyCorrections } from './whisper-local.js'
 import { applyFuzzyCorrections } from './fuzzy-correct.js'
 import { getAllSpeakerNames } from './speaker-embeddings.js'
-import { autoCleanDictation, AUTOCLEAN_MAX_CHARS, buildDictationPolishPrompt, DICTATION_POLISH_SYSTEM_PROMPTS } from './dictation-clean.js'
+import { autoCleanDictation, AUTOCLEAN_MAX_CHARS, buildDictationPolishPrompt, DICTATION_POLISH_SYSTEM_PROMPTS, type DictationPromptExtras } from './dictation-clean.js'
 import { dictationPolishPromptVersion, styleAndRegisterApply, type DictationPolishPromptVersion } from './dictation-polish-options.js'
 import { fillerPassEnabled, stripFillersIfEnglish } from './dictation-fillers.js'
 import { polishBudgetExhausted, recordPolishCall, type PolishBucket } from './dictation-polish-budget.js'
@@ -265,6 +265,21 @@ export function guardPolishAnswer(
   return { text: answer, outcome: answer !== cleaned ? 'polished' : 'unchanged' }
 }
 
+/**
+ * 6.97.0, for the audit row only: what the model is sent, on its own field, because `input_chars` stays
+ * the words dictated so old and new rows still compare. Absent if it cannot be worked out. Never throws.
+ */
+function polishPromptChars(
+  cleaned: string, model: string, version: DictationPolishPromptVersion, customInstructions: string, extras: DictationPromptExtras,
+): { promptChars?: number } {
+  try {
+    const system = model === LUNA_DICTATION_MODEL ? 0 : DICTATION_POLISH_SYSTEM_PROMPTS[version].length
+    return { promptChars: system + buildDictationPolishPrompt(cleaned, getVocabulary(), version, customInstructions, extras).length }
+  } catch {
+    return {}
+  }
+}
+
 export async function polishOutboundDictation(
   text: string,
   opts: OutboundOptions,
@@ -301,16 +316,6 @@ export async function polishOutboundDictation(
   // 6.79.2: a warm process started at key press answers without the CLI's start-up cost.
   const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null
   let prewarm: PrewarmOutcome | undefined = opts.prewarmToken ? 'missed' : undefined
-  // 6.97.0: what the model is sent, on its own field: `input_chars` stays the words dictated, so old and
-  // new rows still compare. Absent if it cannot be worked out. The prompt itself is unchanged.
-  const auditPromptChars = (): { promptChars?: number } => {
-    try {
-      const system = model === LUNA_DICTATION_MODEL ? 0 : DICTATION_POLISH_SYSTEM_PROMPTS[promptVersion].length
-      return { promptChars: system + buildDictationPolishPrompt(cleaned, getVocabulary(), promptVersion, customInstructions, { learnedStyle: style.lines, register }).length }
-    } catch {
-      return {}
-    }
-  }
   // 6.92.0 QA S1: the model time of an abort is stamped when the abort happens, not in the catch,
   // which runs only after the provider process is terminated (up to 4 s on the cold path).
   let abortedAt: number | null = null
@@ -345,7 +350,7 @@ export async function polishOutboundDictation(
       ...(used.polishPrompt ? { polishPrompt: used.polishPrompt } : {}),
       polishOutcome: guarded.outcome, ...(guarded.guard ? { polishGuard: guarded.guard } : {}),
       // Real numbers from a warm result. The cold path prints plain text, so its row stays estimated.
-      ...auditPromptChars(),
+      ...polishPromptChars(cleaned, model, promptVersion, customInstructions, { learnedStyle: style.lines, register }),
       ...warmEntry?.usage,
     })
     return {
@@ -370,7 +375,7 @@ export async function polishOutboundDictation(
         ...(canaried ? { polishRegister: register } : {}),
         ...(used.polishPrompt ? { polishPrompt: used.polishPrompt } : {}),
         polishOutcome: 'aborted',
-        ...auditPromptChars(),
+        ...polishPromptChars(cleaned, model, promptVersion, customInstructions, { learnedStyle: style.lines, register }),
         ...warmEntry?.usage,
       })
       console.warn('[prompt-draft] auto-clean aborted by the client (glossary-only)')

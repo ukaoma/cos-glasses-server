@@ -137,7 +137,8 @@ describe('a job that used up its retries', () => {
     expect(sync.meetings[0]!.label).toBe(sync.label)
     expect(sync.label).not.toMatch(/retrying|do not|syncing/i)
     const health = getMeetingFinalizationSnapshot()
-    expect(health).toMatchObject({ pending: 0, failed: 0, stopped: 1 })
+    expect(health).toMatchObject({ pending: 0, failed: 0 })
+    expect(sync.meetings.filter(m => m.phase === 'stopped')).toHaveLength(1)
     // Nothing is left running: no timer fires another attempt.
     await vi.advanceTimersByTimeAsync(3_600_000)
     expect(run.fn).toHaveBeenCalledTimes(3)
@@ -215,7 +216,7 @@ describe('an attempt that is running', () => {
     const sync = getMeetingSyncSnapshot()
     expect(sync).toMatchObject({ active: true, blocksRestart: true, label: 'HQ polish · pending handoff' })
     expect(sync.meetings.map(m => [m.meetingId, m.phase])).toEqual([[working.sessionId, 'hq_polish'], [stopped.sessionId, 'stopped']])
-    expect(getMeetingFinalizationSnapshot()).toMatchObject({ pending: 1, stopped: 1 })
+    expect(getMeetingFinalizationSnapshot()).toMatchObject({ pending: 1 })
   })
 })
 
@@ -345,6 +346,10 @@ describe('the fragment COS Control reads', () => {
       retained: [],
     })
     const { lastError: _error, ...finalization } = getMeetingFinalizationSnapshot()
-    expect(finalization).toEqual({ pending: 0, failed: 0, stopped: 1, oldestUpdatedAt: null, malformed: 0 })
+    expect(finalization).toEqual({ pending: 0, failed: 0, oldestUpdatedAt: null, malformed: 0 })
+  })
+  it('finalization keeps the keys older clients know: the stop shows in the rows, not as a new key', async () => {
+    await exhaust(savedJob())
+    expect(Object.keys(getMeetingFinalizationSnapshot())).toEqual(['pending', 'failed', 'oldestUpdatedAt', 'lastError', 'malformed'])
   })
 })
