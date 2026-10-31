@@ -24,6 +24,8 @@
 
 import type { QualifiedMachinePosition } from './mac-speaker-machine-evidence.js'
 import { isVoiceLabel } from './mac-voice-labels.js'
+import { isMacSpeakerHumanProtected } from './mac-speaker-protection.js'
+import { checkSpeakerName } from './speaker-name.js'
 
 /** One transcript chunk as stored in the `.g2-chunks.json` sidecar. */
 export interface ReviewChunk {
@@ -136,10 +138,17 @@ export interface Phrase {
 
 export interface VoiceReview {
   label: string
+  /** Only present on the explicit interval view. Never inferred from a label. */
+  kind?: 'anonymous-group' | 'unresolved' | 'preserved-anonymous' | 'name'
+  identityId?: string
+  displayName?: string
+  wordCount?: number
   segments: number
   /** Exact positions a human vouched for. A partial count does not waive the
    *  display floor for other positions carrying the same label. */
   confirmedSegments: number
+  /** Exact HQ words vouched for by a reader-validated interval annotation. */
+  confirmedWordCount?: number
   /** Voiced milliseconds credited to this voice. See `SpeakingTimeSource` for
    *  how it was measured — the two methods are not comparable. */
   speakingMs: number
@@ -296,6 +305,33 @@ export interface MeetingSpeakerReview {
   voices: VoiceReview[]
   /** Chronological spans, so a ribbon can be a timeline instead of a share bar. */
   timeline: TimelineSpan[]
+  effectiveSpeakerSummary?: {
+    version: 1
+    basis: 'source-bound-hq-words'
+    anonymousGroupCount: number
+    preservedAnonymousGroupCount: number
+    namedVoiceCount: number
+    withheldNameCount: number
+    unresolvedSpeakingMs: number
+    unresolvedWordCount: number
+    displayRowCount: number
+  }
+}
+
+/** Reader-validated word keys, never compacted chunk positions or label-wide grants.
+ * The reader must bind each key and original word digest to immutable BASE before
+ * passing it here. This reviewer independently checks current label and geometry. */
+export interface ExactConfirmedSpeakerWord {
+  batchIndex: number
+  wordIndex: number
+  label: string
+}
+
+/** Issued only by an applied, source-bound interval view. Not an admission API. */
+export interface EffectiveSpeakerWordView {
+  version: 1
+  anonymousGroups: ReadonlyArray<{ identityId: string; label: string }>
+  unresolvedLabel: 'Ext'
 }
 
 function mean(xs: number[]): number {
@@ -491,7 +527,7 @@ export function creditedChunkMs(chunks: ReviewChunk[]): number[] {
 export interface SpeakerWordSegment {
   /** Absolute ms offset of this segment; word times are RELATIVE to it. */
   startElapsed?: number
-  speakerWords?: Array<{ start?: number; end?: number; speaker?: string }>
+  speakerWords?: Array<{ start?: number; end?: number; speaker?: string; [key: string]: unknown }>
 }
 
 /** Total length of a set of intervals, counting overlap ONCE. */
@@ -599,6 +635,11 @@ export function reviewMeetingSpeakers(
     /** Validated call-view groups only. Enumerate an anonymous label only when
      * actual HQ words carry it; never append synthetic source chunks/positions. */
     callViewAnonymousLabels?: readonly string[]
+    /** Final word-backed inventory; absent keeps all legacy review semantics. */
+    effectiveWordView?: EffectiveSpeakerWordView
+    /** Exact keys from a validated interval-human annotation; never a whole-label grant.
+     * Explicit [] keeps a closed HQ inventory after the last undo; absence is legacy. */
+    exactConfirmedWords?: readonly ExactConfirmedSpeakerWord[]
     /**
      * The sidecar's `batchSegments`, when the HQ pass has run. Their word
      * timings give real voiced time; without them speaking time falls back to
@@ -628,11 +669,96 @@ export function reviewMeetingSpeakers(
   // measured), capped chunk deltas otherwise. The two are NOT interchangeable —
   // words are voiced time, deltas are wall clock with the silence capped off —
   // so the answer carries which one produced it.
-  const wordIntervals = speakerWordIntervals(options.batchSegments ?? [])
+  const sourceWordIntervals = speakerWordIntervals(options.batchSegments ?? [])
+  const exactWords = new Map<string, string>()
+  if (options.exactConfirmedWords !== undefined) {
+    if (!Array.isArray(options.exactConfirmedWords) || options.exactConfirmedWords.length > 40000) throw new Error('Invalid exact confirmed speaker words')
+    for (const proof of options.exactConfirmedWords) {
+      const word = options.batchSegments?.[proof?.batchIndex]?.speakerWords?.[proof?.wordIndex]
+      const key = `${proof?.batchIndex}:${proof?.wordIndex}`
+      if (!proof || !Number.isSafeInteger(proof.batchIndex) || proof.batchIndex < 0 || !Number.isSafeInteger(proof.wordIndex) || proof.wordIndex < 0
+        || typeof proof.label !== 'string' || proof.label !== proof.label.trim() || !checkSpeakerName(proof.label).ok
+        || /^(?:Ext|Unknown|Unidentified(?:\s+\d+)?|Speaker(?:\s*\d+)?|MU|Anonymous group \d+)$/i.test(proof.label) || isUnattributed(proof.label) || exactWords.has(key)
+        || !word || word.speaker !== proof.label || typeof word.word !== 'string' || !word.word.trim()
+        || typeof word.start !== 'number' || typeof word.end !== 'number' || !Number.isFinite(word.start) || !Number.isFinite(word.end)
+        || word.start < 0 || word.end <= word.start) throw new Error('Invalid exact confirmed speaker words')
+      exactWords.set(key, proof.label)
+    }
+  }
+  // An interval annotation remains word-scoped after automatic packet withdrawal.
+  // Evaluate pre-existing authority separately: a new exact word never lends its
+  // human grant to unconfirmed roots or same-name words elsewhere in the call.
+  const independentVoices = exactWords.size ? new Map(reviewMeetingSpeakers(chunks, { ...options, exactConfirmedWords: undefined }).voices.map(v => [v.label, v])) : new Map<string, VoiceReview>()
+  const exactLabels = new Set(exactWords.values())
+  // Partial older chunk/proof claims cannot be joined to a particular HQ word
+  // here. Preserve that mixed row and its existing floor instead of erasing an
+  // older claim or letting one newly confirmed word promote its other members.
+  const mixedPriorLabels = new Set([...exactLabels].filter(label => {
+    const prior = independentVoices.get(label)
+    return !prior?.nameAsserted && ((prior?.confirmedSegments ?? 0) > 0 || (prior?.machineQualifiedSegments ?? 0) > 0
+      || chunks.some(c => c.speaker === label && isMacSpeakerHumanProtected(c)))
+  }))
+  const wordOnlyHumanLabels = new Set([...exactLabels].filter(label => !independentVoices.get(label)?.nameAsserted && !mixedPriorLabels.has(label)))
+  const effective = sourceWordIntervals.size > 0 ? options.effectiveWordView
+    ?? (options.exactConfirmedWords !== undefined ? { version: 1 as const, anonymousGroups: [], unresolvedLabel: 'Ext' as const } : undefined) : undefined
+  if (effective && (effective.version !== 1 || effective.unresolvedLabel !== 'Ext'
+    || !Array.isArray(effective.anonymousGroups) || effective.anonymousGroups.length > 99
+    || effective.anonymousGroups.some(g => !g || typeof g.identityId !== 'string' || !/^[A-Za-z0-9:_-]{1,128}$/.test(g.identityId)
+      || typeof g.label !== 'string' || !/^Anonymous group [1-9]\d{0,5}$/.test(g.label)
+      || g.label === owner || confirmed.has(g.label))
+    || new Set(effective.anonymousGroups.map(g => g.identityId)).size !== effective.anonymousGroups.length
+    || new Set(effective.anonymousGroups.map(g => g.label)).size !== effective.anonymousGroups.length)) {
+    throw new Error('Invalid effective speaker word view')
+  }
+  const anonymousIds = new Map(effective?.anonymousGroups.map(g => [g.label, g.identityId]) ?? [])
+  const effectiveGeneric = (label: string): boolean => isUnattributed(label)
+    || /^(?:ext|unknown|unidentified(?: \d+| voice)?|speaker(?: \d+)?|voice [1-9]\d?)$/i.test(label.trim())
+  const humanAnonymous = new Set<string>()
+  if (effective) for (const segment of options.batchSegments ?? []) for (const word of segment.speakerWords ?? []) {
+    if (word.speaker && (isVoiceLabel(word.speaker) || /^Unidentified \d+$/.test(word.speaker))
+      && isMacSpeakerHumanProtected(word)) humanAnonymous.add(word.speaker)
+  }
+  // Protected numbered human decisions remain distinct. Automatic placeholder
+  // labels become one speech remainder, including Speaker 4 and above.
+  const effectiveLabel = (label: string, human = false): string => effective && !anonymousIds.has(label) && !human
+    && effectiveGeneric(label)
+    ? effective.unresolvedLabel : label
+  const wordIntervals = new Map<string, Array<[number, number]>>()
+  const addWordIntervals = (source: Map<string, Array<[number, number]>>, human = false) => {
+    for (const [label, intervals] of source) {
+      const target = effectiveLabel(label, human && humanAnonymous.has(label))
+      wordIntervals.set(target, [...(wordIntervals.get(target) ?? []), ...intervals])
+    }
+  }
+  const exactPhrases = new Map<string, Phrase[]>(), confirmedWordCounts = new Map<string, number>()
+  let unresolvedWordCount = 0
+  if (effective) for (const [batchIndex, segment] of (options.batchSegments ?? []).entries()) {
+    let phrase: Phrase | undefined, previousWord = -2
+    for (const [wordIndex, word] of (segment.speakerWords ?? []).entries()) {
+      const label = word.speaker ?? '', exact = exactWords.get(`${batchIndex}:${wordIndex}`) === label
+      const target = wordOnlyHumanLabels.has(label) && !exact && !isMacSpeakerHumanProtected(word)
+        ? effective.unresolvedLabel : effectiveLabel(label, isMacSpeakerHumanProtected(word) && humanAnonymous.has(label))
+      const intervals = speakerWordIntervals([{ ...segment, speakerWords: [{ ...word, speaker: target }] }])
+      addWordIntervals(intervals, isMacSpeakerHumanProtected(word))
+      if (target === effective.unresolvedLabel) unresolvedWordCount += intervals.get(target)?.length ?? 0
+      if (exact) {
+        confirmedWordCounts.set(label, (confirmedWordCounts.get(label) ?? 0) + 1)
+        const offset = typeof segment.startElapsed === 'number' && Number.isFinite(segment.startElapsed) ? segment.startElapsed : 0
+        const text = String(word.word).trim(), atMs = offset + word.start! * 1000
+        if (phrase && previousWord + 1 === wordIndex && exactWords.get(`${batchIndex}:${previousWord}`) === label) phrase.text = `${phrase.text} ${text}`.slice(0, 600)
+        else { phrase = { text: text.slice(0, 600), atMs, similarity: null, chunkIndex: null }; const list = exactPhrases.get(label) ?? []; list.push(phrase); exactPhrases.set(label, list) }
+        previousWord = wordIndex
+      }
+    }
+  } else addWordIntervals(sourceWordIntervals)
   const speakingTimeSource: SpeakingTimeSource = wordIntervals.size > 0 ? 'words' : 'chunks'
   const additional = (options.callViewAnonymousLabels ?? []).filter(label => isUnattributed(label) && wordIntervals.has(label))
-  const labels = [...new Set([...sequence, ...additional])].filter(s => s.length > 0)
-  const named = labels.filter(l => !isUnattributed(l))
+  const labels = [...new Set(effective
+    ? [...wordIntervals.keys(), ...sequence.filter(label => !effectiveGeneric(label) && !wordOnlyHumanLabels.has(label))]
+    : [...sequence, ...additional])].filter(s => s.length > 0)
+  const anonymous = (label: string): boolean => anonymousIds.has(label) || isUnattributed(label) || humanAnonymous.has(label)
+    || !!effective && effectiveGeneric(label)
+  const named = labels.filter(l => !anonymous(l))
 
   // The fallback expresses chunks as intervals too, so both paths decompose
   // through the same union arithmetic. `elapsed` is the chunk END, so a chunk
@@ -655,11 +781,15 @@ export function reviewMeetingSpeakers(
   const speakingFor = (label: string): number => Math.round(unionMs(intervalsFor(label)))
 
   const voices: VoiceReview[] = labels.map(label => {
-    const own = chunks.filter(c => (c.speaker ?? '') === label)
+    const intervalAnonymous = !!effective && anonymous(label)
+    // Interval groups have no whole-label chunk selector or proof. Their
+    // words/times are real, but borrowing an old root's phrases would alias it.
+    const wordOnlyHuman = wordOnlyHumanLabels.has(label)
+    const own = intervalAnonymous || wordOnlyHuman ? [] : chunks.filter(c => (c.speaker ?? '') === label)
     const sims = own.map(c => c.similarity).filter((s): s is number => typeof s === 'number' && s > 0)
     const machineQualifiedSegments = chunks.reduce((n, c, i) => {
       const proof = options.machineQualifiedPositions?.get(i)
-      return n + Number(c.speaker === label && !!proof && proof.label === label
+      return n + Number(!wordOnlyHuman && c.speaker === label && !!proof && proof.label === label
         && (c.chunkIndex === undefined || c.chunkIndex === proof.rawChunkIndex)
         && proof.independentWindows >= 2 && proof.minimumSimilarity >= .88 && proof.minimumMargin >= .05)
     }, 0)
@@ -675,13 +805,13 @@ export function reviewMeetingSpeakers(
       const capture = typeof c.similarity === 'number' && Number.isFinite(c.similarity) && c.similarity >= ASSERT_MIN_SIMILARITY
       return n + Number(!machine && !human && !capture)
     }, 0) : 0
-    const runs = speakerRuns(sequence, label)
-    const unattributed = isUnattributed(label)
-    const confirmedSegments = unattributed ? 0 : confirmed.has(label) ? own.length
+    const runs = wordOnlyHuman ? [] : speakerRuns(sequence, label)
+    const unattributed = anonymous(label)
+    const confirmedSegments = unattributed || wordOnlyHuman ? 0 : confirmed.has(label) ? own.length
       : chunks.reduce((n, c, i) => n + Number(c.speaker === label && options.confirmedChunks?.get(i) === label), 0)
 
     const thrashesWith: ThrashPair[] = []
-    if (!unattributed) {
+    if (!unattributed && !wordOnlyHuman) {
       for (const other of named) {
         if (other === label) continue
         const p = pairFlipRate(sequence, label, other)
@@ -711,7 +841,7 @@ export function reviewMeetingSpeakers(
     const assertionBlockers: string[] = []
     if (unattributed) {
       assertionBlockers.push('no name was ever assigned to this voice')
-    } else if (confirmed.has(label)) {
+    } else if (confirmed.has(label) || wordOnlyHuman) {
       // A human said this is them. Blockers stay OFF the list rather than being
       // listed-then-overridden, because a reviewer reading "similarity 0.56
       // below 0.65" under a name they personally confirmed would reasonably
@@ -748,23 +878,31 @@ export function reviewMeetingSpeakers(
 
     return {
       label,
+      ...(effective ? {
+        kind: anonymousIds.has(label) ? 'anonymous-group' as const : label === effective.unresolvedLabel
+          ? 'unresolved' as const : isUnattributed(label) ? 'preserved-anonymous' as const : 'name' as const,
+        ...(anonymousIds.has(label) ? { identityId: anonymousIds.get(label) } : {}),
+        displayName: label === effective.unresolvedLabel ? 'Unresolved speech' : label,
+        wordCount: wordIntervals.get(label)?.length ?? 0,
+      } : {}),
       segments: own.length,
       confirmedSegments,
+      ...(exactWords.size ? { confirmedWordCount: confirmedWordCounts.get(label) ?? 0 } : {}),
       speakingMs: speakingFor(label),
       meanSimilarity: meanSim,
       meanRun: Math.round(mean(runs) * 100) / 100,
       longestRun: runs.length ? Math.max(...runs) : 0,
-      isOwner: label === owner,
+      isOwner: label === owner && (!effective || !unattributed),
       /** True when a human vouched for this label in this meeting. */
-      confirmedByHuman: confirmed.has(label),
+      confirmedByHuman: (confirmed.has(label) || wordOnlyHuman) && (!effective || !unattributed),
       machineQualified: !unattributed && machineQualified,
       machineQualifiedSegments: unattributed ? 0 : machineQualifiedSegments,
-      assertionSource: assertionBlockers.length ? null : confirmed.has(label) ? 'human' : label === owner ? 'owner' : machineQualified ? 'qualified-profile' : machineQualifiedSegments > 0 ? 'capture-and-qualified-profile' : 'capture-match',
+      assertionSource: assertionBlockers.length ? null : confirmed.has(label) || wordOnlyHuman ? 'human' : label === owner ? 'owner' : machineQualified ? 'qualified-profile' : machineQualifiedSegments > 0 ? 'capture-and-qualified-profile' : 'capture-match',
       reliability,
       nameAsserted: assertionBlockers.length === 0,
       assertionBlockers,
       thrashesWith,
-      phrases: selectPhrases(chunks, label, limit, durationMs),
+      phrases: intervalAnonymous ? [] : wordOnlyHuman ? (exactPhrases.get(label) ?? []).slice(0, limit) : selectPhrases(chunks, label, limit, durationMs),
     }
   })
 
@@ -796,6 +934,30 @@ export function reviewMeetingSpeakers(
     ...speakingBuckets(voices, intervalsFor, durationMs),
     durationMs,
     voices,
-    timeline: speakerTimeline(chunks, durationMs),
+    timeline: effective ? wordSpeakerTimeline(wordIntervals) : speakerTimeline(chunks, durationMs),
+    ...(effective ? { effectiveSpeakerSummary: {
+      version: 1 as const,
+      basis: 'source-bound-hq-words' as const,
+      anonymousGroupCount: voices.filter(v => v.kind === 'anonymous-group').length,
+      preservedAnonymousGroupCount: voices.filter(v => v.kind === 'preserved-anonymous').length,
+      namedVoiceCount: voices.filter(v => v.nameAsserted).length,
+      withheldNameCount: voices.filter(v => v.kind === 'name' && !v.nameAsserted).length,
+      unresolvedSpeakingMs: speakingFor(effective.unresolvedLabel),
+      unresolvedWordCount,
+      displayRowCount: voices.length,
+    } } : {}),
   }
+}
+
+/** Same exact word intervals as the rows/buckets; gaps stay gaps, overlaps stay overlaps. */
+function wordSpeakerTimeline(byLabel: Map<string, Array<[number, number]>>): TimelineSpan[] {
+  const out: TimelineSpan[] = []
+  for (const [speaker, intervals] of byLabel) {
+    let span: TimelineSpan | undefined
+    for (const [startMs, endMs] of [...intervals].sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+      if (span && startMs <= span.endMs) { span.endMs = Math.max(span.endMs, endMs); span.segments++ }
+      else { span = { speaker, startMs, endMs, segments: 1 }; out.push(span) }
+    }
+  }
+  return out.sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs || a.speaker.localeCompare(b.speaker))
 }

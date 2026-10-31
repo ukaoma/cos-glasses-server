@@ -1,3 +1,16 @@
+## 6.96.2 - Source-bound anonymous speaker review (private local candidate)
+
+2026-10-30. Pairs with private COS Control 0.5.357 / build 411 for the interval review. Existing clients retain their compatible review path.
+
+- A separately qualified, source-bound whole-call packet can project anonymous groups onto fully supported timed words. Gaps, transitions and unsupported speech remain unresolved. This derived review does not rewrite the canonical meeting, correction ledger, names, profiles, words or timestamps.
+- The review separates supported anonymous groups, existing named rows and unresolved speech. These rows are not a count of people. Fragment counts and old root-level phrases do not stand in for interval evidence.
+- Human review supports exact timed-word naming, renaming and Undo while the automatic producer is off. Each action is bound to the reviewed source revision; prior corrections and protected words take precedence. For this private candidate, a name already asserted elsewhere in the source is refused rather than risking attribution of unrelated words.
+- A recording can return to its original review after its interval naming actions are undone. Interrupted transactions require recovery before another action; packet and state changes invalidate stale review tokens. Original files, earlier corrections and voice profiles remain untouched.
+- Held-naming Undo proceeds separately for each meeting: a call-wide review can block its own meeting without preventing unrelated meetings in the batch from reverting.
+- The accepted-only October 30 repair covers 3,423 previously unassigned timed words in four anonymous groups, leaves 9,471 words unresolved, and preserves 253 named words. Whole-call human comparison checks on two earlier calls found no conflicting names within this narrower accepted support; identity accuracy on the current call remains unconfirmed. Broader interval expansion failed that quality gate and remains excluded.
+- Includes the 6.96.1 bounded save-receipt lookup correction for large recording sidecars; retained audio and saved-meeting receipts remain separate from speaker quality.
+- Transcript cleanup, live cues and live speaker ID remain disabled. Automatic interval production, profile naming and enrollment are not enabled by this candidate. Historical repair requires the exact qualified packet and correction-preservation checks.
+
 ## 6.95.0 - Speaker merge shadow mode (opt-in, log only)
 
 2026-10-28. Compatible with COS Control 0.5.352; no Control or glasses change required.

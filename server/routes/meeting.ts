@@ -3,6 +3,8 @@ import { readMacSpeakerMachineEvidence } from '../lib/mac-speaker-machine-eviden
 import { isEffectiveMacSpeakerCallView, readMacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
 import { commitMacCallHumanAnnotation, isMacCallHumanName, macCallHumanPaths, macCallHumanScopes, previewMacCallHumanAnnotation, readMacCallHumanFile, recoverMacCallHumanAnnotation, type MacCallHumanFiles, type MacCallHumanScope } from '../lib/mac-speaker-call-human.js'
 import type { MacSpeakerCallPacket, MacSpeakerCallView } from '../lib/mac-speaker-call-view.js'
+import { buildMacIntervalHumanScopes, commitMacIntervalHumanAnnotation, inspectMacIntervalHumanJournal, macIntervalHumanPaths, previewMacIntervalHumanAnnotation, recoverMacIntervalHumanAnnotation, undoMacIntervalHumanAnnotation, type MacIntervalHumanScope } from '../lib/mac-speaker-call-interval-human.js'
+import { commitOriginalViewTransaction, inspectOriginalViewTransaction, originalViewPaths, previewOriginalViewTransaction, recoverOriginalViewTransaction } from '../lib/mac-speaker-call-original-view.js'
 import { checkSpeakerName } from '../lib/speaker-name.js'
 import { dataPath } from '../lib/data-dir.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
@@ -1625,8 +1627,18 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     if (sidecarJSON) {
       try {
         const view = readMacSpeakerCallView(sidecarPath, sidecarJSON, meetingPath)
-        if (isEffectiveMacSpeakerCallView(view)) hash.update(JSON.stringify({ packetSHA256: view.metadata.packetSHA256, generation: view.metadata.generation, revision: view.metadata.revision, mode: view.metadata.mode, humanAnnotation: view.metadata.humanAnnotation }))
+        if (isEffectiveMacSpeakerCallView(view)) hash.update(JSON.stringify({ packetSHA256: view.metadata.packetSHA256, generation: view.metadata.generation, revision: view.metadata.revision, mode: view.metadata.mode, humanAnnotation: view.metadata.humanAnnotation, intervalHumanAnnotation: view.metadata.intervalHumanAnnotation, intervalHumanRecoveryRequired: view.metadata.intervalHumanRecoveryRequired }))
       } catch { /* Preserve existing unreadable-base handling in each caller. */ }
+    }
+    // Include sidecar-only decisions and recovery states even after an automatic
+    // packet is withdrawn or becomes unreadable. Old preview revisions fail CAS.
+    if (MAC_CAPTURE_ID.test(String((() => { try { return JSON.parse(sidecarJSON ?? '{}').sessionId } catch { return '' } })()))) {
+      const id = JSON.parse(sidecarJSON!).sessionId
+      const files = { sidecarPath, meetingPath }, paths = macIntervalHumanPaths(files, id), legacy = macCallHumanPaths(files, id)
+      for (const [path, limit] of [[paths.packet, 16 * 1024 * 1024], [sidecarPath.replace(/\.g2-chunks\.json$/, '.speaker-call-state.json'), 16 * 1024 * 1024], [paths.legacyAnnotation, 16 * 1024 * 1024], [paths.annotation, 16 * 1024 * 1024], [paths.journal, 40 * 1024 * 1024], [originalViewPaths(files, id).journal, 1024 * 1024], [legacy.journal, 64 * 1024 * 1024], [paths.ledger, 8 * 1024 * 1024]] as const) {
+        try { hash.update(JSON.stringify(readMacCallHumanFile(path, limit, true)?.hash ?? null)) }
+        catch { hash.update(JSON.stringify({ unreadable: path })) }
+      }
     }
     return hash.digest('hex')
   }
@@ -1639,8 +1651,13 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const sidecarPath = operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath
     try {
       if (MAC_CAPTURE_ID.test(sessionId)) {
+        const files = { sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }
+        const originalTransaction = inspectOriginalViewTransaction(files, sessionId)
+        if (originalTransaction.status === 'prepared' || originalTransaction.status === 'recovery-invalid') return { status: 409, body: { reason: 'human_annotation_recovery_required', error: 'Finish the interrupted return to the original view before another correction.', mutable: false } }
         let pending = true
         try { const journal = readMacCallHumanFile(macCallHumanPaths({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, sessionId).journal, 64 * 1024 * 1024, true); pending = journal !== null && JSON.parse(journal.text).phase !== 'complete' } catch { /* A malformed owned journal must not permit a competing mutation. */ }
+        const intervalJournal = inspectMacIntervalHumanJournal({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, sessionId)
+        pending = pending || intervalJournal.status === 'prepared' || intervalJournal.status === 'recovery-invalid'
         if (pending) return { status: 409, body: { reason: 'human_annotation_recovery_required', error: 'Finish the interrupted scoped annotation before another correction.', mutable: false } }
       }
       const view = readMacSpeakerCallView(sidecarPath, readFileSync(sidecarPath, 'utf8'), operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath)
@@ -1655,6 +1672,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   }
 
   function callGroupScopes(files: MacCallHumanFiles, baseJSON: string, view: MacSpeakerCallView): MacCallHumanScope[] {
+    // A sample/word interval is not a whole raw-chunk naming selector. Keep
+    // this policy read-only until the consumer can review exact ranges.
+    if (intervalPolicyPresent(view)) return []
     const captureId = JSON.parse(baseJSON).sessionId, paths = macCallHumanPaths(files, captureId)
     const packet = readMacCallHumanFile(paths.packet, 16 * 1024 * 1024, true)
     let parsedPacket: MacSpeakerCallPacket | null = null
@@ -1665,6 +1685,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       annotationJSON: readMacCallHumanFile(paths.annotation, 16 * 1024 * 1024, true)?.text ?? null })
   }
   const publicCallScope = (scope: MacCallHumanScope) => ({ identityId: scope.identityId, displayLabel: scope.displayLabel, reviewBasis: scope.reviewBasis, scopeSHA256: scope.scopeSHA256, members: scope.members, fieldCount: scope.fields.length })
+  function intervalPolicyPresent(view: MacSpeakerCallView): boolean {
+    return view.metadata.status === 'applied' && view.metadata.mode === 'source-bound-intervals' || !!view.metadata.intervalHumanAnnotation || !!view.metadata.intervalHumanAnnotationInvalid || !!view.metadata.intervalHumanRecoveryRequired
+  }
   function callGroupSource(sessionId: string) {
     const operations = cosOperationsMeetingsConfigured() ? findCosOperationsMeetingBySessionId(sessionId) : null
     if (operations?.mergedScribeConflict?.length) throw Error('meeting source conflict')
@@ -1697,6 +1720,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     try {
       const source = callGroupSource(sessionId)
       if (req.body?.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      const view = readMacSpeakerCallView(source.files.sidecarPath, readMacCallHumanFile(source.files.sidecarPath, 32 * 1024 * 1024)!.text, source.files.meetingPath)
+      if (intervalPolicyPresent(view)) { res.status(409).json({ reason: 'interval_scoped_action_required' }); return }
       recoverMacCallHumanAnnotation(source.files, sessionId)
       notifyMacSpeakerCallLedgerChanged(sessionId)
       res.json({ ok: true, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
@@ -1712,6 +1737,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       const source = callGroupSource(sessionId)
       if (body.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
       const base = readMacCallHumanFile(source.files.sidecarPath, 32 * 1024 * 1024)!.text, view = readMacSpeakerCallView(source.files.sidecarPath, base, source.files.meetingPath)
+      if (intervalPolicyPresent(view)) { res.status(409).json({ reason: 'interval_scoped_action_required' }); return }
       const scope = callGroupScopes(source.files, base, view).find(s => s.identityId === identityId && s.scopeSHA256 === body.scopeSHA256)
       if (!scope) { res.status(409).json({ reason: 'group_scope_changed', error: 'Reopen the group before naming it' }); return }
       const selected = new Set<number>(body.rawChunkIndices), members = scope.members.filter(m => selected.has(m.rawChunkIndex))
@@ -1725,7 +1751,11 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // Revising an existing human decision remains independent of the model.
       if (scope.reviewBasis !== 'human-authored') {
         const refresh = await macSpeakerCallCachedRefreshAvailability(sessionId, source.files.sidecarPath)
-        if (!refresh.available) { res.status(409).json({ reason: 'group_refresh_unavailable', error: 'Speaker reconciliation is not ready. Your selection was not changed; reopen this group after it finishes.', retryable: true }); return }
+        // producer_disabled is a setting, not a wait: nothing is coming to finish it, so it must not ask for a retry.
+        // It stays refused because naming now would withdraw the packet and strand every other group in this view.
+        if (!refresh.available) { res.status(409).json({ reason: 'group_refresh_unavailable', ...(refresh.reason === 'producer_disabled'
+          ? { error: 'Naming these groups is not available while speaker reconciliation is off. Your selection was not changed.', retryable: false }
+          : { error: 'Speaker reconciliation is not ready. Your selection was not changed; reopen this group after it finishes.', retryable: true }) }); return }
         // The cached receipt check awaits child IO. A finalization/resume job
         // may start in that interval before it changes any source bytes.
         const afterAdmission = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? sourceRevisionRefusal(sessionId, body) ?? finalizingRefusal(sessionId)
@@ -1735,6 +1765,130 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       notifyMacSpeakerCallLedgerChanged(sessionId)
       res.json({ ok: true, confirmed: true, correction, enrollmentAllowed: false, anonymousRefreshRequired: true, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
     } catch (error) { res.status(409).json({ reason: 'group_correction_refused', error: String(error) }) }
+  })
+
+  // Interval naming cannot reuse raw-chunk selectors. These actions write only
+  // a separate source-bound human sidecar; they never invoke the acoustic producer,
+  // enroll profiles, or rewrite BASE/Markdown/the shared corrections ledger.
+  function intervalGroupScopes(files: MacCallHumanFiles, baseJSON: string, view: MacSpeakerCallView): MacIntervalHumanScope[] {
+    if (view.metadata.humanAnnotationInvalid || view.metadata.intervalHumanRecoveryRequired) throw Error('human annotation requires recovery')
+    const id = JSON.parse(baseJSON).sessionId, paths = macIntervalHumanPaths(files, id)
+    const packetFile = readMacCallHumanFile(paths.packet, 16 * 1024 * 1024, true)
+    let packet: MacSpeakerCallPacket | null = null
+    try { packet = packetFile ? JSON.parse(packetFile.text) : null } catch { /* withdrawn automatic projection */ }
+    return buildMacIntervalHumanScopes({ baseJSON, view, packet,
+      markdown: readMacCallHumanFile(files.meetingPath, 16 * 1024 * 1024)!.text,
+      ledgerJSONL: readMacCallHumanFile(paths.ledger, 8 * 1024 * 1024, true)?.text ?? '',
+      legacyAnnotationJSON: readMacCallHumanFile(paths.legacyAnnotation, 16 * 1024 * 1024, true)?.text ?? null,
+      annotationJSON: readMacCallHumanFile(paths.annotation, 16 * 1024 * 1024, true)?.text ?? null })
+  }
+  const publicIntervalScope = (scope: MacIntervalHumanScope) => ({ kind: scope.kind, reviewBasis: 'exact-hq-words', identityId: scope.identityId, displayLabel: scope.displayLabel, scopeSHA256: scope.scopeSHA256, members: scope.members, fieldCount: scope.fieldCount, ...(scope.selectionRuns ? { selectionRuns: scope.selectionRuns } : {}) })
+  const publicIntervalAnnotation = (view: MacSpeakerCallView) => view.metadata.intervalHumanAnnotation ? {
+    revision: view.metadata.intervalHumanAnnotation.revision, annotationSHA256: view.metadata.intervalHumanAnnotation.annotationSHA256,
+    activeActions: view.metadata.intervalHumanAnnotation.activeActions,
+  } : null
+  function intervalReviewFields(files: MacCallHumanFiles, base: string, view: MacSpeakerCallView) {
+    // Omit entirely for legacy/G2 readers; even an empty new array is a new-policy
+    // signal to Control and must not make every old meeting read-only.
+    const intervalPolicy = intervalPolicyPresent(view)
+    const captureId = JSON.parse(base).sessionId
+    if (!MAC_CAPTURE_ID.test(captureId) || !intervalPolicy && view.metadata.status === 'applied') return {}
+    let originalAvailable = false
+    if (!view.metadata.humanAnnotationInvalid && !view.metadata.intervalHumanRecoveryRequired && !view.metadata.intervalHumanAnnotation?.activeActions.length) {
+      try { originalAvailable = previewOriginalViewTransaction(files, captureId).artifacts.length > 0 } catch { /* Refusal is an explicit unavailable capability. */ }
+    }
+    // An unreadable/withdrawn packet or a state-only remnant still blocks legacy
+    // mutation. Offer its verified archival exit without treating that remnant
+    // as a valid acoustic scope. Unaffected legacy views keep their old tools.
+    if (!intervalPolicy && !originalAvailable) return {}
+    let scopes: MacIntervalHumanScope[] = []
+    if (intervalPolicy) try { scopes = intervalGroupScopes(files, base, view) } catch { /* read-only recovery UI */ }
+    return { intervalGroupScopes: scopes.map(publicIntervalScope), intervalHumanAnnotation: publicIntervalAnnotation(view), intervalHumanRecoveryRequired: view.metadata.intervalHumanRecoveryRequired === true, intervalOriginalViewAvailable: originalAvailable }
+  }
+  function exactIntervalConfirmedWords(base: Record<string, any>, view: MacSpeakerCallView) {
+    if (!view.metadata.intervalHumanAnnotation) return undefined
+    return view.metadata.intervalHumanAnnotation.confirmedWords.map(proof => {
+      const original = base.batchSegments?.[proof.batchIndex]?.speakerWords?.[proof.wordIndex], effective = view.doc.batchSegments?.[proof.batchIndex]?.speakerWords?.[proof.wordIndex]
+      if (!original || createHash('sha256').update(JSON.stringify(original)).digest('hex') !== proof.wordSHA256 || effective?.speaker !== proof.label) throw Error('Exact human word source changed')
+      return { batchIndex: proof.batchIndex, wordIndex: proof.wordIndex, label: proof.label }
+    })
+  }
+  const validSHA = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+  const intervalBodyKeys = (body: any, keys: string[]) => body && typeof body === 'object' && !Array.isArray(body) && Object.keys(body).length === keys.length && Object.keys(body).every(k => keys.includes(k))
+  router.get('/meeting/:sessionId/speaker-interval-groups', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!MAC_CAPTURE_ID.test(sessionId)) { res.status(400).json({ reason: 'not_mac_capture' }); return }
+    const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(req.query.recordId)
+    if (refusal) { res.status(refusal.status).json(refusal.body); return }
+    try {
+      const source = callGroupSource(sessionId)
+      if (req.query.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      const base = readMacCallHumanFile(source.files.sidecarPath, 32 * 1024 * 1024)!.text, view = readMacSpeakerCallView(source.files.sidecarPath, base, source.files.meetingPath)
+      res.json({ sessionId, recordId: source.recordId, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath), ...intervalReviewFields(source.files, base, view), enrollmentAllowed: false })
+    } catch (error) { res.status(409).json({ reason: 'interval_group_review_unavailable', error: String(error) }) }
+  })
+  router.post('/meeting/:sessionId/speaker-interval-groups/recover', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? ''), body = req.body
+    if (!MAC_CAPTURE_ID.test(sessionId) || !intervalBodyKeys(body, ['recordId', 'confirm']) || body.confirm !== true) { res.status(400).json({ reason: 'confirmation_required' }); return }
+    const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? finalizingRefusal(sessionId)
+    if (refusal) { res.status(refusal.status).json(refusal.body); return }
+    try {
+      const source = callGroupSource(sessionId)
+      if (body.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      const original = inspectOriginalViewTransaction(source.files, sessionId)
+      if (original.status === 'prepared' || original.status === 'recovery-invalid') recoverOriginalViewTransaction(source.files, sessionId)
+      else recoverMacIntervalHumanAnnotation(source.files, sessionId)
+      res.json({ ok: true, confirmed: true, enrollmentAllowed: false, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
+    } catch (error) { res.status(409).json({ reason: 'interval_group_recovery_refused', error: String(error) }) }
+  })
+  router.post('/meeting/:sessionId/speaker-interval-groups/original', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? ''), body = req.body
+    if (!MAC_CAPTURE_ID.test(sessionId) || !intervalBodyKeys(body, ['recordId', 'expectedRevision', 'confirm']) || body.confirm !== true || !validSHA(body.expectedRevision)) { res.status(400).json({ reason: 'invalid_original_view_confirmation' }); return }
+    const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? sourceRevisionRefusal(sessionId, body) ?? finalizingRefusal(sessionId)
+    if (refusal) { res.status(refusal.status).json(refusal.body); return }
+    try {
+      const source = callGroupSource(sessionId)
+      if (body.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      const preview = previewOriginalViewTransaction(source.files, sessionId)
+      if (!preview.artifacts.length) throw Error('No active interval view to archive')
+      commitOriginalViewTransaction({ files: source.files, captureId: sessionId, expectedScopeSHA256: preview.scopeSHA256 })
+      res.json({ ok: true, confirmed: true, enrollmentAllowed: false, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
+    } catch (error) { res.status(409).json({ reason: 'interval_original_view_refused', error: String(error) }) }
+  })
+  router.post('/meeting/:sessionId/speaker-interval-groups/undo', (req, res) => {
+    const sessionId = String(req.params.sessionId ?? ''), body = req.body
+    if (!MAC_CAPTURE_ID.test(sessionId) || !intervalBodyKeys(body, ['recordId', 'expectedRevision', 'actionId', 'annotationRevision', 'annotationSHA256', 'confirm']) || body.confirm !== true || !validSHA(body.expectedRevision) || !validSHA(body.annotationSHA256) || !Number.isSafeInteger(body.annotationRevision) || body.annotationRevision < 1 || typeof body.actionId !== 'string' || !/^mac-speaker-call-interval-human-v1:[a-f0-9-]{36}$/.test(body.actionId)) { res.status(400).json({ reason: 'invalid_interval_undo' }); return }
+    const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? sourceRevisionRefusal(sessionId, body) ?? finalizingRefusal(sessionId)
+    if (refusal) { res.status(refusal.status).json(refusal.body); return }
+    try {
+      const source = callGroupSource(sessionId)
+      if (body.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      const view = readMacSpeakerCallView(source.files.sidecarPath, readMacCallHumanFile(source.files.sidecarPath, 32 * 1024 * 1024)!.text, source.files.meetingPath)
+      if (view.metadata.humanAnnotationInvalid || view.metadata.intervalHumanRecoveryRequired) throw Error('human annotation recovery required')
+      const correction = undoMacIntervalHumanAnnotation({ files: source.files, captureId: sessionId, actionId: body.actionId, revision: body.annotationRevision, annotationSHA256: body.annotationSHA256 })
+      res.json({ ok: true, confirmed: true, correction, enrollmentAllowed: false, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
+    } catch (error) { res.status(409).json({ reason: 'interval_group_undo_refused', error: String(error) }) }
+  })
+  router.post('/meeting/:sessionId/speaker-interval-groups/:identityId/relabel', (req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    const sessionId = String(req.params.sessionId ?? ''), identityId = String(req.params.identityId ?? ''), body = req.body
+    const previewOnly = body?.dryRun === true && body?.confirm === undefined, confirmed = body?.confirm === true && body?.dryRun === undefined
+    const keys = ['recordId', 'expectedRevision', 'scopeSHA256', 'memberIds', 'to', previewOnly ? 'dryRun' : 'confirm']
+    if (!MAC_CAPTURE_ID.test(sessionId) || !/^[A-Za-z0-9:_-]{1,128}$/.test(identityId) || !intervalBodyKeys(body, keys) || !previewOnly && !confirmed || !validSHA(body.expectedRevision) || !validSHA(body.scopeSHA256) || !isMacCallHumanName(body.to) || !Array.isArray(body.memberIds) || !body.memberIds.length || body.memberIds.length > 20000 || !body.memberIds.every(validSHA) || new Set(body.memberIds).size !== body.memberIds.length) { res.status(400).json({ reason: 'invalid_interval_selection' }); return }
+    const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? sourceRevisionRefusal(sessionId, body) ?? finalizingRefusal(sessionId)
+    if (refusal) { res.status(refusal.status).json(refusal.body); return }
+    try {
+      const source = callGroupSource(sessionId)
+      if (body.recordId !== source.recordId) { res.status(409).json({ reason: 'record_source_mismatch' }); return }
+      const base = readMacCallHumanFile(source.files.sidecarPath, 32 * 1024 * 1024)!.text, view = readMacSpeakerCallView(source.files.sidecarPath, base, source.files.meetingPath)
+      const scope = intervalGroupScopes(source.files, base, view).find(s => s.identityId === identityId && s.scopeSHA256 === body.scopeSHA256)
+      if (!scope) { res.status(409).json({ reason: 'interval_scope_changed' }); return }
+      const selection = previewMacIntervalHumanAnnotation(scope, body.memberIds, body.to)
+      if (previewOnly) { res.json({ preview: { identityId, scopeSHA256: scope.scopeSHA256, ...selection, to: body.to, enrollmentAllowed: false, sourceRevision: body.expectedRevision } }); return }
+      const correction = commitMacIntervalHumanAnnotation({ files: source.files, captureId: sessionId, scope, memberIds: body.memberIds, to: body.to })
+      res.json({ ok: true, confirmed: true, correction, enrollmentAllowed: false, sourceRevision: reviewRevision(source.files.meetingPath, source.files.sidecarPath) })
+    } catch (error) { res.status(409).json({ reason: 'interval_group_correction_refused', error: String(error) }) }
   })
 
   function sourceRevisionRefusal(sessionId: string, body: any): { status: number; body: Record<string, unknown> } | null {
@@ -1848,6 +2002,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const machineEvidence = readMacSpeakerMachineEvidence(sidecar)
     const review = reviewMeetingSpeakers(withIndices, {
       callViewAnonymousLabels: callView.metadata.groups.map(g => g.label),
+      effectiveWordView: callView.metadata.effectiveWordView,
+      exactConfirmedWords: exactIntervalConfirmedWords(sidecar, callView),
       owner: getOwnerSpeakerLabel(),
       // Labels a human already vouched for in this meeting. Without this the
       // floor re-demotes a confirmed name on every reload, and the reviewer
@@ -1885,6 +2041,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       ...review,
       ...(isEffectiveMacSpeakerCallView(callView) || callView.metadata.humanAnnotationInvalid ? { mutable: false, mutationBlockedReason: callView.metadata.humanAnnotationInvalid ? 'human_annotation_invalid' : 'derived_call_view_requires_scoped_action' } : {}),
       speakerCallView: callView.metadata,
+      ...intervalReviewFields({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, baseJSON, callView),
       ...(() => { try { return { groupScopes: callGroupScopes({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, baseJSON, callView).map(publicCallScope) } } catch { return { groupScopes: [] } } })(),
     })
   })
@@ -1969,6 +2126,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const machineEvidence = readMacSpeakerMachineEvidence(sidecar)
     const review = reviewMeetingSpeakers(attachRawChunkIndices(chunks, sidecar.chunkEntries), {
       callViewAnonymousLabels: callView.metadata.groups.map(g => g.label),
+      effectiveWordView: callView.metadata.effectiveWordView,
+      exactConfirmedWords: exactIntervalConfirmedWords(sidecar, callView),
       owner: getOwnerSpeakerLabel(),
       confirmed: confirmedLabels(sessionId),
       confirmedChunks: confirmedChunks(sessionId),
@@ -1999,6 +2158,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       confirmedByHuman: v.confirmedByHuman,
       machineQualified: v.machineQualified,
       machineQualifiedSegments: v.machineQualifiedSegments,
+      ...(v.kind ? { kind: v.kind, displayName: v.displayName, identityId: v.identityId } : {}),
     }))
 
     // A missing .md is not fatal — the review and the sidecar still describe the
@@ -2064,6 +2224,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       durationMin,
       scribeAvailable: markdown.length > 0,
       speakerCallView: callView.metadata,
+      ...(review.effectiveSpeakerSummary ? { effectiveSpeakerSummary: review.effectiveSpeakerSummary } : {}),
       attendees,
       speakingTimeSource: review.speakingTimeSource,
       voicedMs: review.voicedMs,

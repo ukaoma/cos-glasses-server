@@ -10,6 +10,10 @@ import { readMacSpeakerMachineEvidence } from './mac-speaker-machine-evidence.js
 import { hasMacSpeakerProtectedRows, isMacSpeakerHumanProtected } from './mac-speaker-protection.js'
 import { boundWords, renderMarkdown } from './mac-speaker-repair-render.js'
 import { applyMacCallHumanAnnotation, macCallHumanPaths, readMacCallHumanFile } from './mac-speaker-call-human.js'
+import { intervalSamples, nativeTurns } from './speaker-shadow-decide.js'
+import { createMacSpeakerCallIntervalProjector, prepareMacSpeakerCallIntervalSupport, validateMacSpeakerCallIntervalSupport, type MacSpeakerCallIntervalMembership, type MacSpeakerCallIntervalSupport } from './mac-speaker-call-interval-projection.js'
+import { applyMacIntervalHumanAnnotation, inspectMacIntervalHumanJournal, macIntervalHumanPaths, type MacIntervalHumanMetadata } from './mac-speaker-call-interval-human.js'
+import { inspectOriginalViewTransaction } from './mac-speaker-call-original-view.js'
 
 type Doc = Record<string, any>
 const HASH = /^[a-f0-9]{64}$/
@@ -23,8 +27,8 @@ const checkedPackets = new Set<string>()
 const checkedBaseProofs = new Map<string, ReturnType<typeof readMacSpeakerMachineEvidence>['status']>()
 function remember<K, V>(cache: Map<K, V>, key: K, value: V): void { if (cache.size >= 8) cache.delete(cache.keys().next().value!); cache.set(key, value) }
 export interface MacSpeakerCallPacket {
-  version: 1; policy: 'fluid256-call-view-v1'; admission: 'off' | 'qualified'
-  projectionPolicy: 'strict' | 'anonymous-estimate'
+  version: 1 | 2; policy: 'fluid256-call-view-v1' | 'fluid256-call-interval-view-v1'; admission: 'off' | 'qualified'
+  projectionPolicy: 'strict' | 'anonymous-estimate' | 'source-bound-intervals'
   captureId: string; generation: string; revision: number
   baseSHA256: string; ledgerSHA256: string; sourceBindingSHA256: string
   stateSHA256: string; modelSHA256: string; cliSHA256: string
@@ -32,26 +36,40 @@ export interface MacSpeakerCallPacket {
   protectedRawChunkIndices: number[]
   aliasProtectedRawChunkIndices: number[]
   displayLabels: Record<string, string>
-  provenance: { nativeAuthenticated: false; timingBasis: 'native-exclusive-intersect-machine-production'; speakerPurityVerified: false; excludedProductionSegments?: ReturnType<typeof inspectMacSpeakerShadowCallSource>['excludedProductionSegments'] }
+  provenance: { nativeAuthenticated: false; timingBasis: 'native-exclusive-intersect-machine-production'; speakerPurityVerified: false; excludedProductionSegments?: ReturnType<typeof inspectMacSpeakerShadowCallSource>['excludedProductionSegments']; nativeSHA256?: string; timelinePCMSHA256?: string }
+  intervalSupport?: MacSpeakerCallIntervalSupport
   packetSHA256: string
 }
 export interface MacSpeakerCallView {
   doc: Doc
   markdown?: string
-  metadata: { status: 'base' | 'applied'; reason: string; mode: 'strict' | 'anonymous-estimate' | 'alias-evaluation'; revision?: number; generation?: string; packetSHA256?: string; changedChunks: number; changedWords: number; groups: Array<{ identityId: string; label: string; memberVoices: string[]; intervals: MacSpeaker256Group['intervals'] }>; localization: 'estimated-ASR-with-native-support' | 'inherited-machine-estimate'; speakerPurityVerified: false; humanAnnotation?: { revision: number; annotationSHA256: string; members: number }; humanAnnotationInvalid?: true }
+  metadata: { status: 'base' | 'applied'; reason: string; mode: 'strict' | 'anonymous-estimate' | 'alias-evaluation' | 'source-bound-intervals'; revision?: number; generation?: string; packetSHA256?: string; changedChunks: number; changedWords: number; groups: Array<{ identityId: string; label: string; memberVoices: string[]; intervals: MacSpeaker256Group['intervals'] }>; localization: 'estimated-ASR-with-native-support' | 'inherited-machine-estimate'; speakerPurityVerified: false; humanAnnotation?: { revision: number; annotationSHA256: string; members: number }; humanAnnotationInvalid?: true; intervalHumanAnnotation?: MacIntervalHumanMetadata; intervalHumanAnnotationInvalid?: true; intervalHumanRecoveryRequired?: true; intervalMembership?: MacSpeakerCallIntervalMembership; supportSHA256?: string; effectiveWordView?: { version: 1; anonymousGroups: Array<{ identityId: string; label: string }>; unresolvedLabel: 'Ext' } }
+}
+/** Bind every independently checked admission/source stamp to interval support.
+ * Admission is intentionally excluded: offline QA may grant an off packet without
+ * changing the underlying evidence. This integrity hash is not authentication. */
+function intervalSourceBinding(p: Pick<MacSpeakerCallPacket, 'captureId' | 'generation' | 'revision' | 'baseSHA256' | 'ledgerSHA256' | 'sourceBindingSHA256' | 'stateSHA256' | 'modelSHA256' | 'cliSHA256' | 'rawBindings' | 'groups' | 'aliasProtectedRawChunkIndices' | 'displayLabels'>): string {
+  return digest([p.captureId, p.generation, p.revision, p.baseSHA256, p.ledgerSHA256, p.sourceBindingSHA256, p.stateSHA256, p.modelSHA256, p.cliSHA256, p.rawBindings, p.groups, p.aliasProtectedRawChunkIndices, p.displayLabels])
 }
 
 /** Expensive pure preparation: call only off-thread/offline with full verified inputs. */
-export function prepareMacSpeakerCallPacket(input: MacSpeaker256SnapshotInput, state: MacSpeaker256State, options: { admission?: 'off' | 'qualified'; projectionPolicy?: 'strict' | 'anonymous-estimate' } = {}): MacSpeakerCallPacket {
+export function prepareMacSpeakerCallPacket(input: MacSpeaker256SnapshotInput, state: MacSpeaker256State, options: { admission?: 'off' | 'qualified'; projectionPolicy?: 'strict' | 'anonymous-estimate' | 'source-bound-intervals'; intervalMembership?: MacSpeakerCallIntervalMembership } = {}): MacSpeakerCallPacket {
   validateMacSpeaker256State(state, input)
   const { generation: _g, expectedStateSHA256: _e, ...source } = input
   const inspected = inspectMacSpeakerShadowCallSource(source)
+  const intervalPolicy = options.projectionPolicy === 'source-bound-intervals'
+  if (options.intervalMembership !== undefined && !intervalPolicy) refuse('interval membership requires interval policy')
   const displayLabels: Record<string, string> = {}
   // A display hint is a retained, already estimated Voice label, not a new
   // anonymous namespace. Identity claims live ONLY in the separate interval
   // metadata, never on unsupported occurrences of this same display hint.
   for (const g of state.groups) {
     const identity = state.identities.find(i => i.identityId === g.identityId && !i.retired)
+    if (intervalPolicy) {
+      if (!identity || identity.ordinal < 1 || identity.ordinal > 999999) refuse('admitted anonymous identity display bound')
+      displayLabels[g.identityId] = `Anonymous group ${identity.ordinal}`
+      continue
+    }
     const hint = identity?.birthIntervals[0]?.originalVoice
     if (!hint || !VOICE.test(hint) || !g.memberVoices.includes(hint)) refuse('retained anonymous display hint')
     displayLabels[g.identityId] = hint
@@ -65,13 +83,24 @@ export function prepareMacSpeakerCallPacket(input: MacSpeaker256SnapshotInput, s
     protectedRawChunkIndices: [...inspected.protection].sort((a, b) => a - b), aliasProtectedRawChunkIndices: [...inspected.humanProtection].sort((a, b) => a - b), displayLabels,
     provenance: { nativeAuthenticated: false as const, timingBasis: 'native-exclusive-intersect-machine-production' as const, speakerPurityVerified: false as const, excludedProductionSegments: structuredClone(inspected.excludedProductionSegments) },
   }
-  const packet = { ...body, packetSHA256: digest(body) }
+  let packet: MacSpeakerCallPacket = { ...body, packetSHA256: digest(body) }
+  if (intervalPolicy) {
+    const rawUsedSamples = state.rawBindings.map(r => inspected.placed.find(p => p.rawChunkIndex === r.rawChunkIndex)!.usedSampleCount)
+    const intervalSupport = prepareMacSpeakerCallIntervalSupport({ rawBindings: state.rawBindings, groups: state.groups, displayLabels, protectedRawChunkIndices: [...inspected.humanProtection] }, {
+      version: 1, membership: options.intervalMembership ?? 'accepted-only', sourceSHA256: intervalSourceBinding(body), nativeSHA256: state.provenance.nativeSHA256, timelinePCMSHA256: input.timeline.pcmSHA256, totalSamples: input.timeline.total, rawUsedSamples,
+      nativeIntervals: intervalSamples(inspected.turns, input.timeline.total).filter(([lo, hi]) => hi > lo).map(([startSample, endSample, nativeCluster]) => ({ startSample, endSample, nativeCluster })),
+    })
+    const intervalBody = { ...body, version: 2 as const, policy: 'fluid256-call-interval-view-v1' as const, projectionPolicy: 'source-bound-intervals' as const, intervalSupport, provenance: { ...body.provenance, nativeSHA256: intervalSupport.nativeSHA256, timelinePCMSHA256: intervalSupport.timelinePCMSHA256 } }
+    packet = { ...intervalBody, packetSHA256: digest(intervalBody) }
+  }
   if (Buffer.byteLength(JSON.stringify(packet)) > MAX_PACKET) refuse('packet byte bound')
   return packet
 }
 
 function checkPacket(p: MacSpeakerCallPacket, baseJSON: string, ledger: string, doc: Doc): void {
-  if (!p || p.version !== 1 || p.policy !== 'fluid256-call-view-v1' || !['strict', 'anonymous-estimate'].includes(p.projectionPolicy) || !['off', 'qualified'].includes(p.admission) || p.captureId !== doc.sessionId || typeof p.generation !== 'string' || !p.generation || p.generation.length > 128 || !Number.isSafeInteger(p.revision) || p.revision < 1) refuse('packet identity')
+  const intervalPolicy = p?.version === 2 && p.policy === 'fluid256-call-interval-view-v1' && p.projectionPolicy === 'source-bound-intervals'
+  const legacyPolicy = p?.version === 1 && p.policy === 'fluid256-call-view-v1' && ['strict', 'anonymous-estimate'].includes(p.projectionPolicy) && p.intervalSupport === undefined
+  if (!p || !intervalPolicy && !legacyPolicy || !['off', 'qualified'].includes(p.admission) || p.captureId !== doc.sessionId || typeof p.generation !== 'string' || !p.generation || p.generation.length > 128 || !Number.isSafeInteger(p.revision) || p.revision < 1) refuse('packet identity')
   const { packetSHA256, ...body } = p
   if ([packetSHA256, p.baseSHA256, p.ledgerSHA256, p.sourceBindingSHA256, p.stateSHA256, p.modelSHA256, p.cliSHA256].some(h => !HASH.test(h)) || packetSHA256 !== digest(body) || p.baseSHA256 !== sha(baseJSON) || p.ledgerSHA256 !== sha(ledger)) refuse('packet/source/ledger drift')
   const cacheKey = `${packetSHA256}:${p.baseSHA256}:${p.ledgerSHA256}`
@@ -99,7 +128,7 @@ function checkPacket(p: MacSpeakerCallPacket, baseJSON: string, ledger: string, 
     if (typeof g.identityId !== 'string' || g.identityId.length > 128 || ids.has(g.identityId) || !HASH.test(g.groupSHA256) || !Array.isArray(g.memberVoices) || g.memberVoices.length < 2 || g.memberVoices.length > 99 || !g.memberVoices.every(v => VOICE.test(v) && !voices.has(v)) || new Set(g.memberVoices).size !== g.memberVoices.length || !g.memberVoices.includes(g.keepVoiceHint)) refuse('group identity')
     ids.add(g.identityId); g.memberVoices.forEach(v => voices.add(v))
     const label = p.displayLabels?.[g.identityId]
-    if (!VOICE.test(label) || !g.memberVoices.includes(label) || labels.has(label)) refuse('anonymous display label')
+    if (labels.has(label) || (intervalPolicy ? !/^Anonymous group [1-9]\d{0,5}$/.test(label) : !VOICE.test(label) || !g.memberVoices.includes(label))) refuse('anonymous display label')
     labels.add(label)
     if (!Array.isArray(g.witnesses) || g.witnesses.length !== 2 || !Array.isArray(g.intervals) || (intervals += g.intervals.length) > 40000) refuse('group bounds')
     const [a, b] = g.witnesses
@@ -110,28 +139,76 @@ function checkPacket(p: MacSpeakerCallPacket, baseJSON: string, ledger: string, 
       if (!r || s.identityId !== g.identityId || s.timingBasis !== p.provenance.timingBasis || !g.memberVoices.includes(s.originalVoice) || s.audioSHA256 !== r.audioSHA256 || s.pcmSHA256 !== r.pcmSHA256 || !Number.isSafeInteger(s.startSample) || !Number.isSafeInteger(s.endSample) || s.startSample < r.startSample || s.endSample > r.endSample || s.endSample <= s.startSample || !Array.isArray(s.evidenceIds) || s.evidenceIds.length !== 2 || s.evidenceIds.some(h => !g.witnesses.some(w => w.evidenceId === h))) refuse('interval binding')
     }
   }
+  if (intervalPolicy) {
+    const support = p.intervalSupport
+    if (!support || support.sourceSHA256 !== intervalSourceBinding(p) || support.nativeSHA256 !== p.provenance.nativeSHA256 || support.timelinePCMSHA256 !== p.provenance.timelinePCMSHA256) refuse('interval source provenance')
+    for (const g of p.groups) if (g.groupSHA256 !== digest({ nativeCluster: g.nativeCluster, memberVoices: g.memberVoices, keepVoiceHint: g.keepVoiceHint, witnesses: g.witnesses, intervals: g.intervals.map(({ identityId: _id, ...i }) => i) })) refuse('admission group proof')
+    // New display labels cannot inherit an unrelated occurrence already in BASE.
+    const hasDisplayCollision = (row: unknown): boolean => {
+      if (Array.isArray(row)) return row.some(hasDisplayCollision)
+      if (!row || typeof row !== 'object') return false
+      const value = row as Doc
+      return typeof value.speaker === 'string' && labels.has(value.speaker) || Object.values(value).some(v => v && typeof v === 'object' && hasDisplayCollision(v))
+    }
+    if (hasDisplayCollision(doc)) refuse('anonymous display collision with BASE')
+    validateMacSpeakerCallIntervalSupport({ rawBindings: p.rawBindings, groups: p.groups, displayLabels: p.displayLabels, protectedRawChunkIndices: p.aliasProtectedRawChunkIndices }, support)
+  }
   if (checkedPackets.size >= 8) checkedPackets.delete(checkedPackets.values().next().value!)
   checkedPackets.add(cacheKey)
 }
 
+/** Shared structural/source validator for trusted offline publication callers.
+ * This proves integrity and exact support geometry, not native authenticity or
+ * independent speaker purity. Publication still needs its qualification receipt. */
+export function validateMacSpeakerCallPacket(baseJSON: string, ledgerJSONL: string, packet: MacSpeakerCallPacket): void {
+  if (Buffer.byteLength(baseJSON) > 32 * 1024 * 1024 || Buffer.byteLength(ledgerJSONL) > 8 * 1024 * 1024 || Buffer.byteLength(JSON.stringify(packet)) > MAX_PACKET) refuse('byte bound')
+  const base = JSON.parse(baseJSON) as Doc
+  checkPacket(packet, baseJSON, ledgerJSONL, base)
+  if (readMacSpeakerMachineEvidence(base).status === 'invalid') refuse('base-machine-proof-invalid')
+}
+
+/** Offline qualification must compare packet native geometry to the ACTUAL
+ * hash-pinned export, not a caller's self-resealed projection. HTTP readers use
+ * only the packet published by that trusted, source-verified caller. */
+export function validateMacSpeakerCallIntervalNativeSource(packet: MacSpeakerCallPacket, nativeJSON: string): void {
+  const support = packet.intervalSupport
+  if (packet.version !== 2 || packet.projectionPolicy !== 'source-bound-intervals' || !support || Buffer.byteLength(nativeJSON) > 64 * 1024 * 1024 || sha(nativeJSON) !== support.nativeSHA256) refuse('native source binding')
+  const native = JSON.parse(nativeJSON)
+  if (!Array.isArray(native?.segments) || native.segments.length > 20000) refuse('native source schema')
+  for (const n of native.segments) if (!n || typeof n.speakerId !== 'string' || !n.speakerId || n.speakerId.length > 100 || !Number.isFinite(n.startTimeSeconds) || !Number.isFinite(n.endTimeSeconds) || n.startTimeSeconds < 0 || n.endTimeSeconds <= n.startTimeSeconds || n.endTimeSeconds > support.totalSamples / 16000 + 1) refuse('native source turn bound')
+  const { turns, dropped } = nativeTurns(native.segments, support.totalSamples / 16000)
+  if (dropped !== 0) refuse('native source dropped turn')
+  const intervals = intervalSamples(turns, support.totalSamples).filter(([lo, hi]) => hi > lo).map(([startSample, endSample, nativeCluster]) => ({ startSample, endSample, nativeCluster }))
+  if (digest(intervals) !== digest(support.nativeIntervals)) refuse('native source geometry drift')
+}
+
 /** Evaluation aliases intentionally test an aggregate hypothesis over residuals.
  * They can NEVER be selected by the HTTP loader below. They assert no real name. */
-export function resolveMacSpeakerCallView(baseJSON: string, ledgerJSONL: string, packet: MacSpeakerCallPacket | null, options: { mode?: 'strict' | 'anonymous-estimate' | 'alias-evaluation'; allowEvaluation?: boolean } = {}): MacSpeakerCallView {
+export function resolveMacSpeakerCallView(baseJSON: string, ledgerJSONL: string, packet: MacSpeakerCallPacket | null, options: { mode?: 'strict' | 'anonymous-estimate' | 'alias-evaluation' | 'source-bound-intervals'; allowEvaluation?: boolean } = {}): MacSpeakerCallView {
   const base = JSON.parse(baseJSON) as Doc
   const mode = options.mode ?? packet?.projectionPolicy ?? 'strict'
-  const localization = mode === 'strict' ? 'estimated-ASR-with-native-support' as const : 'inherited-machine-estimate' as const
+  const localization = mode === 'strict' || mode === 'source-bound-intervals' ? 'estimated-ASR-with-native-support' as const : 'inherited-machine-estimate' as const
   const fallback = (reason: string): MacSpeakerCallView => ({ doc: base, metadata: { status: 'base', reason, mode, changedChunks: 0, changedWords: 0, groups: [], localization, speakerPurityVerified: false } })
   try {
     if (!packet) return fallback('packet-absent')
-    if (!['strict', 'anonymous-estimate', 'alias-evaluation'].includes(mode)) refuse('view mode')
+    if (!['strict', 'anonymous-estimate', 'alias-evaluation', 'source-bound-intervals'].includes(mode)) refuse('view mode')
     if (Buffer.byteLength(baseJSON) > 32 * 1024 * 1024 || Buffer.byteLength(ledgerJSONL) > 8 * 1024 * 1024 || Buffer.byteLength(JSON.stringify(packet)) > MAX_PACKET) refuse('byte bound')
     checkPacket(packet, baseJSON, ledgerJSONL, base)
     if (mode === 'alias-evaluation' ? options.allowEvaluation !== true : packet.admission !== 'qualified') return fallback(mode === 'alias-evaluation' ? 'evaluation-not-authorized' : 'packet-off')
     if (mode === 'anonymous-estimate' && packet.projectionPolicy !== 'anonymous-estimate') refuse('packet policy mismatch')
+    if ((mode === 'source-bound-intervals') !== (packet.projectionPolicy === 'source-bound-intervals')) refuse('interval packet policy mismatch')
     // Old qualified names are always validated against immutable BASE bytes.
     let proofStatus = checkedBaseProofs.get(packet.baseSHA256)
     if (!proofStatus) { proofStatus = readMacSpeakerMachineEvidence(base).status; remember(checkedBaseProofs, packet.baseSHA256, proofStatus) }
     if (proofStatus === 'invalid') return fallback('base-machine-proof-invalid')
+    if (mode === 'source-bound-intervals') {
+      const projected = createMacSpeakerCallIntervalProjector({ rawBindings: packet.rawBindings, groups: packet.groups, displayLabels: packet.displayLabels, protectedRawChunkIndices: packet.aliasProtectedRawChunkIndices }, packet.intervalSupport!).project(base)
+      // This is an HQ word-backed closed-call policy. Without that surface the
+      // legacy reviewer cannot interpret its anonymous namespace safely.
+      if (!projected.usableHQWords) return fallback('no-usable-hq-words')
+      const anonymousGroups = packet.groups.map(g => ({ identityId: g.identityId, label: packet.displayLabels[g.identityId] }))
+      return { doc: projected.doc, metadata: { status: 'applied', reason: 'source-bound-anonymous-interval-view', mode, revision: packet.revision, generation: packet.generation, packetSHA256: packet.packetSHA256, changedChunks: projected.changedChunks, changedWords: projected.changedWords, groups: packet.groups.map(g => ({ identityId: g.identityId, label: packet.displayLabels[g.identityId], memberVoices: g.memberVoices, intervals: g.intervals })), localization, speakerPurityVerified: false, intervalMembership: packet.intervalSupport!.membership, supportSHA256: packet.intervalSupport!.supportSHA256, ...(projected.usableHQWords ? { effectiveWordView: { version: 1 as const, anonymousGroups, unresolvedLabel: 'Ext' as const } } : {}) } }
+    }
     const doc = structuredClone(base), protectedRaw = new Set(mode === 'anonymous-estimate' ? packet.aliasProtectedRawChunkIndices : packet.protectedRawChunkIndices)
     const existingVoiceHints = new Set(base.chunks.map((c: Doc) => c.speaker).filter((label: unknown) => typeof label === 'string' && VOICE.test(label)))
     const byRaw = new Map<number, Array<{ g: MacSpeaker256Group; lo: number; hi: number; voice: string }>>()
@@ -224,12 +301,12 @@ export function resolveMacSpeakerCallView(baseJSON: string, ledgerJSONL: string,
 }
 /** Legacy naming actions cannot represent projected multi-source/word scopes. */
 export function isEffectiveMacSpeakerCallView(view: MacSpeakerCallView): boolean {
-  return view.metadata.status === 'applied' && (view.metadata.changedChunks > 0 || view.metadata.changedWords > 0)
+  return !!view.metadata.intervalHumanAnnotation || view.metadata.status === 'applied' && (view.metadata.changedChunks > 0 || view.metadata.changedWords > 0 || view.metadata.mode === 'source-bound-intervals' && !!view.metadata.effectiveWordView)
 }
 
 /** Exact prefix-only label edits; refuses transcript drift instead of guessing. */
 export function renderMacSpeakerCallMarkdown(markdown: string, base: Doc, view: MacSpeakerCallView): string {
-  if (view.metadata.status !== 'applied' || !view.metadata.changedWords) return markdown
+  if (!(view.metadata.status === 'applied' && view.metadata.changedWords) && !view.metadata.intervalHumanAnnotation?.confirmedWords.length) return markdown
   return renderMarkdown(markdown, boundWords(base, view.doc))
 }
 function boundedFile(path: string, maximum: number): string {
@@ -244,23 +321,53 @@ function boundedFile(path: string, maximum: number): string {
   } finally { closeSync(fd) }
 }
 export function readMacSpeakerCallView(sidecarPath: string, baseJSON: string, markdownPath?: string): MacSpeakerCallView {
-  let humanPresent = false
+  let humanPresent = false, intervalPresent = false, recoveryRequired = false
+  let verifiedLegacyView: MacSpeakerCallView | undefined
   try {
     const doc = JSON.parse(baseJSON)
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(doc.sessionId) || !sidecarPath.endsWith('.g2-chunks.json')) return resolveMacSpeakerCallView(baseJSON, '', null)
-    let packet: MacSpeakerCallPacket | null = null
-    try { packet = JSON.parse(boundedFile(sidecarPath.replace(/\.g2-chunks\.json$/, '.speaker-call.json'), MAX_PACKET)) as MacSpeakerCallPacket } catch { /* Independent human annotations remain readable after automatic withdrawal. */ }
     const mdPath = markdownPath ?? sidecarPath.replace(/\.g2-chunks\.json$/, '.md')
-    const paths = macCallHumanPaths({ sidecarPath, meetingPath: mdPath }, doc.sessionId)
-    humanPresent = true // Unreadable annotation files must refuse competing writes.
-    const annotation = readMacCallHumanFile(paths.annotation, 16 * 1024 * 1024, true)
+    const files = { sidecarPath, meetingPath: mdPath }, paths = macCallHumanPaths(files, doc.sessionId), intervalPaths = macIntervalHumanPaths(files, doc.sessionId)
+    // Inspect the archival intent before looking at active interval artifacts:
+    // removal may have landed while the durable completion receipt has not.
+    const originalTransaction = inspectOriginalViewTransaction(files, doc.sessionId)
+    recoveryRequired = originalTransaction.status === 'prepared' || originalTransaction.status === 'recovery-invalid'
+    let packet: MacSpeakerCallPacket | null = null
+    if (!recoveryRequired) {
+      try { packet = JSON.parse(boundedFile(sidecarPath.replace(/\.g2-chunks\.json$/, '.speaker-call.json'), MAX_PACKET)) as MacSpeakerCallPacket } catch { /* Human decisions survive automatic withdrawal. */ }
+    }
+    humanPresent = true // An unreadable annotation must refuse competing writes.
+    const annotation = readMacCallHumanFile(paths.annotation, MAX_PACKET, true)
     humanPresent = annotation !== null
     let ledger = ''
     try { ledger = boundedFile(dataPath('meeting-corrections', `${doc.sessionId.replace(/:/g, '_')}.jsonl`), 8 * 1024 * 1024) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
-    const view = applyMacCallHumanAnnotation(baseJSON, ledger, annotation?.text ?? null, resolveMacSpeakerCallView(baseJSON, ledger, packet))
+    // Independently validated older human decisions remain visible if only the
+    // newer interval transaction is invalid or needs recovery.
+    verifiedLegacyView = applyMacCallHumanAnnotation(baseJSON, ledger, annotation?.text ?? null, resolveMacSpeakerCallView(baseJSON, ledger, null))
+    try {
+      const legacyMarkdown = boundedFile(mdPath, MAX_PACKET)
+      verifiedLegacyView.markdown = renderMacSpeakerCallMarkdown(legacyMarkdown, doc, verifiedLegacyView)
+    } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
+    if (recoveryRequired) throw new Error('original view recovery required')
+    intervalPresent = true
+    const intervalAnnotation = readMacCallHumanFile(intervalPaths.annotation, MAX_PACKET, true)
+    intervalPresent = intervalAnnotation !== null
+    // A prepared or malformed journal is an explicit recovery state, even when
+    // its sidecar replacement landed. Never present that half-commit as saved.
+    const journal = inspectMacIntervalHumanJournal(files, doc.sessionId)
+    recoveryRequired = recoveryRequired || journal.status === 'prepared' || journal.status === 'recovery-invalid'
+    let view = applyMacCallHumanAnnotation(baseJSON, ledger, annotation?.text ?? null, resolveMacSpeakerCallView(baseJSON, ledger, packet))
     let markdown: string
-    try { markdown = boundedFile(mdPath, 16 * 1024 * 1024) } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return view; throw e }
+    try { markdown = boundedFile(mdPath, MAX_PACKET) } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT' && !intervalPresent && !recoveryRequired) return view; throw e }
+    if (recoveryRequired) throw new Error('interval annotation recovery required')
+    view = applyMacIntervalHumanAnnotation({ baseJSON, markdown, ledgerJSONL: ledger, legacyAnnotationJSON: annotation?.text ?? null, annotationJSON: intervalAnnotation?.text ?? null, packet, view })
     view.markdown = renderMacSpeakerCallMarkdown(markdown, doc, view)
     return view
-  } catch { const view = resolveMacSpeakerCallView(baseJSON, '', null); if (humanPresent) { view.metadata.humanAnnotationInvalid = true; view.metadata.reason = 'human-annotation-invalid' }; return view }
+  } catch {
+    const view = verifiedLegacyView ?? resolveMacSpeakerCallView(baseJSON, '', null)
+    if (humanPresent || intervalPresent || recoveryRequired) { view.metadata.humanAnnotationInvalid = true; view.metadata.reason = 'human-annotation-invalid' }
+    if (intervalPresent) view.metadata.intervalHumanAnnotationInvalid = true
+    if (recoveryRequired) { view.metadata.intervalHumanRecoveryRequired = true; view.metadata.reason = 'interval-human-recovery-required' }
+    return view
+  }
 }

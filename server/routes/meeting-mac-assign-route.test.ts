@@ -12,7 +12,6 @@
 // Fictional people only: this file is in a public repository.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
@@ -210,6 +209,18 @@ function post(path: string, body: unknown): Promise<{ status: number; json: any 
     })
     req.on('error', reject)
     req.end(payload)
+  })
+}
+
+function get(path: string): Promise<{ status: number; json: any }> {
+  return new Promise((resolve, reject) => {
+    const req = request(`${baseUrl}${path}`, res => {
+      const parts: Buffer[] = []
+      res.on('data', c => parts.push(Buffer.from(c)))
+      res.on('end', () => { const t = Buffer.concat(parts).toString(); resolve({ status: res.statusCode ?? 0, json: t ? JSON.parse(t) : null }) })
+    })
+    req.on('error', reject)
+    req.end()
   })
 }
 
@@ -778,20 +789,21 @@ describe('B4: it never competes with a live recording, and never lets the meetin
   it('a change to the transcript file alone, while the audio is read, fails the caller\'s expectedRevision: meeting_changed', async () => {
     standardMeeting(); seedProfile('Dana Reyes'); await startServer()
     const md = join(root, MONTH, `${STEM}.md`)
-    const sidecar = join(root, MONTH, `${STEM}.g2-chunks.json`)
-    // The same digest the review panel hands back as expectedRevision: sha256 over JSON.stringify of each file's text.
-    const revision = () => {
-      const hash = createHash('sha256')
-      for (const path of [md, sidecar]) hash.update(JSON.stringify(readFileSync(path, 'utf-8')))
-      return hash.digest('hex')
-    }
-    const expectedRevision = revision()
+    // Use the actual review revision, including absent call-view artifacts, so
+    // this exercises a write DURING extraction rather than a stale initial read.
+    const review = await get(`/api/meeting/${MAC_ID}/speakers`)
+    expect(review.status).toBe(200)
+    expect(review.json.sourceRevision).toMatch(/^[a-f0-9]{64}$/)
+    const expectedRevision = review.json.sourceRevision
     onFirstExtract = () => writeFileSync(md, readFileSync(md, 'utf-8') + '\nA note added by someone else.\n')
     const res = await post(url, { ...ASSIGN, confirm: true, expectedRevision })
     expect(res.status).toBe(409)
     expect(res.json.reason).toBe('meeting_changed')
+    expect(extractCalls).toBeGreaterThan(0)
+    expect(readFileSync(md, 'utf-8')).toContain('A note added by someone else.')
     expect(enrolCalls).toEqual([])
     expect(sidecarNow().labels[1]).toBe('Voice 2')
+    expect(ledgerNow(MAC_ID)).toEqual([])
   }, T)
 
   it('assign_in_progress: a second request on the same meeting while the first is still reading is refused', async () => {

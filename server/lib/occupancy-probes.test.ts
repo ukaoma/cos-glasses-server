@@ -339,13 +339,21 @@ describe('fileExists', () => {
     writeFileSync(plain, '')
     expect(fileExists(plain)).toBe(true)
 
-    const sockPath = join(fx.root, '.claude', 'live.sock')
+    // Darwin's unix-socket pathname limit is shorter than a nested private
+    // TMPDIR. Keep the dot-directory shape while binding at a short real path.
+    const socketRoot = mkdtempSync(join(realpathSync('/tmp'), 'cos-socket-'))
+    const sockPath = join(socketRoot, '.claude', 'live.sock')
     const server = createServer()
-    await new Promise<void>(resolve => server.listen(sockPath, resolve))
     try {
+      mkdirSync(join(socketRoot, '.claude'))
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(sockPath, () => { server.off('error', reject); resolve() })
+      })
       expect(fileExists(sockPath)).toBe(true)
     } finally {
-      await new Promise<void>(resolve => server.close(() => resolve()))
+      if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()))
+      rmSync(socketRoot, { recursive: true, force: true })
     }
   })
 

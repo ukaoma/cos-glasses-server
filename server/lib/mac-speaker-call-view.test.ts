@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { bindMacSpeakerShadowRepair, type MacShadowRepairSource } from './mac-speaker-shadow-repair.js'
 import { hashMacSpeakerLive, reconcileMacSpeaker256Snapshot, type MacSpeaker256SnapshotInput } from './mac-speaker-live-memory.js'
-import { isEffectiveMacSpeakerCallView, prepareMacSpeakerCallPacket, readMacSpeakerCallView, renderMacSpeakerCallMarkdown, resolveMacSpeakerCallView, type MacSpeakerCallPacket } from './mac-speaker-call-view.js'
+import { isEffectiveMacSpeakerCallView, prepareMacSpeakerCallPacket, readMacSpeakerCallView, renderMacSpeakerCallMarkdown, resolveMacSpeakerCallView, validateMacSpeakerCallPacket, validateMacSpeakerCallIntervalNativeSource, type MacSpeakerCallPacket } from './mac-speaker-call-view.js'
 import { SYNTHETIC_SPANS, SYNTHETIC_SECONDS, syntheticEmbeddings, syntheticNative } from './__fixtures__/speaker-shadow/synthetic-meeting.js'
 import { dataPath } from './data-dir.js'
 import { hashMacSpeakerDocument, hashMacSpeakerMachineBinding, projectMacSpeakerRepair } from './mac-speaker-repair-projection.js'
@@ -187,7 +187,7 @@ describe('source-bound read-only call view', () => {
     named.speakerRepair = { id: 'prior_named', evidenceHash: hash('evidence'), machineEvidence: { version: 1, correctionRevision: 1, documentBinding: hashMacSpeakerMachineBinding(named), receipt: prior.receipt, rawAudioSampleCounts: counts } }
     source.currentJSON = JSON.stringify(named)
     expect(readMacSpeakerMachineEvidence(named).status).toBe('qualified')
-    const { input, packet } = prepared(source), view = resolveMacSpeakerCallView(input.currentJSON, '', packet)
+    const { input, packet, state } = prepared(source), view = resolveMacSpeakerCallView(input.currentJSON, '', packet)
     expect(view.metadata.status).toBe('applied')
     expect(view.doc.speakerRepair).toEqual(named.speakerRepair)
     for (const [i, c] of named.chunks.entries()) if (c.speaker === 'Jeremy Example') expect(view.doc.chunks[i]).toEqual(c)
@@ -196,6 +196,12 @@ describe('source-bound read-only call view', () => {
     expect(estimated.metadata.mode).toBe('anonymous-estimate')
     for (const [i, c] of named.chunks.entries()) if (c.speaker === 'Jeremy Example') expect(estimated.doc.chunks[i]).toEqual(c)
     expect(estimated.doc.speakerRepair).toEqual(named.speakerRepair)
+    const intervals = resolveMacSpeakerCallView(input.currentJSON, '', prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals' }))
+    expect(intervals.metadata.status).toBe('applied')
+    expect(intervals.doc.speakerRepair).toEqual(named.speakerRepair)
+    expect(intervals.doc.correctionRevision).toBe(1)
+    for (const [i, c] of named.chunks.entries()) if (c.speaker === 'Jeremy Example') expect(intervals.doc.chunks[i]).toEqual(c)
+    for (const [i, w] of named.batchSegments[0].speakerWords.entries()) if (w.speaker === 'Jeremy Example') expect(intervals.doc.batchSegments[0].speakerWords[i]).toEqual(w)
     const drift = JSON.parse(input.currentJSON); drift.speakerRepair.machineEvidence.documentBinding = hash('wrong')
     const changed = sourceFixture(); changed.currentJSON = JSON.stringify(drift)
     const invalid = prepared(changed)
@@ -353,5 +359,126 @@ describe('source-bound read-only call view', () => {
       expect(emptyPanel.mutable).not.toBe(false); expect(emptyPanel.sourceRevision).toBe(absentPanel.sourceRevision)
       expect(readFileSync(sidecarPath, 'utf8')).toBe(input.currentJSON); expect(readFileSync(filepath, 'utf8')).toBe(markdown)
     } finally { await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); if (previousOps === undefined) delete process.env.COS_OPERATIONS_DIR; else process.env.COS_OPERATIONS_DIR = previousOps; if (previousMeetings === undefined) delete process.env.COS_MEETINGS_ROOT; else process.env.COS_MEETINGS_ROOT = previousMeetings }
+  })
+})
+
+describe('explicit v2 source-bound interval packet', () => {
+  function extSource() {
+    const source = sourceFixture()
+    for (const key of ['originalJSON', 'currentJSON'] as const) {
+      const d = JSON.parse(source[key])
+      for (const w of d.batchSegments[0].speakerWords) if (/^Voice \d+$/.test(w.speaker)) w.speaker = 'Ext'
+      source[key] = JSON.stringify(d)
+    }
+    return source
+  }
+  function withoutSpeakers(value: any): any {
+    if (Array.isArray(value)) return value.map(withoutSpeakers)
+    if (!value || typeof value !== 'object') return value
+    return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'speaker').map(([key, v]) => [key, withoutSpeakers(v)]))
+  }
+  it('defaults off, uses a separate version/policy, and leaves v1 strict/estimate semantics unchanged', () => {
+    const { input, state } = prepared(extSource())
+    const off = prepareMacSpeakerCallPacket(input, state, { projectionPolicy: 'source-bound-intervals' })
+    expect(off).toMatchObject({ version: 2, policy: 'fluid256-call-interval-view-v1', admission: 'off', projectionPolicy: 'source-bound-intervals', intervalSupport: { membership: 'accepted-only' } })
+    expect(resolveMacSpeakerCallView(input.currentJSON, '', off).metadata.reason).toBe('packet-off')
+    expect(resolveMacSpeakerCallView(input.currentJSON, '', off).metadata.effectiveWordView).toBeUndefined()
+    for (const projectionPolicy of ['strict', 'anonymous-estimate'] as const) {
+      const p = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy })
+      expect(p.version).toBe(1); expect(p.intervalSupport).toBeUndefined()
+      expect(resolveMacSpeakerCallView(input.currentJSON, '', p).metadata.changedWords).toBe(0)
+      expect(resolveMacSpeakerCallView(input.currentJSON, '', p, { mode: 'source-bound-intervals' }).metadata.status).toBe('base')
+    }
+    expect(() => prepareMacSpeakerCallPacket(input, state, { intervalMembership: 'native-exclusive-members' })).toThrow()
+  })
+  it('projects only supported Ext words, publishes typed effective-word metadata, and renders exact prefixes', () => {
+    const { input, state } = prepared(extSource())
+    const packet = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals' })
+    expect(() => validateMacSpeakerCallPacket(input.currentJSON, '', packet)).not.toThrow()
+    expect(() => validateMacSpeakerCallIntervalNativeSource(packet, input.cohort.nativeJSON)).not.toThrow()
+    const base = JSON.parse(input.currentJSON), view = resolveMacSpeakerCallView(input.currentJSON, '', packet)
+    expect(view.metadata.status).toBe('applied'); expect(view.metadata.changedWords).toBeGreaterThan(0)
+    expect(view.metadata.mode).toBe('source-bound-intervals')
+    expect(view.metadata.effectiveWordView).toEqual({ version: 1, anonymousGroups: packet.groups.map(g => ({ identityId: g.identityId, label: packet.displayLabels[g.identityId] })), unresolvedLabel: 'Ext' })
+    expect(new Set(Object.values(packet.displayLabels)).size).toBe(packet.groups.length)
+    expect(Object.values(packet.displayLabels).every(label => /^Anonymous group \d+$/.test(label))).toBe(true)
+    expect(withoutSpeakers(view.doc)).toEqual(withoutSpeakers(base))
+    for (const [i, w] of base.batchSegments[0].speakerWords.entries()) if (w.speaker !== 'Ext') expect(view.doc.batchSegments[0].speakerWords[i]).toEqual(w)
+    const markdown = '# Interval Test\n\n## Transcript\n' + base.batchSegments[0].speakerWords.map((w: any) => `[${w.speaker}]: ${w.word}`).join('\n')
+    const rendered = renderMacSpeakerCallMarkdown(markdown, base, view)
+    expect(rendered).toContain('[Anonymous group ')
+    expect(rendered.replace(/\[[^\]]+\]: /g, '')).toBe(markdown.replace(/\[[^\]]+\]: /g, ''))
+    expect(isEffectiveMacSpeakerCallView(view)).toBe(true)
+    expect(input.currentJSON).toBe(JSON.stringify(base))
+  })
+  it('keeps precisely the admitted identities under explicit broader member geometry', () => {
+    const { input, state } = prepared(extSource()), accepted = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals' })
+    const broader = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals', intervalMembership: 'native-exclusive-members' })
+    expect(broader.groups).toEqual(accepted.groups)
+    expect(new Set(broader.intervalSupport!.intervals.map(i => i.identityId))).toEqual(new Set(state.groups.map(g => g.identityId)))
+    expect(resolveMacSpeakerCallView(input.currentJSON, '', broader).metadata.intervalMembership).toBe('native-exclusive-members')
+    expect(resolveMacSpeakerCallView(input.currentJSON, '', broader).metadata.changedWords).toBeGreaterThanOrEqual(resolveMacSpeakerCallView(input.currentJSON, '', accepted).metadata.changedWords)
+    expect(broader.intervalSupport!.intervals.every(i => i.origin === 'native-exclusive-member')).toBe(true)
+  })
+  it('withdraws the closed-call interval namespace when HQ words are absent', () => {
+    const source = sourceFixture()
+    for (const key of ['originalJSON', 'currentJSON'] as const) { const d = JSON.parse(source[key]); d.batchSegments = []; source[key] = JSON.stringify(d) }
+    const { input, state } = prepared(source), p = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals' })
+    const view = resolveMacSpeakerCallView(input.currentJSON, '', p)
+    expect(view.metadata.reason).toBe('no-usable-hq-words'); expect(view.metadata.status).toBe('base')
+    expect(view.doc).toEqual(JSON.parse(input.currentJSON)); expect(view.metadata.effectiveWordView).toBeUndefined()
+  })
+  it('requires actual hash-pinned native bytes rather than a self-resealed native geometry claim', () => {
+    const { input, state } = prepared(extSource()), p = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals', intervalMembership: 'native-exclusive-members' })
+    expect(() => validateMacSpeakerCallIntervalNativeSource(p, input.cohort.nativeJSON + ' ')).toThrow('native source binding')
+    p.intervalSupport!.nativeIntervals[0].nativeCluster = 'S99'
+    const { supportSHA256: _, ...body } = p.intervalSupport!; p.intervalSupport!.supportSHA256 = hash(JSON.stringify(body)); sealPacket(p)
+    expect(() => validateMacSpeakerCallIntervalNativeSource(p, input.cohort.nativeJSON)).toThrow('native source geometry drift')
+  })
+  it('preserves a human anonymous correction and all HQ words touching its protected raw source', () => {
+    const source = extSource(), base = JSON.parse(source.currentJSON), raw = base.chunks.findIndex((c: any) => c.speaker === 'Voice 2')
+    base.chunks[raw].speaker = 'Voice 77'; base.chunkEntries[raw].chunk.manuallyCorrected = true; source.currentJSON = JSON.stringify(base)
+    const { input, state } = prepared(source)
+    for (const intervalMembership of ['accepted-only', 'native-exclusive-members'] as const) {
+      const p = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals', intervalMembership }), v = resolveMacSpeakerCallView(input.currentJSON, '', p)
+      expect(p.aliasProtectedRawChunkIndices).toContain(raw)
+      expect(v.doc.chunks[raw]).toEqual(base.chunks[raw]); expect(v.doc.chunkEntries[raw]).toEqual(base.chunkEntries[raw]); expect(v.doc.batchSegments[0].speakerWords[raw]).toEqual(base.batchSegments[0].speakerWords[raw])
+    }
+  })
+  it.each(['empty-id', 'long-id', 'negative-start', 'reversed', 'past-source', 'dropped-after-source', 'nonfinite'])('rejects %s native turns before geometry comparison', kind => {
+    const { input, state } = prepared(extSource()), p = prepareMacSpeakerCallPacket(input, state, { projectionPolicy: 'source-bound-intervals' })
+    const native = JSON.parse(input.cohort.nativeJSON), total = p.intervalSupport!.totalSamples / 16000
+    const turn = { speakerId: 'S9', startTimeSeconds: 0, endTimeSeconds: 1 }
+    if (kind === 'empty-id') turn.speakerId = ''
+    if (kind === 'long-id') turn.speakerId = 'S'.repeat(101)
+    if (kind === 'negative-start') turn.startTimeSeconds = -1
+    if (kind === 'reversed') turn.endTimeSeconds = 0
+    if (kind === 'past-source') turn.endTimeSeconds = total + 2
+    if (kind === 'dropped-after-source') { turn.startTimeSeconds = total + 0.1; turn.endTimeSeconds = total + 0.2 }
+    if (kind === 'nonfinite') (turn as any).startTimeSeconds = null
+    native.segments.push(turn)
+    const bytes = JSON.stringify(native); p.intervalSupport!.nativeSHA256 = hash(bytes)
+    expect(() => validateMacSpeakerCallIntervalNativeSource(p, bytes)).toThrow(kind === 'dropped-after-source' ? 'native source dropped turn' : 'native source turn bound')
+  })
+  it.each(['generation', 'revision', 'sourceBindingSHA256', 'stateSHA256', 'modelSHA256', 'cliSHA256', 'rawBindings', 'intervalSupport'])('withdraws %s drift even after outer packet resealing', key => {
+    const { input, state } = prepared(extSource()), p = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals' })
+    if (key === 'generation') p.generation = 'different-generation'
+    else if (key === 'revision') p.revision++
+    else if (key === 'rawBindings') p.rawBindings[0].pcmSHA256 = hash('wrong-PCM')
+    else if (key === 'intervalSupport') p.intervalSupport!.intervals[0].endSample++
+    else (p as any)[key] = hash('wrong-binding')
+    sealPacket(p)
+    const result = resolveMacSpeakerCallView(input.currentJSON, '', p)
+    expect(result.metadata.status).toBe('base'); expect(result.doc).toEqual(JSON.parse(input.currentJSON)); expect(result.metadata.effectiveWordView).toBeUndefined()
+    expect(() => validateMacSpeakerCallPacket(input.currentJSON, '', p)).toThrow()
+  })
+  it('withdraws on BASE/audio/ledger drift and never inherits old-number aliases', () => {
+    const { input, state } = prepared(extSource()), p = prepareMacSpeakerCallPacket(input, state, { admission: 'qualified', projectionPolicy: 'source-bound-intervals' })
+    const drift = JSON.parse(input.currentJSON); drift.chunkEntries[0].chunk.audioSha256 = hash('different-WAV')
+    expect(resolveMacSpeakerCallView(JSON.stringify(drift), '', p).metadata.status).toBe('base')
+    expect(resolveMacSpeakerCallView(input.currentJSON, '{"id":"correction"}', p).metadata.status).toBe('base')
+    const view = resolveMacSpeakerCallView(input.currentJSON, '', p), base = JSON.parse(input.currentJSON)
+    const unsupported = new Set(p.rawBindings.map(r => r.rawChunkIndex).filter(raw => !p.intervalSupport!.intervals.some(s => s.rawChunkIndex === raw)))
+    for (const e of base.chunkEntries) if (unsupported.has(e.chunkIndex)) expect(view.doc.chunkEntries[e.chunkIndex]).toEqual(e)
   })
 })

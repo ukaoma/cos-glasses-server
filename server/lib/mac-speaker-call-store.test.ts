@@ -14,7 +14,7 @@ const roots:string[]=[],sha=(v:string|Buffer)=>createHash('sha256').update(v).di
 afterEach(()=>{for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true})})
 /** Synthetic, empty acoustic result with an explicitly FICTIONAL QA decision.
  * No test fixture receipt represents native execution or real qualification. */
-function fixture(){
+function fixture(intervalMembership?:'accepted-only'|'native-exclusive-members'){
   const root=realpathSync(mkdtempSync(join(tmpdir(),'call-store-')));roots.push(root)
   const txRoot=join(root,'transactions');mkdirSync(txRoot)
   const captureId='mac_synthetic_store',pcm=Buffer.alloc(32000),wav=pcm16WavFile(pcm),wavPath=join(root,'raw.wav'),modelPath=join(root,'model.bin'),cliPath=join(root,'cli.bin')
@@ -26,14 +26,14 @@ function fixture(){
   const modelManifest={version:1,modelSHA256,files:[{path:modelPath,sha256:sha('fictional model')}]}
   const source={originalJSON:original,currentJSON:original,ledgerJSONL:'',rawAudio:[{rawChunkIndex:0,wavSHA256:sha(wav),pcmSHA256:sha(pcm),sampleCount:16000}],timeline:{rows:[{rawChunkIndex:0,startSample:0,sampleCount:16000,usedSampleCount:16000}],total:16000,pcmSHA256:sha(pcm)},cohort:{nativeJSON:native,embeddingsJSON:embeddings,modelSHA256,cliSHA256}}
   const snapshot={...source,sourceBindingSHA256:bindMacSpeakerShadowRepair(source),generation:'synthetic-generation'},state=reconcileMacSpeaker256Snapshot(null,snapshot)
-  const packet:any=prepareMacSpeakerCallPacket(snapshot,state,{admission:'qualified'})
+  const packet:any=prepareMacSpeakerCallPacket(snapshot,state,{admission:'qualified',...(intervalMembership?{projectionPolicy:'source-bound-intervals' as const,intervalMembership}:{})})
   // Explicit synthetic policy annotation also works while the peer's additive
   // projectionPolicy field is being implemented; no semantic gate is bypassed.
-  packet.projectionPolicy='strict';const{packetSHA256:_,...body}=packet;packet.packetSHA256=digest(body)
+  if(!intervalMembership)packet.projectionPolicy='strict';const{packetSHA256:_,...body}=packet;packet.packetSHA256=digest(body)
   const values:Array<[MacSpeakerCallFileRole,string,string|Buffer|null]>=[['original','original.json',original],['current','meeting.g2-chunks.json',original],['ledger','ledger.jsonl',null],['raw-pcm-manifest','raw-manifest.json',JSON.stringify(rawManifest)],['cli','cli.bin','fictional CLI'],['model-manifest','model-manifest.json',JSON.stringify(modelManifest)],['native-export','native.json',native],['embedding-export','embeddings.json',embeddings],['raw-audio','raw.wav',wav],['model-file','model.bin','fictional model']]
   const sources=values.map(([role,name,bytes])=>{const path=join(root,name);if(bytes!==null)writeFileSync(path,bytes);return{role,path,sha256:bytes===null?null:sha(bytes)}})
   const packetJSON=JSON.stringify(packet),stateJSON=JSON.stringify(state)
-  const qualification:MacSpeakerCallQualification={version:1,kind:'mac-speaker-call-qualified',captureId,policy:'fluid256-call-view-v1',admissionPolicy:'strict',qualification:{status:'qualified',reviewer:'SYNTHETIC UNIT TEST ONLY',reviewReceiptSHA256:sha('fictional independent review')},sourceFilesSHA256:hashMacSpeakerCallFileInventory(sources),bindings:{originalSHA256:sha(original),currentSHA256:sha(original),ledgerSHA256:sha(''),rawPCMManifestSHA256:sha(JSON.stringify(rawManifest)),cliSHA256,modelSHA256,nativeExportSHA256:sha(native),embeddingExportSHA256:sha(embeddings),sourceBindingSHA256:snapshot.sourceBindingSHA256,stateSHA256:state.stateSHA256,packetSHA256:packet.packetSHA256,stateFileSHA256:sha(stateJSON),packetFileSHA256:sha(packetJSON)}}
+  const qualification:MacSpeakerCallQualification={...(intervalMembership?{version:2 as const,policy:'fluid256-call-interval-view-v1' as const,admissionPolicy:'source-bound-intervals' as const,intervalMembership,intervalSupportSHA256:packet.intervalSupport.supportSHA256,timelinePCMSHA256:packet.intervalSupport.timelinePCMSHA256}:{version:1 as const,policy:'fluid256-call-view-v1' as const,admissionPolicy:'strict' as const}),kind:'mac-speaker-call-qualified',captureId,qualification:{status:'qualified',reviewer:'SYNTHETIC UNIT TEST ONLY',reviewReceiptSHA256:sha('fictional independent review')},sourceFilesSHA256:hashMacSpeakerCallFileInventory(sources),bindings:{originalSHA256:sha(original),currentSHA256:sha(original),ledgerSHA256:sha(''),rawPCMManifestSHA256:sha(JSON.stringify(rawManifest)),cliSHA256,modelSHA256,nativeExportSHA256:sha(native),embeddingExportSHA256:sha(embeddings),sourceBindingSHA256:snapshot.sourceBindingSHA256,stateSHA256:state.stateSHA256,packetSHA256:packet.packetSHA256,stateFileSHA256:sha(stateJSON),packetFileSHA256:sha(packetJSON)}}
   const qualificationPath=join(root,'qualification.json');writeFileSync(qualificationPath,JSON.stringify(qualification))
   const input:MacSpeakerCallPublicationInput={captureId,transactionRoot:txRoot,packetPath:join(root,'meeting.speaker-call.json'),statePath:join(root,'meeting.speaker-call-state.json'),packetJSON,stateJSON,expectedPacketSHA256:null,expectedStateFileSHA256:null,sources,qualificationReceipt:{path:qualificationPath,expectedSHA256:sha(JSON.stringify(qualification))}}
   return{root,input,qualification,currentPath:sources.find(x=>x.role==='current')!.path,ledgerPath:sources.find(x=>x.role==='ledger')!.path,qualificationPath,wavPath,modelPath,rawManifest,packet,state,original}
@@ -41,6 +41,37 @@ function fixture(){
 function qEdit(f:ReturnType<typeof fixture>,change:(q:MacSpeakerCallQualification)=>void){change(f.qualification);const bytes=JSON.stringify(f.qualification);writeFileSync(f.qualificationPath,bytes);f.input.qualificationReceipt.expectedSHA256=sha(bytes)}
 const journal=(dir:string)=>JSON.parse(readFileSync(join(dir,'transaction.json'),'utf8'))
 const overwrite=(p:string,text:string|Buffer)=>{chmodSync(p,0o600);writeFileSync(p,text)}
+
+describe('separately qualified source-bound interval publication',()=>{
+  for(const membership of ['accepted-only','native-exclusive-members'] as const)it(`publishes and undoes explicitly reviewed ${membership} without changing original evidence`,()=>{
+    const f=fixture(membership),before=readFileSync(f.currentPath),dir=prepareMacSpeakerCallPublication(f.input)
+    expect(executeMacSpeakerCallPublication(dir,'apply').phase).toBe('applied')
+    expect(JSON.parse(readFileSync(f.input.packetPath,'utf8')).intervalSupport.membership).toBe(membership)
+    expect(readFileSync(f.currentPath)).toEqual(before);expect(existsSync(f.ledgerPath)).toBe(false)
+    expect(executeMacSpeakerCallPublication(dir,'undo').phase).toBe('reverted')
+    expect(existsSync(f.input.packetPath)).toBe(false);expect(existsSync(f.input.statePath)).toBe(false)
+  })
+  it('does not let a legacy qualification authorize an interval packet',()=>{
+    const f=fixture('accepted-only')
+    qEdit(f,q=>{Object.assign(q,{version:1,policy:'fluid256-call-view-v1',admissionPolicy:'strict'});delete(q as any).intervalMembership;delete(q as any).intervalSupportSHA256;delete(q as any).timelinePCMSHA256})
+    expect(()=>prepareMacSpeakerCallPublication(f.input)).toThrow('qualified packet/state policy')
+    expect(existsSync(f.input.packetPath)).toBe(false)
+  })
+  for(const field of ['intervalMembership','intervalSupportSHA256','timelinePCMSHA256'] as const)it(`requires the independent receipt to bind ${field}`,()=>{
+    const f=fixture('accepted-only');qEdit(f,q=>{(q as any)[field]=field==='intervalMembership'?'native-exclusive-members':sha('a different independently reviewed source')})
+    expect(()=>prepareMacSpeakerCallPublication(f.input)).toThrow('qualified interval evidence binding')
+    expect(existsSync(f.input.packetPath)).toBe(false)
+  })
+  it('rejects an arbitrary native interval even after the packet, support, and receipt are rehashed',()=>{
+    const f=fixture('native-exclusive-members'),support=f.packet.intervalSupport
+    support.nativeIntervals[0].nativeCluster='S2'
+    const{supportSHA256:_,...supportBody}=support;support.supportSHA256=digest(supportBody)
+    const{packetSHA256:__,...packetBody}=f.packet;f.packet.packetSHA256=digest(packetBody);f.input.packetJSON=JSON.stringify(f.packet)
+    qEdit(f,q=>{q.bindings.packetSHA256=f.packet.packetSHA256;q.bindings.packetFileSHA256=sha(f.input.packetJSON);(q as any).intervalSupportSHA256=support.supportSHA256})
+    expect(()=>prepareMacSpeakerCallPublication(f.input)).toThrow('native source geometry drift')
+    expect(existsSync(f.input.packetPath)).toBe(false);expect(readFileSync(f.currentPath,'utf8')).toBe(f.original)
+  })
+})
 
 describe('explicitly qualified derived speaker-call transaction',()=>{
   it('journals before publication, applies/idempotently resumes, and restores exact absence without touching base/ledger',()=>{

@@ -75,9 +75,16 @@ describe('authenticated call-wide group correction handoff', () => {
     expect((await f.request(`/speaker-groups/${scope.identityId}/relabel`, { ...selected, dryRun: true })).status).toBe(200)
     expect(control.availability).not.toHaveBeenCalled()
     const result = await f.request(`/speaker-groups/${scope.identityId}/relabel`, { ...selected, confirm: true })
-    expect(result).toMatchObject({ status: 409, body: { reason: 'group_refresh_unavailable' } })
+    expect(result).toMatchObject({ status: 409, body: { reason: 'group_refresh_unavailable', retryable: false } })
+    expect(result.body.error).toMatch(/while speaker reconciliation is off/)
     expect(existsSync(f.paths.ledger)).toBe(false); expect(existsSync(f.paths.annotation)).toBe(false); expect(control.changed).not.toHaveBeenCalled()
     expect(readFileSync(f.files.sidecarPath, 'utf8')).toBe(f.source.currentJSON); expect(readFileSync(f.files.meetingPath, 'utf8')).toBe(f.markdown)
+  })
+  it('asks for a retry only when the wait can end', async () => {
+    const f = await fixture(), g = (await f.groups()).body, scope = g.groupScopes[0]
+    control.availability.mockResolvedValue({ available: false, reason: 'cached_native_missing' })
+    const result = await f.request(`/speaker-groups/${scope.identityId}/relabel`, { ...f.selection(g, scope), confirm: true })
+    expect(result).toMatchObject({ status: 409, body: { reason: 'group_refresh_unavailable', retryable: true } })
   })
   it('can name two different groups after a cached refresh, preserving the first correction and immutable sources', async () => {
     const f = await fixture(), first = (await f.groups()).body, a = first.groupScopes[0], selectedA = f.selection(first, a)

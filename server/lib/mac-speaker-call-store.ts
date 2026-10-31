@@ -8,12 +8,14 @@ import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { readPcm16Wav } from './speaker-shadow-timeline.js'
+import { validateMacSpeakerCallPacket, validateMacSpeakerCallIntervalNativeSource, type MacSpeakerCallPacket } from './mac-speaker-call-view.js'
+import type { MacSpeakerCallIntervalMembership } from './mac-speaker-call-interval-projection.js'
 
 const SHA=/^[a-f0-9]{64}$/, MAX_ARTIFACT=16*1024*1024, MAX_FILES=6500
 const sha=(b:string|Buffer)=>createHash('sha256').update(b).digest('hex')
 const digest=(v:unknown)=>sha(JSON.stringify(v))
 const fail=(s:string):never=>{throw Error(`Mac speaker call store: ${s}`)}
-export type MacSpeakerCallAdmissionPolicy='strict'|'anonymous-estimate'
+export type MacSpeakerCallAdmissionPolicy='strict'|'anonymous-estimate'|'source-bound-intervals'
 export type MacSpeakerCallFileRole='original'|'current'|'ledger'|'raw-pcm-manifest'|'cli'|'model-manifest'|'native-export'|'embedding-export'|'raw-audio'|'model-file'
 export interface MacSpeakerCallFrozenFile {role:MacSpeakerCallFileRole;path:string;sha256:string|null}
 export interface MacSpeakerCallRawPCMManifest {
@@ -25,13 +27,18 @@ export interface MacSpeakerCallModelManifest {
 }
 /** Independently supplied by the trusted QA caller. No receipt-issuing helper
  * exists here. reviewer/reviewReceiptSHA256 identify the external decision. */
-export interface MacSpeakerCallQualification {
-  version:1;kind:'mac-speaker-call-qualified';captureId:string
-  policy:'fluid256-call-view-v1';admissionPolicy:MacSpeakerCallAdmissionPolicy
+interface MacSpeakerCallQualificationBase {
+  kind:'mac-speaker-call-qualified';captureId:string
   qualification:{status:'qualified';reviewer:string;reviewReceiptSHA256:string}
   sourceFilesSHA256:string
   bindings:{originalSHA256:string;currentSHA256:string;ledgerSHA256:string;rawPCMManifestSHA256:string;cliSHA256:string;modelSHA256:string;nativeExportSHA256:string;embeddingExportSHA256:string;sourceBindingSHA256:string;stateSHA256:string;packetSHA256:string;stateFileSHA256:string;packetFileSHA256:string}
 }
+/** Interval qualification is an explicit new decision. A legacy receipt can
+ * never authorize interval membership, even when all file hashes still match. */
+export type MacSpeakerCallQualification=MacSpeakerCallQualificationBase&(
+  {version:1;policy:'fluid256-call-view-v1';admissionPolicy:'strict'|'anonymous-estimate';intervalMembership?:never;intervalSupportSHA256?:never;timelinePCMSHA256?:never}
+  |{version:2;policy:'fluid256-call-interval-view-v1';admissionPolicy:'source-bound-intervals';intervalMembership:MacSpeakerCallIntervalMembership;intervalSupportSHA256:string;timelinePCMSHA256:string}
+)
 export interface MacSpeakerCallPublicationInput {
   captureId:string;transactionRoot:string;packetPath:string;statePath:string
   packetJSON:string;stateJSON:string
@@ -127,8 +134,10 @@ function immediateFence(stamps:Map<string,Stamp|null>){
 }
 function verifyQualified(packetBytes:Buffer,stateBytes:Buffer,qualification:Buffer,files:MacSpeakerCallFrozenFile[],verified:ReturnType<typeof verifyFiles>,captureId:string){
   const p=json(packetBytes),s=json(stateBytes),q=json(qualification) as MacSpeakerCallQualification
-  if(q.version!==1||q.kind!=='mac-speaker-call-qualified'||q.captureId!==captureId||q.policy!=='fluid256-call-view-v1'||!['strict','anonymous-estimate'].includes(q.admissionPolicy)||q.qualification?.status!=='qualified'||typeof q.qualification.reviewer!=='string'||!q.qualification.reviewer.trim()||q.qualification.reviewer.length>200||!SHA.test(q.qualification.reviewReceiptSHA256)||q.sourceFilesSHA256!==hashMacSpeakerCallFileInventory(files))fail('independent qualification receipt required')
-  if(p.version!==1||p.policy!==q.policy||p.admission!=='qualified'||p.projectionPolicy!==q.admissionPolicy||s.version!==1||s.policy!=='fluid256-recurrence-v1'||p.captureId!==captureId||s.captureId!==captureId||p.generation!==s.generation||typeof p.generation!=='string'||!p.generation||p.generation.length>128||p.revision!==s.revision||!Number.isSafeInteger(s.revision)||s.revision<1||s.revision>=9999999)fail('qualified packet/state policy')
+  const legacy=q.version===1&&q.policy==='fluid256-call-view-v1'&&['strict','anonymous-estimate'].includes(q.admissionPolicy)&&q.intervalMembership===undefined&&q.intervalSupportSHA256===undefined&&q.timelinePCMSHA256===undefined
+  const interval=q.version===2&&q.policy==='fluid256-call-interval-view-v1'&&q.admissionPolicy==='source-bound-intervals'&&['accepted-only','native-exclusive-members'].includes(q.intervalMembership)&&SHA.test(q.intervalSupportSHA256)&&SHA.test(q.timelinePCMSHA256)
+  if(!legacy&&!interval||q.kind!=='mac-speaker-call-qualified'||q.captureId!==captureId||q.qualification?.status!=='qualified'||typeof q.qualification.reviewer!=='string'||!q.qualification.reviewer.trim()||q.qualification.reviewer.length>200||!SHA.test(q.qualification.reviewReceiptSHA256)||q.sourceFilesSHA256!==hashMacSpeakerCallFileInventory(files))fail('independent qualification receipt required')
+  if(p.version!==(interval?2:1)||p.policy!==q.policy||p.admission!=='qualified'||p.projectionPolicy!==q.admissionPolicy||!interval&&p.intervalSupport!==undefined||s.version!==1||s.policy!=='fluid256-recurrence-v1'||p.captureId!==captureId||s.captureId!==captureId||p.generation!==s.generation||typeof p.generation!=='string'||!p.generation||p.generation.length>128||p.revision!==s.revision||!Number.isSafeInteger(s.revision)||s.revision<1||s.revision>=9999999)fail('qualified packet/state policy')
   const{packetSHA256,...pb}=p,{stateSHA256,...sb}=s
   if(packetSHA256!==digest(pb)||stateSHA256!==digest(sb)||p.stateSHA256!==stateSHA256||!same(p.groups,s.groups)||!same(p.rawBindings,s.rawBindings)||p.modelSHA256!==s.modelSHA256||p.cliSHA256!==s.cliSHA256||p.sourceBindingSHA256!==s.sourceBindingSHA256||p.provenance?.speakerPurityVerified!==false||p.provenance?.nativeAuthenticated!==false||s.provenance?.nativeAuthenticated!==false||s.provenance?.productionQualified!==false)fail('packet/state integrity')
   const body=(role:MacSpeakerCallFileRole)=>verified.bodies.get(role)!,pin=(role:MacSpeakerCallFileRole)=>files.find(f=>f.role===role)!
@@ -138,6 +147,15 @@ function verifyQualified(packetBytes:Buffer,stateBytes:Buffer,qualification:Buff
   for(const role of ['original','current'] as const){const doc=json(body(role));if(doc.finalizationState!=='complete'||doc.sourceType!=='mac_system_audio'||doc.active||doc.isActive||doc.claimPending||!Array.isArray(doc.chunkEntries)||doc.chunkEntries.length!==s.rawBindings.length)fail('closed source required')
     for(const[e,i]of doc.chunkEntries.map((e:any,i:number)=>[e,i])){const r=s.rawBindings[i];if(e.chunkIndex!==i||!e.chunk||e.chunk.audioSha256&&e.chunk.audioSha256!==r.audioSHA256||!Number.isFinite(e.chunk.elapsed)||Math.floor(e.chunk.elapsed*16+.5)!==r.startSample||role==='original'&&digest(e.chunk)!==r.originalRowSHA256)fail('raw source geometry binding')}}
   if(s.provenance.originalSHA256!==expected.originalSHA256||s.provenance.currentSHA256!==expected.currentSHA256||s.provenance.ledgerSHA256!==expected.ledgerSHA256||s.provenance.nativeSHA256!==expected.nativeExportSHA256||s.provenance.embeddingsSHA256!==expected.embeddingExportSHA256)fail('state source provenance')
+  if(interval&&q.version===2){
+    // The trusted caller supplies qualification; the store independently checks
+    // packet geometry against the pinned native export, not a self-hashed list.
+    validateMacSpeakerCallPacket(body('current').toString('utf8'),(body('ledger')??Buffer.alloc(0)).toString('utf8'),p as MacSpeakerCallPacket)
+    const support=p.intervalSupport
+    if(!support||support.membership!==q.intervalMembership||support.supportSHA256!==q.intervalSupportSHA256||support.timelinePCMSHA256!==q.timelinePCMSHA256||support.nativeSHA256!==expected.nativeExportSHA256)fail('qualified interval evidence binding')
+    validateMacSpeakerCallIntervalNativeSource(p as MacSpeakerCallPacket,body('native-export').toString('utf8'))
+    if(!Array.isArray(s.identities)||!Array.isArray(s.groups)||s.groups.some((g:any)=>{const id=s.identities.find((i:any)=>i.identityId===g.identityId&&!i.retired);return !id||!Number.isSafeInteger(id.ordinal)||p.displayLabels[g.identityId]!==`Anonymous group ${id.ordinal}`}))fail('qualified anonymous identity display')
+  }
 }
 function lock(path:string,directory:string,resume=false){
   const old=read(path,4096,()=>{},true,true)

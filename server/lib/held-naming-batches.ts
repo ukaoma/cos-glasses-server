@@ -14,6 +14,7 @@ import { MeetingStore } from './meeting-store.js'
 import { appendCorrection, closeInterruptedCorrections, pendingCorrections, readCorrections, appliedCorrections, type CorrectionRow } from './meeting-corrections.js'
 import { patchValue, relabelSpeakerPositions, undoSpeakerMarkdown, strippedTranscript, validatedRawMap, type SpeakerPatch } from './meeting-speaker-labels.js'
 import { acquireMeetingSyncLock } from './meeting-sync-lock.js'
+import { inspectOriginalViewTransaction } from './mac-speaker-call-original-view.js'
 
 export const NAMING_CAPABILITIES = {preview:true,apply:true,undo:true,version:1} as const
 const PREVIEW_TTL = 15 * 60 * 1000
@@ -183,12 +184,17 @@ function checkedRevision(value:unknown):number {
  * physical renames (including Undo and profile fan-out) must not silently make
  * that view, or a later human annotation, disappear. Presence is deliberately
  * enough: a malformed or interrupted artifact is not permission to overwrite. */
+const CALL_OVERLAY_REFUSAL='Call-wide speaker review is active or needs recovery. Use the exact reviewed segment naming flow; legacy naming cannot change this meeting.'
 function assertNoCallSpeakerOverlay(sidecarPath:string,sessionId:string):void {
   const stem=sidecarPath.replace(/\.g2-chunks\.json$/,'')
-  const artifacts=[...['.speaker-call.json','.speaker-call-state.json','.speaker-call-human.json','.speaker-call-human-transaction.json'].map(suffix=>stem+suffix),join(dirname(sidecarPath),`.${sessionId}.speaker-call.lock`)]
+  if(/^mac_[A-Za-z0-9_-]{1,100}$/.test(sessionId)){
+    const original=inspectOriginalViewTransaction({sidecarPath,meetingPath:stem+'.md'},sessionId)
+    if(original.status==='prepared'||original.status==='recovery-invalid')throw new Error(CALL_OVERLAY_REFUSAL)
+  }
+  const artifacts=[...['.speaker-call.json','.speaker-call-state.json','.speaker-call-human.json','.speaker-call-human-transaction.json','.speaker-call-interval-human.json','.speaker-call-interval-human-transaction.json'].map(suffix=>stem+suffix),join(dirname(sidecarPath),`.${sessionId}.speaker-call.lock`)]
   for(const artifact of artifacts){
     try{lstatSync(artifact)}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')continue;throw e}
-    throw new Error('Call-wide speaker review is active or needs recovery. Use the exact reviewed segment naming flow; legacy naming cannot change this meeting.')
+    throw new Error(CALL_OVERLAY_REFUSAL)
   }
 }
 function resolveCopies(sessionId:string):ResolvedCopy[] {
@@ -441,11 +447,22 @@ export async function undoHeldNaming(batchId:string,confirm:boolean){
   let lock:Awaited<ReturnType<typeof acquireMeetingSyncLock>>|undefined
   try{
     try{lock=await acquireMeetingSyncLock()}catch(e){throw new HeldGroupError(409,'sync_running',errorText(e))}
-    // Check every destination before even appending Undo intent: changing the
-    // shared ledger would invalidate a human overlay in another meeting copy.
-    for(const meeting of batch.meetings)if(meeting.receipts.some(r=>r.status!=='reverted'))resolveCopies(meeting.sessionId)
+    // One meeting that cannot be undone must not stop the others: Undo restores
+    // what it can and reports the rest as partial. Each meeting is still checked
+    // before its intent row, because that row changes the ledger its copies share,
+    // and a ledger change would invalidate a human overlay in a sibling copy.
+    const refused:string[]=[]
+    let attempted=false
     for(const meeting of batch.meetings){
       if(!meeting.receipts.length)continue
+      if(meeting.receipts.some(r=>r.status!=='reverted')){
+        try{resolveCopies(meeting.sessionId)}catch(e){
+          // Kept in memory until the outcome is known: a full refusal below leaves the batch record untouched.
+          meeting.error=errorText(e);refused.push(meeting.error)
+          continue
+        }
+      }
+      attempted=true
       const undoId=randomUUID(),row:CorrectionRow={id:undoId,phase:'intent',at:new Date().toISOString(),from:batch.speaker,to:'prior labels',chunks:[...meeting.namedChunks,...meeting.widerChunks],scope:'meeting',batchId:batch.batchId,source:'undo'}
       try{
         const later=appliedCorrections(meeting.sessionId).filter(r=>r.batchId!==batchId&&r.at>=batch.at)
@@ -478,6 +495,9 @@ export async function undoHeldNaming(batchId:string,confirm:boolean){
       }catch(e){meeting.error=errorText(e);appendCorrection(meeting.sessionId,{...row,phase:'failed',error:meeting.error})}
       writeRecord('batch',batch.batchId,batch)
     }
+    // Nothing could be attempted and a call-wide review is why: that is a refusal
+    // with a next step, not a partial Undo.
+    if(!attempted&&refused.includes(CALL_OVERLAY_REFUSAL))throw new HeldGroupError(409,'call_review_active',CALL_OVERLAY_REFUSAL)
     batch.status=batch.meetings.filter(m=>m.receipts.length).every(m=>m.status==='reverted')?'reverted':'partial'
     writeRecord('batch',batch.batchId,batch)
     return{...batchView(batch),kind:'undone',samplesKept:true,audioRestored:false}

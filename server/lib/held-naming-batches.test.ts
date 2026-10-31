@@ -39,7 +39,31 @@ function twoCopies(){
   process.env.COS_OPERATIONS_DIR=ops;process.env.COS_SCRIPTS_DIR=scripts
 }
 describe('held naming execution',()=>{
-  it.each(['.speaker-call.json','.speaker-call-state.json','.speaker-call-human.json','.speaker-call-human-transaction.json'])('keeps corrupt or valid %s artifacts closed to legacy naming',async suffix=>{
+  const intervalArtifacts=['.speaker-call-interval-human.json','.speaker-call-interval-human-transaction.json']
+  it('blocks legacy naming for a Mac original-view recovery marker even when active derived artifacts are absent',async()=>{
+    const {MeetingStore}=await import('./meeting-store.js'),sid='mac_original_recovery'
+    const mac=new MeetingStore().save({sessionId:sid,startTime:Date.parse('2026-09-15T12:00:00Z'),durationMs:9000,transcript:originalMd,chunks:originalDoc.chunks,chunkEntries:originalDoc.chunkEntries})
+    const {appendChunkEmbedding}=await import('./chunk-embedding-store.js')
+    appendChunkEmbedding(sid,{i:3,speaker:'Ext',similarity:.3,embedding:v()})
+    mkdirSync(join(data,'ext-audio',sid),{recursive:true});writeFileSync(join(data,'ext-audio',sid,'ext_chunk3_1000.wav'),Buffer.alloc(48))
+    const before=[readFileSync(mac.sidecarPath,'utf8'),readFileSync(mac.filepath,'utf8')]
+    const artifact=mac.sidecarPath.replace(/\.g2-chunks\.json$/,'.speaker-call-original-view-transaction.json')
+    writeFileSync(artifact,'unreadable original-view recovery marker')
+    const preview=api.previewHeldNaming('Brigitta Pólya',[{sessionId:sid,chunkIndex:3}])
+    expect(preview.meetings[0]).toMatchObject({status:'blocked',labelled:0})
+    expect(preview.meetings[0].error).toContain('Call-wide speaker review')
+    await expect(api.renameMeetingSpeaker(sid,'Ext','Brigitta Pólya',{apply:true})).rejects.toThrow(/Call-wide speaker review/)
+    expect([readFileSync(mac.sidecarPath,'utf8'),readFileSync(mac.filepath,'utf8')]).toEqual(before)
+    expect(readFileSync(artifact,'utf8')).toBe('unreadable original-view recovery marker')
+    expect(existsSync(join(data,'meeting-corrections',`${sid}.jsonl`))).toBe(false)
+    expect(enrollments).toBe(0);expect(profiles).toEqual([])
+  })
+  it('does not treat a Mac-only original-view marker as a G2 naming policy',()=>{
+    writeFileSync(saved.sidecarPath.replace(/\.g2-chunks\.json$/,'.speaker-call-original-view-transaction.json'),'foreign marker')
+    expect(api.previewHeldNaming('Brigitta Pólya',refs).meetings[0]).toMatchObject({status:'ready',labelled:1})
+    expect(read()).toEqual(originalDoc);expect(enrollments).toBe(0)
+  })
+  it.each(['.speaker-call.json','.speaker-call-state.json','.speaker-call-human.json','.speaker-call-human-transaction.json',...intervalArtifacts])('keeps corrupt or valid %s artifacts closed to legacy naming',async suffix=>{
     const artifact=saved.sidecarPath.replace(/\.g2-chunks\.json$/,'')+suffix
     writeFileSync(artifact,'not valid JSON')
     const p=api.previewHeldNaming('Brigitta Pólya',refs)
@@ -48,12 +72,25 @@ describe('held naming execution',()=>{
     await expect(api.renameMeetingSpeaker('meeting_sample','Ext','Brigitta Pólya',{apply:true})).rejects.toThrow(/Call-wide speaker review/)
     expect(read()).toEqual(originalDoc);expect(readFileSync(saved.filepath,'utf8')).toBe(originalMd);expect(enrollments).toBe(0)
     expect(existsSync(join(data,'meeting-corrections','meeting_sample.jsonl'))).toBe(false)
+    expect(readFileSync(artifact,'utf8')).toBe('not valid JSON')
+    if(intervalArtifacts.includes(suffix))expect(existsSync(saved.sidecarPath.replace(/\.g2-chunks\.json$/,'')+'.speaker-call.json')).toBe(false)
   })
   it('refuses a call-wide view arriving after preview before enrollment or correction intent',async()=>{
     const p=api.previewHeldNaming('Brigitta Pólya',refs)
     writeFileSync(saved.sidecarPath.replace(/\.g2-chunks\.json$/,'')+'.speaker-call-human.json','{}')
     await expect(api.applyHeldNaming('Brigitta Pólya',refs,p.previewHash,{confirm:true})).rejects.toMatchObject({reason:'meetings_changed'})
     expect(enrollments).toBe(0);expect(read()).toEqual(originalDoc)
+    expect(existsSync(join(data,'meeting-corrections','meeting_sample.jsonl'))).toBe(false)
+  })
+  it.each(intervalArtifacts)('refuses %s arriving after preview without an automatic packet or any enrollment/ledger/source write',async suffix=>{
+    const p=api.previewHeldNaming('Brigitta Pólya',refs),stem=saved.sidecarPath.replace(/\.g2-chunks\.json$/,'')
+    const artifact=stem+suffix,contents=JSON.stringify({version:1,phase:'complete',source:'exact-word-human-review'})
+    writeFileSync(artifact,contents)
+    expect(existsSync(stem+'.speaker-call.json')).toBe(false)
+    await expect(api.applyHeldNaming('Brigitta Pólya',refs,p.previewHash,{confirm:true})).rejects.toMatchObject({reason:'meetings_changed'})
+    expect(enrollments).toBe(0);expect(profiles).toEqual([])
+    expect(readFileSync(saved.sidecarPath,'utf8')).toBe(JSON.stringify(originalDoc));expect(readFileSync(saved.filepath,'utf8')).toBe(originalMd)
+    expect(readFileSync(artifact,'utf8')).toBe(contents)
     expect(existsSync(join(data,'meeting-corrections','meeting_sample.jsonl'))).toBe(false)
   })
   it('refuses legacy Undo before touching the ledger when a sibling has a call-wide correction',async()=>{
@@ -64,6 +101,76 @@ describe('held naming execution',()=>{
     writeFileSync(opSide.replace(/\.g2-chunks\.json$/,'')+'.speaker-call-human-transaction.json','{}')
     await expect(api.undoHeldNaming(a.batchId,true)).rejects.toThrow(/Call-wide speaker review/)
     expect(paths.map(path=>readFileSync(path,'utf8'))).toEqual(before);expect(enrollments).toBe(1)
+  })
+  async function secondMeeting(){
+    const {MeetingStore}=await import('./meeting-store.js')
+    const chunks=[{speaker:'Ext',text:'four other words',elapsed:1000,similarity:.3}],sid='meeting_other'
+    const other=new MeetingStore().save({sessionId:sid,startTime:new Date('2026-09-14T12:00:00Z').getTime(),durationMs:3000,transcript:'[Ext]: four other words',chunks:chunks as any,chunkEntries:[{chunkIndex:0,chunk:chunks[0]}] as any})
+    const doc=JSON.parse(readFileSync(other.sidecarPath,'utf8'));doc.batchApplied=true;doc.batchSegments=[{startChunkIdx:0,endChunkIdx:0,startElapsed:0,speakerWords:[{word:'four',start:1,end:1.4,speaker:'Ext',similarity:.3}]}]
+    writeFileSync(other.sidecarPath,JSON.stringify(doc))
+    const {appendChunkEmbedding}=await import('./chunk-embedding-store.js');appendChunkEmbedding(sid,{i:0,speaker:'Ext',similarity:.3,embedding:v(0,20)})
+    mkdirSync(join(data,'ext-audio',sid),{recursive:true});writeFileSync(join(data,'ext-audio',sid,'ext_chunk0_1000.wav'),Buffer.alloc(48))
+    return{other,doc,refs:[...refs,{sessionId:sid,chunkIndex:0}]}
+  }
+  const ledgerOf=(sid:string)=>join(data,'meeting-corrections',`${sid}.jsonl`)
+  it('a call-wide review on one meeting does not stop Undo on the other, and leaves its own ledger alone',async()=>{
+    const {other,doc,refs:both}=await secondMeeting()
+    const p=api.previewHeldNaming('Brigitta Pólya',both),a=await api.applyHeldNaming('Brigitta Pólya',both,p.previewHash,{confirm:true})
+    const ledgerBefore=readFileSync(ledgerOf('meeting_sample'),'utf8')
+    writeFileSync(saved.sidecarPath.replace(/\.g2-chunks\.json$/,'')+'.speaker-call-human.json','{}')
+    const undo=await api.undoHeldNaming(a.batchId,true)
+    expect(undo.status).toBe('partial')
+    expect(JSON.parse(readFileSync(other.sidecarPath,'utf8')).chunks).toEqual(doc.chunks)
+    const byId=Object.fromEntries(undo.meetings.map((m:any)=>[m.sessionId,m]))
+    expect(byId.meeting_other.status).toBe('reverted');expect(byId.meeting_sample.status).not.toBe('reverted');expect(byId.meeting_sample.error).toMatch(/Call-wide speaker review/)
+    expect(readFileSync(ledgerOf('meeting_sample'),'utf8')).toBe(ledgerBefore)
+  })
+  it.each(intervalArtifacts)('%s without an automatic packet preserves its refused meeting while Undo restores an allowed sibling',async suffix=>{
+    const {other,doc,refs:both}=await secondMeeting()
+    const p=api.previewHeldNaming('Brigitta Pólya',both),a=await api.applyHeldNaming('Brigitta Pólya',both,p.previewHash,{confirm:true})
+    const stem=saved.sidecarPath.replace(/\.g2-chunks\.json$/,''),artifact=stem+suffix
+    writeFileSync(artifact,JSON.stringify({version:1,phase:'prepared',source:'retained-exact-word-human-decision'}))
+    expect(existsSync(stem+'.speaker-call.json')).toBe(false)
+    const refusedPaths=[saved.sidecarPath,saved.filepath,ledgerOf('meeting_sample'),artifact],before=refusedPaths.map(path=>readFileSync(path,'utf8'))
+    const enrolledBefore=enrollments,undo=await api.undoHeldNaming(a.batchId,true)
+    expect(undo.status).toBe('partial')
+    const byId=Object.fromEntries(undo.meetings.map((m:any)=>[m.sessionId,m]))
+    expect(byId.meeting_sample).toMatchObject({status:'applied'});expect(byId.meeting_sample.error).toMatch(/Call-wide speaker review/)
+    expect(byId.meeting_other.status).toBe('reverted')
+    expect(refusedPaths.map(path=>readFileSync(path,'utf8'))).toEqual(before)
+    const reverted=JSON.parse(readFileSync(other.sidecarPath,'utf8'))
+    expect(reverted.chunks).toEqual(doc.chunks);expect(reverted.batchSegments).toEqual(doc.batchSegments)
+    expect(readFileSync(other.filepath,'utf8')).toContain('[Ext]: four other words')
+    const {confirmedChunks}=await import('./meeting-corrections.js')
+    expect(confirmedChunks('meeting_other').size).toBe(0);expect(confirmedChunks('meeting_sample').get(1)).toBe('Brigitta Pólya')
+    expect(enrollments).toBe(enrolledBefore)
+  })
+  it.each(intervalArtifacts)('all meetings refused by %s return409 and leave batch/source/ledger/artifact bytes untouched',async suffix=>{
+    const {other,refs:both}=await secondMeeting()
+    const p=api.previewHeldNaming('Brigitta Pólya',both),a=await api.applyHeldNaming('Brigitta Pólya',both,p.previewHash,{confirm:true})
+    const artifacts=[saved.sidecarPath,other.sidecarPath].map(path=>path.replace(/\.g2-chunks\.json$/,'')+suffix)
+    for(const artifact of artifacts)writeFileSync(artifact,JSON.stringify({version:1,phase:'complete',source:'retained-exact-word-human-decision'}))
+    for(const sidecar of [saved.sidecarPath,other.sidecarPath])expect(existsSync(sidecar.replace(/\.g2-chunks\.json$/,'')+'.speaker-call.json')).toBe(false)
+    const paths=[saved.sidecarPath,saved.filepath,other.sidecarPath,other.filepath,ledgerOf('meeting_sample'),ledgerOf('meeting_other'),join(data,'meeting-corrections',`batch-${a.batchId}.json`),...artifacts]
+    const before=paths.map(path=>readFileSync(path,'utf8')),enrolledBefore=enrollments,profilesBefore=JSON.stringify(profiles)
+    await expect(api.undoHeldNaming(a.batchId,true)).rejects.toMatchObject({status:409,reason:'call_review_active'})
+    expect(paths.map(path=>readFileSync(path,'utf8'))).toEqual(before)
+    expect(enrollments).toBe(enrolledBefore);expect(JSON.stringify(profiles)).toBe(profilesBefore)
+  })
+  it('a meeting copy that cannot be read does not stop Undo on the other meeting',async()=>{
+    const {other,refs:both}=await secondMeeting()
+    const p=api.previewHeldNaming('Brigitta Pólya',both),a=await api.applyHeldNaming('Brigitta Pólya',both,p.previewHash,{confirm:true})
+    rmSync(other.sidecarPath)
+    const undo=await api.undoHeldNaming(a.batchId,true)
+    expect(undo.status).toBe('partial')
+    expect(read().chunks).toEqual(originalDoc.chunks)
+    const byId=Object.fromEntries(undo.meetings.map((m:any)=>[m.sessionId,m]))
+    expect(byId.meeting_sample.status).toBe('reverted');expect(byId.meeting_other.status).not.toBe('reverted');expect(byId.meeting_other.error).toBeTruthy()
+  })
+  it('Undo blocked only by a call-wide review is a refusal the route can report, with a next step',async()=>{
+    const p=api.previewHeldNaming('Brigitta Pólya',refs),a=await api.applyHeldNaming('Brigitta Pólya',refs,p.previewHash,{confirm:true})
+    writeFileSync(saved.sidecarPath.replace(/\.g2-chunks\.json$/,'')+'.speaker-call-human.json','{}')
+    await expect(api.undoHeldNaming(a.batchId,true)).rejects.toMatchObject({status:409,reason:'call_review_active'})
   })
   it('preview mutates no labels/profiles/audio, maps raw3 to position1, never raw7',()=>{
     const p=api.previewHeldNaming('Brigitta Pólya',refs)
