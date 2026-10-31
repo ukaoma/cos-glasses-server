@@ -18,7 +18,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } f
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
 import { basename, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import { Router } from 'express'
+import { Router, type RequestHandler } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
 import { createStopRequestStore, isStopRequestRefusal, STOP_REQUEST_CLAIM_WINDOW_MS, type StopRequest, type StopRequestStore } from '../lib/meeting-stop-requests.js'
 import { appendAutonomousSaveLog, getStopIntentStore, type StopIntent, type StopIntentStore } from '../lib/meeting-stop-intents.js'
@@ -53,6 +53,8 @@ import {
 import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-embeddings.js'
 import { enrolNamedVoice } from '../lib/meeting-relabel-enrolment.js'
 import { commitMacVoiceAssignment, planMacVoiceAssignment, type MacAssignGate, type MacAssignPlan, type MacAssignSkip } from '../lib/mac-voice-assignment.js'
+import { readVoiceDisplay, voiceDisplayScopes } from '../lib/mac-voice-display.js'
+import { getVoiceSuggestionRunner, voiceSidecarEntries, voiceSuggestionPauseLease, voiceSuggestionRecordingLease, type VoiceSuggestionBlock, type VoiceSuggestionRunner } from '../lib/mac-voice-suggestions.js'
 import { isMacCaptureSidecar, isVoiceLabel } from '../lib/mac-voice-labels.js'
 
 function requireMacRecordingForSave(sessionId: string, expectedChunkCount: unknown): void {
@@ -351,6 +353,8 @@ export interface MeetingRouteDependencies {
   stopRequests?: StopRequestStore
   /** 6.77.0: the post-save transcript cleanup (lib/transcript-cleanup.ts). */
   transcriptCleanup?: TranscriptCleanupRunner
+  /** 6.96.3: on-click voice suggestions (lib/mac-voice-suggestions.ts). Tests inject a runner with a fake extractor. */
+  voiceSuggestions?: VoiceSuggestionRunner
   /** 6.81.0: the phone's Stop, durable (lib/meeting-stop-intents.ts). */
   stopIntents?: StopIntentStore
   /** 6.81.0: the server's own save of a stopped meeting. Tests inject the clock, timer and gate. */
@@ -770,6 +774,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   const finalDiarize = deps.finalDiarize ?? runNemotronFinalPass
   const qualifiedProfilePass = deps.qualifiedProfilePass ?? runQualifiedMacProfilePass
   const transcriptCleanup = deps.transcriptCleanup
+  const voiceSuggestions = deps.voiceSuggestions ?? getVoiceSuggestionRunner()
   const router = Router()
   const captureActive = deps.captureActive ?? (() => getTranscriptionSessionLiveness().live > 0)
   const savingSessions = new Set<string>()
@@ -1935,7 +1940,44 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     } catch (error) { res.status(409).json({ error: String(error) }); }
   })
 
-  router.get('/meeting/:sessionId/speakers', (req, res) => {
+  /** The speaker review of a saved meeting, as GET /speakers answers it. Voice suggestions scope to these same rows. */
+  function speakerReviewFor(input: { sessionId: string; sidecarPath: string; meetingPath: string; baseJSON: string; sidecar: Record<string, unknown>; chunks: unknown; phrasesPerVoice: number }) {
+    const { sessionId, sidecarPath, meetingPath, baseJSON, sidecar, chunks, phrasesPerVoice } = input
+    // Raw capture indices, so a phrase can address its own audio. Position in
+    // `chunks` is NOT the WAV number — see attachRawChunkIndices.
+    const callView = readMacSpeakerCallView(sidecarPath, baseJSON, meetingPath)
+    const withIndices = attachRawChunkIndices(callView.doc.chunks ?? chunks as ReviewChunk[], sidecar.chunkEntries)
+    const machineEvidence = readMacSpeakerMachineEvidence(sidecar)
+    const review = reviewMeetingSpeakers(withIndices, {
+      callViewAnonymousLabels: callView.metadata.groups.map(g => g.label),
+      effectiveWordView: callView.metadata.effectiveWordView,
+      exactConfirmedWords: exactIntervalConfirmedWords(sidecar, callView),
+      owner: getOwnerSpeakerLabel(),
+      // Labels a human already vouched for in this meeting. Without this the
+      // floor re-demotes a confirmed name on every reload, and the reviewer
+      // confirms the same voice forever.
+      confirmed: confirmedLabels(sessionId),
+      confirmedChunks: confirmedChunks(sessionId),
+      machineQualifiedPositions: machineEvidence.positions,
+      machineEvidenceStatus: machineEvidence.status,
+      phrasesPerVoice,
+      // The sidecar's own durationMs is the meeting's true end. Deriving it from
+      // max(elapsed) uses the START of the last chunk, which made the final
+      // timeline span end where it began — a 1.5pt sliver labelled "1s" for what
+      // may be a long closing monologue.
+      durationMs: typeof sidecar.durationMs === 'number' ? sidecar.durationMs : undefined,
+      // Word-level speaker timings from the HQ batch pass, present on 82 of 92
+      // measured sidecars. These give REAL voiced time per speaker; without them
+      // speaking time falls back to capped chunk deltas, which still carry the
+      // sub-ceiling pauses. `speakingTimeSource` on the response says which ran.
+      batchSegments: Array.isArray(callView.doc.batchSegments)
+        ? (callView.doc.batchSegments as SpeakerWordSegment[])
+        : undefined,
+    })
+    return { callView, review }
+  }
+
+  router.get('/meeting/:sessionId/speakers', async (req, res) => {
     const sessionId = String(req.params.sessionId ?? '')
     if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) {
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
@@ -1995,37 +2037,18 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
-    // Raw capture indices, so a phrase can address its own audio. Position in
-    // `chunks` is NOT the WAV number — see attachRawChunkIndices.
-    const callView = readMacSpeakerCallView(sidecarPath, baseJSON!, operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath)
-    const withIndices = attachRawChunkIndices(callView.doc.chunks ?? chunks as ReviewChunk[], sidecar.chunkEntries)
-    const machineEvidence = readMacSpeakerMachineEvidence(sidecar)
-    const review = reviewMeetingSpeakers(withIndices, {
-      callViewAnonymousLabels: callView.metadata.groups.map(g => g.label),
-      effectiveWordView: callView.metadata.effectiveWordView,
-      exactConfirmedWords: exactIntervalConfirmedWords(sidecar, callView),
-      owner: getOwnerSpeakerLabel(),
-      // Labels a human already vouched for in this meeting. Without this the
-      // floor re-demotes a confirmed name on every reload, and the reviewer
-      // confirms the same voice forever.
-      confirmed: confirmedLabels(sessionId),
-      confirmedChunks: confirmedChunks(sessionId),
-      machineQualifiedPositions: machineEvidence.positions,
-      machineEvidenceStatus: machineEvidence.status,
+    const { callView, review } = speakerReviewFor({
+      sessionId,
+      sidecarPath,
+      meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath,
+      baseJSON: baseJSON!,
+      sidecar,
+      chunks,
       phrasesPerVoice: Math.max(1, Math.min(6, Number(req.query.phrases) || 3)),
-      // The sidecar's own durationMs is the meeting's true end. Deriving it from
-      // max(elapsed) uses the START of the last chunk, which made the final
-      // timeline span end where it began — a 1.5pt sliver labelled "1s" for what
-      // may be a long closing monologue.
-      durationMs: typeof sidecar.durationMs === 'number' ? sidecar.durationMs : undefined,
-      // Word-level speaker timings from the HQ batch pass, present on 82 of 92
-      // measured sidecars. These give REAL voiced time per speaker; without them
-      // speaking time falls back to capped chunk deltas, which still carry the
-      // sub-ceiling pauses. `speakingTimeSource` on the response says which ran.
-      batchSegments: Array.isArray(callView.doc.batchSegments)
-        ? (callView.doc.batchSegments as SpeakerWordSegment[])
-        : undefined,
     })
+    // 6.96.3: display grouping from this Mac's speaker shadow log, read at request time. No shadow record,
+    // no field. A view that already groups the words stands on its own, so the two are never layered.
+    const voiceDisplay = isEffectiveMacSpeakerCallView(callView) ? null : await readVoiceDisplay(sessionId, review.voices.map(v => v.label))
     res.set('Cache-Control', 'private, no-store')
     res.json({
       sessionId,
@@ -2043,8 +2066,76 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       speakerCallView: callView.metadata,
       ...intervalReviewFields({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, baseJSON, callView),
       ...(() => { try { return { groupScopes: callGroupScopes({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, baseJSON, callView).map(publicCallScope) } } catch { return { groupScopes: [] } } })(),
+      ...(voiceDisplay ? { voiceDisplay } : {}),
     })
   })
+
+  // ── Voice suggestions (6.96.3, lib/mac-voice-suggestions.ts) ───────────────────
+  // POST is the ONLY thing that starts a job. Both answer one JSON state, so a refusal is 200
+  // with `state: 'refused'` and a reason code; only a malformed id is a 4xx. Read-only: nothing
+  // here or in the job writes a profile, label, sidecar or vector file.
+  function voiceSuggestionSource(sessionId: string): { refused: string } | { sidecarPath: string; meetingPath: string } {
+    if (assertVoiceEvidenceSource([sessionId]) || !MAC_CAPTURE_ID.test(sessionId)) return { refused: 'not_saved_mac_capture' }
+    const operations = cosOperationsMeetingsConfigured() ? findCosOperationsMeetingBySessionId(sessionId) : null
+    const direct = operations ? null : findDirectLibraryMeetingBySessionId(sessionId)
+    const saved = operations || direct ? null : store.findBySessionId(sessionId)
+    if (!operations && !direct && !saved) return { refused: 'not_saved_mac_capture' }
+    return { sidecarPath: operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }
+  }
+
+  const readVoiceSuggestions: RequestHandler = (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) { res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' }); return }
+    res.set('Cache-Control', 'private, no-store')
+    // A job in flight answers from memory: Control polls this, and the revision hashes the whole meeting.
+    const running = voiceSuggestions.running(sessionId)
+    if (running) { res.json(running); return }
+    const source = voiceSuggestionSource(sessionId)
+    if ('refused' in source) { res.json(voiceSuggestions.refusal(source.refused, '')); return }
+    res.json(voiceSuggestions.read(sessionId, reviewRevision(source.meetingPath, source.sidecarPath)))
+  }
+
+  const startVoiceSuggestions: RequestHandler = (req, res) => {
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^[A-Za-z0-9:_-]{3,96}$/.test(sessionId)) { res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' }); return }
+    res.set('Cache-Control', 'private, no-store')
+    const source = voiceSuggestionSource(sessionId)
+    if ('refused' in source) { res.json(voiceSuggestions.refusal(source.refused, '')); return }
+    const { sidecarPath, meetingPath } = source
+    let baseJSON: string
+    let sidecar: Record<string, unknown>
+    try {
+      baseJSON = readFileSync(sidecarPath, 'utf-8')
+      sidecar = JSON.parse(baseJSON) as Record<string, unknown>
+      if (!Array.isArray(sidecar.chunks)) throw new Error('no chunk array')
+    } catch {
+      res.json(voiceSuggestions.refusal('sidecar_unreadable', ''))
+      return
+    }
+    const block = (): VoiceSuggestionBlock | null => {
+      if (captureActive() || voiceSuggestionRecordingLease()) return 'recording_active'
+      if (!maintenanceAdmissionsOpen()) return 'maintenance'
+      if (finalizingRefusal(sessionId)) return 'meeting_finalizing'
+      return null
+    }
+    res.json(voiceSuggestions.start({
+      sessionId,
+      sourceRevision: reviewRevision(meetingPath, sidecarPath),
+      entries: voiceSidecarEntries(sidecar),
+      block,
+      pause: () => voiceSuggestionPauseLease(),
+      loadScopes: async () => {
+        const { callView, review } = speakerReviewFor({ sessionId, sidecarPath, meetingPath, baseJSON, sidecar, chunks: sidecar.chunks, phrasesPerVoice: 1 })
+        // A derived view's labels are not the labels on the audio's turns, so no unit could be chosen honestly.
+        if (isEffectiveMacSpeakerCallView(callView) || callView.metadata.humanAnnotationInvalid) return { refused: 'derived_call_view' }
+        const labels = review.voices.map(v => v.label)
+        return { scopes: voiceDisplayScopes(await readVoiceDisplay(sessionId, labels), labels) }
+      },
+    }))
+  }
+
+  router.get('/meeting/:sessionId/voice-suggestions', readVoiceSuggestions)
+  router.post('/meeting/:sessionId/voice-suggestions', startVoiceSuggestions)
 
 
   // ── Per-meeting speaker relabel (6.21.16) ─────────────────────────────

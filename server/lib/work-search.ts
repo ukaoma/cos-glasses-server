@@ -131,9 +131,11 @@ export function searchOptionText(text: string): string {
  * drain for an update or restart would wait up to 20 s (the Jev timeout) for a search, and a drain would answer every
  * search 503. Outside it, a restart mid-search loses at most that search's token count.
  * Live COS Ask is also read-only and cancellable, with no durable tasks or conversation writes.
+ * Voice suggestions (6.96.3) write nothing, answer at once and run detached. The route checks admissions itself so a
+ * drain answers its own `refused` state rather than a 503, and a running job stops at its next unit when a drain starts.
  */
 export function isReadOnlyApiPost(method: string, path: string): boolean {
-  return method === 'POST' && (path === '/work/search' || path === '/meetings/live-ask')
+  return method === 'POST' && (path === '/work/search' || path === '/meetings/live-ask' || /^\/meeting\/[A-Za-z0-9:_-]{3,96}\/voice-suggestions$/.test(path))
 }
 
 /** A query's length as people count it: code points, not UTF-16 units, so 150 emoji are 150 (Control counts characters). */

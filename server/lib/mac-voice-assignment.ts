@@ -196,22 +196,52 @@ function emptyReport(person: string, skipped: MacAssignSkip): MacAssignReport {
   }
 }
 
-interface Turn { speaker: string; startSec?: number; endSec?: number }
-interface Unit { raw: number; slice: { startSec: number; endSec: number } | null }
+export interface MacVoiceTurn { speaker: string; startSec?: number; endSec?: number }
+export interface MacVoiceSlice { startSec: number; endSec: number }
+interface Unit { raw: number; slice: MacVoiceSlice | null }
 
-function turnsOf(chunk: Record<string, unknown> | undefined): Turn[] {
+export function macVoiceTurnsOf(chunk: Record<string, unknown> | undefined): MacVoiceTurn[] {
   if (!chunk) return []
   const final = chunk.finalSegments
   const live = chunk.segments
   const list = Array.isArray(final) && final.length > 0 ? final : Array.isArray(live) ? live : []
-  return list.filter((t): t is Turn => !!t && typeof t === 'object' && typeof (t as Turn).speaker === 'string')
+  return list.filter((t): t is MacVoiceTurn => !!t && typeof t === 'object' && typeof (t as MacVoiceTurn).speaker === 'string')
 }
 
-function spread<T>(items: T[], max: number): T[] {
+/** At most `max` items, evenly spread across the list. */
+export function spreadMacVoiceUnits<T>(items: T[], max: number): T[] {
   if (items.length <= max) return items
   const out: T[] = []
   for (let k = 0; k < max; k++) out.push(items[Math.floor((k * items.length) / max)])
   return out
+}
+
+/**
+ * What one chunk contributes for a voice: `whole` when every turn is that voice or the chunk has no turns,
+ * otherwise that voice's turns long enough to slice, inset at each end. Empty means nothing here is usable.
+ * Shared with voice suggestions (mac-voice-suggestions.ts) so the two cannot choose audio differently.
+ */
+export function macVoiceChunkUnits(turns: MacVoiceTurn[], voice: string): 'whole' | MacVoiceSlice[] {
+  if (turns.length === 0 || turns.every(t => t.speaker === voice)) return 'whole'
+  return turns
+    .filter(t => t.speaker === voice
+      && Number.isFinite(t.startSec) && Number.isFinite(t.endSec)
+      && (t.endSec as number) - (t.startSec as number) >= MAC_ASSIGN_MIN_SLICE_SEC)
+    .map(t => ({ startSec: (t.startSec as number) + MAC_ASSIGN_SLICE_INSET_SEC, endSec: (t.endSec as number) - MAC_ASSIGN_SLICE_INSET_SEC }))
+}
+
+/** The audio a unit addresses and its length. Null when the WAV is unusable or the slice is empty. */
+export function macVoiceUnitAudio(wav: Buffer, slice: MacVoiceSlice | null): { audio: Buffer; sec: number } | null {
+  const pcm = readPcm16Mono(wav)
+  if (!pcm || pcm.sampleRate !== SAMPLE_RATE) return null
+  let audio = wav
+  if (slice) {
+    const from16 = Math.max(0, Math.round(slice.startSec * SAMPLE_RATE)) * 2
+    const to16 = Math.min(pcm.pcm.length, Math.round(slice.endSec * SAMPLE_RATE) * 2)
+    if (to16 <= from16) return null
+    audio = pcm16ToWav(pcm.pcm.subarray(from16, to16))
+  }
+  return { audio, sec: (audio.length - 44) / (SAMPLE_RATE * 2) }
 }
 
 function centroid(vectors: Float32Array[]): Float32Array | null {
@@ -261,22 +291,16 @@ export async function planMacVoiceAssignment(input: MacAssignInput): Promise<Mac
   const report = emptyReport(to, null)
   const units: Unit[] = []
   for (const raw of [...new Set(rawIndices)].sort((a, b) => a - b)) {
-    const turns = turnsOf(chunksByRaw.get(raw))
-    if (turns.length === 0 || turns.every(t => t.speaker === from)) { units.push({ raw, slice: null }); continue }
-    const usable = turns.filter(t => t.speaker === from
-      && Number.isFinite(t.startSec) && Number.isFinite(t.endSec)
-      && (t.endSec as number) - (t.startSec as number) >= MAC_ASSIGN_MIN_SLICE_SEC)
-    if (usable.length === 0) { report.multiVoiceSkipped += 1; continue }
-    for (const t of usable) units.push({
-      raw,
-      slice: { startSec: (t.startSec as number) + MAC_ASSIGN_SLICE_INSET_SEC, endSec: (t.endSec as number) - MAC_ASSIGN_SLICE_INSET_SEC },
-    })
+    const chunkUnits = macVoiceChunkUnits(macVoiceTurnsOf(chunksByRaw.get(raw)), from)
+    if (chunkUnits === 'whole') { units.push({ raw, slice: null }); continue }
+    if (chunkUnits.length === 0) { report.multiVoiceSkipped += 1; continue }
+    for (const slice of chunkUnits) units.push({ raw, slice })
   }
 
   const embeddings: Float32Array[] = []
   const secs: number[] = []
   let foundAudio = 0
-  const picked = spread(units, MAC_ASSIGN_MAX_UNITS)
+  const picked = spreadMacVoiceUnits(units, MAC_ASSIGN_MAX_UNITS)
   stats.units = picked.length
   const deadline = started + (input.deadlineMs ?? deadlineMsFromEnv())
   for (const unit of picked) {
@@ -302,16 +326,9 @@ export async function planMacVoiceAssignment(input: MacAssignInput): Promise<Mac
     if (hit) { stats.reused += 1; embeddings.push(hit.vec); secs.push(hit.sec); continue }
     let wav: Buffer
     try { wav = readFileSync(path) } catch { report.missingAudio += 1; continue }
-    const pcm = readPcm16Mono(wav)
-    if (!pcm || pcm.sampleRate !== SAMPLE_RATE) continue
-    let audio = wav
-    if (unit.slice) {
-      const from16 = Math.max(0, Math.round(unit.slice.startSec * SAMPLE_RATE)) * 2
-      const to16 = Math.min(pcm.pcm.length, Math.round(unit.slice.endSec * SAMPLE_RATE) * 2)
-      if (to16 <= from16) continue
-      audio = pcm16ToWav(pcm.pcm.subarray(from16, to16))
-    }
-    const sec = (audio.length - 44) / (SAMPLE_RATE * 2)
+    const cut = macVoiceUnitAudio(wav, unit.slice)
+    if (!cut) continue
+    const { audio, sec } = cut
     if (sec < VOICEPRINT_MIN_AUDIO_SEC) { report.shortSkipped += 1; continue }
     const embedding = extractEmbedding(audio)
     stats.embedded += 1
