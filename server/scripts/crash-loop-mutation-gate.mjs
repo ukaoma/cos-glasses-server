@@ -75,8 +75,8 @@ const mutations = [
   m('qj-runtime-passes-gate', RUNTIME, ['  bootResumeGate,\n', ''], WIRE),
 
   // ── Meeting finalization ──
-  m('mf-admit-before-resume', MEETING, ["    if (!gate.admit('meeting_finalization', job.sessionId, job.phase)) continue\n    schedule(job)",
-    "    schedule(job)\n    if (!gate.admit('meeting_finalization', job.sessionId, job.phase)) continue"], MEET),
+  m('mf-admit-before-resume', MEETING, ["    if (!gate.admit('meeting_finalization', job.sessionId, job.phase)) {",
+    "    schedule(job)\n    if (!gate.admit('meeting_finalization', job.sessionId, job.phase)) {"], MEET),
   m('mf-forget-on-finish', MEETING, ["    bootResumeGate().forget('meeting_finalization', current.sessionId)\n    finalizationRetryCounts.delete(key)", '    finalizationRetryCounts.delete(key)'], MEET),
   m('mf-forget-when-already-complete', MEETING, ["      bootResumeGate().forget('meeting_finalization', current.sessionId)\n      return\n", '      return\n'], MEET),
   m('mf-replay-skips-parked', MEETING, ["if (pendingJob && !bootResumeGate().isParked('meeting_finalization', sessionId))", 'if (pendingJob)'], MEET),

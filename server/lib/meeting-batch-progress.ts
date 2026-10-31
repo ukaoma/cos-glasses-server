@@ -5,7 +5,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { dataPath } from './data-dir.js'
-import { MeetingFinalizationJobStore, type MeetingFinalizationJob } from './meeting-finalization-jobs.js'
+import { finalizationStop, MeetingFinalizationJobStore, type MeetingFinalizationJob } from './meeting-finalization-jobs.js'
 import { listActiveRecoveries } from './unsaved-audio-quarantine.js'
 
 export const BATCH_PROGRESS_FILENAME = '_batch_progress.json'
@@ -32,7 +32,8 @@ export interface MeetingBatchProgress {
 
 export interface MeetingSyncMeeting {
   meetingId: string
-  phase: MeetingBatchPhase | 'pending'
+  /** `stopped` (6.97.0): visible, not working, and never counted as active or blocking. */
+  phase: MeetingBatchPhase | 'pending' | 'stopped'
   percent: number | null
   segmentsDone: number | null
   segmentsTotal: number | null
@@ -255,6 +256,27 @@ function finalizationSyncRow(job: MeetingFinalizationJob): MeetingSyncMeeting {
   }
 }
 
+/**
+ * 6.97.0: a job that stopped trying. Says what is true and no more: nothing is running, so it does not
+ * say "do not restart", and it does not say "retrying". Short enough for COS Control's one-line row.
+ */
+function stoppedFinalizationRow(job: MeetingFinalizationJob, chunkFiles: number): MeetingSyncMeeting {
+  const hq = job.phase === 'batch_pending'
+  const what = hq ? 'HQ polish' : job.phase === 'ops_pending' ? 'Library save' : 'Capture save'
+  const audio = hq && job.audioDir ? ' · audio kept' : ''
+  const next = finalizationStop(job)?.reason === 'crash_parked' ? '' : ' · retries later'
+  return {
+    meetingId: job.sessionId,
+    phase: 'stopped',
+    percent: null,
+    segmentsDone: null,
+    segmentsTotal: null,
+    chunkFiles,
+    updatedAt: job.updatedAt,
+    label: `${what} stopped${finalizationStop(job)?.reason === 'crash_parked' ? ' after crashes' : ''}${audio}${next}`,
+  }
+}
+
 /** Snapshot of pending HQ polish work for /api/health and COS Control. */
 export function getMeetingSyncSnapshot(
   root: string = pendingBatchRoot(),
@@ -262,6 +284,16 @@ export function getMeetingSyncSnapshot(
 ): MeetingSyncSnapshot {
   const meetings: MeetingSyncMeeting[] = []
   const retained: MeetingSyncRetainedMeeting[] = []
+  const finalizationJobs = listFinalizationJobsForSnapshot(root, options)
+  // 6.97.0: a stopped job's directory is not evidence of work. A progress file or a fresh marker left
+  // by its last attempt would otherwise read as active below; its one row is the job's own.
+  const stoppedDirs = new Map<string, MeetingFinalizationJob>()
+  for (const job of finalizationJobs) {
+    if (!finalizationStop(job)) continue
+    stoppedDirs.set(job.sessionId, job)
+    if (job.audioDir) stoppedDirs.set(basename(job.audioDir), job)
+  }
+  const stoppedChunks = new Map<string, number>()
   let dirs: string[] = []
   if (existsSync(root)) {
     try {
@@ -284,6 +316,12 @@ export function getMeetingSyncSnapshot(
     try {
       chunkFiles = readdirSync(dir).filter(f => f.endsWith('.wav')).length
     } catch { /* ignore */ }
+
+    const stoppedJob = stoppedDirs.get(name)
+    if (stoppedJob) {
+      stoppedChunks.set(stoppedJob.sessionId, chunkFiles)
+      continue
+    }
 
     // A terminal outcome ends the meeting's ACTIVE life. Its WAVs stay for
     // retry, reported as retained — never as running work. The gate is
@@ -389,13 +427,21 @@ export function getMeetingSyncSnapshot(
   // then showed Meeting sync Idle with restart locked (2026-09-09 local 6.45.1
   // rollout). Same contract as active recoveries: this window is active work.
   const seen = new Set(meetings.map(meeting => meeting.meetingId))
-  for (const job of listFinalizationJobsForSnapshot(root, options)) {
+  const stoppedRows: MeetingSyncMeeting[] = []
+  for (const job of finalizationJobs) {
     if (seen.has(job.sessionId)) continue
     seen.add(job.sessionId)
-    meetings.push(finalizationSyncRow(job))
+    if (finalizationStop(job)) stoppedRows.push(stoppedFinalizationRow(job, stoppedChunks.get(job.sessionId) ?? 0))
+    else meetings.push(finalizationSyncRow(job))
   }
 
   if (meetings.length === 0) {
+    // 6.97.0: visible, but no work. Control keys Restart, Update and Sync now off `active` and
+    // `blocksRestart` here and off `finalization.pending`, so all three must read idle.
+    if (stoppedRows.length > 0) {
+      const label = stoppedRows.length === 1 ? stoppedRows[0]!.label : `${stoppedRows.length} meetings stopped · audio kept`
+      return { active: false, percent: null, label, blocksRestart: false, meetings: stoppedRows, retained }
+    }
     const label = retained.length > 0
       ? `Idle · ${retained.length} retained batch${retained.length === 1 ? '' : 'es'}`
       : 'Idle'
@@ -416,7 +462,7 @@ export function getMeetingSyncSnapshot(
     percent,
     label,
     blocksRestart: true,
-    meetings,
+    meetings: [...meetings, ...stoppedRows],
     retained,
   }
 }

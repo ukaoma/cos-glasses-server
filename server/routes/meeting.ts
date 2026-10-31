@@ -203,13 +203,16 @@ import {
 } from '../lib/g2-ops-handoff.js'
 import {
   canonicalFinalizationIsComplete,
+  finalizationStop,
   MeetingFinalizationJobStore,
   markCanonicalFinalizationState,
   readFinalizationChunkEntries,
+  stoppedFinalizationRetryDue,
   type MeetingFinalizationJob,
 } from '../lib/meeting-finalization-jobs.js'
 import { enrichStandaloneMeeting } from '../lib/meeting-summary-persistence.js'
 import { bootResumeGate, type BootResumeGate } from '../lib/boot-resume.js'
+import { managedServerVersion } from '../lib/managed-runtime.js'
 import { recordFinalPassSkip, runNemotronFinalPass, type FinalPassOptions, type FinalPassOutcome } from '../lib/nemotron-final.js'
 import { runTranscriptCleanup, type CleanupOutcome } from '../lib/transcript-cleanup.js'
 import { notifySpeakerShadowFinalized } from '../lib/speaker-shadow.js'
@@ -370,6 +373,8 @@ export interface MeetingRouteDependencies {
 
 const activeFinalizationJobs = new Set<string>()
 const finalizationRetryCounts = new Map<string, number>()
+/** Retries after a job's first failure in one process, 60 s and 120 s apart. */
+const FINALIZATION_RETRY_LIMIT = 2
 
 interface FinalizationRuntime {
   finalizationJobs: MeetingFinalizationJobStore
@@ -422,6 +427,8 @@ export function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Fi
     allowDuringDrain: true,
     phase: 'queued',
   })
+  // 6.97.0: an attempt is starting, so a job that had stopped is work in progress again.
+  try { runtime.finalizationJobs.clearStopped(job.sessionId) } catch { /* the lease above still holds the drain */ }
   const jobStartedAt = Date.now()
   const task = Promise.resolve().then(async () => {
     lease.setPhase('active')
@@ -553,6 +560,9 @@ export function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Fi
     }
   }).catch(error => {
     const current = runtime.finalizationJobs.get(job.sessionId) ?? job
+    const retryCount = finalizationRetryCounts.get(key) ?? 0
+    // 6.97.0: nothing will try this again in this process, so it stops counting as work.
+    const outOfRetries = retryCount >= FINALIZATION_RETRY_LIMIT
     try {
       runtime.finalizationJobs.save({
         sessionId: current.sessionId,
@@ -563,14 +573,14 @@ export function scheduleFinalizationJob(job: MeetingFinalizationJob, runtime: Fi
         phase: current.phase,
         claimPending: current.claimPending,
         lastError: error instanceof Error ? error.message : String(error),
+        ...(outOfRetries ? { stopped: { at: new Date().toISOString(), reason: 'retries_exhausted' as const, version: managedServerVersion() } } : {}),
       })
     } catch { /* keep the original durable job if error annotation fails */ }
     console.error(
       `[meeting/save] Durable finalization retained for retry (${job.sessionId}): `
       + `${error instanceof Error ? error.message : String(error)}`,
     )
-    const retryCount = finalizationRetryCounts.get(key) ?? 0
-    if (retryCount < 2) {
+    if (!outOfRetries) {
       finalizationRetryCounts.set(key, retryCount + 1)
       const retryRetained = () => {
         if (!maintenanceAdmissionsOpen()) {
@@ -599,6 +609,8 @@ export function resumeMeetingFinalizationJobs(options: {
   gate?: BootResumeGate
   finalizationJobs?: MeetingFinalizationJobStore
   schedule?: (job: MeetingFinalizationJob) => void
+  now?: number
+  version?: string | null
 } = {}): void {
   const finalizationJobs = options.finalizationJobs ?? new MeetingFinalizationJobStore()
   finalizationJobs.reconcileCanonicalSidecars()
@@ -608,11 +620,25 @@ export function resumeMeetingFinalizationJobs(options: {
     runBatch: runMeetingBatchPipeline,
     scheduleBackground: task => { void task },
   }))
+  const now = options.now ?? Date.now()
+  const version = options.version === undefined ? managedServerVersion() : options.version
   for (const job of finalizationJobs.list()) {
     if (options.sessionId !== undefined && job.sessionId !== options.sessionId) continue
+    // 6.97.0: a job that gave up does not take the lock back on every start. It is tried again on
+    // another server version, which may have the fix, or 6 hours after it stopped. A person's Retry
+    // (`sessionId`) always runs.
+    const stop = finalizationStop(job)
+    if (stop && options.sessionId === undefined && !stoppedFinalizationRetryDue(stop, now, version)) continue
     // 6.78.0: counted (durably) BEFORE it runs, so a job that kills the process is parked
     // after RESTART_LIMIT crashed boots. A parked job is skipped and stays in its store.
-    if (!gate.admit('meeting_finalization', job.sessionId, job.phase)) continue
+    if (!gate.admit('meeting_finalization', job.sessionId, job.phase)) {
+      // 6.97.0: parked means nothing is trying it, so it must not hold Restart or Update either.
+      try { if (stop?.reason !== 'crash_parked') finalizationJobs.markStopped(job, 'crash_parked', version) } catch { /* stays as it was */ }
+      continue
+    }
+    // 6.97.0: a job that already failed gets one attempt per start, with no timers: its lock lasts as
+    // long as that attempt runs. This also covers a job that failed before 6.97.0 wrote stops down.
+    if (stop || job.lastError) finalizationRetryCounts.set(`${finalizationJobs.root}:${job.sessionId}`, FINALIZATION_RETRY_LIMIT)
     schedule(job)
   }
 }
