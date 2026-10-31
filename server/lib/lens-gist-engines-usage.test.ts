@@ -62,7 +62,7 @@ describe('runLensGistEngine records real usage', () => {
     const run = await runLensGistEngine('codex', 'gpt-6-astra', PROMPT, OPTS)
     expect(run.text).toBe(ANSWER)
     expect(run.usage).toEqual({ inputTokens: 19629, cachedInputTokens: 19456, outputTokens: 5 })
-    expect(row()).toMatchObject({ cliSessionId: 'gist-thread-1', realUsage: { inputTokens: 173, cacheReadTokens: 19456, outputTokens: 5 } })
+    expect(row()).toMatchObject({ cliSessionId: 'gist-thread-1', realUsage: { inputTokens: 173, cacheReadTokens: 19456, outputTokens: 5, resolvedModel: 'gpt-6-astra' } })
     expect(row().realUsage).not.toHaveProperty('costUsd')
   })
   it('Cursor stays estimated even when it prints usage, and still names its chat', async () => {

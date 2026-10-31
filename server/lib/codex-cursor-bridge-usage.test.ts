@@ -118,15 +118,15 @@ describe('Codex', () => {
   it('a fresh thread: real counts with cached subtracted from input, no cost, run id and thread id', async () => {
     const { cb, row } = await codexTurn('thread-fresh', false, totals(100, 80, 7))
     expect(cb.onDone.mock.calls[0][0]).toBe(ANSWER)
-    expect(row).toMatchObject({ source: 'g2-voice', caller: 'voice_query', runId: 'codex-run-usage', cliSessionId: 'thread-fresh', realUsage: { inputTokens: 20, cacheReadTokens: 80, outputTokens: 7 } })
+    expect(row).toMatchObject({ source: 'g2-voice', caller: 'voice_query', runId: 'codex-run-usage', cliSessionId: 'thread-fresh', realUsage: { inputTokens: 20, cacheReadTokens: 80, outputTokens: 7, resolvedModel: 'gpt-test' } })
     expect(row.realUsage).not.toHaveProperty('costUsd')
   })
   it('a resumed thread is charged its own turn, from the real probe numbers', async () => {
     await codexTurn('thread-probe', false, totals(19610, 0, 5))
     const second = await codexTurn('thread-probe', true, totals(39239, 19456, 10))
-    expect(second.row.realUsage).toEqual({ inputTokens: 19629 - 19456, cacheReadTokens: 19456, outputTokens: 5 })
+    expect(second.row.realUsage).toEqual({ inputTokens: 19629 - 19456, cacheReadTokens: 19456, outputTokens: 5, resolvedModel: 'gpt-test' })
     const third = await codexTurn('thread-probe', true, totals(58887, 38912, 15))
-    expect(third.row.realUsage).toEqual({ inputTokens: 19648 - 19456, cacheReadTokens: 19456, outputTokens: 5 })
+    expect(third.row.realUsage).toEqual({ inputTokens: 19648 - 19456, cacheReadTokens: 19456, outputTokens: 5, resolvedModel: 'gpt-test' })
   })
   it('a resumed thread this server has no total for stays estimated, with its ids', async () => {
     const { row } = await codexTurn('thread-unknown', true, totals(39239, 19456, 10))

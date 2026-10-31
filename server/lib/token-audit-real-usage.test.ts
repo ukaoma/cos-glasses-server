@@ -30,10 +30,13 @@ describe('buildTokenAuditRecord', () => {
       + '"run_id":"run-1","cli_session_id":"sess-1","input_tokens":2,"output_tokens":5,"cache_read_tokens":542,"cache_write_tokens":60,"cache_write_1h_tokens":60,"cost_usd":0.00002012,"resolved_model":"claude-haiku-5-5"}',
     )
   })
-  it('a Codex row has no cost and no cache write, and says so by leaving them out', () => {
-    const rec = buildTokenAuditRecord({ ...base, realUsage: { inputTokens: 173, outputTokens: 5, cacheReadTokens: 19456 } }, at)
-    expect(rec).toMatchObject({ usage_kind: 'provider_final', input_tokens: 173, output_tokens: 5, cache_read_tokens: 19456 })
-    for (const key of ['cost_usd', 'cache_write_tokens', 'cache_write_1h_tokens', 'resolved_model']) expect(rec).not.toHaveProperty(key)
+  it('a Codex row always has the four counts, and leaves out the cost it does not have', () => {
+    const rec = buildTokenAuditRecord({ ...base, realUsage: { inputTokens: 173, outputTokens: 5, cacheReadTokens: 19456, resolvedModel: 'gpt-6-astra' } }, at)
+    expect(rec).toMatchObject({ usage_kind: 'provider_final', input_tokens: 173, output_tokens: 5, cache_read_tokens: 19456, cache_write_tokens: 0, resolved_model: 'gpt-6-astra' })
+    for (const key of ['cost_usd', 'cache_write_1h_tokens']) expect(rec).not.toHaveProperty(key)
+  })
+  it('a provider with no cache split still writes all four counts', () => {
+    expect(buildTokenAuditRecord({ ...base, realUsage: { inputTokens: 300, outputTokens: 20 } }, at)).toMatchObject({ input_tokens: 300, output_tokens: 20, cache_read_tokens: 0, cache_write_tokens: 0 })
   })
   it('provider_final only with real numbers: asking for it does not make it so', () => {
     expect(buildTokenAuditRecord({ ...base, usageKind: 'provider_final' }, at)).toMatchObject({ usage_kind: 'estimated' })

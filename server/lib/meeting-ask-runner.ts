@@ -89,7 +89,7 @@ budget?: MeetingAskRunBudget): Promise<{
                     inputChars: stdin.length + (adapter ? args.join(' ').length : provider === 'claude' ? system.length : 0),
                     outputChars: answerChars, durationMs: Date.now() - started,
                     // 6.97.0: read separately from the answer's parse, so a bad usage block changes neither.
-                    ...readOneShotUsage(provider, stdout) });
+                    ...readOneShotUsage(provider, stdout, model.model) });
             }
         };
         const settle = (unconfirmed: boolean) => {

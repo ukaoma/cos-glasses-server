@@ -663,7 +663,7 @@ export async function callCodexStreaming(
   let lastActivity = Date.now()
   const emittedBlocks = new Set<string>()
   // 6.97.0: what this run used, for the audit row only.
-  const runUsage = new CodexRunUsage()
+  const runUsage = new CodexRunUsage(keyProfile ? keyProfile.model : !skipsCosModel(extra) ? resolvedCodexModel?.id : undefined)
 
   function cleanupImages() {
     cleanupModelImageInputs(imageInputs)

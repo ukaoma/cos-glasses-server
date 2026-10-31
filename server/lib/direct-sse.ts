@@ -35,6 +35,8 @@ export interface DirectSseUsage {
   output: number
   /** Provider-reported cost in USD (OpenRouter `usage.cost`), when present. */
   costUsd?: number
+  /** 6.97.0: the part of `input` read from cache, when the provider says. Only the audit reads it. */
+  cachedInput?: number
 }
 
 export type DirectSseEvent =
@@ -213,10 +215,13 @@ export class DirectSseParser {
     const usage = chunk.usage as Record<string, unknown> | undefined
     if (usage && typeof usage === 'object') {
       const cost = usage.cost
+      const input = nonNegative(usage.prompt_tokens)
+      const cached = (usage.prompt_tokens_details as { cached_tokens?: unknown } | null | undefined)?.cached_tokens
       this.usage = {
-        input: nonNegative(usage.prompt_tokens),
+        input,
         output: nonNegative(usage.completion_tokens),
         ...(typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? { costUsd: cost } : {}),
+        ...(typeof cached === 'number' && Number.isSafeInteger(cached) && cached > 0 && cached <= input ? { cachedInput: cached } : {}),
       }
     }
     const choices = Array.isArray(chunk.choices) ? chunk.choices : []

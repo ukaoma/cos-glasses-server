@@ -112,6 +112,15 @@ describe('ClaudeRunUsage', () => {
     expect(run.take()).toMatchObject({ inputTokens: 4, outputTokens: 9, cacheWriteTokens: 1099, costUsd: 0.0002247 })
     expect(run.take()).toBeNull()
   })
+  it('on an older CLI, a result after the totals were read is not counted: the next total would repeat the first', () => {
+    const run = new ClaudeRunUsage(false)
+    const { model_usage_since_last_result: _a, ...first } = STEER_1 as Record<string, unknown>
+    const { model_usage_since_last_result: _b, ...second } = STEER_2 as Record<string, unknown>
+    run.observe(first)
+    expect(run.take()).toMatchObject({ inputTokens: 2, outputTokens: 4 })
+    run.observe(second)
+    expect(run.take()).toBeNull()
+  })
   it('the same result seen twice counts once', () => {
     const run = new ClaudeRunUsage(false)
     run.observe(STEER_1)
@@ -193,6 +202,18 @@ describe('CodexRunUsage', () => {
     finish(CODEX_3, 'thread-c', undefined)
     expect(finish(CODEX_2, 'thread-c', 'thread-c')).toBeNull()
   })
+  it('a total where only input went backwards is not a turn, though the other counts look fine', () => {
+    finish({ type: 'turn.completed', usage: { input_tokens: 100, cached_input_tokens: 50, output_tokens: 7 } }, 'thread-f', undefined)
+    expect(finish({ type: 'turn.completed', usage: { input_tokens: 90, cached_input_tokens: 50, output_tokens: 9 } }, 'thread-f', 'thread-f')).toBeNull()
+  })
+  it('names the model COS passed on --model, since its stream names none', () => {
+    const run = new CodexRunUsage('gpt-6-astra')
+    run.observe(CODEX_1)
+    expect(run.finish('thread-g', undefined)).toMatchObject({ resolvedModel: 'gpt-6-astra' })
+    const resumed = new CodexRunUsage('gpt-6-astra')
+    resumed.observe(CODEX_2)
+    expect(resumed.finish('thread-g', 'thread-g')).toMatchObject({ resolvedModel: 'gpt-6-astra', inputTokens: 173 })
+  })
   it('states no cost, and never a cache write', () => {
     expect(finish(CODEX_1, 'thread-d', undefined)).not.toHaveProperty('costUsd')
     expect(finish(CODEX_1, 'thread-e', undefined)).not.toHaveProperty('cacheWriteTokens')
@@ -218,7 +239,7 @@ describe('readOneShotUsage', () => {
   })
   it('Codex: JSON lines, cached split out', () => {
     const stdout = [{ type: 'thread.started', thread_id: 'thread-x' }, { type: 'item.completed', item: { type: 'agent_message', text: 'hi' } }, CODEX_2].map(e => JSON.stringify(e)).join('\n')
-    expect(readOneShotUsage('codex', stdout)).toEqual({ realUsage: { inputTokens: 19783, outputTokens: 10, cacheReadTokens: 19456 }, cliSessionId: 'thread-x' })
+    expect(readOneShotUsage('codex', stdout, 'gpt-6-astra')).toEqual({ realUsage: { inputTokens: 19783, outputTokens: 10, cacheReadTokens: 19456, resolvedModel: 'gpt-6-astra' }, cliSessionId: 'thread-x' })
   })
   it('Cursor: the session id only, whatever usage it prints', () => {
     const stdout = JSON.stringify({ type: 'result', session_id: 'chat-1', usage: { inputTokens: 500, outputTokens: 20, cacheReadTokens: 9 } })

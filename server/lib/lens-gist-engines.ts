@@ -430,7 +430,7 @@ export async function runLensGistEngine(
   let resolvedModel = model
   let usage: EngineUsage = {}
   try {
-    const run = await dispatch(engine, model, prompt, opts, (provider, stdout) => { usage = readOneShotUsage(provider, stdout) })
+    const run = await dispatch(engine, model, prompt, opts, (provider, stdout) => { usage = readOneShotUsage(provider, stdout, model) })
     outputChars = run.text.length
     resolvedModel = run.model || model
     // Ollama answers over HTTP, so it has no stdout to read; its reply already carries the counts.

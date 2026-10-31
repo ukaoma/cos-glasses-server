@@ -48,7 +48,7 @@ describe('runMeetingAskModel records real usage', () => {
     ].map(e => JSON.stringify(e)).join('\n')
     const run = await ask(CODEX, stdout)
     expect(run.text).toBe(ANSWER)
-    expect(row()).toMatchObject({ cliSessionId: 'ask-thread-1', realUsage: { inputTokens: 20, cacheReadTokens: 80, outputTokens: 7 } })
+    expect(row()).toMatchObject({ cliSessionId: 'ask-thread-1', realUsage: { inputTokens: 20, cacheReadTokens: 80, outputTokens: 7, resolvedModel: 'gpt-6-astra' } })
     expect(row().realUsage).not.toHaveProperty('costUsd')
   })
   it('keeps the caller label a failed-usage read could not touch', async () => {

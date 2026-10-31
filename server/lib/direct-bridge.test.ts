@@ -378,6 +378,20 @@ describe('direct lane turns (mock OpenAI server, fake relay)', () => {
       expect(entry).toMatchObject({ usd: 3, realUsage: { inputTokens: 1_000_000, outputTokens: 100_000 } })
       expect(entry.realUsage).not.toHaveProperty('costUsd')
     })
+    it('prompt_tokens includes cached ones: the row keeps them apart, and the relay still settles the raw count', async () => {
+      const { relay, state } = fakeRelay()
+      handler = (_b, res) => {
+        sseHead(res)
+        res.write(textDelta('Hi.'))
+        res.write(data({ id: 'gen-1', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }))
+        res.write(data({ id: 'gen-1', choices: [], usage: { prompt_tokens: 1000, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 800 } } }))
+        res.end('data: [DONE]\n\n')
+      }
+      await callDirectStreaming('q', undefined, collect().callbacks, profile(), undefined, undefined, undefined, opts(relay))
+      expect(buildTokenAuditRecord(logTokenAudit.mock.calls[0]![0])).toMatchObject({ input_tokens: 200, cache_read_tokens: 800, cache_write_tokens: 0, output_tokens: 10 })
+      expect(state.settles[0]).toMatchObject({ input: 1000, output: 10 })
+      expect(state.settles[0]).not.toHaveProperty('cachedInput')
+    })
     it('no usage arrived: no real usage, and the row reads estimated', async () => {
       const { relay } = fakeRelay()
       handler = (_b, res) => sendText(res, ['Hi.'])

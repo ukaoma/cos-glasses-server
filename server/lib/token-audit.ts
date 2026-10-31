@@ -107,13 +107,14 @@ export function buildTokenAuditRecord(entry: TokenAuditEntry, now: Date = new Da
     ...(entry.promptEditOutcome ? { prompt_edit_outcome: entry.promptEditOutcome } : {}),
     // 6.97.0: last, and only when set, so a row without them is byte-identical to 6.96.4. Numbers and
     // ids only. COS Control reads these names. input_tokens excludes cache reads and writes on every
-    // provider, so the four counts stay separate; cache_write_1h_tokens is part of cache_write_tokens.
+    // provider, and all four counts are always written, so they stay separate. cache_write_1h_tokens
+    // is part of cache_write_tokens; it and cost_usd appear only when the provider states them.
     ...(cliSessionId ? { cli_session_id: cliSessionId } : {}),
     ...(real ? {
       input_tokens: real.inputTokens,
       output_tokens: real.outputTokens,
-      ...(real.cacheReadTokens !== undefined ? { cache_read_tokens: real.cacheReadTokens } : {}),
-      ...(real.cacheWriteTokens !== undefined ? { cache_write_tokens: real.cacheWriteTokens } : {}),
+      cache_read_tokens: real.cacheReadTokens ?? 0,
+      cache_write_tokens: real.cacheWriteTokens ?? 0,
       ...(real.cacheWrite1hTokens !== undefined ? { cache_write_1h_tokens: real.cacheWrite1hTokens } : {}),
       ...(real.costUsd !== undefined ? { cost_usd: real.costUsd } : {}),
       ...(real.resolvedModel ? { resolved_model: real.resolvedModel } : {}),

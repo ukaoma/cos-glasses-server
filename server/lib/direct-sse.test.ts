@@ -51,6 +51,17 @@ describe('direct SSE parser', () => {
     expect(p.finishReason).toBe('tool_calls')
   })
 
+  it('6.97.0: reads the cached part of prompt_tokens only when it is a real part of it', () => {
+    const read = (details: unknown) => {
+      const p = new DirectSseParser('c')
+      p.push(ev({ id: 'gen-1', choices: [], usage: { prompt_tokens: 100, completion_tokens: 8, prompt_tokens_details: details } }))
+      return p.usage
+    }
+    expect(read({ cached_tokens: 80 })).toEqual({ input: 100, output: 8, cachedInput: 80 })
+    for (const bad of [null, 'x', {}, { cached_tokens: 0 }, { cached_tokens: 101 }, { cached_tokens: -1 }, { cached_tokens: '80' }, { cached_tokens: 1.5 }]) {
+      expect(read(bad)).toEqual({ input: 100, output: 8 })
+    }
+  })
   it('reads the usage chunk (empty choices) including OpenRouter cost', () => {
     const p = new DirectSseParser('c')
     p.push(delta({ content: 'Hi' }))

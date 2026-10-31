@@ -283,11 +283,12 @@ function codexTotals(event: Record<string, unknown>): CodexTotals | null {
  * `cache_write_input_tokens` is left in input: it has read 0 on every row seen, and nothing yet shows
  * whether it sits inside `input_tokens`. No cost: Codex does not state one.
  */
-function codexRealUsage(totals: CodexTotals): RealUsage | null {
+function codexRealUsage(totals: CodexTotals, model: string | undefined): RealUsage | null {
   return normalizeRealUsage({
     inputTokens: Math.max(0, totals.input - totals.cached),
     outputTokens: totals.output,
     cacheReadTokens: totals.cached,
+    ...(model ? { resolvedModel: model } : {}),
   })
 }
 
@@ -314,6 +315,9 @@ export function _resetCodexThreadTotalsForTest(): void {
 export class CodexRunUsage {
   private last: CodexTotals | null = null
 
+  /** `model` is the id COS passed on `--model`: Codex's stream never names the model it ran. */
+  constructor(private readonly model?: string) {}
+
   /** Never throws: this runs inside the bridge's event handler. */
   observe(event: unknown): void {
     try {
@@ -333,11 +337,11 @@ export class CodexRunUsage {
       const thread = cleanProviderId(threadId)
       const prior = thread ? codexThreadTotals.get(thread) : undefined
       if (thread) rememberCodexTotals(thread, totals)
-      if (!resumedFrom) return codexRealUsage(totals)
+      if (!resumedFrom) return codexRealUsage(totals, this.model)
       if (!prior) return null
       const delta = { input: totals.input - prior.input, cached: totals.cached - prior.cached, output: totals.output - prior.output }
       if (delta.input < 0 || delta.cached < 0 || delta.output < 0) return null
-      return codexRealUsage(delta)
+      return codexRealUsage(delta, this.model)
     } catch {
       return null
     }
@@ -364,9 +368,10 @@ function jsonLines(stdout: string): Record<string, unknown>[] {
 /**
  * Usage of a one-shot, never-resumed call: the lens gist, cues, transcript cleanup and Meeting Ask.
  * Cursor's usage is not trusted (its cache parser has never produced a real row), so Cursor reports
- * its session id only. Never throws.
+ * its session id only. `model` is the id passed on `--model`, used only for Codex, which names none.
+ * Never throws.
  */
-export function readOneShotUsage(provider: 'claude' | 'codex' | 'cursor', stdout: string): EngineUsage {
+export function readOneShotUsage(provider: 'claude' | 'codex' | 'cursor', stdout: string, model?: string): EngineUsage {
   try {
     const events = jsonLines(stdout)
     if (provider === 'claude') {
@@ -376,7 +381,7 @@ export function readOneShotUsage(provider: 'claude' | 'codex' | 'cursor', stdout
       return { ...(realUsage ? { realUsage } : {}), ...(run.cliSessionId ? { cliSessionId: run.cliSessionId } : {}) }
     }
     if (provider === 'codex') {
-      const run = new CodexRunUsage()
+      const run = new CodexRunUsage(model)
       let thread: string | undefined
       for (const event of events) {
         if (event.type === 'thread.started') thread = cleanProviderId(event.thread_id) ?? thread
