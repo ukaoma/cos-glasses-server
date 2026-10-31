@@ -1,3 +1,17 @@
+## 6.97.0 - COS's token ledger records what providers actually report (private candidate)
+
+2026-10-31. A private candidate for one Mac, built on 6.96.4. Not published. Pairs with the COS cost view in the next COS Control build, which reads the ledger file directly; there is no new endpoint.
+
+- A token-audit row now carries real usage when the provider reported it: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cache_write_1h_tokens`, `cost_usd` and `resolved_model`, with `usage_kind` `provider_final`. That label now needs real numbers. `input_tokens` excludes cache reads and writes on every provider, so the counts stay separate. The new fields come after every existing field, and a row without them is byte-identical to 6.96.4, so the Python readers are unaffected.
+- Real where a provider states it: the lens gist, cues and transcript cleanup; Meeting Ask; warm dictation polish; the Claude, Codex and direct bridges and the boot pre-warm; Claude attached and fork runs.
+- Still estimated, and marked so: cold polish, whose plain text output has no usage (JSON there would add failures that feed the breaker); every Cursor path, whose cache parser has never produced a real row; Codex attached and fork runs, which share a thread with the desktop; and summaries that run through `spawnClaudeText`.
+- A resumed turn is charged only itself. Claude's `total_cost_usd` and `modelUsage` and Codex's `usage` are running totals that carry earlier turns of the session, so counting them on each turn would overstate every resumed G2 turn. Claude reads `model_usage_since_last_result`, and each result counts once however many a steered run writes. Usage on a result that arrives after the row is written gets one `:late_result` row under the same run id. On a CLI without that field, a resumed Claude run reports this turn's tokens and no cost. Codex charges the difference from the last total this server saw on the thread, so its first resumed turn after a restart stays estimated.
+- Every row these paths log now names its run and provider session where known: `run_id` and `cli_session_id`.
+- Polish's `input_chars` now counts the system prompt and the built message, not just the words dictated. The prompt itself is unchanged.
+- Dispatched tasks and meeting reviews get their own caller, `dispatch_task` and `work_review`, in place of `full_query`. Attached and fork runs that reach an end get a row for the first time: source `g2-attached`, caller `attached_turn`; source `g2-fork`, caller `fork_thread`.
+- A missing or malformed usage block changes nothing: same answer, no failure, no breaker count, no retry, and the row stays estimated. No prompt or answer text enters the audit, and a provider id with spaces in it is refused rather than written.
+- The test config now points the audit at a scratch file (`COS_TOKEN_AUDIT_FILE`), so a test's made-up numbers cannot reach a real ledger. Tests that did not mock the audit used to append to the home file.
+
 ## 6.96.4 - Saved Mac calls no longer stick on one empty window (private candidate)
 
 2026-10-31. A private candidate for one Mac, built on 6.96.3 with nothing else in it.
