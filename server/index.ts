@@ -167,6 +167,7 @@ import { createWorkLensRoundsRouter } from './routes/work-lens-rounds.js'
 import { startWorkOrchestrator } from './lib/work-orchestrator/runtime.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
 import { isReadOnlyApiPost } from './lib/work-search.js'
+import { isMacVoiceNamingBatchPost } from './lib/mac-voice-naming-batch.js'
 import { dataPath } from './lib/data-dir.js'
 import { loadJsonOrQuarantine, durableAtomicWriteFileSync } from './lib/atomic-fs.js'
 import { BOOT_RESUME_LEDGER_FILE, createBootResumeGate, installBootResumeGate } from './lib/boot-resume.js'
@@ -442,6 +443,8 @@ app.use('/api', (req, res, next) => {
     || req.path.startsWith('/maintenance/drain')
     // 6.83.0 lens plans: each write takes the api_mutation lease itself and answers the contract's 503 `maintenance`.
     || req.path.startsWith('/work/chat/lens-')
+    // 6.96.3 voice naming batches: each write holds api_mutation itself; a drain gets the route's own refusal.
+    || isMacVoiceNamingBatchPost(req.path)
   if (lifecycleOwned) return next()
 
   // COS Control must prove the candidate while a committed cross-boot gate is

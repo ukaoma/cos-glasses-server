@@ -54,6 +54,7 @@ import { readVoiceProfiles, retractEmbeddingsBySource } from '../lib/speaker-emb
 import { enrolNamedVoice } from '../lib/meeting-relabel-enrolment.js'
 import { commitMacVoiceAssignment, planMacVoiceAssignment, type MacAssignGate, type MacAssignPlan, type MacAssignSkip } from '../lib/mac-voice-assignment.js'
 import { readVoiceDisplay, voiceDisplayScopes } from '../lib/mac-voice-display.js'
+import { registerMacVoiceNamingBatchRoutes } from '../lib/mac-voice-naming-batch.js'
 import { getVoiceSuggestionRunner, voiceSidecarEntries, voiceSuggestionPauseLease, voiceSuggestionRecordingLease, type VoiceSuggestionBlock, type VoiceSuggestionRunner } from '../lib/mac-voice-suggestions.js'
 import { isMacCaptureSidecar, isVoiceLabel } from '../lib/mac-voice-labels.js'
 
@@ -2086,6 +2087,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     if (!operations && !direct && !saved) return { refused: 'not_saved_mac_capture' }
     return { sidecarPath: operations?.sidecarPath ?? direct?.sidecarPath ?? saved!.sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }
   }
+
+  // 6.96.3: name the high-confidence suggestions in one step, and undo that step (lib/mac-voice-naming-batch.ts).
+  registerMacVoiceNamingBatchRoutes(router, { store, captureActive, reviewRevision, callViewMutationRefusal, finalizingRefusal })
 
   const readVoiceSuggestions: RequestHandler = (req, res) => {
     const sessionId = String(req.params.sessionId ?? '')

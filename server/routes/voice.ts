@@ -2,6 +2,7 @@
 
 import express, { Router } from 'express'
 import { errMsg } from '../lib/utils.js'
+import { forgetMacVoiceNamingPerson } from '../lib/mac-voice-naming-batch.js'
 import { readdirSync, readFileSync, unlinkSync, existsSync, rmdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { checkSpeakerName } from '../lib/speaker-name.js'
@@ -952,6 +953,8 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
 
     // 1. Voice profile + sherpa manager registration.
     const profileResult = removeSpeakerProfile(target)
+    // A deleted person's voiceprints must not survive in a naming batch's Undo journal.
+    forgetMacVoiceNamingPerson(target)
 
     // 2. Saved G2 training audio for this person.
     let trainingAudioFiles = 0
