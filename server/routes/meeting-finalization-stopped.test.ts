@@ -312,6 +312,15 @@ describe('what a stop records', () => {
       if (saved === undefined) delete process.env.COS_SERVER_VERSION; else process.env.COS_SERVER_VERSION = saved
     }
   })
+  it('stopping and starting again both keep the failure, so a crash mid-attempt still gets one try per start', () => {
+    const job = savedJob({ lastError: 'decode failed' })
+    jobs().markStopped(jobs().get(job.sessionId)!, 'retries_exhausted', null)
+    expect(jobs().get(job.sessionId)).toMatchObject({ lastError: 'decode failed', stopped: { reason: 'retries_exhausted' } })
+    jobs().clearStopped(job.sessionId)
+    const cleared = jobs().get(job.sessionId)!
+    expect(cleared.lastError).toBe('decode failed')
+    expect(cleared.stopped).toBeUndefined()
+  })
   it('a later save drops it, because any save is the job moving again', () => {
     const job = savedJob()
     const stopped = jobs().markStopped(jobs().get(job.sessionId)!, 'retries_exhausted', null)

@@ -173,6 +173,15 @@ describe('ClaudeRunUsage', () => {
     run.observe(result({ uuid: 'b', usage: turn(0, 0, 0, 0), total_cost_usd: 5, modelUsage: { [HAIKU]: row(5000, 6000, 0, 0, 5) }, model_usage_since_last_result: {} }))
     expect(run.take()).toMatchObject({ inputTokens: 500, outputTokens: 600, costUsd: 0.25 })
   })
+  it('{} on the first result counts as the field: its running totals and turn usage stay unread, and the next result counts alone', () => {
+    for (const resumed of [false, true]) {
+      const run = new ClaudeRunUsage(resumed)
+      run.observe(result({ uuid: 'first', usage: turn(10, 20, 0, 0), total_cost_usd: 5, modelUsage: { [HAIKU]: row(5000, 6000, 0, 0, 5) }, model_usage_since_last_result: {} }))
+      expect(run.take()).toBeNull()
+      run.observe(STEER_2)
+      expect(run.take()).toMatchObject({ inputTokens: 2, outputTokens: 5, cacheWriteTokens: 566, costUsd: 0.0001159 })
+    }
+  })
   it('a run whose only result counted nothing reports nothing', () => {
     const run = new ClaudeRunUsage(false)
     run.observe(result({ usage: turn(0, 0, 0, 0), total_cost_usd: 0, modelUsage: {}, model_usage_since_last_result: {} }))
