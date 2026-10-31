@@ -1,10 +1,11 @@
 ## 6.96.3 - Fewer voices in Mac speaker review, and suggested names on request (private candidate)
 
-2026-10-30. A private candidate for one Mac. Not published. Pairs with the matching private COS Control build.
+2026-10-30. A private candidate for one Mac. Pairs with the matching private COS Control build.
 
 - Speaker review can show a Mac recording's voices as merged groups first, then a row for each voice with 15 seconds or more, then one expandable row for the shorter ones. It reads the merges speaker shadow already logged for that meeting. Display only: no label, name, sample or file changes, and every voice's words stay one click away. A voice named since the log was written leaves its group. A Mac with speaker shadow off sees no change.
 - A new on-click job compares each of a meeting's voices with the shared voice profiles, one at a time, using the rule frozen in the October 30 study (top score .70 or more, margin .05 or more). Voices in a merged group share one suggestion only when each passed on its own for the same person. On the 12 voices judged by ear it reproduced the study: 10 right, 0 wrong, 2 with no suggestion. That is three people, not proof across every profile, and suggestions on other voices are unverified. A result expires when the meeting or the voice profiles change.
-- A suggestion is never a name. Those scoring .80 or more with a .05 margin are marked high confidence, and they are still suggestions. A person confirms each one through the normal naming path. The job writes nothing, keeps its result in memory only, never suggests the owner, ignores samples taken from the same recording, and refuses during a recording or maintenance.
+- A suggestion is never a name. Those scoring .80 or more with a .05 margin are marked high confidence, and they are still suggestions. A person confirms them, one at a time or as a previewed batch, through the same writes as naming a voice by hand. The job writes nothing, keeps its result in memory only, never suggests the owner, ignores samples taken from the same recording, and refuses during a recording or maintenance.
+- A batch stops at the first refusal and reports what was named. Undo reverses the whole batch and removes only the voice samples it added, so names set one at a time keep theirs. A voice a person changed afterward is left alone and reported. A batch never names the owner.
 - Automatic names are unchanged.
 
 ## 6.96.2 - Source-bound anonymous speaker review (private local candidate)
