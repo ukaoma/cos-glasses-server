@@ -236,3 +236,125 @@ describe('voice naming batch routes', () => {
     for (const other of [`/meeting/${SESSION}/relabel`, `${BATCH}/extra`, `${BATCH}/not-a-batch/undo`, '/meeting/save']) expect(isMacVoiceNamingBatchPost(other)).toBe(false)
   })
 })
+
+describe('wired into the server', () => {
+  const closeServer = () => new Promise<void>(resolve => { if (server) server.close(() => resolve()); else resolve() })
+
+  /** The real meeting and voice routers, nothing of this file's in between: real revision, real sync lock, real runner. */
+  async function startReal(): Promise<void> {
+    await closeServer()
+    vi.resetModules()
+    vi.doMock('../lib/profile.js', () => ({ getOwnerSpeakerLabel: () => 'MU', getOwnerName: () => 'Miles', getVocabulary: () => [], getTranscriptionProfileStatus: () => ({}) }))
+    vi.doMock('../lib/speaker-embeddings.js', async () => {
+      const actual = await vi.importActual<Record<string, unknown>>('../lib/speaker-embeddings.js')
+      ;(actual.__installSpeakerRuntimeForTests as (r: unknown) => void)(fakeSpeakerRuntime())
+      return { ...actual, isEmbeddingAvailable: () => true, extractEmbedding: extract }
+    })
+    const { MeetingStore } = await import('../lib/meeting-store.js')
+    const { createMeetingRouter } = await import('./meeting.js')
+    const { voiceRouter } = await import('./voice.js')
+    const { requireApiToken } = await import('../lib/api-auth.js')
+    const app = express()
+    app.use('/api', requireApiToken(TOKEN))
+    app.use(express.json())
+    app.use('/api', createMeetingRouter({ store: new MeetingStore(join(home, 'meetings')), captureActive: () => false }))
+    app.use('/api', voiceRouter)
+    await new Promise<void>(resolve => {
+      server = app.listen(0, '127.0.0.1', () => {
+        const address = server!.address()
+        if (!address || typeof address === 'string') throw new Error('no address')
+        baseUrl = `http://127.0.0.1:${address.port}`
+        resolve()
+      })
+    })
+  }
+
+  const clickSuggestNames = async () => {
+    expect((await send(`/meeting/${SESSION}/voice-suggestions`, {})).status).toBe(200)
+    let done: any = null
+    await vi.waitFor(async () => {
+      done = (await send(`/meeting/${SESSION}/voice-suggestions`)).body
+      expect(done.state).toBe('done')
+    }, { timeout: 8000, interval: 20 })
+    return done
+  }
+  const labelsAt = async () => {
+    const speakersNow = await send(`/meeting/${SESSION}/speakers`)
+    expect(speakersNow.status).toBe(200)
+    return { labels: speakersNow.body.voices.map((v: { label: string }) => v.label).sort(), sourceRevision: speakersNow.body.sourceRevision as string }
+  }
+
+  it('an operations copy, through the real router and real revision: speakers, batch, speakers, Undo, speakers', async () => {
+    // Move the seeded meeting to where a Mac with an operations tree keeps it, and give the real sync lock its python.
+    const operations = join(home, 'operations')
+    const month = join(operations, 'quilt', 'meetings', '2026-10')
+    mkdirSync(month, { recursive: true })
+    mkdirSync(join(operations, 'scripts'), { recursive: true })
+    writeFileSync(join(operations, 'scripts', 'cos_python'), '#!/bin/sh\nexec python3 "$@"\n', { mode: 0o755 })
+    const opsSidecar = join(month, `${STEM}.g2-chunks.json`)
+    const opsMarkdown = join(month, `${STEM}.md`)
+    writeFileSync(opsSidecar, readFileSync(sidecarPath()))
+    writeFileSync(opsMarkdown, readFileSync(meetingPath()))
+    const localBefore = readFileSync(sidecarPath(), 'utf-8')
+    const opsBefore = readFileSync(opsSidecar, 'utf-8')
+    vi.stubEnv('COS_OPERATIONS_DIR', operations)
+    await startReal()
+
+    const first = await labelsAt()
+    expect(first.labels).toEqual(['Voice 1', 'Voice 2', 'Voice 3'])
+    const job = await clickSuggestNames()
+    expect(job.sourceRevision).toBe(first.sourceRevision)
+    const items = job.suggestions.filter((s: { highConfidence: boolean }) => s.highConfidence).map((s: { labels: string[]; name: string }) => ({ labels: s.labels, name: s.name }))
+    expect(items).toEqual(ITEMS)
+
+    const preview = await send(BATCH, { sourceRevision: first.sourceRevision, items })
+    expect(preview.body).toMatchObject({ state: 'applied', dryRun: true })
+    const applied = await send(BATCH, { sourceRevision: first.sourceRevision, items, confirm: true })
+    expect(applied.status).toBe(200)
+    expect(applied.body).toMatchObject({ state: 'applied', undoAvailable: true })
+
+    const second = await labelsAt()
+    expect(second.labels).toEqual(['Dana Reyes', 'Theo Marsh', 'Voice 3'])
+    expect(second.sourceRevision).not.toBe(first.sourceRevision)
+    expect(applied.body.sourceRevision).toBe(second.sourceRevision)
+    expect(readFileSync(opsMarkdown, 'utf-8')).toContain('[Dana Reyes]:')
+    expect(readFileSync(sidecarPath(), 'utf-8')).toBe(localBefore)
+
+    // The same ledger-only confirmation that must stop a running batch moves this revision.
+    expect((await send(`/meeting/${SESSION}/confirm`, { label: 'Theo Marsh' })).status).toBe(200)
+    const confirmed = await labelsAt()
+    expect(confirmed.sourceRevision).not.toBe(second.sourceRevision)
+
+    const undone = await send(`${BATCH}/${applied.body.batchId}/undo`, { confirm: true })
+    expect(undone.body).toMatchObject({ state: 'partial', left: [{ labels: ['Voice 2'], name: 'Theo Marsh', reason: 'confirmed_by_person' }], reverted: [{ labels: ['Voice 1'], name: 'Dana Reyes' }] })
+    const third = await labelsAt()
+    expect(third.labels).toEqual(['Theo Marsh', 'Voice 1', 'Voice 3'])
+    expect(undone.body.sourceRevision).toBe(third.sourceRevision)
+    expect(readFileSync(opsSidecar, 'utf-8')).not.toBe(opsBefore)
+    expect(JSON.parse(readFileSync(opsSidecar, 'utf-8')).chunks[0].speaker).toBe('Voice 1')
+    expect((await send(BATCH)).body.batches[0]).toMatchObject({ batchId: applied.body.batchId, state: 'undo_partial' })
+  })
+
+  it('POST /voice/delete-person scrubs what a batch journal holds for that person', async () => {
+    const mac = Array.from({ length: 10 }, (_, i) => Array.from(voiceprint(42 + i, 0)))
+    const profiles = store().map(p => (p.name === 'Dana Reyes' ? { ...p, embeddings: [...p.embeddings, ...mac], sources: [...p.sources, ...mac.map(() => 'mac-assign:mac_99999999-0000-4000-8000-000000000000')] } : p))
+    writeFileSync(data('voice-profiles.json'), JSON.stringify({ profiles }))
+    await startReal()
+    const job = await clickSuggestNames()
+    const out = await send(BATCH, { sourceRevision: job.sourceRevision, items: [ITEMS[0]], confirm: true })
+    expect(out.body.state).toBe('applied')
+    const file = data('mac-voice-naming-batches', SESSION, `${out.body.batchId}.json`)
+    expect(JSON.parse(readFileSync(file, 'utf-8')).steps[0].evicted).toHaveLength(4)
+    expect((await send('/voice/delete-person', { name: 'Dana Reyes', confirm: true })).status).toBe(200)
+    expect(JSON.parse(readFileSync(file, 'utf-8')).steps[0]).toMatchObject({ evicted: [], evictedForgotten: 4 })
+    expect(store().some(p => p.name === 'Dana Reyes')).toBe(false)
+  })
+
+  it('server/index.ts leaves these POSTs to their own lease, so a drain answers their refusal', () => {
+    // A shape assertion, and it says so: index.ts binds ports at import, so nothing can execute this line under test.
+    const index = readFileSync(join(import.meta.dirname, '..', 'index.ts'), 'utf-8')
+    const lifecycleOwned = index.slice(index.indexOf('const lifecycleOwned'), index.indexOf('if (lifecycleOwned) return next()'))
+    expect(lifecycleOwned.match(/\|\| isMacVoiceNamingBatchPost\(req\.path\)/g)).toHaveLength(1)
+    expect(index).toContain("import { isMacVoiceNamingBatchPost } from './lib/mac-voice-naming-batch.js'")
+  })
+})

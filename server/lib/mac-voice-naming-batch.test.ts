@@ -3,10 +3,12 @@
 // and the sherpa runtime are fake. Every name and word here is invented.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fakeSpeakerRuntime } from './__fixtures__/fake-speaker-runtime.js'
+import { bindMacSpeakerShadowRepair, inspectMacSpeakerShadowCallSource, type MacShadowRepairSource } from './mac-speaker-shadow-repair.js'
+import { SYNTHETIC_SECONDS, SYNTHETIC_SPANS, syntheticEmbeddings, syntheticNative } from './__fixtures__/speaker-shadow/synthetic-meeting.js'
 
 const SESSION = 'mac_1b2c3d4e-0000-4000-8000-00000000abcd'
 const OTHER_SESSION = 'mac_9f8e7d6c-0000-4000-8000-00000000dcba'
@@ -18,9 +20,10 @@ const DANA: Axis = 0, THEO: Axis = 1, NEVA: Axis = 2, IVO: Axis = 3, OWNER: Axis
 let home = ''
 let sidecarPath = ''
 let meetingPath = ''
+const calls = new Map<string, { sidecarPath: string; filepath: string }>()
 const flags = { capture: false, lease: false, open: true, finalizing: false }
 /** Faults only real I/O or a future store could produce. */
-const faults = { failWrite: null as string | null, reverseRetractWalk: false }
+const faults = { failWrite: null as string | null, skipWrites: 0, reverseRetractWalk: false, dieOnAppend: null as string | null, refuseAppend: null as string | null }
 const library = { operations: null as null | Record<string, unknown>, direct: null as null | Record<string, unknown> }
 const identity = { label: 'MU', name: 'Miles' }
 const data = (...parts: string[]) => join(process.env.COS_DATA_DIR as string, ...parts)
@@ -59,14 +62,16 @@ const VOICES: SeedVoice[] = [
 ]
 
 /** The shape of a real saved Mac sidecar: compacted chunks, a raw index map with a silent gap, turns, words and HQ segments. */
-function seedMeeting(options: { voices?: SeedVoice[]; noAudioFor?: string[] } = {}): void {
+function seedMeeting(options: { voices?: SeedVoice[]; noAudioFor?: string[]; session?: string; markerBase?: number } = {}): void {
   const voices = options.voices ?? VOICES
+  const session = options.session ?? SESSION
+  const markerBase = options.markerBase ?? 0
   const chunks: unknown[] = []
   const chunkEntries: unknown[] = []
   let raw = 0
   const turns: string[] = []
-  rmSync(data('meeting-audio', SESSION), { recursive: true, force: true })
-  mkdirSync(data('meeting-audio', SESSION), { recursive: true })
+  rmSync(data('meeting-audio', session), { recursive: true, force: true })
+  mkdirSync(data('meeting-audio', session), { recursive: true })
   for (const voice of voices) {
     for (let i = 0; i < voice.chunks; i++) {
       const text = `invented remark ${raw} about shelf labels`
@@ -77,7 +82,7 @@ function seedMeeting(options: { voices?: SeedVoice[]; noAudioFor?: string[] } = 
       }
       chunks.push(chunk)
       chunkEntries.push({ chunkIndex: raw, chunk })
-      if (!options.noAudioFor?.includes(voice.label)) writeFileSync(data('meeting-audio', SESSION, `chunk_${String(raw).padStart(4, '0')}.wav`), wav(voice.axis, raw + 1))
+      if (!options.noAudioFor?.includes(voice.label)) writeFileSync(data('meeting-audio', session, `chunk_${String(raw).padStart(4, '0')}.wav`), wav(voice.axis, markerBase + raw + 1))
       raw++
       if (i === 0) chunkEntries.push({ chunkIndex: 900 + raw, chunk: { text: '', speaker: 'Ext', elapsed: raw * 3000 } })
       // Words repeat across people on every real call, and a person may already be named here.
@@ -85,14 +90,16 @@ function seedMeeting(options: { voices?: SeedVoice[]; noAudioFor?: string[] } = 
     }
   }
   const doc = {
-    schemaVersion: 2, sessionId: SESSION, sourceType: 'mac_system_audio', startTime: 1_790_000_000_000, durationMs: raw * 3000, finalizationState: 'complete', syncState: 'finalized',
+    schemaVersion: 2, sessionId: session, sourceType: 'mac_system_audio', startTime: 1_790_000_000_000, durationMs: raw * 3000, finalizationState: 'complete', syncState: 'finalized',
     speakers: ['Neva Sharpe'], chunks, chunkEntries, batchSegments: [{ startChunkIdx: 0, endChunkIdx: raw, startElapsed: 0, speakerWords: [{ word: 'invented', start: 0, speaker: 'Voice 1' }] }],
   }
   mkdirSync(join(home, 'meetings'), { recursive: true })
-  sidecarPath = join(home, 'meetings', 'call.g2-chunks.json')
-  meetingPath = join(home, 'meetings', 'call.md')
-  writeFileSync(sidecarPath, `${JSON.stringify(doc, null, 2)}\n`)
-  writeFileSync(meetingPath, `# Invented review\n\n| **Date** | 2026-10-28 |\n\n## Attendees\n\n- Neva Sharpe\n\n## Summary\n\nInvented summary.\n\n## Transcript\n\n${turns.join('\n')}\n`)
+  const stem = session === SESSION ? 'call' : `call-${session}`
+  const files = { sidecarPath: join(home, 'meetings', `${stem}.g2-chunks.json`), filepath: join(home, 'meetings', `${stem}.md`) }
+  calls.set(session, files)
+  if (session === SESSION) { sidecarPath = files.sidecarPath; meetingPath = files.filepath }
+  writeFileSync(files.sidecarPath, `${JSON.stringify(doc, null, 2)}\n`)
+  writeFileSync(files.filepath, `# Invented review\n\n| **Date** | 2026-10-28 |\n\n## Attendees\n\n- Neva Sharpe\n\n## Summary\n\nInvented summary.\n\n## Transcript\n\n${turns.join('\n')}\n`)
 }
 
 interface SeedProfile { name: string; embeddings: number[][]; sources: string[] }
@@ -113,7 +120,9 @@ const markdown = (): string => readFileSync(meetingPath, 'utf-8')
 const ledger = (id = SESSION): Array<Record<string, unknown>> => { try { return readFileSync(data('meeting-corrections', `${id}.jsonl`), 'utf-8').split('\n').filter(Boolean).map(l => JSON.parse(l)) } catch { return [] } }
 const journalFiles = (): string[] => { try { return readdirSync(data('mac-voice-naming-batches', SESSION)) } catch { return [] } }
 const journal = (batchId: string) => JSON.parse(readFileSync(data('mac-voice-naming-batches', SESSION, `${batchId}.json`), 'utf-8'))
-const revision = (): string => createHash('sha256').update(markdown()).update(readFileSync(sidecarPath)).digest('hex')
+const revisionOf = (md: string, sidecar: string): string => createHash('sha256').update(readFileSync(md)).update(readFileSync(sidecar)).digest('hex')
+const revision = (): string => revisionOf(meetingPath, sidecarPath)
+const revisionFor = (session: string): string => { const call = calls.get(session)!; return revisionOf(call.filepath, call.sidecarPath) }
 const fingerprint = () => ({ md: markdown(), sidecar: readFileSync(sidecarPath, 'utf-8'), store: readFileSync(data('voice-profiles.json'), 'utf-8'), ledger: ledger(), journals: journalFiles() })
 
 const SUGGESTED = [
@@ -139,9 +148,20 @@ type Deps = Parameters<Lib['createMacVoiceNamingBatches']>[0]
 async function load(overrides: Partial<Deps> = {}) {
   vi.resetModules()
   vi.doMock('./profile.js', () => ({ getOwnerSpeakerLabel: () => identity.label, getOwnerName: () => identity.name, getVocabulary: () => [], getTranscriptionProfileStatus: () => ({}) }))
+  vi.doMock('./meeting-corrections.js', async () => {
+    const actual = await vi.importActual<typeof import('./meeting-corrections.js')>('./meeting-corrections.js')
+    return {
+      ...actual,
+      appendCorrection: (session: string, row: { phase: string }) => {
+        if (faults.dieOnAppend === row.phase) throw new Error('process died')
+        if (faults.refuseAppend === row.phase) return false
+        return actual.appendCorrection(session, row as Parameters<typeof actual.appendCorrection>[1])
+      },
+    }
+  })
   vi.doMock('./atomic-fs.js', async () => {
     const actual = await vi.importActual<typeof import('./atomic-fs.js')>('./atomic-fs.js')
-    return { ...actual, durableAtomicWriteFileSync: (path: string, ...rest: [string | Buffer, { mode?: number }?]) => { if (faults.failWrite && path.endsWith(faults.failWrite)) throw new Error('disk refused'); return actual.durableAtomicWriteFileSync(path, ...rest) } }
+    return { ...actual, durableAtomicWriteFileSync: (path: string, ...rest: [string | Buffer, { mode?: number }?]) => { if (faults.failWrite && path.endsWith(faults.failWrite) && faults.skipWrites-- <= 0) throw new Error('disk refused'); return actual.durableAtomicWriteFileSync(path, ...rest) } }
   })
   vi.doMock('./cos-operations-meetings.js', async () => {
     const actual = await vi.importActual<Record<string, unknown>>('./cos-operations-meetings.js')
@@ -167,12 +187,12 @@ async function load(overrides: Partial<Deps> = {}) {
   })
   const lib = await import('./mac-voice-naming-batch.js')
   const deps: Deps = {
-    store: { findBySessionId: id => (id === SESSION ? { sidecarPath, filepath: meetingPath } : null) },
+    store: { findBySessionId: id => calls.get(id) ?? null },
     captureActive: () => flags.capture,
-    reviewRevision: () => revision(),
+    reviewRevision: revisionOf,
     callViewMutationRefusal: () => null,
     finalizingRefusal: () => (flags.finalizing ? { status: 409, body: { reason: 'meeting_finalizing' } } : null),
-    suggestions: () => ({ sourceRevision: revision(), suggestions: SUGGESTED }),
+    suggestions: id => ({ sourceRevision: revisionFor(id), suggestions: SUGGESTED }),
     recordingLease: () => flags.lease,
     admissionsOpen: () => flags.open,
     acquireLock: async () => ({ release: () => {} }),
@@ -192,7 +212,8 @@ beforeEach(() => {
   vi.stubEnv('COS_OPERATIONS_DIR', '')
   vi.stubEnv('COS_SCRIPTS_DIR', '')
   Object.assign(flags, { capture: false, lease: false, open: true, finalizing: false })
-  Object.assign(faults, { failWrite: null, reverseRetractWalk: false })
+  Object.assign(faults, { failWrite: null, skipWrites: 0, reverseRetractWalk: false, dieOnAppend: null, refuseAppend: null })
+  calls.clear()
   Object.assign(library, { operations: null, direct: null })
   Object.assign(identity, { label: 'MU', name: 'Miles' })
   seedMeeting()
@@ -203,6 +224,7 @@ afterEach(() => {
   vi.doUnmock('./profile.js')
   vi.doUnmock('./speaker-embeddings.js')
   vi.doUnmock('./atomic-fs.js')
+  vi.doUnmock('./meeting-corrections.js')
   vi.doUnmock('./cos-operations-meetings.js')
   vi.unstubAllEnvs()
   rmSync(home, { recursive: true, force: true })
@@ -750,7 +772,7 @@ describe('undo', () => {
   it('stops for a recording that starts partway, and a retry finishes the rest', async () => {
     const before = fingerprint()
     let works = 0
-    const { batches } = await load({ acquireWork: () => { if (++works === 3) flags.capture = true; return { release: () => {} } } })
+    const { batches } = await load({ acquireWork: () => { if (++works === 4) flags.capture = true; return { release: () => {} } } })
     const out = await named(batches, [ITEM_1, ITEM_2])
     const undone = await batches.undo(SESSION, out.batchId, true)
     expect(undone.state).toBe('partial')
@@ -857,7 +879,8 @@ describe('evicted samples', () => {
     expect(lib.forgetMacVoiceNamingPerson('Dana Reyes')).toEqual({ batches: 1, vectors: 4 })
     expect(journal(out.batchId).steps[0].evicted).toEqual([])
     const undone = await batches.undo(SESSION, out.batchId, true)
-    expect(undone).toMatchObject({ state: 'undone', samplesRemoved: 0, evictedRestored: 0, evictedNotRestored: 4 })
+    expect(undone).toMatchObject({ state: 'partial', samplesRemoved: 0, evictedRestored: 0, evictedNotRestored: 4 })
+    expect(undone.left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'samples_not_found' }])
     expect(store().some(p => p.name === 'Dana Reyes')).toBe(false)
   })
 
@@ -867,7 +890,9 @@ describe('evicted samples', () => {
     const out = await named(batches, [ITEM_1])
     const { removeSpeakerProfile } = await import('./speaker-embeddings.js')
     removeSpeakerProfile('Dana Reyes')
-    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ evictedRestored: 0, evictedNotRestored: 4 })
+    const undone = await batches.undo(SESSION, out.batchId, true)
+    expect(undone).toMatchObject({ evictedRestored: 0, evictedNotRestored: 4 })
+    expect(undone.left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'samples_not_found' }])
     expect(store().some(p => p.name === 'Dana Reyes')).toBe(false)
   })
 
@@ -892,6 +917,17 @@ describe('guards that need a fault to reach', () => {
     const out = await named(batches, [ITEM_1, ITEM_2])
     expect(out).toMatchObject({ state: 'partial', reason: 'recording_active' })
     expect(plans).toBe(1)
+  })
+
+  it('stops if a correction opened while it waited for the lock', async () => {
+    const { batches } = await load({
+      acquireLock: async () => {
+        (await import('./meeting-corrections.js')).appendCorrection(SESSION, { id: 'open', phase: 'intent', at: new Date().toISOString(), from: 'Voice 6', to: 'Ivo Lund', chunks: [], scope: 'meeting' })
+        return { release: () => {} }
+      },
+    })
+    expect(await named(batches, [ITEM_1])).toMatchObject({ state: 'refused', reason: 'correction_pending' })
+    expect(labelCount('Voice 1')).toBe(4)
   })
 
   it('stops if a correction opened while its plan ran', async () => {
@@ -1003,7 +1039,7 @@ describe('guards that need a fault to reach', () => {
     expect(readFileSync(sidecarPath, 'utf-8')).toBe(original)
   })
 
-  it('restores an attendee bullet byte for byte, and will not guess at one once the file has moved on', async () => {
+  it('restores an attendee bullet byte for byte, after a later edit too, and will not guess once a person changed the section', async () => {
     seedMeeting()
     writeFileSync(meetingPath, markdown().replace('- Neva Sharpe', '- Neva Sharpe\n- Voice 1'))
     const original = markdown()
@@ -1012,10 +1048,18 @@ describe('guards that need a fault to reach', () => {
     expect(markdown()).toContain('- Dana Reyes')
     expect((await batches.undo(SESSION, first.batchId, true)).state).toBe('undone')
     expect(markdown()).toBe(original)
-    const again = await load()
-    const second = await named(again.batches, [ITEM_1])
+    expect(journal(first.batchId).steps[0].attendeesBefore).toBeNull()
+
+    const second = await named((await load()).batches, [ITEM_1])
     writeFileSync(meetingPath, markdown().replace(/^\[Voice 5\]:/gm, '[Ivo Lund]:'))
-    expect((await again.batches.undo(SESSION, second.batchId, true)).left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'transcript_changed' }])
+    const moved = await load()
+    expect((await moved.batches.undo(SESSION, second.batchId, true)).state).toBe('undone')
+    expect(markdown()).toBe(original.replace(/^\[Voice 5\]:/gm, '[Ivo Lund]:'))
+
+    writeFileSync(meetingPath, original)
+    const third = await named((await load()).batches, [ITEM_1])
+    writeFileSync(meetingPath, markdown().replace('- Neva Sharpe', '- Neva Sharpe\n- Rae Quill'))
+    expect((await (await load()).batches.undo(SESSION, third.batchId, true)).left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'transcript_changed' }])
   })
 
   it('accepts a turn a person already put back, and only that', async () => {
@@ -1164,6 +1208,8 @@ describe('findings from the mutation run', () => {
     expect(pendingCorrections(SESSION)).toHaveLength(1)
     expect((await batches.undo(SESSION, out.batchId, true)).state).toBe('undone')
     expect(pendingCorrections(SESSION)).toEqual([])
+    // Nothing was ever applied as far as the ledger knows, so there is nothing to mark reverted: the reader refuses that.
+    expect(ledger().filter(row => row.phase === 'reverted')).toEqual([])
   })
 
   it('a second Undo does not recount a voice a person kept', async () => {
@@ -1184,5 +1230,435 @@ describe('findings from the mutation run', () => {
     const before = fingerprint()
     expect((await batches.run('meeting_1786628481833_eagkaz', { sourceRevision: revision(), items: [ITEM_1], confirm: true })).reason).toBe('not_saved_mac_capture')
     expect(fingerprint()).toEqual(before)
+  })
+})
+
+describe('review: two batches on one person', () => {
+  const OLDER = 'mac_55555555-0000-4000-8000-000000000000'
+  const setup = async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, range(42, 10).map(marker => ({ marker, source: `mac-assign:${OLDER}` })))])
+    seedMeeting({ voices: [{ label: 'Voice 1', axis: DANA, chunks: 10 }] })
+    seedMeeting({ voices: [{ label: 'Voice 1', axis: DANA, chunks: 10 }], session: OTHER_SESSION, markerBase: 10 })
+    const original = [...samplesOf('Dana Reyes')].sort()
+    const { batches } = await load()
+    const a = await named(batches, [ITEM_1])
+    const b = await batches.run(OTHER_SESSION, { sourceRevision: revisionFor(OTHER_SESSION), items: [ITEM_1], confirm: true })
+    expect(a.named[0].samplesAdded).toBe(10)
+    expect(b.named[0].samplesAdded).toBe(10)
+    expect(profile('Dana Reyes').sources.filter(source => source === `mac-assign:${OTHER_SESSION}`)).toHaveLength(10)
+    expect(profile('Dana Reyes').sources.filter(source => source === SOURCE)).toHaveLength(0)
+    return { batches, a, b, original }
+  }
+
+  it('Undo the first, then the second: her older samples come back and the undone batch stays out', async () => {
+    const { batches, a, b, original } = await setup()
+    const first = await batches.undo(SESSION, a.batchId, true)
+    expect(first.state).toBe('partial')
+    expect(first.left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'samples_not_found' }])
+    expect(first).toMatchObject({ samplesRemoved: 0, evictedRestored: 0, evictedNotRestored: 10 })
+    expect(labelCount('Voice 1')).toBe(10)
+    const second = await batches.undo(OTHER_SESSION, b.batchId, true)
+    expect(second).toMatchObject({ state: 'undone', samplesRemoved: 10, evictedRestored: 0, evictedNotRestored: 10 })
+    expect(profile('Dana Reyes').sources.filter(source => source === SOURCE)).toEqual([])
+    expect([...samplesOf('Dana Reyes')].sort()).toEqual(original)
+    expect(journal(a.batchId).steps[0].evicted).toEqual([])
+  })
+
+  it('Undo the second, then the first: the same samples at the end', async () => {
+    const { batches, a, b, original } = await setup()
+    expect(await batches.undo(OTHER_SESSION, b.batchId, true)).toMatchObject({ state: 'undone', samplesRemoved: 10, evictedRestored: 10, evictedNotRestored: 0 })
+    expect(profile('Dana Reyes').sources.filter(source => source === SOURCE)).toHaveLength(10)
+    expect(await batches.undo(SESSION, a.batchId, true)).toMatchObject({ state: 'undone', samplesRemoved: 10, evictedRestored: 10, evictedNotRestored: 0 })
+    expect([...samplesOf('Dana Reyes')].sort()).toEqual(original)
+  })
+
+  it('its own revert does not block a sample of an earlier naming on the same call', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, range(42, 10).map(marker => ({ marker, source: SOURCE })))])
+    const original = [...samplesOf('Dana Reyes')].sort()
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    expect(journal(out.batchId).steps[0].evicted).toHaveLength(4)
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'undone', evictedRestored: 4, evictedNotRestored: 0 })
+    expect([...samplesOf('Dana Reyes')].sort()).toEqual(original)
+  })
+})
+
+describe('review: the ledger after an Undo', () => {
+  /** The repair suite's synthetic meeting, under a real capture id, so its reader judges a ledger this code really wrote. */
+  function syntheticSource(): MacShadowRepairSource {
+    const chunkEntries: any[] = []
+    for (const span of SYNTHETIC_SPANS) for (let start = span.start; start < span.end; start += 6) {
+      const seconds = Math.min(6, span.end - start), raw = chunkEntries.length
+      const chunk = { text: `words for raw ${raw}`, speaker: span.label, elapsed: start * 1000, audioDurationMs: seconds * 1000, audioSha256: raw.toString(16).padStart(64, '0'), similarity: 0, segments: [{ speaker: span.label, startSec: 0, endSec: seconds }], finalSegments: [{ speaker: span.label, startSec: 0, endSec: seconds }], words: [{ word: `raw${raw}`, start: 0, end: seconds }] }
+      chunkEntries.push({ chunkIndex: raw, chunk })
+    }
+    let offset = 0
+    const speakerWords = chunkEntries.map(({ chunk }) => { const start = offset; offset += chunk.audioDurationMs / 1000; return { word: chunk.text, speaker: chunk.speaker, start, end: offset } })
+    const doc = { sessionId: SESSION, sourceType: 'mac_system_audio', finalizationState: 'complete', chunks: chunkEntries.map(e => structuredClone(e.chunk)), chunkEntries, speakers: ['Dana Fictional'], batchSegments: [{ startChunkIdx: 0, endChunkIdx: chunkEntries.length - 1, speakerWords }] }
+    const H = 'a'.repeat(64)
+    const rawAudio = chunkEntries.map(e => ({ rawChunkIndex: e.chunkIndex, wavSHA256: e.chunk.audioSha256, pcmSHA256: H, sampleCount: e.chunk.audioDurationMs * 16 }))
+    const timelineRows = rawAudio.map((a, i) => ({ rawChunkIndex: i, startSample: chunkEntries[i].chunk.elapsed * 16, sampleCount: a.sampleCount, usedSampleCount: a.sampleCount }))
+    return { originalJSON: JSON.stringify(doc), currentJSON: JSON.stringify(doc), ledgerJSONL: '', rawAudio, timeline: { rows: timelineRows, total: SYNTHETIC_SECONDS * 16000, pcmSHA256: H }, cohort: { nativeJSON: JSON.stringify(syntheticNative()), embeddingsJSON: JSON.stringify(syntheticEmbeddings()), modelSHA256: H, cliSHA256: 'b'.repeat(64) } }
+  }
+  const readLedger = (source: MacShadowRepairSource, ledgerJSONL: string) => {
+    const input = { ...source, currentJSON: JSON.stringify(JSON.parse(readFileSync(sidecarPath, 'utf-8'))), ledgerJSONL }
+    return inspectMacSpeakerShadowCallSource({ ...input, sourceBindingSHA256: bindMacSpeakerShadowRepair(input) })
+  }
+
+  it('is one the shadow repair reader accepts, and that reader does refuse the shape this used to write', async () => {
+    const source = syntheticSource()
+    const doc = JSON.parse(source.originalJSON)
+    writeFileSync(sidecarPath, `${JSON.stringify(doc, null, 2)}\n`)
+    writeFileSync(meetingPath, '# Invented\n\n## Transcript\n\n[Voice 2]: invented words\n')
+    doc.chunkEntries.forEach((entry: { chunkIndex: number; chunk: { speaker: string } }) => {
+      if (entry.chunk.speaker === 'Voice 2') writeFileSync(data('meeting-audio', SESSION, `chunk_${String(entry.chunkIndex).padStart(4, '0')}.wav`), wav(DANA, (entry.chunkIndex % 25) + 1))
+    })
+    const { batches } = await load({ suggestions: () => ({ sourceRevision: revision(), suggestions: [{ ...SUGGESTED[0], labels: ['Voice 2'] }] }) })
+    const out = await named(batches, [{ labels: ['Voice 2'], name: 'Dana Reyes' }])
+    expect(out.state).toBe('applied')
+    expect((await batches.undo(SESSION, out.batchId, true)).state).toBe('undone')
+    const ledgerText = readFileSync(data('meeting-corrections', `${SESSION}.jsonl`), 'utf-8')
+    expect(() => readLedger(source, ledgerText)).not.toThrow()
+    // Positive control: the old shape, an undo intent reverted under its own new id.
+    const { id, chunks } = JSON.parse(ledgerText.split('\n')[0])
+    const oldShape = [{ id: `${id}:old`, phase: 'intent', from: 'Voice 2', to: 'Dana Reyes', chunks }, { id: `${id}:old`, phase: 'reverted', from: 'Voice 2', to: 'Dana Reyes', chunks }].map(row => JSON.stringify(row)).join('\n')
+    expect(() => readLedger(source, `${ledgerText}${oldShape}\n`)).toThrow(/correction/)
+  })
+
+  it('writes reverted on the applied row and closes the undo intent failed', async () => {
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    await batches.undo(SESSION, out.batchId, true)
+    const rows = ledger()
+    const correction = rows[0].id as string
+    expect(rows.filter(row => row.id === correction).map(row => row.phase)).toEqual(['intent', 'applied', 'reverted'])
+    const undoRows = rows.filter(row => row.id !== correction)
+    expect(undoRows.map(row => row.phase)).toEqual(['intent', 'failed'])
+    expect(new Set(undoRows.map(row => row.id)).size).toBe(1)
+  })
+
+  it('a kill after the files revert and before the row: the retry still takes the naming out of the ledger', async () => {
+    const original = readFileSync(sidecarPath, 'utf-8')
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    faults.dieOnAppend = 'reverted'
+    await expect(batches.undo(SESSION, out.batchId, true)).rejects.toThrow('process died')
+    faults.dieOnAppend = null
+    const { appliedCorrections, pendingCorrections } = await import('./meeting-corrections.js')
+    expect(readFileSync(sidecarPath, 'utf-8')).toBe(original)
+    expect(appliedCorrections(SESSION)).toHaveLength(1)
+    expect(pendingCorrections(SESSION)).toHaveLength(1)
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'undone', samplesRemoved: 4 })
+    expect(appliedCorrections(SESSION)).toEqual([])
+    expect(pendingCorrections(SESSION)).toEqual([])
+  })
+
+  it.each([['reverted'], ['failed']])('a %s row the ledger refuses is a failure, and a retry finishes', async phase => {
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    faults.refuseAppend = phase
+    const refused = await batches.undo(SESSION, out.batchId, true)
+    expect(refused.state).toBe('partial')
+    expect(refused.left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'ledger_unwritable' }])
+    faults.refuseAppend = null
+    expect((await batches.undo(SESSION, out.batchId, true)).state).toBe('undone')
+    const { appliedCorrections, pendingCorrections } = await import('./meeting-corrections.js')
+    expect(appliedCorrections(SESSION)).toEqual([])
+    expect(pendingCorrections(SESSION)).toEqual([])
+  })
+})
+
+describe('review: samples a later change moved or removed', () => {
+  it('finds them in the profile a merge moved them to', async () => {
+    seedProfiles([ordinary('Rae Quill', DANA)])
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    const { mergeSpeakerProfiles } = await import('./speaker-embeddings.js')
+    mergeSpeakerProfiles('Rae Quill', ['Dana Reyes'], { force: true })
+    expect(profile('Rae Quill').sources.filter(source => source === SOURCE)).toHaveLength(4)
+    const preview = await batches.undo(SESSION, out.batchId, false)
+    expect(preview).toMatchObject({ state: 'undone', samplesRemoved: 4 })
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'undone', samplesRemoved: 4 })
+    expect(profile('Rae Quill').sources.filter(source => source === SOURCE)).toEqual([])
+    expect(profile('Rae Quill').embeddings).toHaveLength(24)
+  })
+
+  it('says so when no profile holds them: partial, label back, nothing offered again', async () => {
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    const { retractEmbeddingsBySource } = await import('./speaker-embeddings.js')
+    retractEmbeddingsBySource('Dana Reyes', source => source === SOURCE)
+    expect((await batches.undo(SESSION, out.batchId, false)).left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'samples_not_found' }])
+    const undone = await batches.undo(SESSION, out.batchId, true)
+    expect(undone).toMatchObject({ state: 'partial', samplesRemoved: 0 })
+    expect(undone.reverted).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes' }])
+    expect(undone.left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'samples_not_found' }])
+    expect(labelCount('Voice 1')).toBe(4)
+    expect(batches.list(SESSION).batches[0]).toMatchObject({ state: 'undo_partial', undoAvailable: false })
+    expect(await batches.undo(SESSION, out.batchId, true)).toEqual(undone)
+  })
+})
+
+describe('review: checks after a wait', () => {
+  it('a recording that starts during the lock wait stops the write', async () => {
+    const before = fingerprint()
+    const { batches } = await load({ acquireLock: async () => { flags.capture = true; return { release: () => {} } } })
+    expect(await named(batches, [ITEM_1])).toMatchObject({ state: 'refused', reason: 'recording_active' })
+    expect(fingerprint()).toEqual(before)
+  })
+
+  it('and stops an Undo the same way', async () => {
+    const original = { store: readFileSync(data('voice-profiles.json'), 'utf-8') }
+    let locks = 0
+    const { batches } = await load({ acquireLock: async () => { if (++locks === 2) flags.capture = true; return { release: () => {} } } })
+    const out = await named(batches, [ITEM_1])
+    const named1 = readFileSync(data('voice-profiles.json'), 'utf-8')
+    expect(named1).not.toBe(original.store)
+    expect((await batches.undo(SESSION, out.batchId, true)).left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'recording_active' }])
+    expect(readFileSync(data('voice-profiles.json'), 'utf-8')).toBe(named1)
+    expect(labelCount('Dana Reyes')).toBe(4)
+  })
+
+  it('from the second label on, a ledger-only confirmation during a plan stops the batch', async () => {
+    let plans = 0
+    const withLedger = (md: string, sidecar: string) => createHash('sha256').update(revisionOf(md, sidecar)).update(JSON.stringify(ledger().filter(row => row.phase === 'confirmed'))).digest('hex')
+    const { batches } = await load({
+      reviewRevision: withLedger,
+      suggestions: () => ({ sourceRevision: withLedger(meetingPath, sidecarPath), suggestions: SUGGESTED }),
+      plan: async input => {
+        const planned = await realPlan(input)
+        if (++plans === 2) (await import('./meeting-corrections.js')).appendCorrection(SESSION, { id: 'vouch', phase: 'confirmed', at: new Date().toISOString(), from: 'Neva Sharpe', to: 'Neva Sharpe', chunks: [], scope: 'meeting' })
+        return planned
+      },
+    })
+    const out = await batches.run(SESSION, { sourceRevision: withLedger(meetingPath, sidecarPath), items: [ITEM_1, ITEM_2], confirm: true })
+    expect(out).toMatchObject({ state: 'partial', reason: 'suggestions_stale' })
+    expect(labelCount('Voice 2')).toBe(4)
+  })
+})
+
+describe('review: restoring', () => {
+  it('a name moved in that meeting before this batch does not hold back its sample', async () => {
+    const { appendCorrection } = await import('./meeting-corrections.js')
+    appendCorrection(OTHER_SESSION, { id: 'earlier-move', phase: 'applied', at: '2020-01-01T00:00:00.000Z', from: 'Dana Reyes', to: 'Rae Quill', chunks: [1], scope: 'meeting' })
+    appendCorrection(OTHER_SESSION, { id: 'earlier-back', phase: 'reverted', at: '2020-01-02T00:00:00.000Z', from: 'Dana Reyes', to: 'Voice 8', chunks: [2], scope: 'meeting' })
+    seedProfiles([ordinary('Dana Reyes', DANA, range(42, 10).map(marker => ({ marker, source: `mac-assign:${OTHER_SESSION}` })))])
+    const before = [...samplesOf('Dana Reyes')].sort()
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'undone', evictedRestored: 4, evictedNotRestored: 0 })
+    expect([...samplesOf('Dana Reyes')].sort()).toEqual(before)
+  })
+
+  it('a name moved in that meeting and then taken back by the person is still a move', async () => {
+    const { batches } = await load()
+    seedProfiles([ordinary('Dana Reyes', DANA, range(42, 10).map(marker => ({ marker, source: `mac-assign:${OTHER_SESSION}` })))])
+    ;(await import('./speaker-embeddings.js')).__installSpeakerRuntimeForTests(fakeSpeakerRuntime())
+    const out = await named(batches, [ITEM_1])
+    const { appendCorrection } = await import('./meeting-corrections.js')
+    const at = new Date().toISOString()
+    appendCorrection(OTHER_SESSION, { id: 'later', phase: 'reverted', at, from: 'Dana Reyes', to: 'Voice 8', chunks: [2], scope: 'meeting' })
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ evictedRestored: 0, evictedNotRestored: 4 })
+  })
+})
+
+describe('review: second mutation pass', () => {
+  const history = range(42, 10).map(marker => ({ marker, source: `mac-assign:${OTHER_SESSION}` }))
+
+  it('takes the copy in the named profile when another profile also holds that exact sample', async () => {
+    seedProfiles([ordinary('Rae Quill', DANA)])
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    const dana = profile('Dana Reyes')
+    const rae = profile('Rae Quill')
+    const twin = { ...rae, embeddings: [...rae.embeddings, dana.embeddings.at(-1)!], sources: [...rae.sources, SOURCE] }
+    writeFileSync(data('voice-profiles.json'), JSON.stringify({ profiles: store().map(p => (p.name === 'Rae Quill' ? twin : p)) }))
+    ;(await import('./speaker-embeddings.js')).__installSpeakerRuntimeForTests(fakeSpeakerRuntime())
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'undone', samplesRemoved: 4 })
+    expect(profile('Rae Quill').sources.filter(source => source === SOURCE)).toHaveLength(1)
+    expect(profile('Dana Reyes').sources.filter(source => source === SOURCE)).toEqual([])
+  })
+
+  it('a crash after the restore and before the journal: the retry does not count them as missing or lost', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, history)])
+    const before = [...samplesOf('Dana Reyes')].sort()
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    faults.failWrite = `${out.batchId}.json`
+    faults.skipWrites = 1
+    await expect(batches.undo(SESSION, out.batchId, true)).rejects.toThrow('disk refused')
+    faults.failWrite = null
+    expect([...samplesOf('Dana Reyes')].sort()).toEqual(before)
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'undone', left: [], evictedNotRestored: 0 })
+    expect([...samplesOf('Dana Reyes')].sort()).toEqual(before)
+  })
+
+  it('a later move of another name in that meeting does not hold back this sample', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, history)])
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    const { appendCorrection } = await import('./meeting-corrections.js')
+    appendCorrection(OTHER_SESSION, { id: 'elsewhere', phase: 'applied', at: new Date().toISOString(), from: 'Theo Marsh', to: 'Rae Quill', chunks: [3], scope: 'meeting' })
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ evictedRestored: 4, evictedNotRestored: 0 })
+  })
+
+  it('does not retry kept samples into the store while a recording runs', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, range(42, 10).map(marker => ({ marker, source: 'mac-assign:mac_55555555-0000-4000-8000-000000000000' })))])
+    seedMeeting({ voices: [{ label: 'Voice 1', axis: DANA, chunks: 10 }] })
+    seedMeeting({ voices: [{ label: 'Voice 1', axis: DANA, chunks: 10 }], session: OTHER_SESSION, markerBase: 10 })
+    const lock = { flip: false }
+    const { batches } = await load({ acquireLock: async () => ({ release: () => { if (lock.flip) flags.capture = true } }) })
+    const a = await named(batches, [ITEM_1])
+    const b = await batches.run(OTHER_SESSION, { sourceRevision: revisionFor(OTHER_SESSION), items: [ITEM_1], confirm: true })
+    await batches.undo(SESSION, a.batchId, true)
+    lock.flip = true
+    await batches.undo(OTHER_SESSION, b.batchId, true)
+    expect(profile('Dana Reyes').sources.filter(source => source.startsWith('mac-assign:'))).toEqual([])
+    expect(journal(a.batchId).steps[0].evicted).toHaveLength(10)
+  })
+
+  it('a step that died in its commit, then an Undo with enrolment down: the retry still has what it evicted', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, history)])
+    const before = [...samplesOf('Dana Reyes')].sort()
+    const { batches } = await load({ commit: (session, plan) => { commitNow?.(session, plan); throw new Error('process died') } })
+    commitNow = (await import('./mac-voice-assignment.js')).commitMacVoiceAssignment
+    const out = await named(batches, [ITEM_1])
+    expect(journal(out.batchId).steps[0].state).toBe('intent')
+    const embeddings = await import('./speaker-embeddings.js')
+    embeddings.__installSpeakerRuntimeForTests(null)
+    expect((await batches.undo(SESSION, out.batchId, true)).left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'profile_store_unavailable' }])
+    embeddings.__installSpeakerRuntimeForTests(fakeSpeakerRuntime())
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'undone', evictedRestored: 4, evictedNotRestored: 0 })
+    expect([...samplesOf('Dana Reyes')].sort()).toEqual(before)
+  })
+})
+
+describe('review: what the journal keeps, and for how long', () => {
+  const history = range(42, 10).map(marker => ({ marker, source: `mac-assign:${OTHER_SESSION}` }))
+
+  it('holds no words of the transcript', async () => {
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1, MERGED])
+    const text = readFileSync(data('mac-voice-naming-batches', SESSION, `${out.batchId}.json`), 'utf-8')
+    expect(text).not.toContain('invented remark')
+    expect(text).not.toContain('Yeah')
+    expect(text).not.toContain('Invented summary')
+  })
+
+  it('a delete during a batch is not written back by the batch in memory', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, history)])
+    let plans = 0
+    const made = await load({
+      plan: async input => {
+        if (++plans === 2) {
+          expect(made.lib.forgetMacVoiceNamingPerson('Dana Reyes').vectors).toBe(4)
+        }
+        return realPlan(input)
+      },
+    })
+    const out = await named(made.batches, [ITEM_1, ITEM_2])
+    const step = journal(out.batchId).steps[0]
+    expect(step.name).toBe('Dana Reyes')
+    expect(step.evicted).toEqual([])
+    expect(step.evictedForgotten).toBe(4)
+  })
+
+  it('a person of the same name named later keeps their own evicted samples', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, history)])
+    const { batches, lib } = await load()
+    lib.forgetMacVoiceNamingPerson('Dana Reyes')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const out = await named(batches, [ITEM_1])
+    expect(journal(out.batchId).steps[0].evicted).toHaveLength(4)
+  })
+
+  it('a delete also drops an attendee copy that names them, and Undo then says it cannot restore that', async () => {
+    writeFileSync(meetingPath, markdown().replace('- Neva Sharpe', '- Neva Sharpe\n- Voice 1'))
+    const { batches, lib } = await load()
+    const out = await named(batches, [ITEM_1])
+    expect(journal(out.batchId).steps[0].attendeesBefore).toContain('Neva Sharpe')
+    lib.forgetMacVoiceNamingPerson('Neva Sharpe')
+    expect(journal(out.batchId).steps[0].attendeesBefore).toBeNull()
+    expect((await batches.undo(SESSION, out.batchId, true)).left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'transcript_changed' }])
+  })
+
+  it('a crash between the sidecar and markdown writes with an attendee bullet present does not refuse forever', async () => {
+    writeFileSync(meetingPath, markdown().replace('- Neva Sharpe', '- Neva Sharpe\n- Voice 1'))
+    const original = { md: markdown(), sidecar: readFileSync(sidecarPath, 'utf-8') }
+    const { batches } = await load()
+    faults.failWrite = 'call.md'
+    const out = await named(batches, [ITEM_1])
+    faults.failWrite = null
+    expect(markdown()).toBe(original.md)
+    expect((await batches.undo(SESSION, out.batchId, true)).state).toBe('undone')
+    expect({ md: markdown(), sidecar: readFileSync(sidecarPath, 'utf-8') }).toEqual(original)
+  })
+
+  it('keeps evicted originals when enrolment is down, and a retry puts them back', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, history)])
+    const before = [...samplesOf('Dana Reyes')].sort()
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    const embeddings = await import('./speaker-embeddings.js')
+    const runtime = fakeSpeakerRuntime()
+    embeddings.__installSpeakerRuntimeForTests(null)
+    const first = await batches.undo(SESSION, out.batchId, true)
+    expect(first.left).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', reason: 'profile_store_unavailable' }])
+    expect(journal(out.batchId).steps[0].evicted).toHaveLength(4)
+    expect(batches.list(SESSION).batches[0].undoAvailable).toBe(true)
+    embeddings.__installSpeakerRuntimeForTests(runtime)
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'undone', samplesRemoved: 4, evictedRestored: 4, evictedNotRestored: 0 })
+    expect([...samplesOf('Dana Reyes')].sort()).toEqual(before)
+    expect(journal(out.batchId).steps[0].evicted).toEqual([])
+  })
+
+  it('scrubs when a person confirmed the name, since nothing will be restored', async () => {
+    seedProfiles([ordinary('Dana Reyes', DANA, history)])
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    expect(journal(out.batchId).steps[0].evicted).toHaveLength(4)
+    const { appendCorrection } = await import('./meeting-corrections.js')
+    appendCorrection(SESSION, { id: 'vouch', phase: 'confirmed', at: new Date().toISOString(), from: 'Dana Reyes', to: 'Dana Reyes', chunks: [], scope: 'meeting' })
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'partial', evictedRestored: 0, evictedNotRestored: 4, samplesRemoved: 0 })
+    expect(journal(out.batchId).steps[0].evicted).toEqual([])
+  })
+
+  it('ends a batch at retention: no Undo, no listing, and the file goes', async () => {
+    const { batches, lib } = await load()
+    const out = await named(batches, [ITEM_1])
+    const file = data('mac-voice-naming-batches', SESSION, `${out.batchId}.json`)
+    const fresh = new Date(Date.now() - lib.MAC_VOICE_NAMING_RETENTION_MS + 60_000)
+    utimesSync(file, fresh, fresh)
+    expect(batches.list(SESSION).batches).toHaveLength(1)
+    const old = new Date(Date.now() - lib.MAC_VOICE_NAMING_RETENTION_MS - 60_000)
+    utimesSync(file, old, old)
+    expect(batches.list(SESSION).batches).toEqual([])
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'refused', reason: 'batch_not_found' })
+    expect(existsSync(file)).toBe(true)
+    expect((await named(batches, [ITEM_2])).state).toBe('applied')
+    expect(existsSync(file)).toBe(false)
+  })
+
+  it('prunes at route registration and on an Undo, not on a preview', async () => {
+    const { batches, lib } = await load()
+    const out = await named(batches, [ITEM_1])
+    const file = data('mac-voice-naming-batches', SESSION, `${out.batchId}.json`)
+    const old = new Date(Date.now() - lib.MAC_VOICE_NAMING_RETENTION_MS - 60_000)
+    utimesSync(file, old, old)
+    await batches.run(SESSION, { sourceRevision: revision(), items: [ITEM_2] })
+    expect(existsSync(file)).toBe(true)
+    const routes: string[] = []
+    lib.registerMacVoiceNamingBatchRoutes({ get: (path: string) => routes.push(path), post: (path: string) => routes.push(path) } as never, { store: { findBySessionId: () => null }, captureActive: () => false, reviewRevision: () => '', callViewMutationRefusal: () => null, finalizingRefusal: () => null })
+    expect(routes).toHaveLength(3)
+    expect(existsSync(file)).toBe(false)
+  })
+
+  it('a corrupt journal reads as unreadable, and naming is not blocked by it', async () => {
+    const { batches } = await load()
+    const out = await named(batches, [ITEM_1])
+    writeFileSync(data('mac-voice-naming-batches', SESSION, `${out.batchId}.json`), '{ not json')
+    expect(await batches.undo(SESSION, out.batchId, true)).toMatchObject({ state: 'refused', reason: 'journal_unreadable' })
+    expect(batches.list(SESSION).batches).toEqual([expect.objectContaining({ batchId: out.batchId, state: 'unreadable', undoAvailable: false })])
+    expect((await named(batches, [ITEM_2])).state).toBe('applied')
   })
 })

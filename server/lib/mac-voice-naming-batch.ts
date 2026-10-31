@@ -13,36 +13,45 @@
 // suggestion for this session and revision. The flag is trusted as given: `score` is rounded, so it is never
 // recomputed here. A restart loses suggestions on purpose, and the answer is to click Suggest names again. The check is
 // repeated immediately before each write, because a profile can change during a batch. Suggestions read null once the
-// store changes, which this batch's own first commit also does, so from then on the store's stamp taken right after
-// that commit stands in for it: any write since then that is not ours stops the batch as `suggestions_stale`.
+// store changes, which this batch's own first commit also does, so from then on the store's stamp and the meeting's
+// revision, both taken right after that commit, stand in for it: any write since then that is not ours stops the batch
+// as `suggestions_stale`.
 //
 // JOURNAL. Intent is durable before anything is touched and the outcome after. A process that dies leaves `running`,
 // which reads as `interrupted` once no live batch owns it, and Undo works out what landed by inspection. Refusals that
-// wrote nothing leave no journal.
+// wrote nothing leave no journal. It holds no transcript words: turn positions and hashes are enough for an exact
+// restore, and only an attendee section a step edited is copied, names only. Journals last 30 days, then Undo is gone.
 //
 // WHICH SAMPLES. The profile store has no sample ids, so a sample is its source plus a sha256 of its vector, taken by
 // diffing the profile around the one synchronous commit. `retractEmbeddingsBySource` matches on source alone, and the
 // broad session retraction would also remove earlier single namings from this call, which are a person's decisions.
-// So Undo finds the exact indices and passes a predicate that walks them in the store's index order, and it can only
-// ever match a sample whose source is the one recorded at that index.
+// So Undo finds the exact indices, in the named profile and then in any other a merge moved them to, and passes a
+// predicate that walks them in the store's index order and can only match the source recorded at that index. A sample
+// no profile holds is reported: `partial`, reason `samples_not_found`, the voice listed there as well as under `reverted`.
 //
 // EVICTED SAMPLES ARE RESTORED WHEN THAT IS SAFE. A Mac-assigned sample only ever evicts another Mac-assigned one, and
 // one label can replace a person's whole Mac allowance, so losing them on Undo would cost earlier decisions. Vectors go
 // back through the normal enrolment path, skipping its near-duplicate check, only if nothing would be displaced, the
-// profile still exists and no person has since moved that name in the sample's own meeting. Anything else is counted
-// as not restored. A restored sample becomes the newest Mac-assigned one, so eviction order is not preserved.
-// Vectors kept for this are scrubbed after Undo, and forgetMacVoiceNamingPerson scrubs them when a person is deleted.
+// profile still exists and that name has not since been moved or taken back in the sample's own meeting, which is what
+// stops a sample of an undone batch coming back. Anything else is counted as not restored. A restored sample becomes the
+// newest Mac-assigned one, so eviction order is not preserved. A vector leaves the journal once it is restored or can
+// never be. One with no room yet, or whose enrolment failed, stays until a later Undo of that name retries it or the
+// journal expires, so two overlapping batches end at the same samples in either Undo order.
+// forgetMacVoiceNamingPerson scrubs vectors when a person is deleted, including from a batch still in memory.
 //
 // LATER HUMAN ACTIONS WIN. A label a person changed afterwards is left alone and the batch's samples for it are still
 // retracted, because that change says the batch was wrong. A label a person CONFIRMED afterwards keeps its samples too.
-// A sample moved to another profile by a later merge is not chased.
+//
+// THE LEDGER AFTER AN UNDO. `reverted` goes on the applied row's id, and the undo's own intent closes `failed`. That is
+// the only shape mac-speaker-shadow-repair's reader accepts, and the ledger is append-only, so anything else would
+// block that capture's call view for good.
 //
 // DRAINS. Planning is read-only and holds no lease. Each write section holds its own `api_mutation` lease and the
 // meeting sync lock. isMacVoiceNamingBatchPost is what index.ts needs in order to let the route answer its own refusal.
 
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { Router } from 'express'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { cosOperationsMeetingsConfigured, findCosOperationsMeetingBySessionId, findDirectLibraryMeetingBySessionId } from './cos-operations-meetings.js'
@@ -64,6 +73,8 @@ export const MAC_VOICE_NAMING_BATCH_DIR = 'mac-voice-naming-batches'
 const SESSION_ID = /^[A-Za-z0-9:_-]{3,96}$/
 const BATCH_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAX_ITEMS = 99
+/** How long a batch can be undone. After this its journal, with any voiceprints and attendee copies in it, is deleted. */
+export const MAC_VOICE_NAMING_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const FILE_MODE = { mode: 0o600 }
 /** Reasons a retry cannot change: the person's action stands. */
 const PERMANENT_LEFT = new Set(['label_changed_by_person', 'confirmed_by_person'])
@@ -103,8 +114,11 @@ interface StepUndo {
   state: 'reverted' | 'left'
   reason?: string
   samplesRemoved: number
+  /** Samples this step added that no profile holds any more. */
+  samplesNotFound: number
   evictedRestored: number
-  evictedNotRestored: number
+  /** Evicted samples that can never come back: the person is gone, or the name moved in their meeting. */
+  evictedDropped: number
   /** An interrupted step that had changed nothing: done, and not reported as reverted. */
   nothingApplied?: boolean
 }
@@ -118,9 +132,11 @@ interface Step {
   correctionId: string
   changed: number[]
   /** Null when this step did not rewrite the markdown. */
-  markdownBefore: string | null
-  markdownAfterHash: string | null
+  markdownBeforeHash: string | null
   attendeeEdits: number
+  /** The section's body, only when this step edited it. Names, never words. */
+  attendeesBefore: string | null
+  attendeesAfterHash: string | null
   turnCount: number
   /** Which `[Name]:` turns, by order in the transcript, this step rewrote. */
   turns: number[]
@@ -131,6 +147,9 @@ interface Step {
   macBefore?: SampleCopy[]
   added: SampleId[]
   evicted: SampleCopy[]
+  /** Set once Undo has worked out `added` and `evicted` for a step that died before its journal said. */
+  effectsKnown?: boolean
+  retractStarted?: boolean
   evictedForgotten?: number
   samplesAdded: number
   undo?: StepUndo
@@ -190,26 +209,47 @@ function subtractSamples<T extends SampleId>(a: T[], b: string[]): T[] {
   })
 }
 
-/** Exactly these identities, in one store write. Runs without awaiting, so the indices cannot go stale. */
-function retractSamples(name: string, ids: SampleId[]): number {
-  const samples = profileSamples(name)
-  if (!samples || ids.length === 0) return 0
+/**
+ * Where these identities are now, by profile and index: the named profile first, then every other one, because a later
+ * merge moves samples with their source intact. `notFound` counts what no profile holds.
+ */
+function locateSamples(name: string, ids: SampleId[]): { found: Array<{ owner: string; samples: SampleCopy[]; drop: Set<number> }>; notFound: number } {
   const wanted = new Map<string, number>()
   for (const id of ids) wanted.set(sampleKey(id), (wanted.get(sampleKey(id)) ?? 0) + 1)
-  const drop = new Set<number>()
-  for (let i = 0; i < samples.length; i++) {
-    const key = sampleKey(samples[i])
-    const count = wanted.get(key) ?? 0
-    if (count > 0) { drop.add(i); wanted.set(key, count - 1) }
+  let notFound = ids.length
+  const found: Array<{ owner: string; samples: SampleCopy[]; drop: Set<number> }> = []
+  if (ids.length === 0) return { found, notFound }
+  const owners = [name, ...readVoiceProfiles().profiles.map(p => p.name).filter(owner => owner !== name)]
+  for (const owner of owners) {
+    if (notFound === 0) break
+    const samples = profileSamples(owner) ?? []
+    const drop = new Set<number>()
+    samples.forEach((sample, i) => {
+      const count = wanted.get(sampleKey(sample)) ?? 0
+      if (count === 0) return
+      drop.add(i)
+      wanted.set(sampleKey(sample), count - 1)
+      notFound--
+    })
+    if (drop.size > 0) found.push({ owner, samples, drop })
   }
-  if (drop.size === 0) return 0
-  let index = 0
-  const { removed } = retractEmbeddingsBySource(name, source => {
-    const at = index++
-    return drop.has(at) && samples[at].source === source
-  })
-  if (removed !== drop.size) throw new Error(`removed ${removed} of ${drop.size} samples`)
-  return removed
+  return { found, notFound }
+}
+
+/** Exactly these identities, wherever they are now. Runs without awaiting, so the indices cannot go stale. */
+function retractSamples(name: string, ids: SampleId[]): { removed: number; notFound: number } {
+  const { found, notFound } = locateSamples(name, ids)
+  let removed = 0
+  for (const { owner, samples, drop } of found) {
+    let index = 0
+    const out = retractEmbeddingsBySource(owner, source => {
+      const at = index++
+      return drop.has(at) && samples[at].source === source
+    })
+    removed += out.removed
+    if (out.removed !== drop.size) throw new Error(`removed ${out.removed} of ${drop.size} samples from one profile`)
+  }
+  return { removed, notFound }
 }
 
 /** True when `enrollEmbedding` would make room by dropping something. Mirrors its makeRoomForSample. */
@@ -218,24 +258,35 @@ function wouldDisplace(samples: SampleCopy[]): boolean {
   return samples.length >= MAX_EMBEDDINGS_PER_SPEAKER || macCount >= macAssignCapFor(samples.length, macCount)
 }
 
-function restoreEvicted(step: Step, evicted: SampleCopy[]): { restored: number; notRestored: number } {
-  let restored = 0
-  let notRestored = step.evictedForgotten ?? 0
+/**
+ * Has that name been taken back or moved in the meeting this sample came from, since this step? A `reverted` row counts:
+ * a sample from a batch that was undone after it was evicted must not come back. `own` is this journal's corrections,
+ * whose rows say nothing about a person.
+ */
+function nameMovedInItsMeeting(sample: SampleId, step: Step, own: Set<string>): boolean {
+  // A Mac-assigned sample only ever evicts another Mac-assigned one, so every evicted source names its meeting.
+  const session = sample.source.slice(MAC_ASSIGN_SOURCE.length + 1)
+  const later = (row: CorrectionRow) => !own.has(row.id) && row.from === step.name && row.at >= step.at
+  return appliedCorrections(session).some(later) || readCorrections(session).rows.some(row => row.phase === 'reverted' && later(row))
+}
+
+/** One pass. `keep` is what another pass could still restore: no room yet, or enrolment failed. `dropped` is final. */
+function restoreEvicted(step: Step, evicted: SampleCopy[], own: Set<string>): { restored: number; dropped: number; keep: SampleCopy[]; enrolFailed: boolean } {
+  const out = { restored: 0, dropped: 0, keep: [] as SampleCopy[], enrolFailed: false }
   for (const sample of evicted) {
     const samples = profileSamples(step.name)
     if (samples?.some(s => sampleKey(s) === sampleKey(sample))) continue
-    const session = sample.source.startsWith(`${MAC_ASSIGN_SOURCE}:`) ? sample.source.slice(MAC_ASSIGN_SOURCE.length + 1) : ''
-    const movedSince = session !== '' && appliedCorrections(session).some(row => row.from === step.name && row.at >= step.at)
-    if (!samples || wouldDisplace(samples) || movedSince) { notRestored++; continue }
-    if (enrollEmbedding(step.name, Float32Array.from(sample.embedding), sample.source, true).success) restored++
-    else notRestored++
+    if (!samples || nameMovedInItsMeeting(sample, step, own)) { out.dropped++; continue }
+    if (wouldDisplace(samples)) { out.keep.push(sample); continue }
+    if (enrollEmbedding(step.name, Float32Array.from(sample.embedding), sample.source, true).success) out.restored++
+    else { out.keep.push(sample); out.enrolFailed = true }
   }
-  return { restored, notRestored }
+  return out
 }
 
 /** What this step did to the profile. A step that died inside its commit is worked out from what is there now. */
 function sampleEffects(step: Step): { added: SampleId[]; evicted: SampleCopy[] } {
-  if (step.state === 'named') return { added: step.added, evicted: step.evicted }
+  if (step.state === 'named' || step.effectsKnown) return { added: step.added, evicted: step.evicted }
   const current = profileSamples(step.name) ?? []
   const planned = new Set(step.planned)
   const added = subtractSamples(current.filter(s => s.source === step.source && planned.has(s.hash)), step.before)
@@ -247,49 +298,84 @@ function sampleEffects(step: Step): { added: SampleId[]; evicted: SampleCopy[] }
 // ── Journal ──────────────────────────────────────────────────────────────────
 
 const sessionFolder = (sessionId: string): string => dataPath(MAC_VOICE_NAMING_BATCH_DIR, sessionId.replace(/:/g, '_'))
-const journalPath = (sessionId: string, batchId: string): string => dataPath(MAC_VOICE_NAMING_BATCH_DIR, sessionId.replace(/:/g, '_'), `${batchId}.json`)
+const journalPath = (sessionId: string, batchId: string): string => join(sessionFolder(sessionId), `${batchId}.json`)
+
+/** Names deleted in this process, and when. A batch still in memory must not write their voiceprints back. */
+const forgotten = new Map<string, string>()
+
+/** Drops what a person's deletion must not leave behind. Returns the number of voiceprints dropped. */
+function scrubForName(step: Step, name: string): number {
+  if (step.attendeesBefore?.includes(name)) step.attendeesBefore = null
+  if (step.name !== name) return 0
+  const vectors = step.evicted.length + (step.macBefore?.length ?? 0)
+  step.evictedForgotten = (step.evictedForgotten ?? 0) + step.evicted.length
+  step.evicted = []
+  delete step.macBefore
+  return vectors
+}
 
 function writeJournal(journal: Journal): void {
+  for (const step of journal.steps) {
+    for (const [name, at] of forgotten) if (step.at <= at) scrubForName(step, name)
+  }
   const path = journalPath(journal.sessionId, journal.batchId)
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   durableAtomicWriteFileSync(path, `${JSON.stringify(journal)}\n`, FILE_MODE)
 }
 
-function parseJournal(text: string, sessionId: string, batchId: string): Journal | null {
-  try {
-    const parsed = JSON.parse(text) as Journal
-    return parsed?.version === 1 && parsed.sessionId === sessionId && parsed.batchId === batchId && Array.isArray(parsed.steps) ? parsed : null
-  } catch { return null }
+function isExpired(path: string, now = Date.now()): boolean {
+  try { return now - statSync(path).mtimeMs > MAC_VOICE_NAMING_RETENTION_MS } catch { return false }
 }
 
-function readJournal(sessionId: string, batchId: string): Journal | null {
-  try { return parseJournal(readFileSync(journalPath(sessionId, batchId), 'utf-8'), sessionId, batchId) } catch { return null }
+/** `missing` covers a journal past retention: it no longer exists as far as anyone is told. */
+function loadJournal(sessionId: string, batchId: string): Journal | 'missing' | 'unreadable' {
+  const path = journalPath(sessionId, batchId)
+  if (isExpired(path)) return 'missing'
+  let text: string
+  try { text = readFileSync(path, 'utf-8') } catch { return 'missing' }
+  try {
+    const parsed = JSON.parse(text) as Journal
+    return parsed?.version === 1 && parsed.sessionId === sessionId && parsed.batchId === batchId && Array.isArray(parsed.steps) ? parsed : 'unreadable'
+  } catch { return 'unreadable' }
+}
+
+/** Every journal on disk, as paths. */
+function journalFiles(): Array<{ session: string; batchId: string; path: string }> {
+  const out: Array<{ session: string; batchId: string; path: string }> = []
+  let folders: string[] = []
+  try { folders = readdirSync(dataPath(MAC_VOICE_NAMING_BATCH_DIR)) } catch { return out }
+  for (const session of folders) {
+    let files: string[] = []
+    try { files = readdirSync(dataPath(MAC_VOICE_NAMING_BATCH_DIR, session)) } catch { continue }
+    for (const file of files) {
+      const batchId = file.replace(/\.json$/, '')
+      if (BATCH_ID.test(batchId)) out.push({ session, batchId, path: dataPath(MAC_VOICE_NAMING_BATCH_DIR, session, file) })
+    }
+  }
+  return out
+}
+
+/** Undo is offered for the retention window, and the voiceprints and attendee copies go with the journal after it. */
+function pruneExpiredJournals(): void {
+  for (const { path } of journalFiles()) {
+    if (isExpired(path)) { try { unlinkSync(path) } catch { /* the next pass tries again */ } }
+  }
 }
 
 /** Person deleted: drop the voiceprints journals hold for them. Their count stays, reported as not restored. */
 export function forgetMacVoiceNamingPerson(name: string): { batches: number; vectors: number } {
+  forgotten.set(name, new Date().toISOString())
   const out = { batches: 0, vectors: 0 }
-  let folders: string[] = []
-  try { folders = readdirSync(dataPath(MAC_VOICE_NAMING_BATCH_DIR)) } catch { return out }
-  for (const folder of folders) {
-    let files: string[] = []
-    try { files = readdirSync(dataPath(MAC_VOICE_NAMING_BATCH_DIR, folder)).filter(file => file.endsWith('.json')) } catch { continue }
-    for (const file of files) {
-      let journal: Journal
-      try { journal = JSON.parse(readFileSync(dataPath(MAC_VOICE_NAMING_BATCH_DIR, folder, file), 'utf-8')) as Journal } catch { continue }
-      let vectors = 0
-      for (const step of journal.steps ?? []) {
-        if (step.name !== name) continue
-        vectors += step.evicted.length + (step.macBefore?.length ?? 0)
-        step.evictedForgotten = (step.evictedForgotten ?? 0) + step.evicted.length
-        step.evicted = []
-        delete step.macBefore
-      }
-      if (vectors === 0) continue
-      writeJournal(journal)
-      out.batches++
-      out.vectors += vectors
-    }
+  for (const { path } of journalFiles()) {
+    let journal: Journal
+    try { journal = JSON.parse(readFileSync(path, 'utf-8')) as Journal } catch { continue }
+    const before = JSON.stringify(journal)
+    let vectors = 0
+    for (const step of journal.steps ?? []) vectors += scrubForName(step, name)
+    if (JSON.stringify(journal) === before) continue
+    writeJournal(journal)
+    out.batches++
+    out.vectors += vectors
   }
   return out
 }
@@ -309,15 +395,24 @@ function transcriptTurnLines(lines: string[]): number[] {
   return out
 }
 
+/** The Attendees section's body, as relabelMeetingMarkdown bounds it. Null when there is none. */
+function attendeeRange(md: string): { start: number; end: number } | null {
+  const heading = /^##\s+Attendees\s*$/m.exec(md)
+  if (!heading) return null
+  const start = heading.index + heading[0].length
+  const next = /^##\s+/m.exec(md.slice(start))
+  return { start, end: next ? start + next.index : md.length }
+}
+
 /**
- * The markdown with this step's turns back on the old label, or null when that cannot be done honestly.
- * Nothing changed since: the exact bytes. Otherwise turn order is the join key, not turn text: undoSpeakerMarkdown
- * refuses a turn whose words repeat, and "Yeah." repeats on every real call.
+ * The markdown with this step's edits taken back, or null when that cannot be done honestly. The journal keeps no words:
+ * turn order finds the turns and the attendee section is names only, which restores the exact bytes when nothing else
+ * has changed. Turn order and not turn text, because undoSpeakerMarkdown refuses a turn whose words repeat, and "Yeah." repeats on
+ * every real call.
  */
 function revertedMarkdown(current: string, step: Step): string | null {
-  if (step.markdownBefore === null) return current
-  if (sha256(current) === step.markdownAfterHash) return step.markdownBefore
-  if (step.attendeeEdits > 0) return null
+  if (step.markdownBeforeHash === null) return current
+  if (sha256(current) === step.markdownBeforeHash) return current
   const lines = current.split('\n')
   const turns = transcriptTurnLines(lines)
   if (turns.length !== step.turnCount) return null
@@ -329,7 +424,11 @@ function revertedMarkdown(current: string, step: Step): string | null {
     if (!line.startsWith(from)) return null
     lines[turns[ordinal]] = to + line.slice(from.length)
   }
-  return lines.join('\n')
+  const next = lines.join('\n')
+  if (step.attendeeEdits === 0) return next
+  const range = attendeeRange(next)
+  if (!range || step.attendeesBefore === null || sha256(next.slice(range.start, range.end)) !== step.attendeesAfterHash) return null
+  return next.slice(0, range.start) + step.attendeesBefore + next.slice(range.end)
 }
 
 // ── The batch ────────────────────────────────────────────────────────────────
@@ -373,6 +472,14 @@ function journalUndoAvailable(journal: Journal): boolean {
 
 function listState(journal: Journal): NamingBatchListState {
   return journal.state === 'running' && active.get(journal.sessionId) !== journal.batchId ? 'interrupted' : journal.state
+}
+
+/** The attendee section before and the hash after, when a step edited it. */
+function attendeeCopies(before: string | null, after: string | null): { attendeesBefore: string | null; attendeesAfterHash: string | null } {
+  const beforeRange = before === null ? null : attendeeRange(before)
+  const afterRange = after === null ? null : attendeeRange(after)
+  if (before === null || after === null || !beforeRange || !afterRange) return { attendeesBefore: null, attendeesAfterHash: null }
+  return { attendeesBefore: before.slice(beforeRange.start, beforeRange.end), attendeesAfterHash: sha256(after.slice(afterRange.start, afterRange.end)) }
 }
 
 export interface MacVoiceNamingBatches {
@@ -458,11 +565,13 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
     const checked = preflight(sessionId, request, meeting, before)
     if ('reason' in checked) return base(checked.reason, allRefused(checked.reason, checked.item), before)
 
+    if (confirm) pruneExpiredJournals()
     active.set(sessionId, null)
     const batchId = randomUUID()
     let journal = null as Journal | null
     let expected = { sidecar: checked.sidecar, markdown: readText(meetingPath) }
-    let ownStoreStamp = null as string | null
+    /** What this batch left, after its last commit. Null until it has written anything. */
+    let own = null as { store: string; revision: string } | null
     const wouldName = new Map<number, NamedEntry>()
     const moved = (): boolean => readText(sidecarPath) !== expected.sidecar || readText(meetingPath) !== expected.markdown
 
@@ -485,20 +594,20 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
         wouldName.set(itemIndex, entry)
         return { named: true, stop: null }
       }
-      // The plan yielded, so anything may have started or moved while it ran.
-      const blockedAfter = blockReason(sessionId)
-      if (blockedAfter) return refuse(blockedAfter)
-      if (pendingCorrections(sessionId).length > 0) return refuse('correction_pending')
       let work: { release: () => void }
       try { work = acquireWork() } catch { return refuse('maintenance') }
       let lock: { release: () => void } | undefined
       try {
         try { lock = await acquireLock() } catch { return refuse('sync_running') }
+        // The plan yielded and the lock waited, so anything may have started or moved by now.
+        const blockedAtLock = blockReason(sessionId)
+        if (blockedAtLock) return refuse(blockedAtLock)
+        if (pendingCorrections(sessionId).length > 0) return refuse('correction_pending')
         if (moved()) return refuse('meeting_changed')
-        if (ownStoreStamp === null) {
+        if (own === null) {
           const current = suggestions(sessionId)
           if (!current || current.sourceRevision !== revision() || !itemIsSuggested(current, item)) return refuse('suggestions_stale')
-        } else if (profileStoreStamp() !== ownStoreStamp) return refuse('suggestions_stale')
+        } else if (profileStoreStamp() !== own.store || revision() !== own.revision) return refuse('suggestions_stale')
         // From here to the release nothing awaits, so the profile diff below is exactly the commit.
         const md = expected.markdown === null ? null : relabelMeetingMarkdown(expected.markdown, label, name)
         const edit = md?.ok ? md.value : null
@@ -511,9 +620,9 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
         const source = `${MAC_ASSIGN_SOURCE}:${sessionId}`
         const step: Step = {
           itemIndex, label, name, state: 'intent', at, correctionId, changed: rename.value.changed,
-          markdownBefore: rewrites ? expected.markdown : null,
-          markdownAfterHash: rewrites && edit ? sha256(edit.markdown) : null,
+          markdownBeforeHash: rewrites && expected.markdown !== null ? sha256(expected.markdown) : null,
           attendeeEdits: edit?.attendees ?? 0,
+          ...attendeeCopies(expected.markdown, edit?.attendees ? edit.markdown : null),
           turnCount: turnLines.length,
           turns: turnLines.flatMap((line, ordinal) => (lines[line].startsWith(`[${label}]:`) ? [ordinal] : [])),
           source,
@@ -549,7 +658,7 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
         appendCorrection(sessionId, { ...row, phase: 'applied', at: new Date().toISOString(), surfaces: { sidecar: rename.value.changed.length, attendees: edit?.attendees ?? 0, transcript: edit?.transcript ?? 0 }, proseStale: edit?.proseStale ?? false })
         expected = { sidecar: rename.value.json, markdown: rewrites && edit ? edit.markdown : expected.markdown }
         const report = commit(sessionId, assignment)
-        ownStoreStamp = profileStoreStamp()
+        own = { store: profileStoreStamp(), revision: revision() }
         const samplesAfter = profileSamples(name) ?? []
         step.added = subtractSamples(samplesAfter, samplesBefore.map(sampleKey)).map(({ source: s, hash }) => ({ source: s, hash }))
         step.evicted = subtractSamples(samplesBefore, samplesAfter.map(sampleKey))
@@ -635,7 +744,7 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
   function revertLabel(sessionId: string, batchId: string, step: Step, meeting: { sidecarPath: string; meetingPath: string }, sidecar: string): string | null {
     const markdown = readText(meeting.meetingPath)
     const nextMarkdown = markdown === null ? null : revertedMarkdown(markdown, step)
-    if (step.markdownBefore !== null && (markdown === null || nextMarkdown === null)) return 'transcript_changed'
+    if (step.markdownBeforeHash !== null && nextMarkdown === null) return 'transcript_changed'
     const inverse = relabelSidecarJson(sidecar, step.name, step.label, step.changed)
     if (!inverse.ok) return 'label_changed_by_person'
     const row: CorrectionRow = { id: `${step.correctionId}:undo:${Date.now().toString(36)}`, phase: 'intent', at: new Date().toISOString(), from: step.name, to: step.label, chunks: step.changed, scope: 'meeting', source: `mac-naming-batch-undo:${batchId}` }
@@ -647,78 +756,140 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
       appendCorrection(sessionId, { ...row, phase: 'failed', at: new Date().toISOString(), error: String(error) })
       return 'write_failed'
     }
-    // The key on this row is the correction it takes back, which is what appliedCorrections filters on.
-    appendCorrection(sessionId, { ...row, phase: 'reverted', at: new Date().toISOString(), batchId: step.correctionId })
     return null
+  }
+
+  /**
+   * The ledger's half of a revert. `reverted` goes on the applied row's own id, whenever one still counts, so a retry
+   * after a crash finishes the job: that id is what appliedCorrections and the repair reader key on, and the undo's own
+   * intent closes `failed` because an intent may only be followed by applied or failed. Null when all of it landed.
+   */
+  function recordRevert(sessionId: string, batchId: string, step: Step): string | null {
+    if (!appliedCorrections(sessionId).some(row => row.id === step.correctionId)) return null
+    const row: CorrectionRow = { id: step.correctionId, phase: 'reverted', at: new Date().toISOString(), from: step.name, to: step.label, chunks: step.changed, scope: 'meeting', source: `mac-naming-batch-undo:${batchId}` }
+    return appendCorrection(sessionId, row) ? null : 'ledger_unwritable'
+  }
+
+  function closeOwnIntents(sessionId: string, step: Step): string | null {
+    let reason: string | null = null
+    for (const open of pendingCorrections(sessionId)) {
+      if (open.id !== step.correctionId && !open.id.startsWith(`${step.correctionId}:undo:`)) continue
+      if (!appendCorrection(sessionId, { ...open, phase: 'failed', at: new Date().toISOString(), error: 'closed by batch undo' })) reason = 'ledger_unwritable'
+    }
+    return reason
   }
 
   function undoStep(journal: Journal, step: Step, meeting: { sidecarPath: string; meetingPath: string }): StepUndo {
     const { sessionId, batchId } = journal
     const own = new Set(journal.steps.map(s => s.correctionId))
     const prior = step.undo
-    const totals = (state: StepUndo['state'], removed: number, restored: number, notRestored: number, reason?: string, nothingApplied?: boolean): StepUndo => ({
+    const totals = (state: StepUndo['state'], extra: { removed?: number; restored?: number; dropped?: number; notFound?: number; reason?: string | null; nothingApplied?: boolean } = {}): StepUndo => ({
       state,
-      ...(reason ? { reason } : {}),
-      samplesRemoved: (prior?.samplesRemoved ?? 0) + removed,
-      evictedRestored: (prior?.evictedRestored ?? 0) + restored,
-      evictedNotRestored: notRestored,
-      ...(nothingApplied ? { nothingApplied } : {}),
+      ...(extra.reason ? { reason: extra.reason } : {}),
+      samplesRemoved: (prior?.samplesRemoved ?? 0) + (extra.removed ?? 0),
+      samplesNotFound: (prior?.samplesNotFound ?? 0) + (extra.notFound ?? 0),
+      evictedRestored: (prior?.evictedRestored ?? 0) + (extra.restored ?? 0),
+      evictedDropped: (prior?.evictedDropped ?? 0) + (extra.dropped ?? 0),
+      ...(extra.nothingApplied ? { nothingApplied: true } : {}),
     })
     const sidecar = readText(meeting.sidecarPath)
     let doc: Record<string, unknown>
-    try { doc = JSON.parse(sidecar ?? '') as Record<string, unknown> } catch { return totals('left', 0, 0, prior?.evictedNotRestored ?? 0, 'sidecar_unreadable') }
-    const rows = readCorrections(sessionId).rows
-    const verdict = verdictFor(step, own, rows, doc)
-    if (verdict === 'confirmed_by_person') return totals('left', 0, 0, prior?.evictedNotRestored ?? 0, verdict)
+    try { doc = JSON.parse(sidecar ?? '') as Record<string, unknown> } catch { return totals('left', { reason: 'sidecar_unreadable' }) }
+    const verdict = verdictFor(step, own, readCorrections(sessionId).rows, doc)
+    if (verdict === 'confirmed_by_person') {
+      // The name and its samples stand, so what they evicted stays out. Nothing is kept for a restore that cannot happen.
+      const dropped = sampleEffects(step).evicted.length
+      step.added = []
+      step.evicted = []
+      step.effectsKnown = true
+      delete step.macBefore
+      step.attendeesBefore = null
+      const closing = closeOwnIntents(sessionId, step)
+      return totals('left', { reason: closing ?? verdict, dropped })
+    }
     let reason: string | null = verdict === 'label_changed_by_person' ? verdict : null
     if (verdict === 'applied') reason = revertLabel(sessionId, batchId, step, meeting, sidecar ?? '')
-    // An interrupted batch may have left its own intent open. Undo is what closes it.
-    for (const open of pendingCorrections(sessionId)) {
-      if (open.id === step.correctionId || open.id.startsWith(`${step.correctionId}:undo:`)) appendCorrection(sessionId, { ...open, phase: 'failed', at: new Date().toISOString(), error: 'interrupted, closed by batch undo' })
-    }
+    if (reason === null) reason = recordRevert(sessionId, batchId, step)
+    reason = closeOwnIntents(sessionId, step) ?? reason
     let removed = 0
-    let restored = { restored: 0, notRestored: 0 }
+    let notFound = 0
+    let restored = 0
+    let dropped = 0
     try {
       const effects = sampleEffects(step)
-      removed = retractSamples(step.name, effects.added)
-      restored = restoreEvicted(step, effects.evicted)
+      step.effectsKnown = true
+      step.evicted = effects.evicted
+      step.added = effects.added
+      // Durable before the store changes: a retry after a crash here must not report its own retraction as missing.
+      const retrying = step.retractStarted === true
+      step.retractStarted = true
+      writeJournal(journal)
+      const out = retractSamples(step.name, step.added)
+      removed = out.removed
+      notFound = retrying ? 0 : out.notFound
+      step.added = []
+      delete step.macBefore
+      const back = restoreEvicted(step, step.evicted, own)
+      step.evicted = back.keep
+      restored = back.restored
+      dropped = back.dropped
+      if (back.enrolFailed) reason = 'profile_store_unavailable'
     } catch (error) {
       log(`samples not reverted for ${step.label} in ${batchId}: ${String(error)}`)
       reason = 'profile_store_unavailable'
     }
-    if (!reason || PERMANENT_LEFT.has(reason)) {
-      step.evicted = []
-      delete step.macBefore
-    }
-    const nothingApplied = verdict === 'not_applied' && step.state !== 'named' && removed === 0
-    return totals(reason ? 'left' : 'reverted', removed, restored.restored, restored.notRestored, reason ?? undefined, nothingApplied)
+    if (!reason) step.attendeesBefore = null
+    return totals(reason ? 'left' : 'reverted', { removed, notFound, restored, dropped, reason, nothingApplied: verdict === 'not_applied' && step.state !== 'named' && removed === 0 })
   }
 
-  function undoResult(journal: Journal, transient: Map<Step, string>, revision: string, dryRun: boolean, wouldRemove = 0, wouldRestore = 0, verdicts?: Map<Step, Verdict>): NamingBatchUndoResult {
+  /** A sample with no room when its batch was undone may have room now that a later batch is undone too. */
+  function retryKeptRestores(): void {
+    for (const { session, batchId } of journalFiles()) {
+      const journal = loadJournal(session, batchId)
+      if (typeof journal === 'string') continue
+      const own = new Set(journal.steps.map(s => s.correctionId))
+      let changed = false
+      for (const step of journal.steps) {
+        if (!step.undo || step.evicted.length === 0) continue
+        const back = restoreEvicted(step, step.evicted, own)
+        step.evicted = back.keep
+        step.undo.evictedRestored += back.restored
+        step.undo.evictedDropped += back.dropped
+        changed = changed || back.restored + back.dropped > 0
+      }
+      if (changed) writeJournal(journal)
+    }
+  }
+
+  function undoResult(journal: Journal, transient: Map<string, string>, revision: string, dryRun: boolean, wouldRemove = 0, wouldRestore = 0, verdicts?: Map<string, Verdict>, wouldMissNames?: Map<string, number>): NamingBatchUndoResult {
     const reverted = new Map<number, { labels: string[]; name: string }>()
     const left = new Map<string, { labels: string[]; name: string; reason: string }>()
     let samplesRemoved = wouldRemove
     let evictedRestored = wouldRestore
     let evictedNotRestored = 0
+    const leave = (step: Step, reason: string): void => {
+      const key = `${step.itemIndex}|${reason}`
+      const entry = left.get(key) ?? { labels: [], name: step.name, reason }
+      entry.labels.push(step.label)
+      left.set(key, entry)
+    }
     for (const step of journal.steps) {
       if (step.state === 'refused') continue
       samplesRemoved += step.undo?.samplesRemoved ?? 0
       evictedRestored += step.undo?.evictedRestored ?? 0
-      evictedNotRestored += step.undo?.evictedNotRestored ?? 0
-      const verdict = verdicts?.get(step)
-      const reason = transient.get(step)
+      if (step.undo) evictedNotRestored += step.undo.evictedDropped + step.evicted.length + (step.evictedForgotten ?? 0)
+      const verdict = verdicts?.get(step.correctionId)
+      const reason = transient.get(step.correctionId)
         ?? (verdict === 'confirmed_by_person' || verdict === 'label_changed_by_person' ? verdict : undefined)
         ?? (step.undo?.state === 'left' ? step.undo.reason ?? 'not_reverted' : undefined)
-      if (reason) {
-        const key = `${step.itemIndex}|${reason}`
-        const entry = left.get(key) ?? { labels: [], name: step.name, reason }
-        entry.labels.push(step.label)
-        left.set(key, entry)
-      } else if (!step.undo?.nothingApplied && !(verdict === 'not_applied' && step.state !== 'named')) {
+      if (reason) leave(step, reason)
+      else if (!step.undo?.nothingApplied && !(verdict === 'not_applied' && step.state !== 'named')) {
         const entry = reverted.get(step.itemIndex) ?? { labels: [], name: step.name }
         entry.labels.push(step.label)
         reverted.set(step.itemIndex, entry)
       }
+      // The label may be back and a sample still unaccounted for: a voice can be in both lists, and the answer is partial.
+      if ((step.undo?.samplesNotFound ?? 0) + (wouldMissNames?.get(step.correctionId) ?? 0) > 0) leave(step, 'samples_not_found')
     }
     return {
       state: left.size > 0 ? 'partial' : 'undone',
@@ -739,8 +910,9 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
     const meeting = resolveMeeting(sessionId)
     if ('refused' in meeting) return refusal(meeting.refused, '')
     const revision = (): string => deps.reviewRevision(meeting.meetingPath, meeting.sidecarPath)
-    const journal = readJournal(sessionId, batchId)
-    if (!journal) return refusal('batch_not_found', revision())
+    const journal = loadJournal(sessionId, batchId)
+    if (journal === 'missing') return refusal('batch_not_found', revision())
+    if (journal === 'unreadable') return refusal('journal_unreadable', revision())
     if (active.has(sessionId)) return refusal('batch_running', revision())
     // Already done: answer the same thing again and touch nothing, whatever else is going on.
     if (journal.state === 'undone') return undoResult(journal, new Map(), revision(), !confirm)
@@ -748,40 +920,42 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
     if (blocked) return refusal(blocked, revision())
     const own = journal.steps.map(step => step.correctionId)
     if (pendingCorrections(sessionId).some(open => !own.some(id => open.id === id || open.id.startsWith(`${id}:undo:`)))) return refusal('correction_pending', revision())
-    const settled = (step: Step): boolean => step.undo?.state === 'reverted' || (step.undo?.state === 'left' && PERMANENT_LEFT.has(step.undo.reason ?? ''))
-    const steps = journal.steps.filter(step => step.state !== 'refused' && !settled(step)).reverse()
+    const steps = journal.steps.filter(step => step.state !== 'refused' && step.undo?.state !== 'reverted').reverse()
 
     if (!confirm) {
       let doc: Record<string, unknown>
       try { doc = JSON.parse(readText(meeting.sidecarPath) ?? '') as Record<string, unknown> } catch { return refusal('sidecar_unreadable', revision()) }
       const rows = readCorrections(sessionId).rows
-      const verdicts = new Map<Step, Verdict>()
+      const verdicts = new Map<string, Verdict>()
+      const misses = new Map<string, number>()
       let wouldRemove = 0
       let wouldRestore = 0
       for (const step of steps) {
         const verdict = verdictFor(step, new Set(own), rows, doc)
-        verdicts.set(step, verdict)
+        verdicts.set(step.correctionId, verdict)
         if (verdict === 'confirmed_by_person') continue
         const effects = sampleEffects(step)
-        const samples = profileSamples(step.name) ?? []
-        wouldRemove += effects.added.length - subtractSamples(effects.added, samples.map(sampleKey)).length
-        wouldRestore += subtractSamples(effects.evicted, samples.map(sampleKey)).length
+        const located = locateSamples(step.name, effects.added)
+        wouldRemove += effects.added.length - located.notFound
+        misses.set(step.correctionId, located.notFound)
+        wouldRestore += subtractSamples(effects.evicted, (profileSamples(step.name) ?? []).map(sampleKey)).length
       }
-      return undoResult(journal, new Map(), revision(), true, wouldRemove, wouldRestore, verdicts)
+      return undoResult(journal, new Map(), revision(), true, wouldRemove, wouldRestore, verdicts, misses)
     }
 
     active.set(sessionId, batchId)
-    const transient = new Map<Step, string>()
+    const transient = new Map<string, string>()
     try {
       for (const step of steps) {
         await yieldToLoop()
-        const stop = blockReason(sessionId)
-        if (stop) { transient.set(step, stop); continue }
         let work: { release: () => void }
-        try { work = acquireWork() } catch { transient.set(step, 'maintenance'); continue }
+        try { work = acquireWork() } catch { transient.set(step.correctionId, 'maintenance'); continue }
         let lock: { release: () => void } | undefined
         try {
-          try { lock = await acquireLock() } catch { transient.set(step, 'sync_running'); continue }
+          try { lock = await acquireLock() } catch { transient.set(step.correctionId, 'sync_running'); continue }
+          // A recording may have started while this waited for the lock. Nothing awaits between here and the journal.
+          const stopAtLock = blockReason(sessionId)
+          if (stopAtLock) { transient.set(step.correctionId, stopAtLock); continue }
           step.undo = undoStep(journal, step, meeting)
           writeJournal(journal)
         } finally {
@@ -789,23 +963,38 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
           work.release()
         }
       }
-      journal.state = transient.size === 0 && journal.steps.every(step => step.state === 'refused' || step.undo?.state === 'reverted') ? 'undone' : 'undo_partial'
+      const clean = transient.size === 0 && journal.steps.every(step => step.state === 'refused' || (step.undo?.state === 'reverted' && !step.undo.samplesNotFound))
+      journal.state = clean ? 'undone' : 'undo_partial'
       writeJournal(journal)
+      // Best effort and bounded by the same checks as a write. A failure here must not turn a finished Undo into an error.
+      if (!blockReason(sessionId)) {
+        let work: { release: () => void } | undefined
+        try {
+          work = acquireWork()
+          retryKeptRestores()
+        } catch (error) {
+          log(`kept samples not retried after ${batchId}: ${String(error)}`)
+        } finally {
+          work?.release()
+        }
+      }
     } finally {
       active.delete(sessionId)
     }
-    return undoResult(journal, transient, revision(), false)
+    const reread = loadJournal(sessionId, batchId)
+    return undoResult(typeof reread === 'string' ? journal : reread, transient, revision(), false)
   }
 
   function list(sessionId: string): { batches: NamingBatchListEntry[] } {
     let files: string[] = []
     try { files = readdirSync(sessionFolder(sessionId)).filter(file => BATCH_ID.test(file.replace(/\.json$/, ''))) } catch { return { batches: [] } }
-    const batches = files.map((file): NamingBatchListEntry => {
+    const batches = files.flatMap((file): NamingBatchListEntry[] => {
       const batchId = file.replace(/\.json$/, '')
-      const journal = readJournal(sessionId, batchId)
-      return journal
-        ? { batchId, at: journal.at, state: listState(journal), named: namedEntries(journal), undoAvailable: journalUndoAvailable(journal) }
-        : { batchId, at: '', state: 'unreadable', named: [], undoAvailable: false }
+      const journal = loadJournal(sessionId, batchId)
+      if (journal === 'missing') return []
+      return [typeof journal === 'string'
+        ? { batchId, at: '', state: 'unreadable', named: [], undoAvailable: false }
+        : { batchId, at: journal.at, state: listState(journal), named: namedEntries(journal), undoAvailable: journalUndoAvailable(journal) }]
     })
     return { batches: batches.sort((a, b) => b.at.localeCompare(a.at)) }
   }
@@ -835,6 +1024,8 @@ function parseItems(value: unknown): NamingBatchItem[] | null {
 
 export function registerMacVoiceNamingBatchRoutes(router: Router, deps: NamingBatchDeps): void {
   const batches = createMacVoiceNamingBatches(deps)
+  // Also at startup, so voiceprints do not outlive retention on a Mac that names nothing more.
+  pruneExpiredJournals()
   const invalidSession = (sessionId: string): boolean => !SESSION_ID.test(sessionId)
 
   router.get('/meeting/:sessionId/voice-naming-batch', (req, res) => {
