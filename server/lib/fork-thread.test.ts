@@ -33,6 +33,7 @@ import {
   compareWatermarks,
   forkOrphanPossible,
   forkThread,
+  realForkDeps,
   selectForkedId,
   type ForkDeps,
   type ForkResult,
@@ -435,7 +436,7 @@ describe('fork does not consult occupancy', () => {
     // undeclared key here throws.
     const declared = new Set([
       'now', 'resolveBinary', 'spawn', 'processStartMs',
-      'recordSpawn', 'releaseSpawn', 'terminate', 'sourceWatermark', 'buildArgs',
+      'recordSpawn', 'releaseSpawn', 'terminate', 'sourceWatermark', 'buildArgs', 'auditRun',
     ])
     const h = claudeRun()
     const guarded = new Proxy(h.deps, {
@@ -1121,5 +1122,61 @@ describe('6.62.2: retry notices are not verdicts; the final error event wins', (
     const out = await run(harness({}, { stdout: lines, exitCode: 1 }))
     if (out.ok) throw new Error('expected failure')
     expect(out.detail).toBe('context_too_long')
+  })
+})
+
+describe('6.97.0: one audit row for a fork, by a passive reader', () => {
+  const resultWithUsage = (sessionId: string, over: Record<string, unknown> = {}) => `${JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, session_id: sessionId, result: 'SECRET ANSWER', uuid: 'fork-1',
+    usage: { input_tokens: 3, output_tokens: 9, cache_read_input_tokens: 5000, cache_creation_input_tokens: 40 },
+    modelUsage: { 'claude-opus-5': { inputTokens: 300, outputTokens: 900, costUSD: 9.99 } },
+    model_usage_since_last_result: { 'claude-opus-5': { inputTokens: 3, outputTokens: 9, cacheReadInputTokens: 5000, cacheCreationInputTokens: 40, costUSD: 0.0123 } },
+    total_cost_usd: 9.99, ...over,
+  })}\n`
+  const claudeWith = (last: string) => [...claudeStdout(CLAUDE_FORK).slice(0, 2), last]
+  const withAudit = (stdout: string[], binary = CLAUDE_BIN) => {
+    const rows: Record<string, any>[] = []
+    return { h: harness({ auditRun: entry => { rows.push(entry as Record<string, any>) } }, { stdout }, binary), rows }
+  }
+
+  it('Claude: names the NEW thread, and this run\'s usage, not the source thread\'s totals', async () => {
+    const { h, rows } = withAudit(claudeWith(resultWithUsage(CLAUDE_FORK)))
+    const result = await run(h)
+    expect(result.ok).toBe(true)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      source: 'g2-fork', caller: 'fork_thread', model: 'claude', inputChars: PROMPT.length, cliSessionId: CLAUDE_FORK,
+      realUsage: { inputTokens: 3, outputTokens: 9, cacheReadTokens: 5000, cacheWriteTokens: 40, costUsd: 0.0123 },
+    })
+    expect(JSON.stringify(rows)).not.toContain('SECRET')
+    expect(JSON.stringify(rows)).not.toContain(PROMPT)
+  })
+  it('Codex stays estimated: a running total on a copied thread says nothing about this run', async () => {
+    const { h, rows } = withAudit(codexStdout(CODEX_FORK), CODEX_BIN)
+    const result = await run(h, { provider: 'codex', nativeThreadId: CODEX_SOURCE })
+    expect(result.ok).toBe(true)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ source: 'g2-fork', model: 'codex', outputChars: 'FORKED'.length, cliSessionId: CODEX_FORK })
+    expect(rows[0]).not.toHaveProperty('realUsage')
+  })
+  it('malformed usage: the same result, and a row that stays estimated', async () => {
+    const good = await run(withAudit(claudeWith(resultWithUsage(CLAUDE_FORK))).h)
+    const { h, rows } = withAudit(claudeWith(resultWithUsage(CLAUDE_FORK, { usage: 'x', modelUsage: 7, model_usage_since_last_result: [] })))
+    expect(await run(h)).toEqual(good)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).not.toHaveProperty('realUsage')
+  })
+  it('an audit that throws never changes the outcome', async () => {
+    const h = claudeRun({ auditRun: () => { throw new Error('audit broke') } })
+    expect((await run(h)).ok).toBe(true)
+  })
+  it('a fork that names no new thread writes no row', async () => {
+    const { h, rows } = withAudit(claudeStdout(CLAUDE_SOURCE))
+    expect((await run(h)).ok).toBe(false)
+    expect(rows).toHaveLength(0)
+  })
+  it('production wiring writes rows; a test harness without it never does', () => {
+    expect(typeof realForkDeps().auditRun).toBe('function')
+    expect(harness().deps.auditRun).toBeUndefined()
   })
 })

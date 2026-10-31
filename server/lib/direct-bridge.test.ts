@@ -33,6 +33,7 @@ vi.mock('./telegram-notify.js', () => ({ notifySessionStart: vi.fn(), notifyExch
 vi.mock('./token-audit.js', async importOriginal => ({ ...(await importOriginal<typeof import('./token-audit.js')>()), logTokenAudit }))
 
 import type { StreamCallbacks } from './claude-bridge.js'
+import { buildTokenAuditRecord } from './token-audit.js'
 import { getHistory } from './conversation.js'
 import type { KeyProfile } from './key-relay-contract.js'
 import { saveKey } from './key-store.js'
@@ -357,6 +358,49 @@ describe('direct lane turns (mock OpenAI server, fake relay)', () => {
     await callDirectStreaming('q', undefined, collect().callbacks, profile(), undefined, undefined, undefined, opts(second.relay))
     expect(second.state.settles).toEqual([null])
     expect(logTokenAudit.mock.calls[0]![0]).toMatchObject({ usageKind: 'estimated', usd: 0 })
+  })
+
+  describe('6.97.0: real usage on the row', () => {
+    it('the provider stated a cost: its tokens, its cost and the model, with usd as before', async () => {
+      const { relay } = fakeRelay()
+      handler = (_b, res) => sendText(res, ['Hi.'], [1500, 40, 0.0042])
+      await callDirectStreaming('SECRET PROMPT WORDS', undefined, collect().callbacks, profile(), undefined, undefined, undefined, opts(relay))
+      const entry = logTokenAudit.mock.calls[0]![0]
+      expect(entry).toMatchObject({ usd: 0.0042, runId: expect.any(String), realUsage: { inputTokens: 1500, outputTokens: 40, costUsd: 0.0042, resolvedModel: 'anthropic/claude-sonnet-5.5' } })
+      expect(buildTokenAuditRecord(entry)).toMatchObject({ usage_kind: 'provider_final', input_tokens: 1500, output_tokens: 40, cost_usd: 0.0042, resolved_model: 'anthropic/claude-sonnet-5.5', usd: 0.0042 })
+      expect(JSON.stringify(entry)).not.toContain('SECRET')
+    })
+    it('COS priced it: usd is COS\'s figure, and cost_usd stays out because the provider stated none', async () => {
+      const { relay } = fakeRelay()
+      handler = (_b, res) => sendText(res, ['Hi.'], [1_000_000, 100_000])
+      await callDirectStreaming('q', undefined, collect().callbacks, profile(), undefined, undefined, undefined, opts(relay))
+      const entry = logTokenAudit.mock.calls[0]![0]
+      expect(entry).toMatchObject({ usd: 3, realUsage: { inputTokens: 1_000_000, outputTokens: 100_000 } })
+      expect(entry.realUsage).not.toHaveProperty('costUsd')
+    })
+    it('no usage arrived: no real usage, and the row reads estimated', async () => {
+      const { relay } = fakeRelay()
+      handler = (_b, res) => sendText(res, ['Hi.'])
+      await callDirectStreaming('q', undefined, collect().callbacks, profile(), undefined, undefined, undefined, opts(relay))
+      const entry = logTokenAudit.mock.calls[0]![0]
+      expect(entry).not.toHaveProperty('realUsage')
+      expect(buildTokenAuditRecord(entry)).toMatchObject({ usage_kind: 'estimated' })
+    })
+    it('malformed usage: the same answer, and the row reads estimated, not measured', async () => {
+      const c = collect()
+      const { relay } = fakeRelay()
+      handler = (_b, res) => {
+        sseHead(res)
+        res.write(textDelta('Same answer.'))
+        res.write(data({ id: 'gen-1', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }))
+        res.write(data({ id: 'gen-1', choices: [], usage: { prompt_tokens: 'lots', completion_tokens: -3, cost: 'free' } }))
+        res.end('data: [DONE]\n\n')
+      }
+      await callDirectStreaming('q', undefined, c.callbacks, profile(), undefined, undefined, undefined, opts(relay))
+      expect(c.done()!.text).toBe('Same answer.')
+      expect(c.error()).toBeUndefined()
+      expect(buildTokenAuditRecord(logTokenAudit.mock.calls[0]![0])).toMatchObject({ usage_kind: 'estimated' })
+    })
   })
 
   it('reassembles fragmented tool calls and answers each with tool_call_id', async () => {

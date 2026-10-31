@@ -11,8 +11,9 @@ describe('token audit key-lane fields', () => {
     expect(JSON.stringify(buildTokenAuditRecord(laneA, at))).toBe(
       '{"ts":"2026-10-19T17:00:00.000Z","source":"g2-query","model":"sonnet","input_chars":400,"output_chars":80,"est_input_tokens":100,"est_output_tokens":20,"duration_ms":1200,"caller":"voice_query","usage_kind":"estimated","turn_id":"t1","session_id":"s1"}',
     )
+    // 6.97.0: `provider_final` now needs real numbers; asking for it with none reads estimated.
     expect(JSON.stringify(buildTokenAuditRecord({ source: 'g2-prewarm', model: 'opus', inputChars: 0, outputChars: 0, durationMs: 5, caller: 'prewarm', usageKind: 'provider_final' }, at))).toBe(
-      '{"ts":"2026-10-19T17:00:00.000Z","source":"g2-prewarm","model":"opus","input_chars":0,"output_chars":0,"est_input_tokens":1,"est_output_tokens":1,"duration_ms":5,"caller":"prewarm","usage_kind":"provider_final"}',
+      '{"ts":"2026-10-19T17:00:00.000Z","source":"g2-prewarm","model":"opus","input_chars":0,"output_chars":0,"est_input_tokens":1,"est_output_tokens":1,"duration_ms":5,"caller":"prewarm","usage_kind":"estimated"}',
     )
   })
 

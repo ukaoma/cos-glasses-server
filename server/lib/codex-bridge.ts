@@ -17,6 +17,7 @@ import {
   skipsCosServiceTier,
 } from './codex-extra-args.js'
 import { logTokenAudit } from './token-audit.js'
+import { CodexRunUsage } from './provider-usage.js'
 import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt } from './context-builder.js'
 import {
@@ -661,6 +662,8 @@ export async function callCodexStreaming(
   let terminalTextError: string | null = null
   let lastActivity = Date.now()
   const emittedBlocks = new Set<string>()
+  // 6.97.0: what this run used, for the audit row only.
+  const runUsage = new CodexRunUsage()
 
   function cleanupImages() {
     cleanupModelImageInputs(imageInputs)
@@ -811,6 +814,7 @@ export async function callCodexStreaming(
     const totalMs = Date.now() - startTime
     // Key lanes (P11): this turn's settled spend on the key. Keyed turns only.
     const keyUsdFields = keyTurnId ? { usd: Math.round(getSharedKeyMeter().turnSettledUsd(keyTurnId) * 1e6) / 1e6 } : {}
+    const realUsage = runUsage.finish(codexThreadId, engineSession?.codexThreadId)
     logTokenAudit({
       source: options?.lightweight ? 'g2-voice' : 'g2-query',
       model,
@@ -820,6 +824,9 @@ export async function callCodexStreaming(
       caller: options?.auditCaller ?? (options?.lightweight ? 'voice_query' : 'full_query'),
       ...keyAuditFields,
       ...keyUsdFields,
+      runId: run.runId,
+      ...(codexThreadId ? { cliSessionId: codexThreadId } : {}),
+      ...(realUsage ? { realUsage } : {}),
     })
     saveEngineSessionBestEffort()
 
@@ -948,6 +955,7 @@ export async function callCodexStreaming(
 
   let nativeSessionAnnounced = false
   function handleEvent(event: any) {
+    runUsage.observe(event)
     const nextThreadId = extractCodexThreadId(event)
     if (nextThreadId && nextThreadId !== codexThreadId) {
       codexThreadId = nextThreadId

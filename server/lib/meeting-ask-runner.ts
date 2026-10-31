@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { resolveProviderBinary } from './provider-binary.js';
 import { buildClaudeGistArgs, buildCodexGistArgs, parseClaudeGistOutput, parseCodexGistOutput, lensGistChildEnv, type ClaudeGistEffort } from './lens-gist-engines.js';
 import { logTokenAudit } from './token-audit.js';
+import { readOneShotUsage } from './provider-usage.js';
 import type { MeetingAskModel } from '../../shared/meeting-ask.js';
 /** 6.73.12: how one caller's run is bounded. Omitted fields keep Meeting Ask's budget, unchanged since before 6.73.12. */
 export interface MeetingAskRunBudget {
@@ -86,7 +87,9 @@ budget?: MeetingAskRunBudget): Promise<{
             finally {
                 logTokenAudit({ source: auditSource, caller: audit ? audit.caller + (unconfirmed ? ':child_exit_unconfirmed' : failure || code !== 0 ? ':' + (failure ?? 'provider_failed') : '') : auditSource.replace(/-/g, '_'), model: answerModel,
                     inputChars: stdin.length + (adapter ? args.join(' ').length : provider === 'claude' ? system.length : 0),
-                    outputChars: answerChars, durationMs: Date.now() - started });
+                    outputChars: answerChars, durationMs: Date.now() - started,
+                    // 6.97.0: read separately from the answer's parse, so a bad usage block changes neither.
+                    ...readOneShotUsage(provider, stdout) });
             }
         };
         const settle = (unconfirmed: boolean) => {

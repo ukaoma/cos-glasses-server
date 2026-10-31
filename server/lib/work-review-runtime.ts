@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { noteWorkReviewJob } from './job-audit-caller.js'
 import type { MeetingDetail } from './meeting-store.js'
 import type { QueryJobSnapshot } from './query-job-types.js'
 import { WorkReviewError, WorkReviewStore, parseMeetingDescriptor, publicReview, reviewHash,
@@ -143,6 +144,7 @@ export class WorkReviewRuntime {
         const request = { clientJobId: row.clientJobId, generation: 1, query: row.prompt, model: row.model,
           messageEra: row.messageEra, activityToolMode: 'status', cursorExecutionMode: 'ask',
           ...(row.provider === 'claude' ? { dispatch: { restricted: true, tools: ['Read','Grep','Glob'] } } : {}) }
+        noteWorkReviewJob(row.clientJobId)
         job = (await this.deps.jobs.submit(request)).job
       }
       if (!job) {

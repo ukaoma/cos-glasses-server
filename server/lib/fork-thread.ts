@@ -89,6 +89,8 @@ import { PROVIDER_AUTH_RE, PROVIDER_OVERFLOW_RE, PROVIDER_QUOTA_RE } from './pro
 import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnavailable, releaseCursorSpawnOnExit } from './cursor-spawn-env.js'
 import { anyKeyedSessions, isKeyedSession } from './keyed-sessions.js'
 import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
+import { SideRunTap } from './provider-usage.js'
+import { logTokenAudit, type TokenAuditEntry } from './token-audit.js'
 
 /**
  * Providers that can be forked.
@@ -496,6 +498,8 @@ export interface ForkDeps {
    * always supply it.
    */
   sourceWatermark?: (provider: ForkProvider, nativeThreadId: string) => string | null
+  /** 6.97.0: where the run's audit row goes. Only production wiring sets it, so no test writes a real ledger. */
+  auditRun?: (entry: TokenAuditEntry) => void
   /**
    * Argv builder. Optional, defaults to the real one.
    *
@@ -793,8 +797,13 @@ async function run(request: ForkRequest, deps: ForkDeps, startedAt: number): Pro
   }
 
   let outcome: ForkResult
+  // 6.97.0: a passive reader, wired after the run's own listeners, for one audit row at the end.
+  const usageTap = deps.auditRun ? new SideRunTap(provider) : null
   try {
-    outcome = await driveChild({ child, deps, provider, sourceNativeThreadId, prompt, timeoutMs, startedAt })
+    const running = driveChild({ child, deps, provider, sourceNativeThreadId, prompt, timeoutMs, startedAt })
+    usageTap?.attach(child.stdout as any)
+    outcome = await running
+    auditForkRun(deps, usageTap, outcome, provider, prompt)
   } finally {
     // EVERY path: success, mismatch, non-zero exit, timeout, throw. A leaked entry
     // outlives the process and lets a RECYCLED pid inherit our self-ownership
@@ -1066,11 +1075,33 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
  * default here would be a placeholder that reports `unverified` forever while
  * looking wired.
  */
+/** One row for a fork that reached an end and names its new thread. Never changes the fork's outcome. */
+function auditForkRun(deps: ForkDeps, tap: SideRunTap | null, outcome: ForkResult, provider: ForkProvider, prompt: string): void {
+  try {
+    if (!tap || !deps.auditRun) return
+    const realUsage = tap.finish()
+    if (!outcome.newNativeThreadId || (!outcome.ok && !tap.sawEnd)) return
+    deps.auditRun({
+      source: 'g2-fork',
+      caller: outcome.ok ? 'fork_thread' : `fork_thread:${outcome.reason}`,
+      model: provider,
+      inputChars: prompt.length,
+      outputChars: tap.outputChars,
+      durationMs: outcome.durationMs,
+      cliSessionId: outcome.newNativeThreadId,
+      ...(realUsage ? { realUsage } : {}),
+    })
+  } catch {
+    // The audit never changes a fork's outcome.
+  }
+}
+
 export function realForkDeps(
   sourceWatermark?: (provider: ForkProvider, nativeThreadId: string) => string | null,
 ): ForkDeps {
   return {
     now: () => Date.now(),
+    auditRun: entry => logTokenAudit(entry),
     resolveBinary: provider => resolveProviderBinary(provider),
     spawn: request => {
       // 6.62.0 (plan 3.4): the Cursor fork's `--model` must not rewrite the CLI default.

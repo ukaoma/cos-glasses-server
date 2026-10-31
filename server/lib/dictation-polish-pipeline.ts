@@ -3,7 +3,7 @@ import { applyNegativeRules } from './hallucination-filter.js'
 import { applyCorrections } from './whisper-local.js'
 import { applyFuzzyCorrections } from './fuzzy-correct.js'
 import { getAllSpeakerNames } from './speaker-embeddings.js'
-import { autoCleanDictation, AUTOCLEAN_MAX_CHARS } from './dictation-clean.js'
+import { autoCleanDictation, AUTOCLEAN_MAX_CHARS, buildDictationPolishPrompt, DICTATION_POLISH_SYSTEM_PROMPTS } from './dictation-clean.js'
 import { dictationPolishPromptVersion, styleAndRegisterApply, type DictationPolishPromptVersion } from './dictation-polish-options.js'
 import { fillerPassEnabled, stripFillersIfEnglish } from './dictation-fillers.js'
 import { polishBudgetExhausted, recordPolishCall, type PolishBucket } from './dictation-polish-budget.js'
@@ -301,6 +301,16 @@ export async function polishOutboundDictation(
   // 6.79.2: a warm process started at key press answers without the CLI's start-up cost.
   const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null
   let prewarm: PrewarmOutcome | undefined = opts.prewarmToken ? 'missed' : undefined
+  // 6.97.0: the row counts what the model was sent, not just the words dictated as 6.96.4 did.
+  // Luna runs through Cursor, whose path has no system prompt. The prompt itself is unchanged.
+  const auditInputChars = () => {
+    try {
+      const system = model === 'luna-5.6-fast' ? 0 : DICTATION_POLISH_SYSTEM_PROMPTS[promptVersion].length
+      return system + buildDictationPolishPrompt(cleaned, getVocabulary(), promptVersion, customInstructions, { learnedStyle: style.lines, register }).length
+    } catch {
+      return cleaned.length
+    }
+  }
   // 6.92.0 QA S1: the model time of an abort is stamped when the abort happens, not in the catch,
   // which runs only after the provider process is terminated (up to 4 s on the cold path).
   let abortedAt: number | null = null
@@ -326,7 +336,7 @@ export async function polishOutboundDictation(
     breakers.slow.recordSuccess()
     const guarded = guardPolishAnswer(cleaned, polished, opts.bucket, register, canaried)
     logTokenAudit({
-      source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: polished.length,
+      source: 'g2-dictation-autoclean', model, inputChars: auditInputChars(), outputChars: polished.length,
       durationMs: Date.now() - startedAt, caller: `dictation_autoclean_${opts.bucket}`,
       polishInstructions: { on: Boolean(customInstructions), hash: instructionsHash },
       // 6.91.0: codes and a hash only, never the app name or a word.
@@ -334,6 +344,8 @@ export async function polishOutboundDictation(
       ...(canaried ? { polishRegister: register } : {}),
       ...(used.polishPrompt ? { polishPrompt: used.polishPrompt } : {}),
       polishOutcome: guarded.outcome, ...(guarded.guard ? { polishGuard: guarded.guard } : {}),
+      // Real numbers from a warm result. The cold path prints plain text, so its row stays estimated.
+      ...warmEntry?.usage,
     })
     return {
       text: guarded.text, ...(prewarm ? { prewarm } : {}),
@@ -349,7 +361,7 @@ export async function polishOutboundDictation(
       const durationMs = (abortedAt ?? Date.now()) - startedAt
       if (durationMs >= SLOW_ABORT_MIN_MODEL_MS) breakers.slow.recordFailure()
       logTokenAudit({
-        source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: 0,
+        source: 'g2-dictation-autoclean', model, inputChars: auditInputChars(), outputChars: 0,
         durationMs, caller: `dictation_autoclean_${opts.bucket}`,
         // Key order differs from the answered row's on purpose: each gate anchor matches one row.
         polishInstructions: { hash: instructionsHash, on: Boolean(customInstructions) },
@@ -357,6 +369,7 @@ export async function polishOutboundDictation(
         ...(canaried ? { polishRegister: register } : {}),
         ...(used.polishPrompt ? { polishPrompt: used.polishPrompt } : {}),
         polishOutcome: 'aborted',
+        ...warmEntry?.usage,
       })
       console.warn('[prompt-draft] auto-clean aborted by the client (glossary-only)')
     } else {

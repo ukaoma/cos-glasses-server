@@ -223,6 +223,26 @@ describe('public durable query runtime', () => {
     await runtime.shutdownQueryJobRuntime('test_shutdown')
   })
 
+  it('6.97.0: a dispatched task and a meeting review get their own audit caller; a phone job has none', async () => {
+    const runtime = await import('./query-job-runtime.js')
+    const { noteWorkReviewJob } = await import('./job-audit-caller.js')
+    await runtime.initQueryJobRuntime()
+    const era = (await runtime.preparePublicDurableQueryAdmission({ clientJobId: randomUUID(), generation: 1, query: 'x', sessionId: 'runtime-session', model: 'sonnet' }) as any).messageEra
+    const base = { generation: 1, sessionId: 'runtime-session', model: 'sonnet', messageEra: era, activityToolMode: 'status', attachmentIds: [], attachmentRefs: [] }
+    const task = await runtime.queryJobCoordinator.submit({ ...base, clientJobId: randomUUID(), query: 'do the task', origin: { kind: 'task', id: 'abcdefabcdef' }, dispatch: { restricted: true, tools: ['Read'] } } as any)
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(task.job.jobId))
+    const reviewId = randomUUID()
+    noteWorkReviewJob(reviewId)
+    const review = await runtime.queryJobCoordinator.submit({ ...base, clientJobId: reviewId, query: 'review the meeting' } as any)
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(review.job.jobId))
+    const phone = await runtime.queryJobCoordinator.submit({ ...base, clientJobId: randomUUID(), query: 'hello' } as any)
+    await waitForCompleted(() => runtime.queryJobCoordinator.getSnapshot(phone.job.jobId))
+    expect(mocks.callModelStreaming.mock.calls[0][7]).toMatchObject({ auditCaller: 'dispatch_task' })
+    expect(mocks.callModelStreaming.mock.calls[1][7]).toMatchObject({ auditCaller: 'work_review' })
+    expect(mocks.callModelStreaming.mock.calls[2][7]).not.toHaveProperty('auditCaller')
+    await runtime.shutdownQueryJobRuntime('test_shutdown')
+  })
+
   it('6.58.2: a New session carries its name to the provider, and the session it names mid-run lands on the job', async () => {
     const SID = '8f7a53b9-b478-4d88-88e4-4a915b256da5'
     mocks.callModelStreaming.mockImplementationOnce(async (

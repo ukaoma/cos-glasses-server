@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveProviderBinary } from './provider-binary.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
+import { ClaudeRunUsage, type EngineUsage } from './provider-usage.js'
 import {
   buildDictationPolishPrompt, claudePolishArgs, DICTATION_POLISH_SYSTEM_PROMPTS, dictationChildEnv, dictationPolishPromptVersion,
   type DictationPolishPromptVersion, type DictationPromptExtras,
@@ -42,6 +43,8 @@ interface WarmPolish {
   timer: NodeJS.Timeout
   onResult: ((event: any) => void) | null
   onExit: (() => void) | null
+  /** 6.97.0: what the one message used, for the audit row. Read by the caller after the call. */
+  usage?: EngineUsage
 }
 
 /** Unclaimed warm processes, by token. */
@@ -178,6 +181,8 @@ export async function runWarmPolish(
     const abort = () => finish(new Error('Auto-clean aborted'))
     const timer = setTimeout(() => finish(new Error(`Auto-clean timed out (${timeoutMs}ms)`)), timeoutMs)
     entry.onResult = (event) => {
+      // Before the answer is judged, and unable to affect it: the audit reads its own copy.
+      noteWarmUsage(entry, event)
       if (event.subtype !== 'success' || event.is_error || typeof event.result !== 'string') {
         return finish(new Error('Warm polish returned an unsuccessful result'))
       }
@@ -201,6 +206,17 @@ export async function runWarmPolish(
       finish(new Error('Auto-clean input failed'))
     }
   })
+}
+
+function noteWarmUsage(entry: WarmPolish, event: unknown): void {
+  try {
+    const run = new ClaudeRunUsage(false)
+    run.observe(event)
+    const realUsage = run.take()
+    entry.usage = { ...(realUsage ? { realUsage } : {}), ...(run.cliSessionId ? { cliSessionId: run.cliSessionId } : {}) }
+  } catch {
+    /* the audit row stays estimated */
+  }
 }
 
 /** The server is going away: a detached warm process would outlive it. */

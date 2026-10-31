@@ -57,6 +57,9 @@ export default defineConfig({
     env: {
       COS_DATA_DIR: isolatedDataDir,
       COS_PROFILE_PATH: join(isolatedDataDir, '.cos-profile.json'),
+      // 6.97.0: a row can now claim to be measured, so a test's made-up numbers must never reach a
+      // real ledger. Before this, tests that did not mock the audit appended to the home file.
+      COS_TOKEN_AUDIT_FILE: join(isolatedDataDir, 'token-audit.jsonl'),
       // 6.61.0: no test may spawn the real Nemotron CLI from ~/.cos-glasses/bin.
       // Tests that exercise Nemotron pass their own env and a fake runner.
       COS_DIARIZER: 'embedding',

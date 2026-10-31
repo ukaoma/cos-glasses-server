@@ -27,6 +27,7 @@ import { resolveProviderBinary } from './provider-binary.js'
 import { getOllamaCatalog, ollamaFetch, resolveOllamaOrigin } from './ollama-catalog.js'
 import { PROVIDER_QUOTA_RE } from './provider-proof.js'
 import { logTokenAudit } from './token-audit.js'
+import { normalizeRealUsage, readOneShotUsage, type EngineUsage } from './provider-usage.js'
 
 /**
  * The provider itself said its plan, session, rate or capacity limit is spent. Raised only
@@ -341,10 +342,14 @@ async function runCli(
   prompt: string,
   opts: LensGistRunOptions,
   parse: (stdout: string) => LensGistEngineRun,
+  onStdout?: (provider: 'claude' | 'codex' | 'cursor', stdout: string) => void,
 ): Promise<LensGistEngineRun> {
   const binary = binaryFor(provider)
   const result = await withScratchWorkspace(workspace =>
     runProcess(binary, args(workspace), { stdin: prompt, cwd: workspace, timeoutMs: opts.timeoutMs, label: provider, cursorIsolation: provider === 'cursor', maxOutputTokens: opts.maxOutputTokens, signal: opts.signal }))
+  // 6.97.0: its own read of the output for the audit, before the answer's parser and independent of
+  // it, so a call that failed after using tokens still reports them.
+  onStdout?.(provider, result.stdout)
   const providerText = `${result.stdout}\n${result.stderr}`
   if (result.code !== 0) {
     // Codex reports its failure as a JSON event AND a non-zero exit; the event says why.
@@ -400,14 +405,14 @@ async function runOllama(model: string, prompt: string, opts: LensGistRunOptions
   }
 }
 
-function dispatch(engine: LensGistEngineName, model: string, prompt: string, opts: LensGistRunOptions): Promise<LensGistEngineRun> {
+function dispatch(engine: LensGistEngineName, model: string, prompt: string, opts: LensGistRunOptions, onStdout: (provider: 'claude' | 'codex' | 'cursor', stdout: string) => void): Promise<LensGistEngineRun> {
   switch (engine) {
     case 'claude':
-      return runCli('claude', () => buildClaudeGistArgs(model, opts.system), prompt, opts, parseClaudeGistOutput)
+      return runCli('claude', () => buildClaudeGistArgs(model, opts.system), prompt, opts, parseClaudeGistOutput, onStdout)
     case 'codex':
-      return runCli('codex', workspace => buildCodexGistArgs(model, workspace), prompt, opts, parseCodexGistOutput)
+      return runCli('codex', workspace => buildCodexGistArgs(model, workspace), prompt, opts, parseCodexGistOutput, onStdout)
     case 'cursor':
-      return runCli('cursor', workspace => buildCursorGistArgs(model, workspace), prompt, opts, parseCursorGistOutput)
+      return runCli('cursor', workspace => buildCursorGistArgs(model, workspace), prompt, opts, parseCursorGistOutput, onStdout)
     case 'ollama':
       return runOllama(model, prompt, opts)
   }
@@ -423,10 +428,16 @@ export async function runLensGistEngine(
   const started = Date.now()
   let outputChars = 0
   let resolvedModel = model
+  let usage: EngineUsage = {}
   try {
-    const run = await dispatch(engine, model, prompt, opts)
+    const run = await dispatch(engine, model, prompt, opts, (provider, stdout) => { usage = readOneShotUsage(provider, stdout) })
     outputChars = run.text.length
     resolvedModel = run.model || model
+    // Ollama answers over HTTP, so it has no stdout to read; its reply already carries the counts.
+    if (engine === 'ollama') {
+      const realUsage = normalizeRealUsage({ inputTokens: run.usage?.inputTokens as number, outputTokens: run.usage?.outputTokens as number, resolvedModel: run.model })
+      if (realUsage) usage = { realUsage }
+    }
     return run
   } finally {
     logTokenAudit({
@@ -436,6 +447,7 @@ export async function runLensGistEngine(
       inputChars: prompt.length + opts.system.length,
       outputChars,
       durationMs: Date.now() - started,
+      ...usage,
     })
   }
 }

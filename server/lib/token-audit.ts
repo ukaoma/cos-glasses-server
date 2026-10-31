@@ -8,12 +8,17 @@ import { homedir } from 'node:os'
 
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
 import type { TokenAuditKeyFields } from './key-relay-contract.js'
+import { cleanProviderId, normalizeRealUsage, type RealUsage } from './provider-usage.js'
 
 // Shared JSONL file — same path as Python's llm_client.py uses
 // Uses COS_SCRIPTS_DIR when available (server mode), falls back to user home
-const AUDIT_FILE = COS_SCRIPTS_DIR
-  ? resolve(COS_SCRIPTS_DIR, '.cos_token_audit.jsonl')
-  : resolve(homedir(), '.cos-glasses', 'token-audit.jsonl')
+// 6.97.0: COS_TOKEN_AUDIT_FILE is set only by the test config, so no test writes a made-up row to a
+// real ledger now that a row can claim to be measured.
+const AUDIT_FILE = process.env.COS_TOKEN_AUDIT_FILE
+  ? resolve(process.env.COS_TOKEN_AUDIT_FILE)
+  : COS_SCRIPTS_DIR
+    ? resolve(COS_SCRIPTS_DIR, '.cos_token_audit.jsonl')
+    : resolve(homedir(), '.cos-glasses', 'token-audit.jsonl')
 
 // Rough char-to-token ratio (1 token ~ 4 chars for English)
 const CHARS_PER_TOKEN = 4
@@ -33,6 +38,13 @@ export interface TokenAuditEntry extends TokenAuditKeyFields {
   runId?: string
   sessionId?: string
   clientJobId?: string
+  /** The provider's own session id: Claude's session, Codex's thread, Cursor's chat. `sessionId` is COS's. */
+  cliSessionId?: string
+  /**
+   * 6.97.0: what the provider reported. The row says `provider_final` only when these are real
+   * numbers (`normalizeRealUsage`); `usageKind` alone cannot make it say so.
+   */
+  realUsage?: RealUsage
   usageKind?: 'provider_final' | 'estimated'
   /** 6.85.0, dictation polish only: whether the user's polish instructions were in the prompt, and their hash. */
   polishInstructions?: { on: boolean; hash: string }
@@ -56,6 +68,8 @@ export interface TokenAuditEntry extends TokenAuditKeyFields {
  * (subscription) row is byte-identical to 6.79.0. Callers set them only on keyed turns.
  */
 export function buildTokenAuditRecord(entry: TokenAuditEntry, now: Date = new Date()): Record<string, unknown> {
+  const real = normalizeRealUsage(entry.realUsage)
+  const cliSessionId = cleanProviderId(entry.cliSessionId)
   return {
     ts: now.toISOString(),
     source: entry.source,
@@ -66,7 +80,7 @@ export function buildTokenAuditRecord(entry: TokenAuditEntry, now: Date = new Da
     est_output_tokens: estimateTokens(entry.outputChars),
     duration_ms: entry.durationMs,
     caller: entry.caller,
-    usage_kind: entry.usageKind ?? 'estimated',
+    usage_kind: real ? 'provider_final' : 'estimated',
     ...(entry.turnId ? { turn_id: entry.turnId } : {}),
     ...(entry.runId ? { run_id: entry.runId } : {}),
     ...(entry.sessionId ? { session_id: entry.sessionId } : {}),
@@ -91,12 +105,25 @@ export function buildTokenAuditRecord(entry: TokenAuditEntry, now: Date = new Da
     ...(entry.polishGuard ? { polish_guard: entry.polishGuard } : {}),
     // 6.92.0: set only by the prompt-edit caller.
     ...(entry.promptEditOutcome ? { prompt_edit_outcome: entry.promptEditOutcome } : {}),
+    // 6.97.0: last, and only when set, so a row without them is byte-identical to 6.96.4. Numbers and
+    // ids only. COS Control reads these names. input_tokens excludes cache reads and writes on every
+    // provider, so the four counts stay separate; cache_write_1h_tokens is part of cache_write_tokens.
+    ...(cliSessionId ? { cli_session_id: cliSessionId } : {}),
+    ...(real ? {
+      input_tokens: real.inputTokens,
+      output_tokens: real.outputTokens,
+      ...(real.cacheReadTokens !== undefined ? { cache_read_tokens: real.cacheReadTokens } : {}),
+      ...(real.cacheWriteTokens !== undefined ? { cache_write_tokens: real.cacheWriteTokens } : {}),
+      ...(real.cacheWrite1hTokens !== undefined ? { cache_write_1h_tokens: real.cacheWrite1hTokens } : {}),
+      ...(real.costUsd !== undefined ? { cost_usd: real.costUsd } : {}),
+      ...(real.resolvedModel ? { resolved_model: real.resolvedModel } : {}),
+    } : {}),
   }
 }
 
 export function logTokenAudit(entry: TokenAuditEntry): void {
-  const record = buildTokenAuditRecord(entry)
   try {
+    const record = buildTokenAuditRecord(entry)
     appendFileSync(AUDIT_FILE, JSON.stringify(record) + '\n', { encoding: 'utf8', mode: 0o600 })
     chmodSync(AUDIT_FILE, 0o600)
   } catch {

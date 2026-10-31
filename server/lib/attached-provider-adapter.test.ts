@@ -49,6 +49,7 @@ import {
   buildAttachedEnv,
   classifyStderr,
   deliverAttachedTurn,
+  realAttachedTurnDeps,
   extractNativeIdsFromLine,
   isKnownStaleShimPath,
   providerBinarySpec,
@@ -1808,5 +1809,69 @@ describe('6.62.0 /qa (W6): an isolation refusal is named, and nothing was delive
     expect(result).toMatchObject({ reason: 'spawn_failed', delivery: 'not_attempted', detail: 'cursor_isolation_unavailable' })
     const other = harness({ spawn: () => { throw new Error('ENOENT') } })
     expect(expectFailure(await deliver(other, { provider: 'cursor' })).detail).toBe('threw')
+  })
+})
+
+describe('6.97.0: one audit row for an attached run, by a passive reader', () => {
+  const SINCE = { 'claude-opus-5': { inputTokens: 3, outputTokens: 9, cacheReadInputTokens: 5000, cacheCreationInputTokens: 40, costUSD: 0.0123 } }
+  const resultLine = (sessionId: string, over: Record<string, unknown> = {}) => `${JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, result: 'SECRET ANSWER', session_id: sessionId, uuid: 'attached-1',
+    usage: { input_tokens: 3, output_tokens: 9, cache_read_input_tokens: 5000, cache_creation_input_tokens: 40 },
+    modelUsage: { 'claude-opus-5': { inputTokens: 300, outputTokens: 900, costUSD: 9.99 } },
+    model_usage_since_last_result: SINCE, total_cost_usd: 9.99, ...over,
+  })}\n`
+  const withAudit = (script: (child: FakeChild) => void) => {
+    const rows: Record<string, any>[] = []
+    const ctx = harness({ script })
+    ctx.deps.auditRun = entry => { rows.push(entry as Record<string, any>) }
+    return { ctx, rows }
+  }
+
+  it('a resumed Claude turn: this run\'s usage, never the session totals on the same line', async () => {
+    const { ctx, rows } = withAudit(child => { child.emitStdout(claudeLine(TARGET)); child.emitStdout(resultLine(TARGET)); child.close(0) })
+    const result = await deliver(ctx)
+    expect(result.ok).toBe(true)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      source: 'g2-attached', caller: 'attached_turn', model: 'claude', inputChars: PROMPT.length, outputChars: 'SECRET ANSWER'.length, cliSessionId: TARGET,
+      realUsage: { inputTokens: 3, outputTokens: 9, cacheReadTokens: 5000, cacheWriteTokens: 40, costUsd: 0.0123, resolvedModel: 'claude-opus-5' },
+    })
+    expect(JSON.stringify(rows)).not.toContain('SECRET')
+    expect(JSON.stringify(rows)).not.toContain(PROMPT)
+  })
+  it('malformed usage: the same result, and a row that stays estimated', async () => {
+    const script = (bad: boolean) => (child: FakeChild) => {
+      child.emitStdout(claudeLine(TARGET))
+      child.emitStdout(resultLine(TARGET, bad ? { usage: 'x', modelUsage: 7, model_usage_since_last_result: [], total_cost_usd: 'free' } : {}))
+      child.close(0)
+    }
+    const good = await deliver(withAudit(script(false)).ctx)
+    const { ctx, rows } = withAudit(script(true))
+    expect(await deliver(ctx)).toEqual(good)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).not.toHaveProperty('realUsage')
+    expect(rows[0]).toMatchObject({ caller: 'attached_turn', cliSessionId: TARGET })
+  })
+  it('an audit that throws never changes the outcome', async () => {
+    const ctx = harness({ script: succeedWith(TARGET) })
+    ctx.deps.auditRun = () => { throw new Error('audit broke') }
+    const result = await deliver(ctx)
+    expect(result.ok).toBe(true)
+  })
+  it('a Continue that ended with no end event writes no row', async () => {
+    const { ctx, rows } = withAudit(child => { child.emitStdout(claudeLine(TARGET)); child.close(1) })
+    const result = await deliver(ctx)
+    expect(result.ok).toBe(false)
+    expect(rows).toHaveLength(0)
+  })
+  it('a failed run that did write a result is counted under its reason', async () => {
+    const { ctx, rows } = withAudit(child => { child.emitStdout(claudeLine(TARGET)); child.emitStdout(resultLine(TARGET)); child.close(1) })
+    const result = expectFailure(await deliver(ctx))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ caller: `attached_turn:${result.reason}`, realUsage: { inputTokens: 3 } })
+  })
+  it('production wiring writes rows; a test harness without it never does', () => {
+    expect(typeof realAttachedTurnDeps(() => ({ attachable: true, reason: null }) as any).auditRun).toBe('function')
+    expect(harness().deps.auditRun).toBeUndefined()
   })
 })

@@ -6,6 +6,7 @@ import { WorkReviewRuntime, proposeReviewTaskLinks, createOptionalWorkReviewRunt
 import { WorkReviewStore, parseMeetingDescriptor } from './work-review-store.js'
 import type { MeetingDetail } from './meeting-store.js'
 import type { QueryJobSnapshot } from './query-job-types.js'
+import { jobAuditCaller } from './job-audit-caller.js'
 const roots: string[] = []; const runtimes: WorkReviewRuntime[] = []
 afterEach(async () => { await Promise.all(runtimes.splice(0).map(r => r.close())); roots.splice(0).forEach(r => rmSync(r,{recursive:true,force:true})) })
 const descriptor = { domain: 'quilt', month: '2026-09', filename: '2026-09-27_Review Café.md', recordId: 'ops:quilt:meeting-one' }
@@ -51,6 +52,16 @@ it('rejects unavailable provider, identity mismatch and stale expected revision 
   await expect(s.runtime.request({meeting:{...descriptor,recordId:'wrong'},model:'ollama'})).rejects.toThrow('meeting_identity_changed')
   await expect(s.runtime.request({meeting:descriptor,model:'ollama',expectedRevision:'a'.repeat(64)})).rejects.toThrow('meeting_revision_changed')
   expect(s.deps.store.list()).toEqual([]);expect(s.deps.jobs.submit).not.toHaveBeenCalled()
+})
+it('6.97.0: a review job is marked before it is submitted, on every provider, for its audit caller',async()=>{
+  for (const model of ['sonnet','ollama']) {
+    const s=setup();const seen:string[]=[]
+    const submit=s.deps.jobs.submit
+    s.deps.jobs.submit=vi.fn(async(r:any)=>{seen.push(jobAuditCaller(r));return (submit as any)(r)}) as any
+    await s.runtime.request({meeting:descriptor,model})
+    expect(seen).toEqual(['work_review'])
+  }
+  expect(jobAuditCaller({clientJobId:'not-a-review'})).toBe('')
 })
 it('enforces Claude read-only policy in trusted admission and never falls back model',async()=>{
   const s=setup();await s.runtime.request({meeting:descriptor,model:'sonnet'})

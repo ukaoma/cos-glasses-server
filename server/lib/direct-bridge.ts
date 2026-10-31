@@ -551,7 +551,8 @@ export async function callDirectStreaming(
 
   let fullText = ''
   let finalized = false
-  const usageTotals = { input: 0, output: 0, usd: 0, measured: false }
+  // statedUsd and allStated: what the provider itself said it cost. `usd` may be priced by COS instead.
+  const usageTotals = { input: 0, output: 0, usd: 0, measured: false, statedUsd: 0, allStated: true }
   const trail = (draft: JobTrailDraft) => {
     if (!callbacks.onTrail) return
     try { callbacks.onTrail(draft) } catch { /* observation only */ }
@@ -574,6 +575,13 @@ export async function callDirectStreaming(
       lane: 'direct',
       credentialKind: key.kind,
       usd: Math.round(usageTotals.usd * 1e6) / 1e6,
+      // 6.97.0: the tokens the provider reported, with its cost only when every call stated one.
+      ...(usageTotals.measured ? { realUsage: {
+        inputTokens: usageTotals.input,
+        outputTokens: usageTotals.output,
+        ...(usageTotals.allStated ? { costUsd: usageTotals.statedUsd } : {}),
+        resolvedModel: profile.model,
+      } } : {}),
     })
   }
 
@@ -745,6 +753,8 @@ export async function callDirectStreaming(
       usageTotals.output += parser.usage.output
       usageTotals.usd += usd
       usageTotals.measured = true
+      if (parser.usage.costUsd === undefined) usageTotals.allStated = false
+      else usageTotals.statedUsd += parser.usage.costUsd
       settle({
         input: parser.usage.input,
         output: parser.usage.output,

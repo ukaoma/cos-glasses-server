@@ -106,6 +106,8 @@ import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnava
 import type { PermissionAllowance } from './banned-permission-args.js'
 import { anyKeyedSessions, isKeyedSession } from './keyed-sessions.js'
 import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
+import { SideRunTap } from './provider-usage.js'
+import { logTokenAudit, type TokenAuditEntry } from './token-audit.js'
 import {
   continueAllowanceFor,
   validateContinuePlan,
@@ -333,6 +335,8 @@ export interface AttachedTurnDeps {
    * would not have performed.
    */
   preflight: () => AttachedPreflightVerdict
+  /** 6.97.0: where the run's audit row goes. Only production wiring sets it, so no test writes a real ledger. */
+  auditRun?: (entry: TokenAuditEntry) => void
   resolveBinary: (provider: AttachedProvider) => BinaryResolution
   spawn: (request: AttachedSpawnRequest) => AttachedChildProcess
   /** MUST be the measured kernel start. See the header. */
@@ -1013,12 +1017,39 @@ async function run(
     })
   }
 
+  // 6.97.0: a passive reader, wired after the run's own listeners, for one audit row at the end.
+  const usageTap = deps.auditRun ? new SideRunTap(provider) : null
   try {
-    return await driveChild({ child, pid, deps, provider, nativeThreadId, prompt, timeoutMs, startedAt, abortSignal: request.abortSignal })
+    const running = driveChild({ child, pid, deps, provider, nativeThreadId, prompt, timeoutMs, startedAt, abortSignal: request.abortSignal })
+    usageTap?.attach(child.stdout as any)
+    const result = await running
+    auditAttachedRun(deps, usageTap, result, provider, nativeThreadId, prompt)
+    return result
   } finally {
     // Every path: success, mismatch, non-zero exit, timeout, throw. A leaked
     // entry lets a recycled pid inherit our self-ownership claim.
     safeRelease(deps, pid)
+  }
+}
+
+/** One row for a run that reached an end: a verified exit, or a result the provider wrote before failing. */
+function auditAttachedRun(deps: AttachedTurnDeps, tap: SideRunTap | null, result: AttachedTurnResult, provider: AttachedProvider, nativeThreadId: string, prompt: string): void {
+  try {
+    if (!tap || !deps.auditRun) return
+    const realUsage = tap.finish()
+    if (!result.ok && !tap.sawEnd) return
+    deps.auditRun({
+      source: 'g2-attached',
+      caller: result.ok ? 'attached_turn' : `attached_turn:${result.reason}`,
+      model: provider,
+      inputChars: prompt.length,
+      outputChars: tap.outputChars,
+      durationMs: result.durationMs,
+      cliSessionId: result.returnedNativeId ?? nativeThreadId,
+      ...(realUsage ? { realUsage } : {}),
+    })
+  } catch {
+    // The audit never changes a turn's outcome.
   }
 }
 
@@ -1870,6 +1901,7 @@ export function realAttachedTurnDeps(preflight: () => AttachedPreflightVerdict):
   return {
     now: () => Date.now(),
     preflight,
+    auditRun: entry => logTokenAudit(entry),
     resolveBinary: provider => resolveProviderBinary(provider),
     spawn: request => {
       // 6.53.3: read BEFORE the spawn call, so every process of this turn starts at or

@@ -13,6 +13,7 @@ import { COS_SCRIPTS_DIR } from './python-bridge.js'
 import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { resolveProviderWorkDir } from './launch-dir.js'
 import { logTokenAudit } from './token-audit.js'
+import { ClaudeRunUsage } from './provider-usage.js'
 import { buildSystemPrompt, buildLightweightSystemPrompt, buildPrewarmSystemPrompt, getCachedContextInstant } from './context-builder.js'
 import { getHistory, addExchange, setExchangeAttachments, removeExchange, formatHistoryForPrompt, getOrCreateSession, isNewSession, markSessionNotified, getSessionModel, getSessionRaw, replaceLastExchangeWithSummary, type ModelPreference, type PromptReference } from './conversation.js'
 import { notifySessionStart, notifyExchange } from './telegram-notify.js'
@@ -263,6 +264,7 @@ export async function preWarmCLI(): Promise<void> {
     })
 
     let buffer = ''
+    const prewarmUsage = new ClaudeRunUsage(false)
 
     proc.stdout.on('data', (chunk: Buffer) => {
       buffer += chunk.toString()
@@ -274,6 +276,7 @@ export async function preWarmCLI(): Promise<void> {
         if (!trimmed) continue
         try {
           const event = JSON.parse(trimmed)
+          prewarmUsage.observe(event)
           if (event.type === 'result' && event.session_id && !claudeResultErrorMessage(event)) {
             preWarmedCliSessionId = event.session_id
             scheduleCliSessionSave()
@@ -287,6 +290,7 @@ export async function preWarmCLI(): Promise<void> {
     proc.on('close', () => {
       preWarmInProgress = false
       const elapsed = Date.now() - start
+      const prewarmRealUsage = prewarmUsage.take()
       logTokenAudit({
         source: 'g2-prewarm',
         model: DEFAULT_MODEL,
@@ -294,6 +298,8 @@ export async function preWarmCLI(): Promise<void> {
         outputChars: 50,
         durationMs: elapsed,
         caller: 'prewarm',
+        ...(prewarmRealUsage ? { realUsage: prewarmRealUsage } : {}),
+        ...(prewarmUsage.cliSessionId ? { cliSessionId: prewarmUsage.cliSessionId } : {}),
       })
       if (!preWarmedCliSessionId) {
         console.warn('[claude-bridge] CLI pre-warm completed but no session ID captured')
@@ -738,6 +744,9 @@ export async function callClaudeStreaming(
     effortLevel: resolvedEffort ?? getClaudeEffortLevel(),
     cliModelId: keyProfile ? keyProfile.model : resolveClaudeCliModelId(resolvedModel),
   })
+  // 6.97.0: what this run used, for the audit row only. --resume decides how its totals can be read.
+  const runUsage = new ClaudeRunUsage(!!existingCliSession)
+  let auditRowWritten = false
 
   // Ultracode is a CLI-only orchestration keyword; history/chat keeps the
   // original user text so the keyword never appears on the lens.
@@ -927,6 +936,7 @@ export async function callClaudeStreaming(
     const inputEstimate = systemPrompt.length + fullQuery.length + contextPrompt.length
     // Key lanes (P11): this turn's settled spend on the key. Keyed turns only.
     const keyUsdFields = keyTurnId ? { usd: Math.round(getSharedKeyMeter().turnSettledUsd(keyTurnId) * 1e6) / 1e6 } : {}
+    const realUsage = runUsage.take()
     logTokenAudit({
       source: options?.lightweight ? 'g2-voice' : 'g2-query',
       model: resolvedModel,
@@ -936,7 +946,11 @@ export async function callClaudeStreaming(
       caller: options?.auditCaller ?? (options?.lightweight ? 'voice_query' : 'full_query'),
       ...keyAuditFields,
       ...keyUsdFields,
+      runId: run.runId,
+      ...auditCliSession(),
+      ...(realUsage ? { realUsage } : {}),
     })
+    auditRowWritten = true
 
     finishClaudeRun(run.runId, {
       status: 'completed',
@@ -961,6 +975,33 @@ export async function callClaudeStreaming(
       markSessionNotified(sid)
     }
     notifyExchange(sid, query, text)
+  }
+
+  function auditCliSession(): { cliSessionId?: string } {
+    const cliSessionId = runUsage.cliSessionId ?? existingCliSession
+    return cliSessionId ? { cliSessionId } : {}
+  }
+
+  /**
+   * A run can finish on its first result while background subagents are still going; their usage is
+   * stated on a later result, after the row above was written. It gets one row of its own under the
+   * same run id, so each result counts once and none is lost. Zero chars: it carries only real usage.
+   */
+  function auditLateUsage() {
+    if (!auditRowWritten) return
+    const realUsage = runUsage.take()
+    if (!realUsage) return
+    logTokenAudit({
+      source: options?.lightweight ? 'g2-voice' : 'g2-query',
+      model: resolvedModel,
+      inputChars: 0,
+      outputChars: 0,
+      durationMs: Date.now() - startTime,
+      caller: `${options?.auditCaller ?? (options?.lightweight ? 'voice_query' : 'full_query')}:late_result`,
+      ...keyAuditFields, runId: run.runId,
+      ...auditCliSession(),
+      realUsage,
+    })
   }
 
   async function finalizeError(
@@ -1120,6 +1161,7 @@ export async function callClaudeStreaming(
 
       try {
         const event = JSON.parse(trimmed)
+        runUsage.observe(event)
 
         // 6.58.2: the first event that carries the session id (a hook or init line, before any
         // answer text) links the run and the job to it. At completion the result's id is
@@ -1274,6 +1316,11 @@ export async function callClaudeStreaming(
     keyTurn?.childClosed()
     if (steerReaper) clearTimeout(steerReaper)
     steerPort?.close()
+    // 6.97.0: nothing more can arrive. A last line with no newline is read here, once, for the audit.
+    if (buffer.trim()) {
+      try { runUsage.observe(JSON.parse(buffer.trim())) } catch { /* not JSON: handled below */ }
+    }
+    auditLateUsage()
     if (terminationRequested) return
     // Process any remaining buffer
     if (buffer.trim()) {
