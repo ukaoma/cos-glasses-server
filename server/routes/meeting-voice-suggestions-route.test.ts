@@ -24,6 +24,9 @@ let extracts = 0
 let live = false
 let effectiveView = false
 let finalizing = false
+/** While set, GET /speakers waits inside readVoiceDisplay, so a test can land a write during the await. */
+let holdDisplay: Promise<void> | null = null
+let displayReads = 0
 const dataHome = () => process.env.COS_DATA_DIR as string
 
 const axis = (i: number): number[] => { const v = new Array<number>(DIM).fill(0); v[i] = 1; return v }
@@ -105,6 +108,14 @@ async function startServer(options: { token?: boolean } = {}): Promise<void> {
     const actual = await vi.importActual<Record<string, unknown>>('../lib/mac-speaker-call-view.js')
     return { ...actual, isEffectiveMacSpeakerCallView: (view: unknown) => effectiveView || (actual.isEffectiveMacSpeakerCallView as (v: unknown) => boolean)(view) }
   })
+  vi.doMock('../lib/mac-voice-display.js', async () => {
+    const actual = await vi.importActual<typeof import('../lib/mac-voice-display.js')>('../lib/mac-voice-display.js')
+    return { ...actual, readVoiceDisplay: async (...args: Parameters<typeof actual.readVoiceDisplay>) => {
+      displayReads += 1
+      if (holdDisplay) await holdDisplay
+      return actual.readVoiceDisplay(...args)
+    } }
+  })
   const { MeetingStore } = await import('../lib/meeting-store.js')
   const { createMeetingRouter } = await import('./meeting.js')
   const { VoiceSuggestionRunner } = await import('../lib/mac-voice-suggestions.js')
@@ -140,15 +151,16 @@ async function startServer(options: { token?: boolean } = {}): Promise<void> {
   })
 }
 
-function call(method: 'GET' | 'POST', path: string, headers: Record<string, string> = {}): Promise<{ status: number; json: any }> {
+function call(method: 'GET' | 'POST', path: string, headers: Record<string, string> = {}, payload?: unknown): Promise<{ status: number; json: any }> {
   return new Promise((resolve, reject) => {
-    const req = request(`${baseUrl}${path}`, { method, headers }, res => {
+    const data = payload === undefined ? undefined : Buffer.from(JSON.stringify(payload))
+    const req = request(`${baseUrl}${path}`, { method, headers: { ...headers, ...(data ? { 'content-type': 'application/json', 'content-length': String(data.length) } : {}) } }, res => {
       let body = ''
       res.on('data', d => { body += d })
       res.on('end', () => resolve({ status: res.statusCode ?? 0, json: body ? JSON.parse(body) : null }))
     })
     req.on('error', reject)
-    req.end()
+    req.end(data)
   })
 }
 
@@ -184,6 +196,8 @@ beforeEach(async () => {
   live = false
   effectiveView = false
   finalizing = false
+  holdDisplay = null
+  displayReads = 0
   for (const stale of ['meeting-audio', 'speaker-shadow', 'voice-profiles.json']) rmSync(join(dataHome(), stale), { recursive: true, force: true })
   seedProfiles()
 })
@@ -194,6 +208,7 @@ afterEach(async () => {
   rmSync(root, { recursive: true, force: true })
   vi.doUnmock('../lib/profile.js')
   vi.doUnmock('../lib/mac-speaker-call-view.js')
+  vi.doUnmock('../lib/mac-voice-display.js')
 })
 
 describe('GET /speakers voiceDisplay', () => {
@@ -262,6 +277,47 @@ describe('GET /speakers voiceDisplay', () => {
     expect('voiceDisplay' in (await speakers()).json).toBe(false)
   })
 
+  it('a relabel landing during the wait cannot pair old rows with a new revision', async () => {
+    seedMacMeeting()
+    seedShadow([SHADOW_RECORD])
+    await startServer()
+    const before = (await speakers()).json.sourceRevision
+    let release = (): void => {}
+    holdDisplay = new Promise<void>(resolve => { release = resolve })
+    const reads = displayReads
+    const pending = speakers()
+    while (displayReads === reads) await new Promise(resolve => setTimeout(resolve, 2))
+
+    // A real rename, through the real route, while that read is parked inside its await.
+    holdDisplay = null
+    const renamed = await call('POST', `/api/meeting/${SESSION}/relabel`, {}, { from: 'Voice 2', to: 'Neva Sharpe', confirm: true })
+    expect(renamed.status).toBe(200)
+    const after = (await speakers()).json
+    expect(after.voices.map((v: any) => v.label)).not.toContain('Voice 2')
+    expect(after.sourceRevision).not.toBe(before)
+
+    release()
+    const stale = (await pending).json
+    expect(stale.voices.map((v: any) => v.label)).toContain('Voice 2')
+    expect(stale.sourceRevision).toBe(before)
+
+    // So the check a client makes with that view refuses it.
+    const refused = await call('POST', `/api/meeting/${SESSION}/relabel`, {}, { from: 'Voice 3', to: 'Neva Sharpe', confirm: true, expectedRevision: stale.sourceRevision })
+    expect(refused.status).toBe(409)
+    expect(refused.json.reason).toBe('record_source_mismatch')
+  })
+
+  it('a meeting that is not a Mac capture never waits on the shadow store', async () => {
+    seedMacMeeting({ sessionId: G2_SESSION })
+    await startServer()
+    const reads = displayReads
+    const res = await speakers(G2_SESSION)
+    expect(res.status).toBe(200)
+    expect(displayReads).toBe(reads)
+    expect('voiceDisplay' in res.json).toBe(false)
+    expect((await speakers(G2_SESSION)).json.sourceRevision).toBe(res.json.sourceRevision)
+  })
+
   it('reading it starts no voice job and writes nothing', async () => {
     seedMacMeeting()
     seedShadow([SHADOW_RECORD])
@@ -276,7 +332,7 @@ describe('GET /speakers voiceDisplay', () => {
 })
 
 describe('/voice-suggestions', () => {
-  it('needs the API token on both methods', async () => {
+  it('sits behind requireApiToken on both methods (this test mounts that gate itself; it does not boot index.ts)', async () => {
     seedMacMeeting()
     await startServer({ token: true })
     expect((await readState()).status).toBe(401)
@@ -287,6 +343,11 @@ describe('/voice-suggestions', () => {
     expect(ok.json.state).toBe('idle')
     const { isPublicApiRequest } = await import('../lib/api-auth.js')
     for (const method of ['GET', 'POST']) expect(isPublicApiRequest(method, `/meeting/${SESSION}/voice-suggestions`)).toBe(false)
+    // What the real server does is pinned as source, since this test cannot show it: the gate is mounted before the router.
+    const index = readFileSync(join(import.meta.dirname, '..', 'index.ts'), 'utf8')
+    const gate = index.indexOf("app.use('/api', requireApiToken(API_TOKEN")
+    expect(gate).toBeGreaterThan(-1)
+    expect(index.indexOf("app.use('/api', meetingRouter)")).toBeGreaterThan(gate)
   })
 
   it('only POST starts anything: GET answers idle, with the review\'s own revision and no extraction', async () => {
@@ -371,7 +432,11 @@ describe('/voice-suggestions', () => {
     expect(refused.json.sourceRevision.length).toBe(64)
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(extracts).toBe(0)
+    // Not sticky: GET does not repeat a refusal, during the recording or after it.
+    expect((await readState()).json).toMatchObject({ state: 'idle', sourceRevision: refused.json.sourceRevision })
+    expect((await readState()).json.reason).toBeUndefined()
     live = false
+    expect((await readState()).json.state).toBe('idle')
     expect((await click()).json.state).toBe('running')
     expect((await untilSettled()).state).toBe('done')
   })
@@ -387,14 +452,14 @@ describe('/voice-suggestions', () => {
     expect(extracts).toBe(0)
   })
 
-  it('a recording that starts mid-job ends it as refused, on GET', async () => {
+  it('a recording that starts mid-job ends it as failed with the reason, on GET', async () => {
     seedMacMeeting()
     await startServer()
     const started = extracts
     expect((await click()).json.state).toBe('running')
     live = true
     const out = await untilSettled()
-    expect(out).toMatchObject({ state: 'refused', reason: 'recording_active' })
+    expect(out).toMatchObject({ state: 'failed', reason: 'recording_active' })
     expect(out.suggestions).toBeUndefined()
     expect(extracts - started).toBeLessThan(12)
   })
@@ -424,8 +489,8 @@ describe('/voice-suggestions', () => {
     seedMacMeeting()
     effectiveView = true
     await startServer()
-    expect((await click()).json.state).toBe('running')
-    expect(await untilSettled()).toMatchObject({ state: 'refused', reason: 'derived_call_view' })
+    expect((await click()).json).toMatchObject({ state: 'refused', reason: 'derived_call_view' })
+    await new Promise(resolve => setTimeout(resolve, 20))
     expect(extracts).toBe(0)
   })
 
@@ -442,7 +507,7 @@ describe('/voice-suggestions', () => {
       const posted = await click(session)
       expect(posted.status).toBe(200)
       expect(posted.json).toMatchObject({ state: 'refused', reason: 'not_saved_mac_capture', sourceRevision: '' })
-      expect((await readState(session)).json).toMatchObject({ state: 'refused', reason: 'not_saved_mac_capture' })
+      expect((await readState(session)).json).toEqual({ state: 'idle', rule: { floor: 0.7, margin: 0.05 }, modelSpace: '192d', sourceRevision: '' })
     }
     expect(extracts).toBe(0)
   })
@@ -451,6 +516,63 @@ describe('/voice-suggestions', () => {
     seedMacMeeting({ sessionId: G2_SESSION })
     await startServer()
     expect((await click(G2_SESSION)).json).toMatchObject({ state: 'refused', reason: 'not_saved_mac_capture' })
+  })
+
+  it('a chunk renamed away from a voice stops being that voice\'s audio, through the real relabel route', async () => {
+    // Voice 3 holds four chunks of Theo and two of a stranger. Naming Theo's four leaves the stranger under Voice 3.
+    seedMacMeeting({ sidecar: doc => {
+      // The seed gives each voice three chunks. Voice 2's three become Voice 3's, making six at positions 3 to 8.
+      for (const c of (doc.chunks as any[]).slice(3, 6)) c.speaker = 'Voice 3'
+    } })
+    const audio = (raw: number, code: number) => writeFileSync(join(dataHome(), 'meeting-audio', SESSION, `chunk_${String(raw).padStart(4, '0')}.wav`), wav(6, code))
+    for (const raw of [6, 7]) audio(raw, CODE['Voice 4'])
+    for (const raw of [3, 4, 5, 8]) audio(raw, CODE['Voice 3'])
+    await startServer()
+
+    // Before the rename Voice 3's six reach Theo at exactly two thirds kept: the suggestion the bug would keep.
+    await click()
+    const first = await untilSettled()
+    expect(first.suggestions.find((s: any) => s.labels.includes('Voice 3'))).toMatchObject({ name: 'Theo Marsh', kept: 4, units: 6 })
+
+    const renamed = await call('POST', `/api/meeting/${SESSION}/relabel`, {}, { from: 'Voice 3', to: 'Theo Marsh', chunks: [3, 4, 5, 8], confirm: true })
+    expect(renamed.status).toBe(200)
+    // The route patched chunks[] and left the entries saying Voice 3: the state this guard exists for.
+    const doc = JSON.parse(readFileSync(join(root, MONTH, `${STEM}.g2-chunks.json`), 'utf8'))
+    expect(doc.chunks[3].speaker).toBe('Theo Marsh')
+    expect(doc.chunkEntries[3].chunk.speaker).toBe('Voice 3')
+
+    await click()
+    const second = await untilSettled()
+    expect(second.state).toBe('done')
+    expect(second.suggestions.flatMap((s: any) => s.labels)).not.toContain('Voice 3')
+    expect(second.unmatched).toContainEqual({ labels: ['Voice 3'], gate: 'below_rule' })
+  })
+
+  it('refuses when the two chunk lists cannot be lined up', async () => {
+    seedMacMeeting({ sidecar: doc => { (doc.chunks as unknown[]).pop() } })
+    await startServer()
+    expect((await click()).json).toMatchObject({ state: 'refused', reason: 'no_index_mapping' })
+    expect(extracts).toBe(0)
+  })
+
+  it('a deleted person stops being suggested: GET goes idle and the next click re-runs against the real store', async () => {
+    seedMacMeeting()
+    await startServer()
+    await click()
+    const done = await untilSettled()
+    expect(done.suggestions.map((s: any) => s.name)).toContain('Dana Reyes')
+    const count = extracts
+
+    const { removeSpeakerProfile } = await import('../lib/speaker-embeddings.js')
+    expect(removeSpeakerProfile('Dana Reyes').removedProfiles).toBe(1)
+
+    const idle = (await readState()).json
+    expect(idle.state).toBe('idle')
+    expect(idle.suggestions).toBeUndefined()
+    expect((await click()).json.state).toBe('running')
+    const again = await untilSettled()
+    expect(extracts).toBe(count + 12)
+    expect(again.suggestions.map((s: any) => s.name)).not.toContain('Dana Reyes')
   })
 
   it('refuses when the audio is gone', async () => {

@@ -2037,20 +2037,20 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
+    const meetingPath = operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath
     const { callView, review } = speakerReviewFor({
       sessionId,
       sidecarPath,
-      meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath,
+      meetingPath,
       baseJSON: baseJSON!,
       sidecar,
       chunks,
       phrasesPerVoice: Math.max(1, Math.min(6, Number(req.query.phrases) || 3)),
     })
-    // 6.96.3: display grouping from this Mac's speaker shadow log, read at request time. No shadow record,
-    // no field. A view that already groups the words stands on its own, so the two are never layered.
-    const voiceDisplay = isEffectiveMacSpeakerCallView(callView) ? null : await readVoiceDisplay(sessionId, review.voices.map(v => v.label))
-    res.set('Cache-Control', 'private, no-store')
-    res.json({
+    // The rows and the revision that vouches for them are read in one synchronous stretch, BEFORE the await below. A
+    // POST /relabel landing during the await then makes this revision old too, and `expectedRevision` refuses the stale
+    // view. Hashing after the await would pair old rows with a new revision, and that check would pass.
+    const body = {
       sessionId,
       title,
       domain,
@@ -2058,22 +2058,26 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       ...identity,
       speakerPolicy: readSpeakerPolicy(sessionId),
       reviewIdentityVersion: 1,
-      sourceRevision: reviewRevision(operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath, sidecarPath),
+      sourceRevision: reviewRevision(meetingPath, sidecarPath),
       ...(operations?.mergedScribeConflict?.length ? { mutable: false, identityConflict: operations.mergedScribeConflict } : {}),
       ...(saved ? { durationMin: saved.durationMin } : {}),
       ...review,
       ...(isEffectiveMacSpeakerCallView(callView) || callView.metadata.humanAnnotationInvalid ? { mutable: false, mutationBlockedReason: callView.metadata.humanAnnotationInvalid ? 'human_annotation_invalid' : 'derived_call_view_requires_scoped_action' } : {}),
       speakerCallView: callView.metadata,
-      ...intervalReviewFields({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, baseJSON, callView),
-      ...(() => { try { return { groupScopes: callGroupScopes({ sidecarPath, meetingPath: operations?.meetingPath ?? direct?.meetingPath ?? saved!.filepath }, baseJSON, callView).map(publicCallScope) } } catch { return { groupScopes: [] } } })(),
-      ...(voiceDisplay ? { voiceDisplay } : {}),
-    })
+      ...intervalReviewFields({ sidecarPath, meetingPath }, baseJSON, callView),
+      ...(() => { try { return { groupScopes: callGroupScopes({ sidecarPath, meetingPath }, baseJSON, callView).map(publicCallScope) } } catch { return { groupScopes: [] } } })(),
+    }
+    // 6.96.3: display grouping from this Mac's speaker shadow log, read at request time. No shadow record, no field.
+    // Mac captures only: anything else never yields here. A view that already groups the words stands on its own.
+    const voiceDisplay = MAC_CAPTURE_ID.test(sessionId) && !isEffectiveMacSpeakerCallView(callView) ? await readVoiceDisplay(sessionId, review.voices.map(v => v.label)) : null
+    res.set('Cache-Control', 'private, no-store')
+    res.json(voiceDisplay ? { ...body, voiceDisplay } : body)
   })
 
   // ── Voice suggestions (6.96.3, lib/mac-voice-suggestions.ts) ───────────────────
-  // POST is the ONLY thing that starts a job. Both answer one JSON state, so a refusal is 200
-  // with `state: 'refused'` and a reason code; only a malformed id is a 4xx. Read-only: nothing
-  // here or in the job writes a profile, label, sidecar or vector file.
+  // POST is the ONLY thing that starts a job. Both answer one JSON state; only a malformed id is a 4xx.
+  // `refused` comes from POST and is not remembered, so GET reads idle, running, done or failed.
+  // Read-only: nothing here or in the job writes a profile, label, sidecar or vector file.
   function voiceSuggestionSource(sessionId: string): { refused: string } | { sidecarPath: string; meetingPath: string } {
     if (assertVoiceEvidenceSource([sessionId]) || !MAC_CAPTURE_ID.test(sessionId)) return { refused: 'not_saved_mac_capture' }
     const operations = cosOperationsMeetingsConfigured() ? findCosOperationsMeetingBySessionId(sessionId) : null
@@ -2091,8 +2095,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     const running = voiceSuggestions.running(sessionId)
     if (running) { res.json(running); return }
     const source = voiceSuggestionSource(sessionId)
-    if ('refused' in source) { res.json(voiceSuggestions.refusal(source.refused, '')); return }
-    res.json(voiceSuggestions.read(sessionId, reviewRevision(source.meetingPath, source.sidecarPath)))
+    res.json(voiceSuggestions.read(sessionId, 'refused' in source ? '' : reviewRevision(source.meetingPath, source.sidecarPath)))
   }
 
   const startVoiceSuggestions: RequestHandler = (req, res) => {
@@ -2112,6 +2115,12 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.json(voiceSuggestions.refusal('sidecar_unreadable', ''))
       return
     }
+    const sourceRevision = reviewRevision(meetingPath, sidecarPath)
+    // Its labels are not the labels on the audio's turns, so no unit could be chosen honestly.
+    const view = readMacSpeakerCallView(sidecarPath, baseJSON, meetingPath)
+    if (isEffectiveMacSpeakerCallView(view) || view.metadata.humanAnnotationInvalid) { res.json(voiceSuggestions.refusal('derived_call_view', sourceRevision)); return }
+    const entries = voiceSidecarEntries(sidecar)
+    if (!entries) { res.json(voiceSuggestions.refusal('no_index_mapping', sourceRevision)); return }
     const block = (): VoiceSuggestionBlock | null => {
       if (captureActive() || voiceSuggestionRecordingLease()) return 'recording_active'
       if (!maintenanceAdmissionsOpen()) return 'maintenance'
@@ -2120,16 +2129,14 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     }
     res.json(voiceSuggestions.start({
       sessionId,
-      sourceRevision: reviewRevision(meetingPath, sidecarPath),
-      entries: voiceSidecarEntries(sidecar),
+      sourceRevision,
+      entries,
       block,
       pause: () => voiceSuggestionPauseLease(),
       loadScopes: async () => {
-        const { callView, review } = speakerReviewFor({ sessionId, sidecarPath, meetingPath, baseJSON, sidecar, chunks: sidecar.chunks, phrasesPerVoice: 1 })
-        // A derived view's labels are not the labels on the audio's turns, so no unit could be chosen honestly.
-        if (isEffectiveMacSpeakerCallView(callView) || callView.metadata.humanAnnotationInvalid) return { refused: 'derived_call_view' }
+        const { review } = speakerReviewFor({ sessionId, sidecarPath, meetingPath, baseJSON, sidecar, chunks: sidecar.chunks, phrasesPerVoice: 1 })
         const labels = review.voices.map(v => v.label)
-        return { scopes: voiceDisplayScopes(await readVoiceDisplay(sessionId, labels), labels) }
+        return voiceDisplayScopes(await readVoiceDisplay(sessionId, labels), labels)
       },
     }))
   }

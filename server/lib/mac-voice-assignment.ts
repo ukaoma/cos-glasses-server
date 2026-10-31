@@ -219,7 +219,8 @@ export function spreadMacVoiceUnits<T>(items: T[], max: number): T[] {
 /**
  * What one chunk contributes for a voice: `whole` when every turn is that voice or the chunk has no turns,
  * otherwise that voice's turns long enough to slice, inset at each end. Empty means nothing here is usable.
- * Shared with voice suggestions (mac-voice-suggestions.ts) so the two cannot choose audio differently.
+ * Voice suggestions (mac-voice-suggestions.ts) use the same per-chunk rule. They do not pick the same units
+ * overall: this plan spreads to the cap before the 2 s filter, suggestions spread after it, as the study did.
  */
 export function macVoiceChunkUnits(turns: MacVoiceTurn[], voice: string): 'whole' | MacVoiceSlice[] {
   if (turns.length === 0 || turns.every(t => t.speaker === voice)) return 'whole'

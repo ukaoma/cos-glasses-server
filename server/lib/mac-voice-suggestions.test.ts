@@ -17,6 +17,7 @@ import {
   VOICE_SUGGESTION_PAUSE_LEASES,
   VoiceSuggestionRunner,
   buildVoiceBank,
+  combineVoiceDecisions,
   currentVoiceSuggestions,
   decideVoiceSuggestion,
   isHighConfidenceVoiceSuggestion,
@@ -29,6 +30,7 @@ import {
   voiceUnitCandidates,
   type StoredVoiceProfile,
   type VoiceBankEntry,
+  type VoiceDecision,
   type VoiceSidecarEntry,
   type VoiceSuggestionBlock,
   type VoiceSuggestionDeps,
@@ -216,6 +218,7 @@ function fakeExtract(audio: Buffer): Float32Array {
 }
 const CODE = { dana: 0, theo: 1, stranger: 20, ana: 2 }
 const profiles = (): StoredVoiceProfile[] => [
+  { name: 'MU', embeddings: [axis(5)], sources: ['g2-training'] },
   { name: 'Dana Reyes', embeddings: [axis(CODE.dana), axis(CODE.dana)], sources: ['fireflies', 'g2-training'] },
   { name: 'Theo Marsh', embeddings: [axis(CODE.theo)], sources: ['fireflies'] },
   { name: 'Ana Silva', embeddings: [axis(CODE.ana)], sources: ['fireflies'] },
@@ -273,7 +276,7 @@ function input(over: Partial<Parameters<VoiceSuggestionRunner['start']>[0]> & { 
     sourceRevision: 'rev-1',
     block: (): VoiceSuggestionBlock | null => null,
     pause: () => false,
-    loadScopes: async () => ({ scopes: scopes ?? [['Voice 1']] }),
+    loadScopes: async () => scopes ?? [['Voice 1']],
     ...rest,
   }
 }
@@ -319,8 +322,31 @@ describe('which audio a voice gets', () => {
   })
 
   it('keeps only rows that can address audio', () => {
-    expect(voiceSidecarEntries({ chunkEntries: [{ chunkIndex: 1, chunk: {} }, { chunkIndex: 'x', chunk: {} }, { chunkIndex: 2 }, null] }).map(e => e.chunkIndex)).toEqual([1])
-    expect(voiceSidecarEntries({})).toEqual([])
+    const rows = [{ chunkIndex: 1, chunk: {} }, { chunkIndex: 'x', chunk: {} }, { chunkIndex: 2 }, null]
+    expect(voiceSidecarEntries({ chunks: [], chunkEntries: rows })?.map(e => e.chunkIndex)).toEqual([1])
+  })
+
+  it('cannot line the two lists up, so it says so rather than guessing', () => {
+    expect(voiceSidecarEntries({})).toBeNull()
+    expect(voiceSidecarEntries({ chunks: [] })).toBeNull()
+    expect(voiceSidecarEntries({ chunkEntries: [] })).toBeNull()
+    expect(voiceSidecarEntries({ chunks: [{ speaker: 'Voice 1', text: 'a' }], chunkEntries: [] })).toBeNull()
+  })
+
+  it('skips a row whose current chunk was renamed, for every voice, and keeps silent rows', () => {
+    const row = (chunkIndex: number, speaker: string, text = 'invented', extra: Record<string, unknown> = {}) => ({ chunkIndex, chunk: { speaker, text, ...extra } })
+    const entries = voiceSidecarEntries({
+      // What POST /relabel leaves behind: `chunks[]` says Theo Marsh at position 1, the entries still say Voice 3.
+      chunks: [{ speaker: 'Voice 3', text: 'a' }, { speaker: 'Theo Marsh', text: 'b' }, { speaker: 'Voice 3', text: 'c' }],
+      chunkEntries: [
+        row(4, 'Voice 3'),
+        row(5, 'Voice 3', '   '),
+        row(6, 'Voice 3', 'b', { segments: [{ speaker: 'Voice 3', startSec: 0, endSec: 3 }, { speaker: 'Voice 8', startSec: 3, endSec: 6 }] }),
+        row(9, 'Voice 3'),
+      ],
+    })
+    expect(entries?.map(e => e.chunkIndex)).toEqual([4, 5, 9])
+    expect(voiceUnitCandidates(entries!, 'Voice 8')).toEqual([])
   })
 
   it('slices the right samples, skips audio under 2 s, and a whole chunk under 2 s', async () => {
@@ -361,15 +387,102 @@ describe('which audio a voice gets', () => {
     expect(done.suggestions?.[0].units).toBe(40)
   })
 
-  it('a group pools its labels, and the cap covers the group, not each label', async () => {
+  it('the cap covers each label, not the group: nothing is pooled', async () => {
     const entries: VoiceSidecarEntry[] = []
     const chunks: Record<number, Buffer> = {}
-    for (let raw = 0; raw < 30; raw++) { entries.push(entry(raw, 'Voice 1'), entry(raw + 100, 'Voice 2')); chunks[raw] = wav([6, CODE.theo]); chunks[raw + 100] = wav([6, CODE.theo]) }
+    for (let raw = 0; raw < 50; raw++) { entries.push(entry(raw, 'Voice 1'), entry(raw + 100, 'Voice 2')); chunks[raw] = wav([6, CODE.theo]); chunks[raw + 100] = wav([6, CODE.theo]) }
     chunkFiles(MAC, chunks)
     rig.runner.start(input({ entries, scopes: [['Voice 1', 'Voice 2']] }))
     const done = await settled(rig.runner, MAC, 'rev-1')
-    expect(rig.extracts).toBe(40)
-    expect(done.suggestions).toEqual([{ labels: ['Voice 1', 'Voice 2'], name: 'Theo Marsh', score: 1, margin: 1, units: 40, kept: 40, requiresConfirmation: true, highConfidence: true }])
+    expect(rig.extracts).toBe(80)
+    expect(done.progress).toEqual({ done: 80, total: 80 })
+    expect(done.suggestions).toEqual([{ labels: ['Voice 1', 'Voice 2'], name: 'Theo Marsh', score: 1, margin: 1, units: 80, kept: 80, requiresConfirmation: true, highConfidence: true }])
+  })
+})
+
+describe('every label is scored on its own', () => {
+  /** Runs one group through the real runner. Audio codes pick the axis, so `at` sets each unit's score against Dana. */
+  async function group(voices: Record<string, { units: number; vector?: number[]; code?: number; sec?: number }>, scopes?: string[][]) {
+    const entries: VoiceSidecarEntry[] = []
+    const chunks: Record<number, Buffer> = {}
+    const byRaw = new Map<number, number[] | null>()
+    let raw = 0
+    for (const [label, voice] of Object.entries(voices)) {
+      for (let i = 0; i < voice.units; i++, raw++) {
+        entries.push(entry(raw, label))
+        chunks[raw] = wav([voice.sec ?? 6, voice.code ?? CODE.dana])
+        byRaw.set(raw, voice.vector ?? null)
+      }
+    }
+    chunkFiles(MAC, chunks)
+    const r = makeRig({ extract: (audio, unit) => { const v = byRaw.get(unit.raw); return v ? Float32Array.from(v) : fakeExtract(audio) } })
+    r.runner.start(input({ entries, scopes: scopes ?? [Object.keys(voices)] }))
+    return settled(r.runner, MAC, 'rev-1')
+  }
+
+  it('the probe: 37 of one person and 3 of a stranger never name the stranger', async () => {
+    const done = await group({ 'Voice 1': { units: 37, code: CODE.dana }, 'Voice 9': { units: 3, code: CODE.stranger } })
+    expect(done.suggestions).toEqual([{ labels: ['Voice 1'], name: 'Dana Reyes', score: 1, margin: 1, units: 37, kept: 37, requiresConfirmation: true, highConfidence: true }])
+    expect(done.unmatched).toEqual([{ labels: ['Voice 9'], gate: 'below_rule' }])
+  })
+
+  it('agreement: labels that each pass for one person share a suggestion at the lowest score and margin', async () => {
+    const done = await group({ 'Voice 1': { units: 3, vector: aimed(0.95, 0.1) }, 'Voice 2': { units: 3, vector: aimed(0.85, 0.2) } })
+    expect(done.unmatched).toEqual([])
+    expect(done.suggestions).toEqual([{ labels: ['Voice 1', 'Voice 2'], name: 'Dana Reyes', score: 0.85, margin: 0.65, units: 6, kept: 6, requiresConfirmation: true, highConfidence: true }])
+  })
+
+  it('agreement below the high-confidence bar: one member under it clears the flag for all', async () => {
+    const done = await group({ 'Voice 1': { units: 3, vector: aimed(0.95) }, 'Voice 2': { units: 3, vector: aimed(0.75) } })
+    expect(done.suggestions).toEqual([{ labels: ['Voice 1', 'Voice 2'], name: 'Dana Reyes', score: 0.75, margin: 0.75, units: 6, kept: 6, requiresConfirmation: true, highConfidence: false }])
+  })
+
+  it('disagreement: a member that passed for someone else gets its own suggestion', async () => {
+    const done = await group({ 'Voice 1': { units: 3, code: CODE.dana }, 'Voice 2': { units: 3, code: CODE.theo }, 'Voice 3': { units: 3, code: CODE.dana } })
+    expect(done.suggestions?.map(s => [s.labels, s.name])).toEqual([[['Voice 1', 'Voice 3'], 'Dana Reyes'], [['Voice 2'], 'Theo Marsh']])
+    expect(done.unmatched).toEqual([])
+  })
+
+  it('a member with too little audio is unmatched with its own gate, and the rest still pass', async () => {
+    const done = await group({ 'Voice 1': { units: 3, code: CODE.dana }, 'Voice 2': { units: 1, code: CODE.dana, sec: 3 } })
+    expect(done.suggestions?.map(s => s.labels)).toEqual([['Voice 1']])
+    expect(done.unmatched).toEqual([{ labels: ['Voice 2'], gate: 'too_little_audio' }])
+  })
+
+  it('a member with no audio at all is unmatched as such', async () => {
+    const done = await group({ 'Voice 1': { units: 3, code: CODE.dana } }, [['Voice 1', 'Voice 2']])
+    expect(done.unmatched).toEqual([{ labels: ['Voice 2'], gate: 'no_usable_audio' }])
+  })
+
+  it('a member closest to MU is unmatched, and cannot ride along with the group', async () => {
+    const done = await group({ 'Voice 1': { units: 3, code: CODE.dana }, 'Voice 2': { units: 3, code: 5 } }, [['Voice 1', 'Voice 2']])
+    expect(done.suggestions?.map(s => s.labels)).toEqual([['Voice 1']])
+    expect(done.unmatched).toEqual([{ labels: ['Voice 2'], gate: 'below_rule' }])
+  })
+
+  it('never lists a label whose own decision did not pass, whatever the mix', () => {
+    const pass = (label: string, name: string, score: number, margin: number): VoiceDecision => ({ labels: [label], units: 3, kept: 3, keptSec: 18, gate: null, top: { name, score }, margin })
+    const fail = (label: string, gate: VoiceDecision['gate']): VoiceDecision => ({ labels: [label], units: 3, kept: 1, keptSec: 6, gate, top: { name: 'Dana Reyes', score: 0.99 }, margin: 0.9 })
+    const decisions = new Map<string, VoiceDecision>([
+      ['Voice 1', pass('Voice 1', 'Dana Reyes', 0.9, 0.3)],
+      ['Voice 2', fail('Voice 2', 'mixed_voice')],
+      ['Voice 3', pass('Voice 3', 'Dana Reyes', 0.72, 0.06)],
+      ['Voice 4', pass('Voice 4', 'Theo Marsh', 0.81, 0.2)],
+      ['Voice 5', fail('Voice 5', 'below_rule')],
+    ])
+    expect(combineVoiceDecisions([['Voice 1', 'Voice 2', 'Voice 3'], ['Voice 4'], ['Voice 5'], ['Voice 6']], decisions)).toEqual({
+      suggestions: [
+        { labels: ['Voice 1', 'Voice 3'], name: 'Dana Reyes', score: 0.72, margin: 0.06, units: 6, kept: 6, requiresConfirmation: true, highConfidence: false },
+        { labels: ['Voice 4'], name: 'Theo Marsh', score: 0.81, margin: 0.2, units: 3, kept: 3, requiresConfirmation: true, highConfidence: true },
+      ],
+      unmatched: [{ labels: ['Voice 2'], gate: 'mixed_voice' }, { labels: ['Voice 5'], gate: 'below_rule' }, { labels: ['Voice 6'], gate: 'no_usable_audio' }],
+    })
+  })
+
+  it('does not merge across scopes: two singles for one person stay two suggestions', () => {
+    const pass = (label: string): VoiceDecision => ({ labels: [label], units: 3, kept: 3, keptSec: 18, gate: null, top: { name: 'Dana Reyes', score: 0.9 }, margin: 0.3 })
+    const { suggestions } = combineVoiceDecisions([['Voice 1'], ['Voice 2']], new Map([['Voice 1', pass('Voice 1')], ['Voice 2', pass('Voice 2')]]))
+    expect(suggestions.map(s => s.labels)).toEqual([['Voice 1'], ['Voice 2']])
   })
 })
 
@@ -464,19 +577,30 @@ describe('refusals', () => {
     expect(out).toEqual({ state: 'refused', reason: 'recording_active', rule: { floor: 0.7, margin: 0.05 }, modelSpace: '192d', sourceRevision: 'rev-1' })
     await new Promise<void>(resolve => setImmediate(resolve))
     expect(rig.extracts).toBe(0)
-    expect(rig.runner.read(MAC, 'rev-1').reason).toBe('recording_active')
+  })
+
+  it('a refusal is the POST\'s answer only: reading afterwards stays idle, or keeps the last real result', async () => {
+    const list = entries()
+    rig.runner.start(input({ entries: list, block: () => 'recording_active' }))
+    expect(rig.runner.read(MAC, 'rev-1')).toEqual({ state: 'idle', rule: { floor: 0.7, margin: 0.05 }, modelSpace: '192d', sourceRevision: 'rev-1' })
+    expect(rig.runner.running(MAC)).toBeNull()
+    rig.runner.start(input({ entries: list }))
+    await settled(rig.runner, MAC, 'rev-1')
+    expect(rig.runner.start(input({ entries: list, sourceRevision: 'rev-2', block: () => 'recording_active' })).state).toBe('refused')
+    expect(rig.runner.read(MAC, 'rev-1').state).toBe('done')
+    expect(rig.runner.read(MAC, 'rev-2').state).toBe('idle')
   })
 
   it('a maintenance drain blocks the start', () => {
     expect(rig.runner.start(input({ entries: entries(), block: () => 'maintenance' }))).toMatchObject({ state: 'refused', reason: 'maintenance' })
   })
 
-  it('a recording that starts mid-run ends the job as refused, with no partial result', async () => {
+  it('a recording that starts mid-run ends the job as failed, with the reason and no partial result', async () => {
     let live = false
     const r = makeRig({ extract: audio => { r.extracts += 1; live = true; return fakeExtract(audio) } })
     r.runner.start(input({ entries: entries(), block: () => live ? 'recording_active' : null }))
     const out = await settled(r.runner, MAC, 'rev-1')
-    expect(out.state).toBe('refused')
+    expect(out.state).toBe('failed')
     expect(out.reason).toBe('recording_active')
     expect(out.suggestions).toBeUndefined()
     expect(r.extracts).toBe(1)
@@ -511,25 +635,93 @@ describe('refusals', () => {
     expect((await settled(rig.runner, MAC2, 'rev-1')).state).toBe('done')
   })
 
-  it('the scope loader can refuse', async () => {
-    rig.runner.start(input({ entries: entries(), loadScopes: async () => ({ refused: 'derived_call_view' }) }))
-    expect(await settled(rig.runner, MAC, 'rev-1')).toMatchObject({ state: 'refused', reason: 'derived_call_view' })
+  it('a scope loader that throws is an explicit failure', async () => {
+    rig.runner.start(input({ entries: entries(), loadScopes: async () => { throw new Error('review') } }))
+    expect(await settled(rig.runner, MAC, 'rev-1')).toMatchObject({ state: 'failed', reason: 'internal_error' })
   })
 
-  it('needs at least two profiles to prove a margin', async () => {
+  it('needs at least two profiles to prove a margin, and says so at the click', async () => {
     const r = makeRig({ readProfiles: () => ({ profiles: profiles().slice(0, 1) }) })
-    r.runner.start(input({ entries: entries() }))
-    expect(await settled(r.runner, MAC, 'rev-1')).toMatchObject({ state: 'refused', reason: 'not_enough_voice_profiles' })
+    expect(r.runner.start(input({ entries: entries() }))).toMatchObject({ state: 'refused', reason: 'not_enough_voice_profiles' })
+    await new Promise<void>(resolve => setImmediate(resolve))
     expect(r.extracts).toBe(0)
   })
 
-  it('a refused job frees the lane', async () => {
+  it('an unreadable profile store is refused at the click', () => {
+    const r = makeRig({ readProfiles: () => { throw new Error('corrupt') } })
+    expect(r.runner.start(input({ entries: entries() }))).toMatchObject({ state: 'refused', reason: 'profile_store_unreadable' })
+  })
+
+  it('a refused click holds no lane', async () => {
     const list = entries()
-    rig.runner.start(input({ entries: list, loadScopes: async () => ({ refused: 'derived_call_view' }) }))
-    await settled(rig.runner, MAC, 'rev-1')
+    rig.runner.start(input({ entries: list, block: () => 'maintenance' }))
     chunkFiles(MAC2, { 0: wav([6, CODE.dana]) })
     expect(rig.runner.start(input({ sessionId: MAC2, entries: [entry(0, 'Voice 1')] })).state).toBe('running')
     await settled(rig.runner, MAC2, 'rev-1')
+  })
+})
+
+describe('a result expires with the profile store', () => {
+  const entries = () => { chunkFiles(MAC, { 0: wav([6, CODE.dana]), 1: wav([6, CODE.dana]) }); return [entry(0, 'Voice 1'), entry(1, 'Voice 1')] }
+  afterEach(() => resetVoiceSuggestionRunnerForTests(null))
+
+  it('a changed store reads as idle and null, and the next click re-runs against the new store', async () => {
+    let store = 'store-a'
+    let people = profiles()
+    const r = makeRig({ storeFingerprint: () => store, readProfiles: () => ({ profiles: people }) })
+    resetVoiceSuggestionRunnerForTests(r.runner)
+    const list = entries()
+    r.runner.start(input({ entries: list }))
+    expect((await settled(r.runner, MAC, 'rev-1')).suggestions?.[0].name).toBe('Dana Reyes')
+    expect(currentVoiceSuggestions(MAC)?.suggestions[0].name).toBe('Dana Reyes')
+    const count = r.extracts
+
+    // delete-person, as the store sees it.
+    people = profiles().filter(p => p.name !== 'Dana Reyes')
+    store = 'store-b'
+    expect(r.runner.read(MAC, 'rev-1')).toEqual({ state: 'idle', rule: { floor: 0.7, margin: 0.05 }, modelSpace: '192d', sourceRevision: 'rev-1' })
+    expect(currentVoiceSuggestions(MAC)).toBeNull()
+
+    expect(r.runner.start(input({ entries: list })).state).toBe('running')
+    const again = await settled(r.runner, MAC, 'rev-1')
+    expect(r.extracts).toBe(count + 2)
+    expect(again.suggestions).toEqual([])
+    expect(again.unmatched).toEqual([{ labels: ['Voice 1'], gate: 'below_rule' }])
+    expect(currentVoiceSuggestions(MAC)?.suggestions).toEqual([])
+  })
+
+  it('an unchanged store keeps the result and the click extracts nothing more', async () => {
+    const r = makeRig({ storeFingerprint: () => 'same' })
+    const list = entries()
+    r.runner.start(input({ entries: list }))
+    await settled(r.runner, MAC, 'rev-1')
+    const count = r.extracts
+    expect(r.runner.start(input({ entries: list })).state).toBe('done')
+    expect(r.extracts).toBe(count)
+  })
+
+  it('a store that changes mid-run makes the result read idle when it finishes', async () => {
+    let store = 'store-a'
+    const r = makeRig({ storeFingerprint: () => store, extract: audio => { store = 'store-b'; return fakeExtract(audio) } })
+    r.runner.start(input({ entries: entries() }))
+    expect(r.runner.running(MAC)?.state).toBe('running')
+    while (r.runner.running(MAC)) await new Promise<void>(resolve => setImmediate(resolve))
+    expect(r.runner.read(MAC, 'rev-1').state).toBe('idle')
+  })
+
+  it('the real fingerprint follows the file', async () => {
+    const { defaultVoiceSuggestionDeps } = await import('./mac-voice-suggestions.js')
+    const { dataPath } = await import('./data-dir.js')
+    const fingerprint = defaultVoiceSuggestionDeps().storeFingerprint
+    const path = dataPath('voice-profiles.json')
+    rmSync(path, { force: true })
+    expect(fingerprint()).toBe('none')
+    writeFileSync(path, JSON.stringify({ profiles: [] }))
+    const first = fingerprint()
+    expect(first).not.toBe('none')
+    writeFileSync(path, JSON.stringify({ profiles: [{ name: 'x', embeddings: [] }] }))
+    expect(fingerprint()).not.toBe(first)
+    rmSync(path, { force: true })
   })
 })
 
@@ -573,13 +765,7 @@ describe('failures and limits', () => {
     let live = false
     const q = makeRig({ sleep: async () => { live = true } })
     q.runner.start(input({ entries: entries(), pause: () => true, block: () => live ? 'recording_active' : null }))
-    expect(await settled(q.runner, MAC, 'rev-1')).toMatchObject({ state: 'refused', reason: 'recording_active' })
-  })
-
-  it('an unreadable profile store fails the job plainly', async () => {
-    const r = makeRig({ readProfiles: () => { throw new Error('corrupt') } })
-    r.runner.start(input({ entries: entries() }))
-    expect(await settled(r.runner, MAC, 'rev-1')).toMatchObject({ state: 'failed', reason: 'profile_store_unreadable' })
+    expect(await settled(q.runner, MAC, 'rev-1')).toMatchObject({ state: 'failed', reason: 'recording_active' })
   })
 
   it('an exception mid-run is an explicit failure and frees the lane', async () => {
@@ -724,14 +910,14 @@ describe('currentVoiceSuggestions', () => {
     expect(rig.runner.read(MAC, 'rev-1').suggestions?.[0].name).toBe('Dana Reyes')
   })
 
-  it('a refusal or a new run on the same session withdraws the old result', async () => {
+  it('a new run on the same session withdraws the old result; a refused click does not', async () => {
     resetVoiceSuggestionRunnerForTests(rig.runner)
     const list = entries()
     rig.runner.start(input({ entries: list }))
     await settled(rig.runner, MAC, 'rev-1')
     expect(currentVoiceSuggestions(MAC)?.sourceRevision).toBe('rev-1')
     rig.runner.start(input({ entries: list, sourceRevision: 'rev-2', block: () => 'recording_active' }))
-    expect(currentVoiceSuggestions(MAC)).toBeNull()
+    expect(currentVoiceSuggestions(MAC)?.sourceRevision).toBe('rev-1')
     rig.runner.start(input({ entries: list, sourceRevision: 'rev-2' }))
     expect(currentVoiceSuggestions(MAC)).toBeNull()
     await settled(rig.runner, MAC, 'rev-2')
