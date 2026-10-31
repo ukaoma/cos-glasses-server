@@ -4,7 +4,7 @@ import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { resolveProviderBinary } from './provider-binary.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
-import { isDictationCleanModel, LUNA_DICTATION_CLI_MODEL } from './dictation-clean-models.js'
+import { isDictationCleanModel, LUNA_DICTATION_CLI_MODEL, LUNA_DICTATION_MODEL } from './dictation-clean-models.js'
 import { sanitizeCustomInstructions } from './dictation-polish-instructions.js'
 import { LEARNED_STYLE_MAX_CHARS } from './dictation-learned-style.js'
 import type { DictationRegister } from './dictation-register.js'
@@ -311,7 +311,7 @@ export async function autoCleanDictation(
   if (opts.signal?.aborted) throw new Error('Auto-clean aborted')
   const model = (opts.model || process.env.COS_DICTATION_AUTOCLEAN_MODEL || 'haiku').toLowerCase()
   if (!isDictationCleanModel(model)) throw new Error('Unsupported dictation cleanup model')
-  const cursor = model === 'luna-5.6-fast'
+  const cursor = model === LUNA_DICTATION_MODEL
   const binary = resolveProviderBinary(cursor ? 'cursor' : 'claude')
   if (!binary.ok) throw new Error(`Dictation cleanup ${cursor ? 'Cursor' : 'Claude'} CLI unavailable`)
   const configuredTimeout = Number.parseInt(process.env.COS_DICTATION_AUTOCLEAN_TIMEOUT_MS || '20000', 10)

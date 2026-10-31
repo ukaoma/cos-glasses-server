@@ -75,6 +75,7 @@ import { nativeHead, realNativeHeadDeps, registerClaudeTranscriptHint } from './
 import { threadOccupancy, holderActivity } from './lib/thread-occupancy.js'
 import { displayRouter } from './routes/display.js'
 import { transcribeStreamRouter, getActiveTranscriptionSessionCount, getTranscriptionSessionLiveness } from './routes/transcribe-stream.js'
+import { installCodexRolloutProbe } from './lib/codex-rollout-watermark.js'
 import { meetingRouter, resumeAutonomousMeetingSaves, resumeMeetingFinalizationJobs, scheduleTranscriptCleanupSweep, transcriptCleanupRouteDeps } from './routes/meeting.js'
 import { createTranscriptCleanupRouter } from './routes/transcript-cleanup.js'
 import { meetingsRouter } from './routes/meetings.js'
@@ -1510,6 +1511,8 @@ listenRequiredServers(listeners).then(() => {
     if (admittedRuntimeStarted) return
     admittedRuntimeStarted = true
 
+    // 6.97.0: lets the Codex bridge show nothing else ran on a thread between its turns.
+    installCodexRolloutProbe()
     // 6.78.0: before any boot resume. Was the last exit clean? Only boots after a crash count.
     bootResume.openBoot()
     // Resume already-saved meetings whose post-response HQ/operations work

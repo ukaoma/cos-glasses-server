@@ -1067,14 +1067,6 @@ function driveChild(input: DriveInput): Promise<ForkResult> {
 // Production wiring
 // ---------------------------------------------------------------------------
 
-/**
- * The real dependency set.
- *
- * `sourceWatermark` has no default and should always be supplied by the caller —
- * it needs `nativeHead`'s dependency shape, which belongs to the route, and a
- * default here would be a placeholder that reports `unverified` forever while
- * looking wired.
- */
 /** One row for a fork that reached an end and names its new thread. Never changes the fork's outcome. */
 function auditForkRun(deps: ForkDeps, tap: SideRunTap | null, outcome: ForkResult, provider: ForkProvider, prompt: string): void {
   try {
@@ -1096,6 +1088,14 @@ function auditForkRun(deps: ForkDeps, tap: SideRunTap | null, outcome: ForkResul
   }
 }
 
+/**
+ * The real dependency set.
+ *
+ * `sourceWatermark` has no default and should always be supplied by the caller —
+ * it needs `nativeHead`'s dependency shape, which belongs to the route, and a
+ * default here would be a placeholder that reports `unverified` forever while
+ * looking wired.
+ */
 export function realForkDeps(
   sourceWatermark?: (provider: ForkProvider, nativeThreadId: string) => string | null,
 ): ForkDeps {

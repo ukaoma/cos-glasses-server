@@ -40,7 +40,7 @@ import {
 } from './fork-thread.js'
 import type { AttachedChildProcess } from './attached-provider-adapter.js'
 import { findBannedPermissionArg } from './banned-permission-args.js'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -1175,8 +1175,10 @@ describe('6.97.0: one audit row for a fork, by a passive reader', () => {
     expect((await run(h)).ok).toBe(false)
     expect(rows).toHaveLength(0)
   })
-  it('production wiring writes rows; a test harness without it never does', () => {
-    expect(typeof realForkDeps().auditRun).toBe('function')
+  it('production wiring writes a row to the ledger; a test harness without it never does', () => {
+    const caller = `fork_wiring_${process.pid}_${Math.random().toString(36).slice(2)}`
+    realForkDeps().auditRun!({ source: 'g2-fork', model: 'claude', inputChars: 1, outputChars: 1, durationMs: 1, caller })
+    expect(readFileSync(process.env.COS_TOKEN_AUDIT_FILE!, 'utf8')).toContain(caller)
     expect(harness().deps.auditRun).toBeUndefined()
   })
 })

@@ -533,7 +533,6 @@ export async function callCursorStreaming(
       runId: run.runId,
       sessionId: sid,
       clientJobId: options?.clientJobId,
-      usageKind: 'estimated',
       // 6.97.0: the chat id only. Cursor's usage stays estimated: its cache parser has no real rows.
       ...(cursorChatId ? { cliSessionId: cursorChatId } : {}),
     })

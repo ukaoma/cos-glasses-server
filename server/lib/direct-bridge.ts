@@ -570,7 +570,6 @@ export async function callDirectStreaming(
       runId: run.runId,
       sessionId: sid,
       ...(options?.clientJobId ? { clientJobId: options.clientJobId } : {}),
-      usageKind: usageTotals.measured ? 'provider_final' : 'estimated',
       profile: profile.id,
       lane: 'direct',
       credentialKind: key.kind,

@@ -645,6 +645,9 @@ export async function callCodexStreaming(
   // the user's own words, bound by the hash of exactly what goes on stdin; the file dies
   // with the child. See lib/turn-request.ts.
   const turnRequest = createTurnRequestBinding({ userText: query, prompt, turnId: options?.turnId })
+  // 6.97.0: what this run used, for the audit row only. Begins before the spawn, which writes to the rollout.
+  const runUsage = new CodexRunUsage(keyProfile ? keyProfile.model : !skipsCosModel(extra) ? resolvedCodexModel?.id : undefined)
+  runUsage.begin(engineSession?.codexThreadId)
   applyTurnRequestEnv(env, turnRequest)
 
   const proc = withKeyTurnRevokedOnThrow(keyTurn, () => spawnWithTurnRequest(turnRequest, () => spawn(resolvedCodex.path, args, {
@@ -662,8 +665,6 @@ export async function callCodexStreaming(
   let terminalTextError: string | null = null
   let lastActivity = Date.now()
   const emittedBlocks = new Set<string>()
-  // 6.97.0: what this run used, for the audit row only.
-  const runUsage = new CodexRunUsage(keyProfile ? keyProfile.model : !skipsCosModel(extra) ? resolvedCodexModel?.id : undefined)
 
   function cleanupImages() {
     cleanupModelImageInputs(imageInputs)
@@ -1040,10 +1041,11 @@ export async function callCodexStreaming(
 
   proc.on('close', (code) => {
     keyTurn?.childClosed()
-    if (terminationRequested) return
+    if (terminationRequested) { runUsage.settle(); return }
     if (buffer.trim()) {
       try { handleEvent(JSON.parse(buffer.trim())) } catch { /* ignore */ }
     }
+    runUsage.settle()
     if (finalized) return
     if (fullText) {
       void finalize(fullText)

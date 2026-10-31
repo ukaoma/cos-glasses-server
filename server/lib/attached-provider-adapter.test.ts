@@ -25,7 +25,8 @@
 // dot component, and that exact gap has already shipped a bug in this repo.
 
 import { EventEmitter } from 'node:events'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { CodexRunUsage } from './provider-usage.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -1870,8 +1871,23 @@ describe('6.97.0: one audit row for an attached run, by a passive reader', () =>
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ caller: `attached_turn:${result.reason}`, realUsage: { inputTokens: 3 } })
   })
-  it('production wiring writes rows; a test harness without it never does', () => {
-    expect(typeof realAttachedTurnDeps(() => ({ attachable: true, reason: null }) as any).auditRun).toBe('function')
+  it('production wiring writes a row to the ledger; a test harness without it never does', () => {
+    const caller = `attached_wiring_${process.pid}_${Math.random().toString(36).slice(2)}`
+    realAttachedTurnDeps(() => ({ attachable: true, reason: null }) as any).auditRun!({ source: 'g2-attached', model: 'claude', inputChars: 1, outputChars: 1, durationMs: 1, caller })
+    expect(readFileSync(process.env.COS_TOKEN_AUDIT_FILE!, 'utf8')).toContain(caller)
     expect(harness().deps.auditRun).toBeUndefined()
+  })
+  it('a Codex Continue drops the thread\'s baseline, so the bridge cannot charge its tokens to the next turn', async () => {
+    const seen = new CodexRunUsage(undefined, () => 1000)
+    seen.observe({ type: 'turn.completed', usage: { input_tokens: 1000, cached_input_tokens: 500, output_tokens: 50 } })
+    seen.finish(TARGET, undefined)
+    seen.settle()
+    const ctx = harness({ script: child => { child.close(1) }, resolveBinary: () => ({ ok: true, path: CLAUDE_BIN, source: 'absolute' }) as any })
+    await deliver(ctx, { provider: 'codex' })
+    expect(ctx.spawns).toHaveLength(1)
+    const next = new CodexRunUsage(undefined, () => 1000)
+    next.begin(TARGET)
+    next.observe({ type: 'turn.completed', usage: { input_tokens: 9100, cached_input_tokens: 8450, output_tokens: 510 } })
+    expect(next.finish(TARGET, TARGET)).toBeNull()
   })
 })

@@ -1,4 +1,4 @@
-import type { DictationCleanModel } from './dictation-clean-models.js'
+import { LUNA_DICTATION_MODEL, type DictationCleanModel } from './dictation-clean-models.js'
 import { applyNegativeRules } from './hallucination-filter.js'
 import { applyCorrections } from './whisper-local.js'
 import { applyFuzzyCorrections } from './fuzzy-correct.js'
@@ -301,14 +301,14 @@ export async function polishOutboundDictation(
   // 6.79.2: a warm process started at key press answers without the CLI's start-up cost.
   const warmEntry = opts.prewarmToken ? takePolishPrewarm(opts.prewarmToken, model) : null
   let prewarm: PrewarmOutcome | undefined = opts.prewarmToken ? 'missed' : undefined
-  // 6.97.0: the row counts what the model was sent, not just the words dictated as 6.96.4 did.
-  // Luna runs through Cursor, whose path has no system prompt. The prompt itself is unchanged.
-  const auditInputChars = () => {
+  // 6.97.0: what the model is sent, on its own field: `input_chars` stays the words dictated, so old and
+  // new rows still compare. Absent if it cannot be worked out. The prompt itself is unchanged.
+  const auditPromptChars = (): { promptChars?: number } => {
     try {
-      const system = model === 'luna-5.6-fast' ? 0 : DICTATION_POLISH_SYSTEM_PROMPTS[promptVersion].length
-      return system + buildDictationPolishPrompt(cleaned, getVocabulary(), promptVersion, customInstructions, { learnedStyle: style.lines, register }).length
+      const system = model === LUNA_DICTATION_MODEL ? 0 : DICTATION_POLISH_SYSTEM_PROMPTS[promptVersion].length
+      return { promptChars: system + buildDictationPolishPrompt(cleaned, getVocabulary(), promptVersion, customInstructions, { learnedStyle: style.lines, register }).length }
     } catch {
-      return cleaned.length
+      return {}
     }
   }
   // 6.92.0 QA S1: the model time of an abort is stamped when the abort happens, not in the catch,
@@ -336,7 +336,7 @@ export async function polishOutboundDictation(
     breakers.slow.recordSuccess()
     const guarded = guardPolishAnswer(cleaned, polished, opts.bucket, register, canaried)
     logTokenAudit({
-      source: 'g2-dictation-autoclean', model, inputChars: auditInputChars(), outputChars: polished.length,
+      source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: polished.length,
       durationMs: Date.now() - startedAt, caller: `dictation_autoclean_${opts.bucket}`,
       polishInstructions: { on: Boolean(customInstructions), hash: instructionsHash },
       // 6.91.0: codes and a hash only, never the app name or a word.
@@ -345,6 +345,7 @@ export async function polishOutboundDictation(
       ...(used.polishPrompt ? { polishPrompt: used.polishPrompt } : {}),
       polishOutcome: guarded.outcome, ...(guarded.guard ? { polishGuard: guarded.guard } : {}),
       // Real numbers from a warm result. The cold path prints plain text, so its row stays estimated.
+      ...auditPromptChars(),
       ...warmEntry?.usage,
     })
     return {
@@ -361,7 +362,7 @@ export async function polishOutboundDictation(
       const durationMs = (abortedAt ?? Date.now()) - startedAt
       if (durationMs >= SLOW_ABORT_MIN_MODEL_MS) breakers.slow.recordFailure()
       logTokenAudit({
-        source: 'g2-dictation-autoclean', model, inputChars: auditInputChars(), outputChars: 0,
+        source: 'g2-dictation-autoclean', model, inputChars: cleaned.length, outputChars: 0,
         durationMs, caller: `dictation_autoclean_${opts.bucket}`,
         // Key order differs from the answered row's on purpose: each gate anchor matches one row.
         polishInstructions: { hash: instructionsHash, on: Boolean(customInstructions) },
@@ -369,6 +370,7 @@ export async function polishOutboundDictation(
         ...(canaried ? { polishRegister: register } : {}),
         ...(used.polishPrompt ? { polishPrompt: used.polishPrompt } : {}),
         polishOutcome: 'aborted',
+        ...auditPromptChars(),
         ...warmEntry?.usage,
       })
       console.warn('[prompt-draft] auto-clean aborted by the client (glossary-only)')

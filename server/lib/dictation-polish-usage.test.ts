@@ -1,5 +1,5 @@
-// 6.97.0: warm dictation polish records what the provider reported, and polish's inputChars counts what
-// the model is sent. Real pipeline, real warm process machinery, with a scratch script as the Claude CLI.
+// 6.97.0: warm dictation polish records what the provider reported, and polish's prompt_chars counts what
+// the model is sent, while input_chars stays the words dictated. Real pipeline, real warm process machinery, with a scratch script as the Claude CLI.
 // The cold path stays plain text and estimated: JSON there would add failures that feed the breaker.
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -58,6 +58,12 @@ async function polishWarm(bucket: 'message' | 'meeting' = 'message') {
   return cleanOutboundDictation(DICTATED, { enabled: true, model: 'haiku', bucket, prewarmToken: token })
 }
 const row = () => { expect(audit).toHaveBeenCalledTimes(1); return audit.mock.calls[0]![0] as Record<string, any> }
+/** The whole row as the real builder writes it, with the clock and the run's duration held still. */
+const wholeRow = async () => {
+  const { buildTokenAuditRecord } = await vi.importActual<typeof import('./token-audit.js')>('./token-audit.js')
+  return JSON.stringify(buildTokenAuditRecord({ ...row(), durationMs: 7 } as any, new Date('2026-10-31T17:00:00.000Z')))
+}
+const ROW_BEFORE_NEW_FIELDS = (chars: number, outputChars: number) => `{"ts":"2026-10-31T17:00:00.000Z","source":"g2-dictation-autoclean","model":"haiku","input_chars":${chars},"output_chars":${outputChars},"est_input_tokens":${Math.floor(chars / 4)},"est_output_tokens":${Math.floor(outputChars / 4)},"duration_ms":7,"caller":"dictation_autoclean_message","usage_kind":"estimated","custom_instructions":false,"learned_style":false,"polish_prompt":"v3","polish_outcome":"polished"`
 const sentChars = (bucket: 'message' | 'meeting' = 'message') => {
   const version = polishPromptVersionFor(bucket, undefined, 'haiku')
   return DICTATION_POLISH_SYSTEM_PROMPTS[version].length + buildDictationPolishPrompt(DICTATED, getVocabulary(), version, '', { learnedStyle: '', register: 'default' }).length
@@ -86,11 +92,12 @@ describe('warm polish', () => {
       realUsage: { inputTokens: 3, outputTokens: 11, cacheReadTokens: 0, cacheWriteTokens: 700, cacheWrite1hTokens: 700, costUsd: 0.0002, resolvedModel: 'claude-haiku-5-5' },
     })
   })
-  it('inputChars counts the system prompt and the built message, not just the words dictated', async () => {
+  it('input_chars stays the words dictated; prompt_chars counts the system prompt and the built message', async () => {
     warmCli(warmResult())
     await polishWarm()
-    expect(row().inputChars).toBe(sentChars())
-    expect(row().inputChars).toBeGreaterThan(DICTATED.length + DICTATION_POLISH_SYSTEM_PROMPTS.v3.length)
+    expect(row().inputChars).toBe(DICTATED.length)
+    expect(row().promptChars).toBe(sentChars())
+    expect(row().promptChars).toBeGreaterThan(DICTATED.length + DICTATION_POLISH_SYSTEM_PROMPTS.v3.length)
   })
   const BAD: Array<[string, Record<string, unknown>]> = [
     ['strings', { usage: 'garbage', modelUsage: 'garbage', model_usage_since_last_result: 'garbage', total_cost_usd: 'free' }],
@@ -106,13 +113,15 @@ describe('warm polish', () => {
     expect(polishBreakerOpen('haiku', 'message')).toBe(false)
     expect(coldCalls.count).toBe(0)
     expect(row()).not.toHaveProperty('realUsage')
-    expect(row().inputChars).toBe(sentChars())
+    expect(row().inputChars).toBe(DICTATED.length)
+    expect(row().promptChars).toBe(sentChars())
   })
   it('no dictation or answer text reaches the audit, even through an id field', async () => {
     warmCli(warmResult({ session_id: 'please send the secret plan' }))
     await polishWarm()
     const written = JSON.stringify(row())
     expect(written).not.toContain('secret plan')
+    expect(await wholeRow()).not.toContain('secret plan')
     expect(row()).not.toHaveProperty('cliSessionId')
   })
 })
@@ -123,6 +132,12 @@ describe('cold polish', () => {
     expect(out.text).toBe(`${DICTATED} Polished cold.`)
     expect(row()).not.toHaveProperty('realUsage')
     expect(row()).not.toHaveProperty('cliSessionId')
-    expect(row().inputChars).toBe(sentChars())
+    expect(row().inputChars).toBe(DICTATED.length)
+    expect(row().promptChars).toBe(sentChars())
+  })
+  it('the whole estimated row is what 6.96.4 wrote, byte for byte, with prompt_chars after it', async () => {
+    const out = await cleanOutboundDictation(DICTATED, { enabled: true, model: 'haiku', bucket: 'message' })
+    const polished = (out.modelText as string).length
+    expect(await wholeRow()).toBe(`${ROW_BEFORE_NEW_FIELDS(DICTATED.length, polished)},"prompt_chars":${sentChars()}}`)
   })
 })

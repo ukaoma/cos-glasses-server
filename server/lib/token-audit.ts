@@ -40,12 +40,10 @@ export interface TokenAuditEntry extends TokenAuditKeyFields {
   clientJobId?: string
   /** The provider's own session id: Claude's session, Codex's thread, Cursor's chat. `sessionId` is COS's. */
   cliSessionId?: string
-  /**
-   * 6.97.0: what the provider reported. The row says `provider_final` only when these are real
-   * numbers (`normalizeRealUsage`); `usageKind` alone cannot make it say so.
-   */
+  /** 6.97.0: what the provider reported. The row says `provider_final` only when these are real numbers. */
   realUsage?: RealUsage
-  usageKind?: 'provider_final' | 'estimated'
+  /** 6.97.0, dictation polish only: what the model is sent, system prompt included. `inputChars` stays the words dictated. */
+  promptChars?: number
   /** 6.85.0, dictation polish only: whether the user's polish instructions were in the prompt, and their hash. */
   polishInstructions?: { on: boolean; hash: string }
   /** 6.91.0, dictation polish only: whether the learned style was in the prompt, and its hash. */
@@ -106,9 +104,13 @@ export function buildTokenAuditRecord(entry: TokenAuditEntry, now: Date = new Da
     // 6.92.0: set only by the prompt-edit caller.
     ...(entry.promptEditOutcome ? { prompt_edit_outcome: entry.promptEditOutcome } : {}),
     // 6.97.0: last, and only when set, so a row without them is byte-identical to 6.96.4. Numbers and
-    // ids only. COS Control reads these names. input_tokens excludes cache reads and writes on every
-    // provider, and all four counts are always written, so they stay separate. cache_write_1h_tokens
-    // is part of cache_write_tokens; it and cost_usd appear only when the provider states them.
+    // ids only. COS Control reads these names. All four counts are always written. input_tokens never
+    // includes cache reads; it excludes cache writes only on Claude, the one provider that reports
+    // them, so on Codex and direct cache_write_tokens is 0 and any write stays in input_tokens.
+    // resolved_model is the CLI's word on Claude, and what COS asked for elsewhere. provider-usage.ts
+    // says exactly what each means. cache_write_1h_tokens is part of cache_write_tokens; it and cost_usd
+    // appear only when stated.
+    ...(typeof entry.promptChars === 'number' ? { prompt_chars: entry.promptChars } : {}),
     ...(cliSessionId ? { cli_session_id: cliSessionId } : {}),
     ...(real ? {
       input_tokens: real.inputTokens,

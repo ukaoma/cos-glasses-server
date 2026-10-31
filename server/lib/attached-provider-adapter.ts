@@ -106,7 +106,7 @@ import { cursorIsolationUnavailableError, cursorSpawnEnv, isCursorIsolationUnava
 import type { PermissionAllowance } from './banned-permission-args.js'
 import { anyKeyedSessions, isKeyedSession } from './keyed-sessions.js'
 import { claudeKeySecretsGuardArgs } from './key-secrets-guard.js'
-import { SideRunTap } from './provider-usage.js'
+import { forgetCodexThreadTotals, SideRunTap } from './provider-usage.js'
 import { logTokenAudit, type TokenAuditEntry } from './token-audit.js'
 import {
   continueAllowanceFor,
@@ -965,6 +965,8 @@ async function run(
   if (request.abortSignal?.aborted === true) {
     return fail('cancelled', 'not_attempted', { ...base, detail: 'before_spawn', reaped: true, durationMs: duration() })
   }
+  // 6.97.0: this run moves the thread's running total without the bridge seeing it.
+  if (provider === 'codex') forgetCodexThreadTotals(nativeThreadId)
   let child: AttachedChildProcess
   try {
     child = deps.spawn({ binaryPath, args, cwd, env: buildAttachedEnv(), provider })

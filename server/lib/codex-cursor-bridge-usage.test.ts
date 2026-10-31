@@ -3,7 +3,7 @@
 // 58,887 input on one thread), so a resumed turn is charged the difference. Cursor stays estimated.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const state = vi.hoisted(() => ({ child: null as any, audit: [] as Record<string, any>[], resumeThread: null as string | null }))
+const state = vi.hoisted(() => ({ child: null as any, audit: [] as Record<string, any>[], resumeThread: null as string | null, rollout: 1000, probes: 0 }))
 
 vi.mock('node:child_process', async () => {
   const { EventEmitter } = await import('node:events')
@@ -89,7 +89,7 @@ vi.mock('./provider-process-lifecycle.js', () => ({
 
 import { callCodexStreaming } from './codex-bridge.js'
 import { callCursorStreaming } from './cursor-bridge.js'
-import { _resetCodexThreadTotalsForTest } from './provider-usage.js'
+import { _resetCodexThreadTotalsForTest, forgetCodexThreadTotals, registerCodexRolloutProbe } from './provider-usage.js'
 
 const ANSWER = 'SECRET ANSWER WORDS'
 const totals = (input_tokens: number, cached_input_tokens: number, output_tokens: number) => ({ type: 'turn.completed', usage: { input_tokens, cached_input_tokens, cache_write_input_tokens: 0, output_tokens, reasoning_output_tokens: 0 } })
@@ -108,11 +108,17 @@ async function codexTurn(thread: string, resumed: boolean, ...lines: unknown[]) 
   await vi.waitFor(() => expect(state.child?.stdin.end).toHaveBeenCalled())
   emit(state.child, { type: 'thread.started', thread_id: thread }, { type: 'item.completed', item: { type: 'agent_message', text: ANSWER } }, ...lines)
   await vi.waitFor(() => expect(cb.onDone).toHaveBeenCalledTimes(1))
+  state.child.emit('close', 0)
   return { cb, row: state.audit.at(-1)! }
 }
 
-beforeEach(() => { state.audit.length = 0; state.resumeThread = null; _resetCodexThreadTotalsForTest(); delete process.env.COS_CODEX_EXTRA_ARGS })
-afterEach(() => { state.child = null })
+beforeEach(() => {
+  state.audit.length = 0; state.resumeThread = null; state.rollout = 1000; state.probes = 0
+  _resetCodexThreadTotalsForTest()
+  registerCodexRolloutProbe(() => { state.probes++; return state.rollout })
+  delete process.env.COS_CODEX_EXTRA_ARGS
+})
+afterEach(() => { state.child = null; registerCodexRolloutProbe(null) })
 
 describe('Codex', () => {
   it('a fresh thread: real counts with cached subtracted from input, no cost, run id and thread id', async () => {
@@ -127,6 +133,43 @@ describe('Codex', () => {
     expect(second.row.realUsage).toEqual({ inputTokens: 19629 - 19456, cacheReadTokens: 19456, outputTokens: 5, resolvedModel: 'gpt-test' })
     const third = await codexTurn('thread-probe', true, totals(58887, 38912, 15))
     expect(third.row.realUsage).toEqual({ inputTokens: 19648 - 19456, cacheReadTokens: 19456, outputTokens: 5, resolvedModel: 'gpt-test' })
+  })
+  it('an attached run between turns: estimated, not the 8,000 tokens it ran charged to this turn', async () => {
+    await codexTurn('thread-attached', false, totals(1000, 500, 50))
+    forgetCodexThreadTotals('thread-attached')
+    const { cb, row } = await codexTurn('thread-attached', true, totals(9100, 8450, 510))
+    expect(cb.onDone.mock.calls[0][0]).toBe(ANSWER)
+    expect(row).not.toHaveProperty('realUsage')
+    expect(row).toMatchObject({ runId: 'codex-run-usage', cliSessionId: 'thread-attached' })
+  })
+  it('the rollout grew between turns, as the desktop app would: estimated', async () => {
+    await codexTurn('thread-desktop', false, totals(1000, 500, 50))
+    state.rollout = 9000
+    const { cb, row } = await codexTurn('thread-desktop', true, totals(9100, 8450, 510))
+    expect(cb.onDone.mock.calls[0][0]).toBe(ANSWER)
+    expect(row).not.toHaveProperty('realUsage')
+  })
+  it('a timed-out turn that saw no total leaves nothing for the next turn to overcharge against', async () => {
+    await codexTurn('thread-timeout', false, totals(1000, 500, 50))
+    state.resumeThread = 'thread-timeout'
+    state.child = null
+    const failed = callbacks()
+    await callCodexStreaming('SECRET PROMPT WORDS', `codex-usage-${++n}`, failed, 'codex-high' as any, undefined, undefined, undefined, { lightweight: true, clientJobId: `job-${n}` } as any)
+    await vi.waitFor(() => expect(state.child?.stdin.end).toHaveBeenCalled())
+    emit(state.child, { type: 'thread.started', thread_id: 'thread-timeout' }, { type: 'turn.failed', error: { message: 'boom' } })
+    await vi.waitFor(() => expect(failed.onError).toHaveBeenCalled())
+    state.child.emit('close', 1)
+    const { row } = await codexTurn('thread-timeout', true, totals(9100, 8450, 510))
+    expect(row).not.toHaveProperty('realUsage')
+  })
+  it('a fresh run never reads the rollout before it starts', async () => {
+    state.probes = 0
+    state.resumeThread = null
+    state.child = null
+    const cb = callbacks()
+    await callCodexStreaming('q', `codex-usage-${++n}`, cb, 'codex-high' as any, undefined, undefined, undefined, { lightweight: true, clientJobId: `job-${n}` } as any)
+    await vi.waitFor(() => expect(state.child?.stdin.end).toHaveBeenCalled())
+    expect(state.probes).toBe(0)
   })
   it('a resumed thread this server has no total for stays estimated, with its ids', async () => {
     const { row } = await codexTurn('thread-unknown', true, totals(39239, 19456, 10))
@@ -166,7 +209,7 @@ describe('Cursor', () => {
   it('stays estimated whatever usage it prints, and writes the run id and chat id', async () => {
     const { cb, row } = await cursorTurn({ type: 'system', subtype: 'init', session_id: 'chat-usage-1' }, { type: 'result', subtype: 'success', is_error: false, result: ANSWER, session_id: 'chat-usage-1', usage: { inputTokens: 500, outputTokens: 20, cacheReadTokens: 9 } })
     expect(cb.onDone.mock.calls[0][0]).toBe(ANSWER)
-    expect(row).toMatchObject({ usageKind: 'estimated', runId: 'cursor-run-usage', cliSessionId: 'chat-usage-1' })
+    expect(row).toMatchObject({ runId: 'cursor-run-usage', cliSessionId: 'chat-usage-1' })
     expect(row).not.toHaveProperty('realUsage')
   })
   it('no prompt or answer text reaches the audit', async () => {

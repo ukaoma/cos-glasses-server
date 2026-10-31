@@ -17,12 +17,21 @@
 //   Codex turn.completed.usage       RUNNING TOTAL for the thread, across `exec resume`.
 //                                    `input_tokens` includes `cached_input_tokens`.
 //
-// A row's numbers mean the same on every provider, so a reader can price them one way:
-// inputTokens is what ran at the full input rate. Cache reads and writes are separate, never inside it.
+// WHAT A ROW'S NUMBERS MEAN, PER PROVIDER. They are not the same everywhere, and a reader pricing them
+// should know why. inputTokens never includes cache reads. Cache writes are another matter:
+//   Claude  inputTokens excludes reads and writes. cacheWriteTokens is what the CLI reports.
+//   Codex   inputTokens is input_tokens minus cached. cacheWriteTokens is absent: its own field read 0
+//           on all 31,670 rollout rows checked on 2026-10-31, and nothing shows whether a nonzero one
+//           would sit inside input_tokens, so any write stays in inputTokens.
+//   Direct  inputTokens is prompt_tokens minus cached_tokens, when the provider states those. No cache
+//           write is read, so any write stays in inputTokens.
+//   Ollama  no cache at all.
+// resolvedModel is what the provider says ran only on Claude. On Codex, direct and Ollama it is the id
+// COS asked for (`--model`, or the request): Codex's stream names no model.
 
 /** Measured usage of one run. Only `normalizeRealUsage` decides whether it counts as measured. */
 export interface RealUsage {
-  /** At the full input rate: excludes cache reads and cache writes. */
+  /** Never includes cache reads. Excludes cache writes only where they are reported: see the header. */
   inputTokens: number
   outputTokens: number
   cacheReadTokens?: number
@@ -31,7 +40,7 @@ export interface RealUsage {
   cacheWrite1hTokens?: number
   /** Only when the provider stated it. Never computed here. */
   costUsd?: number
-  /** The model id the provider says it ran, not the alias COS asked for. */
+  /** Claude: the id the CLI says it ran. Codex, direct, Ollama: the id COS asked for. See the header. */
   resolvedModel?: string
 }
 
@@ -42,11 +51,19 @@ export interface EngineUsage {
 }
 
 // Provider ids and model slugs have no spaces, so text from a prompt or an answer cannot pass here
-// even if a provider ever put it in one of these fields.
+// even if a provider ever put it in one of these fields. Two more shapes are refused because the audit
+// file outlives everything that wrote it: anything shaped like a credential (the prefixes
+// lens-gist-engines.ts redacts, and any long unbroken run, which no session id or model slug has:
+// a UUID's longest is 12), and anything shaped like a path (one slash at most, as in vendor/model).
 const PROVIDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+[\]-]{0,127}$/
+const KEY_SHAPED_RE = /(?:^|[^A-Za-z0-9])(?:sk|pk|rk|ak|pat)-[A-Za-z0-9_-]{3,}|(?:^|[^A-Za-z0-9])(?:gh[pousr]_|github_pat_|xox[abposr]-|eyJ[A-Za-z0-9_-]{4,}\.)|(?:^|[^A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{8,}|[A-Za-z0-9]{32,}/i
+const SLASH_RE = /\//g
 
 export function cleanProviderId(value: unknown): string | undefined {
-  return typeof value === 'string' && PROVIDER_ID_RE.test(value) ? value : undefined
+  if (typeof value !== 'string' || !PROVIDER_ID_RE.test(value)) return undefined
+  if (KEY_SHAPED_RE.test(value)) return undefined
+  if (value.includes('..') || (value.match(SLASH_RE)?.length ?? 0) > 1) return undefined
+  return value
 }
 
 function count(value: unknown): number | undefined {
@@ -122,12 +139,14 @@ function addTally(into: ClaudeTally, more: ClaudeTally): void {
   for (const [model, weight] of more.byModel) into.byModel.set(model, (into.byModel.get(model) ?? 0) + weight)
 }
 
-/** A modelUsage-shaped map. One malformed row makes the whole map unusable, never half a reading. */
+/**
+ * A modelUsage-shaped map. One malformed row makes the whole map unusable, never half a reading.
+ * An empty map is a real answer, not a missing one: the CLI counted nothing, so it is an empty tally.
+ */
 function tallyFromModelMap(map: unknown): ClaudeTally | null {
   const rows = record(map)
   if (!rows) return null
   const tally = emptyTally()
-  let seen = 0
   for (const [model, row] of Object.entries(rows)) {
     const r = record(row)
     if (!r) return null
@@ -142,9 +161,12 @@ function tallyFromModelMap(map: unknown): ClaudeTally | null {
       input, output, cacheRead: read, cacheWrite: write, cacheWrite1h: count(r.cacheCreationEphemeral1hInputTokens), cost,
       byModel: new Map(id ? [[id, input + output + read + write]] : []),
     })
-    seen++
   }
-  return seen > 0 ? tally : null
+  return tally
+}
+
+function hasTokens(tally: ClaudeTally): boolean {
+  return tally.input + tally.output + tally.cacheRead + tally.cacheWrite > 0
 }
 
 /** The `usage` of a result: one turn, main loop only. It states no cost. */
@@ -171,7 +193,8 @@ function tallyFromTurnUsage(usage: unknown): ClaudeTally | null {
 export class ClaudeRunUsage {
   private readonly seen = new Set<string>()
   private results = 0
-  private sinceCount = 0
+  /** Sticky for the run: once the CLI states per-result usage, its running totals are never read. */
+  private sawSince = false
   private since = emptyTally()
   private turnCount = 0
   private turns = emptyTally()
@@ -203,10 +226,11 @@ export class ClaudeRunUsage {
       }
       this.results++
       const since = tallyFromModelMap(e.model_usage_since_last_result)
-      if (since) { addTally(this.since, since); this.sinceCount++ }
+      if (since) { addTally(this.since, since); this.sawSince = true }
       const turn = tallyFromTurnUsage(e.usage)
       if (turn) { addTally(this.turns, turn); this.turnCount++ }
-      this.cumulative = tallyFromModelMap(e.modelUsage) ?? this.cumulative
+      const cumulative = tallyFromModelMap(e.modelUsage)
+      if (cumulative && hasTokens(cumulative)) this.cumulative = cumulative
       this.cumulativeCost = dollars(e.total_cost_usd) ?? this.cumulativeCost
     } catch {
       /* best effort: the row stays estimated */
@@ -218,7 +242,6 @@ export class ClaudeRunUsage {
     try {
       const out = this.compute()
       this.results = 0
-      this.sinceCount = 0
       this.since = emptyTally()
       this.turnCount = 0
       this.turns = emptyTally()
@@ -230,7 +253,7 @@ export class ClaudeRunUsage {
 
   private compute(): RealUsage | null {
     if (this.results === 0) return null
-    if (this.sinceCount === this.results) return this.toUsage(this.since, this.since.cost)
+    if (this.sawSince) return this.toUsage(this.since, this.since.cost)
     // Below this line the running totals or per-turn usage are all there is. They cover a whole run,
     // so they are read at most once; a late result on such a CLI is not counted rather than doubled.
     if (this.totalsTaken) return null
@@ -279,10 +302,7 @@ function codexTotals(event: Record<string, unknown>): CodexTotals | null {
   return { input, cached, output }
 }
 
-/**
- * `cache_write_input_tokens` is left in input: it has read 0 on every row seen, and nothing yet shows
- * whether it sits inside `input_tokens`. No cost: Codex does not state one.
- */
+/** No cost: Codex does not state one. On `cache_write_input_tokens`, see the header. */
 function codexRealUsage(totals: CodexTotals, model: string | undefined): RealUsage | null {
   return normalizeRealUsage({
     inputTokens: Math.max(0, totals.input - totals.cached),
@@ -292,14 +312,38 @@ function codexRealUsage(totals: CodexTotals, model: string | undefined): RealUsa
   })
 }
 
-/** The last running total seen per thread, for the next resumed turn. Lost on restart, on purpose. */
-const codexThreadTotals = new Map<string, CodexTotals>()
+/** Where a thread's rollout had got to, in bytes, or null when that cannot be read. */
+export type CodexRolloutProbe = (threadId: string) => number | null
+
+/**
+ * Registered at boot (codex-rollout-watermark.ts), so this file and the bridge do not load the session
+ * stores. With none registered, a resumed turn can prove nothing and stays estimated. Not per-run: the
+ * seam is the whole point of `registerCodexRolloutProbe`, and tests set it the same way.
+ */
+let registeredCodexRolloutProbe: CodexRolloutProbe | null = null
+export function registerCodexRolloutProbe(probe: CodexRolloutProbe | null): void {
+  registeredCodexRolloutProbe = probe
+}
+
+interface CodexBaseline {
+  totals: CodexTotals
+  /** The rollout's size once this bridge's turn had closed. Unset until then; null when unreadable. */
+  watermark?: number | null
+}
+
+/** The last running total this bridge saw per thread, for its next turn. Lost on restart, on purpose. */
+const codexThreadTotals = new Map<string, CodexBaseline>()
 const CODEX_THREAD_TOTALS_MAX = 512
 
 function rememberCodexTotals(threadId: string, totals: CodexTotals): void {
   codexThreadTotals.delete(threadId)
-  codexThreadTotals.set(threadId, totals)
+  codexThreadTotals.set(threadId, { totals })
   if (codexThreadTotals.size > CODEX_THREAD_TOTALS_MAX) codexThreadTotals.delete(codexThreadTotals.keys().next().value!)
+}
+
+/** Something other than this bridge is about to run on the thread: its next difference would be wrong. */
+export function forgetCodexThreadTotals(threadId: string): void {
+  codexThreadTotals.delete(threadId)
 }
 
 export function _resetCodexThreadTotalsForTest(): void {
@@ -308,15 +352,40 @@ export function _resetCodexThreadTotalsForTest(): void {
 
 /**
  * One Codex process's usage. A fresh thread's running total IS its first turn. A resumed turn is the
- * difference from the last total this server saw on that thread; with no such total (first resume
- * after a restart, or a thread started elsewhere) there is no honest number, so the row stays
- * estimated and the total is kept for the next turn.
+ * difference from the last total, but only when this bridge can show nothing else ran on the thread
+ * since. A wrong real number is worse than an estimate, so each of these stays estimated:
+ *   - no earlier total: the first resume after a restart, or a thread started elsewhere;
+ *   - an earlier turn that never reported one (wall timeout, failure): `begin` consumes the baseline,
+ *     so a turn that does not end with a total leaves none behind;
+ *   - an attached run (`forgetCodexThreadTotals`);
+ *   - the rollout grew between turns: the desktop app or the CLI, which COS cannot see any other way.
+ * The total is kept each time, so the turn after is real again.
  */
 export class CodexRunUsage {
   private last: CodexTotals | null = null
+  private prior: CodexTotals | null = null
+  private closed = false
+  private finishedThread: string | undefined
 
-  /** `model` is the id COS passed on `--model`: Codex's stream never names the model it ran. */
-  constructor(private readonly model?: string) {}
+  /**
+   * `model` is the id COS passed on `--model`: Codex's stream never names the model it ran. `probe`
+   * reads the rollout, defaulting to the one registered at boot.
+   */
+  constructor(private readonly model?: string, private readonly probe: CodexRolloutProbe | null = registeredCodexRolloutProbe) {}
+
+  /** Before the process starts, when resuming: it writes to the rollout from its first moment. */
+  begin(resumedFrom: string | undefined): void {
+    try {
+      const thread = cleanProviderId(resumedFrom)
+      if (!thread) return
+      const baseline = codexThreadTotals.get(thread)
+      codexThreadTotals.delete(thread)
+      if (!baseline || baseline.watermark === undefined || baseline.watermark === null) return
+      if (this.probe?.(thread) === baseline.watermark) this.prior = baseline.totals
+    } catch {
+      this.prior = null
+    }
+  }
 
   /** Never throws: this runs inside the bridge's event handler. */
   observe(event: unknown): void {
@@ -335,15 +404,34 @@ export class CodexRunUsage {
       const totals = this.last
       if (!totals) return null
       const thread = cleanProviderId(threadId)
-      const prior = thread ? codexThreadTotals.get(thread) : undefined
-      if (thread) rememberCodexTotals(thread, totals)
+      if (thread) {
+        rememberCodexTotals(thread, totals)
+        this.finishedThread = thread
+        if (this.closed) this.stampWatermark()
+      }
       if (!resumedFrom) return codexRealUsage(totals, this.model)
-      if (!prior) return null
+      const prior = this.prior
+      if (!prior || thread !== resumedFrom) return null
       const delta = { input: totals.input - prior.input, cached: totals.cached - prior.cached, output: totals.output - prior.output }
       if (delta.input < 0 || delta.cached < 0 || delta.output < 0) return null
       return codexRealUsage(delta, this.model)
     } catch {
       return null
+    }
+  }
+
+  /** When the process has closed, so everything it wrote is on disk. Row and close can land in either order. */
+  settle(): void {
+    this.closed = true
+    this.stampWatermark()
+  }
+
+  private stampWatermark(): void {
+    try {
+      const baseline = this.finishedThread ? codexThreadTotals.get(this.finishedThread) : undefined
+      if (baseline && baseline.watermark === undefined) baseline.watermark = this.probe?.(this.finishedThread!) ?? null
+    } catch {
+      /* no watermark: the next turn stays estimated */
     }
   }
 }
@@ -407,8 +495,7 @@ const SIDE_RUN_LINE_RE = /"type":"result"|"subtype":"init"|"agent_message"/
 /**
  * Reads one attached or fork run's stdout. Both run on the user's own thread (resumed or copied), and
  * the user can also run that thread from the desktop. So Claude reports only the per-result field or
- * main-loop tokens, and Codex stays estimated: the difference between two of its totals would charge
- * this run for whatever else ran on the thread between them.
+ * main-loop tokens, and Codex stays estimated: it has no baseline it could trust here.
  */
 export class SideRunTap {
   private tail = ''

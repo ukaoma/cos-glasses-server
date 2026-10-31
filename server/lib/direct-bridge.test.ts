@@ -333,7 +333,7 @@ describe('direct lane turns (mock OpenAI server, fake relay)', () => {
 
     // Token audit: provider-final usage on the direct lane, with the key fields.
     expect(logTokenAudit).toHaveBeenCalledTimes(1)
-    expect(logTokenAudit.mock.calls[0]![0]).toMatchObject({ model: 'anthropic/claude-sonnet-5.5', usageKind: 'provider_final', lane: 'direct', profile: 'direct-sonnet', credentialKind: 'openrouter', usd: 0.0042, caller: 'direct_query' })
+    expect(logTokenAudit.mock.calls[0]![0]).toMatchObject({ model: 'anthropic/claude-sonnet-5.5', lane: 'direct', profile: 'direct-sonnet', credentialKind: 'openrouter', usd: 0.0042, caller: 'direct_query' })
 
     expect(getHistory(sid).map(e => [e.role, e.content])).toEqual([['user', 'what is left today'], ['assistant', 'Two meetings left.']])
     const run = listDirectRuns(5, sid)[0]!
@@ -348,7 +348,7 @@ describe('direct lane turns (mock OpenAI server, fake relay)', () => {
     const { relay, state } = fakeRelay()
     handler = (_b, res) => sendText(res, ['Hi.'], [1_000_000, 100_000])
     await callDirectStreaming('q', undefined, collect().callbacks, profile(), undefined, undefined, undefined, opts(relay))
-    expect(logTokenAudit.mock.calls[0]![0]).toMatchObject({ usd: 3, usageKind: 'provider_final' }) // $2/M in + $10/M out (built-in Sonnet price)
+    expect(logTokenAudit.mock.calls[0]![0]).toMatchObject({ usd: 3 }) // $2/M in + $10/M out (built-in Sonnet price)
     expect(state.settles[0]).toMatchObject({ input: 1_000_000, output: 100_000 })
     expect(state.settles[0]).not.toHaveProperty('costUsd')
 
@@ -357,7 +357,7 @@ describe('direct lane turns (mock OpenAI server, fake relay)', () => {
     logTokenAudit.mockClear()
     await callDirectStreaming('q', undefined, collect().callbacks, profile(), undefined, undefined, undefined, opts(second.relay))
     expect(second.state.settles).toEqual([null])
-    expect(logTokenAudit.mock.calls[0]![0]).toMatchObject({ usageKind: 'estimated', usd: 0 })
+    expect(logTokenAudit.mock.calls[0]![0]).toMatchObject({ usd: 0 })
   })
 
   describe('6.97.0: real usage on the row', () => {

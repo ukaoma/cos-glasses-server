@@ -38,12 +38,15 @@ describe('buildTokenAuditRecord', () => {
   it('a provider with no cache split still writes all four counts', () => {
     expect(buildTokenAuditRecord({ ...base, realUsage: { inputTokens: 300, outputTokens: 20 } }, at)).toMatchObject({ input_tokens: 300, output_tokens: 20, cache_read_tokens: 0, cache_write_tokens: 0 })
   })
-  it('provider_final only with real numbers: asking for it does not make it so', () => {
-    expect(buildTokenAuditRecord({ ...base, usageKind: 'provider_final' }, at)).toMatchObject({ usage_kind: 'estimated' })
+  it('provider_final only with real numbers', () => {
     for (const bad of [{ inputTokens: 0, outputTokens: 0 }, { inputTokens: Number.NaN, outputTokens: 2 }, { inputTokens: 5 }, 'garbage', { inputTokens: -1, outputTokens: 1 }]) {
-      const rec = buildTokenAuditRecord({ ...base, usageKind: 'provider_final', realUsage: bad as any }, at)
+      const rec = buildTokenAuditRecord({ ...base, realUsage: bad as any }, at)
       expect(JSON.stringify(rec)).toBe(ROW_6964)
     }
+  })
+  it('prompt_chars is its own field: input_chars and est_input_tokens do not move', () => {
+    const rec = buildTokenAuditRecord({ ...base, promptChars: 2400 }, at)
+    expect(JSON.stringify(rec)).toBe(ROW_6964.replace('"usage_kind":"estimated"}', '"usage_kind":"estimated","prompt_chars":2400}'))
   })
   it('a usd on a keyed row stays what it is, beside the provider cost', () => {
     const rec = buildTokenAuditRecord({ ...base, usd: 0.5, lane: 'key', realUsage: real }, at)
@@ -55,6 +58,12 @@ describe('buildTokenAuditRecord', () => {
     expect(JSON.stringify(rec)).not.toContain('private')
     expect(rec).not.toHaveProperty('cli_session_id')
     expect(rec).not.toHaveProperty('resolved_model')
+  })
+  it('no key or path can enter through an id or a model name', () => {
+    const rec = buildTokenAuditRecord({ ...base, cliSessionId: 'sk-ant-abc123def456', realUsage: { inputTokens: 1, outputTokens: 1, resolvedModel: 'Users/ukaoma/notes.md' } }, at)
+    expect(rec).not.toHaveProperty('cli_session_id')
+    expect(rec).not.toHaveProperty('resolved_model')
+    expect(JSON.stringify(rec)).not.toMatch(/sk-ant|notes\.md/)
   })
   it('a row only carries the keys it is built from, so extra text on the usage object is dropped', () => {
     const rec = buildTokenAuditRecord({ ...base, realUsage: { inputTokens: 1, outputTokens: 1, text: 'SECRET ANSWER', prompt: 'SECRET PROMPT' } as any }, at)

@@ -3,7 +3,7 @@
 // gpt-6-astra, in a scratch directory). They are here because the obvious reading of each is wrong.
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
-  ClaudeRunUsage, CodexRunUsage, SideRunTap, _resetCodexThreadTotalsForTest, cleanProviderId, normalizeRealUsage, readOneShotUsage,
+  ClaudeRunUsage, CodexRunUsage, SideRunTap, _resetCodexThreadTotalsForTest, cleanProviderId, forgetCodexThreadTotals, normalizeRealUsage, readOneShotUsage,
 } from './provider-usage.js'
 
 const HAIKU = 'claude-haiku-5-5'
@@ -75,6 +75,22 @@ describe('cleanProviderId: no text can pass as an id', () => {
     for (const id of ['claude-haiku-5-5', 'claude-opus-5-5[1m]', 'anthropic/claude-sonnet-5.5', 'qwen3.8:27b', '01a00ab4-7350-74a3-bfac-743d1f129630']) expect(cleanProviderId(id)).toBe(id)
     for (const bad of ['the quarterly plan', 'a\nb', '', ' leading', 42, null, undefined, 'x'.repeat(129)]) expect(cleanProviderId(bad)).toBeUndefined()
   })
+  it('refuses a credential that is shaped like an id, wherever it sits', () => {
+    const fake = 'a1b2c3d4e5f6'
+    for (const key of [`sk-${fake}`, `sk-ant-${fake}`, `sk-or-v1-${fake}`, `SK-${fake}`, `vendor/sk-${fake}`, `pk-${fake}`, `rk-live-${fake}`, `ghp_${fake}`, `github_pat_${fake}`, `xoxb-${fake}`, `AKIA${'ABCD1234EFGH5678'}`, `pat-na1-${fake}`, `eyJhbGciOiJ.${fake}`, 'f'.repeat(32), 'a1'.repeat(20)]) {
+      expect(cleanProviderId(key), key).toBeUndefined()
+    }
+  })
+  it('refuses anything shaped like a path', () => {
+    for (const path of ['Users/ukaoma/notes.md', 'a/b/c', 'hf.co/org/model', '../secret', 'a..b', 'foo/../bar', '.env', '/etc/passwd', '~/x']) {
+      expect(cleanProviderId(path), path).toBeUndefined()
+    }
+  })
+  it('does not refuse the real ids that look a little like those', () => {
+    for (const id of ['task-claude-opus-5', 'mask-model', 'gpt-6-astra', 'gpt-5.6-terra', 'openrouter/auto', 'anthropic/claude-sonnet-5.5:thinking', '01a00ab4-b9fd-7680-904a-21e49cc9af2c', 'gist-session-1']) {
+      expect(cleanProviderId(id), id).toBe(id)
+    }
+  })
 })
 
 describe('ClaudeRunUsage', () => {
@@ -135,12 +151,47 @@ describe('ClaudeRunUsage', () => {
     run.observe(STEER_2)
     expect(run.take()).toMatchObject({ inputTokens: 2, outputTokens: 5, cacheWriteTokens: 566, costUsd: 0.0001159 })
   })
-  it('a result without the field beside one with it never mixes the two', () => {
+  it('a result without the field beside one with it never mixes the two: the field wins, totals stay unread', () => {
     const run = new ClaudeRunUsage(true)
     const { model_usage_since_last_result: _dropped, ...second } = STEER_2 as Record<string, unknown>
     run.observe(STEER_1)
     run.observe(second)
-    expect(run.take()).toMatchObject({ inputTokens: 4, outputTokens: 9, cacheWriteTokens: 1099 })
+    expect(run.take()).toMatchObject({ inputTokens: 2, outputTokens: 4, cacheWriteTokens: 533, costUsd: 0.0001088 })
+  })
+  it('{} is a real answer, nothing counted: a late one reports nothing, and never the whole run\'s totals', () => {
+    for (const resumed of [false, true]) {
+      const run = new ClaudeRunUsage(resumed)
+      run.observe(STEER_1)
+      expect(run.take()).toMatchObject({ inputTokens: 2, outputTokens: 4, costUsd: 0.0001088 })
+      run.observe(result({ uuid: 'late', usage: turn(9, 9, 0, 0), total_cost_usd: 0.9, modelUsage: { [HAIKU]: row(99, 99, 0, 0, 0.9) }, model_usage_since_last_result: {} }))
+      expect(run.take()).toBeNull()
+    }
+  })
+  it('a resumed steered run with a {} result keeps its counted usage and cost, not the main loop\'s', () => {
+    const run = new ClaudeRunUsage(true)
+    run.observe(result({ uuid: 'a', usage: turn(10, 20, 0, 0), total_cost_usd: 5, modelUsage: { [HAIKU]: row(5000, 6000, 0, 0, 5) }, model_usage_since_last_result: { [HAIKU]: row(500, 600, 0, 0, 0.25) } }))
+    run.observe(result({ uuid: 'b', usage: turn(0, 0, 0, 0), total_cost_usd: 5, modelUsage: { [HAIKU]: row(5000, 6000, 0, 0, 5) }, model_usage_since_last_result: {} }))
+    expect(run.take()).toMatchObject({ inputTokens: 500, outputTokens: 600, costUsd: 0.25 })
+  })
+  it('a run whose only result counted nothing reports nothing', () => {
+    const run = new ClaudeRunUsage(false)
+    run.observe(result({ usage: turn(0, 0, 0, 0), total_cost_usd: 0, modelUsage: {}, model_usage_since_last_result: {} }))
+    expect(run.take()).toBeNull()
+  })
+  it('once the field was seen, a later take never falls back to totals, even on a malformed result', () => {
+    const run = new ClaudeRunUsage(false)
+    run.observe(STEER_1)
+    run.take()
+    const { model_usage_since_last_result: _dropped, ...noField } = STEER_2 as Record<string, unknown>
+    run.observe(noField)
+    expect(run.take()).toBeNull()
+    run.observe(result({ uuid: 'r9', modelUsage: { [HAIKU]: row(7, 7, 0, 0, 0.7) }, total_cost_usd: 0.7, model_usage_since_last_result: [1] }))
+    expect(run.take()).toBeNull()
+  })
+  it('an empty modelUsage does not wipe a total, and real turn usage still reads on a fresh older CLI', () => {
+    const run = new ClaudeRunUsage(false)
+    run.observe(result({ usage: turn(3, 4, 0, 0), modelUsage: {} }))
+    expect(run.take()).toMatchObject({ inputTokens: 3, outputTokens: 4 })
   })
   it('a zero cost beside real tokens is no cost: the CLI could not price them', () => {
     const run = new ClaudeRunUsage(false)
@@ -178,11 +229,17 @@ describe('ClaudeRunUsage', () => {
 })
 
 describe('CodexRunUsage', () => {
-  beforeEach(() => _resetCodexThreadTotalsForTest())
+  let rollout = 1000
+  beforeEach(() => { _resetCodexThreadTotalsForTest(); rollout = 1000 })
+  const probe = () => rollout
+  // One bridge turn in order: begin before the spawn, then the row, then the process closes.
   const finish = (event: unknown, thread: string | undefined, resumedFrom: string | undefined) => {
-    const run = new CodexRunUsage()
+    const run = new CodexRunUsage(undefined, probe)
+    run.begin(resumedFrom)
     run.observe(event)
-    return run.finish(thread, resumedFrom)
+    const usage = run.finish(thread, resumedFrom)
+    run.settle()
+    return usage
   }
 
   it('input_tokens includes cached ones on Codex: the row subtracts them, so the counts stay separate', () => {
@@ -198,6 +255,89 @@ describe('CodexRunUsage', () => {
     expect(finish(CODEX_2, 'thread-b', 'thread-b')).toBeNull()
     expect(finish(CODEX_3, 'thread-b', 'thread-b')).toEqual({ inputTokens: 192, outputTokens: 5, cacheReadTokens: 19456 })
   })
+  // The repro: a real 100/50/10 turn, read against a baseline from before 8,000 tokens ran elsewhere.
+  const BEFORE = { type: 'turn.completed', usage: { input_tokens: 1000, cached_input_tokens: 500, output_tokens: 50 } }
+  const AFTER = { type: 'turn.completed', usage: { input_tokens: 9100, cached_input_tokens: 8450, output_tokens: 510 } }
+  it('an attached run on the thread drops the baseline: estimated, not 150 in and 7,950 cached, then real again', () => {
+    finish(BEFORE, 'thread-h', undefined)
+    forgetCodexThreadTotals('thread-h')
+    expect(finish(AFTER, 'thread-h', 'thread-h')).toBeNull()
+    expect(finish({ type: 'turn.completed', usage: { input_tokens: 9200, cached_input_tokens: 8500, output_tokens: 520 } }, 'thread-h', 'thread-h'))
+      .toEqual({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 50 })
+  })
+  it('the rollout grew between turns, as the desktop app would: estimated, then real again', () => {
+    finish(BEFORE, 'thread-i', undefined)
+    rollout = 5000
+    expect(finish(AFTER, 'thread-i', 'thread-i')).toBeNull()
+    expect(finish({ type: 'turn.completed', usage: { input_tokens: 9200, cached_input_tokens: 8500, output_tokens: 520 } }, 'thread-i', 'thread-i'))
+      .toEqual({ inputTokens: 50, outputTokens: 10, cacheReadTokens: 50 })
+  })
+  it('a turn that never reported a total (wall timeout, failure) leaves no baseline for the next one to overcharge against', () => {
+    finish(BEFORE, 'thread-j', undefined)
+    const timedOut = new CodexRunUsage(undefined, probe)
+    timedOut.begin('thread-j')
+    expect(timedOut.finish('thread-j', 'thread-j')).toBeNull()
+    timedOut.settle()
+    expect(finish(AFTER, 'thread-j', 'thread-j')).toBeNull()
+  })
+  it('a turn that started and never reached a row leaves no baseline either', () => {
+    finish(BEFORE, 'thread-k', undefined)
+    new CodexRunUsage(undefined, probe).begin('thread-k')
+    expect(finish(AFTER, 'thread-k', 'thread-k')).toBeNull()
+  })
+  it('an unreadable rollout proves nothing: estimated, either side of the turn', () => {
+    const unreadable = () => null
+    const first = new CodexRunUsage(undefined, unreadable)
+    first.observe(BEFORE)
+    first.finish('thread-l', undefined)
+    first.settle()
+    expect(finish(AFTER, 'thread-l', 'thread-l')).toBeNull()
+    const second = new CodexRunUsage(undefined, probe)
+    second.observe(BEFORE)
+    second.finish('thread-m', undefined)
+    second.settle()
+    const next = new CodexRunUsage(undefined, unreadable)
+    next.begin('thread-m')
+    next.observe(AFTER)
+    expect(next.finish('thread-m', 'thread-m')).toBeNull()
+  })
+  it('with no probe registered a resumed turn can prove nothing', () => {
+    const first = new CodexRunUsage()
+    first.observe(BEFORE)
+    first.finish('thread-n', undefined)
+    first.settle()
+    const next = new CodexRunUsage()
+    next.begin('thread-n')
+    next.observe(AFTER)
+    expect(next.finish('thread-n', 'thread-n')).toBeNull()
+  })
+  it('the process can close before or after the row is written: the watermark lands either way', () => {
+    const early = new CodexRunUsage(undefined, probe)
+    early.observe(BEFORE)
+    early.settle()
+    early.finish('thread-o', undefined)
+    expect(finish(AFTER, 'thread-o', 'thread-o')).toEqual({ inputTokens: 150, outputTokens: 460, cacheReadTokens: 7950 })
+    const late = new CodexRunUsage(undefined, probe)
+    late.observe(BEFORE)
+    late.finish('thread-p', undefined)
+    late.settle()
+    expect(finish(AFTER, 'thread-p', 'thread-p')).toMatchObject({ outputTokens: 460, cacheReadTokens: 7950 })
+  })
+  it('the watermark is taken after the close, not at the row: the run\'s own last writes are not "outside"', () => {
+    const run = new CodexRunUsage(undefined, probe)
+    run.observe(BEFORE)
+    run.finish('thread-q', undefined)
+    rollout = 1200
+    run.settle()
+    expect(finish(AFTER, 'thread-q', 'thread-q')).toMatchObject({ cacheReadTokens: 7950 })
+  })
+  it('a resume that came back on another thread is not a difference', () => {
+    finish(BEFORE, 'thread-r', undefined)
+    const run = new CodexRunUsage(undefined, probe)
+    run.begin('thread-r')
+    run.observe(AFTER)
+    expect(run.finish('thread-other', 'thread-r')).toBeNull()
+  })
   it('a total that went backwards is not a turn', () => {
     finish(CODEX_3, 'thread-c', undefined)
     expect(finish(CODEX_2, 'thread-c', 'thread-c')).toBeNull()
@@ -207,10 +347,12 @@ describe('CodexRunUsage', () => {
     expect(finish({ type: 'turn.completed', usage: { input_tokens: 90, cached_input_tokens: 50, output_tokens: 9 } }, 'thread-f', 'thread-f')).toBeNull()
   })
   it('names the model COS passed on --model, since its stream names none', () => {
-    const run = new CodexRunUsage('gpt-6-astra')
+    const run = new CodexRunUsage('gpt-6-astra', probe)
     run.observe(CODEX_1)
     expect(run.finish('thread-g', undefined)).toMatchObject({ resolvedModel: 'gpt-6-astra' })
-    const resumed = new CodexRunUsage('gpt-6-astra')
+    run.settle()
+    const resumed = new CodexRunUsage('gpt-6-astra', probe)
+    resumed.begin('thread-g')
     resumed.observe(CODEX_2)
     expect(resumed.finish('thread-g', 'thread-g')).toMatchObject({ resolvedModel: 'gpt-6-astra', inputTokens: 173 })
   })
