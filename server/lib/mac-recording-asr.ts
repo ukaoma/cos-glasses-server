@@ -9,10 +9,12 @@ export class MacParakeetUnavailableError extends Error {
   readonly status = 503
   readonly retryable = true
   readonly model = 'parakeet-ultra'
-  readonly reason: `mac_parakeet_${ParakeetFailure}` | `phone_parakeet_${ParakeetFailure}`
+  readonly reason: `mac_parakeet_${ParakeetFailure | 'internal'}` | `phone_parakeet_${ParakeetFailure | 'internal'}`
 
   constructor(cause: unknown, source: 'Mac' | 'iPhone' = 'Mac') {
-    const reason = cause instanceof ParakeetError ? cause.reason : 'cli_failed'
+    // Anything but a ParakeetError never reached the CLI. Calling it cli_failed sent a stuck
+    // meeting's diagnosis to a tool that had exited 0 on every window (2026-10-31).
+    const reason = cause instanceof ParakeetError ? cause.reason : 'internal'
     const diagnostic = cause instanceof ParakeetError && cause.reason === 'cli_failed' ? `; ${cause.message}` : ''
     super(`Selected Parakeet Ultra could not transcribe this ${source} chunk (${reason})${diagnostic}; audio is preserved for retry`)
     this.name = 'MacParakeetUnavailableError'

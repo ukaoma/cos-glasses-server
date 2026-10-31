@@ -91,6 +91,7 @@ import {
   type EvenSpeakerRoleHistogram,
 } from '../lib/even-hub-speaker-role.js'
 import { archiveSessionAudio, runMeetingAudioRetention } from '../lib/meeting-audio-archive.js'
+import { sweepStalePendingBatch } from '../lib/pending-batch-retention.js'
 import {
   DISCARDED_RETENTION_MS,
   countChunkWavs,
@@ -1363,30 +1364,7 @@ setInterval(() => {
   try {
     const batchBusy = ((maintenanceLifecycle.snapshot().activeByKind as Record<string, number>)
       .meeting_batch_finalization ?? 0) > 0
-    for (const dir of readdirSync(PENDING_BATCH_DIR)) {
-      const dirPath = resolve(PENDING_BATCH_DIR, dir)
-      try {
-        const files = readdirSync(dirPath)
-        if (files.length === 0) { rmSync(dirPath, { recursive: true, force: true }); continue }
-        // Prefer the marker file mtime over first chunk mtime
-        const markerPath = resolve(dirPath, '_batch_pending.marker')
-        let ageSource: number
-        if (existsSync(markerPath)) {
-          ageSource = statSync(markerPath).mtimeMs
-        } else {
-          // Fallback for pre-v5.4.3 dirs: use directory ctime (changes on rename)
-          ageSource = statSync(dirPath).ctimeMs
-        }
-        if (Date.now() - ageSource > 12 * 60 * 60 * 1000) {
-          if (batchBusy) {
-            console.warn(`[cleanup] Retaining stale pending-batch while batch lease held: ${dir}`)
-            continue
-          }
-          rmSync(dirPath, { recursive: true, force: true })
-          console.log(`[cleanup] Purged stale pending-batch: ${dir}`)
-        }
-      } catch {}
-    }
+    sweepStalePendingBatch(PENDING_BATCH_DIR, { now: Date.now(), batchBusy })
   } catch {}
 
   // Meeting audio for review: 7-day window, then an 8 GB budget as a backstop.

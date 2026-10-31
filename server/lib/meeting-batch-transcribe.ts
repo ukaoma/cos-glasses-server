@@ -600,6 +600,23 @@ async function decodeWhisperWindow(
 
 /** A Parakeet window with no words over audio the speech detector says holds speech is a failed decode. */
 export const PARAKEET_EMPTY_SPEECH_SEC = 0.5
+/** How long one saved chunk runs; the most a kept live word can be placed from its true time. */
+const LIVE_CHUNK_SEC = 6
+
+/** A window's live words, clocked evenly across each chunk. They need real times on the window's
+ *  clock: one untimed window would make the saver drop speaker labels for the whole meeting. */
+function liveWordsForWindow(segment: BatchSegment, entries: IndexedTranscriptChunk[]): WhisperWord[] {
+  const words: WhisperWord[] = []
+  for (const entry of entries) {
+    if (entry.chunkIndex < segment.startChunkIdx || entry.chunkIndex > segment.endChunkIdx) continue
+    const tokens = (entry.chunk.text ?? '').split(/\s+/).filter(Boolean)
+    const start = (entry.chunk.elapsed - segment.startElapsed) / 1000
+    tokens.forEach((word, i) => {
+      words.push({ word, start: start + (i * LIVE_CHUNK_SEC) / tokens.length, end: start + ((i + 1) * LIVE_CHUNK_SEC) / tokens.length, probability: 0 })
+    })
+  }
+  return words
+}
 
 async function decodeParakeetWindow(
   deps: HqDecodeDeps,
@@ -693,9 +710,25 @@ async function decodeHqWindow(
     }
   } else if (plan.engine === 'parakeet-ultra') {
     try {
-      primary = await parakeetGuarded(job, () => decodeParakeetWindow(deps, input, parakeetTimeout(job), 'parakeet-ultra', true))
+      // A strict plan has no second engine, so an empty window is an answer (laughter, music,
+      // crosstalk), not a reason to fail the whole meeting. As a failure it replayed the same
+      // audio on every retry and no later window was ever saved (2026-10-30, two calls).
+      primary = await parakeetGuarded(job, () => decodeParakeetWindow(deps, input, parakeetTimeout(job), 'parakeet-ultra', !plan.strictPrimary))
+      if (plan.strictPrimary && !primary.text.trim()) {
+        const speech = deps.speechSeconds?.(input) ?? null
+        if (speech !== null && speech >= PARAKEET_EMPTY_SPEECH_SEC) {
+          const live = liveWordsForWindow(segment, entries)
+          fallbackReason = live.length > 0 ? 'parakeet_empty_over_speech; kept_live_words' : 'parakeet_empty_over_speech'
+          console.warn(`[meeting-batch] Parakeet returned no words for ${segment.startChunkIdx}-${segment.endChunkIdx} over ${speech.toFixed(1)} s of speech; ${live.length > 0 ? 'kept the live words' : 'no live words either'}`)
+          if (live.length > 0) primary = { ...primary, text: live.map(w => w.word).join(' '), words: live }
+        }
+      }
     } catch (error) {
-      if (plan.strictPrimary) throw new MacParakeetUnavailableError(error)
+      if (plan.strictPrimary) {
+        // The window and the reason only: a decode error's message can quote what was said.
+        console.warn(`[meeting-batch] Strict Parakeet failed for ${segment.startChunkIdx}-${segment.endChunkIdx}: ${(error as { reason?: unknown })?.reason ?? (error as Error)?.name ?? 'unknown'}`)
+        throw new MacParakeetUnavailableError(error)
+      }
       fallbackReason = `parakeet_failed: ${errorReason(error)}`
       console.warn(`[meeting-batch] Parakeet HQ failed for ${segment.startChunkIdx}-${segment.endChunkIdx}; using Large-v3: ${errorReason(error)}`)
       const w = await decodeWhisperWindow(deps, input, previousText, 'large-v3', segment, audioDir)

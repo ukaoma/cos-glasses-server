@@ -86,7 +86,7 @@ it('uses shared Parakeet and dictionary, persists source, never calls wearer/voi
 it('retains audio on Parakeet failure, refuses conflicting retries, and never substitutes Whisper',async()=>{
  const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'parakeet-ultra'})
  parakeet.mockRejectedValueOnce(new Error('fake unavailable'))
- const failed=await upload();expect(failed.status).toBe(503);expect(failed.json).toMatchObject({reason:'phone_parakeet_cli_failed',retryable:true})
+ const failed=await upload();expect(failed.status).toBe(503);expect(failed.json).toMatchObject({reason:'phone_parakeet_internal',retryable:true})
  expect(stream.getMeetingSessionStatus(id)).toMatchObject({receivedCount:1,asrCompletedCount:0});expect(whisper).not.toHaveBeenCalled()
  expect((await upload({},wavOf(6,()=>401))).json.reason).toBe('phone_chunk_conflict')
  expect((await upload()).status).toBe(200);expect(parakeet).toHaveBeenCalledTimes(2)

@@ -1,3 +1,12 @@
+## 6.96.4 - Saved Mac calls no longer stick on one empty window (private candidate)
+
+2026-10-31. A private candidate for one Mac, built on 6.96.3 with nothing else in it.
+
+- A saved Mac or iPhone call no longer fails because Parakeet heard no words in one window over audio the speech detector counts as speech. The window is treated as an answer: it keeps any live words it had, stays empty if it had none, and says so in that window's `stt.fallbackReason`. Before, that one window failed the whole call, and every retry failed the same way.
+- A real Parakeet failure (a CLI exit, a timeout, a busy lane) still blocks the call and retries, as it did.
+- An error that never reached the CLI is no longer reported as `cli_failed`. It now reads `internal`, and the log names the window and the reason.
+- Cleanup no longer deletes the pending audio of a saved meeting still waiting on HQ, for up to 30 days. Before, it went 12 hours after the last attempt, and the next start finished the meeting on its streaming text.
+
 ## 6.96.3 - Fewer voices in Mac speaker review, and suggested names on request (private candidate)
 
 2026-10-30. A private candidate for one Mac. Pairs with the matching private COS Control build.

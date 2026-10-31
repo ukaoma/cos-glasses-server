@@ -322,11 +322,88 @@ describe('strict Mac Parakeet saved HQ',()=>{
   await expect(M.transcribeSegments(dir,[segment],entries,macId,plan({engine:'parakeet-ultra',secondOpinion:'off'}),d)).rejects.toThrow('audio is preserved for retry')
   expect(d.whisper).not.toHaveBeenCalled()
  })
+ const emptyParakeet=()=>vi.fn(async(_w:Buffer,opts:any)=>({model:opts.model,text:'',words:[],processingSec:0.1,wallMs:1}))
+ const noLiveWords=entries.map(e=>({...e,chunk:{...e.chunk,text:''}}))
+ const strict=plan({engine:'parakeet-ultra',secondOpinion:'off'})
+ it('an empty window over speech with no live words is an answer: flagged, and the call goes on',async()=>{
+  const {d}=deps({parakeet:emptyParakeet(),speechSeconds:()=>1.6})
+  const [r]=await M.transcribeSegments(dir,[segment],noLiveWords,macId,strict,d)
+  expect(r.text).toBe('');expect(r.words).toEqual([])
+  expect(r.stt).toMatchObject({engine:'parakeet-ultra',fallbackReason:'parakeet_empty_over_speech'})
+  expect(d.whisper).not.toHaveBeenCalled()
+ })
+ it('keeps the live words of an empty window, timed, so the saver keeps the speaker labels of the whole meeting',async()=>{
+  const {d}=deps({parakeet:emptyParakeet(),speechSeconds:()=>1.6})
+  const [r]=await M.transcribeSegments(dir,[segment],entries,macId,strict,d)
+  expect(r.text).toBe('c0 c1')
+  expect(r.stt).toMatchObject({fallbackReason:'parakeet_empty_over_speech; kept_live_words'})
+  expect(r.words.map(w=>[w.word,w.start,w.end])).toEqual([['c0',0,6],['c1',6,12]])
+  expect(r.speakerWords).toHaveLength(2)
+  const {selectBatchTranscriptForPersistence}=await import('./batch-transcript-quality.js')
+  expect(selectBatchTranscriptForPersistence(r.text,[r]).source).toBe('speaker-words')
+ })
+ it('clocks kept live words on the window, spread across each chunk, and only from this window',async()=>{
+  const {d}=deps({parakeet:emptyParakeet(),speechSeconds:()=>1.6})
+  const call=[0,6_000,12_000].map((elapsed,chunkIndex)=>({chunkIndex,chunk:{...entries[0].chunk,text:['x','a b','y'][chunkIndex],elapsed}}))
+  const [r]=await M.transcribeSegments(dir,[{...segment,startChunkIdx:1,endChunkIdx:1,startElapsed:6_000,endElapsed:6_000}],call,macId,strict,d)
+  expect(r.text).toBe('a b')
+  expect(r.words.map(w=>[w.word,w.start,w.end])).toEqual([['a',0,3],['b',3,6]])
+ })
+ it.each([['quiet',0.1],['exactly under the bar',0.49],['unmeasured',null]])('a %s empty window stays as it was: empty, unflagged, live words not pulled in',async(_label,speech)=>{
+  const {d}=deps({parakeet:emptyParakeet(),speechSeconds:()=>speech as number|null})
+  const [r]=await M.transcribeSegments(dir,[segment],entries,macId,strict,d)
+  expect(r.text).toBe('');expect(r.stt?.fallbackReason).toBeUndefined()
+ })
+ it('flags a window at the speech bar, and the windows after it still decode',async()=>{
+  const {d}=deps({speechSeconds:()=>0.5})
+  vi.mocked(d.parakeet).mockImplementationOnce(async(_w,opts)=>({model:opts.model,text:'',words:[],processingSec:0.1,wallMs:1}) as any)
+  const rows=await M.transcribeSegments(dir,[segment,{...segment,startChunkIdx:1}],noLiveWords,macId,strict,d)
+  expect(rows.map(r=>r.text)).toEqual(['','we should ship the build Friday'])
+  expect(rows[0].stt?.fallbackReason).toBe('parakeet_empty_over_speech')
+  expect(rows[1].stt?.fallbackReason).toBeUndefined()
+ })
+ it('a real Parakeet failure still blocks the call: only an empty answer stopped being a failure',async()=>{
+  const {ParakeetError}=await import('./parakeet.js')
+  const {d}=deps({parakeet:vi.fn(async()=>{throw new ParakeetError('cli_failed','',{exitCode:1,signal:null,stderr:''})})})
+  await expect(M.transcribeSegments(dir,[segment],entries,macId,strict,d)).rejects.toThrow('(cli_failed)')
+ })
+ it('names the failing window in the log without quoting the error message',async()=>{
+  const warn=vi.spyOn(console,'warn').mockImplementation(()=>{})
+  try {
+   const {d}=deps({parakeet:vi.fn(async()=>{throw Object.assign(new Error('secret words from the call'),{reason:'bad_output'})})})
+   await expect(M.transcribeSegments(dir,[segment],entries,macId,strict,d)).rejects.toThrow()
+   const logged=warn.mock.calls.map(c=>String(c[0])).join('\n')
+   expect(logged).toContain('Strict Parakeet failed for 0-1: bad_output')
+   expect(logged).not.toContain('secret words')
+  } finally { warn.mockRestore() }
+ })
  it('does not accept a partial Mac HQ candidate when a later Parakeet window fails',async()=>{
   const {d}=deps();vi.mocked(d.parakeet).mockImplementationOnce(async(_wav,opts)=>({model:opts.model,text:'we should ship',words:words('we should ship'),processingSec:0.1,wallMs:100})).mockRejectedValueOnce(new Error('busy'))
   await expect(M.transcribeSegments(dir,[segment,{...segment,startChunkIdx:1}],entries,macId,plan({engine:'parakeet-ultra',secondOpinion:'off'}),d)).rejects.toThrow()
   expect(d.whisper).not.toHaveBeenCalled()
  })
+})
+
+it('a Mac call with one empty window over speech reaches the quality gate and comes back batch',async()=>{
+ vi.resetModules()
+ const sentence='we should ship the drift card build on friday morning'
+ const parakeet=vi.fn(async(_w:Buffer,opts:any)=>({model:opts.model,text:sentence,words:words(sentence),processingSec:0.1,wallMs:1}))
+ parakeet.mockImplementationOnce(async(_w:Buffer,opts:any)=>({model:opts.model,text:'',words:[],processingSec:0.1,wallMs:1}))
+ vi.doMock('./parakeet.js',async original=>({...await original<typeof import('./parakeet.js')>(),transcribeParakeet:parakeet}))
+ vi.doMock('./stt-live.js',async original=>({...await original<typeof import('./stt-live.js')>(),asrFrontEnd:async(b:Buffer)=>b}))
+ vi.doMock('./vad-silero.js',async original=>({...await original<typeof import('./vad-silero.js')>(),measureSpeechSeconds:()=>1.6}))
+ try {
+  const stt=await import('./stt-settings.js');stt.writeSttSettings({...stt.readSttSettings(),hq:'parakeet-ultra',secondOpinion:'off',resolver:false})
+  writeFileSync(join(dir,'chunk_0002.wav'),wav())
+  const call=[0,31_000,62_000].map((elapsed,chunkIndex)=>({chunkIndex,chunk:{...entries[0].chunk,text:'',elapsed}}))
+  const MM=await import('./meeting-batch-transcribe.js')
+  const result=await MM.runMeetingBatchPipeline(dir,call,10,'mac_abcdef01-2345-6789-abcd-0123456789ab')
+  expect(result.transcriptionQuality).toBe('batch')
+  expect(result.batchSegments!.map(s=>s.text)).toEqual(['',sentence])
+  expect(result.stt).toMatchObject({primaryFallbacks:1,windows:2,windowsLost:0})
+ } finally {
+  vi.doUnmock('./parakeet.js');vi.doUnmock('./stt-live.js');vi.doUnmock('./vad-silero.js')
+ }
 })
 
 it('surfaces selected Mac HQ failure to durable finalization while preserving the canonical chunk evidence and WAVs',async()=>{
