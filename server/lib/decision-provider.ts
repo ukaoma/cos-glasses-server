@@ -154,11 +154,13 @@ export function resetSubqDecisionClients(): void { configuredSubqClients.forEach
 /** A SubQ client built outside createDecisionClient (live cues, 6.76.2) still starts clean when a new key is saved. */
 export function trackSubqDecisionClient(client: SubqDecisionClient): SubqDecisionClient { configuredSubqClients.add(client); return client }
 /** Snapshot selection per workflow request. Separate clients and cache identities prevent stale cross-provider answers. */
-export function createDecisionClient(useCase: DecisionUseCase, jev: Pick<JevClient, 'ask'> = new JevClient(), env: NodeJS.ProcessEnv = process.env): DecisionClient {
+export function createDecisionClient(useCase: DecisionUseCase, jev: Pick<JevClient, 'ask'> = new JevClient(), env: NodeJS.ProcessEnv = process.env,
+  /** Optional: a SubQ ledger file and daily cap of this feature's own. Without it SubQ uses `subq-<useCase>-usage.json` and COS_SUBQ_DAILY_TOKENS. */
+  subq: { usageFile?: string; cap?: () => number } = {}): DecisionClient {
   const clients: Partial<Record<DecisionProvider, DecisionClient>> = {}
   const snapshot = (): DecisionClient => {
     const selected = selectedDecisionProvider(useCase, env)
-    if (!clients[selected]) clients[selected] = selected === 'subq' ? new SubqDecisionClient(fetch, () => new Date(), dataPath(`subq-${useCase}-usage.json`)) : {
+    if (!clients[selected]) clients[selected] = selected === 'subq' ? new SubqDecisionClient(fetch, () => new Date(), subq.usageFile ?? dataPath(`subq-${useCase}-usage.json`), undefined, subq.cap) : {
       provider: 'jev', async ask(state, questions, estimate, options) {
         if (options?.images?.length) throw new DecisionProviderError('decision_images_unsupported')
         return { ...await jev.ask(state, questions, estimate, options), provider: 'jev' }

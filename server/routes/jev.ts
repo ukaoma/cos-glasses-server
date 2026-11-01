@@ -14,6 +14,7 @@ import { CompletionChecker, readRepliesSince } from '../lib/work-completion.js'
 import { isSafeSessionId, type AgentProvider } from '../lib/agent-session-store.js'
 import { listBoard } from '../lib/task-store.js'
 import { sharedWorkSearchJevClient } from '../lib/work-search.js'
+import { sharedSessionFindJevClient } from '../lib/session-find.js'
 import { isSafeDomainName } from '../lib/domains.js'
 
 /** What the route reads from a meeting review (6.57.1): the server's own record, never client text. */
@@ -34,6 +35,8 @@ export interface JevRouteDependencies {
   replies: (provider: AgentProvider, sessionId: string, afterMs: number | null) => Promise<string | null>
   /** 6.65.0: Work search keeps its own client and breaker; a newly saved key clears that breaker too. */
   searchJev: Pick<JevClient, 'resetForNewKey'>
+  /** Session find (Control 0.5.362) keeps its own client and breaker too. */
+  findJev: Pick<JevClient, 'resetForNewKey'>
 }
 
 /** Work identity first: it survives a rename, while a new card's id could equal an old identity's text hash. */
@@ -45,7 +48,7 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
   const jev = overrides.jev ?? sharedJevClient()
   const deps: JevRouteDependencies = { jev, recommender: new SessionRecommender(createDecisionClient('session', jev)), list: listBoard, validate: validateJevKey, save: saveJevKey,
     completion: new CompletionChecker(createDecisionClient('completion', jev)), replies: (provider, sessionId, afterMs) => readRepliesSince(provider, sessionId, afterMs),
-    searchJev: sharedWorkSearchJevClient(), ...overrides }
+    searchJev: sharedWorkSearchJevClient(), findJev: sharedSessionFindJevClient(), ...overrides }
   const router = Router()
   router.use(['/jev-key', '/work-board/session-recommendation', '/work-board/completion-check'], (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
 
@@ -67,6 +70,7 @@ export function createJevRouter(overrides: Partial<JevRouteDependencies> = {}): 
     }
     deps.jev.resetForNewKey()
     deps.searchJev.resetForNewKey()
+    deps.findJev.resetForNewKey()
     return res.json({ ok: true, ...deps.jev.status() })
   })
 
