@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync, appendFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -344,5 +345,68 @@ describe('unwrapPrompt', () => {
     expect(performance.now() - started).toBeLessThan(2_000)
     expect(typeof out).toBe('string')
     expect(unwrapPrompt('plain <b>text</b> kept')).toBe('plain <b>text</b> kept')
+  })
+})
+
+describe('a long or hostile body cannot stall the server that owns the glasses', () => {
+  it('reads a first prompt of 800 KB of "a<b " in well under a second (the list\'s title rule took 68 s on it)', async () => {
+    claude(700, { prompt: 'a<b '.repeat(200_000) })
+    codex(701, { prompt: 'a<b '.repeat(200_000) })
+    cursor('c0000000-0000-4000-8000-000000000702', 'a<b '.repeat(200_000))
+    const started = performance.now()
+    const pool = await collect(new SessionFindCollector())
+    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(pool.candidates).toHaveLength(3)
+    for (const c of pool.candidates) { expect(c.listFirstLine.length).toBeLessThanOrEqual(80); expect(c.typed.length).toBeLessThanOrEqual(2_000) }
+  })
+
+  it('unwraps a body full of unclosed wrapper tags in bounded time', () => {
+    const started = performance.now()
+    unwrapPrompt('<system-reminder '.repeat(60_000) + 'x')
+    unwrapPrompt('<system-reminder>'.repeat(60_000) + 'typed words')
+    expect(performance.now() - started).toBeLessThan(2_000)
+  })
+
+  it('skips a line over 2 MB through to its newline and reads the next one', async () => {
+    const dir = join(home, '.claude', 'projects', '-Users-test-proj')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${uuid(710)}.jsonl`)
+    writeFileSync(file, line({ type: 'user', message: { role: 'user', content: 'x'.repeat(3 * 1024 * 1024) }, timestamp: iso(NOW) }) + line({ type: 'user', message: { role: 'user', content: 'The typed prompt after a huge attachment line' }, timestamp: iso(NOW) }))
+    touch(file, NOW)
+    const started = performance.now()
+    const pool = await collect(new SessionFindCollector())
+    expect(ids(pool)).toEqual([uuid(710)])
+    expect(pool.candidates[0]!.typed).toBe('The typed prompt after a huge attachment line')
+    expect(performance.now() - started).toBeLessThan(2_000)
+  })
+
+  it('keeps the memo to a bound of characters as well as entries', async () => {
+    for (let i = 0; i < 30; i++) claude(720 + i, { prompt: `memo bound prompt number ${i} ${'padding words '.repeat(100)}`, at: NOW - (i + 1) * 3600_000 })
+    const c = new SessionFindCollector(6_000)
+    await collect(c)
+    expect(c.memoSize()).toBeLessThan(10)
+  })
+})
+
+describe('what the title says', () => {
+  it('titles a session from the prompt that was typed, not from a harness record before it', async () => {
+    claude(730, { wrapperFirst: true, prompt: 'The real question about the overlay' })
+    const pool = await collect(new SessionFindCollector())
+    expect(pool.candidates[0]!.title).toBe('The real question about the overlay')
+    expect(pool.candidates[0]!.title).not.toMatch(/machine/)
+  })
+})
+
+describe('Cursor archived sessions', () => {
+  const sqlite = (() => { try { execFileSync('/usr/bin/sqlite3', ['-version']); return true } catch { return false } })()
+  it.runIf(sqlite)('leaves out a session its composer header marks archived, and names the others', async () => {
+    const live = 'c0000000-0000-4000-8000-000000000741', gone = 'c0000000-0000-4000-8000-000000000742'
+    cursor(live, 'A live cursor prompt about the lens'); cursor(gone, 'An archived cursor prompt about the lens')
+    const db = join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb')
+    mkdirSync(join(db, '..'), { recursive: true })
+    const rows = [[live, { name: 'Live sidebar name', isArchived: false }], [gone, { name: 'Archived sidebar name', isArchived: true }]]
+    execFileSync('/usr/bin/sqlite3', [db, 'CREATE TABLE composerHeaders (composerId TEXT, value TEXT);' + rows.map(([id, v]) => `INSERT INTO composerHeaders VALUES ('${id}', '${JSON.stringify(v)}');`).join('')])
+    const pool = await collect(new SessionFindCollector())
+    expect(pool.candidates.map(c => [c.session_id, c.title])).toEqual([[live, 'Live sidebar name']])
   })
 })

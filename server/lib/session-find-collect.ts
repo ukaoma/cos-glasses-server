@@ -20,10 +20,12 @@
  * the call keeps boot safe; without the function a compressed file is skipped and COUNTED (`skippedNoDecoder`), never
  * guessed at and never silent.
  *
- * Nothing here reads more than the first megabyte of a file, calls a model, or logs a title or a prompt.
+ * Nothing here reads more than the first 16 MB of a file, calls a model, or logs a title or a prompt.
  */
 import { createReadStream } from 'node:fs'
+import { execFile } from 'node:child_process'
 import { open } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import type { Transform } from 'node:stream'
@@ -44,7 +46,6 @@ import {
   lastCustomTitle,
   loadClaudeDesktopAliases,
   loadCodexThreadNames,
-  loadCursorComposerNames,
   parseJsonLine,
   payloadText,
   preferCursorCopy,
@@ -52,7 +53,7 @@ import {
   type AgentProvider,
   type AgentSessionRoots,
 } from './agent-session-store.js'
-import { ACTIVITY_READ_CONCURRENCY, mapWithConcurrency, readSessionActivity } from './agent-session-activity.js'
+import { ACTIVITY_READ_CONCURRENCY, ACTIVITY_TAIL_BYTES, ACTIVITY_TAIL_MAX_BYTES, activityFromTail, mapWithConcurrency } from './agent-session-activity.js'
 
 /**
  * The most that is read from the top of a file (decompressed) to find its first typed prompt, stopping at the first one. A typed
@@ -65,8 +66,15 @@ const FIND_CHUNK_BYTES = 64 * 1024
 export const FIND_REPEAT_TITLE_LIMIT = 5
 /** The typed first prompt kept per session, unwrapped and on one line. Redaction reads all of it; the model gets 150. */
 export const FIND_PROMPT_KEEP_CHARS = 2_000
-/** A prompt is unwrapped from at most this much of its start, so an unclosed tag cannot make the scan quadratic. */
-const UNWRAP_SCAN_CHARS = 50_000
+/**
+ * A prompt is unwrapped from at most this much of its start, so an unclosed tag cannot make the scan quadratic (the wrapper
+ * pattern rescans to the end from every opener). Likewise the list's firstLineTitle, whose `<[^>]+>` is quadratic on a body of
+ * `a<b a<b ...` and blocked a server for 68 s on 800 KB: it only ever sees the first TITLE_SCAN_CHARS.
+ */
+const UNWRAP_SCAN_CHARS = 16_000
+const TITLE_SCAN_CHARS = 8_000
+/** A line longer than this is skipped through to its newline: it is an attachment or a dump, never a typed prompt. */
+const MAX_LINE_CHARS = 2 * 1024 * 1024
 /** Files opened at most per walk. The newest-first stop below ends nearly every walk long before this. */
 export const FIND_MAX_OPEN = 4_000
 /** Files read at once, and files per batch before the stop rule is checked. */
@@ -74,6 +82,8 @@ const BATCH = 32
 /** A Desktop record read whole to find its scheduled-task and archived flags. The largest seen is 0.7 MB. */
 const DESKTOP_RECORD_MAX_BYTES = 8 * 1024 * 1024
 export const FIND_MEMO_MAX = 8_000
+/** What the memo may hold in all, by the characters it keeps (each entry is also flattened, see flat()). */
+export const FIND_MEMO_MAX_CHARS = 16 * 1024 * 1024
 
 const WRAP_TAGS = 'system-reminder|relevant-memories|cache-health|daily-bulletin|cos-alarms|device-handoff|now|local-command-stdout|local-command-stderr|command-name|command-message|command-args|task-notification|user-prompt-submit-hook|ide_opened_file|ide_selection|environment_context|attached_files|open_files|user_info|git_status|rules|agent_transcripts|image'
 const WRAP_RE = new RegExp(`<(${WRAP_TAGS})(?:\\s[^>]*)?>[\\s\\S]*?</\\1>`, 'gi')
@@ -181,19 +191,27 @@ class NoDecoderError extends Error {}
 async function readHeadLines(file: string, compressed: boolean, maxBytes: number, zstd: ZstdFactory, onLine: (line: string) => boolean): Promise<void> {
   const decoder = new StringDecoder('utf8')
   let carry = ''
+  let scanFrom = 0
+  let skipping = false
   let total = 0
   let stopped = false
   const feed = (chunk: Buffer): boolean => {
     total += chunk.length
     carry += decoder.write(chunk)
-    let at = carry.indexOf('\n')
-    while (at >= 0) {
+    for (;;) {
+      // Resume the newline search where the last one stopped: one enormous line is not rescanned from 0 on every chunk.
+      const at = carry.indexOf('\n', scanFrom)
+      if (at < 0) {
+        scanFrom = carry.length
+        if (carry.length > MAX_LINE_CHARS) { skipping = true; carry = ''; scanFrom = 0 }
+        return false
+      }
       const line = carry.slice(0, at)
       carry = carry.slice(at + 1)
-      if (line && onLine(line)) return true
-      at = carry.indexOf('\n')
+      scanFrom = 0
+      if (skipping) { skipping = false; continue }
+      if (line && line.length <= MAX_LINE_CHARS && onLine(line)) return true
     }
-    return false
   }
   if (!compressed) {
     const handle = await open(file, 'r')
@@ -218,7 +236,7 @@ async function readHeadLines(file: string, compressed: boolean, maxBytes: number
       }
     } finally { raw.destroy(); inflate.destroy() }
   }
-  if (!stopped && carry.trim()) onLine(carry + decoder.end())
+  if (!stopped && !skipping && carry.trim()) onLine(carry + decoder.end())
 }
 
 interface HeadInfo {
@@ -231,6 +249,9 @@ interface HeadInfo {
   created: string
 }
 
+/** A fresh flat copy. A slice of a big string keeps the whole parent alive in V8, and the memo outlives the parse (418 MB for 400 files). */
+const flat = (text: string): string => Buffer.from(text, 'utf8').toString('utf8')
+
 const emptyHead = (): HeadInfo => ({ typed: '', listFirstLine: '', subagent: false, metaId: '', cwd: '', created: '' })
 
 function parseClaudeHead(): { head: HeadInfo; onLine: (line: string) => boolean } {
@@ -242,11 +263,12 @@ function parseClaudeHead(): { head: HeadInfo; onLine: (line: string) => boolean 
     const message = obj.message && typeof obj.message === 'object' ? obj.message as Record<string, unknown> : null
     const body = message ? payloadText(message) : null
     if (!body) return false
-    if (!head.listFirstLine) head.listFirstLine = firstLineTitle(body)
+    // Not from a wrapper body: the list titles a session from whatever the first record says, which can be harness text.
     if (isWrapperPrompt(body)) return false
     const typed = unwrapPrompt(body)
     if (typed.length < 3) return false
-    head.typed = typed.slice(0, FIND_PROMPT_KEEP_CHARS)
+    head.listFirstLine = flat(firstLineTitle(body.slice(0, TITLE_SCAN_CHARS)))
+    head.typed = flat(typed.slice(0, FIND_PROMPT_KEEP_CHARS))
     return true
   } }
 }
@@ -259,20 +281,20 @@ function parseCodexHead(): { head: HeadInfo; onLine: (line: string) => boolean }
     if (!obj || !obj.payload || typeof obj.payload !== 'object') return false
     const payload = obj.payload as Record<string, unknown>
     if (obj.type === 'session_meta') {
-      head.metaId = String(payload.id ?? payload.session_id ?? head.metaId)
-      head.cwd = String(payload.cwd ?? head.cwd)
+      head.metaId = flat(String(payload.id ?? payload.session_id ?? head.metaId))
+      head.cwd = flat(String(payload.cwd ?? head.cwd))
       head.subagent = payload.thread_source === 'subagent'
-      head.created = String(payload.timestamp ?? obj.timestamp ?? head.created).trim()
+      head.created = flat(String(payload.timestamp ?? obj.timestamp ?? head.created).trim())
       return head.subagent
     }
     if (obj.type !== 'response_item' || payload.type !== 'message' || payload.role !== 'user') return false
     const body = codexUserText(payload)
     if (!body) return false
     if (isWrapperPrompt(body)) return false
-    if (!head.listFirstLine) head.listFirstLine = firstLineTitle(body)
     const typed = unwrapPrompt(body)
     if (typed.length < 3) return false
-    head.typed = typed.slice(0, FIND_PROMPT_KEEP_CHARS)
+    head.listFirstLine = flat(firstLineTitle(body.slice(0, TITLE_SCAN_CHARS)))
+    head.typed = flat(typed.slice(0, FIND_PROMPT_KEEP_CHARS))
     return true
   } }
 }
@@ -289,8 +311,8 @@ function parseCursorHead(): { head: HeadInfo; onLine: (line: string) => boolean 
     if (isWrapperPrompt(body) && !body.includes('<user_query>')) return false
     const typed = unwrapPrompt(body)
     if (typed.length < 3) return false
-    head.listFirstLine = firstLineTitle(body)
-    head.typed = typed.slice(0, FIND_PROMPT_KEEP_CHARS)
+    head.listFirstLine = flat(firstLineTitle(body.slice(0, TITLE_SCAN_CHARS)))
+    head.typed = flat(typed.slice(0, FIND_PROMPT_KEEP_CHARS))
     return true
   } }
 }
@@ -352,11 +374,55 @@ export interface FindPoolOptions {
 
 const normTitle = (title: string) => title.toLowerCase().replace(/\s+/g, ' ').trim()
 
+const execFileAsync = promisify(execFile)
+
+/**
+ * Cursor's sidebar names and which of its sessions are archived, read-only, from composerHeaders. loadCursorComposerNames
+ * (the list's reader) keeps names only; an archived session still has one, and 21 of 828 headers here are archived.
+ */
+async function loadComposerHeaders(db: string): Promise<{ names: Map<string, string>; archived: Set<string> }> {
+  const names = new Map<string, string>(), archived = new Set<string>()
+  try {
+    const { stdout } = await execFileAsync('/usr/bin/sqlite3', ['-readonly', '-json', db,
+      "SELECT composerId AS id, json_extract(value, '$.name') AS name, json_extract(value, '$.isArchived') AS archived FROM composerHeaders"],
+    { timeout: 4000, maxBuffer: 16 * 1024 * 1024 })
+    const rows = JSON.parse(stdout || '[]') as Array<{ id?: string; name?: string | null; archived?: number | boolean | null }>
+    for (const row of rows) {
+      const id = String(row.id ?? '').trim()
+      if (!id) continue
+      const name = String(row.name ?? '').trim()
+      if (name) names.set(id, flat(name.slice(0, 120)))
+      if (row.archived === 1 || row.archived === true) archived.add(id)
+    }
+  } catch { /* unreadable: no names and nothing marked archived, as the list's reader does */ }
+  return { names, archived }
+}
+
+/** The newest conversation record's time from the transcript's own tail, widening x4 only while the tail has none. Not the list's memo. */
+async function lastRecordMs(provider: AgentProvider, file: string, size: number): Promise<number | null> {
+  try {
+    const handle = await open(file, 'r')
+    try {
+      for (let window = ACTIVITY_TAIL_BYTES; ; window *= 4) {
+        const length = Math.min(size, window)
+        const start = size - length
+        const buffer = Buffer.alloc(length)
+        const { bytesRead } = await handle.read(buffer, 0, length, start)
+        const at = activityFromTail(provider, buffer.subarray(0, bytesRead).toString('utf8'), start > 0).lastActivityAt
+        if (at) { const ms = Date.parse(at); return Number.isFinite(ms) ? ms : null }
+        if (start === 0 || window >= ACTIVITY_TAIL_MAX_BYTES) return null
+      }
+    } finally { await handle.close() }
+  } catch { return null }
+}
+
 export class SessionFindCollector {
   private memo = new Map<string, FileInfo>()
   private flags = new Map<string, DesktopFlags>()
-  private cursorNames: { stamp: string; names: Map<string, string> } | null = null
+  private cursorNames: { stamp: string; names: Map<string, string>; archived: Set<string> } | null = null
   private flights = new Map<string, { promise: Promise<FindPool>; waiters: number; controller: AbortController }>()
+
+  constructor(private readonly memoMaxChars: number = FIND_MEMO_MAX_CHARS) {}
 
   /** Memo entries held. A test seam: the memo must never outgrow the files it mirrors. */
   memoSize(): number { return this.memo.size }
@@ -415,7 +481,7 @@ export class SessionFindCollector {
       if (!previous || head.mtimeMs >= previous.mtimeMs) desktopByCli.set(cli, { title: head.title, file: head.file, mtimeMs: head.mtimeMs })
     }
     const codexNames = await loadCodexThreadNames(roots.codexSessions)
-    const cursorNames = await this.composerNames(roots.cursorComposerDb)
+    const composers = await this.composerNames(roots.cursorComposerDb)
     throwIfStopped()
 
     const refs = await this.enumerate(roots)
@@ -438,7 +504,7 @@ export class SessionFindCollector {
       next += batch.length
       const results = await mapWithConcurrency(batch, ACTIVITY_READ_CONCURRENCY, async ref => {
         if (signal.aborted) return null
-        return this.inspect(ref, { desktopByCli, codexNames, cursorNames, keyed, zstd, headBytes: options.headBytes ?? FIND_HEAD_BYTES })
+        return this.inspect(ref, { desktopByCli, codexNames, cursorNames: composers.names, cursorArchived: composers.archived, keyed, zstd, headBytes: options.headBytes ?? FIND_HEAD_BYTES })
       })
       for (let i = 0; i < batch.length; i++) {
         const outcome = results[i]
@@ -452,6 +518,7 @@ export class SessionFindCollector {
       pool = this.settle([...assembled.values()])
     }
     throwIfStopped()
+    this.trim()
     skippedNoDecoder = noDecoderFiles.size
     skippedUnreadable = unreadableFiles.size
     return { candidates: pool.slice(0, options.limit), skippedNoDecoder, skippedUnreadable, opened, considered: refs.length, ms: Math.round(performance.now() - started) }
@@ -473,14 +540,14 @@ export class SessionFindCollector {
     return [...byKey.values()].sort((a, b) => b.clockMs - a.clockMs || a.key.localeCompare(b.key))
   }
 
-  private async composerNames(db: string): Promise<Map<string, string>> {
+  private async composerNames(db: string): Promise<{ names: Map<string, string>; archived: Set<string> }> {
     const st = db ? await fileStat(db) : null
-    if (!st?.isFile) return new Map()
+    if (!st?.isFile) return { names: new Map(), archived: new Set() }
     const stamp = `${db}:${st.mtimeMs}:${st.size}`
-    if (this.cursorNames?.stamp === stamp) return this.cursorNames.names
-    const names = await loadCursorComposerNames(db)
-    this.cursorNames = { stamp, names }
-    return names
+    if (this.cursorNames?.stamp === stamp) return this.cursorNames
+    const loaded = { stamp, ...(await loadComposerHeaders(db)) }
+    this.cursorNames = loaded
+    return loaded
   }
 
   /** Stat every transcript. Claude and Cursor from their own stores; Codex from the SERVER home only (never a keyed home). */
@@ -527,10 +594,19 @@ export class SessionFindCollector {
   private prune(refs: readonly FileRef[]): void {
     const live = new Set(refs.map(ref => ref.file))
     for (const file of this.memo.keys()) if (!live.has(file)) this.memo.delete(file)
-    while (this.memo.size > FIND_MEMO_MAX) {
-      const oldest = this.memo.keys().next().value
-      if (oldest === undefined) break
-      this.memo.delete(oldest)
+    this.trim()
+  }
+
+  /** Evict least recently used entries until the memo is inside both bounds: entries and characters held. */
+  private trim(): void {
+    const chars = (info: FileInfo) => info.head.typed.length + info.head.listFirstLine.length + info.head.metaId.length + info.head.cwd.length + (info.customTitle?.length ?? 0) + 64
+    let held = 0
+    for (const info of this.memo.values()) held += chars(info)
+    while (this.memo.size > FIND_MEMO_MAX || held > this.memoMaxChars) {
+      const oldestKey = this.memo.keys().next().value
+      if (oldestKey === undefined) break
+      held -= chars(this.memo.get(oldestKey)!)
+      this.memo.delete(oldestKey)
     }
   }
 
@@ -538,6 +614,7 @@ export class SessionFindCollector {
     desktopByCli: Map<string, { title: string; file: string; mtimeMs: number }>
     codexNames: Map<string, string>
     cursorNames: Map<string, string>
+    cursorArchived: ReadonlySet<string>
     keyed: ReadonlySet<string>
     zstd: ZstdFactory
     headBytes: number
@@ -575,7 +652,7 @@ export class SessionFindCollector {
         const flags = await this.desktopFlags(desktop.file)
         if (!flags || flags.scheduled || flags.archived) return { candidate: null, read }
       }
-      if (!desktop?.title && info.customTitle === undefined) info.customTitle = await lastCustomTitle(ref.file)
+      if (!desktop?.title && info.customTitle === undefined) info.customTitle = await lastCustomTitle(ref.file).then(t => t === null ? null : flat(t), () => null)
       title = desktop?.title || info.customTitle || head.listFirstLine || 'Claude session'
       project = workspaceLabel(ref.folder)
     } else if (ref.provider === 'codex') {
@@ -590,7 +667,7 @@ export class SessionFindCollector {
       created = head.created || createdFromCodexFilename(name) || created
     } else {
       sessionId = ref.id
-      if (ctx.keyed.has(sessionId.toLowerCase())) return { candidate: null, read }
+      if (ctx.keyed.has(sessionId.toLowerCase()) || ctx.cursorArchived.has(sessionId)) return { candidate: null, read }
       title = ctx.cursorNames.get(sessionId) || head.listFirstLine || 'Cursor session'
       project = workspaceLabel(ref.folder)
     }
@@ -600,9 +677,8 @@ export class SessionFindCollector {
       let clock = ref.mtimeMs
       // A compressed rollout cannot be tailed; its write time was preserved from the last write (median 0.21 days after the start, which is the stamp's own offset).
       if (ref.provider !== 'cursor' && !ref.compressed) {
-        const activity = await readSessionActivity(ref.provider, ref.file, { memoMax: FIND_MEMO_MAX })
-        const at = activity.lastActivityAt ? Date.parse(activity.lastActivityAt) : Number.NaN
-        if (Number.isFinite(at)) clock = Math.min(at, ref.mtimeMs)
+        const at = await lastRecordMs(ref.provider, ref.file, ref.size)
+        if (at !== null) clock = Math.min(at, ref.mtimeMs)
       }
       info.clockMs = clock
     }
