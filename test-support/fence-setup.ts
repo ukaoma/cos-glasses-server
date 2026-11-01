@@ -1,7 +1,7 @@
 // vitest setupFile, wired by vitest.config.ts ONLY when COS_TEST_FENCE=1. It runs once per forked
 // test file, before that file's imports, so module-scope constants (DATA_DIR and friends) are
 // resolved against the private scratch area. See test-support/fence.ts.
-import { readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync } from 'node:fs'
 import { relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, expect } from 'vitest'
@@ -23,4 +23,11 @@ if (fenceRequested(process.env)) {
   // afterAll covers a normal finish; the exit hook covers a file that fails inside a hook.
   afterAll(fence.cleanup)
   process.once('exit', fence.cleanup)
+  // The driver (scripts/run-fenced.mjs) names a registry file; each fork records its root and test
+  // file so the driver can remove, and report, any scratch area a fork left behind (a late write
+  // recreated it after cleanup, or the worker was torn down before its hooks ran).
+  const registry = process.env.COS_TEST_FENCE_REGISTRY
+  if (registry) {
+    try { appendFileSync(registry, `${fence.root}\t${relative(PACKAGE_ROOT, expect.getState().testPath ?? '')}\n`) } catch { /* registry is best effort */ }
+  }
 }

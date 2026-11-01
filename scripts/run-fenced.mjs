@@ -14,6 +14,7 @@
 // <prefix>.parallel.json and <prefix>.serial.json for parallel), which qualify-parallel.mjs reads.
 // Everything after `--` goes to vitest unchanged.
 import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { splitSets } from './serial-set.mjs'
@@ -38,15 +39,31 @@ if (!Number.isInteger(workers) || workers < 1) {
   process.exit(2)
 }
 
+/**
+ * Remove, and report, the scratch areas a fenced run left behind. Only paths the forks themselves
+ * registered are touched (never a glob over /tmp), so another run's live scratch is safe.
+ */
+function sweepRegistry(registry) {
+  if (!existsSync(registry)) return { created: 0, leftBehind: [] }
+  const rows = readFileSync(registry, 'utf8').split('\n').filter(Boolean).map(line => line.split('\t'))
+  const leftBehind = rows.filter(([root]) => /^\/tmp\/cos-v-[A-Za-z0-9]{6}$/.test(root) && existsSync(root))
+  for (const [root] of leftBehind) rmSync(root, { recursive: true, force: true })
+  rmSync(registry, { force: true })
+  return { created: rows.length, leftBehind: leftBehind.map(([root, file]) => `${root} (${file})`) }
+}
+
 function invocation(label, maxWorkers, files, jsonPath) {
   const args = ['run', `--maxWorkers=${maxWorkers}`]
   if (jsonPath) args.push('--reporter=default', '--reporter=json', `--outputFile.json=${jsonPath}`)
   args.push(...extra, ...files)
   console.log(`\n== fenced ${label}: maxWorkers=${maxWorkers}, ${files.length || 'all'} file(s)${jsonPath ? `, json ${jsonPath}` : ''}`)
+  const registry = `/tmp/cos-v-registry-${process.pid}-${label}.txt`
   const started = Date.now()
-  const result = spawnSync(VITEST, args, { cwd: ROOT, stdio: 'inherit', env: { ...process.env, COS_TEST_FENCE: '1' } })
+  const result = spawnSync(VITEST, args, { cwd: ROOT, stdio: 'inherit', env: { ...process.env, COS_TEST_FENCE: '1', COS_TEST_FENCE_REGISTRY: registry } })
   const seconds = (Date.now() - started) / 1000
-  console.log(`== fenced ${label}: exit ${result.status ?? result.signal}, ${seconds.toFixed(1)}s wall`)
+  const swept = sweepRegistry(registry)
+  console.log(`== fenced ${label}: exit ${result.status ?? result.signal}, ${seconds.toFixed(1)}s wall; ${swept.created} scratch area(s) made, ${swept.leftBehind.length} left behind and removed`)
+  for (const row of swept.leftBehind) console.log(`   left behind: ${row}`)
   return { label, status: result.status ?? 1, seconds }
 }
 
