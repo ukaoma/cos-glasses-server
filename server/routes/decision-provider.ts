@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { JEV_MODEL, resolveJevKey } from '../lib/jev.js'
 import { resolveSubqKey, subqKeyStatus } from '../lib/subq-key.js'
 import { SUBQ_MODEL } from '../lib/decision-provider.js'
+import { sessionFindAvailable } from '../lib/session-find.js'
 import { decisionSettingsView, DecisionSettingsError, patchDecisionSettings, readDecisionSettings, writeDecisionSettings, type DecisionProvider, type DecisionSettings } from '../lib/decision-settings.js'
 export interface DecisionProviderRouteDeps {
   read: () => DecisionSettings
@@ -15,7 +16,9 @@ export function createDecisionProviderRouter(overrides: Partial<DecisionProvider
   const deps: DecisionProviderRouteDeps = { read: readDecisionSettings, write: writeDecisionSettings, configured: () => ({ jev: !!resolveJevKey(), subq: !!resolveSubqKey() }), env: process.env, keyStatus: () => { const jev = resolveJevKey(); return { jev: { configured:!!jev, source:jev?.source ?? 'none' }, subq:subqKeyStatus() } }, ...overrides }
   const router = Router()
   const view = (settings: DecisionSettings) => ({ ...decisionSettingsView(settings, deps.configured(), deps.env), models: { jev: JEV_MODEL, subq: SUBQ_MODEL }, keyStatus: deps.keyStatus(),
-    capabilities: { choices: ['jev','subq'], workflows: ['session','completion','search'], hotReload: true, fallback: false, subqImages: true, subqKeySource: 'config-or-env' } })
+    capabilities: { choices: ['jev','subq'], workflows: ['session','completion','search'], hotReload: true, fallback: false, subqImages: true, subqKeySource: 'config-or-env',
+    // Present only while POST /api/agent-sessions/find can answer. Absent means no meaning search here, and Control does not ask (never keyed on version).
+    ...(sessionFindAvailable(deps.env) ? { sessionFind: true } : {}) } })
   router.use('/decision-provider', (_req,res,next) => { res.set('Cache-Control','private, no-store'); next() })
   router.get('/decision-provider', (_req,res) => {
     try { res.json(view(deps.read())) } catch { res.status(503).json({ error: { code: 'decision_settings_unavailable', message: 'Decision provider settings could not be read.' } }) }

@@ -159,6 +159,8 @@ import { createWorkHandoffRequestsRouter } from './routes/work-handoff-requests.
 import { createSubqKeyRouter } from './routes/subq-key.js'
 import { createDecisionProviderRouter } from './routes/decision-provider.js'
 import { createJevRouter } from './routes/jev.js'
+import { createSessionFindRouter } from './routes/session-find.js'
+import { isSessionFindPost } from './lib/session-find.js'
 import { createWorkChatRouter } from './routes/work-chat.js'
 import { createWorkOrchestratorRouter } from './routes/work-orchestrator.js'
 import { createWorkLensRoundsRouter } from './routes/work-lens-rounds.js'
@@ -394,6 +396,8 @@ app.use('/api', (req, res, next) => {
   // 6.65.0: a POST that only reads (Work search: a board read and one Jev question) is not a mutation. See
   // lib/work-search.ts isReadOnlyApiPost for why holding the lease would hurt and why skipping it is safe.
   if (isReadOnlyApiPost(req.method, req.path)) return next()
+  // Session find (Control 0.5.362) reads the session store and asks a model; it writes only its own token ledger. See lib/session-find.ts.
+  if (isSessionFindPost(req.method, req.path)) return next()
   // V2 video original chunks are bounded to the advertised session size (1 MiB
   // on new sessions, 256 KiB on leftover drafts) and commit through the upload
   // registry's own generation lock. Holding the global mutation lease while
@@ -856,6 +860,8 @@ app.use('/api', createJevRouter(workReviewRuntime ? { review: async id => workRe
 app.use('/api', createDecisionProviderRouter())
 app.use('/api', createSubqKeyRouter())
 app.use('/api', createWorkSearchRouter())
+// Find a session by meaning (Control 0.5.362): consent per provider, its own ledgers and breakers (lib/session-find.ts).
+app.use('/api', createSessionFindRouter())
 app.use('/api', createWorkChatRouter())
 // 6.83.0 Work orchestrator: Control's Work snapshot, the planner input and plan usage (docs/work-orchestrator.md).
 app.use('/api', createWorkOrchestratorRouter())
