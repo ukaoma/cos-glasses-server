@@ -15,6 +15,12 @@
 // own daily cap and breaker; resolveCuesDecisionProvider), and
 // when cue_memory.py is unavailable, fails or times out the memory arm searches the owner's own COS notes and meetings
 // instead (live-cues-v2-notes.ts; local keyword search, no model call). Each evaluation traces `cueMemorySource`.
+//
+// Live cues v3: `grounding: grounded` (a setting, default classic; COS_LIVE_CUES_GROUNDING=classic forces the old path) swaps
+// the memory and judge steps for grounded retrieval: cue_memory.py and the owner's notes in parallel, plus a best-matching
+// passage of the files attached to the meeting, minus this conversation's own copies and other domains' personal notes, judged
+// by one yes/no question per candidate (live-cues-v2-grounded.ts, live-cues-v2-judge-b.ts). With classic nothing in an
+// evaluation changes: the same Jev requests, writer prompt, trace row and cue, pinned by live-cues-v2-classic-pin.test.ts.
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -33,6 +39,8 @@ import {
   type LiveCuesV2SettingReader, type LiveCuesV2SettingSource, type LiveCuesV2StoredLimits,
 } from './live-cues-v2-settings.js'
 import { notesMemory } from './live-cues-v2-notes.js'
+import { GROUNDED_LIMITS, groundedCandidates, groundedSource, selfIdSet, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
+import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
 import { getMeetingStore } from './meeting-store.js'
 import { MeetingAskStore } from './meeting-ask-store.js'
@@ -73,6 +81,8 @@ export const LIVE_CUES_V2_LIMITS = {
   defaultWeeklyWriterCalls: 750,
   breakerFailures: 3,
   judgeKeep: 0.8,
+  /** Grounded cues (live cues v3): a candidate's own yes probability must reach this, from the replay of 2026-11-01. */
+  judgeYes: 0.65,
   judgeMaxNotes: 2,
   defaultGate: 0.8,
   memoryTimeoutMs: 6_000,
@@ -188,6 +198,14 @@ export function liveCuesV2JudgeKeep(env: NodeJS.ProcessEnv = process.env): numbe
   const keep = Number(raw)
   return keep >= 0.5 && keep <= 0.95 ? keep : knobFallback('COS_LIVE_CUES_V2_JUDGE_KEEP', raw, LIVE_CUES_V2_LIMITS.judgeKeep, 'a number from 0.5 to 0.95')
 }
+/** COS_LIVE_CUES_V2_JUDGE_YES: the grounded judge's yes threshold, 0.5 to 0.95. Unset or empty is 0.65 silently; anything else
+ *  outside the range is 0.65 with one log line per value (the same rule as JUDGE_KEEP). */
+export function liveCuesV2JudgeYes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.COS_LIVE_CUES_V2_JUDGE_YES
+  if (raw === undefined || raw.trim() === '') return LIVE_CUES_V2_LIMITS.judgeYes
+  const yes = Number(raw)
+  return yes >= 0.5 && yes <= 0.95 ? yes : knobFallback('COS_LIVE_CUES_V2_JUDGE_YES', raw, LIVE_CUES_V2_LIMITS.judgeYes, 'a number from 0.5 to 0.95')
+}
 /** COS_LIVE_CUES_V2_REPEAT_OVERLAP: the repeat rule's threshold, 0.3 to 0.9, or null (off, today's behaviour) when unset
  *  or empty. Any other value leaves the rule off, with one log line per value. RESULTS_filter.md: 0.5 withheld no useful
  *  cue on any receipt; 0.4 withheld three. */
@@ -265,7 +283,12 @@ export function pyJson(value: unknown): string {
 // ── Pure helpers (exported for tests) ───────────────────────────────────────
 /** A note as the writer sees it ({id, date, title, notes}; the same keys the replay sent). `key` is the stable meeting
  *  identity from cue_memory.py; it never reaches the prompt. */
-export interface MemoryNote { id: string; date: string; title: string; notes: string; key?: string }
+export interface MemoryNote {
+  id: string; date: string; title: string; notes: string; key?: string
+  /** Live cues v3, set only on grounded candidates: the meeting domain the note was filed under, the record, memory or file it
+   *  is (a cue source's locator), and the session it was recorded from. None of them reaches a prompt. */
+  domain?: string; recordId?: string; memoryId?: string; fileId?: string; sessionId?: string
+}
 
 /** A cue's headline: the first sentence when it fits, otherwise cut at a word with an ellipsis. Never empty. */
 export function cueHeadline(detail: string): string {
@@ -479,14 +502,21 @@ export const CUE_MEMORY_FAILURES: ReadonlySet<string> = new Set(['no_cue_memory_
 export function cueMemoryFailed(mem: MemoryResult): boolean { return !!mem.denseError && CUE_MEMORY_FAILURES.has(mem.denseError) }
 export interface LiveCuesV2Deps {
   gate(title: string, window: string, signal: AbortSignal, provider: DecisionProvider): Promise<GateResult>
-  /** cue_memory.py (Miles's COS scripts). */
-  memory(window: string, before: string, signal: AbortSignal): Promise<MemoryResult>
+  /** cue_memory.py (Miles's COS scripts). `top` (grounded cues) asks for more than the usual four, so that excluded copies of
+   *  this meeting still leave four; classic never passes it. */
+  memory(window: string, before: string, signal: AbortSignal, top?: number): Promise<MemoryResult>
   /** The owner's own COS notes and meetings, used only when `memory` did not answer. Local search, no model call. */
   notes(window: string, before: string, signal: AbortSignal, sessionId: string): Promise<MemoryResult>
   judge(title: string, window: string, notes: MemoryNote[], signal: AbortSignal, provider: DecisionProvider): Promise<{ probs: Record<string, number>; tokens: number }>
   writer(model: string, system: string, prompt: string, signal: AbortSignal): Promise<{ text: string; costUsd?: number; inputTokens?: number; outputTokens?: number; model?: string }>
   emit(type: 'coaching_nudge' | 'coaching_nudge_v2', data: Record<string, unknown>): void
   lease(): MaintenanceWorkLease | null
+  /** Live cues v3, grounded cues only (absent means none): the files attached to this meeting (MeetingAskStore.files). May throw. */
+  files?(sessionId: string): GroundedFile[]
+  /** The user-confirmed context of this meeting: its domain and calendar title (MeetingAskStore.orientation). May throw. */
+  orientation?(sessionId: string): { domain: string | null; title: string | null }
+  /** The grounded judge: one yes/no question per candidate (judge B) and the `same` choice as a diagnostic. */
+  judgeB?(title: string, window: string, cands: GroundedNote[], signal: AbortSignal, provider: DecisionProvider): Promise<{ yes: Record<string, number>; same: Record<string, number>; tokens: number }>
   /** True while the user's own query runs (Ask, a durable query): cues wait rather than compete for the provider. */
   busy(): boolean
   /** The configured decision provider for cues. Throws DecisionProviderError('decision_invalid_provider'). */
@@ -531,6 +561,13 @@ export function cueDecisionCalls(client: Pick<DecisionClient, 'ask'>) {
       const res = await client.ask(state, questions, estimateJevTokens({ state, questions }), { signal })
       return { probs: res.answers?.same?.probabilities ?? {}, tokens: res.inputTokens }
     },
+    /** Grounded cues: ONE request, a yes/no question per candidate plus the `same` choice (live-cues-v2-judge-b.ts). */
+    async judgeB(title: string, window: string, cands: GroundedNote[], signal: AbortSignal): Promise<{ yes: Record<string, number>; same: Record<string, number>; tokens: number }> {
+      const state = { meetingTitle: title, window: window.slice(-JUDGE_B_WINDOW_CHARS) }
+      const questions = judgeBQuestions(cands)
+      const res = await client.ask(state, questions, estimateJevTokens({ state, questions }), { signal })
+      return { ...parseJudgeB(res.answers, cands.map(c => c.id)), tokens: res.inputTokens }
+    },
   }
 }
 
@@ -550,12 +587,18 @@ function realDeps(): LiveCuesV2Deps {
   let memorySourceCache: { at: number; value: LiveCuesV2MemorySource } | null = null
   return {
     gate: (title, window, signal, provider) => calls(provider).gate(title, window, signal),
-    memory: (window, before, signal) => cueMemory(window, before, signal),
+    memory: (window, before, signal, top) => cueMemory(window, before, signal, undefined, undefined, top),
     async notes(window, before, signal, sessionId) {
       const r = await notesMemory(window, before, signal, { sessionId })
       return { notes: r.notes, ...(r.error ? { denseError: r.error } : {}) }
     },
     judge: (title, window, notes, signal, provider) => calls(provider).judge(title, window, notes, signal),
+    judgeB: (title, window, cands, signal, provider) => calls(provider).judgeB(title, window, cands, signal),
+    files: sessionId => new MeetingAskStore().files(sessionId),
+    orientation(sessionId) {
+      const o = new MeetingAskStore().orientation(sessionId)
+      return { domain: o.domain, title: o.calendar?.title ?? null }
+    },
     decisionProvider: () => resolveCuesDecisionProvider(process.env).provider,
     decisionState(provider) {
       if (provider === 'subq') {
@@ -615,7 +658,7 @@ export function warmCueMemory(): void {
 }
 
 /** Rank-fusion retrieval through COS scripts/cue_memory.py. Transcript text goes over stdin, never argv. Non-fatal. */
-export function cueMemory(window: string, before: string, signal: AbortSignal, p: CueMemoryPaths | null = cueMemoryPaths(), timeoutMs: number = LIVE_CUES_V2_LIMITS.memoryTimeoutMs): Promise<MemoryResult> {
+export function cueMemory(window: string, before: string, signal: AbortSignal, p: CueMemoryPaths | null = cueMemoryPaths(), timeoutMs: number = LIVE_CUES_V2_LIMITS.memoryTimeoutMs, top = 4): Promise<MemoryResult> {
   if (!p) return Promise.resolve({ notes: [], denseError: 'no_cue_memory_script' })
   const paths = p
   return new Promise(resolveNotes => {
@@ -633,16 +676,20 @@ export function cueMemory(window: string, before: string, signal: AbortSignal, p
     proc.on('close', () => {
       try {
         const res = JSON.parse(out) as { notes?: MemoryNote[]; timing?: { dense_error?: string }; index?: { ageHours?: number } }
-        const notes = (res.notes ?? []).filter(n => n && typeof n.id === 'string' && typeof n.notes === 'string').slice(0, 4)
+        const notes = (res.notes ?? []).filter(n => n && typeof n.id === 'string' && typeof n.notes === 'string').slice(0, top)
         done({ notes, denseError: res.timing?.dense_error, indexAgeH: res.index?.ageHours })
       } catch { done({ notes: [], denseError: 'bad_output' }) }
     })
     proc.stdin?.on('error', () => { /* child exited early */ })
-    proc.stdin?.end(JSON.stringify({ queries: [window.slice(-600)], keywordText: window, before, top: 4 }))
+    proc.stdin?.end(JSON.stringify({ queries: [window.slice(-600)], keywordText: window, before, top }))
   })
 }
 
 // ── Engine ──────────────────────────────────────────────────────────────────
+/** What grounded retrieval hands the rest of an evaluation: the candidates the judge saw, the ones it kept (best first), where
+ *  the notes came from, the title the writer is given, and which arms supplied a candidate. */
+interface GroundedRun { candidates: GroundedNote[]; kept: GroundedNote[]; source: LiveCuesV2MemorySource; writerTitle: string; arms: GroundedArm[] }
+
 interface Session {
   sessionId: string
   title: string
@@ -688,6 +735,7 @@ export class LiveCuesV2Engine {
   constructor(private readonly deps: LiveCuesV2Deps) {}
 
   private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, this.deps.settings) }
+  private groundingOn(): boolean { return resolveLiveCuesGrounding(this.deps.env, this.deps.settings).value === 'grounded' }
   /** 6.79.2: the spend limits as they stand now (env, else COS Control's saved values, else the defaults). The writer
    *  cap per meeting stays twice the cue cap. */
   private limits(): { gate: number; maxCues: number; writerCap: number; cooldownMs: number; dailyWriterCalls: number } {
@@ -881,9 +929,18 @@ export class LiveCuesV2Engine {
 
       const t1 = Date.now()
       const before = new Date(started + 86_400_000).toLocaleDateString('en-CA')
-      let mem: MemoryResult = await this.deps.memory(window, before, abort.signal).catch((): MemoryResult => ({ notes: [], denseError: 'memory_threw' }))
-      Object.assign(trace, { memoryMs: Date.now() - t1, ...(mem.denseError ? { memoryError: mem.denseError } : {}), ...(mem.indexAgeH !== undefined ? { indexAgeH: mem.indexAgeH } : {}) })
+      // Live cues v3: read once per evaluation, so a change of setting applies from the next one.
+      const grounded = this.groundingOn()
+      let mem: MemoryResult = grounded ? { notes: [] } : await this.deps.memory(window, before, abort.signal).catch((): MemoryResult => ({ notes: [], denseError: 'memory_threw' }))
+      if (!grounded) Object.assign(trace, { memoryMs: Date.now() - t1, ...(mem.denseError ? { memoryError: mem.denseError } : {}), ...(mem.indexAgeH !== undefined ? { indexAgeH: mem.indexAgeH } : {}) })
       let source: LiveCuesV2MemorySource = 'cue_memory'
+      // Grounded: the arms and the judge run here instead of the classic steps below, which then find nothing to do.
+      let run: GroundedRun | null = null
+      if (grounded) {
+        run = await this.groundedRetrieve(s, window, before, abort.signal, provider, trace)
+        mem = { notes: run.candidates }
+        source = run.source
+      }
       if (cueMemoryFailed(mem) && !abort.signal.aborted) {
         // cue_memory.py did not answer: search the owner's own COS (no model call), inside its own 3 s budget.
         const tn = Date.now()
@@ -893,14 +950,14 @@ export class LiveCuesV2Engine {
         source = 'notes'
       }
       Object.assign(trace, { candidates: mem.notes.length, cueMemorySource: mem.notes.length ? source : 'none' })
-      let kept: MemoryNote[] = []
-      if (mem.notes.length && !abort.signal.aborted) {
+      let kept: MemoryNote[] = run?.kept ?? []
+      if (!grounded && mem.notes.length && !abort.signal.aborted) {
         const t2 = Date.now()
         const judged = await this.deps.judge(s.title, window, mem.notes, abort.signal, provider)
         Object.assign(trace, { judgeMs: Date.now() - t2, judgeTokens: judged.tokens })
         kept = mem.notes.filter(m => (judged.probs[m.id] ?? 0) >= liveCuesV2JudgeKeep(this.deps.env)).slice(0, L.judgeMaxNotes).map((m, i) => ({ ...m, id: `M${i + 1}` }))
       }
-      trace.kept = kept.length
+      trace.kept = run ? kept.map(m => m.id) : kept.length
       if (abort.signal.aborted) { trace.outcome = 'cancelled'; return }
 
       // 6.79.2: limits lowered while this evaluation ran apply before the writer is charged.
@@ -913,7 +970,7 @@ export class LiveCuesV2Engine {
       const model = liveCuesV2Model(this.deps.env)
       const previous = s.cues.slice(-3).map(c => c.detail)
       const promptMemory = kept.map(m => ({ id: m.id, date: m.date, title: m.title, notes: m.notes }))  // the replay's exact keys
-      const prompt = pyJson({ meetingTitle: s.title, liveIssue: '', suggestedKind: gate.kind, previousCues: previous, memory: promptMemory, window })
+      const prompt = pyJson({ meetingTitle: run?.writerTitle ?? s.title, liveIssue: '', suggestedKind: gate.kind, previousCues: previous, memory: promptMemory, window })
       const t3 = Date.now()
       const out = await this.deps.writer(model, system, prompt, abort.signal)
       Object.assign(trace, { writerMs: Date.now() - t3, prompt: version, model: out.model ?? model, writerUsd: out.costUsd, writerIn: out.inputTokens, writerOut: out.outputTokens })
@@ -929,7 +986,7 @@ export class LiveCuesV2Engine {
       if (this.deps.store.isEnded(s.sessionId) || this.deps.store.isPaused(s.sessionId) || !this.enabled()) { trace.outcome = 'cancelled'; return }
 
       const sources: CueSourceRef[] = parsed.memoryIds.map(id => kept.find(m => m.id === id)).filter((m): m is MemoryNote => !!m)
-        .map(m => ({ id: sourceId(m), date: m.date, title: m.title }))
+        .map(m => (run ? groundedSource(m as GroundedNote, sourceId(m)) : { id: sourceId(m), date: m.date, title: m.title }))
       const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: cueHeadline(parsed.detail), detail: parsed.detail,
         kind: parsed.kind, sources, gate: round(pCue), createdAt: this.deps.now().getTime(), model: out.model ?? model }
       if (!isLiveCueV2(cue)) { trace.outcome = 'withheld_invalid'; return }       // never emit what the companion would drop
@@ -943,7 +1000,8 @@ export class LiveCuesV2Engine {
       try {
         this.deps.cueLog?.({ v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, armedAt: s.armedAt, kind: cue.kind,
           headline: cue.headline, detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model, prompt: version,
-          memorySource: mem.notes.length ? source : 'none', kept: kept.length, wouldWithhold: wouldWithhold(cue.detail, s.cues), before: cueBefore(said) })
+          memorySource: mem.notes.length ? source : 'none', kept: kept.length, wouldWithhold: wouldWithhold(cue.detail, s.cues), before: cueBefore(said),
+          ...(run ? { arms: run.arms } : {}) })
       } catch (error) {
         trace.cueLogError = (error as NodeJS.ErrnoException)?.code ?? 'append_failed'
         console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`)
@@ -981,6 +1039,51 @@ export class LiveCuesV2Engine {
       trace.totalMs = this.deps.now().getTime() - started
       this.deps.trace(trace)
     }
+  }
+
+  /** Live cues v3, `grounding: grounded`: the retrieval arms in parallel (cue_memory.py within its 6 s, the owner's notes within
+   *  their own 3 s), the files attached to this meeting, then ONE judge request over the candidates that survive the exclusions
+   *  (live-cues-v2-grounded.ts). Never throws for a file, orientation or arm failure: those are traced as codes and the meeting
+   *  carries on with what it has. The trace gets ids, kinds, probabilities and timings, never a candidate's or the room's text. */
+  private async groundedRetrieve(s: Session, window: string, before: string, signal: AbortSignal, provider: DecisionProvider, trace: Record<string, unknown>): Promise<GroundedRun> {
+    trace.grounding = 'grounded'
+    const codeOf = (e: unknown) => { const r = e as { reason?: unknown; code?: unknown } | null; return typeof r?.reason === 'string' ? r.reason : typeof r?.code === 'string' ? r.code : 'threw' }
+    let meetingDomain: string | null = null, calendarTitle: string | null = null
+    try { const o = this.deps.orientation?.(s.sessionId); meetingDomain = o?.domain ?? null; calendarTitle = o?.title ?? null } catch (e) { trace.orientationError = codeOf(e) }
+    let files: GroundedFile[] = []
+    try { files = this.deps.files?.(s.sessionId) ?? [] } catch (e) { trace.filesError = codeOf(e) }
+
+    const timed = async (arm: () => Promise<MemoryResult>, threw: string): Promise<{ res: MemoryResult; ms: number | null }> => {
+      const t = Date.now()
+      try { return { res: await arm(), ms: Date.now() - t } } catch { return { res: { notes: [], denseError: threw }, ms: null } }
+    }
+    const [cm, nt] = await Promise.all([
+      timed(() => this.deps.memory(window, before, signal, GROUNDED_LIMITS.cueMemoryRaw), 'memory_threw'),
+      timed(() => this.deps.notes(window, before, signal, s.sessionId), 'notes_threw'),
+    ])
+    Object.assign(trace, { ...(cm.ms !== null ? { memoryMs: cm.ms } : {}), ...(cm.res.denseError ? { memoryError: cm.res.denseError } : {}), ...(cm.res.indexAgeH !== undefined ? { indexAgeH: cm.res.indexAgeH } : {}),
+      ...(nt.ms !== null ? { notesMs: nt.ms } : {}), ...(nt.res.denseError ? { notesError: nt.res.denseError } : {}) })
+
+    const transcript = cleanWindow(s.chunks.join('\n'))
+    const twins = [...this.sessions.keys()].filter(id => id !== s.sessionId)
+    const { candidates, excludedSelf } = groundedCandidates({ cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript, window, selfIds: selfIdSet(s.sessionId, twins),
+      meetingDomain, today: this.deps.now().toLocaleDateString('en-CA') })
+    Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length }, excludedSelf })
+
+    const source: LiveCuesV2MemorySource = candidates.some(c => c.arm === 'cue_memory') ? 'cue_memory' : candidates.some(c => c.arm === 'notes') ? 'notes' : 'none'
+    const arms = (['cue_memory', 'notes', 'files'] as const).filter(a => candidates.some(c => c.arm === a))
+    const title = (calendarTitle ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+    const writerTitle = title || s.title
+    let kept: GroundedNote[] = []
+    if (candidates.length && !signal.aborted) {
+      if (!this.deps.judgeB) throw new Error('judge_b_unavailable')
+      const t2 = Date.now()
+      const judged = await this.deps.judgeB(s.title, window, candidates, signal, provider)
+      Object.assign(trace, { judgeMs: Date.now() - t2, judgeTokens: judged.tokens,
+        judge: candidates.map(c => ({ id: c.id, kind: c.kind, yes: round(judged.yes[c.id] ?? 0), same: round(judged.same[c.id] ?? 0) })) })
+      kept = selectJudgeB(candidates, judged.yes, liveCuesV2JudgeYes(this.deps.env), LIVE_CUES_V2_LIMITS.judgeMaxNotes)
+    }
+    return { candidates, kept, source, writerTitle, arms }
   }
 
   private reap(): void {

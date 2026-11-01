@@ -74,6 +74,7 @@ describe('classic grounding is byte for byte 6.97.4', () => {
   }
   /** Everything one cue run produced, with the wall-clock fields and the random cue id taken out. */
   async function run(settings: Deps['settings'], envOver: NodeJS.ProcessEnv = {}) {
+    requests = []; writerCalls = []; traces = []; emitted = []; logged = []; clock = Date.parse('2026-10-14T15:00:00Z')
     const e = engine(settings, envOver)
     e.arm('meeting_a')
     await e.feed('meeting_a', words(40))
@@ -106,5 +107,13 @@ describe('classic grounding is byte for byte 6.97.4', () => {
   it('default settings (no grounding field at all)', async () => {
     const got = await run({ stored: () => null })
     expect(got).toEqual(GOLDEN)
+  })
+
+  it('grounding saved as classic, saved as something malformed, or saved as grounded but forced to classic by env: the same bytes', async () => {
+    expect(await run({ stored: () => null, grounding: () => 'classic' })).toEqual(GOLDEN)
+    expect(await run({ stored: () => null, grounding: () => 'turbo' as unknown as 'classic' })).toEqual(GOLDEN)
+    expect(await run({ stored: () => null, grounding: () => null })).toEqual(GOLDEN)
+    expect(await run({ stored: () => null, grounding: () => { throw new Error('unreadable') } })).toEqual(GOLDEN)
+    expect(await run({ stored: () => null, grounding: () => 'grounded' }, { COS_LIVE_CUES_GROUNDING: 'classic' })).toEqual(GOLDEN)
   })
 })
