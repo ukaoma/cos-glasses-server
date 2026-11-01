@@ -183,7 +183,7 @@ describe('failures are answers, with fixed words in the log', () => {
     d.ask.mockRejectedValue(error)
     const answer = await d.finder.find(req({ query: 'a very particular secret search phrase' }), sig())
     expect(answer).toMatchObject({ available: false, reason })
-    expect(warn.mock.calls.flat().join(' ')).toBe(`[session-find] unavailable: ${reason}`)
+    expect(warn).not.toHaveBeenCalled()
   })
 
   it('lets a cancelled walk throw, so the route can stay silent', async () => {

@@ -1,5 +1,5 @@
 /**
- * POST /api/agent-sessions/find (Control 0.5.362): which of this Mac's agent sessions the person means, by meaning.
+ * POST /api/agent-sessions/find (Control 0.5.363): which of this Mac's agent sessions the person means, by meaning.
  * Auth comes from the parent /api mount. See lib/session-find.ts for what leaves the Mac, the cost controls and the gates.
  *
  * Body `{ query, consentedProvider, stage }`, exactly those keys. `query` is a string; the words are redacted and cut at 200
@@ -21,14 +21,24 @@ import { SESSION_FIND_LIMITS, SessionFinder, unavailableAnswer, type SessionFind
 
 export interface SessionFindRouteDependencies {
   finder: Pick<SessionFinder, 'find'>
+  now: () => number
 }
 
 const BODY_KEYS = new Set(['query', 'consentedProvider', 'stage'])
-/** One log line per degrade reason per 10 minutes: Control falls back quietly, so the server says why. */
+/** One log line per degrade reason per 10 minutes: Control falls back quietly, so the server says why. Fixed words only, never the query or a session. */
 export const SESSION_FIND_LOG_EVERY_MS = 10 * 60_000
 
 export function createSessionFindRouter(overrides: Partial<SessionFindRouteDependencies> = {}): Router {
   let finder: Pick<SessionFinder, 'find'> | null = overrides.finder ?? null
+  const now = overrides.now ?? Date.now
+  const lastLogged = new Map<string, number>()
+  const logDegrade = (reason: string) => {
+    const at = now()
+    const last = lastLogged.get(reason)
+    if (last !== undefined && at - last < SESSION_FIND_LOG_EVERY_MS) return
+    lastLogged.set(reason, at)
+    console.warn(`[session-find] unavailable: ${reason}`)
+  }
   const router = Router()
   router.use('/agent-sessions/find', (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
 
@@ -54,6 +64,7 @@ export function createSessionFindRouter(overrides: Partial<SessionFindRouteDepen
       return res.status(503).json({ error: { code: 'session_find_unavailable', message: 'Meaning search could not read your sessions. Try again shortly.' } })
     }
     if (controller.signal.aborted) return
+    if (!answer.available && answer.reason) logDegrade(answer.reason)
     return res.json(answer)
   })
   return router

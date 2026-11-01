@@ -1,5 +1,5 @@
 /**
- * The sessions meaning search can ask about (Control 0.5.362, the "find" route): which sessions exist, what each is
+ * The sessions meaning search can ask about (Control 0.5.363, the "find" route): which sessions exist, what each is
  * called, what its first typed prompt says, and when it last did something.
  *
  * WHY THIS IS NOT THE LIST OR THE SESSIONS-TAB COLLECTOR (validated 2026-11-01, all measured on the owner's Mac).

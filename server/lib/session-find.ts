@@ -1,5 +1,5 @@
 /**
- * Find a session by meaning (Control 0.5.362): `POST /api/agent-sessions/find`.
+ * Find a session by meaning (Control 0.5.363): `POST /api/agent-sessions/find`.
  *
  * Control's command panel sends what the person typed. This reads the Mac's own session store (never client text), shows a
  * decision model each session's title and the first 150 characters of its first prompt, and answers the few sessions that
@@ -324,8 +324,6 @@ export class SessionFinder {
     } catch (error) {
       if (isAbortError(error)) throw error
       const reason = reasonFor(error)
-      // Fixed words only: never the query, never a session.
-      console.warn(`[session-find] unavailable: ${reason}`)
       return unavailableAnswer(reason, provider, resetsAtFor(reason, client, provider, deps.jev, (deps.now ?? Date.now)()))
     }
   }

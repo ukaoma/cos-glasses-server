@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  PATH_PLACEHOLDER, stripLeadingAttachments, FIND_PROMPT_CHARS, FIND_QUERY_CHARS, FIND_SCAN_CHARS, FIND_TITLE_CHARS, HIDDEN, candidateTexts, credentialKey, cutAtCodePoints, maskKeyShapes, maskMore, redactForModel, redactQuery,
+  PATH_PLACEHOLDER, UPSTREAM_PROMPT_CUT, stripLeadingAttachments, FIND_PROMPT_CHARS, FIND_QUERY_CHARS, FIND_SCAN_CHARS, FIND_TITLE_CHARS, HIDDEN, candidateTexts, credentialKey, cutAtCodePoints, maskKeyShapes, maskMore, redactForModel, redactQuery,
 } from './session-find-redact.js'
+import { FIND_PROMPT_KEEP_CHARS } from './session-find-collect.js'
 
 const points = (s: string) => Array.from(s).length
 const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
@@ -317,10 +318,45 @@ describe('a home path anywhere', () => {
     ['a file URL', 'open file:///Users/jane/a.png now', 'open [path] now'],
     ['a quoted file URL with spaces', 'open "file:///Users/jane doe/a b.png" now', 'open [path] now'],
     ['a Windows path', 'it is C:\\Users\\jane\\Desktop\\a.png here', 'it is [path] here'],
-    ['a bare account folder', 'cd /Users/jane then ls', 'cd [path] then ls'],
+    ['an upper-case root', 'at /USERS/Jane/Desktop/a.png today', 'at [path] today'],
+    ['a lower-case Windows drive', 'at c:\\users\\jane\\Desktop\\a.png now', 'at [path] now'],
+    ['escaped backslashes', 'at C:\\\\Users\\\\jane\\\\Desktop\\\\a.png now', 'at [path] now'],
+    ['WSL', 'at /mnt/c/Users/jane/Desktop/a.png now', 'at [path] now'],
+    ['an external volume', 'at /Volumes/Backup/Users/jane/a.png now', 'at [path] now'],
+    ['the data volume', 'at /System/Volumes/Data/Users/jane/a.png now', 'at [path] now'],
+    ['another account', 'see ~jane/notes.md now', 'see [path] now'],
+    ['escaped spaces', 'open /Users/jane/My\\ Clients/Acme\\ Corp/a.txt now', 'open [path] now'],
+    ['an apostrophe in the name', "open /Users/o'brien/Desktop/a.png now", 'open [path] now'],
+    ['a double-quoted path with an apostrophe', 'open "/Users/o\'brien/My Files/a.png" now', 'open [path] now'],
+    ['a quoted Windows path with spaces', 'open "C:\\Users\\jane doe\\My Files\\a.png" now', 'open [path] now'],
   ])('replaces %s', (_name, text, expected) => {
     expect(redactForModel(text, 150)).toBe(expected)
     expect(redactForModel(text, 150)).not.toMatch(account)
+  })
+
+  it.each([
+    ['/home/dashboard', 'check the /home/dashboard page'],
+    ['/Users/list', 'open the /Users/list screen'],
+    ['~/month', 'due ~/month end'],
+    ['a lone tilde in quotes', 'the "~" key'],
+    ['a bare account folder', 'cd /Users/jane then ls'],
+    ['a bracketed word', '[File upload bug] happens again'],
+    ['a quoted name', '@"Jane Doe" can you look'],
+  ])('leaves %s alone, it is a word', (_name, text) => {
+    expect(redactForModel(text, 150)).toBe(text)
+  })
+
+  it.each([
+    ['a host and port', 'curl 192.168.1.20:8080/admin?x=1 now', 'curl [link] now'],
+    ['an address alone', 'ping 10.0.0.5 now', 'ping [link] now'],
+    ['localhost', 'hit localhost:3141/api/keys now', 'hit [link] now'],
+    ['a domain with a port', 'open example.com:8443/x now', 'open [link] now'],
+  ])('masks a link: %s', (_name, text, expected) => {
+    expect(redactForModel(text, 150)).toBe(expected)
+  })
+
+  it('leaves a bare domain, a brand name people search for', () => {
+    expect(redactForModel('the quilt.com redesign', 150)).toBe('the quilt.com redesign')
   })
 
   it('does the same to the search words and to a title', () => {
@@ -331,5 +367,61 @@ describe('a home path anywhere', () => {
   it('leaves ordinary paths and words alone', () => {
     const text = 'edit server/lib/session-find.ts and the ~ key, not /usr/local/bin or http://example.com/x'
     expect(redactForModel(text, 150)).not.toContain(PATH_PLACEHOLDER)
+  })
+})
+
+describe('an attachment that was cut upstream', () => {
+  it('knows the length the collector cuts a typed prompt at', () => {
+    expect(UPSTREAM_PROMPT_CUT).toBe(FIND_PROMPT_KEEP_CHARS)
+  })
+
+  it('drops a title cut inside an attachment, it never closes', () => {
+    const cut = ('@"/Users/jane/Photos Library/' + 'x'.repeat(60)).slice(0, 80)
+    expect(cut.length).toBe(80)
+    expect(candidateTexts(cut, 'the crop is off by a few pixels today please').option).toBe('the crop is off by a few pixels today please')
+  })
+
+  it('drops an unclosed image bracket and a single-quote form when cut', () => {
+    expect(stripLeadingAttachments('[Image: source: /Users/jane/a b', true)).toBe('')
+    expect(stripLeadingAttachments("@'/Users/jane/a b", true)).toBe('')
+  })
+
+  it('keeps an unclosed form when it was not cut, it is the words', () => {
+    expect(stripLeadingAttachments('@"quote me', false)).toBe('@"quote me')
+  })
+
+  it('drops a typed prompt cut at the upstream limit inside an attachment', () => {
+    const typed = ('@"/Users/jane/' + 'My Folder '.repeat(300)).slice(0, UPSTREAM_PROMPT_CUT)
+    expect(candidateTexts('Short title here', typed).prompt).toBe('')
+  })
+})
+
+describe('what is not an attachment', () => {
+  it.each([
+    '[File upload bug] happens',
+    '[Attachment list] is wrong',
+    '@"Jane Doe" can you look',
+    '@jane can you look',
+  ])('keeps %s', (text) => {
+    expect(stripLeadingAttachments(text)).toBe(text)
+  })
+
+  it.each([
+    ['@"/Users/jane/a b.png" fix it', 'fix it'],
+    ['@"notes.md" fix it', 'fix it'],
+    ["@'a/b' fix it", 'fix it'],
+    ['[Image #1] fix it', 'fix it'],
+    ['[Image: source: /Users/jane/a.png] fix it', 'fix it'],
+    ['[Pasted text #1 +20 lines] fix it', 'fix it'],
+  ])('drops %s', (text, rest) => {
+    expect(stripLeadingAttachments(text)).toBe(rest)
+  })
+})
+
+describe('a half of a surrogate pair', () => {
+  it('is removed from the search words, where work-search cuts at 300 UTF-16 units inside a pair', () => {
+    const q = redactQuery('a' + '\u{1F600}'.repeat(160))
+    expect(q).not.toMatch(loneSurrogate)
+    expect(points(q)).toBe(150)
   })
 })

@@ -1,5 +1,5 @@
 /**
- * Asking a decision model which session the person means (the "find" route, Control 0.5.362).
+ * Asking a decision model which session the person means (the "find" route, Control 0.5.363).
  *
  * The shape, measured on 20 real queries over 332 of the owner's sessions (CANARY_meaning_search_2026-11-01):
  *   - ONE Choice over the newest 254 sessions, each shown as its title and the first 150 characters of its first prompt,
