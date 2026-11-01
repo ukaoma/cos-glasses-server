@@ -87,13 +87,13 @@ Generative Claude/Codex/Ollama engines, reasoning, tool execution, text generati
 
 **Cost controls.** Own ledgers `session-find-jev-usage.json` and `session-find-subq-usage.json`, 3,000,000 input tokens a day each (`COS_SESSION_FIND_DAILY_TOKENS`, UTC day), each provider's own breaker (3 failures, one hour; a Jev key save resets it), the `COS_SESSION_FIND=0` switch. Cap and breaker are checked before any session is read. A 10-minute cache keyed by provider, words and the sorted session set. A connection that closes stops the walk and any request not yet sent; a request already sent is never aborted, since it is billed either way. Logs carry fixed words and counts, never the words typed or a session.
 
-**Measured 2026-11-01, Jev, through the real route on the owner's Mac** (20 canary queries and 7 with no answer; the queries were written after reading the sessions, so read these as optimistic). Pool: 254 sessions reach 30 days, 508 reach 98. Walk: 2.5 s cold (1,056 files opened), 0.15 s warm, 0.55 s to widen to 508. Per search about 13,400 tokens for the first request and 10,500 on average more for the second (a Strong first answer skips it); a model request took 174 ms at the median, 429 ms at most.
+**Measured 2026-11-01, Jev, through the real route on the owner's Mac** (20 canary queries and 7 with no answer; the queries were written after reading the sessions, so read these as optimistic). Pool: 254 sessions reach 30 days, 508 reach 87. Walk: 2.8 s cold (1,056 files opened, operating system cache warm), 0.15 s warm, 1.1 s more to widen to 508. Per search about 13,400 tokens for the first request and 10,500 on average more for the second (a Strong first answer skips it); a model request took 174 ms at the median, 429 ms at most.
 
 | | stage first (newest 254) | stage full (up to 508) |
 | --- | --- | --- |
 | Right session first | 10 of 20 | 19 of 20 |
 | Right session in the top 3 | 10 of 20 | 19 of 20 |
-| Rows shown per positive query | 2.0 | 1.6 |
+| Rows shown per positive query | 0.9 | 1.6 |
 | Queries with no answer: rows shown | 0 of 7 | 0 of 7 |
 
 Stage first misses are the 10 answers older than 30 days, as expected. The one miss at full names a category ("the editor") for a product ("Cursor"). Constants, in `FIND_TUNING`: Jev floor 0.30, Likely from 0.40, Strong from 0.60, second request skipped when the top raw Choice probability is 0.60 or more. Behind them: the right session's yes/no probability was 0.44 to 0.88; 14 rows at 0.60 or more were all right; between 0.40 and 0.60, 6 right and 4 wrong; between 0.30 and 0.40, 0 right and 8 wrong. All 7 no-answer queries read `none` at 0.87 to 1.00 and showed nothing; asked the yes/no round anyway, the best of 12 was 0.08 to 0.28, under the floor. **SubQ was not run through this path** (the key could not be reached without pointing the process at the live data folder, which was not allowed), so its numbers are the canary's small sample, the yes/no round is off for it, and it uses a higher floor (0.50, Likely 0.70, Strong 0.90). Re-run before relying on them.
