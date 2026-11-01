@@ -1,16 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import {
-  admitCueTopic, blockedNameWords, normalizeQuery, profileWorldWords, queryHash, sensitiveWindow, withHomeArea, type AdmitContext, type ProfileNameSource,
+  admitCueTopic, blockedNameWords, normalizeQuery, ownerTermPhrases, queryHash, sensitiveWindow, withHomeArea, type AdmitContext, type ProfileNameSource,
 } from './live-cues-general-topic.js'
 
 // Every name here is made up. The module holds none: it reads them from the profile and the transcript.
 const PROFILE: ProfileNameSource = {
   ownerName: () => 'Zephyrine Quillon',
   speakerLabel: () => 'ZQX',
-  vocabulary: () => ['Frobnitz', 'Gizmoworks', 'a'],
+  // The real vocabulary holds plain work words inside longer terms ("retail", "pos"), so the tests do too.
+  vocabulary: () => ['Frobnitz', 'Gizmoworks', 'a', 'retail analytics hub', 'POS'],
   domainKeywords: () => ({ quillco_corp: ['Quillco', 'Brandlet'] }),
 }
-const NO_NAMES: AdmitContext = { nameWords: new Set(), recent: new Set() }
+const NO_NAMES: AdmitContext = { nameWords: new Set(), terms: [], recent: new Set() }
 const ctx = (over: Partial<AdmitContext> = {}): AdmitContext => ({ ...NO_NAMES, ...over })
 
 describe('sensitive window', () => {
@@ -37,32 +38,40 @@ describe('sensitive window', () => {
     expect(sensitiveWindow('the reason this season is personal for the arena crowd, an issue of taxonomy and courtesy')).toBeNull()
     expect(sensitiveWindow('the new team joins the Formula One grid at the circuit this weekend')).toBeNull()
   })
-  it('also skips a window that names a word of the owner\'s own world from the profile', () => {
-    const world = profileWorldWords(PROFILE)
-    expect(sensitiveWindow('we were talking about Frobnitz and the roadmap', world)).toBe('profile')
-    expect(sensitiveWindow('we were talking about the roadmap', world)).toBeNull()
-  })
-  it('a profile word skips nothing when the profile has none', () => {
-    expect(sensitiveWindow('we were talking about Frobnitz', new Set())).toBeNull()
+  it('takes no profile input: the owner\'s own terms never skip a window', () => {
+    expect(sensitiveWindow.length).toBe(1)
+    expect(sensitiveWindow('we were talking about Frobnitz and the retail analytics hub')).toBeNull()
   })
 })
 
 describe('names from the profile and the transcript', () => {
-  it('collects the owner, the profile world, the known speakers and the speaker labels that open window lines', () => {
+  it('collects the owner and their label, the known speakers and the speaker labels that open window lines, one word each', () => {
     const window = 'Marlowe: have you seen the new circuit\n[12] **Prunella Voss**: not yet\nYou: ok\nMe: fine\nSpeaker 3: hello'
     const names = blockedNameWords(window, ['Thaddeus Orme'], PROFILE)
-    for (const w of ['zephyrine', 'quillon', 'frobnitz', 'gizmoworks', 'quillco', 'brandlet', 'corp', 'thaddeus', 'orme', 'marlowe', 'prunella', 'voss']) expect(names, w).toContain(w)
+    for (const w of ['zephyrine', 'quillon', 'thaddeus', 'orme', 'marlowe', 'prunella', 'voss']) expect(names, w).toContain(w)
     for (const w of ['you', 'me', 'speaker']) expect(names, w).not.toContain(w)
   })
-  it('lets the owner\'s own name block a query but never skip a whole window', () => {
-    expect(blockedNameWords('', [], PROFILE)).toContain('zephyrine')
-    expect(profileWorldWords(PROFILE)).not.toContain('zephyrine')
-    expect(profileWorldWords(PROFILE)).toContain('quillco')
+  it('does not block the profile\'s vocabulary or domain keywords word by word: they are whole terms (ownerTermPhrases)', () => {
+    const names = blockedNameWords('', [], PROFILE)
+    for (const w of ['retail', 'analytics', 'hub', 'pos', 'frobnitz', 'gizmoworks', 'quillco', 'brandlet', 'corp']) expect(names, w).not.toContain(w)
   })
   it('survives a profile that throws', () => {
     const broken: ProfileNameSource = { ownerName() { throw new Error('x') }, speakerLabel() { throw new Error('x') }, vocabulary() { throw new Error('x') }, domainKeywords() { throw new Error('x') } }
     expect([...blockedNameWords('Marlowe: hi', [], broken)]).toEqual(['marlowe'])
-    expect(profileWorldWords(broken).size).toBe(0)
+    expect(ownerTermPhrases(broken)).toEqual([])
+  })
+})
+
+describe('owner terms', () => {
+  it('lists every vocabulary term and every domain-keyword term and domain name as stemmed lowercase word lists', () => {
+    expect(ownerTermPhrases(PROFILE)).toEqual([['frobnitz'], ['gizmowork'], ['retail', 'analytic', 'hub'], ['pos'], ['quillco', 'corp'], ['quillco'], ['brandlet']])
+  })
+  it('ignores a term under three characters, repeats and non-strings', () => {
+    const src: ProfileNameSource = { ownerName: () => '', speakerLabel: () => '', vocabulary: () => ['a', 'Hi', 'Frobnitz', 'frobnitz', 'FROBNITZ'], domainKeywords: () => ({ x: ['Gizmo', 5 as unknown as string], y: 'nope' as unknown as string[] }) }
+    expect(ownerTermPhrases(src)).toEqual([['frobnitz'], ['gizmo']])
+  })
+  it('is empty for a profile with no vocabulary and no domain keywords', () => {
+    expect(ownerTermPhrases({ ownerName: () => 'X', speakerLabel: () => 'Y', vocabulary: () => [], domainKeywords: () => ({}) })).toEqual([])
   })
 })
 
@@ -88,12 +97,31 @@ describe('admitCueTopic', () => {
       expect(admitCueTopic(q, ctx()), q).toEqual({ ok: false, reason: 'deny_word' })
     }
   })
-  it('rejects a speaker, owner or profile name word, with plural-insensitive matching', () => {
+  it('rejects a speaker or owner name word, with plural-insensitive matching', () => {
     const names = ctx({ nameWords: blockedNameWords('Marlowe: hi', [], PROFILE) })
-    for (const q of ['Marlowe bakery news', 'Marlowes bakery', 'Zephyrine keynote', 'Quillco product launch', 'Frobnitz review']) {
+    for (const q of ['Marlowe bakery news', 'Marlowes bakery', 'Zephyrine keynote', 'Quillon interview']) {
       expect(admitCueTopic(q, names), q).toEqual({ ok: false, reason: 'name' })
     }
     expect(admitCueTopic('Formula One circuit news', names).ok).toBe(true)
+  })
+  it('owner term: rejects a query that carries a WHOLE vocabulary or domain-keyword term, in any case and with other words around it', () => {
+    const owner = ctx({ terms: ownerTermPhrases(PROFILE) })
+    for (const q of ['Quillco product launch', 'frobnitz review', 'Retail Analytics Hub pricing news', 'news about the RETAIL ANALYTICS HUB', 'Quillco Corp earnings call', 'POS system news']) {
+      expect(admitCueTopic(q, owner), q).toEqual({ ok: false, reason: 'owner_term' })
+    }
+  })
+  it('owner term: a query with just one word of a longer term passes, so plain work words do not block work queries', () => {
+    const owner = ctx({ terms: ownerTermPhrases(PROFILE) })
+    for (const q of ['retail news this week', 'analytics industry news', 'hub airport news', 'retail hub analytics', 'analytics retail hub']) {
+      expect(admitCueTopic(q, owner), q).toMatchObject({ ok: true })
+    }
+  })
+  it('owner term: matches whole words and the phrase in order, not substrings of longer words', () => {
+    const owner = ctx({ terms: ownerTermPhrases(PROFILE) })
+    expect(admitCueTopic('Frobnitzville festival news', owner).ok).toBe(true)
+    expect(admitCueTopic('superfrobnitz news', owner).ok).toBe(true)
+    expect(admitCueTopic('Retail Analytics Hubs news', owner)).toEqual({ ok: false, reason: 'owner_term' })
+    expect(admitCueTopic('retail analytics news hub', owner).ok).toBe(true)
   })
   it('rejects a secret', () => {
     expect(admitCueTopic('sk-abcdefghijklmnop', ctx())).toEqual({ ok: false, reason: 'secret' })

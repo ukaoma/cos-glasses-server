@@ -18,7 +18,7 @@ type Insight = import('./live-cues-general.js').GeneralInsight
 type Limits = import('./live-cues-general.js').GeneralCueLimits
 
 // Every name here is made up; the module holds none.
-const PROFILE = { ownerName: () => 'Zephyrine Quillon', speakerLabel: () => 'ZQX', vocabulary: () => ['Frobnitz'], domainKeywords: () => ({ quillco_corp: ['Quillco'] }) }
+const PROFILE = { ownerName: () => 'Zephyrine Quillon', speakerLabel: () => 'ZQX', vocabulary: () => ['Frobnitz', 'retail analytics hub'], domainKeywords: () => ({ quillco_corp: ['Quillco'] }) }
 const ROOM = 'The Formula One race weekend is coming to town and everyone is talking about the circuit, the grandstands and the new team.'
 const QUERIES = ['Formula One circuit news', 'Formula One grandstands news', 'Formula One paddock news', 'Formula One pit lane news', 'Formula One safety car news',
   'Formula One qualifying news', 'Formula One podium news', 'Formula One tyre news', 'Formula One pole news', 'Formula One chicane news']
@@ -217,10 +217,10 @@ describe('sensitive window', () => {
     expect(h.traces.at(-1)).toMatchObject({ pGeneral: null, queryHash: null })
     expect(JSON.stringify(h.traces)).not.toMatch(/mortgage|IRS/i)
   })
-  it('also skips a window naming a word of the owner\'s own world from the profile', async () => {
-    const h = await make({ sessions: [mac('mac_1', { text: 'we keep coming back to Frobnitz in the roadmap' })] })
-    expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'sensitive:profile' })
-    expect(h.calls.trigger).toBe(0)
+  it('vocabulary never skips a window: the owner\'s own terms guard the query, not the room', async () => {
+    const h = await make({ sessions: [mac('mac_1', { text: 'we keep coming back to Frobnitz and the retail analytics hub in the roadmap' })] })
+    expect(await h.go()).toMatchObject({ outcome: 'cue' })
+    expect(h.calls.trigger).toBe(1)
   })
 })
 
@@ -283,13 +283,19 @@ describe('topic and admission', () => {
     ['admission: a deny-list word in the query', { text: ROOM, speakerNames: [] }, 'family court news', 'rejected:deny_word'],
     ['admission: a speaker label from the window', { text: `Marlowe: ${ROOM}`, speakerNames: [] }, 'Marlowe bakery news', 'rejected:name'],
     ['admission: a speaker name the host knows', { text: ROOM, speakerNames: ['Prunella Voss'] }, 'Prunella Voss interview', 'rejected:name'],
-    ['admission: a profile name', { text: ROOM, speakerNames: [] }, 'Quillco product launch', 'rejected:name'],
+    ['admission: an owner term from the profile', { text: ROOM, speakerNames: [] }, 'Quillco product launch', 'rejected:owner_term'],
+    ['admission: a whole vocabulary phrase', { text: ROOM, speakerNames: [] }, 'Retail Analytics Hub pricing news', 'rejected:owner_term'],
     ['admission: the owner\'s own name', { text: ROOM, speakerNames: [] }, 'Zephyrine keynote speech', 'rejected:name'],
   ])('%s is rejected before any search', async (_name, session, query, reason) => {
     const h = await make({ sessions: [mac('mac_1', session)], deps: { topicModel: async () => ({ text: JSON.stringify({ topic: true, category: 'news', query }) }) } })
     expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason })
     expect(h.calls.search).toEqual([])
     expect(h.traces.at(-1)!.queryHash).toMatch(/^[0-9a-f]{12}$/)
+  })
+  it('owner term: a query with just one word of a vocabulary term goes on to the search', async () => {
+    const h = await make({ deps: { topicModel: async () => ({ text: '{"topic":true,"category":"news","query":"retail industry news"}' }) } })
+    expect(await h.go()).toMatchObject({ outcome: 'cue' })
+    expect(h.calls.search).toEqual(['retail industry news'])
   })
   it('local: appends the owner\'s home area, admits the longer query again, then searches it', async () => {
     const h = await make({ deps: { topicModel: async () => ({ text: '{"topic":true,"category":"local","query":"street food festival"}' }) } })

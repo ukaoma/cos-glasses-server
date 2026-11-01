@@ -36,7 +36,7 @@ import {
   parseGeneralInsight, parseGeneralTopic, type GeneralCueCategory, type InsightSourceIn,
 } from './live-cues-general-prompts.js'
 import {
-  admitCueTopic, blockedNameWords, profileWorldWords, queryHash, realProfileNames, sensitiveWindow, withHomeArea, type ProfileNameSource,
+  admitCueTopic, blockedNameWords, ownerTermPhrases, queryHash, realProfileNames, sensitiveWindow, withHomeArea, type ProfileNameSource,
 } from './live-cues-general-topic.js'
 
 // ── Limits and shared types (names follow CONTRACT_v3; settings v3 and the shared types land with the modes branch) ──
@@ -535,8 +535,9 @@ export class GeneralCueRunner {
     const profile = this.deps.profile ?? realProfileNames
     const window = redactSecrets(c.window(LIVE_CUES_GENERAL_LIMITS.topicWindowChars))
 
-    // 1. Deterministic skip, before any model call: private-life vocabulary or the owner's own world never leaves the machine.
-    const sensitive = sensitiveWindow(window, profileWorldWords(profile))
+    // 1. Deterministic skip, before any model call: a window with private-life vocabulary never leaves the machine. (The owner's
+    //    vocabulary does not skip a window: it guards the query, as whole terms, in admission.)
+    const sensitive = sensitiveWindow(window)
     if (sensitive) { rec.last = { state: 'withheld', reason: 'sensitive_window' }; return this.done(row, 'no_cue', `sensitive:${sensitive}`) }
 
     // 2. Trigger (Jev).
@@ -557,7 +558,7 @@ export class GeneralCueRunner {
     row.category = topic.category
 
     // 4. Admission (deterministic), then the home area for a local query, admitted again as the new string it is.
-    const ctx = { nameWords: blockedNameWords(window, c.speakerNames ?? [], profile), recent: this.recentQueries(c.sessionId, startedAt) }
+    const ctx = { nameWords: blockedNameWords(window, c.speakerNames ?? [], profile), terms: ownerTermPhrases(profile), recent: this.recentQueries(c.sessionId, startedAt) }
     let admitted = admitCueTopic(topic.query, ctx)
     if (!admitted.ok) { row.queryHash = queryHash(topic.query); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }
     if (topic.category === 'local') {
