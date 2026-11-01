@@ -11,7 +11,8 @@
 //          in that idle window is the live server's own churn ("noisy") and is listed, not counted.
 //       2. run the mode with the JSON reporter, timing the wall clock.
 //       3. snapshot again. Any path that is new, removed or modified since step 1's second snapshot,
-//          and not noisy, not --allow'ed and not the known TTS ledger, FAILS the run (exit 1).
+//          and not noisy, not a named live writer (LIVE_WRITERS), not --allow'ed and not the known TTS
+//          ledger, is a test write and FAILS the run (exit 1). Every class is printed with its path.
 //       4. write <out>/<mode>.ids.json (one status per test ID) and <out>/<mode>.summary.json.
 // diff: test IDs and statuses of two runs must match EXACTLY. Every difference is listed, none is
 //       tolerated, and nothing is "fixed" by loosening the comparison. Exit 1 on any difference.
@@ -32,6 +33,22 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 const KNOWN_ALLOWED = ['server/data/openai-tts-budget.json']
+// Processes that write to a live path on their own, whatever the tests do. A change matching one is
+// reported as "live" with its writer named, and does not fail the run. Anything else under a live
+// path, and every change inside the checkout, is a test write and fails it. Found by the first run
+// of the unfenced gate; extend only with evidence of who the writer is.
+const LIVE_WRITERS = [
+  ['.cos_qdrant_health.jsonl', 'qdrant health LaunchAgent (appends every minute)'],
+  ['cos-session-activity-', 'Claude Code session hooks (PID-named, rewritten while a session is active)'],
+  ['cos-pending-session-summary-', 'Claude Code session hooks'],
+  ['home-data:data/hook-spool', 'live server session-hook spool'],
+  ['session-hook-events.jsonl', 'live server session-hook log'],
+  ['closed-transcript-sessions.json', 'live server'],
+  ['home-data:data/work-reviews', 'live server work reviews'],
+  ['home-top:cursor-cli', 'live server Cursor spawn dir'],
+  ['home-top:data', 'live data home (parent directory mtime)'],
+  ['home-data:data/training-audio', 'live server audio retention (age and 30-per-speaker cap prune)'],
+]
 const HASH_CONTENT_UNDER = 256 * 1024
 
 function walk(dir, visit) {
@@ -156,8 +173,9 @@ function runMode() {
   const after = snapshot()
 
   const changes = diffSnapshots(before, after)
-  const classify = (c) => (allow.some(a => c.key.includes(a)) ? 'allowed' : noisy.has(c.key) ? 'noisy' : 'violation')
-  const classified = changes.map(c => ({ ...c, class: classify(c) }))
+  const writerOf = (key) => LIVE_WRITERS.find(([pattern]) => key.includes(pattern))?.[1]
+  const classify = (c) => (allow.some(a => c.key.includes(a)) ? 'allowed' : noisy.has(c.key) ? 'noisy' : writerOf(c.key) ? 'live' : 'violation')
+  const classified = changes.map(c => ({ ...c, class: classify(c), writer: writerOf(c.key) }))
   const violations = classified.filter(c => c.class === 'violation')
 
   const missingJson = json.filter(p => !existsSync(p))
@@ -165,14 +183,14 @@ function runMode() {
   const summary = {
     mode, wallSeconds, exitCode: result.status, jsonMissing: missingJson,
     counts: countStatuses(ids.tests), tests: Object.keys(ids.tests).length, files: Object.keys(ids.files).length,
-    livePathChanges: { violations: violations.length, allowed: classified.filter(c => c.class === 'allowed').length, noisy: classified.filter(c => c.class === 'noisy').length, detail: classified },
+    livePathChanges: { violations: violations.length, allowed: classified.filter(c => c.class === 'allowed').length, live: classified.filter(c => c.class === 'live').length, noisy: classified.filter(c => c.class === 'noisy').length, detail: classified },
   }
   writeFileSync(join(outDir, `${mode}.ids.json`), JSON.stringify({ mode, wallSeconds, ...ids }, null, 1))
   writeFileSync(join(outDir, `${mode}.summary.json`), JSON.stringify(summary, null, 1))
 
   console.log(`\nqualify ${mode}: exit ${result.status}, ${wallSeconds.toFixed(1)}s wall, ${summary.tests} test IDs in ${summary.files} files, ${JSON.stringify(summary.counts)}`)
-  console.log(`qualify live paths: ${violations.length} violation(s), ${summary.livePathChanges.allowed} allowed (known), ${summary.livePathChanges.noisy} noisy (changed in the idle control window too)`)
-  for (const c of classified.filter(c => c.class !== 'noisy')) console.log(`  ${c.class.toUpperCase().padEnd(9)} ${c.kind.padEnd(8)} ${c.key}`)
+  console.log(`qualify live paths: ${violations.length} test write(s), ${summary.livePathChanges.allowed} allowed (known ledger), ${summary.livePathChanges.live} live-process (named writer), ${summary.livePathChanges.noisy} noisy (changed in the idle control window too)`)
+  for (const c of classified.filter(c => c.class !== 'noisy')) console.log(`  ${(c.class === 'violation' ? 'TEST-WRITE' : c.class.toUpperCase()).padEnd(10)} ${c.kind.padEnd(8)} ${c.key}${c.writer ? `  <- ${c.writer}` : ''}`)
   if (missingJson.length > 0) console.log(`qualify: JSON report missing: ${missingJson.join(', ')}`)
   process.exit(result.status === 0 && violations.length === 0 && missingJson.length === 0 ? 0 : 1)
 }

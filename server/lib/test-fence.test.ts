@@ -38,8 +38,8 @@ describe('test fence', () => {
       expect(env.COS_DIARIZER).toBe('embedding')
       expect(env.HOME).toBe(join(fence.root, 'home'))
       expect(env.TMPDIR).toBe(join(fence.root, 'tmp'))
-      // The four fixed /tmp files each get a private path.
-      for (const key of ['COS_CLI_SESSIONS_FILE', 'COS_CODEX_ENGINE_SESSIONS_FILE', 'COS_CURSOR_ENGINE_SESSIONS_FILE', 'COS_SPEAKER_TRAINING_DIR']) {
+      // The fixed /tmp files and the two checkout-local caches each get a private path.
+      for (const key of ['COS_CLI_SESSIONS_FILE', 'COS_CODEX_ENGINE_SESSIONS_FILE', 'COS_CURSOR_ENGINE_SESSIONS_FILE', 'COS_SPEAKER_TRAINING_DIR', 'COS_CURSOR_MODEL_CACHE_FILE', 'TTS_DISK_CACHE_DIR']) {
         expect(env[key], key).toMatch(new RegExp(`^${fence.root}/`))
       }
       for (const dir of [fence.dataDir, fence.homeDir, fence.tmpDir]) expect(existsSync(dir), dir).toBe(true)

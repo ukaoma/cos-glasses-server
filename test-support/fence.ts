@@ -61,6 +61,12 @@ export function applyFence(env: Record<string, string | undefined>, base = FENCE
   env.COS_CODEX_ENGINE_SESSIONS_FILE = join(root, 'cos-codex-engine-sessions.json')
   env.COS_CURSOR_ENGINE_SESSIONS_FILE = join(root, 'cos-cursor-engine-sessions.json')
   env.COS_SPEAKER_TRAINING_DIR = join(root, 'cos-speaker-training')
+  // Two caches that otherwise resolve inside the checkout (server/data), found by the first
+  // live-path snapshot of the unfenced gate: cursor-model-catalog.ts and tts-cache.ts. Both read
+  // their override at import, which is why this runs before the test file's imports. The TTS
+  // spend LEDGER (openai-tts-budget.json) has no override and deliberately stays where it is.
+  env.COS_CURSOR_MODEL_CACHE_FILE = join(dataDir, 'cursor-models-cache.json')
+  env.TTS_DISK_CACHE_DIR = join(root, 'tts-cache')
 
   const cleanup = () => {
     // Only ever remove what this call made.
