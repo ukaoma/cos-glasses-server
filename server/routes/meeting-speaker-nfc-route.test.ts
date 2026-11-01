@@ -2,7 +2,7 @@
 // pipeline's sidecars hold NFC. These drive the real routes over HTTP with real NFD and NFC strings and read the files back.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request, type Server } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -228,6 +228,45 @@ describe('voice profile merge and delete with a name stored decomposed (real wri
     expect(store()[0]!.embeddings).toHaveLength(5)
   }, T)
 
+  // Orthogonal to the target (cosine near 0), against a copy that equals it (cosine 1).
+  const far = (n: number, name: string) => ({ name, embeddings: Array.from({ length: n }, () => Array.from({ length: 192 }, (_, i) => (i % 2 ? 1 : -1) * ((i % 7) + 1) * (i % 3 === 0 ? 1 : -1))), sources: Array(n).fill('g2-training') })
+
+  it('refuses a merge when ANY stored copy of the name is below the floor, and previews the lowest score', async () => {
+    seedStore([profile('Target Person', 3), profile(SRC_NFC, 2), far(2, SRC_NFD)])
+    await startServer()
+    const preview = await post('/api/voice/merge-profiles', { into: 'Target Person', from: [SRC_NFC], dryRun: true })
+    expect(preview.status).toBe(409)
+    expect(preview.json.report.similarity[SRC_NFC]).toBeLessThan(0.55)
+    const real = await post('/api/voice/merge-profiles', { into: 'Target Person', from: [SRC_NFC], confirm: true })
+    expect(real.status).toBe(409)
+    expect(real.json.report.merged).toEqual([])
+    expect(real.json.report.refused[0].name).toBe(SRC_NFC)
+    expect(store().map(p => p.name).sort()).toEqual(['Target Person', SRC_NFC, SRC_NFD].sort())
+  }, T)
+
+  it('merges both copies when both clear the floor', async () => {
+    seedStore([profile('Target Person', 3), profile(SRC_NFC, 2), profile(SRC_NFD, 2)])
+    await startServer()
+    const real = await post('/api/voice/merge-profiles', { into: 'Target Person', from: [SRC_NFC], confirm: true })
+    expect(real.status).toBe(200)
+    expect(store().map(p => p.name)).toEqual(['Target Person'])
+    expect(store()[0]!.embeddings).toHaveLength(7)
+  }, T)
+
+  it('counts every stored copy in the delete preview, and the delete removes the same number', async () => {
+    seedStore([profile(SRC_NFC, 3), profile(SRC_NFD, 2), profile('Keep Person', 2)])
+    await startServer()
+    const unconfirmed = await post('/api/voice/delete-person', { name: SRC_NFC })
+    expect(unconfirmed.status).toBe(400)
+    expect(unconfirmed.json.wouldRemove).toMatchObject({ profile: 2, embeddings: 5 })
+    const dry = await post('/api/voice/delete-person', { name: SRC_NFC, dryRun: true })
+    expect(dry.json.removed).toMatchObject({ profiles: 2, embeddings: 5 })
+    expect(store()).toHaveLength(3)
+    const real = await post('/api/voice/delete-person', { name: SRC_NFC, confirm: true })
+    expect(real.json.removed).toMatchObject({ profiles: 2, embeddings: 5 })
+    expect(store().map(p => p.name)).toEqual(['Keep Person'])
+  }, T)
+
   it('still refuses to merge a name into itself when there is only one profile', async () => {
     seedStore([profile(SRC_NFC, 3)])
     await startServer()
@@ -245,6 +284,16 @@ describe('voice profile merge and delete with a name stored decomposed (real wri
     expect(res.json.removed).toMatchObject({ profiles: 1, embeddings: 3, calibrationRows: 1 })
     expect(store().map(p => p.name)).toEqual(['Keep Person'])
     expect(readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')).not.toContain('Kovacs')
+  }, T)
+})
+
+describe('enroll with a repeated name', () => {
+  it.each(['?name=a&name=b'])('answers 400 for %s instead of enrolling under the owner label', async (query) => {
+    await startServer()
+    const res = await fetch(`${baseUrl}/api/voice/enroll${query}`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: Buffer.alloc(64) })
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toMatch(/single value/)
+    expect(existsSync(join(dataDir, 'voice-profiles.json'))).toBe(false)
   }, T)
 })
 

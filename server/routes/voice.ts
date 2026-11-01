@@ -52,6 +52,8 @@ voiceRouter.post('/voice/enroll', async (req, res) => {
     // Default to the configured wearer label ('Me' unless owner_speaker_label
     // is set). Hardcoding one user's initials here enrolled every other install
     // under a stranger's name.
+    // `?name=a&name=b` is not a name; falling through to the owner's label would enroll a stranger's voice as the owner.
+    if (req.query.name !== undefined && typeof req.query.name !== 'string') return res.status(400).json({ error: 'name must be a single value' })
     const name = nfc(typeof req.query.name === 'string' && req.query.name ? req.query.name : getOwnerSpeakerLabel())
 
     // An old client can still send a whole spoken sentence as the name (the
@@ -916,7 +918,7 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
     const dryRun = req.body?.dryRun === true
 
     if (req.body?.confirm !== true && !dryRun) {
-      const existing = readVoiceProfiles().profiles.find(p => sameSpeakerName(p.name, target))
+      const existing = readVoiceProfiles().profiles.filter(p => sameSpeakerName(p.name, target))
       const audioDir = speakerDirPath(AUDIO_SAVE_DIR, target)
       let wavs = 0
       if (audioDir && existsSync(audioDir)) {
@@ -927,8 +929,8 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
         error: 'confirmation required',
         message: `Deleting "${target}" is not reversible. Pass { confirm: true } to proceed.`,
         wouldRemove: {
-          profile: existing ? 1 : 0,
-          embeddings: existing?.embeddings.length ?? 0,
+          profile: existing.length,
+          embeddings: existing.reduce((n, p) => n + p.embeddings.length, 0),
           trainingAudioFiles: wavs,
           calibrationRows: calibration.removed,
         },
@@ -936,7 +938,7 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
     }
 
     if (dryRun) {
-      const existing = readVoiceProfiles().profiles.find(p => sameSpeakerName(p.name, target))
+      const existing = readVoiceProfiles().profiles.filter(p => sameSpeakerName(p.name, target))
       const audioDir = speakerDirPath(AUDIO_SAVE_DIR, target)
       let wavs = 0
       if (audioDir && existsSync(audioDir)) {
@@ -947,8 +949,8 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
         name: target,
         dryRun: true,
         removed: {
-          profiles: existing ? 1 : 0,
-          embeddings: existing?.embeddings.length ?? 0,
+          profiles: existing.length,
+          embeddings: existing.reduce((n, p) => n + p.embeddings.length, 0),
           trainingAudioFiles: wavs,
           calibrationRows: calibration.removed,
         },

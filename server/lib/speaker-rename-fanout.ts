@@ -6,7 +6,7 @@
 import { readFileSync, readdirSync, lstatSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { renameMeetingSpeaker } from './held-naming-batches.js'
-import { nameForms, sameSpeakerName } from './speaker-name-nfc.js'
+import { nameForms, sameSpeakerName, textHasName } from './speaker-name-nfc.js'
 
 /** A month directory, and nothing that merely looks like one. */
 const CANONICAL_MONTH = /^\d{4}-\d{2}$/
@@ -154,7 +154,7 @@ export async function fanOutSpeakerRename(
     if (!path.endsWith(SIDECAR_SUFFIX)) continue
     const markdownPath = path.slice(0, -SIDECAR_SUFFIX.length) + '.md'
     coveredMarkdown.add(markdownPath)
-    if (!raw.includes(from)) continue
+    if (!textHasName(raw, from)) continue
     try {
       const doc = JSON.parse(raw)
       if (!doc || Array.isArray(doc) || typeof doc !== 'object') throw new Error('sidecar is not a JSON object')
@@ -191,7 +191,7 @@ export async function fanOutSpeakerRename(
   // Cloud-only and archived markdown has no raw G2 position authority. Keep it
   // visible in the report rather than rewriting an attendee or quoted name.
   for (const [path, raw] of entries) {
-    if (!path.endsWith('.md') || coveredMarkdown.has(path) || !raw.includes(from)) continue
+    if (!path.endsWith('.md') || coveredMarkdown.has(path) || !textHasName(raw, from)) continue
     if (hasNamedLabel(raw, from)) result.skipped.push({
       path, reason: 'no G2 session sidecar; transcript labels cannot be safely aligned',
     })

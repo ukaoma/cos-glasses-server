@@ -12,8 +12,8 @@
  *      the next steps can see), one line, the first SCAN code points.
  *   1b. Leading attachments out of the prompt and the title (`@"path"`, `[Image: source: path]`, a bare path), so the 150 characters
  *      start at the words typed.
- *   2. This module's own rules for what mask does not know: home paths (/Users/<name>/…, /home, ~/, file://, C:\Users, /Volumes, /mnt/c)
- *      as `[path]`, links with a host and a port or an IP address as `[link]` (bare domains stay), phone numbers, phone numbers, card numbers, US social security numbers, short
+ *   2. This module's own rules for what mask does not know: home-folder paths, not every file path (/Users/<name>/…, /home, ~/, file://, C:\Users, /Volumes, /mnt/c)
+ *      as `[path]`, links to an IP address or localhost with a port or path as `[link]` (bare domains stay), phone numbers, card numbers, US social security numbers, short
  *      `pk_` and `rk_` keys, base64 that carries `+` or `/` (first, because mask's long-run rule stops at a `/` and would leave
  *      the tail of a run), and a credential word in a few other languages.
  *   3. SetupAssistant.mask, ported: key shapes, then `key: value` and `"key": "value"` pairs whose key names a credential,
@@ -148,12 +148,13 @@ const BARE_HOME_PATH = new RegExp(String.raw`(?<![\w.\-\/\\~])(?:file:\/\/(?:\\ 
 export const PATH_PLACEHOLDER = '[path]'
 const maskQuotedHomePaths = (text: string) => text.replace(QUOTED_HOME_PATH, (whole, _quote: string, inner: string) => HOME_SHAPE_QUOTED.test(inner.trim()) ? PATH_PLACEHOLDER : whole)
 
-// A link with a host and a port, or a bare IP address: `192.168.1.20:8080/admin?x=1`, `localhost:3141/api/keys`, `example.com:8443/x`.
-// Bare domains (`quilt.com`) are left on purpose: they are brand names people search for, and the consent line says "links", not "names".
+// A link to a machine: an IP address or `localhost` WITH a port or a path (`192.168.1.20:8080/admin?x=1`, `localhost:3141/api/keys`).
+// Scheme URLs go later, in searchOptionText. Left alone on purpose: a bare domain (`quilt.com`, a brand people search for), a bare
+// address or `localhost` with nothing after it, a version like `1.2.3.4`, and `word.ext:number` (`meeting.ts:2452` is code, not a link).
 const OCTET = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`
-const HOST_LINK = new RegExp(String.raw`(?<![\w.@\-])(?:(?:${OCTET}\.){3}${OCTET}|localhost|(?:[a-z0-9\-]+\.)+[a-z]{2,24})(?::\d{2,5})?(?:\/[^\s]*)?(?![\w\-])`, 'gi')
+const HOST_LINK = new RegExp(String.raw`(?<![\w.@\-])(?:(?:${OCTET}\.){3}${OCTET}|localhost)(?::\d{2,5}(?:\/[^\s]*)?|\/[^\s]*)`, 'gi')
 const LINK_PLACEHOLDER = '[link]'
-const maskHostLinks = (text: string) => text.replace(HOST_LINK, (match: string) => /^(?:\d|localhost)/i.test(match) || /:\d{2,5}(?:\/|$)/.test(match) ? LINK_PLACEHOLDER : match)
+const maskHostLinks = (text: string) => text.replace(HOST_LINK, LINK_PLACEHOLDER)
 
 /**
  * What an agent app puts in front of the words: `@"/path/with spaces.png"`, `@'path'`, `@/path/file`, `@~/file`, `[Image: source: path]`,

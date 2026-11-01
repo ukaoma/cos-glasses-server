@@ -656,9 +656,10 @@ export function mergeSpeakerProfiles(
   const refused: { name: string; similarity: number; floor: number }[] = []
   for (const name of from) {
     // The target is never its own source, but a twin stored under the same name in the other form is a different profile and merges.
-    const source = store.profiles.find(p => p !== target && sameSpeakerName(p.name, name))
-    if (!source) { if (!sameSpeakerName(name, into)) report.missing.push(name); continue }
-    const similarity = profileSimilarity(target, source)
+    const sources = store.profiles.filter(p => p !== target && sameSpeakerName(p.name, name))
+    if (sources.length === 0) { if (!sameSpeakerName(name, into)) report.missing.push(name); continue }
+    // Every stored copy of the name is merged, so every copy has to clear the floor; the lowest one is what is reported.
+    const similarity = Math.min(...sources.map(source => profileSimilarity(target, source)))
     report.similarity[name] = Math.round(similarity * 1000) / 1000
     if (similarity < MERGE_SIMILARITY_FLOOR && !options.force) {
       refused.push({ name, similarity: report.similarity[name], floor: MERGE_SIMILARITY_FLOOR })
