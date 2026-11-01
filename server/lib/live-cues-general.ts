@@ -157,7 +157,11 @@ export type GeneralEligibility = { ok: true } | { ok: false; state: 'off' | 'nee
 const GENERAL_MODES: ReadonlySet<string> = new Set(['general', 'all'])
 export function generalModeOn(mode: string): boolean { return GENERAL_MODES.has(mode) }
 /** The one place that decides whether a meeting may have general cues; used at every tick and again before the search and emit.
- *  A null domain (unconfirmed) is eligible and a confirmed personal one is not. */
+ *
+ *  DOMAIN. `c.domain` must come only from the confirmed Ask orientation (MeetingAskStore.orientation(sessionId).domain, null when
+ *  unconfirmed). A recording sidecar's domain is NOT a classification: all 974 saved sidecars carry 'personal' as a default,
+ *  work calls included. So only a confirmed 'personal' skips the meeting; null proceeds, and the content checks (sensitive
+ *  window, admission) still apply to it. */
 export function generalEligibility(c: GeneralCueCandidate, mode: GeneralCueMode, publicTopics: boolean): GeneralEligibility {
   const off = (reason: string): GeneralEligibility => ({ ok: false, state: 'off', reason })
   if (!generalModeOn(mode)) return off('mode_focused')

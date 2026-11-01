@@ -9,6 +9,11 @@ describe('trigger question', () => {
   it('keeps the wording the offline replay measured', () => {
     expect(GENERAL_TRIGGER_QUESTIONS.general_topic.type).toBe('choice')
     expect(GENERAL_TRIGGER_QUESTIONS.general_topic.instructions).toBe('Is the room on a topic where an interesting public fact, news item or local happening would be worth a glance now?')
+    expect(GENERAL_TRIGGER_QUESTIONS.general_topic.criteria).toEqual({
+      yes: 'Yes: the conversation is on a public topic (a company, place, event, public figure, product, team, or something in the news) where one interesting public fact would be worth a glance now.',
+      no: 'No: the conversation is private, routine, personal, or too vague for a public fact to add anything.',
+    })
+    expect(Object.keys(GENERAL_TRIGGER_QUESTIONS)).toEqual(['general_topic'])
     expect(Object.keys(GENERAL_TRIGGER_QUESTIONS.general_topic.criteria)).toEqual(['yes', 'no'])
     expect(GENERAL_TRIGGER_QUESTIONS.general_topic.criteria.yes).toContain('a company, place, event, public figure, product, team, or something in the news')
     expect(GENERAL_TRIGGER_QUESTIONS.general_topic.criteria.no).toContain('private, routine, personal, or too vague')
