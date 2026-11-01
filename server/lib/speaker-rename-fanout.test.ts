@@ -213,3 +213,51 @@ it('an open correction intent refuses fanout without changing either copy', asyn
   expect(load(f.local.sidecarPath).correctionRevision).toBe(0)
   expect(load(f.ops.sidecarPath).correctionRevision).toBe(0)
 })
+
+describe('a name stored in the other Unicode form', () => {
+  const NFC = 'Théo M', NFD = 'Théo M'
+  const spell = (f: ReturnType<typeof fixture>, name: string) => {
+    for (const p of [f.local, f.ops]) for (const file of [p.sidecarPath, p.meetingPath]) writeFileSync(file, readFileSync(file, 'utf8').split('Theo M').join(name))
+  }
+
+  it.each([
+    ['decomposed on disk, composed asked for', NFD, NFC],
+    ['composed on disk, decomposed asked for', NFC, NFD],
+    ['control: same form', NFC, NFC],
+  ])('finds every meeting when it is %s (previewed and applied)', async (label, onDisk, asked) => {
+    const f = fixture()
+    spell(f, onDisk)
+    if (!label.startsWith('control')) expect(onDisk).not.toBe(asked)
+    const preview = await fanout.fanOutSpeakerRename(operations, asked, 'Theo Marsh')
+    expect(preview.skipped).toEqual([])
+    expect(preview.sidecars).toHaveLength(2)
+    expect(preview.markdown).toHaveLength(2)
+    const applied = await fanout.fanOutSpeakerRename(operations, asked, 'Theo Marsh', { apply: true })
+    expect(applied.skipped).toEqual([])
+    expect(applied.sidecars).toHaveLength(2)
+    for (const p of [f.local, f.ops]) {
+      expect(readFileSync(p.sidecarPath, 'utf8')).toContain('Theo Marsh')
+      expect(readFileSync(p.meetingPath, 'utf8')).toContain('[Theo Marsh]:')
+    }
+  })
+
+  it('finds the chunks by their labels alone, when the sidecar carries no high-quality words', async () => {
+    const f = fixture()
+    spell(f, NFD)
+    for (const p of [f.local, f.ops]) {
+      const doc = load(p.sidecarPath); delete doc.batchSegments
+      writeFileSync(p.sidecarPath, JSON.stringify(doc, null, 2) + '\n')
+    }
+    const applied = await fanout.fanOutSpeakerRename(operations, NFC, 'Theo Marsh', { apply: true })
+    expect(applied.skipped).toEqual([])
+    expect(applied.sidecars).toHaveLength(2)
+    for (const p of [f.local, f.ops]) expect(load(p.sidecarPath).chunks[0].speaker).toBe('Theo Marsh')
+  })
+
+  it('reports a cloud-only transcript that holds the name in the other form', async () => {
+    const monthDir = join(operations, 'quilt', 'meetings', '2026-08')
+    writeFileSync(join(monthDir, '2026-08-13_Cloud_Only.md'), markdown(NFD))
+    const result = await fanout.fanOutSpeakerRename(operations, NFC, 'Theo Marsh')
+    expect(result.skipped.map(s => s.reason)).toContain('no G2 session sidecar; transcript labels cannot be safely aligned')
+  })
+})

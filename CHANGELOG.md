@@ -2,8 +2,8 @@
 
 2026-11-01. A private candidate for one Mac. Pairs with COS Control 0.5.363.
 
-- Accented names: merge, delete-person, calibration and the embeddings manager now match a stored name in either Unicode form, and a confirm on a decomposed name records the person's confirmation.
-- Session find: a title or prompt cut inside an attachment is dropped instead of sent, Windows, volume and escaped-space home paths are masked, ordinary words like `/home/dashboard` stay, and IP or host-with-port links are masked. Refusals log one line per reason, with no words.
+- Accented names: merge, delete-person, calibration, the rename fan-out and the embeddings manager now match a stored name in either Unicode form, a meeting record id matches in either form (default-on), and a confirm on a decomposed name records the person's confirmation. Merge refuses if any stored copy of a name is below the similarity floor, and the delete preview counts every copy. `?name=a&name=b` on enroll is a 400.
+- Session find: a title or prompt cut inside an attachment is dropped instead of sent, Windows, volume and escaped-space home paths are masked, ordinary words like `/home/dashboard` stay, and links to an IP address or localhost with a port or path are masked. Only home-folder paths are masked, not every file path; bare domains, bare addresses and `file.ts:12` stay. Refusals log one line per reason, with no words.
 
 ## 6.97.2 - Local paths stay off the search (private candidate)
 

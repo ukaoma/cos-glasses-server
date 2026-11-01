@@ -30,3 +30,8 @@ export function nameForms(name: string, escape: (s: string) => string): string {
 export function sameRecordId(requested: unknown, expected: string): boolean {
   return typeof requested === 'string' && (requested === expected || nfc(requested) === nfc(expected))
 }
+
+/** True when raw text holds `name` in either Unicode form (a file written before names were normalized may hold the decomposed one). */
+export function textHasName(raw: string, name: string): boolean {
+  return raw.includes(name) || raw.includes(nfc(name)) || raw.includes(name.normalize('NFD'))
+}

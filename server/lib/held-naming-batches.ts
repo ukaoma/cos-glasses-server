@@ -509,7 +509,7 @@ export async function undoHeldNaming(batchId:string,confirm:boolean){
  * enrolment/audio deletion off. Dry run neither records a preview nor writes a ledger. */
 export async function renameMeetingSpeaker(sessionId:string,from:string,to:string,options:{apply?:boolean;operationsDir?:string;expectedSidecarPath?:string}={}) : Promise<{copies:Array<{sidecarPath:string;meetingPath:string;labels:number;transcript:number;attendees:number;unresolvedTurns:number}>;batchId?:string;error?:string}> {
   if(options.operationsDir && resolveCosOperationsDir()!==realpathSync(options.operationsDir)) throw new Error('Operations root differs from the requested fan-out root')
-  if(from===to||!from.trim()||!to.trim())return{copies:[]}
+  if(sameSpeakerName(from,to)||!from.trim()||!to.trim())return{copies:[]}
   if(options.apply&&mutationBusy)throw new Error('Another naming is running; retry')
   let lock:Awaited<ReturnType<typeof acquireMeetingSyncLock>>|undefined
   let batch:BatchRecord|undefined
@@ -523,22 +523,22 @@ export async function renameMeetingSpeaker(sessionId:string,from:string,to:strin
     if(options.expectedSidecarPath && (!operations || realpathSync(operations.sidecarPath)!==realpathSync(options.expectedSidecarPath)))throw new Error('Session resolves to a different sidecar; duplicate or archived copy')
     const maps=copies.map(c=>validatedRawMap(c.doc))
     if(maps.some(map=>hash(map)!==hash(maps[0])))throw new Error('Meeting copies disagree on raw mapping')
-    const positions:number[]=copies[0].doc.chunks.flatMap((c:any,i:number)=>c.speaker===from?[i]:[])
+    const positions:number[]=copies[0].doc.chunks.flatMap((c:any,i:number)=>sameSpeakerName(c.speaker,from)?[i]:[])
     // Repair historical chunks-only renames too: HQ words still carry `from`
     // even when the compacted chunk already says `to` (the 6.27.10 trap).
     for(const c of copies)for(const segment of c.doc.batchSegments??[])for(const word of segment.speakerWords??[]){
-      if(word.speaker!==from)continue
+      if(!sameSpeakerName(word.speaker,from))continue
       const absolute=Number(segment.startElapsed??0)+Number(word.start)*1000
       let position=-1,distance=Infinity
       const raw=validatedRawMap(c.doc)
       raw.forEach((index,i)=>{if(index<segment.startChunkIdx||index>segment.endChunkIdx)return;const d=Math.abs(Number(c.doc.chunks[i].elapsed)-absolute);if(d<distance){distance=d;position=i}})
       if(distance>3500||position<0)throw new Error('Old HQ speaker has no safe raw chunk mapping')
-      if(![from,to].includes(c.doc.chunks[position].speaker))throw new Error('HQ speaker conflicts with an unrelated named chunk')
+      if(![from,to].some(n=>sameSpeakerName(n,c.doc.chunks[position].speaker)))throw new Error('HQ speaker conflicts with an unrelated named chunk')
       if(!positions.includes(position))positions.push(position)
     }
     positions.sort((a,b)=>a-b)
     if(!positions.length)return{copies:[]}
-    if(copies.some(c=>positions.some((i:number)=>![from,to].includes(c.doc.chunks[i]?.speaker))))throw new Error('Meeting copies disagree on prior speaker labels')
+    if(copies.some(c=>positions.some((i:number)=>![from,to].some(n=>sameSpeakerName(n,c.doc.chunks[i]?.speaker)))))throw new Error('Meeting copies disagree on prior speaker labels')
     const batchId=randomUUID()
     const edits=copies.map(c=>relabelSpeakerPositions(c.doc,c.blended?'':c.markdown,positions,to,batchId))
     const results=copies.map((c,i)=>({sidecarPath:c.sidecarPath,meetingPath:c.meetingPath,labels:positions.length,transcript:edits[i].transcript,attendees:edits[i].attendees,unresolvedTurns:edits[i].unresolvedTurns}))

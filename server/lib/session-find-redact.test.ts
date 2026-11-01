@@ -348,11 +348,21 @@ describe('a home path anywhere', () => {
 
   it.each([
     ['a host and port', 'curl 192.168.1.20:8080/admin?x=1 now', 'curl [link] now'],
-    ['an address alone', 'ping 10.0.0.5 now', 'ping [link] now'],
+    ['an address with a path', 'open 10.0.0.5/status now', 'open [link] now'],
     ['localhost', 'hit localhost:3141/api/keys now', 'hit [link] now'],
-    ['a domain with a port', 'open example.com:8443/x now', 'open [link] now'],
   ])('masks a link: %s', (_name, text, expected) => {
     expect(redactForModel(text, 150)).toBe(expected)
+  })
+
+  it.each([
+    'ping 10.0.0.5 now',
+    'ping localhost now',
+    'version 1.2.3.4 shipped',
+    'see meeting.ts:2452 for the bug',
+    'at server/routes/meeting.ts:2452:7 it throws',
+    'open example.com:8443/x now',
+  ])('leaves %s, it is not a link', (text) => {
+    expect(redactForModel(text, 150)).toBe(text)
   })
 
   it('leaves a bare domain, a brand name people search for', () => {

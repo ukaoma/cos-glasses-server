@@ -52,6 +52,7 @@
     "!server/scripts/work-intake-mutation-gate.mjs",
     "!server/scripts/work-progress-mutation-gate.mjs",
     "!server/scripts/work-search-mutation-gate.mjs",
+    "!server/scripts/session-find-redact-mutation-gate.mjs",
     "!server/scripts/fact-check-mutation-gate.mjs",
     "!server/scripts/stale-session-mutation-gate.mjs",
     "!server/scripts/autonomous-save-mutation-gate.mjs",
