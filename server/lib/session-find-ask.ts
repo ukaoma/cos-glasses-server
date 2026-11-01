@@ -52,7 +52,7 @@ export const FIND_CACHE_ENTRIES = 200
  */
 export interface FindTuning { rerank: boolean; abstainNone: number; floor: number; likely: number; strong: number; skipSecondAt: number; rerankMinRaw: number }
 export const FIND_TUNING: Record<DecisionProvider, FindTuning> = {
-  jev: { rerank: true, abstainNone: 0.8, floor: 0.4, likely: 0.5, strong: 0.6, skipSecondAt: 0.6, rerankMinRaw: 0.02 },
+  jev: { rerank: true, abstainNone: 0.8, floor: 0.4, likely: 0.45, strong: 0.6, skipSecondAt: 0.6, rerankMinRaw: 0.02 },
   // SubQ: Choice only and a cautious abstain (its none was 0.50 to 0.97 on the canary's no-answer queries). To turn its yes/no round on, set rerank: true.
   subq: { rerank: false, abstainNone: 0.5, floor: 0.5, likely: 0.7, strong: 0.9, skipSecondAt: 0.9, rerankMinRaw: 0.02 },
 }
