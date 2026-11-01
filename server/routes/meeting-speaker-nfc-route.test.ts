@@ -189,6 +189,104 @@ describe('voice profiles', () => {
   }, T)
 })
 
+describe('voice profile merge and delete with a name stored decomposed (real writes, not previews)', () => {
+  const vec = (k: number) => Array.from({ length: 192 }, (_, i) => (i % 7) + 1 + k * 0.0001)
+  const profile = (name: string, n: number, k = 0) => ({ name, embeddings: Array.from({ length: n }, () => vec(k)), sources: Array(n).fill('g2-training') })
+  const store = () => (JSON.parse(readFileSync(join(dataDir, 'voice-profiles.json'), 'utf-8')) as { profiles: Array<{ name: string; embeddings: number[][] }> }).profiles
+  const seedStore = (profiles: unknown[]) => writeFileSync(join(dataDir, 'voice-profiles.json'), JSON.stringify({ profiles }))
+  const SRC_NFD = 'Zolta\u0301n Kovacs', SRC_NFC = 'Zolt\u00e1n Kovacs'
+
+  it('merges a profile stored decomposed when asked for in NFC: the source is gone, the samples are added once, and a retry adds nothing', async () => {
+    seedStore([profile('Target Person', 3), profile(SRC_NFD, 2)])
+    await startServer()
+    const first = await post('/api/voice/merge-profiles', { into: 'Target Person', from: [SRC_NFC], confirm: true })
+    expect(first.status).toBe(200)
+    expect(first.json.merged).toEqual([SRC_NFD])
+    expect(store().map(p => p.name)).toEqual(['Target Person'])
+    expect(store()[0]!.embeddings).toHaveLength(5)
+    const retry = await post('/api/voice/merge-profiles', { into: 'Target Person', from: [SRC_NFC], confirm: true })
+    expect(retry.json.merged ?? []).toEqual([])
+    expect(store()[0]!.embeddings).toHaveLength(5)
+  }, T)
+
+  it('merges into a target stored decomposed, asked for in NFC', async () => {
+    seedStore([profile(SRC_NFD, 3), profile('Other Person', 2)])
+    await startServer()
+    const res = await post('/api/voice/merge-profiles', { into: SRC_NFC, from: ['Other Person'], confirm: true })
+    expect(res.status).toBe(200)
+    expect(store().map(p => p.name)).toEqual([SRC_NFD])
+    expect(store()[0]!.embeddings).toHaveLength(5)
+  }, T)
+
+  it('merges twins, the same name stored composed and decomposed, into one profile', async () => {
+    seedStore([profile(SRC_NFC, 3), profile(SRC_NFD, 2)])
+    await startServer()
+    const res = await post('/api/voice/merge-profiles', { into: SRC_NFC, from: [SRC_NFD], confirm: true })
+    expect(res.status).toBe(200)
+    expect(store()).toHaveLength(1)
+    expect(store()[0]!.name).toBe(SRC_NFC)
+    expect(store()[0]!.embeddings).toHaveLength(5)
+  }, T)
+
+  it('still refuses to merge a name into itself when there is only one profile', async () => {
+    seedStore([profile(SRC_NFC, 3)])
+    await startServer()
+    const res = await post('/api/voice/merge-profiles', { into: SRC_NFD, from: [SRC_NFC], confirm: true })
+    expect(res.status).toBe(400)
+    expect(store()).toHaveLength(1)
+  }, T)
+
+  it('deletes a profile stored decomposed, and its decomposed calibration rows, when asked for in NFC', async () => {
+    seedStore([profile(SRC_NFD, 3), profile('Keep Person', 2)])
+    writeFileSync(join(dataDir, 'speaker-calibration.jsonl'), [JSON.stringify({ speaker: SRC_NFD, similarity: 0.7 }), JSON.stringify({ speaker: 'Keep Person', similarity: 0.7 })].join('\n') + '\n')
+    await startServer()
+    const res = await post('/api/voice/delete-person', { name: SRC_NFC, confirm: true })
+    expect(res.status).toBe(200)
+    expect(res.json.removed).toMatchObject({ profiles: 1, embeddings: 3, calibrationRows: 1 })
+    expect(store().map(p => p.name)).toEqual(['Keep Person'])
+    expect(readFileSync(join(dataDir, 'speaker-calibration.jsonl'), 'utf-8')).not.toContain('Kovacs')
+  }, T)
+})
+
+describe('confirmed by a human, sidecar decomposed and ledger composed', () => {
+  it('shows the voice confirmed after the confirm click, and the record id may be asked for in either form', async () => {
+    seed('meeting_n10', NFD)
+    await startServer()
+    const confirmed = await post('/api/meeting/meeting_n10/confirm', { label: NFC })
+    expect(confirmed.status).toBe(200)
+    const speakers = await new Promise<any>((resolve, reject) => {
+      const req = request(`${baseUrl}/api/meeting/meeting_n10/speakers`, res => { const c: Buffer[] = []; res.on('data', d => c.push(Buffer.from(d))); res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString()))) })
+      req.on('error', reject); req.end()
+    })
+    const voice = speakers.voices.find((v: { label: string }) => v.label.normalize('NFC') === NFC)
+    expect(voice.confirmedByHuman).toBe(true)
+    const recordId = `standalone:meeting_n10`
+    expect((await post('/api/meeting/meeting_n10/confirm', { label: NFC, recordId: recordId.normalize('NFD') })).status).toBe(200)
+  }, T)
+})
+
+describe('a record id and an old decomposed ledger', () => {
+  it('compares record ids in NFC, and meeting.ts uses that comparison', async () => {
+    const { sameRecordId } = await import('../lib/speaker-name-nfc.js')
+    expect(sameRecordId(`ops:quilt:2026-08:2026-08-05_Re${'\u0301'}union.md`, 'ops:quilt:2026-08:2026-08-05_R\u00e9union.md')).toBe(true)
+    expect(sameRecordId('ops:quilt:2026-08:other.md', 'ops:quilt:2026-08:2026-08-05_R\u00e9union.md')).toBe(false)
+    expect(sameRecordId(7, 'x')).toBe(false)
+    expect(readFileSync(join(process.cwd(), 'server/routes/meeting.ts'), 'utf-8')).toContain('sameRecordId(requested, expected)')
+  })
+
+  it('shows a voice confirmed by a ledger row written decomposed, for a sidecar that is composed', async () => {
+    seed('meeting_n11', NFC)
+    mkdirSync(join(dataDir, 'meeting-corrections'), { recursive: true })
+    writeFileSync(join(dataDir, 'meeting-corrections', 'meeting_n11.jsonl'), JSON.stringify({ id: 'confirm-1', phase: 'confirmed', at: new Date().toISOString(), from: NFD, to: NFD, chunks: [], scope: 'meeting' }) + '\n')
+    await startServer()
+    const speakers = await new Promise<any>((resolve, reject) => {
+      const req = request(`${baseUrl}/api/meeting/meeting_n11/speakers`, res => { const c: Buffer[] = []; res.on('data', d => c.push(Buffer.from(d))); res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString()))) })
+      req.on('error', reject); req.end()
+    })
+    expect(speakers.voices.find((v: { label: string }) => v.label === NFC).confirmedByHuman).toBe(true)
+  }, T)
+})
+
 describe('the library the routes call, on its own', () => {
   it('relabelSidecarJson and relabelMeetingMarkdown write NFC and match either spelling', async () => {
     const { relabelSidecarJson, relabelMeetingMarkdown } = await import('../lib/meeting-relabel.js')

@@ -52,7 +52,7 @@ export function filterCalibrationRows(
       kept.push(line)
       continue
     }
-    if (speaker === speakerName) {
+    if (sameSpeakerName(speaker, speakerName)) {
       result.removed++
       continue
     }

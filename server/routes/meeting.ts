@@ -3,7 +3,7 @@ import { readMacSpeakerMachineEvidence } from '../lib/mac-speaker-machine-eviden
 import { dataPath } from '../lib/data-dir.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
 import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
-import { bodyName, sameSpeakerName } from '../lib/speaker-name-nfc.js'
+import { bodyName, sameRecordId, sameSpeakerName } from '../lib/speaker-name-nfc.js'
 import { readSpeakerPolicy, writeSpeakerPolicy, isSpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/meeting/save — finalize an existing transcribe-stream session into
 // the standalone public meeting store. The live transcript and chunk metadata
@@ -262,7 +262,7 @@ function markdownUnreadableReason(operations: { mergedScribeConflict?: string[] 
 }
 
 function requestedRecordMatches(requested: unknown, expected: string): boolean {
-  return requested == null || requested === '' || requested === expected
+  return requested == null || requested === '' || sameRecordId(requested, expected)
 }
 
 interface MeetingSessionSource {
