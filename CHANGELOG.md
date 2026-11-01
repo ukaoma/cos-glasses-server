@@ -1,3 +1,10 @@
+## 6.97.4 - Last review fixes (private candidate)
+
+2026-11-01. A private candidate for one Mac, carrying the fixes published in 6.94.3. Pairs with COS Control 0.5.363.
+
+- Merge checks every copy of a name stored in both Unicode forms and refuses on any below the bar; delete previews count them all; renames reach meetings in either form. `?name=a&name=b` answers 400.
+- A file reference like `meeting.ts:2452`, bare `localhost` and a bare IP are no longer treated as links.
+
 ## 6.97.3 - Speaker names and session find, from QA (private candidate)
 
 2026-11-01. A private candidate for one Mac. Pairs with COS Control 0.5.363.
