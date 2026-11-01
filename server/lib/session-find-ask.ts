@@ -42,13 +42,20 @@ export const FIND_CACHE_ENTRIES = 200
  * shown; `likely` and `strong` start the bands above it. `skipSecondAt` is the raw Choice probability of the top row that makes
  * the second request unnecessary. `rerankMinRaw` is the raw probability under which a session is not worth a yes/no question
  * (a search whose best session sits under it shows nothing and spends nothing more). `rerank` is whether the yes/no step is
- * used for this provider; where it is off, rows are the Choice probabilities, with the `choice*` numbers.
- * SET FROM THE RE-RUN OF THE 20 QUERIES ON THE PRODUCT'S OWN POOL; see the numbers in docs/decision-providers.md.
+ * used for this provider; where it is off, rows are the Choice probabilities and the same floor and bands apply to them.
+ *
+ * JEV, from the re-run of the 20 canary queries through the real route on this Mac's own pool (2026-11-01, see
+ * docs/decision-providers.md): the right session was first in 19 of 20 and in the top three in 19 of 20 (the one miss names a
+ * category, "the editor", for a product, "Cursor", and no method found it). Its yes/no probability was 0.44 to 0.88; no row
+ * above 0.6 was wrong (14 of 14 right). On the 7 queries with no answer, `none` was 0.87 to 1.00, so the abstain rule fired on
+ * all 7; asked anyway, the yes/no round put the best of 12 at 0.08 to 0.28, so a floor of 0.30 would also have shown nothing.
+ * SUBQ is NOT measured on this path. Its numbers are the canary's small sample (right answers 0.75 to 1.00, a wrong top row at
+ * 0.70) and the Choice alone, with the yes/no round off until it has been run against SubQ. They are a starting point.
  */
 export interface FindTuning { rerank: boolean; floor: number; likely: number; strong: number; skipSecondAt: number; rerankMinRaw: number }
 export const FIND_TUNING: Record<DecisionProvider, FindTuning> = {
-  jev: { rerank: true, floor: 0.25, likely: 0.45, strong: 0.6, skipSecondAt: 0.6, rerankMinRaw: 0.02 },
-  subq: { rerank: true, floor: 0.5, likely: 0.7, strong: 0.85, skipSecondAt: 0.85, rerankMinRaw: 0.05 },
+  jev: { rerank: true, floor: 0.3, likely: 0.4, strong: 0.6, skipSecondAt: 0.6, rerankMinRaw: 0.02 },
+  subq: { rerank: false, floor: 0.5, likely: 0.7, strong: 0.9, skipSecondAt: 0.9, rerankMinRaw: 0.02 },
 }
 
 export const FIND_CHOICE_INSTRUCTIONS = 'The user typed `query` into the search box for their past AI coding and chat sessions (Claude Code, Codex and Cursor). '
