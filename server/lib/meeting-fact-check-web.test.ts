@@ -33,6 +33,16 @@ describe('6.71.13 public page reading', () => {
     expect(seen.stdin.blockedDomains).toContain('rome2rio.com')
     expect(seen.stdin.query).toBe('elephant weight car')
   })
+  it('audit caller: omitted, the search model row keeps its default label; given, it is passed to the runner as the caller', async () => {
+    fakeSearch(['https://a.example.org/1'], {})
+    mocks.fetch.mockResolvedValue(null)
+    await searchMeetingWeb('elephant weight car', AbortSignal.timeout(5000))
+    expect(mocks.run.mock.calls[0][5]).toBeUndefined()
+    await searchMeetingWeb('elephant weight car', AbortSignal.timeout(5000), {})
+    expect(mocks.run.mock.calls[1][5]).toBeUndefined()
+    await searchMeetingWeb('elephant weight car', AbortSignal.timeout(5000), { auditCaller: 'live_cues_general' })
+    expect(mocks.run.mock.calls[2][5]).toEqual({ caller: 'live_cues_general' })
+  })
   it('drops results from hosts the reader cannot open, in code, not only in the prompt (QA W5)', async () => {
     fakeSearch(['https://www.rome2rio.com/s/Austin/Kansas-City', 'https://travel.kayak.com/x', 'https://a.example.org/1'], {})
     mocks.fetch.mockResolvedValue(null)

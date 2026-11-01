@@ -328,7 +328,11 @@ export function parseWebEvidence(raw: unknown, query: string): MeetingAskSource[
     return sources;
 }
 export function meetingWebCapability() { return resolveProviderBinary('claude').ok ? { available: true, engine: 'claude:haiku' } : { available: false, reason: 'claude_search_provider_unavailable' }; }
-export async function searchMeetingWeb(query: string, signal?: AbortSignal): Promise<{
+/** `options.auditCaller`: the token-audit caller label for the search model's row, e.g. live_cues_general. Omitted, the row
+ *  keeps its meeting_ask_web label and every older caller behaves exactly as before. */
+export async function searchMeetingWeb(query: string, signal?: AbortSignal, options?: {
+    auditCaller?: string;
+}): Promise<{
     sources: MeetingAskSource[];
     notices: string[];
 }> {
@@ -348,7 +352,7 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal): Pro
         const early = new AbortController();
         const poll = setInterval(() => { try { JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')); early.abort(); } catch { /* not written yet */ } }, 100);
         try {
-            await runMeetingAskModel({ engine: 'claude', model: 'haiku' }, '', '', signal ? AbortSignal.any([signal, early.signal]) : early.signal, { workspace: root, args: webSearchArgs(hook), stdin: JSON.stringify({ query: query.slice(0, 240), blockedDomains: UNREADABLE_RESULT_HOSTS }) });
+            await runMeetingAskModel({ engine: 'claude', model: 'haiku' }, '', '', signal ? AbortSignal.any([signal, early.signal]) : early.signal, { workspace: root, args: webSearchArgs(hook), stdin: JSON.stringify({ query: query.slice(0, 240), blockedDomains: UNREADABLE_RESULT_HOSTS }) }, options?.auditCaller ? { caller: options.auditCaller } : undefined);
         } catch (e) {
             if (!early.signal.aborted || signal?.aborted || (e instanceof AskProcessError && e.terminationUnconfirmed)) throw e;
         } finally { clearInterval(poll); }
