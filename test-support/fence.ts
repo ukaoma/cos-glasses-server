@@ -11,11 +11,16 @@
 //
 // This module lives OUTSIDE server/ and shared/ so the npm `files` list can never pick it up
 // (server/lib/package-contents.test.ts asserts it).
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
 import { join, sep } from 'node:path'
 
 export const FENCE_FLAG = 'COS_TEST_FENCE'
 export const FENCE_ROOT_PREFIX = '/tmp/cos-v-'
+
+export interface FenceOptions {
+  /** Leave TMPDIR alone (see test-support/real-tmpdir.txt). The data home and HOME are still private. */
+  keepTmpdir?: boolean
+}
 
 export interface Fence {
   root: string
@@ -37,7 +42,8 @@ export function fenceRequested(env: Record<string, string | undefined>): boolean
  * from it) is moved to the same relative place under the private one, so a variable added to the
  * config later is fenced without editing this file. COS_* values elsewhere are left alone.
  */
-export function applyFence(env: Record<string, string | undefined>, base = FENCE_ROOT_PREFIX): Fence {
+export function applyFence(env: Record<string, string | undefined>, base = FENCE_ROOT_PREFIX, options: FenceOptions = {}): Fence {
+  const realHome = env.HOME
   const root = mkdtempSync(base)
   const dataDir = join(root, 'data')
   const homeDir = join(root, 'home')
@@ -55,7 +61,18 @@ export function applyFence(env: Record<string, string | undefined>, base = FENCE
   env.COS_DATA_DIR = dataDir
   env.COS_PROFILE_PATH = join(dataDir, '.cos-profile.json')
   env.HOME = homeDir
-  env.TMPDIR = tmpDir
+  if (!options.keepTmpdir) env.TMPDIR = tmpDir
+  // The installed speaker models are read-only inputs that live under the real home
+  // (embedding-eviction-integration looks for homedir()/.cos-glasses/models and skips its 11 tests
+  // without it; the first fenced-serial run showed exactly that). A symlink keeps them readable with
+  // exactly the reach the unfenced gate has, and cleanup removes the link, never the target.
+  if (realHome) {
+    const realModels = join(realHome, '.cos-glasses', 'models')
+    if (existsSync(realModels)) {
+      mkdirSync(join(homeDir, '.cos-glasses'), { recursive: true })
+      symlinkSync(realModels, join(homeDir, '.cos-glasses', 'models'))
+    }
+  }
   // Fixed /tmp files the live server shares with a test run (override env vars, default unchanged).
   env.COS_CLI_SESSIONS_FILE = join(root, 'cos-cli-sessions.json')
   env.COS_CODEX_ENGINE_SESSIONS_FILE = join(root, 'cos-codex-engine-sessions.json')

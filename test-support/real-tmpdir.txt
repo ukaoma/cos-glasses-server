@@ -1,0 +1,4 @@
+# Test files that keep the real TMPDIR in the fenced modes (data home and HOME are still private).
+# Each must also be in test-support/serial-set.txt; `node scripts/serial-set.mjs --check` enforces it.
+# The reason is part of the entry: a file belongs here only when it depends on where TMPDIR points.
+server/lib/speaker-shadow-worker.test.ts  # the real sandbox-exec profile lets the CLI write only inside the per-user temp dir (DARWIN_USER_TEMP_DIR); the test's scratch must sit under os.tmpdir() there, so a /tmp/cos-v-* TMPDIR makes the fake CLI fail with EPERM (fenced-serial 2026-10-31: status failed, exit 1)

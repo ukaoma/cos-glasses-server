@@ -83,6 +83,12 @@ function check() {
     console.error(`serial-set: ${repeated.length} repeated line(s) in test-support/serial-set.txt:\n  ${repeated.join('\n  ')}`)
     process.exit(1)
   }
+  const exempt = readList(join(ROOT, 'test-support', 'real-tmpdir.txt'))
+  const badExempt = exempt.filter(f => !serial.includes(f))
+  if (badExempt.length > 0) {
+    console.error(`real-tmpdir.txt lists file(s) that are not in the serial set or do not exist:\n  ${badExempt.join('\n  ')}`)
+    process.exit(1)
+  }
   const hits = heuristicHits(all)
   const unlisted = [...hits.keys()].filter(f => !serial.includes(f))
   if (unlisted.length > 0) {

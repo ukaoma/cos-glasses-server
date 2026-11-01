@@ -170,3 +170,4 @@ server/routes/openai-compat-model.test.ts  # literal /tmp path
 server/routes/query-jobs-active.test.ts  # wall-clock upper bound
 server/routes/query-sse-payload.test.ts  # child_process import
 server/routes/stt-settings.test.ts  # literal /tmp path
+server/lib/fixed-tmp-paths.test.ts  # literal /tmp path

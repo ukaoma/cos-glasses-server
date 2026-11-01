@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FENCE_ROOT_PREFIX, applyFence, fenceRequested } from '../../test-support/fence.js'
@@ -70,6 +71,49 @@ describe('test fence', () => {
     } finally {
       a.cleanup()
       b.cleanup()
+    }
+  })
+
+  it('keeps installed models readable through a symlink, and cleanup never reaches the target', () => {
+    const realHome = mkdtempSync(join(tmpdir(), 'fence-home-'))
+    const models = join(realHome, '.cos-glasses', 'models')
+    mkdirSync(models, { recursive: true })
+    writeFileSync(join(models, 'model.onnx'), 'weights')
+    const env: Record<string, string | undefined> = { HOME: realHome }
+    const fence = applyFence(env)
+    try {
+      const link = join(env.HOME!, '.cos-glasses', 'models')
+      expect(lstatSync(link).isSymbolicLink()).toBe(true)
+      expect(readFileSync(join(link, 'model.onnx'), 'utf8')).toBe('weights')
+      expect(realpathSync(link)).toBe(realpathSync(models))
+    } finally {
+      fence.cleanup()
+    }
+    expect(existsSync(fence.root)).toBe(false)
+    // The scratch area is gone; the real model is not.
+    expect(readFileSync(join(models, 'model.onnx'), 'utf8')).toBe('weights')
+    rmSync(realHome, { recursive: true, force: true })
+  })
+
+  it('makes no models link when the real home has none', () => {
+    const env: Record<string, string | undefined> = { HOME: '/nonexistent-home-for-fence-test' }
+    const fence = applyFence(env)
+    try {
+      expect(existsSync(join(fence.homeDir, '.cos-glasses'))).toBe(false)
+    } finally {
+      fence.cleanup()
+    }
+  })
+
+  it('leaves TMPDIR alone only when asked, and still fences the data home and HOME', () => {
+    const env: Record<string, string | undefined> = { COS_DATA_DIR: '/var/shared-home', HOME: '/Users/someone', TMPDIR: '/var/folders/zz/T' }
+    const fence = applyFence(env, undefined, { keepTmpdir: true })
+    try {
+      expect(env.TMPDIR).toBe('/var/folders/zz/T')
+      expect(env.HOME).toBe(join(fence.root, 'home'))
+      expect(env.COS_DATA_DIR).toBe(join(fence.root, 'data'))
+    } finally {
+      fence.cleanup()
     }
   })
 

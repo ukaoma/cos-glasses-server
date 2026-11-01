@@ -48,6 +48,8 @@ const LIVE_WRITERS = [
   ['home-top:cursor-cli', 'live server Cursor spawn dir'],
   ['home-top:data', 'live data home (parent directory mtime)'],
   ['home-data:data/training-audio', 'live server audio retention (age and 30-per-speaker cap prune)'],
+  ['home-data:data/chunk-embeddings', 'live server chunk-embedding sweep (server.log: "[chunk-embeddings] Purged 1 expired session file(s), 110 retained")'],
+  ['welcome-weather.json', 'live server index.ts weather refresh (no test imports index.ts)'],
 ]
 const HASH_CONTENT_UNDER = 256 * 1024
 
@@ -80,6 +82,11 @@ export function snapshot() {
     for (const name of readdirSync('/tmp')) {
       if (/^cos-.*\.json$/.test(name)) record(map, `tmp-json:${name}`, join('/tmp', name))
     }
+  } catch { /* no /tmp listing */ }
+  // Fence scratch dirs a fenced run failed to remove (a late write recreates one after the file's
+  // cleanup). Names only; they are reported, never counted as a live-path violation.
+  try {
+    for (const name of readdirSync('/tmp')) if (/^cos-v-[A-Za-z0-9]{6}$/.test(name)) record(map, `fence-leftover:${name}`, join('/tmp', name))
   } catch { /* no /tmp listing */ }
   walk('/tmp/cos-speaker-training', (full) => record(map, `tmp-training:${relative('/tmp', full)}`, full))
   for (const dir of ['data', 'server/data']) walk(join(ROOT, dir), (full) => record(map, `checkout:${relative(ROOT, full)}`, full))
@@ -174,7 +181,7 @@ function runMode() {
 
   const changes = diffSnapshots(before, after)
   const writerOf = (key) => LIVE_WRITERS.find(([pattern]) => key.includes(pattern))?.[1]
-  const classify = (c) => (allow.some(a => c.key.includes(a)) ? 'allowed' : noisy.has(c.key) ? 'noisy' : writerOf(c.key) ? 'live' : 'violation')
+  const classify = (c) => (c.key.startsWith('fence-leftover:') ? 'leftover' : allow.some(a => c.key.includes(a)) ? 'allowed' : noisy.has(c.key) ? 'noisy' : writerOf(c.key) ? 'live' : 'violation')
   const classified = changes.map(c => ({ ...c, class: classify(c), writer: writerOf(c.key) }))
   const violations = classified.filter(c => c.class === 'violation')
 
@@ -183,13 +190,13 @@ function runMode() {
   const summary = {
     mode, wallSeconds, exitCode: result.status, jsonMissing: missingJson,
     counts: countStatuses(ids.tests), tests: Object.keys(ids.tests).length, files: Object.keys(ids.files).length,
-    livePathChanges: { violations: violations.length, allowed: classified.filter(c => c.class === 'allowed').length, live: classified.filter(c => c.class === 'live').length, noisy: classified.filter(c => c.class === 'noisy').length, detail: classified },
+    livePathChanges: { violations: violations.length, allowed: classified.filter(c => c.class === 'allowed').length, live: classified.filter(c => c.class === 'live').length, leftover: classified.filter(c => c.class === 'leftover').length, noisy: classified.filter(c => c.class === 'noisy').length, detail: classified },
   }
   writeFileSync(join(outDir, `${mode}.ids.json`), JSON.stringify({ mode, wallSeconds, ...ids }, null, 1))
   writeFileSync(join(outDir, `${mode}.summary.json`), JSON.stringify(summary, null, 1))
 
   console.log(`\nqualify ${mode}: exit ${result.status}, ${wallSeconds.toFixed(1)}s wall, ${summary.tests} test IDs in ${summary.files} files, ${JSON.stringify(summary.counts)}`)
-  console.log(`qualify live paths: ${violations.length} test write(s), ${summary.livePathChanges.allowed} allowed (known ledger), ${summary.livePathChanges.live} live-process (named writer), ${summary.livePathChanges.noisy} noisy (changed in the idle control window too)`)
+  console.log(`qualify live paths: ${violations.length} test write(s), ${summary.livePathChanges.allowed} allowed (known ledger), ${summary.livePathChanges.live} live-process (named writer), ${summary.livePathChanges.leftover} fence leftover dir(s), ${summary.livePathChanges.noisy} noisy (changed in the idle control window too)`)
   for (const c of classified.filter(c => c.class !== 'noisy')) console.log(`  ${(c.class === 'violation' ? 'TEST-WRITE' : c.class.toUpperCase()).padEnd(10)} ${c.kind.padEnd(8)} ${c.key}${c.writer ? `  <- ${c.writer}` : ''}`)
   if (missingJson.length > 0) console.log(`qualify: JSON report missing: ${missingJson.join(', ')}`)
   process.exit(result.status === 0 && violations.length === 0 && missingJson.length === 0 ? 0 : 1)
