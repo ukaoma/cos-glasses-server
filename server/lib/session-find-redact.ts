@@ -1,5 +1,5 @@
 /**
- * What may leave this Mac about a session, and in what shape (the "find" route, Control 0.5.362).
+ * What may leave this Mac about a session, and in what shape (the "find" route, Control 0.5.363).
  *
  * Every string a decision model sees, and every string the route hands back as `judged_text`, goes through
  * `redactForModel`: READ a bounded window, REDACT it, then CUT. The order is the point. The list titles a session by
@@ -10,7 +10,10 @@
  * Steps, in order:
  *   1. Read: lone surrogates, control and bidi characters out, NFKC (a full-width `ｊｏｈｎ＠ｅｘ…` becomes a plain address
  *      the next steps can see), one line, the first SCAN code points.
- *   2. This module's own rules for what mask does not know: phone numbers, card numbers, US social security numbers, short
+ *   1b. Leading attachments out of the prompt and the title (`@"path"`, `[Image: source: path]`, a bare path), so the 150 characters
+ *      start at the words typed.
+ *   2. This module's own rules for what mask does not know: home paths (/Users/<name>/…, /home, ~/, file://, C:\Users, /Volumes, /mnt/c)
+ *      as `[path]`, links with a host and a port or an IP address as `[link]` (bare domains stay), phone numbers, phone numbers, card numbers, US social security numbers, short
  *      `pk_` and `rk_` keys, base64 that carries `+` or `/` (first, because mask's long-run rule stops at a `/` and would leave
  *      the tail of a run), and a credential word in a few other languages.
  *   3. SetupAssistant.mask, ported: key shapes, then `key: value` and `"key": "value"` pairs whose key names a credential,
@@ -28,6 +31,8 @@ import { searchOptionText, WORK_SEARCH_LIMITS } from './work-search.js'
 export const FIND_TITLE_CHARS = 90
 export const FIND_PROMPT_CHARS = 150
 export const FIND_QUERY_CHARS = 200
+/** The collector keeps 2,000 characters of a typed prompt (FIND_PROMPT_KEEP_CHARS); a prompt that long was cut there. A test holds the two together. */
+export const UPSTREAM_PROMPT_CUT = 2_000
 /** Code points read before redacting: seven times the longest cut, so a pair or a block that starts inside a cut is whole. */
 export const FIND_SCAN_CHARS = 1_000
 /** Input bound before anything is normalized, so a pathological caller cannot make NFKC or the scan expensive. */
@@ -130,39 +135,57 @@ const BARE_KEY_PAIR = /(?<![A-Za-z0-9_.\-])(?:key|KEY|Key)[ \t]*[:=][ \t]*(?=[^\
 const UNICODE_EMAIL = /[\p{L}\p{N}._%+\-]{1,64}@[\p{L}\p{N}.\-]{1,253}\.\p{L}{2,24}/gu
 
 // A path into someone's home folder carries the account name and the layout of the machine, and the consent line does not promise
-// either, so it goes out before anything else is read. A quoted path may hold spaces and dots ("Photos Library.photoslibrary/IMG 1.heic"),
-// so a path that opens inside a quote runs to the closing quote; any other runs to the next space. file:// anywhere goes too.
-const HOME_ROOT = String.raw`(?:file:\/\/[^"'\s]*|\/Users\/[^\/"'\n]+|\/home\/[^\/"'\n]+|~|[A-Za-z]:\\Users\\[^\\"'\n]+)`
-const QUOTED_HOME_PATH = new RegExp(String.raw`(["'\x60])${HOME_ROOT}(?:[\/\\][^"'\x60\n]*)?\1`, 'g')
-const BARE_HOME_PATH = new RegExp(String.raw`(?<![A-Za-z0-9_.\-\/\\~])(?:file:\/\/\S*|(?:\/Users|\/home)\/[^\s\/"'\x60]+(?:\/\S*)?|~\/\S*|[A-Za-z]:\\Users\\\S+)`, 'g')
+// either, so it goes out before anything else is read. Only a REAL path shape counts, so a word is not eaten: a root, an account name
+// and at least one more segment (`/home/dashboard` and `/Users/list` are words), or `~/` with a segment that holds a slash or an
+// extension (`~/month` is a word), or `~name/…`, or file://. Case does not matter (/users/, c:\users\), nor the form it arrives in:
+// /Volumes/<x>/Users, /System/Volumes/Data/Users, /mnt/c/Users, C:\\Users\\ (escaped backslashes), `My\ Clients/Acme\ Corp` (escaped
+// spaces) and an apostrophe in the name (/Users/o'brien/x). A path that opens inside a quote runs to the closing quote, spaces and dots
+// and all; any other runs to the next unescaped space.
+const HOME_PREFIX = String.raw`(?:(?:\/System\/Volumes\/Data|\/Volumes\/[^\/\n]+|\/mnt\/[a-z])?\/(?:users|home)\/[^\s\/\\"\x60]+\/|[a-z]:\\{1,2}users\\{1,2}[^\s\\"\x60]+\\{1,2}|~[\w.\-]*\/(?=(?:\\ |[^\s])*[\/.]))`
+const HOME_SHAPE_QUOTED = /^(?:file:\/\/|(?:\/System\/Volumes\/Data|\/Volumes\/[^\/\n]+|\/mnt\/[a-z])?\/(?:users|home)\/[^\/\\\n]+[\/\\][^\n]|[a-z]:\\{1,2}users\\{1,2}[^\\\n]+\\{1,2}[^\n]|~[\w.\-]*\/[^\n]*[\/.])/i
+const QUOTED_HOME_PATH = /(["'\x60])((?:(?!\1)[^\n])+)\1/g
+const BARE_HOME_PATH = new RegExp(String.raw`(?<![\w.\-\/\\~])(?:file:\/\/(?:\\ |\S)*|${HOME_PREFIX}(?:\\ |\S)+)`, 'gi')
 export const PATH_PLACEHOLDER = '[path]'
+const maskQuotedHomePaths = (text: string) => text.replace(QUOTED_HOME_PATH, (whole, _quote: string, inner: string) => HOME_SHAPE_QUOTED.test(inner.trim()) ? PATH_PLACEHOLDER : whole)
+
+// A link with a host and a port, or a bare IP address: `192.168.1.20:8080/admin?x=1`, `localhost:3141/api/keys`, `example.com:8443/x`.
+// Bare domains (`quilt.com`) are left on purpose: they are brand names people search for, and the consent line says "links", not "names".
+const OCTET = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`
+const HOST_LINK = new RegExp(String.raw`(?<![\w.@\-])(?:(?:${OCTET}\.){3}${OCTET}|localhost|(?:[a-z0-9\-]+\.)+[a-z]{2,24})(?::\d{2,5})?(?:\/[^\s]*)?(?![\w\-])`, 'gi')
+const LINK_PLACEHOLDER = '[link]'
+const maskHostLinks = (text: string) => text.replace(HOST_LINK, (match: string) => /^(?:\d|localhost)/i.test(match) || /:\d{2,5}(?:\/|$)/.test(match) ? LINK_PLACEHOLDER : match)
 
 /**
  * What an agent app puts in front of the words: `@"/path/with spaces.png"`, `@'path'`, `@/path/file`, `@~/file`, `[Image: source: path]`,
  * `[Image #1]`, `[Pasted text #1 +20 lines]`, and a bare path. Measured on the owner's newest 508 first prompts: 33 start with `@"`,
  * 19 with `[Image`, 3 with a bare path; 25 carry more than one in a row. They are not what the person was asking, they eat the 150
  * characters that make the match, and a path in them names the account. They are dropped from the front, repeatedly, until the words
- * begin. An `@name` with no slash or dot is a mention and stays.
+ * begin. Only known forms: `@"Jane Doe" can you` (no slash, no file extension), an `@name` mention and `[File upload bug]` are words
+ * and stay. `cut` says the text was already cut upstream (an 80 or 120 character title, a 2,000 character prompt): an attachment that
+ * opens and never closes then runs to the end of what is left, so nothing of it is kept.
  */
-const LEADING_ATTACHMENT = /^\s*(?:@"[^"]*"|@'[^']*'|@(?:~|\.{0,2})?\/\S*|@[^\s\/]*\.(?:png|jpe?g|gif|heic|webp|pdf|txt|md|tsx?|jsx?|json|py|swift|csv|xlsx?|docx?|pptx?|html?|css|log|zip|mov|mp4|wav|mp3|sh|ya?ml|toml)\b|\[(?:Image|Pasted text|Pasted image|File|Attachment)[^\]]*\]|(?:\/Users|\/home)\/\S+|~\/\S+|file:\/\/\S+)\s*/
-export function stripLeadingAttachments(text: string): string {
+const FILE_EXT = String.raw`(?:png|jpe?g|gif|heic|webp|pdf|txt|md|tsx?|jsx?|json|py|swift|csv|xlsx?|docx?|pptx?|html?|css|log|zip|mov|mp4|wav|mp3|sh|ya?ml|toml)`
+const LEADING_ATTACHMENT = new RegExp(String.raw`^\s*(?:@"(?=[^"]*(?:\/|\.${FILE_EXT}"))[^"]*"|@'(?=[^']*(?:\/|\.${FILE_EXT}'))[^']*'|@(?:~|\.{0,2})?\/(?:\\ |\S)*|@[^\s\/]*\.${FILE_EXT}\b|\[(?:Image(?: #\d+|:[^\]]*)|Pasted text[^\]]*|Pasted image[^\]]*)\]|(?:\/users|\/home)\/[^\s\/]+\/(?:\\ |\S)+|~\/(?=\S*[\/.])(?:\\ |\S)+|file:\/\/\S+)\s*`, 'i')
+const UNCLOSED_ATTACHMENT = /^\s*(?:@"|@'|\[(?:Image|Pasted))/i
+export function stripLeadingAttachments(text: string, cut = false): string {
   let out = text
   for (let i = 0; i < 20; i++) {
     const next = out.replace(LEADING_ATTACHMENT, '')
     if (next === out) break
     out = next
   }
-  return out
+  return cut && UNCLOSED_ATTACHMENT.test(out) ? '' : out
 }
 
 export function maskMore(text: string): string {
   // An address goes out as a space, as searchOptionText does, so a query that is only an address is left empty.
-  let out = text.replace(QUOTED_HOME_PATH, PATH_PLACEHOLDER).replace(BARE_HOME_PATH, PATH_PLACEHOLDER).replace(UNICODE_EMAIL, ' ')
+  let out = maskHostLinks(maskQuotedHomePaths(text).replace(BARE_HOME_PATH, PATH_PLACEHOLDER)).replace(UNICODE_EMAIL, ' ')
   for (const re of [KEY_PAIR, SPOKEN_KEY_PAIR, BARE_KEY_PAIR, FOREIGN_CREDENTIAL, SHORT_STRIPE_KEY, SSN_LABELLED, SSN, CARD_NUMBER, PHONE_INTERNATIONAL, PHONE_NANP]) out = out.replace(re, HIDDEN)
   // Base64 that carries + or /, and the padded or long kind: mixed case with a digit, so a path or a word is left alone.
   return out.replace(BASE64_RUN, run => (/[A-Z]/.test(run) && /[a-z]/.test(run) && /\d/.test(run) && (/[+/=]/.test(run) || run.length >= 40)) ? HIDDEN : run)
 }
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
 /** Lone surrogates, control and bidi characters out, NFKC, one line. */
 function readableLine(raw: string): string {
   const wellFormed = raw.slice(0, INPUT_UNITS).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')
@@ -195,7 +218,8 @@ export function cutAtCodePoints(text: string, max: number, cutEarlier = false): 
 export function redactForModel(raw: string, max: number, cutUpstream = false): string {
   if (typeof raw !== 'string' || !raw) return ''
   const scan = cutAtCodePoints(readableLine(raw), FIND_SCAN_CHARS)
-  const redacted = searchOptionText(maskKeyShapes(maskMore(scan)))
+  // work-search's own slice at 300 UTF-16 units can leave half of a surrogate pair; it goes before the cut by code points.
+  const redacted = searchOptionText(maskKeyShapes(maskMore(scan))).replace(LONE_SURROGATE, '')
   // searchOptionText slices at its own 300 UTF-16 units; if it reached them it may have cut inside a token.
   return cutAtCodePoints(redacted, max, cutUpstream || redacted.length >= WORK_SEARCH_LIMITS.optionChars)
 }
@@ -218,8 +242,10 @@ const norm = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' 
  * of the prompt, so the prompt alone says it and a second copy of the words would only cost tokens.
  */
 export function candidateTexts(title: string, typed: string): CandidateTexts {
-  const t = redactForModel(stripLeadingAttachments(title), FIND_TITLE_CHARS, title.length === 80 || title.length === 120)
-  const prompt = redactForModel(stripLeadingAttachments(typed), FIND_PROMPT_CHARS)
+  const titleCut = title.length === 80 || title.length === 120
+  const t = redactForModel(stripLeadingAttachments(title, titleCut), FIND_TITLE_CHARS, titleCut)
+  const promptCut = typed.length >= UPSTREAM_PROMPT_CUT
+  const prompt = redactForModel(stripLeadingAttachments(typed, promptCut), FIND_PROMPT_CHARS)
   if (!prompt) return { option: t, prompt: '' }
   const titleWords = norm(t)
   if (!titleWords || (titleWords.length >= 12 && norm(prompt).startsWith(titleWords.slice(0, 30)))) return { option: prompt, prompt }

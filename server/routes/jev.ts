@@ -35,7 +35,7 @@ export interface JevRouteDependencies {
   replies: (provider: AgentProvider, sessionId: string, afterMs: number | null) => Promise<string | null>
   /** 6.65.0: Work search keeps its own client and breaker; a newly saved key clears that breaker too. */
   searchJev: Pick<JevClient, 'resetForNewKey'>
-  /** Session find (Control 0.5.362) keeps its own client and breaker too. */
+  /** Session find (Control 0.5.363) keeps its own client and breaker too. */
   findJev: Pick<JevClient, 'resetForNewKey'>
 }
 

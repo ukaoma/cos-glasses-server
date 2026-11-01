@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Server } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createSessionFindRouter } from './session-find.js'
+import { SESSION_FIND_LOG_EVERY_MS, createSessionFindRouter } from './session-find.js'
 import { createDecisionProviderRouter } from './decision-provider.js'
 import { createJevRouter } from './jev.js'
 import { SessionFinder, clientCapacity, unavailableAnswer, type SessionFindAnswer, type SessionFindRequest } from '../lib/session-find.js'
@@ -23,11 +23,11 @@ afterEach(async () => {
 
 const answer: SessionFindAnswer = { available: true, reason: null, message: '', provider: 'jev', storesData: false, rows: [], asked: 0, reachedBack: null, skipped: 0, cached: false }
 
-async function setup(find: (request: SessionFindRequest, signal: AbortSignal) => Promise<SessionFindAnswer> = async () => answer) {
+async function setup(find: (request: SessionFindRequest, signal: AbortSignal) => Promise<SessionFindAnswer> = async () => answer, now?: () => number) {
   const finder = { find: vi.fn(find) }
   const app = express(); app.use(express.json())
   app.use('/api', (req, res, next) => req.header('X-COS-Token') === 't' ? next() : res.sendStatus(401))
-  app.use('/api', createSessionFindRouter({ finder }))
+  app.use('/api', createSessionFindRouter({ finder, ...(now ? { now } : {}) }))
   const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) }); servers.push(server)
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/agent-sessions/find`
   const post = (body: unknown, token = 't', signal?: AbortSignal) => fetch(url, { method: 'POST', headers: { 'X-COS-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal })
@@ -106,6 +106,34 @@ describe('the route', () => {
     const s = await setup(async () => { const e = new Error('cancelled'); e.name = 'AbortError'; throw e })
     const abortedFetch = await Promise.race([s.post(good).then(r => r.status), new Promise(r => setTimeout(() => r('no answer'), 150))])
     expect(abortedFetch).toBe('no answer')
+  })
+})
+
+describe('the degrade log line', () => {
+  it('says each reason once per window, in fixed words, and again after the window', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let clock = 1_000
+    const s = await setup(async () => unavailableAnswer('cap_reached', 'jev'), () => clock)
+    for (let i = 0; i < 3; i++) await s.post({ ...good, query: 'a private search phrase' })
+    expect(warn.mock.calls.map(c => c.join(' '))).toEqual(['[session-find] unavailable: cap_reached'])
+    clock += SESSION_FIND_LOG_EVERY_MS - 1
+    await s.post(good)
+    expect(warn).toHaveBeenCalledTimes(1)
+    clock += 1
+    await s.post(good)
+    expect(warn).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a separate window per reason and logs nothing for an answer that worked', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let reason: 'cap_reached' | 'failed' | null = 'cap_reached'
+    const s = await setup(async () => reason ? unavailableAnswer(reason, 'jev') : answer, () => 5_000)
+    await s.post(good)
+    reason = 'failed'
+    await s.post(good)
+    reason = null
+    await s.post(good)
+    expect(warn.mock.calls.map(c => c.join(' '))).toEqual(['[session-find] unavailable: cap_reached', '[session-find] unavailable: failed'])
   })
 })
 
