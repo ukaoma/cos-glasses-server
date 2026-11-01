@@ -1,3 +1,9 @@
+## 6.97.2 - Local paths stay off the search (private candidate)
+
+2026-11-01. A private candidate for one Mac. Pairs with COS Control 0.5.363.
+
+- Session find drops attachment paths at the start of a first prompt, so the 150 characters sent begin at the typed words, and it masks home paths, `~/`, `file://` and `C:\Users` in text, titles and queries. On this Mac 55 of the newest 508 first prompts started with an attachment and 105 held a home path in their first 400 characters.
+
 ## 6.97.1 - Search sessions by meaning (private candidate)
 
 2026-11-01. A private candidate for one Mac, built on 6.97.0, carrying the same commits as the public line's session find route. Pairs with COS Control 0.5.362.
