@@ -62,6 +62,7 @@ import {
   greedyDiversitySelect,
   pairwiseSimilarityMatrix,
 } from './voice-enrolment-selection.js'
+import { sameSpeakerName } from './speaker-name-nfc.js'
 
 /** Where decoded-on-demand vectors are kept. One JSON file per held session. */
 export const HELD_EMBEDDING_CACHE_DIR = 'held-voice-embeddings'
@@ -432,12 +433,12 @@ export function suggestProfile(embedding: Float32Array, profiles: VoiceProfile[]
     if (!best || candidate.score > best.score) best = candidate
   }
   if (!best || best.anchor === null) return null
-  const winner = profiles.find(p => p.name === best!.name)!
+  const winner = profiles.find(p => sameSpeakerName(p.name, best!.name))!
   // Near-duplicate profile pairs represent an existing identity ambiguity, not
   // independent competing acoustic evidence. Do not let that pair erase the
   // margin against genuinely different voices. Never merge or rename here.
   const runnerUp = candidates.filter(c => c.name !== best!.name).filter(c => {
-    const other = profiles.find(p => p.name === c.name)!
+    const other = profiles.find(p => sameSpeakerName(p.name, c.name))!
     return profileSimilarity(winner, other) < HELD_NEAR_PROFILE_SIMILARITY
   }).reduce((score, c) => Math.max(score, c.score), 0)
   const margin = best.score - runnerUp
@@ -754,7 +755,7 @@ export function enrollHeldGroup(name: string, refs: HeldSampleRef[], opts: { dry
   const core = expand(coreReps)
   const leftBehind = expand(reps.filter(i => !coreSet.has(i))).map(s => ({ sessionId: s.sessionId, chunkIndex: s.chunkIndex })).sort(compareRefs)
 
-  const existing = readVoiceProfiles().profiles.find(p => p.name === name)
+  const existing = readVoiceProfiles().profiles.find(p => sameSpeakerName(p.name, name))
   // A primitive snapshot, taken BEFORE the loop: the store hands back its live
   // `embeddings` array by reference, and enrolment appends to that same array
   // until the first write invalidates the cache. Reading `.length` afterwards
@@ -826,7 +827,7 @@ export function projectHeldEnrollment(name: string, refs: HeldSampleRef[]): {
   const profiles = readVoiceProfiles().profiles.map(profile => ({
     ...profile, embeddings: profile.embeddings.map(row => [...row]), sources: [...(profile.sources ?? [])],
   }))
-  let target = profiles.find(profile => profile.name === name)
+  let target = profiles.find(profile => sameSpeakerName(profile.name, name))
   if (!target) { target = { name, embeddings: [], sources: [] }; profiles.push(target) }
   const selectedMembers: HeldSampleRef[] = []
   for (const embedding of selected) {

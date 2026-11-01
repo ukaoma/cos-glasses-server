@@ -43,6 +43,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 import { DATA_DIR } from './data-dir.js'
 import { AUTO_ENROLL_THRESHOLD, OWNER_VERIFY_SIMILARITY } from './voiceprint-floor.js'
+import { sameSpeakerName } from './speaker-name-nfc.js'
 
 export const SPEAKER_MODEL_FILENAME = '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx'
 
@@ -307,7 +308,7 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
 
   // Check diversity: skip if too similar to an existing embedding for this speaker
   const store = loadProfileStore()
-  const profile = store.profiles.find(p => p.name === name)
+  const profile = store.profiles.find(p => sameSpeakerName(p.name, name))
   if (profile) {
     // Dedup check: skip if too similar to existing (unless bypassed by trainer)
     if (!skipDedupCheck) {
@@ -338,7 +339,7 @@ export function enrollEmbedding(name: string, embedding: Float32Array, source: s
       return { success: false, dim: extractor.dim, error: `Profile store write failed: ${errMsg(err)}` }
     }
     const updatedStore = loadProfileStore()
-    const updatedProfile = updatedStore.profiles.find(p => p.name === name)
+    const updatedProfile = updatedStore.profiles.find(p => sameSpeakerName(p.name, name))
     if (updatedProfile) {
       rebuildSpeakerInManager(name, updatedProfile.embeddings)
       console.log(`[speaker] Force-enrolled "${name}" via rebuild (${updatedProfile.embeddings.length} total, source: ${source})`)
@@ -415,7 +416,7 @@ export interface BatchEnrollResult {
 export function enrollEmbeddingsBatch(name: string, items: BatchEnrollItem[]): BatchEnrollResult {
   if (!extractor || !manager) return { enrolled: 0, declined: items.length, persisted: false, error: 'Speaker embeddings not initialized' }
   const store = loadProfileStore()
-  const profile = store.profiles.find(p => p.name === name)
+  const profile = store.profiles.find(p => sameSpeakerName(p.name, name))
   if (!profile) return { enrolled: 0, declined: items.length, persisted: false, error: 'No such profile' }
   let added = 0
   let declined = 0
@@ -565,7 +566,7 @@ export function clearAutoEnrollSession(sessionId: string): void {
 /** Clear all embeddings for a speaker (used by fresh training mode) */
 export function clearSpeakerEmbeddings(name: string): boolean {
   const store = loadProfileStore()
-  const profile = store.profiles.find(p => p.name === name)
+  const profile = store.profiles.find(p => sameSpeakerName(p.name, name))
   if (!profile || profile.embeddings.length === 0) return false
 
   console.log(`[speaker] Clearing ${profile.embeddings.length} embeddings for "${name}"`)
@@ -621,7 +622,7 @@ export function mergeSpeakerProfiles(
   options: { force?: boolean; dryRun?: boolean } = {},
 ): MergeReport {
   const store = loadProfileStore()
-  const target = store.profiles.find(p => p.name === into)
+  const target = store.profiles.find(p => sameSpeakerName(p.name, into))
   const report: MergeReport = {
     into,
     merged: [],
@@ -641,8 +642,8 @@ export function mergeSpeakerProfiles(
   const eligible: string[] = []
   const refused: { name: string; similarity: number; floor: number }[] = []
   for (const name of from) {
-    if (name === into) continue
-    const source = store.profiles.find(p => p.name === name)
+    if (sameSpeakerName(name, into)) continue
+    const source = store.profiles.find(p => sameSpeakerName(p.name, name))
     if (!source) { report.missing.push(name); continue }
     const similarity = profileSimilarity(target, source)
     report.similarity[name] = Math.round(similarity * 1000) / 1000
@@ -729,7 +730,7 @@ export function retractEmbeddingsBySource(
   matches: (source: string) => boolean,
 ): { removed: number; remaining: number } {
   const store = loadProfileStore()
-  const profile = store.profiles.find(p => p.name === name)
+  const profile = store.profiles.find(p => sameSpeakerName(p.name, name))
   if (!profile) return { removed: 0, remaining: 0 }
 
   const removed = removeEmbeddingsBySource(profile, matches)
@@ -743,7 +744,7 @@ export function retractEmbeddingsBySource(
 /** Get embedding count for a speaker */
 export function getEmbeddingCount(name: string): number {
   const store = loadProfileStore()
-  const profile = store.profiles.find(p => p.name === name)
+  const profile = store.profiles.find(p => sameSpeakerName(p.name, name))
   return profile?.embeddings.length ?? 0
 }
 
@@ -1060,7 +1061,7 @@ function invalidateProfileCache(): void {
 function restoreProfileFromDisk(name: string): void {
   invalidateProfileCache()
   try {
-    const fresh = loadProfileStore().profiles.find(p => p.name === name)
+    const fresh = loadProfileStore().profiles.find(p => sameSpeakerName(p.name, name))
     if (fresh && fresh.embeddings.length > 0) rebuildSpeakerInManager(name, fresh.embeddings)
     else if (manager?.contains(name)) manager.remove(name)
   } catch (err: unknown) {
@@ -1077,7 +1078,7 @@ function persistProfile(name: string, embedding: Float32Array, source: string = 
   try {
     const store = loadProfileStore()
 
-    let profile = store.profiles.find(p => p.name === name)
+    let profile = store.profiles.find(p => sameSpeakerName(p.name, name))
     if (!profile) {
       profile = { name, embeddings: [], sources: [] }
       store.profiles.push(profile)

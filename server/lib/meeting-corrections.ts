@@ -27,6 +27,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { dataPath } from './data-dir.js'
+import { sameSpeakerName } from './speaker-name-nfc.js'
 
 export const CORRECTIONS_DIR = 'meeting-corrections'
 
@@ -268,7 +269,7 @@ export function currentLabelFor(sessionId: string, originalLabel: string): strin
   for (let hop = 0; hop < applied.length; hop++) {
     // Latest applied correction FROM the current label wins: a later human
     // decision supersedes an earlier one.
-    const next = [...applied].reverse().find(r => r.from === label)
+    const next = [...applied].reverse().find(r => sameSpeakerName(r.from, label))
     if (!next || seen.has(next.to)) break
     label = next.to
     seen.add(label)

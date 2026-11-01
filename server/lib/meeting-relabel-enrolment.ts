@@ -37,6 +37,7 @@
 // every future meeting. A wrong write is permanent and silent. So every step below
 // fails CLOSED: no mapping means no enrolment, never a fall back to positions.
 
+import { sameSpeakerName } from './speaker-name-nfc.js'
 import {
   chunkEmbeddingTtlMs,
   chunkEmbeddingsEnabled,
@@ -163,7 +164,7 @@ function missingReason(sidecar: Record<string, unknown>): EnrolmentSkipReason {
  *  append as a creation. */
 function profileExists(name: string): boolean {
   try {
-    return readVoiceProfiles().profiles.some(p => p.name === name)
+    return readVoiceProfiles().profiles.some(p => sameSpeakerName(p.name, name))
   } catch {
     // Unknowable is not "new". Claiming creation is the lie that matters here.
     return true

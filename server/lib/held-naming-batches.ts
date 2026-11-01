@@ -1,4 +1,5 @@
 /** Durable held naming: server-stored preview, per-copy receipts, explicit recovery. */
+import { nfc, sameSpeakerName } from './speaker-name-nfc.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -27,12 +28,12 @@ export function resolveStoredName(name: string): {name:string;owner:boolean} {
   if (stored.length > 1) throw new HeldGroupError(400,'ambiguous_name','Multiple stored voices have that spelling. Rename the duplicate profiles first.',{names:stored.map(p=>p.name)})
   const owner = getOwnerSpeakerLabel()
   const isOwner = foldName(owner) === foldName(name.trim()) || (stored[0] && foldName(stored[0].name) === foldName(owner))
-  return {name:isOwner ? owner : stored[0]?.name ?? name.trim(),owner:!!isOwner}
+  return {name:isOwner ? owner : stored[0]?.name ?? nfc(name.trim()),owner:!!isOwner}
 }
 function voiceVersion(name: string) {
   const path = dataPath('voice-profiles.json')
   const profiles = readVoiceProfiles().profiles
-  return {storeMtime:existsSync(path)?statSync(path).mtimeMs:0,profileCount:profiles.length,targetSamples:profiles.find(p=>p.name===name)?.embeddings.length ?? 0}
+  return {storeMtime:existsSync(path)?statSync(path).mtimeMs:0,profileCount:profiles.length,targetSamples:profiles.find(p=>sameSpeakerName(p.name,name))?.embeddings.length ?? 0}
 }
 function evidenceVersion(refs:HeldSampleRef[]) {
   return hash([...new Set(refs.map(r=>r.sessionId))].sort().map(sessionId=>({sessionId,rows:readChunkEmbeddings(sessionId).rows.map(r=>({i:r.i,embedding:Array.from(r.embedding)})),cache:existsSync(dataPath('held-voice-embeddings',`${sessionId}.json`))?readFileSync(dataPath('held-voice-embeddings',`${sessionId}.json`),'utf8'):''})))
