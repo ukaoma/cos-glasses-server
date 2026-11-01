@@ -94,6 +94,64 @@ describe('log row schema', () => {
   })
 })
 
+describe('log row schema, live cues v3', () => {
+  const src = (over: Record<string, unknown> = {}) => ({ id: 'mtg_a1', date: '2026-10-01', title: 'Past A', ...over })
+  const ok = (over: Partial<LiveCueLogRow>) => isLogRow(row(id(1), over))
+  it('insight is a log kind beside the five cue kinds, and other kinds are still skipped', () => {
+    expect(ok({ kind: 'insight' })).toBe(true)
+    for (const kind of ['reinforce', 'challenge', 'decision', 'promise', 'followUp']) expect(ok({ kind: kind as never }), kind).toBe(true)
+    for (const kind of ['Insight', 'news', 'shout', '']) expect(ok({ kind: kind as never }), kind).toBe(false)
+  })
+  it('a source may carry a kind and the ONE locator that matches it', () => {
+    expect(ok({ sources: [src()] })).toBe(true)                                                          // no extras: as before
+    expect(ok({ sources: [src({ kind: 'meeting' })] })).toBe(true)                                       // a meeting whose record id is unknown
+    expect(ok({ sources: [src({ kind: 'meeting', recordId: 'ops:quilt:2026-10:a.md' })] })).toBe(true)
+    expect(ok({ sources: [src({ kind: 'memory', memoryId: 'mem-1' })] })).toBe(true)
+    expect(ok({ sources: [src({ kind: 'file', fileId: 'plan-1' })] })).toBe(true)
+    expect(ok({ sources: [src({ kind: 'web', url: 'https://www.example.com/a?b=1' })] })).toBe(true)
+    expect(ok({ sources: [src({ kind: 'file', fileId: 'plan-1' }), src({ id: 'mtg_b2', kind: 'memory', memoryId: 'mem-2' })] })).toBe(true)
+  })
+  it('a bad optional source field skips the whole row: unknown kind, locator without a kind, two locators, a locator for another kind, empty or non-string values', () => {
+    const bad: Array<Record<string, unknown>> = [
+      { kind: 'page' }, { kind: 7 }, { kind: 'Meeting' },
+      { recordId: 'r1' }, { memoryId: 'm1' }, { fileId: 'f1' }, { url: 'https://example.com/a' },
+      { kind: 'meeting', recordId: 'r1', memoryId: 'm1' }, { kind: 'file', fileId: 'f1', url: 'https://example.com/a' },
+      { kind: 'meeting', memoryId: 'm1' }, { kind: 'memory', fileId: 'f1' }, { kind: 'file', recordId: 'r1' }, { kind: 'web', fileId: 'f1' }, { kind: 'web', recordId: 'r1' },
+      { kind: 'memory', memoryId: '' }, { kind: 'file', fileId: 5 }, { kind: 'meeting', recordId: null }, { kind: 'memory', memoryId: 'm'.repeat(2049) },
+    ]
+    for (const over of bad) expect(ok({ sources: [src(over)] }), JSON.stringify(over)).toBe(false)
+    expect(ok({ sources: [src(), src({ kind: 'page' })] })).toBe(false)                                  // one bad source in two
+  })
+  it('a web url must be https and a public address: http, other schemes, credentials, localhost and private hosts skip the row', () => {
+    for (const url of ['http://example.com/a', 'ftp://example.com/a', 'javascript:alert(1)', 'https://user:pw@example.com/a', 'https://localhost/a', 'https://127.0.0.1/a',
+      'https://10.0.0.5/a', 'https://192.168.1.2/a', 'https://printer.local/a', 'https://intranet.internal/a', 'https://[::1]/a', 'https://example.com:8443/a', 'not a url', '']) {
+      expect(ok({ sources: [src({ kind: 'web', url })] }), url).toBe(false)
+    }
+    expect(ok({ sources: [src({ kind: 'web', url: `https://example.com/${'a'.repeat(2100)}` })] })).toBe(false)
+  })
+  it('arms is a list of the known retrieval arms with no repeats; memorySource keeps its three values', () => {
+    expect(ok({ arms: ['cue_memory', 'notes', 'files'] })).toBe(true)
+    expect(ok({ arms: [] })).toBe(true)
+    expect(ok({ arms: ['files'] })).toBe(true)
+    for (const arms of [['web'], ['notes', 'notes'], 'cue_memory', [3], ['cue_memory', 'notes', 'files', 'files'], { length: 1 }, { 0: 'notes', length: 1 }, null, 3]) expect(ok({ arms: arms as never }), JSON.stringify(arms)).toBe(false)
+    for (const memorySource of ['cue_memory', 'notes', 'none']) expect(ok({ memorySource: memorySource as never }), memorySource).toBe(true)
+    for (const memorySource of ['files', 'web', 'grounded']) expect(ok({ memorySource: memorySource as never }), memorySource).toBe(false)
+  })
+  it('an insight row may carry its category and query; a bad category, an empty or over-long query skips it', () => {
+    expect(ok({ kind: 'insight', general: { category: 'news', query: 'Austin FC playoff schedule' } })).toBe(true)
+    for (const category of ['news', 'local', 'notable']) expect(ok({ kind: 'insight', general: { category: category as never, query: 'q' } }), category).toBe(true)
+    expect(ok({ kind: 'insight', general: { category: 'news', query: 'x'.repeat(80) } })).toBe(true)
+    for (const general of [{ category: 'sports', query: 'q' }, { category: 'news', query: '' }, { category: 'news', query: 'x'.repeat(81) }, { category: 'news' }, { query: 'q' }, 'news', null]) {
+      expect(ok({ kind: 'insight', general: general as never }), JSON.stringify(general)).toBe(false)
+    }
+  })
+  it('a row with the new fields is kept by the reader, written and read back whole', () => {
+    const rich = row(id(7), { kind: 'insight', sources: [src({ kind: 'web', url: 'https://www.example.com/a' })], arms: ['notes'], general: { category: 'local', query: 'Leander road closure' } })
+    svc.logCue(rich)
+    expect(svc.deps.log.read()).toEqual({ rows: [rich], skipped: 0 })
+  })
+})
+
 describe('cue log', () => {
   it('appends one JSON line per cue, mode 0600, and reads them back', () => {
     svc.logCue(row(id(1)))

@@ -46,7 +46,7 @@ import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_
 import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
 import {
-  CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isLiveCueV2, legacyCueKind,
+  CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isCueKind, isLiveCueV2, legacyCueKind,
   type CueKind, type CueKindSet, type CueSourceRef, type LiveCueV1Compat, type LiveCueV2, type LiveCuesV2Capability, type LiveCuesV2MemorySource,
   type LiveCuesV2SessionStatus, type LiveCuesV2StatusResponse, type LiveCuesV2StopReason,
 } from '../../shared/live-cues-v2.js'
@@ -733,7 +733,8 @@ export class LiveCuesV2Engine {
     const cues = s ? [...s.cues] : []
     return { nudgesGenerated: cues.length, protocol: 2, cues,
       // v1 readers know two types: an extended kind is shown as its legacy kind there (the cues keep the real one).
-      nudges: cues.map(c => ({ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId })) }
+      // An insight (live cues v3) has no v1 twin.
+      nudges: cues.flatMap(c => (isCueKind(c.kind) ? [{ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId }] : [])) }
   }
 
   setPaused(sessionId: string, paused: boolean, seq?: number): { ok: true; paused: boolean; applied: boolean; pauseSeq: number } {
@@ -924,7 +925,7 @@ export class LiveCuesV2Engine {
       s.lastCueAt = cue.createdAt
       this.deps.store.recordCue(s.sessionId)
       this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)
-      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(cue.kind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
+      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(parsed.kind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
       this.deps.emit('coaching_nudge', v1 as unknown as Record<string, unknown>)
       Object.assign(trace, { outcome: 'cue', cueId: cue.cueId, cueChars: cue.detail.length, sources: sources.length, ...(parsed.numberFlags.length ? { numberFlags: parsed.numberFlags.length } : {}) })
     } catch (error) {
