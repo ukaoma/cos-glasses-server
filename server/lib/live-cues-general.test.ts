@@ -176,6 +176,12 @@ describe('tick', () => {
     for (let i = 0; i < 4; i++) order.push((await h.go()).sessionId!)
     expect(order).toEqual(['mac_a', 'mac_b', 'mac_a', 'mac_b'])
   })
+  it('a host that throws ends the pass without starting anything', async () => {
+    const h = await make()
+    h.host.candidates = () => { throw new Error('host is gone') }
+    expect(await h.go()).toEqual({ ran: false, why: 'host_error' })
+    expect(h.calls.trigger).toBe(0)
+  })
   it('forgets a meeting the host no longer lists', async () => {
     const h = await make({ sessions: [mac('mac_a'), mac('mac_b')] })
     h.sessions.pop()
@@ -466,12 +472,14 @@ describe('fail closed', () => {
   it.each([
     ['unparseable file', () => 'not json {'],
     ['not an object', () => '[]'],
-    ['wrong schema version', () => JSON.stringify({ v: 2 })],
+    ['wrong schema version', () => JSON.stringify({ v: 2, zone: 'UTC', day: '2026-11-01', topicCalls: 0, webSearches: 0, meetings: {}, breaker: { failures: 0, stage: 0, openUntil: null } })],
     ['a future day', () => JSON.stringify({ v: 1, zone: 'UTC', day: '2999-01-01', topicCalls: 0, webSearches: 0, meetings: {}, breaker: { failures: 0, stage: 0, openUntil: null } })],
     ['a negative count', () => JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-01', topicCalls: -1, webSearches: 0, meetings: {}, breaker: { failures: 0, stage: 0, openUntil: null } })],
     ['a fractional count', () => JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-01', topicCalls: 0.5, webSearches: 0, meetings: {}, breaker: { failures: 0, stage: 0, openUntil: null } })],
     ['an invalid zone', () => JSON.stringify({ v: 1, zone: 'Mars/Olympus', day: '2026-11-01', topicCalls: 0, webSearches: 0, meetings: {}, breaker: { failures: 0, stage: 0, openUntil: null } })],
-    ['a damaged meeting entry', () => JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-01', topicCalls: 0, webSearches: 0, meetings: { mac_1: { attempts: 'x' } }, breaker: { failures: 0, stage: 0, openUntil: null } })],
+    ['a damaged meeting entry (attempts)', () => JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-01', topicCalls: 0, webSearches: 0, meetings: { mac_1: { attempts: 'x', cues: 0, at: Date.parse('2026-11-01T18:00:00Z') } }, breaker: { failures: 0, stage: 0, openUntil: null } })],
+    ['a damaged meeting entry (cues)', () => JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-01', topicCalls: 0, webSearches: 0, meetings: { mac_1: { attempts: 0, cues: -2, at: Date.parse('2026-11-01T18:00:00Z') } }, breaker: { failures: 0, stage: 0, openUntil: null } })],
+    ['a damaged meeting entry (time)', () => JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-01', topicCalls: 0, webSearches: 0, meetings: { mac_1: { attempts: 0, cues: 0, at: 'now' } }, breaker: { failures: 0, stage: 0, openUntil: null } })],
     ['a damaged breaker', () => JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-01', topicCalls: 0, webSearches: 0, meetings: {}, breaker: { failures: 9, stage: 9, openUntil: null } })],
   ])('an unreadable state file (%s) means no call at all', async (_name, content) => {
     const h = await make()
@@ -578,6 +586,15 @@ describe('breaker', () => {
     expect(await n.go()).toMatchObject({ outcome: 'no_cue', reason: 'writer_null' })
     expect(n.state().breaker.failures).toBe(0)
   })
+  it('a writer that answers null clears a streak of writer failures: it got as deep as the stage that failed', async () => {
+    let answer: string | Error = new Error('boom')
+    const h = await make({ deps: { writer: async () => { if (answer instanceof Error) throw answer; return { text: answer } } } })
+    await h.go(); await h.go()
+    expect(h.state().breaker).toMatchObject({ failures: 2, stage: 4 })
+    answer = 'null'
+    expect(await h.go()).toMatchObject({ reason: 'writer_null' })
+    expect(h.state().breaker).toMatchObject({ failures: 0, stage: 0 })
+  })
   it('Jev\'s own cap, breaker or missing key is a quiet stop, not a failure', async () => {
     for (const error of [new JevError('jev_cap_reached'), new JevError('jev_breaker_open'), new JevError('jev_not_configured'), new DecisionProviderError('decision_cap_reached')]) {
       const h = await make({ deps: { jevTrigger: async () => { throw error } } })
@@ -676,6 +693,15 @@ describe('search, writer and emit', () => {
     hh = h
     expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'stale' })
     expect(h.emitted).toEqual([])
+  })
+  it('stale: measured from the window, not from the last step (100 s of search plus 81 s of writer is late)', async () => {
+    let hh: H
+    const h = await make({ deps: {
+      search: async () => { hh.clock.t += 100_000; return { sources: [SOURCE] } },
+      writer: async () => { hh.clock.t += 81_000; return { text: WRITTEN } },
+    } })
+    hh = h
+    expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'stale' })
   })
   it('stale: exactly 180 s is still fresh', async () => {
     let hh: H

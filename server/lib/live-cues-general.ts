@@ -411,14 +411,15 @@ export class GeneralCueRunner {
   }
 
   // ── Tick ──
-  /** One pass over the meetings: starts at most ONE attempt, for the meeting that has waited longest. Never throws. */
+  /** One pass over the meetings: starts at most ONE attempt, for the meeting that has waited longest. A host that throws ends the pass. */
   async tick(): Promise<GeneralTickResult> {
     const nowMs = this.deps.now()
     const mode = this.settings.cueMode()
     if (!generalModeOn(mode)) { this.abortAll('mode_changed'); this.seen.clear(); return { ran: false, why: 'mode_off' } }
     if (this.inFlight) return { ran: false, why: 'busy' }
     const lim = this.settings.limits(), publicTopics = this.settings.publicTopics()
-    const candidates = this.host.candidates()
+    let candidates: GeneralCueCandidate[]
+    try { candidates = this.host.candidates() } catch { return { ran: false, why: 'host_error' } }
     const present = new Set(candidates.map(c => c.sessionId))
     for (const id of [...this.seen.keys()]) if (!present.has(id)) this.seen.delete(id)
     for (const id of [...this.meetingQueries.keys()]) if (!present.has(id)) this.meetingQueries.delete(id)
