@@ -90,10 +90,28 @@ describe('what mask does not know', () => {
     ['a Spanish password label', 'contraseña: Clave9876 para entrar', 'Clave9876'],
     ['a German password label', 'Passwort = Geheim1234 gilt', 'Geheim1234'],
     ['an email address', 'write to jane.doe@example.com about it', 'jane.doe'],
+    ['a STRIPE_KEY pair', 'set STRIPE_KEY=sk9Zx81abc7 now', 'sk9Zx81abc7'],
+    ['an OPENAI_KEY pair', 'export OPENAI_KEY=abc123def456 first', 'abc123def456'],
+    ['a camel case AccountKey pair', 'AccountKey=Zm9vYmFyMTIzNDU2 in config', 'Zm9vYmFyMTIzNDU2'],
+    ['a hyphenated license-key pair', 'license-key: ABCD-1234-EFGH ok', 'EFGH'],
+    ['a quoted JSON my_key pair', 'cfg {"my_key": "abcdef ghijkl"} end', 'abcdef'],
+    ['the spoken api key', 'the api key: hunter22xx was pasted', 'hunter22xx'],
+    ['the spoken API KEY in capitals', 'API KEY = hunter22xx here', 'hunter22xx'],
+    ['a bare key with a digit in a long value', 'key: a1b2c3d4e5f6 was it', 'a1b2c3d4e5f6'],
+    ['an address with an accented letter', 'write to josé@example.com about it', 'josé', 'example.com'],
+    ['an address in Cyrillic letters', 'пиши иван@пример.рф сегодня', 'иван@'],
     ['a bare pass with a digit (only the port knows)', 'login pass: abcd1234 for the box', 'abcd1234'],
     ['a full-width email address', 'write to ｊａｎｅ＠ｅｘａｍｐｌｅ．ｃｏｍ about it', 'example.com', 'ｊａｎｅ', 'ｅｘａｍｐｌｅ'],
     ['a URL with a query token', 'open https://docs.example.com/page?token=abcdef123456 now', 'abcdef123456'],
   ])('hides %s', (_name, input, ...fragments) => { gone(input, ...fragments) })
+
+  it('leaves a bare "key: value", "primary key" and words that merely end in key', () => {
+    for (const text of ['key: value', 'the primary key: id is enough', 'monkey=bananas123 ok', 'a hotkey: ctrl+shift+k works']) expect(redactForModel(text, 150)).toBe(text)
+  })
+
+  it('strips a soft hyphen and a word joiner, so a pattern cannot be broken by them', () => {
+    expect(redactForModel('soft\u00adhy\u2060phen and sk-abc\u00addefghijklmnopqrstuvwxyz123456', 150)).toBe('softhyphen and [hidden]')
+  })
 
   it('does not hide a path, a date or a short number', () => {
     const text = 'edit server/lib/session-find-collect.ts on 2026-11-01 around 42 of 100 rows'
@@ -179,6 +197,18 @@ describe('read, redact, then cut', () => {
 
   it('puts the text on one line without control or direction characters', () => {
     expect(redactForModel('one\ntwo\u0000three‮four​five\r\nsix', 150)).toBe('one twothreefourfive six')
+  })
+})
+
+describe('a title at the length it was cut upstream', () => {
+  it('drops its last token, which can be half a key', () => {
+    const eighty = ('word '.repeat(14) + 'ghp_abcdefghijklmnop').slice(0, 80) // the list cut the first line at 80, in the middle of a token
+    expect(eighty).toHaveLength(80)
+    const { option } = candidateTexts(eighty, 'a typed prompt that says something else entirely')
+    expect(option).not.toContain('ghp_')
+    expect(candidateTexts('x'.repeat(60) + ' tail', 'p').option.startsWith('xxxx')).toBe(true) // 65 characters: not cut upstream
+    const hundredTwenty = 'word '.repeat(22) + 'sk-abcdefghij' // 123, cut by the 120 title rule
+    expect(candidateTexts(hundredTwenty.slice(0, 120), 'prompt text here').option).not.toContain('sk-')
   })
 })
 
