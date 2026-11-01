@@ -51,6 +51,44 @@ describe('6.86.0 cue kinds: the contract', () => {
   })
 })
 
+describe('live cues v3 contract: the insight kind and source locators', () => {
+  const MACCUE = { protocol: 2, cueId: 'c1', sessionId: MAC, headline: 'Leander FC plays at 7 tonight', detail: 'Leander FC plays at home at 7 tonight.', kind: 'insight',
+    sources: [{ id: 'web_1', date: '2026-11-01', title: 'Match preview', kind: 'web', url: 'https://www.example.com/preview' }], gate: 0.7, createdAt: 1, model: 'claude-haiku-5-5' }
+  it('insight is a general kind of its own: CUE_KINDS, LEGACY_CUE_KINDS, the v1 mapping and what health advertises are exactly as before', () => {
+    expect([...contract.GENERAL_CUE_KINDS]).toEqual(['insight'])
+    expect([...CUE_KINDS]).toEqual(['reinforce', 'challenge', 'decision', 'promise', 'followUp'])
+    expect([...LEGACY_CUE_KINDS]).toEqual(['reinforce', 'challenge'])
+    expect(isCueKind('insight')).toBe(false)
+    expect(CUE_KINDS.map(legacyCueKind)).toEqual(['reinforce', 'challenge', 'reinforce', 'reinforce', 'challenge'])
+    expect((CUE_KINDS as readonly string[]).includes('insight')).toBe(false)
+  })
+  it('isLogCueKind is the five cue kinds and insight, nothing else', () => {
+    for (const k of [...CUE_KINDS, 'insight']) expect(contract.isLogCueKind(k), k).toBe(true)
+    for (const k of ['Insight', 'news', 'fact', '', null, undefined, 3, {}]) expect(contract.isLogCueKind(k), String(k)).toBe(false)
+  })
+  it('isLiveCueV2 takes an insight with web sources, and sources with a kind and one matching locator', () => {
+    expect(isLiveCueV2(MACCUE)).toBe(true)
+    const base = { id: 'mtg_1', date: '2026-10-01', title: 'Past' }
+    for (const extras of [{}, { kind: 'meeting' }, { kind: 'meeting', recordId: 'r1' }, { kind: 'memory', memoryId: 'm1' }, { kind: 'file', fileId: 'f1' }, { kind: 'web', url: 'https://example.com/a' }]) {
+      expect(isLiveCueV2({ ...MACCUE, kind: 'challenge', sources: [{ ...base, ...extras }] }), JSON.stringify(extras)).toBe(true)
+    }
+  })
+  it('isLiveCueV2 refuses a source the companion could not read: an unknown kind, a locator with no kind or for another kind, two locators, an http url', () => {
+    const base = { id: 'mtg_1', date: '2026-10-01', title: 'Past' }
+    for (const extras of [{ kind: 'page' }, { recordId: 'r1' }, { kind: 'file', recordId: 'r1' }, { kind: 'meeting', recordId: 'r1', memoryId: 'm1' }, { kind: 'web', url: 'http://example.com/a' },
+      { kind: 'web', url: 'ftp://example.com/a' }, { kind: 'memory', memoryId: '' }, { kind: 'file', fileId: 4 }]) {
+      expect(isLiveCueV2({ ...MACCUE, sources: [{ ...base, ...extras }] }), JSON.stringify(extras)).toBe(false)
+    }
+    expect(isLiveCueV2({ ...MACCUE, kind: 'shout' })).toBe(false)
+    expect(isLiveCueV2({ ...MACCUE, sources: [base, base, base] })).toBe(false)
+  })
+  it('only an extended meeting\'s writer can return an insight: parseWriterCue falls back to the gate kind for it on both sets', () => {
+    const raw = JSON.stringify({ cue: 'Leander FC plays at home at 7 tonight.', kind: 'insight', memoryIds: [] })
+    expect(parseWriterCue(raw, 'challenge', '', [], false, LEGACY_CUE_KINDS)).toMatchObject({ kind: 'challenge' })
+    expect(parseWriterCue(raw, 'challenge', '', [], false, CUE_KINDS)).toMatchObject({ kind: 'challenge' })
+  })
+})
+
 describe('6.86.0 writer v4', () => {
   it('is v3 with rules 3 and 4 and the schema kind list swapped, nothing else (v2 and v3 stay the measured strings)', () => {
     const v4 = kindsPrompt.CUE_WRITER_SYSTEM_V4
@@ -142,6 +180,18 @@ describe('6.86.0 engine: kinds per meeting, Mac recordings', () => {
     store = new LiveCuesV2Store(join(dir, 'state.json'), () => new Date(clock))
   })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('live cues v3: a stop on an extended meeting leaves an insight out of the v1 nudges, and the v1 reader still gets its other cues', () => {
+    const e = engine()
+    const sessions = (e as unknown as { sessions: Map<string, { cues: unknown[] }> }).sessions
+    e.arm(MAC)
+    const cue = (kind: string, cueId: string) => ({ protocol: 2, cueId, sessionId: MAC, headline: 'h', detail: 'd', kind, sources: [], gate: 0.9, createdAt: 1, model: 'm' })
+    sessions.get(MAC)!.cues.push(cue('decision', 'c-a'), cue('insight', 'c-b'), cue('challenge', 'c-c'))
+    const end = e.end(MAC)
+    expect(end.cues.map(c => c.cueId)).toEqual(['c-a', 'c-b', 'c-c'])
+    expect(end.nudges.map(n => [n.cueId, n.type])).toEqual([['c-a', 'reinforce'], ['c-c', 'challenge']])
+    expect(end.nudgesGenerated).toBe(3)
+  })
 
   it('a Mac recording is armed with the five kinds, runs v4, and its decision cue reaches v2 as decision and v1 as reinforce', async () => {
     const e = engine()

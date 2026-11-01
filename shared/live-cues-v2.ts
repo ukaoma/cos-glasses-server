@@ -26,8 +26,37 @@ export function legacyCueKind(kind: CueKind): 'reinforce' | 'challenge' {
   return kind === 'reinforce' || kind === 'decision' || kind === 'promise' ? 'reinforce' : 'challenge'
 }
 
-/** A past meeting the cue drew on (0 to 2 per cue). */
-export interface CueSourceRef { id: string; date: string; title: string }
+/** Live cues v3: general cues carry one kind of their own, `insight` (a short public fact with its source). It is separate from
+ *  CUE_KINDS on purpose: CUE_KINDS decides what a meeting may receive and what health advertises, and the three arrays above
+ *  and legacyCueKind do not know it. Only an extended (Mac) meeting ever gets one; a legacy meeting never does, and an insight
+ *  never has a v1 `coaching_nudge` twin. */
+export const GENERAL_CUE_KINDS = ['insight'] as const
+export type GeneralCueKind = typeof GENERAL_CUE_KINDS[number]
+/** Any kind a cue row (the log, a verdict, an extended meeting's stream) may carry. */
+export function isLogCueKind(value: unknown): value is CueKind | GeneralCueKind {
+  return isCueKind(value) || (typeof value === 'string' && (GENERAL_CUE_KINDS as readonly string[]).includes(value))
+}
+
+/** What a cue source is: a past meeting, a COS memory, a file attached to this meeting, or a public web page. */
+export const CUE_SOURCE_KINDS = ['meeting', 'memory', 'file', 'web'] as const
+export type CueSourceKind = typeof CUE_SOURCE_KINDS[number]
+/** A past meeting the cue drew on (0 to 2 per cue). Live cues v3 adds an optional kind and at most ONE locator matching it:
+ *  meeting `recordId` (when known), memory `memoryId`, file `fileId`, web `url` (https only). Older readers ignore them. */
+export interface CueSourceRef { id: string; date: string; title: string; kind?: CueSourceKind; recordId?: string; memoryId?: string; fileId?: string; url?: string }
+/** The locator field each source kind uses. */
+export const CUE_SOURCE_LOCATOR = { meeting: 'recordId', memory: 'memoryId', file: 'fileId', web: 'url' } as const
+/** Are the optional kind and locator of a source well formed: a known kind, no locator without it, at most one, and it matches
+ *  the kind. A web url must be https (the server also checks it is a public address before it writes a row). */
+export function isCueSourceExtras(source: CueSourceRef): boolean {
+  const locators = (['recordId', 'memoryId', 'fileId', 'url'] as const).filter(k => source[k] !== undefined)
+  if (source.kind === undefined) return locators.length === 0
+  if (!(CUE_SOURCE_KINDS as readonly string[]).includes(source.kind)) return false
+  if (locators.length > 1) return false
+  if (locators.length === 1 && locators[0] !== CUE_SOURCE_LOCATOR[source.kind]) return false
+  const value = locators.length === 1 ? source[locators[0]] : undefined
+  if (value !== undefined && (typeof value !== 'string' || value.length === 0 || value.length > 2048)) return false
+  return source.url === undefined || source.url.startsWith('https://')
+}
 
 /** SSE named event `coaching_nudge_v2` (emitted BEFORE its v1 `coaching_nudge` twin), and the rows of GET /api/live-cues/status?sessionId=. */
 export interface LiveCueV2 {
@@ -38,7 +67,8 @@ export interface LiveCueV2 {
   headline: string
   /** <= 220 chars: the full cue, shown on tap and in the phone Cues sheet. */
   detail: string
-  kind: CueKind
+  /** An extended (Mac) meeting may also receive `insight` (live cues v3); a legacy meeting never does. */
+  kind: CueKind | GeneralCueKind
   sources: CueSourceRef[]
   /** Admission probability from the gate, 0 to 1. */
   gate: number
@@ -91,8 +121,9 @@ export function isLiveCueV2(value: unknown): value is LiveCueV2 {
   return v.protocol === 2 && typeof v.cueId === 'string' && v.cueId.length > 0 && typeof v.sessionId === 'string'
     && typeof v.headline === 'string' && v.headline.length > 0 && v.headline.length <= CUE_HEADLINE_MAX
     && typeof v.detail === 'string' && v.detail.length > 0 && v.detail.length <= CUE_DETAIL_MAX
-    && isCueKind(v.kind)
+    && isLogCueKind(v.kind)
     && Array.isArray(v.sources) && v.sources.length <= 2
-    && v.sources.every(s => !!s && typeof (s as CueSourceRef).id === 'string' && typeof (s as CueSourceRef).date === 'string' && typeof (s as CueSourceRef).title === 'string')
+    && v.sources.every(s => !!s && typeof (s as CueSourceRef).id === 'string' && typeof (s as CueSourceRef).date === 'string' && typeof (s as CueSourceRef).title === 'string'
+      && isCueSourceExtras(s as CueSourceRef))
     && typeof v.gate === 'number' && typeof v.createdAt === 'number' && typeof v.model === 'string'
 }

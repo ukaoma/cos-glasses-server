@@ -22,11 +22,18 @@ import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { errMsg } from './utils.js'
 import { getMeetingStore } from './meeting-store.js'
 import { findCosOperationsMeetingBySessionId, findDirectLibraryMeetingBySessionId } from './cos-operations-meetings.js'
-import { CUE_FEEDBACK_REASON_MAX, isCueKind, type CueKind, type CueSourceRef, type LiveCuesV2MemorySource } from '../../shared/live-cues-v2.js'
+import { CUE_FEEDBACK_REASON_MAX, isCueSourceExtras, isLogCueKind, type CueKind, type CueSourceRef, type GeneralCueKind, type LiveCuesV2MemorySource } from '../../shared/live-cues-v2.js'
 import type { WouldWithhold } from './live-cues-filter.js'
+import { publicHttpsUrl } from './public-https-url.js'
 
 // ── Wire types (server-local: shared/live-cues-v2.ts is hash-pinned with the companion copy) ──
 export const LIVE_CUE_VERDICTS_PROTOCOL = 1 as const
+export const LIVE_CUE_ARMS = ['cue_memory', 'notes', 'files'] as const
+export type LiveCueArm = typeof LIVE_CUE_ARMS[number]
+export const LIVE_CUE_GENERAL_CATEGORIES = ['news', 'local', 'notable'] as const
+export type LiveCueGeneralCategory = typeof LIVE_CUE_GENERAL_CATEGORIES[number]
+/** An insight's query: eight words at most, 80 characters (the general runner's own limit), so a longer one is not ours. */
+export const LIVE_CUE_GENERAL_QUERY_MAX = 80
 /** `before`: the last characters (code points) said before the cue, whitespace-collapsed. */
 export const CUE_BEFORE_MAX = 400
 export const CUE_VERDICTS = ['useful', 'late', 'repeat', 'wrong', 'obvious'] as const
@@ -43,8 +50,9 @@ export interface LiveCueLogRow {
   meetingTitle: string
   createdAt: number
   armedAt?: number
-  /** reinforce | challenge, or (6.86.0, meetings with the extended kinds) decision | promise | followUp. */
-  kind: CueKind
+  /** reinforce | challenge, or (6.86.0, meetings with the extended kinds) decision | promise | followUp, or (live cues v3,
+   *  general cues on a Mac meeting) insight. */
+  kind: CueKind | GeneralCueKind
   headline: string
   detail: string
   gate: number
@@ -55,6 +63,11 @@ export interface LiveCueLogRow {
   memorySource?: LiveCuesV2MemorySource
   /** Notes the judge kept for the writer. */
   kept?: number
+  /** Live cues v3, grounded cues only: which retrieval arms supplied a candidate to the judge for this cue. */
+  arms?: LiveCueArm[]
+  /** Live cues v3, insight cues only: what kind of public fact it is, and the web query it came from. The query is in this
+   *  log and never in the trace. */
+  general?: { category: LiveCueGeneralCategory; query: string }
   /** Shadow owner/date template rules (never enforced): would this cue be withheld per meeting, or per topic. */
   wouldWithhold?: WouldWithhold
   before: string
@@ -103,6 +116,19 @@ export function isCueVerdict(value: unknown): value is CueVerdict {
 const str = (v: unknown): v is string => typeof v === 'string'
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 const optional = (v: unknown, ok: (x: unknown) => boolean) => v === undefined || ok(v)
+function isGeneral(v: unknown): boolean {
+  const g = v as { category?: unknown; query?: unknown } | null
+  return !!g && typeof g === 'object' && (LIVE_CUE_GENERAL_CATEGORIES as readonly unknown[]).includes(g.category) && str(g.query) && g.query.length > 0 && g.query.length <= LIVE_CUE_GENERAL_QUERY_MAX
+}
+/** A source: the three base strings, then the optional kind and locator (live cues v3). A web url must also be a public https
+ *  address; a row with any bad optional field is skipped like any other invalid row. */
+function isSourceRef(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const s = value as CueSourceRef
+  if (!(str(s.id) && str(s.date) && str(s.title))) return false
+  if (!isCueSourceExtras(s)) return false
+  return s.url === undefined || publicHttpsUrl(s.url) !== null
+}
 function isWouldWithhold(v: unknown): boolean {
   const w = v as Partial<WouldWithhold> | null
   return !!w && typeof w === 'object' && typeof w.perMeeting === 'boolean' && typeof w.perTopic === 'boolean' && optional(w.blockerCueId, str)
@@ -112,12 +138,14 @@ export function isLogRow(value: unknown): value is LiveCueLogRow {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const r = value as Record<string, unknown>
   return r.v === 1 && str(r.cueId) && r.cueId.length > 0 && str(r.sessionId) && r.sessionId.length > 0 && str(r.meetingTitle)
-    && num(r.createdAt) && isCueKind(r.kind)
+    && num(r.createdAt) && isLogCueKind(r.kind)
     && str(r.headline) && str(r.detail) && num(r.gate) && str(r.model) && str(r.before)
-    && Array.isArray(r.sources) && r.sources.every(s => !!s && typeof s === 'object' && str((s as CueSourceRef).id) && str((s as CueSourceRef).date) && str((s as CueSourceRef).title))
+    && Array.isArray(r.sources) && r.sources.every(isSourceRef)
     && optional(r.armedAt, num) && optional(r.prompt, p => typeof p === 'string' && /^v\d{1,2}$/.test(p))
     && optional(r.memorySource, m => m === 'cue_memory' || m === 'notes' || m === 'none') && optional(r.kept, num)
     && optional(r.wouldWithhold, isWouldWithhold)
+    && optional(r.arms, a => Array.isArray(a) && a.length <= LIVE_CUE_ARMS.length && new Set(a).size === a.length && a.every(x => (LIVE_CUE_ARMS as readonly unknown[]).includes(x)))
+    && optional(r.general, isGeneral)
 }
 
 export class LiveCueLog {

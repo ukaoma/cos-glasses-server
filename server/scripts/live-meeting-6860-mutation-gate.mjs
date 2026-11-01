@@ -30,9 +30,9 @@ const m = (name, file, edits, tests) => ({ name, file, edits: typeof edits[0] ==
 
 const mutations = [
   // ── Kinds: the contract ──
-  m('contract-new-kinds-valid', SHARED, ['    && isCueKind(v.kind)\n', "    && (v.kind === 'reinforce' || v.kind === 'challenge')\n"], KINDS_T),
+  m('contract-new-kinds-valid', SHARED, ['    && isLogCueKind(v.kind)\n', "    && (v.kind === 'reinforce' || v.kind === 'challenge')\n"], KINDS_T),
   m('contract-legacy-map', SHARED, ["return kind === 'reinforce' || kind === 'decision' || kind === 'promise' ? 'reinforce' : 'challenge'", "return kind === 'reinforce' ? 'reinforce' : 'challenge'"], KINDS_T),
-  m('log-row-new-kinds', LIB, ['&& isCueKind(r.kind)', "&& (r.kind === 'reinforce' || r.kind === 'challenge')"], KINDS_T),
+  m('log-row-new-kinds', LIB, ['&& isLogCueKind(r.kind)', "&& (r.kind === 'reinforce' || r.kind === 'challenge')"], KINDS_T),
   // ── Kinds: the engine ──
   m('parse-kind-inside-set', ENGINE, ['typeof value.kind === \'string\' && (allowed as readonly string[]).includes(value.kind)', 'typeof value.kind === \'string\' && (CUE_KINDS as readonly string[]).includes(value.kind)'], KINDS_T),
   m('parse-default-legacy', ENGINE, ['  allowed: readonly CueKind[] = LEGACY_CUE_KINDS): ParsedCue | CueRejection {', '  allowed: readonly CueKind[] = CUE_KINDS): ParsedCue | CueRejection {'], KINDS_T),
@@ -44,7 +44,7 @@ const mutations = [
   m('arm-keeps-first-kinds', ENGINE, ['      return answer(existing.cues.length, existing.kinds)', '      return answer(existing.cues.length, opts.kinds ?? existing.kinds)'], KINDS_T),
   m('writer-v4-for-extended', ENGINE, ["  if (kinds === 'extended') return { version: 'v4', system: CUE_WRITER_SYSTEM_V4 }\n", ''], KINDS_T),
   m('writer-gets-meeting-kinds', ENGINE, ['liveCuesV2WriterSystem(this.deps.env, s.kinds)', 'liveCuesV2WriterSystem(this.deps.env)'], KINDS_T),
-  m('v1-twin-legacy-type', ENGINE, ['type: legacyCueKind(cue.kind), priority: 2, cueId: cue.cueId', 'type: cue.kind, priority: 2, cueId: cue.cueId'], KINDS_T),
+  m('v1-twin-legacy-type', ENGINE, ['type: legacyCueKind(parsed.kind), priority: 2, cueId: cue.cueId', 'type: parsed.kind, priority: 2, cueId: cue.cueId'], KINDS_T),
   m('stop-nudges-legacy-type', ENGINE, ['type: legacyCueKind(c.kind), priority: 2, timestamp', 'type: c.kind, priority: 2, timestamp'], KINDS_T),
   m('trace-kind-set', ENGINE, ["      if (s.kinds === 'extended') trace.kindSet = 'extended'\n", ''], KINDS_T),
   m('mac-title', ENGINE, ["const title = `${mac ? 'Mac' : 'G2'} Recording", 'const title = `G2 Recording'], KINDS_T),

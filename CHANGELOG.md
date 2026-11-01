@@ -1,3 +1,11 @@
+## Unreleased - Grounded live cues, cue mode settings and source locators (not versioned)
+
+Work on `claude/live-cues-modes`. Everything is off by default: a server that does nothing new answers, asks and writes exactly as 6.97.4 does. No version bump, no publish.
+
+- `GET /api/live-cues/v2/settings?v=3` and `POST {v: 3, ...}` add the cue mode (`focused`, `general`, `all`; default focused), grounded cues (`classic`, `grounded`; default classic) and six general-cue limits to the v2 body. `?v=2`, `{v: 2}` and the unversioned calls answer byte for byte as before; an older server answers `?v=3` with 400 `unsupported_version`, which is Control's signal to hide the new controls. The values live in `live-cues-v2-settings.json` (schema 3). `COS_LIVE_CUES_MODE=focused` and `COS_LIVE_CUES_GROUNDING=classic` can only force the safe value; any other value defers to the setting.
+- Grounded cues: cue_memory.py and the owner's notes run together, the files attached to the meeting add their best matching passage, copies of this conversation and personal notes in a work meeting are dropped, one meeting is one candidate, and one judge request asks yes or no per candidate (`COS_LIVE_CUES_V2_JUDGE_YES`, default 0.65, the best two by yes are kept). The writer is told the confirmed calendar title. The trace gets the judge's probabilities, kept ids, arm timings and an excluded count, never text. With classic nothing in an evaluation changes.
+- A cue source may carry its kind (`meeting`, `memory`, `file`, `web`) and one locator (`recordId`, `memoryId`, `fileId`, `url`, https only). The cue log accepts them, the kind `insight`, and the optional `arms` and `general` fields; `memorySource` keeps its three values. `shared/live-cues-v2.ts` changed, so the companion's byte-identical copy is stale until a companion release takes it; the companion is never sent an insight or a source it cannot read.
+
 ## 6.97.4 - Last review fixes (private candidate)
 
 2026-11-01. A private candidate for one Mac, carrying the fixes published in 6.94.3. Pairs with COS Control 0.5.363.

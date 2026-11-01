@@ -57,6 +57,25 @@ describe('notesMemory', () => {
     expect(log.some(x => x.startsWith('memories:') && x.includes('delmar'))).toBe(true)
     expect(log.every(x => x === 'bridge' || x.split(':')[1].split(' ').length <= 4)).toBe(true)   // the window itself is never a query
   })
+  it('live cues v3: a candidate carries the domain its source filed it under, and the session a library meeting came from, only when they are said', async () => {
+    const run = (over: Partial<NotesSearchers>) => notesMemory(WINDOW, before, new AbortController().signal, { sessionId: 'meeting_live', searchers: searchers(over) })
+    const said = await run({
+      memories: async () => [{ ...memHit('mem_pool', 'Pool contractor'), domain: ' quilt ' }, { ...memHit('mem_blank', 'Pool blank domain'), domain: '   ' }],
+      meetings: async () => [{ ...mtgHit('standalone:a', 'Backyard planning', '2026-09-30', 'meeting_other'), domain: 'personal' }],
+      bridge: async () => [{ id: 'jr_1', content: 'Delmar wants the deposit by Friday for the pool.', created_at: '2026-10-10T12:00:00+00:00', domain: 'hermit_crabs' }],
+    })
+    const by = (r: typeof said, key: string) => r.notes.find(n => n.key === key)!
+    expect(by(said, 'memory:mem_pool').domain).toBe('quilt')                                 // trimmed
+    expect(by(said, 'memory:mem_blank')).not.toHaveProperty('domain')                         // a blank domain says nothing
+    expect(by(said, 'meeting:standalone:a')).toMatchObject({ domain: 'personal', sessionId: 'meeting_other' })
+    expect(by(said, 'memory:jr_1').domain).toBe('hermit_crabs')
+    const silent = await run({
+      memories: async () => [memHit('mem_pool', 'Pool contractor')],
+      meetings: async () => [{ ...mtgHit('standalone:a', 'Backyard planning', '2026-09-30'), domain: '' }],
+      bridge: async () => [{ id: 'jr_1', content: 'Delmar wants the deposit by Friday for the pool.', created_at: '2026-10-10T12:00:00+00:00' }],
+    })
+    for (const n of silent.notes) { expect(n, n.key).not.toHaveProperty('domain'); expect(n, n.key).not.toHaveProperty('sessionId') }
+  })
   it('never more than four candidates, however many match', async () => {
     const r = await notesMemory(WINDOW, before, new AbortController().signal, { searchers: searchers({
       memories: async () => Array.from({ length: 6 }, (_, i) => memHit(`m${i}`, `Pool note ${i}`)), meetings: async () => [], bridge: async () => [] }) })

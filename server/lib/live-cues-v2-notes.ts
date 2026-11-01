@@ -18,7 +18,9 @@ export const NOTES_TOP = 4
 const NOTE_CHARS = 520
 const TITLE_CHARS = 90
 
-export interface NoteCandidate { id: string; date: string; title: string; notes: string; key: string }
+/** `domain` and `sessionId` (live cues v3) are set only when the source said them; grounded cues use them to keep personal notes
+ *  out of other meetings and to recognise this meeting's own filed copy. The judge and the writer never see them. */
+export interface NoteCandidate { id: string; date: string; title: string; notes: string; key: string; domain?: string; sessionId?: string }
 export interface NotesResult { notes: NoteCandidate[]; error?: string }
 
 export interface NotesSearchers {
@@ -73,18 +75,20 @@ export function notesQueries(terms: string[]): string[] {
 
 const dateOf = localDateOf
 const flat = (v: unknown, max: number): string => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : '')
+const domainOf = (v: unknown): { domain?: string } => (typeof v === 'string' && v.trim() ? { domain: v.trim() } : {})
 
 function memoryCandidate(hit: ContextSearchHit): NoteCandidate | null {
   if (!hit.id) return null
-  return { id: '', date: dateOf(hit.created_at), title: flat(hit.title || hit.id, TITLE_CHARS), notes: flat(hit.snippet || hit.title, NOTE_CHARS), key: `memory:${hit.id}` }
+  return { id: '', date: dateOf(hit.created_at), title: flat(hit.title || hit.id, TITLE_CHARS), notes: flat(hit.snippet || hit.title, NOTE_CHARS), key: `memory:${hit.id}`, ...domainOf(hit.domain) }
 }
 function meetingCandidate(hit: MeetingSearchHit): NoteCandidate | null {
   if (!hit.recordId) return null
-  return { id: '', date: dateOf(hit.date), title: flat(hit.title, TITLE_CHARS), notes: flat(hit.snippet || hit.title, NOTE_CHARS), key: `meeting:${hit.recordId}` }
+  return { id: '', date: dateOf(hit.date), title: flat(hit.title, TITLE_CHARS), notes: flat(hit.snippet || hit.title, NOTE_CHARS), key: `meeting:${hit.recordId}`,
+    ...domainOf(hit.domain), ...(hit.sessionId ? { sessionId: hit.sessionId } : {}) }
 }
 function bridgeCandidate(row: BridgeMemory): NoteCandidate {
   const firstLine = row.content.split('\n').find(l => l.trim()) ?? row.id
-  return { id: '', date: dateOf(row.created_at), title: flat(row.summary || firstLine, TITLE_CHARS), notes: flat(row.content, NOTE_CHARS), key: `memory:${row.id}` }
+  return { id: '', date: dateOf(row.created_at), title: flat(row.summary || firstLine, TITLE_CHARS), notes: flat(row.content, NOTE_CHARS), key: `memory:${row.id}`, ...domainOf(row.domain) }
 }
 
 /** Bridge rows ranked for one query, best first (the shared scorer). */

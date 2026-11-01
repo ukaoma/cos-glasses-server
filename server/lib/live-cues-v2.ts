@@ -15,6 +15,12 @@
 // own daily cap and breaker; resolveCuesDecisionProvider), and
 // when cue_memory.py is unavailable, fails or times out the memory arm searches the owner's own COS notes and meetings
 // instead (live-cues-v2-notes.ts; local keyword search, no model call). Each evaluation traces `cueMemorySource`.
+//
+// Live cues v3: `grounding: grounded` (a setting, default classic; COS_LIVE_CUES_GROUNDING=classic forces the old path) swaps
+// the memory and judge steps for grounded retrieval: cue_memory.py and the owner's notes in parallel, plus a best-matching
+// passage of the files attached to the meeting, minus this conversation's own copies and other domains' personal notes, judged
+// by one yes/no question per candidate (live-cues-v2-grounded.ts, live-cues-v2-judge-b.ts). With classic nothing in an
+// evaluation changes: the same Jev requests, writer prompt, trace row and cue, pinned by live-cues-v2-classic-pin.test.ts.
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -27,12 +33,18 @@ import { DecisionProviderError, SubqDecisionClient, trackSubqDecisionClient, typ
 import type { DecisionProvider } from './decision-settings.js'
 import { resolveSubqKey } from './subq-key.js'
 import {
-  LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, liveCuesV2EnvForced, liveCuesV2Settings, resolveLiveCuesV2,
-  type LiveCuesV2LimitName, type LiveCuesV2SettingReader, type LiveCuesV2SettingSource, type LiveCuesV2StoredLimits,
+  LIVE_CUES_GENERAL_LIMIT_BOUNDS, LIVE_CUES_GENERAL_LIMIT_NAMES, LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, liveCuesV2EnvForced, liveCuesV2Settings,
+  resolveLiveCuesCueMode, resolveLiveCuesGrounding, resolveLiveCuesV2,
+  type LiveCuesCueMode, type LiveCuesGeneralLimitName, type LiveCuesGeneralStoredLimits, type LiveCuesGrounding, type LiveCuesV2LimitName, type LiveCuesV2Mode,
+  type LiveCuesV2SettingReader, type LiveCuesV2SettingSource, type LiveCuesV2StoredLimits,
 } from './live-cues-v2-settings.js'
 import { notesMemory } from './live-cues-v2-notes.js'
+import { GROUNDED_LIMITS, groundedCandidates, groundedSource, selfIdSet, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
+import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
 import { getMeetingStore } from './meeting-store.js'
+import { MeetingAskStore } from './meeting-ask-store.js'
+import { getOwnerHomeArea } from './profile.js'
 import { LensGistLimitError, runLensGistEngine } from './lens-gist-engines.js'
 import { resolveProviderBinary } from './provider-binary.js'
 import { COS_SCRIPTS_DIR, PYTHON_BIN, contextSourceAvailable } from './python-bridge.js'
@@ -46,7 +58,7 @@ import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_
 import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
 import {
-  CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isLiveCueV2, legacyCueKind,
+  CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isCueKind, isLiveCueV2, legacyCueKind,
   type CueKind, type CueKindSet, type CueSourceRef, type LiveCueV1Compat, type LiveCueV2, type LiveCuesV2Capability, type LiveCuesV2MemorySource,
   type LiveCuesV2SessionStatus, type LiveCuesV2StatusResponse, type LiveCuesV2StopReason,
 } from '../../shared/live-cues-v2.js'
@@ -69,6 +81,8 @@ export const LIVE_CUES_V2_LIMITS = {
   defaultWeeklyWriterCalls: 750,
   breakerFailures: 3,
   judgeKeep: 0.8,
+  /** Grounded cues (live cues v3): a candidate's own yes probability must reach this, from the replay of 2026-11-01. */
+  judgeYes: 0.65,
   judgeMaxNotes: 2,
   defaultGate: 0.8,
   memoryTimeoutMs: 6_000,
@@ -155,11 +169,42 @@ export function resolveLiveCuesV2Limits(env: NodeJS.ProcessEnv = process.env, se
   }
   return out
 }
+/** Live cues v3: the six general-cue limits, resolved like the v2 ones: an env value in bounds wins and locks, else the saved
+ *  value, else the default. An env value out of bounds is ignored with one log line per value. */
+export type LiveCuesGeneralLimits = Record<LiveCuesGeneralLimitName, LiveCuesV2Limit>
+export function resolveLiveCuesGeneralLimits(env: NodeJS.ProcessEnv = process.env, settings: LiveCuesV2SettingReader | null = liveCuesV2Settings()): LiveCuesGeneralLimits {
+  let saved: LiveCuesGeneralStoredLimits = {}
+  try { saved = settings?.generalLimits?.() ?? {} } catch { saved = {} }
+  const out = {} as LiveCuesGeneralLimits
+  for (const name of LIVE_CUES_GENERAL_LIMIT_NAMES) {
+    const b = LIVE_CUES_GENERAL_LIMIT_BOUNDS[name]
+    let e: number | null
+    if (b.integer) e = envWhole(env, b.env, b.min, b.max)
+    else {
+      const raw = env[b.env]
+      const n = raw === undefined || raw.trim() === '' ? null : Number(raw)
+      e = n === null ? null : n >= b.min && n <= b.max ? n : knobFallback<number | null>(b.env, raw!, null, `a number from ${b.min} to ${b.max}`)
+    }
+    const v = saved[name]
+    out[name] = e !== null ? { value: e, source: 'env', locked: true, min: b.min, max: b.max, default: b.default }
+      : v !== undefined ? { value: v, source: 'setting', locked: false, min: b.min, max: b.max, default: b.default }
+        : { value: b.default, source: 'default', locked: false, min: b.min, max: b.max, default: b.default }
+  }
+  return out
+}
 export function liveCuesV2JudgeKeep(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.COS_LIVE_CUES_V2_JUDGE_KEEP
   if (raw === undefined || raw.trim() === '') return LIVE_CUES_V2_LIMITS.judgeKeep
   const keep = Number(raw)
   return keep >= 0.5 && keep <= 0.95 ? keep : knobFallback('COS_LIVE_CUES_V2_JUDGE_KEEP', raw, LIVE_CUES_V2_LIMITS.judgeKeep, 'a number from 0.5 to 0.95')
+}
+/** COS_LIVE_CUES_V2_JUDGE_YES: the grounded judge's yes threshold, 0.5 to 0.95. Unset or empty is 0.65 silently; anything else
+ *  outside the range is 0.65 with one log line per value (the same rule as JUDGE_KEEP). */
+export function liveCuesV2JudgeYes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.COS_LIVE_CUES_V2_JUDGE_YES
+  if (raw === undefined || raw.trim() === '') return LIVE_CUES_V2_LIMITS.judgeYes
+  const yes = Number(raw)
+  return yes >= 0.5 && yes <= 0.95 ? yes : knobFallback('COS_LIVE_CUES_V2_JUDGE_YES', raw, LIVE_CUES_V2_LIMITS.judgeYes, 'a number from 0.5 to 0.95')
 }
 /** COS_LIVE_CUES_V2_REPEAT_OVERLAP: the repeat rule's threshold, 0.3 to 0.9, or null (off, today's behaviour) when unset
  *  or empty. Any other value leaves the rule off, with one log line per value. RESULTS_filter.md: 0.5 withheld no useful
@@ -238,7 +283,12 @@ export function pyJson(value: unknown): string {
 // ── Pure helpers (exported for tests) ───────────────────────────────────────
 /** A note as the writer sees it ({id, date, title, notes}; the same keys the replay sent). `key` is the stable meeting
  *  identity from cue_memory.py; it never reaches the prompt. */
-export interface MemoryNote { id: string; date: string; title: string; notes: string; key?: string }
+export interface MemoryNote {
+  id: string; date: string; title: string; notes: string; key?: string
+  /** Live cues v3, set only on grounded candidates: the meeting domain the note was filed under, the record, memory or file it
+   *  is (a cue source's locator), and the session it was recorded from. None of them reaches a prompt. */
+  domain?: string; recordId?: string; memoryId?: string; fileId?: string; sessionId?: string
+}
 
 /** A cue's headline: the first sentence when it fits, otherwise cut at a word with an ellipsis. Never empty. */
 export function cueHeadline(detail: string): string {
@@ -452,14 +502,21 @@ export const CUE_MEMORY_FAILURES: ReadonlySet<string> = new Set(['no_cue_memory_
 export function cueMemoryFailed(mem: MemoryResult): boolean { return !!mem.denseError && CUE_MEMORY_FAILURES.has(mem.denseError) }
 export interface LiveCuesV2Deps {
   gate(title: string, window: string, signal: AbortSignal, provider: DecisionProvider): Promise<GateResult>
-  /** cue_memory.py (Miles's COS scripts). */
-  memory(window: string, before: string, signal: AbortSignal): Promise<MemoryResult>
+  /** cue_memory.py (Miles's COS scripts). `top` (grounded cues) asks for more than the usual four, so that excluded copies of
+   *  this meeting still leave four; classic never passes it. */
+  memory(window: string, before: string, signal: AbortSignal, top?: number): Promise<MemoryResult>
   /** The owner's own COS notes and meetings, used only when `memory` did not answer. Local search, no model call. */
   notes(window: string, before: string, signal: AbortSignal, sessionId: string): Promise<MemoryResult>
   judge(title: string, window: string, notes: MemoryNote[], signal: AbortSignal, provider: DecisionProvider): Promise<{ probs: Record<string, number>; tokens: number }>
   writer(model: string, system: string, prompt: string, signal: AbortSignal): Promise<{ text: string; costUsd?: number; inputTokens?: number; outputTokens?: number; model?: string }>
   emit(type: 'coaching_nudge' | 'coaching_nudge_v2', data: Record<string, unknown>): void
   lease(): MaintenanceWorkLease | null
+  /** Live cues v3, grounded cues only (absent means none): the files attached to this meeting (MeetingAskStore.files). May throw. */
+  files?(sessionId: string): GroundedFile[]
+  /** The user-confirmed context of this meeting: its domain and calendar title (MeetingAskStore.orientation). May throw. */
+  orientation?(sessionId: string): { domain: string | null; title: string | null }
+  /** The grounded judge: one yes/no question per candidate (judge B) and the `same` choice as a diagnostic. */
+  judgeB?(title: string, window: string, cands: GroundedNote[], signal: AbortSignal, provider: DecisionProvider): Promise<{ yes: Record<string, number>; same: Record<string, number>; tokens: number }>
   /** True while the user's own query runs (Ask, a durable query): cues wait rather than compete for the provider. */
   busy(): boolean
   /** The configured decision provider for cues. Throws DecisionProviderError('decision_invalid_provider'). */
@@ -504,6 +561,13 @@ export function cueDecisionCalls(client: Pick<DecisionClient, 'ask'>) {
       const res = await client.ask(state, questions, estimateJevTokens({ state, questions }), { signal })
       return { probs: res.answers?.same?.probabilities ?? {}, tokens: res.inputTokens }
     },
+    /** Grounded cues: ONE request, a yes/no question per candidate plus the `same` choice (live-cues-v2-judge-b.ts). */
+    async judgeB(title: string, window: string, cands: GroundedNote[], signal: AbortSignal): Promise<{ yes: Record<string, number>; same: Record<string, number>; tokens: number }> {
+      const state = { meetingTitle: title, window: window.slice(-JUDGE_B_WINDOW_CHARS) }
+      const questions = judgeBQuestions(cands)
+      const res = await client.ask(state, questions, estimateJevTokens({ state, questions }), { signal })
+      return { ...parseJudgeB(res.answers, cands.map(c => c.id)), tokens: res.inputTokens }
+    },
   }
 }
 
@@ -523,12 +587,18 @@ function realDeps(): LiveCuesV2Deps {
   let memorySourceCache: { at: number; value: LiveCuesV2MemorySource } | null = null
   return {
     gate: (title, window, signal, provider) => calls(provider).gate(title, window, signal),
-    memory: (window, before, signal) => cueMemory(window, before, signal),
+    memory: (window, before, signal, top) => cueMemory(window, before, signal, undefined, undefined, top),
     async notes(window, before, signal, sessionId) {
       const r = await notesMemory(window, before, signal, { sessionId })
       return { notes: r.notes, ...(r.error ? { denseError: r.error } : {}) }
     },
     judge: (title, window, notes, signal, provider) => calls(provider).judge(title, window, notes, signal),
+    judgeB: (title, window, cands, signal, provider) => calls(provider).judgeB(title, window, cands, signal),
+    files: sessionId => new MeetingAskStore().files(sessionId),
+    orientation(sessionId) {
+      const o = new MeetingAskStore().orientation(sessionId)
+      return { domain: o.domain, title: o.calendar?.title ?? null }
+    },
     decisionProvider: () => resolveCuesDecisionProvider(process.env).provider,
     decisionState(provider) {
       if (provider === 'subq') {
@@ -588,7 +658,7 @@ export function warmCueMemory(): void {
 }
 
 /** Rank-fusion retrieval through COS scripts/cue_memory.py. Transcript text goes over stdin, never argv. Non-fatal. */
-export function cueMemory(window: string, before: string, signal: AbortSignal, p: CueMemoryPaths | null = cueMemoryPaths(), timeoutMs: number = LIVE_CUES_V2_LIMITS.memoryTimeoutMs): Promise<MemoryResult> {
+export function cueMemory(window: string, before: string, signal: AbortSignal, p: CueMemoryPaths | null = cueMemoryPaths(), timeoutMs: number = LIVE_CUES_V2_LIMITS.memoryTimeoutMs, top = 4): Promise<MemoryResult> {
   if (!p) return Promise.resolve({ notes: [], denseError: 'no_cue_memory_script' })
   const paths = p
   return new Promise(resolveNotes => {
@@ -606,16 +676,20 @@ export function cueMemory(window: string, before: string, signal: AbortSignal, p
     proc.on('close', () => {
       try {
         const res = JSON.parse(out) as { notes?: MemoryNote[]; timing?: { dense_error?: string }; index?: { ageHours?: number } }
-        const notes = (res.notes ?? []).filter(n => n && typeof n.id === 'string' && typeof n.notes === 'string').slice(0, 4)
+        const notes = (res.notes ?? []).filter(n => n && typeof n.id === 'string' && typeof n.notes === 'string').slice(0, top)
         done({ notes, denseError: res.timing?.dense_error, indexAgeH: res.index?.ageHours })
       } catch { done({ notes: [], denseError: 'bad_output' }) }
     })
     proc.stdin?.on('error', () => { /* child exited early */ })
-    proc.stdin?.end(JSON.stringify({ queries: [window.slice(-600)], keywordText: window, before, top: 4 }))
+    proc.stdin?.end(JSON.stringify({ queries: [window.slice(-600)], keywordText: window, before, top }))
   })
 }
 
 // ── Engine ──────────────────────────────────────────────────────────────────
+/** What grounded retrieval hands the rest of an evaluation: the candidates the judge saw, the ones it kept (best first), where
+ *  the notes came from, the title the writer is given, and which arms supplied a candidate. */
+interface GroundedRun { candidates: GroundedNote[]; kept: GroundedNote[]; source: LiveCuesV2MemorySource; writerTitle: string; arms: GroundedArm[] }
+
 interface Session {
   sessionId: string
   title: string
@@ -661,6 +735,7 @@ export class LiveCuesV2Engine {
   constructor(private readonly deps: LiveCuesV2Deps) {}
 
   private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, this.deps.settings) }
+  private groundingOn(): boolean { return resolveLiveCuesGrounding(this.deps.env, this.deps.settings).value === 'grounded' }
   /** 6.79.2: the spend limits as they stand now (env, else COS Control's saved values, else the defaults). The writer
    *  cap per meeting stays twice the cue cap. */
   private limits(): { gate: number; maxCues: number; writerCap: number; cooldownMs: number; dailyWriterCalls: number } {
@@ -733,7 +808,8 @@ export class LiveCuesV2Engine {
     const cues = s ? [...s.cues] : []
     return { nudgesGenerated: cues.length, protocol: 2, cues,
       // v1 readers know two types: an extended kind is shown as its legacy kind there (the cues keep the real one).
-      nudges: cues.map(c => ({ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId })) }
+      // An insight (live cues v3) has no v1 twin.
+      nudges: cues.flatMap(c => (isCueKind(c.kind) ? [{ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId }] : [])) }
   }
 
   setPaused(sessionId: string, paused: boolean, seq?: number): { ok: true; paused: boolean; applied: boolean; pauseSeq: number } {
@@ -853,9 +929,18 @@ export class LiveCuesV2Engine {
 
       const t1 = Date.now()
       const before = new Date(started + 86_400_000).toLocaleDateString('en-CA')
-      let mem: MemoryResult = await this.deps.memory(window, before, abort.signal).catch((): MemoryResult => ({ notes: [], denseError: 'memory_threw' }))
-      Object.assign(trace, { memoryMs: Date.now() - t1, ...(mem.denseError ? { memoryError: mem.denseError } : {}), ...(mem.indexAgeH !== undefined ? { indexAgeH: mem.indexAgeH } : {}) })
+      // Live cues v3: read once per evaluation, so a change of setting applies from the next one.
+      const grounded = this.groundingOn()
+      let mem: MemoryResult = grounded ? { notes: [] } : await this.deps.memory(window, before, abort.signal).catch((): MemoryResult => ({ notes: [], denseError: 'memory_threw' }))
+      if (!grounded) Object.assign(trace, { memoryMs: Date.now() - t1, ...(mem.denseError ? { memoryError: mem.denseError } : {}), ...(mem.indexAgeH !== undefined ? { indexAgeH: mem.indexAgeH } : {}) })
       let source: LiveCuesV2MemorySource = 'cue_memory'
+      // Grounded: the arms and the judge run here instead of the classic steps below, which then find nothing to do.
+      let run: GroundedRun | null = null
+      if (grounded) {
+        run = await this.groundedRetrieve(s, window, before, abort.signal, provider, trace)
+        mem = { notes: run.candidates }
+        source = run.source
+      }
       if (cueMemoryFailed(mem) && !abort.signal.aborted) {
         // cue_memory.py did not answer: search the owner's own COS (no model call), inside its own 3 s budget.
         const tn = Date.now()
@@ -865,14 +950,15 @@ export class LiveCuesV2Engine {
         source = 'notes'
       }
       Object.assign(trace, { candidates: mem.notes.length, cueMemorySource: mem.notes.length ? source : 'none' })
-      let kept: MemoryNote[] = []
-      if (mem.notes.length && !abort.signal.aborted) {
+      let kept: MemoryNote[] = run?.kept ?? []
+      if (!grounded && mem.notes.length && !abort.signal.aborted) {
         const t2 = Date.now()
         const judged = await this.deps.judge(s.title, window, mem.notes, abort.signal, provider)
         Object.assign(trace, { judgeMs: Date.now() - t2, judgeTokens: judged.tokens })
         kept = mem.notes.filter(m => (judged.probs[m.id] ?? 0) >= liveCuesV2JudgeKeep(this.deps.env)).slice(0, L.judgeMaxNotes).map((m, i) => ({ ...m, id: `M${i + 1}` }))
       }
       trace.kept = kept.length
+      if (run) trace.keptIds = kept.map(m => m.id)                      // grounded ids keep their kind (M1, N1, F1)
       if (abort.signal.aborted) { trace.outcome = 'cancelled'; return }
 
       // 6.79.2: limits lowered while this evaluation ran apply before the writer is charged.
@@ -885,7 +971,7 @@ export class LiveCuesV2Engine {
       const model = liveCuesV2Model(this.deps.env)
       const previous = s.cues.slice(-3).map(c => c.detail)
       const promptMemory = kept.map(m => ({ id: m.id, date: m.date, title: m.title, notes: m.notes }))  // the replay's exact keys
-      const prompt = pyJson({ meetingTitle: s.title, liveIssue: '', suggestedKind: gate.kind, previousCues: previous, memory: promptMemory, window })
+      const prompt = pyJson({ meetingTitle: run?.writerTitle ?? s.title, liveIssue: '', suggestedKind: gate.kind, previousCues: previous, memory: promptMemory, window })
       const t3 = Date.now()
       const out = await this.deps.writer(model, system, prompt, abort.signal)
       Object.assign(trace, { writerMs: Date.now() - t3, prompt: version, model: out.model ?? model, writerUsd: out.costUsd, writerIn: out.inputTokens, writerOut: out.outputTokens })
@@ -901,7 +987,7 @@ export class LiveCuesV2Engine {
       if (this.deps.store.isEnded(s.sessionId) || this.deps.store.isPaused(s.sessionId) || !this.enabled()) { trace.outcome = 'cancelled'; return }
 
       const sources: CueSourceRef[] = parsed.memoryIds.map(id => kept.find(m => m.id === id)).filter((m): m is MemoryNote => !!m)
-        .map(m => ({ id: sourceId(m), date: m.date, title: m.title }))
+        .map(m => (run ? groundedSource(m as GroundedNote, sourceId(m)) : { id: sourceId(m), date: m.date, title: m.title }))
       const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: cueHeadline(parsed.detail), detail: parsed.detail,
         kind: parsed.kind, sources, gate: round(pCue), createdAt: this.deps.now().getTime(), model: out.model ?? model }
       if (!isLiveCueV2(cue)) { trace.outcome = 'withheld_invalid'; return }       // never emit what the companion would drop
@@ -915,7 +1001,8 @@ export class LiveCuesV2Engine {
       try {
         this.deps.cueLog?.({ v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, armedAt: s.armedAt, kind: cue.kind,
           headline: cue.headline, detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model, prompt: version,
-          memorySource: mem.notes.length ? source : 'none', kept: kept.length, wouldWithhold: wouldWithhold(cue.detail, s.cues), before: cueBefore(said) })
+          memorySource: mem.notes.length ? source : 'none', kept: kept.length, wouldWithhold: wouldWithhold(cue.detail, s.cues), before: cueBefore(said),
+          ...(run ? { arms: run.arms } : {}) })
       } catch (error) {
         trace.cueLogError = (error as NodeJS.ErrnoException)?.code ?? 'append_failed'
         console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`)
@@ -924,7 +1011,7 @@ export class LiveCuesV2Engine {
       s.lastCueAt = cue.createdAt
       this.deps.store.recordCue(s.sessionId)
       this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)
-      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(cue.kind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
+      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(parsed.kind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
       this.deps.emit('coaching_nudge', v1 as unknown as Record<string, unknown>)
       Object.assign(trace, { outcome: 'cue', cueId: cue.cueId, cueChars: cue.detail.length, sources: sources.length, ...(parsed.numberFlags.length ? { numberFlags: parsed.numberFlags.length } : {}) })
     } catch (error) {
@@ -953,6 +1040,51 @@ export class LiveCuesV2Engine {
       trace.totalMs = this.deps.now().getTime() - started
       this.deps.trace(trace)
     }
+  }
+
+  /** Live cues v3, `grounding: grounded`: the retrieval arms in parallel (cue_memory.py within its 6 s, the owner's notes within
+   *  their own 3 s), the files attached to this meeting, then ONE judge request over the candidates that survive the exclusions
+   *  (live-cues-v2-grounded.ts). Never throws for a file, orientation or arm failure: those are traced as codes and the meeting
+   *  carries on with what it has. The trace gets ids, kinds, probabilities and timings, never a candidate's or the room's text. */
+  private async groundedRetrieve(s: Session, window: string, before: string, signal: AbortSignal, provider: DecisionProvider, trace: Record<string, unknown>): Promise<GroundedRun> {
+    trace.grounding = 'grounded'
+    const codeOf = (e: unknown) => { const r = e as { reason?: unknown; code?: unknown } | null; return typeof r?.reason === 'string' ? r.reason : typeof r?.code === 'string' ? r.code : 'threw' }
+    let meetingDomain: string | null = null, calendarTitle: string | null = null
+    try { const o = this.deps.orientation?.(s.sessionId); meetingDomain = o?.domain ?? null; calendarTitle = o?.title ?? null } catch (e) { trace.orientationError = codeOf(e) }
+    let files: GroundedFile[] = []
+    try { files = this.deps.files?.(s.sessionId) ?? [] } catch (e) { trace.filesError = codeOf(e) }
+
+    const timed = async (arm: () => Promise<MemoryResult>, threw: string): Promise<{ res: MemoryResult; ms: number | null }> => {
+      const t = Date.now()
+      try { return { res: await arm(), ms: Date.now() - t } } catch { return { res: { notes: [], denseError: threw }, ms: null } }
+    }
+    const [cm, nt] = await Promise.all([
+      timed(() => this.deps.memory(window, before, signal, GROUNDED_LIMITS.cueMemoryRaw), 'memory_threw'),
+      timed(() => this.deps.notes(window, before, signal, s.sessionId), 'notes_threw'),
+    ])
+    Object.assign(trace, { ...(cm.ms !== null ? { memoryMs: cm.ms } : {}), ...(cm.res.denseError ? { memoryError: cm.res.denseError } : {}), ...(cm.res.indexAgeH !== undefined ? { indexAgeH: cm.res.indexAgeH } : {}),
+      ...(nt.ms !== null ? { notesMs: nt.ms } : {}), ...(nt.res.denseError ? { notesError: nt.res.denseError } : {}) })
+
+    const transcript = cleanWindow(s.chunks.join('\n'))
+    const twins = [...this.sessions.keys()].filter(id => id !== s.sessionId)
+    const { candidates, excludedSelf } = groundedCandidates({ cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript, window, selfIds: selfIdSet(s.sessionId, twins),
+      meetingDomain, today: this.deps.now().toLocaleDateString('en-CA') })
+    Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length }, excludedSelf })
+
+    const source: LiveCuesV2MemorySource = candidates.some(c => c.arm === 'cue_memory') ? 'cue_memory' : candidates.some(c => c.arm === 'notes') ? 'notes' : 'none'
+    const arms = (['cue_memory', 'notes', 'files'] as const).filter(a => candidates.some(c => c.arm === a))
+    const title = (calendarTitle ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+    const writerTitle = title || s.title
+    let kept: GroundedNote[] = []
+    if (candidates.length && !signal.aborted) {
+      if (!this.deps.judgeB) throw new Error('judge_b_unavailable')
+      const t2 = Date.now()
+      const judged = await this.deps.judgeB(s.title, window, candidates, signal, provider)
+      Object.assign(trace, { judgeMs: Date.now() - t2, judgeTokens: judged.tokens,
+        judge: candidates.map(c => ({ id: c.id, kind: c.kind, yes: round(judged.yes[c.id] ?? 0), same: round(judged.same[c.id] ?? 0) })) })
+      kept = selectJudgeB(candidates, judged.yes, liveCuesV2JudgeYes(this.deps.env), LIVE_CUES_V2_LIMITS.judgeMaxNotes)
+    }
+    return { candidates, kept, source, writerTitle, arms }
   }
 
   private reap(): void {
@@ -1043,13 +1175,51 @@ export function liveCuesV2SettingsViewV2(env: NodeJS.ProcessEnv = process.env): 
   return { ...liveCuesV2SettingsView(env), v: 2, limits, writerCallsPerMeeting: 2 * limits.maxCuesPerMeeting.value, today: liveCuesV2().today() }
 }
 
+/** GET/POST /api/live-cues/v2/settings with v=3 (live cues v3): the v2 body (with `v: 3`) plus the cue mode, grounded cues and the
+ *  general-cue limits. An older server answers ?v=3 with 400 unsupported_version, which is Control's signal to hide these. */
+export interface GeneralCuesToday { day: string; topicCalls: number; webSearches: number; breakerOpenUntil: number | null }
+export interface LiveCuesV2SettingsResponseV3 extends Omit<LiveCuesV2SettingsResponseV2, 'v'> {
+  v: 3
+  cueMode: LiveCuesV2Mode<LiveCuesCueMode>
+  grounding: LiveCuesV2Mode<LiveCuesGrounding>
+  general: { limits: LiveCuesGeneralLimits; today: GeneralCuesToday; publicTopics: boolean; homeArea: string | null }
+}
+/** Today's general-cue counters and breaker come from the general runner, which registers itself here. Until it does (and
+ *  whenever general cues have never run) they read as zero. */
+let generalTodayProvider: (() => GeneralCuesToday) | null = null
+export function setGeneralCuesTodayProvider(provider: (() => GeneralCuesToday) | null): void { generalTodayProvider = provider }
+export function liveCuesV2SettingsViewV3(env: NodeJS.ProcessEnv = process.env): LiveCuesV2SettingsResponseV3 {
+  const v2 = liveCuesV2SettingsViewV2(env)
+  const settings = liveCuesV2Settings()
+  let today: GeneralCuesToday
+  try { today = generalTodayProvider ? generalTodayProvider() : { day: v2.today.day, topicCalls: 0, webSearches: 0, breakerOpenUntil: null } } catch { today = { day: v2.today.day, topicCalls: 0, webSearches: 0, breakerOpenUntil: null } }
+  let publicTopics = false
+  try { publicTopics = new MeetingAskStore().publicTopics() } catch { publicTopics = false }
+  let homeArea: string | null = null
+  try { homeArea = getOwnerHomeArea() } catch { homeArea = null }
+  return { ...v2, v: 3, cueMode: resolveLiveCuesCueMode(env, settings), grounding: resolveLiveCuesGrounding(env, settings),
+    general: { limits: resolveLiveCuesGeneralLimits(env, settings), today, publicTopics, homeArea } }
+}
+
+/** What a v3 POST may change beyond the v2 patch. */
+export interface LiveCuesV3Patch { cueMode?: LiveCuesCueMode; grounding?: LiveCuesGrounding; general?: LiveCuesGeneralStoredLimits }
+
 /** Save the switch and any limits in ONE write, after every check passed: nothing is saved when any part is refused.
  *  Turning v2 off stops evaluations in flight; limits apply from each meeting's next evaluation. */
-export function applyLiveCuesV2Settings(patch: { enabled?: boolean; limits: LiveCuesV2StoredLimits }, env: NodeJS.ProcessEnv = process.env):
-  { ok: true } | { ok: false; error: 'env_forced' } | { ok: false; error: 'env_locked'; fields: LiveCuesV2LimitName[] } {
+export function applyLiveCuesV2Settings(patch: { enabled?: boolean; limits: LiveCuesV2StoredLimits } & LiveCuesV3Patch, env: NodeJS.ProcessEnv = process.env):
+  { ok: true } | { ok: false; error: 'env_forced'; fields?: Array<'cueMode' | 'grounding'> } | { ok: false; error: 'env_locked'; fields: string[] } {
   if (patch.enabled === false && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }
+  // Live cues v3: env may force only the SAFE value, so the only refused request is one for the other value.
+  const forced: Array<'cueMode' | 'grounding'> = []
+  if (patch.cueMode !== undefined && patch.cueMode !== 'focused' && resolveLiveCuesCueMode(env, liveCuesV2Settings()).locked) forced.push('cueMode')
+  if (patch.grounding !== undefined && patch.grounding !== 'classic' && resolveLiveCuesGrounding(env, liveCuesV2Settings()).locked) forced.push('grounding')
+  if (forced.length) return { ok: false, error: 'env_forced', fields: forced }
   const current = resolveLiveCuesV2Limits(env, liveCuesV2Settings())
-  const locked = (Object.keys(patch.limits) as LiveCuesV2LimitName[]).filter(name => current[name].locked)
+  const generalNow = resolveLiveCuesGeneralLimits(env, liveCuesV2Settings())
+  const locked: string[] = [
+    ...(Object.keys(patch.limits) as LiveCuesV2LimitName[]).filter(name => current[name].locked),
+    ...(Object.keys(patch.general ?? {}) as LiveCuesGeneralLimitName[]).filter(name => generalNow[name].locked).map(name => LIVE_CUES_GENERAL_LIMIT_BOUNDS[name].field),
+  ]
   if (locked.length) return { ok: false, error: 'env_locked', fields: locked }
   const wasOn = liveCuesV2Enabled(env)
   liveCuesV2Settings().update(patch)
@@ -1061,6 +1231,9 @@ export function applyLiveCuesV2Settings(patch: { enabled?: boolean; limits: Live
   }
   const changed = Object.entries(patch.limits).map(([k, v]) => `${k}=${v}`).join(' ')
   if (changed) console.log(`[live-cues-v2] limits saved: ${changed}`)
+  const v3 = [patch.cueMode ? `cueMode=${patch.cueMode}` : '', patch.grounding ? `grounding=${patch.grounding}` : '',
+    ...Object.entries(patch.general ?? {}).map(([k, v]) => `general.${k}=${v}`)].filter(Boolean).join(' ')
+  if (v3) console.log(`[live-cues-v2] settings saved: ${v3}`)
   return { ok: true }
 }
 /** What /api/health, /api/models and the status route advertise: NOTHING while v2 is switched off, so a 6.10.642

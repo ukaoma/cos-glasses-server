@@ -32,7 +32,10 @@ describe('pins', () => {
   it('the wire contract matches the companion copy byte for byte (src/lib/live-cues-v2-contract.ts pins the same hash)', () => {
     // 6.76.2: optional capability fields memory and decisionProvider, and four decision_* stop reasons (additive; was df08c712...).
     // 6.86.0: CueKind widened to decision | promise | followUp, sent only to meetings that opt in (was 174728e7...).
-    expect(sha('FILE:' + new URL('../../shared/live-cues-v2.ts', import.meta.url).pathname)).toBe('ad51c642a6e996ff3b2f55f2679937abbc1bc41916fc4e186b7b5d5a62c2c5b5')
+    // Live cues v3: optional CueSourceRef kind and locators, GENERAL_CUE_KINDS (insight) and isLogCueKind (was ad51c642...). The companion's
+    // copy (src/lib/live-cues-v2-contract.ts) keeps its own pin until a companion release takes this file; a companion that has not
+    // taken it validates the two legacy kinds and is never sent an insight or a source it cannot read.
+    expect(sha('FILE:' + new URL('../../shared/live-cues-v2.ts', import.meta.url).pathname)).toBe('59e4eea8269c4ac8401f96cc75b4d675e45ee48cbcbc617933a00165fc607e5a')
   })
   it('the gate threshold was calibrated on jev-1.13.0; a model change needs a new replay', () => {
     expect(JEV_MODEL).toBe('jev-1.13.0')

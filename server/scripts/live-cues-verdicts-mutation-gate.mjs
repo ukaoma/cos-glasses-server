@@ -8,7 +8,7 @@
 //   2. The mutated file differs from the original, so the edit landed.
 //   3. A NAMED test fails ("FAIL  server/x.test.ts > name"); a build error or a harness failure is not a kill.
 //   4. The file is restored byte for byte (compared) before the next mutant.
-// Usage: node server/scripts/live-cues-verdicts-mutation-gate.mjs [--list] [name…]
+// Usage: node server/scripts/live-cues-verdicts-mutation-gate.mjs [--list] [--check] [name…]
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, dirname, basename } from 'node:path'
@@ -35,8 +35,8 @@ const mutations = [
   m('store-refuses-non-file', LIB, ["      if (!statSync(this.file).isFile()) throw new Error('not a regular file')\n", ''], LIB_T),
   m('reader-schema-gate', LIB, ['if (isLogRow(value)) rows.push(value); else skipped += 1', 'rows.push(value as LiveCueLogRow)'], LIB_T),
   m('reader-counts-unparseable', LIB, ['try { value = JSON.parse(line) } catch { skipped += 1; continue }', 'try { value = JSON.parse(line) } catch { continue }'], LIB_T),
-  m('schema-kind', LIB, ['&& isCueKind(r.kind)', ''], LIB_T),
-  m('schema-sources', LIB, ['r.sources.every(s => !!s && typeof s === \'object\' && str((s as CueSourceRef).id) && str((s as CueSourceRef).date) && str((s as CueSourceRef).title))', 'true'], LIB_T),
+  m('schema-kind', LIB, ['&& isLogCueKind(r.kind)', ''], LIB_T),
+  m('schema-sources', LIB, ['r.sources.every(isSourceRef)', 'true'], LIB_T),
   m('schema-before', LIB, ['&& str(r.model) && str(r.before)', '&& str(r.model)'], LIB_T),
   m('schema-finite-numbers', LIB, ["typeof v === 'number' && Number.isFinite(v)", "typeof v === 'number'"], LIB_T),
   m('schema-armedAt-optional', LIB, ['optional(r.armedAt, num)', 'num(r.armedAt)'], LIB_T),
@@ -177,7 +177,7 @@ const mutations = [
   m('settings-read-validates', SETTINGS, ['if (limitInBounds(name, r[name])) limits[name] = r[name] as number', 'if (r[name] !== undefined) limits[name] = r[name] as number'], SETTINGS_T),
   m('settings-update-merges', SETTINGS, ['const limits = { ...current.limits, ...patch.limits }', 'const limits = { ...patch.limits }'], SETTINGS_T),
   m('settings-update-keeps-switch', SETTINGS, ['const value = patch.enabled ?? current.value', 'const value = patch.enabled ?? null'], SETTINGS_T),
-  m('settings-schema-1-without-limits', SETTINGS, ['schema: hasLimits ? 2 : 1', 'schema: 2'], [...SETTINGS_T, ...LIMITS_T]),
+  m('settings-schema-1-without-limits', SETTINGS, ['hasV3 ? 3 : hasLimits ? 2 : 1', 'hasV3 ? 3 : 2'], [...SETTINGS_T, ...LIMITS_T]),
   m('settings-no-enabled-when-unset', SETTINGS, ['...(value === null ? {} : { enabled: value })', 'enabled: value'], SETTINGS_T),
   m('limits-gate-used', ENGINE, ['if (pCue < this.limits().gate)', 'if (pCue < liveCuesV2Gate(this.deps.env))'], ENGINE_T),
   m('limits-cap-feed', ENGINE, ["if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) return this.traceSkip(s, 'meeting_cap', nowMs)", "if (counters.cues >= L.maxCuesPerMeeting || counters.writerCalls >= L.maxWriterCallsPerMeeting) return this.traceSkip(s, 'meeting_cap', nowMs)"], ENGINE_T),
@@ -203,29 +203,50 @@ const mutations = [
   m('day-rollover', ENGINE, ["if (s.day === undefined || (typeof s.day === 'string' && s.day < day)) today = zeroDay()", 'if (s.day === undefined) today = zeroDay()'], ENGINE_T),
   m('day-future-saturated', ENGINE, ['else if (s.day !== day) today = spentDay()', 'else if (s.day !== day) today = zeroDay()'], ENGINE_T),
   m('day-malformed-saturated', ENGINE, ['DAY_FIELDS.every(f => t[f] === undefined || Number(t[f]) >= 0)', 'true'], ENGINE_T),
-  m('day-unreadable-saturated', ENGINE, ['        day: localDay(this.now(), zone), today: spentDay() }', '        day: localDay(this.now(), zone), today: zeroDay() }'], ENGINE_T),
+  m('day-unreadable-saturated', ENGINE, ['day: localDay(this.now(), zone), today: spentDay(), resume: {} }', 'day: localDay(this.now(), zone), today: zeroDay(), resume: {} }'], ENGINE_T),
   m('day-is-local', ENGINE, ["new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now)", 'now.toISOString().slice(0, 10)'], ENGINE_T),
   m('apply-env-locked', ENGINE, ["  if (locked.length) return { ok: false, error: 'env_locked', fields: locked }\n", ''], LIMITS_T),
   m('apply-env-forced', ENGINE, ["  if (patch.enabled === false && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }\n", ''], LIMITS_T),
   m('view-writer-cap', ENGINE, ['writerCallsPerMeeting: 2 * limits.maxCuesPerMeeting.value', 'writerCallsPerMeeting: LIVE_CUES_V2_LIMITS.maxWriterCallsPerMeeting'], LIMITS_T),
-  m('route-get-v1-unless-v2', ROUTE, ["res.json(v === '2' ? liveCuesV2SettingsViewV2() : liveCuesV2SettingsView())", 'res.json(liveCuesV2SettingsViewV2())'], LIMITS_T),
-  m('route-get-version-checked', ROUTE, ["  if (v !== undefined && v !== '2') return res.status(400)", "  if (false) return res.status(400)"], LIMITS_T),
-  m('route-post-v1-unless-versioned', ROUTE, ['body.v !== undefined) return postSettingsV2', 'body.v === 2) return postSettingsV2'], LIMITS_T),
-  m('route-post-version-checked', ROUTE, ['  if (body.v !== 2) return res.status(400)', '  if (false) return res.status(400)'], LIMITS_T),
+  m('route-get-v1-unless-v2', ROUTE, [": v === '2' ? liveCuesV2SettingsViewV2() : liveCuesV2SettingsView()", ': liveCuesV2SettingsViewV2()'], LIMITS_T),
+  m('route-get-version-checked', ROUTE, ["  if (v !== undefined && v !== '2' && v !== '3') return res.status(400)", "  if (false) return res.status(400)"], LIMITS_T),
+  m('route-post-v1-unless-versioned', ROUTE, ['body.v !== undefined) return postSettingsVersioned', 'body.v === 2) return postSettingsVersioned'], LIMITS_T),
+  m('route-post-version-checked', ROUTE, ['  if (body.v !== 2 && body.v !== 3) return res.status(400)', '  if (false) return res.status(400)'], LIMITS_T),
   m('route-unknown-field', ROUTE, ['  if (unknown) return res.status(400)', '  if (false) return res.status(400)'], LIMITS_T),
   m('route-enabled-boolean', ROUTE, ["  if (body.enabled !== undefined && typeof body.enabled !== 'boolean') return", '  if (false) return'], LIMITS_T),
   m('route-bounds', ROUTE, ['    if (!limitInBounds(name, body[name])) {', '    if (false) {'], LIMITS_T),
-  m('route-empty', ROUTE, ['  if (body.enabled === undefined && Object.keys(limits).length === 0) return', '  if (false) return'], LIMITS_T),
+  m('route-empty', ROUTE, ['  if (body.enabled === undefined && Object.keys(limits).length === 0 && !v3Fields) return', '  if (false) return'], LIMITS_T),
   m('contract-max-per-meeting', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_MAX_PER_MEETING",\n', ''], ENGINE_T),
   m('contract-daily-writer-calls', 'managed-runtime-contract.json', ['    "COS_LIVE_CUES_V2_DAILY_WRITER_CALLS",\n', ''], ENGINE_T),
   m('engine-find-cue', ENGINE, ['const cue = s.cues.find(c => c.cueId === cueId); if (cue) return cue', ''], ENGINE_T),
 ]
 
 const args = process.argv.slice(2)
+const names = args.filter(a => !a.startsWith('--'))
 if (args.includes('--list')) { for (const { name } of mutations) console.log(name); process.exit(0) }
-const selected = args.length ? mutations.filter(({ name }) => args.includes(name)) : mutations
-if (args.length && selected.length !== args.length) throw new Error('Unknown mutation name in: ' + args.join(' '))
+const selected = names.length ? mutations.filter(({ name }) => names.includes(name)) : mutations
+if (names.length && selected.length !== names.length) throw new Error('Unknown mutation name in: ' + names.join(' '))
 if (new Set(mutations.map(x => x.name)).size !== mutations.length) throw new Error('Duplicate mutation name')
+
+/** The edits applied to one file's text. Each target must match exactly once and the result must differ. */
+function mutate(original, { name, file, edits }) {
+  let mutated = original
+  for (const [find, replacement] of edits) {
+    if (mutated.split(find).length !== 2) throw new Error(`Mutation ${name} does not match exactly once in ${file}: ${find.slice(0, 80)}`)
+    mutated = mutated.replace(find, () => replacement)
+  }
+  if (mutated === original) throw new Error(`Mutation ${name} did not change ${file}`)
+  return mutated
+}
+// --check: prove every target matches exactly once in the live checkout, without running a test (the baseline is the slow part).
+if (args.includes('--check')) {
+  let bad = 0
+  for (const mutation of selected) {
+    try { mutate(readFileSync(join(root, mutation.file), 'utf8'), mutation) } catch (error) { bad += 1; console.log(error.message) }
+  }
+  console.log(`${selected.length - bad} of ${selected.length} mutation targets match exactly once`)
+  process.exit(bad ? 1 : 0)
+}
 
 const scratch = mkdtempSync(join(tmpdir(), 'cue-verdicts-mutations-'))
 try {
@@ -245,12 +266,7 @@ try {
   let killed = 0
   for (const { name, file, edits, tests } of selected) {
     const target = join(scratch, file), original = readFileSync(target, 'utf8')
-    let mutated = original
-    for (const [find, replacement] of edits) {
-      if (mutated.split(find).length !== 2) throw new Error(`Mutation ${name} does not match exactly once in ${file}: ${find.slice(0, 80)}`)
-      mutated = mutated.replace(find, () => replacement)
-    }
-    if (mutated === original) throw new Error(`Mutation ${name} did not change ${file}`)
+    const mutated = mutate(original, { name, file, edits })
     writeFileSync(target, mutated)
     let result
     try { result = run(tests) } finally { writeFileSync(target, original) }

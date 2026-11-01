@@ -74,7 +74,7 @@ describe('live cues v2 limits (settings v2)', () => {
     expect(body.limits).toEqual(DEFAULT_LIMITS)
     expect(body.writerCallsPerMeeting).toBe(50)
     expect(body.today).toEqual({ day: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), writerCalls: 0, writerTokensIn: 0, writerTokensOut: 0, cues: 0, jevTokens: 0 })
-    expect((await get('/live-cues/v2/settings?v=3')).status).toBe(400)
+    expect((await get('/live-cues/v2/settings?v=4')).status).toBe(400)           // v=3 is the cue mode and general limits (live cues v3)
   })
 
   it('POST v2 takes any subset, keeps the rest, writes once (schema 2, 0600), and the old toggle keeps the limits', async () => {
@@ -120,7 +120,7 @@ describe('live cues v2 limits (settings v2)', () => {
       [{ v: 2, gate: 0.9, weeklyWriterCalls: 10 }, { reason: 'unknown_field', field: 'weeklyWriterCalls' }],
       [{ v: 2 }, { reason: 'empty' }],
       [{ v: 2, enabled: 'yes' }, { reason: 'invalid_enabled' }],
-      [{ v: 3, gate: 0.9 }, { reason: 'unsupported_version' }],
+      [{ v: 4, gate: 0.9 }, { reason: 'unsupported_version' }],
       [{ v: '2', gate: 0.9 }, { reason: 'unsupported_version' }],
     ]
     for (const [body, expected] of bad) {
