@@ -115,9 +115,24 @@ const BASE64_RUN = /(?<![A-Za-z0-9+/_\-])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+/
 // A credential word in other languages, with its value: "contraseña: Clave9876", "Passwort = Geheim1234".
 const FOREIGN_CREDENTIAL = /(?<![\p{L}\p{N}])(?:contrase[ñn]a|mot de passe|passwort|kennwort|senha|palavra-passe|wachtwoord|lösenord|hasło|пароль|密码|パスワード|비밀번호)[ \t]*[:=：][ \t]*\S{4,}/giu
 
+// A pair whose key ends in KEY, which mask's credentialKey list (API_KEY, ACCESS_KEY, SECRET_KEY...) does not: STRIPE_KEY=, OPENAI_KEY=,
+// AccountKey=, license-key:, and the spoken forms "api key:" and "secret key=". A bare "key: value" is a YAML word as often as a
+// secret, so it hides only a value of 8 or more characters that has a digit in it. "monkey=" and "hotkey" end in the letters but not
+// at a word boundary, so they are left alone.
+// PARITY: these rules, the unicode address rule and the invisible-character strip are THIS module's. Control's SetupAssistant.mask does
+// not have them, which is safe (Control masks only what it draws; this decides what leaves the Mac). Do not add them to the Swift
+// pin (`SWIFT_MASK` below tests maskKeyShapes alone).
+const KEY_VALUE = String.raw`(?:"[^"\\]{4,}"|'[^'\\]{4,}'|[^\s"',;]{6,})`
+const KEY_PAIR = new RegExp(String.raw`(?<![A-Za-z0-9])(?:[A-Za-z0-9_.\-]*[_.\-](?:key|KEY|Key)|[A-Za-z0-9_.\-]*(?<=[a-z0-9])Key)["']?[ \t]*[:=][ \t]*${KEY_VALUE}`, 'g')
+const SPOKEN_KEY_PAIR = new RegExp(String.raw`(?<![A-Za-z0-9])(?:api|secret|access|private|auth|account|license|licence|encryption|signing)[ ]key["']?[ \t]*[:=][ \t]*${KEY_VALUE}`, 'gi')
+const BARE_KEY_PAIR = /(?<![A-Za-z0-9_.\-])(?:key|KEY|Key)[ \t]*[:=][ \t]*(?=[^\s"',;]*\d)[^\s"',;]{8,}/g
+// An address with letters outside ASCII (josé@example.com); the server's own rule is ASCII only.
+const UNICODE_EMAIL = /[\p{L}\p{N}._%+\-]{1,64}@[\p{L}\p{N}.\-]{1,253}\.\p{L}{2,24}/gu
+
 export function maskMore(text: string): string {
-  let out = text
-  for (const re of [FOREIGN_CREDENTIAL, SHORT_STRIPE_KEY, SSN_LABELLED, SSN, CARD_NUMBER, PHONE_INTERNATIONAL, PHONE_NANP]) out = out.replace(re, HIDDEN)
+  // An address goes out as a space, as searchOptionText does, so a query that is only an address is left empty.
+  let out = text.replace(UNICODE_EMAIL, ' ')
+  for (const re of [KEY_PAIR, SPOKEN_KEY_PAIR, BARE_KEY_PAIR, FOREIGN_CREDENTIAL, SHORT_STRIPE_KEY, SSN_LABELLED, SSN, CARD_NUMBER, PHONE_INTERNATIONAL, PHONE_NANP]) out = out.replace(re, HIDDEN)
   // Base64 that carries + or /, and the padded or long kind: mixed case with a digit, so a path or a word is left alone.
   return out.replace(BASE64_RUN, run => (/[A-Z]/.test(run) && /[a-z]/.test(run) && /\d/.test(run) && (/[+/=]/.test(run) || run.length >= 40)) ? HIDDEN : run)
 }
@@ -126,7 +141,7 @@ export function maskMore(text: string): string {
 function readableLine(raw: string): string {
   const wellFormed = raw.slice(0, INPUT_UNITS).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '')
   return wellFormed.normalize('NFKC')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
     .replace(/\s+/g, ' ').trim()
 }
 
@@ -147,13 +162,16 @@ export function cutAtCodePoints(text: string, max: number, cutEarlier = false): 
   return kept.join('').trim()
 }
 
-/** Read, redact, then cut. Returns one clean line of at most `max` code points, possibly empty. */
-export function redactForModel(raw: string, max: number): string {
+/**
+ * Read, redact, then cut. Returns one clean line of at most `max` code points, possibly empty. `cutUpstream` says the text was already
+ * cut by whoever made it (the list cuts a first line at 80 and a title at 120, before any redaction), so its last token may be half a key.
+ */
+export function redactForModel(raw: string, max: number, cutUpstream = false): string {
   if (typeof raw !== 'string' || !raw) return ''
   const scan = cutAtCodePoints(readableLine(raw), FIND_SCAN_CHARS)
   const redacted = searchOptionText(maskKeyShapes(maskMore(scan)))
   // searchOptionText slices at its own 300 UTF-16 units; if it reached them it may have cut inside a token.
-  return cutAtCodePoints(redacted, max, redacted.length >= WORK_SEARCH_LIMITS.optionChars)
+  return cutAtCodePoints(redacted, max, cutUpstream || redacted.length >= WORK_SEARCH_LIMITS.optionChars)
 }
 
 /** The search words as they leave: redacted like everything else, at most 200 code points. */
@@ -174,7 +192,7 @@ const norm = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' 
  * of the prompt, so the prompt alone says it and a second copy of the words would only cost tokens.
  */
 export function candidateTexts(title: string, typed: string): CandidateTexts {
-  const t = redactForModel(title, FIND_TITLE_CHARS)
+  const t = redactForModel(title, FIND_TITLE_CHARS, title.length === 80 || title.length === 120)
   const prompt = redactForModel(typed, FIND_PROMPT_CHARS)
   if (!prompt) return { option: t, prompt: '' }
   const titleWords = norm(t)
