@@ -9,7 +9,7 @@
 //   3. A NAMED test fails ("FAIL  server/x.test.ts > name"); a build error or a harness failure is not a kill.
 //   4. The file is restored byte for byte (compared) before the next mutant.
 // Also the Live COS Ask's memory bridge fallback (searchAskHistory) and the helpers it shares with cues (cos-bridge-notes.ts).
-// Usage: node server/scripts/live-cues-v2-notes-mutation-gate.mjs [--list] [name…]
+// Usage: node server/scripts/live-cues-v2-notes-mutation-gate.mjs [--list] [--check] [name…]
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, dirname, basename } from 'node:path'
@@ -34,24 +34,24 @@ const mutations = [
   m('env-forces-only-exact-1', SETTINGS, ["return env.COS_LIVE_CUES_V2 === '1'", 'return !!env.COS_LIVE_CUES_V2']),
   m('env-forced-wins-over-setting', SETTINGS, ["if (liveCuesV2EnvForced(env)) return { enabled: true, source: 'env' }", 'if (false) return { enabled: true, source: \'env\' }']),
   m('saved-setting-read', SETTINGS, ["if (stored !== null) return { enabled: stored, source: 'setting' }", "if (stored === true) return { enabled: stored, source: 'setting' }"]),
-  m('malformed-setting-is-none', SETTINGS, ["typeof (raw as { enabled?: unknown }).enabled === 'boolean'", '(raw as { enabled?: unknown }).enabled !== undefined']),
-  m('cache-follows-write', SETTINGS, ['    this.cache = { value: enabled }\n', '']),
+  m('malformed-setting-is-none', SETTINGS, ["if (typeof r.enabled === 'boolean') value = r.enabled", 'if (r.enabled !== undefined) value = r.enabled as boolean']),
+  m('cache-follows-write', SETTINGS, ["{ mode: 0o600 })\n    this.cache = { value, limits }\n", '{ mode: 0o600 })\n']),
   m('failed-write-keeps-memory', SETTINGS, [
-    ['    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })\n', '    this.cache = { value: enabled }\n    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })\n'],
-    ["{ mode: 0o600 })\n    this.cache = { value: enabled }\n", '{ mode: 0o600 })\n']]),
+    ['    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })\n', '    this.cache = { value, limits }\n    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })\n'],
+    ["{ mode: 0o600 })\n    this.cache = { value, limits }\n", '{ mode: 0o600 })\n']]),
   m('settings-file-private', SETTINGS, ["+ '\\n', { mode: 0o600 })", "+ '\\n', { mode: 0o644 })"]),
   m('engine-reads-setting', ENGINE, ['private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, this.deps.settings) }', 'private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, null) }']),
   m('feed-stops-while-off', ENGINE, ['    if (!this.enabled()) return\n    if (this.deps.store.isEnded(sessionId)) return', '    if (this.deps.store.isEnded(sessionId)) return']),
   m('last-check-before-emit', ENGINE, ['|| this.deps.store.isPaused(s.sessionId) || !this.enabled()) {', '|| this.deps.store.isPaused(s.sessionId)) {']),
   m('suspend-aborts-in-flight', ENGINE, ['if (s.inFlight) { s.inFlight.abort(V2_OFF); aborted += 1 }', 'if (s.inFlight) { aborted += 1 }']),
   m('cancel-reason-traced', ENGINE, ["      if (trace.outcome === 'cancelled' && abort.signal.reason === V2_OFF) trace.cancelReason = V2_OFF\n", '']),
-  m('env-forced-off-refused', ENGINE, ["if (!enabled && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }", "if (false) return { ok: false, error: 'env_forced' }"]),
+  m('env-forced-off-refused', ENGINE, ["if (patch.enabled === false && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }", "if (false) return { ok: false, error: 'env_forced' }"]),
   m('turning-off-suspends', ENGINE, ['const aborted = engine?.suspend() ?? 0', 'const aborted = 0']),
   m('suspend-only-on-transition', ENGINE, ['if (wasOn && !liveCuesV2Enabled(env)) {', 'if (!liveCuesV2Enabled(env)) {']),
   m('saved-meeting-ends-known-session', ENGINE, ['(liveCuesV2Enabled() || engine?.knows(sid))', 'liveCuesV2Enabled()']),
   m('knows-armed-sessions', ENGINE, ['knows(sessionId: string): boolean { return this.sessions.has(sessionId) }', 'knows(sessionId: string): boolean { return false }']),
   m('route-v2-owns-known-meeting', ROUTE, ['return liveCuesV2Enabled() || (peekLiveCuesV2()?.knows(sessionId) ?? false)', 'return liveCuesV2Enabled()']),
-  m('route-boolean-enabled-only', ROUTE, ["typeof body.enabled !== 'boolean'", 'body.enabled === undefined']),
+  m('route-boolean-enabled-only', ROUTE, ["Array.isArray(body) || typeof body.enabled !== 'boolean') {", 'Array.isArray(body) || body.enabled === undefined) {']),
   m('route-409-body', ROUTE, ['if (!result.ok) return res.status(409).json({ error: result.error })', 'if (!result.ok) return res.status(200).json(liveCuesV2SettingsView())']),
   m('advertised-follows-setting', ENGINE, ['return liveCuesV2Enabled(env) ? liveCuesV2Capability() : undefined', "return env.COS_LIVE_CUES_V2 === '1' ? liveCuesV2Capability() : undefined"], HEALTH),
   // ── Notes fallback (engine) ──
@@ -127,10 +127,31 @@ const mutations = [
 ]
 
 const args = process.argv.slice(2)
+const names = args.filter(a => !a.startsWith('--'))
 if (args.includes('--list')) { for (const { name } of mutations) console.log(name); process.exit(0) }
-const selected = args.length ? mutations.filter(({ name }) => args.includes(name)) : mutations
-if (args.length && selected.length !== args.length) throw new Error('Unknown mutation name in: ' + args.join(' '))
+const selected = names.length ? mutations.filter(({ name }) => names.includes(name)) : mutations
+if (names.length && selected.length !== names.length) throw new Error('Unknown mutation name in: ' + names.join(' '))
 if (new Set(mutations.map(x => x.name)).size !== mutations.length) throw new Error('Duplicate mutation name')
+
+/** The edits applied to one file's text. Each target must match exactly once and the result must differ. */
+function mutate(original, { name, file, edits }) {
+  let mutated = original
+  for (const [find, replacement] of edits) {
+    if (mutated.split(find).length !== 2) throw new Error(`Mutation ${name} does not match exactly once in ${file}: ${find.slice(0, 80)}`)
+    mutated = mutated.replace(find, () => replacement)
+  }
+  if (mutated === original) throw new Error(`Mutation ${name} did not change ${file}`)
+  return mutated
+}
+// --check: prove every target matches exactly once in the live checkout, without running a test (the baseline is the slow part).
+if (args.includes('--check')) {
+  let bad = 0
+  for (const mutation of selected) {
+    try { mutate(readFileSync(join(root, mutation.file), 'utf8'), mutation) } catch (error) { bad += 1; console.log(error.message) }
+  }
+  console.log(`${selected.length - bad} of ${selected.length} mutation targets match exactly once`)
+  process.exit(bad ? 1 : 0)
+}
 
 const scratch = mkdtempSync(join(tmpdir(), 'cues-notes-mutations-'))
 try {
@@ -150,12 +171,7 @@ try {
   let killed = 0
   for (const { name, file, edits, tests } of selected) {
     const target = join(scratch, file), original = readFileSync(target, 'utf8')
-    let mutated = original
-    for (const [find, replacement] of edits) {
-      if (mutated.split(find).length !== 2) throw new Error(`Mutation ${name} does not match exactly once in ${file}: ${find.slice(0, 80)}`)
-      mutated = mutated.replace(find, () => replacement)
-    }
-    if (mutated === original) throw new Error(`Mutation ${name} did not change ${file}`)
+    const mutated = mutate(original, { name, file, edits })
     writeFileSync(target, mutated)
     let result
     try { result = run(tests) } finally { writeFileSync(target, original) }

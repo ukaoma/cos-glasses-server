@@ -8,7 +8,7 @@
 //   2. The mutated file differs from the original, so the edit landed.
 //   3. A NAMED test fails ("FAIL  server/x.test.ts > name"); a build error or a harness failure is not a kill.
 //   4. The file is restored byte for byte (compared) before the next mutant.
-// Usage: node server/scripts/live-cues-verdicts-mutation-gate.mjs [--list] [name…]
+// Usage: node server/scripts/live-cues-verdicts-mutation-gate.mjs [--list] [--check] [name…]
 import { mkdtempSync, cpSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve, join, dirname, basename } from 'node:path'
@@ -203,7 +203,7 @@ const mutations = [
   m('day-rollover', ENGINE, ["if (s.day === undefined || (typeof s.day === 'string' && s.day < day)) today = zeroDay()", 'if (s.day === undefined) today = zeroDay()'], ENGINE_T),
   m('day-future-saturated', ENGINE, ['else if (s.day !== day) today = spentDay()', 'else if (s.day !== day) today = zeroDay()'], ENGINE_T),
   m('day-malformed-saturated', ENGINE, ['DAY_FIELDS.every(f => t[f] === undefined || Number(t[f]) >= 0)', 'true'], ENGINE_T),
-  m('day-unreadable-saturated', ENGINE, ['        day: localDay(this.now(), zone), today: spentDay() }', '        day: localDay(this.now(), zone), today: zeroDay() }'], ENGINE_T),
+  m('day-unreadable-saturated', ENGINE, ['day: localDay(this.now(), zone), today: spentDay(), resume: {} }', 'day: localDay(this.now(), zone), today: zeroDay(), resume: {} }'], ENGINE_T),
   m('day-is-local', ENGINE, ["new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now)", 'now.toISOString().slice(0, 10)'], ENGINE_T),
   m('apply-env-locked', ENGINE, ["  if (locked.length) return { ok: false, error: 'env_locked', fields: locked }\n", ''], LIMITS_T),
   m('apply-env-forced', ENGINE, ["  if (patch.enabled === false && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }\n", ''], LIMITS_T),
@@ -222,10 +222,31 @@ const mutations = [
 ]
 
 const args = process.argv.slice(2)
+const names = args.filter(a => !a.startsWith('--'))
 if (args.includes('--list')) { for (const { name } of mutations) console.log(name); process.exit(0) }
-const selected = args.length ? mutations.filter(({ name }) => args.includes(name)) : mutations
-if (args.length && selected.length !== args.length) throw new Error('Unknown mutation name in: ' + args.join(' '))
+const selected = names.length ? mutations.filter(({ name }) => names.includes(name)) : mutations
+if (names.length && selected.length !== names.length) throw new Error('Unknown mutation name in: ' + names.join(' '))
 if (new Set(mutations.map(x => x.name)).size !== mutations.length) throw new Error('Duplicate mutation name')
+
+/** The edits applied to one file's text. Each target must match exactly once and the result must differ. */
+function mutate(original, { name, file, edits }) {
+  let mutated = original
+  for (const [find, replacement] of edits) {
+    if (mutated.split(find).length !== 2) throw new Error(`Mutation ${name} does not match exactly once in ${file}: ${find.slice(0, 80)}`)
+    mutated = mutated.replace(find, () => replacement)
+  }
+  if (mutated === original) throw new Error(`Mutation ${name} did not change ${file}`)
+  return mutated
+}
+// --check: prove every target matches exactly once in the live checkout, without running a test (the baseline is the slow part).
+if (args.includes('--check')) {
+  let bad = 0
+  for (const mutation of selected) {
+    try { mutate(readFileSync(join(root, mutation.file), 'utf8'), mutation) } catch (error) { bad += 1; console.log(error.message) }
+  }
+  console.log(`${selected.length - bad} of ${selected.length} mutation targets match exactly once`)
+  process.exit(bad ? 1 : 0)
+}
 
 const scratch = mkdtempSync(join(tmpdir(), 'cue-verdicts-mutations-'))
 try {
@@ -245,12 +266,7 @@ try {
   let killed = 0
   for (const { name, file, edits, tests } of selected) {
     const target = join(scratch, file), original = readFileSync(target, 'utf8')
-    let mutated = original
-    for (const [find, replacement] of edits) {
-      if (mutated.split(find).length !== 2) throw new Error(`Mutation ${name} does not match exactly once in ${file}: ${find.slice(0, 80)}`)
-      mutated = mutated.replace(find, () => replacement)
-    }
-    if (mutated === original) throw new Error(`Mutation ${name} did not change ${file}`)
+    const mutated = mutate(original, { name, file, edits })
     writeFileSync(target, mutated)
     let result
     try { result = run(tests) } finally { writeFileSync(target, original) }
