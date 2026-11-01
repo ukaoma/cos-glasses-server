@@ -6,7 +6,13 @@ import { join } from 'node:path'
 import { createSessionFindRouter } from './session-find.js'
 import { createDecisionProviderRouter } from './decision-provider.js'
 import { createJevRouter } from './jev.js'
-import { unavailableAnswer, type SessionFindAnswer, type SessionFindRequest } from '../lib/session-find.js'
+import { SessionFinder, clientCapacity, unavailableAnswer, type SessionFindAnswer, type SessionFindRequest } from '../lib/session-find.js'
+import { SessionFindCollector } from '../lib/session-find-collect.js'
+import { SessionFindAsker } from '../lib/session-find-ask.js'
+import { SubqDecisionClient } from '../lib/decision-provider.js'
+import { agentSessionRoots } from '../lib/agent-session-store.js'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { JevClient } from '../lib/jev.js'
 
 const servers: Server[] = []
@@ -158,5 +164,55 @@ describe('saving a new Jev key', () => {
     expect(jev.resetForNewKey).toHaveBeenCalledTimes(1)
     expect(searchJev.resetForNewKey).toHaveBeenCalledTimes(1)
     expect(findJev.resetForNewKey).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('when a cap or a pause ends (resetsAt)', () => {
+  const NOW = Date.parse('2026-11-01T10:00:00Z')
+  let dir = ''
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'session find resets.')); vi.stubEnv('TYPESAFE_API_KEY', 'synthetic-test-key-for-jev') })
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); vi.unstubAllEnvs() })
+
+  async function viaRoute(jev: JevClient, decision?: Partial<import('../lib/decision-provider.js').DecisionClient>) {
+    const client = { provider: 'jev' as const, ask: vi.fn(), ...decision } as import('../lib/decision-provider.js').DecisionClient
+    const finder = new SessionFinder({ collector: new SessionFindCollector(), asker: new SessionFindAsker(), decision: client, roots: () => agentSessionRoots(dir), keyedIds: () => new Set(),
+      available: () => ({ find: true, sessions: true }), selected: () => 'jev', configured: () => true, capacity: clientCapacity, jev, now: () => NOW })
+    const app = express(); app.use(express.json()); app.use('/api', createSessionFindRouter({ finder }))
+    const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) }); servers.push(server)
+    const res = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/agent-sessions/find`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'the tailscale thing', consentedProvider: 'jev', stage: 'first' }) })
+    return res.json() as Promise<SessionFindAnswer>
+  }
+
+  it('says the next UTC midnight of the ledger when the daily cap is reached', async () => {
+    const ledger = join(dir, 'jev-usage.json')
+    writeFileSync(ledger, JSON.stringify({ '2026-11-01': 50 }))
+    const jev = new JevClient(fetch, () => new Date(NOW), ledger, () => 10)
+    const answer = await viaRoute(jev)
+    expect(answer).toMatchObject({ available: false, reason: 'cap_reached', resetsAt: '2026-11-02T00:00:00.000Z' })
+  })
+
+  it('says when the breaker reopens, as the client reports it', async () => {
+    const jev = new JevClient((async () => { throw new Error('down') }) as unknown as typeof fetch, () => new Date(NOW), join(dir, 'jev-usage.json'), () => 1_000_000)
+    for (let i = 0; i < 3; i++) await jev.ask({}, {}, 1).catch(() => undefined)
+    const answer = await viaRoute(jev)
+    expect(answer).toMatchObject({ available: false, reason: 'breaker_open', resetsAt: new Date(NOW + 3_600_000).toISOString() })
+  })
+
+  it('reads a SubQ breaker, which reports epoch milliseconds', async () => {
+    const until = NOW + 1_800_000
+    const subq = Object.assign(Object.create(SubqDecisionClient.prototype), { provider: 'subq', status: () => ({ configured: true, usedToday: 0, dailyCap: 10, breakerOpenUntil: until }) })
+    const finder = new SessionFinder({ collector: new SessionFindCollector(), asker: new SessionFindAsker(), decision: subq, roots: () => agentSessionRoots(dir), keyedIds: () => new Set(),
+      available: () => ({ find: true, sessions: true }), selected: () => 'subq', configured: () => true, capacity: clientCapacity, jev: null, now: () => NOW })
+    const app = express(); app.use(express.json()); app.use('/api', createSessionFindRouter({ finder }))
+    const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) }); servers.push(server)
+    const res = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/agent-sessions/find`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'the tailscale thing', consentedProvider: 'subq', stage: 'first' }) })
+    expect(await res.json()).toMatchObject({ reason: 'breaker_open', resetsAt: new Date(until).toISOString() })
+  })
+
+  it('omits it when nothing else says (not configured, consent, a breaker already past)', async () => {
+    const answer = await viaRoute(new JevClient(fetch, () => new Date(NOW), join(dir, 'jev-usage.json'), () => 1_000_000))
+    expect(answer.available).toBe(true) // an empty fake home: nothing to ask about, nothing refused
+    expect(answer).not.toHaveProperty('resetsAt')
+    expect(unavailableAnswer('consent_required', 'jev')).not.toHaveProperty('resetsAt')
   })
 })
