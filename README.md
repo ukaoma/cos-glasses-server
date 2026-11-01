@@ -699,6 +699,10 @@ flag a Mac rename is text only. `GET /api/health` reports `capabilities.macLiveV
 The saved meeting is relabeled by the whole-meeting pass. Live numbers are kept;
 voices the live path did not prove are numbered above them at save.
 
+### Session find by meaning (6.94.3)
+
+`POST /api/agent-sessions/find` backs ⌘K in COS Control 0.5.363. It is off until the person says yes for one provider in Control. See `docs/decision-providers.md` for what leaves the Mac, the caps and `COS_SESSION_FIND=0`.
+
 ### Saved Mac profile reconciliation (6.94.2)
 
 After transcription and diarization, eligible Mac recordings receive a bounded

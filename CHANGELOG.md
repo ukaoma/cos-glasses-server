@@ -1,3 +1,19 @@
+## 6.94.3 - Search sessions by meaning, and accented speaker names
+
+2026-11-01. Pairs with COS Control 0.5.363. Control 0.5.361 and older keep working and never call the new route.
+
+**New, and off until you say yes in Control.**
+
+- `POST /api/agent-sessions/find` asks your decision model (Jev by default, SubQ if chosen) which recent sessions a few typed words refer to, and returns up to 5 rows in order of likelihood. It answers only for the provider you consented to in Control, and refuses before reading any session otherwise.
+- Each search sends the typed words, plus the title and first 150 characters of the first prompt from up to 254 recent sessions, then up to 508 if the first pass finds nothing strong. Emails, links, file paths and key-shaped text are removed first. Names and other details are not. SubQ keeps what it is sent. Archived, keyed and scheduled sessions are left out.
+- Its own daily caps (3M tokens per provider), breaker and `COS_SESSION_FIND=0` switch. `GET /api/decision-provider` adds `capabilities.sessionFind`.
+
+**Default-on, no setting.**
+
+- Accented speaker names now match in either Unicode form. "Yes, this is Brigitta Pólya" failed with "No chunk in this meeting is labelled" because Control's helper hands names over decomposed. Meeting and voice routes read names as NFC, compare both sides, and store new names as NFC. Merge, delete-person, calibration and the embeddings manager match a stored name in either form. Names already saved are not rewritten.
+
+No other route changes. The session list and search are unchanged.
+
 ## 6.94.2 - Scoped profile matches for saved Mac recordings
 
 2026-10-28. Compatible with COS Control 0.5.352; no Control or glasses package change required.
