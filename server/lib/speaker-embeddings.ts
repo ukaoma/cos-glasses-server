@@ -26,6 +26,7 @@ import {
   saveVoiceProfileStore,
   type ProfileStore,
   type VoiceProfile,
+  findStoredProfile,
 } from './voice-profile-store.js'
 import { homedir } from 'node:os'
 import { spawnSync } from 'node:child_process'
@@ -43,7 +44,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 
 import { DATA_DIR } from './data-dir.js'
 import { AUTO_ENROLL_THRESHOLD, OWNER_VERIFY_SIMILARITY } from './voiceprint-floor.js'
-import { sameSpeakerName } from './speaker-name-nfc.js'
+import { nfc, sameSpeakerName } from './speaker-name-nfc.js'
 
 export const SPEAKER_MODEL_FILENAME = '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx'
 
@@ -264,10 +265,23 @@ export function initSpeakerEmbeddings(): boolean {
   }
 }
 
+/**
+ * The manager is keyed on the STORED profile name, which may be decomposed (written before names were NFC) or composed. Every lookup
+ * therefore tries both forms of the name asked for, and returns the key it is actually held under.
+ */
+function managerKey(name: string): string | null {
+  if (!manager) return null
+  for (const key of new Set([name, nfc(name), name.normalize('NFD')])) if (manager.contains(key)) return key
+  return null
+}
+function removeFromManager(name: string): void {
+  if (!manager) return
+  for (const key of new Set([name, nfc(name), name.normalize('NFD')])) if (manager.contains(key)) manager.remove(key)
+}
+
 /** Check if a speaker is enrolled */
 export function isEnrolled(name: string): boolean {
-  if (!manager) return false
-  return manager.contains(name)
+  return managerKey(name) !== null
 }
 
 /** Get all enrolled speaker names */
@@ -475,13 +489,14 @@ export function identifySpeaker(
     // Phase 4: scoped search — try expected attendees first
     if (expectedSpeakers && expectedSpeakers.length > 0) {
       for (const name of expectedSpeakers) {
-        if (name === owner) continue // wearer already checked
-        if (!manager.contains(name)) continue
-        const matches = manager.verify({ name, v: embedding, threshold: Math.max(SEARCH_THRESHOLD, minimum) })
+        if (sameSpeakerName(name, owner)) continue // wearer already checked
+        const held = managerKey(name)
+        if (!held) continue
+        const matches = manager.verify({ name: held, v: embedding, threshold: Math.max(SEARCH_THRESHOLD, minimum) })
         if (matches) {
-          const similarity = computeCosineSimilarity(embedding, name)
-          logCalibration(name, similarity, true, options.event)
-          return { speaker: name, similarity, embedding }
+          const similarity = computeCosineSimilarity(embedding, held)
+          logCalibration(held, similarity, true, options.event)
+          return { speaker: held, similarity, embedding }
         }
       }
     }
@@ -519,7 +534,7 @@ export function autoEnroll(
   sessionId: string,
 ): { enrolled: boolean; reason: string } {
   if (!extractor || !manager) return { enrolled: false, reason: 'not initialized' }
-  if (name === getOwnerSpeakerLabel() || name === 'Ext') return { enrolled: false, reason: 'skip owner/Ext' }
+  if (sameSpeakerName(name, getOwnerSpeakerLabel()) || name === 'Ext') return { enrolled: false, reason: 'skip owner/Ext' }
   if (similarity < AUTO_ENROLL_THRESHOLD) return { enrolled: false, reason: `similarity ${similarity.toFixed(3)} < ${AUTO_ENROLL_THRESHOLD}` }
 
   // Check if already auto-enrolled this session
@@ -574,9 +589,7 @@ export function clearSpeakerEmbeddings(name: string): boolean {
   profile.sources = []
 
   // Remove from manager
-  if (manager && manager.contains(name)) {
-    try { manager.remove(name) } catch { /* ignore */ }
-  }
+  try { removeFromManager(name) } catch { /* ignore */ }
 
   // Persist. A "fresh training" clear legitimately empties one profile but must
   // never be able to empty the whole store, so allowEmpty stays off here.
@@ -622,7 +635,7 @@ export function mergeSpeakerProfiles(
   options: { force?: boolean; dryRun?: boolean } = {},
 ): MergeReport {
   const store = loadProfileStore()
-  const target = store.profiles.find(p => sameSpeakerName(p.name, into))
+  const target = findStoredProfile(store, into)
   const report: MergeReport = {
     into,
     merged: [],
@@ -642,9 +655,9 @@ export function mergeSpeakerProfiles(
   const eligible: string[] = []
   const refused: { name: string; similarity: number; floor: number }[] = []
   for (const name of from) {
-    if (sameSpeakerName(name, into)) continue
-    const source = store.profiles.find(p => sameSpeakerName(p.name, name))
-    if (!source) { report.missing.push(name); continue }
+    // The target is never its own source, but a twin stored under the same name in the other form is a different profile and merges.
+    const source = store.profiles.find(p => p !== target && sameSpeakerName(p.name, name))
+    if (!source) { if (!sameSpeakerName(name, into)) report.missing.push(name); continue }
     const similarity = profileSimilarity(target, source)
     report.similarity[name] = Math.round(similarity * 1000) / 1000
     if (similarity < MERGE_SIMILARITY_FLOOR && !options.force) {
@@ -697,7 +710,7 @@ export function mergeSpeakerProfiles(
   // tests (no 26 MB model), so this side effect has no test seam — the reason
   // it is expressed as a single reused call rather than bespoke logic.
   for (const name of outcome.mergedFrom) rebuildSpeakerInManager(name, [])
-  rebuildSpeakerInManager(into, target.embeddings)
+  rebuildSpeakerInManager(target.name, target.embeddings)
   writeProfileStore(store)
   console.log(
     `[speaker] Merged ${outcome.mergedFrom.join(', ')} into "${into}"`,
@@ -713,9 +726,7 @@ export function removeSpeakerProfile(name: string): { removedProfiles: number; r
   const result = deleteProfileFromStore(store, name)
   if (result.removedProfiles === 0) return result
 
-  if (manager && manager.contains(name)) {
-    try { manager.remove(name) } catch { /* the on-disk removal is the durable half */ }
-  }
+  try { removeFromManager(name) } catch { /* the on-disk removal is the durable half */ }
   // allowEmpty: deleting the only enrolled person is a legitimate reset, and the
   // caller has already confirmed it explicitly.
   writeProfileStore(store, { allowEmpty: true })
@@ -1062,8 +1073,8 @@ function restoreProfileFromDisk(name: string): void {
   invalidateProfileCache()
   try {
     const fresh = loadProfileStore().profiles.find(p => sameSpeakerName(p.name, name))
-    if (fresh && fresh.embeddings.length > 0) rebuildSpeakerInManager(name, fresh.embeddings)
-    else if (manager?.contains(name)) manager.remove(name)
+    if (fresh && fresh.embeddings.length > 0) rebuildSpeakerInManager(fresh.name, fresh.embeddings)
+    else removeFromManager(name)
   } catch (err: unknown) {
     console.error(`[speaker] Could not restore "${name}" from disk after a failed write:`, errMsg(err))
   } finally {
@@ -1132,10 +1143,8 @@ export function computeCentroid(embeddings: number[][]): Float32Array {
 function rebuildSpeakerInManager(name: string, embeddings: number[][]): void {
   if (!manager) return
   try {
-    // Remove existing entry
-    if (manager.contains(name)) {
-      manager.remove(name)
-    }
+    // Remove the existing entry, whichever form it is held under
+    removeFromManager(name)
     if (embeddings.length === 0) return
 
     // Register centroid of all embeddings

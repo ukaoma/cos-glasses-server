@@ -806,7 +806,9 @@ voiceRouter.post('/voice/merge-profiles', async (req, res) => {
     if (!into || from.length === 0) {
       return res.status(400).json({ error: 'into (string) and from (string or string[]) are required' })
     }
-    if (from.includes(into)) {
+    // The same name twice is refused, unless the store holds it twice (a profile written decomposed and its composed twin): those are two
+    // profiles and merging them is the point.
+    if (from.some(n => sameSpeakerName(n, into)) && readVoiceProfiles().profiles.filter(p => sameSpeakerName(p.name, into)).length < 2) {
       return res.status(400).json({ error: 'into and from must differ' })
     }
 

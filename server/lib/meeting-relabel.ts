@@ -116,7 +116,7 @@ export function relabelSidecarJson(
   let remainingWithFrom = 0
   rows.forEach((row, i) => {
     // The `typeof` half guards the cast below rather than any behaviour — a
-    // truthy non-object can never satisfy `.speaker === from`, so it is
+    // truthy non-object can never satisfy the NFC name match below, so it is
     // deliberately not claimed as tested.
     if (!row || typeof row !== 'object') return
     const r = row as Record<string, unknown>

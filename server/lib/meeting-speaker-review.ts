@@ -26,6 +26,7 @@ import type { QualifiedMachinePosition } from './mac-speaker-machine-evidence.js
 import { isVoiceLabel } from './mac-voice-labels.js'
 import { isMacSpeakerHumanProtected } from './mac-speaker-protection.js'
 import { checkSpeakerName } from './speaker-name.js'
+import { nfc, sameSpeakerName } from './speaker-name-nfc.js'
 
 /** One transcript chunk as stored in the `.g2-chunks.json` sidecar. */
 export interface ReviewChunk {
@@ -649,10 +650,10 @@ export function reviewMeetingSpeakers(
   } = {},
 ): MeetingSpeakerReview {
   const owner = options.owner ?? 'Me'
-  const confirmed = new Set(options.confirmed ?? [])
+  const confirmed = new Set([...(options.confirmed ?? [])].map(nfc))
   for (const label of new Set(chunks.map(c => c.speaker ?? ''))) {
     const positions = chunks.flatMap((c, i) => c.speaker === label ? [i] : [])
-    if (positions.length > 0 && positions.every(i => options.confirmedChunks?.get(i) === label)) confirmed.add(label)
+    if (positions.length > 0 && positions.every(i => sameSpeakerName(options.confirmedChunks?.get(i), label))) confirmed.add(nfc(label))
   }
   const limit = options.phrasesPerVoice ?? 3
   const sequence = chunks.map(c => c.speaker ?? '')
@@ -801,14 +802,14 @@ export function reviewMeetingSpeakers(
       if (c.speaker !== label) return n
       const proof = options.machineQualifiedPositions?.get(i)
       const machine = proof?.label === label && (c.chunkIndex === undefined || c.chunkIndex === proof.rawChunkIndex) && proof.independentWindows >= 2 && proof.minimumSimilarity >= .88 && proof.minimumMargin >= .05
-      const human = confirmed.has(label) || options.confirmedChunks?.get(i) === label
+      const human = confirmed.has(nfc(label)) || sameSpeakerName(options.confirmedChunks?.get(i), label)
       const capture = typeof c.similarity === 'number' && Number.isFinite(c.similarity) && c.similarity >= ASSERT_MIN_SIMILARITY
       return n + Number(!machine && !human && !capture)
     }, 0) : 0
     const runs = wordOnlyHuman ? [] : speakerRuns(sequence, label)
     const unattributed = anonymous(label)
-    const confirmedSegments = unattributed || wordOnlyHuman ? 0 : confirmed.has(label) ? own.length
-      : chunks.reduce((n, c, i) => n + Number(c.speaker === label && options.confirmedChunks?.get(i) === label), 0)
+    const confirmedSegments = unattributed || wordOnlyHuman ? 0 : confirmed.has(nfc(label)) ? own.length
+      : chunks.reduce((n, c, i) => n + Number(c.speaker === label && sameSpeakerName(options.confirmedChunks?.get(i), label)), 0)
 
     const thrashesWith: ThrashPair[] = []
     if (!unattributed && !wordOnlyHuman) {
@@ -841,7 +842,7 @@ export function reviewMeetingSpeakers(
     const assertionBlockers: string[] = []
     if (unattributed) {
       assertionBlockers.push('no name was ever assigned to this voice')
-    } else if (confirmed.has(label) || wordOnlyHuman) {
+    } else if (confirmed.has(nfc(label)) || wordOnlyHuman) {
       // A human said this is them. Blockers stay OFF the list rather than being
       // listed-then-overridden, because a reviewer reading "similarity 0.56
       // below 0.65" under a name they personally confirmed would reasonably
@@ -894,10 +895,10 @@ export function reviewMeetingSpeakers(
       longestRun: runs.length ? Math.max(...runs) : 0,
       isOwner: label === owner && (!effective || !unattributed),
       /** True when a human vouched for this label in this meeting. */
-      confirmedByHuman: (confirmed.has(label) || wordOnlyHuman) && (!effective || !unattributed),
+      confirmedByHuman: (confirmed.has(nfc(label)) || wordOnlyHuman) && (!effective || !unattributed),
       machineQualified: !unattributed && machineQualified,
       machineQualifiedSegments: unattributed ? 0 : machineQualifiedSegments,
-      assertionSource: assertionBlockers.length ? null : confirmed.has(label) || wordOnlyHuman ? 'human' : label === owner ? 'owner' : machineQualified ? 'qualified-profile' : machineQualifiedSegments > 0 ? 'capture-and-qualified-profile' : 'capture-match',
+      assertionSource: assertionBlockers.length ? null : confirmed.has(nfc(label)) || wordOnlyHuman ? 'human' : label === owner ? 'owner' : machineQualified ? 'qualified-profile' : machineQualifiedSegments > 0 ? 'capture-and-qualified-profile' : 'capture-match',
       reliability,
       nameAsserted: assertionBlockers.length === 0,
       assertionBlockers,

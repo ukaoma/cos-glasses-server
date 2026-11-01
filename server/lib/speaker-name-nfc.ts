@@ -25,3 +25,8 @@ export function nameForms(name: string, escape: (s: string) => string): string {
   const composed = nfc(name), decomposed = name.normalize('NFD')
   return composed === decomposed ? escape(composed) : `(?:${escape(composed)}|${escape(decomposed)})`
 }
+
+/** A record id carries a filename, and Control's helper hands it over decomposed: equal when they are the same text in NFC. */
+export function sameRecordId(requested: unknown, expected: string): boolean {
+  return typeof requested === 'string' && (requested === expected || nfc(requested) === nfc(expected))
+}

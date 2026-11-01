@@ -513,6 +513,11 @@ export interface MergeOutcome {
  * removable later, and overwriting it to record a bookkeeping event would trade
  * a useful fact for a useless one.
  */
+/** The profile stored under `name`: the exact spelling first, else the one that is the same name in NFC. */
+export function findStoredProfile(store: ProfileStore, name: string): VoiceProfile | undefined {
+  return store.profiles.find(p => p.name === name) ?? store.profiles.find(p => sameSpeakerName(p.name, name))
+}
+
 export function mergeProfilesInStore(
   store: ProfileStore,
   into: string,
@@ -520,7 +525,7 @@ export function mergeProfilesInStore(
   options: { cap?: number } = {},
 ): MergeOutcome {
   const cap = options.cap ?? 40
-  const target = store.profiles.find(p => sameSpeakerName(p.name, into))
+  const target = findStoredProfile(store, into)
   const outcome: MergeOutcome = {
     similarity: {},
     samplesBefore: target?.embeddings.length ?? 0,
@@ -538,18 +543,23 @@ export function mergeProfilesInStore(
   const sources = [...(target.sources ?? [])]
   while (sources.length < embeddings.length) sources.push(UNKNOWN_SOURCE)
 
+  // Sources are the stored profiles themselves, never the spelling asked for: a name stored decomposed and its composed twin are two
+  // profiles (the twin is merged into the one that was asked for), and the target is never its own source.
+  const absorbed = new Set<VoiceProfile>()
   for (const name of from) {
-    if (sameSpeakerName(name, into)) continue
-    const source = store.profiles.find(p => sameSpeakerName(p.name, name))
-    if (!source) { outcome.missing.push(name); continue }
-    outcome.similarity[name] = profileSimilarity(target, source)
-    const sourceSources = [...(source.sources ?? [])]
-    while (sourceSources.length < source.embeddings.length) sourceSources.push(UNKNOWN_SOURCE)
-    for (let i = 0; i < source.embeddings.length; i++) {
-      embeddings.push(source.embeddings[i])
-      sources.push(sourceSources[i] ?? UNKNOWN_SOURCE)
+    const found = store.profiles.filter(p => p !== target && !absorbed.has(p) && sameSpeakerName(p.name, name))
+    if (found.length === 0) { if (!store.profiles.some(p => sameSpeakerName(p.name, name) && p !== target)) outcome.missing.push(name); continue }
+    for (const source of found) {
+      outcome.similarity[name] = profileSimilarity(target, source)
+      const sourceSources = [...(source.sources ?? [])]
+      while (sourceSources.length < source.embeddings.length) sourceSources.push(UNKNOWN_SOURCE)
+      for (let i = 0; i < source.embeddings.length; i++) {
+        embeddings.push(source.embeddings[i])
+        sources.push(sourceSources[i] ?? UNKNOWN_SOURCE)
+      }
+      outcome.mergedFrom.push(source.name)
+      absorbed.add(source)
     }
-    outcome.mergedFrom.push(name)
   }
 
   if (outcome.mergedFrom.length === 0) return outcome
@@ -570,8 +580,7 @@ export function mergeProfilesInStore(
   target.sources = keep.map(i => sources[i])
   outcome.samplesAfter = target.embeddings.length
 
-  const removed = new Set(outcome.mergedFrom)
-  store.profiles = store.profiles.filter(p => !removed.has(p.name))
+  store.profiles = store.profiles.filter(p => !absorbed.has(p))
   return outcome
 }
 
@@ -584,7 +593,7 @@ export function deleteProfileFromStore(
   let removedProfiles = 0
   let removedEmbeddings = 0
   store.profiles = store.profiles.filter(profile => {
-    if (profile.name !== name) return true
+    if (!sameSpeakerName(profile.name, name)) return true
     removedProfiles++
     removedEmbeddings += profile.embeddings.length
     return false
