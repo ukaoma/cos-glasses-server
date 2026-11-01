@@ -90,7 +90,8 @@ describe('what mask does not know', () => {
     ['a Spanish password label', 'contraseña: Clave9876 para entrar', 'Clave9876'],
     ['a German password label', 'Passwort = Geheim1234 gilt', 'Geheim1234'],
     ['an email address', 'write to jane.doe@example.com about it', 'jane.doe'],
-    ['a full-width email address', 'write to ｊａｎｅ＠ｅｘａｍｐｌｅ．ｃｏｍ about it', 'example.com'],
+    ['a bare pass with a digit (only the port knows)', 'login pass: abcd1234 for the box', 'abcd1234'],
+    ['a full-width email address', 'write to ｊａｎｅ＠ｅｘａｍｐｌｅ．ｃｏｍ about it', 'example.com', 'ｊａｎｅ', 'ｅｘａｍｐｌｅ'],
     ['a URL with a query token', 'open https://docs.example.com/page?token=abcdef123456 now', 'abcdef123456'],
   ])('hides %s', (_name, input, ...fragments) => { gone(input, ...fragments) })
 
@@ -106,6 +107,25 @@ describe('read, redact, then cut', () => {
     const lead = 'a '.repeat(66) // 132 characters
     const out = gone(`${lead}export OPENAI_API_KEY=abc123def456ghi789 trailing words`, 'OPENAI_API_KEY=abc', 'abc1', 'ghi789')
     expect(points(out)).toBeLessThanOrEqual(FIND_PROMPT_CHARS)
+  })
+
+  it('hides a phone number that the cut would otherwise split into a visible half', () => {
+    const lead = 'ab '.repeat(47) + 'c' // 142 characters; the number starts at 143 and the cut falls after its second group
+    const out = gone(`${lead} 512 555 0199 and then some words`, '512', '555', '0199')
+    expect(out.startsWith('ab ab')).toBe(true)
+    expect(points(out)).toBeLessThanOrEqual(FIND_PROMPT_CHARS)
+  })
+
+  it('hides a quoted secret with spaces in it whole, not the part in front of the cut', () => {
+    const lead = 'a '.repeat(63) // 126 characters, so the cut falls right after "horse"
+    const out = gone(`${lead}password: "correct horse battery staple" and more words`, 'horse', 'battery', 'staple', 'correct')
+    expect(out.startsWith('a a')).toBe(true)
+  })
+
+  it('drops the token a 300 unit slice by the server redaction cut, when that leaves fewer than the limit', () => {
+    const out = redactForModel('😀'.repeat(100) + ' ' + 'x'.repeat(150), 200)
+    expect(out).not.toContain('x')
+    expect(points(out)).toBe(100)
   })
 
   it('masks a pair whose value starts before the cut and ends after it', () => {

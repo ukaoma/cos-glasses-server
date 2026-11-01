@@ -79,6 +79,13 @@ describe('one Choice, then the yes/no view', () => {
     expect(out.asked).toHaveLength(FIND_CHOICE_OPTIONS)
   })
 
+  it('asks the yes/no question about at most 12 sessions', async () => {
+    const first = many(0, 20)
+    const f = fake({ choice: () => ({ byOption: Object.fromEntries(first.map(c => [c.option, 0.04])) }), noul: () => 0.5 })
+    await run(new SessionFindAsker(), f, { first })
+    expect(f.reranks()[0]!.texts).toHaveLength(FIND_RERANK_TOP)
+  })
+
   it('shows at most 5 rows even when more clear the floor', async () => {
     const first = many(0, 12)
     const f = fake({ choice: () => ({ byOption: Object.fromEntries(first.map(c => [c.option, 0.08])) }), noul: () => 0.9 })
@@ -152,6 +159,16 @@ describe('the second request and the none rule', () => {
     const out = await run(new SessionFindAsker(), f, { first, second, stage: 'full' })
     expect(out.noneMin).toBeLessThan(FIND_NONE_ABSTAIN)
     expect(out.rows.map(r => r.key)).toEqual(['claude:s104'])
+  })
+
+  it('takes the lowest none, not the last: an answer in the first request is not erased by a second request with no answer', async () => {
+    const first = many(0, 20), second = many(100, 20)
+    const f = fake({ choice: options => options.includes(second[0]!.option) ? { byOption: {}, none: 0.9 } : { byOption: { [first[2]!.option]: 0.5, [first[3]!.option]: 0.45 }, none: 0.05 }, noul: text => text.includes('topic 2 ') || text.endsWith('topic 2') ? 0.8 : 0.01 })
+    const out = await run(new SessionFindAsker(), f, { first, second, stage: 'full' })
+    expect(f.choices()).toHaveLength(2)
+    expect(out.noneMin).toBe(0.05)
+    expect(out.verdict).not.toBe('abstain')
+    expect(out.rows.map(r => r.key)).toEqual(['claude:s2'])
   })
 
   it('abstains when every request says none at 0.8 or more, and spends no yes/no round', async () => {
