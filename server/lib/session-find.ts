@@ -157,10 +157,29 @@ export interface SessionFindAnswer {
   skipped: number
   /** No model was called for this answer. */
   cached: boolean
+  /** On `cap_reached`: when that provider's ledger next resets. On `breaker_open`: when the breaker reopens. ISO 8601 UTC; absent when not known. */
+  resetsAt?: string
 }
 
-export function unavailableAnswer(reason: SessionFindReason, provider: DecisionProvider | null = null): SessionFindAnswer {
-  return { available: false, reason, message: SESSION_FIND_MESSAGES[reason], provider, storesData: provider === 'subq', rows: [], asked: 0, reachedBack: null, skipped: 0, cached: false }
+export function unavailableAnswer(reason: SessionFindReason, provider: DecisionProvider | null = null, resetsAt?: string): SessionFindAnswer {
+  return { available: false, reason, message: SESSION_FIND_MESSAGES[reason], provider, storesData: provider === 'subq', rows: [], asked: 0, reachedBack: null, skipped: 0, cached: false, ...(resetsAt ? { resetsAt } : {}) }
+}
+
+/**
+ * When a cap or a pause ends, read from the clients' own bookkeeping and never guessed. Both ledgers (JevClient `today()`, SubqDecisionClient
+ * `day()`) key a day by `now.toISOString().slice(0, 10)`, so a cap clears at the next UTC midnight of the client's clock. A breaker opens until
+ * the client's `breakerOpenUntil` (Jev reports it as an ISO string, SubQ as epoch milliseconds). Unknown stays undefined.
+ */
+export function resetsAtFor(reason: SessionFindReason, client: DecisionClient, provider: DecisionProvider, jev: JevClient | null, nowMs: number): string | undefined {
+  if (reason === 'cap_reached') {
+    const day = new Date(nowMs)
+    return new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() + 1)).toISOString()
+  }
+  if (reason !== 'breaker_open') return undefined
+  let until: number | null = null
+  if (provider === 'subq') { if (client instanceof SubqDecisionClient) until = client.status().breakerOpenUntil }
+  else if (jev) { const iso = jev.status().breakerOpenUntil; until = iso ? Date.parse(iso) : null }
+  return until !== null && Number.isFinite(until) && until > nowMs ? new Date(until).toISOString() : undefined
 }
 
 /** Every failure a model or its ledger can raise, as one of the contract's reasons. Anything not named is `failed`. */
@@ -258,7 +277,7 @@ export class SessionFinder {
     // The snapshot is the provider this whole search uses. A settings change between the two reads above and this one is refused.
     if ((client.provider ?? 'jev') !== provider) return unavailableAnswer('provider_changed', provider)
     const full = deps.capacity(client, provider, deps.jev)
-    if (full) return unavailableAnswer(full, provider)
+    if (full) return unavailableAnswer(full, provider, resetsAtFor(full, client, provider, deps.jev, (deps.now ?? Date.now)()))
 
     try {
       const roots = deps.roots()
@@ -307,7 +326,7 @@ export class SessionFinder {
       const reason = reasonFor(error)
       // Fixed words only: never the query, never a session.
       console.warn(`[session-find] unavailable: ${reason}`)
-      return unavailableAnswer(reason, provider)
+      return unavailableAnswer(reason, provider, resetsAtFor(reason, client, provider, deps.jev, (deps.now ?? Date.now)()))
     }
   }
 }
