@@ -1,3 +1,10 @@
+## 6.97.3 - Speaker names and session find, from QA (private candidate)
+
+2026-11-01. A private candidate for one Mac. Pairs with COS Control 0.5.363.
+
+- Accented names: merge, delete-person, calibration and the embeddings manager now match a stored name in either Unicode form, and a confirm on a decomposed name records the person's confirmation.
+- Session find: a title or prompt cut inside an attachment is dropped instead of sent, Windows, volume and escaped-space home paths are masked, ordinary words like `/home/dashboard` stay, and IP or host-with-port links are masked. Refusals log one line per reason, with no words.
+
 ## 6.97.2 - Local paths stay off the search (private candidate)
 
 2026-11-01. A private candidate for one Mac. Pairs with COS Control 0.5.363.
