@@ -101,6 +101,7 @@ describe('grounded cues in the engine', () => {
         expect({ judge: calls.judge, judgeB: calls.judgeB, files: calls.files, orientation: calls.orientation, notes: calls.notes }, `${setting} ${JSON.stringify(e)}`).toEqual({ judge: 1, judgeB: 0, files: 0, orientation: 0, notes: 0 })
         expect(Object.keys(evaluation()).filter(k => ['grounding', 'judge', 'arms', 'excludedSelf', 'filesError', 'orientationError'].includes(k))).toEqual([])
         expect(evaluation().kept).toBe(1)                                                     // classic keeps its count
+        expect(evaluation()).not.toHaveProperty('keptIds')
       }
     })
     it('only the exact value classic forces: grounded in env does not turn grounding on, and a saved grounded runs it', async () => {
@@ -164,7 +165,7 @@ describe('grounded cues in the engine', () => {
       yes = { N1: 0.9 }
       writerText = () => JSON.stringify({ cue: 'Overage is 12% with no cap set. Name who quotes the cap today.', kind: 'challenge', memoryIds: ['N1'] })
       await feed(engine())
-      expect(evaluation()).toMatchObject({ candidates: 1, cueMemorySource: 'notes', kept: ['N1'] })
+      expect(evaluation()).toMatchObject({ candidates: 1, cueMemorySource: 'notes', kept: 1, keptIds: ['N1'] })
       expect(logged[0]).toMatchObject({ memorySource: 'notes', arms: ['notes'] })
     })
     it('files and orientation that throw are traced as codes only and the meeting carries on', async () => {
@@ -220,7 +221,7 @@ describe('grounded cues in the engine', () => {
       writerText = () => JSON.stringify({ cue: 'The plan says twelve percent. Confirm the cap.', kind: 'challenge', memoryIds: ['F1'] })
       await feed(engine())
       expect(calls.judgedIds[0]).toEqual(['M1', 'M2', 'M3', 'M4', 'F1'])
-      expect(evaluation()).toMatchObject({ arms: { files: 1 }, kept: ['F1'] })
+      expect(evaluation()).toMatchObject({ arms: { files: 1 }, kept: 1, keptIds: ['F1'] })
       expect(cue()!.sources).toEqual([{ id: sourceId({ id: 'F1', date: '2026-10-14', title: 'plan.pdf', notes: '', key: 'file:plan' }), date: '2026-10-14', title: 'plan.pdf', kind: 'file', fileId: 'plan' }])
       expect(logged[0]).toMatchObject({ arms: ['cue_memory', 'files'] })
     })
@@ -230,7 +231,7 @@ describe('grounded cues in the engine', () => {
       yes = { F1: 0.9 }
       writerText = () => JSON.stringify({ cue: 'The plan says twelve percent. Confirm the cap.', kind: 'challenge', memoryIds: ['F1'] })
       await feed(engine())
-      expect(evaluation()).toMatchObject({ candidates: 1, cueMemorySource: 'none', kept: ['F1'] })
+      expect(evaluation()).toMatchObject({ candidates: 1, cueMemorySource: 'none', kept: 1, keptIds: ['F1'] })
       expect(logged[0]).toMatchObject({ memorySource: 'none', arms: ['files'], kept: 1 })
     })
     it('a secret-held file with text, and a pending one, are never sent to the judge', async () => {
@@ -248,20 +249,20 @@ describe('grounded cues in the engine', () => {
       await feed(engine())
       expect(calls.judgeB).toBe(1)
       expect(calls.judge).toBe(0)
-      expect(evaluation().kept).toEqual(['M3', 'M1'])
+      expect(evaluation()).toMatchObject({ kept: 2, keptIds: ['M3', 'M1'] })
       expect(promptOf().memory.map(m => m.id)).toEqual(['M3', 'M1'])                          // ids keep their kind and are not renumbered
       expect((cue()!.sources as Array<{ title: string }>).map(x => x.title)).toEqual(['Past M1', 'Past M3'])   // the writer cited M1, M3 and M2; M2 was never kept
     })
     it('at most two are kept even when four pass', async () => {
       yes = { M1: 0.9, M2: 0.8, M3: 0.95, M4: 0.7 }
       await feed(engine())
-      expect(evaluation().kept).toEqual(['M3', 'M1'])
+      expect(evaluation()).toMatchObject({ kept: 2, keptIds: ['M3', 'M1'] })
     })
     it('nothing at or above the bar keeps nothing, and the writer still runs with no memory', async () => {
       yes = { M1: 0.64, M2: 0.5 }
       writerText = () => JSON.stringify({ cue: 'Overage is 12% with no cap set. Name who quotes the cap today.', kind: 'challenge', memoryIds: [] })
       await feed(engine())
-      expect(evaluation().kept).toEqual([])
+      expect(evaluation()).toMatchObject({ kept: 0, keptIds: [] })
       expect(promptOf().memory).toEqual([])
       expect(cue()!.sources).toEqual([])
     })
@@ -269,7 +270,7 @@ describe('grounded cues in the engine', () => {
       cueMemoryNotes = []
       await feed(engine())
       expect(calls.judgeB).toBe(0)
-      expect(evaluation()).toMatchObject({ candidates: 0, cueMemorySource: 'none', kept: [] })
+      expect(evaluation()).toMatchObject({ candidates: 0, cueMemorySource: 'none', kept: 0, keptIds: [] })
     })
     it('the judge sees the arm-time title, not the calendar title', async () => {
       orientation = { domain: 'quilt', title: 'Harborview renewal' }
@@ -297,7 +298,7 @@ describe('grounded cues in the engine', () => {
       env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_JUDGE_YES: '0.8' }
       yes = { M1: 0.79, M2: 0.8 }
       await feed(engine())
-      expect(evaluation().kept).toEqual(['M2'])
+      expect(evaluation()).toMatchObject({ kept: 1, keptIds: ['M2'] })
     })
   })
 
@@ -336,7 +337,7 @@ describe('grounded cues in the engine', () => {
       yes = { M1: 0.91234567, F1: 0.7 }
       await feed(engine())
       const t = evaluation()
-      expect(t).toMatchObject({ grounding: 'grounded', kept: ['M1', 'F1'], excludedSelf: 0, arms: { files: 1 }, candidates: 6, judgeTokens: 2300 })
+      expect(t).toMatchObject({ grounding: 'grounded', kept: 2, keptIds: ['M1', 'F1'], excludedSelf: 0, arms: { files: 1 }, candidates: 6, judgeTokens: 2300 })
       expect((t.arms as { cue_memory: unknown; notes: unknown }).cue_memory).toEqual(expect.any(Number))
       expect((t.arms as { cue_memory: unknown; notes: unknown }).notes).toEqual(expect.any(Number))
       expect(t.judge).toEqual([

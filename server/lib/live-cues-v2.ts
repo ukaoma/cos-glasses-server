@@ -957,7 +957,8 @@ export class LiveCuesV2Engine {
         Object.assign(trace, { judgeMs: Date.now() - t2, judgeTokens: judged.tokens })
         kept = mem.notes.filter(m => (judged.probs[m.id] ?? 0) >= liveCuesV2JudgeKeep(this.deps.env)).slice(0, L.judgeMaxNotes).map((m, i) => ({ ...m, id: `M${i + 1}` }))
       }
-      trace.kept = run ? kept.map(m => m.id) : kept.length
+      trace.kept = kept.length
+      if (run) trace.keptIds = kept.map(m => m.id)                      // grounded ids keep their kind (M1, N1, F1)
       if (abort.signal.aborted) { trace.outcome = 'cancelled'; return }
 
       // 6.79.2: limits lowered while this evaluation ran apply before the writer is charged.
