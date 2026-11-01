@@ -129,9 +129,35 @@ const BARE_KEY_PAIR = /(?<![A-Za-z0-9_.\-])(?:key|KEY|Key)[ \t]*[:=][ \t]*(?=[^\
 // An address with letters outside ASCII (josé@example.com); the server's own rule is ASCII only.
 const UNICODE_EMAIL = /[\p{L}\p{N}._%+\-]{1,64}@[\p{L}\p{N}.\-]{1,253}\.\p{L}{2,24}/gu
 
+// A path into someone's home folder carries the account name and the layout of the machine, and the consent line does not promise
+// either, so it goes out before anything else is read. A quoted path may hold spaces and dots ("Photos Library.photoslibrary/IMG 1.heic"),
+// so a path that opens inside a quote runs to the closing quote; any other runs to the next space. file:// anywhere goes too.
+const HOME_ROOT = String.raw`(?:file:\/\/[^"'\s]*|\/Users\/[^\/"'\n]+|\/home\/[^\/"'\n]+|~|[A-Za-z]:\\Users\\[^\\"'\n]+)`
+const QUOTED_HOME_PATH = new RegExp(String.raw`(["'\x60])${HOME_ROOT}(?:[\/\\][^"'\x60\n]*)?\1`, 'g')
+const BARE_HOME_PATH = new RegExp(String.raw`(?<![A-Za-z0-9_.\-\/\\~])(?:file:\/\/\S*|(?:\/Users|\/home)\/[^\s\/"'\x60]+(?:\/\S*)?|~\/\S*|[A-Za-z]:\\Users\\\S+)`, 'g')
+export const PATH_PLACEHOLDER = '[path]'
+
+/**
+ * What an agent app puts in front of the words: `@"/path/with spaces.png"`, `@'path'`, `@/path/file`, `@~/file`, `[Image: source: path]`,
+ * `[Image #1]`, `[Pasted text #1 +20 lines]`, and a bare path. Measured on the owner's newest 508 first prompts: 33 start with `@"`,
+ * 19 with `[Image`, 3 with a bare path; 25 carry more than one in a row. They are not what the person was asking, they eat the 150
+ * characters that make the match, and a path in them names the account. They are dropped from the front, repeatedly, until the words
+ * begin. An `@name` with no slash or dot is a mention and stays.
+ */
+const LEADING_ATTACHMENT = /^\s*(?:@"[^"]*"|@'[^']*'|@(?:~|\.{0,2})?\/\S*|@[^\s\/]*\.(?:png|jpe?g|gif|heic|webp|pdf|txt|md|tsx?|jsx?|json|py|swift|csv|xlsx?|docx?|pptx?|html?|css|log|zip|mov|mp4|wav|mp3|sh|ya?ml|toml)\b|\[(?:Image|Pasted text|Pasted image|File|Attachment)[^\]]*\]|(?:\/Users|\/home)\/\S+|~\/\S+|file:\/\/\S+)\s*/
+export function stripLeadingAttachments(text: string): string {
+  let out = text
+  for (let i = 0; i < 20; i++) {
+    const next = out.replace(LEADING_ATTACHMENT, '')
+    if (next === out) break
+    out = next
+  }
+  return out
+}
+
 export function maskMore(text: string): string {
   // An address goes out as a space, as searchOptionText does, so a query that is only an address is left empty.
-  let out = text.replace(UNICODE_EMAIL, ' ')
+  let out = text.replace(QUOTED_HOME_PATH, PATH_PLACEHOLDER).replace(BARE_HOME_PATH, PATH_PLACEHOLDER).replace(UNICODE_EMAIL, ' ')
   for (const re of [KEY_PAIR, SPOKEN_KEY_PAIR, BARE_KEY_PAIR, FOREIGN_CREDENTIAL, SHORT_STRIPE_KEY, SSN_LABELLED, SSN, CARD_NUMBER, PHONE_INTERNATIONAL, PHONE_NANP]) out = out.replace(re, HIDDEN)
   // Base64 that carries + or /, and the padded or long kind: mixed case with a digit, so a path or a word is left alone.
   return out.replace(BASE64_RUN, run => (/[A-Z]/.test(run) && /[a-z]/.test(run) && /\d/.test(run) && (/[+/=]/.test(run) || run.length >= 40)) ? HIDDEN : run)
@@ -192,8 +218,8 @@ const norm = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' 
  * of the prompt, so the prompt alone says it and a second copy of the words would only cost tokens.
  */
 export function candidateTexts(title: string, typed: string): CandidateTexts {
-  const t = redactForModel(title, FIND_TITLE_CHARS, title.length === 80 || title.length === 120)
-  const prompt = redactForModel(typed, FIND_PROMPT_CHARS)
+  const t = redactForModel(stripLeadingAttachments(title), FIND_TITLE_CHARS, title.length === 80 || title.length === 120)
+  const prompt = redactForModel(stripLeadingAttachments(typed), FIND_PROMPT_CHARS)
   if (!prompt) return { option: t, prompt: '' }
   const titleWords = norm(t)
   if (!titleWords || (titleWords.length >= 12 && norm(prompt).startsWith(titleWords.slice(0, 30)))) return { option: prompt, prompt }

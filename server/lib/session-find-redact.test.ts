@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  FIND_PROMPT_CHARS, FIND_QUERY_CHARS, FIND_SCAN_CHARS, FIND_TITLE_CHARS, HIDDEN, candidateTexts, credentialKey, cutAtCodePoints, maskKeyShapes, maskMore, redactForModel, redactQuery,
+  PATH_PLACEHOLDER, stripLeadingAttachments, FIND_PROMPT_CHARS, FIND_QUERY_CHARS, FIND_SCAN_CHARS, FIND_TITLE_CHARS, HIDDEN, candidateTexts, credentialKey, cutAtCodePoints, maskKeyShapes, maskMore, redactForModel, redactQuery,
 } from './session-find-redact.js'
 
 const points = (s: string) => Array.from(s).length
@@ -257,5 +257,79 @@ describe('what a session is asked as', () => {
 
   it('has a title alone when the prompt hides entirely', () => {
     expect(candidateTexts('Short title here', 'jane@example.com')).toEqual({ option: 'Short title here', prompt: '' })
+  })
+})
+
+describe('what an agent app puts in front of the words', () => {
+  // Fake paths throughout. The shapes are the ones measured on the owner's newest 508 first prompts: 33 start with @", 19 with [Image, 3 with a path.
+  it.each([
+    ['a quoted path with spaces and a .heic', '@"/Users/jane doe/Photos Library.photoslibrary/IMG 1.heic" I need to resolve an issue', 'I need to resolve an issue'],
+    ['a single-quoted path', "@'/home/jane/My Files/a.b.png' what is this", 'what is this'],
+    ['a bare @ path', '@/Users/jane/proj/src/x.ts fix the overlay', 'fix the overlay'],
+    ['an @ home path', '@~/notes/today.md summarize it', 'summarize it'],
+    ['an @ file name with an extension', '@report.pdf summarize it', 'summarize it'],
+    ['an image with a source path', '[Image: source: /Users/jane/Desktop/shot 1.png] describe this', 'describe this'],
+    ['an image number', '[Image #1] words here', 'words here'],
+    ['a pasted text marker', '[Pasted text #1 +20 lines] why does this fail', 'why does this fail'],
+    ['a chain of all of them', `@"/Users/a/b.png" @'/home/x/y z.txt' [Image #2] @/Users/a/c.ts real words`, 'real words'],
+    ['a bare path first', '/Users/jane/proj/file.ts is broken', 'is broken'],
+    ['a bare ~ path first', '~/Documents/my.notes.md is the file', 'is the file'],
+    ['a file URL first', 'file:///Users/jane/a.png ok then', 'ok then'],
+  ])('drops %s from the front', (_name, text, words) => {
+    expect(stripLeadingAttachments(text)).toBe(words)
+    const { option, prompt } = candidateTexts('A title', text)
+    expect(prompt).toBe(words)
+    expect(option).toBe(`A title: ${words}`)
+  })
+
+  it('keeps a mention, and attachments that are not at the front', () => {
+    expect(stripLeadingAttachments('@john can you look at this')).toBe('@john can you look at this')
+    expect(stripLeadingAttachments('look at @"/Users/jane/a.png" please')).toBe('look at @"/Users/jane/a.png" please')
+    expect(candidateTexts('t', 'look at @"/Users/jane/a.png" please').prompt).toBe(`look at @${PATH_PLACEHOLDER} please`)
+  })
+
+  it('gives the 150 characters to the words, not the path', () => {
+    const words = 'I need to resolve an issue with the importer that drops the second page of every scan '.repeat(3)
+    const { prompt } = candidateTexts('t', `@"/Users/jane doe/Photos Library.photoslibrary/IMG 1.heic" ${words}`)
+    expect(prompt.startsWith('I need to resolve')).toBe(true)
+    expect(points(prompt)).toBeGreaterThan(130)
+  })
+
+  it('strips the title too, and leaves nothing when a title is only an attachment', () => {
+    expect(candidateTexts('@"/Users/jane/My Pic.png" Fix the crop', 'the crop is off by a few pixels today please').option.startsWith('Fix the crop: ')).toBe(true)
+    expect(candidateTexts('@/Users/jane/a.png', 'the crop is off by a few pixels today please')).toEqual({ option: 'the crop is off by a few pixels today please', prompt: 'the crop is off by a few pixels today please' })
+  })
+
+  it('returns an empty prompt when the prompt was only attachments', () => {
+    expect(candidateTexts('Short title here', '@"/Users/jane/a.png" [Image #2]')).toEqual({ option: 'Short title here', prompt: '' })
+  })
+})
+
+describe('a home path anywhere', () => {
+  const account = /jane|doe|ukaoma|Photos|IMG|\.heic|Desktop|Documents/
+  it.each([
+    ['a quoted path with spaces and dots', 'open "/Users/jane doe/Photos Library.photoslibrary/IMG 1.heic" please', 'open [path] please'],
+    ['a single-quoted home path', "see '/home/jane/My Notes/a.b.c.txt' now", 'see [path] now'],
+    ['a backtick-quoted ~ path', 'run `~/Documents/my project/run.sh` first', 'run [path] first'],
+    ['a bare /Users path', 'the file /Users/jane/Desktop/a.png is huge', 'the file [path] is huge'],
+    ['a bare /home path', 'in /home/jane/proj/src it fails', 'in [path] it fails'],
+    ['a bare ~ path', 'edit ~/Documents/notes.md today', 'edit [path] today'],
+    ['a file URL', 'open file:///Users/jane/a.png now', 'open [path] now'],
+    ['a quoted file URL with spaces', 'open "file:///Users/jane doe/a b.png" now', 'open [path] now'],
+    ['a Windows path', 'it is C:\\Users\\jane\\Desktop\\a.png here', 'it is [path] here'],
+    ['a bare account folder', 'cd /Users/jane then ls', 'cd [path] then ls'],
+  ])('replaces %s', (_name, text, expected) => {
+    expect(redactForModel(text, 150)).toBe(expected)
+    expect(redactForModel(text, 150)).not.toMatch(account)
+  })
+
+  it('does the same to the search words and to a title', () => {
+    expect(redactQuery('where did I put /Users/jane/Desktop/a.png')).toBe('where did I put [path]')
+    expect(candidateTexts('Fix ~/Documents/x.md', 'a prompt about something else entirely here').option).toBe('Fix [path]: a prompt about something else entirely here')
+  })
+
+  it('leaves ordinary paths and words alone', () => {
+    const text = 'edit server/lib/session-find.ts and the ~ key, not /usr/local/bin or http://example.com/x'
+    expect(redactForModel(text, 150)).not.toContain(PATH_PLACEHOLDER)
   })
 })
