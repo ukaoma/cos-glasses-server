@@ -1,3 +1,13 @@
+## Unreleased - Opt-in fast checks and fenced test modes for the server's own test suite (no behavior change)
+
+Development tooling only. `npm test` is unchanged: serial, one worker, the shared test data home, and still the release gate. Nothing below runs unless someone asks for it, and none of it ships in the npm package (`test-support/` and `scripts/` sit outside `files`; `package-contents.test.ts` asserts it).
+
+- `npm run preflight` runs the seconds-long checks that have failed late in a full run, first and fast (about 20 s): duplicate-file check, `git diff --check`, `tsc --noEmit`, then seven contract test files by explicit list. A missing file fails it. `npm test` still runs all of them again.
+- `npm run check:duplicates` lists iCloud conflict copies (`name 2.ts`) anywhere in the package, including the ones `.gitignore` hides from `git status`. It never excludes silently and exits 1 with the list.
+- `npm run test:fenced-serial` and `npm run test:fenced-parallel` (`COS_TEST_FENCE=1`) give each forked test file its own data home, `HOME` and `TMPDIR` under a short `/tmp/cos-v-*` path. Parallel is two vitest invocations: the files that can share a machine at 2 workers, then the files that spawn processes, bound wall-clock time or touch global paths, one at a time. One measured pair: 475 s against 707 s for the gate, with one timing test (a known flake) differing. These modes are not the gate, and parity has not been qualified over repeated runs.
+- `scripts/qualify-parallel.mjs` compares two runs test by test and checks that a run changed nothing outside its scratch area (live data home, `/tmp/cos-*.json`, the checkout's `server/data`). `test-support/known-flakes.txt` lists tests that flake under load; only that script reads it.
+- Two fixed `/tmp` paths gained an override, so a test run can stop sharing them with a running server: `COS_CLI_SESSIONS_FILE` (default `/tmp/cos-cli-sessions.json`) and `COS_SPEAKER_TRAINING_DIR` (default `/tmp/cos-speaker-training`). Unset, both paths are exactly what they were. The Codex and Cursor engine-session files already had overrides.
+
 ## 6.97.0 - COS's token ledger records what providers report, and a stopped meeting no longer locks Update (private candidate)
 
 2026-10-31. A private candidate for one Mac, built on 6.96.4. Pairs with the COS cost view in the next COS Control build, which reads the ledger file directly; there is no new endpoint.

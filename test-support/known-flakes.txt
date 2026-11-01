@@ -1,0 +1,9 @@
+# Tests that flake under machine load. Read ONLY by scripts/qualify-parallel.mjs, to tell a known flake
+# from a real parity difference between two runs. `npm test` never reads it and a flake still fails there.
+#
+# Format: <test id, exactly as qualify-parallel.mjs prints it>, a TAB, then the reason and the evidence.
+# The ID is "<file> :: <describe titles and test title joined by spaces>". A difference on a listed ID is
+# printed as KNOWN-FLAKE, listed in full, and not counted as a parity failure (exit 3, not 1).
+# qualify warns when an entry matches no test in either run, so a renamed test cannot rot here silently.
+# Add an entry only with a measured failure and a passing re-run of the same test.
+server/lib/attached-provider-adapter.process-tree.e2e.test.ts :: attached turn cancel against a real process tree (6.53.3) a tool that stops one second after SIGTERM settles then, not after the five-second grace	Asserts settleMs < 2400 on a real SIGTERM grace. Failed "expected 2546 to be less than 2400" in fenced-parallel's serial-set invocation (2026-10-31, load average 9 to 15), alone in its invocation; an earlier serial run flaked "2410 < 2400" (research-2); passed 5 of 5 solo re-runs, fenced and unfenced, at 2.6 to 3.6 s.

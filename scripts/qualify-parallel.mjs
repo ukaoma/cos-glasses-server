@@ -5,6 +5,11 @@
 //   node scripts/qualify-parallel.mjs run <serial|fenced-serial|fenced-parallel> [--out <dir>]
 //                                         [--control-seconds N] [--allow <path-substring>]...
 //   node scripts/qualify-parallel.mjs diff <a.ids.json> <b.ids.json>
+//
+// Known flakes: test-support/known-flakes.txt lists test IDs that fail under machine load. Only this script
+// reads it (`npm test` never does). A difference on a listed ID is printed as KNOWN-FLAKE, in full, and is
+// not counted as a parity failure. Exit codes: 0 identical, 1 a real difference or failure, 3 only known
+// flakes differ or failed.
 //   node scripts/qualify-parallel.mjs snapshot --out <file>
 //
 // run:  1. snapshot live paths, wait --control-seconds (default 60), snapshot again. Whatever changed
@@ -32,6 +37,20 @@ import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
+export const KNOWN_FLAKES_FILE = join(ROOT, 'test-support', 'known-flakes.txt')
+
+/** Map of test ID to reason. Lines: ID, TAB, reason; "#" lines are comments. */
+export function readKnownFlakes(path = KNOWN_FLAKES_FILE) {
+  const flakes = new Map()
+  if (!existsSync(path)) return flakes
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    if (!line.trim() || line.startsWith('#')) continue
+    const [id, ...reason] = line.split('\t')
+    flakes.set(id.trim(), reason.join('\t').trim())
+  }
+  return flakes
+}
+
 const KNOWN_ALLOWED = ['server/data/openai-tts-budget.json']
 // Processes that write to a live path on their own, whatever the tests do. A change matching one is
 // reported as "live" with its writer named, and does not fail the run. Anything else under a live
@@ -126,11 +145,28 @@ export function extractIds(jsonPaths) {
   return { tests, files }
 }
 
-export function diffIds(a, b) {
+export function diffIds(a, b, flakes = new Map()) {
   const onlyA = Object.keys(a.tests).filter(k => !(k in b.tests))
   const onlyB = Object.keys(b.tests).filter(k => !(k in a.tests))
   const differ = Object.keys(a.tests).filter(k => k in b.tests && a.tests[k] !== b.tests[k]).map(k => ({ id: k, a: a.tests[k], b: b.tests[k] }))
-  return { onlyA, onlyB, differ }
+  // A known flake is moved aside, never dropped: it comes back in `flaky` with the reason.
+  const flaky = []
+  const keep = (id, entry) => (flakes.has(id) ? (flaky.push({ id, ...entry, reason: flakes.get(id) }), false) : true)
+  return {
+    onlyA: onlyA.filter(id => keep(id, { kind: 'only-a', a: a.tests[id] })),
+    onlyB: onlyB.filter(id => keep(id, { kind: 'only-b', b: b.tests[id] })),
+    differ: differ.filter(d => keep(d.id, { kind: 'differ', a: d.a, b: d.b })),
+    flaky,
+  }
+}
+
+/**
+ * 0 clean; 3 only known flakes failed; 1 anything else: a real failure, a test write, a missing report,
+ * or a non-zero exit with no failed test in the report (a crash is never a flake).
+ */
+export function exitCodeFor({ vitestStatus, clean, realFailures, flakeFailures }) {
+  if (clean && vitestStatus === 0) return 0
+  return clean && vitestStatus !== 0 && realFailures === 0 && flakeFailures > 0 ? 3 : 1
 }
 
 function countStatuses(tests) {
@@ -195,24 +231,36 @@ function runMode() {
   writeFileSync(join(outDir, `${mode}.ids.json`), JSON.stringify({ mode, wallSeconds, ...ids }, null, 1))
   writeFileSync(join(outDir, `${mode}.summary.json`), JSON.stringify(summary, null, 1))
 
+  const flakes = readKnownFlakes()
+  const failedIds = Object.entries(ids.tests).filter(([, status]) => status === 'failed').map(([id]) => id)
+  const flakeFailures = failedIds.filter(id => flakes.has(id))
+  const realFailures = failedIds.filter(id => !flakes.has(id))
+  summary.failed = { real: realFailures, knownFlakes: flakeFailures }
+  writeFileSync(join(outDir, `${mode}.summary.json`), JSON.stringify(summary, null, 1))
   console.log(`\nqualify ${mode}: exit ${result.status}, ${wallSeconds.toFixed(1)}s wall, ${summary.tests} test IDs in ${summary.files} files, ${JSON.stringify(summary.counts)}`)
   console.log(`qualify live paths: ${violations.length} test write(s), ${summary.livePathChanges.allowed} allowed (known ledger), ${summary.livePathChanges.live} live-process (named writer), ${summary.livePathChanges.leftover} fence leftover dir(s), ${summary.livePathChanges.noisy} noisy (changed in the idle control window too)`)
   for (const c of classified.filter(c => c.class !== 'noisy')) console.log(`  ${(c.class === 'violation' ? 'TEST-WRITE' : c.class.toUpperCase()).padEnd(10)} ${c.kind.padEnd(8)} ${c.key}${c.writer ? `  <- ${c.writer}` : ''}`)
   if (missingJson.length > 0) console.log(`qualify: JSON report missing: ${missingJson.join(', ')}`)
-  process.exit(result.status === 0 && violations.length === 0 && missingJson.length === 0 ? 0 : 1)
+  for (const id of flakeFailures) console.log(`  KNOWN-FLAKE failed: ${id}\n      why: ${flakes.get(id)}`)
+  for (const id of realFailures) console.log(`  FAILED: ${id}`)
+  process.exit(exitCodeFor({ vitestStatus: result.status, clean: violations.length === 0 && missingJson.length === 0, realFailures: realFailures.length, flakeFailures: flakeFailures.length }))
 }
 
 function diffMode() {
   const [pa, pb] = [process.argv[3], process.argv[4]]
   const a = JSON.parse(readFileSync(pa, 'utf8'))
   const b = JSON.parse(readFileSync(pb, 'utf8'))
-  const { onlyA, onlyB, differ } = diffIds(a, b)
+  const flakes = readKnownFlakes()
+  const { onlyA, onlyB, differ, flaky } = diffIds(a, b, flakes)
   console.log(`diff ${a.mode} (${Object.keys(a.tests).length} IDs, ${a.wallSeconds?.toFixed?.(1)}s) vs ${b.mode} (${Object.keys(b.tests).length} IDs, ${b.wallSeconds?.toFixed?.(1)}s)`)
-  console.log(`  only in ${a.mode}: ${onlyA.length}\n  only in ${b.mode}: ${onlyB.length}\n  status differs: ${differ.length}`)
+  console.log(`  only in ${a.mode}: ${onlyA.length}\n  only in ${b.mode}: ${onlyB.length}\n  status differs: ${differ.length}\n  known flakes (listed, not counted): ${flaky.length}`)
   for (const id of onlyA) console.log(`  ONLY-A  ${id}  [${a.tests[id]}]`)
   for (const id of onlyB) console.log(`  ONLY-B  ${id}  [${b.tests[id]}]`)
   for (const d of differ) console.log(`  DIFFER  ${d.id}  ${a.mode}=${d.a} ${b.mode}=${d.b}`)
-  process.exit(onlyA.length + onlyB.length + differ.length === 0 ? 0 : 1)
+  for (const f of flaky) console.log(`  KNOWN-FLAKE  ${f.id}  ${f.kind} ${a.mode}=${f.a ?? '-'} ${b.mode}=${f.b ?? '-'}\n      why: ${f.reason}`)
+  for (const id of flakes.keys()) if (!(id in a.tests) && !(id in b.tests)) console.log(`  WARNING known-flakes.txt entry matches no test in either run: ${id}`)
+  const real = onlyA.length + onlyB.length + differ.length
+  process.exit(real > 0 ? 1 : flaky.length > 0 ? 3 : 0)
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
