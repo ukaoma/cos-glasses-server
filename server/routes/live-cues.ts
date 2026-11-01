@@ -8,6 +8,7 @@
 // GET  /live-cues/status               -> engine snapshot + capability
 // GET  /live-cues/v2/settings           -> { enabled, source: env|setting|default, capability }       (6.76.2)
 // POST /live-cues/v2/settings { enabled } -> same shape; 409 { error: 'env_forced' } when env forces v2 on
+//   ?v=2 / {v: 2}: the spend limits (6.79.2). ?v=3 / {v: 3}: the cue mode, grounded cues and the general-cue limits (live cues v3).
 // POST /live-cues/feedback { sessionId, cueId, verdict, note? } -> { ok, cueId, verdict, vote }                 (6.79.0)
 // GET  /live-cues/history?days=7&sessionId=a,b&unrated=1&limit=200 -> { v: 1, cues, counts, truncated, skipped, maxCuesPerMeeting, meetings? } (6.79.0)
 
@@ -20,8 +21,11 @@ import {
   LiveCuesArmError,
 } from '../lib/live-cues-engine.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
-import { applyLiveCuesV2Settings, liveCuesV2SettingsViewV2 } from '../lib/live-cues-v2.js'
-import { LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, limitInBounds, type LiveCuesV2StoredLimits } from '../lib/live-cues-v2-settings.js'
+import { applyLiveCuesV2Settings, liveCuesV2SettingsViewV2, liveCuesV2SettingsViewV3 } from '../lib/live-cues-v2.js'
+import {
+  LIVE_CUES_GENERAL_LIMIT_BOUNDS, LIVE_CUES_GENERAL_LIMIT_NAMES, LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, generalLimitInBounds, isCueMode, isGrounding, limitInBounds,
+  type LiveCuesGeneralStoredLimits, type LiveCuesV2StoredLimits,
+} from '../lib/live-cues-v2-settings.js'
 import { LIVE_CUES_V2_LIMITS, LiveCuesV2ArmError, liveCuesV2, liveCuesV2Advertised, liveCuesV2Enabled, liveCuesV2MeetingCounters, liveCuesV2SettingsView, peekLiveCuesV2, setLiveCuesV2Enabled } from '../lib/live-cues-v2.js'
 import { LIVE_CUE_VERDICTS_PROTOCOL, LIVE_CUE_VERDICT_LIMITS, VerdictsUnreadableError, isCueVerdict, liveCueVerdicts } from '../lib/live-cue-verdicts.js'
 
@@ -202,15 +206,15 @@ liveCuesRouter.get('/live-cues/history', (req, res) => {
 liveCuesRouter.get('/live-cues/v2/settings', (req, res) => {
   res.set('Cache-Control', 'private, no-store')
   const v = req.query.v
-  if (v !== undefined && v !== '2') return res.status(400).json({ error: 'invalid_request', reason: 'unsupported_version' })
-  try { return res.json(v === '2' ? liveCuesV2SettingsViewV2() : liveCuesV2SettingsView()) } catch { return res.status(503).json({ error: 'settings_unavailable' }) }
+  if (v !== undefined && v !== '2' && v !== '3') return res.status(400).json({ error: 'invalid_request', reason: 'unsupported_version' })
+  try { return res.json(v === '3' ? liveCuesV2SettingsViewV3() : v === '2' ? liveCuesV2SettingsViewV2() : liveCuesV2SettingsView()) } catch { return res.status(503).json({ error: 'settings_unavailable' }) }
 })
 
 const V2_SETTINGS_KEYS = new Set<string>(['v', 'enabled', ...LIVE_CUES_V2_LIMIT_NAMES])
 liveCuesRouter.post('/live-cues/v2/settings', (req, res) => {
   res.set('Cache-Control', 'private, no-store')
   const body = req.body as { enabled?: unknown; v?: unknown } | undefined
-  if (body && typeof body === 'object' && !Array.isArray(body) && body.v !== undefined) return postSettingsV2(body as Record<string, unknown>, res)
+  if (body && typeof body === 'object' && !Array.isArray(body) && body.v !== undefined) return postSettingsVersioned(body as Record<string, unknown>, res)
   if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean') {
     return res.status(400).json({ error: 'invalid_request' })
   }
@@ -223,12 +227,19 @@ liveCuesRouter.post('/live-cues/v2/settings', (req, res) => {
   }
 })
 
-/** POST {v: 2, ...}: every field is checked before anything is saved, so a refused request changes nothing. */
-function postSettingsV2(body: Record<string, unknown>, res: import('express').Response) {
-  if (body.v !== 2) return res.status(400).json({ error: 'invalid_request', reason: 'unsupported_version' })
-  const unknown = Object.keys(body).find(k => !V2_SETTINGS_KEYS.has(k))
+const V3_SETTINGS_KEYS = new Set<string>([...V2_SETTINGS_KEYS, 'cueMode', 'grounding', ...LIVE_CUES_GENERAL_LIMIT_NAMES.map(name => LIVE_CUES_GENERAL_LIMIT_BOUNDS[name].field)])
+
+/** POST {v: 2, ...} (the spend limits, 6.79.2) and POST {v: 3, ...} (live cues v3: the same plus cueMode, grounding and the six
+ *  general limits). Every field is checked before anything is saved, so a refused request changes nothing. v=2 takes none of
+ *  the v3 fields (unknown_field), exactly as before. A bad enum is invalid_value; a number out of bounds names the wire field. */
+function postSettingsVersioned(body: Record<string, unknown>, res: import('express').Response) {
+  if (body.v !== 2 && body.v !== 3) return res.status(400).json({ error: 'invalid_request', reason: 'unsupported_version' })
+  const v3 = body.v === 3
+  const unknown = Object.keys(body).find(k => !(v3 ? V3_SETTINGS_KEYS : V2_SETTINGS_KEYS).has(k))
   if (unknown) return res.status(400).json({ error: 'invalid_request', reason: 'unknown_field', field: unknown })
   if (body.enabled !== undefined && typeof body.enabled !== 'boolean') return res.status(400).json({ error: 'invalid_request', reason: 'invalid_enabled', field: 'enabled' })
+  if (v3 && body.cueMode !== undefined && !isCueMode(body.cueMode)) return res.status(400).json({ error: 'invalid_request', reason: 'invalid_value', field: 'cueMode' })
+  if (v3 && body.grounding !== undefined && !isGrounding(body.grounding)) return res.status(400).json({ error: 'invalid_request', reason: 'invalid_value', field: 'grounding' })
   const limits: LiveCuesV2StoredLimits = {}
   for (const name of LIVE_CUES_V2_LIMIT_NAMES) {
     if (body[name] === undefined) continue
@@ -238,11 +249,21 @@ function postSettingsV2(body: Record<string, unknown>, res: import('express').Re
     }
     limits[name] = body[name] as number
   }
-  if (body.enabled === undefined && Object.keys(limits).length === 0) return res.status(400).json({ error: 'invalid_request', reason: 'empty' })
+  const general: LiveCuesGeneralStoredLimits = {}
+  for (const name of LIVE_CUES_GENERAL_LIMIT_NAMES) {
+    const b = LIVE_CUES_GENERAL_LIMIT_BOUNDS[name]
+    if (body[b.field] === undefined) continue
+    if (!generalLimitInBounds(name, body[b.field])) return res.status(400).json({ error: 'invalid_request', reason: 'out_of_bounds', field: b.field, min: b.min, max: b.max, integer: b.integer })
+    general[name] = body[b.field] as number
+  }
+  const v3Fields = body.cueMode !== undefined || body.grounding !== undefined || Object.keys(general).length > 0
+  if (body.enabled === undefined && Object.keys(limits).length === 0 && !v3Fields) return res.status(400).json({ error: 'invalid_request', reason: 'empty' })
   try {
-    const result = applyLiveCuesV2Settings({ ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}), limits })
-    if (!result.ok) return res.status(409).json(result.error === 'env_locked' ? { error: 'env_locked', fields: result.fields } : { error: result.error })
-    return res.json(liveCuesV2SettingsViewV2())
+    const result = applyLiveCuesV2Settings({ ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}), limits,
+      ...(isCueMode(body.cueMode) ? { cueMode: body.cueMode } : {}), ...(isGrounding(body.grounding) ? { grounding: body.grounding } : {}),
+      ...(Object.keys(general).length ? { general } : {}) })
+    if (!result.ok) return res.status(409).json(result.error === 'env_locked' ? { error: 'env_locked', fields: result.fields } : result.fields ? { error: 'env_forced', fields: result.fields } : { error: result.error })
+    return res.json(v3 ? liveCuesV2SettingsViewV3() : liveCuesV2SettingsViewV2())
   } catch {
     return res.status(500).json({ error: 'settings_write_failed' })
   }

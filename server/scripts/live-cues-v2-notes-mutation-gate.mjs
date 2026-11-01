@@ -35,10 +35,10 @@ const mutations = [
   m('env-forced-wins-over-setting', SETTINGS, ["if (liveCuesV2EnvForced(env)) return { enabled: true, source: 'env' }", 'if (false) return { enabled: true, source: \'env\' }']),
   m('saved-setting-read', SETTINGS, ["if (stored !== null) return { enabled: stored, source: 'setting' }", "if (stored === true) return { enabled: stored, source: 'setting' }"]),
   m('malformed-setting-is-none', SETTINGS, ["if (typeof r.enabled === 'boolean') value = r.enabled", 'if (r.enabled !== undefined) value = r.enabled as boolean']),
-  m('cache-follows-write', SETTINGS, ["{ mode: 0o600 })\n    this.cache = { value, limits }\n", '{ mode: 0o600 })\n']),
+  m('cache-follows-write', SETTINGS, ["{ mode: 0o600 })\n    this.cache = { value, limits, cueMode, grounding, general }\n", '{ mode: 0o600 })\n']),
   m('failed-write-keeps-memory', SETTINGS, [
-    ['    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })\n', '    this.cache = { value, limits }\n    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })\n'],
-    ["{ mode: 0o600 })\n    this.cache = { value, limits }\n", '{ mode: 0o600 })\n']]),
+    ['    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })\n', '    this.cache = { value, limits, cueMode, grounding, general }\n    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })\n'],
+    ["{ mode: 0o600 })\n    this.cache = { value, limits, cueMode, grounding, general }\n", '{ mode: 0o600 })\n']]),
   m('settings-file-private', SETTINGS, ["+ '\\n', { mode: 0o600 })", "+ '\\n', { mode: 0o644 })"]),
   m('engine-reads-setting', ENGINE, ['private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, this.deps.settings) }', 'private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, null) }']),
   m('feed-stops-while-off', ENGINE, ['    if (!this.enabled()) return\n    if (this.deps.store.isEnded(sessionId)) return', '    if (this.deps.store.isEnded(sessionId)) return']),

@@ -27,12 +27,16 @@ import { DecisionProviderError, SubqDecisionClient, trackSubqDecisionClient, typ
 import type { DecisionProvider } from './decision-settings.js'
 import { resolveSubqKey } from './subq-key.js'
 import {
-  LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, liveCuesV2EnvForced, liveCuesV2Settings, resolveLiveCuesV2,
-  type LiveCuesV2LimitName, type LiveCuesV2SettingReader, type LiveCuesV2SettingSource, type LiveCuesV2StoredLimits,
+  LIVE_CUES_GENERAL_LIMIT_BOUNDS, LIVE_CUES_GENERAL_LIMIT_NAMES, LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, liveCuesV2EnvForced, liveCuesV2Settings,
+  resolveLiveCuesCueMode, resolveLiveCuesGrounding, resolveLiveCuesV2,
+  type LiveCuesCueMode, type LiveCuesGeneralLimitName, type LiveCuesGeneralStoredLimits, type LiveCuesGrounding, type LiveCuesV2LimitName, type LiveCuesV2Mode,
+  type LiveCuesV2SettingReader, type LiveCuesV2SettingSource, type LiveCuesV2StoredLimits,
 } from './live-cues-v2-settings.js'
 import { notesMemory } from './live-cues-v2-notes.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
 import { getMeetingStore } from './meeting-store.js'
+import { MeetingAskStore } from './meeting-ask-store.js'
+import { getOwnerHomeArea } from './profile.js'
 import { LensGistLimitError, runLensGistEngine } from './lens-gist-engines.js'
 import { resolveProviderBinary } from './provider-binary.js'
 import { COS_SCRIPTS_DIR, PYTHON_BIN, contextSourceAvailable } from './python-bridge.js'
@@ -149,6 +153,29 @@ export function resolveLiveCuesV2Limits(env: NodeJS.ProcessEnv = process.env, se
   for (const name of LIVE_CUES_V2_LIMIT_NAMES) {
     const b = LIVE_CUES_V2_LIMIT_BOUNDS[name]
     const e = fromEnv[name], v = saved[name]
+    out[name] = e !== null ? { value: e, source: 'env', locked: true, min: b.min, max: b.max, default: b.default }
+      : v !== undefined ? { value: v, source: 'setting', locked: false, min: b.min, max: b.max, default: b.default }
+        : { value: b.default, source: 'default', locked: false, min: b.min, max: b.max, default: b.default }
+  }
+  return out
+}
+/** Live cues v3: the six general-cue limits, resolved like the v2 ones: an env value in bounds wins and locks, else the saved
+ *  value, else the default. An env value out of bounds is ignored with one log line per value. */
+export type LiveCuesGeneralLimits = Record<LiveCuesGeneralLimitName, LiveCuesV2Limit>
+export function resolveLiveCuesGeneralLimits(env: NodeJS.ProcessEnv = process.env, settings: LiveCuesV2SettingReader | null = liveCuesV2Settings()): LiveCuesGeneralLimits {
+  let saved: LiveCuesGeneralStoredLimits = {}
+  try { saved = settings?.generalLimits?.() ?? {} } catch { saved = {} }
+  const out = {} as LiveCuesGeneralLimits
+  for (const name of LIVE_CUES_GENERAL_LIMIT_NAMES) {
+    const b = LIVE_CUES_GENERAL_LIMIT_BOUNDS[name]
+    let e: number | null
+    if (b.integer) e = envWhole(env, b.env, b.min, b.max)
+    else {
+      const raw = env[b.env]
+      const n = raw === undefined || raw.trim() === '' ? null : Number(raw)
+      e = n === null ? null : n >= b.min && n <= b.max ? n : knobFallback<number | null>(b.env, raw!, null, `a number from ${b.min} to ${b.max}`)
+    }
+    const v = saved[name]
     out[name] = e !== null ? { value: e, source: 'env', locked: true, min: b.min, max: b.max, default: b.default }
       : v !== undefined ? { value: v, source: 'setting', locked: false, min: b.min, max: b.max, default: b.default }
         : { value: b.default, source: 'default', locked: false, min: b.min, max: b.max, default: b.default }
@@ -1044,13 +1071,51 @@ export function liveCuesV2SettingsViewV2(env: NodeJS.ProcessEnv = process.env): 
   return { ...liveCuesV2SettingsView(env), v: 2, limits, writerCallsPerMeeting: 2 * limits.maxCuesPerMeeting.value, today: liveCuesV2().today() }
 }
 
+/** GET/POST /api/live-cues/v2/settings with v=3 (live cues v3): the v2 body (with `v: 3`) plus the cue mode, grounded cues and the
+ *  general-cue limits. An older server answers ?v=3 with 400 unsupported_version, which is Control's signal to hide these. */
+export interface GeneralCuesToday { day: string; topicCalls: number; webSearches: number; breakerOpenUntil: number | null }
+export interface LiveCuesV2SettingsResponseV3 extends Omit<LiveCuesV2SettingsResponseV2, 'v'> {
+  v: 3
+  cueMode: LiveCuesV2Mode<LiveCuesCueMode>
+  grounding: LiveCuesV2Mode<LiveCuesGrounding>
+  general: { limits: LiveCuesGeneralLimits; today: GeneralCuesToday; publicTopics: boolean; homeArea: string | null }
+}
+/** Today's general-cue counters and breaker come from the general runner, which registers itself here. Until it does (and
+ *  whenever general cues have never run) they read as zero. */
+let generalTodayProvider: (() => GeneralCuesToday) | null = null
+export function setGeneralCuesTodayProvider(provider: (() => GeneralCuesToday) | null): void { generalTodayProvider = provider }
+export function liveCuesV2SettingsViewV3(env: NodeJS.ProcessEnv = process.env): LiveCuesV2SettingsResponseV3 {
+  const v2 = liveCuesV2SettingsViewV2(env)
+  const settings = liveCuesV2Settings()
+  let today: GeneralCuesToday
+  try { today = generalTodayProvider ? generalTodayProvider() : { day: v2.today.day, topicCalls: 0, webSearches: 0, breakerOpenUntil: null } } catch { today = { day: v2.today.day, topicCalls: 0, webSearches: 0, breakerOpenUntil: null } }
+  let publicTopics = false
+  try { publicTopics = new MeetingAskStore().publicTopics() } catch { publicTopics = false }
+  let homeArea: string | null = null
+  try { homeArea = getOwnerHomeArea() } catch { homeArea = null }
+  return { ...v2, v: 3, cueMode: resolveLiveCuesCueMode(env, settings), grounding: resolveLiveCuesGrounding(env, settings),
+    general: { limits: resolveLiveCuesGeneralLimits(env, settings), today, publicTopics, homeArea } }
+}
+
+/** What a v3 POST may change beyond the v2 patch. */
+export interface LiveCuesV3Patch { cueMode?: LiveCuesCueMode; grounding?: LiveCuesGrounding; general?: LiveCuesGeneralStoredLimits }
+
 /** Save the switch and any limits in ONE write, after every check passed: nothing is saved when any part is refused.
  *  Turning v2 off stops evaluations in flight; limits apply from each meeting's next evaluation. */
-export function applyLiveCuesV2Settings(patch: { enabled?: boolean; limits: LiveCuesV2StoredLimits }, env: NodeJS.ProcessEnv = process.env):
-  { ok: true } | { ok: false; error: 'env_forced' } | { ok: false; error: 'env_locked'; fields: LiveCuesV2LimitName[] } {
+export function applyLiveCuesV2Settings(patch: { enabled?: boolean; limits: LiveCuesV2StoredLimits } & LiveCuesV3Patch, env: NodeJS.ProcessEnv = process.env):
+  { ok: true } | { ok: false; error: 'env_forced'; fields?: Array<'cueMode' | 'grounding'> } | { ok: false; error: 'env_locked'; fields: string[] } {
   if (patch.enabled === false && liveCuesV2EnvForced(env)) return { ok: false, error: 'env_forced' }
+  // Live cues v3: env may force only the SAFE value, so the only refused request is one for the other value.
+  const forced: Array<'cueMode' | 'grounding'> = []
+  if (patch.cueMode !== undefined && patch.cueMode !== 'focused' && resolveLiveCuesCueMode(env, liveCuesV2Settings()).locked) forced.push('cueMode')
+  if (patch.grounding !== undefined && patch.grounding !== 'classic' && resolveLiveCuesGrounding(env, liveCuesV2Settings()).locked) forced.push('grounding')
+  if (forced.length) return { ok: false, error: 'env_forced', fields: forced }
   const current = resolveLiveCuesV2Limits(env, liveCuesV2Settings())
-  const locked = (Object.keys(patch.limits) as LiveCuesV2LimitName[]).filter(name => current[name].locked)
+  const generalNow = resolveLiveCuesGeneralLimits(env, liveCuesV2Settings())
+  const locked: string[] = [
+    ...(Object.keys(patch.limits) as LiveCuesV2LimitName[]).filter(name => current[name].locked),
+    ...(Object.keys(patch.general ?? {}) as LiveCuesGeneralLimitName[]).filter(name => generalNow[name].locked).map(name => LIVE_CUES_GENERAL_LIMIT_BOUNDS[name].field),
+  ]
   if (locked.length) return { ok: false, error: 'env_locked', fields: locked }
   const wasOn = liveCuesV2Enabled(env)
   liveCuesV2Settings().update(patch)
@@ -1062,6 +1127,9 @@ export function applyLiveCuesV2Settings(patch: { enabled?: boolean; limits: Live
   }
   const changed = Object.entries(patch.limits).map(([k, v]) => `${k}=${v}`).join(' ')
   if (changed) console.log(`[live-cues-v2] limits saved: ${changed}`)
+  const v3 = [patch.cueMode ? `cueMode=${patch.cueMode}` : '', patch.grounding ? `grounding=${patch.grounding}` : '',
+    ...Object.entries(patch.general ?? {}).map(([k, v]) => `general.${k}=${v}`)].filter(Boolean).join(' ')
+  if (v3) console.log(`[live-cues-v2] settings saved: ${v3}`)
   return { ok: true }
 }
 /** What /api/health, /api/models and the status route advertise: NOTHING while v2 is switched off, so a 6.10.642
