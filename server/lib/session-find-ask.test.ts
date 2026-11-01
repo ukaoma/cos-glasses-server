@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { DecisionProviderError, type DecisionClient, type DecisionProvider } from './decision-provider.js'
 import {
-  FIND_CHOICE_OPTIONS, FIND_MAX_ROWS, FIND_NONE_ABSTAIN, FIND_RERANK_TOP, FIND_TUNING, SessionFindAsker, collapseIdentical, parseChoice, strengthFor, type AskCandidate,
+  FIND_CHOICE_OPTIONS, FIND_MAX_ROWS, FIND_RERANK_TOP, FIND_TUNING, SessionFindAsker, collapseIdentical, parseChoice, strengthFor, type AskCandidate,
 } from './session-find-ask.js'
 
 const cand = (n: number, option = `session ${n} about topic ${n}`, clockMs = 1_000_000 - n): AskCandidate => ({ key: `claude:s${n}`, option, clockMs })
@@ -105,7 +105,7 @@ describe('one Choice, then the yes/no view', () => {
     const first = many(0, 30)
     const f = fake({ choice: () => ({ byOption: Object.fromEntries(first.map(c => [c.option, FIND_TUNING.jev.rerankMinRaw - 0.005])) }) })
     const out = await run(new SessionFindAsker(), f, { first })
-    expect(out.noneMin).toBeLessThan(FIND_NONE_ABSTAIN)
+    expect(out.noneMin).toBeLessThan(FIND_TUNING.jev.abstainNone)
     expect(f.reranks()).toHaveLength(0)
     expect(out.verdict).toBe('below_floor')
   })
@@ -157,7 +157,7 @@ describe('the second request and the none rule', () => {
     const first = many(0, 20), second = many(100, 20)
     const f = fake({ choice: options => options.includes(second[4]!.option) ? { byOption: { [second[4]!.option]: 0.95 }, none: 0.02 } : { byOption: { [first[0]!.option]: 0.05 }, none: 0.83 }, noul: text => text.includes('topic 104') ? 0.9 : 0.02 })
     const out = await run(new SessionFindAsker(), f, { first, second, stage: 'full' })
-    expect(out.noneMin).toBeLessThan(FIND_NONE_ABSTAIN)
+    expect(out.noneMin).toBeLessThan(FIND_TUNING.jev.abstainNone)
     expect(out.rows.map(r => r.key)).toEqual(['claude:s104'])
   })
 
@@ -214,7 +214,40 @@ describe('the second request and the none rule', () => {
   })
 })
 
+describe('per provider tuning', () => {
+  it('abstains at each provider\'s own none: SubQ at 0.5 where Jev still answers', async () => {
+    const first = many(0, 10)
+    const script = (provider: DecisionProvider) => fake({ provider, choice: () => ({ byOption: { [first[0]!.option]: 0.4 }, none: 0.6 }), noul: () => 0.9 })
+    const subq = await run(new SessionFindAsker(), script('subq'), { first })
+    expect(subq.verdict).toBe('abstain')
+    const jev = await run(new SessionFindAsker(), script('jev'), { first })
+    expect(jev.verdict).not.toBe('abstain')
+  })
+
+  it('turns SubQ\'s yes/no round on with one tuning field, and then uses it', async () => {
+    const tuning = FIND_TUNING.subq, original = { ...tuning }
+    try {
+      tuning.rerank = true
+      const first = many(0, 8)
+      const f = fake({ provider: 'subq', choice: () => ({ byOption: { [first[1]!.option]: 0.5, [first[4]!.option]: 0.4 }, none: 0.1 }), noul: t => t.includes('topic 4') ? 0.95 : 0.1 })
+      const out = await run(new SessionFindAsker(), f, { first })
+      expect(f.reranks()).toHaveLength(1)
+      expect(out.rows.map(r => [r.key, r.strength])).toEqual([['claude:s4', 'strong']])
+    } finally { Object.assign(tuning, original) }
+  })
+})
+
 describe('forks and identical text', () => {
+  it('scores identical text by its best member: 0.01 in the first request and 0.92 in the second is 0.92', async () => {
+    const same = 'Same words in two places'
+    const first = [cand(0, same, 9_000), ...many(1, 5)], second = [cand(200, same, 100), ...many(201, 5)]
+    const f = fake({ choice: options => options.includes(second[1]!.option) ? { byOption: { [same]: 0.92 }, none: 0.05 } : { byOption: { [same]: 0.01, [first[1]!.option]: 0.3 }, none: 0.1 }, noul: t => t.includes('Same words') ? 0.9 : 0.01 })
+    const out = await run(new SessionFindAsker(), f, { first, second, stage: 'full' })
+    expect(f.reranks()[0]!.texts).toHaveLength(2)
+    expect(out.rows.map(r => r.key).sort()).toEqual(['claude:s0', 'claude:s200'])
+  })
+
+
   it('collapses identical text into one option and gives every member the probability', async () => {
     const same = 'Genshin settings: the Mac froze while playing'
     const first = [cand(0, same, 5_000), cand(1, 'unrelated session one'), cand(2, same, 4_000), cand(3, 'unrelated session two')]
@@ -272,6 +305,20 @@ describe('the cache', () => {
     expect(f.choices()).toHaveLength(1)
     await run(asker, f, { first, second, query: 'two stages', stage: 'full' })
     expect(f.choices()).toHaveLength(2)
+  })
+
+  it('does not call a request joined to another\'s in-flight call cached', async () => {
+    const first = many(0, 6)
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    const f = fake({ choice: () => ({ byOption: { [first[0]!.option]: 0.7 } }), noul: () => 0.8 })
+    const slow = { ...f.client, ask: async (...args: Parameters<DecisionClient['ask']>) => { await gate; return f.client.ask(...args) } }
+    const asker = new SessionFindAsker()
+    const input = { query: 'joined in flight', stage: 'first' as const, first, second: async () => [] }
+    const a = asker.ask({ ...input, client: slow }), b = asker.ask({ ...input, client: slow })
+    release()
+    const [ra, rb] = await Promise.all([a, b])
+    expect([ra.cached, rb.cached]).toEqual([false, false])
   })
 
   it('lets a search typed twice at once share one request', async () => {
