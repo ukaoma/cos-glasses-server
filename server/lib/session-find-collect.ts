@@ -54,8 +54,12 @@ import {
 } from './agent-session-store.js'
 import { ACTIVITY_READ_CONCURRENCY, mapWithConcurrency, readSessionActivity } from './agent-session-activity.js'
 
-/** What is read from the top of a file, decompressed. 256 KB found 135 of 172 Codex first prompts, 1 MB found 151. */
-export const FIND_HEAD_BYTES = 1024 * 1024
+/**
+ * The most that is read from the top of a file (decompressed) to find its first typed prompt, stopping at the first one. A typed
+ * prompt is rarely deep: 256 KB found 135 of 172 Codex first prompts, 1 MB found 151, 16 MB all of them. Only a file that has none
+ * near the top reads further, so the cost lands on long machine runs, once per file (the memo keeps the answer).
+ */
+export const FIND_HEAD_BYTES = 16 * 1024 * 1024
 const FIND_CHUNK_BYTES = 64 * 1024
 /** A title seen this many times in the pool is a machine run (a routine, a proxy, a probe), not a conversation. */
 export const FIND_REPEAT_TITLE_LIMIT = 5
@@ -342,6 +346,8 @@ export interface FindPoolOptions {
   /** Test seam: where the zstd decoder comes from. Defaults to node:zlib at the call. */
   zstd?: ZstdFactory
   maxOpen?: number
+  /** Test seam: how far into a file to look for the first typed prompt. Defaults to FIND_HEAD_BYTES. */
+  headBytes?: number
 }
 
 const normTitle = (title: string) => title.toLowerCase().replace(/\s+/g, ' ').trim()
@@ -432,7 +438,7 @@ export class SessionFindCollector {
       next += batch.length
       const results = await mapWithConcurrency(batch, ACTIVITY_READ_CONCURRENCY, async ref => {
         if (signal.aborted) return null
-        return this.inspect(ref, { desktopByCli, codexNames, cursorNames, keyed, zstd })
+        return this.inspect(ref, { desktopByCli, codexNames, cursorNames, keyed, zstd, headBytes: options.headBytes ?? FIND_HEAD_BYTES })
       })
       for (let i = 0; i < batch.length; i++) {
         const outcome = results[i]
@@ -534,13 +540,14 @@ export class SessionFindCollector {
     cursorNames: Map<string, string>
     keyed: ReadonlySet<string>
     zstd: ZstdFactory
+    headBytes: number
   }): Promise<{ candidate: FindCandidate | null; read: boolean; skip?: 'nodecoder' | 'unreadable' } | null> {
     let info = this.memo.get(ref.file)
     let read = false
     if (!info || info.mtimeMs !== ref.mtimeMs || info.size !== ref.size) {
       const parser = ref.provider === 'claude' ? parseClaudeHead() : ref.provider === 'codex' ? parseCodexHead() : parseCursorHead()
       try {
-        await readHeadLines(ref.file, ref.compressed, FIND_HEAD_BYTES, ctx.zstd, parser.onLine)
+        await readHeadLines(ref.file, ref.compressed, ctx.headBytes, ctx.zstd, parser.onLine)
       } catch (error) {
         return { candidate: null, read: false, skip: error instanceof NoDecoderError ? 'nodecoder' : 'unreadable' }
       }
