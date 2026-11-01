@@ -32,8 +32,6 @@ export type FindStrength = 'strong' | 'likely' | 'possible'
 export const FIND_CHOICE_OPTIONS = 254
 export const FIND_RERANK_TOP = 12
 export const FIND_MAX_ROWS = 5
-/** The lowest `none`, across the requests of one search, that reads as "nothing here". Measured: 0.88 to 1.00 on every query with no answer. */
-export const FIND_NONE_ABSTAIN = 0.8
 export const FIND_CACHE_MS = 10 * 60_000
 export const FIND_CACHE_ENTRIES = 200
 
@@ -41,21 +39,22 @@ export const FIND_CACHE_ENTRIES = 200
  * Floors and bands, per provider, in one place so they are easy to move. `floor` is the least probability a row may have to be
  * shown; `likely` and `strong` start the bands above it. `skipSecondAt` is the raw Choice probability of the top row that makes
  * the second request unnecessary. `rerankMinRaw` is the raw probability under which a session is not worth a yes/no question
- * (a search whose best session sits under it shows nothing and spends nothing more). `rerank` is whether the yes/no step is
+ * (a search whose best session sits under it shows nothing and spends nothing more). `abstainNone` is the lowest `none`, across the requests of one search, that reads as "nothing here" (Jev: 0.87 to 1.00 on every query with no answer). `rerank` is whether the yes/no step is
  * used for this provider; where it is off, rows are the Choice probabilities and the same floor and bands apply to them.
  *
  * JEV, from the re-run of the 20 canary queries through the real route on this Mac's own pool (2026-11-01, see
  * docs/decision-providers.md): the right session was first in 19 of 20 and in the top three in 19 of 20 (the one miss names a
  * category, "the editor", for a product, "Cursor", and no method found it). Its yes/no probability was 0.44 to 0.88; no row
  * above 0.6 was wrong (14 of 14 right). On the 7 queries with no answer, `none` was 0.87 to 1.00, so the abstain rule fired on
- * all 7; asked anyway, the yes/no round put the best of 12 at 0.08 to 0.28, so a floor of 0.30 would also have shown nothing.
+ * all 7; asked anyway, the yes/no round put the best of 12 at 0.08 to 0.28. Between 0.30 and 0.40 there were 0 right and 8 wrong rows and the lowest right answer was 0.44, so the floor is 0.40.
  * SUBQ is NOT measured on this path. Its numbers are the canary's small sample (right answers 0.75 to 1.00, a wrong top row at
  * 0.70) and the Choice alone, with the yes/no round off until it has been run against SubQ. They are a starting point.
  */
-export interface FindTuning { rerank: boolean; floor: number; likely: number; strong: number; skipSecondAt: number; rerankMinRaw: number }
+export interface FindTuning { rerank: boolean; abstainNone: number; floor: number; likely: number; strong: number; skipSecondAt: number; rerankMinRaw: number }
 export const FIND_TUNING: Record<DecisionProvider, FindTuning> = {
-  jev: { rerank: true, floor: 0.3, likely: 0.4, strong: 0.6, skipSecondAt: 0.6, rerankMinRaw: 0.02 },
-  subq: { rerank: false, floor: 0.5, likely: 0.7, strong: 0.9, skipSecondAt: 0.9, rerankMinRaw: 0.02 },
+  jev: { rerank: true, abstainNone: 0.8, floor: 0.4, likely: 0.5, strong: 0.6, skipSecondAt: 0.6, rerankMinRaw: 0.02 },
+  // SubQ: Choice only and a cautious abstain (its none was 0.50 to 0.97 on the canary's no-answer queries). To turn its yes/no round on, set rerank: true.
+  subq: { rerank: false, abstainNone: 0.5, floor: 0.5, likely: 0.7, strong: 0.9, skipSecondAt: 0.9, rerankMinRaw: 0.02 },
 }
 
 export const FIND_CHOICE_INSTRUCTIONS = 'The user typed `query` into the search box for their past AI coding and chat sessions (Claude Code, Codex and Cursor). '
@@ -146,11 +145,13 @@ export function parseChoice(answer: { probabilities?: Record<string, number> } |
 }
 
 
+/** A group's raw probability: the highest of its members (identical text can sit in two requests, and each member was scored there). */
+export const groupRaw = (group: Group, raw: ReadonlyMap<string, number>) => Math.max(0, ...group.members.map(m => raw.get(m.key) ?? 0))
 const newestClock = (group: Group) => Math.max(...group.members.map(m => m.clockMs))
 
 /** The groups worth a yes/no question: raw probability at or over the pre-floor, most likely first, newest first on a tie. */
 export function rankForRerank(asked: readonly AskCandidate[], raw: ReadonlyMap<string, number>, tuning: FindTuning): Group[] {
-  const rawOf = (group: Group) => raw.get(group.members[0]!.key) ?? 0
+  const rawOf = (group: Group) => groupRaw(group, raw)
   return collapseIdentical(asked).filter(g => rawOf(g) >= tuning.rerankMinRaw).sort((a, b) => rawOf(b) - rawOf(a) || newestClock(b) - newestClock(a))
 }
 
@@ -160,7 +161,7 @@ export function rankForRerank(asked: readonly AskCandidate[], raw: ReadonlyMap<s
  * Pure, so the numbers in docs/decision-providers.md can be re-derived from recorded probabilities.
  */
 export function shapeRows(scored: ReadonlyArray<{ group: Group; p: number }>, raw: ReadonlyMap<string, number>, tuning: FindTuning): AskedRow[] {
-  const rawOf = (group: Group) => raw.get(group.members[0]!.key) ?? 0
+  const rawOf = (group: Group) => groupRaw(group, raw)
   const rows: AskedRow[] = []
   for (const { group, p } of scored.filter(s => s.p >= tuning.floor).sort((a, b) => b.p - a.p || rawOf(b.group) - rawOf(a.group) || newestClock(b.group) - newestClock(a.group))) {
     for (const member of [...group.members].sort((a, b) => b.clockMs - a.clockMs)) {
@@ -171,6 +172,7 @@ export function shapeRows(scored: ReadonlyArray<{ group: Group; p: number }>, ra
   return rows
 }
 
+interface Tally { calls: number; tokens: number; joined: number }
 const digest = (...parts: string[]) => createHash('sha256').update(parts.join('\0')).digest('hex')
 
 export class SessionFindAsker {
@@ -179,13 +181,13 @@ export class SessionFindAsker {
   constructor(private readonly now: () => number = () => Date.now()) {}
 
   /** Cached values are read and written by key, so a hit for the same sessions in a different order is still a hit. */
-  private async remember<T>(key: string, tally: { calls: number; tokens: number }, load: () => Promise<{ value: T; tokens: number }>): Promise<T> {
+  private async remember<T>(key: string, tally: Tally, load: () => Promise<{ value: T; tokens: number }>): Promise<T> {
     const hit = this.cache.get(key)
     if (hit && this.now() - hit.at < FIND_CACHE_MS) return hit.value as T
     if (hit) this.cache.delete(key)
     const running = this.inflight.get(key)
     // The same request, typed twice before the first answers: the second waits and pays nothing.
-    if (running) return await running as T
+    if (running) { tally.joined += 1; return await running as T }
     const work = (async () => {
       const { value, tokens } = await load()
       tally.calls += 1
@@ -198,7 +200,7 @@ export class SessionFindAsker {
     try { return await work } finally { this.inflight.delete(key) }
   }
 
-  private async choice(client: DecisionClient, provider: DecisionProvider, query: string, candidates: readonly AskCandidate[], tally: { calls: number; tokens: number }): Promise<ChoiceResult> {
+  private async choice(client: DecisionClient, provider: DecisionProvider, query: string, candidates: readonly AskCandidate[], tally: Tally): Promise<ChoiceResult> {
     const groups = collapseIdentical(candidates)
     const set = candidates.map(c => `${c.key}\u0001${c.option}`).sort()
     const key = digest('choice', provider, normalizeQuery(query), ...set)
@@ -215,7 +217,7 @@ export class SessionFindAsker {
     })
   }
 
-  private async rerank(client: DecisionClient, provider: DecisionProvider, query: string, groups: readonly Group[], tally: { calls: number; tokens: number }): Promise<number[]> {
+  private async rerank(client: DecisionClient, provider: DecisionProvider, query: string, groups: readonly Group[], tally: Tally): Promise<number[]> {
     const key = digest('rerank', provider, normalizeQuery(query), ...groups.map(g => g.option).sort())
     const bySet = await this.remember<Record<string, number>>(key, tally, async () => {
       const questions: Record<string, unknown> = {}
@@ -234,9 +236,9 @@ export class SessionFindAsker {
     const tuning = FIND_TUNING[provider]
     const chunk = Math.max(1, Math.min(input.chunkSize ?? FIND_CHOICE_OPTIONS, FIND_CHOICE_OPTIONS))
     const stopped = () => input.shouldStop?.() === true
-    const tally = { calls: 0, tokens: 0 }
+    const tally: Tally = { calls: 0, tokens: 0, joined: 0 }
     const done = (partial: Partial<AskOutcome> & Pick<AskOutcome, 'verdict'>): AskOutcome => ({
-      rows: [], asked, modelCalls: tally.calls, tokens: tally.tokens, cached: tally.calls === 0 && asked.length > 0, noneMin: null, stopped: false, ...partial,
+      rows: [], asked, modelCalls: tally.calls, tokens: tally.tokens, cached: tally.calls === 0 && tally.joined === 0 && asked.length > 0, noneMin: null, stopped: false, ...partial,
     })
     const asked: AskCandidate[] = []
     const first = input.first.slice(0, chunk)
@@ -259,7 +261,7 @@ export class SessionFindAsker {
       }
     }
     noneMin = round(noneMin)
-    if (noneMin >= FIND_NONE_ABSTAIN) return done({ verdict: 'abstain', noneMin })
+    if (noneMin >= tuning.abstainNone) return done({ verdict: 'abstain', noneMin })
 
     const ranked = rankForRerank(asked, raw, tuning)
     if (ranked.length === 0) return done({ verdict: 'below_floor', noneMin })
@@ -271,7 +273,7 @@ export class SessionFindAsker {
       const probabilities = await this.rerank(input.client, provider, input.query, top, tally)
       scored = top.map((group, i) => ({ group, p: round(probabilities[i]!) }))
     } else {
-      scored = ranked.map(group => ({ group, p: round(raw.get(group.members[0]!.key) ?? 0) }))
+      scored = ranked.map(group => ({ group, p: round(groupRaw(group, raw)) }))
     }
     const rows = shapeRows(scored, raw, tuning)
     return done({ verdict: rows.length ? 'rows' : 'below_floor', rows, noneMin })
