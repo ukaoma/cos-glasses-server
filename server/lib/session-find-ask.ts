@@ -101,7 +101,7 @@ export interface AskOutcome {
   verdict: 'rows' | 'abstain' | 'below_floor' | 'no_candidates' | 'stopped'
 }
 
-interface Group { option: string; members: AskCandidate[] }
+export interface Group { option: string; members: AskCandidate[] }
 
 /** Identical option text becomes one option; members keep their order (newest first). */
 export function collapseIdentical(candidates: readonly AskCandidate[]): Group[] {
@@ -136,6 +136,32 @@ export function parseChoice(answer: { probabilities?: Record<string, number> } |
     p[index] = value
   }
   return { p, none }
+}
+
+
+const newestClock = (group: Group) => Math.max(...group.members.map(m => m.clockMs))
+
+/** The groups worth a yes/no question: raw probability at or over the pre-floor, most likely first, newest first on a tie. */
+export function rankForRerank(asked: readonly AskCandidate[], raw: ReadonlyMap<string, number>, tuning: FindTuning): Group[] {
+  const rawOf = (group: Group) => raw.get(group.members[0]!.key) ?? 0
+  return collapseIdentical(asked).filter(g => rawOf(g) >= tuning.rerankMinRaw).sort((a, b) => rawOf(b) - rawOf(a) || newestClock(b) - newestClock(a))
+}
+
+/**
+ * The rows: every scored group at or over the floor, most likely first (ties to the higher raw probability, then the newer
+ * session), each member of a collapsed group listed on its own with the group's probability, at most FIND_MAX_ROWS in all.
+ * Pure, so the numbers in docs/decision-providers.md can be re-derived from recorded probabilities.
+ */
+export function shapeRows(scored: ReadonlyArray<{ group: Group; p: number }>, raw: ReadonlyMap<string, number>, tuning: FindTuning): AskedRow[] {
+  const rawOf = (group: Group) => raw.get(group.members[0]!.key) ?? 0
+  const rows: AskedRow[] = []
+  for (const { group, p } of scored.filter(s => s.p >= tuning.floor).sort((a, b) => b.p - a.p || rawOf(b.group) - rawOf(a.group) || newestClock(b.group) - newestClock(a.group))) {
+    for (const member of [...group.members].sort((a, b) => b.clockMs - a.clockMs)) {
+      if (rows.length >= FIND_MAX_ROWS) break
+      rows.push({ key: member.key, probability: p, strength: strengthFor(tuning, p) })
+    }
+  }
+  return rows
 }
 
 const digest = (...parts: string[]) => createHash('sha256').update(parts.join('\0')).digest('hex')
@@ -228,11 +254,7 @@ export class SessionFindAsker {
     noneMin = round(noneMin)
     if (noneMin >= FIND_NONE_ABSTAIN) return done({ verdict: 'abstain', noneMin })
 
-    const byKey = new Map(asked.map(c => [c.key, c]))
-    const groups = collapseIdentical(asked)
-    const rawOf = (group: Group) => raw.get(group.members[0]!.key) ?? 0
-    const newest = (group: Group) => Math.max(...group.members.map(m => m.clockMs))
-    const ranked = groups.filter(g => rawOf(g) >= tuning.rerankMinRaw).sort((a, b) => rawOf(b) - rawOf(a) || newest(b) - newest(a))
+    const ranked = rankForRerank(asked, raw, tuning)
     if (ranked.length === 0) return done({ verdict: 'below_floor', noneMin })
 
     let scored: Array<{ group: Group; p: number }>
@@ -242,15 +264,9 @@ export class SessionFindAsker {
       const probabilities = await this.rerank(input.client, provider, input.query, top, tally)
       scored = top.map((group, i) => ({ group, p: round(probabilities[i]!) }))
     } else {
-      scored = ranked.map(group => ({ group, p: round(rawOf(group)) }))
+      scored = ranked.map(group => ({ group, p: round(raw.get(group.members[0]!.key) ?? 0) }))
     }
-    const rows: AskedRow[] = []
-    for (const { group, p } of scored.filter(s => s.p >= tuning.floor).sort((a, b) => b.p - a.p || rawOf(b.group) - rawOf(a.group) || newest(b.group) - newest(a.group))) {
-      for (const member of [...group.members].sort((a, b) => b.clockMs - a.clockMs)) {
-        if (rows.length >= FIND_MAX_ROWS) break
-        if (byKey.has(member.key)) rows.push({ key: member.key, probability: p, strength: strengthFor(tuning, p) })
-      }
-    }
+    const rows = shapeRows(scored, raw, tuning)
     return done({ verdict: rows.length ? 'rows' : 'below_floor', rows, noneMin })
   }
 }

@@ -274,13 +274,17 @@ describe('Codex', () => {
     expect(pool.skippedNoDecoder).toBe(0)
   })
 
-  it.runIf(hasZstd)('finds the first prompt within the head, and not beyond it', async () => {
-    const filler = line({ timestamp: iso(NOW), type: 'event_msg', payload: { type: 'token_count', pad: 'p'.repeat(200_000) } })
-    codex(340, { prompt: 'prompt inside the first megabyte', leading: filler.repeat(3), zst: true })
-    codex(341, { prompt: 'prompt beyond the first megabyte', leading: filler.repeat(Math.ceil(FIND_HEAD_BYTES / filler.length) + 2), zst: true })
-    codex(342, { prompt: 'plain prompt beyond the first megabyte', leading: filler.repeat(Math.ceil(FIND_HEAD_BYTES / filler.length) + 2) })
-    const pool = await collect(new SessionFindCollector())
+  it.runIf(hasZstd)('finds the first prompt within the head, and not beyond it, in plain and compressed files', async () => {
+    const filler = line({ timestamp: iso(NOW), type: 'event_msg', payload: { type: 'token_count', pad: 'p'.repeat(100_000) } })
+    const head = 512 * 1024
+    codex(340, { prompt: 'prompt inside the head', leading: filler.repeat(3), zst: true })
+    codex(341, { prompt: 'prompt beyond the head', leading: filler.repeat(Math.ceil(head / filler.length) + 2), zst: true })
+    codex(342, { prompt: 'plain prompt beyond the head', leading: filler.repeat(Math.ceil(head / filler.length) + 2) })
+    const pool = await collect(new SessionFindCollector(), 254, { headBytes: head })
     expect(ids(pool)).toEqual([uuid(340)])
+    // The default reaches far enough to find all three.
+    expect(FIND_HEAD_BYTES).toBeGreaterThanOrEqual(16 * 1024 * 1024)
+    expect(ids(await collect(new SessionFindCollector())).sort()).toEqual([uuid(340), uuid(341), uuid(342)])
   })
 })
 
