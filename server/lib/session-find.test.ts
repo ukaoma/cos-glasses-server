@@ -12,6 +12,8 @@ import {
   type SessionFindDependencies, type SessionFindRequest,
 } from './session-find.js'
 import { agentSessionRoots } from './agent-session-store.js'
+import { dataPath } from './data-dir.js'
+import { defaultSessionFindDependencies } from './session-find.js'
 
 const NOW = Date.parse('2026-11-01T12:00:00Z')
 const DAY = 86_400_000
@@ -333,5 +335,43 @@ describe('end to end on a fake home, real collector, real asker, scripted model'
 
     const none = await finder.find(req({ query: 'planning a half marathon training schedule' }), sig())
     expect(none).toMatchObject({ available: true, rows: [], asked: 3 })
+  })
+})
+
+describe('keyed sessions must not leave, even when their file is damaged', () => {
+  const file = () => dataPath('keyed-sessions.json')
+  afterEach(() => rmSync(file(), { force: true }))
+  const record = (id: string) => ({ id, engine: 'claude', profileId: 'p1', recordedAt: '2026-10-30T00:00:00.000Z' })
+
+  it('reads the ids of the keyed sessions, lower case, through the default dependencies', () => {
+    expect(defaultSessionFindDependencies().keyedIds().size).toBe(0)
+    writeFileSync(file(), JSON.stringify({ v: 1, sessions: [record('ABCDEF12-0000-4000-8000-000000000001')] }))
+    expect([...defaultSessionFindDependencies().keyedIds()]).toEqual(['abcdef12-0000-4000-8000-000000000001'])
+  })
+
+  it.each([['not JSON', '{"sessions": ['], ['the wrong shape', '{"v":1,"sessions":"x"}'], ['a record that is not one', JSON.stringify({ v: 1, sessions: [record('abcdef12-0000-4000-8000-000000000001'), { id: 7 }] })]])(
+    'throws for a file that is %s, where the list\'s reader would say "none"', (_name, body) => {
+      writeFileSync(file(), body)
+      expect(() => defaultSessionFindDependencies().keyedIds()).toThrow()
+    })
+
+  it('answers failed, reads no session and asks no model when the file is damaged', async () => {
+    writeFileSync(file(), '{"sessions": [')
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const d = deps({ pool: [cand(1)] })
+    const base = { ...d.base, keyedIds: defaultSessionFindDependencies().keyedIds }
+    const answer = await new SessionFinder(base).find(req(), sig())
+    expect(answer).toMatchObject({ available: false, reason: 'failed' })
+    expect(d.collect).not.toHaveBeenCalled()
+    expect(d.ask).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  it('answers failed (HTTP 200 through the route), not a thrown error, when the walk itself fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const d = deps({ pool: [cand(1)] })
+    d.collect.mockRejectedValue(new Error('EIO'))
+    expect(await d.finder.find(req(), sig())).toMatchObject({ available: false, reason: 'failed' })
+    vi.restoreAllMocks()
   })
 })

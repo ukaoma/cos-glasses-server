@@ -32,7 +32,7 @@ import { isAbortError, sharedSessionFindCollector, type FindCandidate, type Sess
 import { FIND_CHOICE_OPTIONS, SessionFindAsker, type AskCandidate, type FindStrength } from './session-find-ask.js'
 import { candidateTexts, redactQuery } from './session-find-redact.js'
 import { agentSessionRoots, type AgentSessionRoots } from './agent-session-store.js'
-import { listKeyedSessions } from './keyed-sessions.js'
+import { listKeyedSessionsStrict } from './keyed-sessions.js'
 
 export const SESSION_FIND_LIMITS = {
   /** After redaction, in code points. Control sends three or more words; a shorter redacted query is not worth a model call. */
@@ -197,7 +197,10 @@ export interface SessionFindDependencies {
   now?: () => number
 }
 
-/** Cap and breaker, read from the two clients' own status. An unreadable ledger reads as the cap reached. */
+/**
+ * Cap and breaker, read from the two clients' own status. SubQ's status reads an unreadable ledger as the cap reached. Jev's reads
+ * a missing or unreadable ledger as 0 used (jev.ts usedToday), so this check cannot catch one; the client's own write would.
+ */
 export function clientCapacity(client: DecisionClient, provider: DecisionProvider, jev: JevClient | null): 'cap_reached' | 'breaker_open' | null {
   if (provider === 'subq') {
     if (!(client instanceof SubqDecisionClient)) return null
@@ -217,7 +220,8 @@ export function defaultSessionFindDependencies(): SessionFindDependencies {
     asker: new SessionFindAsker(),
     decision: sharedSessionFindDecisionClient(),
     roots: () => agentSessionRoots(),
-    keyedIds: () => new Set(listKeyedSessions().map(record => record.id.toLowerCase())),
+    // Strict: a damaged keyed-sessions file must fail the search (reported as `failed`), not read as no keyed sessions.
+    keyedIds: () => new Set(listKeyedSessionsStrict().map(record => record.id.toLowerCase())),
     available: () => ({ find: sessionFindEnabled(), sessions: process.env.COS_CLAUDE_SESSIONS_ENABLED === '1' }),
     selected: () => selectedDecisionProvider('search'),
     configured: provider => provider === 'subq' ? !!resolveSubqKey() : !!resolveJevKey(),
@@ -258,6 +262,7 @@ export class SessionFinder {
 
     try {
       const roots = deps.roots()
+      // Inside the try: an unreadable keyed-sessions file is a failed search, never an empty set (keyed text must not leave).
       const keyedIds = deps.keyedIds()
       const chunk = Math.min(deps.chunkSize ?? FIND_CHOICE_OPTIONS, FIND_CHOICE_OPTIONS)
       const firstPool = await deps.collector.collect({ roots, limit: chunk, keyedIds, signal })
