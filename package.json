@@ -78,6 +78,7 @@
     "!server/scripts/transcript-cleanup-mutation-gate.mjs",
     "!server/scripts/live-cues-v2-notes-mutation-gate.mjs",
     "!server/scripts/live-cues-verdicts-mutation-gate.mjs",
+    "!server/scripts/live-cues-general-mutation-gate.mjs",
     "!server/scripts/key-lanes-p1-mutation-gate.mjs",
     "!server/scripts/key-lanes-p2-mutation-gate.mjs",
     "!server/scripts/key-lanes-p3-mutation-gate.mjs",
