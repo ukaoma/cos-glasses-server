@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs'
 import { appendFileSync } from 'node:fs'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { cliSessionsFilePath } from './fixed-tmp-paths.js'
 import { cleanupModelImageInputs, type ModelImageInput } from './model-image-input.js'
 import { resolveProviderWorkDir } from './launch-dir.js'
 import { logTokenAudit } from './token-audit.js'
@@ -114,7 +115,7 @@ let preWarmInProgress = false
 // ─── CLI session disk persistence ───
 // Persists CLI session IDs to /tmp (NOT server/data/ — iCloud sync risk).
 // Survives server restarts. TTL: 2 hours (matches conversation SESSION_TTL_MS).
-const CLI_SESSIONS_FILE = '/tmp/cos-cli-sessions.json'
+// COS_CLI_SESSIONS_FILE moves it (fixed-tmp-paths.ts); unset, it is the same fixed path as ever.
 const CLI_SESSION_TTL_MS = 2 * 60 * 60_000  // 2 hours
 
 interface CliSessionsData {
@@ -149,8 +150,8 @@ function loadCliSessions(): void {
   // so a Haiku session could be reused for an Opus query via --resume,
   // causing model inheritance issues. Fresh pre-warm on boot is sufficient.
   try {
-    if (existsSync(CLI_SESSIONS_FILE)) {
-      unlinkSync(CLI_SESSIONS_FILE)
+    if (existsSync(cliSessionsFilePath())) {
+      unlinkSync(cliSessionsFilePath())
       console.log('[claude-bridge] Cleared stale CLI session cache (fresh start)')
     }
   } catch {
@@ -180,7 +181,7 @@ function saveCliSessions(): void {
       cliSessionMap: mapEntries,
       savedAt: new Date().toISOString(),
     }
-    writeFileSync(CLI_SESSIONS_FILE, JSON.stringify(data, null, 2))
+    writeFileSync(cliSessionsFilePath(), JSON.stringify(data, null, 2))
   } catch (err) {
     console.error('[claude-bridge] Failed to save CLI sessions:', err)
   }

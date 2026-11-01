@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
 /**
@@ -51,8 +52,16 @@ process.once('exit', () => {
   try { rmSync(isolatedDataDir, { recursive: true, force: true }) } catch { /* best effort */ }
 })
 
+// Opt-in fence (COS_TEST_FENCE=1, never set by `npm test`): each forked test file gets its own data
+// home, HOME and TMPDIR under /tmp/cos-v-*, so files can run beside each other. The setup file sits
+// OUTSIDE server/ and shared/ so it can never ship in the npm package, and it is referenced only
+// when the flag is on, so the mutation gates that copy just this config keep working. With the flag
+// off the config below is exactly what it was.
+const fenced = process.env.COS_TEST_FENCE === '1'
+
 export default defineConfig({
   test: {
+    ...(fenced ? { setupFiles: [fileURLToPath(new URL('./test-support/fence-setup.ts', import.meta.url))] } : {}),
     include: ['server/**/*.test.ts', 'shared/**/*.test.ts'],
     env: {
       COS_DATA_DIR: isolatedDataDir,

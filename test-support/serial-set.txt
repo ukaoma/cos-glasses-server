@@ -1,0 +1,172 @@
+# Test files that never run beside another test file in the opt-in fenced-parallel mode.
+# One path per line, relative to the package root; "# reason" is a comment.
+# `node scripts/serial-set.mjs --write` appends heuristic hits (see scripts/serial-set.mjs).
+# `node scripts/serial-set.mjs --check` fails on a heuristic hit that is not listed, or a listed
+# file that does not exist. Removing a line is a deliberate edit; the script never does it.
+#
+# TTS: the spend ledger resolves relative to the module (server/data), not dataPath(). It stays
+# where it is, so both files run alone.
+server/routes/tts.test.ts  # TTS ledger
+server/routes/tts-policy.test.ts  # TTS ledger
+server/lib/activity-preview.test.ts  # research-2 serial set (hand-listed)
+server/lib/adaptive-playback-audio.test.ts  # research-2 serial set (hand-listed)
+server/lib/agent-session-binding-registry-p3.test.ts  # research-2 serial set (hand-listed)
+server/lib/agent-session-ownership-store.test.ts  # research-2 serial set (hand-listed)
+server/lib/attached-provider-adapter.process-tree.e2e.test.ts  # research-2 serial set (hand-listed)
+server/lib/attached-provider-adapter.process-tree.test.ts  # research-2 serial set (hand-listed)
+server/lib/attached-workspace.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-audit-caller.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-auth-finalization.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-key-lanes-off-identity.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-key-lanes.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-rate-limit-usage.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-session-name.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-steer-off-identity.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-steer.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-two-results.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-bridge-usage.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-hooks-installer.test.ts  # research-2 serial set (hand-listed)
+server/lib/claude-result-error.test.ts  # research-2 serial set (hand-listed)
+server/lib/cli-transcription-setup.test.ts  # research-2 serial set (hand-listed)
+server/lib/codex-bridge-finalization.test.ts  # research-2 serial set (hand-listed)
+server/lib/codex-bridge-key-lanes-off-identity.test.ts  # research-2 serial set (hand-listed)
+server/lib/codex-cursor-bridge-usage.test.ts  # research-2 serial set (hand-listed)
+server/lib/codex-engine-sessions.test.ts  # research-2 serial set (hand-listed)
+server/lib/codex-hooks-installer.test.ts  # research-2 serial set (hand-listed)
+server/lib/codex-live-queue.test.ts  # research-2 serial set (hand-listed)
+server/lib/control2-sandbox.test.ts  # research-2 serial set (hand-listed)
+server/lib/control2-task-runtime.test.ts  # research-2 serial set (hand-listed)
+server/lib/cos-context-browser.test.ts  # research-2 serial set (hand-listed)
+server/lib/cos-session-hook.halt.test.ts  # research-2 serial set (hand-listed)
+server/lib/cos-session-hook.script.test.ts  # research-2 serial set (hand-listed)
+server/lib/cursor-observer-installer.test.ts  # research-2 serial set (hand-listed)
+server/lib/cursor-spawn-env.test.ts  # research-2 serial set (hand-listed)
+server/lib/direct-bridge.test.ts  # research-2 serial set (hand-listed)
+server/lib/fence-liveness.test.ts  # research-2 serial set (hand-listed)
+server/lib/g2-enrichment-runner.test.ts  # research-2 serial set (hand-listed)
+server/lib/held-naming-batches.test.ts  # research-2 serial set (hand-listed)
+server/lib/job-trail-claude-bridge.test.ts  # research-2 serial set (hand-listed)
+server/lib/job-trail-codex-cursor-bridges.test.ts  # research-2 serial set (hand-listed)
+server/lib/key-lanes-agent-teams-cli.test.ts  # research-2 serial set (hand-listed)
+server/lib/key-lanes-p6-census.test.ts  # research-2 serial set (hand-listed)
+server/lib/key-lanes-p6-preference.test.ts  # research-2 serial set (hand-listed)
+server/lib/key-lanes-wiring.test.ts  # research-2 serial set (hand-listed)
+server/lib/key-relay-cli.test.ts  # research-2 serial set (hand-listed)
+server/lib/key-secrets-cli.test.ts  # research-2 serial set (hand-listed)
+server/lib/launcher-contract.test.ts  # research-2 serial set (hand-listed)
+server/lib/lens-gist-engines.test.ts  # research-2 serial set (hand-listed)
+server/lib/live-cue-verdicts.test.ts  # research-2 serial set (hand-listed)
+server/lib/live-cues-cursor.test.ts  # research-2 serial set (hand-listed)
+server/lib/mac-speaker-call-producer.test.ts  # research-2 serial set (hand-listed)
+server/lib/mac-speaker-live.test.ts  # research-2 serial set (hand-listed)
+server/lib/meeting-ask-review.test.ts  # research-2 serial set (hand-listed)
+server/lib/meeting-ask-runner-audit.test.ts  # research-2 serial set (hand-listed)
+server/lib/meeting-ask-web.test.ts  # research-2 serial set (hand-listed)
+server/lib/meeting-fact-check.test.ts  # research-2 serial set (hand-listed)
+server/lib/meeting-import-wiring.test.ts  # research-2 serial set (hand-listed)
+server/lib/merged-scribe-resolution.test.ts  # research-2 serial set (hand-listed)
+server/lib/model-router.test.ts  # research-2 serial set (hand-listed)
+server/lib/native-head.test.ts  # research-2 serial set (hand-listed)
+server/lib/nemotron-cli.test.ts  # research-2 serial set (hand-listed)
+server/lib/nemotron-final.test.ts  # research-2 serial set (hand-listed)
+server/lib/occupancy-probes.test.ts  # research-2 serial set (hand-listed)
+server/lib/ollama-bridge.test.ts  # research-2 serial set (hand-listed)
+server/lib/permission-broker.test.ts  # research-2 serial set (hand-listed)
+server/lib/pipeline-runner.test.ts  # research-2 serial set (hand-listed)
+server/lib/provider-observe.test.ts  # research-2 serial set (hand-listed)
+server/lib/provider-process-lifecycle.test.ts  # research-2 serial set (hand-listed)
+server/lib/provider-proof.test.ts  # research-2 serial set (hand-listed)
+server/lib/query-job-restart-notice.test.ts  # research-2 serial set (hand-listed)
+server/lib/session-hook-spool.test.ts  # research-2 serial set (hand-listed)
+server/lib/session-stream-catch-up.test.ts  # research-2 serial set (hand-listed)
+server/lib/speaker-shadow.test.ts  # research-2 serial set (hand-listed)
+server/lib/task-bridge.test.ts  # research-2 serial set (hand-listed)
+server/lib/task-dates.test.ts  # research-2 serial set (hand-listed)
+server/lib/tts-chunking.test.ts  # research-2 serial set (hand-listed)
+server/lib/turn-request-bridges.test.ts  # research-2 serial set (hand-listed)
+server/lib/turn-request.test.ts  # research-2 serial set (hand-listed)
+server/lib/video-compression.test.ts  # research-2 serial set (hand-listed)
+server/lib/work-search.test.ts  # research-2 serial set (hand-listed)
+server/routes/cursor-stop-followup.test.ts  # research-2 serial set (hand-listed)
+server/routes/fireflies-key-voice-train.test.ts  # research-2 serial set (hand-listed)
+server/routes/g2-filing-golden.test.ts  # research-2 serial set (hand-listed)
+server/routes/handoffs-keyed.test.ts  # research-2 serial set (hand-listed)
+server/routes/key-lanes-p6-v1.test.ts  # research-2 serial set (hand-listed)
+server/routes/openai-compat-disconnect.test.ts  # research-2 serial set (hand-listed)
+server/routes/permission-broker.test.ts  # research-2 serial set (hand-listed)
+server/routes/tasks-dates.test.ts  # research-2 serial set (hand-listed)
+server/routes/voice-safety.test.ts  # research-2 serial set (hand-listed)
+server/scripts/control2-foundation-lab.test.ts  # research-2 serial set (hand-listed)
+server/tts-sidecar/bootstrap.test.ts  # research-2 serial set (hand-listed)
+server/lib/agent-session-search.test.ts  # child_process import
+server/lib/agent-session-store.test.ts  # child_process import
+server/lib/attached-provider-adapter.test.ts  # literal /tmp path
+server/lib/codex-bridge-key-lanes.test.ts  # literal /tmp path, spawning bridge import
+server/lib/codex-bridge.test.ts  # literal /tmp path, spawning bridge import
+server/lib/codex-clone-identity.test.ts  # literal /tmp path
+server/lib/codex-cursor-occupancy-6510.test.ts  # process inspection
+server/lib/codex-homes-readers.test.ts  # child_process import, literal /tmp path
+server/lib/codex-profile-home.test.ts  # literal /tmp path
+server/lib/codex-run-ledger.test.ts  # literal /tmp path
+server/lib/codex-session-posture.test.ts  # child_process import
+server/lib/codex-subagent-activity.test.ts  # child_process import
+server/lib/continue-plan.test.ts  # child_process import
+server/lib/control2-draft.test.ts  # literal /tmp path
+server/lib/cos-operations-meetings.test.ts  # literal /tmp path
+server/lib/cursor-agent-store.test.ts  # literal /tmp path
+server/lib/cursor-bridge.test.ts  # literal /tmp path, spawning bridge import
+server/lib/cursor-session-model.test.ts  # child_process import
+server/lib/decision-provider.test.ts  # literal /tmp path
+server/lib/diarizer-parakeet-cli.test.ts  # wall-clock upper bound
+server/lib/fork-thread.test.ts  # literal /tmp path
+server/lib/image-safety.test.ts  # child_process import
+server/lib/job-trail.test.ts  # literal /tmp path
+server/lib/lens-gist.test.ts  # literal /tmp path
+server/lib/live-cos-ask-owner-runtime.test.ts  # child_process import
+server/lib/live-cues-v2-notes-bridge.test.ts  # wall-clock upper bound
+server/lib/live-cues-v2-notes.test.ts  # wall-clock upper bound
+server/lib/media-store-video-restart.test.ts  # child_process import
+server/lib/media-store.test.ts  # child_process import, literal /tmp path
+server/lib/meeting-ask-questions.test.ts  # wall-clock upper bound
+server/lib/meeting-ask-runner.test.ts  # child_process import
+server/lib/meeting-batch-progress.test.ts  # literal /tmp path
+server/lib/meeting-batch-transcribe.test.ts  # literal /tmp path
+server/lib/occupied-threads.test.ts  # process inspection, literal /tmp path
+server/lib/ollama-bridge-trail.test.ts  # literal /tmp path, spawning bridge import
+server/lib/ollama-tools.test.ts  # literal /tmp path
+server/lib/package-contents.test.ts  # child_process import
+server/lib/parakeet-cli-trust.test.ts  # wall-clock upper bound
+server/lib/parakeet.test.ts  # literal /tmp path
+server/lib/query-attachments.test.ts  # child_process import
+server/lib/query-job-cursor-mode.test.ts  # literal /tmp path, spawning bridge import
+server/lib/query-job-resume.test.ts  # wall-clock upper bound
+server/lib/rich-media-safety.test.ts  # child_process import
+server/lib/run-output-images.test.ts  # child_process import, literal /tmp path
+server/lib/send-audio.test.ts  # literal /tmp path
+server/lib/session-hooks-runtime.test.ts  # child_process import
+server/lib/session-peer-inbox-deps.test.ts  # literal /tmp path
+server/lib/session-peer-inbox.test.ts  # literal /tmp path
+server/lib/speaker-model-path.test.ts  # literal /tmp path
+server/lib/speaker-shadow-pair-source.test.ts  # child_process import
+server/lib/speaker-shadow-producer.test.ts  # child_process import
+server/lib/speaker-shadow-worker.test.ts  # process.kill, literal /tmp path
+server/lib/thread-occupancy.test.ts  # process inspection, literal /tmp path
+server/lib/tts-session-grace.test.ts  # TTS ledger
+server/lib/video-upload-v2.test.ts  # child_process import
+server/lib/whisper-local-health.test.ts  # process inspection
+server/lib/whisper-metal-gate.test.ts  # child_process import
+server/lib/whisper-preflight-retry.test.ts  # process inspection
+server/lib/whisper-preview.test.ts  # process inspection
+server/routes/agent-session-bindings-p3.test.ts  # literal /tmp path
+server/routes/agent-session-bindings.test.ts  # process inspection, literal /tmp path
+server/routes/agent-sessions-keyed.test.ts  # child_process import
+server/routes/agent-sessions-parity.test.ts  # wall-clock upper bound
+server/routes/agent-sessions.test.ts  # child_process import, process inspection
+server/routes/claude-sessions.test.ts  # literal /tmp path
+server/routes/media-upload-limits.test.ts  # child_process import
+server/routes/media.test.ts  # child_process import
+server/routes/message-ref-attachments.test.ts  # literal /tmp path
+server/routes/openai-compat-model.test.ts  # literal /tmp path
+server/routes/query-jobs-active.test.ts  # wall-clock upper bound
+server/routes/query-sse-payload.test.ts  # child_process import
+server/routes/stt-settings.test.ts  # literal /tmp path

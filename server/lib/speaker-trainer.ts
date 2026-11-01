@@ -13,9 +13,10 @@ import {
   rawCosineSimilarity, saveProfileStore, rebuildAllProfiles, clearSpeakerEmbeddings,
 } from './speaker-embeddings.js'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { speakerTrainingDir } from './fixed-tmp-paths.js'
 
-const CACHE_DIR = '/tmp/cos-speaker-training'
-const PROGRESS_PATH = resolve(CACHE_DIR, 'training-progress.json')
+// The scratch directory is /tmp/cos-speaker-training unless COS_SPEAKER_TRAINING_DIR moves it.
+const progressPath = () => resolve(speakerTrainingDir(), 'training-progress.json')
 
 // Fireflies GraphQL API
 const FIREFLIES_API = 'https://api.fireflies.ai/graphql'
@@ -91,20 +92,20 @@ function ensureFfmpeg(): void {
 }
 
 function ensureCacheDir(): void {
-  if (!existsSync(CACHE_DIR)) {
-    mkdirSync(CACHE_DIR, { recursive: true })
+  if (!existsSync(speakerTrainingDir())) {
+    mkdirSync(speakerTrainingDir(), { recursive: true })
   }
 }
 
 function loadProgress(): TrainingProgress {
-  if (existsSync(PROGRESS_PATH)) {
-    return JSON.parse(readFileSync(PROGRESS_PATH, 'utf-8'))
+  if (existsSync(progressPath())) {
+    return JSON.parse(readFileSync(progressPath(), 'utf-8'))
   }
   return { processedMeetings: [], speakerSegmentCounts: {}, lastRunAt: '' }
 }
 
 function saveProgress(progress: TrainingProgress): void {
-  writeFileSync(PROGRESS_PATH, JSON.stringify(progress, null, 2))
+  writeFileSync(progressPath(), JSON.stringify(progress, null, 2))
 }
 
 /** Fetch transcripts from Fireflies GraphQL API with pagination */
@@ -170,7 +171,7 @@ async function fetchFirefliesTranscripts(limit: number): Promise<FirefliesTransc
 
 /** Download MP3 audio from Fireflies (URL expires in 24hr) */
 async function downloadAudio(audioUrl: string, meetingId: string): Promise<string> {
-  const outPath = resolve(CACHE_DIR, `${meetingId}.mp3`)
+  const outPath = resolve(speakerTrainingDir(), `${meetingId}.mp3`)
   if (existsSync(outPath)) return outPath
 
   console.log(`[speaker-trainer] Downloading audio for ${meetingId}...`)
@@ -433,7 +434,7 @@ export async function trainFromFireflies(options: {
       ]
 
       for (const seg of selectedSegs) {
-        const wavPath = resolve(CACHE_DIR, `${meeting.meetingId}_${speaker.replace(/\s+/g, '_')}_${Math.round(seg.start)}.wav`)
+        const wavPath = resolve(speakerTrainingDir(), `${meeting.meetingId}_${speaker.replace(/\s+/g, '_')}_${Math.round(seg.start)}.wav`)
 
         if (!extractSegment(mp3Path, seg.start, seg.end, wavPath)) {
           continue

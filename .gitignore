@@ -20,3 +20,6 @@ server/models/*.onnx
 __pycache__/
 *.pyc
 *.bak*
+
+# fast-lane and qualification output
+.qualify-results/

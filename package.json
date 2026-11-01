@@ -14,6 +14,10 @@
     "start:server": "node --import tsx/esm server/index.ts",
     "test": "vitest run --maxWorkers=1",
     "typecheck": "tsc --noEmit",
+    "check:duplicates": "node scripts/check-duplicates.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "test:fenced-serial": "node scripts/run-fenced.mjs serial",
+    "test:fenced-parallel": "node scripts/run-fenced.mjs parallel",
     "mutation:gate": "node server/scripts/mutation-gate.mjs",
     "control2:lab": "node bin/control2-foundation.cjs"
   },

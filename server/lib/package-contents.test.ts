@@ -64,4 +64,13 @@ describe('npm tarball contents', () => {
     // The real profile must never be packaged; only the example.
     expect(files.filter(f => f.endsWith('.cos-profile.json'))).toEqual([])
   })
+
+  it('ships no test scaffolding or release tooling that lives outside server/', () => {
+    // The opt-in fence setup (vitest setupFile) and the fast-lane/qualification scripts sit at the
+    // package root precisely so the `files` list never reaches them. A change to `files` that does
+    // would put test helpers on every install.
+    expect(files.filter(f => f.startsWith('test-support/'))).toEqual([])
+    expect(files.filter(f => f.startsWith('scripts/'))).toEqual([])
+    expect(files.filter(f => f === 'vitest.config.ts')).toEqual([])
+  })
 })
