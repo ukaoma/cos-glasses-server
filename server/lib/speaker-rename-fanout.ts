@@ -6,6 +6,7 @@
 import { readFileSync, readdirSync, lstatSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { renameMeetingSpeaker } from './held-naming-batches.js'
+import { nameForms, sameSpeakerName } from './speaker-name-nfc.js'
 
 /** A month directory, and nothing that merely looks like one. */
 const CANONICAL_MONTH = /^\d{4}-\d{2}$/
@@ -203,13 +204,13 @@ function errorText(error: unknown): string {
 }
 
 function carriesSpeaker(doc: Record<string, any>, name: string): boolean {
-  return (Array.isArray(doc.chunks) && doc.chunks.some((chunk: any) => chunk?.speaker === name))
-    || (Array.isArray(doc.chunkEntries) && doc.chunkEntries.some((entry: any) => entry?.chunk?.speaker === name))
+  return (Array.isArray(doc.chunks) && doc.chunks.some((chunk: any) => sameSpeakerName(chunk?.speaker, name)))
+    || (Array.isArray(doc.chunkEntries) && doc.chunkEntries.some((entry: any) => sameSpeakerName(entry?.chunk?.speaker, name)))
     || (Array.isArray(doc.batchSegments) && doc.batchSegments.some((segment: any) =>
-      Array.isArray(segment?.speakerWords) && segment.speakerWords.some((word: any) => word?.speaker === name)))
+      Array.isArray(segment?.speakerWords) && segment.speakerWords.some((word: any) => sameSpeakerName(word?.speaker, name))))
 }
 
-function escapedName(name: string): string { return name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+function escapedName(name: string): string { return nameForms(name, n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) }
 function hasNamedLabel(markdown: string, name: string): boolean {
   const escaped = escapedName(name)
   return new RegExp(`^(?:\\[${escaped}\\]:|\\*\\*${escaped}(?::\\*\\*|\\*\\*)|[-*] ${escaped}$)`, 'm').test(markdown)

@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:f
 import { basename, dirname, join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync, loadJsonOrQuarantine } from './atomic-fs.js'
 import { EVICTION_ORDER, isMacAssign, macAssignCapFor, provenanceTier } from './embedding-eviction.js'
+import { sameSpeakerName } from './speaker-name-nfc.js'
 
 export interface VoiceProfile {
   name: string
@@ -519,7 +520,7 @@ export function mergeProfilesInStore(
   options: { cap?: number } = {},
 ): MergeOutcome {
   const cap = options.cap ?? 40
-  const target = store.profiles.find(p => p.name === into)
+  const target = store.profiles.find(p => sameSpeakerName(p.name, into))
   const outcome: MergeOutcome = {
     similarity: {},
     samplesBefore: target?.embeddings.length ?? 0,
@@ -538,8 +539,8 @@ export function mergeProfilesInStore(
   while (sources.length < embeddings.length) sources.push(UNKNOWN_SOURCE)
 
   for (const name of from) {
-    if (name === into) continue
-    const source = store.profiles.find(p => p.name === name)
+    if (sameSpeakerName(name, into)) continue
+    const source = store.profiles.find(p => sameSpeakerName(p.name, name))
     if (!source) { outcome.missing.push(name); continue }
     outcome.similarity[name] = profileSimilarity(target, source)
     const sourceSources = [...(source.sources ?? [])]

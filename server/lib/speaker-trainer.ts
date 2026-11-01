@@ -13,6 +13,7 @@ import {
   rawCosineSimilarity, saveProfileStore, rebuildAllProfiles, clearSpeakerEmbeddings,
 } from './speaker-embeddings.js'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { sameSpeakerName } from './speaker-name-nfc.js'
 
 const CACHE_DIR = '/tmp/cos-speaker-training'
 const PROGRESS_PATH = resolve(CACHE_DIR, 'training-progress.json')
@@ -520,7 +521,7 @@ export async function getTrainingStatus(): Promise<TrainingStatus> {
   }
 
   for (const name of enrolledNames) {
-    if (!speakers.some(s => s.name === name)) {
+    if (!speakers.some(s => sameSpeakerName(s.name, name))) {
       speakers.push({ name, segments: 0, meetings: 0, enrolled: true })
     }
   }

@@ -26,6 +26,7 @@ import {
 } from './meeting-speaker-review.js'
 import { getOwnerSpeakerLabel } from './profile.js'
 import { readVoiceProfiles, type VoiceProfile } from './speaker-embeddings.js'
+import { sameSpeakerName } from './speaker-name-nfc.js'
 
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/
 const SIDECAR = /\.g2-chunks\.json$/
@@ -363,7 +364,7 @@ export async function buildVoiceDirectorySnapshot(): Promise<VoiceDirectorySnaps
       .slice(0, MAX_APPEARANCES_PER_VOICE)
     return {
       name: profile.name,
-      isOwner: profile.name === owner,
+      isOwner: sameSpeakerName(profile.name, owner),
       embeddings: profile.embeddings.length,
       sources: sourceCounts(profile),
       sourcesAligned: (profile.sources?.length ?? 0) === profile.embeddings.length,

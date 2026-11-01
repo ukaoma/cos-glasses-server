@@ -27,6 +27,7 @@
 // somebody else. Reported as `proseStale` instead.
 
 import { isVoiceLabel } from './mac-voice-labels.js'
+import { nameForms, nfc, sameSpeakerName } from './speaker-name-nfc.js'
 
 /** A label that would corrupt the file formats it gets written into. */
 export function invalidLabelReason(label: string): string | null {
@@ -75,6 +76,10 @@ export function relabelSidecarJson(
   to: string,
   chunks: number[] = [],
 ): RelabelOutcome<SidecarRelabelResult> {
+  // Names are NFC here whatever arrived (a decomposed spelling must never be written), and matched NFC on both sides, so a chunk
+  // already stored decomposed still counts as carrying `from`.
+  from = nfc(from)
+  to = nfc(to)
   if (from === to) return { ok: false, error: 'from and to are the same label' }
   for (const [which, label] of [['from', from], ['to', to]] as const) {
     const bad = invalidLabelReason(label)
@@ -100,7 +105,7 @@ export function relabelSidecarJson(
   if (restrict) {
     const mismatched = chunks.filter(i => {
       const row = rows[i]
-      return !row || typeof row !== 'object' || (row as Record<string, unknown>).speaker !== from
+      return !row || typeof row !== 'object' || !sameSpeakerName((row as Record<string, unknown>).speaker, from)
     })
     if (mismatched.length > 0) {
       return { ok: false, error: `chunks do not carry "${from}": ${mismatched.slice(0, 8).join(', ')}` }
@@ -115,7 +120,7 @@ export function relabelSidecarJson(
     // deliberately not claimed as tested.
     if (!row || typeof row !== 'object') return
     const r = row as Record<string, unknown>
-    if (r.speaker !== from) return
+    if (!sameSpeakerName(r.speaker, from)) return
     if (restrict && !restrict.has(i)) { remainingWithFrom++; return }
     r.speaker = to
     changed.push(i)
@@ -131,18 +136,18 @@ export function relabelSidecarJson(
   if (isVoiceLabel(to)) {
     // 6.90.0: a Mac `Voice N` placeholder never enters `speakers` (the store
     // keeps it out too), so merging into one adds nothing. Retire `from` only.
-    const at = speakers.indexOf(from)
+    const at = speakers.findIndex(x => sameSpeakerName(x, from))
     if (at >= 0 && remainingWithFrom === 0) speakers.splice(at, 1)
-  } else if (!speakers.includes(to)) {
+  } else if (!speakers.some(x => sameSpeakerName(x, to))) {
     // Replace in place when `from` is being fully retired, so the list keeps its
     // original ordering rather than moving the person to the end.
-    const at = speakers.indexOf(from)
+    const at = speakers.findIndex(x => sameSpeakerName(x, from))
     if (at >= 0 && remainingWithFrom === 0) speakers[at] = to
     else speakers.push(to)
   } else if (remainingWithFrom === 0) {
     // `to` already listed and `from` fully retired — merging a split identity.
     // Drop the old entry rather than leaving a name nothing is attributed to.
-    const at = speakers.indexOf(from)
+    const at = speakers.findIndex(x => sameSpeakerName(x, from))
     if (at >= 0) speakers.splice(at, 1)
   }
   doc.speakers = speakers
@@ -198,6 +203,8 @@ export function relabelMeetingMarkdown(
   to: string,
   options: { removeAttendee?: boolean } = {},
 ): RelabelOutcome<MarkdownRelabelResult> {
+  from = nfc(from)
+  to = nfc(to)
   if (from === to) return { ok: false, error: 'from and to are the same label' }
   for (const [which, label] of [['from', from], ['to', to]] as const) {
     const bad = invalidLabelReason(label)
@@ -215,7 +222,7 @@ export function relabelMeetingMarkdown(
     // Anchored at BOTH ends, and `[ \t]` rather than `\s` so a pattern can never
     // run past its own line. Without the end anchor, `- Theo M` matches the
     // PREFIX of `- Theo Marsh` and deleting it leaves the fragment `enry`.
-    const line = (label: string) => `^-[ \t]+${escapeRegExp(label)}[ \t]*$`
+    const line = (label: string) => `^-[ \t]+${nameForms(label, escapeRegExp)}[ \t]*$`
     // A de-attribution must DELETE the attendee bullet, never rename it. Renaming
     // writes `- Unidentified 2` into the attendee list as though it were a
     // person, and the COS pipeline that BUILDS attendees deliberately excludes
@@ -241,7 +248,7 @@ export function relabelMeetingMarkdown(
   if (tr) {
     const body = out.slice(tr.start, tr.end)
     const rewritten = body.replace(
-      new RegExp(`^\\[${escapeRegExp(from)}\\]:`, 'gm'),
+      new RegExp(`^\\[${nameForms(from, escapeRegExp)}\\]:`, 'gm'),
       () => { transcript++; return `[${to}]:` },
     )
     out = out.slice(0, tr.start) + rewritten + out.slice(tr.end)
@@ -276,7 +283,7 @@ export function detectProseReferences(md: string, label: string): string[] {
   prose += md.slice(cursor)
 
   const hits: string[] = []
-  const full = new RegExp(`\\b${escapeRegExp(label)}\\b`)
+  const full = new RegExp(`\\b${nameForms(label, escapeRegExp)}\\b`)
   if (full.test(prose)) hits.push(label)
   const first = label.split(/\s+/)[0]
   // Only a multi-word label has a distinct bare-first-name form. 'MU' or 'Ext'

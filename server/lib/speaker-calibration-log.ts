@@ -12,6 +12,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
+import { sameSpeakerName } from './speaker-name-nfc.js'
 
 export interface CalibrationPurgeResult {
   /** Rows whose `speaker` matched and were dropped. */
@@ -90,7 +91,7 @@ export function relabelCalibrationRows(
     // merge must never lose history. (Contrast filterCalibrationRows, where
     // removed + retained = total.)
     retained++
-    if (row.speaker === fromName) {
+    if (sameSpeakerName(row.speaker, fromName)) {
       row.speaker = toName
       relabeled++
       out.push(JSON.stringify(row))

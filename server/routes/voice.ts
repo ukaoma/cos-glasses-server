@@ -5,6 +5,7 @@ import { errMsg } from '../lib/utils.js'
 import { readdirSync, readFileSync, unlinkSync, existsSync, rmdirSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { checkSpeakerName } from '../lib/speaker-name.js'
+import { bodyName, nfc, sameSpeakerName } from '../lib/speaker-name-nfc.js'
 import { enrollSpeaker, isEnrolled, getAllSpeakerNames, identifySpeaker, extractEmbedding, enrollEmbedding, getEmbeddingCount, removeSpeakerProfile, readVoiceProfiles, mergeSpeakerProfiles } from '../lib/speaker-embeddings.js'
 import { statSync } from 'node:fs'
 import { trainFromFireflies, getTrainingStatus } from '../lib/speaker-trainer.js'
@@ -51,7 +52,7 @@ voiceRouter.post('/voice/enroll', async (req, res) => {
     // Default to the configured wearer label ('Me' unless owner_speaker_label
     // is set). Hardcoding one user's initials here enrolled every other install
     // under a stranger's name.
-    const name = (req.query.name as string) || getOwnerSpeakerLabel()
+    const name = nfc(typeof req.query.name === 'string' && req.query.name ? req.query.name : getOwnerSpeakerLabel())
 
     // An old client can still send a whole spoken sentence as the name (the
     // "enroll my voice" fall-through). Refuse it here: a junk profile can
@@ -115,7 +116,8 @@ voiceRouter.post('/voice/identify', async (req, res) => {
 // POST /api/voice/train — train voiceprints from Fireflies meeting audio
 voiceRouter.post('/voice/train', async (req, res) => {
   try {
-    const { speakerNames, minSegments, minSegmentDuration, limit, maxEmbeddingsPerSpeaker, fresh } = req.body ?? {}
+    const { speakerNames: rawSpeakerNames, minSegments, minSegmentDuration, limit, maxEmbeddingsPerSpeaker, fresh } = req.body ?? {}
+    const speakerNames = Array.isArray(rawSpeakerNames) ? rawSpeakerNames.map((n: unknown) => typeof n === 'string' ? nfc(n) : n) : rawSpeakerNames
     const report = await trainFromFireflies({
       speakerNames,
       minSegments,
@@ -160,7 +162,7 @@ const DEFAULT_MAX_TRAIN_PER_SPEAKER = 10
 
 voiceRouter.post('/voice/train-g2', async (req, res) => {
   try {
-    const targetSpeaker = req.body?.speaker as string | undefined
+    const targetSpeaker = typeof req.body?.speaker === 'string' ? nfc(req.body.speaker) : undefined
     const confirmAll = req.body?.confirmAllSpeakers === true
     const dryRun = req.body?.dryRun === true
     const maxPerSpeaker = Number.isFinite(req.body?.maxPerSpeaker)
@@ -361,7 +363,8 @@ voiceRouter.get('/voice/ext-audio', (_req, res) => {
 // If sessionId provided, only enroll from that session. Otherwise, enroll from all ext sessions.
 voiceRouter.post('/voice/enroll-ext', async (req, res) => {
   try {
-    const { name, sessionId } = req.body ?? {}
+    const { name: rawName, sessionId } = req.body ?? {}
+    const name = typeof rawName === 'string' ? nfc(rawName) : rawName
     if (!name || typeof name !== 'string' || name.length < 2) {
       return res.status(400).json({ error: 'name is required (min 2 chars)' })
     }
@@ -485,7 +488,7 @@ function newestWav(dirPath: string): string | null {
 // GET /api/voice/profiles/:name/sample — hear what a stored profile sounds like.
 voiceRouter.get('/voice/profiles/:name/sample', (req, res) => {
   res.set('Cache-Control', 'private, no-store')
-  const name = String(req.params.name ?? '')
+  const name = nfc(String(req.params.name ?? ''))
   const dirPath = speakerDirPath(AUDIO_SAVE_DIR, name)
   if (!dirPath) {
     res.status(400).json({ error: 'Invalid speaker name', reason: 'invalid_speaker' })
@@ -587,7 +590,7 @@ voiceRouter.post('/voice/held-groups/enroll', async (req, res) => {
   try {
     const nameCheck = checkSpeakerName(req.body?.name, { ownerLabel: getOwnerSpeakerLabel() })
     if (!nameCheck.ok) return res.status(400).json({ success:false,error:nameCheck.message,reason:nameCheck.reason })
-    const name = resolveStoredName(String(req.body.name).trim())
+    const name = resolveStoredName(nfc(String(req.body.name).trim()))
     // Held samples are audio this Mac captured. A member pointing at an imported
     // or derived record is not held audio, so it never reaches the preview.
     //
@@ -679,7 +682,7 @@ voiceRouter.get('/voice/profiles', (_req, res) => {
           return {
             name: p.name,
             embeddings: p.embeddings.length,
-            isOwner: p.name === owner,
+            isOwner: sameSpeakerName(p.name, owner),
             sources: bySource,
             // 6.44.15: a profile whose name on disk was a spoken sentence was
             // renamed at load; the client offers a rename.
@@ -793,11 +796,11 @@ function fanOutTotals(runs: readonly SpeakerRenameFanOut[]): {
 // knows something the audio does not, and it is logged.
 voiceRouter.post('/voice/merge-profiles', async (req, res) => {
   try {
-    const into = typeof req.body?.into === 'string' ? req.body.into.trim() : ''
+    const into = bodyName(req.body?.into).trim()
     const rawFrom = req.body?.from
     const from = (Array.isArray(rawFrom) ? rawFrom : [rawFrom])
       .filter((n: unknown): n is string => typeof n === 'string' && n.trim().length > 0)
-      .map((n: string) => n.trim())
+      .map((n: string) => nfc(n.trim()))
 
     if (!into || from.length === 0) {
       return res.status(400).json({ error: 'into (string) and from (string or string[]) are required' })
@@ -807,7 +810,7 @@ voiceRouter.post('/voice/merge-profiles', async (req, res) => {
     }
 
     const owner = getOwnerSpeakerLabel()
-    if (from.includes(owner)) {
+    if (from.some(n => sameSpeakerName(n, owner))) {
       // Absorbing the owner label would delete the profile the live
       // identification path checks FIRST, on every chunk.
       return res.status(400).json({
@@ -907,11 +910,11 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
     if (!name || typeof name !== 'string' || name.trim().length < 2) {
       return res.status(400).json({ error: 'name is required (min 2 chars)' })
     }
-    const target = name.trim()
+    const target = nfc(name.trim())
     const dryRun = req.body?.dryRun === true
 
     if (req.body?.confirm !== true && !dryRun) {
-      const existing = readVoiceProfiles().profiles.find(p => p.name === target)
+      const existing = readVoiceProfiles().profiles.find(p => sameSpeakerName(p.name, target))
       const audioDir = speakerDirPath(AUDIO_SAVE_DIR, target)
       let wavs = 0
       if (audioDir && existsSync(audioDir)) {
@@ -931,7 +934,7 @@ voiceRouter.post('/voice/delete-person', (req, res) => {
     }
 
     if (dryRun) {
-      const existing = readVoiceProfiles().profiles.find(p => p.name === target)
+      const existing = readVoiceProfiles().profiles.find(p => sameSpeakerName(p.name, target))
       const audioDir = speakerDirPath(AUDIO_SAVE_DIR, target)
       let wavs = 0
       if (audioDir && existsSync(audioDir)) {
