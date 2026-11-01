@@ -9,6 +9,7 @@ import { checkSpeakerName } from '../lib/speaker-name.js'
 import { dataPath } from '../lib/data-dir.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
 import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
+import { bodyName, sameSpeakerName } from '../lib/speaker-name-nfc.js'
 import { readSpeakerPolicy, writeSpeakerPolicy, isSpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/meeting/save — finalize an existing transcribe-stream session into
 // the standalone public meeting store. The live transcript and chunk metadata
@@ -2420,7 +2421,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(400).json({ error: 'Invalid sessionId', reason: 'invalid_session_id' })
       return
     }
-    const speaker = typeof req.body?.speaker === 'string' ? req.body.speaker.trim() : ''
+    const speaker = bodyName(req.body?.speaker).trim()
     if (!speaker) {
       res.status(400).json({ error: 'speaker is required', reason: 'invalid_label' })
       return
@@ -2453,7 +2454,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
     }
 
     // Only rows that ACTUALLY landed, and only those that named this speaker.
-    const rows = appliedCorrections(sessionId).filter(r => r.to === speaker && r.chunks.length > 0)
+    const rows = appliedCorrections(sessionId).filter(r => sameSpeakerName(r.to, speaker) && r.chunks.length > 0)
     if (rows.length === 0) {
       res.status(404).json({ error: `No applied correction named "${speaker}" in this meeting`, reason: 'no_correction' })
       return
@@ -2500,8 +2501,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       return
     }
 
-    const from = typeof req.body?.from === 'string' ? req.body.from : ''
-    const to = typeof req.body?.to === 'string' ? req.body.to : ''
+    const from = bodyName(req.body?.from)
+    const to = bodyName(req.body?.to)
     const chunks = Array.isArray(req.body?.chunks)
       ? (req.body.chunks as unknown[]).filter((n): n is number => Number.isInteger(n) && (n as number) >= 0)
       : []
@@ -2856,7 +2857,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
     }
-    const label = typeof req.body?.label === 'string' ? req.body.label : ''
+    const label = bodyName(req.body?.label)
     const bad = invalidLabelReason(label)
     if (bad) {
       res.status(400).json({ error: `label: ${bad}`, reason: 'invalid_label' })
@@ -2904,7 +2905,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       const doc = JSON.parse(readFileSync(sidecarPath, 'utf-8')) as Record<string, unknown>
       const rows = Array.isArray(doc.chunks) ? doc.chunks : []
       carried = rows.filter(r => r && typeof r === 'object'
-        && (r as Record<string, unknown>).speaker === label).length
+        && sameSpeakerName((r as Record<string, unknown>).speaker, label)).length
     } catch {
       res.status(500).json({ error: 'Could not read the chunk sidecar', reason: 'sidecar_unreadable' })
       return
@@ -2947,7 +2948,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       res.status(evidenceRefusal.status).json(evidenceRefusal.body)
       return
     }
-    const from = typeof req.body?.from === 'string' ? req.body.from : ''
+    const from = bodyName(req.body?.from)
     const bad = invalidLabelReason(from)
     if (bad) {
       res.status(400).json({ error: `from: ${bad}`, reason: 'invalid_label' })
@@ -3023,7 +3024,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       if (Array.isArray(parsed.chunks)) {
         for (const c of parsed.chunks) {
           const sp = (c as { speaker?: unknown } | null)?.speaker
-          if (typeof sp === 'string' && !existingSpeakers.includes(sp)) existingSpeakers.push(sp)
+          if (typeof sp === 'string' && !existingSpeakers.some(x => sameSpeakerName(x, sp))) existingSpeakers.push(sp)
         }
       }
     } catch { /* the relabel below reports a corrupt sidecar */ }
@@ -3036,7 +3037,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
 
     // What this would remove from the profile, and what it CANNOT reach.
     // readVoiceProfiles returns a ProfileStore, not an array.
-    const profile = readVoiceProfiles().profiles.find(p => p.name === from)
+    const profile = readVoiceProfiles().profiles.find(p => sameSpeakerName(p.name, from))
     const profileSources: Array<string | undefined> = profile
       ? Array.from({ length: profile.embeddings.length }, (_, i) => profile.sources?.[i])
       : []

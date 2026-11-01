@@ -77,6 +77,7 @@ import {
   greedyDiversitySelect,
 } from './voice-enrolment-selection.js'
 import { VOICEPRINT_MIN_AUDIO_SEC } from './voiceprint-floor.js'
+import { sameSpeakerName } from './speaker-name-nfc.js'
 
 /** A turn shorter than this is not sliced out of a mixed chunk. */
 export const MAC_ASSIGN_MIN_SLICE_SEC = 3.0
@@ -270,7 +271,7 @@ export async function planMacVoiceAssignment(input: MacAssignInput): Promise<Mac
   if (isPlaceholderLabel(to)) return none('unknown_profile')
   if (input.ownerLabel && sameName(to, input.ownerLabel)) return none('owner_profile')
   let profile: { name: string; embeddings: number[][]; sources?: string[] } | undefined
-  try { profile = readVoiceProfiles().profiles.find(p => p.name === to) } catch { return none('store_unavailable') }
+  try { profile = readVoiceProfiles().profiles.find(p => sameSpeakerName(p.name, to)) } catch { return none('store_unavailable') }
   if (!profile) return none('unknown_profile')
   if (!chunkEmbeddingsEnabled()) return none('disabled')
   if (!isEmbeddingAvailable()) return none('store_unavailable')
