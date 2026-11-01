@@ -1,3 +1,10 @@
+## 6.97.1 - Search sessions by meaning (private candidate)
+
+2026-11-01. A private candidate for one Mac, built on 6.97.0, carrying the same commits as the public line's session find route. Pairs with COS Control 0.5.362.
+
+- `POST /api/agent-sessions/find` asks the person's decision model (Jev or SubQ) which recent sessions a few typed words refer to, after consent for that provider, and returns up to 5 rows in order of likelihood.
+- `GET /api/decision-provider` adds `capabilities.sessionFind`. No other route changes. The session list and search are unchanged.
+
 ## 6.97.0 - COS's token ledger records what providers report, and a stopped meeting no longer locks Update (private candidate)
 
 2026-10-31. A private candidate for one Mac, built on 6.96.4. Pairs with the COS cost view in the next COS Control build, which reads the ledger file directly; there is no new endpoint.
