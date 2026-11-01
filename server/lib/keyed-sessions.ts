@@ -10,7 +10,7 @@
 // every check below is one failed stat. Reading never creates. Remove all keys (plan 12) keeps
 // this file on purpose: a keyed transcript stays refused after the keys are gone. A manual
 // `claude --resume` in a terminal is documented, not blocked.
-import { statSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { dataPath } from './data-dir.js'
 import { readPrivateJsonFile, writePrivateJsonFile } from './key-store.js'
 import { registerKeyLanesStatusProvider } from './key-lanes.js'
@@ -79,6 +79,26 @@ function fileRecords(): KeyedSessionRecord[] {
 export function listKeyedSessions(): KeyedSessionRecord[] {
   const byId = new Map<string, KeyedSessionRecord>()
   for (const r of fileRecords()) byId.set(r.id, r)
+  for (const r of memory.values()) if (!byId.has(r.id)) byId.set(r.id, r)
+  return [...byId.values()]
+}
+
+/**
+ * The same records, read so that a damaged file cannot pass for an empty one. listKeyedSessions reads a corrupt or unreadable
+ * file as "none", which is right for the places that refuse a keyed session (they fail open on a file nobody can read) and wrong for
+ * a place that must NOT send keyed text anywhere: a corrupt file sent keyed session text to a model in a probe. A missing file is
+ * none; a file that exists and is not the store's shape throws. Session find uses this; nothing else does.
+ */
+export function listKeyedSessionsStrict(): KeyedSessionRecord[] {
+  const byId = new Map<string, KeyedSessionRecord>()
+  const file = keyedSessionsPath()
+  if (existsSync(file)) {
+    const st = lstatSync(file)
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error('keyed sessions file is not a plain file')
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<KeyedSessionsFile> | null
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.sessions) || !parsed.sessions.every(isRecord)) throw new Error('keyed sessions file is not readable')
+    for (const r of parsed.sessions) byId.set(r.id, r)
+  }
   for (const r of memory.values()) if (!byId.has(r.id)) byId.set(r.id, r)
   return [...byId.values()]
 }

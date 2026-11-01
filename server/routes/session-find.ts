@@ -7,7 +7,9 @@
  * `stage` is `"first"` (the newest 254 sessions) or `"full"` (the next 254 too, unless the first already settles it).
  *
  * A search that cannot run answers HTTP 200 with `available: false`, a `reason` and a `message`, so Control keeps its word
- * search and says one line about why. A malformed body is 400. 503 means the session store could not be read; try later.
+ * search and says one line about why. A malformed body is 400. A walk that fails (the session store, the keyed-sessions file) is
+ * also a 200 with `reason: failed`, so Control keeps its word search. 503 `session_find_unavailable` is left for an unexpected
+ * error outside the finder's own handling: try later.
  * An older server answers 404, which Control reads as "no meaning search here".
  *
  * A closed connection stops the walk and any stage that has not started. A model request already sent is not aborted (it is

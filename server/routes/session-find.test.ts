@@ -8,7 +8,6 @@ import { createDecisionProviderRouter } from './decision-provider.js'
 import { createJevRouter } from './jev.js'
 import { unavailableAnswer, type SessionFindAnswer, type SessionFindRequest } from '../lib/session-find.js'
 import { JevClient } from '../lib/jev.js'
-import { readDecisionSettings } from '../lib/decision-settings.js'
 
 const servers: Server[] = []
 afterEach(async () => {
@@ -136,8 +135,13 @@ describe('the capability', () => {
   it('keeps every capability it had', async () => {
     expect(await view({ COS_CLAUDE_SESSIONS_ENABLED: '1' })).toMatchObject({ choices: ['jev', 'subq'], workflows: ['session', 'completion', 'search'], hotReload: true, fallback: false, subqImages: true, subqKeySource: 'config-or-env' })
   })
-  it('reads the provider setting the same way Work search does', () => {
-    expect(readDecisionSettings).toBeTypeOf('function')
+  it('reports sessionFind next to the selected search provider, and does not change what the setting says', async () => {
+    const app = express()
+    app.use('/api', createDecisionProviderRouter({ env: { COS_CLAUDE_SESSIONS_ENABLED: '1', COS_DECISION_PROVIDER_SEARCH: 'subq' }, read: () => ({ schema: 1, overrides: {} }), configured: () => ({ jev: true, subq: true }), keyStatus: () => ({ jev: { configured: true, source: 'config' }, subq: { configured: true, source: 'config' } }) }))
+    const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) }); servers.push(server)
+    const body = await (await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/decision-provider`)).json()
+    expect(body.effective).toMatchObject({ search: 'subq', session: 'jev', completion: 'jev' })
+    expect(body.capabilities.sessionFind).toBe(true)
   })
 })
 
