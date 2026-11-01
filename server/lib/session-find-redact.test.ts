@@ -96,6 +96,7 @@ describe('what mask does not know', () => {
     ['a hyphenated license-key pair', 'license-key: ABCD-1234-EFGH ok', 'EFGH'],
     ['a quoted JSON my_key pair', 'cfg {"my_key": "abcdef ghijkl"} end', 'abcdef'],
     ['the spoken api key', 'the api key: hunter22xx was pasted', 'hunter22xx'],
+    ['the spoken secret key with no digit in it', 'the secret key = correcthorsebattery ok', 'correcthorse'],
     ['the spoken API KEY in capitals', 'API KEY = hunter22xx here', 'hunter22xx'],
     ['a bare key with a digit in a long value', 'key: a1b2c3d4e5f6 was it', 'a1b2c3d4e5f6'],
     ['an address with an accented letter', 'write to josé@example.com about it', 'josé', 'example.com'],

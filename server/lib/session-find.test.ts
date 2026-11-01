@@ -14,6 +14,7 @@ import {
 import { agentSessionRoots } from './agent-session-store.js'
 import { dataPath } from './data-dir.js'
 import { defaultSessionFindDependencies } from './session-find.js'
+import { listKeyedSessionsStrict } from './keyed-sessions.js'
 
 const NOW = Date.parse('2026-11-01T12:00:00Z')
 const DAY = 86_400_000
@@ -352,6 +353,7 @@ describe('keyed sessions must not leave, even when their file is damaged', () =>
   it.each([['not JSON', '{"sessions": ['], ['the wrong shape', '{"v":1,"sessions":"x"}'], ['a record that is not one', JSON.stringify({ v: 1, sessions: [record('abcdef12-0000-4000-8000-000000000001'), { id: 7 }] })]])(
     'throws for a file that is %s, where the list\'s reader would say "none"', (_name, body) => {
       writeFileSync(file(), body)
+      expect(() => listKeyedSessionsStrict()).toThrow()
       expect(() => defaultSessionFindDependencies().keyedIds()).toThrow()
     })
 
