@@ -3,7 +3,8 @@
 2026-11-01. A private candidate for one Mac, built on 6.97.0, carrying the same commits as the public line's session find route. Pairs with COS Control 0.5.362.
 
 - `POST /api/agent-sessions/find` asks the person's decision model (Jev or SubQ) which recent sessions a few typed words refer to, after consent for that provider, and returns up to 5 rows in order of likelihood.
-- `GET /api/decision-provider` adds `capabilities.sessionFind`. No other route changes. The session list and search are unchanged.
+- `GET /api/decision-provider` adds `capabilities.sessionFind`. The session list and search are unchanged.
+- Accented speaker names now match. COS Control's helper receives names in decomposed Unicode, so "Yes, this is Brigitta Pólya" failed with "No chunk in this meeting is labelled" although her chunks carried that name. Speaker-name routes in meeting and voice now read names as NFC and compare NFC on both sides, and a new name is stored as NFC. Names already saved are not rewritten.
 
 ## 6.97.0 - COS's token ledger records what providers report, and a stopped meeting no longer locks Update (private candidate)
 
