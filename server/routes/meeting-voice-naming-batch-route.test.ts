@@ -189,6 +189,18 @@ describe('voice naming batch routes', () => {
     expect((await send(BATCH)).body.batches[0]).toMatchObject({ state: 'undo_partial', undoAvailable: false })
   })
 
+  it('store a name that arrives decomposed as NFC, and match the stored profile either way (Control\'s helper sends NFD)', async () => {
+    const composed = 'Dana R\u00e9yes', decomposed = 'Dana Re\u0301yes'
+    writeFileSync(data('voice-profiles.json'), JSON.stringify({ profiles: store().map(p => ({ ...p, name: p.name === 'Dana Reyes' ? decomposed : p.name })) }))
+    await suggestNames([['Voice 1'], ['Voice 2'], ['Voice 3']])
+    const applied = await send(BATCH, { sourceRevision: revision(), items: [{ labels: ['Voice 1'], name: decomposed }], confirm: true })
+    expect(applied.status).toBe(200)
+    expect(applied.body.named).toEqual([{ labels: ['Voice 1'], name: composed, samplesAdded: 4 }])
+    expect(speakers().filter(x => x === composed)).toHaveLength(CHUNKS_PER_VOICE)
+    expect(speakers().some(x => x !== x.normalize('NFC'))).toBe(false)
+    expect(store().filter(p => p.name.normalize('NFC') === composed)).toHaveLength(1) // matched the profile stored decomposed, not a second one
+  })
+
   it('answer a restart honestly: no suggestions in memory, so click again', async () => {
     const { resetVoiceSuggestionRunnerForTests } = await import('../lib/mac-voice-suggestions.js')
     resetVoiceSuggestionRunnerForTests(null)

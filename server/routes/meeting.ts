@@ -9,7 +9,7 @@ import { checkSpeakerName } from '../lib/speaker-name.js'
 import { dataPath } from '../lib/data-dir.js'
 import { PHONE_CAPTURE_ID, PHONE_SOURCE_TYPE, assertPhoneProvenance, readPhoneRecording, requirePhoneRecording, closePhoneRecording } from '../lib/phone-recording.js'
 import { MAC_CAPTURE_ID, readMacRecording, requireMacRecording, macChunkReceipt, closeMacRecording } from '../lib/mac-recording.js'
-import { bodyName, sameSpeakerName } from '../lib/speaker-name-nfc.js'
+import { bodyName, nfc, sameSpeakerName } from '../lib/speaker-name-nfc.js'
 import { readSpeakerPolicy, writeSpeakerPolicy, isSpeakerMode } from '../lib/meeting-speaker-policy.js'
 // POST /api/meeting/save — finalize an existing transcribe-stream session into
 // the standalone public meeting store. The live transcript and chunk metadata
@@ -1763,6 +1763,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   router.post('/meeting/:sessionId/speaker-groups/:identityId/relabel', async (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? ''), identityId = String(req.params.identityId ?? ''), body = req.body
+    if (body && typeof body === 'object' && typeof body.to === 'string') body.to = nfc(body.to)
     if (!MAC_CAPTURE_ID.test(sessionId) || !body || Object.keys(body).some(k => !['recordId', 'expectedRevision', 'scopeSHA256', 'rawChunkIndices', 'to', 'dryRun', 'confirm'].includes(k)) || !isMacCallHumanName(body.to) || !Array.isArray(body.rawChunkIndices) || !body.rawChunkIndices.length || body.rawChunkIndices.length > 6000 || body.rawChunkIndices.some((i: unknown) => !Number.isSafeInteger(i) || Number(i) < 0) || new Set(body.rawChunkIndices).size !== body.rawChunkIndices.length || typeof body.expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(body.expectedRevision)) { res.status(400).json({ reason: 'invalid_group_selection' }); return }
     const refusal = assertVoiceEvidenceSource([sessionId]) ?? refuseDerivedMutation(body.recordId) ?? sourceRevisionRefusal(sessionId, body) ?? finalizingRefusal(sessionId)
     if (refusal) { res.status(refusal.status).json(refusal.body); return }
@@ -1906,6 +1907,7 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   router.post('/meeting/:sessionId/speaker-interval-groups/:identityId/relabel', (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     const sessionId = String(req.params.sessionId ?? ''), identityId = String(req.params.identityId ?? ''), body = req.body
+    if (body && typeof body === 'object' && typeof body.to === 'string') body.to = nfc(body.to)
     const previewOnly = body?.dryRun === true && body?.confirm === undefined, confirmed = body?.confirm === true && body?.dryRun === undefined
     const keys = ['recordId', 'expectedRevision', 'scopeSHA256', 'memberIds', 'to', previewOnly ? 'dryRun' : 'confirm']
     if (!MAC_CAPTURE_ID.test(sessionId) || !/^[A-Za-z0-9:_-]{1,128}$/.test(identityId) || !intervalBodyKeys(body, keys) || !previewOnly && !confirmed || !validSHA(body.expectedRevision) || !validSHA(body.scopeSHA256) || !isMacCallHumanName(body.to) || !Array.isArray(body.memberIds) || !body.memberIds.length || body.memberIds.length > 20000 || !body.memberIds.every(validSHA) || new Set(body.memberIds).size !== body.memberIds.length) { res.status(400).json({ reason: 'invalid_interval_selection' }); return }

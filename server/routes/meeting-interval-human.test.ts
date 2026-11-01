@@ -148,6 +148,16 @@ describe('actual HTTP exact interval human naming with producer disabled', () =>
     f.assertImmutable()
   }, 30_000)
 
+  it('stores a word name that arrives decomposed as NFC (Control\'s helper sends NFD)', async () => {
+    const f = await fixture()
+    await nameOne(f, 'Brigitta Po\u0301lya')
+    const review = (await f.panel()).body
+    expect(review.voices.find((v: any) => v.label === 'Brigitta P\u00f3lya')).toMatchObject({ nameAsserted: true, confirmedByHuman: true })
+    expect(review.voices.some((v: any) => v.label !== v.label.normalize('NFC'))).toBe(false)
+    const file = readFileSync(f.paths.annotation, 'utf8')
+    expect(file).toBe(file.normalize('NFC'))
+  }, 30_000)
+
   it('undoes one of two names without discarding the remaining exact claim or the final closed word inventory', async () => {
     const f = await fixture(), first = await nameOne(f), second = await nameOne(f, 'Second Person')
     const both = (await f.panel()).body

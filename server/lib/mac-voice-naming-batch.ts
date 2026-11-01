@@ -49,6 +49,7 @@
 // DRAINS. Planning is read-only and holds no lease. Each write section holds its own `api_mutation` lease and the
 // meeting sync lock. isMacVoiceNamingBatchPost is what index.ts needs in order to let the route answer its own refusal.
 
+import { nfc, sameSpeakerName } from './speaker-name-nfc.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -192,7 +193,7 @@ const vectorHash = (vector: ArrayLike<number>): string => createHash('sha256').u
 const sampleKey = (sample: SampleId): string => `${sample.source}#${sample.hash}`
 
 function profileSamples(name: string): SampleCopy[] | null {
-  const profile = readVoiceProfiles().profiles.find(p => p.name === name)
+  const profile = readVoiceProfiles().profiles.find(p => sameSpeakerName(p.name, name))
   return profile ? profile.embeddings.map((embedding, i) => ({ source: profile.sources?.[i] ?? 'unknown', hash: vectorHash(embedding), embedding })) : null
 }
 
@@ -305,8 +306,8 @@ const forgotten = new Map<string, string>()
 
 /** Drops what a person's deletion must not leave behind. Returns the number of voiceprints dropped. */
 function scrubForName(step: Step, name: string): number {
-  if (step.attendeesBefore?.includes(name)) step.attendeesBefore = null
-  if (step.name !== name) return 0
+  if (step.attendeesBefore && nfc(step.attendeesBefore).includes(nfc(name))) step.attendeesBefore = null
+  if (!sameSpeakerName(step.name, name)) return 0
   const vectors = step.evicted.length + (step.macBefore?.length ?? 0)
   step.evictedForgotten = (step.evictedForgotten ?? 0) + step.evicted.length
   step.evicted = []
@@ -364,6 +365,7 @@ function pruneExpiredJournals(): void {
 
 /** Person deleted: drop the voiceprints journals hold for them. Their count stays, reported as not restored. */
 export function forgetMacVoiceNamingPerson(name: string): { batches: number; vectors: number } {
+  name = nfc(name)
   forgotten.set(name, new Date().toISOString())
   const out = { batches: 0, vectors: 0 }
   for (const { path } of journalFiles()) {
@@ -440,7 +442,7 @@ const yieldToLoop = (): Promise<void> => new Promise(resolve => { setImmediate(r
 function profileStoreStamp(): string {
   try { const info = statSync(dataPath('voice-profiles.json')); return `${info.ino}:${info.size}:${info.mtimeMs}` } catch { return 'missing' }
 }
-const itemIsSuggested = (current: { suggestions: VoiceSuggestion[] }, item: NamingBatchItem): boolean => current.suggestions.find(s => s.name === item.name && sameLabels(s.labels, item.labels))?.highConfidence === true
+const itemIsSuggested = (current: { suggestions: VoiceSuggestion[] }, item: NamingBatchItem): boolean => current.suggestions.find(s => sameSpeakerName(s.name, item.name) && sameLabels(s.labels, item.labels))?.highConfidence === true
 
 /** One batch or Undo per session at a time, in this process. The value is the journal it is writing, once it has one. */
 const active = new Map<string, string | null>()
@@ -732,7 +734,7 @@ export function createMacVoiceNamingBatches(deps: NamingBatchDeps): MacVoiceNami
     const revoked = new Set(rows.filter(r => r.phase === 'reverted').map(r => r.batchId ?? r.id))
     const later = rows.filter(r => !own.has(r.id) && !revoked.has(r.batchId ?? r.id) && r.at >= step.at)
     const overlaps = (r: CorrectionRow) => r.chunks.some(i => step.changed.includes(i))
-    if (later.some(r => (r.phase === 'confirmed' || r.phase === 'confirmed-chunks') && r.to === step.name && (r.chunks.length === 0 || overlaps(r)))) return 'confirmed_by_person'
+    if (later.some(r => (r.phase === 'confirmed' || r.phase === 'confirmed-chunks') && sameSpeakerName(r.to, step.name) && (r.chunks.length === 0 || overlaps(r)))) return 'confirmed_by_person'
     if (later.some(r => r.phase === 'applied' && overlaps(r))) return 'label_changed_by_person'
     const chunks = Array.isArray(doc.chunks) ? doc.chunks as Array<{ speaker?: unknown } | null> : []
     const speakers = step.changed.map(i => chunks[i]?.speaker)
@@ -1017,7 +1019,7 @@ function parseItems(value: unknown): NamingBatchItem[] | null {
     const name = raw?.name
     if (typeof name !== 'string' || name.length === 0 || name.length > 120) return null
     if (!Array.isArray(labels) || labels.length === 0 || labels.length > MAX_ITEMS || labels.some(label => typeof label !== 'string')) return null
-    items.push({ labels: labels as string[], name })
+    items.push({ labels: labels as string[], name: nfc(name) })
   }
   return items
 }

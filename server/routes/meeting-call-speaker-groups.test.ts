@@ -86,6 +86,14 @@ describe('authenticated call-wide group correction handoff', () => {
     const result = await f.request(`/speaker-groups/${scope.identityId}/relabel`, { ...f.selection(g, scope), confirm: true })
     expect(result).toMatchObject({ status: 409, body: { reason: 'group_refresh_unavailable', retryable: true } })
   })
+  it('stores a group name that arrives decomposed as NFC (Control\'s helper sends NFD)', async () => {
+    const f = await fixture(), g = (await f.groups()).body, scope = g.groupScopes[0]
+    const nfd = 'Brigitta Po\u0301lya', nfc = 'Brigitta P\u00f3lya'
+    expect((await f.request(`/speaker-groups/${scope.identityId}/relabel`, { ...f.selection(g, scope, nfd), confirm: true })).status).toBe(200)
+    const view = readMacSpeakerCallView(f.files.sidecarPath, f.source.currentJSON, f.files.meetingPath)
+    expect(view.doc.chunks[scope.members[0].position].speaker).toBe(nfc)
+    for (const file of [f.paths.ledger, f.paths.annotation]) if (existsSync(file)) expect(readFileSync(file, 'utf8')).toBe(readFileSync(file, 'utf8').normalize('NFC'))
+  })
   it('can name two different groups after a cached refresh, preserving the first correction and immutable sources', async () => {
     const f = await fixture(), first = (await f.groups()).body, a = first.groupScopes[0], selectedA = f.selection(first, a)
     expect((await f.request(`/speaker-groups/${a.identityId}/relabel`, { ...selectedA, confirm: true })).status).toBe(200)
