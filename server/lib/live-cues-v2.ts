@@ -39,7 +39,7 @@ import {
   type LiveCuesV2SettingReader, type LiveCuesV2SettingSource, type LiveCuesV2StoredLimits,
 } from './live-cues-v2-settings.js'
 import { notesMemory } from './live-cues-v2-notes.js'
-import { GROUNDED_LIMITS, groundedCandidates, groundedSource, selfIdSet, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
+import { GROUNDED_LIMITS, groundedCandidates, groundedSource, selfIdSet, usableFiles, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
 import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
 import { getMeetingStore } from './meeting-store.js'
@@ -1050,9 +1050,13 @@ export class LiveCuesV2Engine {
     trace.grounding = 'grounded'
     const codeOf = (e: unknown) => { const r = e as { reason?: unknown; code?: unknown } | null; return typeof r?.reason === 'string' ? r.reason : typeof r?.code === 'string' ? r.code : 'threw' }
     let meetingDomain: string | null = null, calendarTitle: string | null = null
-    try { const o = this.deps.orientation?.(s.sessionId); meetingDomain = o?.domain ?? null; calendarTitle = o?.title ?? null } catch (e) { trace.orientationError = codeOf(e) }
+    try {
+      const o = this.deps.orientation?.(s.sessionId)
+      meetingDomain = typeof o?.domain === 'string' ? o.domain : null
+      calendarTitle = typeof o?.title === 'string' ? o.title : null
+    } catch (e) { trace.orientationError = codeOf(e) }
     let files: GroundedFile[] = []
-    try { files = this.deps.files?.(s.sessionId) ?? [] } catch (e) { trace.filesError = codeOf(e) }
+    try { files = usableFiles(this.deps.files?.(s.sessionId)) } catch (e) { trace.filesError = codeOf(e) }
 
     const timed = async (arm: () => Promise<MemoryResult>, threw: string): Promise<{ res: MemoryResult; ms: number | null }> => {
       const t = Date.now()
@@ -1067,9 +1071,9 @@ export class LiveCuesV2Engine {
 
     const transcript = cleanWindow(s.chunks.join('\n'))
     const twins = [...this.sessions.keys()].filter(id => id !== s.sessionId)
-    const { candidates, excludedSelf } = groundedCandidates({ cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript, window, selfIds: selfIdSet(s.sessionId, twins),
+    const { candidates, excludedSelf, domainUnknown } = groundedCandidates({ cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript, window, selfIds: selfIdSet(s.sessionId, twins),
       meetingDomain, today: this.deps.now().toLocaleDateString('en-CA') })
-    Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length }, excludedSelf })
+    Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length }, excludedSelf, domainUnknown })
 
     const source: LiveCuesV2MemorySource = candidates.some(c => c.arm === 'cue_memory') ? 'cue_memory' : candidates.some(c => c.arm === 'notes') ? 'notes' : 'none'
     const arms = (['cue_memory', 'notes', 'files'] as const).filter(a => candidates.some(c => c.arm === a))

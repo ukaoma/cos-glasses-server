@@ -86,17 +86,36 @@ export function isSelfCopy(c: Pick<MemoryNote, 'notes' | 'recordId' | 'sessionId
 
 /** A personal-domain note never reaches a meeting that is not personal. An unknown meeting domain counts as not personal. */
 export function isForeignPersonal(noteDomain: string | undefined, meetingDomain: string | null): boolean {
-  const norm = (v: string | null | undefined) => (v ?? '').trim().toLowerCase()
+  const norm = (v: unknown) => (typeof v === 'string' ? v.trim().toLowerCase() : '')
   return norm(noteDomain) === 'personal' && norm(meetingDomain) !== 'personal'
 }
 
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
+
+/** A retrieved note the code below can read: the four fields it calls string methods on are strings. cue_memory.py's answer is
+ *  parsed JSON from a subprocess, so a malformed row is skipped here instead of throwing into the evaluation. */
+function wellFormed(n: unknown): n is MemoryNote {
+  const r = n as Partial<Record<keyof MemoryNote, unknown>> | null
+  return !!r && typeof r === 'object' && typeof r.id === 'string' && typeof r.date === 'string' && typeof r.title === 'string' && typeof r.notes === 'string'
+}
+
 /** Kind and locator from a retrieved note's key: `memory:<id>` and `meeting:<recordId>` come from the notes arm, anything
- *  else (cue_memory.py's `date|title`, or no key) is a meeting with no record id known. */
+ *  else (cue_memory.py's `date|title`, or no key) is a meeting with no record id known. Only the fields the arms produce are
+ *  copied: the note's own id, date, title, notes and key, its domain (cue_memory.py and the notes arm say it when they know
+ *  it) and the session it was recorded from, each only when it is a non-empty string. */
 function describe(note: MemoryNote, arm: GroundedArm): Omit<GroundedNote, 'id'> {
-  const key = note.key ?? ''
-  if (key.startsWith('memory:') && key.length > 'memory:'.length) return { ...note, arm, kind: 'memory', memoryId: key.slice('memory:'.length) }
-  if (key.startsWith('meeting:') && key.length > 'meeting:'.length) return { ...note, arm, kind: 'meeting', recordId: key.slice('meeting:'.length) }
-  return { ...note, arm, kind: 'meeting' }
+  const key = typeof note.key === 'string' ? note.key : ''
+  const base = { date: note.date, title: note.title, notes: note.notes, key, arm, ...(nonEmpty(note.domain) ? { domain: note.domain } : {}),
+    ...(nonEmpty(note.sessionId) ? { sessionId: note.sessionId } : {}) }
+  if (key.startsWith('memory:') && key.length > 'memory:'.length) return { ...base, kind: 'memory', memoryId: key.slice('memory:'.length) }
+  if (key.startsWith('meeting:') && key.length > 'meeting:'.length) return { ...base, kind: 'meeting', recordId: key.slice('meeting:'.length) }
+  return { ...base, kind: 'meeting' }
+}
+
+/** The files with the four fields grounded cues read, all strings; anything else in the list is dropped. */
+export function usableFiles(raw: unknown): GroundedFile[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((f): f is GroundedFile => !!f && typeof f === 'object' && typeof f.id === 'string' && typeof f.name === 'string' && typeof f.status === 'string' && typeof f.text === 'string')
 }
 
 /** Passages of at most `max` characters: blank-line blocks, then sentences, then a hard cut. */
@@ -140,7 +159,7 @@ export interface GroundedInputs {
   cueMemory: MemoryNote[]
   /** The owner's COS notes, best first. */
   notes: MemoryNote[]
-  files: GroundedFile[]
+  files: unknown
   /** What has been said so far in this meeting (speaker labels removed). */
   transcript: string
   /** The last part of it: what the room is on now. */
@@ -155,7 +174,7 @@ export interface GroundedInputs {
 /** The candidates for the judge, in order M1..M4, N1, F1, with ids that keep their kind. `excludedSelf` counts the notes dropped
  *  as this conversation or its twin. Files are the owner's own attachments to this meeting, so the self rule does not apply
  *  to them: a document the room reads from is what a file cue is for. */
-export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNote[]; excludedSelf: number } {
+export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNote[]; excludedSelf: number; domainUnknown: number } {
   const transcript = shingleSet(i.transcript)
   const seen = new Set<string>()
   const out: GroundedNote[] = []
@@ -164,10 +183,12 @@ export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNot
     let n = 0
     for (const raw of list) {
       if (n >= limit || out.length >= GROUNDED_LIMITS.maxCandidates) return
+      if (!wellFormed(raw)) continue
       const note = describe(raw, arm)
-      if (isSelfCopy(note, transcript, i.selfIds)) { excludedSelf += 1; continue }
-      if (isForeignPersonal(note.domain, i.meetingDomain)) continue
       const identities = candidateIdentities(note)
+      // A copy of this conversation also keeps every other copy of the same meeting out, whatever its text says.
+      if (isSelfCopy(note, transcript, i.selfIds)) { for (const id of identities) seen.add(id); excludedSelf += 1; continue }
+      if (isForeignPersonal(note.domain, i.meetingDomain)) continue
       if (identities.some(id => seen.has(id))) continue
       for (const id of identities) seen.add(id)
       n += 1
@@ -177,13 +198,15 @@ export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNot
   take(i.cueMemory, 'cue_memory', GROUNDED_LIMITS.cueMemoryTop, 'M')
   take(i.notes, 'notes', GROUNDED_LIMITS.notesTop, 'N')
   if (out.length < GROUNDED_LIMITS.maxCandidates) {
-    const hit = bestFilePassage(i.files, i.window)
+    const hit = bestFilePassage(usableFiles(i.files), i.window)
     if (hit) {
       out.push({ id: 'F1', date: i.today, title: hit.file.name.replace(/\s+/g, ' ').trim().slice(0, 90), notes: hit.passage, key: `file:${hit.file.id}`,
         arm: 'files', kind: 'file', fileId: hit.file.id })
     }
   }
-  return { candidates: out, excludedSelf }
+  // The personal-domain rule can only work on a note that says its domain; this counts the notes that did not.
+  const domainUnknown = out.filter(c => c.arm !== 'files' && !c.domain).length
+  return { candidates: out, excludedSelf, domainUnknown }
 }
 
 /** The cue source for a kept candidate: the opaque id, the date and title as before, and (v3) its kind with its one locator. */

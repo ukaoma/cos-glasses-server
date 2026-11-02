@@ -1,7 +1,7 @@
 // Live cues v3 grounded retrieval and judge B: the pure helpers. The engine's use of them is in live-cues-v2-grounding.test.ts.
 import { describe, expect, it } from 'vitest'
 import {
-  GROUNDED_LIMITS, bestFilePassage, candidateIdentities, groundedCandidates, groundedSource, isForeignPersonal, isSelfCopy, normalizeMeetingTitle,
+  GROUNDED_LIMITS, usableFiles, bestFilePassage, candidateIdentities, groundedCandidates, groundedSource, isForeignPersonal, isSelfCopy, normalizeMeetingTitle,
   passagesOf, selfIdSet, shingleSet, sixGramOverlap, type GroundedFile, type GroundedInputs,
 } from './live-cues-v2-grounded.js'
 import { CUE_REL_NO, CUE_REL_YES, JUDGE_B_NOTE_CHARS, judgeBQuestions, judgeNoteLine, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
@@ -71,6 +71,10 @@ describe('domain filter', () => {
     expect(isForeignPersonal('quilt', 'personal')).toBe(false)
     expect(isForeignPersonal(undefined, 'quilt')).toBe(false)
     expect(isForeignPersonal('', null)).toBe(false)
+    for (const odd of [5, {}, [], ['personal'], true, null]) {                                           // never throws on a value that is not a string
+      expect(isForeignPersonal(odd as never, 'quilt'), String(odd)).toBe(false)
+      expect(isForeignPersonal('personal', odd as never), String(odd)).toBe(true)
+    }
   })
 })
 
@@ -134,10 +138,11 @@ describe('candidates for the judge', () => {
   it('a note filed under this session or its twin is excluded and counted, and so is one from another armed session', () => {
     const r = groundedCandidates(base({
       selfIds: selfIdSet('mac_session', ['meeting_twin']),
-      notes: [note('T1', { key: 'meeting:standalone:meeting_twin', title: 'Twin copy' }), note('S1', { key: 'meeting:standalone:mac_session', title: 'Own copy', date: '2026-11-01' }), note('Z', { key: 'memory:m-9', title: 'Fine' })],
+      notes: [note('T1', { key: 'meeting:standalone:meeting_twin', title: 'Twin copy' }), note('S1', { key: 'meeting:standalone:mac_session', title: 'Own copy', date: '2026-11-01' }),
+        note('R', { key: 'meeting:ops:quilt:2026-11:filed.md', sessionId: 'meeting_twin', title: 'Filed under another record id', date: '2026-11-01' }), note('Z', { key: 'memory:m-9', title: 'Fine' })],
     }))
     expect(r.candidates.map(c => c.title)).toEqual(['Fine'])
-    expect(r.excludedSelf).toBe(2)
+    expect(r.excludedSelf).toBe(3)
   })
   it('a file is never excluded as this conversation: the room may read from the very document it attached', () => {
     const text = w('said', 12)
@@ -145,12 +150,55 @@ describe('candidates for the judge', () => {
     expect(r.candidates.map(c => c.id)).toEqual(['F1'])
     expect(r.excludedSelf).toBe(0)
   })
-  it('personal notes are dropped from a work meeting and kept in a personal one', () => {
-    const personal = note('P', { title: 'Family budget', domain: 'personal' })
-    const work = note('W', { title: 'Quilt plan', domain: 'quilt' })
-    expect(groundedCandidates(base({ cueMemory: [personal, work], notes: [note('N', { title: 'Mine', domain: 'personal', key: 'memory:n' })] })).candidates.map(c => c.title)).toEqual(['Quilt plan'])
-    expect(groundedCandidates(base({ cueMemory: [personal, work], meetingDomain: 'personal' })).candidates.map(c => c.title)).toEqual(['Family budget', 'Quilt plan'])
+  // cue_memory.py builds each note as exactly this (operations/scripts/cue_memory.py:256): id, date, title cut at 90, the header
+  // collapsed and cut at 520, and the date|normalised-title key. Its domain, once the script says it, is one more string field.
+  const cueMemoryLine = (id: string, date: string, title: string, header: string, domain?: string): MemoryNote =>
+    ({ id, date, title: title.slice(0, 90), notes: header.replace(/\s+/g, ' ').slice(0, 520), key: `${date}|${normalizeMeetingTitle(title)}`, ...(domain === undefined ? {} : { domain }) })
+  it('a personal-domain note is dropped from a work meeting and kept in a personal one, from either arm', () => {
+    const personal = cueMemoryLine('M1', '2026-10-02', 'Family budget', 'Summary: the kids\' accounts', 'personal')
+    const work = cueMemoryLine('M2', '2026-10-03', 'Quilt plan', 'Summary: the plan', 'quilt')
+    const mine = note('N', { title: 'Mine', domain: 'personal', key: 'memory:n', date: '2026-10-04' })
+    expect(groundedCandidates(base({ cueMemory: [personal, work], notes: [mine] })).candidates.map(c => c.title)).toEqual(['Quilt plan'])
+    expect(groundedCandidates(base({ cueMemory: [personal, work], notes: [mine], meetingDomain: 'personal' })).candidates.map(c => c.title)).toEqual(['Family budget', 'Quilt plan', 'Mine'])
     expect(groundedCandidates(base({ cueMemory: [personal], meetingDomain: null })).candidates).toEqual([])
+    expect(groundedCandidates(base({ cueMemory: [{ ...personal, domain: ' Personal ' }] })).candidates).toEqual([])          // case and spaces do not hide it
+  })
+  it('the notes cue_memory.py writes today say no domain: they pass the personal rule, and each one is counted as unknown', () => {
+    const lines = [cueMemoryLine('M1', '2026-10-02', 'Family budget', 'Summary: the kids\' accounts'), cueMemoryLine('M2', '2026-10-03', 'Quilt plan', 'Summary: the plan', 'quilt')]
+    expect(Object.keys(lines[0]).sort()).toEqual(['date', 'id', 'key', 'notes', 'title'])
+    const r = groundedCandidates(base({ cueMemory: lines, notes: [note('N', { key: 'memory:n', date: '2026-09-04', title: 'No domain here' })] }))
+    expect(r.candidates.map(c => c.title)).toEqual(['Family budget', 'Quilt plan', 'No domain here'])
+    expect(r.domainUnknown).toBe(2)                                                                                   // a file is not counted, and neither is a note that said its domain
+    expect(groundedCandidates(base({ cueMemory: [lines[1]] })).domainUnknown).toBe(0)
+    const withFile = groundedCandidates(base({ cueMemory: [lines[1]], files: [{ id: 'f', name: 'Plan.pdf', status: 'ready', text: 'Overage pricing renewal contract.' }] }))
+    expect(withFile.candidates.map(c => c.id)).toEqual(['M1', 'F1'])
+    expect(withFile.domainUnknown).toBe(0)
+    expect(groundedCandidates(base({ cueMemory: [{ ...lines[0], domain: '   ' }] })).domainUnknown).toBe(1)             // a blank domain says nothing
+  })
+  it('a domain, session or key that is not a string never throws: the note is treated as saying nothing', () => {
+    const odd = { ...cueMemoryLine('M1', '2026-10-02', 'Odd one', 'Summary: odd'), domain: 5, sessionId: 7, key: 9 } as unknown as MemoryNote
+    const r = groundedCandidates(base({ cueMemory: [odd] }))
+    expect(r.candidates).toHaveLength(1)
+    expect(r.candidates[0]).toMatchObject({ kind: 'meeting', key: '' })
+    expect(r.candidates[0]).not.toHaveProperty('domain')
+    expect(r.candidates[0]).not.toHaveProperty('sessionId')
+    expect(r.domainUnknown).toBe(1)
+  })
+  it('a malformed row is skipped, never thrown on: each of id, date, title and notes must be a string', () => {
+    const ok = cueMemoryLine('M1', '2026-10-02', 'Fine', 'Summary: fine')
+    for (const bad of [{ id: 3 }, { date: 20261002 }, { title: null }, { title: { x: 1 } }, { notes: undefined }, { notes: 5 }]) {
+      const r = groundedCandidates(base({ cueMemory: [{ ...ok, ...bad } as unknown as MemoryNote, cueMemoryLine('M2', '2026-10-03', 'Next', 'Summary: next')] }))
+      expect(r.candidates.map(c => c.title), JSON.stringify(bad)).toEqual(['Next'])
+    }
+    expect(groundedCandidates(base({ cueMemory: [null, 'text', 4] as unknown as MemoryNote[] })).candidates).toEqual([])
+  })
+  it('a copy of this meeting also keeps its other copies out: the identity of an excluded note is remembered', () => {
+    const copy = cueMemoryLine('M1', '2026-10-14', 'Weekly sync', w('said', 12))
+    const sameMeeting = note('N', { date: '2026-10-14', title: 'Weekly sync', key: 'memory:m-9', notes: 'a summary that shares no sentence with the room' })
+    const other = note('O', { date: '2026-10-07', title: 'Other sync', key: 'memory:m-8' })
+    const r = groundedCandidates(base({ cueMemory: [copy], notes: [sameMeeting, other] }))
+    expect(r.candidates.map(c => c.title)).toEqual(['Other sync'])
+    expect(r.excludedSelf).toBe(1)                                                                                    // the duplicate is skipped, not counted as a second copy
   })
   it('one meeting is one candidate however many arms found it: date and title, memory id, record id, file id', () => {
     const r = groundedCandidates(base({
@@ -177,6 +225,22 @@ describe('candidates for the judge', () => {
     expect(groundedSource(rec, 'mtg_3')).toMatchObject({ kind: 'meeting', recordId: 'ops:quilt:2026-10:a.md' })
     const f = groundedCandidates(base({ files: [{ id: 'file-9', name: 'A.pdf', status: 'ready', text: 'Overage pricing renewal contract.' }] })).candidates[0]
     expect(groundedSource(f, 'mtg_4')).toMatchObject({ kind: 'file', fileId: 'file-9' })
+  })
+})
+
+describe('files with fields the code reads', () => {
+  it('only a file whose id, name, status and text are all strings is a file', () => {
+    const ok = { id: 'f1', name: 'Plan.pdf', status: 'ready', text: 'Overage pricing renewal contract.' }
+    expect(usableFiles([ok, null, 'x', 3, { ...ok, id: 4 }, { ...ok, name: 7 }, { ...ok, status: null }, { ...ok, text: undefined }, { ...ok, id: 'f2' }])).toEqual([ok, { ...ok, id: 'f2' }])
+    for (const raw of [undefined, null, 'files', 5, {}, { length: 1, 0: ok }]) expect(usableFiles(raw), String(raw)).toEqual([])
+  })
+  it('a malformed file in the list never reaches the passage search or the candidate', () => {
+    const ok = { id: 'f1', name: 'Plan.pdf', status: 'ready', text: 'Overage pricing renewal contract Harborview terms.' }
+    const inputs = { cueMemory: [], notes: [], transcript: w('said', 60), window: 'overage pricing renewal contract Harborview quarter', selfIds: selfIdSet('mac_session'), meetingDomain: 'quilt', today: '2026-11-01' }
+    const r = groundedCandidates({ ...inputs, files: [null, { id: 'bad', name: 7, status: 'ready', text: 'Overage pricing renewal contract Harborview terms.' }, 'x', ok] })
+    expect(r.candidates.map(c => [c.id, c.title])).toEqual([['F1', 'Plan.pdf']])
+    expect(groundedCandidates({ ...inputs, files: [{ id: 'bad', name: 7, status: 'ready', text: 'Overage pricing renewal contract Harborview terms.' }] }).candidates).toEqual([])
+    expect(groundedCandidates({ ...inputs, files: undefined }).candidates).toEqual([])
   })
 })
 
