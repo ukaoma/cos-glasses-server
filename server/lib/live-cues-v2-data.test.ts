@@ -5,8 +5,8 @@ import { chmodSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync }
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
-  DATA_FACTS_LIMITS as L, askDataIntent, dataArmDomainOk, dataCandidate, dataCandidateText, dataFactsForAsk, dataFactsReader, dataTrigger, namedGroups,
-  parseDataFacts, readDataFactsFile, recentSpeech, refreshText, type DataFacts,
+  DATA_FACTS_LIMITS as L, askDataIntent, askUserWords, dataArmGate, dataCandidate, dataCandidateText, dataFactsForAsk, dataFactsReader, dataTrigger, namedGroups,
+  isQuiltDomain, parseDataFacts, quiltTitleSignal, readDataFactsFile, recentSpeech, refreshText, type DataFacts,
 } from './live-cues-v2-data.js'
 import { GROUNDED_LIMITS, groundedCandidates, groundedSource, selfIdSet, shingleSet, type GroundedNote } from './live-cues-v2-grounded.js'
 import { isCueSourceExtras, isLiveCueV2, type LiveCueV2 } from '../../shared/live-cues-v2.js'
@@ -57,12 +57,21 @@ describe('the contract', () => {
     const raw = rawFacts({ sources: [{ industry: 'Liquor', source: 'Organic Direct', leads: 1, opps: 1, customers: 1 }, { industry: 'Liquor', source: 'X', leads: 'a' }, 4] })
     expect(facts(raw).sources).toHaveLength(1)
   })
-  it('stale: older than 120 hours from asOf is off, 120 hours exactly is still on', () => {
+  const OPEN = { period: { label: 'Nov 2026', start: '2026-11-01', end: '2026-11-04', closed: false }, label: 'Tableau, Nov 2026 to Nov 4, marketing sources' }
+  it('stale, open month: older than 120 hours from asOf is off, 120 hours exactly is still on', () => {
     expect(L.maxAgeHours).toBe(120)
     const asOf = Date.parse(ASOF)
-    expect(parseDataFacts(rawFacts(), asOf + 120 * HOUR).ok).toBe(true)
-    expect(parseDataFacts(rawFacts(), asOf + 120 * HOUR + 1)).toEqual({ ok: false, reason: 'stale' })
-    expect(parseDataFacts(rawFacts(), asOf + 72 * HOUR).ok).toBe(true)   // Monday morning after Friday's run
+    expect(parseDataFacts(rawFacts(OPEN), asOf + 120 * HOUR).ok).toBe(true)
+    expect(parseDataFacts(rawFacts(OPEN), asOf + 120 * HOUR + 1)).toEqual({ ok: false, reason: 'stale' })
+    expect(parseDataFacts(rawFacts(OPEN), asOf + 72 * HOUR).ok).toBe(true)   // Monday morning after Friday's run
+  })
+  it('stale, closed month: 120 hours does not take it off; 35 days from asOf does', () => {
+    expect(L.maxClosedAgeDays).toBe(35)
+    const asOf = Date.parse(ASOF), day = 24 * HOUR
+    expect(parseDataFacts(rawFacts(), asOf + 121 * HOUR).ok).toBe(true)     // the Monday after a Thursday month start
+    expect(parseDataFacts(rawFacts(), asOf + 10 * day).ok).toBe(true)
+    expect(parseDataFacts(rawFacts(), asOf + 35 * day).ok).toBe(true)
+    expect(parseDataFacts(rawFacts(), asOf + 35 * day + 1)).toEqual({ ok: false, reason: 'stale' })
   })
   it('a file dated more than an hour ahead of the clock is off; a minute ahead is not', () => {
     const asOf = Date.parse(ASOF)
@@ -98,7 +107,7 @@ describe('reading the file', () => {
     writeFileSync(path, JSON.stringify(rawFacts()))
     const first = read()
     expect(first.ok && first.facts.label).toBe('Tableau, Oct 2026 close, marketing sources')
-    now = Date.parse(ASOF) + 121 * HOUR
+    now = Date.parse(ASOF) + 36 * 24 * HOUR
     expect(read()).toEqual({ ok: false, reason: 'stale' })           // same bytes, later clock
     now = NOW
     writeFileSync(path, JSON.stringify(rawFacts({ label: 'Tableau, Nov 2026 to Nov 3, marketing sources' })))
@@ -174,9 +183,51 @@ describe('the trigger', () => {
     expect(namedGroups(f, 'quilt leads quilt customers quilt budget')).toEqual([])
     expect(namedGroups(f, 'the quilt industry has 13 customers').map(n => n.group.name)).toEqual(['Quilt'])
   })
-  it('domains: Quilt or not yet known only', () => {
-    for (const d of [null, undefined, '', ' ', 'quilt', 'Quilt']) expect(dataArmDomainOk(d), String(d)).toBe(true)
-    for (const d of ['personal', 'Personal', 'sprocket_rocket', 'hermit_crabs', 'DNP study']) expect(dataArmDomainOk(d), d).toBe(false)
+  it('brand aliases mark a group as named by a Quilt brand; an industry word does not', () => {
+    const brand = (w: string) => namedGroups(f, w).map(n => [n.group.name, n.brand])
+    expect(brand('Bottle POS leads')).toEqual([['Liquor', true]])
+    expect(brand('liquor leads')).toEqual([['Liquor', false]])
+    expect(brand('SBU leads')).toEqual([['SBU', true]])
+    expect(brand('etailpet leads and pet leads')).toEqual([['Pet', true]])
+    const t = dataTrigger(f, 'grocery budget'), u = dataTrigger(f, 'thrift budget and ThriftCart leads')
+    expect(t.fired).toBe(false)                                    // grocery is not in this fixture
+    expect(u.fired && u.brand).toBe(true)
+    const w = dataTrigger(f, 'liquor leads are 40')
+    expect(w.fired && w.brand).toBe(false)
+  })
+})
+
+describe('the domain gate', () => {
+  const g = (over: Partial<Parameters<typeof dataArmGate>[0]> = {}) => dataArmGate({ domain: null, brand: false, ...over })
+  it('a Quilt meeting runs, however it is written', () => {
+    for (const d of ['quilt', 'Quilt', ' quilt ']) expect(g({ domain: d })).toEqual({ ok: true, signal: 'quilt' })
+  })
+  it('another confirmed domain never runs, whatever else is true', () => {
+    for (const d of ['personal', 'Personal', 'sprocket_rocket', 'hermit_crabs', 'DNP study']) {
+      expect(g({ domain: d, brand: true, memoryQuilt: true, titleQuilt: true }), d).toEqual({ ok: false, why: 'domain' })
+    }
+  })
+  it('an orientation that could not be read is off, even with every signal', () => {
+    expect(g({ orientationFailed: true, brand: true, memoryQuilt: true, titleQuilt: true })).toEqual({ ok: false, why: 'orientation' })
+    expect(g({ orientationFailed: true, domain: 'quilt' })).toEqual({ ok: false, why: 'orientation' })
+  })
+  it('no confirmed domain (null, undefined, empty, blank): off without a Quilt signal, on with one, each named', () => {
+    for (const d of [null, undefined, '', '  ']) {
+      expect(g({ domain: d }), String(d)).toEqual({ ok: false, why: 'unconfirmed' })
+      expect(g({ domain: d, brand: true })).toEqual({ ok: true, signal: 'brand' })
+      expect(g({ domain: d, memoryQuilt: true })).toEqual({ ok: true, signal: 'memory' })
+      expect(g({ domain: d, titleQuilt: true })).toEqual({ ok: true, signal: 'title' })
+    }
+  })
+  it('a Quilt-domain note is one whose domain says quilt, nothing else', () => {
+    expect(isQuiltDomain('quilt')).toBe(true); expect(isQuiltDomain(' Quilt ')).toBe(true)
+    for (const d of ['personal', 'hermit_crabs', '', undefined, null, 7]) expect(isQuiltDomain(d)).toBe(false)
+  })
+  it('a Quilt term in a title: quilt, sbu, xbu, tableau, or a brand in the facts; nothing for a generic title', () => {
+    const f = facts()
+    for (const t of ['Quilt weekly forecast', 'SBU pacing review', 'XBU sync', 'Tableau walk-through', 'Bottle POS launch', 'ThriftCart renewal call']) expect(quiltTitleSignal(f, [t]), t).toBe(true)
+    for (const t of ['G2 Recording 2026-10-19 0741', 'Family dinner plans', 'Sprocket Rocket client call', 'Grocery list', '', null, undefined]) expect(quiltTitleSignal(f, [t]), String(t)).toBe(false)
+    expect(quiltTitleSignal(f, ['Family', 'Quilt sync'])).toBe(true)
   })
 })
 
@@ -249,7 +300,7 @@ describe('among the grounded candidates', () => {
     const r = groundedCandidates({ ...base, cueMemory: [note('M1')], notes: [note('N1', { key: 'memory:abc', memoryId: 'abc' })], data: data() })
     expect(r.candidates.map(c => c.id)).toEqual(['M1', 'N1', 'D1'])
   })
-  it('keeps its slot when everything else is full: four memories, a note and a file leave five, and D1 is the sixth', () => {
+  it('when the six are full, D1 displaces the lowest-ranked memory, never the file passage or the note', () => {
     const mems = [1, 2, 3, 4].map(i => note(`m${i}`, { date: `2026-09-0${i}` }))
     const files = [{ id: 'f1', name: 'Plan.txt', status: 'ready', text: 'overage pricing renewal contract Harborview quarter terms' }]
     const full = { ...base, cueMemory: mems, notes: [note('n1', { key: 'memory:x1', memoryId: 'x1', title: 'Other' })], files, window: 'overage pricing renewal contract Harborview quarter' }
@@ -257,10 +308,13 @@ describe('among the grounded candidates', () => {
     expect(without.candidates.map(c => c.arm)).toEqual(['cue_memory', 'cue_memory', 'cue_memory', 'cue_memory', 'notes', 'files'])
     expect(without.candidates).toHaveLength(GROUNDED_LIMITS.maxCandidates)
     const withData = groundedCandidates({ ...full, data: data() })
+    expect(withData.candidates.map(c => c.arm)).toEqual(['cue_memory', 'cue_memory', 'cue_memory', 'notes', 'files', 'data'])
+    expect(withData.candidates.map(c => c.id)).toEqual(['M1', 'M2', 'M3', 'N1', 'F1', 'D1'])   // M4, the lowest ranked, is the one that went
     expect(withData.candidates).toHaveLength(GROUNDED_LIMITS.maxCandidates)
-    expect(withData.candidates.at(-1)).toMatchObject({ id: 'D1', arm: 'data', kind: 'data' })
-    expect(withData.candidates.filter(c => c.arm === 'data')).toHaveLength(1)
-    expect(withData.candidates.filter(c => c.arm !== 'data')).toHaveLength(5)
+  })
+  it('with room to spare nothing is displaced', () => {
+    const r = groundedCandidates({ ...base, cueMemory: [note('m1'), note('m2', { date: '2026-09-02' })], data: data() })
+    expect(r.candidates.map(c => c.id)).toEqual(['M1', 'M2', 'D1'])
   })
   it('is not a copy of any meeting: a room that reads the numbers aloud does not exclude it', () => {
     const d = data()
@@ -304,15 +358,33 @@ describe('among the grounded candidates', () => {
 
 describe('the meeting assistant context', () => {
   const f = facts()
+  const intent = (q: string) => askDataIntent(q, f).intent
   it('intent: Tableau by name, or a named group beside a funnel word, else none', () => {
-    expect(askDataIntent('check Tableau', f)).toBe('tableau')
-    expect(askDataIntent('Can you check TABLEAU for the numbers?', f)).toBe('tableau')
-    expect(askDataIntent('how is SBU pacing against budget?', f)).toBe('named')
-    expect(askDataIntent('what were liquor leads last month', f)).toBe('named')
-    expect(askDataIntent('what does the SBU funnel look like', f)).toBe('named')
-    expect(askDataIntent('what is the budget for the offsite', f)).toBeNull()
-    expect(askDataIntent('who is the liquor distributor?', f)).toBeNull()
-    expect(askDataIntent('what time is lunch', f)).toBeNull()
+    expect(intent('check Tableau')).toBe('tableau')
+    expect(intent('Can you check TABLEAU for the numbers?')).toBe('tableau')
+    expect(intent('how is SBU pacing against budget?')).toBe('named')
+    expect(intent('what were liquor leads last month')).toBe('named')
+    expect(intent('what does the SBU funnel look like')).toBe('named')
+    expect(intent('what is the budget for the offsite')).toBeNull()
+    expect(intent('who is the liquor distributor?')).toBeNull()
+    expect(intent('what time is lunch')).toBeNull()
+  })
+  it('intent: says whether a Quilt brand was named', () => {
+    expect(askDataIntent('how is Bottle POS pacing', f)).toEqual({ intent: 'named', brand: true })
+    expect(askDataIntent('how is liquor pacing', f)).toEqual({ intent: 'named', brand: false })
+  })
+  it('reads only the user\'s own words: a long pasted text counts for nothing, a short last line after it does', () => {
+    expect(L.askQuestionChars).toBe(300)
+    const article = 'Pet owners spent more this year. Liquor sales and thrift store customers rose 12 percent while leads for SBU products dipped. '.repeat(6)
+    expect(article.length).toBeGreaterThan(300)
+    expect(intent(article)).toBeNull()
+    expect(intent(article + ' check Tableau')).toBeNull()                    // one long paragraph: nothing of it is the user\'s
+    expect(intent(article + '\ncheck Tableau')).toBe('tableau')               // their question on its own line
+    expect(intent(article + '\nhow is liquor pacing?')).toBe('named')
+    expect(intent(article + '\nwhat is the weather?')).toBeNull()
+    expect(askUserWords('short question')).toBe('short question')
+    expect(askUserWords('x'.repeat(301))).toBe('')
+    expect(askUserWords('x'.repeat(400) + '\nis it done?\n')).toBe('is it done?')
   })
   it('named groups: their stage rows with prior month, last year and ex-events, then their lead sources', () => {
     const raw = rawFacts(); raw.groups[2].stages.leads.exEventsPct = 81.4
@@ -326,6 +398,13 @@ describe('the meeting assistant context', () => {
     expect(r.text).toContain('Liquor lead sources (leads/opps/customers): Paid Search - Non-Brand 64/11/4; Organic Direct 63/41/16')
     expect(r.text).not.toContain('Thrift lead sources')
     expect(r.text).not.toMatch(/^Thrift:/m)
+  })
+  it('a pasted article\'s group names do not choose the groups', () => {
+    const article = 'liquor thrift pet vertical leads percent '.repeat(20)
+    const r = dataFactsForAsk(f, article + '\ncheck Tableau')!
+    expect(r.text).toContain('SBU (3 of 4')     // no group chosen from the paste: every group
+    expect(r.text).toContain('Thrift:')
+    expect(r.text).not.toContain('lead sources')
   })
   it('a business unit says it is partial and which industries it covers', () => {
     const r = dataFactsForAsk(f, 'how is SBU pacing')!

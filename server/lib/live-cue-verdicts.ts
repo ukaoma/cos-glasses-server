@@ -65,6 +65,9 @@ export interface LiveCueLogRow {
   kept?: number
   /** Live cues v3, grounded cues only: which retrieval arms supplied a candidate to the judge for this cue. */
   arms?: LiveCueArm[]
+  /** Grounded cues, Tableau data arm: a Tableau note was kept for this cue. A separate flag rather than an `arms` entry: an older
+   *  server's isLogRow ignores unknown keys but rejects an unknown arm. */
+  dataNote?: true
   /** Live cues v3, insight cues only: what kind of public fact it is, and the web query it came from. The query is in this
    *  log and never in the trace. */
   general?: { category: LiveCueGeneralCategory; query: string }
@@ -146,6 +149,7 @@ export function isLogRow(value: unknown): value is LiveCueLogRow {
     && optional(r.wouldWithhold, isWouldWithhold)
     && optional(r.arms, a => Array.isArray(a) && a.length <= LIVE_CUE_ARMS.length && new Set(a).size === a.length && a.every(x => (LIVE_CUE_ARMS as readonly unknown[]).includes(x)))
     && optional(r.general, isGeneral)
+    && optional(r.dataNote, d => d === true)
 }
 
 export class LiveCueLog {

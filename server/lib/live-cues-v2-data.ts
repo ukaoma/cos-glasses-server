@@ -13,8 +13,10 @@
 //     carry a funnel word or a figure of two digits or a percent;
 //   - a one-word alias that is also plain English (pet, dive, music...) is "weak": it counts only beside a funnel word or an
 //     industry word, so "let's dive into the numbers" and "pet project" stay quiet. The bare word "quilt" is never an alias;
-//   - it runs only for a meeting whose domain is Quilt or not yet known; personal, Sprocket Rocket, Hermit Crabs and any other
-//     domain never get Quilt's numbers.
+//   - domain (dataArmGate): a Quilt meeting runs it. An unreadable orientation is off. Any other confirmed domain (personal,
+//     Sprocket Rocket, Hermit Crabs...) is off. A meeting with no confirmed domain (most G2 meetings) needs a Quilt signal from
+//     the same evaluation: a Quilt brand or SBU/XBU named, a Quilt-domain memory or note among the candidates, or a Quilt term in
+//     the meeting's title. A plain industry word alone (grocery, liquor, pet...) is not a signal.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import type { GroundedNote } from './live-cues-v2-grounded.js'
@@ -22,9 +24,13 @@ import type { GroundedNote } from './live-cues-v2-grounded.js'
 export const DATA_FACTS_FILE = 'data-facts.json'
 
 export const DATA_FACTS_LIMITS = {
-  /** 120 hours (5 days) from `asOf`. The file is rewritten on weekdays from a 10:30 CT job; a long weekend leaves it 72 hours old
-   *  on Monday morning and a missed run or a holiday adds a day or two. Past 5 days the numbers could be last week's. */
+  /** An open month: 120 hours (5 days) from `asOf`. The file is rewritten on weekdays from a 10:30 CT job; a long weekend leaves it
+   *  72 hours old on Monday morning and a missed run or a holiday adds a day or two. Past 5 days the numbers could be last week's. */
   maxAgeHours: 120,
+  /** A closed month does not go stale the way a month to date does: its figures only move by late-closing deals. It is kept for 35
+   *  days from `asOf` (a month plus five days of slack): by then the next month's close should have replaced it, and a writer that
+   *  stopped is still caught. Without this the first Monday after a month start, when the report window is still under 3 days, went dark. */
+  maxClosedAgeDays: 35,
   /** A clock that reads this far behind the file's own time is wrong or the file is: off. */
   maxFutureMs: 60 * 60_000,
   maxBytes: 2_000_000,
@@ -38,6 +44,8 @@ export const DATA_FACTS_LIMITS = {
   /** What the meeting assistant is given: at most this many characters of Tableau text. */
   askChars: 3_500,
   askSourceRowsPerIndustry: 6,
+  /** A typed question longer than this is probably pasted text (see askUserWords). */
+  askQuestionChars: 300,
 } as const
 
 export const DATA_STAGES = ['leads', 'opps', 'sqls', 'demos', 'customers'] as const
@@ -60,6 +68,8 @@ export interface DataGroup {
   kind: 'bu' | 'industry'
   aliases: string[]
   weakAliases: string[]
+  /** The aliases that are Quilt brand names (and sbu/xbu): naming one is a Quilt signal. A plain industry word is not. */
+  brandAliases: string[]
   members: string[]
   coverage?: { have: number; of: number }
   stages: Partial<Record<DataStageKey, DataStage>>
@@ -111,8 +121,8 @@ function parseStage(raw: unknown): DataStage | null {
 function parseGroup(raw: unknown): DataGroup | null {
   if (!isObj(raw)) return null
   const name = str(raw.name, 40)
-  const aliases = wordList(raw.aliases, 40), weak = wordList(raw.weakAliases, 10)
-  if (name === null || aliases === null || weak === null || !isObj(raw.stages)) return null
+  const aliases = wordList(raw.aliases, 40), weak = wordList(raw.weakAliases, 10), brand = wordList(raw.brandAliases, 20)
+  if (name === null || aliases === null || weak === null || brand === null || !isObj(raw.stages)) return null
   const stages: DataGroup['stages'] = {}
   for (const key of DATA_STAGES) {
     const s = parseStage((raw.stages as Record<string, unknown>)[key])
@@ -123,7 +133,7 @@ function parseGroup(raw: unknown): DataGroup | null {
   const cov = isObj(raw.coverage) && fin(raw.coverage.have) !== null && fin(raw.coverage.of) !== null && (raw.coverage.of as number) > 0
     ? { have: raw.coverage.have as number, of: raw.coverage.of as number } : undefined
   const display = str(raw.display, 60)
-  return { name, ...(display ? { display } : {}), kind: raw.kind === 'bu' ? 'bu' : 'industry', aliases, weakAliases: weak, members, ...(cov ? { coverage: cov } : {}), stages }
+  return { name, ...(display ? { display } : {}), kind: raw.kind === 'bu' ? 'bu' : 'industry', aliases, weakAliases: weak, brandAliases: brand, members, ...(cov ? { coverage: cov } : {}), stages }
 }
 
 /** The facts from a parsed file, or why not. A group that does not parse is dropped (never guessed at); a file with no usable group is
@@ -147,7 +157,8 @@ export function parseDataFacts(raw: unknown, nowMs: number): DataFactsRead {
     if (industry && source && leads !== null && opps !== null && customers !== null) sources.push({ industry, source, bucket: typeof r.bucket === 'string' ? r.bucket : '', leads, opps, customers })
   }
   if (asOf - nowMs > DATA_FACTS_LIMITS.maxFutureMs) return { ok: false, reason: 'future' }
-  if (nowMs - asOf > DATA_FACTS_LIMITS.maxAgeHours * 3_600_000) return { ok: false, reason: 'stale' }
+  const maxAgeMs = period.closed === true ? DATA_FACTS_LIMITS.maxClosedAgeDays * 24 * 3_600_000 : DATA_FACTS_LIMITS.maxAgeHours * 3_600_000
+  if (nowMs - asOf > maxAgeMs) return { ok: false, reason: 'stale' }
   const through = typeof raw.completeThrough === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.completeThrough) ? raw.completeThrough : undefined
   return { ok: true, facts: { label, scope, period: { label: pLabel, start: pStart, end: pEnd, closed: period.closed }, asOfIso: asOfIso as string, asOf,
     ...(through ? { completeThrough: through } : {}), groups, sources } }
@@ -233,21 +244,22 @@ function weakAt(tokens: string[], i: number): boolean {
   return (BRIDGE_TOKENS.has(near(i - 1)) && FUNNEL_TOKENS.has(near(i - 2))) || (BRIDGE_TOKENS.has(near(i + 1)) && FUNNEL_TOKENS.has(near(i + 2)))
 }
 
-export interface NamedGroup { group: DataGroup; at: number }
+export interface NamedGroup { group: DataGroup; at: number; /** Named by a Quilt brand name or sbu/xbu, not only by an industry word. */ brand: boolean }
 /** The groups the speech names, the one named last first. A group named twice counts at its last mention. */
 export function namedGroups(facts: DataFacts, speech: string): NamedGroup[] {
   const tokens = wordsOfSpeech(speech)
   const out: NamedGroup[] = []
   for (const group of facts.groups) {
-    let last = -1
+    let last = -1, brand = false
     for (const alias of group.aliases) for (const i of occurrences(tokens, wordsOfSpeech(alias))) last = Math.max(last, i)
+    for (const alias of group.brandAliases) for (const i of occurrences(tokens, wordsOfSpeech(alias))) { last = Math.max(last, i); brand = true }
     for (const alias of group.weakAliases) for (const i of occurrences(tokens, wordsOfSpeech(alias))) if (weakAt(tokens, i)) last = Math.max(last, i)
-    if (last >= 0) out.push({ group, at: last })
+    if (last >= 0) out.push({ group, at: last, brand })
   }
   return out.sort((a, b) => b.at - a.at)
 }
 
-export type DataTrigger = { fired: true; groups: DataGroup[]; stages: DataStageKey[] } | { fired: false; why: 'no_group' | 'no_funnel' }
+export type DataTrigger = { fired: true; groups: DataGroup[]; stages: DataStageKey[]; brand: boolean } | { fired: false; why: 'no_group' | 'no_funnel' }
 
 /** Fires when the speech names a group AND carries a funnel word or a figure (two digits or more, or a percent). */
 export function dataTrigger(facts: DataFacts, window: string): DataTrigger {
@@ -257,13 +269,50 @@ export function dataTrigger(facts: DataFacts, window: string): DataTrigger {
   const tokens = wordsOfSpeech(speech)
   if (!tokens.some(t => FUNNEL_TOKENS.has(t)) && !hasFigure(speech)) return { fired: false, why: 'no_funnel' }
   const stages = [...new Set(tokens.map(t => STAGE_OF[t]).filter((s): s is DataStageKey => !!s))]
-  return { fired: true, groups: named.slice(0, DATA_FACTS_LIMITS.maxNamedGroups).map(n => n.group), stages: DATA_STAGES.filter(s => stages.includes(s)) }
+  const picked = named.slice(0, DATA_FACTS_LIMITS.maxNamedGroups)
+  return { fired: true, groups: picked.map(n => n.group), stages: DATA_STAGES.filter(s => stages.includes(s)), brand: picked.some(n => n.brand) }
 }
 
-/** The meeting domains the arm serves: Quilt, or one not yet known. */
-export function dataArmDomainOk(domain: string | null | undefined): boolean {
-  const d = typeof domain === 'string' ? domain.trim().toLowerCase() : ''
-  return d === '' || d === 'quilt'
+export interface DataGateInput {
+  /** The confirmed meeting domain (Ask orientation), or null/empty when none is confirmed. */
+  domain: string | null | undefined
+  /** The orientation could not be read: it may belong to a personal meeting, so the arm is off. */
+  orientationFailed?: boolean
+  /** The speech names a Quilt brand or sbu/xbu (not only an industry word). */
+  brand: boolean
+  /** A Quilt-domain cue_memory or notes candidate survived the exclusions in this evaluation. */
+  memoryQuilt?: boolean
+  /** The meeting's title carries a Quilt term. */
+  titleQuilt?: boolean
+}
+export type DataGate = { ok: true; signal: 'quilt' | 'brand' | 'memory' | 'title' } | { ok: false; why: 'orientation' | 'domain' | 'unconfirmed' }
+
+/** Whether this meeting may be given Quilt's numbers. A Quilt meeting: yes. An unreadable orientation: no. Another confirmed domain: no.
+ *  No confirmed domain: only with a Quilt signal from this evaluation, never from an industry word alone. */
+export function dataArmGate(i: DataGateInput): DataGate {
+  if (i.orientationFailed) return { ok: false, why: 'orientation' }
+  const d = typeof i.domain === 'string' ? i.domain.trim().toLowerCase() : ''
+  if (d === 'quilt') return { ok: true, signal: 'quilt' }
+  if (d !== '') return { ok: false, why: 'domain' }
+  if (i.brand) return { ok: true, signal: 'brand' }
+  if (i.memoryQuilt) return { ok: true, signal: 'memory' }
+  if (i.titleQuilt) return { ok: true, signal: 'title' }
+  return { ok: false, why: 'unconfirmed' }
+}
+
+/** Does a Quilt-domain note (cue_memory.py or the notes arm says the domain) stand among the candidates. */
+export const isQuiltDomain = (domain: unknown): boolean => typeof domain === 'string' && domain.trim().toLowerCase() === 'quilt'
+
+/** A Quilt term in a meeting title: the company, SBU or XBU, Tableau, or the name of a Quilt brand in the facts. */
+export function quiltTitleSignal(facts: DataFacts, titles: ReadonlyArray<string | null | undefined>): boolean {
+  const brands = facts.groups.flatMap(g => g.brandAliases)
+  for (const title of titles) {
+    if (typeof title !== 'string' || !title.trim()) continue
+    const tokens = wordsOfSpeech(title)
+    if (tokens.some(t => t === 'quilt' || t === 'sbu' || t === 'xbu' || t === 'tableau')) return true
+    if (brands.some(b => occurrences(tokens, wordsOfSpeech(b)).length > 0)) return true
+  }
+  return false
 }
 
 // ── The candidate ────────────────────────────────────────────────────────────
@@ -327,13 +376,13 @@ export function dataCandidateText(facts: DataFacts, groups: DataGroup[], named: 
 }
 
 /** The grounded candidate for a window, or why there is none. */
-export function dataCandidate(facts: DataFacts, window: string, nowDate: string): { candidate: GroundedNote } | { none: 'no_group' | 'no_funnel' | 'no_stage' } {
+export function dataCandidate(facts: DataFacts, window: string, nowDate: string): { candidate: GroundedNote; brand: boolean } | { none: 'no_group' | 'no_funnel' | 'no_stage' } {
   const t = dataTrigger(facts, window)
   if (!t.fired) return { none: t.why }
   const notes = dataCandidateText(facts, t.groups, t.stages)
   if (!notes) return { none: 'no_stage' }
   const date = /^\d{4}-\d{2}-\d{2}/.exec(facts.asOfIso)?.[0] ?? nowDate
-  return { candidate: { id: 'D1', date, title: facts.label, notes, key: `data:tableau|${facts.label}|${facts.asOfIso}`, arm: 'data', kind: 'data' } }
+  return { candidate: { id: 'D1', date, title: facts.label, notes, key: `data:tableau|${facts.label}|${facts.asOfIso}`, arm: 'data', kind: 'data' }, brand: t.brand }
 }
 
 /** Appended to the writer's rules only when a Tableau note was kept. The v3/v4 rules themselves stay byte-identical. */
@@ -349,18 +398,31 @@ export const DATA_WRITER_ADDENDUM = '\nTableau note. A memory note whose title s
 const ASK_TABLEAU = /\btableau\b/i
 const ASK_FUNNEL = /\b(?:funnel|leads?|opps?|opportunit(?:y|ies)|sqls?|demos?|logos?|customers?|budget(?:s|ed)?|pac(?:e|ing)|forecast|attainment|goals?|quota|percent|plan)\b|%/i
 
+/** The words of a typed question that are the user's own. A long text (a pasted article, a transcript) carries other people's words:
+ *  past askQuestionChars only its last line counts, and only when that line is short; a long text with no short last line counts
+ *  for nothing. */
+export function askUserWords(question: string): string {
+  if (question.length <= DATA_FACTS_LIMITS.askQuestionChars) return question
+  const last = question.trimEnd().split(/\n+/).pop() ?? ''
+  return last.length <= DATA_FACTS_LIMITS.askQuestionChars && last.length < question.trim().length ? last : ''
+}
+
+export interface AskDataIntent { intent: 'tableau' | 'named' | null; /** A Quilt brand or sbu/xbu is named. */ brand: boolean }
 /** What a typed question asks of the data: `tableau` when it says Tableau, `named` when it names a group and asks about funnel,
- *  budget or pacing, else null. The first is an explicit request and may be answered in any meeting but a personal one; the second
- *  only in a Quilt (or not yet known) meeting, like the cue arm. */
-export function askDataIntent(question: string, facts: DataFacts): 'tableau' | 'named' | null {
-  if (ASK_TABLEAU.test(question)) return 'tableau'
-  return ASK_FUNNEL.test(question) && namedGroups(facts, question).length > 0 ? 'named' : null
+ *  budget or pacing, else null. `tableau` may be answered in any meeting but a personal one. `named` goes through dataArmGate like
+ *  the cue arm: a Quilt meeting, or an unconfirmed one with a Quilt brand named or a Quilt term in the meeting's title. */
+export function askDataIntent(question: string, facts: DataFacts): AskDataIntent {
+  const own = askUserWords(question)
+  const named = namedGroups(facts, own)
+  const brand = named.some(n => n.brand)
+  if (ASK_TABLEAU.test(own)) return { intent: 'tableau', brand }
+  return { intent: ASK_FUNNEL.test(own) && named.length > 0 ? 'named' : null, brand }
 }
 
 /** The Tableau text the meeting assistant reads as a local source, or null. Stage rows for the groups the question names (or the
  *  business units and every industry when it names none), then the lead-source rows of the named industries. */
-export function dataFactsForAsk(facts: DataFacts, question: string): { title: string; text: string } | null {
-  const named = namedGroups(facts, question).map(n => n.group)
+export function dataFactsForAsk(facts: DataFacts, rawQuestion: string): { title: string; text: string } | null {
+  const named = namedGroups(facts, askUserWords(rawQuestion)).map(n => n.group)
   const chosen = named.length ? named : facts.groups
   const lines: string[] = [
     `Tableau marketing funnel, ${periodText(facts)}. Scope: ${facts.scope}; marketing-sourced leads, opportunities, SQLs, demos and customers only. Not company revenue, MRR, ARR or location counts.`,

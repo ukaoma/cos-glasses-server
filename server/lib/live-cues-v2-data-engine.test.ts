@@ -130,6 +130,23 @@ describe('the Tableau data arm in the engine', () => {
       // the reason: this server's own validator refuses an arm it does not list, and so would 6.97.7 for a row with 'data'
       expect(isLogRow({ ...logged[0], arms: ['data'] })).toBe(false)
     })
+    it('a Tableau-only cue is flagged dataNote in the log, and the row still passes the validator that ignores the flag', async () => {
+      await feed(SBU_TOPIC)
+      expect(logged[0]).toMatchObject({ arms: [], dataNote: true })
+      expect(isLogRow(logged[0])).toBe(true)
+      expect(isLogRow({ ...logged[0], dataNote: 'yes' })).toBe(false)
+    })
+    it('a cue with no Tableau note carries no dataNote', async () => {
+      cueMemoryNotes = [note('M1')]; yes = { M1: 0.9 }
+      writerText = JSON.stringify({ cue: 'Renewal terms are not settled yet. Name who owns the quote.', kind: 'challenge', memoryIds: ['M1'] })
+      await feed(OTHER_TOPIC)
+      expect(logged[0]).not.toHaveProperty('dataNote')
+    })
+    it('a closed month still serves 10 days after the refresh', async () => {
+      clock += 10 * 24 * 3_600_000
+      await feed(SBU_TOPIC)
+      expect(evaluation()).toMatchObject({ dataArm: 'offered' })
+    })
     it('the data candidate sits beside memory candidates; the judge sees both and the cue may cite either', async () => {
       cueMemoryNotes = [note('M1')]
       yes = { M1: 0.9, D1: 0.8 }
@@ -159,7 +176,7 @@ describe('the Tableau data arm in the engine', () => {
       ['missing', () => ({ ok: false as const, reason: 'missing' as const }), 'missing'],
       ['unreadable', () => ({ ok: false as const, reason: 'unreadable' as const }), 'unreadable'],
       ['invalid', () => ({ ok: false as const, reason: 'invalid' as const }), 'invalid'],
-      ['stale', () => dataMod.parseDataFacts(rawFacts(), Date.parse('2026-11-02T05:41:00-06:00') + 121 * 3_600_000), 'stale'],
+      ['stale', () => dataMod.parseDataFacts(rawFacts(), Date.parse('2026-11-02T05:41:00-06:00') + 36 * 24 * 3_600_000), 'stale'],
     ])('the file is %s: arm off, traced as %s, the cue pipeline carries on without it', async (_n, makeRead, code) => {
       cueMemoryNotes = [note('M1')]; yes = { M1: 0.9 }
       writerText = JSON.stringify({ cue: 'Overage is 12% with no cap set. Name who quotes the cap.', kind: 'challenge', memoryIds: ['M1'] })
@@ -167,6 +184,11 @@ describe('the Tableau data arm in the engine', () => {
       await feed(SBU_TOPIC)
       expect(evaluation()).toMatchObject({ outcome: 'cue', dataArm: code, arms: { data: 0 } })
       expect(judged).toEqual([['M1']])
+    })
+    it('another confirmed domain is traced as domain even when nothing was said about a group', async () => {
+      orientation = { domain: 'personal', title: null }
+      await feed(OTHER_TOPIC)
+      expect(evaluation()).toMatchObject({ dataArm: 'domain', arms: { data: 0 } })
     })
     it.each([['personal'], ['sprocket_rocket'], ['hermit_crabs'], ['DNP study']])('a %s meeting never gets Quilt numbers', async (domain) => {
       orientation = { domain, title: null }
@@ -195,6 +217,62 @@ describe('the Tableau data arm in the engine', () => {
       await feed(SBU_TOPIC, engine({ dataFacts: undefined }))
       expect(evaluation()).not.toHaveProperty('dataArm')
       expect(evaluation().arms).toMatchObject({ data: 0 })
+    })
+  })
+
+  describe('which meetings get Quilt numbers when no domain is confirmed', () => {
+    const FAMILY = ' we should look at the thrift budget, the leads are at 40 percent of plan for the month'
+    const SR_CALL = ' your pet leads are 40 this month and the liquor opps look good for the plan'
+    beforeEach(() => { orientation = { domain: null, title: null } })
+
+    it('a family chat about a thrift budget does not fire', async () => {
+      await feed(FAMILY)
+      expect(evaluation()).toMatchObject({ dataArm: 'unconfirmed', arms: { data: 0 } })
+      expect(judged).toEqual([])
+    })
+    it('a Sprocket Rocket call about pet leads does not fire, confirmed or not', async () => {
+      await feed(SR_CALL)
+      expect(evaluation()).toMatchObject({ dataArm: 'unconfirmed', arms: { data: 0 } })
+      orientation = { domain: 'sprocket_rocket', title: null }; traces = []
+      await feed(SR_CALL, engine())
+      expect(evaluation()).toMatchObject({ dataArm: 'domain', arms: { data: 0 } })
+    })
+    it('a Quilt brand or SBU named fires, and the trace names the signal', async () => {
+      await feed(' ThriftCart leads were 151 against 110')
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'brand', arms: { data: 1 } })
+    })
+    it('an industry word with a Quilt-domain memory in the same evaluation fires', async () => {
+      cueMemoryNotes = [{ ...note('M1'), domain: 'quilt' }]; yes = { M1: 0.2, D1: 0.9 }
+      await feed(FAMILY)
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'memory', arms: { data: 1 } })
+      expect(judged).toEqual([['M1', 'D1']])
+    })
+    it.each([['personal'], ['hermit_crabs'], [undefined]])('a memory in the %s domain is no signal', async (domain) => {
+      cueMemoryNotes = [{ ...note('M1'), ...(domain ? { domain } : {}) }]
+      await feed(FAMILY)
+      expect(evaluation()).toMatchObject({ dataArm: 'unconfirmed', arms: { data: 0 } })
+    })
+    it('a Quilt memory that is this meeting\'s own copy is excluded first and is no signal', async () => {
+      cueMemoryNotes = [{ ...note('M1'), domain: 'quilt', sessionId: 'meeting_a' }]
+      await feed(FAMILY)
+      expect(evaluation()).toMatchObject({ dataArm: 'unconfirmed', excludedSelf: 1 })
+    })
+    it('an industry word with a Quilt term in the calendar title fires; a generic title does not', async () => {
+      orientation = { domain: null, title: 'Quilt weekly forecast' }
+      await feed(FAMILY)
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'title' })
+      orientation = { domain: null, title: 'Dinner with the Okafors' }; traces = []
+      await feed(FAMILY, engine())
+      expect(evaluation()).toMatchObject({ dataArm: 'unconfirmed' })
+    })
+    it('a Quilt-confirmed meeting fires on an industry word alone', async () => {
+      orientation = { domain: 'quilt', title: null }
+      await feed(FAMILY)
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'quilt' })
+    })
+    it('an orientation that cannot be read turns the arm off even with a brand named', async () => {
+      await feed(SBU_TOPIC, engine({ orientation: () => { throw new Error('journal_unreadable') } }))
+      expect(evaluation()).toMatchObject({ dataArm: 'orientation', orientationError: 'threw', arms: { data: 0 } })
     })
   })
 

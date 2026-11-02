@@ -9,8 +9,8 @@
 //   - personal-domain notes stay out of a meeting that is not personal;
 //   - one meeting is one candidate however many arms found it (date and normalised title, memory id, record id, file id);
 //   - at most M1..M4 from cue_memory, N1 from the notes, F1 from the files, D1 from the Tableau data arm, six in all. The data
-//     candidate (live-cues-v2-data.ts) is deterministic and rare, so it keeps a slot: memory, notes and files give way to it, not it to
-//     them. It is not a copy of any meeting, so the self and twin rules do not apply to it, and it has no domain.
+//     candidate (live-cues-v2-data.ts) is deterministic and rare, so it keeps a slot: when the six are full it displaces the lowest-ranked
+//     cue_memory candidate (never the file passage the room reads from). It is not a copy of any meeting, so the self and twin rules do not apply to it, and it has no domain.
 
 import { notesQueryTerms } from './live-cues-v2-notes.js'
 import type { MemoryNote } from './live-cues-v2.js'
@@ -209,12 +209,10 @@ export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNot
   const seen = new Set<string>()
   const out: GroundedNote[] = []
   let excludedSelf = 0
-  // The data candidate keeps the last slot: the other arms fill at most five.
-  const cap = GROUNDED_LIMITS.maxCandidates - (i.data ? 1 : 0)
   const take = (list: MemoryNote[], arm: GroundedArm, limit: number, prefix: string) => {
     let n = 0
     for (const raw of list) {
-      if (n >= limit || out.length >= cap) return
+      if (n >= limit || out.length >= GROUNDED_LIMITS.maxCandidates) return
       if (!wellFormed(raw)) continue
       const note = describe(raw, arm)
       const identities = candidateIdentities(note)
@@ -229,14 +227,22 @@ export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNot
   }
   take(i.cueMemory, 'cue_memory', GROUNDED_LIMITS.cueMemoryTop, 'M')
   take(i.notes, 'notes', GROUNDED_LIMITS.notesTop, 'N')
-  if (out.length < cap) {
+  if (out.length < GROUNDED_LIMITS.maxCandidates) {
     const hit = bestFilePassage(usableFiles(i.files), i.window)
     if (hit) {
       out.push({ id: 'F1', date: i.today, title: hit.file.name.replace(/\s+/g, ' ').trim().slice(0, 90), notes: hit.passage, key: `file:${hit.file.id}`,
         arm: 'files', kind: 'file', fileId: hit.file.id })
     }
   }
-  if (i.data && out.length < GROUNDED_LIMITS.maxCandidates) out.push({ ...i.data, id: 'D1', arm: 'data', kind: 'data' })
+  if (i.data) {
+    // When the six are full, D1 displaces the lowest-ranked cue_memory candidate (the last one), never the file passage the room is
+    // reading from. Memory ranks below it: the data candidate only exists when the room named a group beside a figure.
+    if (out.length >= GROUNDED_LIMITS.maxCandidates) {
+      const at = out.map(c => c.arm).lastIndexOf('cue_memory')
+      if (at >= 0) out.splice(at, 1)
+    }
+    if (out.length < GROUNDED_LIMITS.maxCandidates) out.push({ ...i.data, id: 'D1', arm: 'data', kind: 'data' })
+  }
   // The personal-domain rule can only work on a note that says its domain; this counts the notes that did not.
   const domainUnknown = out.filter(c => c.arm !== 'files' && c.arm !== 'data' && !c.domain).length
   return { candidates: out, excludedSelf, domainUnknown }

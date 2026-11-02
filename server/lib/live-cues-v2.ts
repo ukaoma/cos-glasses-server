@@ -50,7 +50,7 @@ import { GeneralCueRunner, realGeneralDeps, type GeneralCueCandidate, type Gener
 import { generalTriggerCalls } from './live-cues-general-prompts.js'
 import { isGenericSpeakerLabel } from './live-cues-general-topic.js'
 import { publicHttpsUrl } from './public-https-url.js'
-import { DATA_FACTS_FILE, DATA_WRITER_ADDENDUM, dataArmDomainOk, dataCandidate, dataFactsReader, type DataFactsRead } from './live-cues-v2-data.js'
+import { DATA_FACTS_FILE, DATA_WRITER_ADDENDUM, dataArmGate, dataCandidate, dataFactsReader, isQuiltDomain, quiltTitleSignal, type DataFactsRead } from './live-cues-v2-data.js'
 import { GROUNDED_LIMITS, SessionShingles, groundedCandidates, groundedSource, selfIdSet, usableFiles, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
 import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
@@ -1125,8 +1125,10 @@ export class LiveCuesV2Engine {
         this.deps.cueLog?.({ v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, armedAt: s.armedAt, kind: cue.kind,
           headline: cue.headline, detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model, prompt: version,
           memorySource: mem.notes.length ? source : 'none', kept: kept.length, wouldWithhold: wouldWithhold(cue.detail, s.cues), before: cueBefore(said),
-          // 'data' stays out of the log row: an older server's isLogRow rejects an arm it does not know, and the Tableau source is already in `sources`.
-          ...(run ? { arms: run.arms.filter((a): a is Exclude<typeof a, 'data'> => a !== 'data') } : {}) })
+          // 'data' stays out of `arms`: an older server's isLogRow rejects an arm it does not know, and the Tableau source is already in `sources`.
+          // `dataNote` says a Tableau note was kept for this cue, so a cue grounded only in it does not read as ungrounded with arms [].
+          ...(run ? { arms: run.arms.filter((a): a is Exclude<typeof a, 'data'> => a !== 'data') } : {}),
+          ...(kept.some(m => (m as GroundedNote).arm === 'data') ? { dataNote: true as const } : {}) })
       } catch (error) {
         trace.cueLogError = (error as NodeJS.ErrnoException)?.code ?? 'append_failed'
         console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`)
@@ -1173,12 +1175,12 @@ export class LiveCuesV2Engine {
   private async groundedRetrieve(s: Session, window: string, before: string, signal: AbortSignal, provider: DecisionProvider, trace: Record<string, unknown>): Promise<GroundedRun> {
     trace.grounding = 'grounded'
     const codeOf = (e: unknown) => { const r = e as { reason?: unknown; code?: unknown } | null; return typeof r?.reason === 'string' ? r.reason : typeof r?.code === 'string' ? r.code : 'threw' }
-    let meetingDomain: string | null = null, calendarTitle: string | null = null
+    let meetingDomain: string | null = null, calendarTitle: string | null = null, orientationFailed = false
     try {
       const o = this.deps.orientation?.(s.sessionId)
       meetingDomain = typeof o?.domain === 'string' ? o.domain : null
       calendarTitle = typeof o?.title === 'string' ? o.title : null
-    } catch (e) { trace.orientationError = codeOf(e) }
+    } catch (e) { trace.orientationError = codeOf(e); orientationFailed = true }
     let files: GroundedFile[] = []
     try { files = usableFiles(this.deps.files?.(s.sessionId)) } catch (e) { trace.filesError = codeOf(e) }
 
@@ -1198,11 +1200,16 @@ export class LiveCuesV2Engine {
     s.said.add(cleanWindow(s.chunks.join('\n')))
     const twins = [...this.sessions.keys()].filter(id => id !== s.sessionId)
     // The Tableau data arm: a local file, no model call. Off (and traced why) when the file is missing, stale or invalid, when the
-    // meeting is not Quilt's, or when the speech does not name a group beside a funnel word or figure.
+    // meeting is not Quilt's, or when the speech does not name a group beside a funnel word or figure. A meeting with no confirmed
+    // domain needs a Quilt signal from this evaluation: the candidates the other arms just returned (after the self and twin
+    // exclusions) and the titles are the two places one can come from, so the others are built first.
     const today = this.deps.now().toLocaleDateString('en-CA')
-    const data = this.dataArm(window, meetingDomain, today, trace)
-    const { candidates, excludedSelf, domainUnknown } = groundedCandidates({ cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript: s.said.shingles, window, selfIds: selfIdSet(s.sessionId, twins),
-      meetingDomain, today, data })
+    const common = { cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript: s.said.shingles, window, selfIds: selfIdSet(s.sessionId, twins), meetingDomain, today }
+    let grounded = groundedCandidates(common)
+    const data = this.dataArm(window, { domain: meetingDomain, orientationFailed, titles: [s.title, calendarTitle],
+      memoryQuilt: grounded.candidates.some(c => (c.arm === 'cue_memory' || c.arm === 'notes') && isQuiltDomain(c.domain)) }, today, trace)
+    if (data) grounded = groundedCandidates({ ...common, data })
+    const { candidates, excludedSelf, domainUnknown } = grounded
     Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length, data: candidates.some(c => c.arm === 'data') ? 1 : 0 }, excludedSelf, domainUnknown })
 
     const source: LiveCuesV2MemorySource = candidates.some(c => c.arm === 'cue_memory') ? 'cue_memory' : candidates.some(c => c.arm === 'notes') ? 'notes' : 'none'
@@ -1223,16 +1230,21 @@ export class LiveCuesV2Engine {
 
   /** The Tableau candidate for this window, or null. `trace.dataArm` says what happened in one code: offered, no_group, no_funnel,
    *  no_stage, domain, or the file's own reason (missing, unreadable, invalid, stale, future). Never throws. */
-  private dataArm(window: string, meetingDomain: string | null, today: string, trace: Record<string, unknown>): GroundedNote | null {
+  private dataArm(window: string, ctx: { domain: string | null; orientationFailed: boolean; titles: Array<string | null>; memoryQuilt: boolean }, today: string, trace: Record<string, unknown>): GroundedNote | null {
     if (!this.deps.dataFacts) return null
     try {
       const read = this.deps.dataFacts()
       if (!read.ok) { trace.dataArm = read.reason; return null }
       trace.dataAgeH = Math.round((this.deps.now().getTime() - read.facts.asOf) / 360_000) / 10
-      if (!dataArmDomainOk(meetingDomain)) { trace.dataArm = 'domain'; return null }
+      // Cheap exits first: another confirmed domain or an unreadable orientation never reads the speech.
+      const early = dataArmGate({ domain: ctx.domain, orientationFailed: ctx.orientationFailed, brand: true })
+      if (!early.ok) { trace.dataArm = early.why; return null }
       const found = dataCandidate(read.facts, window, today)
       if ('none' in found) { trace.dataArm = found.none; return null }
+      const gate = dataArmGate({ domain: ctx.domain, orientationFailed: ctx.orientationFailed, brand: found.brand, memoryQuilt: ctx.memoryQuilt, titleQuilt: quiltTitleSignal(read.facts, ctx.titles) })
+      if (!gate.ok) { trace.dataArm = gate.why; return null }
       trace.dataArm = 'offered'
+      trace.dataSignal = gate.signal
       return found.candidate
     } catch { trace.dataArm = 'threw'; return null }
   }
