@@ -90,15 +90,16 @@ describe('live cues v3 contract: the insight kind and source locators', () => {
 })
 
 describe('6.86.0 writer v4', () => {
-  it('is v3 with rules 3 and 4 and the schema kind list swapped, nothing else (v2 and v3 stay the measured strings)', () => {
+  it('is v3 with rules 3 and 4, the schema kind list and the optional open key swapped, nothing else (v2 and v3 stay the measured strings)', () => {
     const v4 = kindsPrompt.CUE_WRITER_SYSTEM_V4
     expect(v4).not.toBe(prompts.CUE_WRITER_SYSTEM_V3)
-    const back = v4.replace(kindsPrompt.V4_RULE_3, kindsPrompt.V3_RULE_3).replace(kindsPrompt.V4_RULE_4, kindsPrompt.V3_RULE_4).replace(kindsPrompt.V4_SCHEMA_KIND, kindsPrompt.V3_SCHEMA_KIND)
+    const back = v4.replace(kindsPrompt.V4_RULE_3, kindsPrompt.V3_RULE_3).replace(kindsPrompt.V4_RULE_4, kindsPrompt.V3_RULE_4).replace(kindsPrompt.V4_SCHEMA_KIND, kindsPrompt.V3_SCHEMA_KIND).replace(kindsPrompt.V4_SCHEMA_OPEN, kindsPrompt.V3_SCHEMA_OPEN)
     expect(back).toBe(prompts.CUE_WRITER_SYSTEM_V3)
     expect(v4).toContain('"kind":"reinforce|challenge|decision|promise|followUp"')
+    expect(v4).toContain('"specific":"the specific fact used, copied","open":"<=50 chars, optional"}')
     expect(v4).toContain('at most 200 characters')
     expect(v4).not.toMatch(/[\u2014\u2013]/)
-    expect(sha(v4)).toBe('d3a0e56e38f007df3f3753b396f84c8d2d8add6cfb1191975204c5141839cc39')
+    expect(sha(v4)).toBe('369f215b8795f7aa0e8204fc428fd50c887c830ad037cb8f796270fe6ba195fe')
   })
   it('an extended meeting always runs v4; a legacy meeting keeps v3, or v2 when COS_LIVE_CUES_V2_PROMPT=v2', () => {
     expect(liveCuesV2WriterSystem({}, 'extended')).toEqual({ version: 'v4', system: kindsPrompt.CUE_WRITER_SYSTEM_V4 })

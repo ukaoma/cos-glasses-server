@@ -69,6 +69,7 @@ import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_
 import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
 import { KNOWN_NAMES_USE, knownNamesFor } from './live-cues-v2-names.js'
 import { paceAllowed } from './live-cues-v2-pacing.js'
+import { OpenItemFold, openItemOf, openItemsDetail, openItemsHeadline } from './live-cues-v2-open-items.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
 import {
   CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isCueKind, isLiveCueV2, legacyCueKind,
@@ -333,7 +334,8 @@ export function unsupportedNumbers(cue: string, window: string, memory: MemoryNo
   return bad
 }
 
-export interface ParsedCue { detail: string; kind: CueKind; memoryIds: string[]; numberFlags: string[] }
+/** `open` (6.97.8): the writer's own item when the cue's main point is a missing owner or date (the extended-kind prompt asks for it). */
+export interface ParsedCue { detail: string; kind: CueKind; memoryIds: string[]; numberFlags: string[]; open?: string }
 export type CueRejection = 'null' | 'unparseable' | 'empty' | 'too_long' | 'unsupported_number'
 /** `enforceNumbers` withholds a cue whose numbers are not in the source. Off by default: on the held-out replay the
  *  guard fired on 3 v3 cues and only 1 was unsupported (ASR writes "300 000" and "a hundred"), so it is traced, not enforced. */
@@ -355,7 +357,7 @@ export function parseWriterCue(raw: string, fallbackKind: CueKind, window: strin
   const kind: CueKind = typeof value.kind === 'string' && (allowed as readonly string[]).includes(value.kind) ? value.kind as CueKind : fallbackKind
   const ids = new Set(kept.map(m => m.id))
   const memoryIds = Array.isArray(value.memoryIds) ? [...new Set(value.memoryIds.filter((x): x is string => typeof x === 'string' && ids.has(x)))] : []
-  return { detail: cue, kind, memoryIds, numberFlags }
+  return { detail: cue, kind, memoryIds, numberFlags, ...(typeof value.open === 'string' && value.open.trim() ? { open: value.open } : {}) }
 }
 
 /** A stable, opaque id for a past meeting (the same meeting gets the same id in every cue). */
@@ -765,6 +767,8 @@ interface Session {
   insights: LiveCueV2[]
   /** Live cues v3: the 6-word sequences of everything said since arm, fed only while grounding is on (the self-copy check). */
   said: SessionShingles
+  /** 6.97.8: the open-item cues held for a combined cue. Apart from `cues`: a held item was never shown. */
+  fold: OpenItemFold
 }
 /** A session's status row, plus (live cues v3) the general-cue state for an extended meeting. */
 export type LiveCuesV2SessionStatusV3 = LiveCuesV2SessionStatus & { general?: GeneralCueStatus }
@@ -858,7 +862,7 @@ export class LiveCuesV2Engine {
     const d = this.deps.now()
     const title = `${mac ? 'Mac' : 'G2'} Recording ${d.toLocaleDateString('en-CA')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
     this.sessions.set(sessionId, { sessionId, title, armedAt: nowMs, lastSeenAt: nowMs, chunks: [], wordsSinceEval: 0, lastEvalAt: 0, lastCueAt: 0,
-      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, speakers: new Set(), insights: [], said: new SessionShingles() })
+      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, speakers: new Set(), insights: [], said: new SessionShingles(), fold: new OpenItemFold() })
     if (opts.resume) this.deps.store.setResume(sessionId, kinds)
     this.deps.warmMemory()
     return answer(this.deps.store.counters(sessionId).cues, kinds)
@@ -1077,7 +1081,7 @@ export class LiveCuesV2Engine {
 
       const sources: CueSourceRef[] = parsed.memoryIds.map(id => kept.find(m => m.id === id)).filter((m): m is MemoryNote => !!m)
         .map(m => (run ? groundedSource(m as GroundedNote, sourceId(m)) : { id: sourceId(m), date: m.date, title: m.title }))
-      const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: cueHeadline(parsed.detail), detail: parsed.detail,
+      let cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: cueHeadline(parsed.detail), detail: parsed.detail,
         kind: parsed.kind, sources, gate: round(pCue), createdAt: this.deps.now().getTime(), model: out.model ?? model }
       if (!isLiveCueV2(cue)) { trace.outcome = 'withheld_invalid'; return }       // never emit what the companion would drop
       // 6.79.0 repeat rule, off unless COS_LIVE_CUES_V2_REPEAT_OVERLAP is set: a cue that repeats an earlier SHOWN cue of
@@ -1089,6 +1093,25 @@ export class LiveCuesV2Engine {
       // line (the whole-cue rule misses it when the evidence after the opener differs). Same outcome; repeatRule says which.
       const lead = liveCuesV2Rule('LEAD_REPEAT', this.deps.env) ? leadRepeatOf(cue.detail, s.cues) : null
       if (lead) { Object.assign(trace, { outcome: 'withheld_repeat', repeatRule: 'lead', repeatOf: lead.blocker, repeatOverlap: lead.overlap }); return }
+      // 6.97.8 open items, on unless COS_LIVE_CUES_V2_OPEN_ITEMS=0: a cue whose point is "nobody named an owner or a date" is held,
+      // not shown. At most one combined cue per 10 minutes carries up to 3 held items; see live-cues-v2-open-items.ts. The writer
+      // call already counted; a held cue is not logged, emitted or counted as a cue, and the cooldown still applies.
+      if (liveCuesV2Rule('OPEN_ITEMS', this.deps.env)) {
+        const item = openItemOf({ kind: parsed.kind, detail: parsed.detail, cited: sources.length, field: parsed.open })
+        if (item) {
+          const at = this.deps.now().getTime()
+          s.fold.hold(item.label, at)
+          s.lastCueAt = at
+          const due = s.fold.due(at)
+          if (!due) { Object.assign(trace, { outcome: 'held_open_item', openSource: item.source, openWaiting: s.fold.waiting(at) }); return }
+          const digest: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: openItemsHeadline(due.length), detail: openItemsDetail(due),
+            kind: s.kinds === 'extended' ? 'followUp' : 'challenge', sources: [], gate: round(pCue), createdAt: at, model: out.model ?? model }
+          if (!isLiveCueV2(digest)) { trace.outcome = 'withheld_invalid'; return }
+          s.fold.markShown(due, at)
+          cue = digest
+          trace.openItems = due.length
+        }
+      }
       // 6.79.0: logged before it is held or emitted, so a rating that arrives at once finds it. Its own try/catch: a log
       // failure is traced on this evaluation and is never a writer failure or a step toward the breaker.
       try {
@@ -1104,9 +1127,9 @@ export class LiveCuesV2Engine {
       s.lastCueAt = cue.createdAt
       this.deps.store.recordCue(s.sessionId)
       this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)
-      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(parsed.kind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
+      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(cue.kind as CueKind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
       this.deps.emit('coaching_nudge', v1 as unknown as Record<string, unknown>)
-      Object.assign(trace, { outcome: 'cue', cueId: cue.cueId, cueChars: cue.detail.length, sources: sources.length, ...(parsed.numberFlags.length ? { numberFlags: parsed.numberFlags.length } : {}) })
+      Object.assign(trace, { outcome: 'cue', cueId: cue.cueId, cueChars: cue.detail.length, sources: cue.sources.length, ...(parsed.numberFlags.length ? { numberFlags: parsed.numberFlags.length } : {}) })
     } catch (error) {
       if (wallHit) { trace.outcome = 'failure'; trace.error = 'wall_timeout'; s.failures += 1; if (s.failures >= L.breakerFailures) s.breaker = true; return }
       if (isCancel(error, abort.signal)) { trace.outcome = 'cancelled'; return }
