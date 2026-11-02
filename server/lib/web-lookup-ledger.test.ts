@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, readdirSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WebLookupLedger, WEB_LEDGER_MAX_REASONS } from './web-lookup-ledger.js'
@@ -77,6 +77,13 @@ describe('web lookup ledger', () => {
     expect(broken.pagesRead('ask', 3)).toBe(false)
     expect(broken.today().readable).toBe(false)
   })
+  it('recording survives a failure anywhere inside it (a clock that throws): it returns false and the lookup goes on', () => {
+    const { file } = setup()
+    const broken = new WebLookupLedger(file, () => { throw new Error('clock unavailable') })
+    expect(() => broken.search('ask')).not.toThrow()
+    expect(broken.search('ask')).toBe(false)
+    expect(broken.withheld('cues', 'personal')).toBe(false)
+  })
   it('a reason that is not a code is counted as other, and the distinct reasons per feature are capped', () => {
     const { ledger } = setup()
     ledger.withheld('ask', 'This Has Spaces and the question text itself'); ledger.withheld('ask', '')
@@ -94,6 +101,5 @@ describe('web lookup ledger', () => {
     ledger.search('ask')
     expect(statSync(nested).mode & 0o777).toBe(0o600)
     expect(existsSync(`${nested}.tmp`)).toBe(false)
-    mkdirSync(join(dir, 'x'), { recursive: true })
   })
 })

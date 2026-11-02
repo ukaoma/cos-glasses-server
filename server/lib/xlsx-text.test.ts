@@ -115,6 +115,10 @@ describe('extractXlsxText', () => {
       const parts = { 'xl/worksheets/sheet1.xml': bomb, 'xl/workbook.xml': '<workbook><sheets><sheet name="Liar"/></sheets></workbook>' }
       expect(extractXlsxText(zip(parts, { understate: true })).text).toBe('Sheet: Liar\n[This sheet could not be read.]')
     })
+    it('a stored part larger than its cap is refused by its header size (nothing inflates it, so the header is the only guard)', () => {
+      const padded = `<workbook><sheets><sheet name="Pad"/></sheets></workbook><!--${'x'.repeat(XLSX_LIMITS.maxPartBytes + 1000)}-->`
+      expect(() => extractXlsxText(zip({ 'xl/workbook.xml': padded }, { stored: true }))).toThrowError(expect.objectContaining({ code: 'not_a_workbook' }))
+    })
     it(`refuses a workbook over ${XLSX_LIMITS.maxBytes} bytes without reading it`, () => {
       expect(() => extractXlsxText(Buffer.alloc(XLSX_LIMITS.maxBytes + 1))).toThrowError(expect.objectContaining({ code: 'too_large' }))
     })
@@ -139,6 +143,10 @@ describe('the media ingress admits .xlsx (phone attachments and the files/media 
     expect(byType.category === 'document' && byType.extractedText).toContain('Sheet: Q3')
     await expect(prepareRichMedia(wb, { label: 'budget.docx' })).rejects.toBeInstanceOf(RichMediaSafetyError)
     await expect(prepareRichMedia(Buffer.from('not a zip at all, but named xlsx'), { label: 'x.xlsx' })).rejects.toMatchObject({ code: 'unsupported_attachment_format' })
+  })
+  it('a zip signature is required: CSV bytes named .xlsx but declared text/csv are still read as CSV', async () => {
+    const csv = await prepareRichMedia(Buffer.from('a,b\n1,2\n'), { label: 'data.xlsx', declaredMime: 'text/csv' })
+    expect(csv).toMatchObject({ category: 'document', mime: 'text/csv', extractedText: 'a,b\n1,2' })
   })
   it('an encrypted workbook is refused; a workbook with no cell values still reports its sheet names', async () => {
     await expect(prepareRichMedia(zip({ 'xl/workbook.xml': '<workbook><sheets><sheet name="A"/></sheets></workbook>' }, { encrypted: true }), { label: 'e.xlsx' })).rejects.toMatchObject({ code: 'corrupt_attachment' })

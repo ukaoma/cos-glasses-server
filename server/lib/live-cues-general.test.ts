@@ -1134,6 +1134,18 @@ describe('web lookup ledger: withheld lookups', () => {
     await h.go()
     expect(ledger.today().withheld.byReason).toEqual({ local_no_area: 1 })
   })
+  it('voices that cannot be read count as names_unavailable; a rejected local query keeps its own code', async () => {
+    const unreadable: Deps['profile'] = { ...PROFILE, voiceProfileNames: () => { throw new Error('voice store unreadable') } }
+    const h = await make({ deps: { profile: unreadable } })
+    const ledger = await ledgerFor(h)
+    await h.go()
+    expect(ledger.today().withheld.byReason).toEqual({ names_unavailable: 1 })
+    const local = await make({ deps: { topicModel: async () => ({ text: JSON.stringify({ topic: true, category: 'local', query: 'road closures' }) }) } })
+    const ledger2 = await ledgerFor(local)
+    local.settings.homeArea = 'Quillco Heights'                            // an owner term: the area passes alone, the query with it is refused
+    await local.go()
+    expect(ledger2.today().withheld.byReason).toEqual({ rejected_local_owner_term: 1 })
+  })
   it('a meeting that is not eligible (mode off) counts nothing: no lookup was proposed', async () => {
     const h = await make()
     const ledger = await ledgerFor(h)

@@ -181,6 +181,11 @@ describe('a pasted link is read through the meeting assistant', () => {
     expect(W.recentPastedPagesFromUserLinks([row({})], 'meeting_test', 'server-one', at + 60_000)).toHaveLength(1)
     expect(W.recentPastedPagesFromUserLinks([row({})], 'meeting_test', 'server-one', at + 16 * 60_000)).toHaveLength(0)       // read 16 minutes ago
     expect(W.recentPastedPagesFromUserLinks([row({ question: 'What was decided?' })], 'meeting_test', 'server-one', at + 60_000)).toHaveLength(0)   // the link was not the user's
+    expect(W.recentPastedPagesFromUserLinks([row({ question: 'What was decided?', answer: `See ${ARTICLE}` })], 'meeting_test', 'server-one', at + 60_000)).toHaveLength(0)   // a link in an earlier ANSWER is not the user's
+    // The page itself carries its own read time: an exchange from a minute ago whose page was read 20 minutes before is too old.
+    const old = row({ createdAt: new Date(at + 19 * 60_000).toISOString(), sources: [{ ...source, retrievedAt: new Date(at).toISOString() }] })
+    expect(W.recentPastedPage([old], 'meeting_test', 'server-one', ARTICLE, at + 20 * 60_000)).toBeNull()
+    expect(W.recentPastedPage([old], 'meeting_test', 'server-one', ARTICLE, at + 10 * 60_000)).not.toBeNull()
     expect(W.recentPastedPagesFromUserLinks([row({})], 'other_meeting', 'server-one', at + 60_000)).toHaveLength(0)
     expect(W.pointsAtEarlierLink('What does the article say?')).toBe(true)
     expect(W.pointsAtEarlierLink(`What does the article at ${ARTICLE} say?`)).toBe(false)
@@ -237,6 +242,12 @@ describe('what Miles shares becomes meeting context the live cues can use', () =
     const again = await ask(f, `This is the article: ${ARTICLE}`)
     expect(cueFiles(f)).toHaveLength(1)
     expect(again.notices.join(' ')).not.toContain('Kept for live cues')      // nothing new was kept
+    // Pasted text twice: one file, and the second time nothing new is kept or announced.
+    const first = await ask(f, `${LONG} idem`)
+    expect(first.notices.join(' ')).toContain('Kept for live cues')
+    const second = await ask(f, `${LONG} idem`)
+    expect(second.notices.join(' ')).not.toContain('Kept for live cues')
+    expect(cueFiles(f).filter(x => x.id.startsWith('paste_'))).toHaveLength(1)
   })
   it('belongs to its own meeting: another meeting\'s cues never see it', async () => {
     const f = fixture()
@@ -285,6 +296,12 @@ describe('the meeting assistant counts its own lookups where they are decided', 
   })
   it('an explicit request that is refused up front and again when the model proposes a search is one withheld lookup, not two', async () => {
     const f = fixture([webAsk('wife birthday gift'), answer('No. [T1]')])
+    await ask(f, 'Search the web for my wife birthday gift ideas')
+    expect(f.webSearch).not.toHaveBeenCalled()
+    expect(f.ledger.today().withheld).toMatchObject({ total: 1, byReason: { personal: 1 } })
+  })
+  it('an explicit request refused up front is counted even when the model never proposes a search', async () => {
+    const f = fixture([answer('Local answer. [T1]')])
     await ask(f, 'Search the web for my wife birthday gift ideas')
     expect(f.webSearch).not.toHaveBeenCalled()
     expect(f.ledger.today().withheld).toMatchObject({ total: 1, byReason: { personal: 1 } })

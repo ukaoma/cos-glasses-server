@@ -377,6 +377,14 @@ export async function typedGeneralSearch(search: GeneralCueDeps['search'], query
  *  step with QUIET_DECISION_STOPS in live-cues-v2.ts, which this module cannot import (that module imports this one). */
 const QUIET_DECISION_CODES: ReadonlySet<string> = new Set(['jev_cap_reached', 'jev_breaker_open', 'jev_not_configured',
   'decision_cap_reached', 'decision_breaker_open', 'decision_not_configured', 'decision_invalid_provider'])
+/** The ledger code for an attempt that ended because a lookup was held back before any search (not for a cap, a failure or "no topic"):
+ *  a private-life window, voices that could not be read, an admission rejection, or no home area for a local query. Otherwise null. */
+export function heldLookupReason(reason: string): string | null {
+  if (reason.startsWith('sensitive:')) return 'personal'
+  if (reason === 'names_unavailable' || reason === 'local_no_area') return reason
+  const m = /^(rejected|rejected_local):([a-z_]+)$/.exec(reason)
+  return m ? `${m[1]}_${m[2]}` : null
+}
 const WALL = 'general_wall'
 const round4 = (n: number): number => Math.round(n * 10_000) / 10_000
 interface SeenSession { firstSeenAt: number; lastTickAt: number | null; lastTickChars: number; last: { state: GeneralCueState; reason: string } | null }
@@ -558,6 +566,8 @@ export class GeneralCueRunner {
   private done(row: GeneralTickRow, outcome: 'cue' | 'no_cue', reason: string, depth = 0): void {
     row.outcome = outcome
     row.reason = reason
+    const held = heldLookupReason(reason)
+    if (held) webLedger().withheld('cues', held)
     if (depth > 0) this.store.recordClean(depth)
   }
   private fail(row: GeneralTickRow, stage: Stage, reason: string, immediate = false): void {
@@ -582,7 +592,7 @@ export class GeneralCueRunner {
     // 1. Deterministic skip, before any model call: a window with private-life vocabulary never leaves the machine. (The owner's
     //    vocabulary does not skip a window: it guards the query, as whole terms, in admission.)
     const sensitive = sensitiveWindow(window)
-    if (sensitive) { rec.last = { state: 'withheld', reason: 'sensitive_window' }; webLedger().withheld('cues', 'personal'); return this.done(row, 'no_cue', `sensitive:${sensitive}`) }
+    if (sensitive) { rec.last = { state: 'withheld', reason: 'sensitive_window' }; return this.done(row, 'no_cue', `sensitive:${sensitive}`) }
 
     // 1b. The names a query must not carry, read now, before any spend: the owner, every enrolled voice, the speakers the ASR path
     //     reported, the calendar title's capitalized words and the speaker labels in the window. If the voice names cannot be read
@@ -591,7 +601,6 @@ export class GeneralCueRunner {
     try { nameWords = await raceAbort(blockedNameWords(window, c.speakerNames ?? [], profile), signal) } catch (error) {
       if (isCancel(error, signal)) throw error
       rec.last = { state: 'withheld', reason: 'names_unavailable' }
-      webLedger().withheld('cues', 'names_unavailable')
       return this.done(row, 'no_cue', 'names_unavailable')
     }
 
@@ -620,12 +629,12 @@ export class GeneralCueRunner {
     /** A trace row carries a hash only for a rejection that names nothing private: a repeat or a length. */
     const hashFor = (reason: AdmitReason, q: string): string | null => HASHABLE_REJECTIONS.has(reason) ? queryHash(q) : null
     let admitted = admitCueTopic(topic.query, ctx)
-    if (!admitted.ok) { row.queryHash = hashFor(admitted.reason, topic.query); webLedger().withheld('cues', `rejected_${admitted.reason}`); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }
+    if (!admitted.ok) { row.queryHash = hashFor(admitted.reason, topic.query); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }
     if (topic.category === 'local') {
       const withArea = withHomeArea(admitted.query, this.settings.homeArea())
-      if (withArea === null) { row.queryHash = queryHash(admitted.query); webLedger().withheld('cues', 'local_no_area'); return this.done(row, 'no_cue', 'local_no_area', 2) }
+      if (withArea === null) { row.queryHash = queryHash(admitted.query); return this.done(row, 'no_cue', 'local_no_area', 2) }
       const again = admitCueTopic(withArea, ctx)
-      if (!again.ok) { row.queryHash = hashFor(again.reason, withArea); webLedger().withheld('cues', `rejected_local_${again.reason}`); return this.done(row, 'no_cue', `rejected_local:${again.reason}`, 2) }
+      if (!again.ok) { row.queryHash = hashFor(again.reason, withArea); return this.done(row, 'no_cue', `rejected_local:${again.reason}`, 2) }
       admitted = again
     }
     row.queryHash = queryHash(admitted.query)
