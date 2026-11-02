@@ -86,7 +86,7 @@ const mutations = [
   m('title-cached', LIB, ['if (hit && nowMs - hit.at < LIVE_CUE_VERDICT_LIMITS.titleCacheMs) return hit.value', ''], LIB_T),
   m('title-cache-expires', LIB, ['nowMs - hit.at < LIVE_CUE_VERDICT_LIMITS.titleCacheMs', 'nowMs - hit.at < Infinity'], LIB_T),
   m('title-saved-first', LIB, ["if (m?.title) return { title: m.title, source: 'saved' }", "if (m?.title) return { title: m.title, source: 'library' }"], ROUTE_T),
-  m('logged-cues-once-each', LIB, ['new Set(this.deps.log.read().rows.filter(r => r.sessionId === sessionId).map(r => r.cueId)).size', 'this.deps.log.read().rows.filter(r => r.sessionId === sessionId).length'], LIB_T),
+  m('logged-cues-once-each', LIB, ['new Set(this.deps.log.read().rows.filter(r => r.sessionId === sessionId && !r.held).map(r => r.cueId)).size', 'this.deps.log.read().rows.filter(r => r.sessionId === sessionId && !r.held).length'], LIB_T),
   // ── Routes ──
   m('route-one-of-vote-verdict', ROUTE, ['if (body.vote !== undefined || !SESSION_ID.test(sessionId) || !CUE_ID.test(cueId)', 'if (!SESSION_ID.test(sessionId) || !CUE_ID.test(cueId)'], ROUTE_T),
   m('route-verdict-enum', ROUTE, ["|| !(isCueVerdict(body.verdict) || body.verdict === 'clear')", ''], ROUTE_T),

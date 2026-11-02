@@ -700,7 +700,7 @@ describe('engine', () => {
       expect(shown).toHaveLength(1)
       expect(shown[0]).toMatchObject({ detail: JSON.parse(GAP_A).cue, cueId: logged[0].cueId, createdAt: clock })
       expect(traces.at(-1)).toMatchObject({ kind: 'flush', mode: 'alone', items: 1 })
-      expect(logged).toHaveLength(1)                                                              // not logged twice
+      expect(logged.map(r => r.held ?? false)).toEqual([true, false])                              // the held row, then the shown row, one id
     })
 
     it('with more than three waiting, the newest three go in one combined cue and the oldest waits, then is shown alone; nothing is dropped', async () => {
@@ -714,15 +714,50 @@ describe('engine', () => {
       clock += 21 * MIN
       await e.feed(id, words(L.minNewWords))
       expect(cuesShown().map(c => c.detail).at(-1)).toBe(JSON.parse(GAP_C).cue)                 // the one the newest three left behind
-      expect(e.end(id).cues).toHaveLength(3)                                                    // nothing is left unshown
+      expect(e.end(id).cues).toHaveLength(3)                                                    // the two combined cues and the one shown alone; nothing is waiting
     })
 
-    it('the meeting end returns a held cue that was never shown, so the record has it', async () => {
+    it('the meeting end lists only what was shown: a held cue is in the cue log (marked held), not in the meeting\'s cues', async () => {
       on()
       const { e, id } = await play([GAP_A])
       const end = e.end(id)
-      expect(end.cues.map(c => c.detail)).toEqual([JSON.parse(GAP_A).cue])
-      expect(end.nudgesGenerated).toBe(1)
+      expect(end.cues).toEqual([])
+      expect(end.nudgesGenerated).toBe(0)
+    })
+
+    it('W1: a held cue is logged with held: true; a combined cue is logged without; a cue shown alone is logged again, without, under the same id', async () => {
+      on()
+      const { e, logged, id } = await play([GAP_A, NORMAL, GAP_B])
+      expect(logged.map(r => r.held ?? false)).toEqual([true, false, true])
+      await e.feed(id, words(L.minNewWords))                                                     // the combined cue of A and B
+      const digest = logged.at(-1)!
+      expect(digest.held).toBeUndefined()
+      expect(digest.detail).toMatch(/^Still open/)
+      // a lone one: a second meeting
+      const { e: e2, logged: logged2, id: id2 } = await play([GAP_C], MAC.replace('f1118630', 'a1118630'))
+      expect(logged2).toHaveLength(1); expect(logged2[0].held).toBe(true)
+      clock += 21 * MIN
+      await e2.feed(id2, words(L.minNewWords))
+      expect(logged2).toHaveLength(2)
+      expect(logged2[1]).toMatchObject({ cueId: logged2[0].cueId, createdAt: clock, before: logged2[0].before })
+      expect(logged2[1].held).toBeUndefined()
+    })
+
+    it('W2: a stale item the room talked about again is dropped (logged held, never shown), and one it did not talk about is shown', async () => {
+      on()
+      const talked = await play([GAP_A], MAC.replace('f1118630', 'b1118630'))
+      clock += 21 * MIN
+      await talked.e.feed(talked.id, words(L.minNewWords) + ' the slides draft is finished and sent')
+      expect(cuesShown()).toHaveLength(0)
+      expect(traces.at(-1)).toMatchObject({ kind: 'flush', mode: 'drop', items: 1 })
+      expect(talked.logged).toHaveLength(1)
+      expect(talked.logged[0].held).toBe(true)
+      emitted = []
+      const quiet = await play([GAP_B], MAC.replace('f1118630', 'c1118630'))
+      clock += 21 * MIN
+      await quiet.e.feed(quiet.id, words(L.minNewWords) + ' we moved on to the roadmap')
+      expect(cuesShown()).toHaveLength(1)
+      expect(traces.at(-1)).toMatchObject({ kind: 'flush', mode: 'alone' })
     })
 
     it('a held cue still starts the cooldown, so the writer is not asked faster than before', async () => {

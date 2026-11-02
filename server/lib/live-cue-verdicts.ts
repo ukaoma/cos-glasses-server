@@ -70,6 +70,9 @@ export interface LiveCueLogRow {
   general?: { category: LiveCueGeneralCategory; query: string }
   /** Shadow owner/date template rules (never enforced): would this cue be withheld per meeting, or per topic. */
   wouldWithhold?: WouldWithhold
+  /** 6.97.8: this cue was written but HELD for a combined open-items cue and never shown. It is kept here for the record, and history,
+   *  counts, the unrated queue, the per-meeting count and ratings all ignore it. A cue later shown alone is logged again, without this. */
+  held?: true
   before: string
 }
 /** A history row's rating. `verdict` null with a `vote` is a lens vote alone: unrated. */
@@ -145,7 +148,7 @@ export function isLogRow(value: unknown): value is LiveCueLogRow {
     && optional(r.memorySource, m => m === 'cue_memory' || m === 'notes' || m === 'none') && optional(r.kept, num)
     && optional(r.wouldWithhold, isWouldWithhold)
     && optional(r.arms, a => Array.isArray(a) && a.length <= LIVE_CUE_ARMS.length && new Set(a).size === a.length && a.every(x => (LIVE_CUE_ARMS as readonly unknown[]).includes(x)))
-    && optional(r.general, isGeneral)
+    && optional(r.general, isGeneral) && optional(r.held, h => h === true)
 }
 
 export class LiveCueLog {
@@ -206,7 +209,7 @@ export class LiveCueLog {
 
   /** The first logged row for this cue, under any meeting. */
   find(cueId: string): LiveCueLogRow | null {
-    return this.read().rows.find(r => r.cueId === cueId) ?? null
+    return this.read().rows.find(r => r.cueId === cueId && !r.held) ?? null
   }
 
   /** Drops rows past retention and blanks `before` on rows past 7 days. Rewrites only when something changed; synchronous
@@ -363,7 +366,7 @@ export class LiveCueVerdicts {
     const { rows: logged, skipped } = this.deps.log.read()
     const sessions = q.sessionIds?.length ? new Set(q.sessionIds) : null
     const seen = new Set<string>()
-    const rows = logged
+    const rows = logged.filter(r => !r.held)                       // a held cue was never shown: not listed, not counted, not ratable
       .filter(r => r.createdAt >= cutoff && (!sessions || sessions.has(r.sessionId)))
       .filter(r => { if (seen.has(r.cueId)) return false; seen.add(r.cueId); return true })
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -386,7 +389,7 @@ export class LiveCueVerdicts {
 
   /** Every logged cue for one meeting, whatever its age (for the per-meeting count once the engine's counter expired). */
   loggedCues(sessionId: string): number {
-    return new Set(this.deps.log.read().rows.filter(r => r.sessionId === sessionId).map(r => r.cueId)).size
+    return new Set(this.deps.log.read().rows.filter(r => r.sessionId === sessionId && !r.held).map(r => r.cueId)).size
   }
 
   private title(sessionId: string): { title: string; source: 'saved' | 'library' } | null {
