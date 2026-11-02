@@ -46,7 +46,7 @@ const WINDOW_TERMS: Record<SensitiveCategory, string[]> = {
   health: ['doctors?', 'hospitals?', 'clinics?', 'diagnos*', 'chemo*', 'cancer', 'surger(?:y|ies)', 'therapists?', 'therapy', 'psychiatr*', 'psycholog*', 'prescription*',
     'pregnan*', 'icu', 'intensive care', 'emergency room', 'er visit', 'urgent care', 'ob gyn', 'obgyn', 'c section', 'csection', 'adhd', 'autis*', 'hospice'],
   family: ['wife', 'wives', 'husbands?', 'spouses?', 'kids?', 'moms?', 'mommy', 'dads?', 'daddy', 'sons?', 'daughters?', 'brothers?', 'sisters?', 'parents',
-    'step ?(?:son|daughter|mom|dad|kid\\w*)', 'grandma*', 'grandpa*', 'grandmother*', 'grandfather*', 'grandparent*', 'grandchild*', 'grandson*', 'granddaughter*',
+    'step ?(?:son|daughter|mom|dad|kid\\w*)', 'grandma*', 'grandpa*', 'grandmother*', 'grandfather*', 'grandchild*', 'grandson*', 'granddaughter*',
     'grandkid*', 'nephews?', 'nieces?'],
   finance: ['irs', 'tax bills?', 'tax returns?', 'back taxes', 'income tax(?:es)?', 'property tax(?:es)?', 'debts?', 'loans?', 'mortgages?', 'bankrupt*', 'credit score',
     'installment*', 'escrow', 'pensions?', 'roth', 'ira', 'rollover', 'k 1', 'alimony', 'child support'],

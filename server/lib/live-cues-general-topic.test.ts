@@ -32,7 +32,7 @@ const WINDOW_SAMPLES = [
   ['family', 'daddy', 'daddy duty'], ['family', 'sons?', 'his son plays'], ['family', 'daughters?', 'her daughter plays'], ['family', 'brothers?', 'my brother called'],
   ['family', 'sisters?', 'my sister called'], ['family', 'parents', 'his parents are in town'], ['family', 'step ?(?:son|daughter|mom|dad|kid\\w*)', 'her stepdaughter plays'],
   ['family', 'grandma*', 'my grandma came'], ['family', 'grandpa*', 'my grandpa came'], ['family', 'grandmother*', 'my grandmother came'],
-  ['family', 'grandfather*', 'my grandfather came'], ['family', 'grandparent*', 'the grandparents came'], ['family', 'grandchild*', 'a grandchild came'],
+  ['family', 'grandfather*', 'my grandfather came'], ['family', 'grandchild*', 'a grandchild came'],
   ['family', 'grandson*', 'a grandson came'], ['family', 'granddaughter*', 'a granddaughter came'], ['family', 'grandkid*', 'a grandkid came'],
   ['family', 'nephews?', 'her nephew visits'], ['family', 'nieces?', 'her niece visits'],
   ['finance', 'irs', 'the I.R.S. called'], ['finance', 'tax bills?', 'a big tax bill'], ['finance', 'tax returns?', 'the tax return is due'], ['finance', 'back taxes', 'owes back taxes'],
@@ -57,6 +57,7 @@ describe('sensitive window (clearly personal only)', () => {
   it('skips a window in the category of the first list that fires, and says only the category', () => {
     expect(sensitiveWindow('we still owe the IRS and the mortgage is due')).toBe('finance')
     expect(sensitiveWindow('her doctor and the lawyer')).toBe('health')
+    expect(sensitiveWindow('the grandparents came')).toBe('family')                   // grandpa* is the stem for grandparent forms
     expect(JSON.stringify(sensitiveWindow('the mortgage on the lake house'))).toBe('"finance"')
   })
   /** The words the review measured as the top firings on ordinary work talk (the broad list skipped 37.6% of 974 saved windows). */
