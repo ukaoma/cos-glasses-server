@@ -900,8 +900,7 @@ export class LiveCuesV2Engine {
     s?.inFlight?.abort()
     s?.said.clear()
     this.general?.endSession(sessionId)
-    // A held open item that was never shown is still one of the meeting's cues (it is in the cue log too).
-    const cues = s ? [...this.allCues(s), ...s.fold.unshown()].sort((a, b) => a.createdAt - b.createdAt) : []
+    const cues = s ? this.allCues(s) : []
     // v1 readers know two types: an extended kind is shown as its legacy kind there (the cues keep the real one).
     // An insight (live cues v3) has no v1 twin, so it is not counted as a nudge either.
     const nudges = cues.flatMap(c => (isCueKind(c.kind) ? [{ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId }] : []))
@@ -976,6 +975,7 @@ export class LiveCuesV2Engine {
     const words = text.trim().split(/\s+/).filter(Boolean)
     if (words.length) {
       s.chunks.push(text.trim())
+      s.fold.noteSaid(text)                                           // 6.97.8: a held open item the room talks about again may be settled
       s.charsFed += cleanWindow(text.trim()).length
       if (this.groundingOn()) s.said.add(cleanWindow(text.trim()))
       s.wordsSinceEval += words.length
@@ -1030,23 +1030,32 @@ export class LiveCuesV2Engine {
     return out
   }
 
-  /** 6.97.8: show what the fold says is due, without a model call: a combined cue (new, logged) or a held cue on its own (already logged). */
+  /** 6.97.8: carry out what the fold says is due, without a model call: a combined cue (new row in the cue log), a held cue on its own
+   *  (a shown row now, beside its held row), or a stale held cue set aside because the room has talked about it again. */
   private showHeld(s: Session, plan: FlushPlan, nowMs: number): void {
     const items = plan.items
-    let cue: LiveCueV2
+    if (plan.mode === 'drop') {
+      s.fold.markShown(plan, nowMs)
+      this.deps.trace({ kind: 'flush', at: new Date(nowMs).toISOString(), sessionId: s.sessionId, mode: 'drop', items: 1, cueId: items[0].cue.cueId })
+      return
+    }
+    let cue: LiveCueV2, before: string
     if (plan.mode === 'alone') {
       cue = { ...items[0].cue, createdAt: nowMs }                    // the cue as written; re-stamped so the lens still flashes it
+      before = items[0].before
     } else {
       const labels = items.map(i => i.label)
       cue = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: openItemsHeadline(labels), detail: openItemsDetail(labels),
         kind: s.kinds === 'extended' ? 'followUp' : 'challenge', sources: [], gate: round(Math.max(...items.map(i => i.cue.gate))), createdAt: nowMs, model: items[items.length - 1].cue.model }
       if (!isLiveCueV2(cue)) return
-      const shadow = wouldWithhold(cue.detail, s.cues), before = cueBefore(s.chunks.join('\n').replace(/^\[\d+\]\s*/gm, ''))
-      const row: LiveCueLogRow = { v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, kind: cue.kind, headline: cue.headline,
-        detail: cue.detail, gate: cue.gate, sources: [], model: cue.model, prompt: liveCuesV2WriterSystem(this.deps.env, s.kinds).version, memorySource: 'none', kept: 0,
-        wouldWithhold: shadow, before, armedAt: s.armedAt }
-      try { this.deps.cueLog?.(row) } catch (error) { console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`) }
+      before = cueBefore(s.chunks.join('\n').replace(/^\[\d+\]\s*/gm, ''))
     }
+    // Shown now, so logged now without `held`: history lists it from this row (the held row, if any, stays hidden).
+    const shadow = wouldWithhold(cue.detail, s.cues)
+    const row: LiveCueLogRow = { v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, kind: cue.kind, headline: cue.headline,
+      detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model, prompt: liveCuesV2WriterSystem(this.deps.env, s.kinds).version, memorySource: 'none', kept: 0,
+      wouldWithhold: shadow, before, armedAt: s.armedAt }
+    try { this.deps.cueLog?.(row) } catch (error) { console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`) }
     s.fold.markShown(plan, nowMs)
     s.cues.push(cue)
     s.lastCueAt = nowMs
@@ -1175,6 +1184,12 @@ export class LiveCuesV2Engine {
       // line (the whole-cue rule misses it when the evidence after the opener differs). Same outcome; repeatRule says which.
       const lead = liveCuesV2Rule('LEAD_REPEAT', this.deps.env) ? leadRepeatOf(cue.detail, history) : null
       if (lead) { Object.assign(trace, { outcome: 'withheld_repeat', repeatRule: 'lead', repeatOf: lead.blocker, repeatOverlap: lead.overlap }); return }
+      // 6.97.8 open items, on unless COS_LIVE_CUES_V2_OPEN_ITEMS=0, extended meetings only (writer v4 is the one that returns `open`): a cue the
+      // writer marked as a missing owner or date (and whose wording agrees) is held, not shown. It is logged below with `held`, so history
+      // never lists or counts it, stays in the writer's history, and comes back through showHeld(). The writer call counted; the cooldown
+      // applies; the cue does not count toward the cap.
+      const item = s.kinds === 'extended' && liveCuesV2Rule('OPEN_ITEMS', this.deps.env)
+        ? openItemOf({ kind: parsed.kind, detail: parsed.detail, cited: sources.length, field: parsed.open }) : null
       // 6.79.0: logged before it is held or emitted, so a rating that arrives at once finds it. Its own try/catch: a log
       // failure is traced on this evaluation and is never a writer failure or a step toward the breaker.
       try {
@@ -1184,22 +1199,16 @@ export class LiveCuesV2Engine {
           // 'data' stays out of `arms`: an older server's isLogRow rejects an arm it does not know, and the Tableau source is already in `sources`.
           // `dataNote` says a Tableau note was kept for this cue, so a cue grounded only in it does not read as ungrounded with arms [].
           ...(run ? { arms: run.arms.filter((a): a is Exclude<typeof a, 'data'> => a !== 'data') } : {}),
-          ...(kept.some(m => (m as GroundedNote).arm === 'data') ? { dataNote: true as const } : {}) })
+          ...(kept.some(m => (m as GroundedNote).arm === 'data') ? { dataNote: true as const } : {}), ...(item ? { held: true as const } : {}) })
       } catch (error) {
         trace.cueLogError = (error as NodeJS.ErrnoException)?.code ?? 'append_failed'
         console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`)
       }
-      // 6.97.8 open items, on unless COS_LIVE_CUES_V2_OPEN_ITEMS=0, extended meetings only (writer v4 is the one that returns `open`): a cue the writer marked as a missing owner or date (and whose wording
-      // agrees) is held, not shown; it is already in the cue log above, stays in the writer's history, and comes back through
-      // showHeld(). The writer call counted; the cooldown applies; the cue does not count toward the cap.
-      if (s.kinds === 'extended' && liveCuesV2Rule('OPEN_ITEMS', this.deps.env)) {
-        const item = openItemOf({ kind: parsed.kind, detail: parsed.detail, cited: sources.length, field: parsed.open })
-        if (item) {
-          s.fold.hold(item.label, cue, cue.createdAt)
-          s.lastCueAt = cue.createdAt
-          Object.assign(trace, { outcome: 'held_open_item', openWaiting: s.fold.waiting() })
-          return
-        }
+      if (item) {
+        s.fold.hold(item.label, cue, cue.createdAt, cueBefore(said))
+        s.lastCueAt = cue.createdAt
+        Object.assign(trace, { outcome: 'held_open_item', openWaiting: s.fold.waiting() })
+        return
       }
       s.cues.push(cue)
       s.lastCueAt = cue.createdAt

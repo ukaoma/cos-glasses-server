@@ -8,8 +8,8 @@
 - `.xlsx` text extraction on the media route: linear scanners, bounded by 2 s of scanning, 48 MB inflated, 12 sheets and 200 rows per sheet; no formulas.
 - New daily web lookup ledger, `webToday` on `GET /live-cues/v2/settings?v=3` and `GET /meeting-ask/config`: searches, pages read and pages failed for cues, the assistant and fact checks, and lookups held back after the trigger, by reason. `general.today` keeps its meaning.
 - Cue pacing: the per-meeting cap opens with half the cap, then refills across the meeting (calendar length when known, else 60 minutes; 5 minutes per cue at cap 25). Caps of 4 or less are not paced; a raised cap takes effect at once (`COS_LIVE_CUES_V2_PACING=0` turns it off).
-- On Mac recordings, "no owner or date" cues the writer marks `open` fold into one cue per 10 minutes headed by the first item; an item left alone 20 minutes is shown on its own when the meeting continues, unless it was said since; every held cue is kept in the cue log, marked held. G2 cues are shown as written (`COS_LIVE_CUES_V2_OPEN_ITEMS=0`).
-- A cue whose opening line repeats one of the last six is withheld (`COS_LIVE_CUES_V2_LEAD_REPEAT=0`). The writer gets the meeting's known names for spelling: speakers, owner, vocabulary, then voices (`COS_LIVE_CUES_V2_KNOWN_NAMES=0`).
+- On Mac recordings, "no owner or date" cues the writer marks `open` fold into one cue per 10 minutes headed by the first item; an item left alone 20 minutes is shown on its own when the meeting continues, unless the room talked about it since; every held cue is kept in the cue log marked `held` and left out of cue history, counts and ratings. G2 cues are shown as written (`COS_LIVE_CUES_V2_OPEN_ITEMS=0`).
+- A cue whose opening line repeats one of the last six is withheld (`COS_LIVE_CUES_V2_LEAD_REPEAT=0`). The writer gets the meeting's known names for spelling: this meeting's speakers, the owner and name-like vocabulary; enrolled voice names are never sent (`COS_LIVE_CUES_V2_KNOWN_NAMES=0`).
 
 ## 6.97.7 - Live cues: grounded cues, cue modes and general cues (private candidate)
 

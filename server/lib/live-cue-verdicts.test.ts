@@ -428,3 +428,32 @@ describe('history', () => {
     expect(svc.loggedCues('meeting_z')).toBe(0)
   })
 })
+
+describe('held cues (6.97.8): written but never shown', () => {
+  const held = (n: number, over: Partial<LiveCueLogRow> = {}) => row(id(n), { held: true, createdAt: T0 - DAY, ...over })
+  it('the schema takes held: true and refuses anything else; a reader that predates it would ignore the key', () => {
+    expect(isLogRow(held(1))).toBe(true)
+    expect(isLogRow({ ...row(id(1)), held: false })).toBe(false)
+    expect(isLogRow({ ...row(id(1)), held: 'yes' })).toBe(false)
+  })
+  it('history never lists, counts or queues a held cue, and it cannot be rated', () => {
+    svc.logCue(row(id(1), { createdAt: T0 - DAY }))
+    svc.logCue(held(2)); svc.logCue(held(3, { sessionId: 'meeting_b' }))
+    const h = svc.history({ days: 7, unrated: false, limit: 200 })
+    expect(h.cues.map(c => c.cueId)).toEqual([id(1)])
+    expect(h.counts).toMatchObject({ total: 1, rated: 0, unrated: 1 })
+    expect(svc.history({ days: 7, unrated: true, limit: 200 }).cues.map(c => c.cueId)).toEqual([id(1)])
+    expect(rate(id(2), 'useful')).toEqual({ ok: false, error: 'unknown_cue' })
+    expect(svc.loggedCues('meeting_a')).toBe(1)
+    expect(svc.loggedCues('meeting_b')).toBe(0)
+  })
+  it('a held cue later shown alone is listed from its shown row, at the time it was shown, and can then be rated', () => {
+    svc.logCue(held(2))
+    svc.logCue(row(id(2), { createdAt: T0 - 10 * 60_000 }))                       // the shown row: same cueId, no held
+    const h = svc.history({ days: 7, unrated: false, limit: 200 })
+    expect(h.cues.map(c => [c.cueId, c.createdAt])).toEqual([[id(2), T0 - 10 * 60_000]])
+    expect(h.counts.total).toBe(1)
+    expect(svc.loggedCues('meeting_a')).toBe(1)
+    expect(rate(id(2), 'useful')).toMatchObject({ ok: true })
+  })
+})

@@ -71,9 +71,13 @@ export function openItemsHeadline(items: readonly string[]): string {
   return items.length > 1 ? `${items[0]} +${items.length - 1}` : items[0]
 }
 
-export interface HeldItem { label: string; at: number; cue: LiveCueV2 }
-/** What the fold hands back when something is due: a combined cue of the newest three, or the oldest stale item on its own. */
-export type FlushPlan = { mode: 'digest'; items: HeldItem[] } | { mode: 'alone'; items: [HeldItem] }
+export interface HeldItem { label: string; at: number; cue: LiveCueV2; before: string; tokens: Set<string>; seen: Set<string> }
+/** What the fold hands back when something is due: a combined cue of the newest three, the oldest stale item on its own, or the
+ *  oldest stale item dropped because the room has talked about it again since it was held (it may well be settled now). */
+export type FlushPlan = { mode: 'digest'; items: HeldItem[] } | { mode: 'alone'; items: [HeldItem] } | { mode: 'drop'; items: [HeldItem] }
+
+/** The share of an item's scored words that must have been said again since it was held for the item to count as talked about. */
+export const OPEN_ITEM_SAID_SHARE = 0.6
 
 /** The held items of one meeting, and when something is due. */
 export class OpenItemFold {
@@ -83,12 +87,12 @@ export class OpenItemFold {
   private lastDigestAt: number | null = null
 
   /** Hold a cue as an item, unless it is the same item as one held or already shown (it is then only remembered). Returns whether it waits. */
-  hold(label: string, cue: LiveCueV2, now: number): boolean {
+  hold(label: string, cue: LiveCueV2, now: number, before = ''): boolean {
     this.everHeld.push(cue)
     const tokens = cueTokens(label)
     const same = (other: string) => cueOverlap(tokens, cueTokens(other)) >= SAME_ITEM
     if (this.pending.some(p => same(p.label)) || this.shownLabels.some(same)) return false
-    this.pending.push({ label, at: now, cue })
+    this.pending.push({ label, at: now, cue, before, tokens, seen: new Set() })
     return true
   }
 
@@ -98,21 +102,31 @@ export class OpenItemFold {
   /** Every cue ever held, for the writer's recent-cue history and the repeat rules: a held item must not be raised again. */
   history(): readonly LiveCueV2[] { return this.everHeld }
 
-  /** The held cues not yet shown in any form (meeting end). */
-  unshown(): LiveCueV2[] { return this.pending.map(p => p.cue) }
+  /** What the room says after an item was held: remember which of each waiting item's scored words came up again. */
+  noteSaid(text: string): void {
+    if (!this.pending.length) return
+    const said = cueTokens(text)
+    for (const p of this.pending) for (const t of p.tokens) if (said.has(t)) p.seen.add(t)
+  }
+
+  /** Has the room talked about this item again since it was held (most of its scored words, at least one)? */
+  talkedAbout(item: HeldItem): boolean {
+    return item.seen.size >= Math.max(1, Math.ceil(item.tokens.size * OPEN_ITEM_SAID_SHARE))   // a label with no scored words can never be seen again
+  }
 
   /** What is due now. A combined cue needs two waiting and 10 minutes since the last; a stale item is shown alone. */
   next(now: number): FlushPlan | null {
     const spaced = this.lastDigestAt === null || now - this.lastDigestAt >= OPEN_ITEMS_EVERY_MS
     if (spaced && this.pending.length >= 2) return { mode: 'digest', items: this.pending.slice(-OPEN_ITEMS_MAX) }
     const stale = this.pending.find(p => now - p.at >= OPEN_ITEM_STALE_MS)
-    return stale ? { mode: 'alone', items: [stale] } : null
+    if (!stale) return null
+    return this.talkedAbout(stale) ? { mode: 'drop', items: [stale] } : { mode: 'alone', items: [stale] }
   }
 
-  /** The plan was shown. */
+  /** The plan was carried out (shown, or for a drop, set aside). */
   markShown(plan: FlushPlan, now: number): void {
     this.pending = this.pending.filter(p => !plan.items.includes(p))
-    this.shownLabels.push(...plan.items.map(i => i.label))
+    if (plan.mode !== 'drop') this.shownLabels.push(...plan.items.map(i => i.label))
     if (plan.mode === 'digest') this.lastDigestAt = now
   }
 }

@@ -108,7 +108,7 @@ describe('open items: the fold (6.97.8, QA fix: nothing is lost)', () => {
     expect(OPEN_ITEMS_MAX).toBe(3)
     f.markShown(plan, 4 * MIN)
     expect(f.waiting()).toBe(1)                                                     // the oldest is still waiting, not dropped
-    expect(f.unshown().map(c => c.cueId)).toEqual(['a'])
+    expect(f.next(5 * MIN)).toBeNull()                                              // alone for 20 minutes
   })
 
   it('a second combined cue waits 10 minutes after the first', () => {
@@ -131,6 +131,39 @@ describe('open items: the fold (6.97.8, QA fix: nothing is lost)', () => {
     f.markShown(plan, OPEN_ITEM_STALE_MS)
     expect(f.waiting()).toBe(0)
     expect(f.next(OPEN_ITEM_STALE_MS + 1)).toBeNull()
+  })
+
+  it('W2: a stale item the room talked about again since it was held is dropped, not shown alone; one it did not is shown', () => {
+    const f = new OpenItemFold()
+    f.hold('Warehouse audit booking', cueOf('a'), 0)
+    f.noteSaid('We moved on to pricing and the vendor list')
+    expect(f.next(OPEN_ITEM_STALE_MS)).toMatchObject({ mode: 'alone' })
+    f.noteSaid('so the warehouse audit is booked for Tuesday')                         // warehouse, audit and booking-ish words
+    const plan = f.next(OPEN_ITEM_STALE_MS)!
+    expect(plan.mode).toBe('drop')
+    f.markShown(plan, OPEN_ITEM_STALE_MS)
+    expect(f.waiting()).toBe(0)
+    expect(f.hold('Warehouse audit booking', cueOf('b'), OPEN_ITEM_STALE_MS + 1)).toBe(true)   // a dropped item was never shown, so it can be raised again
+  })
+
+  it('W2: one word of a longer label coming up again is not enough; most of the label is', () => {
+    const f = new OpenItemFold()
+    f.hold('Warehouse audit booking schedule', cueOf('a'), 0)                          // four scored words: 0.6 of 4 rounds up to 3
+    f.noteSaid('the warehouse came up'); f.noteSaid('an audit')
+    expect(f.next(OPEN_ITEM_STALE_MS)).toMatchObject({ mode: 'alone' })
+    f.noteSaid('and the booking')
+    expect(f.next(OPEN_ITEM_STALE_MS)).toMatchObject({ mode: 'drop' })
+  })
+
+  it('W2: only what was said after the item was held counts, and a label with no scored words is never dropped', () => {
+    const f = new OpenItemFold()
+    f.noteSaid('warehouse audit booking')                                              // before it was held: nothing waits, nothing is remembered
+    f.hold('Warehouse audit booking', cueOf('a'), 0)
+    expect(f.next(OPEN_ITEM_STALE_MS)).toMatchObject({ mode: 'alone' })
+    const g = new OpenItemFold()
+    g.hold('Owner and date', cueOf('b'), 0)                                            // every word is on the stop list
+    g.noteSaid('owner and date, owner and date')
+    expect(g.next(OPEN_ITEM_STALE_MS)).toMatchObject({ mode: 'alone' })
   })
 
   it('showing an item alone does not use up the 10 minutes between combined cues', () => {
