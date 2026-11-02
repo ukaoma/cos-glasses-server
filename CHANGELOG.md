@@ -1,3 +1,7 @@
+## 6.97.6 - SubQ session find shows every session that fits (private candidate)
+
+2026-11-01. Carries what 6.94.4 publishes, and replaces the measuring build 6.97.5. Pairs with COS Control 0.5.363.
+
 ## 6.97.4 - Last review fixes (private candidate)
 
 2026-11-01. A private candidate for one Mac, carrying the fixes published in 6.94.3. Pairs with COS Control 0.5.363.
