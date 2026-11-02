@@ -21,7 +21,7 @@ import type { MeetingAskPhaseTiming, MeetingAskTimings } from '../../shared/meet
 import { refineActiveMeetingAsk } from './meeting-ask-refinement.js';
 import { getMediaStore, MediaStoreError } from './media-store.js';
 import { createHash } from 'node:crypto';
-import { DATA_ASK_ADDENDUM, DATA_FACTS_FILE, askDataIntent, dataArmDomainOk, dataFactsForAsk, dataFactsReader, type DataFactsRead } from './live-cues-v2-data.js';
+import { DATA_ASK_ADDENDUM, DATA_FACTS_FILE, askDataIntent, askUserWords, dataArmGate, dataFactsForAsk, dataFactsReader, quiltTitleSignal, type DataFactsRead } from './live-cues-v2-data.js';
 import { dataPath } from './data-dir.js';
 import { readMeetingImage, imageTextHasSecrets } from './meeting-image-ocr.js';
 import { isValidMediaId, mediaCategoryOf } from '../../shared/media-attachment.js';
@@ -399,15 +399,19 @@ export class MeetingAskRuntime {
             let dataSystem = '';
             try {
                 const read = this.deps.dataFacts();
-                const wantsTableau = /\btableau\b/i.test(input.question);
+                const own = askUserWords(input.question);
+                const wantsTableau = /\btableau\b/i.test(own);
                 const personal = (orientation?.domain ?? '').trim().toLowerCase() === 'personal';
                 if (!read.ok) {
                     if (wantsTableau && !personal)
                         extraNotices.push(`Tableau data is not available (${read.reason}), so no Tableau figures were used.`);
                 }
                 else if (!personal) {
-                    const intent = askDataIntent(input.question, read.facts);
-                    if (intent === 'tableau' || (intent === 'named' && dataArmDomainOk(orientation?.domain))) {
+                    const { intent, brand } = askDataIntent(input.question, read.facts);
+                    // Saying Tableau is explicit. Only naming a group goes through the cue arm's gate: a Quilt meeting, or one with no
+                    // confirmed domain and a Quilt brand named (or a Quilt term in the calendar title).
+                    const ok = intent === 'tableau' || (intent === 'named' && dataArmGate({ domain: orientation?.domain, brand, titleQuilt: quiltTitleSignal(read.facts, [orientation?.calendar?.title]) }).ok);
+                    if (ok) {
                         const data = dataFactsForAsk(read.facts, input.question);
                         if (data) {
                             extraSources.push({ id: `F${extraSources.filter(s => s.kind === 'file').length + 1}`, kind: 'file', title: data.title, text: data.text });
