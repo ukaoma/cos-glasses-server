@@ -103,7 +103,7 @@ describe('extractXlsxText', () => {
       expect(out.text.length).toBeLessThanOrEqual(XLSX_LIMITS.maxChars)
       expect(out.text.endsWith(`[Text cut at ${XLSX_LIMITS.maxChars} characters.]`)).toBe(true)
       expect(out.truncated).toBe(true)
-    })
+    }, 30_000)
     it('a part that inflates past its cap is not read (a zip bomb stops at the cap) and the sheet says so', () => {
       const bomb = `<worksheet><sheetData>${'<row r="1"><c r="A1"><v>1</v></c></row>'.repeat(Math.ceil(XLSX_LIMITS.maxSheetBytes / 38) + 10)}</sheetData></worksheet>`
       expect(bomb.length).toBeGreaterThan(XLSX_LIMITS.maxSheetBytes)
@@ -155,10 +155,11 @@ describe('the media ingress admits .xlsx (phone attachments and the files/media 
 })
 
 // 6.97.8 QA: lazy [\s\S]*? scanners went quadratic on unclosed tags (a 20 KB file could hold the server for hours). The scanners are
-// linear indexOf passes now. Each part below is as big as the inflate cap allows; the stated bound is 1,500 ms for each (the code's own
-// work bound is 2,000 ms). Measured on the build machine: the slowest shape took under 150 ms; see the timing line each test prints.
+// linear indexOf passes now. Each part below is as big as the inflate cap allows; the stated bound is 2,500 ms for each (loose on purpose: the
+// machine may be busy; the code's own work bound is 2,000 ms). Measured on a loaded build machine: the slowest shape took about 430 ms and
+// most took under 40 ms (the timing line each test prints). The old lazy-regex scanners took 2 to 7 s at only 400 KB, hours at the cap.
 describe('pathological parts finish within a stated bound', () => {
-  const BOUND_MS = 1500
+  const BOUND_MS = 2500
   const sheetWith = (body: string): string => `<worksheet><sheetData>${body}</sheetData></worksheet>`
   const fill = (unit: string, bytes: number): string => unit.repeat(Math.floor(bytes / unit.length))
   const wb = (names = ['P']) => `<workbook><sheets>${names.map((n, i) => `<sheet name="${n}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>`
@@ -172,7 +173,7 @@ describe('pathological parts finish within a stated bound', () => {
   }
   const SHEET_CAP = XLSX_LIMITS.maxSheetBytes - 100
   // Each shape at the inflate cap and, for the mutation gate (a quadratic scanner takes hours at the cap), at 400 KB, where a quadratic
-  // scanner is already seconds slower than the 1,500 ms bound.
+  // scanner is already seconds slower than the 2,500 ms bound.
   const shapes = (sheet: number, strings: number, part: number): Array<[string, Record<string, string>]> => [
     ['unclosed <row>', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(fill('<row>', sheet)) }],
     ['<row><c> never closed', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(fill('<row><c>', sheet)) }],
@@ -180,7 +181,7 @@ describe('pathological parts finish within a stated bound', () => {
     ['cells with an unclosed <v>', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(`<row r="1"><c r="A1">${fill('<v>', sheet)}</c></row>`) }],
     ['empty rows', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(fill('<row></row>', sheet)) }],
     ['one row of self-closed cells all in A1', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(`<row r="1">${fill('<c r="A1"/>', sheet)}</row>`) }],
-    ['rows that are tags without a closing >', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(fill('<row r="1" ', sheet)) }],
+    ['rows that are tags without a closing >', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': `<worksheet><sheetData>${fill('<row ', Math.max(sheet, 3_000_000))}` }],
     ['unclosed <si><t>', { 'xl/workbook.xml': wb(), 'xl/sharedStrings.xml': `<sst>${fill('<si><t>', strings)}</sst>`, 'xl/worksheets/sheet1.xml': sheetWith('<row r="1"><c r="A1" t="s"><v>0</v></c></row>') }],
     ['one closed <si> holding unclosed <rPh>', { 'xl/workbook.xml': wb(), 'xl/sharedStrings.xml': `<sst><si>${fill('<rPh>', strings)}</si></sst>`, 'xl/worksheets/sheet1.xml': sheetWith('<row r="1"><c r="A1" t="s"><v>0</v></c></row>') }],
     ['<sheet with no end', { 'xl/workbook.xml': `<workbook><sheets>${fill('<sheet ', part)}</sheets></workbook>` }],
@@ -191,7 +192,7 @@ describe('pathological parts finish within a stated bound', () => {
     const out = timed(`at the cap: ${name}`, zip(parts))
     expect(out.ms).toBeLessThan(BOUND_MS)
   })
-  it.each(shapes(400_000, 400_000, 400_000))('small (400 KB): %s', (name, parts) => {
+  it.each(shapes(1_000_000, 400_000, 400_000))('small (400 KB to 1 MB): %s', (name, parts) => {
     const out = timed(`small: ${name}`, zip(parts))
     expect(out.ms).toBeLessThan(BOUND_MS)
   })

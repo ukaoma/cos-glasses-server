@@ -329,7 +329,7 @@ describe('publicAddress closes NAT64 and the IPv4-compatible form', () => {
     expect(W.publicAddress(`[${addr}]`), addr).toBe(false)
     expect(W.pastedPublicUrls(`read http://[${addr}]/x`).urls, addr).toEqual([])
   })
-  it.each(['2606:4700:4700::1111', '2001:4860:4860::8888', '2a00:1450:4001:81b::200e', '2620:fe::fe'])('keeps the public address [%s]', (addr) => {
+  it.each(['2606:4700:4700::1111', '2001:4860:4860::8888', '2a00:1450:4001:81b::200e', '2620:fe::fe', '2606:4700:4700:0:0:0:8.8.8.8'])('keeps the public address [%s]', (addr) => {
     expect(W.publicAddress(addr)).toBe(true)
     expect(W.pastedPublicUrls(`read https://[${addr}]/x`).urls).toHaveLength(1)
   })
@@ -392,13 +392,20 @@ describe('pasted files never crowd out or repeat what is already in the answer',
     expect(prompt).not.toContain('PASTEB')                                                          // what was left of the budget went to the first paste only
   })
   it('a read page that is already a W source in this answer is not repeated as a web_ file', async () => {
-    const f = fixture([answer('Approved. [W1]'), answer('Again. [W1]')])
+    const f = fixture([answer('Approved. [W1]'), answer('Again. [W1]'), answer('Third. [W1]')])
     await ask(f, `This is the article: ${ARTICLE}`)
     const webFile = f.store.files('meeting_test').find(x => x.id.startsWith('web_'))!
     expect(webFile).toBeTruthy()
     await ask(f, 'What does the article say about the winning bidder?', { files: [{ id: webFile.id, revision: webFile.revision }] })
     const prompt = f.run.mock.calls[1][1] as string
     expect(prompt.split('Quartz Basin Marine').length - 1).toBe(1)                                  // once, as the W source
+    // A web_ file for a DIFFERENT page stays beside the read page.
+    const other = { id: 'web_fedcba9876543210', revision: 'r1', name: 'Other story', status: 'ready' as const, text: 'https://other.example.org/story\n\nOTHERPAGEMARK words' }
+    f.store.putFiles('meeting_test', [other])
+    await ask(f, 'What does the article say about the winning bidder?', { files: [{ id: webFile.id, revision: webFile.revision }, { id: other.id, revision: other.revision }] })
+    const prompt3 = f.run.mock.calls[2]?.[1] as string | undefined
+    expect(prompt3 ?? '').toContain('OTHERPAGEMARK')
+    expect(((prompt3 ?? '').split('Quartz Basin Marine').length - 1)).toBe(1)
     // With no read page in the answer, the web_ file is ordinary context and stays.
     const f2 = fixture()
     f2.store.putFiles('meeting_test', [webFile])
@@ -414,9 +421,10 @@ describe('transcript cleanup does not learn vocabulary from pasted text or pages
     const sessionId = 'meeting_cleanup_ids'
     store.putFiles(sessionId, [
       { id: 'file_dropped0001', revision: '1', name: 'Agenda', status: 'ready', text: 'Agenda for the quarterly review' },
+      { id: 'paste_my_own_notes', revision: '1', name: 'My notes', status: 'ready', text: 'A file the user dropped, whose name only looks like ours' },
       { id: 'paste_0123456789abcdef', revision: '1', name: 'Pasted text 11:49', status: 'ready', text: 'Dredging contract article words' },
       { id: 'web_0123456789abcdef', revision: '1', name: 'Harbor story', status: 'ready', text: 'https://apnews.com/x\n\nQuartz Basin Marine' },
     ])
-    expect(await defaultCleanupDeps().files(sessionId)).toEqual([{ name: 'Agenda', text: 'Agenda for the quarterly review' }])
+    expect(await defaultCleanupDeps().files(sessionId)).toEqual([{ name: 'Agenda', text: 'Agenda for the quarterly review' }, { name: 'My notes', text: 'A file the user dropped, whose name only looks like ours' }])
   })
 })
