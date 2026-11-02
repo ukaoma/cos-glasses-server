@@ -63,7 +63,7 @@ import { dataPath } from './data-dir.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { cueBefore, liveCueVerdicts, type LiveCueLogRow } from './live-cue-verdicts.js'
-import { repeatOf, wouldWithhold } from './live-cues-filter.js'
+import { leadRepeatOf, repeatOf, wouldWithhold } from './live-cues-filter.js'
 import { errMsg } from './utils.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
 import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
@@ -225,6 +225,11 @@ export function liveCuesV2RepeatOverlap(env: NodeJS.ProcessEnv = process.env): n
   if (raw === undefined || raw.trim() === '') return null
   const t = Number(raw)
   return t >= 0.3 && t <= 0.9 ? t : knobFallback<number | null>('COS_LIVE_CUES_V2_REPEAT_OVERLAP', raw, null, 'a number from 0.3 to 0.9 (the repeat rule stays off)')
+}
+/** 6.97.8: the four lens-tuning rules (lead repeat, pacing, open items, known names) are on unless their switch is exactly `0`.
+ *  A kill switch for the Mac, not a setting: an unset, empty or any other value leaves the rule on. */
+export function liveCuesV2Rule(name: 'LEAD_REPEAT' | 'PACING' | 'OPEN_ITEMS' | 'KNOWN_NAMES', env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env[`COS_LIVE_CUES_V2_${name}`] ?? '').trim() !== '0'
 }
 export function liveCuesV2Model(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.COS_LIVE_CUES_V2_MODEL ?? '').trim().toLowerCase()
@@ -1053,6 +1058,10 @@ export class LiveCuesV2Engine {
       const repeatT = liveCuesV2RepeatOverlap(this.deps.env)
       const repeat = repeatT === null ? null : repeatOf(cue.detail, s.cues, repeatT)
       if (repeat) { Object.assign(trace, { outcome: 'withheld_repeat', repeatOf: repeat.blocker, repeatOverlap: repeat.overlap }); return }
+      // 6.97.8 lead repeat, on unless COS_LIVE_CUES_V2_LEAD_REPEAT=0: a cue that opens by restating a recent shown cue's opening
+      // line (the whole-cue rule misses it when the evidence after the opener differs). Same outcome; repeatRule says which.
+      const lead = liveCuesV2Rule('LEAD_REPEAT', this.deps.env) ? leadRepeatOf(cue.detail, s.cues) : null
+      if (lead) { Object.assign(trace, { outcome: 'withheld_repeat', repeatRule: 'lead', repeatOf: lead.blocker, repeatOverlap: lead.overlap }); return }
       // 6.79.0: logged before it is held or emitted, so a rating that arrives at once finds it. Its own try/catch: a log
       // failure is traced on this evaluation and is never a writer failure or a step toward the breaker.
       try {

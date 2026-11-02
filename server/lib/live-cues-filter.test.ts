@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { CUE_FILTER_STOPWORDS, CUE_TEMPLATE_RE, cueOverlap, cueTokens, isTemplateCue, repeatOf, wouldWithhold } from './live-cues-filter.js'
+import { CUE_FILTER_STOPWORDS, CUE_TEMPLATE_RE, LEAD_REPEAT_RECENT, cueLead, cueOverlap, cueTokens, isTemplateCue, leadRepeatOf, repeatOf, wouldWithhold } from './live-cues-filter.js'
 
 // Vectors in the reference's format (cue_verdicts_mvp/v4_replay/filter_test_vectors.json). The committed set is synthetic,
 // with every expectation produced by the Python reference (filter_cues.py), because the real receipts hold meeting text and
@@ -94,5 +94,57 @@ describe('live cues filter (port of filter_cues.py)', () => {
       .toEqual({ perMeeting: true, perTopic: true, blockerCueId: 'q' })
     expect(isTemplateCue(n1.detail)).toBe(true)
     expect(isTemplateCue('Nothing to ask here.')).toBe(false)
+  })
+})
+
+describe('lead repeat (6.97.8)', () => {
+  const shown = (...details: string[]) => details.map((detail, i) => ({ cueId: `c${i + 1}`, detail }))
+
+  it('catches two cues that open with the same restated line and then add different evidence (the 12:30 and 12:31 shape, synthesized)', () => {
+    const earlier = shown('Leads handed you the budget. Before pushing kiosk keywords, check the April overlap that doubled cost per lead.')
+    const next = 'Leads say you pick the budget. The October review flagged close rates as the concern, so set that as the bar.'
+    expect(repeatOf(next, earlier, 0.5)).toBeNull()                               // the whole-cue rule cannot see it
+    expect(leadRepeatOf(next, earlier)).toEqual({ blocker: 'c1', overlap: 0.667 })
+  })
+
+  it('keeps cues that open differently, even with a shared noun', () => {
+    const earlier = shown('Leads handed you the budget. Check the April overlap.')
+    expect(leadRepeatOf('Pricing page lacks a cap. Name the number.', earlier)).toBeNull()
+    expect(leadRepeatOf('The budget slipped twice this quarter. Agree a date.', earlier)).toBeNull()
+  })
+
+  it('a different name or figure in the opener means two cues, not one', () => {
+    expect(leadRepeatOf('Roy joins the shared pool. Hold him to a target.', shown('Amit joins the shared pool. Hold him to a target.'))).toBeNull()
+    expect(leadRepeatOf('Referral spend is 15% above budget. Cut it.', shown('Referral spend is 12% above budget. Cut it.'))).toBeNull()
+    // the same opener with only lowercase words differing still matches
+    expect(leadRepeatOf('Referral spend runs 12% above budget. Cut it.', shown('Referral spend sits 12% above budget. Cut it.'))).not.toBeNull()
+  })
+
+  it('a short opener that sits inside a long one is not a repeat (shared words must be most of the larger opener)', () => {
+    const earlier = shown('Margin on kiosk hardware is thin. Check the quote.')
+    const long = 'Kiosk hardware margin is thin only because installation labor, shipping, warranty reserve and refurbishment all sit in the same line. Split them.'
+    expect(leadRepeatOf(long, earlier)).toBeNull()
+  })
+
+  it('openers under three scored tokens are never compared', () => {
+    expect(cueTokens(cueLead('Margin is thin. Check the quote.')).size).toBe(2)
+    expect(leadRepeatOf('Margin is thin. Check the quote.', shown('Margin is thin. Name the vendor.'))).toBeNull()
+    // one side of three scored tokens and one of two: still no comparison, in either order
+    expect(leadRepeatOf('Margin is thin on kiosks. Check the quote.', shown('Margin is thin. Name the vendor.'))).toBeNull()
+    expect(leadRepeatOf('Margin is thin. Check the quote.', shown('Margin is thin on kiosks. Name the vendor.'))).toBeNull()
+  })
+
+  it('compares only the most recent shown cues', () => {
+    const old = { cueId: 'old', detail: 'Leads handed you the budget. Check the April overlap.' }
+    const filler = Array.from({ length: LEAD_REPEAT_RECENT }, (_, i) => ({ cueId: `f${i}`, detail: `Filler number ${i} stands alone entirely. Different matter ${i}.` }))
+    const next = 'Leads say you pick the budget. Set the bar.'
+    expect(leadRepeatOf(next, [old, ...filler])).toBeNull()
+    expect(leadRepeatOf(next, [old, ...filler.slice(1)])).toEqual({ blocker: 'old', overlap: 0.667 })
+  })
+
+  it('cueLead takes the first sentence, or the whole text', () => {
+    expect(cueLead('Name the owner. Then the date.')).toBe('Name the owner.')
+    expect(cueLead('One line with no end')).toBe('One line with no end')
+    expect(cueLead('')).toBe('')
   })
 })

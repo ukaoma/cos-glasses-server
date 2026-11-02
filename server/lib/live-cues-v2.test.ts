@@ -18,6 +18,8 @@ const { LiveCuesV2Engine, LiveCuesV2Store, LIVE_CUES_V2_LIMITS: L, cueHeadline, 
 const { isLiveCueV2, CUE_HEADLINE_MAX, CUE_DETAIL_MAX } = contract
 type Deps = import('./live-cues-v2.js').LiveCuesV2Deps
 
+/** The 6.97.8 tuning rules, off by default in this file's engine tests; each has its own describe block below. */
+const OFF_RULES: NodeJS.ProcessEnv = { COS_LIVE_CUES_V2_LEAD_REPEAT: '0' }
 const words = (n: number, w = 'budget') => Array.from({ length: n }, () => w).join(' ')
 const sha = (v: unknown) => createHash('sha256').update(typeof v === 'string' && v.startsWith('FILE:') ? readFileSync(v.slice(5)) : JSON.stringify(v)).digest('hex')
 
@@ -256,7 +258,9 @@ describe('engine', () => {
       now: () => new Date(clock),
       store: new LiveCuesV2Store(join(dir, 'state.json'), () => new Date(clock)),
       trace: row => { traces.push(row) },
-      env,
+      // The older engine tests feed one fixed cue text over and over, which the 6.97.8 lead rule would rightly withhold: the
+      // rules run only where a test turns them on (its env sets the switch to anything but 0).
+      env: new Proxy(env, { get: (target, key: string) => (key in target ? target[key] : OFF_RULES[key]) }),
       ...over,
     }
     return new LiveCuesV2Engine(deps)
@@ -439,6 +443,34 @@ describe('engine', () => {
     const e = engine(); e.arm('meeting_a')
     for (let i = 0; i < 2; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
     expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue'])                    // overlap 0.8 < 0.9: shown
+  })
+
+  it('6.97.8: the lead repeat rule withholds a cue that restates a recent opener, with its own trace marker, and a switch of 0 turns it off', async () => {
+    const texts = ['Leads handed you the budget. Before pushing kiosk keywords, check the April overlap that doubled cost per lead.',
+      'Leads say you pick the budget. The October review flagged close rates as the concern, so set that as the bar.',
+      'Kiosk vendor review slipped twice; agree a new pilot date with procurement.']
+    const run = async (extra: NodeJS.ProcessEnv) => {
+      traces = []; emitted = []; clock = Date.parse('2026-10-14T15:00:00Z')
+      env = { COS_LIVE_CUES_V2: '1', ...extra }
+      let n = 0
+      writerText = async () => JSON.stringify({ cue: texts[n++], kind: 'challenge' })
+      const logged: string[] = []
+      const e = engine({ cueLog: row => { logged.push(row.cueId) } }); e.arm(`meeting_${extra.COS_LIVE_CUES_V2_LEAD_REPEAT}`)
+      for (let i = 0; i < 3; i++) { await e.feed(`meeting_${extra.COS_LIVE_CUES_V2_LEAD_REPEAT}`, words(L.minNewWords)); next() }
+      return { shown: emitted.filter(x => x.type === 'coaching_nudge_v2').map(x => x.data), logged, e, id: `meeting_${extra.COS_LIVE_CUES_V2_LEAD_REPEAT}` }
+    }
+    const on = await run({ COS_LIVE_CUES_V2_LEAD_REPEAT: '1' })
+    expect(on.shown.map(c => c.detail)).toEqual([texts[0], texts[2]])
+    expect(on.logged).toEqual(on.shown.map(c => c.cueId))                                 // withheld before it is logged or counted
+    const evals = evaluations()
+    expect(evals.map(t => t.outcome)).toEqual(['cue', 'withheld_repeat', 'cue'])
+    expect(evals[1]).toMatchObject({ repeatRule: 'lead', repeatOf: on.shown[0].cueId, repeatOverlap: 0.667 })
+    expect(JSON.stringify(evals[1])).not.toContain('Leads')                               // ids and the ratio, never text
+    expect(on.e.status(on.id).session?.cues).toHaveLength(2)
+    const off = await run({ COS_LIVE_CUES_V2_LEAD_REPEAT: '0' })
+    expect(off.shown.map(c => c.detail)).toEqual(texts)
+    for (const [raw, expected] of [[undefined, true], ['', true], ['1', true], ['on', true], ['0', false], [' 0 ', false]] as const)
+      expect(mod.liveCuesV2Rule('LEAD_REPEAT', raw === undefined ? {} : { COS_LIVE_CUES_V2_LEAD_REPEAT: raw }), String(raw)).toBe(expected)
   })
 
   it('6.79.0: an invalid COS_LIVE_CUES_V2_REPEAT_OVERLAP leaves the rule off with one log line per value', () => {
