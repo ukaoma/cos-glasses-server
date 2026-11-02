@@ -47,14 +47,21 @@ export const FIND_CACHE_ENTRIES = 200
  * category, "the editor", for a product, "Cursor", and no method found it). Its yes/no probability was 0.44 to 0.88; no row
  * above 0.6 was wrong (14 of 14 right). On the 7 queries with no answer, `none` was 0.87 to 1.00, so the abstain rule fired on
  * all 7; asked anyway, the yes/no round put the best of 12 at 0.08 to 0.28. Between 0.30 and 0.40 there were 0 right and 8 wrong rows and the lowest right answer was 0.44, so the floor is 0.40.
- * SUBQ is NOT measured on this path. Its numbers are the canary's small sample (right answers 0.75 to 1.00, a wrong top row at
- * 0.70) and the Choice alone, with the yes/no round off until it has been run against SubQ. They are a starting point.
+ * SUBQ, measured 2026-11-01 through the installed helper with the yes/no round on, no floor and no abstain (26 of the 27 queries ran, 507,240
+ * tokens; only 6 of the 7 no-answer queries ran). Its Choice probabilities sum to 1, so with the old floor of 0.5 at most one session
+ * usually showed; the fidelity of a list matters more than a tight cutoff, so the yes/no round is on, as for Jev. Positive queries: the right
+ * session was first in 18 of 20 and in the top five in 19 of 20 (Q09 is the known "the editor" means Cursor miss); the lowest right row was
+ * 0.493, and a 51-day-old answer was found at 0.961 by the full stage. Every top row at 0.9 or more was right (15 of 15). Wrong rows run high
+ * below a right top (up to 0.988) and one wrong top reached 0.812. On the no-answer queries the best row was 0.028, 0.138, none, 0.052, 0.5
+ * and 0.018. So: floor 0.2 is under the lowest right row by more than double and over 5 of those 6 bests; abstain is off (1.01, `none` can
+ * never reach it) because a wrong rule can hide a right session and the floor already says "nothing close"; strong is 0.9 because no top row
+ * at or over it was wrong; likely 0.6; the second request is skipped from 0.9; rerankMinRaw 0.005 keeps nearly every candidate in the yes/no round.
  */
 export interface FindTuning { rerank: boolean; abstainNone: number; floor: number; likely: number; strong: number; skipSecondAt: number; rerankMinRaw: number }
 export const FIND_TUNING: Record<DecisionProvider, FindTuning> = {
   jev: { rerank: true, abstainNone: 0.8, floor: 0.4, likely: 0.45, strong: 0.6, skipSecondAt: 0.6, rerankMinRaw: 0.02 },
-  // SubQ: Choice only and a cautious abstain (its none was 0.50 to 0.97 on the canary's no-answer queries). To turn its yes/no round on, set rerank: true.
-  subq: { rerank: false, abstainNone: 0.5, floor: 0.5, likely: 0.7, strong: 0.9, skipSecondAt: 0.9, rerankMinRaw: 0.02 },
+  // SubQ, measured 2026-11-01 (see above): yes/no round on, no abstain, floor 0.2.
+  subq: { rerank: true, abstainNone: 1.01, floor: 0.2, likely: 0.6, strong: 0.9, skipSecondAt: 0.9, rerankMinRaw: 0.005 },
 }
 
 export const FIND_CHOICE_INSTRUCTIONS = 'The user typed `query` into the search box for their past AI coding and chat sessions (Claude Code, Codex and Cursor). '
