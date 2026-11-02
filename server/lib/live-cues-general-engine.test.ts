@@ -260,6 +260,48 @@ describe('general cues in the engine', () => {
       clock += 301_000
       expect(await r.tick()).toMatchObject({ outcome: 'cue', sessionId: MAC })
     })
+    it('cue mode general with Public topics on: the Mac meeting\'s focused cues are off', async () => {
+      s.mode = 'general'; s.publicTopics = true
+      const e = engine()
+      e.arm(MAC)
+      await feed(e, MAC)
+      expect(focused()).toEqual([])
+      expect(focusedGates).toBe(0)
+    })
+    it('cue mode general with Public topics OFF: the Mac meeting keeps its focused cues, and the status says needs_public_topics', async () => {
+      s.mode = 'general'; s.publicTopics = false
+      const e = engine()
+      e.arm(MAC)
+      await feed(e, MAC)
+      expect(focused().length).toBeGreaterThan(0)
+      expect(e.status(MAC).session!.general).toEqual({ state: 'needs_public_topics', reason: 'public_topics_off', cues: 0, attempts: 0 })
+      expect(g.trigger).toBe(0)
+    })
+    it('cue mode general with the consent unreadable or missing counts as off: focused cues stay on', async () => {
+      for (const consent of ['throws', 'absent'] as const) {
+        emitted = []
+        s.mode = 'general'; s.publicTopics = consent
+        const e = engine()
+        e.arm(MAC)
+        await feed(e, MAC)
+        expect(focused().length, consent).toBeGreaterThan(0)
+      }
+    })
+    it('the consent is read at every feed: turning it off in general mode brings the focused cues back, turning it on switches them off again', async () => {
+      s.mode = 'general'; s.publicTopics = true
+      const e = engine()
+      e.arm(MAC)
+      await feed(e, MAC, 1)
+      expect(focused()).toEqual([])
+      s.publicTopics = false
+      clock += 60_000
+      await feed(e, MAC, 1)
+      expect(focused()).toHaveLength(1)
+      s.publicTopics = true
+      clock += 120_000
+      await feed(e, MAC, 1)
+      expect(focused()).toHaveLength(1)
+    })
     it('cue mode all runs both on a Mac meeting; focused runs the focused cues only', async () => {
       const both = engine()
       expect(await insightAttempt(both)).toMatchObject({ outcome: 'cue' })

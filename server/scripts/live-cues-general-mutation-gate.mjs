@@ -38,21 +38,28 @@ const WEB = 'server/lib/meeting-ask-web.ts', ENGINE = 'server/lib/live-cues-v2.t
 // `by`: the killing test's full name must contain this (case-insensitive), so a mutant is killed by a test that names its behaviour.
 const m = (name, file, edits, tests, by) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests, by })
 
-// The six category lists in the sensitive-window vocabulary, each replaced by a list that matches nothing.
+// The window list (WINDOW_TERMS) and the deny extras (DENY_EXTRA_TERMS) are read from the source. Every window term is taken out on
+// its own: the test that has that term in its name must fail. Each broad extras list is emptied whole, a category at a time. Each
+// word the review measured as ordinary work talk is put back into the window list, one at a time: the "does NOT skip" test must fail.
 const topicSource = readFileSync(join(root, TOPIC), 'utf8')
-const categoryMutants = ['health', 'family', 'finance', 'legal', 'school', 'funeral'].map(cat => {
-  const line = new RegExp(`  \\['${cat}', wordsRe\\(\\[[^\\n]*?\\]\\)\\],?\\n(?=  \\[|\\]\\))`, 's').exec(topicSource)
-  const block = new RegExp(`  \\['${cat}', wordsRe\\(\\[(?:[^\\]]|\\n)*?\\]\\)\\],\\n`).exec(topicSource)
-  const found = block?.[0] ?? line?.[0]
-  if (!found) throw new Error(`Cannot find the ${cat} vocabulary in ${TOPIC}`)
-  return m(`sensitive-category-${cat}`, TOPIC, [found, `  ['${cat}', wordsRe(['qqqneverqqq'])],\n`], TOPIC_T, `skips a ${cat} window`)
+const topicTest = readFileSync(join(root, 'server/lib/live-cues-general-topic.test.ts'), 'utf8')
+const windowTerms = [...topicTest.matchAll(/\['(?:health|family|finance|legal|school|funeral)', '((?:[^'\\]|\\.)*)', '/g)].map(x => x[1])
+if (windowTerms.length < 60) throw new Error(`Cannot read the window samples from the topic test (found ${windowTerms.length})`)
+const windowTermMutants = windowTerms.map((term, n) => m(`window-term-${n + 1}`, TOPIC, [`'${term}'`, "'qqqneverqqq'"], TOPIC_T, `(${term.replace(/\\\\/g, '\\')})`))
+const extrasBlock = topicSource.slice(topicSource.indexOf('const DENY_EXTRA_TERMS'), topicSource.indexOf('const WINDOW:'))
+const denyExtraMutants = ['health', 'family', 'finance', 'legal', 'school', 'funeral'].map(cat => {
+  const entry = new RegExp(`\n  ${cat}: \\[(?:[^\\]]|\n)*?\\],?\n`).exec(extrasBlock)?.[0]
+  if (!entry) throw new Error(`Cannot find the ${cat} deny extras in ${TOPIC}`)
+  const edits = [[extrasBlock.slice(0, extrasBlock.indexOf(entry) + entry.length), extrasBlock.slice(0, extrasBlock.indexOf(entry)) + `\n  ${cat}: [],\n`]]
+  return m(`deny-extras-${cat}`, TOPIC, edits, TOPIC_T, `deny: broad ${cat} words`)
 })
-
-
-// Each stem of the widened sensitive vocabulary, taken out on its own: the test with that stem in its name must fail.
-const WIDENED_STEMS = ['chemo*', 'ob gyn', 'c section', 'adhd', 'psychiatr*', 'psycholog*', 'pediatric*', 'hospice', 'pharmac*', 'autis*', 'irs', 'installment*', 'escrow', 'credit score',
-  'pension*', 'insurance', 'husband*', 'wives', 'moms', 'parent*', 'grandma*', 'aunt*', 'uncle*', 'cousin*', 'nephew*', 'niece*', 'dnp', 'dissertation*', 'nursery', 'die', 'dies', 'died', 'dying']
-const stemMutants = WIDENED_STEMS.map(stem => m(`vocab-${stem.replace(/[^a-z]+/g, '-')}`, TOPIC, [`'${stem}',`, ''], TOPIC_T, `(${stem})`))
+const workWordMutants = [
+  ['court', 'legal', "legal: ['lawsuits?', ", "legal: ['court', 'lawsuits?', "], ['sick', 'health', "health: ['doctors?', ", "health: ['sick', 'doctors?', "], ['baby', 'family', "family: ['wife', ", "family: ['baby', 'wife', "],
+  ['finance', 'finance', "finance: ['irs', ", "finance: ['finance', 'irs', "], ['financial', 'finance', "finance: ['irs', ", "finance: ['financ*', 'irs', "], ['taxes', 'finance', "finance: ['irs', ", "finance: ['taxes', 'irs', "],
+  ['tax', 'finance', "finance: ['irs', ", "finance: ['tax', 'irs', "], ['health', 'health', "health: ['doctors?', ", "health: ['health', 'doctors?', "], ['healthy', 'health', "health: ['doctors?', ", "health: ['health*', 'doctors?', "],
+  ['medical', 'health', "health: ['doctors?', ", "health: ['medical', 'doctors?', "], ['school', 'school', "school: ['daycare*', ", "school: ['school', 'daycare*', "], ['family', 'family', "family: ['wife', ", "family: ['family', 'wife', "],
+  ['die', 'funeral', "funeral: ['died', ", "funeral: ['die', 'died', "], ['dies', 'funeral', "funeral: ['died', ", "funeral: ['dies', 'died', "],
+].map(([word, _cat, find, replace]) => m(`window-adds-${word}`, TOPIC, [find, replace], TOPIC_T, 'window: does NOT skip ordinary work talk'))
 // And each of the number words the review named.
 const NUMBER_WORDS = ['zero', 'hundreds', 'thousands', 'millions', 'billions', 'dozen', 'half', 'first', 'third', 'fifth', 'tenth']
 const numberMutants = NUMBER_WORDS.map(word => m(`number-${word}`, TOPIC, [`'${word}',`, ''], TOPIC_T, 'ordinals, plurals of the big numbers'))
@@ -97,9 +104,17 @@ const mutations = [
     ["    const trigger = await raceAbort(this.deps.jevTrigger(c.title, window, signal), signal)\n", "    const sensitive = sensitiveWindow(window)\n    const trigger = await raceAbort(this.deps.jevTrigger(c.title, window, signal), signal)\n    if (sensitive) { rec.last = { state: 'withheld', reason: 'sensitive_window' }; return this.done(row, 'no_cue', `sensitive:${sensitive}`) }\n"]], RUN_T, 'sensitive window'),
   m('window-redacted', RUN, ['const window = redactSecrets(c.window(LIVE_CUES_GENERAL_LIMITS.topicWindowChars))', 'const window = c.window(LIVE_CUES_GENERAL_LIMITS.topicWindowChars)'], RUN_T, 'redacted'),
   m('window-three-minutes', RUN, ['topicWindowChars: 2_700', 'topicWindowChars: 6_000'], RUN_T, 'last 2,700 characters'),
+  ...windowTermMutants,
+  ...denyExtraMutants,
+  ...workWordMutants,
+  m('window-list-read', TOPIC, ['for (const [category, re] of WINDOW) if (re.test(t)) return category', 'void WINDOW'], TOPIC_T, 'window: skips a'),
+  m('admit-deny-list', TOPIC, ["if (denyWordHit(folded)) return { ok: false, reason: 'deny_word' }", ''], TOPIC_T, 'deny-list word'),
+  m('deny-private-words', TOPIC, ['return PRIVATE_QUERY.test(spelled) || DENY_ALL.test(spelled)', 'return DENY_ALL.test(spelled)'], TOPIC_T, 'deny-list word'),
+  m('deny-sensitive-words', TOPIC, ['return PRIVATE_QUERY.test(spelled) || DENY_ALL.test(spelled)', 'return PRIVATE_QUERY.test(spelled)'], TOPIC_T, 'deny-list word'),
+  m('deny-reads-normalized', TOPIC, ['export function denyWordHit(text: string): boolean {\n  const folded = normalizeForMatch(text)', 'export function denyWordHit(text: string): boolean {\n  const folded = text'], TOPIC_T, 'denyWordHit reads the normalized text'),
+  m('deny-spells-out-short-runs', TOPIC, ['const spelled = `${folded} ${collapseShortRuns(folded)}`', 'const spelled = folded'], TOPIC_T, 'spelled out in one- and two-letter pieces'),
+  m('deny-short-run-letters', TOPIC, ['/^\\p{L}{1,2}$/u.test(token)', '/^\\p{L}{1}$/u.test(token)'], TOPIC_T, 'spelled out in one- and two-letter pieces'),
   m('sensitive-whole-words', TOPIC, ['`\\\\b(?:${words.map', '`(?:${words.map'], TOPIC_T, 'look-alike'),
-  m('sensitive-category-loop', TOPIC, ['for (const [category, re] of SENSITIVE) if (re.test(t)) return category', 'void SENSITIVE'], TOPIC_T, 'skips a'),
-  ...categoryMutants,
   // ── Trigger ──
   m('trigger-threshold', RUN, ['if (!(trigger.pGeneral >= lim.trigger))', 'if (false)'], RUN_T, 'below the threshold'),
   m('trigger-threshold-edge', RUN, ['trigger.pGeneral >= lim.trigger', 'trigger.pGeneral > lim.trigger'], RUN_T, 'at the threshold'),
@@ -130,9 +145,6 @@ const mutations = [
   m('admit-characters', TOPIC, ["if (!QUERY_CHARS.test(query)) return { ok: false, reason: 'characters' }", ''], TOPIC_T, 'operators, quotes and urls'),
   m('admit-url', TOPIC, ["if (URLISH.test(folded)) return { ok: false, reason: 'url' }", ''], TOPIC_T, 'operators, quotes and urls'),
   m('admit-secret', TOPIC, ["if (query !== redactSecrets(query)) return { ok: false, reason: 'secret' }", ''], TOPIC_T, 'rejects a secret'),
-  m('admit-deny-list', TOPIC, ['if (PRIVATE_QUERY.test(folded) || SENSITIVE_ALL.test(folded))', 'if (false)'], TOPIC_T, 'deny-list word'),
-  m('admit-deny-list-ask-words', TOPIC, ['if (PRIVATE_QUERY.test(folded) || SENSITIVE_ALL.test(folded))', 'if (SENSITIVE_ALL.test(folded))'], TOPIC_T, 'deny-list word'),
-  m('admit-deny-list-private-life', TOPIC, ['if (PRIVATE_QUERY.test(folded) || SENSITIVE_ALL.test(folded))', 'if (PRIVATE_QUERY.test(folded))'], TOPIC_T, 'deny-list word'),
   m('admit-name', TOPIC, ["if (words.some(w => ctx.nameWords.has(w) || ctx.nameWords.has(stemWord(w)))) return { ok: false, reason: 'name' }", ''], TOPIC_T, 'name word'),
   m('admit-name-plural', TOPIC, ['ctx.nameWords.has(w) || ctx.nameWords.has(stemWord(w))', 'ctx.nameWords.has(w)'], TOPIC_T, 'name word'),
   m('admit-repeat', TOPIC, ["if (ctx.recent.has(normalized)) return { ok: false, reason: 'repeat' }", ''], TOPIC_T, 'repeat'),
@@ -323,6 +335,11 @@ const mutations = [
   m('reader-limits-resolved-with-env', ENGINE, ['const r = resolveLiveCuesGeneralLimits(this.deps.env, this.deps.settings)\n        return { intervalSeconds', 'const r = resolveLiveCuesGeneralLimits({}, this.deps.settings)\n        return { intervalSeconds'], ENGINE_T, 'locks a limit in the reader'),
   m('reader-consent-exact', ENGINE, ['return this.deps.publicTopics?.() === true }', 'return this.deps.publicTopics?.() !== false }'], ENGINE_T, 'unreadable or missing reads as off'),
   m('reader-consent-unreadable-is-off', ENGINE, ['return this.deps.publicTopics?.() === true } catch { return false } }', 'return this.deps.publicTopics?.() === true } catch { return true } }'], ENGINE_T, 'unreadable or missing reads as off'),
+  m('reader-consent-from-engine-reader', ENGINE, ['publicTopics: () => this.publicTopicsOn(),', 'publicTopics: () => true,'], ENGINE_T, 'with Public topics OFF'),
+  m('mode-general-needs-consent', ENGINE, ["this.cueMode() === 'general' && this.publicTopicsOn() }", "this.cueMode() === 'general' }"], ENGINE_T, 'with Public topics OFF'),
+  m('mode-general-consent-unreadable-is-off', ENGINE, ['=== true } catch { return false } }', '=== true } catch { return true } }'], ENGINE_T, 'consent unreadable or missing counts as off'),
+  m('mode-general-consent-absent-is-off', ENGINE, ['return this.deps.publicTopics?.() === true }', 'return this.deps.publicTopics?.() !== false }'], ENGINE_T, 'consent unreadable or missing counts as off'),
+  m('mode-general-consent-read-per-feed', ENGINE, ['private publicTopicsOn(): boolean { try { return this.deps.publicTopics?.() === true }', 'private publicTopicsOn(): boolean { try { return (this as unknown as { c?: boolean }).c ??= this.deps.publicTopics?.() === true }'], ENGINE_T, 'read at every feed'),
   m('reader-home-unreadable-is-null', ENGINE, ['return this.deps.homeArea?.() ?? null } catch { return null } }', "return this.deps.homeArea?.() ?? null } catch { return 'Austin, TX' } }"], ENGINE_T, 'throw read as null and off'),
   // ── The insight emit path ──
   m('emit-extended-only', ENGINE, ["if (!s || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false", 'if (!s || this.deps.store.isEnded(sessionId)) return false'], ENGINE_T, 'emit refuses a legacy meeting'),
@@ -346,9 +363,9 @@ const mutations = [
   m('emit-trips-focused-breaker', ENGINE, ['    s.insights.push(cue)\n    this.deps.emit', '    s.insights.push(cue); s.failures = 3; s.breaker = true\n    this.deps.emit'], ENGINE_T, 'still allowed right after an insight'),
   // ── Cue mode and the focused cues ──
   m('mode-general-focused-off', ENGINE, ['    if (this.focusedOff(s)) return ', '    if (false) return '], ENGINE_T, 'cue mode general: a Mac meeting gets insights only'),
-  m('mode-general-only-mac', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return this.cueMode() === 'general' }"], ENGINE_T, 'a G2 meeting keeps its focused cues'),
-  m('mode-general-only-in-general', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return s.kinds === 'extended' }"], ENGINE_T, 'yields focused cues and an insight'),
-  m('mode-all-keeps-focused', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return s.kinds === 'extended' && this.cueMode() !== 'focused' }"], ENGINE_T, 'cue mode all runs both'),
+  m('mode-general-only-mac', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' && this.publicTopicsOn() }", "return this.cueMode() === 'general' }"], ENGINE_T, 'a G2 meeting keeps its focused cues'),
+  m('mode-general-only-in-general', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' && this.publicTopicsOn() }", "return s.kinds === 'extended' }"], ENGINE_T, 'yields focused cues and an insight'),
+  m('mode-all-keeps-focused', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' && this.publicTopicsOn() }", "return s.kinds === 'extended' && this.cueMode() !== 'focused' }"], ENGINE_T, 'cue mode all runs both'),
   // ── Status ──
   m('status-general-field', ENGINE, ['      ...(general ? { general } : {}),\n', ''], ENGINE_T, 'shows the general state off'),
   m('status-general-read', ENGINE, ['general = this.general?.status(sessionId) ?? null', 'general = null'], ENGINE_T, 'shows the general state off'),
@@ -382,7 +399,6 @@ const mutations = [
   m('real-consent', ENGINE, ['publicTopics: () => new MeetingAskStore().publicTopics(),', 'publicTopics: () => true,'], ENGINE_T, 'keep their state in the data home'),
   m('real-home-area', ENGINE, ['homeArea: () => getOwnerHomeArea(),', "homeArea: () => 'Austin, TX',"], ENGINE_T, 'keep their state in the data home'),
   // ── Round 2 (review): names, wider lists, normalization ──
-  ...stemMutants,
   ...numberMutants,
   m('norm-fold-accents', TOPIC, [".normalize('NFKD').replace(/\\p{M}/gu, '')\n    .replace(/\\b(?:", "\n    .replace(/\\b(?:"], TOPIC_T, 'reads the window normalized'),
   m('norm-acronym-dots', TOPIC, ["    .replace(/\\b(?:\\p{L}\\.){2,}\\p{L}?/gu, m => m.replace(/\\./g, ''))\n", ''], TOPIC_T, 'reads the window normalized'),
@@ -390,7 +406,6 @@ const mutations = [
   m('sensitive-reads-normalized', TOPIC, ['const t = normalizeForMatch(text)', 'const t = text'], TOPIC_T, 'reads the window normalized'),
   m('admit-nfkc', TOPIC, ["const query = raw.normalize('NFKC').replace(/\\s+/g, ' ').trim()", "const query = raw.replace(/\\s+/g, ' ').trim()"], TOPIC_T, 'reads the query after NFKC'),
   m('admit-latin-only', TOPIC, ["/^[\\p{Script=Latin}\\p{M}][\\p{Script=Latin}\\p{M}'’.&\\- ]*$/u", "/^[\\p{L}\\p{M}][\\p{L}\\p{M}'’.&\\- ]*$/u"], TOPIC_T, 'allows Latin script only'),
-  m('admit-deny-reads-normalized', TOPIC, ['SENSITIVE_ALL.test(folded)) return', 'SENSITIVE_ALL.test(query)) return'], TOPIC_T, 'reads the deny list on the normalized query'),
   m('admit-owner-join', TOPIC, ["  if (ctx.joins.some(j => grams.has(stemWord(j)))) return { ok: false, reason: 'owner_term' }\n", ''], TOPIC_T, 'written without its spaces'),
   m('admit-owner-join-pairs', TOPIC, ['for (let n = 1; n <= 2; n++)', 'for (let n = 1; n <= 1; n++)'], TOPIC_T, 'written without its spaces'),
   m('admit-owner-join-single-words', TOPIC, ['for (let n = 1; n <= 2; n++)', 'for (let n = 2; n <= 2; n++)'], TOPIC_T, 'written without its spaces'),

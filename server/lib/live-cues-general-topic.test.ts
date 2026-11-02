@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  HASHABLE_REJECTIONS, admitCueTopic, blockedNameWords, cachedNames, isGenericSpeakerLabel, normalizeForMatch, normalizeQuery, ownerTermJoins, ownerTermPhrases, queryHash,
+  HASHABLE_REJECTIONS, admitCueTopic, blockedNameWords, denyWordHit, cachedNames, isGenericSpeakerLabel, normalizeForMatch, normalizeQuery, ownerTermJoins, ownerTermPhrases, queryHash,
   sensitiveWindow, withHomeArea, type AdmitContext, type ProfileNameSource,
 } from './live-cues-general-topic.js'
 
@@ -16,38 +16,59 @@ const PROFILE: ProfileNameSource = {
 const NO_NAMES: AdmitContext = { nameWords: new Set(), terms: [], joins: [], recent: new Set() }
 const ctx = (over: Partial<AdmitContext> = {}): AdmitContext => ({ ...NO_NAMES, ...over })
 
-describe('sensitive window', () => {
-  it.each([
-    ['health', 'she said her doctor wants the surgery done before the summer'],
-    ['health', 'the clinic called about the prescription'],
-    ['family', 'my wife and the kids are away this weekend'],
-    ['family', 'his mother is turning seventy and we are planning the birthday'],
-    ['finance', 'we still owe the IRS and the mortgage is due'],
-    ['finance', 'what is the tax situation with the payroll'],
-    ['finance', 'rolling over the 401k before retirement'],
-    ['legal', 'the lawsuit settlement is with the attorney now'],
-    ['school', 'the daycare called and tuition is due'],
-    ['school', 'he forgot his homework at school again'],
-    ['funeral', 'the funeral is on Friday and the obituary ran today'],
-    ['funeral', 'she passed away on Tuesday'],
-  ] as const)('skips a %s window: %s', (category, text) => {
+/** One term each: [category, the term as it is written in WINDOW_TERMS, a sample with that term and nothing else clearly personal].
+ *  The mutation gate takes the term out and the test with it in its name must fail. */
+const WINDOW_SAMPLES = [
+  ['health', 'doctors?', 'her doctor called'], ['health', 'hospitals?', 'at the hospital today'], ['health', 'clinics?', 'the clinic opens early'],
+  ['health', 'diagnos*', 'the diagnosis came back'], ['health', 'chemo*', 'she started chemo'], ['health', 'cancer', 'a cancer screening'],
+  ['health', 'surger(?:y|ies)', 'after the surgery'], ['health', 'therapists?', 'her therapist said so'], ['health', 'therapy', 'weekly therapy sessions'],
+  ['health', 'psychiatr*', 'the psychiatrist agrees'], ['health', 'psycholog*', 'the psychologist agrees'], ['health', 'prescription*', 'a prescription refill'],
+  ['health', 'pregnan*', 'she is pregnant'], ['health', 'icu', 'he is in the ICU'], ['health', 'intensive care', 'moved to intensive care'],
+  ['health', 'emergency room', 'waited in the emergency room'], ['health', 'er visit', 'an ER visit last night'], ['health', 'urgent care', 'a trip to urgent care'],
+  ['health', 'ob gyn', 'the OB-GYN moved it'], ['health', 'obgyn', 'the obgyn called'], ['health', 'c section', 'after the C-section'], ['health', 'csection', 'after the csection'],
+  ['health', 'adhd', 'ADHD at work'], ['health', 'autis*', 'autism screening'], ['health', 'hospice', 'the hospice called'],
+  ['family', 'wife', 'my wife called'], ['family', 'wives', 'their wives came'], ['family', 'husbands?', 'her husband came'], ['family', 'spouses?', 'each spouse agrees'],
+  ['family', 'kids?', 'the kids are loud'], ['family', 'moms?', 'my mom called'], ['family', 'mommy', 'mommy time'], ['family', 'dads?', 'my dad called'],
+  ['family', 'daddy', 'daddy duty'], ['family', 'sons?', 'his son plays'], ['family', 'daughters?', 'her daughter plays'], ['family', 'brothers?', 'my brother called'],
+  ['family', 'sisters?', 'my sister called'], ['family', 'parents', 'his parents are in town'], ['family', 'step ?(?:son|daughter|mom|dad|kid\\w*)', 'her stepdaughter plays'],
+  ['family', 'grandma*', 'my grandma came'], ['family', 'grandpa*', 'my grandpa came'], ['family', 'grandmother*', 'my grandmother came'],
+  ['family', 'grandfather*', 'my grandfather came'], ['family', 'grandchild*', 'a grandchild came'],
+  ['family', 'grandson*', 'a grandson came'], ['family', 'granddaughter*', 'a granddaughter came'], ['family', 'grandkid*', 'a grandkid came'],
+  ['family', 'nephews?', 'her nephew visits'], ['family', 'nieces?', 'her niece visits'],
+  ['finance', 'irs', 'the I.R.S. called'], ['finance', 'tax bills?', 'a big tax bill'], ['finance', 'tax returns?', 'the tax return is due'], ['finance', 'back taxes', 'owes back taxes'],
+  ['finance', 'income tax(?:es)?', 'income tax is due'], ['finance', 'property tax(?:es)?', 'property taxes went up'], ['finance', 'debts?', 'too much debt'],
+  ['finance', 'loans?', 'a car loan'], ['finance', 'mortgages?', 'the mortgage rate'], ['finance', 'bankrupt*', 'they went bankrupt'], ['finance', 'credit score', 'his credit score'],
+  ['finance', 'installment*', 'an installment plan'], ['finance', 'escrow', 'the escrow account'], ['finance', 'pensions?', 'his pension'], ['finance', 'roth', 'a roth account'],
+  ['finance', 'ira', 'an IRA account'], ['finance', 'rollover', 'a rollover from work'], ['finance', 'k 1', 'a K-1 form'], ['finance', 'alimony', 'pays alimony'],
+  ['finance', 'child support', 'owes child support'],
+  ['legal', 'lawsuits?', 'a lawsuit was filed'], ['legal', 'sued', 'they sued us'], ['legal', 'attorneys?', 'the attorney called'], ['legal', 'lawyers?', 'our lawyer called'],
+  ['legal', 'custody', 'shared custody'], ['legal', 'divorce*', 'the divorce is final'], ['legal', 'court dates?', 'a court date next week'], ['legal', 'court hearings?', 'a court hearing today'],
+  ['school', 'daycare*', 'the daycare called'], ['school', 'preschool*', 'the preschool opens'], ['school', 'kindergarten*', 'she starts kindergarten'],
+  ['school', 'school pick ?up', 'school pickup is at three'], ['school', 'report cards?', 'the report card came'], ['school', 'tuition', 'tuition is due'],
+  ['school', 'parent teacher', 'a parent-teacher night'], ['school', 'dnp', 'the DNP program'], ['school', 'dissertation*', 'the dissertation is due'],
+  ['funeral', 'died', 'the plant died'], ['funeral', 'deaths?', 'after the death of a friend'], ['funeral', 'funeral*', 'the funeral is Friday'],
+  ['funeral', 'passed away', 'he passed away'], ['funeral', 'dying', 'the plant is dying'],
+] as const
+
+describe('sensitive window (clearly personal only)', () => {
+  it.each(WINDOW_SAMPLES)('window: skips a %s window (%s): %s', (category, _term, text) => {
     expect(sensitiveWindow(text)).toBe(category)
   })
-  /** One trigger word each, so the gate can take a stem out and see this test fail. */
-  const WIDENED = [
-    ['health', 'chemo*', 'she started chemo last week'], ['health', 'ob gyn', 'the OB-GYN moved it'], ['health', 'c section', 'after the C-section she rested'],
-    ['health', 'adhd', 'ADHD at work'], ['health', 'psychiatr*', 'the psychiatrist agrees'], ['health', 'psycholog*', 'the psychologist agrees'],
-    ['health', 'pediatric*', 'a pediatric ward'], ['health', 'hospice', 'the hospice called'], ['health', 'pharmac*', 'the pharmacy called'], ['health', 'autis*', 'autism screening'],
-    ['finance', 'irs', 'the I.R.S. called'], ['finance', 'installment*', 'an installment plan'], ['finance', 'escrow', 'the escrow account'],
-    ['finance', 'credit score', 'his credit score'], ['finance', 'pension*', 'his pension'], ['finance', 'insurance', 'the insurance claim'],
-    ['family', 'husband*', 'both husbands came along'], ['family', 'wives', 'their wives came'], ['family', 'moms', 'the moms organized it'], ['family', 'parent*', 'his parents are in town'],
-    ['family', 'grandma*', 'my grandma came'], ['family', 'aunt*', 'an aunt came'], ['family', 'uncle*', 'his uncle came'], ['family', 'cousin*', 'the cousins came'],
-    ['family', 'nephew*', 'her nephew visits'], ['family', 'niece*', 'her niece visits'],
-    ['school', 'dnp', 'the DNP program'], ['school', 'dissertation*', 'the dissertation is due'], ['school', 'nursery', 'the nursery pickup'],
-    ['funeral', 'die', 'the plant will die'], ['funeral', 'dies', 'the plant dies'], ['funeral', 'died', 'the plant died'], ['funeral', 'dying', 'the plant is dying'],
-  ] as const
-  it.each(WIDENED)('widened list: skips a %s window (%s): %s', (category, _stem, text) => {
-    expect(sensitiveWindow(text)).toBe(category)
+  it('skips a window in the category of the first list that fires, and says only the category', () => {
+    expect(sensitiveWindow('we still owe the IRS and the mortgage is due')).toBe('finance')
+    expect(sensitiveWindow('her doctor and the lawyer')).toBe('health')
+    expect(sensitiveWindow('the grandparents came')).toBe('family')                   // grandpa* is the stem for grandparent forms
+    expect(JSON.stringify(sensitiveWindow('the mortgage on the lake house'))).toBe('"finance"')
+  })
+  /** The words the review measured as the top firings on ordinary work talk (the broad list skipped 37.6% of 974 saved windows). */
+  it.each([
+    'the court of public opinion', 'a sick day policy', 'baby steps on the roadmap', 'the finance team signed off', 'financial results for the quarter', 'sales taxes by state',
+    'the tax software market', 'healthy margins this quarter', 'the health of the pipeline', 'old school marketing', 'the product family', 'a medical device vertical',
+    'the tool will die off', 'interest dies down', 'a birthday promotion', 'the mother brand', 'insurance verticals', 'a parent company', 'the nursery rhyme ad',
+    'homework for the team', 'a teacher discount program', 'the settlement terms', 'our legal review', 'a doctoral student intern', 'the pharmacy chain', 'a pediatric segment',
+    'a cousin of that product', 'an aunt stella brand',
+  ])('window: does NOT skip ordinary work talk: %s', text => {
+    expect(sensitiveWindow(text)).toBeNull()
   })
   it('reads the window normalized: full-width letters, accents, dotted acronyms, hyphens and slashes', () => {
     expect(normalizeForMatch('The I.R.S. said  C-SECTION / OB-GYN, Zoë')).toBe('the irs said c section ob gyn, zoe')
@@ -242,6 +263,42 @@ describe('admitCueTopic', () => {
   })
   it('a trace may carry a query hash only for a repeat or a length rejection', () => {
     expect([...HASHABLE_REJECTIONS].sort()).toEqual(['repeat', 'too_long', 'too_many_words'])
+  })
+  /** The query deny list is broad on purpose: a bare word that is harmless in a window is not harmless in a web query. One group per
+   *  category, each made only of words that are NOT on the window list, so taking a category's broad words out fails its group. */
+  it.each([
+    ['health', ['health news today', 'medical devices', 'medicine prices', 'medication guide', 'sick leave policy', 'healthy snacks', 'dentist near', 'anxiety tips', 'nursing jobs', 'ivf clinic costs']],
+    ['family', ['family news', 'baby formula', 'mother brand', 'birthday party venues', 'wedding venues', 'cousin visit', 'sibling rivalry', 'aunt stella', 'girlfriend gifts', 'childhood games']],
+    ['finance', ['finance news', 'financial markets', 'taxes explained', 'tax software', 'insurance rates', 'payroll software', 'retirement plans', 'net worth rankings', 'k one form']],
+    ['legal', ['court news', 'legal news', 'settlement terms', 'litigation trends', 'subpoena rules']],
+    ['school', ['school news', 'homework help', 'teacher shortage', 'doctoral programs', 'nursery rhymes', 'prek programs']],
+    ['funeral', ['die casting', 'dies down', 'death valley', 'grief tips', 'obituary news', 'condolence cards']],
+  ] as const)('deny: broad %s words are refused in a query, window or not', (_category, queries) => {
+    for (const q of queries) expect(admitCueTopic(q, ctx()), q).toEqual({ ok: false, reason: 'deny_word' })
+  })
+  it('deny: every word the window list drops is still refused in a query', () => {
+    for (const q of ['court news', 'sick leave', 'baby formula', 'finance news', 'financial markets', 'taxes explained', 'tax software', 'health news', 'healthy snacks', 'school news',
+      'family news', 'medical devices', 'die casting', 'dies down']) {
+      expect(sensitiveWindow(q), q).toBeNull()
+      expect(denyWordHit(q), q).toBe(true)
+    }
+  })
+  it('deny: roth, ira, rollover, k 1 and k one, icu, intensive care and the step family words are refused', () => {
+    for (const q of ['roth conversion news', 'ira limits', 'rollover rules', 'k one form', 'icu beds', 'intensive care units', 'stepmom blog', 'step-family tips', 'stepchildren news', 'stepbrother movie']) {
+      expect(admitCueTopic(q, ctx()), q).toEqual({ ok: false, reason: 'deny_word' })
+    }
+  })
+  it('deny: a word spelled out in one- and two-letter pieces is the word ("I R S", "ta x", "I C U", "mo m")', () => {
+    for (const q of ['I R S payment plan', 'ta x news', 'I C U beds', 'mo m blog', 'R O T H account']) expect(admitCueTopic(q, ctx()), q).toEqual({ ok: false, reason: 'deny_word' })
+    for (const q of ['go to it now', 'a b test results', 'Meta Xbox news', 'Formula One news']) expect(admitCueTopic(q, ctx()).ok, q).toBe(true)
+  })
+  it('denyWordHit reads the normalized text and is pure: dotted acronyms, hyphens, full-width letters, runs of short tokens', () => {
+    expect(denyWordHit('I.R.S. news')).toBe(true)
+    expect(denyWordHit('ＩＲＳ')).toBe(true)
+    expect(denyWordHit('i r a')).toBe(true)
+    expect(denyWordHit('a K-1 form')).toBe(true)                       // the digit is the query rules' to refuse; the word list knows k 1 too
+    expect(denyWordHit('the Grand Prix')).toBe(false)
+    expect(denyWordHit('')).toBe(false)
   })
   it('rejects a secret', () => {
     expect(admitCueTopic('sk-abcdefghijklmnop', ctx())).toEqual({ ok: false, reason: 'secret' })
