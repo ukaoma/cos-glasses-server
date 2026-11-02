@@ -1185,9 +1185,13 @@ export class LiveCuesV2Engine {
   modeChanged(): void { this.general?.modeChanged() }
 
   private cueMode(): LiveCuesCueMode { return resolveLiveCuesCueMode(this.deps.env, this.deps.settings).value }
-  /** Cue mode `general` turns the focused cues off for an extended (Mac) meeting. A legacy (G2) meeting keeps them: it can never
-   *  carry an insight, so switching them off would leave it with nothing. */
-  private focusedOff(s: Session): boolean { return s.kinds === 'extended' && this.cueMode() === 'general' }
+  /** Ask Public topics consent, read the way the general runner reads it: unreadable, absent and off are all off. */
+  private publicTopicsOn(): boolean { try { return this.deps.publicTopics?.() === true } catch { return false } }
+  /** Cue mode `general` turns the focused cues off for an extended (Mac) meeting, but only while the insights that replace them can
+   *  run: with Public topics off the general runner stops at public_topics_off, so switching the focused cues off as well would
+   *  leave the meeting with nothing, and Control cannot turn the consent on. Then the focused cues stay on and the status says
+   *  needs_public_topics. A legacy (G2) meeting keeps them too: it can never carry an insight. */
+  private focusedOff(s: Session): boolean { return s.kinds === 'extended' && this.cueMode() === 'general' && this.publicTopicsOn() }
   private allCues(s: Session): LiveCueV2[] { return s.insights.length ? [...s.cues, ...s.insights].sort((a, b) => a.createdAt - b.createdAt) : [...s.cues] }
 
   /** Remembers who the ASR path says is speaking, for the general runner's name gate. Bounded; generic labels ("Ext", "Speaker 2")
@@ -1232,7 +1236,7 @@ export class LiveCuesV2Engine {
         return { intervalSeconds: r.intervalSeconds.value, trigger: r.trigger.value, attemptsPerMeeting: r.attemptsPerMeeting.value, maxCuesPerMeeting: r.maxCuesPerMeeting.value,
           dailyTopicCalls: r.dailyTopicCalls.value, dailyWebSearches: r.dailyWebSearches.value }
       },
-      publicTopics: () => { try { return this.deps.publicTopics?.() === true } catch { return false } },
+      publicTopics: () => this.publicTopicsOn(),
       homeArea: () => { try { return this.deps.homeArea?.() ?? null } catch { return null } },
     }
   }

@@ -335,6 +335,11 @@ const mutations = [
   m('reader-limits-resolved-with-env', ENGINE, ['const r = resolveLiveCuesGeneralLimits(this.deps.env, this.deps.settings)\n        return { intervalSeconds', 'const r = resolveLiveCuesGeneralLimits({}, this.deps.settings)\n        return { intervalSeconds'], ENGINE_T, 'locks a limit in the reader'),
   m('reader-consent-exact', ENGINE, ['return this.deps.publicTopics?.() === true }', 'return this.deps.publicTopics?.() !== false }'], ENGINE_T, 'unreadable or missing reads as off'),
   m('reader-consent-unreadable-is-off', ENGINE, ['return this.deps.publicTopics?.() === true } catch { return false } }', 'return this.deps.publicTopics?.() === true } catch { return true } }'], ENGINE_T, 'unreadable or missing reads as off'),
+  m('reader-consent-from-engine-reader', ENGINE, ['publicTopics: () => this.publicTopicsOn(),', 'publicTopics: () => true,'], ENGINE_T, 'with Public topics OFF'),
+  m('mode-general-needs-consent', ENGINE, ["this.cueMode() === 'general' && this.publicTopicsOn() }", "this.cueMode() === 'general' }"], ENGINE_T, 'with Public topics OFF'),
+  m('mode-general-consent-unreadable-is-off', ENGINE, ['=== true } catch { return false } }', '=== true } catch { return true } }'], ENGINE_T, 'consent unreadable or missing counts as off'),
+  m('mode-general-consent-absent-is-off', ENGINE, ['return this.deps.publicTopics?.() === true }', 'return this.deps.publicTopics?.() !== false }'], ENGINE_T, 'consent unreadable or missing counts as off'),
+  m('mode-general-consent-read-per-feed', ENGINE, ['private publicTopicsOn(): boolean { try { return this.deps.publicTopics?.() === true }', 'private publicTopicsOn(): boolean { try { return (this as unknown as { c?: boolean }).c ??= this.deps.publicTopics?.() === true }'], ENGINE_T, 'read at every feed'),
   m('reader-home-unreadable-is-null', ENGINE, ['return this.deps.homeArea?.() ?? null } catch { return null } }', "return this.deps.homeArea?.() ?? null } catch { return 'Austin, TX' } }"], ENGINE_T, 'throw read as null and off'),
   // ── The insight emit path ──
   m('emit-extended-only', ENGINE, ["if (!s || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false", 'if (!s || this.deps.store.isEnded(sessionId)) return false'], ENGINE_T, 'emit refuses a legacy meeting'),
@@ -358,9 +363,9 @@ const mutations = [
   m('emit-trips-focused-breaker', ENGINE, ['    s.insights.push(cue)\n    this.deps.emit', '    s.insights.push(cue); s.failures = 3; s.breaker = true\n    this.deps.emit'], ENGINE_T, 'still allowed right after an insight'),
   // ── Cue mode and the focused cues ──
   m('mode-general-focused-off', ENGINE, ['    if (this.focusedOff(s)) return ', '    if (false) return '], ENGINE_T, 'cue mode general: a Mac meeting gets insights only'),
-  m('mode-general-only-mac', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return this.cueMode() === 'general' }"], ENGINE_T, 'a G2 meeting keeps its focused cues'),
-  m('mode-general-only-in-general', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return s.kinds === 'extended' }"], ENGINE_T, 'yields focused cues and an insight'),
-  m('mode-all-keeps-focused', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return s.kinds === 'extended' && this.cueMode() !== 'focused' }"], ENGINE_T, 'cue mode all runs both'),
+  m('mode-general-only-mac', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' && this.publicTopicsOn() }", "return this.cueMode() === 'general' }"], ENGINE_T, 'a G2 meeting keeps its focused cues'),
+  m('mode-general-only-in-general', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' && this.publicTopicsOn() }", "return s.kinds === 'extended' }"], ENGINE_T, 'yields focused cues and an insight'),
+  m('mode-all-keeps-focused', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' && this.publicTopicsOn() }", "return s.kinds === 'extended' && this.cueMode() !== 'focused' }"], ENGINE_T, 'cue mode all runs both'),
   // ── Status ──
   m('status-general-field', ENGINE, ['      ...(general ? { general } : {}),\n', ''], ENGINE_T, 'shows the general state off'),
   m('status-general-read', ENGINE, ['general = this.general?.status(sessionId) ?? null', 'general = null'], ENGINE_T, 'shows the general state off'),
