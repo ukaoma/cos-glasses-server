@@ -11,6 +11,8 @@ import { createHash } from 'node:crypto'
 const ownData = mkdtempSync(join(tmpdir(), 'cues-general-engine-data-'))
 const priorData = process.env.COS_DATA_DIR
 process.env.COS_DATA_DIR = ownData
+const mocks = vi.hoisted(() => ({ engine: vi.fn() }))
+vi.mock('./lens-gist-engines.js', async (orig) => ({ ...(await orig<typeof import('./lens-gist-engines.js')>()), runLensGistEngine: mocks.engine }))
 vi.mock('./jev.js', async (orig) => ({ ...(await orig<typeof import('./jev.js')>()), resolveJevKey: () => ({ key: 'k', source: 'env' as const }) }))
 vi.mock('./provider-binary.js', () => ({ resolveProviderBinary: () => ({ ok: true, path: '/bin/true' }) }))
 
@@ -43,17 +45,17 @@ describe('general cues in the engine', () => {
   let logged: Array<Record<string, unknown>>
   let writerPrompts: string[]
   let focusedGates: number
-  let g: { trigger: number; topic: number; search: string[]; writer: number; windows: string[]; p: number; searchImpl: null | ((q: string, signal: AbortSignal) => Promise<{ sources: Array<{ id: string; title: string; text: string; url?: string }> }>) }
+  let g: { trigger: number; titles: string[]; topic: number; search: string[]; writer: number; windows: string[]; p: number; searchImpl: null | ((q: string, signal: AbortSignal) => Promise<{ sources: Array<{ id: string; title: string; text: string; url?: string }> }>) }
   let generalTraces: Array<Record<string, unknown>>
   let s: { on: boolean; mode: Mode; domain: string | null; orientationThrows: boolean; publicTopics: boolean | 'throws' | 'absent'; generalLimits: Record<string, number>; env: NodeJS.ProcessEnv }
   const engines: Array<InstanceType<typeof LiveCuesV2Engine>> = []
 
   function engine(over: Partial<Deps> = {}, withGeneral = true) {
     const general: GeneralDeps = {
-      jevTrigger: async (_title, window) => { g.trigger += 1; g.windows.push(window); return { pGeneral: g.p, tokens: 800 } },
+      jevTrigger: async (title, window) => { g.trigger += 1; g.titles.push(title); g.windows.push(window); return { pGeneral: g.p, tokens: 800 } },
       topicModel: async () => { const q = QUERIES[g.topic % QUERIES.length]; g.topic += 1; return { text: JSON.stringify({ topic: true, category: 'news', query: q }), costUsd: 0.001 } },
       search: async (q, signal) => { g.search.push(q); return g.searchImpl ? g.searchImpl(q, signal) : { sources: [SOURCE] } },
-      writer: async () => { g.writer += 1; return { text: WRITTEN, costUsd: 0.002, model: 'claude-sonnet-5-5' } },
+      writer: async () => { g.writer += 1; return { text: WRITTEN, costUsd: 0.002, model: 'claude-test-writer' } },
       now: () => clock, statePath: join(dir, 'general-state.json'), trace: row => { generalTraces.push(row as unknown as Record<string, unknown>) }, profile: PROFILE,
     }
     const deps: Deps = {
@@ -104,7 +106,7 @@ describe('general cues in the engine', () => {
     dir = mkdtempSync(join(tmpdir(), 'cues-general-engine-'))
     clock = Date.parse('2026-11-01T18:00:00Z')
     emitted = []; logged = []; writerPrompts = []; generalTraces = []; focusedGates = 0
-    g = { trigger: 0, topic: 0, search: [], writer: 0, windows: [], p: 0.9, searchImpl: null }
+    g = { trigger: 0, titles: [], topic: 0, search: [], writer: 0, windows: [], p: 0.9, searchImpl: null }
     s = { on: true, mode: 'all', domain: 'work', orientationThrows: false, publicTopics: true, generalLimits: {}, env: {} }
   })
   afterEach(() => { for (const e of engines.splice(0)) e.shutdown(); mod.shutdownLiveCuesV2(); rmSync(dir, { recursive: true, force: true }) })
@@ -117,7 +119,8 @@ describe('general cues in the engine', () => {
       expect(insights()).toHaveLength(1)
       const cue = insights()[0].data
       expect(contract.isLiveCueV2(cue)).toBe(true)
-      expect(cue).toMatchObject({ kind: 'insight', sessionId: MAC, headline: 'A new team joins the grid', gate: 0.9, model: 'claude-sonnet-5-5' })
+      expect(g.titles).toEqual([e['sessions'].get(MAC)!.title])                              // the trigger is given the meeting's title
+      expect(cue).toMatchObject({ kind: 'insight', sessionId: MAC, headline: 'A new team joins the grid', gate: 0.9, model: 'claude-test-writer' })
       expect((cue.sources as Array<Record<string, unknown>>)[0]).toMatchObject({ kind: 'web', url: 'https://example.org/grid', title: 'Grid news' })
       expect(v1().map(x => x.data.cueId)).not.toContain(cue.cueId)
       expect(v1()).toHaveLength(focused().length)
@@ -151,7 +154,7 @@ describe('general cues in the engine', () => {
       expect(last.previousCues.length).toBeGreaterThan(0)
       expect(last.previousCues.join(' ')).not.toContain('constructor joins the grid')
     })
-    it('not the focused cooldown: a focused cue is still allowed right after an insight when no focused cue came before it', async () => {
+    it('not the focused cooldown, slot or breaker: a focused cue is still allowed right after an insight when no focused cue came before it', async () => {
       s.mode = 'general'                                               // no focused cue yet: the Mac meeting is insights only
       const e = engine()
       e.arm(MAC)
@@ -388,11 +391,13 @@ describe('general cues in the engine', () => {
       expect(await running).toMatchObject({ outcome: 'cancelled', reason })
       expect(insights()).toEqual([])
     })
-    it('a pause for another meeting leaves the attempt alone', async () => {
+    it('a pause for another meeting, or an unpause, leaves the attempt alone', async () => {
       const e = engine()
       e.arm(MAC_B)
       const { seen, running } = await holdAtSearch(e)
       e.setPaused(MAC_B, true)
+      expect(seen.signal!.aborted).toBe(false)
+      e.setPaused(MAC, false)                                          // taking a pause off is not a pause
       expect(seen.signal!.aborted).toBe(false)
       e.suspend()
       await running
@@ -404,6 +409,21 @@ describe('general cues in the engine', () => {
       e.shutdown()
       expect(seen.signal!.aborted).toBe(true)
       expect(await running).toMatchObject({ outcome: 'cancelled' })
+    })
+    it('startGeneral starts the runner\'s poll timer, once; shutdown stops it', () => {
+      const e = engine()
+      const runner = e.generalRunner()!
+      const start = vi.spyOn(runner, 'start'), stop = vi.spyOn(runner, 'stop')
+      e.startGeneral()
+      expect(start).toHaveBeenCalledTimes(1)
+      e.shutdown()
+      expect(stop).toHaveBeenCalledTimes(1)
+    })
+    it('the engine singleton starts its runner when it is built', () => {
+      const start = vi.spyOn(LiveCuesV2Engine.prototype, 'startGeneral')
+      mod.liveCuesV2()
+      expect(start).toHaveBeenCalledTimes(1)
+      start.mockRestore()
     })
     it('saving the cue mode tells the engine: applyLiveCuesV2Settings calls modeChanged for a cueMode change only', () => {
       const eng = mod.liveCuesV2()
@@ -547,6 +567,53 @@ describe('general cues in the engine', () => {
       e['general']!['deps'].jevTrigger = async () => { throw new JevError('jev_cap_reached') }
       expect(await insightAttempt(e)).toMatchObject({ outcome: 'no_cue', reason: 'jev_cap_reached' })
       expect(focused().length).toBeGreaterThan(0)
+    })
+  })
+
+  describe('the singleton\'s real dependencies', () => {
+    afterEach(() => { vi.unstubAllGlobals(); delete process.env.TYPESAFE_API_KEY })
+    const realDeps = () => mod.liveCuesV2().generalRunner()!['deps']
+    it('keep their state in the data home, apart from the focused state, and the consent and home area come from the real stores', () => {
+      const deps = realDeps()
+      expect(deps.statePath).toBe(join(ownData, 'live-cues-general-state.json'))
+      expect(mod.liveCuesV2().generalRunner()!['host']).toBeTruthy()
+      const engine = mod.liveCuesV2()
+      expect(engine['deps'].publicTopics!()).toBe(false)               // no consent saved in this data home
+      expect(engine['deps'].homeArea!()).toBeNull()                    // no home_city in this profile
+    })
+    it('write a general_tick row to the same trace file as the focused cues', async () => {
+      const { readFileSync } = await import('node:fs')
+      realDeps().trace!({ type: 'general_tick', at: 'x', sessionId: MAC, pGeneral: null, outcome: 'skip', reason: 'test', category: null, queryHash: null, searchMs: null, sourcesCount: null, writerMs: null, usd: null })
+      const lines = readFileSync(join(ownData, 'live-cues-trace.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
+      expect(lines.at(-1)).toMatchObject({ type: 'general_tick', reason: 'test' })
+    })
+    it('ask Jev the trigger question on the cues\' own client: the title and the window only, answers read as P(yes)', async () => {
+      process.env.TYPESAFE_API_KEY = 'test-key'
+      const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ answers: { general_topic: { type: 'choice', probabilities: { yes: 0.8, no: 0.2 } } }, usage: { input_tokens: 11 } }) }))
+      vi.stubGlobal('fetch', fetchMock)
+      const out = await realDeps().jevTrigger('Mac Recording', 'the room talks about the grid', new AbortController().signal)
+      expect(out).toEqual({ pGeneral: 0.8, tokens: 11 })
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, { body: string }]
+      expect(url).toBe('https://api.typesafe.ai/v1/systemone')
+      const body = JSON.parse(init.body) as { state: Record<string, string>; questions: Record<string, unknown> }
+      expect(body.state).toEqual({ meetingTitle: 'Mac Recording', window: 'the room talks about the grid' })
+      expect(Object.keys(body.questions)).toEqual(['general_topic'])
+      const { readFileSync } = await import('node:fs')
+      expect(Object.values(JSON.parse(readFileSync(join(ownData, 'jev-cues-usage.json'), 'utf8')) as Record<string, number>).reduce((a, b) => a + b, 0)).toBe(11)
+    })
+    it('run the topic on pinned Haiku and the writer on the focused writer model, through the one claude runner', async () => {
+      mocks.engine.mockResolvedValue({ text: 'null' })
+      const signal = new AbortController().signal
+      const deps = realDeps()
+      await deps.topicModel('S', 'P', signal)
+      expect(mocks.engine).toHaveBeenLastCalledWith('claude', 'claude-haiku-5-5', 'P', expect.objectContaining({ source: 'live-cues-general-topic' }))
+      await deps.writer('S', 'P', signal)
+      expect(mocks.engine).toHaveBeenLastCalledWith('claude', mod.liveCuesV2Model(process.env), 'P', expect.objectContaining({ source: 'live-cues-general' }))
+      process.env.COS_LIVE_CUES_V2_MODEL = 'haiku'
+      try {
+        await deps.writer('S', 'P', signal)
+        expect(mocks.engine).toHaveBeenLastCalledWith('claude', 'claude-haiku-5-5', 'P', expect.objectContaining({ source: 'live-cues-general' }))
+      } finally { delete process.env.COS_LIVE_CUES_V2_MODEL }
     })
   })
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-// General live cues mutation gate: the runner, the topic admission and the prompts/parsers, plus the optional audit caller on the
-// web search. Mutations run only in a disposable copy of the checkout; the live checkout is never rewritten.
+// General live cues mutation gate: the runner, the topic admission and the prompts/parsers, the optional audit caller on the web
+// search, and the engine's hosting of the runner (the extended-only meeting list, the confirmed domain, the settings reader, the
+// insight emit path, the aborts and the settings-view wiring). Mutations run only in a disposable copy of the checkout; the live
+// checkout is never rewritten.
 //
 // What it proves, in order:
 //   0. The target suites are GREEN unmutated. A gate over a red suite reads every mutant as killed and proves nothing.
@@ -21,9 +23,14 @@ const RUN_T = ['server/lib/live-cues-general.test.ts']
 const TOPIC_T = ['server/lib/live-cues-general-topic.test.ts']
 const PROMPTS_T = ['server/lib/live-cues-general-prompts.test.ts']
 const WEB_T = ['server/lib/meeting-fact-check-web.test.ts']
-const ALL = [...RUN_T, ...TOPIC_T, ...PROMPTS_T, ...WEB_T, 'server/lib/meeting-ask-web.test.ts']
+const ENGINE_T = ['server/lib/live-cues-general-engine.test.ts']
+// The engine's own suites must stay green too: the classic pin (a default engine is byte for byte 6.97.4), the focused engine,
+// the kinds, the grounded cues and the settings.
+const ENGINE_SUITES = ['server/lib/live-cues-v2-classic-pin.test.ts', 'server/lib/live-cues-v2.test.ts', 'server/lib/live-cues-v2-kinds.test.ts', 'server/lib/live-cues-v2-grounding.test.ts',
+  'server/lib/live-cues-v2-settings.test.ts', 'server/routes/live-cues-v3-settings-route.test.ts']
+const ALL = [...RUN_T, ...TOPIC_T, ...PROMPTS_T, ...WEB_T, ...ENGINE_T, ...ENGINE_SUITES, 'server/lib/meeting-ask-web.test.ts']
 const RUN = 'server/lib/live-cues-general.ts', TOPIC = 'server/lib/live-cues-general-topic.ts', PROMPTS = 'server/lib/live-cues-general-prompts.ts'
-const WEB = 'server/lib/meeting-ask-web.ts'
+const WEB = 'server/lib/meeting-ask-web.ts', ENGINE = 'server/lib/live-cues-v2.ts'
 // `by`: the killing test's full name must contain this (case-insensitive), so a mutant is killed by a test that names its behaviour.
 const m = (name, file, edits, tests, by) => ({ name, file, edits: typeof edits[0] === 'string' ? [edits] : edits, tests, by })
 
@@ -272,6 +279,87 @@ const mutations = [
   m('wiring-real-deps', RUN, ["topicModel: runGeneralTopicModel,", 'topicModel: (system, prompt, signal) => runGeneralWriterModel("claude-opus-5-5", system, prompt, signal),'], RUN_T, 'realGeneralDeps'),
   m('web-audit-caller-passed', WEB, ['options?.auditCaller ? { caller: options.auditCaller } : undefined', 'undefined'], WEB_T, 'audit caller'),
   m('web-audit-caller-default-untouched', WEB, ['options?.auditCaller ? { caller: options.auditCaller } : undefined', "{ caller: options?.auditCaller ?? 'meeting_ask_web' }"], WEB_T, 'audit caller'),
+  // ── The engine hosts the runner ──
+  m('host-extended-only', ENGINE, ["          if (s.kinds !== 'extended') continue\n", ''], ENGINE_T, 'offers extended meetings only'),
+  m('host-needs-v2-on', ENGINE, ['        if (!this.enabled()) return []\n        const out: GeneralCueCandidate[] = []', '        const out: GeneralCueCandidate[] = []'], ENGINE_T, 'v2 switched off'),
+  m('host-domain-from-orientation', ENGINE, ['domain = this.deps.orientation?.(s.sessionId).domain ?? null', 'domain = null'], ENGINE_T, 'confirmed personal domain skips'),
+  m('host-domain-unreadable-is-null', ENGINE, ['} catch { domain = null }', '} catch (e) { throw e }'], ENGINE_T, 'unreadable orientation is null'),
+  m('host-armed-means-not-ended', ENGINE, ['armed: !this.deps.store.isEnded(s.sessionId)', 'armed: true'], ENGINE_T, 'ended'),
+  m('host-paused', ENGINE, ['paused: this.deps.store.isPaused(s.sessionId), domain,', 'paused: false, domain,'], ENGINE_T, 'paused'),
+  m('host-chars-counted', ENGINE, ['      s.charsFed += cleanWindow(text.trim()).length\n', ''], ENGINE_T, 'monotonic character count'),
+  m('host-chars-offered', ENGINE, ['transcriptChars: s.charsFed', 'transcriptChars: 0'], ENGINE_T, 'monotonic character count'),
+  m('host-window-cleaned', ENGINE, ["window: chars => cleanWindow(s.chunks.join('\\n')).slice(-chars)", "window: chars => s.chunks.join('\\n').slice(-chars)"], ENGINE_T, 'cleaned window'),
+  m('host-window-tail', ENGINE, ["window: chars => cleanWindow(s.chunks.join('\\n')).slice(-chars)", "window: chars => cleanWindow(s.chunks.join('\\n')).slice(0, chars)"], ENGINE_T, 'cleaned window'),
+  m('host-title', ENGINE, ['title: s.title, transcriptChars', "title: '', transcriptChars"], ENGINE_T, 'yields focused cues and an insight'),
+  // ── The settings reader ──
+  m('reader-interval', ENGINE, ['intervalSeconds: r.intervalSeconds.value, trigger', 'intervalSeconds: r.trigger.value, trigger'], ENGINE_T, 'maps the six saved limits'),
+  m('reader-trigger', ENGINE, ['trigger: r.trigger.value,', 'trigger: r.intervalSeconds.value,'], ENGINE_T, 'maps the six saved limits'),
+  m('reader-attempts', ENGINE, ['attemptsPerMeeting: r.attemptsPerMeeting.value,', 'attemptsPerMeeting: r.maxCuesPerMeeting.value,'], ENGINE_T, 'maps the six saved limits'),
+  m('reader-max-cues', ENGINE, ['maxCuesPerMeeting: r.maxCuesPerMeeting.value,', 'maxCuesPerMeeting: r.attemptsPerMeeting.value,'], ENGINE_T, 'maps the six saved limits'),
+  m('reader-daily-topic', ENGINE, ['dailyTopicCalls: r.dailyTopicCalls.value, dailyWebSearches', 'dailyTopicCalls: r.dailyWebSearches.value, dailyWebSearches'], ENGINE_T, 'maps the six saved limits'),
+  m('reader-daily-search', ENGINE, ['dailyWebSearches: r.dailyWebSearches.value }', 'dailyWebSearches: r.dailyTopicCalls.value }'], ENGINE_T, 'maps the six saved limits'),
+  m('reader-mode', ENGINE, ['cueMode: () => this.cueMode(),', "cueMode: () => 'general',"], ENGINE_T, 'maps the six saved limits'),
+  m('reader-mode-from-resolved', ENGINE, ['private cueMode(): LiveCuesCueMode { return resolveLiveCuesCueMode(this.deps.env, this.deps.settings).value }', "private cueMode(): LiveCuesCueMode { return resolveLiveCuesCueMode({}, this.deps.settings).value }"], ENGINE_T, 'COS_LIVE_CUES_MODE=focused forces the mode'),
+  m('reader-limits-resolved-with-env', ENGINE, ['const r = resolveLiveCuesGeneralLimits(this.deps.env, this.deps.settings)\n        return { intervalSeconds', 'const r = resolveLiveCuesGeneralLimits({}, this.deps.settings)\n        return { intervalSeconds'], ENGINE_T, 'locks a limit in the reader'),
+  m('reader-consent-exact', ENGINE, ['return this.deps.publicTopics?.() === true }', 'return this.deps.publicTopics?.() !== false }'], ENGINE_T, 'unreadable or missing reads as off'),
+  m('reader-consent-unreadable-is-off', ENGINE, ['return this.deps.publicTopics?.() === true } catch { return false } }', 'return this.deps.publicTopics?.() === true } catch { return true } }'], ENGINE_T, 'unreadable or missing reads as off'),
+  m('reader-home-unreadable-is-null', ENGINE, ['return this.deps.homeArea?.() ?? null } catch { return null } }', "return this.deps.homeArea?.() ?? null } catch { return 'Austin, TX' } }"], ENGINE_T, 'throw read as null and off'),
+  // ── The insight emit path ──
+  m('emit-extended-only', ENGINE, ["if (!s || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false", 'if (!s || this.deps.store.isEnded(sessionId)) return false'], ENGINE_T, 'emit refuses a legacy meeting'),
+  m('emit-not-after-end', ENGINE, ["if (!s || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false", "if (!s || s.kinds !== 'extended') return false"], ENGINE_T, 'emit refuses a legacy meeting'),
+  m('emit-known-meeting', ENGINE, ["if (!s || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false", "if (s!.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false"], ENGINE_T, 'emit refuses a legacy meeting'),
+  m('emit-validated', ENGINE, ['if (!isLiveCueV2(cue)) return false                                 // never emit what the companion would drop\n    const log', 'const log'], ENGINE_T, 'emit refuses a legacy meeting'),
+  m('emit-kind-insight', ENGINE, ["headline: insight.headline, detail: insight.detail, kind: 'insight',", "headline: insight.headline, detail: insight.detail, kind: 'reinforce',"], ENGINE_T, 'yields focused cues and an insight'),
+  m('emit-gate', ENGINE, ['gate: round(insight.gate), createdAt', 'gate: 0, createdAt'], ENGINE_T, 'yields focused cues and an insight'),
+  m('emit-model-default', ENGINE, ['model: insight.model ?? liveCuesV2Model(this.deps.env) }', "model: insight.model ?? 'x' }"], ENGINE_T, 'emit refuses a legacy meeting'),
+  m('emit-model-from-insight', ENGINE, ['model: insight.model ?? liveCuesV2Model(this.deps.env) }', 'model: liveCuesV2Model(this.deps.env) }'], ENGINE_T, 'yields focused cues and an insight'),
+  m('emit-no-v1-twin', ENGINE, ["    s.insights.push(cue)\n    this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)\n    return true", "    s.insights.push(cue)\n    this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)\n    this.deps.emit('coaching_nudge', { nudge: cue.headline, type: 'challenge', priority: 2, cueId: cue.cueId, sessionId, protocol: 2 })\n    return true"], ENGINE_T, 'no v1 twin'),
+  m('emit-own-list', ENGINE, ['    s.insights.push(cue)\n', '    s.cues.push(cue)\n'], ENGINE_T, 'previousCues'),
+  m('emit-held', ENGINE, ['    s.insights.push(cue)\n', ''], ENGINE_T, 'in time order'),
+  m('emit-sse', ENGINE, ["    s.insights.push(cue)\n    this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)", '    s.insights.push(cue)'], ENGINE_T, 'yields focused cues and an insight'),
+  m('emit-logged-general', ENGINE, ['general: { category: insight.category, query: insight.query },', 'general: { category: insight.category, query: "" },'], ENGINE_T, 'logs the insight with the general category'),
+  m('emit-logged-sources', ENGINE, ['detail: cue.detail, gate: cue.gate,\n        sources: cue.sources, model', 'detail: cue.detail, gate: cue.gate,\n        sources: [], model'], ENGINE_T, 'logs the insight with the general category'),
+  m('emit-log-failure-tolerated', ENGINE, ['      console.warn(`[live-cues-v2] insight log append failed: ${errMsg(error)}`)', '      throw error'], ENGINE_T, 'failed cue log append is not an emit failure'),
+  m('emit-sets-cooldown', ENGINE, ['    s.insights.push(cue)\n    this.deps.emit', '    s.insights.push(cue); s.lastCueAt = cue.createdAt\n    this.deps.emit'], ENGINE_T, 'not the focused cooldown'),
+  m('emit-counts-as-focused-cue', ENGINE, ['    s.insights.push(cue)\n    this.deps.emit', '    s.insights.push(cue); this.deps.store.recordCue(sessionId)\n    this.deps.emit'], ENGINE_T, 'per-meeting cue counter'),
+  m('emit-takes-focused-slot', ENGINE, ['    s.insights.push(cue)\n    this.deps.emit', '    s.insights.push(cue); s.inFlight = new AbortController()\n    this.deps.emit'], ENGINE_T, 'still allowed right after an insight'),
+  m('emit-trips-focused-breaker', ENGINE, ['    s.insights.push(cue)\n    this.deps.emit', '    s.insights.push(cue); s.failures = 3; s.breaker = true\n    this.deps.emit'], ENGINE_T, 'still allowed right after an insight'),
+  // ── Cue mode and the focused cues ──
+  m('mode-general-focused-off', ENGINE, ['    if (this.focusedOff(s)) return ', '    if (false) return '], ENGINE_T, 'cue mode general: a Mac meeting gets insights only'),
+  m('mode-general-only-mac', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return this.cueMode() === 'general' }"], ENGINE_T, 'a G2 meeting keeps its focused cues'),
+  m('mode-general-only-in-general', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return s.kinds === 'extended' }"], ENGINE_T, 'yields focused cues and an insight'),
+  m('mode-all-keeps-focused', ENGINE, ["return s.kinds === 'extended' && this.cueMode() === 'general' }", "return s.kinds === 'extended' && this.cueMode() !== 'focused' }"], ENGINE_T, 'cue mode all runs both'),
+  // ── Status ──
+  m('status-general-field', ENGINE, ['      ...(general ? { general } : {}),\n', ''], ENGINE_T, 'shows the general state off'),
+  m('status-general-read', ENGINE, ['general = this.general?.status(sessionId) ?? null', 'general = null'], ENGINE_T, 'shows the general state off'),
+  m('status-cues-merged', ENGINE, ['cues: s ? this.allCues(s) : []', 'cues: s ? [...s.cues] : []'], ENGINE_T, 'in time order'),
+  m('status-cues-in-time-order', ENGINE, ['[...s.cues, ...s.insights].sort((a, b) => a.createdAt - b.createdAt)', '[...s.cues, ...s.insights]'], ENGINE_T, 'in time order'),
+  m('end-cues-merged', ENGINE, ['const cues = s ? this.allCues(s) : []', 'const cues = s ? [...s.cues] : []'], ENGINE_T, 'in time order'),
+  m('end-v1-nudges-only-focused', ENGINE, ['nudges: cues.flatMap(c => (isCueKind(c.kind) ?', 'nudges: cues.flatMap(c => (true ?'], ENGINE_T, 'in time order'),
+  m('find-cue-insights', ENGINE, ['    for (const s of this.sessions.values()) { const cue = s.insights.find(c => c.cueId === cueId); if (cue) return cue }\n', ''], ENGINE_T, 'findCue and feedback know an insight'),
+  m('feedback-insights', ENGINE, ['held.cues.some(c => c.cueId === input.cueId) || held.insights.some(c => c.cueId === input.cueId))', 'held.cues.some(c => c.cueId === input.cueId))'], ENGINE_T, 'findCue and feedback know an insight'),
+  // ── Hooks ──
+  m('hook-end', ENGINE, ['    this.general?.endSession(sessionId)\n', ''], ENGINE_T, 'the end of the meeting'),
+  m('hook-pause', ENGINE, ["this.general?.abortSession(sessionId, 'paused')", 'void 0'], ENGINE_T, 'a pause stops an insight attempt'),
+  m('hook-pause-only-when-paused', ENGINE, ['if (r.applied && paused) {', 'if (r.applied) {'], ENGINE_T, 'or an unpause, leaves the attempt alone'),
+  m('hook-suspend', ENGINE, ['    if (this.general?.abortAll(V2_OFF)) aborted += 1\n', ''], ENGINE_T, 'v2 switched off (suspend)'),
+  m('hook-suspend-counts', ENGINE, ['if (this.general?.abortAll(V2_OFF)) aborted += 1', 'this.general?.abortAll(V2_OFF)'], ENGINE_T, 'v2 switched off (suspend)'),
+  m('hook-mode-changed', ENGINE, ['  modeChanged(): void { this.general?.modeChanged() }', '  modeChanged(): void { }'], ENGINE_T, 'a mode change stops an insight attempt'),
+  m('hook-shutdown-stops-runner', ENGINE, ['if (this.general) { this.general.stop(); setGeneralCuesTodayProvider(null) }', 'if (this.general) { setGeneralCuesTodayProvider(null) }'], ENGINE_T, 'shutdown stops the runner'),
+  m('hook-shutdown-clears-today', ENGINE, ['if (this.general) { this.general.stop(); setGeneralCuesTodayProvider(null) }', 'if (this.general) { this.general.stop() }'], ENGINE_T, 'zeros after shutdown'),
+  m('hook-start-registers-today', ENGINE, ['    setGeneralCuesTodayProvider(() => this.general!.generalCuesToday())\n', ''], ENGINE_T, 'settings view reads today from the runner'),
+  m('hook-start-polls', ENGINE, ['    this.general.start()\n  }', '  }'], ENGINE_T, 'startGeneral starts'),
+  m('hook-singleton-starts', ENGINE, ['    engine.startGeneral()\n', ''], ENGINE_T, 'singleton starts its runner'),
+  m('hook-settings-save-mode-changed', ENGINE, ['  if (patch.cueMode !== undefined) engine?.modeChanged()', '  void 0'], ENGINE_T, 'saving the cue mode tells the engine'),
+  m('hook-settings-save-only-cue-mode', ENGINE, ['  if (patch.cueMode !== undefined) engine?.modeChanged()', '  engine?.modeChanged()'], ENGINE_T, 'saving the cue mode tells the engine'),
+  m('hook-no-runner-without-deps', ENGINE, ['this.general = deps.general ? new GeneralCueRunner(this.generalHost(), this.generalSettings(), deps.general) : null', 'this.general = new GeneralCueRunner(this.generalHost(), this.generalSettings(), deps.general ?? ({} as never))'], ENGINE_T, 'without general dependencies'),
+  // ── Real dependencies ──
+  m('real-state-file', ENGINE, ["statePath: dataPath('live-cues-general-state.json')", "statePath: dataPath('live-cues-v2-state.json')"], ENGINE_T, 'keep their state in the data home'),
+  m('real-writer-model', ENGINE, ['writerModel: () => liveCuesV2Model(process.env),', "writerModel: () => 'claude-opus-5-5',"], ENGINE_T, 'run the topic on pinned Haiku'),
+  m('real-trace-file', ENGINE, ['trace: row => trace(row as unknown as Record<string, unknown>),', 'trace: () => {},'], ENGINE_T, 'write a general_tick row'),
+  m('real-trigger-question', ENGINE, ['.trigger(title, window, signal)', '.trigger(window, title, signal)'], ENGINE_T, 'ask Jev the trigger question'),
+  m('real-consent', ENGINE, ['publicTopics: () => new MeetingAskStore().publicTopics(),', 'publicTopics: () => true,'], ENGINE_T, 'keep their state in the data home'),
+  m('real-home-area', ENGINE, ['homeArea: () => getOwnerHomeArea(),', "homeArea: () => 'Austin, TX',"], ENGINE_T, 'keep their state in the data home'),
   // ── Prompts ──
   m('insight-number-guard', PROMPTS, ["if (unsupportedSearchNumbers(`${headline} ${detail}`, cited.map(s => `${s.title} ${s.text}`).join(' ')).length) return 'unsupported_number'", ''], PROMPTS_T, 'number guard'),
   m('insight-number-guard-cited-only', PROMPTS, ['cited.map(s => `${s.title} ${s.text}`)', 'sources.map(s => `${s.title} ${s.text}`)'], PROMPTS_T, 'number guard'),
