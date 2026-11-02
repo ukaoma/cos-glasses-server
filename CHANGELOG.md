@@ -1,3 +1,15 @@
+## 6.97.8 - Live cues: Tableau facts, shared links and pacing (private candidate)
+
+2026-11-02. Built on 6.97.7, which it carries. Pairs with COS Control 0.5.365. Private, for one Mac; npm latest stays 6.94.4.
+
+- Grounded cues gain a data arm: a local `data-facts.json` (written by COS from the Tableau report, contract v1) offers one candidate when the last 600 characters name a Quilt industry, brand or SBU/XBU and a funnel word or figure. The cue states the period, marketing-sourced scope and refresh time, and never presents it as revenue, MRR or locations. Off when the file is missing, invalid, ahead of the clock or more than 120 hours past its refresh; never in personal, Sprocket Rocket or Hermit Crabs meetings. Sent as a `file` source with no locator, so older clients render it. Trace: `arms.data`, `dataArm`, `dataAgeH`.
+- The meeting assistant reads the same facts for funnel, budget, pacing or "check Tableau" questions, as a local source. No network.
+- A public link typed in a meeting question is read as a page even without "search" wording (up to two; credentials, keys, private hosts refused). Pasted text over 400 characters and pages read from typed links are kept as meeting files, so live cues in that meeting can use them. `.xlsx` text extraction (bounded, no formulas) on the media route.
+- New daily web lookup ledger, `webToday` on `GET /live-cues/v2/settings?v=3` and `GET /meeting-ask/config`: searches and pages read for cues, the assistant and fact checks, and held lookups by reason. `general.today` keeps its meaning.
+- Cue pacing: the per-meeting cap opens with half the cap, then one cue per refill (5 minutes at cap 25), so long meetings still get cues late (`COS_LIVE_CUES_V2_PACING=0` turns it off).
+- "No owner or date" cues fold into one Open items cue per 10 minutes (`COS_LIVE_CUES_V2_OPEN_ITEMS=0`); writer v4 returns an optional `open` field.
+- A cue whose opening line repeats one of the last six shown is withheld (`COS_LIVE_CUES_V2_LEAD_REPEAT=0`). The writer gets the meeting's known names for spelling (`COS_LIVE_CUES_V2_KNOWN_NAMES=0`).
+
 ## 6.97.7 - Live cues: grounded cues, cue modes and general cues (private candidate)
 
 2026-11-01. Built on 6.97.6 (SubQ session find), which it carries. Pairs with COS Control 0.5.364. Everything new is off by default: until the owner changes the cue mode or turns grounded cues on, this server answers, asks and writes exactly as 6.97.6 does.
