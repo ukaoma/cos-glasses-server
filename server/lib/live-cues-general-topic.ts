@@ -29,36 +29,75 @@ export function normalizeForMatch(text: string): string {
     .replace(/\b(?:\p{L}\.){2,}\p{L}?/gu, m => m.replace(/\./g, ''))
     .replace(/[-_\u2010-\u2015/]+/g, ' ').replace(/\s+/g, ' ').trim()
 }
-/** A trailing * is a stem ("pregnan*" is pregnant, pregnancy). Whole words only, so "son" never matches "reason". Run on
- *  normalizeForMatch text. Stems stop where a longer word would be a public topic: no "mom*" (moment), "kid*" (kidney), "tax*"
- *  (taxi, taxonomy), "grand*" (Grand Prix) or "mother*" (motherboard). */
+/** A trailing * is a stem ("pregnan*" is pregnant, pregnancy); any other regex fragment ("doctors?") is used as written, and must
+ *  not end in a bare * (write (?:\\w*)). Whole
+ *  words only, so "son" never matches "reason". Run on normalizeForMatch text. */
 const wordsRe = (words: string[]): RegExp => new RegExp(`\\b(?:${words.map(w => w.endsWith('*') ? `${w.slice(0, -1)}\\w*` : w).join('|')})\\b`, 'i')
 export type SensitiveCategory = 'health' | 'family' | 'finance' | 'legal' | 'school' | 'funeral'
-const SENSITIVE: ReadonlyArray<readonly [SensitiveCategory, RegExp]> = [
-  ['health', wordsRe(['health*', 'medical', 'medicine*', 'medication*', 'doctor*', 'hospital*', 'hospice', 'clinic*', 'diagnos*', 'therap*', 'surger*', 'pregnan*',
-    'prescription*', 'pharmac*', 'cancer', 'chemo*', 'oncolog*', 'illness*', 'symptom*', 'dentist*', 'nurse', 'nurses', 'nursing', 'sick', 'injur*', 'anxiety', 'depress*',
-    'psychiatr*', 'psycholog*', 'pediatric*', 'adhd', 'autis*', 'ob gyn', 'obgyn', 'c section', 'csection', 'miscarriage*', 'infertil*', 'ivf'])],
-  ['family', wordsRe(['family', 'families', 'wife', 'wives', 'husband*', 'spouse*', 'daughter*', 'son', 'sons', 'kid', 'kids', 'kiddo', 'kiddos', 'child', 'children',
-    'childcare', 'childhood', 'baby', 'babies', 'newborn', 'mom', 'moms', 'mommy', 'mum', 'mums', 'mother', 'mothers', 'motherhood', 'dad', 'dads', 'daddy',
-    'father', 'fathers', 'fatherhood', 'parent*', 'brother*', 'sister*', 'sibling*', 'grandma*', 'grandpa*', 'grandmother*', 'grandfather*', 'grandparent*',
-    'grandchild*', 'grandson*', 'granddaughter*', 'grandkid*', 'aunt*', 'uncle*', 'cousin*', 'nephew*', 'niece*', 'stepmom', 'stepdad', 'fiance*',
-    'girlfriend', 'boyfriend', 'in laws', 'inlaws', 'birthday*', 'wedding*'])],
-  ['finance', wordsRe(['financ*', 'tax', 'taxes', 'taxed', 'taxing', 'taxable', 'taxation', 'irs', 'debt*', 'loan*', 'mortgage*', 'installment*', 'escrow',
-    'credit score', 'pension*', 'insurance', 'salary', 'salaries', 'payroll', 'paycheck*', 'bankrupt*', 'retirement', '401k', '403b', 'inheritance', 'net worth'])],
-  ['legal', wordsRe(['legal*', 'lawsuit*', 'sue', 'sued', 'suing', 'lawyer*', 'attorney*', 'court', 'courts', 'courtroom*', 'subpoena*', 'divorce*', 'custody', 'settlement*', 'litigation'])],
-  ['school', wordsRe(['school*', 'daycare*', 'preschool*', 'kindergarten*', 'nursery', 'pre k', 'prek', 'teacher*', 'tuition', 'homework', 'dnp', 'dissertation*', 'doctoral'])],
-  ['funeral', wordsRe(['funeral*', 'obituar*', 'burial*', 'cemetery', 'die', 'dies', 'died', 'dying', 'passed away', 'death*', 'grief', 'mourning', 'casket', 'condolence*'])],
-]
-const SENSITIVE_ALL = new RegExp(SENSITIVE.map(([, re]) => re.source).join('|'), 'i')
+const CATEGORIES: readonly SensitiveCategory[] = ['health', 'family', 'finance', 'legal', 'school', 'funeral']
 
-/** The private-life category a transcript window touches, or null. Pure and exported so the saved windows can be replayed through
- *  it. Private-life vocabulary only: the owner's profile terms never skip a window. Measured on the saved windows, even
- *  whole-term matching skipped a third of the work windows that pass the trigger and word matching skipped all of them; the
- *  profile's terms guard the QUERY instead (ownerTermPhrases). */
+/** TWO LAYERS, because they have opposite costs. A window that is skipped loses a chance at a cue; a query that is let through
+ *  can reach the web. So the WINDOW list holds only what is clearly personal (measured on the 974 saved windows: the broad list
+ *  skipped 37.6% of them, mostly on ordinary work talk: court, sick, baby, finance, taxes, health, school, family, medical),
+ *  and the QUERY list is the window list plus everything broader.
+ *
+ *  WINDOW_TERMS: family relations, health specifics, personal-finance phrases, legal specifics, school for kids, and death. */
+const WINDOW_TERMS: Record<SensitiveCategory, string[]> = {
+  health: ['doctors?', 'hospitals?', 'clinics?', 'diagnos*', 'chemo*', 'cancer', 'surger(?:y|ies)', 'therapists?', 'therapy', 'psychiatr*', 'psycholog*', 'prescription*',
+    'pregnan*', 'icu', 'intensive care', 'emergency room', 'er visit', 'urgent care', 'ob gyn', 'obgyn', 'c section', 'csection', 'adhd', 'autis*', 'hospice'],
+  family: ['wife', 'wives', 'husbands?', 'spouses?', 'kids?', 'moms?', 'mommy', 'dads?', 'daddy', 'sons?', 'daughters?', 'brothers?', 'sisters?', 'parents',
+    'step ?(?:son|daughter|mom|dad|kid\\w*)', 'grandma*', 'grandpa*', 'grandmother*', 'grandfather*', 'grandparent*', 'grandchild*', 'grandson*', 'granddaughter*',
+    'grandkid*', 'nephews?', 'nieces?'],
+  finance: ['irs', 'tax bills?', 'tax returns?', 'back taxes', 'income tax(?:es)?', 'property tax(?:es)?', 'debts?', 'loans?', 'mortgages?', 'bankrupt*', 'credit score',
+    'installment*', 'escrow', 'pensions?', 'roth', 'ira', 'rollover', 'k 1', 'alimony', 'child support'],
+  legal: ['lawsuits?', 'sued', 'attorneys?', 'lawyers?', 'custody', 'divorce*', 'court dates?', 'court hearings?'],
+  school: ['daycare*', 'preschool*', 'kindergarten*', 'school pick ?up', 'report cards?', 'tuition', 'parent teacher', 'dnp', 'dissertation*'],
+  funeral: ['died', 'deaths?', 'funeral*', 'passed away', 'dying'],
+}
+/** DENY_EXTRA_TERMS: the broader words a QUERY must not carry. Bare words like these are common in work talk, so they never skip a
+ *  window, but a web query is a different matter. Stems stop where a longer word would be a public topic: no "mom*" (moment),
+ *  "kid*" (kidney), "tax*" (taxi, taxonomy), "grand*" (Grand Prix) or "mother*" (motherboard). */
+const DENY_EXTRA_TERMS: Record<SensitiveCategory, string[]> = {
+  health: ['health*', 'medical', 'medicine*', 'medication*', 'doctor*', 'hospital*', 'clinic*', 'therap*', 'surger*', 'pharmac*', 'oncolog*', 'illness*', 'symptom*',
+    'dentist*', 'nurse', 'nurses', 'nursing', 'sick', 'injur*', 'anxiety', 'depress*', 'pediatric*', 'miscarriage*', 'infertil*', 'ivf'],
+  family: ['family', 'families', 'husband*', 'spouse*', 'daughter*', 'brother*', 'sister*', 'kiddo', 'kiddos', 'child', 'children', 'childcare', 'childhood', 'baby',
+    'babies', 'newborn', 'mum', 'mums', 'mother', 'mothers', 'motherhood', 'father', 'fathers', 'fatherhood', 'parent*', 'sibling*', 'aunt*', 'uncle*', 'cousin*',
+    'fiance*', 'girlfriend', 'boyfriend', 'in laws', 'inlaws', 'birthday*', 'wedding*', 'step ?(?:mom|mother|dad|father|son|daughter|kid|child|brother|sister|parent|family)(?:\\w*)'],
+  finance: ['financ*', 'tax', 'taxes', 'taxed', 'taxing', 'taxable', 'taxation', 'debt*', 'loan*', 'mortgage*', 'pension*', 'insurance', 'salary', 'salaries', 'payroll',
+    'paycheck*', 'retirement', '401k', '403b', 'inheritance', 'net worth', 'k one'],
+  legal: ['legal*', 'lawsuit*', 'sue', 'suing', 'lawyer*', 'attorney*', 'court', 'courts', 'courtroom*', 'subpoena*', 'settlement*', 'litigation'],
+  school: ['school*', 'nursery', 'pre k', 'prek', 'teacher*', 'homework', 'doctoral'],
+  funeral: ['obituar*', 'burial*', 'cemetery', 'die', 'dies', 'death*', 'grief', 'mourning', 'casket', 'condolence*'],
+}
+const WINDOW: ReadonlyArray<readonly [SensitiveCategory, RegExp]> = CATEGORIES.map(c => [c, wordsRe(WINDOW_TERMS[c])] as const)
+const DENY_ALL = wordsRe(CATEGORIES.flatMap(c => [...WINDOW_TERMS[c], ...DENY_EXTRA_TERMS[c]]))
+
+/** The clearly personal category a transcript window touches, or null. Pure and exported so the saved windows can be replayed
+ *  through it. Private-life vocabulary only, and only the high-precision list: the owner's profile terms never skip a window
+ *  (measured: whole-term matching still skipped a third of the work windows that pass the trigger, word matching all of them),
+ *  and neither do bare words like court, sick, baby, finance, taxes, health, school, family or medical. The broad list guards the
+ *  QUERY instead (denyWordHit, ownerTermPhrases). */
 export function sensitiveWindow(text: string): SensitiveCategory | null {
   const t = normalizeForMatch(text)
-  for (const [category, re] of SENSITIVE) if (re.test(t)) return category
+  for (const [category, re] of WINDOW) if (re.test(t)) return category
   return null
+}
+/** Runs of two or more consecutive tokens of one or two letters, joined ("i r s" is irs, "ta x" is tax): a query spelled out letter
+ *  by letter is the word it spells. Appended to the text before the deny list reads it, so nothing already in it is lost. */
+function collapseShortRuns(folded: string): string {
+  const out: string[] = []
+  let run: string[] = []
+  const flush = () => { if (run.length >= 2 && run.join('').length >= 3) out.push(run.join('')); run = [] }
+  for (const token of folded.split(' ')) { if (/^\p{L}{1,2}$/u.test(token)) run.push(token); else flush() }
+  flush()
+  return out.join(' ')
+}
+/** Does a QUERY (or any text) carry a word of the broad deny list? The window list plus the broader words, the Ask gate's private
+ *  words, and the letter-by-letter spellings of them. Pure and exported for probes. */
+export function denyWordHit(text: string): boolean {
+  const folded = normalizeForMatch(text)
+  const spelled = `${folded} ${collapseShortRuns(folded)}`
+  return PRIVATE_QUERY.test(spelled) || DENY_ALL.test(spelled)
 }
 
 // ── Names from the profile and the live transcript ──────────────────────────
@@ -183,7 +222,7 @@ export function admitCueTopic(raw: string, ctx: AdmitContext): AdmitResult {
   if (!QUERY_CHARS.test(query)) return { ok: false, reason: 'characters' }
   if (URLISH.test(folded)) return { ok: false, reason: 'url' }
   if (query !== redactSecrets(query)) return { ok: false, reason: 'secret' }
-  if (PRIVATE_QUERY.test(folded) || SENSITIVE_ALL.test(folded)) return { ok: false, reason: 'deny_word' }
+  if (denyWordHit(folded)) return { ok: false, reason: 'deny_word' }
   const words = factWords(folded)
   if (words.some(w => ctx.nameWords.has(w) || ctx.nameWords.has(stemWord(w)))) return { ok: false, reason: 'name' }
   const padded = ` ${words.map(stemWord).join(' ')} `
