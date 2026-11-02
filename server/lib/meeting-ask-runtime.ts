@@ -6,14 +6,16 @@ import { captureFinalizedAskEvidence, type FinalizedAskEvidence } from './meetin
 import { transcriptSources } from './meeting-ask-transcript-sources.js';
 import { confirmOrientation, meetingCalendar, meetingDomains, validateOrientationChange } from './meeting-ask-orientation.js';
 import type { MeetingAskOrientation } from '../../shared/meeting-ask.js';
-import type { MeetingAskSubmit, MeetingAskExchange, MeetingAskModel, MeetingAskFile, MeetingAskConfig, MeetingAskCapabilities, MeetingAskCosSearch } from '../../shared/meeting-ask.js';
+import type { MeetingAskSubmit, MeetingAskExchange, MeetingAskModel, MeetingAskFile, MeetingAskConfig, MeetingAskCapabilities, MeetingAskCosSearch, MeetingAskSource } from '../../shared/meeting-ask.js';
 import { AskError, createLiveAsk, normalizeAsk, searchAskHistory, LIVE_ASK_SYSTEM, type AskInput, type AskResult } from './live-cos-ask.js';
 import { MeetingAskStore, ASK_ID, ASK_SESSION, askFingerprint, type AskRecord } from './meeting-ask-store.js';
 import { runMeetingAskModel, AskProcessError } from './meeting-ask-runner.js';
 import { redactSecrets } from './lens-gist-engines.js';
 import { listLensGistEngines } from './lens-gist.js';
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen, type MaintenanceWorkLease } from './maintenance-lifecycle.js';
-import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate, factCheckRequest, recentPublicPages } from './meeting-ask-web.js';
+import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate, factCheckRequest, recentPublicPages, pastedPublicUrls, recentPastedPage, pointsAtEarlierLink, recentPastedPagesFromUserLinks } from './meeting-ask-web.js';
+import { readPastedPages, pastedReadFailedNotice, pastedPageFile, pastedTextFile, keepPastedContext, PASTED_REFUSED_NOTICE, PASTED_OVER_LIMIT_NOTICE } from './meeting-ask-pasted.js';
+import { webLedger } from './web-lookup-ledger.js';
 import { getServerInstanceId } from './server-instance-id.js';
 import { getOwnerName, getOwnerSpeakerLabel } from './profile.js';
 import { ownerCardFromProfile, type OwnerCard } from './meeting-ask-owner.js';
@@ -30,6 +32,7 @@ export function meetingAskCapabilities(): MeetingAskCapabilities { return { ...M
  * Replaces 'No web.' in LIVE_ASK_SYSTEM when the web is available. The planner decides whether to look
  * anything up; this tells it how to ask so the server's gate (meeting-ask-web.ts) can admit the query.
  */
+interface SharedContext { sources: import('./live-cos-ask.js').AskSource[]; notices: string[]; linkInQuestion: boolean }
 export const MEETING_ASK_WEB_SYSTEM = 'Public web: when the question needs public facts (who or what a public person, company, product, channel or term is, news, prices, documentation) that the supplied evidence does not confirm from a public source, return {"sections":[],"searchQuery":"...","searchScope":"web"}. If the user asks to fact-check, verify a public claim, or compare public costs, request a web search; missing roof area, dimensions or detailed scope limits the eventual comparison but does not prevent finding the original article, location, date, allocation and available comparable projects. Separate an announced budget or allocation from an awarded contract, invoice or total project scope. Do not infer fraud or overpricing from residential prices or unmatched scopes. If a comparison needs the previous public subject, retain that subject rather than searching generic words such as similar fixes. A question such as how much more is that than average requires a benchmark search; use the remaining lookup to find comparable public costs when the first article lacks a benchmark. With a usable cited benchmark B and discussed price P, calculate difference P-B, ratio P/B, and percentage (P/B-1)*100. State the units, source dates, geography, scope and whether the benchmark is an actual average or just a comparable project. Use a corroborated total allocation for total-cost comparisons. Do not base numerical ratios on an uncorroborated per-square-foot ASR figure; explicitly flag that number for confirmation. Missing roof area prevents a defensible per-square-foot comparison, but still retrieve examples and report their limits. Never label one example as the average. If the user asks you to search the web or look something up, request it. Build searchQuery only from words the user typed in this question or in their earlier questions. Never add names, numbers or details from the transcript, files, screenshots, memory or earlier answers: the server withholds a query that does. Never send private personal details to web search. For COS memories or earlier meetings use "searchScope":"cos". One Ask may use both, for example COS memory first and then the web. Do not ask permission for another lookup when the user has asked for a fact-check or comparison: use searchAllowed to request the remaining lookup, or explain the result when the bounded budget is spent. Only So what and Details are permitted for a typed answer; put follow-up suggestions in Details rather than a separate Ask row. If the search is withheld for missing user words, briefly explain it in the answer itself and give one exact suggested question naming the public subject so the user can authorize that search. Never claim to have verified anything without retrieved web evidence. Cite the observed article link using its supplied W source ID; do not cite only transcript claims or invent URLs. Evidence marked Retrieved page excerpt comes from that linked page and may be partial. Other links contain search-result evidence only. Prefer a retrieved official source for the requested application or terms. Return the observed application URL first when asked for a link. Distinguish API credits from subscription seats and partner discounts; do not combine their values, assume annual recurrence, or present partner discounts as Claude credits. Web search summaries represent the whole search, not any single linked page; disclose a material limitation briefly.';
 interface RuntimeDeps {
     /** Dependency-injected only for focused unit tests; production always reviews. */
@@ -190,7 +193,7 @@ export class MeetingAskRuntime {
         const catalog = await this.deps.catalog();
         return { protocolVersion: 2, serverInstanceId, selected: this.deps.store.config(), cosSearch: this.deps.store.cosSearch(), publicTopics:this.deps.store.publicTopics(), capabilities: { ...meetingAskCapabilities(), webRetrieval: this.deps.webCapability().available },
             models: catalog.flatMap(e => (e.models.length ? e.models : [e.defaultModel]).filter(Boolean).map(model => ({ engine: e.engine, model, available: e.available && (e.engine === 'claude' || e.engine === 'codex'), ...(!e.available ? { reason: e.detail ?? 'provider_unavailable' } : e.engine !== 'claude' && e.engine !== 'codex' ? { reason: 'meeting_adapter_not_qualified' } : {}) }))),
-            web: this.deps.webCapability() };
+            web: this.deps.webCapability(), webToday: (() => { try { return webLedger().today(); } catch { return undefined; } })() };
     }
     /** PUT config: {engine,model}, {cosSearch} or both. Everything is validated before anything is written. */
     async setConfig(raw: unknown): Promise<MeetingAskConfig> {
@@ -361,6 +364,76 @@ export class MeetingAskRuntime {
             throw e;
         }
     }
+    /**
+     * What the user shared in this question (6.97.8). A public link they typed is read as a page, even with no public-intent
+     * wording: the address is words they typed, and the gate in meeting-ask-web.ts (pastedPublicUrls) keeps every address check
+     * and refuses a link that carries a secret. A link seen only in the transcript, files or earlier answers is never read.
+     * Pasted text over 400 characters and a page that was read become meeting files, so the live cues' files arm can use them.
+     * Never throws: failing to read or keep something is a notice, not a failed answer.
+     */
+    private sharedContext(input: MeetingAskSubmit, exchanges: MeetingAskExchange[], signal: AbortSignal, readLinks: boolean): SharedContext | Promise<SharedContext> {
+        const notices: string[] = [], pages: MeetingAskSource[] = [];
+        const ledger = webLedger();
+        let linkInQuestion = false;
+        const toRead: string[] = [];
+        try {
+            if (readLinks) {
+                const { urls, refused } = pastedPublicUrls(input.question);
+                linkInQuestion = urls.length > 0 || refused.length > 0;
+                for (const reason of refused)
+                    ledger.withheld('ask', reason);
+                if (refused.some(r => r !== 'pasted_over_limit'))
+                    notices.push(PASTED_REFUSED_NOTICE);
+                if (refused.includes('pasted_over_limit'))
+                    notices.push(PASTED_OVER_LIMIT_NOTICE);
+                for (const url of urls) {
+                    const again = recentPastedPage(exchanges, input.sessionId, input.serverInstanceId, url);
+                    if (again)
+                        pages.push(again);
+                    else
+                        toRead.push(url);
+                }
+                if (!urls.length && pointsAtEarlierLink(input.question))
+                    pages.push(...recentPastedPagesFromUserLinks(exchanges, input.sessionId, input.serverInstanceId));
+                if (pages.length)
+                    notices.push('Reused the page from a link you pasted earlier in this meeting, read less than 15 minutes ago.');
+            }
+        }
+        catch {
+            notices.push('What you shared could not be fully read. The answer uses the rest of the evidence.');
+        }
+        const finish = (fresh: MeetingAskSource[]): SharedContext => {
+            try {
+                const files = [...fresh.map(pastedPageFile), pastedTextFile(input.question, Date.now())].filter((f): f is MeetingAskFile => !!f);
+                if (files.length) {
+                    const kept = keepPastedContext(this.deps.store, input.sessionId, files);
+                    notices.push(...kept.notices);
+                    if (kept.added.length)
+                        notices.push(`Kept for live cues: ${kept.added.map(n => `"${n}"`).join(', ')}.`);
+                }
+            }
+            catch {
+                notices.push('What you shared could not be added to live cue context.');
+            }
+            return { sources: [...pages, ...fresh].slice(0, 2).map((p, i) => ({ ...p, id: `W${i + 1}` })), notices, linkInQuestion };
+        };
+        // Nothing to fetch: answer in the same tick, so a question without a new link starts its model call exactly as before.
+        if (!toRead.length)
+            return finish([]);
+        const focus = (input.question.replace(/https?:\/\/\S+/gi, ' ').match(/[\p{L}\p{N}]{4,}/gu) ?? []).slice(0, 8);
+        return readPastedPages(toRead, { signal, focus }).then(read => {
+            if (read.sources.length)
+                ledger.pagesRead('ask', read.sources.length);
+            if (read.failedHosts.length)
+                notices.push(pastedReadFailedNotice(read.failedHosts));
+            return finish(read.sources);
+        }, e => {
+            if (signal.aborted)
+                throw e;
+            notices.push('What you shared could not be fully read. The answer uses the rest of the evidence.');
+            return finish([]);
+        });
+    }
     private async execute(input: MeetingAskSubmit, normal: AskInput, files: MeetingAskFile[], controller: AbortController, lease: MaintenanceWorkLease, refinementNotices: string[] = [], orientation?: MeetingAskOrientation, finalized?: FinalizedAskEvidence, publicTopics=false) {
         let release = true;
         let completedResult: AskResult | undefined;
@@ -396,6 +469,17 @@ export class MeetingAskRuntime {
             const cosSearch = this.deps.store.cosSearch();
             if (!webAvailable)
                 extraNotices.push('Public web lookup is unavailable: Claude search provider is not connected.');
+            // Links and text the user shared (6.97.8). Typed questions only; a preset's words come from the meeting.
+            let shared: SharedContext = { sources: [], notices: [], linkInQuestion: false };
+            if (input.action === 'ask') {
+                const pending = this.sharedContext(input, journal.map(r => r.exchange), controller.signal, !withoutPublic);
+                shared = pending instanceof Promise ? await pending : pending;
+            }
+            extraSources.push(...shared.sources);
+            extraNotices.push(...shared.notices);
+            // A withheld lookup counts once per reason per question, wherever in this run it is first refused.
+            const withheldCounted = new Set<string>();
+            const countWithheld = (reason: string) => { if (!withheldCounted.has(reason)) { withheldCounted.add(reason); webLedger().withheld('ask', reason); } };
             // Only the user's own typed questions from this meeting, newest last. Answers, transcript and files never lend words.
             const priorQuestions = priorUserQuestions(journal, input);
             // 6.71.13: meeting-wide Fact check, named claim checks and their follow-ups. The narrow
@@ -403,7 +487,7 @@ export class MeetingAskRuntime {
             const factMode = factCheckScopeEnabled() && publicTopics && webAvailable && input.action === 'ask' && !genericRetirementQuery(normal, priorQuestions) ? this.factCheckMode(journal, input) : null;
             if (factMode) {
                 const factStarted = Date.now();
-                const fact = await runMeetingFactCheck({ ...factMode, input: normal, at: { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, elapsedMs: input.elapsedMs }, records: journal, run: (prompt, system, signal, caller) => this.deps.run(input.model!, prompt, system, signal, undefined, caller ? { caller } : undefined), search: (query, signal) => this.deps.webSearch(query, signal), ownerArea: this.deps.ownerArea, nameWords: [this.deps.wearer() ?? ''], ownerWords: [this.deps.wearer() ?? '', this.deps.ownerLabel() ?? ''], signal: controller.signal, startedAt: executionStarted });
+                const fact = await runMeetingFactCheck({ ...factMode, input: normal, at: { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, elapsedMs: input.elapsedMs }, records: journal, run: (prompt, system, signal, caller) => this.deps.run(input.model!, prompt, system, signal, undefined, caller ? { caller } : undefined), search: (query, signal) => this.deps.webSearch(query, signal, { feature: 'factCheck' }), ownerArea: this.deps.ownerArea, nameWords: [this.deps.wearer() ?? ''], ownerWords: [this.deps.wearer() ?? '', this.deps.ownerLabel() ?? ''], signal: controller.signal, startedAt: executionStarted });
                 phases.push({ phase: 'fact_check', ms: Date.now() - factStarted, ...(fact ? {} : { results: 0 }) });
                 if (fact) {
                     completedResult = { answer: fact.answer, sections: fact.sections, sources: fact.sources, notices: fact.notices, model: fact.model ?? '', throughMs: input.elapsedMs };
@@ -421,8 +505,10 @@ export class MeetingAskRuntime {
                 const own = publicSearchGate({ question: input.question, query: userWebQuery(input.question, priorQuestions) ?? '', priorQuestions });
                 if (own.ok)
                     explicitWebQuery = own.query;
-                else
+                else {
                     withheldNotice = own.notice;
+                    countWithheld(own.reason);
+                }
             }
             let contextualQuery:string | null=null, benchmarkQuery:string | null=null, admittedQuery:string | undefined;
             const genericRule=publicTopics && webAvailable && input.action==='ask' ? genericRetirementQuery(normal,priorQuestions) : null;
@@ -454,8 +540,14 @@ export class MeetingAskRuntime {
             const webLookup = async (q: string) => {
                 const topicGate = contextualQuery ? publicTopicLookupGate(q,contextualQuery) : null;
                 const plan = contextualQuery ? {query:topicGate?.ok ? topicGate.query : contextualQuery,notices:[]} : resolveMeetingWebQuery({ question: input.question, query: q, priorQuestions, explicitQuery: explicitWebQuery });
-                if (plan.query === null)
-                    return { sources: [], notices: plan.notices };
+                if (plan.query === null) {
+                    // resolveMeetingWebQuery withheld it because publicSearchGate refused the planner's query; ask the gate for the same reason.
+                    const refusal = contextualQuery ? null : publicSearchGate({ question: input.question, query: q, priorQuestions });
+                    const reason = refusal && !refusal.ok ? refusal.reason : null;
+                    if (reason) countWithheld(reason);
+                    // The user pasted a link, so "the question did not ask for public information" would be false: the page notice speaks.
+                    return { sources: [], notices: shared.linkInQuestion && reason === 'no_public_intent' ? [] : plan.notices };
+                }
                 admittedQuery=plan.query;
                 let found=webResults.get(plan.query);
                 if (!found) {
@@ -463,7 +555,7 @@ export class MeetingAskRuntime {
                     // A slow second lookup must not discard an already fetched article.
                     const budget=Math.min(12000,15000-(Date.now()-executionStarted));
                     if(budget<=0)found={sources:[],notices:['The public lookup budget ended. Additional comparisons remain unverified.']};
-                    else try { found=await this.deps.webSearch(plan.query,AbortSignal.any([controller.signal,AbortSignal.timeout(budget)])); }
+                    else try { found=await this.deps.webSearch(plan.query,AbortSignal.any([controller.signal,AbortSignal.timeout(budget)]),{feature:'ask'}); }
                     catch(e){
                         if(controller.signal.aborted || e instanceof AskProcessError && e.terminationUnconfirmed)throw e;
                         found={sources:[],notices:['The public lookup budget ended before supporting pages were returned. Additional claims remain unverified.']};

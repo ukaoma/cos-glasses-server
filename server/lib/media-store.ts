@@ -623,7 +623,8 @@ export class MediaStore {
       : prepared.mime === 'application/pdf' ? 'pdf'
         : prepared.mime === 'text/markdown' ? 'md'
           : prepared.mime === 'text/csv' ? 'csv'
-            : prepared.mime === 'application/json' ? 'json' : 'txt'
+            : prepared.mime === 'application/json' ? 'json'
+              : prepared.mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ? 'xlsx' : 'txt'
     const derivatives = prepared.category === 'video' ? prepared.frames : prepared.pageImages
     const ref: MediaAttachmentRef = {
       id,

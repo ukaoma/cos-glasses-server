@@ -60,6 +60,7 @@ import { LensGistLimitError, runLensGistEngine } from './lens-gist-engines.js'
 import { resolveProviderBinary } from './provider-binary.js'
 import { COS_SCRIPTS_DIR, PYTHON_BIN, contextSourceAvailable } from './python-bridge.js'
 import { dataPath } from './data-dir.js'
+import { webLedger, type WebTodayView } from './web-lookup-ledger.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { cueBefore, liveCueVerdicts, type LiveCueLogRow } from './live-cue-verdicts.js'
@@ -1347,6 +1348,8 @@ export interface LiveCuesV2SettingsResponseV3 extends Omit<LiveCuesV2SettingsRes
   cueMode: LiveCuesV2Mode<LiveCuesCueMode>
   grounding: LiveCuesV2Mode<LiveCuesGrounding>
   general: { limits: LiveCuesGeneralLimits; today: GeneralCuesToday; publicTopics: boolean; homeArea: string | null }
+  /** Additive (6.97.8): every public web lookup today by feature (cues, meeting assistant, fact check) and the ones held back. `general.today` keeps its meaning (the general cues only). */
+  webToday: WebTodayView
 }
 /** Today's general-cue counters and breaker come from the general runner, which registers itself here. Until it does (and
  *  whenever general cues have never run) they read as zero. */
@@ -1361,8 +1364,10 @@ export function liveCuesV2SettingsViewV3(env: NodeJS.ProcessEnv = process.env): 
   try { publicTopics = new MeetingAskStore().publicTopics() } catch { publicTopics = false }
   let homeArea: string | null = null
   try { homeArea = getOwnerHomeArea() } catch { homeArea = null }
+  let webToday: WebTodayView
+  try { webToday = webLedger().today() } catch { webToday = { day: v2.today.day, readable: false, cues: { searches: 0, pagesRead: 0 }, ask: { searches: 0, pagesRead: 0 }, factCheck: { searches: 0, pagesRead: 0 }, withheld: { total: 0, byReason: {}, byFeature: { cues: 0, ask: 0, factCheck: 0 } } } }
   return { ...v2, v: 3, cueMode: resolveLiveCuesCueMode(env, settings), grounding: resolveLiveCuesGrounding(env, settings),
-    general: { limits: resolveLiveCuesGeneralLimits(env, settings), today, publicTopics, homeArea } }
+    general: { limits: resolveLiveCuesGeneralLimits(env, settings), today, publicTopics, homeArea }, webToday }
 }
 
 /** What a v3 POST may change beyond the v2 patch. */

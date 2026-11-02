@@ -12,6 +12,7 @@ import { resolveProviderBinary } from './provider-binary.js';
 import { pageWasRead, READ_PAGE_PREFIX } from './meeting-ask-review.js';
 import type { MeetingAskExchange, MeetingAskSource } from '../../shared/meeting-ask.js';
 import { fetchPublicArticle } from './meeting-web-page.js';
+import { webLedger, type WebFeature } from './web-lookup-ledger.js';
 export function publicAddress(host: string): boolean {
     const h = host.toLowerCase().replace(/^\[|\]$/g, '');
     if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal'))
@@ -332,6 +333,8 @@ export function meetingWebCapability() { return resolveProviderBinary('claude').
  *  keeps its meeting_ask_web label and every older caller behaves exactly as before. */
 export async function searchMeetingWeb(query: string, signal?: AbortSignal, options?: {
     auditCaller?: string;
+    /** Which feature to count the lookup under in the daily web ledger. Omitted: the general cues' audit caller counts as cues, anything else as the meeting assistant. */
+    feature?: WebFeature;
 }): Promise<{
     sources: MeetingAskSource[];
     notices: string[];
@@ -340,6 +343,9 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal, opti
         return { sources: [], notices: ['Public search was withheld because the query contained a secret.'] };
     if (/\b(?:application|apply|signup|documentation|docs)\b/i.test(query) && !/\bofficial\b/i.test(query)) query += ' official';
     if(query.toLowerCase().replace(/[^a-z0-9]/g,'') === '401k403bleavingemployerkeepmoneyinoldretirementplanirsdepartmentoflabor') return readRetirementRules(publicAddress,signal);
+    const feature: WebFeature = options?.feature ?? (options?.auditCaller === 'live_cues_general' ? 'cues' : 'ask');
+    // Counted where the search is dispatched, whatever it returns: a search that ran and found nothing still ran.
+    webLedger().search(feature);
     const root = mkdtempSync(join(tmpdir(), 'cos-ask-web-'));
     writeFileSync(join(root,'query.txt'),query.slice(0,240),{mode:0o600});
     const hook = join(root, 'hook.cjs');
@@ -393,6 +399,7 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal, opti
             if (!page || fetched >= 2) return;
             source.text = READ_PAGE_PREFIX + redactSecrets(page.text); source.url=page.url; if(page.title) source.title=redactSecrets(page.title); fetched++;
         });
+        if (fetched) webLedger().pagesRead(feature, fetched);
         return { sources, notices: [`Public web: ${fetched} result page${fetched === 1 ? '' : 's'} read (at most two, bounded excerpts). Other links have search-result evidence only. The search summary describes the search, not any single page. Search provider: Claude Haiku.`] };
     }
     catch (e) {
@@ -415,4 +422,118 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal, opti
 export function recentPublicPages(exchanges:readonly MeetingAskExchange[],sessionId:string,serverInstanceId:string,query:string,now=Date.now()):MeetingAskSource[]{
     const prior=exchanges.filter(e=>e.sessionId===sessionId&&e.serverInstanceId===serverInstanceId&&e.status==='completed'&&e.publicWebQuery===query&&now-Date.parse(e.createdAt)>=0&&now-Date.parse(e.createdAt)<900000).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).at(-1);
     return (prior?.sources??[]).filter(s=>pageWasRead(s)&&now-Date.parse(s.retrievedAt??prior!.createdAt)>=0&&now-Date.parse(s.retrievedAt??prior!.createdAt)<900000).slice(0,2).map(s=>({...s,retrievedAt:s.retrievedAt??prior!.createdAt}));
+}
+
+/*
+ * Pasted links (6.97.8).
+ *
+ * The privacy rule is "a word reaches the web only if the user typed it". A public http(s) address the user typed into the
+ * question is words the user typed, so COS reads that one page even when the question has no public-intent wording ("This is
+ * the article we're discussing by the way: <url>"). It is read, not searched: nothing but the address the user typed is
+ * requested, and the page is fetched by fetchPublicArticle with its DNS pin, redirect checks and size and time caps.
+ *
+ * What stays. publicWebUrl (http or https, public host, no credentials, ports 80 and 443), the public-address check on every
+ * address the host resolves to (fetchPublicArticle), and redactSecrets: a link that carries a key or token, in its path or
+ * in a query parameter named like one, is refused, never fetched. At most PASTED_URL_MAX links are looked at per question;
+ * the rest are ignored. A link found only in the transcript, a file, memory or an earlier ANSWER is never fetched: this
+ * reads the current question text and nothing else.
+ */
+export const PASTED_URL_MAX = 2;
+export type PastedUrlRefusal = 'pasted_not_public' | 'pasted_secret' | 'pasted_over_limit';
+export interface PastedUrls {
+    /** The links that may be read, in the order typed. */
+    urls: string[];
+    /** One entry per link that was looked at and refused, or ignored for being over the limit. */
+    refused: PastedUrlRefusal[];
+}
+const URL_IN_TEXT = /https?:\/\/[^\s<>"'`]+/gi;
+/** A query parameter whose name says it carries a credential or a signature. */
+const URL_SECRET_PARAM = /(?:^|[_-])(?:token|secret|passw(?:or)?d|passwd|apikey|api[_-]?key|access[_-]?key|signature|sig|auth|authorization|session|sessionid|credential|jwt|bearer|key)(?:$|[_-])/i;
+function trimUrl(raw: string): string {
+    let u = raw.replace(/[.,;:!?'"\]}]+$/, '');
+    // A closing parenthesis belongs to the link only when an opening one does.
+    while (u.endsWith(')') && (u.match(/\)/g) ?? []).length > (u.match(/\(/g) ?? []).length)
+        u = u.slice(0, -1).replace(/[.,;:!?'"\]}]+$/, '');
+    return u;
+}
+/** The addresses typed into `question` that COS may read, and what it refused. Pure: no network, no disk. */
+export function pastedPublicUrls(question: string): PastedUrls {
+    const found: string[] = [];
+    for (const m of question.match(URL_IN_TEXT) ?? []) {
+        const u = trimUrl(m);
+        if (u && !found.includes(u))
+            found.push(u);
+    }
+    const urls: string[] = [], refused: PastedUrlRefusal[] = [];
+    found.forEach((raw, i) => {
+        if (i >= PASTED_URL_MAX) {
+            refused.push('pasted_over_limit');
+            return;
+        }
+        let parsed: URL | null = null;
+        try {
+            parsed = new URL(raw);
+        }
+        catch { /* not an address */ }
+        if (!parsed) {
+            refused.push('pasted_not_public');
+            return;
+        }
+        const carriesSecret = !!(parsed.username || parsed.password) || raw !== redactSecrets(raw) || REDACTION_MARK.test(raw)
+            || [...parsed.searchParams].some(([name, value]) => value && URL_SECRET_PARAM.test(name));
+        if (carriesSecret) {
+            refused.push('pasted_secret');
+            return;
+        }
+        const ok = publicWebUrl(raw);
+        if (!ok) {
+            refused.push('pasted_not_public');
+            return;
+        }
+        urls.push(ok);
+    });
+    return { urls, refused };
+}
+/** Two addresses for the same page: scheme-agnostic host, no fragment, no tracking parameters, no trailing slash. */
+export function pastedUrlKey(url: string): string {
+    try {
+        const u = new URL(url);
+        const keep = [...u.searchParams].filter(([k]) => !/^(?:utm_|fbclid$|gclid$|mc_|ref$)/i.test(k)).sort(([a], [b]) => a.localeCompare(b));
+        const query = keep.map(([k, v]) => `${k}=${v}`).join('&');
+        return `${u.hostname.toLowerCase().replace(/^www\./, '')}${u.pathname.replace(/\/+$/, '')}${query ? `?${query}` : ''}`;
+    }
+    catch {
+        return url;
+    }
+}
+/** A read page from this meeting's own recent exchanges for the same address (read less than 15 minutes ago), newest first. */
+export function recentPastedPage(exchanges: readonly MeetingAskExchange[], sessionId: string, serverInstanceId: string, url: string, now = Date.now()): MeetingAskSource | null {
+    const key = pastedUrlKey(url);
+    const rows = exchanges.filter(e => e.sessionId === sessionId && e.serverInstanceId === serverInstanceId && e.status === 'completed').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    for (const e of rows)
+        for (const s of e.sources ?? []) {
+            const at = Date.parse(s.retrievedAt ?? e.createdAt);
+            if (s.url && pageWasRead(s) && pastedUrlKey(s.url) === key && now - at >= 0 && now - at < 900000)
+                return { ...s, retrievedAt: s.retrievedAt ?? e.createdAt };
+        }
+    return null;
+}
+/** "The article", "that link", "the page": a follow-up that points back at a link typed earlier, with none of its own. */
+export function pointsAtEarlierLink(question: string): boolean {
+    return pastedPublicUrls(question).urls.length === 0 && /\b(?:article|story|page|link|post|piece|site|website|url)\b/i.test(question);
+}
+/** The pages read for links the USER typed in this meeting's last few questions (read less than 15 minutes ago), newest first, at most PASTED_URL_MAX. */
+export function recentPastedPagesFromUserLinks(exchanges: readonly MeetingAskExchange[], sessionId: string, serverInstanceId: string, now = Date.now()): MeetingAskSource[] {
+    const mine = exchanges.filter(e => e.sessionId === sessionId && e.serverInstanceId === serverInstanceId && e.status === 'completed' && e.action === 'ask' && now - Date.parse(e.createdAt) < 900000)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4);
+    const out: MeetingAskSource[] = [];
+    for (const e of mine)
+        for (const url of pastedPublicUrls(e.question).urls) {
+            const page = recentPastedPage(exchanges, sessionId, serverInstanceId, url, now);
+            if (page && !out.some(p => p.url === page.url))
+                out.push(page);
+            if (out.length >= PASTED_URL_MAX)
+                return out;
+        }
+    return out;
 }

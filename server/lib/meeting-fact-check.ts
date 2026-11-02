@@ -27,6 +27,7 @@ import { groundWebLinks } from './meeting-ask-links.js'
 import type { FactCheckClaim } from './meeting-ask-store.js'
 import { isFactCheckCTA, pageWasRead, COVERAGE, normalizeReviewConfidence, reviewRepairDiagnostics, READ_PAGE_PREFIX } from './meeting-ask-review.js'
 import { publicSearchGate } from './meeting-ask-web.js'
+import { webLedger } from './web-lookup-ledger.js'
 import { PRIVATE_QUERY, RESEARCH_WORDS } from './meeting-public-topic.js'
 import { redactSecrets } from './lens-gist-engines.js'
 import { getOwnerHomeArea, HOME_AREA_LABEL } from './profile.js'
@@ -413,6 +414,8 @@ export function admitFactCheckClaims(raw: unknown, input: Pick<AskInput, 'turns'
 export function originQuery(baseQuery: string, origin: OwnerOrigin | null): string | undefined {
   const full = origin ? `${factWords(origin.text).join(' ')} ${baseQuery}` : baseQuery
   const gate = publicSearchGate({ question: 'Search the web for ' + full, query: full })
+  // The one place a fact check's query meets the public-search gate: a refusal is counted here, once per claim it is asked about.
+  if (!gate.ok) webLedger().withheld('factCheck', gate.reason)
   return gate.ok ? gate.query : undefined
 }
 

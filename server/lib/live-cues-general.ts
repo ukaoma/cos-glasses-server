@@ -32,6 +32,7 @@ import { JevError } from './jev.js'
 import { DecisionProviderError } from './decision-provider.js'
 import { LensGistLimitError, redactSecrets, runLensGistEngine } from './lens-gist-engines.js'
 import { searchMeetingWeb } from './meeting-ask-web.js'
+import { webLedger } from './web-lookup-ledger.js'
 import { publicHttpsUrl } from './public-https-url.js'
 import {
   GENERAL_INSIGHT_CONTEXT_CHARS, GENERAL_INSIGHT_SOURCE_CHARS, GENERAL_INSIGHT_WRITER_SYSTEM, GENERAL_TOPIC_SYSTEM, generalInsightPrompt, generalTopicPrompt,
@@ -581,7 +582,7 @@ export class GeneralCueRunner {
     // 1. Deterministic skip, before any model call: a window with private-life vocabulary never leaves the machine. (The owner's
     //    vocabulary does not skip a window: it guards the query, as whole terms, in admission.)
     const sensitive = sensitiveWindow(window)
-    if (sensitive) { rec.last = { state: 'withheld', reason: 'sensitive_window' }; return this.done(row, 'no_cue', `sensitive:${sensitive}`) }
+    if (sensitive) { rec.last = { state: 'withheld', reason: 'sensitive_window' }; webLedger().withheld('cues', 'personal'); return this.done(row, 'no_cue', `sensitive:${sensitive}`) }
 
     // 1b. The names a query must not carry, read now, before any spend: the owner, every enrolled voice, the speakers the ASR path
     //     reported, the calendar title's capitalized words and the speaker labels in the window. If the voice names cannot be read
@@ -590,6 +591,7 @@ export class GeneralCueRunner {
     try { nameWords = await raceAbort(blockedNameWords(window, c.speakerNames ?? [], profile), signal) } catch (error) {
       if (isCancel(error, signal)) throw error
       rec.last = { state: 'withheld', reason: 'names_unavailable' }
+      webLedger().withheld('cues', 'names_unavailable')
       return this.done(row, 'no_cue', 'names_unavailable')
     }
 
@@ -618,12 +620,12 @@ export class GeneralCueRunner {
     /** A trace row carries a hash only for a rejection that names nothing private: a repeat or a length. */
     const hashFor = (reason: AdmitReason, q: string): string | null => HASHABLE_REJECTIONS.has(reason) ? queryHash(q) : null
     let admitted = admitCueTopic(topic.query, ctx)
-    if (!admitted.ok) { row.queryHash = hashFor(admitted.reason, topic.query); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }
+    if (!admitted.ok) { row.queryHash = hashFor(admitted.reason, topic.query); webLedger().withheld('cues', `rejected_${admitted.reason}`); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }
     if (topic.category === 'local') {
       const withArea = withHomeArea(admitted.query, this.settings.homeArea())
-      if (withArea === null) { row.queryHash = queryHash(admitted.query); return this.done(row, 'no_cue', 'local_no_area', 2) }
+      if (withArea === null) { row.queryHash = queryHash(admitted.query); webLedger().withheld('cues', 'local_no_area'); return this.done(row, 'no_cue', 'local_no_area', 2) }
       const again = admitCueTopic(withArea, ctx)
-      if (!again.ok) { row.queryHash = hashFor(again.reason, withArea); return this.done(row, 'no_cue', `rejected_local:${again.reason}`, 2) }
+      if (!again.ok) { row.queryHash = hashFor(again.reason, withArea); webLedger().withheld('cues', `rejected_local_${again.reason}`); return this.done(row, 'no_cue', `rejected_local:${again.reason}`, 2) }
       admitted = again
     }
     row.queryHash = queryHash(admitted.query)

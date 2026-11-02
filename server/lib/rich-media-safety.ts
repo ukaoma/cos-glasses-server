@@ -20,6 +20,7 @@ import {
 import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
 import type { MediaMime } from '../../shared/media-attachment.js'
+import { extractXlsxText, XlsxError, XLSX_LIMITS } from './xlsx-text.js'
 
 /** Images and documents — the contract's `otherMaxBytes`. Unchanged. */
 export const MAX_OTHER_MEDIA_BYTES = 64 * 1024 * 1024          // 67108864
@@ -144,7 +145,7 @@ interface PreparedOriginalFile {
 
 export type PreparedDocumentFile = PreparedOriginalFile & {
   category: 'document'
-  mime: Extract<MediaMime, 'text/plain' | 'text/markdown' | 'text/csv' | 'application/json' | 'application/pdf'>
+  mime: Extract<MediaMime, 'text/plain' | 'text/markdown' | 'text/csv' | 'application/json' | 'application/pdf' | typeof XLSX_MIME>
   extractedText: string
   textTruncated: boolean
   pageImages: Buffer[]
@@ -502,6 +503,22 @@ export function mediaCeilingBytes(isVideo: boolean, transfer: MediaTransferMode 
   return transfer === 'chunked' ? MAX_CHUNKED_MEDIA_BYTES : MAX_VIDEO_MEDIA_BYTES
 }
 
+export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' as const
+
+/** A workbook's text: sheet names and cell values as tab-separated rows, bounded (see xlsx-text.ts). No formula is evaluated. */
+function processXlsx(sourcePath: string, byteLength: number): PreparedDocumentFile {
+  if (byteLength > XLSX_LIMITS.maxBytes) throw new RichMediaSafetyError('attachment_too_large', `workbook exceeds ${XLSX_LIMITS.maxBytes} byte limit`)
+  let result: ReturnType<typeof extractXlsxText>
+  try {
+    result = extractXlsxText(readFileSync(sourcePath))
+  } catch (e) {
+    if (e instanceof XlsxError) throw new RichMediaSafetyError(e.code === 'too_large' ? 'attachment_too_large' : e.code === 'not_a_workbook' ? 'unsupported_attachment_format' : 'corrupt_attachment', `workbook: ${e.message}`)
+    throw new RichMediaSafetyError('corrupt_attachment', 'workbook could not be read')
+  }
+  const capped = capText(result.text)
+  return { category: 'document', mime: XLSX_MIME, originalPath: sourcePath, originalBytes: byteLength, extractedText: capped.text, textTruncated: result.truncated || capped.truncated, pageImages: [] }
+}
+
 export async function prepareRichMediaFromFile(
   sourcePath: string,
   options: { label?: string; declaredMime?: string; byteLength: number; transfer?: MediaTransferMode },
@@ -516,6 +533,10 @@ export async function prepareRichMediaFromFile(
     throw new RichMediaSafetyError('attachment_too_large', `attachment exceeds ${cap} byte limit`)
   }
   if (isPdf(head)) return processPdf(sourcePath, options.byteLength)
+  // 6.97.8: .xlsx. Byte-authoritative like the PDF: the zip signature must be there, and the name or the declared type must say workbook.
+  if (head.length >= 4 && head.readUInt32LE(0) === 0x04034b50 && (fileExtension(options.label) === '.xlsx' || (options.declaredMime ?? '').toLowerCase().split(';', 1)[0] === XLSX_MIME)) {
+    return processXlsx(sourcePath, options.byteLength)
+  }
   if (isVideo) return processVideo(sourcePath, options.byteLength, options.label, options.declaredMime)
 
   const ext = fileExtension(options.label)
@@ -529,7 +550,7 @@ export async function prepareRichMediaFromFile(
         : ext === '.txt' || declared === 'text/plain'
           ? 'text/plain'
           : null
-  if (!textMime) throw new RichMediaSafetyError('unsupported_attachment_format', 'supported files: TXT, MD, CSV, JSON, PDF, MP4, MOV')
+  if (!textMime) throw new RichMediaSafetyError('unsupported_attachment_format', 'supported files: TXT, MD, CSV, JSON, XLSX, PDF, MP4, MOV')
   // Text has to be decoded to be validated at all, and it is bounded by the
   // 64 MiB `otherMaxBytes` cap enforced above.
   const capped = capText(decodeStrictUtf8(readFileSync(sourcePath)))

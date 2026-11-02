@@ -1098,3 +1098,47 @@ describe('real dependencies', () => {
     expect(mocks.search).toHaveBeenLastCalledWith('q', signal, { auditCaller: 'live_cues_general' })
   })
 })
+
+// 6.97.8: every lookup the general cues hold back is counted in the daily web ledger where it is held back. (The search itself is
+// counted inside searchMeetingWeb, tested in web-lookup-ledger-sites.test.ts.)
+describe('web lookup ledger: withheld lookups', () => {
+  async function ledgerFor(h: H) {
+    const L = await import('./web-lookup-ledger.js')
+    const ledger = new L.WebLookupLedger(join(h.dir, 'web-ledger.json'), () => h.clock.t)
+    L.setWebLedgerForTests(ledger)
+    return ledger
+  }
+  afterEach(async () => { (await import('./web-lookup-ledger.js')).setWebLedgerForTests(null) })
+  it('a window with private-life vocabulary counts as personal, once per attempt', async () => {
+    const h = await make({ sessions: [mac('mac_1', { text: 'we still owe the IRS and the mortgage payment' })] })
+    const ledger = await ledgerFor(h)
+    await h.go()
+    expect(ledger.today().withheld).toEqual({ total: 1, byReason: { personal: 1 }, byFeature: { cues: 1, ask: 0, factCheck: 0 } })
+    await h.go()
+    expect(ledger.today().withheld.byReason.personal).toBe(2)
+  })
+  it('an admission rejection counts under its own reason code, and a clean search counts no withheld lookup', async () => {
+    const reject = await make({ deps: { topicModel: async () => ({ text: JSON.stringify({ topic: true, category: 'news', query: 'Austin FC 2026 season' }) }) } })
+    const ledger = await ledgerFor(reject)
+    await reject.go()
+    expect(ledger.today().withheld).toMatchObject({ total: 1, byReason: { rejected_digit: 1 }, byFeature: { cues: 1 } })
+    const clean = await make()
+    const ledger2 = await ledgerFor(clean)
+    expect(await clean.go()).toMatchObject({ outcome: 'cue' })
+    expect(ledger2.today().withheld.total).toBe(0)
+  })
+  it('a lookup that is held back for the home area counts as local_no_area', async () => {
+    const h = await make({ deps: { topicModel: async () => ({ text: JSON.stringify({ topic: true, category: 'local', query: 'road closures' }) }) } })
+    const ledger = await ledgerFor(h)
+    h.settings.homeArea = null
+    await h.go()
+    expect(ledger.today().withheld.byReason).toEqual({ local_no_area: 1 })
+  })
+  it('a meeting that is not eligible (mode off) counts nothing: no lookup was proposed', async () => {
+    const h = await make()
+    const ledger = await ledgerFor(h)
+    h.settings.mode = 'focused' as never
+    await h.go()
+    expect(ledger.today().withheld.total).toBe(0)
+  })
+})
