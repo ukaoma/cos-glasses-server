@@ -50,6 +50,7 @@ import { GeneralCueRunner, realGeneralDeps, type GeneralCueCandidate, type Gener
 import { generalTriggerCalls } from './live-cues-general-prompts.js'
 import { isGenericSpeakerLabel } from './live-cues-general-topic.js'
 import { publicHttpsUrl } from './public-https-url.js'
+import { DATA_FACTS_FILE, DATA_WRITER_ADDENDUM, dataArmDomainOk, dataCandidate, dataFactsReader, type DataFactsRead } from './live-cues-v2-data.js'
 import { GROUNDED_LIMITS, SessionShingles, groundedCandidates, groundedSource, selfIdSet, usableFiles, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
 import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
@@ -524,6 +525,8 @@ export interface LiveCuesV2Deps {
   lease(): MaintenanceWorkLease | null
   /** Live cues v3, grounded cues only (absent means none): the files attached to this meeting (MeetingAskStore.files). May throw. */
   files?(sessionId: string): GroundedFile[]
+  /** Live cues, grounded only (absent means no data arm): the Tableau facts file, read and checked for staleness. Never throws. */
+  dataFacts?(): DataFactsRead
   /** The user-confirmed context of this meeting: its domain and calendar title (MeetingAskStore.orientation). May throw. */
   orientation?(sessionId: string): { domain: string | null; title: string | null }
   /** Live cues v3, general cues (absent means none: no runner is built): the general runner's dependencies. */
@@ -615,6 +618,7 @@ function realDeps(): LiveCuesV2Deps {
     judge: (title, window, notes, signal, provider) => calls(provider).judge(title, window, notes, signal),
     judgeB: (title, window, cands, signal, provider) => calls(provider).judgeB(title, window, cands, signal),
     files: sessionId => new MeetingAskStore().files(sessionId),
+    dataFacts: dataFactsReader(dataPath(DATA_FACTS_FILE)),
     orientation(sessionId) {
       const o = new MeetingAskStore().orientation(sessionId)
       return { domain: o.domain, title: o.calendar?.title ?? null }
@@ -1023,7 +1027,9 @@ export class LiveCuesV2Engine {
       if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) { trace.outcome = 'meeting_cap'; return }
       if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) { trace.outcome = 'daily_cap'; s.stopReason = 'budget_exhausted'; return }
       if (!this.deps.store.charge(liveCuesV2WeeklyCap(this.deps.env), s.sessionId)) { trace.outcome = 'budget_exhausted'; s.stopReason = 'budget_exhausted'; return }
-      const { version, system } = liveCuesV2WriterSystem(this.deps.env, s.kinds)
+      const { version, system: baseSystem } = liveCuesV2WriterSystem(this.deps.env, s.kinds)
+      // The Tableau scope rule rides on the rules only when a Tableau note was kept; every other cue sees the pinned text unchanged.
+      const system = kept.some(m => (m as GroundedNote).arm === 'data') ? baseSystem + DATA_WRITER_ADDENDUM : baseSystem
       if (s.kinds === 'extended') trace.kindSet = 'extended'
       const model = liveCuesV2Model(this.deps.env)
       const previous = s.cues.slice(-3).map(c => c.detail)
@@ -1059,7 +1065,8 @@ export class LiveCuesV2Engine {
         this.deps.cueLog?.({ v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, armedAt: s.armedAt, kind: cue.kind,
           headline: cue.headline, detail: cue.detail, gate: cue.gate, sources: cue.sources, model: cue.model, prompt: version,
           memorySource: mem.notes.length ? source : 'none', kept: kept.length, wouldWithhold: wouldWithhold(cue.detail, s.cues), before: cueBefore(said),
-          ...(run ? { arms: run.arms } : {}) })
+          // 'data' stays out of the log row: an older server's isLogRow rejects an arm it does not know, and the Tableau source is already in `sources`.
+          ...(run ? { arms: run.arms.filter((a): a is Exclude<typeof a, 'data'> => a !== 'data') } : {}) })
       } catch (error) {
         trace.cueLogError = (error as NodeJS.ErrnoException)?.code ?? 'append_failed'
         console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`)
@@ -1130,12 +1137,16 @@ export class LiveCuesV2Engine {
     // grounded part way through has only the window to start from).
     s.said.add(cleanWindow(s.chunks.join('\n')))
     const twins = [...this.sessions.keys()].filter(id => id !== s.sessionId)
+    // The Tableau data arm: a local file, no model call. Off (and traced why) when the file is missing, stale or invalid, when the
+    // meeting is not Quilt's, or when the speech does not name a group beside a funnel word or figure.
+    const today = this.deps.now().toLocaleDateString('en-CA')
+    const data = this.dataArm(window, meetingDomain, today, trace)
     const { candidates, excludedSelf, domainUnknown } = groundedCandidates({ cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript: s.said.shingles, window, selfIds: selfIdSet(s.sessionId, twins),
-      meetingDomain, today: this.deps.now().toLocaleDateString('en-CA') })
-    Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length }, excludedSelf, domainUnknown })
+      meetingDomain, today, data })
+    Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length, data: candidates.some(c => c.arm === 'data') ? 1 : 0 }, excludedSelf, domainUnknown })
 
     const source: LiveCuesV2MemorySource = candidates.some(c => c.arm === 'cue_memory') ? 'cue_memory' : candidates.some(c => c.arm === 'notes') ? 'notes' : 'none'
-    const arms = (['cue_memory', 'notes', 'files'] as const).filter(a => candidates.some(c => c.arm === a))
+    const arms = (['cue_memory', 'notes', 'files', 'data'] as const).filter(a => candidates.some(c => c.arm === a))
     const title = (calendarTitle ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
     const writerTitle = title || s.title
     let kept: GroundedNote[] = []
@@ -1148,6 +1159,22 @@ export class LiveCuesV2Engine {
       kept = selectJudgeB(candidates, judged.yes, liveCuesV2JudgeYes(this.deps.env), LIVE_CUES_V2_LIMITS.judgeMaxNotes)
     }
     return { candidates, kept, source, writerTitle, arms }
+  }
+
+  /** The Tableau candidate for this window, or null. `trace.dataArm` says what happened in one code: offered, no_group, no_funnel,
+   *  no_stage, domain, or the file's own reason (missing, unreadable, invalid, stale, future). Never throws. */
+  private dataArm(window: string, meetingDomain: string | null, today: string, trace: Record<string, unknown>): GroundedNote | null {
+    if (!this.deps.dataFacts) return null
+    try {
+      const read = this.deps.dataFacts()
+      if (!read.ok) { trace.dataArm = read.reason; return null }
+      trace.dataAgeH = Math.round((this.deps.now().getTime() - read.facts.asOf) / 360_000) / 10
+      if (!dataArmDomainOk(meetingDomain)) { trace.dataArm = 'domain'; return null }
+      const found = dataCandidate(read.facts, window, today)
+      if ('none' in found) { trace.dataArm = found.none; return null }
+      trace.dataArm = 'offered'
+      return found.candidate
+    } catch { trace.dataArm = 'threw'; return null }
   }
 
   private reap(): void {

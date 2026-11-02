@@ -8,7 +8,9 @@
 //     at least 15% of its 6-word sequences with what has been said so far;
 //   - personal-domain notes stay out of a meeting that is not personal;
 //   - one meeting is one candidate however many arms found it (date and normalised title, memory id, record id, file id);
-//   - at most M1..M4 from cue_memory, N1 from the notes, F1 from the files, six in all.
+//   - at most M1..M4 from cue_memory, N1 from the notes, F1 from the files, D1 from the Tableau data arm, six in all. The data
+//     candidate (live-cues-v2-data.ts) is deterministic and rare, so it keeps a slot: memory, notes and files give way to it, not it to
+//     them. It is not a copy of any meeting, so the self and twin rules do not apply to it, and it has no domain.
 
 import { notesQueryTerms } from './live-cues-v2-notes.js'
 import type { MemoryNote } from './live-cues-v2.js'
@@ -34,8 +36,8 @@ export const GROUNDED_LIMITS = {
   fileWindowTerms: 12,
 } as const
 
-export type GroundedArm = 'cue_memory' | 'notes' | 'files'
-export type GroundedKind = 'meeting' | 'memory' | 'file'
+export type GroundedArm = 'cue_memory' | 'notes' | 'files' | 'data'
+export type GroundedKind = 'meeting' | 'memory' | 'file' | 'data'
 /** A candidate for the judge: the note fields the judge and the writer read, plus where it came from. */
 export interface GroundedNote extends MemoryNote { arm: GroundedArm; kind: GroundedKind }
 
@@ -195,6 +197,8 @@ export interface GroundedInputs {
   meetingDomain: string | null
   /** This meeting's local date (YYYY-MM-DD): a file is dated with the meeting it was attached to. */
   today: string
+  /** The Tableau data candidate (live-cues-v2-data.ts dataCandidate), already triggered and domain-checked, or none. */
+  data?: GroundedNote | null
 }
 
 /** The candidates for the judge, in order M1..M4, N1, F1, with ids that keep their kind. `excludedSelf` counts the notes dropped
@@ -205,10 +209,12 @@ export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNot
   const seen = new Set<string>()
   const out: GroundedNote[] = []
   let excludedSelf = 0
+  // The data candidate keeps the last slot: the other arms fill at most five.
+  const cap = GROUNDED_LIMITS.maxCandidates - (i.data ? 1 : 0)
   const take = (list: MemoryNote[], arm: GroundedArm, limit: number, prefix: string) => {
     let n = 0
     for (const raw of list) {
-      if (n >= limit || out.length >= GROUNDED_LIMITS.maxCandidates) return
+      if (n >= limit || out.length >= cap) return
       if (!wellFormed(raw)) continue
       const note = describe(raw, arm)
       const identities = candidateIdentities(note)
@@ -223,21 +229,26 @@ export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNot
   }
   take(i.cueMemory, 'cue_memory', GROUNDED_LIMITS.cueMemoryTop, 'M')
   take(i.notes, 'notes', GROUNDED_LIMITS.notesTop, 'N')
-  if (out.length < GROUNDED_LIMITS.maxCandidates) {
+  if (out.length < cap) {
     const hit = bestFilePassage(usableFiles(i.files), i.window)
     if (hit) {
       out.push({ id: 'F1', date: i.today, title: hit.file.name.replace(/\s+/g, ' ').trim().slice(0, 90), notes: hit.passage, key: `file:${hit.file.id}`,
         arm: 'files', kind: 'file', fileId: hit.file.id })
     }
   }
+  if (i.data && out.length < GROUNDED_LIMITS.maxCandidates) out.push({ ...i.data, id: 'D1', arm: 'data', kind: 'data' })
   // The personal-domain rule can only work on a note that says its domain; this counts the notes that did not.
-  const domainUnknown = out.filter(c => c.arm !== 'files' && !c.domain).length
+  const domainUnknown = out.filter(c => c.arm !== 'files' && c.arm !== 'data' && !c.domain).length
   return { candidates: out, excludedSelf, domainUnknown }
 }
 
 /** The cue source for a kept candidate: the opaque id, the date and title as before, and (v3) its kind with its one locator. */
 export function groundedSource(note: GroundedNote, id: string): CueSourceRef {
-  const base: CueSourceRef = { id, date: note.date, title: note.title, kind: note.kind }
+  // A Tableau data note (kind 'data') is not a meeting, memory, file or page, and has no locator. It goes out as a `file` source with none, which
+  // every reader already shows as plain text with its title and date: Control 0.5.363 reads only id, date and title; 0.5.364 keeps
+  // `kind` as a free string and opens nothing without a fileId; the companion shows the headline only. A new kind would be one
+  // that a rolled-back server rejects when it reloads the cue log (isCueSourceExtras).
+  const base: CueSourceRef = { id, date: note.date, title: note.title, kind: note.kind === 'data' ? 'file' : note.kind }
   if (note.kind === 'memory' && note.memoryId) return { ...base, memoryId: note.memoryId }
   if (note.kind === 'file' && note.fileId) return { ...base, fileId: note.fileId }
   if (note.kind === 'meeting' && note.recordId) return { ...base, recordId: note.recordId }
