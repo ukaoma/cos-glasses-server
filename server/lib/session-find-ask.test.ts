@@ -120,7 +120,7 @@ describe('one Choice, then the yes/no view', () => {
     expect(t.likely).toBeLessThan(t.strong)
   })
 
-  it('uses the Choice probabilities as they are when the provider is Choice-only', async () => {
+  it('uses the Choice probabilities as they are when a provider is Choice-only (SubQ with rerank switched off)', async () => {
     const tuning = FIND_TUNING.subq
     const original = { ...tuning }
     try {
@@ -215,24 +215,57 @@ describe('the second request and the none rule', () => {
 })
 
 describe('per provider tuning', () => {
-  it('abstains at each provider\'s own none: SubQ at 0.5 where Jev still answers', async () => {
+  it('abstains at each provider\'s own none: Jev stops at its limit, SubQ never abstains', async () => {
     const first = many(0, 10)
-    const script = (provider: DecisionProvider) => fake({ provider, choice: () => ({ byOption: { [first[0]!.option]: 0.4 }, none: 0.6 }), noul: () => 0.9 })
-    const subq = await run(new SessionFindAsker(), script('subq'), { first })
-    expect(subq.verdict).toBe('abstain')
+    const none = FIND_TUNING.jev.abstainNone + 0.05
+    const script = (provider: DecisionProvider) => fake({ provider, choice: () => ({ byOption: { [first[0]!.option]: 1 - none }, none }), noul: () => 0.9 })
     const jev = await run(new SessionFindAsker(), script('jev'), { first })
-    expect(jev.verdict).not.toBe('abstain')
+    expect(jev.verdict).toBe('abstain')
+    expect(FIND_TUNING.subq.abstainNone).toBeGreaterThan(1)
+    const subq = await run(new SessionFindAsker(), script('subq'), { first })
+    expect(subq.verdict).not.toBe('abstain')
+    expect(subq.rows.length).toBeGreaterThan(0)
   })
 
-  it('turns SubQ\'s yes/no round on with one tuning field, and then uses it', async () => {
+  it('SubQ shows several rows from independent yes/no scores, not one row out of a Choice that sums to 1', async () => {
+    const first = many(0, 8)
+    const t = FIND_TUNING.subq
+    const f = fake({ provider: 'subq', choice: () => ({ byOption: { [first[1]!.option]: 0.4, [first[4]!.option]: 0.3, [first[6]!.option]: 0.2 }, none: 0.1 }),
+      noul: x => x.includes('topic 1') ? 0.95 : x.includes('topic 4') ? 0.7 : x.includes('topic 6') ? 0.62 : 0.01 })
+    const out = await run(new SessionFindAsker(), f, { first })
+    expect(t.rerank).toBe(true)
+    expect(f.reranks()).toHaveLength(1)
+    expect(out.rows.map(r => [r.key, r.strength])).toEqual([['claude:s1', 'strong'], ['claude:s4', 'likely'], ['claude:s6', 'likely']])
+  })
+
+  it('SubQ keeps the lowest right row measured (0.493) and drops a no-answer best (0.138)', async () => {
+    const t = FIND_TUNING.subq
+    expect(0.493).toBeGreaterThanOrEqual(t.floor)
+    expect(0.138).toBeLessThan(t.floor)
+    const first = many(0, 6)
+    const kept = await run(new SessionFindAsker(), fake({ provider: 'subq', choice: () => ({ byOption: { [first[2]!.option]: 0.5 }, none: 0.5 }), noul: () => 0.493 }), { first })
+    expect(kept.rows.map(r => [r.key, r.strength])).toEqual([['claude:s2', 'possible']])
+    const dropped = await run(new SessionFindAsker(), fake({ provider: 'subq', choice: () => ({ byOption: { [first[2]!.option]: 0.5 }, none: 0.5 }), noul: () => 0.138 }), { first })
+    expect(dropped.rows).toEqual([])
+  })
+
+  it('a high none no longer hides SubQ rows', async () => {
+    const first = many(0, 6)
+    const f = fake({ provider: 'subq', choice: () => ({ byOption: { [first[0]!.option]: 0.02, [first[3]!.option]: 0.01 }, none: 0.97 }), noul: x => x.includes('topic 3') ? 0.8 : 0.05 })
+    const out = await run(new SessionFindAsker(), f, { first })
+    expect(out.verdict).not.toBe('abstain')
+    expect(out.rows.map(r => r.key)).toEqual(['claude:s3'])
+  })
+
+  it('turns SubQ\'s yes/no round off with one tuning field, and then uses the Choice as it is', async () => {
     const tuning = FIND_TUNING.subq, original = { ...tuning }
     try {
-      tuning.rerank = true
+      tuning.rerank = false
       const first = many(0, 8)
-      const f = fake({ provider: 'subq', choice: () => ({ byOption: { [first[1]!.option]: 0.5, [first[4]!.option]: 0.4 }, none: 0.1 }), noul: t => t.includes('topic 4') ? 0.95 : 0.1 })
+      const f = fake({ provider: 'subq', choice: () => ({ byOption: { [first[1]!.option]: 0.5, [first[4]!.option]: 0.1 }, none: 0.1 }), noul: () => 0.95 })
       const out = await run(new SessionFindAsker(), f, { first })
-      expect(f.reranks()).toHaveLength(1)
-      expect(out.rows.map(r => [r.key, r.strength])).toEqual([['claude:s4', 'strong']])
+      expect(f.reranks()).toHaveLength(0)
+      expect(out.rows.map(r => r.key)).toEqual(['claude:s1'])
     } finally { Object.assign(tuning, original) }
   })
 })
