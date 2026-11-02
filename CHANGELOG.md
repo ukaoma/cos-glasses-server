@@ -1,3 +1,11 @@
+## 6.94.4 - SubQ session find shows every session that fits
+
+2026-11-01. Pairs with COS Control 0.5.363. Only affects people who chose SubQ and said yes to find sessions by meaning. Jev and everything else are unchanged.
+
+- SubQ now scores each likely session on its own, as Jev does. Before, its scores across all sessions added up to one against a floor of 0.5, so usually one row could show and others that fit were hidden.
+- Measured through the real route on 26 of 27 queries: the right session was shown in 19 of 20 and first in 18. An answer 51 days old is now found. Of 6 no-answer queries, 5 say nothing close and 1 shows weak rows marked possible. Wrong rows can still score high below the right one.
+- A SubQ search now uses about 10,500 to 24,000 tokens against its 3M daily cap.
+
 ## 6.94.3 - Search sessions by meaning, and accented speaker names
 
 2026-11-01. Pairs with COS Control 0.5.363. Control 0.5.361 and older keep working and never call the new route.
