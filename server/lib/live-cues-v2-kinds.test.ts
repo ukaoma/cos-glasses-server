@@ -76,7 +76,7 @@ describe('live cues v3 contract: the insight kind and source locators', () => {
   it('isLiveCueV2 refuses a source the companion could not read: an unknown kind, a locator with no kind or for another kind, two locators, an http url', () => {
     const base = { id: 'mtg_1', date: '2026-10-01', title: 'Past' }
     for (const extras of [{ kind: 'page' }, { recordId: 'r1' }, { kind: 'file', recordId: 'r1' }, { kind: 'meeting', recordId: 'r1', memoryId: 'm1' }, { kind: 'web', url: 'http://example.com/a' },
-      { kind: 'web', url: 'ftp://example.com/a' }, { kind: 'memory', memoryId: '' }, { kind: 'file', fileId: 4 }]) {
+      { kind: 'web' }, { kind: 'web', url: 'ftp://example.com/a' }, { kind: 'memory', memoryId: '' }, { kind: 'file', fileId: 4 }]) {
       expect(isLiveCueV2({ ...MACCUE, sources: [{ ...base, ...extras }] }), JSON.stringify(extras)).toBe(false)
     }
     expect(isLiveCueV2({ ...MACCUE, kind: 'shout' })).toBe(false)

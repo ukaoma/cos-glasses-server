@@ -187,6 +187,7 @@ const mutations = [
   m('contract-locator-matches-kind', SH, ['if (locators.length === 1 && locators[0] !== CUE_SOURCE_LOCATOR[source.kind]) return false\n', ''], KINDS_T),
   m('contract-no-kind-no-locator', SH, ['if (source.kind === undefined) return locators.length === 0', 'if (source.kind === undefined) return true'], KINDS_T),
   m('contract-known-kind', SH, ['if (!(CUE_SOURCE_KINDS as readonly string[]).includes(source.kind)) return false\n', ''], KINDS_T),
+  m('contract-web-needs-url', SH, ["if (source.kind === 'web' && source.url === undefined) return false\n", ''], [...KINDS_T, ...VERDICT_T]),
   m('contract-url-https', SH, ["return source.url === undefined || source.url.startsWith('https://')", 'return true'], KINDS_T),
   m('contract-locator-nonempty', SH, ["if (value !== undefined && (typeof value !== 'string' || value.length === 0 || value.length > 2048)) return false", ''], KINDS_T),
   m('contract-insight-is-a-log-kind', SH, ['(GENERAL_CUE_KINDS as readonly string[]).includes(value))', 'false)'], KINDS_T),
@@ -195,8 +196,12 @@ const mutations = [
   // ── Public https validator ──
   m('url-https-only', UR, ["u.protocol !== 'https:' ||", "(u.protocol !== 'https:' && u.protocol !== 'http:') ||"], URL_T),
   m('url-no-credentials', UR, ['|| u.username || u.password ||', '||'], URL_T),
-  m('url-public-host', UR, ['!publicAddress(u.hostname) ||', ''], URL_T),
-  m('url-port', UR, ["u.port && !['80', '443'].includes(u.port)", 'false'], URL_T),
+  m('url-public-host', UR, ['!publicAddress(host) ||', ''], URL_T),
+  m('url-default-port-only', UR, ["u.port && u.port !== '443'", 'false'], URL_T),
+  m('url-port-80-is-not-https', UR, ["u.port && u.port !== '443'", "u.port && !['80', '443'].includes(u.port)"], URL_T),
+  m('url-trailing-dot', UR, ["const host = u.hostname.replace(/\\.$/, '')", 'const host = u.hostname'], URL_T),
+  m('url-empty-label-end', UR, ["if (host.endsWith('.') || host.includes('..')) return null", "if (host.includes('..')) return null"], URL_T),
+  m('url-empty-label-inside', UR, ["if (host.endsWith('.') || host.includes('..')) return null", "if (host.endsWith('.')) return null"], URL_T),
   m('url-length', UR, ["value.length > 2048", 'false'], URL_T),
   // ── Notes arm: domain and session ride along ──
   m('notes-carry-meeting-domain', NT, ['...domainOf(hit.domain), ...(hit.sessionId ? { sessionId: hit.sessionId } : {}) }', '...(hit.sessionId ? { sessionId: hit.sessionId } : {}) }'], [...GROUNDED_T, ...GROUNDING_T, 'server/lib/live-cues-v2-notes.test.ts']),

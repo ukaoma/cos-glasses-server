@@ -35,7 +35,8 @@ describe('pins', () => {
     // Live cues v3: optional CueSourceRef kind and locators, GENERAL_CUE_KINDS (insight) and isLogCueKind (was ad51c642...). The companion's
     // copy (src/lib/live-cues-v2-contract.ts) keeps its own pin until a companion release takes this file; a companion that has not
     // taken it validates the two legacy kinds and is never sent an insight or a source it cannot read.
-    expect(sha('FILE:' + new URL('../../shared/live-cues-v2.ts', import.meta.url).pathname)).toBe('59e4eea8269c4ac8401f96cc75b4d675e45ee48cbcbc617933a00165fc607e5a')
+    // Review fix: a web source must carry its url (was 59e4eea8...).
+    expect(sha('FILE:' + new URL('../../shared/live-cues-v2.ts', import.meta.url).pathname)).toBe('50729ff5cff5789df9ba299d7ecdd861bb14fa8ecf8fd7862b4dfc0a1ff0725e')
   })
   it('the gate threshold was calibrated on jev-1.13.0; a model change needs a new replay', () => {
     expect(JEV_MODEL).toBe('jev-1.13.0')

@@ -117,6 +117,7 @@ describe('log row schema, live cues v3', () => {
       { recordId: 'r1' }, { memoryId: 'm1' }, { fileId: 'f1' }, { url: 'https://example.com/a' },
       { kind: 'meeting', recordId: 'r1', memoryId: 'm1' }, { kind: 'file', fileId: 'f1', url: 'https://example.com/a' },
       { kind: 'meeting', memoryId: 'm1' }, { kind: 'memory', fileId: 'f1' }, { kind: 'file', recordId: 'r1' }, { kind: 'web', fileId: 'f1' }, { kind: 'web', recordId: 'r1' },
+      { kind: 'web' },                                                                                     // a web source is its url
       { kind: 'memory', memoryId: '' }, { kind: 'file', fileId: 5 }, { kind: 'meeting', recordId: null }, { kind: 'memory', memoryId: 'm'.repeat(2049) },
     ]
     for (const over of bad) expect(ok({ sources: [src(over)] }), JSON.stringify(over)).toBe(false)
