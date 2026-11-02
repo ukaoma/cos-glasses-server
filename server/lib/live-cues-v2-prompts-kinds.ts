@@ -3,8 +3,9 @@
 // byte-identical to what the dev and held-out replays measured, and every meeting without the extended kinds (every
 // glasses meeting today) still runs them.
 //
-// v4 is v3 with three segments swapped: rule 3 (the kinds), rule 4 (a record of what the room settled is allowed to say
-// what the room said) and the kind list in the schema line. Nothing else changes: one cue, at most 200 characters, the
+// v4 is v3 with four segments swapped: rule 3 (the kinds), rule 4 (a record of what the room settled is allowed to say
+// what the room said, and 6.97.8: an optional `open` item when the cue's main point is a missing owner or date) and the
+// kind list and the optional `open` key in the schema line. Nothing else changes: one cue, at most 200 characters, the
 // same evidence rules, the same null. The swap throws when v3 no longer holds a segment, so a regenerated v3 fails the
 // suite (live-cues-v2-kinds.test.ts) instead of silently shipping v3 under the v4 label.
 //
@@ -24,9 +25,13 @@ export const V3_RULE_4 = '4. Add something the room has not said: the missing ow
   + '   If the cue would only restate what was just said, output null.\n'
 export const V4_RULE_4 = '4. A reinforce or challenge cue must add something the room has not said: the missing owner, deadline or criterion, a risk, a contradiction, or a past decision from memory.\n'
   + '   If it would only restate what was just said, output null. A decision, promise or followUp records what the room settled, took on or left open, in a few plain words.\n'
+  + '   When the main point of a cue is that nobody named an owner or a date for something, add "open": that thing in at most 50 characters, in plain words (for example "Thanksgiving week agenda"). Otherwise leave "open" out.\n'
 
 export const V3_SCHEMA_KIND = '"kind":"reinforce|challenge"'
 export const V4_SCHEMA_KIND = '"kind":"reinforce|challenge|decision|promise|followUp"'
+/** 6.97.8: the optional `open` key, added after `specific`. */
+export const V3_SCHEMA_OPEN = '"specific":"the specific fact used, copied"}'
+export const V4_SCHEMA_OPEN = '"specific":"the specific fact used, copied","open":"<=50 chars, optional"}'
 
 function swap(text: string, from: string, to: string): string {
   const at = text.indexOf(from)
@@ -34,5 +39,5 @@ function swap(text: string, from: string, to: string): string {
   return text.slice(0, at) + to + text.slice(at + from.length)
 }
 
-/** Writer v4: v3 plus the decision, promise and followUp kinds. */
-export const CUE_WRITER_SYSTEM_V4 = swap(swap(swap(CUE_WRITER_SYSTEM_V3, V3_RULE_3, V4_RULE_3), V3_RULE_4, V4_RULE_4), V3_SCHEMA_KIND, V4_SCHEMA_KIND)
+/** Writer v4: v3 plus the decision, promise and followUp kinds, and the optional `open` item. */
+export const CUE_WRITER_SYSTEM_V4 = swap(swap(swap(swap(CUE_WRITER_SYSTEM_V3, V3_RULE_3, V4_RULE_3), V3_RULE_4, V4_RULE_4), V3_SCHEMA_KIND, V4_SCHEMA_KIND), V3_SCHEMA_OPEN, V4_SCHEMA_OPEN)

@@ -65,10 +65,13 @@ import { webLedger, type WebTodayView } from './web-lookup-ledger.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { terminateProviderProcess } from './provider-process-lifecycle.js'
 import { cueBefore, liveCueVerdicts, type LiveCueLogRow } from './live-cue-verdicts.js'
-import { repeatOf, wouldWithhold } from './live-cues-filter.js'
+import { leadRepeatOf, repeatOf, wouldWithhold } from './live-cues-filter.js'
 import { errMsg } from './utils.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
 import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
+import { KNOWN_NAMES_USE, knownNamesFor } from './live-cues-v2-names.js'
+import { paceAllowed } from './live-cues-v2-pacing.js'
+import { OpenItemFold, openItemOf, openItemsDetail, openItemsHeadline } from './live-cues-v2-open-items.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
 import {
   CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isCueKind, isLiveCueV2, legacyCueKind,
@@ -228,6 +231,11 @@ export function liveCuesV2RepeatOverlap(env: NodeJS.ProcessEnv = process.env): n
   const t = Number(raw)
   return t >= 0.3 && t <= 0.9 ? t : knobFallback<number | null>('COS_LIVE_CUES_V2_REPEAT_OVERLAP', raw, null, 'a number from 0.3 to 0.9 (the repeat rule stays off)')
 }
+/** 6.97.8: the four lens-tuning rules (lead repeat, pacing, open items, known names) are on unless their switch is exactly `0`.
+ *  A kill switch for the Mac, not a setting: an unset, empty or any other value leaves the rule on. */
+export function liveCuesV2Rule(name: 'LEAD_REPEAT' | 'PACING' | 'OPEN_ITEMS' | 'KNOWN_NAMES', env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env[`COS_LIVE_CUES_V2_${name}`] ?? '').trim() !== '0'
+}
 export function liveCuesV2Model(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.COS_LIVE_CUES_V2_MODEL ?? '').trim().toLowerCase()
   if (raw === 'haiku') return 'claude-haiku-5-5'
@@ -328,7 +336,8 @@ export function unsupportedNumbers(cue: string, window: string, memory: MemoryNo
   return bad
 }
 
-export interface ParsedCue { detail: string; kind: CueKind; memoryIds: string[]; numberFlags: string[] }
+/** `open` (6.97.8): the writer's own item when the cue's main point is a missing owner or date (the extended-kind prompt asks for it). */
+export interface ParsedCue { detail: string; kind: CueKind; memoryIds: string[]; numberFlags: string[]; open?: string }
 export type CueRejection = 'null' | 'unparseable' | 'empty' | 'too_long' | 'unsupported_number'
 /** `enforceNumbers` withholds a cue whose numbers are not in the source. Off by default: on the held-out replay the
  *  guard fired on 3 v3 cues and only 1 was unsupported (ASR writes "300 000" and "a hundred"), so it is traced, not enforced. */
@@ -350,7 +359,7 @@ export function parseWriterCue(raw: string, fallbackKind: CueKind, window: strin
   const kind: CueKind = typeof value.kind === 'string' && (allowed as readonly string[]).includes(value.kind) ? value.kind as CueKind : fallbackKind
   const ids = new Set(kept.map(m => m.id))
   const memoryIds = Array.isArray(value.memoryIds) ? [...new Set(value.memoryIds.filter((x): x is string => typeof x === 'string' && ids.has(x)))] : []
-  return { detail: cue, kind, memoryIds, numberFlags }
+  return { detail: cue, kind, memoryIds, numberFlags, ...(typeof value.open === 'string' && value.open.trim() ? { open: value.open } : {}) }
 }
 
 /** A stable, opaque id for a past meeting (the same meeting gets the same id in every cue). */
@@ -369,7 +378,8 @@ export function localWeekStart(now: Date, zone: string): string {
 }
 
 // ── Durable state: weekly ceiling, tombstones, pauses, per-meeting counters ─────
-interface MeetingCounters { cues: number; writerCalls: number; at: number }
+/** `since` (6.97.8): when the meeting's first writer call was charged, so a restarted server keeps the pacing clock. Absent in older files. */
+interface MeetingCounters { cues: number; writerCalls: number; at: number; since?: number }
 /** 6.79.2: usage on the local calendar day (in the stored zone), for the daily writer ceiling and COS Control's readout. */
 export interface LiveCuesV2DayUsage { writerCalls: number; writerTokensIn: number; writerTokensOut: number; cues: number; jevTokens: number }
 const DAY_FIELDS = ['writerCalls', 'writerTokensIn', 'writerTokensOut', 'cues', 'jevTokens'] as const
@@ -447,7 +457,8 @@ export class LiveCuesV2Store {
     s.writerCalls += 1
     s.today.writerCalls += 1
     const m = s.meetings[sessionId] ?? { cues: 0, writerCalls: 0, at: 0 }
-    s.meetings[sessionId] = { ...m, writerCalls: m.writerCalls + 1, at: this.now().getTime() }
+    const nowMs = this.now().getTime()
+    s.meetings[sessionId] = { ...m, writerCalls: m.writerCalls + 1, at: nowMs, since: typeof m.since === 'number' ? m.since : nowMs }
     this.write(s)
     return true
   }
@@ -475,6 +486,11 @@ export class LiveCuesV2Store {
     return { cues: m?.cues ?? 0, writerCalls: m?.writerCalls ?? 0 }
   }
   /** The durable per-meeting counters, or null once they expired (24 h) or never existed. */
+  /** When this meeting's first writer call was charged (6.97.8), or null for a meeting with none or from an older file. */
+  meetingSince(sessionId: string): number | null {
+    const since = this.read().meetings[sessionId]?.since
+    return typeof since === 'number' && Number.isFinite(since) ? since : null
+  }
   meetingCounters(sessionId: string): { cues: number; writerCalls: number } | null {
     const m = this.read().meetings[sessionId]
     return m ? { cues: m.cues, writerCalls: m.writerCalls } : null
@@ -532,6 +548,9 @@ export interface LiveCuesV2Deps {
   orientation?(sessionId: string): { domain: string | null; title: string | null }
   /** Live cues v3, general cues (absent means none: no runner is built): the general runner's dependencies. */
   general?: GeneralCueDeps
+  /** 6.97.8: the spellings of names the writer may use (the meeting's speakers, enrolled voices, the owner, the owner's vocabulary
+   *  names). Absent means none: the writer prompt is then byte for byte what it was. May throw or reject; a failure means none. */
+  knownNames?(speakers: readonly string[]): Promise<string[]> | string[]
   /** Ask Public topics consent (MeetingAskStore.publicTopics), which general cues need. May throw. */
   publicTopics?(): boolean
   /** The owner's city-level home area (profile home_city), or null. May throw. */
@@ -663,6 +682,7 @@ function realDeps(): LiveCuesV2Deps {
       statePath: dataPath('live-cues-general-state.json'),
       trace: row => trace(row as unknown as Record<string, unknown>),
     }),
+    knownNames: speakers => knownNamesFor(speakers),
     publicTopics: () => new MeetingAskStore().publicTopics(),
     homeArea: () => getOwnerHomeArea(),
     cueLog: row => liveCueVerdicts().logCue(row),
@@ -752,6 +772,8 @@ interface Session {
   insights: LiveCueV2[]
   /** Live cues v3: the 6-word sequences of everything said since arm, fed only while grounding is on (the self-copy check). */
   said: SessionShingles
+  /** 6.97.8: the open-item cues held for a combined cue. Apart from `cues`: a held item was never shown. */
+  fold: OpenItemFold
 }
 /** A session's status row, plus (live cues v3) the general-cue state for an extended meeting. */
 export type LiveCuesV2SessionStatusV3 = LiveCuesV2SessionStatus & { general?: GeneralCueStatus }
@@ -845,7 +867,7 @@ export class LiveCuesV2Engine {
     const d = this.deps.now()
     const title = `${mac ? 'Mac' : 'G2'} Recording ${d.toLocaleDateString('en-CA')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
     this.sessions.set(sessionId, { sessionId, title, armedAt: nowMs, lastSeenAt: nowMs, chunks: [], wordsSinceEval: 0, lastEvalAt: 0, lastCueAt: 0,
-      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, speakers: new Set(), insights: [], said: new SessionShingles() })
+      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, speakers: new Set(), insights: [], said: new SessionShingles(), fold: new OpenItemFold() })
     if (opts.resume) this.deps.store.setResume(sessionId, kinds)
     this.deps.warmMemory()
     return answer(this.deps.store.counters(sessionId).cues, kinds)
@@ -949,6 +971,12 @@ export class LiveCuesV2Engine {
     if (nowMs - s.lastEvalAt < L.minIntervalMs || nowMs - s.lastCueAt < lim.cooldownMs) return
     const counters = this.deps.store.counters(sessionId)
     if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) return this.traceSkip(s, 'meeting_cap', nowMs)
+    // 6.97.8 pacing, on unless COS_LIVE_CUES_V2_PACING=0: before the gate, so a paced-out minute costs no Jev call. The clock starts
+    // at arm, or at the first writer call a previous run of this server recorded, whichever is earlier.
+    if (liveCuesV2Rule('PACING', this.deps.env)) {
+      const started = Math.min(s.armedAt, this.deps.store.meetingSince(sessionId) ?? s.armedAt)
+      if (counters.cues >= paceAllowed(lim.maxCues, lim.cooldownMs, nowMs - started)) return this.traceSkip(s, 'paced', nowMs)
+    }
     if (this.deps.store.weeklyUsed() >= liveCuesV2WeeklyCap(this.deps.env)) return this.traceSkip(s, 'budget_exhausted', nowMs)  // before the gate
     if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) return this.traceSkip(s, 'daily_cap', nowMs)              // before the gate
     if (this.deps.busy()) return this.traceSkip(s, 'busy', nowMs)
@@ -1035,7 +1063,15 @@ export class LiveCuesV2Engine {
       const model = liveCuesV2Model(this.deps.env)
       const previous = s.cues.slice(-3).map(c => c.detail)
       const promptMemory = kept.map(m => ({ id: m.id, date: m.date, title: m.title, notes: m.notes }))  // the replay's exact keys
-      const prompt = pyJson({ meetingTitle: run?.writerTitle ?? s.title, liveIssue: '', suggestedKind: gate.kind, previousCues: previous, memory: promptMemory, window })
+      // 6.97.8: the known spellings ride in the prompt data, before the window, only when there are some (and the rule is on).
+      let names: string[] = []
+      if (liveCuesV2Rule('KNOWN_NAMES', this.deps.env) && this.deps.knownNames) {
+        try { names = await this.deps.knownNames([...s.speakers]) } catch { names = []; trace.knownNamesError = true }
+        if (abort.signal.aborted) { trace.outcome = 'cancelled'; return }
+        if (names.length) trace.knownNames = names.length
+      }
+      const prompt = pyJson({ meetingTitle: run?.writerTitle ?? s.title, liveIssue: '', suggestedKind: gate.kind, previousCues: previous, memory: promptMemory,
+        ...(names.length ? { knownNames: { use: KNOWN_NAMES_USE, names } } : {}), window })
       const t3 = Date.now()
       const out = await this.deps.writer(model, system, prompt, abort.signal)
       Object.assign(trace, { writerMs: Date.now() - t3, prompt: version, model: out.model ?? model, writerUsd: out.costUsd, writerIn: out.inputTokens, writerOut: out.outputTokens })
@@ -1052,7 +1088,7 @@ export class LiveCuesV2Engine {
 
       const sources: CueSourceRef[] = parsed.memoryIds.map(id => kept.find(m => m.id === id)).filter((m): m is MemoryNote => !!m)
         .map(m => (run ? groundedSource(m as GroundedNote, sourceId(m)) : { id: sourceId(m), date: m.date, title: m.title }))
-      const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: cueHeadline(parsed.detail), detail: parsed.detail,
+      let cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: cueHeadline(parsed.detail), detail: parsed.detail,
         kind: parsed.kind, sources, gate: round(pCue), createdAt: this.deps.now().getTime(), model: out.model ?? model }
       if (!isLiveCueV2(cue)) { trace.outcome = 'withheld_invalid'; return }       // never emit what the companion would drop
       // 6.79.0 repeat rule, off unless COS_LIVE_CUES_V2_REPEAT_OVERLAP is set: a cue that repeats an earlier SHOWN cue of
@@ -1060,6 +1096,29 @@ export class LiveCuesV2Engine {
       const repeatT = liveCuesV2RepeatOverlap(this.deps.env)
       const repeat = repeatT === null ? null : repeatOf(cue.detail, s.cues, repeatT)
       if (repeat) { Object.assign(trace, { outcome: 'withheld_repeat', repeatOf: repeat.blocker, repeatOverlap: repeat.overlap }); return }
+      // 6.97.8 lead repeat, on unless COS_LIVE_CUES_V2_LEAD_REPEAT=0: a cue that opens by restating a recent shown cue's opening
+      // line (the whole-cue rule misses it when the evidence after the opener differs). Same outcome; repeatRule says which.
+      const lead = liveCuesV2Rule('LEAD_REPEAT', this.deps.env) ? leadRepeatOf(cue.detail, s.cues) : null
+      if (lead) { Object.assign(trace, { outcome: 'withheld_repeat', repeatRule: 'lead', repeatOf: lead.blocker, repeatOverlap: lead.overlap }); return }
+      // 6.97.8 open items, on unless COS_LIVE_CUES_V2_OPEN_ITEMS=0: a cue whose point is "nobody named an owner or a date" is held,
+      // not shown. At most one combined cue per 10 minutes carries up to 3 held items; see live-cues-v2-open-items.ts. The writer
+      // call already counted; a held cue is not logged, emitted or counted as a cue, and the cooldown still applies.
+      if (liveCuesV2Rule('OPEN_ITEMS', this.deps.env)) {
+        const item = openItemOf({ kind: parsed.kind, detail: parsed.detail, cited: sources.length, field: parsed.open })
+        if (item) {
+          const at = this.deps.now().getTime()
+          s.fold.hold(item.label, at)
+          s.lastCueAt = at
+          const due = s.fold.due(at)
+          if (!due) { Object.assign(trace, { outcome: 'held_open_item', openSource: item.source, openWaiting: s.fold.waiting(at) }); return }
+          const digest: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: openItemsHeadline(due.length), detail: openItemsDetail(due),
+            kind: s.kinds === 'extended' ? 'followUp' : 'challenge', sources: [], gate: round(pCue), createdAt: at, model: out.model ?? model }
+          if (!isLiveCueV2(digest)) { trace.outcome = 'withheld_invalid'; return }
+          s.fold.markShown(due, at)
+          cue = digest
+          trace.openItems = due.length
+        }
+      }
       // 6.79.0: logged before it is held or emitted, so a rating that arrives at once finds it. Its own try/catch: a log
       // failure is traced on this evaluation and is never a writer failure or a step toward the breaker.
       try {
@@ -1076,9 +1135,9 @@ export class LiveCuesV2Engine {
       s.lastCueAt = cue.createdAt
       this.deps.store.recordCue(s.sessionId)
       this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)
-      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(parsed.kind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
+      const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(cue.kind as CueKind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
       this.deps.emit('coaching_nudge', v1 as unknown as Record<string, unknown>)
-      Object.assign(trace, { outcome: 'cue', cueId: cue.cueId, cueChars: cue.detail.length, sources: sources.length, ...(parsed.numberFlags.length ? { numberFlags: parsed.numberFlags.length } : {}) })
+      Object.assign(trace, { outcome: 'cue', cueId: cue.cueId, cueChars: cue.detail.length, sources: cue.sources.length, ...(parsed.numberFlags.length ? { numberFlags: parsed.numberFlags.length } : {}) })
     } catch (error) {
       if (wallHit) { trace.outcome = 'failure'; trace.error = 'wall_timeout'; s.failures += 1; if (s.failures >= L.breakerFailures) s.breaker = true; return }
       if (isCancel(error, abort.signal)) { trace.outcome = 'cancelled'; return }

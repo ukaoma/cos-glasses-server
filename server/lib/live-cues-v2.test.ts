@@ -18,6 +18,8 @@ const { LiveCuesV2Engine, LiveCuesV2Store, LIVE_CUES_V2_LIMITS: L, cueHeadline, 
 const { isLiveCueV2, CUE_HEADLINE_MAX, CUE_DETAIL_MAX } = contract
 type Deps = import('./live-cues-v2.js').LiveCuesV2Deps
 
+/** The 6.97.8 tuning rules, off by default in this file's engine tests; each has its own describe block below. */
+const OFF_RULES: NodeJS.ProcessEnv = { COS_LIVE_CUES_V2_LEAD_REPEAT: '0', COS_LIVE_CUES_V2_KNOWN_NAMES: '0', COS_LIVE_CUES_V2_PACING: '0', COS_LIVE_CUES_V2_OPEN_ITEMS: '0' }
 const words = (n: number, w = 'budget') => Array.from({ length: n }, () => w).join(' ')
 const sha = (v: unknown) => createHash('sha256').update(typeof v === 'string' && v.startsWith('FILE:') ? readFileSync(v.slice(5)) : JSON.stringify(v)).digest('hex')
 
@@ -256,7 +258,9 @@ describe('engine', () => {
       now: () => new Date(clock),
       store: new LiveCuesV2Store(join(dir, 'state.json'), () => new Date(clock)),
       trace: row => { traces.push(row) },
-      env,
+      // The older engine tests feed one fixed cue text over and over, which the 6.97.8 lead rule would rightly withhold: the
+      // rules run only where a test turns them on (its env sets the switch to anything but 0).
+      env: new Proxy(env, { get: (target, key: string) => (key in target ? target[key] : OFF_RULES[key]) }),
       ...over,
     }
     return new LiveCuesV2Engine(deps)
@@ -439,6 +443,244 @@ describe('engine', () => {
     const e = engine(); e.arm('meeting_a')
     for (let i = 0; i < 2; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
     expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue'])                    // overlap 0.8 < 0.9: shown
+  })
+
+  it('6.97.8: the lead repeat rule withholds a cue that restates a recent opener, with its own trace marker, and a switch of 0 turns it off', async () => {
+    const texts = ['Leads handed you the budget. Before pushing kiosk keywords, check the April overlap that doubled cost per lead.',
+      'Leads say you pick the budget. The October review flagged close rates as the concern, so set that as the bar.',
+      'Kiosk vendor review slipped twice; agree a new pilot date with procurement.']
+    const run = async (extra: NodeJS.ProcessEnv) => {
+      traces = []; emitted = []; clock = Date.parse('2026-10-14T15:00:00Z')
+      env = { COS_LIVE_CUES_V2: '1', ...extra }
+      let n = 0
+      writerText = async () => JSON.stringify({ cue: texts[n++], kind: 'challenge' })
+      const logged: string[] = []
+      const e = engine({ cueLog: row => { logged.push(row.cueId) } }); e.arm(`meeting_${extra.COS_LIVE_CUES_V2_LEAD_REPEAT}`)
+      for (let i = 0; i < 3; i++) { await e.feed(`meeting_${extra.COS_LIVE_CUES_V2_LEAD_REPEAT}`, words(L.minNewWords)); next() }
+      return { shown: emitted.filter(x => x.type === 'coaching_nudge_v2').map(x => x.data), logged, e, id: `meeting_${extra.COS_LIVE_CUES_V2_LEAD_REPEAT}` }
+    }
+    const on = await run({ COS_LIVE_CUES_V2_LEAD_REPEAT: '1' })
+    expect(on.shown.map(c => c.detail)).toEqual([texts[0], texts[2]])
+    expect(on.logged).toEqual(on.shown.map(c => c.cueId))                                 // withheld before it is logged or counted
+    const evals = evaluations()
+    expect(evals.map(t => t.outcome)).toEqual(['cue', 'withheld_repeat', 'cue'])
+    expect(evals[1]).toMatchObject({ repeatRule: 'lead', repeatOf: on.shown[0].cueId, repeatOverlap: 0.667 })
+    expect(JSON.stringify(evals[1])).not.toContain('Leads')                               // ids and the ratio, never text
+    expect(on.e.status(on.id).session?.cues).toHaveLength(2)
+    const off = await run({ COS_LIVE_CUES_V2_LEAD_REPEAT: '0' })
+    expect(off.shown.map(c => c.detail)).toEqual(texts)
+    for (const [raw, expected] of [[undefined, true], ['', true], ['1', true], ['on', true], ['0', false], [' 0 ', false]] as const)
+      expect(mod.liveCuesV2Rule('LEAD_REPEAT', raw === undefined ? {} : { COS_LIVE_CUES_V2_LEAD_REPEAT: raw }), String(raw)).toBe(expected)
+  })
+
+  it('6.97.8: known names ride in the writer prompt data before the window, from the meeting speakers and the dependency, and only when there are some', async () => {
+    env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_KNOWN_NAMES: '1' }
+    const asked: string[][] = []
+    const e = engine({ knownNames: speakers => { asked.push([...speakers]); return [...speakers, 'Zorvana'] } }); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords), false, ['Tamsin', 'Speaker 2'])
+    expect(asked).toEqual([['Tamsin']])                                                 // generic labels never reach the session's speakers
+    const prompt = JSON.parse(calls.prompts[0]) as Record<string, unknown>
+    expect(Object.keys(prompt)).toEqual(['meetingTitle', 'liveIssue', 'suggestedKind', 'previousCues', 'memory', 'knownNames', 'window'])
+    expect(prompt.knownNames).toEqual({ use: expect.stringContaining('Spell a person, company or product exactly as listed'), names: ['Tamsin', 'Zorvana'] })
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue', knownNames: 2 })
+    expect(JSON.stringify(traces)).not.toContain('Zorvana')                              // a count, never the names
+  })
+
+  it('6.97.8: no names, a failing reader, the switch at 0, or no dependency leave the writer prompt exactly as it was', async () => {
+    const promptFor = async (over: Partial<Deps>, extra: NodeJS.ProcessEnv): Promise<string> => {
+      calls.prompts = []; traces = []; clock += 3_600_000
+      env = { COS_LIVE_CUES_V2: '1', ...extra }
+      const e = engine(over); const id = `meeting_${Math.round(clock)}`; e.arm(id)
+      await e.feed(id, words(L.minNewWords))
+      return calls.prompts[0].replace(/G2 Recording \d{4}-\d{2}-\d{2} \d{4}/, 'G2 Recording <time>')   // the arm-time title carries the clock
+    }
+    const baseline = await promptFor({}, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })
+    expect(baseline).not.toContain('knownNames')
+    expect(await promptFor({ knownNames: () => [] }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toBe(baseline)
+    expect(await promptFor({ knownNames: () => { throw new Error('boom') } }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toBe(baseline)
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue', knownNamesError: true })
+    expect(await promptFor({ knownNames: async () => { throw new Error('boom') } }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toBe(baseline)
+    expect(await promptFor({ knownNames: () => ['Zorvana'] }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '0' })).toBe(baseline)
+    expect(await promptFor({ knownNames: () => ['Zorvana'] }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toContain('Zorvana')
+  })
+
+  describe('6.97.8 pacing', () => {
+    const MIN = 60_000
+    let t0 = 0
+    beforeEach(() => { t0 = clock })                                                       // minute 0 is when the test arms the meeting
+    /** One feed a minute from minute `from` to minute `to`, returning the minute of every cue shown. */
+    async function run(e: InstanceType<typeof LiveCuesV2Engine>, id: string, from: number, to: number): Promise<number[]> {
+      const at: number[] = []
+      for (let m = from; m <= to; m++) {
+        clock = t0 + m * MIN
+        const before = emitted.filter(x => x.type === 'coaching_nudge_v2').length
+        await e.feed(id, words(L.minNewWords))
+        if (emitted.filter(x => x.type === 'coaching_nudge_v2').length > before) at.push(m)
+      }
+      return at
+    }
+
+    it('a 60 minute meeting still has cues at minute 50: a burst of 13, then one cue every 5 minutes, the 25th at minute 60', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      const e = engine(); e.arm('meeting_a')
+      const at = await run(e, 'meeting_a', 0, 60)
+      expect(at.slice(0, 15)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+      expect(at.slice(15)).toEqual([15, 20, 25, 30, 35, 40, 45, 50, 55, 60])
+      expect(at).toHaveLength(25)
+      expect(e.status('meeting_a').session?.cues).toHaveLength(25)
+    })
+
+    it('without the switch the same meeting spends all 25 cues in its first 25 minutes (the 11/02 shape)', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '0' }
+      const e = engine(); e.arm('meeting_a')
+      const at = await run(e, 'meeting_a', 0, 60)
+      expect(at.at(-1)).toBe(24)
+      expect(at).toHaveLength(25)
+    })
+
+    it('a paced-out minute costs no gate call and traces one `paced` skip per five minutes; the user cap is untouched', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      const e = engine(); e.arm('meeting_a')
+      await run(e, 'meeting_a', 0, 19)
+      const gatesAfterBurst = calls.gate
+      expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(16)         // minutes 0..15
+      expect(gatesAfterBurst).toBe(16)                                                     // minutes 16 to 19 asked nothing
+      const skips = traces.filter(t => t.kind === 'skip')
+      expect(skips.map(t => t.reason)).toEqual(['paced'])
+      expect(e.status('meeting_a').session).toMatchObject({ state: 'active' })              // pacing is not a stop
+      expect(e.status('meeting_a').session).not.toHaveProperty('reason')
+    })
+
+    it('the user cap and gap keep their meaning: a lowered cap scales the burst, and the cap is never exceeded', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1', COS_LIVE_CUES_V2_MAX_PER_MEETING: '6' }
+      const e = engine(); e.arm('meeting_a')
+      const at = await run(e, 'meeting_a', 0, 70)
+      expect(at).toEqual([0, 1, 2, 20, 40, 60])                                              // burst 3, then one every 60 / (6 - 3) = 20 minutes, the 6th at minute 60
+    })
+
+    it('silent opening minutes still count: the clock starts at arm, not at the first cue', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      pCue = 0.1                                                                           // the gate is silent for the first five minutes
+      const e = engine(); e.arm('meeting_a')
+      await run(e, 'meeting_a', 0, 4)
+      pCue = 0.9
+      const at = await run(e, 'meeting_a', 5, 30)
+      // allowed(m) = 13 + floor(m / 5) from minute 0. A clock that started at the first charge (minute 5) would stop at 16 cues, not 17.
+      expect(at.filter(m => m <= 21)).toHaveLength(17)
+      expect(at.slice(17)).toEqual([25, 30])
+    })
+
+    it('the clock survives a server restart through the stored first-charge time', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      const e = engine(); e.arm('meeting_a')
+      await run(e, 'meeting_a', 0, 12)                                                      // 13 cues, clock now at minute 12
+      expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(13)
+      const restarted = engine(); restarted.arm('meeting_a')                                 // armedAt is now; the store remembers minute 0
+      emitted = []
+      clock += MIN                                                                           // minute 13: 1 minute after the restart, 13 minutes after the meeting began
+      await restarted.feed('meeting_a', words(L.minNewWords))
+      expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(1)           // allowed(13) = 15, 13 shown: a cue. A clock restarted at arm would allow 13: paced out
+    })
+  })
+
+  describe('6.97.8 open items', () => {
+    const MIN = 60_000
+    const GAP_A = JSON.stringify({ cue: 'Main slides get built this week, but nobody has taken the draft deadline. Settle a date before the call ends.', kind: 'challenge', open: 'Slides draft deadline' })
+    const GAP_B = JSON.stringify({ cue: 'The vendor decision is pending after the budget call. Settle who chases that answer, since no owner or date was named.', kind: 'challenge' })   // no field: the wording matches
+    const GAP_C = JSON.stringify({ cue: 'Open: how many trials converted at the second tier. No owner or date was named.', kind: 'followUp', open: 'Second tier trial conversions' })
+    const GAP_D = JSON.stringify({ cue: 'Someone took on the offsite agenda. No date was set for that talk.', kind: 'promise', open: 'Offsite agenda talk' })
+    const NORMAL = JSON.stringify({ cue: 'Kiosk vendor review slipped twice; agree a new pilot date with procurement.', kind: 'challenge' })
+    const cuesShown = () => emitted.filter(x => x.type === 'coaching_nudge_v2').map(x => x.data)
+
+    async function play(writes: string[], id = 'meeting_a', gapMs = 65_000, over: Partial<Deps> = {}) {
+      let n = 0
+      writerText = async () => writes[n++]
+      const logged: Array<Record<string, unknown>> = []
+      const e = engine({ cueLog: row => { logged.push(row as unknown as Record<string, unknown>) }, ...over }); e.arm(id)
+      for (let i = 0; i < writes.length; i++) { await e.feed(id, words(L.minNewWords)); clock += gapMs }
+      return { e, logged, id }
+    }
+
+    it('a held item is not shown, logged or counted as a cue, but its writer call is; the second one makes one combined cue', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
+      const { e, logged } = await play([GAP_A, NORMAL, GAP_B])
+      const shown = cuesShown()
+      expect(shown.map(c => c.detail)).toEqual([JSON.parse(NORMAL).cue, 'Still open, no owner or date: Slides draft deadline; The vendor decision is pending after the budget call.'])
+      expect(shown[1]).toMatchObject({ headline: 'Open items: 2 need an owner or date', kind: 'challenge', sources: [] })
+      expect(logged.map(r => r.cueId)).toEqual(shown.map(c => c.cueId))                  // the held item never reached the log
+      const evals = evaluations()
+      expect(evals.map(t => t.outcome)).toEqual(['held_open_item', 'cue', 'cue'])
+      expect(evals[0]).toMatchObject({ openSource: 'field', openWaiting: 1 })
+      expect(evals[2]).toMatchObject({ openItems: 2 })
+      expect(JSON.stringify(traces)).not.toContain('Slides draft')                       // counts, never the items
+      expect(e.status('meeting_a').session).toMatchObject({ writerCalls: 3 })
+      expect(e.status('meeting_a').session?.cues).toHaveLength(2)                         // the held item never became a cue, so it never counted toward the cap
+      expect(emitted.filter(x => x.type === 'coaching_nudge').map(x => x.data.type)).toEqual(['challenge', 'challenge'])
+    })
+
+    it('a held cue still starts the cooldown, so the writer is not asked faster than before', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
+      writerText = async () => GAP_A
+      const e = engine(); e.arm('meeting_a')
+      await e.feed('meeting_a', words(L.minNewWords))
+      clock += L.minIntervalMs + 1                                                        // past the 20 s floor, inside the 45 s cooldown
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(calls.writer).toBe(1)
+    })
+
+    it('at most one combined cue per 10 minutes; a later pair makes the next, and the older items past three are dropped', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
+      const items = Array.from({ length: 6 }, (_, i) => JSON.stringify({ cue: `Topic ${i} has loose ends. Nobody has taken it, so settle who reports.`, kind: 'challenge', open: ['Offsite agenda', 'Pricing deck draft', 'Vendor budget answer', 'Dashboard review', 'Warehouse audit', 'Hiring plan signoff'][i] }))
+      const { e } = await play([items[0], items[1], items[2], items[3]], 'meeting_a', 65_000)   // items 0 and 1 make a cue at minute 1; 2 and 3 wait
+      expect(cuesShown().map(c => c.headline)).toEqual(['Open items: 2 need an owner or date'])
+      expect(evaluations().map(t => t.outcome)).toEqual(['held_open_item', 'cue', 'held_open_item', 'held_open_item'])
+      clock += 10 * MIN
+      let n = 0
+      writerText = async () => items[4 + n++]
+      await e.feed('meeting_a', words(L.minNewWords))                                      // 10 minutes after the first combined cue: item 4 arrives, 2 and 3 still wait
+      const shown = cuesShown()
+      expect(shown).toHaveLength(2)
+      expect(shown[1].detail).toBe('Still open, no owner or date: Vendor budget answer; Dashboard review; Warehouse audit.')
+    })
+
+    it('an extended meeting gets a followUp combined cue, and its v1 twin reads as the legacy kind', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
+      const mac = 'mac_f1118630-458a-47d6-852f-5ef55ec22bee'
+      const { e } = await play([GAP_C, GAP_D], mac)
+      expect(e.arm(mac).kinds).toContain('followUp')
+      const shown = cuesShown()
+      expect(shown).toHaveLength(1)
+      expect(shown[0]).toMatchObject({ kind: 'followUp', detail: 'Still open, no owner or date: Second tier trial conversions; Offsite agenda talk.' })
+      expect(emitted.find(x => x.type === 'coaching_nudge')?.data.type).toBe('challenge')
+    })
+
+    it('a decision, a cue that cites a past meeting, and a cue with no gap are shown as before', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
+      const cited = JSON.stringify({ cue: 'The 2026-10-01 review flagged the cap at 12%. Nobody has taken the cap decision, so settle who owns it.', kind: 'challenge', memoryIds: ['M1'], open: 'Cap decision' })
+      const decision = JSON.stringify({ cue: 'Decided: Sam joins the pool. No target or date was given yet. Settle when.', kind: 'decision', open: 'Sam target' })
+      const mac = 'mac_f1118630-458a-47d6-852f-5ef55ec22bee'
+      await play([cited, decision, NORMAL], mac)
+      expect(cuesShown().map(c => c.kind)).toEqual(['challenge', 'decision', 'challenge'])
+      expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue', 'cue'])
+    })
+
+    it('with the switch at 0 every gap cue is shown exactly as before', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '0' }
+      await play([GAP_A, GAP_B, GAP_C])
+      expect(cuesShown()).toHaveLength(3)
+      expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue', 'cue'])
+      expect(cuesShown()[0].detail).toContain('nobody has taken the draft deadline')
+    })
+
+    it('a lone held item is dropped when it waits too long for company', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
+      const { e } = await play([GAP_A], 'meeting_a')
+      clock += 25 * MIN
+      writerText = async () => GAP_D
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(cuesShown()).toHaveLength(0)                                                  // the first expired: one waiting, no cue
+      expect(evaluations().at(-1)).toMatchObject({ outcome: 'held_open_item', openWaiting: 1 })
+    })
   })
 
   it('6.79.0: an invalid COS_LIVE_CUES_V2_REPEAT_OVERLAP leaves the rule off with one log line per value', () => {
