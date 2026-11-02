@@ -169,8 +169,9 @@ const notesSearchDefault: CleanupDeps['searchNotes'] = async (queries, sessionId
 
 const filesDefault: CleanupDeps['files'] = async sessionId => {
   try {
-    const { MeetingAskStore } = await import('./meeting-ask-store.js')
-    return new MeetingAskStore().files(sessionId).filter(f => f.status === 'ready' && typeof f.text === 'string' && f.text.trim()).map(f => ({ name: f.name, text: f.text }))
+    const { MeetingAskStore, isPastedFileId } = await import('./meeting-ask-store.js')
+    // Pasted text and read pages (paste_, web_) are article words, not the room's vocabulary: they must not rewrite the saved transcript.
+    return new MeetingAskStore().files(sessionId).filter(f => !isPastedFileId(f.id) && f.status === 'ready' && typeof f.text === 'string' && f.text.trim()).map(f => ({ name: f.name, text: f.text }))
   } catch { return [] }
 }
 

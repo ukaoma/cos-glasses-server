@@ -377,11 +377,12 @@ export async function typedGeneralSearch(search: GeneralCueDeps['search'], query
  *  step with QUIET_DECISION_STOPS in live-cues-v2.ts, which this module cannot import (that module imports this one). */
 const QUIET_DECISION_CODES: ReadonlySet<string> = new Set(['jev_cap_reached', 'jev_breaker_open', 'jev_not_configured',
   'decision_cap_reached', 'decision_breaker_open', 'decision_not_configured', 'decision_invalid_provider'])
-/** The ledger code for an attempt that ended because a lookup was held back before any search (not for a cap, a failure or "no topic"):
- *  a private-life window, voices that could not be read, an admission rejection, or no home area for a local query. Otherwise null. */
+/** The ledger code for an attempt that ended because a PROPOSED lookup was held back: an admission rejection, or no home area for a local
+ *  query. Otherwise null. The checks that run before the trigger (a private-life window, voices that cannot be read) are not counted:
+ *  no topic was proposed, they repeat roughly once per interval in any meeting with personal vocabulary, and counting them would
+ *  make the ledger read as lookups refused when none was ever asked for. */
 export function heldLookupReason(reason: string): string | null {
-  if (reason.startsWith('sensitive:')) return 'personal'
-  if (reason === 'names_unavailable' || reason === 'local_no_area') return reason
+  if (reason === 'local_no_area') return reason
   const m = /^(rejected|rejected_local):([a-z_]+)$/.exec(reason)
   return m ? `${m[1]}_${m[2]}` : null
 }

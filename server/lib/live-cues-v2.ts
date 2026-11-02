@@ -1365,7 +1365,7 @@ export function liveCuesV2SettingsViewV3(env: NodeJS.ProcessEnv = process.env): 
   let homeArea: string | null = null
   try { homeArea = getOwnerHomeArea() } catch { homeArea = null }
   let webToday: WebTodayView
-  try { webToday = webLedger().today() } catch { webToday = { day: v2.today.day, readable: false, cues: { searches: 0, pagesRead: 0 }, ask: { searches: 0, pagesRead: 0 }, factCheck: { searches: 0, pagesRead: 0 }, withheld: { total: 0, byReason: {}, byFeature: { cues: 0, ask: 0, factCheck: 0 } } } }
+  try { webToday = webLedger().today() } catch { webToday = { day: v2.today.day, readable: false, cues: { searches: 0, pagesRead: 0, pagesFailed: 0 }, ask: { searches: 0, pagesRead: 0, pagesFailed: 0 }, factCheck: { searches: 0, pagesRead: 0, pagesFailed: 0 }, withheld: { total: 0, byReason: {}, byFeature: { cues: 0, ask: 0, factCheck: 0 } } } }
   return { ...v2, v: 3, cueMode: resolveLiveCuesCueMode(env, settings), grounding: resolveLiveCuesGrounding(env, settings),
     general: { limits: resolveLiveCuesGeneralLimits(env, settings), today, publicTopics, homeArea }, webToday }
 }

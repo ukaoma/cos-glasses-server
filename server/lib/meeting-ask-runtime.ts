@@ -8,12 +8,12 @@ import { confirmOrientation, meetingCalendar, meetingDomains, validateOrientatio
 import type { MeetingAskOrientation } from '../../shared/meeting-ask.js';
 import type { MeetingAskSubmit, MeetingAskExchange, MeetingAskModel, MeetingAskFile, MeetingAskConfig, MeetingAskCapabilities, MeetingAskCosSearch, MeetingAskSource } from '../../shared/meeting-ask.js';
 import { AskError, createLiveAsk, normalizeAsk, searchAskHistory, LIVE_ASK_SYSTEM, type AskInput, type AskResult } from './live-cos-ask.js';
-import { MeetingAskStore, ASK_ID, ASK_SESSION, askFingerprint, type AskRecord } from './meeting-ask-store.js';
+import { MeetingAskStore, ASK_ID, ASK_SESSION, askFingerprint, isPastedFileId, type AskRecord } from './meeting-ask-store.js';
 import { runMeetingAskModel, AskProcessError } from './meeting-ask-runner.js';
 import { redactSecrets } from './lens-gist-engines.js';
 import { listLensGistEngines } from './lens-gist.js';
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen, type MaintenanceWorkLease } from './maintenance-lifecycle.js';
-import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate, factCheckRequest, recentPublicPages, pastedPublicUrls, recentPastedPage, pointsAtEarlierLink, recentPastedPagesFromUserLinks } from './meeting-ask-web.js';
+import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate, factCheckRequest, recentPublicPages, pastedPublicUrls, recentPastedPage, pointsAtEarlierLink, recentPastedPagesFromUserLinks, pastedUrlKey } from './meeting-ask-web.js';
 import { readPastedPages, pastedReadFailedNotice, pastedPageFile, pastedTextFile, keepPastedContext, PASTED_REFUSED_NOTICE, PASTED_OVER_LIMIT_NOTICE } from './meeting-ask-pasted.js';
 import { webLedger } from './web-lookup-ledger.js';
 import { getServerInstanceId } from './server-instance-id.js';
@@ -424,6 +424,7 @@ export class MeetingAskRuntime {
         return readPastedPages(toRead, { signal, focus }).then(read => {
             if (read.sources.length)
                 ledger.pagesRead('ask', read.sources.length);
+            ledger.pagesFailed('ask', read.failedHosts.length);
             if (read.failedHosts.length)
                 notices.push(pastedReadFailedNotice(read.failedHosts));
             return finish(read.sources);
@@ -457,7 +458,9 @@ export class MeetingAskRuntime {
             const journal = this.deps.store.list();
             const history = journal.filter(r => r.exchange.sessionId === input.sessionId && r.exchange.serverInstanceId === input.serverInstanceId && r.exchange.status === 'completed' && r.exchange.throughMs <= input.elapsedMs).sort((a, b) => a.exchange.createdAt.localeCompare(b.exchange.createdAt)).slice(-4).map(r => ({ question: r.exchange.question, answer: r.exchange.answer ?? '', sources: r.exchange.sources }));
             let remaining = 16000;
-            const extraSources: import('./live-cos-ask.js').AskSource[] = files.filter(f => f.status === 'ready' && f.text.trim()).map((f, i) => { const text = f.text.slice(0, Math.max(0, remaining)); remaining -= text.length; return { id: `F${i + 1}`, kind: 'file' as const, title: f.name, text, fileId: f.id, revision: f.revision }; }).filter(f => f.text);
+            // Files the user dropped come first; what this server made from pasted text and read pages (paste_, web_) comes after, so it never eats the 16,000 characters before a phone screenshot does.
+            const ordered = [...files.filter(f => !isPastedFileId(f.id)), ...files.filter(f => isPastedFileId(f.id))];
+            const extraSources: import('./live-cos-ask.js').AskSource[] = ordered.filter(f => f.status === 'ready' && f.text.trim()).map((f, i) => { const text = f.text.slice(0, Math.max(0, remaining)); remaining -= text.length; return { id: `F${i + 1}`, kind: 'file' as const, title: f.name, text, fileId: f.id, revision: f.revision }; }).filter(f => f.text);
             extraSources.push(...(finalized?.sources ?? []));
             const extraNotices = [...refinementNotices, ...(finalized?.notices ?? []), ...files.filter(f => f.status !== 'ready').map(f => `${f.name}: ${f.status}; text not available.`)];
             if (files.reduce((n, f) => n + f.text.length, 0) > 16000)
@@ -475,6 +478,14 @@ export class MeetingAskRuntime {
                 const pending = this.sharedContext(input, journal.map(r => r.exchange), controller.signal, !withoutPublic);
                 shared = pending instanceof Promise ? await pending : pending;
             }
+            // A page that is already a W source in this answer is not also a web_ file in it.
+            const readPages = new Set(shared.sources.flatMap(w => w.url ? [pastedUrlKey(w.url)] : []));
+            if (readPages.size)
+                for (let i = extraSources.length - 1; i >= 0; i--) {
+                    const f = extraSources[i].fileId && extraSources[i].fileId!.startsWith('web_') && isPastedFileId(extraSources[i].fileId!) ? files.find(x => x.id === extraSources[i].fileId) : undefined;
+                    if (f && readPages.has(pastedUrlKey(f.text.split('\n', 1)[0])))
+                        extraSources.splice(i, 1);
+                }
             extraSources.push(...shared.sources);
             extraNotices.push(...shared.notices);
             // A withheld lookup counts once per reason per question, wherever in this run it is first refused.

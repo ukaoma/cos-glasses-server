@@ -39,7 +39,7 @@ describe('searchMeetingWeb counts the search where it is dispatched, and the pag
     fakeSearch(['https://a.example.org/1', 'https://b.example.org/2', 'https://c.example.org/3'])
     mocks.fetch.mockImplementation(async (url: string) => page(url))
     await searchMeetingWeb('elephant weight car', sig())
-    expect(ledger.today()).toMatchObject({ ask: { searches: 1, pagesRead: 2 }, cues: { searches: 0, pagesRead: 0 }, factCheck: { searches: 0, pagesRead: 0 } })
+    expect(ledger.today()).toMatchObject({ ask: { searches: 1, pagesRead: 2, pagesFailed: 0 }, cues: { searches: 0, pagesRead: 0, pagesFailed: 0 }, factCheck: { searches: 0, pagesRead: 0, pagesFailed: 0 } })
   })
   it('the general cues\' audit caller counts as cues', async () => {
     fakeSearch(['https://a.example.org/1'])
@@ -57,7 +57,20 @@ describe('searchMeetingWeb counts the search where it is dispatched, and the pag
     fakeSearch(['https://a.example.org/1', 'https://b.example.org/2'])
     mocks.fetch.mockResolvedValue(null)
     await searchMeetingWeb('elephant weight car', sig())
-    expect(ledger.today().ask).toEqual({ searches: 1, pagesRead: 0 })
+    expect(ledger.today().ask).toEqual({ searches: 1, pagesRead: 0, pagesFailed: 2 })      // both attempted fetches are counted as failed
+  })
+  it('fetches that fail are counted per attempt: one page read, one failed', async () => {
+    fakeSearch(['https://a.example.org/1', 'https://b.example.org/2'])
+    mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/1') ? page(url) : null)
+    await searchMeetingWeb('elephant weight car', sig())
+    expect(ledger.today().ask).toEqual({ searches: 1, pagesRead: 1, pagesFailed: 1 })
+  })
+  it('the retirement-rules shortcut is not a search but its two official fetches are counted', async () => {
+    mocks.fetch.mockImplementation(async (url: string) => url.includes('irs.gov') ? page(url) : null)
+    const out = await searchMeetingWeb('401k 403b leaving employer keep money in old retirement plan IRS Department of Labor', sig())
+    expect(out.sources).toHaveLength(1)
+    expect(mocks.run).not.toHaveBeenCalled()
+    expect(ledger.today().ask).toEqual({ searches: 0, pagesRead: 1, pagesFailed: 1 })
   })
   it('a search that threw still ran, so it is counted', async () => {
     mocks.run.mockRejectedValue(new Error('provider down'))

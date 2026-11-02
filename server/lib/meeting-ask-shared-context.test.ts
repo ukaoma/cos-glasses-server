@@ -105,7 +105,7 @@ describe('a pasted link is read through the meeting assistant', () => {
     expect(e.sources.find(s => s.kind === 'web')).toMatchObject({ id: 'W1', url: ARTICLE, title: 'Harbor commission approves dredging' })
     expect(e.sources.find(s => s.kind === 'web')!.text.startsWith('Retrieved page excerpt')).toBe(true)
     expect(e.notices.join(' ')).not.toContain('Public search was withheld')
-    expect(f.ledger.today().ask).toEqual({ searches: 0, pagesRead: 1 })
+    expect(f.ledger.today().ask).toEqual({ searches: 0, pagesRead: 1, pagesFailed: 0 })
   })
   it('when the page cannot be read, one plain notice says so, and no "public search was withheld" notice follows even if the model asks for the web', async () => {
     mocks.fetch.mockResolvedValue(null)
@@ -115,7 +115,7 @@ describe('a pasted link is read through the meeting assistant', () => {
     expect(e.notices.filter(n => n.startsWith('Could not read the page'))).toEqual([P.pastedReadFailedNotice(['apnews.com'])])
     expect(e.notices.join(' ')).not.toContain('Public search was withheld')
     expect(f.webSearch).not.toHaveBeenCalled()
-    expect(f.ledger.today()).toMatchObject({ ask: { searches: 0, pagesRead: 0 }, withheld: { byReason: { no_public_intent: 1 } } })   // still counted: the model's search WAS refused
+    expect(f.ledger.today()).toMatchObject({ ask: { searches: 0, pagesRead: 0, pagesFailed: 1 }, withheld: { byReason: { no_public_intent: 1 } } })   // the fetch was attempted; the refusal still counted: the model's search WAS refused
   })
   it('a link seen only in the transcript, a file or an earlier answer is never fetched', async () => {
     const f = fixture()
@@ -313,5 +313,110 @@ describe('the meeting assistant counts its own lookups where they are decided', 
     expect(e.notices.join(' ')).not.toContain('Public search was withheld')
     expect(e.notices.some(n => n.startsWith('Could not read the page'))).toBe(true)
     expect(f.ledger.today().withheld.byReason).toEqual({ no_public_intent: 1 })
+  })
+})
+
+// 6.97.8 QA round
+describe('publicAddress closes NAT64 and the IPv4-compatible form', () => {
+  it.each([
+    '::', '::1', '::7f00:1', '::a00:1', '::c0a8:101', '::127.0.0.1', '::10.0.0.5',                    // first 96 bits zero: loopback, private and IPv4-compatible
+    '::ffff:7f00:1', '::ffff:10.0.0.1',                                                                 // IPv4-mapped
+    '64:ff9b::7f00:1', '64:ff9b::a00:1', '64:ff9b::127.0.0.1', '64:ff9b::c0a8:101', '64:ff9b:1::1',    // NAT64: a gateway forwards it to the embedded IPv4
+    'fc00::1', 'fd12:3456::1', 'fe80::1', 'fe81::1', 'febf::1', 'fec0::1', 'ff02::1',                   // unique-local, link-local (all of fe80::/10), site-local, multicast
+    '2002:7f00:1::', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:db8::1',                             // 6to4, Teredo, documentation
+  ])('refuses [%s], typed or resolved', (addr) => {
+    expect(W.publicAddress(addr), addr).toBe(false)
+    expect(W.publicAddress(`[${addr}]`), addr).toBe(false)
+    expect(W.pastedPublicUrls(`read http://[${addr}]/x`).urls, addr).toEqual([])
+  })
+  it.each(['2606:4700:4700::1111', '2001:4860:4860::8888', '2a00:1450:4001:81b::200e', '2620:fe::fe'])('keeps the public address [%s]', (addr) => {
+    expect(W.publicAddress(addr)).toBe(true)
+    expect(W.pastedPublicUrls(`read https://[${addr}]/x`).urls).toHaveLength(1)
+  })
+  it('the IPv4 rules are as before', () => {
+    for (const a of ['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.1.1', '100.64.0.1', '0.0.0.0', '224.0.0.1']) expect(W.publicAddress(a), a).toBe(false)
+    for (const a of ['8.8.8.8', '93.184.216.34']) expect(W.publicAddress(a), a).toBe(true)
+  })
+})
+
+describe('pointsAtEarlierLink needs a clear reference', () => {
+  it.each(['What does the article say?', 'Summarize that link', 'what about the linked story', 'Is this piece accurate?', 'go back to the pasted article', 'what did the linked page claim?'])('%s', q => {
+    expect(W.pointsAtEarlierLink(q)).toBe(true)
+  })
+  it.each(["what's on page 3 of the deck?", 'which site should we host on', 'Who wrote the post about pricing?', 'the page count is wrong', 'What was decided?', 'open the website', 'a piece of cake'])('%s', q => {
+    expect(W.pointsAtEarlierLink(q)).toBe(false)
+  })
+})
+
+describe('stored text keeps no unsafe link', () => {
+  const LONG = 'The council debated the harbor budget at length and the minutes ran long into the evening hearing. '.repeat(6)
+  it('redactUnsafeLinks cuts every link that is not a clean public address, keeps clean ones and the punctuation after', () => {
+    const text = 'see https://example.org/a?access_token=abc123xyz, and https://example.org/ok. also http://localhost:8080/x) and https://u:p@example.org/z!'
+    expect(W.redactUnsafeLinks(text)).toBe('see [link removed], and https://example.org/ok. also [link removed]) and [link removed]!')
+    expect(W.redactUnsafeLinks('no links here')).toBe('no links here')
+  })
+  it('a pasted-text file made from a question with a ?access_token= link holds no such link, even past the first two links', () => {
+    const q = `${LONG} https://a.example.org/1 https://b.example.org/2 https://c.example.org/3 https://d.example.org/doc?access_token=SECRETVALUE99 and the rest`
+    const file = P.pastedTextFile(q, 0)!
+    expect(file.text).not.toContain('access_token')
+    expect(file.text).not.toContain('SECRETVALUE99')
+    expect(file.text).toContain('[link removed]')
+    expect(file.text).toContain('https://c.example.org/3')                           // clean links stay
+  })
+  it('end to end: the kept file, and what cues would read, holds no token link', async () => {
+    const f = fixture()
+    await ask(f, `${LONG} see https://example.org/doc?access_token=SECRETVALUE99 for more`)
+    const files = f.store.files('meeting_test')
+    expect(files.length).toBeGreaterThan(0)
+    expect(JSON.stringify(files)).not.toContain('SECRETVALUE99')
+  })
+  it('a page file whose address carries a token holds no such address', () => {
+    const file = P.pastedPageFile({ id: 'W1', kind: 'web', title: 'T', url: 'https://example.org/a?token=zzzz9999', text: 'Retrieved page excerpt (may be partial): ' + PAGE_TEXT })!
+    expect(file.text).not.toContain('zzzz9999')
+    expect(file.text.startsWith('[link removed]')).toBe(true)
+  })
+})
+
+describe('pasted files never crowd out or repeat what is already in the answer', () => {
+  const mk = (id: string, text: string, extra: Record<string, unknown> = {}) => ({ id, revision: 'r1', name: id, status: 'ready' as const, text, ...extra })
+  it('dropped and phone files come before paste_ and web_ files when the 16,000 character budget is spent', async () => {
+    const f = fixture()
+    const phone = mk('phone_screenshot01', `PHONEMARK ${'p'.repeat(5000)} PHONEEND`, { origin: 'phone' as const })
+    const pasteA = mk('paste_aaaaaaaaaaaaaaaa', `PASTEA ${'a'.repeat(12000)}`), pasteB = mk('paste_bbbbbbbbbbbbbbbb', `PASTEB ${'b'.repeat(12000)}`)
+    f.store.putFiles('meeting_test', [phone, pasteA, pasteB])
+    const refs = [pasteA, pasteB, phone].map(x => ({ id: x.id, revision: x.revision }))           // the order an id sort gives: paste_ before phone_
+    await ask(f, 'Summarize the screenshot', { files: refs })
+    const prompt = f.run.mock.calls[0][1]
+    expect(prompt).toContain('PHONEEND')                                                            // the phone text is whole
+    expect(prompt).toContain('PASTEA')
+    expect(prompt).not.toContain('PASTEB')                                                          // what was left of the budget went to the first paste only
+  })
+  it('a read page that is already a W source in this answer is not repeated as a web_ file', async () => {
+    const f = fixture([answer('Approved. [W1]'), answer('Again. [W1]')])
+    await ask(f, `This is the article: ${ARTICLE}`)
+    const webFile = f.store.files('meeting_test').find(x => x.id.startsWith('web_'))!
+    expect(webFile).toBeTruthy()
+    await ask(f, 'What does the article say about the winning bidder?', { files: [{ id: webFile.id, revision: webFile.revision }] })
+    const prompt = f.run.mock.calls[1][1] as string
+    expect(prompt.split('Quartz Basin Marine').length - 1).toBe(1)                                  // once, as the W source
+    // With no read page in the answer, the web_ file is ordinary context and stays.
+    const f2 = fixture()
+    f2.store.putFiles('meeting_test', [webFile])
+    await ask(f2, 'What was decided?', { files: [{ id: webFile.id, revision: webFile.revision }] })
+    expect((f2.run.mock.calls[0][1] as string).split('Quartz Basin Marine').length - 1).toBe(1)
+  })
+})
+
+describe('transcript cleanup does not learn vocabulary from pasted text or pages', () => {
+  it('the default file source leaves paste_ and web_ files out and keeps dropped ones', async () => {
+    const { defaultCleanupDeps } = await import('./transcript-cleanup.js')
+    const store = new MeetingAskStore()
+    const sessionId = 'meeting_cleanup_ids'
+    store.putFiles(sessionId, [
+      { id: 'file_dropped0001', revision: '1', name: 'Agenda', status: 'ready', text: 'Agenda for the quarterly review' },
+      { id: 'paste_0123456789abcdef', revision: '1', name: 'Pasted text 11:49', status: 'ready', text: 'Dredging contract article words' },
+      { id: 'web_0123456789abcdef', revision: '1', name: 'Harbor story', status: 'ready', text: 'https://apnews.com/x\n\nQuartz Basin Marine' },
+    ])
+    expect(await defaultCleanupDeps().files(sessionId)).toEqual([{ name: 'Agenda', text: 'Agenda for the quarterly review' }])
   })
 })

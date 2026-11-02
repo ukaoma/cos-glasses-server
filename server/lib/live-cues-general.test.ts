@@ -1109,13 +1109,12 @@ describe('web lookup ledger: withheld lookups', () => {
     return ledger
   }
   afterEach(async () => { (await import('./web-lookup-ledger.js')).setWebLedgerForTests(null) })
-  it('a window with private-life vocabulary counts as personal, once per attempt', async () => {
+  it('checks that run before the trigger are not lookups held back: a private-life window counts nothing, attempt after attempt', async () => {
     const h = await make({ sessions: [mac('mac_1', { text: 'we still owe the IRS and the mortgage payment' })] })
     const ledger = await ledgerFor(h)
-    await h.go()
-    expect(ledger.today().withheld).toEqual({ total: 1, byReason: { personal: 1 }, byFeature: { cues: 1, ask: 0, factCheck: 0 } })
-    await h.go()
-    expect(ledger.today().withheld.byReason.personal).toBe(2)
+    await h.go(); await h.go(); await h.go()
+    expect(h.traces.filter(t => t.reason === 'sensitive:finance')).toHaveLength(3)           // it was withheld three times, and said so in the trace
+    expect(ledger.today().withheld.total).toBe(0)
   })
   it('an admission rejection counts under its own reason code, and a clean search counts no withheld lookup', async () => {
     const reject = await make({ deps: { topicModel: async () => ({ text: JSON.stringify({ topic: true, category: 'news', query: 'Austin FC 2026 season' }) }) } })
@@ -1134,12 +1133,12 @@ describe('web lookup ledger: withheld lookups', () => {
     await h.go()
     expect(ledger.today().withheld.byReason).toEqual({ local_no_area: 1 })
   })
-  it('voices that cannot be read count as names_unavailable; a rejected local query keeps its own code', async () => {
+  it('voices that cannot be read are a pre-trigger check and count nothing; a rejected local query keeps its own code', async () => {
     const unreadable: Deps['profile'] = { ...PROFILE, voiceProfileNames: () => { throw new Error('voice store unreadable') } }
     const h = await make({ deps: { profile: unreadable } })
     const ledger = await ledgerFor(h)
     await h.go()
-    expect(ledger.today().withheld.byReason).toEqual({ names_unavailable: 1 })
+    expect(ledger.today().withheld.total).toBe(0)
     const local = await make({ deps: { topicModel: async () => ({ text: JSON.stringify({ topic: true, category: 'local', query: 'road closures' }) }) } })
     const ledger2 = await ledgerFor(local)
     local.settings.homeArea = 'Quillco Heights'                            // an owner term: the area passes alone, the query with it is refused

@@ -12,19 +12,31 @@ function setup(startIso = '2026-11-02T15:00:00.000Z') {
   const clock = { at: Date.parse(startIso) }
   return { dir, file, clock, ledger: new WebLookupLedger(file, () => clock.at) }
 }
-const ZERO = { searches: 0, pagesRead: 0 }
+const ZERO = { searches: 0, pagesRead: 0, pagesFailed: 0 }
 
 describe('web lookup ledger', () => {
   it('counts searches, pages read and withheld lookups by feature, and totals the withheld by reason across features', () => {
     const { ledger } = setup()
     ledger.search('cues'); ledger.search('ask'); ledger.search('ask'); ledger.search('factCheck')
-    ledger.pagesRead('ask', 2); ledger.pagesRead('factCheck'); ledger.pagesRead('cues', 0)
+    ledger.pagesRead('ask', 2); ledger.pagesRead('factCheck'); ledger.pagesRead('cues', 0); ledger.pagesFailed('ask', 3); ledger.pagesFailed('cues'); ledger.pagesFailed('factCheck', 0)
     ledger.withheld('ask', 'no_public_intent'); ledger.withheld('ask', 'no_public_intent'); ledger.withheld('cues', 'personal'); ledger.withheld('factCheck', 'no_public_intent')
     expect(ledger.today()).toEqual({
       day: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), readable: true,
-      cues: { searches: 1, pagesRead: 0 }, ask: { searches: 2, pagesRead: 2 }, factCheck: { searches: 1, pagesRead: 1 },
+      cues: { searches: 1, pagesRead: 0, pagesFailed: 1 }, ask: { searches: 2, pagesRead: 2, pagesFailed: 3 }, factCheck: { searches: 1, pagesRead: 1, pagesFailed: 0 },
       withheld: { total: 4, byReason: { no_public_intent: 3, personal: 1 }, byFeature: { cues: 1, ask: 2, factCheck: 1 } },
     })
+  })
+  it('a file written before pagesFailed existed reads as zero failures and keeps its counts', () => {
+    const { file, ledger } = setup()
+    writeFileSync(file, JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-02', features: { cues: { searches: 1, pagesRead: 0, withheld: {} }, ask: { searches: 2, pagesRead: 1, withheld: {} }, factCheck: { searches: 0, pagesRead: 0, withheld: {} } } }))
+    expect(ledger.today()).toMatchObject({ readable: true, ask: { searches: 2, pagesRead: 1, pagesFailed: 0 } })
+    ledger.pagesFailed('ask')
+    expect(ledger.today().ask).toEqual({ searches: 2, pagesRead: 1, pagesFailed: 1 })
+  })
+  it('a pagesFailed that is not a count makes the file unreadable', () => {
+    const { file, ledger } = setup()
+    writeFileSync(file, JSON.stringify({ v: 1, zone: 'UTC', day: '2026-11-02', features: { cues: { searches: 0, pagesRead: 0, pagesFailed: -2, withheld: {} }, ask: { searches: 0, pagesRead: 0, withheld: {} }, factCheck: { searches: 0, pagesRead: 0, withheld: {} } } }))
+    expect(ledger.today().readable).toBe(false)
   })
   it('a fresh data dir is readable and all zero', () => {
     expect(setup().ledger.today()).toMatchObject({ readable: true, cues: ZERO, ask: ZERO, factCheck: ZERO, withheld: { total: 0, byReason: {} } })
@@ -37,7 +49,7 @@ describe('web lookup ledger', () => {
   it('rolls over at the local midnight, not the UTC one: the state names its own zone', () => {
     const { file, clock, ledger } = setup('2026-11-02T01:00:00.000Z')   // 19:00 on Nov 1 in Chicago
     writeFileSync(file, JSON.stringify({ v: 1, zone: 'America/Chicago', day: '2026-11-01', features: { cues: { searches: 3, pagesRead: 0, withheld: {} }, ask: { searches: 5, pagesRead: 1, withheld: { personal: 2 } }, factCheck: { searches: 0, pagesRead: 0, withheld: {} } } }))
-    expect(ledger.today()).toMatchObject({ day: '2026-11-01', ask: { searches: 5, pagesRead: 1 }, withheld: { total: 2 } })   // 02:00 UTC is still Nov 1 in the file's zone
+    expect(ledger.today()).toMatchObject({ day: '2026-11-01', ask: { searches: 5, pagesRead: 1, pagesFailed: 0 }, withheld: { total: 2 } })   // 02:00 UTC is still Nov 1 in the file's zone
     clock.at = Date.parse('2026-11-02T06:30:00.000Z')                  // 00:30 Nov 2 in Chicago
     expect(ledger.today()).toMatchObject({ day: '2026-11-02', readable: true, cues: ZERO, ask: ZERO, withheld: { total: 0, byReason: {} } })
     ledger.search('ask')
