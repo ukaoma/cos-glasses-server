@@ -19,7 +19,7 @@ const { isLiveCueV2, CUE_HEADLINE_MAX, CUE_DETAIL_MAX } = contract
 type Deps = import('./live-cues-v2.js').LiveCuesV2Deps
 
 /** The 6.97.8 tuning rules, off by default in this file's engine tests; each has its own describe block below. */
-const OFF_RULES: NodeJS.ProcessEnv = { COS_LIVE_CUES_V2_LEAD_REPEAT: '0', COS_LIVE_CUES_V2_KNOWN_NAMES: '0' }
+const OFF_RULES: NodeJS.ProcessEnv = { COS_LIVE_CUES_V2_LEAD_REPEAT: '0', COS_LIVE_CUES_V2_KNOWN_NAMES: '0', COS_LIVE_CUES_V2_PACING: '0' }
 const words = (n: number, w = 'budget') => Array.from({ length: n }, () => w).join(' ')
 const sha = (v: unknown) => createHash('sha256').update(typeof v === 'string' && v.startsWith('FILE:') ? readFileSync(v.slice(5)) : JSON.stringify(v)).digest('hex')
 
@@ -502,6 +502,85 @@ describe('engine', () => {
     expect(await promptFor({ knownNames: async () => { throw new Error('boom') } }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toBe(baseline)
     expect(await promptFor({ knownNames: () => ['Zorvana'] }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '0' })).toBe(baseline)
     expect(await promptFor({ knownNames: () => ['Zorvana'] }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toContain('Zorvana')
+  })
+
+  describe('6.97.8 pacing', () => {
+    const MIN = 60_000
+    let t0 = 0
+    beforeEach(() => { t0 = clock })                                                       // minute 0 is when the test arms the meeting
+    /** One feed a minute from minute `from` to minute `to`, returning the minute of every cue shown. */
+    async function run(e: InstanceType<typeof LiveCuesV2Engine>, id: string, from: number, to: number): Promise<number[]> {
+      const at: number[] = []
+      for (let m = from; m <= to; m++) {
+        clock = t0 + m * MIN
+        const before = emitted.filter(x => x.type === 'coaching_nudge_v2').length
+        await e.feed(id, words(L.minNewWords))
+        if (emitted.filter(x => x.type === 'coaching_nudge_v2').length > before) at.push(m)
+      }
+      return at
+    }
+
+    it('a 60 minute meeting still has cues at minute 50: a burst of 13, then one cue every 5 minutes, the 25th at minute 60', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      const e = engine(); e.arm('meeting_a')
+      const at = await run(e, 'meeting_a', 0, 60)
+      expect(at.slice(0, 15)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+      expect(at.slice(15)).toEqual([15, 20, 25, 30, 35, 40, 45, 50, 55, 60])
+      expect(at).toHaveLength(25)
+      expect(e.status('meeting_a').session?.cues).toHaveLength(25)
+    })
+
+    it('without the switch the same meeting spends all 25 cues in its first 25 minutes (the 11/02 shape)', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '0' }
+      const e = engine(); e.arm('meeting_a')
+      const at = await run(e, 'meeting_a', 0, 60)
+      expect(at.at(-1)).toBe(24)
+      expect(at).toHaveLength(25)
+    })
+
+    it('a paced-out minute costs no gate call and traces one `paced` skip per five minutes; the user cap is untouched', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      const e = engine(); e.arm('meeting_a')
+      await run(e, 'meeting_a', 0, 19)
+      const gatesAfterBurst = calls.gate
+      expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(16)         // minutes 0..15
+      expect(gatesAfterBurst).toBe(16)                                                     // minutes 16 to 19 asked nothing
+      const skips = traces.filter(t => t.kind === 'skip')
+      expect(skips.map(t => t.reason)).toEqual(['paced'])
+      expect(e.status('meeting_a').session).toMatchObject({ state: 'active' })              // pacing is not a stop
+      expect(e.status('meeting_a').session).not.toHaveProperty('reason')
+    })
+
+    it('the user cap and gap keep their meaning: a lowered cap scales the burst, and the cap is never exceeded', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1', COS_LIVE_CUES_V2_MAX_PER_MEETING: '6' }
+      const e = engine(); e.arm('meeting_a')
+      const at = await run(e, 'meeting_a', 0, 70)
+      expect(at).toEqual([0, 1, 2, 20, 40, 60])                                              // burst 3, then one every 60 / (6 - 3) = 20 minutes, the 6th at minute 60
+    })
+
+    it('silent opening minutes still count: the clock starts at arm, not at the first cue', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      pCue = 0.1                                                                           // the gate is silent for the first five minutes
+      const e = engine(); e.arm('meeting_a')
+      await run(e, 'meeting_a', 0, 4)
+      pCue = 0.9
+      const at = await run(e, 'meeting_a', 5, 30)
+      // allowed(m) = 13 + floor(m / 5) from minute 0. A clock that started at the first charge (minute 5) would stop at 16 cues, not 17.
+      expect(at.filter(m => m <= 21)).toHaveLength(17)
+      expect(at.slice(17)).toEqual([25, 30])
+    })
+
+    it('the clock survives a server restart through the stored first-charge time', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      const e = engine(); e.arm('meeting_a')
+      await run(e, 'meeting_a', 0, 12)                                                      // 13 cues, clock now at minute 12
+      expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(13)
+      const restarted = engine(); restarted.arm('meeting_a')                                 // armedAt is now; the store remembers minute 0
+      emitted = []
+      clock += MIN                                                                           // minute 13: 1 minute after the restart, 13 minutes after the meeting began
+      await restarted.feed('meeting_a', words(L.minNewWords))
+      expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(1)           // allowed(13) = 15, 13 shown: a cue. A clock restarted at arm would allow 13: paced out
+    })
   })
 
   it('6.79.0: an invalid COS_LIVE_CUES_V2_REPEAT_OVERLAP leaves the rule off with one log line per value', () => {

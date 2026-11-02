@@ -68,6 +68,7 @@ import { errMsg } from './utils.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
 import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
 import { KNOWN_NAMES_USE, knownNamesFor } from './live-cues-v2-names.js'
+import { paceAllowed } from './live-cues-v2-pacing.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
 import {
   CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isCueKind, isLiveCueV2, legacyCueKind,
@@ -373,7 +374,8 @@ export function localWeekStart(now: Date, zone: string): string {
 }
 
 // ── Durable state: weekly ceiling, tombstones, pauses, per-meeting counters ─────
-interface MeetingCounters { cues: number; writerCalls: number; at: number }
+/** `since` (6.97.8): when the meeting's first writer call was charged, so a restarted server keeps the pacing clock. Absent in older files. */
+interface MeetingCounters { cues: number; writerCalls: number; at: number; since?: number }
 /** 6.79.2: usage on the local calendar day (in the stored zone), for the daily writer ceiling and COS Control's readout. */
 export interface LiveCuesV2DayUsage { writerCalls: number; writerTokensIn: number; writerTokensOut: number; cues: number; jevTokens: number }
 const DAY_FIELDS = ['writerCalls', 'writerTokensIn', 'writerTokensOut', 'cues', 'jevTokens'] as const
@@ -451,7 +453,8 @@ export class LiveCuesV2Store {
     s.writerCalls += 1
     s.today.writerCalls += 1
     const m = s.meetings[sessionId] ?? { cues: 0, writerCalls: 0, at: 0 }
-    s.meetings[sessionId] = { ...m, writerCalls: m.writerCalls + 1, at: this.now().getTime() }
+    const nowMs = this.now().getTime()
+    s.meetings[sessionId] = { ...m, writerCalls: m.writerCalls + 1, at: nowMs, since: typeof m.since === 'number' ? m.since : nowMs }
     this.write(s)
     return true
   }
@@ -479,6 +482,11 @@ export class LiveCuesV2Store {
     return { cues: m?.cues ?? 0, writerCalls: m?.writerCalls ?? 0 }
   }
   /** The durable per-meeting counters, or null once they expired (24 h) or never existed. */
+  /** When this meeting's first writer call was charged (6.97.8), or null for a meeting with none or from an older file. */
+  meetingSince(sessionId: string): number | null {
+    const since = this.read().meetings[sessionId]?.since
+    return typeof since === 'number' && Number.isFinite(since) ? since : null
+  }
   meetingCounters(sessionId: string): { cues: number; writerCalls: number } | null {
     const m = this.read().meetings[sessionId]
     return m ? { cues: m.cues, writerCalls: m.writerCalls } : null
@@ -954,6 +962,12 @@ export class LiveCuesV2Engine {
     if (nowMs - s.lastEvalAt < L.minIntervalMs || nowMs - s.lastCueAt < lim.cooldownMs) return
     const counters = this.deps.store.counters(sessionId)
     if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) return this.traceSkip(s, 'meeting_cap', nowMs)
+    // 6.97.8 pacing, on unless COS_LIVE_CUES_V2_PACING=0: before the gate, so a paced-out minute costs no Jev call. The clock starts
+    // at arm, or at the first writer call a previous run of this server recorded, whichever is earlier.
+    if (liveCuesV2Rule('PACING', this.deps.env)) {
+      const started = Math.min(s.armedAt, this.deps.store.meetingSince(sessionId) ?? s.armedAt)
+      if (counters.cues >= paceAllowed(lim.maxCues, lim.cooldownMs, nowMs - started)) return this.traceSkip(s, 'paced', nowMs)
+    }
     if (this.deps.store.weeklyUsed() >= liveCuesV2WeeklyCap(this.deps.env)) return this.traceSkip(s, 'budget_exhausted', nowMs)  // before the gate
     if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) return this.traceSkip(s, 'daily_cap', nowMs)              // before the gate
     if (this.deps.busy()) return this.traceSkip(s, 'busy', nowMs)
