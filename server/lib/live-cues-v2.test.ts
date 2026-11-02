@@ -399,7 +399,7 @@ describe('engine', () => {
     expect((JSON.parse(calls.prompts[0]) as { memory: Array<{ title: string }> }).memory.map(m => m.title)).toEqual(['Kept A'])
   })
 
-  it('6.79.0: with COS_LIVE_CUES_V2_REPEAT_OVERLAP unset, a repeated cue is shown exactly as before', async () => {
+  it('6.79.0: with COS_LIVE_CUES_V2_REPEAT_OVERLAP unset the whole-cue rule is off (this file\'s harness also switches the 6.97.8 lead rule off, which would withhold the repeat)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     onTestFinished(() => warn.mockRestore())
     const e = engine(); e.arm('meeting_a')
@@ -558,6 +558,47 @@ describe('engine', () => {
       expect(at).toEqual([0, 1, 2, 20, 40, 60])                                              // burst 3, then one every 60 / (6 - 3) = 20 minutes, the 6th at minute 60
     })
 
+    it('the horizon is the meeting\'s calendar length when known: a 30 minute meeting has its whole cap open by minute 30', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      const e = engine({ meetingLength: () => 30 * MIN }); e.arm('meeting_a')
+      const at = await run(e, 'meeting_a', 0, 60)
+      expect(at).toHaveLength(25)
+      expect(at.at(-1)).toBeLessThanOrEqual(30)                                           // refill 30 min / 12 = 2.5 min, not 5
+      // an unreadable or nonsense length falls back to the hour
+      clock = t0
+      const e2 = engine({ meetingLength: () => { throw new Error('no calendar') } }); e2.arm('meeting_b')
+      expect((await run(e2, 'meeting_b', 0, 60)).at(-1)).toBe(60)
+    })
+
+    it('a cap of 4 or fewer is not paced', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1', COS_LIVE_CUES_V2_MAX_PER_MEETING: '4' }
+      const e = engine(); e.arm('meeting_a')
+      expect(await run(e, 'meeting_a', 0, 10)).toEqual([0, 1, 2, 3])
+    })
+
+    it('raising the cap mid-meeting resumes cues at once', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      const saved: Record<string, number> = { maxCuesPerMeeting: 5 }
+      const e = engine({ settings: { stored: () => null, limits: () => ({ ...saved }) } }); e.arm('meeting_a')
+      expect(await run(e, 'meeting_a', 0, 5)).toEqual([0, 1, 2])                          // burst 3 of 5, then paced (the next refill is at minute 30)
+      expect(await run(e, 'meeting_a', 6, 6)).toEqual([])
+      saved.maxCuesPerMeeting = 6                                                         // raised at minute 7: the new cap's own allowance is still 3 (burst 3, refill at 20), but one more cue is open now
+      expect(await run(e, 'meeting_a', 7, 7)).toEqual([7])
+      expect(await run(e, 'meeting_a', 8, 8)).toEqual([])                                 // and only one
+    })
+
+    it('the pacing clock is stored at arm: a restart keeps the meeting\'s own start, not the first writer call\'s and not the restart\'s', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
+      pCue = 0.1                                                                           // five silent minutes: no writer call, no charge
+      const e = engine(); e.arm('meeting_a')
+      await run(e, 'meeting_a', 0, 4)
+      pCue = 0.9
+      expect(await run(e, 'meeting_a', 5, 20)).toHaveLength(16)                            // allowed(20) = 13 + 4 = 17 from minute 0
+      const restarted = engine(); restarted.arm('meeting_a')                              // armedAt is minute 20
+      // From arm: allowed(21) = 17, 16 shown: a cue. From the first charge (minute 5): allowed = 16, paced. From the restart: 13, paced.
+      expect(await run(restarted, 'meeting_a', 21, 21)).toEqual([21])
+    })
+
     it('silent opening minutes still count: the clock starts at arm, not at the first cue', async () => {
       env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_PACING: '1' }
       pCue = 0.1                                                                           // the gate is silent for the first five minutes
@@ -585,14 +626,17 @@ describe('engine', () => {
 
   describe('6.97.8 open items', () => {
     const MIN = 60_000
-    const GAP_A = JSON.stringify({ cue: 'Main slides get built this week, but nobody has taken the draft deadline. Settle a date before the call ends.', kind: 'challenge', open: 'Slides draft deadline' })
-    const GAP_B = JSON.stringify({ cue: 'The vendor decision is pending after the budget call. Settle who chases that answer, since no owner or date was named.', kind: 'challenge' })   // no field: the wording matches
-    const GAP_C = JSON.stringify({ cue: 'Open: how many trials converted at the second tier. No owner or date was named.', kind: 'followUp', open: 'Second tier trial conversions' })
-    const GAP_D = JSON.stringify({ cue: 'Someone took on the offsite agenda. No date was set for that talk.', kind: 'promise', open: 'Offsite agenda talk' })
+    const MAC = 'mac_f1118630-458a-47d6-852f-5ef55ec22bee'
+    const gapCue = (cue: string, open: string, kind = 'challenge') => JSON.stringify({ cue, kind, open })
+    const GAP_A = gapCue('Main slides get built this week, but nobody has taken the draft deadline. Settle a date before the call ends.', 'Slides draft deadline')
+    const GAP_B = gapCue('The vendor decision is pending after the budget call. Settle who chases that answer, since no owner or date was named.', 'Vendor decision follow-up')
+    const GAP_C = gapCue('Open: how many trials converted at the second tier. No owner or date was named.', 'Second tier trial conversions', 'followUp')
+    const GAP_D = gapCue('Someone took on the offsite agenda. No date was set for that talk.', 'Offsite agenda talk', 'promise')
+    const GAP_E = gapCue('Warehouse audit scheduling came up. Nobody has taken it, so settle who books it.', 'Warehouse audit booking')
     const NORMAL = JSON.stringify({ cue: 'Kiosk vendor review slipped twice; agree a new pilot date with procurement.', kind: 'challenge' })
     const cuesShown = () => emitted.filter(x => x.type === 'coaching_nudge_v2').map(x => x.data)
 
-    async function play(writes: string[], id = 'meeting_a', gapMs = 65_000, over: Partial<Deps> = {}) {
+    async function play(writes: string[], id = MAC, gapMs = 65_000, over: Partial<Deps> = {}) {
       let n = 0
       writerText = async () => writes[n++]
       const logged: Array<Record<string, unknown>> = []
@@ -600,86 +644,112 @@ describe('engine', () => {
       for (let i = 0; i < writes.length; i++) { await e.feed(id, words(L.minNewWords)); clock += gapMs }
       return { e, logged, id }
     }
+    const on = () => { env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' } }
 
-    it('a held item is not shown, logged or counted as a cue, but its writer call is; the second one makes one combined cue', async () => {
-      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
-      const { e, logged } = await play([GAP_A, NORMAL, GAP_B])
+    it('a held item is logged when held and not shown; the next feed makes the combined cue from the held items with no model call', async () => {
+      on()
+      const { e, logged, id } = await play([GAP_A, NORMAL, GAP_B])
+      expect(cuesShown().map(c => c.detail)).toEqual([JSON.parse(NORMAL).cue])                  // both gap cues are held so far
+      expect(logged.map(r => r.detail)).toEqual([JSON.parse(GAP_A).cue, JSON.parse(NORMAL).cue, JSON.parse(GAP_B).cue])   // all three logged, held ones as written
+      expect(evaluations().map(t => t.outcome)).toEqual(['held_open_item', 'cue', 'held_open_item'])
+      const writerCalls = calls.writer, gates = calls.gate
+      await e.feed(id, words(L.minNewWords))                                                     // the next feed: a combined cue is due
+      expect(calls.writer).toBe(writerCalls)
+      expect(calls.gate).toBe(gates)
       const shown = cuesShown()
-      expect(shown.map(c => c.detail)).toEqual([JSON.parse(NORMAL).cue, 'Still open, no owner or date: Slides draft deadline; The vendor decision is pending after the budget call.'])
-      expect(shown[1]).toMatchObject({ headline: 'Open items: 2 need an owner or date', kind: 'challenge', sources: [] })
-      expect(logged.map(r => r.cueId)).toEqual(shown.map(c => c.cueId))                  // the held item never reached the log
-      const evals = evaluations()
-      expect(evals.map(t => t.outcome)).toEqual(['held_open_item', 'cue', 'cue'])
-      expect(evals[0]).toMatchObject({ openSource: 'field', openWaiting: 1 })
-      expect(evals[2]).toMatchObject({ openItems: 2 })
-      expect(JSON.stringify(traces)).not.toContain('Slides draft')                       // counts, never the items
-      expect(e.status('meeting_a').session).toMatchObject({ writerCalls: 3 })
-      expect(e.status('meeting_a').session?.cues).toHaveLength(2)                         // the held item never became a cue, so it never counted toward the cap
-      expect(emitted.filter(x => x.type === 'coaching_nudge').map(x => x.data.type)).toEqual(['challenge', 'challenge'])
+      expect(shown).toHaveLength(2)
+      expect(shown[1]).toMatchObject({ headline: 'Slides draft deadline +1', kind: 'followUp', sources: [],
+        detail: 'Still open, no owner or date: Slides draft deadline; Vendor decision follow-up.' })
+      expect(logged.at(-1)).toMatchObject({ cueId: shown[1].cueId, kind: 'followUp', headline: 'Slides draft deadline +1' })
+      expect(traces.at(-1)).toMatchObject({ kind: 'flush', mode: 'digest', items: 2, cueId: shown[1].cueId })
+      expect(JSON.stringify(traces)).not.toContain('Slides draft')
+      expect(emitted.filter(x => x.type === 'coaching_nudge').map(x => x.data.type)).toEqual(['challenge', 'challenge'])   // followUp reads as challenge to a v1 reader
+      expect(e.status(id).session?.cues).toHaveLength(2)                                         // the held cues never counted toward the cap
+    })
+
+    it('on a legacy (G2) meeting nothing folds, even when a writer returns an open field: every cue is shown as written', async () => {
+      on()
+      await play([GAP_A, GAP_B, NORMAL], 'meeting_a')
+      expect(cuesShown().map(c => c.detail)).toEqual([JSON.parse(GAP_A).cue, JSON.parse(GAP_B).cue, JSON.parse(NORMAL).cue])
+      expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue', 'cue'])
+    })
+
+    it('a cue with no open field from the writer is shown even on an extended meeting, however it is worded', async () => {
+      on()
+      const noField = JSON.stringify({ cue: 'Main slides get built this week, but nobody has taken the draft deadline. Settle a date before the call ends.', kind: 'challenge' })
+      await play([noField, noField.replace('Main slides', 'Budget slides')])
+      expect(cuesShown()).toHaveLength(2)
+    })
+
+    it('a held cue stays in the writer\'s previous cues and in both repeat rules, so a re-raise is withheld', async () => {
+      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1', COS_LIVE_CUES_V2_LEAD_REPEAT: '1' }
+      const { e, id } = await play([GAP_A])
+      const again = gapCue('Main slides get built this week, but nobody has taken the draft deadline. Settle a date before the call ends.', 'Slides draft deadline')
+      writerText = async () => again
+      await e.feed(id, words(L.minNewWords))
+      expect(JSON.parse(calls.prompts.at(-1)!).previousCues).toEqual([JSON.parse(GAP_A).cue])
+      expect(evaluations().at(-1)).toMatchObject({ outcome: 'withheld_repeat', repeatRule: 'lead' })
+    })
+
+    it('a lone held item that nothing joined for 20 minutes is shown on its own, as the cue the writer wrote, with the id it was logged under', async () => {
+      on()
+      const { e, logged, id } = await play([GAP_A])
+      clock += 21 * MIN
+      await e.feed(id, words(L.minNewWords))
+      const shown = cuesShown()
+      expect(shown).toHaveLength(1)
+      expect(shown[0]).toMatchObject({ detail: JSON.parse(GAP_A).cue, cueId: logged[0].cueId, createdAt: clock })
+      expect(traces.at(-1)).toMatchObject({ kind: 'flush', mode: 'alone', items: 1 })
+      expect(logged).toHaveLength(1)                                                              // not logged twice
+    })
+
+    it('with more than three waiting, the newest three go in one combined cue and the oldest waits, then is shown alone; nothing is dropped', async () => {
+      on()
+      const GAP_F = gapCue('Hiring plan sign off came up. Nobody has named who approves it, so settle who signs.', 'Hiring plan sign off')
+      const { e, id } = await play([GAP_A, GAP_B, GAP_C, GAP_D, GAP_E, GAP_F, 'null'])   // the 3rd feed is the flush (no writer call), so the 7th write is a filler
+      expect(cuesShown().map(c => c.detail)).toEqual(['Still open, no owner or date: Slides draft deadline; Vendor decision follow-up.'])   // flushed on the feed after the second item
+      clock += 10 * MIN
+      await e.feed(id, words(L.minNewWords))
+      expect(cuesShown().map(c => c.detail).at(-1)).toBe('Still open, no owner or date: Offsite agenda talk; Warehouse audit booking; Hiring plan sign off.')
+      clock += 21 * MIN
+      await e.feed(id, words(L.minNewWords))
+      expect(cuesShown().map(c => c.detail).at(-1)).toBe(JSON.parse(GAP_C).cue)                 // the one the newest three left behind
+      expect(e.end(id).cues).toHaveLength(3)                                                    // nothing is left unshown
+    })
+
+    it('the meeting end returns a held cue that was never shown, so the record has it', async () => {
+      on()
+      const { e, id } = await play([GAP_A])
+      const end = e.end(id)
+      expect(end.cues.map(c => c.detail)).toEqual([JSON.parse(GAP_A).cue])
+      expect(end.nudgesGenerated).toBe(1)
     })
 
     it('a held cue still starts the cooldown, so the writer is not asked faster than before', async () => {
-      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
+      on()
       writerText = async () => GAP_A
-      const e = engine(); e.arm('meeting_a')
-      await e.feed('meeting_a', words(L.minNewWords))
-      clock += L.minIntervalMs + 1                                                        // past the 20 s floor, inside the 45 s cooldown
-      await e.feed('meeting_a', words(L.minNewWords))
+      const e = engine(); e.arm(MAC)
+      await e.feed(MAC, words(L.minNewWords))
+      clock += L.minIntervalMs + 1                                                               // past the 20 s floor, inside the 45 s cooldown
+      await e.feed(MAC, words(L.minNewWords))
       expect(calls.writer).toBe(1)
     })
 
-    it('at most one combined cue per 10 minutes; a later pair makes the next, and the older items past three are dropped', async () => {
-      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
-      const items = Array.from({ length: 6 }, (_, i) => JSON.stringify({ cue: `Topic ${i} has loose ends. Nobody has taken it, so settle who reports.`, kind: 'challenge', open: ['Offsite agenda', 'Pricing deck draft', 'Vendor budget answer', 'Dashboard review', 'Warehouse audit', 'Hiring plan signoff'][i] }))
-      const { e } = await play([items[0], items[1], items[2], items[3]], 'meeting_a', 65_000)   // items 0 and 1 make a cue at minute 1; 2 and 3 wait
-      expect(cuesShown().map(c => c.headline)).toEqual(['Open items: 2 need an owner or date'])
-      expect(evaluations().map(t => t.outcome)).toEqual(['held_open_item', 'cue', 'held_open_item', 'held_open_item'])
-      clock += 10 * MIN
-      let n = 0
-      writerText = async () => items[4 + n++]
-      await e.feed('meeting_a', words(L.minNewWords))                                      // 10 minutes after the first combined cue: item 4 arrives, 2 and 3 still wait
-      const shown = cuesShown()
-      expect(shown).toHaveLength(2)
-      expect(shown[1].detail).toBe('Still open, no owner or date: Vendor budget answer; Dashboard review; Warehouse audit.')
-    })
-
-    it('an extended meeting gets a followUp combined cue, and its v1 twin reads as the legacy kind', async () => {
-      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
-      const mac = 'mac_f1118630-458a-47d6-852f-5ef55ec22bee'
-      const { e } = await play([GAP_C, GAP_D], mac)
-      expect(e.arm(mac).kinds).toContain('followUp')
-      const shown = cuesShown()
-      expect(shown).toHaveLength(1)
-      expect(shown[0]).toMatchObject({ kind: 'followUp', detail: 'Still open, no owner or date: Second tier trial conversions; Offsite agenda talk.' })
-      expect(emitted.find(x => x.type === 'coaching_nudge')?.data.type).toBe('challenge')
-    })
-
-    it('a decision, a cue that cites a past meeting, and a cue with no gap are shown as before', async () => {
-      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
+    it('a decision, a cue that cites a past meeting, and a cue that is not an owner or date gap are shown as before, field or not', async () => {
+      on()
       const cited = JSON.stringify({ cue: 'The 2026-10-01 review flagged the cap at 12%. Nobody has taken the cap decision, so settle who owns it.', kind: 'challenge', memoryIds: ['M1'], open: 'Cap decision' })
       const decision = JSON.stringify({ cue: 'Decided: Sam joins the pool. No target or date was given yet. Settle when.', kind: 'decision', open: 'Sam target' })
-      const mac = 'mac_f1118630-458a-47d6-852f-5ef55ec22bee'
-      await play([cited, decision, NORMAL], mac)
+      const risky = JSON.stringify({ cue: 'Pricing ships Monday with no customer email drafted; churn risk for 400 accounts. Review it today.', kind: 'challenge', open: 'Customer email' })
+      await play([cited, decision, risky])
       expect(cuesShown().map(c => c.kind)).toEqual(['challenge', 'decision', 'challenge'])
       expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue', 'cue'])
     })
 
     it('with the switch at 0 every gap cue is shown exactly as before', async () => {
       env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '0' }
-      await play([GAP_A, GAP_B, GAP_C])
+      await play([GAP_A, GAP_B, GAP_E])
       expect(cuesShown()).toHaveLength(3)
       expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue', 'cue'])
-      expect(cuesShown()[0].detail).toContain('nobody has taken the draft deadline')
-    })
-
-    it('a lone held item is dropped when it waits too long for company', async () => {
-      env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_OPEN_ITEMS: '1' }
-      const { e } = await play([GAP_A], 'meeting_a')
-      clock += 25 * MIN
-      writerText = async () => GAP_D
-      await e.feed('meeting_a', words(L.minNewWords))
-      expect(cuesShown()).toHaveLength(0)                                                  // the first expired: one waiting, no cue
-      expect(evaluations().at(-1)).toMatchObject({ outcome: 'held_open_item', openWaiting: 1 })
     })
   })
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { CUE_DETAIL_MAX, CUE_HEADLINE_MAX } from '../../shared/live-cues-v2.js'
+import { CUE_DETAIL_MAX, CUE_HEADLINE_MAX, type LiveCueV2 } from '../../shared/live-cues-v2.js'
 import {
-  OPEN_ITEMS_EVERY_MS, OPEN_ITEMS_MAX, OPEN_ITEM_MAX_CHARS, OPEN_ITEM_STALE_MS, OpenItemFold, cleanOpenItem, isOwnerDateGap, openItemFromText, openItemOf, openItemsDetail, openItemsHeadline,
+  OPEN_ITEMS_EVERY_MS, OPEN_ITEMS_MAX, OPEN_ITEM_MAX_CHARS, OPEN_ITEM_STALE_MS, OpenItemFold, cleanOpenItem, isOwnerDateGap, openItemOf, openItemsDetail, openItemsHeadline,
 } from './live-cues-v2-open-items.js'
 
 const MIN = 60_000
@@ -47,98 +47,117 @@ describe('open items: what counts (6.97.8)', () => {
     expect(isOwnerDateGap(absenceOnly, 'reinforce')).toBe(false)
   })
 
-  it('a decision is never an open item, even with a gap in its text or a field from the writer', () => {
+  it('a decision is never an open item, even with a gap in its text and a field from the writer', () => {
     const text = 'Decided: Sam joins the pool. No target or date for holding them accountable was given yet. Settle when.'
-    expect(openItemOf({ kind: 'decision', detail: text, cited: 0 })).toBeNull()
     expect(openItemOf({ kind: 'decision', detail: text, cited: 0, field: 'Accountability date' })).toBeNull()
   })
 
   it('a cue that cites a past meeting or note is never an open item: its cross-meeting contrast is the value', () => {
     const [text] = GAP_CUES[1]
-    expect(openItemOf({ kind: 'challenge', detail: text, cited: 0 })).not.toBeNull()
+    expect(openItemOf({ kind: 'challenge', detail: text, cited: 0, field: 'Draft deadline' })).not.toBeNull()
     expect(openItemOf({ kind: 'challenge', detail: text, cited: 1, field: 'Draft deadline' })).toBeNull()
   })
 
-  it("the writer's own item wins and needs no matching wording; an empty or useless field falls back to the wording", () => {
-    expect(openItemOf({ kind: 'challenge', detail: 'The offsite agenda is still loose.', cited: 0, field: ' Offsite agenda. ' })).toEqual({ label: 'Offsite agenda', source: 'field' })
-    expect(openItemOf({ kind: 'challenge', detail: 'The offsite agenda is still loose.', cited: 0, field: '  ' })).toBeNull()
-    expect(openItemOf({ kind: 'challenge', detail: 'The offsite agenda is still loose.', cited: 0, field: 42 })).toBeNull()
-    const [text] = GAP_CUES[3]
-    expect(openItemOf({ kind: 'challenge', detail: text, cited: 0, field: '??' })).toMatchObject({ source: 'text' })
+  it('QA fix: an item needs the writer\'s own `open`; wording alone never folds a cue (the legacy prompt returns none)', () => {
+    for (const [text, kind] of GAP_CUES) {
+      expect(openItemOf({ kind, detail: text, cited: 0 }), text).toBeNull()
+      expect(openItemOf({ kind, detail: text, cited: 0, field: '  ' }), text).toBeNull()
+      expect(openItemOf({ kind, detail: text, cited: 0, field: 42 }), text).toBeNull()
+    }
   })
 
-  it('an item is short, in plain words and never over the limit; a label from the wording is the first sentence', () => {
+  it('QA fix: a field on a cue whose wording is not an owner or date gap does not fold it (a risk or a figure is never reduced to a label)', () => {
+    const risky = 'Pricing ships Monday but the customer email has no draft; churn risk for 400 accounts. Review the email today.'
+    expect(openItemOf({ kind: 'challenge', detail: risky, cited: 0, field: 'Customer email' })).toBeNull()
+    for (const [text, kind] of NOT_GAP_CUES) expect(openItemOf({ kind, detail: text, cited: 0, field: 'Some item' }), text).toBeNull()
+    const [gap, gapKind] = GAP_CUES[0]
+    expect(openItemOf({ kind: gapKind, detail: gap, cited: 0, field: ' Churn analysis date. ' })).toEqual({ label: 'Churn analysis date' })
+  })
+
+  it('an item is short, in plain words and never over the limit', () => {
     expect(cleanOpenItem('Thanksgiving week — agenda')).toBe('Thanksgiving week - agenda')
     expect(cleanOpenItem('x'.repeat(200))!.length).toBeLessThanOrEqual(OPEN_ITEM_MAX_CHARS)
     expect(cleanOpenItem('word '.repeat(40))!.endsWith('…')).toBe(true)
     expect(cleanOpenItem('')).toBeNull()
-    expect(openItemFromText('Open: how many trials converted at the second tier. No owner or date was named.')).toBe('How many trials converted at the second tier')
-    expect(openItemFromText(GAP_CUES[1][0]).length).toBeLessThanOrEqual(OPEN_ITEM_MAX_CHARS)
   })
 
-  it('the combined cue fits a cue: three longest items under the detail limit, a headline under the headline limit, no dash or arrow', () => {
+  it('the combined cue fits a cue: three longest items under the detail limit, the headline (first item plus the count) under the headline limit, no dash or arrow', () => {
     const longest = 'x'.repeat(OPEN_ITEM_MAX_CHARS)
     const detail = openItemsDetail([longest, longest, longest])
     expect(detail.length).toBeLessThanOrEqual(CUE_DETAIL_MAX)
-    for (const n of [1, 2, 3]) {
-      expect(openItemsHeadline(n).length).toBeLessThanOrEqual(CUE_HEADLINE_MAX)
-      expect(openItemsHeadline(n)).not.toMatch(/[—–→]/)
-    }
+    expect(openItemsHeadline([longest, longest, longest]).length).toBeLessThanOrEqual(CUE_HEADLINE_MAX)
+    expect(openItemsHeadline([longest]).length).toBeLessThanOrEqual(CUE_HEADLINE_MAX)
     expect(detail).not.toMatch(/[—–→]/)
-    expect(openItemsHeadline(1)).toBe('Open item: needs an owner or date')
-    expect(openItemsHeadline(3)).toBe('Open items: 3 need an owner or date')
+    expect(openItemsHeadline(['Offsite agenda'])).toBe('Offsite agenda')
+    expect(openItemsHeadline(['Offsite agenda', 'Draft deadline', 'Vendor answer'])).toBe('Offsite agenda +2')
     expect(openItemsDetail(['Offsite agenda', 'Draft deadline'])).toBe('Still open, no owner or date: Offsite agenda; Draft deadline.')
   })
 })
 
-describe('open items: the fold (6.97.8)', () => {
-  it('needs two waiting items, and shows the newest three', () => {
+const cueOf = (id: string, at = 0): LiveCueV2 => ({ protocol: 2, cueId: id, sessionId: 'm', headline: id, detail: `Detail of ${id}`, kind: 'challenge', sources: [], gate: 0.9, createdAt: at, model: 'm' })
+
+describe('open items: the fold (6.97.8, QA fix: nothing is lost)', () => {
+  it('a combined cue needs two waiting, shows the newest three, and keeps the older ones waiting', () => {
     const f = new OpenItemFold()
-    f.hold('Offsite agenda', 0)
-    expect(f.due(MIN)).toBeNull()
-    f.hold('Draft deadline for pricing', MIN)
-    f.hold('Vendor budget answer', 2 * MIN)
-    f.hold('Dashboard review date', 3 * MIN)
-    expect(f.due(4 * MIN)).toEqual(['Draft deadline for pricing', 'Vendor budget answer', 'Dashboard review date'])
+    f.hold('Offsite agenda', cueOf('a'), 0)
+    expect(f.next(MIN)).toBeNull()
+    for (const [i, label] of ['Pricing deck draft', 'Vendor budget answer', 'Dashboard review'].entries()) f.hold(label, cueOf(`b${i}`), (i + 1) * MIN)
+    const plan = f.next(4 * MIN)!
+    expect(plan.mode).toBe('digest')
+    expect(plan.items.map(i => i.label)).toEqual(['Pricing deck draft', 'Vendor budget answer', 'Dashboard review'])
     expect(OPEN_ITEMS_MAX).toBe(3)
+    f.markShown(plan, 4 * MIN)
+    expect(f.waiting()).toBe(1)                                                     // the oldest is still waiting, not dropped
+    expect(f.unshown().map(c => c.cueId)).toEqual(['a'])
   })
 
-  it('shows nothing for 10 minutes after a combined cue, then the next two or more', () => {
+  it('a second combined cue waits 10 minutes after the first', () => {
     const f = new OpenItemFold()
-    f.hold('Offsite agenda', 0); f.hold('Draft deadline pricing', MIN)
-    const items = f.due(2 * MIN)!
-    f.markShown(items, 2 * MIN)
-    f.hold('Vendor budget answer', 3 * MIN); f.hold('Dashboard review date', 4 * MIN)
-    expect(f.due(5 * MIN)).toBeNull()
-    expect(f.due(2 * MIN + OPEN_ITEMS_EVERY_MS - 1)).toBeNull()
-    expect(f.due(2 * MIN + OPEN_ITEMS_EVERY_MS)).toEqual(['Vendor budget answer', 'Dashboard review date'])
+    f.hold('Offsite agenda', cueOf('a'), 0); f.hold('Draft deadline pricing', cueOf('b'), MIN)
+    f.markShown(f.next(2 * MIN)!, 2 * MIN)
+    f.hold('Vendor budget answer', cueOf('c'), 3 * MIN); f.hold('Dashboard review date', cueOf('d'), 4 * MIN)
+    expect(f.next(5 * MIN)).toBeNull()
+    expect(f.next(2 * MIN + OPEN_ITEMS_EVERY_MS - 1)).toBeNull()
+    expect(f.next(2 * MIN + OPEN_ITEMS_EVERY_MS)!.items.map(i => i.label)).toEqual(['Vendor budget answer', 'Dashboard review date'])
   })
 
-  it('the same item is held once, and an item already shown is not held again', () => {
+  it('a lone item nothing joined for 20 minutes is shown on its own, as the cue the writer wrote', () => {
     const f = new OpenItemFold()
-    expect(f.hold('Offsite agenda owner', 0)).toBe(true)
-    expect(f.hold('Offsite agenda owner needed', MIN)).toBe(false)             // the same item in other words
-    expect(f.hold('Draft deadline pricing', MIN)).toBe(true)
-    f.markShown(f.due(2 * MIN)!, 2 * MIN)
-    expect(f.hold('Offsite agenda owner', 20 * MIN)).toBe(false)               // said already
-    expect(f.hold('Vendor budget answer', 20 * MIN)).toBe(true)
+    f.hold('Offsite agenda', cueOf('lone'), 0)
+    expect(f.next(OPEN_ITEM_STALE_MS - 1)).toBeNull()
+    const plan = f.next(OPEN_ITEM_STALE_MS)!
+    expect(plan.mode).toBe('alone')
+    expect(plan.items[0].cue.cueId).toBe('lone')
+    f.markShown(plan, OPEN_ITEM_STALE_MS)
+    expect(f.waiting()).toBe(0)
+    expect(f.next(OPEN_ITEM_STALE_MS + 1)).toBeNull()
   })
 
-  it('an item that waited too long is dropped, not shown late', () => {
+  it('showing an item alone does not use up the 10 minutes between combined cues', () => {
     const f = new OpenItemFold()
-    f.hold('Offsite agenda', 0)
-    f.hold('Draft deadline pricing', 5 * MIN)
-    expect(f.due(OPEN_ITEM_STALE_MS + 1)).toBeNull()                           // the first expired, one left
-    expect(f.waiting(OPEN_ITEM_STALE_MS + 1)).toBe(1)
-    expect(f.waiting(5 * MIN + OPEN_ITEM_STALE_MS + 1)).toBe(0)
+    f.hold('Offsite agenda', cueOf('a'), 0)
+    f.markShown(f.next(OPEN_ITEM_STALE_MS)!, OPEN_ITEM_STALE_MS)
+    f.hold('Draft deadline pricing', cueOf('b'), OPEN_ITEM_STALE_MS + MIN); f.hold('Vendor budget answer', cueOf('c'), OPEN_ITEM_STALE_MS + MIN)
+    expect(f.next(OPEN_ITEM_STALE_MS + 2 * MIN)).toMatchObject({ mode: 'digest' })
   })
 
-  it('a combined cue clears what waited: older items past the newest three are dropped, not carried', () => {
+  it('a stale item is shown alone even inside the 10 minutes after a combined cue (it is the original cue, not another combined one)', () => {
     const f = new OpenItemFold()
-    for (const [i, label] of ['Alpha topic', 'Bravo topic', 'Charlie topic', 'Delta topic', 'Echo topic'].entries()) f.hold(label, i * 1000)
-    const items = f.due(10_000)!
-    expect(items).toEqual(['Charlie topic', 'Delta topic', 'Echo topic'])
-    f.markShown(items, 10_000)
-    expect(f.waiting(10_001)).toBe(0)
+    f.hold('Offsite agenda', cueOf('a'), 0); f.hold('Draft deadline pricing', cueOf('b'), MIN)
+    f.markShown(f.next(2 * MIN)!, 2 * MIN)
+    f.hold('Vendor budget answer', cueOf('c'), 3 * MIN)
+    expect(f.next(3 * MIN + OPEN_ITEM_STALE_MS - 1)).toBeNull()
+    expect(f.next(3 * MIN + OPEN_ITEM_STALE_MS)).toMatchObject({ mode: 'alone' })
+  })
+
+  it('the same item is held once, an item already shown is not held again, and every held cue stays in the history', () => {
+    const f = new OpenItemFold()
+    expect(f.hold('Offsite agenda owner', cueOf('a'), 0)).toBe(true)
+    expect(f.hold('Offsite agenda owner needed', cueOf('b'), MIN)).toBe(false)
+    expect(f.hold('Draft deadline pricing', cueOf('c'), MIN)).toBe(true)
+    f.markShown(f.next(2 * MIN)!, 2 * MIN)
+    expect(f.hold('Offsite agenda owner', cueOf('d'), 20 * MIN)).toBe(false)
+    expect(f.hold('Vendor budget answer', cueOf('e'), 20 * MIN)).toBe(true)
+    expect(f.history().map(c => c.cueId)).toEqual(['a', 'b', 'c', 'd', 'e'])
   })
 })
