@@ -189,6 +189,65 @@ describe('grounded cues in the engine', () => {
       expect(evaluation().excludedSelf).toBe(1)
       expect(promptOf().memory.map(m => m.title)).not.toContain('Copy of today')
     })
+    describe('the whole meeting, not only the window', () => {
+      // Speaker labels every few words, as ASR gives them: only text cleaned the way the window is can be found in a copy.
+      const labelled = (prefix: string, n: number) => Array.from({ length: n / 3 }, (_, k) => `Speaker ${k % 2 + 1}: ${prefix}${3 * k} ${prefix}${3 * k + 1} ${prefix}${3 * k + 2}`).join('\n')
+      const plain = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}${i}`).join(' ')
+      const sessionOf = (e: InstanceType<typeof LiveCuesV2Engine>, id: string) => (e as unknown as { sessions: Map<string, { said: { shingles: ReadonlySet<string> }; chunks: string[] }> }).sessions.get(id)!
+      /** Say `early`, let the cue run, then 10 chunks of 50 words push it out of the 400-word window; the last chunk starts the evaluation. */
+      async function sayEarlyThenLongAfter(e: InstanceType<typeof LiveCuesV2Engine>) {
+        e.arm('meeting_a')
+        await e.feed('meeting_a', labelled('early', 60))
+        clock += L.cooldownAfterCueMs + L.minIntervalMs
+        for (let i = 0; i < 9; i += 1) await e.feed('meeting_a', plain(`filler${i}_`, 50), true)
+        await e.feed('meeting_a', plain('last', 50))
+      }
+      it('a copy of something said long before the window is excluded, and the window itself no longer holds it', async () => {
+        cueMemoryNotes = [note('E', { title: 'Copy of the first minute', date: '2026-10-14', notes: plain('early', 12) }), note('F', { title: 'Real one', date: '2026-09-03' })]
+        const e = engine()
+        e.arm('meeting_a')
+        // No evaluation runs until the end, so the first minute is in no window an evaluation ever saw: only the history has it.
+        await e.feed('meeting_a', labelled('early', 60), true)
+        for (let i = 0; i < 9; i += 1) await e.feed('meeting_a', plain(`filler${i}_`, 50), true)
+        await e.feed('meeting_a', plain('last', 50))
+        expect(sessionOf(e, 'meeting_a').chunks.join(' ')).not.toContain('early0')            // the window moved on
+        expect(calls.judgedIds.at(-1)).toEqual(['M1'])
+        expect(evaluation()).toMatchObject({ excludedSelf: 1, candidates: 1 })
+        expect((JSON.parse(calls.prompts.at(-1)!) as { memory: Array<{ title: string }> }).memory.map(m => m.title)).toEqual(['Real one'])
+      })
+      it('a window shorter than the meeting is not all it knows: the history grows from every chunk, labels and punctuation removed', async () => {
+        const e = engine()
+        e.arm('meeting_a')
+        await e.feed('meeting_a', labelled('early', 60))
+        expect(sessionOf(e, 'meeting_a').said.shingles.has('early0 early1 early2 early3 early4 early5')).toBe(true)
+        expect([...sessionOf(e, 'meeting_a').said.shingles].some(x => x.includes('speaker'))).toBe(false)
+      })
+      it('classic leaves the history empty: it costs a classic meeting nothing', async () => {
+        grounding = 'classic'
+        const e = engine()
+        await sayEarlyThenLongAfter(e)
+        expect(sessionOf(e, 'meeting_a').said.shingles.size).toBe(0)
+      })
+      it('a meeting switched to grounded part way through has the window to start from: a copy of what the room says now is excluded', async () => {
+        grounding = 'classic'
+        const e = engine()
+        e.arm('meeting_a')
+        await e.feed('meeting_a', labelled('early', 60))
+        grounding = 'grounded'
+        cueMemoryNotes = [note('E', { title: 'Copy of the first minute', date: '2026-10-14', notes: plain('early', 12) }), note('F', { title: 'Real one', date: '2026-09-03' })]
+        clock += L.cooldownAfterCueMs + L.minIntervalMs
+        await e.feed('meeting_a', plain('now', 50))
+        expect(evaluation()).toMatchObject({ grounding: 'grounded', excludedSelf: 1, candidates: 1 })
+      })
+      it('stopping a meeting empties its history', async () => {
+        const e = engine()
+        e.arm('meeting_a')
+        await e.feed('meeting_a', labelled('early', 60))
+        expect(sessionOf(e, 'meeting_a').said.shingles.size).toBeGreaterThan(0)
+        e.end('meeting_a')
+        expect(sessionOf(e, 'meeting_a').said.shingles.size).toBe(0)
+      })
+    })
     it('a library record of this very session, or of another armed session (its twin), is dropped', async () => {
       notesFound = [note('A', { title: 'Own copy', key: 'meeting:standalone:meeting_a', date: '2026-10-14' }), note('B', { title: 'Twin copy', key: 'meeting:standalone:mac_twin', date: '2026-10-14' }),
         note('C', { title: 'Real', key: 'memory:m-real', date: '2026-09-05' })]

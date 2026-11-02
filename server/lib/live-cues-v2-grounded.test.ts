@@ -1,7 +1,7 @@
 // Live cues v3 grounded retrieval and judge B: the pure helpers. The engine's use of them is in live-cues-v2-grounding.test.ts.
 import { describe, expect, it } from 'vitest'
 import {
-  GROUNDED_LIMITS, usableFiles, bestFilePassage, candidateIdentities, groundedCandidates, groundedSource, isForeignPersonal, isSelfCopy, normalizeMeetingTitle,
+  GROUNDED_LIMITS, SessionShingles, usableFiles, bestFilePassage, candidateIdentities, groundedCandidates, groundedSource, isForeignPersonal, isSelfCopy, normalizeMeetingTitle,
   passagesOf, selfIdSet, shingleSet, sixGramOverlap, type GroundedFile, type GroundedInputs,
 } from './live-cues-v2-grounded.js'
 import { CUE_REL_NO, CUE_REL_YES, JUDGE_B_NOTE_CHARS, judgeBQuestions, judgeNoteLine, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
@@ -62,6 +62,54 @@ describe('self and twin exclusion', () => {
   })
 })
 
+describe('the whole meeting\'s 6-word sequences', () => {
+  const seq = (...ws: string[]) => ws.join(' ')
+  it('collects every sequence of a chunk, lower case and without punctuation, and starts empty', () => {
+    const h = new SessionShingles()
+    expect(h.shingles.size).toBe(0)
+    h.add('Alpha, BETA gamma delta epsilon zeta eta')
+    expect([...h.shingles]).toEqual([seq('alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'), seq('beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta')])
+  })
+  it('counts a sequence across a chunk boundary: the last five words of one chunk join the next', () => {
+    const h = new SessionShingles()
+    h.add('one two three four five six')
+    h.add('seven eight nine')
+    expect(h.shingles.has(seq('two', 'three', 'four', 'five', 'six', 'seven'))).toBe(true)
+    expect(h.shingles.has(seq('four', 'five', 'six', 'seven', 'eight', 'nine'))).toBe(true)
+    expect(h.shingles.size).toBe(4)
+    const short = new SessionShingles()
+    short.add('a b'); short.add('c d'); short.add('e f')                                 // chunks shorter than a sequence still chain
+    expect([...short.shingles]).toEqual([seq('a', 'b', 'c', 'd', 'e', 'f')])
+  })
+  it('is capped at 50,000 by default, and over the cap the oldest go first', () => {
+    expect(GROUNDED_LIMITS.historyShingles).toBe(50_000)
+    expect(new SessionShingles().cap).toBe(50_000)
+    const h = new SessionShingles(5)
+    h.add(w('t', 10))                                                                   // 5 sequences: t0..t5 to t4..t9
+    expect(h.shingles.size).toBe(5)
+    h.add(w('u', 3))                                                                    // 3 more, across the boundary: the 3 oldest are dropped
+    expect(h.shingles.size).toBe(5)
+    expect(h.shingles.has(seq('t0', 't1', 't2', 't3', 't4', 't5'))).toBe(false)
+    expect(h.shingles.has(seq('t2', 't3', 't4', 't5', 't6', 't7'))).toBe(false)
+    expect(h.shingles.has(seq('t3', 't4', 't5', 't6', 't7', 't8'))).toBe(true)
+    expect(h.shingles.has(seq('t7', 't8', 't9', 'u0', 'u1', 'u2'))).toBe(true)
+  })
+  it('clear empties it, the boundary memory included', () => {
+    const h = new SessionShingles()
+    h.add('one two three four five six')
+    h.clear()
+    expect(h.shingles.size).toBe(0)
+    h.add('seven eight nine')
+    expect(h.shingles.size).toBe(0)                                                     // no tail from before the clear
+  })
+  it('the overlap test sees a copy of anything said so far, however long ago', () => {
+    const h = new SessionShingles()
+    h.add(w('early', 30)); for (let i = 0; i < 20; i += 1) h.add(w(`later${i}_`, 40))
+    expect(sixGramOverlap(w('early', 12), h.shingles)).toBe(1)
+    expect(isSelfCopy({ notes: w('early', 12) }, h.shingles, new Set())).toBe(true)
+  })
+})
+
 describe('domain filter', () => {
   it('a personal note never reaches a meeting that is not personal; an unknown meeting domain is not personal', () => {
     expect(isForeignPersonal('personal', 'quilt')).toBe(true)
@@ -113,7 +161,7 @@ describe('files', () => {
 
 describe('candidates for the judge', () => {
   const base = (over: Partial<GroundedInputs> = {}): GroundedInputs => ({
-    cueMemory: [], notes: [], files: [], transcript: w('said', 60), window: 'overage pricing renewal contract Harborview quarter',
+    cueMemory: [], notes: [], files: [], transcript: shingleSet(w('said', 60)), window: 'overage pricing renewal contract Harborview quarter',
     selfIds: selfIdSet('mac_session'), meetingDomain: 'quilt', today: '2026-11-01', ...over,
   })
   it('M1..M4 from cue_memory, N1 from the notes, F1 from the files, in that order, with ids that keep their kind', () => {
@@ -236,7 +284,7 @@ describe('files with fields the code reads', () => {
   })
   it('a malformed file in the list never reaches the passage search or the candidate', () => {
     const ok = { id: 'f1', name: 'Plan.pdf', status: 'ready', text: 'Overage pricing renewal contract Harborview terms.' }
-    const inputs = { cueMemory: [], notes: [], transcript: w('said', 60), window: 'overage pricing renewal contract Harborview quarter', selfIds: selfIdSet('mac_session'), meetingDomain: 'quilt', today: '2026-11-01' }
+    const inputs = { cueMemory: [], notes: [], transcript: shingleSet(w('said', 60)), window: 'overage pricing renewal contract Harborview quarter', selfIds: selfIdSet('mac_session'), meetingDomain: 'quilt', today: '2026-11-01' }
     const r = groundedCandidates({ ...inputs, files: [null, { id: 'bad', name: 7, status: 'ready', text: 'Overage pricing renewal contract Harborview terms.' }, 'x', ok] })
     expect(r.candidates.map(c => [c.id, c.title])).toEqual([['F1', 'Plan.pdf']])
     expect(groundedCandidates({ ...inputs, files: [{ id: 'bad', name: 7, status: 'ready', text: 'Overage pricing renewal contract Harborview terms.' }] }).candidates).toEqual([])

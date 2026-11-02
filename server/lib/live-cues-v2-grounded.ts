@@ -26,6 +26,9 @@ export const GROUNDED_LIMITS = {
   maxCandidates: 6,
   /** A file passage is at most this long, and so is what the judge reads of it. */
   fileChars: 300,
+  /** 6-word sequences kept for the whole meeting so far, oldest dropped first: 50,000 is about 50,000 spoken words, a 5 to 6 hour
+   *  meeting at a normal pace, and a few megabytes. */
+  historyShingles: 50_000,
   /** A passage must share this many of the window's salient words to be offered at all. */
   fileMinTerms: 2,
   fileWindowTerms: 12,
@@ -55,16 +58,39 @@ export function candidateIdentities(c: Pick<MemoryNote, 'date' | 'title' | 'reco
   return ids
 }
 
+const wordsOf = (text: string): string[] => text.toLowerCase().match(/[a-z0-9']+/g) ?? []
+
 /** The set of 6-word sequences in `text` (lower case, letters, digits and apostrophes). */
 export function shingleSet(text: string, n: number = GROUNDED_LIMITS.shingleWords): Set<string> {
-  const words = text.toLowerCase().match(/[a-z0-9']+/g) ?? []
+  const words = wordsOf(text)
   const out = new Set<string>()
   for (let i = 0; i + n <= words.length; i += 1) out.add(words.slice(i, i + n).join(' '))
   return out
 }
 
+/** Every 6-word sequence said in one meeting since it was armed, for the self-copy check. The engine's window keeps only the last
+ *  ~400 words, so a copy of something said an hour ago would pass a check against the window alone. Chunks are added as they
+ *  arrive; the last five words of one chunk join the next, so a sequence across a chunk boundary is counted. Over its cap the
+ *  oldest go first. */
+export class SessionShingles {
+  private readonly seen = new Set<string>()
+  private tail: string[] = []
+  constructor(readonly cap: number = GROUNDED_LIMITS.historyShingles) {}
+  add(text: string): void {
+    const n = GROUNDED_LIMITS.shingleWords
+    const words = [...this.tail, ...wordsOf(text)]
+    for (let i = 0; i + n <= words.length; i += 1) {
+      this.seen.add(words.slice(i, i + n).join(' '))
+    }
+    this.tail = words.slice(-(n - 1))
+    while (this.seen.size > this.cap) this.seen.delete(this.seen.values().next().value as string)
+  }
+  get shingles(): ReadonlySet<string> { return this.seen }
+  clear(): void { this.seen.clear(); this.tail = [] }
+}
+
 /** The share of the candidate's own 6-word sequences that also appear in the transcript so far (0 when it has none). */
-export function sixGramOverlap(candidateText: string, transcript: Set<string>): number {
+export function sixGramOverlap(candidateText: string, transcript: ReadonlySet<string>): number {
   const own = shingleSet(candidateText)
   if (!own.size) return 0
   let shared = 0
@@ -79,7 +105,7 @@ export function selfIdSet(sessionId: string, twins: Iterable<string> = []): Set<
   return out
 }
 
-export function isSelfCopy(c: Pick<MemoryNote, 'notes' | 'recordId' | 'sessionId'>, transcript: Set<string>, selfIds: ReadonlySet<string>): boolean {
+export function isSelfCopy(c: Pick<MemoryNote, 'notes' | 'recordId' | 'sessionId'>, transcript: ReadonlySet<string>, selfIds: ReadonlySet<string>): boolean {
   if ((c.recordId && selfIds.has(c.recordId)) || (c.sessionId && selfIds.has(c.sessionId))) return true
   return sixGramOverlap(c.notes, transcript) >= GROUNDED_LIMITS.selfOverlap
 }
@@ -160,8 +186,8 @@ export interface GroundedInputs {
   /** The owner's COS notes, best first. */
   notes: MemoryNote[]
   files: unknown
-  /** What has been said so far in this meeting (speaker labels removed). */
-  transcript: string
+  /** The 6-word sequences of everything said in this meeting so far (SessionShingles; speaker labels removed). */
+  transcript: ReadonlySet<string>
   /** The last part of it: what the room is on now. */
   window: string
   selfIds: ReadonlySet<string>
@@ -175,7 +201,7 @@ export interface GroundedInputs {
  *  as this conversation or its twin. Files are the owner's own attachments to this meeting, so the self rule does not apply
  *  to them: a document the room reads from is what a file cue is for. */
 export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNote[]; excludedSelf: number; domainUnknown: number } {
-  const transcript = shingleSet(i.transcript)
+  const transcript = i.transcript
   const seen = new Set<string>()
   const out: GroundedNote[] = []
   let excludedSelf = 0
