@@ -27,7 +27,7 @@ function fixture(plans: Record<string, unknown>, compose: (prompt: any) => unkno
     if (system === PUBLIC_TOPIC_SYSTEM) return { text: '{"publicTopic":false}', model: 'claude-sonnet' }
     return { text: JSON.stringify({ sections: [{ label: 'So what', text: 'Plain answer [T1]' }], confidence: { level: 'limited', reason: 'Only the transcript.' } }), model: 'claude-sonnet' }
   })
-  const webSearch = vi.fn(async (query: string) => ({ sources: [page('https://example.org/' + query.split(' ')[0], `Reference page about ${query}. Nonstop flights take about 1 hour 50 minutes; elephants weigh about 6 tonnes; hearts beat about 3 billion times.`)], notices: [] as string[] }))
+  const webSearch = vi.fn(async (query: string, _signal?: unknown, _options?: unknown) => ({ sources: [page('https://example.org/' + query.split(' ')[0], `Reference page about ${query}. Nonstop flights take about 1 hour 50 minutes; elephants weigh about 6 tonnes; hearts beat about 3 billion times.`)], notices: [] as string[] }))
   const runtime = new MeetingAskRuntime({ reviewAnswers: false, finalized: () => ({ sources: [], notices: [] }), domains: () => [], store, identity: () => 'server-one', admissions: () => true, lease: () => ({ release() {}, id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'sonnet', models: ['sonnet'] }], run, search: async () => ({ sources: [], notices: [] }), webSearch, webCapability: () => ({ available: true, engine: 'claude' }), ownerArea: () => ({ text: 'Austin, TX', source: 'profile' as const }), ownerLabel: () => 'MU', wearer: () => 'Pat Example', ...overrides } as any)
   return { runtime, store, run, webSearch, dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
@@ -62,6 +62,8 @@ describe('6.71.13 Fact check through the durable runtime', () => {
       expect(e.factCheckRange).toEqual({ fromMs: 0, throughMs: 100_000, full: true, claims: 2 })
       expect(e.sections!.map(s => s.label)).toEqual(['So what', 'Claim', 'Claim', 'Confidence'])
       expect(f.webSearch.mock.calls.map(c => c[0])).toEqual(['elephant weight vs car weight', 'average human heart beats lifetime'])
+      // 6.97.8: each search is counted under the fact check in the daily web ledger, not under the meeting assistant.
+      expect(f.webSearch.mock.calls.map(c => c[2])).toEqual([{ feature: 'factCheck' }, { feature: 'factCheck' }])
       // Durable: a fresh store over the same directory reads the watermark and the server-only claims.
       const reread = new MeetingAskStore(f.dir).get(first.requestId)!
       expect(reread.exchange.factCheckRange?.throughMs).toBe(100_000)

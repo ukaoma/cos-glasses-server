@@ -17,6 +17,7 @@ export type MediaMime =
   | 'text/csv'
   | 'application/json'
   | 'application/pdf'
+  | 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   | 'video/mp4'
   | 'video/quicktime'
 
@@ -88,6 +89,7 @@ const VALID_KINDS: ReadonlySet<string> = new Set([
 const IMAGE_MIMES: ReadonlySet<string> = new Set(['image/jpeg', 'image/png'])
 const DOCUMENT_MIMES: ReadonlySet<string> = new Set([
   'text/plain', 'text/markdown', 'text/csv', 'application/json', 'application/pdf',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ])
 const VIDEO_MIMES: ReadonlySet<string> = new Set(['video/mp4', 'video/quicktime'])
 const VALID_MIMES: ReadonlySet<string> = new Set([...IMAGE_MIMES, ...DOCUMENT_MIMES, ...VIDEO_MIMES])

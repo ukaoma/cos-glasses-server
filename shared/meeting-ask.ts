@@ -247,6 +247,17 @@ export interface MeetingAskConfig {
         engine?: string;
     };
     capabilities: MeetingAskCapabilities;
+    /** 6.97.8, additive: today's public web lookups by feature, from the server's daily ledger. Older servers omit it. */
+    webToday?: MeetingAskWebToday;
+}
+export interface MeetingAskWebToday {
+    day: string;
+    /** False when the ledger file could not be read: the counts are then zero and do not describe today. */
+    readable: boolean;
+    cues: { searches: number; pagesRead: number };
+    ask: { searches: number; pagesRead: number };
+    factCheck: { searches: number; pagesRead: number };
+    withheld: { total: number; byReason: Record<string, number>; byFeature: { cues: number; ask: number; factCheck: number } };
 }
 /** All paths under /api/meeting-ask. GET config; PUT config {engine,model} and/or {cosSearch} (6.71.1); either part may come alone.
  * POST requests MeetingAskSubmit -> 202 {exchange}; GET requests/:requestId -> {exchange}.

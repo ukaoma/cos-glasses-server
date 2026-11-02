@@ -32,6 +32,7 @@ import { JevError } from './jev.js'
 import { DecisionProviderError } from './decision-provider.js'
 import { LensGistLimitError, redactSecrets, runLensGistEngine } from './lens-gist-engines.js'
 import { searchMeetingWeb } from './meeting-ask-web.js'
+import { webLedger } from './web-lookup-ledger.js'
 import { publicHttpsUrl } from './public-https-url.js'
 import {
   GENERAL_INSIGHT_CONTEXT_CHARS, GENERAL_INSIGHT_SOURCE_CHARS, GENERAL_INSIGHT_WRITER_SYSTEM, GENERAL_TOPIC_SYSTEM, generalInsightPrompt, generalTopicPrompt,
@@ -376,6 +377,14 @@ export async function typedGeneralSearch(search: GeneralCueDeps['search'], query
  *  step with QUIET_DECISION_STOPS in live-cues-v2.ts, which this module cannot import (that module imports this one). */
 const QUIET_DECISION_CODES: ReadonlySet<string> = new Set(['jev_cap_reached', 'jev_breaker_open', 'jev_not_configured',
   'decision_cap_reached', 'decision_breaker_open', 'decision_not_configured', 'decision_invalid_provider'])
+/** The ledger code for an attempt that ended because a lookup was held back before any search (not for a cap, a failure or "no topic"):
+ *  a private-life window, voices that could not be read, an admission rejection, or no home area for a local query. Otherwise null. */
+export function heldLookupReason(reason: string): string | null {
+  if (reason.startsWith('sensitive:')) return 'personal'
+  if (reason === 'names_unavailable' || reason === 'local_no_area') return reason
+  const m = /^(rejected|rejected_local):([a-z_]+)$/.exec(reason)
+  return m ? `${m[1]}_${m[2]}` : null
+}
 const WALL = 'general_wall'
 const round4 = (n: number): number => Math.round(n * 10_000) / 10_000
 interface SeenSession { firstSeenAt: number; lastTickAt: number | null; lastTickChars: number; last: { state: GeneralCueState; reason: string } | null }
@@ -557,6 +566,8 @@ export class GeneralCueRunner {
   private done(row: GeneralTickRow, outcome: 'cue' | 'no_cue', reason: string, depth = 0): void {
     row.outcome = outcome
     row.reason = reason
+    const held = heldLookupReason(reason)
+    if (held) webLedger().withheld('cues', held)
     if (depth > 0) this.store.recordClean(depth)
   }
   private fail(row: GeneralTickRow, stage: Stage, reason: string, immediate = false): void {
