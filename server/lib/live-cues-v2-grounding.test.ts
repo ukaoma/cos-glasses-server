@@ -189,6 +189,65 @@ describe('grounded cues in the engine', () => {
       expect(evaluation().excludedSelf).toBe(1)
       expect(promptOf().memory.map(m => m.title)).not.toContain('Copy of today')
     })
+    describe('the whole meeting, not only the window', () => {
+      // Speaker labels every few words, as ASR gives them: only text cleaned the way the window is can be found in a copy.
+      const labelled = (prefix: string, n: number) => Array.from({ length: n / 3 }, (_, k) => `Speaker ${k % 2 + 1}: ${prefix}${3 * k} ${prefix}${3 * k + 1} ${prefix}${3 * k + 2}`).join('\n')
+      const plain = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}${i}`).join(' ')
+      const sessionOf = (e: InstanceType<typeof LiveCuesV2Engine>, id: string) => (e as unknown as { sessions: Map<string, { said: { shingles: ReadonlySet<string> }; chunks: string[] }> }).sessions.get(id)!
+      /** Say `early`, let the cue run, then 10 chunks of 50 words push it out of the 400-word window; the last chunk starts the evaluation. */
+      async function sayEarlyThenLongAfter(e: InstanceType<typeof LiveCuesV2Engine>) {
+        e.arm('meeting_a')
+        await e.feed('meeting_a', labelled('early', 60))
+        clock += L.cooldownAfterCueMs + L.minIntervalMs
+        for (let i = 0; i < 9; i += 1) await e.feed('meeting_a', plain(`filler${i}_`, 50), true)
+        await e.feed('meeting_a', plain('last', 50))
+      }
+      it('a copy of something said long before the window is excluded, and the window itself no longer holds it', async () => {
+        cueMemoryNotes = [note('E', { title: 'Copy of the first minute', date: '2026-10-14', notes: plain('early', 12) }), note('F', { title: 'Real one', date: '2026-09-03' })]
+        const e = engine()
+        e.arm('meeting_a')
+        // No evaluation runs until the end, so the first minute is in no window an evaluation ever saw: only the history has it.
+        await e.feed('meeting_a', labelled('early', 60), true)
+        for (let i = 0; i < 9; i += 1) await e.feed('meeting_a', plain(`filler${i}_`, 50), true)
+        await e.feed('meeting_a', plain('last', 50))
+        expect(sessionOf(e, 'meeting_a').chunks.join(' ')).not.toContain('early0')            // the window moved on
+        expect(calls.judgedIds.at(-1)).toEqual(['M1'])
+        expect(evaluation()).toMatchObject({ excludedSelf: 1, candidates: 1 })
+        expect((JSON.parse(calls.prompts.at(-1)!) as { memory: Array<{ title: string }> }).memory.map(m => m.title)).toEqual(['Real one'])
+      })
+      it('a window shorter than the meeting is not all it knows: the history grows from every chunk, labels and punctuation removed', async () => {
+        const e = engine()
+        e.arm('meeting_a')
+        await e.feed('meeting_a', labelled('early', 60))
+        expect(sessionOf(e, 'meeting_a').said.shingles.has('early0 early1 early2 early3 early4 early5')).toBe(true)
+        expect([...sessionOf(e, 'meeting_a').said.shingles].some(x => x.includes('speaker'))).toBe(false)
+      })
+      it('classic leaves the history empty: it costs a classic meeting nothing', async () => {
+        grounding = 'classic'
+        const e = engine()
+        await sayEarlyThenLongAfter(e)
+        expect(sessionOf(e, 'meeting_a').said.shingles.size).toBe(0)
+      })
+      it('a meeting switched to grounded part way through has the window to start from: a copy of what the room says now is excluded', async () => {
+        grounding = 'classic'
+        const e = engine()
+        e.arm('meeting_a')
+        await e.feed('meeting_a', labelled('early', 60))
+        grounding = 'grounded'
+        cueMemoryNotes = [note('E', { title: 'Copy of the first minute', date: '2026-10-14', notes: plain('early', 12) }), note('F', { title: 'Real one', date: '2026-09-03' })]
+        clock += L.cooldownAfterCueMs + L.minIntervalMs
+        await e.feed('meeting_a', plain('now', 50))
+        expect(evaluation()).toMatchObject({ grounding: 'grounded', excludedSelf: 1, candidates: 1 })
+      })
+      it('stopping a meeting empties its history', async () => {
+        const e = engine()
+        e.arm('meeting_a')
+        await e.feed('meeting_a', labelled('early', 60))
+        expect(sessionOf(e, 'meeting_a').said.shingles.size).toBeGreaterThan(0)
+        e.end('meeting_a')
+        expect(sessionOf(e, 'meeting_a').said.shingles.size).toBe(0)
+      })
+    })
     it('a library record of this very session, or of another armed session (its twin), is dropped', async () => {
       notesFound = [note('A', { title: 'Own copy', key: 'meeting:standalone:meeting_a', date: '2026-10-14' }), note('B', { title: 'Twin copy', key: 'meeting:standalone:mac_twin', date: '2026-10-14' }),
         note('C', { title: 'Real', key: 'memory:m-real', date: '2026-09-05' })]
@@ -205,6 +264,33 @@ describe('grounded cues in the engine', () => {
       orientation = { domain: 'personal', title: null }
       await feed(engine(), 'meeting_b')
       expect(calls.judgedIds[1]).toEqual(['M1', 'M2', 'M3', 'M4', 'N1'])
+    })
+    it('a personal-domain note from cue_memory.py itself is dropped from a work meeting, and the notes that say no domain are counted in the trace', async () => {
+      cueMemoryNotes = [note('M1', { title: 'Family budget', domain: 'personal' }), note('M2', { title: 'Quilt plan', date: '2026-09-20', domain: 'quilt' }), note('M3', { title: 'Says nothing', date: '2026-09-10' })]
+      await feed(engine())
+      expect(calls.judgedIds[0]).toEqual(['M1', 'M2'])                                       // ids are renumbered after the drop: Quilt plan, Says nothing
+      expect(evaluation()).toMatchObject({ candidates: 2, domainUnknown: 1 })
+      orientation = { domain: 'personal', title: null }
+      await feed(engine(), 'meeting_b')
+      expect(calls.judgedIds[1]).toEqual(['M1', 'M2', 'M3'])
+      expect(evaluation()).toMatchObject({ candidates: 3, domainUnknown: 1 })
+    })
+    it('a malformed orientation, file list or note never reaches writer_error: each is skipped and the cue still runs', async () => {
+      cueMemoryNotes = [{ id: 3, date: '2026-10-01', title: null, notes: 'x' } as unknown as MemoryNote, note('M1', { title: 'Real one', domain: 5 as unknown as string })]
+      const e = engine({
+        orientation: () => ({ domain: 5, title: { x: 1 } }) as unknown as { domain: null; title: null },
+        files: () => [null, 'x', { id: 'bad', name: 7, status: 'ready', text: 'Overage pricing renewal contract Harborview terms.' }] as unknown as GroundedFile[],
+      })
+      await feed(e)
+      expect(evaluation()).toMatchObject({ outcome: 'cue', candidates: 1, arms: { files: 0 }, domainUnknown: 1 })
+      expect(evaluation()).not.toHaveProperty('filesError')
+      expect(evaluation()).not.toHaveProperty('orientationError')
+      expect(promptOf().meetingTitle).toMatch(/^G2 Recording /)
+      expect(e.status('meeting_a').session).toMatchObject({ state: 'active' })
+      const nothing = engine({ files: () => undefined as unknown as GroundedFile[], orientation: () => undefined as unknown as { domain: null; title: null } })
+      traces = []
+      await feed(nothing, 'meeting_c')
+      expect(evaluation()).toMatchObject({ outcome: 'cue', arms: { files: 0 } })
     })
     it('one meeting found by both arms is judged once', async () => {
       notesFound = [note('D', { title: 'Past M1', date: '2026-10-01', key: 'meeting:ops:quilt:2026-10:m1.md' })]
@@ -337,7 +423,7 @@ describe('grounded cues in the engine', () => {
       yes = { M1: 0.91234567, F1: 0.7 }
       await feed(engine())
       const t = evaluation()
-      expect(t).toMatchObject({ grounding: 'grounded', kept: 2, keptIds: ['M1', 'F1'], excludedSelf: 0, arms: { files: 1 }, candidates: 6, judgeTokens: 2300 })
+      expect(t).toMatchObject({ grounding: 'grounded', kept: 2, keptIds: ['M1', 'F1'], excludedSelf: 0, domainUnknown: 5, arms: { files: 1 }, candidates: 6, judgeTokens: 2300 })
       expect((t.arms as { cue_memory: unknown; notes: unknown }).cue_memory).toEqual(expect.any(Number))
       expect((t.arms as { cue_memory: unknown; notes: unknown }).notes).toEqual(expect.any(Number))
       expect(t.judge).toEqual([
@@ -375,6 +461,13 @@ describe('cueMemory top', () => {
     const signal = new AbortController().signal
     expect((await cueMemory('w', '2026-10-18', signal, fake())).notes.map(n => n.id)).toEqual(['M0', 'M1', 'M2', 'M3'])
     expect((await cueMemory('w', '2026-10-18', signal, fake(), undefined, 8)).notes.map(n => n.id)).toEqual(['M0', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7'])
+  })
+  it('keeps the domain the script says, so grounded cues can apply the personal rule to its notes', async () => {
+    const script = join(dir, 'domain.py')
+    writeFileSync(script, 'import sys, json\nreq = json.loads(sys.stdin.read())\nprint(json.dumps({"notes": [{"id": "M1", "date": "2026-10-01", "title": "T", "notes": "n", "key": "2026-10-01|t", "domain": "personal"}, {"id": "M2", "date": "2026-10-02", "title": "U", "notes": "n", "key": "2026-10-02|u"}]}))\n')
+    chmodSync(script, 0o700)
+    const r = await cueMemory('w', '2026-10-18', new AbortController().signal, { python: '/usr/bin/python3', script, cwd: dir })
+    expect(r.notes).toEqual([{ id: 'M1', date: '2026-10-01', title: 'T', notes: 'n', key: '2026-10-01|t', domain: 'personal' }, { id: 'M2', date: '2026-10-02', title: 'U', notes: 'n', key: '2026-10-02|u' }])
   })
   it('the request body carries the count it was asked for', async () => {
     const script = join(dir, 'echo.py')

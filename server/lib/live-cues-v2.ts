@@ -48,7 +48,7 @@ import {
 import { notesMemory } from './live-cues-v2-notes.js'
 import { GeneralCueRunner, realGeneralDeps, type GeneralCueCandidate, type GeneralCueDeps, type GeneralCueHost, type GeneralCueSettingsReader, type GeneralCueStatus, type GeneralInsight } from './live-cues-general.js'
 import { generalTriggerCalls } from './live-cues-general-prompts.js'
-import { GROUNDED_LIMITS, groundedCandidates, groundedSource, selfIdSet, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
+import { GROUNDED_LIMITS, SessionShingles, groundedCandidates, groundedSource, selfIdSet, usableFiles, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
 import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
 import { getMeetingStore } from './meeting-store.js'
@@ -740,6 +740,8 @@ interface Session {
   /** Live cues v3: this meeting's insights. Apart from `cues` on purpose: previousCues, the repeat rule and the shadow template
    *  rules read `cues`, and an insight must not change what a focused cue sees. */
   insights: LiveCueV2[]
+  /** Live cues v3: the 6-word sequences of everything said since arm, fed only while grounding is on (the self-copy check). */
+  said: SessionShingles
 }
 /** A session's status row, plus (live cues v3) the general-cue state for an extended meeting. */
 export type LiveCuesV2SessionStatusV3 = LiveCuesV2SessionStatus & { general?: GeneralCueStatus }
@@ -831,7 +833,7 @@ export class LiveCuesV2Engine {
     const d = this.deps.now()
     const title = `${mac ? 'Mac' : 'G2'} Recording ${d.toLocaleDateString('en-CA')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
     this.sessions.set(sessionId, { sessionId, title, armedAt: nowMs, lastSeenAt: nowMs, chunks: [], wordsSinceEval: 0, lastEvalAt: 0, lastCueAt: 0,
-      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, insights: [] })
+      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, insights: [], said: new SessionShingles() })
     if (opts.resume) this.deps.store.setResume(sessionId, kinds)
     this.deps.warmMemory()
     return answer(this.deps.store.counters(sessionId).cues, kinds)
@@ -842,6 +844,7 @@ export class LiveCuesV2Engine {
     this.deps.store.end(sessionId)
     const s = this.sessions.get(sessionId)
     s?.inFlight?.abort()
+    s?.said.clear()
     this.general?.endSession(sessionId)
     const cues = s ? this.allCues(s) : []
     return { nudgesGenerated: cues.length, protocol: 2, cues,
@@ -918,6 +921,7 @@ export class LiveCuesV2Engine {
     if (words.length) {
       s.chunks.push(text.trim())
       s.charsFed += cleanWindow(text.trim()).length
+      if (this.groundingOn()) s.said.add(cleanWindow(text.trim()))
       s.wordsSinceEval += words.length
       let total = s.chunks.reduce((n, c) => n + c.split(/\s+/).length, 0)
       while (s.chunks.length > 1 && total > LIVE_CUES_V2_LIMITS.windowWords) { total -= s.chunks[0].split(/\s+/).length; s.chunks.shift() }
@@ -1095,9 +1099,13 @@ export class LiveCuesV2Engine {
     trace.grounding = 'grounded'
     const codeOf = (e: unknown) => { const r = e as { reason?: unknown; code?: unknown } | null; return typeof r?.reason === 'string' ? r.reason : typeof r?.code === 'string' ? r.code : 'threw' }
     let meetingDomain: string | null = null, calendarTitle: string | null = null
-    try { const o = this.deps.orientation?.(s.sessionId); meetingDomain = o?.domain ?? null; calendarTitle = o?.title ?? null } catch (e) { trace.orientationError = codeOf(e) }
+    try {
+      const o = this.deps.orientation?.(s.sessionId)
+      meetingDomain = typeof o?.domain === 'string' ? o.domain : null
+      calendarTitle = typeof o?.title === 'string' ? o.title : null
+    } catch (e) { trace.orientationError = codeOf(e) }
     let files: GroundedFile[] = []
-    try { files = this.deps.files?.(s.sessionId) ?? [] } catch (e) { trace.filesError = codeOf(e) }
+    try { files = usableFiles(this.deps.files?.(s.sessionId)) } catch (e) { trace.filesError = codeOf(e) }
 
     const timed = async (arm: () => Promise<MemoryResult>, threw: string): Promise<{ res: MemoryResult; ms: number | null }> => {
       const t = Date.now()
@@ -1110,11 +1118,13 @@ export class LiveCuesV2Engine {
     Object.assign(trace, { ...(cm.ms !== null ? { memoryMs: cm.ms } : {}), ...(cm.res.denseError ? { memoryError: cm.res.denseError } : {}), ...(cm.res.indexAgeH !== undefined ? { indexAgeH: cm.res.indexAgeH } : {}),
       ...(nt.ms !== null ? { notesMs: nt.ms } : {}), ...(nt.res.denseError ? { notesError: nt.res.denseError } : {}) })
 
-    const transcript = cleanWindow(s.chunks.join('\n'))
+    // What the room has said since arm: every chunk that came while grounding was on, plus the window now (a meeting switched to
+    // grounded part way through has only the window to start from).
+    s.said.add(cleanWindow(s.chunks.join('\n')))
     const twins = [...this.sessions.keys()].filter(id => id !== s.sessionId)
-    const { candidates, excludedSelf } = groundedCandidates({ cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript, window, selfIds: selfIdSet(s.sessionId, twins),
+    const { candidates, excludedSelf, domainUnknown } = groundedCandidates({ cueMemory: cm.res.notes, notes: nt.res.notes, files, transcript: s.said.shingles, window, selfIds: selfIdSet(s.sessionId, twins),
       meetingDomain, today: this.deps.now().toLocaleDateString('en-CA') })
-    Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length }, excludedSelf })
+    Object.assign(trace, { arms: { cue_memory: cm.ms, notes: nt.ms, files: files.filter(f => f.status === 'ready').length }, excludedSelf, domainUnknown })
 
     const source: LiveCuesV2MemorySource = candidates.some(c => c.arm === 'cue_memory') ? 'cue_memory' : candidates.some(c => c.arm === 'notes') ? 'notes' : 'none'
     const arms = (['cue_memory', 'notes', 'files'] as const).filter(a => candidates.some(c => c.arm === a))

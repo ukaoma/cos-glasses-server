@@ -26,6 +26,9 @@ export const GROUNDED_LIMITS = {
   maxCandidates: 6,
   /** A file passage is at most this long, and so is what the judge reads of it. */
   fileChars: 300,
+  /** 6-word sequences kept for the whole meeting so far, oldest dropped first: 50,000 is about 50,000 spoken words, a 5 to 6 hour
+   *  meeting at a normal pace, and a few megabytes. */
+  historyShingles: 50_000,
   /** A passage must share this many of the window's salient words to be offered at all. */
   fileMinTerms: 2,
   fileWindowTerms: 12,
@@ -55,16 +58,39 @@ export function candidateIdentities(c: Pick<MemoryNote, 'date' | 'title' | 'reco
   return ids
 }
 
+const wordsOf = (text: string): string[] => text.toLowerCase().match(/[a-z0-9']+/g) ?? []
+
 /** The set of 6-word sequences in `text` (lower case, letters, digits and apostrophes). */
 export function shingleSet(text: string, n: number = GROUNDED_LIMITS.shingleWords): Set<string> {
-  const words = text.toLowerCase().match(/[a-z0-9']+/g) ?? []
+  const words = wordsOf(text)
   const out = new Set<string>()
   for (let i = 0; i + n <= words.length; i += 1) out.add(words.slice(i, i + n).join(' '))
   return out
 }
 
+/** Every 6-word sequence said in one meeting since it was armed, for the self-copy check. The engine's window keeps only the last
+ *  ~400 words, so a copy of something said an hour ago would pass a check against the window alone. Chunks are added as they
+ *  arrive; the last five words of one chunk join the next, so a sequence across a chunk boundary is counted. Over its cap the
+ *  oldest go first. */
+export class SessionShingles {
+  private readonly seen = new Set<string>()
+  private tail: string[] = []
+  constructor(readonly cap: number = GROUNDED_LIMITS.historyShingles) {}
+  add(text: string): void {
+    const n = GROUNDED_LIMITS.shingleWords
+    const words = [...this.tail, ...wordsOf(text)]
+    for (let i = 0; i + n <= words.length; i += 1) {
+      this.seen.add(words.slice(i, i + n).join(' '))
+    }
+    this.tail = words.slice(-(n - 1))
+    while (this.seen.size > this.cap) this.seen.delete(this.seen.values().next().value as string)
+  }
+  get shingles(): ReadonlySet<string> { return this.seen }
+  clear(): void { this.seen.clear(); this.tail = [] }
+}
+
 /** The share of the candidate's own 6-word sequences that also appear in the transcript so far (0 when it has none). */
-export function sixGramOverlap(candidateText: string, transcript: Set<string>): number {
+export function sixGramOverlap(candidateText: string, transcript: ReadonlySet<string>): number {
   const own = shingleSet(candidateText)
   if (!own.size) return 0
   let shared = 0
@@ -79,24 +105,43 @@ export function selfIdSet(sessionId: string, twins: Iterable<string> = []): Set<
   return out
 }
 
-export function isSelfCopy(c: Pick<MemoryNote, 'notes' | 'recordId' | 'sessionId'>, transcript: Set<string>, selfIds: ReadonlySet<string>): boolean {
+export function isSelfCopy(c: Pick<MemoryNote, 'notes' | 'recordId' | 'sessionId'>, transcript: ReadonlySet<string>, selfIds: ReadonlySet<string>): boolean {
   if ((c.recordId && selfIds.has(c.recordId)) || (c.sessionId && selfIds.has(c.sessionId))) return true
   return sixGramOverlap(c.notes, transcript) >= GROUNDED_LIMITS.selfOverlap
 }
 
 /** A personal-domain note never reaches a meeting that is not personal. An unknown meeting domain counts as not personal. */
 export function isForeignPersonal(noteDomain: string | undefined, meetingDomain: string | null): boolean {
-  const norm = (v: string | null | undefined) => (v ?? '').trim().toLowerCase()
+  const norm = (v: unknown) => (typeof v === 'string' ? v.trim().toLowerCase() : '')
   return norm(noteDomain) === 'personal' && norm(meetingDomain) !== 'personal'
 }
 
+const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
+
+/** A retrieved note the code below can read: the four fields it calls string methods on are strings. cue_memory.py's answer is
+ *  parsed JSON from a subprocess, so a malformed row is skipped here instead of throwing into the evaluation. */
+function wellFormed(n: unknown): n is MemoryNote {
+  const r = n as Partial<Record<keyof MemoryNote, unknown>> | null
+  return !!r && typeof r === 'object' && typeof r.id === 'string' && typeof r.date === 'string' && typeof r.title === 'string' && typeof r.notes === 'string'
+}
+
 /** Kind and locator from a retrieved note's key: `memory:<id>` and `meeting:<recordId>` come from the notes arm, anything
- *  else (cue_memory.py's `date|title`, or no key) is a meeting with no record id known. */
+ *  else (cue_memory.py's `date|title`, or no key) is a meeting with no record id known. Only the fields the arms produce are
+ *  copied: the note's own id, date, title, notes and key, its domain (cue_memory.py and the notes arm say it when they know
+ *  it) and the session it was recorded from, each only when it is a non-empty string. */
 function describe(note: MemoryNote, arm: GroundedArm): Omit<GroundedNote, 'id'> {
-  const key = note.key ?? ''
-  if (key.startsWith('memory:') && key.length > 'memory:'.length) return { ...note, arm, kind: 'memory', memoryId: key.slice('memory:'.length) }
-  if (key.startsWith('meeting:') && key.length > 'meeting:'.length) return { ...note, arm, kind: 'meeting', recordId: key.slice('meeting:'.length) }
-  return { ...note, arm, kind: 'meeting' }
+  const key = typeof note.key === 'string' ? note.key : ''
+  const base = { date: note.date, title: note.title, notes: note.notes, key, arm, ...(nonEmpty(note.domain) ? { domain: note.domain } : {}),
+    ...(nonEmpty(note.sessionId) ? { sessionId: note.sessionId } : {}) }
+  if (key.startsWith('memory:') && key.length > 'memory:'.length) return { ...base, kind: 'memory', memoryId: key.slice('memory:'.length) }
+  if (key.startsWith('meeting:') && key.length > 'meeting:'.length) return { ...base, kind: 'meeting', recordId: key.slice('meeting:'.length) }
+  return { ...base, kind: 'meeting' }
+}
+
+/** The files with the four fields grounded cues read, all strings; anything else in the list is dropped. */
+export function usableFiles(raw: unknown): GroundedFile[] {
+  if (!Array.isArray(raw)) return []
+  return raw.filter((f): f is GroundedFile => !!f && typeof f === 'object' && typeof f.id === 'string' && typeof f.name === 'string' && typeof f.status === 'string' && typeof f.text === 'string')
 }
 
 /** Passages of at most `max` characters: blank-line blocks, then sentences, then a hard cut. */
@@ -140,9 +185,9 @@ export interface GroundedInputs {
   cueMemory: MemoryNote[]
   /** The owner's COS notes, best first. */
   notes: MemoryNote[]
-  files: GroundedFile[]
-  /** What has been said so far in this meeting (speaker labels removed). */
-  transcript: string
+  files: unknown
+  /** The 6-word sequences of everything said in this meeting so far (SessionShingles; speaker labels removed). */
+  transcript: ReadonlySet<string>
   /** The last part of it: what the room is on now. */
   window: string
   selfIds: ReadonlySet<string>
@@ -155,8 +200,8 @@ export interface GroundedInputs {
 /** The candidates for the judge, in order M1..M4, N1, F1, with ids that keep their kind. `excludedSelf` counts the notes dropped
  *  as this conversation or its twin. Files are the owner's own attachments to this meeting, so the self rule does not apply
  *  to them: a document the room reads from is what a file cue is for. */
-export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNote[]; excludedSelf: number } {
-  const transcript = shingleSet(i.transcript)
+export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNote[]; excludedSelf: number; domainUnknown: number } {
+  const transcript = i.transcript
   const seen = new Set<string>()
   const out: GroundedNote[] = []
   let excludedSelf = 0
@@ -164,10 +209,12 @@ export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNot
     let n = 0
     for (const raw of list) {
       if (n >= limit || out.length >= GROUNDED_LIMITS.maxCandidates) return
+      if (!wellFormed(raw)) continue
       const note = describe(raw, arm)
-      if (isSelfCopy(note, transcript, i.selfIds)) { excludedSelf += 1; continue }
-      if (isForeignPersonal(note.domain, i.meetingDomain)) continue
       const identities = candidateIdentities(note)
+      // A copy of this conversation also keeps every other copy of the same meeting out, whatever its text says.
+      if (isSelfCopy(note, transcript, i.selfIds)) { for (const id of identities) seen.add(id); excludedSelf += 1; continue }
+      if (isForeignPersonal(note.domain, i.meetingDomain)) continue
       if (identities.some(id => seen.has(id))) continue
       for (const id of identities) seen.add(id)
       n += 1
@@ -177,13 +224,15 @@ export function groundedCandidates(i: GroundedInputs): { candidates: GroundedNot
   take(i.cueMemory, 'cue_memory', GROUNDED_LIMITS.cueMemoryTop, 'M')
   take(i.notes, 'notes', GROUNDED_LIMITS.notesTop, 'N')
   if (out.length < GROUNDED_LIMITS.maxCandidates) {
-    const hit = bestFilePassage(i.files, i.window)
+    const hit = bestFilePassage(usableFiles(i.files), i.window)
     if (hit) {
       out.push({ id: 'F1', date: i.today, title: hit.file.name.replace(/\s+/g, ' ').trim().slice(0, 90), notes: hit.passage, key: `file:${hit.file.id}`,
         arm: 'files', kind: 'file', fileId: hit.file.id })
     }
   }
-  return { candidates: out, excludedSelf }
+  // The personal-domain rule can only work on a note that says its domain; this counts the notes that did not.
+  const domainUnknown = out.filter(c => c.arm !== 'files' && !c.domain).length
+  return { candidates: out, excludedSelf, domainUnknown }
 }
 
 /** The cue source for a kept candidate: the opaque id, the date and title as before, and (v3) its kind with its one locator. */

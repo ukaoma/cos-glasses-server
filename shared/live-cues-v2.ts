@@ -41,7 +41,8 @@ export function isLogCueKind(value: unknown): value is CueKind | GeneralCueKind 
 export const CUE_SOURCE_KINDS = ['meeting', 'memory', 'file', 'web'] as const
 export type CueSourceKind = typeof CUE_SOURCE_KINDS[number]
 /** A past meeting the cue drew on (0 to 2 per cue). Live cues v3 adds an optional kind and at most ONE locator matching it:
- *  meeting `recordId` (when known), memory `memoryId`, file `fileId`, web `url` (https only). Older readers ignore them. */
+ *  meeting `recordId` (when known), memory `memoryId`, file `fileId`, web `url` (https only, and required for a web source).
+ *  Older readers ignore them. */
 export interface CueSourceRef { id: string; date: string; title: string; kind?: CueSourceKind; recordId?: string; memoryId?: string; fileId?: string; url?: string }
 /** The locator field each source kind uses. */
 export const CUE_SOURCE_LOCATOR = { meeting: 'recordId', memory: 'memoryId', file: 'fileId', web: 'url' } as const
@@ -52,6 +53,7 @@ export function isCueSourceExtras(source: CueSourceRef): boolean {
   if (source.kind === undefined) return locators.length === 0
   if (!(CUE_SOURCE_KINDS as readonly string[]).includes(source.kind)) return false
   if (locators.length > 1) return false
+  if (source.kind === 'web' && source.url === undefined) return false
   if (locators.length === 1 && locators[0] !== CUE_SOURCE_LOCATOR[source.kind]) return false
   const value = locators.length === 1 ? source[locators[0]] : undefined
   if (value !== undefined && (typeof value !== 'string' || value.length === 0 || value.length > 2048)) return false

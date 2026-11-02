@@ -1,8 +1,10 @@
-// A public https address, for the live cue log. The same rules as publicWebUrl in meeting-ask-web.ts (no credentials, no
-// localhost or private or link-local host, port 80 or 443 only) plus https only, because a cue source never links to plain
-// http. It is a copy on purpose: meeting-ask-web.ts pulls in the whole Ask runtime, and the cue log must stay standalone (a
-// v2-off server reads it without building anything). public-https-url.test.ts pins parity with publicWebUrl on a table of
-// hosts, so the two cannot drift apart unnoticed.
+// A public https address, for the live cue log. The rules of publicWebUrl in meeting-ask-web.ts (no credentials, no localhost
+// or private or link-local host) with three differences, all stricter: https only, because a cue source never links to plain
+// http; one trailing dot is dropped from the host before the local-host checks, and a host with an empty label is refused, so
+// `localhost.` and `printer.local.` are the local hosts they are; and only the default port, because an https page on port 80
+// is not a page a cue should open. It is a copy on purpose: meeting-ask-web.ts pulls in the whole Ask runtime, and the cue log
+// must stay standalone (a v2-off server reads it without building anything). public-https-url.test.ts pins parity with
+// publicWebUrl on a table of URLs and lists the differences by name, so the two cannot drift apart unnoticed.
 
 import { isIP } from 'node:net'
 
@@ -22,7 +24,9 @@ export function publicHttpsUrl(value: unknown): string | null {
   try {
     if (typeof value !== 'string' || value.length > 2048) return null
     const u = new URL(value)
-    if (u.protocol !== 'https:' || u.username || u.password || !publicAddress(u.hostname) || u.port && !['80', '443'].includes(u.port)) return null
+    const host = u.hostname.replace(/\.$/, '')
+    if (host.endsWith('.') || host.includes('..')) return null
+    if (u.protocol !== 'https:' || u.username || u.password || !publicAddress(host) || u.port && u.port !== '443') return null
     return u.href
   } catch { return null }
 }
