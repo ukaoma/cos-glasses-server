@@ -19,7 +19,8 @@ export const WEB_FEATURES: readonly WebFeature[] = ['cues', 'ask', 'factCheck']
 /** Distinct withheld reasons kept per feature; the rest count under 'other' so a bad caller cannot grow the file. */
 export const WEB_LEDGER_MAX_REASONS = 40
 
-export interface WebFeatureToday { searches: number; pagesRead: number }
+/** `pagesRead` is pages whose text was used; `pagesFailed` is page fetches that were attempted and returned nothing (blocked, too big, not an article, too slow). */
+export interface WebFeatureToday { searches: number; pagesRead: number; pagesFailed: number }
 export interface WebTodayView {
   day: string
   /** False when the file could not be read: the counts below are then zero and do not describe today. */
@@ -30,7 +31,7 @@ export interface WebTodayView {
   withheld: { total: number; byReason: Record<string, number>; byFeature: Record<WebFeature, number> }
 }
 
-interface FeatureState { searches: number; pagesRead: number; withheld: Record<string, number> }
+interface FeatureState { searches: number; pagesRead: number; pagesFailed: number; withheld: Record<string, number> }
 interface LedgerState { v: 1; zone: string; day: string; features: Record<WebFeature, FeatureState> }
 type LedgerRead = { ok: true; state: LedgerState } | { ok: false; future: boolean }
 
@@ -44,7 +45,7 @@ function validZone(zone: unknown): string | null {
 function localDay(ms: number, zone: string): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms))
 }
-const emptyFeature = (): FeatureState => ({ searches: 0, pagesRead: 0, withheld: {} })
+const emptyFeature = (): FeatureState => ({ searches: 0, pagesRead: 0, pagesFailed: 0, withheld: {} })
 const REASON = /^[a-z0-9][a-z0-9_:.-]{0,47}$/
 
 export class WebLookupLedger {
@@ -69,13 +70,14 @@ export class WebLookupLedger {
     const features = {} as Record<WebFeature, FeatureState>
     for (const f of WEB_FEATURES) {
       const s = raw.features[f]
-      if (!isRecord(s) || !whole(s.searches) || !whole(s.pagesRead) || !isRecord(s.withheld)) return { ok: false, future: false }
+      // pagesFailed arrived after the first files were written: a file without it reads as zero.
+      if (!isRecord(s) || !whole(s.searches) || !whole(s.pagesRead) || !(s.pagesFailed === undefined || whole(s.pagesFailed)) || !isRecord(s.withheld)) return { ok: false, future: false }
       const withheld: Record<string, number> = {}
       for (const [reason, n] of Object.entries(s.withheld)) {
         if (!whole(n) || !REASON.test(reason)) return { ok: false, future: false }
         withheld[reason] = n
       }
-      features[f] = rolled ? emptyFeature() : { searches: s.searches, pagesRead: s.pagesRead, withheld }
+      features[f] = rolled ? emptyFeature() : { searches: s.searches, pagesRead: s.pagesRead, pagesFailed: (s.pagesFailed as number | undefined) ?? 0, withheld }
     }
     return { ok: true, state: { v: 1, zone, day: today, features } }
   }
@@ -107,6 +109,11 @@ export class WebLookupLedger {
     if (!whole(count) || count === 0) return false
     return this.update(s => { s.features[feature].pagesRead += count })
   }
+  /** `count` page fetches were attempted and returned nothing. */
+  pagesFailed(feature: WebFeature, count = 1): boolean {
+    if (!whole(count) || count === 0) return false
+    return this.update(s => { s.features[feature].pagesFailed += count })
+  }
   /** One lookup was proposed and refused, for `reason` (a gate reason code such as no_public_intent). */
   withheld(feature: WebFeature, reason: string): boolean {
     const key = REASON.test(reason) ? reason : 'other'
@@ -118,7 +125,7 @@ export class WebLookupLedger {
   }
   today(): WebTodayView {
     const r = this.read()
-    const zeros = (): WebTodayView => ({ day: localDay(this.now(), this.systemZone()), readable: false, cues: { searches: 0, pagesRead: 0 }, ask: { searches: 0, pagesRead: 0 }, factCheck: { searches: 0, pagesRead: 0 },
+    const zeros = (): WebTodayView => ({ day: localDay(this.now(), this.systemZone()), readable: false, cues: { searches: 0, pagesRead: 0, pagesFailed: 0 }, ask: { searches: 0, pagesRead: 0, pagesFailed: 0 }, factCheck: { searches: 0, pagesRead: 0, pagesFailed: 0 },
       withheld: { total: 0, byReason: {}, byFeature: { cues: 0, ask: 0, factCheck: 0 } } })
     if (!r.ok) return zeros()
     const f = r.state.features
@@ -128,7 +135,7 @@ export class WebLookupLedger {
       byFeature[name] = Object.values(f[name].withheld).reduce((a, b) => a + b, 0)
       for (const [reason, n] of Object.entries(f[name].withheld)) byReason[reason] = (byReason[reason] ?? 0) + n
     }
-    const view = (s: FeatureState): WebFeatureToday => ({ searches: s.searches, pagesRead: s.pagesRead })
+    const view = (s: FeatureState): WebFeatureToday => ({ searches: s.searches, pagesRead: s.pagesRead, pagesFailed: s.pagesFailed })
     return { day: r.state.day, readable: true, cues: view(f.cues), ask: view(f.ask), factCheck: view(f.factCheck),
       withheld: { total: WEB_FEATURES.reduce((n, name) => n + byFeature[name], 0), byReason, byFeature } }
   }

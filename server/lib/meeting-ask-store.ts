@@ -8,6 +8,8 @@ import { emptyOrientation } from './meeting-ask-orientation.js';
 import type { MeetingAskOrientation } from '../../shared/meeting-ask.js';
 import { AskError } from './live-cos-ask.js';
 export const ASK_ID = /^[A-Za-z0-9_-]{8,100}$/;
+/** The ids of files this server makes from what the user shares in a question (pasted text and read pages), not files the user dropped. */
+export const isPastedFileId = (id: string): boolean => /^(?:paste|web)_[0-9a-f]{16}$/.test(id);
 export { ASK_SESSION } from './ask-session-id.js';
 import { ASK_SESSION } from './ask-session-id.js';
 export interface AskRecord {

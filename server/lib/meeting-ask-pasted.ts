@@ -3,14 +3,17 @@
 // (MeetingAskStore.putFiles), so they are listed wherever dropped files are and every limit and the secret rule are the same.
 //
 // Privacy. Only what the user typed or pasted is used: the question text and the links in it. Nothing from the transcript,
-// files, memory or earlier answers is ever read here. A page or paste that carries a key or token is not stored. The files
-// belong to one meeting (session id), so a personal meeting's paste is only ever seen by that meeting's own cues.
+// files, memory or earlier answers is ever read here. A page is redacted (redactSecrets) before it is stored and a paste has been
+// redacted by normalizeAsk; a link that is not a clean public address is cut out of stored text (redactUnsafeLinks), because
+// redactSecrets does not know every token parameter name. keepPastedContext is the last backstop: it refuses any file that still
+// carries a key. The files belong to one meeting (session id), so a personal meeting's paste is only ever seen by that meeting's own cues.
 import { createHash, randomUUID } from 'node:crypto';
 import type { MeetingAskFile, MeetingAskSource } from '../../shared/meeting-ask.js';
 import { redactSecrets } from './lens-gist-engines.js';
 import { fetchPublicArticle, type PublicArticle } from './meeting-web-page.js';
 import { READ_PAGE_PREFIX } from './meeting-ask-review.js';
-import { publicAddress, pastedUrlKey } from './meeting-ask-web.js';
+import { publicAddress, pastedUrlKey, redactUnsafeLinks } from './meeting-ask-web.js';
+import { isPastedFileId } from './meeting-ask-store.js';
 import { AskError } from './live-cos-ask.js';
 
 /** A question longer than this (links removed) is kept as meeting context for the live cues. */
@@ -19,7 +22,6 @@ export const PASTED_TEXT_MIN_CHARS = 400;
 export const PASTED_FILE_MAX_CHARS = 12000;
 /** Pasted-text and page files this server adds to one meeting. Dropped files are not counted. */
 export const PASTED_FILES_PER_MEETING = 12;
-const PASTED_ID = /^(?:paste|web)_[0-9a-f]{16}$/;
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex');
 const flat = (text: string): string => text.replace(/\s+/g, ' ').trim();
@@ -61,7 +63,7 @@ export const PASTED_OVER_LIMIT_NOTICE = 'Only the first two links in a question 
 export function pastedPageFile(source: MeetingAskSource): MeetingAskFile | null {
     if (!source.url)
         return null;
-    const text = redactSecrets(`${source.url}\n\n${source.text.replace(READ_PAGE_PREFIX, '')}`).slice(0, PASTED_FILE_MAX_CHARS);
+    const text = redactUnsafeLinks(redactSecrets(`${source.url}\n\n${source.text.replace(READ_PAGE_PREFIX, '')}`)).slice(0, PASTED_FILE_MAX_CHARS);
     return { id: `web_${hash(pastedUrlKey(source.url)).slice(0, 16)}`, revision: hash(text).slice(0, 16), name: flat(source.title).slice(0, 120) || 'Web page', status: 'ready', text };
 }
 /** "11:49" in this machine's time zone. */
@@ -73,7 +75,8 @@ export function pastedTextFile(question: string, atMs: number): MeetingAskFile |
     const withoutLinks = question.replace(/https?:\/\/\S+/gi, ' ');
     if (flat(withoutLinks).length <= PASTED_TEXT_MIN_CHARS)
         return null;
-    const text = question.trim().slice(0, PASTED_FILE_MAX_CHARS);
+    // Stored text keeps no link that is not a clean public address (a ?access_token=... link is cut out, not kept).
+    const text = redactUnsafeLinks(question.trim()).slice(0, PASTED_FILE_MAX_CHARS);
     return { id: `paste_${hash(text).slice(0, 16)}`, revision: hash(text).slice(0, 16), name: `Pasted text ${clock(atMs)}`, status: 'ready', text };
 }
 export interface PastedStore {
@@ -90,7 +93,7 @@ export function keepPastedContext(store: PastedStore, sessionId: string, files: 
     catch {
         return { kept, added, notices: ['What you shared could not be added to live cue context: the meeting files could not be read.'] };
     }
-    const ours = existing.filter(f => PASTED_ID.test(f.id)).length;
+    const ours = existing.filter(f => isPastedFileId(f.id)).length;
     let newOnes = 0;
     for (const file of files) {
         const same = existing.find(f => f.id === file.id);

@@ -88,7 +88,7 @@ const DEFAULT_GENERAL = {
 }
 const ZERO_TODAY = { day: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), topicCalls: 0, webSearches: 0, breakerOpenUntil: null }
 /** 6.97.8: the additive web ledger view. A fresh data dir counts nothing, and says the file is readable. */
-const ZERO_WEB_TODAY = { day: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), readable: true, cues: { searches: 0, pagesRead: 0 }, ask: { searches: 0, pagesRead: 0 }, factCheck: { searches: 0, pagesRead: 0 },
+const ZERO_WEB_TODAY = { day: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), readable: true, cues: { searches: 0, pagesRead: 0, pagesFailed: 0 }, ask: { searches: 0, pagesRead: 0, pagesFailed: 0 }, factCheck: { searches: 0, pagesRead: 0, pagesFailed: 0 },
   withheld: { total: 0, byReason: {}, byFeature: { cues: 0, ask: 0, factCheck: 0 } } }
 
 describe('settings v3 (live cues v3)', () => {
@@ -299,9 +299,9 @@ describe('settings v3 (live cues v3)', () => {
   // 6.97.8. Control relabels its "Today" line from this; the general cue counters keep their meaning beside it.
   it('webToday is additive: v3 carries the ledger, v2 and v1 do not, and general.today still counts only the general cues', async () => {
     const { webLedger } = await import('../lib/web-lookup-ledger.js')
-    webLedger().search('ask'); webLedger().pagesRead('ask', 2); webLedger().search('cues'); webLedger().search('factCheck'); webLedger().withheld('ask', 'no_public_intent'); webLedger().withheld('cues', 'personal')
+    webLedger().search('ask'); webLedger().pagesRead('ask', 2); webLedger().pagesFailed('ask', 1); webLedger().search('cues'); webLedger().search('factCheck'); webLedger().withheld('ask', 'no_public_intent'); webLedger().withheld('cues', 'personal')
     const v3 = await (await get('/live-cues/v2/settings?v=3')).json() as Record<string, any>
-    expect(v3.webToday).toEqual({ day: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), readable: true, cues: { searches: 1, pagesRead: 0 }, ask: { searches: 1, pagesRead: 2 }, factCheck: { searches: 1, pagesRead: 0 },
+    expect(v3.webToday).toEqual({ day: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), readable: true, cues: { searches: 1, pagesRead: 0, pagesFailed: 0 }, ask: { searches: 1, pagesRead: 2, pagesFailed: 1 }, factCheck: { searches: 1, pagesRead: 0, pagesFailed: 0 },
       withheld: { total: 2, byReason: { no_public_intent: 1, personal: 1 }, byFeature: { cues: 1, ask: 1, factCheck: 0 } } })
     expect(v3.general.today).toEqual(ZERO_TODAY)                       // topicCalls and webSearches stay the general cues' own
     expect('webToday' in await (await get('/live-cues/v2/settings?v=2')).json()).toBe(false)

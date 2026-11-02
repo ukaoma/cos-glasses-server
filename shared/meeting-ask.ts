@@ -254,9 +254,9 @@ export interface MeetingAskWebToday {
     day: string;
     /** False when the ledger file could not be read: the counts are then zero and do not describe today. */
     readable: boolean;
-    cues: { searches: number; pagesRead: number };
-    ask: { searches: number; pagesRead: number };
-    factCheck: { searches: number; pagesRead: number };
+    cues: { searches: number; pagesRead: number; pagesFailed: number };
+    ask: { searches: number; pagesRead: number; pagesFailed: number };
+    factCheck: { searches: number; pagesRead: number; pagesFailed: number };
     withheld: { total: number; byReason: Record<string, number>; byFeature: { cues: number; ask: number; factCheck: number } };
 }
 /** All paths under /api/meeting-ask. GET config; PUT config {engine,model} and/or {cosSearch} (6.71.1); either part may come alone.

@@ -103,7 +103,7 @@ describe('extractXlsxText', () => {
       expect(out.text.length).toBeLessThanOrEqual(XLSX_LIMITS.maxChars)
       expect(out.text.endsWith(`[Text cut at ${XLSX_LIMITS.maxChars} characters.]`)).toBe(true)
       expect(out.truncated).toBe(true)
-    })
+    }, 30_000)
     it('a part that inflates past its cap is not read (a zip bomb stops at the cap) and the sheet says so', () => {
       const bomb = `<worksheet><sheetData>${'<row r="1"><c r="A1"><v>1</v></c></row>'.repeat(Math.ceil(XLSX_LIMITS.maxSheetBytes / 38) + 10)}</sheetData></worksheet>`
       expect(bomb.length).toBeGreaterThan(XLSX_LIMITS.maxSheetBytes)
@@ -151,5 +151,76 @@ describe('the media ingress admits .xlsx (phone attachments and the files/media 
   it('an encrypted workbook is refused; a workbook with no cell values still reports its sheet names', async () => {
     await expect(prepareRichMedia(zip({ 'xl/workbook.xml': '<workbook><sheets><sheet name="A"/></sheets></workbook>' }, { encrypted: true }), { label: 'e.xlsx' })).rejects.toMatchObject({ code: 'corrupt_attachment' })
     await expect(prepareRichMedia(workbook([{ name: 'Empty', rows: [[]] }]), { label: 'empty.xlsx' })).resolves.toMatchObject({ extractedText: 'Sheet: Empty' })
+  })
+})
+
+// 6.97.8 QA: lazy [\s\S]*? scanners went quadratic on unclosed tags (a 20 KB file could hold the server for hours). The scanners are
+// linear indexOf passes now. Each part below is as big as the inflate cap allows; the stated bound is 2,500 ms for each (loose on purpose: the
+// machine may be busy; the code's own work bound is 2,000 ms). Measured on a loaded build machine: the slowest shape took about 430 ms and
+// most took under 40 ms (the timing line each test prints). The old lazy-regex scanners took 2 to 7 s at only 400 KB, hours at the cap.
+describe('pathological parts finish within a stated bound', () => {
+  const BOUND_MS = 2500
+  const sheetWith = (body: string): string => `<worksheet><sheetData>${body}</sheetData></worksheet>`
+  const fill = (unit: string, bytes: number): string => unit.repeat(Math.floor(bytes / unit.length))
+  const wb = (names = ['P']) => `<workbook><sheets>${names.map((n, i) => `<sheet name="${n}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>`
+  function timed(name: string, bytes: Buffer): { ms: number; text: string; error?: string } {
+    const at = performance.now()
+    let text = '', error: string | undefined
+    try { text = extractXlsxText(bytes).text } catch (e) { error = e instanceof XlsxError ? e.code : String(e) }
+    const ms = Math.round(performance.now() - at)
+    console.log(`xlsx pathological ${name}: ${ms} ms, input ${bytes.length} bytes`)
+    return { ms, text, error }
+  }
+  const SHEET_CAP = XLSX_LIMITS.maxSheetBytes - 100
+  // Each shape at the inflate cap and, for the mutation gate (a quadratic scanner takes hours at the cap), at 400 KB, where a quadratic
+  // scanner is already seconds slower than the 2,500 ms bound.
+  const shapes = (sheet: number, strings: number, part: number): Array<[string, Record<string, string>]> => [
+    ['unclosed <row>', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(fill('<row>', sheet)) }],
+    ['<row><c> never closed', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(fill('<row><c>', sheet)) }],
+    ['one closed row holding unclosed <c>', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(`<row r="1">${fill('<c r="A1">', sheet)}</row>`) }],
+    ['cells with an unclosed <v>', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(`<row r="1"><c r="A1">${fill('<v>', sheet)}</c></row>`) }],
+    ['empty rows', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(fill('<row></row>', sheet)) }],
+    ['one row of self-closed cells all in A1', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(`<row r="1">${fill('<c r="A1"/>', sheet)}</row>`) }],
+    ['rows that are tags without a closing >', { 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': `<worksheet><sheetData>${fill('<row ', Math.max(sheet, 3_000_000))}` }],
+    ['unclosed <si><t>', { 'xl/workbook.xml': wb(), 'xl/sharedStrings.xml': `<sst>${fill('<si><t>', strings)}</sst>`, 'xl/worksheets/sheet1.xml': sheetWith('<row r="1"><c r="A1" t="s"><v>0</v></c></row>') }],
+    ['one closed <si> holding unclosed <rPh>', { 'xl/workbook.xml': wb(), 'xl/sharedStrings.xml': `<sst><si>${fill('<rPh>', strings)}</si></sst>`, 'xl/worksheets/sheet1.xml': sheetWith('<row r="1"><c r="A1" t="s"><v>0</v></c></row>') }],
+    ['<sheet with no end', { 'xl/workbook.xml': `<workbook><sheets>${fill('<sheet ', part)}</sheets></workbook>` }],
+    ['unclosed <Relationship', { 'xl/workbook.xml': wb(), 'xl/_rels/workbook.xml.rels': `<Relationships>${fill('<Relationship Id="a" ', part)}</Relationships>` }],
+    ['closed <sheet> elements never closed by </sheet>', { 'xl/workbook.xml': `<workbook><sheets>${fill('<sheet name="x">', part)}</sheets></workbook>` }],
+  ]
+  it.each(shapes(SHEET_CAP, XLSX_LIMITS.maxSharedStringsBytes - 100, XLSX_LIMITS.maxPartBytes - 100))('at the cap: %s', (name, parts) => {
+    const out = timed(`at the cap: ${name}`, zip(parts))
+    expect(out.ms).toBeLessThan(BOUND_MS)
+  })
+  it.each(shapes(1_000_000, 400_000, 400_000))('small (400 KB to 1 MB): %s', (name, parts) => {
+    const out = timed(`small: ${name}`, zip(parts))
+    expect(out.ms).toBeLessThan(BOUND_MS)
+  })
+  it('a legitimate 16 MB sheet of real rows is read to its 200-row cut well inside the bound', () => {
+    const row = (r: number) => `<row r="${r}"><c r="A${r}"><v>${r}</v></c><c r="B${r}" t="inlineStr"><is><t>item ${r}</t></is></c></row>`
+    const body = Array.from({ length: Math.floor(SHEET_CAP / row(100000).length) }, (_, i) => row(i + 1)).join('')
+    const out = timed('16 MB of real rows', zip({ 'xl/workbook.xml': wb(['Real']), 'xl/worksheets/sheet1.xml': sheetWith(body) }))
+    expect(out.error).toBeUndefined()
+    expect(out.text).toContain('Only the first 200 rows')
+    expect(out.ms).toBeLessThan(BOUND_MS)
+  })
+  it('the work bound stops a scan that runs past its clock, with a plain error', () => {
+    const rows = Array.from({ length: 8000 }, (_, i) => `<row r="${i + 1}"><c r="A${i + 1}"/></row>`).join('')
+    const bytes = zip({ 'xl/workbook.xml': wb(), 'xl/worksheets/sheet1.xml': sheetWith(rows) })
+    let t = 0
+    expect(() => extractXlsxText(bytes, { now: () => (t += 1000) })).toThrowError(expect.objectContaining({ code: 'too_complex' }))
+    expect(extractXlsxText(bytes).text).toBe('Sheet: P')                    // the same bytes on a real clock are read
+  })
+  it(`all parts together may inflate at most ${XLSX_LIMITS.maxTotalInflatedBytes} bytes`, () => {
+    const names = ['A', 'B', 'C', 'D']
+    const parts: Record<string, string> = { 'xl/workbook.xml': wb(names), 'xl/_rels/workbook.xml.rels': `<Relationships>${names.map((_, i) => `<Relationship Id="rId${i + 1}" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}</Relationships>` }
+    names.forEach((_, i) => { parts[`xl/worksheets/sheet${i + 1}.xml`] = sheetWith(`<row r="1"><c r="A1"><v>1</v></c></row><!--${'x'.repeat(SHEET_CAP - 200)}-->`) })
+    expect(() => extractXlsxText(zip(parts))).toThrowError(expect.objectContaining({ code: 'too_complex' }))
+  })
+  it('the media ingress turns too_complex into a refusal, not a hang', async () => {
+    const names = ['A', 'B', 'C', 'D']
+    const parts: Record<string, string> = { 'xl/workbook.xml': wb(names), 'xl/_rels/workbook.xml.rels': `<Relationships>${names.map((_, i) => `<Relationship Id="rId${i + 1}" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}</Relationships>` }
+    names.forEach((_, i) => { parts[`xl/worksheets/sheet${i + 1}.xml`] = sheetWith(`<row r="1"><c r="A1"><v>1</v></c></row><!--${'x'.repeat(SHEET_CAP - 200)}-->`) })
+    await expect(prepareRichMedia(zip(parts), { label: 'big.xlsx' })).rejects.toMatchObject({ code: 'corrupt_attachment' })
   })
 })

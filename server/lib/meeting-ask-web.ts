@@ -1,4 +1,4 @@
-import { readRetirementRules } from './meeting-official-rules.js';
+import { readRetirementRules, RETIREMENT_AUTHORITIES } from './meeting-official-rules.js';
 /** One admitted public WebSearch per hop. Hook is an enforcement boundary, not an after-the-fact count. */
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,6 +13,37 @@ import { pageWasRead, READ_PAGE_PREFIX } from './meeting-ask-review.js';
 import type { MeetingAskExchange, MeetingAskSource } from '../../shared/meeting-ask.js';
 import { fetchPublicArticle } from './meeting-web-page.js';
 import { webLedger, type WebFeature } from './web-lookup-ledger.js';
+/** The eight 16-bit groups of an IPv6 address `isIP` already accepted ("::" expanded, a trailing dotted IPv4 turned into two groups). */
+function ipv6Groups(h: string): number[] {
+    let text = h.toLowerCase().split('%')[0];
+    const dotted = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
+    if (dotted)
+        text = text.slice(0, dotted.index) + ((Number(dotted[1]) << 8) | Number(dotted[2])).toString(16) + ':' + ((Number(dotted[3]) << 8) | Number(dotted[4])).toString(16);
+    const [head, tail] = text.split('::');
+    const left = head ? head.split(':') : [], right = tail === undefined ? [] : tail ? tail.split(':') : [];
+    const fill = tail === undefined ? [] : Array(8 - left.length - right.length).fill('0');
+    return [...left, ...fill, ...right].map(g => parseInt(g, 16));
+}
+/**
+ * Public IPv6 only. Refused: the unspecified and loopback addresses and every address whose first 96 bits are zero (this covers the
+ * deprecated IPv4-compatible form ::a.b.c.d), IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/32 (a gateway forwards it to the embedded IPv4,
+ * private ones included), unique-local fc00::/7, link-local fe80::/10, site-local fec0::/10, multicast ff00::/8, 6to4 2002::/16 and
+ * Teredo 2001::/32 (both embed an IPv4 address), and the documentation range 2001:db8::/32.
+ */
+function publicIPv6(h: string): boolean {
+    const g = ipv6Groups(h);
+    if (g.length !== 8 || g.some(x => !Number.isInteger(x)))
+        return false;
+    if (g.slice(0, 6).every(x => x === 0) || g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff)
+        return false;
+    if (g[0] === 0x64 && g[1] === 0xff9b)
+        return false;
+    if ((g[0] & 0xfe00) === 0xfc00 || (g[0] & 0xffc0) === 0xfe80 || (g[0] & 0xffc0) === 0xfec0 || (g[0] & 0xff00) === 0xff00)
+        return false;
+    if (g[0] === 0x2002 || g[0] === 0x2001 && (g[1] === 0 || g[1] === 0xdb8))
+        return false;
+    return true;
+}
 export function publicAddress(host: string): boolean {
     const h = host.toLowerCase().replace(/^\[|\]$/g, '');
     if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal'))
@@ -22,7 +53,7 @@ export function publicAddress(host: string): boolean {
         return !(p[0] === 0 || p[0] === 10 || p[0] === 127 || p[0] >= 224 || p[0] === 169 && p[1] === 254 || p[0] === 172 && p[1] >= 16 && p[1] <= 31 || p[0] === 192 && p[1] === 168 || p[0] === 100 && p[1] >= 64 && p[1] <= 127);
     }
     if (isIP(h) === 6)
-        return !(h === '::' || h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80') || h.startsWith('::ffff:'));
+        return publicIPv6(h);
     return h.includes('.');
 }
 export function publicWebUrl(value: unknown): string | null { try {
@@ -342,8 +373,14 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal, opti
     if (query !== redactSecrets(query))
         return { sources: [], notices: ['Public search was withheld because the query contained a secret.'] };
     if (/\b(?:application|apply|signup|documentation|docs)\b/i.test(query) && !/\bofficial\b/i.test(query)) query += ' official';
-    if(query.toLowerCase().replace(/[^a-z0-9]/g,'') === '401k403bleavingemployerkeepmoneyinoldretirementplanirsdepartmentoflabor') return readRetirementRules(publicAddress,signal);
     const feature: WebFeature = options?.feature ?? (options?.auditCaller === 'live_cues_general' ? 'cues' : 'ask');
+    if(query.toLowerCase().replace(/[^a-z0-9]/g,'') === '401k403bleavingemployerkeepmoneyinoldretirementplanirsdepartmentoflabor') {
+        // Not a search, but it fetches the two official pages, so those fetches are counted.
+        const rules = await readRetirementRules(publicAddress,signal);
+        webLedger().pagesRead(feature, rules.sources.length);
+        webLedger().pagesFailed(feature, RETIREMENT_AUTHORITIES.length - rules.sources.length);
+        return rules;
+    }
     // Counted where the search is dispatched, whatever it returns: a search that ran and found nothing still ran.
     webLedger().search(feature);
     const root = mkdtempSync(join(tmpdir(), 'cos-ask-web-'));
@@ -392,7 +429,7 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal, opti
         await new Promise<void>(resolve => {
             let settled = 0, read = 0;
             if (!candidates.length) resolve();
-            candidates.forEach((source, i) => { void fetchPublicArticle(source.url!, publicAddress, signal, focus).catch(() => null).then(page => { pages[i] = page; settled++; if (page) read++; if (read >= 2 || settled === candidates.length) resolve(); }); });
+            candidates.forEach((source, i) => { void fetchPublicArticle(source.url!, publicAddress, signal, focus).catch(() => null).then(page => { pages[i] = page; if (!page) webLedger().pagesFailed(feature, 1); settled++; if (page) read++; if (read >= 2 || settled === candidates.length) resolve(); }); });
         });
         candidates.forEach((source, i) => {
             const page = pages[i];
@@ -456,6 +493,22 @@ function trimUrl(raw: string): string {
         u = u.slice(0, -1).replace(/[.,;:!?'"\]}]+$/, '');
     return u;
 }
+/** One typed address: the public address to read, or why not. */
+function classifyPastedUrl(raw: string): { ok: string } | { refusal: 'pasted_not_public' | 'pasted_secret' } {
+    let parsed: URL | null = null;
+    try {
+        parsed = new URL(raw);
+    }
+    catch { /* not an address */ }
+    if (!parsed)
+        return { refusal: 'pasted_not_public' };
+    const carriesSecret = !!(parsed.username || parsed.password) || raw !== redactSecrets(raw) || REDACTION_MARK.test(raw)
+        || [...parsed.searchParams].some(([name, value]) => value && URL_SECRET_PARAM.test(name));
+    if (carriesSecret)
+        return { refusal: 'pasted_secret' };
+    const ok = publicWebUrl(raw);
+    return ok ? { ok } : { refusal: 'pasted_not_public' };
+}
 /** The addresses typed into `question` that COS may read, and what it refused. Pure: no network, no disk. */
 export function pastedPublicUrls(question: string): PastedUrls {
     const found: string[] = [];
@@ -470,29 +523,24 @@ export function pastedPublicUrls(question: string): PastedUrls {
             refused.push('pasted_over_limit');
             return;
         }
-        let parsed: URL | null = null;
-        try {
-            parsed = new URL(raw);
-        }
-        catch { /* not an address */ }
-        if (!parsed) {
-            refused.push('pasted_not_public');
-            return;
-        }
-        const carriesSecret = !!(parsed.username || parsed.password) || raw !== redactSecrets(raw) || REDACTION_MARK.test(raw)
-            || [...parsed.searchParams].some(([name, value]) => value && URL_SECRET_PARAM.test(name));
-        if (carriesSecret) {
-            refused.push('pasted_secret');
-            return;
-        }
-        const ok = publicWebUrl(raw);
-        if (!ok) {
-            refused.push('pasted_not_public');
-            return;
-        }
-        urls.push(ok);
+        const c = classifyPastedUrl(raw);
+        if ('ok' in c)
+            urls.push(c.ok);
+        else
+            refused.push(c.refusal);
     });
     return { urls, refused };
+}
+/**
+ * `text` with every web address that is not a clean public one replaced by "[link removed]", for text that is KEPT (a pasted-text file).
+ * Every address counts, not only the first two: the limit of two is about what is read, not about what may sit in a stored file. An
+ * address with a token in its query (redactSecrets does not know every parameter name) never reaches a cue prompt this way.
+ */
+export function redactUnsafeLinks(text: string): string {
+    return text.replace(URL_IN_TEXT, m => {
+        const u = trimUrl(m);
+        return u && !('ok' in classifyPastedUrl(u)) ? '[link removed]' + m.slice(u.length) : m;
+    });
 }
 /** Two addresses for the same page: scheme-agnostic host, no fragment, no tracking parameters, no trailing slash. */
 export function pastedUrlKey(url: string): string {
@@ -518,9 +566,12 @@ export function recentPastedPage(exchanges: readonly MeetingAskExchange[], sessi
         }
     return null;
 }
-/** "The article", "that link", "the page": a follow-up that points back at a link typed earlier, with none of its own. */
+/** "The article", "that link", "the linked story": a follow-up that clearly points back at a link typed earlier, with none of its own.
+ *  A bare "page", "site" or "post" does not count ("what is on page 3 of the deck?" is not about the article). */
 export function pointsAtEarlierLink(question: string): boolean {
-    return pastedPublicUrls(question).urls.length === 0 && /\b(?:article|story|page|link|post|piece|site|website|url)\b/i.test(question);
+    return pastedPublicUrls(question).urls.length === 0
+        && (/\b(?:the|that|this|those|my|our)\s+(?:(?:linked|pasted|news|web)\s+)?(?:article|story|link|url|piece)\b/i.test(question)
+            || /\b(?:linked|pasted)\s+(?:page|post|article|story|piece)\b/i.test(question));
 }
 /** The pages read for links the USER typed in this meeting's last few questions (read less than 15 minutes ago), newest first, at most PASTED_URL_MAX. */
 export function recentPastedPagesFromUserLinks(exchanges: readonly MeetingAskExchange[], sessionId: string, serverInstanceId: string, now = Date.now()): MeetingAskSource[] {
