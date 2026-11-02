@@ -67,6 +67,7 @@ import { leadRepeatOf, repeatOf, wouldWithhold } from './live-cues-filter.js'
 import { errMsg } from './utils.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
 import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
+import { KNOWN_NAMES_USE, knownNamesFor } from './live-cues-v2-names.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
 import {
   CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isCueKind, isLiveCueV2, legacyCueKind,
@@ -533,6 +534,9 @@ export interface LiveCuesV2Deps {
   orientation?(sessionId: string): { domain: string | null; title: string | null }
   /** Live cues v3, general cues (absent means none: no runner is built): the general runner's dependencies. */
   general?: GeneralCueDeps
+  /** 6.97.8: the spellings of names the writer may use (the meeting's speakers, enrolled voices, the owner, the owner's vocabulary
+   *  names). Absent means none: the writer prompt is then byte for byte what it was. May throw or reject; a failure means none. */
+  knownNames?(speakers: readonly string[]): Promise<string[]> | string[]
   /** Ask Public topics consent (MeetingAskStore.publicTopics), which general cues need. May throw. */
   publicTopics?(): boolean
   /** The owner's city-level home area (profile home_city), or null. May throw. */
@@ -663,6 +667,7 @@ function realDeps(): LiveCuesV2Deps {
       statePath: dataPath('live-cues-general-state.json'),
       trace: row => trace(row as unknown as Record<string, unknown>),
     }),
+    knownNames: speakers => knownNamesFor(speakers),
     publicTopics: () => new MeetingAskStore().publicTopics(),
     homeArea: () => getOwnerHomeArea(),
     cueLog: row => liveCueVerdicts().logCue(row),
@@ -1033,7 +1038,15 @@ export class LiveCuesV2Engine {
       const model = liveCuesV2Model(this.deps.env)
       const previous = s.cues.slice(-3).map(c => c.detail)
       const promptMemory = kept.map(m => ({ id: m.id, date: m.date, title: m.title, notes: m.notes }))  // the replay's exact keys
-      const prompt = pyJson({ meetingTitle: run?.writerTitle ?? s.title, liveIssue: '', suggestedKind: gate.kind, previousCues: previous, memory: promptMemory, window })
+      // 6.97.8: the known spellings ride in the prompt data, before the window, only when there are some (and the rule is on).
+      let names: string[] = []
+      if (liveCuesV2Rule('KNOWN_NAMES', this.deps.env) && this.deps.knownNames) {
+        try { names = await this.deps.knownNames([...s.speakers]) } catch { names = []; trace.knownNamesError = true }
+        if (abort.signal.aborted) { trace.outcome = 'cancelled'; return }
+        if (names.length) trace.knownNames = names.length
+      }
+      const prompt = pyJson({ meetingTitle: run?.writerTitle ?? s.title, liveIssue: '', suggestedKind: gate.kind, previousCues: previous, memory: promptMemory,
+        ...(names.length ? { knownNames: { use: KNOWN_NAMES_USE, names } } : {}), window })
       const t3 = Date.now()
       const out = await this.deps.writer(model, system, prompt, abort.signal)
       Object.assign(trace, { writerMs: Date.now() - t3, prompt: version, model: out.model ?? model, writerUsd: out.costUsd, writerIn: out.inputTokens, writerOut: out.outputTokens })

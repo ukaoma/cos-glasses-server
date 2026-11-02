@@ -19,7 +19,7 @@ const { isLiveCueV2, CUE_HEADLINE_MAX, CUE_DETAIL_MAX } = contract
 type Deps = import('./live-cues-v2.js').LiveCuesV2Deps
 
 /** The 6.97.8 tuning rules, off by default in this file's engine tests; each has its own describe block below. */
-const OFF_RULES: NodeJS.ProcessEnv = { COS_LIVE_CUES_V2_LEAD_REPEAT: '0' }
+const OFF_RULES: NodeJS.ProcessEnv = { COS_LIVE_CUES_V2_LEAD_REPEAT: '0', COS_LIVE_CUES_V2_KNOWN_NAMES: '0' }
 const words = (n: number, w = 'budget') => Array.from({ length: n }, () => w).join(' ')
 const sha = (v: unknown) => createHash('sha256').update(typeof v === 'string' && v.startsWith('FILE:') ? readFileSync(v.slice(5)) : JSON.stringify(v)).digest('hex')
 
@@ -471,6 +471,37 @@ describe('engine', () => {
     expect(off.shown.map(c => c.detail)).toEqual(texts)
     for (const [raw, expected] of [[undefined, true], ['', true], ['1', true], ['on', true], ['0', false], [' 0 ', false]] as const)
       expect(mod.liveCuesV2Rule('LEAD_REPEAT', raw === undefined ? {} : { COS_LIVE_CUES_V2_LEAD_REPEAT: raw }), String(raw)).toBe(expected)
+  })
+
+  it('6.97.8: known names ride in the writer prompt data before the window, from the meeting speakers and the dependency, and only when there are some', async () => {
+    env = { COS_LIVE_CUES_V2: '1', COS_LIVE_CUES_V2_KNOWN_NAMES: '1' }
+    const asked: string[][] = []
+    const e = engine({ knownNames: speakers => { asked.push([...speakers]); return [...speakers, 'Zorvana'] } }); e.arm('meeting_a')
+    await e.feed('meeting_a', words(L.minNewWords), false, ['Tamsin', 'Speaker 2'])
+    expect(asked).toEqual([['Tamsin']])                                                 // generic labels never reach the session's speakers
+    const prompt = JSON.parse(calls.prompts[0]) as Record<string, unknown>
+    expect(Object.keys(prompt)).toEqual(['meetingTitle', 'liveIssue', 'suggestedKind', 'previousCues', 'memory', 'knownNames', 'window'])
+    expect(prompt.knownNames).toEqual({ use: expect.stringContaining('Spell a person, company or product exactly as listed'), names: ['Tamsin', 'Zorvana'] })
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue', knownNames: 2 })
+    expect(JSON.stringify(traces)).not.toContain('Zorvana')                              // a count, never the names
+  })
+
+  it('6.97.8: no names, a failing reader, the switch at 0, or no dependency leave the writer prompt exactly as it was', async () => {
+    const promptFor = async (over: Partial<Deps>, extra: NodeJS.ProcessEnv): Promise<string> => {
+      calls.prompts = []; traces = []; clock += 3_600_000
+      env = { COS_LIVE_CUES_V2: '1', ...extra }
+      const e = engine(over); const id = `meeting_${Math.round(clock)}`; e.arm(id)
+      await e.feed(id, words(L.minNewWords))
+      return calls.prompts[0].replace(/G2 Recording \d{4}-\d{2}-\d{2} \d{4}/, 'G2 Recording <time>')   // the arm-time title carries the clock
+    }
+    const baseline = await promptFor({}, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })
+    expect(baseline).not.toContain('knownNames')
+    expect(await promptFor({ knownNames: () => [] }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toBe(baseline)
+    expect(await promptFor({ knownNames: () => { throw new Error('boom') } }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toBe(baseline)
+    expect(evaluations().at(-1)).toMatchObject({ outcome: 'cue', knownNamesError: true })
+    expect(await promptFor({ knownNames: async () => { throw new Error('boom') } }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toBe(baseline)
+    expect(await promptFor({ knownNames: () => ['Zorvana'] }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '0' })).toBe(baseline)
+    expect(await promptFor({ knownNames: () => ['Zorvana'] }, { COS_LIVE_CUES_V2_KNOWN_NAMES: '1' })).toContain('Zorvana')
   })
 
   it('6.79.0: an invalid COS_LIVE_CUES_V2_REPEAT_OVERLAP leaves the rule off with one log line per value', () => {
