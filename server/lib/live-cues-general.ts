@@ -31,13 +31,15 @@ import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { JevError } from './jev.js'
 import { DecisionProviderError } from './decision-provider.js'
 import { LensGistLimitError, redactSecrets, runLensGistEngine } from './lens-gist-engines.js'
-import { publicWebUrl, searchMeetingWeb } from './meeting-ask-web.js'
+import { searchMeetingWeb } from './meeting-ask-web.js'
+import { publicHttpsUrl } from './public-https-url.js'
 import {
   GENERAL_INSIGHT_CONTEXT_CHARS, GENERAL_INSIGHT_SOURCE_CHARS, GENERAL_INSIGHT_WRITER_SYSTEM, GENERAL_TOPIC_SYSTEM, generalInsightPrompt, generalTopicPrompt,
   parseGeneralInsight, parseGeneralTopic, type GeneralCueCategory, type InsightSourceIn,
 } from './live-cues-general-prompts.js'
 import {
-  admitCueTopic, blockedNameWords, ownerTermPhrases, queryHash, realProfileNames, sensitiveWindow, withHomeArea, type ProfileNameSource,
+  HASHABLE_REJECTIONS, admitCueTopic, blockedNameWords, ownerTermJoins, ownerTermPhrases, queryHash, realProfileNames, sensitiveWindow, withHomeArea, type AdmitReason,
+  type ProfileNameSource,
 } from './live-cues-general-topic.js'
 
 // ── Limits and shared types (names follow CONTRACT_v3; settings v3 and the shared types land with the modes branch) ──
@@ -104,12 +106,16 @@ export interface GeneralCueCandidate {
   paused: boolean
   /** The CONFIRMED Ask orientation domain, or null when unconfirmed. Never the sidecar default (all 974 saved sidecars say personal). */
   domain: string | null
+  /** True when the orientation could not be READ (it threw), as opposed to not being confirmed (domain null). The meeting is then
+   *  withheld: an unreadable orientation may be a personal meeting. */
+  domainUnreadable?: boolean
   title: string
   /** Cleaned characters fed to this meeting since it was armed. Monotonic: a rolling window's length is not this. */
   transcriptChars: number
   /** The last `chars` characters of the cleaned transcript, as of now. */
   window(chars: number): string
-  /** Speaker names the host knows, to keep out of a query. */
+  /** Names the host knows, to keep out of a query: the speakers the ASR path reported and the capitalized words of the calendar
+   *  title. (A speaker label that opens a line of the window is read from the window itself.) */
   speakerNames?: readonly string[]
 }
 export interface GeneralCueHost {
@@ -139,6 +145,17 @@ export interface GeneralCueDeps {
   trace?(row: GeneralTickRow): void
   /** Names the owner's profile offers (default: the real profile). */
   profile?: ProfileNameSource
+  /** Where the internal daily trigger cap is read from (default process.env). */
+  env?: NodeJS.ProcessEnv
+}
+
+/** An internal ceiling on Jev trigger calls a local day: not a user setting (so not in the settings contract), env only. The
+ *  trigger runs on every tick of every eligible meeting, so it has a cap of its own beside the topic and search caps. */
+export const GENERAL_TRIGGER_CAP = { default: 300, min: 1, max: 2000, env: 'COS_LIVE_CUES_GENERAL_DAILY_TRIGGERS' } as const
+export function dailyTriggerCap(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[GENERAL_TRIGGER_CAP.env]
+  const n = raw !== undefined && /^\d{1,5}$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN
+  return n >= GENERAL_TRIGGER_CAP.min && n <= GENERAL_TRIGGER_CAP.max ? n : GENERAL_TRIGGER_CAP.default
 }
 
 /** CONTRACT_v3 section 5. `reason` is a code, never text from the meeting. */
@@ -155,6 +172,8 @@ export interface GeneralTickRow {
   sourcesCount: number | null
   writerMs: number | null
   usd: number | null
+  /** Input tokens of the Jev trigger request (additive to CONTRACT_v3 section 5). */
+  jevTokens: number | null
 }
 
 // ── Eligibility ─────────────────────────────────────────────────────────────
@@ -166,7 +185,7 @@ export function generalModeOn(mode: string): boolean { return GENERAL_MODES.has(
  *  DOMAIN. `c.domain` must come only from the confirmed Ask orientation (MeetingAskStore.orientation(sessionId).domain, null when
  *  unconfirmed). A recording sidecar's domain is NOT a classification: all 974 saved sidecars carry 'personal' as a default,
  *  work calls included. So only a confirmed 'personal' skips the meeting; null proceeds, and the content checks (sensitive
- *  window, admission) still apply to it. */
+ *  window, admission) still apply to it. An orientation that cannot be READ (`domainUnreadable`) is not null: it is withheld. */
 export function generalEligibility(c: GeneralCueCandidate, mode: GeneralCueMode, publicTopics: boolean): GeneralEligibility {
   const off = (reason: string): GeneralEligibility => ({ ok: false, state: 'off', reason })
   if (!generalModeOn(mode)) return off('mode_focused')
@@ -174,6 +193,7 @@ export function generalEligibility(c: GeneralCueCandidate, mode: GeneralCueMode,
   if (!c.armed) return off('not_armed')
   if (c.paused) return off('paused')
   if (!publicTopics) return { ok: false, state: 'needs_public_topics', reason: 'public_topics_off' }
+  if (c.domainUnreadable) return { ok: false, state: 'withheld', reason: 'orientation_unreadable' }
   if (c.domain?.trim().toLowerCase() === 'personal') return { ok: false, state: 'withheld', reason: 'personal_domain' }
   return { ok: true }
 }
@@ -185,7 +205,7 @@ type Stage = typeof STAGES[number]
 const stageRank = (s: Stage): number => STAGES.indexOf(s) + 1
 interface MeetingCounters { attempts: number; cues: number; at: number }
 interface StoredBreaker { failures: number; stage: number; openUntil: number | null }
-interface StoreState { v: 1; zone: string; day: string; topicCalls: number; webSearches: number; meetings: Record<string, MeetingCounters>; breaker: StoredBreaker }
+interface StoreState { v: 1; zone: string; day: string; topicCalls: number; webSearches: number; triggerCalls: number; meetings: Record<string, MeetingCounters>; breaker: StoredBreaker }
 type StoreRead = { ok: true; state: StoreState } | { ok: false }
 export type ChargeResult = 'ok' | 'unreadable' | 'daily_cap' | 'meeting_cap' | 'write_failed'
 
@@ -206,7 +226,7 @@ export class GeneralCueStore {
   private systemZone(): string { return validZone(Intl.DateTimeFormat().resolvedOptions().timeZone) ?? 'UTC' }
   private fresh(nowMs: number): StoreState {
     const zone = this.systemZone()
-    return { v: 1, zone, day: localDay(nowMs, zone), topicCalls: 0, webSearches: 0, meetings: {}, breaker: { failures: 0, stage: 0, openUntil: null } }
+    return { v: 1, zone, day: localDay(nowMs, zone), topicCalls: 0, webSearches: 0, triggerCalls: 0, meetings: {}, breaker: { failures: 0, stage: 0, openUntil: null } }
   }
   /** A missing file is a fresh day. Anything else that is not a valid state (unparseable, wrong shape, a future day, a negative or
    *  fractional count, an unreadable path) is `ok: false`, and every caller treats that as "do not spend". */
@@ -220,7 +240,7 @@ export class GeneralCueStore {
     if (!isRecord(raw) || raw.v !== 1) return { ok: false }
     const zone = validZone(raw.zone), today = zone ? localDay(nowMs, zone) : ''
     if (!zone || typeof raw.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.day) || raw.day > today) return { ok: false }
-    if (!whole(raw.topicCalls) || !whole(raw.webSearches) || !isRecord(raw.meetings) || !isRecord(raw.breaker)) return { ok: false }
+    if (!whole(raw.topicCalls) || !whole(raw.webSearches) || !(raw.triggerCalls === undefined || whole(raw.triggerCalls)) || !isRecord(raw.meetings) || !isRecord(raw.breaker)) return { ok: false }
     const b = raw.breaker
     if (!whole(b.failures) || !whole(b.stage) || b.stage > STAGES.length || !(b.openUntil === null || (typeof b.openUntil === 'number' && Number.isFinite(b.openUntil)))) return { ok: false }
     const meetings: Record<string, MeetingCounters> = {}
@@ -230,7 +250,7 @@ export class GeneralCueStore {
     }
     const rolled = raw.day < today
     const open = b.openUntil !== null && b.openUntil > nowMs
-    return { ok: true, state: { v: 1, zone, day: today, topicCalls: rolled ? 0 : raw.topicCalls, webSearches: rolled ? 0 : raw.webSearches, meetings,
+    return { ok: true, state: { v: 1, zone, day: today, topicCalls: rolled ? 0 : raw.topicCalls, webSearches: rolled ? 0 : raw.webSearches, triggerCalls: rolled ? 0 : (raw.triggerCalls ?? 0), meetings,
       breaker: open ? { failures: 0, stage: 0, openUntil: b.openUntil as number } : { failures: b.failures, stage: b.stage, openUntil: null } } }
   }
   private write(s: StoreState): boolean {
@@ -250,6 +270,14 @@ export class GeneralCueStore {
     s.topicCalls += 1
     s.meetings[sessionId] = { ...m, attempts: m.attempts + 1, at: this.now() }
     return this.write(s) ? 'ok' : 'write_failed'
+  }
+  /** Charge one Jev trigger call BEFORE it is sent. Never refunded. */
+  chargeTrigger(cap: number): ChargeResult {
+    const r = this.read()
+    if (!r.ok) return 'unreadable'
+    if (r.state.triggerCalls >= cap) return 'daily_cap'
+    r.state.triggerCalls += 1
+    return this.write(r.state) ? 'ok' : 'write_failed'
   }
   /** Charge one web search BEFORE it starts. Never refunded. */
   chargeSearch(cap: number): ChargeResult {
@@ -314,7 +342,7 @@ function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 /** searchMeetingWeb swallows a failed search into `{sources: []}` plus a notice, so the focused breaker could never see it. This
- *  types the answer: ok needs at least one https source (publicWebUrl-checked); no https source, a throw and the 60 s wall are
+ *  types the answer: ok needs at least one https source (publicHttpsUrl-checked); no https source, a throw and the 60 s wall are
  *  failures; the caller's own abort is `aborted` (a cancel, not a failure). */
 export async function typedGeneralSearch(search: GeneralCueDeps['search'], query: string, parent: AbortSignal, wallMs: number = LIVE_CUES_GENERAL_LIMITS.searchWallMs): Promise<GeneralSearchResult> {
   const own = new AbortController()
@@ -328,8 +356,8 @@ export async function typedGeneralSearch(search: GeneralCueDeps['search'], query
     const out = await raceAbort(search(query, own.signal), own.signal)
     const sources: InsightSourceIn[] = []
     for (const s of out.sources ?? []) {
-      const url = typeof s?.url === 'string' ? publicWebUrl(s.url) : null
-      if (!url || !url.startsWith('https://') || typeof s.id !== 'string' || sources.some(x => x.url === url)) continue
+      const url = publicHttpsUrl(s?.url)
+      if (!url || typeof s.id !== 'string' || sources.some(x => x.url === url)) continue
       sources.push({ id: s.id, title: redactSecrets(String(s.title ?? '')).slice(0, 160), text: redactSecrets(String(s.text ?? '')).slice(0, GENERAL_INSIGHT_SOURCE_CHARS), url })
       if (sources.length >= LIVE_CUES_GENERAL_LIMITS.writerSources) break
     }
@@ -425,6 +453,7 @@ export class GeneralCueRunner {
     const nowMs = this.deps.now()
     const mode = this.settings.cueMode()
     if (!generalModeOn(mode)) { this.abortAll('mode_changed'); this.seen.clear(); return { ran: false, why: 'mode_off' } }
+    if (this.inFlight && !this.settings.publicTopics()) this.abortAll('consent_off')       // consent withdrawn: stop what is running
     if (this.inFlight) return { ran: false, why: 'busy' }
     const lim = this.settings.limits(), publicTopics = this.settings.publicTopics()
     let candidates: GeneralCueCandidate[]
@@ -456,6 +485,7 @@ export class GeneralCueRunner {
     if (!r.ok) return { state: 'capped', reason: 'state_unreadable' }
     const s = r.state
     if (s.breaker.openUntil !== null && s.breaker.openUntil > nowMs) return { state: 'breaker', reason: 'breaker_open' }
+    if (s.triggerCalls >= dailyTriggerCap(this.deps.env)) return { state: 'capped', reason: 'daily_trigger_cap' }
     if (s.topicCalls >= lim.dailyTopicCalls) return { state: 'capped', reason: 'daily_topic_cap' }
     if (s.webSearches >= lim.dailyWebSearches) return { state: 'capped', reason: 'daily_search_cap' }
     const m = s.meetings[sessionId]
@@ -469,7 +499,7 @@ export class GeneralCueRunner {
     if (nowMs - (this.skipTracedAt.get(key) ?? 0) < LIVE_CUES_GENERAL_LIMITS.skipTraceEveryMs) return
     this.skipTracedAt.set(key, nowMs)
     this.writeTrace({ type: 'general_tick', at: new Date(nowMs).toISOString(), sessionId, pGeneral: null, outcome: 'skip', reason, category: null, queryHash: null,
-      searchMs: null, sourcesCount: null, writerMs: null, usd: null })
+      searchMs: null, sourcesCount: null, writerMs: null, usd: null, jevTokens: null })
   }
   private writeTrace(row: GeneralTickRow): void { try { this.deps.trace?.(row) } catch { /* the trace is best effort */ } }
 
@@ -484,6 +514,14 @@ export class GeneralCueRunner {
     this.meetingQueries.set(sessionId, set)
   }
 
+  /** Public topics consent, right now. Checked on its own right before the search and before emit: if it was withdrawn the attempt
+   *  is stopped with the reason consent_off, not left to finish. */
+  private consentOk(): boolean { return this.settings.publicTopics() === true }
+  /** Consent was withdrawn mid-attempt: abort the attempt with that reason (it ends as a cancel, never a failure). */
+  private consentWithdrawn(): never {
+    this.inFlight?.abort.abort('consent_off')
+    throw abortError()
+  }
   /** Is the meeting still eligible right now (session still there, mode and consent unchanged)? Fresh from the host. */
   private live(sessionId: string): boolean {
     const c = this.host.candidates().find(x => x.sessionId === sessionId)
@@ -500,7 +538,7 @@ export class GeneralCueRunner {
     this.inFlight = { sessionId: c.sessionId, abort }            // synchronously: nothing awaits between the busy check and here
     const run: Run = { stage: 0, usd: 0 }
     const row: GeneralTickRow = { type: 'general_tick', at: new Date(startedAt).toISOString(), sessionId: c.sessionId, pGeneral: null, outcome: 'no_cue', reason: '',
-      category: null, queryHash: null, searchMs: null, sourcesCount: null, writerMs: null, usd: null }
+      category: null, queryHash: null, searchMs: null, sourcesCount: null, writerMs: null, usd: null, jevTokens: null }
     const wall = setTimeout(() => abort.abort(WALL), LIVE_CUES_GENERAL_LIMITS.attemptWallMs)
     wall.unref?.()
     try {
@@ -545,9 +583,22 @@ export class GeneralCueRunner {
     const sensitive = sensitiveWindow(window)
     if (sensitive) { rec.last = { state: 'withheld', reason: 'sensitive_window' }; return this.done(row, 'no_cue', `sensitive:${sensitive}`) }
 
-    // 2. Trigger (Jev).
+    // 1b. The names a query must not carry, read now, before any spend: the owner, every enrolled voice, the speakers the ASR path
+    //     reported, the calendar title's capitalized words and the speaker labels in the window. If the voice names cannot be read
+    //     the meeting is withheld (fail closed), not searched with fewer names.
+    let nameWords: Set<string>
+    try { nameWords = await raceAbort(blockedNameWords(window, c.speakerNames ?? [], profile), signal) } catch (error) {
+      if (isCancel(error, signal)) throw error
+      rec.last = { state: 'withheld', reason: 'names_unavailable' }
+      return this.done(row, 'no_cue', 'names_unavailable')
+    }
+
+    // 2. Trigger (Jev), under its own daily cap, charged before the request.
+    const triggered = this.store.chargeTrigger(dailyTriggerCap(this.deps.env))
+    if (triggered !== 'ok') return this.done(row, 'no_cue', `cap:trigger_${triggered}`)
     run.stage = 1
     const trigger = await raceAbort(this.deps.jevTrigger(c.title, window, signal), signal)
+    row.jevTokens = Number.isFinite(trigger.tokens) ? trigger.tokens : null
     row.pGeneral = Number.isFinite(trigger.pGeneral) ? Math.round(trigger.pGeneral * 1000) / 1000 : 0
     if (!(trigger.pGeneral >= lim.trigger)) return this.done(row, 'no_cue', 'trigger_below', 1)
 
@@ -563,19 +614,22 @@ export class GeneralCueRunner {
     row.category = topic.category
 
     // 4. Admission (deterministic), then the home area for a local query, admitted again as the new string it is.
-    const ctx = { nameWords: blockedNameWords(window, c.speakerNames ?? [], profile), terms: ownerTermPhrases(profile), recent: this.recentQueries(c.sessionId, startedAt) }
+    const ctx = { nameWords, terms: ownerTermPhrases(profile), joins: ownerTermJoins(profile), recent: this.recentQueries(c.sessionId, startedAt) }
+    /** A trace row carries a hash only for a rejection that names nothing private: a repeat or a length. */
+    const hashFor = (reason: AdmitReason, q: string): string | null => HASHABLE_REJECTIONS.has(reason) ? queryHash(q) : null
     let admitted = admitCueTopic(topic.query, ctx)
-    if (!admitted.ok) { row.queryHash = queryHash(topic.query); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }
+    if (!admitted.ok) { row.queryHash = hashFor(admitted.reason, topic.query); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }
     if (topic.category === 'local') {
       const withArea = withHomeArea(admitted.query, this.settings.homeArea())
       if (withArea === null) { row.queryHash = queryHash(admitted.query); return this.done(row, 'no_cue', 'local_no_area', 2) }
       const again = admitCueTopic(withArea, ctx)
-      if (!again.ok) { row.queryHash = queryHash(withArea); return this.done(row, 'no_cue', `rejected_local:${again.reason}`, 2) }
+      if (!again.ok) { row.queryHash = hashFor(again.reason, withArea); return this.done(row, 'no_cue', `rejected_local:${again.reason}`, 2) }
       admitted = again
     }
     row.queryHash = queryHash(admitted.query)
 
-    // 5. Search. The room or mode may have changed during the topic call; the daily search is charged before it starts.
+    // 5. Search. The room, the mode or the consent may have changed during the topic call; the daily search is charged before it starts.
+    if (!this.consentOk()) return this.consentWithdrawn()
     if (!this.live(c.sessionId)) return this.done(row, 'no_cue', 'not_eligible')
     const paid = this.store.chargeSearch(lim.dailyWebSearches)
     if (paid !== 'ok') return this.done(row, 'no_cue', `cap:${paid}`)
@@ -590,11 +644,12 @@ export class GeneralCueRunner {
     }
     row.sourcesCount = found.sources.length
 
-    // 6. Writer. The context is the last of the room as of now, only for relevance.
+    // 6. Writer. The context is the tail of the window that passed the sensitive check, not a fresh read of the room: what the
+    //    writer is sent was checked, only for relevance.
     run.stage = 4
     const t1 = this.deps.now()
     const writerOut = await raceAbort(this.deps.writer(GENERAL_INSIGHT_WRITER_SYSTEM, generalInsightPrompt({ query: admitted.query, category: topic.category, sources: found.sources,
-      context: c.window(GENERAL_INSIGHT_CONTEXT_CHARS) }), signal), signal)
+      context: window.slice(-GENERAL_INSIGHT_CONTEXT_CHARS) }), signal), signal)
     row.writerMs = this.deps.now() - t1
     run.usd += writerOut.costUsd ?? 0
     const insight = parseGeneralInsight(writerOut.text, found.sources)
@@ -602,6 +657,7 @@ export class GeneralCueRunner {
 
     // 7. Emit, only if it is still fresh and the meeting is still eligible. A late cue is dropped, never shown.
     if (this.deps.now() - startedAt > LIVE_CUES_GENERAL_LIMITS.staleMs) return this.done(row, 'no_cue', 'stale', 4)
+    if (!this.consentOk()) return this.consentWithdrawn()
     if (!this.live(c.sessionId)) return this.done(row, 'no_cue', 'not_eligible', 4)
     const day = new Date(this.deps.now()).toLocaleDateString('en-CA')
     const cited = insight.sourceIds.map(id => found.sources.find(s => s.id === id)!)

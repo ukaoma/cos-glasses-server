@@ -48,6 +48,8 @@ import {
 import { notesMemory } from './live-cues-v2-notes.js'
 import { GeneralCueRunner, realGeneralDeps, type GeneralCueCandidate, type GeneralCueDeps, type GeneralCueHost, type GeneralCueSettingsReader, type GeneralCueStatus, type GeneralInsight } from './live-cues-general.js'
 import { generalTriggerCalls } from './live-cues-general-prompts.js'
+import { isGenericSpeakerLabel } from './live-cues-general-topic.js'
+import { publicHttpsUrl } from './public-https-url.js'
 import { GROUNDED_LIMITS, SessionShingles, groundedCandidates, groundedSource, selfIdSet, usableFiles, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
 import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
@@ -737,6 +739,9 @@ interface Session {
   /** Live cues v3: cleaned characters fed since arm. Monotonic (the chunk window is capped, this is not): the general runner
    *  measures "about 90 s of new speech" with it. */
   charsFed: number
+  /** Live cues v3: the speaker names the ASR path reported (at most SPEAKER_NAMES_MAX), kept for the general runner's name
+   *  gate. Stored only: the focused path never reads them. */
+  speakers: Set<string>
   /** Live cues v3: this meeting's insights. Apart from `cues` on purpose: previousCues, the repeat rule and the shadow template
    *  rules read `cues`, and an insight must not change what a focused cue sees. */
   insights: LiveCueV2[]
@@ -763,6 +768,8 @@ function isCancel(error: unknown, signal: AbortSignal): boolean {
  *  provider's own breaker and cap already bound these; counting them would also end the meeting's cues. */
 export const QUIET_DECISION_STOPS: ReadonlySet<string> = new Set(['jev_cap_reached', 'jev_breaker_open', 'jev_not_configured',
   'decision_cap_reached', 'decision_breaker_open', 'decision_not_configured', 'decision_invalid_provider'])
+/** How many distinct speaker names a meeting remembers for the general runner's name gate. */
+export const SPEAKER_NAMES_MAX = 200
 /** Abort reason when v2 is switched off at runtime. */
 export const V2_OFF = 'v2_off'
 
@@ -833,7 +840,7 @@ export class LiveCuesV2Engine {
     const d = this.deps.now()
     const title = `${mac ? 'Mac' : 'G2'} Recording ${d.toLocaleDateString('en-CA')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
     this.sessions.set(sessionId, { sessionId, title, armedAt: nowMs, lastSeenAt: nowMs, chunks: [], wordsSinceEval: 0, lastEvalAt: 0, lastCueAt: 0,
-      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, insights: [], said: new SessionShingles() })
+      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, speakers: new Set(), insights: [], said: new SessionShingles() })
     if (opts.resume) this.deps.store.setResume(sessionId, kinds)
     this.deps.warmMemory()
     return answer(this.deps.store.counters(sessionId).cues, kinds)
@@ -847,10 +854,10 @@ export class LiveCuesV2Engine {
     s?.said.clear()
     this.general?.endSession(sessionId)
     const cues = s ? this.allCues(s) : []
-    return { nudgesGenerated: cues.length, protocol: 2, cues,
-      // v1 readers know two types: an extended kind is shown as its legacy kind there (the cues keep the real one).
-      // An insight (live cues v3) has no v1 twin.
-      nudges: cues.flatMap(c => (isCueKind(c.kind) ? [{ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId }] : [])) }
+    // v1 readers know two types: an extended kind is shown as its legacy kind there (the cues keep the real one).
+    // An insight (live cues v3) has no v1 twin, so it is not counted as a nudge either.
+    const nudges = cues.flatMap(c => (isCueKind(c.kind) ? [{ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId }] : []))
+    return { nudgesGenerated: nudges.length, protocol: 2, cues, nudges }
   }
 
   setPaused(sessionId: string, paused: boolean, seq?: number): { ok: true; paused: boolean; applied: boolean; pauseSeq: number } {
@@ -902,7 +909,7 @@ export class LiveCuesV2Engine {
   }
 
   /** From the ASR path: fire-and-forget, never awaited. All gates live here. */
-  async feed(sessionId: string, text: string, asrDegraded = false): Promise<void> {
+  async feed(sessionId: string, text: string, asrDegraded = false, speakers?: readonly string[]): Promise<void> {
     if (!this.enabled()) return
     if (this.deps.store.isEnded(sessionId)) return                    // tombstone before any auto-arm
     let s = this.sessions.get(sessionId)
@@ -917,6 +924,7 @@ export class LiveCuesV2Engine {
     }
     const nowMs = this.deps.now().getTime()
     s.lastSeenAt = nowMs
+    this.noteSpeakers(s, speakers)
     const words = text.trim().split(/\s+/).filter(Boolean)
     if (words.length) {
       s.chunks.push(text.trim())
@@ -1182,6 +1190,16 @@ export class LiveCuesV2Engine {
   private focusedOff(s: Session): boolean { return s.kinds === 'extended' && this.cueMode() === 'general' }
   private allCues(s: Session): LiveCueV2[] { return s.insights.length ? [...s.cues, ...s.insights].sort((a, b) => a.createdAt - b.createdAt) : [...s.cues] }
 
+  /** Remembers who the ASR path says is speaking, for the general runner's name gate. Bounded; generic labels ("Ext", "Speaker 2")
+   *  are not names. Never read by the focused path. */
+  private noteSpeakers(s: Session, speakers: readonly string[] | undefined): void {
+    for (const raw of speakers ?? []) {
+      const name = typeof raw === 'string' ? raw.replace(/\s+/g, ' ').trim() : ''
+      if (!name || name.length > 60 || isGenericSpeakerLabel(name) || s.speakers.size >= SPEAKER_NAMES_MAX) continue
+      s.speakers.add(name)
+    }
+  }
+
   /** The meetings the general runner may look at: extended ones only, while v2 is on. The domain is the CONFIRMED Ask orientation
    *  domain or null, never a recording sidecar's default (all saved sidecars say personal). */
   private generalHost(): GeneralCueHost {
@@ -1191,10 +1209,14 @@ export class LiveCuesV2Engine {
         const out: GeneralCueCandidate[] = []
         for (const s of this.sessions.values()) {
           if (s.kinds !== 'extended') continue
-          let domain: string | null = null
-          try { domain = this.deps.orientation?.(s.sessionId).domain ?? null } catch { domain = null }
+          // A throw is not "unconfirmed": an orientation that cannot be read may belong to a personal meeting, so it is withheld.
+          let domain: string | null = null, calendarTitle: string | null = null, domainUnreadable = false
+          try { const o = this.deps.orientation?.(s.sessionId); domain = o?.domain ?? null; calendarTitle = o?.title ?? null } catch { domainUnreadable = true }
+          // The orientation carries the calendar event's title, not its attendees: its capitalized words stand in for them.
+          const titleNames = (calendarTitle ?? '').match(/\p{Lu}[\p{L}'’-]{2,}/gu) ?? []
           out.push({ sessionId: s.sessionId, kindSet: s.kinds, armed: !this.deps.store.isEnded(s.sessionId), paused: this.deps.store.isPaused(s.sessionId), domain,
-            title: s.title, transcriptChars: s.charsFed, window: chars => cleanWindow(s.chunks.join('\n')).slice(-chars) })
+            ...(domainUnreadable ? { domainUnreadable } : {}), title: s.title, transcriptChars: s.charsFed, speakerNames: [...s.speakers, ...titleNames],
+            window: chars => cleanWindow(s.chunks.join('\n')).slice(-chars) })
         }
         return out
       },
@@ -1220,7 +1242,11 @@ export class LiveCuesV2Engine {
   private emitInsight(sessionId: string, insight: GeneralInsight): boolean {
     const s = this.sessions.get(sessionId)
     if (!s || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false
-    const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId, headline: insight.headline, detail: insight.detail, kind: 'insight', sources: insight.sources,
+    // Every source goes through the same public https check as the cue log's: one that fails drops the whole insight.
+    const urls = insight.sources.map(src => publicHttpsUrl(src.url))
+    if (!insight.sources.length || urls.some(u => u === null)) return false
+    const sources = insight.sources.map((src, i) => ({ ...src, url: urls[i]! }))
+    const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId, headline: insight.headline, detail: insight.detail, kind: 'insight', sources,
       gate: round(insight.gate), createdAt: this.deps.now().getTime(), model: insight.model ?? liveCuesV2Model(this.deps.env) }
     if (!isLiveCueV2(cue)) return false                                 // never emit what the companion would drop
     const log = this.deps.cueLog

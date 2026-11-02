@@ -2806,7 +2806,7 @@ async function processStreamChunk(opts: {
   // bare `void` on a rejecting promise is an unhandled rejection, which Node
   // throws on by default. All gates live inside the feed.
   // The ASR await above lets a late chunk land after Stop or save; a closed session never feeds cues.
-  if (!isSessionDeleted(sessionId)) void feedLiveCueTranscript(sessionId, trimmedText, Boolean(fallbackReason)).catch(() => {})
+  if (!isSessionDeleted(sessionId)) void feedLiveCueTranscript(sessionId, trimmedText, Boolean(fallbackReason), [speaker, ...(chunk.segments ?? []).map(segment => segment.speaker)]).catch(() => {})
 
   // 6.85.0: timing and the character count only. This line runs for every chunk, so the meeting
   // text itself never goes to the server log (transcribe-stream-log-privacy.test.ts).

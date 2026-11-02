@@ -47,7 +47,7 @@ describe('general cues in the engine', () => {
   let focusedGates: number
   let g: { trigger: number; titles: string[]; topic: number; search: string[]; writer: number; windows: string[]; p: number; searchImpl: null | ((q: string, signal: AbortSignal) => Promise<{ sources: Array<{ id: string; title: string; text: string; url?: string }> }>) }
   let generalTraces: Array<Record<string, unknown>>
-  let s: { on: boolean; mode: Mode; domain: string | null; orientationThrows: boolean; publicTopics: boolean | 'throws' | 'absent'; generalLimits: Record<string, number>; env: NodeJS.ProcessEnv }
+  let s: { on: boolean; mode: Mode; domain: string | null; calendarTitle: string | null; orientationThrows: boolean; publicTopics: boolean | 'throws' | 'absent'; generalLimits: Record<string, number>; env: NodeJS.ProcessEnv }
   const engines: Array<InstanceType<typeof LiveCuesV2Engine>> = []
 
   function engine(over: Partial<Deps> = {}, withGeneral = true) {
@@ -77,7 +77,7 @@ describe('general cues in the engine', () => {
       trace: () => {},
       cueLog: row => { logged.push(row as unknown as Record<string, unknown>) },
       env: s.env,
-      orientation: () => { if (s.orientationThrows) throw new Error('orientation unreadable'); return { domain: s.domain, title: null } },
+      orientation: () => { if (s.orientationThrows) throw new Error('orientation unreadable'); return { domain: s.domain, title: s.calendarTitle } },
       publicTopics: () => { if (s.publicTopics === 'throws') throw new Error('consent unreadable'); return s.publicTopics === true },
       homeArea: () => 'Austin, TX',
       ...(withGeneral ? { general } : {}),
@@ -91,11 +91,11 @@ describe('general cues in the engine', () => {
   const insights = () => emitted.filter(x => x.type === 'coaching_nudge_v2' && x.data.kind === 'insight')
   const focused = () => emitted.filter(x => x.type === 'coaching_nudge_v2' && x.data.kind !== 'insight')
   const v1 = () => emitted.filter(x => x.type === 'coaching_nudge')
-  async function feed(e: InstanceType<typeof LiveCuesV2Engine>, sessionId: string, times = 4) { for (let i = 0; i < times; i++) await e.feed(sessionId, SAID) }
+  async function feed(e: InstanceType<typeof LiveCuesV2Engine>, sessionId: string, times = 4, speakers?: readonly string[]) { for (let i = 0; i < times; i++) await e.feed(sessionId, SAID, false, speakers) }
   /** Arms the meeting, feeds enough speech, lets the runner see it, and runs the attempt that falls due 301 s later. */
-  async function insightAttempt(e: InstanceType<typeof LiveCuesV2Engine>, sessionId: string = MAC) {
+  async function insightAttempt(e: InstanceType<typeof LiveCuesV2Engine>, sessionId: string = MAC, speakers?: readonly string[]) {
     e.arm(sessionId)
-    await feed(e, sessionId)
+    await feed(e, sessionId, 4, speakers)
     const r = e.generalRunner()!
     await r.tick()                                                     // the meeting becomes eligible now: it waits one interval
     clock += 301_000
@@ -107,7 +107,7 @@ describe('general cues in the engine', () => {
     clock = Date.parse('2026-11-01T18:00:00Z')
     emitted = []; logged = []; writerPrompts = []; generalTraces = []; focusedGates = 0
     g = { trigger: 0, titles: [], topic: 0, search: [], writer: 0, windows: [], p: 0.9, searchImpl: null }
-    s = { on: true, mode: 'all', domain: 'work', orientationThrows: false, publicTopics: true, generalLimits: {}, env: {} }
+    s = { on: true, mode: 'all', domain: 'work', calendarTitle: null, orientationThrows: false, publicTopics: true, generalLimits: {}, env: {} }
   })
   afterEach(() => { for (const e of engines.splice(0)) e.shutdown(); mod.shutdownLiveCuesV2(); rmSync(dir, { recursive: true, force: true }) })
 
@@ -220,6 +220,7 @@ describe('general cues in the engine', () => {
       expect(stop.cues.map(c => c.kind)).toEqual(['insight', 'challenge'])
       expect(stop.nudges).toHaveLength(1)
       expect(stop.nudges[0]).toMatchObject({ type: 'challenge' })
+      expect(stop.nudgesGenerated).toBe(1)                               // focused cues only, like nudges
     })
     it('findCue and feedback know an insight', async () => {
       const e = engine()
@@ -339,19 +340,28 @@ describe('general cues in the engine', () => {
   })
 
   describe('the confirmed domain', () => {
-    it('a confirmed personal domain skips the meeting (status withheld); work and null proceed; an unreadable orientation is null and proceeds', async () => {
+    it('a confirmed personal domain skips the meeting (status withheld); work and null proceed', async () => {
       s.domain = 'personal'
       const skipped = engine()
       expect(await insightAttempt(skipped)).toMatchObject({ ran: false })
       expect(skipped.status(MAC).session!.general).toMatchObject({ state: 'withheld', reason: 'personal_domain' })
       expect(g.trigger).toBe(0)
-      for (const [domain, throws] of [[null, false], ['quilt', false], [null, true]] as const) {
-        s.domain = domain; s.orientationThrows = throws; emitted = []
+      for (const domain of [null, 'quilt']) {
+        s.domain = domain; emitted = []
         const e = engine()
-        expect(await insightAttempt(e, MAC_B), `${domain} ${throws}`).toMatchObject({ ran: true, outcome: 'cue' })
-        expect(insights(), `${domain} ${throws}`).toHaveLength(1)
+        expect(await insightAttempt(e, MAC_B), `${domain}`).toMatchObject({ ran: true, outcome: 'cue' })
+        expect(insights(), `${domain}`).toHaveLength(1)
         clock += 400_000
       }
+    })
+    it('a missing orientation reader is null and proceeds; an orientation that cannot be READ withholds the meeting (orientation_unreadable)', async () => {
+      const none = engine({ orientation: undefined })
+      expect(await insightAttempt(none, MAC_B)).toMatchObject({ ran: true, outcome: 'cue' })
+      s.orientationThrows = true
+      const e = engine()
+      expect(await insightAttempt(e)).toMatchObject({ ran: false })
+      expect(e.status(MAC).session!.general).toMatchObject({ state: 'withheld', reason: 'orientation_unreadable' })
+      expect(g.trigger).toBe(1)                                          // only the first meeting's
     })
     it('the domain is the confirmed orientation, read at every tick (a domain confirmed personal later stops the next attempt)', async () => {
       const e = engine()
@@ -361,6 +371,60 @@ describe('general cues in the engine', () => {
       await feed(e, MAC, 4)
       expect(await e.generalRunner()!.tick()).toMatchObject({ ran: false })
       expect(g.trigger).toBe(1)
+    })
+  })
+
+  describe('the name gate through the real feed path', () => {
+    const asked = () => JSON.stringify({ topic: true, category: 'news', query: 'Prunella Voss interview' })
+    it('a speaker the ASR path reported is never searched; without the speakers the same query goes through', async () => {
+      const withSpeaker = engine({}, true)
+      const topic = async () => ({ text: asked() })
+      withSpeaker['general']!['deps'].topicModel = topic
+      expect(await insightAttempt(withSpeaker, MAC, ['Prunella Voss', 'Ext'])).toMatchObject({ outcome: 'no_cue', reason: 'rejected:name' })
+      expect(g.search).toEqual([])
+      const without = engine()
+      without['general']!['deps'].topicModel = topic
+      expect(await insightAttempt(without, MAC_B)).toMatchObject({ outcome: 'cue' })
+      expect(g.search).toEqual(['Prunella Voss interview'])
+    })
+    it('remembers each speaker once, skips generic labels, and stops at 200 names', async () => {
+      const e = engine()
+      e.arm(MAC)
+      await e.feed(MAC, SAID, false, ['Prunella Voss', ' Prunella  Voss ', ' Ext ', 'Unidentified', 'Speaker 3', 'You', '', '   ', 'x'.repeat(61), 'Thaddeus Orme'])
+      expect([...e['sessions'].get(MAC)!.speakers]).toEqual(['Prunella Voss', 'Thaddeus Orme'])
+      await e.feed(MAC, SAID, false, Array.from({ length: 300 }, (_, i) => `Name${i}`))
+      expect(e['sessions'].get(MAC)!.speakers.size).toBe(200)
+      await e.feed(MAC, SAID, false, undefined)
+      expect(e['sessions'].get(MAC)!.speakers.size).toBe(200)
+    })
+    it('the calendar title\'s capitalized words stand in for the attendees the orientation does not carry', async () => {
+      s.calendarTitle = 'Weekly sync with Prunella Voss and Co'
+      const e = engine()
+      e.arm(MAC)
+      const names = e['generalHost']().candidates()[0].speakerNames!
+      expect(names).toEqual(expect.arrayContaining(['Weekly', 'Prunella', 'Voss']))
+      expect(names).not.toContain('sync')
+      expect(names).not.toContain('Co')
+      e['general']!['deps'].topicModel = async () => ({ text: asked() })
+      expect(await insightAttempt(e)).toMatchObject({ outcome: 'no_cue', reason: 'rejected:name' })
+    })
+    it('feedLiveCueTranscript hands the speakers to the engine, and only the engine reads them', async () => {
+      const { feedLiveCueTranscript } = await import('./live-cues-engine.js')
+      const feedSpy = vi.spyOn(LiveCuesV2Engine.prototype, 'feed').mockResolvedValue(undefined)
+      process.env.COS_LIVE_CUES_V2 = '1'
+      try {
+        await feedLiveCueTranscript(MAC, 'some words here', false, ['Prunella Voss'])
+        expect(feedSpy).toHaveBeenCalledWith(MAC, 'some words here', false, ['Prunella Voss'])
+        await feedLiveCueTranscript(MAC, 'more words', true)
+        expect(feedSpy).toHaveBeenLastCalledWith(MAC, 'more words', true, undefined)
+      } finally { delete process.env.COS_LIVE_CUES_V2; feedSpy.mockRestore() }
+    })
+    it('the ASR call site reports the chunk speaker and every segment speaker', async () => {
+      const { readFileSync } = await import('node:fs')
+      const source = readFileSync(join(import.meta.dirname, '../routes/transcribe-stream.ts'), 'utf8')
+      const calls = source.match(/feedLiveCueTranscript\([^\n]*\)/g) ?? []
+      expect(calls.filter(c => c.startsWith('feedLiveCueTranscript(sessionId, trimmedText'))).toHaveLength(1)
+      expect(calls.find(c => c.includes('trimmedText'))).toContain('[speaker, ...(chunk.segments ?? []).map(segment => segment.speaker)]')
     })
   })
 
@@ -531,6 +595,21 @@ describe('general cues in the engine', () => {
       expect(insights()).toHaveLength(1)
       expect(insights()[0].data).toMatchObject({ model: 'claude-sonnet-5-5' })           // the configured writer model when the insight names none
     })
+    it('emit sends sources through the cue log\'s https check: a bad address drops the whole insight, a good one is normalized', () => {
+      const e = engine()
+      e.arm(MAC)
+      const host = e['generalHost']()
+      const base: GeneralInsight = { headline: 'A fact', detail: 'A true public fact from a page.', category: 'news', query: 'q', gate: 0.9,
+        sources: [{ id: 'web_x', date: '2026-11-01', title: 'Page', kind: 'web', url: 'https://Example.org/p' }], windowAt: clock, createdAt: clock }
+      for (const url of ['https://printer.local./p', 'https://example.org:8443/p', 'http://example.org/p', 'https://10.0.0.1/p', 'not a url']) {
+        expect(host.emit(MAC, { ...base, sources: [{ ...base.sources[0], url }] }), url).toBe(false)
+      }
+      expect(host.emit(MAC, { ...base, sources: [] })).toBe(false)
+      expect(host.emit(MAC, { ...base, sources: [base.sources[0], { ...base.sources[0], url: 'https://printer.local./p' }] })).toBe(false)
+      expect(insights()).toEqual([])
+      expect(host.emit(MAC, base)).toBe(true)
+      expect((insights()[0].data.sources as Array<{ url: string }>)[0].url).toBe('https://example.org/p')
+    })
     it('a failed cue log append is not an emit failure', () => {
       const e = engine({ cueLog: () => { throw new Error('disk') } })
       e.arm(MAC)
@@ -583,7 +662,7 @@ describe('general cues in the engine', () => {
     })
     it('write a general_tick row to the same trace file as the focused cues', async () => {
       const { readFileSync } = await import('node:fs')
-      realDeps().trace!({ type: 'general_tick', at: 'x', sessionId: MAC, pGeneral: null, outcome: 'skip', reason: 'test', category: null, queryHash: null, searchMs: null, sourcesCount: null, writerMs: null, usd: null })
+      realDeps().trace!({ type: 'general_tick', at: 'x', sessionId: MAC, pGeneral: null, outcome: 'skip', reason: 'test', category: null, queryHash: null, searchMs: null, sourcesCount: null, writerMs: null, usd: null, jevTokens: null })
       const lines = readFileSync(join(ownData, 'live-cues-trace.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
       expect(lines.at(-1)).toMatchObject({ type: 'general_tick', reason: 'test' })
     })

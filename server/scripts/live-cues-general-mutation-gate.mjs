@@ -28,7 +28,11 @@ const ENGINE_T = ['server/lib/live-cues-general-engine.test.ts']
 // the kinds, the grounded cues and the settings.
 const ENGINE_SUITES = ['server/lib/live-cues-v2-classic-pin.test.ts', 'server/lib/live-cues-v2.test.ts', 'server/lib/live-cues-v2-kinds.test.ts', 'server/lib/live-cues-v2-grounding.test.ts',
   'server/lib/live-cues-v2-settings.test.ts', 'server/routes/live-cues-v3-settings-route.test.ts']
-const ALL = [...RUN_T, ...TOPIC_T, ...PROMPTS_T, ...WEB_T, ...ENGINE_T, ...ENGINE_SUITES, 'server/lib/meeting-ask-web.test.ts']
+const NAMES_T = ['server/lib/live-cues-general-real-names.test.ts']
+// The routes and the v1 engine that import the general cues' module graph with partial mocks of the profile and the data home.
+const GRAPH_SUITES = ['server/lib/live-cues-engine.test.ts', 'server/routes/transcribe-stream-log-privacy.test.ts']
+const ALL = [...RUN_T, ...TOPIC_T, ...PROMPTS_T, ...WEB_T, ...ENGINE_T, ...NAMES_T, ...ENGINE_SUITES, ...GRAPH_SUITES, 'server/lib/meeting-ask-web.test.ts']
+const LIVE_ENGINE = 'server/lib/live-cues-engine.ts', TRANSCRIBE = 'server/routes/transcribe-stream.ts'
 const RUN = 'server/lib/live-cues-general.ts', TOPIC = 'server/lib/live-cues-general-topic.ts', PROMPTS = 'server/lib/live-cues-general-prompts.ts'
 const WEB = 'server/lib/meeting-ask-web.ts', ENGINE = 'server/lib/live-cues-v2.ts'
 // `by`: the killing test's full name must contain this (case-insensitive), so a mutant is killed by a test that names its behaviour.
@@ -43,6 +47,15 @@ const categoryMutants = ['health', 'family', 'finance', 'legal', 'school', 'fune
   if (!found) throw new Error(`Cannot find the ${cat} vocabulary in ${TOPIC}`)
   return m(`sensitive-category-${cat}`, TOPIC, [found, `  ['${cat}', wordsRe(['qqqneverqqq'])],\n`], TOPIC_T, `skips a ${cat} window`)
 })
+
+
+// Each stem of the widened sensitive vocabulary, taken out on its own: the test with that stem in its name must fail.
+const WIDENED_STEMS = ['chemo*', 'ob gyn', 'c section', 'adhd', 'psychiatr*', 'psycholog*', 'pediatric*', 'hospice', 'pharmac*', 'autis*', 'irs', 'installment*', 'escrow', 'credit score',
+  'pension*', 'insurance', 'husband*', 'wives', 'moms', 'parent*', 'grandma*', 'aunt*', 'uncle*', 'cousin*', 'nephew*', 'niece*', 'dnp', 'dissertation*', 'nursery', 'die', 'dies', 'died', 'dying']
+const stemMutants = WIDENED_STEMS.map(stem => m(`vocab-${stem.replace(/[^a-z]+/g, '-')}`, TOPIC, [`'${stem}',`, ''], TOPIC_T, `(${stem})`))
+// And each of the number words the review named.
+const NUMBER_WORDS = ['zero', 'hundreds', 'thousands', 'millions', 'billions', 'dozen', 'half', 'first', 'third', 'fifth', 'tenth']
+const numberMutants = NUMBER_WORDS.map(word => m(`number-${word}`, TOPIC, [`'${word}',`, ''], TOPIC_T, 'ordinals, plurals of the big numbers'))
 
 const mutations = [
   // ── Eligibility, every term ──
@@ -85,7 +98,7 @@ const mutations = [
   m('window-redacted', RUN, ['const window = redactSecrets(c.window(LIVE_CUES_GENERAL_LIMITS.topicWindowChars))', 'const window = c.window(LIVE_CUES_GENERAL_LIMITS.topicWindowChars)'], RUN_T, 'redacted'),
   m('window-three-minutes', RUN, ['topicWindowChars: 2_700', 'topicWindowChars: 6_000'], RUN_T, 'last 2,700 characters'),
   m('sensitive-whole-words', TOPIC, ['`\\\\b(?:${words.map', '`(?:${words.map'], TOPIC_T, 'look-alike'),
-  m('sensitive-category-loop', TOPIC, ['for (const [category, re] of SENSITIVE) if (re.test(text)) return category', 'void SENSITIVE'], TOPIC_T, 'skips a'),
+  m('sensitive-category-loop', TOPIC, ['for (const [category, re] of SENSITIVE) if (re.test(t)) return category', 'void SENSITIVE'], TOPIC_T, 'skips a'),
   ...categoryMutants,
   // ── Trigger ──
   m('trigger-threshold', RUN, ['if (!(trigger.pGeneral >= lim.trigger))', 'if (false)'], RUN_T, 'below the threshold'),
@@ -113,43 +126,47 @@ const mutations = [
   m('admit-max-words-8', TOPIC, ['GENERAL_QUERY_MAX_WORDS = 8', 'GENERAL_QUERY_MAX_WORDS = 12'], TOPIC_T, '8 words'),
   m('admit-digit', TOPIC, ["if (/\\p{Nd}/u.test(query)) return { ok: false, reason: 'digit' }", ''], TOPIC_T, 'rejects any digit'),
   m('admit-digit-ascii-only', TOPIC, ['/\\p{Nd}/u.test(query)', '/[0-9]/.test(query)'], TOPIC_T, 'rejects any digit'),
-  m('admit-number-word', TOPIC, ["if (NUMBER_WORD.test(query)) return { ok: false, reason: 'number_word' }", ''], TOPIC_T, 'number word'),
+  m('admit-number-word', TOPIC, ["if (NUMBER_WORD.test(folded)) return { ok: false, reason: 'number_word' }", ''], TOPIC_T, 'number word'),
   m('admit-characters', TOPIC, ["if (!QUERY_CHARS.test(query)) return { ok: false, reason: 'characters' }", ''], TOPIC_T, 'operators, quotes and urls'),
-  m('admit-url', TOPIC, ["if (URLISH.test(query)) return { ok: false, reason: 'url' }", ''], TOPIC_T, 'operators, quotes and urls'),
+  m('admit-url', TOPIC, ["if (URLISH.test(folded)) return { ok: false, reason: 'url' }", ''], TOPIC_T, 'operators, quotes and urls'),
   m('admit-secret', TOPIC, ["if (query !== redactSecrets(query)) return { ok: false, reason: 'secret' }", ''], TOPIC_T, 'rejects a secret'),
-  m('admit-deny-list', TOPIC, ['if (PRIVATE_QUERY.test(query) || SENSITIVE_ALL.test(query))', 'if (false)'], TOPIC_T, 'deny-list word'),
-  m('admit-deny-list-ask-words', TOPIC, ['if (PRIVATE_QUERY.test(query) || SENSITIVE_ALL.test(query))', 'if (SENSITIVE_ALL.test(query))'], TOPIC_T, 'deny-list word'),
-  m('admit-deny-list-private-life', TOPIC, ['if (PRIVATE_QUERY.test(query) || SENSITIVE_ALL.test(query))', 'if (PRIVATE_QUERY.test(query))'], TOPIC_T, 'deny-list word'),
-  m('admit-name', TOPIC, ["if (factWords(query).some(w => ctx.nameWords.has(w) || ctx.nameWords.has(stemWord(w)))) return { ok: false, reason: 'name' }", ''], TOPIC_T, 'name word'),
+  m('admit-deny-list', TOPIC, ['if (PRIVATE_QUERY.test(folded) || SENSITIVE_ALL.test(folded))', 'if (false)'], TOPIC_T, 'deny-list word'),
+  m('admit-deny-list-ask-words', TOPIC, ['if (PRIVATE_QUERY.test(folded) || SENSITIVE_ALL.test(folded))', 'if (SENSITIVE_ALL.test(folded))'], TOPIC_T, 'deny-list word'),
+  m('admit-deny-list-private-life', TOPIC, ['if (PRIVATE_QUERY.test(folded) || SENSITIVE_ALL.test(folded))', 'if (PRIVATE_QUERY.test(folded))'], TOPIC_T, 'deny-list word'),
+  m('admit-name', TOPIC, ["if (words.some(w => ctx.nameWords.has(w) || ctx.nameWords.has(stemWord(w)))) return { ok: false, reason: 'name' }", ''], TOPIC_T, 'name word'),
   m('admit-name-plural', TOPIC, ['ctx.nameWords.has(w) || ctx.nameWords.has(stemWord(w))', 'ctx.nameWords.has(w)'], TOPIC_T, 'name word'),
   m('admit-repeat', TOPIC, ["if (ctx.recent.has(normalized)) return { ok: false, reason: 'repeat' }", ''], TOPIC_T, 'repeat'),
   m('admit-repeat-normalized', TOPIC, ['if (ctx.recent.has(normalized))', 'if (ctx.recent.has(query))'], TOPIC_T, 'repeat'),
   m('names-owner-and-label', TOPIC, ['try { names.push(src.ownerName(), src.speakerLabel()) } catch { /* no profile */ }', ''], TOPIC_T, 'collects the owner and their label'),
   m('names-window-labels', TOPIC, ['names.push(m[1])', 'void m'], TOPIC_T, 'speaker labels that open window lines'),
-  m('names-generic-labels', TOPIC, ['names.filter(n => !GENERIC_LABELS.has(n.trim().toLowerCase()))', 'names'], TOPIC_T, 'speaker labels that open window lines'),
+  m('names-generic-labels', TOPIC, ['names.filter(n => !isGenericSpeakerLabel(n))', 'names'], TOPIC_T, 'never a generic label'),
   m('names-no-vocabulary-words', TOPIC, ['try { names.push(src.ownerName(), src.speakerLabel()) } catch { /* no profile */ }', 'try { names.push(src.ownerName(), src.speakerLabel(), ...src.vocabulary()) } catch { /* no profile */ }'], TOPIC_T, 'word by word'),
   m('names-no-domain-keyword-words', TOPIC, ['try { names.push(src.ownerName(), src.speakerLabel()) } catch { /* no profile */ }', 'try { names.push(src.ownerName(), src.speakerLabel(), ...Object.values(src.domainKeywords()).flat()) } catch { /* no profile */ }'], TOPIC_T, 'word by word'),
   m('admit-owner-term', TOPIC, ["  if (ctx.terms.some(t => padded.includes(` ${t.join(' ')} `))) return { ok: false, reason: 'owner_term' }\n", ''], TOPIC_T, 'owner term: rejects a query that carries a WHOLE'),
   m('admit-owner-term-in-order', TOPIC, ["ctx.terms.some(t => padded.includes(` ${t.join(' ')} `))", 'ctx.terms.some(t => t.every(w => padded.includes(` ${w} `)))'], TOPIC_T, 'owner term: a query with just one word'),
   m('admit-owner-term-not-per-word', TOPIC, ["ctx.terms.some(t => padded.includes(` ${t.join(' ')} `))", 'ctx.terms.some(t => t.some(w => padded.includes(` ${w} `)))'], TOPIC_T, 'owner term: a query with just one word'),
   m('admit-owner-term-word-boundary', TOPIC, ["padded.includes(` ${t.join(' ')} `)", "padded.includes(t.join(' '))"], TOPIC_T, 'owner term: matches whole words'),
-  m('admit-owner-term-stemmed', TOPIC, ["const padded = ` ${factWords(query).map(stemWord).join(' ')} `", "const padded = ` ${factWords(query).join(' ')} `"], TOPIC_T, 'owner term: matches whole words'),
-  m('terms-from-vocabulary', TOPIC, ['  try { raw.push(...src.vocabulary()) } catch { /* no vocabulary */ }\n', ''], TOPIC_T, 'lists every vocabulary term'),
-  m('terms-from-domain-keyword-values', TOPIC, ["...(Array.isArray(words) ? words.filter(w => typeof w === 'string') : [])", ''], TOPIC_T, 'lists every vocabulary term'),
-  m('terms-from-domain-names', TOPIC, ["raw.push(domain.replace(/_/g, ' '), ", 'raw.push('], TOPIC_T, 'lists every vocabulary term'),
-  m('terms-stemmed', TOPIC, ['const words = factWords(term).map(stemWord), key', 'const words = factWords(term), key'], TOPIC_T, 'lists every vocabulary term'),
+  m('admit-owner-term-stemmed', TOPIC, ["const padded = ` ${words.map(stemWord).join(' ')} `", "const padded = ` ${words.join(' ')} `"], TOPIC_T, 'owner term: matches whole words'),
+  m('terms-from-vocabulary', TOPIC, ["export function ownerTermPhrases(src: ProfileNameSource = realProfileNames): string[][] {\n  const raw: string[] = []\n  try { raw.push(...src.vocabulary()) } catch { /* no vocabulary */ }\n", "export function ownerTermPhrases(src: ProfileNameSource = realProfileNames): string[][] {\n  const raw: string[] = []\n"], TOPIC_T, 'lists every vocabulary term'),
+  m('joins-from-vocabulary', TOPIC, ["export function ownerTermJoins(src: ProfileNameSource = realProfileNames): string[] {\n  const raw: string[] = []\n  try { raw.push(...src.vocabulary()) } catch { /* no vocabulary */ }\n", "export function ownerTermJoins(src: ProfileNameSource = realProfileNames): string[] {\n  const raw: string[] = []\n"], TOPIC_T, 'also lists each term with its spaces taken out'),
+  m('terms-from-domain-keyword-values', TOPIC, ["...(Array.isArray(words) ? words.filter(w => typeof w === 'string') : [])) } catch { /* none */ }\n  const seen", ") } catch { /* none */ }\n  const seen"], TOPIC_T, 'lists every vocabulary term'),
+  m('joins-from-domain-keyword-values', TOPIC, ["...(Array.isArray(words) ? words.filter(w => typeof w === 'string') : [])) } catch { /* none */ }\n  return [...new Set", ") } catch { /* none */ }\n  return [...new Set"], TOPIC_T, 'also lists each term with its spaces taken out'),
+  m('terms-from-domain-names', TOPIC, ["raw.push(domain.replace(/_/g, ' '), ...(Array.isArray(words) ? words.filter(w => typeof w === 'string') : [])) } catch { /* none */ }\n  const seen", "raw.push(...(Array.isArray(words) ? words.filter(w => typeof w === 'string') : [])) } catch { /* none */ }\n  const seen"], TOPIC_T, 'lists every vocabulary term'),
+  m('joins-from-domain-names', TOPIC, ["raw.push(domain.replace(/_/g, ' '), ...(Array.isArray(words) ? words.filter(w => typeof w === 'string') : [])) } catch { /* none */ }\n  return [...new Set", "raw.push(...(Array.isArray(words) ? words.filter(w => typeof w === 'string') : [])) } catch { /* none */ }\n  return [...new Set"], TOPIC_T, 'also lists each term with its spaces taken out'),
+  m('terms-stemmed', TOPIC, ['const words = factWords(fold(term)).map(stemWord), key', 'const words = factWords(fold(term)), key'], TOPIC_T, 'lists every vocabulary term'),
   m('terms-min-three-characters', TOPIC, ["if (key.replace(/ /g, '').length < 3 || seen.has(key)) continue", 'if (seen.has(key)) continue'], TOPIC_T, 'ignores a term under three characters'),
   m('terms-deduped', TOPIC, ["if (key.replace(/ /g, '').length < 3 || seen.has(key)) continue", "if (key.replace(/ /g, '').length < 3) continue"], TOPIC_T, 'ignores a term under three characters'),
   m('local-area-label-check', TOPIC, ['if (!label || !HOME_AREA_LABEL.test(label)) return null', 'if (!label) return null'], TOPIC_T, 'appends nothing unless'),
   m('local-area-comma', TOPIC, ["label.replace(/,/g, '')", 'label'], TOPIC_T, 'without its comma'),
   m('hash-12-hex', TOPIC, ['.digest(\'hex\').slice(0, 12)', ".digest('hex').slice(0, 16)"], TOPIC_T, 'first 12 hex'),
   // ── Admission, as the runner applies it ──
-  m('run-admission-names', RUN, ['nameWords: blockedNameWords(window, c.speakerNames ?? [], profile)', 'nameWords: new Set<string>()'], RUN_T, 'admission:'),
+  m('run-admission-names', RUN, ['nameWords, terms: ownerTermPhrases(profile)', 'nameWords: new Set<string>(), terms: ownerTermPhrases(profile)'], RUN_T, 'admission:'),
   m('run-admission-host-speakers', RUN, ['blockedNameWords(window, c.speakerNames ?? [], profile)', 'blockedNameWords(window, [], profile)'], RUN_T, 'speaker name the host knows'),
-  m('run-admission-terms', RUN, ['terms: ownerTermPhrases(profile), ', 'terms: [], '], RUN_T, 'admission: an owner term from the profile'),
+  m('run-admission-terms', RUN, ['terms: ownerTermPhrases(profile), ', 'terms: [], '], RUN_T, 'admission: a whole vocabulary phrase'),
+  m('run-admission-joins', RUN, ['joins: ownerTermJoins(profile), ', 'joins: [], '], RUN_T, 'a vocabulary phrase written without its spaces'),
   m('run-admission-whole-phrase', RUN, ['terms: ownerTermPhrases(profile), ', 'terms: ownerTermPhrases(profile).map(t => [t[0]]), '], RUN_T, 'owner term: a query with just one word'),
   m('run-admission-repeats', RUN, ['recent: this.recentQueries(c.sessionId, startedAt)', 'recent: new Set<string>()'], RUN_T, 'repeat:'),
-  m('run-admission-rejection-ends', RUN, ["if (!admitted.ok) { row.queryHash = queryHash(topic.query); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }", ''], RUN_T, 'admission:'),
+  m('run-admission-rejection-ends', RUN, ["if (!admitted.ok) { row.queryHash = hashFor(admitted.reason, topic.query); return this.done(row, 'no_cue', `rejected:${admitted.reason}`, 2) }", ''], RUN_T, 'admission:'),
   m('run-repeat-cross-session-expiry', RUN, ['for (const [q, at] of this.crossQueries) if (nowMs - at >= LIVE_CUES_GENERAL_LIMITS.queryCacheMs) this.crossQueries.delete(q)\n', '\n'], RUN_T, 'repeat: another meeting'),
   m('run-repeat-cross-session-30min', RUN, ['queryCacheMs: 30 * 60_000', 'queryCacheMs: 10 * 60_000'], RUN_T, 'repeat: another meeting'),
   m('run-repeat-cross-session-cache', RUN, ['this.crossQueries.set(normalized, nowMs)\n', '\n'], RUN_T, 'repeat: another meeting'),
@@ -157,7 +174,7 @@ const mutations = [
   m('run-repeat-noted-before-search', RUN, ['    this.noteQuery(c.sessionId, admitted.normalized, startedAt)\n', '\n'], RUN_T, 'repeat:'),
   m('run-local-only', RUN, ["if (topic.category === 'local') {", 'if (true) {'], RUN_T, 'never gets the home area'),
   m('run-local-no-area', RUN, ["if (withArea === null) { row.queryHash = queryHash(admitted.query); return this.done(row, 'no_cue', 'local_no_area', 2) }", ''], RUN_T, 'without a home area'),
-  m('run-local-readmit', RUN, ["if (!again.ok) { row.queryHash = queryHash(withArea); return this.done(row, 'no_cue', `rejected_local:${again.reason}`, 2) }", ''], RUN_T, 'appended query is admitted again'),
+  m('run-local-readmit', RUN, ["if (!again.ok) { row.queryHash = hashFor(again.reason, withArea); return this.done(row, 'no_cue', `rejected_local:${again.reason}`, 2) }", ''], RUN_T, 'appended query is admitted again'),
   m('run-local-uses-settings-area', RUN, ['withHomeArea(admitted.query, this.settings.homeArea())', "withHomeArea(admitted.query, 'Austin, TX')"], RUN_T, 'local:'),
   // ── Caps ──
   m('cap-daily-topic', RUN, ['if (s.topicCalls >= lim.dailyTopicCalls) return', 'if (false) return'], RUN_T, 'dailyTopicCalls'),
@@ -180,7 +197,7 @@ const mutations = [
   m('cap-topic-charged-before-call', RUN, [
     ["    const charged = this.store.chargeTopic(c.sessionId, { daily: lim.dailyTopicCalls, perMeeting: lim.attemptsPerMeeting })\n    if (charged !== 'ok') return this.done(row, 'no_cue', `cap:${charged}`)\n    run.stage = 2\n", '    run.stage = 2\n'],
     ['    run.usd += topicOut.costUsd ?? 0\n', "    run.usd += topicOut.costUsd ?? 0\n    this.store.chargeTopic(c.sessionId, { daily: lim.dailyTopicCalls, perMeeting: lim.attemptsPerMeeting })\n"]], RUN_T, 'charge before call: the topic call and the search'),
-  m('cap-topic-charge-refusal-ends', RUN, ["    if (charged !== 'ok') return this.done(row, 'no_cue', `cap:${charged}`)\n", '\n'], RUN_T, 'cannot be written'),
+  m('cap-topic-charge-refusal-ends', RUN, ["    if (charged !== 'ok') return this.done(row, 'no_cue', `cap:${charged}`)\n", '\n'], RUN_T, 'finds the topic cap reached'),
   m('cap-search-charged-before-call', RUN, [
     ["    const paid = this.store.chargeSearch(lim.dailyWebSearches)\n    if (paid !== 'ok') return this.done(row, 'no_cue', `cap:${paid}`)\n", ''],
     ['    row.searchMs = this.deps.now() - t0\n', '    row.searchMs = this.deps.now() - t0\n    this.store.chargeSearch(lim.dailyWebSearches)\n']], RUN_T, 'charge before call: the topic call and the search'),
@@ -229,8 +246,8 @@ const mutations = [
   m('wall-150s', RUN, ['attemptWallMs: 150_000', 'attemptWallMs: 150_000_000'], RUN_T, 'has a wall'),
   m('wall-armed', RUN, ['const wall = setTimeout(() => abort.abort(WALL), LIVE_CUES_GENERAL_LIMITS.attemptWallMs)', 'const wall = setTimeout(() => {}, LIVE_CUES_GENERAL_LIMITS.attemptWallMs)'], RUN_T, 'has a wall'),
   // ── Search ──
-  m('search-https-only', RUN, ["!url.startsWith('https://') || ", ''], RUN_T, 'only https public sources'),
-  m('search-public-urls-only', RUN, ["typeof s?.url === 'string' ? publicWebUrl(s.url) : null", "typeof s?.url === 'string' ? s.url : null"], RUN_T, 'only https public sources'),
+  m('search-source-url-check', RUN, ['const url = publicHttpsUrl(s?.url)', "const url = typeof s?.url === 'string' ? s.url : null"], RUN_T, 'only https public sources'),
+  m('search-source-cue-log-check', RUN, ['const url = publicHttpsUrl(s?.url)', "const url = typeof s?.url === 'string' && s.url.startsWith('https://') ? s.url : null"], RUN_T, 'cue log\'s https check'),
   m('search-no-sources-is-failure', RUN, ["return sources.length ? { ok: true, sources } : { ok: false, code: 'no_sources' }", 'return { ok: true, sources }'], RUN_T, 'no https source is a failure'),
   m('search-throw-is-failure', RUN, ["return { ok: false, code: timedOut ? 'timeout' : 'error' }", "return { ok: false, code: 'timeout' }"], RUN_T, 'a throw is a failure'),
   m('search-wall-60s', RUN, ['searchWallMs: 60_000', 'searchWallMs: 600_000'], RUN_T, 'production wall is 60 s'),
@@ -242,7 +259,8 @@ const mutations = [
   m('search-source-redacted', RUN, ["title: redactSecrets(String(s.title ?? '')).slice(0, 160)", "title: String(s.title ?? '').slice(0, 160)"], RUN_T, 'at most five sources'),
   m('search-race-abort', RUN, ["const onAbort = () => reject(abortError())", 'const onAbort = () => {}'], RUN_T, 'ignores its signal'),
   // ── Writer and emit ──
-  m('writer-gets-context', RUN, ['context: c.window(GENERAL_INSIGHT_CONTEXT_CHARS)', "context: ''"], RUN_T, 'last 1,000 characters'),
+  m('writer-gets-context', RUN, ['context: window.slice(-GENERAL_INSIGHT_CONTEXT_CHARS) })', "context: '' })"], RUN_T, 'tail of the window that passed'),
+  m('writer-context-from-checked-window', RUN, ['context: window.slice(-GENERAL_INSIGHT_CONTEXT_CHARS) })', 'context: c.window(GENERAL_INSIGHT_CONTEXT_CHARS) })'], RUN_T, 'tail of the window that passed'),
   m('writer-parse-enforced', RUN, ["if (typeof insight === 'string') return this.done(row, 'no_cue', `writer_${insight}`, 4)", ''], RUN_T, 'number guard'),
   m('emit-stale-dropped', RUN, ["if (this.deps.now() - startedAt > LIVE_CUES_GENERAL_LIMITS.staleMs) return this.done(row, 'no_cue', 'stale', 4)", ''], RUN_T, 'stale: a cue older than 180 s'),
   m('emit-stale-edge', RUN, ['this.deps.now() - startedAt > LIVE_CUES_GENERAL_LIMITS.staleMs', 'this.deps.now() - startedAt >= LIVE_CUES_GENERAL_LIMITS.staleMs'], RUN_T, 'exactly 180 s'),
@@ -260,7 +278,9 @@ const mutations = [
   m('abort-end-session', RUN, ["    this.abortSession(sessionId, 'session_ended')\n    this.seen.delete(sessionId)", '    this.seen.delete(sessionId)'], RUN_T, 'endSession aborts'),
   // ── Trace ──
   m('trace-no-query-text', RUN, ['row.queryHash = queryHash(admitted.query)\n\n', 'row.queryHash = admitted.query\n\n'], RUN_T, 'never the query'),
-  m('trace-hash-of-rejected', RUN, ["row.queryHash = queryHash(topic.query); return this.done(row, 'no_cue', `rejected:", "return this.done(row, 'no_cue', `rejected:"], RUN_T, 'admission:'),
+  m('hash-only-for-benign-rejections', RUN, ['HASHABLE_REJECTIONS.has(reason) ? queryHash(q) : null', 'queryHash(q)'], RUN_T, 'keeps its hash'),
+  m('hash-set-adds-a-private-reason', TOPIC, ["new Set(['repeat', 'too_long', 'too_many_words'])", "new Set(['repeat', 'too_long', 'too_many_words', 'digit'])"], TOPIC_T, 'a trace may carry a query hash only'),
+  m('hash-set-drops-repeat', TOPIC, ["new Set(['repeat', 'too_long', 'too_many_words'])", "new Set(['too_long', 'too_many_words'])"], TOPIC_T, 'a trace may carry a query hash only'),
   m('trace-usd-sums-topic-and-writer', RUN, ['    run.usd += writerOut.costUsd ?? 0\n', '\n'], RUN_T, 'usd is the topic and writer model cost'),
   m('trace-skip-throttled', RUN, ['if (nowMs - (this.skipTracedAt.get(key) ?? 0) < LIVE_CUES_GENERAL_LIMITS.skipTraceEveryMs) return', 'if (false) return'], RUN_T, 'skip is traced once'),
   m('trace-skip-5min', RUN, ['skipTraceEveryMs: 5 * 60_000', 'skipTraceEveryMs: 60 * 60_000'], RUN_T, 'skip is traced once'),
@@ -282,8 +302,8 @@ const mutations = [
   // ── The engine hosts the runner ──
   m('host-extended-only', ENGINE, ["          if (s.kinds !== 'extended') continue\n", ''], ENGINE_T, 'offers extended meetings only'),
   m('host-needs-v2-on', ENGINE, ['        if (!this.enabled()) return []\n        const out: GeneralCueCandidate[] = []', '        const out: GeneralCueCandidate[] = []'], ENGINE_T, 'v2 switched off'),
-  m('host-domain-from-orientation', ENGINE, ['domain = this.deps.orientation?.(s.sessionId).domain ?? null', 'domain = null'], ENGINE_T, 'confirmed personal domain skips'),
-  m('host-domain-unreadable-is-null', ENGINE, ['} catch { domain = null }', '} catch (e) { throw e }'], ENGINE_T, 'unreadable orientation is null'),
+  m('host-domain-from-orientation', ENGINE, ['domain = o?.domain ?? null; calendarTitle', 'domain = null; calendarTitle'], ENGINE_T, 'confirmed personal domain skips'),
+  m('host-domain-unreadable-withholds', ENGINE, ['} catch { domainUnreadable = true }', '} catch { domain = null }'], ENGINE_T, 'cannot be READ'),
   m('host-armed-means-not-ended', ENGINE, ['armed: !this.deps.store.isEnded(s.sessionId)', 'armed: true'], ENGINE_T, 'ended'),
   m('host-paused', ENGINE, ['paused: this.deps.store.isPaused(s.sessionId), domain,', 'paused: false, domain,'], ENGINE_T, 'paused'),
   m('host-chars-counted', ENGINE, ['      s.charsFed += cleanWindow(text.trim()).length\n', ''], ENGINE_T, 'monotonic character count'),
@@ -335,7 +355,8 @@ const mutations = [
   m('status-cues-merged', ENGINE, ['cues: s ? this.allCues(s) : []', 'cues: s ? [...s.cues] : []'], ENGINE_T, 'in time order'),
   m('status-cues-in-time-order', ENGINE, ['[...s.cues, ...s.insights].sort((a, b) => a.createdAt - b.createdAt)', '[...s.cues, ...s.insights]'], ENGINE_T, 'in time order'),
   m('end-cues-merged', ENGINE, ['const cues = s ? this.allCues(s) : []', 'const cues = s ? [...s.cues] : []'], ENGINE_T, 'in time order'),
-  m('end-v1-nudges-only-focused', ENGINE, ['nudges: cues.flatMap(c => (isCueKind(c.kind) ?', 'nudges: cues.flatMap(c => (true ?'], ENGINE_T, 'in time order'),
+  m('end-v1-nudges-only-focused', ENGINE, ['const nudges = cues.flatMap(c => (isCueKind(c.kind) ?', 'const nudges = cues.flatMap(c => (true ?'], ENGINE_T, 'in time order'),
+  m('end-nudges-generated-counts-nudges', ENGINE, ['return { nudgesGenerated: nudges.length, protocol: 2, cues, nudges }', 'return { nudgesGenerated: cues.length, protocol: 2, cues, nudges }'], ENGINE_T, 'the v1 nudges list has only focused cues'),
   m('find-cue-insights', ENGINE, ['    for (const s of this.sessions.values()) { const cue = s.insights.find(c => c.cueId === cueId); if (cue) return cue }\n', ''], ENGINE_T, 'findCue and feedback know an insight'),
   m('feedback-insights', ENGINE, ['held.cues.some(c => c.cueId === input.cueId) || held.insights.some(c => c.cueId === input.cueId))', 'held.cues.some(c => c.cueId === input.cueId))'], ENGINE_T, 'findCue and feedback know an insight'),
   // ── Hooks ──
@@ -360,6 +381,75 @@ const mutations = [
   m('real-trigger-question', ENGINE, ['.trigger(title, window, signal)', '.trigger(window, title, signal)'], ENGINE_T, 'ask Jev the trigger question'),
   m('real-consent', ENGINE, ['publicTopics: () => new MeetingAskStore().publicTopics(),', 'publicTopics: () => true,'], ENGINE_T, 'keep their state in the data home'),
   m('real-home-area', ENGINE, ['homeArea: () => getOwnerHomeArea(),', "homeArea: () => 'Austin, TX',"], ENGINE_T, 'keep their state in the data home'),
+  // ── Round 2 (review): names, wider lists, normalization ──
+  ...stemMutants,
+  ...numberMutants,
+  m('norm-fold-accents', TOPIC, [".normalize('NFKD').replace(/\\p{M}/gu, '')\n    .replace(/\\b(?:", "\n    .replace(/\\b(?:"], TOPIC_T, 'reads the window normalized'),
+  m('norm-acronym-dots', TOPIC, ["    .replace(/\\b(?:\\p{L}\\.){2,}\\p{L}?/gu, m => m.replace(/\\./g, ''))\n", ''], TOPIC_T, 'reads the window normalized'),
+  m('norm-hyphens-and-slashes', TOPIC, [".replace(/[-_\\u2010-\\u2015/]+/g, ' ')", ''], TOPIC_T, 'reads the window normalized'),
+  m('sensitive-reads-normalized', TOPIC, ['const t = normalizeForMatch(text)', 'const t = text'], TOPIC_T, 'reads the window normalized'),
+  m('admit-nfkc', TOPIC, ["const query = raw.normalize('NFKC').replace(/\\s+/g, ' ').trim()", "const query = raw.replace(/\\s+/g, ' ').trim()"], TOPIC_T, 'reads the query after NFKC'),
+  m('admit-latin-only', TOPIC, ["/^[\\p{Script=Latin}\\p{M}][\\p{Script=Latin}\\p{M}'’.&\\- ]*$/u", "/^[\\p{L}\\p{M}][\\p{L}\\p{M}'’.&\\- ]*$/u"], TOPIC_T, 'allows Latin script only'),
+  m('admit-deny-reads-normalized', TOPIC, ['SENSITIVE_ALL.test(folded)) return', 'SENSITIVE_ALL.test(query)) return'], TOPIC_T, 'reads the deny list on the normalized query'),
+  m('admit-owner-join', TOPIC, ["  if (ctx.joins.some(j => grams.has(stemWord(j)))) return { ok: false, reason: 'owner_term' }\n", ''], TOPIC_T, 'written without its spaces'),
+  m('admit-owner-join-pairs', TOPIC, ['for (let n = 1; n <= 2; n++)', 'for (let n = 1; n <= 1; n++)'], TOPIC_T, 'written without its spaces'),
+  m('admit-owner-join-single-words', TOPIC, ['for (let n = 1; n <= 2; n++)', 'for (let n = 2; n <= 2; n++)'], TOPIC_T, 'written without its spaces'),
+  m('names-voice-profiles', TOPIC, ['  if (src.voiceProfileNames) names.push(...await src.voiceProfileNames())\n', ''], TOPIC_T, 'every word of every enrolled voice profile name'),
+  m('names-voice-awaited', TOPIC, ['names.push(...await src.voiceProfileNames())', 'names.push(...(src.voiceProfileNames() as string[]))'], TOPIC_T, 'REJECTS when the voice profile names cannot be read'),
+  m('names-fold-accents', TOPIC, ['return new Set([...words, ...[...words].map(fold)])', 'return new Set([...words])'], TOPIC_T, 'every word of every enrolled voice profile name'),
+  m('generic-label-numbered', TOPIC, ['(?:speaker|guest|voice)\\s*\\d*', '(?:speaker|guest|voice)'], TOPIC_T, 'never a generic label'),
+  m('cached-names-window', TOPIC, ['if (cache && t - cache.at < ttlMs) return cache.names', 'if (false) return cache!.names'], TOPIC_T, 'reads once inside the window'),
+  m('cached-names-edge', TOPIC, ['t - cache.at < ttlMs', 't - cache.at <= ttlMs'], TOPIC_T, 'reads once inside the window'),
+  m('cached-names-five-minutes', TOPIC, ['ttlMs = 5 * 60_000', 'ttlMs = 60_000'], TOPIC_T, 'the default window is five minutes'),
+  m('real-voice-names-read', TOPIC, ['.readVoiceProfiles().profiles.map(p => p.name)', '.readVoiceProfiles().profiles.map(p => "")'], NAMES_T, 'reads every enrolled voice profile name'),
+  m('real-owner-name-thunk', TOPIC, ['ownerName: () => getOwnerName(),', "ownerName: () => 'User',"], NAMES_T, 'reads the owner'),
+  m('real-vocabulary-thunk', TOPIC, ['vocabulary: () => getVocabulary(),', 'vocabulary: () => [],'], NAMES_T, 'reads the owner'),
+  // ── Round 2: eligibility, the trigger cap, consent, names in the pipeline ──
+  m('elig-orientation-unreadable', RUN, ["  if (c.domainUnreadable) return { ok: false, state: 'withheld', reason: 'orientation_unreadable' }\n", ''], RUN_T, 'eligibility: orientation unreadable'),
+  m('trigger-cap-default', RUN, ['default: 300, min: 1, max: 2000', 'default: 500, min: 1, max: 2000'], RUN_T, 'dailyTriggerCap'),
+  m('trigger-cap-max', RUN, ['default: 300, min: 1, max: 2000', 'default: 300, min: 1, max: 5000'], RUN_T, 'dailyTriggerCap'),
+  m('trigger-cap-min', RUN, ['default: 300, min: 1, max: 2000', 'default: 300, min: 0, max: 2000'], RUN_T, 'dailyTriggerCap'),
+  m('trigger-cap-digits', RUN, ['/^\\d{1,5}$/.test(raw.trim())', '/^\\d{1,3}$/.test(raw.trim())'], RUN_T, 'dailyTriggerCap'),
+  m('trigger-cap-charged-before-call', RUN, [
+    ["    const triggered = this.store.chargeTrigger(dailyTriggerCap(this.deps.env))\n    if (triggered !== 'ok') return this.done(row, 'no_cue', `cap:trigger_${triggered}`)\n    run.stage = 1\n    const trigger = await raceAbort(this.deps.jevTrigger(c.title, window, signal), signal)\n",
+      "    run.stage = 1\n    const trigger = await raceAbort(this.deps.jevTrigger(c.title, window, signal), signal)\n    this.store.chargeTrigger(dailyTriggerCap(this.deps.env))\n"]], RUN_T, 'charged in the durable file BEFORE the request'),
+  m('trigger-cap-refusal-ends', RUN, ["    if (triggered !== 'ok') return this.done(row, 'no_cue', `cap:trigger_${triggered}`)\n", ''], RUN_T, 'finds the cap reached stops the request'),
+  m('trigger-cap-env-at-charge', RUN, ['this.store.chargeTrigger(dailyTriggerCap(this.deps.env))', 'this.store.chargeTrigger(dailyTriggerCap({}))'], RUN_T, 'finds the cap reached stops the request'),
+  m('trigger-cap-blocks-tick', RUN, ["if (s.triggerCalls >= dailyTriggerCap(this.deps.env)) return { state: 'capped', reason: 'daily_trigger_cap' }", 'void 0'], RUN_T, 'the cap stops the next tick'),
+  m('trigger-cap-blocks-tick-edge', RUN, ['s.triggerCalls >= dailyTriggerCap(this.deps.env)', 's.triggerCalls > dailyTriggerCap(this.deps.env)'], RUN_T, 'the cap stops the next tick'),
+  m('store-trigger-counted', RUN, ['    r.state.triggerCalls += 1\n', ''], RUN_T, 'charges a Jev trigger against the daily cap'),
+  m('store-trigger-cap-check', RUN, ["    if (r.state.triggerCalls >= cap) return 'daily_cap'\n", ''], RUN_T, 'charges a Jev trigger against the daily cap'),
+  m('store-trigger-day-rollover', RUN, ['triggerCalls: rolled ? 0 : (raw.triggerCalls ?? 0)', 'triggerCalls: raw.triggerCalls ?? 0'], RUN_T, 'resets with the local day'),
+  m('store-trigger-legacy-file', RUN, ['!(raw.triggerCalls === undefined || whole(raw.triggerCalls))', '!whole(raw.triggerCalls)'], RUN_T, 'legacy state file'),
+  m('store-trigger-validated', RUN, ['(raw.triggerCalls === undefined || whole(raw.triggerCalls))', 'true'], RUN_T, 'a damaged counter is unreadable'),
+  m('trace-jev-tokens', RUN, ['row.jevTokens = Number.isFinite(trigger.tokens) ? trigger.tokens : null', 'row.jevTokens = null'], RUN_T, 'tokens are traced'),
+  m('consent-recheck-before-search', RUN, ["    if (!this.consentOk()) return this.consentWithdrawn()\n    if (!this.live(c.sessionId)) return this.done(row, 'no_cue', 'not_eligible')\n", "    if (!this.live(c.sessionId)) return this.done(row, 'no_cue', 'not_eligible')\n"], RUN_T, 'consent re-check before the search'),
+  m('consent-recheck-before-emit', RUN, ["    if (!this.consentOk()) return this.consentWithdrawn()\n    if (!this.live(c.sessionId)) return this.done(row, 'no_cue', 'not_eligible', 4)", "    if (!this.live(c.sessionId)) return this.done(row, 'no_cue', 'not_eligible', 4)"], RUN_T, 'consent re-check before emit'),
+  m('consent-reason', RUN, ["this.inFlight?.abort.abort('consent_off')\n    throw abortError()", "this.inFlight?.abort.abort('x')\n    throw abortError()"], RUN_T, 'consent re-check before the search'),
+  m('consent-aborts-the-attempt', RUN, ["    this.inFlight?.abort.abort('consent_off')\n    throw abortError()", '    throw abortError()'], RUN_T, 'consent re-check before the search'),
+  m('consent-tick-aborts-in-flight', RUN, ["    if (this.inFlight && !this.settings.publicTopics()) this.abortAll('consent_off')       // consent withdrawn: stop what is running\n", ''], RUN_T, 'next tick aborts the attempt with consent_off'),
+  m('consent-tick-only-when-off', RUN, ['if (this.inFlight && !this.settings.publicTopics()) this.abortAll', 'if (this.inFlight) this.abortAll'], RUN_T, 'consent that stays on lets an in-flight attempt finish'),
+  m('names-unavailable-fails-closed', RUN, ["      rec.last = { state: 'withheld', reason: 'names_unavailable' }\n      return this.done(row, 'no_cue', 'names_unavailable')\n", "      nameWords = new Set<string>()\n"], RUN_T, 'names_unavailable: voice names that cannot be read'),
+  m('names-abort-is-a-cancel', RUN, ['      if (isCancel(error, signal)) throw error\n', ''], RUN_T, 'an abort while the voice names are being read'),
+  m('names-read-before-any-spend', RUN, [
+    ["    let nameWords: Set<string>\n    try { nameWords = await raceAbort(blockedNameWords(window, c.speakerNames ?? [], profile), signal) } catch (error) {\n      if (isCancel(error, signal)) throw error\n      rec.last = { state: 'withheld', reason: 'names_unavailable' }\n      return this.done(row, 'no_cue', 'names_unavailable')\n    }\n", ''],
+    ["    if (!(trigger.pGeneral >= lim.trigger)) return this.done(row, 'no_cue', 'trigger_below', 1)\n", "    if (!(trigger.pGeneral >= lim.trigger)) return this.done(row, 'no_cue', 'trigger_below', 1)\n    let nameWords: Set<string>\n    try { nameWords = await raceAbort(blockedNameWords(window, c.speakerNames ?? [], profile), signal) } catch (error) {\n      if (isCancel(error, signal)) throw error\n      rec.last = { state: 'withheld', reason: 'names_unavailable' }\n      return this.done(row, 'no_cue', 'names_unavailable')\n    }\n"]], RUN_T, 'names_unavailable: voice names that cannot be read'),
+  // ── Round 2: the engine ──
+  m('host-speakers-offered', ENGINE, ['speakerNames: [...s.speakers, ...titleNames]', 'speakerNames: [...titleNames]'], ENGINE_T, 'a speaker the ASR path reported'),
+  m('host-title-names-offered', ENGINE, ['speakerNames: [...s.speakers, ...titleNames]', 'speakerNames: [...s.speakers]'], ENGINE_T, 'calendar title'),
+  m('host-title-names-pattern', ENGINE, ["match(/\\p{Lu}[\\p{L}'’-]{2,}/gu)", "match(/\\p{Lu}[\\p{L}'’-]{20,}/gu)"], ENGINE_T, 'calendar title'),
+  m('feed-notes-speakers', ENGINE, ['    this.noteSpeakers(s, speakers)\n', ''], ENGINE_T, 'a speaker the ASR path reported'),
+  m('speakers-bounded', ENGINE, ['|| s.speakers.size >= SPEAKER_NAMES_MAX) continue', ') continue'], ENGINE_T, 'stops at 200 names'),
+  m('speakers-bound-200', ENGINE, ['SPEAKER_NAMES_MAX = 200', 'SPEAKER_NAMES_MAX = 20'], ENGINE_T, 'stops at 200 names'),
+  m('speakers-length-limit', ENGINE, ['name.length > 60 || ', ''], ENGINE_T, 'remembers each speaker once'),
+  m('speakers-not-generic', ENGINE, ['|| isGenericSpeakerLabel(name) ', ''], ENGINE_T, 'remembers each speaker once'),
+  m('speakers-trimmed', ENGINE, ["raw.replace(/\\s+/g, ' ').trim() : ''", "raw : ''"], ENGINE_T, 'remembers each speaker once'),
+  m('feed-forwards-speakers', LIVE_ENGINE, ['liveCuesV2().feed(sessionId, text, asrDegraded, speakers)', 'liveCuesV2().feed(sessionId, text, asrDegraded)'], ENGINE_T, 'hands the speakers to the engine'),
+  m('asr-call-site-segments', TRANSCRIBE, ['[speaker, ...(chunk.segments ?? []).map(segment => segment.speaker)]', '[speaker]'], ENGINE_T, 'the ASR call site reports'),
+  m('asr-call-site-speaker', TRANSCRIBE, ['[speaker, ...(chunk.segments ?? []).map(segment => segment.speaker)]', '[...(chunk.segments ?? []).map(segment => segment.speaker)]'], ENGINE_T, 'the ASR call site reports'),
+  m('emit-sources-https-checked', ENGINE, ['    if (!insight.sources.length || urls.some(u => u === null)) return false\n', ''], ENGINE_T, 'emit sends sources through the cue log'),
+  m('emit-sources-need-one', ENGINE, ['if (!insight.sources.length || urls.some(u => u === null)) return false', 'if (urls.some(u => u === null)) return false'], ENGINE_T, 'emit sends sources through the cue log'),
+  m('emit-sources-normalized', ENGINE, ['({ ...src, url: urls[i]! })', '({ ...src })'], ENGINE_T, 'emit sends sources through the cue log'),
   // ── Prompts ──
   m('insight-number-guard', PROMPTS, ["if (unsupportedSearchNumbers(`${headline} ${detail}`, cited.map(s => `${s.title} ${s.text}`).join(' ')).length) return 'unsupported_number'", ''], PROMPTS_T, 'number guard'),
   m('insight-number-guard-cited-only', PROMPTS, ['cited.map(s => `${s.title} ${s.text}`)', 'sources.map(s => `${s.title} ${s.text}`)'], PROMPTS_T, 'number guard'),

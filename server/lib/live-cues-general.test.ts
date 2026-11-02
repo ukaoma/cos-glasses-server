@@ -26,7 +26,7 @@ const LIMITS: Limits = { intervalSeconds: 300, trigger: 0.6, attemptsPerMeeting:
 const SOURCE = { id: 'W1', title: 'Grid news', text: 'A new constructor joins the grid next season.', url: 'https://example.org/grid' }
 const WRITTEN = JSON.stringify({ headline: 'A new team joins the grid', detail: 'A new constructor joins the grid next season, says the source.', sourceIds: ['W1'] })
 
-interface Sess { sessionId: string; kindSet: 'legacy' | 'extended'; armed: boolean; paused: boolean; domain: string | null; title: string; transcriptChars: number; text: string; speakerNames?: string[] }
+interface Sess { sessionId: string; kindSet: 'legacy' | 'extended'; armed: boolean; paused: boolean; domain: string | null; domainUnreadable?: boolean; title: string; transcriptChars: number; text: string; speakerNames?: string[] }
 const mac = (sessionId = 'mac_1', over: Partial<Sess> = {}): Sess => ({ sessionId, kindSet: 'extended', armed: true, paused: false, domain: 'work', title: 'Mac Recording 2026-11-01 1200', transcriptChars: 0, text: ROOM, ...over })
 
 const dirs: string[] = []
@@ -89,6 +89,7 @@ describe('eligibility', () => {
     ['eligibility: meeting paused', (h: H) => { h.sessions[0].paused = true }, { state: 'off', reason: 'paused' }],
     ['eligibility: public topics consent off', (h: H) => { h.settings.publicTopics = false }, { state: 'needs_public_topics', reason: 'public_topics_off' }],
     ['eligibility: personal domain', (h: H) => { h.sessions[0].domain = 'personal' }, { state: 'withheld', reason: 'personal_domain' }],
+    ['eligibility: orientation unreadable', (h: H) => { h.sessions[0].domainUnreadable = true }, { state: 'withheld', reason: 'orientation_unreadable' }],
     ['eligibility: personal domain in any case', (h: H) => { h.sessions[0].domain = ' Personal ' }, { state: 'withheld', reason: 'personal_domain' }],
   ])('%s: no model call, no search, no cue', async (_name, change, status) => {
     const h = await make()
@@ -285,12 +286,46 @@ describe('topic and admission', () => {
     ['admission: a speaker name the host knows', { text: ROOM, speakerNames: ['Prunella Voss'] }, 'Prunella Voss interview', 'rejected:name'],
     ['admission: an owner term from the profile', { text: ROOM, speakerNames: [] }, 'Quillco product launch', 'rejected:owner_term'],
     ['admission: a whole vocabulary phrase', { text: ROOM, speakerNames: [] }, 'Retail Analytics Hub pricing news', 'rejected:owner_term'],
+    ['admission: a vocabulary phrase written without its spaces', { text: ROOM, speakerNames: [] }, 'RetailAnalyticsHub pricing news', 'rejected:owner_term'],
+    ['admission: a vocabulary term split differently', { text: ROOM, speakerNames: [] }, 'Frob Nitz review', 'rejected:owner_term'],
     ['admission: the owner\'s own name', { text: ROOM, speakerNames: [] }, 'Zephyrine keynote speech', 'rejected:name'],
   ])('%s is rejected before any search', async (_name, session, query, reason) => {
     const h = await make({ sessions: [mac('mac_1', session)], deps: { topicModel: async () => ({ text: JSON.stringify({ topic: true, category: 'news', query }) }) } })
     expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason })
     expect(h.calls.search).toEqual([])
+    expect(h.traces.at(-1)!.queryHash).toBeNull()                    // a privacy rejection carries no hash at all
+  })
+  it('a repeat or a length rejection keeps its hash; a privacy rejection never has one', async () => {
+    for (const [query, reason, hash] of [['Formula One circuit news', 'rejected:repeat', true], ['alpha beta gamma delta epsilon zeta eta theta iota', 'rejected:too_many_words', true],
+      ['a'.repeat(81), 'rejected:too_long', true], ['Austin FC 2026 season', 'rejected:digit', false], ['ten percent growth', 'rejected:number_word', false],
+      ['sk-abcdefghijklmnop', 'rejected:secret', false], ['family court news', 'rejected:deny_word', false], ['Zephyrine keynote', 'rejected:name', false],
+      ['Quillco launch', 'rejected:owner_term', false]] as const) {
+      const h = await make({ deps: { topicModel: async () => ({ text: JSON.stringify({ topic: true, category: 'news', query }) }) } })
+      if (reason === 'rejected:repeat') h.runner['noteQuery']('mac_1', 'formula one circuit news', h.clock.t)
+      expect(await h.go(), query).toMatchObject({ outcome: 'no_cue', reason })
+      if (hash) expect(h.traces.at(-1)!.queryHash, query).toMatch(/^[0-9a-f]{12}$/)
+      else expect(h.traces.at(-1)!.queryHash, query).toBeNull()
+    }
+  })
+  it('a local query that fails after the area is added keeps a hash only for a length rejection', async () => {
+    const h = await make({ deps: { topicModel: async () => ({ text: '{"topic":true,"category":"local","query":"riverside street food festival lineup tonight"}' }) } })
+    h.settings.homeArea = 'San Francisco, CA'
+    expect(await h.go()).toMatchObject({ reason: 'rejected_local:too_many_words' })
     expect(h.traces.at(-1)!.queryHash).toMatch(/^[0-9a-f]{12}$/)
+  })
+  it('admission reads every enrolled voice name: a name only the voice store knows is rejected', async () => {
+    const voices: Deps['profile'] = { ...PROFILE, voiceProfileNames: () => ['Prunella Voss', 'Thaddeus Orme'] }
+    const h = await make({ deps: { profile: voices, topicModel: async () => ({ text: '{"topic":true,"category":"news","query":"Thaddeus Orme interview"}' }) } })
+    expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'rejected:name' })
+    expect(h.calls.search).toEqual([])
+  })
+  it('names_unavailable: voice names that cannot be read withhold the meeting before any spend', async () => {
+    const unreadable: Deps['profile'] = { ...PROFILE, voiceProfileNames: () => { throw new Error('voice store unreadable') } }
+    const h = await make({ deps: { profile: unreadable } })
+    expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'names_unavailable' })
+    expect(h.calls).toMatchObject({ trigger: 0, topic: 0, search: [], writer: 0 })
+    expect(() => h.state()).toThrow()                                  // nothing charged
+    expect(h.runner.status('mac_1')).toMatchObject({ state: 'withheld', reason: 'names_unavailable' })
   })
   it('owner term: a query with just one word of a vocabulary term goes on to the search', async () => {
     const h = await make({ deps: { topicModel: async () => ({ text: '{"topic":true,"category":"news","query":"retail industry news"}' }) } })
@@ -396,6 +431,13 @@ describe('caps', () => {
     expect(atTopic).toMatchObject({ topicCalls: 1, webSearches: 0, meetings: { mac_1: { attempts: 1 } } })
     expect(atSearch).toMatchObject({ topicCalls: 1, webSearches: 1 })
   })
+  it('cap: a charge that finds the topic cap reached (another path spent it) stops the call', async () => {
+    const h = await make({ limits: { dailyTopicCalls: 1 } })
+    const real = h.runner['store'].chargeTopic.bind(h.runner['store'])
+    h.runner['store'].chargeTopic = (id: string, caps: { daily: number; perMeeting: number }) => { h.writeState({ topicCalls: 1, triggerCalls: 1 }); return real(id, caps) }
+    expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'cap:daily_cap' })
+    expect(h.calls.topic).toBe(0)
+  })
   it('charge before call: a call that fails is still charged, never refunded', async () => {
     const h = await make({ deps: { topicModel: async () => { throw new Error('boom') } } })
     expect(await h.go()).toMatchObject({ outcome: 'failure' })
@@ -438,6 +480,12 @@ describe('store', () => {
     expect(s.meeting('a')).toEqual({ attempts: 2, cues: 0 })
     expect(s.today()).toMatchObject({ topicCalls: 3 })
   })
+  it('charges a Jev trigger against the daily cap, refusing at the cap', () => {
+    const s = store(path())
+    expect(s.chargeTrigger(2)).toBe('ok')
+    expect(s.chargeTrigger(2)).toBe('ok')
+    expect(s.chargeTrigger(2)).toBe('daily_cap')
+  })
   it('charges a web search against the daily cap, refusing at the cap', () => {
     const s = store(path())
     expect(s.chargeSearch(2)).toBe('ok')
@@ -451,6 +499,7 @@ describe('store', () => {
     const s = store(p)
     expect(s.chargeTopic('a', { daily: 9, perMeeting: 9 })).toBe('unreadable')
     expect(s.chargeSearch(9)).toBe('unreadable')
+    expect(s.chargeTrigger(9)).toBe('unreadable')
     expect(s.recordCue('a')).toBe(false)
     expect(s.recordFailure('search')).toBe(false)
     expect(s.meeting('a')).toBeNull()
@@ -471,6 +520,61 @@ describe('store', () => {
     const s = store(path())
     expect(s.recordCue('a')).toBe(true)
     expect(s.meeting('a')).toEqual({ attempts: 0, cues: 1 })
+  })
+})
+
+describe('trigger cap', () => {
+  it('dailyTriggerCap: 300 by default, a whole number from 1 to 2000 from the environment, anything else is the default', () => {
+    const cap = (v?: string) => G.dailyTriggerCap(v === undefined ? {} : { COS_LIVE_CUES_GENERAL_DAILY_TRIGGERS: v })
+    expect(cap()).toBe(300)
+    for (const v of ['1', '2', ' 40 ', '2000']) expect(cap(v), v).toBe(Number(v))
+    for (const v of ['', '0', '2001', '-5', '1.5', 'abc', '10000', '1e3']) expect(cap(v), v).toBe(300)
+    expect(G.GENERAL_TRIGGER_CAP).toMatchObject({ default: 300, min: 1, max: 2000, env: 'COS_LIVE_CUES_GENERAL_DAILY_TRIGGERS' })
+  })
+  it('the trigger is charged in the durable file BEFORE the request; the tokens are traced', async () => {
+    let seen: Record<string, unknown> | null = null
+    let hh: H
+    const h = await make({ deps: { jevTrigger: async () => { seen = hh.state(); return { pGeneral: 0.1, tokens: 912 } } } })
+    hh = h
+    await h.go()
+    expect(seen).toMatchObject({ triggerCalls: 1, topicCalls: 0 })
+    expect(h.traces[0]).toMatchObject({ jevTokens: 912, reason: 'trigger_below' })
+  })
+  it('the cap stops the next tick before any Jev request, is shared by every meeting, and shows as capped', async () => {
+    const h = await make({ sessions: [mac('mac_a'), mac('mac_b')], deps: { env: { COS_LIVE_CUES_GENERAL_DAILY_TRIGGERS: '2' } } })
+    h.settings.p = 0.1
+    await h.go(); await h.go()
+    expect(h.calls.trigger).toBe(2)
+    expect(await h.go()).toMatchObject({ ran: false, why: 'blocked' })
+    expect(h.calls.trigger).toBe(2)
+    expect(h.runner.status('mac_a')).toMatchObject({ state: 'capped', reason: 'daily_trigger_cap' })
+    expect(h.traces.at(-1)).toMatchObject({ outcome: 'skip', reason: 'daily_trigger_cap' })
+  })
+  it('the cap is durable (a new runner keeps it) and resets with the local day', async () => {
+    const h = await make({ deps: { env: { COS_LIVE_CUES_GENERAL_DAILY_TRIGGERS: '1' } } })
+    h.settings.p = 0.1
+    await h.go()
+    expect(h.fresh().status('mac_1')).toMatchObject({ state: 'capped', reason: 'daily_trigger_cap' })
+    h.clock.t += 36 * 3_600_000
+    expect(h.runner.status('mac_1')).toMatchObject({ state: 'waiting' })
+    expect(await h.go()).toMatchObject({ ran: true })
+    expect(h.calls.trigger).toBe(2)
+  })
+  it('a charge that finds the cap reached stops the request (the store\'s own check)', async () => {
+    const h = await make({ deps: { env: { COS_LIVE_CUES_GENERAL_DAILY_TRIGGERS: '1' } } })
+    const real = h.runner['store'].chargeTrigger.bind(h.runner['store'])
+    h.runner['store'].chargeTrigger = (cap: number) => { h.writeState({ triggerCalls: 1 }); return real(cap) }
+    expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'cap:trigger_daily_cap' })
+    expect(h.calls.trigger).toBe(0)
+  })
+  it('a legacy state file without the counter reads as zero; a damaged counter is unreadable', async () => {
+    const h = await make()
+    h.writeState({})
+    expect(h.runner.status('mac_1')).toMatchObject({ state: 'waiting' })
+    h.writeState({ triggerCalls: -1 })
+    expect(h.runner.status('mac_1')).toMatchObject({ state: 'capped', reason: 'state_unreadable' })
+    h.writeState({ triggerCalls: 'many' })
+    expect(h.runner.status('mac_1')).toMatchObject({ state: 'capped', reason: 'state_unreadable' })
   })
 })
 
@@ -512,7 +616,7 @@ describe('fail closed', () => {
     dirs.push(dir)
     chmodSync(dir, 0o500)
     const h = await make({ statePath: join(dir, 'nested', 'state.json') })
-    expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'cap:write_failed' })
+    expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'cap:trigger_write_failed' })
     expect(h.calls.topic).toBe(0)
   })
 })
@@ -605,7 +709,7 @@ describe('breaker', () => {
     for (const error of [new JevError('jev_cap_reached'), new JevError('jev_breaker_open'), new JevError('jev_not_configured'), new DecisionProviderError('decision_cap_reached')]) {
       const h = await make({ deps: { jevTrigger: async () => { throw error } } })
       expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: error.code })
-      expect(() => h.state()).toThrow()
+      expect(h.state()).toMatchObject({ topicCalls: 0, webSearches: 0, breaker: { failures: 0, openUntil: null } })
     }
   })
   it('any other Jev or decision error is a failure at the trigger stage', async () => {
@@ -621,6 +725,10 @@ describe('typed search', () => {
   it('is ok with at least one https public source, and keeps only https public sources', async () => {
     const r = await G.typedGeneralSearch(async () => ({ sources: [src('http://example.org/a', 'W1'), src('https://10.0.0.1/x', 'W2'), src('https://example.org/b', 'W3'), { id: 'W0', title: 'summary', text: 'no url' }] }), 'q', abort().signal)
     expect(r).toEqual({ ok: true, sources: [{ id: 'W3', title: 'T W3', text: 'body', url: 'https://example.org/b' }] })
+  })
+  it('uses the cue log\'s https check: a trailing-dot local host and a non-default port are refused, a plain page is kept', async () => {
+    const r = await G.typedGeneralSearch(async () => ({ sources: [src('https://printer.local./page', 'W1'), src('https://example.org:8443/x', 'W2'), src('https://localhost./x', 'W3'), src('https://example.org/ok', 'W4')] }), 'q', abort().signal)
+    expect(r.ok && r.sources.map(x => x.id)).toEqual(['W4'])
   })
   it('no https source is a failure', async () => {
     expect(await G.typedGeneralSearch(async () => ({ sources: [src('http://example.org/a')] }), 'q', abort().signal)).toEqual({ ok: false, code: 'no_sources' })
@@ -721,7 +829,6 @@ describe('search, writer and emit', () => {
     ['mode switched to focused', (h: H) => { h.settings.mode = 'focused' }],
     ['the meeting turned legacy', (h: H) => { h.sessions[0].kindSet = 'legacy' }],
     ['the meeting was paused', (h: H) => { h.sessions[0].paused = true }],
-    ['Public topics consent withdrawn', (h: H) => { h.settings.publicTopics = false }],
     ['the meeting went away', (h: H) => { h.sessions.length = 0 }],
   ])('re-check before the search: %s while the topic call ran means no search', async (_name, change) => {
     let hh: H
@@ -735,7 +842,6 @@ describe('search, writer and emit', () => {
     ['mode switched to focused', (h: H) => { h.settings.mode = 'focused' }],
     ['the meeting turned legacy', (h: H) => { h.sessions[0].kindSet = 'legacy' }],
     ['the meeting was paused', (h: H) => { h.sessions[0].paused = true }],
-    ['Public topics consent withdrawn', (h: H) => { h.settings.publicTopics = false }],
     ['the meeting went away', (h: H) => { h.sessions.length = 0 }],
   ])('re-check before emit: %s while the search ran means no insight', async (_name, change) => {
     let hh: H
@@ -743,6 +849,56 @@ describe('search, writer and emit', () => {
     hh = h
     expect(await h.go()).toMatchObject({ outcome: 'no_cue', reason: 'not_eligible' })
     expect(h.emitted).toEqual([])
+  })
+  it('consent re-check before the search: Public topics withdrawn while the topic call ran cancels the attempt with consent_off, no search, no failure', async () => {
+    let hh: H
+    const h = await make({ deps: { topicModel: async () => { hh.settings.publicTopics = false; return { text: '{"topic":true,"category":"news","query":"Formula One circuit news"}' } } } })
+    hh = h
+    expect(await h.go()).toMatchObject({ outcome: 'cancelled', reason: 'consent_off' })
+    expect(h.calls.search).toEqual([])
+    expect(h.state()).toMatchObject({ webSearches: 0, breaker: { failures: 0, openUntil: null } })
+  })
+  it('consent re-check before emit: Public topics withdrawn while the search ran cancels with consent_off, nothing emitted', async () => {
+    let hh: H
+    const h = await make({ deps: { search: async () => { hh.settings.publicTopics = false; return { sources: [SOURCE] } } } })
+    hh = h
+    expect(await h.go()).toMatchObject({ outcome: 'cancelled', reason: 'consent_off' })
+    expect(h.emitted).toEqual([])
+    expect(h.state().breaker).toMatchObject({ failures: 0, openUntil: null })
+  })
+  it('consent withdrawn while a call is in flight: the next tick aborts the attempt with consent_off', async () => {
+    const entered = gate()
+    let signal: AbortSignal | null = null
+    const h = await make({ deps: { search: (_q, s) => { signal = s; entered.release(); return new Promise((_r, reject) => s.addEventListener('abort', () => reject(new Error('aborted')))) } } })
+    h.advance()
+    const running = h.runner.tick()
+    await entered.promise
+    h.settings.publicTopics = false
+    expect(await h.runner.tick()).toMatchObject({ ran: false, why: 'busy' })
+    expect(signal!.aborted).toBe(true)
+    expect(await running).toMatchObject({ outcome: 'cancelled', reason: 'consent_off' })
+  })
+  it('consent that stays on lets an in-flight attempt finish', async () => {
+    const entered = gate(), hold = gate()
+    const h = await make({ deps: { search: async () => { entered.release(); await hold.promise; return { sources: [SOURCE] } } } })
+    h.advance()
+    const running = h.runner.tick()
+    await entered.promise
+    expect(await h.runner.tick()).toMatchObject({ ran: false, why: 'busy' })
+    hold.release()
+    expect(await running).toMatchObject({ outcome: 'cue' })
+  })
+  it('the writer is sent the tail of the window that passed the sensitive check, not a fresh read of the room', async () => {
+    let hh: H, prompt = ''
+    const h = await make({ deps: {
+      topicModel: async () => { hh.sessions[0].text += ' and then the mortgage payment came up with the lawyer'; return { text: '{"topic":true,"category":"news","query":"Formula One circuit news"}' } },
+      writer: async (_s, p) => { prompt = p; return { text: 'null' } },
+    } })
+    hh = h
+    await h.go()
+    const context = JSON.parse(prompt).context as string
+    expect(context).not.toMatch(/mortgage|lawyer/)
+    expect(context).toBe(ROOM)
   })
 })
 
@@ -802,6 +958,18 @@ describe('abort', () => {
     h.runner.endSession('mac_1')
     expect(await running).toMatchObject({ outcome: 'cancelled', reason: 'session_ended' })
   })
+  it('an abort while the voice names are being read is a cancel, not names_unavailable', async () => {
+    const entered = gate()
+    const slow = { ...PROFILE, voiceProfileNames: () => { entered.release(); return new Promise<string[]>(() => {}) } }
+    const h = await make({ deps: { profile: slow } })
+    h.advance()
+    const running = h.runner.tick()
+    await entered.promise
+    h.runner.abortAll('suspended')
+    expect(await running).toMatchObject({ outcome: 'cancelled', reason: 'suspended' })
+    expect(h.calls.trigger).toBe(0)
+    expect(h.runner.status('mac_1')).toMatchObject({ state: 'waiting' })
+  })
   it('stop() aborts the attempt in flight', async () => {
     const { h, seen, running } = await holdAtSearch()
     h.runner.stop()
@@ -846,7 +1014,7 @@ describe('trace', () => {
     await h.go()
     expect(h.traces).toHaveLength(1)
     const row = h.traces[0]
-    expect(Object.keys(row).sort()).toEqual(['at', 'category', 'outcome', 'pGeneral', 'queryHash', 'reason', 'searchMs', 'sessionId', 'sourcesCount', 'type', 'usd', 'writerMs'])
+    expect(Object.keys(row).sort()).toEqual(['at', 'category', 'jevTokens', 'outcome', 'pGeneral', 'queryHash', 'reason', 'searchMs', 'sessionId', 'sourcesCount', 'type', 'usd', 'writerMs'])
     expect(row).toMatchObject({ type: 'general_tick', sessionId: 'mac_1', pGeneral: 0.9, outcome: 'cue', reason: 'emitted', category: 'news', sourcesCount: 1 })
     expect(row.queryHash).toBe(createHash('sha256').update('formula one circuit news').digest('hex').slice(0, 12))
     const text = JSON.stringify(h.traces)

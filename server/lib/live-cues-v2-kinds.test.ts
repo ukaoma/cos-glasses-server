@@ -190,7 +190,7 @@ describe('6.86.0 engine: kinds per meeting, Mac recordings', () => {
     const end = e.end(MAC)
     expect(end.cues.map(c => c.cueId)).toEqual(['c-a', 'c-b', 'c-c'])
     expect(end.nudges.map(n => [n.cueId, n.type])).toEqual([['c-a', 'reinforce'], ['c-c', 'challenge']])
-    expect(end.nudgesGenerated).toBe(3)
+    expect(end.nudgesGenerated).toBe(2)                              // the v1 count is the v1 nudges: an insight has no v1 twin, so it is not one
   })
 
   it('a Mac recording is armed with the five kinds, runs v4, and its decision cue reaches v2 as decision and v1 as reinforce', async () => {

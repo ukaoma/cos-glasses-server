@@ -244,9 +244,12 @@ export async function feedLiveCueTranscript(
   sessionId: string,
   text: string,
   asrDegraded = false,
+  /** Who the ASR path says spoke this chunk (the chunk's speaker and its segments' speakers). Only the v2 engine's general cues
+   *  read them, to keep a speaker's name out of a web query; the v1 path ignores them. */
+  speakers?: readonly string[],
 ): Promise<void> {
   // v2 (COS_LIVE_CUES_V2=1) owns the feed when enabled; the Composer v1 path below is unchanged otherwise.
-  if (liveCuesV2Enabled()) return liveCuesV2().feed(sessionId, text, asrDegraded)
+  if (liveCuesV2Enabled()) return liveCuesV2().feed(sessionId, text, asrDegraded, speakers)
   let session = sessions.get(sessionId)
   if (!session) {
     if (process.env.COS_LIVE_CUES_AUTO === '1' && liveCuesEnabled()) {
