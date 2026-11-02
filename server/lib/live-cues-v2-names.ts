@@ -22,13 +22,17 @@ function looksLikeName(term: string): boolean {
   return term.length >= 3 && term.length <= NAME_MAX_CHARS && term.split(/\s+/).length <= NAME_MAX_WORDS && /\p{Lu}/u.test(term) && !/[\x00-\x1f\x7f]/.test(term)
 }
 
-/** The names for one meeting, most useful first: the meeting's speakers, the enrolled voices, the owner, then vocabulary names. */
+/** Per name in the prompt: the quotes, the comma and the space the JSON adds around it. */
+const NAME_OVERHEAD_CHARS = 4
+
+/** The names for one meeting, most useful first: the meeting's speakers, the owner, the vocabulary names, then the enrolled voices
+ *  (the longest list, and the least likely to be in this room). A name that does not fit is skipped, not the end of the list. */
 export async function knownNamesFor(speakers: readonly string[], src: ProfileNameSource = realProfileNames): Promise<string[]> {
   const candidates: string[] = []
   for (const s of speakers) if (typeof s === 'string') candidates.push(s)
-  try { const v = await src.voiceProfileNames?.(); if (Array.isArray(v)) candidates.push(...v) } catch { /* the voice store could not be read */ }
   try { candidates.push(src.ownerName()) } catch { /* no profile */ }
   try { candidates.push(...src.vocabulary().filter(looksLikeName)) } catch { /* no vocabulary */ }
+  try { const v = await src.voiceProfileNames?.(); if (Array.isArray(v)) candidates.push(...v) } catch { /* the voice store could not be read */ }
   const seen = new Set<string>(), out: string[] = []
   let chars = 0
   for (const raw of candidates) {
@@ -37,8 +41,9 @@ export async function knownNamesFor(speakers: readonly string[], src: ProfileNam
     const key = name.toLowerCase()
     // The owner's placeholder name ("User") and the ASR's generic labels ("Speaker 2") are not names, wherever they came from.
     if (!name || name.length > NAME_MAX_CHARS || seen.has(key) || key === 'user' || isGenericSpeakerLabel(name)) continue
-    if (out.length >= KNOWN_NAMES_MAX || chars + name.length > KNOWN_NAMES_CHARS) break
-    seen.add(key); out.push(name); chars += name.length
+    if (out.length >= KNOWN_NAMES_MAX) break
+    if (chars + name.length + NAME_OVERHEAD_CHARS > KNOWN_NAMES_CHARS) continue
+    seen.add(key); out.push(name); chars += name.length + NAME_OVERHEAD_CHARS
   }
   return out
 }
