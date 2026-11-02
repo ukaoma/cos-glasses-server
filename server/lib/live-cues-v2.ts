@@ -68,8 +68,8 @@ import { errMsg } from './utils.js'
 import { CUE_GATE_QUESTIONS, CUE_JUDGE_INSTRUCTIONS, CUE_JUDGE_NONE, CUE_WRITER_SYSTEM_V2, CUE_WRITER_SYSTEM_V3 } from './live-cues-v2-prompts.js'
 import { CUE_WRITER_SYSTEM_V4 } from './live-cues-v2-prompts-kinds.js'
 import { KNOWN_NAMES_USE, knownNamesFor } from './live-cues-v2-names.js'
-import { paceAllowed } from './live-cues-v2-pacing.js'
-import { OpenItemFold, openItemOf, openItemsDetail, openItemsHeadline } from './live-cues-v2-open-items.js'
+import { paceAllowed, paceHorizon } from './live-cues-v2-pacing.js'
+import { OpenItemFold, openItemOf, openItemsDetail, openItemsHeadline, type FlushPlan } from './live-cues-v2-open-items.js'
 import { MAC_CAPTURE_ID } from './mac-recording.js'
 import {
   CUE_DETAIL_MAX, CUE_FEEDBACK_REASON_MAX, CUE_HEADLINE_MAX, CUE_KINDS, LEGACY_CUE_KINDS, LIVE_CUES_V2_PROTOCOL, isCueKind, isLiveCueV2, legacyCueKind,
@@ -484,7 +484,15 @@ export class LiveCuesV2Store {
     return { cues: m?.cues ?? 0, writerCalls: m?.writerCalls ?? 0 }
   }
   /** The durable per-meeting counters, or null once they expired (24 h) or never existed. */
-  /** When this meeting's first writer call was charged (6.97.8), or null for a meeting with none or from an older file. */
+  /** 6.97.8: remember when a meeting began, at arm, so the pacing clock is the meeting's and not the first writer call's. Once. */
+  noteArm(sessionId: string): void {
+    const s = this.read()
+    if (s.meetings[sessionId]) return
+    const nowMs = this.now().getTime()
+    s.meetings[sessionId] = { cues: 0, writerCalls: 0, at: nowMs, since: nowMs }
+    this.write(s)
+  }
+  /** When this meeting began (6.97.8), or null for a meeting from an older file. */
   meetingSince(sessionId: string): number | null {
     const since = this.read().meetings[sessionId]?.since
     return typeof since === 'number' && Number.isFinite(since) ? since : null
@@ -542,6 +550,8 @@ export interface LiveCuesV2Deps {
   files?(sessionId: string): GroundedFile[]
   /** The user-confirmed context of this meeting: its domain and calendar title (MeetingAskStore.orientation). May throw. */
   orientation?(sessionId: string): { domain: string | null; title: string | null }
+  /** 6.97.8 pacing: the length of the calendar match for this meeting in ms, or null. Separate from `orientation`, which classic cues never read. May throw. */
+  meetingLength?(sessionId: string): number | null
   /** Live cues v3, general cues (absent means none: no runner is built): the general runner's dependencies. */
   general?: GeneralCueDeps
   /** 6.97.8: the spellings of names the writer may use (the meeting's speakers, enrolled voices, the owner, the owner's vocabulary
@@ -634,6 +644,11 @@ function realDeps(): LiveCuesV2Deps {
     judge: (title, window, notes, signal, provider) => calls(provider).judge(title, window, notes, signal),
     judgeB: (title, window, cands, signal, provider) => calls(provider).judgeB(title, window, cands, signal),
     files: sessionId => new MeetingAskStore().files(sessionId),
+    meetingLength(sessionId) {
+      const cal = new MeetingAskStore().orientation(sessionId).calendar
+      const start = Date.parse(cal?.start ?? ''), end = Date.parse(cal?.end ?? '')
+      return Number.isFinite(start) && Number.isFinite(end) && end > start ? end - start : null
+    },
     orientation(sessionId) {
       const o = new MeetingAskStore().orientation(sessionId)
       return { domain: o.domain, title: o.calendar?.title ?? null }
@@ -769,6 +784,10 @@ interface Session {
   said: SessionShingles
   /** 6.97.8: the open-item cues held for a combined cue. Apart from `cues`: a held item was never shown. */
   fold: OpenItemFold
+  /** 6.97.8 pacing: the cap seen on the last feed, the cue count a raised cap resumes from, and the calendar length read at most once a minute. */
+  lastCap: number
+  paceFloor: number
+  horizon: { at: number; ms: number | null }
 }
 /** A session's status row, plus (live cues v3) the general-cue state for an extended meeting. */
 export type LiveCuesV2SessionStatusV3 = LiveCuesV2SessionStatus & { general?: GeneralCueStatus }
@@ -862,7 +881,8 @@ export class LiveCuesV2Engine {
     const d = this.deps.now()
     const title = `${mac ? 'Mac' : 'G2'} Recording ${d.toLocaleDateString('en-CA')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
     this.sessions.set(sessionId, { sessionId, title, armedAt: nowMs, lastSeenAt: nowMs, chunks: [], wordsSinceEval: 0, lastEvalAt: 0, lastCueAt: 0,
-      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, speakers: new Set(), insights: [], said: new SessionShingles(), fold: new OpenItemFold() })
+      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, speakers: new Set(), insights: [], said: new SessionShingles(), fold: new OpenItemFold(), lastCap: 0, paceFloor: 0, horizon: { at: 0, ms: null } })
+    this.deps.store.noteArm(sessionId)
     if (opts.resume) this.deps.store.setResume(sessionId, kinds)
     this.deps.warmMemory()
     return answer(this.deps.store.counters(sessionId).cues, kinds)
@@ -875,7 +895,8 @@ export class LiveCuesV2Engine {
     s?.inFlight?.abort()
     s?.said.clear()
     this.general?.endSession(sessionId)
-    const cues = s ? this.allCues(s) : []
+    // A held open item that was never shown is still one of the meeting's cues (it is in the cue log too).
+    const cues = s ? [...this.allCues(s), ...s.fold.unshown()].sort((a, b) => a.createdAt - b.createdAt) : []
     // v1 readers know two types: an extended kind is shown as its legacy kind there (the cues keep the real one).
     // An insight (live cues v3) has no v1 twin, so it is not counted as a nudge either.
     const nudges = cues.flatMap(c => (isCueKind(c.kind) ? [{ nudge: c.headline, type: legacyCueKind(c.kind), priority: 2, timestamp: c.createdAt, cueId: c.cueId }] : []))
@@ -967,15 +988,68 @@ export class LiveCuesV2Engine {
     const counters = this.deps.store.counters(sessionId)
     if (counters.cues >= lim.maxCues || counters.writerCalls >= lim.writerCap) return this.traceSkip(s, 'meeting_cap', nowMs)
     // 6.97.8 pacing, on unless COS_LIVE_CUES_V2_PACING=0: before the gate, so a paced-out minute costs no Jev call. The clock starts
-    // at arm, or at the first writer call a previous run of this server recorded, whichever is earlier.
+    // at arm (kept in the store, so a restart keeps it). A cap raised mid-meeting resumes at once: one more cue is allowed now.
     if (liveCuesV2Rule('PACING', this.deps.env)) {
+      if (s.lastCap > 0 && lim.maxCues > s.lastCap) s.paceFloor = counters.cues + 1
+      s.lastCap = lim.maxCues
       const started = Math.min(s.armedAt, this.deps.store.meetingSince(sessionId) ?? s.armedAt)
-      if (counters.cues >= paceAllowed(lim.maxCues, lim.cooldownMs, nowMs - started)) return this.traceSkip(s, 'paced', nowMs)
+      const allowed = Math.max(s.paceFloor, paceAllowed(lim.maxCues, lim.cooldownMs, nowMs - started, this.paceHorizonMs(s, nowMs)))
+      if (counters.cues >= allowed) return this.traceSkip(s, 'paced', nowMs)
+    }
+    // 6.97.8 open items: a held cue is shown when it is due (a combined cue, or alone after 20 minutes). No model call.
+    if (liveCuesV2Rule('OPEN_ITEMS', this.deps.env)) {
+      const plan = s.fold.next(nowMs)
+      if (plan) return this.showHeld(s, plan, nowMs)
     }
     if (this.deps.store.weeklyUsed() >= liveCuesV2WeeklyCap(this.deps.env)) return this.traceSkip(s, 'budget_exhausted', nowMs)  // before the gate
     if (this.deps.store.dailyWriterCalls() >= lim.dailyWriterCalls) return this.traceSkip(s, 'daily_cap', nowMs)              // before the gate
     if (this.deps.busy()) return this.traceSkip(s, 'busy', nowMs)
     await this.evaluate(s)
+  }
+
+  /** The pacing horizon: the calendar match's length when the meeting has one (read at most once a minute), else the default. */
+  private paceHorizonMs(s: Session, nowMs: number): number {
+    if (nowMs - s.horizon.at >= 60_000) {
+      s.horizon.at = nowMs
+      try { s.horizon.ms = this.deps.meetingLength?.(s.sessionId) ?? null } catch { s.horizon.ms = null }
+    }
+    return paceHorizon(s.horizon.ms)
+  }
+
+  /** Every cue of this meeting the writer has seen, shown or held, oldest first: the writer's previousCues and the repeat rules read it. */
+  private cueHistory(s: Session): LiveCueV2[] {
+    const held = s.fold.history()
+    if (!held.length) return s.cues
+    const seen = new Set<string>(), out: LiveCueV2[] = []
+    for (const c of [...s.cues, ...held].sort((a, b) => a.createdAt - b.createdAt)) if (!seen.has(c.cueId)) { seen.add(c.cueId); out.push(c) }
+    return out
+  }
+
+  /** 6.97.8: show what the fold says is due, without a model call: a combined cue (new, logged) or a held cue on its own (already logged). */
+  private showHeld(s: Session, plan: FlushPlan, nowMs: number): void {
+    const items = plan.items
+    let cue: LiveCueV2
+    if (plan.mode === 'alone') {
+      cue = { ...items[0].cue, createdAt: nowMs }                    // the cue as written; re-stamped so the lens still flashes it
+    } else {
+      const labels = items.map(i => i.label)
+      cue = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: openItemsHeadline(labels), detail: openItemsDetail(labels),
+        kind: s.kinds === 'extended' ? 'followUp' : 'challenge', sources: [], gate: round(Math.max(...items.map(i => i.cue.gate))), createdAt: nowMs, model: items[items.length - 1].cue.model }
+      if (!isLiveCueV2(cue)) return
+      const shadow = wouldWithhold(cue.detail, s.cues), before = cueBefore(s.chunks.join('\n').replace(/^\[\d+\]\s*/gm, ''))
+      const row: LiveCueLogRow = { v: 1, cueId: cue.cueId, sessionId: s.sessionId, meetingTitle: s.title, createdAt: cue.createdAt, kind: cue.kind, headline: cue.headline,
+        detail: cue.detail, gate: cue.gate, sources: [], model: cue.model, prompt: liveCuesV2WriterSystem(this.deps.env, s.kinds).version, memorySource: 'none', kept: 0,
+        wouldWithhold: shadow, before, armedAt: s.armedAt }
+      try { this.deps.cueLog?.(row) } catch (error) { console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`) }
+    }
+    s.fold.markShown(plan, nowMs)
+    s.cues.push(cue)
+    s.lastCueAt = nowMs
+    this.deps.store.recordCue(s.sessionId)
+    this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)
+    const v1: LiveCueV1Compat = { nudge: cue.headline, type: legacyCueKind(cue.kind as CueKind), priority: 2, cueId: cue.cueId, sessionId: s.sessionId, protocol: 2 }
+    this.deps.emit('coaching_nudge', v1 as unknown as Record<string, unknown>)
+    this.deps.trace({ kind: 'flush', at: new Date(nowMs).toISOString(), sessionId: s.sessionId, mode: plan.mode, items: items.length, cueId: cue.cueId })
   }
 
   private traceSkip(s: Session, reason: string, nowMs: number): void {
@@ -1054,7 +1128,8 @@ export class LiveCuesV2Engine {
       const { version, system } = liveCuesV2WriterSystem(this.deps.env, s.kinds)
       if (s.kinds === 'extended') trace.kindSet = 'extended'
       const model = liveCuesV2Model(this.deps.env)
-      const previous = s.cues.slice(-3).map(c => c.detail)
+      const history = this.cueHistory(s)
+      const previous = history.slice(-3).map(c => c.detail)
       const promptMemory = kept.map(m => ({ id: m.id, date: m.date, title: m.title, notes: m.notes }))  // the replay's exact keys
       // 6.97.8: the known spellings ride in the prompt data, before the window, only when there are some (and the rule is on).
       let names: string[] = []
@@ -1087,31 +1162,12 @@ export class LiveCuesV2Engine {
       // 6.79.0 repeat rule, off unless COS_LIVE_CUES_V2_REPEAT_OVERLAP is set: a cue that repeats an earlier SHOWN cue of
       // this meeting is not logged, emitted or counted (the writer call already counted). Ids and the overlap only.
       const repeatT = liveCuesV2RepeatOverlap(this.deps.env)
-      const repeat = repeatT === null ? null : repeatOf(cue.detail, s.cues, repeatT)
+      const repeat = repeatT === null ? null : repeatOf(cue.detail, history, repeatT)
       if (repeat) { Object.assign(trace, { outcome: 'withheld_repeat', repeatOf: repeat.blocker, repeatOverlap: repeat.overlap }); return }
       // 6.97.8 lead repeat, on unless COS_LIVE_CUES_V2_LEAD_REPEAT=0: a cue that opens by restating a recent shown cue's opening
       // line (the whole-cue rule misses it when the evidence after the opener differs). Same outcome; repeatRule says which.
-      const lead = liveCuesV2Rule('LEAD_REPEAT', this.deps.env) ? leadRepeatOf(cue.detail, s.cues) : null
+      const lead = liveCuesV2Rule('LEAD_REPEAT', this.deps.env) ? leadRepeatOf(cue.detail, history) : null
       if (lead) { Object.assign(trace, { outcome: 'withheld_repeat', repeatRule: 'lead', repeatOf: lead.blocker, repeatOverlap: lead.overlap }); return }
-      // 6.97.8 open items, on unless COS_LIVE_CUES_V2_OPEN_ITEMS=0: a cue whose point is "nobody named an owner or a date" is held,
-      // not shown. At most one combined cue per 10 minutes carries up to 3 held items; see live-cues-v2-open-items.ts. The writer
-      // call already counted; a held cue is not logged, emitted or counted as a cue, and the cooldown still applies.
-      if (liveCuesV2Rule('OPEN_ITEMS', this.deps.env)) {
-        const item = openItemOf({ kind: parsed.kind, detail: parsed.detail, cited: sources.length, field: parsed.open })
-        if (item) {
-          const at = this.deps.now().getTime()
-          s.fold.hold(item.label, at)
-          s.lastCueAt = at
-          const due = s.fold.due(at)
-          if (!due) { Object.assign(trace, { outcome: 'held_open_item', openSource: item.source, openWaiting: s.fold.waiting(at) }); return }
-          const digest: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId: s.sessionId, headline: openItemsHeadline(due.length), detail: openItemsDetail(due),
-            kind: s.kinds === 'extended' ? 'followUp' : 'challenge', sources: [], gate: round(pCue), createdAt: at, model: out.model ?? model }
-          if (!isLiveCueV2(digest)) { trace.outcome = 'withheld_invalid'; return }
-          s.fold.markShown(due, at)
-          cue = digest
-          trace.openItems = due.length
-        }
-      }
       // 6.79.0: logged before it is held or emitted, so a rating that arrives at once finds it. Its own try/catch: a log
       // failure is traced on this evaluation and is never a writer failure or a step toward the breaker.
       try {
@@ -1122,6 +1178,18 @@ export class LiveCuesV2Engine {
       } catch (error) {
         trace.cueLogError = (error as NodeJS.ErrnoException)?.code ?? 'append_failed'
         console.warn(`[live-cues-v2] cue log append failed: ${errMsg(error)}`)
+      }
+      // 6.97.8 open items, on unless COS_LIVE_CUES_V2_OPEN_ITEMS=0, extended meetings only (writer v4 is the one that returns `open`): a cue the writer marked as a missing owner or date (and whose wording
+      // agrees) is held, not shown; it is already in the cue log above, stays in the writer's history, and comes back through
+      // showHeld(). The writer call counted; the cooldown applies; the cue does not count toward the cap.
+      if (s.kinds === 'extended' && liveCuesV2Rule('OPEN_ITEMS', this.deps.env)) {
+        const item = openItemOf({ kind: parsed.kind, detail: parsed.detail, cited: sources.length, field: parsed.open })
+        if (item) {
+          s.fold.hold(item.label, cue, cue.createdAt)
+          s.lastCueAt = cue.createdAt
+          Object.assign(trace, { outcome: 'held_open_item', openWaiting: s.fold.waiting() })
+          return
+        }
       }
       s.cues.push(cue)
       s.lastCueAt = cue.createdAt

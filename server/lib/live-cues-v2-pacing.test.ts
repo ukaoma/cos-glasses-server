@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PACE_HORIZON_MS, paceAllowed, paceBurst, paceRefillMs } from './live-cues-v2-pacing.js'
+import { PACE_HORIZON_MAX_MS, PACE_HORIZON_MIN_MS, PACE_HORIZON_MS, PACE_MIN_CAP, paceAllowed, paceBurst, paceHorizon, paceRefillMs } from './live-cues-v2-pacing.js'
 
 const MIN = 60_000
 
@@ -17,9 +17,9 @@ describe('cue pacing (6.97.8)', () => {
     expect(paceRefillMs(25, 10 * MIN)).toBe(10 * MIN)
   })
 
-  it('allowed never exceeds the cap, never decreases, and starts at the burst, for every cap the settings accept (1 to 25)', () => {
+  it('allowed never exceeds the cap, never decreases, and starts at the burst (the whole cap below 5), for every cap the settings accept (1 to 25)', () => {
     for (let cap = 1; cap <= 25; cap++) {
-      expect(paceAllowed(cap, 45_000, 0), `cap ${cap} at 0`).toBe(paceBurst(cap))
+      expect(paceAllowed(cap, 45_000, 0), `cap ${cap} at 0`).toBe(cap < PACE_MIN_CAP ? cap : paceBurst(cap))
       let last = 0
       for (let m = 0; m <= 240; m++) {
         const a = paceAllowed(cap, 45_000, m * MIN)
@@ -29,9 +29,26 @@ describe('cue pacing (6.97.8)', () => {
       }
       expect(paceAllowed(cap, 45_000, 60 * MIN), `cap ${cap} at the horizon`).toBe(cap)
     }
+    expect(PACE_MIN_CAP).toBe(5)
   })
 
-  it('a cap of 1 is open at once; a negative or zero elapsed time is the burst', () => {
+  it('a cap of 4 or fewer is not paced; 5 is', () => {
+    expect([1, 2, 3, 4].map(c => paceAllowed(c, 60_000, 0))).toEqual([1, 2, 3, 4])
+    expect(paceAllowed(5, 60_000, 0)).toBe(3)
+  })
+
+  it('the horizon is the calendar length, clamped to 15 to 180 minutes; anything else is the hour', () => {
+    expect(paceHorizon(30 * MIN)).toBe(30 * MIN)
+    expect(paceHorizon(5 * MIN)).toBe(PACE_HORIZON_MIN_MS)
+    expect(paceHorizon(10 * 60 * MIN)).toBe(PACE_HORIZON_MAX_MS)
+    for (const bad of [null, undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) expect(paceHorizon(bad as number | null), String(bad)).toBe(PACE_HORIZON_MS)
+    // a 30 minute meeting: refill 30 min / 12 = 2.5 min, the whole cap open at minute 30
+    expect(paceRefillMs(25, 60_000, 30 * MIN)).toBe(150_000)
+    expect(paceAllowed(25, 60_000, 30 * MIN, 30 * MIN)).toBe(25)
+    expect(paceAllowed(25, 60_000, 29 * MIN, 30 * MIN)).toBe(24)
+  })
+
+  it('a cap of 1 is open at once; a negative elapsed time is the burst', () => {
     expect(paceAllowed(1, 45_000, 0)).toBe(1)
     expect(paceRefillMs(1, 45_000)).toBe(Number.POSITIVE_INFINITY)
     expect(paceAllowed(25, 45_000, -5 * MIN)).toBe(13)
