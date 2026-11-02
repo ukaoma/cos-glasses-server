@@ -21,6 +21,13 @@
 // passage of the files attached to the meeting, minus this conversation's own copies and other domains' personal notes, judged
 // by one yes/no question per candidate (live-cues-v2-grounded.ts, live-cues-v2-judge-b.ts). With classic nothing in an
 // evaluation changes: the same Jev requests, writer prompt, trace row and cue, pinned by live-cues-v2-classic-pin.test.ts.
+//
+// Live cues v3, general cues: with cueMode `general` or `all` a server-wide runner (live-cues-general.ts) now and then looks up one
+// public fact for a Mac meeting and hands it to emitInsight() below. This engine only HOSTS it: it lists the extended meetings,
+// emits the insight, and passes end, pause, suspend and a mode change on as aborts. An insight is kept apart from the focused
+// state: its own list (`insights`), no v1 twin, and it never touches the focused counters, cooldown, lastCueAt, inFlight,
+// failures or breaker. `general` mode turns the FOCUSED cues off for Mac meetings (a G2 meeting keeps them: it cannot carry an
+// insight); `all` runs both.
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -39,6 +46,8 @@ import {
   type LiveCuesV2SettingReader, type LiveCuesV2SettingSource, type LiveCuesV2StoredLimits,
 } from './live-cues-v2-settings.js'
 import { notesMemory } from './live-cues-v2-notes.js'
+import { GeneralCueRunner, realGeneralDeps, type GeneralCueCandidate, type GeneralCueDeps, type GeneralCueHost, type GeneralCueSettingsReader, type GeneralCueStatus, type GeneralInsight } from './live-cues-general.js'
+import { generalTriggerCalls } from './live-cues-general-prompts.js'
 import { GROUNDED_LIMITS, groundedCandidates, groundedSource, selfIdSet, type GroundedArm, type GroundedFile, type GroundedNote } from './live-cues-v2-grounded.js'
 import { JUDGE_B_WINDOW_CHARS, judgeBQuestions, parseJudgeB, selectJudgeB } from './live-cues-v2-judge-b.js'
 import { meetingLibraryConfigured } from './cos-operations-meetings.js'
@@ -515,6 +524,12 @@ export interface LiveCuesV2Deps {
   files?(sessionId: string): GroundedFile[]
   /** The user-confirmed context of this meeting: its domain and calendar title (MeetingAskStore.orientation). May throw. */
   orientation?(sessionId: string): { domain: string | null; title: string | null }
+  /** Live cues v3, general cues (absent means none: no runner is built): the general runner's dependencies. */
+  general?: GeneralCueDeps
+  /** Ask Public topics consent (MeetingAskStore.publicTopics), which general cues need. May throw. */
+  publicTopics?(): boolean
+  /** The owner's city-level home area (profile home_city), or null. May throw. */
+  homeArea?(): string | null
   /** The grounded judge: one yes/no question per candidate (judge B) and the `same` choice as a diagnostic. */
   judgeB?(title: string, window: string, cands: GroundedNote[], signal: AbortSignal, provider: DecisionProvider): Promise<{ yes: Record<string, number>; same: Record<string, number>; tokens: number }>
   /** True while the user's own query runs (Ask, a durable query): cues wait rather than compete for the provider. */
@@ -584,6 +599,9 @@ function realDeps(): LiveCuesV2Deps {
   const subq = trackSubqDecisionClient(new SubqDecisionClient(fetch, () => new Date(), dataPath('subq-cues-usage.json'), () => resolveSubqKey()?.key, subqDailyCap))
   const calls = (provider: DecisionProvider) => cueDecisionCalls(provider === 'subq' ? subq : jev)
   const traceFile = dataPath('live-cues-trace.jsonl')
+  const trace = (row: Record<string, unknown>) => {
+    try { mkdirSync(dirname(traceFile), { recursive: true, mode: 0o700 }); appendFileSync(traceFile, JSON.stringify(row) + '\n', { mode: 0o600 }) } catch { /* trace is best effort */ }
+  }
   let memorySourceCache: { at: number; value: LiveCuesV2MemorySource } | null = null
   return {
     gate: (title, window, signal, provider) => calls(provider).gate(title, window, signal),
@@ -630,9 +648,16 @@ function realDeps(): LiveCuesV2Deps {
     warmMemory: () => warmCueMemory(),
     now: () => new Date(),
     store: new LiveCuesV2Store(dataPath('live-cues-v2-state.json'), () => new Date()),
-    trace(row) {
-      try { mkdirSync(dirname(traceFile), { recursive: true, mode: 0o700 }); appendFileSync(traceFile, JSON.stringify(row) + '\n', { mode: 0o600 }) } catch { /* trace is best effort */ }
-    },
+    trace,
+    general: realGeneralDeps({
+      // The trigger is one more request on the cues' own decision client, so it shares their daily cap and breaker.
+      jevTrigger: (title, window, signal) => generalTriggerCalls(resolveCuesDecisionProvider(process.env).provider === 'subq' ? subq : jev).trigger(title, window, signal),
+      writerModel: () => liveCuesV2Model(process.env),
+      statePath: dataPath('live-cues-general-state.json'),
+      trace: row => trace(row as unknown as Record<string, unknown>),
+    }),
+    publicTopics: () => new MeetingAskStore().publicTopics(),
+    homeArea: () => getOwnerHomeArea(),
     cueLog: row => liveCueVerdicts().logCue(row),
     env: process.env,
   }
@@ -709,7 +734,16 @@ interface Session {
   skipTracedAt: Record<string, number>
   /** 6.86.0: the kinds this meeting's cues may carry, fixed at arm. */
   kinds: CueKindSet
+  /** Live cues v3: cleaned characters fed since arm. Monotonic (the chunk window is capped, this is not): the general runner
+   *  measures "about 90 s of new speech" with it. */
+  charsFed: number
+  /** Live cues v3: this meeting's insights. Apart from `cues` on purpose: previousCues, the repeat rule and the shadow template
+   *  rules read `cues`, and an insight must not change what a focused cue sees. */
+  insights: LiveCueV2[]
 }
+/** A session's status row, plus (live cues v3) the general-cue state for an extended meeting. */
+export type LiveCuesV2SessionStatusV3 = LiveCuesV2SessionStatus & { general?: GeneralCueStatus }
+export interface LiveCuesV2StatusResponseV3 { protocol: 2; enabled: boolean; session: LiveCuesV2SessionStatusV3 | null }
 
 /** 6.86.0: how a meeting is armed. `kinds` defaults by session (defaultCueKindSet); `resume` makes a restarted server re-arm
  *  it on its next chunk (the Mac recording start passes it). */
@@ -732,7 +766,10 @@ export const V2_OFF = 'v2_off'
 
 export class LiveCuesV2Engine {
   private readonly sessions = new Map<string, Session>()
-  constructor(private readonly deps: LiveCuesV2Deps) {}
+  private readonly general: GeneralCueRunner | null
+  constructor(private readonly deps: LiveCuesV2Deps) {
+    this.general = deps.general ? new GeneralCueRunner(this.generalHost(), this.generalSettings(), deps.general) : null
+  }
 
   private enabled(): boolean { return liveCuesV2Enabled(this.deps.env, this.deps.settings) }
   private groundingOn(): boolean { return resolveLiveCuesGrounding(this.deps.env, this.deps.settings).value === 'grounded' }
@@ -794,7 +831,7 @@ export class LiveCuesV2Engine {
     const d = this.deps.now()
     const title = `${mac ? 'Mac' : 'G2'} Recording ${d.toLocaleDateString('en-CA')} ${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}`
     this.sessions.set(sessionId, { sessionId, title, armedAt: nowMs, lastSeenAt: nowMs, chunks: [], wordsSinceEval: 0, lastEvalAt: 0, lastCueAt: 0,
-      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds })
+      inFlight: null, cues: [], evaluations: 0, failures: 0, breaker: false, stopReason: null, skipTracedAt: {}, kinds, charsFed: 0, insights: [] })
     if (opts.resume) this.deps.store.setResume(sessionId, kinds)
     this.deps.warmMemory()
     return answer(this.deps.store.counters(sessionId).cues, kinds)
@@ -805,7 +842,8 @@ export class LiveCuesV2Engine {
     this.deps.store.end(sessionId)
     const s = this.sessions.get(sessionId)
     s?.inFlight?.abort()
-    const cues = s ? [...s.cues] : []
+    this.general?.endSession(sessionId)
+    const cues = s ? this.allCues(s) : []
     return { nudgesGenerated: cues.length, protocol: 2, cues,
       // v1 readers know two types: an extended kind is shown as its legacy kind there (the cues keep the real one).
       // An insight (live cues v3) has no v1 twin.
@@ -814,20 +852,23 @@ export class LiveCuesV2Engine {
 
   setPaused(sessionId: string, paused: boolean, seq?: number): { ok: true; paused: boolean; applied: boolean; pauseSeq: number } {
     const r = this.deps.store.setPaused(sessionId, paused, seq)
-    if (r.applied && paused) this.sessions.get(sessionId)?.inFlight?.abort()
+    if (r.applied && paused) { this.sessions.get(sessionId)?.inFlight?.abort(); this.general?.abortSession(sessionId, 'paused') }
     return { ok: true, ...r }
   }
 
-  status(sessionId: string): LiveCuesV2StatusResponse {
+  status(sessionId: string): LiveCuesV2StatusResponseV3 {
     const s = this.sessions.get(sessionId)
     const ended = this.deps.store.isEnded(sessionId)
     const paused = this.deps.store.isPaused(sessionId)
     if (!s && !ended) return { protocol: 2, enabled: this.enabled(), session: null }
     const counters = this.deps.store.counters(sessionId)
     const reason = s ? this.stopReasonOf(s, counters) : null
-    const session: LiveCuesV2SessionStatus = {
+    let general: GeneralCueStatus | null = null
+    if (s) { try { general = this.general?.status(sessionId) ?? null } catch { general = null } }       // null for a meeting the runner is not offered (G2)
+    const session: LiveCuesV2SessionStatusV3 = {
       sessionId, state: ended ? 'ended' : paused ? 'paused' : reason ? 'stopped' : 'active', ...(reason && !ended && !paused ? { reason } : {}),
-      paused, ended, pauseSeq: this.deps.store.pauseSeq(sessionId), cues: s ? [...s.cues] : [], evaluations: s?.evaluations ?? 0, writerCalls: counters.writerCalls,
+      paused, ended, pauseSeq: this.deps.store.pauseSeq(sessionId), cues: s ? this.allCues(s) : [], evaluations: s?.evaluations ?? 0, writerCalls: counters.writerCalls,
+      ...(general ? { general } : {}),
     }
     return { protocol: 2, enabled: this.enabled(), session }
   }
@@ -845,11 +886,13 @@ export class LiveCuesV2Engine {
   /** The cue, if this process emitted it and still holds it, under whichever meeting. */
   findCue(cueId: string): LiveCueV2 | null {
     for (const s of this.sessions.values()) { const cue = s.cues.find(c => c.cueId === cueId); if (cue) return cue }
+    for (const s of this.sessions.values()) { const cue = s.insights.find(c => c.cueId === cueId); if (cue) return cue }
     return null
   }
 
   recordFeedback(input: { sessionId: string; cueId: string; vote: 'up' | 'down'; reason?: string }): { ok: true; knownCue: boolean } {
-    const knownCue = !!this.sessions.get(input.sessionId)?.cues.some(c => c.cueId === input.cueId)
+    const held = this.sessions.get(input.sessionId)
+    const knownCue = !!held && (held.cues.some(c => c.cueId === input.cueId) || held.insights.some(c => c.cueId === input.cueId))
     const reason = (input.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, CUE_FEEDBACK_REASON_MAX)
     this.deps.trace({ kind: 'feedback', at: this.deps.now().toISOString(), sessionId: input.sessionId, cueId: input.cueId, vote: input.vote, knownCue, ...(reason ? { reason } : {}) })
     return { ok: true, knownCue }
@@ -874,11 +917,13 @@ export class LiveCuesV2Engine {
     const words = text.trim().split(/\s+/).filter(Boolean)
     if (words.length) {
       s.chunks.push(text.trim())
+      s.charsFed += cleanWindow(text.trim()).length
       s.wordsSinceEval += words.length
       let total = s.chunks.reduce((n, c) => n + c.split(/\s+/).length, 0)
       while (s.chunks.length > 1 && total > LIVE_CUES_V2_LIMITS.windowWords) { total -= s.chunks[0].split(/\s+/).length; s.chunks.shift() }
     }
     const L = LIVE_CUES_V2_LIMITS
+    if (this.focusedOff(s)) return                                    // cue mode `general`: this Mac meeting gets insights only
     if (s.inFlight || asrDegraded) return
     if (s.breaker) return this.traceSkip(s, 'breaker_open', nowMs)
     if (this.deps.store.isPaused(sessionId)) return this.traceSkip(s, 'paused', nowMs)
@@ -1092,7 +1137,11 @@ export class LiveCuesV2Engine {
     for (const [id, s] of this.sessions) if (!s.inFlight && nowMs - s.lastSeenAt > LIVE_CUES_V2_LIMITS.sessionTtlMs) this.sessions.delete(id)
   }
 
-  shutdown(): void { for (const s of this.sessions.values()) s.inFlight?.abort(); this.sessions.clear() }
+  shutdown(): void {
+    for (const s of this.sessions.values()) s.inFlight?.abort()
+    this.sessions.clear()
+    if (this.general) { this.general.stop(); setGeneralCuesTodayProvider(null) }
+  }
 
   /** v2 switched off at runtime (6.76.2): abort every evaluation in flight, so no half-written cue is emitted and every
    *  lease is released. Sessions are kept (no new evaluation starts while off), so switching back on resumes a running
@@ -1100,7 +1149,81 @@ export class LiveCuesV2Engine {
   suspend(): number {
     let aborted = 0
     for (const s of this.sessions.values()) if (s.inFlight) { s.inFlight.abort(V2_OFF); aborted += 1 }
+    if (this.general?.abortAll(V2_OFF)) aborted += 1
     return aborted
+  }
+
+  // ── General cues (live cues v3) ──
+  /** Starts the general runner's poll timer and registers its counters for the settings view. Called once, where the engine
+   *  singleton is built; an engine made by a test never polls on its own. */
+  startGeneral(): void {
+    if (!this.general) return
+    setGeneralCuesTodayProvider(() => this.general!.generalCuesToday())
+    this.general.start()
+  }
+  /** The general runner, if this engine has one (tests drive its ticks directly). */
+  generalRunner(): GeneralCueRunner | null { return this.general }
+  /** The cue mode was saved: leaving general mode stops an insight in flight at once. */
+  modeChanged(): void { this.general?.modeChanged() }
+
+  private cueMode(): LiveCuesCueMode { return resolveLiveCuesCueMode(this.deps.env, this.deps.settings).value }
+  /** Cue mode `general` turns the focused cues off for an extended (Mac) meeting. A legacy (G2) meeting keeps them: it can never
+   *  carry an insight, so switching them off would leave it with nothing. */
+  private focusedOff(s: Session): boolean { return s.kinds === 'extended' && this.cueMode() === 'general' }
+  private allCues(s: Session): LiveCueV2[] { return s.insights.length ? [...s.cues, ...s.insights].sort((a, b) => a.createdAt - b.createdAt) : [...s.cues] }
+
+  /** The meetings the general runner may look at: extended ones only, while v2 is on. The domain is the CONFIRMED Ask orientation
+   *  domain or null, never a recording sidecar's default (all saved sidecars say personal). */
+  private generalHost(): GeneralCueHost {
+    return {
+      candidates: () => {
+        if (!this.enabled()) return []
+        const out: GeneralCueCandidate[] = []
+        for (const s of this.sessions.values()) {
+          if (s.kinds !== 'extended') continue
+          let domain: string | null = null
+          try { domain = this.deps.orientation?.(s.sessionId).domain ?? null } catch { domain = null }
+          out.push({ sessionId: s.sessionId, kindSet: s.kinds, armed: !this.deps.store.isEnded(s.sessionId), paused: this.deps.store.isPaused(s.sessionId), domain,
+            title: s.title, transcriptChars: s.charsFed, window: chars => cleanWindow(s.chunks.join('\n')).slice(-chars) })
+        }
+        return out
+      },
+      emit: (sessionId, insight) => this.emitInsight(sessionId, insight),
+    }
+  }
+  /** The general limits, the mode and the consent as they stand now (read at every tick, so a saved change applies at once). */
+  private generalSettings(): GeneralCueSettingsReader {
+    return {
+      cueMode: () => this.cueMode(),
+      limits: () => {
+        const r = resolveLiveCuesGeneralLimits(this.deps.env, this.deps.settings)
+        return { intervalSeconds: r.intervalSeconds.value, trigger: r.trigger.value, attemptsPerMeeting: r.attemptsPerMeeting.value, maxCuesPerMeeting: r.maxCuesPerMeeting.value,
+          dailyTopicCalls: r.dailyTopicCalls.value, dailyWebSearches: r.dailyWebSearches.value }
+      },
+      publicTopics: () => { try { return this.deps.publicTopics?.() === true } catch { return false } },
+      homeArea: () => { try { return this.deps.homeArea?.() ?? null } catch { return null } },
+    }
+  }
+  /** One insight: logged, held in the meeting's own list, and emitted as `coaching_nudge_v2` ONLY (no v1 twin, so a v1 reader
+   *  never sees it). Extended meetings only. Nothing here touches the focused counters, cooldown, lastCueAt, inFlight, failures
+   *  or breaker. False when the meeting is gone, ended or not extended, or the cue would not pass isLiveCueV2. */
+  private emitInsight(sessionId: string, insight: GeneralInsight): boolean {
+    const s = this.sessions.get(sessionId)
+    if (!s || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false
+    const cue: LiveCueV2 = { protocol: 2, cueId: randomUUID(), sessionId, headline: insight.headline, detail: insight.detail, kind: 'insight', sources: insight.sources,
+      gate: round(insight.gate), createdAt: this.deps.now().getTime(), model: insight.model ?? liveCuesV2Model(this.deps.env) }
+    if (!isLiveCueV2(cue)) return false                                 // never emit what the companion would drop
+    const log = this.deps.cueLog
+    try {
+      log?.({ v: 1, cueId: cue.cueId, sessionId, meetingTitle: s.title, createdAt: cue.createdAt, kind: cue.kind, headline: cue.headline, detail: cue.detail, gate: cue.gate,
+        sources: cue.sources, model: cue.model, before: cueBefore(s.chunks.join('\n').replace(/^\[\d+\]\s*/gm, '')), general: { category: insight.category, query: insight.query },
+        armedAt: s.armedAt })
+    } catch (error) {
+      console.warn(`[live-cues-v2] insight log append failed: ${errMsg(error)}`)
+    }
+    s.insights.push(cue)
+    this.deps.emit('coaching_nudge_v2', cue as unknown as Record<string, unknown>)
+    return true
   }
 
   /** Was this meeting armed under v2 in this process? Its stop and status stay v2 even after v2 is switched off. */
@@ -1115,6 +1238,7 @@ let unsubscribe: (() => void) | null = null
 export function liveCuesV2(): LiveCuesV2Engine {
   if (!engine) {
     engine = new LiveCuesV2Engine(realDeps())
+    engine.startGeneral()
     // A saved meeting ends its cues even when the phone never sent Stop (orphan recovery, Control save).
     unsubscribe = onDisplay(event => {
       const sid = event.type === 'recording_stop' ? event.data?.sessionId : null
@@ -1223,6 +1347,7 @@ export function applyLiveCuesV2Settings(patch: { enabled?: boolean; limits: Live
   if (locked.length) return { ok: false, error: 'env_locked', fields: locked }
   const wasOn = liveCuesV2Enabled(env)
   liveCuesV2Settings().update(patch)
+  if (patch.cueMode !== undefined) engine?.modeChanged()              // leaving general mode stops an insight in flight at once
   if (wasOn && !liveCuesV2Enabled(env)) {
     const aborted = engine?.suspend() ?? 0
     console.log(`[live-cues-v2] switched off by setting; ${aborted} evaluation(s) stopped`)

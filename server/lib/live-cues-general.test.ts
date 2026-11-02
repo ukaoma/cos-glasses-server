@@ -684,7 +684,9 @@ describe('search, writer and emit', () => {
     const { sessionId, insight } = h.emitted[0]
     expect(sessionId).toBe('mac_1')
     expect(insight).toMatchObject({ headline: 'A new team joins the grid', category: 'news', query: QUERIES[0], windowAt: h.clock.t - 0 })
-    expect(insight.sources).toEqual([{ id: 'W1', date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), title: 'Grid news', kind: 'web', url: 'https://example.org/grid' }])
+    expect(insight.sources).toEqual([{ id: `web_${createHash('sha256').update('https://example.org/grid').digest('hex').slice(0, 12)}`, date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), title: 'Grid news', kind: 'web', url: 'https://example.org/grid' }])
+    expect(insight).toMatchObject({ gate: 0.9 })
+    expect('model' in insight).toBe(false)
     expect(h.state().meetings.mac_1).toMatchObject({ attempts: 1, cues: 1 })
   })
   it('emit: a host that does not emit is not counted as a cue', async () => {

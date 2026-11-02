@@ -24,6 +24,7 @@
 // admitCueTopic (no digit, deny word, name or repeat), then the search. The query text lives in the emitted cue's log row only;
 // a trace row carries a hash. Search cost is not readable (the search process is stopped after result.json), so `usd` is the
 // topic and writer model cost only.
+import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
@@ -85,6 +86,10 @@ export interface GeneralInsight {
   /** The admitted query. For the cue log row only; never a trace field. */
   query: string
   sources: GeneralInsightSource[]
+  /** P(yes) from the trigger, as the cue's admission probability. */
+  gate: number
+  /** The model the writer reported, when it said. */
+  model?: string
   /** When the window this fact was chosen from was read, and when the fact was handed over (ms). */
   windowAt: number
   createdAt: number
@@ -600,8 +605,10 @@ export class GeneralCueRunner {
     if (!this.live(c.sessionId)) return this.done(row, 'no_cue', 'not_eligible', 4)
     const day = new Date(this.deps.now()).toLocaleDateString('en-CA')
     const cited = insight.sourceIds.map(id => found.sources.find(s => s.id === id)!)
+    // A web source's id is opaque and stable per page, like a past meeting's: the same url gets the same id in every cue.
     const emitted = this.host.emit(c.sessionId, { headline: insight.headline, detail: insight.detail, category: topic.category, query: admitted.query,
-      sources: cited.map(s => ({ id: s.id, date: day, title: s.title, kind: 'web' as const, url: s.url })), windowAt: startedAt, createdAt: this.deps.now() })
+      sources: cited.map(s => ({ id: `web_${createHash('sha256').update(s.url).digest('hex').slice(0, 12)}`, date: day, title: s.title, kind: 'web' as const, url: s.url })),
+      gate: row.pGeneral ?? 0, ...(writerOut.model ? { model: writerOut.model } : {}), windowAt: startedAt, createdAt: this.deps.now() })
     if (!emitted) return this.done(row, 'no_cue', 'not_emitted', 4)
     this.store.recordCue(c.sessionId)
     this.done(row, 'cue', 'emitted', 4)
