@@ -1,8 +1,9 @@
 // 6.97.8: the spellings the cue writer may use for a name. The transcript misspells names ("Bori" for Vori, "Niall" for
-// Niala), and the server already knows the right ones: the speakers the ASR path reported for this meeting, every enrolled
-// voice profile, the owner, and the terms the owner taught the decoder. No new data source and no network: the same readers
-// the general-cue name gate uses (live-cues-general-topic.ts ProfileNameSource), handed to the same local writer that already
-// sees the transcript. Pure but for those readers; a reader that fails just contributes nothing.
+// Niala), and the server already knows the right ones: the speakers the ASR path reported for THIS meeting, the owner, and the
+// terms the owner taught the decoder that are written like names. Enrolled voice profiles are deliberately left out: that store holds
+// everyone the glasses ever heard, household included, and none of it belongs in a work meeting's prompt. No new data source and
+// no network: the same readers the general-cue name gate uses (live-cues-general-topic.ts ProfileNameSource), handed to the same
+// local writer that already sees the transcript. Pure but for those readers; a reader that fails just contributes nothing.
 
 import { isGenericSpeakerLabel, realProfileNames, type ProfileNameSource } from './live-cues-general-topic.js'
 
@@ -25,14 +26,13 @@ function looksLikeName(term: string): boolean {
 /** Per name in the prompt: the quotes, the comma and the space the JSON adds around it. */
 const NAME_OVERHEAD_CHARS = 4
 
-/** The names for one meeting, most useful first: the meeting's speakers, the owner, the vocabulary names, then the enrolled voices
- *  (the longest list, and the least likely to be in this room). A name that does not fit is skipped, not the end of the list. */
+/** The names for one meeting, most useful first: the meeting's speakers, the owner, then the vocabulary names. A name that does not
+ *  fit is skipped, not the end of the list. */
 export async function knownNamesFor(speakers: readonly string[], src: ProfileNameSource = realProfileNames): Promise<string[]> {
   const candidates: string[] = []
   for (const s of speakers) if (typeof s === 'string') candidates.push(s)
   try { candidates.push(src.ownerName()) } catch { /* no profile */ }
   try { candidates.push(...src.vocabulary().filter(looksLikeName)) } catch { /* no vocabulary */ }
-  try { const v = await src.voiceProfileNames?.(); if (Array.isArray(v)) candidates.push(...v) } catch { /* the voice store could not be read */ }
   const seen = new Set<string>(), out: string[] = []
   let chars = 0
   for (const raw of candidates) {
