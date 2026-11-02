@@ -13,8 +13,8 @@ import { runMeetingAskModel, AskProcessError } from './meeting-ask-runner.js';
 import { redactSecrets } from './lens-gist-engines.js';
 import { listLensGistEngines } from './lens-gist.js';
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen, type MaintenanceWorkLease } from './maintenance-lifecycle.js';
-import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate, factCheckRequest, recentPublicPages, pastedPublicUrls, recentPastedPage, pointsAtEarlierLink, recentPastedPagesFromUserLinks, pastedUrlKey } from './meeting-ask-web.js';
-import { readPastedPages, pastedReadFailedNotice, pastedPageFile, pastedTextFile, keepPastedContext, PASTED_REFUSED_NOTICE, PASTED_OVER_LIMIT_NOTICE } from './meeting-ask-pasted.js';
+import { meetingWebCapability, searchMeetingWeb, resolveMeetingWebQuery, explicitWebRequest, userWebQuery, publicSearchGate, factCheckRequest, recentPublicPages, pastedPublicUrls, recentPastedPage, pointsAtEarlierLink, recentPastedPagesFromUserLinks } from './meeting-ask-web.js';
+import { readPastedPages, pastedReadFailedNotice, pastedPageFile, pastedPageFileId, pastedTextFile, keepPastedContext, PASTED_REFUSED_NOTICE, PASTED_OVER_LIMIT_NOTICE } from './meeting-ask-pasted.js';
 import { webLedger } from './web-lookup-ledger.js';
 import { getServerInstanceId } from './server-instance-id.js';
 import { getOwnerName, getOwnerSpeakerLabel } from './profile.js';
@@ -479,13 +479,11 @@ export class MeetingAskRuntime {
                 shared = pending instanceof Promise ? await pending : pending;
             }
             // A page that is already a W source in this answer is not also a web_ file in it.
-            const readPages = new Set(shared.sources.flatMap(w => w.url ? [pastedUrlKey(w.url)] : []));
-            if (readPages.size)
-                for (let i = extraSources.length - 1; i >= 0; i--) {
-                    const f = extraSources[i].fileId && extraSources[i].fileId!.startsWith('web_') && isPastedFileId(extraSources[i].fileId!) ? files.find(x => x.id === extraSources[i].fileId) : undefined;
-                    if (f && readPages.has(pastedUrlKey(f.text.split('\n', 1)[0])))
+            const readPageFiles = new Set(shared.sources.flatMap(w => w.url ? [pastedPageFileId(w.url)] : []));
+            if (readPageFiles.size)
+                for (let i = extraSources.length - 1; i >= 0; i--)
+                    if (extraSources[i].kind === 'file' && readPageFiles.has(extraSources[i].fileId ?? ''))
                         extraSources.splice(i, 1);
-                }
             extraSources.push(...shared.sources);
             extraNotices.push(...shared.notices);
             // A withheld lookup counts once per reason per question, wherever in this run it is first refused.

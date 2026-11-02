@@ -59,12 +59,23 @@ export function pastedReadFailedNotice(hosts: readonly string[]): string {
 export const PASTED_REFUSED_NOTICE = 'A link in your question was not opened because it is not a public web address, or it carries a key or token. Only public links without credentials are read.';
 export const PASTED_OVER_LIMIT_NOTICE = 'Only the first two links in a question are read.';
 
+/** The id of the meeting file for a page: the same page address (tracking parameters aside) is the same file. */
+export function pastedPageFileId(url: string): string {
+    return `web_${hash(pastedUrlKey(url)).slice(0, 16)}`;
+}
 /** The meeting file for a page that was read: the page title for the name, the address and the excerpt for the text. */
 export function pastedPageFile(source: MeetingAskSource): MeetingAskFile | null {
     if (!source.url)
         return null;
-    const text = redactUnsafeLinks(redactSecrets(`${source.url}\n\n${source.text.replace(READ_PAGE_PREFIX, '')}`)).slice(0, PASTED_FILE_MAX_CHARS);
-    return { id: `web_${hash(pastedUrlKey(source.url)).slice(0, 16)}`, revision: hash(text).slice(0, 16), name: flat(source.title).slice(0, 120) || 'Web page', status: 'ready', text };
+    // The page's own address (final, after redirects) is cut to origin and path whatever it carried; the body goes through the link scrub.
+    let address = '[link removed]';
+    try {
+        const u = new URL(source.url);
+        address = u.origin + u.pathname;
+    }
+    catch { /* the address was checked before it got here */ }
+    const text = `${address}\n\n${redactUnsafeLinks(redactSecrets(source.text.replace(READ_PAGE_PREFIX, '')))}`.slice(0, PASTED_FILE_MAX_CHARS);
+    return { id: pastedPageFileId(source.url), revision: hash(text).slice(0, 16), name: flat(source.title).slice(0, 120) || 'Web page', status: 'ready', text };
 }
 /** "11:49" in this machine's time zone. */
 function clock(ms: number): string {
