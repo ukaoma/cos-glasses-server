@@ -26,7 +26,7 @@ function ipv6Groups(h: string): number[] {
 }
 /**
  * Public IPv6 only. Refused: the unspecified and loopback addresses and every address whose first 96 bits are zero (this covers the
- * deprecated IPv4-compatible form ::a.b.c.d), IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/32 (a gateway forwards it to the embedded IPv4,
+ * deprecated IPv4-compatible form ::a.b.c.d), IPv4-mapped ::ffff:0:0/96, IPv4-translated ::ffff:0:0:0/96, NAT64 64:ff9b::/32 (a gateway forwards it to the embedded IPv4,
  * private ones included), unique-local fc00::/7, link-local fe80::/10, site-local fec0::/10, multicast ff00::/8, 6to4 2002::/16 and
  * Teredo 2001::/32 (both embed an IPv4 address), and the documentation range 2001:db8::/32.
  */
@@ -36,6 +36,8 @@ function publicIPv6(h: string): boolean {
         return false;
     if (g.slice(0, 6).every(x => x === 0) || g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff)
         return false;
+    if (g.slice(0, 4).every(x => x === 0) && g[4] === 0xffff && g[5] === 0)
+        return false;                                                        // IPv4-translated ::ffff:0:a.b.c.d (RFC 2765)
     if (g[0] === 0x64 && g[1] === 0xff9b)
         return false;
     if ((g[0] & 0xfe00) === 0xfc00 || (g[0] & 0xffc0) === 0xfe80 || (g[0] & 0xffc0) === 0xfec0 || (g[0] & 0xff00) === 0xff00)
@@ -484,8 +486,35 @@ export interface PastedUrls {
     refused: PastedUrlRefusal[];
 }
 const URL_IN_TEXT = /https?:\/\/[^\s<>"'`]+/gi;
-/** A query parameter whose name says it carries a credential or a signature. */
-const URL_SECRET_PARAM = /(?:^|[_-])(?:token|secret|passw(?:or)?d|passwd|apikey|api[_-]?key|access[_-]?key|signature|sig|auth|authorization|session|sessionid|credential|jwt|bearer|key)(?:$|[_-])/i;
+/**
+ * Parameters that carry a credential, a one-time code or a signature, in a link's query or fragment. By name: distinctive words anywhere in
+ * the name (token, secret, passw..., apikey, signature, credential, bearer, hmac), short words as whole pieces of it (pwd, pass, passcode,
+ * sig, auth, session, sid, key, code, otp, jwt, pw), login/reset/verify/magic/invite hashes and keys, and one-letter names (?t=, ?h=, ?k=)
+ * only when the value is a long opaque string (a "?t=30" timestamp is fine). By value: a JWT in any parameter.
+ */
+const SECRET_NAME_ANYWHERE = /token|secret|passw|apikey|signature|credential|bearer|hmac/i;
+const SECRET_NAME_PIECES = new Set(['pwd', 'pass', 'passcode', 'passkey', 'sig', 'auth', 'authorization', 'session', 'sessionid', 'sid', 'key', 'code', 'otp', 'jwt', 'pw', 'secret']);
+const SECRET_NAME_HASHES = /(?:login|reset|verify|verification|confirm|magic|invite|activation|unsubscribe|recovery)[_-]?(?:hash|key|code|id|link|token)/i;
+const JWT_VALUE = /^eyJ[\w-]+\.[\w-]+\.[\w-]*$/;
+function secretParam(name: string, value: string): boolean {
+    if (!value)
+        return false;
+    if (JWT_VALUE.test(value))
+        return true;
+    if (SECRET_NAME_ANYWHERE.test(name) || SECRET_NAME_HASHES.test(name))
+        return true;
+    const pieces = name.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    if (pieces.some(x => SECRET_NAME_PIECES.has(x)))
+        return true;
+    return name.length === 1 && /^[A-Za-z0-9_-]{16,}$/.test(value);
+}
+/** Addresses that are themselves the secret: whoever holds the link can post as the owner. Never fetched, never stored. */
+const WEBHOOK_HOSTS = new Set(['hooks.slack.com', 'hooks.zapier.com', 'maker.ifttt.com', 'events.pagerduty.com', 'hooks.airtable.com', 'webhook.office.com']);
+function webhookLink(u: URL): boolean {
+    const host = u.hostname.toLowerCase(), path = u.pathname.toLowerCase();
+    return WEBHOOK_HOSTS.has(host) || host.endsWith('.webhook.office.com') || /^hook\.[a-z0-9.-]*make\.com$/.test(host) || /^(?:discord|discordapp)\.com$/.test(host) && /^\/api(?:\/v\d+)?\/webhooks\//.test(path)
+        || host === 'outlook.office.com' && path.startsWith('/webhook') || host === 'api.telegram.org' && /^\/bot/.test(path);
+}
 function trimUrl(raw: string): string {
     let u = raw.replace(/[.,;:!?'"\]}]+$/, '');
     // A closing parenthesis belongs to the link only when an opening one does.
@@ -502,8 +531,10 @@ function classifyPastedUrl(raw: string): { ok: string } | { refusal: 'pasted_not
     catch { /* not an address */ }
     if (!parsed)
         return { refusal: 'pasted_not_public' };
-    const carriesSecret = !!(parsed.username || parsed.password) || raw !== redactSecrets(raw) || REDACTION_MARK.test(raw)
-        || [...parsed.searchParams].some(([name, value]) => value && URL_SECRET_PARAM.test(name));
+    // The fragment is read as parameters too (#access_token=..., or #/route?code=...): it never reaches a server, but it reaches stored text.
+    const fragment = parsed.hash.slice(1), fragmentParams = fragment ? new URLSearchParams(fragment.includes('?') ? fragment.slice(fragment.indexOf('?') + 1) : fragment) : new URLSearchParams();
+    const carriesSecret = !!(parsed.username || parsed.password) || raw !== redactSecrets(raw) || REDACTION_MARK.test(raw) || webhookLink(parsed)
+        || [...parsed.searchParams, ...fragmentParams].some(([name, value]) => secretParam(name, value));
     if (carriesSecret)
         return { refusal: 'pasted_secret' };
     const ok = publicWebUrl(raw);
@@ -531,16 +562,30 @@ export function pastedPublicUrls(question: string): PastedUrls {
     });
     return { urls, refused };
 }
+/** A web address written without its scheme but with a query or fragment that holds parameters: example.com/page?access_token=... */
+const SCHEMELESS_WITH_PARAMS = /(?<![\w@.\/-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:\/[^\s?#<>"'`]*)?)[?#][^\s<>"'`]*=[^\s<>"'`]*/gi;
+const SCHEMELESS_WEBHOOK = /(?<![\w@.\/-])(?:hooks\.slack\.com|hooks\.zapier\.com|maker\.ifttt\.com|events\.pagerduty\.com|hooks\.airtable\.com|(?:[a-z0-9-]+\.)*webhook\.office\.com|hook\.[a-z0-9.-]*make\.com|(?:discord|discordapp)\.com\/api(?:\/v\d+)?\/webhooks|outlook\.office\.com\/webhook|api\.telegram\.org\/bot)[^\s<>"'`]*/gi;
 /**
- * `text` with every web address that is not a clean public one replaced by "[link removed]", for text that is KEPT (a pasted-text file).
- * Every address counts, not only the first two: the limit of two is about what is read, not about what may sit in a stored file. An
- * address with a token in its query (redactSecrets does not know every parameter name) never reaches a cue prompt this way.
+ * `text` as it may be KEPT (a paste_ or web_ file, which the live cues' prompts and the writer read):
+ *   - an address that is not a clean public one (credentials, a key or token anywhere in it, a webhook, a private host) becomes
+ *     "[link removed]";
+ *   - every other address is cut to origin + path, with no query and no fragment (a one-time code, a reset hash or a token that no
+ *     list of parameter names knows about cannot survive);
+ *   - an address written without its scheme loses its query or fragment the same way, and a schemeless webhook address is removed.
+ * Every address counts, not only the first two: the limit of two is about what is read, not about what may sit in a stored file.
  */
 export function redactUnsafeLinks(text: string): string {
-    return text.replace(URL_IN_TEXT, m => {
-        const u = trimUrl(m);
-        return u && !('ok' in classifyPastedUrl(u)) ? '[link removed]' + m.slice(u.length) : m;
+    const withScheme = text.replace(URL_IN_TEXT, m => {
+        const u = trimUrl(m), tail = m.slice(u.length);
+        if (!u)
+            return m;
+        const c = classifyPastedUrl(u);
+        if (!('ok' in c))
+            return '[link removed]' + tail;
+        const p = new URL(c.ok);                                          // classifyPastedUrl returned it, so it parses
+        return p.origin + p.pathname + tail;
     });
+    return withScheme.replace(SCHEMELESS_WEBHOOK, '[link removed]').replace(SCHEMELESS_WITH_PARAMS, '$1');
 }
 /** Two addresses for the same page: scheme-agnostic host, no fragment, no tracking parameters, no trailing slash. */
 export function pastedUrlKey(url: string): string {

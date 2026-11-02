@@ -373,7 +373,7 @@ describe('stored text keeps no unsafe link', () => {
   it('a page file whose address carries a token holds no such address', () => {
     const file = P.pastedPageFile({ id: 'W1', kind: 'web', title: 'T', url: 'https://example.org/a?token=zzzz9999', text: 'Retrieved page excerpt (may be partial): ' + PAGE_TEXT })!
     expect(file.text).not.toContain('zzzz9999')
-    expect(file.text.startsWith('[link removed]')).toBe(true)
+    expect(file.text.startsWith('https://example.org/a\n')).toBe(true)
   })
 })
 
@@ -426,5 +426,80 @@ describe('transcript cleanup does not learn vocabulary from pasted text or pages
       { id: 'web_0123456789abcdef', revision: '1', name: 'Harbor story', status: 'ready', text: 'https://apnews.com/x\n\nQuartz Basin Marine' },
     ])
     expect(await defaultCleanupDeps().files(sessionId)).toEqual([{ name: 'Agenda', text: 'Agenda for the quarterly review' }, { name: 'My notes', text: 'A file the user dropped, whose name only looks like ours' }])
+  })
+})
+
+// 6.97.8 re-review: token-bearing links that no parameter list knows about must not reach what the cues read.
+describe('every link in kept text is cut to origin and path, and secret-bearing links are never fetched', () => {
+  const FIRST = 'The council debated the harbor budget at length and the minutes ran long into the evening hearing.'
+  const BODY = `${FIRST} `.repeat(6)
+  const PROBES: Array<[name: string, link: string, secret: string, fetched: boolean]> = [
+    ['a Zoom link with a meeting password', 'https://zoom.us/j/1234567890?pwd=SzFhOTNyQ2VYSEFFcjFJcmZMd1RNQT09', 'SzFhOTNyQ2VYSEFFcjFJcmZMd1RNQT09', false],
+    ['an OAuth code', 'https://app.example.com/cb?code=4%2F0AfJohXn1x2y3zQ', '0AfJohXn1x2y3zQ', false],
+    ['a one-time password', 'https://bank.example.com/verify?otp=938271', '938271', false],
+    ['a reset hash under a one-letter name', 'https://app.example.com/reset?t=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b', '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b', false],
+    ['a login hash', 'https://app.example.com/login?login_hash=abc123def456ghi', 'abc123def456ghi', false],
+    ['an access token in the fragment', 'https://x.example.com/a#access_token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl', 'eyJhbGciOiJIUzI1NiJ9', false],
+    ['a token in a fragment route', 'https://x.example.com/app#/cb?id_token=opaque998877', 'opaque998877', false],
+    ['a Slack webhook', 'https://hooks.slack.com/services/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', 'Xy7QwErTyUiOpAsDfGhJkLzX', false],
+    ['a Discord webhook', 'https://discord.com/api/webhooks/123456789012345678/AbCdEfGhIjKlMnOpQrStUvWxYz0123', 'AbCdEfGhIjKlMnOpQrStUvWxYz0123', false],
+    ['a link with no scheme and a token', 'example.com/page?access_token=plainsecret4455', 'plainsecret4455', false],
+    ['a schemeless webhook', 'hooks.slack.com/services/T0ABC1234/B0DEF5678/Schemeless77SecretXy', 'Schemeless77SecretXy', false],
+    ['a clean link with ordinary parameters (read, but stored without them)', 'https://news.example.org/story/harbor?id=5821&ref=mail', 'ref=mail', true],
+    ['a timestamp parameter named t (read, stored without it)', 'https://video.example.org/watch?v=abcdefghijk&t=30', 't=30', true],
+  ]
+  it.each(PROBES)('%s: never fetched when secret, and absent from the stored file the cues read', async (_name, link, secret, fetched) => {
+    const f = fixture()
+    mocks.fetch.mockClear()
+    await ask(f, `${link} ${BODY}`)
+    if (/^https?:\/\//.test(link)) expect(mocks.fetch.mock.calls.length > 0, link).toBe(fetched)
+    const files = f.store.files('meeting_test').filter(x => x.id.startsWith('paste_'))
+    expect(files).toHaveLength(1)
+    expect(files[0].text).not.toContain(secret)
+    const { candidates } = groundedCandidates({ cueMemory: [], notes: [], files: f.store.files('meeting_test'), transcript: new Set(), window: 'Now the council is on the harbor budget and the evening hearing minutes.', selfIds: new Set(), meetingDomain: null, today: '2026-11-02' })
+    expect(candidates).toHaveLength(1)
+    expect(JSON.stringify(candidates)).not.toContain(secret)
+    expect(JSON.stringify(f.store.files('meeting_test'))).not.toContain(secret)
+  })
+  it('a clean link is stored as origin and path only', () => {
+    expect(W.redactUnsafeLinks('read https://news.example.org/story/harbor?id=5821&ref=mail#top. then https://example.org/ok')).toBe('read https://news.example.org/story/harbor. then https://example.org/ok')
+    expect(W.redactUnsafeLinks('see example.com/page?access_token=abc123 and mail jo@example.com?x=1= and e.g. report.pdf? done')).toBe('see example.com/page and mail jo@example.com?x=1= and e.g. report.pdf? done')
+    expect(W.redactUnsafeLinks('plain words, version 1.2, no links')).toBe('plain words, version 1.2, no links')
+  })
+  it('secret-looking parameters are refused by name or value, and ordinary ones are not', () => {
+    for (const q of ['?pwd=a', '?passcode=a', '?code=a', '?otp=1', '?sid=a', '?reset_hash=a', '?verify-code=a', '?accessToken=a', '?X-Goog-Signature=a', '?hmac=a', '?foo=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig', '?t=0123456789abcdef0123', '#access_token=a', '#/cb?code=a', '#/cb?t=0123456789abcdef0123'])
+      expect(W.pastedPublicUrls(`read https://example.org/p${q}`), q).toEqual({ urls: [], refused: ['pasted_secret'] })
+    for (const q of ['?id=5', '?t=30', '?v=abc&t=95', '?utm_source=x', '?page=2&sort=new', '?author=jo', '?monkey=1', '#section-2', '#/route', '?fbclid=IwAR0abcdefghijklmnopqrstuvwxyz'])
+      expect(W.pastedPublicUrls(`read https://example.org/p${q}`).urls, q).toHaveLength(1)
+  })
+  it('webhook hosts are secrets, not just unreadable', () => {
+    for (const u of ['https://hooks.slack.com/services/T/B/X', 'https://hooks.zapier.com/hooks/catch/1/abc', 'https://discordapp.com/api/webhooks/1/abc', 'https://outlook.office.com/webhook/abc', 'https://contoso.webhook.office.com/webhookb2/abc', 'https://api.telegram.org/bot123:ABC/sendMessage', 'https://hook.eu1.make.com/abcdef', 'https://maker.ifttt.com/trigger/x/with/key/abc'])
+      expect(W.pastedPublicUrls(`go ${u}`), u).toEqual({ urls: [], refused: ['pasted_secret'] })
+    expect(W.pastedPublicUrls('go https://slack.com/intl/en-us/').urls).toHaveLength(1)
+    expect(W.pastedPublicUrls('go https://discord.com/blog/post').urls).toHaveLength(1)
+  })
+  it('a page whose final address (after a redirect) carries a query or a fragment token is stored without either', async () => {
+    const f = fixture([answer('Approved. [W1]')])
+    mocks.fetch.mockImplementation(async (url: string) => page(`${url}?session=live99887#access_token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln`))
+    await ask(f, `This is the article: ${ARTICLE}`)
+    const webFile = f.store.files('meeting_test').find(x => x.id.startsWith('web_'))!
+    expect(webFile.text.split('\n', 1)[0]).toBe(ARTICLE)
+    expect(JSON.stringify(f.store.files('meeting_test'))).not.toMatch(/live99887|eyJhbGci/)
+  })
+  it('the web_ file for a page is still dropped when that page is a W source, even when its stored address has no query', async () => {
+    const f = fixture([answer('Approved. [W1]'), answer('Again. [W1]')])
+    const withQuery = `${ARTICLE}?id=77`
+    await ask(f, `This is the article: ${withQuery}`)
+    const webFile = f.store.files('meeting_test').find(x => x.id.startsWith('web_'))!
+    expect(webFile.text.split('\n', 1)[0]).toBe(ARTICLE)
+    await ask(f, 'What does the article say about the winning bidder?', { files: [{ id: webFile.id, revision: webFile.revision }] })
+    expect((f.run.mock.calls[1][1] as string).split('Quartz Basin Marine').length - 1).toBe(1)
+  })
+})
+
+describe('publicAddress refuses IPv4-translated addresses', () => {
+  it.each(['::ffff:0:7f00:1', '::ffff:0:10.0.0.1', '0:0:0:0:ffff:0:a00:1'])('[%s]', addr => {
+    expect(W.publicAddress(addr), addr).toBe(false)
+    expect(W.pastedPublicUrls(`read http://[${addr}]/x`).urls, addr).toEqual([])
   })
 })
