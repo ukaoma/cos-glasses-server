@@ -1,3 +1,12 @@
+## 6.98.1 - Tableau answers by lead source (private)
+
+2026-11-03. Private build for one Mac, on top of the public 6.98.0. Not published.
+
+- Live cues and the meeting assistant answer at lead-source level. Name paid search, PPC, brand or non-brand, paid social, events, organic, direct, referrals, aggregators, email, webinar or partnership, and the note or answer shows that source's numbers for the industry named, not the all-marketing totals.
+- Tableau budgets per budget line, and a line can count several sources (Paid Social sits inside the Paid Search Non-Brand line). The line is shown with what else it counts, never summed into one source.
+- A source word on its own fires a Tableau cue only in a meeting confirmed as Quilt or with a Quilt title. "G2" is not a lead source word, and everyday phrases such as "email Gina", "direct reports" and "conference call" do not count as sources.
+- Older Tableau data files keep working and show source rows without budgets.
+
 ## 6.98.0 - Live cues with five kinds, phone tuning, and a meeting assistant that reads links (public)
 
 2026-11-03. The public release of the private 6.95.0 to 6.97.9 line, merged with everything 6.94.4 published. Pairs with COS Glasses 6.11.669 and works with COS Control 0.5.363.
