@@ -13,6 +13,7 @@ import { pageWasRead, READ_PAGE_PREFIX } from './meeting-ask-review.js';
 import type { MeetingAskExchange, MeetingAskSource } from '../../shared/meeting-ask.js';
 import { fetchPublicArticle } from './meeting-web-page.js';
 import { webLedger, type WebFeature } from './web-lookup-ledger.js';
+import { privateReference } from './private-reference.js';
 /** The eight 16-bit groups of an IPv6 address `isIP` already accepted ("::" expanded, a trailing dotted IPv4 turned into two groups). */
 function ipv6Groups(h: string): number[] {
     let text = h.toLowerCase().split('%')[0];
@@ -112,7 +113,8 @@ export interface WebGateInput {
     /** The user's own earlier questions in this meeting, oldest first. Never answers, transcript or files. */
     priorQuestions?: readonly string[];
 }
-const PRIVATE_COST = /\b(?:private|internal|employee)\b|\b(?:our|my|client|customer)\b.*\b(?:budget|contract|salary|quote)\b/i;
+const PRIVATE_COST_WORDS = /\b(?:internal|employee)\b|\b(?:our|my|client|customer)\b.*\b(?:budget|contract|salary|quote)\b/i;
+const PRIVATE_COST = { test: (text: string) => PRIVATE_COST_WORDS.test(text) || privateReference(text) };
 const SENSITIVE = /\b(?:birthday|birthdate|address|phone|email|salary|medical|diagnosis|password|secret|confidential|wife|husband|daughter|son|family)\b/i;
 /** normalizeAsk redacts before the journal write, so a stored question shows a secret only as the mark it left. */
 const REDACTION_MARK = /REDACTED|\[private key\]/;
@@ -206,7 +208,7 @@ export function factCheckRequest(question: string): boolean {
 /** Public resource requests should not require the user to say "web".
  * Private/internal application and file lookups retain their COS routing. */
 export function publicResourceRequest(question: string): boolean {
-    return !/\b(?:private|internal|confidential|file|document|our app|our application|client application)\b/i.test(question)
+    return !/\b(?:internal|confidential|file|document|our app|our application|client application)\b/i.test(question) && !privateReference(question)
         && /\b(?:find|give|send|show|locate|get|look up)\b.{0,100}\b(?:application|apply|signup|sign up|official link|link|documentation|docs)\b/i.test(question);
 }
 export function explicitWebRequest(question: string): boolean {
@@ -366,6 +368,8 @@ export function meetingWebCapability() { return resolveProviderBinary('claude').
  *  keeps its meeting_ask_web label and every older caller behaves exactly as before. */
 export async function searchMeetingWeb(query: string, signal?: AbortSignal, options?: {
     auditCaller?: string;
+    /** Result pages to keep (default 2; the page reader tries two more candidates than it keeps). A comparison question gives its three searches 2, 1 and 1: four pages in all. */
+    maxPages?: number;
     /** Which feature to count the lookup under in the daily web ledger. Omitted: the general cues' audit caller counts as cues, anything else as the meeting assistant. */
     feature?: WebFeature;
 }): Promise<{
@@ -424,22 +428,23 @@ export async function searchMeetingWeb(query: string, signal?: AbortSignal, opti
         // (same per-page bounds and DNS pinning) and the first two that read, in priority order, are kept,
         // so one blocked or oversize page no longer leaves a check without a readable source. An
         // unavailable page keeps its honest search-result description, never a fabricated excerpt.
-        const candidates = prioritizeWebPages(sources, query).slice(0, 4);
+        const keepPages = Math.max(1, Math.min(4, Math.trunc(options?.maxPages ?? 2)));
+        const candidates = prioritizeWebPages(sources, query).slice(0, keepPages + 2);
         const focus = words(query).filter(w => w.length > 2 && isSubject(w));
         // Stop waiting once two pages have read; slower attempts end on their own 5 s page bound.
         const pages: Array<Awaited<ReturnType<typeof fetchPublicArticle>> | undefined> = new Array(candidates.length);
         await new Promise<void>(resolve => {
             let settled = 0, read = 0;
             if (!candidates.length) resolve();
-            candidates.forEach((source, i) => { void fetchPublicArticle(source.url!, publicAddress, signal, focus).catch(() => null).then(page => { pages[i] = page; if (!page) webLedger().pagesFailed(feature, 1); settled++; if (page) read++; if (read >= 2 || settled === candidates.length) resolve(); }); });
+            candidates.forEach((source, i) => { void fetchPublicArticle(source.url!, publicAddress, signal, focus).catch(() => null).then(page => { pages[i] = page; if (!page) webLedger().pagesFailed(feature, 1); settled++; if (page) read++; if (read >= keepPages || settled === candidates.length) resolve(); }); });
         });
         candidates.forEach((source, i) => {
             const page = pages[i];
-            if (!page || fetched >= 2) return;
+            if (!page || fetched >= keepPages) return;
             source.text = READ_PAGE_PREFIX + redactSecrets(page.text); source.url=page.url; if(page.title) source.title=redactSecrets(page.title); fetched++;
         });
         if (fetched) webLedger().pagesRead(feature, fetched);
-        return { sources, notices: [`Public web: ${fetched} result page${fetched === 1 ? '' : 's'} read (at most two, bounded excerpts). Other links have search-result evidence only. The search summary describes the search, not any single page. Search provider: Claude Haiku.`] };
+        return { sources, notices: [`Public web: ${fetched} result page${fetched === 1 ? '' : 's'} read (at most ${keepPages === 2 ? 'two' : keepPages === 1 ? 'one' : keepPages}, bounded excerpts). Other links have search-result evidence only. The search summary describes the search, not any single page. Search provider: Claude Haiku.`] };
     }
     catch (e) {
         if (e instanceof AskProcessError && e.terminationUnconfirmed) {
@@ -632,4 +637,42 @@ export function recentPastedPagesFromUserLinks(exchanges: readonly MeetingAskExc
                 return out;
         }
     return out;
+}
+
+
+/*
+ * Comparison and fact-check questions (6.97.8).
+ *
+ * A public factual comparison ("is private aviation safer than commercial?") is answered from more than one page, so it may run up to
+ * COMPARISON_SEARCHES admitted searches in parallel (the usual Ask runs one) and keep COMPARISON_PAGES pages in all (2, 1 and 1).
+ * Cost and timing: three searches start together, so the wait is the slowest one (the 12 s per-search budget), not the sum; each
+ * search is one Haiku call plus the page reads, and each is counted in the daily web ledger. The answer still has to finish inside the
+ * 30 s Ask deadline, so a slow search ends with a notice instead of delaying the answer.
+ * Every query is built from the user's OWN typed words plus the generic modifiers publicSearchGate allows (comparison, average), and
+ * each still passes publicSearchGate in webLookup: nothing from the transcript, files or memory is ever added.
+ */
+export const COMPARISON_SEARCHES = 3;
+export const COMPARISON_PAGES = 4;
+/** "than", "versus", "compared to": the question sets two things side by side. A fact-check request counts on its own (factCheckRequest). */
+export function comparisonQuestion(question: string): boolean {
+    return /\b(?:than|versus|vs\.?|compared (?:to|with)|compare(?:d)?|difference between)\b/i.test(question) || factCheckRequest(question);
+}
+const COMPARATOR = new Set(['than', 'versus', 'vs', 'compared', 'compare']);
+const SIDE_NOISE = new Set(['more', 'less', 'or', 'and', 'much', 'many']);
+/**
+ * Up to three distinct queries for a comparison question, all made of the user's own typed words (those in `base`, the admitted query) and
+ * the modifiers "comparison" and "average": the query as admitted; the first side of the comparison plus "average"; the second side plus
+ * "average" (so each side gets its own pages). The sides come from the words around "than", "versus" or "vs" in the question. With no
+ * comparator they fall back to all the subject words plus "comparison" and plus "average". A typo stays as typed.
+ */
+export function comparisonQueries(base: string, question: string = base): string[] {
+    const baseWords = new Set((base.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []));
+    const typed = (question.match(/[\p{L}\p{N}]+/gu) ?? []);
+    const at = typed.findIndex(w => COMPARATOR.has(w.toLowerCase()));
+    const uniq = (list: string[]) => list.filter((w, i) => list.findIndex(x => x.toLowerCase() === w.toLowerCase()) === i);
+    const side = (list: string[]) => uniq(list.filter(w => baseWords.has(w.toLowerCase()) && isSubject(w.toLowerCase()) && !SIDE_NOISE.has(w.toLowerCase()) && !COMPARATOR.has(w.toLowerCase())));
+    const all = side(typed);
+    const left = at < 0 ? [] : side(typed.slice(0, at)), right = at < 0 ? [] : side(typed.slice(at + 1)).filter(w => !left.some(l => l.toLowerCase() === w.toLowerCase()));
+    const out = left.length && right.length ? [base, `${left.join(' ')} average`, `${right.join(' ')} average`] : [base, `${all.join(' ')} comparison`, `${all.join(' ')} average`];
+    return out.map(q => q.trim().split(/\s+/).slice(0, 12).join(' ')).filter((q, i, list) => q.split(' ').some(w => isSubject(w.toLowerCase())) && list.indexOf(q) === i).slice(0, COMPARISON_SEARCHES);
 }
