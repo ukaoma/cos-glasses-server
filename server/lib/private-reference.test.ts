@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { privateReference } from './private-reference.js'
-import { PRIVATE_QUERY, admitPublicTopic } from './meeting-public-topic.js'
+import { PRIVATE_QUERY, PRIVATE_QUERY_BARE, admitPublicTopic } from './meeting-public-topic.js'
 import { publicSearchGate, publicResourceRequest, userWebQuery } from './meeting-ask-web.js'
 import { denyWordHit } from './live-cues-general-topic.js'
 
@@ -53,9 +53,58 @@ describe('every site that read the bare word uses the helper', () => {
     expect(admitPublicTopic(raw, privateTurn)).toBeNull()
     expect(admitPublicTopic({ ...raw, query: 'my private notes accident rate average' }, input)).toBeNull()
   })
-  it('the live-cue deny list (denyWordHit) lets a public subject through and keeps a privacy reference out', () => {
-    expect(denyWordHit('private aviation accident rates')).toBe(false)
-    expect(denyWordHit('private equity returns')).toBe(false)
-    expect(denyWordHit('our private pricing')).toBe(true)
+  it('the live-cue deny list (denyWordHit) keeps the bare word: its queries are chosen by a model, so nothing the user typed vouches for them', () => {
+    for (const t of ['private aviation accident rates', 'private equity returns', 'our private pricing', 'a private jet', 'private']) expect(denyWordHit(t), t).toBe(true)
+    expect(denyWordHit('commercial aviation accident rates')).toBe(false)
+    expect(PRIVATE_QUERY_BARE.test('private aviation')).toBe(true)
+    expect(PRIVATE_QUERY_BARE.test('commercial aviation')).toBe(false)
+  })
+})
+
+describe('B1: the bare word blocks; only a short list of public phrases is let through', () => {
+  const BLOCKED = [
+    'This stays private - is the Blackstone deal above the typical average?', 'private funding round from Blackstone', 'our private placement price', 'private offer from Shopify',
+    "Acme's private valuation", 'private dinner with Jeremy', "Stephen's private plane crash rate", 'my private hospital stay', "pricing that's private",
+    'a private matter', 'a private hospital stay', 'the private clinic visit', 'private health records', 'private company salaries at our firm', 'privately owned by Pete', 'privacy settings for our app',
+  ]
+  it.each(BLOCKED)('blocked: %s', text => {
+    expect(privateReference(text), text).toBe(true)
+    expect(PRIVATE_QUERY.test(text), text).toBe(true)
+  })
+  it.each([
+    "Does private aviation safter or more dangerious than commercial? typical commercial", 'Is private aviation more dangerous than commercial?', 'Is it true that private planes crash more than airlines?',
+    'private jets accident rate per flight hour', 'private pilot fatality rate', 'private equity returns vs the S&P', 'private school tuition trends', 'private sector job growth', 'private label market share',
+    'private markets versus public markets', 'private companies in the US', 'private credit default rates', 'how many privately held firms are there', 'private jet charter prices',
+  ])('let through: %s', text => {
+    expect(privateReference(text), text).toBe(false)
+  })
+  it.each([
+    "Stephen's private plane crash rate", 'private jets that our CEO owns', 'is my private jet safe', 'their private equity firm', "Pete's private school", 'private aviation, his plane, crash rate',
+    'private equity returns, keep this between us', 'private plane crash rate (off the record)', 'private jets stay private for now', 'keep this private: private equity returns', 'we discussed private aviation in private.',
+  ])('a public phrase still blocks with a possessive, a person or a privacy phrase: %s', text => {
+    expect(privateReference(text), text).toBe(true)
+  })
+  it('a contraction is not a possessive, and "keep up with private aviation" is not a privacy phrase', () => {
+    expect(privateReference("What's the crash rate of private aviation?")).toBe(false)
+    expect(privateReference("It's said private jets crash more, is that right?")).toBe(false)
+    expect(privateReference('keep up with private aviation news')).toBe(false)
+    expect(privateReference('Is private aviation safe?')).toBe(false)                    // "is private" is not a clause-final privacy phrase
+  })
+  it('every probe is withheld by the Ask search gate, on the comparison path too, and Miles\'s question is admitted', () => {
+    for (const q of BLOCKED.slice(0, 9)) {
+      const question = /typical|average|more|than/i.test(q) ? q : `Compare ${q} to the typical average`
+      const gate = publicSearchGate({ question, query: userWebQuery(question) ?? question })
+      expect(gate.ok, question).toBe(false)
+    }
+    expect(publicSearchGate({ question: MILES, query: userWebQuery(MILES)! })).toMatchObject({ ok: true })
+  })
+  it('narrow health words are sensitive; death, fatal and crash are not (public safety statistics need them)', () => {
+    for (const w of ['hospital', 'surgery', 'clinic', 'therapy', 'pregnant', 'pregnancy', 'fever']) {
+      const q = `Compare the ${w} rate to the typical average`
+      expect(publicSearchGate({ question: q, query: userWebQuery(q) ?? q }), w).toMatchObject({ ok: false, reason: 'personal' })
+    }
+    for (const q of ['Compare commercial aviation fatal accident rates to the typical average', 'Compare crash deaths per year to the typical average']) {
+      expect(publicSearchGate({ question: q, query: userWebQuery(q) ?? q }), q).toMatchObject({ ok: true })
+    }
   })
 })

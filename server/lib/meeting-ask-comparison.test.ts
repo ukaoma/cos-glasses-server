@@ -29,7 +29,7 @@ const FIGURE = 'fatal accidents per 100,000 flight hours'
 
 const dirs: string[] = []
 let seq = 0
-function setup(opts: { publicTopics?: boolean; review?: boolean; pages?: boolean; answer?: (prompt: any) => unknown } = {}) {
+function setup(opts: { publicTopics?: boolean; review?: boolean; pages?: boolean; answer?: (prompt: any) => unknown; finalizedSources?: unknown[]; webSearch?: typeof W.searchMeetingWeb } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ask-cmp-')); dirs.push(dir)
   const store = new MeetingAskStore(dir)
   store.setPublicTopics(!!opts.publicTopics)
@@ -51,9 +51,9 @@ function setup(opts: { publicTopics?: boolean; review?: boolean; pages?: boolean
       : { sections: [{ label: 'So what', text: 'Not checked against a source: private flying is generally considered meaningfully riskier per hour than airline flying.' }], confidence: { level: 'low', reason: 'No page was read.' }, searchQuery: null }
     return { text: JSON.stringify(reply), model: 'claude-sonnet-5-5' }
   })
-  const runtime = new MeetingAskRuntime({ reviewAnswers: !!opts.review, finalized: () => ({ sources: [], notices: [] }), domains: () => [{ id: 'quilt', label: 'Quilt' }], store, identity: () => 'server-one', admissions: () => true,
+  const runtime = new MeetingAskRuntime({ reviewAnswers: !!opts.review, finalized: () => ({ sources: (opts.finalizedSources ?? []) as any, notices: [] }), domains: () => [{ id: 'quilt', label: 'Quilt' }], store, identity: () => 'server-one', admissions: () => true,
     lease: () => ({ release: vi.fn(), id: 'lease', kind: 'meeting_ask' } as any), catalog: async () => [{ engine: 'claude', available: true, defaultModel: 'haiku', models: ['haiku', 'sonnet'] }],
-    run, search: async () => ({ sources: [], notices: [] }), webSearch: W.searchMeetingWeb, webCapability: () => ({ available: true, engine: 'claude:haiku' }), ownerArea: () => null, ownerLabel: () => null, wearer: () => 'Morgan' } as any)
+    run, search: async () => ({ sources: [], notices: [] }), webSearch: opts.webSearch ?? W.searchMeetingWeb, webCapability: () => ({ available: true, engine: 'claude:haiku' }), ownerArea: () => null, ownerLabel: () => null, wearer: () => 'Morgan' } as any)
   const ledger = new WebLookupLedger(join(dir, 'ledger.json'), () => Date.parse('2026-11-02T22:43:00Z'))
   setWebLedgerForTests(ledger)
   return { runtime, run, seen, ledger, store }
@@ -94,7 +94,7 @@ describe('Miles\'s 5:43 PM question shape (synthesized meeting)', () => {
     expect(queries[0]).toContain('private aviation safter')
     expect(f.ledger.today().ask).toEqual({ searches: 3, pagesRead: 4, pagesFailed: 0 })
     expect(e.notices.join(' ')).not.toMatch(/withheld|No sufficiently clear public topic/)
-    // Three searches together: the stated parallelism, not a sum. The fake search takes no time, so assert they were all started before any finished.
+    // The caps are 3 searches and 4 pages. That the searches run together, not one after another, is tested in 'timing' below.
     expect(W.COMPARISON_SEARCHES).toBe(3); expect(W.COMPARISON_PAGES).toBe(4)
   })
   it('the answer is a verdict first, then cited figures and one caveat, in the existing So what and Details rows', async () => {
@@ -300,5 +300,154 @@ describe('the Ask deadline', () => {
     expect(e.error ?? '').toBe('')
     expect(e.status).toBe('completed')
     expect(took).toBeLessThan(MEETING_ASK_DEADLINE_MS)
+  })
+})
+
+// 6.97.8 review round
+describe('W2: the "Not checked against a source:" line needs an admitted lookup', () => {
+  const unchecked = (f: ReturnType<typeof setup>) => f.seen.some(x => !x.system.startsWith(REVIEW_SYSTEM) && x.system.includes(UNCHECKED_FINAL))
+  it.each([
+    'Did Taylor say the launch is later than Friday?',
+    "Is Isaiah's fever higher than normal for his age?",
+    'Is the private conversation with Pete more expensive than the typical average?',
+    'Is the private conversation with Pete pricier than average?',
+  ])('never offered when the gate refused it: %s', async question => {
+    const f = setup({ review: true })
+    const e = await ask(f, { question })
+    expect(e.status).toBe('completed')
+    expect(mocks.search).not.toHaveBeenCalled()
+    expect(unchecked(f)).toBe(false)
+    expect(f.seen.some(x => x.prompt.uncheckedLineAllowed === true)).toBe(false)
+  })
+  it('offered when the gate admitted the lookup, and when the only reason it was withheld is that nothing specific was left to search', async () => {
+    const admitted = setup({ review: true })
+    await ask(admitted)
+    expect(unchecked(admitted)).toBe(true)
+    const noSubject = setup({ review: true })
+    await ask(noSubject, { question: 'Search the web for that' })
+    expect(noSubject.ledger.today().withheld.byReason).toEqual({ no_public_subject: 1 })
+    expect(unchecked(noSubject)).toBe(true)
+  })
+  const answersOf = (f: ReturnType<typeof setup>) => f.seen.filter(x => !x.system.startsWith(REVIEW_SYSTEM))
+  const planThenAnswer = (searchQuery: string) => ({ parsed }: { parsed: any }) => parsed.searchAllowed && !parsed.evidence.some((s: any) => s.kind === 'web') && !parsed.__proposed
+    ? { sections: [], searchQuery, searchScope: 'web' } : { sections: [{ label: 'So what', text: 'Not checked against a source: plans vary.' }], confidence: { level: 'low', reason: 'No page.' }, searchQuery: null }
+  it('an explicit request with an admitted query offers it from the first answer call', async () => {
+    mocks.fetch.mockResolvedValue(null)
+    const f = setup({ review: true })
+    await ask(f, { question: 'Search the web for Shopify pricing' })
+    expect(answersOf(f)[0].system).toContain(UNCHECKED_FINAL)
+  })
+  it('a planner-proposed search the gate admits turns it on for the answer that follows, not before', async () => {
+    mocks.fetch.mockResolvedValue(null)
+    const f = setup({ review: true, answer: planThenAnswer('Shopify pricing') })
+    await ask(f, { question: 'What is the Shopify pricing these days?' })
+    const answers = answersOf(f)
+    expect(answers.length).toBeGreaterThanOrEqual(2)
+    expect(answers[0].system).not.toContain(UNCHECKED_FINAL)
+    expect(answers.at(-1)!.system).toContain(UNCHECKED_FINAL)
+  })
+  it('a planner-proposed search the gate refuses for untyped words (not_user_words) does not turn it on', async () => {
+    const f = setup({ review: true, answer: planThenAnswer('Acme Corp pricing tiers') })
+    await ask(f, { question: 'What is the Shopify pricing these days?' })
+    expect(f.ledger.today().withheld.byReason).toMatchObject({ not_user_words: 1 })
+    expect(answersOf(f).every(x => !x.system.includes(UNCHECKED_FINAL))).toBe(true)
+  })
+  it('a privacy withhold on a proposed search turns it off even though the user\'s own words were admitted', async () => {
+    mocks.fetch.mockResolvedValue(null)
+    const f = setup({ review: true, answer: planThenAnswer('Shopify pricing birthday') })
+    await ask(f, { question: 'Search the web for Shopify pricing' })
+    expect(f.ledger.today().withheld.byReason).toMatchObject({ personal: 1 })
+    expect(answersOf(f)[0].system).toContain(UNCHECKED_FINAL)                       // before any withhold
+    expect(answersOf(f).at(-1)!.system).not.toContain(UNCHECKED_FINAL)             // after it
+  })
+  it('a figure with no citation must be the labeled line: the review fails otherwise, the same way its other problems do', async () => {
+    const bad = setup({ review: true, answer: ({ pages }) => ({ sections: [{ label: 'So what', text: `Private flying is far more dangerous [${pages[0].id}].` }, { label: 'Details', text: `Airlines: about 0.01 [${pages[0].id}]. Private flying is about 60 times riskier per hour.` }], confidence: { level: 'supported', reason: 'Read pages.' }, searchQuery: null }) })
+    const e = await ask(bad)
+    expect(e.notices.join(' ')).toContain('Answer grounding review could not confirm')
+    expect(e.sections![0].text).toMatch(/could not|Unverified/i)
+    const good = setup({ review: true, answer: ({ pages }) => ({ sections: [{ label: 'So what', text: `Private flying is far more dangerous [${pages[0].id}].` }, { label: 'Details', text: `Airlines: about 0.01 [${pages[0].id}]. Not checked against a source: private flying is often quoted at 60 times the risk.` }], confidence: { level: 'supported', reason: 'Read pages.' }, searchQuery: null }) })
+    const ok = await ask(good)
+    expect(ok.notices.join(' ')).not.toContain('could not confirm')
+  })
+  it('uncitedFigure and reviewProblem: sentences, citations and the label', async () => {
+    const { uncitedFigure, reviewProblem } = await import('./meeting-ask-review.js')
+    expect(uncitedFigure([{ text: 'About 60 times riskier.' }])).toBe(true)
+    expect(uncitedFigure([{ text: 'About 60 times riskier [W1].' }])).toBe(false)
+    expect(uncitedFigure([{ text: 'No figures here. Just words.' }])).toBe(false)
+    expect(uncitedFigure([{ text: 'Not checked against a source: roughly 60 times riskier.' }])).toBe(false)
+    expect(uncitedFigure([{ text: 'Not checked against a source: riskier. And 60 times at that.' }])).toBe(true)      // only the labeled sentence is exempt
+    const raw = { sections: [{ label: 'So what', text: 'About 60 times riskier.' }], confidence: { level: 'low', reason: 'x' } }
+    expect(reviewProblem(raw, [], 200)).toBeNull()                                                                         // off unless asked for
+    expect(reviewProblem(raw, [], 200, { uncitedFigures: true })).toBe('uncited_figure')
+  })
+})
+
+describe('W3: a question the attached data answers does not take the comparison path', () => {
+  it('a data source (a file source with no file id) beside a comparison-looking question: one ordinary lookup, no comparison shape, no unchecked line', async () => {
+    const data = [{ id: 'F9', kind: 'file', title: 'Tableau data', text: 'Liquor leads October: 120 against a plan of 110.' }]
+    const f = setup({ review: true, finalizedSources: data })
+    const e = await ask(f, { question: 'Is our Liquor lead volume in Tableau higher than the typical average?' })
+    expect(e.status).toBe('completed')
+    expect(mocks.search.mock.calls.length).toBeLessThanOrEqual(1)
+    const answer = f.seen.find(x => !x.system.startsWith(REVIEW_SYSTEM))!
+    expect(answer.system).not.toContain('COMPARISON OVERRIDE')
+    expect(answer.system).not.toContain(UNCHECKED_FINAL)
+    expect(answer.prompt.labels).toEqual(['So what'])
+    expect(answer.prompt.finalInstructions).not.toContain(COMPARISON_FINAL)
+    expect(f.seen.every(x => !x.prompt.comparison)).toBe(true)
+    // The same question with no data attached is the comparison.
+    const plain = setup({ review: true })
+    await ask(plain, { question: 'Is our Liquor lead volume in Tableau higher than the typical average?' })
+    expect(plain.seen.find(x => !x.system.startsWith(REVIEW_SYSTEM))!.system).toContain('COMPARISON OVERRIDE')
+  })
+  it('a dropped file (it has a file id) does not count as the data source', async () => {
+    const f = setup({ review: true })
+    f.store.putFiles('meeting_cmp', [{ id: 'file_notes0001', revision: 'r1', name: 'Notes', status: 'ready', text: 'Some notes.' }])
+    await ask(f, { files: [{ id: 'file_notes0001', revision: 'r1' }] })
+    expect(f.seen.find(x => !x.system.startsWith(REVIEW_SYSTEM))!.system).toContain('COMPARISON OVERRIDE')
+  })
+})
+
+describe('W4: public safety and statistics questions have public intent', () => {
+  it.each([
+    'Is private aviation more dangerous than commercial?', 'Is it true that private planes crash more than airlines?', 'Is flying safer than driving', 'What is the crash rate of small planes',
+    'Give me the accident rate for helicopters', 'Fatality rates for motorcycles', 'Any statistics on this', 'How common are lightning strikes', 'How likely is a delay',
+  ])('public intent: %s', q => { expect(W.publicIntent(q), q).toBe(true) })
+  it.each([
+    'Is it true that Pete said the launch slipped?', 'is that true about our pipeline', 'Is it true that we signed the deal', 'Is it true she told you'
+  ])('still no public intent: %s', q => { expect(W.publicIntent(q), q).toBe(false) })
+  it('both questions pass the whole gate on the user\'s own words', () => {
+    for (const q of ['Is private aviation more dangerous than commercial?', 'Is it true that private planes crash more than airlines?'])
+      expect(W.publicSearchGate({ question: q, query: W.userWebQuery(q)! }), q).toMatchObject({ ok: true })
+    expect(W.publicSearchGate({ question: 'Is it true that Pete said the launch slipped?', query: 'Pete launch slipped' })).toMatchObject({ ok: false, reason: 'no_public_intent' })
+  })
+})
+
+describe('notes', () => {
+  it('when one of the three searches throws, the other two are waited for before the Ask ends (no search runs on behind a thrown error)', async () => {
+    const f = setup()
+    let finished = 0, started = 0
+    const fast = mocks.search.getMockImplementation()!
+    const { AskProcessError } = await import('./meeting-ask-runner.js')
+    mocks.search.mockImplementation(async (...args: any[]) => {
+      const n = ++started
+      if (n === 2) throw new AskProcessError('could_not_confirm_stopped', true)
+      await new Promise(r => setTimeout(r, 300))
+      finished++
+      return fast(...args)
+    })
+    const e = await ask(f)
+    expect(e.status).toBe('failed')
+    expect(started).toBe(3)
+    expect(finished).toBe(2)                                   // both others ran to their end before the Ask was over
+  })
+  it('the base query keeps the two-page budget, the others one page each', async () => {
+    const calls: Array<{ q: string; maxPages?: number }> = []
+    const f = setup({ webSearch: (q, signal, options) => { calls.push({ q, maxPages: options?.maxPages }); return W.searchMeetingWeb(q, signal, options) } })
+    await ask(f)
+    expect(calls).toHaveLength(3)
+    expect(calls[0].maxPages).toBe(2)
+    expect(calls.slice(1).map(c => c.maxPages)).toEqual([1, 1])
+    expect(calls[0].q).toBe(W.comparisonQueries(W.userWebQuery(QUESTION)!, QUESTION)[0])
   })
 })
