@@ -3,8 +3,9 @@
 2026-11-03. The public release of the private 6.95.0 to 6.97.9 line, merged with everything 6.94.4 published. Pairs with COS Glasses 6.11.669 and works with COS Control 0.5.363.
 
 - Live cues stay off until a person turns them on. Once on: G2 meetings armed by the phone get all five kinds (reinforce, challenge, decision, promise, follow-up), cues are paced across the meeting instead of spending the cap early, a cue that repeats a recent opening line is held back, and names come from the meeting's own speakers.
+- For anyone who already has live cues on, pacing, the repeat hold, meeting speaker names sent to the cue writer, and grouped open items on Mac meetings start on install. Each has an env switch to turn it off.
 - Cue tuning from the phone and from COS Control uses `GET/POST /api/live-cues/v2/settings?v=3`.
-- The meeting assistant reads a public link typed in a question, runs up to three searches for a comparison or fact check and leads with a verdict, and treats "private" as a privacy word only when it means privacy. Searches still go out only with Public topics on, and only with the words the user typed.
+- The meeting assistant reads a public link typed in a question, runs up to three searches for a comparison or fact check and leads with a verdict, and treats "private" as a privacy word only when it means privacy. Web searches go out only with Public topics on, using only the words the user typed. A link the user types into a question is read even with Public topics off, unless the question says not to use the web. Pasted text over 400 characters and pages read from typed links are kept as meeting files for live cues.
 - Dropped `.xlsx` files give their text to the meeting assistant.
 - A daily web lookup count (`webToday`) on the cue settings and meeting assistant config.
 - Saved Mac calls no longer fail on one silent window, and a meeting that has stopped retrying no longer locks Restart and Update.
