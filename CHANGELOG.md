@@ -1,6 +1,6 @@
 ## 6.98.1 - Tableau answers by lead source (private)
 
-2026-11-03. Private build for one Mac, on top of the public 6.98.0. Not published.
+2026-11-03. Private build for one Mac, on top of the public 6.98.0.
 
 - Live cues and the meeting assistant answer at lead-source level. Name paid search, PPC, brand or non-brand, paid social, events, organic, direct, referrals, aggregators, email, webinar or partnership, and the note or answer shows that source's numbers for the industry named, not the all-marketing totals.
 - Tableau budgets per budget line, and a line can count several sources (Paid Social sits inside the Paid Search Non-Brand line). The line is shown with what else it counts, never summed into one source.
