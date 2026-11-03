@@ -13,7 +13,8 @@
 // enrolled voices, the owner and the capitalized words of the calendar title are what the lists can know.
 import { createHash } from 'node:crypto'
 import { redactSecrets } from './lens-gist-engines.js'
-import { PRIVATE_QUERY } from './meeting-public-topic.js'
+// The bare word "private" still blocks here (the 6.97.7 rule): these queries are chosen by a model, so nothing the user typed vouches for "private aviation".
+import { PRIVATE_QUERY_BARE as PRIVATE_QUERY } from './meeting-public-topic.js'
 import { speakerNameWords, factWords, stemWord } from './meeting-fact-check.js'
 import { HOME_AREA_LABEL, getDomainKeywords, getOwnerName, getOwnerSpeakerLabel, getVocabulary } from './profile.js'
 

@@ -26,7 +26,12 @@ export function reviewRepairDiagnostics(raw: any, sources: readonly MeetingAskSo
   const ids=[...new Set([...text.matchAll(/\[([THFW]\d+)\]/g)].map(m=>m[1]))]
   return {unsupportedQuoteIds:ids.filter(id=>{const s=sources.find(s=>s.id===id),q=raw?.support?.find((q:any)=>q?.id===id)?.quote;return !s||typeof q!=='string'||q.length<Math.min(12,s.text.length)||q.length>300||!s.text.includes(q)})}
 }
-export function reviewProblem(raw: any, sources: readonly MeetingAskSource[], maxWords: number): string | null {
+/** True for an answer sentence that states a figure (has a digit) with no citation and is not the labeled general-knowledge line. */
+export const UNCHECKED_LABEL = 'Not checked against a source:'
+export function uncitedFigure(sections: ReadonlyArray<{ text: string }>): boolean {
+  return sections.some(s => s.text.split(/(?<=[.!?])\s+/).some(sentence => /\d/.test(sentence) && !/\[[THFW]\d+\]/.test(sentence) && !sentence.trim().startsWith(UNCHECKED_LABEL)))
+}
+export function reviewProblem(raw: any, sources: readonly MeetingAskSource[], maxWords: number, options?: { uncitedFigures?: boolean }): string | null {
   if (!Array.isArray(raw?.sections) || !raw.sections.length || raw.sections.some((s: any) => typeof s?.text !== 'string')) return 'invalid_sections'
   const text = raw.sections.map((s: any) => s.text).join(' '), reason = String(raw?.confidence?.reason ?? '')
   if (COVERAGE.test(text + ' ' + reason)) return 'invented_coverage'
@@ -54,6 +59,8 @@ export function reviewProblem(raw: any, sources: readonly MeetingAskSource[], ma
       if (!sourceCounts.includes(value) || /\b(?:and a half to|half to)\s+\d+\s+pages?\b/i.test(citedText)) return 'unsupported_page_count'
     }
   }
+  // A web comparison or general-knowledge answer: a figure with no citation must be the labeled "Not checked against a source:" line.
+  if (options?.uncitedFigures && uncitedFigure(raw.sections)) return 'uncited_figure'
   if (/^(?:(?:verdict|fact check)\s*:\s*)?(?:mostly\s+)?(?:supported|verified|confirmed|contradicted|mixed)\b/i.test(text.trim()) && !cited.some(id => sources.some(s => s.id === id && pageWasRead(s)))) return 'unverified_verdict'
   return null
 }

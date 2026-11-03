@@ -115,7 +115,7 @@ export interface WebGateInput {
 }
 const PRIVATE_COST_WORDS = /\b(?:internal|employee)\b|\b(?:our|my|client|customer)\b.*\b(?:budget|contract|salary|quote)\b/i;
 const PRIVATE_COST = { test: (text: string) => PRIVATE_COST_WORDS.test(text) || privateReference(text) };
-const SENSITIVE = /\b(?:birthday|birthdate|address|phone|email|salary|medical|diagnosis|password|secret|confidential|wife|husband|daughter|son|family)\b/i;
+const SENSITIVE = /\b(?:birthday|birthdate|address|phone|email|salary|medical|diagnosis|password|secret|confidential|wife|husband|daughter|son|family|hospital|surgery|clinic|therapy|pregnant|pregnancy|fever)\b/i;
 /** normalizeAsk redacts before the journal write, so a stored question shows a secret only as the mark it left. */
 const REDACTION_MARK = /REDACTED|\[private key\]/;
 /** A subjectless follow-up may borrow words from at most this many of the user's latest earlier questions. */
@@ -184,7 +184,14 @@ export function publicIntent(question: string): boolean {
     if (w.some(x => INTENT_WORDS.has(x)))
         return true;
     const s = w.join(' ');
-    if (factCheckRequest(question)) return true;
+    // "Is that true about our pipeline?" asks about the user's own thing, not a public claim; the other fact-check wording is unchanged.
+    const ownThing = /\b(?:my|our|his|her|their|your|we|i)\b/.test(s) && /\bis (?:this|that) (?:true|accurate)\b/.test(s) && !/\bfact check(?:ing)?\b|\bverify\b|\bcompar|\b(?:average|typical|benchmark)\b/.test(s);
+    if (factCheckRequest(question) && !ownThing) return true;
+    // 6.97.8: public safety and statistics questions. "is it true (that)" counts unless it asks about what someone said or about the user's own things.
+    if (/\bis it true\b/.test(s) && !/\b(?:said|says|told|mentioned|claimed|promised|asked|my|our|his|her|their|your|we|i)\b/.test(s))
+        return true;
+    if (/\bsafer than\b|\b(?:more|less) dangerous than\b|\b(?:crash|accident|fatality) rates?\b|\bstatistics?\b|\bhow common\b|\bhow likely\b/.test(s))
+        return true;
     return /\bknown for\b/.test(s) || /\blook (?:\S+ ){0,2}up\b/.test(s);
 }
 /**

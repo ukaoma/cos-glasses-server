@@ -539,7 +539,9 @@ export class MeetingAskRuntime {
             // A withheld lookup counts once per reason per question, wherever in this run it is first refused.
             const withheldCounted = new Set<string>();
             let privacyWithheld = false;
-            const countWithheld = (reason: string) => { if (reason === 'secret' || reason === 'personal') privacyWithheld = true; if (!withheldCounted.has(reason)) { withheldCounted.add(reason); webLedger().withheld('ask', reason); } };
+            const withheldReasons = new Set<string>();
+            let webAdmitted = false;
+            const countWithheld = (reason: string) => { withheldReasons.add(reason); if (reason === 'secret' || reason === 'personal') privacyWithheld = true; if (!withheldCounted.has(reason)) { withheldCounted.add(reason); webLedger().withheld('ask', reason); } };
             // Only the user's own typed questions from this meeting, newest last. Answers, transcript and files never lend words.
             const priorQuestions = priorUserQuestions(journal, input);
             // 6.71.13: meeting-wide Fact check, named claim checks and their follow-ups. The narrow
@@ -602,12 +604,17 @@ export class MeetingAskRuntime {
             const webResults=new Map<string, Awaited<ReturnType<typeof searchMeetingWeb>>>();
             if(benchmarkQuery&&contextualQuery){const remembered=recentPublicPages(journal.map(r=>r.exchange),input.sessionId,input.serverInstanceId,contextualQuery);if(remembered.length)webResults.set(contextualQuery,{sources:remembered,notices:['Public web: reused readable pages from an earlier question in this meeting, read less than 15 minutes ago. A fresh benchmark lookup is still attempted.']});}
             // A public factual comparison (6.97.8): up to three searches built from the user's own words run together and keep four pages in all.
-            const comparisonSet = input.action === 'ask' && webAvailable && explicitWebQuery && !contextualQuery && !genericRule && !isFactCheckCTA(input.question) && comparisonQuestion(input.question) ? comparisonQueries(explicitWebQuery, input.question) : [];
-            let searchesDispatched = 0;
+            // A data source attached to the answer (the Tableau facts: a file source with no file id) is cited as [F#]; the comparison shape demands
+            // [W#] citations, so a question the data answers does not take this path.
+            const dataAttached = extraSources.some(x => x.kind === 'file' && !x.fileId);
+            const comparisonSet = input.action === 'ask' && webAvailable && !dataAttached && explicitWebQuery && !contextualQuery && !genericRule && !isFactCheckCTA(input.question) && comparisonQuestion(input.question) ? comparisonQueries(explicitWebQuery, input.question) : [];
             if (comparisonSet.length) allowUntil(COMPARISON_DEADLINE_MS);
-            // A public factual question whose search was withheld, failed or empty may still be answered from general knowledge, in one labeled line. Never after a privacy withhold.
-            const publicFactual = input.action === 'ask' && webAvailable && !isFactCheckCTA(input.question) && (comparisonQuestion(input.question) || explicitWebRequest(input.question) || !!explicitWebQuery);
-            const uncheckedLine = () => publicFactual && !privacyWithheld;
+            // The "Not checked against a source:" line (general knowledge, labeled) is offered only when the gate admitted a lookup (the user's own words
+            // were searchable, whether or not a page could then be read) or the only reason it was withheld was that nothing specific was left to
+            // search (no_public_subject). A question the gate refused for no public intent ("Did Taylor say the launch is later than Friday?") or for a
+            // privacy reason never gets it, and neither does a question the attached data answers.
+            const uncheckedLine = () => input.action === 'ask' && webAvailable && !isFactCheckCTA(input.question) && !privacyWithheld && !dataAttached
+                && (!!explicitWebQuery || webAdmitted || (withheldReasons.size > 0 && [...withheldReasons].every(r => r === 'no_public_subject')));
             const webLookup = async (q: string) => {
                 const topicGate = contextualQuery ? publicTopicLookupGate(q,contextualQuery) : null;
                 const plan = contextualQuery ? {query:topicGate?.ok ? topicGate.query : contextualQuery,notices:[]} : resolveMeetingWebQuery({ question: input.question, query: q, priorQuestions, explicitQuery: explicitWebQuery });
@@ -620,13 +627,14 @@ export class MeetingAskRuntime {
                     return { sources: [], notices: shared.linkInQuestion && reason === 'no_public_intent' ? [] : plan.notices };
                 }
                 admittedQuery=plan.query;
+                webAdmitted=true;
                 let found=webResults.get(plan.query);
                 if (!found) {
                     // Reserve fifteen seconds for answer/review and provider shutdown.
                     // A slow second lookup must not discard an already fetched article.
                     const budget=Math.min(12000,15000-(Date.now()-executionStarted));
                     if(budget<=0)found={sources:[],notices:['The public lookup budget ended. Additional comparisons remain unverified.']};
-                    else try { found=await this.deps.webSearch(plan.query,AbortSignal.any([controller.signal,AbortSignal.timeout(budget)]),{feature:'ask',...(comparisonSet.length?{maxPages:searchesDispatched++===0?COMPARISON_PAGES-2:1}:{})}); }
+                    else try { found=await this.deps.webSearch(plan.query,AbortSignal.any([controller.signal,AbortSignal.timeout(budget)]),{feature:'ask',...(comparisonSet.length?{maxPages:plan.query===comparisonSet[0]?COMPARISON_PAGES-2:1}:{})}); }
                     catch(e){
                         if(controller.signal.aborted || e instanceof AskProcessError && e.terminationUnconfirmed)throw e;
                         found={sources:[],notices:['The public lookup budget ended before supporting pages were returned. Additional claims remain unverified.']};

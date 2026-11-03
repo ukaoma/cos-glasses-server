@@ -374,7 +374,15 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
       const comparison = input.action === 'ask' && !!deps.webAvailable && !!deps.comparisonQueries?.length && !preloadedWeb
       if(preloadedWeb){webAsked=true;const queries=[deps.explicitWebQuery!,...(deps.benchmarkWebQuery?[deps.benchmarkWebQuery]:[])];for(const found of await Promise.all(queries.map(q=>lookup(q,'web'))))absorb(found)}
       // A comparison runs its searches together, so the wait is the slowest one; the answer hop below may not search again.
-      if (comparison) { webAsked = true; for (const found of await Promise.all(deps.comparisonQueries!.slice(0, 3).map(q => lookup(q, 'web')))) absorb(found) }
+      if (comparison) {
+        webAsked = true
+        // allSettled, not all: when one search throws (the Ask was aborted, a child could not be confirmed stopped) the others are waited for,
+        // never left running behind a thrown error. The first failure is rethrown once every search has ended.
+        const settled = await Promise.allSettled(deps.comparisonQueries!.slice(0, 3).map(q => lookup(q, 'web')))
+        for (const r of settled) if (r.status === 'fulfilled') absorb(r.value)
+        const failed = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+        if (failed) throw failed.reason
+      }
       // 6.76.0: a question about who someone is, or about the owner's own history, always looks in COS
       // first (memories and earlier meetings, every domain), whatever the planner would have chosen. It
       // takes one of the two lookups and saves the planner hop. Never the web: that stays explicit-only.
@@ -472,7 +480,7 @@ export function createLiveAsk(overrides: Partial<LiveAskDeps> = {}) {
             phases.push({phase:'review',ms:Math.max(0,clock()-reviewStarted)})
             if(checked.model&&checked.model!==model){evidence.notices.push(`Grounding review used ${checked.model}; the requested answer draft used ${model}.`);model=checked.model}
             try { reviewed=normalizeReviewConfidence(parseAskReply(checked.text));reviewed.sections=normalizeSections(input.action,reviewed.sections,allowed);if(deps.evidenceQuestion && reviewed?.confidence)reviewed.confidence.reason="Only general rules can be checked; this plan's terms remain unverified." } catch { reviewed=null }
-            problem=reviewProblem(reviewed,evidence.sources,maxWords)
+            problem=reviewProblem(reviewed,evidence.sources,maxWords,comparison||unchecked?{uncitedFigures:true}:undefined)
             if(!problem&&reviewInput.omitUnrequestedMoney&&/\$\s*\d|\b[0-9,]+\s+(?:dollars|grand)\b/i.test(JSON.stringify(reviewed.sections)))problem='unrequested_money'
             if(!problem&&input.action==='ask'&&!detailed&&reviewed.sections.some((s:any)=>s.label!=='So what'))problem='extra_sections'
             if(!problem)break
