@@ -90,12 +90,12 @@ const mutations = [
   // Runtime wiring.
   ['runtime-needs-consent', RT, 'const factMode = factCheckScopeEnabled() && publicTopics && webAvailable', 'const factMode = factCheckScopeEnabled() && webAvailable'],
   ['runtime-kill-switch', RT, 'const factMode = factCheckScopeEnabled() && publicTopics', 'const factMode = publicTopics'],
-  ['runtime-retirement-precedence', RT, " && !genericRetirementQuery(normal, priorQuestions) ? this.factCheckMode(journal, input) : null", ' ? this.factCheckMode(journal, input) : null'],
+  ['runtime-retirement-precedence', RT, " && !genericRetirementQuery(normal, priorQuestions) ? this.factCheckMode(journal, input, comparisonIsClaim) : null", ' ? this.factCheckMode(journal, input, comparisonIsClaim) : null'],
   ['capability-follows-switch', RT, '...(factCheckScopeEnabled() ? { factCheckScope: 1 as const } : {})', '...({ factCheckScope: 1 as const })'],
   ['runtime-range-saved', RT, '...(fact.factCheckRange ? { factCheckRange: fact.factCheckRange } : {})', ''],
   ['runtime-claims-saved', RT, ', { factCheck: { claims: fact.claims } });', ');'],
   ['runtime-continue-mode', RT, "if (pending && intent)\n            return { mode: 'continue' as const", "if (false)\n            return { mode: 'continue' as const"],
-  ['runtime-named-mode', RT, "if (factCheckRequest(input.question) && userWebQuery(input.question) !== null)\n            return { mode: 'named' as const };\n", ''],
+  ['runtime-named-mode', RT, "if (!comparisonIsClaim && factCheckRequest(input.question) && userWebQuery(input.question) !== null)\n            return { mode: 'named' as const };\n", ''],
   ['store-record-patch', ST, '        if (recordPatch.factCheck) record.factCheck = recordPatch.factCheck;\n', ''],
   // QA B1: a typed starting place.
   ['clarify-pure-only', FC, '  if (!low.slice(rest).every(w => CLARIFY_WORDS.has(w) || owner.has(w))) return null\n', ''],
