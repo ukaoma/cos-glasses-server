@@ -606,7 +606,8 @@ export class MeetingAskRuntime {
             // A public factual comparison (6.97.8): up to three searches built from the user's own words run together and keep four pages in all.
             // A data source attached to the answer (the Tableau facts: a file source with no file id) is cited as [F#]; the comparison shape demands
             // [W#] citations, so a question the data answers does not take this path.
-            const dataAttached = extraSources.some(x => x.kind === 'file' && !x.fileId);
+            // The Tableau facts were attached (DATA_ASK_ADDENDUM set) or a source arrived without a file id: keep the data answer shape.
+            const dataAttached = dataSystem !== '' || extraSources.some(x => x.kind === 'file' && !x.fileId);
             const comparisonSet = input.action === 'ask' && webAvailable && !dataAttached && explicitWebQuery && !contextualQuery && !genericRule && !isFactCheckCTA(input.question) && comparisonQuestion(input.question) ? comparisonQueries(explicitWebQuery, input.question) : [];
             if (comparisonSet.length) allowUntil(COMPARISON_DEADLINE_MS);
             // The "Not checked against a source:" line (general knowledge, labeled) is offered only when the gate admitted a lookup (the user's own words
