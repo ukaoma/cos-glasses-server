@@ -50,9 +50,8 @@ describe('the file: budget lines and source pointers', () => {
   it('a null budget stays null; the line count is capped', () => {
     const raw = rawSourceFacts(); raw.budgetLines[0].stages.leads = { actual: 74, budget: null, pctToGoal: null }
     expect(facts(raw).budgetLines[0].stages.leads).toEqual({ actual: 74, budget: null, pctToGoal: null })
-    expect(L.maxBudgetLines).toBe(400)
-    const many = rawSourceFacts(); many.budgetLines = Array.from({ length: 450 }, () => ({ ...rawSourceFacts().budgetLines[0] }))
-    expect(facts(many).budgetLines).toHaveLength(400)
+    const many = rawSourceFacts(); many.budgetLines = Array.from({ length: L.maxBudgetLines + 50 }, () => ({ ...rawSourceFacts().budgetLines[0] }))
+    expect(facts(many).budgetLines).toHaveLength(L.maxBudgetLines)
   })
   it('the group-level reading is unchanged by the extras', () => {
     expect(facts().groups).toEqual(facts(rawFacts()).groups)
@@ -101,7 +100,7 @@ describe('the source vocabulary', () => {
   it.each([
     ['referral traffic', ['Referral Traffic'], false], ['customer referral', ['Customer Referral'], false], ['referrals', ['Customer Referral', 'Referral Traffic'], false],
     ['AI referrals', ['AI Referrals'], true], ['chatgpt', ['AI Referrals'], false],
-    ['capterra', ['Paid Aggregator'], true], ['Software Advice', ['Paid Aggregator'], true], ['lead aggregators', ['Paid Aggregator'], true], ['G2', ['Paid Aggregator'], false],
+    ['capterra', ['Paid Aggregator'], true], ['Software Advice', ['Paid Aggregator'], true], ['lead aggregators', ['Paid Aggregator'], true], ['G2 Crowd', ['Paid Aggregator'], true],
     ['email database', ['Email Database'], true], ['email', ['Email Database'], false], ['newsletter', ['Email Database'], true],
     ['webinar', ['Webinar'], false], ['paid partnership', ['Paid Partnership'], true], ['partnership', ['Paid Partnership'], false],
   ])('a source the file only knows from a budget line: "%s" covers %j (stands alone: %s)', (w, names, strong) => { expect(src(w, withAll)).toEqual([{ names: [...names].sort(), strong }]) })
@@ -124,12 +123,16 @@ describe('the source vocabulary', () => {
     expect(sourceLabel('Paid Search - Non-Brand')).toBe('Paid Search Non-Brand')
     expect(sourceLabel('Organic Direct')).toBe('Organic Direct')
   })
-  it('a specific source name beside a plain-English group word makes the group count ("PPC for pet")', () => {
+  it('a specific source name directly beside a plain-English group word makes the group count ("paid search pet")', () => {
     const named = (w: string) => namedGroups(f, w).map(n => n.group.name)
-    expect(named('ppc for pet')).toEqual(['Pet'])
-    expect(named('paid search for dive')).toEqual(['Dive'])
-    expect(named('pet for ppc')).toEqual(['Pet'])
+    expect(named('ppc pet')).toEqual(['Pet'])                                   // directly beside it
+    expect(named('paid search dive')).toEqual(['Dive'])
+    expect(named('pet ppc')).toEqual(['Pet'])
     expect(named('paid search pet')).toEqual(['Pet'])
+    expect(named('events pet')).toEqual([])                                     // a plain-English source word is no anchor even beside it
+    expect(named('ppc for pet')).toEqual([])                                    // not across a bridge word: only a funnel word reaches that far
+    expect(named("let's dive in, google ads are the topic")).toEqual([])
+    expect(named('leads for pet')).toEqual(['Pet'])
     expect(named('events for pet')).toEqual([])                                 // a plain-English source word is not an anchor
     expect(named('pet project for ppc people') ).toEqual([])                    // 'project' sits between, no bridge
     expect(named('dive into the numbers')).toEqual([])
@@ -182,21 +185,21 @@ describe('the cue candidate with a source', () => {
   it('leads with that source\'s own numbers for the group, then its budget line, naming what the line also counts', () => {
     expect(notes("we're doing a refresh on the PPC landing pages for thrift")).toBe(HEAD
       + 'Thrift, Paid Search Non-Brand alone: leads 45, opps 11; Paid Search Brand alone: leads 8, opps 2. '
-      + 'Budget line Paid Search Non-Brand (shared with Paid Social): leads 66 vs 47 (140%), opps 17 vs 13 (131%).')
+      + 'Budget line Paid Search Non-Brand (also counts Paid Social): leads 66 vs 47 (140%), opps 17 vs 13 (131%).')
   })
   it('a narrowed window gives one source with all three stages and its line', () => {
     expect(notes('non-brand ppc for thrift')).toBe(HEAD
       + 'Thrift, Paid Search Non-Brand alone: leads 45, opps 11, customers 3. '
-      + 'Budget line Paid Search Non-Brand (shared with Paid Social): leads 66 vs 47 (140%), opps 17 vs 13 (131%), customers 6 vs 3 (200%).')
+      + 'Budget line Paid Search Non-Brand (also counts Paid Social): leads 66 vs 47 (140%), opps 17 vs 13 (131%), customers 6 vs 3 (200%).')
   })
   it('the stage the room named is the one shown; a stage a source has no number for falls back to the three', () => {
-    expect(notes('thrift customers from paid social')).toContain('Thrift, Paid Social alone: customers 3. Budget line Paid Search Non-Brand (shared with Paid Search Non-Brand): customers 6 vs 3 (200%).')
+    expect(notes('thrift customers from paid social')).toContain('Thrift, Paid Social alone: customers 3. Paid Social is budgeted inside the Paid Search Non-Brand line, which also counts Paid Search Non-Brand: customers 6 vs 3 (200%).')
     expect(notes('thrift sqls from events')).toContain('Thrift, Event Conferences alone: leads 24, opps 15, customers 2.')
   })
   it('a line with no zero-line budget shows "no budget" instead of a percent', () => {
-    expect(notes('events for thrift customers')).toContain('Budget line Events: customers 2 vs 0')
+    expect(notes('events for thrift customers')).toContain('Event Conferences is budgeted inside the Events line: customers 2 vs 0')
     const raw = rawSourceFacts(); raw.budgetLines[5].stages.leads = { actual: 24, budget: null, pctToGoal: null }
-    expect(notes('events for thrift leads', facts(raw))).toContain('Budget line Events: leads 24 vs no budget.')
+    expect(notes('events for thrift leads', facts(raw))).toContain('Event Conferences is budgeted inside the Events line: leads 24 vs no budget.')
   })
   it('is at most 300 characters, dropping budget lines, then the second group, then stages, before it cuts', () => {
     const w = "we're doing a refresh on the PPC landing pages for thrift and liquor leads opps customers"
@@ -280,6 +283,7 @@ describe('the meeting assistant, intent', () => {
     'which channel brought leads, events or direct',
     'what did the direct channel bring us',                  // a plain-English source beside a source word
     'how did events do for thrift',                          // a plain-English source, a group and a performance word
+    'how are events doing for thrift',
     'non-brand ppc leads for jewelry',
     'how are referrals doing for thrift leads',
     'what about ai referrals for thrift',
@@ -289,6 +293,9 @@ describe('the meeting assistant, intent', () => {
     'what is the budget for events',                         // a plain-English source beside a budget word only
     'what time is the thrift events call',
     'the direct reports on the thrift team',
+    'how are the direct reports on the thrift team doing',
+    'how did the conference go for liquor',
+    'let me email Gina about thrift',
     'who runs the events team',
     'what is the weather',
     'chatgpt wrote the memo',
@@ -325,10 +332,10 @@ describe('the meeting assistant, the data it is given', () => {
     const t = ask(REAL)
     expect(t).toContain('Lead source asked about: Paid Search (Paid Search Non-Brand, Paid Search Brand).')
     expect(t).toContain('Liquor (leads/opps/customers): Paid Search Non-Brand 64/11/4; Paid Search Brand 17/7/4. '
-      + 'Budget line Paid Search Non-Brand (shared with Paid Social): leads 74 vs 85 (87%), opps 13 vs 20 (65%), customers 5 vs 9 (56%). '
+      + 'Budget line Paid Search Non-Brand (also counts Paid Social): leads 74 vs 85 (87%), opps 13 vs 20 (65%), customers 5 vs 9 (56%). '
       + 'Budget line Paid Search Brand: leads 17 vs 18 (94%), opps 7 vs 10 (70%), customers 4 vs 6 (67%).')
     expect(t).toContain('Thrift (leads/opps/customers): Paid Search Non-Brand 45/11/3; Paid Search Brand 8/2/0. ')
-    expect(t).toContain('Budget line Paid Search Non-Brand (shared with Paid Social): leads 66 vs 47 (140%), opps 17 vs 13 (131%), customers 6 vs 3 (200%).')
+    expect(t).toContain('Budget line Paid Search Non-Brand (also counts Paid Social): leads 66 vs 47 (140%), opps 17 vs 13 (131%), customers 6 vs 3 (200%).')
     for (const industry of ['Pet', 'Dive']) expect(t).toContain(`${industry} (leads/opps/customers): Paid Search Non-Brand`)
     expect(t).not.toMatch(/^SBU|^XBU|^Thrift: leads|^Liquor: leads/m)             // the group totals are what it used to quote
     expect(t).not.toContain('lead sources (leads/opps/customers)')                  // nor the old top-six rows
@@ -347,7 +354,7 @@ describe('the meeting assistant, the data it is given', () => {
     expect(t).toContain('Thrift: leads 151 vs 110 (137%)')
     expect(t).toContain('Thrift (leads/opps/customers): Paid Search Non-Brand 45/11/3; Paid Search Brand 8/2/0.')
     expect(t).toContain('Budget line Paid Search Brand: leads 8 vs 11 (73%), opps 2 vs 8 (25%), customers 0 vs 3 (0%).')
-    expect(t).toContain('Budget line Paid Search Non-Brand (shared with Paid Social): leads 66 vs 47 (140%)')
+    expect(t).toContain('Budget line Paid Search Non-Brand (also counts Paid Social): leads 66 vs 47 (140%)')
     expect(t).not.toContain('Liquor (leads'); expect(t).not.toContain('SBU (')
   })
   it('a business unit named with the source: its member industries only', () => {
@@ -356,16 +363,19 @@ describe('the meeting assistant, the data it is given', () => {
     expect(t).toContain('Liquor (leads/opps/customers): Paid Social 10/2/1.')
     expect(t).not.toContain('Thrift (leads')
   })
-  it('the budget line of a source says what it is shared with, from the sources that have rows in that industry', () => {
-    expect(ask('how did paid social do for thrift')).toContain('Paid Social 21/6/3. Budget line Paid Search Non-Brand (shared with Paid Search Non-Brand): leads 66 vs 47')
-    expect(ask('how did events do for thrift')).toContain('Event Conferences 24/15/2. Budget line Events: leads 24 vs 6 (400%)')
-    expect(ask('how did organic do for thrift')).toContain('Budget line Organic Direct (shared with Direct): leads 46 vs 37 (124%)')
+  it('a budget line says what else it counts: named for the source, "also counts"; named for another, the source "is budgeted inside" it', () => {
+    expect(ask('how did paid social do for thrift')).toContain('Paid Social 21/6/3. Paid Social is budgeted inside the Paid Search Non-Brand line, which also counts Paid Search Non-Brand: leads 66 vs 47')
+    expect(ask('how did events do for thrift')).toContain('Event Conferences 24/15/2. Event Conferences is budgeted inside the Events line: leads 24 vs 6 (400%)')
+    expect(ask('how did organic do for thrift')).toContain('Organic is budgeted inside the Organic Direct line, which also counts Direct: leads 46 vs 37 (124%)')
+    expect(ask('how did organic direct do for liquor')).toContain('Organic Direct 63/41/16. Budget line Organic Direct: leads 63 vs 70 (90%)')   // named for the source, nothing else counted
+    expect(ask('how did paid search and paid social do for thrift')).not.toContain('is budgeted inside')
+    expect(ask('how did organic and direct do for thrift')).toContain('Organic and Direct are budgeted inside the Organic Direct line')   // two sources shown, one line   // the line is named for one of the rows shown
   })
   it('the budget line is shared only with sources that have volume in that industry: a zero row is not named', () => {
     const raw = rawSourceFacts(); raw.sources.push({ industry: 'Thrift', source: 'AI Referrals', bucket: 'Organic Direct', leads: 0, opps: 0, customers: 0, budgetLine: 'Organic Direct' })
-    expect(ask('how did organic do for thrift', facts(raw))).toContain('Budget line Organic Direct (shared with Direct):')
+    expect(ask('how did organic do for thrift', facts(raw))).toContain('which also counts Direct: leads')
     raw.sources[raw.sources.length - 1].leads = 2
-    expect(ask('how did organic do for thrift', facts(raw))).toContain('Budget line Organic Direct (shared with Direct, AI Referrals):')
+    expect(ask('how did organic do for thrift', facts(raw))).toContain('which also counts Direct, AI Referrals: leads')
   })
   it('rows are largest by leads first, whatever order the file lists them in; a Quilt industry keeps its display name', () => {
     const raw = rawSourceFacts(); raw.sources.reverse()
@@ -375,10 +385,25 @@ describe('the meeting assistant, the data it is given', () => {
     expect(notes('ppc for thrift leads', g)).toContain('Thrift, Paid Search Non-Brand alone: leads 45; Paid Search Brand alone: leads 8')
     expect(ask('how did paid search do for like sew', g)).toContain('Quilt industry (Like Sew) (leads/opps/customers): Paid Search Non-Brand 19/4/3.')
   })
-  it('an industry the file knows only from a budget line is still shown, with no rows', () => {
+  it('a named industry with no row for the source says so, and gives no budget line it cannot tie to a row', () => {
     const raw = rawSourceFacts(); raw.sources = raw.sources.filter((r: Raw) => r.industry !== 'Dive')
     const t = ask('how did paid search do for dive leads', facts(raw))
-    expect(t).toContain('Dive (leads/opps/customers): no rows for this source. Budget line Paid Search Non-Brand')
+    expect(t).toContain('Dive (leads/opps/customers): no rows for this source.')
+    expect(t).not.toContain('Budget line')
+  })
+  it('a line that also counts many sources names at most three', () => {
+    const raw = rawSourceFacts()
+    raw.budgetLines.push({ industry: 'Pet', line: 'Wide Line', sources: ['Paid Social', 'A1', 'A2', 'A3', 'A4', 'A5'], stages: { leads: { actual: 30, budget: 20, pctToGoal: 150 } } })
+    for (const n of ['A1', 'A2', 'A3', 'A4', 'A5']) raw.sources.push({ industry: 'Pet', source: n, bucket: '', leads: 2, opps: 0, customers: 0 })
+    raw.sources = raw.sources.filter((r: Raw) => !(r.industry === 'Pet' && r.source === NB)); raw.budgetLines = raw.budgetLines.filter((l: Raw) => !(l.industry === 'Pet' && l.line === NB))
+    expect(ask('how did paid social do for pet leads', facts(raw))).toContain('Paid Social is budgeted inside the Wide Line line, which also counts A1, A2, A3: leads 30 vs 20 (150%)')
+  })
+  it('the lines of an industry follow the sources that have rows: "social" does not pull in General Marketing without a Social Media row', () => {
+    const raw = rawSourceFacts(); raw.sources = raw.sources.filter((r: Raw) => r.source !== 'Social Media')
+    const t = ask('how did we do on social for thrift leads', facts(raw))
+    expect(t).toContain('Paid Social is budgeted inside the Paid Search Non-Brand line')
+    expect(t).not.toContain('General Marketing')
+    expect(ask('how did we do on social for thrift leads')).toContain('Social Media is budgeted inside the General Marketing line')   // with the row, the line is shown
   })
   it('a source the file has no rows for says so instead of answering with totals', () => {
     const t = ask('how many webinar leads for thrift')
@@ -427,5 +452,58 @@ describe('the meeting assistant, the data it is given', () => {
     const t = dataFactsForAsk(f, article + '\ncheck Tableau')!.text
     expect(t).not.toContain('Lead source asked about')
     expect(t).toContain('SBU (3 of 4')
+  })
+})
+
+describe('plain words that are not a source, and the picks that follow', () => {
+  const withEmail = (() => { const raw = rawSourceFacts(); raw.sources.push(row('Thrift', 'Email Database')); raw.sources.push(row('Thrift', 'Direct')); return facts(raw) })()
+  const labels = (w: string) => namedSources(withEmail, w).map(x => x.label)
+  it.each([
+    'my direct reports on the thrift team', 'a direct message', 'send a direct mail piece', 'the direct line', 'direct reports',
+    'on the conference call', 'in the conference room', 'the conferences calls',
+    'let me email Gina', 'I will email them', 'we should email about it', 'please email', 'email me', 'to email everyone', 'Gina can email',
+    'meta description', 'the meta',
+  ])('"%s" names no source', w => { expect(labels(w)).toEqual([]) })
+  it.each([
+    ['direct leads for thrift', 'Direct'], ['the conference leads for liquor', 'Events'], ['email leads for thrift', 'Email'], ['the email list is at 40', 'Email'],
+    ['meta ads for thrift', 'Paid Social'], ['direct traffic', 'Direct'],
+  ])('"%s" still names %s', (w, label) => { expect(labels(w).includes(label)).toBe(true) })
+  it('the cue is the group totals when the plain word was not a source', () => {
+    for (const w of ['my direct reports on the thrift team have 40 leads', 'on the conference call thrift leads were down', 'I will email them about thrift leads']) {
+      const t = dataTrigger(withEmail, w)
+      expect(t.fired && t.source, w).toBeNull()
+      expect(notes(w, withEmail), w).toContain('Thrift: leads 151 vs 110 (137%)')
+    }
+  })
+  it('G2 is the glasses, not an aggregator: no source, and the cue is the group totals', () => {
+    expect(namedSources(f, 'I said this on the G2, thrift leads are up')).toEqual([])
+    const t = dataTrigger(f, 'I said this on the G2, thrift leads are up')
+    expect(t.fired && t.source).toBeNull()
+    expect(notes('I said this on the G2, thrift leads are up')).toContain('Thrift: leads 151 vs 110 (137%)')
+    const g = dataTrigger(f, 'paid search for thrift is great but on my G2 the leads looked low')
+    expect(g.fired && g.source?.label).toBe('Paid Search')
+  })
+  it('the cue takes the last SPECIFIC source named; a plain-English one only when no specific one was', () => {
+    const a = dataTrigger(f, 'paid search for thrift leads, and events too')
+    expect(a.fired && a.source?.label).toBe('Paid Search')                   // events came last but is plain English
+    const b = dataTrigger(f, 'events for thrift leads and then ppc')
+    expect(b.fired && b.source?.label).toBe('Paid Search')
+    const c = dataTrigger(f, 'events for thrift leads')
+    expect(c.fired && c.source?.label).toBe('Events')                        // no specific one: the plain one, beside a group
+    const d = dataTrigger(f, 'ppc and paid social for thrift leads')
+    expect(d.fired && d.source?.label).toBe('Paid Social')                   // two specific: the one said last
+  })
+  it('a strong source word is no bridge for a weak group word: "let us dive in, google ads are the topic" names no group', () => {
+    const t = dataTrigger(f, "let's dive in, google ads are at 40 percent")
+    expect(t.fired && t.groups).toEqual([])                                  // a source-alone cue at most, never the dive industry
+    expect(dataTrigger(f, "let's dive in, google ads are the topic")).toEqual({ fired: false, why: 'no_funnel' })
+  })
+  it('a source-alone cue is skipped when the largest row has no leads', () => {
+    const raw = rawSourceFacts(); for (const r of raw.sources) if (r.source.startsWith('Paid Search')) r.leads = 0
+    const g = facts(raw)
+    expect(dataCandidate(g, 'paid search leads are at 40', '2026-11-02')).toEqual({ none: 'no_stage' })
+    expect('candidate' in dataCandidate(f, 'paid search leads are at 40', '2026-11-02')).toBe(true)
+    // with a group named the rows still show, zero or not
+    expect(notes('ppc for thrift leads', g)).toContain('Thrift, Paid Search Non-Brand alone: leads 0')
   })
 })

@@ -102,7 +102,7 @@ describe('the meeting assistant and the Tableau facts', () => {
         const text = tableauOf(f)!.text
         expect(tableauOf(f)).toMatchObject({ id: 'F1', kind: 'file' })
         expect(text).toContain('Thrift (leads/opps/customers): Paid Search Non-Brand 45/11/3; Paid Search Brand 8/2/0.')
-        expect(text).toContain('Budget line Paid Search Non-Brand (shared with Paid Social): leads 66 vs 47 (140%)')
+        expect(text).toContain('Budget line Paid Search Non-Brand (also counts Paid Social): leads 66 vs 47 (140%)')
         expect(text).not.toMatch(/^SBU|^XBU/m)
         expect(systemOf(f)).toContain(DATA_ASK_ADDENDUM)
         expect(systemOf(f)).toContain('A lead-source row covers only that source')

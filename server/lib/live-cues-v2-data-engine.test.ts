@@ -284,7 +284,7 @@ describe('the Tableau data arm in the engine', () => {
       await feed(PPC)
       expect(judged).toEqual([['D1']])
       expect(judgedNotes[0][0].notes).toContain('Thrift, Paid Search Non-Brand alone: leads 45, opps 11; Paid Search Brand alone: leads 8, opps 2.')
-      expect(judgedNotes[0][0].notes).toContain('Budget line Paid Search Non-Brand (shared with Paid Social): leads 66 vs 47 (140%)')
+      expect(judgedNotes[0][0].notes).toContain('Budget line Paid Search Non-Brand (also counts Paid Social): leads 66 vs 47 (140%)')
       expect(evaluation()).toMatchObject({ outcome: 'cue', dataArm: 'offered', arms: { data: 1 }, keptIds: ['D1'] })
       expect(systems[0]).toBe(liveCuesV2WriterSystem(env, 'legacy').system + dataMod.DATA_WRITER_ADDENDUM)
       expect(systems[0]).toContain('covers only that source')
@@ -312,6 +312,25 @@ describe('the Tableau data arm in the engine', () => {
       await feed(' paid search leads are at 40 this month', engine())
       expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'quilt' })
       expect(judgedNotes.at(-1)![0].notes).toContain('Paid Search alone, largest by leads: Liquor Paid Search Non-Brand leads 64; Thrift Paid Search Non-Brand leads 45.')
+    })
+    it('no confirmed domain: a Quilt memory does not vouch for a source alone ("the trade show is in 30 days"); a Quilt title does; a group beside the source keeps the old rule', async () => {
+      orientation = { domain: null, title: null }
+      cueMemoryNotes = [{ ...note('M1'), domain: 'quilt' }]; yes = { M1: 0.2, D1: 0.9 }
+      for (const w of [' the google ads plan is 40 percent done', ' the trade show leads are at 30', ' paid search is at 40 this month']) {
+        traces = []; judged = []
+        await feed(w, engine())
+        expect(evaluation(), w).toMatchObject({ dataArm: 'unconfirmed', arms: { data: 0 } })
+        expect(judged.flat(), w).not.toContain('D1')
+      }
+      traces = []; judged = []
+      await feed(PPC, engine())                                                           // a group beside the source: memory vouches, as for a group note
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'memory', arms: { data: 1 } })
+      orientation = { domain: null, title: 'Quilt weekly forecast' }; traces = []
+      await feed(' the google ads plan is 40 percent done', engine())                     // a Quilt term in the title vouches for the source alone
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'title' })
+      orientation = { domain: 'quilt', title: null }; traces = []
+      await feed(' the google ads plan is 40 percent done', engine())
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'quilt' })
     })
     it('an older file (no source detail) still serves: rows only, no budget line; with no rows for the group the totals rule decides', async () => {
       read = () => dataMod.parseDataFacts(rawFacts({ sources: rawSourceFacts().sources.map(({ budgetLine: _b, ...r }: Record<string, unknown>) => r) }), clock)

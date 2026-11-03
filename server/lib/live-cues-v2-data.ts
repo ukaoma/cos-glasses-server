@@ -90,7 +90,8 @@ export interface DataSourceStage { actual: number; budget: number | null; pctToG
 export interface DataBudgetLine { industry: string; line: string; sources: string[]; stages: Partial<Record<SourceStageKey, DataSourceStage>> }
 export interface DataSourceRow {
   industry: string; source: string; bucket: string; leads: number; opps: number; customers: number
-  /** The budget line the writer verified this source counts under; absent in older files. */
+  /** The budget line the writer verified this source counts under; absent in older files. Informational: the readers join a source to
+   *  its line by the line's own member list (budgetLinesFor), for the sources that have rows. */
   budgetLine?: string
 }
 export interface DataFacts {
@@ -279,12 +280,13 @@ function occurrences(tokens: string[], phrase: string[]): number[] {
   return at
 }
 
-/** `anchors` are the token positions of a lead-source name that is specific enough to stand alone (ppc, paid search): beside one, a weak
- *  alias counts the way it does beside a funnel word ("PPC for pet", "paid search for dive"). */
+/** `anchors` are the token positions of a lead-source name that is specific enough to stand alone (ppc, paid search): directly beside one,
+ *  a weak alias counts the way it does beside a funnel word ("paid search pet", "pet ppc"). Not across a bridge word: "let's dive in,
+ *  google ads are the topic" is not about the dive industry. */
 function weakAt(tokens: string[], i: number, anchors: ReadonlySet<number>): boolean {
   const inside = (k: number) => k >= 0 && k < tokens.length
-  const funnel = (k: number) => inside(k) && (FUNNEL_TOKENS.has(tokens[k]) || anchors.has(k))
-  const funnelOrIndustry = (k: number) => funnel(k) || (inside(k) && INDUSTRY_TOKENS.has(tokens[k]))
+  const funnel = (k: number) => inside(k) && FUNNEL_TOKENS.has(tokens[k])
+  const funnelOrIndustry = (k: number) => funnel(k) || anchors.has(k) || (inside(k) && INDUSTRY_TOKENS.has(tokens[k]))
   const bridge = (k: number) => inside(k) && BRIDGE_TOKENS.has(tokens[k])
   if (funnelOrIndustry(i - 1) || funnelOrIndustry(i + 1)) return true
   return (bridge(i - 1) && funnel(i - 2)) || (bridge(i + 1) && funnel(i + 2))
@@ -301,7 +303,7 @@ const SOURCE_CONCEPTS: SourceConcept[] = [
   { label: 'Paid Search', strong: ['paid search', 'ppc', 'pay per click', 'sem', 'search engine marketing', 'google ads', 'google adwords', 'adwords', 'search ads'], weak: [], match: k => k.startsWith('paid search'), narrow: true },
   { label: 'Paid Search Brand', strong: [], weak: ['brand search', 'branded search'], match: k => k === 'paid search brand' },
   { label: 'Paid Search Non-Brand', strong: [], weak: ['non brand search', 'nonbrand search'], match: k => k === 'paid search non brand' },
-  { label: 'Paid Social', strong: ['paid social', 'social ads', 'facebook ads', 'meta ads', 'instagram ads', 'linkedin ads', 'paid facebook', 'paid linkedin'], weak: ['facebook', 'meta', 'linkedin', 'instagram'], match: k => k === 'paid social' },
+  { label: 'Paid Social', strong: ['paid social', 'social ads', 'facebook ads', 'meta ads', 'instagram ads', 'linkedin ads', 'paid facebook', 'paid linkedin'], weak: ['facebook', 'linkedin', 'instagram'], match: k => k === 'paid social' },
   { label: 'Social Media', strong: [], weak: ['social media'], match: k => k === 'social media' },
   { label: 'Social', strong: [], weak: ['social'], match: k => k.includes('social') },
   { label: 'Events', strong: ['trade show', 'trade shows', 'tradeshow', 'tradeshows'], weak: ['events', 'event', 'conference', 'conferences'], match: k => /(^| )events?( |$)/.test(k) },
@@ -311,7 +313,7 @@ const SOURCE_CONCEPTS: SourceConcept[] = [
   { label: 'Customer Referral', strong: [], weak: ['customer referral', 'customer referrals'], match: k => k === 'customer referral' },
   { label: 'Referral', strong: [], weak: ['referral', 'referrals'], match: k => k === 'referral traffic' || k === 'customer referral' },
   { label: 'AI Referrals', strong: ['ai referrals', 'ai referral', 'ai traffic'], weak: ['chatgpt', 'chat gpt', 'perplexity'], match: k => k === 'ai referrals' },
-  { label: 'Aggregators', strong: ['paid aggregator', 'paid aggregators', 'lead aggregator', 'lead aggregators', 'capterra', 'software advice', 'getapp'], weak: ['aggregator', 'aggregators', 'g2'], match: k => k === 'paid aggregator' },
+  { label: 'Aggregators', strong: ['paid aggregator', 'paid aggregators', 'lead aggregator', 'lead aggregators', 'capterra', 'software advice', 'getapp', 'g2 crowd'], weak: ['aggregator', 'aggregators'], match: k => k === 'paid aggregator' },
   { label: 'Email', strong: ['email database', 'email marketing', 'newsletter', 'newsletters'], weak: ['email', 'emails'], match: k => k === 'email database' },
   { label: 'Webinar', strong: [], weak: ['webinar', 'webinars'], match: k => k === 'webinar' },
   { label: 'Partnership', strong: ['paid partnership', 'paid partnerships'], weak: ['partnership', 'partnerships'], match: k => k === 'paid partnership' },
@@ -327,6 +329,22 @@ function sourceNamesOf(facts: DataFacts): string[] {
   for (const r of facts.sources) out.add(r.source)
   for (const l of facts.budgetLines) for (const x of l.sources) out.add(x)
   return [...out]
+}
+
+/** Plain words that are a lead source only some of the time. A hit is dropped where the next or previous word says it is something else:
+ *  "direct reports", "the conference call", "let me email Gina". Keyed by the alias as spoken. */
+const PLAIN_WORD_GUARDS: Record<string, (tokens: string[], start: number, end: number) => boolean> = {
+  direct: (t, _s, e) => ['report', 'reports', 'mail', 'message', 'messages', 'line', 'lines'].includes(t[e] ?? ''),
+  conference: (t, _s, e) => ['call', 'calls', 'room', 'rooms'].includes(t[e] ?? ''),
+  conferences: (t, _s, e) => ['call', 'calls', 'room', 'rooms'].includes(t[e] ?? ''),
+  // "email" the verb: after a helper or a pronoun ("let me email Gina", "I will email them") or before "about" or a pronoun.
+  email: (t, s, e) => emailAsVerb(t, s, e),
+  emails: (t, s, e) => emailAsVerb(t, s, e),
+}
+const EMAIL_VERB_BEFORE = new Set(['to', 'will', 'll', 'should', 'please', 'can', 'could', 'would', 'just', 'gonna', 'may', 'might', 'must', 'me', 'us', 'we', 'i', 'you', 'they', 'he', 'she'])
+const EMAIL_VERB_AFTER = new Set(['about', 'him', 'her', 'them', 'me', 'us', 'you', 'everyone', 'everybody'])
+function emailAsVerb(t: string[], start: number, end: number): boolean {
+  return EMAIL_VERB_BEFORE.has(t[start - 1] ?? '') || EMAIL_VERB_AFTER.has(t[end] ?? '')
 }
 
 interface SourceHit { start: number; end: number; names: string[]; strong: boolean; label: string }
@@ -346,8 +364,10 @@ function sourceHits(facts: DataFacts, tokens: string[]): SourceHit[] {
   const hits: SourceHit[] = []
   const add = (alias: string, strong: boolean, label: string, names: string[], narrow: boolean) => {
     const phrase = wordsOfSpeech(alias)
+    const guard = phrase.length === 1 ? PLAIN_WORD_GUARDS[phrase[0]] : undefined
     for (const start of occurrences(tokens, phrase)) {
       const end = start + phrase.length
+      if (guard?.(tokens, start, end)) continue
       hits.push({ start, end, names: narrow ? narrowedNames(tokens, start, end, names) : names, strong, label })
     }
   }
@@ -414,7 +434,9 @@ export function dataTrigger(facts: DataFacts, window: string): DataTrigger {
   const speech = recentSpeech(window)
   const named = namedGroups(facts, speech)
   const tokens = wordsOfSpeech(speech)
-  const source = namedSources(facts, speech).find(s => s.names.length > 0 && (s.strong || named.length > 0)) ?? null
+  // The last specific source named; a plain-English one only when no specific one was, and only beside a group.
+  const usable = namedSources(facts, speech).filter(s => s.names.length > 0 && (s.strong || named.length > 0))
+  const source = usable.find(s => s.strong) ?? usable[0] ?? null
   if (!named.length && !source) return { fired: false, why: 'no_group' }
   const funnel = tokens.some(t => FUNNEL_TOKENS.has(t)) || hasFigure(speech)
   if (!funnel && !(source?.strong && named.length)) return { fired: false, why: 'no_funnel' }
@@ -538,10 +560,19 @@ function budgetLinesFor(facts: DataFacts, industry: string, names: string[]): Da
   return facts.budgetLines.filter(l => l.industry === industry && l.sources.some(x => names.includes(x)))
 }
 
-/** "shared with Paid Social": the other sources that have rows in this industry and sit in the same budget line. */
-function alsoCounts(facts: DataFacts, l: DataBudgetLine, names: string[]): string {
-  const others = l.sources.filter(x => !names.includes(x) && facts.sources.some(r => r.industry === l.industry && r.source === x && r.leads + r.opps + r.customers > 0))
-  return others.length ? ` (shared with ${others.slice(0, 3).map(sourceLabel).join(', ')})` : ''
+/** One budget line as a sentence. `rowSources` are the sources shown above it (the ones that have rows). A line named for one of them
+ *  says what else it counts ("Budget line Paid Search Non-Brand (also counts Paid Social): ..."); a line named for something else says
+ *  the source sits inside it ("Paid Social is budgeted inside the Paid Search Non-Brand line, which also counts Paid Search Non-Brand: ...").
+ *  "Also counts" lists only other sources that have volume in this industry. Empty when the line has none of the shown stages. */
+function budgetClause(facts: DataFacts, l: DataBudgetLine, rowSources: string[], shown: SourceStageKey[]): string {
+  const text = lineStagesText(l, shown)
+  if (!text) return ''
+  const others = l.sources.filter(x => !rowSources.includes(x) && facts.sources.some(r => r.industry === l.industry && r.source === x && r.leads + r.opps + r.customers > 0))
+    .slice(0, 3).map(sourceLabel).join(', ')
+  const line = sourceLabel(l.line)
+  if (rowSources.some(x => sourceKey(x) === sourceKey(l.line))) return `Budget line ${line}${others ? ` (also counts ${others})` : ''}: ${text}.`
+  const mine = rowSources.filter(x => l.sources.includes(x)).map(sourceLabel)
+  return `${mine.join(' and ')} ${mine.length > 1 ? 'are' : 'is'} budgeted inside the ${line} line${others ? `, which also counts ${others}` : ''}: ${text}.`
 }
 
 function lineStagesText(l: DataBudgetLine, shown: SourceStageKey[]): string {
@@ -568,13 +599,15 @@ export function dataSourceCandidateText(facts: DataFacts, source: NamedSource, g
       if (!rows.length) return ''
       let out = `${g.display ?? g.name}, ${rows.map(r => `${sourceLabel(r.source)} alone: ${rowStages(r, shown)}`).join('; ')}.`
       if (budget !== 'none') for (const l of budgetLinesFor(facts, industry, (budget === 'top' ? rows.slice(0, 1) : rows).map(r => r.source))) {
-        const text = lineStagesText(l, shown)
-        if (text) out += ` Budget line ${sourceLabel(l.line)}${alsoCounts(facts, l, rows.map(r => r.source))}: ${text}.`
+        const clause = budgetClause(facts, l, rows.map(r => r.source), shown)
+        if (clause) out += ` ${clause}`
       }
       return out
     }
-    const rows = sourceRowsFor(facts, source.names, g ? g.members : null).slice(0, DATA_FACTS_LIMITS.cueSourceRows)
-    if (!rows.length) return ''
+    const found = sourceRowsFor(facts, source.names, g ? g.members : null)
+    // A list of the largest industries is only worth a cue when the largest has something to say.
+    if (!found.length || found[0].leads === 0) return ''
+    const rows = found.slice(0, DATA_FACTS_LIMITS.cueSourceRows)
     return `${g ? `${g.display ?? g.name} industries, ` : ''}${several ? source.label : sourceLabel(source.names[0])} alone, largest by leads: ${rows.map(r => `${r.industry}${several ? ` ${sourceLabel(r.source)}` : ''} ${rowStages(r, shown)}`).join('; ')}.`
   }
   const tries = groups.length ? [groups, groups.slice(0, 1)] : [[] as DataGroup[]]
@@ -589,7 +622,7 @@ export function dataSourceCandidateText(facts: DataFacts, source: NamedSource, g
 }
 
 /** The grounded candidate for a window, or why there is none. */
-export function dataCandidate(facts: DataFacts, window: string, nowDate: string): { candidate: GroundedNote; brand: boolean } | { none: 'no_group' | 'no_funnel' | 'no_stage' } {
+export function dataCandidate(facts: DataFacts, window: string, nowDate: string): { candidate: GroundedNote; brand: boolean; /** Fired by a lead source with no group named. */ sourceOnly: boolean } | { none: 'no_group' | 'no_funnel' | 'no_stage' } {
   const t = dataTrigger(facts, window)
   if (!t.fired) return { none: t.why }
   const fromSource = t.source ? dataSourceCandidateText(facts, t.source, t.groups, t.stages) : ''
@@ -598,7 +631,7 @@ export function dataCandidate(facts: DataFacts, window: string, nowDate: string)
   const notes = fromSource || (t.groups.length ? dataCandidateText(facts, t.groups, t.stages) : '')
   if (!notes) return { none: 'no_stage' }
   const date = /^\d{4}-\d{2}-\d{2}/.exec(facts.asOfIso)?.[0] ?? nowDate
-  return { candidate: { id: 'D1', date, title: facts.label, notes, key: `data:tableau|${facts.label}|${facts.asOfIso}`, arm: 'data', kind: 'data' }, brand: t.brand }
+  return { candidate: { id: 'D1', date, title: facts.label, notes, key: `data:tableau|${facts.label}|${facts.asOfIso}`, arm: 'data', kind: 'data' }, brand: t.brand, sourceOnly: t.groups.length === 0 }
 }
 
 /** Appended to the writer's rules only when a Tableau note was kept. The v3/v4 rules themselves stay byte-identical. */
@@ -629,7 +662,7 @@ export function askUserWords(question: string): string {
 const ASK_STAGE = /\b(?:leads?|opps?|opportunit(?:y|ies)|sqls?|demos?|logos?|customers?|pac(?:e|ing)|attainment)\b/i
 const ASK_SOURCE_WORD = /\b(?:sources?|channels?|campaigns?)\b/i
 /** "how did events do for thrift": a question about how something performed, which a group and a plain source word then make a data question. */
-const ASK_PERFORMANCE = /\b(?:did|doing|perform(?:ed|ing|ance)?|results?|numbers?|convert(?:ed|ing)?|conversions?|roi|worked|working)\b/i
+const ASK_PERFORMANCE = /\b(?:do|doing|perform(?:ed|ing|ance)?|results?|numbers?|convert(?:ed|ing)?|conversions?|roi)\b/i
 
 /** The lead sources a typed question names that it may be answered from. A specific name ("paid search", "PPC") always counts; a
  *  plain-English one ("direct", "events", "email") only with a stage or source word, or with a group beside "Tableau" or a
@@ -701,14 +734,17 @@ function sourceLinesForAsk(facts: DataFacts, sources: NamedSource[], groups: Dat
     + 'so a budget appears only against its whole line, never against one source. Rows are listed, not added up.']
   if (!names.length) return out
   const wanted = groups.length ? new Set(groups.flatMap(g => g.members)) : null
-  const industries = [...new Set([...facts.sources.filter(r => names.includes(r.source)).map(r => r.industry), ...facts.budgetLines.filter(l => l.sources.some(x => names.includes(x))).map(l => l.industry)])]
-    .filter(i => !wanted || wanted.has(i))
+  // The industries that have rows for the source; plus a named single industry with none, so the answer says so.
+  const industries = [...new Set([...facts.sources.filter(r => names.includes(r.source)).map(r => r.industry).filter(i => !wanted || wanted.has(i)),
+    ...groups.filter(g => g.kind === 'industry').flatMap(g => g.members)])]
   const leadsOf = (i: string) => sourceRowsFor(facts, names, [i]).reduce((n, r) => n + r.leads, 0)
   const blocks = industries.sort((a, b) => leadsOf(b) - leadsOf(a)).map(industry => {
     const rows = sourceRowsFor(facts, names, [industry])
     const display = facts.groups.find(g => g.kind === 'industry' && g.name === industry)?.display ?? industry
     const rowText = rows.length ? rows.map(r => `${sourceLabel(r.source)} ${fmt(r.leads)}/${fmt(r.opps)}/${fmt(r.customers)}`).join('; ') : 'no rows for this source'
-    const budget = budgetLinesFor(facts, industry, names).map(l => `Budget line ${sourceLabel(l.line)}${alsoCounts(facts, l, names)}: ${lineStagesText(l, [...SOURCE_STAGES])}.`)
+    // Only the sources that have rows here choose the lines: "social" must not pull in a line whose only link is a source with no rows.
+    const rowSources = rows.map(r => r.source)
+    const budget = budgetLinesFor(facts, industry, rowSources).map(l => budgetClause(facts, l, rowSources, [...SOURCE_STAGES])).filter(Boolean)
     return `${display} (leads/opps/customers): ${rowText}.${budget.length ? ` ${budget.join(' ')}` : ''}`
   })
   const room = DATA_FACTS_LIMITS.askChars - used - out[0].length - 80

@@ -1323,7 +1323,9 @@ export class LiveCuesV2Engine {
       if (!early.ok) { trace.dataArm = early.why; return null }
       const found = dataCandidate(read.facts, window, today)
       if ('none' in found) { trace.dataArm = found.none; return null }
-      const gate = dataArmGate({ domain: ctx.domain, orientationFailed: ctx.orientationFailed, brand: found.brand, memoryQuilt: ctx.memoryQuilt, titleQuilt: quiltTitleSignal(read.facts, ctx.titles) })
+      // A lead source alone (no group named) is everyday speech in a marketing agency's meeting ("the trade show is in 30 days"): a Quilt
+      // memory among the candidates does not vouch for it. Only a Quilt-confirmed meeting or a Quilt term in the title does.
+      const gate = dataArmGate({ domain: ctx.domain, orientationFailed: ctx.orientationFailed, brand: found.brand, memoryQuilt: found.sourceOnly ? false : ctx.memoryQuilt, titleQuilt: quiltTitleSignal(read.facts, ctx.titles) })
       if (!gate.ok) { trace.dataArm = gate.why; return null }
       trace.dataArm = 'offered'
       trace.dataSignal = gate.signal
