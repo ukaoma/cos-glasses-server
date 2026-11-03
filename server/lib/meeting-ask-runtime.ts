@@ -32,6 +32,22 @@ export function meetingAskCapabilities(): MeetingAskCapabilities { return { ...M
  * Replaces 'No web.' in LIVE_ASK_SYSTEM when the web is available. The planner decides whether to look
  * anything up; this tells it how to ask so the server's gate (meeting-ask-web.ts) can admit the query.
  */
+/**
+ * The Ask deadline, in milliseconds from the start of the run. The usual Ask: 30 s (journal, 2026-11-02: a full ordinary Ask with a fact-check
+ * planner, a public-topic call, two plan hops, the answer and the review took 23.6 s).
+ * A public factual comparison (6.97.8) is allowed COMPARISON_DEADLINE_MS, the sum of the phase budgets below (milliseconds):
+ *   startup           3000   before the searches: no fact-check planner (2.5 s), no public-topic call (3.6 s) and no plan hop (3 s each) on this path
+ *   searches         12000   three together, each capped at 12 s by webLookup; the page reads happen inside that cap
+ *   answer           12000   190 words against the 5.8 s a 60-word answer took: about twice the output
+ *   review           12000   the grounding review rewrites the whole answer (5.5 s for 60 words, about twice)
+ *   reviewRepair     12000   reviewProblem allows two attempts
+ *   shutdown          4000   provider shutdown and the journal write
+ *   total            55000
+ * Each model call has its own 45 s limit (MEETING_ASK_DEFAULT_BUDGET.deadlineMs), which is not the binding one.
+ */
+export const MEETING_ASK_DEADLINE_MS = 30000;
+export const COMPARISON_PHASE_BUDGET_MS = { startup: 3000, searches: 12000, answer: 12000, review: 12000, reviewRepair: 12000, shutdown: 4000 } as const;
+export const COMPARISON_DEADLINE_MS = Object.values(COMPARISON_PHASE_BUDGET_MS).reduce((a, b) => a + b, 0);
 interface SharedContext { sources: import('./live-cos-ask.js').AskSource[]; notices: string[]; linkInQuestion: boolean }
 export const MEETING_ASK_WEB_SYSTEM = 'Public web: when the question needs public facts (who or what a public person, company, product, channel or term is, news, prices, documentation) that the supplied evidence does not confirm from a public source, return {"sections":[],"searchQuery":"...","searchScope":"web"}. If the user asks to fact-check, verify a public claim, or compare public costs, request a web search; missing roof area, dimensions or detailed scope limits the eventual comparison but does not prevent finding the original article, location, date, allocation and available comparable projects. Separate an announced budget or allocation from an awarded contract, invoice or total project scope. Do not infer fraud or overpricing from residential prices or unmatched scopes. If a comparison needs the previous public subject, retain that subject rather than searching generic words such as similar fixes. A question such as how much more is that than average requires a benchmark search; use the remaining lookup to find comparable public costs when the first article lacks a benchmark. With a usable cited benchmark B and discussed price P, calculate difference P-B, ratio P/B, and percentage (P/B-1)*100. State the units, source dates, geography, scope and whether the benchmark is an actual average or just a comparable project. Use a corroborated total allocation for total-cost comparisons. Do not base numerical ratios on an uncorroborated per-square-foot ASR figure; explicitly flag that number for confirmation. Missing roof area prevents a defensible per-square-foot comparison, but still retrieve examples and report their limits. Never label one example as the average. If the user asks you to search the web or look something up, request it. Build searchQuery only from words the user typed in this question or in their earlier questions. Never add names, numbers or details from the transcript, files, screenshots, memory or earlier answers: the server withholds a query that does. Never send private personal details to web search. For COS memories or earlier meetings use "searchScope":"cos". One Ask may use both, for example COS memory first and then the web. Do not ask permission for another lookup when the user has asked for a fact-check or comparison: use searchAllowed to request the remaining lookup, or explain the result when the bounded budget is spent. Only So what and Details are permitted for a typed answer; put follow-up suggestions in Details rather than a separate Ask row. If the search is withheld for missing user words, briefly explain it in the answer itself and give one exact suggested question naming the public subject so the user can authorize that search. Never claim to have verified anything without retrieved web evidence. Cite the observed article link using its supplied W source ID; do not cite only transcript claims or invent URLs. Evidence marked Retrieved page excerpt comes from that linked page and may be partial. Other links contain search-result evidence only. Prefer a retrieved official source for the requested application or terms. Return the observed application URL first when asked for a link. Distinguish API credits from subscription seats and partner discounts; do not combine their values, assume annual recurrence, or present partner discounts as Claude credits. Web search summaries represent the whole search, not any single linked page; disclose a material limitation briefly.';
 interface RuntimeDeps {
@@ -442,7 +458,9 @@ export class MeetingAskRuntime {
         const phases: MeetingAskPhaseTiming[] = [];
         const timings = (): MeetingAskTimings => ({ totalMs: Date.now() - executionStarted, phases: [...phases] });
         let timedOut=false;
-        const deadline = setTimeout(() => { timedOut=true;controller.abort(); }, 30000);
+        let deadline = setTimeout(() => { timedOut=true;controller.abort(); }, MEETING_ASK_DEADLINE_MS);
+        // The comparison path is chosen part-way through; its longer bound counts from the start of the run, not from the choice.
+        const allowUntil = (totalMs: number) => { clearTimeout(deadline); deadline = setTimeout(() => { timedOut=true;controller.abort(); }, Math.max(1, totalMs - (Date.now() - executionStarted))); };
         const drain = setInterval(() => { if (!this.deps.admissions())
             controller.abort(); }, 100);
         try {
@@ -494,7 +512,11 @@ export class MeetingAskRuntime {
             const priorQuestions = priorUserQuestions(journal, input);
             // 6.71.13: meeting-wide Fact check, named claim checks and their follow-ups. The narrow
             // retirement-rule catalog route keeps precedence, unchanged.
-            const factMode = factCheckScopeEnabled() && publicTopics && webAvailable && input.action === 'ask' && !genericRetirementQuery(normal, priorQuestions) ? this.factCheckMode(journal, input) : null;
+            // A comparison question whose own typed words pass the search gate IS the claim: the planner that hunts the transcript for claims to
+            // check (2.5 s) is skipped and the search runs on those words. "Fact check ..." and the Fact check button keep the planner.
+            const comparisonIsClaim = input.action === 'ask' && webAvailable && !isFactCheckCTA(input.question) && explicitWebAllowed(input.action, webAvailable, input.question) && comparisonQuestion(input.question)
+                && !/\bfact[\s-]*check/i.test(input.question) && publicSearchGate({ question: input.question, query: userWebQuery(input.question, priorQuestions) ?? '', priorQuestions }).ok;
+            const factMode = factCheckScopeEnabled() && publicTopics && webAvailable && input.action === 'ask' && !genericRetirementQuery(normal, priorQuestions) ? this.factCheckMode(journal, input, comparisonIsClaim) : null;
             if (factMode) {
                 const factStarted = Date.now();
                 const fact = await runMeetingFactCheck({ ...factMode, input: normal, at: { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, elapsedMs: input.elapsedMs }, records: journal, run: (prompt, system, signal, caller) => this.deps.run(input.model!, prompt, system, signal, undefined, caller ? { caller } : undefined), search: (query, signal) => this.deps.webSearch(query, signal, { feature: 'factCheck' }), ownerArea: this.deps.ownerArea, nameWords: [this.deps.wearer() ?? ''], ownerWords: [this.deps.wearer() ?? '', this.deps.ownerLabel() ?? ''], signal: controller.signal, startedAt: executionStarted });
@@ -550,6 +572,7 @@ export class MeetingAskRuntime {
             // A public factual comparison (6.97.8): up to three searches built from the user's own words run together and keep four pages in all.
             const comparisonSet = input.action === 'ask' && webAvailable && explicitWebQuery && !contextualQuery && !genericRule && !isFactCheckCTA(input.question) && comparisonQuestion(input.question) ? comparisonQueries(explicitWebQuery, input.question) : [];
             let searchesDispatched = 0;
+            if (comparisonSet.length) allowUntil(COMPARISON_DEADLINE_MS);
             // A public factual question whose search was withheld, failed or empty may still be answered from general knowledge, in one labeled line. Never after a privacy withhold.
             const publicFactual = input.action === 'ask' && webAvailable && !isFactCheckCTA(input.question) && (comparisonQuestion(input.question) || explicitWebRequest(input.question) || !!explicitWebQuery);
             const uncheckedLine = () => publicFactual && !privacyWithheld;
@@ -620,7 +643,7 @@ export class MeetingAskRuntime {
         return timings;
     }
     /** Which 6.71.13 fact-check path this question takes, or null for the ordinary Ask path. */
-    private factCheckMode(journal: AskRecord[], input: MeetingAskSubmit) {
+    private factCheckMode(journal: AskRecord[], input: MeetingAskSubmit, comparisonIsClaim = false) {
         const at = { requestId: input.requestId, sessionId: input.sessionId, serverInstanceId: input.serverInstanceId, elapsedMs: input.elapsedMs };
         if (factCheckScopeRequest(input.question))
             return { mode: 'scope' as const };
@@ -629,7 +652,7 @@ export class MeetingAskRuntime {
         const intent = continuationIntent(input.question, pending?.claim ?? null, { ownerArea: pending ? this.deps.ownerArea() : null, blockedNames: speakerNameWords(input.turns, [wearer]), ownerWords: new Set([wearer, this.deps.ownerLabel() ?? ''].join(' ').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) });
         if (pending && intent)
             return { mode: 'continue' as const, continuation: { ...pending, intent } };
-        if (factCheckRequest(input.question) && userWebQuery(input.question) !== null)
+        if (!comparisonIsClaim && factCheckRequest(input.question) && userWebQuery(input.question) !== null)
             return { mode: 'named' as const };
         return null;
     }

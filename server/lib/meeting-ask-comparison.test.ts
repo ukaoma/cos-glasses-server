@@ -17,6 +17,7 @@ const { PUBLIC_TOPIC_SYSTEM } = await import('./meeting-public-topic.js')
 const { COMPARISON_FINAL, UNCHECKED_FINAL } = await import('./live-cos-ask.js')
 const { REVIEW_SYSTEM } = await import('./meeting-ask-review.js')
 const { WebLookupLedger, setWebLedgerForTests } = await import('./web-lookup-ledger.js')
+const RT = await import('./meeting-ask-runtime.js')
 
 const QUESTION = 'Does private aviation safter or more dangerious than commercial? typical commercial'
 const TYPED = new Set(QUESTION.toLowerCase().match(/[a-z]+/g))
@@ -40,7 +41,10 @@ function setup(opts: { publicTopics?: boolean; review?: boolean; pages?: boolean
     seen.push({ system, prompt: parsed })
     if (system.startsWith(REVIEW_SYSTEM)) return { text: JSON.stringify({ sections: parsed.draft.sections, confidence: parsed.draft.confidence, support: parsed.draft.sections.flatMap((r: any) => [...r.text.matchAll(/\[(W\d+)\]/g)].map(m => ({ id: m[1], quote: parsed.sources.find((s: any) => s.id === m[1]).text.slice(0, 60) }))) }), model: 'claude-sonnet-5-5' }
     const pages = (parsed.evidence as any[]).filter(s => s.kind === 'web' && s.text.startsWith('Retrieved page excerpt'))
-    const reply = opts.answer ? opts.answer({ parsed, pages }) : pages.length >= 2
+    const oneRow = (parsed.labels as string[] | undefined)?.length === 1
+    const reply = opts.answer ? opts.answer({ parsed, pages }) : pages.length >= 2 && oneRow
+      ? { sections: [{ label: 'So what', text: `Shopify publishes its plan prices on its pricing page [${pages[0].id}].` }], confidence: { level: 'supported', reason: 'One read page.' }, searchQuery: null }
+      : pages.length >= 2
       ? { sections: [{ label: 'So what', text: `Taylor was right to doubt it: private flying is far more dangerous per flight hour than airline flying [${pages[0].id}].` },
         { label: 'Details', text: `Airlines: about 0.01 ${FIGURE} [${pages[0].id}]. Charter: about 0.2 to 0.8 [${pages[1].id}]. Private: about 0.7 to 1.0 [${pages[1].id}]. The caveat is that two-pilot charter flights come close to airlines [${pages[1].id}].` }],
         confidence: { level: 'supported', reason: 'Two read pages give the rates.' }, searchQuery: null }
@@ -200,5 +204,101 @@ describe('comparisonQueries', () => {
   it('comparisonQuestion: than, versus, compare, and fact-check requests', () => {
     for (const q of [QUESTION, 'Is X cheaper than Y', 'A versus B', 'Compare A and B', 'can you fact check this']) expect(W.comparisonQuestion(q), q).toBe(true)
     for (const q of ['Who is the CEO of Shopify?', 'What was decided?', 'Search the web for Shopify pricing']) expect(W.comparisonQuestion(q), q).toBe(false)
+  })
+})
+
+// 6.97.8 deadline: virtual time, realistic latencies. The 2026-11-02 journal: fact_check 2.5 s, public_topic 3.6 s, plan 2.9 + 3.2 s, answer 5.8 s,
+// review 5.5 s. A comparison answer is longer (about twice the output), and each search takes 8 s here.
+describe('the Ask deadline', () => {
+  const { MEETING_ASK_DEADLINE_MS, COMPARISON_DEADLINE_MS, COMPARISON_PHASE_BUDGET_MS } = RT
+  const LAT = { factPlanner: 2500, publicTopic: 3600, answerLong: 11_600, reviewLong: 11_000, answerShort: 5800, reviewShort: 5500, search: 8000, page: 1500 }
+  beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] }) })
+  afterEach(() => { vi.useRealTimers() })
+
+  function slowSetup(lat: { answer: number; review: number }, publicTopics = true) {
+    const f = setup({ publicTopics, review: true })
+    const calls = { factPlanner: 0, publicTopic: 0 }
+    const inner = f.run.getMockImplementation()!
+    // Like the real runner, a model call stops when the Ask is aborted.
+    const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
+      const t = setTimeout(resolve, ms)
+      signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')) }, { once: true })
+    })
+    f.run.mockImplementation(async (m: unknown, prompt: string, system: string, signal?: AbortSignal) => {
+      if (system === FACT_CHECK_PLANNER_SYSTEM) { calls.factPlanner++; await sleep(LAT.factPlanner, signal) }
+      else if (system === PUBLIC_TOPIC_SYSTEM) { calls.publicTopic++; await sleep(LAT.publicTopic, signal) }
+      else await sleep(system.startsWith(REVIEW_SYSTEM) ? lat.review : lat.answer, signal)
+      return inner(m, prompt, system)
+    })
+    const fast = mocks.search.getMockImplementation()!
+    mocks.search.mockImplementation(async (...args: any[]) => { await new Promise(r => setTimeout(r, LAT.search)); return fast(...args) })
+    const pages = mocks.fetch.getMockImplementation()!
+    mocks.fetch.mockImplementation(async (...args: any[]) => { await new Promise(r => setTimeout(r, LAT.page)); return pages(...args) })
+    return { f, calls }
+  }
+  async function runVirtual(f: ReturnType<typeof setup>, over: Record<string, unknown> = {}) {
+    const req = { ...base, requestId: `request_dl${String(++seq).padStart(6, '0')}`, turns: PLAIN_TURNS, ...over }
+    const started = Date.now()
+    await f.runtime.submit(req)
+    for (let i = 0; i < 1500; i++) {
+      const e = f.runtime.get(req.requestId)
+      if (!['pending', 'running'].includes(e.status)) return { e, took: Date.now() - started }
+      await vi.advanceTimersByTimeAsync(100)
+    }
+    throw new Error('never terminal')
+  }
+
+  it('the comparison bound is the sum of its phase budgets: 3 + 12 + 12 + 12 + 12 + 4 = 55 s; the usual Ask keeps 30 s', () => {
+    expect(COMPARISON_PHASE_BUDGET_MS).toEqual({ startup: 3000, searches: 12000, answer: 12000, review: 12000, reviewRepair: 12000, shutdown: 4000 })
+    expect(COMPARISON_DEADLINE_MS).toBe(55_000)
+    expect(MEETING_ASK_DEADLINE_MS).toBe(30_000)
+  })
+  it('a comparison that takes 32 s finishes (the 30 s deadline would have cut it), with no fact-check planner, no public-topic call and no plan hop', async () => {
+    const { f, calls } = slowSetup({ answer: LAT.answerLong, review: LAT.reviewLong })
+    const { e, took } = await runVirtual(f)
+    expect(e.status).toBe('completed')
+    expect(took).toBeGreaterThan(MEETING_ASK_DEADLINE_MS)                       // longer than the usual deadline allows
+    expect(took).toBeLessThan(COMPARISON_DEADLINE_MS)
+    expect(calls).toEqual({ factPlanner: 0, publicTopic: 0 })
+    expect(e.timings!.phases.map(p => p.phase)).toEqual(['web_search', 'web_search', 'web_search', 'answer', 'review'])
+    expect(mocks.search).toHaveBeenCalledTimes(3)
+    console.log(`comparison path, virtual ms: total ${e.timings!.totalMs}; phases ${e.timings!.phases.map(p => `${p.phase} ${p.ms}`).join(', ')}`)
+  })
+  it('a "fact check" question keeps the planner (the skip is for a comparison that is itself the claim)', async () => {
+    const { f, calls } = slowSetup({ answer: LAT.answerShort, review: LAT.reviewShort })
+    await runVirtual(f, { question: 'Can you fact check whether private aviation is more dangerous than commercial on average' })
+    expect(calls.factPlanner).toBe(1)
+  })
+  it('the comparison bound counts from the start of the run: an answer that never ends is cut at 55 s, not later', async () => {
+    const { f } = slowSetup({ answer: 200_000, review: LAT.reviewLong })
+    const { e, took } = await runVirtual(f)
+    expect(e.status).toBe('failed')
+    expect(e.error).toBe('answer_deadline_exceeded')
+    expect(took).toBeGreaterThanOrEqual(COMPARISON_DEADLINE_MS - 200)
+    expect(took).toBeLessThanOrEqual(COMPARISON_DEADLINE_MS + 400)
+  })
+  it('the bound counts from the start even when the comparison is chosen late (a pasted link took 1.5 s to read first)', async () => {
+    const { f } = slowSetup({ answer: 200_000, review: LAT.reviewLong })
+    const { e, took } = await runVirtual(f, { question: `${QUESTION} https://example.org/story` })
+    expect(e.status).toBe('failed')
+    expect(e.error).toBe('answer_deadline_exceeded')
+    expect(took).toBeGreaterThanOrEqual(COMPARISON_DEADLINE_MS - 200)
+    expect(took).toBeLessThanOrEqual(COMPARISON_DEADLINE_MS + 400)
+  })
+  it('a non-comparison Ask keeps the 30 s deadline: the same latencies end it at 30 s', async () => {
+    const { f } = slowSetup({ answer: LAT.answerLong, review: LAT.reviewLong })
+    const { e, took } = await runVirtual(f, { question: 'Search the web for Shopify pricing' })
+    expect(e.status).toBe('failed')
+    expect(e.error).toBe('answer_deadline_exceeded')
+    expect(took).toBeGreaterThanOrEqual(MEETING_ASK_DEADLINE_MS - 200)
+    expect(took).toBeLessThanOrEqual(MEETING_ASK_DEADLINE_MS + 400)
+    expect(mocks.search).toHaveBeenCalledTimes(1)
+  })
+  it('a non-comparison Ask with the journal\'s own latencies finishes well inside 30 s', async () => {
+    const { f } = slowSetup({ answer: LAT.answerShort, review: LAT.reviewShort })
+    const { e, took } = await runVirtual(f, { question: 'Search the web for Shopify pricing' })
+    expect(e.error ?? '').toBe('')
+    expect(e.status).toBe('completed')
+    expect(took).toBeLessThan(MEETING_ASK_DEADLINE_MS)
   })
 })
