@@ -5,6 +5,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
+import { darwinUserTempDir } from './parakeet.js'
 
 const scratch = mkdtempSync(join(tmpdir(), 'speaker-shadow-worker-'))
 process.env.COS_DATA_DIR = join(scratch, 'data')
@@ -33,8 +34,8 @@ const sha = (path: string) => createHash('sha256').update(readFileSync(path)).di
 const okModels = async (dir: string) => ({ ok: true as const, dir, bytes: 0 })
 let caseNo = 0
 
-function setup(mode: FakeCliMode, options: { audioRoot?: string } = {}) {
-  const root = join(scratch, `case-${++caseNo}`)
+function setup(mode: FakeCliMode, options: { audioRoot?: string; base?: string } = {}) {
+  const root = join(options.base ?? scratch, `case-${++caseNo}`)
   const cli = writeFakeCli(join(root, 'cli'), mode)
   markers.push(cli.marker)
   const meeting = syntheticMeeting()
@@ -226,8 +227,12 @@ describe('speaker shadow worker: one run', () => {
     // The meeting audio must sit OUTSIDE the per-user temp dir (os.tmpdir() is inside it, and the
     // profile lets the CLI write there for MPSGraph), as <data>/meeting-audio does in production.
     const audioRoot = mkdtempSync('/tmp/speaker-shadow-probe-')
+    // The fake CLI appends its run marker beside itself, and the profile allows writes only in the
+    // real per-user temp dir (getconf DARWIN_USER_TEMP_DIR). The release runner points TMPDIR at
+    // /tmp, which put the fake's own files outside it and failed the run before the probe; keep them there.
+    const base = mkdtempSync(join(darwinUserTempDir() ?? tmpdir(), 'speaker-shadow-sandbox-'))
     try {
-      const t = setup('probe', { audioRoot })
+      const t = setup('probe', { audioRoot, base })
       const outcome = await runShadowJob({ ...t.job, sandboxExec: '/usr/bin/sandbox-exec' }, { verifyModels: okModels })
       expect(outcome.status).toBe('proposed')
       const probe = t.cliRuns().find(r => r.probe)?.probe
@@ -235,7 +240,7 @@ describe('speaker shadow worker: one run', () => {
       expect(probe.audioWrite).toBe('EPERM')
       expect(probe.workWrite).toBe('allowed')
       expect(existsSync(join(t.job.audioDir, 'written-by-cli.txt'))).toBe(false)
-    } finally { rmSync(audioRoot, { recursive: true, force: true }) }
+    } finally { rmSync(audioRoot, { recursive: true, force: true }); rmSync(base, { recursive: true, force: true }) }
   }, 20_000)
 
   it('names its temp dir with the prefix the boot sweep removes', () => {
