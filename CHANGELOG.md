@@ -1,3 +1,16 @@
+## 6.98.0 - Live cues with five kinds, phone tuning, and a meeting assistant that reads links (public)
+
+2026-11-03. The public release of the private 6.95.0 to 6.97.9 line, merged with everything 6.94.4 published. Pairs with COS Glasses 6.11.669 and works with COS Control 0.5.363.
+
+- Live cues stay off until a person turns them on. Once on: G2 meetings armed by the phone get all five kinds (reinforce, challenge, decision, promise, follow-up), cues are paced across the meeting instead of spending the cap early, a cue that repeats a recent opening line is held back, and names come from the meeting's own speakers.
+- Cue tuning from the phone and from COS Control uses `GET/POST /api/live-cues/v2/settings?v=3`.
+- The meeting assistant reads a public link typed in a question, runs up to three searches for a comparison or fact check and leads with a verdict, and treats "private" as a privacy word only when it means privacy. Searches still go out only with Public topics on, and only with the words the user typed.
+- Dropped `.xlsx` files give their text to the meeting assistant.
+- A daily web lookup count (`webToday`) on the cue settings and meeting assistant config.
+- Saved Mac calls no longer fail on one silent window, and a meeting that has stopped retrying no longer locks Restart and Update.
+- The token ledger records provider-reported usage where the provider gives it.
+- Opt-in only, unchanged by default: speaker merge shadow, general cues, grounded cues, the Tableau data arm (needs a local `data-facts.json`).
+
 ## 6.97.9 - G2 meetings with all five cue kinds stay focused (private candidate)
 
 2026-11-02. Built on 6.97.8. Pairs with the phone build that arms G2 meetings with all five kinds. Private; npm latest stays 6.94.4.
@@ -130,6 +143,30 @@
 - **Models:** never downloaded by the server. The pinned `FluidInference/speaker-diarization-coreml@df2625ac` files must be present (`models_missing` is logged otherwise); every file is hashed before every run and linked read-only into the CLI's private HOME.
 - **Known limits:** a recording's first run with a cold CoreML cache leaves up to four empty `NSIRD_fluidaudiocli_*` folders in the per-user temp dir (counted in the record, not removed). Recovered (orphan) Mac captures are not queued. The gates were fixed on one truth-labeled call; scoring the logged proposals is the next step.
 - **Switches:** the per-Mac setting and `COS_SPEAKER_SHADOW` (default off), `COS_SPEAKER_SHADOW_DAILY_RUNS`, `COS_SPEAKER_SHADOW_TIMEOUT_MS` (may only lower 180 s), `COS_SPEAKER_SHADOW_RSS_MB`, `COS_SPEAKER_SHADOW_MODELS`. No default-on change.
+
+## 6.94.4 - SubQ session find shows every session that fits
+
+2026-11-01. Pairs with COS Control 0.5.363. Only affects people who chose SubQ and said yes to find sessions by meaning. Jev and everything else are unchanged.
+
+- SubQ now scores each likely session on its own, as Jev does. Before, its scores across all sessions added up to one against a floor of 0.5, so usually one row could show and others that fit were hidden.
+- Measured through the real route on 26 of 27 queries: the right session was shown in 19 of 20 and first in 18. An answer 51 days old is now found. Of 6 no-answer queries, 5 say nothing close and 1 shows weak rows marked possible. Wrong rows can still score high below the right one.
+- A SubQ search now uses about 10,500 to 24,000 tokens against its 3M daily cap.
+
+## 6.94.3 - Search sessions by meaning, and accented speaker names
+
+2026-11-01. Pairs with COS Control 0.5.363. Control 0.5.361 and older keep working and never call the new route.
+
+**New, and off until you say yes in Control.**
+
+- `POST /api/agent-sessions/find` asks your decision model (Jev by default, SubQ if chosen) which recent sessions a few typed words refer to, and returns up to 5 rows in order of likelihood. It answers only for the provider you consented to in Control, and refuses before reading any session otherwise.
+- Each search sends the typed words, plus the title and first 150 characters of the first prompt from up to 254 recent sessions, then up to 508 if the first pass finds nothing strong. Emails, URLs, links to an IP address or localhost, home-folder paths (not every file path) and key-shaped text are removed first. Names and other details are not. SubQ keeps what it is sent. Archived, keyed and scheduled sessions are left out.
+- Its own daily caps (3M tokens per provider), breaker and `COS_SESSION_FIND=0` switch. `GET /api/decision-provider` adds `capabilities.sessionFind`.
+
+**Default-on, no setting.**
+
+- Accented speaker names now match in either Unicode form. "Yes, this is Brigitta Pólya" failed with "No chunk in this meeting is labelled" because Control's helper hands names over decomposed. Meeting and voice routes read names as NFC, compare both sides, and store new names as NFC. Merge, delete-person, calibration, the rename fan-out and the embeddings manager match a stored name in either form, and a meeting record id matches in either form too (a decomposed id from Control's helper opens the same record). Merge refuses if any stored copy of a name is below the similarity floor. Names already saved are not rewritten.
+
+No other route changes. The session list and search are unchanged.
 
 ## 6.94.2 - Scoped profile matches for saved Mac recordings
 

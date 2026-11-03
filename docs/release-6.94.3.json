@@ -1,0 +1,26 @@
+{
+  "version": "6.94.3",
+  "status": "published_verified",
+  "tag": "latest",
+  "artifact": "gotcos-glasses-server-6.94.3.tgz",
+  "integrity": "sha512-HiURmV/lvfCInQJ3oNdQCKqdzEduH7Y8EF7eOHWu+cgCKU1kfrmG9vehyMdEDHSzUqKQNy45uvBatZOg0c5aPw==",
+  "registry_integrity": "sha512-HiURmV/lvfCInQJ3oNdQCKqdzEduH7Y8EF7eOHWu+cgCKU1kfrmG9vehyMdEDHSzUqKQNy45uvBatZOg0c5aPw==",
+  "sha256": "cb1358b6cca34bd65be776bd9c78c5024c5b9fd7bbf67810a8d2e045f8db687b",
+  "files": 584,
+  "bytes": 4825966,
+  "source_commit": "42bc805",
+  "validation": {
+    "test_files_passed": 626,
+    "test_files_skipped": 1,
+    "tests_passed": 10059,
+    "tests_skipped": 14,
+    "typecheck": "passed",
+    "registry_fresh_cache_cli": "passed",
+    "public_download_sha256": "matched"
+  },
+  "verified_at": "2026-11-01T21:26:24.941857+00:00",
+  "dist_tags": {
+    "latest": "6.94.3",
+    "next": "6.95.0"
+  }
+}
