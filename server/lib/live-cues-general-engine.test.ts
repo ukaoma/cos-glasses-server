@@ -248,6 +248,38 @@ describe('general cues in the engine', () => {
       expect(g.trigger).toBe(0)
       expect(insights()).toEqual([])
     })
+    it('6.97.9: a G2 meeting armed with all five kinds is still no general candidate, never switched off, and never gets an insight, in every mode', async () => {
+      for (const mode of ['focused', 'general', 'all'] as const) {
+        s.mode = mode; s.publicTopics = true
+        focusedGates = 0; emitted = []
+        const e = engine()
+        const answer = e.arm(G2, { kinds: 'extended' })
+        expect(answer.kinds).toEqual(['reinforce', 'challenge', 'decision', 'promise', 'followUp'])      // the five kinds are still granted
+        const host = e['generalHost']()
+        expect(host.candidates(), mode).toEqual([])
+        await feed(e, G2)
+        expect(focusedGates, mode).toBe(1)                                                              // focused cues run, whatever the mode
+        expect(focused().map(x => x.data.sessionId), mode).toEqual([G2])
+        const r = e.generalRunner()!
+        await r.tick(); clock += 301_000; await feed(e, G2, 4)
+        expect(await r.tick(), mode).toMatchObject({ ran: false })
+        expect(e.status(G2).session).not.toHaveProperty('general')
+        const insight: GeneralInsight = { headline: 'A fact', detail: 'A true public fact from a page.', category: 'news', query: 'Formula One circuit news', gate: 0.9,
+          sources: [{ id: 'web_x', date: '2026-11-01', title: 'Page', kind: 'web', url: 'https://example.org/p' }], windowAt: clock, createdAt: clock }
+        expect(host.emit(G2, insight)).toBe(false)
+        expect(insights()).toEqual([])
+        expect(e['focusedOff'](e['sessions'].get(G2)!)).toBe(false)
+      }
+      expect(g.trigger).toBe(0)
+      expect(g.search).toEqual([])
+    })
+    it('6.97.9: the same mode general with Public topics on still switches a Mac meeting\'s focused cues off and offers it to the runner', async () => {
+      s.mode = 'general'; s.publicTopics = true
+      const e = engine()
+      e.arm(MAC)
+      expect(e['generalHost']().candidates().map(c => c.sessionId)).toEqual([MAC])
+      expect(e['focusedOff'](e['sessions'].get(MAC)!)).toBe(true)
+    })
     it('cue mode general: a Mac meeting gets insights only, a G2 meeting keeps its focused cues', async () => {
       s.mode = 'general'
       const e = engine()

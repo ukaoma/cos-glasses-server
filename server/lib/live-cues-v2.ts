@@ -248,6 +248,11 @@ export function liveCuesV2WriterSystem(env: NodeJS.ProcessEnv = process.env, kin
   if (kinds === 'extended') return { version: 'v4', system: CUE_WRITER_SYSTEM_V4 }
   return (env.COS_LIVE_CUES_V2_PROMPT ?? '').trim() === 'v2' ? { version: 'v2', system: CUE_WRITER_SYSTEM_V2 } : { version: 'v3', system: CUE_WRITER_SYSTEM_V3 }
 }
+/** 6.97.9: the Mac-only machinery (the general web runner and its insights, cue mode `general` switching the focused cues off, the open-items
+ *  fold) keys on the session being a Mac recording, never on its kind set: a G2 meeting may be armed with all five kinds (the phone does)
+ *  and gets the five kinds and writer v4, nothing else of the Mac's. */
+const macRecording = (s: { sessionId: string }): boolean => MAC_CAPTURE_ID.test(s.sessionId)
+
 /** 6.86.0: which kinds a meeting gets when its armer does not say. A Mac recording (`mac_` capture id) is read only by COS
  *  Control, which shows any kind, so it gets the extended set; every other meeting keeps the two legacy kinds, because a
  *  companion that validates `kind` drops a cue whose kind it does not know. */
@@ -1188,7 +1193,7 @@ export class LiveCuesV2Engine {
       // writer marked as a missing owner or date (and whose wording agrees) is held, not shown. It is logged below with `held`, so history
       // never lists or counts it, stays in the writer's history, and comes back through showHeld(). The writer call counted; the cooldown
       // applies; the cue does not count toward the cap.
-      const item = s.kinds === 'extended' && liveCuesV2Rule('OPEN_ITEMS', this.deps.env)
+      const item = macRecording(s) && s.kinds === 'extended' && liveCuesV2Rule('OPEN_ITEMS', this.deps.env)
         ? openItemOf({ kind: parsed.kind, detail: parsed.detail, cited: sources.length, field: parsed.open }) : null
       // 6.79.0: logged before it is held or emitted, so a rating that arrives at once finds it. Its own try/catch: a log
       // failure is traced on this evaluation and is never a writer failure or a step toward the breaker.
@@ -1363,11 +1368,11 @@ export class LiveCuesV2Engine {
   private cueMode(): LiveCuesCueMode { return resolveLiveCuesCueMode(this.deps.env, this.deps.settings).value }
   /** Ask Public topics consent, read the way the general runner reads it: unreadable, absent and off are all off. */
   private publicTopicsOn(): boolean { try { return this.deps.publicTopics?.() === true } catch { return false } }
-  /** Cue mode `general` turns the focused cues off for an extended (Mac) meeting, but only while the insights that replace them can
+  /** Cue mode `general` turns the focused cues off for a Mac recording, but only while the insights that replace them can
    *  run: with Public topics off the general runner stops at public_topics_off, so switching the focused cues off as well would
    *  leave the meeting with nothing, and Control cannot turn the consent on. Then the focused cues stay on and the status says
-   *  needs_public_topics. A legacy (G2) meeting keeps them too: it can never carry an insight. */
-  private focusedOff(s: Session): boolean { return s.kinds === 'extended' && this.cueMode() === 'general' && this.publicTopicsOn() }
+   *  needs_public_topics. A G2 meeting keeps them too, whatever kinds it was armed with (6.97.9): it can never carry an insight. */
+  private focusedOff(s: Session): boolean { return macRecording(s) && this.cueMode() === 'general' && this.publicTopicsOn() }
   private allCues(s: Session): LiveCueV2[] { return s.insights.length ? [...s.cues, ...s.insights].sort((a, b) => a.createdAt - b.createdAt) : [...s.cues] }
 
   /** Remembers who the ASR path says is speaking, for the general runner's name gate. Bounded; generic labels ("Ext", "Speaker 2")
@@ -1388,7 +1393,7 @@ export class LiveCuesV2Engine {
         if (!this.enabled()) return []
         const out: GeneralCueCandidate[] = []
         for (const s of this.sessions.values()) {
-          if (s.kinds !== 'extended') continue
+          if (!macRecording(s) || s.kinds !== 'extended') continue            // a G2 meeting armed with the five kinds is still never offered to the general runner
           // A throw is not "unconfirmed": an orientation that cannot be read may belong to a personal meeting, so it is withheld.
           let domain: string | null = null, calendarTitle: string | null = null, domainUnreadable = false
           try { const o = this.deps.orientation?.(s.sessionId); domain = o?.domain ?? null; calendarTitle = o?.title ?? null } catch { domainUnreadable = true }
@@ -1421,7 +1426,7 @@ export class LiveCuesV2Engine {
    *  or breaker. False when the meeting is gone, ended or not extended, or the cue would not pass isLiveCueV2. */
   private emitInsight(sessionId: string, insight: GeneralInsight): boolean {
     const s = this.sessions.get(sessionId)
-    if (!s || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false
+    if (!s || !macRecording(s) || s.kinds !== 'extended' || this.deps.store.isEnded(sessionId)) return false
     // Every source goes through the same public https check as the cue log's: one that fails drops the whole insight.
     const urls = insight.sources.map(src => publicHttpsUrl(src.url))
     if (!insight.sources.length || urls.some(u => u === null)) return false

@@ -1,3 +1,9 @@
+## 6.97.9 - G2 meetings with all five cue kinds stay focused (private candidate)
+
+2026-11-02. Built on 6.97.8. Pairs with the phone build that arms G2 meetings with all five kinds. Private; npm latest stays 6.94.4.
+
+- A `meeting_` session armed with `kinds: 'extended'` gets the five cue kinds and writer v4, and nothing else of the Mac's: it is never offered to the general (web) cue runner and never gets an insight, cue mode `general` never switches its focused cues off, and the open-items fold never holds its cues (they show as written). Those three, and the insight emit path, now key on the session being a Mac recording (`mac_` id), not on the kind set.
+
 ## 6.97.8 - Live cues: Tableau facts, shared links and pacing (private candidate)
 
 2026-11-02. Built on 6.97.7, which it carries. Pairs with COS Control 0.5.365. Private, for one Mac; npm latest stays 6.94.4.

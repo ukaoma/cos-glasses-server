@@ -636,11 +636,11 @@ describe('engine', () => {
     const NORMAL = JSON.stringify({ cue: 'Kiosk vendor review slipped twice; agree a new pilot date with procurement.', kind: 'challenge' })
     const cuesShown = () => emitted.filter(x => x.type === 'coaching_nudge_v2').map(x => x.data)
 
-    async function play(writes: string[], id = MAC, gapMs = 65_000, over: Partial<Deps> = {}) {
+    async function play(writes: string[], id = MAC, gapMs = 65_000, over: Partial<Deps> = {}, kinds?: 'extended') {
       let n = 0
       writerText = async () => writes[n++]
       const logged: Array<Record<string, unknown>> = []
-      const e = engine({ cueLog: row => { logged.push(row as unknown as Record<string, unknown>) }, ...over }); e.arm(id)
+      const e = engine({ cueLog: row => { logged.push(row as unknown as Record<string, unknown>) }, ...over }); e.arm(id, kinds ? { kinds } : {})
       for (let i = 0; i < writes.length; i++) { await e.feed(id, words(L.minNewWords)); clock += gapMs }
       return { e, logged, id }
     }
@@ -672,6 +672,17 @@ describe('engine', () => {
       await play([GAP_A, GAP_B, NORMAL], 'meeting_a')
       expect(cuesShown().map(c => c.detail)).toEqual([JSON.parse(GAP_A).cue, JSON.parse(GAP_B).cue, JSON.parse(NORMAL).cue])
       expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue', 'cue'])
+    })
+
+    it('6.97.9: a G2 meeting armed with all five kinds is never folded: every gap cue is shown as written, on writer v4, with the five kinds allowed', async () => {
+      on()
+      const promise = gapCue('Someone took on the offsite agenda. No date was set for that talk.', 'Offsite agenda talk', 'promise')
+      await play([GAP_A, GAP_B, promise], 'meeting_a', 65_000, {}, 'extended')
+      expect(cuesShown().map(c => c.detail)).toEqual([JSON.parse(GAP_A).cue, JSON.parse(GAP_B).cue, JSON.parse(promise).cue])
+      expect(cuesShown().map(c => c.kind)).toEqual(['challenge', 'challenge', 'promise'])         // a Mac-only kind passes; the cues are as written
+      expect(evaluations().map(t => t.outcome)).toEqual(['cue', 'cue', 'cue'])
+      expect(evaluations()[0]).toMatchObject({ prompt: 'v4', kindSet: 'extended' })
+      expect(traces.filter(t => t.kind === 'flush')).toEqual([])
     })
 
     it('a cue with no open field from the writer is shown even on an extended meeting, however it is worded', async () => {

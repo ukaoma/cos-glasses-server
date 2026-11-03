@@ -3,7 +3,8 @@
 //
 // POST /live-cues/start { sessionId, kinds? }  -> { armed, sessionId, pipelinesUsed } (v1) or the v2 arm answer
 //   kinds (6.86.0, v2 only): 'legacy' (reinforce, challenge) or 'extended' (plus decision, promise, followUp). Absent: a
-//   Mac recording (mac_ id) gets extended, every other meeting legacy, so an older companion never sees a kind it drops.
+//   Mac recording (mac_ id) gets extended, every other meeting legacy, so an older companion never sees a kind it drops. A G2 meeting armed 'extended' (6.97.9) gets the five kinds and
+//   nothing else of the Mac's: no general (web) cues, no cue mode `general` switching its focused cues off, no open-items fold.
 // POST /live-cues/stop  { sessionId }  -> { nudgesGenerated, nudges }
 // GET  /live-cues/status               -> engine snapshot + capability
 // GET  /live-cues/v2/settings           -> { enabled, source: env|setting|default, capability }       (6.76.2)
