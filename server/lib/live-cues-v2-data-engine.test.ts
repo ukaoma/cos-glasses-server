@@ -12,7 +12,7 @@ const mod = await import('./live-cues-v2.js')
 const contract = await import('../../shared/live-cues-v2.js')
 const dataMod = await import('./live-cues-v2-data.js')
 const { isLogRow } = await import('./live-cue-verdicts.js')
-const { rawFacts } = await import('./__fixtures__/live-cues-v2-data-fixture.js')
+const { rawFacts, rawSourceFacts } = await import('./__fixtures__/live-cues-v2-data-fixture.js')
 const { LiveCuesV2Engine, LiveCuesV2Store, LIVE_CUES_V2_LIMITS: L, liveCuesV2WriterSystem } = mod
 type Deps = import('./live-cues-v2.js').LiveCuesV2Deps
 type MemoryNote = import('./live-cues-v2.js').MemoryNote
@@ -273,6 +273,56 @@ describe('the Tableau data arm in the engine', () => {
     it('an orientation that cannot be read turns the arm off even with a brand named', async () => {
       await feed(SBU_TOPIC, engine({ orientation: () => { throw new Error('journal_unreadable') } }))
       expect(evaluation()).toMatchObject({ dataArm: 'orientation', orientationError: 'threw', arms: { data: 0 } })
+    })
+  })
+
+  describe('a lead source named in the room', () => {
+    const PPC = ' we are doing a refresh on the PPC landing pages for thrift'
+    beforeEach(() => { read = () => dataMod.parseDataFacts(rawSourceFacts(), clock) })
+
+    it('gives the judge a D1 about that source, the writer the scope rule for it, and the cue the same Tableau source', async () => {
+      await feed(PPC)
+      expect(judged).toEqual([['D1']])
+      expect(judgedNotes[0][0].notes).toContain('Thrift, Paid Search Non-Brand alone: leads 45, opps 11; Paid Search Brand alone: leads 8, opps 2.')
+      expect(judgedNotes[0][0].notes).toContain('Budget line Paid Search Non-Brand (shared with Paid Social): leads 66 vs 47 (140%)')
+      expect(evaluation()).toMatchObject({ outcome: 'cue', dataArm: 'offered', arms: { data: 1 }, keptIds: ['D1'] })
+      expect(systems[0]).toBe(liveCuesV2WriterSystem(env, 'legacy').system + dataMod.DATA_WRITER_ADDENDUM)
+      expect(systems[0]).toContain('covers only that source')
+      const cue = emitted.find(x => x.type === 'coaching_nudge_v2')!.data as unknown as import('../../shared/live-cues-v2.js').LiveCueV2
+      expect(cue.sources).toEqual([{ id: expect.stringMatching(/^mtg_[0-9a-f]{12}$/), date: '2026-11-02', title: 'Tableau, Oct 2026 close, marketing sources', kind: 'file' }])
+      expect(isLogRow(logged[0])).toBe(true)
+    })
+    it('the trace carries ids, a count and an age, never the source text or the room', async () => {
+      await feed(PPC)
+      const row = JSON.stringify(evaluation())
+      expect(row).not.toContain('Paid Search'); expect(row).not.toContain('landing pages'); expect(row).not.toContain('66 vs 47')
+    })
+    it('the same gate as the group note: a Quilt meeting, or no confirmed domain with a Quilt signal; never another domain', async () => {
+      orientation = { domain: 'personal', title: null }
+      await feed(PPC)
+      expect(evaluation()).toMatchObject({ dataArm: 'domain', arms: { data: 0 } })
+      orientation = { domain: null, title: null }; traces = []
+      await feed(PPC, engine())
+      expect(evaluation()).toMatchObject({ dataArm: 'unconfirmed', arms: { data: 0 } })        // an industry word and a source are no Quilt signal
+      traces = []; await feed(' paid search leads are at 40 this month', engine())
+      expect(evaluation()).toMatchObject({ dataArm: 'unconfirmed', arms: { data: 0 } })        // a source alone is never a brand signal
+      traces = []; await feed(' the ThriftCart PPC landing pages are at 40 leads', engine())
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'brand' })
+      orientation = { domain: 'quilt', title: null }; traces = []
+      await feed(' paid search leads are at 40 this month', engine())
+      expect(evaluation()).toMatchObject({ dataArm: 'offered', dataSignal: 'quilt' })
+      expect(judgedNotes.at(-1)![0].notes).toContain('Paid Search alone, largest by leads: Liquor Paid Search Non-Brand leads 64; Thrift Paid Search Non-Brand leads 45.')
+    })
+    it('an older file (no source detail) still serves: rows only, no budget line; with no rows for the group the totals rule decides', async () => {
+      read = () => dataMod.parseDataFacts(rawFacts({ sources: rawSourceFacts().sources.map(({ budgetLine: _b, ...r }: Record<string, unknown>) => r) }), clock)
+      await feed(PPC)
+      expect(judgedNotes[0][0].notes).toContain('Thrift, Paid Search Non-Brand alone: leads 45, opps 11, customers 3; Paid Search Brand alone: leads 8, opps 2, customers 0.')
+      expect(judgedNotes[0][0].notes).not.toContain('Budget line')
+      read = okRead(); traces = []
+      await feed(' we are doing a refresh on the PPC landing pages for thrift', engine())
+      expect(evaluation()).toMatchObject({ dataArm: 'no_funnel', arms: { data: 0 } })
+      traces = []; await feed(' PPC leads for thrift look low', engine())
+      expect(judgedNotes.at(-1)![0].notes).toContain('Thrift: leads 151 vs 110 (137%)')
     })
   })
 

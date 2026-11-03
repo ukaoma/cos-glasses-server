@@ -34,3 +34,45 @@ export function rawFacts(over: Raw = {}): Raw {
     ...over,
   }
 }
+
+// Lead-source detail, shaped like cue_data_facts.py writes it with budget lines (numbers made up). Tableau budgets per LINE and counts
+// Paid Social under "Paid Search - Non-Brand", so a line's actual is the sum of its sources' rows: Thrift 45 + 21 = 66 leads.
+const line = (industry: string, name: string, sources: string[], s: Record<string, [number, number | null]>) => ({ industry, line: name, sources,
+  stages: Object.fromEntries(Object.entries(s).map(([k, [a, b]]) => [k, { actual: a, budget: b, pctToGoal: b ? Math.round((1000 * a) / b) / 10 : null }])) })
+const NB = ['Paid Search - Non-Brand', 'Paid Social']
+const row = (industry: string, source: string, bucket: string, leads: number, opps: number, customers: number, budgetLine?: string) =>
+  ({ industry, source, bucket, leads, opps, customers, ...(budgetLine ? { budgetLine } : {}) })
+
+export function rawSourceFacts(over: Raw = {}): Raw {
+  return rawFacts({
+    sources: [
+      row('Liquor', 'Paid Search - Non-Brand', 'Paid Search Non-Brand', 64, 11, 4, 'Paid Search - Non-Brand'),
+      row('Liquor', 'Paid Search - Brand', 'Paid Search Brand', 17, 7, 4, 'Paid Search - Brand'),
+      row('Liquor', 'Paid Social', 'General Marketing', 10, 2, 1, 'Paid Search - Non-Brand'),
+      row('Liquor', 'Organic Direct', 'Organic Direct', 63, 41, 16, 'Organic Direct'),
+      row('Thrift', 'Paid Search - Non-Brand', 'Paid Search Non-Brand', 45, 11, 3, 'Paid Search - Non-Brand'),
+      row('Thrift', 'Event Conferences', 'Events', 24, 15, 2, 'Events'),
+      row('Thrift', 'Organic', 'Organic Direct', 24, 8, 2, 'Organic Direct'),
+      row('Thrift', 'Direct', 'Organic Direct', 22, 16, 5, 'Organic Direct'),
+      row('Thrift', 'Paid Social', 'General Marketing', 21, 6, 3, 'Paid Search - Non-Brand'),
+      row('Thrift', 'Paid Search - Brand', 'Paid Search Brand', 8, 2, 0, 'Paid Search - Brand'),
+      row('Thrift', 'Social Media', 'General Marketing', 3, 1, 0, 'General Marketing'),
+      row('Pet', 'Paid Search - Non-Brand', 'Paid Search Non-Brand', 7, 0, 0, 'Paid Search - Non-Brand'),
+      row('Pet', 'Paid Social', 'General Marketing', 17, 1, 1, 'Paid Search - Non-Brand'),
+      row('Dive', 'Paid Search - Non-Brand', 'Paid Search Non-Brand', 6, 0, 0, 'Paid Search - Non-Brand'),
+    ],
+    budgetLines: [
+      line('Liquor', 'Paid Search - Non-Brand', NB, { leads: [74, 85], opps: [13, 20], customers: [5, 9] }),
+      line('Liquor', 'Paid Search - Brand', ['Paid Search - Brand'], { leads: [17, 18], opps: [7, 10], customers: [4, 6] }),
+      line('Liquor', 'Organic Direct', ['Organic', 'Organic Direct', 'Direct', 'AI Referrals'], { leads: [63, 70], opps: [41, 30], customers: [16, 20] }),
+      line('Thrift', 'Paid Search - Non-Brand', NB, { leads: [66, 47], opps: [17, 13], customers: [6, 3] }),
+      line('Thrift', 'Paid Search - Brand', ['Paid Search - Brand'], { leads: [8, 11], opps: [2, 8], customers: [0, 3] }),
+      line('Thrift', 'Events', ['Event Conferences'], { leads: [24, 6], opps: [15, 6], customers: [2, 0] }),
+      line('Thrift', 'Organic Direct', ['Organic', 'Organic Direct', 'Direct', 'AI Referrals'], { leads: [46, 37], opps: [24, 20], customers: [7, 11] }),
+      line('Thrift', 'General Marketing', ['Referral Traffic', 'Social Media', 'Email Database', 'Paid Partnership'], { leads: [3, 9], opps: [1, 4], customers: [0, 1] }),
+      line('Pet', 'Paid Search - Non-Brand', NB, { leads: [24, 10], opps: [1, 3], customers: [1, 1] }),
+      line('Dive', 'Paid Search - Non-Brand', NB, { leads: [6, 0], opps: [0, 0], customers: [0, 0] }),
+    ],
+    ...over,
+  })
+}

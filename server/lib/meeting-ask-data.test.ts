@@ -8,11 +8,13 @@ import { join } from 'node:path'
 import { MeetingAskRuntime } from './meeting-ask-runtime.js'
 import { MeetingAskStore } from './meeting-ask-store.js'
 import { DATA_ASK_ADDENDUM, parseDataFacts, type DataFactsRead } from './live-cues-v2-data.js'
-import { NOW, rawFacts } from './__fixtures__/live-cues-v2-data-fixture.js'
+import { NOW, rawFacts, rawSourceFacts } from './__fixtures__/live-cues-v2-data-fixture.js'
 
 const base = { requestId: 'request_12345678', sessionId: 'meeting_test', serverInstanceId: 'server-one', action: 'ask' as const, question: 'What was decided?', elapsedMs: 1000,
   turns: [{ id: 0, elapsedMs: 0, speaker: 'Person', text: 'SBU closed at 120% of MRR budget, 148 vs 131 locations.' }] }
 const ok = (): DataFactsRead => parseDataFacts(rawFacts(), NOW)
+const withSources = (): DataFactsRead => parseDataFacts(rawSourceFacts(), NOW)
+const tableauOf = (f: ReturnType<typeof fixture>) => evidenceOf(f).find(s => s.title.startsWith('Tableau'))
 
 function fixture(dataFacts: () => DataFactsRead, domain: string | null = 'quilt', calendarTitle?: string) {
   const dir = mkdtempSync(join(tmpdir(), 'ask-data-')), store = new MeetingAskStore(dir), release = vi.fn()
@@ -89,6 +91,77 @@ describe('the meeting assistant and the Tableau facts', () => {
       expect(ev.find(s => s.title === 'Plan')!.id).toBe('F1')
       expect(ev.find(s => s.title.startsWith('Tableau'))!.id).toBe('F2')
     } finally { f.cleanup() }
+  })
+
+  describe('a lead source in the question', () => {
+    it('"check that tableau report via paid search": the paid search rows and their budget lines are the cited source, with no all-marketing totals', async () => {
+      const f = fixture(withSources)
+      try {
+        const e = await ask(f, 'Can you check that tableau report via paid search')
+        expect(e.status).toBe('completed')
+        const text = tableauOf(f)!.text
+        expect(tableauOf(f)).toMatchObject({ id: 'F1', kind: 'file' })
+        expect(text).toContain('Thrift (leads/opps/customers): Paid Search Non-Brand 45/11/3; Paid Search Brand 8/2/0.')
+        expect(text).toContain('Budget line Paid Search Non-Brand (shared with Paid Social): leads 66 vs 47 (140%)')
+        expect(text).not.toMatch(/^SBU|^XBU/m)
+        expect(systemOf(f)).toContain(DATA_ASK_ADDENDUM)
+        expect(systemOf(f)).toContain('A lead-source row covers only that source')
+        expect(f.webSearch).not.toHaveBeenCalled()
+      } finally { f.cleanup() }
+    })
+    it('"how did paid search do for thrift": a group beside a specific source is a data question in a Quilt meeting, and only Thrift is given', async () => {
+      const f = fixture(withSources)
+      try {
+        await ask(f, 'how did paid search do for thrift in October')
+        const text = tableauOf(f)!.text
+        expect(text).toContain('Thrift: leads 151 vs 110 (137%)')
+        expect(text).toContain('Thrift (leads/opps/customers): Paid Search Non-Brand 45/11/3; Paid Search Brand 8/2/0.')
+        expect(text).not.toContain('Liquor (leads')
+      } finally { f.cleanup() }
+    })
+    it('the gates are as strict as for a group: personal never, another domain only when Tableau is named, no domain needs a brand or a Quilt title', async () => {
+      const q = 'how did paid search do for thrift in October'
+      for (const [domain, title, served] of [['personal', undefined, false], ['hermit_crabs', undefined, false], [null, undefined, false], [null, 'Quilt weekly forecast', true], ['quilt', undefined, true]] as const) {
+        const f = fixture(withSources, domain, title)
+        try {
+          const e = await ask(f, q)
+          expect(tableauOf(f) !== undefined, `${domain} ${title}`).toBe(served)
+          if (!served) expect(e.notices.join(' ')).not.toMatch(/Tableau/)
+        } finally { f.cleanup() }
+      }
+      const g = fixture(withSources, null)
+      try {
+        await ask(g, 'how did paid search do for ThriftCart')
+        expect(tableauOf(g)).toBeDefined()                       // a Quilt brand named is the signal, as for a group
+      } finally { g.cleanup() }
+      const h = fixture(withSources, null)
+      try {
+        await ask(h, 'what were ppc leads last month')
+        expect(tableauOf(h)).toBeUndefined()                      // a source alone is never a Quilt-brand signal
+      } finally { h.cleanup() }
+      const i = fixture(withSources, 'hermit_crabs')
+      try {
+        await ask(i, 'check Tableau via paid search')
+        expect(tableauOf(i)).toBeDefined()                        // another business domain, but Tableau was named
+      } finally { i.cleanup() }
+    })
+    it('an older file (no budget lines) answers with the rows alone', async () => {
+      const f = fixture(() => parseDataFacts(rawFacts({ sources: rawSourceFacts().sources.map(({ budgetLine: _b, ...r }: Record<string, unknown>) => r) }), NOW))
+      try {
+        await ask(f, 'how did paid search do for thrift')
+        expect(tableauOf(f)!.text).toContain('Thrift (leads/opps/customers): Paid Search Non-Brand 45/11/3; Paid Search Brand 8/2/0.')
+        expect(tableauOf(f)!.text).not.toContain('Budget line')
+      } finally { f.cleanup() }
+    })
+    it('a question that names no source gets what it always got', async () => {
+      const f = fixture(withSources)
+      try {
+        await ask(f, 'Why were liquor leads down last month?')
+        const text = tableauOf(f)!.text
+        expect(text).toContain('Liquor lead sources (leads/opps/customers): Paid Search - Non-Brand 64/11/4; Organic Direct 63/41/16; Paid Search - Brand 17/7/4; Paid Social 10/2/1')
+        expect(text).not.toContain('Lead source asked about')
+      } finally { f.cleanup() }
+    })
   })
 
   describe('domains', () => {
