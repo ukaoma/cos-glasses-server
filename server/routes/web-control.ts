@@ -12,6 +12,7 @@ import {
   WEB_SESSION_TTL_MS,
   WebHandoffStore,
   WebLoginLimiter,
+  WebDeviceCodeStore,
 } from '../lib/web-session-auth.js'
 import { acquireMaintenanceWork, MaintenanceLifecycleError, maintenanceErrorPayload } from '../lib/maintenance-lifecycle.js'
 import { getOwnerName } from '../lib/profile.js'
@@ -34,6 +35,7 @@ export interface WebControlRouterDeps {
   httpsPort?: () => number | null
   handoffStore?: WebHandoffStore
   loginLimiter?: WebLoginLimiter
+  deviceCodeStore?: WebDeviceCodeStore
   serverVersion?: () => string
   selfDnsName?: () => string | null
   baseDataDir?: () => string | undefined
@@ -95,6 +97,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
   const router = Router()
   const handoffStore = deps.handoffStore ?? new WebHandoffStore()
   const loginLimiter = deps.loginLimiter ?? new WebLoginLimiter()
+  const deviceCodes = deps.deviceCodeStore ?? new WebDeviceCodeStore()
   const smallJson = express.json({ limit: '64kb' })
 
   const allowedPorts = (): number[] => {
@@ -169,15 +172,15 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
       })
     }
     const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
-      ? req.body as { token?: unknown; handoff?: unknown }
+      ? req.body as { token?: unknown; handoff?: unknown; code?: unknown }
       : {}
     const token = deps.apiToken()
-    if (!verifyLoginTokenOrHandoff(body, token, handoffStore)) {
+    if (!verifyLoginTokenOrHandoff(body, token, handoffStore, deviceCodes)) {
       loginLimiter.fail(ip)
       return res.status(401).json({
         ok: false,
         error: 'invalid_credentials',
-        message: 'Invalid COS pairing token or expired handoff link.',
+        message: 'That code or token did not match, or it has expired.',
       })
     }
     loginLimiter.succeed(ip)
@@ -195,6 +198,14 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     res.set('Cache-Control', 'private, no-store')
     res.setHeader('Set-Cookie', formatClearWebSessionCookie(req.secure))
     res.json({ ok: true })
+  })
+
+  // A signed-in browser (or the Mac app) asks for a short code to type on another device.
+  // Behind the gate: a cookie caller also needs X-COS-Web and its own Origin (CSRF).
+  router.post('/web-session/device-code', (_req: Request, res: Response) => {
+    res.set('Cache-Control', 'private, no-store')
+    const minted = deviceCodes.mint()
+    res.json({ ok: true, code: minted.display, expiresAt: minted.expiresAt })
   })
 
   router.post('/web-session/handoff', (req: Request, res: Response) => {

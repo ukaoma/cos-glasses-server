@@ -141,6 +141,7 @@ export function isReadOnlyApiPost(method: string, path: string): boolean {
     || path === '/web-session/login'
     || path === '/web-session/logout'
     || path === '/web-session/handoff'
+    || path === '/web-session/device-code'
     || path === '/web-bridge/memories'
     || /^\/meeting\/[A-Za-z0-9:_-]{3,96}\/voice-suggestions$/.test(path)
   )

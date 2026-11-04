@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { isAllowedNetworkOrigin, type AllowedOriginOptions } from './network-policy.js'
 import { timingSafeTokenEqual } from './token-auth.js'
+import { CROCKFORD_ALPHABET, PAIRING_CODE_LENGTH } from './glasses-pairing.js'
 
 export const WEB_SESSION_COOKIE_NAME = 'cos_web_session'
 export const WEB_CSRF_HEADER = 'x-cos-web'
@@ -172,9 +173,10 @@ export class WebHandoffStore {
 }
 
 export function verifyLoginTokenOrHandoff(
-  input: { token?: unknown; handoff?: unknown },
+  input: { token?: unknown; handoff?: unknown; code?: unknown },
   apiToken: string,
   handoffStore?: WebHandoffStore,
+  codeStore?: WebDeviceCodeStore,
 ): boolean {
   if (typeof input.token === 'string' && input.token.trim().length > 0) {
     return timingSafeTokenEqual(input.token.trim(), apiToken)
@@ -182,7 +184,71 @@ export function verifyLoginTokenOrHandoff(
   if (handoffStore && typeof input.handoff === 'string') {
     return handoffStore.consume(input.handoff.trim())
   }
+  if (codeStore && typeof input.code === 'string') {
+    return codeStore.consume(input.code)
+  }
   return false
+}
+
+export const WEB_DEVICE_CODE_TTL_MS = 5 * 60_000
+export const WEB_DEVICE_CODE_MAX_ACTIVE = 4
+const DEVICE_CODE_ALPHABET = CROCKFORD_ALPHABET
+const DEVICE_CODE_LENGTH = PAIRING_CODE_LENGTH
+
+/**
+ * Normalise what a person typed: Crockford base32 reads O as 0 and I/L as 1, and ignores
+ * case, spaces and dashes, so "k7p3-qx9m" and "K7P3QX9M" are the same code.
+ */
+export function normalizeDeviceCode(input: unknown): string | null {
+  if (typeof input !== 'string') return null
+  const clean = input.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1')
+  if (clean.length !== DEVICE_CODE_LENGTH) return null
+  for (const ch of clean) if (!DEVICE_CODE_ALPHABET.includes(ch)) return null
+  return clean
+}
+
+/**
+ * Short sign-in codes for another device (the phone), minted by a browser or app that is
+ * already signed in. Same shape as glasses pairing: 8 Crockford characters (40 bits), five
+ * minutes, single use, at most four live at once. Guessing is also capped per IP by the
+ * route's sign-in limiter, so a code cannot be found inside its lifetime.
+ */
+export class WebDeviceCodeStore {
+  private readonly codes = new Map<string, number>()
+  constructor(private readonly now: () => number = () => Date.now()) {}
+
+  private sweep(at: number): void {
+    for (const [code, exp] of this.codes) if (at >= exp) this.codes.delete(code)
+  }
+
+  mint(ttlMs = WEB_DEVICE_CODE_TTL_MS): { code: string; display: string; expiresAt: string } {
+    const at = this.now()
+    this.sweep(at)
+    while (this.codes.size >= WEB_DEVICE_CODE_MAX_ACTIVE) {
+      const oldest = this.codes.keys().next().value
+      if (oldest === undefined) break
+      this.codes.delete(oldest)
+    }
+    let code = ''
+    do {
+      code = ''
+      const bytes = randomBytes(DEVICE_CODE_LENGTH)
+      for (const b of bytes) code += DEVICE_CODE_ALPHABET[b & 31]
+    } while (this.codes.has(code))
+    this.codes.set(code, at + ttlMs)
+    return { code, display: `${code.slice(0, 4)}-${code.slice(4)}`, expiresAt: new Date(at + ttlMs).toISOString() }
+  }
+
+  consume(input: unknown): boolean {
+    const at = this.now()
+    this.sweep(at)
+    const code = normalizeDeviceCode(input)
+    if (!code) return false
+    // The sweep above has already dropped every expired code, so presence means still valid.
+    if (!this.codes.has(code)) return false
+    this.codes.delete(code)
+    return true
+  }
 }
 
 export const WEB_LOGIN_MAX_FAILURES = 8

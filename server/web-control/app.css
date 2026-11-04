@@ -497,3 +497,13 @@ select.field {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
 #section-menu .nav-row[aria-current='page'] { background: var(--qopen); box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Sign-in code (typed on the phone, shown on the Mac) */
+.code-field { font: 600 22px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; text-align: center; }
+.code-field::placeholder { letter-spacing: 0.08em; color: color-mix(in srgb, var(--grey) 55%, transparent); }
+.device-code { padding: 16px; border-top: 1px solid var(--row-border); background: var(--qopen); }
+.device-code .code { display: block; font: 600 34px/1.1 var(--mono); letter-spacing: 0.08em; margin: 2px 0 8px; }
+.device-code p { margin: 0; color: var(--sub); font-size: 14px; }
+.device-code p + p { margin-top: 6px; }
+.device-code .url { color: var(--ink); overflow-wrap: anywhere; }
+#auth-switch { margin-top: 6px; }

@@ -39,12 +39,20 @@
       <h1 id="auth-title">Connect this browser</h1>
       <p>COS runs on your Mac. Sign in once and this browser stays connected for 7 days.</p>
       <form id="auth-form">
-        <label for="auth-token">Pairing token</label>
-        <input id="auth-token" class="field" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste it from COS Control" required>
+        <div id="auth-code-block">
+          <label for="auth-code">Code from your Mac</label>
+          <input id="auth-code" class="field code-field" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="K7P3-QX9M">
+          <p class="auth-foot" style="margin-top:8px">On a browser that is already signed in, open Settings and choose Sign in another device.</p>
+        </div>
+        <div id="auth-token-block" class="hidden">
+          <label for="auth-token">Pairing token</label>
+          <input id="auth-token" class="field" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the pairing token">
+          <p class="auth-foot" style="margin-top:8px">In the COS menu-bar panel on your Mac, choose Copy pairing token.</p>
+        </div>
         <p id="auth-error" class="status-line error hidden" role="alert"></p>
         <button type="submit" class="btn primary block">Connect</button>
+        <button type="button" class="link-btn" id="auth-switch">Use the pairing token instead</button>
       </form>
-      <p class="auth-foot">Find the token in COS Control under Settings, Glasses. Faster: click Open in browser on the Mac and this step is skipped.</p>
     </div>
   </main>
 
@@ -237,6 +245,8 @@
           <div id="settings-server"></div>
           <h2 class="group-title">This browser</h2>
           <div class="list">
+            <button type="button" class="nav-row" id="device-code-btn"><svg class="icon"><use href="#i-link"/></svg><span class="grow">Sign in another device<span class="note">Shows a code to type on your phone</span></span><span class="chev"></span></button>
+            <div id="device-code-panel" class="device-code hidden" aria-live="polite"></div>
             <button type="button" class="nav-row" id="copy-link"><svg class="icon"><use href="#i-link"/></svg><span class="grow">Copy link for your phone<span class="note" id="tailnet-url">Checking Tailscale</span></span></button>
             <button type="button" class="nav-row" id="sign-out"><span class="grow">Sign out of this browser</span></button>
           </div>
