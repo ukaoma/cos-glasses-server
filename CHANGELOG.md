@@ -1,3 +1,16 @@
+## Unreleased: Drop it P1 (server)
+
+Server half of Drop it phase 1: a pinned COS chat that takes a drop (a thought, a task, a reminder, a question), files it, and answers with a receipt. Off for every user; on only where `COS_DROP_IT=1` is set or Control writes `PUT /api/drops/settings {"enabled":true}`. While off, every new route except the settings pair answers 404 `drop_it_off` and no drop or chat file is created. Messages, the lens message counter, `all-messages` and `live-chats` are unchanged either way.
+
+- **Drops and the chat.** Two new stores beside the Messages store, never inside it: `data/drops/drops.json` (each drop, where it went, a status timeline) and `data/inbox/feed.json` (the chat: drop, receipt, question, answer, follow-up). One writer lock each, a 0700 folder and 0600 files, atomic writes, and a bad row set aside on its own. A drop is saved before it is filed, so a restart mid-filing keeps it as a note.
+- **Where a drop goes.** "remind me" is a reminder, "remember" a memory, and a question goes to the existing Ask job, all by rule with no Jev call. Anything else is one Jev request: it files on its own at 0.80 with a 0.25 lead (a memory needs 0.90), otherwise it asks one question with the top two readings and Just a note. When Jev cannot run, the drop is kept as a plain note and the receipt says why.
+- **Its own budget.** Decision use case `drop`, cap `COS_DROP_DAILY_TOKENS` (300,000 a day), its own ledger (`jev-drop-usage.json`) and breaker, and `COS_DROP_ROUTER=0` turns Jev routing off. Token audit caller `drop`, sizes only. Jev reads cleaned words; a drop that looks like it holds a key or password is never sent. No claude -p and no new model caller.
+- **Filing writes.** New card through the bridge verb `task-capture-drop` (answers the card id), memory through `memory-capture` into To review, thread notes through `thread-source`/`thread-unsource` by id. A bridge without a verb keeps a plain note and says so. Existing card, session follow-up (held until Send), note and reminder live in the drop store only. Reminder times and firing come in P2.
+- **Undo and Move.** 24 hours, refused with a reason when the card or thread note was edited since. Move is Undo, then filing where you picked, with no Jev call. Nothing is deleted.
+- **Routes.** `POST/GET /api/drops`, `GET /api/drops/:id`, `POST /api/drops/:id/{undo,move,ask,sent}`, `GET /api/inbox/summary`, `GET /api/inbox/feed`, `POST /api/inbox/{read,action}`, `GET/PUT /api/drops/settings`. History is word search with kind and status filters.
+- **Capability.** `capabilities.dropIt` `{ protocol: 1, enabled, source }` on `/api/health` and `/api/models`. Additive.
+- Default-on changes: none.
+
 ## 6.99.4 - Control Web matches the Mac (private)
 
 2026-11-04. Private build for one Mac, on top of 6.99.3. COS Control Web, the page at `/control`, now looks and behaves like the Mac app's panes. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
