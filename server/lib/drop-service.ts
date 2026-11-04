@@ -337,7 +337,8 @@ export class DropService {
           const result = await this.deps.writers.unsourceThread(link.id, link.sourceId, drop.id)
           if (result === 'touched') throw new DropError('edited', 409, 'The thread note was changed since, so Undo leaves it alone.')
         } else if (link.kind === 'memory') {
-          await this.deps.writers.pruneMemory(link.id)
+          const result = await this.deps.writers.pruneMemory(link.id, drop.id)
+          if (result === 'touched') throw new DropError('edited', 409, 'The memory was reviewed since, so Undo leaves it alone.')
         }
       } catch (e) {
         if (e instanceof DropDestinationError) throw new DropError('undo_failed', 503, 'COS could not reach where it went. Try again.')

@@ -175,6 +175,37 @@ describe('Undo and Move (canary 2: every destination)', () => {
     expect(h.writers.calls.filter(c => c.startsWith('archiveCard'))).toHaveLength(0)
   })
 
+  it('a memory accepted since is left alone by Undo', async () => {
+    const h = harness()
+    const out = await h.service.submit(drop('remember that the Tulsa store prefers email'))
+    ;[...h.writers.memories.values()][0].reviewed = true
+    await expect(h.service.undo(out.drop.id)).rejects.toMatchObject({ code: 'edited', message: 'The memory was reviewed since, so Undo leaves it alone.' })
+    expect([...h.writers.memories.values()][0].pruned).toBe(false)
+    expect(h.drops.get(out.drop.id)!.state).toBe('filed')
+  })
+
+  it('filing a memory again after Undo is a new capture, never the set-aside row', async () => {
+    const h = harness()
+    const out = await h.service.submit(drop('remember that the Tulsa store prefers email'))
+    await h.service.move(out.drop.id, { dest: 'note' })
+    const back = await h.service.move(out.drop.id, { dest: 'memory' })
+    const ids = [...h.writers.memories.keys()]
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
+    expect(back.drop.links[0].id).toBe(ids[1])
+    expect(h.writers.memories.get(ids[0])!.pruned).toBe(true)
+  })
+
+  it('a move target the store would refuse is refused before anything is undone', async () => {
+    const h = harness()
+    const out = await h.service.submit(drop('Draft the onboarding email sequence for new liquor stores'))
+    await expect(h.service.move(out.drop.id, { dest: 'thread', target: { id: 'thread-3', label: 'bad\u0007label' } })).rejects.toMatchObject({ code: 'invalid_target' })
+    await expect(h.service.move(out.drop.id, { dest: 'thread', target: { id: 'thread-3', label: 'x'.repeat(201) } })).rejects.toMatchObject({ code: 'invalid_target' })
+    expect([...h.writers.cards.values()][0].archived).toBe(false)
+    expect(h.writers.calls.filter(c => c.startsWith('sourceThread'))).toHaveLength(0)
+    expect(h.drops.get(out.drop.id)).toMatchObject({ state: 'filed', dest: 'new_card' })
+  })
+
   it('refuses after 24 hours', async () => {
     const h = harness()
     const out = await h.service.submit(drop('Draft the onboarding email sequence for new liquor stores'))
