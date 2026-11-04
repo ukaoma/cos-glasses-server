@@ -1,3 +1,13 @@
+## 6.99.5 - Control Web: questions asked on the Mac show on the phone (private)
+
+2026-11-04. Private build for one Mac, on top of 6.99.4. Fixes from the web and Mac meeting comparison. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
+
+- **Meeting Ask stays in step.** A question asked on the Mac now appears on the phone while the live meeting is open. The page re-reads the Ask history every 12 seconds, and at once when you come back to the page. The panel redraws only when something changed.
+- **Files.** A meeting with files shows the Mac's "Files · N" row, in the live view and on the saved meeting. Open it for the names and any that could not be read. Files are still added and removed in COS Control on your Mac.
+- **The meeting's name.** A name typed in COS Control while recording now shows on the web. Without one, the web uses the calendar event that started within 20 minutes of the recording, as the Mac does.
+- **Opening a page right after signing in is fast again.** The side rail's story lines load two at a time instead of all at once, so the page you open is never stuck behind them. A meeting opened 4 seconds after sign-in waited 10 to 14 seconds for its first read; it now takes under 2.
+- Default-on changes: the web's background Ask history read (one GET every 12 seconds while a live meeting's panel is open). No change to the Mac app or the glasses.
+
 ## 6.99.4 - Control Web matches the Mac (private)
 
 2026-11-04. Private build for one Mac, on top of 6.99.3. COS Control Web, the page at `/control`, now looks and behaves like the Mac app's panes. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
