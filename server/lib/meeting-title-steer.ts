@@ -196,5 +196,5 @@ export function isPlaceholderTitle(title: string): boolean {
 export function effectiveSaveTitle(sentTitle: unknown, steer: string | null): string | undefined {
   const sent = typeof sentTitle === 'string' && sentTitle.trim() ? sentTitle : null
   if (sent !== null && !(steer !== null && isPlaceholderTitle(sent))) return sent
-  return steer ?? sent ?? undefined
+  return steer ?? undefined
 }
