@@ -173,6 +173,7 @@
 
   // ── state ──────────────────────────────────────────────
   var S = {
+    view: 'meetings',   // the Speaker view picker: window state, as in Control, never a route of its own
     meetings: null, meetingsLoading: false, meetingsError: '', refreshNeeded: false, pendingNew: 0, peekTimer: null,
     dir: null, dirLoading: false, dirError: '', dirLoadFailed: false, dirRoute: null, unresolvedMeetings: 0, unresolvedSegments: 0,
     voiceSearch: '', voiceSort: 'attention',
@@ -300,7 +301,7 @@
   }
   function syncPeek() {
     var r = W.parseRoute();
-    var want = r.pane === 'speakers' && !r.args.length && !document.hidden;
+    var want = r.pane === 'speakers' && !r.args.length && S.view === 'meetings' && !document.hidden;
     if (want && !S.peekTimer) S.peekTimer = setInterval(peek, 45000);
     if (!want && S.peekTimer) { clearInterval(S.peekTimer); S.peekTimer = null; }
   }
@@ -1162,7 +1163,7 @@
     var report = (b.report && typeof b.report === 'object') ? b.report : (b.preview && typeof b.preview === 'object') ? b.preview : b;
     // The helper's own line is the fallback the card shows when the report carries no sentence.
     return { state: refused ? 'refused' : (gated ? 'preview' : (confirmed ? 'merged' : 'preview')), httpStatus: r.status, result: report,
-      message: refused ? 'Merge refused: voices too far apart' : (confirmed ? 'Profiles merged' : 'Merge preview ready') };
+      isMerge: true, message: refused ? 'Merge refused: voices too far apart' : (confirmed ? 'Profiles merged' : '') };
   }
   function buildCorrection(from, to, scope, cls, opts) {
     var o = opts || {};
@@ -1170,7 +1171,8 @@
     var refused = ['refused', 'declined', 'meeting_finalizing', 'record_source_mismatch', 'direct_library_read_only'].indexOf(state) >= 0;
     var pendingEarlier = state === 'pending_correction';
     var training = result.training && typeof result.training === 'object' ? result.training : {};
-    var serverMsg = withoutForce(str(result.message) || str(result.error) || cls.message || '', '');
+    // The global fold is the one irreversible voice write: its preview always states that, never a neutral server line.
+    var serverMsg = cls.isMerge && !refused ? '' : withoutForce(str(result.message) || str(result.error) || cls.message || '', '');
     var message;
     if (state === 'meeting_finalizing') message = FINALIZING;
     else if (state === 'record_source_mismatch') message = 'This meeting changed since you opened it. Reopen it, then try again.';
@@ -1214,6 +1216,7 @@
   }
   function previewRename(from, to, scope, isNameAssignment, assign) {
     var R = S.R;
+    if (R) R.anchor = from;
     if (from === to || !guardWrite(R)) return;
     var rv = R.review;
     scope = rv.isMac ? 'thisMeeting' : scope;
@@ -1236,6 +1239,7 @@
   }
   function previewDeattribution(from) {
     var R = S.R;
+    if (R) R.anchor = from;
     if (!guardWrite(R)) return;
     var rv = R.review;
     R.busy = true; R.anchor = from; render();
@@ -1251,6 +1255,7 @@
   // Vouch for a label the display floor withheld. It rewrites nothing, so there is no preview step.
   function confirmVoice(label) {
     var R = S.R;
+    if (R) R.anchor = label;
     if (!guardWrite(R)) return;
     var rv = R.review;
     R.busy = true; R.anchor = label; render();
@@ -1335,17 +1340,19 @@
     return sentence + (o.skipped || []).filter(function (k) { if (seen[k]) return false; seen[k] = true; return true; }).map(skipNote).join('');
   }
   // Naming a merged row: one dryRun per label at one revision, nothing written until Save.
-  function previewGroupName(row, rawName, assign) {
+  // `anchor` is where the plan card, progress and any refusal draw: the merged row's id, or null for the top of the list.
+  function previewGroupName(row, rawName, assign, anchor) {
     var R = S.R, rv = R && R.review;
     var name = String(rawName || '').trim();
+    var at = anchor === undefined ? row.id : anchor;
     if (!rv || R.busy || name.length < 2 || !row.members.every(function (v) { return canNameAlone(rv, v); })) {
-      if (R) { R.error = 'This voice group changed. Reopen the meeting before naming it.'; render(); }
+      if (R) { R.anchor = at; R.error = 'This voice group changed. Reopen the meeting before naming it.'; render(); }
       return;
     }
-    if (isPhoneCapture(rv.sessionId)) { R.error = PHONE_NOTE; render(); return; }
+    if (isPhoneCapture(rv.sessionId)) { R.anchor = at; R.error = PHONE_NOTE; render(); return; }
     var assigned = assign && (S.profiles || []).some(function (p) { return p.name === name && !p.isOwner; });
     var labels = row.members.map(function (v) { return v.label; });
-    R.busy = true; R.pending = null; R.groupPlan = null; R.groupOutcome = ''; R.anchor = row.id;
+    R.busy = true; R.pending = null; R.groupPlan = null; R.groupOutcome = ''; R.anchor = at;
     var corrections = [], i = 0;
     function step() {
       if (!live(R)) return Promise.resolve();
@@ -1429,18 +1436,26 @@
     var members = sg.labels.map(function (l) { return rv.byLabel[l]; }).filter(Boolean);
     if (members.length !== sg.labels.length || !members.length) return;
     if (members.length === 1) previewRename(members[0].label, sg.name, 'thisMeeting', members[0].isNameAssignment, true);
-    else previewGroupName({ id: 'suggestion:' + sg.id, members: members, seconds: null }, sg.name, true);
+    else {
+      // The card belongs under the merged row that holds this suggestion, never under an id nothing renders.
+      var holder = null;
+      ((rv.layout && rv.layout.rows) || []).forEach(function (r) {
+        if (r.merged && r.merged.members.map(function (v) { return v.label; }).join('|') === rowLabels.join('|')) holder = r.merged.id;
+      });
+      previewGroupName({ id: 'suggestion:' + sg.id, members: members, seconds: null }, sg.name, true, holder);
+    }
   }
 
   // ── render: shell ──────────────────────────────────────
+  // #/speakers shows whichever view the picker holds, so Back from any of the three leaves the section (Control's Back
+  // from a section root goes home) and the phone keeps its section switcher. #/speakers/samples and /voices still open
+  // as deep links: load() selects the view and rewrites the hash to #/speakers.
   function route() {
     var a = W.parseRoute().args;
-    if (a[0] === 'samples') return { view: 'samples' };
-    if (a[0] === 'voices') return { view: 'voices' };
-    if (a[0] === 'review' && a[1]) return { view: 'meetings', review: a[1] };
+    if (a[0] === 'review' && a[1]) return { view: S.view, review: a[1] };
     if (a[0] === 'voice' && a[1] && a[2] === 'review' && a[3]) return { view: 'voices', voice: a[1], review: a[3] };
     if (a[0] === 'voice' && a[1]) return { view: 'voices', voice: a[1] };
-    return { view: 'meetings' };
+    return { view: S.view };
   }
   function viewOf(id) { return VIEWS.filter(function (v) { return v.id === id; })[0] || VIEWS[0]; }
   function heroDetail(view) {
@@ -2129,8 +2144,9 @@
   }
 
   // Control pins these at the bottom of its panel; on the web they sit under the row they are about, so a phone sees them.
-  function actionZone(R, anchor) {
-    if ((R.anchor || null) !== anchor) return '';
+  function actionZone(R, anchor, force) {
+    if (!force && (R.anchor || null) !== anchor) return '';
+    R.zoneDrawn = true;
     var out = '';
     if (R.error) {
       out += '<div class="sp-banner" role="alert"><span>' + esc(R.error) + '</span><span class="sp-grow"></span>' +
@@ -2285,16 +2301,21 @@
         : 'The audio was recovered after the session ended, so no voice matching ran while it played. The lines below are all that is left to go on.') + '</p></div>';
     }
     out += suggestBar(R);
-    out += actionZone(R, null);
-    out += '<div class="sp-voices">';
+    R.zoneDrawn = false;
+    var list = '';
     if (rv.layout) {
-      out += rv.layout.rows.map(function (row) { return row.merged ? mergedRow(R, row.merged) : voiceRow(R, row.voice, rv.layout.seconds[row.voice.label]); }).join('');
+      list += rv.layout.rows.map(function (row) { return row.merged ? mergedRow(R, row.merged) : voiceRow(R, row.voice, rv.layout.seconds[row.voice.label]); }).join('');
       if (rv.layout.short.length) {
-        out += '<details class="sp-fold sp-short"' + (R.shortOpen ? ' open' : '') + ' data-fold="short"><summary>Short voices (' + rv.layout.short.length + ')</summary>' +
+        // A card about a short voice opens the fold, or it would sit hidden inside it.
+        var holds = R.anchor != null && rv.layout.short.some(function (v) { return v.label === R.anchor; }) && !!(R.error || R.pending || R.groupPlan || R.groupProgress || R.groupOutcome);
+        if (holds) R.shortOpen = true;
+        list += '<details class="sp-fold sp-short"' + (R.shortOpen ? ' open' : '') + ' data-fold="short"><summary>Short voices (' + rv.layout.short.length + ')</summary>' +
           rv.layout.short.map(function (v) { return voiceRow(R, v, rv.layout.seconds[v.label]); }).join('') + '</details>';
       }
-    } else out += rv.ordered.map(function (v) { return voiceRow(R, v, null); }).join('');
-    out += '</div>';
+    } else list += rv.ordered.map(function (v) { return voiceRow(R, v, null); }).join('');
+    // A row that is not on screen (a collapsed group, a label a refetch renamed) still gets its card, above the list.
+    out += R.zoneDrawn ? '' : actionZone(R, null, true);
+    out += '<div class="sp-voices">' + list + '</div>';
     return out + writeUp(R);
   }
   function renderReview(R) {
@@ -2404,8 +2425,10 @@
         var v = t.getAttribute('data-view');
         stopPlayback(); A.note = null;
         if (H) { H.naming = null; H.confirmDiscard = null; H.result = ''; }
-        W.go('speakers', v === 'meetings' ? [] : [v]);
+        S.view = v;
+        if (W.parseRoute().args.length) W.go('speakers'); else render();
         if (v === 'meetings') loadMeetings(); else if (v === 'samples') { if (!S.H) S.H = newHeld(); loadHeld(); } else loadDirectory(false);
+        syncPeek();
         return;
       }
       case 'refresh':
@@ -2570,10 +2593,27 @@
     if (nx) { e.preventDefault(); W.go('speakers', ['review', nx.sessionId]); }
   });
 
+  // A deep link rewritten to #/speakers was routed as a reader; put back the root chrome route() would have drawn.
+  function rootChrome() {
+    var back = $('topbar-back'), sw = $('section-btn');
+    if (back) back.classList.add('hidden');
+    if (sw) sw.classList.remove('hidden');
+    pane.classList.remove('reading');
+  }
+
   // ── registration ───────────────────────────────────────
   W.registerPane('speakers', {
     load: function (args, ctx) {
+      var a0 = (args || [])[0];
+      if (a0 === 'meetings' || a0 === 'samples' || a0 === 'voices') {
+        S.view = a0;
+        try { history.replaceState(history.state, '', location.pathname + location.search + '#/speakers'); } catch (_e) {}
+        rootChrome();
+      }
       var rt = route(), changed = !!(ctx && ctx.changed);
+      // A voice detail belongs to the directory; a review opened from anywhere else returns to Meetings to review.
+      if (rt.voice) S.view = 'voices';
+      else if (rt.review) S.view = 'meetings';
       if (S.R && !(rt.review === S.R.sid && (rt.voice || null) === S.R.parent)) closeReview();
       if (rt.review) {
         openReview(rt.review, rt.voice || null);
@@ -2593,11 +2633,15 @@
       }
       syncPeek();
     },
-    leave: function () { closeReview(); stopPlayback(); syncPeek(); if (S.peekTimer) { clearInterval(S.peekTimer); S.peekTimer = null; } },
+    leave: function () {
+      closeReview(); stopPlayback();
+      if (S.peekTimer) { clearInterval(S.peekTimer); S.peekTimer = null; }
+      if (expiryTimer) { clearInterval(expiryTimer); expiryTimer = null; }
+    },
     // Back unwinds one step: a review opened from a voice returns to that voice, a voice to the directory.
+    // A voice returns to the directory and a review to its list: both are #/speakers, which shows the selected view.
     up: function (args) {
       if (args[0] === 'voice' && args[2] === 'review') return ['voice', args[1]];
-      if (args[0] === 'voice') return ['voices'];
       return null;
     }
   });
