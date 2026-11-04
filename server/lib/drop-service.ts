@@ -174,6 +174,7 @@ export class DropService {
     let remind: DropRecord['remind']
     let actualDest = dest
     let reason = route.reason
+    if (target) checkTarget(target)
     try {
       switch (dest) {
         case 'new_card': {
@@ -537,6 +538,12 @@ export class DropService {
       this.receipt(saved, 'receipt', words.title, words.line, [], words.actions, 1)
     }
   }
+}
+
+/** A move or filing target, held to the store's own link rules before any write. */
+function checkTarget(target: DropTarget): void {
+  try { parseLink({ kind: 'card', id: target.id, label: target.label, ...(target.domain !== undefined ? { domain: target.domain } : {}) }) }
+  catch { throw new DropError('invalid_target', 400, 'That destination cannot be used.') }
 }
 
 function validateInput(input: DropInput): DropInput {

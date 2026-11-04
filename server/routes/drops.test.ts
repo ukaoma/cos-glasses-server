@@ -112,6 +112,17 @@ describe('on', () => {
     expect((await h.call('POST', '/inbox/read', { through: 'fi_nope' })).status).toBe(404)
   })
 
+  it('a move target with a bad label is refused before anything is undone', async () => {
+    const h = await setup()
+    const filed = await h.call('POST', '/drops', { dropId: randomUUID(), text: 'Draft the onboarding email sequence for new liquor stores', source: 'mac' })
+    for (const target of [{ id: 'thread-3', label: 'a\nb' }, { id: 'thread-3', label: 'x'.repeat(201) }, { id: '../x', label: 'ok' }, { id: 'thread-3' }]) {
+      const out = await h.call('POST', `/drops/${filed.body.drop.id}/move`, { dest: 'thread', target })
+      expect(out.status, JSON.stringify(target)).toBe(400)
+    }
+    expect([...h.writers.cards.values()][0].archived).toBe(false)
+    expect((await h.call('GET', `/drops/${filed.body.drop.id}`)).body.drop.dest).toBe('new_card')
+  })
+
   it('an Undo it cannot do answers 409 with a reason', async () => {
     const h = await setup()
     const ask = await h.call('POST', '/drops', { dropId: randomUUID(), text: 'what did we decide?', source: 'mac' })

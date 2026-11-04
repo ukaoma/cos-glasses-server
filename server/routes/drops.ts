@@ -23,7 +23,7 @@
  */
 import { Router, type Response } from 'express'
 import { DropError, DropService, type DropInput, type HistoryStatus } from '../lib/drop-service.js'
-import { DROP_DESTS, DROP_KINDS, DropStore, DropStoreError, InboxFeedStore, type DropDest, type DropKind } from '../lib/drop-store.js'
+import { DROP_DESTS, DROP_KINDS, DropStore, DropStoreError, InboxFeedStore, parseLink, type DropDest, type DropKind } from '../lib/drop-store.js'
 import { dropItCapability, dropItEnabled, dropItEnvValue, writeDropItSetting } from '../lib/drop-settings.js'
 import { dropDailyCap, dropRouterEnabled } from '../lib/drop-router.js'
 
@@ -122,9 +122,10 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
     let target: { id: string; label: string; domain?: string } | undefined
     if (b.target !== undefined) {
       const t = b.target
-      if (!isRecord(t) || typeof t.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/.test(t.id) || typeof t.label !== 'string' || t.label.length > 200
-        || (t.domain !== undefined && (typeof t.domain !== 'string' || t.domain.length > 64))) return bad(res, 'invalid_move')
-      target = { id: t.id, label: t.label, ...(typeof t.domain === 'string' ? { domain: t.domain } : {}) }
+      if (!isRecord(t)) return bad(res, 'invalid_move')
+      target = { id: t.id as string, label: t.label as string, ...(t.domain !== undefined ? { domain: t.domain as string } : {}) }
+      // The store's own link rule (length, no control characters, id shape), checked before anything is undone or written.
+      try { parseLink({ kind: 'card', ...target }) } catch { return bad(res, 'invalid_move', 'That destination cannot be used.') }
     }
     const dest = b.dest as DropDest
     if ((dest === 'new_card' && !target?.domain) || ((dest === 'existing_card') && (!target?.domain)) || ((dest === 'thread' || dest === 'session') && !target)) return bad(res, 'invalid_move', 'This destination needs a target.')
