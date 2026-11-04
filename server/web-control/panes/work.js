@@ -74,7 +74,7 @@
     moreOpen: false, mentionedOpen: false, mentionedAll: false, showAllDecisions: false, columnAll: {},
     pendingComplete: null, busy: false, mutationError: '', note: '',
     hidden: W.readStore(STORE + '.hidden'),
-    activity: {}, activityError: {}, activityLoading: {},
+    activity: {}, activityError: {}, activityLoading: {}, reply: {},
     sortIndex: 0, undoBatch: null, loopAvailable: null, intakeBusy: {}, sortError: '',
     waiting: null, dropped: null, waitingDropped: false, batchBusy: false, loopError: '',
     meaning: null, meaningPending: '',
@@ -438,7 +438,9 @@
       S.boardError = '';
     }, function (err) { S.boardError = err.message || 'Work board is unavailable. Refresh before trying again.'; S.complete = false; if (!S.tasks) S.tasks = []; });
     var domains = S.domains ? Promise.resolve() : soft(api('/api/domains')).then(function (d) { S.domains = (d && Array.isArray(d.domains)) ? d.domains : []; });
-    return Promise.all([board, loadOpen(), loadSessions(), domains]).then(function () {
+    // Live session state only refines the status words, so the board never waits for it.
+    loadSessions().then(function () { ITEMS = null; if (!S.loading) render(); });
+    return Promise.all([board, loadOpen(), domains]).then(function () {
       S.loading = false; S.loadedAt = Date.now(); ITEMS = null;
       render();
       if (!S.intake && !S.intakeLoading) loadIntake();
@@ -920,10 +922,60 @@
         '<p><strong>' + esc(str(latest.sessionTitle) || 'Session') + '</strong></p>' + (line ? '<p class="wk-small">' + esc(line) + '</p>' : '') +
         (tr && tr.evidence ? '<p class="wk-quote">“' + esc(tr.evidence) + '”</p>' : '') + '</div>';
     }
-    return '<section class="wk-section" id="wk-agent-workspace"><h2 class="wk-h2">Agent workspace</h2>' + status +
+    var reply = latest ? replyBox(it, latest) : '';
+    return '<section class="wk-section" id="wk-agent-workspace"><h2 class="wk-h2">Agent workspace</h2>' + status + reply +
       (!it.completed ? '<button type="button" class="cx-btn primary" data-wk="start" data-id="' + esc(it.id) + '">Start work</button>' : '') +
       (data && data.savedDestination ? '<p class="wk-fine">' + esc('Saved destination: ' + destinationLabel(data.savedDestination)) + '</p>' : '') +
       '<p class="wk-fine">Card files and Work chat stay on your Mac. Add or send files from this card in COS Control.</p></section>';
+  }
+  // Answer (needs input or blocked) and Not done yet (a reported done): a reply request that continues the same session
+  // with a note, naming the handoff it answers. COS Control on the Mac sends it, as it does for the glasses.
+  function replyBox(it, a) {
+    var tr = tracking(a), sess = splitSession(a.sessionId);
+    if (!tr || a.acknowledged || !sess) return '';
+    var intent = tr.asks ? 'reply' : tr.phase === 'done' ? 'notDone' : '';
+    if (!intent) return '';
+    var r = S.reply[it.wid] || (S.reply[it.wid] = { open: intent === 'reply', text: '', sending: false, request: null, error: '' });
+    var title = clip(str(a.sessionTitle) || 'session', 40);
+    if (r.request) {
+      var req = r.request, done = ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'].indexOf(req.state) >= 0;
+      return '<div class="wk-handoff" data-tone="' + (req.state === 'sent' ? 'green' : req.state === 'refused' || req.state === 'expired' ? 'danger' : 'accent') + '"><p class="wk-state">' +
+        esc(REQUEST_LINE[req.state] || req.state) + '</p>' + (req.reason ? '<p class="wk-small">' + esc(req.reason) + '</p>' : '') + (done ? '' : '<p class="wk-fine">This page checks every few seconds.</p>') + '</div>';
+    }
+    if (!r.open) return '<button type="button" class="cx-btn quiet" data-wk="reply-open" data-id="' + esc(it.id) + '">Not done yet</button>';
+    var limit = r.text.trim().length > 2000;
+    return '<div class="wk-reply"><label class="wk-field"><span class="wk-label">' + (intent === 'reply' ? 'Your answer' : 'What’s missing?') + '</span>' +
+      '<textarea class="field" rows="3" data-wk-reply="' + esc(it.id) + '" maxlength="2000"' + (r.sending ? ' disabled' : '') + '>' + esc(r.text) + '</textarea></label>' +
+      '<p class="wk-small wk-muted">' + esc('Continues “' + title + '” with this note.') + '</p>' +
+      (r.error ? '<p class="wk-error">' + esc(r.error) + '</p>' : '') +
+      '<div class="wk-row">' + (intent === 'notDone' ? '<button type="button" class="wk-text-btn" data-wk="reply-cancel" data-id="' + esc(it.id) + '">Cancel</button>' : '') +
+      '<button type="button" class="cx-btn primary" data-wk="reply-send" data-id="' + esc(it.id) + '" data-intent="' + intent + '"' + (!r.text.trim() || limit || r.sending ? ' disabled' : '') + '>' +
+      esc(r.sending ? 'Sending…' : intent === 'reply' ? 'Send' : 'Send back') + '</button></div></div>';
+  }
+  function sendReply(it, intent) {
+    var a = contributors(it)[0], r = S.reply[it.wid];
+    if (!a || !r || !r.text.trim() || r.sending) return;
+    if (/COS-WORK/i.test(r.text.replace(/[*_`‌‍]/g, ''))) { r.error = 'A note cannot carry a COS-WORK status line.'; return renderDetail(it.id); }
+    var body = { clientRequestId: uuid(), domain: it.domain, workIdentity: it.id, intent: intent, mode: 'continueSession', sessionId: a.sessionId,
+      note: r.text.trim(), replyTo: a.id, destinationSource: 'user',
+      expectedTaskRevision: str((S.activity[it.wid] || {}).taskRevision) || str(it.task.taskRevision) };
+    r.sending = true; r.error = ''; renderDetail(it.id);
+    api('/api/work-board/handoff-requests', { method: 'POST', body: body }).then(function (d) {
+      r.sending = false; r.request = (d && d.request) || { clientRequestId: body.clientRequestId, state: 'pending' };
+      renderDetail(it.id); pollReply(it, r);
+    }, function (err) { r.sending = false; r.error = errText(err); renderDetail(it.id); });
+  }
+  function pollReply(it, r) {
+    clearTimeout(r.timer);
+    if (!r.request || ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'].indexOf(r.request.state) >= 0) return;
+    r.timer = setTimeout(function () {
+      api('/api/work-board/handoff-requests/' + encodeURIComponent(r.request.clientRequestId)).then(function (d) {
+        if (d && d.request) r.request = d.request;
+        var rt = W.parseRoute();
+        if (rt.pane === 'work' && rt.args.length === 1 && rt.args[0] === it.id) renderDetail(it.id);
+        pollReply(it, r);
+      }, function () { pollReply(it, r); });
+    }, 3000);
   }
   function destinationLabel(d) {
     if (d.mode === 'newSession') return 'New ' + providerName(d.provider) + ' session' + (d.model ? ' · ' + d.model : '');
@@ -1351,6 +1403,9 @@
         W.copyText(t.getAttribute('data-sid')).then(function () { W.toast('Copied session ID'); }, function (err) { W.toast(err.message); });
         return;
       case 'start-send': it = itemFor(id); if (it) sendStart(it); return;
+      case 'reply-open': case 'reply-cancel':
+        it = itemFor(id); if (it && S.reply[it.wid]) { S.reply[it.wid].open = act === 'reply-open'; renderDetail(it.id); } return;
+      case 'reply-send': it = itemFor(id); if (it) sendReply(it, t.getAttribute('data-intent')); return;
       case 'edit-save': it = current(); if (it) editSave(it); return;
       case 'edit-cancel':
         it = current(); if (!it) return W.goBack();
@@ -1425,6 +1480,12 @@
       S.captureText = el.value;
       var b = pane.querySelector('.wk-capture [type="submit"]');
       if (b) b.disabled = !(S.captureText.trim() && domainNames().indexOf(S.captureDomain) >= 0 && !S.captureBusy);
+      return;
+    }
+    if (el.hasAttribute('data-wk-reply')) {
+      it = itemFor(el.getAttribute('data-wk-reply')); var rr = it && S.reply[it.wid]; if (!rr) return;
+      rr.text = el.value;
+      var rs = pane.querySelector('[data-wk="reply-send"]'); if (rs) rs.disabled = !rr.text.trim() || rr.text.trim().length > 2000 || rr.sending;
       return;
     }
     if (el.getAttribute('data-wk-start') === 'note') {
