@@ -1,3 +1,13 @@
+## 6.99.0 - Rename a live meeting, and up to 50 cues per meeting (private)
+
+2026-11-03. Private build for one Mac, on top of the public 6.98.1. COS Control needs a later build to show the rename field; nothing changes for older clients.
+
+- A live meeting (a G2 meeting or a Mac recording) can be renamed while it records: `GET` and `PUT /api/meeting/title-steer`. The name is kept across a server restart, a second client editing at the same time is told the name changed, and the name text is never logged.
+- When the meeting saves without a title of its own, the name you gave becomes its title and helps file it in the right domain. It is also saved as a title steer, so the meeting sync names the meeting from your words and sharpens them, instead of starting from "Mac recording 9:05 PM".
+- The live meeting file Control reads carries the name as soon as you change it. `capabilities.titleSteer` says a server supports it.
+- Live cues per meeting can be set up to 50 (was 25) in COS Control or the phone. The default stays 25. A meeting at 50 can use up to 100 of the 150 daily writer calls.
+- `GET /live-cues/history` now reports the per-meeting cap you set, not a fixed 25.
+
 ## 6.98.1 - Tableau answers by lead source (private)
 
 2026-11-03. Private build for one Mac, on top of the public 6.98.0.
