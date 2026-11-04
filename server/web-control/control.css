@@ -284,3 +284,7 @@
 button.cx-set-row:hover { background: var(--qopen); }
 @media (min-width: 1100px) { .cx-set-name { font-size: 14px; } }
 @media (min-width: 1100px) { .rail-settings[aria-current='page'] { background: var(--rail-active); border: 1px solid var(--panel-border); } }
+
+/* Sign in another device: the QR the phone camera scans. */
+.device-code .qr { display: block; width: 200px; height: 200px; margin: 4px 0 8px; border-radius: 8px; border: 1px solid var(--panel-border); background: #fff; }
+.device-code .qr-hint { font-weight: 600; color: var(--ink); }

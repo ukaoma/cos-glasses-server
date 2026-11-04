@@ -55,7 +55,7 @@
         <div id="auth-code-block">
           <label for="auth-code">Sign-in code</label>
           <input id="auth-code" class="field code-field" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="K7P3-QX9M">
-          <p class="auth-foot" style="margin-top:8px">In COS Control on your Mac, choose Open COS on your phone. Scan its QR with the camera, or tap Show a sign-in code and type it here. A browser that is already signed in can also make one: Settings, Sign in another device.</p>
+          <p class="auth-foot" style="margin-top:8px">Scan the QR with your phone's camera. A browser that is already signed in shows one under Settings, Sign in another device. COS Control on your Mac shows one under Open COS on your phone. Or type the code shown with the QR.</p>
           <p class="auth-foot">The glasses pairing code does not work here.</p>
         </div>
         <div id="auth-token-block" class="hidden">
@@ -248,6 +248,7 @@
 
   <div id="toast" class="toast hidden" role="status"></div>
 
+  <script src="/control/vendor/qrcode-encoder.js"></script>
   <script src="/control/app.js"></script>
   <script src="/control/shell.js"></script>
   <script src="/control/panes/messages.js"></script>

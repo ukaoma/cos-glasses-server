@@ -2056,6 +2056,16 @@
     });
   }
   var codeTimer = null;
+  // A QR as inline SVG from vendor/qrcode-encoder.js (window.COSQR). Only numbers reach the
+  // markup; the text is encoded, never inserted. Empty when the encoder did not load.
+  function qrSvg(text) {
+    if (!window.COSQR || !window.COSQR.matrix) return '';
+    var m; try { m = window.COSQR.matrix(text); } catch (_e) { return ''; }
+    var n = m.size, q = 4, d = '';
+    for (var y = 0; y < n; y++) for (var x = 0; x < n; x++) if (m.data[y * n + x]) d += 'M' + (x + q) + ' ' + (y + q) + 'h1v1h-1z';
+    var w = n + q * 2;
+    return '<svg class="qr" viewBox="0 0 ' + w + ' ' + w + '" role="img" aria-label="Sign-in QR code" shape-rendering="crispEdges"><rect width="' + w + '" height="' + w + '" fill="#fff"/><path d="' + d + '" fill="#000"/></svg>';
+  }
   function showDeviceCode() {
     var panel = $('device-code-panel');
     panel.classList.remove('hidden');
@@ -2063,8 +2073,13 @@
     api('/api/web-session/device-code', { method: 'POST', body: {} }).then(function (d) {
       var url = state.tailnetUrl || (location.origin + '/control');
       var exp = toDate(d.expiresAt);
-      panel.innerHTML = '<span class="code">' + esc(d.code) + '</span>' +
-        '<p>On your phone, open <span class="url">' + esc(url) + '</span> and type this code.</p>' +
+      // The QR is the phone link with this code on it: the camera opens it, the page signs in
+      // with the code (one use, five minutes), and nothing is typed. Same code, same rules.
+      var link = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'code=' + encodeURIComponent(d.code);
+      panel.innerHTML = qrSvg(link) +
+        '<p class="qr-hint">Scan with your phone\'s camera to sign it in.</p>' +
+        '<p>Or open <span class="url">' + esc(url) + '</span> on the phone and type this code:</p>' +
+        '<span class="code">' + esc(d.code) + '</span>' +
         '<p id="device-code-left"></p>';
       clearInterval(codeTimer);
       var tick = function () {
@@ -2079,7 +2094,9 @@
   }
   function loadTailnetUrl() {
     api('/api/tailscale/web-url').then(function (d) {
-      state.tailnetUrl = d.magicDnsHttpsUrl || d.magicDnsUrl || d.ipv4Url || '';
+      // The phone link is plain http by name, then by address. The https name link comes last:
+      // the Mac's local certificate does not cover the Tailscale name, so Safari refuses it.
+      state.tailnetUrl = d.magicDnsUrl || d.ipv4Url || d.magicDnsHttpsUrl || '';
       // Settings renders this line itself; fill it only if it is on screen now.
       var el = $('tailnet-url'); if (el) el.textContent = state.tailnetUrl || 'Tailscale is not running on the Mac';
     }).catch(function () { var el = $('tailnet-url'); if (el) el.textContent = 'Tailscale address unavailable'; });
@@ -2290,6 +2307,16 @@
   // Every pane module is a plain script after this one; boot waits for all of them.
   function boot() {
     var params = new URLSearchParams(location.search);
+    var linkCode = params.get('code');
+    if (linkCode && !params.get('handoff')) {
+      history.replaceState({}, document.title, location.pathname + location.hash);
+      api('/api/web-session/login', { method: 'POST', body: { code: linkCode } }).then(showShell)
+        .catch(function (err) {
+          showAuth(err && err.status ? err.message : 'Could not reach COS on your Mac. Check that this phone is on Tailscale and the Mac is awake.');
+          var box = $('auth-code'); if (box) box.value = linkCode;
+        });
+      return;
+    }
     var handoff = params.get('handoff');
     if (handoff) {
       history.replaceState({}, document.title, location.pathname + location.hash);
