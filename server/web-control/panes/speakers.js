@@ -210,7 +210,9 @@
     if (p && p.catch) p.catch(function (err) {
       if (A.key !== key) return;
       if (err && err.name === 'AbortError') return;
-      A.note = { voice: voice, text: missing }; A.key = null; render();
+      // A browser that refuses to start audio is not expired audio; say what is true.
+      A.note = { voice: voice, text: err && err.name === 'NotAllowedError' ? 'This browser did not start the audio. Tap play again.' : missing };
+      A.key = null; render();
     });
     render();
   }
