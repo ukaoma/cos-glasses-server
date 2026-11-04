@@ -155,7 +155,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     // Mac's name or its owner's. `network: 'tailscale_only'` tells the sign-in page why a
     // home-Wi-Fi browser cannot sign in (review W2), so it can say "use Tailscale".
     if (!cookieOk && !headerOk) {
-      return res.json(isWebControlSocketAllowed(req.socket?.remoteAddress)
+      return res.json(isWebControlSocketAllowed(req.socket?.remoteAddress, process.env, req.headers)
         ? { authenticated: false, mode: 'none' }
         : { authenticated: false, mode: 'none', network: 'tailscale_only' })
     }
@@ -169,7 +169,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
 
   router.post('/web-session/login', smallJson, (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
-    if (!isWebControlSocketAllowed(req.socket?.remoteAddress)) {
+    if (!isWebControlSocketAllowed(req.socket?.remoteAddress, process.env, req.headers)) {
       return res.status(403).json({
         ok: false,
         error: 'tailscale_only',

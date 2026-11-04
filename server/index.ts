@@ -1384,7 +1384,7 @@ if (webControlEnabled()) {
   const webControlDir = path.join(__dirname, 'web-control')
   app.use('/control', (req, res, next) => {
     // Loopback and Tailscale only, unless COS_WEB_CONTROL_LAN=1 (review W2).
-    if (!isWebControlSocketAllowed(req.socket?.remoteAddress)) {
+    if (!isWebControlSocketAllowed(req.socket?.remoteAddress, process.env, req.headers)) {
       res.status(403).type('text').send('COS Control Web is available on this Mac and over Tailscale.')
       return
     }
