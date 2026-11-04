@@ -1,5 +1,6 @@
 import { getOwnerName } from './profile.js'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { getNeedsYouReader, needsYouCount, type NeedsYouBlock } from './learning-needs-you.js'
 
 export const READ_ONLY_MEMORY_WEB_OPS = new Set([
   'status', 'learning.list', 'learning.review', 'learning.event', 'learning.status',
@@ -62,6 +63,7 @@ export async function dispatchMemoriesWebOp(
   args: Record<string, unknown>,
   loopbackFetch: LoopbackFetchFn,
   serverVersion = 'unknown',
+  readNeedsYou: () => Promise<NeedsYouBlock | null> = () => getNeedsYouReader().read(),
 ): Promise<{ ok: boolean; message: string; details: Record<string, unknown> }> {
   const reply = (ok: boolean, message: string, details: Record<string, unknown> = {}) => ({ ok, message, details })
 
@@ -73,9 +75,10 @@ export async function dispatchMemoriesWebOp(
         : reply(false, r.body.message || r.body.error || `Workspace error (${r.status})`)
     }
     case 'status': {
-      const [ctx, health] = await Promise.all([
+      const [ctx, health, needsYou] = await Promise.all([
         loopbackFetch('/api/context/status', { timeoutMs: 10_000 }),
         loopbackFetch('/api/health', { timeoutMs: 5_000 }),
+        readNeedsYou().catch(() => null),
       ])
       const c = ctx.body
       const learning = (c.learning ?? {}) as Record<string, any>
@@ -94,9 +97,13 @@ export async function dispatchMemoriesWebOp(
         threadsAvailable: threads.available === true,
         threadsTotal: threads.total ?? 0,
         learningAvailable: learning.available === true,
-        learningToReview: learning.to_review ?? 0,
+        // Control's count (the gated needs-you list the helper overlays on the Mac), or null
+        // when it cannot be read. Never `learning.to_review`: that is an object of counts, and
+        // the page rendered it as "To review (NaN)".
+        learningToReview: needsYouCount(needsYou),
         learningTotal: learning.total ?? 0,
-        learningRewardEnabled: learning.reward_enabled === true,
+        learningRewardEnabled: needsYou ? needsYou.reward_enabled === true : learning.reward_enabled === true,
+        ...(needsYou ? { needs_you: needsYou } : {}),
         graphAvailable: graph.available === true,
         graphIndexState: graph.index_state ?? null,
         graphEntities: graph.entities ?? null,
@@ -299,10 +306,14 @@ export async function dispatchMemoriesWebOp(
       return r.status === 200 ? reply(true, 'Duplicates ready', r.body) : reply(false, r.body.message || r.body.error || 'Failed')
     }
     case 'cues.summary': {
+      // Rating cues opens Control's native cue pane, which the browser does not have, so the
+      // page is told cues are unavailable and hides "Cues to rate" rather than show a button
+      // that does nothing. The counts use Control's keys for when a web cue pane exists.
       const r = await loopbackFetch('/api/live-cues/history?days=7&limit=200', { timeoutMs: 10_000 })
-      if (r.status !== 200) return reply(true, 'Cues', { available: false, toRate: 0, rated: 0 })
-      const counts = (r.body.counts ?? {}) as Record<string, any>
-      return reply(true, 'Cues', { available: true, toRate: typeof counts.unrated === 'number' ? counts.unrated : 0, rated: typeof counts.rated === 'number' ? counts.rated : 0 })
+      const counts = (r.status === 200 ? r.body.counts ?? {} : {}) as Record<string, any>
+      const unrated = typeof counts.unrated === 'number' ? counts.unrated : 0
+      const rated = typeof counts.rated === 'number' ? counts.rated : 0
+      return reply(true, 'Cues', { available: false, unrated, rated, total: unrated + rated })
     }
     case 'copy':
       return reply(true, 'Copied', {})

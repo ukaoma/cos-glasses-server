@@ -170,9 +170,19 @@
       setStory('threads', active + ' active' + (list[0] && list[0].name ? ', newest ' + clip(list[0].name, 40) : ''), false);
     });
 
-    // Memories: Control's count comes from a Mac-side script the server does not expose yet, so
-    // the web says what Control says when it cannot read that count.
-    setStory('memories', FALLBACK.memories, false);
+    // Memories (TodayHome.memoriesStory): n is the gated needs-you count (capped, from the
+    // bridge's status, which runs the same CLI Control's helper runs); total is the number of
+    // rows to review. "Next n of total" when there are more rows than n, else "n to review".
+    Promise.all([
+      soft(api('/api/web-bridge/memories', { method: 'POST', body: { id: 'rail-status', op: 'status', args: {} } })),
+      soft(api('/api/context/learning/review?limit=200'))
+    ]).then(function (res) {
+      var n = res[0] && res[0].details ? res[0].details.learningToReview : null;
+      if (typeof n !== 'number') return setStory('memories', FALLBACK.memories, false);
+      if (n <= 0) return setStory('memories', 'Nothing to review', false);
+      var total = res[1] && Array.isArray(res[1].events) ? res[1].events.length : null;
+      setStory('memories', total != null && total > n ? 'Next ' + n + ' of ' + total : n + ' to review', true);
+    });
     // Dictation lives on the Mac (its history and suggestions are local files).
     setStory('dictation', FALLBACK.dictation, false);
   }

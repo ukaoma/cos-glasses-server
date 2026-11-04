@@ -249,3 +249,21 @@
 .cx-find button .icon { width: 14px; height: 14px; }
 .cx-turn.match .cx-card { background: color-mix(in srgb, var(--green) 7%, var(--panel)); }
 @media (max-width: 599px) { .cx-find { top: calc(var(--topbar-h) + var(--safe-top)); } .cx-thumb { width: 132px; height: 92px; } }
+
+/* ── Dictation and Dictionary ─────────────────────────── */
+.cx-pair { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cx-pair .heard { color: var(--sub); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--sub) 60%, transparent); }
+.cx-pair .written { font-weight: 600; color: var(--ink); }
+.cx-pair .icon { width: 12px; height: 12px; color: var(--tertiary); }
+.cx-row-static { cursor: default; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; }
+.cx-row-static:hover { background: none; }
+.cx-col-title { font: 600 14px/1.2 var(--body); color: var(--ink); margin: 18px 2px 10px; }
+.cx-dict-cols { display: grid; gap: 4px 22px; }
+@media (min-width: 900px) { .cx-dict-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; } }
+.cx-inline-form { display: flex; gap: 8px; margin-bottom: 10px; }
+.cx-inline-form .field { flex: 1; min-width: 0; min-height: 36px; font-size: 14px; padding: 0 10px; border-radius: 9px; }
+.cx-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cx-chip { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 4px 0 10px; border-radius: 14px; background: var(--panel); border: 1px solid var(--panel-border); font-size: 13px; color: var(--ink); }
+.cx-chip button, .cx-x { width: 24px; height: 24px; border-radius: 12px; color: var(--sub); font-size: 15px; line-height: 1; display: grid; place-items: center; }
+.cx-chip.more { padding-right: 10px; color: var(--sub); }
+@media (max-width: 599px) { .cx-inline-form .field { min-height: 40px; font-size: 16px; } .cx-chip { height: 32px; } }

@@ -22,12 +22,21 @@
       delete pending[id];
       var a = args || {};
       if (op === 'copy') {
+        // A plain-http tailnet page has no navigator.clipboard. Fall back to a selected
+        // textarea, and reject when both fail so the page never says "Copied" for nothing.
         var text = String(a.text || '');
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(function () { resolve({}); }, function () { resolve({}); });
-        } else {
-          resolve({});
-        }
+        var viaTextarea = function () {
+          var ta = document.createElement('textarea');
+          ta.value = text; ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+          document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
+          var ok = false;
+          try { ok = document.execCommand('copy'); } catch (_e) { ok = false; }
+          document.body.removeChild(ta);
+          if (ok) resolve({}); else reject(new Error('This browser would not copy. Select the text and copy it yourself.'));
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) navigator.clipboard.writeText(text).then(function () { resolve({}); }, viaTextarea);
+        else viaTextarea();
         return;
       }
       if (op === 'pick.folder') {
@@ -45,11 +54,8 @@
         reject(new Error('Revealing files in Finder is available in the Mac app.'));
         return;
       }
+      // The browser session cookie is the only credential; this page never holds the token.
       var headers = { 'Content-Type': 'application/json', 'X-COS-Web': '1' };
-      try {
-        var savedToken = window.sessionStorage && window.sessionStorage.getItem('cos_web_token');
-        if (savedToken) headers['X-COS-Token'] = savedToken;
-      } catch (_e) {}
       fetch('/api/web-bridge/memories', {
         method: 'POST',
         headers: headers,
