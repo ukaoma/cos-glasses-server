@@ -733,6 +733,28 @@
       '</div><p class="status-line" id="settings-status">Keys, permissions and glasses pairing change only on the Mac.</p>';
     });
   }
+  var codeTimer = null;
+  function showDeviceCode() {
+    var panel = $('device-code-panel');
+    panel.classList.remove('hidden');
+    panel.innerHTML = '<p>Getting a code</p>';
+    api('/api/web-session/device-code', { method: 'POST', body: {} }).then(function (d) {
+      var url = state.tailnetUrl || (location.origin + '/control');
+      var exp = toDate(d.expiresAt);
+      panel.innerHTML = '<span class="code">' + esc(d.code) + '</span>' +
+        '<p>On your phone, open <span class="url">' + esc(url) + '</span> and type this code.</p>' +
+        '<p id="device-code-left"></p>';
+      clearInterval(codeTimer);
+      var tick = function () {
+        var left = exp ? Math.round((exp.getTime() - Date.now()) / 1000) : 0;
+        var el = $('device-code-left');
+        if (!el) { clearInterval(codeTimer); return; }
+        if (left <= 0) { clearInterval(codeTimer); panel.innerHTML = '<p>That code expired. Choose Sign in another device for a new one.</p>'; return; }
+        el.textContent = 'Works once, for ' + (left >= 60 ? Math.ceil(left / 60) + ' more min' : left + ' more sec') + '.';
+      };
+      tick(); codeTimer = setInterval(tick, 1000);
+    }).catch(function (err) { panel.innerHTML = '<p class="status-line error">' + esc(err.message) + '</p>'; });
+  }
   function loadTailnetUrl() {
     api('/api/tailscale/web-url').then(function (d) {
       state.tailnetUrl = d.magicDnsHttpsUrl || d.magicDnsUrl || d.ipv4Url || '';
@@ -783,11 +805,20 @@
 
   // ── events (one delegated listener) ─────────────────────
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close');
+    var t = e.target.closest('[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#device-code-btn');
     if (!t) { if (e.target.id === 'ask-sheet') closeAsk(); if (e.target.id === 'section-menu') closeMenu(); return; }
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
     if (t.id === 'section-btn') return openMenu();
+    if (t.id === 'auth-switch') {
+      var toToken = $('auth-token-block').classList.contains('hidden');
+      $('auth-token-block').classList.toggle('hidden', !toToken);
+      $('auth-code-block').classList.toggle('hidden', toToken);
+      t.textContent = toToken ? 'Use a code from your Mac instead' : 'Use the pairing token instead';
+      (toToken ? $('auth-token') : $('auth-code')).focus();
+      return;
+    }
+    if (t.id === 'device-code-btn') return showDeviceCode();
     if (t.id === 'ask-close') return closeAsk();
     if (t.id === 'sign-out') { api('/api/web-session/logout', { method: 'POST' }).finally(function () { showAuth(); }); return; }
     if (t.id === 'copy-link') {
@@ -833,9 +864,15 @@
     var f = e.target;
     e.preventDefault();
     if (f.id === 'auth-form') {
-      var tok = $('auth-token').value.trim(); if (!tok) return;
-      api('/api/web-session/login', { method: 'POST', body: { token: tok } }).then(function (d) { $('auth-token').value = ''; showShell(d); })
-        .catch(function (err) { showAuth(err.status === 401 ? 'That token did not match. Copy it again from COS Control.' : err.message); });
+      var usingToken = !$('auth-token-block').classList.contains('hidden');
+      var value = (usingToken ? $('auth-token') : $('auth-code')).value.trim();
+      if (!value) return;
+      var body = usingToken ? { token: value } : { code: value };
+      api('/api/web-session/login', { method: 'POST', body: body }).then(function (d) { $('auth-token').value = ''; $('auth-code').value = ''; showShell(d); })
+        .catch(function (err) {
+          if (err.status === 429) return showAuth(err.message);
+          showAuth(err.status === 401 ? (usingToken ? 'That token did not match. Copy it again from the COS menu-bar panel.' : 'That code did not match or has expired. Ask for a new one on your Mac.') : err.message);
+        });
     } else if (f.id === 'session-form') sendSessionTurn(false);
     else if (f.id === 'sessions-search-form') { $('sessions-q').blur(); searchSessions(); }
     else if (f.id === 'meetings-search-form') { $('meetings-q').blur(); if (parseRoute().args.length) go('meetings'); loadMeetings($('meetings-q').value.trim()); }

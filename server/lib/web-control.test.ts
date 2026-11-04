@@ -20,6 +20,8 @@ import {
   WebHandoffStore,
   WebLoginLimiter,
   WEB_LOGIN_MAX_FAILURES,
+  WebDeviceCodeStore,
+  normalizeDeviceCode,
 } from './web-session-auth.js'
 import { requireApiToken } from './api-auth.js'
 import { createWebControlRouter, isAllowedCorsOrigin, isMemoryWebOpReadOnly, webControlCsp } from '../routes/web-control.js'
@@ -471,5 +473,54 @@ describe('CORS gate for the tailnet URL (isAllowedCorsOrigin)', () => {
     expect(await isAllowedCorsOrigin(`http://${REAL_DNS}:3141`, dns)).toBe(false)
     const throwing = { currentSelfDnsName: () => null, queryStatus: async () => { throw new Error('no tailscale') } }
     expect(await isAllowedCorsOrigin(`http://${REAL_DNS}:3141`, throwing)).toBe(false)
+  })
+})
+
+describe('Sign-in codes for another device', () => {
+  it('mints 8-character Crockford codes that work once and read the way people type them', () => {
+    const store = new WebDeviceCodeStore()
+    const { code, display } = store.mint()
+    expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]{8}$/)
+    expect(display).toBe(`${code.slice(0, 4)}-${code.slice(4)}`)
+    expect(normalizeDeviceCode(` ${display.toLowerCase()} `)).toBe(code)
+    expect(normalizeDeviceCode('O0IL-1111')).toBe('00111111')
+    expect(normalizeDeviceCode('SHORT')).toBeNull()
+    expect(normalizeDeviceCode('UUUUUUUU')).toBeNull()
+    expect(store.consume(display.toLowerCase())).toBe(true)
+    expect(store.consume(display)).toBe(false)
+  })
+
+  it('expires codes after five minutes and keeps at most four alive', () => {
+    let now = 5_000_000
+    const store = new WebDeviceCodeStore(() => now)
+    const first = store.mint()
+    now += 5 * 60_000
+    expect(store.consume(first.code)).toBe(false)
+    const codes = [store.mint(), store.mint(), store.mint(), store.mint(), store.mint()].map(c => c.code)
+    expect(store.consume(codes[0])).toBe(false)
+    expect(store.consume(codes[4])).toBe(true)
+  })
+
+  it('signs a phone in with a code a signed-in caller minted, once, and refuses minting without sign-in', async () => {
+    const app = express()
+    let port = 0
+    app.use('/api', requireApiToken(API_TOKEN, { selfDnsName: () => REAL_DNS, allowedPorts: () => [port] }))
+    app.use('/api', express.json())
+    app.use('/api', createWebControlRouter({ apiToken: () => API_TOKEN, port: () => port, selfDnsName: () => REAL_DNS }))
+    const server: Server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+    port = (server.address() as { port: number }).port
+    const base = `http://127.0.0.1:${port}/api`
+    try {
+      expect((await fetch(`${base}/web-session/device-code`, { method: 'POST' })).status).toBe(401)
+      const minted = await (await fetch(`${base}/web-session/device-code`, { method: 'POST', headers: { 'X-COS-Token': API_TOKEN } })).json() as { code: string }
+      expect(minted.code).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}$/)
+      const login = (code: string) => fetch(`${base}/web-session/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) })
+      const ok = await login(minted.code.toLowerCase())
+      expect(ok.status).toBe(200)
+      expect(ok.headers.get('set-cookie') ?? '').toContain('cos_web_session=')
+      expect((await login(minted.code)).status).toBe(401)
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
   })
 })
