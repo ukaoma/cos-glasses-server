@@ -13,10 +13,13 @@ import {
   WebHandoffStore,
   WebLoginLimiter,
   WebDeviceCodeStore,
+  bumpWebSessionEpoch,
+  isWebControlSocketAllowed,
 } from '../lib/web-session-auth.js'
 import { acquireMaintenanceWork, MaintenanceLifecycleError, maintenanceErrorPayload } from '../lib/maintenance-lifecycle.js'
 import { getOwnerName } from '../lib/profile.js'
 import { readSwitch } from '../lib/env-switch.js'
+import { managedServerVersion } from '../lib/managed-runtime.js'
 import {
   dispatchMemoriesWebOp,
   isMemoryWebOpReadOnly,
@@ -149,8 +152,13 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     })
     const headerOk = timingSafeTokenEqual(req.headers['x-cos-token'], token)
     // Public door: an unauthenticated caller learns only that it is signed out, never the
-    // Mac's name or its owner's.
-    if (!cookieOk && !headerOk) return res.json({ authenticated: false, mode: 'none' })
+    // Mac's name or its owner's. `network: 'tailscale_only'` tells the sign-in page why a
+    // home-Wi-Fi browser cannot sign in (review W2), so it can say "use Tailscale".
+    if (!cookieOk && !headerOk) {
+      return res.json(isWebControlSocketAllowed(req.socket?.remoteAddress)
+        ? { authenticated: false, mode: 'none' }
+        : { authenticated: false, mode: 'none', network: 'tailscale_only' })
+    }
     res.json({
       authenticated: true,
       mode: headerOk ? 'header' : 'cookie',
@@ -161,6 +169,13 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
 
   router.post('/web-session/login', smallJson, (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
+    if (!isWebControlSocketAllowed(req.socket?.remoteAddress)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'tailscale_only',
+        message: 'Open COS Control Web over Tailscale. Home Wi-Fi is off unless COS_WEB_CONTROL_LAN=1 is set on the Mac.',
+      })
+    }
     const ip = normalizeRemoteIp(req.socket?.remoteAddress ?? '')
     const retryAfterS = loginLimiter.blockedFor(ip)
     if (retryAfterS > 0) {
@@ -198,6 +213,16 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     res.set('Cache-Control', 'private, no-store')
     res.setHeader('Set-Cookie', formatClearWebSessionCookie(req.secure))
     res.json({ ok: true })
+  })
+
+  // Sign out every browser at once (review W1): bumps the session epoch, so every cookie ever
+  // issued stops working, copies included. The pairing token, the glasses and the phone app
+  // are untouched. Behind the gate, so a cookie caller also needs X-COS-Web and its own Origin.
+  router.post('/web-session/revoke-all', (req: Request, res: Response) => {
+    res.set('Cache-Control', 'private, no-store')
+    const epoch = bumpWebSessionEpoch()
+    res.setHeader('Set-Cookie', formatClearWebSessionCookie(req.secure))
+    res.json({ ok: true, epoch })
   })
 
   // A signed-in browser (or the Mac app) asks for a short code to type on another device.
@@ -279,7 +304,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
       }
     }
     try {
-      const out = await dispatchMemoriesWebOp(op, args, loopbackFetch, deps.serverVersion?.())
+      const out = await dispatchMemoriesWebOp(op, args, loopbackFetch, deps.serverVersion?.() ?? managedServerVersion() ?? undefined)
       res.json(out)
     } catch (error) {
       res.json({ ok: false, message: error instanceof Error ? error.message : 'Bridge request failed', details: {} })

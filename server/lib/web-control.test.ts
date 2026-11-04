@@ -22,6 +22,9 @@ import {
   WEB_LOGIN_MAX_FAILURES,
   WebDeviceCodeStore,
   normalizeDeviceCode,
+  setWebSessionEpochFile,
+  currentWebSessionEpoch,
+  bumpWebSessionEpoch,
 } from './web-session-auth.js'
 import { requireApiToken } from './api-auth.js'
 import { createWebControlRouter, isAllowedCorsOrigin, isMemoryWebOpReadOnly, webControlCsp } from '../routes/web-control.js'
@@ -144,39 +147,92 @@ describe('Dedicated Web Session Cookie, CSRF & Handoff Auth', () => {
     const { value } = mintWebSessionCookieValue(API_TOKEN, now, 60_000)
     const cookie = `${WEB_SESSION_COOKIE_NAME}=${value}`
     const opts = { selfDnsName: REAL_DNS, allowedPorts: [3141], nowMs: now + 1_000 }
+    // The phone, over Tailscale, at the MagicDNS URL: the socket is its 100.x address and the
+    // browser's Host header is the name it typed.
+    const socket = { remoteAddress: '100.83.140.84' }
+    const host = `${REAL_DNS}:3141`
 
     // Same-origin GET (e.g., <audio> or EventSource with no Origin header) is allowed
-    expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie } }, API_TOKEN, opts)).toBe(true)
+    expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie }, socket }, API_TOKEN, opts)).toBe(true)
 
     // Cross-port GET with Origin is rejected
     expect(isWebSessionAuthorized({
       method: 'GET',
-      headers: { cookie, origin: `http://${REAL_DNS}:8080` },
+      socket,
+      headers: { host, cookie, origin: `http://${REAL_DNS}:8080` },
     }, API_TOKEN, opts)).toBe(false)
 
     // POST without X-COS-Web: 1 is rejected (blocks HTML form CSRF)
     expect(isWebSessionAuthorized({
       method: 'POST',
-      headers: { cookie, origin: `http://${REAL_DNS}:3141` },
+      socket,
+      headers: { host, cookie, origin: `http://${REAL_DNS}:3141` },
     }, API_TOKEN, opts)).toBe(false)
 
     // POST with X-COS-Web: 1 but no Origin/Referer is rejected
     expect(isWebSessionAuthorized({
       method: 'POST',
-      headers: { cookie, 'x-cos-web': '1' },
+      socket,
+      headers: { host, cookie, 'x-cos-web': '1' },
     }, API_TOKEN, opts)).toBe(false)
 
     // POST with X-COS-Web: 1 from wrong port is rejected
     expect(isWebSessionAuthorized({
       method: 'POST',
-      headers: { cookie, 'x-cos-web': '1', origin: `http://${REAL_DNS}:8080` },
+      socket,
+      headers: { host, cookie, 'x-cos-web': '1', origin: `http://${REAL_DNS}:8080` },
     }, API_TOKEN, opts)).toBe(false)
 
     // POST with X-COS-Web: 1 and valid MagicDNS Origin+Port succeeds
     expect(isWebSessionAuthorized({
       method: 'POST',
-      headers: { cookie, 'x-cos-web': '1', origin: `http://${REAL_DNS}:3141` },
+      socket,
+      headers: { host, cookie, 'x-cos-web': '1', origin: `http://${REAL_DNS}:3141` },
     }, API_TOKEN, opts)).toBe(true)
+
+    // Review W3: another machine's page on an allowed LAN address and port, sent to this Mac.
+    // The allowlist alone admits it; the Origin must also name the host the browser reached.
+    expect(isWebSessionAuthorized({
+      method: 'POST',
+      socket,
+      headers: { host, cookie, 'x-cos-web': '1', origin: 'http://192.168.1.50:3141' },
+    }, API_TOKEN, opts)).toBe(false)
+    // A DNS-rebinding page matches its own Host but is not on the allowlist.
+    expect(isWebSessionAuthorized({
+      method: 'POST',
+      socket,
+      headers: { host: 'evil.example.com:3141', cookie, 'x-cos-web': '1', origin: 'http://evil.example.com:3141' },
+    }, API_TOKEN, opts)).toBe(false)
+
+    // Review W2: home Wi-Fi is refused unless COS_WEB_CONTROL_LAN=1, whatever the cookie says.
+    const lan = { remoteAddress: '192.168.1.20' }
+    expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie }, socket: lan }, API_TOKEN, opts)).toBe(false)
+    expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie }, socket: lan }, API_TOKEN, { ...opts, env: { COS_WEB_CONTROL_LAN: '1' } })).toBe(true)
+    expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie } }, API_TOKEN, opts)).toBe(false)
+  })
+
+  it('signs the session epoch: "Sign out every browser" kills every copy of every cookie', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cos-web-epoch-'))
+    setWebSessionEpochFile(join(dir, 'web-session.json'))
+    try {
+      expect(currentWebSessionEpoch()).toBe(0)
+      const before = mintWebSessionCookieValue(API_TOKEN).value
+      expect(verifyWebSessionCookieValue(before, API_TOKEN)).toBe(true)
+      expect(bumpWebSessionEpoch()).toBe(1)
+      expect(verifyWebSessionCookieValue(before, API_TOKEN)).toBe(false)
+      const after = mintWebSessionCookieValue(API_TOKEN).value
+      expect(verifyWebSessionCookieValue(after, API_TOKEN)).toBe(true)
+      // Persisted: a restart (fresh cache) still refuses the old cookie.
+      setWebSessionEpochFile(join(dir, 'web-session.json'))
+      expect(currentWebSessionEpoch()).toBe(1)
+      expect(verifyWebSessionCookieValue(before, API_TOKEN)).toBe(false)
+      // A forged epoch fails the signature.
+      const [exp, , sig] = before.split('.')
+      expect(verifyWebSessionCookieValue(`${exp}.1.${sig}`, API_TOKEN)).toBe(false)
+    } finally {
+      setWebSessionEpochFile(null)
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('consumes loopback handoff tickets exactly once', () => {
@@ -267,17 +323,24 @@ describe('Lease Exemptions & Route Integration', () => {
       })
       expect(csrfFail.status).toBe(401)
 
-      // 4. POST /api/protected-write with cookie + X-COS-Web: 1 + valid MagicDNS Origin succeeds
+      // 4. POST with cookie + X-COS-Web: 1 + the Origin of the address this browser reached succeeds
       const csrfPass = await fetch(`http://127.0.0.1:${port}/api/protected-write`, {
         method: 'POST',
         headers: {
           Cookie: cookiePair,
           'X-COS-Web': '1',
-          Origin: `http://${REAL_DNS}:${port}`,
+          Origin: `http://127.0.0.1:${port}`,
         },
       })
       expect(csrfPass.status).toBe(200)
       expect(pairingNoted).toBe(0)
+
+      // 4b. Review W3: an allowed Origin that is not the host this request reached is refused
+      const otherHost = await fetch(`http://127.0.0.1:${port}/api/protected-write`, {
+        method: 'POST',
+        headers: { Cookie: cookiePair, 'X-COS-Web': '1', Origin: `http://${REAL_DNS}:${port}` },
+      })
+      expect(otherHost.status).toBe(401)
 
       // 5. Header X-COS-Token still increments pairingNoted as before
       const headerPass = await fetch(`http://127.0.0.1:${port}/api/tailscale/web-url`, {

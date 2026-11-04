@@ -1,5 +1,16 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { isAllowedNetworkOrigin, type AllowedOriginOptions } from './network-policy.js'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
+import {
+  isAllowedNetworkIp,
+  isAllowedNetworkOrigin,
+  isLoopbackAddress,
+  isTailscaleIpv4,
+  isTailscaleIpv6,
+  normalizeRemoteIp,
+  type AllowedOriginOptions,
+} from './network-policy.js'
+import { readSwitch } from './env-switch.js'
 import { timingSafeTokenEqual } from './token-auth.js'
 import { CROCKFORD_ALPHABET, PAIRING_CODE_LENGTH } from './glasses-pairing.js'
 
@@ -24,36 +35,79 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
   return out
 }
 
-function signSessionExpiry(apiToken: string, expUnixSec: number): string {
-  return createHmac('sha256', `cos_web_session_v1:${apiToken}`)
-    .update(String(expUnixSec))
+function signSession(apiToken: string, expUnixSec: number, epoch: number): string {
+  return createHmac('sha256', `cos_web_session_v2:${apiToken}`)
+    .update(`${expUnixSec}:${epoch}`)
     .digest('hex')
 }
 
-export function mintWebSessionCookieValue(apiToken: string, nowMs = Date.now(), ttlMs = WEB_SESSION_TTL_MS): {
+// ── Revocation (review W1) ───────────────────────────────────────────────────
+// The cookie signs a session EPOCH kept on the Mac. "Sign out every browser" bumps it, so
+// every copy of every cookie stops working at once, without rotating the pairing token
+// (which would also unpair the glasses). The file holds only a number.
+let epochFile: string | null = null
+let epochCache: number | null = null
+
+/** Where the epoch lives. index.ts sets it to dataPath('web-session.json'); tests pass a temp file. */
+export function setWebSessionEpochFile(path: string | null): void {
+  epochFile = path
+  epochCache = null
+}
+
+export function currentWebSessionEpoch(): number {
+  if (epochCache !== null) return epochCache
+  let value = 0
+  if (epochFile) {
+    try {
+      const parsed = JSON.parse(readFileSync(epochFile, 'utf8')) as { epoch?: unknown }
+      if (typeof parsed.epoch === 'number' && Number.isSafeInteger(parsed.epoch) && parsed.epoch >= 0) value = parsed.epoch
+    } catch {
+      value = 0
+    }
+  }
+  epochCache = value
+  return value
+}
+
+/** Invalidates every browser session. Returns the new epoch. Written atomically. */
+export function bumpWebSessionEpoch(): number {
+  const next = currentWebSessionEpoch() + 1
+  if (epochFile) {
+    mkdirSync(dirname(epochFile), { recursive: true })
+    const temporary = `${epochFile}.tmp-${process.pid}`
+    writeFileSync(temporary, JSON.stringify({ epoch: next }) + '\n', { mode: 0o600 })
+    renameSync(temporary, epochFile)
+  }
+  epochCache = next
+  return next
+}
+
+export function mintWebSessionCookieValue(apiToken: string, nowMs = Date.now(), ttlMs = WEB_SESSION_TTL_MS, epoch = currentWebSessionEpoch()): {
   value: string
   expiresAtMs: number
 } {
   const expiresAtMs = nowMs + ttlMs
   const expUnixSec = Math.floor(expiresAtMs / 1000)
-  const sig = signSessionExpiry(apiToken, expUnixSec)
-  return { value: `${expUnixSec}.${sig}`, expiresAtMs }
+  const sig = signSession(apiToken, expUnixSec, epoch)
+  return { value: `${expUnixSec}.${epoch}.${sig}`, expiresAtMs }
 }
 
 export function verifyWebSessionCookieValue(
   cookieValue: string | undefined,
   apiToken: string,
   nowMs = Date.now(),
+  epoch = currentWebSessionEpoch(),
 ): boolean {
   if (typeof cookieValue !== 'string' || !apiToken) return false
-  const dot = cookieValue.indexOf('.')
-  if (dot <= 0) return false
-  const expPart = cookieValue.slice(0, dot)
-  const sigPart = cookieValue.slice(dot + 1)
-  if (!/^\d{1,15}$/.test(expPart) || !/^[0-9a-f]{64}$/.test(sigPart)) return false
+  const parts = cookieValue.split('.')
+  if (parts.length !== 3) return false
+  const [expPart, epochPart, sigPart] = parts
+  if (!/^\d{1,15}$/.test(expPart) || !/^\d{1,9}$/.test(epochPart) || !/^[0-9a-f]{64}$/.test(sigPart)) return false
   const expUnixSec = Number(expPart)
   if (!Number.isSafeInteger(expUnixSec) || expUnixSec * 1000 <= nowMs) return false
-  const expected = signSessionExpiry(apiToken, expUnixSec)
+  // The signature covers the CURRENT epoch, so a cookie from before "Sign out every browser"
+  // (or one whose epoch digits were edited) fails here; epochPart is only shape-checked.
+  const expected = signSession(apiToken, expUnixSec, epoch)
   const left = Buffer.from(sigPart, 'utf8')
   const right = Buffer.from(expected, 'utf8')
   return left.length === right.length && timingSafeEqual(left, right)
@@ -75,30 +129,62 @@ export function formatClearWebSessionCookie(secure = false): string {
   return formatSetWebSessionCookie('', 0, secure)
 }
 
+// ── Which sockets may use the browser surface (review W2) ────────────────────
+/**
+ * COS Control Web is for this Mac and its tailnet: loopback, Tailscale IPv4 (100.64/10) and
+ * Tailscale IPv6 (fd7a:115c:a1e0::/48). Home Wi-Fi and other LAN addresses are refused
+ * unless COS_WEB_CONTROL_LAN=1, because there the page and its sign-in travel as plain HTTP
+ * and anyone on the network can watch. The glasses' X-Cos-Token path is unaffected.
+ */
+export function isWebControlSocketAllowed(
+  remoteAddress: string | undefined | null,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const addr = normalizeRemoteIp(remoteAddress ?? '')
+  if (!addr) return false
+  if (isLoopbackAddress(addr) || isTailscaleIpv4(addr) || isTailscaleIpv6(addr)) return true
+  return readSwitch(env.COS_WEB_CONTROL_LAN, false) && isAllowedNetworkIp(addr)
+}
+
 export interface WebSessionAuthRequest {
   method?: string
   headers?: Record<string, string | string[] | undefined>
+  socket?: { remoteAddress?: string | undefined } | null
 }
 
 export interface WebSessionVerifyOptions extends AllowedOriginOptions {
   nowMs?: number
+  env?: NodeJS.ProcessEnv
+}
+
+/** The origin a browser stamped, as `host[:port]`, lowercased; null when it is not a URL. */
+function originHostPort(origin: string): string | null {
+  try {
+    return new URL(origin).host.toLowerCase()
+  } catch {
+    return null
+  }
 }
 
 /**
- * Verify whether `req` carries a valid `cos_web_session` cookie AND satisfies
- * CSRF + Origin + Port bounds on mutating methods.
+ * Verify whether `req` carries a valid `cos_web_session` cookie AND satisfies the CSRF and
+ * origin rules on writes.
  *
- * - GET/HEAD/OPTIONS: valid cookie signature + not expired. If an `Origin` header is
- *   present, it must also match `isAllowedNetworkOrigin` (including `allowedPorts`).
- * - POST/PUT/PATCH/DELETE: valid cookie + `X-COS-Web: 1` header + an explicit `Origin`
- *   (or `Referer`) matching `isAllowedNetworkOrigin` (including `allowedPorts`).
- *   This blocks cross-origin requests, HTML form CSRF, and same-host cross-port servers.
+ * - Any method: the socket must be loopback or a Tailscale peer (or LAN, opted in), the cookie
+ *   signature valid, unexpired and of the current session epoch.
+ * - GET/HEAD/OPTIONS: if an `Origin` header is present it must pass `isAllowedNetworkOrigin`.
+ * - POST/PUT/PATCH/DELETE: `X-COS-Web: 1`, plus an `Origin` (or `Referer`) that passes the
+ *   allowlist AND names the very host and port the browser connected to (the `Host` header).
+ *   The allowlist alone admits any LAN or tailnet address on 3141/3143 (review W3); equality
+ *   with Host is what makes it "this server". A DNS-rebinding page matches Host but fails the
+ *   allowlist; another machine's page passes the allowlist but fails Host.
  */
 export function isWebSessionAuthorized(
   req: WebSessionAuthRequest,
   apiToken: string,
   options: WebSessionVerifyOptions = {},
 ): boolean {
+  if (!isWebControlSocketAllowed(req.socket?.remoteAddress, options.env)) return false
   const headers = req.headers ?? {}
   const cookieHeader = typeof headers.cookie === 'string' ? headers.cookie : undefined
   const cookies = parseCookies(cookieHeader)
@@ -124,7 +210,9 @@ export function isWebSessionAuthorized(
     ? originHeader
     : (typeof headers.referer === 'string' ? headers.referer : '')
   if (!candidateOrigin) return false
-  return isAllowedNetworkOrigin(candidateOrigin, options)
+  if (!isAllowedNetworkOrigin(candidateOrigin, options)) return false
+  const host = typeof headers.host === 'string' ? headers.host.trim().toLowerCase() : ''
+  return host !== '' && originHostPort(candidateOrigin) === host
 }
 
 interface HandoffRecord {
