@@ -1,3 +1,4 @@
+import { dropItCapability } from '../lib/drop-settings.js'
 import { phoneMicrophoneMeetingsCapability } from '../lib/phone-recording.js'
 import { macLiveVoicesSnapshot } from '../lib/mac-window-replay.js'
 import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
@@ -530,6 +531,8 @@ healthRouter.get('/health', async (_req, res) => {
       liveMeeting: liveMeetingCapability(),
       // 6.99.0: GET/PUT /api/meeting/title-steer (lib/meeting-title-steer.ts). Absent on an older server.
       titleSteer: TITLE_STEER_CAPABILITY,
+      // Drop it P1: the pinned COS chat (routes/drops.ts). Codes only; `enabled` is false unless turned on. Absent on an older server.
+      dropIt: dropItCapability(),
       // 6.77.0: codes only (this route is public): the protocol and whether the switch is on.
       transcriptCleanup: transcriptCleanupAdvertised(),
       richMedia: {
@@ -741,6 +744,8 @@ healthRouter.get('/models', async (req, res) => {
       liveMeeting: liveMeetingCapability(),
       // 6.99.0: GET/PUT /api/meeting/title-steer (lib/meeting-title-steer.ts). Absent on an older server.
       titleSteer: TITLE_STEER_CAPABILITY,
+      // Drop it P1: the pinned COS chat (routes/drops.ts). Codes only; `enabled` is false unless turned on. Absent on an older server.
+      dropIt: dropItCapability(),
       richMedia: {
         video: richMedia.video,
         maxPromptVisuals: MAX_MODEL_IMAGE_INPUTS,
