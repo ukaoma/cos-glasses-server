@@ -22,12 +22,14 @@ import {
   WEB_LOGIN_MAX_FAILURES,
   WebDeviceCodeStore,
   normalizeDeviceCode,
+  normalizePastedToken,
+  classifyWebLogin,
   setWebSessionEpochFile,
   currentWebSessionEpoch,
   bumpWebSessionEpoch,
 } from './web-session-auth.js'
 import { requireApiToken } from './api-auth.js'
-import { createWebControlRouter, isAllowedCorsOrigin, isMemoryWebOpReadOnly, webControlCsp } from '../routes/web-control.js'
+import { createWebControlRouter, isAllowedCorsOrigin, isMemoryWebOpReadOnly, webControlCsp, WEB_LOGIN_FAILURE_MESSAGE } from '../routes/web-control.js'
 import { isReadOnlyApiPost } from './work-search.js'
 import { listLiveTranscriptSessions, readLiveTranscriptSession } from './web-live-chunks.js'
 import { readFallbackTokenAudit } from './web-usage-bridge.js'
@@ -612,6 +614,140 @@ describe('Sign-in codes for another device', () => {
       expect(ok.status).toBe(200)
       expect(ok.headers.get('set-cookie') ?? '').toContain('cos_web_session=')
       expect((await login(minted.code)).status).toBe(401)
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+})
+
+describe('Sign-in failures say what went wrong (6.99.3)', () => {
+  it('cleans a pasted token: spaces, line breaks, zero-width characters and wrapping quotes', () => {
+    expect(normalizePastedToken(`  ${API_TOKEN}\n`)).toBe(API_TOKEN)
+    expect(normalizePastedToken(`\u200B${API_TOKEN}\uFEFF`)).toBe(API_TOKEN)
+    expect(normalizePastedToken(`"${API_TOKEN}"`)).toBe(API_TOKEN)
+    expect(normalizePastedToken(`\u201C${API_TOKEN}\u201D `)).toBe(API_TOKEN)
+    expect(normalizePastedToken(`'${API_TOKEN}'`)).toBe(API_TOKEN)
+    expect(normalizePastedToken(`${API_TOKEN.slice(0, 10)}\u00A0${API_TOKEN.slice(10)}`)).toBe(API_TOKEN)
+    expect(normalizePastedToken(undefined)).toBe('')
+    const handoffs = new WebHandoffStore()
+    expect(classifyWebLogin({ token: ` "${API_TOKEN}"\u200B\n` }, API_TOKEN, handoffs)).toEqual({ ok: true, kind: 'token' })
+  })
+
+  it('names each failure, and asks about the glasses code only after a web code fails', () => {
+    const handoffs = new WebHandoffStore()
+    const codes = new WebDeviceCodeStore()
+    const asked: string[] = []
+    const glasses = (code: string) => { asked.push(code); return code === 'K7P3QX9M' }
+    expect(classifyWebLogin({ token: 'nope' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'wrong_token', length: 4 })
+    expect(classifyWebLogin({ handoff: 'A'.repeat(32) }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'handoff_expired', length: 32 })
+    expect(classifyWebLogin({ code: 'k7p3-qx9m' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'glasses_code', length: 8 })
+    expect(classifyWebLogin({ code: 'AAAA-AAAA' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'wrong_code', length: 8 })
+    expect(classifyWebLogin({ code: 'abc' }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'wrong_code', length: 3 })
+    expect(classifyWebLogin({}, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: false, reason: 'missing', length: 0 })
+    // A real web code signs in without ever asking about the glasses code.
+    asked.length = 0
+    const minted = codes.mint()
+    expect(classifyWebLogin({ code: minted.display }, API_TOKEN, handoffs, codes, glasses)).toEqual({ ok: true, kind: 'code' })
+    expect(asked).toEqual([])
+    // A glasses check that throws reads as a plain wrong code.
+    expect(classifyWebLogin({ code: 'AAAA-AAAA' }, API_TOKEN, handoffs, codes, () => { throw new Error('boom') })).toEqual({ ok: false, reason: 'wrong_code', length: 8 })
+  })
+
+  it('answers 401 with the reason and message, logs kind and length only, and the lockout names the last failure', async () => {
+    const app = express()
+    let port = 0
+    const logs: string[] = []
+    app.use('/api', requireApiToken(API_TOKEN, { selfDnsName: () => REAL_DNS, allowedPorts: () => [port] }))
+    app.use('/api', createWebControlRouter({
+      apiToken: () => API_TOKEN, port: () => port, selfDnsName: () => REAL_DNS,
+      glassesCodeIsLive: code => code === 'K7P3QX9M',
+      log: line => logs.push(line),
+    }))
+    const server: Server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+    port = (server.address() as { port: number }).port
+    const login = (body: Record<string, string>) => fetch(`http://127.0.0.1:${port}/api/web-session/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    try {
+      const wrongToken = await login({ token: 'secret-guess-value' })
+      expect(wrongToken.status).toBe(401)
+      expect(await wrongToken.json()).toEqual({ ok: false, error: 'invalid_credentials', reason: 'wrong_token', message: WEB_LOGIN_FAILURE_MESSAGE.wrong_token })
+      const glassesCode = await login({ code: 'K7P3-QX9M' })
+      expect(await glassesCode.json()).toMatchObject({ reason: 'glasses_code', message: WEB_LOGIN_FAILURE_MESSAGE.glasses_code })
+      expect(logs).toEqual([
+        '[web-login] fail kind=wrong_token len=18 ip=127.0.0.1',
+        '[web-login] fail kind=glasses_code len=8 ip=127.0.0.1',
+      ])
+      expect(logs.join('\n')).not.toContain('secret-guess-value')
+      expect(logs.join('\n')).not.toContain('K7P3')
+      for (let i = 2; i < WEB_LOGIN_MAX_FAILURES; i++) expect((await login({ code: 'K7P3QX9M' })).status).toBe(401)
+      const blocked = await login({ token: API_TOKEN })
+      expect(blocked.status).toBe(429)
+      const body = await blocked.json() as { reason: string; message: string }
+      expect(body.reason).toBe('glasses_code')
+      expect(body.message).toMatch(/^Too many failed sign-ins from this device\. Try again in 10 min\. The last try was the glasses pairing code/)
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+
+  it('logs a successful sign-in by kind only', async () => {
+    const app = express()
+    let port = 0
+    const logs: string[] = []
+    app.use('/api', requireApiToken(API_TOKEN, { selfDnsName: () => REAL_DNS, allowedPorts: () => [port] }))
+    app.use('/api', createWebControlRouter({ apiToken: () => API_TOKEN, port: () => port, selfDnsName: () => REAL_DNS, log: line => logs.push(line) }))
+    const server: Server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+    port = (server.address() as { port: number }).port
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/web-session/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: `"${API_TOKEN}"\n` }),
+      })
+      expect(res.status).toBe(200)
+      expect(logs).toEqual(['[web-login] ok kind=token ip=127.0.0.1'])
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+
+  it('handoff gives the phone one tailnet link (the name when known) plus the loopback link', async () => {
+    let port = 0
+    let name: string | null = REAL_DNS_WITH_DOT
+    let ip: string | null = '100.108.149.114'
+    const app = express()
+    app.use('/api', requireApiToken(API_TOKEN, { selfDnsName: () => REAL_DNS, allowedPorts: () => [port] }))
+    app.use('/api', createWebControlRouter({
+      apiToken: () => API_TOKEN, port: () => port, publicPort: () => 3141,
+      selfDnsName: () => name, tailnetIpv4: () => ip, log: () => {},
+    }))
+    const server: Server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+    port = (server.address() as { port: number }).port
+    const mint = async () => (await fetch(`http://127.0.0.1:${port}/api/web-session/handoff`, { method: 'POST', headers: { 'X-COS-Token': API_TOKEN } })).json() as Promise<Record<string, any>>
+    try {
+      const both = await mint()
+      const q = `/control?handoff=${both.ticket}`
+      expect(both.url).toBe(`http://127.0.0.1:3141${q}`)
+      expect(both.tailnet).toEqual({ ipUrl: `http://100.108.149.114:3141${q}`, nameUrl: `http://${REAL_DNS}:3141${q}` })
+      expect(both.phoneUrl).toBe(`http://${REAL_DNS}:3141${q}`)
+
+      name = null
+      const ipOnly = await mint()
+      expect(ipOnly.tailnet.nameUrl).toBeNull()
+      expect(ipOnly.phoneUrl).toBe(`http://100.108.149.114:3141/control?handoff=${ipOnly.ticket}`)
+
+      ip = null
+      const none = await mint()
+      expect(none.phoneUrl).toBeNull()
+      expect(none.tailnet).toEqual({ ipUrl: null, nameUrl: null })
+
+      // The phone signs in with the ticket from its link, once.
+      const login = (handoff: string) => fetch(`http://127.0.0.1:${port}/api/web-session/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ handoff }),
+      })
+      expect((await login(both.ticket)).status).toBe(200)
+      const reused = await login(both.ticket)
+      expect(reused.status).toBe(401)
+      expect(await reused.json()).toMatchObject({ reason: 'handoff_expired' })
     } finally {
       await new Promise(resolve => server.close(resolve))
     }

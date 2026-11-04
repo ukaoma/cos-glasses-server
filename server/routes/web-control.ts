@@ -8,7 +8,8 @@ import {
   formatSetWebSessionCookie,
   isWebSessionAuthorized,
   mintWebSessionCookieValue,
-  verifyLoginTokenOrHandoff,
+  classifyWebLogin,
+  type WebLoginFailure,
   WEB_SESSION_TTL_MS,
   WebHandoffStore,
   WebLoginLimiter,
@@ -43,6 +44,35 @@ export interface WebControlRouterDeps {
   selfDnsName?: () => string | null
   baseDataDir?: () => string | undefined
   queryTailscaleStatus?: () => Promise<{ backendState: string; selfIps: string[]; selfDnsName?: string | null; certDomains?: string[] } | null>
+  /** Read-only: is this normalised code the live glasses pairing code? (PairingState.isLiveCode) */
+  glassesCodeIsLive?: (code: string) => boolean
+  /** This Mac's Tailscale IPv4, for the phone link in a handoff. Defaults to the interfaces. */
+  tailnetIpv4?: () => string | null
+  /** Where sign-in failures are logged. Kind, length and socket IP only, never the value. */
+  log?: (line: string) => void
+}
+
+/** What the sign-in page shows for each failure. Names the fix, never the value typed. */
+export const WEB_LOGIN_FAILURE_MESSAGE: Record<WebLoginFailure, string> = {
+  wrong_token: 'That token did not match. Copy the pairing token again and paste it within a minute, since the copy clears after 60 seconds. Or choose Open COS on your phone in COS Control and scan its QR.',
+  wrong_code: 'That code did not match or has expired. A code lasts 5 minutes and works once. Get a new one.',
+  glasses_code: 'That is the glasses pairing code. It only pairs the COS Glasses app. To sign in here, choose Open COS on your phone in COS Control, or paste the pairing token.',
+  handoff_expired: 'That sign-in link expired or was already used. Scan a new one in COS Control.',
+  missing: 'Enter a sign-in code or paste the pairing token.',
+}
+
+const WEB_LOGIN_LOCKOUT_CAUSE: Record<WebLoginFailure, string> = {
+  wrong_token: 'The last try was a wrong token.',
+  wrong_code: 'The last try was a wrong or expired code.',
+  glasses_code: 'The last try was the glasses pairing code, which only works in the COS Glasses app.',
+  handoff_expired: 'The last try was an expired sign-in link.',
+  missing: 'The last try had no code or token.',
+}
+
+/** The 429 text: how long to wait, and what kept failing, so the next try is the right one. */
+export function webLoginLockoutMessage(retryAfterS: number, last: WebLoginFailure | null): string {
+  const wait = `Too many failed sign-ins from this device. Try again in ${Math.max(1, Math.ceil(retryAfterS / 60))} min.`
+  return last ? `${wait} ${WEB_LOGIN_LOCKOUT_CAUSE[last]}` : wait
 }
 
 /** What the CORS gate needs from the Tailscale nudger (the real one, or a fake in tests). */
@@ -102,6 +132,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
   const loginLimiter = deps.loginLimiter ?? new WebLoginLimiter()
   const deviceCodes = deps.deviceCodeStore ?? new WebDeviceCodeStore()
   const smallJson = express.json({ limit: '64kb' })
+  const log = deps.log ?? ((line: string) => console.log(line))
 
   const allowedPorts = (): number[] => {
     const ports = [deps.port()]
@@ -183,21 +214,28 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
       return res.status(429).json({
         ok: false,
         error: 'too_many_attempts',
-        message: `Too many wrong tokens from this device. Try again in ${Math.ceil(retryAfterS / 60)} min.`,
+        reason: loginLimiter.lastFailure(ip),
+        message: webLoginLockoutMessage(retryAfterS, loginLimiter.lastFailure(ip)),
       })
     }
     const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
       ? req.body as { token?: unknown; handoff?: unknown; code?: unknown }
       : {}
     const token = deps.apiToken()
-    if (!verifyLoginTokenOrHandoff(body, token, handoffStore, deviceCodes)) {
-      loginLimiter.fail(ip)
+    const result = classifyWebLogin(body, token, handoffStore, deviceCodes, deps.glassesCodeIsLive)
+    if (!result.ok) {
+      // Every failure counts, the glasses-code one included, so that check cannot be used to
+      // probe codes faster than the limiter allows.
+      loginLimiter.fail(ip, result.reason)
+      log(`[web-login] fail kind=${result.reason} len=${result.length} ip=${ip}`)
       return res.status(401).json({
         ok: false,
         error: 'invalid_credentials',
-        message: 'That code or token did not match, or it has expired.',
+        reason: result.reason,
+        message: WEB_LOGIN_FAILURE_MESSAGE[result.reason],
       })
     }
+    log(`[web-login] ok kind=${result.kind} ip=${ip}`)
     loginLimiter.succeed(ip)
     const minted = mintWebSessionCookieValue(token, Date.now(), WEB_SESSION_TTL_MS)
     res.setHeader('Set-Cookie', formatSetWebSessionCookie(minted.value, WEB_SESSION_TTL_MS / 1000, req.secure))
@@ -233,18 +271,40 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     res.json({ ok: true, code: minted.display, expiresAt: minted.expiresAt })
   })
 
-  router.post('/web-session/handoff', (req: Request, res: Response) => {
+  // COS Control mints a ticket here and shows `phoneUrl` as a QR: the phone camera opens Safari
+  // on the tailnet address and the page signs in with the ticket (one use, 2 minutes). The
+  // cookie belongs to the origin, so Control shows exactly one URL, the name when this Mac
+  // knows it. `url` stays the loopback link the Mac's own browser opens.
+  router.post('/web-session/handoff', async (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
     if (!isLoopbackSocket(req)) {
       return res.status(403).json({ error: 'not_loopback', message: 'Web handoff tickets are minted only on this Mac.' })
     }
     const pubPort = deps.publicPort?.() ?? deps.port()
+    let name = selfDns()
+    if (!name && deps.queryTailscaleStatus) {
+      const status = await deps.queryTailscaleStatus().catch(() => null)
+      name = normalizeTailscaleDnsName(status?.selfDnsName ?? null)
+    }
+    let ip: string | null = null
+    try {
+      ip = deps.tailnetIpv4
+        ? deps.tailnetIpv4()
+        : reachableIpv4Addresses(networkInterfaces()).find(a => a.kind === 'tailscale')?.address ?? null
+    } catch {
+      ip = null
+    }
     const { ticket, expiresAt } = handoffStore.mint()
+    const controlPath = `/control?handoff=${encodeURIComponent(ticket)}`
+    const nameUrl = name ? `http://${name}:${pubPort}${controlPath}` : null
+    const ipUrl = ip ? `http://${ip}:${pubPort}${controlPath}` : null
     return res.json({
       ok: true,
       ticket,
       expiresAt,
-      url: `http://127.0.0.1:${pubPort}/control?handoff=${encodeURIComponent(ticket)}`,
+      url: `http://127.0.0.1:${pubPort}${controlPath}`,
+      phoneUrl: nameUrl ?? ipUrl,
+      tailnet: { ipUrl, nameUrl },
     })
   })
 

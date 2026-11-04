@@ -425,6 +425,21 @@ export class PairingState {
     this.log(`[pairing] first authenticated request ip=${claim.ip}`)
   }
 
+  /**
+   * Whether `input` is the glasses code showing in COS Control right now. Read only: it never
+   * counts an attempt, consumes the code or creates a claim. COS Control Web asks this after a
+   * typed code fails as a web code, so it can say "that code is for the glasses app" instead of
+   * a bare "wrong code" (6.99.3; Miles typed the glasses code on the web page until locked out).
+   */
+  isLiveCode(input: unknown): boolean {
+    const at = this.now()
+    this.sweep(at)
+    const code = normalizePairingCode(input)
+    const current = this.current
+    if (!code || !current || current.status !== 'active' || at >= current.expiresAt) return false
+    return pairingCodesEqual(code, current.code)
+  }
+
   /** GET /pairing/status. */
   status(): PairingStatus {
     const at = this.now()

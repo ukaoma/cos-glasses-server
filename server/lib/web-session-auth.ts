@@ -282,22 +282,69 @@ export class WebHandoffStore {
   }
 }
 
+/** Why a browser sign-in failed. Logged and shown to the person; never carries the value. */
+export type WebLoginFailure = 'wrong_token' | 'wrong_code' | 'glasses_code' | 'handoff_expired' | 'missing'
+
+export type WebLoginResult =
+  | { ok: true; kind: 'token' | 'handoff' | 'code' }
+  | { ok: false; reason: WebLoginFailure; length: number }
+
+// What a phone paste drags along with a token: spaces and line breaks (a copy out of a
+// terminal or a note), zero-width and no-break characters, and the quotes around a value
+// copied out of an .env line. None of them can be part of a pairing token.
+const PASTE_INVISIBLES = /[\s\u200B-\u200D\u2060\uFEFF\u00A0]/g
+const PASTE_WRAPPING_QUOTES = /^["'`\u2018\u2019\u201C\u201D]+|["'`\u2018\u2019\u201C\u201D]+$/g
+
+/** The token as pasted, with paste debris removed (see PASTE_INVISIBLES). */
+export function normalizePastedToken(input: unknown): string {
+  if (typeof input !== 'string') return ''
+  return input.replace(PASTE_INVISIBLES, '').replace(PASTE_WRAPPING_QUOTES, '')
+}
+
+/**
+ * Check one sign-in and say why it failed. Exactly one credential is tried, in this order:
+ * token, handoff ticket, code. `isGlassesCode` answers whether a code that is NOT a web code
+ * is the live glasses pairing code; it must be read only (never consume or count an attempt),
+ * because that code belongs to the glasses app and the person typed it here by mistake.
+ */
+export function classifyWebLogin(
+  input: { token?: unknown; handoff?: unknown; code?: unknown },
+  apiToken: string,
+  handoffStore?: WebHandoffStore,
+  codeStore?: WebDeviceCodeStore,
+  isGlassesCode?: (code: string) => boolean,
+): WebLoginResult {
+  const token = normalizePastedToken(input.token)
+  if (token.length > 0) {
+    return timingSafeTokenEqual(token, apiToken)
+      ? { ok: true, kind: 'token' }
+      : { ok: false, reason: 'wrong_token', length: token.length }
+  }
+  if (handoffStore && typeof input.handoff === 'string' && input.handoff.trim().length > 0) {
+    const ticket = input.handoff.trim()
+    return handoffStore.consume(ticket)
+      ? { ok: true, kind: 'handoff' }
+      : { ok: false, reason: 'handoff_expired', length: ticket.length }
+  }
+  if (codeStore && typeof input.code === 'string' && input.code.trim().length > 0) {
+    if (codeStore.consume(input.code)) return { ok: true, kind: 'code' }
+    const code = normalizeDeviceCode(input.code)
+    let glasses = false
+    if (code && isGlassesCode) {
+      try { glasses = isGlassesCode(code) === true } catch { glasses = false }
+    }
+    return { ok: false, reason: glasses ? 'glasses_code' : 'wrong_code', length: code?.length ?? input.code.trim().length }
+  }
+  return { ok: false, reason: 'missing', length: 0 }
+}
+
 export function verifyLoginTokenOrHandoff(
   input: { token?: unknown; handoff?: unknown; code?: unknown },
   apiToken: string,
   handoffStore?: WebHandoffStore,
   codeStore?: WebDeviceCodeStore,
 ): boolean {
-  if (typeof input.token === 'string' && input.token.trim().length > 0) {
-    return timingSafeTokenEqual(input.token.trim(), apiToken)
-  }
-  if (handoffStore && typeof input.handoff === 'string') {
-    return handoffStore.consume(input.handoff.trim())
-  }
-  if (codeStore && typeof input.code === 'string') {
-    return codeStore.consume(input.code)
-  }
-  return false
+  return classifyWebLogin(input, apiToken, handoffStore, codeStore).ok
 }
 
 export const WEB_DEVICE_CODE_TTL_MS = 5 * 60_000
@@ -370,7 +417,7 @@ export const WEB_LOGIN_WINDOW_MS = 10 * 60_000
  * failure ends. A success clears the IP. Bounded: at most 512 tracked IPs, oldest evicted.
  */
 export class WebLoginLimiter {
-  private readonly failures = new Map<string, { count: number; firstAt: number }>()
+  private readonly failures = new Map<string, { count: number; firstAt: number; last?: WebLoginFailure }>()
   constructor(
     private readonly now: () => number = () => Date.now(),
     private readonly maxFailures = WEB_LOGIN_MAX_FAILURES,
@@ -386,12 +433,12 @@ export class WebLoginLimiter {
     return rec.count >= this.maxFailures ? Math.ceil(left / 1000) : 0
   }
 
-  fail(ip: string): void {
+  fail(ip: string, reason?: WebLoginFailure): void {
     const at = this.now()
     const rec = this.failures.get(ip)
     if (!rec || at - rec.firstAt >= this.windowMs) {
       this.failures.delete(ip)
-      this.failures.set(ip, { count: 1, firstAt: at })
+      this.failures.set(ip, { count: 1, firstAt: at, last: reason })
       while (this.failures.size > 512) {
         const oldest = this.failures.keys().next().value
         if (oldest === undefined) break
@@ -400,6 +447,12 @@ export class WebLoginLimiter {
       return
     }
     rec.count += 1
+    if (reason) rec.last = reason
+  }
+
+  /** The kind of this IP's most recent failure inside its window, for the lockout message. */
+  lastFailure(ip: string): WebLoginFailure | null {
+    return this.failures.get(ip)?.last ?? null
   }
 
   succeed(ip: string): void {

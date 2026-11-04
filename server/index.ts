@@ -1402,6 +1402,8 @@ if (webControlEnabled()) {
     port: () => PORT,
     httpsPort: () => existsSync(path.join(__dirname, 'certs', 'cert.pem')) ? HTTPS_PORT : null,
     selfDnsName: () => tailnetSelf.currentSelfDnsName(),
+    // A glasses pairing code typed on the web sign-in page gets its own message (read only).
+    glassesCodeIsLive: code => pairingState.isLiveCode(code),
     queryTailscaleStatus: async () => {
       const name = await tailnetSelf.refresh()
       return name ? { backendState: 'Running', selfIps: [], selfDnsName: name, certDomains: [] } : null

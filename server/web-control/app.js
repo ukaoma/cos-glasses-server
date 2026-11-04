@@ -1207,7 +1207,7 @@
 
   // ── events (one delegated listener) ─────────────────────
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#device-code-btn');
+    var t = e.target.closest('[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#device-code-btn');
     if (!t) { if (e.target.id === 'ask-sheet') closeAsk(); if (e.target.id === 'section-menu') closeMenu(); return; }
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
@@ -1216,8 +1216,16 @@
       var toToken = $('auth-token-block').classList.contains('hidden');
       $('auth-token-block').classList.toggle('hidden', !toToken);
       $('auth-code-block').classList.toggle('hidden', toToken);
-      t.textContent = toToken ? 'Use a code from your Mac instead' : 'Use the pairing token instead';
+      t.textContent = toToken ? 'Use a sign-in code instead' : 'Use the pairing token instead';
       (toToken ? $('auth-token') : $('auth-code')).focus();
+      return;
+    }
+    if (t.id === 'auth-token-show') {
+      // A stale or partial paste is invisible in a password field; let the person look.
+      var shown = $('auth-token').type === 'text';
+      $('auth-token').type = shown ? 'password' : 'text';
+      t.textContent = shown ? 'Show token' : 'Hide token';
+      t.setAttribute('aria-pressed', shown ? 'false' : 'true');
       return;
     }
     if (t.id === 'device-code-btn') return showDeviceCode();
@@ -1281,8 +1289,8 @@
       var body = usingToken ? { token: value } : { code: value };
       api('/api/web-session/login', { method: 'POST', body: body }).then(function (d) { $('auth-token').value = ''; $('auth-code').value = ''; showShell(d); })
         .catch(function (err) {
-          if (err.status === 429) return showAuth(err.message);
-          showAuth(err.status === 401 ? (usingToken ? 'That token did not match. Copy it again from the COS menu-bar panel.' : 'That code did not match or has expired. Ask for a new one on your Mac.') : err.message);
+          // The server names what failed (wrong token, wrong code, the glasses code, lockout).
+          showAuth(err.message);
         });
     } else if (f.id === 'session-form') sendSessionTurn(false);
     else if (f.id === 'sessions-search-form') { $('sessions-q').blur(); searchSessions(); }
@@ -1364,7 +1372,7 @@
     if (handoff) {
       history.replaceState({}, document.title, location.pathname + location.hash);
       api('/api/web-session/login', { method: 'POST', body: { handoff: handoff } }).then(showShell)
-        .catch(function () { showAuth('That sign-in link expired. Open it again from COS Control, or paste the token.'); });
+        .catch(function (err) { showAuth(err && err.status ? err.message : 'That sign-in link did not work. Scan a new one in COS Control, or use a code or the token.'); });
       return;
     }
     api('/api/web-session/status').then(function (st) { if (st && st.authenticated) showShell(st); else showAuth(); }).catch(function () { showAuth('COS on your Mac is not answering. Check that the Mac is awake and on Tailscale.'); });

@@ -40,14 +40,16 @@
       <p>COS runs on your Mac. Sign in once and this browser stays connected for 7 days.</p>
       <form id="auth-form">
         <div id="auth-code-block">
-          <label for="auth-code">Code from your Mac</label>
+          <label for="auth-code">Sign-in code</label>
           <input id="auth-code" class="field code-field" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="9" placeholder="K7P3-QX9M">
-          <p class="auth-foot" style="margin-top:8px">On a browser that is already signed in, open Settings and choose Sign in another device.</p>
+          <p class="auth-foot" style="margin-top:8px">In COS Control on your Mac, choose Open COS on your phone. Scan its QR with the camera, or tap Show a sign-in code and type it here. A browser that is already signed in can also make one: Settings, Sign in another device.</p>
+          <p class="auth-foot">The glasses pairing code does not work here.</p>
         </div>
         <div id="auth-token-block" class="hidden">
           <label for="auth-token">Pairing token</label>
           <input id="auth-token" class="field" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the pairing token">
-          <p class="auth-foot" style="margin-top:8px">In the COS menu-bar panel on your Mac, choose Copy pairing token.</p>
+          <button type="button" class="link-btn" id="auth-token-show" aria-controls="auth-token" aria-pressed="false">Show token</button>
+          <p class="auth-foot" style="margin-top:8px">In the COS menu-bar panel on your Mac, choose Copy pairing token. The copy clears after 60 seconds, so paste within a minute.</p>
         </div>
         <p id="auth-error" class="status-line error hidden" role="alert"></p>
         <button type="submit" class="btn primary block">Connect</button>

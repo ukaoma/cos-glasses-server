@@ -496,3 +496,23 @@ describe('pairing parity fixture', () => {
     })
   })
 })
+
+describe('isLiveCode (COS Control Web asks, read only)', () => {
+  it('recognises the live code as typed, and never counts, consumes or claims it', () => {
+    const { state, advance } = makeState()
+    const { code, display } = state.mint()
+    // Far more reads than the attempt limit: a read must not count as an attempt.
+    for (let i = 0; i < PAIRING_CODE_ATTEMPT_LIMIT + 5; i++) expect(state.isLiveCode(display.toLowerCase())).toBe(true)
+    expect(state.isLiveCode(code)).toBe(true)
+    expect(state.isLiveCode('ZZZZ-ZZZZ')).toBe(false)
+    expect(state.isLiveCode(42)).toBe(false)
+    expect(state.status().pending).toBeNull()
+    // Still claimable after all those reads.
+    expect(reasonOf(() => state.claim({ code, nonce: NONCE }, TS_IP))).toBe('ok')
+    // Once claimed the code is spent, so it is no longer "the live code".
+    expect(state.isLiveCode(code)).toBe(false)
+    const second = state.mint()
+    advance(PAIRING_CODE_TTL_MS)
+    expect(state.isLiveCode(second.code)).toBe(false)
+  })
+})
