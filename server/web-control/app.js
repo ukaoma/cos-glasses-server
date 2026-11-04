@@ -1063,25 +1063,29 @@
     if (reason === 'stream_lost') return 'The live feed stopped answering; showing the stored turns. Reopen the session to try again.';
     return 'Live feed unavailable (' + reason + '); showing the stored turns.';
   }
+  // The block keeps one size whatever it holds (/qa: the turns below moved while Miles read, as tool
+  // lines and prose came and went): a label row with the counters, a state row with the clock and
+  // Stop, one prompt line, and a tail of the newest tool lines and reply text, fixed in height and
+  // anchored to its bottom, so the newest line shows and older lines slide out of view above it.
   function paintActivity(r) {
     var box = $('session-live');
     if (!box || state.reading !== r) return;
     var f = r.feed, live = r.live || {};
-    var html = '<div class="sx-act-label">ACTIVITY</div>';
-    if (f.connected || f.lastSeq > 0 || live.working) {
+    var on = f.connected || f.lastSeq > 0 || live.working;
+    var bits = [];
+    if (on && f.missed > 0) bits.push('<span class="warn">missed ' + f.missed + '</span>');
+    if (on && r.queued > 0) bits.push('<span class="accent">' + (r.queued === 1 ? '1 queued' : r.queued + ' queued') + '</span>');
+    if (on && f.fallback === 'reconnecting') bits.push('<span>reconnecting…</span>');
+    var html = '<div class="sx-act-label"><span>ACTIVITY</span>' + (bits.length ? '<span class="sx-act-bits">' + bits.join('') + '</span>' : '') + '</div>';
+    if (on) {
       var word = sxFeedWord(r), detail = sxFeedDetail(f, word);
       html += '<div class="sx-act-state"><span class="sx-dot ' + word.toLowerCase() + '" aria-hidden="true"></span><strong>' + word + '</strong>' +
-        (detail ? '<span class="sx-act-detail">' + esc(detail) + '</span>' : '') +
-        '<span class="sx-act-clock" id="session-elapsed">' + esc(sxElapsed(f)) + '</span></div>';
-      if (f.prompt) html += '<p class="sx-act-prompt">' + esc(f.prompt) + '</p>';
-      if (f.tools.length) html += '<div class="sx-act-tools">' + f.tools.map(function (t) { return '<div>' + esc(sxToolLine(t)) + '</div>'; }).join('') + '</div>';
-      var bits = [];
-      if (f.missed > 0) bits.push('<span class="warn">missed ' + f.missed + '</span>');
-      if (r.queued > 0) bits.push('<span class="accent">' + (r.queued === 1 ? '1 queued' : r.queued + ' queued') + '</span>');
-      if (f.fallback === 'reconnecting') bits.push('<span>reconnecting…</span>');
-      if (bits.length) html += '<div class="sx-act-bits">' + bits.join('') + '</div>';
-      if (live.working && live.prose) html += '<div class="sx-act-prose">' + md(String(live.prose).slice(-1200)) + '</div>';
-      if (live.working) html += '<div class="sx-act-actions"><button type="button" class="cx-btn quiet" data-action="stop-session">Stop</button></div>';
+        '<span class="sx-act-detail">' + esc(detail) + '</span>' +
+        '<span class="sx-act-clock" id="session-elapsed">' + esc(sxElapsed(f)) + '</span>' +
+        (live.working ? '<button type="button" class="cx-btn quiet sx-act-stop" data-action="stop-session">Stop</button>' : '') + '</div>' +
+        '<p class="sx-act-prompt">' + esc(f.prompt) + '</p>' +
+        '<div class="sx-act-tail">' + f.tools.map(function (t) { return '<div class="sx-act-tool">' + esc(sxToolLine(t)) + '</div>'; }).join('') +
+          (live.working && live.prose ? '<div class="sx-act-prose">' + esc(String(live.prose).slice(-600)) + '</div>' : '') + '</div>';
     } else {
       html += '<p class="sx-act-fallback">' + esc(f.fallback ? sxFallbackLine(f.fallback) : 'Connecting to the live feed…') + '</p>';
     }
@@ -1159,9 +1163,9 @@
       var r = state.reading;
       if (!r || r.id !== id) return;
       var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : [];
+      var box = $('session-turns'); if (box) sxMergeTurns(box, r.turns || [], turns, d);
+      // The header keeps the subtitle it opened with: a rewrap above the turns would move them.
       r.detail = d; r.turns = turns; r.more = d.recent_turns_more === true;
-      var box = $('session-turns'); if (box) box.innerHTML = renderTurns(turns, d);
-      var sub = document.querySelector('#session-reader .sx-subtitle'); if (sub) sub.textContent = sxSubtitle(d, provider, turns, r.more);
       renderHeld(r);
       loadQueue(provider, id);
       sxProbeAttach(r);
@@ -1668,15 +1672,50 @@
   // you typed it"). The server shapes each turn to 4,000 characters with a visible ellipsis.
   function renderTurns(turns, d) {
     if (!turns.length) return '<p class="reader-placeholder">This session has no user or assistant prose stored.</p>';
-    return turns.map(function (t, i) {
-      var role = String(t.role || '').toLowerCase() === 'user' ? 'user' : 'assistant';
-      var text = String(t.text || t.content || '').trim();
-      var at = toDate(t.at);
-      var when = at ? (Date.now() - at.getTime() < 86400000 ? clock(at) : sxShortDate(at)) : '';
-      return '<div class="turn ' + role + ' sx-turn" data-turn="' + i + '"><span class="who"><span>' + (role === 'user' ? 'YOU' : 'ASSISTANT') + '</span>' +
-        (when ? '<span class="sx-turn-when">' + esc(when) + '</span>' : '') + '</span>' +
-        (role === 'user' ? '<div class="sx-plain">' + esc(text) + '</div>' : '<div class="sx-md">' + sxMd(text) + '</div>') + '</div>';
-    }).join('');
+    return turns.map(sxTurnHtml).join('');
+  }
+  // One turn's identity, for telling which turns a refresh brought that the page already shows.
+  function sxTurnSig(t) {
+    var text = String(t.text || t.content || '').trim();
+    return (String(t.role || '').toLowerCase() === 'user' ? 'u' : 'a') + '|' + (t.at || '') + '|' + text.length + '|' + text.slice(0, 48);
+  }
+  function sxTurnHtml(t) {
+    var role = String(t.role || '').toLowerCase() === 'user' ? 'user' : 'assistant';
+    var text = String(t.text || t.content || '').trim();
+    var at = toDate(t.at);
+    var when = at ? (Date.now() - at.getTime() < 86400000 ? clock(at) : sxShortDate(at)) : '';
+    return '<div class="turn ' + role + ' sx-turn" data-sig="' + esc(sxTurnSig(t)) + '"><span class="who"><span>' + (role === 'user' ? 'YOU' : 'ASSISTANT') + '</span>' +
+      (when ? '<span class="sx-turn-when">' + esc(when) + '</span>' : '') + '</span>' +
+      (role === 'user' ? '<div class="sx-plain">' + esc(text) + '</div>' : '<div class="sx-md">' + sxMd(text) + '</div>') + '</div>';
+  }
+  // A refresh never rebuilds what you are reading (Miles, /qa: "start to scroll and then it reloads
+  // the section"). The server's window slides as a session grows, so the turns the page already
+  // shows are found at the start of the new list and only what follows them is appended; older
+  // cards stay. Your sent and waiting bubbles give way to the real turns only when new turns land.
+  // When the lists share nothing, the card you are reading is kept where it was on screen.
+  function sxMergeTurns(box, old, next, d) {
+    if (!old.length && !next.length) return;
+    var oldSigs = old.map(sxTurnSig), nextSigs = next.map(sxTurnSig), fresh = null;
+    for (var j = 0; j < oldSigs.length && fresh === null; j++) {
+      var tail = oldSigs.slice(j);
+      if (tail.length > nextSigs.length) continue;
+      if (tail.every(function (s, k) { return s === nextSigs[k]; })) fresh = next.slice(tail.length);
+    }
+    if (fresh) {
+      if (!fresh.length) return;
+      box.querySelectorAll('.turn.pending, .reader-placeholder').forEach(function (el) { el.remove(); });
+      box.insertAdjacentHTML('beforeend', fresh.map(sxTurnHtml).join(''));
+      return;
+    }
+    var anchor = null, top = 0, cards = box.querySelectorAll('.turn[data-sig]');
+    for (var i = 0; i < cards.length; i++) {
+      var rect = cards[i].getBoundingClientRect();
+      if (rect.bottom > 0) { anchor = cards[i].getAttribute('data-sig'); top = rect.top; break; }
+    }
+    box.innerHTML = renderTurns(next, d);
+    if (!anchor) return;
+    var same = [].filter.call(box.querySelectorAll('.turn[data-sig]'), function (el) { return el.getAttribute('data-sig') === anchor; })[0];
+    if (same) window.scrollBy(0, same.getBoundingClientRect().top - top);
   }
 
   // ── Ask COS (the Ask sheet's first row) ─────────────────
@@ -1727,7 +1766,9 @@
     else box.innerHTML = '<p class="cx-note sx-reading">' + (SX.view === 'cost' ? 'Reading what COS used.' : 'Reading local usage…') + '</p>';
     if ((!force && !stale) || SX.usageLoading) return;
     SX.usageLoading = true; paintSessionsHero();
-    api('/api/usage/summary' + (force ? '?refresh=1' : '')).then(function (d) {
+    // The server runs the two Mac helpers side by side, each capped at 15 s (web-usage-bridge.ts), so a
+    // cold read can pass the 20 s default for reads once the network is added; 30 s covers it.
+    api('/api/usage/summary' + (force ? '?refresh=1' : ''), { timeoutMs: 30000 }).then(function (d) {
       SX.usage = d || {}; SX.usageAt = Date.now(); SX.usageError = ''; SX.usageLoading = false;
       paintSessionsHero(); paintUsage();
     }, function (err) {

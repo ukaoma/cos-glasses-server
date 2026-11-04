@@ -91,28 +91,32 @@
 .sx-subtitle { margin: 6px 0 0; font-size: 12.5px; color: var(--sub); overflow-wrap: anywhere; }
 .sx-retry { margin: 10px 0; }
 
-.sx-activity { padding: 13px 14px; border-radius: 10px; background: var(--qopen); border: 1px solid var(--panel-border); margin-bottom: 14px; }
-.sx-act-label { font: 600 9.5px/1 var(--mono); letter-spacing: 0.12em; color: var(--sub); margin-bottom: 9px; }
-.sx-act-state { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
-.sx-act-state strong { font: 600 13.5px/1.3 var(--body); color: var(--ink); }
-.sx-act-state { align-items: flex-start; }
-.sx-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tertiary); margin-top: 5px; flex: none; }
-.sx-act-clock { margin-top: 2px; }
-.sx-act-detail { margin-top: 1px; }
+/* ACTIVITY keeps one size in every state, so nothing below it moves while you read. Each row has a
+   fixed height; the tail of tool lines and reply text is anchored to its bottom and clips above. */
+.sx-activity {
+  --act-state: 34px; --act-prompt: 20px; --act-tail: 48px;
+  padding: 11px 14px 10px; border-radius: 10px; background: var(--qopen); border: 1px solid var(--panel-border); margin-bottom: 14px; overflow: hidden;
+}
+@media (min-width: 760px) { .sx-activity { --act-tail: 64px; } }
+.sx-act-label { display: flex; align-items: center; gap: 12px; height: 14px; font: 600 9.5px/14px var(--mono); letter-spacing: 0.12em; color: var(--sub); white-space: nowrap; overflow: hidden; }
+.sx-act-bits { display: flex; gap: 10px; margin-left: auto; min-width: 0; overflow: hidden; font: 400 10px/14px var(--mono); letter-spacing: 0; color: var(--tertiary); }
+.sx-act-bits .warn { color: var(--amber); }
+.sx-act-bits .accent { color: var(--accent); }
+.sx-act-state { display: flex; align-items: center; gap: 8px; height: var(--act-state); margin-top: 4px; white-space: nowrap; overflow: hidden; }
+.sx-act-state strong { flex: none; font: 600 13.5px/1.3 var(--body); color: var(--ink); }
+.sx-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tertiary); flex: none; }
 .sx-dot.working { background: var(--run-green); animation: pulse 2s ease-out infinite; }
 .sx-dot.waiting { background: var(--amber); }
 .sx-dot.failed { background: var(--hot); }
-.sx-act-detail { flex: 1 1 140px; min-width: 0; font-size: 12.5px; color: var(--sub); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-.sx-act-clock { margin-left: auto; font: 400 11px/1.3 var(--mono); color: var(--tertiary); font-variant-numeric: tabular-nums; }
-.sx-act-prompt { margin: 8px 0 0; font-size: 13.5px; line-height: 1.4; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-.sx-act-tools { margin-top: 7px; display: grid; gap: 3px; font: 400 11px/1.35 var(--mono); color: var(--sub); }
-.sx-act-tools div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sx-act-bits { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 7px; font: 400 10px/1.3 var(--mono); color: var(--tertiary); }
-.sx-act-bits .warn { color: var(--amber); }
-.sx-act-bits .accent { color: var(--accent); }
-.sx-act-prose { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--hairline); font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow: auto; color: var(--ink); }
-.sx-act-actions { margin-top: 10px; }
-.sx-act-fallback { margin: 0; font-size: 12.5px; line-height: 1.4; color: var(--sub); }
+.sx-act-detail { flex: 1 1 auto; min-width: 0; font-size: 12.5px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sx-act-clock { flex: none; margin-left: auto; font: 400 11px/1.3 var(--mono); color: var(--tertiary); font-variant-numeric: tabular-nums; }
+.sx-act-stop.cx-btn { flex: none; height: 30px; padding: 0 11px; font-size: 13px; }
+.sx-act-prompt { height: var(--act-prompt); margin: 0; font-size: 13.5px; line-height: var(--act-prompt); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sx-act-tail { height: var(--act-tail); margin-top: 4px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+.sx-act-tool { flex: none; font: 400 11px/16px var(--mono); color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sx-act-prose { flex: none; margin-top: 2px; font-size: 13px; line-height: 16px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.sx-act-fallback { height: calc(var(--act-state) + var(--act-prompt) + var(--act-tail) + 8px); margin: 0; padding-top: 6px; font-size: 12.5px; line-height: 1.4; color: var(--sub); overflow: hidden; box-sizing: border-box; }
+@media (max-width: 599px) { .sx-activity { --act-state: 38px; } .sx-act-stop.cx-btn { height: 36px; } }
 .sx-note { font-size: 12px; color: var(--sub); margin: 0 2px 12px; }
 
 /* YOU and ASSISTANT cards (Control: card fill, a tinted hairline; sessions tint for you, green for the reply). */
