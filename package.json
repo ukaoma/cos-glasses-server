@@ -41,6 +41,7 @@
     "shared",
     "!server/**/*.test.ts",
     "!server/scripts/engine-canary.ts",
+    "!server/scripts/start-web-candidate.mjs",
     "!server/scripts/hq-native-canary.ts",
     "!server/scripts/hq-contention-canary.ts",
     "!server/scripts/live-cos-ask-canary.ts",
