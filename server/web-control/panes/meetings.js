@@ -1706,14 +1706,14 @@
       '<button type="submit" class="cx-btn primary"' + (blocked || !a.draft.trim() ? ' disabled' : '') + '>Ask</button></form>' +
       '<div class="mt-ask-more"><button type="button" class="mt-link" data-mt="ask-act" data-sid="' + esc(sid) + '" data-action="ask" data-q="' + esc(CHALLENGE_Q) + '"' + dis + '>Challenge an assumption</button>' +
       '<button type="button" class="mt-link" data-mt="ask-act" data-sid="' + esc(sid) + '" data-action="ask" data-q="' + esc(DECISION_Q) + '"' + dis + '>Find my next decision</button></div>' +
-      modelPickerHtml(conf);
+      modelPickerHtml(conf, sid);
     return html;
   }
   // The Mac's Model menu (Control's meeting Ask panel): every model the server lists, the unavailable ones shown but
   // not pickable. The choice is the server's one meeting-assistance setting, so it changes for the Mac too.
-  function modelPickerHtml(conf) {
+  function modelPickerHtml(conf, sid) {
     if (!conf || !conf.selected) return '';
-    var sel = conf.selected, models = ((conf.capabilities || {}).models || []).filter(function (m) { return m && m.engine && m.model; });
+    var sel = conf.selected, models = (conf.models || (conf.capabilities || {}).models || []).filter(function (m) { return m && m.engine && m.model; });
     var label = function (m) { return cap(m.engine) + ' · ' + m.model; };
     if (!models.length) return '<p class="mt-muted mt-model">Model: ' + esc(label(sel)) + '</p>';
     var key = function (m) { return m.engine + '\u0001' + m.model; }, cur = key(sel), seen = false;
@@ -1722,7 +1722,7 @@
       return '<option value="' + esc(k) + '"' + (on ? ' selected' : '') + (m.available === false && !on ? ' disabled' : '') + '>' + esc(label(m) + (m.available === false ? ' (not available)' : '')) + '</option>';
     });
     if (!seen) opts.unshift('<option value="' + esc(cur) + '" selected>' + esc(label(sel)) + '</option>');
-    var busy = !!S.conf.modelBusy;
+    var busy = !!S.conf.modelBusy || !!(sid && A(sid).running);
     return '<label class="mt-model mt-model-pick"><span class="mt-muted">Model</span><select class="field mt-model-select" data-mt-model' + (busy ? ' disabled' : '') + '>' + opts.join('') + '</select></label>' +
       (S.conf.modelNote ? '<p class="mt-muted mt-amber">' + esc(S.conf.modelNote) + '</p>' : '');
   }
@@ -1740,7 +1740,7 @@
     });
   }
   function repaintAllAsk() {
-    pane.querySelectorAll('[id^="mt-ask-"]').forEach(function (el) { var sid = el.getAttribute('data-sid'); if (sid) repaintAsk(sid); });
+    pane.querySelectorAll('[id^="mt-ask-"]').forEach(function (el) { var sid = el.getAttribute('data-sid'); if (sid) repaintAsk(sid, true); });
   }
   function cuesHtml(sid) {
     var a = A(sid), cues = (a.cues || []).slice().sort(function (x, y) { return num(y.createdAt) - num(x.createdAt); });
@@ -1767,8 +1767,11 @@
     return '<section class="mt-panel">' + sw + (view === 'cues' ? cuesHtml(sid) : askHtml(sid)) + '</section>';
   }
   // Repaint one panel in place, keeping the caret in its box and which disclosures are open.
-  function repaintAsk(sid) {
+  function repaintAsk(sid, force) {
     var el = $('mt-ask-' + safeId(sid)); if (!el) return;
+    // An open Model menu is never rebuilt under the finger (it would close the iOS picker); it repaints on blur.
+    if (!force && document.activeElement && document.activeElement.hasAttribute && document.activeElement.hasAttribute('data-mt-model') && el.contains(document.activeElement)) { A(sid).panelDirty = true; return; }
+    A(sid).panelDirty = false;
     var act = document.activeElement, inBox = act && el.contains(act) && act.tagName === 'TEXTAREA' ? act.className : null;
     var caret = inBox ? [act.selectionStart, act.selectionEnd] : null;
     var open = {}; el.querySelectorAll('details[open][data-k]').forEach(function (d) { open[d.getAttribute('data-k')] = 1; });
@@ -2142,6 +2145,11 @@
       var save = t.parentNode.querySelector('[data-mt="follow-save"]');
       if (save) save.disabled = a.followBusy || !t.value.trim() || t.value.trim().length > 600 || !online();
     }
+  });
+  pane.addEventListener('focusout', function (e) {
+    if (!(e.target.hasAttribute && e.target.hasAttribute('data-mt-model'))) return;
+    var panel = e.target.closest('.mt-side-panel'), sid = panel && panel.getAttribute('data-sid');
+    if (sid && A(sid).panelDirty) setTimeout(function () { repaintAsk(sid); }, 0);
   });
   pane.addEventListener('change', function (e) {
     if (e.target.id === 'mt-recency') { S.recency = e.target.value; paintBrowse(); }

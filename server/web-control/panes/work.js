@@ -1630,7 +1630,7 @@
     if (e.repeat && e.key === 'e') return;   // a held key decides once
     if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
     var groups = sortGroups(), n = groups.length;
-    S.sortGroupId = '';
+    if (e.key === 'j' || e.key === 'k' || e.key === 's') S.sortGroupId = '';
     if (e.key === 'j') S.sortIndex = Math.min(Math.max(0, n - 1), S.sortIndex + 1);
     else if (e.key === 'k') S.sortIndex = Math.max(0, S.sortIndex - 1);
     else if (e.key === 's') S.sortIndex = n ? (S.sortIndex + 1) % n : 0;
