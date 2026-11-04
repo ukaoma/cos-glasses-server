@@ -189,7 +189,7 @@ export function scriptedDecisionClient(entries: ReplayEntry[] = REPLAY): FakeDec
 
 export interface FakeWriters extends DropWriters {
   cards: Map<string, { domain: string; text: string; archived: boolean; touched: boolean }>
-  memories: Map<string, { text: string; pruned: boolean }>
+  memories: Map<string, { text: string; pruned: boolean; reviewed: boolean; dropId: string }>
   threadSources: Map<string, { threadId: string; text: string; removed: boolean; touched: boolean }>
   calls: string[]
   missing: Set<string>
@@ -216,14 +216,23 @@ export function fakeWriters(options: { missing?: string[]; candidates?: (text: s
       card.archived = true
       return 'archived'
     },
-    async captureMemory(text, dropId) {
+    async captureMemory(text, dropId, attempt) {
       w.calls.push('captureMemory')
       if (w.missing.has('captureMemory')) throw new DropDestinationError('destination_unavailable')
-      const id = `mem_${dropId.slice(0, 8)}`
-      w.memories.set(id, { text, pruned: false })
+      // The memory contract: under 30 characters is refused (memory_contract.MIN_CONTENT_LENGTH).
+      if (text.trim().length < 30) throw new DropDestinationError('memory_too_short')
+      const id = `mem_${dropId.slice(0, 8)}_${attempt}`
+      w.memories.set(id, { text, pruned: false, reviewed: false, dropId })
       return { id, created: true }
     },
-    async pruneMemory(id) { w.calls.push(`pruneMemory:${id}`); const m = w.memories.get(id); if (!m) return 'gone'; m.pruned = true; return 'pruned' },
+    async pruneMemory(id, dropId) {
+      w.calls.push(`pruneMemory:${id}`)
+      const m = w.memories.get(id)
+      if (!m) return 'gone'
+      if (m.reviewed || m.dropId !== dropId) return 'touched'
+      m.pruned = true
+      return 'pruned'
+    },
     async sourceThread(threadId, text, dropId) {
       w.calls.push(`sourceThread:${threadId}`)
       if (w.missing.has('sourceThread')) throw new DropDestinationError('destination_unavailable')

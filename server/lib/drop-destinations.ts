@@ -19,14 +19,16 @@ import { normalizeThreads, THREAD_ID_PATTERN } from './cos-context-browser.js'
 import { DROP_ROUTER_LIMITS, rankByOverlap, type RouteCandidates } from './drop-router.js'
 
 export class DropDestinationError extends Error {
-  constructor(readonly code: 'destination_unavailable' | 'destination_failed') { super(code) }
+  constructor(readonly code: 'destination_unavailable' | 'destination_failed' | 'memory_too_short') { super(code) }
 }
 
 export interface DropWriters {
   captureCard(domain: string, text: string, dropId: string): Promise<{ id: string; workIdentity: string; created: boolean }>
   archiveCard(domain: string, id: string, dropId: string, text: string): Promise<'archived' | 'touched' | 'gone'>
-  captureMemory(text: string, dropId: string): Promise<{ id: string; created: boolean }>
-  pruneMemory(id: string): Promise<'pruned' | 'gone'>
+  /** `attempt` is the filing's number: each filing is a new capture, so a replay never answers a set-aside row. */
+  captureMemory(text: string, dropId: string, attempt: string): Promise<{ id: string; created: boolean }>
+  /** pruned | touched (reviewed since, or not this drop's) | gone. */
+  pruneMemory(id: string, dropId: string): Promise<'pruned' | 'touched' | 'gone'>
   sourceThread(threadId: string, text: string, dropId: string): Promise<{ sourceId: string; created: boolean }>
   unsourceThread(threadId: string, sourceId: string, dropId: string): Promise<'removed' | 'touched' | 'gone'>
   /** What the router may choose from. Any part that cannot be read is simply left out. */
@@ -48,6 +50,7 @@ export function bridgeErrorCode(answer: unknown): string | null {
   return typeof code === 'string' ? code : 'bridge_error'
 }
 function fail(code: string | null): never {
+  if (code === 'memory_rejected') throw new DropDestinationError('memory_too_short')
   throw new DropDestinationError(code && MISSING.has(code) ? 'destination_unavailable' : 'destination_failed')
 }
 async function python(args: string[], input?: string): Promise<Record<string, unknown>> {
@@ -69,14 +72,15 @@ export function createBridgeDropWriters(): DropWriters {
     async archiveCard(domain, id, dropId, text) {
       try { return await archiveDropCard(domain, id, dropId, text) } catch (e) { fail(taskCode(e)) }
     },
-    async captureMemory(text, dropId) {
-      const out = await python(['memory-capture'], JSON.stringify({ text, dropId }))
+    async captureMemory(text, dropId, attempt) {
+      const out = await python(['memory-capture'], JSON.stringify({ text, dropId, attempt }))
       if (out.ok !== true || typeof out.id !== 'string' || !ID.test(out.id)) fail('bridge_error')
       return { id: out.id as string, created: out.created !== false }
     },
-    async pruneMemory(id) {
-      const out = await python(['memory-review', `--id=${id}`, '--decision=prune', '--note=Undone from Drop it'])
-      return out.deleted === true || out.decision ? 'pruned' : 'gone'
+    async pruneMemory(id, dropId) {
+      const out = await python(['memory-uncapture', '--id', id], JSON.stringify({ dropId }))
+      if (out.ok === true && (out.result === 'pruned' || out.result === 'touched' || out.result === 'gone')) return out.result
+      fail('bridge_error')
     },
     async sourceThread(threadId, text, dropId) {
       if (!THREAD_ID_PATTERN.test(threadId)) fail('invalid_thread')

@@ -17,7 +17,7 @@ vi.mock('./domains.js', async importOriginal => ({
   taskDomainNames: () => ['work', 'personal'],
 }))
 
-const { bridgeErrorCode, createBridgeDropWriters, DropDestinationError } = await import('./drop-destinations.js')
+const { bridgeErrorCode, createBridgeDropWriters, DropDestinationError, within } = await import('./drop-destinations.js')
 const ID = '3f0c9a52-1b2d-4c8e-9f10-2a3b4c5d6e7f'
 
 beforeEach(() => { py.source = 'bridge'; py.answers = []; py.calls = []; task.calls = []; task.answers = [] })
@@ -60,13 +60,18 @@ describe('new card', () => {
 })
 
 describe('memory and thread', () => {
-  it('memory capture goes into To review; Undo prunes through memory-review', async () => {
-    py.answers.push({ ok: true, id: 'mem-123', created: true }, { decision: { id: 'mem-123' }, quarantined: true })
+  it('memory capture goes into To review with the filing number; Undo goes through memory-uncapture', async () => {
+    py.answers.push({ ok: true, id: 'mem-123', created: true }, { ok: true, result: 'touched' }, { ok: true, result: 'removed' })
     const w = createBridgeDropWriters()
-    expect(await w.captureMemory('the alarm code changed', ID)).toEqual({ id: 'mem-123', created: true })
-    expect(py.calls[0]).toEqual({ args: ['memory-capture'], input: JSON.stringify({ text: 'the alarm code changed', dropId: ID }) })
-    expect(await w.pruneMemory('mem-123')).toBe('pruned')
-    expect(py.calls[1].args).toEqual(['memory-review', '--id=mem-123', '--decision=prune', '--note=Undone from Drop it'])
+    expect(await w.captureMemory('the alarm code changed', ID, '2')).toEqual({ id: 'mem-123', created: true })
+    expect(py.calls[0]).toEqual({ args: ['memory-capture'], input: JSON.stringify({ text: 'the alarm code changed', dropId: ID, attempt: '2' }) })
+    expect(await w.pruneMemory('mem-123', ID)).toBe('touched')
+    expect(py.calls[1]).toEqual({ args: ['memory-uncapture', '--id', 'mem-123'], input: JSON.stringify({ dropId: ID }) })
+    await expect(w.pruneMemory('mem-123', ID)).rejects.toMatchObject({ code: 'destination_failed' })
+  })
+  it('a memory the contract refuses is memory_too_short, not a failure to retry', async () => {
+    py.answers.push({ error: { code: 'memory_rejected' } })
+    await expect(createBridgeDropWriters().captureMemory('coffee', ID, '1')).rejects.toMatchObject({ code: 'memory_too_short' })
   })
   it('thread source and unsource by id', async () => {
     py.answers.push({ ok: true, sourceId: 'drop-3f0c9a52', created: false }, { ok: true, result: 'removed' })

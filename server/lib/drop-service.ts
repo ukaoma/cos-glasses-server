@@ -191,7 +191,8 @@ export class DropService {
           break
         }
         case 'memory': {
-          const out = await this.deps.writers.captureMemory(drop.text, drop.id)
+          // A new capture key per filing, so a replay never answers with a row an earlier Undo set aside.
+          const out = await this.deps.writers.captureMemory(drop.text, drop.id, String(generation))
           links = [{ kind: 'memory', id: out.id, label: 'To review', created: out.created }]
           break
         }
