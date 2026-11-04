@@ -191,21 +191,32 @@
 
         <!-- SESSIONS -->
         <section id="pane-sessions" class="pane wide hidden" data-title="Sessions">
-          <div class="pane-head">
-            <h1 class="pane-title">Sessions</h1>
-          </div>
-          <div class="split" id="sessions-split">
-            <div class="split-list">
-              <form class="searchline" id="sessions-search-form" role="search">
-                <input id="sessions-q" class="field" type="search" placeholder="Search sessions" enterkeyhint="search">
-              </form>
-              <div class="mode-switch" role="group" aria-label="Search by">
-                <button type="button" data-mode="words" aria-pressed="true">Words</button>
-                <button type="button" data-mode="meaning" aria-pressed="false">Meaning</button>
+          <div class="cx sx" data-tint="sessions">
+            <header class="cx-hero sx-hero" id="sessions-hero" data-tint="sessions">
+              <span class="cx-glyph"><svg class="icon"><use href="#i-sessions"/></svg></span>
+              <div class="cx-hero-text"><h1 class="cx-title">Sessions</h1><p class="cx-detail-line">Claude · Codex · Cursor · reading the last 7 days…</p></div>
+            </header>
+            <div class="cx-controls sx-views" id="sessions-views"></div>
+            <div class="split sx-split" id="sessions-split">
+              <div class="split-list">
+                <div class="sx-tools">
+                  <form class="cx-search sx-search" id="sessions-search-form" role="search">
+                    <input id="sessions-q" class="field" type="search" placeholder="Search titles, transcripts…" enterkeyhint="search" autocomplete="off" aria-label="Search titles, transcripts">
+                    <button type="button" class="cx-clear hidden" id="sessions-clear" data-sx="clear" aria-label="Clear search">Clear</button>
+                  </form>
+                  <select id="sessions-recency" class="field sx-select" aria-label="Recency">
+                    <option value="newest">Newest</option>
+                    <option value="oldest">Oldest</option>
+                    <option value="match">Best match</option>
+                  </select>
+                </div>
+                <p class="cx-note sx-hint hidden" id="sessions-hint"></p>
+                <div id="sessions-hooks"></div>
+                <div id="sessions-list"></div>
               </div>
-              <div id="sessions-list"></div>
+              <div class="reader sx-reader" id="session-reader"><p class="reader-placeholder">Pick a session to read it and send it a turn.</p></div>
             </div>
-            <div class="reader" id="session-reader"><p class="reader-placeholder">Pick a session to read it and send it a turn.</p></div>
+            <div class="sx-usage hidden" id="sessions-usage"></div>
           </div>
         </section>
 
@@ -241,11 +252,8 @@
 
         <!-- USAGE -->
         <section id="pane-usage" class="pane hidden" data-title="Usage">
-          <div class="pane-head">
-            <h1 class="pane-title">Usage</h1>
-            <p id="usage-sub" class="pane-sub">What COS spent in the last 30 days.</p>
-          </div>
-          <div id="usage-body"></div>
+          <!-- Usage is a view inside Sessions (Sessions | Usage | COS cost); this old route opens it there. -->
+          <p class="reader-placeholder">Opening Usage in Sessions…</p>
         </section>
 
         <!-- SETTINGS -->

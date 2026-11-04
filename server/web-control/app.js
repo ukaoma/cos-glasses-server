@@ -354,20 +354,201 @@
   function setBadge(name, on) { document.querySelectorAll('[data-badge="' + name + '"]').forEach(function (b) { b.classList.toggle('hidden', !on); }); }
 
   // ── Sessions ────────────────────────────────────────────
-  function loadSessions() {
-    var list = $('sessions-list');
-    if (!state.sessions.length) list.innerHTML = skeletonRows(6);
-    return api('/api/agent-sessions?limit=60&sort=updated').then(function (d) {
-      state.sessions = (d && d.sessions) || [];
-      if (!$('sessions-q').value.trim()) renderSessionGroups(state.sessions);
-    }).catch(function (err) { list.innerHTML = emptyBox('Sessions did not load', err.message); });
+  // Control's Sessions pane (ActivityWindow.swift sessionsList 2288-2366, sessionRow 2773-2865,
+  // sessionsStatus 2911-2933; Models.swift ClaudeSession 1762-2150): one flat list on a clock
+  // (Updated, Opened, Pinned), the ON DISK / WAITING / PINNED strip, and per row the provider
+  // badge, PINNED, the state chip, "Updated <time>" and, for twins, "Opened <date>". The pane holds
+  // three views, Sessions | Usage | COS cost, as on the Mac. Data: GET /api/agent-sessions and
+  // /api/agent-sessions/search. The Mac's own enrichment (Desktop titles, scheduled jobs, the
+  // jobs-today list) has no server route, so it is not here.
+  var SX_PREFS = 'cos_web_sessions';
+  function sxPref(key, fallback, allowed) { var v = readStore(SX_PREFS)[key]; return allowed.indexOf(v) >= 0 ? v : fallback; }
+  function sxSave() { writeStore(SX_PREFS, { clock: SX.clock, view: SX.view, recency: SX.recency }); }
+  var SX = {
+    rows: null, dropped: null, enabled: true, loading: false, error: '', loadedAt: 0,
+    clock: sxPref('clock', 'updated', ['updated', 'opened', 'pinned']),
+    view: sxPref('view', 'sessions', ['sessions', 'usage', 'cost']),
+    recency: sxPref('recency', 'newest', ['newest', 'oldest', 'match']),
+    q: '', instant: [], remote: [], searching: false, searchError: '', ranFor: '', semantic: null, semanticReason: '', searchSeq: 0, searchTimer: null,
+    hooks: null, hooksAt: 0,
+    usage: null, usageAt: 0, usageLoading: false, usageError: '',
+    uPeriod: 'Last 30 days', uTool: 'All tools', uModel: 'All models'
+  };
+  var SX_VIEWS = { sessions: 'Sessions', usage: 'Usage', cost: 'COS cost' };
+
+  function sxProvider(p) { return p === 'codex' || p === 'cursor' ? p : 'claude'; }
+  function sxProviderLabel(p) { p = sxProvider(p); return p === 'codex' ? 'Codex' : p === 'cursor' ? 'Cursor' : 'Claude'; }
+  // Drawn marks for the 28pt provider tile (Control uses each platform's mark; these are plain shapes).
+  var SX_GLYPHS = {
+    claude: '<path d="M12 3.6v16.8M3.6 12h16.8M6.1 6.1l11.8 11.8M17.9 6.1 6.1 17.9"/>',
+    codex: '<path d="M12 3.4 19.4 7.7v8.6L12 20.6 4.6 16.3V7.7z"/><path d="m9.2 10 2.3 2-2.3 2M12.9 14.2h2.3"/>',
+    cursor: '<path d="M12 3.4 19.4 7.7v8.6L12 20.6 4.6 16.3V7.7z"/><path d="M12 12 19.4 7.7M12 12v8.6M12 12 4.6 7.7"/>'
+  };
+  function sxGlyph(p) {
+    p = sxProvider(p);
+    return '<span class="sx-glyph ' + p + '" role="img" aria-label="' + (p === 'codex' ? 'ChatGPT' : sxProviderLabel(p)) + '"><svg viewBox="0 0 24 24" aria-hidden="true">' + SX_GLYPHS[p] + '</svg></span>';
   }
-  // The project most sessions share says nothing; name it only when a session differs.
+  function sxBadge(p) { p = sxProvider(p); return '<span class="sx-badge ' + p + '">' + sxProviderLabel(p).toUpperCase() + '</span>'; }
+
+  // ClaudeSession.title: the job label, else the name, else the workspace, else the id.
+  function sxTitle(s) {
+    var t = plain(s.display_label || s.custom_title || '').replace(/\s+/g, ' ').trim();
+    return t || String(s.project || '').trim() || String(s.session_id || s.id || 'Session');
+  }
+  function sxWarmWords(t) { t = String(t || '').trim().toLowerCase(); return t === 'ready' || t.indexOf('this is an automated local readiness check') === 0; }
+  // A warm-up is known by its first prompt, never by a title someone gave it (Models.swift isKeepWarm).
+  function sxKeepWarm(s) { return sxWarmWords(s.display_label) && (!s.first_prompt || sxWarmWords(s.first_prompt)); }
+  function sxTime(v) { var d = toDate(v); return d ? d.getTime() : 0; }
+  function sxShortDate(d) {
+    if (d.toDateString() === new Date().toDateString()) return clock(d);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  // The row's state in Control's words (HelperSources/main.swift sessionStateFromServer and
+  // claudePeerState): the server's derivation when the hooks or the registry back it; otherwise a
+  // Claude row with no live process is stale, and the rest read from the server's own state.
+  var SX_FROM_SERVER = { running: 'running', waiting: 'waiting', idle: 'recent', ended: 'stale', failed: 'error' };
+  function sxState(s) {
+    var a = s.agent_state || '', src = s.state_source || '';
+    if ((src === 'hook' || src === 'registry') && SX_FROM_SERVER[a]) return SX_FROM_SERVER[a];
+    if (sxProvider(s.provider) === 'claude' && !s.alive) return 'stale';
+    if (a === 'waiting') return 'waiting';
+    if (a === 'failed') return 'error';
+    return s.running_active || a === 'running' ? 'running' : 'recent';
+  }
+  function sxNeedsPerson(s) { var st = sxState(s); return st === 'waiting' || st === 'error'; }
+  // "Permission: Bash git push", "Question", "Plan approval", "Input".
+  function sxWaitingKind(kind, detail) {
+    detail = String(detail || '').trim();
+    if (kind === 'permission') return detail ? 'Permission: ' + detail : 'Permission';
+    if (kind === 'question') return 'Question';
+    if (kind === 'plan') return 'Plan approval';
+    if (kind === 'mcp_input') return 'Input';
+    if (!kind) return detail;
+    var cap = String(kind).charAt(0).toUpperCase() + String(kind).slice(1);
+    return detail ? cap + ': ' + detail : cap;
+  }
+  function sxStateLabel(s, st) {
+    var base = '';
+    if (st === 'waiting') { var k = sxWaitingKind(s.waiting_kind, s.waiting_detail); base = k ? 'Waiting · ' + k : 'Waiting'; }
+    else if (st === 'stale') base = 'Stale';
+    else if (st === 'running') base = 'Running';
+    else if (st === 'error') base = s.failure ? 'Failed · ' + String(s.failure).replace(/_/g, ' ') : 'Failed';
+    var queued = Number(s.queued_turns) || 0;
+    if (queued > 0) return base ? base + ' · ' + queued + ' queued' : queued + ' queued';
+    return base;
+  }
+
+  function sxReal() { return (SX.rows || []).filter(function (s) { return !sxKeepWarm(s); }); }
+  function byUpdated(a, b) { return sxTime(b.modified) - sxTime(a.modified); }
+  // visibleSessions: Updated is every row by its last update; Opened is what is alive or was opened
+  // in the last 7 days, newest first; Pinned is the pins.
+  function sxVisible() {
+    var real = sxReal();
+    if (SX.clock === 'opened') {
+      var week = Date.now() - 7 * 86400000;
+      return real.filter(function (s) { if (s.alive) return true; var t = sxTime(s.created) || sxTime(s.modified); return t > 0 && t >= week; })
+        .sort(function (a, b) { return sxTime(b.created) - sxTime(a.created); });
+    }
+    if (SX.clock === 'pinned') return real.filter(function (s) { return !!s.pinned; }).sort(byUpdated);
+    return real.slice().sort(byUpdated);
+  }
+  // Two rows with one name are almost always a fork and its parent: those rows say when each opened.
+  function sxAmbiguous(rows) {
+    var seen = {}, dupes = {};
+    rows.forEach(function (s) { var k = sxTitle(s); if (seen[k]) dupes[k] = true; else seen[k] = true; });
+    return dupes;
+  }
+  function sxDropped() {
+    var d = SX.dropped || {}, parts = [];
+    var age = Math.max(0, Number(d.age) || 0), cap = Math.max(0, Number(d.limit) || 0), big = Math.max(0, Number(d.oversized) || 0);
+    if (age) parts.push(age + ' older than 7 days');
+    if (cap) parts.push(cap + ' over the cap');
+    if (big) parts.push(big + ' too large');
+    return { age: age, summary: parts.length ? parts.join(' · ') + ' not shown' : '' };
+  }
+  function sxQueryActive() { return SX.q.trim().length >= 2; }
+
+  function sxDetailLine(vis) {
+    if (sxQueryActive()) return SX.searching ? 'Looking up…' : 'Lookup across Claude, Codex, and Cursor';
+    if (SX.loading) return vis.length ? 'Refreshing…' : 'Claude · Codex · Cursor · reading the last 7 days…';
+    if (SX.error) return SX.error;
+    if (!vis.length) return 'No sessions';
+    if (SX.clock === 'opened') return 'Claude · Codex · Cursor · opened in last 7 days';
+    if (SX.clock === 'pinned') return 'Claude · Codex · Cursor · pinned';
+    var dropped = sxDropped().summary;
+    return dropped ? 'Last 7 days · ' + dropped : 'Claude · Codex · Cursor · updated in last 7 days';
+  }
+  function sxStats(vis) {
+    if (!vis.length && SX.loading && !sxQueryActive()) return [['–', 'ON DISK'], ['–', 'WAITING'], ['–', 'PINNED']];
+    if (!vis.length) return [];
+    return [[vis.length, 'ON DISK'], [vis.filter(sxNeedsPerson).length, 'WAITING'], [vis.filter(function (s) { return !!s.pinned; }).length, 'PINNED']];
+  }
+  function sxEmptyCopy() {
+    if (SX.clock === 'opened') return 'No sessions opened in the last 7 days. Pins are under Pinned.';
+    if (SX.clock === 'pinned') return 'No pinned sessions. Star Claude Desktop chats, pin Cursor chats, or pin Codex/ChatGPT threads to see them here.';
+    var d = sxDropped();
+    if (d.summary && d.age > 0) return 'No sessions updated on this Mac in the last 7 days. ' + d.summary.replace(/ not shown$/, '') + '. Search to find them.';
+    return 'No Claude, Codex, or Cursor sessions updated on this Mac in the last 7 days.';
+  }
+  function sxEmpty(text) { return '<div class="cx-list"><p class="cx-empty">' + esc(text) + '</p></div>'; }
+
+  // The hero, the view switch and the clock: painted on every change so the counts never lag the list.
+  function paintSessionsHero() {
+    var hero = $('sessions-hero'), views = $('sessions-views');
+    if (!hero || !views) return;
+    var view = SX.view, vis = SX.rows ? sxVisible() : [];
+    var detail = view === 'cost' ? 'What COS itself used, on top of your sessions' : view === 'usage' ? 'Token usage and estimated API value' : sxDetailLine(vis);
+    var stats = view === 'sessions' ? sxStats(vis) : [];
+    var busy = view === 'sessions' ? SX.loading : SX.usageLoading;
+    hero.innerHTML = '<span class="cx-glyph"><svg class="icon"><use href="#i-sessions"/></svg></span>' +
+      '<div class="cx-hero-text"><h1 class="cx-title">Sessions</h1><p class="cx-detail-line">' + esc(detail) + '</p></div>' +
+      '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-sx="refresh"' + (busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>' +
+      (stats.length ? '<div class="cx-stats">' + stats.map(function (s) { return '<span class="cx-stat"><b>' + esc(typeof s[0] === 'number' ? s[0].toLocaleString() : s[0]) + '</b><span>' + s[1] + '</span></span>'; }).join('') + '</div>' : '');
+    var clockOn = view === 'sessions' && !sxQueryActive();
+    views.innerHTML = '<div class="cx-switch" role="group" aria-label="Sessions view">' +
+        Object.keys(SX_VIEWS).map(function (v) { return '<button type="button" data-sx="view" data-view="' + v + '" aria-pressed="' + (v === view) + '">' + SX_VIEWS[v] + '</button>'; }).join('') +
+      '</div>' +
+      (clockOn ? '<div class="cx-switch sx-clock" role="group" aria-label="Clock">' +
+        [['updated', 'Updated'], ['opened', 'Opened'], ['pinned', 'Pinned']].map(function (c) { return '<button type="button" data-sx="clock" data-clock="' + c[0] + '" aria-pressed="' + (c[0] === SX.clock) + '">' + c[1] + '</button>'; }).join('') +
+      '</div>' : '');
+    var split = $('sessions-split'), usage = $('sessions-usage');
+    if (split) split.classList.toggle('hidden', view !== 'sessions');
+    if (usage) usage.classList.toggle('hidden', view === 'sessions');
+  }
+
+  function loadSessions(force) {
+    var r = parseRoute();
+    var reading = r.pane === 'sessions' && r.args.length === 2;
+    if (reading) SX.view = 'sessions';
+    else if (r.pane === 'sessions') window.COSWeb.setCrumb(SX.view === 'sessions' ? '' : SX_VIEWS[SX.view]);
+    paintSessionsHero();
+    if (SX.view !== 'sessions') { renderUsageView(force === true); return Promise.resolve(); }
+    loadSessionHooks();
+    if (force !== true && SX.rows && Date.now() - SX.loadedAt < 15000) { renderSessionGroups(); return Promise.resolve(); }
+    SX.loading = true;
+    renderSessionGroups();
+    return api('/api/agent-sessions?limit=80&sort=updated').then(function (d) {
+      SX.rows = (d && d.sessions) || [];
+      SX.dropped = (d && d.dropped) || null;
+      SX.enabled = !(d && d.enabled === false);
+      SX.loading = false; SX.error = ''; SX.loadedAt = Date.now();
+      state.sessions = SX.rows;
+      if (sxQueryActive()) SX.instant = sxInstant(SX.q);
+      renderSessionGroups();
+    }).catch(function (err) {
+      SX.loading = false;
+      SX.error = (err && err.message) || 'Sessions did not load';
+      renderSessionGroups();
+    });
+  }
+  // The project most sessions share says nothing; name it only when a session differs (Today's rows).
   function usualProject() {
     var counts = {}, best = '', n = 0;
     state.sessions.forEach(function (s) { if (!s.project) return; counts[s.project] = (counts[s.project] || 0) + 1; if (counts[s.project] > n) { n = counts[s.project]; best = s.project; } });
     return best;
   }
+  // The Ask sheet's compact row (⌘K recents and hits).
   function sessionRow(s, sub) {
     var key = splitSessionId(s.provider, s.session_id || s.id);
     var r = parseRoute();
@@ -378,36 +559,160 @@
       '<span class="row-side">' + esc(ago(s.last_activity_at || s.modified || s.created)) + '</span>' +
       '<span class="row-sub">' + badge(key.provider) + '<span class="clip">' + esc(sub || project) + '</span></span></button>';
   }
-  function renderSessionGroups(rows) {
-    var working = rows.filter(function (s) { return s.running_active; });
-    var open = rows.filter(function (s) { return s.running && !s.running_active; });
-    var recent = rows.filter(function (s) { return !s.running; });
-    var html = '';
-    function group(title, items, subFn) {
-      if (!items.length) return;
-      html += '<h2 class="group-title"><span>' + esc(title) + '</span><span>' + items.length + '</span></h2><div class="list">' + items.map(function (s) { return sessionRow(s, subFn && subFn(s)); }).join('') + '</div>';
+  // Control's row: glyph, title, a snippet on search hits, then badge · PINNED · state · Updated ·
+  // Opened (twins only, amber) · workspace; a match chip and a chevron on the right.
+  function sxRow(s, hit, ambiguous) {
+    var key = splitSessionId(s.provider, s.session_id || s.id);
+    var r = parseRoute();
+    var selected = r.pane === 'sessions' && r.args[0] === key.provider && r.args[1] === key.id;
+    var st = sxState(s), label = sxStateLabel(s, st), title = sxTitle(s);
+    var upd = toDate(s.modified), opened = toDate(s.created);
+    var meta = sxBadge(key.provider) +
+      (s.pinned ? '<span class="sx-pinned">PINNED</span>' : '') +
+      (label ? '<span class="sx-chip ' + st + '">' + esc(label) + '</span>' : '') +
+      (upd ? '<span class="sx-when">Updated ' + esc(sxShortDate(upd)) + '</span>' : '') +
+      (ambiguous[title] && opened ? '<span class="sx-opened" title="Another session on screen has the same name. This one was opened ' + esc(sxShortDate(opened)) + '.">Opened ' + esc(sxShortDate(opened)) + '</span>' : '') +
+      (s.project && String(s.project) !== title ? '<span class="sx-ws">' + esc(s.project) + '</span>' : '');
+    var match = hit ? (hit.match === 'both' ? 'Keyword + meaning' : hit.match === 'semantic' ? 'Meaning' : 'Keyword') : '';
+    // An instant title hit's snippet is the title itself; it says nothing twice.
+    var snippet = hit && hit.snippet ? plain(hit.snippet).replace(/\s+/g, ' ').trim() : '';
+    return '<button type="button" class="cx-row sx-row" data-session="' + esc(key.provider) + '|' + esc(key.id) + '"' + (selected ? ' aria-selected="true"' : '') + '>' +
+      sxGlyph(key.provider) +
+      '<span class="cx-row-body"><span class="sx-title">' + esc(title) + '</span>' +
+      (snippet && snippet !== title ? '<span class="sx-snippet">' + esc(snippet) + '</span>' : '') +
+      '<span class="sx-meta">' + meta + '</span></span>' +
+      '<span class="sx-side">' + (match ? '<span class="sx-match">' + match + '</span>' : '') + '<span class="chev"></span></span></button>';
+  }
+  function sxListHtml() {
+    if (!SX.rows) return SX.error ? sxEmpty(SX.error) : skeletonRows(6);
+    if (!SX.enabled && !SX.rows.length) return sxEmpty('AI sessions are off. Turn on Show AI sessions in Settings, Work and agents.');
+    var vis = sxVisible();
+    if (!vis.length) return sxEmpty(SX.error || sxEmptyCopy());
+    var amb = sxAmbiguous(vis);
+    return '<div class="cx-list sx-list">' + vis.map(function (s) { return sxRow(s, null, amb); }).join('') + '</div>';
+  }
+  // The list, under the hero. The name stays: the shared input handler calls it when the search clears.
+  function renderSessionGroups() {
+    var input = $('sessions-q');
+    var q = input ? input.value.trim() : '';
+    if (q.length < 2 && SX.q) { SX.q = ''; SX.instant = []; SX.remote = []; SX.ranFor = ''; SX.searchError = ''; SX.semantic = null; SX.searching = false; }
+    paintSessionsHero();
+    paintHooks();
+    var clear = $('sessions-clear'); if (clear) clear.classList.toggle('hidden', !(input && input.value));
+    var hint = $('sessions-hint');
+    if (hint) {
+      var note = sxQueryActive() && SX.ranFor === SX.q && SX.semantic === false ? sxSemanticHint(SX.semanticReason) : '';
+      hint.textContent = note; hint.classList.toggle('hidden', !note);
     }
-    group('Working now', working, function (s) { return 'Working for ' + span(s.state_since); });
-    group('Open', open);
-    group('Recent', recent);
-    $('sessions-list').innerHTML = html || emptyBox('No sessions this week', 'Claude Code, Codex and Cursor sessions on your Mac show up here.');
+    var list = $('sessions-list'); if (!list) return;
+    list.innerHTML = sxQueryActive() ? sxSearchHtml() : sxListHtml();
+  }
+
+  // Search (ActivityWindow.swift sessionsSearchBar 2652-2712, ControllerModel scheduleSessionSearch):
+  // instant title hits from the loaded list, then the server's keyword and meaning hits, one row
+  // per session, ordered by the Recency choice.
+  var SX_STOP = ['the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'for', 'on', 'at', 'by', 'with', 'from', 'vs', 'is', 'it', 'be', 'as', 'we', 'our'];
+  function sxTokens(q) {
+    var seen = {}, out = [];
+    String(q).toLowerCase().split(/[^\p{L}\p{N}]+/u).forEach(function (t) { if (t.length >= 2 && SX_STOP.indexOf(t) < 0 && !seen[t]) { seen[t] = true; out.push(t); } });
+    return out;
+  }
+  function sxScore(tokens, title, hay) {
+    if (!tokens.length) return 0;
+    var tl = title.toLowerCase(), hl = hay.toLowerCase(), hits = 0, inTitle = 0;
+    tokens.forEach(function (t) { var a = tl.indexOf(t) >= 0, b = hl.indexOf(t) >= 0; if (!a && !b) return; hits += 1; if (a) inTitle += 1; });
+    if (!hits) return 0;
+    var coverage = hits / tokens.length;
+    if (coverage < 0.5 && !inTitle) return 0;
+    return Math.min(1, coverage * 0.65 + (inTitle / tokens.length) * 0.35);
+  }
+  function sxInstant(q) {
+    var tokens = sxTokens(q);
+    if (!tokens.length) return [];
+    return sxReal().map(function (s) {
+      var t = sxTitle(s), v = sxScore(tokens, t, [s.display_label || '', s.project || '', t].join('\n'));
+      return v > 0 ? { s: s, snippet: t, match: 'keyword', score: v } : null;
+    }).filter(Boolean).sort(function (a, b) { return b.score - a.score; }).slice(0, 20);
+  }
+  function sxKey(s) { var k = splitSessionId(s.provider, s.session_id || s.id); return k.provider + ':' + k.id.toLowerCase(); }
+  // One session whether the id is whole or the list's 8-character prefix (ClaudeSession.sameSession).
+  function sxSame(a, b) {
+    if (a === b) return true;
+    var x = a.split(':'), y = b.split(':');
+    if (x[0] !== y[0] || !x[1] || !y[1]) return false;
+    var short = x[1].length <= y[1].length ? x[1] : y[1], long = short === x[1] ? y[1] : x[1];
+    return short.length >= 8 && long.indexOf(short) === 0;
+  }
+  function sxHits() {
+    var out = [];
+    SX.instant.concat(SX.remote).forEach(function (h) {
+      var k = sxKey(h.s);
+      for (var i = 0; i < out.length; i++) if (sxSame(sxKey(out[i].s), k)) { if (out[i].score < h.score) out[i] = h; return; }
+      out.push(h);
+    });
+    var date = function (h) { return sxTime(h.s.modified) || sxTime(h.s.created); };
+    return out.sort(function (a, b) {
+      if (SX.recency === 'match') return (b.score - a.score) || (date(b) - date(a));
+      if (SX.recency === 'oldest') return ((date(a) || Infinity) - (date(b) || Infinity)) || (b.score - a.score);
+      return (date(b) - date(a)) || (b.score - a.score);
+    });
+  }
+  // A hit names the session as the search found it; the list's own row carries the live state.
+  function sxListed(s) {
+    var k = sxKey(s);
+    var row = (SX.rows || []).filter(function (x) { return sxSame(sxKey(x), k); })[0];
+    return row || s;
+  }
+  function sxSearchHtml() {
+    var hits = sxHits();
+    if (!hits.length) {
+      if (SX.searching) return '<p class="cx-note sx-looking">Looking up…</p>';
+      if (SX.searchError) return sxEmpty(SX.searchError);
+      return sxEmpty('No sessions match that lookup.');
+    }
+    var rows = hits.map(function (h) { return { s: sxListed(h.s), h: h }; });
+    var amb = sxAmbiguous(sxVisible().concat(rows.map(function (x) { return x.s; })));
+    return '<div class="cx-list sx-list">' + rows.map(function (x) { return sxRow(x.s, x.h, amb); }).join('') + '</div>';
+  }
+  // The words Control shows when meaning search is not available (em dashes made periods).
+  function sxSemanticHint(reason) {
+    reason = String(reason || '');
+    if (reason.indexOf('server_error_') === 0) return 'Keyword only. The server returned ' + reason.slice('server_error_'.length);
+    if (reason === 'server_too_old') return 'Keyword only. Meaning search needs a server update';
+    if (reason === 'server_unreachable') return 'Keyword only. The server did not answer in time';
+    if (reason === 'no_server_token') return 'Keyword only. No server token available';
+    if (reason === 'no_session_embeddings' || reason === 'embeddings_unreachable') return 'Keyword only. Meaning search needs an OpenAI key';
+    return 'Keyword only. Meaning search is unavailable';
   }
   function searchSessions() {
-    var q = $('sessions-q').value.trim();
-    var list = $('sessions-list');
-    if (q.length < 2) { renderSessionGroups(state.sessions); return; }
-    list.innerHTML = skeletonRows(4);
-    if (state.sessionsMode === 'meaning') {
-      findByMeaning(q).then(function (html) { list.innerHTML = html; });
-      return;
-    }
-    api('/api/agent-sessions/search?q=' + encodeURIComponent(q) + '&limit=25').then(function (d) {
-      var hits = (d && d.hits) || [];
-      list.innerHTML = hits.length
-        ? '<h2 class="group-title"><span>Sessions with “' + esc(q) + '”</span><span>' + hits.length + '</span></h2><div class="list">' + hits.map(function (s) { return sessionRow(s, s.snippet); }).join('') + '</div>'
-        : emptyBox('No session mentions “' + q + '”', 'Try Meaning to search by what the session was about.');
-    }).catch(function (err) { list.innerHTML = emptyBox('Search did not run', err.message); });
+    var input = $('sessions-q');
+    var q = input ? input.value.trim() : '';
+    clearTimeout(SX.searchTimer);
+    SX.q = q;
+    if (q.length < 2) { renderSessionGroups(); return; }
+    if (q !== SX.ranFor) SX.remote = [];
+    SX.instant = sxInstant(q);
+    SX.searchError = '';
+    SX.searching = true;
+    var mine = ++SX.searchSeq;
+    renderSessionGroups();
+    api('/api/agent-sessions/search?q=' + encodeURIComponent(q) + '&limit=20').then(function (d) {
+      if (mine !== SX.searchSeq) return;
+      SX.remote = ((d && d.hits) || []).map(function (h) {
+        return { s: h, snippet: h.snippet || '', match: h.match || 'keyword', score: Number(h.score) || Math.max(Number(h.keywordScore) || 0, Number(h.semanticScore) || 0) };
+      });
+      SX.semantic = !!(d && d.semanticAvailable === true);
+      SX.semanticReason = (d && d.semanticReason) || '';
+      SX.searching = false; SX.ranFor = q;
+      renderSessionGroups();
+    }, function (err) {
+      if (mine !== SX.searchSeq) return;
+      SX.searching = false; SX.ranFor = q; SX.remote = [];
+      if (!SX.instant.length) SX.searchError = (err && err.message) || 'The lookup failed.';
+      renderSessionGroups();
+    });
   }
+  // The meaning finder the Ask sheet offers ("Find a session about this").
   function findByMeaning(q) {
     return api('/api/agent-sessions/find', { method: 'POST', body: { query: q } }).then(function (d) {
       if (d && d.available === false) return emptyBox('Meaning search is off', d.message || 'Turn on a decision provider in Settings.');
@@ -421,6 +726,81 @@
       }).join('') + '</div>';
     }).catch(function (err) { return emptyBox('Meaning search did not run', err.message); });
   }
+
+  // The hooks banner (ActivityWindow.swift 2867-2905). Installing hooks writes to the Mac's Claude
+  // settings, which stays a Mac action, so the web names where to do it.
+  function loadSessionHooks() {
+    if (Date.now() - SX.hooksAt < 60000) { paintHooks(); return; }
+    SX.hooksAt = Date.now();
+    api('/api/session-hooks/status').then(function (d) {
+      SX.hooks = (d && d.sessionHooks && d.sessionHooks.state) || null; paintHooks();
+    }, function (err) { SX.hooks = err && err.status === 404 ? 'route_absent' : null; paintHooks(); });
+  }
+  function paintHooks() {
+    var el = $('sessions-hooks'); if (!el) return;
+    var st = SX.hooks;
+    if (['missing', 'drift', 'script_outdated', 'route_absent'].indexOf(st) < 0) { el.innerHTML = ''; return; }
+    var text = st === 'route_absent' ? 'Live session state needs COS server 6.48.0 or later.'
+      : st === 'missing' ? 'Claude Code hooks are not installed: sessions read from their transcripts only.'
+      : 'Claude Code hooks need a refresh (' + (st === 'drift' ? 'settings changed' : 'script outdated') + ').';
+    var where = st === 'route_absent' ? 'Update Server from COS Control on your Mac.' : (st === 'missing' ? 'Install hooks' : 'Reinstall hooks') + ' from COS Control on your Mac.';
+    el.innerHTML = '<div class="sx-hooks"><span class="sx-hooks-dot" aria-hidden="true"></span><span>' + esc(text) + ' <span class="sx-hooks-where">' + esc(where) + '</span></span></div>';
+  }
+
+  // The view switch: Sessions | Usage | COS cost. A reader belongs to Sessions, so another view
+  // closes it; the route repaints the pane and names the view in the breadcrumb.
+  function setSessionsView(v) {
+    if (!SX_VIEWS[v] || v === SX.view) return;
+    SX.view = v; sxSave();
+    go('sessions');
+  }
+
+  // Pane-level events for this pane's own controls (data-sx). Sends, Stop, Fork and the queue
+  // keep their data-action names, which the shared listener handles.
+  var sxPane = $('pane-sessions');
+  if (sxPane) {
+    if ($('sessions-recency')) $('sessions-recency').value = SX.recency;
+    sxPane.addEventListener('click', function (e) {
+      var t = e.target.closest('[data-sx]');
+      if (!t || !sxPane.contains(t)) return;
+      var act = t.getAttribute('data-sx'), rd = state.reading;
+      if (act === 'view') return setSessionsView(t.getAttribute('data-view'));
+      if (act === 'clock') { SX.clock = t.getAttribute('data-clock'); sxSave(); return renderSessionGroups(); }
+      if (act === 'refresh') {
+        if (SX.view !== 'sessions') return renderUsageView(true);
+        SX.hooksAt = 0;
+        loadSessions(true);
+        if (sxQueryActive()) searchSessions();
+        return;
+      }
+      if (act === 'clear') { var input = $('sessions-q'); input.value = ''; searchSessions(); input.focus(); return; }
+      if (act === 'copy-session') return copySessionBrief();
+      if (act === 'refresh-turns' && rd) { rd.refusal = null; renderVerdict(rd); refreshTurns(rd.provider, rd.id); return; }
+      if (act === 'retry' && rd) { rd.refusal = null; renderVerdict(rd); return sendSessionTurn(!!rd.retryFork); }
+      if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); return sendSessionTurn(false); }
+      if (act === 'caution-cancel' && rd) { rd.cautionAsk = false; renderVerdict(rd); return; }
+      if (act === 'usage-clear') { SX.uTool = 'All tools'; SX.uModel = 'All models'; return paintUsage(); }
+    });
+    sxPane.addEventListener('input', function (e) {
+      if (e.target.id !== 'sessions-q') return;
+      clearTimeout(SX.searchTimer);
+      if (e.target.value.trim().length < 2) { searchSessions(); return; }
+      // The last answer belonged to other words: until this one lands, the instant title hits stand alone.
+      SX.q = e.target.value.trim();
+      if (SX.q !== SX.ranFor) { SX.remote = []; SX.searching = true; }
+      SX.instant = sxInstant(SX.q);
+      renderSessionGroups();
+      SX.searchTimer = setTimeout(searchSessions, 350);
+    });
+    sxPane.addEventListener('change', function (e) {
+      var id = e.target.id;
+      if (id === 'sessions-recency') { SX.recency = e.target.value; sxSave(); return renderSessionGroups(); }
+      if (id === 'usage-period') { SX.uPeriod = e.target.value; return paintUsage(); }
+      if (id === 'usage-tool') { SX.uTool = e.target.value; SX.uModel = 'All models'; return paintUsage(); }
+      if (id === 'usage-model') { SX.uModel = e.target.value; return paintUsage(); }
+    });
+  }
+
   // ── Sessions: read, send, queue, fork, stop (the glasses' Continue, from a browser) ──
   // The server owns every safety rule (agent-session-bindings.ts): COS writes into a desktop
   // thread only through a binding, attaches only when no live process owns the thread, and
@@ -495,53 +875,217 @@
   }
   function parkedByMe(r, key) { return (readStore(PARKED_KEY)[r.provider + '|' + r.id] || []).indexOf(key) >= 0; }
 
+  // The server serves at most 40 turns (lib/agent-session-turns.ts SESSION_TURNS_MAX), each
+  // shaped to 4,000 characters. Control reads up to 120 from the Mac's own files.
+  var SX_TURNS = 40;
+  // Control's detail subtitle (Models.swift ClaudeSessionDetail.subtitle).
+  function sxSubtitle(d, provider, turns, more) {
+    var parts = [sxProviderLabel(d.provider || provider)];
+    if (d.project) parts.push(String(d.project).replace(/^-Users-[^-]+-/, ''));
+    if (d.git_branch && d.git_branch !== 'unknown') parts.push(String(d.git_branch));
+    var total = Number(d.message_count) || 0;
+    if (more) parts.push(total > turns.length && !d.truncated ? 'last ' + turns.length + ' of ' + total + ' turns' : 'last ' + turns.length + ' turns');
+    else parts.push(turns.length + (turns.length === 1 ? ' turn' : ' turns'));
+    if (Number(d.omitted_tools) > 0) parts.push('tools omitted');
+    if (d.truncated) parts.push('large session · earlier turns skipped');
+    return parts.join(' · ');
+  }
+  function sxTruncNote(d, turns, more) {
+    if (!more) return '';
+    var total = Number(d.message_count) || 0;
+    return 'Showing the last ' + turns.length + (total > turns.length && !d.truncated ? ' of ' + total : '') + ' turns. Copy session keeps the original request plus the newest context.';
+  }
+
   function openSession(provider, id) {
     var reader = $('session-reader');
     if (!provider || !id) return;
     if (state.stream) { state.stream.close(); state.stream = null; }
     clearInterval(state.turnPoll);
-    if (state.reading) clearInterval(state.reading.heldTimer);
+    if (state.reading) { clearInterval(state.reading.heldTimer); clearInterval(state.reading.feedTimer); }
     var held = (readStore(HELD_KEY)[provider + '|' + id] || []).filter(function (h) { return h && typeof h.text === 'string' && typeof h.key === 'string'; });
-    state.reading = { provider: provider, id: id, draft: null, live: null, held: held, flushing: null };
-    document.querySelectorAll('#sessions-list .row').forEach(function (r) { r.setAttribute('aria-selected', String(r.getAttribute('data-session') === provider + '|' + id)); });
-    reader.innerHTML = '<div class="reader-head"><div class="skeleton" style="height:28px;width:70%;margin:10px 0"></div></div>' + skeletonRows(3);
-    api(sessionPath(provider, id, '?turns=30')).then(function (d) {
+    var r = state.reading = { provider: provider, id: id, draft: null, live: null, held: held, flushing: null, feed: newFeed(), verdict: null, cautionAck: false, cautionAsk: false, refusal: null, detail: null, turns: [], more: false, queued: 0 };
+    if (SX.view !== 'sessions') { SX.view = 'sessions'; sxSave(); paintSessionsHero(); }
+    document.querySelectorAll('#sessions-list [data-session]').forEach(function (b) { b.setAttribute('aria-selected', String(b.getAttribute('data-session') === provider + '|' + id)); });
+    var listed = (SX.rows || []).filter(function (s) { return sxSame(sxKey(s), provider + ':' + String(id).toLowerCase()); })[0];
+    if (listed) window.COSWeb.setCrumb(sxTitle(listed));
+    reader.innerHTML = '<div class="sx-reader-head"><div class="skeleton" style="height:26px;width:70%;margin:6px 0 10px"></div><div class="skeleton" style="width:45%"></div></div>' + skeletonRows(3);
+    api(sessionPath(provider, id, '?turns=' + SX_TURNS)).then(function (d) {
+      if (state.reading !== r) return;
       var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : ((d && d.recent_turns && d.recent_turns.turns) || (d && d.turns) || []);
+      r.detail = d; r.turns = turns; r.more = d.recent_turns_more === true;
+      r.queued = Number(d.queued_turns) || 0;
+      var title = sxTitle(d);
+      window.COSWeb.setCrumb(title);
+      var trunc = sxTruncNote(d, turns, r.more);
       reader.innerHTML =
-        '<div class="reader-head"><h2>' + esc(sessionTitle(d)) + '</h2>' +
-        '<div class="row-sub">' + badge(provider) + '<span id="session-state">' + esc(d.running_active ? 'Working now' : d.running ? 'Open' : 'Not running') + '</span>' +
-        (d.project ? '<span class="clip">' + esc(String(d.project).replace(/^-Users-[^-]+-/, '')) + '</span>' : '') + '</div></div>' +
-        '<div class="turns" id="session-turns">' + renderTurns(turns, d) + '</div>' +
-        '<div class="live-box hidden" id="session-live" aria-live="polite"></div>' +
-        '<div id="session-queue"></div>' +
-        '<form class="composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
-          '<textarea id="session-input" rows="1" placeholder="Send this session a message" enterkeyhint="send" aria-label="Message for this session"></textarea>' +
-          '<div class="composer-actions"><button type="button" class="btn small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
-          '<button type="submit" class="btn primary small" aria-label="Send"><svg class="icon" style="width:18px;height:18px"><use href="#i-send"/></svg></button></div>' +
-        '</form><div class="status-line" id="session-status"></div>';
+        '<div class="sx-reader-head"><div class="sx-head-line">' + sxBadge(provider) + '<h2 class="sx-reader-title">' + esc(title) + '</h2></div>' +
+          '<p class="sx-subtitle">' + esc(sxSubtitle(d, provider, turns, r.more)) + '</p></div>' +
+        '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
+        (trunc ? '<p class="sx-note">' + esc(trunc) + '</p>' : '') +
+        '<div class="turns sx-turns" id="session-turns">' + renderTurns(turns, d) + '</div>' +
+        '<div class="sx-foot"><button type="button" class="cx-btn quiet" data-sx="copy-session" title="A kickstart brief for another agent, built from the turns COS serves. Not a Claude Code resume: it does not reopen this session.">Copy session</button>' +
+          '<span class="sx-foot-note">Kickstart brief for another agent. Not a Claude Code resume.</span></div>' +
+        '<p class="sx-copy-note hidden" id="session-copy-note" role="status"></p>' +
+        '<div class="sx-chat">' +
+          '<div id="session-verdict"></div>' +
+          '<form class="composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
+            '<textarea id="session-input" rows="1" placeholder="Continue this session…" enterkeyhint="send" aria-label="Continue this session"></textarea>' +
+            '<div class="composer-actions"><button type="button" class="btn small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
+            '<button type="submit" class="btn primary small">Send</button></div>' +
+          '</form><div class="status-line" id="session-status"></div>' +
+          '<p class="sx-caution hidden" id="session-caution"></p>' +
+          '<div id="session-queue"></div>' +
+        '</div>';
       setLive({ working: !!d.running_active });
       renderHeld(state.reading);
       loadQueue(provider, id);
+      sxProbeAttach(r);
       if (state.reading.held.length) {
-        sessionStatus('Waiting for the current reply. ' + (state.reading.held.length > 1 ? state.reading.held.length + ' messages send' : 'Yours sends') + ' as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don\u2019t send</button>');
+        sessionStatus('Waiting for the current reply. ' + (state.reading.held.length > 1 ? state.reading.held.length + ' messages send' : 'Yours sends') + ' as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don’t send</button>');
         startHeldTimer(state.reading);
       }
       if (turns.length) requestAnimationFrame(function () { window.scrollTo(0, document.documentElement.scrollHeight); });
       watchSession(provider, id);
-    }).catch(function (err) { reader.innerHTML = emptyBox('This session did not open', err.message); });
+    }).catch(function (err) {
+      if (state.reading !== r) return;
+      reader.innerHTML = sxEmpty((err && err.message) || 'This session did not open.') + '<p class="sx-retry"><button type="button" class="cx-btn quiet" data-session="' + esc(provider) + '|' + esc(id) + '">Retry</button></p>';
+    });
   }
 
-  // The live stream: one JSON object per data line, `kind` = status | tool | prose | heartbeat.
+  // ACTIVITY (ActivityWindow.swift SessionActivityFeed 6800-6890, SessionLiveFeed.swift): the state
+  // word with its clock, the current prompt, the last eight tool lines, and the honest counters.
+  // The reducer follows SessionLiveFeed.applying: a reseed (seq 1 after anything) starts over.
+  function newFeed() { return { transport: 'idle', agentState: null, stateSince: null, waitingKind: null, waitingDetail: null, failure: null, lastReply: null, prompt: '', tools: [], lastSeq: 0, lastEventAt: null, missed: 0, connected: false, fallback: null }; }
+  function applyFeed(r, e) {
+    if (typeof e.seq !== 'number') return;
+    var f = r.feed;
+    if (e.seq === 1 && f.lastSeq > 0) { var keep = f.connected; f = r.feed = newFeed(); f.connected = keep; }
+    else if (f.lastSeq > 0 && e.seq > f.lastSeq + 1) f.missed += e.seq - f.lastSeq - 1;
+    f.lastSeq = e.seq;
+    f.lastEventAt = typeof e.at === 'number' ? new Date(e.at) : new Date();
+    f.connected = true;
+    if (f.fallback === 'reconnecting') f.fallback = null;
+    if (e.kind === 'status') {
+      if (e.state) f.transport = e.state;
+      if (e.agent_state) {
+        f.agentState = e.agent_state; f.stateSince = toDate(e.state_since);
+        f.waitingKind = e.waiting_kind || null; f.waitingDetail = e.waiting_detail || null; f.failure = e.failure || null;
+        if (e.last_reply) f.lastReply = e.last_reply;
+      }
+    } else if (e.kind === 'prompt') {
+      f.prompt = String(e.text || ''); f.tools = [];
+    } else if (e.kind === 'tool') {
+      f.tools.push({ seq: e.seq, verb: e.verb || 'tool', target: e.target || '' });
+      if (f.tools.length > 8) f.tools.splice(0, f.tools.length - 8);
+    }
+  }
+  var SX_VERBS = { read: 'Read', edit: 'Edited', write: 'Edited', bash: 'Ran', run: 'Ran', search: 'Searched', grep: 'Searched', glob: 'Searched', fetch: 'Fetched', web: 'Fetched', agent: 'Delegated', task: 'Delegated' };
+  function sxToolLine(t) { var v = String(t.verb || 'tool'); var w = SX_VERBS[v] || v.charAt(0).toUpperCase() + v.slice(1); return t.target ? w + ' ' + t.target : w; }
+  // The word follows the page's own working flag, which a Stop or a finished turn settles before
+  // the stream's status catches up; otherwise the server's derived state, as Control reads it.
+  function sxFeedWord(r) {
+    var f = r.feed;
+    if (r.live && r.live.working) return 'Working';
+    var s = f.agentState || f.transport;
+    if (s === 'waiting') return 'Waiting';
+    if (s === 'failed') return 'Failed';
+    if (s === 'ended' || s === 'done') return 'Done';
+    return 'Idle';
+  }
+  function sxFeedDetail(f, word) {
+    if (word === 'Waiting' && f.agentState === 'waiting') {
+      var d = String(f.waitingDetail || '').trim();
+      if (f.waitingKind === 'permission') return d ? 'Permission: ' + d : 'Permission';
+      if (f.waitingKind === 'question') return 'Question';
+      if (f.waitingKind === 'plan') return 'Plan approval';
+      if (f.waitingKind === 'mcp_input') return 'Input';
+      return d;
+    }
+    if (word === 'Failed' && f.agentState === 'failed') return String(f.failure || '').replace(/_/g, ' ');
+    if (word === 'Idle' && f.agentState === 'idle') { var reply = String(f.lastReply || '').trim(); return reply ? 'last reply: ' + reply : ''; }
+    return '';
+  }
+  function sxElapsed(f) {
+    var since = f.stateSince || f.lastEventAt;
+    if (!since) return '';
+    var s = Math.max(0, Math.floor((Date.now() - since.getTime()) / 1000));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  }
+  function sxFallbackLine(reason) {
+    if (reason === 'http_404') return 'No live feed for this session (no transcript to follow); showing the stored turns.';
+    if (reason === 'http_503') return 'The server has no room for another live feed right now; showing the stored turns.';
+    if (reason === 'reconnecting') return 'Reconnecting to the live feed…';
+    if (reason === 'stream_lost') return 'The live feed stopped answering; showing the stored turns. Reopen the session to try again.';
+    return 'Live feed unavailable (' + reason + '); showing the stored turns.';
+  }
+  function paintActivity(r) {
+    var box = $('session-live');
+    if (!box || state.reading !== r) return;
+    var f = r.feed, live = r.live || {};
+    var html = '<div class="sx-act-label">ACTIVITY</div>';
+    if (f.connected || f.lastSeq > 0 || live.working) {
+      var word = sxFeedWord(r), detail = sxFeedDetail(f, word);
+      html += '<div class="sx-act-state"><span class="sx-dot ' + word.toLowerCase() + '" aria-hidden="true"></span><strong>' + word + '</strong>' +
+        (detail ? '<span class="sx-act-detail">' + esc(detail) + '</span>' : '') +
+        '<span class="sx-act-clock" id="session-elapsed">' + esc(sxElapsed(f)) + '</span></div>';
+      if (f.prompt) html += '<p class="sx-act-prompt">' + esc(f.prompt) + '</p>';
+      if (f.tools.length) html += '<div class="sx-act-tools">' + f.tools.map(function (t) { return '<div>' + esc(sxToolLine(t)) + '</div>'; }).join('') + '</div>';
+      var bits = [];
+      if (f.missed > 0) bits.push('<span class="warn">missed ' + f.missed + '</span>');
+      if (r.queued > 0) bits.push('<span class="accent">' + (r.queued === 1 ? '1 queued' : r.queued + ' queued') + '</span>');
+      if (f.fallback === 'reconnecting') bits.push('<span>reconnecting…</span>');
+      if (bits.length) html += '<div class="sx-act-bits">' + bits.join('') + '</div>';
+      if (live.working && live.prose) html += '<div class="sx-act-prose">' + md(String(live.prose).slice(-1200)) + '</div>';
+      if (live.working) html += '<div class="sx-act-actions"><button type="button" class="cx-btn quiet" data-action="stop-session">Stop</button></div>';
+    } else {
+      html += '<p class="sx-act-fallback">' + esc(f.fallback ? sxFallbackLine(f.fallback) : 'Connecting to the live feed…') + '</p>';
+    }
+    box.innerHTML = html;
+    // The clock ticks only while the session works or waits (Control 0.5.337).
+    clearInterval(r.feedTimer); r.feedTimer = null;
+    var w = sxFeedWord(r);
+    if ((f.connected || f.lastSeq > 0) && (w === 'Working' || w === 'Waiting')) {
+      r.feedTimer = setInterval(function () {
+        if (state.reading !== r) { clearInterval(r.feedTimer); return; }
+        var el = $('session-elapsed'); if (el) el.textContent = sxElapsed(r.feed);
+      }, 1000);
+    }
+  }
+  // EventSource hides the status of a refused stream, so one GET reads it for the fallback line.
+  function sxProbeStream(provider, id, r) {
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    fetch(sessionPath(provider, id, '/stream?seed=turn'), { headers: { 'X-COS-Web': '1' }, credentials: 'same-origin', signal: ctrl ? ctrl.signal : undefined })
+      .then(function (res) { var code = res.status; if (ctrl) ctrl.abort(); return code; }, function () { return 0; })
+      .then(function (code) {
+        if (state.reading !== r || r.feed.lastSeq > 0) return;
+        r.feed.fallback = code === 200 ? 'stream_lost' : code ? 'http_' + code : 'unreachable';
+        paintActivity(r);
+      });
+  }
+
+  // The live stream: one JSON object per data line, `kind` = status | prompt | tool | prose | heartbeat.
   function watchSession(provider, id) {
-    if (typeof EventSource !== 'function') return;
+    var r0 = state.reading;
+    if (typeof EventSource !== 'function') { if (r0) { r0.feed.fallback = 'unsupported'; paintActivity(r0); } return; }
     var es;
-    try { es = new EventSource(sessionPath(provider, id, '/stream?seed=turn')); } catch (_e) { return; }
+    try { es = new EventSource(sessionPath(provider, id, '/stream?seed=turn')); } catch (_e) { if (r0) { r0.feed.fallback = 'unsupported'; paintActivity(r0); } return; }
     state.stream = es;
     var wasWorking = false;
+    es.onerror = function () {
+      var r = state.reading;
+      if (!r || r.id !== id || state.stream !== es) return;
+      if (es.readyState === 2) {
+        if (r.feed.lastSeq > 0) { r.feed.connected = false; r.feed.fallback = 'stream_lost'; paintActivity(r); }
+        else sxProbeStream(provider, id, r);
+      } else { r.feed.fallback = 'reconnecting'; paintActivity(r); }
+    };
     es.onmessage = function (ev) {
       var e; try { e = JSON.parse(ev.data); } catch (_e) { return; }
       var r = state.reading;
       if (!r || r.id !== id) return;
+      applyFeed(r, e);
       if (e.kind === 'status') {
         var working = e.state === 'working' || e.agent_state === 'running';
         // The stream's status trails a Stop by a few seconds; do not let that echo reopen it.
@@ -556,30 +1100,38 @@
         setLive({ step: [e.verb, e.target].filter(Boolean).join(' ') });
       } else if (e.kind === 'prose' && e.text) {
         setLive({ prose: String(e.text) });
+      } else if (e.kind === 'prompt') {
+        paintActivity(r);
       }
     };
   }
   function setLive(patch) {
     var r = state.reading; if (!r) return;
     r.live = Object.assign(r.live || {}, patch);
-    var box = $('session-live'); if (!box) return;
-    var live = r.live;
-    if (!live.working) { box.classList.add('hidden'); box.innerHTML = ''; live.step = null; live.prose = null; return; }
-    box.classList.remove('hidden');
-    box.innerHTML = '<div class="live-head"><span class="pulse" aria-hidden="true"></span><strong>Working</strong>' +
-      (live.step ? '<span class="live-step">' + esc(live.step) + '</span>' : '') +
-      '<button type="button" class="link-btn" data-action="stop-session">Stop</button></div>' +
-      (live.prose ? '<div class="live-prose">' + md(live.prose.slice(-1200)) + '</div>' : '');
+    if (!r.live.working) { r.live.step = null; r.live.prose = null; }
+    paintActivity(r);
   }
   function refreshTurns(provider, id) {
-    api(sessionPath(provider, id, '?turns=30')).then(function (d) {
+    api(sessionPath(provider, id, '?turns=' + SX_TURNS)).then(function (d) {
       var r = state.reading;
       if (!r || r.id !== id) return;
       var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : [];
+      r.detail = d; r.turns = turns; r.more = d.recent_turns_more === true;
       var box = $('session-turns'); if (box) box.innerHTML = renderTurns(turns, d);
+      var sub = document.querySelector('#session-reader .sx-subtitle'); if (sub) sub.textContent = sxSubtitle(d, provider, turns, r.more);
       renderHeld(r);
       loadQueue(provider, id);
+      sxProbeAttach(r);
     }).catch(function () {});
+  }
+  // Control's queue line for a parked turn (Models.swift 1655): Next, 2nd in line, 3rd in line.
+  function sxQueueLine(t) {
+    var p = Number(t.position);
+    if (!(p >= 0)) return 'Waiting';
+    if (p === 0) return 'Next';
+    if (p === 1) return '2nd in line';
+    if (p === 2) return '3rd in line';
+    return (p + 1) + 'th in line';
   }
   function loadQueue(provider, id) {
     apiAnswer(sessionPath(provider, id, '/queued-turns')).then(function (q) {
@@ -587,14 +1139,72 @@
       var box = $('session-queue'); if (!box || !r || r.id !== id) return;
       var rows = (q.status === 200 && q.body && q.body.turns) || [];
       var waiting = rows.filter(function (t) { return t.status === 'waiting' || t.status === 'queued' || t.status === 'pending'; });
+      if (q.status === 200 && r.queued !== waiting.length) { r.queued = waiting.length; paintActivity(r); }
       if (!waiting.length) { box.innerHTML = ''; return; }
-      box.innerHTML = '<h3 class="group-title" style="margin-top:14px"><span>Waiting to send</span><span>' + waiting.length + '</span></h3><div class="list">' +
+      box.innerHTML = '<div class="sx-queue"><p class="sx-queue-head">' + (waiting.length === 1 ? '1 follow-up queued. It sends when this session is available.' : waiting.length + ' follow-ups queued. They send in order when this session is available.') + '</p>' +
         waiting.map(function (t) {
           var mine = t.owner !== 'codex' && parkedByMe(r, t.clientTurnId);
-          return '<div class="row"><span class="row-title">' + esc(t.preview || t.prompt || 'Message') + '</span><span class="row-side">' + esc(t.position != null && t.position >= 0 ? (t.position === 0 ? 'Next' : '#' + (t.position + 1)) : '') + '</span>' +
-            (mine ? '<span class="row-actions"><button type="button" class="link-btn" data-action="unqueue" data-turn-key="' + esc(t.clientTurnId) + '">Remove</button></span>' : '') + '</div>';
+          return '<div class="sx-queue-row"><span class="sx-queue-state">' + esc(sxQueueLine(t)) + '</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') + '</span>' +
+            (mine ? '<button type="button" class="cx-btn quiet" data-action="unqueue" data-turn-key="' + esc(t.clientTurnId) + '" title="Cancel this queued message. It will not be sent.">Cancel</button>' : '') + '</div>';
         }).join('') + '</div>';
     }).catch(function () {});
+  }
+
+  // What the server says about writing into this session before anything is sent (Control's
+  // probeChatAttachability): a busy thread parks a send, another app holding it idle asks first,
+  // and anything else is the server's refusal, word for word.
+  function sxProbeAttach(r) {
+    apiAnswer(sessionPath(r.provider, r.id, '/attachability')).then(function (a) {
+      if (state.reading !== r) return;
+      if (a.status === 404) { r.verdict = { attachable: false, reason: 'route_absent', reasonCopy: 'Update the COS server to continue a thread from here.', ownerCount: 0 }; renderVerdict(r); return; }
+      var b = a.body || {};
+      if (a.status !== 200 || typeof b.attachable !== 'boolean') return;
+      var owners = Number(b.ownerCount) || 0;
+      r.verdict = { attachable: b.attachable, reason: String(b.reason || ''), reasonCopy: String(b.reasonCopy || ''), ownerCount: owners, caution: b.attachable === true && owners > 0 };
+      renderVerdict(r);
+    }).catch(function () {});
+  }
+  var SX_PARK = {
+    cursor: 'Working right now. A message you send goes into this Cursor chat when its turn ends.',
+    codex: 'Working right now. A message you send joins the Codex app’s queue for this thread.',
+    claude: 'Working right now. A message you send waits and lands when this turn ends.'
+  };
+  function sxSupplement(reason) {
+    if (reason === 'native_target_busy') return 'It frees itself within 30 minutes. Detaching is not available in Control yet.';
+    if (reason === 'native_target_fenced') return 'Fences can be released from the Fences card in this panel.';
+    return '';
+  }
+  function renderVerdict(r) {
+    var box = $('session-verdict'), line = $('session-caution');
+    if (!box || state.reading !== r) return;
+    var v = r.verdict, html = '';
+    var forkBtn = '<button type="button" class="cx-btn quiet" data-action="fork-session" title="Runs your message in a copy of this thread. The original is untouched.">Fork with this message</button>';
+    function refusalBox(copy, supplement, buttons) {
+      return '<div class="sx-box refusal" role="status"><p>' + esc(copy) + '</p>' + (supplement ? '<p class="sx-box-sub">' + esc(supplement) + '</p>' : '') +
+        (buttons ? '<div class="sx-box-actions">' + buttons + '</div>' : '') + '</div>';
+    }
+    if (r.cautionAsk) {
+      html = '<div class="sx-box confirm" role="alertdialog" aria-labelledby="sx-caution-title" aria-describedby="sx-caution-body"><strong id="sx-caution-title">Send into an open session?</strong>' +
+        '<p id="sx-caution-body">Another app on this Mac has this session open. It looks idle right now, but a reply will run with that session’s own permissions.</p>' +
+        '<div class="sx-box-actions"><button type="button" class="cx-btn danger" data-sx="caution-send">Send anyway</button><button type="button" class="cx-btn quiet" data-sx="caution-cancel">Cancel</button></div></div>';
+    } else if (r.refusal) {
+      var f = r.refusal;
+      html = refusalBox(f.copy, f.supplement,
+        (f.changed ? '<button type="button" class="cx-btn quiet" data-sx="refresh-turns">Refresh</button><button type="button" class="cx-btn quiet" data-action="send-anyway">Continue anyway</button>' : '') +
+        (f.retry ? '<button type="button" class="cx-btn quiet" data-sx="retry">Retry</button>' : '') +
+        (f.fork ? forkBtn : ''));
+    } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
+      html = '<div class="sx-park"><p>' + esc(SX_PARK[sxProvider(r.provider)]) + '</p>' + (/fork/i.test(v.reasonCopy) ? '<div class="sx-box-actions">' + forkBtn + '</div>' : '') + '</div>';
+    } else if (v && v.attachable === false && v.reasonCopy) {
+      html = refusalBox(v.reasonCopy, sxSupplement(v.reason), /fork/i.test(v.reasonCopy) ? forkBtn : '');
+    }
+    box.innerHTML = html;
+    if (line) {
+      var caution = v && v.caution ? (sxProvider(r.provider) === 'codex'
+        ? 'The Codex app has this thread open. COS will ask before the first send, then hands your message to the app’s own queue, where it shows.'
+        : 'Another app on this Mac has this session open. COS will ask before the first send. The reply lands in the transcript; the open desk tab will not show it until you resume.') : '';
+      line.textContent = caution; line.classList.toggle('hidden', !caution);
+    }
   }
 
   function sessionStatus(text, kind, actionHtml) {
@@ -641,13 +1251,22 @@
     if (!r || !form) return;
     var input = $('session-input'), text = input.value.trim();
     if (!text) { sessionStatus(fork ? 'Write what the copy should do first.' : 'Write a message first.', 'error'); return; }
+    // Control's caution (SessionChatVerdict.caution): another app holds this session and looks
+    // idle, so the first send asks before it writes. A fork writes to a copy and never asks.
+    if (!fork && r.verdict && r.verdict.caution && !r.cautionAck) { r.cautionAsk = true; renderVerdict(r); return; }
+    if (r.refusal || r.cautionAsk) { r.refusal = null; r.cautionAsk = false; renderVerdict(r); }
     var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
     var done = function () { btns.forEach(function (b) { b.disabled = false; }); };
     (fork ? forkSession(r, text) : continueSession(r, text, opts || {})).then(done, function (err) {
       done();
-      sessionStatus(err && err.name === 'AbortError'
+      if (state.reading !== r) return;
+      var why = err && err.name === 'AbortError'
         ? (fork ? 'No answer from your Mac yet. The copy may still be made; tapping Fork again is safe, it will not make a second one.' : 'No answer from your Mac yet. It may still land. Sending again is safe; it will not post twice.')
-        : (err && err.message) || 'Could not reach your Mac.', 'error');
+        : (err && err.message) || 'Could not reach your Mac.';
+      sessionStatus('');
+      r.retryFork = !!fork;
+      r.refusal = { copy: why, retry: true, fork: !fork };
+      renderVerdict(r);
     });
   }
 
@@ -676,7 +1295,13 @@
         var why = (at.refusal && at.refusal.reason) || '';
         if (PARKABLE_REFUSALS.test(why)) return parkTurn(r, draft, at.refusal, opts);
         var copy = ((at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.') + ' Fork sends your message to a copy instead.';
-        if (opts.held) settleHeld(r, opts.held, 'refused', copy); else sessionStatus(copy, 'error');
+        if (opts.held) settleHeld(r, opts.held, 'refused', copy);
+        else {
+          // Control's refusal box: the server's words, then Fork with this message.
+          sessionStatus('');
+          r.refusal = { copy: (at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.', supplement: sxSupplement(why), fork: true };
+          renderVerdict(r);
+        }
         return 'refused';
       }
       return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(at.binding.bindingId) + '/turns', {
@@ -700,8 +1325,11 @@
         if (reason === 'native_thread_changed' && b.revision) {
           if (opts.held) settleHeld(r, opts.held, 'refused', 'This session changed on your Mac while your message waited.');
           else {
+            // Control's refusal box for a changed thread: Refresh, Continue anyway, Fork with this message.
             r.sendAnyway = b.revision;
-            sessionStatus('This session changed on your Mac since you opened it. ', null, '<button type="button" class="link-btn" data-action="send-anyway">Send anyway</button>');
+            sessionStatus('');
+            r.refusal = { copy: b.reasonCopy || 'This session changed on your Mac since you opened it.', changed: true, fork: true };
+            renderVerdict(r);
           }
           return 'changed';
         }
@@ -821,7 +1449,7 @@
       if (b.forked === true) {
         r.forkDraft = null; clearBoxOf(text);
         sessionStatus('Forked. The copy has your message and shows in Sessions in a moment.');
-        setTimeout(function () { if (state.pane === 'sessions') loadSessions(); }, 4000);
+        setTimeout(function () { if (state.pane === 'sessions') loadSessions(true); }, 4000);
         return true;
       }
       if (b.forked === false || b.state === 'failed' || b.state === 'refused') { sessionStatus((b.reasonCopy || 'COS could not copy that session.'), 'error'); return true; }
@@ -866,16 +1494,141 @@
     });
   }
 
+  // Copy session (Control's Kickstart brief, HelperSources/main.swift claudeKickstartCopy). Control
+  // builds it from the Mac's transcript; the web builds it from the turns the server serves and
+  // the session's first prompt, so it keeps the original request and the newest context.
+  function sxKickstart(r) {
+    var d = r.detail || {}, p = sxProvider(r.provider);
+    var name = p === 'codex' ? 'Codex' : p === 'cursor' ? 'Cursor' : 'Claude Code';
+    var title = sxTitle(d);
+    var branch = d.git_branch && d.git_branch !== 'unknown' ? d.git_branch : '(unknown)';
+    var out = '# Kickstart: ' + (title || name + ' session') + '\n\n' +
+      'Read-only export of a ' + name + ' session. Continue this work here. Do not look for ' + name + ' jsonl or session IDs to resume.\n\n' +
+      '- Workspace: ' + (d.project || '(unknown)') + '\n- Branch: ' + branch + '\n- Session: ' + (d.session_id || r.id) +
+      (Number(d.omitted_tools) > 0 ? '\n- Tool calls omitted: ' + d.omitted_tools : '') + '\n\n';
+    var turns = (r.turns || []).filter(function (t) { return String(t.text || '').trim(); });
+    var firstUser = turns.filter(function (t) { return t.role === 'user'; })[0];
+    var original = String(d.first_prompt || '').trim() || (firstUser ? String(firstUser.text).trim() : '');
+    out += original ? '## Original request\n\n' + original + '\n\n## Conversation\n\n' : '## Conversation\n\n';
+    if (r.more) out += '[Older turns omitted. COS serves the newest ' + turns.length + '. Original request kept.]\n\n';
+    turns.forEach(function (t) {
+      var text = String(t.text).trim();
+      if (original && t.role === 'user' && text === original) return;
+      out += '**' + (t.role === 'user' ? 'You' : 'Assistant') + '**\n\n' + text + '\n\n';
+    });
+    return out.length > 100000 ? out.slice(0, 100000) + '\n[truncated]\n' : out;
+  }
+  function copySessionBrief() {
+    var r = state.reading, note = $('session-copy-note');
+    if (!r || !r.detail) return;
+    var text = sxKickstart(r);
+    var say = function (msg) { if (note) { note.textContent = msg; note.classList.remove('hidden'); } };
+    if (!text.trim()) return say('Nothing to copy');
+    copyText(text).then(function () { say('Copied kickstart for another agent'); }, function (err) { say((err && err.message) || 'This browser would not copy.'); });
+  }
+
+  // Markdown for an assistant turn (Control renders replies with COSMarkdownView): headings, lists,
+  // code, quotes, tables, rules, links. Everything is escaped first, so a reply can never add
+  // markup of its own; a link keeps only an http(s) address.
+  function sxInline(s) {
+    var codes = [];
+    s = s.replace(/`([^`\n]+)`/g, function (_m, c) { codes.push(c); return '\u0000' + (codes.length - 1) + '\u0000'; });
+    s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\w)/g, '$1<em>$2</em>');
+    s = s.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+    return s.replace(/\u0000(\d+)\u0000/g, function (_m, i) { return '<code>' + codes[Number(i)] + '</code>'; });
+  }
+  var SX_LIST = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/;
+  var SX_RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
+  var SX_TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  function sxCells(row) { return row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim(); }); }
+  function sxMd(text) {
+    var lines = esc(String(text || '')).replace(/\r\n?/g, '\n').split('\n');
+    var out = [], para = [], i = 0;
+    function flush() { if (para.length) { out.push('<p>' + para.map(sxInline).join('<br>') + '</p>'); para = []; } }
+    while (i < lines.length) {
+      var line = lines[i];
+      if (/^\s*(```|~~~)/.test(line)) {
+        flush();
+        var code = [];
+        i += 1;
+        while (i < lines.length && !/^\s*(```|~~~)/.test(lines[i])) { code.push(lines[i]); i += 1; }
+        i += 1;
+        out.push('<pre><code>' + code.join('\n') + '</code></pre>');
+        continue;
+      }
+      if (!line.trim()) { flush(); i += 1; continue; }
+      var h = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      if (h) { flush(); var lvl = Math.min(6, h[1].length + 2); out.push('<h' + lvl + '>' + sxInline(h[2]) + '</h' + lvl + '>'); i += 1; continue; }
+      if (SX_RULE.test(line)) { flush(); out.push('<hr>'); i += 1; continue; }
+      if (line.indexOf('|') >= 0 && i + 1 < lines.length && SX_TABLE_SEP.test(lines[i + 1])) {
+        flush();
+        var head = sxCells(line), aligns = sxCells(lines[i + 1]).map(function (a) { return /^:-+:$/.test(a) ? 'center' : /-:$/.test(a) ? 'right' : ''; });
+        var cell = function (tag, c, k) { return '<' + tag + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : '') + '>' + sxInline(c) + '</' + tag + '>'; };
+        i += 2;
+        var body = [];
+        while (i < lines.length && lines[i].indexOf('|') >= 0 && lines[i].trim()) { body.push(sxCells(lines[i])); i += 1; }
+        out.push('<div class="sx-table"><table><thead><tr>' + head.map(function (c, k) { return cell('th', c, k); }).join('') + '</tr></thead><tbody>' +
+          body.map(function (row) { return '<tr>' + head.map(function (_c, k) { return cell('td', row[k] || '', k); }).join('') + '</tr>'; }).join('') + '</tbody></table></div>');
+        continue;
+      }
+      if (/^\s*&gt;/.test(line)) {
+        flush();
+        var quote = [];
+        while (i < lines.length && /^\s*&gt;/.test(lines[i])) { quote.push(lines[i].replace(/^\s*&gt;\s?/, '')); i += 1; }
+        out.push('<blockquote>' + sxMd.unescaped(quote) + '</blockquote>');
+        continue;
+      }
+      if (SX_LIST.test(line)) { flush(); var list = sxListBlock(lines, i); out.push(list.html); i = list.next; continue; }
+      para.push(line.trim());
+      i += 1;
+    }
+    flush();
+    return out.join('');
+  }
+  // A quote's lines are already escaped: paragraphs and line breaks only, inline styles kept.
+  sxMd.unescaped = function (lines) {
+    return lines.join('\n').split(/\n\s*\n/).map(function (p) { return '<p>' + p.split('\n').map(sxInline).join('<br>') + '</p>'; }).join('');
+  };
+  // Nested lists by indent: a deeper item opens a list inside the open item, a shallower one closes back.
+  function sxListBlock(lines, i) {
+    var html = '', stack = [];
+    while (i < lines.length) {
+      var m = SX_LIST.exec(lines[i]);
+      if (!m) {
+        if (!lines[i].trim() && i + 1 < lines.length && SX_LIST.test(lines[i + 1])) { i += 1; continue; }
+        if (stack.length && /^\s{2,}\S/.test(lines[i])) { html += '<br>' + sxInline(lines[i].trim()); i += 1; continue; }
+        break;
+      }
+      var indent = m[1].replace(/\t/g, '    ').length, tag = /\d/.test(m[2]) ? 'ol' : 'ul';
+      var start = tag === 'ol' ? parseInt(m[2], 10) : 1;
+      var open = '<' + tag + (tag === 'ol' && start > 1 ? ' start="' + start + '"' : '') + '>';
+      if (!stack.length || indent > stack[stack.length - 1].indent) { html += open; stack.push({ indent: indent, tag: tag }); }
+      else {
+        while (stack.length > 1 && indent < stack[stack.length - 1].indent) html += '</li></' + stack.pop().tag + '>';
+        html += '</li>';
+        if (stack[stack.length - 1].tag !== tag) { html += '</' + stack.pop().tag + '>' + open; stack.push({ indent: indent, tag: tag }); }
+      }
+      html += '<li>' + sxInline(m[3]);
+      i += 1;
+    }
+    while (stack.length) html += '</li></' + stack.pop().tag + '>';
+    return { html: html, next: i };
+  }
+
+  // YOU and ASSISTANT cards, shown whole (Control: "a reply is Markdown; what you typed is shown as
+  // you typed it"). The server shapes each turn to 4,000 characters with a visible ellipsis.
   function renderTurns(turns, d) {
-    if (!turns.length) return '<p class="reader-placeholder">' + esc(d && (d.discussion_summary || d.first_prompt) || 'No turns recorded yet.') + '</p>';
+    if (!turns.length) return '<p class="reader-placeholder">This session has no user or assistant prose stored.</p>';
     return turns.map(function (t, i) {
       var role = String(t.role || '').toLowerCase() === 'user' ? 'user' : 'assistant';
       var text = String(t.text || t.content || '').trim();
-      var long = text.length > 900 && i < turns.length - 1; // the newest turn is always shown whole
       var at = toDate(t.at);
-      var who = (role === 'user' ? 'You' : providerLabel(d.provider)) + (at ? ', ' + (Date.now() - at.getTime() < 86400000 ? clock(at) : ago(at)) : '');
-      return '<div class="turn ' + role + (long ? ' clamped' : '') + '" data-turn="' + i + '"><span class="who">' + esc(who) + '</span>' + md(text) + '</div>' +
-        (long ? '<button type="button" class="link-btn turn-more" data-action="expand-turn" data-turn="' + i + '">Show all of it</button>' : '');
+      var when = at ? (Date.now() - at.getTime() < 86400000 ? clock(at) : sxShortDate(at)) : '';
+      return '<div class="turn ' + role + ' sx-turn" data-turn="' + i + '"><span class="who"><span>' + (role === 'user' ? 'YOU' : 'ASSISTANT') + '</span>' +
+        (when ? '<span class="sx-turn-when">' + esc(when) + '</span>' : '') + '</span>' +
+        (role === 'user' ? '<div class="sx-plain">' + esc(text) + '</div>' : '<div class="sx-md">' + sxMd(text) + '</div>') + '</div>';
     }).join('');
   }
 
@@ -1087,38 +1840,382 @@
   }
 
   // ── Usage ───────────────────────────────────────────────
-  function categoryLabel(id) {
-    var words = String(id || 'Other').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase();
-    return words.charAt(0).toUpperCase() + words.slice(1);
+  // Usage and COS cost are views inside Sessions, as on the Mac (ActivityWindow.swift 2306-2325);
+  // an old #/usage link opens the Usage view there. Data: GET /api/usage/summary, the helper's
+  // read-only session-usage and cos-usage reports (web-usage-bridge.ts). The figures follow
+  // SessionUsageCore.swift: COS cost counts measured dollars (measuredUSD) and never adds
+  // estimates into them, and its rows keep Control's category titles.
+  function loadUsage() {
+    SX.view = 'usage'; sxSave();
+    location.replace('#/sessions');
   }
-  function money(n) { return '$' + (Number(n) || 0).toFixed(Number(n) >= 100 ? 0 : 2); }
-  function loadUsage(force) {
-    var box = $('usage-body');
-    box.innerHTML = skeletonRows(4);
+  function renderUsageView(force) {
+    var box = $('sessions-usage'); if (!box) return;
+    var stale = !SX.usage || Date.now() - SX.usageAt > 5 * 60000;
+    if (SX.usage) paintUsage();
+    else box.innerHTML = '<p class="cx-note sx-reading">' + (SX.view === 'cost' ? 'Reading what COS used.' : 'Reading local usage…') + '</p>';
+    if ((!force && !stale) || SX.usageLoading) return;
+    SX.usageLoading = true; paintSessionsHero();
     api('/api/usage/summary' + (force ? '?refresh=1' : '')).then(function (d) {
-      var cos = (d && d.cosCost) || {};
-      var rows = (cos.rows || []).slice().sort(function (a, b) { return (b.estimatedUSD || 0) - (a.estimatedUSD || 0); });
-      var total = rows.reduce(function (s, r) { return s + (Number(r.estimatedUSD) || 0); }, 0);
-      var max = rows.length ? Math.max.apply(null, rows.map(function (r) { return Number(r.estimatedUSD) || 0; })) || 1 : 1;
-      var calls = rows.reduce(function (s, r) { return s + (Number(r.calls) || 0); }, 0);
-      var html = '<div class="list"><div class="stat-line"><span class="big-number">' + esc(money(total)) + '</span><span class="sub">' + esc(calls.toLocaleString() + ' background calls in 30 days') + '</span></div></div>';
-      if (rows.length) {
-        html += '<h2 class="group-title"><span>Where it went</span></h2><div class="list">' + rows.slice(0, 12).map(function (r) {
-          var pct = Math.round(((Number(r.estimatedUSD) || 0) / max) * 100);
-          return '<div class="row"><span class="row-title">' + esc(categoryLabel(r.category)) + '</span><span class="row-side">' + esc(money(r.estimatedUSD)) + '</span>' +
-            '<span class="row-sub">' + esc((r.calls || 0).toLocaleString() + ' calls') + '</span><span class="meter"><span style="width:' + pct + '%"></span></span></div>';
-        }).join('') + '</div>';
+      SX.usage = d || {}; SX.usageAt = Date.now(); SX.usageError = ''; SX.usageLoading = false;
+      paintSessionsHero(); paintUsage();
+    }, function (err) {
+      SX.usageLoading = false; SX.usageError = (err && err.message) || 'Usage did not load.';
+      paintSessionsHero(); paintUsage();
+    });
+  }
+  function paintUsage() {
+    var box = $('sessions-usage'); if (!box || SX.view === 'sessions') return;
+    if (!SX.usage) { box.innerHTML = SX.usageError ? '<div class="cx-notice warn">' + esc(SX.usageError) + '</div>' : ''; return; }
+    box.innerHTML = (SX.usageError ? '<div class="cx-notice warn">' + esc(SX.usageError) + '</div>' : '') +
+      (SX.view === 'cost' ? cosCostHtml(SX.usage) : sessionUsageHtml(SX.usage));
+  }
+
+  // Numbers the way Control writes them (SessionUsagePresentation, CosCostPresentation).
+  function uCurrency(v, digits) { return (Number(v) || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits }); }
+  function uMoney(v) { v = Number(v) || 0; return v > 0 && v < 0.01 ? 'under 1¢' : uCurrency(v, v < 10 ? 2 : 0); }
+  function uAtLeast(v) { return v < 0.01 ? 'at least a fraction of 1¢' : 'at least ' + uMoney(v); }
+  function uDollars(v) { v = Number(v) || 0; return v > 0 && v < 1 ? '<$1' : uCurrency(v, 0); }
+  function uNum(n) { return (Number(n) || 0).toLocaleString('en-US'); }
+  function uShort(n) {
+    n = Number(n) || 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e8) return (n / 1e6).toFixed(0) + 'M';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e5) return (n / 1e3).toFixed(0) + 'K';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+  }
+  function uShare(part, whole) { if (!(whole > 0)) return 'Unavailable'; var p = 100 * part / whole; return p > 0 && p < 0.1 ? '<0.1%' : p.toFixed(1) + '%'; }
+  var U_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  function uDayWords(key) { var p = String(key || '').split('-').map(Number); return p.length === 3 && p[1] ? U_MONTHS[p[1] - 1] + ' ' + p[2] + ', ' + p[0] : String(key || ''); }
+
+  // ── Usage view (SessionUsageView.swift 329-445) ──
+  var U_PERIODS = ['Last 7 days', 'Last 30 days', 'Last 90 days', 'Last weekend', 'All history'];
+  function uToolName(p) { return p === 'Anthropic' ? 'Claude Code' : p === 'OpenAI' ? 'Codex' : p === 'Cursor' ? 'Cursor' : 'Codex (' + p + ')'; }
+  // "claude-opus-5-5" reads "Opus 5.5"; an unknown id stays recognizable.
+  function uModelName(id) {
+    var name = String(id || '').replace(/-\d{8}$/, '');
+    if (name.indexOf('cursor-') === 0) name = name.slice(7);
+    var parts = name.split('-');
+    if (parts.length < 2) return name;
+    var isVersion = function (s) { return /^[\d.]+$/.test(s); };
+    var cap = function (s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; };
+    if (parts[0] === 'claude') {
+      parts.shift();
+      if (parts.length > 1 && isVersion(parts[0])) { var t = parts[0]; parts[0] = parts[1]; parts[1] = t; }
+      var family = parts.shift(), version = [];
+      while (parts.length && isVersion(parts[0])) version.push(parts.shift());
+      return [cap(family)].concat(version.length ? [version.join('.')] : []).concat(parts).join(' ');
+    }
+    if (parts[0] === 'gpt') return ['GPT-' + parts[1]].concat(parts.slice(2).map(function (p, i) { return i === 0 ? cap(p) : p; })).join(' ');
+    return [cap(parts[0])].concat(parts.slice(1)).join(' ');
+  }
+  function uDayKey(tz) {
+    try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz || undefined, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
+    catch (_e) { var d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  }
+  function uAddDays(key, n) { var p = key.split('-').map(Number); return new Date(Date.UTC(p[0], p[1] - 1, p[2] + n)).toISOString().slice(0, 10); }
+  function uWeekday(key) { var p = key.split('-').map(Number); return (new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay() + 6) % 7; }
+  function uBounds(period, tz) {
+    var today = uDayKey(tz), counts = { 'Last 7 days': 7, 'Last 30 days': 30, 'Last 90 days': 90 };
+    if (counts[period]) return [uAddDays(today, 1 - counts[period]), today];
+    if (period === 'Last weekend') { var monday = uAddDays(today, -uWeekday(today)); return [uAddDays(monday, -2), uAddDays(monday, -1)]; }
+    if (/^\d{4}-\d{2}$/.test(period)) return [period + '-01', period + '-31'];
+    return null;
+  }
+  function uTotals(rows) {
+    var t = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, events: 0, priced: 0, usd: 0 };
+    rows.forEach(function (b) {
+      var c = b.counts || {};
+      t.input += Number(c.input) || 0; t.output += Number(c.output) || 0; t.cacheRead += Number(c.cacheRead) || 0; t.cacheWrite += Number(c.cacheWrite) || 0;
+      t.events += Number(b.events) || 0; t.priced += Number(b.pricedEvents) || 0; t.usd += Number(b.estimatedUSD) || 0;
+    });
+    t.fresh = t.input + t.output + t.cacheWrite;
+    t.all = t.fresh + t.cacheRead;
+    return t;
+  }
+  function uCostCell(t) { return t.priced > 0 ? uDollars(t.usd) + (t.priced < t.events ? '+' : '') : 'No price'; }
+  function uGroup(rows, keyFn) {
+    var by = {}, order = [];
+    rows.forEach(function (b) { var k = keyFn(b); if (!by[k]) { by[k] = []; order.push(k); } by[k].push(b); });
+    return order.map(function (k) { return { key: k, rows: by[k], t: uTotals(by[k]) }; });
+  }
+  function uSelect(id, label, value, options) {
+    return '<select id="' + id + '" class="field sx-select" aria-label="' + label + '">' + options.map(function (o) {
+      return '<option value="' + esc(o[0]) + '"' + (o[0] === value ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+    }).join('') + '</select>';
+  }
+  function sessionUsageHtml(d) {
+    var su = d.sessionUsage;
+    var how = '<details class="sx-how"><summary>How this is counted</summary>' + uHowLines(su).map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</details>';
+    if (!su) return '<div class="sx-uempty">' + esc('Usage has not been read yet. Refresh reads Claude Code and Codex logs on this Mac.') + '</div>' + how;
+    var tz = su.timeZone || '';
+    var buckets = (Array.isArray(su.buckets) ? su.buckets : []).filter(function (b) { return b && typeof b.day === 'string'; });
+    var pending = [];
+    if (Number(su.pendingFiles) > 0) pending.push('Reading older history: ' + su.pendingFiles + ' files remaining. Totals will grow until it finishes.');
+    if (su.cursorFeed && su.cursorFeed.pending === true && su.cursorFeed.message) pending.push(su.cursorFeed.message + ' Totals will grow until it finishes.');
+    var pendingHtml = pending.map(function (n) { return '<p class="cx-note sx-unote">' + esc(n) + '</p>'; }).join('');
+    if (!buckets.length) return '<div class="sx-uempty">' + esc('No usage recorded yet. Claude Code and Codex sessions on this Mac appear here once their logs are read. A missing tool is not zero usage.') + pendingHtml + '</div>' + how;
+
+    var months = []; buckets.forEach(function (b) { var m = b.day.slice(0, 7); if (months.indexOf(m) < 0) months.push(m); });
+    months.sort().reverse();
+    var periods = U_PERIODS.concat(months.slice(0, 12));
+    if (periods.indexOf(SX.uPeriod) < 0) SX.uPeriod = 'Last 30 days';
+    var bounds = uBounds(SX.uPeriod, tz);
+    var inPeriod = bounds ? buckets.filter(function (b) { return b.day >= bounds[0] && b.day <= bounds[1]; }) : buckets;
+    var tools = uGroup(buckets, function (b) { return b.provider; }).sort(function (a, b) { return b.t.all - a.t.all; }).map(function (g) { return g.key; });
+    if (SX.uTool !== 'All tools' && tools.indexOf(SX.uTool) < 0) SX.uTool = 'All tools';
+    var forTool = buckets.filter(function (b) { return SX.uTool === 'All tools' || b.provider === SX.uTool; });
+    var models = uGroup(forTool, function (b) { return b.model; }).sort(function (a, b) { return b.t.all - a.t.all; }).map(function (g) { return g.key; });
+    if (SX.uModel !== 'All models' && models.indexOf(SX.uModel) < 0) SX.uModel = 'All models';
+    var selected = inPeriod.filter(function (b) { return (SX.uTool === 'All tools' || b.provider === SX.uTool) && (SX.uModel === 'All models' || b.model === SX.uModel); });
+    var hasFilter = SX.uTool !== 'All tools' || SX.uModel !== 'All models';
+    var updated = toDate(su.updatedAt);
+
+    var html = '<div class="sx-ufilters">' +
+      uSelect('usage-period', 'Period', SX.uPeriod, periods.map(function (p) { return [p, /^\d{4}-\d{2}$/.test(p) ? U_MONTHS[Number(p.slice(5)) - 1] + ' ' + p.slice(0, 4) : p]; })) +
+      uSelect('usage-tool', 'Tool', SX.uTool, [['All tools', 'All tools']].concat(tools.map(function (p) { return [p, uToolName(p)]; }))) +
+      uSelect('usage-model', 'Model', SX.uModel, [['All models', 'All models']].concat(models.map(function (m) { return [m, uModelName(m)]; }))) +
+      (hasFilter ? '<button type="button" class="sx-link" data-sx="usage-clear">Clear filters</button>' : '') +
+      (updated ? '<span class="sx-fresh">Updated ' + esc(clock(updated)) + '</span>' : '') +
+      '</div>' + pendingHtml;
+    if (!selected.length) return html + '<div class="sx-uempty">No recorded usage for this selection. A missing tool is not zero usage.</div>' + uFooter(su, selected) + how;
+
+    var t = uTotals(selected);
+    var days = uGroup(selected, function (b) { return b.day; });
+    var pricedDays = days.filter(function (g) { return g.t.priced > 0; });
+    var perDay = pricedDays.length ? uDollars(pricedDays.reduce(function (s, g) { return s + g.t.usd; }, 0) / pricedDays.length) + (pricedDays.some(function (g) { return g.t.priced < g.t.events; }) ? '+' : '') : 'No price';
+    var figures = [
+      ['API value', uCostCell(t), '', 'What these tokens would cost at standard API rates. Not your subscription bill.'],
+      ['New tokens', uShort(t.fresh), '', 'Input, output and cache writes.'],
+      ['All tokens', uShort(t.all), uShare(t.cacheRead, t.all) + ' read again from cache', 'New tokens plus context read again from cache.'],
+      ['API value a day', perDay, days.length + ' ' + (days.length === 1 ? 'day' : 'days') + ' with usage', 'Average across days with a price. Days without logs or a price are left out, not counted as zero.']
+    ];
+    html += '<div class="sx-figures">' + figures.map(function (f, i) {
+      return '<div class="sx-figure' + (i === 0 ? ' lead' : '') + '" title="' + esc(f[3]) + '"><b>' + esc(f[1]) + '</b><span class="sx-figure-title">' + esc(f[0]) + '</span>' + (f[2] ? '<span class="sx-figure-note">' + esc(f[2]) + '</span>' : '') + '</div>';
+    }).join('') + '</div>';
+
+    // By tool and model, largest first.
+    var byModel = uGroup(selected, function (b) { return b.provider + '|' + b.model; }).sort(function (a, b) { return b.t.all - a.t.all; });
+    html += '<h3 class="sx-uhead">By tool and model</h3><div class="sx-table sx-utable"><table><thead><tr><th>Model</th><th>Tool</th><th class="num hp">New tokens</th><th class="num">All tokens</th><th class="num">API value</th></tr></thead><tbody>' +
+      byModel.map(function (g) {
+        var b = g.rows[0];
+        return '<tr><td title="' + esc(b.model) + '">' + esc(uModelName(b.model)) + '</td><td>' + esc(uToolName(b.provider)) + '</td><td class="num hp">' + uShort(g.t.fresh) + '</td><td class="num">' + uShort(g.t.all) + '</td><td class="num">' + esc(uCostCell(g.t)) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+
+    // Day by day, newest first, with a bar for the day's new tokens.
+    var dayRows = days.slice().sort(function (a, b) { return a.key < b.key ? 1 : -1; }).slice(0, 45);
+    var peak = dayRows.reduce(function (m, g) { return Math.max(m, g.t.fresh); }, 0) || 1;
+    html += '<h3 class="sx-uhead">Day by day</h3><div class="cx-list sx-days">' + dayRows.map(function (g) {
+      var p = g.key.split('-').map(Number);
+      var label = new Date(Date.UTC(p[0], p[1] - 1, p[2])).toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
+      return '<div class="sx-day"><span class="sx-day-date">' + esc(label) + '</span><span class="sx-day-bar" aria-hidden="true"><span style="width:' + Math.max(1, Math.round(100 * g.t.fresh / peak)) + '%"></span></span>' +
+        '<span class="sx-day-tok">' + uShort(g.t.fresh) + '</span><span class="sx-day-usd">' + esc(uCostCell(g.t)) + '</span></div>';
+    }).join('') + '</div>' + (days.length > dayRows.length ? '<p class="cx-note">The newest ' + dayRows.length + ' of ' + days.length + ' days.</p>' : '');
+    return html + uFooter(su, selected) + how;
+  }
+  function uFooter(su, selected) {
+    var bits = ['Read from ' + uNum(su.filesIndexed) + ' log files on this Mac.'];
+    if (Number(su.unreadableFiles) > 0) bits.push(uNum(su.unreadableFiles) + ' could not be read.');
+    var missing = {}, unpriced = 0;
+    selected.forEach(function (b) { var gap = (Number(b.events) || 0) - (Number(b.pricedEvents) || 0); if (gap > 0) { unpriced += gap; var n = uModelName(b.model); missing[n] = (missing[n] || 0) + gap; } });
+    if (unpriced > 0) {
+      var names = Object.keys(missing).sort(function (a, b) { return missing[b] - missing[a] || (a < b ? -1 : 1); });
+      bits.push('A + means a figure leaves out ' + uNum(unpriced) + ' records with no verified price: ' + names.slice(0, 2).join(' and ') + (names.length > 2 ? ' and ' + (names.length - 2) + ' more' : '') + '.');
+    }
+    return '<p class="sx-ufoot">' + bits.map(esc).join(' ') + '</p>';
+  }
+  function uHowLines(su) {
+    var lines = ['While COS Control is running it refreshes every five minutes. Pausing keeps existing history. Only counts, dates, model names and file checkpoints are stored. Local logs are never uploaded.'];
+    if (su) {
+      (su.coverage || []).forEach(function (c) { if (typeof c === 'string') lines.push(c); });
+      var gaps = (Number(su.unreadableFiles) || 0) + (Number(su.malformedRows) || 0) + (Number(su.missingBaselineEvents) || 0);
+      if (gaps > 0) lines.push('Gaps: ' + (su.unreadableFiles || 0) + ' unreadable files or oversized rows, ' + (su.malformedRows || 0) + ' malformed rows, ' + (su.missingBaselineEvents || 0) + ' missing usage baselines. Totals reflect what could be read.');
+      lines.push('Calendar dates in ' + (su.timeZone || 'this Mac’s time zone') + '. Days without logs are missing, not zero. Weeks run Monday to Sunday, and the first and last week or month of a period can be partial.');
+    }
+    lines.push('New tokens are input, output and cache writes. Output includes reasoning. Cache reads are repeated context, not cache savings.');
+    var checked = su && /^\d{4}-\d{2}-\d{2}/.test(String(su.pricingVersion || '')) ? uDayWords(String(su.pricingVersion).slice(0, 10)) : 'October 25, 2026';
+    lines.push('API value is the standard API rate, checked ' + checked + ' and applied to all dates. It leaves out discounts, speed tiers, tools and taxes, and it is not your subscription bill. Cursor’s value is the per-request cost Cursor reports.');
+    lines.push('Token share is not your plan allowance. It compares recorded tokens in this selection; providers calculate subscription limits separately.');
+    return lines;
+  }
+
+  // ── COS cost view (SessionUsageView.swift CosCostView 1773-2009, CosCostPresentation) ──
+  var COS_CATS = {
+    dictation: ['Dictation', 'dictation', 'dictations'],
+    transcription: ['Transcription cleanup', 'cleanup', 'cleanups'],
+    dictationBeforeSplit: ['Dictation and transcripts, before Oct 20', 'cleanup', 'cleanups'],
+    meetingNotes: ['Meeting notes', 'note or summary', 'notes and summaries'],
+    answers: ['Answers', 'answer', 'answers'],
+    liveAndUpkeep: ['Live help and upkeep', 'check', 'checks'],
+    memoryIndexing: ['Memory indexing', 'indexing call', 'indexing calls'],
+    other: ['Other', 'other call', 'other calls'],
+    work: ['Work', 'background call', 'background calls'],
+    sessionFinding: ['Finding sessions', 'search', 'searches']
+  };
+  var COS_FIELDS = ['calls', 'measuredCalls', 'measuredUSD', 'measuredTokens', 'unpricedMeasuredCalls', 'unpricedLedgerTokens', 'estimatedCalls', 'estimatedUSD', 'estimatedPricedCalls', 'estimatedTokens', 'addsToTotalUSD', 'addsUnlessCursorFeedUSD', 'approximateMatches'];
+  function cosCount(cat, n) { var c = COS_CATS[cat] || COS_CATS.other; return uNum(n) + ' ' + (n === 1 ? c[1] : c[2]); }
+  // A category this page does not know joins Other, so every row keeps one of Control's titles.
+  function cosRows(report) {
+    var by = {};
+    (report.rows || []).forEach(function (row) {
+      var cat = COS_CATS[row.category] ? row.category : 'other';
+      var acc = by[cat] || (by[cat] = { category: cat });
+      COS_FIELDS.forEach(function (k) { acc[k] = (acc[k] || 0) + (Number(row[k]) || 0); });
+    });
+    return Object.keys(by).map(function (k) { return by[k]; });
+  }
+  function cosSum(rows, k) { return rows.reduce(function (s, r) { return s + (Number(r[k]) || 0); }, 0); }
+  function cosUsageState(su) {
+    if (!su) return 'unavailable';
+    if (Number(su.pendingFiles) > 0 || (su.cursorFeed && su.cursorFeed.pending === true)) return 'importing';
+    return 'ready';
+  }
+  function cosCostHtml(d) {
+    var report = d.cosCost, su = d.sessionUsage;
+    if (!report) return '<div class="sx-uempty">Reading what COS used.</div>';
+    var rows = cosRows(report), overhead = rows.filter(function (r) { return r.category !== 'work'; });
+    var workRow = rows.filter(function (r) { return r.category === 'work'; })[0] || null;
+    var work = report.work || {}, sessions = report.sessions || {};
+    var reading = (Number(sessions.stillReading) || 0) > 0 || sessions.busy === true;
+    var us = cosUsageState(su);
+    // The total the person ran: Usage's API value in the window, plus COS spend Usage cannot see.
+    var lo = report.windowStart || '', hi = report.windowEnd || '';
+    var buckets = (su && su.buckets) || [];
+    var inWin = function (b) { return (!lo || b.day >= lo) && (!hi || b.day <= hi); };
+    var cursorHeld = !!(su && su.cursorFeed && su.cursorFeed.lastSuccessAt) || buckets.some(function (b) { return b.provider === 'Cursor' && inWin(b); });
+    var ran = buckets.filter(inWin).reduce(function (s, b) { return s + (Number(b.estimatedUSD) || 0); }, 0) +
+      rows.reduce(function (s, r) { return s + (Number(r.addsToTotalUSD) || 0) + (cursorHeld ? 0 : (Number(r.addsUnlessCursorFeedUSD) || 0)); }, 0) +
+      (Number(work.addsToTotalUSD) || 0);
+    var ranPartial = us !== 'unavailable' && buckets.some(function (b) { return inWin(b) && (Number(b.pricedEvents) || 0) < (Number(b.events) || 0); });
+    var total = cosSum(overhead, 'calls'), measured = cosSum(overhead, 'measuredCalls'), estimated = cosSum(overhead, 'estimatedCalls');
+    var usd = cosSum(overhead, 'measuredUSD');
+    var measuredPartial = overhead.some(function (r) { return r.unpricedMeasuredCalls > 0 || r.unpricedLedgerTokens > 0; });
+    var workUSD = (Number(work.measuredUSD) || 0) + (workRow ? workRow.measuredUSD : 0);
+    var workTokens = (Number(work.measuredTokens) || 0) + (workRow ? workRow.measuredTokens : 0);
+    var callWord = total === 1 ? 'call' : 'calls';
+
+    // The headline: the answer, then what it leaves out (headlineParts).
+    var answer, caveat = '';
+    if (!report.auditFound && total === 0) { answer = 'COS has no record of its calls on this Mac yet.'; caveat = ' The record starts with its first one.'; }
+    else if (total === 0) {
+      var withoutCalls = overhead.some(function (r) { return r.measuredTokens > 0; }) || workTokens > 0 || (Number(work.widerTokens) || 0) > 0;
+      answer = withoutCalls ? 'COS made no counted calls in the last 30 days.' : 'COS made no calls in the last 30 days.';
+      caveat = withoutCalls ? ' Its Work and background usage is below.' : '';
+    } else if (measured <= 0) {
+      answer = 'COS made ' + uNum(total) + ' ' + callWord + ' in the last 30 days.';
+      caveat = reading ? ' Still reading the session logs that could hold their cost.'
+        : sessions.failed ? ' COS could not read the usage history, so the session logs that could hold their cost are missing from this pass.'
+        : ' This server doesn’t measure their cost yet.';
+    } else {
+      var lead = reading || sessions.failed ? 'Measured so far: COS used ' : 'Measured: COS used ';
+      var usdText = uMoney(usd) + (measuredPartial ? '+' : ''), ranText = uMoney(ran) + (ranPartial ? '+' : '');
+      if (usd <= 0) answer = 'COS made ' + uNum(total) + ' ' + callWord + ' in the last 30 days. ' + uNum(measured) + ' were measured, on models with no verified price.';
+      else if (us === 'unavailable' || ran <= 0 || usd > ran) answer = lead + usdText + ' in the last 30 days.';
+      else if (us === 'importing') answer = lead + usdText + ' of the ' + ranText + ' read so far in the last 30 days.';
+      else answer = lead + usdText + ' of the ' + ranText + ' you ran in the last 30 days.';
+      if (estimated > 0 && usd > 0) caveat = ' ' + uNum(estimated) + ' more ' + (estimated === 1 ? 'call has' : 'calls have') + ' only character counts, so the real figure is higher.';
+    }
+    if (report.auditUnreadable) {
+      if (total === 0) { answer = 'COS could not read its record of calls, so there is no count to show.'; caveat = ''; }
+      else caveat += ' COS could not read its record of calls, so some are missing here.';
+    }
+    var html = '<h2 class="sx-cost-head">' + esc(answer) + (caveat ? '<span>' + esc(caveat) + '</span>' : '') + '</h2>';
+    var showsDollars = rows.some(function (r) { return r.measuredUSD > 0 || r.estimatedUSD > 0; }) || (Number(work.widerUSD) || 0) > 0;
+    if (showsDollars) html += '<p class="sx-cost-api">These are API values: what the same calls would cost at standard API rates. They aren’t your bill.</p>';
+
+    var status = [];
+    if (reading) { var n = Number(sessions.stillReading) || 0; status.push(['', n > 0 ? 'Still reading ' + uNum(n) + ' ' + (n === 1 ? 'session' : 'sessions') + '. These figures will grow until it finishes.' : 'Still reading. The usage history was busy, so these figures may grow.']); }
+    if (us === 'importing') {
+      var files = Number(su.pendingFiles) || 0;
+      status.push(['warn', files > 0 ? 'Usage is still reading ' + uNum(files) + ' log ' + (files === 1 ? 'file' : 'files') + ', so the total will grow and the share will settle.' : 'Usage is still reading your Cursor usage, so the total will grow and the share will settle.']);
+    } else if (us === 'unavailable') status.push(['warn', 'Usage has not been read yet, so there is no total to compare this with.']);
+    if (status.length) html += '<div class="sx-cost-status">' + status.map(function (s) { return '<p class="' + s[0] + '">' + esc(s[1]) + '</p>'; }).join('') + '</div>';
+
+    // Category rows (rowLines): measured first, largest first; then estimated; then tokens with no
+    // price; then empty rows. Dictation and Transcription cleanup always show.
+    if (total > 0 || overhead.some(function (r) { return r.measuredTokens > 0; })) {
+      var list = overhead.slice();
+      ['dictation', 'transcription'].forEach(function (c) { if (!list.some(function (r) { return r.category === c; })) { var e = { category: c }; COS_FIELDS.forEach(function (k) { e[k] = 0; }); list.push(e); } });
+      var rank = function (r) { return r.measuredUSD > 0 ? 0 : r.estimatedUSD > 0 ? 1 : (r.calls > 0 || r.measuredTokens > 0 ? 2 : 3); };
+      var size = function (r) { return r.measuredUSD > 0 ? r.measuredUSD : r.estimatedUSD > 0 ? r.estimatedUSD : r.calls; };
+      list.sort(function (a, b) { return (rank(a) - rank(b)) || (size(b) - size(a)) || (a.category < b.category ? -1 : 1); });
+      var peak = list.reduce(function (m, r) { return Math.max(m, r.measuredUSD + r.estimatedUSD); }, 0);
+      html += '<div class="sx-cost-rows">' + list.map(function (r) { return cosRowHtml(r, peak); }).join('') + '</div>';
+    }
+
+    // Work: what a person chose, under the figure rather than inside it.
+    var workCount = !work.handoffsFound ? 'This Mac has no record of Work runs.' : !(Number(work.runs) > 0) ? 'No Work runs in the last 30 days' : uNum(work.runs) + ' ' + (Number(work.runs) === 1 ? 'run' : 'runs') + ' you started';
+    var workPartial = (Number(work.unpricedEvents) || 0) > 0 || (workRow ? workRow.unpricedMeasuredCalls > 0 : false);
+    var workFigure = workUSD > 0 ? uMoney(workUSD) + (workPartial ? '+' : '') : workTokens > 0 ? 'No price' : '';
+    var wider = (Number(work.widerUSD) || 0) + (workRow ? workRow.measuredUSD : 0);
+    var widerPartial = (Number(work.widerUnpricedEvents) || 0) > 0 || (workRow ? workRow.unpricedMeasuredCalls > 0 : false);
+    var workLines = [];
+    if (wider - workUSD >= 0.01) workLines.push(['strong', uMoney(wider) + (widerPartial ? '+' : '') + ' if you count what you did later in those sessions.']);
+    if (work.handoffsFound && Number(work.runs) > 0) workLines.push(['', 'From each run’s session log, from its start until you next typed in that session or its last turn finished. Not part of the figure above.']);
+    if (workRow && workRow.estimatedCalls > 0) workLines.push(['', 'Plus ' + cosCount('work', workRow.estimatedCalls) + (workRow.estimatedUSD > 0 ? ', ' + uAtLeast(workRow.estimatedUSD) + ' estimated' : ', no verified price') + '.']);
+    var unproven = Number(work.unprovenRuns) || 0;
+    if (unproven > 0) workLines.push(['', uNum(unproven) + ' ' + (unproven === 1 ? 'run has' : 'runs have') + ' no provable end, so ' + (unproven === 1 ? 'it is' : 'they are') + ' only in the wider figure.']);
+    var noLogs = Number(work.runsWithoutLogs) || 0;
+    if (noLogs > 0) workLines.push(['', uNum(noLogs) + ' ' + (noLogs === 1 ? 'run' : 'runs') + ' left no log COS can read, so ' + (noLogs === 1 ? 'it isn’t' : 'they aren’t') + ' counted.']);
+    html += '<div class="sx-work"><div class="sx-work-top"><div><b class="sx-work-title">Work</b><span class="sx-work-count">' + esc(workCount) + '</span></div>' +
+      '<div class="sx-work-fig">' + (workFigure ? '<b>' + esc(workFigure) + '</b>' : '') + (workTokens > 0 ? '<span>' + uShort(workTokens) + ' tokens, measured</span>' : '') + '</div></div>' +
+      workLines.map(function (l) { return '<p class="' + l[0] + '">' + esc(l[1]) + '</p>'; }).join('') + '</div>';
+
+    // Footer: the notes, then how this is counted.
+    var notes = [];
+    if (ranPartial) {
+      var short = measuredPartial || estimated > 0 || (Number(sessions.compressed) || 0) > 0 || (Number(sessions.noLogs) || 0) > 0 || reading;
+      notes.push(short ? 'Some of your own sessions use models with no verified price, and COS’s own figure leaves some calls out too. Neither side is complete, so the share can be higher or lower.'
+        : 'Some of your own sessions use models with no verified price. They aren’t in the total you ran, so it is higher than shown and COS’s share of it is lower.');
+    }
+    var compressed = Number(sessions.compressed) || 0, gone = Number(sessions.noLogs) || 0;
+    if (compressed > 0) notes.push(uNum(compressed) + ' ' + (compressed === 1 ? 'session is' : 'sessions are') + ' compressed and could not be read, so their cost is not in these figures.');
+    if (gone > 0) notes.push(uNum(gone) + ' ' + (gone === 1 ? 'session has' : 'sessions have') + ' no log left on this Mac, so their cost is not in these figures.');
+    if (sessions.busy) notes.push('The usage history was busy, so this pass read nothing new. COS tries again soon.');
+    if (sessions.failed) notes.push('COS could not read the usage history, so this pass read nothing new. It tries again in 5 minutes.');
+    if (!report.runLedgersFound && overhead.some(function (r) { return r.category === 'answers' && r.calls > 0; })) notes.push('This server has no run records, so answers stay estimated.');
+    var undated = Number(report.undatedCalls) || 0, unreadable = Number(report.unreadableRows) || 0;
+    if (undated > 0) notes.push(uNum(undated) + ' ' + (undated === 1 ? 'call has' : 'calls have') + ' no readable date, so ' + (undated === 1 ? 'it isn’t' : 'they aren’t') + ' in these 30 days.');
+    if (unreadable > 0) notes.push(uNum(unreadable) + ' ' + (unreadable === 1 ? 'line' : 'lines') + ' could not be read at all.');
+    var approximate = cosSum(rows, 'approximateMatches');
+    var method = [
+      'Measured means the provider reported the tokens, in a session log or a record COS keeps. Estimated means COS only has the length of the text, so it divides characters by four and uses the model’s plain rate. Cache reads and system prompts aren’t in that, which is why an estimate says at least.',
+      'Estimated figures stay out of every measured total. Rates are standard API rates, checked ' + (report.ratesCheckedOn ? uDayWords(report.ratesCheckedOn) : 'recently') + '. A model with no verified rate shows tokens and No price, never $0. A dollar figure that leaves out some calls with no rate ends in a +.',
+      'The total you ran is what Usage counted in these 30 days, plus COS calls Usage can’t see because they keep no session log.',
+      'A Work run counts from its start until you next typed in that session, another session messaged it, or its last turn finished. COS tells a typed turn from a tool result by the row’s type and never reads the words. Background work the run started counts as the run. With none of those endings in the log, a run has no provable end and stays in the wider figure only. The wider figure is everything in those sessions from the first run’s start, and it stays out of every share.'
+    ];
+    if (approximate > 0) method.push(uNum(approximate) + ' ' + (approximate === 1 ? 'call was' : 'calls were') + ' matched to ' + (approximate === 1 ? 'its run' : 'their runs') + ' by time and model, because older servers write no id. Newer rows carry one.');
+    method.push('Only counts, dates and model names are read from these logs.');
+    html += '<div class="sx-cost-foot">' + notes.map(function (n) { return '<p>' + esc(n) + '</p>'; }).join('') +
+      '<details class="sx-how"><summary>How this is counted</summary>' + method.map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</details></div>';
+    return html;
+  }
+  // One category (rowLine): what a person got, a bar (measured solid, an estimated floor paler
+  // after it), and the dollars or the word for what the row has instead.
+  function cosRowHtml(r, peak) {
+    var title = (COS_CATS[r.category] || COS_CATS.other)[0];
+    var tokens = uShort(r.measuredTokens + (r.measuredCalls === 0 ? r.estimatedTokens : 0)) + ' tokens';
+    var count = r.calls > 0 ? cosCount(r.category, r.calls) : r.measuredTokens > 0 ? 'Counted by the day' : 'None in the last 30 days';
+    var figure = '', detail = '', evidence = 'none', mix = [];
+    if (r.calls > 0 || r.measuredTokens > 0) {
+      if (r.measuredCalls > 0 && r.estimatedCalls > 0) {
+        var rest = r.estimatedPricedCalls > 0 && r.estimatedPricedCalls < r.estimatedCalls ? uNum(r.estimatedPricedCalls) + ' of the ' + uNum(r.estimatedCalls) + ' others' : 'the rest';
+        mix.push(uNum(r.measuredCalls) + ' measured' + (r.estimatedUSD > 0 ? ', ' + uAtLeast(r.estimatedUSD) + ' estimated for ' + rest : ', no verified price for the rest') + '.');
       }
-      var buckets = ((d.sessionUsage && d.sessionUsage.buckets) || []).slice().reverse().slice(0, 14);
-      if (buckets.length) {
-        html += '<h2 class="group-title"><span>Your sessions by day</span></h2><div class="list">' + buckets.map(function (b) {
-          var c = b.counts || {}; var tok = (c.input || 0) + (c.output || 0) + (c.cacheRead || 0) + (c.cacheWrite || 0);
-          var usd = typeof b.costUSD === 'number' ? b.costUSD : b.estimatedUSD;
-          return '<div class="row"><span class="row-title">' + esc(b.day || b.label || '') + '</span><span class="row-side">' + esc(usd != null ? money(usd) : '') + '</span><span class="row-sub">' + esc(providerLabel(b.provider) + ', ' + Math.round(tok / 1000).toLocaleString() + 'k tokens') + '</span></div>';
-        }).join('') + '</div>';
-      }
-      box.innerHTML = html;
-    }).catch(function (err) { box.innerHTML = emptyBox('Usage did not load', err.message); });
+      var partial = r.measuredUSD > 0 && (r.unpricedMeasuredCalls > 0 || r.unpricedLedgerTokens > 0);
+      if (r.measuredUSD > 0 && r.unpricedMeasuredCalls > 0) mix.push(uNum(r.unpricedMeasuredCalls) + ' measured ' + (r.unpricedMeasuredCalls === 1 ? 'call has' : 'calls have') + ' no verified price, so the dollars are a floor.');
+      if (r.measuredUSD > 0 && r.unpricedLedgerTokens > 0) mix.push(uShort(r.unpricedLedgerTokens) + ' tokens counted by the day have no verified price, so the dollars are a floor.');
+      if (r.measuredUSD > 0) { evidence = 'measured'; figure = uMoney(r.measuredUSD) + (partial ? '+' : ''); detail = tokens + ', measured'; }
+      else if (r.measuredTokens > 0 && r.estimatedCalls === 0) { evidence = 'noprice'; figure = 'No price'; detail = tokens; }
+      else if (r.estimatedUSD > 0) { evidence = 'estimated'; figure = 'Estimated'; detail = uAtLeast(r.estimatedUSD); }
+      else { evidence = 'noprice'; figure = 'No price'; detail = tokens; }
+    }
+    var m = peak > 0 ? Math.min(1, r.measuredUSD / peak) : 0, e = peak > 0 ? Math.min(1 - m, r.estimatedUSD / peak) : 0;
+    return '<div class="sx-cost-row"><div class="sx-cost-name"><b>' + esc(title) + '</b><span>' + esc(count) + '</span>' + (mix.length ? '<span class="mix">' + esc(mix.join(' ')) + '</span>' : '') + '</div>' +
+      '<div class="sx-cost-bar" aria-hidden="true">' + (m > 0 ? '<span class="m" style="width:' + (m * 100).toFixed(2) + '%"></span>' : '') + (e > 0 ? '<span class="e" style="width:' + (e * 100).toFixed(2) + '%"></span>' : '') + '</div>' +
+      '<div class="sx-cost-fig ' + evidence + '">' + (figure ? '<b>' + esc(figure) + '</b>' : '') + (detail ? '<span>' + esc(detail) + '</span>' : '') + '</div></div>';
   }
 
   // ── Settings ────────────────────────────────────────────
