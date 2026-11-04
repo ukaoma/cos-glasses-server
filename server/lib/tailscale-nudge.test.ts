@@ -639,7 +639,9 @@ describe('wiring', () => {
     const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN")
     expect(note).toBeGreaterThan(0)
     expect(note).toBeLessThan(auth)
-    const authed = index.indexOf('if (!isPublicApiRequest(req.method, req.path)) tailscaleNudger.noteRequest(req.socket?.remoteAddress, { authenticated: true })')
+    // 6.99.1: only a request that carried the pairing token in X-Cos-Token marks a paired phone.
+    // A COS Control Web browser passes the same gate with its cookie and must not count.
+    const authed = index.indexOf("if (!isPublicApiRequest(req.method, req.path) && typeof req.headers['x-cos-token'] === 'string') {\n    tailscaleNudger.noteRequest(req.socket?.remoteAddress, { authenticated: true })")
     expect(authed).toBeGreaterThan(auth)
     expect(authed).toBeLessThan(index.indexOf("app.use('/api', createPairingRouter("))
   })

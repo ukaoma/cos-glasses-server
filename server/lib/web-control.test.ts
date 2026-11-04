@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import express from 'express'
 import type { Server } from 'node:http'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -209,26 +209,56 @@ describe('Dedicated Web Session Cookie, CSRF & Handoff Auth', () => {
     expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie }, socket: lan }, API_TOKEN, opts)).toBe(false)
     expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie }, socket: lan }, API_TOKEN, { ...opts, env: { COS_WEB_CONTROL_LAN: '1' } })).toBe(true)
     expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie } }, API_TOKEN, opts)).toBe(false)
+
+    // An IPv4-mapped tailnet socket is a tailnet socket.
+    expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie }, socket: { remoteAddress: '::ffff:100.83.140.84' } }, API_TOKEN, opts)).toBe(true)
+    // Review W4: anything carrying proxy headers is refused, even on loopback (tailscale serve, Funnel).
+    expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie, 'x-forwarded-for': '203.0.113.9' }, socket: { remoteAddress: '127.0.0.1' } }, API_TOKEN, opts)).toBe(false)
+    expect(isWebSessionAuthorized({ method: 'GET', headers: { cookie, 'tailscale-user-login': 'x@example.com' }, socket: { remoteAddress: '127.0.0.1' } }, API_TOKEN, opts)).toBe(false)
+    // Writes: a missing Host is refused; 3141 page writing to 3143 (or back) is refused.
+    expect(isWebSessionAuthorized({ method: 'POST', socket, headers: { cookie, 'x-cos-web': '1', origin: `http://${REAL_DNS}:3141` } }, API_TOKEN, opts)).toBe(false)
+    const both = { ...opts, allowedPorts: [3141, 3143] }
+    expect(isWebSessionAuthorized({ method: 'POST', socket, headers: { host: `${REAL_DNS}:3143`, cookie, 'x-cos-web': '1', origin: `http://${REAL_DNS}:3141` } }, API_TOKEN, both)).toBe(false)
+    expect(isWebSessionAuthorized({ method: 'POST', socket, headers: { host: `${REAL_DNS}:3143`, cookie, 'x-cos-web': '1', origin: `https://${REAL_DNS}:3143` } }, API_TOKEN, both)).toBe(true)
+    // A Tailscale IPv6 page writing to the address it reached.
+    const v6 = { remoteAddress: 'fd7a:115c:a1e0::5' }
+    expect(isWebSessionAuthorized({ method: 'POST', socket: v6, headers: { host: '[fd7a:115c:a1e0::1]:3141', cookie, 'x-cos-web': '1', origin: 'http://[fd7a:115c:a1e0::1]:3141' } }, API_TOKEN, opts)).toBe(true)
+    expect(isWebSessionAuthorized({ method: 'POST', socket: v6, headers: { host: '[fd7a:115c:a1e0::1]:3141', cookie, 'x-cos-web': '1', origin: 'http://[fd7a:115c:a1e0::2]:3141' } }, API_TOKEN, opts)).toBe(false)
   })
 
   it('signs the session epoch: "Sign out every browser" kills every copy of every cookie', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cos-web-epoch-'))
     setWebSessionEpochFile(join(dir, 'web-session.json'))
+    const file = join(dir, 'web-session.json')
     try {
-      expect(currentWebSessionEpoch()).toBe(0)
+      // A first run starts the epoch from the clock, never from 0 (review W5).
+      const first = currentWebSessionEpoch()
+      expect(first).toBeGreaterThan(1_700_000_000)
       const before = mintWebSessionCookieValue(API_TOKEN).value
       expect(verifyWebSessionCookieValue(before, API_TOKEN)).toBe(true)
-      expect(bumpWebSessionEpoch()).toBe(1)
+      expect(bumpWebSessionEpoch()).toBe(first + 1)
       expect(verifyWebSessionCookieValue(before, API_TOKEN)).toBe(false)
       const after = mintWebSessionCookieValue(API_TOKEN).value
       expect(verifyWebSessionCookieValue(after, API_TOKEN)).toBe(true)
       // Persisted: a restart (fresh cache) still refuses the old cookie.
-      setWebSessionEpochFile(join(dir, 'web-session.json'))
-      expect(currentWebSessionEpoch()).toBe(1)
+      setWebSessionEpochFile(file)
+      expect(currentWebSessionEpoch()).toBe(first + 1)
       expect(verifyWebSessionCookieValue(before, API_TOKEN)).toBe(false)
       // A forged epoch fails the signature.
       const [exp, , sig] = before.split('.')
-      expect(verifyWebSessionCookieValue(`${exp}.1.${sig}`, API_TOKEN)).toBe(false)
+      expect(verifyWebSessionCookieValue(`${exp}.${first + 1}.${sig}`, API_TOKEN)).toBe(false)
+      // A corrupt file never rolls back: the epoch moves forward and every old cookie dies.
+      writeFileSync(file, '{not json')
+      setWebSessionEpochFile(file)
+      const recovered = currentWebSessionEpoch()
+      expect(recovered).toBeGreaterThanOrEqual(first)
+      expect(recovered).not.toBe(first + 1)
+      expect(verifyWebSessionCookieValue(after, API_TOKEN)).toBe(false)
+      expect(JSON.parse(readFileSync(file, 'utf8')).epoch).toBe(recovered)
+      // A deleted file does the same.
+      rmSync(file)
+      setWebSessionEpochFile(file)
+      expect(verifyWebSessionCookieValue(after, API_TOKEN)).toBe(false)
     } finally {
       setWebSessionEpochFile(null)
       rmSync(dir, { recursive: true, force: true })

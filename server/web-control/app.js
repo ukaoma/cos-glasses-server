@@ -136,7 +136,7 @@
     document.querySelectorAll('#section-menu [data-goto]').forEach(function (b) { if (b.getAttribute('data-goto') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     document.querySelectorAll('.rail-btn').forEach(function (b) { if (b.getAttribute('data-pane') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     if (state.stream && !(r.pane === 'sessions' && r.args.length === 2)) { state.stream.close(); state.stream = null; }
-    if (!(r.pane === 'sessions' && r.args.length === 2)) { clearInterval(state.turnPoll); if (state.reading) clearInterval(state.reading.afterTimer); state.reading = null; }
+    if (!(r.pane === 'sessions' && r.args.length === 2)) { clearInterval(state.turnPoll); if (state.reading) clearInterval(state.reading.heldTimer); state.reading = null; }
     if (r.pane !== 'meetings' && state.livePoll) { clearInterval(state.livePoll); state.livePoll = null; }
 
     var reading = r.args.length > 0;
@@ -458,12 +458,32 @@
       .finally(function () { if (timer) clearTimeout(timer); });
   }
 
+  // Per-browser memory for one session: messages held until a reply ends, and the queue keys
+  // this browser parked (so Remove is offered only on its own rows). Both survive a reload.
+  var HELD_KEY = 'cos_web_held', PARKED_KEY = 'cos_web_parked';
+  function readStore(key) { try { var v = JSON.parse(localStorage.getItem(key) || '{}'); return v && typeof v === 'object' ? v : {}; } catch (_e) { return {}; } }
+  function writeStore(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (_e) {} }
+  function saveHeld(r) {
+    var all = readStore(HELD_KEY), k = r.provider + '|' + r.id;
+    var keep = r.held.filter(function (h) { return !h.cancelled; }).map(function (h) { return { text: h.text, key: h.key, since: h.since }; });
+    if (keep.length) all[k] = keep; else delete all[k];
+    writeStore(HELD_KEY, all);
+  }
+  function rememberParked(r, key) {
+    var all = readStore(PARKED_KEY), k = r.provider + '|' + r.id;
+    all[k] = (all[k] || []).concat(key).slice(-50);
+    writeStore(PARKED_KEY, all);
+  }
+  function parkedByMe(r, key) { return (readStore(PARKED_KEY)[r.provider + '|' + r.id] || []).indexOf(key) >= 0; }
+
   function openSession(provider, id) {
     var reader = $('session-reader');
     if (!provider || !id) return;
     if (state.stream) { state.stream.close(); state.stream = null; }
     clearInterval(state.turnPoll);
-    state.reading = { provider: provider, id: id, draft: null, live: null };
+    if (state.reading) clearInterval(state.reading.heldTimer);
+    var held = (readStore(HELD_KEY)[provider + '|' + id] || []).filter(function (h) { return h && typeof h.text === 'string' && typeof h.key === 'string'; });
+    state.reading = { provider: provider, id: id, draft: null, live: null, held: held, flushing: null };
     document.querySelectorAll('#sessions-list .row').forEach(function (r) { r.setAttribute('aria-selected', String(r.getAttribute('data-session') === provider + '|' + id)); });
     reader.innerHTML = '<div class="reader-head"><div class="skeleton" style="height:28px;width:70%;margin:10px 0"></div></div>' + skeletonRows(3);
     api(sessionPath(provider, id, '?turns=30')).then(function (d) {
@@ -481,7 +501,12 @@
           '<button type="submit" class="btn primary small" aria-label="Send"><svg class="icon" style="width:18px;height:18px"><use href="#i-send"/></svg></button></div>' +
         '</form><div class="status-line" id="session-status"></div>';
       setLive({ working: !!d.running_active });
+      renderHeld(state.reading);
       loadQueue(provider, id);
+      if (state.reading.held.length) {
+        sessionStatus('Waiting for the current reply. ' + (state.reading.held.length > 1 ? state.reading.held.length + ' messages send' : 'Yours sends') + ' as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don\u2019t send</button>');
+        startHeldTimer(state.reading);
+      }
       if (turns.length) requestAnimationFrame(function () { window.scrollTo(0, document.documentElement.scrollHeight); });
       watchSession(provider, id);
     }).catch(function (err) { reader.innerHTML = emptyBox('This session did not open', err.message); });
@@ -496,19 +521,17 @@
     var wasWorking = false;
     es.onmessage = function (ev) {
       var e; try { e = JSON.parse(ev.data); } catch (_e) { return; }
-      if (!state.reading || state.reading.id !== id) return;
+      var r = state.reading;
+      if (!r || r.id !== id) return;
       if (e.kind === 'status') {
         var working = e.state === 'working' || e.agent_state === 'running';
         // The stream's status trails a Stop by a few seconds; do not let that echo reopen it.
-        if (working && state.reading.stoppedAt && Date.now() - state.reading.stoppedAt < 8000) working = false;
+        if (working && r.stoppedAt && Date.now() - r.stoppedAt < 8000) working = false;
         var waiting = e.state === 'waiting' || e.state === 'needs_input' || e.agent_state === 'waiting';
         var el = $('session-state');
         if (el) el.textContent = working ? 'Working now' : waiting ? 'Waiting for you' : 'Open';
         setLive({ working: working });
-        if (wasWorking && !working) {
-          refreshTurns(provider, id);
-          if (state.reading && state.reading.afterReply) setTimeout(function () { sendHeldMessage(state.reading); }, 800);
-        }
+        if (wasWorking && !working) { refreshTurns(provider, id); replyEnded(r); }
         wasWorking = working;
       } else if (e.kind === 'tool') {
         setLive({ step: [e.verb, e.target].filter(Boolean).join(' ') });
@@ -531,22 +554,25 @@
   }
   function refreshTurns(provider, id) {
     api(sessionPath(provider, id, '?turns=30')).then(function (d) {
-      if (!state.reading || state.reading.id !== id) return;
+      var r = state.reading;
+      if (!r || r.id !== id) return;
       var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : [];
       var box = $('session-turns'); if (box) box.innerHTML = renderTurns(turns, d);
+      renderHeld(r);
       loadQueue(provider, id);
     }).catch(function () {});
   }
   function loadQueue(provider, id) {
-    apiAnswer(sessionPath(provider, id, '/queued-turns')).then(function (r) {
-      var box = $('session-queue'); if (!box || !state.reading || state.reading.id !== id) return;
-      var rows = (r.status === 200 && r.body && r.body.turns) || [];
+    apiAnswer(sessionPath(provider, id, '/queued-turns')).then(function (q) {
+      var r = state.reading;
+      var box = $('session-queue'); if (!box || !r || r.id !== id) return;
+      var rows = (q.status === 200 && q.body && q.body.turns) || [];
       var waiting = rows.filter(function (t) { return t.status === 'waiting' || t.status === 'queued' || t.status === 'pending'; });
       if (!waiting.length) { box.innerHTML = ''; return; }
       box.innerHTML = '<h3 class="group-title" style="margin-top:14px"><span>Waiting to send</span><span>' + waiting.length + '</span></h3><div class="list">' +
         waiting.map(function (t) {
-          var mine = t.owner !== 'codex';
-          return '<div class="row"><span class="row-title">' + esc(t.preview || t.prompt || 'Message') + '</span><span class="row-side">' + esc(t.position != null ? (t.position === 0 ? 'Next' : '#' + (t.position + 1)) : '') + '</span>' +
+          var mine = t.owner !== 'codex' && parkedByMe(r, t.clientTurnId);
+          return '<div class="row"><span class="row-title">' + esc(t.preview || t.prompt || 'Message') + '</span><span class="row-side">' + esc(t.position != null && t.position >= 0 ? (t.position === 0 ? 'Next' : '#' + (t.position + 1)) : '') + '</span>' +
             (mine ? '<span class="row-actions"><button type="button" class="link-btn" data-action="unqueue" data-turn-key="' + esc(t.clientTurnId) + '">Remove</button></span>' : '') + '</div>';
         }).join('') + '</div>';
     }).catch(function () {});
@@ -562,20 +588,33 @@
     if (!r.draft || r.draft.text !== text) r.draft = { text: text, key: newTurnKey() };
     return r.draft;
   }
-  // Your words show in the conversation the moment the Mac accepts them; the next refresh
-  // of the transcript replaces this bubble with the real turn.
-  function showPendingTurn(text, note) {
+  // The box is cleared only of the very words that were sent; anything typed since stays.
+  function clearBoxOf(text) {
+    var input = $('session-input');
+    if (input && input.value.trim() === String(text).trim()) { input.value = ''; autoGrow(input); }
+    if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null;
+  }
+  // Words go back in the box only if the box is empty; otherwise the status line keeps them.
+  function returnToBox(text, why) {
+    var input = $('session-input');
+    if (input && !input.value.trim()) { input.value = text; autoGrow(input); sessionStatus(why + ' Your message is back in the box.', 'error'); }
+    else sessionStatus(why + ' Not sent: “' + String(text).slice(0, 80) + (text.length > 80 ? '…' : '') + '”', 'error');
+  }
+  // Your words show in the conversation the moment the Mac accepts them; the next refresh of
+  // the transcript replaces the bubble with the real turn.
+  function showPendingTurn(text, note, heldKey) {
     var box = $('session-turns'); if (!box) return;
     var ph = box.querySelector('.reader-placeholder'); if (ph) ph.remove();
     var el = document.createElement('div');
     el.className = 'turn user pending';
+    if (heldKey) el.setAttribute('data-held-key', heldKey);
     el.innerHTML = '<span class="who">You, ' + esc(note) + '</span>' + md(text);
     box.appendChild(el);
     requestAnimationFrame(function () { window.scrollTo(0, document.documentElement.scrollHeight); });
   }
-  function draftSent() {
-    var input = $('session-input'); if (input) { input.value = ''; autoGrow(input); }
-    if (state.reading) state.reading.draft = null;
+  function heldBubble(key) { return document.querySelector('#session-turns .turn.pending[data-held-key="' + key.replace(/[^A-Za-z0-9_-]/g, '') + '"]'); }
+  function renderHeld(r) {
+    r.held.forEach(function (h) { if (!h.cancelled && !heldBubble(h.key)) showPendingTurn(h.text, 'sends after this reply', h.key); });
   }
 
   function sendSessionTurn(fork, opts) {
@@ -586,13 +625,20 @@
     var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
     var done = function () { btns.forEach(function (b) { b.disabled = false; }); };
     (fork ? forkSession(r, text) : continueSession(r, text, opts || {})).then(done, function (err) {
-      done(); sessionStatus(err && err.name === 'AbortError' ? 'No answer from your Mac yet. It may still land. Sending again is safe; it will not post twice.' : (err && err.message) || 'Could not reach your Mac.', 'error');
+      done();
+      sessionStatus(err && err.name === 'AbortError'
+        ? (fork ? 'No answer from your Mac yet. The copy may still be made; tapping Fork again is safe, it will not make a second one.' : 'No answer from your Mac yet. It may still land. Sending again is safe; it will not post twice.')
+        : (err && err.message) || 'Could not reach your Mac.', 'error');
     });
   }
 
+  // One attempt to deliver `text`. `opts.held` is a message waiting for a reply to end: its
+  // attempts never touch the box or the status line unless they settle it.
+  // Resolves to 'sent' | 'parked' | 'held' | 'refused' | 'changed'.
   function continueSession(r, text, opts) {
-    var provider = r.provider, id = r.id, draft = draftFor(text);
-    sessionStatus('Sending');
+    var provider = r.provider, id = r.id;
+    var draft = opts.held ? { text: opts.held.text, key: opts.held.key } : draftFor(text);
+    if (!opts.held) sessionStatus('Sending');
     var bound = bindingFor(provider, id);
     var attach = bound ? Promise.resolve({ ok: true, binding: bound }) : apiAnswer(sessionPath(provider, id, '/attach'), { method: 'POST', body: { cosSessionId: cosSessionId() }, timeoutMs: 20000 }).then(function (a) {
       // 201 Created on success; any 2xx that says attached counts.
@@ -606,13 +652,13 @@
     return attach.then(function (at) {
       // Busy right now (the Mac is writing to it, or another binding holds it): park the
       // message in the session's own queue; the server delivers it when the session is free.
-      // Any other refusal is permanent for this thread, and a parked message would never go:
-      // say the server's words and offer Fork, which copies the thread and never writes to it.
+      // Any other refusal is permanent for this thread, and a parked message would never go.
       if (!at.ok) {
         var why = (at.refusal && at.refusal.reason) || '';
-        if (PARKABLE_REFUSALS.test(why)) return parkTurn(r, draft, at.refusal);
-        sessionStatus(((at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.') + ' Fork sends your message to a copy instead.', 'error');
-        return;
+        if (PARKABLE_REFUSALS.test(why)) return parkTurn(r, draft, at.refusal, opts);
+        var copy = ((at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.') + ' Fork sends your message to a copy instead.';
+        if (opts.held) settleHeld(r, opts.held, 'refused', copy); else sessionStatus(copy, 'error');
+        return 'refused';
       }
       return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(at.binding.bindingId) + '/turns', {
         method: 'POST', timeoutMs: 25000,
@@ -620,80 +666,109 @@
       }).then(function (t) {
         var b = t.body || {};
         if (t.status >= 200 && t.status < 300 && (b.outcome === 'queued' || b.outcome === 'completed')) {
-          showPendingTurn(draft.text, b.replayed ? 'already sent' : 'sent');
-          draftSent();
+          if (opts.held) settleHeld(r, opts.held, 'sent');
+          else { showPendingTurn(draft.text, b.replayed ? 'already sent' : 'sent'); clearBoxOf(draft.text); }
           sessionStatus(b.replayed ? 'Already sent. Watching for the reply.' : 'Sent. Watching for the reply.');
           watchTurn(at.binding.bindingId, draft.key, provider, id);
-          return;
+          return 'sent';
         }
         var reason = b.reason || '';
-        if (reason === 'native_thread_working') return parkTurn(r, draft, b);
+        if (reason === 'native_thread_working') return parkTurn(r, draft, b, opts);
         // COS's own reply is still running on this thread. The server's queue counts that
         // thread as free (the running child is COS's), so it cannot park this; the page holds
-        // it under the same key and sends it the moment the reply finishes.
-        if (reason === 'native_turn_in_progress') { holdUntilReplyEnds(r, draft); return; }
+        // it under the same key and sends it the moment the reply ends.
+        if (reason === 'native_turn_in_progress') { if (!opts.held) holdUntilReplyEnds(r, draft); return 'held'; }
         if (reason === 'native_thread_changed' && b.revision) {
-          state.reading.sendAnyway = b.revision;
-          sessionStatus('This session changed on your Mac since you opened it. ', null, '<button type="button" class="link-btn" data-action="send-anyway">Send anyway</button>');
-          return;
+          if (opts.held) settleHeld(r, opts.held, 'refused', 'This session changed on your Mac while your message waited.');
+          else {
+            r.sendAnyway = b.revision;
+            sessionStatus('This session changed on your Mac since you opened it. ', null, '<button type="button" class="link-btn" data-action="send-anyway">Send anyway</button>');
+          }
+          return 'changed';
         }
-        if (/^(stale_epoch|binding_expired|binding_not_found|binding_detached|binding_terminal|unknown_binding)$/.test(reason) && !opts.reattached) {
+        if (/^(stale_epoch|binding_expired|binding_not_active|binding_unusable|unknown_binding)$/.test(reason) && !opts.reattached) {
           rememberBinding(provider, id, null);
           return continueSession(r, text, Object.assign({}, opts, { reattached: true }));
         }
-        sessionStatus(b.reasonCopy || 'The session did not take that message. It is still in the box.', 'error');
+        var refusedCopy = b.reasonCopy || 'The session did not take that message.';
+        if (opts.held) settleHeld(r, opts.held, 'refused', refusedCopy);
+        else sessionStatus(refusedCopy + ' It is still in the box.', 'error');
+        return 'refused';
       });
     });
   }
 
-  var AFTER_REPLY_MAX_MS = 5 * 60000;
+  var HELD_MAX_MS = 5 * 60000, HELD_RETRY_MS = 8000;
   function holdUntilReplyEnds(r, draft) {
-    var first = !r.afterReply;
-    r.afterReply = { text: draft.text, key: draft.key, since: (r.afterReply && r.afterReply.since) || Date.now() };
-    if (first && !r.heldShown) { showPendingTurn(draft.text, 'sends after this reply'); r.heldShown = true; }
-    draftSent();
-    sessionStatus('COS is still answering. Yours sends as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don\u2019t send</button>');
-    clearInterval(r.afterTimer);
-    r.afterTimer = setInterval(function () { sendHeldMessage(r); }, 8000);
-  }
-  function sendHeldMessage(r) {
-    if (!r || !r.afterReply || r.flushing || state.reading !== r) { if (r && state.reading !== r) clearInterval(r.afterTimer); return; }
-    var held = r.afterReply;
-    if (Date.now() - held.since > AFTER_REPLY_MAX_MS) {
-      clearInterval(r.afterTimer); r.afterReply = null;
-      var input = $('session-input'); if (input && !input.value) { input.value = held.text; autoGrow(input); }
-      sessionStatus('The session is still busy, so your message is back in the box.', 'error');
-      return;
+    if (!r.held.some(function (h) { return h.key === draft.key; })) {
+      r.held.push({ text: draft.text, key: draft.key, since: Date.now() });
+      showPendingTurn(draft.text, 'sends after this reply', draft.key);
+      saveHeld(r);
     }
-    r.flushing = true; r.afterReply = null; clearInterval(r.afterTimer);
-    var heldBubble = document.querySelector('#session-turns .turn.pending:last-child'); if (heldBubble) heldBubble.remove();
-    r.heldShown = false;
-    r.draft = { text: held.text, key: held.key };
-    continueSession(r, held.text, {}).then(function () {
-      if (r.afterReply) r.afterReply.since = held.since; // still running: keep the original clock
-    }, function () {
-      r.afterReply = held; r.afterTimer = setInterval(function () { sendHeldMessage(r); }, 8000);
-    }).finally(function () { r.flushing = false; });
+    clearBoxOf(draft.text);
+    sessionStatus('COS is still answering. ' + (r.held.length > 1 ? r.held.length + ' messages send' : 'Yours sends') + ' as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don’t send</button>');
+    startHeldTimer(r);
+  }
+  function startHeldTimer(r) {
+    clearInterval(r.heldTimer);
+    r.heldTimer = setInterval(function () { flushHeld(r); }, HELD_RETRY_MS);
+  }
+  function replyEnded(r) { if (r && r.held && r.held.length) setTimeout(function () { flushHeld(r); }, 800); }
+  // Tries the oldest held message once. A "still answering" answer changes nothing on screen.
+  function flushHeld(r) {
+    if (state.reading !== r) { clearInterval(r.heldTimer); return; }
+    var next = r.held.filter(function (h) { return !h.cancelled; })[0];
+    if (!next) { clearInterval(r.heldTimer); return; }
+    if (r.flushing) return;
+    if (Date.now() - next.since > HELD_MAX_MS) { settleHeld(r, next, 'timeout', 'The session stayed busy for five minutes.'); return; }
+    r.flushing = next;
+    continueSession(r, next.text, { held: next }).then(function () {}, function () { /* no answer: keep it, retry */ })
+      .finally(function () { r.flushing = null; if (next.cancelled && r.held.indexOf(next) >= 0) settleHeld(r, next, 'cancelled'); });
+  }
+  // Ends one held message: sent, refused, timed out or cancelled.
+  function settleHeld(r, h, how, copy) {
+    r.held = r.held.filter(function (x) { return x !== h; });
+    saveHeld(r);
+    var bubble = heldBubble(h.key);
+    if (how === 'sent') {
+      if (bubble) { bubble.removeAttribute('data-held-key'); bubble.querySelector('.who').textContent = 'You, sent'; }
+      if (h.cancelled) sessionStatus('Too late to stop it: that message had already gone.');
+    } else if (how === 'parked') {
+      if (bubble) { bubble.removeAttribute('data-held-key'); bubble.querySelector('.who').textContent = 'You, waiting in line'; }
+    } else {
+      if (bubble) bubble.remove();
+      if (how === 'cancelled') returnToBox(h.text, 'Not sent.');
+      else returnToBox(h.text, copy || 'Not sent.');
+    }
+    if (!r.held.some(function (x) { return !x.cancelled; })) clearInterval(r.heldTimer);
+  }
+  function dropHeld() {
+    var r = state.reading; if (!r || !r.held.length) return;
+    r.held.slice().forEach(function (h) {
+      h.cancelled = true;
+      if (r.flushing !== h) settleHeld(r, h, 'cancelled');
+    });
+    saveHeld(r);
   }
 
-  function parkTurn(r, draft, refusal) {
+  function parkTurn(r, draft, refusal, opts) {
     return apiAnswer(sessionPath(r.provider, r.id, '/queued-turns'), {
       method: 'POST', timeoutMs: 15000,
       body: { cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text },
     }).then(function (q) {
       var b = q.body || {};
-      if (b.queued === true) {
-        draftSent();
-        sessionStatus(b.position ? 'The session is busy. Yours is #' + (b.position + 1) + ' in line and sends on its own.' : 'The session is busy. Yours sends next, on its own.');
+      if (b.queued === true || b.error === 'duplicate_turn') {
+        rememberParked(r, draft.key);
+        if (opts.held) settleHeld(r, opts.held, 'parked');
+        else { showPendingTurn(draft.text, 'waiting in line'); clearBoxOf(draft.text); }
+        sessionStatus(b.error === 'duplicate_turn' ? 'Already waiting to send.' : (b.position ? 'The session is busy. Yours is #' + (b.position + 1) + ' in line and sends on its own.' : 'The session is busy. Yours sends next, on its own.'));
         loadQueue(r.provider, r.id);
-        return;
+        return 'parked';
       }
-      if (b.error === 'duplicate_turn') { draftSent(); sessionStatus('Already waiting to send.'); loadQueue(r.provider, r.id); return; }
-      if (b.error === 'thread_free' && !r.retriedFree) {
-        r.retriedFree = true;
-        return continueSession(r, draft.text, {}).finally(function () { r.retriedFree = false; });
-      }
-      sessionStatus((refusal && refusal.reasonCopy) || (b.error === 'queue_full' ? 'That session already has a full line of waiting messages.' : 'COS could not send or queue that. Your message is still in the box.'), 'error');
+      if (b.error === 'thread_free' && !opts.freeRetry) return continueSession(r, draft.text, Object.assign({}, opts, { freeRetry: true }));
+      var copy = (refusal && refusal.reasonCopy) || (b.error === 'queue_full' ? 'That session already has a full line of waiting messages.' : 'COS could not send or queue that.');
+      if (opts.held) settleHeld(r, opts.held, 'refused', copy); else sessionStatus(copy + ' It is still in the box.', 'error');
+      return 'refused';
     });
   }
 
@@ -702,32 +777,50 @@
     clearInterval(state.turnPoll);
     var started = Date.now();
     state.turnPoll = setInterval(function () {
-      if (!state.reading || state.reading.id !== id || Date.now() - started > 180000) { clearInterval(state.turnPoll); return; }
+      var r = state.reading;
+      if (!r || r.id !== id || Date.now() - started > 180000) { clearInterval(state.turnPoll); return; }
       apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(bindingId) + '/turns/' + encodeURIComponent(key)).then(function (s) {
         var o = s.body && s.body.outcome;
         if (o === 'completed') {
           clearInterval(state.turnPoll); sessionStatus('Done.'); refreshTurns(provider, id);
           // The finished turn is the authority; the stream's idle status can trail it.
           setLive({ working: false }); var st = $('session-state'); if (st) st.textContent = 'Open';
-          if (state.reading && state.reading.afterReply) setTimeout(function () { sendHeldMessage(state.reading); }, 800);
-        }
-        else if (o === 'refused') { clearInterval(state.turnPoll); sessionStatus(s.body.reasonCopy || 'The session refused that message.', 'error'); }
+          replyEnded(r);
+        } else if (o === 'refused') { clearInterval(state.turnPoll); sessionStatus(s.body.reasonCopy || 'The session refused that message.', 'error'); replyEnded(r); }
         else if (o === 'ambiguous') { clearInterval(state.turnPoll); sessionStatus(s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', 'error'); }
       }).catch(function () {});
     }, 3000);
   }
 
+  // Fork copies the session and runs the message there. One key per draft, so a second tap or
+  // a resend after a timeout finds the same job instead of making a second copy.
   function forkSession(r, text) {
+    if (!r.forkDraft || r.forkDraft.text !== text) r.forkDraft = { text: text, key: 'fk' + newTurnKey().slice(2) };
+    var forkId = r.forkDraft.key;
     sessionStatus('Copying the session. This can take up to a minute.');
-    return apiAnswer(sessionPath(r.provider, r.id, '/fork'), { method: 'POST', timeoutMs: 65000, body: { prompt: text, cosSessionId: cosSessionId() } }).then(function (f) {
-      var b = f.body || {};
+    var settle = function (b) {
       if (b.forked === true) {
-        draftSent();
+        r.forkDraft = null; clearBoxOf(text);
         sessionStatus('Forked. The copy has your message and shows in Sessions in a moment.');
         setTimeout(function () { if (state.pane === 'sessions') loadSessions(); }, 4000);
-        return;
+        return true;
       }
-      sessionStatus(b.reasonCopy || 'COS could not copy that session.', 'error');
+      if (b.forked === false || b.state === 'failed' || b.state === 'refused') { sessionStatus((b.reasonCopy || 'COS could not copy that session.'), 'error'); return true; }
+      return false;
+    };
+    return apiAnswer(sessionPath(r.provider, r.id, '/fork'), { method: 'POST', timeoutMs: 65000, body: { prompt: text, cosSessionId: cosSessionId(), clientForkId: forkId } }).then(function (f) {
+      if (settle(f.body || {})) return;
+      if (f.status !== 202) { sessionStatus('COS could not copy that session.', 'error'); return; }
+      // 202: running in the background. Follow its job for up to three minutes.
+      var started = Date.now();
+      return new Promise(function (resolve) {
+        var poll = setInterval(function () {
+          if (state.reading !== r || Date.now() - started > 180000) { clearInterval(poll); resolve(); return; }
+          apiAnswer('/api/agent-session-forks/' + encodeURIComponent(forkId)).then(function (j) {
+            if (settle(j.body || {})) { clearInterval(poll); resolve(); }
+          }).catch(function () {});
+        }, 3000);
+      });
     });
   }
 
@@ -747,7 +840,7 @@
   }
 
   function removeQueued(key) {
-    var r = state.reading; if (!r || !key) return;
+    var r = state.reading; if (!r || !key || !parkedByMe(r, key)) return;
     apiAnswer(sessionPath(r.provider, r.id, '/queued-turns/' + encodeURIComponent(key)), { method: 'DELETE' }).then(function (d) {
       sessionStatus(d.body && d.body.cancelled ? 'Removed from the line.' : ((d.body && d.body.reasonCopy) || 'It may already be sending.'), d.body && d.body.cancelled ? null : 'error');
       loadQueue(r.provider, r.id);
@@ -1149,12 +1242,7 @@
     if (action === 'fork-session') return sendSessionTurn(true);
     if (action === 'send-anyway') { var rev = state.reading && state.reading.sendAnyway; if (state.reading) state.reading.sendAnyway = null; return sendSessionTurn(false, { acknowledgedRevision: rev }); }
     if (action === 'stop-session') return stopSession();
-    if (action === 'drop-after') {
-      var rr = state.reading;
-      if (rr && rr.afterReply) { var input = $('session-input'); if (input && !input.value) { input.value = rr.afterReply.text; autoGrow(input); } rr.afterReply = null; clearInterval(rr.afterTimer); }
-      sessionStatus('Not sent. Your message is back in the box.');
-      return;
-    }
+    if (action === 'drop-after') return dropHeld();
     if (action === 'unqueue') return removeQueued(t.getAttribute('data-turn-key'));
     if (action === 'revoke-all') {
       if (t.getAttribute('data-armed') !== '1') { t.setAttribute('data-armed', '1'); t.querySelector('.grow').firstChild.textContent = 'Tap again to sign out every browser'; return; }

@@ -1,7 +1,8 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
+  hasProxyForwardedHeaders,
   isAllowedNetworkIp,
   isAllowedNetworkOrigin,
   isLoopbackAddress,
@@ -54,30 +55,51 @@ export function setWebSessionEpochFile(path: string | null): void {
   epochCache = null
 }
 
+/**
+ * The epoch NEVER moves backwards (review W5). A missing file (first run, or deleted) and an
+ * unreadable or corrupt one both start a new epoch from the clock in whole seconds, which is
+ * above any count of earlier "Sign out every browser" bumps, so no cookie from before can come
+ * back to life. The cost is one more sign-in after such an event, never a revival.
+ */
 export function currentWebSessionEpoch(): number {
   if (epochCache !== null) return epochCache
-  let value = 0
-  if (epochFile) {
-    try {
-      const parsed = JSON.parse(readFileSync(epochFile, 'utf8')) as { epoch?: unknown }
-      if (typeof parsed.epoch === 'number' && Number.isSafeInteger(parsed.epoch) && parsed.epoch >= 0) value = parsed.epoch
-    } catch {
-      value = 0
-    }
+  if (!epochFile) {
+    epochCache = 0
+    return 0
+  }
+  let value: number | null = null
+  try {
+    const parsed = JSON.parse(readFileSync(epochFile, 'utf8')) as { epoch?: unknown }
+    if (typeof parsed.epoch === 'number' && Number.isSafeInteger(parsed.epoch) && parsed.epoch >= 0) value = parsed.epoch
+  } catch {
+    value = null
+  }
+  if (value === null) {
+    value = Math.floor(Date.now() / 1000)
+    try { writeEpoch(value) } catch { /* still forward in memory; the next read tries again */ }
   }
   epochCache = value
   return value
 }
 
-/** Invalidates every browser session. Returns the new epoch. Written atomically. */
+function writeEpoch(value: number): void {
+  if (!epochFile) return
+  mkdirSync(dirname(epochFile), { recursive: true })
+  const temporary = `${epochFile}.tmp-${process.pid}`
+  const fd = openSync(temporary, 'w', 0o600)
+  try {
+    writeSync(fd, JSON.stringify({ epoch: value }) + '\n')
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+  renameSync(temporary, epochFile)
+}
+
+/** Invalidates every browser session. Returns the new epoch. Written atomically and fsynced. */
 export function bumpWebSessionEpoch(): number {
   const next = currentWebSessionEpoch() + 1
-  if (epochFile) {
-    mkdirSync(dirname(epochFile), { recursive: true })
-    const temporary = `${epochFile}.tmp-${process.pid}`
-    writeFileSync(temporary, JSON.stringify({ epoch: next }) + '\n', { mode: 0o600 })
-    renameSync(temporary, epochFile)
-  }
+  writeEpoch(next)
   epochCache = next
   return next
 }
@@ -102,7 +124,7 @@ export function verifyWebSessionCookieValue(
   const parts = cookieValue.split('.')
   if (parts.length !== 3) return false
   const [expPart, epochPart, sigPart] = parts
-  if (!/^\d{1,15}$/.test(expPart) || !/^\d{1,9}$/.test(epochPart) || !/^[0-9a-f]{64}$/.test(sigPart)) return false
+  if (!/^\d{1,15}$/.test(expPart) || !/^\d{1,12}$/.test(epochPart) || !/^[0-9a-f]{64}$/.test(sigPart)) return false
   const expUnixSec = Number(expPart)
   if (!Number.isSafeInteger(expUnixSec) || expUnixSec * 1000 <= nowMs) return false
   // The signature covers the CURRENT epoch, so a cookie from before "Sign out every browser"
@@ -139,7 +161,12 @@ export function formatClearWebSessionCookie(secure = false): string {
 export function isWebControlSocketAllowed(
   remoteAddress: string | undefined | null,
   env: NodeJS.ProcessEnv = process.env,
+  headers?: Record<string, unknown> | null,
 ): boolean {
+  // Review W4: behind `tailscale serve`, Funnel or any local proxy every caller arrives on
+  // loopback. Such a request carries forwarding headers, and is never treated as this Mac or
+  // the tailnet (the same rule isLoopbackSocket applies to the Mac-only routes).
+  if (hasProxyForwardedHeaders(headers)) return false
   const addr = normalizeRemoteIp(remoteAddress ?? '')
   if (!addr) return false
   if (isLoopbackAddress(addr) || isTailscaleIpv4(addr) || isTailscaleIpv6(addr)) return true
@@ -184,7 +211,7 @@ export function isWebSessionAuthorized(
   apiToken: string,
   options: WebSessionVerifyOptions = {},
 ): boolean {
-  if (!isWebControlSocketAllowed(req.socket?.remoteAddress, options.env)) return false
+  if (!isWebControlSocketAllowed(req.socket?.remoteAddress, options.env, req.headers)) return false
   const headers = req.headers ?? {}
   const cookieHeader = typeof headers.cookie === 'string' ? headers.cookie : undefined
   const cookies = parseCookies(cookieHeader)
