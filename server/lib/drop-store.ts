@@ -275,7 +275,7 @@ export class DropStore {
   private readonly path: string
   private readonly lock: ServerInstanceLock
   private closed = false
-  constructor(root: string, private readonly now: () => Date = () => new Date()) {
+  constructor(root: string, private readonly now: () => Date = () => new Date(), private readonly maxBytes: number = DROP_LIMITS.fileBytes) {
     const opened = openJournal(root, 'drops.json', 'drop')
     this.path = opened.path; this.lock = opened.lock
     try {
@@ -319,7 +319,16 @@ export class DropStore {
       return r.state === 'undone' ? age <= DROP_LIMITS.keepUndoneDays * 86_400_000 : age <= DROP_LIMITS.keepDropDays * 86_400_000
     })
     if (kept.length > DROP_LIMITS.drops) throw new DropStoreError('drop_store_full', 503)
-    durableAtomicWriteFileSync(this.path, JSON.stringify({ version: 1, drops: kept, quarantined: this.quarantined }) + '\n')
+    // Never write a file the reader would refuse (it reads at most maxBytes): undone rows go first, oldest first.
+    let body = JSON.stringify({ version: 1, drops: kept, quarantined: this.quarantined }) + '\n'
+    while (Buffer.byteLength(body) > this.maxBytes) {
+      let oldest = -1
+      kept.forEach((r, i) => { if (r.state === 'undone' && (oldest < 0 || r.updatedAt < kept[oldest].updatedAt)) oldest = i })
+      if (oldest < 0) throw new DropStoreError('drop_store_full', 503)
+      kept.splice(oldest, 1)
+      body = JSON.stringify({ version: 1, drops: kept, quarantined: this.quarantined }) + '\n'
+    }
+    durableAtomicWriteFileSync(this.path, body)
     this.rows = kept
   }
   close(): void { if (this.closed) return; this.closed = true; this.lock.release() }
@@ -332,7 +341,7 @@ export class InboxFeedStore {
   private readonly path: string
   private readonly lock: ServerInstanceLock
   private closed = false
-  constructor(root: string, private readonly now: () => Date = () => new Date()) {
+  constructor(root: string, private readonly now: () => Date = () => new Date(), private readonly maxBytes: number = DROP_LIMITS.fileBytes) {
     const opened = openJournal(root, 'feed.json', 'inbox')
     this.path = opened.path; this.lock = opened.lock
     try {
@@ -396,7 +405,16 @@ export class InboxFeedStore {
     })
     if (kept.length > DROP_LIMITS.feed) throw new DropStoreError('inbox_store_full', 503)
     const version = this.versionNo + bump
-    durableAtomicWriteFileSync(this.path, JSON.stringify({ version: 1, feedVersion: version, items: kept, quarantined: this.quarantined }) + '\n')
+    // Never write a file the reader would refuse: the oldest COS lines (receipts, answers, pings) go first.
+    const serialize = () => JSON.stringify({ version: 1, feedVersion: version, items: kept, quarantined: this.quarantined }) + '\n'
+    let body = serialize()
+    while (Buffer.byteLength(body) > this.maxBytes) {
+      const oldest = kept.findIndex(i => i.kind !== 'drop')
+      if (oldest < 0) throw new DropStoreError('inbox_store_full', 503)
+      kept.splice(oldest, 1)
+      body = serialize()
+    }
+    durableAtomicWriteFileSync(this.path, body)
     this.items = kept; this.versionNo = version
   }
   close(): void { if (this.closed) return; this.closed = true; this.lock.release() }

@@ -5,7 +5,8 @@
  * | New card      | `task-capture-drop` (answers the id)               | `task-archive-drop` while untouched          |
  * | Existing card | a link on the drop only (no tasks.md write)        | the link is removed                          |
  * | Thread        | `thread-source --id <thread>`                      | `thread-unsource --id --source-id`           |
- * | Memory        | `memory-capture` into To review                    | `memory-review --decision=prune` (reversible)|
+ * | Memory        | `memory-capture` into To review (the bridge embeds | `memory-uncapture`: quarantine (reversible),  |
+ * |               | it through the embedding provider, as any memory) | refused once the memory was reviewed          |
  * | Session, note, reminder: the drop store only.                                                               |
  *
  * A bridge that does not know a verb answers `cos_pipeline_not_configured` (or the portable runtime's
@@ -64,6 +65,15 @@ async function python(args: string[], input?: string): Promise<Record<string, un
 }
 const taskCode = (e: unknown): string | null => e instanceof TaskBridgeError || e instanceof TaskRunError ? e.code : null
 
+export const CANDIDATE_MS = 6_000
+/** The value, or null when it failed or took longer than `ms`. */
+export async function within<T>(ms: number, fn: () => Promise<T>): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([fn().catch(() => null), new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), ms) })])
+  } finally { if (timer) clearTimeout(timer) }
+}
+
 export function createBridgeDropWriters(): DropWriters {
   return {
     async captureCard(domain, text, dropId) {
@@ -94,20 +104,25 @@ export function createBridgeDropWriters(): DropWriters {
       fail('bridge_error')
     },
     async candidates(text, session) {
+      // The board and the threads are read side by side, each bounded: POST /api/drops holds the API mutation lease,
+      // so its worst case (candidates 6 s, Jev 20 s, a card write with lock retries about 37 s) stays under Control's
+      // 90 s drain. A part that is slow or unreadable is simply not offered.
       const out: RouteCandidates = { domains: [], cards: [], threads: [], ...(session ? { session } : {}) }
       try { out.domains = taskDomains().map(name => ({ name, label: domainLabel(name) })) } catch { /* no domains: no new card */ }
-      try {
-        const open = (await listBoard()).filter(row => !row.checked)
-        out.cards = rankByOverlap(text, open, row => row.text, DROP_ROUTER_LIMITS.cardCandidates)
-          .map(row => ({ id: row.id, workIdentity: row.workIdentity ?? row.id, domain: row.domain, text: row.text }))
-      } catch { /* board unreadable: no existing card offered */ }
-      try {
-        if (contextSourceAvailable()) {
-          const threads = normalizeThreads(await callPython(['threads', '--limit', '50'], 10_000), 50).threads.filter(t => !t.is_resolved)
-          out.threads = rankByOverlap(text, threads, t => `${t.name} ${t.topics.join(' ')}`, DROP_ROUTER_LIMITS.threadCandidates)
-            .map(t => ({ id: t.id, name: t.name }))
-        }
-      } catch { /* threads unreadable: none offered */ }
+      const [cards, threads] = await Promise.all([
+        within(CANDIDATE_MS, async () => {
+          const open = (await listBoard()).filter(row => !row.checked)
+          return rankByOverlap(text, open, row => row.text, DROP_ROUTER_LIMITS.cardCandidates)
+            .map(row => ({ id: row.id, workIdentity: row.workIdentity ?? row.id, domain: row.domain, text: row.text }))
+        }),
+        within(CANDIDATE_MS, async () => {
+          if (!contextSourceAvailable()) return []
+          const list = normalizeThreads(await callPython(['threads', '--limit', '50'], CANDIDATE_MS), 50).threads.filter(t => !t.is_resolved)
+          return rankByOverlap(text, list, t => `${t.name} ${t.topics.join(' ')}`, DROP_ROUTER_LIMITS.threadCandidates).map(t => ({ id: t.id, name: t.name }))
+        }),
+      ])
+      out.cards = cards ?? []
+      out.threads = threads ?? []
       return out
     },
     async cardStates() {

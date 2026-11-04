@@ -398,7 +398,8 @@ export class DropService {
     if (!this.deps.askLookup) return 0
     let posted = 0
     const cutoff = this.now().getTime() - ASK_WINDOW_MS
-    for (const drop of this.deps.drops.list()) {
+    // Only the rows with a pending ask are copied: the summary poll calls this often.
+    for (const drop of this.deps.drops.select(d => d.dest === 'ask' && !!d.ask && !d.ask.answeredAt && Date.parse(d.createdAt) >= cutoff)) {
       if (drop.dest !== 'ask' || !drop.ask || drop.ask.answeredAt || Date.parse(drop.createdAt) < cutoff) continue
       let job: AskLookup | undefined
       try { job = await this.deps.askLookup(drop.ask.clientJobId, drop.ask.generation) } catch { continue }

@@ -83,6 +83,37 @@ describe('DropStore', () => {
   })
 })
 
+describe('size bound', () => {
+  it('trims the oldest undone drops to stay under the read limit, and refuses when only live drops are left', () => {
+    const r = root(); let n = 0
+    const id = () => `3f0c9a52-1b2d-4c8e-9f10-${(n++).toString(16).padStart(12, '0')}`
+    const store = new DropStore(join(r, 'drops'), now, 4_000); open.push(store)
+    const big = 'w'.repeat(900)
+    const undone = [id(), id()]
+    const dayBefore = new Date(Date.parse(at) - 86_400_000).toISOString()
+    store.insert(drop({ id: undone[0], text: big, state: 'undone', createdAt: dayBefore, updatedAt: dayBefore }))
+    store.insert(drop({ id: undone[1], text: big, state: 'undone' }))
+    store.insert(drop({ id: id(), text: big, state: 'filed', dest: 'note' }))
+    store.insert(drop({ id: id(), text: big, state: 'filed', dest: 'note' }))
+    expect(store.list().map(d => d.id)).not.toContain(undone[0])
+    expect(statSync(join(r, 'drops', 'drops.json')).size).toBeLessThanOrEqual(4_000)
+    expect(() => { for (let i = 0; i < 6; i++) store.insert(drop({ id: id(), text: big, state: 'filed', dest: 'note' })) })
+      .toThrowError(expect.objectContaining({ code: 'drop_store_full' }))
+    expect(statSync(join(r, 'drops', 'drops.json')).size).toBeLessThanOrEqual(4_000)
+  })
+  it('the feed drops its oldest COS lines first, never a drop line', () => {
+    const r = root(); const feed = new InboxFeedStore(join(r, 'inbox'), now, 3_000); open.push(feed)
+    const big = 'w'.repeat(700)
+    feed.insert([item({ id: `fi_${'1'.repeat(32)}`, kind: 'drop', key: 'd1', source: 'mac', line: big })])
+    feed.insert([item({ id: `fi_${'2'.repeat(32)}`, key: 'r1', line: big })])
+    feed.insert([item({ id: `fi_${'3'.repeat(32)}`, key: 'r2', line: big })])
+    feed.insert([item({ id: `fi_${'4'.repeat(32)}`, key: 'r3', line: big })])
+    expect(feed.list().map(i => i.key)).toContain('d1')
+    expect(feed.list().map(i => i.key)).not.toContain('r1')
+    expect(statSync(join(r, 'inbox', 'feed.json')).size).toBeLessThanOrEqual(3_000)
+  })
+})
+
 describe('InboxFeedStore', () => {
   it('inserts each key exactly once, even inside one batch', () => {
     const r = root(); const feed = new InboxFeedStore(join(r, 'inbox'), now); open.push(feed)
