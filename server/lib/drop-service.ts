@@ -89,6 +89,7 @@ export class DropService {
   constructor(private readonly deps: DropServiceDeps) {
     this.now = deps.now ?? (() => new Date())
     this.recover()
+    this.purgeOrphans()
   }
 
   // ── Intake ─────────────────────────────────────────────────────────
@@ -235,12 +236,22 @@ export class DropService {
     return this.answer(this.deps.drops.get(saved.id)!, false)
   }
 
+  /**
+   * Retention across the two stores (plan section 6): when the drop store lets a drop go (a year, or 30 days after
+   * Undo), its chat lines go too, so its words never outlive the drop.
+   */
+  private purgeOrphans(): void {
+    const ids = this.deps.drops.ids()
+    this.deps.feed.purge(item => DROP_ID.test(item.threadId) && !ids.has(item.threadId))
+  }
+
   private receipt(drop: DropRecord, kind: 'receipt' | 'question' | 'followup', title: string, line: string, links: DropLink[], actions: FeedAction[], generation: number): FeedItem {
     const at = this.now().toISOString()
     const [item] = this.deps.feed.insert([{ id: feedId(), kind, threadId: drop.id, createdAt: at,
       // Receipts are born read (plan section 1); a question and a follow-up count as unread on the pinned row.
       readAt: kind === 'receipt' ? at : null, source: 'cos', title, line, links, actions, state: 'live',
       ...(kind === 'receipt' && drop.undoUntil ? { undoUntil: drop.undoUntil } : {}), key: `${drop.id}:${kind}:${generation}` }])
+    this.purgeOrphans()
     return item
   }
 

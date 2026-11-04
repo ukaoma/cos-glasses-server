@@ -303,6 +303,23 @@ describe('the chat', () => {
   })
 })
 
+describe('retention', () => {
+  it('an undone drop and its chat lines are gone after 30 days; a filed one stays', async () => {
+    const h = harness()
+    const kept = await h.service.submit(drop('Draft the onboarding email sequence for new liquor stores'))
+    const gone = await h.service.submit(drop('Trade show budget might need another booth panel'))
+    await h.service.undo(gone.drop.id)
+    h.advance(31 * 86_400_000)
+    await h.service.submit(drop('Book the dentist for the kids'))
+    expect(h.drops.get(gone.drop.id)).toBeUndefined()
+    expect(h.feed.list().filter(i => i.threadId === gone.drop.id)).toEqual([])
+    expect(h.feed.list().filter(i => i.threadId === kept.drop.id && i.kind === 'drop')).toHaveLength(1)
+    // A reopen purges too: no chat line ever outlives its drop.
+    const { feed } = h.reopen()
+    expect(feed.list().some(i => i.threadId === gone.drop.id)).toBe(false)
+  })
+})
+
 describe('History', () => {
   it('filters by words over text and link labels, kind and status, newest first', async () => {
     const h = harness()

@@ -286,6 +286,9 @@ export class DropStore {
   }
   list(): DropRecord[] { return structuredClone(this.rows) }
   get(id: string): DropRecord | undefined { const row = this.rows.find(r => r.id === id); return row ? structuredClone(row) : undefined }
+  /** Copies of the matching rows only (a poll that needs a few rows does not copy them all). */
+  select(match: (row: Readonly<DropRecord>) => boolean): DropRecord[] { return this.rows.filter(match).map(r => structuredClone(r)) }
+  ids(): Set<string> { return new Set(this.rows.map(r => r.id)) }
   quarantineCount(): number { return this.quarantined.length }
 
   /** Insert a new drop. A repeated id returns the stored one unchanged (idempotent on the drop id). */
@@ -361,6 +364,14 @@ export class InboxFeedStore {
     }
     if (add.length) this.write([...this.items, ...add], add.length)
     return out
+  }
+
+  /** Remove the items `drop` answers true for (the drops store let their drop go). Writes only when one goes. */
+  purge(drop: (item: Readonly<FeedItem>) => boolean): number {
+    const kept = this.items.filter(i => !drop(i))
+    const removed = this.items.length - kept.length
+    if (removed) this.write(kept, 1)
+    return removed
   }
 
   update(ids: ReadonlySet<string>, fn: (item: FeedItem) => FeedItem): FeedItem[] {
