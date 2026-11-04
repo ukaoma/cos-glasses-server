@@ -507,3 +507,13 @@ select.field {
 .device-code p + p { margin-top: 6px; }
 .device-code .url { color: var(--ink); overflow-wrap: anywhere; }
 #auth-switch { margin-top: 6px; }
+
+/* Live work inside a session reader */
+.live-box { margin-top: 12px; padding: 12px 14px; border-radius: 14px; background: var(--run-bg); color: var(--run-title); }
+.live-head { display: flex; align-items: center; gap: 10px; min-height: 28px; }
+.live-head strong { font-weight: 600; }
+.live-step { color: var(--run-sub); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.live-head .link-btn { color: var(--run-open); margin-left: auto; min-height: 36px; }
+.live-prose { margin-top: 8px; font-size: 15px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14em; overflow: auto; color: var(--run-title); }
+#session-status .link-btn { min-height: 0; padding: 0; }
+.turn.user.pending { opacity: 0.72; }

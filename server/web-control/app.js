@@ -136,6 +136,7 @@
     document.querySelectorAll('#section-menu [data-goto]').forEach(function (b) { if (b.getAttribute('data-goto') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     document.querySelectorAll('.rail-btn').forEach(function (b) { if (b.getAttribute('data-pane') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     if (state.stream && !(r.pane === 'sessions' && r.args.length === 2)) { state.stream.close(); state.stream = null; }
+    if (!(r.pane === 'sessions' && r.args.length === 2)) { clearInterval(state.turnPoll); if (state.reading) clearInterval(state.reading.afterTimer); state.reading = null; }
     if (r.pane !== 'meetings' && state.livePoll) { clearInterval(state.livePoll); state.livePoll = null; }
 
     var reading = r.args.length > 0;
@@ -401,36 +402,358 @@
       }).join('') + '</div>';
     }).catch(function (err) { return emptyBox('Meaning search did not run', err.message); });
   }
+  // ── Sessions: read, send, queue, fork, stop (the glasses' Continue, from a browser) ──
+  // The server owns every safety rule (agent-session-bindings.ts): COS writes into a desktop
+  // thread only through a binding, attaches only when no live process owns the thread, and
+  // re-checks before delivery. This page follows the same order the glasses do:
+  //   attach (or reuse this tab's binding) -> send the turn under ONE key per draft ->
+  //   if the session is busy, park it in the session's queue -> watch the live stream.
+  // A refusal is an answer with the server's own words, never an error to retry blindly. The
+  // draft key is reused on a resend, so a retry after a lost answer can never post twice.
+  var WEB_SESSION_KEY = 'cos_web_sid';
+  function cosSessionId() {
+    try {
+      var v = localStorage.getItem(WEB_SESSION_KEY);
+      if (v && /^web-[a-z0-9]{8,24}$/.test(v)) return v;
+      v = 'web-' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36).slice(-4);
+      localStorage.setItem(WEB_SESSION_KEY, v);
+      return v;
+    } catch (_e) { return 'web-' + Date.now().toString(36); }
+  }
+  function newTurnKey() { return 'ct' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10).padEnd(8, '0'); }
+  function targetKey(provider, id) { return provider.length + ':' + provider + ':' + id.length + ':' + id; }
+  var BINDING_REUSE_MS = 25 * 60000; // the server keeps a binding 30 min
+  var PARKABLE_REFUSALS = /^(native_thread_working|native_target_busy|target_busy)$/;
+  // A binding is kept per browser, across reloads: the server allows one live binding per
+  // thread, so a reload that forgot it would read its own binding as "target busy".
+  var BINDINGS_KEY = 'cos_web_bindings';
+  function readBindings() {
+    try { var all = JSON.parse(localStorage.getItem(BINDINGS_KEY) || '{}'); return all && typeof all === 'object' ? all : {}; } catch (_e) { return {}; }
+  }
+  function bindingFor(provider, id) {
+    var b = readBindings()[provider + '|' + id];
+    return b && typeof b.bindingId === 'string' && typeof b.epoch === 'number' && Date.now() - b.at < BINDING_REUSE_MS ? b : null;
+  }
+  function rememberBinding(provider, id, b) {
+    var all = readBindings(), now = Date.now();
+    Object.keys(all).forEach(function (k) { if (!all[k] || now - all[k].at >= BINDING_REUSE_MS) delete all[k]; });
+    if (b) all[provider + '|' + id] = b; else delete all[provider + '|' + id];
+    try { localStorage.setItem(BINDINGS_KEY, JSON.stringify(all)); } catch (_e) {}
+  }
+  function sessionPath(provider, id, tail) { return '/api/agent-sessions/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) + (tail || ''); }
+
+  // Like api(), but a 4xx refusal comes back as { status, body } instead of throwing, because
+  // these routes answer "busy", "changed" or "not now" with a body the person should read.
+  function apiAnswer(path, opts) {
+    var o = opts || {};
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = ctrl && o.timeoutMs ? setTimeout(function () { ctrl.abort(); }, o.timeoutMs) : null;
+    var headers = { 'X-COS-Web': '1' };
+    if (o.body !== undefined) headers['Content-Type'] = 'application/json';
+    return fetch(path, { method: o.method || 'GET', headers: headers, credentials: 'same-origin', body: o.body !== undefined ? JSON.stringify(o.body) : undefined, signal: ctrl ? ctrl.signal : undefined })
+      .then(function (res) {
+        if (res.status === 401) { showAuth(); throw new Error('Signed out. Connect this browser again.'); }
+        return res.text().then(function (t) { var b = {}; try { b = t ? JSON.parse(t) : {}; } catch (_e) { b = {}; } return { status: res.status, body: b || {} }; });
+      })
+      .finally(function () { if (timer) clearTimeout(timer); });
+  }
+
   function openSession(provider, id) {
     var reader = $('session-reader');
     if (!provider || !id) return;
     if (state.stream) { state.stream.close(); state.stream = null; }
+    clearInterval(state.turnPoll);
+    state.reading = { provider: provider, id: id, draft: null, live: null };
     document.querySelectorAll('#sessions-list .row').forEach(function (r) { r.setAttribute('aria-selected', String(r.getAttribute('data-session') === provider + '|' + id)); });
     reader.innerHTML = '<div class="reader-head"><div class="skeleton" style="height:28px;width:70%;margin:10px 0"></div></div>' + skeletonRows(3);
-    api('/api/agent-sessions/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) + '?turns=30').then(function (d) {
-      // recent_turns is a plain list of {role, text, at}, oldest first.
+    api(sessionPath(provider, id, '?turns=30')).then(function (d) {
       var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : ((d && d.recent_turns && d.recent_turns.turns) || (d && d.turns) || []);
-      var stateWord = d.running_active ? 'Working now' : d.running ? 'Open' : 'Not running';
       reader.innerHTML =
         '<div class="reader-head"><h2>' + esc(sessionTitle(d)) + '</h2>' +
-        '<div class="row-sub">' + badge(provider) + '<span id="session-state">' + esc(stateWord) + '</span>' + (d.project ? '<span class="clip">' + esc(d.project) + '</span>' : '') + '</div></div>' +
+        '<div class="row-sub">' + badge(provider) + '<span id="session-state">' + esc(d.running_active ? 'Working now' : d.running ? 'Open' : 'Not running') + '</span>' +
+        (d.project ? '<span class="clip">' + esc(String(d.project).replace(/^-Users-[^-]+-/, '')) + '</span>' : '') + '</div></div>' +
         '<div class="turns" id="session-turns">' + renderTurns(turns, d) + '</div>' +
+        '<div class="live-box hidden" id="session-live" aria-live="polite"></div>' +
+        '<div id="session-queue"></div>' +
         '<form class="composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
-          '<textarea id="session-input" rows="1" placeholder="Send this session a turn" enterkeyhint="send" aria-label="Turn for this session"></textarea>' +
-          '<div class="composer-actions"><button type="button" class="btn small" data-action="fork-session">Fork</button>' +
+          '<textarea id="session-input" rows="1" placeholder="Send this session a message" enterkeyhint="send" aria-label="Message for this session"></textarea>' +
+          '<div class="composer-actions"><button type="button" class="btn small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
           '<button type="submit" class="btn primary small" aria-label="Send"><svg class="icon" style="width:18px;height:18px"><use href="#i-send"/></svg></button></div>' +
-        '</form><p class="status-line" id="session-status"></p>';
-      // Land on the latest turn, where a reply goes, not the oldest of the thirty.
+        '</form><div class="status-line" id="session-status"></div>';
+      setLive({ working: !!d.running_active });
+      loadQueue(provider, id);
       if (turns.length) requestAnimationFrame(function () { window.scrollTo(0, document.documentElement.scrollHeight); });
-      try {
-        var es = new EventSource('/api/agent-sessions/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) + '/stream');
-        state.stream = es;
-        es.addEventListener('state', function (ev) {
-          try { var st = JSON.parse(ev.data); var el = $('session-state'); if (el && st && st.state) el.textContent = st.state === 'running' ? 'Working now' : st.state === 'idle' ? 'Open' : String(st.state); } catch (_e) {}
-        });
-      } catch (_e) {}
+      watchSession(provider, id);
     }).catch(function (err) { reader.innerHTML = emptyBox('This session did not open', err.message); });
   }
+
+  // The live stream: one JSON object per data line, `kind` = status | tool | prose | heartbeat.
+  function watchSession(provider, id) {
+    if (typeof EventSource !== 'function') return;
+    var es;
+    try { es = new EventSource(sessionPath(provider, id, '/stream?seed=turn')); } catch (_e) { return; }
+    state.stream = es;
+    var wasWorking = false;
+    es.onmessage = function (ev) {
+      var e; try { e = JSON.parse(ev.data); } catch (_e) { return; }
+      if (!state.reading || state.reading.id !== id) return;
+      if (e.kind === 'status') {
+        var working = e.state === 'working' || e.agent_state === 'running';
+        // The stream's status trails a Stop by a few seconds; do not let that echo reopen it.
+        if (working && state.reading.stoppedAt && Date.now() - state.reading.stoppedAt < 8000) working = false;
+        var waiting = e.state === 'waiting' || e.state === 'needs_input' || e.agent_state === 'waiting';
+        var el = $('session-state');
+        if (el) el.textContent = working ? 'Working now' : waiting ? 'Waiting for you' : 'Open';
+        setLive({ working: working });
+        if (wasWorking && !working) {
+          refreshTurns(provider, id);
+          if (state.reading && state.reading.afterReply) setTimeout(function () { sendHeldMessage(state.reading); }, 800);
+        }
+        wasWorking = working;
+      } else if (e.kind === 'tool') {
+        setLive({ step: [e.verb, e.target].filter(Boolean).join(' ') });
+      } else if (e.kind === 'prose' && e.text) {
+        setLive({ prose: String(e.text) });
+      }
+    };
+  }
+  function setLive(patch) {
+    var r = state.reading; if (!r) return;
+    r.live = Object.assign(r.live || {}, patch);
+    var box = $('session-live'); if (!box) return;
+    var live = r.live;
+    if (!live.working) { box.classList.add('hidden'); box.innerHTML = ''; live.step = null; live.prose = null; return; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="live-head"><span class="pulse" aria-hidden="true"></span><strong>Working</strong>' +
+      (live.step ? '<span class="live-step">' + esc(live.step) + '</span>' : '') +
+      '<button type="button" class="link-btn" data-action="stop-session">Stop</button></div>' +
+      (live.prose ? '<div class="live-prose">' + md(live.prose.slice(-1200)) + '</div>' : '');
+  }
+  function refreshTurns(provider, id) {
+    api(sessionPath(provider, id, '?turns=30')).then(function (d) {
+      if (!state.reading || state.reading.id !== id) return;
+      var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : [];
+      var box = $('session-turns'); if (box) box.innerHTML = renderTurns(turns, d);
+      loadQueue(provider, id);
+    }).catch(function () {});
+  }
+  function loadQueue(provider, id) {
+    apiAnswer(sessionPath(provider, id, '/queued-turns')).then(function (r) {
+      var box = $('session-queue'); if (!box || !state.reading || state.reading.id !== id) return;
+      var rows = (r.status === 200 && r.body && r.body.turns) || [];
+      var waiting = rows.filter(function (t) { return t.status === 'waiting' || t.status === 'queued' || t.status === 'pending'; });
+      if (!waiting.length) { box.innerHTML = ''; return; }
+      box.innerHTML = '<h3 class="group-title" style="margin-top:14px"><span>Waiting to send</span><span>' + waiting.length + '</span></h3><div class="list">' +
+        waiting.map(function (t) {
+          var mine = t.owner !== 'codex';
+          return '<div class="row"><span class="row-title">' + esc(t.preview || t.prompt || 'Message') + '</span><span class="row-side">' + esc(t.position != null ? (t.position === 0 ? 'Next' : '#' + (t.position + 1)) : '') + '</span>' +
+            (mine ? '<span class="row-actions"><button type="button" class="link-btn" data-action="unqueue" data-turn-key="' + esc(t.clientTurnId) + '">Remove</button></span>' : '') + '</div>';
+        }).join('') + '</div>';
+    }).catch(function () {});
+  }
+
+  function sessionStatus(text, kind, actionHtml) {
+    var el = $('session-status'); if (!el) return;
+    el.className = 'status-line' + (kind === 'error' ? ' error' : '');
+    el.innerHTML = esc(text || '') + (actionHtml || '');
+  }
+  function draftFor(text) {
+    var r = state.reading;
+    if (!r.draft || r.draft.text !== text) r.draft = { text: text, key: newTurnKey() };
+    return r.draft;
+  }
+  // Your words show in the conversation the moment the Mac accepts them; the next refresh
+  // of the transcript replaces this bubble with the real turn.
+  function showPendingTurn(text, note) {
+    var box = $('session-turns'); if (!box) return;
+    var ph = box.querySelector('.reader-placeholder'); if (ph) ph.remove();
+    var el = document.createElement('div');
+    el.className = 'turn user pending';
+    el.innerHTML = '<span class="who">You, ' + esc(note) + '</span>' + md(text);
+    box.appendChild(el);
+    requestAnimationFrame(function () { window.scrollTo(0, document.documentElement.scrollHeight); });
+  }
+  function draftSent() {
+    var input = $('session-input'); if (input) { input.value = ''; autoGrow(input); }
+    if (state.reading) state.reading.draft = null;
+  }
+
+  function sendSessionTurn(fork, opts) {
+    var r = state.reading; var form = $('session-form');
+    if (!r || !form) return;
+    var input = $('session-input'), text = input.value.trim();
+    if (!text) { sessionStatus(fork ? 'Write what the copy should do first.' : 'Write a message first.', 'error'); return; }
+    var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
+    var done = function () { btns.forEach(function (b) { b.disabled = false; }); };
+    (fork ? forkSession(r, text) : continueSession(r, text, opts || {})).then(done, function (err) {
+      done(); sessionStatus(err && err.name === 'AbortError' ? 'No answer from your Mac yet. It may still land. Sending again is safe; it will not post twice.' : (err && err.message) || 'Could not reach your Mac.', 'error');
+    });
+  }
+
+  function continueSession(r, text, opts) {
+    var provider = r.provider, id = r.id, draft = draftFor(text);
+    sessionStatus('Sending');
+    var bound = bindingFor(provider, id);
+    var attach = bound ? Promise.resolve({ ok: true, binding: bound }) : apiAnswer(sessionPath(provider, id, '/attach'), { method: 'POST', body: { cosSessionId: cosSessionId() }, timeoutMs: 20000 }).then(function (a) {
+      // 201 Created on success; any 2xx that says attached counts.
+      if (a.status >= 200 && a.status < 300 && a.body.attached === true && a.body.bindingId && typeof a.body.epoch === 'number') {
+        var b = { bindingId: a.body.bindingId, epoch: a.body.epoch, at: Date.now() };
+        rememberBinding(provider, id, b);
+        return { ok: true, binding: b };
+      }
+      return { ok: false, refusal: a.body };
+    });
+    return attach.then(function (at) {
+      // Busy right now (the Mac is writing to it, or another binding holds it): park the
+      // message in the session's own queue; the server delivers it when the session is free.
+      // Any other refusal is permanent for this thread, and a parked message would never go:
+      // say the server's words and offer Fork, which copies the thread and never writes to it.
+      if (!at.ok) {
+        var why = (at.refusal && at.refusal.reason) || '';
+        if (PARKABLE_REFUSALS.test(why)) return parkTurn(r, draft, at.refusal);
+        sessionStatus(((at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.') + ' Fork sends your message to a copy instead.', 'error');
+        return;
+      }
+      return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(at.binding.bindingId) + '/turns', {
+        method: 'POST', timeoutMs: 25000,
+        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}),
+      }).then(function (t) {
+        var b = t.body || {};
+        if (t.status >= 200 && t.status < 300 && (b.outcome === 'queued' || b.outcome === 'completed')) {
+          showPendingTurn(draft.text, b.replayed ? 'already sent' : 'sent');
+          draftSent();
+          sessionStatus(b.replayed ? 'Already sent. Watching for the reply.' : 'Sent. Watching for the reply.');
+          watchTurn(at.binding.bindingId, draft.key, provider, id);
+          return;
+        }
+        var reason = b.reason || '';
+        if (reason === 'native_thread_working') return parkTurn(r, draft, b);
+        // COS's own reply is still running on this thread. The server's queue counts that
+        // thread as free (the running child is COS's), so it cannot park this; the page holds
+        // it under the same key and sends it the moment the reply finishes.
+        if (reason === 'native_turn_in_progress') { holdUntilReplyEnds(r, draft); return; }
+        if (reason === 'native_thread_changed' && b.revision) {
+          state.reading.sendAnyway = b.revision;
+          sessionStatus('This session changed on your Mac since you opened it. ', null, '<button type="button" class="link-btn" data-action="send-anyway">Send anyway</button>');
+          return;
+        }
+        if (/^(stale_epoch|binding_expired|binding_not_found|binding_detached|binding_terminal|unknown_binding)$/.test(reason) && !opts.reattached) {
+          rememberBinding(provider, id, null);
+          return continueSession(r, text, Object.assign({}, opts, { reattached: true }));
+        }
+        sessionStatus(b.reasonCopy || 'The session did not take that message. It is still in the box.', 'error');
+      });
+    });
+  }
+
+  var AFTER_REPLY_MAX_MS = 5 * 60000;
+  function holdUntilReplyEnds(r, draft) {
+    var first = !r.afterReply;
+    r.afterReply = { text: draft.text, key: draft.key, since: (r.afterReply && r.afterReply.since) || Date.now() };
+    if (first && !r.heldShown) { showPendingTurn(draft.text, 'sends after this reply'); r.heldShown = true; }
+    draftSent();
+    sessionStatus('COS is still answering. Yours sends as soon as it finishes. ', null, '<button type="button" class="link-btn" data-action="drop-after">Don\u2019t send</button>');
+    clearInterval(r.afterTimer);
+    r.afterTimer = setInterval(function () { sendHeldMessage(r); }, 8000);
+  }
+  function sendHeldMessage(r) {
+    if (!r || !r.afterReply || r.flushing || state.reading !== r) { if (r && state.reading !== r) clearInterval(r.afterTimer); return; }
+    var held = r.afterReply;
+    if (Date.now() - held.since > AFTER_REPLY_MAX_MS) {
+      clearInterval(r.afterTimer); r.afterReply = null;
+      var input = $('session-input'); if (input && !input.value) { input.value = held.text; autoGrow(input); }
+      sessionStatus('The session is still busy, so your message is back in the box.', 'error');
+      return;
+    }
+    r.flushing = true; r.afterReply = null; clearInterval(r.afterTimer);
+    var heldBubble = document.querySelector('#session-turns .turn.pending:last-child'); if (heldBubble) heldBubble.remove();
+    r.heldShown = false;
+    r.draft = { text: held.text, key: held.key };
+    continueSession(r, held.text, {}).then(function () {
+      if (r.afterReply) r.afterReply.since = held.since; // still running: keep the original clock
+    }, function () {
+      r.afterReply = held; r.afterTimer = setInterval(function () { sendHeldMessage(r); }, 8000);
+    }).finally(function () { r.flushing = false; });
+  }
+
+  function parkTurn(r, draft, refusal) {
+    return apiAnswer(sessionPath(r.provider, r.id, '/queued-turns'), {
+      method: 'POST', timeoutMs: 15000,
+      body: { cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text },
+    }).then(function (q) {
+      var b = q.body || {};
+      if (b.queued === true) {
+        draftSent();
+        sessionStatus(b.position ? 'The session is busy. Yours is #' + (b.position + 1) + ' in line and sends on its own.' : 'The session is busy. Yours sends next, on its own.');
+        loadQueue(r.provider, r.id);
+        return;
+      }
+      if (b.error === 'duplicate_turn') { draftSent(); sessionStatus('Already waiting to send.'); loadQueue(r.provider, r.id); return; }
+      if (b.error === 'thread_free' && !r.retriedFree) {
+        r.retriedFree = true;
+        return continueSession(r, draft.text, {}).finally(function () { r.retriedFree = false; });
+      }
+      sessionStatus((refusal && refusal.reasonCopy) || (b.error === 'queue_full' ? 'That session already has a full line of waiting messages.' : 'COS could not send or queue that. Your message is still in the box.'), 'error');
+    });
+  }
+
+  // Follow one sent turn to its end (completed, refused, or ambiguous) for up to 3 minutes.
+  function watchTurn(bindingId, key, provider, id) {
+    clearInterval(state.turnPoll);
+    var started = Date.now();
+    state.turnPoll = setInterval(function () {
+      if (!state.reading || state.reading.id !== id || Date.now() - started > 180000) { clearInterval(state.turnPoll); return; }
+      apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(bindingId) + '/turns/' + encodeURIComponent(key)).then(function (s) {
+        var o = s.body && s.body.outcome;
+        if (o === 'completed') {
+          clearInterval(state.turnPoll); sessionStatus('Done.'); refreshTurns(provider, id);
+          // The finished turn is the authority; the stream's idle status can trail it.
+          setLive({ working: false }); var st = $('session-state'); if (st) st.textContent = 'Open';
+          if (state.reading && state.reading.afterReply) setTimeout(function () { sendHeldMessage(state.reading); }, 800);
+        }
+        else if (o === 'refused') { clearInterval(state.turnPoll); sessionStatus(s.body.reasonCopy || 'The session refused that message.', 'error'); }
+        else if (o === 'ambiguous') { clearInterval(state.turnPoll); sessionStatus(s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', 'error'); }
+      }).catch(function () {});
+    }, 3000);
+  }
+
+  function forkSession(r, text) {
+    sessionStatus('Copying the session. This can take up to a minute.');
+    return apiAnswer(sessionPath(r.provider, r.id, '/fork'), { method: 'POST', timeoutMs: 65000, body: { prompt: text, cosSessionId: cosSessionId() } }).then(function (f) {
+      var b = f.body || {};
+      if (b.forked === true) {
+        draftSent();
+        sessionStatus('Forked. The copy has your message and shows in Sessions in a moment.');
+        setTimeout(function () { if (state.pane === 'sessions') loadSessions(); }, 4000);
+        return;
+      }
+      sessionStatus(b.reasonCopy || 'COS could not copy that session.', 'error');
+    });
+  }
+
+  function stopSession() {
+    var r = state.reading; if (!r) return;
+    sessionStatus('Stopping');
+    apiAnswer(sessionPath(r.provider, r.id, '/cancel'), { method: 'POST', timeoutMs: 15000, body: { clientCancelId: newTurnKey() } }).then(function (c) {
+      var b = c.body || {};
+      sessionStatus(b.reasonCopy || (b.cancelled ? 'Stopped.' : 'COS could not stop it.'), b.cancelled ? null : 'error');
+      if (b.cancelled) {
+        r.stoppedAt = Date.now();
+        clearInterval(state.turnPoll);
+        setLive({ working: false }); var st = $('session-state'); if (st) st.textContent = 'Open';
+        setTimeout(function () { if (state.reading === r) refreshTurns(r.provider, r.id); }, 1500);
+      }
+    }).catch(function (err) { sessionStatus(err.message, 'error'); });
+  }
+
+  function removeQueued(key) {
+    var r = state.reading; if (!r || !key) return;
+    apiAnswer(sessionPath(r.provider, r.id, '/queued-turns/' + encodeURIComponent(key)), { method: 'DELETE' }).then(function (d) {
+      sessionStatus(d.body && d.body.cancelled ? 'Removed from the line.' : ((d.body && d.body.reasonCopy) || 'It may already be sending.'), d.body && d.body.cancelled ? null : 'error');
+      loadQueue(r.provider, r.id);
+    });
+  }
+
   function renderTurns(turns, d) {
     if (!turns.length) return '<p class="reader-placeholder">' + esc(d && (d.discussion_summary || d.first_prompt) || 'No turns recorded yet.') + '</p>';
     return turns.map(function (t, i) {
@@ -442,20 +765,6 @@
       return '<div class="turn ' + role + (long ? ' clamped' : '') + '" data-turn="' + i + '"><span class="who">' + esc(who) + '</span>' + md(text) + '</div>' +
         (long ? '<button type="button" class="link-btn turn-more" data-action="expand-turn" data-turn="' + i + '">Show all of it</button>' : '');
     }).join('');
-  }
-  function sendSessionTurn(fork) {
-    var form = $('session-form'); if (!form) return;
-    var provider = form.getAttribute('data-provider'), id = form.getAttribute('data-id');
-    var input = $('session-input'), text = input.value.trim(), status = $('session-status');
-    if (!text) { setStatus(status, fork ? 'Write what the fork should do first.' : 'Write a turn first.', true); return; }
-    setStatus(status, fork ? 'Starting a fork' : 'Sending');
-    var path = '/api/agent-sessions/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) + (fork ? '/fork' : '/queued-turns');
-    var body = fork ? { prompt: text, clientForkId: 'web_fork_' + Date.now() } : { prompt: text, clientTurnId: 'web_turn_' + Date.now() };
-    api(path, { method: 'POST', body: body }).then(function (res) {
-      input.value = ''; autoGrow(input);
-      setStatus(status, fork ? 'Fork started. It shows under Sessions in a moment.' : 'Sent. It runs when the session is free.');
-      if (fork && res && res.newSessionId) toast('Fork started');
-    }).catch(function (err) { setStatus(status, err.message, true); });
   }
 
   // ── Meetings ────────────────────────────────────────────
@@ -838,6 +1147,20 @@
     if (action === 'show-done') { state.workOpenStages.complete = true; return renderWork(null); }
     if (action === 'show-all') { state.workOpenStages[t.getAttribute('data-stage') + ':all'] = true; return renderWork(null); }
     if (action === 'fork-session') return sendSessionTurn(true);
+    if (action === 'send-anyway') { var rev = state.reading && state.reading.sendAnyway; if (state.reading) state.reading.sendAnyway = null; return sendSessionTurn(false, { acknowledgedRevision: rev }); }
+    if (action === 'stop-session') return stopSession();
+    if (action === 'drop-after') {
+      var rr = state.reading;
+      if (rr && rr.afterReply) { var input = $('session-input'); if (input && !input.value) { input.value = rr.afterReply.text; autoGrow(input); } rr.afterReply = null; clearInterval(rr.afterTimer); }
+      sessionStatus('Not sent. Your message is back in the box.');
+      return;
+    }
+    if (action === 'unqueue') return removeQueued(t.getAttribute('data-turn-key'));
+    if (action === 'revoke-all') {
+      if (t.getAttribute('data-armed') !== '1') { t.setAttribute('data-armed', '1'); t.querySelector('.grow').firstChild.textContent = 'Tap again to sign out every browser'; return; }
+      api('/api/web-session/revoke-all', { method: 'POST', body: {} }).then(function () { showAuth('Every browser is signed out, this one too.'); }).catch(function (err) { setStatus($('settings-status'), err.message, true); });
+      return;
+    }
     if (action === 'expand-turn') { var tr = document.querySelector('.turn[data-turn="' + t.getAttribute('data-turn') + '"]'); if (tr) tr.classList.remove('clamped'); t.remove(); return; }
     if (action === 'toggle-cues') {
       var on = t.getAttribute('aria-checked') === 'true';
