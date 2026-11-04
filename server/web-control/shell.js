@@ -60,8 +60,23 @@
 
   var storyTimer = null;
   var storiesAt = 0;
-  // About 16 reads: never two runs at once, never more than one a minute, and never ahead of
-  // the pane the person just opened (Safari keeps 6 connections to the Mac over HTTP/1.1).
+  // The stories share the browser's 6 connections to the Mac with the pane in use, and four of their reads take 8 to
+  // 11 s on a busy Mac. They go through this lane, STORY_LANE at a time, so the pane always has connections free.
+  // Measured 2026-11-04 at 1440 px: with all 14 sent at once, a meeting opened 4 s after sign-in waited 10 to 14 s for
+  // its first read, and /api/health took 6.2 s. The unfolded Duo (about 1000 px) loads the stories the same way.
+  var STORY_LANE = 2, storyActive = 0, storyQueue = [];
+  function nextStory() { while (storyActive < STORY_LANE && storyQueue.length) storyQueue.shift()(); }
+  function storyApi(path, opts) {
+    return new Promise(function (resolve, reject) {
+      storyQueue.push(function () {
+        storyActive++;
+        api(path, opts).then(resolve, reject).then(function () { storyActive--; nextStory(); });
+      });
+      nextStory();
+    });
+  }
+  // About 16 reads: never two runs at once, never more than one a minute, two at a time through storyApi, and never
+  // ahead of the pane the person just opened (Safari keeps 6 connections to the Mac over HTTP/1.1).
   // On the closed Duo (below 600px) the stories show only inside the section menu, so they load
   // when the menu opens rather than costing the pane its connections on every visit.
   function loadStories(force) {
@@ -73,9 +88,9 @@
 
     // Sessions and Today share the sessions list and Work's your move.
     Promise.all([
-      soft(api('/api/agent-sessions?limit=80&sort=updated')),
-      soft(api('/api/work-board/your-move')),
-      soft(api('/api/meetings/live-chunks'))
+      soft(storyApi('/api/agent-sessions?limit=80&sort=updated')),
+      soft(storyApi('/api/work-board/your-move')),
+      soft(storyApi('/api/meetings/live-chunks'))
     ]).then(function (res) {
       var rows = (res[0] && res[0].sessions) || [];
       var moves = (res[1] && res[1].items) || [];
@@ -97,7 +112,7 @@
       // Ask each recent session the way Today does (live-chunks read: not ended, active lately).
       var recent = live.filter(function (s) { return Date.now() - (s.mtimeMs || 0) < 5 * 60000; }).slice(0, 3);
       Promise.all(recent.map(function (f) {
-        return soft(api('/api/meetings/live-chunks?sessionId=' + encodeURIComponent(f.sessionId) + '&since=1000000')).then(function (r) {
+        return soft(storyApi('/api/meetings/live-chunks?sessionId=' + encodeURIComponent(f.sessionId) + '&since=1000000')).then(function (r) {
           var read = r && r.read;
           return !!(read && !read.ended && Date.now() - Number(read.lastActivityAt || 0) < 5 * 60000);
         });
@@ -112,7 +127,7 @@
       });
 
       // Work: your move (minus the sessions already counted as waiting), and the older-to-sort count.
-      Promise.all([soft(api('/api/work-intake')), soft(api('/api/work-board'))]).then(function (w) {
+      Promise.all([soft(storyApi('/api/work-intake')), soft(storyApi('/api/work-board'))]).then(function (w) {
         var items = (w[0] && (w[0].items || w[0].suggestions)) || [];
         // The local day, as Work's Sort uses (toISOString is UTC: after 6 PM Central it is tomorrow).
         var today = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
@@ -143,7 +158,7 @@
     });
 
     // Messages: the morning brief that reached the glasses today, else the last message today.
-    Promise.all([soft(api('/api/morning-brief')), soft(api('/api/sessions/today/all-messages?limit=5'))]).then(function (res) {
+    Promise.all([soft(storyApi('/api/morning-brief')), soft(storyApi('/api/sessions/today/all-messages?limit=5'))]).then(function (res) {
       var runs = (res[0] && res[0].runs) || [];
       var brief = runs.filter(function (r) { return r.status === 'completed'; })
         .map(function (r) { return toDate(r.firedAt); }).filter(Boolean)
@@ -157,7 +172,7 @@
 
     // Speakers (TodayHome.things): each held voice counts one; today's meetings count their
     // unnamed voices (up to three meetings); every other meeting with unnamed voices counts one.
-    Promise.all([soft(api('/api/voice/held-groups')), soft(api('/api/meetings?limit=30'))]).then(function (res) {
+    Promise.all([soft(storyApi('/api/voice/held-groups')), soft(storyApi('/api/meetings?limit=30'))]).then(function (res) {
       if (!res[0] && !res[1]) return setStory('speakers', FALLBACK.speakers, false);
       var groups = (res[0] && res[0].groups) || [];
       var meetings = ((res[1] && res[1].meetings) || []).filter(function (m) { return m.sessionId && needsNames(m); });
@@ -171,7 +186,7 @@
     });
 
     // Meetings: reviews ready, then the next calendar event (it counts until an hour past its start).
-    Promise.all([soft(api('/api/work-reviews')), soft(api('/api/welcome-context'))]).then(function (res) {
+    Promise.all([soft(storyApi('/api/work-reviews')), soft(storyApi('/api/welcome-context'))]).then(function (res) {
       var reviews = (res[0] && (res[0].reviews || res[0].items)) || [];
       var ready = reviews.filter(function (r) { return r.status === 'ready'; }).length;
       var ev = res[1] && res[1].nextEvent;
@@ -183,7 +198,7 @@
     });
 
     // Threads: "N active, newest <name>". Newest is the unresolved thread seen most recently.
-    Promise.all([soft(api('/api/context/status')), soft(api('/api/threads?limit=50'))]).then(function (res) {
+    Promise.all([soft(storyApi('/api/context/status')), soft(storyApi('/api/threads?limit=50'))]).then(function (res) {
       var t = res[0] && res[0].threads;
       var active = t && t.available ? Number(t.active) || 0 : 0;
       if (!active) return setStory('threads', FALLBACK.threads, false);
@@ -196,8 +211,8 @@
     // bridge's status, which runs the same CLI Control's helper runs); total is the number of
     // rows to review. "Next n of total" when there are more rows than n, else "n to review".
     Promise.all([
-      soft(api('/api/web-bridge/memories', { method: 'POST', body: { id: 'rail-status', op: 'status', args: {} } })),
-      soft(api('/api/context/learning/review?limit=200'))
+      soft(storyApi('/api/web-bridge/memories', { method: 'POST', body: { id: 'rail-status', op: 'status', args: {} } })),
+      soft(storyApi('/api/context/learning/review?limit=200'))
     ]).then(function (res) {
       var n = res[0] && res[0].details ? res[0].details.learningToReview : null;
       if (typeof n !== 'number') return setStory('memories', FALLBACK.memories, false);

@@ -1408,10 +1408,18 @@
     else a.history.push(ex);
     return true;
   }
+  // What the panel draws from the history read: each question's state, and the meeting's files.
+  function askSig(a) {
+    return a.history.map(function (e) { return e.requestId + ':' + e.status + ':' + e.updatedAt; }).join('|') + '#' +
+      (a.files || []).map(function (x) { return x.id + ':' + x.revision + ':' + x.status; }).join('|') + '#' + a.error;
+  }
+  // quiet 'poll' is the background re-read: no loading state, no error on a failed read, and no repaint unless the
+  // history or the files changed, so a panel nobody touched never redraws under the reader.
   function askOpen(sid, quiet) {
     var a = A(sid);
     if (a.openP) return a.openP;
-    a.loading = true; if (!quiet) repaintAsk(sid);
+    var polling = quiet === 'poll', before = polling ? askSig(a) : '';
+    if (!polling) { a.loading = true; if (!quiet) repaintAsk(sid); }
     a.openP = loadConfig().then(function (conf) {
       if (!conf) return;
       var inst = encodeURIComponent(conf.serverInstanceId), offset = 0, all = [], files = [];
@@ -1424,16 +1432,38 @@
       return page().then(function () {
         all.forEach(function (e) { accept(sid, e); });
         a.history.sort(function (x, y) { return x.createdAt === y.createdAt ? (x.requestId < y.requestId ? -1 : 1) : (x.createdAt < y.createdAt ? -1 : 1); });
-        a.files = files; a.error = '';
+        a.files = files;
+        // A background read clears only an error a history read left; a send's error stays until the person acts.
+        if (!polling || a.histErr) a.error = '';
+        a.histErr = false;
         if (a.outbox) {
           if (a.history.some(function (e) { return e.requestId === a.outbox.req.requestId; })) { if (a.outbox.consumes && a.draft.trim() === a.outbox.req.question) setDraft(sid, ''); a.outbox = null; }
           else a.error = 'The last question’s admission is uncertain. Check its status before sending another.';
         }
         var active = a.history.filter(function (e) { return !terminal(e); })[0];
         if (active && !a.running) poll(sid, active);
-      }, function (err) { a.error = helperMsg(err && err.status); });
-    }).then(function () { a.loading = false; a.openP = null; repaintAsk(sid); });
+      }, function (err) { if (!polling) { a.error = helperMsg(err && err.status); a.histErr = true; } });
+    }).then(function () {
+      a.loading = false; a.openP = null; a.histAt = Date.now();
+      if (!polling || askSig(a) !== before) repaintAsk(sid);
+      paintLiveHead();
+    });
     return a.openP;
+  }
+  // The gap review (2026-11-04): both clients read the Ask history once, so a question asked on the Mac never showed on
+  // the phone. While a live panel shows, re-read it every ASK_HISTORY_POLL_MS, and at once when the page comes back.
+  var ASK_HISTORY_POLL_MS = 12000;
+  function refreshAskHistory(sid, now) {
+    var a = A(sid);
+    // Only after the panel's own first read (histAt), which shows its errors; this one never does.
+    if (!a.histAt || !online() || a.openP || a.running || a.outbox || a.loading) return;
+    if (Date.now() - (a.histAt || 0) < (now ? 2000 : ASK_HISTORY_POLL_MS)) return;
+    askOpen(sid, 'poll');
+  }
+  function refreshShownAsk() {
+    if (S.out) return;
+    if (S.view === 'live' && S.liveSid) refreshAskHistory(S.liveSid, true);
+    else if (S.view === 'detail') detailSessions().forEach(function (sid) { refreshAskHistory(sid, true); });
   }
   // The panel's open: history, then (saved) the saved transcript, then the source line, then the cue count.
   function panelOpen(sid) {
@@ -1463,7 +1493,8 @@
       api('/api/context/status'),
       api('/api/meeting-ask/context?sessionId=' + encodeURIComponent(sid) + '&serverInstanceId=' + encodeURIComponent(conf.serverInstanceId))
     ]).then(function (r) {
-      var h = r[0] || {}, o = (r[1] && r[1].orientation) || {};
+      var h = r[0] || {}, o = (r[1] && r[1].orientation) || {}, f = a.ctx.live ? S.feeds[sid] : null;
+      if (f) { f.calendar = r[1] && Array.isArray(r[1].candidates) ? r[1].candidates : []; paintLiveHead(); }
       function part(x) { return x && x.available ? fmtCount(x.total) + ' available' : 'unavailable'; }
       a.health = 'Memory: ' + part(h.memory) + '. Threads: ' + part(h.threads) + '. Domain: ' + (o.domain || 'not confirmed') + '. Checked ' + clockOf(new Date()) + '. Last sync is not reported by this source.';
       repaintAsk(sid);
@@ -1685,7 +1716,8 @@
       '<button type="button" class="mt-iconbtn" data-mt="ask-refresh" data-sid="' + esc(sid) + '" title="Refresh saved answers" aria-label="Refresh saved answers">' + icon('refresh') + '</button></div>' +
       '<p class="mt-ask-line">Ask when you need it. Uses this meeting first.</p>' +
       '<details class="mt-ask-sources" data-k="sources"><summary>Sources and context</summary><p>' + esc(a.health || 'Source status has not been checked.') + '</p></details>' +
-      (a.ctx.captureLabel ? '<p class="mt-muted">' + esc(a.ctx.captureLabel) + '</p>' : '');
+      (a.ctx.captureLabel ? '<p class="mt-muted">' + esc(a.ctx.captureLabel) + '</p>' : '') +
+      (live ? '' : filesRowHtml(sid));
     html += '<div class="mt-ask-acts">' + ACTIONS.map(function (x) {
       return '<button type="button" class="cx-btn quiet" data-mt="ask-act" data-sid="' + esc(sid) + '" data-action="' + x[0] + '" data-q="' + esc(x[1] === 'Catch me up' ? 'Catch me up on this recording' : x[1]) + '"' + dis + '>' + esc(x[1]) + '</button>';
     }).join('') + (caps.factCheck === true ? '<button type="button" class="cx-btn quiet" data-mt="ask-act" data-sid="' + esc(sid) + '" data-action="ask" data-q="' + esc(FACT_CHECK_Q) + '"' + dis + '>Fact check</button>' : '') + '</div>';
@@ -1759,6 +1791,21 @@
         (rated ? '<p class="mt-muted">' + esc(rated) + '</p>' : '') + (vote ? '<p class="mt-muted">' + esc(vote) + '</p>' : '') + '</div>';
     }).join('');
     return html;
+  }
+  var FILE_STATE = { pending: 'Reading', unsupported: 'No readable text', failed: 'Could not be read', 'secret-held': 'Held: it appears to contain credentials' };
+  function filesRowHtml(sid) {
+    var a = A(sid), shown = (a.files || []).filter(function (x) { return x && x.status !== 'removed' && String(x.name || '').trim(); });
+    if (!shown.length) return '';
+    var title = 'Files \u00b7 ' + shown.length;
+    var html = '<div class="mt-files"><button type="button" class="mt-files-head" data-mt="files-toggle" data-sid="' + esc(sid) + '" aria-expanded="' + !!a.filesOpen + '">' +
+      icon('clip') + '<span>' + esc(title) + '</span>' + icon('chev') + '</button>';
+    if (a.filesOpen) {
+      html += '<ul class="mt-files-list">' + shown.map(function (x) {
+        var note = [x.status !== 'ready' ? (x.notice || FILE_STATE[x.status] || '') : '', x.origin === 'phone' ? 'Added from the phone' : ''].filter(Boolean).join(' \u00b7 ');
+        return '<li><span class="mt-files-name">' + esc(x.name) + '</span>' + (note ? '<span class="mt-muted">' + esc(note) + '</span>' : '') + '</li>';
+      }).join('') + '</ul><p class="mt-muted mt-files-note">Meeting Ask reads these files. Add or remove them in COS Control on your Mac.</p>';
+    }
+    return html + '</div>';
   }
   function sidePanelHtml(sid) {
     var a = A(sid), offered = cuesOffered(sid), view = offered ? a.view : 'ask';
@@ -1868,11 +1915,26 @@
     S.liveTimer = setInterval(livePoll, 1500);
     panelOpen(sid);
   }
-  function liveTitle(f) { return f.titleSteer || sourceLabel(f.sid, f.start); }
+  // Control's LiveMeeting.title: the typed name, else a calendar event that started within CALENDAR_MATCH_MS of the
+  // recording (the nearest, up to 160 characters), else the source label. The events come from the server's own match
+  // (GET meeting-ask/context `candidates`: from 5 minutes before an event's start to its end), so a name shows only when
+  // both rules agree; an event starting 5 to 20 minutes after the recording shows on the Mac and not here.
+  var CALENDAR_MATCH_MS = 20 * 60000;
+  function calendarTitle(f) {
+    if (!f.start || !f.calendar || !f.calendar.length) return '';
+    var best = '', gap = Infinity;
+    f.calendar.forEach(function (c) {
+      var name = cleanTitle(c && c.title), d = Math.abs(Date.parse(c && c.start) - f.start);
+      if (name && d <= CALENDAR_MATCH_MS && d < gap) { best = name; gap = d; }
+    });
+    return Array.from(best).slice(0, 160).join('');
+  }
+  function liveTitle(f) { return f.titleSteer || calendarTitle(f) || sourceLabel(f.sid, f.start); }
   function livePoll() {
     if (document.hidden || S.livePolling || S.view !== 'live') return;
     var f = S.feeds[S.liveSid]; if (!f) return;
     var now = Date.now();
+    refreshAskHistory(f.sid);
     if (f.endedAt) {
       handoff(f, now);
       if (now - f.statusAt >= STATUS_ENDED_MS && f.phase !== 'saved') askStatus(f, now);
@@ -1940,7 +2002,7 @@
       '<p class="mt-muted">' + esc(LIVE_HEADER) + '</p>' +
       (isMac(sid) ? '<p class="mt-muted">Mac playback · microphone off · voice numbers do not identify people</p>' : '') +
       '<p class="mt-lsub">' + esc(sub) + (quiet ? '<span class="mt-amber"> · ' + esc(quiet) + '</span>' : '') + '</p>' +
-      liveHandoffLine(f) +
+      liveHandoffLine(f) + filesRowHtml(sid) +
       (line ? '<p class="mt-stopline' + (S.stop && S.stop.nothing ? ' bad' : '') + '">' + esc(line) + '</p>' : '') +
       (controls ? '<div class="mt-bar">' + controls + '</div>' : '') +
       (S.confirm === 'stop:' + sid ? confirmCard(STOP_TITLE, STOP_LINE, 'stop-yes', 'Stop and save', 'Cancel', sid) : '') + '</div>';
@@ -2103,6 +2165,7 @@
         return;
       }
       case 'ask-refresh': loadConfig(true).then(function () { panelOpen(sid); }); return;
+      case 'files-toggle': a = A(sid); a.filesOpen = !a.filesOpen; if (S.view === 'live' && S.liveSid === sid) paintLiveHead(); else repaintAsk(sid); return;
       case 'ask-act': submit(sid, t.getAttribute('data-action'), t.getAttribute('data-q')); return;
       case 'ask-retry': ex = exchangeOf(sid, req); if (ex) submit(sid, ex.action, ex.question, ex.requestId); return;
       case 'ask-stop': cancelAnswer(sid, req); return;
@@ -2174,8 +2237,10 @@
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) return;
     if (S.out) return;
+    refreshShownAsk();
     if (S.view === 'list') { pollFiles(); loadOrphans(); } else if (S.view === 'live') livePoll();
   });
+  window.addEventListener('focus', refreshShownAsk);
 
   W.registerPane('meetings', {
     load: function (args) {

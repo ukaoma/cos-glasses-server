@@ -230,6 +230,18 @@
 .mt-lsub { font-size: 13px; color: var(--tertiary); margin: 0; }
 .mt-handoff { font-size: 13px; margin: 2px 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .mt-lhead .mt-bar { border-bottom: 0; margin-top: 6px; }
+/* Control's LiveMeetingFilesRow: one collapsed "Files · N" row; open, the names and the note. */
+.mt-files { border: 1px solid var(--hairline); border-radius: 9px; margin: 6px 0 4px; max-width: 520px; min-width: 0; }
+.mt-files-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 0 12px; font-size: 13px; font-weight: 600; color: var(--ink); text-align: left; }
+.mt-files-head > span { flex: 1; min-width: 0; }
+.mt-files-head .icon { width: 14px; height: 14px; color: var(--sub); flex: none; }
+.mt-files-head .icon:last-child { transform: rotate(90deg); transition: transform 0.15s ease; }
+.mt-files-head[aria-expanded="true"] .icon:last-child { transform: rotate(-90deg); }
+.mt-files-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--hairline); }
+.mt-files-list li { display: grid; gap: 2px; padding: 8px 12px; border-bottom: 1px solid var(--hairline); min-width: 0; }
+.mt-files-name { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-files-note { padding: 8px 12px 10px; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .mt-files-head .icon:last-child { transition: none; } }
 .mt-lgrid { display: grid; gap: 16px; }
 .mt-lmain { min-width: 0; }
 .mt-turns { display: grid; gap: 22px; padding: 16px 0 14px; border-top: 1px solid var(--hairline); max-width: 700px; }

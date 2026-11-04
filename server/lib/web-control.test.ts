@@ -33,6 +33,7 @@ import { requireApiToken } from './api-auth.js'
 import { createWebControlRouter, isAllowedCorsOrigin, isMemoryWebOpReadOnly, webControlCsp, WEB_LOGIN_FAILURE_MESSAGE } from '../routes/web-control.js'
 import { isReadOnlyApiPost } from './work-search.js'
 import { listLiveTranscriptSessions, readLiveTranscriptSession } from './web-live-chunks.js'
+import { TITLE_STEER_MAX_CHARS } from './meeting-title-steer.js'
 import { readFallbackTokenAudit } from './web-usage-bridge.js'
 
 const REAL_DNS_WITH_DOT = 'ukaoma-mac-studio.tail38457f.ts.net.'
@@ -459,6 +460,38 @@ describe('Lease Exemptions & Route Integration', () => {
         sessionId: 'mac_missing_123',
       })
       expect(missing.ended).toBe(true)
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('passes the live name (titleSteer) through the live read, normalized, and drops one it cannot trust', () => {
+    // transcribe-stream writes `titleSteer` into the active-session file when the name is set in COS Control; the web
+    // pane reads r.titleSteer to title the recording. Before 6.99.5 this reader dropped the key, so the web never showed it.
+    const tempRoot = mkdtempSync(join(tmpdir(), 'cos-live-steer-'))
+    try {
+      const activeDir = join(tempRoot, 'active-sessions')
+      mkdirSync(activeDir, { recursive: true })
+      const read = (sessionId: string, titleSteer: unknown) => {
+        writeFileSync(join(activeDir, `${sessionId}.json`), JSON.stringify({
+          sessionId, startTime: 1793583600000, maxChunkIndex: 0, receivedIndices: [0],
+          chunksIndexed: [{ i: 0, c: { text: 'Hello', speaker: 'Miles', elapsed: 0 } }],
+          ...(titleSteer === undefined ? {} : { titleSteer }),
+        }))
+        return readLiveTranscriptSession({ baseDataDir: tempRoot, sessionId })
+      }
+      expect(read('meeting_steer_named', 'Bottle Product Update').titleSteer).toBe('Bottle Product Update')
+      expect(read('meeting_steer_messy', '  Board\u0007 prep\n\u200bnotes ').titleSteer).toBe('Board prep notes')
+      expect('titleSteer' in read('meeting_steer_absent', undefined)).toBe(false)
+      expect('titleSteer' in read('meeting_steer_blank', '   ')).toBe(false)
+      expect('titleSteer' in read('meeting_steer_number', 42)).toBe(false)
+      expect('titleSteer' in read('meeting_steer_long', 'x'.repeat(TITLE_STEER_MAX_CHARS + 1))).toBe(false)
+      expect(read('meeting_steer_cap', 'y'.repeat(TITLE_STEER_MAX_CHARS)).titleSteer).toBe('y'.repeat(TITLE_STEER_MAX_CHARS))
+      // An unchanged read (same stamp) carries no turns and no name: the client keeps what it has.
+      const first = read('meeting_steer_stamp', 'Kept')
+      const again = readLiveTranscriptSession({ baseDataDir: tempRoot, sessionId: 'meeting_steer_stamp', knownStamp: first.stamp })
+      expect(again.unchanged).toBe(true)
+      expect('titleSteer' in again).toBe(false)
     } finally {
       rmSync(tempRoot, { recursive: true, force: true })
     }

@@ -1,6 +1,7 @@
 import { lstatSync, readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { dataPath } from './data-dir.js'
+import { normalizeTitleSteer } from './meeting-title-steer.js'
 
 const SESSION_ID_RE = /^[A-Za-z0-9:_-]{3,96}$/
 const MAX_FILE_BYTES = 32 * 1024 * 1024
@@ -44,6 +45,8 @@ export interface LiveTranscriptReadResult {
   sourceType?: string
   speakerPolicy?: string
   levels?: LiveChunkLevel[]
+  /** 6.99.5: the name typed for this recording while it runs (the session file's `titleSteer`); absent when none. */
+  titleSteer?: string
 }
 
 export function isValidLiveSessionId(id: string): boolean {
@@ -247,6 +250,10 @@ export function readLiveTranscriptSession(options: {
     .map(idx => chunks.get(idx)!)
 
   const levels = parseLevels(parsed.chunkLevels)
+  // The live name, read the way the steer store reads its own ledger: normalized, and dropped (never trimmed to fit)
+  // when it is not a string or is over the cap. The web pane names the recording with it, as COS Control does.
+  let titleSteer = ''
+  try { titleSteer = normalizeTitleSteer(typeof parsed.titleSteer === 'string' ? parsed.titleSteer : null) } catch { titleSteer = '' }
 
   return {
     sessionId,
@@ -261,5 +268,6 @@ export function readLiveTranscriptSession(options: {
     ...(speakerRevision !== undefined ? { speakerRevision, fullSnapshot } : {}),
     ...(sessionId.startsWith('phone_') ? { sourceType: 'iphone_microphone', speakerPolicy: 'anonymous' } : {}),
     ...(levels ? { levels } : {}),
+    ...(titleSteer ? { titleSteer } : {}),
   }
 }
