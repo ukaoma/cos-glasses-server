@@ -25,7 +25,7 @@ export const TITLE_STEER_RETAIN_MS = 7 * 24 * 60 * 60_000
 const SESSION_ID = /^[A-Za-z0-9:_-]{3,96}$/
 
 export class TitleSteerError extends Error {
-  constructor(readonly reason: 'invalid_session_id' | 'invalid_title' | 'invalid_revision' | 'title_changed' | 'session_not_live' | 'steer_persistence_failed', readonly status: number) {
+  constructor(readonly reason: 'invalid_session_id' | 'invalid_title' | 'invalid_revision' | 'title_changed' | 'session_not_live' | 'save_in_progress' | 'steer_persistence_failed', readonly status: number) {
     super(reason)
   }
 }
@@ -170,8 +170,31 @@ export function getTitleSteerStore(): TitleSteerStore {
   return defaultStore
 }
 
-/** The title a save files under: the one the request sent when it has text, else the steer (undefined when neither). */
+// A title COS Control or the store invents when nobody named the meeting: "Mac recording 9:05 PM", "Zoom meeting 10:01 AM",
+// "Glasses meeting 10:10 PM", "iPhone microphone 4:30 PM", and the store's own "Mac Recording 2026-11-03 2105" / "G2 Recording ...".
+// Control 0.5.365 sends one on every Mac save, so without this a steer could never become the title there. Anchored at both
+// ends on purpose: a real title that merely STARTS like one ("Mac recording pipeline review") must win.
+const CLOCK = String.raw`\d{1,2}[:_]\d{2}(?:[:_]\d{2})?(?:[ _-]?(?:AM|PM))?`
+const STAMP = String.raw`(?:\d{4}-\d{2}-\d{2}(?:[ _-]+\d{4})?|\d{4})`
+const PLACEHOLDER_TITLES: RegExp[] = [
+  new RegExp(String.raw`^(?:Mac|G2|iPhone)[ _-]+Recording(?:[ _-]+(?:${CLOCK}|${STAMP}))?$`, 'i'),
+  new RegExp(String.raw`^Glasses[ _-]+meeting(?:[ _-]+${CLOCK})?$`, 'i'),
+  new RegExp(String.raw`^iPhone[ _-]+microphone(?:[ _-]+${CLOCK})?$`, 'i'),
+  // "<App> meeting 10:01 AM": the app's name, then a 12-hour clock (a macOS clock may use a narrow no-break space, which the `\s` collapse turns into a space). The AM/PM is required here so "Q3 meeting 10:30" stays a title.
+  new RegExp(String.raw`^[\w .-]{1,40}?[ _-]meeting[ _-]+\d{1,2}[:_]\d{2}[ _-]?(?:AM|PM)$`, 'i'),
+]
+export function isPlaceholderTitle(title: string): boolean {
+  const text = title.replace(/\s+/g, ' ').trim()
+  return PLACEHOLDER_TITLES.some(pattern => pattern.test(text))
+}
+
+/**
+ * The title a save files under. A title the request sent wins, untouched, unless it is a placeholder and a steer exists: then
+ * the steer names the meeting (a placeholder with no steer is kept, as before). A blank or non-string title is none.
+ * Undefined when neither exists, so the store files its own fallback.
+ */
 export function effectiveSaveTitle(sentTitle: unknown, steer: string | null): string | undefined {
-  if (typeof sentTitle === 'string' && sentTitle.trim()) return sentTitle
-  return steer ?? undefined
+  const sent = typeof sentTitle === 'string' && sentTitle.trim() ? sentTitle : null
+  if (sent !== null && !(steer !== null && isPlaceholderTitle(sent))) return sent
+  return steer ?? sent ?? undefined
 }

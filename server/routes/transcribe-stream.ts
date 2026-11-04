@@ -3000,7 +3000,7 @@ transcribeStreamRouter.post('/mac-recording/start', (req, res) => {
     if (!session.chunks.some(Boolean)) session.startTime = recording.startTime
     persistSessionRequired(recording.sessionId)
     // Arming happens only after the recording is admitted, and its answer never fails the start (armMacLiveCues returns a
-    // reason code instead of throwing). Without `liveCues: true` the answer is byte for byte what 6.85.0 sent.
+    // reason code instead of throwing). Without `liveCues: true` the answer is what 6.85.0 sent plus the additive `titleSteer` (6.99.0).
     let liveCues: MacLiveCuesAnswer | undefined
     if (req.body.liveCues === true) {
       try { liveCues = armMacLiveCues(recording.sessionId) } catch { liveCues = { armed: false, reason: 'unavailable' } }

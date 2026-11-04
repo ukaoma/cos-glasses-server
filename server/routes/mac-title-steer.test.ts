@@ -160,6 +160,17 @@ it('saving a Mac recording with no title files it under the steer and records th
   expect((await steer('Too late', 1)).status).toBe(404)
 })
 
+it('W1: Control sends its placeholder title on every Mac save; the steer still becomes the title', async () => {
+  await boot()
+  await startRecording(); await sendChunk()
+  await steer('Polling accuracy chat', 0)
+  const saved = await call('/meeting/save', { sessionId: id, expectedChunkCount: 1, title: 'Mac recording 9:05 PM' })
+  expect(saved.status, JSON.stringify(saved.json)).toBe(200)
+  const markdown = readFileSync(join(process.env.COS_DATA_DIR!, saved.json.filepath), 'utf8')
+  expect(markdown.startsWith('# Polling accuracy chat\n')).toBe(true)
+  expect(markdown).toContain('| **Title steer** | Polling accuracy chat |')
+})
+
 it('a Mac save that sends its own title keeps it and still records the steer', async () => {
   await boot()
   await startRecording(); await sendChunk()

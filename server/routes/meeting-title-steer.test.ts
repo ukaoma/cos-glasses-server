@@ -39,7 +39,7 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-async function harness(opts: { state?: 'active' | 'closed' | 'missing'; parent?: string; wrapSteer?: (real: ReturnType<typeof createTitleSteerStore>) => ReturnType<typeof createTitleSteerStore> } = {}) {
+async function harness(opts: { state?: 'active' | 'closed' | 'missing'; parent?: string; drainGate?: Promise<void>; onDrain?: () => void; wrapSteer?: (real: ReturnType<typeof createTitleSteerStore>) => ReturnType<typeof createTitleSteerStore> } = {}) {
   const parent = opts.parent ?? mkdtempSync(join(tmpdir(), 'cos-title-steer-route-'))
   if (!opts.parent) roots.push(parent)
   initializeServerInstanceId(join(parent, 'server-instance-id'))
@@ -56,10 +56,10 @@ async function harness(opts: { state?: 'active' | 'closed' | 'missing'; parent?:
     getChunkEntries: () => [{ chunkIndex: 0, chunk }],
     getProviderCandidates: () => ({}),
     getIntegrity: () => ({ received: 1, stored: 1, maxIndex: 0, expected: 1, missingIndices: [], completeness: 1 }),
-    drainAudioWrites: async () => {},
+    drainAudioWrites: async () => { opts.onDrain?.(); await opts.drainGate },
     hasAudio: () => false,
     moveAudioToPending: () => null,
-    delete: vi.fn(),
+    delete: vi.fn(() => { sessionState.value = 'closed' }),
     getState: () => sessionState.value,
     publishTitleSteer: publish,
   }
@@ -217,6 +217,29 @@ describe('GET and PUT /meeting/title-steer', () => {
     expect(bad.body.reason).toBe('invalid_session_id')
   })
 
+  it('W2: a rename while the save is in flight is refused 409 save_in_progress, because the meeting is filed under the name it had', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let draining!: () => void
+    const reached = new Promise<void>(resolve => { draining = resolve })
+    const h = await harness({ drainGate: gate, onDrain: () => draining() })
+    await h.put({ sessionId: SID, title: 'Name at save', expectedRevision: 0 })
+    const saving = h.save()                                   // reads the steer, files the meeting, then waits on the audio drain
+    await reached
+    expect(h.sessionState.value).toBe('active')              // the gap: still live, not yet closed
+    const late = await h.put({ sessionId: SID, title: 'Name too late', expectedRevision: 1 })
+    expect(late.status).toBe(409)
+    expect(late.body).toMatchObject({ error: 'save_in_progress', reason: 'save_in_progress' })
+    const lateClear = await h.put({ sessionId: SID, title: '', expectedRevision: 1 })
+    expect(lateClear.status).toBe(409)
+    expect(h.titleSteer.get(SID)).toMatchObject({ title: 'Name at save', revision: 1 })
+    release()
+    expect((await saving).status).toBe(200)
+    expect(h.saved().found.title).toBe('Name at save')
+    // Once the save has closed the session, the answer is the ordinary 404.
+    expect((await h.put({ sessionId: SID, title: 'After', expectedRevision: 1 })).status).toBe(404)
+  })
+
   it('GET for an id that names an Object member (constructor, __proto__) is an ordinary empty answer, not an error', async () => {
     const h = await harness()
     for (const id of ['constructor', '__proto__', 'toString']) {
@@ -307,6 +330,24 @@ describe('saving with a steer', () => {
     expect(sidecar.title).toBe('Polling accuracy chat')
     expect(sidecar.titleSteer).toBe('Polling accuracy chat')
     expect(found.filename).toContain('Polling_accuracy_chat')
+  })
+
+  it('W1: a save that sends Control\'s placeholder title is filed under the steer; a real title still wins; no steer keeps the placeholder', async () => {
+    const h = await harness()
+    await h.put({ sessionId: SID, title: 'Polling accuracy chat', expectedRevision: 0 })
+    await h.save({ title: 'Mac recording 9:05 PM' })
+    const { found, markdown, sidecar } = h.saved()
+    expect(found.title).toBe('Polling accuracy chat')
+    expect(markdown).toContain('| **Title steer** | Polling accuracy chat |')
+    expect(sidecar).toMatchObject({ title: 'Polling accuracy chat', titleSteer: 'Polling accuracy chat' })
+    const real = await harness()
+    await real.put({ sessionId: SID, title: 'Polling accuracy chat', expectedRevision: 0 })
+    await real.save({ title: 'Mac recording pipeline review' })
+    expect(real.saved().found.title).toBe('Mac recording pipeline review')
+    const none = await harness()
+    await none.save({ title: 'Zoom meeting 10:01 AM' })
+    expect(none.saved().found.title).toBe('Zoom meeting 10:01 AM')
+    expect(none.saved().markdown).not.toContain('Title steer')
   })
 
   it('a blank title in the save counts as none: the steer names the meeting', async () => {

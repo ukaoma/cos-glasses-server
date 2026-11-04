@@ -921,6 +921,9 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       normalizeTitleSteer(body.title)
       if (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 0) throw new TitleSteerError('invalid_revision', 400)
       if ((sessions.getState ?? defaultSessionState)(sessionId) !== 'active') throw new TitleSteerError('session_not_live', 404)
+      // The save reads the steer once, then awaits before it closes the session. A rename in that gap would answer 200 and miss the
+      // filed meeting, so it is refused: the meeting is being filed under the name it had.
+      if (savingSessions.has(sessionId)) throw new TitleSteerError('save_in_progress', 409)
       const view = titleSteer.set(sessionId, body.title, body.expectedRevision)
       ;(sessions.publishTitleSteer ?? (() => false))(sessionId)
       console.log(`[meeting/title-steer] ${view.title ? 'set' : 'cleared'} ${sessionId} length=${view.title ? Array.from(view.title).length : 0} revision=${view.revision}`)

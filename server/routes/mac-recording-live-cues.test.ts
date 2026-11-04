@@ -1,5 +1,5 @@
 // 6.86.0: POST /api/mac-recording/start { liveCues: true } arms live cues for the recording. The answer never fails the
-// start, a bad flag admits nothing, and a start without the flag is answered exactly as 6.85.0 answered it.
+// start, a bad flag admits nothing, and a start without the flag is answered as 6.85.0 answered it, plus the additive `titleSteer` (6.99.0).
 import express from 'express'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'

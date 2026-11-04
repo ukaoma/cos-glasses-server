@@ -91,6 +91,22 @@ afterEach(() => {
 })
 
 describe('MeetingStore', () => {
+  it('6.99.0: the title steer is filed by code points: 120 kept, an emoji at the cut is whole, never half', () => {
+    const store = new MeetingStore(newRoot())
+    const long = 'a'.repeat(119) + '\u{1F600}' + 'bbb'                 // 123 characters; the emoji is characters 120
+    const saved = store.save(input({ titleSteer: long }))
+    const steer = JSON.parse(readFileSync(saved.sidecarPath, 'utf8')).titleSteer as string
+    expect(Array.from(steer)).toHaveLength(120)
+    expect(steer).toBe('a'.repeat(119) + '\u{1F600}')
+    expect(readFileSync(saved.filepath, 'utf8')).toContain(`| **Title steer** | ${steer} |`)
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(steer)).toBe(false)   // no lone surrogate
+    // A shorter one is untouched, and an empty or whitespace one files nothing.
+    const other = store.save(input({ sessionId: 'meeting_store_002', titleSteer: 'Short one' }))
+    expect(JSON.parse(readFileSync(other.sidecarPath, 'utf8')).titleSteer).toBe('Short one')
+    const none = store.save(input({ sessionId: 'meeting_store_003', titleSteer: '  \n ' }))
+    expect('titleSteer' in JSON.parse(readFileSync(none.sidecarPath, 'utf8'))).toBe(false)
+  })
+
   it('persists capture identity policy on both raw sidecar projections', () => {
     const store = new MeetingStore(newRoot())
     const value = input()

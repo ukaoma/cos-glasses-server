@@ -365,7 +365,9 @@ export class MeetingStore {
     const fallbackTitle = `${mac ? 'Mac' : phone ? 'iPhone' : 'G2'} Recording ${parts.date} ${parts.hourMinute}`
     const title = normalizeTitle(input.title, fallbackTitle)
     // Kept faithful (slashes stay): it was normalized when typed. This only makes a hand-built input safe to file.
-    const titleSteer = (input.titleSteer ?? '').normalize('NFKC').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
+    const titleSteerText = (input.titleSteer ?? '').normalize('NFKC').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()
+    // By code points, like the ledger: a UTF-16 slice could cut an emoji in half.
+    const titleSteer = Array.from(titleSteerText).slice(0, 120).join('')
     const stem = filenameStem(title, `${mac ? 'Mac' : phone ? 'iPhone' : 'G2'}_Recording_${parts.hourMinute}`)
     const durationMs = Number.isFinite(input.durationMs) ? Math.max(0, input.durationMs) : 0
     const durationMin = Math.round(durationMs / 60_000)

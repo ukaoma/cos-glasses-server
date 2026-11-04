@@ -9,6 +9,7 @@ import {
   TitleSteerError,
   createTitleSteerStore,
   effectiveSaveTitle,
+  isPlaceholderTitle,
   normalizeTitleSteer,
 } from './meeting-title-steer.js'
 
@@ -299,6 +300,30 @@ describe('effectiveSaveTitle', () => {
   it('no title, blank or whitespace-only title, or a non-string title falls back to the steer', () => {
     for (const sent of [undefined, null, '', '   ', 5]) expect(effectiveSaveTitle(sent, 'Steer')).toBe('Steer')
   })
+  it('6.99.0 W1: a placeholder title Control or the store invents does not beat a steer; a real title still does', () => {
+    const placeholders = [
+      'Mac recording 9:05 PM', 'Mac recording 9:05:12 PM', 'Mac recording 9:05\u202fPM', 'Mac Recording 09:05 pm', 'Mac recording', 'mac_recording_9:05_PM',
+      'Mac Recording 2026-11-03 2105', 'Mac Recording 2105', 'G2 Recording 2026-11-03 2105', 'G2 recording', 'iPhone Recording 2026-11-03 2105',
+      'Glasses meeting 10:10 PM', 'Glasses meeting 22:10', 'iPhone microphone 4:30 PM',
+      'Zoom meeting 10:01 AM', 'Microsoft Teams meeting 10:01 AM', 'Google Chrome meeting 9:30\u202fAM', '  Mac recording 9:05 PM  ',
+    ]
+    for (const sent of placeholders) {
+      expect(isPlaceholderTitle(sent), sent).toBe(true)
+      expect(effectiveSaveTitle(sent, 'Polling accuracy chat'), sent).toBe('Polling accuracy chat')
+      // With no steer a placeholder is just the title it always was.
+      expect(effectiveSaveTitle(sent, null), sent).toBe(sent)
+    }
+    const real = [
+      'Quarterly Polling Review', 'Mac recording pipeline review', 'Mac Recording Study', 'G2 Recording notes from Waco', 'Recording notes',
+      'Weekly meeting 10:30 AM review', 'Q3 meeting 10:30', 'Board meeting', 'Planning meeting with Jeremy 9:00 AM sync', 'Glasses meeting prep',
+      'iPhone microphone test results', 'Polling Accuracy and Weighting Debate (Mac)', 'Mac recording 9:05 PM and the board deck',
+    ]
+    for (const sent of real) {
+      expect(isPlaceholderTitle(sent), sent).toBe(false)
+      expect(effectiveSaveTitle(sent, 'Polling accuracy chat'), sent).toBe(sent)
+    }
+  })
+
   it('neither a title nor a steer is undefined, so the store files its own fallback', () => {
     expect(effectiveSaveTitle(undefined, null)).toBeUndefined()
     expect(effectiveSaveTitle('', null)).toBeUndefined()

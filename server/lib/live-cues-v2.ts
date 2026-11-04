@@ -90,8 +90,10 @@ export const LIVE_CUES_V2_LIMITS = {
   staleMs: 30_000,
   windowWords: 400,
   windowChars: 2_200,
-  /** 25 a meeting (Miles 2026-10-19: 10 ran out 10 minutes into an HC call). Writer calls stay at twice the cue cap so
-   *  discarded drafts cannot end a meeting's cues early, and the weekly default keeps the same ~15 capped meetings. */
+  /** FALLBACK DEFAULTS ONLY (nothing reads these at run time): the live cap is `resolveLiveCuesV2Limits().maxCuesPerMeeting`, which
+   *  Settings can raise to 50 (6.99.0) and env can lock. 25 a meeting (Miles 2026-10-19: 10 ran out 10 minutes into an HC call).
+   *  Writer calls stay at twice the cue cap so discarded drafts cannot end a meeting's cues early. At 25 cues the weekly default
+   *  of 750 writer calls covers ~15 capped meetings (50 calls each); at 50 cues it covers ~7 (100 calls each). */
   maxCuesPerMeeting: 25,
   maxWriterCallsPerMeeting: 50,
   defaultWeeklyWriterCalls: 750,
