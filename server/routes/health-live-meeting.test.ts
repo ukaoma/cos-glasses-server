@@ -25,10 +25,12 @@ describe('live meeting capabilities (6.86.0)', () => {
     expect(typeof body.capabilities.liveCues.available).toBe('boolean')       // the v1 fields the companion reads are untouched
     expect(body.features.liveCues).toBe(body.capabilities.liveCues.available)
     expect(body.capabilities.liveMeeting).toEqual(LIVE_MEETING)
+    expect(body.capabilities.titleSteer).toBe(1)                              // 6.99.0: GET/PUT /api/meeting/title-steer exist
   }, 20_000)
   it('/api/models publishes the same values', async () => {
     const body = await (await fetch(`${base}/api/models`)).json() as any
     expect(body.capabilities.liveCues.kinds).toEqual(KINDS)
     expect(body.capabilities.liveMeeting).toEqual(LIVE_MEETING)
+    expect(body.capabilities.titleSteer).toBe(1)
   }, 20_000)
 })

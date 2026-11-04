@@ -19,7 +19,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } f
 import { isWorthRecovering } from '../lib/quarantine-auto-recover.js'
 import { basename, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import { Router, type RequestHandler } from 'express'
+import { Router, type RequestHandler, type Response } from 'express'
 import { emitDisplay } from '../lib/display-bus.js'
 import { createStopRequestStore, isStopRequestRefusal, STOP_REQUEST_CLAIM_WINDOW_MS, type StopRequest, type StopRequestStore } from '../lib/meeting-stop-requests.js'
 import { appendAutonomousSaveLog, getStopIntentStore, type StopIntent, type StopIntentStore } from '../lib/meeting-stop-intents.js'
@@ -153,6 +153,7 @@ import {
   getSessionChunks,
   getSessionProviderCandidates,
   getSessionStartTime,
+  publishLiveTitleSteer,
   getSessionTranscript,
   getMeetingSessionStatus,
   getStrandedCaptures,
@@ -175,6 +176,7 @@ import {
 import { derivedSourcesFor, findDerivedRecord } from '../lib/imported-library-rows.js'
 import { assertVoiceEvidenceSource } from '../lib/voice-evidence-guard.js'
 import { domainForMeeting, resolveDomains } from '../lib/domains.js'
+import { effectiveSaveTitle, getTitleSteerStore, normalizeTitleSteer, TitleSteerError, type TitleSteerStore } from '../lib/meeting-title-steer.js'
 import { getOwnerSpeakerLabel } from '../lib/profile.js'
 import {
   DEATTRIBUTED_PREFIX,
@@ -319,6 +321,8 @@ interface MeetingSessionSource {
   delete(sessionId: string, options?: { preserveAudio?: boolean }): void
   /** 6.53.3: live, closed within its retention, or unknown (`getMeetingSessionStatus`). */
   getState?(sessionId: string): 'active' | 'closed' | 'missing'
+  /** 6.99.0: write a changed title steer into the live session's record (transcribe-stream publishLiveTitleSteer). */
+  publishTitleSteer?(sessionId: string): boolean
   /** 6.81.0: the received/ASR ledger the server's own save of a stopped meeting reads. */
   getLedger?(sessionId: string): SessionLedger
 }
@@ -340,6 +344,8 @@ function defaultSessionLedger(sessionId: string): SessionLedger {
 
 export interface MeetingRouteDependencies {
   store?: MeetingStore
+  /** 6.99.0: the live title steer ledger (lib/meeting-title-steer.ts). Tests inject one on a scratch path. */
+  titleSteer?: TitleSteerStore
   /** 6.93.0: is any meeting capture (glasses, Mac or iPhone) live right now? Assigning a Mac voice to a profile is refused while one is. */
   captureActive?: () => boolean
   sessions?: MeetingSessionSource
@@ -656,6 +662,7 @@ const defaultSessionSource: MeetingSessionSource = {
   moveAudioToPending: moveSessionAudioToPending,
   delete: deleteSession,
   getState: defaultSessionState,
+  publishTitleSteer: publishLiveTitleSteer,
 }
 
 function countWords(text: string): number {
@@ -794,6 +801,7 @@ const macAssignInFlight = new Set<string>()
 
 export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router {
   const store = deps.store ?? getMeetingStore()
+  const titleSteer = deps.titleSteer ?? getTitleSteerStore()
   const sessions = deps.sessions ?? defaultSessionSource
   const runBatch = deps.runBatch ?? runMeetingBatchPipeline
   const scheduleBackground = deps.scheduleBackground ?? (task => { void task })
@@ -886,6 +894,40 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
   })
   autoDeps.onCreate?.(autonomousFinalizer)
 
+  // ── 6.99.0: title steer ─────────────────────────────────────────────────────────────
+  // A name typed in COS Control while a Mac recording or glasses meeting is live. It is a hint the title model receives
+  // at save (and the title itself when the save sends none), never the final word. See lib/meeting-title-steer.ts.
+  // The title is never logged here or anywhere: names and companies. Length only.
+  const steerFailure = (res: Response, error: unknown, sessionId: string) => {
+    if (error instanceof TitleSteerError) {
+      res.status(error.status).json({ error: error.reason, reason: error.reason, ...(error.reason === 'title_changed' ? { current: titleSteer.get(sessionId) } : {}) })
+      return
+    }
+    console.error('[meeting/title-steer] Unexpected failure:', error instanceof Error ? error.name : 'unknown')
+    res.status(500).json({ error: 'title_steer_error', reason: 'title_steer_error' })
+  }
+  router.get('/meeting/title-steer', (req, res) => {
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : ''
+    res.set('Cache-Control', 'private, no-store')
+    try { res.json(titleSteer.get(sessionId)) } catch (error) { steerFailure(res, error, sessionId) }
+  })
+  router.put('/meeting/title-steer', (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
+    res.set('Cache-Control', 'private, no-store')
+    try {
+      // Malformed input is a 400 whether or not the session is live; only a well-formed request earns a 404/409.
+      titleSteer.get(sessionId)
+      normalizeTitleSteer(body.title)
+      if (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 0) throw new TitleSteerError('invalid_revision', 400)
+      if ((sessions.getState ?? defaultSessionState)(sessionId) !== 'active') throw new TitleSteerError('session_not_live', 404)
+      const view = titleSteer.set(sessionId, body.title, body.expectedRevision)
+      ;(sessions.publishTitleSteer ?? (() => false))(sessionId)
+      console.log(`[meeting/title-steer] ${view.title ? 'set' : 'cleared'} ${sessionId} length=${view.title ? Array.from(view.title).length : 0} revision=${view.revision}`)
+      res.json(view)
+    } catch (error) { steerFailure(res, error, sessionId) }
+  })
+
   let recoveryPendingLogged = false
   router.get('/meeting/sessions/:sessionId/status', (req, res) => {
     const sessionId = String(req.params.sessionId ?? '')
@@ -963,6 +1005,8 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       disposition: publicDisposition(disposition),
       // 6.81.0, additive: the Stop the server holds for this meeting, if any. Older clients ignore it.
       stopIntent: intent ? publicStopIntent(intent) : null,
+      // 6.99.0, additive: the name typed while it recorded (null = none). Older clients ignore it.
+      titleSteer: titleSteer.title(sessionId),
     })
   })
 
@@ -1371,14 +1415,19 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
       // save — infer from the content instead of filing everything under one
       // domain. Keyword scoring, no model call: this runs on every save, and a
       // per-meeting LLM call would breach the recurring-caller rule.
+      // 6.99.0: the title steer (a name typed while it recorded) is the title when the request sends none, and is filed
+      // beside the title either way so the title model can read it. It feeds the domain through the title, as a title does.
+      const steer = titleSteer.title(sessionId)
+      const savedTitle = effectiveSaveTitle(body?.title, steer)
       const filedDomain = domainForMeeting(
         body?.domain as string | undefined,
-        `${(body?.title as string | undefined) ?? ''}\n${transcript}`,
+        `${savedTitle ?? ''}\n${transcript}`,
         resolveCosOperationsDir(),
       )
       const saved = store.save({
         sessionId,
-        title: body?.title as string | undefined,
+        title: savedTitle,
+        ...(steer ? { titleSteer: steer } : {}),
         domain: filedDomain,
         transcript: cleanFinalTranscript(transcript),
         startTime,
@@ -3496,12 +3545,16 @@ export function createMeetingRouter(deps: MeetingRouteDependencies = {}): Router
         words: item.words,
         canonical: true,
       }))
+      // 6.99.0: same rule as POST /meeting/save: the title steer names the meeting when the request does not.
+      const steer = titleSteer.title(sessionId)
+      const recoveredTitle = effectiveSaveTitle(body.title, steer)
       const saved = store.save({
         sessionId,
-        title: typeof body.title === 'string' && body.title.trim() ? body.title : undefined,
+        title: recoveredTitle,
+        ...(steer ? { titleSteer: steer } : {}),
         domain: domainForMeeting(
           typeof body.domain === 'string' && body.domain.trim() ? body.domain : undefined,
-          `${typeof body.title === 'string' ? body.title : ''}\n${transcript}`,
+          `${recoveredTitle ?? ''}\n${transcript}`,
           resolveCosOperationsDir(),
         ),
         transcript,

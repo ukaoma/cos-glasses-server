@@ -128,6 +128,7 @@ import {
 import { feedLiveCueTranscript } from '../lib/live-cues-engine.js'
 import { armMacLiveCues, type MacLiveCuesAnswer } from '../lib/live-cues-v2.js'
 import { liveProvisional } from '../lib/live-provisional.js'
+import { getTitleSteerStore, TITLE_STEER_CAPABILITY } from '../lib/meeting-title-steer.js'
 import { chunkLevel, restoreChunkLevels, withChunkLevel, type ChunkLevel } from '../lib/chunk-levels.js'
 import { preemptMetalBatchForLive, registerLiveActivityProbe } from '../lib/whisper-metal-gate.js'
 import {
@@ -792,6 +793,8 @@ function persistSessionRequired(sessionId: string, certified?:MacSpeakerLivePrep
       startTime: session.startTime,
       lastActivityAt: session.lastActivityAt,
       title: session.title,
+      // 6.99.0: the name typed in COS Control while recording (lib/meeting-title-steer.ts). Control reads this file directly.
+      ...titleSteerField(sessionId),
       // `chunks` = legacy dense form, kept for backward compatibility with
       // existing readers; `chunksIndexed` preserves original indices so gap
       // detection survives recovery. Recovery prefers chunksIndexed.
@@ -816,6 +819,34 @@ function persistSessionRequired(sessionId: string, certified?:MacSpeakerLivePrep
     console.error(`[transcribe-stream] Durable session write failed for ${sessionId}: ${errMsg(error)}`)
     throw makeHttpError(503, 'meeting session persistence unavailable', 'session_persistence_failed')
   }
+}
+
+/** `{ titleSteer }` for the active-session record: the live name, or nothing (the key is absent, never an empty string). */
+function titleSteerField(sessionId: string): { titleSteer?: string } {
+  const title = getTitleSteerStore().title(sessionId)
+  return title ? { titleSteer: title } : {}
+}
+
+/**
+ * 6.99.0: put a changed title steer into the live session's record NOW, so COS Control (which reads the active-session
+ * file, not a route) shows it without waiting for the next chunk. A targeted edit of one key, not persistSessionRequired:
+ * that rebuilds the whole record from memory and would re-judge the Mac speaker projection outside the chunk path. A
+ * session with no record yet gets the key at its first persist. Returns whether the file was updated; never throws.
+ */
+export function publishLiveTitleSteer(sessionId: string): boolean {
+  try {
+    if (!sessions.has(sessionId)) return false
+    const filePath = resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)
+    const stat = lstatSync(filePath)
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 1024 * 1024) return false
+    const record = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>
+    if (record.sessionId !== sessionId) return false
+    const { titleSteer, ...rest } = record
+    const field = titleSteerField(sessionId)
+    if (titleSteer === field.titleSteer) return true
+    durableAtomicWriteFileSync(filePath, JSON.stringify({ ...rest, ...field }), { mode: 0o600 })
+    return true
+  } catch { return false }
 }
 
 function persistSessionBestEffort(sessionId: string): void {
@@ -2945,7 +2976,7 @@ export function assertMacCaptureComplete(sessionId: string, expectedChunkCount: 
 transcribeStreamRouter.get('/mac-recording/capabilities', (_req, res) => {
   // 6.83.2: `discard` advertises POST /api/meeting/sessions/:id/discard for a stranded no-sound capture. Older
   // servers omit it, and COS Control then discards only its own local copy and says so.
-  res.set('Cache-Control', 'private, no-store').json({ available: true, ...MAC_AUDIO, serverInstanceId: getServerInstanceId(), discard: true })
+  res.set('Cache-Control', 'private, no-store').json({ available: true, ...MAC_AUDIO, serverInstanceId: getServerInstanceId(), discard: true, titleSteer: TITLE_STEER_CAPABILITY })
 })
 function requireMacPin(req: { get(name: string): string | undefined }): string {
   const pin = req.get('X-COS-Server-Instance')?.trim()
@@ -2974,7 +3005,7 @@ transcribeStreamRouter.post('/mac-recording/start', (req, res) => {
     if (req.body.liveCues === true) {
       try { liveCues = armMacLiveCues(recording.sessionId) } catch { liveCues = { armed: false, reason: 'unavailable' } }
     }
-    res.json({ ...MAC_AUDIO, ...recording, replayed, serverInstanceId, ...(liveCues ? { liveCues } : {}) })
+    res.json({ ...MAC_AUDIO, ...recording, replayed, serverInstanceId, ...(liveCues ? { liveCues } : {}), titleSteer: getTitleSteerStore().title(recording.sessionId) })
   } catch (error) { sendStreamError(res, error) } finally { lease?.release() }
 })
 const macChunkLocks = new Set<string>()

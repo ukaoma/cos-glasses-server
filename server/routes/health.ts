@@ -77,6 +77,7 @@ import { getLocalTtsHealth, refreshLocalTtsHealth } from '../lib/tts-local.js'
 import { liveCuesCapability } from '../lib/live-cues-capability.js'
 import { liveCuesV2Advertised } from '../lib/live-cues-v2.js'
 import { liveMeetingCapability } from '../lib/live-provisional.js'
+import { TITLE_STEER_CAPABILITY } from '../lib/meeting-title-steer.js'
 import { CUE_KINDS } from '../../shared/live-cues-v2.js'
 import { tailscaleNudgeHealthField } from '../lib/tailscale-nudge.js'
 
@@ -527,6 +528,8 @@ healthRouter.get('/health', async (_req, res) => {
       liveCues: withCueKinds(liveCues),
       ...(liveCuesV2Advertised() ? { liveCuesV2: liveCuesV2Advertised() } : {}),
       liveMeeting: liveMeetingCapability(),
+      // 6.99.0: GET/PUT /api/meeting/title-steer (lib/meeting-title-steer.ts). Absent on an older server.
+      titleSteer: TITLE_STEER_CAPABILITY,
       // 6.77.0: codes only (this route is public): the protocol and whether the switch is on.
       transcriptCleanup: transcriptCleanupAdvertised(),
       richMedia: {
@@ -736,6 +739,8 @@ healthRouter.get('/models', async (req, res) => {
       liveCues: withCueKinds(liveCuesCapability()),
       ...(liveCuesV2Advertised() ? { liveCuesV2: liveCuesV2Advertised() } : {}),
       liveMeeting: liveMeetingCapability(),
+      // 6.99.0: GET/PUT /api/meeting/title-steer (lib/meeting-title-steer.ts). Absent on an older server.
+      titleSteer: TITLE_STEER_CAPABILITY,
       richMedia: {
         video: richMedia.video,
         maxPromptVisuals: MAX_MODEL_IMAGE_INPUTS,

@@ -207,6 +207,8 @@ const GOLDEN_MODELS_CAPS = [
   'recovery',
   'liveCues',
   'liveMeeting',
+  // Added after 6.87.0, additive: the live title steer (6.99.0), right after liveMeeting.
+  'titleSteer',
   'richMedia',
   'localFirstMeetings',
   // Added after 6.87.0, additive: the iPhone microphone capability (6.93.0) and the live Mac voice switch (6.93.0 QA W8).
@@ -477,6 +479,7 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.liveMeeting.provisional.maxChars',
   '.capabilities.liveMeeting.provisional.ttlMs',
   '.capabilities.liveMeeting.chunkLevels',
+  '.capabilities.titleSteer',
   '.capabilities.richMedia',
   '.capabilities.richMedia.video',
   '.capabilities.richMedia.maxPromptVisuals',
@@ -602,6 +605,7 @@ const GOLDEN_HEALTH_CAPS_6870 = [
   'cliDebug',
   'liveCues',
   'liveMeeting',
+  'titleSteer',
   'transcriptCleanup',
   'richMedia',
   'meetingLifecycle',

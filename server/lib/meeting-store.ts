@@ -183,6 +183,8 @@ export interface MeetingDetail extends MeetingMeta {
 export interface SaveMeetingInput {
   sessionId: string
   title?: string
+  /** 6.99.0: the name typed in COS Control while it recorded. Filed beside the title (header row + sidecar `titleSteer`) so the title model can read it. */
+  titleSteer?: string
   domain?: string
   transcript: string
   startTime: number
@@ -362,6 +364,8 @@ export class MeetingStore {
     const parts = localParts(input.startTime)
     const fallbackTitle = `${mac ? 'Mac' : phone ? 'iPhone' : 'G2'} Recording ${parts.date} ${parts.hourMinute}`
     const title = normalizeTitle(input.title, fallbackTitle)
+    // Kept faithful (slashes stay): it was normalized when typed. This only makes a hand-built input safe to file.
+    const titleSteer = (input.titleSteer ?? '').normalize('NFKC').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
     const stem = filenameStem(title, `${mac ? 'Mac' : phone ? 'iPhone' : 'G2'}_Recording_${parts.hourMinute}`)
     const durationMs = Number.isFinite(input.durationMs) ? Math.max(0, input.durationMs) : 0
     const durationMin = Math.round(durationMs / 60_000)
@@ -405,6 +409,7 @@ export class MeetingStore {
       ...(phone ? ['| **Capture source** | iphone_microphone |', '| **Speaker policy** | anonymous |'] : []),
       ...(mac ? ['| **Capture source** | mac_system_audio |', '| **Captured voices** | Other participants only |'] : []),
       `| **Domain** | ${escapeTableValue(domain)} |`,
+      ...(titleSteer ? [`| **Title steer** | ${escapeTableValue(titleSteer)} |`] : []),
       `| **Transfer integrity** | ${integrityValue} |`,
       '| **Transcription quality** | streaming |',
       '',
@@ -436,6 +441,7 @@ export class MeetingStore {
       durationMs,
       domain,
       title,
+      ...(titleSteer ? { titleSteer } : {}),
       canonicalProvider: canonicalProvider(input.chunks),
       providers,
       providerCandidates: input.providerCandidates ?? {},
