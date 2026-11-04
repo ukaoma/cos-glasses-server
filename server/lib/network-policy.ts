@@ -19,10 +19,16 @@ export function isTailscaleIpv4(value: string): boolean {
   return !!octets && octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127
 }
 
+/** Tailscale IPv6 ULA range: fd7a:115c:a1e0::/48. */
+export function isTailscaleIpv6(value: string): boolean {
+  const clean = normalizeRemoteIp(value).trim().toLowerCase()
+  return clean.startsWith('fd7a:115c:a1e0:')
+}
+
 export function isAllowedNetworkIp(value: string): boolean {
   const clean = normalizeRemoteIp(value)
   if (clean === '127.0.0.1' || clean === '::1') return true
-  if (isTailscaleIpv4(clean)) return true
+  if (isTailscaleIpv4(clean) || isTailscaleIpv6(clean)) return true
 
   const octets = parseIpv4(clean)
   if (!octets) return false
@@ -31,11 +37,51 @@ export function isAllowedNetworkIp(value: string): boolean {
     (octets[0] === 192 && octets[1] === 168)
 }
 
-export function isAllowedNetworkOrigin(origin: string): boolean {
+/**
+ * Normalize a Tailscale MagicDNS hostname (`Self.DNSName` from `tailscale status --json`).
+ * Strips one trailing dot, lowercases, and requires a strict `<node>.<tailnet>.ts.net` shape.
+ */
+export function normalizeTailscaleDnsName(value: string | undefined | null): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim().toLowerCase().replace(/\.$/, '')
+  if (!trimmed || trimmed.length > 253) return null
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.ts\.net$/.test(trimmed)) {
+    return null
+  }
+  return trimmed
+}
+
+export interface AllowedOriginOptions {
+  /** The Mac's own verified `Self.DNSName` from `tailscale status --json`. Never a suffix wildcard. */
+  selfDnsName?: string | null
+  /**
+   * When set, any explicit port in `origin` must match one of these numbers (e.g. `[3141, 3143]`).
+   * Prevents another server on the same host (`localhost:8080`, `<mac>.ts.net:8080`) from passing
+   * CORS or riding a host-scoped cookie session.
+   */
+  allowedPorts?: readonly number[]
+}
+
+export function isAllowedNetworkOrigin(origin: string, options: AllowedOriginOptions = {}): boolean {
   try {
     const url = new URL(origin)
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
-    return url.hostname === 'localhost' || isAllowedNetworkIp(url.hostname)
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    const selfDns = normalizeTailscaleDnsName(options.selfDnsName)
+    const hostAllowed = host === 'localhost'
+      || isAllowedNetworkIp(host)
+      || (selfDns !== null && host === selfDns)
+    if (!hostAllowed) return false
+
+    if (options.allowedPorts && options.allowedPorts.length > 0) {
+      const effectivePort = url.port
+        ? Number(url.port)
+        : (url.protocol === 'https:' ? 443 : 80)
+      if (!Number.isInteger(effectivePort) || !options.allowedPorts.includes(effectivePort)) {
+        return false
+      }
+    }
+    return true
   } catch {
     return false
   }
@@ -57,11 +103,43 @@ export function isLoopbackAddress(value: string | undefined | null): boolean {
     || address.startsWith('127.') || address.startsWith('::ffff:127.')
 }
 
+const PROXY_FORWARDED_HEADERS = [
+  'forwarded',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-real-ip',
+  'tailscale-user-login',
+  'tailscale-user-name',
+  'tailscale-user-profile-pic',
+  'tailscale-headers-info',
+] as const
+
 /**
- * Loopback check on the SOCKET, never `req.ip` or `X-Forwarded-For`. The server never
- * enables trust-proxy, but reading the socket keeps this true even if someone does.
+ * True if a request carries reverse-proxy or `tailscale serve` headers.
+ * A local proxy (like `tailscale serve --bg 3141`) connects over `127.0.0.1`, so
+ * `isLoopbackSocket` must refuse any request carrying proxy headers to prevent remote
+ * tailnet peers from masquerading as the Mac owner on `loopbackOnly` / `macOnly` routes.
  */
-export function isLoopbackSocket(req: { socket?: { remoteAddress?: string | undefined } | null }): boolean {
+export function hasProxyForwardedHeaders(headers: Record<string, unknown> | undefined | null): boolean {
+  if (!headers || typeof headers !== 'object') return false
+  for (const name of PROXY_FORWARDED_HEADERS) {
+    const val = headers[name]
+    if (typeof val === 'string' && val.trim().length > 0) return true
+    if (Array.isArray(val) && val.length > 0) return true
+  }
+  return false
+}
+
+/**
+ * Loopback check on the SOCKET, never `req.ip` or `X-Forwarded-For` — and false if any
+ * reverse-proxy or `tailscale serve` header is present.
+ */
+export function isLoopbackSocket(req: {
+  socket?: { remoteAddress?: string | undefined } | null
+  headers?: Record<string, unknown> | null
+}): boolean {
+  if (hasProxyForwardedHeaders(req.headers)) return false
   return isLoopbackAddress(req.socket?.remoteAddress)
 }
 

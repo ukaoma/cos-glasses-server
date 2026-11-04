@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express'
 import { timingSafeTokenEqual } from './token-auth.js'
 import { PAIRING_NONCE_BODY } from './glasses-pairing.js'
+import { isWebSessionAuthorized } from './web-session-auth.js'
 
 // Recovery/setup clients need these availability surfaces before they have a
 // usable token. Keep private provider state and every mutation route out.
@@ -47,6 +48,11 @@ export function isPublicApiRequest(method: string, path: string): boolean {
   if (PUBLIC_API_PATHS.has(path)) return true
   if (method === 'POST' && path === '/pairing/claim') return true
   if (method === 'GET' && PAIRING_POLL_PATH.test(path)) return true
+  // COS Control Web (browser on the tailnet). Login takes the token or a one-time handoff
+  // ticket and answers with the HttpOnly cookie; it is rate limited in the route. Status
+  // says only whether this browser is signed in. Everything else stays behind the gate.
+  if (method === 'POST' && (path === '/web-session/login' || path === '/web-session/logout')) return true
+  if (method === 'GET' && path === '/web-session/status') return true
   if (method !== 'GET' && method !== 'HEAD') return false
   return TTS_PLAYBACK_CAPABILITY_PATH.test(path)
     || DISPLAY_STREAM_CAPABILITY_PATH.test(path)
@@ -54,29 +60,40 @@ export function isPublicApiRequest(method: string, path: string): boolean {
 
 export interface RequireApiTokenOptions {
   /**
-   * Called once per request that passed the token check (never for a public path).
-   * Pairing uses it to stamp `firstAuthAfterClaimAt`. A throw here is swallowed: an
-   * observer must never turn an authenticated request into a failure.
+   * Called once per request that passed the X-COS-Token header check (never for a
+   * public path and never for a browser cookie session so web login cannot disturb
+   * the glasses pairing state machine).
    */
   onAuthenticated?: (req: Parameters<RequestHandler>[0]) => void
+  /** Verified Tailscale `Self.DNSName` for validating browser cookie Origins. */
+  selfDnsName?: () => string | null
+  /** Allowed browser-facing server ports (e.g. `[3141, 3143]`) for cookie Origin port binding. */
+  allowedPorts?: () => readonly number[]
 }
 
 /** Global /api authentication boundary. Mount before all body parsers. */
 export function requireApiToken(apiToken: string, options: RequireApiTokenOptions = {}): RequestHandler {
   return (req, res, next) => {
     if (isPublicApiRequest(req.method, req.path)) return next()
-    if (!timingSafeTokenEqual(req.headers['x-cos-token'], apiToken)) {
-      return res.status(401).json({
-        error: 'unauthorized',
-        // Stable on purpose: clients key off this value, not the message.
-        reason: 'pairing_token_rejected',
-        // Older COS Glasses builds, which cannot scan, show this message word for word.
-        message: 'Paste the pairing token from COS Control, or scan its code with COS Glasses 6.10.621 or newer.',
-      })
+    if (timingSafeTokenEqual(req.headers['x-cos-token'], apiToken)) {
+      if (options.onAuthenticated) {
+        try { options.onAuthenticated(req) } catch { /* observer only */ }
+      }
+      return next()
     }
-    if (options.onAuthenticated) {
-      try { options.onAuthenticated(req) } catch { /* observer only */ }
+    const cookieAuth = isWebSessionAuthorized(req, apiToken, {
+      selfDnsName: options.selfDnsName?.() ?? null,
+      allowedPorts: options.allowedPorts?.(),
+    })
+    if (cookieAuth) {
+      return next()
     }
-    next()
+    return res.status(401).json({
+      error: 'unauthorized',
+      // Stable on purpose: clients key off this value, not the message.
+      reason: 'pairing_token_rejected',
+      // Older COS Glasses builds, which cannot scan, show this message word for word.
+      message: 'Paste the pairing token from COS Control, or scan its code with COS Glasses 6.10.621 or newer.',
+    })
   }
 }

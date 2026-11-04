@@ -15,7 +15,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { healthRouter } from './routes/health.js'
 import { diagRouter } from './routes/diag.js'
 import { createClientInstanceRouter, isMeetingChunkPost } from './routes/client-instance.js'
-import { installTailscaleNudger } from './lib/tailscale-nudge.js'
+import { getTailscaleNudger, installTailscaleNudger } from './lib/tailscale-nudge.js'
 import { queryRouter } from './routes/query.js'
 import { providerProofRouter } from './routes/provider-proof.js'
 import { transcribeRouter } from './routes/transcribe.js'
@@ -198,6 +198,7 @@ import {
 import { isPublicApiRequest, requireApiToken } from './lib/api-auth.js'
 import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
+import { createWebControlRouter, webControlCsp, webControlEnabled } from './routes/web-control.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -271,12 +272,12 @@ app.use((req, res, next) => {
   next()
 })
 
-// Allow localhost + LAN IPs (glasses WebView accesses server over LAN)
+// Allow localhost + LAN IPs (glasses WebView accesses server over LAN) + this Mac's verified Tailscale MagicDNS
 app.use(cors({
   origin: (origin, cb) => {
     // Allow requests with no origin (same-origin, curl, SSE) or "null" origin (file:// WebViews like Even Hub)
     if (!origin || origin === 'null') return cb(null, true)
-    if (isAllowedNetworkOrigin(origin)) return cb(null, true)
+    if (isAllowedNetworkOrigin(origin, { selfDnsName: getTailscaleNudger().currentSelfDnsName() })) return cb(null, true)
     cb(new Error('CORS blocked'))
   },
   // Without this, a cross-origin reader sees only the CORS-safelisted response
@@ -371,8 +372,11 @@ app.use('/api', (req, _res, next) => {
   tailscaleNudger.noteRequest(req.socket?.remoteAddress, { meetingChunk: isMeetingChunkPost(req.method, req.path) })
   next()
 })
+const HTTPS_PORT = parseInt(process.env.HTTPS_PORT ?? '3143', 10)
 app.use('/api', requireApiToken(API_TOKEN, {
   onAuthenticated: req => pairingState.noteAuthenticated(req.socket?.remoteAddress),
+  selfDnsName: () => tailscaleNudger.currentSelfDnsName(),
+  allowedPorts: () => [PORT, HTTPS_PORT],
 }))
 // Past the token gate, a request on a non-public path carried the token: mark a paired phone.
 app.use('/api', (req, _res, next) => {
@@ -1361,6 +1365,21 @@ process.on('unhandledRejection', (reason: any) => {
 // Start HTTPS alongside HTTP — Even Hub WebView prefers HTTPS (iOS ATS).
 // Optional: drop cert.pem + key.pem in server/certs/ (e.g. via mkcert) to enable.
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+if (webControlEnabled()) {
+  const webControlDir = path.join(__dirname, 'web-control')
+  app.use('/control', (req, res, next) => {
+    res.setHeader('Content-Security-Policy', webControlCsp(req.path))
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('Referrer-Policy', 'no-referrer')
+    next()
+  }, express.static(webControlDir))
+  app.use('/api', createWebControlRouter({
+    apiToken: () => API_TOKEN,
+    port: () => PORT,
+    httpsPort: () => existsSync(path.join(__dirname, 'certs', 'cert.pem')) ? HTTPS_PORT : null,
+    selfDnsName: () => tailscaleNudger.currentSelfDnsName(),
+  }))
+}
 /**
  * Let a slow large upload finish instead of killing its socket mid-body.
  *
@@ -1389,7 +1408,6 @@ function withRequestTimeout<T extends { requestTimeout: number }>(server: T): T 
   return server
 }
 
-const HTTPS_PORT = parseInt(process.env.HTTPS_PORT ?? '3143', 10)
 const certDir = path.join(__dirname, 'certs')
 const listeners: RequiredListener[] = []
 if (existsSync(path.join(certDir, 'cert.pem'))) {

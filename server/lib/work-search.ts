@@ -135,7 +135,15 @@ export function searchOptionText(text: string): string {
  * drain answers its own `refused` state rather than a 503, and a running job stops at its next unit when a drain starts.
  */
 export function isReadOnlyApiPost(method: string, path: string): boolean {
-  return method === 'POST' && (path === '/work/search' || path === '/meetings/live-ask' || /^\/meeting\/[A-Za-z0-9:_-]{3,96}\/voice-suggestions$/.test(path))
+  return method === 'POST' && (
+    path === '/work/search'
+    || path === '/meetings/live-ask'
+    || path === '/web-session/login'
+    || path === '/web-session/logout'
+    || path === '/web-session/handoff'
+    || path === '/web-bridge/memories'
+    || /^\/meeting\/[A-Za-z0-9:_-]{3,96}\/voice-suggestions$/.test(path)
+  )
 }
 
 /** A query's length as people count it: code points, not UTF-16 units, so 150 emoji are 150 (Control counts characters). */
