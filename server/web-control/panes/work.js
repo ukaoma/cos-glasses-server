@@ -126,7 +126,13 @@
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
   function icon(name) { return '<svg class="icon"><use href="#i-' + name + '"/></svg>'; }
-  function errText(err, map) { var m = err && err.message ? err.message : 'That did not go through.'; return (map && map[m]) || m; }
+  // The server's error code first (api() carries it as err.code), then its message, then a plain line.
+  function errText(err, map) {
+    var code = err && typeof err.code === 'string' ? err.code : '';
+    if (map && code && map[code]) return map[code];
+    var m = err && err.message ? err.message : 'That did not go through.';
+    return (map && map[m]) || m;
+  }
 
   // ── live sessions and handoff state (WorkHandoffState, WorkActivity) ──
   function splitSession(id) { var m = /^(claude|codex|cursor):(.+)$/.exec(String(id || '')); return m ? { provider: m[1], id: m[2] } : null; }
@@ -749,7 +755,7 @@
   function intakeRow(it) {
     var busy = !!S.intakeBusy[it.id], link = it.kind === 'link' && it.status === 'suggested', ask = it.kind === 'ask' && it.status === 'ask';
     var text = link ? it.task.text : it.text;
-    var detail = link ? Math.round(it.confidence * 100) + '%' : ask ? str(it.owner) : (REASON[it.reason] || (it.ownerIsMiles ? 'probably yours' : str(it.owner)));
+    var detail = link ? (typeof it.confidence === 'number' && isFinite(it.confidence) ? Math.round(it.confidence * 100) + '%' : '') : ask ? str(it.owner) : (REASON[it.reason] || (it.ownerIsMiles ? 'probably yours' : str(it.owner)));
     var accept = link ? 'Link' : ask ? 'Make it mine' : 'Keep as card', dismiss = link || ask ? 'Dismiss' : 'Drop';
     var enabled = link ? S.intakeCaps.linkWrites === true : S.intakeCaps.cardCreation === true;
     var evidence = '';
@@ -940,7 +946,9 @@
     if (r.request) {
       var req = r.request, done = ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'].indexOf(req.state) >= 0;
       return '<div class="wk-handoff" data-tone="' + (req.state === 'sent' ? 'green' : req.state === 'refused' || req.state === 'expired' ? 'danger' : 'accent') + '"><p class="wk-state">' +
-        esc(REQUEST_LINE[req.state] || req.state) + '</p>' + (req.reason ? '<p class="wk-small">' + esc(req.reason) + '</p>' : '') + (done ? '' : '<p class="wk-fine">This page checks every few seconds.</p>') + '</div>';
+        esc(REQUEST_LINE[req.state] || req.state) + '</p>' + (req.reason ? '<p class="wk-small">' + esc(req.reason) + '</p>' : '') +
+        (r.pollStopped ? '<p class="wk-small wk-muted">' + esc(r.pollStopped) + '</p>' : done ? '' : '<p class="wk-fine">This page checks every few seconds.</p>') +
+        (done || r.pollStopped ? '<div class="wk-row"><button type="button" class="wk-text-btn" data-wk="reply-reset" data-id="' + esc(it.id) + '">Dismiss</button></div>' : '') + '</div>';
     }
     if (!r.open) return '<button type="button" class="cx-btn quiet" data-wk="reply-open" data-id="' + esc(it.id) + '">Not done yet</button>';
     var limit = r.text.trim().length > 2000;
@@ -962,20 +970,59 @@
     r.sending = true; r.error = ''; renderDetail(it.id);
     api('/api/work-board/handoff-requests', { method: 'POST', body: body }).then(function (d) {
       r.sending = false; r.request = (d && d.request) || { clientRequestId: body.clientRequestId, state: 'pending' };
-      renderDetail(it.id); pollReply(it, r);
+      r.madeAt = new Date(); r.fails = 0; r.pollStopped = '';
+      renderDetail(it.id); pollHandoff(r, replyUpdate(it.wid));
     }, function (err) { r.sending = false; r.error = errText(err); renderDetail(it.id); });
   }
-  function pollReply(it, r) {
-    clearTimeout(r.timer);
-    if (!r.request || ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'].indexOf(r.request.state) >= 0) return;
-    r.timer = setTimeout(function () {
-      api('/api/work-board/handoff-requests/' + encodeURIComponent(r.request.clientRequestId)).then(function (d) {
-        if (d && d.request) r.request = d.request;
-        var rt = W.parseRoute();
-        if (rt.pane === 'work' && rt.args.length === 1 && rt.args[0] === it.id) renderDetail(it.id);
-        pollReply(it, r);
-      }, function () { pollReply(it, r); });
+  // One bounded poller for Start work and reply requests: every 3 s while the request is open, at most 25 minutes from
+  // when it was made, stopping after 4 failures in a row or at once when signed out. leave() clears every timer.
+  var HANDOFF_TIMERS = new Set();
+  var TERMINAL = ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'];
+  function requestOpen(h) { return !!(h && h.request && TERMINAL.indexOf(h.request.state) < 0); }
+  function pollHandoff(h, onUpdate) {
+    if (h.timer) { clearTimeout(h.timer); HANDOFF_TIMERS.delete(h.timer); h.timer = null; }
+    if (!requestOpen(h) || h.pollStopped) return;
+    var made = W.toDate(h.request.createdAt) || h.madeAt || new Date();
+    if (Date.now() - made.getTime() > 25 * 60000) { h.pollStopped = 'Stopped checking after 25 minutes. Open the card later to see what happened.'; onUpdate(); return; }
+    var timer = setTimeout(function () {
+      HANDOFF_TIMERS.delete(timer); h.timer = null;
+      api('/api/work-board/handoff-requests/' + encodeURIComponent(h.request.clientRequestId)).then(function (d) {
+        h.fails = 0;
+        if (d && d.request) h.request = d.request;
+        onUpdate();
+        if (W.parseRoute().pane === 'work') pollHandoff(h, onUpdate);   // an answer that lands after leave() does not re-arm
+      }, function (err) {
+        h.fails = (h.fails || 0) + 1;
+        if ((err && err.status === 401) || h.fails >= 4) { h.pollStopped = 'Stopped checking: COS on your Mac did not answer. Refresh to check again.'; onUpdate(); return; }
+        if (W.parseRoute().pane === 'work') pollHandoff(h, onUpdate);
+      });
     }, 3000);
+    h.timer = timer; HANDOFF_TIMERS.add(timer);
+  }
+  function stopHandoffPolls() {
+    HANDOFF_TIMERS.forEach(function (t) { clearTimeout(t); }); HANDOFF_TIMERS.clear();
+    [S.start, S.reply].forEach(function (all) { Object.keys(all).forEach(function (k) { all[k].timer = null; }); });
+  }
+  // Back on Work: pick up any request that was still open when the pane was left.
+  function resumeHandoffPolls() {
+    Object.keys(S.start).forEach(function (wid) { var h = S.start[wid]; if (requestOpen(h) && !h.timer && !h.pollStopped) pollHandoff(h, startUpdate(wid)); });
+    Object.keys(S.reply).forEach(function (wid) { var h = S.reply[wid]; if (requestOpen(h) && !h.timer && !h.pollStopped) pollHandoff(h, replyUpdate(wid)); });
+  }
+  function replyUpdate(wid) {
+    return function () {
+      var h = S.reply[wid], it = itemByWid(wid); if (!h || !it) return;
+      if (h.request && h.request.state === 'sent') { delete S.activity[wid]; }
+      var rt = W.parseRoute();
+      if (rt.pane === 'work' && rt.args.length === 1 && rt.args[0] === it.id) renderDetail(it.id);
+    };
+  }
+  function startUpdate(wid) {
+    return function () {
+      var h = S.start[wid], it = itemByWid(wid); if (!h || !it) return;
+      if (h.request && h.request.state === 'sent') { delete S.activity[wid]; loadOpen().then(function () { ITEMS = null; }); }
+      var rt = W.parseRoute();
+      if (rt.pane === 'work' && rt.args[0] === it.id && rt.args[1] === 'start') renderStart(it.id);
+    };
   }
   function destinationLabel(d) {
     if (d.mode === 'newSession') return 'New ' + providerName(d.provider) + ' session' + (d.model ? ' · ' + d.model : '');
@@ -1021,10 +1068,26 @@
 
   // ── Start work: a handoff request COS Control on the Mac claims and sends (glasses path, 6.59.0) ──
   var FORKABLE = { claude: 1, codex: 1 };
+  // The sessions Start work can continue or fork: this card's own, plus the saved destination's session when it names one
+  // that never worked on this card (labelled as the saved destination, so the picker shows what Start will send to).
+  function sessionChoices(it) {
+    var rows = contributors(it).filter(function (a) { return splitSession(a.sessionId); }).map(function (a) {
+      var row = sessionRow(a);
+      return { sessionId: a.sessionId, provider: splitSession(a.sessionId).provider,
+        label: providerName(a.provider) + ' \u00b7 ' + clip(str((row || {}).display_label) || str(a.sessionTitle) || 'Session', 60) + (row ? ' \u00b7 ' + ageLabel(row) : '') };
+    });
+    var saved = (S.activity[it.wid] || {}).savedDestination, ss = saved && splitSession(saved.sessionId);
+    if (ss && saved.mode !== 'newSession' && !rows.some(function (c) { return String(c.sessionId).toLowerCase() === String(saved.sessionId).toLowerCase(); })) {
+      var live = S.sessions[ss.id.toLowerCase()];
+      rows.unshift({ sessionId: saved.sessionId, provider: ss.provider, saved: true,
+        label: destinationLabel(saved) + (live ? ' \u00b7 ' + clip(str(live.display_label) || 'Session', 50) : '') + ' (saved)' });
+    }
+    return rows;
+  }
   function startState(it) {
     var st = S.start[it.wid];
     if (st) return st;
-    var saved = (S.activity[it.wid] || {}).savedDestination, rows = contributors(it).filter(function (a) { return splitSession(a.sessionId); });
+    var saved = (S.activity[it.wid] || {}).savedDestination, rows = sessionChoices(it);
     st = { mode: 'newSession', sessionId: '', model: '', note: '', sending: false, request: null, error: '', fromSaved: false };
     if (saved && saved.mode) {
       st.mode = saved.mode; st.sessionId = str(saved.sessionId); st.model = str(saved.model); st.fromSaved = true;
@@ -1054,7 +1117,7 @@
       return;
     }
     var st = startState(it), blocking = blockingHandoff(it), caps = (S.activity[it.wid] || {}).capabilities || S.openCaps || {};
-    var sessions = contributors(it).filter(function (a) { return splitSession(a.sessionId); });
+    var sessions = sessionChoices(it);
     var problem = startProblem(it, st), taking = caps.requests === 1;
     function choice(mode, title, detail, disabled) {
       return '<label class="wk-choice' + (disabled ? ' off' : '') + '"><input type="radio" name="wk-mode" value="' + mode + '"' + (st.mode === mode ? ' checked' : '') + (disabled || st.sending || st.request ? ' disabled' : '') + '>' +
@@ -1065,17 +1128,16 @@
         MODELS.map(function (m) { return '<option value="' + m[0] + '"' + (m[0] === st.model ? ' selected' : '') + '>' + esc(m[1]) + '</option>'; }).join('') + '</select></label>'
       : '<label class="wk-pick wk-pick-wide"><span>Session</span><select class="field" data-wk-start="session"' + (st.sending || st.request ? ' disabled' : '') + '>' +
         (sessions.length ? '' : '<option value="">No session has worked on this card yet</option>') +
-        sessions.filter(function (a) { return st.mode !== 'fork' || FORKABLE[splitSession(a.sessionId).provider]; }).map(function (a) {
-          var row = sessionRow(a);
-          return '<option value="' + esc(a.sessionId) + '"' + (String(a.sessionId).toLowerCase() === String(st.sessionId).toLowerCase() ? ' selected' : '') + '>' +
-            esc(providerName(a.provider) + ' · ' + clip(str((row || {}).display_label) || str(a.sessionTitle) || 'Session', 60) + (row ? ' · ' + ageLabel(row) : '')) + '</option>';
+        sessions.filter(function (c) { return st.mode !== 'fork' || FORKABLE[c.provider]; }).map(function (c) {
+          return '<option value="' + esc(c.sessionId) + '"' + (String(c.sessionId).toLowerCase() === String(st.sessionId).toLowerCase() ? ' selected' : '') + '>' + esc(c.label) + '</option>';
         }).join('') + '</select></label>';
     var req = st.request, reqHtml = '';
     if (req) {
       var terminal = ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'].indexOf(req.state) >= 0;
       reqHtml = '<div class="wk-handoff" data-tone="' + (req.state === 'sent' ? 'green' : req.state === 'refused' || req.state === 'expired' ? 'danger' : 'accent') + '">' +
         '<p class="wk-state">' + esc(REQUEST_LINE[req.state] || req.state) + '</p>' + (req.reason ? '<p class="wk-small">' + esc(req.reason) + '</p>' : '') +
-        (terminal ? '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="back">Back to the card</button></div>' : '<p class="wk-fine">This page checks every few seconds.</p>') + '</div>';
+        (st.pollStopped ? '<p class="wk-small wk-muted">' + esc(st.pollStopped) + '</p>' : '') +
+        (terminal || st.pollStopped ? '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="back">Back to the card</button></div>' : '<p class="wk-fine">This page checks every few seconds.</p>') + '</div>';
     }
     pane.innerHTML = '<div class="cx wk" data-tint="work">' + backBar('Back to the card') +
       '<section class="wk-start"><h1 class="wk-detail-title">' + esc(blocking && !req ? 'This card already has a handoff' : 'Start work on this card?') + '</h1>' +
@@ -1085,7 +1147,7 @@
       (st.fromSaved && !req ? '<p class="wk-small wk-muted">Your saved destination for this card.</p>' : '') +
       '<div class="wk-field"><span class="wk-label">Where should it go?</span><div class="wk-choices">' +
       choice('continueSession', 'Continue a session', 'Sends to an existing conversation, with its model and permissions. For Cursor, a new Cursor chat opens with your note filled in, and you press Send there.', !sessions.length) +
-      choice('fork', 'Fork a session', 'Copies a conversation first. Same platform, or to Claude or Codex.', !sessions.some(function (a) { return FORKABLE[splitSession(a.sessionId).provider]; })) +
+      choice('fork', 'Fork a session', 'Copies a conversation first. Same platform, or to Claude or Codex.', !sessions.some(function (c) { return FORKABLE[c.provider]; })) +
       choice('newSession', 'Start a new session', 'Claude, Codex or a local model in the background, with a model you pick. Cursor opens its own window with the handoff filled in, and you press Send there.', false) +
       '</div></div>' + picker +
       '<label class="wk-field"><span class="wk-label">Note</span><textarea class="field" rows="3" data-wk-start="note" maxlength="2000" placeholder="Anything to add to the card’s context (optional)"' + (st.sending || req ? ' disabled' : '') + '>' + esc(st.note) + '</textarea></label>' +
@@ -1107,22 +1169,9 @@
     st.sending = true; st.error = ''; renderStart(it.id);
     api('/api/work-board/handoff-requests', { method: 'POST', body: body }).then(function (d) {
       st.sending = false; st.request = (d && d.request) || { clientRequestId: body.clientRequestId, state: 'pending' };
-      renderStart(it.id); pollRequest(it, st);
+      st.madeAt = new Date(); st.fails = 0; st.pollStopped = '';
+      renderStart(it.id); pollHandoff(st, startUpdate(it.wid));
     }, function (err) { st.sending = false; st.error = errText(err); renderStart(it.id); });
-  }
-  function pollRequest(it, st) {
-    clearTimeout(st.timer);
-    var req = st.request; if (!req || ['sent', 'refused', 'unresolved', 'unconfirmed', 'expired'].indexOf(req.state) >= 0) return;
-    if (Date.now() - (W.toDate(req.createdAt) || Date.now()) > 25 * 60000) return;
-    st.timer = setTimeout(function () {
-      api('/api/work-board/handoff-requests/' + encodeURIComponent(req.clientRequestId)).then(function (d) {
-        if (d && d.request) st.request = d.request;
-        var r = W.parseRoute();
-        if (r.pane === 'work' && r.args[0] === it.id && r.args[1] === 'start') renderStart(it.id);
-        if (st.request.state === 'sent') { delete S.activity[it.wid]; loadOpen().then(function () { ITEMS = null; }); }
-        pollRequest(it, st);
-      }, function () { pollRequest(it, st); });
-    }, 3000);
   }
 
   // ── Edit task (WorkTaskEditor) ───────────────────────────
@@ -1369,7 +1418,10 @@
       case 'clear': S.q = ''; S.meaning = null; return renderList();
       case 'open': return W.go('work', [id]);
       case 'back': return W.goBack();
-      case 'start': return W.go('work', [id, 'start']);
+      case 'start':
+        it = itemFor(id);
+        if (it && S.start[it.wid] && (!requestOpen(S.start[it.wid]) && S.start[it.wid].request || S.start[it.wid].pollStopped)) delete S.start[it.wid];
+        return W.go('work', [id, 'start']);
       case 'edit': return W.go('work', [id, 'edit']);
       case 'meeting': return W.go('meetings', [t.getAttribute('data-domain'), t.getAttribute('data-month'), t.getAttribute('data-file')]);
       case 'session': return W.go('sessions', [t.getAttribute('data-provider'), t.getAttribute('data-sid')]);
@@ -1406,6 +1458,7 @@
       case 'reply-open': case 'reply-cancel':
         it = itemFor(id); if (it && S.reply[it.wid]) { S.reply[it.wid].open = act === 'reply-open'; renderDetail(it.id); } return;
       case 'reply-send': it = itemFor(id); if (it) sendReply(it, t.getAttribute('data-intent')); return;
+      case 'reply-reset': it = itemFor(id); if (it) { delete S.reply[it.wid]; delete S.activity[it.wid]; renderDetail(it.id); } return;
       case 'edit-save': it = current(); if (it) editSave(it); return;
       case 'edit-cancel':
         it = current(); if (!it) return W.goBack();
@@ -1460,8 +1513,8 @@
       var st = startState(it);
       if (el.name === 'wk-mode') {
         st.mode = el.value; st.fromSaved = false;
-        var rows = contributors(it).filter(function (a) { var s = splitSession(a.sessionId); return s && (st.mode !== 'fork' || FORKABLE[s.provider]); });
-        if (st.mode !== 'newSession' && !rows.some(function (a) { return a.sessionId === st.sessionId; })) st.sessionId = rows.length ? rows[0].sessionId : '';
+        var rows = sessionChoices(it).filter(function (c) { return st.mode !== 'fork' || FORKABLE[c.provider]; });
+        if (st.mode !== 'newSession' && !rows.some(function (c) { return c.sessionId === st.sessionId; })) st.sessionId = rows.length ? rows[0].sessionId : '';
       } else if (el.getAttribute('data-wk-start') === 'session') { st.sessionId = el.value; st.fromSaved = false; }
       else if (el.getAttribute('data-wk-start') === 'model') { st.model = el.value; st.fromSaved = false; }
       return renderStart(it.id);
@@ -1513,6 +1566,7 @@
   document.addEventListener('keydown', function (e) {
     var r = W.parseRoute();
     if (r.pane !== 'work' || r.args.length || S.tab !== 'sort' || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.repeat && e.key === 'e') return;   // a held key decides once
     if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
     var groups = sortGroups(), n = groups.length;
     if (e.key === 'j') S.sortIndex = Math.min(Math.max(0, n - 1), S.sortIndex + 1);
@@ -1529,12 +1583,12 @@
 
   W.registerPane('work', {
     load: function (args) {
-      startPoll();
+      startPoll(); resumeHandoffPolls();
       if (!S.tasks && !S.loading) loadBoard();
       else if (!args.length && Date.now() - S.loadedAt > 60000 && !S.loading) loadBoard();
       render();
     },
-    leave: function () { stopPoll(); },
+    leave: function () { stopPoll(); stopHandoffPolls(); },
     // The Ask sheet's "Find a task about this": open the board on this query and ask by meaning.
     search: function (q) { S.q = String(q || ''); S.tab = 'board'; render(); searchMeaning(); },
     // Back unwinds one step: Start work and Edit go to the card, the card to the list.
