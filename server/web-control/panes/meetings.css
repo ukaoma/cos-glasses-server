@@ -63,6 +63,7 @@
 .mt-match { display: inline-flex; align-items: center; height: 19px; padding: 0 8px; border-radius: 10px; font: 600 9.5px/1 var(--mono); letter-spacing: 0.02em; color: var(--ink); background: color-mix(in srgb, var(--tint) 16%, transparent); white-space: nowrap; }
 .mt-row .chev { align-self: center; margin-top: 0; }
 .mt-empty { text-align: center; }
+.mt-capnote { font-size: 12.5px; color: var(--sub); margin: 10px 2px 0; line-height: 1.45; }
 @media (max-width: 599px) {
   .mt-row { grid-template-columns: 32px minmax(0, 1fr) 12px; }
   .mt-row .mt-side { grid-column: 2; grid-row: 2; justify-content: flex-start; margin-top: 2px; }

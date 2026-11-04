@@ -10,7 +10,18 @@
 (function () {
   'use strict';
   var W = window.COSWeb;
-  var $ = W.$, esc = W.esc, api = W.api;
+  var $ = W.$, esc = W.esc;
+  // W.api with one addition: a 401 (it has already shown the sign-in) halts every Meetings timer, so no later poll
+  // calls the sign-in again and wipes its reason.
+  function api(path, opts) {
+    return W.api(path, opts).catch(function (err) { if (err && err.status === 401) halt(); throw err; });
+  }
+  function halt() {
+    var first = !S.out;
+    stopTimers(); clearTimeout(S.stopTimer); S.stopTimer = null; S.view = ''; S.out = true;
+    // Once, so the sign-in says why; no later Meetings call reaches it to clear the line.
+    if (first && typeof W.showAuth === 'function') W.showAuth(SIGNED_OUT);
+  }
   var pane = $('pane-meetings');
   if (!pane) return;
 
@@ -454,6 +465,9 @@
     });
     return hits;
   }
+  // The server reads at most 200 meetings for a month (and has no offset); days[] counts the whole month.
+  function monthTotal() { return S.days.reduce(function (n, d) { return n + num(d.count); }, 0); }
+  function monthCapped() { return !S.day && !!S.rows && S.rows.length >= 200 && monthTotal() > S.rows.length; }
   function rowKey(m) { return [m.domain || '', m.month || '', m.filename || ''].join('|'); }
 
   // iOS Safari has no scroll anchoring: a box above the reader that grows or shrinks would move the rows under the
@@ -473,7 +487,8 @@
       : (S.loading ? 'Loading…' : (S.error || 'Saved calls by day · transcript and summary'));
     var stats = [];
     if (S.rows) {
-      stats.push([fmtCount(visibleRows().length), S.day ? 'ON ' + S.day : monthTitle(S.month).toUpperCase()]);
+      var shown = visibleRows().length;
+      stats.push([monthCapped() && S.domain === 'all' ? fmtCount(shown) + ' of ' + fmtCount(monthTotal()) : fmtCount(shown), S.day ? 'ON ' + S.day : monthTitle(S.month).toUpperCase()]);
       var withCalls = S.days.filter(function (d) { return num(d.count) > 0; }).length;
       if (withCalls > 0) stats.push([fmtCount(withCalls), 'DAYS WITH CALLS']);
     }
@@ -550,7 +565,8 @@
     if (count) {
       count.textContent = active
         ? (S.searching && !(S.hits || []).length ? 'Looking up…' : visibleHits().length + ' across stored calls')
-        : (S.day ? visibleRows().length + ' on ' + S.day : visibleRows().length + ' in ' + monthTitle(S.month));
+        : (S.day ? visibleRows().length + ' on ' + S.day
+          : visibleRows().length + (monthCapped() && S.domain === 'all' ? ' of ' + monthTotal() : '') + ' in ' + monthTitle(S.month));
     }
     var note = $('mt-note');
     if (note) {
@@ -587,7 +603,8 @@
       html = emptyBox(S.error);
     } else {
       var rows = visibleRows();
-      html = rows.length ? '<div class="cx-list">' + rows.map(function (m) { return rowHtml(m, false); }).join('') + '</div>'
+      html = rows.length ? '<div class="cx-list">' + rows.map(function (m) { return rowHtml(m, false); }).join('') + '</div>' +
+          (monthCapped() ? '<p class="mt-capnote">Showing the newest ' + S.rows.length + ' of ' + monthTotal() + ' in ' + esc(monthTitle(S.month)) + '. Pick a day in the calendar to see all of its meetings.</p>' : '')
         : emptyBox(S.day ? 'No meetings stored on ' + S.day + '. Pick another day, or show the whole month.' : 'No meetings stored in ' + monthTitle(S.month) + '.');
     }
     if (S.listHtml === html) return;
@@ -694,9 +711,9 @@
 
   // A sign-in that lapsed: stop polling and show the sign-in, as W.api does on a 401.
   function signedOut() {
-    stopTimers(); clearTimeout(S.stopTimer); S.stopTimer = null;
-    if (typeof W.showAuth === 'function') W.showAuth(SIGNED_OUT);
-    else api('/api/meeting-ask/config').catch(function () {});
+    var first = !S.out;
+    halt();
+    if (first && typeof W.showAuth !== 'function') api('/api/meeting-ask/config').catch(function () {});
   }
   var SIGNED_OUT = 'Signed out. Connect this browser again.';
   // A write whose refusal is an answer to read ({status, body}), never an error to throw. A 401 signs out.
@@ -825,8 +842,9 @@
           if (now - f.statusAt >= STATUS_ENDED_MS) askStatus(f, now);
         }
       });
+      S.filesFailed = false;
       liveChanged();
-    }, function () { S.filesBusy = false; });
+    }, function (err) { S.filesBusy = false; if (!(err && err.status === 401)) { S.filesFailed = true; liveChanged(); } });
   }
   function liveRows(now) {
     var stranded = strandedIds(), out = [], seen = {};
@@ -887,7 +905,8 @@
     var el = $('mt-live'); if (!el) return;
     var now = Date.now(), rows = liveRows(now);
     var html = rows.length || S.liveNote
-      ? '<section class="mt-livebox">' + rows.map(function (r) { return liveRowHtml(r, now); }).join('') + (S.liveNote ? '<p class="mt-notice">' + esc(S.liveNote) + '</p>' : '') + '</section>'
+      ? '<section class="mt-livebox">' + rows.map(function (r) { return liveRowHtml(r, now); }).join('') + (S.liveNote ? '<p class="mt-notice">' + esc(S.liveNote) + '</p>' : '') +
+        (S.filesFailed && rows.length ? '<p class="mt-notice mt-amber">Could not check live recordings. Showing the last answer.</p>' : '') + '</section>'
       : '';
     paintAbove(el, 'liveHtml', html);
   }
@@ -1035,9 +1054,13 @@
       O.recovering = (d && d.recovering) || [];
       O.items = ((d && d.items) || []).filter(function (o) { return o && o.sessionId; });
       O.stranded = ((d && d.stranded) || []).filter(function (s) { return s && s.sessionId; });
-      O.loaded = true;
+      O.loaded = true; O.failed = false;
       if (S.view === 'list') { paintOrphans(); paintLive(); }
-    }, function () { S.orphansBusy = false; /* quiet, as Control's loadOrphans(quiet: true) */ });
+    }, function (err) {
+      S.orphansBusy = false;
+      // Quiet when there is nothing to show (Control's loadOrphans(quiet: true)); otherwise the last rows stay, marked.
+      if (!(err && err.status === 401)) { S.orphans.failed = true; if (S.view === 'list') paintOrphans(); }
+    });
   }
   function paintOrphans() {
     var el = $('mt-orphans'); if (!el) return;
@@ -1062,6 +1085,7 @@
     if (O.stranded.length > 1) html += '<div class="mt-orow"><button type="button" class="cx-btn quiet" data-mt="save-all-ask"' + (busy ? ' disabled' : '') + '>Save all still-live</button></div>';
     if (O.confirm === 'save-all') html += confirmCard('Save live recordings as meetings?', 'Ends each live glasses recording and saves it, like Stop on the phone. The files are kept.', 'save-all-yes', 'Save all', 'Cancel');
     if (O.notice) html += '<p class="mt-notice">' + esc(O.notice) + '</p>';
+    if (O.failed) html += '<p class="mt-notice mt-amber">Could not check unsaved recordings. Showing the last answer.</p>';
     paintAbove(el, 'orphHtml', html + '</section>');
   }
   function recoverOne(sid) {
@@ -2067,12 +2091,14 @@
   window.addEventListener('scroll', onScroll, { passive: true });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) return;
+    if (S.out) return;
     if (S.view === 'list') { pollFiles(); loadOrphans(); } else if (S.view === 'live') livePoll();
   });
 
   W.registerPane('meetings', {
     load: function (args) {
       args = args || [];
+      S.out = false;
       stopTimers();
       if (S.stop && STOP_ACTIVE[S.stop.phase.k] && S.stopResume && !S.stopTimer && (args[0] === 'live' || !args.length)) S.stopResume();
       if (args[0] === 'live' && args[1]) { openLive(args[1]); return; }
