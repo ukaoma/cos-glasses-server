@@ -85,6 +85,7 @@
 @media (max-width: 599px) {
   .mt-liverow { flex-wrap: wrap; gap: 0; }
   .mt-liverow .cx-row { flex-basis: 100%; }
+  .mt-liverow .mt-sub { white-space: normal; }
   .mt-liveact { padding: 0 14px 12px 58px; }
 }
 @media (prefers-reduced-motion: reduce) { .mt-livedot.on { animation: none; } }
@@ -102,6 +103,10 @@
 .mt-orow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; }
 .mt-olabel { font-size: 13px; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mt-olabel.dim { color: var(--tertiary); }
+@media (max-width: 599px) {
+  .mt-olabel { white-space: normal; overflow-wrap: anywhere; }
+  .mt-orow { align-items: flex-start; }
+}
 
 /* ── detail ───────────────────────────────────────────── */
 .mt-dhead { padding: 14px 0 10px; }
@@ -147,6 +152,7 @@
 .md-list { margin: 0 0 0.85em; padding-left: 1.35em; }
 .md-list li { margin: 0.2em 0; }
 .md-list .md-list { margin: 0.2em 0; }
+.md-list li.md-task { list-style: none; margin-left: -1.1em; }
 .md-check { display: inline-block; width: 12px; height: 12px; border: 1.5px solid var(--sub); border-radius: 3px; margin-right: 7px; vertical-align: -1px; }
 .md-check.on { background: var(--green); border-color: var(--green); }
 .md-table-wrap { overflow-x: auto; margin: 0 0 1em; -webkit-overflow-scrolling: touch; }

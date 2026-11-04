@@ -356,7 +356,7 @@
           case 'list':
             return '<' + (b.ordered ? 'ol' : 'ul') + ' class="md-list">' + b.items.map(function (it) {
               var box = it.checked == null ? '' : '<span class="md-check' + (it.checked ? ' on' : '') + '" aria-label="' + (it.checked ? 'done' : 'open') + '"></span>';
-              return '<li>' + box + inline(it.text) + (it.children.length ? render(it.children) : '') + '</li>';
+              return '<li' + (box ? ' class="md-task"' : '') + '>' + box + inline(it.text) + (it.children.length ? render(it.children) : '') + '</li>';
             }).join('') + '</' + (b.ordered ? 'ol' : 'ul') + '>';
           case 'table': {
             var kv = b.header.length === 2 && b.rows.length && b.rows.every(function (r) { return r.length === 2 && r[0].indexOf('**') === 0; });
@@ -1158,15 +1158,7 @@
     // Copy full context: the transcript, every Meeting Ask answer with its sources, the cues and the files (MeetingAskText.fullContext).
     var source = transcriptPart(d.transcript || ''), sessions = detailSessions();
     var title = (row.title || 'Meeting') + (source.document ? ' · meeting document' : '') + (row.derivedKind === 'split' ? ' · Ask history covers the whole original capture' : '');
-    setCopyNote('Preparing full context…');
-    var work = sessions.length ? loadConfig().then(function () {
-      if (!S.conf.config) return null;
-      return Promise.all(sessions.map(function (sid) { return askOpen(sid, true); })).then(function () {
-        return Promise.all(sessions.filter(function (sid) { return isGlasses(sid) || isMac(sid); }).map(function (sid) { return loadCues(sid, true); }));
-      });
-    }) : Promise.resolve(true);
-    work.then(function (ok) {
-      if (sessions.length && ok === null) { setCopyNote('Refresh meeting assistance before copying its full context.'); return; }
+    function assemble() {
       var seen = {}, rows = [], files = [], cues = [], cueNote = null, coverage = [];
       sessions.forEach(function (sid) {
         var a = A(sid);
@@ -1178,7 +1170,22 @@
       var text = fullContext(title, source.text, rows, evidenceFiles(rows, files), cues, cueNote) + (coverage.length ? '\n\n' + coverage.join('\n') : '');
       if (new Blob([text]).size > 4000000) { setCopyNote('Full context exceeds the 4 MB clipboard limit. Nothing was copied; saved history remains available.'); return; }
       copyOut(text, 'Copied full meeting context');
+    }
+    // Safari copies only inside the tap, so a panel that has already read its answers and cues copies at once.
+    if (contextReady(sessions)) { assemble(); return; }
+    setCopyNote('Preparing full context…');
+    loadConfig().then(function () {
+      if (!S.conf.config) { setCopyNote('Refresh meeting assistance before copying its full context.'); return; }
+      return Promise.all(sessions.map(function (sid) { return askOpen(sid, true); })).then(function () {
+        return Promise.all(sessions.filter(function (sid) { return isGlasses(sid) || isMac(sid); }).map(function (sid) { return loadCues(sid); }));
+      }).then(function () { setCopyNote('Ready. Tap Copy full context again.'); });
     });
+  }
+  function contextReady(sessions) {
+    return !sessions.length || (!!S.conf.config && sessions.every(function (sid) {
+      var a = A(sid);
+      return !a.loading && !a.openP && (!!a.cuesState || !(isGlasses(sid) || isMac(sid)));
+    }));
   }
   function downloadDetail() {
     var d = S.detail; if (!d) return;
@@ -1820,15 +1827,18 @@
     var f = S.feeds[S.liveSid]; if (!f) return;
     function done(text) { S.liveCopy = text; paintLiveFoot(); }
     if (kind === 'transcript') { W.copyText(liveCopyText(f)).then(function () { done('Copied transcript'); }, function (err) { done(err.message); }); return; }
+    // Safari copies only inside the tap: copy what the panel has read, or read it and ask for a second tap.
+    if (contextReady([f.sid])) {
+      var a = A(f.sid);
+      var cueNote = a.cues ? null : (a.cuesState && a.cuesState !== 'older' ? 'Context coverage: cues could not be read from the server.' : null);
+      var text = fullContext('Live meeting', f.turns.length ? liveCopyText(f) : '', a.history, evidenceFiles(a.history, a.files || []), a.cues || [], cueNote) + (a.error ? '\n\nContext coverage: ' + a.error : '');
+      W.copyText(text).then(function () { done('Copied full meeting context'); }, function (err) { done(err.message); });
+      return;
+    }
     done('Preparing full context…');
     loadConfig().then(function (conf) {
       if (!conf) { done('Refresh meeting assistance before copying its full context.'); return; }
-      return askOpen(f.sid, true).then(function () { return loadCues(f.sid, true); }).then(function () {
-        var a = A(f.sid);
-        var cueNote = a.cues ? null : (a.cuesState && a.cuesState !== 'older' ? 'Context coverage: cues could not be read from the server.' : null);
-        var text = fullContext('Live meeting', f.turns.length ? liveCopyText(f) : '', a.history, evidenceFiles(a.history, a.files || []), a.cues || [], cueNote) + (a.error ? '\n\nContext coverage: ' + a.error : '');
-        W.copyText(text).then(function () { done('Copied full meeting context'); }, function (err) { done(err.message); });
-      });
+      return askOpen(f.sid, true).then(function () { return loadCues(f.sid); }).then(function () { done('Ready. Tap Copy full context again.'); });
     });
   }
   function onScroll() {
