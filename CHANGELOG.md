@@ -1,3 +1,13 @@
+## 6.99.4 - Control Web matches the Mac (private)
+
+2026-11-04. Private build for one Mac, on top of 6.99.3. COS Control Web, the page at `/control`, now looks and behaves like the Mac app's panes. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
+
+- **Work.** Sort leads with today's meetings. A `#/work/sort` link opens Sort directly. The board holds still while you read: background loads no longer repaint under your finger.
+- **Meetings.** Two columns from 860 px wide, so an unfolded phone reads like the Mac. The live transcript no longer jumps when new lines arrive. A Model menu picks the model for meeting Ask, and a refused change says why in words. When a sign-in lapses, every Meetings call stops and the reason stays on screen. Months that hit the list cap say N of M.
+- **Sessions and Speakers hold still and say when offline.** Nothing above the turns moves while you read, Speakers never rebuilds the whole pane under your finger, and a read that times out offers Retry.
+- **The sign-in screen keeps its message.** A later sign-out never blanks the words that say why you were signed out.
+- Default-on changes: none beyond the web page itself; the Model menu changes the one meeting-assistance model the Mac also uses.
+
 ## 6.99.3 - Signing in on the phone says what went wrong (private)
 
 2026-11-04. Private build for one Mac, on top of 6.99.2. Pairs with COS Control 0.5.367, which adds Open COS on your phone. Nothing changes for the glasses or the phone companion.
