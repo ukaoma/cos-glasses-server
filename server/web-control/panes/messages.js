@@ -598,6 +598,7 @@
 
   W.registerPane('messages', {
     load: load,
+    refresh: function () { S.recent = null; S.recentState = 'idle'; loadRecent(true); },
     // Back unwinds one step: a chat goes to its day, a day to the archive list, an image to its message.
     up: function (args) {
       if (args[0] === 'day' && args.length >= 3) return ['day', args[1]];

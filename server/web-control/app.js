@@ -101,7 +101,12 @@
         if (!res.ok) {
           var msg = (data && (data.message || (data.error && data.error.message) || data.error)) || ('The server answered ' + res.status + '.');
           var err = new Error(typeof msg === 'string' ? msg : 'The server answered ' + res.status + '.');
-          err.status = res.status; throw err;
+          err.status = res.status;
+          // The machine-readable reason, so a pane can say the right thing for a refusal whose
+          // body carries a code and no sentence (for example work-intake's {error: {code}}).
+          var code = data && ((data.error && typeof data.error === 'object' && data.error.code) || data.code || data.reason || (typeof data.error === 'string' ? data.error : ''));
+          if (code) err.code = String(code);
+          throw err;
         }
         return data;
       });
@@ -169,13 +174,8 @@
     if (PANES[r.pane]) { try { PANES[r.pane].load(r.args, { changed: changedPane }); } catch (err) { console.error(err); } }
     else if (r.pane === 'today') loadToday();
     else if (r.pane === 'sessions') { if (!reading || !state.sessions.length || changedPane) loadSessions(); if (reading) openSession(r.args[0], r.args[1]); }
-    else if (r.pane === 'meetings') { if (changedPane || !reading) loadMeetings(); if (reading) openMeeting(r.args[0], r.args[1], r.args[2]); }
-    else if (r.pane === 'work') loadWork();
-    else if (r.pane === 'messages') loadMessages();
     else if (r.pane === 'memories') loadMemories();
-    else if (r.pane === 'speakers') { if (changedPane || !reading) loadSpeakers(); if (reading) openSpeakers(r.args[0]); }
     else if (r.pane === 'usage') loadUsage(false);
-    else if (r.pane === 'settings') loadSettings();
     state.lastLoad[r.pane] = Date.now();
     runHooks(routeHooks, r);
   }
@@ -1254,9 +1254,13 @@
     // Control's caution (SessionChatVerdict.caution): another app holds this session and looks
     // idle, so the first send asks before it writes. A fork writes to a copy and never asks.
     if (!fork && r.verdict && r.verdict.caution && !r.cautionAck) { r.cautionAsk = true; renderVerdict(r); return; }
+    // One send at a time: Enter submits the form even while Send is disabled, and a second send
+    // during the first attach could park the same text in the queue while the first lands.
+    if (r.sending) return;
     if (r.refusal || r.cautionAsk) { r.refusal = null; r.cautionAsk = false; renderVerdict(r); }
+    r.sending = true;
     var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
-    var done = function () { btns.forEach(function (b) { b.disabled = false; }); };
+    var done = function () { r.sending = false; btns.forEach(function (b) { b.disabled = false; }); };
     (fork ? forkSession(r, text) : continueSession(r, text, opts || {})).then(done, function (err) {
       done();
       if (state.reading !== r) return;
@@ -1632,153 +1636,16 @@
     }).join('');
   }
 
-  // ── Meetings ────────────────────────────────────────────
-  function loadMeetings(q) {
-    pollLive();
-    if (!state.livePoll) state.livePoll = setInterval(function () { if (!document.hidden) pollLive(); }, 8000);
-    var list = $('meetings-list');
-    list.innerHTML = skeletonRows(5);
-    var query = q != null ? q : $('meetings-q').value.trim();
-    var url = query.length >= 2 ? '/api/meetings/search?q=' + encodeURIComponent(query) + '&limit=25' : '/api/meetings?limit=40';
-    api(url).then(function (d) {
-      var rows = (d && (d.meetings || d.hits || d.items)) || [];
-      if (!rows.length) { list.innerHTML = emptyBox(query ? 'No meeting matched' : 'No meetings yet', query ? 'Try other words.' : 'Recorded and synced meetings show here.'); return; }
-      var byDay = {};
-      var order = [];
-      rows.forEach(function (m) { var k = m.date || m.month || 'Earlier'; if (!byDay[k]) { byDay[k] = []; order.push(k); } byDay[k].push(m); });
-      list.innerHTML = order.map(function (k) {
-        var d = toDate(k + 'T12:00:00');
-        var label = d ? d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' }) : k;
-        return '<h2 class="group-title"><span>' + esc(label) + '</span></h2><div class="list">' + byDay[k].map(function (m) {
-          var dur = m.durationMinutes ? Math.round(Number(m.durationMinutes)) + ' min' : '';
-          return '<button type="button" class="row" data-meeting="' + esc(m.domain || '') + '|' + esc(m.month || '') + '|' + esc(m.filename || '') + '">' +
-            '<span class="row-title">' + esc(String(m.title || m.filename || 'Meeting').replace(/\s*\((G2|Mac)\)\s*$/, '')) + '</span>' +
-            '<span class="row-side">' + esc(m.time || '') + '</span>' +
-            '<span class="row-sub"><span class="clip">' + esc([domainLabel(m.domain), dur, m.source].filter(Boolean).join(', ')) + '</span></span></button>';
-        }).join('') + '</div>';
-      }).join('');
-    }).catch(function (err) { list.innerHTML = emptyBox('Meetings did not load', err.message); });
-  }
-  function pollLive() {
-    api('/api/meetings/live-chunks').then(function (d) {
-      var sessions = ((d && d.sessions) || []).filter(function (s) { return Date.now() - (s.mtimeMs || 0) < LIVE_FRESH_MS; });
-      var box = $('meetings-live');
-      if (!sessions.length) { box.innerHTML = ''; setBadge('meetings', false); return; }
-      var top = sessions[0];
-      return api('/api/meetings/live-chunks?sessionId=' + encodeURIComponent(top.sessionId) + '&since=-1').then(function (r) {
-        var read = (r && r.read) || {};
-        var turns = read.turns || [];
-        var live = !read.ended && Date.now() - Number(read.lastActivityAt || 0) < LIVE_FRESH_MS;
-        setBadge('meetings', live);
-        if (!live) { box.innerHTML = ''; return; }
-        var source = SOURCES[String(top.sessionId).split('_')[0]] || 'Recording';
-        var keep = box.querySelector('#live-ask-input');
-        var draft = keep ? keep.value : '';
-        box.innerHTML = '<section class="card" style="margin-top:0;margin-bottom:18px"><div class="panel-head" style="padding:8px 16px 4px"><h2 class="panel-title"><span class="rec-dot" style="display:inline-block;margin-right:8px;vertical-align:1px"></span>Live now</h2><span class="row-side">' + esc(source + (read.startTime ? ', ' + span(read.startTime) : '')) + '</span></div>' +
-          '<div style="padding:0 16px 12px">' + (turns.length ? turns.slice(-5).map(function (t) {
-            return '<p style="margin:8px 0"><strong>' + esc(t.speaker || 'Speaker') + '.</strong> ' + esc(t.text) + '</p>';
-          }).join('') : '<p class="row-side" style="white-space:normal">Listening. Lines appear as people speak.</p>') + '</div>' +
-          '<form class="composer" id="live-ask-form" style="position:static;margin:0 12px 12px;box-shadow:none" data-session="' + esc(top.sessionId) + '"><textarea id="live-ask-input" rows="1" placeholder="Ask COS about this meeting" enterkeyhint="send"></textarea>' +
-          '<div class="composer-actions"><button type="submit" class="btn primary small">Ask</button></div></form><p class="status-line" id="live-ask-status" style="margin:0 16px 12px"></p></section>';
-        if (draft) $('live-ask-input').value = draft;
-      });
-    }).catch(function () {});
-  }
-  function openMeeting(domain, month, file) {
-    var reader = $('meeting-reader');
-    if (!domain || !month || !file) return;
-    reader.innerHTML = '<div class="reader-head"><div class="skeleton" style="height:28px;width:70%;margin:10px 0"></div></div>' + skeletonRows(2);
-    api('/api/meetings/' + encodeURIComponent(domain) + '/' + encodeURIComponent(month) + '/' + encodeURIComponent(file)).then(function (m) {
-      var body = String(m.content || m.summary || '').replace(/^---[\s\S]*?---\s*/, '');
-      reader.innerHTML = '<div class="reader-head"><h2>' + esc(String(m.title || file).replace(/\s*\((G2|Mac)\)\s*$/, '')) + '</h2>' +
-        '<div class="row-sub"><span>' + esc([domainLabel(domain), m.date || '', m.duration || ''].filter(Boolean).join(', ')) + '</span></div></div>' +
-        '<div class="doc">' + esc(body || 'This meeting has no notes yet.') + '</div>';
-    }).catch(function (err) { reader.innerHTML = emptyBox('This meeting did not open', err.message); });
-  }
-
-  // ── Work ────────────────────────────────────────────────
-  var STAGES = [
-    { id: 'planned', title: 'Planned', next: 'draft', action: 'Start' },
-    { id: 'draft', title: 'In progress', next: 'qa', action: 'Ready for review' },
-    { id: 'qa', title: 'Review', next: 'complete', action: 'Mark done' },
-    { id: 'complete', title: 'Done', next: null, action: null }
-  ];
-  function loadWork() {
-    var box = $('work-stages');
-    if (!state.workTasks.length) box.innerHTML = skeletonRows(5);
-    api('/api/work-intake').then(function (d) {
-      var items = (d && d.items) || [];
-      // Intake is a backlog, not an alert, so it never lights the Work badge.
-      $('work-intake').innerHTML = items.length ? '<p class="intake-note"><strong>' + countWord(items.length) + ' ' + plural(items.length, 'task', 'tasks') + ' suggested from recent meetings.</strong> Review them in COS Control on your Mac.</p>' : '';
-    }).catch(function () {});
-    api('/api/work-board').then(function (d) {
-      state.workTasks = (d && d.tasks) || [];
-      renderWork(null);
-    }).catch(function (err) { box.innerHTML = emptyBox('Work did not load', err.message); });
-  }
-  function renderWork(onlyIds) {
-    var q = $('work-q').value.trim().toLowerCase();
-    var tasks = state.workTasks.filter(function (t) {
-      if (onlyIds) return onlyIds.indexOf(t.id) >= 0 || onlyIds.indexOf(t.workIdentity) >= 0;
-      return !q || String(t.text || '').toLowerCase().indexOf(q) >= 0 || String(t.domain || '').toLowerCase().indexOf(q) >= 0;
-    });
-    var html = STAGES.map(function (st) {
-      var items = tasks.filter(function (t) { return (t.workStage || (t.checked ? 'complete' : 'planned')) === st.id; });
-      var collapsed = st.id === 'complete' && !state.workOpenStages.complete && !q && !onlyIds;
-      var limit = state.workOpenStages[st.id + ':all'] ? items.length : 25;
-      var rows = collapsed ? '' : items.slice(0, limit).map(function (t) {
-        return '<div class="row work-row"><span class="row-title">' + esc(plain(t.text)) + '</span><span class="row-side">' + esc(domainLabel(t.domain)) + '</span>' +
-          (st.next && t.taskRevision ? '<span class="row-actions"><button type="button" class="link-btn" data-action="stage" data-domain="' + esc(t.domain) + '" data-id="' + esc(t.id) + '" data-stage="' + esc(st.next) + '">' + esc(st.action) + '</button></span>' : '') + '</div>';
-      }).join('');
-      var foot = '';
-      if (collapsed && items.length) foot = '<button type="button" class="nav-row" data-action="show-done"><span class="grow">Show ' + items.length + ' done</span><span class="chev"></span></button>';
-      else if (items.length > limit) foot = '<button type="button" class="nav-row" data-action="show-all" data-stage="' + st.id + '"><span class="grow">Show all ' + items.length + '</span><span class="chev"></span></button>';
-      return '<section class="stage"><div class="stage-head"><h2>' + esc(st.title) + '</h2><span class="count">' + items.length + '</span></div>' +
-        (rows || foot ? '<div class="list">' + rows + foot + '</div>' : '<div class="list"><p class="empty">Nothing here.</p></div>') + '</section>';
-    }).join('');
-    $('work-stages').innerHTML = html;
-  }
-  function moveStage(btn) {
-    var dom = btn.getAttribute('data-domain'), id = btn.getAttribute('data-id'), next = btn.getAttribute('data-stage');
-    var task = state.workTasks.find(function (t) { return t.domain === dom && t.id === id; });
-    if (!task) return;
-    btn.disabled = true;
-    api('/api/work-board/stage', { method: 'POST', body: { domain: dom, id: id, workStage: next, expectedText: task.text, expectedRevision: task.taskRevision } })
-      .then(function () { toast('Moved'); loadWork(); })
-      .catch(function (err) { btn.disabled = false; setStatus($('work-status'), err.message, true); });
-  }
-
-  // ── Messages ────────────────────────────────────────────
-  function loadMessages() {
-    var list = $('messages-list');
-    if (!list.children.length) list.innerHTML = skeletonRows(3);
-    api('/api/sessions/today/all-messages').then(function (d) {
-      var msgs = ((d && d.messages) || []).slice().sort(function (a, b) { return Number(a.timestamp || 0) - Number(b.timestamp || 0); });
-      if (!msgs.length) { list.innerHTML = '<p class="reader-placeholder">No messages today. Ask COS something below.</p>'; }
-      else list.innerHTML = msgs.slice(-40).map(function (m) {
-        var t = toDate(m.timestamp);
-        var q = String(m.query || '').trim(), a = String(m.text || m.content || '').trim();
-        return (q ? '<div class="turn user"><span class="who">You' + (t ? ', ' + esc(clock(t)) : '') + '</span>' + esc(q) + '</div>' : '') +
-          (a ? '<div class="turn assistant"><span class="who">COS</span>' + md(a) + '</div>' : '');
-      }).join('');
-      if (msgs.length && !state.messagesSeen) { state.messagesSeen = true; requestAnimationFrame(function () { window.scrollTo(0, $('messages-form').offsetTop - 120); }); }
-    }).catch(function (err) { list.innerHTML = emptyBox('Messages did not load', err.message); });
-    api('/api/threads?limit=30').then(function (d) {
-      var threads = ((d && d.threads) || []).filter(function (t) { return !t.is_resolved; });
-      $('threads-list').innerHTML = threads.length ? threads.slice(0, 20).map(function (t) {
-        return '<div class="row"><span class="row-title">' + esc(t.name || t.title || t.id) + '</span><span class="row-side">' + esc(ago(t.last_seen)) + '</span>' +
-          '<span class="row-sub"><span class="clip">' + esc([domainLabel(t.domain), t.meeting_count ? t.meeting_count + ' meetings' : '', t.velocity || ''].filter(Boolean).join(', ')) + '</span></span></div>';
-      }).join('') : '<p class="empty">No open threads.</p>';
-    }).catch(function () { $('threads-list').innerHTML = '<p class="empty">Threads did not load.</p>'; });
-  }
+  // ── Ask COS (the Ask sheet's first row) ─────────────────
   function askCos(prompt, statusEl) {
     setStatus(statusEl, 'Sent. COS is answering.');
     return api('/api/query-jobs', { method: 'POST', body: { prompt: prompt, clientJobId: 'web_' + Date.now() } }).then(function () {
-      setTimeout(function () { if (state.pane === 'messages') loadMessages(); }, 4000);
-      setTimeout(function () { if (state.pane === 'messages') { loadMessages(); setStatus(statusEl, ''); } }, 15000);
+      // The answer lands in Messages; refresh it there if it is open.
+      var again = function () { if (state.pane === 'messages' && PANES.messages && PANES.messages.refresh) PANES.messages.refresh(); };
+      setTimeout(again, 4000);
+      setTimeout(function () { again(); setStatus(statusEl, ''); }, 15000);
     }).catch(function (err) { setStatus(statusEl, err.message, true); throw err; });
   }
-
   // ── Memories (the native page, hosted) ──────────────────
   function syncFrameTheme() {
     var frame = $('memories-frame'); if (!frame) return;
@@ -1798,45 +1665,6 @@
     state.memoriesLoaded = true;
     frame.addEventListener('load', syncFrameTheme);
     frame.src = '/control/memories/memories.html';
-  }
-
-  // ── Speakers ────────────────────────────────────────────
-  function loadSpeakers() {
-    var box = $('speakers-meetings');
-    box.innerHTML = skeletonRows(4);
-    api('/api/meetings?limit=40').then(function (d) {
-      var rows = ((d && d.meetings) || []).filter(function (m) { return !!m.sessionId; });
-      box.innerHTML = rows.length ? '<h2 class="group-title"><span>Meetings with audio</span><span>' + rows.length + '</span></h2><div class="list">' + rows.map(function (m) {
-        return '<button type="button" class="row" data-speakers="' + esc(m.sessionId) + '"><span class="row-title">' + esc(String(m.title || m.filename).replace(/\s*\((G2|Mac)\)\s*$/, '')) + '</span><span class="row-side">' + esc(ago(m.date ? m.date + 'T' + (m.time || '12:00') : '')) + '</span>' +
-          '<span class="row-sub"><span class="clip">' + esc([domainLabel(m.domain), m.attendeeCount ? m.attendeeCount + ' people' : ''].filter(Boolean).join(', ')) + '</span></span></button>';
-      }).join('') + '</div>' : emptyBox('No meetings with audio', 'Meetings recorded on your glasses or Mac show here.');
-    }).catch(function (err) { box.innerHTML = emptyBox('Meetings did not load', err.message); });
-    Promise.all([api('/api/voice/profiles').catch(function () { return {}; }), api('/api/voice/held-groups').catch(function () { return {}; })]).then(function (res) {
-      var profiles = (res[0] && res[0].profiles) || [];
-      var groups = (res[1] && res[1].groups) || [];
-      var named = profiles.filter(function (p) { return !p.needsName; });
-      var html = '<div class="setting"><span class="name">' + named.length + ' named ' + plural(named.length, 'voice', 'voices') + '</span><span class="desc">' + esc(named.slice(0, 6).map(function (p) { return p.name; }).join(', ')) + (named.length > 6 ? ' and more' : '') + '</span></div>';
-      if (groups.length) html += '<div class="setting"><span class="name">' + groups.length + ' unnamed ' + plural(groups.length, 'voice', 'voices') + ' held</span><span class="desc">Name them in COS Control on your Mac, where you can hear each one.</span></div>';
-      $('speakers-profiles').innerHTML = html;
-    });
-  }
-  function openSpeakers(sessionId) {
-    var reader = $('speaker-reader');
-    if (!sessionId) return;
-    reader.innerHTML = skeletonRows(3);
-    api('/api/meeting/' + encodeURIComponent(sessionId) + '/speakers').then(function (d) {
-      var speakers = (d && d.speakers) || [];
-      if (!speakers.length) { reader.innerHTML = emptyBox('No speakers found', 'COS did not split this meeting by voice.'); return; }
-      reader.innerHTML = '<div class="reader-head"><h2>Who spoke</h2><div class="row-sub"><span>Speaker names are suggestions. Listen before you rename.</span></div></div>' +
-        '<div class="list" style="margin-top:14px">' + speakers.map(function (sp, i) {
-          var label = sp.speaker || sp.label || 'Speaker';
-          var chunk = sp.sampleChunkIndex != null ? sp.sampleChunkIndex : (sp.chunks && sp.chunks[0]);
-          return '<div class="row speaker-row"><span class="row-title">' + esc(label) + '</span><span class="row-side">' + esc((sp.count || sp.turns || 0) + ' turns') + '</span>' +
-            (sp.sampleText ? '<span class="row-sub"><span class="clip">“' + esc(sp.sampleText) + '”</span></span>' : '') +
-            (chunk != null ? '<audio controls preload="none" src="/api/meeting/' + encodeURIComponent(sessionId) + '/audio/' + encodeURIComponent(chunk) + '"></audio>' : '') +
-            '<form class="capture-row" data-relabel="' + esc(label) + '" data-session="' + esc(sessionId) + '"><input class="field" type="text" placeholder="Rename ' + esc(label) + '" aria-label="New name for ' + esc(label) + '" id="relabel-' + i + '"><button type="submit" class="btn small">Rename</button></form></div>';
-        }).join('') + '</div><p class="status-line" id="speaker-status"></p>';
-    }).catch(function (err) { reader.innerHTML = emptyBox('Speakers did not load', err.message); });
   }
 
   // ── Usage ───────────────────────────────────────────────
@@ -2227,30 +2055,6 @@
       b.querySelector('.value').innerHTML = on ? '<span class="check">✓</span>' : '';
     });
   }
-  function loadSettings() {
-    paintAppearance();
-    var box = $('settings-server');
-    var host = esc(state.serverName.replace(/-/g, ' '));
-    box.innerHTML = '<h2 class="group-title">COS on ' + host + '</h2>' + skeletonRows(3);
-    Promise.all([
-      api('/api/decision-provider').catch(function () { return null; }),
-      api('/api/live-cues/v2/settings').catch(function () { return null; }),
-      api('/api/stt-settings').catch(function () { return null; }),
-      api('/api/morning-brief').catch(function () { return null; })
-    ]).then(function (res) {
-      var dp = res[0] || {}, lc = res[1] || {}, stt = res[2] || {}, mb = (res[3] && (res[3].config || res[3])) || {};
-      var provider = dp.provider || dp.decisionProvider || '';
-      var cuesOn = !!(lc.enabled != null ? lc.enabled : (lc.settings && lc.settings.enabled));
-      box.innerHTML = '<h2 class="group-title">COS on ' + host + '</h2><div class="list">' +
-        '<div class="setting"><span class="name">Live cues</span><span class="desc">Quiet suggestions on your glasses during meetings.</span><button type="button" class="switch" role="switch" aria-checked="' + cuesOn + '" aria-label="Live cues" data-action="toggle-cues" data-on="' + cuesOn + '"></button></div>' +
-        '<div class="setting"><span class="name">Meaning search</span><span class="desc">Which model ranks sessions and tasks by meaning.</span><span class="value">' + esc(provider ? (provider === 'subq' ? 'SubQ' : provider === 'jev' ? 'Jev' : provider) : 'Not set') + '</span></div>' +
-        '<button type="button" class="setting" data-action="set-provider" data-provider="jev"><span class="name">Use Jev</span><span class="desc">Fast and cheap.</span><span class="value">' + (provider === 'jev' ? '<span class="check">✓</span>' : '') + '</span></button>' +
-        '<button type="button" class="setting" data-action="set-provider" data-provider="subq"><span class="name">Use SubQ</span><span class="desc">Asks a yes or no question per match.</span><span class="value">' + (provider === 'subq' ? '<span class="check">✓</span>' : '') + '</span></button>' +
-        '<div class="setting"><span class="name">Transcription</span><span class="desc">Speech to text on your Mac.</span><span class="value">' + esc(stt.tier || stt.liveModel || stt.mode || 'Local') + '</span></div>' +
-        '<div class="setting"><span class="name">Morning brief</span><span class="desc">' + esc(mb.enabled === false ? 'Paused' : 'Runs every day') + '</span><span class="value">' + esc(mb.time || '7:00') + '</span></div>' +
-      '</div><p class="status-line" id="settings-status">Keys, permissions and glasses pairing change only on the Mac.</p>';
-    });
-  }
   var codeTimer = null;
   function showDeviceCode() {
     var panel = $('device-code-panel');
@@ -2276,8 +2080,9 @@
   function loadTailnetUrl() {
     api('/api/tailscale/web-url').then(function (d) {
       state.tailnetUrl = d.magicDnsHttpsUrl || d.magicDnsUrl || d.ipv4Url || '';
-      $('tailnet-url').textContent = state.tailnetUrl || 'Tailscale is not running on the Mac';
-    }).catch(function () { $('tailnet-url').textContent = 'Tailscale address unavailable'; });
+      // Settings renders this line itself; fill it only if it is on screen now.
+      var el = $('tailnet-url'); if (el) el.textContent = state.tailnetUrl || 'Tailscale is not running on the Mac';
+    }).catch(function () { var el = $('tailnet-url'); if (el) el.textContent = 'Tailscale address unavailable'; });
   }
 
   // ── Ask sheet (⌘K) ──────────────────────────────────────
@@ -2360,9 +2165,6 @@
     if (t.hasAttribute('data-meeting')) { var m = t.getAttribute('data-meeting').split('|'); return go('meetings', m); }
     if (t.hasAttribute('data-speakers')) return go('speakers', [t.getAttribute('data-speakers')]);
     var action = t.getAttribute('data-action');
-    if (action === 'stage') return moveStage(t);
-    if (action === 'show-done') { state.workOpenStages.complete = true; return renderWork(null); }
-    if (action === 'show-all') { state.workOpenStages[t.getAttribute('data-stage') + ':all'] = true; return renderWork(null); }
     if (action === 'fork-session') return sendSessionTurn(true);
     if (action === 'send-anyway') { var rev = state.reading && state.reading.sendAnyway; if (state.reading) state.reading.sendAnyway = null; return sendSessionTurn(false, { acknowledgedRevision: rev }); }
     if (action === 'stop-session') return stopSession();
@@ -2374,18 +2176,6 @@
       return;
     }
     if (action === 'expand-turn') { var tr = document.querySelector('.turn[data-turn="' + t.getAttribute('data-turn') + '"]'); if (tr) tr.classList.remove('clamped'); t.remove(); return; }
-    if (action === 'toggle-cues') {
-      var on = t.getAttribute('aria-checked') === 'true';
-      t.setAttribute('aria-checked', String(!on));
-      api('/api/live-cues/v2/settings', { method: 'POST', body: { enabled: !on } }).then(function () { toast(!on ? 'Live cues on' : 'Live cues off'); })
-        .catch(function (err) { t.setAttribute('aria-checked', String(on)); setStatus($('settings-status'), err.message, true); });
-      return;
-    }
-    if (action === 'set-provider') {
-      api('/api/decision-provider', { method: 'PATCH', body: { provider: t.getAttribute('data-provider') } }).then(function () { toast('Saved'); loadSettings(); })
-        .catch(function (err) { setStatus($('settings-status'), err.message, true); });
-      return;
-    }
     var q = $('ask-q').value.trim();
     if (action === 'ask-cos' && q) { askCos(q, $('ask-status')).then(function () { closeAsk(); go('messages'); }).catch(function () {}); return; }
     if (action === 'ask-meaning' && q) { $('ask-hits').innerHTML = skeletonRows(3); findByMeaning(q).then(function (html) { var el = $('ask-hits'); if (el) el.innerHTML = html; }); return; }
@@ -2412,37 +2202,7 @@
         });
     } else if (f.id === 'session-form') sendSessionTurn(false);
     else if (f.id === 'sessions-search-form') { $('sessions-q').blur(); searchSessions(); }
-    else if (f.id === 'meetings-search-form') { $('meetings-q').blur(); if (parseRoute().args.length) go('meetings'); loadMeetings($('meetings-q').value.trim()); }
-    else if (f.id === 'work-search-form') {
-      var q = $('work-q').value.trim(); $('work-q').blur();
-      if (q.length < 2) return renderWork(null);
-      setStatus($('work-status'), 'Searching by meaning');
-      api('/api/work/search', { method: 'POST', body: { query: q } }).then(function (d) {
-        setStatus($('work-status'), d && d.available === false ? (d.message || 'Meaning search is off.') : '');
-        if (d && Array.isArray(d.results)) renderWork(d.results.map(function (r) { return r.id; }));
-      }).catch(function (err) { setStatus($('work-status'), err.message, true); });
-    } else if (f.id === 'work-capture-form') {
-      var text = $('work-capture-text').value.trim(); if (!text) return;
-      api('/api/tasks/capture', { method: 'POST', body: { domain: $('work-capture-domain').value, text: text, captureId: 'web_' + Date.now() } })
-        .then(function () { $('work-capture-text').value = ''; toast('Added to Work'); loadWork(); })
-        .catch(function (err) { setStatus($('work-status'), err.message, true); });
-    } else if (f.id === 'messages-form') {
-      var inp = $('messages-input'), prompt = inp.value.trim(); if (!prompt) return;
-      inp.value = ''; autoGrow(inp);
-      askCos(prompt, $('messages-status')).catch(function () { inp.value = prompt; });
-    } else if (f.id === 'live-ask-form') {
-      var li = $('live-ask-input'), question = li.value.trim(); if (!question) return;
-      setStatus($('live-ask-status'), 'Asking COS');
-      api('/api/meetings/live-ask', { method: 'POST', body: { question: question, sessionId: f.getAttribute('data-session') } }).then(function (d) {
-        li.value = ''; setStatus($('live-ask-status'), (d && (d.answer || d.text || d.message)) || 'Answered.');
-      }).catch(function (err) { setStatus($('live-ask-status'), err.message, true); });
-    } else if (f.hasAttribute('data-relabel')) {
-      var from = f.getAttribute('data-relabel'), sid = f.getAttribute('data-session'), to = f.querySelector('input').value.trim();
-      if (!to) return;
-      api('/api/meeting/' + encodeURIComponent(sid) + '/relabel', { method: 'POST', body: { from: from, to: to } })
-        .then(function () { toast('Renamed to ' + to); openSpeakers(sid); })
-        .catch(function (err) { setStatus($('speaker-status'), err.message, true); });
-    } else if (f.id === 'ask-form') {
+    else if (f.id === 'ask-form') {
       var hits = $('ask-hits'); if (hits && $('ask-q').value.trim().length >= 2) renderAsk();
     }
   });
@@ -2450,7 +2210,6 @@
   document.addEventListener('input', function (e) {
     if (e.target.tagName === 'TEXTAREA') autoGrow(e.target);
     if (e.target.id === 'ask-q') renderAsk();
-    if (e.target.id === 'work-q') renderWork(null);
     if (e.target.id === 'sessions-q' && !e.target.value.trim()) renderSessionGroups(state.sessions);
   });
   document.addEventListener('keydown', function (e) {
@@ -2520,6 +2279,8 @@
     // once a detail has loaded; route() clears it on every navigation.
     setCrumb: function (text) { crumbDetail = String(text || ''); runHooks(routeHooks, parseRoute()); },
     crumb: function () { return crumbDetail; },
+    // Panes that read with their own fetch call this on a 401 so the sign-in screen shows.
+    showAuth: function (message) { showAuth(message); },
     // Control's session state (the Sessions pane's sxState) and warm-up test, so the rail's
     // "N waiting on you, N working" counts exactly what the pane lists.
     sessionState: function (s) { return sxState(s); },
