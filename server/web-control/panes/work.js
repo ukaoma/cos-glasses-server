@@ -530,7 +530,8 @@
   }
   function sortTitle() {
     if (S.intakeError && !S.intake) return 'Intake · !';
-    var n = sortSplit().count;
+    var split = sortSplit(), n = split.count, t = split.todayCount;
+    if (t > 0) return 'Sort · ' + t + ' today' + (n > 0 ? ', ' + n + ' older' : '');
     return n > 0 ? 'Sort · ' + n + ' older' : 'Sort';
   }
   function tabs() {
@@ -761,13 +762,15 @@
       return it && /^wi_[a-f0-9]{32}$/.test(it.id) && ['suggested', 'review', 'ask'].indexOf(it.status) >= 0 && it.meeting && !it._done
         && (it.kind === 'link' ? it.task && it.task.text : it.text);
     });
-    var older = open.filter(function (it) { return String(it.meeting.filename || '').slice(0, 10) !== today; });
-    var cards = (S.tasks || []).filter(function (t) {
-      if (t.workStage !== 'mentioned' || t.checked) return false;
-      var ref = (t.meetingRefs || [])[0];
-      return !ref || String(ref.filename || '').slice(0, 10) !== today;
-    });
-    SPLIT = { items: older, cards: cards, count: older.length + cards.length };
+    // TodayHome.intakeSplit: an item is today's when its meeting file is dated today; a mentioned card when its first
+    // linked meeting is. Everything else is older.
+    function isToday(it) { return String(it.meeting.filename || '').slice(0, 10) === today; }
+    function cardToday(t) { var ref = (t.meetingRefs || [])[0]; return !!ref && String(ref.filename || '').slice(0, 10) === today; }
+    var mentioned = (S.tasks || []).filter(function (t) { return t.workStage === 'mentioned' && !t.checked; });
+    var older = open.filter(function (it) { return !isToday(it); }), cards = mentioned.filter(function (t) { return !cardToday(t); });
+    var todayItems = open.filter(isToday).sort(function (a, b) { var x = a.meeting.filename + '|' + a.id, y = b.meeting.filename + '|' + b.id; return x < y ? -1 : x > y ? 1 : 0; });
+    var todayCards = mentioned.filter(cardToday);
+    SPLIT = { items: older, cards: cards, count: older.length + cards.length, todayItems: todayItems, todayCards: todayCards, todayCount: todayItems.length + todayCards.length };
     SPLIT_KEY = key;
     return SPLIT;
   }
@@ -783,10 +786,15 @@
       var g = groups[k] || (groups[k] = { id: k, title: ref ? ref.title || 'Saved meeting' : 'Your captures', date: ref ? String(ref.filename || '').slice(0, 10) : str(t.createdAt), items: [], cards: [] });
       g.cards.push(t);
     });
-    return Object.keys(groups).map(function (k) { return groups[k]; }).sort(function (a, b) {
+    var list = Object.keys(groups).map(function (k) { return groups[k]; }).sort(function (a, b) {
       if ((a.id === 'self-captured') !== (b.id === 'self-captured')) return a.id === 'self-captured' ? -1 : 1;
       return a.date === b.date ? (a.id < b.id ? -1 : 1) : (a.date > b.date ? -1 : 1);
     });
+    // Today's meetings lead, as one group (the web Today home links here instead of listing them itself).
+    var ti = split.todayItems.filter(function (it) { return !S.domain || it.meeting.domain === S.domain; });
+    var tc = split.todayCards.filter(function (t) { return !S.domain || t.domain === S.domain; });
+    if (ti.length || tc.length) list.unshift({ id: 'today', title: 'From today\u2019s meetings', note: 'Moves to Work at midnight', date: localDay(), items: ti, cards: tc });
+    return list;
   }
   function meetingDate(m) { var p = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(m.filename || '')); return p ? (+p[2]) + '/' + (+p[3]) : ''; }
   var REASON = { outside_window: 'older meeting', unclear_task: 'may not be a task', owner_uncertain: 'owner unclear' };
@@ -823,18 +831,18 @@
     var body;
     if (S.intakeError && !(S.intake && S.intake.length)) body = '<p class="wk-muted">' + esc(S.intakeError) + '</p>';
     else if (!S.intake) body = '<p class="wk-muted">Loading Intake…</p>';
-    else if (!g) body = '<p class="wk-muted">Today is clear. Older items stay in Catch up.</p>';
+    else if (!g) body = '<p class="wk-muted">Nothing to sort</p>';
     else {
       body = '<div class="wk-row wk-sort-group"><h3>' + esc(g.title) + '</h3><span class="wk-muted wk-push">' + (S.sortIndex + 1) + ' of ' + n + '</span></div>' +
+        (g.note ? '<p class="wk-muted wk-sort-note">' + esc(g.note) + '</p>' : '') +
         '<p class="wk-fine wk-keys">j / k: next / previous meeting · s: decide later · e: keep first item</p>' +
         g.cards.map(function (t) {
           var meta = [str(t.createdAt), str(t.owner), str(t.dueDate) ? 'Due ' + t.dueDate : ''].filter(Boolean).join(' · ');
           return '<div class="wk-sort-card"><p class="wk-intake-text">' + inline(titleOf(t)) + '</p>' + (meta ? '<p class="wk-muted">' + esc(meta) + '</p>' : '') +
             '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="card-keep" data-id="' + esc(identity(t)) + '"' + (batch && !S.batchBusy ? '' : ' disabled') + '>Keep</button>' +
             '<button type="button" class="cx-btn quiet" data-wk="card-drop" data-id="' + esc(identity(t)) + '"' + (batch && !S.batchBusy ? '' : ' disabled') + '>Drop</button>' +
-            '<button type="button" class="wk-text-btn" data-wk="open" data-id="' + esc(identity(t)) + '">Open card</button></div>' +
-            (batch ? '' : '<p class="wk-fine">Keep and Drop need a COS server with Work batch changes.</p>') + '</div>';
-        }).join('') +
+            '<button type="button" class="wk-text-btn" data-wk="open" data-id="' + esc(identity(t)) + '">Open card</button></div></div>';
+        }).join('') + (g.cards.length && !batch ? '<p class="wk-fine">Keep and Drop need a COS server with Work batch changes.</p>' : '') +
         (g.items.length ? '<div class="wk-items"><div class="wk-row"><h4>Items to decide</h4><span class="wk-muted">' + g.items.length + '</span></div>' +
           '<p class="wk-muted">Keep what you own. Other people’s asks can become cards when you take them on.</p>' +
           '<div class="wk-items-list">' + g.items.map(intakeRow).join('') + '</div></div>' : '') +
@@ -843,7 +851,7 @@
         (g.items.length ? '<button type="button" class="wk-text-btn wk-push" data-wk="dismiss-rest"' + (Object.keys(S.intakeBusy).length ? ' disabled' : '') + '>Dismiss remaining items</button>' : '') + '</div>';
     }
     return '<section class="wk-sort"><div class="wk-row wk-wrap wk-sort-head"><h2 class="wk-h2">Sort</h2>' +
-      '<span class="wk-muted">From meetings before today. Today’s stay on Today until midnight.</span>' +
+      '<span class="wk-muted">Follow-ups from your meetings, today’s first.</span>' +
       '<button type="button" class="cx-btn quiet wk-icon-btn wk-push" data-wk="intake-refresh" aria-label="Refresh Intake" title="Refresh Intake">' + icon('refresh') + '</button></div>' +
       (undo ? '<div class="wk-row wk-undo">' + undo + '</div>' : '') +
       (S.sortError ? '<p class="wk-error">' + esc(S.sortError) + '</p>' : '') + '<div class="wk-sort-body">' + body + '</div></section>';
@@ -1631,6 +1639,14 @@
 
   W.registerPane('work', {
     load: function (args) {
+      // #/work/sort (the Today home's "From today's meetings" link): open Sort on today's group, and leave the list's
+      // own address in history so Back returns to where the link was.
+      if (args[0] === 'sort') {
+        S.tab = 'sort'; S.sortIndex = 0; S.moreOpen = false;
+        if (!S.intake && !S.intakeLoading) loadIntake(true);
+        location.replace('#/work');
+        return;
+      }
       startPoll(); resumeHandoffPolls();
       render();   // one paint now; loads that finish later go through backgroundPaint
       if (!S.tasks && !S.loading) loadBoard();
