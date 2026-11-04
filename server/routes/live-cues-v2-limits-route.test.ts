@@ -48,7 +48,7 @@ const post = (path: string, body: unknown) =>
 const fileText = () => (existsSync(SETTINGS_FILE) ? readFileSync(SETTINGS_FILE, 'utf8') : null)
 const DEFAULT_LIMITS = {
   gate: { value: 0.8, source: 'default', locked: false, min: 0.5, max: 0.95, default: 0.8 },
-  maxCuesPerMeeting: { value: 25, source: 'default', locked: false, min: 1, max: 25, default: 25 },
+  maxCuesPerMeeting: { value: 25, source: 'default', locked: false, min: 1, max: 50, default: 25 },
   cooldownSeconds: { value: 45, source: 'default', locked: false, min: 20, max: 900, default: 45 },
   dailyWriterCalls: { value: 150, source: 'default', locked: false, min: 1, max: 500, default: 150 },
 }
@@ -108,8 +108,9 @@ describe('live cues v2 limits (settings v2)', () => {
       [{ v: 2, gate: 0.49 }, { reason: 'out_of_bounds', field: 'gate', min: 0.5, max: 0.95 }],
       [{ v: 2, gate: 0.96 }, { reason: 'out_of_bounds', field: 'gate' }],
       [{ v: 2, gate: '0.8' }, { reason: 'out_of_bounds', field: 'gate' }],
-      [{ v: 2, maxCuesPerMeeting: 0 }, { reason: 'out_of_bounds', field: 'maxCuesPerMeeting', min: 1, max: 25, integer: true }],
-      [{ v: 2, maxCuesPerMeeting: 26 }, { reason: 'out_of_bounds', field: 'maxCuesPerMeeting' }],
+      [{ v: 2, maxCuesPerMeeting: 0 }, { reason: 'out_of_bounds', field: 'maxCuesPerMeeting', min: 1, max: 50, integer: true }],
+      [{ v: 2, maxCuesPerMeeting: 51 }, { reason: 'out_of_bounds', field: 'maxCuesPerMeeting', max: 50 }],
+      [{ v: 2, maxCuesPerMeeting: 26.5 }, { reason: 'out_of_bounds', field: 'maxCuesPerMeeting' }],
       [{ v: 2, maxCuesPerMeeting: 2.5 }, { reason: 'out_of_bounds', field: 'maxCuesPerMeeting' }],
       [{ v: 2, cooldownSeconds: 19 }, { reason: 'out_of_bounds', field: 'cooldownSeconds' }],
       [{ v: 2, cooldownSeconds: 901 }, { reason: 'out_of_bounds', field: 'cooldownSeconds' }],
@@ -168,5 +169,30 @@ describe('live cues v2 limits (settings v2)', () => {
     expect(refused.status).toBe(409)
     expect(await refused.json()).toEqual({ error: 'env_forced' })
     expect(JSON.parse(fileText()!).gate).toBe(0.9)
+  })
+
+  it('6.99.0: Control can raise the cap to 50 (the view says max 50, the writer cap is 100), 51 is refused, and 50 survives a restart and shows in history', async () => {
+    const ok = await post('/live-cues/v2/settings', { v: 2, maxCuesPerMeeting: 50 })
+    expect(ok.status).toBe(200)
+    const view = await ok.json() as { limits: typeof DEFAULT_LIMITS; writerCallsPerMeeting: number }
+    expect(view.limits.maxCuesPerMeeting).toEqual({ value: 50, source: 'setting', locked: false, min: 1, max: 50, default: 25 })
+    expect(view.writerCallsPerMeeting).toBe(100)
+    const before = fileText()
+    const over = await post('/live-cues/v2/settings', { v: 2, maxCuesPerMeeting: 51 })
+    expect(over.status).toBe(400)
+    expect(await over.json()).toMatchObject({ reason: 'out_of_bounds', field: 'maxCuesPerMeeting', min: 1, max: 50 })
+    expect(fileText()).toBe(before)
+    await restart()
+    const after = await (await get('/live-cues/v2/settings?v=2')).json() as { limits: typeof DEFAULT_LIMITS }
+    expect(after.limits.maxCuesPerMeeting).toMatchObject({ value: 50, source: 'setting' })
+    // The history route states the cap as set now, not the built-in 25, and the writer cap twice it.
+    const hist = await (await get('/live-cues/history?sessionId=meeting_cap50_test')).json() as { maxCuesPerMeeting: number; meetings: Record<string, { cap: number; writerCap: number }> }
+    expect(hist.maxCuesPerMeeting).toBe(50)
+    expect(hist.meetings.meeting_cap50_test).toMatchObject({ cap: 50, writerCap: 100 })
+    // The default for a fresh install is still 25.
+    rmSync(SETTINGS_FILE, { force: true })
+    await restart()
+    const fresh = await (await get('/live-cues/v2/settings?v=2')).json() as { limits: typeof DEFAULT_LIMITS }
+    expect(fresh.limits.maxCuesPerMeeting).toMatchObject({ value: 25, source: 'default', max: 50 })
   })
 })

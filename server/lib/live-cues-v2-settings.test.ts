@@ -54,7 +54,7 @@ describe('live cues v2 runtime setting', () => {
     expect(b.stored()).toBe(false)
     expect(b.limits()).toEqual({ gate: 0.9, maxCuesPerMeeting: 10, cooldownSeconds: 60 })
     // A hand-edited value outside its bounds reads as unset (the default), never as a looser limit; the others stand.
-    writeFileSync(file, JSON.stringify({ schema: 2, enabled: true, gate: 0.2, maxCuesPerMeeting: 40, cooldownSeconds: 30.5, dailyWriterCalls: 0, updatedAt: 'x' }))
+    writeFileSync(file, JSON.stringify({ schema: 2, enabled: true, gate: 0.2, maxCuesPerMeeting: 51, cooldownSeconds: 30.5, dailyWriterCalls: 0, updatedAt: 'x' }))
     expect(new LiveCuesV2Settings(file).limits()).toEqual({})
     writeFileSync(file, JSON.stringify({ schema: 2, gate: 0.6, dailyWriterCalls: 200 }))
     const c = new LiveCuesV2Settings(file)
@@ -76,6 +76,20 @@ describe('live cues v2 runtime setting', () => {
       expect(limitInBounds(name, Number.NaN), name).toBe(false)
     }
     expect(limitInBounds('maxCuesPerMeeting', 12.5)).toBe(false)
+  })
+
+  it('6.99.0 cues per meeting: the ceiling is 50 and the default stays 25; 50 is accepted, 51 and 0 are not, and 50 survives a restart', () => {
+    const b = LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting
+    expect([b.min, b.max, b.default]).toEqual([1, 50, 25])
+    expect(limitInBounds('maxCuesPerMeeting', 50)).toBe(true)
+    expect(limitInBounds('maxCuesPerMeeting', 51)).toBe(false)
+    expect(limitInBounds('maxCuesPerMeeting', 0)).toBe(false)
+    const file = join(dir, 'live-cues-v2-settings.json')
+    new LiveCuesV2Settings(file).update({ limits: { maxCuesPerMeeting: 50 } })
+    expect(new LiveCuesV2Settings(file).limits()).toEqual({ maxCuesPerMeeting: 50 })
+    // A hand-edited 51 reads as unset (the default), never as a looser limit.
+    writeFileSync(file, JSON.stringify({ schema: 2, maxCuesPerMeeting: 51 }))
+    expect(new LiveCuesV2Settings(file).limits()).toEqual({})
     expect(limitInBounds('gate', 0.875)).toBe(true)
   })
 

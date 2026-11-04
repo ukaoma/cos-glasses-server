@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { LIVE_CUES_V2_LIMIT_BOUNDS } from './live-cues-v2-settings.js'
 
 vi.mock('./jev.js', async (orig) => ({ ...(await orig<typeof import('./jev.js')>()), resolveJevKey: () => ({ key: 'k', source: 'env' as const }) }))
 vi.mock('./provider-binary.js', () => ({ resolveProviderBinary: () => ({ ok: true, path: '/bin/true' }) }))
@@ -868,6 +869,30 @@ describe('engine', () => {
       saved.maxCuesPerMeeting = 3; next()                                                // raised again: it resumes
       await e.feed('meeting_a', words(L.minNewWords))
       expect(calls.gate).toBe(gates + 1)
+    })
+
+    it('6.99.0: the env cap follows the bound: its ceiling (50) is honoured and locks, one past it is ignored, the default stays 25', () => {
+      const B = LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting
+      expect(B.max).toBe(50)
+      const key = B.env
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        expect(mod.resolveLiveCuesV2Limits({ [key]: String(B.max) }, null).maxCuesPerMeeting).toMatchObject({ value: 50, source: 'env', locked: true, min: 1, max: 50, default: 25 })
+        expect(mod.resolveLiveCuesV2Limits({ [key]: String(B.max + 1) }, null).maxCuesPerMeeting).toMatchObject({ value: 25, source: 'default', locked: false })
+        expect(mod.resolveLiveCuesV2Limits({}, null).maxCuesPerMeeting).toMatchObject({ value: 25, source: 'default', max: 50 })
+      } finally { warn.mockRestore() }
+    })
+
+    it('6.99.0: a saved cap of 50 is reachable: 50 cues are shown, the writer cap is 100, and the next evaluation stops at meeting_cap', async () => {
+      saved.maxCuesPerMeeting = 50
+      const e = withLimits(); e.arm('meeting_a')
+      for (let i = 0; i < 50; i++) { await e.feed('meeting_a', words(L.minNewWords)); next() }
+      expect(emitted.filter(x => x.type === 'coaching_nudge_v2')).toHaveLength(50)
+      const writers = calls.writer
+      await e.feed('meeting_a', words(L.minNewWords))
+      expect(calls.writer).toBe(writers)
+      expect(traces.at(-1)).toMatchObject({ kind: 'skip', reason: 'meeting_cap' })
+      expect(e.status('meeting_a').session).toMatchObject({ state: 'stopped', reason: 'meeting_cap' })
     })
 
     it('the writer cap per meeting is twice the saved cue cap', async () => {

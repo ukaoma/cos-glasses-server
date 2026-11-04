@@ -28,7 +28,8 @@ export type LiveCuesV2SettingSource = 'env' | 'setting' | 'default'
 /** COS Control's live-cue spend limits (6.79.2). Bounds are inclusive; integer fields take whole numbers only. */
 export const LIVE_CUES_V2_LIMIT_BOUNDS = {
   gate: { min: 0.5, max: 0.95, default: 0.8, integer: false, env: 'COS_LIVE_CUES_V2_GATE' },
-  maxCuesPerMeeting: { min: 1, max: 25, default: 25, integer: true, env: 'COS_LIVE_CUES_V2_MAX_PER_MEETING' },
+  // 6.99.0: the ceiling is 50 (Miles 2026-11-03, longer meetings); the default stays 25. Everything that clamps or validates this reads `.max`.
+  maxCuesPerMeeting: { min: 1, max: 50, default: 25, integer: true, env: 'COS_LIVE_CUES_V2_MAX_PER_MEETING' },
   cooldownSeconds: { min: 20, max: 900, default: 45, integer: true, env: 'COS_LIVE_CUES_V2_COOLDOWN_S' },
   dailyWriterCalls: { min: 1, max: 500, default: 150, integer: true, env: 'COS_LIVE_CUES_V2_DAILY_WRITER_CALLS' },
 } as const

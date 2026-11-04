@@ -171,9 +171,9 @@ export function resolveLiveCuesV2Limits(env: NodeJS.ProcessEnv = process.env, se
   try { saved = settings?.limits?.() ?? {} } catch { saved = {} }
   const fromEnv: Record<LiveCuesV2LimitName, number | null> = {
     gate: envGate(env),
-    maxCuesPerMeeting: envWhole(env, LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting.env, 1, 25),
+    maxCuesPerMeeting: envWhole(env, LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting.env, LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting.min, LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting.max),
     cooldownSeconds: envCooldownSeconds(env),
-    dailyWriterCalls: envWhole(env, LIVE_CUES_V2_LIMIT_BOUNDS.dailyWriterCalls.env, 1, 500),
+    dailyWriterCalls: envWhole(env, LIVE_CUES_V2_LIMIT_BOUNDS.dailyWriterCalls.env, LIVE_CUES_V2_LIMIT_BOUNDS.dailyWriterCalls.min, LIVE_CUES_V2_LIMIT_BOUNDS.dailyWriterCalls.max),
   }
   const out = {} as LiveCuesV2Limits
   for (const name of LIVE_CUES_V2_LIMIT_NAMES) {

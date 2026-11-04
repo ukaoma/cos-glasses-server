@@ -27,7 +27,7 @@ import {
   LIVE_CUES_GENERAL_LIMIT_BOUNDS, LIVE_CUES_GENERAL_LIMIT_NAMES, LIVE_CUES_V2_LIMIT_BOUNDS, LIVE_CUES_V2_LIMIT_NAMES, generalLimitInBounds, isCueMode, isGrounding, limitInBounds,
   type LiveCuesGeneralStoredLimits, type LiveCuesV2StoredLimits,
 } from '../lib/live-cues-v2-settings.js'
-import { LIVE_CUES_V2_LIMITS, LiveCuesV2ArmError, liveCuesV2, liveCuesV2Advertised, liveCuesV2Enabled, liveCuesV2MeetingCounters, liveCuesV2SettingsView, peekLiveCuesV2, setLiveCuesV2Enabled } from '../lib/live-cues-v2.js'
+import { LiveCuesV2ArmError, resolveLiveCuesV2Limits, liveCuesV2, liveCuesV2Advertised, liveCuesV2Enabled, liveCuesV2MeetingCounters, liveCuesV2SettingsView, peekLiveCuesV2, setLiveCuesV2Enabled } from '../lib/live-cues-v2.js'
 import { LIVE_CUE_VERDICTS_PROTOCOL, LIVE_CUE_VERDICT_LIMITS, VerdictsUnreadableError, isCueVerdict, liveCueVerdicts } from '../lib/live-cue-verdicts.js'
 
 const SESSION_ID = /^[A-Za-z0-9:_-]{3,96}$/
@@ -183,13 +183,14 @@ liveCuesRouter.get('/live-cues/history', (req, res) => {
   try {
     const verdicts = liveCueVerdicts()
     const history = verdicts.history({ days, limit, unrated: unrated === '1', ...(sessionIds.length ? { sessionIds } : {}) })
-    const C = LIVE_CUES_V2_LIMITS
+    // 6.99.0: the cap as set now (Settings or env), not the built-in 25: the cap can be raised to 50, writer calls stay twice it.
+    const capNow = resolveLiveCuesV2Limits().maxCuesPerMeeting.value, writerCapNow = 2 * capNow
     const meetings = sessionIds.length ? Object.fromEntries(sessionIds.map(id => {
       // The engine's counters expire 24 h after a meeting; past that the log's count stands in and writerCalls is unknown.
       const counters = liveCuesV2MeetingCounters(id)
-      return [id, { cues: counters?.cues ?? verdicts.loggedCues(id), cap: C.maxCuesPerMeeting, writerCalls: counters?.writerCalls ?? null, writerCap: C.maxWriterCallsPerMeeting }]
+      return [id, { cues: counters?.cues ?? verdicts.loggedCues(id), cap: capNow, writerCalls: counters?.writerCalls ?? null, writerCap: writerCapNow }]
     })) : undefined
-    return res.json({ ...history, maxCuesPerMeeting: C.maxCuesPerMeeting, ...(meetings ? { meetings } : {}) })
+    return res.json({ ...history, maxCuesPerMeeting: capNow, ...(meetings ? { meetings } : {}) })
   } catch (error) {
     if (error instanceof VerdictsUnreadableError) return res.status(503).json({ error: 'the verdicts file is unreadable', reason: error.code })
     return res.status(500).json({ error: 'history_unavailable' })
