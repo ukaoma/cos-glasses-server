@@ -2519,7 +2519,11 @@
     // The detail title after "COS Control > Section" (Control's breadcrumb). Pane modules set it
     // once a detail has loaded; route() clears it on every navigation.
     setCrumb: function (text) { crumbDetail = String(text || ''); runHooks(routeHooks, parseRoute()); },
-    crumb: function () { return crumbDetail; }
+    crumb: function () { return crumbDetail; },
+    // Control's session state (the Sessions pane's sxState) and warm-up test, so the rail's
+    // "N waiting on you, N working" counts exactly what the pane lists.
+    sessionState: function (s) { return sxState(s); },
+    isKeepWarm: function (s) { return sxKeepWarm(s); }
   };
 
   // Every pane module is a plain script after this one; boot waits for all of them.

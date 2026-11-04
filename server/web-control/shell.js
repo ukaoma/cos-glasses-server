@@ -72,9 +72,12 @@
       var rows = (res[0] && res[0].sessions) || [];
       var moves = (res[1] && res[1].items) || [];
       var live = (res[2] && res[2].sessions) || [];
-      // Same reading as the web home: running_active is the server's "working now".
-      var working = rows.filter(function (s) { return s.running_active || s.agent_state === 'running'; }).length;
-      var waiting = rows.filter(function (s) { return s.agent_state === 'waiting' || !!s.waiting_kind; }).length;
+      // Control's rule (Models.swift isWorking / isWaiting) through the Sessions pane's own state:
+      // working is running; waiting is waiting or failed; warm-up sessions never count.
+      var real = rows.filter(function (s) { return !(W.isKeepWarm && W.isKeepWarm(s)); });
+      var stateOf = W.sessionState || function (s) { return s.running_active || s.agent_state === 'running' ? 'running' : s.agent_state === 'waiting' ? 'waiting' : 'recent'; };
+      var working = real.filter(function (s) { return stateOf(s) === 'running'; }).length;
+      var waiting = real.filter(function (s) { var st = stateOf(s); return st === 'waiting' || st === 'error'; }).length;
       if (res[0]) {
         if (!waiting && !working) setStory('sessions', 'No agents running', false);
         else setStory('sessions', [waiting ? waiting + ' waiting on you' : '', working ? working + ' working' : ''].filter(Boolean).join(', '), waiting > 0);
