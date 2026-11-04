@@ -65,7 +65,7 @@
     return '<section class="cx-set-cat"><h2 class="cx-col-title">This browser</h2>' +
       group('Appearance', '', themeBtn('system', 'Match this device') + themeBtn('light', 'Light') + themeBtn('dark', 'Dark')) +
       group('Sign-in', '',
-        '<button type="button" class="cx-set-row" id="device-code-btn"><span class="cx-set-text"><span class="cx-set-name">Sign in another device</span><span class="cx-set-desc">Shows a code to type on your phone.</span></span><span class="chev"></span></button>' +
+        '<button type="button" class="cx-set-row" id="device-code-btn"><span class="cx-set-text"><span class="cx-set-name">Sign in another device</span><span class="cx-set-desc">Shows a QR for your phone's camera, and a code to type.</span></span><span class="chev"></span></button>' +
         '<div id="device-code-panel" class="device-code hidden" aria-live="polite"></div>' +
         '<button type="button" class="cx-set-row" id="copy-link"><span class="cx-set-text"><span class="cx-set-name">Copy link for your phone</span><span class="cx-set-desc" id="tailnet-url">' + esc(W.state.tailnetUrl || 'Checking Tailscale') + '</span></span></button>' +
         '<button type="button" class="cx-set-row" id="sign-out"><span class="cx-set-text"><span class="cx-set-name">Sign out of this browser</span></span></button>' +

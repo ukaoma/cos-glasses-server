@@ -309,8 +309,8 @@
     var arch = S.archiveBusy ? '…' : S.archiveRan !== q ? 'press return' : (S.archiveHits.length === 1 ? '1 day' : S.archiveHits.length + ' days');
     var recentSide = 'Recent ' + recentN, archSide = 'Archive ' + arch;
     return '<p class="cx-cross">' + (S.view === 'recent'
-      ? '<span>' + esc(recentSide) + '</span><span>·</span><button type="button" class="door" data-msg="view" data-view="archive">' + esc(archSide) + '</button>'
-      : '<button type="button" class="door" data-msg="view" data-view="recent">' + esc(recentSide) + '</button><span>·</span><span>' + esc(archSide) + '</span>') + '</p>';
+      ? '<span>' + esc(recentSide) + '</span><span>·</span><button type="button" class="door" data-msg="view" data-view="archive">' + esc(archSide) + '<svg class="icon" aria-hidden="true"><use href="#i-chev"/></svg></button>'
+      : '<button type="button" class="door" data-msg="view" data-view="recent">' + esc(recentSide) + '<svg class="icon" aria-hidden="true"><use href="#i-chev"/></svg></button><span>·</span><span>' + esc(archSide) + '</span>') + '</p>';
   }
   function recentRowHtml(t, i) {
     var a = atts(t);
