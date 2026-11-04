@@ -434,9 +434,11 @@
       S.openAt = Date.now();
     }, function (err) { S.open = S.open || []; S.openAvailable = false; S.openError = err.message || 'Session activity could not be read.'; S.openAt = Date.now(); });
   }
-  function loadBoard() {
+  // `user`: a tap asked for this (Refresh, a write). It paints at once. Otherwise the result goes through backgroundPaint.
+  function loadBoard(user) {
     if (S.loading) return Promise.resolve();
-    S.loading = true; render();
+    S.loading = true;
+    if (user || !pane.querySelector('.wk')) render();
     var board = api('/api/work-board').then(function (d) {
       S.tasks = (d && Array.isArray(d.tasks)) ? d.tasks : [];
       S.caps = (d && d.capabilities) || {};
@@ -445,25 +447,25 @@
     }, function (err) { S.boardError = err.message || 'Work board is unavailable. Refresh before trying again.'; S.complete = false; if (!S.tasks) S.tasks = []; });
     var domains = S.domains ? Promise.resolve() : soft(api('/api/domains')).then(function (d) { S.domains = (d && Array.isArray(d.domains)) ? d.domains : []; });
     // Live session state only refines the status words, so the board never waits for it.
-    loadSessions().then(function () { ITEMS = null; if (!S.loading) render(); });
+    loadSessions().then(function () { ITEMS = null; if (!S.loading) backgroundPaint(); });
     return Promise.all([board, loadOpen(), domains]).then(function () {
-      S.loading = false; S.loadedAt = Date.now(); ITEMS = null;
-      render();
+      S.loading = false; S.loadedAt = Date.now(); ITEMS = null; S.activityKey = activityKey();
+      if (user) render(); else backgroundPaint();
       if (!S.intake && !S.intakeLoading) loadIntake();
     });
   }
-  function loadIntake() {
+  function loadIntake(user) {
     S.intakeLoading = true;
     return api('/api/work-intake').then(function (d) {
       S.intake = (d && Array.isArray(d.items)) ? d.items : [];
       S.intakeCaps = (d && d.capabilities) || {};
       S.intakeError = '';
     }, function (err) { S.intakeError = err.status === 404 ? 'Intake is unavailable on this server.' : (err.message || 'Intake could not be read.'); if (!S.intake) S.intake = []; })
-      .then(function () { S.intakeLoading = false; render(); });
+      .then(function () { S.intakeLoading = false; SPLIT = null; if (user) render(); else backgroundPaint(); });
   }
   function refreshAll() {
     S.meaning = null;
-    return Promise.all([loadBoard(), loadIntake()]);
+    return Promise.all([loadBoard(true), loadIntake(true)]);
   }
   // Session activity every 30 s while Work is open, as Control rechecks its sessions on a timer.
   var poll = null;
@@ -471,10 +473,46 @@
     if (poll) return;
     poll = setInterval(function () {
       if (W.parseRoute().pane !== 'work' || document.hidden) return;
-      Promise.all([loadOpen(), loadSessions()]).then(function () { ITEMS = null; render(); });
+      Promise.all([loadOpen(), loadSessions()]).then(function () {
+        var key = activityKey();
+        if (key === S.activityKey) return;   // nothing a card shows has changed
+        S.activityKey = key; ITEMS = null; backgroundPaint();
+      });
     }, 30000);
   }
-  function stopPoll() { clearInterval(poll); poll = null; }
+  function stopPoll() { clearInterval(poll); poll = null; clearTimeout(PAINT.timer); PAINT.timer = null; }
+  // What the 30 s check can change on screen: the open handoffs and the live state of their sessions.
+  function activityKey() {
+    var parts = (S.open || []).map(function (a) {
+      var row = sessionRow(a);
+      return [a.id, a.status, a.acknowledged, a.sending, a.updatedAt, JSON.stringify(a.progress || null), row ? sessionStatus(row) + '|' + (row.display_label || '') : ''].join('~');
+    });
+    return parts.join('\n') + '#' + (S.openAvailable ? 1 : 0) + (S.openError || '');
+  }
+
+  // ── painting ─────────────────────────────────────────────
+  // A tap paints at once (render). Data that arrives on its own (a load finishing, the 30 s check) goes through
+  // backgroundPaint: only the list is repainted, only when its HTML changed, never while a field there has the focus,
+  // the capture form holds text or the More menu is open, and never within 1.5 s of a touch, scroll or wheel. A card,
+  // Start work or Edit is left alone unless it is still waiting for its data.
+  var PAINT = { html: '', timer: null, touched: 0 };
+  function noteTouch() { PAINT.touched = Date.now(); }
+  ['touchstart', 'touchmove', 'wheel', 'pointerdown', 'keydown'].forEach(function (ev) { pane.addEventListener(ev, noteTouch, { passive: true }); });
+  document.addEventListener('scroll', function () { if (W.parseRoute().pane === 'work') noteTouch(); }, { passive: true, capture: true });
+  function deferPaint() { clearTimeout(PAINT.timer); PAINT.timer = setTimeout(backgroundPaint, 1500); }
+  function listBusy() {
+    var a = document.activeElement;
+    if (a && pane.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
+    return S.moreOpen || (S.captureOpen && !!S.captureText.trim()) || S.captureBusy;
+  }
+  function backgroundPaint() {
+    var r = W.parseRoute();
+    if (r.pane !== 'work') return;
+    if (r.args.length) { if (S.viewWaiting) render(); return; }
+    if (listBusy() || Date.now() - PAINT.touched < 1500) return deferPaint();
+    var html = listHtml();
+    if (html !== PAINT.html) writeList(html);
+  }
 
   // ── header, tabs, filters ────────────────────────────────
   function domainNames() {
@@ -644,7 +682,7 @@
       : (stage === 'complete' && S.scope === 'all' && !S.domain) ? 'No word matches here' : 'No matches here') + '</p>' : '';
     return '<section class="wk-col" data-stage="' + stage + '"><header class="wk-col-head"><div class="wk-row"><h3>' + esc(STAGE_TITLE[stage]) + '</h3>' +
       '<span class="wk-count">' + esc(countLabel(cards.length, all.length, res.active)) + '</span></div><p>' + esc(STAGE_SUB[stage]) + '</p></header>' +
-      '<div class="wk-col-body">' + empty + cards.slice(0, limit).map(function (it) { return boardCard(it, res.hits[it.id], order); }).join('') +
+      '<div class="wk-col-body" data-keep="col-' + stage + '">' + empty + cards.slice(0, limit).map(function (it) { return boardCard(it, res.hits[it.id], order); }).join('') +
       (cards.length > limit ? '<button type="button" class="wk-more-row" data-wk="column-all" data-stage="' + stage + '">Show all ' + cards.length + '</button>' : '') + '</div></section>';
   }
   function board() {
@@ -678,7 +716,7 @@
     var mentioned = kept(mentionedAll, res);
     var mlimit = S.mentionedAll ? mentioned.length : 30;
     var mentionedHtml = '<div class="wk-mentioned"><button type="button" class="wk-menu-label" data-wk="mentioned" aria-expanded="' + S.mentionedOpen + '">Mentioned · ' + mentioned.length + '<span class="wk-caret"></span></button>' +
-      (S.mentionedOpen ? '<div class="cx-list wk-mentioned-list">' + (mentioned.length ? mentioned.slice(0, mlimit).map(function (it) {
+      (S.mentionedOpen ? '<div class="cx-list wk-mentioned-list" data-keep="mentioned">' + (mentioned.length ? mentioned.slice(0, mlimit).map(function (it) {
         return '<button type="button" class="wk-mrow" data-wk="open" data-id="' + esc(it.id) + '"><span>' + inline(it.title) + '</span><span class="chev"></span></button>';
       }).join('') + (mentioned.length > mlimit ? '<button type="button" class="wk-more-row" data-wk="mentioned-all">Show all ' + mentioned.length + '</button>' : '')
         : '<p class="wk-muted wk-pad">Nothing mentioned in this view.</p>') + '</div>' : '') + '</div>';
@@ -688,7 +726,7 @@
     }).join('');
     return '<section class="wk-board">' + head + search + notes +
       '<button type="button" class="wk-text-btn wk-pad-x" data-wk="tab" data-tab="review">Open decisions and results</button>' + mentionedHtml +
-      '<div class="wk-columns">' + columns + '</div>' +
+      '<div class="wk-columns" data-keep="columns">' + columns + '</div>' +
       '<p class="wk-fine">Stages reflect your decisions. Moving a card does not run an agent or publish changes. Start work asks before anything is sent.</p></section>';
   }
 
@@ -1051,6 +1089,7 @@
   }
   function renderDetail(arg) {
     var it = itemFor(arg);
+    S.viewWaiting = !it && (S.loading || !S.tasks);
     if (!it) {
       pane.innerHTML = '<div class="cx wk" data-tint="work">' + backBar(backLabel()) + (S.loading || !S.tasks ? W.skeletonRows(4)
         : '<div class="wk-missing"><h2 class="wk-h2">This work is not currently available</h2><p class="wk-muted">Refresh or choose another item. The original task or meeting has not been recreated.</p></div>') + '</div>';
@@ -1238,7 +1277,7 @@
     var e = editState(it);
     if (e.busy) return;
     e.busy = true; e.error = ''; e.confirming = false; renderEdit(it.id);
-    work().then(function () { return loadBoard(); }).then(function () {
+    work().then(function () { return loadBoard(true); }).then(function () {
       e.busy = false; delete S.edit[it.wid];
       var fresh = itemByWid(it.wid);
       W.go('work', [fresh ? fresh.id : it.id]);
@@ -1266,7 +1305,7 @@
   // ── writes (each one only on a person's tap) ─────────────
   function afterWrite(p) {
     S.busy = true; S.mutationError = ''; render();
-    return p.then(function () { S.busy = false; return loadBoard(); }, function (err) { S.busy = false; S.mutationError = errText(err); render(); });
+    return p.then(function () { S.busy = false; return loadBoard(true); }, function (err) { S.busy = false; S.mutationError = errText(err); render(); });
   }
   function moveStage(it, stage) {
     var t = it.task;
@@ -1280,7 +1319,7 @@
     if (!text || domainNames().indexOf(domain) < 0 || S.captureBusy) return;
     S.captureBusy = true; S.captureError = ''; render();
     api('/api/tasks/capture', { method: 'POST', body: { domain: domain, text: text, section: 'inbox', captureId: uuid() } }).then(function () {
-      S.captureBusy = false; S.captureText = ''; S.captureOpen = false; loadBoard();
+      S.captureBusy = false; S.captureText = ''; S.captureOpen = false; loadBoard(true);
     }, function (err) { S.captureBusy = false; S.captureError = errText(err); render(); });
   }
   function probeLoop() {
@@ -1298,7 +1337,7 @@
       delete S.intakeBusy[id]; dropIntake([id]);
       var at = d && d.item && d.item.resolution && d.item.resolution.at;
       if (at) S.undoBatch = id + ':' + at;
-      return probeLoop().then(function () { render(); loadIntake(); if (action === 'accept') loadBoard(); });
+      return probeLoop().then(function () { render(); loadIntake(); if (action === 'accept') loadBoard(true); });
     }, function (err) { delete S.intakeBusy[id]; S.sortError = errText(err, INTAKE_REFUSALS); render(); });
   }
   function dismissRest(ids) {
@@ -1322,7 +1361,7 @@
   function undoIntake() {
     if (!S.undoBatch) return;
     api('/api/work-intake/undo', { method: 'POST', body: { batchId: S.undoBatch } }).then(function () {
-      S.undoBatch = null; loadIntake(); loadBoard();
+      S.undoBatch = null; loadIntake(true); loadBoard(true);
     }, function (err) { if (err.status === 404) S.loopAvailable = false; S.sortError = err.status === 404 ? UNDO_MISSING : errText(err); render(); });
   }
   function batchOp(t, action, fields) {
@@ -1331,7 +1370,7 @@
     Object.keys(fields || {}).forEach(function (k) { op[k] = fields[k]; });
     S.batchBusy = true; S.loopError = ''; render();
     api('/api/work-board/batch', { method: 'POST', body: { domain: t.domain, ops: [op] } }).then(function () {
-      S.batchBusy = false; loadBoard(); if (S.tab === 'waiting') loadWaiting();
+      S.batchBusy = false; loadBoard(true); if (S.tab === 'waiting') loadWaiting();
     }, function (err) { S.batchBusy = false; S.loopError = err.status === 404 ? 'Waiting on needs a newer COS server.' : errText(err); render(); });
   }
   function loadWaiting() {
@@ -1375,19 +1414,28 @@
     if (S.tab === 'waiting') return waitingView();
     return board();
   }
-  function renderList() {
+  function listHtml() {
+    return '<div class="cx wk" data-tint="work" data-tab="' + esc(S.tab) + '">' + hero() + captureForm() +
+      '<div class="wk-controls">' + tabs() + filters() + '</div>' + notices() + body() + '</div>';
+  }
+  // Every scroller marked data-keep keeps its place across a repaint; the page keeps its own.
+  function writeList(html) {
     var active = document.activeElement, keep = active && pane.contains(active) && active.id ? active.id : null;
     var caret = keep && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
-    var scroller = pane.querySelector('.wk-columns'), sx = scroller ? scroller.scrollLeft : 0;
-    pane.innerHTML = '<div class="cx wk" data-tint="work" data-tab="' + esc(S.tab) + '">' + hero() + captureForm() +
-      '<div class="wk-controls">' + tabs() + filters() + '</div>' + notices() + body() + '</div>';
-    var nextScroller = pane.querySelector('.wk-columns'); if (nextScroller && sx) nextScroller.scrollLeft = sx;
-    if (keep) { var el = $(keep); if (el) { el.focus(); if (caret) { try { el.setSelectionRange(caret[0], caret[1]); } catch (_e) {} } } }
+    var places = {};
+    pane.querySelectorAll('[data-keep]').forEach(function (el) { places[el.getAttribute('data-keep')] = [el.scrollLeft, el.scrollTop]; });
+    var y = window.scrollY;
+    pane.innerHTML = html; PAINT.html = html; S.viewWaiting = false;
+    pane.querySelectorAll('[data-keep]').forEach(function (el) { var p = places[el.getAttribute('data-keep')]; if (p) { el.scrollLeft = p[0]; el.scrollTop = p[1]; } });
+    if (Math.abs(window.scrollY - y) > 1) window.scrollTo(window.scrollX, y);
+    if (keep) { var el = $(keep); if (el) { el.focus({ preventScroll: true }); if (caret) { try { el.setSelectionRange(caret[0], caret[1]); } catch (_e) {} } } }
   }
+  function renderList() { clearTimeout(PAINT.timer); PAINT.timer = null; writeList(listHtml()); }
   function render() {
     var r = W.parseRoute();
     if (r.pane !== 'work') return;
     if (!r.args.length) return renderList();
+    PAINT.html = '';
     if (r.args[1] === 'start') return renderStart(r.args[0]);
     if (r.args[1] === 'edit') return renderEdit(r.args[0]);
     return renderDetail(r.args[0]);
@@ -1409,7 +1457,7 @@
         return;
       case 'tab':
         S.tab = t.getAttribute('data-tab'); S.moreOpen = false; S.pendingComplete = null; persist();
-        if (S.tab === 'sort' && !S.intake && !S.intakeLoading) loadIntake();
+        if (S.tab === 'sort' && !S.intake && !S.intakeLoading) loadIntake(true);
         if (S.tab === 'waiting') { S.waiting = null; S.dropped = null; loadWaiting(); }
         if (W.parseRoute().args.length) return W.go('work');
         window.scrollTo(0, 0);
@@ -1466,9 +1514,9 @@
         delete S.edit[it.wid]; return W.goBack();
       case 'edit-discard': it = current(); if (it) delete S.edit[it.wid]; return W.goBack();
       case 'edit-keep': it = current(); if (it) { editState(it).confirming = false; renderEdit(it.id); } return;
-      case 'edit-refresh': loadBoard(); return;
+      case 'edit-refresh': loadBoard(true); return;
       case 'task-patch': it = current(); if (it) taskPatch(it, t.getAttribute('data-patch'), t.getAttribute('data-stage')); return;
-      case 'intake-refresh': return loadIntake();
+      case 'intake-refresh': return loadIntake(true);
       case 'resolve': return resolveIntake(t.getAttribute('data-iid'), t.getAttribute('data-action-kind'));
       case 'dismiss-rest':
         var g = sortGroups()[S.sortIndex]; if (g) dismissRest(g.items.map(function (x) { return x.id; }));
@@ -1584,9 +1632,9 @@
   W.registerPane('work', {
     load: function (args) {
       startPoll(); resumeHandoffPolls();
+      render();   // one paint now; loads that finish later go through backgroundPaint
       if (!S.tasks && !S.loading) loadBoard();
       else if (!args.length && Date.now() - S.loadedAt > 60000 && !S.loading) loadBoard();
-      render();
     },
     leave: function () { stopPoll(); stopHandoffPolls(); },
     // The Ask sheet's "Find a task about this": open the board on this query and ask by meaning.
