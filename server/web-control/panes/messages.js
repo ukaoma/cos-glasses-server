@@ -363,7 +363,7 @@
           '</span><span class="chev"></span></button>';
       }).join('') + '</div>';
     }
-    if (S.daysState === 'loading' || !S.days) return '<div class="cx-list">' + W.skeletonRows(5) + '</div>';
+    if (!S.days) return '<div class="cx-list">' + W.skeletonRows(5) + '</div>';
     if (!S.days.length) return '<div class="cx-list"><p class="cx-empty">Nothing is archived yet. Conversations move here at the end of each day.</p></div>';
     return (q.length >= 2 ? '<p class="cx-note" style="margin:0 2px 10px">Press return to search the archive.</p>' : '') +
       '<div class="cx-list">' + S.days.map(function (d) {
@@ -573,7 +573,7 @@
     if (!t || t.tagName === 'INPUT') return;
     var act = t.getAttribute('data-msg');
     if (act === 'view') return W.go('messages', t.getAttribute('data-view') === 'archive' ? ['archive'] : []);
-    if (act === 'refresh') { S.recent = null; S.recentState = 'idle'; loadRecent(true); if (S.view === 'archive') { S.days = null; S.daysState = 'idle'; loadDays(true); } return; }
+    if (act === 'refresh') { S.recentState = 'idle'; loadRecent(true); if (S.view === 'archive') { S.daysState = 'idle'; loadDays(true); } return; }
     if (act === 'clear') { S.q = ''; S.archiveRan = ''; S.archiveHits = null; return renderList(); }
     if (act === 'open') return W.go('messages', ['m', t.getAttribute('data-key')]);
     if (act === 'day') return W.go('messages', ['day', t.getAttribute('data-date')]);
@@ -621,7 +621,8 @@
 
   W.registerPane('messages', {
     load: load,
-    refresh: function () { S.recent = null; S.recentState = 'idle'; loadRecent(true); },
+    // Keeps the rows on screen while the new window loads (emptying it moved the page).
+    refresh: function () { S.recentState = 'idle'; loadRecent(true); },
     // Back unwinds one step: a chat goes to its day, a day to the archive list, an image to its message.
     up: function (args) {
       if (args[0] === 'day' && args.length >= 3) return ['day', args[1]];

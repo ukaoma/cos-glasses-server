@@ -62,7 +62,10 @@
   var storiesAt = 0;
   // About 16 reads: never two runs at once, never more than one a minute, and never ahead of
   // the pane the person just opened (Safari keeps 6 connections to the Mac over HTTP/1.1).
-  function loadStories() {
+  // On the closed Duo (below 600px) the stories show only inside the section menu, so they load
+  // when the menu opens rather than costing the pane its connections on every visit.
+  function loadStories(force) {
+    if (!force && W.isPhone()) return;
     if (Date.now() - storiesAt < 60000) return;
     storiesAt = Date.now();
     var now = new Date();
@@ -240,6 +243,7 @@
   }
 
   document.addEventListener('click', function (e) {
+    if (e.target.closest('#section-btn')) loadStories(true);
     var t = e.target.closest('#nav-home,#nav-back,#nav-settings');
     if (!t) return;
     if (t.id === 'nav-home') W.go('today');
