@@ -114,7 +114,8 @@
       // Work: your move (minus the sessions already counted as waiting), and the older-to-sort count.
       Promise.all([soft(api('/api/work-intake')), soft(api('/api/work-board'))]).then(function (w) {
         var items = (w[0] && (w[0].items || w[0].suggestions)) || [];
-        var today = now.toISOString().slice(0, 10);
+        // The local day, as Work's Sort uses (toISOString is UTC: after 6 PM Central it is tomorrow).
+        var today = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
         var olderIntake = items.filter(function (it) {
           var st = it.status || it.state;
           if (st && ['suggested', 'review', 'ask'].indexOf(st) < 0) return false;

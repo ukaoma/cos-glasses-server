@@ -291,3 +291,11 @@ button.cx-set-row:hover { background: var(--qopen); }
 
 /* iOS Safari pull-to-refresh reloaded the whole app on a downward drag at the top of a pane. */
 html, body { overscroll-behavior-y: none; }
+
+/* Today: From today's meetings. */
+.intake-body { padding: 4px 16px 14px; }
+.intake-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--hairline); font-size: 14.5px; }
+.intake-row:first-child { border-top: 0; }
+.intake-meeting { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.intake-n { font: 600 12px/1.6 var(--mono); color: var(--sub); }
+.intake-foot { margin: 6px 0 0; font-size: 12.5px; color: var(--tertiary); }

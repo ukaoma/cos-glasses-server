@@ -583,7 +583,7 @@
     if (act === 'retry') { if (S.recentState === 'error') { S.recentState = 'idle'; S.recent = null; } return load(current); }
     if (act === 'handoff') {
       var list = (S.recent || []).slice().reverse();
-      var day = S.recentDate || new Date().toISOString().slice(0, 10);
+      var nd = new Date(), day = S.recentDate || (nd.getFullYear() + '-' + String(nd.getMonth() + 1).padStart(2, '0') + '-' + String(nd.getDate()).padStart(2, '0'));
       var lines = ['COS Glasses handoff · ' + day + ' · last ' + list.length + ' turns', 'Continue from this context. Global msg numbers refer to glasses history.', ''];
       list.forEach(function (turn) { lines.push(copyTurnText(turn)); lines.push(''); });
       W.copyText(lines.join('\n')).then(function () { W.toast('Copied'); }, function (err) { W.toast(err.message); });

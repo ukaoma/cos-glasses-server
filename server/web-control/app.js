@@ -260,6 +260,7 @@
       renderRunning(working, open);
       renderNeeds(needs);
       renderNext(welcome);
+      loadTodayIntake();
       setBadge('today', needs.length > 0);
       setBadge('sessions', working.length > 0);
       liveSession(recent).then(function (rec) {
@@ -294,8 +295,12 @@
     var el = $('today-story');
     el.className = 'story';
     if (offline) { el.textContent = 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'; return; }
+    // Quiet hours (Control 0.5.361, and the rail's line): after 6 PM and at weekends what is
+    // waiting can wait until tomorrow, so Today says so instead of "waiting on you".
+    var nowD = new Date(), quiet = nowD.getDay() === 0 || nowD.getDay() === 6 || nowD.getHours() >= 18;
     var first = needs > 0
-      ? countWord(needs) + ' ' + plural(needs, 'handoff is', 'handoffs are') + ' waiting on you'
+      ? (quiet ? countWord(needs) + ' ' + plural(needs, 'handoff', 'handoffs') + ' can wait until tomorrow'
+        : countWord(needs) + ' ' + plural(needs, 'handoff is', 'handoffs are') + ' waiting on you')
       : 'Nothing is waiting on you';
     var nextBit = '';
     var nd = next && toDate(next.time);
@@ -366,6 +371,28 @@
     $('next-body').innerHTML = '<span class="when">' + esc(clock(d)) + '</span><span><span class="what">' + esc(n.title) + '</span>' +
       '<span class="sub" style="display:block">' + esc((dw.charAt(0).toUpperCase() + dw.slice(1)) + (weather ? '. Now ' + weather : '')) + '</span></span>';
     card.classList.remove('hidden');
+  }
+  // From today's meetings: Work's suggestions from meetings held today. They stay here until
+  // midnight, then join Sort in Work; Review opens them in Work's Sort.
+  function localDay(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function loadTodayIntake() {
+    var card = $('intake-card'); if (!card) return;
+    api('/api/work-intake').then(function (d) {
+      var today = localDay(new Date());
+      var items = ((d && d.items) || []).filter(function (it) {
+        if (['suggested', 'review', 'ask'].indexOf(it.status) < 0) return false;
+        var day = String((it.meeting && (it.meeting.filename || it.meeting.date)) || '').match(/\d{4}-\d{2}-\d{2}/);
+        return day && day[0] === today;
+      });
+      if (!items.length) { card.classList.add('hidden'); return; }
+      var meetings = {};
+      items.forEach(function (it) { var t = (it.meeting && it.meeting.title) || 'A meeting'; meetings[t] = (meetings[t] || 0) + 1; });
+      $('intake-count').textContent = String(items.length);
+      $('intake-body').innerHTML = Object.keys(meetings).slice(0, 4).map(function (t) {
+        return '<div class="intake-row"><span class="intake-meeting">' + esc(t) + '</span><span class="intake-n">' + meetings[t] + '</span></div>';
+      }).join('') + '<p class="intake-foot">Moves to Work at midnight.</p>';
+      card.classList.remove('hidden');
+    }, function () { card.classList.add('hidden'); });
   }
   function setBadge(name, on) { document.querySelectorAll('[data-badge="' + name + '"]').forEach(function (b) { b.classList.toggle('hidden', !on); }); }
 
@@ -2193,7 +2220,12 @@
     }
     if (t.hasAttribute('data-open-ask')) return openAsk();
     if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); syncFrameTheme(); return; }
-    if (t.hasAttribute('data-goto') || t.hasAttribute('data-pane')) { if (inSheet) closeAsk(); closeMenu(); return go(t.getAttribute('data-goto') || t.getAttribute('data-pane')); }
+    if (t.hasAttribute('data-goto') || t.hasAttribute('data-pane')) {
+      if (inSheet) closeAsk(); closeMenu();
+      // "work/sort" is a pane and its arguments, not one name.
+      var dest = String(t.getAttribute('data-goto') || t.getAttribute('data-pane')).split('/');
+      return go(dest[0], dest.slice(1));
+    }
     if (t.hasAttribute('data-session')) { if (inSheet) closeAsk(); var p = t.getAttribute('data-session').split('|'); return go('sessions', [p[0], p.slice(1).join('|')]); }
     if (t.hasAttribute('data-meeting')) { var m = t.getAttribute('data-meeting').split('|'); return go('meetings', m); }
     if (t.hasAttribute('data-speakers')) return go('speakers', [t.getAttribute('data-speakers')]);
