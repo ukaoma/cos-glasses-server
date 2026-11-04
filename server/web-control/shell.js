@@ -85,13 +85,23 @@
 
       var needs = waiting + moves.length;
       var folded = quiet ? needs : 0;
-      var recordings = live.filter(function (s) { return Date.now() - (s.mtimeMs || 0) < 5 * 60000; }).length;
-      var waitNow = needs - folded;
-      var needText = waitNow > 0 ? (waitNow === 1 ? '1 needs you' : waitNow + ' need you')
-        : folded > 0 ? folded + ' can wait until tomorrow'
-        : (res[0] || res[1]) ? 'Nothing needs you' : "Couldn't read your Mac";
-      if (recordings > 0) setStory('today', [recordings + ' recording', waitNow > 0 ? needText : ''].filter(Boolean).join(', '), true);
-      else setStory('today', [needText, working ? working + ' running' : ''].filter(Boolean).join(', '), waitNow > 0);
+      // A fresh file is not proof of a recording: a meeting saved a minute ago still has one.
+      // Ask each recent session the way Today does (live-chunks read: not ended, active lately).
+      var recent = live.filter(function (s) { return Date.now() - (s.mtimeMs || 0) < 5 * 60000; }).slice(0, 3);
+      Promise.all(recent.map(function (f) {
+        return soft(api('/api/meetings/live-chunks?sessionId=' + encodeURIComponent(f.sessionId) + '&since=1000000')).then(function (r) {
+          var read = r && r.read;
+          return !!(read && !read.ended && Date.now() - Number(read.lastActivityAt || 0) < 5 * 60000);
+        });
+      })).then(function (flags) {
+        var recordings = flags.filter(Boolean).length;
+        var waitNow = needs - folded;
+        var needText = waitNow > 0 ? (waitNow === 1 ? '1 needs you' : waitNow + ' need you')
+          : folded > 0 ? folded + ' can wait until tomorrow'
+          : (res[0] || res[1]) ? 'Nothing needs you' : "Couldn't read your Mac";
+        if (recordings > 0) setStory('today', [recordings + ' recording', waitNow > 0 ? needText : ''].filter(Boolean).join(', '), true);
+        else setStory('today', [needText, working ? working + ' running' : ''].filter(Boolean).join(', '), waitNow > 0);
+      });
 
       // Work: your move (minus the sessions already counted as waiting), and the older-to-sort count.
       Promise.all([soft(api('/api/work-intake')), soft(api('/api/work-board'))]).then(function (w) {
