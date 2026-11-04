@@ -1,3 +1,9 @@
+## 6.99.2 - The phone address by name works (private)
+
+2026-11-04. Private build for one Mac, on top of 6.99.1. Nothing changes for the glasses, the phone companion or COS Control.
+
+- **Fix: signing in at `http://<your-mac>.<your-tailnet>.ts.net:3141/control` was refused.** The server learned this Mac's Tailscale name from the Tailscale command line, which does not answer when the server runs in the background, so every sign-in from the name address was turned away. It now asks Tailscale's own DNS for the name of this Mac's Tailscale address, which answers in milliseconds. Only this Mac's exact name is accepted. The address by number (`http://100.x.y.z:3141/control`) always worked.
+
 ## 6.99.1 - COS Control in a browser on your phone, over Tailscale (private)
 
 2026-11-04. Private build for one Mac, on top of 6.99.0. Nothing changes for the glasses, the phone companion or COS Control.
