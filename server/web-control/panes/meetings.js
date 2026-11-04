@@ -1244,7 +1244,7 @@
         (row.sourceSessionId && sessions.length ? '<p class="mt-note-line">Ask history covers the whole original capture, including its other split pieces.</p>' : '') +
         sessions.map(function (sid, i) {
           A(sid).ctx = { saved: true, meeting: row, captureLabel: 'Original recording ' + (i + 1) + '. Questions use its saved cutoff; each recording keeps its own history.' };
-          return '<div class="mt-side-panel" id="mt-ask-' + safeId(sid) + '">' + sidePanelHtml(sid) + '</div>';
+          return '<div class="mt-side-panel" id="mt-ask-' + safeId(sid) + '" data-sid="' + esc(sid) + '">' + sidePanelHtml(sid) + '</div>';
         }).join('') +
         '<article class="mt-doc">' + documentHtml(d) + '</article></div>';
     }
@@ -1706,8 +1706,41 @@
       '<button type="submit" class="cx-btn primary"' + (blocked || !a.draft.trim() ? ' disabled' : '') + '>Ask</button></form>' +
       '<div class="mt-ask-more"><button type="button" class="mt-link" data-mt="ask-act" data-sid="' + esc(sid) + '" data-action="ask" data-q="' + esc(CHALLENGE_Q) + '"' + dis + '>Challenge an assumption</button>' +
       '<button type="button" class="mt-link" data-mt="ask-act" data-sid="' + esc(sid) + '" data-action="ask" data-q="' + esc(DECISION_Q) + '"' + dis + '>Find my next decision</button></div>' +
-      (conf && conf.selected ? '<p class="mt-muted mt-model">Model: ' + esc(cap(conf.selected.engine) + ' · ' + conf.selected.model) + '</p>' : '');
+      modelPickerHtml(conf);
     return html;
+  }
+  // The Mac's Model menu (Control's meeting Ask panel): every model the server lists, the unavailable ones shown but
+  // not pickable. The choice is the server's one meeting-assistance setting, so it changes for the Mac too.
+  function modelPickerHtml(conf) {
+    if (!conf || !conf.selected) return '';
+    var sel = conf.selected, models = ((conf.capabilities || {}).models || []).filter(function (m) { return m && m.engine && m.model; });
+    var label = function (m) { return cap(m.engine) + ' · ' + m.model; };
+    if (!models.length) return '<p class="mt-muted mt-model">Model: ' + esc(label(sel)) + '</p>';
+    var key = function (m) { return m.engine + '\u0001' + m.model; }, cur = key(sel), seen = false;
+    var opts = models.map(function (m) {
+      var k = key(m), on = k === cur; if (on) seen = true;
+      return '<option value="' + esc(k) + '"' + (on ? ' selected' : '') + (m.available === false && !on ? ' disabled' : '') + '>' + esc(label(m) + (m.available === false ? ' (not available)' : '')) + '</option>';
+    });
+    if (!seen) opts.unshift('<option value="' + esc(cur) + '" selected>' + esc(label(sel)) + '</option>');
+    var busy = !!S.conf.modelBusy;
+    return '<label class="mt-model mt-model-pick"><span class="mt-muted">Model</span><select class="field mt-model-select" data-mt-model' + (busy ? ' disabled' : '') + '>' + opts.join('') + '</select></label>' +
+      (S.conf.modelNote ? '<p class="mt-muted mt-amber">' + esc(S.conf.modelNote) + '</p>' : '');
+  }
+  function setModel(value) {
+    var parts = String(value || '').split('\u0001'); if (parts.length !== 2) return;
+    S.conf.modelBusy = true; S.conf.modelNote = ''; repaintAllAsk();
+    api('/api/meeting-ask/config', { method: 'PUT', body: { engine: parts[0], model: parts[1] } }).then(function (c) {
+      S.conf.modelBusy = false;
+      if (c && c.selected) S.conf.config = c;
+      repaintAllAsk();
+    }, function (err) {
+      S.conf.modelBusy = false;
+      if (!(err && err.status === 401)) S.conf.modelNote = 'Could not change the model: ' + ((err && err.message) || 'the server did not answer') + '.';
+      repaintAllAsk();
+    });
+  }
+  function repaintAllAsk() {
+    pane.querySelectorAll('[id^="mt-ask-"]').forEach(function (el) { var sid = el.getAttribute('data-sid'); if (sid) repaintAsk(sid); });
   }
   function cuesHtml(sid) {
     var a = A(sid), cues = (a.cues || []).slice().sort(function (x, y) { return num(y.createdAt) - num(x.createdAt); });
@@ -1823,7 +1856,7 @@
     W.setCrumb(liveTitle(f));
     pane.innerHTML = '<div class="cx mt mt-livev" data-tint="meetings"><div id="mt-lhead"></div><div class="mt-lgrid"><div class="mt-lmain">' +
       '<div id="mt-turns" class="mt-turns" aria-live="polite"></div><div id="mt-lfoot"></div></div>' +
-      '<aside class="mt-side-panel" id="mt-ask-' + safeId(sid) + '">' + sidePanelHtml(sid) + '</aside></div></div>';
+      '<aside class="mt-side-panel" id="mt-ask-' + safeId(sid) + '" data-sid="' + esc(sid) + '">' + sidePanelHtml(sid) + '</aside></div></div>';
     S.headHtml = S.footHtml = null;
     paintLiveHead(); paintTurns(true); paintLiveFoot();
     clearInterval(S.liveTimer);
@@ -2074,6 +2107,7 @@
   pane.addEventListener('change', function (e) {
     if (e.target.id === 'mt-recency') { S.recency = e.target.value; paintBrowse(); }
     else if (e.target.id === 'mt-dom') { S.domain = e.target.value; if (queryActive()) runSearch(); else paintBrowse(); }
+    else if (e.target.hasAttribute && e.target.hasAttribute('data-mt-model')) setModel(e.target.value);
   });
   pane.addEventListener('submit', function (e) {
     var f = e.target;

@@ -214,6 +214,8 @@
 .mt-composer .cx-btn { height: 40px; }
 .mt-ask-more { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; }
 .mt-model { margin-top: 8px; font-size: 12px; }
+.mt-model-pick { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.mt-model-select { flex: 1; min-width: 0; max-width: 320px; height: 36px; font-size: 14px; }
 .mt-cue { border-top: 1px solid var(--hairline); padding: 10px 0; }
 .mt-cue:first-of-type { border-top: 0; }
 .mt-cue p { margin: 0 0 4px; }
