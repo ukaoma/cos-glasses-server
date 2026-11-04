@@ -1,3 +1,14 @@
+## 6.99.1 - COS Control in a browser on your phone, over Tailscale (private)
+
+2026-11-04. Private build for one Mac, on top of 6.99.0. Nothing changes for the glasses, the phone companion or COS Control.
+
+- **COS Control Web.** Open `http://<your-mac>.<your-tailnet>.ts.net:3141/control` on a phone or another computer on your tailnet: Today, Sessions, Meetings, Work, Messages, Memories, Speakers, Usage and Settings, against the same routes the Mac app uses. Built phone first for the iPhone Duo: on the closed screen one top bar that slides away while you scroll; on the open screen a labelled left rail and two columns. No bottom bar, because Safari owns that edge.
+- **Sign in once per browser.** On a signed-in browser choose Settings, Sign in another device, then type the 8-character code on the phone (single use, five minutes). The pairing token still works. The session is an HttpOnly cookie for 7 days; the page never holds the token.
+- **Guards.** Changes from a browser need its own origin and an extra header, so another site cannot act for you. Eight wrong codes or tokens in ten minutes lock that device out for the rest of the window. The page runs only its own scripts. A request that passed through a local proxy never counts as coming from the Mac itself.
+- **On by default, served to your local network and tailnet only.** `COS_WEB_CONTROL_ENABLED=0` turns it off. Every route behind sign-in still needs the pairing token or the browser session.
+- New routes: `/api/web-session/{login,logout,status,device-code,handoff}`, `/api/tailscale/web-url`, `/api/web-bridge/memories`, `/api/meetings/live-chunks`, `/api/usage/summary`, `/api/work-board/your-move`.
+- The tailnet address is admitted only once this Mac's own Tailscale name is known; the server reads it at start and again on demand, so the first sign-in after a restart is not refused.
+
 ## 6.99.0 - Rename a live meeting, and up to 50 cues per meeting (private)
 
 2026-11-03. Private build for one Mac, on top of the public 6.98.1. COS Control needs a later build to show the rename field; nothing changes for older clients.
