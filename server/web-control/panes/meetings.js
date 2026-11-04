@@ -136,18 +136,22 @@
 
   // ── Markdown (COSMarkdownParser.swift) ────────────────
   // Escape first, then add only our own tags, so server text can never become markup.
+  function emphasis(s) {
+    s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>').replace(/__([^_\n]+?)__/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?![*\w])/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[^\w])_([^_\s][^_\n]*?)_(?!\w)/g, '$1<em>$2</em>');
+    return s.replace(/\[([THFW]\d+)\]/g, '<span class="mt-cite">[$1]</span>');
+  }
+  // Links are set aside before emphasis and citations run, then put back, so an href is never rewritten.
   function inline(text) {
-    return String(text == null ? '' : text).split(/(`[^`\n]+`)/g).map(function (p, i) {
+    return String(text == null ? '' : text).replace(/[\uE000\uE001]/g, '').split(/(`[^`\n]+`)/g).map(function (p, i) {
       if (i % 2 === 1) return '<code>' + esc(p.slice(1, -1)) + '</code>';
-      var s = esc(p);
-      s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, function (_m, label, url) {
-        return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+      var links = [];
+      var s = esc(p).replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, function (_m, label, url) {
+        links.push('<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + emphasis(label) + '</a>');
+        return '\uE000' + (links.length - 1) + '\uE001';
       });
-      s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>').replace(/__([^_\n]+?)__/g, '<strong>$1</strong>');
-      s = s.replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?![*\w])/g, '$1<em>$2</em>');
-      s = s.replace(/(^|[^\w])_([^_\s][^_\n]*?)_(?!\w)/g, '$1<em>$2</em>');
-      s = s.replace(/\[([THFW]\d+)\]/g, '<span class="mt-cite">[$1]</span>');
-      return s;
+      return emphasis(s).replace(/\uE000(\d+)\uE001/g, function (_m, n) { return links[Number(n)] || ''; });
     }).join('');
   }
   var MD = (function () {
@@ -661,13 +665,21 @@
     }, function () { S.inboxBusy = false; });
   }
 
-  // A write whose refusal is an answer to read ({status, body}), never an error to throw. W.api handles sign-out.
+  // A sign-in that lapsed: stop polling and show the sign-in, as W.api does on a 401.
+  function signedOut() {
+    stopTimers(); clearTimeout(S.stopTimer); S.stopTimer = null;
+    if (typeof W.showAuth === 'function') W.showAuth();
+    else api('/api/meeting-ask/config').catch(function () {});
+  }
+  var SIGNED_OUT = 'Signed out. Connect this browser again.';
+  // A write whose refusal is an answer to read ({status, body}), never an error to throw. A 401 signs out.
   function answer(path, opts) {
     var o = opts || {};
     var headers = { 'X-COS-Web': '1' };
     if (o.body !== undefined) headers['Content-Type'] = 'application/json';
     return fetch(path, { method: o.method || 'GET', headers: headers, credentials: 'same-origin', body: o.body !== undefined ? JSON.stringify(o.body) : undefined })
       .then(function (res) {
+        if (res.status === 401) signedOut();
         return res.text().then(function (t) { var b = null; try { b = t ? JSON.parse(t) : {}; } catch (_e) { b = null; } return { status: res.status, body: b || {}, json: b !== null }; });
       }, function () { return { status: 0, body: {}, json: false }; });
   }
@@ -884,13 +896,14 @@
       case 'alreadyStopped': return 'This meeting already stopped.';
       case 'serverUnreachable': return 'COS server unreachable. Nothing was stopped.';
       case 'serverTooOld': return 'This COS server cannot stop glasses meetings yet. Update the server, or stop it on the glasses or phone.';
-      case 'unauthorized': return 'Reconnect COS Control to the server. Nothing was stopped.';
+      case 'unauthorized': return SIGNED_OUT + ' Nothing was stopped.';
       case 'stillSaving': return 'The glasses stopped. The save is still running; check Meetings in a minute.';
       case 'serverRestarted': return 'The COS server restarted before the glasses answered. Nothing was stopped.';
       default: return 'The server could not ask the glasses (HTTP ' + p.status + '). Nothing was stopped.';
     }
   }
   var STOP_ACTIVE = { asking: 1, stopping: 1, finalizing: 1 };
+  var STOP_FOLLOW_MS = 210000;
   var STOP_NOTHING = { notConnected: 1, notRecordingHere: 1, otherMeeting: 1, serverUnreachable: 1, serverTooOld: 1, unauthorized: 1, serverRestarted: 1, failed: 1 };
   function stopping(sid) { return !!(S.stop && S.stop.sid === sid && STOP_ACTIVE[S.stop.phase.k]); }
   function stopLineFor(sid) { return S.stop && S.stop.sid === sid ? stopLineText(S.stop.phase) : null; }
@@ -912,7 +925,7 @@
     if (a.status === 0) { if (claimed) return { k: elapsed > saveWait ? 'stillSaving' : 'stopping' }; return { k: elapsed > deadline ? 'serverUnreachable' : 'asking' }; }
     if (a.status === 404) return { k: claimed ? 'stillSaving' : 'serverRestarted' };
     if (a.status === 401 || a.status === 403) return { k: claimed ? 'stillSaving' : 'unauthorized' };
-    if (a.status < 200 || a.status >= 300) return claimed ? { k: 'stopping' } : (elapsed > deadline ? { k: 'failed', status: a.status } : { k: 'asking' });
+    if (a.status < 200 || a.status >= 300) return claimed ? { k: elapsed > saveWait ? 'stillSaving' : 'stopping' } : (elapsed > deadline ? { k: 'failed', status: a.status } : { k: 'asking' });
     switch (b.state) {
       case 'saved': return savedPhase(b);
       case 'claimed': return elapsed > saveWait ? { k: 'stillSaving' } : { k: b.finalizing === true ? 'finalizing' : 'stopping' };
@@ -936,16 +949,24 @@
       setStop(sid, asked.phase);
       if (!STOP_ACTIVE[asked.phase.k] || !asked.requestId) { if (asked.phase.k === 'saved') pollFiles(); return; }
       var started = Date.now(), claimed = false;
-      (function tick() {
-        setTimeout(function () {
+      // Followed only while the pane shows (leave() clears the timer; load() resumes), never past STOP_FOLLOW_MS.
+      function tick() {
+        clearTimeout(S.stopTimer);
+        S.stopTimer = setTimeout(function () {
+          S.stopTimer = null;
+          if (Date.now() - started > STOP_FOLLOW_MS) { setStop(sid, { k: 'stillSaving' }); S.stopResume = null; return; }
           answer(base + '/' + encodeURIComponent(asked.requestId)).then(function (p) {
+            if (!S.stop || S.stop.sid !== sid || !STOP_ACTIVE[S.stop.phase.k]) return;
             var next = afterPoll(p, Date.now() - started, asked.win, claimed);
             if (next.k === 'stopping' || next.k === 'finalizing') claimed = true;
             setStop(sid, next);
-            if (STOP_ACTIVE[next.k]) tick(); else if (next.k === 'saved') pollFiles();
+            if (!STOP_ACTIVE[next.k]) { S.stopResume = null; if (next.k === 'saved') pollFiles(); }
+            else if (S.view === 'list' || S.view === 'live') tick();
           });
         }, claimed ? 2000 : 1000);
-      })();
+      }
+      S.stopResume = tick;
+      tick();
     });
   }
 
@@ -1282,7 +1303,7 @@
   function online() { return S.conf.reach === 'online'; }
   function helperMsg(status, op) {
     if (status === 404) return op === 'config' ? 'Update the COS server to use saved meeting assistance.' : 'This request or meeting is unavailable.';
-    if (status === 401 || status === 403) return 'Reconnect COS Control to the server.';
+    if (status === 401 || status === 403) return SIGNED_OUT;
     if (status === 409) return 'Meeting assistant could not accept this request. Refresh its history before retrying.';
     if (status === 429) return 'Meeting assistant is busy or has reached its usage limit. Your question is retained.';
     if (!status) return 'Meeting assistant is offline. Your question is retained; nothing retries automatically.';
@@ -1764,7 +1785,7 @@
     S.livePolling = true;
     answer('/api/meetings/live-chunks?sessionId=' + encodeURIComponent(f.sid) + '&since=' + f.cursor + (f.stamp ? '&stamp=' + encodeURIComponent(f.stamp) : '') + (f.rev != null ? '&speakerRevision=' + f.rev : '')).then(function (a) {
       S.livePolling = false;
-      if (S.view !== 'live' || S.liveSid !== f.sid) return;
+      if (S.view !== 'live' || S.liveSid !== f.sid || a.status === 401) return;
       if (a.status !== 200) { S.liveReason = a.status === 0 ? 'server_stopped' : (typeof a.body.reason === 'string' && /^[a-z0-9_]{1,40}$/.test(a.body.reason) ? a.body.reason : 'unavailable'); paintLiveFoot(); return; }
       S.liveReason = '';
       var t = Date.now(), files = a.body.sessions || [];
@@ -2016,6 +2037,7 @@
     load: function (args) {
       args = args || [];
       stopTimers();
+      if (S.stop && STOP_ACTIVE[S.stop.phase.k] && S.stopResume && !S.stopTimer && (args[0] === 'live' || !args.length)) S.stopResume();
       if (args[0] === 'live' && args[1]) { openLive(args[1]); return; }
       if (args.length >= 3) { openDetail(args[0], args[1], args.slice(2).join('/')); return; }
       renderList();
@@ -2026,6 +2048,6 @@
       S.listTimer = setInterval(function () { if (S.view === 'list') pollFiles(); }, 3000);
       if (queryActive() && S.ranFor !== S.q.trim() && !S.searching) runSearch();
     },
-    leave: function () { stopTimers(); S.view = ''; }
+    leave: function () { stopTimers(); clearTimeout(S.stopTimer); S.stopTimer = null; S.view = ''; }
   });
 })();
