@@ -84,14 +84,22 @@ describe('memory and thread', () => {
   it('without the Python bridge (file tier or nothing) these are missing, and nothing is called', async () => {
     for (const source of ['files', null] as const) {
       py.source = source
-      await expect(createBridgeDropWriters().captureMemory('x', ID)).rejects.toMatchObject({ code: 'destination_unavailable' })
+      await expect(createBridgeDropWriters().captureMemory('x', ID, '1')).rejects.toMatchObject({ code: 'destination_unavailable' })
       await expect(createBridgeDropWriters().sourceThread('thread-1', 'x', ID)).rejects.toMatchObject({ code: 'destination_unavailable' })
     }
     expect(py.calls).toHaveLength(0)
   })
   it('an older bridge (unknown command) is missing, a refusal is a failure', async () => {
     py.answers.push({ error: 'unknown command: memory-capture' }, { error: { code: 'invalid_text' } })
-    await expect(createBridgeDropWriters().captureMemory('x', ID)).rejects.toMatchObject({ code: 'destination_unavailable' })
-    await expect(createBridgeDropWriters().captureMemory('x', ID)).rejects.toMatchObject({ code: 'destination_failed' })
+    await expect(createBridgeDropWriters().captureMemory('x', ID, '1')).rejects.toMatchObject({ code: 'destination_unavailable' })
+    await expect(createBridgeDropWriters().captureMemory('x', ID, '1')).rejects.toMatchObject({ code: 'destination_failed' })
+  })
+})
+
+describe('bounded candidate reads', () => {
+  it('a slow or failing part answers null, a fast one its value', async () => {
+    expect(await within(20, async () => 'ok')).toBe('ok')
+    expect(await within(20, () => new Promise(r => setTimeout(() => r('late'), 200)))).toBeNull()
+    expect(await within(20, async () => { throw new Error('x') })).toBeNull()
   })
 })

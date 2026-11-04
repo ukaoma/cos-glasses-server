@@ -86,6 +86,14 @@ describe('filing', () => {
     expect(out.items[1]).toMatchObject({ title: 'Kept as a note', line: 'Automatic filing is off on this server.' })
   })
 
+  it('a memory too short for the memory contract is kept as a note, with words that do not suggest Move', async () => {
+    const h = harness()
+    const out = await h.service.submit(drop('remember coffee black'))
+    expect(out.drop).toMatchObject({ dest: 'note', route: { by: 'rule', reason: 'memory_too_short' } })
+    expect(out.items.at(-1)!.line).toBe('Memories need a full sentence, so this one is kept as a note.')
+    expect(out.items.at(-1)!.line).not.toMatch(/move/i)
+  })
+
   it('a missing bridge verb keeps a plain note with the reason', async () => {
     const h = harness({ writers: fakeWriters({ missing: ['captureCard', 'captureMemory'] }) })
     const card = await h.service.submit(drop('Draft the onboarding email sequence for new liquor stores'))

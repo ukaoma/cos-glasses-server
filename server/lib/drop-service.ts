@@ -78,6 +78,7 @@ export const NOTE_REASONS: Record<string, string> = {
   jev_bad_answer: 'Jev gave an answer COS could not read.',
   destination_unavailable: 'Filing there needs a COS update on this Mac.',
   destination_failed: 'The place it was going did not accept it. Move it to try again.',
+  memory_too_short: 'Memories need a full sentence, so this one is kept as a note.',
   interrupted: 'The server restarted while filing it.',
 }
 
