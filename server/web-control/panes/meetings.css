@@ -131,8 +131,9 @@
 .mt-section + .mt-section { margin-top: 18px; }
 .mt-label { font: 600 10px/1 var(--mono); letter-spacing: 0.08em; color: var(--sub); margin-bottom: 8px; }
 .mt-tlabel { font-weight: 600; font-size: 13px; margin-bottom: 10px; }
-@media (min-width: 1100px) {
-  .mt-detail .mt-dbody { grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); align-items: start; column-gap: 24px; }
+/* Two columns from 860 px, so an unfolded phone (iPhone Duo, about 1000 px) reads like the Mac: text left, Ask right. */
+@media (min-width: 860px) {
+  .mt-detail .mt-dbody { grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); align-items: start; column-gap: 24px; }
   .mt-detail .mt-dbody > .mt-note-line, .mt-detail .mt-dbody > .mt-side-panel { grid-column: 2; }
   .mt-detail .mt-dbody > .mt-doc { grid-column: 1; grid-row: 1 / span 20; }
 }
@@ -236,7 +237,7 @@
 .mt-lturn p { margin: 0 0 0.6em; font-size: 15px; line-height: 1.6; color: var(--ink); overflow-wrap: anywhere; }
 .mt-lturn p:last-child { margin-bottom: 0; }
 .mt-lempty { color: var(--sub); text-align: center; font-size: 14px; padding: 26px 8px; margin: 0; }
-@media (min-width: 1100px) {
-  .mt-lgrid { grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); align-items: start; column-gap: 24px; }
+@media (min-width: 860px) {
+  .mt-lgrid { grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); align-items: start; column-gap: 24px; }
   .mt-lgrid > .mt-side-panel { position: sticky; top: 62px; max-height: calc(100vh - 80px); overflow: auto; }
 }
