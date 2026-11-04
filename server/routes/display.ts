@@ -13,6 +13,7 @@ import {
 } from '../lib/display-bus.js'
 import { type DisplayTicketVerdict, explainDisplayTicket } from '../lib/display-ticket.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
+import { isWebSessionAuthorized } from '../lib/web-session-auth.js'
 
 export const displayRouter = Router()
 
@@ -183,7 +184,9 @@ export function __resetDisplayStreamLogForTests(): void {
  * counter with connections that were never the problem.
  */
 function headerAuthorized(req: Request): boolean {
-  return timingSafeTokenEqual(req.headers['x-cos-token'], process.env.COS_API_TOKEN ?? '')
+  const apiToken = process.env.COS_API_TOKEN ?? ''
+  return timingSafeTokenEqual(req.headers['x-cos-token'], apiToken)
+    || isWebSessionAuthorized(req, apiToken)
 }
 
 /**

@@ -39,7 +39,7 @@ import { execFile } from 'node:child_process'
 import { accessSync, constants as fsConstants } from 'node:fs'
 import { networkInterfaces } from 'node:os'
 import { readSwitch } from './env-switch.js'
-import { isTailscaleIpv4, normalizeRemoteIp } from './network-policy.js'
+import { isTailscaleIpv4, normalizeRemoteIp, normalizeTailscaleDnsName } from './network-policy.js'
 
 export const TAILSCALE_NUDGE_LIMITS = Object.freeze({
   tickMs: 10_000,
@@ -135,6 +135,8 @@ export interface PeerStatus {
 export interface TailscaleStatus {
   backendState: string
   selfIps: string[]
+  selfDnsName?: string | null
+  certDomains?: string[]
   peers: PeerStatus[]
   at: number
 }
@@ -145,6 +147,10 @@ export function parseTailscaleStatus(text: string, at: number): TailscaleStatus 
   try { raw = JSON.parse(text) } catch { return null }
   if (!raw || typeof raw !== 'object' || typeof raw.BackendState !== 'string') return null
   const v4 = (ips: unknown): string[] => Array.isArray(ips) ? ips.filter((ip): ip is string => typeof ip === 'string' && isTailscaleIpv4(ip)) : []
+  const selfDnsName = normalizeTailscaleDnsName(raw.Self?.DNSName)
+  const certDomains = Array.isArray(raw.CertDomains)
+    ? (raw.CertDomains as unknown[]).filter((d): d is string => typeof d === 'string' && d.trim().length > 0).map((d: string) => d.trim().toLowerCase().replace(/\.$/, ''))
+    : []
   const peers: PeerStatus[] = []
   const peerMap = raw.Peer && typeof raw.Peer === 'object' ? raw.Peer : {}
   for (const p of Object.values(peerMap) as any[]) {
@@ -160,7 +166,7 @@ export function parseTailscaleStatus(text: string, at: number): TailscaleStatus 
       lastHandshakeMs: Number.isFinite(hs) && hs > 0 ? hs : 0,
     })
   }
-  return { backendState: raw.BackendState, selfIps: v4(raw.Self?.TailscaleIPs).sort(), peers, at }
+  return { backendState: raw.BackendState, selfIps: v4(raw.Self?.TailscaleIPs).sort(), selfDnsName, certDomains, peers, at }
 }
 
 /** Disco ping output: "pong from <name> (<ip>) via <DERP(x) | ip:port | peer-relay(...)> in 91ms". */
@@ -417,6 +423,38 @@ export class TailscaleNudger {
     const read = await this.readStatus(at)
     if (read && tailscaleStateChanged(before, read)) this.raise('tailscale', at, TAILSCALE_NUDGE_LIMITS.networkSettleMs)
     return read
+  }
+
+  /**
+   * Cached or last-known Tailscale status, plus a single-flight on-demand refresh.
+   * Preserves the last known-good `selfDnsName` across transient read failures so CORS
+   * never tears or fails open under concurrent requests.
+   */
+  private statusRefreshInFlight: Promise<TailscaleStatus | null> | null = null
+  private lastKnownSelfDnsName: string | null = null
+
+  currentSelfDnsName(): string | null {
+    if (this.status?.selfDnsName) {
+      this.lastKnownSelfDnsName = this.status.selfDnsName
+    }
+    return this.lastKnownSelfDnsName
+  }
+
+  async queryStatus(forceRefresh = false): Promise<TailscaleStatus | null> {
+    const at = this.now()
+    if (!forceRefresh && this.status && at - this.status.at <= TAILSCALE_NUDGE_LIMITS.statusFreshMs) {
+      if (this.status.selfDnsName) this.lastKnownSelfDnsName = this.status.selfDnsName
+      return this.status
+    }
+    if (this.statusRefreshInFlight) return this.statusRefreshInFlight
+    if (!this.ensureBin(at)) return this.status
+    this.statusRefreshInFlight = this.readStatus(at).then(parsed => {
+      if (parsed?.selfDnsName) this.lastKnownSelfDnsName = parsed.selfDnsName
+      return parsed ?? this.status
+    }).finally(() => {
+      this.statusRefreshInFlight = null
+    })
+    return this.statusRefreshInFlight
   }
 
   private async runEvent(pending: PendingEvent, at: number): Promise<void> {

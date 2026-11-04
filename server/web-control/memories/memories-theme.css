@@ -1,0 +1,73 @@
+/* Match the native COS tabs. WebKit follows the host appearance; browser previews follow the OS. */
+:root{--sidebar:#1d1711;--success-bg:#27271b;--graph-bg:#14100c}
+@media(prefers-color-scheme:light){
+  :root{--bg:#f5f0e6;--card:#ffffff;--raised:#eee8dd;--sidebar:#f0ece3;--fg:#30312e;--muted:#74726d;--line:#ded6c8;--accent:#89662d;--green:#2f7952;--purple:#7355a0;--red:#a54732;--success-bg:#e8eee4;--graph-bg:#faf8f3;color-scheme:light}
+  .cgx-result{border-bottom-color:var(--line)}
+  .cgx-panel{box-shadow:0 4px 14px rgba(31,23,18,.08)}
+}
+@media(prefers-color-scheme:dark){:root{color-scheme:dark}}
+input,textarea,select{color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:6px}
+.ask-card{margin-top:0;padding:20px}
+.ask-card h3{font:500 23px/1.25 var(--display)}
+.ask-card .setup-row input{background:var(--card);font-size:14px;padding:12px;min-width:160px}
+.ask-card .setup-row button{font-size:13px;padding:11px 18px}
+.ask-card .setup-answer{max-height:360px;overflow:auto;background:var(--bg)}
+.ask-card .ask-cards-title,.ask-card .ask-cards{display:none}
+.ask-card .ask-refs{margin-top:12px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--raised)}
+.ask-card .ask-refs h4{margin:0 0 8px;font:600 13px/1.3 var(--ui,system-ui)}
+.ask-card .ask-refs ol{margin:0;padding-left:1.3em}
+.ask-card .ask-refs li{margin:0 0 6px;font-size:13px;line-height:1.4}
+.ask-card a.ref,.ask-card .ask-refs .ref{color:var(--accent);text-decoration:none;font-variant-numeric:tabular-nums}
+.knowledge-health{margin-top:18px}
+.knowledge-health>summary,.investigation-tools>summary{cursor:pointer;font-size:13px;font-weight:600;padding:14px 0;color:var(--fg)}
+.memory-investigation>[data-role=canvas]{margin-top:8px}
+.memory-investigation>.investigation-tools{border-top:1px solid var(--line);margin-top:12px}
+.memory-investigation .source-card{margin-top:0}
+.memory-investigation .graph-search{flex-wrap:wrap;margin-bottom:12px}
+.graph-question-status{font-size:12px;color:var(--muted);margin-top:8px}
+.ask-card[aria-busy="true"] .setup-row button:disabled,.setup-row button:disabled:has(.ask-spin){display:inline-flex;align-items:center;gap:8px;opacity:1}
+.ask-spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--accent);animation:askspin .8s linear infinite;display:inline-block;flex-shrink:0}
+@keyframes askspin{to{transform:rotate(360deg)}}
+.ask-progress{display:flex;align-items:center;gap:10px;margin-top:12px;padding:10px 12px;border-radius:8px;background:var(--raised);border:1px solid var(--line);font-size:13px;color:var(--fg)}
+.ask-progress .ask-spin{width:16px;height:16px;margin:0}
+@media(prefers-reduced-motion:reduce){.ask-spin{animation:none;opacity:.7}}
+.owner-card input{flex:1;min-width:120px;padding:8px 10px}
+.owner-card p{margin:8px 0}
+@media(max-width:700px){.ask-card{padding:14px}.actual-header{flex-wrap:wrap}.ask-card .setup-row input{min-width:140px}.summary{flex-wrap:wrap;gap:5px 12px}}
+
+/* Learning modal sits above graph rail (z 15–50). Stage isolation keeps rail z-index inside the graph. */
+.cgx-stage{isolation:isolate}
+#modalRoot{position:relative;z-index:300}
+.modal-backdrop{position:fixed;inset:0;z-index:300;background:rgba(16,12,9,.84);-webkit-backdrop-filter:none;backdrop-filter:none;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal{position:relative;z-index:1;background:var(--card);isolation:isolate}
+body.modal-open .cgx-rail,
+body.modal-open .cgx-railtoggle,
+body.modal-open .cgx-pinned,
+body.modal-open .cgx-dp,
+body.modal-open .cgx-tip,
+body.modal-open .cgx-hint,
+body:has(#modalRoot .modal-backdrop) .cgx-rail,
+body:has(#modalRoot .modal-backdrop) .cgx-railtoggle,
+body:has(#modalRoot .modal-backdrop) .cgx-pinned,
+body:has(#modalRoot .modal-backdrop) .cgx-dp,
+body:has(#modalRoot .modal-backdrop) .cgx-tip,
+body:has(#modalRoot .modal-backdrop) .cgx-hint{visibility:hidden;pointer-events:none}
+
+button.hairline{background:var(--card);border:1px solid var(--line);color:var(--fg)}
+.sync-card .ingest-control{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;margin-left:6px;vertical-align:middle}
+.sync-card .ingest-pending{font-weight:650;color:var(--fg)}
+.sync-card .ingest-control label{font-size:10px;color:var(--muted);letter-spacing:.03em}
+.sync-card .ingest-control button.hairline{font-size:10px;padding:3px 8px;border:1px solid var(--line);background:var(--card)}
+
+/* 0.5.217: the Applied row's excerpt is a sentence, not a status word; clamp it. */
+.lesson .status.excerpt{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal;line-height:1.35}
+.date.row.spread .link{font-size:10px;text-transform:none;letter-spacing:0}
+/* COS Control Web: the browser shell sets data-theme on this page so a Light/Dark choice in
+   Settings wins over the device appearance. Values copy the two blocks above. */
+:root[data-theme=light]{--bg:#f5f0e6;--card:#ffffff;--raised:#eee8dd;--sidebar:#f0ece3;--fg:#30312e;--muted:#74726d;--line:#ded6c8;--accent:#89662d;--green:#2f7952;--purple:#7355a0;--red:#a54732;--success-bg:#e8eee4;--graph-bg:#faf8f3;color-scheme:light}
+:root[data-theme=dark]{--bg:#17120d;--card:#261d16;--raised:#30271f;--fg:#f5f0e6;--muted:#bbae9a;--line:#473a2c;--accent:#c9a86e;--green:#92c6a1;--purple:#c3b0e7;--red:#e8a494;--sidebar:#1d1711;--success-bg:#27271b;--graph-bg:#14100c;color-scheme:dark}
+/* COS Control Web on a phone: the browser shell's top bar already says "Memories", so the page
+   drops its own title and tagline there and keeps the settings button and the summary. The shell
+   sets data-host=web-phone only below 600px; the Mac app never sets it. */
+:root[data-host=web-phone] .heading h1,:root[data-host=web-phone] .heading .row.spread > div > p{display:none}
+:root[data-host=web-phone] .heading .row.spread{justify-content:flex-end}
