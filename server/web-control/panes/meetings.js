@@ -1951,12 +1951,49 @@
     S.turnsDirty = false;
     var f = S.feeds[S.liveSid]; if (!f) return;
     var hours = f.turns.some(function (t) { return t.elapsedMs >= 3600000; });
-    el.innerHTML = f.turns.length ? f.turns.map(function (t) {
-      return '<div class="mt-lturn" data-turn="' + t.id + '"><div class="mt-lwho"><span class="mt-lname">' + esc(t.speaker) + '</span><span class="mt-lstamp">' + esc(stampMs(t.elapsedMs, hours)) + '</span></div>' +
-        t.text.split(/\n{2,}/).map(function (p) { return '<p>' + esc(p) + '</p>'; }).join('') + '</div>';
-    }).join('') : '<p class="mt-lempty">' + esc(f.endedAt ? 'No words were transcribed before the recording ended.' : 'Waiting for the first words. Text appears a few seconds after it is spoken.') + '</p>';
-    if (S.follow) jumpToLive(); else paintLiveFoot();
+    // Reading (not following): hold what is on screen still while turns above it are refined or new ones arrive.
+    var anchor = S.follow ? null : turnsAnchor(el);
+    if (!f.turns.length) {
+      el.innerHTML = '<p class="mt-lempty">' + esc(f.endedAt ? 'No words were transcribed before the recording ended.' : 'Waiting for the first words. Text appears a few seconds after it is spoken.') + '</p>';
+    } else {
+      // Patch in place: only a turn whose words changed is rewritten, new turns are appended, so nothing else reflows.
+      var empty = el.querySelector('.mt-lempty'); if (empty) empty.remove();
+      var have = {}, want = {};
+      Array.prototype.forEach.call(el.children, function (n) { var id = n.getAttribute('data-turn'); if (id != null) have[id] = n; });
+      f.turns.forEach(function (t) { want[String(t.id)] = 1; });
+      Object.keys(have).forEach(function (id) { if (!want[id]) have[id].remove(); });
+      var prev = null;
+      f.turns.forEach(function (t) {
+        var id = String(t.id), html = turnInner(t, hours), node = have[id];
+        if (!node) { node = document.createElement('div'); node.className = 'mt-lturn'; node.setAttribute('data-turn', id); }
+        if (node.__cosHtml !== html) { node.innerHTML = html; node.__cosHtml = html; }
+        var at = prev ? prev.nextSibling : el.firstChild;
+        if (node !== at) el.insertBefore(node, at);
+        prev = node;
+      });
+    }
+    if (S.follow) jumpToLive(); else { holdAnchor(anchor); paintLiveFoot(); }
     repaintAskEnabled(f.sid);
+  }
+  function turnInner(t, hours) {
+    return '<div class="mt-lwho"><span class="mt-lname">' + esc(t.speaker) + '</span><span class="mt-lstamp">' + esc(stampMs(t.elapsedMs, hours)) + '</span></div>' +
+      t.text.split(/\n{2,}/).map(function (p) { return '<p>' + esc(p) + '</p>'; }).join('');
+  }
+  // iOS Safari has no scroll anchoring. The anchor is the first turn still on screen; when every turn is above the
+  // screen (reading Ask under the transcript) it is the transcript's bottom edge, so the panel below holds still.
+  function turnsAnchor(el) {
+    var kids = el.children;
+    for (var i = 0; i < kids.length; i++) {
+      var r = kids[i].getBoundingClientRect();
+      if (r.bottom > 0) return r.top >= window.innerHeight ? null : { node: kids[i], top: r.top };
+    }
+    return kids.length ? { node: el, edge: true, top: el.getBoundingClientRect().bottom } : null;
+  }
+  function holdAnchor(a) {
+    if (!a || !a.node.isConnected) return;
+    var now = a.edge ? a.node.getBoundingClientRect().bottom : a.node.getBoundingClientRect().top;
+    var dy = now - a.top;
+    if (Math.abs(dy) >= 1) { S.autoScroll = Date.now(); window.scrollBy(0, dy); }
   }
   // A question needs words: the panel's buttons follow the transcript's first turn.
   function repaintAskEnabled(sid) {
@@ -1999,7 +2036,9 @@
     if (S.view !== 'live' || Date.now() - (S.autoScroll || 0) < 600) return;
     var el = $('mt-turns'), last = el && el.lastElementChild;
     if (!last) return;
-    var atEnd = last.getBoundingClientRect().bottom <= window.innerHeight + 40;
+    // Following means the end of the transcript is on screen. Scrolled past it (reading Ask below) is not following:
+    // a new chunk must not pull the reader back up.
+    var b = last.getBoundingClientRect().bottom, atEnd = b <= window.innerHeight + 40 && b >= 0;
     if (atEnd !== S.follow) { S.follow = atEnd; paintLiveFoot(); if (atEnd && S.turnsDirty) paintTurns(false); }
   }
 
