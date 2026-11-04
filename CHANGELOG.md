@@ -4,6 +4,7 @@
 
 - A live meeting (a G2 meeting or a Mac recording) can be renamed while it records: `GET` and `PUT /api/meeting/title-steer`. The name is kept across a server restart, a second client editing at the same time is told the name changed, and the name text is never logged.
 - When the meeting saves without a title of its own, the name you gave becomes its title and helps file it in the right domain. It is also saved as a title steer, so the meeting sync names the meeting from your words and sharpens them, instead of starting from "Mac recording 9:05 PM".
+- A placeholder title such as "Mac recording 9:05 PM" never beats a name you gave; a real title sent with the save still wins. A rename sent while the meeting is saving is refused (409 `save_in_progress`) instead of being lost.
 - The live meeting file Control reads carries the name as soon as you change it. `capabilities.titleSteer` says a server supports it.
 - Live cues per meeting can be set up to 50 (was 25) in COS Control or the phone. The default stays 25. A meeting at 50 can use up to 100 of the 150 daily writer calls.
 - `GET /live-cues/history` now reports the per-meeting cap you set, not a fixed 25.
