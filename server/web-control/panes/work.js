@@ -1535,6 +1535,8 @@
       render();
     },
     leave: function () { stopPoll(); },
+    // The Ask sheet's "Find a task about this": open the board on this query and ask by meaning.
+    search: function (q) { S.q = String(q || ''); S.tab = 'board'; render(); searchMeaning(); },
     // Back unwinds one step: Start work and Edit go to the card, the card to the list.
     up: function (args) { return args.length >= 2 ? [args[0]] : null; }
   });

@@ -2390,8 +2390,9 @@
     if (action === 'ask-cos' && q) { askCos(q, $('ask-status')).then(function () { closeAsk(); go('messages'); }).catch(function () {}); return; }
     if (action === 'ask-meaning' && q) { $('ask-hits').innerHTML = skeletonRows(3); findByMeaning(q).then(function (html) { var el = $('ask-hits'); if (el) el.innerHTML = html; }); return; }
     if (action === 'ask-work' && q) {
-      closeAsk(); go('work'); $('work-q').value = q;
-      api('/api/work/search', { method: 'POST', body: { query: q } }).then(function (d) { if (d && Array.isArray(d.results)) renderWork(d.results.map(function (r) { return r.id; })); }).catch(function () {});
+      closeAsk(); go('work');
+      // The Work pane (panes/work.js) owns its search box; hand it the query.
+      if (PANES.work && PANES.work.search) PANES.work.search(q);
     }
   });
 
