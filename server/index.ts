@@ -200,6 +200,7 @@ import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
 import { createWebControlRouter, isAllowedCorsOrigin, webControlCsp, webControlEnabled } from './routes/web-control.js'
 import { isWebControlSocketAllowed, setWebSessionEpochFile } from './lib/web-session-auth.js'
+import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -280,7 +281,7 @@ app.use(cors({
     if (!origin || origin === 'null') return cb(null, true)
     // Async only for an unrecognised *.ts.net origin (see isAllowedCorsOrigin); every other
     // origin is decided from cached state, as before.
-    isAllowedCorsOrigin(origin, getTailscaleNudger()).then(
+    isAllowedCorsOrigin(origin, getTailnetSelfName()).then(
       ok => ok ? cb(null, true) : cb(new Error('CORS blocked')),
       () => cb(new Error('CORS blocked')),
     )
@@ -373,9 +374,11 @@ const pairingState = new PairingState({
 // request that arrives proves the tunnel carries COS traffic. Authenticated ones also mark the
 // address as a paired phone. Notes only, never answers; noteRequest never throws.
 const tailscaleNudger = installTailscaleNudger({ activeMeetings: () => getActiveTranscriptionSessionCount() })
-// COS Control Web: learn this Mac's MagicDNS name at boot so the first phone sign-in on the
-// tailnet URL is not refused while the nudger's own tick has yet to read status.
-if (webControlEnabled()) void tailscaleNudger.queryStatus().catch(() => null)
+// COS Control Web: this Mac's MagicDNS name, from the nudger when it has one and otherwise
+// from a reverse lookup at MagicDNS (the CLI does not answer under this LaunchAgent; see
+// lib/tailnet-self-name.ts). Learned at boot so the first phone sign-in is not refused.
+const tailnetSelf = installTailnetSelfName({ nudgerName: () => tailscaleNudger.currentSelfDnsName() })
+if (webControlEnabled()) void tailnetSelf.refresh()
 // Browser sessions sign this Mac's session epoch; "Sign out every browser" bumps it.
 setWebSessionEpochFile(dataPath('web-session.json'))
 app.use('/api', (req, _res, next) => {
@@ -385,7 +388,7 @@ app.use('/api', (req, _res, next) => {
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT ?? '3143', 10)
 app.use('/api', requireApiToken(API_TOKEN, {
   onAuthenticated: req => pairingState.noteAuthenticated(req.socket?.remoteAddress),
-  selfDnsName: () => tailscaleNudger.currentSelfDnsName(),
+  selfDnsName: () => tailnetSelf.currentSelfDnsName(),
   allowedPorts: () => [PORT, HTTPS_PORT],
 }))
 // Past the token gate, a request on a non-public path carried the token: mark a paired phone.
@@ -1398,7 +1401,11 @@ if (webControlEnabled()) {
     serverVersion: () => managedServerVersion() ?? 'unknown',
     port: () => PORT,
     httpsPort: () => existsSync(path.join(__dirname, 'certs', 'cert.pem')) ? HTTPS_PORT : null,
-    selfDnsName: () => tailscaleNudger.currentSelfDnsName(),
+    selfDnsName: () => tailnetSelf.currentSelfDnsName(),
+    queryTailscaleStatus: async () => {
+      const name = await tailnetSelf.refresh()
+      return name ? { backendState: 'Running', selfIps: [], selfDnsName: name, certDomains: [] } : null
+    },
   }))
 }
 /**

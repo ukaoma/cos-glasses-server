@@ -14,7 +14,7 @@ import {
 import { type DisplayTicketVerdict, explainDisplayTicket } from '../lib/display-ticket.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { isWebSessionAuthorized } from '../lib/web-session-auth.js'
-import { getTailscaleNudger } from '../lib/tailscale-nudge.js'
+import { getTailnetSelfName } from '../lib/tailnet-self-name.js'
 
 export const displayRouter = Router()
 
@@ -191,7 +191,7 @@ function headerAuthorized(req: Request): boolean {
   const port = Number.parseInt(process.env.PORT ?? '3141', 10)
   const httpsPort = Number.parseInt(process.env.HTTPS_PORT ?? '3143', 10)
   return isWebSessionAuthorized(req, apiToken, {
-    selfDnsName: getTailscaleNudger().currentSelfDnsName(),
+    selfDnsName: getTailnetSelfName().currentSelfDnsName(),
     allowedPorts: [port, httpsPort],
   })
 }
