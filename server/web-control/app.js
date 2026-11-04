@@ -585,8 +585,9 @@
         var t = toDate(m.timestamp);
         var q = String(m.query || '').trim(), a = String(m.text || m.content || '').trim();
         return (q ? '<div class="turn user"><span class="who">You' + (t ? ', ' + esc(clock(t)) : '') + '</span>' + esc(q) + '</div>' : '') +
-          (a ? '<div class="turn assistant"><span class="who">COS</span>' + esc(a) + '</div>' : '');
+          (a ? '<div class="turn assistant"><span class="who">COS</span>' + md(a) + '</div>' : '');
       }).join('');
+      if (msgs.length && !state.messagesSeen) { state.messagesSeen = true; requestAnimationFrame(function () { window.scrollTo(0, $('messages-form').offsetTop - 120); }); }
     }).catch(function (err) { list.innerHTML = emptyBox('Messages did not load', err.message); });
     api('/api/threads?limit=30').then(function (d) {
       var threads = ((d && d.threads) || []).filter(function (t) { return !t.is_resolved; });
@@ -609,7 +610,13 @@
     var frame = $('memories-frame'); if (!frame) return;
     var mode = window.CosTheme ? window.CosTheme.mode() : 'light';
     frame.style.colorScheme = mode;
-    try { if (frame.contentDocument && frame.contentDocument.documentElement) frame.contentDocument.documentElement.setAttribute('data-theme', mode); } catch (_e) {}
+    try {
+      var root = frame.contentDocument && frame.contentDocument.documentElement;
+      if (root) {
+        root.setAttribute('data-theme', mode);
+        if (isPhone()) root.setAttribute('data-host', 'web-phone'); else root.removeAttribute('data-host');
+      }
+    } catch (_e) {}
   }
   function loadMemories() {
     var frame = $('memories-frame');
@@ -659,6 +666,10 @@
   }
 
   // ── Usage ───────────────────────────────────────────────
+  function categoryLabel(id) {
+    var words = String(id || 'Other').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase();
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  }
   function money(n) { return '$' + (Number(n) || 0).toFixed(Number(n) >= 100 ? 0 : 2); }
   function loadUsage(force) {
     var box = $('usage-body');
@@ -673,7 +684,7 @@
       if (rows.length) {
         html += '<h2 class="group-title"><span>Where it went</span></h2><div class="list">' + rows.slice(0, 12).map(function (r) {
           var pct = Math.round(((Number(r.estimatedUSD) || 0) / max) * 100);
-          return '<div class="row"><span class="row-title">' + esc(r.category) + '</span><span class="row-side">' + esc(money(r.estimatedUSD)) + '</span>' +
+          return '<div class="row"><span class="row-title">' + esc(categoryLabel(r.category)) + '</span><span class="row-side">' + esc(money(r.estimatedUSD)) + '</span>' +
             '<span class="row-sub">' + esc((r.calls || 0).toLocaleString() + ' calls') + '</span><span class="meter"><span style="width:' + pct + '%"></span></span></div>';
         }).join('') + '</div>';
       }
@@ -882,6 +893,8 @@
     });
   });
   window.addEventListener('hashchange', route);
+  // Folding or unfolding the Duo crosses the 600px line: keep the hosted Memories page in step.
+  window.matchMedia('(min-width: 600px)').addEventListener('change', syncFrameTheme);
   window.addEventListener('scroll', onScroll, { passive: true });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden || $('app-shell').classList.contains('hidden')) return;

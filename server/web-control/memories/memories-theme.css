@@ -66,3 +66,8 @@ button.hairline{background:var(--card);border:1px solid var(--line);color:var(--
    Settings wins over the device appearance. Values copy the two blocks above. */
 :root[data-theme=light]{--bg:#f5f0e6;--card:#ffffff;--raised:#eee8dd;--sidebar:#f0ece3;--fg:#30312e;--muted:#74726d;--line:#ded6c8;--accent:#89662d;--green:#2f7952;--purple:#7355a0;--red:#a54732;--success-bg:#e8eee4;--graph-bg:#faf8f3;color-scheme:light}
 :root[data-theme=dark]{--bg:#17120d;--card:#261d16;--raised:#30271f;--fg:#f5f0e6;--muted:#bbae9a;--line:#473a2c;--accent:#c9a86e;--green:#92c6a1;--purple:#c3b0e7;--red:#e8a494;--sidebar:#1d1711;--success-bg:#27271b;--graph-bg:#14100c;color-scheme:dark}
+/* COS Control Web on a phone: the browser shell's top bar already says "Memories", so the page
+   drops its own title and tagline there and keeps the settings button and the summary. The shell
+   sets data-host=web-phone only below 600px; the Mac app never sets it. */
+:root[data-host=web-phone] .heading h1,:root[data-host=web-phone] .heading .row.spread > div > p{display:none}
+:root[data-host=web-phone] .heading .row.spread{justify-content:flex-end}
