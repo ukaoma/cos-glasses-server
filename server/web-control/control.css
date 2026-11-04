@@ -168,7 +168,8 @@
 /* Crossing line: "Recent 3 · Archive 2 days ->". */
 .cx-cross { font-size: 12.5px; color: var(--sub); margin: -2px 0 10px; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
 .cx-cross .door { color: var(--gold); font-weight: 600; }
-.cx-cross .door::after { content: ' →'; }
+.cx-cross .door { display: inline-flex; align-items: center; gap: 2px; }
+.cx-cross .door .icon { width: 12px; height: 12px; }
 
 /* ── rows ─────────────────────────────────────────────── */
 .cx-list { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 14px; overflow: hidden; }
