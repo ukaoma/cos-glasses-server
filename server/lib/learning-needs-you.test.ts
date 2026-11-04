@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createNeedsYouReader, needsYouCount, NEEDS_YOU_TIMEOUT_MS, NEEDS_YOU_TTL_MS, parseJsonObject } from './learning-needs-you.js'
+import { createNeedsYouReader, needsYouCount, NEEDS_YOU_STALE_FLAG_LIMIT_MS, NEEDS_YOU_TIMEOUT_MS, NEEDS_YOU_TTL_MS, parseJsonObject } from './learning-needs-you.js'
 import { dispatchMemoriesWebOp } from './web-memories-bridge.js'
 
 function scriptsDir(): string {
@@ -68,6 +68,35 @@ describe('needs-you count for the web Memories page', () => {
     expect(needsYouCount(null)).toBeNull()
     expect(needsYouCount({ items: [1, 2, 3] })).toBe(3)
     expect(needsYouCount({ count: 4 })).toBe(4)
+  })
+
+  it('matches Control: 90 s and one hour, never caches a failure, falls back to the last good count', async () => {
+    // Control's helper constants (main.swift 10969-10970), pinned here so a change is deliberate.
+    expect(NEEDS_YOU_TTL_MS).toBe(90_000)
+    expect(NEEDS_YOU_STALE_FLAG_LIMIT_MS).toBe(3_600_000)
+    expect(NEEDS_YOU_TIMEOUT_MS).toBe(10_000)
+    const dir = scriptsDir()
+    let clock = 0
+    let mode: 'ok' | 'fail' = 'ok'
+    let runs = 0
+    try {
+      const reader = createNeedsYouReader({ scriptsDir: dir, now: () => clock, run: async () => { runs += 1; return mode === 'ok' ? { code: 0, stdout: '{"count": 9, "limit": 7, "reward_enabled": true}' } : { code: 1, stdout: '' } } })
+      expect(await reader.read()).toEqual({ count: 9, limit: 7, reward_enabled: true })
+      mode = 'fail'
+      clock += NEEDS_YOU_TTL_MS + 1
+      // A failed read returns the last good block and is not cached: the next read tries again.
+      expect(await reader.read()).toEqual({ count: 9, limit: 7, reward_enabled: true })
+      expect(await reader.read()).toEqual({ count: 9, limit: 7, reward_enabled: true })
+      expect(runs).toBe(3)
+      // Past an hour the stale block keeps its count but loses the reward flag.
+      clock = NEEDS_YOU_STALE_FLAG_LIMIT_MS + 1
+      expect(await reader.read()).toEqual({ count: 9, limit: 7 })
+      // Recovery replaces the stale block.
+      mode = 'ok'
+      expect(await reader.read()).toEqual({ count: 9, limit: 7, reward_enabled: true })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('bridge status carries a number or null as learningToReview, never the to_review object', async () => {

@@ -213,6 +213,7 @@
     render();
     api('/api/sessions/today/all-messages?limit=30').then(function (d) {
       var list = (d && d.messages) || [];
+      S.recentAt = Date.now();
       S.recent = list.slice().reverse();
       S.recentDate = (d && d.date) || '';
       S.recentState = 'ready';
@@ -263,7 +264,12 @@
   function loadDay(date) {
     if (S.dayCache[date]) return Promise.resolve(S.dayCache[date]);
     if (dayLoading[date]) return dayLoading[date];
-    dayLoading[date] = api('/api/archive/' + encodeURIComponent(date)).then(function (d) { S.dayCache[date] = d; return d; })
+    dayLoading[date] = api('/api/archive/' + encodeURIComponent(date)).then(function (d) {
+      // A day can be megabytes: keep the three most recent opened days only.
+      S.dayCache[date] = d;
+      var keys = Object.keys(S.dayCache); if (keys.length > 3) delete S.dayCache[keys[0]];
+      return d;
+    })
       .finally(function () { delete dayLoading[date]; });
     return dayLoading[date];
   }
@@ -559,7 +565,9 @@
     current = args || [];
     if (!current.length || current[0] === 'archive') {
       S.view = current[0] === 'archive' ? 'archive' : 'recent';
-      loadRecent(false);
+      // Older than a minute: refetch quietly, with the rows still on screen (the rail's "Last
+      // from the glasses" line refreshes too, and the two must not disagree).
+      loadRecent(!!S.recent && Date.now() - (S.recentAt || 0) > 60000);
       if (S.view === 'archive') loadDays(false);
       renderList();
     } else if (current[0] === 'm') renderMessage(current[1], current[2] === 'a' ? current[3] : null);

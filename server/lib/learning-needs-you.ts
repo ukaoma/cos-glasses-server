@@ -14,7 +14,10 @@ import { join } from 'node:path'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
 
 export const NEEDS_YOU_TIMEOUT_MS = 10_000
+/** Control: needsYouCacheTTL = 90 s (HelperSources main.swift 10969). */
 export const NEEDS_YOU_TTL_MS = 90_000
+/** Control: needsYouStaleFlagLimit = 3600 s (main.swift 10970): an older stale block loses reward_enabled. */
+export const NEEDS_YOU_STALE_FLAG_LIMIT_MS = 3_600_000
 const KEYS = ['count', 'gates', 'system_backlog', 'window_days', 'limit', 'partial', 'not_implemented', 'items', 'overflow', 'reward_enabled'] as const
 
 export type NeedsYouBlock = Partial<Record<(typeof KEYS)[number], unknown>>
@@ -61,7 +64,10 @@ function defaultRun(file: string, args: string[], timeoutMs: number): Promise<{ 
 export function createNeedsYouReader(deps: NeedsYouDeps = {}) {
   const now = deps.now ?? (() => Date.now())
   const run = deps.run ?? defaultRun
-  let cached: { at: number; block: NeedsYouBlock | null } | null = null
+  // Only a good read is kept (Control's fetchNeedsYouBlock, main.swift 10987-11001): a failed
+  // read is never cached, and falls back to the last good block, which drops reward_enabled
+  // once it is older than an hour so a stale flag cannot keep the ranking sentence alive.
+  let good: { at: number; block: NeedsYouBlock } | null = null
   let inflight: Promise<NeedsYouBlock | null> | null = null
 
   async function readOnce(): Promise<NeedsYouBlock | null> {
@@ -79,13 +85,19 @@ export function createNeedsYouReader(deps: NeedsYouDeps = {}) {
     return Object.keys(block).length ? block : null
   }
 
-  /** The block, from cache when it is under NEEDS_YOU_TTL_MS old; single flight; never throws. */
+  function stale(): NeedsYouBlock | null {
+    if (!good) return null
+    const block: NeedsYouBlock = { ...good.block }
+    if (now() - good.at > NEEDS_YOU_STALE_FLAG_LIMIT_MS) delete block.reward_enabled
+    return block
+  }
+  /** A fresh block under NEEDS_YOU_TTL_MS old, else a new read, else the last good block; single flight; never throws. */
   function read(): Promise<NeedsYouBlock | null> {
-    if (cached && now() - cached.at < NEEDS_YOU_TTL_MS) return Promise.resolve(cached.block)
+    if (good && now() - good.at < NEEDS_YOU_TTL_MS) return Promise.resolve(good.block)
     if (inflight) return inflight
     inflight = readOnce().catch(() => null).then(block => {
-      cached = { at: now(), block }
-      return block
+      if (block) { good = { at: now(), block }; return block }
+      return stale()
     }).finally(() => { inflight = null })
     return inflight
   }
