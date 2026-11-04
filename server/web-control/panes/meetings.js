@@ -456,6 +456,16 @@
   }
   function rowKey(m) { return [m.domain || '', m.month || '', m.filename || ''].join('|'); }
 
+  // iOS Safari has no scroll anchoring: a box above the reader that grows or shrinks would move the rows under the
+  // finger. Paint only when the HTML changed, and when the box starts above the viewport keep the toolbar where it was.
+  function paintAbove(el, key, html) {
+    if (!el || S[key] === html) return;
+    var ref = $('mt-toolbar'), top = el.getBoundingClientRect().top;
+    var keep = ref && window.scrollY > 0 && top < 0, before = keep ? ref.getBoundingClientRect().top : 0;
+    S[key] = html; el.innerHTML = html;
+    if (keep) { var moved = ref.getBoundingClientRect().top - before; if (moved) window.scrollBy(0, moved); }
+  }
+
   // ── list: hero ────────────────────────────────────────
   function paintHero() {
     var el = $('mt-hero'); if (!el) return;
@@ -467,11 +477,11 @@
       var withCalls = S.days.filter(function (d) { return num(d.count) > 0; }).length;
       if (withCalls > 0) stats.push([fmtCount(withCalls), 'DAYS WITH CALLS']);
     }
-    el.innerHTML = '<header class="cx-hero" data-tint="meetings"><span class="cx-glyph">' + icon('meetings') + '</span>' +
+    paintAbove(el, 'heroHtml', '<header class="cx-hero" data-tint="meetings"><span class="cx-glyph">' + icon('meetings') + '</span>' +
       '<div class="cx-hero-text"><h1 class="cx-title">Meetings</h1><p class="cx-detail-line">' + esc(detail) + '</p></div>' +
       '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-mt="refresh"' + (S.loading ? ' disabled' : '') + '>' + icon('refresh') + 'Refresh</button></div>' +
       (stats.length ? '<div class="cx-stats">' + stats.map(function (s) { return '<span class="cx-stat"><b>' + esc(s[0]) + '</b><span>' + esc(s[1]) + '</span></span>'; }).join('') + '</div>' : '') +
-      '</header>';
+      '</header>');
   }
 
   // ── list: month calendar (MeetingMonthCalendar) ───────
@@ -485,8 +495,8 @@
   }
   function paintCal() {
     var el = $('mt-cal'); if (!el) return;
-    if (queryActive()) { el.innerHTML = ''; return; }
-    var start = parseMonth(S.month); if (!start) { el.innerHTML = ''; return; }
+    if (queryActive()) { paintAbove(el, 'calHtml', ''); return; }
+    var start = parseMonth(S.month); if (!start) { paintAbove(el, 'calHtml', ''); return; }
     var counts = {}; S.days.forEach(function (d) { counts[d.date] = num(d.count); });
     var ws = weekStart(), lead = (start.getDay() - ws + 7) % 7;
     var dim = new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate();
@@ -501,12 +511,12 @@
       n++;
     }
     while (n % 7 !== 0) { cells += '<span class="mt-blank"></span>'; n++; }
-    el.innerHTML = '<section class="mt-cal" aria-label="' + esc(monthTitle(S.month)) + '"><div class="mt-cal-head">' +
+    paintAbove(el, 'calHtml', '<section class="mt-cal" aria-label="' + esc(monthTitle(S.month)) + '"><div class="mt-cal-head">' +
       '<button type="button" class="mt-nav" data-mt="month" data-delta="-1" aria-label="Previous month">' + icon('back') + '</button>' +
       '<span class="mt-cal-title">' + esc(monthTitle(S.month)) + '</span>' +
       '<button type="button" class="mt-nav next" data-mt="month" data-delta="1" aria-label="Next month">' + icon('chev') + '</button></div>' +
       '<div class="mt-grid">' + heads + cells + '</div>' +
-      (S.day ? '<button type="button" class="cx-btn quiet mt-all" data-mt="all-month">All month</button>' : '') + '</section>';
+      (S.day ? '<button type="button" class="cx-btn quiet mt-all" data-mt="all-month">All month</button>' : '') + '</section>');
   }
 
   // ── list: toolbar ─────────────────────────────────────
@@ -531,9 +541,10 @@
     var active = queryActive(), slot = $('mt-domain');
     if (slot) {
       var opts = domainOptions();
-      slot.innerHTML = opts.length + 1 > 2 || active
+      var dom = opts.length + 1 > 2 || active
         ? '<select class="mt-select" id="mt-dom" aria-label="Domain"><option value="all">All domains</option>' + opts.map(function (d) { return '<option value="' + esc(d) + '"' + (S.domain === d ? ' selected' : '') + '>' + esc(cap(d)) + '</option>'; }).join('') + '</select>'
         : '';
+      if (S.domHtml !== dom) { S.domHtml = dom; slot.innerHTML = dom; }
     }
     var count = $('mt-count');
     if (count) {
@@ -570,7 +581,7 @@
       else if (S.searchError && !hits.length) html = emptyBox(S.searchError);
       else if (!hits.length) html = S.ranFor === S.q.trim() ? emptyBox('No meetings match that lookup.') : '<p class="cx-note mt-wait">Looking up…</p>';
       else html = '<div class="cx-list">' + hits.map(function (h) { return rowHtml(h, true); }).join('') + '</div>';
-    } else if (S.loading && !(S.rows || []).length) {
+    } else if (S.loading && !S.rows) {
       html = '<p class="cx-note mt-wait">Loading meetings…</p>' + W.skeletonRows(6);
     } else if (S.error && !(S.rows || []).length) {
       html = emptyBox(S.error);
@@ -579,14 +590,25 @@
       html = rows.length ? '<div class="cx-list">' + rows.map(function (m) { return rowHtml(m, false); }).join('') + '</div>'
         : emptyBox(S.day ? 'No meetings stored on ' + S.day + '. Pick another day, or show the whole month.' : 'No meetings stored in ' + monthTitle(S.month) + '.');
     }
-    el.innerHTML = html;
+    if (S.listHtml === html) return;
+    // Keep the row under the reader still while rows above it change height (pills arriving, a reload).
+    var anchor = null, at = 0;
+    if (window.scrollY > 0) {
+      var rows = el.querySelectorAll('.cx-row[data-key]');
+      for (var i = 0; i < rows.length; i++) { var r = rows[i].getBoundingClientRect(); if (r.bottom > 0) { anchor = rows[i].getAttribute('data-key'); at = r.top; break; } }
+    }
+    S.listHtml = html; el.innerHTML = html;
+    if (anchor) {
+      var again = el.querySelector('.cx-row[data-key="' + anchor.replace(/["\\]/g, '\\$&') + '"]');
+      if (again) { var moved = again.getBoundingClientRect().top - at; if (moved) window.scrollBy(0, moved); }
+    }
   }
   function paintBrowse() { paintHero(); paintCal(); paintToolbarBits(); paintList(); }
 
-  function loadMonth() {
+  // quiet: a background reload (a meeting finished saving). The rows stay on screen and nothing says Loading.
+  function loadMonth(quiet) {
     var id = ++S.loadSeq;
-    S.loading = true; S.dayRows = {};
-    if (S.view === 'list') paintBrowse();
+    if (!quiet) { S.loading = true; if (S.view === 'list') paintBrowse(); }
     api('/api/meetings?limit=200&domain=all&month=' + encodeURIComponent(S.month)).then(function (d) {
       if (id !== S.loadSeq) return;
       S.rows = (d && d.meetings) || [];
@@ -596,6 +618,8 @@
         days = Object.keys(counts).sort().map(function (k) { return { date: k, count: counts[k] }; });
       }
       S.days = days;
+      var kept = S.dayRows; S.dayRows = {};
+      if (S.day && kept[S.day]) S.dayRows[S.day] = kept[S.day];
       if (!S.autoDay && S.month === monthKey(new Date())) {
         var today = dayKey(new Date());
         if (days.some(function (x) { return x.date === today && num(x.count) > 0; })) S.day = today;
@@ -603,16 +627,19 @@
       }
       S.error = ''; S.loading = false;
       if (S.view === 'list') paintBrowse();
-      ensureDay();
+      ensureDay(quiet);
     }, function (err) {
       if (id !== S.loadSeq) return;
-      S.rows = []; S.error = (err && err.message) || 'Meetings could not be loaded.'; S.loading = false;
+      if (!S.rows || !quiet) S.rows = S.rows || [];
+      S.error = (err && err.message) || 'Meetings could not be loaded.'; S.loading = false;
       if (S.view === 'list') paintBrowse();
     });
   }
-  function ensureDay() {
+  // A saved meeting changes the month: reload it in place on the list, or on the way back to it.
+  function refreshRows() { if (S.view === 'list') loadMonth(true); else S.rowsStale = true; }
+  function ensureDay(again) {
     var day = S.day;
-    if (!day || !S.rows || S.rows.length < 200 || S.dayRows[day]) return;
+    if (!day || !S.rows || S.rows.length < 200 || (S.dayRows[day] && !again)) return;
     api('/api/meetings?limit=200&domain=all&day=' + encodeURIComponent(day)).then(function (d) {
       S.dayRows[day] = (d && d.meetings) || [];
       if (S.view === 'list' && S.day === day) paintBrowse();
@@ -621,7 +648,7 @@
   function shiftMonth(delta) {
     var d = parseMonth(S.month); if (!d) return;
     S.month = monthKey(new Date(d.getFullYear(), d.getMonth() + delta, 1));
-    S.day = null; S.rows = null; S.days = [];
+    S.day = null; S.rows = null; S.days = []; S.dayRows = {};
     loadMonth();
   }
   function runSearch() {
@@ -677,11 +704,16 @@
     var o = opts || {};
     var headers = { 'X-COS-Web': '1' };
     if (o.body !== undefined) headers['Content-Type'] = 'application/json';
-    return fetch(path, { method: o.method || 'GET', headers: headers, credentials: 'same-origin', body: o.body !== undefined ? JSON.stringify(o.body) : undefined })
+    // A read gives up at 20 s, as W.api's do, so a stalled Mac never freezes a poll that waits on it.
+    var method = o.method || 'GET', ctrl = method === 'GET' && typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 20000) : null;
+    return fetch(path, { method: method, headers: headers, credentials: 'same-origin', body: o.body !== undefined ? JSON.stringify(o.body) : undefined, signal: ctrl ? ctrl.signal : undefined })
       .then(function (res) {
         if (res.status === 401) signedOut();
-        return res.text().then(function (t) { var b = null; try { b = t ? JSON.parse(t) : {}; } catch (_e) { b = null; } return { status: res.status, body: b || {}, json: b !== null }; });
-      }, function () { return { status: 0, body: {}, json: false }; });
+        return res.text().then(function (t) { clearTimeout(timer); var b = null; try { b = t ? JSON.parse(t) : {}; } catch (_e) { b = null; } return { status: res.status, body: b || {}, json: b !== null }; });
+      })
+      // Never rejects: a lost network, a timeout or a body cut off mid-read all read as status 0.
+      .catch(function () { clearTimeout(timer); return { status: 0, body: {}, json: false }; });
   }
 
   // ── live recordings (LiveTranscript.swift) ────────────
@@ -752,7 +784,7 @@
     else if (st === 'receipted') f.phase = 'ended';
     else if (f.leftover && st && st !== 'active') f.phase = 'ended';
     else f.phase = waited >= FINAL_DEADLINE_MS + (f.start ? Math.max(0, f.endedAt - f.start) / 12 : 0) ? 'notFoundYet' : 'finalizing';
-    if (f.phase === 'saved' && before !== 'saved' && f.seenLive && !f.leftover && S.view === 'list') { S.rows = null; loadMonth(); }
+    if (f.phase === 'saved' && before !== 'saved' && f.seenLive && !f.leftover) refreshRows();
   }
   // One read of a listed file for its start and last activity, without moving the transcript cursor.
   function probe(f) {
@@ -768,8 +800,10 @@
   }
   function strandedIds() { var out = {}; S.orphans.stranded.forEach(function (s) { out[s.sessionId] = 1; }); return out; }
   function pollFiles() {
-    if (document.hidden) return Promise.resolve();
+    if (document.hidden || S.filesBusy) return Promise.resolve();
+    S.filesBusy = true;
     return api('/api/meetings/live-chunks').then(function (d) {
+      S.filesBusy = false;
       var now = Date.now(), listed = {}, stranded = strandedIds();
       S.files = (d && d.sessions) || [];
       S.files.forEach(function (file) {
@@ -792,7 +826,7 @@
         }
       });
       liveChanged();
-    }, function () {});
+    }, function () { S.filesBusy = false; });
   }
   function liveRows(now) {
     var stranded = strandedIds(), out = [], seen = {};
@@ -855,7 +889,7 @@
     var html = rows.length || S.liveNote
       ? '<section class="mt-livebox">' + rows.map(function (r) { return liveRowHtml(r, now); }).join('') + (S.liveNote ? '<p class="mt-notice">' + esc(S.liveNote) + '</p>' : '') + '</section>'
       : '';
-    if (html !== S.liveHtml || !el.firstChild !== !html) { S.liveHtml = html; el.innerHTML = html; }
+    paintAbove(el, 'liveHtml', html);
   }
   function liveChanged() {
     if (S.view === 'list') paintLive();
@@ -873,7 +907,7 @@
       else if (a.status === 0) S.liveNote = 'Server stopped';
       else S.liveNote = (typeof b.error === 'string' && b.error) || (typeof b.reason === 'string' && b.reason) || 'Save failed (' + a.status + ')';
       liveChanged(); loadOrphans(); pollFiles();
-      if (a.status === 200 && S.view === 'list') { S.rows = null; loadMonth(); }
+      if (a.status === 200) refreshRows();
     });
   }
 
@@ -993,19 +1027,22 @@
     return shortId(s.sessionId) + ' · ' + idle + ' · ready to save';
   }
   function loadOrphans() {
+    if (S.orphansBusy) return Promise.resolve();
+    S.orphansBusy = true;
     return api('/api/meeting/orphans').then(function (d) {
+      S.orphansBusy = false;
       var O = S.orphans;
       O.recovering = (d && d.recovering) || [];
       O.items = ((d && d.items) || []).filter(function (o) { return o && o.sessionId; });
       O.stranded = ((d && d.stranded) || []).filter(function (s) { return s && s.sessionId; });
       O.loaded = true;
       if (S.view === 'list') { paintOrphans(); paintLive(); }
-    }, function () { /* quiet, as Control's loadOrphans(quiet: true) */ });
+    }, function () { S.orphansBusy = false; /* quiet, as Control's loadOrphans(quiet: true) */ });
   }
   function paintOrphans() {
     var el = $('mt-orphans'); if (!el) return;
     var O = S.orphans, rec = O.items.filter(orphanRecoverable), busy = O.busy;
-    if (!rec.length && !O.stranded.length) { el.innerHTML = O.notice ? '<p class="mt-notice">' + esc(O.notice) + '</p>' : ''; return; }
+    if (!rec.length && !O.stranded.length) { paintAbove(el, 'orphHtml', O.notice ? '<p class="mt-notice">' + esc(O.notice) + '</p>' : ''); return; }
     var html = '<section class="mt-orphans"><p class="mt-orphans-title">Unsaved recordings</p>' +
       '<p class="mt-orphans-line">Audio that never became a meeting. This is not Speakers’ Meetings to review.</p>';
     rec.forEach(function (o) {
@@ -1025,7 +1062,7 @@
     if (O.stranded.length > 1) html += '<div class="mt-orow"><button type="button" class="cx-btn quiet" data-mt="save-all-ask"' + (busy ? ' disabled' : '') + '>Save all still-live</button></div>';
     if (O.confirm === 'save-all') html += confirmCard('Save live recordings as meetings?', 'Ends each live glasses recording and saves it, like Stop on the phone. The files are kept.', 'save-all-yes', 'Save all', 'Cancel');
     if (O.notice) html += '<p class="mt-notice">' + esc(O.notice) + '</p>';
-    el.innerHTML = html + '</section>';
+    paintAbove(el, 'orphHtml', html + '</section>');
   }
   function recoverOne(sid) {
     return answer('/api/meeting/orphans/' + encodeURIComponent(sid) + '/recover', { method: 'POST', body: {} }).then(function (a) {
@@ -1056,7 +1093,7 @@
     run().then(function (text) {
       O.busy = false; O.notice = text; paintOrphans();
       loadOrphans(); pollFiles();
-      if (S.view === 'list') { S.rows = null; loadMonth(); }
+      refreshRows();
     });
   }
   function recoverAll() {
@@ -1810,7 +1847,7 @@
       f.lookupBusy = false;
       var hit = lists.reduce(function (all, l) { return all.concat(l); }, []).filter(function (m) { return m.sessionId === f.sid || (m.g2SessionIds || []).indexOf(f.sid) >= 0; })[0];
       if (hit && S.view === 'live' && S.liveSid === f.sid) {
-        S.rows = null;
+        S.rowsStale = true;
         location.replace('#/meetings/' + [hit.domain, hit.month, hit.filename].map(encodeURIComponent).join('/'));
       } else if (!hit && f.endedAt && now - (f.retryAt || f.endedAt) >= FINAL_DEADLINE_MS + (f.start ? Math.max(0, f.endedAt - f.start) / 12 : 0)) {
         f.notFound = true; paintLiveHead();
@@ -1912,7 +1949,7 @@
   // ── list shell ────────────────────────────────────────
   function renderList() {
     S.view = 'list';
-    S.liveHtml = null;
+    S.liveHtml = S.heroHtml = S.calHtml = S.listHtml = S.orphHtml = S.domHtml = null;
     pane.innerHTML = '<div class="cx mt" data-tint="meetings"><div id="mt-hero"></div><div id="mt-orphans"></div><div id="mt-live"></div>' +
       '<div id="mt-cal"></div><div id="mt-toolbar"></div><div id="mt-list"></div></div>';
     paintHero(); paintOrphans(); paintLive(); paintCal(); paintToolbar(); paintList();
@@ -1927,7 +1964,7 @@
     var act = t.getAttribute('data-mt'), sid = t.getAttribute('data-sid') || '', req = t.getAttribute('data-req') || '';
     var ex, a;
     switch (act) {
-      case 'refresh': S.rows = null; loadMonth(); loadOrphans(); pollFiles(); if (queryActive()) runSearch(); return;
+      case 'refresh': loadMonth(); ensureDay(true); loadOrphans(); pollFiles(); if (queryActive()) runSearch(); return;
       case 'month': shiftMonth(Number(t.getAttribute('data-delta')) || 0); return;
       case 'day': { var d = t.getAttribute('data-day'); S.day = S.day === d ? null : d; S.autoDay = true; paintBrowse(); ensureDay(); return; }
       case 'all-month': S.day = null; S.autoDay = true; paintBrowse(); return;
@@ -2042,6 +2079,7 @@
       if (args.length >= 3) { openDetail(args[0], args[1], args.slice(2).join('/')); return; }
       renderList();
       if (!S.rows && !S.loading) loadMonth();
+      else if (S.rowsStale && !S.loading) { S.rowsStale = false; loadMonth(true); }
       loadOrphans();
       loadInbox();
       pollFiles();
