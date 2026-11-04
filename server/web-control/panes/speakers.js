@@ -89,7 +89,7 @@
     return fetch(path, opts).then(function (res) {
       if (timer) clearTimeout(timer);
       if (res.status === 401) {
-        if (W.showAuth) W.showAuth(); else W.api('/api/voice/profiles').catch(function () {});
+        signedOut();
         var e = new Error('Signed out. Connect this browser again.'); e.status = 401; throw e;
       }
       if (res.status === 403) { var f = new Error('Unauthorized'); f.status = 403; throw f; }
@@ -104,8 +104,20 @@
         var late = new Error('Your Mac did not answer in ' + Math.round(limit / 1000) + ' seconds. Check that it is awake, then try again.');
         late.code = 'timeout'; throw late;
       }
-      throw new Error('Server stopped');
+      var off = new Error(OFFLINE); off.code = 'offline'; throw off;
     });
+  }
+  var OFFLINE = 'Could not reach your Mac. Check Tailscale on this phone and that the Mac is awake.';
+  // The server answered, but not with JSON (a proxy page, a crash): say that, never that it stopped.
+  function unreadable(r) { return new Error('The server answered ' + r.status + ' without a readable reply.'); }
+  // A 401 hands the page to the shell's sign-in and stops every timer here, so nothing polls a signed-out session.
+  function signedOut() {
+    S.signedOut = true;
+    if (S.peekTimer) { clearInterval(S.peekTimer); S.peekTimer = null; }
+    if (expiryTimer) { clearInterval(expiryTimer); expiryTimer = null; }
+    if (S.R && S.R.suggest.timer) { clearTimeout(S.R.suggest.timer); S.R.suggest.timer = null; S.R.suggest.running = false; }
+    stopPlayback();
+    if (W.showAuth) W.showAuth('Signed out. Connect this browser again.');
   }
   // A read that must answer 200 (speakerReviewBody): anything else throws the server's own sentence.
   function read(path, timeoutMs) {
@@ -302,7 +314,8 @@
       S.meetings = []; S.meetingsError = err.message || 'Meetings could not be loaded.';
     }).then(function () { S.meetingsLoading = false; render(); });
   }
-  // Quiet poll: never replaces the list while someone works it, only sets the Refresh cue.
+  // Quiet poll: never replaces or rebuilds the list while someone works it. It patches only the Refresh button
+  // (paintRefresh), the way Control changes only its refreshTitle and refreshProminent.
   function peek() {
     if (S.meetingsLoading || !S.meetings) return;
     read('/api/meetings?limit=30').then(function (d) {
@@ -315,7 +328,7 @@
   }
   function syncPeek() {
     var r = W.parseRoute();
-    var want = r.pane === 'speakers' && !r.args.length && S.view === 'meetings' && !document.hidden;
+    var want = !S.signedOut && r.pane === 'speakers' && !r.args.length && S.view === 'meetings' && !document.hidden;
     if (want && !S.peekTimer) S.peekTimer = setInterval(peek, 45000);
     if (!want && S.peekTimer) { clearInterval(S.peekTimer); S.peekTimer = null; }
   }
@@ -566,7 +579,7 @@
       var message = str(r.body.message) || str(r.body.error) || (r.status === 200 ? 'Naming receipt ready' : 'Naming refused (' + r.status + ')');
       return { message: message, receipt: parseReceipt(r.body, r.status) };
     }, function (err) {
-      if (err && err.message === 'Server stopped') throw new Error('Server stopped. Refresh to review any interrupted naming before retrying.');
+      if (err && err.code === 'offline') throw new Error(OFFLINE + ' Then refresh to review any interrupted naming before retrying.');
       throw err;
     });
   }
@@ -662,7 +675,7 @@
       var batch = members.slice(slice, slice + 200);
       return call('POST', '/api/voice/held-groups/discard', { members: membersPayload(batch), confirm: true }).then(function (r) {
         if (r.status === 404 && !(r.body && r.body.reason)) throw new Error(HELD_UPDATE('name held voices by group'));
-        if (!r.body) throw new Error('Server stopped');
+        if (!r.body) throw unreadable(r);
         if (r.status !== 200) throw new Error(str(r.body.error) || str(r.body.message) || 'Request failed (' + r.status + ')');
         removed += int(r.body.removed) || 0;
         slice += batch.length;
@@ -1137,8 +1150,9 @@
       if (suggestKey(R) !== before || !paintSuggest(R)) render();
       if (g.job && g.job.state === 'running') g.timer = setTimeout(function () { pollSuggestions(R, false, attempt + 1, 0); }, 1500);
       else g.running = false;
-    }, function () {
+    }, function (err) {
       if (!live(R)) return;
+      if (err && err.status === 401) { g.running = false; return; }
       if (failures + 1 < 3) { g.timer = setTimeout(function () { pollSuggestions(R, false, attempt + 1, failures + 1); }, 1500); return; }
       var before = suggestKey(R);
       if (g.probed) { g.note = SUG.didNotFinish; g.job = null; }
@@ -1221,7 +1235,7 @@
     var b = r.body;
     var unknownProfile = r.status === 404 && b && b.reason === 'unknown_profile';
     if (r.status === 404 && !unknownProfile) return { state: 'route_missing', httpStatus: 404, result: {} };
-    if (!b) throw new Error('Server stopped');
+    if (!b) throw unreadable(r);
     var notApplicable = r.status === 400 && ['not_a_voice_label', 'not_mac_capture'].indexOf(str(b.reason)) >= 0;
     var gated = r.status === 400 && !notApplicable;
     var pending = r.status === 409;
@@ -1239,7 +1253,7 @@
   // The global fold: 409 is the server refusing a below-floor merge, 400 its confirmation gate; both carry the report.
   function classifyMerge(r, confirmed) {
     var b = r.body;
-    if (!b) throw new Error('Server stopped');
+    if (!b) throw unreadable(r);
     var refused = r.status === 409, gated = r.status === 400;
     if (r.status !== 200 && !refused && !gated) throw new Error(serverMessage(b, r.status));
     var report = (b.report && typeof b.report === 'object') ? b.report : (b.preview && typeof b.preview === 'object') ? b.preview : b;
@@ -2696,6 +2710,7 @@
   // ── registration ───────────────────────────────────────
   W.registerPane('speakers', {
     load: function (args, ctx) {
+      S.signedOut = false;
       var a0 = (args || [])[0];
       if (a0 === 'meetings' || a0 === 'samples' || a0 === 'voices') {
         S.view = a0;
