@@ -75,13 +75,21 @@
 
   // Every write reads its status and body: a 400 confirmation gate, a 409 refusal and a 422 decline carry the
   // explanation the card shows, so they are answers, not transport errors. Same headers as W.api.
-  function call(method, path, body) {
+  // Reads give up after 20 s, or after `timeoutMs` (the helper's own limit for slow routes), with err.code 'timeout',
+  // the same as core api(): a sleeping Mac must not leave a pane on its spinner. Writes wait unless they ask.
+  var READ_TIMEOUT_MS = 20000;
+  function call(method, path, body, timeoutMs) {
     var headers = { 'X-COS-Web': '1' };
     var opts = { method: method, headers: headers, credentials: 'same-origin' };
     if (body !== undefined) { headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    var limit = timeoutMs != null ? timeoutMs : (method === 'GET' ? READ_TIMEOUT_MS : 0);
+    var ctrl = limit && window.AbortController ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, limit) : null;
+    if (ctrl) opts.signal = ctrl.signal;
     return fetch(path, opts).then(function (res) {
+      if (timer) clearTimeout(timer);
       if (res.status === 401) {
-        W.api('/api/voice/profiles').catch(function () {});
+        if (W.showAuth) W.showAuth(); else W.api('/api/voice/profiles').catch(function () {});
         var e = new Error('Signed out. Connect this browser again.'); e.status = 401; throw e;
       }
       if (res.status === 403) { var f = new Error('Unauthorized'); f.status = 403; throw f; }
@@ -90,11 +98,18 @@
         try { b = t ? JSON.parse(t) : {}; } catch (_e) { b = null; }
         return { status: res.status, body: b };
       });
-    }, function () { throw new Error('Server stopped'); });
+    }, function (err) {
+      if (timer) clearTimeout(timer);
+      if (err && err.name === 'AbortError' && ctrl && ctrl.signal.aborted) {
+        var late = new Error('Your Mac did not answer in ' + Math.round(limit / 1000) + ' seconds. Check that it is awake, then try again.');
+        late.code = 'timeout'; throw late;
+      }
+      throw new Error('Server stopped');
+    });
   }
   // A read that must answer 200 (speakerReviewBody): anything else throws the server's own sentence.
-  function read(path) {
-    return call('GET', path).then(function (r) {
+  function read(path, timeoutMs) {
+    return call('GET', path, undefined, timeoutMs).then(function (r) {
       if (r.status !== 200 || !r.body) { var e = new Error(serverMessage(r.body, r.status)); e.status = r.status; throw e; }
       return r.body;
     });
@@ -294,9 +309,8 @@
       var loaded = {};
       S.meetings.forEach(function (m) { loaded[m.sessionId] = true; });
       var incoming = (Array.isArray(d.meetings) ? d.meetings : []).map(parseMeeting).filter(Boolean).filter(function (m) { return !loaded[m.sessionId]; });
-      var changed = S.pendingNew !== incoming.length;
       S.pendingNew = incoming.length; S.refreshNeeded = incoming.length > 0;
-      if (changed) render();
+      paintRefresh();
     }, function () {});
   }
   function syncPeek() {
@@ -306,6 +320,14 @@
     if (!want && S.peekTimer) { clearInterval(S.peekTimer); S.peekTimer = null; }
   }
   document.addEventListener('visibilitychange', syncPeek);
+  // Patch the hero's Refresh in place: rebuilding the pane under a scrolling finger moves the page on a phone.
+  function paintRefresh() {
+    var b = pane.querySelector('[data-sp="refresh"]');
+    if (!b || route().view !== 'meetings' || W.parseRoute().args.length) return;
+    b.classList.toggle('primary', !!S.refreshNeeded);
+    b.classList.toggle('quiet', !S.refreshNeeded);
+    b.innerHTML = icon('refresh') + esc(refreshTitle());
+  }
   function refreshTitle() {
     if (!S.refreshNeeded) return 'Refresh';
     if (S.pendingNew === 1) return 'Refresh · 1 new recording';
@@ -336,7 +358,7 @@
     if (S.dirLoading) return Promise.resolve();
     S.dirLoading = true;
     render();
-    return call('GET', '/api/voice/directory?limit=100' + (refresh ? '&refresh=1' : '')).then(function (r) {
+    return call('GET', '/api/voice/directory?limit=100' + (refresh ? '&refresh=1' : ''), undefined, 45000).then(function (r) {
       if (r.status === 404) {
         return read('/api/voice/profiles').then(function (b) {
           S.dir = (Array.isArray(b.profiles) ? b.profiles : []).map(parsePerson).filter(Boolean);
@@ -354,12 +376,14 @@
       S.dirLoadFailed = !S.dir || !S.dir.length;
     }).then(function () { S.dirLoading = false; render(); });
   }
+  // A failed read leaves profiles unknown (null), not empty, so the next review asks again and can say why.
   function loadProfiles() {
     return read('/api/voice/profiles').then(function (b) {
+      S.profilesError = '';
       S.profiles = (Array.isArray(b.profiles) ? b.profiles : []).map(function (p) {
         return p && typeof p.name === 'string' ? { name: p.name, embeddings: int(p.embeddings) || 0, isOwner: p.isOwner === true } : null;
       }).filter(Boolean);
-    }, function () { S.profiles = []; });
+    }, function (err) { S.profiles = null; S.profilesError = err.message || 'Voice profiles could not be read.'; });
   }
 
   // ── Samples to review: held voices ─────────────────────
@@ -407,7 +431,7 @@
     if (H.loading) return Promise.resolve();
     H.loading = true; H.extError = ''; H.extLoadFailed = false;
     render();
-    var ext = call('GET', '/api/voice/ext-audio').then(function (r) {
+    var ext = call('GET', '/api/voice/ext-audio', undefined, 30000).then(function (r) {
       if (r.status === 404) { H.extSessions = []; H.extError = 'Update the COS server to add a voice from here.'; return; }
       if (r.status !== 200 || !r.body) throw new Error('Request failed (' + r.status + ')');
       H.extSessions = (Array.isArray(r.body.sessions) ? r.body.sessions : []).map(function (o) {
@@ -426,7 +450,7 @@
   function loadHeldGroups() {
     var H = S.H;
     H.error = '';
-    return call('GET', '/api/voice/held-groups').then(function (r) {
+    return call('GET', '/api/voice/held-groups', undefined, 30000).then(function (r) {
       if (r.status === 404) {
         H.state = 'route_absent'; H.groups = []; H.loose = []; H.pending = 0; H.namingAvailable = false; return null;
       }
@@ -953,7 +977,7 @@
   function fetchReview(R, first) {
     R.loading = true; R.copyNote = ''; R.contentUnavailable = null;
     render();
-    return call('GET', sidPath(R.sid) + '/speakers').then(function (r) {
+    return call('GET', sidPath(R.sid) + '/speakers', undefined, 25000).then(function (r) {
       if (!live(R)) return;
       if (r.status !== 200 || !r.body) throw new Error(serverMessage(r.body, r.status));
       var rv = parseReview(r.body);
@@ -962,31 +986,68 @@
       R.review = rv; R.loadError = '';
       W.setCrumb(rv.title);
       if (first) { loadPolicy(R); probeSuggestions(R); }
-      return (S.profiles ? Promise.resolve() : loadProfiles()).then(function () {
-        if (!live(R)) return;
-        return call('GET', sidPath(R.sid) + '/audio').then(function (a) {
-          var map = {};
-          if (a.status === 200 && a.body && Array.isArray(a.body.chunks)) a.body.chunks.forEach(function (c) { var n = int(c); if (n != null) map[n] = true; });
-          R.chunks = map;
-        }, function () { R.chunks = {}; });
-      }).then(function () {
-        if (!live(R)) return;
-        return call('GET', sidPath(R.sid) + '/content').then(function (c) {
-          if (c.status === 404) { R.content = null; R.contentUnavailable = 'route_absent'; return; }
-          if (c.status !== 200 || !c.body) { R.content = null; R.contentUnavailable = 'error'; return; }
-          var parsed = parseContent(c.body);
-          if (parsed && rv.sourceRevision && parsed.sourceRevision && parsed.sourceRevision !== rv.sourceRevision) {
-            R.content = null; R.contentUnavailable = 'Meeting changed while opening. Reopen review.'; return;
-          }
-          R.content = parsed; R.contentUnavailable = parsed ? null : 'error';
-        }, function () { R.content = null; R.contentUnavailable = 'error'; });
-      });
+      return loadParts(R, ['profiles', 'audio', 'content']);
     }).catch(function (err) {
       if (!live(R)) return;
       if (R.review) R.error = err.message; else R.loadError = err.message;
     }).then(function () { if (live(R)) { R.loading = false; render(); } });
   }
   function retryReview() { var R = S.R; if (!R) return; R.error = ''; R.loadError = ''; fetchReview(R, !R.review); }
+  // The reads after the review never blank its rows (Control drops playback or the write-up quietly on an older
+  // server), but a timeout or failure here is named, with a Try again that re-runs only the reads that failed.
+  function loadParts(R, parts) {
+    var rv = R.review;
+    function next(i) {
+      if (i >= parts.length || !live(R)) return Promise.resolve();
+      return loadPart(R, rv, parts[i]).then(function () { return next(i + 1); });
+    }
+    return next(0);
+  }
+  function loadPart(R, rv, part) {
+    R.failed = R.failed || {};
+    delete R.failed[part];
+    if (part === 'profiles') {
+      if (S.profiles) return Promise.resolve();
+      return loadProfiles().then(function () { if (S.profiles == null) R.failed.profiles = S.profilesError; });
+    }
+    if (part === 'audio') {
+      return call('GET', sidPath(R.sid) + '/audio', undefined, 15000).then(function (a) {
+        if (!live(R)) return;
+        var map = {};
+        if (a.status === 200 && a.body && Array.isArray(a.body.chunks)) a.body.chunks.forEach(function (c) { var n = int(c); if (n != null) map[n] = true; });
+        // 404 is an older server with no playback, said nowhere, as in Control. Anything else is a failure worth naming.
+        else if (a.status !== 404) R.failed.audio = 'Could not read retained audio (' + a.status + ')';
+        R.chunks = map;
+      }, function (err) { if (live(R)) { R.chunks = {}; R.failed.audio = err.message; } });
+    }
+    return call('GET', sidPath(R.sid) + '/content', undefined, 30000).then(function (c) {
+      if (!live(R)) return;
+      if (c.status === 404) { R.content = null; R.contentUnavailable = 'route_absent'; return; }
+      if (c.status !== 200 || !c.body) { R.content = null; R.contentUnavailable = 'error'; R.failed.content = serverMessage(c.body, c.status); return; }
+      var parsed = parseContent(c.body);
+      if (parsed && rv.sourceRevision && parsed.sourceRevision && parsed.sourceRevision !== rv.sourceRevision) {
+        R.content = null; R.contentUnavailable = 'Meeting changed while opening. Reopen review.'; return;
+      }
+      R.content = parsed; R.contentUnavailable = parsed ? null : 'error';
+    }, function (err) { if (live(R)) { R.content = null; R.contentUnavailable = 'error'; R.failed.content = err.message; } });
+  }
+  function retryParts() {
+    var R = S.R;
+    if (!R || !R.review || !R.failed || R.partsBusy) return;
+    var parts = Object.keys(R.failed);
+    if (!parts.length) return;
+    R.partsBusy = true; render();
+    loadParts(R, parts).then(function () { if (live(R)) { R.partsBusy = false; render(); } });
+  }
+  var PART_NAMES = { profiles: 'the voice profiles', audio: 'the playback list', content: 'the write-up' };
+  function partsBanner(R) {
+    var keys = R.failed ? Object.keys(R.failed) : [];
+    if (!keys.length || R.loading) return '';
+    var names = keys.map(function (k) { return PART_NAMES[k]; });
+    var list = names.length === 1 ? names[0] : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+    return '<div class="sp-banner sp-parts" role="status"><span>' + esc('Part of this review did not load: ' + list + '. ' + R.failed[keys[0]]) + '</span><span class="sp-grow"></span>' +
+      (R.partsBusy ? spin() : '<button type="button" class="sp-text" data-sp="retry-parts">Try again</button>') + '</div>';
+  }
 
   // Voice identity policy (MeetingSpeakerPolicyView): the server owns this per-capture setting.
   function loadPolicy(R) {
@@ -1061,19 +1122,40 @@
   function pollSuggestions(R, first, attempt, failures) {
     var g = R.suggest;
     if (!live(R)) return;
-    if (attempt >= 1200) { g.note = SUG.still; g.job = null; g.running = false; render(); return; }
-    call(first ? 'POST' : 'GET', sidPath(R.sid) + '/voice-suggestions', first ? {} : undefined).then(function (r) {
+    if (attempt >= 1200) {
+      var was = suggestKey(R);
+      g.note = SUG.still; g.job = null; g.running = false;
+      if (suggestKey(R) !== was || !paintSuggest(R)) render();
+      return;
+    }
+    call(first ? 'POST' : 'GET', sidPath(R.sid) + '/voice-suggestions', first ? {} : undefined, first ? 15000 : undefined).then(function (r) {
       if (!live(R)) return;
+      var before = suggestKey(R);
       applyJob(R, r);
-      render();
+      // Each 1.5 s tick changes only the progress line: patch the bar. The review is rebuilt once, when the answer
+      // changes what the rows show (the bar appears, or suggestions arrive or drop).
+      if (suggestKey(R) !== before || !paintSuggest(R)) render();
       if (g.job && g.job.state === 'running') g.timer = setTimeout(function () { pollSuggestions(R, false, attempt + 1, 0); }, 1500);
       else g.running = false;
     }, function () {
       if (!live(R)) return;
       if (failures + 1 < 3) { g.timer = setTimeout(function () { pollSuggestions(R, false, attempt + 1, failures + 1); }, 1500); return; }
+      var before = suggestKey(R);
       if (g.probed) { g.note = SUG.didNotFinish; g.job = null; }
-      g.running = false; render();
+      g.running = false;
+      if (suggestKey(R) !== before || !paintSuggest(R)) render();
     });
+  }
+  // What the rest of the review reads from the check: whether the bar shows, and which suggestions the rows hold.
+  function suggestKey(R) {
+    var j = R.suggest.job;
+    return (showsSuggest(R) ? '1' : '0') + '|' + (j && j.state === 'done' ? (j.sourceRevision || '') + '|' + j.suggestions.map(function (x) { return x.id; }).join(',') : '');
+  }
+  function paintSuggest(R) {
+    var el = $('sp-sbar'), html = suggestBar(R);
+    if (!el || !html || W.parseRoute().pane !== 'speakers') return false;
+    el.outerHTML = html;
+    return true;
   }
   function probeSuggestions(R) { if (R.review && R.review.canSuggest) { R.suggest.running = true; pollSuggestions(R, false, 0, 0); } }
   function startSuggestions() {
@@ -2225,7 +2307,7 @@
   function suggestBar(R) {
     if (!showsSuggest(R)) return '';
     var line = suggestLine(R);
-    return '<div class="sp-sbar"><div class="sp-inline"><button type="button" class="cx-btn quiet" data-sp="suggest"' + (isRunning(R) || R.busy ? ' disabled' : '') + '>Suggest names</button>' +
+    return '<div class="sp-sbar" id="sp-sbar"><div class="sp-inline"><button type="button" class="cx-btn quiet" data-sp="suggest"' + (isRunning(R) || R.busy ? ' disabled' : '') + '>Suggest names</button>' +
       (isRunning(R) ? spin() : '') + '</div>' + (line ? '<p class="sp-muted sp-small">' + esc(line) + '</p>' : '') + '</div>';
   }
   function policyBlock(R) {
@@ -2319,7 +2401,7 @@
     return out + writeUp(R);
   }
   function renderReview(R) {
-    return '<div class="cx sp-review" data-tint="speakers">' + reviewHeader(R) + policyBlock(R) +
+    return '<div class="cx sp-review" data-tint="speakers">' + reviewHeader(R) + partsBanner(R) + policyBlock(R) +
       (R.loading && R.review ? '<p class="cx-note sp-loading">' + spin() + 'Reading the transcript…</p>' : '') + reviewBody(R) + '</div>';
   }
 
@@ -2331,6 +2413,13 @@
     var active = document.activeElement;
     var fid = active && pane.contains(active) && active.id ? active.id : null, sel = null;
     if (fid && typeof active.selectionStart === 'number') { try { sel = [active.selectionStart, active.selectionEnd]; } catch (_e) { sel = null; } }
+    // A rebuild in place keeps the page where the finger left it; a move to another list or detail restores where that
+    // one was left (Back to a list lands on the row you came from), or starts a new detail at the top.
+    var where = location.hash + '|' + rt.view, y = window.scrollY || 0;
+    S.scrollMem = S.scrollMem || {};
+    var moved = S.lastWhere != null && S.lastWhere !== where;
+    if (moved) S.scrollMem[S.lastWhere] = y;
+    S.lastWhere = where;
     var html;
     if (rt.review) html = S.R ? renderReview(S.R) : '';
     else if (rt.voice) html = voiceDetail(rt.voice);
@@ -2340,6 +2429,8 @@
         (rt.view === 'meetings' ? meetingsBody() : rt.view === 'samples' ? samplesBody() : voicesBody()) + '</div>';
     }
     pane.innerHTML = html;
+    var target = moved ? (S.scrollMem[where] || 0) : y;
+    if (Math.abs((window.scrollY || 0) - target) > 1) window.scrollTo(0, target);
     if (fid) {
       var el = $(fid);
       if (el) { try { el.focus({ preventScroll: true }); if (sel) el.setSelectionRange(sel[0], sel[1]); } catch (_e) {} }
@@ -2478,6 +2569,7 @@
     if (!R || !R.review) { if (act === 'retry') retryReview(); return; }
     switch (act) {
       case 'retry': retryReview(); return;
+      case 'retry-parts': retryParts(); return;
       case 'dismiss': R.error = ''; render(); return;
       case 'dismiss-outcome': R.groupOutcome = ''; render(); return;
       case 'legend': {
