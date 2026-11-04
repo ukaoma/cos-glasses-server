@@ -59,7 +59,12 @@
   }
 
   var storyTimer = null;
+  var storiesAt = 0;
+  // About 16 reads: never two runs at once, never more than one a minute, and never ahead of
+  // the pane the person just opened (Safari keeps 6 connections to the Mac over HTTP/1.1).
   function loadStories() {
+    if (Date.now() - storiesAt < 60000) return;
+    storiesAt = Date.now();
     var now = new Date();
     var quiet = quietNow(now);
 
@@ -256,8 +261,7 @@
   W.onRoute(paintNavbar);
   W.onShell(function () {
     Object.keys(FALLBACK).forEach(function (k) { setStory(k, FALLBACK[k], false); });
-    loadStories();
-    checkServer();
+    setTimeout(function () { loadStories(); checkServer(); }, 2500);
     clearInterval(storyTimer);
     storyTimer = setInterval(function () { if (!document.hidden) { loadStories(); checkServer(); } }, 5 * 60000);
   });

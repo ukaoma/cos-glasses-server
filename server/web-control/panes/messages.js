@@ -259,9 +259,13 @@
       render();
     });
   }
+  var dayLoading = {};
   function loadDay(date) {
     if (S.dayCache[date]) return Promise.resolve(S.dayCache[date]);
-    return api('/api/archive/' + encodeURIComponent(date)).then(function (d) { S.dayCache[date] = d; return d; });
+    if (dayLoading[date]) return dayLoading[date];
+    dayLoading[date] = api('/api/archive/' + encodeURIComponent(date)).then(function (d) { S.dayCache[date] = d; return d; })
+      .finally(function () { delete dayLoading[date]; });
+    return dayLoading[date];
   }
 
   // ── list view ─────────────────────────────────────────
@@ -415,6 +419,9 @@
   function renderMessage(key, attId) {
     var t = findRecent(key);
     if (!t) {
+      // Opened cold (reload, deep link, iOS reloading the tab): load the recent window, and
+      // render() comes back here when it lands, or shows the failure with Retry.
+      if (S.recentState === 'error') { pane.innerHTML = retryBox('Messages could not be loaded. Check that the Mac is awake, then try again.'); return; }
       if (S.recentState !== 'ready') { loadRecent(false); pane.innerHTML = '<div class="cx">' + W.skeletonRows(4) + '</div>'; return; }
       pane.innerHTML = '<div class="cx"><p class="cx-empty">That message is no longer in the recent window. Look for it in the Archive.</p></div>';
       return;
@@ -447,7 +454,7 @@
     W.setCrumb(date);
     pane.innerHTML = '<div class="cx">' + W.skeletonRows(4) + '</div>';
     loadDay(date).then(function (d) {
-      if (W.parseRoute().args.join('/') !== 'day/' + date) return;
+      if (!here(['day', date])) return;
       var chats = (d && d.chats) || [];
       var q = S.q.trim();
       var msgs = chats.reduce(function (n, c) { return n + (Number(c.exchangeCount) || 0); }, 0);
@@ -480,7 +487,9 @@
         '<p class="cx-detail-meta">' + esc(chats.length + ' ' + W.plural(chats.length, 'chat', 'chats') + ' · ' + msgs + ' ' + W.plural(msgs, 'message', 'messages')) + '</p></div></div>' +
         bar + '<div class="cx-list">' + body + '</div></div>';
     }, function (err) {
-      pane.innerHTML = '<div class="cx"><div class="cx-notice warn">' + esc(err && err.status === 404 ? 'That day is no longer in the archive.' : (err.message || 'The day could not be read.')) + '</div></div>';
+      if (!here(['day', date])) return;
+      pane.innerHTML = err && err.status === 404 ? '<div class="cx"><div class="cx-notice warn">That day is no longer in the archive.</div></div>'
+        : retryBox(err && err.message ? err.message : 'The day could not be read.');
     });
   }
   var find = { q: '', hits: [], at: 0 };
@@ -488,7 +497,7 @@
     W.setCrumb(date + ' · chat ' + (Number(index) + 1));
     pane.innerHTML = '<div class="cx">' + W.skeletonRows(4) + '</div>';
     api('/api/archive/' + encodeURIComponent(date) + '/chats/' + encodeURIComponent(index) + '/messages').then(function (d) {
-      if (W.parseRoute().args.join('/') !== 'day/' + date + '/' + index) return;
+      if (!here(['day', date, String(index)])) return;
       var msgs = (d && d.messages) || [];
       find.q = S.q.trim();
       pane.innerHTML = '<div class="cx" data-tint="messages">' +
@@ -508,7 +517,9 @@
       pane._chat = msgs;
       applyFind(true);
     }, function (err) {
-      pane.innerHTML = '<div class="cx"><p class="cx-empty">' + esc(err && err.status === 404 ? 'That chat is no longer in the archive.' : (err.message || 'The chat could not be read.')) + '</p></div>';
+      if (!here(['day', date, String(index)])) return;
+      pane.innerHTML = err && err.status === 404 ? '<div class="cx"><p class="cx-empty">That chat is no longer in the archive.</p></div>'
+        : retryBox(err && err.message ? err.message : 'The chat could not be read.');
     });
   }
   function applyFind(scroll) {
@@ -529,9 +540,20 @@
 
   // ── render and route ──────────────────────────────────
   var current = [];
+  // Whether Messages is still showing these arguments: a late answer never paints over
+  // another pane, or over a different message, day or chat.
+  function here(args) {
+    var r = W.parseRoute();
+    return r.pane === 'messages' && r.args.join('/') === (args || []).join('/');
+  }
+  function retryBox(text) {
+    return '<div class="cx"><div class="cx-notice warn"><span>' + esc(text) + '</span></div><button type="button" class="cx-btn quiet" data-msg="retry">Try again</button></div>';
+  }
   function render() {
     var a = current;
+    if (W.parseRoute().pane !== 'messages') return;
     if (!a.length || a[0] === 'archive') return renderList();
+    if (a[0] === 'm') return renderMessage(a[1], a[2] === 'a' ? a[3] : null);
   }
   function load(args) {
     current = args || [];
@@ -558,6 +580,7 @@
     if (act === 'chat') return W.go('messages', ['day', t.getAttribute('data-date'), t.getAttribute('data-index')]);
     if (act === 'att') return W.go('messages', ['m', t.getAttribute('data-key'), 'a', t.getAttribute('data-att')]);
     if (act === 'att-open') { window.open(t.getAttribute('data-href'), '_blank', 'noopener'); return; }
+    if (act === 'retry') { if (S.recentState === 'error') { S.recentState = 'idle'; S.recent = null; } return load(current); }
     if (act === 'handoff') {
       var list = (S.recent || []).slice().reverse();
       var day = S.recentDate || new Date().toISOString().slice(0, 10);

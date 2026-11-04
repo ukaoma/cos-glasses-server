@@ -93,8 +93,16 @@
     var headers = { 'X-COS-Web': '1' };
     var body;
     if (o.body !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(o.body); }
-    return fetch(path, { method: o.method || 'GET', headers: headers, credentials: 'same-origin', body: body }).then(function (res) {
-      if (res.status === 401 && path.indexOf('/api/web-session/') !== 0) { showAuth(); throw new Error('Signed out. Connect this browser again.'); }
+    // Reads give up after 20 s (a sleeping or busy Mac must not leave a reader on its skeleton
+    // forever); a caller can pass timeoutMs. Writes wait unless they ask, so a slow save is not
+    // reported as failed while it may still land.
+    var method = o.method || 'GET';
+    var limit = o.timeoutMs != null ? o.timeoutMs : (method === 'GET' ? API_READ_TIMEOUT_MS : 0);
+    var ctrl = limit && window.AbortController ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, limit) : null;
+    return fetch(path, { method: method, headers: headers, credentials: 'same-origin', body: body, signal: ctrl ? ctrl.signal : undefined }).then(function (res) {
+      if (timer) clearTimeout(timer);
+      if (res.status === 401 && path.indexOf('/api/web-session/') !== 0) { showAuth(); var gone = new Error('Signed out. Connect this browser again.'); gone.status = 401; throw gone; }
       return res.text().then(function (text) {
         var data = {};
         try { data = text ? JSON.parse(text) : {}; } catch (_e) { data = {}; }
@@ -110,8 +118,16 @@
         }
         return data;
       });
+    }, function (err) {
+      if (timer) clearTimeout(timer);
+      if (err && err.name === 'AbortError' && ctrl && ctrl.signal.aborted) {
+        var late = new Error('Your Mac did not answer in ' + Math.round(limit / 1000) + ' seconds. Check that it is awake, then try again.');
+        late.code = 'timeout'; throw late;
+      }
+      throw err;
     });
   }
+  var API_READ_TIMEOUT_MS = 20000;
 
   // ── state ───────────────────────────────────────────────
   var state = {
@@ -2248,7 +2264,9 @@
   window.addEventListener('scroll', onScroll, { passive: true });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden || $('app-shell').classList.contains('hidden')) return;
-    if (Date.now() - (state.lastLoad[state.pane] || 0) > 60000 && !parseRoute().args.length) route();
+    // Coming back to the page refreshes Today in place. Other panes keep what is on screen:
+    // rebuilding them here moved the page under Miles's finger ("it reloads the section").
+    if (state.pane === 'today' && Date.now() - (state.lastLoad.today || 0) > 60000) { state.lastLoad.today = Date.now(); loadToday(); }
   });
   window.addEventListener('message', function (e) {
     if (e.origin !== location.origin) return;

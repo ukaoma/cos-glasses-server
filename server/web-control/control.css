@@ -288,3 +288,6 @@ button.cx-set-row:hover { background: var(--qopen); }
 /* Sign in another device: the QR the phone camera scans. */
 .device-code .qr { display: block; width: 200px; height: 200px; margin: 4px 0 8px; border-radius: 8px; border: 1px solid var(--panel-border); background: #fff; }
 .device-code .qr-hint { font-weight: 600; color: var(--ink); }
+
+/* iOS Safari pull-to-refresh reloaded the whole app on a downward drag at the top of a pane. */
+html, body { overscroll-behavior-y: none; }

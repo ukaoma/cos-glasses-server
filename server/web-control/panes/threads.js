@@ -150,7 +150,7 @@
     if (cached) W.setCrumb(cached.name || id);
     pane.innerHTML = '<div class="cx">' + W.skeletonRows(4) + '</div>';
     api('/api/threads/' + encodeURIComponent(id)).then(function (t) {
-      if (W.parseRoute().args[0] !== id) return;
+      var rt = W.parseRoute(); if (rt.pane !== 'threads' || rt.args[0] !== id) return;
       t = t && t.thread ? t.thread : t;
       S.details[id] = t;
       W.setCrumb(t.name || id);
@@ -162,7 +162,9 @@
         '<div class="cx-actions"><button type="button" class="cx-btn primary" data-th="copy">Copy as Context</button></div></div>' +
         '<div class="cx-card"><div class="cx-card-body md">' + (text ? W.md(text) : '<p style="color:var(--sub)">(no stored body)</p>') + '</div></div></div>';
     }, function (err) {
-      pane.innerHTML = '<div class="cx"><div class="cx-notice warn">' + esc(err && err.status === 404 ? 'That thread is no longer stored.' : (err.message || 'The thread could not be read.')) + '</div></div>';
+      var r = W.parseRoute(); if (r.pane !== 'threads' || r.args[0] !== id) return;
+      pane.innerHTML = '<div class="cx"><div class="cx-notice warn">' + esc(err && err.status === 404 ? 'That thread is no longer stored.' : (err.message || 'The thread could not be read.')) + '</div>' +
+        (err && err.status === 404 ? '' : '<button type="button" class="cx-btn quiet" data-th="retry">Try again</button>') + '</div>';
     });
   }
   function render() { var a = W.parseRoute(); if (a.pane === 'threads' && !a.args.length) renderList(); }
@@ -174,6 +176,7 @@
     if (act === 'refresh') { S.rows = null; S.state = 'idle'; load(true); if (S.q.trim().length >= 2) search(); return; }
     if (act === 'clear') { S.q = ''; S.hits = null; S.ranFor = ''; return renderList(); }
     if (act === 'open') return W.go('threads', [t.getAttribute('data-id')]);
+    if (act === 'retry') { var cur = W.parseRoute().args[0]; if (cur) renderDetail(cur); return; }
     if (act === 'copy') {
       var id = W.parseRoute().args[0], th = S.details[id];
       if (th) W.copyText(copyFormat(th)).then(function () { W.toast('Copied as grounded context'); }, function (err) { W.toast(err.message); });
