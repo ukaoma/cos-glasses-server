@@ -7,10 +7,7 @@ import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { secureExistingPrivateFile, securePrivateDirectory } from './secure-user-config.js'
 
 export type DecisionProvider = 'jev' | 'subq'
-/** 'drop' (Drop it router, lib/drop-router.ts) is additive: the revision below reads it only when it is set, so a
- *  settings file without a drop override keeps the revision it had before, and Control's PATCH keeps matching. */
-export const DECISION_WORKFLOWS = ['session', 'completion', 'search', 'drop'] as const
-const REVISION_WORKFLOWS = ['session', 'completion', 'search'] as const
+export const DECISION_WORKFLOWS = ['session', 'completion', 'search'] as const
 export type DecisionUseCase = typeof DECISION_WORKFLOWS[number]
 export interface DecisionSettings { schema: 1; provider?: DecisionProvider; overrides: Partial<Record<DecisionUseCase, DecisionProvider>> }
 export class DecisionSettingsError extends Error {
@@ -40,8 +37,7 @@ export function readDecisionSettings(file = settingsFile()): DecisionSettings {
   }
 }
 export function decisionSettingsRevision(settings: DecisionSettings): string {
-  return createHash('sha256').update(JSON.stringify([settings.provider ?? null, ...REVISION_WORKFLOWS.map(w => settings.overrides[w] ?? null),
-    ...(settings.overrides.drop !== undefined ? [settings.overrides.drop] : [])])).digest('hex')
+  return createHash('sha256').update(JSON.stringify([settings.provider ?? null, ...DECISION_WORKFLOWS.map(w => settings.overrides[w] ?? null)])).digest('hex')
 }
 export function patchDecisionSettings(current: DecisionSettings, raw: unknown): DecisionSettings {
   if (!record(raw) || !Object.keys(raw).length || Object.keys(raw).some(k => !['provider','overrides','expectedRevision'].includes(k)) || typeof raw.expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(raw.expectedRevision) || (!('provider' in raw) && !('overrides' in raw)) ||

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dropItCapability, dropItEnabled, dropItSource, writeDropItSetting } from './drop-settings.js'
-import { decisionSettingsRevision, decisionSettingsView, DECISION_WORKFLOWS, patchDecisionSettings, resolveDecisionSelection } from './decision-settings.js'
+import { decisionSettingsRevision, DECISION_WORKFLOWS, patchDecisionSettings } from './decision-settings.js'
 
 const file = () => join(mkdtempSync(join(tmpdir(), 'drop-settings-')), 'drop-it-settings.json')
 
@@ -39,21 +39,13 @@ describe('Drop it switch', () => {
   })
 })
 
-describe('decision use case drop', () => {
-  it('is a workflow, and existing settings keep their revision', () => {
-    expect(DECISION_WORKFLOWS).toContain('drop')
-    // Pinned against 6.99.4's formula: sha256 of [provider, session, completion, search].
-    const settings = { schema: 1 as const, provider: 'subq' as const, overrides: { search: 'jev' as const } }
-    const old = createHash('sha256').update(JSON.stringify(['subq', null, null, 'jev'])).digest('hex')
-    expect(decisionSettingsRevision(settings)).toBe(old)
-    expect(decisionSettingsRevision({ ...settings, overrides: { ...settings.overrides, drop: 'jev' } })).not.toBe(old)
-  })
-  it('can be selected per use case and defaults to Jev', () => {
-    expect(resolveDecisionSelection('drop', {}, { schema: 1, overrides: {} })).toEqual({ provider: 'jev', source: 'default' })
-    expect(resolveDecisionSelection('drop', { COS_DECISION_PROVIDER_DROP: 'subq' }, { schema: 1, overrides: {} }).provider).toBe('subq')
+describe('no drop decision use case in P1', () => {
+  it('a drop override is refused, so 6.99.4 and earlier can always read the settings file', () => {
+    expect(DECISION_WORKFLOWS).not.toContain('drop' as never)
     const base = { schema: 1 as const, overrides: {} }
-    const next = patchDecisionSettings(base, { overrides: { drop: 'subq' }, expectedRevision: decisionSettingsRevision(base) })
-    expect(next.overrides.drop).toBe('subq')
-    expect(decisionSettingsView(next, { jev: true, subq: false }, {}).effective).toMatchObject({ drop: 'subq', session: 'jev' })
+    expect(() => patchDecisionSettings(base, { overrides: { drop: 'subq' }, expectedRevision: decisionSettingsRevision(base) })).toThrow()
+    // The revision formula is the 6.99.4 one.
+    const settings = { schema: 1 as const, provider: 'subq' as const, overrides: { search: 'jev' as const } }
+    expect(decisionSettingsRevision(settings)).toBe(createHash('sha256').update(JSON.stringify(['subq', null, null, 'jev'])).digest('hex'))
   })
 })
