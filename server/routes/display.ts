@@ -14,6 +14,7 @@ import {
 import { type DisplayTicketVerdict, explainDisplayTicket } from '../lib/display-ticket.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { isWebSessionAuthorized } from '../lib/web-session-auth.js'
+import { getTailscaleNudger } from '../lib/tailscale-nudge.js'
 
 export const displayRouter = Router()
 
@@ -185,8 +186,14 @@ export function __resetDisplayStreamLogForTests(): void {
  */
 function headerAuthorized(req: Request): boolean {
   const apiToken = process.env.COS_API_TOKEN ?? ''
-  return timingSafeTokenEqual(req.headers['x-cos-token'], apiToken)
-    || isWebSessionAuthorized(req, apiToken)
+  if (timingSafeTokenEqual(req.headers['x-cos-token'], apiToken)) return true
+  // A COS Control Web browser: same origin rules as the /api gate (review note).
+  const port = Number.parseInt(process.env.PORT ?? '3141', 10)
+  const httpsPort = Number.parseInt(process.env.HTTPS_PORT ?? '3143', 10)
+  return isWebSessionAuthorized(req, apiToken, {
+    selfDnsName: getTailscaleNudger().currentSelfDnsName(),
+    allowedPorts: [port, httpsPort],
+  })
 }
 
 /**

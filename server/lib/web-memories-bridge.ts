@@ -61,7 +61,7 @@ export async function dispatchMemoriesWebOp(
   op: string,
   args: Record<string, unknown>,
   loopbackFetch: LoopbackFetchFn,
-  serverVersion = '6.97.5',
+  serverVersion = 'unknown',
 ): Promise<{ ok: boolean; message: string; details: Record<string, unknown> }> {
   const reply = (ok: boolean, message: string, details: Record<string, unknown> = {}) => ({ ok, message, details })
 

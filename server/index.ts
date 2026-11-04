@@ -199,7 +199,8 @@ import { isPublicApiRequest, requireApiToken } from './lib/api-auth.js'
 import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
 import { createWebControlRouter, isAllowedCorsOrigin, webControlCsp, webControlEnabled } from './routes/web-control.js'
-import { isManagedRuntime } from './lib/managed-runtime.js'
+import { isWebControlSocketAllowed, setWebSessionEpochFile } from './lib/web-session-auth.js'
+import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
   acquireMaintenanceWork,
@@ -375,6 +376,8 @@ const tailscaleNudger = installTailscaleNudger({ activeMeetings: () => getActive
 // COS Control Web: learn this Mac's MagicDNS name at boot so the first phone sign-in on the
 // tailnet URL is not refused while the nudger's own tick has yet to read status.
 if (webControlEnabled()) void tailscaleNudger.queryStatus().catch(() => null)
+// Browser sessions sign this Mac's session epoch; "Sign out every browser" bumps it.
+setWebSessionEpochFile(dataPath('web-session.json'))
 app.use('/api', (req, _res, next) => {
   tailscaleNudger.noteRequest(req.socket?.remoteAddress, { meetingChunk: isMeetingChunkPost(req.method, req.path) })
   next()
@@ -386,8 +389,13 @@ app.use('/api', requireApiToken(API_TOKEN, {
   allowedPorts: () => [PORT, HTTPS_PORT],
 }))
 // Past the token gate, a request on a non-public path carried the token: mark a paired phone.
+// Only the X-Cos-Token header counts: a browser signed in to COS Control Web passed the gate
+// with its cookie, and treating that laptop or tab as a paired phone would point the nudger's
+// phone checks at it (review note).
 app.use('/api', (req, _res, next) => {
-  if (!isPublicApiRequest(req.method, req.path)) tailscaleNudger.noteRequest(req.socket?.remoteAddress, { authenticated: true })
+  if (!isPublicApiRequest(req.method, req.path) && typeof req.headers['x-cos-token'] === 'string') {
+    tailscaleNudger.noteRequest(req.socket?.remoteAddress, { authenticated: true })
+  }
   next()
 })
 
@@ -1375,6 +1383,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 if (webControlEnabled()) {
   const webControlDir = path.join(__dirname, 'web-control')
   app.use('/control', (req, res, next) => {
+    // Loopback and Tailscale only, unless COS_WEB_CONTROL_LAN=1 (review W2).
+    if (!isWebControlSocketAllowed(req.socket?.remoteAddress)) {
+      res.status(403).type('text').send('COS Control Web is available on this Mac and over Tailscale.')
+      return
+    }
     res.setHeader('Content-Security-Policy', webControlCsp(req.path))
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('Referrer-Policy', 'no-referrer')
@@ -1382,6 +1395,7 @@ if (webControlEnabled()) {
   }, express.static(webControlDir))
   app.use('/api', createWebControlRouter({
     apiToken: () => API_TOKEN,
+    serverVersion: () => managedServerVersion() ?? 'unknown',
     port: () => PORT,
     httpsPort: () => existsSync(path.join(__dirname, 'certs', 'cert.pem')) ? HTTPS_PORT : null,
     selfDnsName: () => tailscaleNudger.currentSelfDnsName(),

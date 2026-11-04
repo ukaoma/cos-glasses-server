@@ -324,12 +324,12 @@
   function lessonRow(e, selected) {
     var st = rowStatus(e);
     var meta = [STORE[e.store] || e.store, e.scope, stamp(e.ts)].filter(Boolean).join(' · ');
-    return '<button class="lesson ' + (selected ? 'selected' : '') + '" onclick="cosApp.select(\'' + esc(e.event_id) + '\')" aria-pressed="' + (selected ? 'true' : 'false') + '"><div class="kind">' + esc(kindLabel(e)) + '</div><span class="title">' + esc(e.title || '(untitled)') + '</span><div class="meta">' + esc(meta) + '</div><span class="status ' + st.color + '">' + esc(st.text) + '</span></button>';
+    return '<button class="lesson ' + (selected ? 'selected' : '') + '" onclick="cosApp.select(' + attr(e.event_id) + ')" aria-pressed="' + (selected ? 'true' : 'false') + '"><div class="kind">' + esc(kindLabel(e)) + '</div><span class="title">' + esc(e.title || '(untitled)') + '</span><div class="meta">' + esc(meta) + '</div><span class="status ' + st.color + '">' + esc(st.text) + '</span></button>';
   }
   function memoryRow(m, selected) {
     var title = m.summary || m.content || '(untitled)';
     var meta = [m.type, dateOnly(m.created_at)].filter(Boolean).join(' · ');
-    return '<button class="lesson ' + (selected ? 'selected' : '') + '" onclick="cosApp.selectMemory(\'' + esc(m.id) + '\')" aria-pressed="' + (selected ? 'true' : 'false') + '"><div class="kind">Memory</div><span class="title">' + esc(String(title).slice(0, 140)) + '</span><div class="meta">' + esc(meta) + '</div></button>';
+    return '<button class="lesson ' + (selected ? 'selected' : '') + '" onclick="cosApp.selectMemory(' + attr(m.id) + ')" aria-pressed="' + (selected ? 'true' : 'false') + '"><div class="kind">Memory</div><span class="title">' + esc(String(title).slice(0, 140)) + '</span><div class="meta">' + esc(meta) + '</div></button>';
   }
 
   // ── summary and nav ─────────────────────────────────────────────
@@ -431,14 +431,14 @@
   // ── lesson detail (the reviewed timeline) ───────────────────────
   function event(title, meta, body, done, last) { return '<section class="event ' + (done !== false ? 'complete' : '') + ' ' + (last ? 'last' : '') + '"><div class="row spread"><h3>' + title + '</h3><span class="meta">' + meta + '</span></div>' + body + '</section>'; }
   function detailActions(e) {
-    return '<div class="context-actions row spread"><span class="eyebrow">' + esc(STORE[e.store] || e.store || '') + '</span><div class="row"><button class="quiet" onclick="cosApp.openKnowledge(\'' + esc(e.event_id) + '\')">Open sources</button><button class="quiet" onclick="cosApp.exploreInGraph(\'' + esc(e.event_id) + '\')">Explore in graph</button><button onclick="cosApp.openCopyContext(\'' + esc(e.event_id) + '\')">Copy context</button></div></div>';
+    return '<div class="context-actions row spread"><span class="eyebrow">' + esc(STORE[e.store] || e.store || '') + '</span><div class="row"><button class="quiet" onclick="cosApp.openKnowledge(' + attr(e.event_id) + ')">Open sources</button><button class="quiet" onclick="cosApp.exploreInGraph(' + attr(e.event_id) + ')">Explore in graph</button><button onclick="cosApp.openCopyContext(' + attr(e.event_id) + ')">Copy context</button></div></div>';
   }
   function sourceEvent(e) {
     var ref = (e.source_refs || [])[0] || {};
     var d = e.detail || {};
     var quote = ref.excerpt || d.content || (d.bodies || [])[0] || '';
     var title = e.store === 'correction_journal' ? 'You corrected COS' : e.store === 'self_improvement_queue' ? 'A task proposed a change' : e.store === 'bot_memory' ? 'COS captured this' : e.store === 'eval_scores' || e.store === 'reflect_log' ? 'A run was checked' : 'Captured';
-    var open = e.store === 'bot_memory' && e.lesson_id ? '<button class="link" onclick="cosApp.openMemoryRecord(\'' + esc(e.lesson_id) + '\')">Open source record</button>' : (ref.id ? '<span class="meta">' + esc(ref.kind || '') + ' · ' + esc(ref.id) + '</span>' : '');
+    var open = e.store === 'bot_memory' && e.lesson_id ? '<button class="link" onclick="cosApp.openMemoryRecord(' + attr(e.lesson_id) + ')">Open source record</button>' : (ref.id ? '<span class="meta">' + esc(ref.kind || '') + ' · ' + esc(ref.id) + '</span>' : '');
     return event(title, esc(stamp(e.ts) || 'Source'), (quote ? '<div class="quote">' + esc(quote) + '</div>' : '<p>No excerpt was stored with this record.</p>') + open + memoryActions(e));
   }
   // Accept activates; quality quarantine retains content. Forget is a separate explicit action.
@@ -490,8 +490,8 @@
         '<button class="primary" onclick="cosApp.openStewardship()">Review rule versions</button>' +
         '<button disabled title="Editing a proposed instruction arrives with skill versioning.">Edit</button>' +
         (dismissed
-          ? '<button onclick="cosApp.decide(\'' + esc(e.event_id) + '\',\'reopened\')">Restore proposal</button>'
-          : '<button class="quiet" onclick="cosApp.decide(\'' + esc(e.event_id) + '\',\'dismissed\')">Dismiss</button>') +
+          ? '<button onclick="cosApp.decide(' + attr(e.event_id) + ',\'reopened\')">Restore proposal</button>'
+          : '<button class="quiet" onclick="cosApp.decide(' + attr(e.event_id) + ',\'dismissed\')">Dismiss</button>') +
         '</div>';
     }
     var title = decision === 'dismissed' ? 'Change dismissed' : proposal ? 'Proposed change' : e.event_type === 'promotable' ? 'Promotable pattern' : (KIND[e.event_type] || 'Change');
@@ -546,7 +546,7 @@
   }
   function evidenceEvent(e) {
     var n = (e.source_refs || []).length;
-    return event('Evidence for this lesson', 'Knowledge', '<p>' + fmt(n) + ' source record' + (n === 1 ? '' : 's') + '. Sources are what was actually said. Graph links are extracted context, not proof that the lesson worked.</p><div class="actions"><button onclick="cosApp.openKnowledge(\'' + esc(e.event_id) + '\')">Open sources</button><button onclick="cosApp.exploreInGraph(\'' + esc(e.event_id) + '\')">Explore in graph</button></div>' + (e.provenance && e.provenance !== 'complete' ? '<p>Provenance: ' + esc(e.provenance) + '.</p>' : ''), true, true);
+    return event('Evidence for this lesson', 'Knowledge', '<p>' + fmt(n) + ' source record' + (n === 1 ? '' : 's') + '. Sources are what was actually said. Graph links are extracted context, not proof that the lesson worked.</p><div class="actions"><button onclick="cosApp.openKnowledge(' + attr(e.event_id) + ')">Open sources</button><button onclick="cosApp.exploreInGraph(' + attr(e.event_id) + ')">Explore in graph</button></div>' + (e.provenance && e.provenance !== 'complete' ? '<p>Provenance: ' + esc(e.provenance) + '.</p>' : ''), true, true);
   }
   function lessonDetail(e, full) {
     var o = outcomeText(e);
@@ -566,7 +566,7 @@
   function appliedRow(e, selected) {
     var lesson = lessonText(e.lesson_id) || e.lesson_id || '(lesson)';
     var meta = [e.engine && e.engine !== 'unknown' ? e.engine : null, stamp(e.ts)].filter(Boolean).join(' · ');
-    return '<button class="lesson ' + (selected ? 'selected' : '') + '" onclick="cosApp.select(\'' + esc(e.event_id) + '\')" aria-pressed="' + (selected ? 'true' : 'false') + '"><div class="kind">' + esc(KIND.used) + '</div><span class="title">' + esc(clip(lesson, 140)) + '</span><div class="meta">' + esc(meta) + '</div><span class="status green excerpt">' + esc(clip(appliedExcerpt(e), 120) || 'A later answer used this lesson') + '</span></button>';
+    return '<button class="lesson ' + (selected ? 'selected' : '') + '" onclick="cosApp.select(' + attr(e.event_id) + ')" aria-pressed="' + (selected ? 'true' : 'false') + '"><div class="kind">' + esc(KIND.used) + '</div><span class="title">' + esc(clip(lesson, 140)) + '</span><div class="meta">' + esc(meta) + '</div><span class="status green excerpt">' + esc(clip(appliedExcerpt(e), 120) || 'A later answer used this lesson') + '</span></button>';
   }
   // Empty copy by path. The bridge can detect use and simply saw none; the other
   // paths cannot detect it at all, and the list must not be filled from elsewhere.
@@ -593,7 +593,7 @@
       '<h2 style="margin-top:12px">' + esc(lesson ? clip(lesson, 200) : 'Lesson') + '</h2>' +
       '<p class="intro">' + esc([e.engine && e.engine !== 'unknown' ? e.engine : null, d.sessions ? fmt(d.sessions) + ' session' + (d.sessions === 1 ? '' : 's') : null, stamp(e.ts)].filter(Boolean).join(' · ')) + '</p>';
     var lessonBody = lesson ? '<div class="quote">' + esc(lesson) + '</div>' : lessonErr ? '<div class="notice">This lesson\'s record could not be read (' + esc(lessonErr) + '). The use below is still recorded.</div>' : '<p class="muted">Loading the record…</p>';
-    var timeline = event('The lesson', 'Bot memory', lessonBody + (e.lesson_id ? '<button class="link" onclick="cosApp.openMemoryRecord(\'' + esc(e.lesson_id) + '\')">Open source record</button>' : ''));
+    var timeline = event('The lesson', 'Bot memory', lessonBody + (e.lesson_id ? '<button class="link" onclick="cosApp.openMemoryRecord(' + attr(e.lesson_id) + ')">Open source record</button>' : ''));
     timeline += event('A later answer used it', esc(stamp(e.ts)), (excerpt ? '<div class="quote">' + esc(excerpt) + '</div>' : '') + '<p>' + esc(count) + ' from the assistant\'s own words. An acknowledgment is evidence for that answer, not a guarantee about every future one.</p>');
     if (rewardEnabled()) timeline += event('Ranking', 'Reward on', rankingSentence(), true, true);
     return head + '<div class="timeline">' + timeline + '</div>';
@@ -615,7 +615,7 @@
     }
     var e = rows.find(function (x) { return x.event_id === state.selected; });
     if (e.lesson_id) ensureMemoryDetail(e.lesson_id);
-    detail.innerHTML = '<div class="context-actions row spread"><span class="eyebrow">Applied this week</span><div class="row">' + (e.lesson_id ? '<button class="quiet" onclick="cosApp.openMemoryRecord(\'' + esc(e.lesson_id) + '\')">Open source record</button>' : '') + '</div></div>' + appliedDetail(e);
+    detail.innerHTML = '<div class="context-actions row spread"><span class="eyebrow">Applied this week</span><div class="row">' + (e.lesson_id ? '<button class="quiet" onclick="cosApp.openMemoryRecord(' + attr(e.lesson_id) + ')">Open source record</button>' : '') + '</div></div>' + appliedDetail(e);
   }
   function renderMemories(inbox, detail) {
     var focusInput=inbox.querySelector('input[aria-label="Search memories"]');
@@ -633,7 +633,7 @@
     ensureMemoryDetail(m.id);
     var full = state.memoryDetail[m.id] || {};
     var record = full._error ? m : Object.assign({}, m, full);
-    detail.innerHTML = '<div class="context-actions row spread"><span class="eyebrow">MEMORY</span><div class="row">' + (record.filePath ? '<button class="quiet" onclick="cosApp.reveal(\'' + esc(m.id) + '\')">Reveal in Finder</button>' : '') + '<button onclick="cosApp.copyMemory(\'' + esc(m.id) + '\')">Copy context</button></div></div>' +
+    detail.innerHTML = '<div class="context-actions row spread"><span class="eyebrow">MEMORY</span><div class="row">' + (record.filePath ? '<button class="quiet" onclick="cosApp.reveal(' + attr(m.id) + ')">Reveal in Finder</button>' : '') + '<button onclick="cosApp.copyMemory(' + attr(m.id) + ')">Copy context</button></div></div>' +
       '<span class="badge green">Saved memory</span><h2 style="margin-top:12px">' + esc(record.summary || 'Memory') + '</h2><p class="intro">' + esc([record.type, dateOnly(record.created_at), record.source].filter(Boolean).join(' · ')) + '</p>' +
       (full._error ? '<div class="notice">' + esc(full._error) + '</div>' : '') +
       '<div class="timeline">' + event('Captured memory', esc(record.type || 'Memory'), '<div class="quote">' + esc(record.content || record.summary || '') + '</div>') + event('Available for recall', record.filePath ? 'Plain files' : 'Memory store', '<p>Active memories are available to authorized sessions. Later retrieval, use, or result appears under Recent learning when it is recorded.</p>', false, true) + '</div>';
@@ -845,7 +845,7 @@
       cards = state.recent.slice(0, 8).filter(function (e) { return (e.source_refs || []).length; }).map(function (e) { var r = e.source_refs[0]; return { title: e.title, kind: STORE[r.kind] || r.kind || 'Source', id: e.event_id, text: r.excerpt || '', note: stamp(e.ts), event: e.event_id }; });
     }
     return '<div class="row spread" id="sourceRecords"><span class="eyebrow">MEMORIES / KNOWLEDGE / SOURCES</span>' + (cards.length ? '<button type="button" class="hairline" data-role="real-records" onclick="cosApp.openSourceRecords()">Real records</button>' : '<span class="badge">No records</span>') + '</div><h2 style="margin-top:12px">The context behind the lesson.</h2><p class="intro">Open the original evidence before reusing an interpretation.</p>' +
-      (cards.length ? cards.map(function (x) { return '<article class="source-card"><div class="row spread"><h3>' + esc(x.title) + '</h3><span class="badge">' + esc(x.kind) + '</span></div>' + (x.text ? '<div class="quote">' + esc(x.text) + '</div>' : '') + (x.note ? '<p>' + esc(x.note) + '</p>' : '') + (x.event ? '<div class="actions"><button class="link" onclick="cosApp.select(\'' + esc(x.event) + '\');cosApp.setFilter(\'recent\')">Inspect learning →</button></div>' : '') + '</article>'; }).join('') : '<div class="empty"><div><h3>No source records yet.</h3><p>Your first saved lesson will bring its source here.</p></div></div>');
+      (cards.length ? cards.map(function (x) { return '<article class="source-card"><div class="row spread"><h3>' + esc(x.title) + '</h3><span class="badge">' + esc(x.kind) + '</span></div>' + (x.text ? '<div class="quote">' + esc(x.text) + '</div>' : '') + (x.note ? '<p>' + esc(x.note) + '</p>' : '') + (x.event ? '<div class="actions"><button class="link" onclick="cosApp.select(' + attr(x.event) + ');cosApp.setFilter(\'recent\')">Inspect learning →</button></div>' : '') + '</article>'; }).join('') : '<div class="empty"><div><h3>No source records yet.</h3><p>Your first saved lesson will bring its source here.</p></div></div>');
   }
   function graphDetail() {
     return '<div id="graphAsk">' + askBlockInner() + '</div><section class="knowledge-visual"><div class="row spread actual-header"><h2>Your knowledge</h2><span class="badge green">' + (fileGraph() ? 'Your document links' : 'Your LightRAG data') + '</span></div><p class="intro">Explore connected people and ideas. Ask a question above to trace the connections that matter.</p><div id="graphMount" class="cgx-host"></div></section>';
