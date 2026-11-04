@@ -9,8 +9,9 @@
  *
  * Cost controls of its own, copying lib/work-search.ts: a daily input-token cap (COS_DROP_DAILY_TOKENS, default
  * 300,000), its own usage ledger (data/jev-drop-usage.json), its own breaker (jev.ts: 3 failures, then 1 hour), and a
- * kill switch (COS_DROP_ROUTER=0 turns Jev routing off; drops are still saved). Decision use case `drop`
- * (DECISION_WORKFLOWS), token-audit caller `drop`.
+ * kill switch (COS_DROP_ROUTER=0 turns Jev routing off; drops are still saved). Token-audit caller `drop`.
+ * Pinned to Jev for P1: the global decision provider setting (SubQ) does not apply, and there is no `drop` decision
+ * use case, so no settings file can carry a drop override that 6.99.4 and earlier would refuse to read.
  *
  * Privacy (plan section 8): Jev reads cleaned text only (credentials, URLs, email addresses and opaque ids removed),
  * and a drop whose words trip the secret redactor is never sent at all: it stays a note. Nothing here logs words.
@@ -18,7 +19,7 @@
  */
 import { dataPath } from './data-dir.js'
 import { estimateJevTokens, JevClient, JevError } from './jev.js'
-import { createDecisionClient, DecisionProviderError, type DecisionClient } from './decision-provider.js'
+import { DecisionProviderError, type DecisionClient } from './decision-provider.js'
 import { boundForRedaction, redactSecretText } from './activity-preview.js'
 import { redactSecrets } from './lens-gist-engines.js'
 import { searchOptionText } from './work-search.js'
@@ -71,8 +72,18 @@ export function createDropJevClient(fetchImpl: typeof fetch = fetch, now: () => 
 let sharedClient: JevClient | null = null
 export function sharedDropJevClient(): JevClient { return sharedClient ??= createDropJevClient() }
 let sharedDecision: DecisionClient | null = null
+/** Jev only, whatever the decision provider setting says: a drop never goes to another classifier in P1. */
+export function jevOnlyDropClient(jev: Pick<JevClient, 'ask'>): DecisionClient {
+  return {
+    provider: 'jev',
+    async ask(state, questions, estimate, options) {
+      if (options?.images?.length) throw new DecisionProviderError('decision_images_unsupported')
+      return { ...await jev.ask(state, questions, estimate, options), provider: 'jev' }
+    },
+  }
+}
 export function sharedDropDecisionClient(): DecisionClient {
-  return sharedDecision ??= createDecisionClient('drop', sharedDropJevClient(), process.env, { usageFile: dataPath('subq-drop-usage.json'), cap: () => dropDailyCap() })
+  return sharedDecision ??= jevOnlyDropClient(sharedDropJevClient())
 }
 
 // ── Rules ──────────────────────────────────────────────────────────────

@@ -17,9 +17,8 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { DropStore, InboxFeedStore } from './drop-store.js'
-import { auditDropRoute, createDropJevClient, DropRouter } from './drop-router.js'
+import { auditDropRoute, createDropJevClient, DropRouter, jevOnlyDropClient } from './drop-router.js'
 import { DropService } from './drop-service.js'
-import { createDecisionClient } from './decision-provider.js'
 import { DATA_DIR } from './data-dir.js'
 import { fakeWriters, REPLAY, scriptedAnswer, scriptedDecisionClient } from './__fixtures__/drop-fixtures.js'
 import { createDropsRouter } from '../routes/drops.js'
@@ -70,7 +69,7 @@ describe('canary 1: replay', () => {
 
   it.skipIf(process.env.COS_DROP_LIVE_REPLAY !== '1')('live: the same set against TypeSafe Jev (opt-in, spends tokens)', async () => {
     const { drops, feed, root } = stores()
-    const client = createDecisionClient('drop', createDropJevClient(fetch, () => new Date(), join(root, 'ledger.json')), { COS_DECISION_PROVIDER: 'jev' })
+    const client = jevOnlyDropClient(createDropJevClient(fetch, () => new Date(), join(root, 'ledger.json')))
     const service = new DropService({ drops, feed, writers: fakeWriters(), router: new DropRouter({ client, enabled: () => true }) })
     let wrong = 0, asked = 0
     for (const entry of REPLAY) {
@@ -111,7 +110,8 @@ function filesUnder(dir: string, skip: (path: string) => boolean): string[] {
 describe('canaries 3 and 5: no drop text in any log, ledger or audit; nothing outward but Jev', () => {
   it('runs every destination through the real Jev client and finds the marker only in the two stores', async () => {
     const MARKER = `zqxmarker${randomUUID().slice(0, 8)}`
-    withEnv({ TYPESAFE_API_KEY: 'test-key-not-real', COS_DECISION_PROVIDER: 'jev', COS_DROP_DAILY_TOKENS: '300000' })
+    // The global decision provider says SubQ: Drop it is pinned to Jev, so nothing may go anywhere but TypeSafe.
+    withEnv({ TYPESAFE_API_KEY: 'test-key-not-real', COS_DECISION_PROVIDER: 'subq', COS_DROP_DAILY_TOKENS: '300000' })
     const { root, drops, feed } = stores()
     const ledger = join(root, 'jev-drop-usage.json')
     const net = recordingFetch()
@@ -125,10 +125,10 @@ describe('canaries 3 and 5: no drop text in any log, ledger or audit; nothing ou
     const auditFile = process.env.COS_TOKEN_AUDIT_FILE!
     const auditBefore = existsSync(auditFile) ? readFileSync(auditFile, 'utf8').length : 0
     const writers = fakeWriters({ candidates: () => ({ domains: [{ name: 'work', label: 'Work' }, { name: 'personal', label: 'Personal' }], cards: [], threads: [] }) })
-    const client = createDecisionClient('drop', createDropJevClient(net.impl as unknown as typeof fetch, () => new Date(), ledger), process.env)
+    const client = jevOnlyDropClient(createDropJevClient(net.impl as unknown as typeof fetch, () => new Date(), ledger))
     const service = new DropService({ drops, feed, writers, router: new DropRouter({ client, enabled: () => true, audit: auditDropRoute }) })
 
-    const texts = [`Draft the ${MARKER} onboarding email`, `remind me to call ${MARKER}`, `remember ${MARKER} likes tea`, `what is ${MARKER}?`, `note ${MARKER} sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH`]
+    const texts = [`Draft the ${MARKER} onboarding email`, `remind me to call ${MARKER}`, `remember that ${MARKER} likes green tea in the morning`, `what is ${MARKER}?`, `note ${MARKER} sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH`]
     const ids: string[] = []
     for (const text of texts) ids.push((await service.submit({ dropId: randomUUID(), text, source: 'mac' })).drop.id)
     await service.undo(ids[0])
@@ -165,12 +165,32 @@ describe('canaries 3 and 5: no drop text in any log, ledger or audit; nothing ou
   })
 })
 
+describe('canary 3b: a drop holding a secret never reaches memory, the Ask job or Jev', () => {
+  it('remember, a question and a plain drop with a key are kept as notes, and no writer or classifier sees them', async () => {
+    const { drops, feed } = stores()
+    const writers = fakeWriters()
+    const client = scriptedDecisionClient()
+    const service = new DropService({ drops, feed, writers, router: new DropRouter({ client, enabled: () => true }) })
+    const KEY = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH'
+    for (const text of [`remember the staging key is ${KEY} for the demo account`, `what does ${KEY} unlock?`, `remind me to rotate ${KEY}`, `Draft a card with ${KEY}`]) {
+      const out = await service.submit({ dropId: randomUUID(), text, source: 'mac' })
+      expect(out.drop, text).toMatchObject({ dest: 'note', route: { by: 'fallback', reason: 'redacted' } })
+      expect(out.next).toBeUndefined()
+      expect(out.items.at(-1)!.line).toBe('It looked like it held a password or key, so it was not sent for filing.')
+      await expect(service.move(out.drop.id, { dest: 'memory' })).rejects.toMatchObject({ code: 'redacted' })
+    }
+    // The memory writer stands in for the bridge's embed-and-store: it was never called.
+    expect(writers.calls).toEqual([])
+    expect(client.calls).toHaveLength(0)
+  })
+})
+
 describe('canary 4: cap at 1 token', () => {
   it('makes no Jev request, and the drop is kept as a note with the reason', async () => {
     withEnv({ TYPESAFE_API_KEY: 'test-key-not-real', COS_DECISION_PROVIDER: 'jev', COS_DROP_DAILY_TOKENS: '1' })
     const { root, drops, feed } = stores()
     const net = recordingFetch()
-    const client = createDecisionClient('drop', createDropJevClient(net.impl as unknown as typeof fetch, () => new Date(), join(root, 'ledger.json')), process.env)
+    const client = jevOnlyDropClient(createDropJevClient(net.impl as unknown as typeof fetch, () => new Date(), join(root, 'ledger.json')))
     const service = new DropService({ drops, feed, writers: fakeWriters(), router: new DropRouter({ client, enabled: () => true }) })
     const out = await service.submit({ dropId: randomUUID(), text: 'Draft the onboarding email sequence for new liquor stores', source: 'mac' })
     expect(net.impl).not.toHaveBeenCalled()

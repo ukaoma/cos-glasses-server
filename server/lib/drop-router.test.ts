@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { buildDropRequest, cleanDropForJev, createDropJevClient, decideDrop, dropDailyCap, dropRouterEnabled, DropRouter, rankByOverlap,
+import { buildDropRequest, cleanDropForJev, createDropJevClient, decideDrop, dropDailyCap, dropRouterEnabled, DropRouter, jevOnlyDropClient, rankByOverlap, sharedDropDecisionClient,
   ruleRoute, type DropRequest, type RouteCandidates } from './drop-router.js'
-import { createDecisionClient, type DecisionClient } from './decision-provider.js'
+import { type DecisionClient } from './decision-provider.js'
 import { JevError } from './jev.js'
 import { CARDS, DOMAINS, THREADS } from './__fixtures__/drop-fixtures.js'
 
@@ -149,7 +149,7 @@ describe('switch and cap', () => {
     process.env.COS_DROP_DAILY_TOKENS = '1'; process.env.TYPESAFE_API_KEY = 'test-key-not-real'
     try {
       const ledger = join(mkdtempSync(join(tmpdir(), 'drop-ledger-')), 'jev-drop-usage.json')
-      const client = createDecisionClient('drop', createDropJevClient(fetchImpl as never, () => new Date(), ledger), { COS_DECISION_PROVIDER: 'jev' })
+      const client = jevOnlyDropClient(createDropJevClient(fetchImpl as never, () => new Date(), ledger))
       const out = await new DropRouter({ client, enabled: () => true }).route('Draft the onboarding email', world)
       expect(out).toEqual({ by: 'fallback', reason: 'jev_cap_reached' })
       expect(fetchImpl).not.toHaveBeenCalled()
@@ -157,5 +157,21 @@ describe('switch and cap', () => {
       if (prior === undefined) delete process.env.COS_DROP_DAILY_TOKENS; else process.env.COS_DROP_DAILY_TOKENS = prior
       if (priorKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = priorKey
     }
+  })
+})
+
+describe('pinned to Jev', () => {
+  it('the shared drop client is Jev whatever the decision provider setting says', async () => {
+    const prior = process.env.COS_DECISION_PROVIDER
+    process.env.COS_DECISION_PROVIDER = 'subq'
+    try { expect(sharedDropDecisionClient().provider).toBe('jev') } finally {
+      if (prior === undefined) delete process.env.COS_DECISION_PROVIDER; else process.env.COS_DECISION_PROVIDER = prior
+    }
+  })
+  it('passes through to Jev and refuses images', async () => {
+    const ask = vi.fn(async () => ({ answers: {}, inputTokens: 3 }))
+    const client = jevOnlyDropClient({ ask })
+    expect(await client.ask({}, {}, 1)).toMatchObject({ provider: 'jev', inputTokens: 3 })
+    await expect(client.ask({}, {}, 1, { images: [{ mediaType: 'image/png', base64: 'AA==' }] })).rejects.toMatchObject({ code: 'decision_images_unsupported' })
   })
 })
