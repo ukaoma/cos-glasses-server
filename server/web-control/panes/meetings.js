@@ -668,7 +668,7 @@
   // A sign-in that lapsed: stop polling and show the sign-in, as W.api does on a 401.
   function signedOut() {
     stopTimers(); clearTimeout(S.stopTimer); S.stopTimer = null;
-    if (typeof W.showAuth === 'function') W.showAuth();
+    if (typeof W.showAuth === 'function') W.showAuth(SIGNED_OUT);
     else api('/api/meeting-ask/config').catch(function () {});
   }
   var SIGNED_OUT = 'Signed out. Connect this browser again.';
