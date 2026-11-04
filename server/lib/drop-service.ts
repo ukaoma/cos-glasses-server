@@ -13,9 +13,9 @@
  * a Messages row or moves the lens message counter (canary 11).
  */
 import { randomBytes } from 'node:crypto'
-import { DROP_ID, DROP_LIMITS, DropStoreError, type DropChoice, type DropDest, type DropKind, type DropLink, type DropRecord,
+import { DROP_DESTS, DROP_ID, DROP_LIMITS, DropStoreError, parseLink, type DropChoice, type DropDest, type DropKind, type DropLink, type DropRecord,
   type DropSource, type DropFileRef, type FeedAction, type FeedItem, type DropStore, type InboxFeedStore } from './drop-store.js'
-import { choiceFor, DROP_ROUTER_LIMITS, ruleRoute, type DropRouter, type DropTarget, type RouteOutcome } from './drop-router.js'
+import { choiceFor, cleanDropForJev, DROP_ROUTER_LIMITS, ruleRoute, type DropRouter, type DropTarget, type RouteOutcome } from './drop-router.js'
 import { DropDestinationError, type DropWriters } from './drop-destinations.js'
 
 export class DropError extends Error {
@@ -114,6 +114,9 @@ export class DropService {
     this.deps.drops.insert(fresh)
     this.deps.feed.insert([{ id: feedId(), kind: 'drop', threadId: fresh.id, createdAt: at, readAt: at, source: input.source,
       line: input.text, links: [], actions: [], state: 'live', key: `${fresh.id}:drop` }])
+    // Before any rule (plan section 8): a drop that looks like it holds a password or key goes nowhere but the drop
+    // store. Not to memory (the bridge embeds it), not to the Ask job, not to Jev.
+    if (cleanDropForJev(input.text).tripped) return this.file(fresh, 'note', undefined, { by: 'fallback', reason: 'redacted' })
     const rule = ruleRoute(input.text)
     if (rule === 'ask') return this.asked(fresh)
     if (rule === 'reminder') return this.file(fresh, 'reminder', undefined, { by: 'rule' })
@@ -292,11 +295,14 @@ export class DropService {
 
   /** Move: Undo, then file where the user picked, with no Jev call. */
   async move(dropId: string, to: { dest: DropDest; target?: DropTarget }): Promise<DropAnswer> {
-    if (to.dest === 'ask') throw new DropError('invalid_move', 400)
+    if (to.dest === 'ask' || !(DROP_DESTS as readonly string[]).includes(to.dest)) throw new DropError('invalid_move', 400)
+    // Checked before anything is undone or written: a target the store would refuse must never leave a write unlinked.
+    if (to.target) checkTarget(to.target)
     return this.locked(dropId, async () => {
       const drop = this.mustGet(dropId)
       if (drop.state === 'undone') throw new DropError('drop_undone', 409, 'This drop was undone.')
       if (to.dest === 'session' && !to.target?.id) throw new DropError('invalid_move', 400)
+      if (to.dest === 'memory' && cleanDropForJev(drop.text).tripped) throw new DropError('redacted', 409, 'It looks like it holds a password or key, so it stays out of memories.')
       const generation = this.nextGeneration(drop.id)
       if (drop.state !== 'asking') await this.reverse(drop)
       else if (this.now().getTime() > Date.parse(drop.undoUntil ?? '')) throw new DropError('undo_expired', 409, 'Undo and Move last 24 hours.')
