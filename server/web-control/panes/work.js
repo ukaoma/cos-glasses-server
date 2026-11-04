@@ -793,7 +793,7 @@
     // Today's meetings lead, as one group (the web Today home links here instead of listing them itself).
     var ti = split.todayItems.filter(function (it) { return !S.domain || it.meeting.domain === S.domain; });
     var tc = split.todayCards.filter(function (t) { return !S.domain || t.domain === S.domain; });
-    if (ti.length || tc.length) list.unshift({ id: 'today', title: 'From today\u2019s meetings', note: 'Moves to Work at midnight', date: localDay(), items: ti, cards: tc });
+    if (ti.length || tc.length) list.unshift({ id: 'today', title: 'From today\u2019s meetings', note: 'Joins the older groups at midnight', date: localDay(), items: ti, cards: tc });
     return list;
   }
   function meetingDate(m) { var p = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(m.filename || '')); return p ? (+p[2]) + '/' + (+p[3]) : ''; }
@@ -824,8 +824,13 @@
   }
   function sortView() {
     var groups = sortGroups(), n = groups.length;
+    // Stay on the group the reader was on when a background load adds or removes one above it (today's group leads).
+    if (S.sortGroupId && (!groups[S.sortIndex] || groups[S.sortIndex].id !== S.sortGroupId)) {
+      for (var gi = 0; gi < n; gi++) if (groups[gi].id === S.sortGroupId) { S.sortIndex = gi; break; }
+    }
     if (S.sortIndex > n - 1) S.sortIndex = Math.max(0, n - 1);
     var g = n ? groups[S.sortIndex] : null, batch = S.caps.workBatch === 1 && S.caps.writable === true;
+    S.sortGroupId = g ? g.id : '';
     var undo = S.undoBatch ? (S.loopAvailable === true ? '<button type="button" class="wk-text-btn" data-wk="undo">Undo last decision</button>'
       : S.loopAvailable === false ? '<span class="wk-muted">' + esc(UNDO_MISSING) + '</span>' : '') : '';
     var body;
@@ -1530,8 +1535,8 @@
         var g = sortGroups()[S.sortIndex]; if (g) dismissRest(g.items.map(function (x) { return x.id; }));
         return;
       case 'undo': return undoIntake();
-      case 'sort-prev': S.sortIndex = Math.max(0, S.sortIndex - 1); return renderList();
-      case 'sort-later': var n = sortGroups().length; S.sortIndex = n ? (S.sortIndex + 1) % n : 0; return renderList();
+      case 'sort-prev': S.sortGroupId = ''; S.sortIndex = Math.max(0, S.sortIndex - 1); return renderList();
+      case 'sort-later': var n = sortGroups().length; S.sortGroupId = ''; S.sortIndex = n ? (S.sortIndex + 1) % n : 0; return renderList();
       case 'card-keep': case 'card-drop':
         var task = (S.tasks || []).filter(function (x) { return identity(x) === id; })[0];
         if (task) batchOp(task, act === 'card-keep' ? 'stage' : 'drop', act === 'card-keep' ? { workStage: 'planned' } : null);
@@ -1625,6 +1630,7 @@
     if (e.repeat && e.key === 'e') return;   // a held key decides once
     if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
     var groups = sortGroups(), n = groups.length;
+    S.sortGroupId = '';
     if (e.key === 'j') S.sortIndex = Math.min(Math.max(0, n - 1), S.sortIndex + 1);
     else if (e.key === 'k') S.sortIndex = Math.max(0, S.sortIndex - 1);
     else if (e.key === 's') S.sortIndex = n ? (S.sortIndex + 1) % n : 0;
@@ -1642,7 +1648,7 @@
       // #/work/sort (the Today home's "From today's meetings" link): open Sort on today's group, and leave the list's
       // own address in history so Back returns to where the link was.
       if (args[0] === 'sort') {
-        S.tab = 'sort'; S.sortIndex = 0; S.moreOpen = false;
+        S.tab = 'sort'; S.sortGroupId = ''; S.sortIndex = 0; S.moreOpen = false;
         if (!S.intake && !S.intakeLoading) loadIntake(true);
         location.replace('#/work');
         return;

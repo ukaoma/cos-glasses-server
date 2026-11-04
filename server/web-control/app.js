@@ -221,8 +221,12 @@
 
   // ── auth ────────────────────────────────────────────────
   function showAuth(message) {
+    var alreadyOpen = !$('auth-gate').classList.contains('hidden');
     $('app-shell').classList.add('hidden');
     $('auth-gate').classList.remove('hidden');
+    // A later 401 from a pane still polling (W.api passes no message) must not blank what the gate already says:
+    // the reason it opened, or "That code did not match" while the person retypes.
+    if (!message && alreadyOpen) return;
     setStatus($('auth-error'), message || '', true);
     $('auth-error').classList.toggle('hidden', !message);
   }
