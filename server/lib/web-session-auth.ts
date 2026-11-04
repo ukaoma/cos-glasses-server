@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { dirname } from 'node:path'
 import {
   hasProxyForwardedHeaders,
@@ -82,18 +83,12 @@ export function currentWebSessionEpoch(): number {
   return value
 }
 
+// The server's durable writer: fsync of the bytes, rename, then fsync of the directory, through
+// a guarded (O_NOFOLLOW) exclusive temp file.
 function writeEpoch(value: number): void {
   if (!epochFile) return
   mkdirSync(dirname(epochFile), { recursive: true })
-  const temporary = `${epochFile}.tmp-${process.pid}`
-  const fd = openSync(temporary, 'w', 0o600)
-  try {
-    writeSync(fd, JSON.stringify({ epoch: value }) + '\n')
-    fsyncSync(fd)
-  } finally {
-    closeSync(fd)
-  }
-  renameSync(temporary, epochFile)
+  durableAtomicWriteFileSync(epochFile, JSON.stringify({ epoch: value }) + '\n', { mode: 0o600 })
 }
 
 /** Invalidates every browser session. Returns the new epoch. Written atomically and fsynced. */
