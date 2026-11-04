@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { LIVE_CUES_V2_LIMIT_BOUNDS } from './live-cues-v2-settings.js'
 import { PACE_HORIZON_MAX_MS, PACE_HORIZON_MIN_MS, PACE_HORIZON_MS, PACE_MIN_CAP, paceAllowed, paceBurst, paceHorizon, paceRefillMs } from './live-cues-v2-pacing.js'
 
 const MIN = 60_000
@@ -17,8 +18,8 @@ describe('cue pacing (6.97.8)', () => {
     expect(paceRefillMs(25, 10 * MIN)).toBe(10 * MIN)
   })
 
-  it('allowed never exceeds the cap, never decreases, and starts at the burst (the whole cap below 5), for every cap the settings accept (1 to 25)', () => {
-    for (let cap = 1; cap <= 25; cap++) {
+  it('allowed never exceeds the cap, never decreases, and starts at the burst (the whole cap below 5), for every cap the settings accept (1 up to the bound, 50 since 6.99.0)', () => {
+    for (let cap = 1; cap <= LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting.max; cap++) {
       expect(paceAllowed(cap, 45_000, 0), `cap ${cap} at 0`).toBe(cap < PACE_MIN_CAP ? cap : paceBurst(cap))
       let last = 0
       for (let m = 0; m <= 240; m++) {
@@ -30,6 +31,15 @@ describe('cue pacing (6.97.8)', () => {
       expect(paceAllowed(cap, 45_000, 60 * MIN), `cap ${cap} at the horizon`).toBe(cap)
     }
     expect(PACE_MIN_CAP).toBe(5)
+  })
+
+  it('6.99.0 cap 50, gap 45 s, one hour: burst 25, one more every 144 s, all 50 open at minute 60; a 3 hour meeting spreads the second 25 over 180 minutes', () => {
+    expect(LIVE_CUES_V2_LIMIT_BOUNDS.maxCuesPerMeeting.max).toBe(50)
+    expect(paceBurst(50)).toBe(25)
+    expect(paceRefillMs(50, 45_000)).toBe(144_000)
+    expect([0, 2, 3, 30, 59, 60, 61].map(m => paceAllowed(50, 45_000, m * MIN))).toEqual([25, 25, 26, 37, 49, 50, 50])
+    expect(paceRefillMs(50, 45_000, PACE_HORIZON_MAX_MS)).toBe(432_000)
+    expect(paceAllowed(50, 45_000, 180 * MIN, PACE_HORIZON_MAX_MS)).toBe(50)
   })
 
   it('a cap of 4 or fewer is not paced; 5 is', () => {
