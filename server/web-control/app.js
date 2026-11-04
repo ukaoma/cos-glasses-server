@@ -145,7 +145,7 @@
     document.querySelectorAll('.pane').forEach(function (sec) { sec.classList.toggle('hidden', sec.id !== 'pane-' + r.pane); });
     document.querySelectorAll('#section-menu [data-goto]').forEach(function (b) { if (b.getAttribute('data-goto') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     var railPane = r.pane === 'usage' ? 'sessions' : r.pane;
-    document.querySelectorAll('.rail-btn').forEach(function (b) { if (b.getAttribute('data-pane') === railPane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    document.querySelectorAll('.rail-btn,.rail-settings').forEach(function (b) { if (b.getAttribute('data-pane') === railPane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     if (state.stream && !(r.pane === 'sessions' && r.args.length === 2)) { state.stream.close(); state.stream = null; }
     if (!(r.pane === 'sessions' && r.args.length === 2)) { clearInterval(state.turnPoll); if (state.reading) clearInterval(state.reading.heldTimer); state.reading = null; }
     if (r.pane !== 'meetings' && state.livePoll) { clearInterval(state.livePoll); state.livePoll = null; }
