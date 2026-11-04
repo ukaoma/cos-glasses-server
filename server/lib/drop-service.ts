@@ -174,8 +174,11 @@ export class DropService {
     let remind: DropRecord['remind']
     let actualDest = dest
     let reason = route.reason
-    if (target) checkTarget(target)
+    // A label can come from a card's own words (Jev's pick): control characters become spaces, and it is cut to the
+    // store's limit, so the record written after the destination write can never be refused (an unlinked write).
+    if (target) target = { ...target, label: target.label.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, DROP_LIMITS.label) }
     try {
+      if (target) checkTarget(target)
       switch (dest) {
         case 'new_card': {
           if (!target?.domain) throw new DropDestinationError('destination_failed')
@@ -214,7 +217,9 @@ export class DropService {
         default:
           throw new DropDestinationError('destination_failed')
       }
-    } catch (e) {
+    } catch (caught) {
+      // A target that still fails the store's rule is refused before any write, as a failed destination.
+      const e = caught instanceof DropError && caught.code === 'invalid_target' ? new DropDestinationError('destination_failed') : caught
       if (!(e instanceof DropDestinationError)) throw e
       console.warn(`[drops] ${drop.id} ${dest} write failed: ${e.code}`)
       actualDest = 'note'; links = []; hold = undefined; remind = undefined

@@ -206,6 +206,17 @@ describe('Undo and Move (canary 2: every destination)', () => {
     expect(h.drops.get(out.drop.id)).toMatchObject({ state: 'filed', dest: 'new_card' })
   })
 
+  it('a card picked by Jev whose words hold control characters still files with a clean label', async () => {
+    const card = { id: 'bbbbbbbbbbbb', workIdentity: 'bbbbbbbbbbbb', domain: 'work', text: 'Run the price test\u0007 for a first-month discount' }
+    const h = harness({ writers: fakeWriters({ candidates: () => ({ domains: [{ name: 'work', label: 'Work' }], cards: [card], threads: [] }) }) })
+    const client = { provider: 'jev' as const, ask: async () => ({ provider: 'jev' as const, inputTokens: 1, answers: {
+      dest: { probabilities: { existing_card: 0.95, new_card: 0.02, memory: 0.01, note: 0.02 } }, card: { probabilities: { c0: 0.95, none: 0.05 } }, clear: { noul: 0.9 } } }) }
+    const service = new DropService({ drops: h.drops, feed: h.feed, writers: h.writers, router: new DropRouter({ client, enabled: () => true }) })
+    const out = await service.submit(drop('Add the Clover stat to the price test card'))
+    expect(out.drop).toMatchObject({ state: 'filed', dest: 'existing_card', links: [{ kind: 'card', id: 'bbbbbbbbbbbb' }] })
+    expect(out.drop.links[0].label).not.toMatch(/[\x00-\x1f]/)
+  })
+
   it('refuses after 24 hours', async () => {
     const h = harness()
     const out = await h.service.submit(drop('Draft the onboarding email sequence for new liquor stores'))
