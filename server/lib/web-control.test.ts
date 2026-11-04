@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { request as httpRequest, type Server } from 'node:http'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -233,6 +233,11 @@ describe('Dedicated Web Session Cookie, CSRF & Handoff Auth', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cos-web-epoch-'))
     setWebSessionEpochFile(join(dir, 'web-session.json'))
     const file = join(dir, 'web-session.json')
+    // A fixed clock: on the real clock a run that crossed a second boundary between creating
+    // the file and losing it recovered to first + 1 (the bumped epoch) and failed. Production
+    // creates the file on first run, long before any loss; see currentWebSessionEpoch.
+    const T = 1_793_000_000_000
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(T)
     try {
       // A first run starts the epoch from the clock, never from 0 (review W5).
       const first = currentWebSessionEpoch()
@@ -250,19 +255,25 @@ describe('Dedicated Web Session Cookie, CSRF & Handoff Auth', () => {
       // A forged epoch fails the signature.
       const [exp, , sig] = before.split('.')
       expect(verifyWebSessionCookieValue(`${exp}.${first + 1}.${sig}`, API_TOKEN)).toBe(false)
-      // A corrupt file never rolls back: the epoch moves forward and every old cookie dies.
+      // An hour later the file is corrupt. It never rolls back: the epoch moves forward and
+      // every old cookie dies.
+      clock.mockReturnValue(T + 60 * 60_000)
       writeFileSync(file, '{not json')
       setWebSessionEpochFile(file)
       const recovered = currentWebSessionEpoch()
-      expect(recovered).toBeGreaterThanOrEqual(first)
-      expect(recovered).not.toBe(first + 1)
+      // Above every epoch ever issued (first, then first + 1), so neither cookie comes back.
+      expect(recovered).toBeGreaterThan(first + 1)
+      expect(verifyWebSessionCookieValue(before, API_TOKEN)).toBe(false)
       expect(verifyWebSessionCookieValue(after, API_TOKEN)).toBe(false)
       expect(JSON.parse(readFileSync(file, 'utf8')).epoch).toBe(recovered)
       // A deleted file does the same.
       rmSync(file)
       setWebSessionEpochFile(file)
+      expect(currentWebSessionEpoch()).toBeGreaterThan(first + 1)
+      expect(verifyWebSessionCookieValue(before, API_TOKEN)).toBe(false)
       expect(verifyWebSessionCookieValue(after, API_TOKEN)).toBe(false)
     } finally {
+      clock.mockRestore()
       setWebSessionEpochFile(null)
       rmSync(dir, { recursive: true, force: true })
     }

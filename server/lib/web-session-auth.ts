@@ -58,9 +58,11 @@ export function setWebSessionEpochFile(path: string | null): void {
 
 /**
  * The epoch NEVER moves backwards (review W5). A missing file (first run, or deleted) and an
- * unreadable or corrupt one both start a new epoch from the clock in whole seconds, which is
- * above any count of earlier "Sign out every browser" bumps, so no cookie from before can come
- * back to life. The cost is one more sign-in after such an event, never a revival.
+ * unreadable or corrupt one both start a new epoch from the clock in whole seconds. Each "Sign
+ * out every browser" adds 1 to the epoch the file was created with, so the clock is above every
+ * earlier epoch unless the file is lost within k seconds of its creation after k bumps (in use
+ * the file is created on first run, long before). So no cookie from before can come back to
+ * life; the cost is one more sign-in after such an event. Tests pin Date.now for this reason.
  */
 export function currentWebSessionEpoch(): number {
   if (epochCache !== null) return epochCache
