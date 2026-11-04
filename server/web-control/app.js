@@ -114,8 +114,16 @@
     sessions: [], sessionsMode: 'words', workTasks: [], workOpenStages: { complete: false },
     stream: null, memoriesLoaded: false, lastLoad: {}, livePoll: null
   };
-  var ROOT_PANES = ['today', 'meetings', 'work', 'sessions', 'messages', 'memories', 'speakers', 'usage', 'settings'];
-  var TITLES = { today: 'Today', meetings: 'Meetings', work: 'Work', sessions: 'Sessions', messages: 'Messages', memories: 'Memories', speakers: 'Speakers', usage: 'Usage', settings: 'Settings' };
+  // Control's order (ActivitySection.visibleSections): Today, then Messages to Dictation. Usage is a
+  // view inside Sessions on the Mac; its route stays so old links work, and the rail marks Sessions.
+  var ROOT_PANES = ['today', 'messages', 'speakers', 'meetings', 'memories', 'threads', 'sessions', 'work', 'dictation', 'usage', 'settings'];
+  var TITLES = { today: 'Today', messages: 'Messages', speakers: 'Speakers', meetings: 'Meetings', memories: 'Memories', threads: 'Threads', sessions: 'Sessions', work: 'Work', dictation: 'Dictation', usage: 'Usage', settings: 'Settings' };
+  // Pane modules (panes/*.js) register here: { load(args, ctx), leave(), up(args) }. A registered
+  // pane owns its section; route() only shows it and hands it the hash arguments.
+  var PANES = {};
+  var routeHooks = [];
+  var shellHooks = [];
+  var crumbDetail = '';
 
   // ── routing ─────────────────────────────────────────────
   function parseRoute() {
@@ -131,10 +139,13 @@
   function route() {
     var r = parseRoute();
     var changedPane = r.pane !== state.pane || !document.querySelector('#pane-' + r.pane + ':not(.hidden)');
+    if (state.pane !== r.pane && PANES[state.pane] && PANES[state.pane].leave) { try { PANES[state.pane].leave(); } catch (err) { console.error(err); } }
     state.pane = r.pane;
+    crumbDetail = '';
     document.querySelectorAll('.pane').forEach(function (sec) { sec.classList.toggle('hidden', sec.id !== 'pane-' + r.pane); });
     document.querySelectorAll('#section-menu [data-goto]').forEach(function (b) { if (b.getAttribute('data-goto') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-    document.querySelectorAll('.rail-btn').forEach(function (b) { if (b.getAttribute('data-pane') === r.pane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    var railPane = r.pane === 'usage' ? 'sessions' : r.pane;
+    document.querySelectorAll('.rail-btn').forEach(function (b) { if (b.getAttribute('data-pane') === railPane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     if (state.stream && !(r.pane === 'sessions' && r.args.length === 2)) { state.stream.close(); state.stream = null; }
     if (!(r.pane === 'sessions' && r.args.length === 2)) { clearInterval(state.turnPoll); if (state.reading) clearInterval(state.reading.heldTimer); state.reading = null; }
     if (r.pane !== 'meetings' && state.livePoll) { clearInterval(state.livePoll); state.livePoll = null; }
@@ -155,7 +166,8 @@
     $('topbar').classList.remove('tucked');
     onScroll();
 
-    if (r.pane === 'today') loadToday();
+    if (PANES[r.pane]) { try { PANES[r.pane].load(r.args, { changed: changedPane }); } catch (err) { console.error(err); } }
+    else if (r.pane === 'today') loadToday();
     else if (r.pane === 'sessions') { if (!reading || !state.sessions.length || changedPane) loadSessions(); if (reading) openSession(r.args[0], r.args[1]); }
     else if (r.pane === 'meetings') { if (changedPane || !reading) loadMeetings(); if (reading) openMeeting(r.args[0], r.args[1], r.args[2]); }
     else if (r.pane === 'work') loadWork();
@@ -165,10 +177,16 @@
     else if (r.pane === 'usage') loadUsage(false);
     else if (r.pane === 'settings') loadSettings();
     state.lastLoad[r.pane] = Date.now();
+    runHooks(routeHooks, r);
   }
+  function runHooks(list, arg) { list.forEach(function (fn) { try { fn(arg); } catch (err) { console.error(err); } }); }
+  // Back unwinds one step, the way Control's Back does: a pane module may name the step above a
+  // nested reader (an archive chat goes back to its day, not to the list).
   function goBack() {
     var r = parseRoute();
-    if (r.args.length) go(r.pane);
+    var up = PANES[r.pane] && PANES[r.pane].up ? PANES[r.pane].up(r.args) : null;
+    if (up) go(r.pane, up);
+    else if (r.args.length) go(r.pane);
     else go('today');
   }
   // On the closed Duo every vertical pixel counts: the top bar slides away while you scroll
@@ -198,6 +216,7 @@
     state.serverName = (info && info.serverName) || 'Your Mac';
     $('host-name').textContent = state.serverName.replace(/-/g, ' ');
     loadTailnetUrl();
+    runHooks(shellHooks, info);
     route();
   }
 
@@ -1166,8 +1185,8 @@
 
   // ── Ask sheet (⌘K) ──────────────────────────────────────
   var JUMPS = [
-    ['today', 'Today'], ['meetings', 'Meetings'], ['work', 'Work'], ['sessions', 'Sessions'], ['messages', 'Messages'],
-    ['memories', 'Memories'], ['speakers', 'Speakers'], ['usage', 'Usage'], ['settings', 'Settings']
+    ['today', 'Today'], ['messages', 'Messages'], ['speakers', 'Speakers'], ['meetings', 'Meetings'], ['memories', 'Memories'],
+    ['threads', 'Threads'], ['sessions', 'Sessions'], ['work', 'Work'], ['dictation', 'Dictation'], ['usage', 'Usage'], ['settings', 'Settings']
   ];
   function openAsk(prefill) {
     $('ask-sheet').classList.remove('hidden');
@@ -1367,7 +1386,46 @@
   });
 
   // ── boot ────────────────────────────────────────────────
-  (function boot() {
+  // Copy that tells the truth: a plain-http tailnet page is not a secure context, so
+  // navigator.clipboard is missing there. Fall back to a selected textarea, and reject when both
+  // fail so no toast claims a copy that did not happen.
+  function copyText(text) {
+    return new Promise(function (resolve, reject) {
+      function fallback() {
+        var ta = document.createElement('textarea');
+        ta.value = String(text == null ? '' : text);
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select(); ta.setSelectionRange(0, ta.value.length);
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (_e) { ok = false; }
+        document.body.removeChild(ta);
+        if (ok) resolve(); else reject(new Error('This browser would not copy. Select the text and copy it yourself.'));
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) navigator.clipboard.writeText(String(text)).then(resolve, fallback);
+      else fallback();
+    });
+  }
+
+  // ── the shared kit for pane modules (panes/*.js) ───────
+  window.COSWeb = {
+    $: $, esc: esc, md: md, plain: plain, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
+    plural: plural, countWord: countWord, dayWord: dayWord, providerLabel: providerLabel, domainLabel: domainLabel,
+    skeletonRows: skeletonRows, emptyBox: emptyBox, setStatus: setStatus, autoGrow: autoGrow,
+    readStore: readStore, writeStore: writeStore, copyText: copyText, isPhone: isPhone,
+    state: state, titles: TITLES, go: go, parseRoute: parseRoute, goBack: goBack,
+    registerPane: function (name, def) { PANES[name] = def; },
+    onRoute: function (fn) { routeHooks.push(fn); },
+    onShell: function (fn) { shellHooks.push(fn); },
+    // The detail title after "COS Control > Section" (Control's breadcrumb). Pane modules set it
+    // once a detail has loaded; route() clears it on every navigation.
+    setCrumb: function (text) { crumbDetail = String(text || ''); runHooks(routeHooks, parseRoute()); },
+    crumb: function () { return crumbDetail; }
+  };
+
+  // Every pane module is a plain script after this one; boot waits for all of them.
+  function boot() {
     var params = new URLSearchParams(location.search);
     var handoff = params.get('handoff');
     if (handoff) {
@@ -1377,5 +1435,6 @@
       return;
     }
     api('/api/web-session/status').then(function (st) { if (st && st.authenticated) showShell(st); else showAuth(); }).catch(function () { showAuth('COS on your Mac is not answering. Check that the Mac is awake and on Tailscale.'); });
-  })();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 })();
