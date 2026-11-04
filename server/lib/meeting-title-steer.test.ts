@@ -271,7 +271,24 @@ describe('title steer store', () => {
     expect(store.set('__proto__', 'Odd but legal', 0)).toMatchObject({ title: 'Odd but legal', revision: 1 })
     expect(({} as Record<string, unknown>).title).toBeUndefined()
     expect(createTitleSteerStore({ path }).get('__proto__')).toMatchObject({ title: 'Odd but legal', revision: 1 })
-    expect(createTitleSteerStore({ path }).title('constructor')).toBeNull()
+    // Read back from the file: Object members still read as absent, and the stored `__proto__` entry is the only one there.
+    const reloaded = createTitleSteerStore({ path })
+    for (const id of ['constructor', 'toString', 'hasOwnProperty']) {
+      expect(reloaded.get(id), id).toEqual({ sessionId: id, title: null, revision: 0, updatedAt: null })
+      expect(reloaded.title(id), id).toBeNull()
+    }
+  })
+
+  it('the file is cleaned as it is rewritten: an entry the reader refused is gone after the next write', () => {
+    const { path } = scratch()
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, entries: {
+      'bad id': { title: 'x', revision: 1, updatedAt: Date.now() },
+      meeting_zero_0001: { title: 'x', revision: 0, updatedAt: Date.now() },
+      [SID]: { title: 'Good', revision: 1, updatedAt: Date.now() },
+    } }))
+    const store = createTitleSteerStore({ path })
+    store.set('meeting_other_0001', 'Trigger a write', 0)
+    expect(Object.keys(JSON.parse(readFileSync(path, 'utf-8')).entries).sort()).toEqual([SID, 'meeting_other_0001'].sort())
   })
 })
 

@@ -838,7 +838,7 @@ export function publishLiveTitleSteer(sessionId: string): boolean {
     if (!sessions.has(sessionId)) return false
     const filePath = resolve(CHUNK_PERSIST_DIR, `${sessionId}.json`)
     const stat = lstatSync(filePath)
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 1024 * 1024) return false
+    if (!stat.isFile() || stat.size > 256 * 1024 * 1024) return false   // lstat: a symlink is not a file here
     const record = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>
     if (record.sessionId !== sessionId) return false
     const { titleSteer, ...rest } = record

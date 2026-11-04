@@ -97,7 +97,7 @@ export interface TitleSteerStore {
   readonly path: string
   /** The current steer, or { title: null, revision: 0, updatedAt: null } when none was ever set. */
   get(sessionId: string): TitleSteerView
-  /** Just the text a save may use (null when none or cleared). Never throws on a malformed id. */
+  /** Just the text a save may use (null when none or cleared). Never throws, whatever the id. */
   title(sessionId: string): string | null
   /**
    * Set (a non-empty title) or clear ('' or null) the steer. `expectedRevision` must equal the current revision (0 when
@@ -132,9 +132,9 @@ export function createTitleSteerStore(options: { path?: string; now?: () => numb
       return view(sessionId, entries[sessionId])
     },
     title(sessionId) {
-      if (!SESSION_ID.test(sessionId)) return null
       const entries = load()
       prune(entries, now())
+      // No id check: the ledger has a null prototype and its keys are all valid ids, so an odd id simply is not there.
       return entries[sessionId]?.title ?? null
     },
     set(sessionId, rawTitle, expectedRevision) {

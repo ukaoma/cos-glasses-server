@@ -3,7 +3,7 @@
 // test) because importing server modules runs them. Synthetic text only. Nothing reaches a model or the COS library.
 
 import express from 'express'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Server } from 'node:http'
@@ -94,8 +94,12 @@ it('a live Mac recording takes a steer; the active-session record Control reads 
   const replay = await startRecording()
   expect(replay.json).toMatchObject({ replayed: true, titleSteer: 'Polling accuracy chat' })
   expect((await call(`/meeting/sessions/${id}/status`)).json.titleSteer).toBe('Polling accuracy chat')
+  // The same title again (a new revision, the same text) does not rewrite the record.
+  const inode = statSync(join(process.env.COS_DATA_DIR!, 'active-sessions', `${id}.json`)).ino
+  expect((await steer('Polling accuracy chat', 1)).json.revision).toBe(2)
+  expect(statSync(join(process.env.COS_DATA_DIR!, 'active-sessions', `${id}.json`)).ino).toBe(inode)
   // Clearing removes the key entirely.
-  expect((await steer('', 1)).json).toMatchObject({ title: null, revision: 2 })
+  expect((await steer('', 2)).json).toMatchObject({ title: null, revision: 3 })
   expect('titleSteer' in activeFile()).toBe(false)
   expect((await call(`/meeting/sessions/${id}/status`)).json.titleSteer).toBeNull()
 })
