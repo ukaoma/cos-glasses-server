@@ -325,9 +325,12 @@ describe('retention', () => {
     expect(h.drops.get(gone.drop.id)).toBeUndefined()
     expect(h.feed.list().filter(i => i.threadId === gone.drop.id)).toEqual([])
     expect(h.feed.list().filter(i => i.threadId === kept.drop.id && i.kind === 'drop')).toHaveLength(1)
-    // A reopen purges too: no chat line ever outlives its drop.
+    // A reopen purges too: a chat line left behind (say, a stop between the two writes) never outlives its drop.
+    const orphan = randomUUID(), at = new Date().toISOString()
+    h.feed.insert([{ id: `fi_${'7'.repeat(32)}`, kind: 'drop', threadId: orphan, createdAt: at, readAt: at, source: 'mac', line: 'left behind', links: [], actions: [], state: 'live', key: `${orphan}:drop` }])
     const { feed } = h.reopen()
-    expect(feed.list().some(i => i.threadId === gone.drop.id)).toBe(false)
+    expect(feed.list().some(i => i.threadId === gone.drop.id || i.threadId === orphan)).toBe(false)
+    expect(feed.list().some(i => i.threadId === kept.drop.id)).toBe(true)
   })
 })
 

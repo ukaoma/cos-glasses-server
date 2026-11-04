@@ -118,6 +118,7 @@ describe('on', () => {
     for (const target of [{ id: 'thread-3', label: 'a\nb' }, { id: 'thread-3', label: 'x'.repeat(201) }, { id: '../x', label: 'ok' }, { id: 'thread-3' }]) {
       const out = await h.call('POST', `/drops/${filed.body.drop.id}/move`, { dest: 'thread', target })
       expect(out.status, JSON.stringify(target)).toBe(400)
+      expect(out.body.error.code, JSON.stringify(target)).toBe('invalid_move')  // refused by the route itself
     }
     expect([...h.writers.cards.values()][0].archived).toBe(false)
     expect((await h.call('GET', `/drops/${filed.body.drop.id}`)).body.drop.dest).toBe('new_card')
