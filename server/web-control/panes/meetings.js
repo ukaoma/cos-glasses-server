@@ -1735,7 +1735,8 @@
       repaintAllAsk();
     }, function (err) {
       S.conf.modelBusy = false;
-      if (!(err && err.status === 401)) S.conf.modelNote = 'Could not change the model: ' + ((err && err.message) || 'the server did not answer') + '.';
+      var why = { invalid_model: 'this server does not offer that model', model_unavailable: 'that model is not available on your Mac right now', maintenance: 'COS is updating, try again in a minute' }[err && (err.code || err.message)];
+      if (!(err && err.status === 401)) S.conf.modelNote = 'Could not change the model: ' + (why || (err && err.message) || 'the server did not answer') + '.';
       repaintAllAsk();
     });
   }
