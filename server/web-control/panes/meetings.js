@@ -105,12 +105,26 @@
   }
   function canReviewVoices(m) { return !!m.sessionId && m.librarySource !== 'imported' && m.derivedKind !== 'split' && !isPhone(m.sessionId, m.sourceType); }
   // MeetingStatusPills: the voice tag the row's own voiceReview carries (Control's voiceTag(for:)).
-  function voiceTag(m) {
-    var r = m && m.voiceReview; if (!r) return null;
-    var un = r.unattributedVoices == null ? null : num(r.unattributedVoices);
-    if (un === 0 && r.humanTouched === true) return { cls: 'ok', text: 'REVIEWED' };
+  // Speakers' memory (Control's SpeakerListMemory), kept by the Speakers pane. Read here, never written.
+  function speakerMemory() { var v = W.readStore('cos_web_speaker_memory'); return v && typeof v === 'object' ? v : {}; }
+  function tagFor(un, finished) {
+    if (un === 0 && finished) return { cls: 'ok', text: 'REVIEWED' };
     if (un != null && un > 0) return { cls: 'warn', text: un + ' TO NAME' };
     return null;
+  }
+  // MeetingStatusPills' tag: Control's voiceTag(sessionId:). A row in the Speakers inbox (the newest 30 with a session)
+  // reads its review with the visit over it; any other row shows only a visit Speakers recorded.
+  function voiceTag(m) {
+    var sid = m && m.sessionId; if (!sid) return null;
+    var visits = speakerMemory().visits, visit = visits && typeof visits === 'object' ? visits[sid] : null;
+    var inbox = S.inbox && S.inbox[sid];
+    if (inbox) {
+      var r = inbox.voiceReview || m.voiceReview || {};
+      var un = visit && visit.unattributedVoices != null ? num(visit.unattributedVoices) : (r.unattributedVoices != null ? num(r.unattributedVoices) : null);
+      return tagFor(un, (visit && visit.humanTouched === true) || r.humanTouched === true);
+    }
+    if (!visit) return null;
+    return tagFor(num(visit.unattributedVoices), visit.humanTouched === true);
   }
   function pillsHtml(m, isNew) {
     var out = '';
@@ -627,7 +641,25 @@
   }
 
   // NEW is Speakers' memory (Control's isInboxNew). It is read here, never written.
-  function isNew(_sessionId) { return false; }
+  // Control's isInboxNew: in the Speakers inbox and not yet acknowledged there (none before Speakers first seeds it).
+  function isNew(sessionId) {
+    if (!sessionId || !S.inbox || !S.inbox[sessionId]) return false;
+    var ack = speakerMemory().acknowledged;
+    return Array.isArray(ack) && ack.length > 0 && ack.indexOf(sessionId) < 0;
+  }
+  // The Speakers inbox: GET /api/meetings?limit=30, rows with a session (the helper's reviewable list).
+  function loadInbox() {
+    if (S.inboxBusy) return;
+    S.inboxBusy = true;
+    api('/api/meetings?limit=30').then(function (d) {
+      S.inboxBusy = false;
+      var map = {};
+      ((d && d.meetings) || []).forEach(function (m) { if (m && m.sessionId) map[m.sessionId] = m; });
+      S.inbox = map;
+      if (S.view === 'list') paintList();
+      else if (S.view === 'detail') paintBar();
+    }, function () { S.inboxBusy = false; });
+  }
 
   // A write whose refusal is an answer to read ({status, body}), never an error to throw. W.api handles sign-out.
   function answer(path, opts) {
@@ -1053,6 +1085,7 @@
     } else if (!S.detailRow) S.detailRow = findRow(key);
     if (S.detailRow) W.setCrumb(S.detailRow.title || 'Meeting');
     paintDetail();
+    if (!S.inbox) loadInbox();
     if (S.detail) { W.setCrumb(detailRow().title || 'Meeting'); detailSessions().forEach(function (sid) { panelOpen(sid); }); return; }
     var id = ++S.detailSeq;
     S.detailLoading = true;
@@ -1134,6 +1167,12 @@
         '<article class="mt-doc">' + documentHtml(d) + '</article></div>';
     }
     pane.innerHTML = '<div class="cx mt mt-detail" data-tint="meetings">' + head + body + '</div>';
+  }
+  function paintBar() {
+    if (S.view !== 'detail' || !S.detail) return;
+    var bar = pane.querySelector('.mt-bar'); if (!bar) return;
+    var note = pane.querySelector('.mt-copynote'); if (note) note.remove();
+    bar.outerHTML = detailBarHtml(detailRow(), S.detail);
   }
   function setCopyNote(text) {
     S.copyNote = text;
@@ -1899,7 +1938,7 @@
       case 'copy-summary': copyDetail('summary'); return;
       case 'copy-transcript': copyDetail('transcript'); return;
       case 'download': downloadDetail(); return;
-      case 'review': location.hash = '#/speakers/review/' + encodeURIComponent(sid); return;
+      case 'review': W.go('speakers', ['review', sid]); return;
       case 'panel': {
         a = A(sid); a.view = t.getAttribute('data-view') === 'cues' ? 'cues' : 'ask'; repaintAsk(sid);
         if (a.view === 'cues') loadCues(sid, true);
@@ -1982,6 +2021,7 @@
       renderList();
       if (!S.rows && !S.loading) loadMonth();
       loadOrphans();
+      loadInbox();
       pollFiles();
       S.listTimer = setInterval(function () { if (S.view === 'list') pollFiles(); }, 3000);
       if (queryActive() && S.ranFor !== S.q.trim() && !S.searching) runSearch();
