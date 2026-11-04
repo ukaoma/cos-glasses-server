@@ -852,15 +852,18 @@
   //   if the session is busy, park it in the session's queue -> watch the live stream.
   // A refusal is an answer with the server's own words, never an error to retry blindly. The
   // draft key is reused on a resend, so a retry after a lost answer can never post twice.
+  // One id for the life of the page, read once. Without storage (a private window) the old code made
+  // a new id on every call, so one page sent different ids to /attach, /queued-turns and /fork.
   var WEB_SESSION_KEY = 'cos_web_sid';
+  var webSessionId = null;
   function cosSessionId() {
-    try {
-      var v = localStorage.getItem(WEB_SESSION_KEY);
-      if (v && /^web-[a-z0-9]{8,24}$/.test(v)) return v;
-      v = 'web-' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36).slice(-4);
-      localStorage.setItem(WEB_SESSION_KEY, v);
-      return v;
-    } catch (_e) { return 'web-' + Date.now().toString(36); }
+    if (webSessionId) return webSessionId;
+    var stored = null;
+    try { stored = localStorage.getItem(WEB_SESSION_KEY); } catch (_e) { stored = null; }
+    if (stored && /^web-[a-z0-9]{8,24}$/.test(stored)) return (webSessionId = stored);
+    webSessionId = 'web-' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36).slice(-4);
+    try { localStorage.setItem(WEB_SESSION_KEY, webSessionId); } catch (_e) {}
+    return webSessionId;
   }
   function newTurnKey() { return 'ct' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10).padEnd(8, '0'); }
   function targetKey(provider, id) { return provider.length + ':' + provider + ':' + id.length + ':' + id; }
