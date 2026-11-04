@@ -10,6 +10,7 @@ import {
   mintWebSessionCookieValue,
   classifyWebLogin,
   type WebLoginFailure,
+  WebGlassesCodeProbeBudget,
   WEB_SESSION_TTL_MS,
   WebHandoffStore,
   WebLoginLimiter,
@@ -46,6 +47,9 @@ export interface WebControlRouterDeps {
   queryTailscaleStatus?: () => Promise<{ backendState: string; selfIps: string[]; selfDnsName?: string | null; certDomains?: string[] } | null>
   /** Read-only: is this normalised code the live glasses pairing code? (PairingState.isLiveCode) */
   glassesCodeIsLive?: (code: string) => boolean
+  /** Names the live glasses code (its expiry), or null when none is showing. Scopes the probe budget. */
+  liveGlassesCodeKey?: () => string | null
+  glassesProbeBudget?: WebGlassesCodeProbeBudget
   /** This Mac's Tailscale IPv4, for the phone link in a handoff. Defaults to the interfaces. */
   tailnetIpv4?: () => string | null
   /** Where sign-in failures are logged. Kind, length and socket IP only, never the value. */
@@ -133,6 +137,11 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
   const deviceCodes = deps.deviceCodeStore ?? new WebDeviceCodeStore()
   const smallJson = express.json({ limit: '64kb' })
   const log = deps.log ?? ((line: string) => console.log(line))
+  const glassesBudget = deps.glassesProbeBudget ?? new WebGlassesCodeProbeBudget()
+  const isLiveGlassesCode = deps.glassesCodeIsLive
+  const glassesCheck = isLiveGlassesCode
+    ? (code: string): boolean => glassesBudget.check(deps.liveGlassesCodeKey ? deps.liveGlassesCodeKey() : 'live', () => isLiveGlassesCode(code))
+    : undefined
 
   const allowedPorts = (): number[] => {
     const ports = [deps.port()]
@@ -210,19 +219,20 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     const ip = normalizeRemoteIp(req.socket?.remoteAddress ?? '')
     const retryAfterS = loginLimiter.blockedFor(ip)
     if (retryAfterS > 0) {
+      const last = loginLimiter.lastFailure(ip)
       res.setHeader('Retry-After', String(retryAfterS))
       return res.status(429).json({
         ok: false,
         error: 'too_many_attempts',
-        reason: loginLimiter.lastFailure(ip),
-        message: webLoginLockoutMessage(retryAfterS, loginLimiter.lastFailure(ip)),
+        ...(last ? { reason: last } : {}),
+        message: webLoginLockoutMessage(retryAfterS, last),
       })
     }
     const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
       ? req.body as { token?: unknown; handoff?: unknown; code?: unknown }
       : {}
     const token = deps.apiToken()
-    const result = classifyWebLogin(body, token, handoffStore, deviceCodes, deps.glassesCodeIsLive)
+    const result = classifyWebLogin(body, token, handoffStore, deviceCodes, glassesCheck)
     if (!result.ok) {
       // Every failure counts, the glasses-code one included, so that check cannot be used to
       // probe codes faster than the limiter allows.

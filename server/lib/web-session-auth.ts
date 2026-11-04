@@ -14,7 +14,7 @@ import {
 } from './network-policy.js'
 import { readSwitch } from './env-switch.js'
 import { timingSafeTokenEqual } from './token-auth.js'
-import { CROCKFORD_ALPHABET, PAIRING_CODE_LENGTH } from './glasses-pairing.js'
+import { CROCKFORD_ALPHABET, PAIRING_CODE_ATTEMPT_LIMIT, PAIRING_CODE_LENGTH } from './glasses-pairing.js'
 
 export const WEB_SESSION_COOKIE_NAME = 'cos_web_session'
 export const WEB_CSRF_HEADER = 'x-cos-web'
@@ -314,11 +314,14 @@ export function classifyWebLogin(
   codeStore?: WebDeviceCodeStore,
   isGlassesCode?: (code: string) => boolean,
 ): WebLoginResult {
+  const raw = typeof input.token === 'string' ? input.token.trim() : ''
   const token = normalizePastedToken(input.token)
-  if (token.length > 0) {
-    return timingSafeTokenEqual(token, apiToken)
-      ? { ok: true, kind: 'token' }
-      : { ok: false, reason: 'wrong_token', length: token.length }
+  if (token.length > 0 || raw.length > 0) {
+    // The value as typed first (a provisioned token is never second-guessed), then the
+    // paste-cleaned one. Still one sign-in attempt either way.
+    if (raw.length > 0 && timingSafeTokenEqual(raw, apiToken)) return { ok: true, kind: 'token' }
+    if (token.length > 0 && token !== raw && timingSafeTokenEqual(token, apiToken)) return { ok: true, kind: 'token' }
+    return { ok: false, reason: 'wrong_token', length: token.length || raw.length }
   }
   if (handoffStore && typeof input.handoff === 'string' && input.handoff.trim().length > 0) {
     const ticket = input.handoff.trim()
@@ -336,6 +339,32 @@ export function classifyWebLogin(
     return { ok: false, reason: glasses ? 'glasses_code' : 'wrong_code', length: code?.length ?? input.code.trim().length }
   }
   return { ok: false, reason: 'missing', length: 0 }
+}
+
+/**
+ * How many times web sign-in may ask "is this the glasses code?" about one live glasses code,
+ * across every device (review W1). The glasses claim route allows PAIRING_CODE_ATTEMPT_LIMIT
+ * guesses per code, but the web limiter counts per IP, so without this cap many tailnet
+ * addresses would each get their own answers about the same code. Past the budget a typed code
+ * reads as a plain wrong code, which says nothing. Pairing state is never touched: the key is
+ * read from it, the count lives here, and a newly shown glasses code starts a fresh budget.
+ */
+export class WebGlassesCodeProbeBudget {
+  private key: string | null = null
+  private count = 0
+  constructor(private readonly limit = PAIRING_CODE_ATTEMPT_LIMIT) {}
+
+  /** `key` names the live glasses code (null when none is showing); `isLive` is the read-only check. */
+  check(key: string | null, isLive: () => boolean): boolean {
+    if (key === null) return false
+    if (key !== this.key) {
+      this.key = key
+      this.count = 0
+    }
+    this.count += 1
+    if (this.count > this.limit) return false
+    return isLive()
+  }
 }
 
 export function verifyLoginTokenOrHandoff(

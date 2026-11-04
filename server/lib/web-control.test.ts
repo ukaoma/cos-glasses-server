@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import express from 'express'
-import type { Server } from 'node:http'
+import { request as httpRequest, type Server } from 'node:http'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +24,7 @@ import {
   normalizeDeviceCode,
   normalizePastedToken,
   classifyWebLogin,
+  WebGlassesCodeProbeBudget,
   setWebSessionEpochFile,
   currentWebSessionEpoch,
   bumpWebSessionEpoch,
@@ -748,6 +749,85 @@ describe('Sign-in failures say what went wrong (6.99.3)', () => {
       const reused = await login(both.ticket)
       expect(reused.status).toBe(401)
       expect(await reused.json()).toMatchObject({ reason: 'handoff_expired' })
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+})
+
+describe('6.99.3 review fixes (W1, W2, notes a and b)', () => {
+  it('a typed token is compared as typed first, then paste-cleaned, and near misses fail', () => {
+    const handoffs = new WebHandoffStore()
+    // Provisioned tokens with characters the cleaner would strip still work as typed.
+    expect(classifyWebLogin({ token: '"wrapped-token"' }, '"wrapped-token"', handoffs)).toEqual({ ok: true, kind: 'token' })
+    expect(classifyWebLogin({ token: 'has space inside' }, 'has space inside', handoffs)).toEqual({ ok: true, kind: 'token' })
+    for (const near of [API_TOKEN + 'x', API_TOKEN.slice(1), API_TOKEN.slice(0, 5) + '"' + API_TOKEN.slice(5), API_TOKEN.toUpperCase()]) {
+      expect(classifyWebLogin({ token: near }, API_TOKEN, handoffs)).toMatchObject({ ok: false, reason: 'wrong_token' })
+    }
+    // A token of nothing but invisible characters is still a wrong token, not a missing one.
+    expect(classifyWebLogin({ token: '\u200B\u200B' }, API_TOKEN, handoffs)).toEqual({ ok: false, reason: 'wrong_token', length: 2 })
+  })
+
+  it('caps glasses-code answers per live code across every device, and a new code starts fresh', () => {
+    const budget = new WebGlassesCodeProbeBudget(3)
+    let asked = 0
+    const live = () => { asked += 1; return true }
+    expect([1, 2, 3, 4, 5].map(() => budget.check('code-A', live))).toEqual([true, true, true, false, false])
+    expect(asked).toBe(3)
+    expect(budget.check(null, live)).toBe(false)
+    expect(asked).toBe(3)
+    expect(budget.check('code-B', live)).toBe(true)
+    expect(new WebGlassesCodeProbeBudget().check('k', () => true)).toBe(true)
+  })
+
+  it('the login route spends the shared budget, then answers wrong_code', async () => {
+    const app = express()
+    let port = 0
+    app.use('/api', requireApiToken(API_TOKEN, { selfDnsName: () => REAL_DNS, allowedPorts: () => [port] }))
+    app.use('/api', createWebControlRouter({
+      apiToken: () => API_TOKEN, port: () => port, selfDnsName: () => REAL_DNS, log: () => {},
+      glassesCodeIsLive: () => true, liveGlassesCodeKey: () => 'live-1', glassesProbeBudget: new WebGlassesCodeProbeBudget(2),
+    }))
+    const server: Server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+    port = (server.address() as { port: number }).port
+    const reason = async () => ((await (await fetch(`http://127.0.0.1:${port}/api/web-session/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: 'K7P3-QX9M' }),
+    })).json()) as { reason: string }).reason
+    try {
+      expect([await reason(), await reason(), await reason()]).toEqual(['glasses_code', 'glasses_code', 'wrong_code'])
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+
+  it('handoff: needs the token, refuses proxy headers, and ignores the Host header for phoneUrl', async () => {
+    const app = express()
+    let port = 0
+    app.use('/api', requireApiToken(API_TOKEN, { selfDnsName: () => REAL_DNS, allowedPorts: () => [port] }))
+    app.use('/api', createWebControlRouter({
+      apiToken: () => API_TOKEN, port: () => port, publicPort: () => 3141,
+      selfDnsName: () => REAL_DNS, tailnetIpv4: () => '100.108.149.114', log: () => {},
+    }))
+    const server: Server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)) })
+    port = (server.address() as { port: number }).port
+    const post = (headers: Record<string, string>) => new Promise<{ status: number; body: Record<string, any> }>((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path: '/api/web-session/handoff', method: 'POST', headers }, res => {
+        let text = ''
+        res.setEncoding('utf8')
+        res.on('data', chunk => { text += chunk })
+        res.on('end', () => { let body = {}; try { body = JSON.parse(text) } catch { body = {} } resolve({ status: res.statusCode ?? 0, body }) })
+      })
+      req.on('error', reject)
+      req.end()
+    })
+    try {
+      expect((await post({})).status).toBe(401)
+      expect((await post({ 'X-COS-Token': API_TOKEN, 'X-Forwarded-For': '203.0.113.9' })).status).toBe(403)
+      expect((await post({ 'X-COS-Token': API_TOKEN, 'X-Forwarded-Host': 'evil.example' })).status).toBe(403)
+      const spoofed = await post({ 'X-COS-Token': API_TOKEN, Host: 'evil.example' })
+      expect(spoofed.status).toBe(200)
+      expect(spoofed.body.phoneUrl).toBe(`http://${REAL_DNS}:3141/control?handoff=${spoofed.body.ticket}`)
+      expect(JSON.stringify(spoofed.body)).not.toContain('evil.example')
     } finally {
       await new Promise(resolve => server.close(resolve))
     }

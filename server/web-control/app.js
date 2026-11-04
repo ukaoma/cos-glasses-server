@@ -1290,7 +1290,8 @@
       api('/api/web-session/login', { method: 'POST', body: body }).then(function (d) { $('auth-token').value = ''; $('auth-code').value = ''; showShell(d); })
         .catch(function (err) {
           // The server names what failed (wrong token, wrong code, the glasses code, lockout).
-          showAuth(err.message);
+          // No status means the request never reached COS (the browser's own "Load failed").
+          showAuth(err && err.status ? err.message : 'Could not reach COS on your Mac. Check that this phone is on Tailscale and the Mac is awake.');
         });
     } else if (f.id === 'session-form') sendSessionTurn(false);
     else if (f.id === 'sessions-search-form') { $('sessions-q').blur(); searchSessions(); }

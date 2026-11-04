@@ -1404,6 +1404,7 @@ if (webControlEnabled()) {
     selfDnsName: () => tailnetSelf.currentSelfDnsName(),
     // A glasses pairing code typed on the web sign-in page gets its own message (read only).
     glassesCodeIsLive: code => pairingState.isLiveCode(code),
+    liveGlassesCodeKey: () => pairingState.status().code?.expiresAt ?? null,
     queryTailscaleStatus: async () => {
       const name = await tailnetSelf.refresh()
       return name ? { backendState: 'Running', selfIps: [], selfDnsName: name, certDomains: [] } : null
