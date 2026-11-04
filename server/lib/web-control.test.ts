@@ -22,7 +22,7 @@ import {
   WEB_LOGIN_MAX_FAILURES,
 } from './web-session-auth.js'
 import { requireApiToken } from './api-auth.js'
-import { createWebControlRouter, isMemoryWebOpReadOnly, webControlCsp } from '../routes/web-control.js'
+import { createWebControlRouter, isAllowedCorsOrigin, isMemoryWebOpReadOnly, webControlCsp } from '../routes/web-control.js'
 import { isReadOnlyApiPost } from './work-search.js'
 import { listLiveTranscriptSessions, readLiveTranscriptSession } from './web-live-chunks.js'
 import { readFallbackTokenAudit } from './web-usage-bridge.js'
@@ -434,5 +434,42 @@ describe('Web sign-in hardening (limiter, private status, CSP)', () => {
 
   it('does not exempt the removed /memory/web-op alias from the mutation lease', () => {
     expect(isReadOnlyApiPost('POST', '/memory/web-op')).toBe(false)
+  })
+})
+
+describe('CORS gate for the tailnet URL (isAllowedCorsOrigin)', () => {
+  function fakeDns(learned: string | null) {
+    let known: string | null = null
+    let reads = 0
+    return {
+      currentSelfDnsName: () => known,
+      queryStatus: async () => { reads++; known = learned; return null },
+      reads: () => reads,
+    }
+  }
+
+  it('reads Tailscale once for an unrecognised *.ts.net origin and admits only this Mac', async () => {
+    const dns = fakeDns(REAL_DNS)
+    expect(await isAllowedCorsOrigin(`http://${REAL_DNS}:3141`, dns)).toBe(true)
+    expect(dns.reads()).toBe(1)
+    expect(await isAllowedCorsOrigin(`http://${REAL_DNS}:3141`, dns)).toBe(true)
+    expect(dns.reads()).toBe(1)
+    expect(await isAllowedCorsOrigin('http://other-mac.tail38457f.ts.net:3141', dns)).toBe(false)
+  })
+
+  it('never reads status for localhost, LAN or a non-tailnet origin', async () => {
+    const dns = fakeDns(REAL_DNS)
+    expect(await isAllowedCorsOrigin('http://localhost:5173', dns)).toBe(true)
+    expect(await isAllowedCorsOrigin('http://192.168.1.20:3141', dns)).toBe(true)
+    expect(await isAllowedCorsOrigin('https://evil.example.com', dns)).toBe(false)
+    expect(await isAllowedCorsOrigin('not a url', dns)).toBe(false)
+    expect(dns.reads()).toBe(0)
+  })
+
+  it('refuses a *.ts.net origin when Tailscale cannot say who this Mac is', async () => {
+    const dns = fakeDns(null)
+    expect(await isAllowedCorsOrigin(`http://${REAL_DNS}:3141`, dns)).toBe(false)
+    const throwing = { currentSelfDnsName: () => null, queryStatus: async () => { throw new Error('no tailscale') } }
+    expect(await isAllowedCorsOrigin(`http://${REAL_DNS}:3141`, throwing)).toBe(false)
   })
 })

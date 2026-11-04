@@ -198,7 +198,7 @@ import {
 import { isPublicApiRequest, requireApiToken } from './lib/api-auth.js'
 import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
-import { createWebControlRouter, webControlCsp, webControlEnabled } from './routes/web-control.js'
+import { createWebControlRouter, isAllowedCorsOrigin, webControlCsp, webControlEnabled } from './routes/web-control.js'
 import { isManagedRuntime } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
 import {
@@ -277,8 +277,12 @@ app.use(cors({
   origin: (origin, cb) => {
     // Allow requests with no origin (same-origin, curl, SSE) or "null" origin (file:// WebViews like Even Hub)
     if (!origin || origin === 'null') return cb(null, true)
-    if (isAllowedNetworkOrigin(origin, { selfDnsName: getTailscaleNudger().currentSelfDnsName() })) return cb(null, true)
-    cb(new Error('CORS blocked'))
+    // Async only for an unrecognised *.ts.net origin (see isAllowedCorsOrigin); every other
+    // origin is decided from cached state, as before.
+    isAllowedCorsOrigin(origin, getTailscaleNudger()).then(
+      ok => ok ? cb(null, true) : cb(new Error('CORS blocked')),
+      () => cb(new Error('CORS blocked')),
+    )
   },
   // Without this, a cross-origin reader sees only the CORS-safelisted response
   // headers. The companion's origin is `null` (a file:// WebView), so it is
@@ -368,6 +372,9 @@ const pairingState = new PairingState({
 // request that arrives proves the tunnel carries COS traffic. Authenticated ones also mark the
 // address as a paired phone. Notes only, never answers; noteRequest never throws.
 const tailscaleNudger = installTailscaleNudger({ activeMeetings: () => getActiveTranscriptionSessionCount() })
+// COS Control Web: learn this Mac's MagicDNS name at boot so the first phone sign-in on the
+// tailnet URL is not refused while the nudger's own tick has yet to read status.
+if (webControlEnabled()) void tailscaleNudger.queryStatus().catch(() => null)
 app.use('/api', (req, _res, next) => {
   tailscaleNudger.noteRequest(req.socket?.remoteAddress, { meetingChunk: isMeetingChunkPost(req.method, req.path) })
   next()

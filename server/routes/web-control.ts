@@ -1,6 +1,6 @@
 import express, { Router, type Request, type Response } from 'express'
 import { hostname, networkInterfaces } from 'node:os'
-import { isLoopbackSocket, normalizeRemoteIp, normalizeTailscaleDnsName, reachableIpv4Addresses } from '../lib/network-policy.js'
+import { isAllowedNetworkOrigin, isLoopbackSocket, normalizeRemoteIp, normalizeTailscaleDnsName, reachableIpv4Addresses } from '../lib/network-policy.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { getTailscaleNudger } from '../lib/tailscale-nudge.js'
 import {
@@ -38,6 +38,29 @@ export interface WebControlRouterDeps {
   selfDnsName?: () => string | null
   baseDataDir?: () => string | undefined
   queryTailscaleStatus?: () => Promise<{ backendState: string; selfIps: string[]; selfDnsName?: string | null; certDomains?: string[] } | null>
+}
+
+/** What the CORS gate needs from the Tailscale nudger (the real one, or a fake in tests). */
+export interface SelfDnsSource {
+  currentSelfDnsName(): string | null
+  queryStatus(forceRefresh?: boolean): Promise<unknown>
+}
+
+/**
+ * The global CORS origin check. A phone on the tailnet opens
+ * `http://<mac>.<tailnet>.ts.net:3141/control` and every POST it sends (sign-in first) carries
+ * that Origin. The nudger learns the Mac's own Self.DNSName only on its own tick, and never when
+ * COS_TAILSCALE_NUDGE=0, so a `*.ts.net` origin it does not recognise yet triggers one status
+ * read (single-flight, cached 15 s) before the verdict. Any other unknown origin is refused
+ * without a read. Never a suffix match: only this Mac's exact name passes.
+ */
+export async function isAllowedCorsOrigin(origin: string, dns: SelfDnsSource): Promise<boolean> {
+  if (isAllowedNetworkOrigin(origin, { selfDnsName: dns.currentSelfDnsName() })) return true
+  let host = ''
+  try { host = new URL(origin).hostname.toLowerCase().replace(/\.$/, '') } catch { return false }
+  if (!host.endsWith('.ts.net')) return false
+  try { await dns.queryStatus() } catch { return false }
+  return isAllowedNetworkOrigin(origin, { selfDnsName: dns.currentSelfDnsName() })
 }
 
 export function webControlEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
