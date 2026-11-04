@@ -3,7 +3,7 @@
 // test) because importing server modules runs them. Synthetic text only. Nothing reaches a model or the COS library.
 
 import express from 'express'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Server } from 'node:http'
@@ -98,6 +98,35 @@ it('a live Mac recording takes a steer; the active-session record Control reads 
   expect((await steer('', 1)).json).toMatchObject({ title: null, revision: 2 })
   expect('titleSteer' in activeFile()).toBe(false)
   expect((await call(`/meeting/sessions/${id}/status`)).json.titleSteer).toBeNull()
+})
+
+it('publishLiveTitleSteer touches only a live session\'s own regular record: not a file with no live session, not a symlink, not a record of another session', async () => {
+  await boot()
+  const { getTitleSteerStore } = await import('../lib/meeting-title-steer.js')
+  const dir = join(process.env.COS_DATA_DIR!, 'active-sessions')
+  mkdirSync(dir, { recursive: true })
+  // 1. A record on disk with no live session behind it (what a stale file is): never rewritten.
+  const ghost = 'mac_11111111-2222-4333-8444-555555555555'
+  writeFileSync(join(dir, `${ghost}.json`), JSON.stringify({ sessionId: ghost, chunks: [] }))
+  getTitleSteerStore().set(ghost, 'Ghost steer', 0)
+  expect(stream.publishLiveTitleSteer(ghost)).toBe(false)
+  expect(JSON.parse(readFileSync(join(dir, `${ghost}.json`), 'utf8'))).toEqual({ sessionId: ghost, chunks: [] })
+  // 2. A live session whose record is a symlink: refused, the target untouched.
+  await startRecording()
+  getTitleSteerStore().set(id, 'Live steer', 0)
+  const target = join(root, 'elsewhere.json')
+  writeFileSync(target, JSON.stringify({ sessionId: id }))
+  rmSync(join(dir, `${id}.json`)); symlinkSync(target, join(dir, `${id}.json`))
+  expect(stream.publishLiveTitleSteer(id)).toBe(false)
+  expect(JSON.parse(readFileSync(target, 'utf8'))).toEqual({ sessionId: id })
+  // 3. A live session whose record names another session: refused.
+  rmSync(join(dir, `${id}.json`))
+  writeFileSync(join(dir, `${id}.json`), JSON.stringify({ sessionId: ghost }))
+  expect(stream.publishLiveTitleSteer(id)).toBe(false)
+  expect(JSON.parse(readFileSync(join(dir, `${id}.json`), 'utf8'))).toEqual({ sessionId: ghost })
+  // 4. A missing record is false, not a throw.
+  rmSync(join(dir, `${id}.json`))
+  expect(stream.publishLiveTitleSteer(id)).toBe(false)
 })
 
 it('a recording that is not live is refused: 404 session_not_live before the start, and the steer is not stored', async () => {

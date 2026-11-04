@@ -57,7 +57,7 @@ export function normalizeTitleSteer(raw: unknown): string {
   const text = raw
     .normalize('NFKC')
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
-    .replace(/[​-‏‪-‮⁠-⁩﻿]/g, '')
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
   if (Array.from(text).length > TITLE_STEER_MAX_CHARS) throw new TitleSteerError('invalid_title', 400)
@@ -69,11 +69,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function readEntries(path: string): Record<string, TitleSteerEntry> {
-  if (!existsSync(path)) return {}
+  if (!existsSync(path)) return Object.create(null)
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown
-    if (!isRecord(parsed) || !isRecord(parsed.entries)) return {}
-    const out: Record<string, TitleSteerEntry> = {}
+    if (!isRecord(parsed) || !isRecord(parsed.entries)) return Object.create(null)
+    // Null prototype: a session id like `constructor` or `__proto__` fits the id pattern and must read as absent, not as Object's own members.
+    const out: Record<string, TitleSteerEntry> = Object.create(null)
     for (const [id, raw] of Object.entries(parsed.entries)) {
       if (!SESSION_ID.test(id) || !isRecord(raw)) continue
       const { title, revision, updatedAt } = raw
@@ -88,7 +89,7 @@ function readEntries(path: string): Record<string, TitleSteerEntry> {
   } catch {
     // A corrupt ledger is set aside, never silently trusted or deleted.
     try { renameSync(path, `${path}.corrupt.${Date.now()}`) } catch { /* the next write replaces it */ }
-    return {}
+    return Object.create(null)
   }
 }
 
@@ -148,7 +149,8 @@ export function createTitleSteerStore(options: { path?: string; now?: () => numb
       if (!current && !title) return view(sessionId, undefined)
       const next: TitleSteerEntry = { title: title || null, revision: (current?.revision ?? 0) + 1, updatedAt: at }
       // Persist a copy first: a failed write must leave the cache, and so the revision, where it was.
-      const draft = { ...entries, [sessionId]: next }
+      const draft: Record<string, TitleSteerEntry> = Object.assign(Object.create(null), entries)
+      draft[sessionId] = next
       try {
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
         durableAtomicWriteFileSync(path, JSON.stringify({ schemaVersion: 1, entries: draft }, null, 2), { mode: 0o600 })

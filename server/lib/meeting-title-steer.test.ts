@@ -37,7 +37,9 @@ describe('normalizeTitleSteer', () => {
   })
 
   it('drops zero-width and direction-override marks so a title cannot hide or reverse text', () => {
-    expect(normalizeTitleSteer('Pla​n‮ ning')).toBe('Plan ning')
+    for (const mark of ['\u200b', '\u200f', '\u202a', '\u202e', '\u2060', '\u2066', '\u2069', '\ufeff']) {
+      expect(normalizeTitleSteer(`Pla${mark}nning`), mark.charCodeAt(0).toString(16)).toBe('Planning')
+    }
   })
 
   it('treats null, undefined and blank as "no title"', () => {
@@ -178,6 +180,18 @@ describe('title steer store', () => {
     expect(readdirSync(nested)).toEqual([TITLE_STEER_FILE_NAME])
   })
 
+  it('keeps an entry for 7 days (pinned as a literal, not read back from the constant)', () => {
+    expect(TITLE_STEER_RETAIN_MS).toBe(7 * 24 * 60 * 60 * 1000)
+  })
+
+  it('prunes on the very first read, whichever read it is: get() on a fresh store drops an expired entry', () => {
+    const { path } = scratch()
+    let clock = 1_000_000_000_000
+    createTitleSteerStore({ path, now: () => clock }).set(SID, 'Old news', 0)
+    clock += TITLE_STEER_RETAIN_MS + 1
+    expect(createTitleSteerStore({ path, now: () => clock }).get(SID)).toEqual({ sessionId: SID, title: null, revision: 0, updatedAt: null })
+  })
+
   it('prunes entries older than 7 days on read, and an expired session starts again at revision 0', () => {
     const { path } = scratch()
     let clock = 1_000_000_000_000
@@ -241,7 +255,23 @@ describe('title steer store', () => {
     }))
     const store = createTitleSteerStore({ path })
     expect(store.get(SID)).toMatchObject({ title: 'Fine title', revision: 3 })
-    for (const id of ['meeting_zero_0001', 'meeting_long_0001', 'meeting_num_0001']) expect(store.get(id).revision).toBe(0)
+    for (const id of ['meeting_zero_0001', 'meeting_long_0001', 'meeting_num_0001']) {
+      expect(store.get(id), id).toEqual({ sessionId: id, title: null, revision: 0, updatedAt: null })
+      expect(store.title(id), id).toBeNull()
+    }
+  })
+
+  it('an id that fits the pattern but names an Object member reads as absent, can be set, and never touches prototypes', () => {
+    const { path } = scratch()
+    const store = createTitleSteerStore({ path })
+    for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      expect(store.get(id), id).toEqual({ sessionId: id, title: null, revision: 0, updatedAt: null })
+      expect(store.title(id), id).toBeNull()
+    }
+    expect(store.set('__proto__', 'Odd but legal', 0)).toMatchObject({ title: 'Odd but legal', revision: 1 })
+    expect(({} as Record<string, unknown>).title).toBeUndefined()
+    expect(createTitleSteerStore({ path }).get('__proto__')).toMatchObject({ title: 'Odd but legal', revision: 1 })
+    expect(createTitleSteerStore({ path }).title('constructor')).toBeNull()
   })
 })
 

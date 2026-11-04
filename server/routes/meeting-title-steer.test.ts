@@ -15,7 +15,7 @@ vi.mock('../lib/domains.js', async original => {
 import { MeetingStore } from '../lib/meeting-store.js'
 import { MeetingFinalizationJobStore } from '../lib/meeting-finalization-jobs.js'
 import { initializeServerInstanceId } from '../lib/server-instance-id.js'
-import { createTitleSteerStore, TITLE_STEER_FILE_NAME } from '../lib/meeting-title-steer.js'
+import { createTitleSteerStore, TitleSteerError, TITLE_STEER_FILE_NAME } from '../lib/meeting-title-steer.js'
 import { createMeetingRouter } from './meeting.js'
 
 // Title steer (6.99.0): the name typed in COS Control while a meeting records. Route level, over the real meeting store
@@ -39,12 +39,13 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-async function harness(opts: { state?: 'active' | 'closed' | 'missing'; parent?: string } = {}) {
+async function harness(opts: { state?: 'active' | 'closed' | 'missing'; parent?: string; wrapSteer?: (real: ReturnType<typeof createTitleSteerStore>) => ReturnType<typeof createTitleSteerStore> } = {}) {
   const parent = opts.parent ?? mkdtempSync(join(tmpdir(), 'cos-title-steer-route-'))
   if (!opts.parent) roots.push(parent)
   initializeServerInstanceId(join(parent, 'server-instance-id'))
   const store = new MeetingStore(join(parent, 'data', 'recordings'))
-  const titleSteer = createTitleSteerStore({ path: join(parent, 'data', TITLE_STEER_FILE_NAME) })
+  const realSteer = createTitleSteerStore({ path: join(parent, 'data', TITLE_STEER_FILE_NAME) })
+  const titleSteer = opts.wrapSteer ? opts.wrapSteer(realSteer) : realSteer
   const publish = vi.fn(() => true)
   const chunk = { text: 'Hello there.', speaker: 'Speaker A', elapsed: 61_000, similarity: 0.9 }
   const sessionState = { value: opts.state ?? 'active' as 'active' | 'closed' | 'missing' }
@@ -216,6 +217,35 @@ describe('GET and PUT /meeting/title-steer', () => {
     expect(bad.body.reason).toBe('invalid_session_id')
   })
 
+  it('GET for an id that names an Object member (constructor, __proto__) is an ordinary empty answer, not an error', async () => {
+    const h = await harness()
+    for (const id of ['constructor', '__proto__', 'toString']) {
+      const res = await h.get(id)
+      expect(res.status, id).toBe(200)
+      expect(res.body, id).toEqual({ sessionId: id, title: null, revision: 0, updatedAt: null })
+    }
+  })
+
+  it('an unexpected failure is a plain 500 and the log carries the error name only, never its message (which could hold the title)', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const secret = 'Zephyrwind Acquisition Talks'
+    const h = await harness({ wrapSteer: real => ({ ...real, set: () => { throw new Error(`disk said no to ${secret}`) } }) })
+    const res = await h.put({ sessionId: SID, title: secret, expectedRevision: 0 })
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ error: 'title_steer_error', reason: 'title_steer_error' })
+    const lines = errors.mock.calls.map(args => args.map(a => (a instanceof Error ? `${a.name}: ${a.message}` : String(a))).join(' '))
+    expect(lines.some(line => line.includes('[meeting/title-steer]'))).toBe(true)
+    expect(lines.filter(line => line.includes('Zephyrwind') || line.includes('disk said no'))).toEqual([])
+  })
+
+  it('a persistence failure is a 503 steer_persistence_failed and the revision stays', async () => {
+    const h = await harness({ wrapSteer: real => ({ ...real, set: () => { throw new TitleSteerError('steer_persistence_failed', 503) } }) })
+    const res = await h.put({ sessionId: SID, title: 'Anything', expectedRevision: 0 })
+    expect(res.status).toBe(503)
+    expect(res.body.reason).toBe('steer_persistence_failed')
+    expect(h.publish).not.toHaveBeenCalled()
+  })
+
   it('needs the API token like every other /api/meeting route', async () => {
     const h = await harness()
     const res = await fetch(`http://127.0.0.1:${(servers[0].address() as { port: number }).port}/api/meeting/title-steer?sessionId=${SID}`)
@@ -326,6 +356,15 @@ describe('saving with a steer', () => {
     const row = markdown.split('\n').find(line => line.includes('Title steer'))!
     expect(row.replace(/\\\|/g, '').split('|').length).toBe(4)               // leading, field, value, trailing
     expect(sidecar.titleSteer).toBe('Sales | Marketing sync')               // the sidecar keeps the raw text
+  })
+
+  it('the header row and sidecar keep the steer as typed: a slash is not turned into a space', async () => {
+    const h = await harness()
+    await h.put({ sessionId: SID, title: 'AI/ML roadmap sync', expectedRevision: 0 })
+    await h.save({ title: 'Roadmap sync' })
+    const { markdown, sidecar } = h.saved()
+    expect(markdown).toContain('| **Title steer** | AI/ML roadmap sync |')
+    expect(sidecar.titleSteer).toBe('AI/ML roadmap sync')
   })
 
   it('the steer reaches the domain filer through the title, as a sent title does', async () => {
