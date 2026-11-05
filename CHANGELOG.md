@@ -1,3 +1,21 @@
+## 6.99.13 - The Mac asks first; Drop takes files on COS Control Web (private)
+
+2026-11-05. Private build for one Mac, on top of 6.99.12. Pairs with COS Control 0.5.371 or 0.5.372. Nothing changes for the glasses app.
+
+- **An open web tab never holds a session question from the Mac (option B).** Miles chose B on 11/05: the Mac shows its own dialog at once. A COS Control Web poll (`GET /api/session-questions?client=web`, browser session) no longer counts as a live answering client, so a tab left open on another computer never delays the Mac's pop-up. The web still lists and answers what the glasses or phone are holding, with the same cards and actions as 6.99.12. Token polls from the glasses and phone are unchanged.
+- **Drop takes files (COS Control Web).** Miles, 11/05: "I don't see the file attachment in drop. Can we ensure that functionality is there." The clip, paste and drag-drop already added files to the composer; now Drop sends them with the words, as Ask does.
+  - `POST /api/drops` takes `attachmentIds`: up to 5 fresh uploads from `POST /api/media` or `/api/media/file`, held to the Ask's own rules (media ids, deduplicated, 5 at most). Refusals are plain and save nothing: a sixth file (400 `too_many_attachments`), an id this Mac never gave out (400 `invalid_attachment`, 404 `attachment_not_found`), an upload past its 4 hour wait (410 `attachment_expired`), a file already queued with an Ask or held by another drop (409 `attachment_in_use`). Each says what to do ("Add it again, then Drop").
+  - Words are still required: a drop is filed by its words, so files alone are refused with "Add a few words with the files so COS knows where they go." (400 `words_needed`). The password and key check on the words runs exactly as before.
+  - Where the files live: in the media store, the same place an Ask's files live (`data/media/assets/<id>/`). The drop pins them (`MediaStore.pinForDrop`): the upload becomes `associated` with the drop's id, which no upload TTL and no GC pass touches, so the files stay as long as the drop holds them, across restarts. Nothing is copied, nothing leaves the data dir, and the index is written atomically as always.
+  - The drop record keeps each file's id, name, type and size (`attachments`). Your words in the chat show what you sent, and every receipt lists each file with Open (`GET /api/media/:id/content`). A card, a thread note and a memory take words only, so the receipt says where the files are: "The 2 files stay here in the COS chat with your words." History finds a drop by a file's name. Move keeps the files.
+  - A drop read as a question sends its files with the Ask (`next.attachmentIds`), so "what is on this shelf?" with a photo asks about the photo.
+  - Undo removes the files with the drop: the bytes are deleted, the drop forgets them, and no chat line offers them any more. Undo removes only what that drop pinned; a file an Ask has since sent with a message stays. A refused Undo (the card was edited) keeps them.
+  - `capabilities.dropIt.attachments: 5` on `/api/health` and `/api/drops/settings`. The web sends files only to a server that says so; against an older server Drop keeps the words-only note and sends nothing.
+  - On the web: Option-Return is still Drop and Return is still Ask. With files attached, Drop waits for the uploads (as Ask does), says so when a file failed, and keeps the words and files in the box when the Mac refuses one.
+- Default-on changes, for every user:
+  - The Mac's own session question dialog shows at once even while a COS Control Web tab is open (before, a visible tab could hold it up to the broker's deadline).
+  - `capabilities.dropIt.attachments` on `/api/health` and `/api/drops/settings` for every install (additive). Drop it itself stays off by default; files on a drop exist only where Drop it is on.
+
 ## 6.99.12 - COS Control Web catches up with the Even app: Ask with files, Reply, session questions, wide Usage (private)
 
 2026-11-05. Private build for one Mac, on top of 6.99.11 (Drop it P2), which carries 6.99.10 (Drop it P1 and the web Ask sheet fix). Pairs with COS Control 0.5.371 or 0.5.372. Nothing changes for the glasses app.
