@@ -129,3 +129,32 @@ it('uses the provider-allocated conversation for every subsequent pass', async (
   await run(f, base)
   expect(pass).toBe(2)
 })
+
+it('cannot complete by dropping an earlier pending inventory entry', async () => {
+  const f = fixture(); let pass = 0
+  const cb = callbacks()
+  await run(f, async (...a) => {
+    pass++
+    if (pass === 1) f.save()
+    else if (pass === 2) { f.state.items.shift(); f.state.state = 'complete'; f.save() }
+    else {
+      expect(a[0]).toContain('Restore previously inventoried entries')
+      expect(cb.onDone).not.toHaveBeenCalled()
+      f.state.items.unshift({ id: 'g2-mac-pair', state: 'applied' }); f.complete()
+    }
+    await a[2].onDone('progress', 'opus'); return 'same-session'
+  }, cb)
+  expect(pass).toBe(3); expect(cb.onDone).toHaveBeenCalledTimes(1)
+})
+
+it('bounds total evidence reads so a completed audit cannot monopolize the server', () => {
+  const f = fixture(); f.complete()
+  const bytes = Buffer.alloc(17 * 1024 * 1024, 65)
+  f.state.evidence = ['large-a', 'large-b'].map(name => {
+    const path = join(f.dir, name); writeFileSync(path, bytes)
+    return { path, sha256: createHash('sha256').update(bytes).digest('hex') }
+  })
+  f.save()
+  const result = inspectConsolidationCheckpoint(f.checkpoint, f.runId, [f.dir])
+  expect(result.complete).toBe(false); expect(result.issue).toContain('32 MiB total')
+})
