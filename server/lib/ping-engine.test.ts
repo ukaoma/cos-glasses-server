@@ -189,7 +189,7 @@ describe('canary 9: no LLM and nothing outward in the ping path', () => {
     return { files, packages }
   }
 
-  for (const entry of ['ping-engine.ts', 'ping-sources.ts', 'ping-budget.ts', 'drop-when.ts', 'reminder-scheduler.ts']) {
+  for (const entry of ['ping-engine.ts', 'ping-sources.ts', 'ping-budget.ts', 'drop-when.ts', 'reminder-scheduler.ts', 'drop-resolution.ts', 'ping-feed-sink.ts']) {
     it(entry, () => {
       const { files, packages } = graph(join(here, entry))
       expect(files.size).toBeGreaterThan(entry === 'ping-budget.ts' ? 1 : 2)  // the walk really followed imports

@@ -40,6 +40,8 @@ export interface PingCandidate {
    * local backup notification, so a server fire replaces Control's instead of doubling it (plan section 7).
    */
   notifyId?: string
+  /** The drop a follow-up answers (it threads under that drop in the chat); a ping without one is its own thread. */
+  threadId?: string
 }
 
 export const PING_TEXT = { title: 120, line: 400, digestLines: 5 } as const
