@@ -308,7 +308,11 @@ it('counts query length in code points, as people count characters', () => {
 it('only explicit read-only searches bypass the mutation lease', () => {
   expect(isReadOnlyApiPost('POST', '/work/search')).toBe(true)
   expect(isReadOnlyApiPost('POST', '/meetings/live-ask')).toBe(true)
+  expect(isReadOnlyApiPost('POST', '/drops/search')).toBe(true)
   expect(isReadOnlyApiPost('POST', '/meetings/live-ask/write')).toBe(false)
+  // A drop itself writes: never past the lease.
+  expect(isReadOnlyApiPost('POST', '/drops')).toBe(false)
+  expect(isReadOnlyApiPost('POST', '/drops/search/x')).toBe(false)
   for (const [method, path] of [['PUT', '/work/search'], ['DELETE', '/work/search'], ['POST', '/work/search/x'], ['POST', '/work-board/stage'], ['POST', '/tasks/capture']]) {
     expect(isReadOnlyApiPost(method, path)).toBe(false)
   }

@@ -137,6 +137,8 @@ export function searchOptionText(text: string): string {
 export function isReadOnlyApiPost(method: string, path: string): boolean {
   return method === 'POST' && (
     path === '/work/search'
+    // Drop it P2 History search: reads the drop store and asks Jev one question, writing only its token ledger.
+    || path === '/drops/search'
     || path === '/meetings/live-ask'
     || path === '/web-session/login'
     || path === '/web-session/logout'

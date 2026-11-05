@@ -21,6 +21,12 @@
  *   POST /inbox/read      { through }                                                   { unread, waiting, version }
  *   POST /inbox/action    { itemId, action: 'choose:<id>' | 'undo' }                    DropAnswer
  *   POST /inbox/action    { itemId, action: 'dismiss' }                                 { unread, waiting, version }
+ *   P2:
+ *   POST /inbox/action    { itemId, action: 'when:tomorrow_9' | 'when:monday_9' | 'when:<ISO>' }  DropAnswer
+ *   POST /inbox/action    { itemId, action: 'reminder_done' | 'snooze_1h' | 'snooze_tomorrow' }  { item, drop, unread, waiting, version }
+ *   GET  /inbox/banners   ?bootId&seq                                                   { bootId, seq, banners }
+ *   GET  /drops/reminders                                                               { reminders: [{ id, at, title, notifyId }] }
+ *   POST /drops/search    { q }                                                         DropSearchResult
  *
  * `waiting` (6.99.10, plan section 12) is a plain whole number: live questions, live items marked needsReply, and the
  * Work items in Your move. It clears only when answered, done or dismissed; `unread` clears when the chat is opened.
@@ -30,6 +36,10 @@ import { DropError, DropService, type DropInput, type HistoryStatus } from '../l
 import { DROP_DESTS, DROP_KINDS, DropStore, DropStoreError, InboxFeedStore, parseLink, type DropDest, type DropKind } from '../lib/drop-store.js'
 import { dropItCapability, dropItEnabled, dropItEnvValue, writeDropItSetting } from '../lib/drop-settings.js'
 import { dropDailyCap, dropRouterEnabled } from '../lib/drop-router.js'
+import type { DropP2Runtime } from '../lib/drop-p2-runtime.js'
+import type { DropHistorySearcher } from '../lib/drop-history-search.js'
+import { pendingReminders } from '../lib/reminder-scheduler.js'
+import { unavailable } from '../lib/work-search.js'
 
 export interface DropsRouterDependencies {
   /** The service, opened on first use. Null when its stores cannot open (locked, unsafe, unreadable). */
@@ -42,6 +52,10 @@ export interface DropsRouterDependencies {
    * Optional: without it `waiting` counts the chat alone. It must answer quickly (index.ts caches it).
    */
   yourMove?: () => Promise<number | null>
+  /** P2: the pings, reminders and follow-ups runtime, when it is running. Its banner outbox is what Control reads. */
+  p2?: () => DropP2Runtime | null
+  /** P2: History search by meaning. Absent: the search answers search_off and word search carries on. */
+  search?: () => DropHistorySearcher | null
 }
 
 /** How long the summary waits for the Your move count before answering without it. */
@@ -129,6 +143,10 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
     catch (e) { return send(res, e) }
   }))
 
+  // P2, registered before /drops/:id so 'reminders' is never read as a drop id.
+  router.get('/drops/reminders', (_req, res) => withService(res, async service => {
+    try { return res.json({ reminders: pendingReminders(service.p2Stores().drops) }) } catch (e) { return send(res, e) }
+  }))
   router.get('/drops/:id', (req, res) => withService(res, service => {
     try { return res.json(service.get(req.params.id)) } catch (e) { return send(res, e) }
   }))
@@ -189,6 +207,13 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
       if (b.action === 'undo') {
         return res.json(await service.undo(service.threadOf(b.itemId)))
       }
+      if (b.action.startsWith('when:')) return res.json(await service.setReminderTime(b.itemId, b.action.slice('when:'.length)))
+      if (b.action === 'reminder_done' || b.action === 'snooze_1h' || b.action === 'snooze_tomorrow') {
+        const out = service.reminderAction(b.itemId, b.action)
+        const yourMove = await boundedYourMove(deps.yourMove)
+        const sum = service.summary({ yourMove })
+        return res.json({ ...out, unread: sum.unread, waiting: sum.waiting, version: sum.version })
+      }
       if (b.action === 'dismiss') {
         const out = service.dismiss(b.itemId)
         const yourMove = await boundedYourMove(deps.yourMove)
@@ -196,6 +221,20 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
       }
       return bad(res, 'invalid_action')
     } catch (e) { return send(res, e) }
+  }))
+  // ── P2 ──
+  router.get('/inbox/banners', (req, res) => withService(res, async () => {
+    const runtime = deps.p2?.()
+    if (!runtime) return res.status(503).json({ error: { code: 'pings_unavailable' } })
+    const bootId = typeof req.query.bootId === 'string' ? req.query.bootId : undefined
+    const seq = typeof req.query.seq === 'string' && /^\d{1,9}$/.test(req.query.seq) ? Number(req.query.seq) : undefined
+    return res.json(runtime.banners({ bootId, seq }))
+  }))
+  router.post('/drops/search', (req, res) => withService(res, async service => {
+    const searcher = deps.search?.()
+    if (!searcher) return res.json(unavailable('search_off'))
+    const q = isRecord(req.body) ? req.body.q : undefined
+    try { return res.json(await searcher.search(q, service.p2Stores().drops.list())) } catch (e) { return send(res, e) }
   }))
   return router
 }
