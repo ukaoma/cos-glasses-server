@@ -152,9 +152,9 @@ export function signalCandidates(signals: readonly SignalRow[] | null | undefine
 }
 
 /** The weekly check-in, Monday from 9:00 local, once per ISO week. His reply becomes a reminder. */
-export function checkinCandidates(nowMs: number, timezone: string): PingCandidate[] {
+export function checkinCandidates(nowMs: number, timezone: string, when: { weekday: number; minutes: number } = CHECKIN): PingCandidate[] {
   const c = localClock(nowMs, timezone)
-  if (c.weekday !== CHECKIN.weekday || c.minutes < CHECKIN.minutes) return []
+  if (c.weekday !== when.weekday || c.minutes < when.minutes) return []
   return [{
     source: 'checkin', key: `checkin:${isoWeek(nowMs, timezone)}`, line: CHECKIN.line,
     links: [], actions: [{ id: 'reply', label: 'Reply' }, { id: 'dismiss', label: 'Skip this week' }],

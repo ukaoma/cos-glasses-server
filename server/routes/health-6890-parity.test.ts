@@ -486,6 +486,8 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.dropIt.protocol',
   '.capabilities.dropIt.enabled',
   '.capabilities.dropIt.source',
+  // 6.99.11: the P2 settings routes exist (GET/PUT /api/drops/settings/p2).
+  '.capabilities.dropIt.p2Settings',
   '.capabilities.richMedia',
   '.capabilities.richMedia.video',
   '.capabilities.richMedia.maxPromptVisuals',

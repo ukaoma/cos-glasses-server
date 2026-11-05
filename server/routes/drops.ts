@@ -40,6 +40,7 @@ import type { DropP2Runtime } from '../lib/drop-p2-runtime.js'
 import type { DropHistorySearcher } from '../lib/drop-history-search.js'
 import { pendingReminders } from '../lib/reminder-scheduler.js'
 import { unavailable } from '../lib/work-search.js'
+import { mergeP2Settings, P2_DEFAULTS, P2_SETTINGS_PROTOCOL, type P2Settings } from '../lib/drop-p2-settings.js'
 
 export interface DropsRouterDependencies {
   /** The service, opened on first use. Null when its stores cannot open (locked, unsafe, unreadable). */
@@ -56,7 +57,10 @@ export interface DropsRouterDependencies {
   p2?: () => DropP2Runtime | null
   /** P2: History search by meaning. Absent: the search answers search_off and word search carries on. */
   search?: () => DropHistorySearcher | null
+  /** 6.99.11: P2 settings (drop-p2-settings.ts createP2SettingsReader). Absent: GET answers the defaults, PUT 503. */
+  p2Settings?: { read(): P2Settings; write(next: P2Settings): P2Settings }
 }
+const P2_SECTIONS = new Set(['pings', 'followUps', 'checkin', 'reminders', 'banners', 'steer'])
 
 /** How long the summary waits for the Your move count before answering without it. */
 export const YOUR_MOVE_WAIT_MS = 1_500
@@ -111,6 +115,20 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
     }
     // An environment value wins (COS_DROP_IT); the answer says so through `source`.
     return res.json({ ...settingsView(), ...(dropItEnvValue() !== null ? { savedButEnvWins: true } : {}) })
+  })
+
+  // 6.99.11 P2 settings, readable and writable while Drop it is off (as the switch is), so they can be set first.
+  const p2View = (settings: P2Settings) => ({ protocol: P2_SETTINGS_PROTOCOL, settings, defaults: P2_DEFAULTS })
+  router.get('/drops/settings/p2', (_req, res) => res.json(p2View(deps.p2Settings?.read() ?? P2_DEFAULTS)))
+  router.put('/drops/settings/p2', (req, res) => {
+    const body = req.body
+    if (!isRecord(body) || !Object.keys(body).length || Object.keys(body).some(k => !P2_SECTIONS.has(k)) || Object.values(body).some(v => !isRecord(v))) {
+      return bad(res, 'invalid_settings', 'Send one or more sections: pings, followUps, checkin, reminders, banners, steer.')
+    }
+    if (!deps.p2Settings) return res.status(503).json({ error: { code: 'settings_unwritable' } })
+    try { return res.json(p2View(deps.p2Settings.write(mergeP2Settings(deps.p2Settings.read(), body)))) } catch {
+      return res.status(503).json({ error: { code: 'settings_unwritable' } })
+    }
   })
 
   // Everything else exists only while the feature is on.

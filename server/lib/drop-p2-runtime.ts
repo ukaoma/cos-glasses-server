@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto'
 import type { DropRecord, InboxFeedStore } from './drop-store.js'
 import { PingEngine, type PingBanner, type PingSnapshot, type PingStateStore } from './ping-engine.js'
 import { DEFAULT_BANNER_SOURCES, type PingSource } from './ping-budget.js'
+import { P2_FOLLOWUP_KINDS, timeMinutes, type P2Settings } from './drop-p2-settings.js'
 import type { IntakeRow, ThreadRow, SignalRow, PingCandidate } from './ping-sources.js'
 import { feedSink } from './ping-feed-sink.js'
 import { createReminderScheduler, pendingReminders, applyReminderAction, type ReminderAction, type ReminderStore } from './reminder-scheduler.js'
@@ -52,6 +53,16 @@ export interface DropP2Deps {
   bootId?: string
   /** True while the server drains for an update or restart: every loop skips its turn (a reminder fires next tick, late). */
   paused?: () => boolean
+  /** 6.99.11 settings (drop-p2-settings.ts). Absent: the defaults, exactly as before. */
+  settings?: () => P2Settings
+}
+
+/** Follow-ups allowed by the settings: the switch, then the kind (the link kind in the key `dropId:kind:id:state`). */
+export function followUpAllowed(c: PingCandidate, s: P2Settings | null): boolean {
+  if (!s) return true
+  if (!s.followUps.on) return false
+  const kind = c.key.split(':')[1] as (typeof P2_FOLLOWUP_KINDS)[number]
+  return (P2_FOLLOWUP_KINDS as readonly string[]).includes(kind) ? s.followUps.kinds[kind] : true
 }
 
 export interface OutboxBanner extends PingBanner { seq: number; at: string }
@@ -86,10 +97,12 @@ export function createDropP2Runtime(deps: DropP2Deps) {
   const outbox: OutboxBanner[] = []
   let seq = 0
 
+  const settingsNow = (): P2Settings | null => { try { return deps.settings?.() ?? null } catch { return null } }
+  const followUps = (list: PingCandidate[]) => { const s = settingsNow(); return list.filter(c => followUpAllowed(c, s)) }
   const banner = (b: PingBanner) => {
     outbox.push({ ...b, seq: ++seq, at: new Date(now()).toISOString() })
     if (outbox.length > P2_TIMING.outbox) outbox.shift()
-    if (b.exempt && b.sources.includes('reminder')) {
+    if (b.exempt && b.sources.includes('reminder') && (settingsNow()?.reminders.lensPush ?? true)) {
       try { deps.emitLens?.({ type: 'cos_ping', data: { title: b.title, line: b.line, feedIds: b.feedIds, ...(b.notifyId ? { notifyId: b.notifyId } : {}) } }) }
       catch { /* the lens is a second screen: the chat and the Mac banner already have it */ }
     }
@@ -105,6 +118,7 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     now,
     timezone: deps.timezone,
     enabled: deps.enabled ?? (() => DEFAULT_BANNER_SOURCES),
+    ...(deps.settings ? { settings: deps.settings } : {}),
     read: async (): Promise<PingSnapshot> => {
       const snap: PingSnapshot = {}
       try { const e = await deps.nextEvent?.(); if (e !== undefined) snap.nextEvent = e } catch { /* calendar unread */ }
@@ -124,7 +138,8 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     select: (m: Parameters<typeof deps.drops.select>[0]) => isPaused() ? [] : deps.drops.select(m),
     update: deps.drops.update.bind(deps.drops),
   }
-  const reminders = createReminderScheduler({ store: reminderStore, deliver: c => engine.push(c), now, intervalMs: P2_TIMING.reminderTickMs })
+  const reminders = createReminderScheduler({ store: reminderStore, deliver: c => engine.push(c), now, intervalMs: P2_TIMING.reminderTickMs,
+    snoozeMinutes: () => settingsNow()?.reminders.snoozeMinutes ?? 60 })
 
   async function resolutionSnapshot() {
     const snap: { cards?: Map<string, CardSnapshot>; handoffs?: Map<string, HandoffSnapshot[]>; threads?: Map<string, ThreadSnapshot> } = {}
@@ -156,7 +171,7 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     try {
       const drops = deps.drops.list()
       if (!drops.length) return 0
-      const found = pollResolutions(drops, await resolutionSnapshot(), now())
+      const found = followUps(pollResolutions(drops, await resolutionSnapshot(), now()))
       return found.length ? engine.push(found).posted : 0
     } catch { return 0 } finally { polling = false }
   }
@@ -194,14 +209,14 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     pollOnce,
     /** The server's own card write (work-board, tasks routes): the same rule as the poll, at once. */
     onCardWrite(domain: string, workIdentity: string, row: CardSnapshot | null) {
-      try { const c = cardWriteResolutions(deps.drops.list(), domain, workIdentity, row, now()); if (c.length) engine.push(c) } catch { /* the poll will see it */ }
+      try { const c = followUps(cardWriteResolutions(deps.drops.list(), domain, workIdentity, row, now())); if (c.length) engine.push(c) } catch { /* the poll will see it */ }
     },
     onSessionTurn(sessionId: string, outcome: SessionState, endedAtMs?: number) {
       // Every session's every Stop lands here: copy only the drops held for a session and already sent.
       try {
         const held = deps.drops.select(d => d.state !== 'undone' && d.dest === 'session' && !!d.hold?.sentAt)
         if (!held.length) return
-        const c = sessionTurnResolutions(held, sessionId, outcome, now(), endedAtMs ?? now())
+        const c = followUps(sessionTurnResolutions(held, sessionId, outcome, now(), endedAtMs ?? now()))
         if (c.length) engine.push(c)
       } catch { /* nothing else watches a held session; it stays open in History */ }
     },
@@ -213,7 +228,10 @@ export function createDropP2Runtime(deps: DropP2Deps) {
       return { bootId, seq, banners: outbox.filter(b => b.seq > from) }
     },
     pendingReminders: () => pendingReminders(deps.drops),
-    reminderAction: (dropId: string, action: ReminderAction) => applyReminderAction(deps.drops, dropId, action, now()),
+    reminderAction: (dropId: string, action: ReminderAction) => {
+      const s = settingsNow()
+      return applyReminderAction(deps.drops, dropId, action, now(), s ? { snoozeMs: s.reminders.snoozeMinutes * 60_000, dayMinutes: timeMinutes(s.reminders.defaultTime) } : undefined)
+    },
   }
 }
 export type DropP2Runtime = ReturnType<typeof createDropP2Runtime>

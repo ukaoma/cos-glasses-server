@@ -7,11 +7,12 @@ import { DropStore, InboxFeedStore, type DropDest } from './drop-store.js'
 import { DropRouter } from './drop-router.js'
 import { DropService, kindFor, statusOf } from './drop-service.js'
 import { fakeWriters, scriptedDecisionClient, type FakeWriters } from './__fixtures__/drop-fixtures.js'
+import { mergeP2Settings, P2_DEFAULTS } from './drop-p2-settings.js'
 
 const cleanup: Array<() => void> = []
 afterEach(() => { cleanup.splice(0).forEach(fn => fn()) })
 
-function harness(options: { writers?: FakeWriters; routerOn?: boolean; askLookup?: ConstructorParameters<typeof DropService>[0]['askLookup'] } = {}) {
+function harness(options: { writers?: FakeWriters; routerOn?: boolean; askLookup?: ConstructorParameters<typeof DropService>[0]['askLookup']; p2Settings?: ConstructorParameters<typeof DropService>[0]['p2Settings'] } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'drop-service-'))
   let clock = new Date('2026-11-04T15:00:00.000Z')
   const now = () => clock
@@ -19,7 +20,7 @@ function harness(options: { writers?: FakeWriters; routerOn?: boolean; askLookup
   const writers = options.writers ?? fakeWriters()
   const client = scriptedDecisionClient()
   const router = new DropRouter({ client, enabled: () => options.routerOn ?? true })
-  const service = new DropService({ drops, feed, router, writers, now, timezone: () => 'America/Chicago', askLookup: options.askLookup })
+  const service = new DropService({ drops, feed, router, writers, now, timezone: () => 'America/Chicago', askLookup: options.askLookup, p2Settings: options.p2Settings })
   cleanup.push(() => { drops.close(); feed.close(); rmSync(root, { recursive: true, force: true }) })
   return { service, drops, feed, writers, client, root, advance: (ms: number) => { clock = new Date(clock.getTime() + ms) },
     reopen: () => { drops.close(); feed.close(); const d = new DropStore(join(root, 'drops'), now), f = new InboxFeedStore(join(root, 'inbox'), now)
@@ -418,5 +419,26 @@ describe('P2 reminders in the service', () => {
     h.service.reminderAction(ping2.id, 'reminder_done')
     const receipt = h.feed.list().find(i => i.kind === 'receipt' && i.threadId === id)!
     await expect(h.service.setReminderTime(receipt.id, 'monday_9')).rejects.toMatchObject({ code: 'not_a_live_reminder' })
+  })
+})
+
+describe('P2 settings in the service (6.99.11)', () => {
+  const settings = mergeP2Settings(P2_DEFAULTS, { reminders: { defaultTime: '08:30', snoozeMinutes: 30 } })
+  it('the default time is used at filing and in the two picks', async () => {
+    const h = harness({ p2Settings: () => settings })
+    const friday = await h.service.submit(drop('remind me Friday to send the deck'))
+    expect(friday.drop.remind!.at).toBe('2026-11-06T14:30:00.000Z')  // 8:30 CST
+    const none = await h.service.submit(drop('remind me to call mom'))
+    const ask = none.items.find(i => i.kind === 'receipt')!
+    expect(ask.actions.slice(0, 2).map(a => a.label)).toEqual(['Tomorrow 8:30', 'Monday 8:30'])
+    expect((await h.service.setReminderTime(ask.id, 'tomorrow_9')).drop.remind!.at).toBe('2026-11-05T14:30:00.000Z')
+  })
+  it('the snooze length is what a snooze does', async () => {
+    const h = harness({ p2Settings: () => settings })
+    const out = await h.service.submit(drop('remind me tomorrow at 9am to stretch'))
+    const id = out.drop.id
+    const [p] = h.feed.insert([{ id: 'fi_' + 'c'.repeat(32), kind: 'ping', threadId: 'fi_' + 'c'.repeat(32), createdAt: new Date().toISOString(), readAt: null, source: 'cos',
+      line: 'Reminder: stretch', links: [{ kind: 'reminder', id, label: 'stretch' }], actions: [], state: 'live', key: `reminder:${id}:z` }])
+    expect(h.service.reminderAction(p.id, 'snooze_1h').drop.remind!.at).toBe('2026-11-04T15:30:00.000Z')  // 9:00 CST + 30 minutes
   })
 })

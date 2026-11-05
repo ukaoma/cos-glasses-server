@@ -33,6 +33,23 @@ export const PING_BUDGET = {
   firstBannerMinutes: 8 * 60,
 } as const
 
+/** The budget in the units the code uses. 6.99.11 settings (drop-p2-settings.ts budgetFrom) fill it; these are the defaults. */
+export interface BudgetOptions {
+  perWeekday: number
+  perSource: number
+  gapMs: number
+  /** Quiet from start to end, minutes past midnight; start after end wraps midnight; equal means no quiet hours. */
+  quietStartMinutes: number
+  quietEndMinutes: number
+  weekendsQuiet: boolean
+  firstBannerMinutes: number
+}
+export const DEFAULT_BUDGET: BudgetOptions = {
+  perWeekday: PING_BUDGET.perWeekday, perSource: PING_BUDGET.perSource, gapMs: PING_BUDGET.gapMs,
+  quietStartMinutes: PING_BUDGET.dayEndMinutes, quietEndMinutes: PING_BUDGET.dayStartMinutes, weekendsQuiet: true,
+  firstBannerMinutes: PING_BUDGET.firstBannerMinutes,
+}
+
 /** Decided 2026-11-04: banners on for reminders and his own drops' resolutions; the rest off for the first week. */
 export const DEFAULT_BANNER_SOURCES: readonly PingSource[] = ['reminder', 'resolution']
 
@@ -54,10 +71,12 @@ export interface BannerPlan {
 export type SilentReason = 'source_off' | 'quiet_hours' | 'before_first_banner' | 'daily_cap' | 'source_cap' | 'too_soon'
 
 /** Control's quiet rule at `nowMs` in `timezone`: weekends, before 6:00 and from 18:00. */
-export function isQuietHours(nowMs: number, timezone: string): boolean {
+export function isQuietHours(nowMs: number, timezone: string, budget: BudgetOptions = DEFAULT_BUDGET): boolean {
   const c = localClock(nowMs, timezone)
-  if (c.weekday === 0 || c.weekday === 6) return true
-  return c.minutes < PING_BUDGET.dayStartMinutes || c.minutes >= PING_BUDGET.dayEndMinutes
+  if (budget.weekendsQuiet && (c.weekday === 0 || c.weekday === 6)) return true
+  const { quietStartMinutes: start, quietEndMinutes: end } = budget
+  if (start === end) return false
+  return start > end ? c.minutes >= start || c.minutes < end : c.minutes >= start && c.minutes < end
 }
 
 /** The local day's non-exempt banners in the ledger (reminders never count). */
@@ -77,6 +96,9 @@ export function planBanners(
   nowMs: number,
   timezone: string,
   enabled: readonly PingSource[] = DEFAULT_BANNER_SOURCES,
+  budget: BudgetOptions = DEFAULT_BUDGET,
+  /** Ids that may banner although their source is switched off ("Ping me about" in Settings). Caps still apply. */
+  promoted: ReadonlySet<string> = new Set(),
 ): BannerPlan {
   const plan: BannerPlan = { banners: [], silent: [] }
   const sorted = [...candidates].sort((a, b) => PING_RANK[a.source] - PING_RANK[b.source] || b.createdAt - a.createdAt)
@@ -91,22 +113,23 @@ export function planBanners(
   if (!rest.length) return plan
 
   const silence = (list: BannerCandidate[], reason: SilentReason) => { for (const c of list) plan.silent.push({ id: c.id, reason }) }
-  const on = rest.filter(c => enabled.includes(c.source))
-  silence(rest.filter(c => !enabled.includes(c.source)), 'source_off')
+  const allowed = (c: BannerCandidate) => enabled.includes(c.source) || promoted.has(c.id)
+  const on = rest.filter(allowed)
+  silence(rest.filter(c => !allowed(c)), 'source_off')
   if (!on.length) return plan
-  if (isQuietHours(nowMs, timezone)) { silence(on, 'quiet_hours'); return plan }
-  if (localClock(nowMs, timezone).minutes < PING_BUDGET.firstBannerMinutes) { silence(on, 'before_first_banner'); return plan }
+  if (isQuietHours(nowMs, timezone, budget)) { silence(on, 'quiet_hours'); return plan }
+  if (localClock(nowMs, timezone).minutes < budget.firstBannerMinutes) { silence(on, 'before_first_banner'); return plan }
 
   const today = counted(ledger, nowMs, timezone)
-  if (today.length >= PING_BUDGET.perWeekday) { silence(on, 'daily_cap'); return plan }
+  if (today.length >= budget.perWeekday) { silence(on, 'daily_cap'); return plan }
   const last = today.reduce((max, b) => Math.max(max, b.at), -Infinity)
-  if (nowMs - last < PING_BUDGET.gapMs) { silence(on, 'too_soon'); return plan }
+  if (nowMs - last < budget.gapMs) { silence(on, 'too_soon'); return plan }
 
   const perSource = new Map<PingSource, number>()
   for (const b of today) for (const s of new Set(b.sources)) perSource.set(s, (perSource.get(s) ?? 0) + 1)
   const pass: BannerCandidate[] = []
   for (const c of on) {
-    if ((perSource.get(c.source) ?? 0) >= PING_BUDGET.perSource) plan.silent.push({ id: c.id, reason: 'source_cap' })
+    if ((perSource.get(c.source) ?? 0) >= budget.perSource) plan.silent.push({ id: c.id, reason: 'source_cap' })
     else pass.push(c)
   }
   if (!pass.length) return plan

@@ -22,7 +22,7 @@ export const REMINDER_TICK_MS = 30_000
 export const REMINDER_LATE_MS = 10 * 60_000
 export const REMINDER_ACTIONS = [
   { id: 'reminder_done', label: 'Done' },
-  { id: 'snooze_1h', label: 'Snooze 1 hour' },
+  { id: 'snooze_1h', label: 'Snooze 1 hour' },  // the id stays; the length is Settings, Reminders, snooze
   { id: 'snooze_tomorrow', label: 'Tomorrow 9' },
 ] as const
 export type ReminderAction = typeof REMINDER_ACTIONS[number]['id']
@@ -41,6 +41,12 @@ export function reminderAbout(drop: Pick<DropRecord, 'text' | 'createdAt' | 'rem
   const tz = drop.remind?.tz || 'UTC'
   const about = parseWhen(drop.text, Date.parse(drop.createdAt) || 0, tz).about
   return clip(about || drop.text, PING_TEXT.title) || 'your reminder'
+}
+
+/** The ping's buttons, with the snooze named by its length ("Snooze 30 minutes"). */
+export function reminderActions(snoozeMinutes = 60): Array<{ id: ReminderAction; label: string }> {
+  const len = snoozeMinutes % 60 === 0 ? `${snoozeMinutes / 60} hour${snoozeMinutes === 60 ? '' : 's'}` : `${snoozeMinutes} minutes`
+  return REMINDER_ACTIONS.map(a => ({ id: a.id, label: a.id === 'snooze_1h' ? `Snooze ${len}` : a.label }))
 }
 
 /** "2 hours", "35 minutes", "1 day": how late a fire is. */
@@ -68,7 +74,7 @@ export interface FireResult { fired: number; late: number }
  * Fire every reminder whose time has come. `deliver` receives the candidates only after each `firedAt` is on disk.
  * A store write that fails (store closed, disk full) skips that reminder this tick; it is tried again next tick.
  */
-export function fireDueReminders(store: ReminderStore, nowMs: number, deliver: (c: PingCandidate[]) => void): FireResult {
+export function fireDueReminders(store: ReminderStore, nowMs: number, deliver: (c: PingCandidate[]) => void, options?: { snoozeMinutes?: number }): FireResult {
   const due = store.select(r => pending(r) && Date.parse(r.remind!.at!) <= nowMs)
   const out: PingCandidate[] = []
   let late = 0
@@ -90,7 +96,7 @@ export function fireDueReminders(store: ReminderStore, nowMs: number, deliver: (
       source: 'reminder', key: `reminder:${drop.id}:${at}`, title: 'Reminder',
       line: isLate ? `Reminder (${lateWords(lateMs)} late): ${about}` : `Reminder: ${about}`,
       links: [{ kind: 'reminder', id: drop.id, label: about }],
-      actions: REMINDER_ACTIONS.map(a => ({ ...a })),
+      actions: reminderActions(options?.snoozeMinutes),
       createdAt: nowMs, notifyId: reminderNotifyId(drop.id),
     })
   }
@@ -102,11 +108,12 @@ export function fireDueReminders(store: ReminderStore, nowMs: number, deliver: (
  * Done, Snooze 1 hour or Tomorrow 9, on a reminder that has fired (or a pending one: Done also cancels it).
  * Returns the updated drop, or null when it is not a live reminder.
  */
-export function applyReminderAction(store: ReminderStore, dropId: string, action: ReminderAction, nowMs: number): DropRecord | null {
+export function applyReminderAction(store: ReminderStore, dropId: string, action: ReminderAction, nowMs: number,
+                                    options?: { snoozeMs?: number; dayMinutes?: number }): DropRecord | null {
   const [row] = store.select(r => r.id === dropId)
   if (!row || row.state === 'undone' || row.dest !== 'reminder' || !row.remind || row.remind.ackAt) return null
   const iso = (ms: number) => new Date(ms).toISOString()
-  const targets = snoozeTargets(nowMs, row.remind.tz || 'UTC')
+  const targets = snoozeTargets(nowMs, row.remind.tz || 'UTC', options)
   try {
     return store.update(dropId, cur => {
       if (!cur.remind || cur.remind.ackAt) throw new Error('reminder_gone')
@@ -123,7 +130,7 @@ export function reminderTimeFor(text: string, nowMs: number, timezone: string): 
 }
 
 /** The 30-second tick. `start` is idempotent; the timer never holds the process open. */
-export function createReminderScheduler(deps: { store: ReminderStore; deliver: (c: PingCandidate[]) => void; now?: () => number; intervalMs?: number }) {
+export function createReminderScheduler(deps: { store: ReminderStore; deliver: (c: PingCandidate[]) => void; now?: () => number; intervalMs?: number; snoozeMinutes?: () => number }) {
   const now = deps.now ?? (() => Date.now())
   let timer: ReturnType<typeof setInterval> | null = null
   let running = false
@@ -131,7 +138,9 @@ export function createReminderScheduler(deps: { store: ReminderStore; deliver: (
     if (running) return { fired: 0, late: 0 }
     running = true
     try {
-      const r = fireDueReminders(deps.store, now(), deps.deliver)
+      let snoozeMinutes: number | undefined
+      try { snoozeMinutes = deps.snoozeMinutes?.() } catch { snoozeMinutes = undefined }
+      const r = fireDueReminders(deps.store, now(), deps.deliver, { snoozeMinutes })
       if (r.fired) console.log(`[reminders] fired=${r.fired} late=${r.late}`)
       return r
     } catch { return { fired: 0, late: 0 } } finally { running = false }

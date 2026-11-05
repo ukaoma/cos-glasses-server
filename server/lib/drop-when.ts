@@ -109,7 +109,11 @@ function about(text: string, spans: Span[]): string {
  * Read a reminder time out of `text`. `nowMs` and `timezone` decide what "today", "Thursday" and "at 3" mean.
  * Never throws; anything it cannot read gives `at: null` and a reason.
  */
-export function parseWhen(text: string, nowMs: number, timezone: string): WhenResult {
+/** 6.99.11 settings: the time a day alone means (Settings, Reminders, default time). */
+export interface WhenOptions { dayMinutes?: number }
+const dayMinutesOf = (o?: WhenOptions) => o?.dayMinutes !== undefined && Number.isInteger(o.dayMinutes) && o.dayMinutes >= 0 && o.dayMinutes < 1440 ? o.dayMinutes : WHEN_DEFAULTS.dayMinutes
+
+export function parseWhen(text: string, nowMs: number, timezone: string, options?: WhenOptions): WhenResult {
   const source = typeof text === 'string' ? text.slice(0, 2_000) : ''
   const lower = source.toLowerCase()
   const now = localClock(nowMs, timezone)
@@ -219,7 +223,7 @@ export function parseWhen(text: string, nowMs: number, timezone: string): WhenRe
     } else minutes = pmBias(bareHour)
     minutes += bareMinute
   }
-  if (minutes === null) minutes = part ? WHEN_DEFAULTS[part] : WHEN_DEFAULTS.dayMinutes
+  if (minutes === null) minutes = part ? WHEN_DEFAULTS[part] : dayMinutesOf(options)
 
   // A time with no day: the next time the clock shows it.
   if (!day) day = minutes > now.minutes ? now.day : shiftDay(now.day, 1)
@@ -240,19 +244,22 @@ function finish(source: string, taken: Span[], at: number, nowMs: number, timezo
 }
 
 /** The three times COS offers when it could not read one (plan section 7): Tomorrow 9:00 and Monday 9:00. */
-export function whenSuggestions(nowMs: number, timezone: string): Array<{ id: string; label: string; at: number }> {
+export function whenSuggestions(nowMs: number, timezone: string, options?: WhenOptions): Array<{ id: string; label: string; at: number }> {
   const now = localClock(nowMs, timezone)
-  const tomorrow = taskInstant(shiftDay(now.day, 1), WHEN_DEFAULTS.dayMinutes, timezone)
+  const dm = dayMinutesOf(options), hm = `${Math.floor(dm / 60)}:${String(dm % 60).padStart(2, '0')}`
+  const tomorrow = taskInstant(shiftDay(now.day, 1), dm, timezone)
   const toMonday = ((8 - now.weekday) % 7) || 7
-  const monday = taskInstant(shiftDay(now.day, toMonday), WHEN_DEFAULTS.dayMinutes, timezone)
-  const out = [{ id: 'tomorrow_9', label: 'Tomorrow 9:00', at: tomorrow }]
-  if (monday !== tomorrow) out.push({ id: 'monday_9', label: 'Monday 9:00', at: monday })
+  const monday = taskInstant(shiftDay(now.day, toMonday), dm, timezone)
+  // The ids stay tomorrow_9 and monday_9 whatever the time: they name the choice, not the hour.
+  const out = [{ id: 'tomorrow_9', label: `Tomorrow ${hm}`, at: tomorrow }]
+  if (monday !== tomorrow) out.push({ id: 'monday_9', label: `Monday ${hm}`, at: monday })
   return out
 }
 
 /** Snooze targets for a fired reminder: one hour from now, and tomorrow 9:00. */
-export function snoozeTargets(nowMs: number, timezone: string): { hour: number; tomorrow9: number } {
+export function snoozeTargets(nowMs: number, timezone: string, options?: WhenOptions & { snoozeMs?: number }): { hour: number; tomorrow9: number } {
   const now = localClock(nowMs, timezone)
-  return { hour: nowMs + 3_600_000, tomorrow9: taskInstant(shiftDay(now.day, 1), WHEN_DEFAULTS.dayMinutes, timezone) }
+  const snooze = options?.snoozeMs !== undefined && options.snoozeMs > 0 ? options.snoozeMs : 3_600_000
+  return { hour: nowMs + snooze, tomorrow9: taskInstant(shiftDay(now.day, 1), dayMinutesOf(options), timezone) }
 }
 

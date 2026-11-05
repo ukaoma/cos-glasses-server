@@ -12,6 +12,7 @@ import { fakeWriters, scriptedDecisionClient } from '../lib/__fixtures__/drop-fi
 import { PingStateStore } from '../lib/ping-engine.js'
 import { createDropP2Runtime, type DropP2Runtime } from '../lib/drop-p2-runtime.js'
 import { DropHistorySearcher } from '../lib/drop-history-search.js'
+import { createP2SettingsReader, P2_DEFAULTS } from '../lib/drop-p2-settings.js'
 
 const servers: Server[] = [], cleanups: Array<() => void> = []
 afterEach(async () => {
@@ -19,7 +20,7 @@ afterEach(async () => {
   cleanups.splice(0).forEach(fn => fn())
 })
 
-async function setup(options: { p2?: boolean; search?: boolean } = {}) {
+async function setup(options: { p2?: boolean; search?: boolean; settings?: boolean; enabled?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'drops-p2-route-'))
   const clock = { now: Date.parse('2026-11-04T15:00:00.000Z') }  // Wednesday 9:00 CST
   let opened: DropService | null = null
@@ -42,7 +43,8 @@ async function setup(options: { p2?: boolean; search?: boolean } = {}) {
   const searcher = new DropHistorySearcher({ async ask(_s, q) { const c = (q as { c: { criteria: Record<string, string> } }).c.criteria; return { answers: { c: { probabilities: { t0: 0.9, none: 0.1, ...Object.fromEntries(Object.keys(c).filter(k => k !== 't0' && k !== 'none').map(k => [k, 0])) } } }, inputTokens: 10 } } }, () => clock.now, {})
   cleanups.push(() => { runtime?.stop(); pings?.close(); (opened as DropService | null)?.close(); rmSync(root, { recursive: true, force: true }) })
   const app = express(); app.use(express.json({ limit: '1mb' }))
-  app.use('/api', createDropsRouter({ enabled: () => true, service, p2, ...(options.search ? { search: () => searcher } : {}) }))
+  const settingsReader = createP2SettingsReader(join(root, 'drop-p2-settings.json'))
+  app.use('/api', createDropsRouter({ enabled: () => options.enabled ?? true, service, p2, ...(options.search ? { search: () => searcher } : {}), ...(options.settings ? { p2Settings: settingsReader } : {}) }))
   const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) }); servers.push(server)
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`
   const call = async (method: string, path: string, body?: unknown) => {
@@ -104,5 +106,31 @@ describe('Drop it P2 routes', () => {
     const r = await h.call('POST', '/drops/search', { q: 'jewelry show numbers' })
     expect(r.body).toMatchObject({ available: true, results: [{ id: a.body.drop.id, p: 0.9 }], searched: 1 })
     expect((await h.call('POST', '/drops/search', { q: 'x' })).body.reason).toBe('query_invalid')
+  })
+})
+
+describe('P2 settings routes (6.99.11)', () => {
+  it('GET answers the defaults; PUT merges, clamps and keeps the rest; works while Drop it is off', async () => {
+    const h = await setup({ settings: true, enabled: false })
+    const read = await h.call('GET', '/drops/settings/p2')
+    expect(read.status).toBe(200)
+    expect(read.body).toMatchObject({ protocol: 1, settings: P2_DEFAULTS, defaults: P2_DEFAULTS })
+    const put = await h.call('PUT', '/drops/settings/p2', { pings: { dailyCap: 50, sources: { stale: false } }, steer: { leaveAlone: 'HubDB' } })
+    expect(put.status).toBe(200)
+    expect(put.body.settings.pings).toMatchObject({ dailyCap: 20, perSource: 2, sources: { stale: false, prep: true } })
+    expect(put.body.settings.steer).toEqual({ about: '', leaveAlone: 'HubDB' })
+    expect((await h.call('GET', '/drops/settings/p2')).body.settings.pings.dailyCap).toBe(20)
+    // A second save of another section keeps the first.
+    const second = await h.call('PUT', '/drops/settings/p2', { checkin: { time: '10:30' } })
+    expect(second.body.settings.checkin.time).toBe('10:30')
+    expect(second.body.settings.pings).toMatchObject({ dailyCap: 20, sources: { stale: false } })
+    expect(second.body.settings.steer.leaveAlone).toBe('HubDB')
+  })
+  it('refuses a body that is not sections, and answers 503 with no store', async () => {
+    const h = await setup({ settings: true })
+    for (const body of [{}, { nope: {} }, { pings: 3 }, [1]]) expect((await h.call('PUT', '/drops/settings/p2', body)).status).toBe(400)
+    const bare = await setup()
+    expect((await bare.call('PUT', '/drops/settings/p2', { pings: { on: false } })).status).toBe(503)
+    expect((await bare.call('GET', '/drops/settings/p2')).body.settings).toEqual(P2_DEFAULTS)
   })
 })

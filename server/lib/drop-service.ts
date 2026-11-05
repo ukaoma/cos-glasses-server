@@ -19,6 +19,7 @@ import { choiceFor, cleanDropForJev, DROP_ROUTER_LIMITS, ruleRoute, type DropRou
 import { DropDestinationError, type DropWriters } from './drop-destinations.js'
 import { parseWhen, whenLabel, whenSuggestions, WHEN_MAX_AHEAD_MS } from './drop-when.js'
 import { applyReminderAction, reminderAbout, REMINDER_ACTIONS, type ReminderAction } from './reminder-scheduler.js'
+import { timeMinutes, type P2Settings } from './drop-p2-settings.js'
 
 export class DropError extends Error {
   constructor(readonly code: string, readonly status: number, message?: string) { super(message ?? code) }
@@ -50,6 +51,8 @@ export interface DropServiceDeps {
   askLookup?: (clientJobId: string, generation: number) => Promise<AskLookup | undefined>
   now?: () => Date
   timezone?: () => string
+  /** 6.99.11 settings: the reminders' default time and snooze length. Absent: 9:00 and an hour. */
+  p2Settings?: () => P2Settings
 }
 
 const TEXT_MAX = DROP_LIMITS.text
@@ -214,7 +217,7 @@ export class DropService {
         case 'reminder': {
           // P2 (plan section 7): the time is read from his words at filing. None found: the receipt asks once.
           const tz = this.deps.timezone?.() ?? 'UTC'
-          const when = parseWhen(drop.text, this.now().getTime(), tz)
+          const when = parseWhen(drop.text, this.now().getTime(), tz, this.whenOptions())
           remind = { at: when.at === null ? null : new Date(when.at).toISOString(), tz, firedAt: null, ackAt: null, snoozes: 0 }
           links = [{ kind: 'reminder', id: drop.id, label: 'Reminder' }]
           break
@@ -244,7 +247,7 @@ export class DropService {
       return next
     })
     console.log(`[drops] ${saved.id} filed dest=${actualDest} by=${route.by}${reason ? ` reason=${reason}` : ''} chars=${saved.text.length}`)
-    const words = receiptWords(saved, actualDest, reason, movedFrom, this.now().getTime())
+    const words = receiptWords(saved, actualDest, reason, movedFrom, this.now().getTime(), this.whenOptions())
     this.receipt(saved, 'receipt', words.title, words.line, saved.links, words.actions, generation, words.needsReply)
     return this.answer(this.deps.drops.get(saved.id)!, false)
   }
@@ -312,13 +315,13 @@ export class DropService {
       const drop = this.mustGet(item.threadId)
       if (drop.state === 'undone' || drop.dest !== 'reminder' || !drop.remind || drop.remind.ackAt) throw new DropError('not_a_live_reminder', 409)
       const nowMs = this.now().getTime()
-      const suggested = whenSuggestions(nowMs, drop.remind.tz).find(w => w.id === choice)
+      const suggested = whenSuggestions(nowMs, drop.remind.tz, this.whenOptions()).find(w => w.id === choice)
       const atMs = suggested ? suggested.at : /^\d{4}-\d{2}-\d{2}T/.test(choice) ? Date.parse(choice) : Number.NaN
       if (!Number.isFinite(atMs) || atMs <= nowMs || atMs - nowMs > WHEN_MAX_AHEAD_MS) throw new DropError('invalid_time', 400)
       const generation = this.nextGeneration(drop.id)
       this.retire(drop.id)
       const saved = this.deps.drops.update(drop.id, d => ({ ...d, remind: { ...d.remind!, at: new Date(atMs).toISOString(), firedAt: null } }))
-      const words = receiptWords(saved, 'reminder', undefined, undefined, nowMs)
+      const words = receiptWords(saved, 'reminder', undefined, undefined, nowMs, this.whenOptions())
       this.receipt(saved, 'receipt', words.title, words.line, saved.links, words.actions, generation)
       return this.answer(this.deps.drops.get(saved.id)!, false)
     })
@@ -330,10 +333,17 @@ export class DropService {
     const reminder = item?.links.find(l => l.kind === 'reminder')
     if (!item || item.kind !== 'ping' || !reminder) throw new DropError('reminder_not_found', 404)
     if (!REMINDER_ACTIONS.some(a => a.id === action)) throw new DropError('invalid_action', 400)
-    const drop = applyReminderAction(this.deps.drops, reminder.id, action as ReminderAction, this.now().getTime())
+    const o = this.whenOptions()
+    const drop = applyReminderAction(this.deps.drops, reminder.id, action as ReminderAction, this.now().getTime(), { dayMinutes: o.dayMinutes, snoozeMs: o.snoozeMinutes === undefined ? undefined : o.snoozeMinutes * 60_000 })
     if (!drop) throw new DropError('not_a_live_reminder', 409)
     const [done] = this.deps.feed.update(new Set([item.id]), i => ({ ...i, state: 'done', actions: [] }))
     return { item: done, drop: this.view(drop, null) }
+  }
+
+  private whenOptions(): { dayMinutes?: number; snoozeMinutes?: number } {
+    let s: P2Settings | undefined
+    try { s = this.deps.p2Settings?.() } catch { s = undefined }
+    return s ? { dayMinutes: timeMinutes(s.reminders.defaultTime), snoozeMinutes: s.reminders.snoozeMinutes } : {}
   }
 
   /** The two stores, for the P2 runtime (pings, reminders, follow-ups) that writes beside this service. */
@@ -671,7 +681,7 @@ function reading(choice: DropChoice): string {
   }
 }
 
-function receiptWords(drop: DropRecord, dest: DropDest, reason?: string, movedFrom?: DropDest, nowMs = Date.now()): { title: string; line: string; actions: FeedAction[]; needsReply?: boolean } {
+function receiptWords(drop: DropRecord, dest: DropDest, reason?: string, movedFrom?: DropDest, nowMs = Date.now(), when: { dayMinutes?: number } = {}): { title: string; line: string; actions: FeedAction[]; needsReply?: boolean } {
   const card = drop.links.find(l => l.kind === 'card'), thread = drop.links.find(l => l.kind === 'thread')
   const moved = movedFrom ? 'Moved. ' : ''
   switch (dest) {
@@ -687,7 +697,7 @@ function receiptWords(drop: DropRecord, dest: DropDest, reason?: string, movedFr
       if (drop.remind?.at) return { title: `${moved}Reminder set: ${whenLabel(Date.parse(drop.remind.at), nowMs, drop.remind.tz)}`, line: `I will remind you: ${about}.`, actions: [A.undo, A.move] }
       // No time in his words (plan section 7): ask once, with the two common answers.
       return { title: `${moved}When should I remind you?`, line: `I could not read a time for: ${about}.`, needsReply: true,
-        actions: [...whenSuggestions(nowMs, drop.remind?.tz ?? 'UTC').map(w => ({ id: `when:${w.id}`, label: w.label })), A.undo, A.move] }
+        actions: [...whenSuggestions(nowMs, drop.remind?.tz ?? 'UTC', when).map(w => ({ id: `when:${w.id}`, label: w.label })), A.undo, A.move] }
     }
     default: {
       const word = drop.kind === 'idea' ? 'an idea' : drop.kind === 'file' ? 'a file note' : 'a note'

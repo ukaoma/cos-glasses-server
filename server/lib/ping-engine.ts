@@ -20,7 +20,8 @@ import { join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { acquireServerInstanceLock, type ServerInstanceLock } from './server-instance-lock.js'
 import { localClock } from './morning-brief-schedule.js'
-import { DEFAULT_BANNER_SOURCES, isQuietHours, PING_BUDGET, PING_SOURCES, planBanners, trimLedger, bannerTitle, type BannerRecord, type PingSource } from './ping-budget.js'
+import { DEFAULT_BANNER_SOURCES, DEFAULT_BUDGET, isQuietHours, PING_SOURCES, planBanners, trimLedger, bannerTitle, type BannerRecord, type BudgetOptions, type PingSource } from './ping-budget.js'
+import { bannerSourcesFrom, budgetFrom, matchesSteer, steerWords, timeMinutes, type P2Settings } from './drop-p2-settings.js'
 import {
   agentCandidate, checkinCandidates, digestCandidate, followupCandidates, prepCandidates, signalCandidates, staleCandidates,
   type IntakeRow, type PingCandidate, type SignalRow, type ThreadRow,
@@ -119,6 +120,8 @@ export interface PingEngineDeps {
   now?: () => number
   timezone: () => string
   enabled?: () => readonly PingSource[]
+  /** 6.99.11 settings. When given, they decide the budget, quiet hours, sources, check-in, steer and banners. */
+  settings?: () => P2Settings
 }
 
 export interface PingTickResult { posted: number; held: number; released: number; expired: number; banners: number }
@@ -134,11 +137,14 @@ export class PingEngine {
     try { snap = await this.deps.read() } catch { snap = {} }
     const polled: PingCandidate[] = []
     const safely = (fn: () => PingCandidate[]) => { try { polled.push(...fn()) } catch { /* one bad source never stops the others */ } }
-    safely(() => prepCandidates(snap.nextEvent, nowMs, tz))
-    safely(() => followupCandidates(snap.intakeOpen, nowMs))
-    safely(() => staleCandidates(snap.threads, nowMs, tz))
-    safely(() => signalCandidates(snap.signals, nowMs))
-    safely(() => checkinCandidates(nowMs, tz))
+    const set = this.settingsNow()
+    const src = set?.pings.sources
+    const pingsOn = set ? set.pings.on : true
+    if (pingsOn && (src?.prep ?? true)) safely(() => prepCandidates(snap.nextEvent, nowMs, tz))
+    if (pingsOn && (src?.followups ?? true)) safely(() => followupCandidates(snap.intakeOpen, nowMs))
+    if (pingsOn && (src?.stale ?? true)) safely(() => staleCandidates(snap.threads, nowMs, tz))
+    if (pingsOn && (src?.signals ?? true)) safely(() => signalCandidates(snap.signals, nowMs))
+    if (set ? set.checkin.on : true) safely(() => checkinCandidates(nowMs, tz, set ? { weekday: set.checkin.weekday, minutes: timeMinutes(set.checkin.time) } : undefined))
     // Sources this snapshot could read: a held item from a source we could not read this tick is kept, not expired.
     const read = new Set<PingSource>(['checkin'])
     if (snap.nextEvent !== undefined) read.add('prep')
@@ -153,18 +159,30 @@ export class PingEngine {
     return this.deliver(candidates, nowMs, this.deps.timezone(), null)
   }
 
-  /** A pushed agent event, through the template. */
+  /** A pushed agent event, through the template. Off with the pings switch or the agent source switch. */
   pushAgent(ev: Parameters<typeof agentCandidate>[0]): PingTickResult {
+    const set = this.settingsNow()
+    if (set && (!set.pings.on || !set.pings.sources.agent)) return { posted: 0, held: 0, released: 0, expired: 0, banners: 0 }
     const c = agentCandidate(ev)
     return c ? this.push([c]) : { posted: 0, held: 0, released: 0, expired: 0, banners: 0 }
   }
 
+  private settingsNow(): P2Settings | null {
+    try { return this.deps.settings?.() ?? null } catch { return null }
+  }
+
   private deliver(incoming: PingCandidate[], nowMs: number, tz: string, current: { keys: Set<string>; sources: Set<PingSource> } | null): PingTickResult {
     const result: PingTickResult = { posted: 0, held: 0, released: 0, expired: 0, banners: 0 }
+    const set = this.settingsNow()
+    const budget: BudgetOptions = set ? budgetFrom(set) : DEFAULT_BUDGET
+    const leaveAlone = set ? steerWords(set.steer.leaveAlone) : [], about = set ? steerWords(set.steer.about) : []
+    const words = (c: PingCandidate) => `${c.title ?? ''} ${c.line}`
+    // "Leave alone" mutes a ping by its words. Never a reminder he set, never a follow-up to his own drop.
+    if (leaveAlone.length) incoming = incoming.filter(c => c.source === 'reminder' || c.source === 'resolution' || !matchesSteer(words(c), leaveAlone))
     const state = this.deps.state.read()
     const consumed = new Set(state.consumed.map(c => c.key))
     const heldKeys = new Set(state.held.map(h => h.key))
-    const quiet = isQuietHours(nowMs, tz)
+    const quiet = isQuietHours(nowMs, tz, budget)
     const posted: Array<{ candidate: PingCandidate; feedId: string }> = []
     let changed = false
 
@@ -182,7 +200,7 @@ export class PingEngine {
     }
 
     // Release what quiet hours held, as one item, from 8:00 on a weekday.
-    if (!quiet && state.held.length && localClock(nowMs, tz).minutes >= PING_BUDGET.firstBannerMinutes) {
+    if (!quiet && state.held.length && localClock(nowMs, tz).minutes >= budget.firstBannerMinutes) {
       const live = state.held.filter(h => {
         if (h.expiresAt !== undefined && h.expiresAt <= nowMs) return false
         if (current && POLLED.has(h.source) && current.sources.has(h.source) && !current.keys.has(h.key)) return false
@@ -199,8 +217,10 @@ export class PingEngine {
     }
 
     if (posted.length) {
-      const enabled = this.deps.enabled?.() ?? DEFAULT_BANNER_SOURCES
-      const plan = planBanners(posted.map(p => ({ id: p.feedId, source: p.candidate.source, createdAt: p.candidate.createdAt })), state.ledger, nowMs, tz, enabled)
+      const enabled = set ? bannerSourcesFrom(set) : this.deps.enabled?.() ?? DEFAULT_BANNER_SOURCES
+      // "Ping me about": a ping whose words match may banner although its kind is silent. The caps still hold.
+      const promoted = new Set(about.length ? posted.filter(p => matchesSteer(words(p.candidate), about)).map(p => p.feedId) : [])
+      const plan = planBanners(posted.map(p => ({ id: p.feedId, source: p.candidate.source, createdAt: p.candidate.createdAt })), state.ledger, nowMs, tz, enabled, budget, promoted)
       const banners: PingBanner[] = plan.banners.map(b => {
         const items = b.ids.map(id => posted.find(p => p.feedId === id)!.candidate)
         return {

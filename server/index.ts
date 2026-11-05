@@ -177,6 +177,7 @@ import { serverTimezone } from './lib/morning-brief-config.js'
 import { createYourMoveCounter } from './lib/your-move-count.js'
 import { readWorkJournal } from './lib/work-activity.js'
 import { createDropP2Boot } from './lib/drop-p2-boot.js'
+import { createP2SettingsReader } from './lib/drop-p2-settings.js'
 import { createDropP2Runtime, journalReceiptsLite } from './lib/drop-p2-runtime.js'
 import { sessionTurnOutcome } from './lib/drop-resolution.js'
 import { DropHistorySearcher } from './lib/drop-history-search.js'
@@ -910,7 +911,10 @@ app.use('/api', createWorkSearchRouter())
 // Drop it P1 (6.100 candidate): the pinned COS chat's drops, receipts and History. Off by default (COS_DROP_IT or
 // PUT /api/drops/settings); its stores open on first use, so an install with it off writes nothing. The router is one
 // Jev request per drop with its own cap (COS_DROP_DAILY_TOKENS), ledger, breaker and switch (COS_DROP_ROUTER).
+// 6.99.11: P2 settings (data/drop-p2-settings.json), read through a 15 s cache; a PUT updates it at once.
+const dropP2Settings = createP2SettingsReader()
 const dropService = lazyDropService(() => openDropService(part => dataPath(part), {
+  p2Settings: () => dropP2Settings.read(),
   router: createDropRouter(),
   writers: createBridgeDropWriters(),
   timezone: () => serverTimezone(),
@@ -937,6 +941,7 @@ const dropP2 = createDropP2Boot({
     emitLens: event => { emitDisplay(event) },
     // Quiet while the server drains for an update or restart, as the morning brief is.
     paused: () => gracefulShutdownStarted || !maintenanceAdmissionsOpen(),
+    settings: () => dropP2Settings.read(),
   }),
 })
 // The turn after Send to session ended: its held drop gets one follow-up (replied, or stopped). Never throws.
@@ -952,6 +957,7 @@ app.use('/api', createDropsRouter({
   service: dropService,
   p2: () => dropP2.runtime(),
   search: () => dropSearcher,
+  p2Settings: dropP2Settings,
   routerStatus: () => {
     const status = sharedDropJevClient().status()
     return { on: dropRouterEnabled(), dailyCap: dropDailyCap(), usedToday: status.usedToday, breakerOpenUntil: status.breakerOpenUntil }

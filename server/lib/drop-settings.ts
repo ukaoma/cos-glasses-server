@@ -39,6 +39,7 @@ export function writeDropItSetting(enabled: boolean, file = DROP_IT_SETTINGS_FIL
 }
 
 /** The capability block for /api/health and /api/models. Codes only: no counts, no words. Additive. */
-export function dropItCapability(env: NodeJS.ProcessEnv = process.env): { protocol: number; enabled: boolean; source: 'env' | 'settings' } {
-  return { protocol: DROP_IT_PROTOCOL, enabled: dropItEnabled(env), source: dropItSource(env) }
+export function dropItCapability(env: NodeJS.ProcessEnv = process.env): { protocol: number; enabled: boolean; source: 'env' | 'settings'; p2Settings: number } {
+  // p2Settings (6.99.11): GET/PUT /api/drops/settings/p2 exists. Clients that do not see it hide the P2 controls.
+  return { protocol: DROP_IT_PROTOCOL, enabled: dropItEnabled(env), source: dropItSource(env), p2Settings: 1 }
 }
