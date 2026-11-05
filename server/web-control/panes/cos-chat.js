@@ -497,11 +497,24 @@
     if (action === 'open_memory') return W.go('memories');
     if (action === 'open_session') return W.go('sessions');
     if (action === 'open_messages') return W.go('messages');
-    var body = action === 'undo' || action === 'dismiss' || /^choose:/.test(action) ? { itemId: itemId, action: action } : null;
+    // P2 (6.99.11): pings and follow-ups. Opens go where the item's link lives; Prep asks COS; Reply starts a reminder.
+    var linkOf = function (kind) { return (item.links || []).filter(function (l) { return l.kind === kind; })[0]; };
+    if (action === 'open_result') return W.go(linkOf('session') ? 'sessions' : linkOf('card') ? 'work' : 'messages');
+    if (action === 'open') { if (linkOf('thread')) return W.go('threads'); if (linkOf('meeting')) return W.go('meetings'); return; }
+    if (action === 'review') return W.go('work');
+    if (action === 'prep') { if (C.caps && C.caps.jobs) submitAsk('Prep me for ' + (item.title || 'my next meeting'), ''); return; }
+    if (action === 'reply') {
+      var box = document.getElementById('cos-input');
+      if (box) { box.value = 'remind me '; box.focus(); }
+      return;
+    }
+    var P2_POST = { reminder_done: 1, snooze_1h: 1, snooze_tomorrow: 1 };
+    var body = action === 'undo' || action === 'dismiss' || /^choose:/.test(action) || /^when:/.test(action) || P2_POST[action] ? { itemId: itemId, action: action } : null;
     if (!body) return;
     api('/api/inbox/action', { method: 'POST', body: body }).then(function (ans) {
       if (ans && ans.items) mergeItems(ans.items);
-      if (action === 'dismiss') item.state = 'done';
+      if (ans && ans.item) mergeItems([ans.item]);
+      if (action === 'dismiss' || P2_POST[action]) item.state = 'done';
       if (ans && ans.next && ans.next.kind === 'ask' && C.caps && C.caps.jobs) submitAsk(ans.next.prompt, ans.drop.id);
       paintFeed(false); refreshSummary();
     }, function (err) { W.toast((err && err.message) || 'That did not go through.'); });
