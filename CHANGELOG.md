@@ -1,6 +1,6 @@
 ## 6.99.11 - Drop it P2: pings, follow-ups, reminders and History search (private)
 
-2026-11-04. Private build for one Mac, on top of 6.99.10 (Drop it P1), which carries 6.99.9, 6.99.8 (resumable meeting consolidation) and the 6.99.7 dictation hotfix. Pairs with COS Control 0.5.371 now; COS Control 0.5.372 adds the Mac banners and the local reminder backup. Nothing changes for the glasses app yet.
+2026-11-04. Private build for one Mac, on top of 6.99.10 (Drop it P1, with the web Ask sheet fix), which carries 6.99.9, 6.99.8 (resumable meeting consolidation) and the 6.99.7 dictation hotfix. Pairs with COS Control 0.5.371 now; COS Control 0.5.372 adds the Mac banners and the local reminder backup. Nothing changes for the glasses app yet.
 
 Phase 2 of Drop it, the part that reaches out. Everything here runs only while Drop it is on (off for every user; on where `COS_DROP_IT=1` is set or Control turns it on), checked at boot and each minute. While off, nothing new opens and nothing is written.
 
@@ -12,9 +12,17 @@ Phase 2 of Drop it, the part that reaches out. Everything here runs only while D
 - **Waiting on you.** Pings and follow-ups that need an answer (a card at QA, a failed or refused handoff, follow-ups ready, the check-in, a session that stopped, a reminder with no time) count toward `waiting` until answered, done or dismissed.
 - **History search by meaning.** `POST /api/drops/search`: one Jev Choice over your drops' words and where they went, charged to the drop budget (`COS_DROP_DAILY_TOKENS`) and off with `COS_DROP_ROUTER=0`. A drop that looks like it holds a password or key is never offered. Over 254 drops it searches the newest 254 and says so; word search still covers everything. Read-only, so it is not held during an update drain.
 - **COS Control Web.** The pinned chat's new buttons work: Done, Snooze, Tomorrow 9, the reminder time picks, Open result, Open, Review, Prep me, and Reply on the check-in.
+- **Settings: tune and steer it.** `GET`/`PUT /api/drops/settings/p2` (its own file, `data/drop-p2-settings.json`; the P1 switch and its route are unchanged), and a COS reaching out section in COS Control Web Settings. Every value is honored by the code that does the thing:
+  - Pings: on or off; interruptions a day (6), from one kind a day (2), minutes between (45); quiet from and until (6 PM to 6 AM) and weekends; the first interruption (8:00); a switch for meeting prep, agents finishing, follow-ups ready, threads gone quiet and red signals.
+  - Follow-ups on your drops: on or off, and Work cards, handoffs, sessions and threads one by one.
+  - Weekly check-in: on or off, its day and time (Monday 9:00).
+  - Reminders: the default time (what a day alone means, and Tomorrow and Monday), the snooze length (the button says it), notifications, and the glasses push.
+  - Which kinds may interrupt; the rest land in the chat without a notification.
+  - Steer: Ping me about (a ping that mentions one of these words may interrupt, even when its kind stays in the chat; the limits still hold) and Leave alone (a ping that mentions one is not posted; reminders and follow-ups always are). Whole words, 300 characters each, no model.
+  - Numbers are clamped and a save changes only what it names. Readable and writable while Drop it is off. `capabilities.dropIt.p2Settings` lets older clients hide the controls.
 - **Quiet during updates.** Every P2 loop skips its turn while the server drains; a reminder then fires on the next tick, marked late.
 - **State.** `data/pings/state.json` (the banner ledger, held items, consumed keys): one writer, a 0700 folder and a 0600 file. Logs carry counts only, never words.
-- Default-on changes: none for anyone with Drop it off, which is every install by default. With Drop it on: reminder times, reminder and follow-up banners, the Monday check-in, and silent pings in the chat.
+- Default-on changes: none for anyone with Drop it off, which is every install by default. With Drop it on: reminder times, reminder and follow-up banners, the Monday check-in, and silent pings in the chat, all adjustable in Settings. `capabilities.dropIt` gains `p2Settings: 1` for every install (additive).
 
 ## 6.99.10 - Drop it P1, with Ask and Drop on the web (private)
 
