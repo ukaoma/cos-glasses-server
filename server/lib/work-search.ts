@@ -141,6 +141,7 @@ export function isReadOnlyApiPost(method: string, path: string): boolean {
     || path === '/web-session/login'
     || path === '/web-session/logout'
     || path === '/web-session/handoff'
+    || path === '/web-session/phone-link'
     || path === '/web-session/device-code'
     || path === '/web-session/revoke-all'
     || path === '/web-bridge/memories'

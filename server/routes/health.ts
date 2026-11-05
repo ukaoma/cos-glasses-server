@@ -80,6 +80,7 @@ import { liveMeetingCapability } from '../lib/live-provisional.js'
 import { TITLE_STEER_CAPABILITY } from '../lib/meeting-title-steer.js'
 import { CUE_KINDS } from '../../shared/live-cues-v2.js'
 import { tailscaleNudgeHealthField } from '../lib/tailscale-nudge.js'
+import { WEB_PHONE_LINK_CAPABILITY, webControlEnabled } from './web-control.js'
 
 /** 6.86.0: `capabilities.liveCues.kinds`, the cue kinds this server can write (additive; an older server omits it, which
  *  is how a client knows to expect only reinforce and challenge). Which kinds a given meeting gets is in its arm answer. */
@@ -504,6 +505,10 @@ healthRouter.get('/health', async (_req, res) => {
       // reads it before it holds a token, and an older server omits it, which is how
       // the phone knows to say "Update COS on your Mac (server 6.67 or newer)".
       pairing: { version: PAIRING_PROTOCOL_VERSION },
+      // Open COS on the web from the glasses app: POST /api/web-session/phone-link (routes/web-control.ts).
+      // Present only while COS Control Web is on, which is when the route is mounted. An older
+      // server omits it, and the app then hides its row.
+      ...(webControlEnabled() ? { webPhoneLink: WEB_PHONE_LINK_CAPABILITY } : {}),
       // Advertised on the PUBLIC health route on purpose: a client deciding whether
       // to request a display ticket may not hold a usable token yet, and an old
       // server simply omits this key, which is how a new client detects it.

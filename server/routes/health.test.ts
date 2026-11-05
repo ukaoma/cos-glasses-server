@@ -92,6 +92,19 @@ describe('health capability contract', () => {
     expect(body.capabilities?.pairing).toEqual({ version: 1 })
   }, 20_000)
 
+  // Open COS on the web from the glasses app: the app shows its row only when this is present.
+  it('advertises webPhoneLink 1 while COS Control Web is on, and omits it when it is off', async () => {
+    const saved = process.env.COS_WEB_CONTROL_ENABLED
+    try {
+      delete process.env.COS_WEB_CONTROL_ENABLED
+      expect((await (await fetch(`${base}/api/health`)).json() as any).capabilities.webPhoneLink).toBe(1)
+      process.env.COS_WEB_CONTROL_ENABLED = '0'
+      expect((await (await fetch(`${base}/api/health`)).json() as any).capabilities).not.toHaveProperty('webPhoneLink')
+    } finally {
+      if (saved === undefined) delete process.env.COS_WEB_CONTROL_ENABLED; else process.env.COS_WEB_CONTROL_ENABLED = saved
+    }
+  }, 20_000)
+
   // 6.93.0 W8: Miles can see whether COS_MAC_LIVE_VOICES took effect without reading a label. Public route: a mode and counts, nothing else.
   it('advertises the live Mac voice switch, window by default, and counts only while the window path is on', async () => {
     const saved = { live: process.env.COS_MAC_LIVE_VOICES, labels: process.env.COS_MAC_VOICE_LABELS }
