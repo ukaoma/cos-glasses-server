@@ -410,7 +410,13 @@
   // jobs-today list) has no server route, so it is not here.
   var SX_PREFS = 'cos_web_sessions';
   function sxPref(key, fallback, allowed) { var v = readStore(SX_PREFS)[key]; return allowed.indexOf(v) >= 0 ? v : fallback; }
-  function sxSave() { writeStore(SX_PREFS, { clock: SX.clock, view: SX.view, recency: SX.recency }); }
+  // Usage's own choices ride along once they have been read, so an early save never writes defaults over them.
+  function sxSave() {
+    var v = readStore(SX_PREFS);
+    v.clock = SX.clock; v.view = SX.view; v.recency = SX.recency;
+    if (SX.uPrefsLoaded) { v.uPeriod = SX.uPeriod; v.uFrom = SX.uFrom; v.uTo = SX.uTo; v.uMeasure = SX.uMeasure; v.uSeries = SX.uSeries; v.uScale = SX.uScale; v.uLines = SX.uLines; }
+    writeStore(SX_PREFS, v);
+  }
   var SX = {
     rows: null, dropped: null, enabled: true, loading: false, error: '', loadedAt: 0,
     clock: sxPref('clock', 'updated', ['updated', 'opened', 'pinned']),
@@ -419,7 +425,10 @@
     q: '', instant: [], remote: [], searching: false, searchError: '', ranFor: '', semantic: null, semanticReason: '', searchSeq: 0, searchTimer: null,
     hooks: null, hooksAt: 0,
     usage: null, usageAt: 0, usageLoading: false, usageError: '',
-    uPeriod: 'Last 30 days', uTool: 'All tools', uModel: 'All models'
+    uPeriod: 'Last 30 days', uTool: 'All tools', uModel: 'All models',
+    // Usage on a wide screen (uWideModel): the custom range, the chart sentence, the chosen bar, the table's order.
+    uFrom: '', uTo: '', uMeasure: 'all', uSeries: 'tool', uScale: '', uScaleBeforeHistory: '', uDayJump: false, uLines: false,
+    uInspect: null, uPinned: null, uSort: 'tokens', uSortAsc: false, uOpen: {}, uCols: null, uToolBefore: null, uM: null
   };
   var SX_VIEWS = { sessions: 'Sessions', usage: 'Usage', cost: 'COS cost' };
 
@@ -827,7 +836,8 @@
       if (act === 'retry' && rd) { rd.refusal = null; renderVerdict(rd); return sendSessionTurn(!!rd.retryFork); }
       if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); return sendSessionTurn(false); }
       if (act === 'caution-cancel' && rd) { rd.cautionAsk = false; renderVerdict(rd); return; }
-      if (act === 'usage-clear') { SX.uTool = 'All tools'; SX.uModel = 'All models'; return paintUsage(); }
+      if (act === 'usage-clear') { SX.uTool = 'All tools'; SX.uModel = 'All models'; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
+      if (act === 'usage-range') return uOpenRange(t, true);
     });
     sxPane.addEventListener('input', function (e) {
       if (e.target.id !== 'sessions-q') return;
@@ -843,9 +853,10 @@
     sxPane.addEventListener('change', function (e) {
       var id = e.target.id;
       if (id === 'sessions-recency') { SX.recency = e.target.value; sxSave(); return renderSessionGroups(); }
-      if (id === 'usage-period') { SX.uPeriod = e.target.value; return paintUsage(); }
-      if (id === 'usage-tool') { SX.uTool = e.target.value; SX.uModel = 'All models'; return paintUsage(); }
-      if (id === 'usage-model') { SX.uModel = e.target.value; return paintUsage(); }
+      // Custom dates opens the date sheet; the menu goes back to the range in force if it is cancelled.
+      if (id === 'usage-period') { if (e.target.value === U_CUSTOM) return uOpenRange(e.target, true); SX.uPeriod = e.target.value; uPeriodChanged(); return paintUsage(); }
+      if (id === 'usage-tool') { SX.uTool = e.target.value; SX.uModel = 'All models'; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
+      if (id === 'usage-model') { SX.uModel = e.target.value; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
     });
   }
 
@@ -1796,8 +1807,9 @@
   }
   function renderUsageView(force) {
     var box = $('sessions-usage'); if (!box) return;
+    uLoadPrefs(); uWire();
     var stale = !SX.usage || Date.now() - SX.usageAt > 5 * 60000;
-    if (SX.usage) paintUsage();
+    if (SX.usage) paintUsage(true);
     else box.innerHTML = '<p class="cx-note sx-reading">' + (SX.view === 'cost' ? 'Reading what COS used.' : 'Reading local usage…') + '</p>';
     if ((!force && !stale) || SX.usageLoading) return;
     SX.usageLoading = true; paintSessionsHero();
@@ -1805,17 +1817,26 @@
     // cold read can pass the 20 s default for reads once the network is added; 30 s covers it.
     api('/api/usage/summary' + (force ? '?refresh=1' : ''), { timeoutMs: 30000 }).then(function (d) {
       SX.usage = d || {}; SX.usageAt = Date.now(); SX.usageError = ''; SX.usageLoading = false;
-      paintSessionsHero(); paintUsage();
+      paintSessionsHero(); paintUsage(true);
     }, function (err) {
       SX.usageLoading = false; SX.usageError = (err && err.message) || 'Usage did not load.';
-      paintSessionsHero(); paintUsage();
+      paintSessionsHero(); paintUsage(true);
     });
   }
-  function paintUsage() {
+  // background: a refresh or a breakpoint change, which waits while someone is using the page (uHeld). What a person
+  // chose paints at once. From 860 px Usage takes the Mac's desktop layout; under it the vertical view is unchanged.
+  function paintUsage(background) {
     var box = $('sessions-usage'); if (!box || SX.view === 'sessions') return;
+    if (background === true && SX.view === 'usage' && uHeld()) { SX.uDeferred = true; return; }
+    SX.uDeferred = false; SX.uRedraw = false;
+    var wide = SX.view === 'usage' && !!SX.usage && uWide();
+    SX.uWideShown = wide;
+    box.classList.toggle('u-wide', wide);
+    if (!wide) SX.uM = null;
     if (!SX.usage) { box.innerHTML = SX.usageError ? '<div class="cx-notice warn">' + esc(SX.usageError) + '</div>' : ''; return; }
     box.innerHTML = (SX.usageError ? '<div class="cx-notice warn">' + esc(SX.usageError) + '</div>' : '') +
-      (SX.view === 'cost' ? cosCostHtml(SX.usage) : sessionUsageHtml(SX.usage));
+      (SX.view === 'cost' ? cosCostHtml(SX.usage) : wide ? sessionUsageWideHtml(SX.usage) : sessionUsageHtml(SX.usage));
+    if (wide) uDrawWide();
   }
 
   // Numbers the way Control writes them (SessionUsagePresentation, CosCostPresentation).
@@ -1837,6 +1858,188 @@
   var U_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
   function uDayWords(key) { var p = String(key || '').split('-').map(Number); return p.length === 3 && p[1] ? U_MONTHS[p[1] - 1] + ' ' + p[2] + ', ' + p[0] : String(key || ''); }
 
+  // SessionUsagePricing.tokens, for the chart's hover card: "2.82B", "48.30M", "12.5K".
+  function uTok2(n) { n = Number(n) || 0; return n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n); }
+  // spokenTokens: "78.0 billion", for the summary card's headline.
+  function uSpoken(n) {
+    n = Number(n) || 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + ' billion';
+    if (n >= 1e6) return (n >= 1e8 ? (n / 1e6).toFixed(0) : (n / 1e6).toFixed(1)) + ' million';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + ' thousand';
+    return uNum(n);
+  }
+  // deltaPercent: "+48.1%", "-3.2%", "0.0%"; no prior is Unavailable, never a made-up change.
+  function uDelta(cur, prior) {
+    if (!(prior > 0)) return 'Unavailable';
+    var p = 100 * (cur - prior) / prior;
+    if (Math.abs(p) < 0.05) return '0.0%';
+    return (p > 0 ? '+' : '') + p.toFixed(1) + '%';
+  }
+
+  // ── Usage range math (pure: no page, no SX; server/lib/web-usage-range.test.ts runs this block) ──
+  // Dates are ledger day keys (yyyy-MM-dd) in the report's time zone. A day key is a civil date, so the arithmetic
+  // runs on UTC midnights and never meets a daylight-saving gap (SessionUsageDay in SessionUsageCore.swift).
+  var U_CUSTOM = 'Custom dates';
+  var U_PRESETS = ['Last 7 days', 'Last 30 days', 'Last 90 days', 'This month', 'Last month', 'This quarter', 'Year to date', 'Last weekend', 'All history'];
+  var U_LAST = { 'Last 7 days': 7, 'Last 30 days': 30, 'Last 90 days': 90 };
+  var U_MONTH_RE = /^\d{4}-\d{2}$/, U_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+  var U_WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  // Today's date where the report was written. A zone the browser does not know falls back to the browser's own day.
+  function uDayKey(tz, now) {
+    var d = now || new Date();
+    try {
+      var parts = {};
+      new Intl.DateTimeFormat('en-US', { timeZone: tz || undefined, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d)
+        .forEach(function (p) { parts[p.type] = p.value; });
+      if (parts.year && parts.month && parts.day) return parts.year + '-' + parts.month + '-' + parts.day;
+    } catch (_e) { /* an unknown zone */ }
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+  function uSerial(key) { var p = String(key).split('-').map(Number); return Math.round(Date.UTC(p[0], p[1] - 1, p[2]) / 86400000); }
+  function uFromSerial(n) { return new Date(n * 86400000).toISOString().slice(0, 10); }
+  function uAddDays(key, n) { return uFromSerial(uSerial(key) + n); }
+  // 0 is Monday. 1970-01-01 was a Thursday.
+  function uWeekday(key) { return ((uSerial(key) + 3) % 7 + 7) % 7; }
+  function uValidDay(key) { return U_DAY_RE.test(String(key || '')) && uFromSerial(uSerial(key)) === key; }
+  function uMonthAdd(month, n) { var p = month.split('-').map(Number), m = p[0] * 12 + (p[1] - 1) + n; return Math.floor(m / 12) + '-' + String(m % 12 + 1).padStart(2, '0'); }
+  function uMonthEnd(month) { return uAddDays(uMonthAdd(month, 1) + '-01', -1); }
+  function uKnownPeriod(p) { return U_PRESETS.indexOf(p) >= 0 || U_MONTH_RE.test(String(p || '')) || p === U_CUSTOM; }
+  function uMonthShaped(p) { return p === 'This month' || p === 'Last month' || U_MONTH_RE.test(String(p || '')); }
+  function uMonthOf(p, today) { return p === 'This month' ? today.slice(0, 7) : p === 'Last month' ? uMonthAdd(today.slice(0, 7), -1) : p; }
+  // The words Control uses when a custom range is not one.
+  function uCustomError(from, to) {
+    if (!uValidDay(from) || !uValidDay(to)) return 'Choose a start and an end date.';
+    return from > to ? 'Choose an end date on or after the start.' : '';
+  }
+  // The dates a period covers, [first, last]. Null is All history; false is a custom range that is not one. A month or
+  // quarter covers all its dates, as Control's selectionBounds does; the calendar and the comparison stop at today.
+  function uRange(period, today, from, to) {
+    if (period === 'All history') return null;
+    if (U_LAST[period]) return [uAddDays(today, 1 - U_LAST[period]), today];
+    if (period === 'Last weekend') { var monday = uAddDays(today, -uWeekday(today)); return [uAddDays(monday, -2), uAddDays(monday, -1)]; }
+    if (uMonthShaped(period)) { var m = uMonthOf(period, today); return [m + '-01', uMonthEnd(m)]; }
+    if (period === 'This quarter') {
+      var q = today.slice(0, 4) + '-' + String(Math.floor((Number(today.slice(5, 7)) - 1) / 3) * 3 + 1).padStart(2, '0');
+      return [q + '-01', uMonthEnd(uMonthAdd(q, 2))];
+    }
+    if (period === 'Year to date') return [today.slice(0, 4) + '-01-01', today];
+    if (period === U_CUSTOM) return uCustomError(from, to) ? false : [from, to];
+    return false;
+  }
+  // Like-for-like windows (SessionUsageCore comparisonWindows): a month in progress against the same dates of the month
+  // before, clamped to its length; a finished month against the whole month before; anything else against the same
+  // number of dates just before it, counting only the dates that have happened. All history has nothing before it.
+  function uCompare(period, today, from, to) {
+    if (period === 'All history') return null;
+    var shifted = function (a, b, span) { var n = span || (uSerial(b) - uSerial(a) + 1); return { current: [a, b], prior: [uAddDays(a, -n), uAddDays(b, -n)] }; };
+    if (period === 'Last weekend') { var w = uRange(period, today); return shifted(w[0], w[1], 7); }
+    if (uMonthShaped(period)) {
+      var month = uMonthOf(period, today), first = month + '-01', prev = uMonthAdd(month, -1);
+      if (month === today.slice(0, 7)) {
+        var same = uAddDays(prev + '-01', uSerial(today) - uSerial(first)), end = uMonthEnd(prev);
+        return { current: [first, today], prior: [prev + '-01', same < end ? same : end] };
+      }
+      return { current: [first, uMonthEnd(month)], prior: [prev + '-01', uMonthEnd(prev)] };
+    }
+    var r = uRange(period, today, from, to);
+    if (!r || r[0] > today) return null;
+    return shifted(r[0], r[1] < today ? r[1] : today);
+  }
+  // ‹ › on the summary card: the same length earlier or later. A month steps a month and a calendar quarter steps a
+  // quarter; anything else moves by its number of days, and a step that lands on the last 7, 30 or 90 days says so.
+  // Nothing steps past today, or earlier than the first day of history.
+  function uStep(period, today, from, to, delta, firstDay) {
+    if (period === 'All history') return null;
+    var nb, next;
+    if (uMonthShaped(period)) {
+      var m = uMonthAdd(uMonthOf(period, today), delta);
+      nb = [m + '-01', uMonthEnd(m)]; next = { period: m, from: '', to: '' };
+    } else {
+      var r = uRange(period, today, from, to);
+      if (!r) return null;
+      var quarter = /-(01|04|07|10)-01$/.test(r[0]) && r[1] === uMonthEnd(uMonthAdd(r[0].slice(0, 7), 2));
+      if (quarter) { var qs = uMonthAdd(r[0].slice(0, 7), 3 * delta); nb = [qs + '-01', uMonthEnd(uMonthAdd(qs, 2))]; }
+      else { var n = uSerial(r[1]) - uSerial(r[0]) + 1; nb = [uAddDays(r[0], delta * n), uAddDays(r[1], delta * n)]; }
+      next = { period: U_CUSTOM, from: nb[0], to: nb[1] };
+      Object.keys(U_LAST).forEach(function (p) { if (nb[1] === today && nb[0] === uAddDays(today, 1 - U_LAST[p])) next = { period: p, from: '', to: '' }; });
+    }
+    if (nb[0] > today) return null;
+    if (delta < 0 && firstDay && nb[1] < firstDay) return null;
+    return next;
+  }
+  // The scale a period opens on until someone picks one, so bars stay few enough to read (defaultScale, extended to the
+  // ranges the web adds: a quarter by week, a long custom range or year by week or month).
+  function uDefaultScale(period, today, from, to) {
+    if (period === 'All history') return 'monthly';
+    if (period === 'Last 90 days' || period === 'This quarter') return 'weekly';
+    if (period === 'Year to date' || period === U_CUSTOM) {
+      var r = uRange(period, today, from, to);
+      if (!r) return 'daily';
+      var n = uSerial(r[1] < today ? r[1] : today) - uSerial(r[0]) + 1;
+      return n > 200 ? 'monthly' : n > 62 ? 'weekly' : 'daily';
+    }
+    return 'daily';
+  }
+  function uPeriodKey(day, scale) { return scale === 'monthly' ? day.slice(0, 7) : scale === 'weekly' ? uAddDays(day.slice(0, 10), -uWeekday(day.slice(0, 10))) : day.slice(0, 10); }
+  function uPeriodStart(key) { return key.length === 7 ? key + '-01' : key; }
+  function uShortDay(key) { var p = key.split('-').map(Number); return U_MONTHS[p[1] - 1].slice(0, 3) + ' ' + p[2]; }
+  // dateRangeTitle: "Sep 6 – Oct 5, 2026", "Dec 29, 2025 – Jan 4, 2026", "Oct 19, 2026".
+  function uDateRangeTitle(b) {
+    var a = b[0], z = b[1];
+    if (a === z) return uShortDay(a) + ', ' + a.slice(0, 4);
+    return a.slice(0, 4) === z.slice(0, 4) ? uShortDay(a) + ' – ' + uShortDay(z) + ', ' + z.slice(0, 4) : uShortDay(a) + ', ' + a.slice(0, 4) + ' – ' + uShortDay(z) + ', ' + z.slice(0, 4);
+  }
+  // periodTitle: a bar's name, clamped to the selection, so a boundary week or month says which of its dates are in it.
+  function uPeriodTitle(key, scale, bounds) {
+    var first = uPeriodStart(key);
+    var clamp = function (a, z) { return [bounds && bounds[0] > a ? bounds[0] : a, bounds && bounds[1] < z ? bounds[1] : z]; };
+    if (scale === 'monthly') {
+      var name = U_MONTHS[Number(first.slice(5, 7)) - 1] + ' ' + first.slice(0, 4), end = uMonthEnd(first.slice(0, 7)), c = clamp(first, end);
+      return (c[0] === first && c[1] === end) || c[0] > c[1] ? name : name + ' (' + uShortDay(c[0]) + ' – ' + uShortDay(c[1]) + ')';
+    }
+    if (scale === 'weekly') {
+      var sunday = uAddDays(first, 6), w = clamp(first, sunday);
+      return (w[0] === first && w[1] === sunday) || w[0] > w[1] ? 'Week of ' + uDateRangeTitle([first, sunday]) : uDateRangeTitle(w) + ' (partial week)';
+    }
+    return U_WEEKDAYS[uWeekday(first)] + ', ' + uShortDay(first) + ', ' + first.slice(0, 4);
+  }
+  // The label on the period button: the preset's words, "October 2026", or a custom range's dates.
+  function uRangeTitle(period, from, to) {
+    if (period === U_CUSTOM) return uCustomError(from, to) ? 'Custom dates' : uDateRangeTitle([from, to]);
+    if (U_MONTH_RE.test(period)) return U_MONTHS[Number(period.slice(5)) - 1] + ' ' + period.slice(0, 4);
+    return period;
+  }
+  // partialPeriods: the first and last week or month that the selection or today cuts short.
+  function uPartialPeriods(keys, scale, firstDay, lastDay) {
+    var out = {};
+    if (scale === 'daily' || !firstDay) return out;
+    keys.forEach(function (k) {
+      var s = uPeriodStart(k), e = scale === 'weekly' ? uAddDays(s, 6) : uMonthEnd(s.slice(0, 7));
+      if (s < firstDay || e > lastDay) out[k] = true;
+    });
+    return out;
+  }
+  // axisKeys: at most about seven labels, from the first period, never the last (it would run off the edge).
+  function uAxisKeys(keys) {
+    if (keys.length <= 7) return keys.slice();
+    var step = Math.ceil(keys.length / 7), out = [];
+    for (var i = 0; i < keys.length - 1; i += step) out.push(keys[i]);
+    return out;
+  }
+  function uAxisLabel(key) {
+    var s = uPeriodStart(key), m = U_MONTHS[Number(s.slice(5, 7)) - 1].slice(0, 3);
+    return key.length === 7 ? (s.slice(5, 7) === '01' ? m + ' ' + s.slice(0, 4) : m) : m + ' ' + Number(s.slice(8, 10));
+  }
+  // niceAxisTop: four even steps that land on round numbers.
+  function uNiceTop(peak) {
+    if (!(peak > 0) || !isFinite(peak)) return 1;
+    var target = peak * 1.04, mag = Math.pow(10, Math.floor(Math.log10(target)));
+    var steps = [1, 1.2, 1.6, 2, 2.4, 3.2, 4, 6, 8, 10];
+    for (var i = 0; i < steps.length; i++) if (steps[i] * mag >= target) return steps[i] * mag;
+    return 10 * mag;
+  }
+  // ── end of usage range math ──
+
   // ── Usage view (SessionUsageView.swift 329-445) ──
   var U_PERIODS = ['Last 7 days', 'Last 30 days', 'Last 90 days', 'Last weekend', 'All history'];
   function uToolName(p) { return p === 'Anthropic' ? 'Claude Code' : p === 'OpenAI' ? 'Codex' : p === 'Cursor' ? 'Cursor' : 'Codex (' + p + ')'; }
@@ -1857,19 +2060,6 @@
     }
     if (parts[0] === 'gpt') return ['GPT-' + parts[1]].concat(parts.slice(2).map(function (p, i) { return i === 0 ? cap(p) : p; })).join(' ');
     return [cap(parts[0])].concat(parts.slice(1)).join(' ');
-  }
-  function uDayKey(tz) {
-    try { return new Intl.DateTimeFormat('en-CA', { timeZone: tz || undefined, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
-    catch (_e) { var d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
-  }
-  function uAddDays(key, n) { var p = key.split('-').map(Number); return new Date(Date.UTC(p[0], p[1] - 1, p[2] + n)).toISOString().slice(0, 10); }
-  function uWeekday(key) { var p = key.split('-').map(Number); return (new Date(Date.UTC(p[0], p[1] - 1, p[2])).getUTCDay() + 6) % 7; }
-  function uBounds(period, tz) {
-    var today = uDayKey(tz), counts = { 'Last 7 days': 7, 'Last 30 days': 30, 'Last 90 days': 90 };
-    if (counts[period]) return [uAddDays(today, 1 - counts[period]), today];
-    if (period === 'Last weekend') { var monday = uAddDays(today, -uWeekday(today)); return [uAddDays(monday, -2), uAddDays(monday, -1)]; }
-    if (/^\d{4}-\d{2}$/.test(period)) return [period + '-01', period + '-31'];
-    return null;
   }
   function uTotals(rows) {
     var t = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, events: 0, priced: 0, usd: 0 };
@@ -1908,9 +2098,13 @@
     var months = []; buckets.forEach(function (b) { var m = b.day.slice(0, 7); if (months.indexOf(m) < 0) months.push(m); });
     months.sort().reverse();
     var periods = U_PERIODS.concat(months.slice(0, 12));
-    if (periods.indexOf(SX.uPeriod) < 0) SX.uPeriod = 'Last 30 days';
-    var bounds = uBounds(SX.uPeriod, tz);
-    var inPeriod = bounds ? buckets.filter(function (b) { return b.day >= bounds[0] && b.day <= bounds[1]; }) : buckets;
+    // A range picked on the wide layout (This quarter, a custom range) stays when the phone folds; Custom dates sits
+    // before All history, as on the Mac.
+    if (!uKnownPeriod(SX.uPeriod) || (SX.uPeriod === U_CUSTOM && uCustomError(SX.uFrom, SX.uTo))) SX.uPeriod = 'Last 30 days';
+    if (SX.uPeriod !== U_CUSTOM && periods.indexOf(SX.uPeriod) < 0) periods.splice(4, 0, SX.uPeriod);
+    periods.splice(periods.indexOf('All history'), 0, U_CUSTOM);
+    var bounds = uRange(SX.uPeriod, uDayKey(tz), SX.uFrom, SX.uTo);
+    var inPeriod = bounds === null ? buckets : bounds ? buckets.filter(function (b) { return b.day >= bounds[0] && b.day <= bounds[1]; }) : [];
     var tools = uGroup(buckets, function (b) { return b.provider; }).sort(function (a, b) { return b.t.all - a.t.all; }).map(function (g) { return g.key; });
     if (SX.uTool !== 'All tools' && tools.indexOf(SX.uTool) < 0) SX.uTool = 'All tools';
     var forTool = buckets.filter(function (b) { return SX.uTool === 'All tools' || b.provider === SX.uTool; });
@@ -1921,7 +2115,8 @@
     var updated = toDate(su.updatedAt);
 
     var html = '<div class="sx-ufilters">' +
-      uSelect('usage-period', 'Period', SX.uPeriod, periods.map(function (p) { return [p, /^\d{4}-\d{2}$/.test(p) ? U_MONTHS[Number(p.slice(5)) - 1] + ' ' + p.slice(0, 4) : p]; })) +
+      uSelect('usage-period', 'Period', SX.uPeriod, periods.map(function (p) { return [p, p === U_CUSTOM ? (SX.uPeriod === U_CUSTOM ? uRangeTitle(p, SX.uFrom, SX.uTo) : p) : /^\d{4}-\d{2}$/.test(p) ? U_MONTHS[Number(p.slice(5)) - 1] + ' ' + p.slice(0, 4) : p]; })) +
+      (SX.uPeriod === U_CUSTOM ? '<button type="button" class="sx-link" data-sx="usage-range">Change dates</button>' : '') +
       uSelect('usage-tool', 'Tool', SX.uTool, [['All tools', 'All tools']].concat(tools.map(function (p) { return [p, uToolName(p)]; }))) +
       uSelect('usage-model', 'Model', SX.uModel, [['All models', 'All models']].concat(models.map(function (m) { return [m, uModelName(m)]; }))) +
       (hasFilter ? '<button type="button" class="sx-link" data-sx="usage-clear">Clear filters</button>' : '') +
@@ -1986,6 +2181,998 @@
     lines.push('API value is the standard API rate, checked ' + checked + ' and applied to all dates. It leaves out discounts, speed tiers, tools and taxes, and it is not your subscription bill. Cursor’s value is the per-request cost Cursor reports.');
     lines.push('Token share is not your plan allowance. It compares recorded tokens in this selection; providers calculate subscription limits separately.');
     return lines;
+  }
+
+
+  // ── Usage, wide (860 px and up): the Mac's desktop layout (SessionUsageView body, SessionUsageSplitLayout) ──
+  // Figures, then the chart beside the summary card, then the day-by-day calendar, the Tool and model table and the
+  // daily breakdown. Under 860 px the vertical view above stays as it was. The chart and calendar draw after the HTML
+  // lands, at the width they get, and redraw only on their own: a hover, a tap or a refresh never rebuilds a control
+  // under a finger (uHeld).
+  var U_WIDE_MQ = '(min-width: 860px)';
+  function uWide() { try { return !!(window.matchMedia && window.matchMedia(U_WIDE_MQ).matches); } catch (_e) { return false; } }
+  var U_MEASURES = [['all', 'All tokens'], ['new', 'New tokens'], ['value', 'API value']];
+  var U_SERIES = [['tool', 'tool'], ['model', 'model'], ['type', 'token type']];
+  var U_SCALES = [['daily', 'day'], ['weekly', 'week'], ['monthly', 'month']];
+  var U_COLUMNS = [
+    ['records', 'Records', 'Usage records, about one for each model response.'],
+    ['cacheReads', 'Cache reads', 'How much of all tokens was context read again from cache.'],
+    ['perMillion', 'Per 1M new', 'API value for each million new tokens, counting only rows where every record has a price.'],
+    ['lastUsed', 'Last used', 'The last day with a record in this selection.']
+  ];
+  var U_COLS_KEY = 'cos_web_usage_columns';
+  // SessionUsageChart.seriesColor and rankedColors. The values live in sessions.css as --u-* tokens.
+  var U_RANKED = ['var(--u-gold)', 'var(--u-codex)', 'var(--u-output)', 'var(--u-input)', 'var(--u-purple)', 'var(--u-brown)'];
+  var U_HASHED = ['var(--u-blue)', 'var(--u-green)', 'var(--u-pink)', 'var(--u-indigo)', 'var(--u-tan)'];
+  function uSeriesColor(name) {
+    switch (name) {
+      case 'Claude Code': return 'var(--u-gold)';
+      case 'Codex': return 'var(--u-codex)';
+      case 'Cursor': return 'var(--u-cursor)';
+      case 'Codex (Ollama)': return 'var(--u-purple)';
+      case 'Input': return 'var(--u-input)';
+      case 'Output': return 'var(--u-output)';
+      case 'Read from cache': return 'var(--u-read)';
+      case 'Written to cache': return 'var(--u-purple)';
+      case 'Other models': return 'var(--u-gray)';
+    }
+    var h = 0, bytes = new TextEncoder().encode(String(name));
+    for (var i = 0; i < bytes.length; i++) h = (h * 31 + bytes[i]) % U_HASHED.length;
+    return U_HASHED[h];
+  }
+
+  // SessionUsagePricing.rate and categoryUSD (SessionUsageCore.swift 98-170, rates checked 2026-10-25): the stored
+  // value of a fully priced row split across its token types, reconciling to it. Partly priced rows and Cursor are not
+  // split, and the card says so instead of inventing the difference.
+  var U_RATES_ANTHROPIC = {
+    'claude-opus-5-5': [4, 20, 0.2], 'claude-sonnet-5-5': [2, 10, 0.1],
+    'claude-fable-5-1': [10, 50, 0.25], 'claude-mythos-5-1': [10, 50, 0.25], 'claude-fable-5': [10, 50, 1], 'claude-mythos-5': [10, 50, 1],
+    'claude-opus-5': [5, 25, 0.5], 'claude-opus-4-8': [5, 25, 0.5], 'claude-opus-4-7': [5, 25, 0.5], 'claude-opus-4-6': [5, 25, 0.5], 'claude-opus-4-5': [5, 25, 0.5],
+    'claude-opus-4-1': [15, 75, 1.5], 'claude-opus-4': [15, 75, 1.5], 'claude-sonnet-5': [2, 10, 0.2],
+    'claude-sonnet-4-6': [3, 15, 0.3], 'claude-sonnet-4-5': [3, 15, 0.3], 'claude-sonnet-4': [3, 15, 0.3],
+    'claude-haiku-4-5': [1, 5, 0.1], 'claude-3-5-haiku': [0.8, 4, 0.08]
+  };
+  var U_RATES_OPENAI = { 'gpt-6.1-sol': [2, 10, 0.1, 2.5, 5], 'gpt-6-astra': [10, 50, 1, 12.5, 25], 'gpt-6-luna': [0.1, 0.5, 0.01, 0.125, 0.25], 'gpt-5.3-codex': [1.75, 14, 0.175, 0, 0] };
+  function uRate(provider, model, prompt) {
+    var name = String(model || '').replace(/-\d{8}$/, ''), t;
+    if (provider === 'Anthropic') {
+      t = name === 'claude-haiku-5-5' ? (prompt > 100000 ? [0.5, 2.5, 0.05] : [0.1, 0.5, 0.01]) : U_RATES_ANTHROPIC[name];
+      return t ? { input: t[0], output: t[1], read: t[2], write5: t[0] * 1.25, write1h: t[0] * 2 } : null;
+    }
+    t = provider === 'OpenAI' ? U_RATES_OPENAI[name] : null;
+    return t ? { input: t[0], output: t[1], read: t[2], write5: t[3], write1h: t[4] } : null;
+  }
+  function uCategoryUSD(b) {
+    var c = b.counts || {}, events = Number(b.events) || 0, usd = Number(b.estimatedUSD) || 0;
+    if (!(events > 0) || Number(b.pricedEvents) !== events || !(usd > 0)) return null;
+    var r = uRate(b.provider, b.model, 0);
+    if (!r) return null;
+    var write = Number(c.cacheWrite) || 0;
+    var inU = (Number(c.input) || 0) * r.input / 1e6, outU = (Number(c.output) || 0) * r.output / 1e6, readU = (Number(c.cacheRead) || 0) * r.read / 1e6;
+    var w5 = write * r.write5 / 1e6, nonWrite = inU + outU + readU;
+    // One-hour cache writes raise only cacheWrite, never past every write at the one-hour rate.
+    if (b.provider === 'Anthropic' && write > 0 && String(b.model).indexOf('claude-haiku-5-5') !== 0) {
+      var rem = usd - nonWrite, cap = write * r.write1h / 1e6;
+      if (rem >= w5 * 0.999 && rem <= cap * 1.001) return { input: inU, output: outU, cacheRead: readU, cacheWrite: Math.max(0, rem) };
+    }
+    var base = nonWrite + w5;
+    if (!(base > 0)) return null;
+    var s = usd / base;
+    return { input: inU * s, output: outU * s, cacheRead: readU * s, cacheWrite: Math.max(0, usd - inU * s - outU * s - readU * s) };
+  }
+  function uCostSplit(rows) {
+    var sp = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, priced: 0, unsplit: 0 };
+    rows.forEach(function (b) {
+      if (!(Number(b.pricedEvents) > 0)) return;
+      sp.priced += Number(b.estimatedUSD) || 0;
+      var c = uCategoryUSD(b);
+      if (!c) { sp.unsplit += Number(b.events) || 0; return; }
+      sp.input += c.input; sp.output += c.output; sp.cacheRead += c.cacheRead; sp.cacheWrite += c.cacheWrite;
+    });
+    sp.split = sp.input + sp.output + sp.cacheRead + sp.cacheWrite;
+    return sp;
+  }
+  // tokenMix: always the four disjoint types, so the strips, the card's rows and the chart describe the same set.
+  function uTokenMix(t, excl, rows) {
+    var c = uCostSplit(rows);
+    return [
+      { id: 'Input', count: t.input, usd: c.input },
+      { id: 'Output', count: t.output, usd: c.output },
+      { id: 'Read from cache', count: t.cacheRead, usd: c.cacheRead, excluded: excl },
+      { id: 'Written to cache', count: t.cacheWrite, usd: c.cacheWrite }
+    ];
+  }
+  function uMeasured(t, excl) { return excl ? t.fresh : t.all; }
+  // summarize: one total per key, largest first by the measured tokens, ties by name.
+  function uSummaries(rows, keyFn, excl) {
+    return uGroup(rows, keyFn).sort(function (a, b) { var x = uMeasured(a.t, excl), y = uMeasured(b.t, excl); return x === y ? (a.key < b.key ? -1 : 1) : y - x; });
+  }
+  function uCostLabel2(t) { return t.priced > 0 ? uCurrency(t.usd, 2) + (t.priced < t.events ? '+' : '') : 'No price'; }
+  function uSumCost(t) { return t.priced > 0 ? uDollars(t.usd) + (t.priced < t.events ? '+' : '') : 'No price'; }
+  // peakDay: the highest day by the chart's measure; API value ranks only days with a price. Ties go to the earlier date.
+  function uPeakDay(rows, cost, excl) {
+    var best = null;
+    uGroup(rows, function (b) { return b.day; }).forEach(function (g) {
+      if (cost && !(g.t.priced > 0)) return;
+      var v = cost ? g.t.usd : uMeasured(g.t, excl);
+      if (!best || v > best.v || (v === best.v && g.key < best.g.key)) best = { g: g, v: v };
+    });
+    return best && best.g;
+  }
+  // comparePeriod: the selection against the window before it, for the same tool and model.
+  function uComparePeriod(M, cost, excl) {
+    var t = uTotals(M.selected), out = { peak: uPeakDay(M.selected, cost, excl), prior: null, has: false, partialPrior: false, costPartial: false, tok: 'Unavailable', usd: 'Unavailable' };
+    var w = uCompare(M.period, M.today, SX.uFrom, SX.uTo);
+    if (!w) return out;
+    out.prior = w.prior;
+    var priorRows = M.matching.filter(function (b) { return b.day >= w.prior[0] && b.day <= w.prior[1]; });
+    // Each tool in view must reach back that far, or a mostly empty window would read as a real baseline.
+    var provs = {}; M.selected.forEach(function (b) { provs[b.provider] = true; });
+    var names = Object.keys(provs);
+    out.partialPrior = !names.length || names.some(function (p) { var first = M.firstByProvider[p]; return !first || first > w.prior[0]; });
+    var pt = uTotals(priorRows);
+    out.has = priorRows.length > 0;
+    out.tok = out.has ? uDelta(uMeasured(t, excl), uMeasured(pt, excl)) : 'Unavailable';
+    out.usd = out.has && t.priced > 0 && pt.priced > 0 ? uDelta(t.usd, pt.usd) : 'Unavailable';
+    out.costPartial = t.priced < t.events || pt.priced < pt.events;
+    return out;
+  }
+  function uPriorNote(delta, c, pricedOnly) {
+    if (!c.has || c.partialPrior || delta === 'Unavailable') return '';
+    return delta + ' on the period before' + (pricedOnly ? ', priced records' : '');
+  }
+  // The selection the wide view draws. Built once per paint; a hover or a tap reads it and never rebuilds it.
+  function uWideModel(d) {
+    var su = d.sessionUsage, tz = su.timeZone || '', today = uDayKey(tz);
+    var buckets = (Array.isArray(su.buckets) ? su.buckets : []).filter(function (b) { return b && typeof b.day === 'string' && uValidDay(b.day.slice(0, 10)); });
+    var M = { su: su, tz: tz, today: today, buckets: buckets, firstByProvider: {} };
+    if (!buckets.length) return M;
+    buckets.forEach(function (b) { var f = M.firstByProvider[b.provider]; if (!f || b.day < f) M.firstByProvider[b.provider] = b.day; if (!M.firstDay || b.day < M.firstDay) M.firstDay = b.day; });
+    var months = []; buckets.forEach(function (b) { var m = b.day.slice(0, 7); if (months.indexOf(m) < 0) months.push(m); });
+    M.months = months.sort().reverse();
+    if (!uKnownPeriod(SX.uPeriod) || (SX.uPeriod === U_CUSTOM && uCustomError(SX.uFrom, SX.uTo))) SX.uPeriod = 'Last 30 days';
+    M.period = SX.uPeriod;
+    M.bounds = uRange(M.period, today, SX.uFrom, SX.uTo);
+    var inPeriod = M.bounds ? buckets.filter(function (b) { return b.day >= M.bounds[0] && b.day <= M.bounds[1]; }) : buckets;
+    M.tools = uGroup(buckets, function (b) { return b.provider; }).sort(function (a, b) { return b.t.all - a.t.all; }).map(function (g) { return g.key; });
+    if (SX.uTool !== 'All tools' && M.tools.indexOf(SX.uTool) < 0) SX.uTool = 'All tools';
+    var forTool = buckets.filter(function (b) { return SX.uTool === 'All tools' || b.provider === SX.uTool; });
+    M.models = uGroup(forTool, function (b) { return b.model; }).sort(function (a, b) { return b.t.all - a.t.all; }).map(function (g) { return g.key; });
+    if (SX.uModel !== 'All models' && M.models.indexOf(SX.uModel) < 0) SX.uModel = 'All models';
+    var inSlice = function (b) { return (SX.uTool === 'All tools' || b.provider === SX.uTool) && (SX.uModel === 'All models' || b.model === SX.uModel); };
+    M.matching = buckets.filter(inSlice);
+    M.selected = inPeriod.filter(inSlice);
+    M.hasFilter = SX.uTool !== 'All tools' || SX.uModel !== 'All models';
+    M.cost = SX.uMeasure === 'value'; M.excl = SX.uMeasure === 'new';
+    M.series = SX.uSeries;
+    M.scale = uScale(M);
+    if (!M.selected.length) return M;
+
+    // Bars: one per period with records. Slots run continuously from the first to the last, so a gap shows as a gap.
+    M.keyOf = {}; M.keySet = {};
+    M.selected.forEach(function (b) { if (!M.keyOf[b.day]) { M.keyOf[b.day] = uPeriodKey(b.day, M.scale); M.keySet[M.keyOf[b.day]] = true; } });
+    M.keys = Object.keys(M.keySet).sort();
+    M.slots = [];
+    for (var k = M.keys[0]; k <= M.keys[M.keys.length - 1];) {
+      M.slots.push(k);
+      k = M.scale === 'monthly' ? uMonthAdd(k, 1) : uAddDays(k, M.scale === 'weekly' ? 7 : 1);
+    }
+    var firstSel = M.selected.reduce(function (m, b) { return !m || b.day < m ? b.day : m; }, '');
+    var lo = M.bounds && M.bounds[0] > firstSel ? M.bounds[0] : firstSel, hi = M.bounds && M.bounds[1] < today ? M.bounds[1] : today;
+    M.partial = uPartialPeriods(M.keys, M.scale, lo, hi);
+    M.inspect = uInspected(M);
+
+    // The six largest models by the measured tokens. The chart and the card name the same six.
+    var top = {}, rank = {};
+    uSummaries(M.selected, function (b) { return b.model; }, M.excl).slice(0, 6).forEach(function (g, i) { top[g.key] = true; rank[uModelName(g.key)] = U_RANKED[i]; });
+    M.rankColor = rank;
+    var groups = {};
+    M.selected.forEach(function (b) { var key = M.keyOf[b.day]; (groups[key] = groups[key] || []).push(b); });
+    M.points = [];
+    Object.keys(groups).forEach(function (key) {
+      var g = groups[key];
+      if (M.series === 'type') {
+        var gt = uTotals(g);
+        uTokenMix(gt, M.excl, g).forEach(function (c) { if (M.cost || !c.excluded) M.points.push({ key: key, series: c.id, tokens: c.count, usd: c.usd, priced: gt.priced, events: gt.events }); });
+        return;
+      }
+      var by = {};
+      g.forEach(function (b) { var s = M.series === 'tool' ? uToolName(b.provider) : top[b.model] ? uModelName(b.model) : 'Other models'; (by[s] = by[s] || []).push(b); });
+      Object.keys(by).forEach(function (s) { var st = uTotals(by[s]); M.points.push({ key: key, series: s, tokens: uMeasured(st, M.excl), usd: st.usd, priced: st.priced, events: st.events }); });
+    });
+    // The largest series sits at the bottom of every stack, and the legend and colours read the same order.
+    var totals = {};
+    M.points.forEach(function (p) { totals[p.series] = (totals[p.series] || 0) + (M.cost ? p.usd : p.tokens); });
+    M.order = Object.keys(totals).sort(function (a, b) { return totals[a] === totals[b] ? (a < b ? -1 : 1) : totals[b] - totals[a]; });
+    M.color = function (name) { return M.series === 'model' ? (rank[name] || 'var(--u-gray)') : uSeriesColor(name); };
+    M.plotted = function (p) { return M.cost ? p.usd : p.tokens / 1e6; };
+    M.figure = function (p) { return !M.cost || p.priced > 0; };
+    M.average = uChartAverage(M);
+    if (M.cost && M.selected.every(function (b) { return !(Number(b.pricedEvents) > 0); })) M.noChart = 'No verified prices for this selection.';
+    else if (M.cost && M.series === 'type' && !(uCostSplit(M.selected).split > 0)) M.noChart = 'This cost cannot be split by token type. Cursor reports one cost per request.';
+    M.compare = uComparePeriod(M, M.cost, M.excl);
+    M.weeks = uCalendarWeeks(M);
+    return M;
+  }
+  // The scale in use: a day jump (Busiest day, a calendar square) shows days until the whole period comes back.
+  function uScale(M) { return SX.uDayJump ? 'daily' : SX.uScale || uDefaultScale(M.period, M.today, SX.uFrom, SX.uTo); }
+  function uInspected(M) { return SX.uInspect && SX.uInspect.scale === M.scale && M.keySet && M.keySet[SX.uInspect.key] ? SX.uInspect.key : null; }
+  // chartAverage: the typical bar, leaving out partial ones and, for value, bars with no price. Lines draw none, and
+  // under four full periods an average says nothing a glance does not.
+  function uChartAverage(M) {
+    if (SX.uLines) return null;
+    var totals = {};
+    M.points.forEach(function (p) { if (M.figure(p)) totals[p.key] = (totals[p.key] || 0) + M.plotted(p); });
+    var full = Object.keys(totals).filter(function (k) { return !M.partial[k]; }).map(function (k) { return totals[k]; });
+    return full.length >= 4 ? full.reduce(function (s, v) { return s + v; }, 0) / full.length : null;
+  }
+  function uDayValue(M, t) { return M.cost ? t.usd : uMeasured(t, M.excl); }
+  function uDayFigure(M, v) { return M.cost ? uDollars(v) : uShort(v); }
+  // calendarWeeks: Monday-to-Sunday columns over the selection, through today. A day outside it stays blank; a day in
+  // it with no records has no logs, which is not zero.
+  function uCalendarWeeks(M) {
+    var lower = M.bounds ? M.bounds[0] : M.firstDay, upper = M.bounds && M.bounds[1] < M.today ? M.bounds[1] : M.today;
+    if (!lower || lower > upper) return [];
+    var days = {}; uGroup(M.selected, function (b) { return b.day; }).forEach(function (g) { days[g.key] = g; });
+    var weeks = [], spans = uSerial(upper) - uSerial(lower) > 366;
+    for (var monday = uAddDays(lower, -uWeekday(lower)); monday <= upper; monday = uAddDays(monday, 7)) {
+      var first = monday < lower ? lower : monday;
+      var label = U_MONTHS[Number(first.slice(5, 7)) - 1].slice(0, 3) + (spans && (!weeks.length || first.slice(5, 7) === '01') ? ' ' + first.slice(0, 4) : '');
+      var prev = weeks.length ? weeks[weeks.length - 1].days.filter(function (x) { return x.inRange; })[0] : null;
+      var cells = [];
+      for (var i = 0; i < 7; i++) { var day = uAddDays(monday, i); cells.push({ id: day, inRange: day >= lower && day <= upper, sum: days[day] || null }); }
+      weeks.push({ id: monday, label: prev && prev.id.slice(5, 7) === first.slice(5, 7) ? null : label, days: cells });
+    }
+    // A stub first column would run its label into the next month's.
+    if (weeks.length > 1 && weeks[1].label && weeks[0].days.filter(function (x) { return x.inRange; }).length < 4) weeks[0].label = null;
+    return weeks;
+  }
+  // calendarFit: the most recent weeks that fit at 4 px a square or more, with month labels that do not touch.
+  function uCalendarFit(all, width) {
+    var spacing = all.length > 52 ? 1 : 3;
+    if (!(width > 0) || !all.length) return { weeks: all, spacing: spacing, numbers: false };
+    var fits = Math.max(1, Math.floor((width + spacing) / (4 + spacing)));
+    var weeks = all.slice(-fits).map(function (w) { return { id: w.id, label: w.label, days: w.days }; });
+    if (weeks.length < all.length) {
+      var f = weeks[0].days.filter(function (x) { return x.inRange; })[0];
+      if (f) weeks[0].label = U_MONTHS[Number(f.id.slice(5, 7)) - 1].slice(0, 3) + ' ' + f.id.slice(0, 4);
+    }
+    var pitch = (width + spacing) / weeks.length, kept = [], labels = {};
+    var labelled = weeks.map(function (w, i) { return [i, w.label]; }).filter(function (x) { return x[1]; });
+    labelled.filter(function (x) { return x[1].indexOf(' ') >= 0; }).concat(labelled.filter(function (x) { return x[1].indexOf(' ') < 0; })).forEach(function (x) {
+      var start = x[0] * pitch, end = start + x[1].length * 6.5 + 2;
+      if (kept.some(function (r) { return start < r[1] + 4 && r[0] < end + 4; }) || end > width + 8) return;
+      kept.push([start, end]); labels[x[0]] = x[1];
+    });
+    weeks.forEach(function (w, i) { w.label = labels[i] || null; });
+    return { weeks: weeks, spacing: spacing, numbers: width / weeks.length - spacing >= 44 };
+  }
+  var U_CHEV = '<svg class="u-chev" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg>';
+  // One word of the chart sentence: the word shows, and a real select over it opens the platform's own picker.
+  function uWord(id, label, value, options) {
+    var shown = (options.filter(function (o) { return o[0] === value; })[0] || options[0])[1];
+    return '<label class="u-word"><span class="u-word-text">' + esc(shown) + '</span>' + U_CHEV +
+      '<select id="' + id + '" aria-label="' + esc(label) + '">' + options.map(function (o) { return '<option value="' + esc(o[0]) + '"' + (o[0] === value ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select></label>';
+  }
+  function uWholeTitle(M) {
+    var parts = [M.period === U_CUSTOM ? uDateRangeTitle([SX.uFrom, SX.uTo]) : uRangeTitle(M.period)];
+    if (SX.uTool !== 'All tools') parts.push(uToolName(SX.uTool));
+    if (SX.uModel !== 'All models') parts.push(uModelName(SX.uModel));
+    return parts.join(', ');
+  }
+  function uMeasureWords() { return SX.uMeasure === 'value' ? 'API value' : SX.uMeasure === 'new' ? 'New tokens' : 'All tokens'; }
+  function uSwatch(color) { return color ? '<span class="u-sw" style="background:' + color + '" aria-hidden="true"></span>' : ''; }
+
+  // The answers people open the page for (figures, SessionUsageView 702-750), with the change on the period before.
+  function uFiguresHtml(M) {
+    var all = uComparePeriod(M, false, false), nw = uComparePeriod(M, false, true), t = uTotals(M.selected);
+    var days = uGroup(M.selected, function (b) { return b.day; }), priced = days.filter(function (g) { return g.t.priced > 0; });
+    var perDay = priced.length ? uDollars(priced.reduce(function (s, g) { return s + g.t.usd; }, 0) / priced.length) + (priced.some(function (g) { return g.t.priced < g.t.events; }) ? '+' : '') : 'No price';
+    var list = [
+      ['API value', uCostCell(t), uPriorNote(all.usd, all, all.costPartial), 'What these tokens would cost at standard API rates. Not your subscription bill.'],
+      ['New tokens', uShort(t.fresh), uPriorNote(nw.tok, nw), 'Input, output and cache writes.'],
+      ['All tokens', uShort(t.all), uShare(t.cacheRead, t.all) + ' read again from cache', 'New tokens plus context read again from cache.'],
+      ['API value a day', perDay, days.length + ' ' + (days.length === 1 ? 'day' : 'days') + ' with usage', 'Average across days with a price. Days without logs or a price are left out, not counted as zero.']
+    ];
+    // monthPace: this calendar month for the tool and model in view, whatever period is selected.
+    var month = M.today.slice(0, 7), mt = uTotals(M.matching.filter(function (b) { return b.day.slice(0, 7) === month; }));
+    if (mt.priced > 0) {
+      var todayN = Number(M.today.slice(8)), last = uMonthEnd(month), total = Number(last.slice(8));
+      var start = M.matching.filter(function (b) { return b.day.slice(0, 7) === month; }).reduce(function (m, b) { return Math.min(m, Number(b.day.slice(8, 10))); }, todayN);
+      var elapsed = todayN - start + 1, projected = elapsed >= 3 && todayN < total ? mt.usd + mt.usd / elapsed * (total - todayN) : null;
+      list.push([U_MONTHS[Number(month.slice(5)) - 1] + ' so far', uDollars(mt.usd) + (mt.priced < mt.events ? '+' : ''), projected === null ? '' : 'About ' + uDollars(projected) + ' by ' + uShortDay(last),
+        'This calendar month for the tool and model in view, whatever period is selected. The estimate is a straight line from the days so far.']);
+    }
+    return '<div class="sx-figures u-figs' + (list.length > 4 ? ' five' : '') + '">' + list.map(function (f, i) {
+      return '<div class="sx-figure' + (i === 0 ? ' lead' : '') + '" title="' + esc(f[3]) + '"><b>' + esc(f[1]) + '</b><span class="sx-figure-title">' + esc(f[0]) + '</span>' + (f[2] ? '<span class="sx-figure-note">' + esc(f[2]) + '</span>' : '') + '</div>';
+    }).join('') + '</div>';
+  }
+
+  function uChartSectionHtml(M) {
+    var sentence = '<div class="u-sentence">' + uWord('u-measure', 'Measure', SX.uMeasure, U_MEASURES) + '<span>by</span>' + uWord('u-series', 'Stack by', SX.uSeries, U_SERIES) +
+      '<span>per</span>' + uWord('u-scale', 'Time scale', M.scale, U_SCALES) + '<span class="u-grow"></span>' +
+      '<button type="button" class="u-style" data-u="lines" data-on="0" aria-pressed="' + !SX.uLines + '" aria-label="Stacked bars" title="Stacked bars"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 14h12M4 12V7M8 12V3M12 12V8"/></svg></button>' +
+      '<button type="button" class="u-style" data-u="lines" data-on="1" aria-pressed="' + !!SX.uLines + '" aria-label="Lines" title="Lines"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 14h12M2.5 11l3.5-4 3 2.5L13.5 4"/></svg></button></div>';
+    var legend = M.order.map(function (n) { return '<span class="u-key">' + uSwatch(M.color(n)) + esc(n) + '</span>'; }).join('');
+    var scaleWord = M.scale === 'weekly' ? 'week' : M.scale === 'monthly' ? 'month' : 'day';
+    if (!SX.uLines && Object.keys(M.partial).length) legend += '<span class="u-key">Lighter bars cover part of a ' + scaleWord + (M.average !== null ? ' and are left out of the average.' : '.') + '</span>';
+    return '<section class="u-chartcol">' + sentence +
+      '<div class="u-chart" id="u-chart" tabindex="0" role="group" aria-label="' + esc(uMeasureWords() + ' by ' + (SX.uSeries === 'type' ? 'token type' : SX.uSeries) + ' per ' + scaleWord + '. Arrow keys step through the bars.') + '">' +
+      '<div class="u-tip hidden" id="u-tip" aria-hidden="true"></div></div>' +
+      '<div class="u-legend">' + legend + '</div></section>';
+  }
+
+  // The summary card (SessionUsageInspector): the whole period until a bar is chosen, then that bar.
+  function uCardHtml(M) {
+    var key = M.inspect, rows = key ? M.selected.filter(function (b) { return M.keyOf[b.day] === key; }) : M.selected;
+    var t = uTotals(rows), measured = uMeasured(t, M.excl);
+    var title = key ? uPeriodTitle(key, M.scale, M.bounds) : uWholeTitle(M), earlier, later;
+    if (key) { var i = M.keys.indexOf(key); earlier = i > 0; later = i < M.keys.length - 1; }
+    else { earlier = !!uStep(M.period, M.today, SX.uFrom, SX.uTo, -1, M.firstDay); later = !!uStep(M.period, M.today, SX.uFrom, SX.uTo, 1, M.firstDay); }
+    var step = function (d, on) {
+      return '<button type="button" class="u-step" data-u="step" data-d="' + d + '"' + (on ? '' : ' disabled') + ' aria-label="' + (d < 0 ? 'Earlier period' : 'Later period') + '" title="' + (d < 0 ? 'Earlier period' : 'Later period') + '">' +
+        '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="' + (d < 0 ? 'M6.5 1.5L3 5l3.5 3.5' : 'M3.5 1.5L7 5 3.5 8.5') + '"/></svg></button>';
+    };
+    var h = '<div class="u-card-top">' + (key ? '<p class="u-card-title">' + esc(title) + '</p>'
+      : '<button type="button" class="u-card-title u-rangelink" data-u="range" aria-haspopup="dialog" title="Choose the dates">' + esc(title) + U_CHEV + '</button>') + step(-1, earlier) + step(1, later) + '</div>';
+    if (key) {
+      h += '<p class="u-card-head">' + esc(M.cost ? uCostCell(t) : uSpoken(measured) + (M.excl ? ' new tokens' : ' tokens')) + '</p>' +
+        '<p class="u-card-sub">' + esc(M.cost ? uSpoken(t.all) + ' tokens' : t.priced > 0 ? uDollars(t.usd) + ' at API rates' + (t.priced < t.events ? ', plus unpriced records' : '') : 'No verified price') + '</p>';
+    }
+    var mix = uTokenMix(t, false, rows).sort(function (a, b) { return b.count - a.count; }), split = uCostSplit(rows);
+    var strip = function (label, parts) {
+      var sum = parts.reduce(function (s, p) { return s + Math.max(0, p[1]); }, 0);
+      return '<div class="u-mix"><span>' + label + '</span><div class="u-strip" aria-hidden="true">' + parts.filter(function (p) { return p[1] > 0 && sum > 0; }).map(function (p) {
+        return '<i style="flex-grow:' + (p[1] / sum).toFixed(5) + ';background:' + uSeriesColor(p[0]) + '"></i>';
+      }).join('') + '</div></div>';
+    };
+    h += '<div class="u-mixes">' + strip('Share of tokens', mix.map(function (c) { return [c.id, c.count]; })) +
+      (split.split > 0 ? strip('Share of API value', mix.map(function (c) { return [c.id, c.usd]; })) : '') + '</div>';
+    var row = function (color, name, a, b, help) {
+      return '<div class="u-crow">' + uSwatch(color) + '<span class="u-cname" title="' + esc(help || name) + '">' + esc(name) + '</span><span class="u-cnum">' + esc(a) + '</span><span class="u-cval">' + esc(b) + '</span></div>';
+    };
+    var tools = uSummaries(rows, function (b) { return b.provider; }, M.excl);
+    if (tools.length > 1) h += '<h4 class="u-ch">Tools</h4>' + tools.map(function (g) { return row(uSeriesColor(uToolName(g.key)), uToolName(g.key), uShort(uMeasured(g.t, M.excl)), uSumCost(g.t)); }).join('');
+    if (key) {
+      var models = uSummaries(rows, function (b) { return b.provider + '|' + b.model; }, M.excl);
+      h += '<h4 class="u-ch">Models</h4>' + models.slice(0, 5).map(function (g) {
+        var id = g.rows[0].model, name = uModelName(id);
+        return row(M.series === 'model' ? M.rankColor[name] : '', name, uShort(uMeasured(g.t, M.excl)), uSumCost(g.t), id);
+      }).join('') + (models.length > 5 ? '<p class="u-cnote">' + (models.length - 5) + ' more not listed here</p>' : '');
+    }
+    h += '<h4 class="u-ch">Token types</h4>' + uTokenMix(t, M.excl, rows).sort(function (a, b) { return b.count - a.count; }).map(function (c) {
+      return row(uSeriesColor(c.id), c.id, c.excluded ? 'Not counted' : uShort(c.count), split.split > 0 ? uDollars(c.usd) : '');
+    }).join('');
+    if (split.unsplit > 0 && split.split > 0) {
+      h += '<p class="u-cnote">Values by type cover ' + esc(uDollars(split.split)) + ' of ' + esc(uDollars(split.priced)) + '. ' +
+        (rows.some(function (b) { return b.provider === 'Cursor'; }) ? 'Cursor and partly priced records are' : 'Partly priced records are') + ' not split.</p>';
+    }
+    h += '<hr class="u-rule-h">';
+    if (key) h += '<p class="u-cline">' + esc(uSpoken(t.fresh) + ' were new. ' + uShare(t.cacheRead, t.all) + ' was context read again from cache.') + '</p>';
+    if (!key) {
+      var c = M.compare;
+      if (c.peak) h += '<button type="button" class="u-peak" data-u="peak" data-day="' + esc(c.peak.key) + '" title="Show this day">Busiest day: ' + esc(uPeriodTitle(c.peak.key, 'daily') + ', ' + (M.cost ? uDollars(c.peak.t.usd) : uShort(uMeasured(c.peak.t, M.excl)))) + '</button>';
+      if (c.prior && (!c.has || c.partialPrior)) h += '<p class="u-cline">' + (c.partialPrior ? 'History does not reach back a full period, so there is no comparison.' : 'No usage in the period before.') + '</p>';
+      if (c.prior && c.has && !c.partialPrior) h += '<p class="u-cline">' + esc('Compared with ' + uDateRangeTitle(c.prior) + ': tokens ' + c.tok + ', API value ' + c.usd + (c.costPartial ? ' (priced records only)' : '') + '.') + '</p>';
+    }
+    if (key) h += '<button type="button" class="sx-link u-whole" data-u="whole">Show the whole period</button>';
+    return h;
+  }
+
+  function uCols() {
+    if (!SX.uCols) {
+      var saved = null;
+      try { saved = JSON.parse(localStorage.getItem(U_COLS_KEY) || 'null'); } catch (_e) { saved = null; }
+      SX.uCols = Array.isArray(saved) ? U_COLUMNS.map(function (c) { return c[0]; }).filter(function (c) { return saved.indexOf(c) >= 0; }) : ['records', 'lastUsed'];
+    }
+    return SX.uCols;
+  }
+  // sortModels: unpriced rows sort last on API value in both directions; ties break on provider and model.
+  function uSortRows(groups, sort, asc) {
+    return groups.slice().sort(function (a, b) {
+      if (sort === 'cost' && (a.t.priced > 0) !== (b.t.priced > 0)) return a.t.priced > 0 ? -1 : 1;
+      var x, y;
+      if (sort === 'model') { x = String(a.rows[0].model).toLowerCase(); y = String(b.rows[0].model).toLowerCase(); if (x !== y) return (x < y) === asc ? -1 : 1; return a.key < b.key ? -1 : 1; }
+      x = sort === 'newTokens' ? a.t.fresh : sort === 'cost' ? a.t.usd : a.t.all;
+      y = sort === 'newTokens' ? b.t.fresh : sort === 'cost' ? b.t.usd : b.t.all;
+      if (x === y) return a.key < b.key ? -1 : 1;
+      return asc ? x - y : y - x;
+    });
+  }
+  // The Tool and model table (SessionUsageView usageTable): tools, each with its models, in the chosen order.
+  function uTableHtml(M) {
+    var cols = uCols(), whole = uTotals(M.selected), wholeV = M.cost ? whole.usd : uMeasured(whole, M.excl), last = {};
+    M.selected.forEach(function (b) { var k = b.provider + '|' + b.model; if (!last[k] || b.day > last[k]) last[k] = b.day; });
+    var year = M.today.slice(0, 4);
+    var share = function (t) {
+      var part = M.cost ? t.usd : uMeasured(t, M.excl);
+      var text = M.cost ? (t.priced > 0 ? uShare(t.usd, whole.usd) : '') : uShare(part, wholeV);
+      if (text === 'Unavailable') text = '';
+      var f = wholeV > 0 ? part / wholeV : 0;
+      return { text: text, f: f };
+    };
+    var extra = function (rows, t) {
+      return cols.map(function (c) {
+        if (c === 'records') return '<td class="num">' + uNum(t.events) + '</td>';
+        if (c === 'cacheReads') return '<td class="num">' + esc(uShare(t.cacheRead, t.all)) + '</td>';
+        if (c === 'perMillion') {
+          var full = rows.filter(function (b) { return Number(b.events) > 0 && Number(b.pricedEvents) === Number(b.events); }), ft = uTotals(full);
+          return '<td class="num">' + (ft.fresh > 0 ? esc(uCurrency(ft.usd / ft.fresh * 1e6, 2)) : 'No price') + '</td>';
+        }
+        var day = rows.map(function (b) { return last[b.provider + '|' + b.model] || ''; }).reduce(function (m, d) { return d > m ? d : m; }, '');
+        return '<td class="num">' + (day ? esc(uShortDay(day) + (day.slice(0, 4) === year ? '' : ', ' + day.slice(0, 4))) : '') + '</td>';
+      }).join('');
+    };
+    var cells = function (rows, t, color) {
+      var s = share(t);
+      return '<td class="num">' + uShort(t.all) + '</td><td class="num">' + uShort(t.fresh) + '</td>' + extra(rows, t) +
+        '<td class="num u-sharecell"><span class="u-sharebar" aria-hidden="true"' + (s.text ? '' : ' data-empty') + '><i style="width:' + (s.f > 0 ? Math.max(2, Math.round(56 * s.f)) : 0) + 'px;background:' + color + '"></i></span>' + esc(s.text) + '</td>' +
+        '<td class="num">' + esc(uSumCost(t)) + '</td>';
+    };
+    var sortTh = function (label, sort, help, lead) {
+      var on = SX.uSort === sort;
+      return '<th class="' + (lead ? 'name' : 'num') + '"' + (on ? ' aria-sort="' + (SX.uSortAsc ? 'ascending' : 'descending') + '"' : '') + '><button type="button" class="u-sort' + (on ? ' on' : '') + '" data-u="sort" data-sort="' + sort + '" title="' + esc(help) + '">' + label +
+        (on ? '<svg class="u-dir" viewBox="0 0 10 6" aria-hidden="true"><path d="' + (SX.uSortAsc ? 'M1 5l4-4 4 4' : 'M1 1l4 4 4-4') + '"/></svg>' : '') + '</button></th>';
+    };
+    var head = '<tr>' + sortTh('Name', 'model', 'Sort models by name', true) + sortTh('All tokens', 'tokens', 'Sort by all tokens') + sortTh('New tokens', 'newTokens', 'Sort by input, output and cache writes') +
+      cols.map(function (c) { var d = U_COLUMNS.filter(function (x) { return x[0] === c; })[0]; return '<th class="num" title="' + esc(d[2]) + '">' + d[1] + '</th>'; }).join('') +
+      '<th class="num" title="Share of the selected ' + (M.cost ? 'API value' : 'tokens') + '. Never your subscription allowance.">Share</th>' + sortTh('API value', 'cost', 'Sort by API value; unpriced models stay last') + '</tr>';
+    var span = 5 + cols.length, body = '';
+    uSummaries(M.selected, function (b) { return b.provider; }, false).forEach(function (g) {
+      var tool = uToolName(g.key), color = uSeriesColor(tool), on = SX.uTool === g.key;
+      body += '<tr class="u-tool"><td><button type="button" class="u-namebtn" data-u="tool" data-p="' + esc(g.key) + '" title="' + (on ? 'Show all tools' : 'Show only ' + esc(tool)) + '">' + uSwatch(color) + esc(tool) + '</button></td>' + cells(g.rows, g.t, color) + '</tr>';
+      var models = uSortRows(uGroup(g.rows, function (b) { return b.model; }), SX.uSort, SX.uSortAsc);
+      var open = SX.uOpen[g.key] || SX.uModel !== 'All models', shown = open ? models : models.slice(0, 5);
+      shown.forEach(function (m) {
+        var mine = SX.uModel === m.key && SX.uTool === g.key;
+        body += '<tr class="u-model"><td><button type="button" class="u-namebtn' + (mine ? ' on' : '') + '" data-u="model" data-p="' + esc(g.key) + '" data-m="' + esc(m.key) + '" title="' + esc(m.key) + '">' + esc(uModelName(m.key)) + '</button></td>' + cells(m.rows, m.t, color) + '</tr>';
+      });
+      if (models.length > shown.length) {
+        var hidden = models.slice(shown.length), hr = [], n = hidden.length;
+        hidden.forEach(function (m) { hr = hr.concat(m.rows); });
+        body += '<tr class="u-model"><td><button type="button" class="u-namebtn u-more" data-u="more" data-p="' + esc(g.key) + '">' + n + ' more ' + (n === 1 ? 'model' : 'models') + '</button></td>' + cells(hr, uTotals(hr), 'var(--sub)') + '</tr>';
+      } else if (models.length > 5 && SX.uModel === 'All models') {
+        body += '<tr class="u-model"><td colspan="' + span + '"><button type="button" class="u-namebtn u-more" data-u="fewer" data-p="' + esc(g.key) + '">Show fewer</button></td></tr>';
+      }
+    });
+    var menu = '<details class="u-cols"' + (SX.uColsOpen ? ' open' : '') + '><summary>Columns' + U_CHEV + '</summary><div class="u-cols-menu" role="group" aria-label="Table columns">' +
+      U_COLUMNS.map(function (c) { return '<label class="u-colopt" title="' + esc(c[2]) + '"><input type="checkbox" data-ucol="' + c[0] + '"' + (cols.indexOf(c[0]) >= 0 ? ' checked' : '') + '>' + c[1] + '</label>'; }).join('') + '</div></details>';
+    return '<section class="u-tablesec"><div class="u-thead"><h3 class="sx-uhead u-h" id="u-table-title">' + esc(M.inspect ? 'Tool and model, ' + uWholeTitle(M) : 'Tool and model') + '</h3>' + menu + '</div>' +
+      '<div class="u-tablewrap"><table class="u-table"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div></section>';
+  }
+  function uBreakdownHtml(M) {
+    var days = uGroup(M.selected, function (b) { return b.day; }).sort(function (a, b) { return a.key < b.key ? 1 : -1; });
+    var whole = uMeasured(uTotals(M.selected), M.excl), year = M.today.slice(0, 4);
+    return '<details class="u-breakdown"' + (SX.uBreakOpen ? ' open' : '') + '><summary>Daily breakdown, ' + uNum(days.length) + ' recorded ' + (days.length === 1 ? 'day' : 'days') + U_CHEV + '</summary>' +
+      '<div class="u-brow u-bhead"><span>Date</span><span>Tokens</span><span>Share</span><span>Records</span><span>API value</span></div>' +
+      days.map(function (g) {
+        var v = uMeasured(g.t, M.excl);
+        return '<button type="button" class="u-brow' + (M.scale === 'daily' && M.inspect === g.key ? ' on' : '') + '" data-u="day" data-day="' + g.key + '" title="' + g.key + '"><span>' + esc(U_WEEKDAYS[uWeekday(g.key)].slice(0, 3) + ', ' + uShortDay(g.key) + (g.key.slice(0, 4) === year ? '' : ', ' + g.key.slice(0, 4))) + '</span>' +
+          '<span>' + uShort(v) + '</span><span>' + esc(uShare(v, whole)) + '</span><span>' + uNum(g.t.events) + '</span><span>' + esc(uCostLabel2(g.t)) + '</span></button>';
+      }).join('') + '</details>';
+  }
+  function sessionUsageWideHtml(d) {
+    var su = d.sessionUsage;
+    var how = '<details class="sx-how"><summary>How this is counted</summary>' + uHowLines(su).map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</details>';
+    SX.uM = null;
+    if (!su) return '<div class="sx-uempty">' + esc('Usage has not been read yet. Refresh reads Claude Code and Codex logs on this Mac.') + '</div>' + how;
+    var M = uWideModel(d);
+    var pending = [];
+    if (Number(su.pendingFiles) > 0) pending.push('Reading older history: ' + su.pendingFiles + ' files remaining. Totals will grow until it finishes.');
+    if (su.cursorFeed && su.cursorFeed.pending === true && su.cursorFeed.message) pending.push(su.cursorFeed.message + ' Totals will grow until it finishes.');
+    var pendingHtml = pending.map(function (n) { return '<p class="cx-note sx-unote">' + esc(n) + '</p>'; }).join('');
+    if (!M.buckets.length) return '<div class="sx-uempty">' + esc('No usage recorded yet. Claude Code and Codex sessions on this Mac appear here once their logs are read. A missing tool is not zero usage.') + pendingHtml + '</div>' + how;
+    var updated = toDate(su.updatedAt);
+    var html = '<div class="sx-ufilters u-filters">' +
+      '<button type="button" class="field sx-select u-rangebtn" data-u="range" aria-haspopup="dialog" aria-label="Period: ' + esc(uRangeTitle(M.period, SX.uFrom, SX.uTo)) + '">' + esc(uRangeTitle(M.period, SX.uFrom, SX.uTo)) + '</button>' +
+      uSelect('usage-tool', 'Tool', SX.uTool, [['All tools', 'All tools']].concat(M.tools.map(function (p) { return [p, uToolName(p)]; }))) +
+      uSelect('usage-model', 'Model', SX.uModel, [['All models', 'All models']].concat(M.models.map(function (m) { return [m, uModelName(m)]; }))) +
+      (M.hasFilter ? '<button type="button" class="sx-link" data-sx="usage-clear">Clear filters</button>' : '') +
+      (updated ? '<span class="sx-fresh">Updated ' + esc(clock(updated)) + '</span>' : '') + '</div>' + pendingHtml;
+    if (!M.selected.length) return html + '<div class="sx-uempty">No recorded usage for this selection. A missing tool is not zero usage.</div>' + uFooter(su, M.selected) + how;
+    SX.uM = M;
+    html += uFiguresHtml(M) +
+      '<div class="u-split">' + uChartSectionHtml(M) + '<aside class="u-card" id="u-card" aria-label="Summary" aria-live="polite">' + uCardHtml(M) + '</aside></div>';
+    // Under three columns the bars above already say all of this.
+    if (M.weeks.length >= 3) html += '<section class="u-daysec"><h3 class="sx-uhead u-h">' + esc(uMeasureWords()) + ' day by day</h3><div class="u-heat" id="u-heat"></div></section>';
+    return html + uTableHtml(M) + uBreakdownHtml(M) + uFooter(su, M.selected) + how;
+  }
+
+  // ── Drawing: the chart (SessionUsageChart) and the calendar (SessionUsageCalendar), at the width they get ──
+  var U_CHART_H = 300;
+  function uAxisValue(M, v, top) {
+    if (!(v > 0)) return '0';
+    if (M.cost) return uCurrency(v, top < 10 ? 2 : 0);
+    if (v >= 1000) return Math.round(v / 100) / 10 + 'B';
+    if (v >= 1) return Math.round(v * 10) / 10 + 'M';
+    return Math.round(v * 10000) / 10 + 'K';
+  }
+  function uDim(M, key) {
+    var partial = M.partial[key] ? 0.42 : 1;
+    if (!M.inspect) return partial;
+    return key === M.inspect ? 1 : 0.32 * partial;
+  }
+  function uDrawChart() {
+    var M = SX.uM, host = $('u-chart');
+    if (!M || !host) return;
+    var old = host.querySelector('svg, .u-chart-empty');
+    if (old) old.remove();
+    uBindChart(host);
+    if (M.noChart) { host.insertAdjacentHTML('afterbegin', '<p class="u-chart-empty">' + esc(M.noChart) + '</p>'); SX.uGeom = null; return; }
+    // The chart takes the card's height, so the two columns end together (SessionUsageSplitLayout).
+    var W = Math.max(240, host.clientWidth), H = Math.max(U_CHART_H, Math.floor(host.clientHeight)), padL = 48, padR = 6, padT = 20, padB = 24, pw = W - padL - padR, ph = H - padT - padB;
+    var slots = M.slots, n = slots.length, slot = pw / n, byKey = {};
+    M.points.forEach(function (p) { (byKey[p.key] = byKey[p.key] || []).push(p); });
+    var peak = 0;
+    if (SX.uLines) M.points.forEach(function (p) { if (M.figure(p)) peak = Math.max(peak, M.plotted(p)); });
+    else Object.keys(byKey).forEach(function (k) { peak = Math.max(peak, byKey[k].reduce(function (s, p) { return s + M.plotted(p); }, 0)); });
+    var top = uNiceTop(peak), y = function (v) { return padT + ph - v / top * ph; }, f1 = function (v) { return Math.round(v * 10) / 10; };
+    var s = ['<svg class="u-svg" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" aria-hidden="true">'];
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (fr) {
+      var yy = f1(y(top * fr));
+      s.push('<line class="u-grid" x1="' + padL + '" x2="' + (W - padR) + '" y1="' + yy + '" y2="' + yy + '"/><text class="u-ylab" x="' + (padL - 7) + '" y="' + f1(yy + 3.5) + '" text-anchor="end">' + esc(uAxisValue(M, top * fr, top)) + '</text>');
+    });
+    var order = {}; M.order.forEach(function (name, i) { order[name] = i; });
+    if (!SX.uLines) {
+      var bw = Math.max(1, Math.min(slot * 0.72, 44));
+      slots.forEach(function (k, i) {
+        var pts = (byKey[k] || []).filter(M.figure).sort(function (a, b) { return order[a.series] - order[b.series]; });
+        if (!pts.length) return;
+        var x = f1(padL + i * slot + (slot - bw) / 2), base = 0;
+        s.push('<g class="u-col" data-key="' + k + '" opacity="' + uDim(M, k) + '">');
+        pts.forEach(function (p) {
+          var v = M.plotted(p);
+          if (!(v > 0)) return;
+          var y1 = y(base + v), y0 = y(base);
+          s.push('<rect x="' + x + '" y="' + f1(y1) + '" width="' + f1(bw) + '" height="' + f1(Math.max(0.5, y0 - y1)) + '" style="fill:' + M.color(p.series) + '"/>');
+          base += v;
+        });
+        s.push('</g>');
+      });
+    } else {
+      M.order.forEach(function (name) {
+        var d = '', dots = '', pen = false;
+        slots.forEach(function (k, i) {
+          var p = (byKey[k] || []).filter(function (q) { return q.series === name && M.figure(q); })[0];
+          if (!p) { pen = false; return; }
+          var x = f1(padL + (i + 0.5) * slot), yy = f1(y(M.plotted(p)));
+          d += (pen ? 'L' : 'M') + x + ' ' + yy; pen = true;
+          if (n <= 62) dots += '<circle cx="' + x + '" cy="' + yy + '" r="2.4" style="fill:' + M.color(name) + '"/>';
+        });
+        s.push('<path class="u-line" d="' + d + '" style="stroke:' + M.color(name) + '"/>' + dots);
+      });
+    }
+    if (M.average !== null) {
+      var ay = f1(y(M.average));
+      s.push('<line class="u-avg" x1="' + padL + '" x2="' + (W - padR) + '" y1="' + ay + '" y2="' + ay + '"/><text class="u-avglab" x="' + (W - padR - 2) + '" y="' + f1(ay - 5) + '" text-anchor="end">Average ' + esc(uAxisValue(M, M.average, top)) + '</text>');
+    }
+    uAxisKeys(slots).forEach(function (k) {
+      var i = slots.indexOf(k), mid = M.scale === 'daily' && i > 0;
+      s.push('<text class="u-xlab" x="' + f1(mid ? padL + (i + 0.5) * slot : padL + i * slot) + '" y="' + (H - 6) + '" text-anchor="' + (mid ? 'middle' : 'start') + '">' + esc(uAxisLabel(k)) + '</text>');
+    });
+    s.push('<line class="u-hover hidden" id="u-hover" x1="0" x2="0" y1="' + padT + '" y2="' + (padT + ph) + '"/>');
+    s.push('<rect class="u-hit" x="' + padL + '" y="0" width="' + f1(pw) + '" height="' + (padT + ph) + '"/></svg>');
+    host.insertAdjacentHTML('afterbegin', s.join(''));
+    SX.uGeom = { padL: padL, slot: slot, n: n, W: W };
+    if (SX.uPinned && M.keySet[SX.uPinned]) uTipShow(SX.uPinned, padL + (slots.indexOf(SX.uPinned) + 0.5) * slot);
+    else uTipHide();
+  }
+  function uKeyAt(host, clientX) {
+    var g = SX.uGeom, M = SX.uM;
+    if (!g || !M) return null;
+    var x = clientX - host.getBoundingClientRect().left, i = Math.floor((x - g.padL) / g.slot);
+    if (i < 0 || i >= g.n) return null;
+    var k = M.slots[i];
+    return M.keySet[k] ? { key: k, x: x } : null;
+  }
+  // The hover card: the bar's period and figure, then each series in it, largest first.
+  function uTipShow(key, px) {
+    var M = SX.uM, tip = $('u-tip'), host = $('u-chart'), g = SX.uGeom;
+    if (!M || !tip || !host || !g) return;
+    var rows = M.selected.filter(function (b) { return M.keyOf[b.day] === key; }), t = uTotals(rows);
+    var line = uPeriodTitle(key, M.scale, M.bounds) + (M.partial[key] ? ' (part of a ' + (M.scale === 'weekly' ? 'week' : 'month') + ')' : '') + ': ' +
+      (M.cost ? uCostLabel2(t) : uTok2(uMeasured(t, M.excl)) + ' tokens');
+    var members = M.points.filter(function (p) { return p.key === key; });
+    var list = members.length > 1 ? M.order.map(function (name) {
+      var p = members.filter(function (q) { return q.series === name; })[0];
+      if (!p) return '';
+      return '<div class="u-tiprow">' + uSwatch(M.color(name)) + '<span>' + esc(name) + '</span><b>' + esc(M.cost ? (p.priced > 0 ? uDollars(p.usd) : 'No price') : uShort(p.tokens)) + '</b></div>';
+    }).join('') : '';
+    tip.innerHTML = '<p>' + esc(line) + '</p>' + list;
+    var cw = Math.min(320, host.clientWidth - 16), right = px + 18, left = px - 18 - cw, x;
+    if (right + cw <= host.clientWidth - 8 && (left < 8 || px <= host.clientWidth / 2)) x = right;
+    else if (left >= 8) x = left;
+    else x = px > host.clientWidth / 2 ? 8 : Math.max(8, host.clientWidth - 8 - cw);
+    tip.style.width = cw + 'px';
+    tip.style.transform = 'translateX(' + Math.round(x) + 'px)';
+    tip.classList.remove('hidden');
+    var hover = $('u-hover'), cx = Math.round((g.padL + (M.slots.indexOf(key) + 0.5) * g.slot) * 10) / 10;
+    if (hover) { hover.setAttribute('x1', cx); hover.setAttribute('x2', cx); hover.classList.remove('hidden'); }
+  }
+  function uTipHide() {
+    var tip = $('u-tip'), hover = $('u-hover');
+    if (tip) tip.classList.add('hidden');
+    if (hover) hover.classList.add('hidden');
+  }
+  // Mouse: hover shows the card, a click chooses the bar. Touch has no hover, so a finger scrubs: the card follows it
+  // across the bars, and lifting it chooses that bar. A vertical drag still scrolls the page (touch-action: pan-y).
+  function uBindChart(host) {
+    if (host.__uBound) return;
+    host.__uBound = true;
+    host.addEventListener('pointermove', function (e) {
+      if (e.pointerType !== 'mouse' && !SX.uScrub) return;
+      var h = uKeyAt(host, e.clientX);
+      if (h) uTipShow(h.key, h.x); else if (!SX.uPinned) uTipHide();
+    });
+    host.addEventListener('pointerleave', function (e) { if (e.pointerType === 'mouse' && !SX.uPinned) uTipHide(); });
+    host.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse') return;
+      SX.uScrub = true;
+      var h = uKeyAt(host, e.clientX);
+      if (h) uTipShow(h.key, h.x);
+    });
+    host.addEventListener('pointerup', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      var h = uKeyAt(host, e.clientX);
+      SX.uScrub = false;
+      if (!h) { if (e.pointerType !== 'mouse') { SX.uPinned = null; uTipHide(); } return; }
+      SX.uPinned = e.pointerType === 'mouse' ? null : h.key;
+      uInspectKey(h.key, true);
+    });
+    host.addEventListener('pointercancel', function () { SX.uScrub = false; if (!SX.uPinned) uTipHide(); });
+    host.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); uMoveInspect(e.key === 'ArrowLeft' ? -1 : 1); }
+      else if (e.key === 'Escape' && SX.uInspect) { e.preventDefault(); uShowWhole(); }
+    });
+  }
+  function uDrawHeat() {
+    var M = SX.uM, host = $('u-heat');
+    if (!M || !host || !M.weeks || M.weeks.length < 3) return;
+    var fit = uCalendarFit(M.weeks, Math.max(0, host.clientWidth - 26 - 150 - 16)), long = M.weeks.length > 26;
+    var counted = function (sum) { return sum && (!M.cost || sum.t.priced > 0); };
+    var top = 0;
+    fit.weeks.forEach(function (w) { w.days.forEach(function (x) { if (counted(x.sum)) top = Math.max(top, uDayValue(M, x.sum.t)); }); });
+    var sums = [0, 0, 0, 0, 0, 0, 0], cnt = [0, 0, 0, 0, 0, 0, 0];
+    uGroup(M.selected, function (b) { return b.day; }).forEach(function (g) { if (!counted(g)) return; var i = uWeekday(g.key); sums[i] += uDayValue(M, g.t); cnt[i] += 1; });
+    var avg = sums.map(function (v, i) { return cnt[i] ? v / cnt[i] : 0; }), topAvg = Math.max.apply(null, avg);
+    var cols = 'grid-template-columns:repeat(' + fit.weeks.length + ',minmax(0,1fr));column-gap:' + fit.spacing + 'px';
+    var inspected = M.scale === 'daily' ? M.inspect : null, empty = M.hasFilter ? 'no records for this selection' : 'no logs';
+    var h = '<div class="u-cal' + (fit.numbers ? ' numbers' : '') + '"' + (long ? ' role="img" aria-label="Calendar of ' + M.weeks.length + ' weeks. Daily breakdown lists each day."' : '') + '>' +
+      '<div class="u-cal-row u-cal-months"><span class="u-cal-lab"></span><div class="u-cal-weeks" style="' + cols + '">' +
+      fit.weeks.map(function (w) { return '<span class="u-cal-month">' + (w.label ? esc(w.label) : '') + '</span>'; }).join('') + '</div><span class="u-cal-avg">Daily average</span></div>';
+    for (var wd = 0; wd < 7; wd++) {
+      h += '<div class="u-cal-row"><span class="u-cal-lab">' + U_WEEKDAYS[wd].slice(0, 3) + '</span><div class="u-cal-weeks" style="' + cols + '">';
+      fit.weeks.forEach(function (w) {
+        var x = w.days[wd];
+        if (!x.inRange) { h += '<span class="u-cell out"></span>'; return; }
+        if (counted(x.sum)) {
+          var v = uDayValue(M, x.sum.t), level = top > 0 ? Math.sqrt(v / top) : 0, t = x.sum.t;
+          var detail = uPeriodTitle(x.id, 'daily') + ': ' + uCostLabel2(t) + ', ' + uShort(t.all) + ' tokens, ' + uShort(t.fresh) + ' new, ' + uNum(t.events) + ' records';
+          h += '<button type="button" class="u-cell day' + (level > 0.65 ? ' deep' : '') + (inspected === x.id ? ' on' : '') + '" data-u="day" data-day="' + x.id + '"' + (long ? ' tabindex="-1"' : '') +
+            ' style="background:color-mix(in srgb, var(--u-gold) ' + Math.round((0.12 + 0.82 * level) * 100) + '%, transparent)" title="' + esc(detail) + '" aria-label="' + esc(detail) + '"' + (inspected === x.id ? ' aria-pressed="true"' : '') + '>' +
+            (fit.numbers ? esc(uDayFigure(M, v) + (M.cost && t.priced < t.events ? '+' : '')) : '') + '</button>';
+        } else {
+          var why = uPeriodTitle(x.id, 'daily') + ': ' + (x.sum ? 'no price' : empty);
+          h += '<span class="u-cell ' + (long ? 'faint' : 'none') + '" title="' + esc(why) + '"' + (long ? '' : ' role="img" aria-label="' + esc(why) + '"') + '></span>';
+        }
+      });
+      h += '</div><span class="u-cal-avg"><span class="u-avgbar"><i style="width:' + (topAvg > 0 ? (avg[wd] > 0 ? Math.max(2, Math.round(88 * avg[wd] / topAvg)) : 0) : 0) + 'px"></i></span>' +
+        '<span class="u-avgnum">' + (avg[wd] > 0 ? esc(uDayFigure(M, avg[wd])) : '') + '</span></span></div>';
+    }
+    if (fit.weeks.length < M.weeks.length) h += '<p class="u-cnote">Showing the most recent ' + fit.weeks.length + ' of ' + M.weeks.length + ' weeks. The daily averages cover all of them, and Daily breakdown lists every day.</p>';
+    host.innerHTML = h + '</div>';
+  }
+  function uDrawWide() { uDrawChart(); uDrawHeat(); }
+
+  // ── Wide interactions ──
+  // A chosen bar repaints the card, the bars and the calendar's outline, never the controls around them.
+  function uRepaintInspect() {
+    var M = SX.uM;
+    if (!M) return;
+    M.inspect = uInspected(M);
+    var card = $('u-card'), title = $('u-table-title');
+    if (card) card.innerHTML = uCardHtml(M);
+    if (title) title.textContent = M.inspect ? 'Tool and model, ' + uWholeTitle(M) : 'Tool and model';
+    document.querySelectorAll('#sessions-usage .u-brow.on').forEach(function (b) { b.classList.remove('on'); });
+    if (M.inspect && M.scale === 'daily') { var row = document.querySelector('#sessions-usage .u-brow[data-day="' + M.inspect + '"]'); if (row) row.classList.add('on'); }
+    uDrawWide();
+  }
+  function uInspectKey(key, toggle) {
+    var M = SX.uM;
+    if (!M) return;
+    if (toggle && M.inspect === key) { SX.uPinned = null; return uShowWhole(); }
+    SX.uInspect = { key: key, scale: M.scale };
+    uRepaintInspect();
+  }
+  // moveInspection: with nothing chosen, left starts at the last bar and right at the first.
+  function uMoveInspect(delta) {
+    var M = SX.uM;
+    if (!M || !M.keys || !M.keys.length) return;
+    var i = M.inspect ? M.keys.indexOf(M.inspect) + delta : delta < 0 ? M.keys.length - 1 : 0;
+    if (i < 0 || i >= M.keys.length) return;
+    SX.uPinned = null;
+    SX.uInspect = { key: M.keys[i], scale: M.scale };
+    uRepaintInspect();
+  }
+  // Show the whole period: back from a chosen bar, and from a day jump to the scale it left.
+  function uShowWhole() {
+    SX.uInspect = null; SX.uPinned = null;
+    if (SX.uDayJump) { SX.uDayJump = false; return paintUsage(); }
+    uRepaintInspect();
+  }
+  function uInspectDay(day) {
+    var M = SX.uM;
+    if (M && M.scale === 'daily' && M.inspect === day) return uShowWhole();
+    if (M && M.scale !== 'daily') SX.uDayJump = true;
+    SX.uInspect = { key: day, scale: 'daily' }; SX.uPinned = null;
+    paintUsage();
+  }
+  // A new period starts on the whole of it. All history opens on months and gives back a picked scale on the way out.
+  function uPeriodChanged() {
+    SX.uInspect = null; SX.uPinned = null; SX.uDayJump = false;
+    if (SX.uScale) {
+      if (SX.uPeriod === 'All history') { if (SX.uScale !== 'monthly') { SX.uScaleBeforeHistory = SX.uScale; SX.uScale = 'monthly'; } }
+      else if (SX.uScaleBeforeHistory) { SX.uScale = SX.uScaleBeforeHistory; SX.uScaleBeforeHistory = ''; }
+    }
+    sxSave();
+  }
+  function uSliceChanged() { SX.uInspect = null; SX.uPinned = null; SX.uDayJump = false; }
+  function uStepRange(delta) {
+    var M = SX.uM;
+    if (!M) return;
+    if (M.inspect) return uMoveInspect(delta);
+    var next = uStep(M.period, M.today, SX.uFrom, SX.uTo, delta, M.firstDay);
+    if (!next) return;
+    SX.uPeriod = next.period;
+    if (next.period === U_CUSTOM) { SX.uFrom = next.from; SX.uTo = next.to; }
+    uPeriodChanged();
+    paintUsage();
+    var again = document.querySelector('#u-card [data-u="step"][data-d="' + delta + '"]:not([disabled])') || document.querySelector('#u-card [data-u="step"]:not([disabled])');
+    if (again) again.focus();
+  }
+  // A refresh, a breakpoint change or a resize waits while a finger is down, a menu is open or the dates are being picked.
+  function uHeld() {
+    var box = $('sessions-usage'), a = document.activeElement;
+    return !!(SX.uPointer || SX.uSheet || (box && box.querySelector('.u-cols[open]')) || (box && a && box.contains(a) && a.tagName === 'SELECT'));
+  }
+  function uFlush() {
+    if (uHeld()) return;
+    if (SX.uDeferred) paintUsage();
+    else if (SX.uRedraw) uDrawWide();
+    SX.uRedraw = false;
+  }
+  function uUsageAction(t) {
+    var act = t.getAttribute('data-u');
+    if (act === 'range') return uOpenRange(t);
+    if (act === 'step') return uStepRange(Number(t.getAttribute('data-d')));
+    if (act === 'whole') return uShowWhole();
+    if (act === 'peak' || act === 'day') return uInspectDay(t.getAttribute('data-day'));
+    if (act === 'lines') { SX.uLines = t.getAttribute('data-on') === '1'; sxSave(); return paintUsage(); }
+    if (act === 'sort') {
+      var sort = t.getAttribute('data-sort');
+      if (SX.uSort === sort) SX.uSortAsc = !SX.uSortAsc; else { SX.uSort = sort; SX.uSortAsc = sort === 'model'; }
+      return paintUsage();
+    }
+    if (act === 'tool') { var p = t.getAttribute('data-p'); SX.uTool = SX.uTool === p ? 'All tools' : p; SX.uModel = 'All models'; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
+    if (act === 'model') {
+      var tp = t.getAttribute('data-p'), m = t.getAttribute('data-m');
+      if (SX.uModel === m && SX.uTool === tp) { SX.uModel = 'All models'; SX.uTool = SX.uToolBefore || SX.uTool; SX.uToolBefore = null; }
+      else { if (SX.uToolBefore === null || SX.uToolBefore === undefined) SX.uToolBefore = SX.uTool; SX.uTool = tp; SX.uModel = m; }
+      uSliceChanged();
+      return paintUsage();
+    }
+    if (act === 'more') { SX.uOpen[t.getAttribute('data-p')] = true; return paintUsage(); }
+    if (act === 'fewer') { delete SX.uOpen[t.getAttribute('data-p')]; return paintUsage(); }
+  }
+  function uUsageChange(e) {
+    var id = e.target.id;
+    if (id === 'u-measure') { SX.uMeasure = e.target.value; sxSave(); return paintUsage(); }
+    if (id === 'u-series') { SX.uSeries = e.target.value; sxSave(); return paintUsage(); }
+    if (id === 'u-scale') {
+      var M = SX.uM, scale = e.target.value;
+      // A day carries into the week or month that holds it; anything else would mislabel the period.
+      if (SX.uInspect && SX.uInspect.scale === 'daily' && scale !== 'daily') SX.uInspect = { key: uPeriodKey(SX.uInspect.key, scale), scale: scale };
+      else if (!M || !M.inspect) SX.uInspect = null;
+      SX.uScale = scale; SX.uDayJump = false; SX.uScaleBeforeHistory = '';
+      sxSave();
+      return paintUsage();
+    }
+    var col = e.target.getAttribute && e.target.getAttribute('data-ucol');
+    if (col) {
+      var cols = uCols().slice(), i = cols.indexOf(col);
+      if (i >= 0) cols.splice(i, 1); else cols.push(col);
+      SX.uCols = U_COLUMNS.map(function (c) { return c[0]; }).filter(function (c) { return cols.indexOf(c) >= 0; });
+      try { localStorage.setItem(U_COLS_KEY, JSON.stringify(SX.uCols)); } catch (_e) { /* storage off: the choice lasts this visit */ }
+      // The menu stays open while columns are chosen, so the next box is one tap away.
+      SX.uColsOpen = true;
+      paintUsage();
+      var cb = document.querySelector('#sessions-usage [data-ucol="' + col + '"]');
+      if (cb) cb.focus();
+    }
+  }
+
+  // ── The date range sheet: presets, a month, or Custom From and To. A popover beside its button when wide, a bottom
+  // sheet on a phone. Nothing applies until Apply; Cancel, Escape and a tap outside leave the range as it was. ──
+  function uRangeContext() {
+    var su = SX.usage && SX.usage.sessionUsage, tz = (su && su.timeZone) || '', today = uDayKey(tz), first = '', months = [];
+    ((su && su.buckets) || []).forEach(function (b) {
+      if (!b || typeof b.day !== 'string') return;
+      if (!first || b.day < first) first = b.day;
+      var m = b.day.slice(0, 7); if (months.indexOf(m) < 0) months.push(m);
+    });
+    return { today: today, first: first, months: months.sort().reverse() };
+  }
+  function uSheetDates(period, ctx) {
+    if (period === 'All history') return ctx.first ? [ctx.first.slice(0, 10), ctx.today] : [uAddDays(ctx.today, -29), ctx.today];
+    var r = uRange(period, ctx.today, SX.uFrom, SX.uTo);
+    if (!r) return [uAddDays(ctx.today, -29), ctx.today];
+    return [r[0], r[1] > ctx.today ? ctx.today : r[1]];
+  }
+  function uOpenRange(anchor, custom) {
+    var ctx = uRangeContext(), period = custom ? U_CUSTOM : SX.uPeriod;
+    var dates = SX.uPeriod === U_CUSTOM && !uCustomError(SX.uFrom, SX.uTo) ? [SX.uFrom, SX.uTo] : uSheetDates(SX.uPeriod, ctx);
+    var wide = uWide();
+    SX.uSheet = { period: period, from: dates[0], to: dates[1], anchor: anchor, wide: wide, ctx: ctx };
+    var back = $('u-range-back');
+    if (!back) {
+      back = document.createElement('div');
+      back.id = 'u-range-back';
+      back.className = 'u-range-back hidden';
+      document.body.appendChild(back);
+      back.addEventListener('click', function (e) {
+        if (e.target === back) return uCloseRange(false);
+        var t = e.target.closest('[data-us]');
+        if (!t) return;
+        var act = t.getAttribute('data-us');
+        if (act === 'cancel') return uCloseRange(false);
+        if (act === 'apply') return uSheetApply();
+        if (act === 'pick') return uSheetPick(t.getAttribute('data-period'));
+      });
+      back.addEventListener('input', uSheetInput);
+      back.addEventListener('change', uSheetInput);
+      back.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') { e.preventDefault(); uCloseRange(false); }
+        if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); uSheetApply(); }
+      });
+    }
+    var S = SX.uSheet, presets = U_PRESETS.map(function (p) {
+      var d = uSheetDates(p, ctx), words = p === 'All history' ? (ctx.first ? 'Since ' + uDateRangeTitle([ctx.first.slice(0, 10), ctx.first.slice(0, 10)]) : '') : uDateRangeTitle(d);
+      return '<button type="button" class="u-preset" role="radio" aria-checked="' + (S.period === p) + '" data-us="pick" data-period="' + esc(p) + '"><span>' + esc(p) + '</span><span class="u-preset-dates">' + esc(words) + '</span></button>';
+    }).join('');
+    back.className = 'u-range-back' + (wide ? ' pop' : ' bottom');
+    back.innerHTML = '<div class="u-range" role="dialog" aria-modal="true" aria-labelledby="u-range-title">' +
+      '<h2 class="u-range-title" id="u-range-title">Dates</h2>' +
+      '<div class="u-presets" role="radiogroup" aria-label="Ranges">' + presets + '</div>' +
+      '<label class="u-range-field"><span>A month</span><select id="u-range-month" class="field"><option value="">Choose a month</option>' +
+      ctx.months.map(function (m) { return '<option value="' + m + '"' + (S.period === m ? ' selected' : '') + '>' + esc(uRangeTitle(m)) + '</option>'; }).join('') + '</select></label>' +
+      '<div class="u-custom' + (S.period === U_CUSTOM ? ' on' : '') + '" id="u-custom"><p class="u-custom-title">Custom dates</p><div class="u-dates">' +
+      '<label class="u-range-field"><span>From</span><input type="date" class="field" id="u-from" value="' + S.from + '" max="' + ctx.today + '"></label>' +
+      '<label class="u-range-field"><span>To</span><input type="date" class="field" id="u-to" value="' + S.to + '" max="' + ctx.today + '"></label></div>' +
+      '<p class="u-range-err" id="u-range-err" role="alert"></p></div>' +
+      '<p class="u-range-note">' + esc((ctx.first ? 'History on this Mac starts ' + uDateRangeTitle([ctx.first.slice(0, 10), ctx.first.slice(0, 10)]) + '. ' : '') + 'Days without logs are missing, not zero.') + '</p>' +
+      '<div class="u-range-actions"><button type="button" class="cx-btn quiet" data-us="cancel">Cancel</button><button type="button" class="cx-btn primary" data-us="apply" id="u-range-apply">Apply</button></div></div>';
+    uSheetPlace();
+    uSheetCheck();
+    var focus = S.period === U_CUSTOM ? $('u-from') : back.querySelector('.u-preset[aria-checked="true"]') || $('u-range-month');
+    if (focus) focus.focus();
+  }
+  function uSheetPlace() {
+    var S = SX.uSheet, panel = document.querySelector('#u-range-back .u-range');
+    if (!S || !panel) return;
+    panel.style.top = panel.style.left = '';
+    if (!S.wide || !S.anchor || !S.anchor.getBoundingClientRect) return;
+    var r = S.anchor.getBoundingClientRect(), w = Math.min(380, innerWidth - 32), left = Math.min(Math.max(16, r.right - w), innerWidth - 16 - w);
+    var top = r.bottom + 8, room = innerHeight - top - 16;
+    if (room < 420 && r.top > room) top = Math.max(16, r.top - 8 - Math.min(panel.scrollHeight, innerHeight - 32));
+    panel.style.left = Math.round(left) + 'px';
+    panel.style.top = Math.round(top) + 'px';
+    panel.style.maxHeight = Math.round(innerHeight - top - 16) + 'px';
+  }
+  // In place, never rebuilt: the radios, the month and the two dates follow the choice.
+  function uSheetPick(period) {
+    var S = SX.uSheet;
+    if (!S) return;
+    S.period = period;
+    var d = uSheetDates(period, S.ctx);
+    S.from = d[0]; S.to = d[1];
+    $('u-from').value = S.from; $('u-to').value = S.to;
+    $('u-range-month').value = U_MONTH_RE.test(period) ? period : '';
+    uSheetCheck();
+  }
+  function uSheetInput(e) {
+    var S = SX.uSheet;
+    if (!S) return;
+    if (e.target.id === 'u-range-month') { if (e.target.value) uSheetPick(e.target.value); return; }
+    if (e.target.id !== 'u-from' && e.target.id !== 'u-to') return;
+    S.period = U_CUSTOM; S.from = $('u-from').value; S.to = $('u-to').value;
+    $('u-range-month').value = '';
+    uSheetCheck();
+  }
+  function uSheetCheck() {
+    var S = SX.uSheet;
+    if (!S) return;
+    document.querySelectorAll('#u-range-back .u-preset').forEach(function (b) { b.setAttribute('aria-checked', String(b.getAttribute('data-period') === S.period)); });
+    var err = S.period === U_CUSTOM ? uCustomError(S.from, S.to) : '';
+    $('u-custom').classList.toggle('on', S.period === U_CUSTOM);
+    $('u-range-err').textContent = err;
+    $('u-range-apply').disabled = !!err;
+    return err;
+  }
+  function uSheetApply() {
+    var S = SX.uSheet;
+    if (!S || uSheetCheck()) return;
+    SX.uPeriod = S.period;
+    if (S.period === U_CUSTOM) { SX.uFrom = S.from; SX.uTo = S.to; }
+    uCloseRange(true);
+    uPeriodChanged();
+    paintUsage();
+    uRefocus(S);
+  }
+  function uCloseRange(applied) {
+    var S = SX.uSheet, back = $('u-range-back');
+    SX.uSheet = null;
+    if (back) { back.className = 'u-range-back hidden'; back.innerHTML = ''; }
+    if (applied) return;
+    // A narrow Period menu left on Custom dates goes back to the range in force.
+    if (S && !S.wide) paintUsage(); else if (SX.uDeferred) paintUsage();
+    uRefocus(S);
+  }
+  function uRefocus(S) {
+    if (!S || !S.anchor) return;
+    var a = S.anchor;
+    if (!document.body.contains(a)) {
+      var sel = a.id ? '#' + a.id : a.getAttribute('data-sx') ? '[data-sx="' + a.getAttribute('data-sx') + '"]' : a.classList.contains('u-rangelink') ? '#u-card [data-u="range"]' : '.u-rangebtn';
+      a = document.querySelector('#sessions-usage ' + sel) || document.querySelector('#sessions-usage #usage-period');
+    }
+    if (a && a.focus) a.focus();
+  }
+
+  // Wired once, the first time Usage shows: the breakpoint, resizes, and the finger that holds a repaint back.
+  function uWire() {
+    if (SX.uWired) return;
+    var box = $('sessions-usage');
+    if (!box) return;
+    SX.uWired = true;
+    box.addEventListener('click', function (e) { var t = e.target.closest('[data-u]'); if (t && box.contains(t)) uUsageAction(t); });
+    box.addEventListener('change', uUsageChange);
+    box.addEventListener('toggle', function (e) {
+      if (e.target.classList.contains('u-breakdown')) SX.uBreakOpen = e.target.open;
+      if (e.target.classList.contains('u-cols')) { SX.uColsOpen = e.target.open; if (!e.target.open) setTimeout(uFlush, 0); }
+    }, true);
+    box.addEventListener('pointerdown', function () { SX.uPointer = true; }, true);
+    var release = function () { if (!SX.uPointer) return; SX.uPointer = false; if (SX.uDeferred || SX.uRedraw) setTimeout(uFlush, 400); };
+    document.addEventListener('pointerup', release, true);
+    document.addEventListener('pointercancel', release, true);
+    document.addEventListener('pointerdown', function (e) {
+      if (SX.uPinned && !e.target.closest('#u-chart')) { SX.uPinned = null; uTipHide(); }
+      var cols = box.querySelector('.u-cols[open]');
+      if (cols && !cols.contains(e.target)) cols.removeAttribute('open');
+    });
+    box.addEventListener('focusout', function () { setTimeout(function () { if (SX.uDeferred || SX.uRedraw) uFlush(); }, 0); });
+    try {
+      var mq = window.matchMedia(U_WIDE_MQ), onMq = function () { if (SX.view === 'usage' && SX.usage) paintUsage(true); };
+      if (mq.addEventListener) mq.addEventListener('change', onMq); else if (mq.addListener) mq.addListener(onMq);
+    } catch (_e) { /* no media queries: the vertical layout stays */ }
+    var timer = null;
+    window.addEventListener('resize', function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        if (SX.uSheet) uSheetPlace();
+        if (!SX.uWideShown || SX.view !== 'usage') return;
+        if (uHeld()) SX.uRedraw = true; else uDrawWide();
+      }, 150);
+    });
+  }
+  // The viewer's last range, scale and chart choices, checked before use (the stored words could be from an older page).
+  function uLoadPrefs() {
+    if (SX.uPrefsLoaded) return;
+    SX.uPrefsLoaded = true;
+    var p = readStore(SX_PREFS);
+    if (uKnownPeriod(p.uPeriod) && (p.uPeriod !== U_CUSTOM || !uCustomError(p.uFrom, p.uTo))) { SX.uPeriod = p.uPeriod; SX.uFrom = p.uFrom || ''; SX.uTo = p.uTo || ''; }
+    if (['all', 'new', 'value'].indexOf(p.uMeasure) >= 0) SX.uMeasure = p.uMeasure;
+    if (['tool', 'model', 'type'].indexOf(p.uSeries) >= 0) SX.uSeries = p.uSeries;
+    if (['daily', 'weekly', 'monthly'].indexOf(p.uScale) >= 0) SX.uScale = p.uScale;
+    SX.uLines = p.uLines === true;
   }
 
   // ── COS cost view (SessionUsageView.swift CosCostView 1773-2009, CosCostPresentation) ──
