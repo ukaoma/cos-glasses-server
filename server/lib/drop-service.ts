@@ -17,6 +17,8 @@ import { DROP_DESTS, DROP_ID, DROP_LIMITS, DropStoreError, parseLink, type DropC
   type DropSource, type DropFileRef, type FeedAction, type FeedItem, type DropStore, type InboxFeedStore } from './drop-store.js'
 import { choiceFor, cleanDropForJev, DROP_ROUTER_LIMITS, ruleRoute, type DropRouter, type DropTarget, type RouteOutcome } from './drop-router.js'
 import { DropDestinationError, type DropWriters } from './drop-destinations.js'
+import { parseWhen, whenLabel, whenSuggestions, WHEN_MAX_AHEAD_MS } from './drop-when.js'
+import { applyReminderAction, reminderAbout, REMINDER_ACTIONS, type ReminderAction } from './reminder-scheduler.js'
 
 export class DropError extends Error {
   constructor(readonly code: string, readonly status: number, message?: string) { super(message ?? code) }
@@ -209,11 +211,14 @@ export class DropService {
           hold = { sessionId: target.id, label: target.label }
           links = [{ kind: 'session', id: target.id, label: target.label }]
           break
-        case 'reminder':
-          // P1 keeps the reminder; its time and firing come with the parser and scheduler in P2 (plan section 7).
-          remind = { at: null, tz: this.deps.timezone?.() ?? 'UTC', firedAt: null, ackAt: null, snoozes: 0 }
+        case 'reminder': {
+          // P2 (plan section 7): the time is read from his words at filing. None found: the receipt asks once.
+          const tz = this.deps.timezone?.() ?? 'UTC'
+          const when = parseWhen(drop.text, this.now().getTime(), tz)
+          remind = { at: when.at === null ? null : new Date(when.at).toISOString(), tz, firedAt: null, ackAt: null, snoozes: 0 }
           links = [{ kind: 'reminder', id: drop.id, label: 'Reminder' }]
           break
+        }
         case 'note':
           break
         default:
@@ -239,8 +244,8 @@ export class DropService {
       return next
     })
     console.log(`[drops] ${saved.id} filed dest=${actualDest} by=${route.by}${reason ? ` reason=${reason}` : ''} chars=${saved.text.length}`)
-    const words = receiptWords(saved, actualDest, reason, movedFrom)
-    this.receipt(saved, 'receipt', words.title, words.line, saved.links, words.actions, generation)
+    const words = receiptWords(saved, actualDest, reason, movedFrom, this.now().getTime())
+    this.receipt(saved, 'receipt', words.title, words.line, saved.links, words.actions, generation, words.needsReply)
     return this.answer(this.deps.drops.get(saved.id)!, false)
   }
 
@@ -253,11 +258,12 @@ export class DropService {
     this.deps.feed.purge(item => DROP_ID.test(item.threadId) && !ids.has(item.threadId))
   }
 
-  private receipt(drop: DropRecord, kind: 'receipt' | 'question' | 'followup', title: string, line: string, links: DropLink[], actions: FeedAction[], generation: number): FeedItem {
+  private receipt(drop: DropRecord, kind: 'receipt' | 'question' | 'followup', title: string, line: string, links: DropLink[], actions: FeedAction[], generation: number, needsReply = false): FeedItem {
     const at = this.now().toISOString()
     const [item] = this.deps.feed.insert([{ id: feedId(), kind, threadId: drop.id, createdAt: at,
       // Receipts are born read (plan section 1); a question and a follow-up count as unread on the pinned row.
-      readAt: kind === 'receipt' ? at : null, source: 'cos', title, line, links, actions, state: 'live',
+      // A receipt that asks (a reminder with no time) is waiting on him until he picks one (P2).
+      readAt: kind === 'receipt' ? at : null, source: 'cos', title, line, links, actions, state: 'live', ...(needsReply ? { needsReply: true } : {}),
       ...(kind === 'receipt' && drop.undoUntil ? { undoUntil: drop.undoUntil } : {}), key: `${drop.id}:${kind}:${generation}` }])
     this.purgeOrphans()
     return item
@@ -292,6 +298,46 @@ export class DropService {
       return this.file(drop, choice.dest, sessionTarget, { by: 'user' }, drop.kind === 'idea' ? 0 : 1, generation)
     })
   }
+
+  // ── P2: reminder times and actions ──────────────────────────────────
+
+  /**
+   * `when:tomorrow_9`, `when:monday_9` or `when:<ISO instant>` on a reminder's receipt: set (or change) its time.
+   * Refused for an undone drop, a reminder already done, and a time in the past or over a year out.
+   */
+  async setReminderTime(itemId: string, choice: string): Promise<DropAnswer> {
+    const item = this.deps.feed.get(itemId)
+    if (!item || item.kind !== 'receipt') throw new DropError('receipt_not_found', 404)
+    return this.locked(item.threadId, async () => {
+      const drop = this.mustGet(item.threadId)
+      if (drop.state === 'undone' || drop.dest !== 'reminder' || !drop.remind || drop.remind.ackAt) throw new DropError('not_a_live_reminder', 409)
+      const nowMs = this.now().getTime()
+      const suggested = whenSuggestions(nowMs, drop.remind.tz).find(w => w.id === choice)
+      const atMs = suggested ? suggested.at : /^\d{4}-\d{2}-\d{2}T/.test(choice) ? Date.parse(choice) : Number.NaN
+      if (!Number.isFinite(atMs) || atMs <= nowMs || atMs - nowMs > WHEN_MAX_AHEAD_MS) throw new DropError('invalid_time', 400)
+      const generation = this.nextGeneration(drop.id)
+      this.retire(drop.id)
+      const saved = this.deps.drops.update(drop.id, d => ({ ...d, remind: { ...d.remind!, at: new Date(atMs).toISOString(), firedAt: null } }))
+      const words = receiptWords(saved, 'reminder', undefined, undefined, nowMs)
+      this.receipt(saved, 'receipt', words.title, words.line, saved.links, words.actions, generation)
+      return this.answer(this.deps.drops.get(saved.id)!, false)
+    })
+  }
+
+  /** Done, Snooze 1 hour or Tomorrow 9 on a fired reminder's ping. The ping's buttons go; a snooze fires again later. */
+  reminderAction(itemId: string, action: string): { item: FeedItem; drop: DropView } {
+    const item = this.deps.feed.get(itemId)
+    const reminder = item?.links.find(l => l.kind === 'reminder')
+    if (!item || item.kind !== 'ping' || !reminder) throw new DropError('reminder_not_found', 404)
+    if (!REMINDER_ACTIONS.some(a => a.id === action)) throw new DropError('invalid_action', 400)
+    const drop = applyReminderAction(this.deps.drops, reminder.id, action as ReminderAction, this.now().getTime())
+    if (!drop) throw new DropError('not_a_live_reminder', 409)
+    const [done] = this.deps.feed.update(new Set([item.id]), i => ({ ...i, state: 'done', actions: [] }))
+    return { item: done, drop: this.view(drop, null) }
+  }
+
+  /** The two stores, for the P2 runtime (pings, reminders, follow-ups) that writes beside this service. */
+  p2Stores(): { drops: DropStore; feed: InboxFeedStore } { return { drops: this.deps.drops, feed: this.deps.feed } }
 
   // ── Undo and Move ──────────────────────────────────────────────────
 
@@ -625,7 +671,7 @@ function reading(choice: DropChoice): string {
   }
 }
 
-function receiptWords(drop: DropRecord, dest: DropDest, reason?: string, movedFrom?: DropDest): { title: string; line: string; actions: FeedAction[] } {
+function receiptWords(drop: DropRecord, dest: DropDest, reason?: string, movedFrom?: DropDest, nowMs = Date.now()): { title: string; line: string; actions: FeedAction[]; needsReply?: boolean } {
   const card = drop.links.find(l => l.kind === 'card'), thread = drop.links.find(l => l.kind === 'thread')
   const moved = movedFrom ? 'Moved. ' : ''
   switch (dest) {
@@ -636,7 +682,13 @@ function receiptWords(drop: DropRecord, dest: DropDest, reason?: string, movedFr
     case 'thread': return { title: `${moved}Added to the ${thread?.label ?? ''} thread`.replace('the  thread', 'the thread'), line: 'It joins the thread for the next prep. No card.', actions: [A.openThread, A.undo, A.move] }
     case 'memory': return { title: `${moved}Saved to memories`, line: 'It waits in To review until you accept it.', actions: [A.openMemory, A.undo, A.move] }
     case 'session': return { title: `${moved}Held for ${drop.hold?.label ?? 'the session'}`, line: 'Send it to the session when you are ready.', actions: [A.send, A.undo, A.move] }
-    case 'reminder': return { title: `${moved}Reminder saved`, line: 'Timed reminders come in the next update. It is in History.', actions: [A.undo, A.move] }
+    case 'reminder': {
+      const about = reminderAbout(drop)
+      if (drop.remind?.at) return { title: `${moved}Reminder set: ${whenLabel(Date.parse(drop.remind.at), nowMs, drop.remind.tz)}`, line: `I will remind you: ${about}.`, actions: [A.undo, A.move] }
+      // No time in his words (plan section 7): ask once, with the two common answers.
+      return { title: `${moved}When should I remind you?`, line: `I could not read a time for: ${about}.`, needsReply: true,
+        actions: [...whenSuggestions(nowMs, drop.remind?.tz ?? 'UTC').map(w => ({ id: `when:${w.id}`, label: w.label })), A.undo, A.move] }
+    }
     default: {
       const word = drop.kind === 'idea' ? 'an idea' : drop.kind === 'file' ? 'a file note' : 'a note'
       const why = reason ? NOTE_REASONS[reason] ?? NOTE_REASONS.jev_unavailable : drop.route?.by === 'jev' ? 'Nothing else happens.' : 'Nothing else happens.'

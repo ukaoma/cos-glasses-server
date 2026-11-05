@@ -44,7 +44,8 @@ describe('filing', () => {
     const memory = await h.service.submit(drop('remember that the Tulsa store prefers email'))
     const ask = await h.service.submit(drop('what did we decide about the price test?'))
     expect(h.client.calls).toHaveLength(0)
-    expect(reminder.drop).toMatchObject({ dest: 'reminder', kind: 'reminder', remind: { at: null, tz: 'America/Chicago' } })
+    // P2: the time is read at filing. Wednesday 9:00 CST, so Thursday is tomorrow at 9:00 CST.
+    expect(reminder.drop).toMatchObject({ dest: 'reminder', kind: 'reminder', remind: { at: '2026-11-05T15:00:00.000Z', tz: 'America/Chicago', firedAt: null } })
     expect(memory.drop).toMatchObject({ dest: 'memory', links: [{ kind: 'memory' }] })
     expect(ask.drop).toMatchObject({ dest: 'ask', state: 'asked' })
     expect(ask.next).toEqual({ kind: 'ask', prompt: 'what did we decide about the price test?' })
@@ -360,5 +361,62 @@ describe('History', () => {
     expect(statusOf(base, null)).toBe('open')
     expect(kindFor('note', 0.49)).toBe('idea')
     expect(kindFor('note', 0.5)).toBe('note')
+  })
+})
+
+describe('P2 reminders in the service', () => {
+  it('a reminder with a time says when, in his words', async () => {
+    const h = harness()
+    const out = await h.service.submit(drop('remind me Thursday to send Gina the JCK numbers'))
+    const receipt = out.items.find(i => i.kind === 'receipt')!
+    expect(receipt).toMatchObject({ title: 'Reminder set: tomorrow 9:00 AM', line: 'I will remind you: send Gina the JCK numbers.' })
+    expect(receipt.needsReply).toBeUndefined()
+    expect(receipt.actions.map(a => a.id)).toEqual(['undo', 'move'])
+  })
+
+  it('no time: the receipt asks once, waits on him, and a pick sets the time and clears the wait', async () => {
+    const h = harness()
+    const out = await h.service.submit(drop('remind me to call mom'))
+    const ask = out.items.find(i => i.kind === 'receipt')!
+    expect(out.drop.remind).toMatchObject({ at: null })
+    expect(ask).toMatchObject({ title: 'When should I remind you?', line: 'I could not read a time for: call mom.', needsReply: true })
+    expect(ask.actions.map(a => a.id)).toEqual(['when:tomorrow_9', 'when:monday_9', 'undo', 'move'])
+    expect(h.service.summary().waiting).toBe(1)
+    const set = await h.service.setReminderTime(ask.id, 'tomorrow_9')
+    expect(set.drop.remind).toMatchObject({ at: '2026-11-05T15:00:00.000Z' })
+    expect(h.feed.get(ask.id)!.state).toBe('done')
+    expect(h.service.summary().waiting).toBe(0)
+    const latest = h.feed.list().filter(i => i.kind === 'receipt' && i.state === 'live')
+    expect(latest.map(i => i.title)).toEqual(['Reminder set: tomorrow 9:00 AM'])
+  })
+
+  it('refuses a past time, a time over a year out, and an undone reminder', async () => {
+    const h = harness()
+    const out = await h.service.submit(drop('remind me to call mom'))
+    const ask = out.items.find(i => i.kind === 'receipt')!
+    await expect(h.service.setReminderTime(ask.id, '2026-11-04T14:00:00.000Z')).rejects.toMatchObject({ code: 'invalid_time' })
+    await expect(h.service.setReminderTime(ask.id, '2028-01-01T15:00:00.000Z')).rejects.toMatchObject({ code: 'invalid_time' })
+    await expect(h.service.setReminderTime(ask.id, 'sometime')).rejects.toMatchObject({ code: 'invalid_time' })
+    await h.service.undo(out.drop.id)
+    await expect(h.service.setReminderTime(ask.id, 'tomorrow_9')).rejects.toMatchObject({ code: 'not_a_live_reminder' })
+  })
+
+  it('Done and Snooze on a fired reminder ping', async () => {
+    const h = harness()
+    const out = await h.service.submit(drop('remind me tomorrow at 9am to stretch'))
+    const id = out.drop.id
+    const [ping] = h.feed.insert([{ id: 'fi_' + 'a'.repeat(32), kind: 'ping', threadId: 'fi_' + 'a'.repeat(32), createdAt: new Date().toISOString(), readAt: null, source: 'cos',
+      line: 'Reminder: stretch', links: [{ kind: 'reminder', id, label: 'stretch' }], actions: [{ id: 'snooze_1h', label: 'Snooze 1 hour' }], state: 'live', key: `reminder:${id}:x` }])
+    const snoozed = h.service.reminderAction(ping.id, 'snooze_1h')
+    expect(snoozed.item.state).toBe('done')
+    expect(snoozed.drop.remind).toMatchObject({ at: '2026-11-04T16:00:00.000Z', snoozes: 1 })
+    expect(() => h.service.reminderAction(ping.id, 'launch')).toThrow()
+    expect(() => h.service.reminderAction(out.items[0].id, 'reminder_done')).toThrow()  // not a ping
+    // Done is final: its time can no longer be changed from the receipt.
+    const [ping2] = h.feed.insert([{ id: 'fi_' + 'b'.repeat(32), kind: 'ping', threadId: 'fi_' + 'b'.repeat(32), createdAt: new Date().toISOString(), readAt: null, source: 'cos',
+      line: 'Reminder: stretch', links: [{ kind: 'reminder', id, label: 'stretch' }], actions: [], state: 'live', key: `reminder:${id}:y` }])
+    h.service.reminderAction(ping2.id, 'reminder_done')
+    const receipt = h.feed.list().find(i => i.kind === 'receipt' && i.threadId === id)!
+    await expect(h.service.setReminderTime(receipt.id, 'monday_9')).rejects.toMatchObject({ code: 'not_a_live_reminder' })
   })
 })
