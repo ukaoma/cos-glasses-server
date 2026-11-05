@@ -26,11 +26,13 @@ describe('live meeting capabilities (6.86.0)', () => {
     expect(body.features.liveCues).toBe(body.capabilities.liveCues.available)
     expect(body.capabilities.liveMeeting).toEqual(LIVE_MEETING)
     expect(body.capabilities.titleSteer).toBe(1)                              // 6.99.0: GET/PUT /api/meeting/title-steer exist
+    expect(body.capabilities.dropIt).toMatchObject({ protocol: 1, enabled: expect.any(Boolean) })  // Drop it P1, off by default
   }, 20_000)
   it('/api/models publishes the same values', async () => {
     const body = await (await fetch(`${base}/api/models`)).json() as any
     expect(body.capabilities.liveCues.kinds).toEqual(KINDS)
     expect(body.capabilities.liveMeeting).toEqual(LIVE_MEETING)
     expect(body.capabilities.titleSteer).toBe(1)
+    expect(body.capabilities.dropIt).toMatchObject({ protocol: 1, enabled: expect.any(Boolean) })
   }, 20_000)
 })

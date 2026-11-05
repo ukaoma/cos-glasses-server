@@ -209,6 +209,8 @@ const GOLDEN_MODELS_CAPS = [
   'liveMeeting',
   // Added after 6.87.0, additive: the live title steer (6.99.0), right after liveMeeting.
   'titleSteer',
+  // Added after 6.99.4, additive: Drop it P1 (routes/drops.ts), right after titleSteer.
+  'dropIt',
   'richMedia',
   'localFirstMeetings',
   // Added after 6.87.0, additive: the iPhone microphone capability (6.93.0) and the live Mac voice switch (6.93.0 QA W8).
@@ -480,6 +482,10 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.liveMeeting.provisional.ttlMs',
   '.capabilities.liveMeeting.chunkLevels',
   '.capabilities.titleSteer',
+  '.capabilities.dropIt',
+  '.capabilities.dropIt.protocol',
+  '.capabilities.dropIt.enabled',
+  '.capabilities.dropIt.source',
   '.capabilities.richMedia',
   '.capabilities.richMedia.video',
   '.capabilities.richMedia.maxPromptVisuals',
@@ -606,6 +612,8 @@ const GOLDEN_HEALTH_CAPS_6870 = [
   'liveCues',
   'liveMeeting',
   'titleSteer',
+  // Added after 6.99.4, additive: Drop it P1 (routes/drops.ts), right after titleSteer.
+  'dropIt',
   'transcriptCleanup',
   'richMedia',
   'meetingLifecycle',

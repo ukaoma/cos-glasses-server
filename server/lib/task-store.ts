@@ -853,3 +853,35 @@ export function liveLedgerFor(taskId: string, day: string, paths = taskStorePath
     run.taskId === taskId && run.day === day && (run.status === 'dispatching' || run.status === 'running'),
   )
 }
+
+/**
+ * Drop it (plan section 3): a new Inbox card from a drop, in one locked bridge write that answers the card's id
+ * (`task-capture-drop`, stdin `{ text, dropId }`). `captureTask` answers no id, and Undo needs one. Repeating the
+ * same dropId answers the same card (`created: false`). A bridge without the verb answers
+ * `cos_pipeline_not_configured`, which the caller turns into a plain note.
+ */
+export interface CapturedDropCard { id: string; workIdentity: string; created: boolean }
+export async function captureDropCard(domain: string, text: string, dropId: string): Promise<CapturedDropCard> {
+  if (!isSafeDomainName(domain) || !taskDomains().includes(domain)) throw new TaskRunError(400, 'invalid_domain', 'Unknown task domain')
+  const clean = text.replace(/\s+/g, ' ').trim()
+  if (!clean || clean.length > 2000) throw new TaskRunError(422, 'invalid_task_text', 'Card text must be 1 to 2,000 characters')
+  rejectReservedWorkText(clean)
+  const out = await withLockRetry(() => bridge(['task-capture-drop', domain], JSON.stringify({ text: clean, dropId }))) as Partial<CapturedDropCard> & { ok?: unknown }
+  if (out?.ok !== true || typeof out.id !== 'string' || !/^[a-f0-9]{12}$/.test(out.id) || typeof out.created !== 'boolean'
+    || (out.workIdentity !== undefined && (typeof out.workIdentity !== 'string' || !/^[a-f0-9]{12}$/.test(out.workIdentity)))) {
+    throw new TaskRunError(502, 'capture_unverified', 'The card could not be confirmed. Refresh Work before trying again.')
+  }
+  return { id: out.id, workIdentity: out.workIdentity ?? out.id, created: out.created }
+}
+
+/**
+ * Undo for captureDropCard: archive (`[~]`) the card only while it is untouched (`task-archive-drop`, stdin
+ * `{ dropId, expectedText }`). `touched` means it was edited, checked or moved since: Undo refuses with that reason.
+ * `gone` means the card is no longer there, which Undo treats as done.
+ */
+export async function archiveDropCard(domain: string, id: string, dropId: string, expectedText: string): Promise<'archived' | 'touched' | 'gone'> {
+  if (!isSafeDomainName(domain) || !/^[a-f0-9]{12}$/.test(id)) throw new TaskRunError(422, 'invalid_task_id', 'Use the exact card id')
+  const out = await withLockRetry(() => bridge(['task-archive-drop', domain, id], JSON.stringify({ dropId, expectedText: expectedText.replace(/\s+/g, ' ').trim() }))) as { ok?: unknown; result?: unknown }
+  if (out?.ok === true && (out.result === 'archived' || out.result === 'touched' || out.result === 'gone')) return out.result
+  throw new TaskRunError(502, 'archive_unverified', 'The card could not be confirmed. Refresh Work before trying again.')
+}

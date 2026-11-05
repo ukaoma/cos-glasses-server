@@ -169,6 +169,11 @@ import { createWorkOrchestratorRouter } from './routes/work-orchestrator.js'
 import { createWorkLensRoundsRouter } from './routes/work-lens-rounds.js'
 import { startWorkOrchestrator } from './lib/work-orchestrator/runtime.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
+import { createDropsRouter, lazyDropService, openDropService } from './routes/drops.js'
+import { createDropRouter, sharedDropJevClient, dropDailyCap, dropRouterEnabled } from './lib/drop-router.js'
+import { createBridgeDropWriters } from './lib/drop-destinations.js'
+import { dropItEnabled } from './lib/drop-settings.js'
+import { serverTimezone } from './lib/morning-brief-config.js'
 import { isReadOnlyApiPost } from './lib/work-search.js'
 import { isMacVoiceNamingBatchPost } from './lib/mac-voice-naming-batch.js'
 import { dataPath } from './lib/data-dir.js'
@@ -888,6 +893,25 @@ app.use('/api', createJevRouter(workReviewRuntime ? { review: async id => workRe
 app.use('/api', createDecisionProviderRouter())
 app.use('/api', createSubqKeyRouter())
 app.use('/api', createWorkSearchRouter())
+// Drop it P1 (6.100 candidate): the pinned COS chat's drops, receipts and History. Off by default (COS_DROP_IT or
+// PUT /api/drops/settings); its stores open on first use, so an install with it off writes nothing. The router is one
+// Jev request per drop with its own cap (COS_DROP_DAILY_TOKENS), ledger, breaker and switch (COS_DROP_ROUTER).
+app.use('/api', createDropsRouter({
+  enabled: () => dropItEnabled(),
+  service: lazyDropService(() => openDropService(part => dataPath(part), {
+    router: createDropRouter(),
+    writers: createBridgeDropWriters(),
+    timezone: () => serverTimezone(),
+    askLookup: async (clientJobId, generation) => {
+      const job = await queryJobCoordinator.getByClientGeneration(clientJobId, generation)
+      return job ? { status: job.status, response: job.response, sessionId: job.sessionId } : undefined
+    },
+  })),
+  routerStatus: () => {
+    const status = sharedDropJevClient().status()
+    return { on: dropRouterEnabled(), dailyCap: dropDailyCap(), usedToday: status.usedToday, breakerOpenUntil: status.breakerOpenUntil }
+  },
+}))
 // Find a session by meaning (Control 0.5.363): consent per provider, its own ledgers and breakers (lib/session-find.ts).
 app.use('/api', createSessionFindRouter())
 app.use('/api', createWorkChatRouter())
