@@ -514,7 +514,8 @@
     api('/api/inbox/action', { method: 'POST', body: body }).then(function (ans) {
       if (ans && ans.items) mergeItems(ans.items);
       if (ans && ans.item) mergeItems([ans.item]);
-      if (action === 'dismiss' || P2_POST[action]) item.state = 'done';
+      // A reminder action answers the finished item itself (merged above); dismiss answers counts only.
+      if (action === 'dismiss') item.state = 'done';
       if (ans && ans.next && ans.next.kind === 'ask' && C.caps && C.caps.jobs) submitAsk(ans.next.prompt, ans.drop.id);
       paintFeed(false); refreshSummary();
     }, function (err) { W.toast((err && err.message) || 'That did not go through.'); });
