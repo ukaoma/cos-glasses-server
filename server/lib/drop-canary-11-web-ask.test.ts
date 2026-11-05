@@ -204,5 +204,16 @@ describe('the web Ask sheet (app.js askCos) is admitted on a Mac with a message 
 
     const old = await post({ prompt: 'Web Ask test: reply OK', clientJobId: 'web_' + Date.now() })
     expect(old.status).toBeGreaterThanOrEqual(400)
+
+    // 6.99.11: the pinned chat's own Ask (panes/cos-chat.js submitAsk), which the Ask button and P2's "Prep me" use,
+    // read out of the pane and sent with the same era active.
+    const chat = readFileSync(new URL('../web-control/panes/cos-chat.js', import.meta.url), 'utf8')
+    const askFn = chat.slice(chat.indexOf('function submitAsk('), chat.indexOf('var admit ='))
+    const chatBody = /var body = (\{[^;]*\});/.exec(askFn)?.[1]
+    expect(chatBody, 'submitAsk builds its request as `var body = {...};`').toBeTruthy()
+    // eslint-disable-next-line no-new-func
+    const chatSent = new Function('a', 'text', `return ${chatBody};`)({ cid: globalThis.crypto.randomUUID() }, 'Prep me for Pete 1:1') as Record<string, unknown>
+    const chatOk = await post(chatSent)
+    expect(chatOk.status, JSON.stringify(chatOk.body)).toBeLessThan(300)
   })
 })
