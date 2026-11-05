@@ -1739,6 +1739,17 @@
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
   function askCos(prompt, statusEl) {
+    // 6.99.12: "it shows Sent but never shows up" (Miles, 11/04). With Ask COS in Messages, the sheet hands its words to
+    // that composer (panes/cos-chat.js submitAsk), so the answer streams on screen and lands as a numbered turn. The
+    // request below is the fallback for a page without it; it resolves to the Messages route to open.
+    var chat = window.COSWeb && window.COSWeb.cosChat;
+    if (chat && chat.askFromSheet) {
+      setStatus(statusEl, 'Sending…');
+      return chat.askFromSheet(prompt).then(function (where) { setStatus(statusEl, ''); return where; }, function (err) {
+        setStatus(statusEl, err.message, true);
+        throw err;
+      });
+    }
     setStatus(statusEl, 'Sent. COS is answering.');
     var body = { clientJobId: webJobId(), generation: 1, query: prompt, source: 'web', activityToolMode: 'status' };
     return api('/api/query-jobs', { method: 'POST', body: body, timeoutMs: 30000 }).then(function () {
@@ -2307,7 +2318,7 @@
     }
     if (action === 'expand-turn') { var tr = document.querySelector('.turn[data-turn="' + t.getAttribute('data-turn') + '"]'); if (tr) tr.classList.remove('clamped'); t.remove(); return; }
     var q = $('ask-q').value.trim();
-    if (action === 'ask-cos' && q) { askCos(q, $('ask-status')).then(function () { closeAsk(); go('messages'); }).catch(function () {}); return; }
+    if (action === 'ask-cos' && q) { askCos(q, $('ask-status')).then(function (where) { closeAsk(); go('messages', Array.isArray(where) ? where : []); }).catch(function () {}); return; }
     if (action === 'ask-meaning' && q) { $('ask-hits').innerHTML = skeletonRows(3); findByMeaning(q).then(function (html) { var el = $('ask-hits'); if (el) el.innerHTML = html; }); return; }
     if (action === 'ask-work' && q) {
       closeAsk(); go('work');

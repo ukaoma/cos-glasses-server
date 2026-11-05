@@ -3,10 +3,11 @@
    Recent is the server's rolling window of the newest turns (GET /api/sessions/today/all-messages),
    newest first. Archive is the day list, its search, a day's chats and one chat's transcript.
    Routes: #/messages, #/messages/archive, #/messages/m/<no>, #/messages/m/<no>/a/<attachment>,
-   #/messages/day/<date>, #/messages/day/<date>/<chat index>, and with Drop it on (6.99.10) #/messages/cos, the pinned
-   COS chat (panes/cos-chat.js). With Drop it on, the list and the chat share a split: the list on the left and the chat
-   on the right from 860 px, one at a time below it. The list rebuilds in its own column, so the chat's composer is
-   never rebuilt while it is in use. */
+   #/messages/day/<date>, #/messages/day/<date>/<chat index>, and with Drop it on (6.99.10) or durable query jobs on
+   (6.99.12) #/messages/cos, the pinned COS chat or Ask COS (panes/cos-chat.js). Then the list and the chat share a split:
+   the list on the left and the chat on the right from 860 px, one at a time below it. The list rebuilds in its own
+   column, so the chat's composer is never rebuilt while it is in use. 6.99.12: the message reader ends with Reply, the
+   same composer, sending that turn's sessionId. */
 (function () {
   'use strict';
   var W = window.COSWeb;
@@ -474,14 +475,20 @@
         return;
       }
     }
+    // A refresh of Recent (a web Ask landed) must not rebuild the reader under a half-written reply.
+    var sig = String(t.text || '').length + ':' + atts(t).length + ':' + (cos && cos.askOn() ? 1 : 0);
+    var shown = pane.querySelector('[data-reader-key]');
+    if (shown && shown.getAttribute('data-reader-key') === key && shown.getAttribute('data-sig') === sig) { W.setCrumb(title); return; }
     W.setCrumb(title);
     var source = t.source === 'live' ? 'live' : t.source === 'archive' ? 'archive' : 'COS Glasses';
     var meta = [timeLabel(t.timestamp), source, modelOf(t), t.origin || ''].filter(Boolean).join(' · ');
-    pane.innerHTML = '<div class="cx" data-tint="messages"><div class="cx-detail-head"><div><h2 class="cx-detail-title">' + esc(title) + '</h2>' +
+    var reply = cos ? cos.replyHtml(key, t) : '';
+    pane.innerHTML = '<div class="cx" data-tint="messages" data-reader-key="' + esc(key) + '" data-sig="' + esc(sig) + '"><div class="cx-detail-head"><div><h2 class="cx-detail-title">' + esc(title) + '</h2>' +
       '<p class="cx-detail-meta">' + esc(meta) + '</p></div>' +
       '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-msg="copy-turn" data-key="' + esc(key) + '">Copy turn</button></div></div>' +
-      turnCards(t, key) + '</div>';
+      turnCards(t, key) + reply + '</div>';
     pane.querySelectorAll('[data-hl]').forEach(function (el) { highlightIn(el, S.q.trim()); });
+    if (reply) cos.mountReply(key);
   }
 
   // ── archive day and chat ──────────────────────────────
@@ -658,6 +665,9 @@
     if (e.target.matches('[data-msg="only"]')) { S.onlyMatches = e.target.checked; renderDay(current[1]); }
   });
   pane.addEventListener('keydown', function (e) { if (cos) cos.onKey(e); });
+  // 6.99.12: paste a photo or file into a composer, or drop files on it.
+  pane.addEventListener('paste', function (e) { if (cos) cos.onPaste(e); });
+  ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (type) { pane.addEventListener(type, function (e) { if (cos) cos.onDrag(e); }); });
   pane.addEventListener('input', function (e) {
     if (cos) cos.onInput(e);
     if (e.target.id === 'msg-q') {
@@ -680,7 +690,7 @@
   });
 
   if (cos) {
-    // Drop it turned on or off (a health read): Messages redraws as it now should.
+    // Drop it or Ask turned on or off (a health read): Messages redraws as it now should.
     cos.setOnChange(function () { if (W.parseRoute().pane === 'messages') load(current); });
     // A web Ask landed: its turn is now in Recent.
     cos.setOnAnswered(function () { loadRecent(true); });
