@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { InboxFeedStore, type DropLink, type DropRecord } from './drop-store.js'
-import { cardState, cardWriteResolutions, followedDrops, pollResolutions, quoteOf, resolutionCandidate, resolutionKey, sessionTurnResolutions, RESOLUTION_REPORT_CHARS, type CardSnapshot, type HandoffSnapshot } from './drop-resolution.js'
+import { cardState, cardWriteResolutions, sameHeldSession, sessionTurnOutcome, followedDrops, pollResolutions, quoteOf, resolutionCandidate, resolutionKey, sessionTurnResolutions, RESOLUTION_REPORT_CHARS, type CardSnapshot, type HandoffSnapshot } from './drop-resolution.js'
 import { PingEngine, PingStateStore, type PingBanner } from './ping-engine.js'
 import { feedSink, toFeedItem } from './ping-feed-sink.js'
 import { isWaiting } from './drop-service.js'
@@ -73,6 +73,25 @@ describe('resolution rules', () => {
     expect(isWaiting(item)).toBe(true)
     expect(isWaiting({ ...item, state: 'done' })).toBe(false)
     expect(isWaiting(toFeedItem(c, 0))).toBe(false)
+  })
+
+  it('reads hook events as turn outcomes and matches held session ids', () => {
+    expect(sessionTurnOutcome('Stop', false)).toBe('replied')
+    expect(sessionTurnOutcome('StopFailure', false)).toBe('failed')
+    expect(sessionTurnOutcome('Interrupt', false)).toBe('failed')
+    expect(sessionTurnOutcome('Stop', true)).toBeNull()  // a subagent's Stop is not the session's reply
+    for (const e of ['UserPromptSubmit', 'PreToolUse', 'SessionStart', 'SubagentStop']) expect(sessionTurnOutcome(e, false)).toBeNull()
+    expect(sameHeldSession('codex:ABC-123', 'abc-123')).toBe(true)
+    expect(sameHeldSession('abc-123', 'abc-123')).toBe(true)
+    expect(sameHeldSession('codex:abc-1234', 'abc-123')).toBe(false)
+    expect(sameHeldSession('codex:xabc-123', 'abc-123')).toBe(false)
+  })
+
+  it('only a turn that ended after the send answers it', () => {
+    const sentAt = local('2026-11-04', '12:00')
+    const d = cardDrop({ dest: 'session', links: [{ kind: 'session', id: 'claude:abc', label: 'Deck' }], hold: { sessionId: 'claude:abc', label: 'Deck', sentAt: new Date(sentAt).toISOString() } })
+    expect(sessionTurnResolutions([d], 'abc', 'replied', sentAt + 60_000, sentAt - 1)).toEqual([])
+    expect(sessionTurnResolutions([d], 'abc', 'replied', sentAt + 60_000, sentAt + 30_000).map(c => c.line)).toEqual(['Deck replied.'])
   })
 
   it('a session follow-up posts replied or failed, only once it was sent', () => {

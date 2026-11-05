@@ -138,12 +138,30 @@ export function cardWriteResolutions(drops: readonly DropRecord[], domain: strin
     .filter(c => !c.key.includes(':handoff:'))
 }
 
-/** The turn after Send to session ended (SessionSignalStore): replied or failed, for the drops held for it. */
-export function sessionTurnResolutions(drops: readonly DropRecord[], sessionId: string, outcome: SessionState, nowMs: number): PingCandidate[] {
+/** A session hook event as a turn outcome: Stop is a reply; StopFailure and Interrupt stopped it. A subagent's never counts. */
+export function sessionTurnOutcome(event: string, child: boolean): SessionState | null {
+  if (child) return null
+  if (event === 'Stop') return 'replied'
+  if (event === 'StopFailure' || event === 'Interrupt') return 'failed'
+  return null
+}
+
+/** A held drop names its session as `provider:native` or the bare native id; the hooks report the native id. */
+export function sameHeldSession(held: string, hookSessionId: string): boolean {
+  const a = held.toLowerCase(), b = hookSessionId.toLowerCase()
+  return a === b || a.endsWith(`:${b}`)
+}
+
+/**
+ * The turn after Send to session ended (SessionSignalStore): replied or failed, for the drops held for it. Only a turn
+ * that ended after the drop was sent counts, so the end of the turn already running at Send is never its answer.
+ */
+export function sessionTurnResolutions(drops: readonly DropRecord[], sessionId: string, outcome: SessionState, nowMs: number, endedAtMs = nowMs): PingCandidate[] {
   const out: PingCandidate[] = []
   for (const d of drops) {
-    if (d.state === 'undone' || d.dest !== 'session' || !d.hold?.sentAt || d.hold.sessionId !== sessionId) continue
-    const link: DropLink = d.links.find(l => l.kind === 'session' && l.id === sessionId) ?? { kind: 'session', id: sessionId, label: d.hold.label }
+    if (d.state === 'undone' || d.dest !== 'session' || !d.hold?.sentAt || !sameHeldSession(d.hold.sessionId, sessionId)) continue
+    if (!(Date.parse(d.hold.sentAt) < endedAtMs)) continue
+    const link: DropLink = d.links.find(l => l.kind === 'session' && sameHeldSession(l.id, sessionId)) ?? { kind: 'session', id: d.hold.sessionId, label: d.hold.label }
     out.push(resolutionCandidate(d, link, outcome, nowMs))
   }
   return out

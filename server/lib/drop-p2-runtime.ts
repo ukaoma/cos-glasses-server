@@ -23,7 +23,7 @@ import { feedSink } from './ping-feed-sink.js'
 import { createReminderScheduler, pendingReminders, applyReminderAction, type ReminderAction, type ReminderStore } from './reminder-scheduler.js'
 import { cardWriteResolutions, pollResolutions, RESOLUTION_POLL_MS, sessionTurnResolutions, type CardSnapshot, type HandoffSnapshot, type SessionState, type ThreadSnapshot } from './drop-resolution.js'
 
-export const P2_TIMING = { pingTickMs: 60_000, reminderTickMs: 30_000, resolutionPollMs: RESOLUTION_POLL_MS, outbox: 50 } as const
+export const P2_TIMING = { pingTickMs: 60_000, reminderTickMs: 30_000, resolutionPollMs: RESOLUTION_POLL_MS, outbox: 50, kickDelayMs: 3_000 } as const
 /** The COS caches are a few hundred KB; anything far larger is not the cache this reads. */
 const CACHE_MAX_BYTES = 8 * 1024 * 1024
 
@@ -50,6 +50,8 @@ export interface DropP2Deps {
   emitLens?: (event: { type: 'cos_ping'; data: Record<string, unknown> }) => void
   enabled?: () => readonly PingSource[]
   bootId?: string
+  /** True while the server drains for an update or restart: every loop skips its turn (a reminder fires next tick, late). */
+  paused?: () => boolean
 }
 
 export interface OutboxBanner extends PingBanner { seq: number; at: string }
@@ -116,7 +118,13 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     },
   })
 
-  const reminders = createReminderScheduler({ store: deps.drops, deliver: c => engine.push(c), now, intervalMs: P2_TIMING.reminderTickMs })
+  const isPaused = () => { try { return deps.paused?.() === true } catch { return true } }
+  const reminderStore = {
+    // While paused, the scheduler sees nothing due, so nothing is written during a drain.
+    select: (m: Parameters<typeof deps.drops.select>[0]) => isPaused() ? [] : deps.drops.select(m),
+    update: deps.drops.update.bind(deps.drops),
+  }
+  const reminders = createReminderScheduler({ store: reminderStore, deliver: c => engine.push(c), now, intervalMs: P2_TIMING.reminderTickMs })
 
   async function resolutionSnapshot() {
     const snap: { cards?: Map<string, CardSnapshot>; handoffs?: Map<string, HandoffSnapshot[]>; threads?: Map<string, ThreadSnapshot> } = {}
@@ -143,7 +151,7 @@ export function createDropP2Runtime(deps: DropP2Deps) {
 
   let polling = false, ticking = false
   async function pollOnce(): Promise<number> {
-    if (polling) return 0
+    if (polling || isPaused()) return 0
     polling = true
     try {
       const drops = deps.drops.list()
@@ -153,12 +161,13 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     } catch { return 0 } finally { polling = false }
   }
   async function pingOnce() {
-    if (ticking) return
+    if (ticking || isPaused()) return
     ticking = true
     try { await engine.tick() } catch { /* never throws by contract; belt and braces */ } finally { ticking = false }
   }
 
   const timers: Array<ReturnType<typeof setInterval>> = []
+  let kickTimer: ReturnType<typeof setTimeout> | null = null
   return {
     bootId,
     engine,
@@ -170,7 +179,16 @@ export function createDropP2Runtime(deps: DropP2Deps) {
         const t = setInterval(() => { void fn() }, ms); t.unref?.(); timers.push(t)
       }
     },
-    stop() { reminders.stop(); for (const t of timers.splice(0)) clearInterval(t) },
+    stop() { reminders.stop(); for (const t of timers.splice(0)) clearInterval(t); if (kickTimer) clearTimeout(kickTimer); kickTimer = null },
+    /**
+     * A card was written through this server (work-board, tasks): poll the board shortly, instead of within 2 minutes.
+     * Several writes in a row make one poll. The write invalidated the shared board reader, so the poll sees it.
+     */
+    kickPoll() {
+      if (kickTimer) return
+      kickTimer = setTimeout(() => { kickTimer = null; void pollOnce() }, P2_TIMING.kickDelayMs)
+      kickTimer.unref?.()
+    },
     tickReminders: () => reminders.tick(),
     pingOnce,
     pollOnce,
@@ -178,8 +196,14 @@ export function createDropP2Runtime(deps: DropP2Deps) {
     onCardWrite(domain: string, workIdentity: string, row: CardSnapshot | null) {
       try { const c = cardWriteResolutions(deps.drops.list(), domain, workIdentity, row, now()); if (c.length) engine.push(c) } catch { /* the poll will see it */ }
     },
-    onSessionTurn(sessionId: string, outcome: SessionState) {
-      try { const c = sessionTurnResolutions(deps.drops.list(), sessionId, outcome, now()); if (c.length) engine.push(c) } catch { /* nothing else watches a held session; it stays open in History */ }
+    onSessionTurn(sessionId: string, outcome: SessionState, endedAtMs?: number) {
+      // Every session's every Stop lands here: copy only the drops held for a session and already sent.
+      try {
+        const held = deps.drops.select(d => d.state !== 'undone' && d.dest === 'session' && !!d.hold?.sentAt)
+        if (!held.length) return
+        const c = sessionTurnResolutions(held, sessionId, outcome, now(), endedAtMs ?? now())
+        if (c.length) engine.push(c)
+      } catch { /* nothing else watches a held session; it stays open in History */ }
     },
     pushAgent: (ev: Parameters<PingEngine['pushAgent']>[0]) => engine.pushAgent(ev),
     push: (c: PingCandidate[]) => engine.push(c),

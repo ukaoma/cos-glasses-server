@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,7 +13,7 @@ const local = (day: string, hhmm: string) => { const [h, m] = hhmm.split(':').ma
 const dirs: string[] = []
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
 
-function rig(start: number) {
+function rig(start: number, opts: { paused?: () => boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'cos-p2-')); dirs.push(dir)
   const scripts = join(dir, 'scripts'); mkdirSync(scripts)
   const clock = { now: start }
@@ -21,12 +21,12 @@ function rig(start: number) {
   const feed = new InboxFeedStore(join(dir, 'inbox'), () => new Date(clock.now))
   const pingState = new PingStateStore(join(dir, 'pings'))
   const lens: Array<{ type: string; data: Record<string, unknown> }> = []
-  const boardRef: { rows: BoardRowLite[] | null } = { rows: [] }
+  const boardRef: { rows: BoardRowLite[] | null; reads: number } = { rows: [], reads: 0 }
   const runtime = createDropP2Runtime({
     drops, feed, pingState, timezone: () => TZ, now: () => clock.now, scriptsDir: scripts,
     nextEvent: async () => null, intakeOpen: () => [],
-    board: async () => { if (!boardRef.rows) throw new Error('board unread'); return boardRef.rows },
-    journal: () => [], emitLens: e => lens.push(e), bootId: 'boot-a',
+    board: async () => { boardRef.reads++; if (!boardRef.rows) throw new Error('board unread'); return boardRef.rows },
+    journal: () => [], emitLens: e => lens.push(e), bootId: 'boot-a', paused: opts.paused,
   })
   const close = () => { runtime.stop(); drops.close(); feed.close(); pingState.close() }
   return { dir, scripts, clock, drops, feed, runtime, lens, boardRef, close }
@@ -117,6 +117,60 @@ describe('Drop it P2 runtime, end to end on fixtures', () => {
       { id: 'h1', status: 'completed', workID: 'task:quilt:wid-1', result: 'Pushed.' },
       { id: 'h2', status: 'running', workID: null, result: null },
     ])
+  })
+
+  it('while the server drains, no loop writes: a reminder waits and fires on the next tick, late', async () => {
+    const drain = { on: true }
+    const r = rig(local('2026-11-04', '10:00'), { paused: () => drain.on })
+    r.drops.insert(baseDrop('remind me at 10am to call Pete', local('2026-11-04', '09:00'), {
+      dest: 'reminder', kind: 'reminder', links: [], remind: { at: new Date(local('2026-11-04', '10:00')).toISOString(), tz: TZ, firedAt: null, ackAt: null, snoozes: 0 },
+    }))
+    r.drops.insert(baseDrop('send Gina the JCK numbers', local('2026-11-04', '09:00'), { dest: 'new_card', kind: 'task', links: [{ kind: 'card', id: 'wid-1', label: 'JCK numbers', domain: 'quilt' }] }))
+    r.boardRef.rows = [{ id: 'abc123def456', domain: 'quilt', workIdentity: 'wid-1', workStage: 'complete', checked: true }]
+    writeFileSync(join(r.scripts, '.threads_cache.json'), JSON.stringify({ threads: [{ id: 'thr-1', name: 'JCK follow-through', is_stale: true, is_resolved: false, last_seen: '2026-10-21T12:00:00Z' }] }))
+    expect(r.runtime.tickReminders().fired).toBe(0)
+    expect(await r.runtime.pollOnce()).toBe(0)
+    await r.runtime.pingOnce()
+    expect(r.feed.list().filter(i => i.kind !== 'drop')).toEqual([])
+    drain.on = false
+    r.clock.now = local('2026-11-04', '10:20')
+    const fired = r.runtime.tickReminders()
+    expect(fired).toEqual({ fired: 1, late: 1 })
+    expect(await r.runtime.pollOnce()).toBe(1)
+    r.close()
+  })
+
+  it('a card write kicks one poll a few seconds later, not one per write', async () => {
+    const r = rig(local('2026-11-04', '10:00'))
+    r.drops.insert(baseDrop('x', local('2026-11-04', '09:00'), { dest: 'new_card', kind: 'task', links: [{ kind: 'card', id: 'wid-9', label: 'X', domain: 'quilt' }] }))
+    r.boardRef.rows = [{ id: 'abc123def456', domain: 'quilt', workIdentity: 'wid-9', workStage: 'qa' }]
+    vi.useFakeTimers()
+    try {
+      r.runtime.kickPoll(); r.runtime.kickPoll(); r.runtime.kickPoll()
+      await vi.advanceTimersByTimeAsync(P2_TIMING.kickDelayMs - 100)
+      expect(r.boardRef.reads).toBe(0)
+      await vi.advanceTimersByTimeAsync(200)
+    } finally { vi.useRealTimers() }
+    await new Promise(res => setTimeout(res, 50))
+    expect(r.boardRef.reads).toBe(1)
+    expect(r.feed.list().filter(i => i.kind === 'followup').map(i => i.line)).toEqual(['X is ready for your review.'])
+    r.close()
+  })
+
+  it('a session turn that ends after Send to session posts one follow-up under the drop', () => {
+    const r = rig(local('2026-11-04', '10:00'))
+    const sent = local('2026-11-04', '09:30')
+    const d = r.drops.insert(baseDrop('ask Codex to finish the HubDB push', local('2026-11-04', '09:00'), {
+      dest: 'session', kind: 'task', state: 'held', links: [{ kind: 'session', id: 'codex:abc-123', label: 'HubDB push' }],
+      hold: { sessionId: 'codex:abc-123', label: 'HubDB push', sentAt: new Date(sent).toISOString() },
+    })).drop
+    r.runtime.onSessionTurn('abc-123', 'replied', sent - 1_000)  // the turn running at Send: not its answer
+    r.runtime.onSessionTurn('other', 'replied', sent + 60_000)
+    expect(r.feed.list().filter(i => i.kind === 'followup')).toEqual([])
+    r.runtime.onSessionTurn('abc-123', 'replied', sent + 60_000)
+    r.runtime.onSessionTurn('abc-123', 'replied', sent + 90_000)  // a later turn: same key, no second post
+    expect(r.feed.list().filter(i => i.kind === 'followup').map(i => [i.threadId, i.line])).toEqual([[d.id, 'HubDB push replied.']])
+    r.close()
   })
 
   it('the outbox keeps the last 50 banners', () => {

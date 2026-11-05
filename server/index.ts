@@ -178,6 +178,7 @@ import { createYourMoveCounter } from './lib/your-move-count.js'
 import { readWorkJournal } from './lib/work-activity.js'
 import { createDropP2Boot } from './lib/drop-p2-boot.js'
 import { createDropP2Runtime, journalReceiptsLite } from './lib/drop-p2-runtime.js'
+import { sessionTurnOutcome } from './lib/drop-resolution.js'
 import { DropHistorySearcher } from './lib/drop-history-search.js'
 import { emitDisplay } from './lib/display-bus.js'
 import { COS_SCRIPTS_DIR } from './lib/python-bridge.js'
@@ -888,6 +889,12 @@ app.use('/api', createWorkReviewsRouter(workReviewRuntime))
 const workHandoffRequestStore = createOptionalWorkHandoffRequestStore(() => new WorkHandoffRequestStore(dataPath('work-handoff-requests')))
 // One bounded board read (5 s) shared by the glasses' Work glances and the request inbox; GET /api/work-board primes it.
 const workBoardReader = createWorkBoardReader(() => listBoard())
+// Drop it P2: a card written through this server kicks the resolution poll (a few seconds, one poll per burst) instead
+// of waiting up to 2 minutes. Mounted before the Work and tasks routers so it sees their answers; it never changes them.
+app.use(['/api/work-board', '/api/tasks'], (req, res, next) => {
+  if (req.method !== 'GET') res.on('finish', () => { if (res.statusCode < 300) dropP2.runtime()?.kickPoll() })
+  next()
+})
 app.use('/api', createWorkBoardRouter({ readBoard: workBoardReader, requests: () => handoffRequestCapabilities(workHandoffRequestStore, Date.now()) }))
 app.use('/api', createWorkHandoffRequestsRouter({ store: workHandoffRequestStore, readBoard: workBoardReader }))
 // Work intake (6.57.0): meeting-derived suggestions, asks and review items. Optional: a bad journal never blocks boot.
@@ -928,7 +935,16 @@ const dropP2 = createDropP2Boot({
     board: () => workBoardReader.read(60_000, 5_000),
     journal: () => { const j = readWorkJournal(); return j.available ? journalReceiptsLite(j.receipts) : undefined },
     emitLens: event => { emitDisplay(event) },
+    // Quiet while the server drains for an update or restart, as the morning brief is.
+    paused: () => gracefulShutdownStarted || !maintenanceAdmissionsOpen(),
   }),
+})
+// The turn after Send to session ended: its held drop gets one follow-up (replied, or stopped). Never throws.
+sessionSignalStore.subscribe((signal, env, child) => {
+  try {
+    const outcome = sessionTurnOutcome(env.event, child)
+    if (outcome) dropP2.runtime()?.onSessionTurn(signal.sessionId, outcome, env.ts)
+  } catch { /* a follow-up is never worth breaking another subscriber */ }
 })
 const dropSearcher = new DropHistorySearcher(sharedDropJevClient())
 app.use('/api', createDropsRouter({
