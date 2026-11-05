@@ -7,6 +7,7 @@ import { InboxFeedStore, type DropLink, type DropRecord } from './drop-store.js'
 import { cardState, cardWriteResolutions, followedDrops, pollResolutions, quoteOf, resolutionCandidate, resolutionKey, sessionTurnResolutions, RESOLUTION_REPORT_CHARS, type CardSnapshot, type HandoffSnapshot } from './drop-resolution.js'
 import { PingEngine, PingStateStore, type PingBanner } from './ping-engine.js'
 import { feedSink, toFeedItem } from './ping-feed-sink.js'
+import { isWaiting } from './drop-service.js'
 import { taskInstant } from './morning-brief-schedule.js'
 
 const TZ = 'America/Chicago'
@@ -65,6 +66,13 @@ describe('resolution rules', () => {
     expect(c).toMatchObject({ source: 'resolution', title: 'Re: send Gina the JCK numbers', line: 'Done: JCK numbers for Gina moved to Complete.', threadId: d.id })
     expect(quoteOf({ text: 'y'.repeat(200) }).length).toBeLessThanOrEqual(84)
     expect(toFeedItem(c, 0)).toMatchObject({ kind: 'followup', threadId: d.id, source: 'cos', readAt: null, state: 'live', key: c.key })
+    expect(toFeedItem(c, 0)).not.toHaveProperty('needsReply')
+    const qa = resolutionCandidate(d, CARD, 'qa', 0)
+    const item = toFeedItem(qa, 0)
+    expect(item.needsReply).toBe(true)
+    expect(isWaiting(item)).toBe(true)
+    expect(isWaiting({ ...item, state: 'done' })).toBe(false)
+    expect(isWaiting(toFeedItem(c, 0))).toBe(false)
   })
 
   it('a session follow-up posts replied or failed, only once it was sent', () => {

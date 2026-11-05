@@ -20,6 +20,8 @@ export function toFeedItem(c: PingCandidate, nowMs: number): FeedItem {
     createdAt: new Date(nowMs).toISOString(), readAt: null, source: 'cos',
     ...(c.title ? { title: clip(c.title, 200) } : {}),
     line: c.line.slice(0, 2_000), links: c.links.slice(0, 12) as DropLink[], actions: c.actions.slice(0, 6), state: 'live', key: c.key,
+    // Counts toward "waiting on you" (drop-service isWaiting) until dismissed, answered or done.
+    ...(c.needsReply === true ? { needsReply: true } : {}),
   }
 }
 
