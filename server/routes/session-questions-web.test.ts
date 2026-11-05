@@ -28,7 +28,7 @@ afterEach(async () => {
 interface Harness { base: string; host: string; broker: PermissionBroker; cookie: string }
 
 /** `web: false` leaves the cookie check out of the questions router, as 6.99.11 and earlier mounted it. */
-async function start(opts: { web?: boolean } = {}): Promise<Harness> {
+async function start(opts: { web?: boolean; gate?: boolean } = {}): Promise<Harness> {
   __resetClientLivenessForTests()
   const store = new SessionSignalStore({ isCosSpawnedPid: () => false })
   const broker = new PermissionBroker({
@@ -40,7 +40,7 @@ async function start(opts: { web?: boolean } = {}): Promise<Harness> {
   wirePermissionBrokerToSignals(broker, store)
   const app = express()
   app.use(createPermissionBrokerHookRouter({ hookToken: () => HOOK_TOKEN, broker }))
-  app.use('/api', requireApiToken(API_TOKEN))
+  if (opts.gate !== false) app.use('/api', requireApiToken(API_TOKEN))
   app.use(express.json({ limit: '10mb' }))
   app.use('/api', createSessionQuestionsRouter({
     broker,
@@ -108,6 +108,18 @@ describe('GET /api/session-questions with the COS Control Web session (6.99.12)'
       expect(r.status, JSON.stringify(Object.keys(headers))).toBe(401)
     }
     expect(lastQuestionsPollAt()).toBeNull()
+  })
+
+  it('with no /api gate in front, the router itself refuses a forged, stale or missing session and the hook token', async () => {
+    const h = await start({ gate: false })
+    const forged = `${WEB_SESSION_COOKIE_NAME}=${mintWebSessionCookieValue('not-the-token').value}`
+    const expired = `${WEB_SESSION_COOKIE_NAME}=${mintWebSessionCookieValue(API_TOKEN, Date.now() - 10 * 24 * 3_600_000).value}`
+    for (const headers of [{ cookie: forged }, { cookie: expired }, { 'x-cos-hook-token': HOOK_TOKEN }, { 'x-cos-token': HOOK_TOKEN }, {}] as Array<Record<string, string>>) {
+      expect((await list(h, headers, 'web')).status, JSON.stringify(Object.keys(headers))).toBe(401)
+    }
+    expect(lastQuestionsPollAt()).toBeNull()
+    expect((await list(h, browser(h), 'web')).status).toBe(200)
+    expect(lastQuestionsPollAt()).not.toBeNull()
   })
 
   it('the questions router itself refuses a cookie it was not given a check for (the gate alone is not enough)', async () => {
