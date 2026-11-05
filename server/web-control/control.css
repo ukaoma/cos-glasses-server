@@ -283,6 +283,16 @@
 .cx-set-choice .value { margin-left: auto; color: var(--accent); }
 .cx-set-mac { font-size: 12.5px; color: var(--tertiary); margin: 2px 2px 12px; }
 button.cx-set-row:hover { background: var(--qopen); }
+/* 6.99.11 COS reaching out: compact fields at the end of a Settings row. 16px text keeps iOS Safari from zooming. */
+.cx-set-row .cx-set-num, .cx-set-row .cx-set-time, .cx-set-row .cx-set-day { flex: none; width: auto; min-height: 40px; padding: 8px 10px; }
+.cx-set-row .cx-set-num { width: 84px; text-align: right; font-variant-numeric: tabular-nums; }
+.cx-set-row .cx-set-time { width: 148px; }
+.cx-set-row .cx-set-day { width: 150px; padding-right: 36px; background-position: calc(100% - 20px) 17px, calc(100% - 15px) 17px; }
+.cx-set-row .cx-set-steer { flex: none; width: 46%; min-width: 180px; min-height: 64px; }
+@media (max-width: 599px) {
+  .cx-set-row:has(.cx-set-steer) { flex-wrap: wrap; }
+  .cx-set-row .cx-set-steer { width: 100%; min-width: 0; }
+}
 @media (min-width: 1100px) { .cx-set-name { font-size: 14px; } }
 @media (min-width: 1100px) { .rail-settings[aria-current='page'] { background: var(--rail-active); border: 1px solid var(--panel-border); } }
 

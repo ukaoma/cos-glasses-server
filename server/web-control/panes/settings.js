@@ -21,6 +21,8 @@
     { id: 'dictation', title: 'Dictation', summary: 'Type by voice into any Mac app: shortcuts, sounds, text and AI polish.', mac: ['Dictation', 'Microphone', 'Shortcuts', 'Sounds and audio', 'Text', 'AI polish', 'History'] },
     { id: 'voice', title: 'Transcription and voice', summary: 'The engines and models that turn speech into text on this Mac.', mac: ['Voice setup', 'Models', 'Performance'] },
     { id: 'work', title: 'Work and agents', summary: 'Sessions, Work chat, background jobs, folders and the morning brief.', mac: ['Sessions', 'Work chat', 'Background', 'Folders and notes'] },
+    // 6.99.11 (Drop it P2): shown only when the server has the P2 settings and Drop it is on.
+    { id: 'reach', title: 'COS reaching out', summary: 'What COS tells you about on its own, when it may interrupt, and your reminders.', mac: [], p2: true },
     { id: 'privacy', title: 'Privacy and permissions', summary: 'What COS can use on this Mac. Each permission turns on one feature.', mac: ['Permissions'] },
     { id: 'pet', title: 'Pet', summary: 'The session pet: its character, size and motion.', mac: ['Session pet', 'Characters'] },
     { id: 'system', title: 'System and updates', summary: 'The COS server on this Mac, app updates, and checks when something is off.', mac: ['App updates', 'Troubleshooting'] }
@@ -34,9 +36,9 @@
     Promise.all([
       soft(api('/api/decision-provider')), soft(api('/api/live-cues/v2/settings')), soft(api('/api/morning-brief')),
       soft(api('/api/domains')), soft(api('/api/agent-sessions/fences')), soft(api('/api/meeting-import/fireflies/status')),
-      soft(api('/api/health'))
+      soft(api('/api/health')), soft(api('/api/drops/settings/p2'))
     ]).then(function (r) {
-      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6] };
+      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7] };
       S.state = 'ready';
       render();
     });
@@ -73,9 +75,85 @@
       '</section>';
   }
 
+  // ── COS reaching out (6.99.11) ──────────────────────────
+  function p2On() {
+    var d = S.data || {}, cap = d.health && d.health.capabilities && d.health.capabilities.dropIt;
+    return !!(cap && cap.enabled && cap.p2Settings && d.p2 && d.p2.settings);
+  }
+  function p2Get(path) { return path.split('.').reduce(function (o, k) { return o == null ? undefined : o[k]; }, S.data.p2.settings); }
+  function p2Switch(path, label) { return toggle(p2Get(path), 'data-set="p2" data-p2="' + path + '"', label); }
+  function p2Num(path, min, max, label) {
+    return '<input type="number" class="field cx-set-num" inputmode="numeric" data-p2="' + path + '" min="' + min + '" max="' + max + '" value="' + esc(String(p2Get(path))) + '" aria-label="' + esc(label) + '">';
+  }
+  function p2Time(path, label) { return '<input type="time" class="field cx-set-time" data-p2="' + path + '" value="' + esc(String(p2Get(path))) + '" aria-label="' + esc(label) + '">'; }
+  function p2Text(path, label, hint) {
+    return '<textarea class="field cx-set-steer" rows="2" maxlength="300" data-p2="' + path + '" aria-label="' + esc(label) + '" placeholder="' + esc(hint) + '">' + esc(String(p2Get(path) || '')) + '</textarea>';
+  }
+  var FULL_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  function reachBody() {
+    var day = p2Get('checkin.weekday');
+    return group('Pings', 'COS posts these in the COS chat. They interrupt you only within these limits.',
+        row('Pings', 'Turn off to keep COS from posting on its own. Reminders and follow-ups on your drops still come.', p2Switch('pings.on', 'Pings')) +
+        row('Interruptions a day', 'On a weekday. Reminders do not count.', p2Num('pings.dailyCap', 0, 20, 'Interruptions a day')) +
+        row('From one kind a day', '', p2Num('pings.perSource', 1, 10, 'Interruptions from one kind a day')) +
+        row('Minutes between', 'The shortest gap between two interruptions.', p2Num('pings.gapMinutes', 0, 240, 'Minutes between interruptions')) +
+        row('Quiet from', 'No interruption and no new work ping from this time.', p2Time('pings.quietStart', 'Quiet from')) +
+        row('Quiet until', 'What waited posts as one item after this.', p2Time('pings.quietEnd', 'Quiet until')) +
+        row('Weekends are quiet', '', p2Switch('pings.weekendsQuiet', 'Weekends are quiet')) +
+        row('First interruption', 'The earliest a weekday interruption comes.', p2Time('pings.firstBanner', 'First interruption'))) +
+      group('What COS pings about', 'Each lands in the COS chat.',
+        row('Meeting prep', '15 minutes before your next meeting.', p2Switch('pings.sources.prep', 'Meeting prep')) +
+        row('Agents finishing', 'When a session you sent work to ends its turn.', p2Switch('pings.sources.agent', 'Agents finishing')) +
+        row('Follow-ups ready', 'When a meeting leaves follow-ups to review.', p2Switch('pings.sources.followups', 'Follow-ups ready')) +
+        row('Threads gone quiet', 'At most once a week for each thread.', p2Switch('pings.sources.stale', 'Threads gone quiet')) +
+        row('Red signals', 'A signal the system marks red.', p2Switch('pings.sources.signals', 'Red signals'))) +
+      group('Steer', 'Words, matched whole. COS reads no more than this into them.',
+        row('Ping me about', 'A ping that mentions one of these may interrupt you, even when its kind stays in the chat.', p2Text('steer.about', 'Ping me about', 'JCK, Rain, pricing')) +
+        row('Leave alone', 'A ping that mentions one of these is not posted. Your reminders and follow-ups always are.', p2Text('steer.leaveAlone', 'Leave alone', 'HubDB, standup'))) +
+      group('Follow-ups on your drops', 'One line under the drop when what it became resolves.',
+        row('Follow-ups', '', p2Switch('followUps.on', 'Follow-ups')) +
+        row('Work cards', 'At QA, complete or archived.', p2Switch('followUps.kinds.card', 'Work cards')) +
+        row('Handoffs', 'Finished, failed or refused.', p2Switch('followUps.kinds.handoff', 'Handoffs')) +
+        row('Sessions', 'Replied or stopped.', p2Switch('followUps.kinds.session', 'Sessions')) +
+        row('Threads', 'Resolved or gone quiet.', p2Switch('followUps.kinds.thread', 'Threads'))) +
+      group('Weekly check-in', 'COS asks what you do not want to forget this week. Your reply becomes a reminder.',
+        row('Check-in', '', p2Switch('checkin.on', 'Weekly check-in')) +
+        row('Day', '', '<select class="field cx-set-day" data-p2="checkin.weekday" aria-label="Check-in day">' + FULL_DAYS.map(function (n, i) {
+          return '<option value="' + i + '"' + (i === day ? ' selected' : '') + '>' + n + '</option>';
+        }).join('') + '</select>') +
+        row('Time', '', p2Time('checkin.time', 'Check-in time'))) +
+      group('Reminders', 'The ones you set by saying remind me.',
+        row('Default time', 'What a day alone means, and the time for Tomorrow and Monday.', p2Time('reminders.defaultTime', 'Default reminder time')) +
+        row('Snooze for', 'Minutes.', p2Num('reminders.snoozeMinutes', 5, 1440, 'Snooze minutes')) +
+        row('Notify me', 'A reminder notifies you at any hour.', p2Switch('reminders.banners', 'Reminder notifications')) +
+        row('Show on the glasses', 'For the glasses build that shows COS on the lens.', p2Switch('reminders.lensPush', 'Show reminders on the glasses'))) +
+      group('Which may interrupt', 'The rest land in the COS chat without a notification.',
+        row('Follow-ups on your drops', '', p2Switch('banners.resolution', 'Follow-ups on your drops may interrupt')) +
+        row('Meeting prep', '', p2Switch('banners.prep', 'Meeting prep may interrupt')) +
+        row('Agents finishing', '', p2Switch('banners.agent', 'Agents finishing may interrupt')) +
+        row('Follow-ups ready', '', p2Switch('banners.followups', 'Follow-ups ready may interrupt')) +
+        row('Threads and signals', '', p2Switch('banners.stale', 'Threads and signals may interrupt')) +
+        row('Weekly check-in', '', p2Switch('banners.checkin', 'Weekly check-in may interrupt')));
+  }
+  /** One field as the partial PUT the server merges: "pings.sources.prep" becomes { pings: { sources: { prep: v } } }. */
+  function p2Patch(path, v) {
+    var keys = path.split('.'), out = {}, at = out;
+    for (var i = 0; i < keys.length - 1; i++) { at[keys[i]] = {}; at = at[keys[i]]; }
+    at[keys[keys.length - 1]] = v;
+    return out;
+  }
+  function p2Save(path, v, undo) {
+    return api('/api/drops/settings/p2', { method: 'PUT', body: p2Patch(path, v) }).then(function (ans) {
+      if (ans && ans.settings) S.data.p2.settings = ans.settings;
+      W.toast('Saved');
+      return ans;
+    }, function (err) { if (undo) undo(); say((err && err.message) || 'That did not save.', true); });
+  }
+
   function categoryBody(cat) {
     var d = S.data || {};
     var out = '';
+    if (cat.id === 'reach') return reachBody();
     if (cat.id === 'ai' && d.dp) {
       var p = d.dp.provider || '';
       var name = function (x) { return x === 'subq' ? 'SubQ' : x === 'jev' ? 'Jev' : x || 'Not set'; };
@@ -135,7 +213,7 @@
         (h.claude ? row('Claude Code', '', value(String(h.claude).replace(/\s*\(.*\)$/, ''))) : '') +
         (h.codex ? row('Codex', '', value(String(h.codex))) : ''));
     }
-    return out + onMac(cat.mac);
+    return out + (cat.mac.length ? onMac(cat.mac) : '');
   }
 
   function render() {
@@ -147,7 +225,7 @@
       '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-set="refresh"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div></header>' +
       browserGroup() +
       (S.state !== 'ready' ? '<div class="cx-list" style="margin-top:18px">' + W.skeletonRows(4) + '</div>' :
-        CATEGORIES.map(function (cat) {
+        CATEGORIES.filter(function (cat) { return !cat.p2 || p2On(); }).map(function (cat) {
           return '<section class="cx-set-cat"><h2 class="cx-col-title">' + esc(cat.title) + '</h2><p class="cx-set-blurb">' + esc(cat.summary) + '</p>' + categoryBody(cat) + '</section>';
         }).join('')) +
       '<p class="status-line" id="settings-status"></p></div>';
@@ -181,12 +259,31 @@
         .then(function () { W.toast(!bon ? 'Morning brief on' : 'Morning brief paused'); }, function (err) { t.setAttribute('aria-checked', String(bon)); say(err.message, true); });
       return;
     }
+    if (act === 'p2') {
+      var path = t.getAttribute('data-p2'), was = t.getAttribute('aria-checked') === 'true';
+      t.setAttribute('aria-checked', String(!was));
+      p2Save(path, !was, function () { t.setAttribute('aria-checked', String(was)); });
+      return;
+    }
     if (act === 'release') {
       if (t.getAttribute('data-armed') !== '1') { t.setAttribute('data-armed', '1'); t.textContent = 'Tap again to release'; return; }
       // The server fails closed without confirm; the second tap is the confirmation.
       api('/api/agent-sessions/fences/release', { method: 'POST', body: { target: t.getAttribute('data-target'), confirm: true } })
         .then(function () { W.toast('Released'); S.data = null; S.state = 'idle'; load(true); }, function (err) { say(err.message, true); });
     }
+  });
+
+  // Number, time, day and steer fields save when they change (a number is clamped by the server, then shown as saved).
+  pane.addEventListener('change', function (e) {
+    var f = e.target && e.target.closest ? e.target.closest('[data-p2]') : null;
+    if (!f || f.getAttribute('data-set') === 'p2' || !S.data || !S.data.p2) return;
+    var path = f.getAttribute('data-p2'), raw = f.value;
+    var v = f.type === 'number' || f.tagName === 'SELECT' ? Number(raw) : raw;
+    if (typeof v === 'number' && !isFinite(v)) return;
+    p2Save(path, v).then(function (ans) {
+      var saved = ans && ans.settings ? p2Get(path) : undefined;
+      if (saved !== undefined && String(saved) !== String(f.value)) f.value = String(saved);
+    });
   });
 
   W.registerPane('settings', {
