@@ -1,3 +1,10 @@
+## 6.99.7 - Dictation no longer fails while meetings record (private hotfix)
+
+2026-11-04. Private hotfix for one Mac, on top of 6.99.5. 6.99.6 is a separate meeting consolidation build, not yet installed; it needs this fix merged before it ships. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
+
+- **Fix: Mac dictation said "Server stopped" while a meeting was recording.** Asking whether a meeting was saved read and parsed every saved meeting's chunk file (813 files, 1.8 GB on the test Mac) whenever the meeting was not saved yet, which is every live recording. COS Control asks that of each live recording every few seconds, so two recordings kept the server busy for 4 to 17 seconds at a time. Dictation's 5 second check timed out, and live chunks took up to 26 seconds. Now each saved file's session is remembered until the file changes, and its first 4 KB is enough for most files. On the test Mac one lookup went from about 4.7 seconds to 5 ms (575 ms the first time after a start). Results were identical for 37 saved meetings, 6 of them Mac recordings.
+- Default-on changes: none. The lookup gives the same answers, only faster.
+
 ## 6.99.5 - Control Web: questions asked on the Mac show on the phone (private)
 
 2026-11-04. Private build for one Mac, on top of 6.99.4. Fixes from the web and Mac meeting comparison. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
