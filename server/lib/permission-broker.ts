@@ -235,8 +235,9 @@ export const POLL_FUTURE_SKEW_MS = 5_000
 /** The `client` values of a questions poll that count as a live answerer. */
 export const ANSWERING_CLIENTS: ReadonlySet<string> = new Set(['glasses', 'phone'])
 /**
- * 6.99.12: the one `client` value a COS Control Web poll (browser session cookie, never the token) counts under,
- * sent only while the page shows the cards. Kept apart from ANSWERING_CLIENTS: a token poll naming it never counts.
+ * 6.99.12: the `client` value a COS Control Web poll (browser session cookie, never the token) sends while the page
+ * shows the cards. 6.99.13: it never counts as live (the Mac always pops up at once), and a token poll naming it
+ * never counted. Kept apart from ANSWERING_CLIENTS.
  */
 export const WEB_ANSWERING_CLIENT = 'web'
 /** The questions API's own version, advertised at /api/models. */
@@ -1787,8 +1788,9 @@ export interface SessionQuestionsCapability {
    */
   awayRecentClientMs: number
   /**
-   * 6.99.12: the questions route takes the COS Control Web session too, and a poll with `client=web` counts as a
-   * live answering client. A page reads this before it calls the route (an older server answers a cookie 401).
+   * 6.99.12: the questions route takes the COS Control Web session too. 6.99.13: a `client=web` poll no longer
+   * counts as a live answering client, so the Mac pops up at once; the web answers what the glasses or phone hold.
+   * A page reads this before it calls the route (an older server answers a cookie 401).
    */
   webClient: true
 }

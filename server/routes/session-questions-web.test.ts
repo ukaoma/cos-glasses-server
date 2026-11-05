@@ -72,16 +72,14 @@ async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 3_00
 }
 
 describe('GET /api/session-questions with the COS Control Web session (6.99.12)', () => {
-  it('the browser session reads the list; only ?client=web makes it a live client', async () => {
+  it('the browser session reads the list and never counts as a live client, even as ?client=web (6.99.13)', async () => {
     const h = await start()
-    for (const client of [null, 'phone', 'glasses', 'control', 'WEB']) {
+    for (const client of [null, 'phone', 'glasses', 'control', 'WEB', 'web']) {
       const r = await list(h, browser(h), client)
       expect(r.status, `client=${client}`).toBe(200)
       expect(r.body.items).toEqual([])
       expect(lastQuestionsPollAt(), `a cookie poll with client=${client} never counts`).toBeNull()
     }
-    expect((await list(h, browser(h), 'web')).status).toBe(200)
-    expect(lastQuestionsPollAt()).not.toBeNull()
   })
 
   it('the token naming web never counts; the token naming phone still does', async () => {
@@ -119,7 +117,7 @@ describe('GET /api/session-questions with the COS Control Web session (6.99.12)'
     }
     expect(lastQuestionsPollAt()).toBeNull()
     expect((await list(h, browser(h), 'web')).status).toBe(200)
-    expect(lastQuestionsPollAt()).not.toBeNull()
+    expect(lastQuestionsPollAt()).toBeNull()
   })
 
   it('the questions router itself refuses a cookie it was not given a check for (the gate alone is not enough)', async () => {
@@ -129,13 +127,14 @@ describe('GET /api/session-questions with the COS Control Web session (6.99.12)'
     expect(lastQuestionsPollAt()).toBeNull()
   })
 
-  it('a question waits for the web, and the web answers it through the gate with its session', async () => {
+  it('an open web tab never holds a question from the Mac, and the web answers one the phone holds (6.99.13)', async () => {
     const h = await start()
-    // Nobody is polling: the Mac's own dialog, at once.
+    // The page shows the cards and polls as web: the Mac's own dialog still comes at once (option B).
+    expect((await list(h, browser(h), 'web')).status).toBe(200)
     const first = await fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-hook-token': HOOK_TOKEN }, body: JSON.stringify(permissionEnvelope('AskUserQuestion', ASK_INPUT)) })
     expect(await first.json()).toEqual({})
-    // The page shows the cards: it polls as web, and the next question is held for it.
-    expect((await list(h, browser(h), 'web')).status).toBe(200)
+    // The phone polls: the next question is held, and the web answers it with its session.
+    expect((await list(h, { 'x-cos-token': API_TOKEN }, 'phone')).status).toBe(200)
     const hook = fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-hook-token': HOOK_TOKEN }, body: JSON.stringify(permissionEnvelope('AskUserQuestion', ASK_INPUT)) })
       .then(r => r.json())
     const item = (await until(() => list(h, browser(h), 'web'), l => l.body.items.length === 1)).body.items[0]!

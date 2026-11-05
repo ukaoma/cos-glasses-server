@@ -197,8 +197,8 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
     // Only a client that says it can answer (and shows the cards) counts as live.
     const client = typeof req.query.client === 'string' ? req.query.client : ''
     if (byToken && ANSWERING_CLIENTS.has(client)) notePoll(now(), questionsPollFacts(req.query as Record<string, unknown>))
-    // 6.99.12: a browser counts only as `web`, and never with presence (no away hold from a tab).
-    else if (byWebSession && client === WEB_ANSWERING_CLIENT) notePoll(now(), {})
+    // 6.99.13 (Miles, option B): a browser poll never counts as live, so an open web tab never holds a question
+    // back from the Mac's own pop-up. The web still lists and answers what the glasses or phone are holding.
     const health = deps.broker.health()
     // Listed first: a deadline the timer has not caught yet is settled by the listing.
     const items = deps.broker.list()
