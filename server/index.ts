@@ -170,6 +170,7 @@ import { createWorkLensRoundsRouter } from './routes/work-lens-rounds.js'
 import { startWorkOrchestrator } from './lib/work-orchestrator/runtime.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
 import { createDropsRouter, lazyDropService, openDropService } from './routes/drops.js'
+import { mediaDropAttachments } from './lib/drop-attachments.js'
 import { createDropRouter, sharedDropJevClient, dropDailyCap, dropRouterEnabled } from './lib/drop-router.js'
 import { createBridgeDropWriters } from './lib/drop-destinations.js'
 import { dropItEnabled } from './lib/drop-settings.js'
@@ -918,6 +919,8 @@ const dropService = lazyDropService(() => openDropService(part => dataPath(part)
   router: createDropRouter(),
   writers: createBridgeDropWriters(),
   timezone: () => serverTimezone(),
+  // 6.99.13: a drop's files are pinned in the media store (lib/drop-attachments.ts); Undo removes them.
+  attachments: mediaDropAttachments(() => getMediaStore()),
   askLookup: async (clientJobId, generation) => {
     const job = await queryJobCoordinator.getByClientGeneration(clientJobId, generation)
     return job ? { status: job.status, response: job.response, sessionId: job.sessionId } : undefined

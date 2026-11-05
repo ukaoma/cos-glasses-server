@@ -34,9 +34,10 @@ describe('Drop it switch', () => {
     const link = file(); symlinkSync(target, link)
     expect(dropItEnabled({}, link)).toBe(false)
   })
-  it('advertises a protocol, the switch and (6.99.11) the P2 settings routes, nothing else', () => {
-    expect(Object.keys(dropItCapability({ COS_DROP_IT: '0' })).sort()).toEqual(['enabled', 'p2Settings', 'protocol', 'source'])
+  it('advertises a protocol, the switch, (6.99.11) the P2 settings routes and (6.99.13) the files a drop takes, nothing else', () => {
+    expect(Object.keys(dropItCapability({ COS_DROP_IT: '0' })).sort()).toEqual(['attachments', 'enabled', 'p2Settings', 'protocol', 'source'])
     expect(dropItCapability({ COS_DROP_IT: '0' }).p2Settings).toBe(1)
+    expect(dropItCapability({ COS_DROP_IT: '0' }).attachments).toBe(5)
   })
 })
 

@@ -1,6 +1,6 @@
 /**
  * 6.99.12, Even app parity on COS Control Web: the Ask composer without Drop it, attachments, Model and Effort from
- * /api/models, Reply from the message reader, and session question cards. Runs the REAL panes/cos-chat.js and
+ * /api/models, Reply from the message reader, and session question cards. 6.99.13: Drop with files. Runs the REAL panes/cos-chat.js and
  * panes/questions.js in a vm with a fake COSWeb, document, XMLHttpRequest and fetch, and drives them the way taps do.
  */
 import { describe, expect, it } from 'vitest'
@@ -205,16 +205,101 @@ describe('the composer: Ask, Reply and Drop', () => {
     expect(h.chat._state.asks[0]).toMatchObject({ replyKey: 'reply-409', no: 413 })
   })
 
-  it('Drop with files attached says so and drops nothing', async () => {
-    const h = loadChat()
-    h.chat._state.caps = { dropIt: true, jobs: true, steer: false }
+  // 6.99.13: Drop takes the files too, where the server says it does (capabilities.dropIt.attachments).
+  const M = (n: number) => 'm_' + String(n).repeat(24).slice(0, 24)
+  const health = (attachments?: number) => ({ capabilities: { dropIt: { enabled: true, ...(attachments === undefined ? {} : { attachments }) }, durableQueryJobs: true } })
+  const dropAnswer = (extra: Record<string, unknown> = {}) => ({ '/api/drops': { drop: { id: 'd1' }, items: [], ...extra } })
+
+  it('Drop with a photo and a PDF sends both ids with the words, and the chips clear once the Mac has them', async () => {
+    const h = loadChat({ answers: dropAnswer() })
+    h.chat._setCaps(health(5))
+    expect(h.chat._state.caps.dropFiles).toBe(5)
     const k = h.k('chat')
-    k.atts = [{ id: 'a1', name: 'x.pdf', kind: 'doc', state: 'ready', mediaId: 'm1' }]
+    k.atts = [{ id: 'a1', name: 'Endcap.jpg', kind: 'photo', state: 'ready', mediaId: M(1) }, { id: 'a2', name: 'Q3 plan.pdf', kind: 'doc', state: 'ready', mediaId: M(2) }]
+    h.input('cos-input').value = 'File this with the shelf photo'
+    h.tap('drop')
+    await flush()
+    const sent = h.posts.find(p => p.path === '/api/drops')!.body
+    expect(sent).toMatchObject({ text: 'File this with the shelf photo', source: 'web', attachmentIds: [M(1), M(2)] })
+    expect(sent.dropId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    await flush()
+    expect(k.atts).toEqual([])
+  })
+
+  it('an older server without dropIt.attachments keeps the words-only note and drops nothing', async () => {
+    const h = loadChat({ answers: dropAnswer() })
+    h.chat._setCaps(health())
+    expect(h.chat._state.caps.dropFiles).toBe(0)
+    const k = h.k('chat')
+    k.atts = [{ id: 'a1', name: 'x.pdf', kind: 'doc', state: 'ready', mediaId: M(1) }]
     h.input('cos-input').value = 'File this'
     h.tap('drop')
     await flush()
     expect(h.posts).toEqual([])
-    expect(k.note).toBe('Drop takes words only for now. Ask sends the files with your words, or remove them to drop.')
+    expect(k.note).toBe('Drop takes words only on this Mac. Ask sends the files with your words, or remove them to drop.')
+    expect(k.atts).toHaveLength(1)
+  })
+
+  it('files with no words, an upload still going, and a failed upload: each says what to do and sends nothing', async () => {
+    const h = loadChat({ answers: dropAnswer() })
+    h.chat._setCaps(health(5))
+    const k = h.k('chat')
+    k.atts = [{ id: 'a1', name: 'x.pdf', kind: 'doc', state: 'ready', mediaId: M(1) }]
+    h.input('cos-input').value = '  '
+    h.tap('drop')
+    expect(k.note).toBe('Add a few words with the files so COS knows where they go.')
+    h.input('cos-input').value = 'File this'
+    k.atts = [{ id: 'a1', name: 'x.pdf', kind: 'doc', state: 'uploading', mediaId: '' }]
+    h.tap('drop')
+    k.atts = [{ id: 'a1', name: 'x.pdf', kind: 'doc', state: 'failed', mediaId: '' }]
+    h.tap('drop')
+    expect(k.note).toBe('A file did not upload. Retry it or remove it, then Drop.')
+    await flush()
+    expect(h.posts).toEqual([])
+  })
+
+  it('a refused file keeps the words and the files in the box and says why', async () => {
+    const refused = Object.assign(new Error('A file expired before it was dropped (uploads wait 4 hours). Add it again, then Drop.'), { code: 'attachment_expired' })
+    const h = loadChat({ answers: { '/api/drops': () => Promise.reject(refused) } })
+    h.chat._setCaps(health(5))
+    const k = h.k('chat')
+    k.atts = [{ id: 'a1', name: 'x.pdf', kind: 'doc', state: 'ready', mediaId: M(1) }]
+    h.input('cos-input').value = 'File this'
+    h.tap('drop')
+    await flush(); await flush()
+    expect(k.note).toBe('Not dropped: A file expired before it was dropped (uploads wait 4 hours). Add it again, then Drop. Your words and files are still here.')
+    expect(k.atts).toHaveLength(1)
+    expect(h.input('cos-input').value).toBe('File this')
+  })
+
+  it('a drop read as a question runs the Ask with the drop\'s files', async () => {
+    const h = loadChat({ answers: { ...dropAnswer({ drop: { id: 'd1' }, next: { kind: 'ask', prompt: 'what is on this shelf?', attachmentIds: [M(3), '../x'] } }),
+      '/api/query-jobs': { job: { jobId: 'j1', sessionId: 's1', globalMsgNum: 9, status: 'queued' } } } })
+    h.chat._setCaps(health(5))
+    h.k('chat').atts = [{ id: 'a1', name: 'shelf.jpg', kind: 'photo', state: 'ready', mediaId: M(3) }]
+    h.input('cos-input').value = 'what is on this shelf?'
+    h.tap('drop')
+    await flush(); await flush()
+    const ask = h.posts.find(p => p.path === '/api/query-jobs')!.body
+    expect(ask).toMatchObject({ query: 'what is on this shelf?', attachmentIds: [M(3)] })
+  })
+
+  it('the receipt lists each file with Open; your words show what you sent; a line without files shows none', () => {
+    const { chat } = loadChat()
+    const receipt = chat._itemHtml({ id: 'fi_1', kind: 'receipt', threadId: 'd1', state: 'live', title: 'Filed to Work, Work', line: 'New card in the Inbox. The 2 files stay here in the COS chat with your words.',
+      links: [{ kind: 'card', id: 'c1', label: 'Work' }, { kind: 'file', id: M(1), label: 'Endcap.jpg' }, { kind: 'file', id: M(2), label: 'Q3 plan.pdf' }, { kind: 'file', id: '../etc', label: 'bad' }], actions: [] })
+    expect(receipt).toContain('href="/api/media/' + M(1) + '/content?variant=phone" target="_blank" rel="noopener" aria-label="Open Endcap.jpg"')
+    expect(receipt).toContain('<img src="/api/media/' + M(1) + '/content?variant=thumb"')
+    expect(receipt).toContain('aria-label="Open Q3 plan.pdf"')
+    expect(receipt.split('<span class="cc-dfile-open">Open</span>')).toHaveLength(3)
+    expect(receipt).not.toContain('../etc')
+    // Never the clip's class: .cc-file is the invisible file input, and a link wearing it does not show.
+    expect(receipt).not.toMatch(/class="cc-file[" ]/)
+    const mine = chat._itemHtml({ id: 'fi_0', kind: 'drop', threadId: 'd1', source: 'web', line: 'File this', links: [{ kind: 'file', id: M(2), label: 'Q3 plan.pdf' }], actions: [] })
+    expect(mine).toContain('cc-dfiles mine')
+    expect(mine).not.toContain('cc-dfile-open')
+    // After Undo the server answers the lines without their file links: nothing to open.
+    expect(chat._itemHtml({ id: 'fi_2', kind: 'receipt', threadId: 'd1', state: 'live', title: 'Undone', line: 'x', links: [], actions: [] })).not.toContain('cc-dfiles')
   })
 
   it('with Drop it off and jobs on, the pinned row is Ask COS and the reader offers Reply; with jobs off, no Reply', () => {

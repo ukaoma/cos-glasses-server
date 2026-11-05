@@ -187,7 +187,17 @@ export interface MediaRecord {
    * the public attachment ref; it lets a lost finalize response or server
    * restart rediscover the one record that upload already published. */
   videoUploadId?: string
+  /** 6.99.13: the Drop it drop that holds this upload (pinForDrop). Kept apart
+   *  from runId, which an Ask's association overwrites. Never exposed. */
+  dropId?: string
 }
+
+/** A drop id (lowercase UUID v4), as lib/drop-store.ts DROP_ID. Kept local so
+ *  the media store never imports the drop store. */
+const DROP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+/** The kinds a person uploads. Traffic frames and generated visuals carry
+ *  their own content TTL, so they can never be pinned to a drop. */
+const DROPPABLE_KINDS: ReadonlySet<string> = new Set(['user_photo', 'user_document', 'user_video'])
 
 interface MediaIndexFile {
   v: 1
@@ -324,6 +334,7 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
     ...(typeof r.videoUploadId === 'string' && /^vu_[0-9a-f]{24}$/.test(r.videoUploadId)
       ? { videoUploadId: r.videoUploadId }
       : {}),
+    ...(typeof r.dropId === 'string' && DROP_ID_RE.test(r.dropId) ? { dropId: r.dropId } : {}),
   }
 }
 
@@ -1209,6 +1220,75 @@ export class MediaStore {
         dirty = true
       }
       if (dirty) this.saveIndex()
+    })
+  }
+
+  /**
+   * 6.99.13 Drop it with files: bind fresh uploads to one drop so they outlive
+   * the staged TTL (4 h). An associated record has no lifecycle TTL and GC
+   * never touches it, so the bytes live as long as the drop holds them.
+   * All-or-nothing, like reserve. Refused (nothing changes):
+   *   - unknown or deleted id                        media_not_found
+   *   - expired, or its bytes already gone           media_expired
+   *   - queued with an Ask, sent with a message, held
+   *     by another drop, or not a person's upload   media_conflict
+   *   - bytes missing on disk                        media_unavailable
+   * Replaying the same drop is a no-op that answers the same refs.
+   */
+  pinForDrop(ids: string[], dropId: string): Promise<MediaAttachmentRef[]> {
+    return this.withLock(() => {
+      if (!DROP_ID_RE.test(dropId)) throw new MediaStoreError('media_conflict', 'invalid drop id')
+      const now = Date.now()
+      for (const id of ids) {
+        const rec = isValidMediaId(id) ? this.records.get(id) : undefined
+        if (!rec || rec.lifecycle === 'deleted') throw new MediaStoreError('media_not_found', `attachment ${id} not found`)
+        if (rec.lifecycle === 'associated' && rec.dropId === dropId) continue
+        if (rec.lifecycle === 'expired' || rec.contentRemoved || this.isContentExpired(rec, now)) {
+          throw new MediaStoreError('media_expired', `attachment ${id} expired`)
+        }
+        if (!DROPPABLE_KINDS.has(rec.ref.kind)) throw new MediaStoreError('media_conflict', `attachment ${id} is not an upload`)
+        if (rec.lifecycle !== 'staged') throw new MediaStoreError('media_conflict', `attachment ${id} is already in use`)
+        if (!existsSync(this.absPath(rec.storagePath))) throw new MediaStoreError('media_unavailable', `attachment ${id} content unavailable`)
+      }
+      let dirty = false
+      const refs: MediaAttachmentRef[] = []
+      for (const id of ids) {
+        const rec = this.records.get(id)!
+        refs.push(rec.ref)
+        if (rec.lifecycle === 'associated' && rec.dropId === dropId) continue
+        rec.lifecycle = 'associated'
+        rec.dropId = dropId
+        rec.associatedAtMs = now
+        rec.updatedAtMs = now
+        dirty = true
+      }
+      if (dirty) this.saveIndex()
+      return refs
+    })
+  }
+
+  /**
+   * 6.99.13: Undo of a drop with files. Removes the bytes of the uploads this
+   * drop pinned, and only those: a record another drop holds, or one an Ask
+   * since bound to a message (globalMsgNum), is left alone. Safe to replay.
+   * Answers how many were removed.
+   */
+  unpinDrop(ids: string[], dropId: string): Promise<number> {
+    return this.withLock(() => {
+      if (!DROP_ID_RE.test(dropId)) return 0
+      const now = Date.now()
+      let removed = 0
+      for (const id of ids) {
+        const rec = isValidMediaId(id) ? this.records.get(id) : undefined
+        if (!rec || rec.lifecycle !== 'associated' || rec.dropId !== dropId || rec.globalMsgNum != null) continue
+        this.removeAssetFiles(rec)
+        rec.lifecycle = 'deleted'
+        rec.contentRemoved = true
+        rec.updatedAtMs = now
+        removed++
+      }
+      if (removed) this.saveIndex()
+      return removed
     })
   }
 

@@ -11,9 +11,12 @@
      Steer and Cancel are the existing query-job routes. The Model and Effort menus come from /api/models (6.99.12).
    - Drop (outlined, Drop it on only): POST /api/drops, then the receipt with Undo and Move. A drop the server reads as a
      question runs the Ask the same way and is linked back (POST /api/drops/:id/ask), as COS Control does.
+     6.99.13: Drop takes the composer's files too (up to capabilities.dropIt.attachments, 5), as attachmentIds. The
+     server keeps them with the drop; the receipt lists each one with Open, and Undo removes them. A drop read as a
+     question sends its files with the Ask. An older server without that field keeps the words-only note.
    - The clip (6.99.12) attaches photos, PDF, TXT, MD, CSV, JSON, XLSX, MP4 and MOV, as the Even app does: photos are
      resized to a 1024 px JPEG and posted to /api/media, other files go raw to /api/media/file, and the Ask carries up to
-     five attachmentIds. Paste and drag-drop add files too.
+     five attachmentIds. Paste and drag-drop add files too. Drop sends them too where the server says it takes them.
    With a keyboard, Return asks and Option-Return drops; Shift-Return is a new line.
 
    The same composer answers in the message reader (6.99.12): Reply sends that turn's sessionId, so the answer continues
@@ -76,6 +79,7 @@
   // ── capabilities and the rail badge ───────────────────
   // Drop it on: the pinned COS chat. Ask on (durable query jobs): the composer, with or without Drop it.
   function dropOn() { return !!(C.caps && C.caps.dropIt); }
+  function dropFiles() { return C.caps && C.caps.dropIt && C.caps.dropFiles > 0 ? C.caps.dropFiles : 0; }
   function askOn() { return !!(C.caps && C.caps.jobs); }
   function on() { return dropOn() || askOn(); }
   function setCaps(h) {
@@ -83,13 +87,17 @@
     var drop = caps.dropIt;
     var next = {
       dropIt: !!(drop && drop.enabled === true),
+      // 6.99.13: how many files a drop takes. 0 (an older server): Drop is words only and says so.
+      dropFiles: drop && drop.enabled === true && Number.isInteger(drop.attachments) && drop.attachments > 0 ? Math.min(drop.attachments, MAX_ATTS) : 0,
       jobs: caps.durableQueryJobs === true || h && h.durableQueryJobs === true || !!(caps.durableQueryJobs && caps.durableQueryJobs.enabled),
       steer: !!(C.caps && C.caps.steer)
     };
     var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs;
+    var filesChanged = !!C.caps && C.caps.dropFiles !== next.dropFiles;
     C.caps = next;
     if (!next.dropIt) { clearRail(); C.summary = null; }
     if (changed && C.onChange) C.onChange();
+    else if (filesChanged) paintButtons(CHAT);
     if (next.dropIt) refreshSummary();
   }
   // The shell's status read (shell.js checkServer) hands its /api/health answer here.
@@ -360,16 +368,30 @@
       return '<button type="button" class="cc-choice" data-cos="move-to" data-item="' + esc(item.id) + '" data-dest="' + o.dest + '"' + (o.domain ? ' data-domain="' + esc(o.domain) + '"' : '') + '>' + esc(o.label) + '</button>';
     }).join('') + '<button type="button" class="link-btn cc-text-btn" data-cos="move-cancel">Keep it where it is</button></div>';
   }
+  // 6.99.13: a drop's files, each opening from the media store in a new tab. Under your words they are what you sent;
+  // on a receipt each says Open. Undo takes the links away with the files. The classes are cc-dfile*, never cc-file:
+  // .cc-file is the clip's invisible file input (opacity 0, absolute), and a link wearing it does not show.
+  function fileLinksHtml(item, mine) {
+    var files = (item.links || []).filter(function (l) { return l.kind === 'file' && MEDIA_ID.test(String(l.id)); });
+    if (!files.length) return '';
+    return '<div class="cc-dfiles' + (mine ? ' mine' : '') + '">' + files.map(function (f) {
+      var url = '/api/media/' + encodeURIComponent(f.id) + '/content';
+      var photo = /\.(jpe?g|png|gif|webp|heic|heif)$/i.test(String(f.label)) || f.label === 'Photo';
+      return '<a class="cc-dfile" href="' + esc(url + '?variant=phone') + '" target="_blank" rel="noopener" aria-label="Open ' + esc(f.label) + '">' +
+        '<span class="cc-dfile-thumb">' + (photo ? '<img src="' + esc(url + '?variant=thumb') + '" alt="" loading="lazy">' : '<svg class="icon" aria-hidden="true"><use href="#i-doc"/></svg>') + '</span>' +
+        '<span class="cc-dfile-name">' + esc(f.label) + '</span>' + (mine ? '' : '<span class="cc-dfile-open">Open</span>') + '</a>';
+    }).join('') + '</div>';
+  }
   function itemHtml(item) {
     if (item.kind === 'drop' || item.kind === 'answer') {
       return '<div class="cc-line you' + (item.kind === 'answer' ? ' answer' : '') + '"' + (item.kind === 'drop' ? ' data-drop-thread="' + esc(item.threadId) + '"' : '') + '><div class="cc-bubble">' + esc(item.line) + '</div>' +
-        (item.kind === 'drop' ? '<div class="cc-src">' + esc(SOURCE[item.source] || '') + '</div>' : '') + '</div>';
+        (item.kind === 'drop' ? fileLinksHtml(item, true) + '<div class="cc-src">' + esc(SOURCE[item.source] || '') + '</div>' : '') + '</div>';
     }
     var quote = item.kind === 'followup' ? (function () { var d = dropOf(item); return d ? '<button type="button" class="cc-quote" data-cos="quote" data-thread="' + esc(item.threadId) + '">Re: ' + esc(clip(d.line, 70)) + '</button>' : ''; })() : '';
     return '<div class="cc-line cos' + (item.state !== 'live' ? ' done' : '') + (item.needsReply && item.state === 'live' ? ' waits' : '') + '" data-item-id="' + esc(item.id) + '">' +
       '<span class="cc-avatar">' + MARK + '</span><div class="cc-card">' + quote +
       (item.title ? '<p class="cc-card-title">' + esc(item.title) + '</p>' : '') +
-      '<p class="cc-card-line">' + esc(item.line) + '</p>' + actionsHtml(item) + '</div></div>';
+      '<p class="cc-card-line">' + esc(item.line) + '</p>' + fileLinksHtml(item, false) + actionsHtml(item) + '</div></div>';
   }
   // The finished answer as Markdown; while it streams, plain words, so a half-written "**bold" never shows its stars.
   function answerHtml(a) {
@@ -458,7 +480,13 @@
     var jobs = !C.caps || C.caps.jobs;
     var waiting = uploadsPending(k), failed = uploadsFailed(k);
     if (ask) { ask.disabled = !text || !!k.busy || !jobs || waiting || failed; ask.textContent = k.busy === 'ask' ? 'Asking…' : waiting ? 'Uploading…' : (k.name === 'chat' ? 'Ask' : 'Reply'); }
-    if (drop) { drop.disabled = !text || !!k.busy; drop.textContent = k.busy === 'drop' ? 'Dropping…' : 'Drop'; }
+    if (drop) {
+      // 6.99.13: with files on a server that takes them, Drop waits for the uploads as Ask does. Files with no words keep
+      // Drop tappable so the tap can say what is missing.
+      var withFiles = k.atts.length > 0 && dropFiles();
+      drop.disabled = !!k.busy || (!text && !withFiles) || (withFiles && (waiting || failed));
+      drop.textContent = k.busy === 'drop' ? 'Dropping…' : withFiles && waiting ? 'Uploading…' : 'Drop';
+    }
     var attach = form.querySelector('.cc-attach'), picker = form.querySelector('[data-cos-file]');
     if (attach) attach.classList.toggle('full', k.atts.length >= MAX_ATTS);
     if (picker) picker.disabled = k.atts.length >= MAX_ATTS || !!k.busy;
@@ -476,6 +504,7 @@
 
   // ── attachments (6.99.12, the Even app's composer) ────
   var MAX_ATTS = 5;                       // MAX_ATTACHMENTS_PER_PROMPT
+  var MEDIA_ID = /^m_[a-f0-9]{24}$/;      // shared/media-attachment.ts MEDIA_ID_RE
   var MAX_PHOTO = 2 * 1024 * 1024;        // MAX_IMAGE_BYTES, after the resize
   var MAX_DOC = 64 * 1024 * 1024;         // MAX_OTHER_MEDIA_BYTES
   var MAX_VIDEO = 100 * 1024 * 1024;      // MAX_VIDEO_MEDIA_BYTES
@@ -663,13 +692,20 @@
   function doDrop() {
     var k = CHAT;
     var input = inputOf(k); var text = input ? input.value.trim() : '';
-    if (!text || k.busy) return;
-    // A drop files words. Files go with an Ask (a drop takes no attachments yet).
-    if (k.atts.length) { setNote(k, 'Drop takes words only for now. Ask sends the files with your words, or remove them to drop.'); return; }
+    if (k.busy) return;
+    // An older server files words only (no capabilities.dropIt.attachments): say so, and send nothing.
+    if (k.atts.length && !dropFiles()) { setNote(k, 'Drop takes words only on this Mac. Ask sends the files with your words, or remove them to drop.'); return; }
+    if (!text) { if (k.atts.length) setNote(k, 'Add a few words with the files so COS knows where they go.'); return; }
+    if (uploadsPending(k)) return;
+    if (uploadsFailed(k)) { setNote(k, 'A file did not upload. Retry it or remove it, then Drop.'); return; }
+    // What is shown as sent is exactly what is sent: never more than the server takes.
+    var ready = readyAtts(k).slice(0, dropFiles() || 0);
     var dropId = uuid();
+    var body = { dropId: dropId, text: text, source: 'web' };
+    if (ready.length) body.attachmentIds = ready.map(function (t) { return t.mediaId; });
     k.busy = 'drop'; setNote(k, ''); paintButtons(k);
     var send = function (retry) {
-      return api('/api/drops', { method: 'POST', body: { dropId: dropId, text: text, source: 'web' }, timeoutMs: 30000 }).catch(function (err) {
+      return api('/api/drops', { method: 'POST', body: body, timeoutMs: 30000 }).catch(function (err) {
         // The same dropId is safe to send again: the server answers the first result.
         if (retry && err && err.code === 'timeout') return send(false);
         throw err;
@@ -678,15 +714,24 @@
     send(true).then(function (ans) {
       k.busy = ''; k.draft = ''; saveDraft(k);
       var box = inputOf(k); if (box) { box.value = ''; W.autoGrow(box); }
+      if (ready.length) clearAtts(k);
       mergeItems(ans.items);
       paintFeed(true); paintButtons(k);
-      if (ans.next && ans.next.kind === 'ask' && C.caps && C.caps.jobs) submitAsk(ans.next.prompt, ans.drop.id);
+      if (ans.next && ans.next.kind === 'ask' && C.caps && C.caps.jobs) submitAsk(ans.next.prompt, ans.drop.id, null, askFilesOf(ans.next));
       refreshSummary();
     }, function (err) {
       k.busy = ''; paintButtons(k);
-      // The words stay in the box until the server has them.
-      setNote(k, err && err.code === 'drop_it_off' ? 'Drop it is off on this Mac.' : 'Not dropped: ' + ((err && err.message) || 'the Mac did not answer') + ' Your words are still here.');
+      // The words and the files stay in the box until the server has them.
+      var kept = ready.length ? ' Your words and files are still here.' : ' Your words are still here.';
+      // A refused file says why in the server's own words (attachment_expired, too_many_attachments, words_needed...).
+      setNote(k, err && err.code === 'drop_it_off' ? 'Drop it is off on this Mac.' : 'Not dropped: ' + ((err && err.message) || 'the Mac did not answer.') + kept);
     });
+  }
+
+  // A drop read as a question runs the Ask with the drop's files (the server names them in next.attachmentIds).
+  function askFilesOf(next) {
+    var ids = next && Array.isArray(next.attachmentIds) ? next.attachmentIds.filter(function (id) { return MEDIA_ID.test(String(id)); }).slice(0, MAX_ATTS) : [];
+    return ids.length ? { attachmentIds: ids } : undefined;
   }
 
   // ── Ask ───────────────────────────────────────────────
@@ -847,7 +892,7 @@
       if (ans && ans.item) mergeItems([ans.item]);
       // A reminder action answers the finished item itself (merged above); dismiss answers counts only.
       if (action === 'dismiss') item.state = 'done';
-      if (ans && ans.next && ans.next.kind === 'ask' && C.caps && C.caps.jobs) submitAsk(ans.next.prompt, ans.drop.id);
+      if (ans && ans.next && ans.next.kind === 'ask' && C.caps && C.caps.jobs) submitAsk(ans.next.prompt, ans.drop.id, null, askFilesOf(ans.next));
       paintFeed(false); refreshSummary();
     }, function (err) { W.toast((err && err.message) || 'That did not go through.'); });
   }
@@ -968,6 +1013,6 @@
     onClick: onClick, onKey: onKey, onInput: onInput, onChange: onChangeEvent, onSubmit: onSubmit, onPaste: onPaste, onDrag: onDrag,
     setOnChange: function (fn) { C.onChange = fn; }, setOnAnswered: function (fn) { C.onAnswered = fn; },
     // Test and render hooks: what the chat holds right now.
-    _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles
+    _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps
   };
 })();

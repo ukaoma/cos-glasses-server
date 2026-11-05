@@ -45,6 +45,11 @@ export interface DropLink {
 export interface DropChoice { id: string; dest: DropDest; label: string; detail: string; target?: { id: string; domain?: string; label: string } }
 export interface DropRoute { by: 'rule' | 'jev' | 'user' | 'fallback'; p?: number; reason?: string; tokens?: number; provider?: string }
 export interface DropFileRef { store: string; key: string; fileID: string; sha256: string; displayName: string }
+/**
+ * 6.99.13: a file dropped with the words (COS Control Web). `id` is the media store's id: the bytes live there, pinned
+ * to this drop (MediaStore.pinForDrop), and open through GET /api/media/:id/content. Undo removes them.
+ */
+export interface DropAttachment { id: string; name: string; mime: string; size: number }
 export interface DropRemind { at: string | null; tz: string; firedAt: string | null; ackAt: string | null; snoozes: number }
 export interface DropTimelineEntry { at: string; state: DropState; dest?: DropDest; note?: string }
 export interface DropAsk { clientJobId: string; generation: number; answeredAt?: string }
@@ -64,6 +69,7 @@ export interface DropRecord {
   hold?: { sessionId: string; label: string; sentAt?: string }
   remind?: DropRemind
   file?: DropFileRef
+  attachments?: DropAttachment[]
   ask?: DropAsk
   hint?: { sessionId: string }
   /** Undo and Move work until this instant (24 hours after filing). */
@@ -102,6 +108,8 @@ export interface FeedItem {
 export const DROP_LIMITS = {
   text: 2_000, label: 200, line: 2_000, title: 200, links: 12, choices: 3, timeline: 40,
   drops: 20_000, feed: 20_000, fileBytes: 32_000_000, quarantineKept: 500,
+  /** Files on one drop: the Ask's own cap (shared/media-attachment.ts MAX_ATTACHMENTS_PER_PROMPT). */
+  attachments: 5, attachmentName: 255,
   /** Retention (plan section 6): drop records and links a year; undone drops and chat receipts 30 days. */
   keepDropDays: 365, keepUndoneDays: 30, keepReceiptDays: 30,
   undoMs: 24 * 60 * 60_000,
@@ -109,6 +117,8 @@ export const DROP_LIMITS = {
 
 export const DROP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 export const FEED_ID = /^fi_[a-f0-9]{32}$/
+/** A media store id (shared/media-attachment.ts MEDIA_ID_RE). */
+export const ATTACHMENT_ID = /^m_[a-f0-9]{24}$/
 const LINK_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/
 const CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/
 
@@ -143,6 +153,14 @@ function parseChoice(raw: unknown): DropChoice {
     choice.target = { id: tid, label: tlabel, ...(typeof t.domain === 'string' && t.domain.length <= 64 ? { domain: t.domain } : {}) }
   }
   return choice
+}
+
+export function parseAttachment(raw: unknown): DropAttachment {
+  if (!record(raw)) throw new DropStoreError('invalid_drop', 400)
+  const id = typeof raw.id === 'string' && ATTACHMENT_ID.test(raw.id) ? raw.id : null
+  const name = str(raw.name, DROP_LIMITS.attachmentName), mime = str(raw.mime, 100)
+  if (!id || !name || !mime || !/^[a-z]+\/[a-z0-9.+-]+$/i.test(mime) || !Number.isSafeInteger(raw.size) || (raw.size as number) < 0) throw new DropStoreError('invalid_drop', 400)
+  return { id, name, mime, size: raw.size as number }
 }
 
 /** Validate one drop record from the journal. Unknown fields are dropped, never trusted. */
@@ -191,6 +209,10 @@ export function parseDropRecord(raw: unknown): DropRecord {
     const store = str(f.store, 64), key = str(f.key, 512), fileID = str(f.fileID, 200), sha256 = str(f.sha256, 64), displayName = str(f.displayName, 255)
     if (!store || !key || !fileID || !sha256 || !/^[a-f0-9]{64}$/.test(sha256) || !displayName) throw new DropStoreError('invalid_drop', 400)
     drop.file = { store, key, fileID, sha256, displayName }
+  }
+  if (raw.attachments !== undefined) {
+    if (!Array.isArray(raw.attachments) || raw.attachments.length > DROP_LIMITS.attachments) throw new DropStoreError('invalid_drop', 400)
+    drop.attachments = raw.attachments.map(parseAttachment)
   }
   if (raw.ask !== undefined) {
     const a = raw.ask

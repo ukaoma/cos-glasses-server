@@ -10,8 +10,11 @@ import { dirname } from 'node:path'
 import { dataPath } from './data-dir.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { securePrivateDirectory } from './secure-user-config.js'
+import { MAX_ATTACHMENTS_PER_PROMPT } from '../../shared/media-attachment.js'
 
 export const DROP_IT_PROTOCOL = 1
+/** 6.99.13: files one drop takes, the Ask's own cap (shared/media-attachment.ts MAX_ATTACHMENTS_PER_PROMPT). */
+export const DROP_ATTACHMENTS_MAX = MAX_ATTACHMENTS_PER_PROMPT
 export const DROP_IT_SETTINGS_FILE = () => dataPath('drop-it-settings.json')
 
 export function dropItSetting(file = DROP_IT_SETTINGS_FILE()): boolean {
@@ -39,7 +42,8 @@ export function writeDropItSetting(enabled: boolean, file = DROP_IT_SETTINGS_FIL
 }
 
 /** The capability block for /api/health and /api/models. Codes only: no counts, no words. Additive. */
-export function dropItCapability(env: NodeJS.ProcessEnv = process.env): { protocol: number; enabled: boolean; source: 'env' | 'settings'; p2Settings: number } {
+export function dropItCapability(env: NodeJS.ProcessEnv = process.env): { protocol: number; enabled: boolean; source: 'env' | 'settings'; p2Settings: number; attachments: number } {
   // p2Settings (6.99.11): GET/PUT /api/drops/settings/p2 exists. Clients that do not see it hide the P2 controls.
-  return { protocol: DROP_IT_PROTOCOL, enabled: dropItEnabled(env), source: dropItSource(env), p2Settings: 1 }
+  // attachments (6.99.13): POST /api/drops takes this many attachmentIds. A client that does not see it sends words only.
+  return { protocol: DROP_IT_PROTOCOL, enabled: dropItEnabled(env), source: dropItSource(env), p2Settings: 1, attachments: DROP_ATTACHMENTS_MAX }
 }

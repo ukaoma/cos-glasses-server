@@ -13,8 +13,8 @@
  * a Messages row or moves the lens message counter (canary 11).
  */
 import { randomBytes } from 'node:crypto'
-import { DROP_DESTS, DROP_ID, DROP_LIMITS, DropStoreError, parseLink, type DropChoice, type DropDest, type DropKind, type DropLink, type DropRecord,
-  type DropSource, type DropFileRef, type FeedAction, type FeedItem, type DropStore, type InboxFeedStore } from './drop-store.js'
+import { ATTACHMENT_ID, DROP_DESTS, DROP_ID, DROP_LIMITS, DropStoreError, parseLink, type DropAttachment, type DropChoice, type DropDest, type DropKind, type DropLink,
+  type DropRecord, type DropSource, type DropFileRef, type FeedAction, type FeedItem, type DropStore, type InboxFeedStore } from './drop-store.js'
 import { choiceFor, cleanDropForJev, DROP_ROUTER_LIMITS, ruleRoute, type DropRouter, type DropTarget, type RouteOutcome } from './drop-router.js'
 import { DropDestinationError, type DropWriters } from './drop-destinations.js'
 import { parseWhen, whenLabel, whenSuggestions, WHEN_MAX_AHEAD_MS } from './drop-when.js'
@@ -31,16 +31,29 @@ export interface DropInput {
   source: DropSource
   hint?: { sessionId: string; label?: string }
   file?: DropFileRef
+  /** 6.99.13: up to five fresh uploads (POST /api/media, /api/media/file) to keep with the drop. Words are still required. */
+  attachmentIds?: string[]
 }
 export interface DropView {
   id: string; text: string; source: DropSource; createdAt: string; updatedAt: string
   state: DropRecord['state']; dest: DropDest | null; kind: DropKind; status: HistoryStatus
   links: DropLink[]; choices?: DropChoice[]; route: DropRecord['route']; undoUntil: string | null
-  canUndo: boolean; hold?: DropRecord['hold']; remind?: DropRecord['remind']; file?: DropFileRef
+  canUndo: boolean; hold?: DropRecord['hold']; remind?: DropRecord['remind']; file?: DropFileRef; attachments?: DropAttachment[]
 }
-export interface DropAnswer { drop: DropView; items: FeedItem[]; replayed: boolean; next?: { kind: 'ask'; prompt: string } }
+/** A drop read as a question: the client runs the Ask with these words, and the drop's files when it has any. */
+export interface DropNextAsk { kind: 'ask'; prompt: string; attachmentIds?: string[] }
+export interface DropAnswer { drop: DropView; items: FeedItem[]; replayed: boolean; next?: DropNextAsk }
 export type HistoryStatus = 'open' | 'in_progress' | 'done' | 'undone'
 export interface AskLookup { status: string; response?: string; sessionId?: string }
+/**
+ * 6.99.13: where a drop's files live (lib/drop-attachments.ts, the media store). `pin` binds fresh uploads to the drop
+ * so they outlive the upload TTL, all or nothing, and throws a DropError that says what to do when one cannot be kept.
+ * `unpin` removes the bytes this drop pinned (Undo).
+ */
+export interface DropAttachmentPins {
+  pin(ids: string[], dropId: string): Promise<DropAttachment[]>
+  unpin(ids: string[], dropId: string): Promise<number>
+}
 
 export interface DropServiceDeps {
   drops: DropStore
@@ -53,6 +66,8 @@ export interface DropServiceDeps {
   timezone?: () => string
   /** 6.99.11 settings: the reminders' default time and snooze length. Absent: 9:00 and an hour. */
   p2Settings?: () => P2Settings
+  /** 6.99.13: files on a drop. Absent: a drop with attachmentIds is refused (attachments_unsupported). */
+  attachments?: DropAttachmentPins
 }
 
 const TEXT_MAX = DROP_LIMITS.text
@@ -63,6 +78,13 @@ const short = (text: string, max = 60): string => {
   return one.length <= max ? one : one.slice(0, max - 1).trimEnd() + '…'
 }
 const feedId = () => `fi_${randomBytes(16).toString('hex')}`
+/** A drop's files as chat links (kind `file`, the media id), so the chat can open each one. */
+const fileLinks = (attachments: DropAttachment[] | undefined): DropLink[] =>
+  (attachments ?? []).map(a => ({ kind: 'file' as const, id: a.id, label: a.name.slice(0, DROP_LIMITS.label) }))
+/** Where a drop's files are, said on its receipts: the destinations take words only. */
+const filesLine = (n: number): string => n === 1 ? 'The file stays here in the COS chat with your words.' : `The ${n} files stay here in the COS chat with your words.`
+const nextAsk = (drop: DropRecord): DropNextAsk =>
+  ({ kind: 'ask', prompt: drop.text, ...(drop.attachments?.length ? { attachmentIds: drop.attachments.map(a => a.id) } : {}) })
 /** One item that waits on an answer: a live question, or a live item marked needsReply (6.99.10). */
 export const isWaiting = (i: FeedItem): boolean => i.state === 'live' && (i.kind === 'question' || i.needsReply === true)
 const A = {
@@ -114,15 +136,23 @@ export class DropService {
   }
 
   private async run(input: DropInput): Promise<DropAnswer> {
+    // Files first (6.99.13): they are pinned to the drop before it is saved, so a saved drop never points at an upload
+    // the store could still expire. A file that cannot be kept refuses the whole drop and nothing is saved.
+    let attachments: DropAttachment[] = []
+    if (input.attachmentIds?.length) {
+      if (!this.deps.attachments) throw new DropError('attachments_unsupported', 400, 'This Mac takes words only on a drop. Ask sends the files, or remove them to drop.')
+      attachments = await this.deps.attachments.pin(input.attachmentIds, input.dropId)
+    }
     const at = this.now().toISOString()
     const fresh: DropRecord = {
       id: input.dropId, text: input.text, source: input.source, createdAt: at, updatedAt: at, state: 'routing', dest: null,
       kind: input.file ? 'file' : 'note', links: [], route: null, undoUntil: null, timeline: [{ at, state: 'routing' }],
       ...(input.hint ? { hint: { sessionId: input.hint.sessionId } } : {}), ...(input.file ? { file: input.file } : {}),
+      ...(attachments.length ? { attachments } : {}),
     }
     this.deps.drops.insert(fresh)
     this.deps.feed.insert([{ id: feedId(), kind: 'drop', threadId: fresh.id, createdAt: at, readAt: at, source: input.source,
-      line: input.text, links: [], actions: [], state: 'live', key: `${fresh.id}:drop` }])
+      line: input.text, links: fileLinks(attachments), actions: [], state: 'live', key: `${fresh.id}:drop` }])
     // Before any rule (plan section 8): a drop that looks like it holds a password or key goes nowhere but the drop
     // store. Not to memory (the bridge embeds it), not to the Ask job, not to Jev.
     if (cleanDropForJev(input.text).tripped) return this.file(fresh, 'note', undefined, { by: 'fallback', reason: 'redacted' })
@@ -155,8 +185,8 @@ export class DropService {
     const at = this.now().toISOString()
     const saved = this.deps.drops.update(drop.id, d => ({ ...d, state: 'asked', dest: 'ask', kind: 'ask', route: { by: 'rule' },
       undoUntil: null, timeline: [...d.timeline, { at, state: 'asked', dest: 'ask' }] }))
-    this.receipt(saved, 'receipt', 'Asking COS', 'The answer lands here when it is ready.', [], [], 1)
-    return { ...this.answer(saved, false), next: { kind: 'ask', prompt: saved.text } }
+    this.receipt(saved, 'receipt', 'Asking COS', saved.attachments?.length ? 'The answer lands here when it is ready. The files go with the question.' : 'The answer lands here when it is ready.', [], [], 1)
+    return { ...this.answer(saved, false), next: nextAsk(saved) }
   }
 
   private question(drop: DropRecord, choices: DropChoice[], route: DropRecord['route'], clear: number): DropAnswer {
@@ -263,6 +293,10 @@ export class DropService {
 
   private receipt(drop: DropRecord, kind: 'receipt' | 'question' | 'followup', title: string, line: string, links: DropLink[], actions: FeedAction[], generation: number, needsReply = false): FeedItem {
     const at = this.now().toISOString()
+    // 6.99.13: a drop's files ride on every receipt and question it gets, each one openable, with a line saying where
+    // they are (no destination holds a file: a card, a thread note and a memory take words).
+    const files = kind === 'followup' ? [] : fileLinks(drop.attachments)
+    if (files.length) { links = [...links, ...files]; line = `${line} ${filesLine(files.length)}` }
     const [item] = this.deps.feed.insert([{ id: feedId(), kind, threadId: drop.id, createdAt: at,
       // Receipts are born read (plan section 1); a question and a follow-up count as unread on the pinned row.
       // A receipt that asks (a reminder with no time) is waiting on him until he picks one (P2).
@@ -357,15 +391,36 @@ export class DropService {
       if (drop.state === 'undone') return this.answer(drop, true)
       const generation = this.nextGeneration(drop.id)
       await this.reverse(drop)
+      // 6.99.13: Undo takes the drop's files with it. Only after the destination let go, so a refused Undo keeps them.
+      const fileIds = (drop.attachments ?? []).map(a => a.id)
+      let files: 'none' | 'removed' | 'kept' = 'none'
+      if (fileIds.length) {
+        try {
+          if (!this.deps.attachments) throw new Error('no attachment store')
+          await this.deps.attachments.unpin(fileIds, drop.id)
+          files = 'removed'
+        } catch {
+          files = 'kept'
+          console.warn(`[drops] ${drop.id} files not removed on undo`)
+        }
+      }
       const at = this.now().toISOString()
       const saved = this.deps.drops.update(drop.id, d => {
         const next: DropRecord = { ...d, state: 'undone', links: [], undoUntil: null, timeline: [...d.timeline, { at, state: 'undone' }] }
         delete next.hold; delete next.remind; delete next.choices
+        if (files === 'removed') delete next.attachments
         return next
       })
+      if (files === 'removed') {
+        // The chat stops offering files that are gone.
+        const withFiles = new Set(this.deps.feed.list().filter(i => i.threadId === drop.id && i.links.some(l => l.kind === 'file')).map(i => i.id))
+        if (withFiles.size) this.deps.feed.update(withFiles, i => ({ ...i, links: i.links.filter(l => l.kind !== 'file') }))
+      }
       this.retire(drop.id)
-      this.receipt(saved, 'receipt', 'Undone', undoLine(drop), [], [], generation)
-      console.log(`[drops] ${drop.id} undone from=${drop.dest ?? drop.state}`)
+      const filesWords = files === 'removed' ? (fileIds.length === 1 ? ' The file is removed.' : ` The ${fileIds.length} files are removed.`)
+        : files === 'kept' ? ' COS could not remove the files.' : ''
+      this.receipt(saved, 'receipt', 'Undone', undoLine(drop) + filesWords, [], [], generation)
+      console.log(`[drops] ${drop.id} undone from=${drop.dest ?? drop.state}${files === 'none' ? '' : ` files=${files}`}`)
       return this.answer(this.deps.drops.get(drop.id)!, false)
     })
   }
@@ -567,7 +622,7 @@ export class DropService {
     if (options.q) {
       const terms = options.q.normalize('NFKC').toLowerCase().split(/\s+/).filter(Boolean)
       rows = rows.filter(r => {
-        const hay = [r.text, ...r.links.map(l => l.label), r.hold?.label ?? '', r.file?.displayName ?? ''].join(' ').normalize('NFKC').toLowerCase()
+        const hay = [r.text, ...r.links.map(l => l.label), r.hold?.label ?? '', r.file?.displayName ?? '', ...(r.attachments ?? []).map(a => a.name)].join(' ').normalize('NFKC').toLowerCase()
         return terms.every(t => hay.includes(t))
       })
     }
@@ -589,7 +644,7 @@ export class DropService {
 
   private answer(drop: DropRecord, replayed: boolean): DropAnswer {
     const items = this.deps.feed.list().filter(i => i.threadId === drop.id)
-    return { drop: this.view(drop, null), items, replayed, ...(drop.dest === 'ask' && !drop.ask ? { next: { kind: 'ask' as const, prompt: drop.text } } : {}) }
+    return { drop: this.view(drop, null), items, replayed, ...(drop.dest === 'ask' && !drop.ask ? { next: nextAsk(drop) } : {}) }
   }
 
   private view(drop: DropRecord, cards: Map<string, { workStage: string; checked: boolean }> | null): DropView {
@@ -599,6 +654,7 @@ export class DropService {
       route: drop.route, undoUntil: drop.undoUntil,
       canUndo: ['filed', 'held', 'asking'].includes(drop.state) && !!drop.undoUntil && this.now().getTime() <= Date.parse(drop.undoUntil) && !drop.hold?.sentAt,
       ...(drop.hold ? { hold: drop.hold } : {}), ...(drop.remind ? { remind: drop.remind } : {}), ...(drop.file ? { file: drop.file } : {}),
+      ...(drop.attachments?.length ? { attachments: drop.attachments } : {}),
     }
   }
 
@@ -639,11 +695,23 @@ function checkTarget(target: DropTarget): void {
 function validateInput(input: DropInput): DropInput {
   if (!input || typeof input !== 'object') throw new DropError('invalid_drop', 400)
   if (typeof input.dropId !== 'string' || !DROP_ID.test(input.dropId)) throw new DropError('invalid_drop_id', 400, 'dropId must be a lowercase UUID v4.')
+  // 6.99.13: files, held to the Ask's own rules (media ids, deduplicated, at most five), before the words.
+  let attachmentIds: string[] = []
+  if (input.attachmentIds !== undefined) {
+    const list: unknown = input.attachmentIds
+    if (!Array.isArray(list) || list.some(id => typeof id !== 'string' || !ATTACHMENT_ID.test(id))) {
+      throw new DropError('invalid_attachment', 400, 'A file was not one this Mac uploaded. Add it again, then Drop.')
+    }
+    attachmentIds = [...new Set(list as string[])]
+    if (attachmentIds.length > DROP_LIMITS.attachments) throw new DropError('too_many_attachments', 400, `Up to ${DROP_LIMITS.attachments} files per drop. Remove one, then Drop.`)
+  }
+  // A drop is filed by its words, so files alone have nowhere to go: say so instead of guessing.
+  if (attachmentIds.length && (typeof input.text !== 'string' || !input.text.trim())) throw new DropError('words_needed', 400, 'Add a few words with the files so COS knows where they go.')
   if (typeof input.text !== 'string') throw new DropError('invalid_text', 400)
   const text = input.text.replace(/\r\n?/g, '\n').trim()
   if (!text || [...text].length > TEXT_MAX || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) throw new DropError('invalid_text', 400, `Text must be 1 to ${TEXT_MAX} characters.`)
   if (!['mac', 'web', 'g2', 'telegram'].includes(input.source)) throw new DropError('invalid_source', 400)
-  const out: DropInput = { dropId: input.dropId, text, source: input.source }
+  const out: DropInput = { dropId: input.dropId, text, source: input.source, ...(attachmentIds.length ? { attachmentIds } : {}) }
   if (input.hint !== undefined) {
     const h = input.hint
     if (!h || typeof h.sessionId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$/.test(h.sessionId)

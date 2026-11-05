@@ -9,7 +9,9 @@
  *
  *   GET  /drops/settings                      { protocol, enabled, source, router }
  *   PUT  /drops/settings  { enabled }         same answer
- *   POST /drops           { dropId, text, source, hint?: { sessionId, label? }, file? }  DropAnswer
+ *   POST /drops           { dropId, text, source, hint?: { sessionId, label? }, file?, attachmentIds? }  DropAnswer
+ *                         6.99.13: attachmentIds, up to 5 fresh uploads (POST /api/media, /api/media/file), kept with the
+ *                         drop (lib/drop-attachments.ts). Words are still required. Advertised as dropIt.attachments.
  *   GET  /drops           ?q&kind&status&limit&before                                   History
  *   GET  /drops/:id                                                                     DropAnswer
  *   POST /drops/:id/undo                                                                DropAnswer
@@ -144,7 +146,7 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
 
   router.post('/drops', (req, res) => withService(res, async service => {
     const b = req.body
-    if (!isRecord(b) || Object.keys(b).some(k => !['dropId', 'text', 'source', 'hint', 'file'].includes(k))) return bad(res, 'invalid_drop')
+    if (!isRecord(b) || Object.keys(b).some(k => !['dropId', 'text', 'source', 'hint', 'file', 'attachmentIds'].includes(k))) return bad(res, 'invalid_drop')
     try { return res.json(await service.submit(b as unknown as DropInput)) } catch (e) { return send(res, e) }
   }))
 
