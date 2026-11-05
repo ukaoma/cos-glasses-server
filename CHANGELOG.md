@@ -1,3 +1,12 @@
+## 6.99.8 - Open COS on the web from the glasses app (private)
+
+2026-11-04. Private build for one Mac, on top of 6.99.7. Pairs with COS Glasses 6.11.672. Nothing changes for the COS Control Mac app.
+
+- **A sign-in link for your phone's browser.** COS Glasses 6.11.672 adds Open COS on the web in Settings. It asks the Mac for a link, copies it, and you paste it into Safari or any browser to land on COS Activity already signed in, over Tailscale. The link works once and lasts 2 minutes; a short sign-in code is shown with it as a fallback. Links from the Even app open inside Even's own browser, never Safari, so copying is the way out (tested on an iPhone).
+- New route `POST /api/web-session/phone-link`, for the paired glasses app only (its token; a signed-in browser cookie is refused). Callers must be on this Mac, Tailscale or the home network. At most 5 links a minute. The link and the code are never written to the log. `/api/health` advertises `capabilities.webPhoneLink`, so older glasses builds and older servers simply do not show the row.
+- An expired link now says to get a new one from COS Control or the COS Glasses app.
+- Default-on changes: none for the Mac. The route answers only the paired glasses app.
+
 ## 6.99.7 - Dictation no longer fails while meetings record (private hotfix)
 
 2026-11-04. Private hotfix for one Mac, on top of 6.99.5. 6.99.6 is a separate meeting consolidation build, not yet installed; it needs this fix merged before it ships. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
