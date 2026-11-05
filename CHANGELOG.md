@@ -1,9 +1,16 @@
-## 6.99.6 - Resumable meeting consolidation (private)
+## 6.99.8 - Resumable meeting consolidation (private)
 
 - Explicit meeting cleanup jobs continue across bounded 15-minute provider passes under one durable job, model selection and cancellation control. Ordinary chats retain their current limits.
 - Each pass closes its provider process tree before continuation. Partial output at the pass limit is progress, never a completed cleanup.
 - A saved inventory, verified evidence hashes and final audit report gate completion. Provider failures, cancellation, three unchanged checkpoints or the 12-hour/48-pass safeguard stop honestly with saved work intact.
 - Exposes the maintenance workflow capability for compatible COS Control clients. Interrupted server boots retain the existing interruption/orphan recovery policy; this does not silently restart writes after a server crash.
+
+## 6.99.7 - Dictation no longer fails while meetings record (private hotfix)
+
+2026-11-04. Private hotfix for one Mac, on top of 6.99.5. 6.99.6 is a separate meeting consolidation build, not yet installed; it needs this fix merged before it ships. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
+
+- **Fix: Mac dictation said "Server stopped" while a meeting was recording.** Asking whether a meeting was saved read and parsed every saved meeting's chunk file (813 files, 1.8 GB on the test Mac) whenever the meeting was not saved yet, which is every live recording. COS Control asks that of each live recording every few seconds, so two recordings kept the server busy for 4 to 17 seconds at a time. Dictation's 5 second check timed out, and live chunks took up to 26 seconds. Now each saved file's session is remembered until the file changes, and its first 4 KB is enough for most files. On the test Mac one lookup went from about 4.7 seconds to 5 ms (575 ms the first time after a start). Results were identical for 37 saved meetings, 6 of them Mac recordings.
+- Default-on changes: none. The lookup gives the same answers, only faster.
 
 ## 6.99.5 - Control Web: questions asked on the Mac show on the phone (private)
 

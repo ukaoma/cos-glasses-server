@@ -15,10 +15,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, afterAll, vi } from 'vitest'
 import {
   boundedMeetingSource,
+  clearSidecarSessionCache,
   MEETING_SOURCE_MAX_BYTES,
   MeetingStore,
   MeetingStoreError,
   storedMeetingTime,
+  sidecarHeadSessionId,
   type SaveMeetingInput,
 } from './meeting-store.js'
 
@@ -353,5 +355,60 @@ describe('MeetingStore', () => {
     const saved = store.save(input())
     expect(existsSync(saved.filepath)).toBe(true)
     expect(statSync(root).mode & 0o777).toBe(0o700)
+  })
+})
+
+// 6.99.7: a live (unsaved) session's lookup read and parsed every saved sidecar on the main thread; Control asks it of
+// each live recording every few seconds, and the server froze long enough for dictation to report "Server stopped".
+describe('findBySessionId reads only the sidecar that can match (6.99.7)', () => {
+  const sidecarReads = () => markdownReads.filter(name => name.endsWith('.g2-chunks.json'))
+
+  it('answers a missing session without reading any sidecar in full, and still finds a saved one', () => {
+    const root = newRoot()
+    const store = new MeetingStore(root)
+    const saved = ['meeting_idx_001', 'meeting_idx_002', 'meeting_idx_003'].map(sessionId =>
+      store.save(input({ sessionId, title: `Index ${sessionId}` })))
+    clearSidecarSessionCache()
+    markdownReads.length = 0
+
+    expect(store.findBySessionId('meeting_live_absent')).toBeNull()
+    expect(sidecarReads()).toEqual([])
+
+    expect(store.findBySessionId('meeting_idx_002')).toMatchObject({ filename: saved[1].filename })
+    expect(sidecarReads()).toEqual([saved[1].filename.replace(/\.md$/, '.g2-chunks.json')])
+  })
+
+  it('reads a sidecar whose head cannot decide once, then remembers it until the file changes', () => {
+    const root = newRoot()
+    const store = new MeetingStore(root)
+    const saved = store.save(input({ sessionId: 'meeting_idx_mac' }))
+    const sidecarPath = saved.filepath.replace(/\.md$/, '.g2-chunks.json')
+    const sidecarName = sidecarPath.split('/').pop()!
+    // A Mac capture's shape: an object member before the top-level sessionId, so the head is undecided.
+    const { schemaVersion, ...rest } = JSON.parse(readFileSync(sidecarPath, 'utf8')) as Record<string, unknown>
+    writeFileSync(sidecarPath, JSON.stringify({ schemaVersion, captureSource: { version: 1, sessionId: 'nested_other' }, ...rest }))
+    expect(sidecarHeadSessionId(readFileSync(sidecarPath, 'utf8'))).toBeUndefined()
+    clearSidecarSessionCache()
+    markdownReads.length = 0
+
+    expect(store.findBySessionId('meeting_live_absent')).toBeNull()
+    expect(sidecarReads()).toEqual([sidecarName])
+    expect(store.findBySessionId('meeting_live_absent')).toBeNull()
+    expect(sidecarReads()).toEqual([sidecarName])
+    expect(store.findBySessionId('meeting_idx_mac')).toMatchObject({ filename: saved.filename })
+
+    // A rewrite that changes the top-level sessionId is seen: the stamp moved, so the cached answer is not used.
+    writeFileSync(sidecarPath, JSON.stringify({ schemaVersion, captureSource: { version: 1 }, ...rest, sessionId: 'meeting_idx_moved' }))
+    expect(store.findBySessionId('meeting_idx_moved')).toMatchObject({ filename: saved.filename })
+    expect(store.findBySessionId('meeting_idx_mac')).toBeNull()
+  })
+
+  it('takes a sessionId from the head only when nothing but scalars precede it', () => {
+    expect(sidecarHeadSessionId('{"schemaVersion":1,"sessionId":"meeting_a_1","chunks":[')).toBe('meeting_a_1')
+    expect(sidecarHeadSessionId('{\n  "schemaVersion": 2,\n  "title": "a \\"q\\" b",\n  "sessionId": "meeting_b_2"')).toBe('meeting_b_2')
+    expect(sidecarHeadSessionId('{"schemaVersion":1,"captureSource":{"sessionId":"meeting_nested"},"sessionId":"meeting_c_3"')).toBeUndefined()
+    expect(sidecarHeadSessionId('{"schemaVersion":1,"chunks":[{"sessionId":"meeting_nested"}]')).toBeUndefined()
+    expect(sidecarHeadSessionId('{"schemaVersion":1,"sessionId":"meeting_trunc')).toBeUndefined()
+    expect(sidecarHeadSessionId(null)).toBeUndefined()
   })
 })

@@ -341,6 +341,48 @@ const SIDECAR_HEAD_BYTES = 4096
  * a matching prefix alone cannot prove a valid committed capture. */
 const SAVE_RECEIPT_SIDECAR_MAX_BYTES = 32 * 1024 * 1024
 
+/** 6.99.7: findBySessionId read and parsed every saved sidecar (813 files, 1.8 GB on Miles's Mac) on the main thread
+ * for any session not yet saved, and Control asks that of each live recording every few seconds. Two live recordings
+ * froze the server for 4 to 17 s at a time, so dictation's 5 s capability check timed out ("Server stopped").
+ * A sidecar's top-level sessionId is remembered by file stamp (inode, size, mtime): a lookup now stats files and
+ * fully reads only the one that matches. null means the sidecar has no sessionId, so it can never match. */
+const sidecarSessions = new Map<string, { stamp: string; sessionId: string | null }>()
+const SIDECAR_SESSION_CACHE_MAX = 50_000
+
+function sidecarStamp(path: string): string | undefined {
+  try {
+    const st = lstatSync(path, { throwIfNoEntry: false })
+    return st?.isFile() ? `${st.ino}:${st.size}:${st.mtimeMs}` : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function knownSidecarSession(path: string, stamp: string): string | null | undefined {
+  const entry = sidecarSessions.get(path)
+  return entry && entry.stamp === stamp ? entry.sessionId : undefined
+}
+
+function rememberSidecarSession(path: string, stamp: string, sessionId: string | null): void {
+  if (sidecarSessions.size >= SIDECAR_SESSION_CACHE_MAX && !sidecarSessions.has(path)) sidecarSessions.clear()
+  sidecarSessions.set(path, { stamp, sessionId })
+}
+
+/** The top-level sessionId from a sidecar's head, only when nothing but scalar members precede it (so it cannot be a
+ * nested object's sessionId). Every saved sidecar starts `{"schemaVersion": N, "sessionId": ...`; a Mac capture puts
+ * its captureSource object first, so its head is undecided (undefined) and it is read in full once, then remembered. */
+const SIDECAR_HEAD_SESSION = /^\s*\{(?:\s*"[A-Za-z0-9_]+"\s*:\s*(?:-?[0-9][0-9.eE+-]*|true|false|null|"(?:[^"\\]|\\.)*")\s*,)*\s*"sessionId"\s*:\s*"([A-Za-z0-9:_-]{3,96})"/
+
+export function sidecarHeadSessionId(head: string | null): string | undefined {
+  if (!head) return undefined
+  return SIDECAR_HEAD_SESSION.exec(head)?.[1]
+}
+
+/** Tests only. */
+export function clearSidecarSessionCache(): void {
+  sidecarSessions.clear()
+}
+
 export class MeetingStore {
   readonly root: string
 
@@ -504,10 +546,21 @@ export class MeetingStore {
         .sort()
         .reverse()
       for (const sidecarName of sidecars) {
+        // 6.99.7: skip a sidecar whose top-level sessionId is already known to differ, from the stamp cache or the
+        // file's head, before reading and parsing all of it. Unknown falls through to the full read, as before.
+        const sidecarPath = join(monthDir, sidecarName)
+        const stamp = sidecarStamp(sidecarPath)
+        let known = stamp ? knownSidecarSession(sidecarPath, stamp) : undefined
+        if (known === undefined) {
+          known = sidecarHeadSessionId(safeReadFileHead(monthDir, monthReal, sidecarName, SIDECAR_HEAD_BYTES))
+          if (known !== undefined && stamp) rememberSidecarSession(sidecarPath, stamp, known)
+        }
+        if (known !== undefined && known !== sessionId) continue
         const sidecarText = safeReadFile(monthDir, monthReal, sidecarName, SAVE_RECEIPT_SIDECAR_MAX_BYTES)
         if (sidecarText === null) continue
         try {
           const sidecar = JSON.parse(sidecarText) as Record<string, unknown>
+          if (stamp) rememberSidecarSession(sidecarPath, stamp, typeof sidecar.sessionId === 'string' ? sidecar.sessionId : null)
           if (sidecar.sessionId !== sessionId) continue
           if (sessionId.startsWith('phone_')) {
             const capture = sidecar.captureSource as Record<string, unknown> | undefined
