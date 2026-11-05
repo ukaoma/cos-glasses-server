@@ -146,7 +146,7 @@ describe('origin on the durable request', () => {
 })
 
 describe('the fingerprint pick', () => {
-  it('names exactly the sixteen keys the request had before origin existed', () => {
+  it('keeps legacy identity keys plus the explicit maintenance execution policy', () => {
     expect([...FINGERPRINT_KEYS]).toEqual([
       'clientJobId', 'generation', 'query', 'sessionId', 'model', 'effort',
       'cursorExecutionMode', 'messageEra', 'globalMsgNum', 'reference', 'handoffCode',
@@ -154,7 +154,7 @@ describe('the fingerprint pick', () => {
       'activityToolMode',
       // 6.80.0 key lanes (QA U9): a one-turn key run asks something different. Absent on every
       // older request, so no stored hash moves (the pick drops an absent key).
-      'keyTurnOnly',
+      'keyTurnOnly', 'maintenanceWorkflow',
     ])
     expect(FINGERPRINT_KEYS).not.toContain('origin')
     // Every request key is in exactly one list; the type-level assertion is

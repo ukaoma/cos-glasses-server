@@ -134,6 +134,8 @@ export interface QueryJobRequest {
    * it names the session, it does not change what is asked.
    */
   sessionName?: string
+  /** Explicit user-started, checkpointed maintenance. Changes execution semantics. */
+  maintenanceWorkflow?: 'meeting-consolidation-v1'
   /**
    * Key lanes (QA U9 / C10): run THIS turn on the key profile it names without binding the
    * session to it (the plan-limit "run this one on your key" offer). Kept only with a
@@ -599,6 +601,12 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
   const handoffCode = optionalString(input.handoffCode, 'handoff_code', 128)
   const clientQueueItemId = optionalString(input.clientQueueItemId, 'client_queue_item_id', 120)
   const sessionName = sanitizeSessionName(input.sessionName)
+  const maintenanceWorkflow = input.maintenanceWorkflow
+  if (maintenanceWorkflow != null && (maintenanceWorkflow !== 'meeting-consolidation-v1'
+    || !['opus', 'codex-frontier'].includes(model ?? '') || input.dispatch != null || input.steerable === true
+    || (Array.isArray(input.attachmentIds) && input.attachmentIds.length > 0))) {
+    throw new QueryJobValidationError('invalid_maintenance_workflow')
+  }
   const globalMsgNum = input.globalMsgNum == null ? undefined : Number(input.globalMsgNum)
   if (globalMsgNum != null && (!Number.isSafeInteger(globalMsgNum) || globalMsgNum < 1)) {
     throw new QueryJobValidationError('invalid_global_msg_num')
@@ -670,6 +678,7 @@ export function parseQueryJobRequest(raw: unknown, options: ParseQueryJobRequest
     ...(input.handoffLatest === true ? { handoffLatest: true } : {}),
     ...(clientQueueItemId ? { clientQueueItemId } : {}),
     ...(sessionName ? { sessionName } : {}),
+    ...(maintenanceWorkflow === 'meeting-consolidation-v1' ? { maintenanceWorkflow } as const : {}),
     ...(input.keyTurnOnly === true && isProfilePreference(model) ? { keyTurnOnly: true as const } : {}),
     ...(input.steerable === true ? { steerable: true as const } : {}),
     attachmentIds,
@@ -735,7 +744,7 @@ export const FINGERPRINT_KEYS = [
   'clientJobId', 'generation', 'query', 'sessionId', 'model', 'effort',
   'cursorExecutionMode', 'messageEra', 'globalMsgNum', 'reference', 'handoffCode',
   'handoffLatest', 'clientQueueItemId', 'attachmentIds', 'attachmentRefs',
-  'activityToolMode', 'keyTurnOnly',
+  'activityToolMode', 'keyTurnOnly', 'maintenanceWorkflow',
 ] as const satisfies readonly (keyof QueryJobRequest)[]
 
 /** The request keys deliberately OUTSIDE the identity. Every key of

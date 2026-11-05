@@ -1,3 +1,6 @@
+import { resolveProviderWorkDir } from './launch-dir.js'
+import { COS_SCRIPTS_DIR } from './python-bridge.js'
+import { consolidationModelRunner } from './meeting-consolidation-run.js'
 import { routineAuditCaller } from './routines-config.js'
 import { jobAuditCaller } from './job-audit-caller.js'
 import { carriesBoundTo } from './agent-session-binding-store.js'
@@ -255,7 +258,13 @@ const runner: QueryJobRunner = async ({ jobId, turnId, request, signal, callback
     ? { ...keyProfileLinkageProvider(keyTurn), resolvedModel: keyTurn.binding }
     : { provider: providerFor(model), resolvedModel: model }
 
-  await callModelStreaming(
+  const runModel = request.maintenanceWorkflow === 'meeting-consolidation-v1'
+    ? consolidationModelRunner(callModelStreaming, {
+        root: dataPath('meeting-consolidation'),
+        workspace: resolveProviderWorkDir({ scriptsDir: COS_SCRIPTS_DIR }),
+        runId: `${request.clientJobId}-g${request.generation}`,
+      }) : callModelStreaming
+  await runModel(
     request.query,
     request.sessionId,
     {

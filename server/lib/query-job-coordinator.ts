@@ -1,3 +1,4 @@
+import { CONSOLIDATION_JOB_MS } from './meeting-consolidation-run.js'
 import { getOrCreateSession } from './conversation.js'
 import {
   QueryJobNotFoundError,
@@ -723,8 +724,10 @@ export class QueryJobCoordinator {
   private armProviderDeadline(active: ActiveRun): void {
     if (active.providerTimeoutTimer || active.terminalPersisted || active.persistenceFailed) return
     // On the monotonic steer clock (P7 S7): decideSteer compares it with the bridge's wall clock.
-    active.deadlineAt = steerClock() + this.providerTimeoutMs
-    active.providerTimeoutTimer = setTimeout(() => active.resolveProviderTimeout(), this.providerTimeoutMs)
+    const timeoutMs = active.request.maintenanceWorkflow === 'meeting-consolidation-v1'
+      ? CONSOLIDATION_JOB_MS : this.providerTimeoutMs
+    active.deadlineAt = steerClock() + timeoutMs
+    active.providerTimeoutTimer = setTimeout(() => active.resolveProviderTimeout(), timeoutMs)
     active.providerTimeoutTimer.unref?.()
   }
 

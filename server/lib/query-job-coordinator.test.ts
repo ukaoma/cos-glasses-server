@@ -938,3 +938,20 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
     await waitFor(() => live, count => count === 0)
   })
 })
+
+describe('maintenance deadline', () => {
+  it('keeps the same cleanup job active past the ordinary provider budget', async () => {
+    let context: QueryJobRunnerContext | undefined
+    const timed = await coordinator(async ctx => {
+      context = ctx
+      await ctx.callbacks.onStart({ sessionId: ctx.request.sessionId, provider: 'claude' })
+      await new Promise(resolve => setTimeout(resolve, 1_200))
+      await ctx.callbacks.onStart({ sessionId: ctx.request.sessionId, provider: 'claude' })
+      await ctx.callbacks.onDone({ text: 'verified multi-pass report', provider: 'claude' })
+    }, { providerTimeoutMs: 1_000 })
+    const admitted = await timed.submit({ ...admission(), model: 'opus', maintenanceWorkflow: 'meeting-consolidation-v1' })
+    const completed = await waitFor(() => timed.getSnapshot(admitted.job.jobId), job => job.status === 'completed', 3_000)
+    expect(completed.response).toBe('verified multi-pass report')
+    expect(context?.signal.aborted).toBe(false)
+  }, 4_000)
+})

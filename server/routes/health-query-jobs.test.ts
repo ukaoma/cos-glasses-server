@@ -152,6 +152,7 @@ describe('public durable-query capability health', () => {
       enabled: true,
       protocolVersion: 1,
       trail: true,
+      maintenanceWorkflows: ['meeting-consolidation-v1'],
     })
     // 6.52.0: the session questions contract, beside the trail. No broker is registered in
     // this harness, so it reads off; the numbers are the client contract.
@@ -206,7 +207,7 @@ describe('public durable-query capability health', () => {
     try {
       const response = await fetch(`${base}/api/models`)
       const body = await response.json() as any
-      expect(body.capabilities?.durableQueryJobs).toEqual({ enabled: true, protocolVersion: 1, trail: false })
+      expect(body.capabilities?.durableQueryJobs).toEqual({ enabled: true, protocolVersion: 1, trail: false, maintenanceWorkflows: ['meeting-consolidation-v1'] })
     } finally {
       delete process.env.COS_MESSAGES_TRAIL
     }

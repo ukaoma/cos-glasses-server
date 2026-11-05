@@ -312,3 +312,36 @@ describe('Codex detached finalization', () => {
     }))
   })
 })
+
+describe('codex maintenance pass lifecycle', () => {
+  const begin = async (cb: ReturnType<typeof callbacks>) => {
+    await callCodexStreaming('cleanup', 'session-test', cb, undefined, undefined, undefined, undefined,
+      { lightweight: true, maintenancePass: true, sessionLockHeld: true })
+  }
+  it('waits for tree closure even with repeated terminal events', async () => {
+    const cb = callbacks()
+    state.terminateProviderProcess.mockImplementation(() => new Promise(resolve => { state.resolveTermination = resolve }))
+    await begin(cb)
+    state.child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'partial progress' } }) + '\n'))
+    state.child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'turn.completed' }) + '\n'))
+    state.child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'turn.completed' }) + '\n'))
+    expect(cb.onDone).not.toHaveBeenCalled(); expect(cb.onAnswerReady).not.toHaveBeenCalled()
+    expect(state.terminateProviderProcess).toHaveBeenCalledTimes(1)
+    state.resolveTermination?.({ closed: true, code: 0, signal: null, escalated: false })
+    await vi.waitFor(() => expect(cb.onDone).toHaveBeenCalledTimes(1))
+    expect(cb.onError).not.toHaveBeenCalled()
+  })
+  it('15-minute partial output yields a continuation signal, never success', async () => {
+    vi.useFakeTimers()
+    const cb = callbacks()
+    state.terminateProviderProcess.mockResolvedValue({ closed: true, code: null, signal: 'SIGTERM', escalated: false })
+    await begin(cb)
+    for (let minute = 0; minute < 15; minute++) {
+      state.child.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'partial progress' } }) + '\n'))
+      await vi.advanceTimersByTimeAsync(60_000)
+    }
+    expect(cb.onError).toHaveBeenCalledWith('maintenance_pass_timeout')
+    expect(cb.onDone).not.toHaveBeenCalled(); expect(cb.onAnswerReady).not.toHaveBeenCalled()
+    expect(state.terminateProviderProcess).toHaveBeenCalledTimes(1)
+  })
+})

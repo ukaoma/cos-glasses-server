@@ -711,6 +711,7 @@ healthRouter.get('/models', async (req, res) => {
         // 6.78.0 Messages steer: present only with COS_MESSAGES_STEER on and a Claude CLI that
         // takes stream-json input (probed once). Absent, the app shows today's UI.
         ...steerCapabilityField(durableJobs.enabled),
+        ...(durableJobs.enabled ? { maintenanceWorkflows: ['meeting-consolidation-v1'] } : {}),
       },
       // 6.52.0: the session questions API and its client contract. A client polls
       // `GET /api/session-questions?client=glasses|phone` every `pollIntervalMs`; one

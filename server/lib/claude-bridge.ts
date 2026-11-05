@@ -418,6 +418,8 @@ const PHASE_LABELS: Record<Phase, string> = {
  * Returns the session ID for multi-turn tracking.
  */
 export interface CallOptions {
+  /** Internal checkpoint runner only; timeout is never a successful answer. */
+  maintenancePass?: true
   lightweight?: boolean  // Skip async context fetch — use cached context instantly (G2 speed path)
   abortSignal?: AbortSignal
   effort?: EffortPreference
@@ -700,7 +702,7 @@ export async function callClaudeStreaming(
   const effortWallMax = resolvedEffort === 'max' || resolvedEffort === 'ultracode'
     ? Math.max(defaultWallMax, WALL_MAX_DEEP_EFFORT_MS)
     : defaultWallMax
-  const wallMax = isExtendedQuery(query) ? Math.max(WALL_MAX_EXTENDED_MS, effortWallMax) : effortWallMax
+  const wallMax = options?.maintenancePass ? 900_000 : isExtendedQuery(query) ? Math.max(WALL_MAX_EXTENDED_MS, effortWallMax) : effortWallMax
   // Key lanes: one nonce per turn from the relay (P2 contract), then the child env points at it.
   // Only the child's copy is written. A relay that cannot issue ends the turn before spawn.
   let keyTurn: RelayTurnHandle | null = null
@@ -850,8 +852,16 @@ export async function callClaudeStreaming(
     })
   }
 
+  let maintenanceClosed = false
   async function finalize(text: string) {
     if (finalized) return
+    // A next maintenance pass may start only after the entire provider tree
+    // has closed. Normal chat retains its existing result-event behavior.
+    if (options?.maintenancePass && !maintenanceClosed) {
+      if (terminationRequested) return
+      await terminateForTerminal('maintenance checkpoint', () => finalize(text))
+      return
+    }
     const responseAuthFailure = terminalProviderAuthFailure('claude', text)
     const authFailure = responseAuthFailure
       ?? (!text.trim() ? terminalTextError ?? terminalProviderAuthFailure('claude', stderr) : null)
@@ -1010,6 +1020,11 @@ export async function callClaudeStreaming(
     status: Exclude<ClaudeRunStatus, 'running'> = 'failed',
   ) {
     if (finalized) return
+    if (options?.maintenancePass && !maintenanceClosed) {
+      if (terminationRequested) return
+      await terminateForTerminal('maintenance error', () => finalizeError(msg, exitCode, status))
+      return
+    }
     finalized = true
     cleanup()
     armSteerReaper()
@@ -1041,6 +1056,7 @@ export async function callClaudeStreaming(
       console.error(`[claude-bridge] provider did not close after SIGKILL (${reason}); retaining lifecycle ownership`)
       return
     }
+    maintenanceClosed = true
     await onClosed(result)
   }
 
@@ -1117,6 +1133,7 @@ export async function callClaudeStreaming(
 
   const wallTimer = setTimeout(() => {
     void terminateForTerminal('wall timeout', result => {
+      if (options?.maintenancePass) return finalizeError('maintenance_pass_timeout', result.code)
       // 6.78.0 steer: a steered run past its first whole answer completes with that answer.
       if (steerCheckpoint !== null) return finalize(steerCheckpoint)
       if (fullText) {
@@ -1338,7 +1355,9 @@ export async function callClaudeStreaming(
       } catch { /* ignore */ }
     }
 
-    if (fullText) {
+    if (options?.maintenancePass) {
+      void finalizeError('maintenance_pass_incomplete_exit', code)
+    } else if (fullText) {
       // If we got text but no explicit result event, still finalize. A sole,
       // machine-shaped auth response is classified inside finalize.
       void finalize(fullText)

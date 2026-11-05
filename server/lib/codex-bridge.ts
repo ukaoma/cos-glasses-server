@@ -722,8 +722,16 @@ export async function callCodexStreaming(
     callbacks.onChunk(text)
   }
 
+  let maintenanceClosed = false
   async function finalize(text: string) {
     if (finalized) return
+    // A next maintenance pass may start only after the entire provider tree
+    // has closed. Normal chat retains its existing result-event behavior.
+    if (options?.maintenancePass && !maintenanceClosed) {
+      if (terminationRequested) return
+      await terminateForTerminal('maintenance checkpoint', () => finalize(text))
+      return
+    }
     const responseAuthFailure = terminalProviderAuthFailure('codex', text)
     const authFailure = responseAuthFailure
       ?? (!text.trim() ? terminalTextError ?? terminalProviderAuthFailure('codex', stderr) : null)
@@ -861,6 +869,11 @@ export async function callCodexStreaming(
 
   async function finalizeError(msg: string, exitCode?: number | null, status: Exclude<CodexRunStatus, 'running'> = 'failed') {
     if (finalized) return
+    if (options?.maintenancePass && !maintenanceClosed) {
+      if (terminationRequested) return
+      await terminateForTerminal('maintenance error', () => finalizeError(msg, exitCode, status))
+      return
+    }
     finalized = true
     // Canary R14: a Codex child keeps retrying after the bridge ends the turn; its nonce dies now.
     keyTurn?.revoke('cancel')
@@ -876,7 +889,7 @@ export async function callCodexStreaming(
       exitCode,
     })
     try {
-      await callbacks.onError(safeCodexUserError(msg))
+      await callbacks.onError(options?.maintenancePass && msg === 'maintenance_pass_timeout' ? msg : safeCodexUserError(msg))
     } catch (error) {
       console.error('[codex-bridge] terminal error callback failed:', error)
     }
@@ -910,6 +923,7 @@ export async function callCodexStreaming(
       console.error(`[codex-bridge] provider did not close after SIGKILL (${reason}); retaining lifecycle ownership`)
       return
     }
+    maintenanceClosed = true
     await onClosed(result)
   }
 
@@ -949,6 +963,7 @@ export async function callCodexStreaming(
 
   const wallTimer = setTimeout(() => {
     void terminateForTerminal('wall timeout', result => {
+      if (options?.maintenancePass) return finalizeError('maintenance_pass_timeout', result.code)
       if (fullText) return finalize(fullText)
       return finalizeError(`Wall clock limit reached (${WALL_MAX_MS / 1000}s). Codex process killed.`, result.code)
     })
@@ -1046,7 +1061,11 @@ export async function callCodexStreaming(
       try { handleEvent(JSON.parse(buffer.trim())) } catch { /* ignore */ }
     }
     runUsage.settle()
-    if (finalized) return
+    if (finalized || terminationRequested) return
+    if (options?.maintenancePass) {
+      finalizeError('maintenance_pass_incomplete_exit', code)
+      return
+    }
     if (fullText) {
       void finalize(fullText)
       return

@@ -1,3 +1,10 @@
+## 6.99.6 - Resumable meeting consolidation (private)
+
+- Explicit meeting cleanup jobs continue across bounded 15-minute provider passes under one durable job, model selection and cancellation control. Ordinary chats retain their current limits.
+- Each pass closes its provider process tree before continuation. Partial output at the pass limit is progress, never a completed cleanup.
+- A saved inventory, verified evidence hashes and final audit report gate completion. Provider failures, cancellation, three unchanged checkpoints or the 12-hour/48-pass safeguard stop honestly with saved work intact.
+- Exposes the maintenance workflow capability for compatible COS Control clients. Interrupted server boots retain the existing interruption/orphan recovery policy; this does not silently restart writes after a server crash.
+
 ## 6.99.5 - Control Web: questions asked on the Mac show on the phone (private)
 
 2026-11-04. Private build for one Mac, on top of 6.99.4. Fixes from the web and Mac meeting comparison. Nothing changes for the glasses, the phone companion or the COS Control Mac app.
