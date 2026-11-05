@@ -165,6 +165,8 @@ describe('public durable-query capability health', () => {
       // 6.60.0: the away hold, 0 with no broker.
       awayHoldMs: 0,
       awayRecentClientMs: 0,
+      // 6.99.12: the route takes the COS Control Web session too.
+      webClient: true,
     })
     expect(body.capabilities?.runningTurnMeta).toEqual({ protocolVersion: 1 })
     expect(body.capabilities?.localFirstMeetings).toMatchObject({
@@ -227,6 +229,7 @@ describe('public durable-query capability health', () => {
         // 6.60.0: a broker built without the away hold reports 0.
         awayHoldMs: 0,
         awayRecentClientMs: 0,
+        webClient: true,
       })
       const health = await (await fetch(`${base}/api/health`)).json() as any
       expect(health.permissionBroker).toMatchObject({ enabled: true, mode: 'questions', lastFastPath: null, lastQuestionsPollAt: null })

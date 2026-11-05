@@ -234,6 +234,11 @@ export const QUESTIONS_POLL_INTERVAL_MS = 10_000
 export const POLL_FUTURE_SKEW_MS = 5_000
 /** The `client` values of a questions poll that count as a live answerer. */
 export const ANSWERING_CLIENTS: ReadonlySet<string> = new Set(['glasses', 'phone'])
+/**
+ * 6.99.12: the one `client` value a COS Control Web poll (browser session cookie, never the token) counts under,
+ * sent only while the page shows the cards. Kept apart from ANSWERING_CLIENTS: a token poll naming it never counts.
+ */
+export const WEB_ANSWERING_CLIENT = 'web'
 /** The questions API's own version, advertised at /api/models. */
 export const SESSION_QUESTIONS_PROTOCOL_VERSION = 1
 /** How often a parked item re-reads the desk. */
@@ -1781,6 +1786,11 @@ export interface SessionQuestionsCapability {
    * ms (`COS_PERMISSION_BROKER_AWAY_RECENT_CLIENT_S`); 0 means it must be polling right now.
    */
   awayRecentClientMs: number
+  /**
+   * 6.99.12: the questions route takes the COS Control Web session too, and a poll with `client=web` counts as a
+   * live answering client. A page reads this before it calls the route (an older server answers a cookie 401).
+   */
+  webClient: true
 }
 
 /**
@@ -1803,5 +1813,6 @@ export function sessionQuestionsCapability(): SessionQuestionsCapability {
     liveWindowMs: CLIENT_LIVE_WINDOW_MS,
     awayHoldMs,
     awayRecentClientMs,
+    webClient: true,
   }
 }

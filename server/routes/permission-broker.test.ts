@@ -562,7 +562,7 @@ describe('liveness and the mount', () => {
     const cursor = index.indexOf('  app.use(createCursorStopFollowupRouter({')
     const auth = index.indexOf("app.use('/api', requireApiToken(API_TOKEN, {")
     const parser = index.indexOf("app.use(express.json({ limit: '10mb' }))")
-    const api = index.indexOf("app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker, apiToken: () => API_TOKEN }))")
+    const api = index.indexOf("app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker, apiToken: () => API_TOKEN, webSessionAuthorized: webSessionCookieAuthorized }))")
     const gate = index.indexOf('if (threadAttachEnabled()) {\n  // 6.51.0: a queued Cursor turn')
     const attach = index.lastIndexOf('if (threadAttachEnabled()) {')
     for (const at of [hook, cursor, auth, parser, api, gate, attach]) expect(at).toBeGreaterThan(-1)

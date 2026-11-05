@@ -1251,10 +1251,10 @@ describe('the rows (session signal store seams)', () => {
     await broker.admit(permissionEnvelope('Bash', { command: 'ls' }, { cursor_version: '1' }, clock.now))
     for (const key of keys(broker.health())) expect(key, key).toMatch(/^[a-z][A-Za-z]*$/)
     expect(broker.health()).toMatchObject({ lastFastPath: 'cursor', lastFastPathAt: new Date(clock.now).toISOString() })
-    expect(sessionQuestionsCapability()).toEqual({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0, awayRecentClientMs: 0 })
+    expect(sessionQuestionsCapability()).toEqual({ enabled: true, mode: 'all', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0, awayRecentClientMs: 0, webClient: true })
     registerPermissionBroker(null)
     expect(permissionBrokerHealthFields()).toEqual({ permissionBroker: null })
-    expect(sessionQuestionsCapability()).toEqual({ enabled: false, mode: 'off', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0, awayRecentClientMs: 0 })
+    expect(sessionQuestionsCapability()).toEqual({ enabled: false, mode: 'off', protocolVersion: 1, pollIntervalMs: 10_000, liveWindowMs: 30_000, awayHoldMs: 0, awayRecentClientMs: 0, webClient: true })
   })
 })
 
@@ -1776,7 +1776,7 @@ describe('6.60.0: the away hold', () => {
     installed = PERMISSION_HOOK_TIMEOUT_S
     hold = 0
     expect(broker.awayHoldNowMs()).toBe(0)
-    expect(sessionQuestionsCapability()).toMatchObject({ awayHoldMs: 0, awayRecentClientMs: 0 })
+    expect(sessionQuestionsCapability()).toMatchObject({ awayHoldMs: 0, awayRecentClientMs: 0, webClient: true })
   })
 })
 

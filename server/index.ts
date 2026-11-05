@@ -213,7 +213,7 @@ import { isPublicApiRequest, requireApiToken } from './lib/api-auth.js'
 import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
 import { createWebControlRouter, isAllowedCorsOrigin, webControlCsp, webControlEnabled } from './routes/web-control.js'
-import { isWebControlSocketAllowed, setWebSessionEpochFile } from './lib/web-session-auth.js'
+import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
 import { reportClaudeExtraToolConfiguration } from './lib/claude-tool-access.js'
@@ -1001,7 +1001,12 @@ app.use('/api', createSessionHooksRouter({ port: PORT }))
 // 6.52.0: the permission broker's client API (the hook's door is mounted before the /api
 // gate, above). Behind the API token; a poll counts as a live answerer only with
 // `?client=glasses|phone`.
-app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker, apiToken: () => API_TOKEN }))
+// 6.99.12: COS Control Web reads the questions with its browser session, checked exactly as the /api gate checks it.
+const webSessionCookieAuthorized = (req: express.Request): boolean => isWebSessionAuthorized(req, API_TOKEN, {
+  selfDnsName: tailnetSelf.currentSelfDnsName(),
+  allowedPorts: [PORT, HTTPS_PORT],
+})
+app.use('/api', createSessionQuestionsRouter({ broker: permissionBroker, apiToken: () => API_TOKEN, webSessionAuthorized: webSessionCookieAuthorized }))
 // Phase 0 of Continue Original Agent Thread: can COS write into a desktop thread
 // without colliding with a live writer? Read-only — it answers, it never attaches.
 // Registered AFTER agentSessionsRouter deliberately: its paths are 2 and 4 segments

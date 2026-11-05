@@ -30,6 +30,13 @@
 // so a surface that only shows a count can poll without making the Mac hold questions it
 // cannot answer. It checks X-Cos-Token itself as well, in constant time, and a request
 // without it is refused and never counted, whatever sits in front of this router.
+// 6.99.12: COS Control Web reads the same list with its signed browser session (the
+// `cos_web_session` cookie, verified by `webSessionAuthorized`, the check the /api gate runs).
+// The hook token still opens nothing here. A browser poll counts as a live answering client
+// only with `?client=web`, which the page sends only while it shows the cards (a visible tab);
+// the same 30 s window as the phone. A cookie poll naming `glasses` or `phone`, or no client,
+// never counts, and a token poll naming `web` never counts either. A browser never reports
+// wearer presence, so it never enables the away hold.
 // 6.60.0: a poll with `&hold=1&presenceAgeMs=<int>` (COS Glasses 6.9.563 and later) records
 // wearer presence for the away hold instead of the 6.59.0 liveness; a `hold=1` poll without
 // a valid `presenceAgeMs` makes no client live and enables no hold. The response adds
@@ -40,6 +47,7 @@ import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import {
   ANSWERING_CLIENTS,
   CLIENT_LIVE_WINDOW_MS,
+  WEB_ANSWERING_CLIENT,
   SESSION_QUESTIONS_PROTOCOL_VERSION,
   type BrokerAdmission,
   type HookReplyChannel,
@@ -138,8 +146,13 @@ export function createPermissionBrokerHookRouter(deps: PermissionBrokerHookRoute
 
 export interface SessionQuestionsRouterDeps {
   broker: PermissionBroker
-  /** The pairing token (X-Cos-Token). A poll counts as a live client only with it. */
+  /** The pairing token (X-Cos-Token). A poll counts as a live client only with it, or with the web session below. */
   apiToken: () => string
+  /**
+   * 6.99.12: whether this request carries a valid COS Control Web session (the cookie, its epoch, and the origin
+   * rules: `isWebSessionAuthorized` in production). Absent: only the token opens the list, as before.
+   */
+  webSessionAuthorized?: (req: Request) => boolean
   /** Where a counted poll is recorded; `noteQuestionsPoll` in production. */
   notePoll?: (at: number, poll: QuestionsPollFacts) => void
   now?: () => number
@@ -171,14 +184,21 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
     res.set('Cache-Control', 'private, no-store')
     let expected = ''
     try { expected = deps.apiToken() } catch { expected = '' }
+    const byToken = timingSafeTokenEqual(req.headers['x-cos-token'], expected)
+    let byWebSession = false
+    if (!byToken && deps.webSessionAuthorized) {
+      try { byWebSession = deps.webSessionAuthorized(req) === true } catch { byWebSession = false }
+    }
     // A hook token, or nothing: refused, and never a live client.
-    if (!timingSafeTokenEqual(req.headers['x-cos-token'], expected)) {
+    if (!byToken && !byWebSession) {
       res.status(401).json({ error: 'unauthorized' })
       return
     }
     // Only a client that says it can answer (and shows the cards) counts as live.
     const client = typeof req.query.client === 'string' ? req.query.client : ''
-    if (ANSWERING_CLIENTS.has(client)) notePoll(now(), questionsPollFacts(req.query as Record<string, unknown>))
+    if (byToken && ANSWERING_CLIENTS.has(client)) notePoll(now(), questionsPollFacts(req.query as Record<string, unknown>))
+    // 6.99.12: a browser counts only as `web`, and never with presence (no away hold from a tab).
+    else if (byWebSession && client === WEB_ANSWERING_CLIENT) notePoll(now(), {})
     const health = deps.broker.health()
     // Listed first: a deadline the timer has not caught yet is settled by the listing.
     const items = deps.broker.list()
