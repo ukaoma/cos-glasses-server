@@ -393,6 +393,8 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.sessionQuestions.liveWindowMs',
   '.capabilities.sessionQuestions.awayHoldMs',
   '.capabilities.sessionQuestions.awayRecentClientMs',
+  // 6.99.12: the questions route takes the COS Control Web session (client=web).
+  '.capabilities.sessionQuestions.webClient',
   '.capabilities.runningTurnMeta',
   '.capabilities.runningTurnMeta.protocolVersion',
   '.capabilities.transcription',
