@@ -16,10 +16,14 @@
  *   POST /drops/:id/move  { dest, target?: { id, label, domain? } }                     DropAnswer
  *   POST /drops/:id/ask   { clientJobId, generation }                                   DropAnswer
  *   POST /drops/:id/sent                                                                DropAnswer
- *   GET  /inbox/summary                                                                 { unread, lastLine, lastAt, version }
+ *   GET  /inbox/summary                                                                 { unread, waiting, lastLine, lastAt, version }
  *   GET  /inbox/feed      ?after&limit                                                  { items, version, more }
- *   POST /inbox/read      { through }                                                   { unread, version }
+ *   POST /inbox/read      { through }                                                   { unread, waiting, version }
  *   POST /inbox/action    { itemId, action: 'choose:<id>' | 'undo' }                    DropAnswer
+ *   POST /inbox/action    { itemId, action: 'dismiss' }                                 { unread, waiting, version }
+ *
+ * `waiting` (6.99.10, plan section 12) is a plain whole number: live questions, live items marked needsReply, and the
+ * Work items in Your move. It clears only when answered, done or dismissed; `unread` clears when the chat is opened.
  */
 import { Router, type Response } from 'express'
 import { DropError, DropService, type DropInput, type HistoryStatus } from '../lib/drop-service.js'
@@ -33,6 +37,21 @@ export interface DropsRouterDependencies {
   enabled: () => boolean
   routerStatus?: () => { on: boolean; dailyCap: number; usedToday?: number; breakerOpenUntil?: string | null }
   writeSetting?: (enabled: boolean) => void
+  /**
+   * 6.99.10: how many Work items are in Your move, or null when the board cannot be read. Counted into `waiting`.
+   * Optional: without it `waiting` counts the chat alone. It must answer quickly (index.ts caches it).
+   */
+  yourMove?: () => Promise<number | null>
+}
+
+/** How long the summary waits for the Your move count before answering without it. */
+export const YOUR_MOVE_WAIT_MS = 1_500
+async function boundedYourMove(read: (() => Promise<number | null>) | undefined): Promise<number | null> {
+  if (!read) return null
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([read().catch(() => null), new Promise<null>(done => { timer = setTimeout(() => done(null), YOUR_MOVE_WAIT_MS) })])
+  } finally { if (timer) clearTimeout(timer) }
 }
 
 const HISTORY_STATUSES: readonly HistoryStatus[] = ['open', 'in_progress', 'done', 'undone']
@@ -144,7 +163,8 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
 
   router.get('/inbox/summary', (_req, res) => withService(res, async service => {
     try { await service.syncAsks() } catch { /* a summary never fails for a lookup */ }
-    try { return res.json(service.summary()) } catch (e) { return send(res, e) }
+    const yourMove = await boundedYourMove(deps.yourMove)
+    try { return res.json(service.summary({ yourMove })) } catch (e) { return send(res, e) }
   }))
   router.get('/inbox/feed', (req, res) => withService(res, async service => {
     const after = typeof req.query.after === 'string' ? req.query.after : undefined
@@ -153,9 +173,13 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
     try { await service.syncAsks() } catch { /* the chat still reads */ }
     try { return res.json(service.feed({ after, limit })) } catch (e) { return send(res, e) }
   }))
-  router.post('/inbox/read', (req, res) => withService(res, service => {
+  router.post('/inbox/read', (req, res) => withService(res, async service => {
     if (!isRecord(req.body) || typeof req.body.through !== 'string') return bad(res, 'invalid_read')
-    try { return res.json(service.markRead(req.body.through)) } catch (e) { return send(res, e) }
+    let out: { unread: number; waiting: number; version: number }
+    try { out = service.markRead(req.body.through) } catch (e) { return send(res, e) }
+    // The same `waiting` the summary gives, Work's Your move included.
+    const yourMove = await boundedYourMove(deps.yourMove)
+    return res.json({ ...out, waiting: service.summary({ yourMove }).waiting })
   }))
   router.post('/inbox/action', (req, res) => withService(res, async service => {
     const b = req.body
@@ -164,6 +188,11 @@ export function createDropsRouter(deps: DropsRouterDependencies): Router {
       if (b.action.startsWith('choose:')) return res.json(await service.choose(b.itemId, b.action.slice('choose:'.length)))
       if (b.action === 'undo') {
         return res.json(await service.undo(service.threadOf(b.itemId)))
+      }
+      if (b.action === 'dismiss') {
+        const out = service.dismiss(b.itemId)
+        const yourMove = await boundedYourMove(deps.yourMove)
+        return res.json({ ...out, waiting: service.summary({ yourMove }).waiting })
       }
       return bad(res, 'invalid_action')
     } catch (e) { return send(res, e) }

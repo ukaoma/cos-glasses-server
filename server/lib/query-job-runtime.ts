@@ -11,7 +11,9 @@ import { emitDisplay } from './display-bus.js'
 import { resolveQueryAttachments } from './query-attachments.js'
 import { getMediaStore } from './media-store.js'
 import { dataPath } from './data-dir.js'
-import { currentMessageEra, LEGACY_MESSAGE_ERA } from './message-era.js'
+import { currentMessageEra, exchangeBelongsToEra, LEGACY_MESSAGE_ERA } from './message-era.js'
+import { isWebAsk, prepareWebAsk } from './web-ask-admission.js'
+import { maxGlobalMsgNumInDir } from '../routes/message-ref.js'
 import { durableQueryJobsEnabled, messagesSteerEnabled, messagesTrailEnabled } from './query-job-feature.js'
 import { claudeSupportsSteer } from './claude-cli-support.js'
 import { steerProviderFor } from './claude-steer.js'
@@ -28,6 +30,9 @@ import {
 import { mergeMediaAttachmentRefs } from '../../shared/media-attachment.js'
 import { attachmentHistoryPrefix, defaultAttachmentRequest } from '../../shared/media-attachment.js'
 import {
+  createSession,
+  getActiveSessions,
+  getSessionRaw,
   findExchangesByJobIdentity,
   flushConversationToDisk,
   getSessionBinding,
@@ -47,7 +52,7 @@ import {
 } from './query-job-types.js'
 import { acquireMaintenanceWork } from './maintenance-lifecycle.js'
 import type { JobTrailDraft } from './job-trail.js'
-import { registerMessageReservationSource } from './message-reservations.js'
+import { maxReservedGlobalMsgNum, registerMessageReservationSource } from './message-reservations.js'
 import { bootResumeGate } from './boot-resume.js'
 import { keyAnswerCompletionFields, keyAnswerDoneFields } from './key-answer-fields.js'
 
@@ -72,9 +77,36 @@ export class QueryJobAdmissionPreparationError extends Error {
  * the strict QueryJobRequest parser before persistence. Once a reset era
  * exists, reject pre-era clients before they stamp five-digit numbers into
  * the fresh namespace. */
+/** 6.99.10: the next-number ceiling for a web Ask, the same arithmetic /api/message-counter serves. */
+function webAskCurrentMax(): number {
+  const era = currentMessageEra()
+  let liveMax = 0
+  for (const session of getActiveSessions()) {
+    for (const exchange of (session as { exchanges?: Array<{ globalMsgNum?: unknown; messageEra?: unknown }> }).exchanges ?? []) {
+      if (!exchangeBelongsToEra(exchange, era)) continue
+      if (typeof exchange?.globalMsgNum === 'number' && exchange.globalMsgNum > liveMax) liveMax = exchange.globalMsgNum
+    }
+  }
+  return Math.max(liveMax, maxGlobalMsgNumInDir(dataPath('archive'), era), maxReservedGlobalMsgNum(era))
+}
+
 export async function preparePublicDurableQueryAdmission(raw: unknown): Promise<unknown> {
   if (!raw || typeof raw !== 'object') return raw
-  const input = raw as Record<string, unknown>
+  let input = raw as Record<string, unknown>
+  // 6.99.10: Ask from COS Control Web (`source: 'web'`): the server picks the conversation and mints the message
+  // number (lib/web-ask-admission.ts). Every other caller is untouched.
+  if (isWebAsk(input) && !carriesBoundTo(input)) {
+    input = await prepareWebAsk(input, {
+      currentMax: webAskCurrentMax,
+      activeEra: currentMessageEra,
+      sessionExists: id => !!getSessionRaw(id),
+      createSession,
+      priorJob: async (clientJobId, generation) => {
+        const job = await queryJobCoordinator.getByClientGeneration(clientJobId, generation)
+        return job ? { sessionId: job.sessionId, globalMsgNum: job.globalMsgNum, messageEra: job.messageEra } : undefined
+      },
+    })
+  }
 
   // Plan 4.2: an attached turn must NEVER silently degrade into an ordinary COS
   // turn. The binding lives in the route path rather than the body, so a

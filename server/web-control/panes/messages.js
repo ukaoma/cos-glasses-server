@@ -3,12 +3,17 @@
    Recent is the server's rolling window of the newest turns (GET /api/sessions/today/all-messages),
    newest first. Archive is the day list, its search, a day's chats and one chat's transcript.
    Routes: #/messages, #/messages/archive, #/messages/m/<no>, #/messages/m/<no>/a/<attachment>,
-   #/messages/day/<date>, #/messages/day/<date>/<chat index>. */
+   #/messages/day/<date>, #/messages/day/<date>/<chat index>, and with Drop it on (6.99.10) #/messages/cos, the pinned
+   COS chat (panes/cos-chat.js). With Drop it on, the list and the chat share a split: the list on the left and the chat
+   on the right from 860 px, one at a time below it. The list rebuilds in its own column, so the chat's composer is
+   never rebuilt while it is in use. */
 (function () {
   'use strict';
   var W = window.COSWeb;
   var $ = W.$, esc = W.esc, api = W.api;
   var pane = $('pane-messages');
+  var cos = W.cosChat;
+  function cosOn() { return !!(cos && cos.on()); }
 
   var S = {
     view: 'recent',          // recent | archive
@@ -332,7 +337,14 @@
         '<span class="cx-row-sub">' + esc(stripMd(t.text)) + '</span>' +
       '</span><span class="chev"></span></button>';
   }
+  // The pinned COS chat, first in Recent (Drop it on only, and not while a search narrows the list).
+  function pinHtml() { return cosOn() && S.q.trim().length < 2 ? cos.pinnedRowHtml(current[0] === 'cos') : ''; }
   function recentBody() {
+    var pin = pinHtml();
+    if (pin) return recentBodyInner().replace('<div class="cx-list">', '<div class="cx-list">' + pin);
+    return recentBodyInner();
+  }
+  function recentBodyInner() {
     if (S.recentState === 'loading' && !S.recent) return '<div class="cx-list">' + W.skeletonRows(5) + '</div>';
     if (S.recentState === 'error') {
       return '<div class="cx-list"><p class="cx-empty">' + (S.recentError === 'signed-out'
@@ -380,11 +392,28 @@
           '</span><span class="chev"></span></button>';
       }).join('') + '</div>';
   }
+  // Drop it on: the list column and the chat column. Built once; each column then paints only itself.
+  function splitHost() {
+    var split = pane.querySelector('.msg-split');
+    if (!split) {
+      pane.innerHTML = '<div class="msg-split"><div class="msg-left" id="msg-left"></div><div class="msg-right" id="msg-right"></div></div>';
+      split = pane.querySelector('.msg-split');
+    }
+    split.setAttribute('data-show', current[0] === 'cos' ? 'chat' : 'list');
+    return split;
+  }
   function renderList() {
     var focus = document.activeElement && document.activeElement.id === 'msg-q';
     var caret = focus ? document.activeElement.selectionStart : null;
-    pane.innerHTML = '<div class="cx" data-tint="messages">' + heroHtml() + controlsHtml() + crossingHtml() +
+    var html = '<div class="cx" data-tint="messages">' + heroHtml() + controlsHtml() + crossingHtml() +
       (S.view === 'recent' ? recentBody() : archiveBody()) + '</div>';
+    if (cosOn()) {
+      splitHost();
+      $('msg-left').innerHTML = html;
+      var chatShown = current[0] === 'cos' || cos.wide();
+      cos.mount($('msg-right'), chatShown);
+      if (current[0] === 'cos') W.setCrumb('COS');
+    } else pane.innerHTML = html;
     if (focus) { var input = $('msg-q'); if (input) { input.focus(); try { input.setSelectionRange(caret, caret); } catch (_e) {} } }
   }
 
@@ -558,11 +587,27 @@
   function render() {
     var a = current;
     if (W.parseRoute().pane !== 'messages') return;
-    if (!a.length || a[0] === 'archive') return renderList();
+    if (!a.length || a[0] === 'archive' || a[0] === 'cos') return renderList();
     if (a[0] === 'm') return renderMessage(a[1], a[2] === 'a' ? a[3] : null);
   }
   function load(args) {
     current = args || [];
+    if (current[0] === 'cos') {
+      // The chat route before /api/health has answered: ask once, then come back. Drop it off sends the list.
+      if (!cos || (!cos.known() && !cosOn())) {
+        pane.innerHTML = '<div class="cx">' + W.skeletonRows(4) + '</div>';
+        if (cos) cos.ensureCaps().then(function () { if (here(['cos'])) load(['cos']); });
+        return;
+      }
+      if (!cosOn()) return W.go('messages');
+      S.view = 'recent';
+      loadRecent(!!S.recent && Date.now() - (S.recentAt || 0) > 60000);
+      renderList();
+      cos.refreshSummary();
+      return;
+    }
+    if (cos && !cos.known()) cos.ensureCaps();
+    if (cosOn()) cos.refreshSummary();
     if (!current.length || current[0] === 'archive') {
       S.view = current[0] === 'archive' ? 'archive' : 'recent';
       // Older than a minute: refetch quietly, with the rows still on screen (the rail's "Last
@@ -577,10 +622,13 @@
   }
 
   pane.addEventListener('click', function (e) {
+    var c = cos && e.target.closest('[data-cos]');
+    if (c && !c.disabled) { cos.onClick(c); return; }
     var t = e.target.closest('[data-msg]');
     if (!t || t.tagName === 'INPUT') return;
     var act = t.getAttribute('data-msg');
     if (act === 'view') return W.go('messages', t.getAttribute('data-view') === 'archive' ? ['archive'] : []);
+    if (act === 'cos') return W.go('messages', ['cos']);
     if (act === 'refresh') { S.recentState = 'idle'; loadRecent(true); if (S.view === 'archive') { S.daysState = 'idle'; loadDays(true); } return; }
     if (act === 'clear') { S.q = ''; S.archiveRan = ''; S.archiveHits = null; return renderList(); }
     if (act === 'open') return W.go('messages', ['m', t.getAttribute('data-key')]);
@@ -606,9 +654,12 @@
     }
   });
   pane.addEventListener('change', function (e) {
+    if (cos) cos.onChange(e);
     if (e.target.matches('[data-msg="only"]')) { S.onlyMatches = e.target.checked; renderDay(current[1]); }
   });
+  pane.addEventListener('keydown', function (e) { if (cos) cos.onKey(e); });
   pane.addEventListener('input', function (e) {
+    if (cos) cos.onInput(e);
     if (e.target.id === 'msg-q') {
       S.q = e.target.value;
       clearTimeout(pane._t);
@@ -618,6 +669,7 @@
     }
   });
   pane.addEventListener('submit', function (e) {
+    if (cos && cos.onSubmit(e)) return;
     if (!e.target.matches('[data-msg-form="search"]')) return;
     e.preventDefault();
     S.q = ($('msg-q') || {}).value || S.q;
@@ -626,6 +678,13 @@
       runArchiveSearch();
     }
   });
+
+  if (cos) {
+    // Drop it turned on or off (a health read): Messages redraws as it now should.
+    cos.setOnChange(function () { if (W.parseRoute().pane === 'messages') load(current); });
+    // A web Ask landed: its turn is now in Recent.
+    cos.setOnAnswered(function () { loadRecent(true); });
+  }
 
   W.registerPane('messages', {
     load: load,

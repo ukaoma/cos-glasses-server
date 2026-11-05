@@ -58,6 +58,8 @@ const short = (text: string, max = 60): string => {
   return one.length <= max ? one : one.slice(0, max - 1).trimEnd() + '…'
 }
 const feedId = () => `fi_${randomBytes(16).toString('hex')}`
+/** One item that waits on an answer: a live question, or a live item marked needsReply (6.99.10). */
+export const isWaiting = (i: FeedItem): boolean => i.state === 'live' && (i.kind === 'question' || i.needsReply === true)
 const A = {
   undo: { id: 'undo', label: 'Undo' }, move: { id: 'move', label: 'Move' },
   openCard: { id: 'open_card', label: 'Open card' }, openThread: { id: 'open_thread', label: 'Open thread' },
@@ -430,11 +432,36 @@ export class DropService {
     return this.answer(drop, false)
   }
 
-  summary(): { unread: number; lastLine: string; lastAt: string | null; version: number } {
+  /**
+   * The pinned row. `unread` clears when the chat is opened (markRead). `waiting` (6.99.10, plan section 12) is what
+   * waits on an answer from you, and clears only when it is answered, done or dismissed: every live question COS asked
+   * (a router ask), every live item marked `needsReply` (a follow-up that needs a decision, a ping that asks), plus
+   * `yourMove`, the Work items in Your move, when the caller could count them. Always a whole number, never negative.
+   */
+  summary(extra: { yourMove?: number | null } = {}): { unread: number; waiting: number; lastLine: string; lastAt: string | null; version: number } {
     const items = this.deps.feed.list()
     const unread = items.filter(i => i.readAt === null && (i.kind === 'ping' || i.kind === 'followup' || i.kind === 'question')).length
+    const asked = items.filter(i => isWaiting(i)).length
+    const work = typeof extra.yourMove === 'number' && Number.isSafeInteger(extra.yourMove) && extra.yourMove > 0 ? extra.yourMove : 0
     const last = items[items.length - 1]
-    return { unread, lastLine: last ? short(last.title && last.kind !== 'drop' ? `${last.title}. ${last.line}` : last.line, 120) : '', lastAt: last?.createdAt ?? null, version: this.deps.feed.version() }
+    return { unread, waiting: asked + work, lastLine: last ? short(last.title && last.kind !== 'drop' ? `${last.title}. ${last.line}` : last.line, 120) : '', lastAt: last?.createdAt ?? null, version: this.deps.feed.version() }
+  }
+
+  /**
+   * Dismiss one item that waits on you without answering it (6.99.10): it stops counting toward `waiting` and loses
+   * its buttons. Only an item marked `needsReply` can be dismissed; a question is answered by one of its choices
+   * (Just a note among them). Idempotent: a second dismiss answers the same.
+   */
+  dismiss(itemId: string): { unread: number; waiting: number; version: number } {
+    const item = this.deps.feed.get(itemId)
+    if (!item) throw new DropError('feed_item_not_found', 404)
+    if (!item.needsReply) throw new DropError('not_dismissable', 409, 'Only something that waits on you can be dismissed.')
+    if (item.state === 'live') {
+      const at = this.now().toISOString()
+      this.deps.feed.update(new Set([item.id]), i => ({ ...i, state: 'done', actions: [], readAt: i.readAt ?? at }))
+    }
+    const s = this.summary()
+    return { unread: s.unread, waiting: s.waiting, version: s.version }
   }
 
   /** The chat, oldest first. `after` is an item id: only items after it. */
@@ -460,7 +487,7 @@ export class DropService {
     return item.threadId
   }
 
-  markRead(through: string): { unread: number; version: number } {
+  markRead(through: string): { unread: number; waiting: number; version: number } {
     const items = this.deps.feed.list()
     const index = items.findIndex(i => i.id === through)
     if (index < 0) throw new DropError('feed_item_not_found', 404)
@@ -468,7 +495,8 @@ export class DropService {
     const ids = new Set(items.slice(0, index + 1).filter(i => i.readAt === null).map(i => i.id))
     if (ids.size) this.deps.feed.update(ids, item => ({ ...item, readAt: at }))
     const s = this.summary()
-    return { unread: s.unread, version: s.version }
+    // Opening the chat clears unread only: what waits on you stays until it is answered, done or dismissed.
+    return { unread: s.unread, waiting: s.waiting, version: s.version }
   }
 
   /** History (plan section 6), P1: words over drop text and link labels, with kind and status filters, newest first. */

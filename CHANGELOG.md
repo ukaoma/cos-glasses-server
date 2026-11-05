@@ -1,4 +1,6 @@
-## 6.99.10 - Drop it P1 (private)
+## 6.99.10 - Drop it P1, with Ask and Drop on the web (private)
+
+2026-11-04. Private build for one Mac, on top of 6.99.9 (web phone link and provider logos), which carries 6.99.8 (resumable meeting consolidation) and the 6.99.7 dictation hotfix. Pairs with COS Control 0.5.371. Nothing changes for the glasses app.
 
 Server half of Drop it phase 1: a pinned COS chat that takes a drop (a thought, a task, a reminder, a question), files it, and answers with a receipt. Off for every user; on only where `COS_DROP_IT=1` is set or Control writes `PUT /api/drops/settings {"enabled":true}`. While off, every new route except the settings pair answers 404 `drop_it_off` and no drop or chat file is created. Messages, the lens message counter, `all-messages` and `live-chats` are unchanged either way.
 
@@ -11,7 +13,10 @@ Server half of Drop it phase 1: a pinned COS chat that takes a drop (a thought, 
 - **Retention.** Drops a year; an undone drop 30 days; a drop's chat lines go when the drop goes. Neither store ever writes a file larger than it will read back (32 MB).
 - **Routes.** `POST/GET /api/drops`, `GET /api/drops/:id`, `POST /api/drops/:id/{undo,move,ask,sent}`, `GET /api/inbox/summary`, `GET /api/inbox/feed`, `POST /api/inbox/{read,action}`, `GET/PUT /api/drops/settings`. History is word search with kind and status filters.
 - **Capability.** `capabilities.dropIt` `{ protocol: 1, enabled, source }` on `/api/health` and `/api/models`. Additive.
-- Default-on changes: none.
+- **Waiting on you.** `GET /api/inbox/summary` adds `waiting`, a whole number: questions COS asked that you have not answered, chat items marked `needsReply` (a follow-up or ping that needs a decision), and the Work items in Your move that want an answer or a look (needs input, attention, done; a run still going does not count). Unread clears when the chat is opened; waiting clears only when the item is answered, done or dismissed (`POST /api/inbox/action {action: "dismiss"}`, for a `needsReply` item). `POST /api/inbox/read` answers `waiting` too. The Your move count shares Work's own board read and is kept 30 seconds, and the summary waits at most 1.5 seconds for it. COS Control 0.5.371's Messages badge reads this field.
+- **Ask from COS Control Web.** `POST /api/query-jobs` with `source: "web"` (the glasses' own route, behind the web sign-in and its write check): the server picks the conversation (the one the web is in today, or a new one) and gives the turn the next message number, from the same count `/api/message-counter` serves. The answer is a normal Messages turn: it shows in Recent on the Mac and the web, and in the glasses' Messages list. A retry of the same request reuses its number. Any other caller is unchanged.
+- **COS Control Web, while Drop it is on.** Messages pins a COS row first in Recent (`#/messages/cos` opens the chat), and from 860 px the list and the chat sit side by side. The chat's composer has two visible buttons, Ask (filled) and Drop (outlined), so a phone with no keyboard needs no key combination or long press; with a keyboard, Return asks and Option-Return drops. Ask streams its answer with its message number, with Steer (where the Mac allows it) and Cancel; the Model menu lists what meeting Ask offers. Drop shows the receipt with Undo and Move. The rail and the section menu show a number on Messages for what waits on you, and a dot when there is only something unread; both are read with the page's existing status check, with no new timer, and never redraw the pane. With Drop it off the web looks exactly as in 6.99.9.
+- Default-on changes: none. Drop it stays off until it is turned on. The `waiting` field and the web Ask route change nothing until a client uses them.
 
 ## 6.99.9 - Open COS on the web from the glasses app, and real provider logos (private)
 

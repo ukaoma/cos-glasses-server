@@ -91,6 +91,12 @@ export interface FeedItem {
   undoUntil?: string | null
   /** Exactly-once key: a second insert with the same key returns the first item. */
   key: string
+  /**
+   * 6.99.10 (plan section 12): this item waits on an answer from you (a ping or follow-up that needs a decision). It
+   * counts toward `waiting` on GET /api/inbox/summary while it is live, and stops counting when it is answered, done or
+   * dismissed. Kept only when it is a real boolean; an older row without it is valid and does not wait.
+   */
+  needsReply?: boolean
 }
 
 export const DROP_LIMITS = {
@@ -226,6 +232,7 @@ export function parseFeedItem(raw: unknown): FeedItem {
   const item: FeedItem = { id, kind, threadId, createdAt, readAt, source, line, links: raw.links.map(parseLink), actions, state, key }
   if (raw.title !== undefined) { const t = str(raw.title, DROP_LIMITS.title, true); if (t === null) throw new DropStoreError('invalid_feed_item', 400); item.title = t }
   if (raw.undoUntil !== undefined) { const u = isoOrNull(raw.undoUntil); if (u === undefined) throw new DropStoreError('invalid_feed_item', 400); item.undoUntil = u }
+  if (typeof raw.needsReply === 'boolean') item.needsReply = raw.needsReply
   return item
 }
 

@@ -174,6 +174,8 @@ import { createDropRouter, sharedDropJevClient, dropDailyCap, dropRouterEnabled 
 import { createBridgeDropWriters } from './lib/drop-destinations.js'
 import { dropItEnabled } from './lib/drop-settings.js'
 import { serverTimezone } from './lib/morning-brief-config.js'
+import { createYourMoveCounter } from './lib/your-move-count.js'
+import { readWorkJournal } from './lib/work-activity.js'
 import { isReadOnlyApiPost } from './lib/work-search.js'
 import { isMacVoiceNamingBatchPost } from './lib/mac-voice-naming-batch.js'
 import { dataPath } from './lib/data-dir.js'
@@ -911,6 +913,12 @@ app.use('/api', createDropsRouter({
     const status = sharedDropJevClient().status()
     return { on: dropRouterEnabled(), dailyCap: dropDailyCap(), usedToday: status.usedToday, breakerOpenUntil: status.breakerOpenUntil }
   },
+  // 6.99.10: Work items in Your move count toward `waiting` (plan section 12). The board read is the one Work's own
+  // glances share (10 s old at most, 3 s bound), and the count is kept 30 s, so the summary poll adds no bridge load.
+  yourMove: createYourMoveCounter({
+    journal: () => readWorkJournal(),
+    rows: () => workBoardReader.read(10_000, 3_000).catch(() => null),
+  }),
 }))
 // Find a session by meaning (Control 0.5.363): consent per provider, its own ledgers and breakers (lib/session-find.ts).
 app.use('/api', createSessionFindRouter())

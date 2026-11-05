@@ -604,6 +604,9 @@ const GOLDEN_HEALTH_CAPS_6870 = [
   'meetingAsk',
   'dictationCleanup',
   'pairing',
+  // Added in 6.99.9, additive: the glasses app's Open COS on the web (present while COS_WEB_CONTROL_ENABLED is on,
+  // the default). The 6.99.9 branch left it out of this golden, so this test failed there; fixed in 6.99.10.
+  'webPhoneLink',
   'displayStream',
   'transcription',
   'recovery',

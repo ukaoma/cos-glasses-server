@@ -231,7 +231,11 @@
     document.querySelectorAll('[data-server-line]').forEach(function (l) { l.classList.toggle('down', !ok); });
   }
   function checkServer() {
-    return api('/api/health').then(function (h) { setServer(!!h && h.status !== 'down'); }, function () { setServer(false); });
+    return api('/api/health').then(function (h) {
+      setServer(!!h && h.status !== 'down');
+      // 6.99.10: the same read tells the pinned COS chat whether Drop it is on, and refreshes the Messages badge.
+      if (W.cosChat) W.cosChat.fromHealth(h);
+    }, function () { setServer(false); });
   }
 
   // ── navigation bar (Home, Back, breadcrumb, Settings) ──
