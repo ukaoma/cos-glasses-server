@@ -2419,7 +2419,7 @@
     if (handoff) {
       history.replaceState({}, document.title, location.pathname + location.hash);
       api('/api/web-session/login', { method: 'POST', body: { handoff: handoff } }).then(showShell)
-        .catch(function (err) { showAuth(err && err.status ? err.message : 'That sign-in link did not work. Scan a new one in COS Control, or use a code or the token.'); });
+        .catch(function (err) { showAuth(err && err.status ? err.message : 'That sign-in link did not work. Get a new one from COS Control on your Mac or the COS Glasses app, or use a code or the token.'); });
       return;
     }
     api('/api/web-session/status').then(function (st) { if (st && st.authenticated) showShell(st); else showAuth(); }).catch(function () { showAuth('COS on your Mac is not answering. Check that the Mac is awake and on Tailscale.'); });

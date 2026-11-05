@@ -1,6 +1,15 @@
 import express, { Router, type Request, type Response } from 'express'
 import { hostname, networkInterfaces } from 'node:os'
-import { isAllowedNetworkOrigin, isLoopbackSocket, normalizeRemoteIp, normalizeTailscaleDnsName, reachableIpv4Addresses } from '../lib/network-policy.js'
+import {
+  hasProxyForwardedHeaders,
+  isAllowedNetworkIp,
+  isAllowedNetworkOrigin,
+  isLoopbackAddress,
+  isLoopbackSocket,
+  normalizeRemoteIp,
+  normalizeTailscaleDnsName,
+  reachableIpv4Addresses,
+} from '../lib/network-policy.js'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { getTailscaleNudger } from '../lib/tailscale-nudge.js'
 import {
@@ -54,6 +63,8 @@ export interface WebControlRouterDeps {
   tailnetIpv4?: () => string | null
   /** Where sign-in failures are logged. Kind, length and socket IP only, never the value. */
   log?: (line: string) => void
+  /** Caps POST /web-session/phone-link (5 a minute). Injected by tests. */
+  phoneLinkLimiter?: WebPhoneLinkLimiter
 }
 
 /** What the sign-in page shows for each failure. Names the fix, never the value typed. */
@@ -61,7 +72,7 @@ export const WEB_LOGIN_FAILURE_MESSAGE: Record<WebLoginFailure, string> = {
   wrong_token: 'That token did not match. Copy the pairing token again and paste it within a minute, since the copy clears after 60 seconds. Or choose Open COS on your phone in COS Control and scan its QR.',
   wrong_code: 'That code did not match or has expired. A code lasts 5 minutes and works once. Get a new one.',
   glasses_code: 'That is the glasses pairing code. It only pairs the COS Glasses app. To sign in here, choose Open COS on your phone in COS Control, or paste the pairing token.',
-  handoff_expired: 'That sign-in link expired or was already used. Scan a new one in COS Control.',
+  handoff_expired: 'That sign-in link expired or was already used. Get a new one from COS Control on your Mac, or Open COS on the web in the COS Glasses app.',
   missing: 'Enter a sign-in code or paste the pairing token.',
 }
 
@@ -102,6 +113,54 @@ export async function isAllowedCorsOrigin(origin: string, dns: SelfDnsSource): P
   return isAllowedNetworkOrigin(origin, { selfDnsName: dns.currentSelfDnsName() })
 }
 
+/**
+ * Open COS on the web, from the COS Glasses app (phone-link). The companion reads
+ * `capabilities.webPhoneLink` on /api/health and shows its row only when this is present,
+ * so an older server simply omits it.
+ */
+export const WEB_PHONE_LINK_CAPABILITY = 1
+export const WEB_PHONE_LINK_MAX_PER_WINDOW = 5
+export const WEB_PHONE_LINK_WINDOW_MS = 60_000
+
+/**
+ * At most 5 phone links a minute for the whole server. One person holds the pairing token,
+ * so a per-IP split would only let a leaked token mint faster from more addresses.
+ */
+export class WebPhoneLinkLimiter {
+  private readonly stamps: number[] = []
+  constructor(
+    private readonly now: () => number = () => Date.now(),
+    private readonly max = WEB_PHONE_LINK_MAX_PER_WINDOW,
+    private readonly windowMs = WEB_PHONE_LINK_WINDOW_MS,
+  ) {}
+
+  /** Seconds until the next link may be minted; 0 means it was admitted and counted now. */
+  take(): number {
+    const at = this.now()
+    while (this.stamps.length && at - this.stamps[0] >= this.windowMs) this.stamps.shift()
+    if (this.stamps.length >= this.max) {
+      return Math.max(1, Math.ceil((this.stamps[0] + this.windowMs - at) / 1000))
+    }
+    this.stamps.push(at)
+    return 0
+  }
+}
+
+/**
+ * Who may ask for a phone link: this Mac, a Tailscale peer, or a home-network address,
+ * the same places the glasses' token already reaches. Never a request carrying proxy
+ * forwarding headers (`tailscale serve`, Funnel, a local proxy), whose real caller is unknown.
+ */
+export function isPhoneLinkSocketAllowed(
+  remoteAddress: string | undefined | null,
+  headers?: Record<string, unknown> | null,
+): boolean {
+  if (hasProxyForwardedHeaders(headers)) return false
+  const addr = normalizeRemoteIp(remoteAddress ?? '')
+  if (!addr) return false
+  return isLoopbackAddress(addr) || isAllowedNetworkIp(addr)
+}
+
 export function webControlEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return readSwitch(env.COS_WEB_CONTROL_ENABLED, true)
 }
@@ -138,6 +197,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
   const smallJson = express.json({ limit: '64kb' })
   const log = deps.log ?? ((line: string) => console.log(line))
   const glassesBudget = deps.glassesProbeBudget ?? new WebGlassesCodeProbeBudget()
+  const phoneLinkLimiter = deps.phoneLinkLimiter ?? new WebPhoneLinkLimiter()
   const isLiveGlassesCode = deps.glassesCodeIsLive
   const glassesCheck = isLiveGlassesCode
     ? (code: string): boolean => glassesBudget.check(deps.liveGlassesCodeKey ? deps.liveGlassesCodeKey() : 'live', () => isLiveGlassesCode(code))
@@ -155,6 +215,24 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
   const selfDns = (): string | null => {
     if (deps.selfDnsName) return normalizeTailscaleDnsName(deps.selfDnsName())
     return getTailscaleNudger().currentSelfDnsName()
+  }
+
+  /** This Mac's tailnet name (when known) and Tailscale IPv4, for links a phone opens. */
+  async function tailnetAddress(): Promise<{ name: string | null; ip: string | null }> {
+    let name = selfDns()
+    if (!name && deps.queryTailscaleStatus) {
+      const status = await deps.queryTailscaleStatus().catch(() => null)
+      name = normalizeTailscaleDnsName(status?.selfDnsName ?? null)
+    }
+    let ip: string | null = null
+    try {
+      ip = deps.tailnetIpv4
+        ? deps.tailnetIpv4()
+        : reachableIpv4Addresses(networkInterfaces()).find(a => a.kind === 'tailscale')?.address ?? null
+    } catch {
+      ip = null
+    }
+    return { name, ip }
   }
 
   async function loopbackFetch(
@@ -291,19 +369,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
       return res.status(403).json({ error: 'not_loopback', message: 'Web handoff tickets are minted only on this Mac.' })
     }
     const pubPort = deps.publicPort?.() ?? deps.port()
-    let name = selfDns()
-    if (!name && deps.queryTailscaleStatus) {
-      const status = await deps.queryTailscaleStatus().catch(() => null)
-      name = normalizeTailscaleDnsName(status?.selfDnsName ?? null)
-    }
-    let ip: string | null = null
-    try {
-      ip = deps.tailnetIpv4
-        ? deps.tailnetIpv4()
-        : reachableIpv4Addresses(networkInterfaces()).find(a => a.kind === 'tailscale')?.address ?? null
-    } catch {
-      ip = null
-    }
+    const { name, ip } = await tailnetAddress()
     const { ticket, expiresAt } = handoffStore.mint()
     const controlPath = `/control?handoff=${encodeURIComponent(ticket)}`
     const nameUrl = name ? `http://${name}:${pubPort}${controlPath}` : null
@@ -315,6 +381,68 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
       url: `http://127.0.0.1:${pubPort}${controlPath}`,
       phoneUrl: nameUrl ?? ipUrl,
       tailnet: { ipUrl, nameUrl },
+    })
+  })
+
+  // Open COS on the web, from the COS Glasses app. The phone asks with its pairing token,
+  // copies `url` and pastes it into Safari: the link signs in once, within 2 minutes, and the
+  // page drops the ticket from the address bar (web-control/app.js boot). `code` is the
+  // fallback when the clipboard refuses: typed at `codeAddress`, once, within 5 minutes.
+  // The Even app keeps every link inside its own WebView, which is why this copies a link
+  // rather than opening one. Never logs the ticket, the link or the code.
+  router.post('/web-session/phone-link', async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'private, no-store')
+    // Only the glasses' header token. A browser signed in with the cookie already has COS
+    // on the web, and must not be able to mint links that sign other browsers in.
+    if (!timingSafeTokenEqual(req.headers['x-cos-token'], deps.apiToken())) {
+      return res.status(401).json({
+        ok: false,
+        error: 'unauthorized',
+        reason: 'pairing_token_required',
+        message: 'Only the paired COS Glasses app can ask for a web link.',
+      })
+    }
+    if (!isPhoneLinkSocketAllowed(req.socket?.remoteAddress, req.headers)) {
+      return res.status(403).json({
+        ok: false,
+        error: 'network_refused',
+        message: 'Ask for a web link from this Mac, over Tailscale or on your home network.',
+      })
+    }
+    const ip = normalizeRemoteIp(req.socket?.remoteAddress ?? '')
+    const retryAfterS = phoneLinkLimiter.take()
+    if (retryAfterS > 0) {
+      res.setHeader('Retry-After', String(retryAfterS))
+      log(`[web-phone-link] refused kind=rate_limited ip=${ip}`)
+      return res.status(429).json({
+        ok: false,
+        error: 'too_many_links',
+        retryAfterS,
+        message: `That is 5 links in a minute. Try again in ${retryAfterS} s.`,
+      })
+    }
+    const pubPort = deps.publicPort?.() ?? deps.port()
+    const { name, ip: tailIp } = await tailnetAddress()
+    const host = name ?? tailIp
+    if (!host) {
+      log(`[web-phone-link] refused kind=no_tailnet ip=${ip}`)
+      return res.status(503).json({
+        ok: false,
+        error: 'no_tailnet_address',
+        message: 'Your Mac has no Tailscale address right now. Turn Tailscale on, on the Mac.',
+      })
+    }
+    const { ticket, expiresAt } = handoffStore.mint()
+    const code = deviceCodes.mint()
+    const base = `http://${host}:${pubPort}/control`
+    log(`[web-phone-link] minted via=${name ? 'name' : 'ip'} ip=${ip}`)
+    return res.json({
+      ok: true,
+      url: `${base}?handoff=${encodeURIComponent(ticket)}`,
+      expiresAt,
+      code: code.display,
+      codeAddress: base,
+      codeExpiresAt: code.expiresAt,
     })
   })
 
