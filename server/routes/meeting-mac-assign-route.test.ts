@@ -831,11 +831,23 @@ describe('B4: it never competes with a live recording, and never lets the meetin
     seed(MAC_ID, raws.map(raw => ({ raw, speaker: 'Voice 2' })))
     for (const raw of raws) archive(MAC_ID, raw, wav([{ sec: 2.5, axis: 1, marker: raw }]))
     seedProfile('Dana Reyes'); await startServer()
-    let ticks = 0
-    const timer = setInterval(() => { ticks += 1 }, 0)
-    try { await post(url, { ...ASSIGN, dryRun: true }) } finally { clearInterval(timer) }
+    // Count distinct in-flight extraction positions observed by another callback,
+    // not 1 ms timer ticks: faster sidecar lookup must not make this test fail.
+    const observedProgress = new Set<number>()
+    let running = true
+    let tick: NodeJS.Immediate
+    const observe = () => {
+      if (!running) return
+      if (extractCalls > 0 && extractCalls < raws.length) observedProgress.add(extractCalls)
+      tick = setImmediate(observe)
+    }
+    tick = setImmediate(observe)
+    try {
+      const response = await post(url, { ...ASSIGN, dryRun: true })
+      expect(response.status).toBe(200)
+    } finally { running = false; clearImmediate(tick) }
     expect(extractCalls).toBe(30)
-    expect(ticks).toBeGreaterThan(5)
+    expect(observedProgress.size).toBeGreaterThan(5)
   }, T)
 })
 
