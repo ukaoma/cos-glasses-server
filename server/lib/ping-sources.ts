@@ -35,6 +35,11 @@ export interface PingCandidate {
   expiresAt?: number
   /** Counts toward "waiting on you" until answered, done or dismissed (plan section 12). */
   needsReply?: boolean
+  /**
+   * The notification identifier the banner uses. A reminder uses `reminder-<drop id>`, the same id Control gives its
+   * local backup notification, so a server fire replaces Control's instead of doubling it (plan section 7).
+   */
+  notifyId?: string
 }
 
 export const PING_TEXT = { title: 120, line: 400, digestLines: 5 } as const

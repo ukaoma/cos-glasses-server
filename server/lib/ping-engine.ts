@@ -107,7 +107,7 @@ export interface PingFeedSink {
   hasKey(key: string): boolean
   post(candidate: PingCandidate): string
 }
-export interface PingBanner { feedIds: string[]; title: string; line: string; sources: PingSource[]; exempt: boolean }
+export interface PingBanner { feedIds: string[]; title: string; line: string; sources: PingSource[]; exempt: boolean; notifyId?: string }
 
 export interface PingEngineDeps {
   state: Pick<PingStateStore, 'read' | 'write'>
@@ -203,7 +203,11 @@ export class PingEngine {
       const plan = planBanners(posted.map(p => ({ id: p.feedId, source: p.candidate.source, createdAt: p.candidate.createdAt })), state.ledger, nowMs, tz, enabled)
       const banners: PingBanner[] = plan.banners.map(b => {
         const items = b.ids.map(id => posted.find(p => p.feedId === id)!.candidate)
-        return { feedIds: b.ids, sources: b.sources, exempt: b.exempt, title: bannerTitle(items.length, items[0].title ?? 'COS'), line: items.length === 1 ? items[0].line : items.map(i => i.title ?? i.line).join(', ') }
+        return {
+          feedIds: b.ids, sources: b.sources, exempt: b.exempt, title: bannerTitle(items.length, items[0].title ?? 'COS'),
+          line: items.length === 1 ? items[0].line : items.map(i => i.title ?? i.line).join(', '),
+          ...(items.length === 1 && items[0].notifyId ? { notifyId: items[0].notifyId } : {}),
+        }
       })
       for (const b of plan.banners) state.ledger.push({ at: nowMs, sources: b.sources, ids: b.ids })
       if (plan.banners.length) changed = true
