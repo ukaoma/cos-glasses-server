@@ -102,6 +102,14 @@ describe('PingEngine', () => {
     expect(await h.engine.tick()).toMatchObject({ released: 1, expired: 0 })
   })
 
+  it('a half-read stale source (threads read, signals not) keeps a held signal ping', async () => {
+    const h = harness({ now: local('2026-11-04', '19:00'), snap: { threads: [], signals: [{ id: 'sig-1', severity: 'red', title: 'Pet leads down' }] } })
+    expect((await h.engine.tick()).held).toBe(1)
+    h.clock.now = local('2026-11-05', '08:05')
+    h.snapRef.snap = { threads: [] }  // the signals cache could not be read this morning
+    expect(await h.engine.tick()).toMatchObject({ released: 1, expired: 0 })
+  })
+
   it('a reminder banners at 3 AM on a Saturday; a resolution then lands silently', () => {
     const h = harness({ now: local('2026-11-07', '03:00') })
     const reminder: PingCandidate = { source: 'reminder', key: 'reminder:r1:2026-11-07T09:00:00.000Z', line: 'Reminder: call mom.', title: 'Reminder', links: [], actions: [], createdAt: h.clock.now }
@@ -189,7 +197,7 @@ describe('canary 9: no LLM and nothing outward in the ping path', () => {
     return { files, packages }
   }
 
-  for (const entry of ['ping-engine.ts', 'ping-sources.ts', 'ping-budget.ts', 'drop-when.ts', 'reminder-scheduler.ts', 'drop-resolution.ts', 'ping-feed-sink.ts']) {
+  for (const entry of ['ping-engine.ts', 'ping-sources.ts', 'ping-budget.ts', 'drop-when.ts', 'reminder-scheduler.ts', 'drop-resolution.ts', 'ping-feed-sink.ts', 'drop-p2-runtime.ts']) {
     it(entry, () => {
       const { files, packages } = graph(join(here, entry))
       expect(files.size).toBeGreaterThan(entry === 'ping-budget.ts' ? 1 : 2)  // the walk really followed imports

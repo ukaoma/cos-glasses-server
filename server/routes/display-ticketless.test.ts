@@ -132,6 +132,8 @@ const FIXTURE_BY_TYPE: Record<DisplayEvent['type'], Record<string, unknown>> = {
   recording_start: { sessionId: 'CANARY_START_SESSION', title: 'CANARY_START_TITLE' },
   recording_stop: { sessionId: 'CANARY_STOP_SESSION', filename: 'CANARY_STOP_FILE.md', durationMin: 1, domain: 'x' },
   meeting_stop_requested: { sessionId: 'CANARY_STOPREQ_SESSION', requestId: 'CANARY_STOPREQ_ID', source: 'control', claimWindowMs: 10000 },
+  // Drop it P2: a reminder's own words (drop-p2-runtime.ts banner). Never to a stream without a ticket.
+  cos_ping: { title: 'Reminder', line: 'CANARY_REMINDER_WORDS', feedIds: ['fi_canary'], notifyId: 'CANARY_NOTIFY_ID' },
 }
 const ALLOWLISTED: ReadonlySet<DisplayEvent['type']> = new Set(['recording_stop'])
 const CONTENT_TYPES: Array<{ type: DisplayEvent['type']; data: Record<string, unknown> }> =

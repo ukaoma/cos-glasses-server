@@ -11,6 +11,9 @@ export interface DisplayEvent {
   type: 'chunk' | 'done' | 'error' | 'tool_status' | 'start' | 'session_restore' | 'transcript_chunk' | 'prompt_transcript' | 'recording_start' | 'recording_stop' | 'coaching_nudge' | 'coaching_nudge_v2'
     // Control asked the glasses to stop a G2 meeting (routes/meeting.ts stop-request).
     | 'meeting_stop_requested' | 'mac_speaker_live_revision'
+    // Drop it P2: a reminder he set fired; the lens shows it (plan section 5). Not in the ticketless projections, so a
+    // stream without a ticket never receives it; shipped clients do not listen for it and ignore it.
+    | 'cos_ping'
   data: Record<string, unknown>
 }
 
