@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { DropStore, InboxFeedStore, type DropRecord } from './drop-store.js'
 import { PingStateStore } from './ping-engine.js'
-import { createDropP2Runtime, readCacheArray, P2_TIMING, type BoardRowLite } from './drop-p2-runtime.js'
+import { createDropP2Runtime, journalReceiptsLite, readCacheArray, P2_TIMING, type BoardRowLite } from './drop-p2-runtime.js'
 import { taskInstant } from './morning-brief-schedule.js'
 
 const TZ = 'America/Chicago'
@@ -109,6 +109,16 @@ describe('Drop it P2 runtime, end to end on fixtures', () => {
     expect(readCacheArray(null, '.threads_cache.json', 'threads')).toBeUndefined()
   })
 
+  it('maps journal receipts to the fields the poll reads, skipping rows without an id or status', () => {
+    expect(journalReceiptsLite([
+      { id: 'h1', status: 'completed', workID: 'task:quilt:wid-1', result: 'Pushed.', prompt: 'secret words' },
+      { id: 'h2', status: 'running' }, { status: 'failed' }, { id: 3, status: 'failed' },
+    ])).toEqual([
+      { id: 'h1', status: 'completed', workID: 'task:quilt:wid-1', result: 'Pushed.' },
+      { id: 'h2', status: 'running', workID: null, result: null },
+    ])
+  })
+
   it('the outbox keeps the last 50 banners', () => {
     const r = rig(local('2026-11-04', '10:00'))
     for (let i = 0; i < 60; i++) r.runtime.push([{ source: 'reminder', key: `reminder:x${i}`, line: `r${i}`, links: [], actions: [], createdAt: r.clock.now }])
@@ -117,5 +127,5 @@ describe('Drop it P2 runtime, end to end on fixtures', () => {
     expect(all.banners[0].seq).toBe(11)
     expect(all.seq).toBe(60)
     r.close()
-  })
+  }, 20_000)  // 60 real store writes: about 1.3 s idle, over 5 s while another suite loads the Mac
 })

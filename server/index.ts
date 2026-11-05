@@ -123,7 +123,7 @@ import { meetingAskRouter } from './routes/meeting-ask.js'
 import { meetingAskRuntime } from './lib/meeting-ask-runtime.js'
 import { lensGistRouter } from './routes/lens-gist.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
-import { setWeatherPersistence, welcomeContextRouter } from './routes/welcome-context.js'
+import { fetchNextEvent, setWeatherPersistence, welcomeContextRouter } from './routes/welcome-context.js'
 import { liveCuesRouter } from './routes/live-cues.js'
 import { tasksRouter } from './routes/tasks.js'
 import { memoryRouter } from './routes/memory.js'
@@ -176,6 +176,11 @@ import { dropItEnabled } from './lib/drop-settings.js'
 import { serverTimezone } from './lib/morning-brief-config.js'
 import { createYourMoveCounter } from './lib/your-move-count.js'
 import { readWorkJournal } from './lib/work-activity.js'
+import { createDropP2Boot } from './lib/drop-p2-boot.js'
+import { createDropP2Runtime, journalReceiptsLite } from './lib/drop-p2-runtime.js'
+import { DropHistorySearcher } from './lib/drop-history-search.js'
+import { emitDisplay } from './lib/display-bus.js'
+import { COS_SCRIPTS_DIR } from './lib/python-bridge.js'
 import { isReadOnlyApiPost } from './lib/work-search.js'
 import { isMacVoiceNamingBatchPost } from './lib/mac-voice-naming-batch.js'
 import { dataPath } from './lib/data-dir.js'
@@ -898,17 +903,39 @@ app.use('/api', createWorkSearchRouter())
 // Drop it P1 (6.100 candidate): the pinned COS chat's drops, receipts and History. Off by default (COS_DROP_IT or
 // PUT /api/drops/settings); its stores open on first use, so an install with it off writes nothing. The router is one
 // Jev request per drop with its own cap (COS_DROP_DAILY_TOKENS), ledger, breaker and switch (COS_DROP_ROUTER).
+const dropService = lazyDropService(() => openDropService(part => dataPath(part), {
+  router: createDropRouter(),
+  writers: createBridgeDropWriters(),
+  timezone: () => serverTimezone(),
+  askLookup: async (clientJobId, generation) => {
+    const job = await queryJobCoordinator.getByClientGeneration(clientJobId, generation)
+    return job ? { status: job.status, response: job.response, sessionId: job.sessionId } : undefined
+  },
+}))
+// Drop it P2 (6.99.11 candidate): pings, reminders and follow-ups, running only while Drop it is on (checked at boot and
+// each minute). It reads signals that already exist (calendar, Work intake, the board, the Work journal, the thread and
+// signal caches) and calls no model; History search by meaning shares the drop router's Jev client and cap.
+const dropP2 = createDropP2Boot({
+  enabled: () => dropItEnabled(),
+  service: dropService,
+  pingRoot: dataPath('pings'),
+  make: (stores, pingState) => createDropP2Runtime({
+    ...stores, pingState,
+    timezone: () => serverTimezone(),
+    nextEvent: async () => { const r = await fetchNextEvent(); return r.read ? r.event : undefined },
+    intakeOpen: () => workIntakeStore?.open(),
+    scriptsDir: COS_SCRIPTS_DIR,
+    board: () => workBoardReader.read(60_000, 5_000),
+    journal: () => { const j = readWorkJournal(); return j.available ? journalReceiptsLite(j.receipts) : undefined },
+    emitLens: event => { emitDisplay(event) },
+  }),
+})
+const dropSearcher = new DropHistorySearcher(sharedDropJevClient())
 app.use('/api', createDropsRouter({
   enabled: () => dropItEnabled(),
-  service: lazyDropService(() => openDropService(part => dataPath(part), {
-    router: createDropRouter(),
-    writers: createBridgeDropWriters(),
-    timezone: () => serverTimezone(),
-    askLookup: async (clientJobId, generation) => {
-      const job = await queryJobCoordinator.getByClientGeneration(clientJobId, generation)
-      return job ? { status: job.status, response: job.response, sessionId: job.sessionId } : undefined
-    },
-  })),
+  service: dropService,
+  p2: () => dropP2.runtime(),
+  search: () => dropSearcher,
   routerStatus: () => {
     const status = sharedDropJevClient().status()
     return { on: dropRouterEnabled(), dailyCap: dropDailyCap(), usedToday: status.usedToday, breakerOpenUntil: status.breakerOpenUntil }
@@ -1359,6 +1386,7 @@ async function gracefulShutdown(): Promise<void> {
   stopRoutineScheduler()
   tailscaleNudger.stop()
   await workReviewRuntime?.close()
+  dropP2.stop()
   workIntakeStore?.close()
   workHandoffRequestStore?.close()
   stopMeetingImportScheduler()
@@ -1685,6 +1713,8 @@ listenRequiredServers(listeners).then(() => {
       // still mounted, so the kill switch is an immediate rollback.
       console.error('[COS API] Durable query-job store unavailable:', error)
     })
+    // Drop it P2: off unless Drop it is on; the boot re-checks the switch each minute.
+    dropP2.start()
 
     if (COS_MODE) {
       initSessionCache()

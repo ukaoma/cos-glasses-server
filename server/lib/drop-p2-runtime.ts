@@ -54,6 +54,16 @@ export interface DropP2Deps {
 
 export interface OutboxBanner extends PingBanner { seq: number; at: string }
 
+/** The journal's validated raw receipts (work-activity readWorkJournal) as the few fields the poll reads. */
+export function journalReceiptsLite(records: ReadonlyArray<Record<string, unknown>>): JournalReceiptLite[] {
+  const out: JournalReceiptLite[] = []
+  for (const r of records) {
+    if (typeof r?.id !== 'string' || typeof r.status !== 'string') continue
+    out.push({ id: r.id, status: r.status, workID: typeof r.workID === 'string' ? r.workID : null, result: typeof r.result === 'string' ? r.result : null })
+  }
+  return out
+}
+
 /** Read one array out of a COS cache file, or undefined when the file is missing, unsafe, too large or unreadable. */
 export function readCacheArray(dir: string | null | undefined, file: string, key: string): unknown[] | undefined {
   if (!dir) return undefined

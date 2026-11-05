@@ -296,7 +296,8 @@ export function calendarAnswerWasRead(bridgeReady: boolean, answer: unknown): bo
   return !('error' in answer)
 }
 
-async function fetchNextEvent(): Promise<{ event: NextEventPayload | null; read: boolean }> {
+/** Exported for Drop it P2's prep pings (lib/drop-p2-runtime.ts); same cache, same bridge read. */
+export async function fetchNextEvent(): Promise<{ event: NextEventPayload | null; read: boolean }> {
   if (cachedNextEvent && Date.now() - calendarFetchedAt < CALENDAR_TTL_MS) {
     return { event: cachedNextEvent, read: cachedCalendarRead }
   }
