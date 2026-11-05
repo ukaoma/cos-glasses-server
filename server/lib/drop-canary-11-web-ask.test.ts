@@ -169,3 +169,40 @@ describe('web Ask admission (lib/web-ask-admission.ts)', () => {
     expect(out).toMatchObject({ sessionId: 's-7', globalMsgNum: 77, messageEra: 'era-0' })
   })
 })
+
+// 6.99.10 field bug (Miles, 23:32): Ask COS in the web Ask sheet (app.js askCos) "does nothing". It posted `prompt`
+// with a `web_<time>` id and no era, so a Mac with a message era refused it (409 message_era_mismatch). This runs
+// askCos's own request body, read out of app.js, against the real routes with an era active.
+describe('the web Ask sheet (app.js askCos) is admitted on a Mac with a message era', () => {
+  it('sends the request the server accepts; the old request is refused', async () => {
+    const { writeFileSync, readFileSync } = await import('node:fs')
+    writeFileSync(join(root, 'message-era.json'), JSON.stringify({ v: 1, era: 'era-test-1', startedAt: Date.now() }))
+    const runtime = await import('./query-job-runtime.js')
+    await runtime.initQueryJobRuntime()
+    cleanup.push(() => runtime.shutdownQueryJobRuntime('test_shutdown'))
+    const { createQueryJobsRouter } = await import('../routes/query-jobs.js')
+    const app = express(); app.use(express.json())
+    app.use('/api', createQueryJobsRouter(runtime.queryJobCoordinator, { enabled: () => true, prepareAdmission: runtime.preparePublicDurableQueryAdmission }))
+    const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
+    cleanup.push(() => new Promise<void>(r => server.close(() => r())))
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`
+    const post = (body: unknown) => fetch(base + '/query-jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async r => ({ status: r.status, body: await r.json() as any }))
+
+    const source = readFileSync(new URL('../web-control/app.js', import.meta.url), 'utf8')
+    const fn = source.slice(source.indexOf('function askCos('), source.indexOf('// ── Memories'))
+    const bodyLiteral = /var body = (\{[^;]*\});/.exec(fn)?.[1]
+    expect(bodyLiteral, 'askCos builds its request as `var body = {...};`').toBeTruthy()
+    const jobIdSrc = source.slice(source.indexOf('function webJobId('), source.indexOf('function askCos('))
+    // eslint-disable-next-line no-new-func
+    const build = new Function('prompt', 'crypto', `${jobIdSrc}; return ${bodyLiteral};`)
+    const sent = build('Web Ask test: reply OK', globalThis.crypto) as Record<string, unknown>
+
+    const ok = await post(sent)
+    expect(ok.status, JSON.stringify(ok.body)).toBeLessThan(300)
+    expect(ok.body.job?.messageEra ?? ok.body.messageEra ?? 'era-test-1').toBe('era-test-1')
+
+    const old = await post({ prompt: 'Web Ask test: reply OK', clientJobId: 'web_' + Date.now() })
+    expect(old.status).toBeGreaterThanOrEqual(400)
+  })
+})

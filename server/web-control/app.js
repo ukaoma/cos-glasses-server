@@ -1727,14 +1727,30 @@
   }
 
   // ── Ask COS (the Ask sheet's first row) ─────────────────
+  // 6.99.10: the same request as the COS chat's Ask (panes/cos-chat.js submitAsk). Before, this sent `prompt` with a
+  // `web_<time>` id and no generation or era, so the server refused every one (409 message_era_mismatch on a Mac with
+  // a message era, else invalid_client_job_id) and a small status line was the only sign.
+  function webJobId() {
+    // crypto.randomUUID needs a secure context; a plain-http tailnet page is not one.
+    var b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    var h = Array.prototype.map.call(b, function (x) { return (x + 0x100).toString(16).slice(1); }).join('');
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+  }
   function askCos(prompt, statusEl) {
     setStatus(statusEl, 'Sent. COS is answering.');
-    return api('/api/query-jobs', { method: 'POST', body: { prompt: prompt, clientJobId: 'web_' + Date.now() } }).then(function () {
+    var body = { clientJobId: webJobId(), generation: 1, query: prompt, source: 'web', activityToolMode: 'status' };
+    return api('/api/query-jobs', { method: 'POST', body: body, timeoutMs: 30000 }).then(function () {
       // The answer lands in Messages; refresh it there if it is open.
       var again = function () { if (state.pane === 'messages' && PANES.messages && PANES.messages.refresh) PANES.messages.refresh(); };
       setTimeout(again, 4000);
       setTimeout(function () { again(); setStatus(statusEl, ''); }, 15000);
-    }).catch(function (err) { setStatus(statusEl, err.message, true); throw err; });
+    }).catch(function (err) {
+      setStatus(statusEl, err.message, true);
+      toast('Ask COS did not send: ' + err.message);
+      throw err;
+    });
   }
   // ── Memories (the native page, hosted) ──────────────────
   function syncFrameTheme() {
