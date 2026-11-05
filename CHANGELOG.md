@@ -1,3 +1,13 @@
+## 6.99.9 - Open COS on the web from the glasses app, and real provider logos (private)
+
+2026-11-04. Private build for one Mac, on top of 6.99.8 (meeting consolidation, with the 6.99.7 dictation hotfix). Pairs with COS Glasses 6.11.672. Nothing changes for the COS Control Mac app.
+
+- **A sign-in link for your phone's browser.** COS Glasses 6.11.672 adds Open COS on the web in Settings. It asks the Mac for a link, copies it, and you paste it into Safari or any browser to land on COS Activity already signed in, over Tailscale. The link works once and lasts 2 minutes; a short sign-in code is shown with it as a fallback. Links from the Even app open inside Even's own browser, never Safari, so copying is the way out (tested on an iPhone).
+- New route `POST /api/web-session/phone-link`, for the paired glasses app only (its token; a signed-in browser cookie is refused). Callers must be on this Mac, Tailscale or the home network. At most 5 links a minute. The link and the code are never written to the log. `/api/health` advertises `capabilities.webPhoneLink`, so older glasses builds and older servers simply do not show the row.
+- An expired link now says to get a new one from COS Control or the COS Glasses app.
+- **Sessions on the web show the real Claude, OpenAI and Cursor logos**, the same marks COS Control draws, instead of plain shapes.
+- Default-on changes: the web Sessions logos. The route answers only the paired glasses app.
+
 ## 6.99.8 - Resumable meeting consolidation (private)
 
 - Explicit meeting cleanup jobs continue across bounded 15-minute provider passes under one durable job, model selection and cancellation control. Ordinary chats retain their current limits.
