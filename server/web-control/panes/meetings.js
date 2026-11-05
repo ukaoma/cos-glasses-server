@@ -5,7 +5,8 @@
    Data: GET /api/meetings?limit=200&domain=all&month=, /api/meetings/search, /api/meetings/detail,
    /api/meetings/live-chunks, /api/meeting/sessions/:id/status, /api/meeting/orphans, /api/meeting-ask/*,
    /api/live-cues/history, /api/context/status. Writes only on a tap: Meeting Ask, Stop and save, End and save,
-   Recover, Save, Save as follow-up.
+   Recover, Save, Save as follow-up, and (6.99.14) Add file, paste or drop in the live view: /api/media or
+   /api/media/file, then POST /api/meeting-ask/files/media.
    Routes: #/meetings, #/meetings/<domain>/<month>/<filename>, #/meetings/live/<sessionId>. */
 (function () {
   'use strict';
@@ -812,6 +813,7 @@
       if (r.startTime != null) f.start = r.startTime;
       if (r.lastActivityAt != null) f.last = Math.max(f.last || 0, r.lastActivityAt);
       if (typeof r.titleSteer === 'string') f.titleSteer = cleanTitle(r.titleSteer) || null;
+      setLevels(f, r.levels);
       liveChanged();
     }, function () {});
   }
@@ -1793,17 +1795,32 @@
     return html;
   }
   var FILE_STATE = { pending: 'Reading', unsupported: 'No readable text', failed: 'Could not be read', 'secret-held': 'Held: it appears to contain credentials' };
-  function filesRowHtml(sid) {
+  // `live`: the live view while it records, where this page adds files itself (Add file, paste, drop). There the row is
+  // always drawn, one line tall whatever it says, so files that arrive with the Ask history, an upload that starts and
+  // one that finishes never move what is under it. Open, the files and the uploads are rows of the same height: a
+  // finished upload becomes its file in place. { items, note } are the uploads and the last refusal.
+  function filesRowHtml(sid, live) {
     var a = A(sid), shown = (a.files || []).filter(function (x) { return x && x.status !== 'removed' && String(x.name || '').trim(); });
-    if (!shown.length) return '';
-    var title = 'Files \u00b7 ' + shown.length;
-    var html = '<div class="mt-files"><button type="button" class="mt-files-head" data-mt="files-toggle" data-sid="' + esc(sid) + '" aria-expanded="' + !!a.filesOpen + '">' +
-      icon('clip') + '<span>' + esc(title) + '</span>' + icon('chev') + '</button>';
-    if (a.filesOpen) {
+    var ups = live ? live.items : [], note = live ? live.note : '';
+    if (!shown.length && !(live && live.on) && !ups.length && !note) return '';
+    var busy = ups.filter(function (t) { return t.state !== 'failed'; }).length, failed = ups.length - busy;
+    var title = shown.length ? 'Files \u00b7 ' + shown.length : (live && live.on ? 'No files yet. Add file, paste or drop one here.' : 'Files');
+    var extra = busy ? ' \u00b7 adding ' + busy : '';
+    var bad = failed ? (failed === 1 ? '1 did not upload' : failed + ' did not upload') : '';
+    var openable = shown.length + ups.length > 0 || !!note;
+    var html = '<div class="mt-files' + (live ? ' live' : '') + '">' + (openable
+      ? '<button type="button" class="mt-files-head" data-mt="files-toggle" data-sid="' + esc(sid) + '" aria-expanded="' + !!a.filesOpen + '">'
+      : '<div class="mt-files-head quiet">') +
+      icon('clip') + '<span>' + esc(title + extra) + (bad ? '<span class="mt-amber"> \u00b7 ' + esc(bad) + '</span>' : '') + '</span>' + (openable ? icon('chev') + '</button>' : '</div>');
+    if (a.filesOpen && openable) {
       html += '<ul class="mt-files-list">' + shown.map(function (x) {
-        var note = [x.status !== 'ready' ? (x.notice || FILE_STATE[x.status] || '') : '', x.origin === 'phone' ? 'Added from the phone' : ''].filter(Boolean).join(' \u00b7 ');
-        return '<li><span class="mt-files-name">' + esc(x.name) + '</span>' + (note ? '<span class="mt-muted">' + esc(note) + '</span>' : '') + '</li>';
-      }).join('') + '</ul><p class="mt-muted mt-files-note">Meeting Ask reads these files. Add or remove them in COS Control on your Mac.</p>';
+        var line = [x.status !== 'ready' ? (x.notice || FILE_STATE[x.status] || '') : (x.notice || ''), x.origin === 'phone' ? 'Added from a phone or browser' : ''].filter(Boolean).join(' \u00b7 ');
+        return '<li><span class="mt-files-name">' + esc(x.name) + '</span>' + (line ? '<span class="mt-muted">' + esc(line) + '</span>' : '') + '</li>';
+      }).join('') + ups.map(uploadRowHtml).join('') + '</ul>' +
+        (note ? '<p class="mt-amber-line mt-files-note" role="status">' + esc(note) + '</p>' : '') +
+        '<p class="mt-muted mt-files-note">' + (live && live.on
+          ? 'Meeting Ask reads these files. Add more here; remove them in COS Control on your Mac.'
+          : 'Meeting Ask reads these files. Add or remove them in COS Control on your Mac.') + '</p>';
     }
     return html + '</div>';
   }
@@ -1901,18 +1918,27 @@
   }
   function openLive(sid) {
     S.view = 'live';
-    if (S.liveSid !== sid) { S.liveSid = sid; S.follow = true; S.confirm = ''; S.liveCopy = ''; S.liveReason = ''; }
+    if (S.liveSid !== sid) { S.liveSid = sid; S.confirm = ''; S.liveCopy = ''; S.liveReason = ''; }
+    // A new box starts at its newest line, following.
+    S.follow = true;
     var f = feedFor(sid);
     A(sid).ctx = { live: true };
     W.setCrumb(liveTitle(f));
-    pane.innerHTML = '<div class="cx mt mt-livev" data-tint="meetings"><div id="mt-lhead"></div><div class="mt-lgrid"><div class="mt-lmain">' +
-      '<div id="mt-turns" class="mt-turns" aria-live="polite"></div><div id="mt-lfoot"></div></div>' +
+    // 6.99.14: the transcript scrolls inside its own box, as Control's does, so a new line never moves the page: the
+    // title, the recording bar, the files and the Ask panel stay where the reader left them. Everything that changes
+    // height while it records (the stop line, the files, the confirm card) sits under the box, never above it.
+    pane.innerHTML = '<div class="cx mt mt-livev" data-tint="meetings"><div id="mt-lhead"></div><div class="mt-lgrid"><div class="mt-lmain" id="mt-lmain">' +
+      '<div class="mt-tbox"><div id="mt-turns" class="mt-turns" tabindex="0" role="log" aria-live="polite" aria-label="Live transcript"></div>' +
+      '<button type="button" class="cx-btn quiet mt-jump" id="mt-jump" data-mt="jump" hidden>Jump to live</button></div>' +
+      '<div id="mt-lbar" class="mt-lbarslot"></div><div id="mt-lfiles"></div><div id="mt-lfoot"></div>' +
+      '<input type="file" id="mt-lpick" class="mt-pick" multiple accept="' + esc(LIVE_ACCEPT) + '" tabindex="-1" aria-hidden="true"></div>' +
       '<aside class="mt-side-panel" id="mt-ask-' + safeId(sid) + '" data-sid="' + esc(sid) + '">' + sidePanelHtml(sid) + '</aside></div></div>';
-    S.headHtml = S.footHtml = null;
+    S.headHtml = S.footHtml = S.barHtml = S.filesHtml = null;
     paintLiveHead(); paintTurns(true); paintLiveFoot();
-    clearInterval(S.liveTimer);
+    clearInterval(S.liveTimer); clearInterval(S.clockTimer);
     livePoll();
     S.liveTimer = setInterval(livePoll, 1500);
+    S.clockTimer = setInterval(tickClock, 1000);
     panelOpen(sid);
   }
   // Control's LiveMeeting.title: the typed name, else a calendar event that started within CALENDAR_MATCH_MS of the
@@ -1951,7 +1977,9 @@
       var t = Date.now(), files = a.body.sessions || [];
       S.files = files;
       var file = files.filter(function (s) { return s.sessionId === f.sid; })[0];
-      var changed = applyRead(f, a.body.read, t);
+      var r = a.body.read;
+      if (r && r.sessionId === f.sid && !r.unchanged) setLevels(f, r.levels);
+      var changed = applyRead(f, r, t);
       if (file) { var m = num(file.mtimeMs); if (!f.last || m > f.last) f.last = m; }
       else if (!f.endedAt) changed = markEnded(f, t) || changed;
       if (!f.endedAt && f.last && t - f.last >= QUIET_MS && t - f.statusAt >= STATUS_QUIET_MS) askStatus(f, t);
@@ -1992,22 +2020,276 @@
       : (ended ? '' : (isMac(sid) ? 'Recording on this Mac' : 'Recording on the glasses') + (f.titleSteer && f.start ? ' · started ' + clockOf(new Date(f.start)) : ''));
     var quiet = ended ? null : quietLabel(f.last, now);
     var sub = f.titleSteer && f.start && !isPhone(sid) ? (durationLabel(f.start, now, f.endedAt) || 'Starting') : liveSubtitle(f.start, now, f.endedAt);
-    var controls = '';
-    if (!ended && isGlasses(sid)) controls = '<button type="button" class="cx-btn quiet" data-mt="stop-ask" data-sid="' + esc(sid) + '"' + (stopping(sid) ? ' disabled' : '') + '>Stop and save</button>';
-    else if (!ended && isPhone(sid)) controls = '<span class="mt-side-note">Stop on iPhone</span>';
-    var line = stopLineFor(sid);
+    // Every line here is one line tall whatever it says (the CSS keeps each to one line), so the header never changes
+    // height while it records and the transcript under it never moves.
     var html = '<div class="mt-dhead mt-lhead"><div class="mt-ltitle"><span class="mt-livedot big' + (ended ? '' : ' on') + '"></span><h2 class="mt-dtitle">' + esc(liveTitle(f)) + '</h2></div>' +
       (status ? '<p class="mt-lstatus">' + esc(status) + '</p>' : '') +
       (isPhone(sid) ? '<p class="mt-muted">iPhone microphone recordings are anonymous. Names and voice training are unavailable.</p>' : '') +
       '<p class="mt-muted">' + esc(LIVE_HEADER) + '</p>' +
       (isMac(sid) ? '<p class="mt-muted">Mac playback · microphone off · voice numbers do not identify people</p>' : '') +
-      '<p class="mt-lsub">' + esc(sub) + (quiet ? '<span class="mt-amber"> · ' + esc(quiet) + '</span>' : '') + '</p>' +
-      liveHandoffLine(f) + filesRowHtml(sid) +
-      (line ? '<p class="mt-stopline' + (S.stop && S.stop.nothing ? ' bad' : '') + '">' + esc(line) + '</p>' : '') +
-      (controls ? '<div class="mt-bar">' + controls + '</div>' : '') +
-      (S.confirm === 'stop:' + sid ? confirmCard(STOP_TITLE, STOP_LINE, 'stop-yes', 'Stop and save', 'Cancel', sid) : '') + '</div>';
+      '<p class="mt-lsub">' + esc(sub) + (quiet ? '<span class="mt-amber"> · ' + esc(quiet) + '</span>' : '') + '</p></div>';
     if (html !== S.headHtml) { S.headHtml = html; el.innerHTML = html; }
     if (W.crumb() !== liveTitle(f)) W.setCrumb(liveTitle(f));
+    paintLiveBar(); paintLiveFiles();
+  }
+
+  // ── the recording bar (LiveRecordingBar, 0.5.339) ──────
+  // The red dot, the elapsed time on its own one-second clock, the level strip, Add file and Stop and save, in one row
+  // of fixed height under the transcript. Under it: the stop line and the confirm card. Once it ends: the handoff line.
+  // The row is rebuilt only when what it offers changes; the clock and the strip draw in place.
+  function elapsedLabel(ms) {
+    var t = Math.max(0, Math.floor((isFinite(ms) ? ms : 0) / 1000)), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    return h > 0 ? h + ':' + pad2(m) + ':' + pad2(s) : m + ':' + pad2(s);
+  }
+  function clockText(f, now) { return f && f.start ? elapsedLabel(now - f.start) : 'Starting'; }
+  // The Meeting Ask files route takes the ids Meeting Ask does (server/lib/ask-session-id.ts ASK_SESSION).
+  var ASK_SESSION = /^(?:meeting_[A-Za-z0-9_-]{1,89}|(?:mac_|phone_(?:[0-9]{13}_)?)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+  function canAddFiles(f) { return !!f && !f.endedAt && ASK_SESSION.test(f.sid); }
+  function liveStopHtml(sid) {
+    if (isGlasses(sid)) return '<button type="button" class="cx-btn quiet mt-stopbtn" data-mt="stop-ask" data-sid="' + esc(sid) + '"' + (stopping(sid) ? ' disabled' : '') + '>Stop and save</button>';
+    if (isPhone(sid)) return '<span class="mt-side-note">Stop on iPhone</span>';
+    return '<span class="mt-side-note">Stop on your Mac</span>';
+  }
+  function liveBarHtml(f) {
+    var sid = f.sid;
+    if (f.endedAt) return liveHandoffLine(f);
+    var line = stopLineFor(sid);
+    return '<div class="mt-lbar" role="group" aria-label="Recording">' +
+      '<span class="mt-livedot on" aria-hidden="true"></span>' +
+      '<span class="mt-ltime' + (f.start ? '' : ' starting') + '" id="mt-ltime" role="timer" aria-label="Recording time">' + esc(clockText(f, Date.now())) + '</span>' +
+      '<span class="mt-meterwrap"><canvas class="mt-meter" id="mt-meter" role="img" aria-label="' + esc(LEVEL_LABEL) + '"></canvas>' +
+      '<span class="mt-glyph" aria-hidden="true"><i></i><i></i><i></i></span></span>' +
+      (canAddFiles(f) ? '<button type="button" class="cx-btn quiet mt-addfile" data-mt="add-file" aria-label="Add file" title="Add a screenshot or files to this meeting">' + icon('clip') + '<span class="mt-addlabel">Add file</span></button>' : '') +
+      liveStopHtml(sid) + '</div>' +
+      (line ? '<p class="mt-stopline' + (S.stop && S.stop.nothing ? ' bad' : '') + '">' + esc(line) + '</p>' : '') +
+      (S.confirm === 'stop:' + sid ? confirmCard(STOP_TITLE, STOP_LINE, 'stop-yes', 'Stop and save', 'Cancel', sid) : '');
+  }
+  function paintLiveBar() {
+    var el = $('mt-lbar'); if (!el || S.view !== 'live') return;
+    var f = S.feeds[S.liveSid]; if (!f) return;
+    // The clock's own text is left out of the comparison, so a second ticking never rebuilds the row (or the strip).
+    var html = liveBarHtml(f), key = html.replace(/(id="mt-ltime"[^>]*>)[^<]*/, '$1');
+    if (key !== S.barHtml) { S.barHtml = key; el.innerHTML = html; drawMeter(); }
+  }
+  function tickClock() {
+    if (S.view !== 'live' || document.hidden) return;
+    var f = S.feeds[S.liveSid], el = $('mt-ltime');
+    if (!f || !el) return;
+    var text = clockText(f, Date.now());
+    if (el.textContent !== text) el.textContent = text;
+  }
+
+  // ── the level strip (LiveChunkLevelStripView) ─────────
+  // One bar per chunk from the live read's `levels` (server 6.87.0: the quiet gate's RMS and Silero speech seconds,
+  // kept on the active-session record), newest at the right, a dot where the chunk held almost no speech, the oldest
+  // clipped first when narrow. It trails the room by a chunk. Reduce Motion: one still bar for the newest chunk.
+  var LEVEL_STEP = 5, SPEECH_FLOOR = 0.5, LEVEL_FLOOR = 0.27;
+  var LEVEL_LABEL = 'Audio level, a few seconds behind';
+  function levelSilent(l) { return l.speechSec != null ? l.speechSec < SPEECH_FLOOR : l.level <= LEVEL_FLOOR; }
+  function cleanLevels(v) {
+    if (!Array.isArray(v)) return null;
+    var seen = {}, out = [];
+    v.forEach(function (l) {
+      if (!l || typeof l !== 'object' || !Number.isInteger(l.i) || l.i < 0 || seen[l.i]) return;
+      if (typeof l.level !== 'number' || !(l.level >= 0 && l.level <= 1)) return;
+      if (l.speechSec != null && !(typeof l.speechSec === 'number' && l.speechSec >= 0)) return;
+      seen[l.i] = 1; out.push({ i: l.i, level: l.level, speechSec: l.speechSec == null ? null : l.speechSec });
+    });
+    return out.sort(function (a, b) { return a.i - b.i; }).slice(-120);
+  }
+  function visibleLevels(levels, width) { var fit = Math.floor(width / LEVEL_STEP); return fit < 1 ? [] : levels.slice(-fit); }
+  function reduceMotion() { try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (_e) { return false; } }
+  function drawMeter() {
+    var c = $('mt-meter'); if (!c || !c.getContext) return;
+    var f = S.feeds[S.liveSid], levels = (f && f.levels) || [];
+    var wrap = c.parentNode; if (wrap && wrap.classList) wrap.classList.toggle('mt-nolevels', !levels.length);
+    var last = levels[levels.length - 1];
+    c.setAttribute('aria-label', LEVEL_LABEL + ': ' + (!last ? 'waiting for the first chunk' : levelSilent(last) ? 'quiet' : 'speech'));
+    var w = c.clientWidth, h = c.clientHeight; if (!w || !h) return;
+    var dpr = window.devicePixelRatio || 1;
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+    var g = c.getContext('2d'); if (!g) return;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    if (!levels.length) return;
+    var css = getComputedStyle(c), bar = css.getPropertyValue('--mt-bar').trim() || '#c2410c', dot = css.getPropertyValue('--mt-dot').trim() || '#8a8a8a';
+    var mid = h / 2;
+    if (reduceMotion()) {
+      var lv = levelSilent(last) ? 0 : last.level;
+      g.fillStyle = dot; g.globalAlpha = 0.35; g.fillRect(0, mid - 2, w, 4); g.globalAlpha = 1;
+      g.fillStyle = bar; g.fillRect(0, mid - 2, Math.max(2, w * lv), 4);
+      return;
+    }
+    var shown = visibleLevels(levels, w);
+    for (var back = 0; back < shown.length; back++) {
+      var l = shown[shown.length - 1 - back], x = w - (back + 0.5) * LEVEL_STEP;
+      // The oldest fade out at the left edge, so clipped history reads as older, not cut.
+      g.globalAlpha = Math.min(1, Math.max(0.15, x / 28));
+      if (levelSilent(l)) { g.fillStyle = dot; g.beginPath(); g.arc(x, mid, 1, 0, Math.PI * 2); g.fill(); }
+      else { var bh = Math.max(3, l.level * h); g.fillStyle = bar; g.fillRect(x - 1.5, mid - bh / 2, 3, bh); }
+    }
+    g.globalAlpha = 1;
+  }
+  function setLevels(f, raw) {
+    var next = cleanLevels(raw); if (!next) return;
+    var sig = next.map(function (l) { return l.i + ':' + l.level + ':' + l.speechSec; }).join('|');
+    if (sig === f.levelSig) return;
+    f.levelSig = sig; f.levels = next;
+    if (S.view === 'live' && S.liveSid === f.sid) drawMeter();
+  }
+
+  // ── files during a live meeting (LiveMeetingFiles) ─────
+  // Add file, paste and drop: each file goes to the media store (W.cosChat.uploadMedia, the composer's own upload) and
+  // then joins the meeting's files through POST /api/meeting-ask/files/media, the route the phone uses, so Meeting Ask
+  // reads it and Copy full context carries it. A file never becomes text: a paste or a drop that holds a file is taken
+  // as the file, and one the browser will not hand over is refused out loud instead of landing as its path.
+  var LIVE_ACCEPT = 'image/*,.heic,.heif,application/pdf,.pdf,text/plain,.txt,text/markdown,.md,text/csv,.csv,application/json,.json,.xlsx';
+  var MAX_LIVE_UPLOADS = 10;
+  function LU() { return S.lup || (S.lup = { sid: '', items: [], note: '' }); }
+  function liveUploads(sid) { var u = LU(); if (u.sid !== sid) { u.items.forEach(abortUpload); S.lup = { sid: sid, items: [], note: '' }; } return S.lup; }
+  function abortUpload(t) { if (t.xhr) { try { t.xhr.abort(); } catch (_e) {} } }
+  /** The files a paste or a drop carries: its File list, else the items of kind file. */
+  function filesOf(dt) {
+    if (!dt) return [];
+    var list = Array.prototype.slice.call(dt.files || []);
+    if (!list.length && dt.items) Array.prototype.forEach.call(dt.items, function (it) { if (it && it.kind === 'file' && it.getAsFile) { var x = it.getAsFile(); if (x) list.push(x); } });
+    return list;
+  }
+  /** True when a paste or a drop is a file (or a file's link) rather than words: it must never be inserted as text. */
+  function carriesFile(dt) {
+    if (!dt) return false;
+    var types = Array.prototype.slice.call(dt.types || []);
+    if (types.indexOf('Files') >= 0 || filesOf(dt).length) return true;
+    var uri = '';
+    try { uri = types.indexOf('text/uri-list') >= 0 ? String(dt.getData('text/uri-list') || '') : ''; } catch (_e) { uri = ''; }
+    return /^\s*file:/i.test(uri);
+  }
+  function liveFileKind(file) {
+    var cc = W.cosChat;
+    if (!cc || !cc.classify || !cc.uploadMedia) return { refuse: 'This page could not load its upload code. Reload the page, then try again.' };
+    var c = cc.classify(file);
+    if (c.refuse) return c;
+    if (c.kind === 'video') return { refuse: (file.name || 'That video') + ' is a video. Meeting Ask reads documents and the text in images, so attach a PDF, a text file or a screenshot.' };
+    return c;
+  }
+  function addLiveFiles(list) {
+    var f = S.feeds[S.liveSid];
+    if (S.view !== 'live' || !f) return;
+    var u = liveUploads(f.sid), files = Array.prototype.slice.call(list || []), refusals = [];
+    if (!canAddFiles(f)) { liveNote(f.endedAt ? 'This recording has ended. Files can be added while it records.' : 'Meeting Ask does not take files for this recording.'); return; }
+    files.forEach(function (file) {
+      if (u.items.filter(function (t) { return t.state !== 'failed'; }).length >= MAX_LIVE_UPLOADS) { refusals.push('Up to 10 files at a time. ' + (file.name || 'A file') + ' was not added.'); return; }
+      var c = liveFileKind(file);
+      if (c.refuse) { refusals.push(c.refuse); return; }
+      var t = { id: W.cosChat.uuid(), file: file, name: file.name || (c.kind === 'photo' ? 'Screenshot' : 'File'), size: file.size, kind: c.kind, mime: c.mime || '', state: 'reading', progress: 0, mediaId: '', error: '' };
+      u.items.push(t);
+      sendLiveFile(f.sid, t, false);
+    });
+    u.note = refusals.join(' ');
+    // Opened by the person's own add, in the same task as the paste or drop, never later when an upload lands.
+    A(f.sid).filesOpen = true;
+    paintLiveFiles();
+  }
+  var ATTACH_COPY = {
+    file_context_limit: 'This meeting holds as many files as Meeting Ask reads. Remove one in COS Control on your Mac, then retry.',
+    file_context_storage_limit: 'COS is out of room for meeting files. Remove some in COS Control on your Mac, then retry.',
+    file_revision_conflict: 'The meeting’s files changed while this one was read. Retry.',
+    media_not_found: 'The upload expired before it was added. Retry.', media_expired: 'The upload expired before it was added. Retry.',
+    media_conflict: 'The upload is still being read. Retry in a moment.', media_unavailable: 'COS could not read the upload. Retry.',
+    maintenance: 'COS is updating. Retry in a minute.', invalid_session_id: 'Meeting Ask does not take files for this recording.',
+    invalid_media: 'COS did not accept that file. Retry, or attach it from COS Control on your Mac.'
+  };
+  // The media store has it; now the meeting. A changed server (it restarted) is read again once before giving up.
+  function attachLiveFile(sid, t, again) {
+    t.state = 'attaching'; paintLiveFiles();
+    return loadConfig(again).then(function (conf) {
+      if (!conf) { var e = new Error(S.conf.notice || 'Meeting assistance is not available on this server.'); e.code = 'config'; throw e; }
+      return answer('/api/meeting-ask/files/media', { method: 'POST', body: { sessionId: sid, serverInstanceId: conf.serverInstanceId, media: [{ id: t.mediaId, name: t.name.slice(0, 240) }] } });
+    }).then(function (a) {
+      var b = a.body || {}, code = typeof b.error === 'string' ? b.error : (b.error && b.error.code) || b.reason || '';
+      if (a.status === 200 && Array.isArray(b.files)) return b.files;
+      if (a.status === 409 && code === 'server_instance_mismatch' && !again) return attachLiveFile(sid, t, true);
+      var err = new Error(a.status === 0 ? 'COS on your Mac did not answer. Retry when it is awake.' : a.status === 401 ? SIGNED_OUT + ' The file is kept here; sign in, then retry.' : ATTACH_COPY[code] || 'COS could not add the file to this meeting (HTTP ' + a.status + '). Retry.');
+      err.code = 'attach'; throw err;
+    });
+  }
+  function sendLiveFile(sid, t, retry) {
+    var u = liveUploads(sid);
+    t.state = t.mediaId ? 'attaching' : 'reading'; t.progress = 0; t.error = '';
+    var step = t.mediaId ? Promise.resolve({ id: t.mediaId }) : W.cosChat.uploadMedia(t, {
+      uploading: function () { t.state = 'uploading'; paintLiveFiles(); },
+      progress: function (p) { t.progress = p; paintUploadProgress(t); }
+    });
+    if (retry) paintLiveFiles();
+    step.then(function (ref) {
+      if (u.items.indexOf(t) < 0) return null;
+      if (!ref || !ref.id) { var e = new Error('COS did not keep the file. Retry.'); e.code = 'attach'; throw e; }
+      t.mediaId = ref.id;
+      return attachLiveFile(sid, t, false);
+    }).then(function (files) {
+      if (!files || u.items.indexOf(t) < 0) return;
+      u.items = u.items.filter(function (x) { return x !== t; });
+      var a = A(sid); a.files = files;
+      repaintAsk(sid); paintLiveFiles();
+    }).catch(function (err) {
+      if (u.items.indexOf(t) < 0 || (err && err.code === 'aborted')) return;
+      t.state = 'failed';
+      t.error = err && (err.code === 'attach' || err.code === 'config') ? err.message
+        : err && err.status === 401 ? SIGNED_OUT + ' The file is kept here; sign in, then retry.'
+        : W.cosChat.uploadErrorText(err);
+      paintLiveFiles();
+    });
+  }
+  function uploadMeta(t) {
+    if (t.state === 'reading') return t.kind === 'photo' ? 'Preparing the image' : 'Preparing';
+    if (t.state === 'uploading') return 'Uploading ' + Math.round(t.progress * 100) + '%';
+    if (t.state === 'attaching') return t.kind === 'photo' ? 'Reading the text in the image' : 'Adding to the meeting';
+    return t.error || 'Did not upload';
+  }
+  function uploadRowHtml(t) {
+    return '<li class="mt-up ' + t.state + '" data-up="' + esc(t.id) + '"><span class="mt-files-name">' + esc(t.name) + '</span>' +
+      '<span class="mt-up-meta ' + (t.state === 'failed' ? 'mt-amber' : 'mt-muted') + '" data-up-meta>' + esc(uploadMeta(t)) + '</span>' +
+      '<span class="mt-up-acts">' + (t.state === 'failed' ? '<button type="button" class="mt-link" data-mt="up-retry" data-up="' + esc(t.id) + '">Retry</button>' : '') +
+      '<button type="button" class="mt-link" data-mt="up-remove" data-up="' + esc(t.id) + '" aria-label="Remove ' + esc(t.name) + '">' + (t.state === 'failed' ? 'Remove' : 'Cancel') + '</button></span>' +
+      (t.state === 'uploading' || t.state === 'reading' ? '<span class="mt-up-bar" data-up-bar style="width:' + Math.round(t.progress * 100) + '%"></span>' : '') + '</li>';
+  }
+  // Progress moves the bar and its words only, so a tap on Cancel never misses.
+  function paintUploadProgress(t) {
+    var row = pane.querySelector('[data-up="' + t.id + '"]'); if (!row) return;
+    var meta = row.querySelector('[data-up-meta]'); if (meta) meta.textContent = uploadMeta(t);
+    var bar = row.querySelector('[data-up-bar]'); if (bar) bar.style.width = Math.round(t.progress * 100) + '%';
+  }
+  function paintLiveFiles() {
+    var el = $('mt-lfiles'); if (!el || S.view !== 'live') return;
+    var f = S.feeds[S.liveSid]; if (!f) return;
+    var u = liveUploads(f.sid);
+    var html = filesRowHtml(f.sid, { on: canAddFiles(f), items: u.items, note: u.note });
+    if (html !== S.filesHtml) { S.filesHtml = html; el.innerHTML = html; }
+  }
+  function liveNote(text) { LU().note = text; if (S.liveSid) A(S.liveSid).filesOpen = true; paintLiveFiles(); }
+  function findUpload(id) { var u = LU(); for (var i = 0; i < u.items.length; i++) if (u.items[i].id === id) return u.items[i]; return null; }
+  function onLivePaste(e) {
+    if (S.view !== 'live') return;
+    var dt = e.clipboardData;
+    if (!carriesFile(dt)) return;
+    // Taken as the file, never as its name or path in a text box.
+    e.preventDefault();
+    var files = filesOf(dt);
+    if (files.length) addLiveFiles(files);
+    else liveNote('This browser did not hand over the file. Use Add file to choose it.');
+  }
+  function onLiveDrag(e) {
+    if (S.view !== 'live') return;
+    var dt = e.dataTransfer;
+    if (!carriesFile(dt)) return;
+    // Every file drag is ours: the browser must not open the file, or drop its path into the Ask box.
+    e.preventDefault();
+    var main = $('mt-lmain');
+    if (e.type === 'dragenter' || e.type === 'dragover') { if (dt) dt.dropEffect = 'copy'; if (main) main.classList.add('dropping'); S.dragAt = Date.now(); return; }
+    if (e.type === 'dragleave') { if (main && (!e.relatedTarget || !pane.contains(e.relatedTarget))) main.classList.remove('dropping'); return; }
+    if (main) main.classList.remove('dropping');
+    var files = filesOf(dt);
+    if (files.length) addLiveFiles(files);
+    else liveNote('This browser did not hand over the file. Use Add file to choose it.');
   }
   function paintTurns(force) {
     var el = $('mt-turns'); if (!el) return;
@@ -2017,7 +2299,8 @@
     S.turnsDirty = false;
     var f = S.feeds[S.liveSid]; if (!f) return;
     var hours = f.turns.some(function (t) { return t.elapsedMs >= 3600000; });
-    // Reading (not following): hold what is on screen still while turns above it are refined or new ones arrive.
+    // Reading (not following): hold the first line on screen still while turns above it are refined. A new turn lands
+    // below the reader, inside the box, so it moves nothing and needs no scroll at all.
     var anchor = S.follow ? null : turnsAnchor(el);
     if (!f.turns.length) {
       el.innerHTML = '<p class="mt-lempty">' + esc(f.endedAt ? 'No words were transcribed before the recording ended.' : 'Waiting for the first words. Text appears a few seconds after it is spoken.') + '</p>';
@@ -2038,45 +2321,52 @@
         prev = node;
       });
     }
-    if (S.follow) jumpToLive(); else { holdAnchor(anchor); paintLiveFoot(); }
+    if (S.follow) pinBottom(el); else holdAnchor(el, anchor);
+    paintJump();
     repaintAskEnabled(f.sid);
   }
   function turnInner(t, hours) {
     return '<div class="mt-lwho"><span class="mt-lname">' + esc(t.speaker) + '</span><span class="mt-lstamp">' + esc(stampMs(t.elapsedMs, hours)) + '</span></div>' +
       t.text.split(/\n{2,}/).map(function (p) { return '<p>' + esc(p) + '</p>'; }).join('');
   }
-  // iOS Safari has no scroll anchoring. The anchor is the first turn still on screen; when every turn is above the
-  // screen (reading Ask under the transcript) it is the transcript's bottom edge, so the panel below holds still.
-  function turnsAnchor(el) {
-    var kids = el.children;
+  // iOS Safari has no scroll anchoring, and Chrome's would fight this one (the box sets overflow-anchor: none), so the
+  // anchor is ours on every browser: the first turn still showing in the box, and its distance from the box's top.
+  function turnsAnchor(box) {
+    var kids = box.children, top = box.scrollTop;
     for (var i = 0; i < kids.length; i++) {
-      var r = kids[i].getBoundingClientRect();
-      if (r.bottom > 0) return r.top >= window.innerHeight ? null : { node: kids[i], top: r.top };
+      var n = kids[i];
+      if (n.offsetTop + n.offsetHeight > top) return { node: n, off: n.offsetTop - top };
     }
-    return kids.length ? { node: el, edge: true, top: el.getBoundingClientRect().bottom } : null;
+    return null;
   }
-  function holdAnchor(a) {
+  // Moves the box only when a turn above the reader changed height; a write to scrollTop during an iOS fling stops it.
+  function holdAnchor(box, a) {
     if (!a || !a.node.isConnected) return;
-    var now = a.edge ? a.node.getBoundingClientRect().bottom : a.node.getBoundingClientRect().top;
-    var dy = now - a.top;
-    if (Math.abs(dy) >= 1) { S.autoScroll = Date.now(); window.scrollBy(0, dy); }
+    var dy = (a.node.offsetTop - box.scrollTop) - a.off;
+    if (Math.abs(dy) >= 1) box.scrollTop += dy;
   }
+  function atBottom(box) { return box.scrollHeight - box.scrollTop - box.clientHeight <= 40; }
+  function pinBottom(box) { var end = box.scrollHeight - box.clientHeight; if (end - box.scrollTop > 0.5) box.scrollTop = end; }
   // A question needs words: the panel's buttons follow the transcript's first turn.
   function repaintAskEnabled(sid) {
     var a = A(sid), en = askEnabled(sid);
     if (a.lastEnabled !== en) { a.lastEnabled = en; repaintAsk(sid); }
   }
   function jumpToLive() {
-    var el = $('mt-turns'), last = el && el.lastElementChild;
-    if (last) { S.autoScroll = Date.now(); last.scrollIntoView({ block: 'end' }); }
-    S.follow = true; paintLiveFoot();
+    var el = $('mt-turns');
+    if (el) pinBottom(el);
+    S.follow = true; paintJump();
+  }
+  // Jump to live floats over the box's bottom edge: showing it never moves a line.
+  function paintJump() {
+    var b = $('mt-jump'), f = S.feeds[S.liveSid];
+    if (b) b.hidden = S.follow || !(f && f.turns.length);
   }
   function paintLiveFoot() {
     var el = $('mt-lfoot'); if (!el || S.view !== 'live') return;
     var f = S.feeds[S.liveSid], has = !!(f && f.turns.length);
     var html = '<div class="mt-bar"><button type="button" class="cx-btn primary" data-mt="live-copy"' + (has ? '' : ' disabled') + '>Copy transcript</button>' +
-      '<button type="button" class="cx-btn quiet" data-mt="live-context">Copy full context</button>' +
-      (!S.follow && has ? '<button type="button" class="cx-btn quiet" data-mt="jump">Jump to live</button>' : '') + '</div>' +
+      '<button type="button" class="cx-btn quiet" data-mt="live-context">Copy full context</button></div>' +
       (S.liveCopy ? '<p class="mt-copynote">' + esc(S.liveCopy) + '</p>' : S.liveReason ? '<p class="mt-copynote mt-amber">' + esc('Live transcript paused · ' + S.liveReason.replace(/_/g, ' ')) + '</p>' : '');
     if (html !== S.footHtml) { S.footHtml = html; el.innerHTML = html; }
   }
@@ -2098,14 +2388,12 @@
       return askOpen(f.sid, true).then(function () { return loadCues(f.sid); }).then(function () { done('Ready. Tap Copy full context again.'); });
     });
   }
-  function onScroll() {
-    if (S.view !== 'live' || Date.now() - (S.autoScroll || 0) < 600) return;
-    var el = $('mt-turns'), last = el && el.lastElementChild;
-    if (!last) return;
-    // Following means the end of the transcript is on screen. Scrolled past it (reading Ask below) is not following:
-    // a new chunk must not pull the reader back up.
-    var b = last.getBoundingClientRect().bottom, atEnd = b <= window.innerHeight + 40 && b >= 0;
-    if (atEnd !== S.follow) { S.follow = atEnd; paintLiveFoot(); if (atEnd && S.turnsDirty) paintTurns(false); }
+  // Following means the end of the transcript shows in its box. Scrolled up is reading: a new line must not pull the
+  // reader down. The page's own scroll is never touched.
+  function onBoxScroll(e) {
+    if (S.view !== 'live' || !e.target || e.target.id !== 'mt-turns') return;
+    var end = atBottom(e.target);
+    if (end !== S.follow) { S.follow = end; paintJump(); if (end && S.turnsDirty) paintTurns(false); }
   }
 
   // ── list shell ────────────────────────────────────────
@@ -2116,7 +2404,7 @@
       '<div id="mt-cal"></div><div id="mt-toolbar"></div><div id="mt-list"></div></div>';
     paintHero(); paintOrphans(); paintLive(); paintCal(); paintToolbar(); paintList();
   }
-  function stopTimers() { clearInterval(S.listTimer); clearInterval(S.liveTimer); S.listTimer = null; S.liveTimer = null; }
+  function stopTimers() { clearInterval(S.listTimer); clearInterval(S.liveTimer); clearInterval(S.clockTimer); S.listTimer = null; S.liveTimer = null; S.clockTimer = null; }
 
   // ── events ────────────────────────────────────────────
   function exchangeOf(sid, req) { return A(sid).history.filter(function (x) { return x.requestId === req; })[0]; }
@@ -2165,7 +2453,10 @@
         return;
       }
       case 'ask-refresh': loadConfig(true).then(function () { panelOpen(sid); }); return;
-      case 'files-toggle': a = A(sid); a.filesOpen = !a.filesOpen; if (S.view === 'live' && S.liveSid === sid) paintLiveHead(); else repaintAsk(sid); return;
+      case 'files-toggle': a = A(sid); a.filesOpen = !a.filesOpen; if (S.view === 'live' && S.liveSid === sid) paintLiveFiles(); else repaintAsk(sid); return;
+      case 'add-file': { var pick = $('mt-lpick'); if (pick) pick.click(); return; }
+      case 'up-retry': { var ru = findUpload(t.getAttribute('data-up')); if (ru && ru.state === 'failed' && S.liveSid) sendLiveFile(S.liveSid, ru, true); return; }
+      case 'up-remove': { var xu = findUpload(t.getAttribute('data-up')); if (xu) { abortUpload(xu); LU().items = LU().items.filter(function (q) { return q !== xu; }); paintLiveFiles(); } return; }
       case 'ask-act': submit(sid, t.getAttribute('data-action'), t.getAttribute('data-q')); return;
       case 'ask-retry': ex = exchangeOf(sid, req); if (ex) submit(sid, ex.action, ex.question, ex.requestId); return;
       case 'ask-stop': cancelAnswer(sid, req); return;
@@ -2216,6 +2507,7 @@
     if (sid && A(sid).panelDirty) setTimeout(function () { repaintAsk(sid); }, 0);
   });
   pane.addEventListener('change', function (e) {
+    if (e.target.id === 'mt-lpick') { addLiveFiles(e.target.files); e.target.value = ''; return; }
     if (e.target.id === 'mt-recency') { S.recency = e.target.value; paintBrowse(); }
     else if (e.target.id === 'mt-dom') { S.domain = e.target.value; if (queryActive()) runSearch(); else paintBrowse(); }
     else if (e.target.hasAttribute && e.target.hasAttribute('data-mt-model')) setModel(e.target.value);
@@ -2233,7 +2525,13 @@
       var sid = t.getAttribute('data-sid'); submit(sid, 'ask', A(sid).draft);
     }
   });
-  window.addEventListener('scroll', onScroll, { passive: true });
+  // scroll does not bubble: the transcript box's own scroll is caught on the way down.
+  pane.addEventListener('scroll', onBoxScroll, true);
+  pane.addEventListener('paste', onLivePaste);
+  // The strip is drawn at the box's own pixel size and in the theme's colours: draw again when either changes.
+  window.addEventListener('resize', function () { if (S.view === 'live') drawMeter(); });
+  if (typeof MutationObserver === 'function') new MutationObserver(function () { if (S.view === 'live') drawMeter(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (type) { pane.addEventListener(type, onLiveDrag); });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) return;
     if (S.out) return;
@@ -2242,6 +2540,12 @@
   });
   window.addEventListener('focus', refreshShownAsk);
 
+  // Test hooks (server/web-control/live-meeting-view.test.ts drives the real pane through these and through its events).
+  W.meetingsLive = {
+    _state: S, _elapsedLabel: elapsedLabel, _cleanLevels: cleanLevels, _visibleLevels: visibleLevels, _levelSilent: levelSilent,
+    _carriesFile: carriesFile, _filesOf: filesOf, _addLiveFiles: addLiveFiles, _drawMeter: drawMeter, _tickClock: tickClock,
+    _livePoll: livePoll, _feed: function (sid) { return S.feeds[sid]; }, _uploads: function () { return LU(); }
+  };
   W.registerPane('meetings', {
     load: function (args) {
       args = args || [];

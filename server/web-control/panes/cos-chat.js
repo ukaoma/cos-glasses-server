@@ -647,32 +647,47 @@
       k.signedOut = true;
       setNote(k, 'This browser was signed out. Your message and files are kept. Sign in, then tap Retry on each file.');
     } else {
-      t.error = UPLOAD_COPY[err && err.code] || (err && err.status === 413 ? 'Too large for COS.' : 'Did not upload');
+      t.error = uploadErrorText(err);
     }
     paintChips(k); paintButtons(k);
   }
-  function startUpload(k, t) {
-    t.state = 'reading'; t.progress = 0; t.error = '';
+  /**
+   * One file to the media store, the way every web upload goes: a photo resized to a 1024 px JPEG and posted to /api/media,
+   * any other file raw to /api/media/file. Resolves with the media ref ({ id }). `t` is the upload's record ({ file, name,
+   * kind, mime }); it gets `xhr` while sending (Remove aborts it) and `thumb` for a photo. hooks.uploading() runs once the
+   * bytes start, hooks.progress(0..1) as they go. 6.99.14: the live meeting view's Add file uses this too.
+   */
+  function uploadMedia(t, hooks) {
     var at = new Date(t.file.lastModified || Date.now()).toISOString();
-    var step;
     if (t.kind === 'photo') {
-      step = resizePhoto(t.file).then(function (dataUrl) {
+      return resizePhoto(t.file).then(function (dataUrl) {
         var data = dataUrl.slice(dataUrl.indexOf(',') + 1);
         var bytes = Math.floor(data.length * 3 / 4);
         if (bytes > MAX_PHOTO) { var big = new Error('Over 2 MB even after resizing.'); big.code = 'photo_too_large'; throw big; }
-        t.thumb = dataUrl; t.state = 'uploading'; paintChips(k); paintButtons(k);
+        t.thumb = dataUrl; hooks.uploading();
         var body = JSON.stringify({ images: [{ data: data, label: t.name.slice(0, 120), capturedAt: at }], kind: 'user_photo' });
-        return uploadRequest('/api/media', body, { 'Content-Type': 'application/json' }, function (p) { t.progress = p; paintProgress(k, t); }, t);
+        return uploadRequest('/api/media', body, { 'Content-Type': 'application/json' }, function (p) { hooks.progress(p); }, t);
       }).then(function (d) { return d && d.attachments && d.attachments[0]; });
-    } else {
-      t.state = 'uploading';
-      step = uploadRequest('/api/media/file', t.file, {
-        'Content-Type': t.mime || 'application/octet-stream',
-        'X-COS-Filename': encodeURIComponent(t.name),
-        'X-COS-Captured-At': at
-      }, function (p) { t.progress = p; paintProgress(k, t); }, t).then(function (d) { return d && d.attachment; });
-      paintChips(k);
     }
+    hooks.uploading();
+    return uploadRequest('/api/media/file', t.file, {
+      'Content-Type': t.mime || 'application/octet-stream',
+      'X-COS-Filename': encodeURIComponent(t.name),
+      'X-COS-Captured-At': at
+    }, function (p) { hooks.progress(p); }, t).then(function (d) { return d && d.attachment; });
+  }
+  /** The chip's words for a failed upload (never the sign-in case, which each caller says its own way). */
+  function uploadErrorText(err) {
+    if (err && err.code === 'photo_too_large') return 'Over 2 MB even after resizing';
+    if (err && !err.status && !err.code) return err.message || 'Did not upload';
+    return UPLOAD_COPY[err && err.code] || (err && err.status === 413 ? 'Too large for COS.' : 'Did not upload');
+  }
+  function startUpload(k, t) {
+    t.state = 'reading'; t.progress = 0; t.error = '';
+    var step = uploadMedia(t, {
+      uploading: function () { t.state = 'uploading'; paintChips(k); paintButtons(k); },
+      progress: function (p) { t.progress = p; paintProgress(k, t); }
+    });
     step.then(function (ref) {
       if (!findAtt(k, t.id)) return;
       if (!ref || !ref.id) { var e = new Error('The Mac did not keep the file.'); e.code = ''; throw e; }
@@ -680,8 +695,8 @@
       paintChips(k); paintButtons(k);
     }).catch(function (err) {
       if (!findAtt(k, t.id)) return;
-      if (err && err.code === 'photo_too_large') { t.state = 'failed'; t.error = 'Over 2 MB even after resizing'; paintChips(k); paintButtons(k); return; }
-      if (err && !err.status && !err.code) { t.state = 'failed'; t.error = err.message || 'Did not upload'; paintChips(k); paintButtons(k); return; }
+      if (err && err.code === 'photo_too_large') { t.state = 'failed'; t.error = uploadErrorText(err); paintChips(k); paintButtons(k); return; }
+      if (err && !err.status && !err.code) { t.state = 'failed'; t.error = uploadErrorText(err); paintChips(k); paintButtons(k); return; }
       uploadError(k, t, err);
     });
   }
@@ -1013,6 +1028,7 @@
     onClick: onClick, onKey: onKey, onInput: onInput, onChange: onChangeEvent, onSubmit: onSubmit, onPaste: onPaste, onDrag: onDrag,
     setOnChange: function (fn) { C.onChange = fn; }, setOnAnswered: function (fn) { C.onAnswered = fn; },
     // Test and render hooks: what the chat holds right now.
+    classify: classify, uploadMedia: uploadMedia, uploadErrorText: uploadErrorText, uuid: uuid,
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps
   };
 })();

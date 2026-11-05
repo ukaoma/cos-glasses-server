@@ -226,10 +226,13 @@
 /* ── live transcript view ─────────────────────────────── */
 .mt-lhead { display: grid; gap: 4px; }
 .mt-ltitle { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.mt-ltitle .mt-dtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 6.99.14: each header line is one line whatever it says (a quiet label, a longer minute count), so the header never
+   changes height while it records and the transcript box under it never moves. */
+.mt-lstatus, .mt-lsub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .mt-lstatus { font-weight: 500; font-size: 13.5px; color: var(--ink); margin: 4px 0 0; }
 .mt-lsub { font-size: 13px; color: var(--tertiary); margin: 0; }
-.mt-handoff { font-size: 13px; margin: 2px 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.mt-lhead .mt-bar { border-bottom: 0; margin-top: 6px; }
+.mt-handoff { font-size: 13px; margin: 2px 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: 50px; }
 /* Control's LiveMeetingFilesRow: one collapsed "Files · N" row; open, the names and the note. */
 .mt-files { border: 1px solid var(--hairline); border-radius: 9px; margin: 6px 0 4px; max-width: 520px; min-width: 0; }
 .mt-files-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 0 12px; font-size: 13px; font-weight: 600; color: var(--ink); text-align: left; }
@@ -243,15 +246,69 @@
 .mt-files-note { padding: 8px 12px 10px; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { .mt-files-head .icon:last-child { transition: none; } }
 .mt-lgrid { display: grid; gap: 16px; }
-.mt-lmain { min-width: 0; }
-.mt-turns { display: grid; gap: 22px; padding: 16px 0 14px; border-top: 1px solid var(--hairline); max-width: 700px; }
+.mt-lmain { min-width: 0; position: relative; border-radius: 12px; }
+/* 6.99.14: the transcript scrolls in its own box of fixed height (Control's ScrollView), so a new line moves only the
+   text inside it. overflow-anchor: none: the pane anchors the reader itself on every browser (iOS Safari has none), and
+   Chrome's own anchoring would correct a second time. */
+.mt-tbox { position: relative; margin-top: 12px; }
+.mt-turns { display: grid; gap: 22px; align-content: start; position: relative; padding: 16px 6px 14px 0; border-top: 1px solid var(--hairline);
+  height: clamp(240px, 52dvh, 640px); overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; -webkit-overflow-scrolling: touch; }
+.mt-turns:focus { outline: none; }
+.mt-turns:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.mt-lturn { max-width: 700px; }
 .mt-lwho { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
 .mt-lname { font-weight: 600; font-size: 12.5px; color: var(--sub); }
 .mt-lstamp { font: 400 11px/1 var(--mono); color: var(--tertiary); }
 .mt-lturn p { margin: 0 0 0.6em; font-size: 15px; line-height: 1.6; color: var(--ink); overflow-wrap: anywhere; }
 .mt-lturn p:last-child { margin-bottom: 0; }
 .mt-lempty { color: var(--sub); text-align: center; font-size: 14px; padding: 26px 8px; margin: 0; }
+.mt-jump { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); box-shadow: var(--shadow); background: var(--panel); }
+.mt-jump[hidden] { display: none; }
+/* The recording bar (Control's LiveRecordingBar): one row, 50 px, never wraps. Under 560 px of bar Add file is the
+   paperclip alone; under 340 px the still glyph takes the strip's place. */
+.mt-lbarslot { container-type: inline-size; min-height: 50px; margin-top: 8px; }
+.mt-lbar { display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 8px 0 14px; border: 1px solid var(--panel-border);
+  border-radius: 11px; background: color-mix(in srgb, var(--panel) 70%, var(--page)); min-width: 0; }
+.mt-lbar .mt-livedot { width: 9px; height: 9px; }
+/* A fixed width (h:mm:ss in the mono face), so Starting, 9:59 and 1:00:00 never move the strip beside it. */
+.mt-ltime { font: 500 12.5px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; width: 7ch; flex: none; overflow: hidden; }
+.mt-ltime.starting { font: 400 12px/1 var(--body); color: var(--sub); }
+.mt-meterwrap { position: relative; flex: 1 1 auto; min-width: 40px; height: 22px; display: flex; align-items: center; }
+.mt-meter { display: block; width: 100%; height: 22px; --mt-bar: color-mix(in srgb, var(--accent) 85%, transparent); --mt-dot: color-mix(in srgb, var(--sub) 70%, transparent); }
+/* The still glyph sits over the strip's box (no levels yet, or too narrow): shown and hidden by visibility, never by
+   display, so the switch moves nothing. */
+.mt-glyph { position: absolute; left: 0; top: 6px; display: inline-flex; visibility: hidden; align-items: center; gap: 1.5px; height: 10px; }
+.mt-glyph i { display: block; width: 2px; border-radius: 1px; background: color-mix(in srgb, var(--rec) 85%, transparent); }
+.mt-glyph i:nth-child(1) { height: 6px; } .mt-glyph i:nth-child(2) { height: 9px; } .mt-glyph i:nth-child(3) { height: 7px; }
+.mt-meterwrap.mt-nolevels .mt-meter { visibility: hidden; }
+.mt-meterwrap.mt-nolevels .mt-glyph { visibility: visible; }
+.mt-addfile, .mt-stopbtn { flex: none; white-space: nowrap; }
+.mt-addfile { display: inline-flex; align-items: center; gap: 6px; }
+.mt-addfile .icon { width: 14px; height: 14px; }
+.mt-lbar .mt-side-note { flex: none; }
+@container (max-width: 559px) { .mt-addlabel { display: none; } .mt-addfile { padding-left: 10px; padding-right: 10px; } }
+@container (max-width: 339px) { .mt-meter { visibility: hidden; } .mt-glyph { visibility: visible; } .mt-meterwrap { flex: 0 0 40px; } }
+.mt-lbarslot > .mt-stopline { margin: 8px 4px 0; }
+.mt-lbarslot > .mt-confirm { margin-top: 8px; }
+/* A file dragged over the pane: the column is outlined. Drawn only, so it moves nothing. */
+.mt-lmain.dropping { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.mt-pick { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; overflow: hidden; clip: rect(0 0 0 0); }
+#mt-lfiles:empty { display: none; }
+#mt-lfiles { margin-top: 8px; }
+.mt-files.live { max-width: none; }
+.mt-files-head.quiet { color: var(--sub); font-weight: 500; cursor: default; }
+.mt-files-head > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mt-files-list li.mt-up { position: relative; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; overflow: hidden; }
+.mt-up .mt-files-name, .mt-up-meta { grid-column: 1; }
+.mt-up-meta { font-size: 13px; line-height: 1.45; margin: 0; }
+.mt-up-acts { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 6px; align-items: center; }
+.mt-up-acts .mt-link { min-height: 28px; }
+.mt-up-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); transition: width 0.2s ease; }
+@media (prefers-reduced-motion: reduce) { .mt-up-bar { transition: none; } }
+#mt-lfiles .mt-files { margin-top: 0; }
+#mt-lfoot .mt-bar { border-top: 0; }
 @media (min-width: 860px) {
+  .mt-turns { height: clamp(320px, calc(100dvh - 400px), 1100px); }
   .mt-lgrid { grid-template-columns: minmax(0, 1fr) minmax(280px, min(380px, 38%)); align-items: start; column-gap: 24px; }
   .mt-lgrid > .mt-side-panel { position: sticky; top: calc(62px + var(--safe-top, 0px)); max-height: calc(100vh - 80px - var(--safe-top, 0px)); overflow: auto; }
 }
