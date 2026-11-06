@@ -37,7 +37,7 @@ it('advertises a plan-only capability under parent auth without reading state or
   expect((await fetch(s.url)).status).toBe(401)
   const response = await fetch(s.url, { headers: { 'X-Cos-Token': 't' } })
   expect(response.headers.get('cache-control')).toBe('private, no-store')
-  expect(await response.json()).toMatchObject({ protocolVersion: 1, planOnly: true, dispatch: false, requiresExistingWork: true, maxAssignments: 3 })
+  expect(await response.json()).toMatchObject({ protocolVersion: 1, planOnly: true, dispatch: false, controlSnapshot: 1, requiresExistingWork: true, maxAssignments: 3 })
   expect(s.board).not.toHaveBeenCalled(); expect(s.input).not.toHaveBeenCalled(); expect(s.run).not.toHaveBeenCalled()
 })
 it('builds trusted input and uses the existing tools-off planner contract, returning a proposal only', async () => {

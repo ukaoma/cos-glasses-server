@@ -34,7 +34,7 @@ export function parseAskWorkPlanRequest(raw: unknown): AskWorkPlanRequest {
 }
 
 /** Resolve exactly one existing card. Never infer a task from prose or synthesize a card identity. */
-export function resolveAskWorkTask(request: AskWorkPlanRequest, rows: TaskBoardRow[]): TaskBoardRow {
+export function resolveAskWorkTask(request: Pick<AskWorkPlanRequest, 'workID' | 'revision'>, rows: TaskBoardRow[]): TaskBoardRow {
   if (!Array.isArray(rows) || rows.length > 10_000) throw new AskWorkPlanError('work_board_unavailable', 503)
   const matches = rows.filter(row => `task:${row.domain}:${row.workIdentity || row.id}` === request.workID)
   if (!matches.length) throw new AskWorkPlanError('task_not_found', 404)

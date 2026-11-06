@@ -34,7 +34,7 @@ export function createAskWorkPlanRouter(given: Partial<AskWorkPlanDeps> = {}) {
   let running = false
   router.use('/ask/work-plan', (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
   router.get('/ask/work-plan', (_req, res) => res.json({ protocolVersion: ASK_WORK_PLAN_PROTOCOL, planOnly: true,
-    requiresExistingWork: true, dispatch: false, planner: 'sonnet', planners: WORK_CHAT_PLANNERS,
+    requiresExistingWork: true, dispatch: false, controlSnapshot: 1, planner: 'sonnet', planners: WORK_CHAT_PLANNERS,
     effort: WORK_CHAT_DEFAULT_EFFORT, efforts: WORK_CHAT_EFFORTS, maxAssignments: WORK_CHAT_MAX_ASSIGNMENTS,
     maxQuestionChars: 2000, maxBodyBytes: ASK_WORK_PLAN_BODY_BYTES }))
   router.post('/ask/work-plan', async (req, res) => {
