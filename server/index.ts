@@ -165,6 +165,7 @@ import { createJevRouter } from './routes/jev.js'
 import { createSessionFindRouter } from './routes/session-find.js'
 import { isSessionFindPost } from './lib/session-find.js'
 import { createWorkChatRouter } from './routes/work-chat.js'
+import { createAskWorkPlanRouter } from './routes/ask-work-plan.js'
 import { createWorkOrchestratorRouter } from './routes/work-orchestrator.js'
 import { createWorkLensRoundsRouter } from './routes/work-lens-rounds.js'
 import { startWorkOrchestrator } from './lib/work-orchestrator/runtime.js'
@@ -993,6 +994,8 @@ app.use('/api', createCosThreadRouter({ enabled: () => dropItEnabled(), thread: 
 // Find a session by meaning (Control 0.5.363): consent per provider, its own ledgers and breakers (lib/session-find.ts).
 app.use('/api', createSessionFindRouter())
 app.use('/api', createWorkChatRouter())
+// Ask proposes a Work plan; Control remains the sole owner of assignment sends.
+app.use('/api', createAskWorkPlanRouter())
 // 6.83.0 Work orchestrator: Control's Work snapshot, the planner input and plan usage (docs/work-orchestrator.md).
 app.use('/api', createWorkOrchestratorRouter())
 // 6.83.0 lens plans: the lens records a plan and may ask for it to be sent; COS Control pulls, sends and reports.
