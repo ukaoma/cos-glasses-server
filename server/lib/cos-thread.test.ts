@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { execFileSync } from 'node:child_process'
 import {
   buildDigest, claudeContextReader, contextTokensFromLog, cosThreadCapTokens, CosThread, describeDropFiling, DIGEST_HEADER,
   DIGEST_MAX_CHARS, parseTurnInput, type DigestDrop,
@@ -77,6 +78,15 @@ describe('cap and context reading', () => {
     // A usage row only inside the cut part of the file is out of reach: unknown, not zero.
     writeFileSync(file, usageLine(1, 1, 1) + '\n' + JSON.stringify({ type: 'user', pad: 'x'.repeat(600 * 1024) }) + '\n')
     expect(contextTokensFromLog(file)).toBeNull()
+  })
+
+  it('a FIFO planted at the log path is never opened blocking: unknown, at once', () => {
+    const h = harness()
+    const fifo = join(h.projects, '-Users-x-proj', 'fifo0001.jsonl')
+    execFileSync('mkfifo', [fifo])
+    const started = Date.now()
+    expect(contextTokensFromLog(fifo)).toBeNull()
+    expect(Date.now() - started).toBeLessThan(1000)
   })
 
   it('finds the log through the live CLI session first, then the one recorded, then the COS id', () => {

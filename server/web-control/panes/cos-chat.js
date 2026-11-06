@@ -101,7 +101,9 @@
       dropIt: !!(drop && drop.enabled === true),
       // 6.99.13: how many files a drop takes. 0 (an older server): Drop is words only and says so.
       dropFiles: drop && drop.enabled === true && Number.isInteger(drop.attachments) && drop.attachments > 0 ? Math.min(drop.attachments, MAX_ATTS) : 0,
-      jobs: caps.durableQueryJobs === true || h && h.durableQueryJobs === true || !!(caps.durableQueryJobs && caps.durableQueryJobs.enabled),
+      // 6.99.16: /api/health carries it at features.durableQueryJobs (a boolean); /api/models at capabilities.durableQueryJobs.enabled.
+      jobs: caps.durableQueryJobs === true || h && h.durableQueryJobs === true || !!(caps.durableQueryJobs && caps.durableQueryJobs.enabled) ||
+        !!(h && h.features && h.features.durableQueryJobs === true),
       steer: !!(C.caps && C.caps.steer),
       thread: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1)
     };

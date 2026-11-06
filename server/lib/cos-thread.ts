@@ -189,7 +189,9 @@ const SESSION_LOG_ID_RE = /^[A-Za-z0-9-]{8,80}$/
 
 /** The last tail of a file, at most `max` bytes. */
 function readTail(file: string, max: number): { text: string; truncated: boolean } {
-  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  // O_NONBLOCK: a FIFO planted at the log path must not stop the event loop (hazard-invariants.test.ts).
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+  if (!fstatSync(fd).isFile()) { closeSync(fd); throw new CosThreadError('cos_thread_unsafe', 503) }
   try {
     const size = fstatSync(fd).size
     const length = Math.min(size, max)
@@ -427,7 +429,7 @@ export class CosThread {
   }
 
   private appendRaw(text: string): void {
-    const fd = openSync(this.ledgerFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600)
+    const fd = openSync(this.ledgerFile, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
     try {
       fchmodSync(fd, 0o600)
       writeSync(fd, text)

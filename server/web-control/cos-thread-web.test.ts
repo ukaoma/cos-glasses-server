@@ -148,4 +148,20 @@ describe('COS Control Web: the COS thread (6.99.16)', () => {
     h.chat._setCaps({ capabilities: { dropIt: { enabled: true }, durableQueryJobs: true } })
     expect(h.chat._state.caps.thread).toBe(false)
   })
+
+  it('Ask is on for a health body shaped like the live one (features.durableQueryJobs, no capabilities.durableQueryJobs)', async () => {
+    const h = load({ '/api/query-jobs': admitted('sess0300', 700), '/api/cos-thread': thread({ mode: 'continue', sessionId: 'sess0300', reason: 'continue', digest: null }) })
+    h.chat._state.caps = null
+    const live = { status: 'ok', features: { durableQueryJobs: true, durableQueryJobsProtocol: 1 }, capabilities: { dropIt: { protocol: 1, enabled: true, source: 'settings', p2Settings: 1, attachments: 5, thread: { protocol: 1 } } } }
+    h.chat._setCaps(live)
+    expect(h.chat.askOn()).toBe(true)
+    h.ask('Is Ask on?')
+    await flush()
+    // The web Ask still names itself (source 'web'), so the server fills in the message era and number.
+    expect(h.jobs()).toHaveLength(1)
+    expect(h.jobs()[0]!.body).toMatchObject({ source: 'web', generation: 1, sessionId: 'sess0300', activityToolMode: 'status' })
+    // Off stays off.
+    h.chat._setCaps({ features: { durableQueryJobs: false }, capabilities: {} })
+    expect(h.chat.askOn()).toBe(false)
+  })
 })
