@@ -156,7 +156,7 @@ export function normalizeAskFiles(v: unknown): MeetingAskFile[] {
         seen.add(f.id);
         const text = redactSecrets(f.text);
         const secret = text !== f.text;
-        return { id: f.id, revision: f.revision, name: redactSecrets(f.name), status: secret ? 'secret-held' : f.status, text: secret || f.status !== 'ready' ? '' : text, ...(typeof f.notice === 'string' ? { notice: redactSecrets(f.notice).slice(0, 400) } : {}), ...(f.origin === 'phone' ? { origin: 'phone' as const } : {}) };
+        return { id: f.id, revision: f.revision, name: redactSecrets(f.name), status: secret ? 'secret-held' : f.status, text: secret || f.status !== 'ready' ? '' : text, ...(typeof f.notice === 'string' ? { notice: redactSecrets(f.notice).slice(0, 400) } : {}), ...(f.origin === 'phone' || f.origin === 'prep' ? { origin: f.origin as 'phone' | 'prep' } : {}) };
     });
 }
 /**

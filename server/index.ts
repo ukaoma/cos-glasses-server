@@ -155,6 +155,8 @@ import { initializeServerInstanceId } from './lib/server-instance-id.js'
 import { appendPrivateEnvBlock, UnsafeUserConfigPathError } from './lib/secure-user-config.js'
 import { getTranscriptionProfileStatus } from './lib/profile.js'
 import { createQueryJobsRouter } from './routes/query-jobs.js'
+import { createPrepRouter } from './routes/prep.js'
+import { PrepRuntime } from './lib/prep-runtime.js'
 import { createWorkReviewsRouter } from './routes/work-reviews.js'
 import { createWorkBoardRouter } from './routes/work-board.js'
 import { createWorkIntakeRouter } from './routes/work-intake.js'
@@ -495,6 +497,8 @@ app.use('/api', (req, res, next) => {
     || req.path.startsWith('/work/chat/lens-')
     // 6.96.3 voice naming batches: each write holds api_mutation itself; a drain gets the route's own refusal.
     || isMacVoiceNamingBatchPost(req.path)
+    // 6.99.19 Prep: each write takes the api_mutation lease itself and answers the contract's 503 `maintenance`.
+    || req.path.startsWith('/prep/')
   if (lifecycleOwned) return next()
 
   // COS Control must prove the candidate while a committed cross-boot gate is
@@ -892,6 +896,15 @@ app.use('/api', createClientInstanceRouter())
 app.use('/api', createQueryJobsRouter(queryJobCoordinator, {
   prepareAdmission: preparePublicDurableQueryAdmission,
 }))
+// 6.99.19 Prep: notes and files before a call. A run is an ordinary durable query job (the web Ask admission); files reach a
+// meeting only through an explicit bind (lib/prep-runtime.ts).
+app.use('/api', createPrepRouter(new PrepRuntime({
+  jobs: {
+    prepare: preparePublicDurableQueryAdmission,
+    submit: raw => queryJobCoordinator.submit(raw),
+    byClient: (clientJobId, generation) => queryJobCoordinator.getByClientGeneration(clientJobId, generation),
+  },
+})))
 const workReviewRuntime = createDefaultWorkReviewRuntime()
 app.use('/api', createWorkReviewsRouter(workReviewRuntime))
 // Work handoff requests (6.59.0): the glasses ask for Work to start and COS Control claims them. Optional: a bad

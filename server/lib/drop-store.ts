@@ -79,7 +79,12 @@ export interface DropRecord {
 
 export const FEED_KINDS = ['drop', 'receipt', 'question', 'followup', 'ping', 'answer'] as const
 export type FeedKind = typeof FEED_KINDS[number]
-export interface FeedAction { id: string; label: string }
+/**
+ * 6.99.19: the prep card's "Prep me" may carry the event it is about, so a client can open a Prep draft for it
+ * (ping-sources.ts prepCandidates). Display fields only; occurrence is null until the calendar sends event ids.
+ */
+export interface FeedActionPrep { title: string; startsAt: string; occurrence: null }
+export interface FeedAction { id: string; label: string; prep?: FeedActionPrep }
 export interface FeedItem {
   id: string
   kind: FeedKind
@@ -236,6 +241,14 @@ export function parseDropRecord(raw: unknown): DropRecord {
   return drop
 }
 
+/** A valid prep payload, or undefined (an invalid one is dropped, never a reason to refuse the item). */
+function feedActionPrep(raw: unknown): FeedActionPrep | undefined {
+  if (!record(raw)) return undefined
+  const title = str(raw.title, 300), startsAt = typeof raw.startsAt === 'string' && raw.startsAt.length <= 64 && Number.isFinite(Date.parse(raw.startsAt)) ? raw.startsAt : null
+  if (!title || !startsAt || raw.occurrence !== null) return undefined
+  return { title, startsAt, occurrence: null }
+}
+
 export function parseFeedItem(raw: unknown): FeedItem {
   if (!record(raw)) throw new DropStoreError('invalid_feed_item', 400)
   const id = typeof raw.id === 'string' && FEED_ID.test(raw.id) ? raw.id : null
@@ -249,7 +262,8 @@ export function parseFeedItem(raw: unknown): FeedItem {
   const actions = raw.actions.map(a => {
     const aid = record(a) ? str(a.id, 40) : null, label = record(a) ? str(a.label, 80) : null
     if (!aid || !/^[a-z0-9_:-]{1,40}$/.test(aid) || !label) throw new DropStoreError('invalid_feed_item', 400)
-    return { id: aid, label }
+    const prep = record(a) ? feedActionPrep(a.prep) : undefined
+    return { id: aid, label, ...(prep ? { prep } : {}) }
   })
   const item: FeedItem = { id, kind, threadId, createdAt, readAt, source, line, links: raw.links.map(parseLink), actions, state, key }
   if (raw.title !== undefined) { const t = str(raw.title, DROP_LIMITS.title, true); if (t === null) throw new DropStoreError('invalid_feed_item', 400); item.title = t }

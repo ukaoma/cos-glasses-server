@@ -4,6 +4,8 @@
 
 import { Router } from 'express'
 import { callPython, pythonBridgeAvailable } from '../lib/python-bridge.js'
+import { parsePrepOccurrence } from '../lib/prep-store.js'
+import type { PrepOccurrence } from '../../shared/prep.js'
 
 export const welcomeContextRouter = Router()
 
@@ -14,7 +16,29 @@ const CALENDAR_TTL_MS = 2 * 60_000
 const COORD_MOVE_DEG = 0.05 // ~5km
 
 type WeatherPayload = { temp: string; desc: string; location: string }
-type NextEventPayload = { title: string; time: string; inMinutes?: number }
+/**
+ * 6.99.19: `occurrence` (shared/prep.ts PrepOccurrence) is present ONLY when the bridge answers the event with a
+ * provider, calendar id, event id or external id, and start. The bridge sends no event ids today, so it is absent.
+ * It lets a client find a Prep draft for this exact event; it never binds one, and nothing is inferred from the title.
+ */
+type NextEventPayload = { title: string; time: string; inMinutes?: number; occurrence?: PrepOccurrence }
+
+/** The bridge event's provider identity, or undefined. snake_case (calendar_context.py) or camelCase is accepted. */
+export function bridgeOccurrence(evt: Record<string, unknown> | null | undefined): PrepOccurrence | undefined {
+  if (!evt || typeof evt !== 'object') return undefined
+  const pick = (...keys: string[]) => keys.map(k => evt[k]).find(v => v !== undefined && v !== null)
+  try {
+    return parsePrepOccurrence({
+      provider: pick('provider'),
+      account: pick('account', 'account_id', 'accountId') ?? null,
+      calendarId: pick('calendar_id', 'calendarId'),
+      eventId: pick('event_id', 'eventId') ?? null,
+      externalId: pick('external_id', 'externalId') ?? null,
+      startsAt: pick('start_time', 'start', 'startsAt'),
+      endsAt: pick('end_time', 'end', 'endsAt') ?? null,
+    }) ?? undefined
+  } catch { return undefined }
+}
 
 let cachedWeather: WeatherPayload | null = null
 let weatherFetchedAt = 0
@@ -327,16 +351,20 @@ export async function fetchNextEvent(): Promise<{ event: NextEventPayload | null
       const minsUntil = Number.isFinite(eventTime)
         ? Math.max(0, Math.round((eventTime - now) / 60_000))
         : undefined
+      const occurrence = bridgeOccurrence(meaningful as Record<string, unknown>)
       cachedNextEvent = {
         title: meaningful.title || 'Meeting',
         time: meaningful.start_time || meaningful.start || '',
         ...(minsUntil != null ? { inMinutes: minsUntil } : {}),
+        ...(occurrence ? { occurrence } : {}),
       }
     } else if (cal?.next_event && !isGenericNoiseEvent(cal.next_event.title || '')) {
+      const occurrence = bridgeOccurrence(cal.next_event as Record<string, unknown>)
       cachedNextEvent = {
         title: cal.next_event.title || 'Meeting',
         time: cal.next_event.start_time || '',
         ...(cal.minutes_until_next != null ? { inMinutes: cal.minutes_until_next } : {}),
+        ...(occurrence ? { occurrence } : {}),
       }
     } else {
       cachedNextEvent = null

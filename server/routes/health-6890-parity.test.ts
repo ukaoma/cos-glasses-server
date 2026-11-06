@@ -211,6 +211,8 @@ const GOLDEN_MODELS_CAPS = [
   'titleSteer',
   // Added after 6.99.4, additive: Drop it P1 (routes/drops.ts), right after titleSteer.
   'dropIt',
+  // Added in 6.99.19, additive: Prep (routes/prep.ts), right after dropIt.
+  'prep',
   'richMedia',
   'localFirstMeetings',
   // Added after 6.87.0, additive: the iPhone microphone capability (6.93.0) and the live Mac voice switch (6.93.0 QA W8).
@@ -492,6 +494,14 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.dropIt.p2Settings',
   // 6.99.13: POST /api/drops takes this many attachmentIds (Drop with files).
   '.capabilities.dropIt.attachments',
+  // 6.99.19: Prep (routes/prep.ts) and the server a Prep write must name.
+  '.capabilities.prep',
+  '.capabilities.prep.protocol',
+  '.capabilities.prep.maxFiles',
+  '.capabilities.prep.steerChars',
+  '.capabilities.prep.bind',
+  '.capabilities.prep.suggest',
+  '.capabilities.prep.serverInstanceId',
   '.capabilities.richMedia',
   '.capabilities.richMedia.video',
   '.capabilities.richMedia.maxPromptVisuals',
@@ -625,6 +635,8 @@ const GOLDEN_HEALTH_CAPS_6870 = [
   'titleSteer',
   // Added after 6.99.4, additive: Drop it P1 (routes/drops.ts), right after titleSteer.
   'dropIt',
+  // Added in 6.99.19, additive: Prep (routes/prep.ts), right after dropIt.
+  'prep',
   'transcriptCleanup',
   'richMedia',
   'meetingLifecycle',

@@ -28,7 +28,11 @@ export interface PingCandidate {
   title?: string
   line: string
   links: PingLink[]
-  actions: Array<{ id: string; label: string }>
+  /**
+   * 6.99.19: the prep card's "Prep me" action also carries `prep` (title, startsAt and a null occurrence: the calendar
+   * gives no event ids today), so a client can open a Prep draft for that event. Additive; a client may ignore it.
+   */
+  actions: Array<{ id: string; label: string; prep?: { title: string; startsAt: string; occurrence: null } }>
   /** Epoch ms the source saw it. */
   createdAt: number
   /** Epoch ms after which it is no longer worth posting (prep: the meeting start). */
@@ -82,7 +86,7 @@ export function prepCandidates(next: { title?: unknown; time?: unknown } | null 
   return [{
     source: 'prep', key: `prep:${hash(`${title}\n${next.time}`)}:${day}`,
     title, line: `${title} at ${clockLabel(localClock(start, timezone).minutes)}. Prep me?`,
-    links: [], actions: [{ id: 'prep', label: 'Prep me' }, { id: 'dismiss', label: 'Not now' }],
+    links: [], actions: [{ id: 'prep', label: 'Prep me', prep: { title, startsAt: new Date(start).toISOString(), occurrence: null } }, { id: 'dismiss', label: 'Not now' }],
     createdAt: nowMs, expiresAt: start,
   }]
 }

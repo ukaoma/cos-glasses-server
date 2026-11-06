@@ -33,8 +33,12 @@ export interface MeetingAskFile {
     status: 'ready' | 'pending' | 'unsupported' | 'failed' | 'removed' | 'secret-held';
     text: string;
     notice?: string;
-    /** "phone" for a file the phone attached through POST files/media (6.71.1). Control's rows omit it. */
-    origin?: 'phone';
+    /**
+     * "phone" for a file the phone attached through POST files/media (6.71.1). "prep" (6.99.19) for a copy a Prep bind
+     * adopted (id prep_<draftId>_<fileId>, or prep_<draftId>_steer for "Prep notes"). Control's own rows omit it, and a
+     * client that does not know a value shows the row as a plain file.
+     */
+    origin?: 'phone' | 'prep';
 }
 export interface MeetingAskSource {
   /** Server-owned accepted post-stop quotation; no live turn target or precise word clock. */

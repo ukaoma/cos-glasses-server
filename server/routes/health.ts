@@ -1,4 +1,5 @@
 import { dropItCapability } from '../lib/drop-settings.js'
+import { PREP_CAPABILITY } from '../../shared/prep.js'
 import { phoneMicrophoneMeetingsCapability } from '../lib/phone-recording.js'
 import { macLiveVoicesSnapshot } from '../lib/mac-window-replay.js'
 import { DICTATION_CLEAN_MODELS } from '../lib/dictation-clean-models.js'
@@ -538,6 +539,8 @@ healthRouter.get('/health', async (_req, res) => {
       titleSteer: TITLE_STEER_CAPABILITY,
       // Drop it P1: the pinned COS chat (routes/drops.ts). Codes only; `enabled` is false unless turned on. Absent on an older server.
       dropIt: dropItCapability(),
+      // 6.99.19 Prep: notes and files before a call, kept in the meeting by an explicit bind (routes/prep.ts). Absent on an older server.
+      prep: { ...PREP_CAPABILITY, serverInstanceId: getServerInstanceId() },
       // 6.77.0: codes only (this route is public): the protocol and whether the switch is on.
       transcriptCleanup: transcriptCleanupAdvertised(),
       richMedia: {
@@ -752,6 +755,8 @@ healthRouter.get('/models', async (req, res) => {
       titleSteer: TITLE_STEER_CAPABILITY,
       // Drop it P1: the pinned COS chat (routes/drops.ts). Codes only; `enabled` is false unless turned on. Absent on an older server.
       dropIt: dropItCapability(),
+      // 6.99.19 Prep: notes and files before a call, kept in the meeting by an explicit bind (routes/prep.ts). Absent on an older server.
+      prep: { ...PREP_CAPABILITY, serverInstanceId: getServerInstanceId() },
       richMedia: {
         video: richMedia.video,
         maxPromptVisuals: MAX_MODEL_IMAGE_INPUTS,
