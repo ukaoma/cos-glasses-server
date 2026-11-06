@@ -1,3 +1,16 @@
+## 6.99.17 - iPhone saved transcripts keep your dictionary terms, borrowed from the live words (private)
+
+2026-11-06. Private build for one Mac, on top of 6.99.16. Works with any COS Control that pairs with 6.99.16. Nothing changes for the glasses app.
+
+Miles, 11/06: "yes build the saved transcript vocabulary fix".
+
+- **Why.** Since 6.99.16 an iPhone recording's live pass is the same dictionary-prompted Whisper as the glasses, so the live words already hold your dictionary terms. The saved transcript is strict Parakeet, which takes no prompt, and with Second opinion off (it is off on Miles's Mac: Large-v3 is too slow) nothing put the dictionary back. A name read right live came back wrong in the saved transcript.
+- **What changes.** For an iPhone recording with no second opinion, each saved window is aligned against that window's live words, using only chunks live server Whisper transcribed (`asrProvider: 'server-whisper'`). Older Parakeet or on-phone live chunks never heard the prompt and lend nothing. The existing resolver (`stt-resolver.ts`) decides. A live word is taken only when it carries a dictionary term the saved words lack, inside a short disagreement (at most 4 live words) where Parakeet heard other words in the same place. A term the live Whisper put where Parakeet heard nothing is never inserted (new option `anchoredVocabularyOnly`, reason `unanchored`), because a prompted Whisper can echo a vocabulary term into a pause. The taken words are clocked across the Parakeet words they replace, not the approximate live clock. The resolver's existing protection still holds: a region whose sides differ in a negation, a number or a unit is never changed. No extra decode and no model call.
+- **What the saved record says.** `stt.liveVocabulary: { chunks, applied, wordsFromLive }` on each window where it ran, and the taken substitutions as `disagreements` with reason `vocabulary`.
+- **Unchanged.** With Second opinion on, Large-v3 stays the vocabulary source and the live words are not consulted. G2 and Mac saves never borrow live words.
+- Tests: `meeting-batch-stt.test.ts` (a misheard name is taken with its clocks over the replaced words and no Whisper call; an echoed insertion is refused; Parakeet live chunks lend nothing; G2 and Mac never borrow; second opinion on skips it) and `stt-resolver.test.ts` (re-clocking, `unanchored`, the unchanged Large-v3 behavior, numbers and units). Mutation-checked: the unanchored guard, the re-clock, the server-whisper filter, the phone plan flag, and the no-second-opinion condition each fail a test when removed.
+- Default-on changes: for iPhone microphone recordings with Second opinion off, the saved transcript can now differ from plain Parakeet where the live words held a dictionary term. Nothing else.
+
 ## 6.99.16 - The COS thread: one size-capped conversation behind the COS chat's Ask, stored to recover and search (private)
 
 Merged in: claude/iphone-dictionary (94323de, from the COS Glasses QA session; its own full suite on 94323de: 13,041 passed, 0 failed).

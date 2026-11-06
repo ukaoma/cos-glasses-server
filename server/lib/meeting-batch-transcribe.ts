@@ -469,6 +469,9 @@ export interface HqJobPlan {
   frontEnd: FrontEndId
   /** Canonical Mac/phone Parakeet must never silently substitute Whisper. */
   strictPrimary?: true
+  /** iPhone (6.99.17): with no second opinion, the live Whisper words lend the
+   *  saved Parakeet transcript the dictionary terms it missed. */
+  liveVocabulary?: true
 }
 
 /**
@@ -478,10 +481,14 @@ export interface HqJobPlan {
  * the user's choice, so its vocabulary rescue can write a dictionary term Parakeet missed.
  * Off stays off. Before this, a phone plan forced both off and the dictionary never applied
  * to iPhone recordings beyond the fixed corrections (Miles, 2026-11-05).
+ *
+ * With the second opinion off (Large-v3 is too slow for Miles), the live words are the
+ * vocabulary source instead: since 6.99.16 an iPhone recording's live pass is the same
+ * prompted Whisper as the G2, so it already heard the dictionary (Miles, 2026-11-06).
  */
 export function phoneHqPlan(selected: Pick<HqJobPlan, 'secondOpinion' | 'resolver' | 'frontEnd'>): HqJobPlan {
   const secondOpinion = selected.secondOpinion === 'off' ? 'off' : 'large-v3'
-  return { engine: 'parakeet-ultra', secondOpinion, resolver: secondOpinion !== 'off' && selected.resolver, frontEnd: selected.frontEnd, strictPrimary: true }
+  return { engine: 'parakeet-ultra', secondOpinion, resolver: secondOpinion !== 'off' && selected.resolver, frontEnd: selected.frontEnd, strictPrimary: true, liveVocabulary: true }
 }
 
 export function currentHqJobPlan(sessionId?: string): HqJobPlan {
@@ -629,6 +636,16 @@ function liveWordsForWindow(segment: BatchSegment, entries: IndexedTranscriptChu
     })
   }
   return words
+}
+
+/** The live words a vocabulary rescue may borrow: prompted server Whisper chunks only. A
+ *  Parakeet or on-phone live chunk never heard the vocabulary prompt. */
+function liveWhisperHypothesis(segment: BatchSegment, entries: IndexedTranscriptChunk[]): { hypothesis: Hypothesis; chunks: number } | null {
+  const whisper = entries.filter(e => e.chunkIndex >= segment.startChunkIdx && e.chunkIndex <= segment.endChunkIdx
+    && e.chunk.asrProvider === 'server-whisper' && (e.chunk.text ?? '').trim())
+  if (!whisper.length) return null
+  const words = liveWordsForWindow(segment, whisper)
+  return { hypothesis: { engine: 'live-whisper', text: words.map(w => w.word).join(' '), words }, chunks: whisper.length }
 }
 
 async function decodeParakeetWindow(
@@ -809,6 +826,27 @@ async function decodeHqWindow(
       disagreements = disagreements.map(d => ({ ...d, taken: 'primary' as const }))
     }
   }
+  let liveVocabulary: SegmentStt['liveVocabulary']
+  if (!second && plan.liveVocabulary && isParakeet(primary.engine) && primary.spoken) {
+    const live = liveWhisperHypothesis(segment, entries)
+    if (live) {
+      // Vocabulary only: Parakeet is not deletion-prone, and an anchored rescue never takes
+      // an insertion, so a term Whisper echoed into a pause is never written.
+      const resolved = resolveHypotheses(asHypothesis(primary), live.hypothesis, {
+        vocabulary: deps.vocabulary(),
+        primaryDeletionProne: false,
+        apply: true,
+        anchoredVocabularyOnly: true,
+      })
+      const used = resolved.wordsFromSecond > 0 && resolved.timed
+      liveVocabulary = { chunks: live.chunks, applied: used, wordsFromLive: used ? resolved.wordsFromSecond : 0, ...(resolved.skipped ? { skipped: resolved.skipped } : {}) }
+      if (used) {
+        text = applyCorrections(resolved.text)
+        words = resolved.words.map(w => ({ word: applyCorrections(w.word), start: w.start, end: w.end, probability: w.probability ?? 0 }))
+        disagreements = resolved.disagreements.filter(d => d.reason === 'vocabulary')
+      }
+    }
+  }
   // Only a prompted Whisper decode can echo the previous window's text.
   if (previousText && !isParakeet(primary.engine)) text = stripOverlap(text, previousText)
 
@@ -822,6 +860,7 @@ async function decodeHqWindow(
     primary: hypothesisRecord(primary),
     ...(second ? { secondOpinion: hypothesisRecord(second) } : secondError ? { secondOpinion: { engine: secondEngine, text: '', error: secondError } } : {}),
     resolver: { version: RESOLVER_VERSION, enabled: plan.resolver, applied, wordsFromSecond, ...(skipped ? { skipped } : {}) },
+    ...(liveVocabulary ? { liveVocabulary } : {}),
     disagreements,
   }
   return {

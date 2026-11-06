@@ -17,6 +17,13 @@
 //      holds a profile vocabulary term the primary's side does not, the second
 //      opinion's words are taken.
 //
+// A third caller (6.99.17) is the saved iPhone transcript, where the second
+// side is the live Whisper words the phone already heard with the vocabulary
+// prompt. Those words have approximate clocks and a prompted Whisper can echo a
+// vocabulary term into a pause, so that caller sets anchoredVocabularyOnly: a
+// term is taken only where the primary heard other words in the same place,
+// and the taken words are clocked across the primary words they replace.
+//
 // Everything else stays as the primary heard it. No region whose two sides
 // differ in a negation, a number or a unit is ever changed, whatever its length
 // (the 2026-10-13 diagnostic saw "born lacking" become "born having" and
@@ -37,7 +44,7 @@ export interface Hypothesis {
 }
 
 export type DisagreementKind = 'substitution' | 'primary_only' | 'second_only'
-export type ResolutionReason = 'gap_fill' | 'vocabulary' | 'protected' | 'not_speech' | 'low_confidence' | 'too_wide' | null
+export type ResolutionReason = 'gap_fill' | 'vocabulary' | 'protected' | 'not_speech' | 'low_confidence' | 'too_wide' | 'unanchored' | null
 
 export interface Disagreement {
   kind: DisagreementKind
@@ -66,6 +73,10 @@ export interface ResolveOptions {
    *  10 s) made the resolver worse than plain text alignment, because Large-v3's
    *  remapped token clocks have a heavy tail (median skew 0.23 s, p90 1.0 s). */
   maxSkewSec?: number | null
+  /** The second side's clocks are approximate (live words). A vocabulary term is
+   *  taken only from a substitution, never an insertion the primary has nothing
+   *  for, and the taken words are clocked across the primary words they replace. */
+  anchoredVocabularyOnly?: boolean
 }
 
 export interface ResolveResult {
@@ -241,6 +252,15 @@ function gapVerdict(q: Token[], options: ResolveOptions): ResolutionReason {
   return 'gap_fill'
 }
 
+/** The second side's words spread evenly over the time the replaced primary words took. */
+function reclock(q: Token[], p: Token[]): Token[] {
+  const { start, end } = span(p)
+  if (start === null) return q.map(t => ({ ...t, start: null, end: null }))
+  const stop = Math.max(start, end ?? start)
+  const step = (stop - start) / q.length
+  return q.map((t, i) => ({ ...t, start: start + i * step, end: start + (i + 1) * step }))
+}
+
 export function resolveHypotheses(primary: Hypothesis, second: Hypothesis, options: ResolveOptions): ResolveResult {
   const P = tokens(primary), Q = tokens(second)
   const toWords = (ts: Token[]): HypWord[] => ts.map(t => ({
@@ -290,6 +310,7 @@ export function resolveHypotheses(primary: Hypothesis, second: Hypothesis, optio
       const wantVocab = newTerms.length > 0
       if (wantGap || wantVocab) {
         if (!sameProtected(p, q)) reason = 'protected'
+        else if (wantVocab && options.anchoredVocabularyOnly && !p.length) reason = 'unanchored'
         else if (wantVocab && (q.length > MAX_VOCAB_REGION_WORDS || p.length > q.length + MAX_VOCAB_REGION_SLACK)) {
           // A term inside a long disagreement is not a reason to swap the whole region.
           reason = wantGap ? gapVerdict(q, options) : 'too_wide'
@@ -308,7 +329,10 @@ export function resolveHypotheses(primary: Hypothesis, second: Hypothesis, optio
       taken: options.apply ? take : 'primary',
       reason,
     })
-    if (options.apply && take === 'second') { out.push(...q); wordsFromSecond += q.length }
+    if (options.apply && take === 'second') {
+      out.push(...(options.anchoredVocabularyOnly ? reclock(q, p) : q))
+      wordsFromSecond += q.length
+    }
     else out.push(...p)
   }
   return {

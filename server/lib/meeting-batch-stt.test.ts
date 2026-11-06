@@ -314,6 +314,59 @@ describe('what the resolver saves', () => {
     expect(r.stt).toMatchObject({ engine: 'parakeet-ultra', resolver: { enabled: false } })
   })
 
+  describe('an iPhone recording with the second opinion off borrows dictionary terms from its live Whisper words (6.99.17)', () => {
+    const heard = 'is it able to tell who mild gyucoma is'
+    const live = (texts: string[], asrProvider = 'server-whisper'): IndexedTranscriptChunk[] =>
+      texts.map((text, chunkIndex) => ({ chunkIndex, chunk: { text, speaker: 'Ext', elapsed: chunkIndex * 6_000, similarity: 0, asrProvider } as any }))
+    const parakeetHeard = (text: string) => vi.fn(async (_w: Buffer, opts: any) => ({ model: opts.model, text, words: words(text), processingSec: 0.1, wallMs: 10 }))
+    const off = () => plan({ engine: 'large-v3', secondOpinion: 'off', resolver: true })
+
+    it('a term Parakeet misheard is taken from the live words, clocked over the words it replaces, with no extra decode', async () => {
+      const id = await seedPhoneRecording()
+      const { d, calls } = deps({ parakeet: parakeetHeard(heard), vocabulary: () => ['Miles Ukaoma'] })
+      const [r] = await M.transcribeSegments(dir, [segment], live(['is it able to tell', 'who Miles Ukaoma is']), id, off(), d)
+      expect(calls.some(c => c.startsWith('whisper'))).toBe(false)
+      expect(r.text).toBe('is it able to tell who Miles Ukaoma is')
+      expect(r.stt).toMatchObject({ engine: 'parakeet-ultra', resolver: { enabled: false, applied: false }, liveVocabulary: { chunks: 2, applied: true, wordsFromLive: 2 } })
+      expect(r.stt!.disagreements).toEqual([expect.objectContaining({ kind: 'substitution', primary: 'mild gyucoma', second: 'Miles Ukaoma', taken: 'second', reason: 'vocabulary' })])
+      const taken = r.words.filter(w => w.word === 'Miles' || w.word === 'Ukaoma')
+      expect(taken.map(w => [w.start, w.end]).flat().map(x => Math.round(x * 100) / 100)).toEqual([2.4, 2.75, 2.75, 3.1])
+      expect(r.speakerWords).toHaveLength(9)
+    })
+
+    it('never inserts a term the live Whisper put where Parakeet heard nothing (a prompted echo)', async () => {
+      const id = await seedPhoneRecording()
+      const { d } = deps({ parakeet: parakeetHeard('we should ship it'), vocabulary: () => ['Miles Ukaoma'] })
+      const [r] = await M.transcribeSegments(dir, [segment], live(['we should ship it', 'Miles Ukaoma']), id, off(), d)
+      expect(r.text).toBe('we should ship it')
+      expect(r.stt!.liveVocabulary).toEqual({ chunks: 2, applied: false, wordsFromLive: 0 })
+      expect(r.stt!.disagreements).toEqual([])
+    })
+
+    it('only prompted server Whisper chunks count: older Parakeet live chunks lend nothing', async () => {
+      const id = await seedPhoneRecording()
+      const { d } = deps({ parakeet: parakeetHeard(heard), vocabulary: () => ['Miles Ukaoma'] })
+      const [r] = await M.transcribeSegments(dir, [segment], live(['is it able to tell', 'who Miles Ukaoma is'], 'server-parakeet'), id, off(), d)
+      expect(r.text).toBe(heard)
+      expect(r.stt!.liveVocabulary).toBeUndefined()
+    })
+
+    it('a G2 or Mac Parakeet save never borrows live words', async () => {
+      const { d } = deps({ parakeet: parakeetHeard(heard), vocabulary: () => ['Miles Ukaoma'] })
+      const [r] = await M.transcribeSegments(dir, [segment], live(['is it able to tell', 'who Miles Ukaoma is']), undefined, plan({ engine: 'parakeet-ultra', secondOpinion: 'off' }), d)
+      expect(r.text).toBe(heard)
+      expect(r.stt!.liveVocabulary).toBeUndefined()
+    })
+
+    it('with the second opinion on, Large-v3 is the vocabulary source and the live words are not consulted', async () => {
+      const id = await seedPhoneRecording()
+      const { d } = deps({ parakeet: parakeetHeard(heard), vocabulary: () => ['Miles Ukaoma'] })
+      const [r] = await M.transcribeSegments(dir, [segment], live(['is it able to tell', 'who Miles Ukaoma is']), id, plan({ engine: 'large-v3', secondOpinion: 'parakeet-ultra', resolver: true }), d)
+      expect(d.whisper).toHaveBeenCalledTimes(1)
+      expect(r.stt!.liveVocabulary).toBeUndefined()
+    })
+  })
+
   it('a rescue the resolver cannot apply (untimed second opinion) is saved as kept, not taken', async () => {
     const { d } = deps({
       whisper: vi.fn(async () => ({ text: 'we sell ThriftCart now', words: words('we sell ThriftCart now'), timestamps: false, model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' }) as any),
