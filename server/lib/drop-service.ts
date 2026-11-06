@@ -73,6 +73,17 @@ export interface DropServiceDeps {
 const TEXT_MAX = DROP_LIMITS.text
 const ASK_WINDOW_MS = 6 * 60 * 60_000
 const ANSWER_CHARS = 1_200
+/** The pinned row's line: the item's title, then its line, but never the title twice (6.99.15: a follow-up's line
+ *  already names its card, so "X. 2 follow-ups from X." read as a stutter). A drop shows only its line. */
+export function pinLine(item: { kind: string; title?: string | null; line: string }): string {
+  const title = String(item.title ?? '').trim()
+  const line = String(item.line ?? '').trim()
+  if (!title || item.kind === 'drop') return line
+  if (!line) return title
+  const t = title.replace(/[.!?]+$/, '').toLowerCase()
+  return line.toLowerCase().includes(t) ? line : `${title.replace(/[.!?]+$/, '')}. ${line}`
+}
+
 const short = (text: string, max = 60): string => {
   const one = text.replace(/\s+/g, ' ').trim()
   return one.length <= max ? one : one.slice(0, max - 1).trimEnd() + '…'
@@ -555,7 +566,7 @@ export class DropService {
     const asked = items.filter(i => isWaiting(i)).length
     const work = typeof extra.yourMove === 'number' && Number.isSafeInteger(extra.yourMove) && extra.yourMove > 0 ? extra.yourMove : 0
     const last = items[items.length - 1]
-    return { unread, waiting: asked + work, lastLine: last ? short(last.title && last.kind !== 'drop' ? `${last.title}. ${last.line}` : last.line, 120) : '', lastAt: last?.createdAt ?? null, version: this.deps.feed.version() }
+    return { unread, waiting: asked + work, lastLine: last ? short(pinLine(last), 120) : '', lastAt: last?.createdAt ?? null, version: this.deps.feed.version() }
   }
 
   /**

@@ -80,3 +80,20 @@ describe('COS Control Web chat: P2 buttons', () => {
     expect(h.posts).toEqual([])
   })
 })
+
+describe('COS Control Web chat: one Dismiss (6.99.15)', () => {
+  const count = (html: string) => (html.match(/data-act="dismiss"/g) ?? []).length
+  it('a follow-up that carries its own Dismiss shows it once', () => {
+    const h = load()
+    const itemHtml = (h.chat as unknown as { _itemHtml: (i: unknown) => string })._itemHtml
+    const followup = { id: 'fi_9', kind: 'followup', threadId: 'fi_9', state: 'live', needsReply: true, title: 'Nav approved', line: '2 follow-ups',
+      actions: [{ id: 'open_card', label: 'Review' }, { id: 'dismiss', label: 'Dismiss' }], links: [], createdAt: '2026-11-05T22:30:00.000Z' }
+    expect(count(itemHtml(followup))).toBe(1)
+  })
+  it('an item that needs a reply and carries no Dismiss still gets one', () => {
+    const h = load()
+    const itemHtml = (h.chat as unknown as { _itemHtml: (i: unknown) => string })._itemHtml
+    const asked = { id: 'fi_8', kind: 'question', threadId: 'fi_8', state: 'live', needsReply: true, line: 'Which thread?', actions: [], links: [], createdAt: '2026-11-05T22:30:00.000Z' }
+    expect(count(itemHtml(asked))).toBe(1)
+  })
+})

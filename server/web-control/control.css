@@ -195,6 +195,19 @@
 .cx-row-sub.three { -webkit-line-clamp: 3; }
 .cx-id { margin-top: 3px; font: 400 10.5px/1.3 var(--mono); color: var(--tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cx-row .chev { margin-top: 12px; }
+/* 6.99.15 Messages rows: no glyph column; the ask and its time on one line, the answer, then one quiet line of facts. */
+.cx-msgrow { grid-template-columns: minmax(0, 1fr) 12px; padding: 12px 16px; }
+.cx-row + .cx-msgrow::before { left: 16px; }
+.cx-msg-top { display: flex; align-items: baseline; gap: 12px; }
+.cx-msg-top .cx-row-title { flex: 1 1 auto; min-width: 0; margin-top: 0; font-weight: 600; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cx-msg-top .cx-time { flex: none; font-family: var(--body); font-size: 12px; }
+.cx-msgrow .cx-row-sub { margin-top: 4px; }
+.cx-facts { margin-top: 6px; gap: 2px 12px; }
+.cx-facts .cx-num { font: 500 11.5px/1.3 var(--body); color: var(--tertiary); }
+.cx-facts .cx-tag { font: 500 11.5px/1.3 var(--body); letter-spacing: 0; color: var(--gold); }
+.cx-facts .cx-model, .cx-facts .cx-att { font: 400 11.5px/1.3 var(--body); color: var(--tertiary); }
+.cx-msgrow .chev { margin-top: 8px; }
+.cc-pin .cx-time { font-family: var(--body); font-size: 12px; }
 @media (min-width: 1100px) {
   .cx-row-title { font-size: 13.5px; }
   .cx-row-sub { font-size: 12px; }

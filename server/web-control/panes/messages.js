@@ -62,10 +62,16 @@
   function headline(q) {
     var s = String(q || '').replace(/\s+/g, ' ').trim();
     if (!s) return '(empty query)';
-    return s.length > 60 ? s.slice(0, 57) + '…' : s;
+    return s.length > 240 ? s.slice(0, 239) + '…' : s;
   }
   function modelOf(t) { var m = String(t.modelPreference || ''); return /^[A-Za-z0-9._:-]{1,64}$/.test(m) ? m : ''; }
-  function originTag(t) { return t.origin === 'routine' ? 'ROUTINE' : t.origin === 'task' ? 'TASK' : ''; }
+  // 6.99.15: the row says "Opus", not "opus"; a model id it does not know stays as the server wrote it.
+  var MODEL_NAMES = { opus: 'Opus', sonnet: 'Sonnet', fable: 'Fable', haiku: 'Haiku' };
+  function modelName(m) { return MODEL_NAMES[m] || m; }
+  // A preview of an answer whose progress lines were joined with no space ("now.Reading the tax"): one space after a
+  // sentence's end when the next sentence starts at once. Previews only; the reader shows the answer as written.
+  function previewText(text) { return stripMd(text).replace(/([a-z0-9)][.!?])([A-Z][a-z])/g, '$1 $2'); }
+  function originTag(t) { return t.origin === 'routine' ? 'Routine' : t.origin === 'task' ? 'Task' : ''; }
   function originTitle(t) {
     var id = t.originId ? ' (' + t.originId + ')' : '';
     return t.origin === 'routine' ? 'Produced by a scheduled routine on your Mac' + id : t.origin === 'task' ? 'Produced by an agent working a task on your Mac' + id : '';
@@ -285,8 +291,8 @@
     var detail;
     if (S.recentState === 'loading' && !S.recent) detail = 'Loading…';
     else if (S.recentState === 'error') detail = S.recentError === 'signed-out' ? 'Signed out' : 'Could not load messages';
-    else if (S.recent && S.recent.length) detail = 'Newest first · ' + S.recent.length + ' ' + W.plural(S.recent.length, 'turn', 'turns');
-    else if (S.recent) detail = 'No turns today';
+    else if (S.recent && S.recent.length) detail = S.recent.length + ' ' + W.plural(S.recent.length, 'message', 'messages') + ', newest first';
+    else if (S.recent) detail = 'No messages today';
     else detail = 'Refresh to load';
     return '<header class="cx-hero" data-tint="messages">' +
       '<span class="cx-glyph"><svg class="icon"><use href="#i-messages"/></svg></span>' +
@@ -298,7 +304,7 @@
   }
   function controlsHtml() {
     return '<div class="cx-controls">' +
-      '<div class="cx-switch" role="group" aria-label="Message view"><span class="cx-switch-label">Message view</span>' +
+      '<div class="cx-switch" role="group" aria-label="Message view">' +
         '<button type="button" data-msg="view" data-view="recent" aria-pressed="' + (S.view === 'recent') + '">Recent</button>' +
         '<button type="button" data-msg="view" data-view="archive" aria-pressed="' + (S.view === 'archive') + '">Archive</button>' +
       '</div>' +
@@ -318,24 +324,26 @@
       ? '<span>' + esc(recentSide) + '</span><span>·</span><button type="button" class="door" data-msg="view" data-view="archive">' + esc(archSide) + '<svg class="icon" aria-hidden="true"><use href="#i-chev"/></svg></button>'
       : '<button type="button" class="door" data-msg="view" data-view="recent">' + esc(recentSide) + '<svg class="icon" aria-hidden="true"><use href="#i-chev"/></svg></button><span>·</span><span>' + esc(archSide) + '</span>') + '</p>';
   }
+  // 6.99.15: one row is the ask as its title with the time beside it, the answer under it, and one quiet line of
+  // facts (number, Routine or Task, model, attachments). No glyph per row: every row was the same bubble.
   function recentRowHtml(t, i) {
     var a = atts(t);
     var kinds = a.map(attKind);
     var n = numOf(t);
     var tag = originTag(t);
     var model = modelOf(t);
-    return '<button type="button" class="cx-row" data-msg="open" data-key="' + esc(keyOf(t, i)) + '">' +
-      '<span class="cx-row-glyph"><svg class="icon"><use href="#i-messages"/></svg>' +
-        (a.length ? '<span class="cx-badge-icon"><svg class="icon"><use href="#i-' + attIcon(kinds) + '"/></svg></span>' : '') + '</span>' +
+    var facts = [];
+    if (n != null) facts.push('<span class="cx-num">#' + esc(n) + '</span>');
+    if (tag) facts.push('<span class="cx-tag" title="' + esc(originTitle(t)) + '">' + tag + '</span>');
+    if (model) facts.push('<span class="cx-model">' + esc(modelName(model)) + '</span>');
+    if (a.length) facts.push('<span class="cx-att" title="' + esc(attTitle(a)) + '"><svg class="icon"><use href="#i-' + attIcon(kinds) + '"/></svg>' + esc(attTitle(a)) + '</span>');
+    var sub = previewText(t.text);
+    return '<button type="button" class="cx-row cx-msgrow" data-msg="open" data-key="' + esc(keyOf(t, i)) + '">' +
       '<span class="cx-row-body">' +
-        '<span class="cx-meta"><span class="cx-num">' + (n != null ? 'Message #' + esc(n) : 'Message') + '</span>' +
-          '<span class="cx-time">' + esc(timeLabel(t.timestamp)) + '</span>' +
-          (tag ? '<span class="cx-tag" title="' + esc(originTitle(t)) + '">' + tag + '</span>' : '') +
-          (model ? '<span class="cx-model">' + esc(model) + '</span>' : '') +
-          (a.length ? '<span class="cx-att" title="' + esc(attTitle(a)) + '"><svg class="icon"><use href="#i-' + attIcon(kinds) + '"/></svg>' + a.length + '</span>' : '') +
-        '</span>' +
-        '<span class="cx-row-title">' + esc(headline(t.query)) + '</span>' +
-        '<span class="cx-row-sub">' + esc(stripMd(t.text)) + '</span>' +
+        '<span class="cx-msg-top"><span class="cx-row-title">' + esc(headline(t.query)) + '</span>' +
+          '<span class="cx-time">' + esc(timeLabel(t.timestamp)) + '</span></span>' +
+        (sub ? '<span class="cx-row-sub">' + esc(sub) + '</span>' : '') +
+        (facts.length ? '<span class="cx-meta cx-facts">' + facts.join('') + '</span>' : '') +
       '</span><span class="chev"></span></button>';
   }
   // The pinned COS chat, first in Recent (Drop it on only, and not while a search narrows the list).
@@ -361,8 +369,7 @@
       return '<div class="cx-list"><p class="cx-empty">No recent message contains “' + esc(q) + '”' +
         (days ? ', but ' + days + ' archived ' + W.plural(days, 'day', 'days') + ' ' + (days === 1 ? 'does' : 'do') + '.' : '. The archive goes back further.') + '</p></div>';
     }
-    return '<div class="cx-list">' + shown.map(function (t) { return recentRowHtml(t, list.indexOf(t)); }).join('') + '</div>' +
-      '<p class="cx-note">ROUTINE and TASK mark a run your Mac started.</p>';
+    return '<div class="cx-list">' + shown.map(function (t) { return recentRowHtml(t, list.indexOf(t)); }).join('') + '</div>';
   }
   function archiveBody() {
     var q = S.q.trim();

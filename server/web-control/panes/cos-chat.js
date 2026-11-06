@@ -346,7 +346,8 @@
       }).join('') + '</ol>';
     }
     var rest = acts.filter(function (a) { return !/^choose:/.test(a.id); });
-    if (item.needsReply) rest.push({ id: 'dismiss', label: 'Dismiss' });
+    // A P2 follow-up already carries its own Dismiss (6.99.11); add one only to an item that does not (6.99.15: it showed twice).
+    if (item.needsReply && !rest.some(function (a) { return a.id === 'dismiss'; })) rest.push({ id: 'dismiss', label: 'Dismiss' });
     if (rest.length) {
       html += '<div class="cc-acts">' + rest.map(function (a) {
         var cls = PRIMARY[a.id] ? 'cx-btn primary' : 'link-btn cc-text-btn';

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { DropStore, InboxFeedStore, type DropDest } from './drop-store.js'
 import { DropRouter } from './drop-router.js'
-import { DropService, kindFor, statusOf } from './drop-service.js'
+import { DropService, kindFor, pinLine, statusOf } from './drop-service.js'
 import { fakeWriters, scriptedDecisionClient, type FakeWriters } from './__fixtures__/drop-fixtures.js'
 import { mergeP2Settings, P2_DEFAULTS } from './drop-p2-settings.js'
 
@@ -440,5 +440,20 @@ describe('P2 settings in the service (6.99.11)', () => {
     const [p] = h.feed.insert([{ id: 'fi_' + 'c'.repeat(32), kind: 'ping', threadId: 'fi_' + 'c'.repeat(32), createdAt: new Date().toISOString(), readAt: null, source: 'cos',
       line: 'Reminder: stretch', links: [{ kind: 'reminder', id, label: 'stretch' }], actions: [], state: 'live', key: `reminder:${id}:z` }])
     expect(h.service.reminderAction(p.id, 'snooze_1h').drop.remind!.at).toBe('2026-11-04T15:30:00.000Z')  // 9:00 CST + 30 minutes
+  })
+})
+
+describe('the pinned line (6.99.15)', () => {
+  const title = 'Sprocket Rocket AI Unified Nav Approved (G2)'
+  it('never says the title twice when the line already names it', () => {
+    expect(pinLine({ kind: 'followup', title, line: `2 follow-ups from ${title}.` })).toBe(`2 follow-ups from ${title}.`)
+    expect(pinLine({ kind: 'followup', title: `${title}.`, line: `2 follow-ups from ${title.toLowerCase()}` })).toBe(`2 follow-ups from ${title.toLowerCase()}`)
+  })
+  it('puts a title the line does not name in front of it, with one period', () => {
+    expect(pinLine({ kind: 'ping', title: 'Prep for Silas.', line: 'Your 1:1 starts in 30 minutes.' })).toBe('Prep for Silas. Your 1:1 starts in 30 minutes.')
+  })
+  it('a drop shows its line, and a missing line falls back to the title', () => {
+    expect(pinLine({ kind: 'drop', title: 'Ignored', line: 'Call Silas' })).toBe('Call Silas')
+    expect(pinLine({ kind: 'ping', title: 'Prep for Silas', line: '' })).toBe('Prep for Silas')
   })
 })
