@@ -1,3 +1,13 @@
+## 6.99.17 - Ask proposes a Work plan for review (private)
+
+2026-11-06. Private follow-on to 6.99.16; preserves its persistent COS thread and existing glasses behavior. The matched COS Control follow-on discovers this capability explicitly. Older clients retain their existing paths.
+
+- Adds authenticated `GET/POST /api/ask/work-plan` for one explicitly selected existing Work card and its canonical revision. The server derives task context and session eligibility, asks the existing tools-off planner for proposals, then rechecks the card and targets before returning them. Nothing is sent, queued, recorded as a Work round, or changed on the task by this endpoint. Sending remains an explicit review through the existing Work flow.
+- Uses cached provider headroom only, with no usage probes. Stale, incomplete, busy, excluded or otherwise unavailable evidence disables targets; new sessions stay unavailable until a trusted execution-capability contract exists. Context excludes local attachments, local link context and Work chat history. Credentials in a question are rejected before evidence reads or inference with a removal message.
+- Adds authenticated `POST /api/work/orchestrator/snapshot`, advertised as `controlSnapshot: 1`, to accept the existing bounded Control snapshot after checking the server identity and current card revision. It updates only the existing snapshot cache and performs no discovery, model call or dispatch. Uploaded evidence is paired-client data, not execution approval or authoritative receipt storage.
+- Holds admission and the maintenance lease until canceled provider work settles; unconfirmed process termination retains both guards. Preserves canonical revision and target checks across the planner call, and makes no changes to the persistent COS thread routes.
+- Regression checks cover request bounds, redaction refusal, revision/target changes, cache-only runtime, snapshot binding, disconnects and maintenance. Existing test-only fixes remove a checkout-name false positive from the Nemotron credential check and give an orphan-fence/drain test a controlled store clock; no associated runtime behavior changes.
+
 ## 6.99.16 - The COS thread: one size-capped conversation behind the COS chat's Ask, stored to recover and search (private)
 
 Merged in: claude/iphone-dictionary (94323de, from the COS Glasses QA session; its own full suite on 94323de: 13,041 passed, 0 failed).
