@@ -144,9 +144,14 @@ it('admits the timestamped UUID contract and refuses an ID whose embedded origin
  const {ASK_SESSION}=await import('../lib/ask-session-id.js');expect(ASK_SESSION.test(timestamped)).toBe(true);expect(ASK_SESSION.test('phone_1700000000000_anything')).toBe(false)
  expect((await upload({sessionId:'phone_1700000000001_abcdef01-2345-6789-abcd-0123456789ab'})).json.reason).toBe('phone_capture_conflict')
 })
-it('keeps phone HQ strictly Parakeet with no second opinion or resolver after global choices change',async()=>{
- await upload();const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'large-v3'})
- const {currentHqJobPlan}=await import('../lib/meeting-batch-transcribe.js');expect(currentHqJobPlan(id)).toMatchObject({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'off',resolver:false})
+it('keeps phone HQ strictly Parakeet; a second opinion, when on, is always the dictionary-prompted Whisper',async()=>{
+ await upload();const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'large-v3',secondOpinion:'off',resolver:false})
+ const {currentHqJobPlan,phoneHqPlan}=await import('../lib/meeting-batch-transcribe.js');expect(currentHqJobPlan(id)).toMatchObject({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'off',resolver:false})
+ // Whisper HQ with a Parakeet second opinion: for the phone the other engine is Whisper, never Parakeet twice.
+ writeSttSettings({...readSttSettings(),hq:'large-v3',secondOpinion:'parakeet-ultra',resolver:true});expect(currentHqJobPlan(id)).toEqual({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'large-v3',resolver:true,frontEnd:readSttSettings().frontEnd})
+ writeSttSettings({...readSttSettings(),hq:'parakeet-ultra',secondOpinion:'large-v3',resolver:false});expect(currentHqJobPlan(id)).toMatchObject({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'large-v3',resolver:false})
+ // transcribeSegments re-derives the phone plan from whatever plan it is handed.
+ expect(phoneHqPlan({secondOpinion:'off',resolver:true,frontEnd:'full'})).toEqual({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'off',resolver:false,frontEnd:'full'})
  const {assertVoiceEvidenceSource}=await import('../lib/voice-evidence-guard.js');expect(assertVoiceEvidenceSource([id])?.body.reason).toBe('phone_anonymous_capture')
 })
 

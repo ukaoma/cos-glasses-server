@@ -275,7 +275,45 @@ describe('the plan the production call sites use', () => {
   })
 })
 
+/** An admitted iPhone capture's provenance, written the way admitPhoneRecording writes it. */
+async function seedPhoneRecording(): Promise<string> {
+  const id = 'phone_1700000000000_abcdef01-2345-6789-abcd-0123456789ab'
+  const { readSpeakerPolicy, writeSpeakerPolicy } = await import('./meeting-speaker-policy.js')
+  writeSpeakerPolicy(id, 'anonymous', readSpeakerPolicy(id).revision)
+  const { dataPath } = await import('./data-dir.js')
+  mkdirSync(dataPath('phone-recordings'), { recursive: true })
+  writeFileSync(join(dataPath('phone-recordings'), id + '.json'), JSON.stringify({ version: 1, captureId: id, sessionId: id, sourceType: 'iphone_microphone', speakerPolicy: 'anonymous', startTime: 1_700_000_000_000 }))
+  return id
+}
+
 describe('what the resolver saves', () => {
+  it('an iPhone recording keeps Parakeet as the primary and lets the dictionary-prompted Whisper rescue a vocabulary name (2026-11-05)', async () => {
+    const id = await seedPhoneRecording()
+    const heard = 'is it able to tell who mild gyucoma is'
+    const { d } = deps({
+      whisper: vi.fn(async () => ({ text: 'is it able to tell who Miles Ukaoma is', words: words('is it able to tell who Miles Ukaoma is'),
+        spokenWords: words('is it able to tell who Miles Ukaoma is'), timestamps: true, speechSpans: [[0, 10]], model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' }) as any),
+      parakeet: vi.fn(async (_w: Buffer, opts: any) => ({ model: opts.model, text: heard, words: words(heard), processingSec: 0.1, wallMs: 10 })),
+      vocabulary: () => ['Miles Ukaoma'],
+    })
+    // The plan as the user's settings would hand it (Whisper HQ, Parakeet second): the phone re-derives its own.
+    const [r] = await M.transcribeSegments(dir, [segment], entries, id, plan({ engine: 'large-v3', secondOpinion: 'parakeet-ultra', resolver: true }), d)
+    expect((d.parakeet as any).mock.calls[0][1]).toMatchObject({ model: 'parakeet-ultra' })
+    expect(d.parakeet).toHaveBeenCalledTimes(1); expect(d.whisper).toHaveBeenCalledTimes(1)
+    expect(r.stt).toMatchObject({ engine: 'parakeet-ultra', secondOpinion: { engine: 'large-v3' }, resolver: { enabled: true, applied: true } })
+    expect(r.text).toBe('is it able to tell who Miles Ukaoma is')
+    expect(r.stt!.disagreements).toEqual([expect.objectContaining({ taken: 'second', reason: 'vocabulary' })])
+  })
+
+  it('an iPhone recording with the second opinion off stays Parakeet only, as before', async () => {
+    const id = await seedPhoneRecording()
+    const { d, calls } = deps({ vocabulary: () => ['Miles Ukaoma'] })
+    const [r] = await M.transcribeSegments(dir, [segment], entries, id, plan({ engine: 'large-v3', secondOpinion: 'off', resolver: true }), d)
+    expect(calls.some(c => c.startsWith('whisper'))).toBe(false)
+    expect(r.text).toBe('we should ship the build Friday')
+    expect(r.stt).toMatchObject({ engine: 'parakeet-ultra', resolver: { enabled: false } })
+  })
+
   it('a rescue the resolver cannot apply (untimed second opinion) is saved as kept, not taken', async () => {
     const { d } = deps({
       whisper: vi.fn(async () => ({ text: 'we sell ThriftCart now', words: words('we sell ThriftCart now'), timestamps: false, model: 'large-v3', backend: 'whisper-cli', actualQuality: 'hq' }) as any),
