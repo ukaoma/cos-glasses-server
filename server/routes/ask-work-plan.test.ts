@@ -52,7 +52,7 @@ it('builds trusted input and uses the existing tools-off planner contract, retur
   expect(call[0]).toEqual({ engine: 'claude', model: 'opus' })
   expect(JSON.parse(call[1])).toMatchObject({ sessions: [{ automatic: true }], context: expect.stringContaining(task.text) })
   expect(JSON.parse(JSON.parse(call[1]).context).evidenceStatus).toMatchObject({ snapshotAgeSec: 1, liveListAgeSec: 1,
-    logScanComplete: true, fresh: true, scope: expect.stringContaining('no local attachments') })
+    logScanComplete: true, fresh: true, usageMode: 'cached', scope: expect.stringContaining('no local attachments') })
   expect(JSON.parse(call[1])).not.toHaveProperty('planner')
   expect(call[2]).toContain('Nothing is sent or recorded'); expect(call[5]).toEqual({ caller: 'ask_work_plan' })
   expect(call[6]).toEqual({ effort: 'low', maxOutputTokens: WORK_CHAT_ORCHESTRATOR_OUTPUT_TOKENS, maxThinkingTokens: 0, deadlineMs: 180000 })
@@ -136,7 +136,7 @@ it('retains admission and maintenance if the runner cannot confirm process termi
   expect(s.release).not.toHaveBeenCalled()
   expect((await s.post()).status).toBe(409)
 })
-it('holds admission through a disconnected usage-input probe, then releases without running inference', async () => {
+it('holds admission through a disconnected evidence read, then releases without running inference', async () => {
   let started!: () => void, finishInput!: (data: OrchestratorInput) => void
   const entered = new Promise<void>(resolve => { started = resolve })
   const s = await setup({ input: async () => { started(); return new Promise(resolve => { finishInput = resolve }) } })

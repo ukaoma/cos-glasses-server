@@ -4,7 +4,7 @@ import { ASK_WORK_PLAN_PROTOCOL, ASK_WORK_PLAN_BODY_BYTES, ASK_WORK_PLAN_DEADLIN
   AskWorkPlanError, parseAskWorkPlanRequest, resolveAskWorkTask, askWorkMeetingIDs, prepareAskWorkPlan, askWorkProposalID } from '../lib/ask-work-plan.js'
 import { listBoard, type TaskBoardRow } from '../lib/task-store.js'
 import { createWorkBoardReader } from '../lib/work-board-reader.js'
-import { orchestratorInputFor } from '../lib/work-orchestrator/runtime.js'
+import { orchestratorInputFor, type OrchestratorParts } from '../lib/work-orchestrator/runtime.js'
 import { runMeetingAskModel, AskProcessError } from '../lib/meeting-ask-runner.js'
 import { maintenanceAdmissionsOpen, acquireMaintenanceWork } from '../lib/maintenance-lifecycle.js'
 import { parseWorkChatAnswer, WORK_CHAT_SYSTEM, WORK_CHAT_ORCHESTRATOR_RULES, WORK_CHAT_PLANNERS, WORK_CHAT_EFFORTS,
@@ -19,9 +19,13 @@ export interface AskWorkPlanDeps {
   lease: () => { release(): void }
   now: () => number
 }
+/** Ask never launches usage probes; stale or unknown cached headroom disables targets in prepareAskWorkPlan. */
+export function readAskWorkPlanInput(workID: string, meetingWorkIDs: string[], parts?: OrchestratorParts) {
+  return orchestratorInputFor(workID, meetingWorkIDs, parts, { usageMode: 'cached' })
+}
 const defaults: AskWorkPlanDeps = {
   // A new reader guarantees the post-plan revision check starts a new bounded board read.
-  board: () => createWorkBoardReader(() => listBoard()).read(0), input: orchestratorInputFor, run: runMeetingAskModel,
+  board: () => createWorkBoardReader(() => listBoard()).read(0), input: readAskWorkPlanInput, run: runMeetingAskModel,
   admissions: maintenanceAdmissionsOpen, lease: () => acquireMaintenanceWork('work_chat'), now: Date.now,
 }
 
@@ -57,7 +61,7 @@ export function createAskWorkPlanRouter(given: Partial<AskWorkPlanDeps> = {}) {
       if (controller.signal.aborted) throw new AskWorkPlanError('ask_work_plan_canceled', 408)
       const task = resolveAskWorkTask(request, rows)
       let evidence
-      // Input can run bounded provider usage probes. Hold admission/lease until they settle too.
+      // The default reads cached usage only. Still await the bounded evidence dependency before releasing admission.
       try { evidence = await deps.input(request.workID, askWorkMeetingIDs(task)) }
       catch { throw new AskWorkPlanError('orchestrator_input_unavailable', 503) }
       if (controller.signal.aborted) throw new AskWorkPlanError('ask_work_plan_canceled', 408)

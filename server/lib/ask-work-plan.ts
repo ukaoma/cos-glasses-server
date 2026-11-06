@@ -77,7 +77,7 @@ export function prepareAskWorkPlan(request: AskWorkPlanRequest, task: TaskBoardR
   // executable-provider contract yet, so it never offers New (and never accepts a caller allowlist).
   const newSessionProviders: ('claude' | 'codex')[] = []
   const evidenceStatus = { snapshotAgeSec: evidence.snapshotAgeSec, liveListAgeSec: evidence.liveListAgeSec,
-    logScanComplete: evidence.logScanComplete, fresh,
+    logScanComplete: evidence.logScanComplete, fresh, usageMode: 'cached',
     scope: 'Canonical task and server session evidence only; no local attachments, local link context, or chat history. Meeting references do not include transcripts.',
     disabledTargets: evidence.rows.filter((_, index) => !sessions[index]!.automatic || !sessions[index]!.forkable).map(row => ({ id: row.id,
       reasons: [!fresh && 'stale_or_missing_evidence', !evidence.logScanComplete && 'incomplete_session_scan',
@@ -95,7 +95,7 @@ export function prepareAskWorkPlan(request: AskWorkPlanRequest, task: TaskBoardR
       orchestrator: true, now: new Date(now).toISOString(), usage: evidence.usage, leftOut: evidence.leftOut, newSessionProviders })
   } catch { throw new AskWorkPlanError('orchestrator_input_unavailable', 503) }
   return { input, title: redactSecrets(task.title), evidence: {
-    snapshotAgeSec: evidence.snapshotAgeSec, liveListAgeSec: evidence.liveListAgeSec,
+    snapshotAgeSec: evidence.snapshotAgeSec, liveListAgeSec: evidence.liveListAgeSec, usageMode: 'cached',
     logScanComplete: evidence.logScanComplete, discovered: evidence.discovered,
     sessions: input.sessions.map(row => ({ id: row.id, title: row.title, automatic: row.automatic, forkable: row.forkable,
       member: row.member, live: row.live, busy: row.busy, available: row.available, discoveredBy: row.discoveredBy,

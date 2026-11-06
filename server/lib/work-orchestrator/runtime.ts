@@ -48,14 +48,20 @@ export const INPUT_SCAN_WAIT_MS = 20_000
 
 /** What one plan input reads. The server passes the process-wide stores; a test passes its own. */
 export interface OrchestratorParts { tags: TagIndex; usage: UsageMonitor; snapshot: () => ControlSnapshot | null }
+export interface OrchestratorInputOptions {
+  /** Read the existing usage view only, without starting provider usage subprocesses. Default retains Work's refresh. */
+  usageMode?: 'cached'
+}
 
-export async function orchestratorInputFor(workID: string, meetingWorkIDs: string[], parts?: OrchestratorParts): Promise<OrchestratorInput> {
+export async function orchestratorInputFor(workID: string, meetingWorkIDs: string[], parts?: OrchestratorParts,
+  options: OrchestratorInputOptions = {}): Promise<OrchestratorInput> {
   const tags = parts?.tags ?? orchestratorTagIndex()
   const monitor = parts?.usage ?? orchestratorUsage()
   const scan = tags.refresh().catch(() => null)
   const scanned = await Promise.race([scan, new Promise<null>(r => setTimeout(() => r(null), INPUT_SCAN_WAIT_MS).unref?.())])
   // On demand: the plan this input feeds may fork or start a session, so a reading older than 2 minutes is re-read.
-  const usageViews = await monitor.forPlan()
+  // Ask's proposal-only adapter uses cache-only evidence; it does not own the usage probes' child lifetimes.
+  const usageViews = options.usageMode === 'cached' ? monitor.views() : await monitor.forPlan()
   const roots = agentSessionRoots()
   return buildOrchestratorInput(workID, meetingWorkIDs, {
     snapshot: parts ? parts.snapshot() : orchestratorSnapshots().get(),
