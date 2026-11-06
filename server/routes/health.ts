@@ -466,6 +466,9 @@ healthRouter.get('/health', async (_req, res) => {
       providerObserveFields({ state: cachedHookStatus().state, ready: hookHaltReady(cachedHookStatus()) }),
     ),
     server_instance_id: getServerInstanceId(),
+    // 6.99.20: the same id in camelCase, the name COS Control 0.5.376's Prep discovery reads from /api/health
+    // (it refused Prep with "did not answer Prep discovery" when only server_instance_id was here). Additive.
+    serverInstanceId: getServerInstanceId(),
     boot_id: serverMetrics.bootId,
     generation_id: getServerGenerationId(),
     mediaLimits,

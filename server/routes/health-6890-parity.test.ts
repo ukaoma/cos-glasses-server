@@ -592,6 +592,7 @@ const GOLDEN_HEALTH_TOP_6870 = [
   'continueReads',
   'providers',
   'server_instance_id',
+  'serverInstanceId',
   'boot_id',
   'generation_id',
   'mediaLimits',

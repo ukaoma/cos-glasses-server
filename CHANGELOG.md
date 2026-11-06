@@ -1,3 +1,10 @@
+## 6.99.20 - Prep opens from COS Control on the Mac (private)
+
+2026-11-06. Private fix on 6.99.19, matched to COS Control 0.5.376 already installed.
+
+- Fixes Prep on the Mac. COS Control 0.5.376 reads the server's id from `serverInstanceId` at the top of `/api/health` before it opens Prep. The server only sent it as `server_instance_id` (and inside `capabilities.prep`), so Control showed "The COS server did not answer Prep discovery." and fell back to a plain Ask. `/api/health` now also carries `serverInstanceId`, the same value. Nothing else changes.
+- Default-on changes: one added field on `/api/health`. No behaviour change for any other client.
+
 ## 6.99.19 - Prep: add notes and files before a call, keep them in the meeting (private)
 
 2026-11-06. Private build for one Mac, on top of 6.99.18. Pairs with COS Control 0.5.376 (desktop Prep, Codex) and COS Control Web (this branch). Older clients keep today's behavior: without `capabilities.prep`, "Prep me" is a plain Ask. Nothing changes for the glasses app. Contract: `operations/personal/wk45_2026/PREP_CONTRACT_v1_2026-11-06.md`, with its v1.1 amendments.
