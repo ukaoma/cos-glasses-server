@@ -306,19 +306,27 @@
 .mt-up-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); transition: width 0.2s ease; }
 @media (prefers-reduced-motion: reduce) { .mt-up-bar { transition: none; } }
 #mt-lfiles .mt-files { margin-top: 0; }
-/* 6.99.19: one quiet line offering a prep made before the call. A fixed height (two lines of words at most, the button
-   beside them), under the transcript box, so it appearing, Adding… and Added never move the transcript or each other. */
+/* 6.99.19: the area offering a prep made before the call. Its height is fixed and reserved from the first paint
+   whenever a suggestion is possible, and every state (looking, none, one prep, several, adding, added, ended) fills the
+   same box, so the answer arriving, Adding… and Added never move the footer or the Ask panel under it. */
 #mt-lprep:empty { display: none; }
-#mt-lprep { margin-top: 8px; container-type: inline-size; }
-.mt-prepline { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 6px 0 12px; border: 1px solid var(--hairline); border-radius: 9px; min-width: 0; }
-/* Narrow (a phone): the words take the full width over the button, so the sentence is read whole; still one fixed height. */
-@container (max-width: 559px) {
-  .mt-prepline { display: grid; grid-template-columns: minmax(0, 1fr); align-content: center; gap: 6px; height: 96px; padding: 8px 8px 8px 12px; }
-  .mt-prepline .cx-btn { justify-self: end; }
-}
+#mt-lprep { margin-top: 8px; }
+.mt-prepslot { height: 96px; container-type: inline-size; }
+.mt-prepline { display: flex; align-items: center; gap: 10px; height: 100%; box-sizing: border-box; padding: 0 6px 0 12px; border: 1px solid var(--hairline); border-radius: 9px; min-width: 0; }
 .mt-prepline-text { flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--sub); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .mt-prepline .cx-btn { flex: none; white-space: nowrap; height: 36px; }
-.mt-prepline.done .mt-prepline-text { color: var(--ink); }
+/* Narrow (a phone): one prep reads as its whole sentence over the button. */
+@container (max-width: 559px) {
+  .mt-prepline:not(.list):has(.cx-btn) { display: grid; grid-template-columns: minmax(0, 1fr); align-content: center; gap: 6px; padding: 8px 8px 8px 12px; }
+  .mt-prepline:not(.list) .cx-btn { justify-self: end; }
+}
+/* Several preps: a short list in the same box, each row with its own Add to this meeting; it scrolls inside. */
+.mt-prepline.list { padding: 0; align-items: stretch; }
+.mt-preplist { list-style: none; margin: 0; padding: 2px 6px 2px 12px; width: 100%; overflow-y: auto; overscroll-behavior: contain; }
+.mt-preplist li { display: flex; align-items: center; gap: 10px; min-height: 44px; border-bottom: 1px solid var(--hairline); }
+.mt-preplist li:last-child { border-bottom: 0; }
+.mt-preplist .mt-prepline-text { -webkit-line-clamp: 2; color: var(--ink); line-height: 1.3; }
+.mt-preplist .cx-btn { flex: none; white-space: nowrap; height: 34px; }
 /* The saved meeting's Prep: what it focused on and its files. */
 #mt-dprep:empty { display: none; }
 .mt-prep { margin: 12px 0; display: grid; gap: 10px; }

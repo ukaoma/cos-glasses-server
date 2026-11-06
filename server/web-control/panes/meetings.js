@@ -1268,6 +1268,7 @@
     cc.ensureCaps().then(function () {
       if (!prepCapsNow()) return;
       return Promise.all(sessions.map(function (sid) { return answer('/api/prep/by-session/' + encodeURIComponent(sid)); })).then(function (list) {
+        list.forEach(function (r) { if (r.status === 200) notePrepInstance(r.body); });
         if (!S.dprep || S.dprep.key !== key) return;
         var seen = {}, out = [];
         list.forEach(function (r) {
@@ -1280,7 +1281,8 @@
             var k = sn.draftId + '@' + sn.draftRevision;
             if (seen[k]) return;
             seen[k] = 1;
-            out.push({ id: sn.draftId, title: sn.title, startsAt: sn.startsAt, steer: typeof sn.steer === 'string' ? sn.steer : '', files: Array.isArray(sn.files) ? sn.files : [] });
+            out.push({ id: sn.draftId, title: sn.title, startsAt: sn.startsAt, steer: typeof sn.steer === 'string' ? sn.steer : '', files: Array.isArray(sn.files) ? sn.files : [],
+              applying: sn.state === 'applying', held: sn.held === true });
           });
         });
         S.dprep.drafts = out;
@@ -1291,10 +1293,14 @@
   function prepItemHtml(d) {
     var files = (d.files || []).filter(function (x) { return x && x.status !== 'removed' && String(x.name || '').trim(); });
     var steer = String(d.steer || '').trim();
-    if (!steer && !files.length) return '';
+    if (!steer && !files.length && !d.held && !d.applying) return '';
     var at = d.startsAt ? Date.parse(d.startsAt) : NaN;
     var when = isFinite(at) ? new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' + clockOf(new Date(at)) : '';
     return '<div class="mt-prep-item"><p class="mt-q">' + esc((cleanTitle(d.title) || 'Prep') + (when ? ' · ' + when : '')) + '</p>' +
+      // Amendment 11: a bind is written 'applying' before the meeting's files change. Said as it is, never as adopted.
+      (d.applying ? '<p class="mt-amber-line mt-prep-state">Still being added to this meeting. These notes and files are not in its files yet.</p>' : '') +
+      // A held note (it looked like a password or key) was not adopted; its words are not shown.
+      (d.held ? '<p class="mt-muted mt-prep-held">Notes held: they look like a password or key.</p>' : '') +
       (steer ? '<div class="mt-prep-steer">' + steer.split(/\n{2,}/).map(function (para) { return '<p>' + esc(para) + '</p>'; }).join('') + '</div>' : '') +
       (files.length ? '<ul class="mt-files-list mt-prep-files">' + files.map(function (x) {
         var meta = x.status === 'ready' ? (x.notice || '') : (x.notice || FILE_STATE[x.status] || '');
@@ -2331,26 +2337,43 @@
   }
   function liveNote(text) { LU().note = text; if (S.liveSid) A(S.liveSid).filesOpen = true; paintLiveFiles(); }
   // ── Prep in the live view (6.99.19, PREP_CONTRACT_v1) ──
-  // A prep made before the call (the chat's Prep me) can join this meeting. GET /api/prep/suggest lists drafts whose
-  // start is near this recording's; one quiet line under the files offers the first. Only a tap on Add to this meeting
-  // binds it (POST .../bind): its notes and files then join the meeting's files, each marked From prep. The line has a
-  // fixed height and sits under the transcript box, so showing it, adding and the answer never move the transcript.
+  // A prep made before the call (the chat's Prep me) can join this meeting. GET /api/prep/suggest lists up to five
+  // drafts, closest to this recording's start first. One area under the files offers them: one prep as a line, several
+  // as a short list, each with its own Add to this meeting. Only that tap binds (POST .../bind); its notes and files
+  // then join the meeting's files, each marked From prep.
+  // The area's height is reserved from the first paint whenever a suggestion is possible (Prep on, or not known yet,
+  // and a recording that takes files), and every state (looking, none, one, several, adding, added, ended) fills the
+  // same fixed box, so nothing under it moves when the answer arrives. The transcript box sits above it.
   function prepCapsNow() { var cc = W.cosChat; return cc && typeof cc.prepCaps === 'function' ? cc.prepCaps() : null; }
-  function livePrep(sid) { if (!S.lprep || S.lprep.sid !== sid) S.lprep = { sid: sid, asked: false, drafts: [], busy: '', done: null, note: '' }; return S.lprep; }
+  function livePrep(sid) { if (!S.lprep || S.lprep.sid !== sid) S.lprep = { sid: sid, asked: false, state: 'idle', drafts: [], busy: '', done: null, note: '', changed: '' }; return S.lprep; }
+  function notePrepInstance(b) { var cc = W.cosChat; if (b && cc && typeof cc.notePrepInstance === 'function') cc.notePrepInstance(b.serverInstanceId); }
   function prepBoundTo(d, sid) { return ((d && d.bindings) || []).some(function (b) { return b && b.sessionId === sid && !b.removedAt; }); }
   function prepReadyFiles(d) { return ((d && d.files) || []).filter(function (x) { return x && x.status === 'ready'; }); }
   function prepHasNotes(d) { return !!String((d && d.steer) || '').trim(); }
+  // Whether this live view may offer a prep at all: the area is reserved exactly when this is true.
+  function prepPossible(f) {
+    var cc = W.cosChat;
+    if (!f || !canAddFiles(f) && !(S.lprep && S.lprep.sid === f.sid && (S.lprep.done || S.lprep.state !== 'idle'))) return false;
+    if (!cc || typeof cc.known !== 'function') return false;
+    if (!cc.known()) return true;
+    var caps = prepCapsNow();
+    return !!(caps && caps.suggest && caps.bind);
+  }
   function suggestPrep(f) {
     if (!f || f.endedAt || !f.start || !canAddFiles(f)) return;
     var p = livePrep(f.sid), cc = W.cosChat;
     if (p.asked || !cc || typeof cc.ensureCaps !== 'function') return;
-    p.asked = true;
+    p.asked = true; p.state = 'checking';
     cc.ensureCaps().then(function () {
       var caps = prepCapsNow();
-      if (!caps || !caps.suggest || !caps.bind) return;
+      if (!caps || !caps.suggest || !caps.bind) { p.state = 'off'; paintLivePrep(); return; }
       return answer('/api/prep/suggest?sessionId=' + encodeURIComponent(f.sid) + '&startedAt=' + Math.round(f.start)).then(function (r) {
-        if (r.status !== 200 || !Array.isArray(r.body.drafts) || S.lprep !== p) return;
-        p.drafts = r.body.drafts.filter(function (d) { return d && typeof d.id === 'string' && !prepBoundTo(d, f.sid) && (prepHasNotes(d) || prepReadyFiles(d).length > 0); });
+        if (S.lprep !== p) return;
+        notePrepInstance(r.body);
+        p.drafts = r.status === 200 && Array.isArray(r.body.drafts) ? r.body.drafts.filter(function (d) {
+          return d && typeof d.id === 'string' && !prepBoundTo(d, f.sid) && (prepHasNotes(d) || prepReadyFiles(d).length > 0);
+        }).slice(0, 5) : [];
+        p.state = r.status === 200 ? 'ready' : 'failed';
         paintLivePrep();
       });
     });
@@ -2359,24 +2382,40 @@
     var n = prepReadyFiles(d).length, files = n + (n === 1 ? ' file' : ' files');
     return prepHasNotes(d) ? (n ? 'its notes and ' + files : 'its notes') : 'its ' + files;
   }
+  function prepAddBtn(p, d) {
+    return '<button type="button" class="cx-btn quiet" data-mt="prep-bind" data-id="' + esc(d.id) + '"' + (p.busy ? ' disabled' : '') + '>' + (p.busy === d.id ? 'Adding…' : 'Add to this meeting') + '</button>';
+  }
+  function prepQuiet(text, warn) { return '<div class="mt-prepline" role="status"><span class="mt-prepline-text' + (warn ? ' mt-amber' : '') + '">' + esc(text) + '</span></div>'; }
   function livePrepHtml() {
-    var f = S.feeds[S.liveSid], p = S.lprep;
-    if (!f || !p || p.sid !== f.sid) return '';
-    var title = cleanTitle(p.done ? p.done.title : '') || '';
-    if (p.done) return '<div class="mt-prepline done" role="status"><span class="mt-prepline-text">' + esc('Added ' + (title ? 'the prep for ' + title : 'the prep') + ' to this meeting. Its files say From prep.') + '</span></div>';
-    var d = p.drafts[0];
-    if (!d || f.endedAt) return '';
-    title = cleanTitle(d.title) || 'this meeting';
-    var text = p.note || 'Prep for ' + title + (p.changed === d.id ? ' changed since it was offered: add ' : ' is ready: add ') + prepWhat(d) + ' to this meeting';
-    return '<div class="mt-prepline"><span class="mt-prepline-text' + (p.note ? ' mt-amber' : '') + '" title="' + esc(text) + '">' + esc(text) + '</span>' +
-      '<button type="button" class="cx-btn quiet" data-mt="prep-bind" data-id="' + esc(d.id) + '"' + (p.busy ? ' disabled' : '') + '>' + (p.busy ? 'Adding…' : 'Add to this meeting') + '</button></div>';
+    var f = S.feeds[S.liveSid];
+    if (!prepPossible(f)) return '';
+    var p = livePrep(f.sid), html;
+    if (p.done) html = prepQuiet('Added ' + (cleanTitle(p.done.title) ? 'the prep for ' + cleanTitle(p.done.title) : 'the prep') + ' to this meeting. Its files say From prep.');
+    else if (f.endedAt) html = prepQuiet(p.drafts.length ? 'The recording ended, so prep can no longer be added here.' : 'No prep was added to this meeting.');
+    else if (p.state === 'failed') html = prepQuiet('Prep for this meeting could not be checked. It is checked again when you reopen this view.', true);
+    else if (p.state !== 'ready') html = prepQuiet('Looking for a prep for this meeting…');
+    else if (!p.drafts.length) html = prepQuiet('No prep for this meeting. Make one from a Prep me card in COS chat.');
+    else if (p.drafts.length === 1) {
+      var d = p.drafts[0], title = cleanTitle(d.title) || 'this meeting';
+      var text = p.note || 'Prep for ' + title + (p.changed === d.id ? ' changed since it was offered: add ' : ' is ready: add ') + prepWhat(d) + ' to this meeting';
+      html = '<div class="mt-prepline"><span class="mt-prepline-text' + (p.note ? ' mt-amber' : '') + '" title="' + esc(text) + '">' + esc(text) + '</span>' + prepAddBtn(p, d) + '</div>';
+    } else {
+      // Several: the person picks. Each row says what it adds; the list scrolls inside the same box.
+      html = '<div class="mt-prepline list"><ul class="mt-preplist" aria-label="' + esc(p.drafts.length + ' preps are ready for this meeting') + '">' +
+        (p.note ? '<li class="mt-prepnote"><span class="mt-prepline-text mt-amber">' + esc(p.note) + '</span></li>' : '') +
+        p.drafts.map(function (d) {
+          var label = (cleanTitle(d.title) || 'Prep') + (p.changed === d.id ? ' (changed)' : '') + ': ' + prepWhat(d).replace(/^its /, '');
+          return '<li><span class="mt-prepline-text" title="' + esc(label) + '">' + esc(label) + '</span>' + prepAddBtn(p, d) + '</li>';
+        }).join('') + '</ul></div>';
+    }
+    return '<div class="mt-prepslot">' + html + '</div>';
   }
   function paintLivePrep() {
     var el = $('mt-lprep'); if (!el || S.view !== 'live') return;
     var html = livePrepHtml();
     if (html !== S.prepHtml) { S.prepHtml = html; el.innerHTML = html; }
   }
-  var PREP_SERVER_CHANGED = 'The COS server on your Mac changed. The prep was read again; tap Add to this meeting again.';
+  var PREP_SERVER_CHANGED = 'A different COS server answered than the one that offered this prep. It was read again; tap Add to this meeting again.';
   var PREP_BIND_COPY = {
     maintenance: 'COS is updating. Try again in a minute.', invalid_session_id: 'This recording does not take prep files.',
     file_context_limit: 'This meeting holds as many files as Meeting Ask reads. Remove one in COS Control on your Mac, then try again.',
@@ -2385,34 +2424,36 @@
     request_reused: 'COS saw a different request with the same id. Reload the page, then try again.'
   };
   function kb(n) { return Math.max(1, Math.round(num(n) / 1024)).toLocaleString() + ' KB'; }
-  // v1.1: the bind names the revision the line described ({revision, sessionId, serverInstanceId, surface}), so a newer
-  // version nobody has seen is never attached. serverInstanceId: the draft's, else the capability's, else Meeting Ask's.
-  function bindOnce(sid, d, again) {
-    var caps = prepCapsNow() || {};
-    var known = (typeof d.serverInstanceId === 'string' && d.serverInstanceId) || (again ? '' : caps.serverInstanceId) || '';
-    return (known ? Promise.resolve(known) : loadConfig(again).then(function (conf) { return conf && conf.serverInstanceId; })).then(function (inst) {
+  // v1.1: the bind names the revision the offer described ({revision, sessionId, serverInstanceId, surface}), so a newer
+  // version nobody has seen is never attached. The server id is the newest one read: capabilities.prep or the most
+  // recent Prep answer (W.cosChat.prepInstance), else Meeting Ask's, which is the same id.
+  function bindOnce(sid, d) {
+    var cc = W.cosChat, known = cc && typeof cc.prepInstance === 'function' ? cc.prepInstance() : '';
+    return (known ? Promise.resolve(known) : loadConfig().then(function (conf) { return conf && conf.serverInstanceId; })).then(function (inst) {
       if (!inst) throw new Error(S.conf.notice || 'Meeting assistance is not available on this server.');
       // Amendment 19: the header is what authorizes the write; the body carries the same id.
       return answer('/api/prep/drafts/' + encodeURIComponent(d.id) + '/bind', { method: 'POST', headers: { 'X-COS-Expected-Server-Instance': inst }, body: { revision: d.revision, sessionId: sid, serverInstanceId: inst, surface: 'web' } });
     }).then(function (a) {
       var b = a.body || {}, code = typeof b.error === 'string' ? b.error : (b.error && b.error.code) || b.reason || '';
+      if (a.status >= 200 && a.status < 300 || a.status === 409) notePrepInstance(b);
       if (a.status >= 200 && a.status < 300) return b;
-      // The server restarted between the offer and the tap: the prep is read again (amendment 19) and the line says so.
-      // Adding it again takes another tap, against the server as it is now.
+      // A different server than the one that offered it: the prep is read again (amendment 19) and the line says so.
+      // Adding it takes another tap, against the server that answers now.
       if (a.status === 409 && code === 'server_instance_mismatch') {
         return answer('/api/prep/drafts/' + encodeURIComponent(d.id)).then(function (g) {
+          if (g.status === 200) notePrepInstance(g.body);
           var e = new Error(PREP_SERVER_CHANGED);
-          e.draft = g.status === 200 && g.body.draft ? g.body.draft : Object.assign({}, d, { serverInstanceId: typeof b.serverInstanceId === 'string' ? b.serverInstanceId : '' });
+          e.draft = g.status === 200 && g.body.draft ? g.body.draft : d;
           e.changedServer = true;
           throw e;
         });
       }
       if (a.status === 428 && typeof console !== 'undefined') console.error('[prep] bind went without X-COS-Expected-Server-Instance');
       var err = new Error(a.status === 0 ? 'COS on your Mac did not answer. Try again when it is awake.' : a.status === 401 ? SIGNED_OUT
-        : a.status === 428 ? 'This page did not name the Mac\u2019s COS server, so nothing was added. Reload the page, then try again.'
+        : a.status === 428 ? 'This page did not name the Mac’s COS server, so nothing was added. Reload the page, then try again.'
         : code === 'file_context_limit' && b.needBytes != null ? 'This meeting has too much file text for this prep: it needs ' + kb(b.needBytes) + ' and the meeting has room for ' + kb(b.haveBytes) + '. Remove a large file from the meeting in COS Control on your Mac, then try again.'
         : PREP_BIND_COPY[code] || (a.status === 404 ? PREP_BIND_COPY.not_found : 'COS could not add the prep (HTTP ' + a.status + '). Try again.'));
-      // Changed since it was offered: the line now describes the newer version, and adding it takes another tap.
+      // Changed since it was offered: the area now describes the newer version, and adding it takes another tap.
       if (a.status === 409 && code === 'revision_conflict' && b.draft) err.draft = b.draft;
       throw err;
     });
@@ -2423,7 +2464,7 @@
     if (!f || !p || p.sid !== f.sid || p.busy || p.done || f.endedAt) return;
     var d = p.drafts.filter(function (x) { return x.id === id; })[0]; if (!d) return;
     p.busy = id; p.note = ''; paintLivePrep();
-    bindOnce(f.sid, d, false).then(function (b) {
+    bindOnce(f.sid, d).then(function (b) {
       p.busy = ''; p.done = (b && b.draft) || d;
       var a = A(f.sid);
       // The meeting's files as the bind answered them, when it answered Meeting Ask files; and read again either way.
@@ -2434,10 +2475,9 @@
     }, function (err) {
       p.busy = '';
       if (err && err.draft && typeof err.draft.id === 'string') {
-        p.drafts = [err.draft].concat(p.drafts.filter(function (x) { return x.id !== err.draft.id; }));
+        p.drafts = p.drafts.map(function (x) { return x.id === err.draft.id ? err.draft : x; });
         if (err.changedServer) p.note = err.message; else { p.changed = err.draft.id; p.note = ''; }
-      }
-      else p.note = 'Not added. ' + ((err && err.message) || 'Try again.');
+      } else p.note = 'Not added. ' + ((err && err.message) || 'Try again.');
       paintLivePrep();
     });
   }

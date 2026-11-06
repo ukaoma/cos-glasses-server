@@ -64,6 +64,7 @@ function load(opts: { prep?: boolean; store?: Map<string, unknown> } = {}) {
     if (next) return next.delayMs ? new Promise(r => setTimeout(r, next.delayMs)).then(() => answer(next.status, next.body)) : answer(next.status, next.body)
     if (key === 'POST create') { draft.clientDraftId = body.clientDraftId; return answer(201, { draft }) }
     if (key === 'GET draft') return answer(200, { draft })
+    if (key === 'DELETE draft') { draft.state = 'archived'; return answer(200, { draft }) }
     if (key === 'PATCH draft') {
       if (body.revision !== draft.revision) return answer(409, { error: 'revision_conflict', draft })
       draft.steer = body.steer; draft.revision++; return answer(200, { draft })
@@ -505,6 +506,117 @@ describe('Prep me runs as an ordinary Ask in the chat', () => {
     h.chat._runPrep()
     await flush(12)
     expect(h.calls.find(c => c.path.endsWith('/run'))!.body.continue).toBe(true)
+  })
+})
+
+describe('a run in flight is never lost (review item 1)', () => {
+  const storedRun = (h: ReturnType<typeof load>) => (h.store.get('cos.web.prepDrafts') as any)['item:fi_prep1'].run
+  it('an unanswered run (503) is kept with the draft: after a reload the next tap resends the same clientRequestId with its own model and effort', async () => {
+    const store = new Map<string, unknown>()
+    const h = load({ prep: true, store })
+    await h.ready()
+    h.chat._state.model = 'opus'; h.chat._state.effort = 'max'
+    h.tapPrep(); await flush()
+    h.script['POST run'] = [{ status: 503, body: { error: 'run_status_unknown' } }]
+    h.chat._runPrep(); await flush(12)
+    const first = h.calls.find(c => c.path.endsWith('/run'))!.body
+    expect(storedRun(h)).toEqual({ rid: first.clientRequestId, model: 'opus', effort: 'max', cont: false })
+    expect(h.chat._prep().note).toMatch(/Tap Prep me again; it will not run twice\.$/)
+    // A reload: a new page, the same browser storage, and a different model picked since.
+    const again = load({ prep: true, store })
+    await again.ready()
+    again.chat._state.model = 'sonnet'
+    again.tapPrep(); await flush()
+    again.chat._runPrep(); await flush(12)
+    const second = again.calls.find(c => c.path.endsWith('/run'))!.body
+    expect(second).toMatchObject({ clientRequestId: first.clientRequestId, model: 'opus', effort: 'max' })
+    expect(again.chat._state.asks).toHaveLength(1)
+    expect(storedRun(again)).toBeUndefined()
+  })
+
+  it('a later write (the notes saved again) keeps the stored run with the draft', async () => {
+    const store = new Map<string, unknown>()
+    const h = load({ prep: true, store })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = [{ status: 503, body: { error: 'run_status_unknown' } }]
+    h.chat._runPrep(); await flush(12)
+    const rid = h.calls.find(c => c.path.endsWith('/run'))!.body.clientRequestId
+    h.type('One more line'); await h.chat._savePrepSteer(); await flush()
+    expect(storedRun(h).rid).toBe(rid)
+    const again = load({ prep: true, store })
+    await again.ready()
+    again.tapPrep(); await flush()
+    again.chat._runPrep(); await flush(12)
+    expect(again.calls.find(c => c.path.endsWith('/run'))!.body.clientRequestId).toBe(rid)
+  })
+
+  it('closing and reopening the composer keeps the run too', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = [{ status: 503, body: { error: 'maintenance' } }]
+    h.chat._runPrep(); await flush(12)
+    const rid = h.calls.find(c => c.path.endsWith('/run'))!.body.clientRequestId
+    h.chat._closePrep()
+    h.tapPrep(); await flush()
+    h.chat._runPrep(); await flush(12)
+    expect(h.calls.filter(c => c.path.endsWith('/run')).map(c => c.body.clientRequestId)).toEqual([rid, rid])
+  })
+
+  it('409 run_in_progress still submitting: that run is sent again with its own clientRequestId and params, and then shown', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = [{ status: 409, body: { error: 'run_in_progress', run: { clientRequestId: '11111111-2222-4333-8444-555555555555', clientJobId: 'cj-x', state: 'submitting', model: 'fable', effort: 'high', continue: true } } }]
+    h.chat._runPrep(); await flush(14)
+    const runs = h.calls.filter(c => c.path.endsWith('/run'))
+    expect(runs).toHaveLength(2)
+    expect(runs[1].body).toMatchObject({ clientRequestId: '11111111-2222-4333-8444-555555555555', model: 'fable', effort: 'high', continue: true })
+    expect(h.chat._state.asks).toHaveLength(1)
+    expect(h.chat._state.asks[0].cid).toBe('cj-' + '11111111')
+  })
+
+  it('409 run_failed says so plainly, and the next tap is a fresh run', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = [{ status: 409, body: { error: 'run_failed', run: { clientRequestId: 'r', state: 'failed', error: 'model_unavailable' } } }]
+    h.chat._runPrep(); await flush(12)
+    expect(h.chat._prep().note).toBe('This prep did not start on your Mac (model unavailable). Tap Prep me to try again.')
+    expect(storedRun(h)).toBeUndefined()
+    h.chat._runPrep(); await flush(12)
+    const runs = h.calls.filter(c => c.path.endsWith('/run'))
+    expect(runs[1].body.clientRequestId).not.toBe(runs[0].body.clientRequestId)
+    expect(h.chat._state.asks).toHaveLength(1)
+  })
+})
+
+describe('the draft limit and Archive this prep (review item 3)', () => {
+  it('507 prep_draft_limit says how to free a slot', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.script['POST create'] = [{ status: 507, body: { error: 'prep_draft_limit' } }]
+    h.tapPrep(); await flush()
+    expect(h.chat._prep().note).toBe('COS already keeps as many preps as it can. Open an old prep card, tap Archive this prep, then try again.')
+  })
+
+  it('Archive this prep: DELETE the draft with the server header, forget it here, close; the card then starts a new draft', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    expect(h.chat._prepHtml()).toMatch(/data-cos="prep-archive">Archive this prep<\/button>/)
+    const cd = h.calls[0].body.clientDraftId
+    h.chat.onClick({ getAttribute: (k: string) => (({ 'data-cos': 'prep-archive' }) as Record<string, string>)[k] ?? null })
+    await flush()
+    const i = h.calls.findIndex(c => c.method === 'DELETE')
+    expect(h.calls[i].path).toBe('/api/prep/drafts/' + DRAFT_ID + '?revision=1')
+    expect(h.heads[i]['X-COS-Expected-Server-Instance']).toBe('inst-A')
+    expect(h.chat._prep()).toBe(null)
+    expect((h.store.get('cos.web.prepDrafts') as any)['item:fi_prep1']).toBeUndefined()
+    h.tapPrep(); await flush()
+    const create = h.calls.filter(c => c.path === '/api/prep/drafts').at(-1)!
+    expect(create.body.clientDraftId).not.toBe(cd)
   })
 })
 

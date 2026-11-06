@@ -179,6 +179,7 @@
 .cc-prep-panel { display: grid; gap: 6px; }
 .cc-prep-panel .mt-ask-line { margin: 0 0 4px; }
 .cc-prep-title { min-width: 0; overflow-wrap: anywhere; }
+.cc-prep-head-acts { display: flex; flex: none; gap: 4px 14px; flex-wrap: wrap; justify-content: flex-end; }
 .cc-prep-panel .mt-files { max-width: none; margin: 0; }
 .cc-prep-panel .mt-files-list li.mt-up { min-height: 44px; align-content: center; }
 .cc-prep-form { margin-top: 2px; }

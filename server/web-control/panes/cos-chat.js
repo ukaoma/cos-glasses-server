@@ -1043,7 +1043,8 @@
   var PREP_SAVE_MS = 700;
   var PREP_FILE_STATE = { unsupported: 'No readable text', failed: 'Could not be read', 'secret-held': 'Held: it appears to contain credentials' };
   // Amendment 19: every Prep write names the server it expects (X-COS-Expected-Server-Instance), the id last read from
-  // capabilities.prep, a draft or a Prep answer. A restarted server answers 409 server_instance_mismatch.
+  // capabilities.prep or the most recent Prep answer (every one carries it). The id survives restarts; a different id
+  // means a different COS server answered (409 server_instance_mismatch).
   var PREP_INST = '';
   var P = null;   // the open composer: { key, title, startsAt, draft, steer, dirty, ups, note, warn, running, runId, chain, timer, conflicts }
   function prepCaps() { return C.caps && C.caps.prep ? C.caps.prep : null; }
@@ -1058,6 +1059,15 @@
     var keys = Object.keys(all).sort(function (a, b) { return (Number(all[a] && all[a].at) || 0) - (Number(all[b] && all[b].at) || 0); });
     while (keys.length > 20) delete all[keys.shift()];
     W.writeStore(PREP_STORE, all);
+  }
+  function forgetPrepRec(key) { var all = W.readStore(PREP_STORE); delete all[key]; W.writeStore(PREP_STORE, all); }
+  // The run in flight, kept with the draft in this browser (closing the composer or reloading the page does not lose it):
+  // its clientRequestId and its own model, effort and continue, so a retry is the same request and the server re-drives it.
+  function setPendingRun(p, run) {
+    p.pending = run;
+    var rec = prepRec(p.key); if (!rec) return;
+    if (run) rec.run = run; else delete rec.run;
+    savePrepRec(p.key, rec);
   }
   /** A Prep route, answered as { status, body } (a 409 carries the newer draft). Never rejects: no answer is status 0. */
   function prepCall(path, opts) {
@@ -1137,6 +1147,7 @@
     if (code === 'media_hash_mismatch') return 'The file your Mac kept does not match what this browser sent. Retry to send it again.';
     if (code === 'maintenance' || r.status === 503) return 'COS is updating. Try again in a minute.';
     if (code === 'prep_file_limit' || r.status === 413) return 'This prep holds ' + prepMax() + ' files. Remove one, then retry.';
+    if (code === 'prep_draft_limit') return 'COS already keeps as many preps as it can. Open an old prep card, tap Archive this prep, then try again.';
     if (r.status === 507) return 'COS is out of room for prep files. Remove some files from older preps, then retry.';
     if (code === 'durable_query_jobs_disabled') return 'Prep me needs the durable query jobs switch on your Mac. Your notes and files are saved.';
     if (/^media_/.test(code)) return 'The upload expired before COS kept it. Retry.';
@@ -1157,7 +1168,7 @@
     if (P && P.key === key) { paintPrep(); focusPrep(); return; }
     if (P) closePrep();
     P = { key: key, title: clip(info.title || item.title || 'my next meeting', 200), startsAt: typeof info.startsAt === 'string' ? info.startsAt : null,
-      draft: null, steer: '', dirty: false, ups: [], note: '', warn: false, running: false, runId: '', chain: Promise.resolve(), timer: null, conflicts: 0, loading: true };
+      draft: null, steer: '', dirty: false, ups: [], note: '', warn: false, running: false, pending: null, chain: Promise.resolve(), timer: null, conflicts: 0, loading: true };
     paintPrep(true); focusPrep();
     // On a phone the page scrolls: bring the composer up to where the card was tapped.
     var slot = prepSlot(false); if (slot && slot.scrollIntoView && !wide()) slot.scrollIntoView({ block: 'start' });
@@ -1176,6 +1187,8 @@
   // Resume when this browser has the draft; otherwise create it (the same clientDraftId answers the same draft).
   function loadPrep(p) {
     var rec = prepRec(p.key);
+    var run = rec && rec.run;
+    if (run && typeof run.rid === 'string') p.pending = { rid: run.rid, model: run.model || '', effort: run.effort || '', cont: !!run.cont };
     var create = function (cd) {
       savePrepRec(p.key, { cd: cd, id: '', at: Date.now() });
       var body = { clientDraftId: cd, title: p.title };
@@ -1194,7 +1207,9 @@
   function adoptPrep(p, draft, conflict) {
     p.draft = draft;
     var rec = prepRec(p.key);
-    savePrepRec(p.key, { cd: (draft && draft.clientDraftId) || (rec && rec.cd) || '', id: draft.id, at: Date.now() });
+    var next = { cd: (draft && draft.clientDraftId) || (rec && rec.cd) || '', id: draft.id, at: Date.now() };
+    if (rec && rec.run) next.run = rec.run;
+    savePrepRec(p.key, next);
     if (conflict || !p.dirty) {
       p.steer = typeof draft.steer === 'string' ? draft.steer : '';
       if (conflict) { p.dirty = false; clearTimeout(p.timer); p.conflicts++; }
@@ -1213,7 +1228,7 @@
       return r;
     });
   }
-  // The Mac's server changed (it restarted) between reading this prep and writing to it: say so, read the draft again,
+  // A different COS server answered than the one this prep was read from: say so, read the draft again,
   // and keep words not yet saved, which go out once the draft is read.
   var PREP_SERVER_CHANGED = 'The COS server on your Mac changed since this prep opened. It was read again. Check it, then try again.';
   function reloadAfterServerChange(p) {
@@ -1315,35 +1330,63 @@
     }).then(function (r) { if (r && !(r.status >= 200 && r.status < 300) && r.status !== 409) setPrepNote(p, 'Not removed. ' + prepErrorText(r), true); });
   }
 
-  // Prep me: the notes saved first, then .../run with a clientRequestId kept until the run is known, so a retry after a
-  // lost answer is the same request (the server answers the same job).
+  // Prep me: the notes saved first, then .../run. The run in flight (its clientRequestId and its own params) is kept with
+  // the draft until its outcome is known, so the next tap, a close or a reload resends the same request.
   function runPrep(p) {
     if (!p || !p.draft || p.running || prepUploading(p)) return;
     p.running = true; setPrepNote(p, '', false); paintPrep();
     var seen = p.conflicts;
     if (p.dirty) savePrepSteer(p);
-    var rid = p.runId || (p.runId = uuid());
-    var path = prepPath(p) + '/run';
     prepQueue(p, function () {
       // The notes changed elsewhere, or did not save: nothing runs on words the person has not seen.
       if (p.conflicts !== seen) return { status: -1, body: {} };
       if (p.dirty) return { status: -2, body: {} };
-      var body = { clientRequestId: rid, revision: p.draft.revision };
-      if (C.model) body.model = C.model;
-      if (C.effort) body.effort = C.effort;
-      if ((p.draft.runs || []).length && p.draft.conversation && p.draft.conversation.sessionId) body.continue = true;
-      return prepWrite(p, 'POST', path, body).then(function (r) { return r.status === 0 ? prepWrite(p, 'POST', path, body) : r; });
-    }).then(function (r) {
-      p.running = false;
-      if (r.status === 202 || r.status === 200) { p.runId = ''; return startPrepJob(p, r.body.run || {}, r.body.job || null); }
-      if (r.status === 0) return recoverPrepRun(p, rid);
-      // v1.1: one run at a time per draft. The run already going is shown, as its own Ask, instead of a second one.
-      if (r.status === 409 && prepCode(r) === 'run_in_progress' && r.body.run && r.body.run.clientJobId) { p.runId = ''; return startPrepJob(p, r.body.run, null); }
-      // Refused, so no run exists: the next tap is a new request. (-1 and -2: stopped here; the note already says why.)
-      p.runId = '';
-      if (r.status !== -1 && r.status !== -2 && r.status !== 409) setPrepNote(p, prepErrorText(r), true);
-      paintPrep();
-    });
+      if (!p.pending) {
+        var cont = !!((p.draft.runs || []).length && p.draft.conversation && p.draft.conversation.sessionId);
+        setPendingRun(p, { rid: uuid(), model: C.model || '', effort: C.effort || '', cont: cont });
+      }
+      return postRun(p, p.pending, true);
+    }).then(function (r) { return settleRun(p, r, true); });
+  }
+  function runBody(p, run) {
+    var body = { clientRequestId: run.rid, revision: p.draft.revision };
+    if (run.model) body.model = run.model;
+    if (run.effort) body.effort = run.effort;
+    if (run.cont) body.continue = true;
+    return body;
+  }
+  function postRun(p, run, retryLost) {
+    var path = prepPath(p) + '/run';
+    return prepWrite(p, 'POST', path, runBody(p, run)).then(function (r) { return r.status === 0 && retryLost ? prepWrite(p, 'POST', path, runBody(p, run)) : r; });
+  }
+  function settleRun(p, r, mayRedrive) {
+    p.running = false;
+    var code = prepCode(r), run = r.body && r.body.run;
+    if (r.status === 202 || r.status === 200) { setPendingRun(p, null); return startPrepJob(p, run || {}, r.body.job || null); }
+    if (r.status === 0) return recoverPrepRun(p, p.pending ? p.pending.rid : '');
+    // One run at a time per draft. Still being submitted: send THAT run again, with its own params (the server
+    // re-drives it). Already taken: show it, as its own Ask, instead of a second one.
+    if (r.status === 409 && code === 'run_in_progress' && run) {
+      if (run.state === 'submitting' && typeof run.clientRequestId === 'string' && mayRedrive) {
+        setPendingRun(p, { rid: run.clientRequestId, model: run.model || '', effort: run.effort || '', cont: !!run.continue });
+        p.running = true; paintPrep();
+        return prepQueue(p, function () { return postRun(p, p.pending, true); }).then(function (r2) { return settleRun(p, r2, false); });
+      }
+      if (run.clientJobId) { setPendingRun(p, null); return startPrepJob(p, run, null); }
+    }
+    // The run failed on the Mac: say so plainly; the next tap is a fresh run.
+    if (r.status === 409 && code === 'run_failed') {
+      setPendingRun(p, null);
+      var why = run && typeof run.error === 'string' && run.error ? run.error.replace(/_/g, ' ') : '';
+      setPrepNote(p, 'This prep did not start on your Mac' + (why ? ' (' + why + ')' : '') + '. Tap Prep me to try again.', true);
+      return paintPrep();
+    }
+    // No answer the Mac could vouch for (503, run_status_unknown): keep the run; the next tap is the same request.
+    if (r.status >= 500) { setPrepNote(p, prepErrorText(r) + ' Tap Prep me again; it will not run twice.', true); return paintPrep(); }
+    // Refused, so no run exists: the next tap is a new request. (-1 and -2: stopped here; the note already says why.)
+    if (r.status > 0) setPendingRun(p, null);
+    if (r.status !== -1 && r.status !== -2 && r.status !== 409) setPrepNote(p, prepErrorText(r), true);
+    paintPrep();
   }
   // The run's answer was lost twice. v1.1: GET .../runs/<clientRequestId> answers {run, job} when the run was taken and
   // 404 run_not_accepted when it was not. A server without that route: the draft lists its runs, and the run's
@@ -1354,7 +1397,7 @@
   function recoverPrepRun(p, rid, tries) {
     tries = tries || 0;
     return prepCall(prepPath(p) + '/runs/' + encodeURIComponent(rid)).then(function (r) {
-      if (r.status === 200 && r.body.run && r.body.run.clientJobId) { p.runId = ''; return startPrepJob(p, r.body.run, r.body.job || null); }
+      if (r.status === 200 && r.body.run && r.body.run.clientJobId) { setPendingRun(p, null); return startPrepJob(p, r.body.run, r.body.job || null); }
       if (r.status === 202 && tries < PREP_RUN_WAITS.length) {
         setPrepNote(p, 'Your Mac is starting this prep.', false); p.running = true; paintPrep();
         return new Promise(function (res) { setTimeout(res, PREP_RUN_WAITS[tries]); }).then(function () { p.running = false; return recoverPrepRun(p, rid, tries + 1); });
@@ -1371,7 +1414,7 @@
     return prepCall(prepPath(p)).then(function (r) {
       if (r.status === 200 && r.body.draft) adoptPrep(p, r.body.draft, false);
       var run = r.status === 200 ? (((r.body.draft || {}).runs) || []).filter(function (x) { return x && x.clientRequestId === rid; })[0] : null;
-      if (run && run.clientJobId) { p.runId = ''; return startPrepJob(p, run, null); }
+      if (run && run.clientJobId) { setPendingRun(p, null); return startPrepJob(p, run, null); }
       notStarted(p);
     });
   }
@@ -1400,6 +1443,29 @@
     return a;
   }
 
+  // Archive this prep (DELETE /api/prep/drafts/:id, the server keeps it as archived): it frees one of the drafts the Mac
+  // keeps, and the card's Prep me then starts a new one. Nothing a meeting already took is touched.
+  function archivePrep(p) {
+    if (!p.draft || p.running || p.archiving) return;
+    p.archiving = true; setPrepNote(p, 'Archiving this prep…', false);
+    clearTimeout(p.timer);
+    prepQueue(p, function () {
+      return prepCall(prepPath(p) + '?revision=' + encodeURIComponent(p.draft.revision), { method: 'DELETE' });
+    }).then(function (r) {
+      p.archiving = false;
+      if (r.status >= 200 && r.status < 300) {
+        forgetPrepRec(p.key);
+        p.dirty = false; p.pending = null;
+        if (P === p) closePrep();
+        W.toast('Prep archived. Prep me on the card starts a new one.');
+        return;
+      }
+      var conflict = r.status === 409 && prepCode(r) === 'revision_conflict';
+      if (conflict && r.body.draft) return adoptPrep(p, r.body.draft, true);
+      setPrepNote(p, 'Not archived. ' + prepErrorText(r), true);
+    });
+  }
+
   // ── the Prep composer on the page ─────────────────────
   // It sits above the chat's composer, outside the feed, so a poll that redraws the feed never takes the words or the
   // caret. Built once per draft; after that only its parts are written.
@@ -1424,7 +1490,8 @@
   function prepPanelHtml(p) {
     return '<section class="mt-panel cc-prep-panel" aria-label="' + esc('Prep for ' + p.title) + '">' +
       '<div class="mt-ask-head"><h3 class="mt-ask-title cc-prep-title">' + esc('Prep for ' + p.title) + '</h3>' +
-        '<button type="button" class="mt-link" data-cos="prep-close">Close</button></div>' +
+        '<span class="cc-prep-head-acts"><button type="button" class="mt-link" data-cos="prep-archive">Archive this prep</button>' +
+        '<button type="button" class="mt-link" data-cos="prep-close">Close</button></span></div>' +
       '<p class="mt-ask-line">' + esc(prepHeadLine(p)) + '</p>' +
       '<form class="mt-composer cc-prep-form" data-cos-prep-form autocomplete="off">' +
         '<textarea class="field" rows="3" data-cos-prep-steer maxlength="' + prepChars() + '" placeholder="What should this prep focus on?" aria-label="What should this prep focus on?">' + esc(p.steer) + '</textarea></form>' +
@@ -1512,6 +1579,7 @@
     var p = P; if (!p) return;
     if (what === 'prep-close') return closePrep();
     if (what === 'prep-run') return runPrep(p);
+    if (what === 'prep-archive') return archivePrep(p);
     if (what === 'prep-remove') return removePrepFile(p, t.getAttribute('data-file'));
     var up = p.ups.filter(function (x) { return x.id === t.getAttribute('data-up'); })[0];
     if (!up) return;
@@ -1638,6 +1706,8 @@
     classify: classify, uploadMedia: uploadMedia, uploadErrorText: uploadErrorText, uuid: uuid,
     // 6.99.19: Prep. meetings.js reads the capability from here (one /api/health read for the page).
     prepCaps: prepCaps,
+    // The Prep server id to name on a write: the newest from capabilities.prep or any Prep answer (meetings.js reports its own).
+    prepInstance: function () { return PREP_INST; }, notePrepInstance: function (id) { if (typeof id === 'string' && id) PREP_INST = id; },
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn

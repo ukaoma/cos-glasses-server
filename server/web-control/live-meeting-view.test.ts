@@ -125,7 +125,7 @@ function load(opts: { sid?: string; reduceMotion?: boolean; prep?: boolean } = {
     files: [] as Array<Record<string, unknown>>, attach: [] as Array<{ status: number; body: unknown }>, posts: [] as Array<{ path: string; body: any }>,
     configs: 0, instance: 'inst-1', start: START,
     // 6.99.19 Prep: what /api/prep/suggest and /api/prep/by-session answer, every request the page made, and the name.
-    titleSteer: '' as string, suggest: [] as Array<Record<string, any>>, bySession: {} as Record<string, Array<Record<string, any>>>,
+    titleSteer: '' as string, prepInst: '' as string, suggest: [] as Array<Record<string, any>>, bySession: {} as Record<string, Array<Record<string, any>>>,
     calls: [] as Array<{ method: string; path: string; body: any; headers?: Record<string, string> }>, bind: [] as Array<{ status: number; body: unknown }>,
   }
   const read = (since: number, knownRev: string | null) => ({
@@ -140,7 +140,7 @@ function load(opts: { sid?: string; reduceMotion?: boolean; prep?: boolean } = {
     let status = 200, body: unknown = {}
     server.calls.push({ method: o.method ?? 'GET', path, body: o.body ? JSON.parse(o.body) : undefined, headers: o.headers })
     const bindM = /^\/api\/prep\/drafts\/([^/]+)\/bind$/.exec(url.pathname)
-    if (url.pathname === '/api/prep/suggest') body = { drafts: server.suggest }
+    if (url.pathname === '/api/prep/suggest') body = { drafts: server.suggest, ...(server.prepInst ? { serverInstanceId: server.prepInst } : {}) }
     else if (/^\/api\/prep\/drafts\/[^/]+$/.test(url.pathname) && (o.method ?? 'GET') === 'GET') body = { draft: { ...server.suggest[0], serverInstanceId: 'inst-2', revision: 5 }, serverInstanceId: 'inst-2' }
     // Amendment 21 as the server builds it: {serverInstanceId, snapshots: PrepSessionSnapshot[]}, one per binding.
     else if (url.pathname.startsWith('/api/prep/by-session/')) body = { serverInstanceId: server.instance, snapshots: server.bySession[decodeURIComponent(url.pathname.split('/').pop()!)] ?? [] }
@@ -580,7 +580,7 @@ describe('Prep in the live view: a suggestion, bound only by a tap', () => {
     expect(t.pageScrolls()).toBe(0)
   })
 
-  it('a restarted server: the line says so, the prep is read again, and nothing binds until the next tap, which names the new server', async () => {
+  it('a different server answered: the line says so, the prep is read again, and nothing binds until the next tap, which names that server', async () => {
     const t = load({ prep: true })
     t.server.suggest = [PREP_DRAFT()]
     t.server.chunks.push(chunk(0))
@@ -591,7 +591,7 @@ describe('Prep in the live view: a suggestion, bound only by a tap', () => {
     await flush(12)
     expect(t.server.calls.filter(c => /\/bind$/.test(c.path))).toHaveLength(1)
     expect(t.server.calls.at(-1)).toMatchObject({ method: 'GET', path: '/api/prep/drafts/' + PREP_DRAFT().id })
-    expect(t.$('mt-lprep').innerHTML).toMatch(/The COS server on your Mac changed\. The prep was read again; tap Add to this meeting again\./)
+    expect(t.$('mt-lprep').innerHTML).toMatch(/A different COS server answered than the one that offered this prep\. It was read again; tap Add to this meeting again\./)
     t.server.bind.push({ status: 200, body: { draft: PREP_DRAFT(), files: [] } })
     t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
     await flush(12)
@@ -645,13 +645,68 @@ describe('Prep in the live view: a suggestion, bound only by a tap', () => {
     expect(t.server.calls.filter(c => /\/bind$/.test(c.path)).map(c => c.body.revision)).toEqual([4, 6])
   })
 
-  it('a prep already bound to this recording, or one with nothing in it, is not offered', async () => {
+  it('a prep already bound to this recording, or one with nothing in it, is not offered; the reserved area says there is none', async () => {
     const t = load({ prep: true })
     t.server.suggest = [{ ...PREP_DRAFT(), bindings: [{ sessionId: SID, serverInstanceId: 'inst-1', surface: 'control', boundAt: 'x', fileIds: [] }] }, { ...PREP_DRAFT(), id: 'prep_' + 'B'.repeat(26), steer: '  ', files: [] }]
     t.server.chunks.push(chunk(0))
     t.pane$.load(['live', SID])
     await flush(12)
-    expect(t.$('mt-lprep').innerHTML).toBe('')
+    expect(t.$('mt-lprep').innerHTML).toMatch(/^<div class="mt-prepslot">/)
+    expect(t.$('mt-lprep').innerHTML).toMatch(/No prep for this meeting\. Make one from a Prep me card in COS chat\./)
+    expect(t.$('mt-lprep').innerHTML).not.toMatch(/prep-bind/)
+  })
+
+  it('the area is reserved from the first paint, before the suggestion answers, so its arrival moves nothing under it', async () => {
+    const t = load({ prep: true })
+    t.server.suggest = [PREP_DRAFT()]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    // Synchronously after opening: the box is already there, saying it is looking.
+    const first = t.$('mt-lprep').innerHTML
+    expect(first).toMatch(/^<div class="mt-prepslot"><div class="mt-prepline" role="status">/)
+    expect(first).toMatch(/Looking for a prep for this meeting/)
+    await flush(12)
+    expect(t.$('mt-lprep').innerHTML).toMatch(/^<div class="mt-prepslot">/)
+    expect(t.$('mt-lprep').innerHTML).toMatch(/is ready: add its notes and 2 files/)
+  })
+
+  it('several preps: a short list, each with its own Add to this meeting; nothing binds until one is tapped, and only that one binds', async () => {
+    const t = load({ prep: true })
+    const b = { ...PREP_DRAFT(), id: 'prep_' + 'B'.repeat(26), title: 'Gina 1:1', revision: 2, steer: '', files: PREP_DRAFT().files.slice(0, 1) }
+    const c = { ...PREP_DRAFT(), id: 'prep_' + 'D'.repeat(26), title: 'Pricing review', revision: 8 }
+    t.server.suggest = [PREP_DRAFT(), b, c]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    const html = t.$('mt-lprep').innerHTML
+    expect(html).toMatch(/<ul class="mt-preplist" aria-label="3 preps are ready for this meeting">/)
+    expect((html.match(/data-mt="prep-bind"/g) ?? []).length).toBe(3)
+    expect((html.match(/>Add to this meeting<\/button>/g) ?? []).length).toBe(3)
+    expect(html).toMatch(/Weekly marketing sync: notes and 2 files/)
+    expect(html).toMatch(/Gina 1:1: 1 file/)
+    expect(html).toMatch(/Pricing review: notes and 2 files/)
+    for (let i = 1; i < 4; i++) { t.server.chunks.push(chunk(i)); await t.poll() }
+    expect(t.server.calls.filter(c2 => /\/bind$/.test(c2.path))).toEqual([])
+    t.tap('prep-bind', { 'data-id': b.id })
+    await flush(12)
+    const binds = t.server.calls.filter(c2 => /\/bind$/.test(c2.path))
+    expect(binds.map(x => [x.path, x.body.revision])).toEqual([['/api/prep/drafts/' + b.id + '/bind', 2]])
+    expect(t.$('mt-lprep').innerHTML).toMatch(/Added the prep for Gina 1:1 to this meeting\./)
+  })
+
+  it('the bind names the newest server id read (a Prep answer), not the one stored on the offered draft', async () => {
+    const t = load({ prep: true })
+    t.server.prepInst = 'inst-9'
+    t.server.suggest = [{ ...PREP_DRAFT(), serverInstanceId: 'inst-old' }]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    t.server.bind.push({ status: 200, body: { draft: PREP_DRAFT(), files: [] } })
+    t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
+    await flush(12)
+    const bind = t.server.calls.find(c2 => /\/bind$/.test(c2.path))!
+    expect(bind.headers!['X-COS-Expected-Server-Instance']).toBe('inst-9')
+    expect(bind.body.serverInstanceId).toBe('inst-9')
   })
 
   it('without Prep on the server, the live view asks nothing and draws nothing', async () => {
@@ -691,6 +746,23 @@ describe('Prep in a saved meeting', () => {
     expect(html).toMatch(/Re-bound later: budget too\./)
     expect(html.indexOf('Re-bound later')).toBeLessThan(html.indexOf('What the meeting had'))
     expect(html).toMatch(new RegExp('href="/api/prep/drafts/' + PREP_DRAFT().id + '/files/pf_1{16}"'))
+  })
+
+  it('a bind still being applied says so, never as adopted; held notes say they were held and show no words', async () => {
+    const t = load({ prep: true })
+    t.server.bySession[SID] = [
+      SNAPSHOT({ draftRevision: 6, state: 'applying', steer: 'Applying notes.' }),
+      SNAPSHOT({ draftRevision: 4, held: true, steer: '', files: [] }),
+    ]
+    t.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
+    await flush(14)
+    const html = t.$('mt-dprep').innerHTML
+    const items = html.split('<div class="mt-prep-item">').slice(1)
+    expect(items).toHaveLength(2)
+    expect(items[0]).toMatch(/Still being added to this meeting\. These notes and files are not in its files yet\./)
+    expect(items[1]).not.toMatch(/Still being added/)
+    expect(items[1]).toMatch(/Notes held: they look like a password or key\./)
+    expect(items[1]).not.toMatch(/mt-prep-steer/)
   })
 
   it('a prep taken back off this meeting (its binding removed) is not listed', async () => {
