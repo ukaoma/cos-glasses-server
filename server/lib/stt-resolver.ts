@@ -17,7 +17,7 @@
 //      holds a profile vocabulary term the primary's side does not, the second
 //      opinion's words are taken.
 //
-// A third caller (6.99.17) is the saved iPhone transcript, where the second
+// A third caller (6.99.18) is the saved iPhone transcript, where the second
 // side is the live Whisper words the phone already heard with the vocabulary
 // prompt. Those words have approximate clocks and a prompted Whisper can echo a
 // vocabulary term into a pause, so that caller sets anchoredVocabularyOnly: a

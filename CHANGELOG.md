@@ -1,6 +1,6 @@
-## 6.99.17 - iPhone saved transcripts keep your dictionary terms, borrowed from the live words (private)
+## 6.99.18 - iPhone saved transcripts keep your dictionary terms, borrowed from the live words (private)
 
-2026-11-06. Private build for one Mac, on top of 6.99.16. Works with any COS Control that pairs with 6.99.16. Nothing changes for the glasses app.
+2026-11-06. Private build for one Mac. Written on 6.99.16; renumbered from 6.99.17, which the Ask COS orchestration release (codex/ask-cos-orchestration-20261105, frozen with Control 0.5.375) holds. It is rebased onto that 6.99.17 before any install. Works with any COS Control that pairs with 6.99.16. Nothing changes for the glasses app.
 
 Miles, 11/06: "yes build the saved transcript vocabulary fix".
 

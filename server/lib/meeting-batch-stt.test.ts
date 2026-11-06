@@ -314,7 +314,7 @@ describe('what the resolver saves', () => {
     expect(r.stt).toMatchObject({ engine: 'parakeet-ultra', resolver: { enabled: false } })
   })
 
-  describe('an iPhone recording with the second opinion off borrows dictionary terms from its live Whisper words (6.99.17)', () => {
+  describe('an iPhone recording with the second opinion off borrows dictionary terms from its live Whisper words (6.99.18)', () => {
     const heard = 'is it able to tell who mild gyucoma is'
     const live = (texts: string[], asrProvider = 'server-whisper'): IndexedTranscriptChunk[] =>
       texts.map((text, chunkIndex) => ({ chunkIndex, chunk: { text, speaker: 'Ext', elapsed: chunkIndex * 6_000, similarity: 0, asrProvider } as any }))

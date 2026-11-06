@@ -469,7 +469,7 @@ export interface HqJobPlan {
   frontEnd: FrontEndId
   /** Canonical Mac/phone Parakeet must never silently substitute Whisper. */
   strictPrimary?: true
-  /** iPhone (6.99.17): with no second opinion, the live Whisper words lend the
+  /** iPhone (6.99.18): with no second opinion, the live Whisper words lend the
    *  saved Parakeet transcript the dictionary terms it missed. */
   liveVocabulary?: true
 }
