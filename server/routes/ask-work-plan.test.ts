@@ -5,6 +5,7 @@ import { createAskWorkPlanRouter, type AskWorkPlanDeps } from './ask-work-plan.j
 import type { TaskBoardRow } from '../lib/task-store.js'
 import type { OrchestratorInput } from '../lib/work-orchestrator/input.js'
 import { WORK_CHAT_ORCHESTRATOR_OUTPUT_TOKENS } from '../lib/work-chat.js'
+import { AskProcessError } from '../lib/meeting-ask-runner.js'
 
 const now = Date.parse('2026-11-05T12:00:00Z'), sid = 'claude:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 const task = { id: 'aaaaaaaaaaaa', domain: 'quilt', title: 'Review design', text: 'Review the design', doneWhen: 'Report findings', checked: false, workRevision: 'a'.repeat(64) } as TaskBoardRow
@@ -50,6 +51,8 @@ it('builds trusted input and uses the existing tools-off planner contract, retur
   const call = (run.mock.calls as unknown as any[][])[0]!
   expect(call[0]).toEqual({ engine: 'claude', model: 'opus' })
   expect(JSON.parse(call[1])).toMatchObject({ sessions: [{ automatic: true }], context: expect.stringContaining(task.text) })
+  expect(JSON.parse(JSON.parse(call[1]).context).evidenceStatus).toMatchObject({ snapshotAgeSec: 1, liveListAgeSec: 1,
+    logScanComplete: true, fresh: true, scope: expect.stringContaining('no local attachments') })
   expect(JSON.parse(call[1])).not.toHaveProperty('planner')
   expect(call[2]).toContain('Nothing is sent or recorded'); expect(call[5]).toEqual({ caller: 'ask_work_plan' })
   expect(call[6]).toEqual({ effort: 'low', maxOutputTokens: WORK_CHAT_ORCHESTRATOR_OUTPUT_TOKENS, maxThinkingTokens: 0, deadlineMs: 180000 })
@@ -104,12 +107,14 @@ it('refuses maintenance before reads and rechecks before inference', async () =>
   const second = await setup({ admissions: vi.fn().mockReturnValueOnce(true).mockReturnValue(false) })
   expect(await (await second.post()).json()).toMatchObject({ error: 'maintenance' }); expect(second.run).not.toHaveBeenCalled()
 })
-it('bounds concurrent plans and releases admission and lease when the caller cancels', async () => {
+it('holds admission and maintenance through disconnect until the runner proves it settled', async () => {
   let started!: () => void
   const entered = new Promise<void>(resolve => { started = resolve })
   let signal: AbortSignal | undefined
+  let rejectRun!: (error: Error) => void, calls = 0
   const run: AskWorkPlanDeps['run'] = async (_model, _prompt, _system, givenSignal) => {
-    signal = givenSignal; started(); return new Promise(() => {})
+    if (++calls > 1) return output()
+    signal = givenSignal; started(); return new Promise((_resolve, reject) => { rejectRun = reject })
   }
   const s = await setup({ run }), cancel = new AbortController()
   const pending = s.post(request, 't', cancel.signal).catch(() => undefined)
@@ -117,5 +122,30 @@ it('bounds concurrent plans and releases admission and lease when the caller can
   expect((await s.post()).status).toBe(409)
   cancel.abort(); await pending
   await vi.waitFor(() => expect(signal?.aborted).toBe(true))
+  expect(s.release).not.toHaveBeenCalled()
+  expect((await s.post()).status).toBe(409)
+  rejectRun(new AskProcessError('cancelled'))
   await vi.waitFor(() => expect(s.release).toHaveBeenCalledOnce())
+  expect((await s.post()).status).toBe(200)
+})
+it('retains admission and maintenance if the runner cannot confirm process termination', async () => {
+  const s = await setup({ run: async () => { throw new AskProcessError('child_exit_unconfirmed', true) } })
+  const response = await s.post()
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({ error: 'provider_termination_unconfirmed' })
+  expect(s.release).not.toHaveBeenCalled()
+  expect((await s.post()).status).toBe(409)
+})
+it('holds admission through a disconnected usage-input probe, then releases without running inference', async () => {
+  let started!: () => void, finishInput!: (data: OrchestratorInput) => void
+  const entered = new Promise<void>(resolve => { started = resolve })
+  const s = await setup({ input: async () => { started(); return new Promise(resolve => { finishInput = resolve }) } })
+  const cancel = new AbortController(), pending = s.post(request, 't', cancel.signal).catch(() => undefined)
+  await entered
+  cancel.abort(); await pending
+  expect((await s.post()).status).toBe(409)
+  expect(s.release).not.toHaveBeenCalled()
+  finishInput(evidence())
+  await vi.waitFor(() => expect(s.release).toHaveBeenCalledOnce())
+  expect(s.run).not.toHaveBeenCalled()
 })

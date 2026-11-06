@@ -67,15 +67,26 @@ export function prepareAskWorkPlan(request: AskWorkPlanRequest, task: TaskBoardR
     const provider = row.id.split(':')[0]!
     const owned = row.member && (provider === 'claude' || provider === 'codex')
     const safe = fresh && evidence.logScanComplete && owned && providerAllowed(provider)
-    return { ...row, automatic: safe && row.available && row.live && !row.busy && !row.reason,
-      forkable: safe && row.forkable && row.reason !== 'app_owned', openWork: row.busy }
+    const automatic = safe && row.available && row.live && !row.busy && !row.reason
+    return { ...row, automatic, available: automatic,
+      // Discovery reasons are prioritized, so on_another_card can hide app-owned state.
+      // This first adapter does not independently prove those overlapping exclusions safe to fork.
+      forkable: safe && row.forkable && !row.reason, openWork: row.busy }
   })
   // Headroom does not prove Control can execute a New session. This adapter has no authoritative
   // executable-provider contract yet, so it never offers New (and never accepts a caller allowlist).
   const newSessionProviders: ('claude' | 'codex')[] = []
+  const evidenceStatus = { snapshotAgeSec: evidence.snapshotAgeSec, liveListAgeSec: evidence.liveListAgeSec,
+    logScanComplete: evidence.logScanComplete, fresh,
+    scope: 'Canonical task and server session evidence only; no local attachments, local link context, or chat history. Meeting references do not include transcripts.',
+    disabledTargets: evidence.rows.filter((_, index) => !sessions[index]!.automatic || !sessions[index]!.forkable).map(row => ({ id: row.id,
+      reasons: [!fresh && 'stale_or_missing_evidence', !evidence.logScanComplete && 'incomplete_session_scan',
+        !row.member && 'not_card_member', !['claude', 'codex'].includes(row.id.split(':')[0]!) && 'unsupported_provider',
+        !providerAllowed(row.id.split(':')[0]!) && 'provider_usage_unavailable', row.busy && 'busy', !row.live && 'not_live',
+        !row.available && 'unavailable', !row.forkable && 'not_forkable', row.reason].filter((value): value is string => typeof value === 'string') })) }
   const context = JSON.stringify({ task: task.text || task.title, title: task.title, domain: task.domain,
     workStage: task.workStage ?? '', doneWhen: task.doneWhen ?? '', owner: task.owner ?? '', source: task.source ?? '',
-    meetingReferences: task.meetingRefs ?? [] })
+    meetingReferences: task.meetingRefs ?? [], evidenceStatus })
   // Do not silently truncate a task's finish line or attached evidence.
   if (context.length > 16_000) throw new AskWorkPlanError('task_context_too_large', 413)
   let input: WorkChatInput
