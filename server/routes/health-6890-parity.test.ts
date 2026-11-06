@@ -529,6 +529,8 @@ const GOLDEN_MODELS_PATHS = [
   '.capabilities.phoneMicrophoneMeetings.sourceType',
   '.capabilities.phoneMicrophoneMeetings.speakerPolicy',
   '.capabilities.phoneMicrophoneMeetings.asrModel',
+  // 6.99.16: live iPhone lines use the G2 Whisper; asrModel stays the saved engine.
+  '.capabilities.phoneMicrophoneMeetings.liveAsrModel',
   '.capabilities.phoneMicrophoneMeetings.dictionary',
   '.capabilities.phoneMicrophoneMeetings.reason',
   '.capabilities.macLiveVoices',

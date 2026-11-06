@@ -471,11 +471,24 @@ export interface HqJobPlan {
   strictPrimary?: true
 }
 
+/**
+ * An iPhone recording's saved transcript. Parakeet stays the strict primary. Parakeet takes
+ * no prompt, so the dictionary's vocabulary reaches it only through a second opinion: when
+ * one is on, it is Whisper Large-v3 (prompted with the vocabulary) and the resolver keeps
+ * the user's choice, so its vocabulary rescue can write a dictionary term Parakeet missed.
+ * Off stays off. Before this, a phone plan forced both off and the dictionary never applied
+ * to iPhone recordings beyond the fixed corrections (Miles, 2026-11-05).
+ */
+export function phoneHqPlan(selected: Pick<HqJobPlan, 'secondOpinion' | 'resolver' | 'frontEnd'>): HqJobPlan {
+  const secondOpinion = selected.secondOpinion === 'off' ? 'off' : 'large-v3'
+  return { engine: 'parakeet-ultra', secondOpinion, resolver: secondOpinion !== 'off' && selected.resolver, frontEnd: selected.frontEnd, strictPrimary: true }
+}
+
 export function currentHqJobPlan(sessionId?: string): HqJobPlan {
   const selected = readSttSettings()
   if (sessionId && PHONE_CAPTURE_ID.test(sessionId)) {
     requirePhoneRecording(sessionId)
-    return { engine: 'parakeet-ultra', secondOpinion: 'off', resolver: false, frontEnd: selected.frontEnd, strictPrimary: true }
+    return phoneHqPlan(selected)
   }
   if (sessionId && MAC_CAPTURE_ID.test(sessionId) && selected.hq === 'parakeet-ultra') {
     return { engine: selected.hq, secondOpinion: selected.secondOpinion, resolver: selected.resolver, frontEnd: selected.frontEnd, strictPrimary: true }
@@ -827,7 +840,7 @@ export async function transcribeSegments(
   plan: HqJobPlan,
   deps: HqDecodeDeps = defaultHqDeps,
 ): Promise<BatchResult[]> {
-  if (expectedSessionId?.startsWith('phone_')) { requirePhoneRecording(expectedSessionId); plan = { ...plan, engine: 'parakeet-ultra', secondOpinion: 'off', resolver: false, strictPrimary: true } }
+  if (expectedSessionId?.startsWith('phone_')) { requirePhoneRecording(expectedSessionId); plan = phoneHqPlan(plan) }
   if (expectedSessionId && MAC_CAPTURE_ID.test(expectedSessionId) && plan.engine === 'parakeet-ultra') plan = { ...plan, strictPrimary: true }
   const results: BatchResult[] = []
   const meetingId = basename(audioDir)

@@ -52,7 +52,7 @@ function upload(over:Record<string,string>={},audio=wavOf(6,()=>400),pin='server
 it('advertises default-off and unavailable reasons without starting or changing an engine',async()=>{
  const {phoneMicrophoneMeetingsCapability:cap}=await import('../lib/phone-recording.js')
  delete process.env.COS_IPHONE_MICROPHONE_MEETINGS
- expect(cap('server-mac')).toMatchObject({...source,enabled:false,reason:'disabled',asrModel:'parakeet-ultra',dictionary:'server-profile-corrections'})
+ expect(cap('server-mac')).toMatchObject({...source,enabled:false,reason:'disabled',asrModel:'parakeet-ultra',liveAsrModel:'server-whisper',dictionary:'server-profile-corrections'})
  expect((await upload()).json.reason).toBe('phone_microphone_disabled')
  expect(existsSync(join(root,'phone-recordings',id+'.json'))).toBe(false)
  process.env.COS_IPHONE_MICROPHONE_MEETINGS='1'
@@ -71,25 +71,26 @@ it('rejects missing, conflicting and forged provenance before persistence or ide
  expect(existsSync(join(root,'phone-recordings',id+'.json'))).toBe(false);expect(stream.getSessionStartTime(id)).toBeNull()
  expect(identify).not.toHaveBeenCalled();expect(enroll).not.toHaveBeenCalled();expect(diarize).not.toHaveBeenCalled()
 })
-it('uses shared Parakeet and dictionary, persists source, never calls wearer/voiceprint/training, and retries exact chunks',async()=>{
+it('uses the G2 live Whisper and the dictionary, persists source, never calls wearer/voiceprint/training, and retries exact chunks',async()=>{
  const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'parakeet-ultra'})
- const done=await upload();expect(done.status).toBe(200);expect(done.json).toMatchObject({...source,sessionId:id,speaker:'Ext',canonical:true,asrProvider:'server-parakeet',model:'parakeet-ultra',text:'We reviewed Sprocket Rocket and agreed on the launch plan.'})
- expect(parakeet).toHaveBeenCalledWith(expect.any(Buffer),expect.objectContaining({model:'parakeet-ultra',lane:'interactive'}));expect(whisper).not.toHaveBeenCalled();expect(identify).not.toHaveBeenCalled();expect(enroll).not.toHaveBeenCalled();expect(diarize).not.toHaveBeenCalled()
+ whisper.mockResolvedValue({text:'We reviewed sproket roket and agreed on the launch plan.',backend:'server'})
+ const done=await upload();expect(done.status).toBe(200);expect(done.json).toMatchObject({...source,sessionId:id,speaker:'Ext',canonical:true,asrProvider:'server-whisper',text:'We reviewed Sprocket Rocket and agreed on the launch plan.'})
+ expect(whisper).toHaveBeenCalledTimes(1);expect(parakeet).not.toHaveBeenCalled();expect(identify).not.toHaveBeenCalled();expect(enroll).not.toHaveBeenCalled();expect(diarize).not.toHaveBeenCalled()
  expect(stream.getSessionChunks(id)?.[0]).toMatchObject({...source,speaker:'Ext',elapsed:0,audioDurationMs:6000})
  const journal=JSON.parse(readFileSync(join(root,'active-sessions',id+'.json'),'utf8'));expect(journal).toMatchObject({...source,captureSource:{captureId:id,...source}})
  expect(existsSync(join(root,'session-audio',id,'_capture.json'))).toBe(true)
- expect((await upload()).status).toBe(200);expect(parakeet).toHaveBeenCalledTimes(1)
+ expect((await upload()).status).toBe(200);expect(whisper).toHaveBeenCalledTimes(1)
  expect((await upload({},wavOf(6,()=>401))).json.reason).toBe('phone_chunk_conflict')
  expect((await upload({elapsed:'1'})).json.reason).toBe('phone_chunk_conflict')
  for(const dir of ['chunk-embeddings','ext-audio'])expect(existsSync(join(root,dir,dir==='chunk-embeddings'?id+'.jsonl':id))).toBe(false)
 })
-it('retains audio on Parakeet failure, refuses conflicting retries, and never substitutes Whisper',async()=>{
+it('retains audio when live Whisper fails, refuses conflicting retries, and never substitutes Parakeet live',async()=>{
  const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'parakeet-ultra'})
- parakeet.mockRejectedValueOnce(new Error('fake unavailable'))
- const failed=await upload();expect(failed.status).toBe(503);expect(failed.json).toMatchObject({reason:'phone_parakeet_internal',retryable:true})
- expect(stream.getMeetingSessionStatus(id)).toMatchObject({receivedCount:1,asrCompletedCount:0});expect(whisper).not.toHaveBeenCalled()
+ whisper.mockRejectedValueOnce(new Error('fake unavailable'))
+ const failed=await upload();expect(failed.status).toBe(503);expect(failed.json).toMatchObject({reason:'local_asr_unavailable',retryable:true})
+ expect(stream.getMeetingSessionStatus(id)).toMatchObject({receivedCount:1,asrCompletedCount:0});expect(parakeet).not.toHaveBeenCalled()
  expect((await upload({},wavOf(6,()=>401))).json.reason).toBe('phone_chunk_conflict')
- expect((await upload()).status).toBe(200);expect(parakeet).toHaveBeenCalledTimes(2)
+ expect((await upload()).status).toBe(200);expect(whisper).toHaveBeenCalledTimes(2)
 })
 it('saves once with source receipt, archive metadata and truthful export, and keeps shared Ask/files identity',async()=>{
  const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'parakeet-ultra'});await upload()
@@ -121,10 +122,10 @@ it('preserves unmarked legacy G2 ingestion and rejects unprovenanced old phone c
 
 it('restores admitted provenance across a real module restart and deduplicates replay before the next chunk',async()=>{
  expect((await upload()).status).toBe(200)
- await new Promise<void>(resolve=>server.close(()=>resolve()));vi.resetModules();parakeet.mockClear();await mount()
+ await new Promise<void>(resolve=>server.close(()=>resolve()));vi.resetModules();whisper.mockClear();await mount()
  expect(stream.getSessionChunks(id)?.[0]).toMatchObject({...source,speaker:'Ext'})
- expect((await upload()).status).toBe(200);expect(parakeet).not.toHaveBeenCalled()
- expect((await upload({chunkIndex:'1',elapsed:'6000'})).status).toBe(200);expect(parakeet).toHaveBeenCalledTimes(1)
+ expect((await upload()).status).toBe(200);expect(whisper).not.toHaveBeenCalled()
+ expect((await upload({chunkIndex:'1',elapsed:'6000'})).status).toBe(200);expect(whisper).toHaveBeenCalledTimes(1)
  expect((await call('/meeting/sessions/'+id+'/status')).json).toMatchObject({...source,state:'active',asrCompletedCount:2})
  expect((await call('/meeting/sessions/'+id+'/stop',{finalChunkIndex:1,serverInstanceId:'server-mac'})).json.reason).toBe('phone_provenance_required')
 })
@@ -144,9 +145,14 @@ it('admits the timestamped UUID contract and refuses an ID whose embedded origin
  const {ASK_SESSION}=await import('../lib/ask-session-id.js');expect(ASK_SESSION.test(timestamped)).toBe(true);expect(ASK_SESSION.test('phone_1700000000000_anything')).toBe(false)
  expect((await upload({sessionId:'phone_1700000000001_abcdef01-2345-6789-abcd-0123456789ab'})).json.reason).toBe('phone_capture_conflict')
 })
-it('keeps phone HQ strictly Parakeet with no second opinion or resolver after global choices change',async()=>{
- await upload();const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'large-v3'})
- const {currentHqJobPlan}=await import('../lib/meeting-batch-transcribe.js');expect(currentHqJobPlan(id)).toMatchObject({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'off',resolver:false})
+it('keeps phone HQ strictly Parakeet; a second opinion, when on, is always the dictionary-prompted Whisper',async()=>{
+ await upload();const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'large-v3',secondOpinion:'off',resolver:false})
+ const {currentHqJobPlan,phoneHqPlan}=await import('../lib/meeting-batch-transcribe.js');expect(currentHqJobPlan(id)).toMatchObject({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'off',resolver:false})
+ // Whisper HQ with a Parakeet second opinion: for the phone the other engine is Whisper, never Parakeet twice.
+ writeSttSettings({...readSttSettings(),hq:'large-v3',secondOpinion:'parakeet-ultra',resolver:true});expect(currentHqJobPlan(id)).toEqual({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'large-v3',resolver:true,frontEnd:readSttSettings().frontEnd})
+ writeSttSettings({...readSttSettings(),hq:'parakeet-ultra',secondOpinion:'large-v3',resolver:false});expect(currentHqJobPlan(id)).toMatchObject({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'large-v3',resolver:false})
+ // transcribeSegments re-derives the phone plan from whatever plan it is handed.
+ expect(phoneHqPlan({secondOpinion:'off',resolver:true,frontEnd:'full'})).toEqual({engine:'parakeet-ultra',strictPrimary:true,secondOpinion:'off',resolver:false,frontEnd:'full'})
  const {assertVoiceEvidenceSource}=await import('../lib/voice-evidence-guard.js');expect(assertVoiceEvidenceSource([id])?.body.reason).toBe('phone_anonymous_capture')
 })
 
@@ -173,7 +179,7 @@ it('lets the stranded sweep save through the same pinned anonymous phone contrac
 })
 
 it('recovers quarantined phone audio through shared strict HQ, dictionary and anonymous saved meeting',async()=>{
- await upload();stream.deleteSession(id,{preserveAudio:true})
+ await upload();whisper.mockClear();stream.deleteSession(id,{preserveAudio:true})
  const {quarantineSessionAudio,listUnsavedCaptures}=await import('../lib/unsaved-audio-quarantine.js');const quarantined=quarantineSessionAudio(join(root,'session-audio',id),'test_phone_recovery')!;expect(quarantined).toBeTruthy()
  expect(listUnsavedCaptures().find(c=>c.sessionId===id)).toMatchObject({sourceType:'iphone_microphone',provenanceState:'admitted'})
  const recovery=await call('/meeting/orphans/'+id+'/recover',{});expect(recovery.status).toBe(202);await Promise.allSettled(background.splice(0))
@@ -184,18 +190,18 @@ it('recovers quarantined phone audio through shared strict HQ, dictionary and an
 })
 
 it('returns an anonymous durable empty completion and preserves its strict policy on HQ entries',async()=>{
- parakeet.mockResolvedValueOnce({model:'parakeet-ultra',text:'',words:[],processingSec:0.1,wallMs:120})
+ whisper.mockResolvedValueOnce({text:'',backend:'server'})
  const done=await upload();expect(done.status).toBe(200);expect(done.json).toMatchObject({...source,speaker:'Ext',canonical:false,asrCompleted:true})
  expect(stream.getSessionChunkEntries(id)?.[0].chunk).toMatchObject({...source,speaker:'Ext',text:''})
- expect((await upload()).status).toBe(200);expect(parakeet).toHaveBeenCalledTimes(1);expect(identify).not.toHaveBeenCalled()
+ expect((await upload()).status).toBe(200);expect(whisper).toHaveBeenCalledTimes(1);expect(identify).not.toHaveBeenCalled()
 })
 it('serializes phone uploads while ASR is pending and accepts a clean retry after receipt',async()=>{
  let release!:(value:unknown)=>void
- parakeet.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve}))
+ whisper.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve}))
  const first=upload();await vi.waitFor(()=>expect(release).toBeTypeOf('function'))
  expect((await upload()).json.reason).toBe('phone_chunk_in_progress')
- release({model:'parakeet-ultra',text:'The product launch remains on schedule.',words:[],processingSec:0.1,wallMs:120})
- expect((await first).status).toBe(200);expect((await upload()).status).toBe(200);expect(parakeet).toHaveBeenCalledTimes(1)
+ release({text:'The product launch remains on schedule.',backend:'server'})
+ expect((await first).status).toBe(200);expect((await upload()).status).toBe(200);expect(whisper).toHaveBeenCalledTimes(1)
 })
 it('refuses corrupt registry and unsupported audio/index before another model call, retaining accepted bytes',async()=>{
  expect((await upload({chunkIndex:'0junk'})).json.reason).toBe('invalid_chunk_index')
@@ -204,13 +210,13 @@ it('refuses corrupt registry and unsupported audio/index before another model ca
  expect(existsSync(join(root,'phone-recordings',id+'.json'))).toBe(false)
  await upload();const {writeFileSync}=await import('node:fs');writeFileSync(join(root,'phone-recordings',id+'.json'),'{broken')
  expect((await upload({chunkIndex:'1',elapsed:'6000'})).json.reason).toBe('phone_capture_metadata_unreadable')
- expect(existsSync(join(root,'session-audio',id,'chunk_0000.wav'))).toBe(true);expect(existsSync(join(root,'session-audio',id,'chunk_0001.wav'))).toBe(false);expect(parakeet).toHaveBeenCalledTimes(1)
+ expect(existsSync(join(root,'session-audio',id,'chunk_0000.wav'))).toBe(true);expect(existsSync(join(root,'session-audio',id,'chunk_0001.wav'))).toBe(false);expect(whisper).toHaveBeenCalledTimes(1)
 })
 it('refuses new audio after a durable save even if a crash left its registry apparently open',async()=>{
  await upload();const {getMeetingStore}=await import('../lib/meeting-store.js')
  getMeetingStore().save({sessionId:id,transcript:stream.getSessionTranscript(id)!,startTime:1700000000000,durationMs:6000,chunks:stream.getSessionChunks(id)!,chunkEntries:stream.getSessionChunkEntries(id)!})
  const path=join(root,'phone-recordings',id+'.json');const metadata=JSON.parse(readFileSync(path,'utf8'));delete metadata.closedAt;const {writeFileSync}=await import('node:fs');writeFileSync(path,JSON.stringify(metadata))
- expect((await upload({chunkIndex:'1',elapsed:'6000'})).json.reason).toBe('session_closed');expect(parakeet).toHaveBeenCalledTimes(1)
+ expect((await upload({chunkIndex:'1',elapsed:'6000'})).json.reason).toBe('session_closed');expect(whisper).toHaveBeenCalledTimes(1)
 })
 
 it('keeps phone library/context identity distinct from Mac and rejects cross-source key aliases',async()=>{
@@ -228,11 +234,12 @@ it('keeps phone library/context identity distinct from Mac and rejects cross-sou
 
 it('never schedules Whisper progressive work when the selected engine changes during phone ASR',async()=>{
  process.env.COS_MEETING_PROGRESSIVE_HQ='1'
- let finish!:(value:unknown)=>void;parakeet.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}))
+ let finish!:(value:unknown)=>void;whisper.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}))
  const pending=upload();await vi.waitFor(()=>expect(finish).toBeTypeOf('function'))
  const {writeSttSettings,readSttSettings}=await import('../lib/stt-settings.js');writeSttSettings({...readSttSettings(),hq:'large-v3'})
- finish({model:'parakeet-ultra',text:'The launch plan is agreed.',words:[],processingSec:0.1,wallMs:120})
- expect((await pending).status).toBe(200);expect(progressive).not.toHaveBeenCalled();expect(whisper).not.toHaveBeenCalled()
+ finish({text:'The launch plan is agreed.',backend:'server'})
+ // Only the live call: no progressive checkpoint and no Whisper HQ (transcribeHighQuality throws in this file).
+ expect((await pending).status).toBe(200);expect(progressive).not.toHaveBeenCalled();expect(whisper).toHaveBeenCalledTimes(1)
 })
 it('keeps actual shared Ask history/files isolated by full capture ID through phone live-to-saved reopening',async()=>{
  await upload()

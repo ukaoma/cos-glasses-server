@@ -17,7 +17,7 @@ export function phoneMicrophoneMeetingsCapability(serverInstanceId: string | nul
     try { reason = !serverInstanceId ? 'server_identity_unavailable' : readSttSettings().hq !== 'parakeet-ultra' ? 'parakeet_not_selected' : !parakeetInstalled().installed ? 'parakeet_not_installed' : 'ready' }
     catch { reason = 'parakeet_unavailable' }
   }
-  return { enabled: reason === 'ready', protocolVersion: 1 as const, sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' as const, asrModel: 'parakeet-ultra', dictionary: 'server-profile-corrections', reason }
+  return { enabled: reason === 'ready', protocolVersion: 1 as const, sourceType: PHONE_SOURCE_TYPE, speakerPolicy: 'anonymous' as const, asrModel: 'parakeet-ultra', liveAsrModel: 'server-whisper' as const, dictionary: 'server-profile-corrections', reason }
 }
 /** Phone IDs and the new source marker must agree, including on rejected/replayed requests. */
 export function assertPhoneProvenance(id: unknown, fields: Record<string, unknown> | undefined): boolean {

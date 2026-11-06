@@ -2331,6 +2331,14 @@ function emptyChunkResponse(
   }
 }
 
+/**
+ * 6.99.16: an iPhone recording's live lines come from the same server Whisper as a G2 meeting,
+ * prompted with the profile vocabulary, so the dictionary shows while recording (Miles,
+ * 2026-11-05: "as close to the g2 stack as possible"). Parakeet takes no prompt. The saved
+ * transcript is unchanged: strict Parakeet, as the capability's asrModel says.
+ */
+export const PHONE_LIVE_ENGINE: 'server-whisper' | 'parakeet-ultra' = 'server-whisper'
+
 async function transcribeWithServerWhisper(audioBuffer: Buffer, whisperAudio: Buffer, whisperContext: string, isQuiet: boolean): Promise<{ text: string; words?: WhisperWord[]; backend: string }> {
   // The worker owns reconciliation of stale health. Always attempt local ASR
   // once; an availability snapshot must not divert meeting audio to cloud.
@@ -2639,7 +2647,7 @@ async function processStreamChunk(opts: {
     model = candidate.model
     mode = candidate.mode
     latencyMs = candidate.latencyMs
-  } else if (phoneCapture) {
+  } else if (phoneCapture && PHONE_LIVE_ENGINE === 'parakeet-ultra') {
     const result = await transcribePhoneParakeet(whisperAudio, quiet.speechSec)
     rawText = result.text; words = result.words; backend = result.backend; asrProvider = result.asrProvider; model = result.model; latencyMs = result.latencyMs
   } else if (MAC_CAPTURE_ID.test(sessionId) && stt.hq === 'parakeet-ultra') {
