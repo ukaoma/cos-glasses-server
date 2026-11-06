@@ -131,7 +131,7 @@ describe('stt resolver', () => {
   })
 })
 
-describe('anchored vocabulary from approximate-clock live words (6.99.17)', () => {
+describe('anchored vocabulary from approximate-clock live words (6.99.18)', () => {
   const timed = (text: string, at = 0, step = 0.5) => text.split(' ').map((word, i) => ({ word, start: at + i * step, end: at + i * step + 0.4, probability: 0.9 }))
   const P = (text: string) => ({ engine: 'parakeet-ultra', text, words: timed(text) })
   const live = (text: string) => ({ engine: 'live-whisper', text, words: timed(text, 7, 1.5) })
