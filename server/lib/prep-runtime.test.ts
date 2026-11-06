@@ -495,10 +495,15 @@ describe('Prep run', () => {
     expect([err.code, err.status]).toEqual(['run_status_unknown', 503])
     expect(f.store.get(d.id)!.runs.map(r => r.state)).toEqual(['submitting'])
     const stuckJob = f.store.get(d.id)!.runs[0].clientJobId
-    const results = []
-    for (let i = 0; i < 3; i++) results.push(await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision }))
-    // The first new request re-drove the stuck run; the next two ran on their own.
-    expect(results[0].run.clientRequestId).toBe(stuck)
+    // The first new request re-drives the stuck run but does not run itself: 409 run_in_progress names the old run.
+    const fresh = uuid()
+    const redrive = await caught(f.runtime.run(d.id, { clientRequestId: fresh, revision: f.store.get(d.id)!.revision }))
+    expect([redrive.code, redrive.status, (redrive.extra.run as any).clientRequestId, (redrive.extra.run as any).state, redrive.extra.redriven]).toEqual(['run_in_progress', 409, stuck, 'accepted', true])
+    expect(f.store.get(d.id)!.runs.map(r => r.clientRequestId)).toEqual([stuck])
+    // Retrying the same new request (now that the old run has a session) runs it on its own, at the current revision.
+    const results = [await f.runtime.run(d.id, { clientRequestId: fresh, revision: f.store.get(d.id)!.revision })]
+    for (let i = 0; i < 2; i++) results.push(await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision }))
+    expect(results[0].run.clientRequestId).toBe(fresh)
     expect(results.map(r => r.run.state)).toEqual(['accepted', 'accepted', 'accepted'])
     expect((f.jobs.submit as any).mock.calls.filter((c: any[]) => c[0].clientJobId === stuckJob)).toHaveLength(1)
     expect(f.store.get(d.id)!.runs.filter(r => r.state === 'submitting')).toEqual([])
@@ -525,8 +530,9 @@ describe('Prep run', () => {
     expect((await caught(f.runtime.run(d.id, { clientRequestId: stuck, revision: d.revision }))).code).toBe('maintenance')
     f.deps.jobs.byClient = realByClient
     f.state.open = true
-    const next = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision })
-    expect(next.run).toMatchObject({ clientRequestId: stuck, state: 'accepted' })
+    const next = await caught(f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision }))
+    expect([next.code, next.extra.redriven]).toEqual(['run_in_progress', true])
+    expect(next.extra.run).toMatchObject({ clientRequestId: stuck, state: 'accepted' })
     expect(f.jobs.submit).toHaveBeenCalledTimes(1)
   })
 

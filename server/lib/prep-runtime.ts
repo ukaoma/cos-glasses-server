@@ -23,7 +23,7 @@
  *   accepted job has no session and has not ended. The web admission gives a job its session at admission, so from
  *   that instant a second run may go into the same conversation while the first is still answering. A receipt left
  *   'submitting' with no live admission (a failed lookup, a drain, a restart) is re-driven by the next run, never left
- *   to lock the draft. A terminal job's status and answer (20 KB) are copied onto the run on read, without moving the
+ *   to lock the draft; that next request itself does not run and answers 409 run_in_progress {run, redriven: true}. A terminal job's status and answer (20 KB) are copied onto the run on read, without moving the
  *   draft's revision.
  * - Bind: the exact rows are saved, the binding is written 'applying', merged into the meeting's Meeting Ask files with
  *   putFiles (which keeps every other file), then marked 'applied'. The meeting's limits (100 files, 500 KB text) are
@@ -535,7 +535,7 @@ export class PrepRuntime {
     const print = fingerprint({ clientRequestId, model: body.model ?? null, effort: body.effort ?? null, continue: body.continue === true })
 
     // Step 1 (draft queue): replay, or save the prompt and a 'submitting' receipt before anything is submitted.
-    const step1 = await this.serial(id, async (): Promise<{ replay?: PrepRun; admitting?: Promise<RunResult>; draft: PrepDraft }> => {
+    const step1 = await this.serial(id, async (): Promise<{ replay?: PrepRun; admitting?: Promise<RunResult>; redriving?: Promise<RunResult>; stuck?: PrepRun; draft: PrepDraft }> => {
       const draft = this.draft(id)
       const prior = draft.runs.find(r => r.clientRequestId === clientRequestId)
       if (prior) {
@@ -545,8 +545,10 @@ export class PrepRuntime {
       }
       const busy = await this.runInProgress(draft)
       // A receipt left 'submitting' with no live admission (a failed lookup, a drain, a restart) is re-driven here, the
-      // way its own retry would be, so it can never lock the draft. The caller gets that run's result.
-      if (busy?.state === 'submitting' && !this.admitting.has(`${id}:${busy.clientRequestId}`)) return { admitting: this.admitOnce(id, busy), draft }
+      // way its own retry would be, so it can never lock the draft. The new request is NOT recorded and does not run:
+      // it answers 409 run_in_progress with the old run (redriven: true), so notes typed since are never silently
+      // answered by the old run's prompt. Its own retry, once the old run has a session, runs at the then-current revision.
+      if (busy?.state === 'submitting' && !this.admitting.has(`${id}:${busy.clientRequestId}`)) return { redriving: this.admitOnce(id, busy), stuck: busy, draft }
       if (busy) throw new PrepError('run_in_progress', 409, undefined, { run: busy })
       this.cas(draft, body.revision)
       return this.writing(async () => {
@@ -572,13 +574,20 @@ export class PrepRuntime {
       const job = await this.deps.jobs.byClient(step1.replay.clientJobId, 1).catch(() => undefined)
       return { job: prepJobForClient(job), run: step1.replay, draft: step1.draft }
     }
+    if (step1.redriving) {
+      // Whatever the re-drive settled to, this request did not run. A re-drive that failed again leaves the old receipt
+      // as it was (submitting or failed), which is what the 409 reports.
+      const settled = await step1.redriving.catch(() => undefined)
+      const run = settled?.run ?? this.draft(id).runs.find(r => r.clientRequestId === step1.stuck!.clientRequestId) ?? step1.stuck!
+      throw new PrepError('run_in_progress', 409, undefined, { run, job: settled?.job ?? null, redriven: true })
+    }
     return step1.admitting!
   }
 
   /**
    * v1.1 #6: the run that blocks a new one, until it has a session. A 'submitting' receipt, or an accepted run whose
    * job is not terminal and has no session yet (a failed lookup counts as in progress: it is not proof the job ended).
-   * The caller re-drives a 'submitting' receipt whose admission is not live, rather than refusing. This does NOT keep
+   * The caller re-drives a 'submitting' receipt whose admission is not live, then still refuses the new request. This does NOT keep
    * two runs out of one conversation: the web admission gives a job its session at admission, and from that instant a
    * second run may continue the same conversation while the first is still answering.
    */
