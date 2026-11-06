@@ -1,5 +1,10 @@
 ## 6.99.16 - The COS thread: one size-capped conversation behind the COS chat's Ask, stored to recover and search (private)
 
+Merged in: claude/iphone-dictionary (94323de, from the COS Glasses QA session; its own full suite on 94323de: 13,041 passed, 0 failed).
+
+- Default-on for iPhone microphone recordings: iPhone recordings now transcribe live with the same Whisper as the glasses, so your dictionary shows while you record. Saved transcripts are unchanged (strict Parakeet, as for G2 saves). If live Whisper fails, the chunk errors as retryable `local_asr_unavailable`; it never falls back to Parakeet live. The capability keeps `asrModel: 'parakeet-ultra'` (glasses clients 677 and older check it before offering the iPhone mic) and adds `liveAsrModel: 'server-whisper'`.
+- iPhone saved transcripts can use the dictionary when Second opinion is on (`phoneHqPlan` in meeting-batch-transcribe.ts): Parakeet stays the strict primary and the dictionary-prompted Whisper Large-v3 fills in names it missed. Off stays off; Miles's Mac has it off, so this changes nothing there until he turns it on.
+
 2026-11-05. Private build for one Mac, on top of 6.99.15. Pairs with COS Control 0.5.374 (written against this contract), and works with any COS Control that pairs with 6.99.15. Nothing changes for the glasses app. Everything here exists only while Drop it is on.
 
 Miles, 11/05 22:55: "As long as we're storing so we can easily recover and search for them, I like this plan let's build and deploy."
