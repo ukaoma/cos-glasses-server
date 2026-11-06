@@ -1,3 +1,14 @@
+## 6.99.15 - Messages cleanup on COS Control Web; the pinned COS line never says its title twice (private)
+
+2026-11-05. Private build for one Mac, on top of 6.99.14. Pairs with COS Control 0.5.374 (the same Messages cleanup on the Mac), and works with any COS Control that pairs with 6.99.14.
+
+Miles, 11/05 21:15, with a screenshot of Messages: "clean up the UI/UX on this, make sure it's clean on the browser and the desktop version".
+
+- The pinned COS row's line (`/api/inbox/summary` `lastLine`, `pinLine` in `server/lib/drop-service.ts`): a follow-up's line already names its card, so "Sprocket Rocket AI Unified Nav Approved (G2). 2 follow-ups from Sprocket Rocket AI Unified Nav Approved (G2)." now reads "2 follow-ups from Sprocket Rocket AI Unified Nav Approved (G2).". A title the line does not name still leads it, with one period. Both COS Control and the web show this line.
+- COS Control Web, Messages (`panes/messages.js`, `control.css`): each row leads with the ask, one line cut by width (was 57 characters), with its time beside it; the answer's two-line preview under it; one quiet line of facts (`#442`, Routine or Task, the model by name, attachments with their icon and "1 image"). No per-row glyph, no "ROUTINE and TASK" legend, no visible "Message view" label. The header says "30 messages, newest first". Previews put a space between progress sentences that ran together ("now.Reading").
+- COS Control Web, the COS chat (`panes/cos-chat.js`): a P2 follow-up that carries its own Dismiss no longer gets a second one. The pinned row's time is in the body font.
+- Tests: `drop-service.test.ts` covers `pinLine` (mutation-checked: always prefixing the title fails it); `cos-chat-p2.test.ts` counts one Dismiss on a follow-up that carries one, and one on a question that does not (mutation-checked).
+
 ## 6.99.14 - The live meeting view on COS Control Web stops jumping, and gets the recording bar and Add file (private)
 
 2026-11-05. Private build for one Mac, on top of 6.99.13. Web only: no server route, no store and no glasses change. Pairs with any COS Control that pairs with 6.99.13.
