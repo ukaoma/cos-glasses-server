@@ -133,6 +133,17 @@ describe('Prep HTTP contract', () => {
     expect((await f.request('/drafts')).status).toBe(200)
   })
 
+  it('DELETE a draft archives it (header required) and by-session still lists its snapshots', async () => {
+    const f = await make()
+    const { draft } = await (await f.request('/drafts', 'POST', { clientDraftId: uuid() })).json() as any
+    await f.request(`/drafts/${draft.id}`, 'PATCH', { revision: 1, steer: 'Bring the list' })
+    await f.request(`/drafts/${draft.id}/bind`, 'POST', { revision: 2, sessionId: 'meeting_http_9', surface: 'web' })
+    const del = await f.request(`/drafts/${draft.id}`, 'DELETE')
+    expect(del.status).toBe(200)
+    expect((await del.json() as any).draft.state).toBe('archived')
+    expect((await (await f.request('/by-session/meeting_http_9')).json() as any).snapshots.map((r: any) => r.steer)).toEqual(['Bring the list'])
+  })
+
   it('every mutation needs X-COS-Expected-Server-Instance: missing is 428, another server is 409; reads need none', async () => {
     const f = await make()
     const missing = await f.request('/drafts', 'POST', { clientDraftId: uuid() }, true, null)
@@ -143,7 +154,7 @@ describe('Prep HTTP contract', () => {
     expect(await other.json()).toEqual({ error: 'server_instance_mismatch', serverInstanceId: 'srv-1' })
     expect((await (await f.request('/drafts')).json() as any).drafts).toEqual([])   // nothing was created
     const { draft } = await (await f.request('/drafts', 'POST', { clientDraftId: uuid() })).json() as any
-    for (const [path, method, body] of [[`/drafts/${draft.id}`, 'PATCH', { revision: 1, steer: 'x' }], [`/drafts/${draft.id}/files`, 'POST', { revision: 1, media: [{ id: MEDIA, sha256: SHA }] }], [`/drafts/${draft.id}/run`, 'POST', { clientRequestId: uuid(), revision: 1 }], [`/drafts/${draft.id}/bind`, 'POST', { revision: 1, sessionId: 'meeting_http_1', surface: 'web' }], [`/drafts/${draft.id}/bind/meeting_http_1`, 'DELETE', undefined], [`/drafts/${draft.id}/files/pf_0123456789abcdef?revision=1`, 'DELETE', undefined]] as const) {
+    for (const [path, method, body] of [[`/drafts/${draft.id}`, 'PATCH', { revision: 1, steer: 'x' }], [`/drafts/${draft.id}/files`, 'POST', { revision: 1, media: [{ id: MEDIA, sha256: SHA }] }], [`/drafts/${draft.id}/run`, 'POST', { clientRequestId: uuid(), revision: 1 }], [`/drafts/${draft.id}/bind`, 'POST', { revision: 1, sessionId: 'meeting_http_1', surface: 'web' }], [`/drafts/${draft.id}/bind/meeting_http_1`, 'DELETE', undefined], [`/drafts/${draft.id}/files/pf_0123456789abcdef?revision=1`, 'DELETE', undefined], [`/drafts/${draft.id}`, 'DELETE', undefined]] as const) {
       expect([path, (await f.request(path, method, body, true, null)).status]).toEqual([path, 428])
     }
     expect(f.submit).not.toHaveBeenCalled()
@@ -157,5 +168,10 @@ describe('Prep HTTP contract', () => {
   it('builds a safe Content-Disposition for any name', () => {
     expect(attachmentDisposition('a\r\nb".pdf')).toBe(`attachment; filename="a__b_.pdf"; filename*=UTF-8''${encodeURIComponent('a\r\nb".pdf')}`)
     expect(attachmentDisposition('...')).toBe(`attachment; filename="file"; filename*=UTF-8''...`)
+    // Half an emoji (a lone surrogate) is dropped instead of throwing URIError; a whole one survives the 240 cut.
+    expect(() => attachmentDisposition('report\uD83D.pdf')).not.toThrow()
+    expect(attachmentDisposition('report\uD83D.pdf')).toContain(`filename*=UTF-8''report.pdf`)
+    const atEdge = 'a'.repeat(239) + '\u{1F600}' + 'tail'
+    expect(attachmentDisposition(atEdge)).toContain(encodeURIComponent('a'.repeat(239) + '\u{1F600}'))
   })
 })

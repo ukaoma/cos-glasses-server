@@ -9,7 +9,7 @@ import type { PrepDraft } from '../../shared/prep.js'
 const dirs: string[] = []
 afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); vi.restoreAllMocks() })
 const root = () => { const d = mkdtempSync(join(tmpdir(), 'prep-store-')); dirs.push(d); return join(d, 'prep') }
-const draft = (id: string): PrepDraft => ({ id, clientDraftId: '11111111-1111-4111-8111-111111111111', serverInstanceId: 'srv-1', fileOperations: [], revision: 1, createdAt: '2026-11-06T15:00:00.000Z', updatedAt: '2026-11-06T15:00:00.000Z', title: 't', startsAt: null, occurrence: null, identity: 'none', steer: '', files: [], runs: [], conversation: { sessionId: null }, bindings: [], state: 'active' })
+const draft = (id: string): PrepDraft => ({ id, clientDraftId: '11111111-1111-4111-8111-111111111111', serverInstanceId: 'srv-1', fileOperations: [], snapshots: [], revision: 1, createdAt: '2026-11-06T15:00:00.000Z', updatedAt: '2026-11-06T15:00:00.000Z', title: 't', startsAt: null, occurrence: null, identity: 'none', steer: '', files: [], runs: [], conversation: { sessionId: null }, bindings: [], state: 'active' })
 const ID = 'prep_' + 'a'.repeat(26)
 
 describe('PrepStore', () => {

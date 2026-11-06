@@ -5,7 +5,7 @@
  *   files/<draftId>/<fileId>.bin     the original bytes, copied out of /api/media at add time (the media stage expires in 4 h)
  *   files/<draftId>/<fileId>.txt     the extracted text a run and a bind read (ready files only)
  *   runs/<draftId>/<clientRequestId>.txt   a run's exact prompt, saved before the job is submitted
- *   binds/<draftId>/<sessionId>.json       the exact Meeting Ask rows a bind attaches, saved before its intent
+ *   binds/<draftId>/<sessionId>/<revision>.json   the exact Meeting Ask rows a bind attaches, saved before its intent
  *
  * Drafts are read back from disk on first use, so a restarted server (a fresh instance) serves the same drafts. Writes
  * are synchronous inside one server process; prep-runtime.ts serializes each draft's read-modify-write. Nothing is
@@ -54,6 +54,10 @@ export function parsePrepOccurrence(raw: unknown): PrepOccurrence | null {
   return { key: prepOccurrenceKey(base), ...base, endsAt: iso(o.endsAt) }
 }
 
+/** The loader skips a draft file larger than this; writes stop well short of it. */
+export const DRAFT_LOAD_BYTES = 5_000_000
+export const DRAFT_WRITE_BYTES = 4_000_000
+
 export class PrepStore {
   readonly root: string
   private cache: Map<string, PrepDraft> | null = null
@@ -81,9 +85,11 @@ export class PrepStore {
       const id = name.slice(0, -5)
       try {
         const path = join(dir, name), st = lstatSync(path)
-        if (!PREP_DRAFT_ID.test(id) || !st.isFile() || st.size > 5_000_000) throw new Error('unsafe')
+        if (!PREP_DRAFT_ID.test(id) || !st.isFile() || st.size > DRAFT_LOAD_BYTES) throw new Error('unsafe')
         const draft = JSON.parse(readFileSync(path, 'utf8')) as PrepDraft
         if (draft?.id !== id || !Number.isSafeInteger(draft.revision) || !Array.isArray(draft.files)) throw new Error('shape')
+        draft.snapshots ??= []
+        draft.fileOperations ??= []
         drafts.set(id, draft)
       } catch {
         // Kept on disk for a person to look at; it simply is not served.
@@ -109,8 +115,11 @@ export class PrepStore {
 
   write(draft: PrepDraft): PrepDraft {
     if (!PREP_DRAFT_ID.test(draft.id)) throw new PrepError('invalid_draft_id')
+    const encoded = JSON.stringify(draft)
+    // Never write a draft the loader would refuse: it would vanish on the next restart.
+    if (Buffer.byteLength(encoded, 'utf8') > DRAFT_WRITE_BYTES) throw new PrepError('prep_draft_too_large', 507)
     try {
-      durableAtomicWriteFileSync(join(this.dir('drafts'), draft.id + '.json'), JSON.stringify(draft), { mode: 0o600 })
+      durableAtomicWriteFileSync(join(this.dir('drafts'), draft.id + '.json'), encoded, { mode: 0o600 })
     } catch (e) {
       if (e instanceof PrepError) throw e
       throw new PrepError('prep_write_failed', 507)
@@ -177,16 +186,16 @@ export class PrepStore {
    * The exact Meeting Ask rows one bind attaches, saved before the binding intent, so a retry after a crash re-applies
    * the frozen revision rather than whatever the draft holds by then.
    */
-  putBindPayload(draftId: string, sessionId: string, rows: unknown[]): void {
-    try { durableAtomicWriteFileSync(this.bindPath(draftId, sessionId), JSON.stringify(rows), { mode: 0o600 }) } catch (e) {
+  putBindPayload(draftId: string, sessionId: string, revision: number, rows: unknown[]): void {
+    try { durableAtomicWriteFileSync(this.bindPath(draftId, sessionId, revision), JSON.stringify(rows), { mode: 0o600 }) } catch (e) {
       if (e instanceof PrepError) throw e
       throw new PrepError('prep_write_failed', 507)
     }
   }
 
-  readBindPayload(draftId: string, sessionId: string): unknown[] | null {
+  readBindPayload(draftId: string, sessionId: string, revision: number): unknown[] | null {
     try {
-      const rows = JSON.parse(readFileSync(this.bindPath(draftId, sessionId), 'utf8'))
+      const rows = JSON.parse(readFileSync(this.bindPath(draftId, sessionId, revision), 'utf8'))
       return Array.isArray(rows) ? rows : null
     } catch (e) {
       if (e instanceof PrepError) throw e
@@ -194,9 +203,10 @@ export class PrepStore {
     }
   }
 
-  private bindPath(draftId: string, sessionId: string): string {
-    if (!PREP_DRAFT_ID.test(draftId) || !ASK_SESSION.test(sessionId)) throw new PrepError('invalid_session_id')
-    return join(this.dir('binds', draftId), `${sessionId}.json`)
+  /** Keyed by (draft, meeting, revision): a replay of one bind can never read another bind's rows. */
+  private bindPath(draftId: string, sessionId: string, revision: number): string {
+    if (!PREP_DRAFT_ID.test(draftId) || !ASK_SESSION.test(sessionId) || !Number.isSafeInteger(revision) || revision < 0) throw new PrepError('invalid_session_id')
+    return join(this.dir('binds', draftId, sessionId), `${revision}.json`)
   }
 
   /** Bytes on disk under the store root (drafts, originals, text). Walked on each add: at most 300 drafts x 10 files. */

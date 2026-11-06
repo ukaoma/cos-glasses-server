@@ -28,6 +28,7 @@
 
 import { existsSync, mkdirSync, appendFileSync, readFileSync, renameSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { isPrepCopyId } from '../../shared/prep.js'
 import { LensGistLimitError, runLensGistEngine } from './lens-gist-engines.js'
 import { resolveProviderBinary } from './provider-binary.js'
 import { getVocabulary, getWhisperCorrections } from './profile.js'
@@ -167,11 +168,19 @@ const notesSearchDefault: CleanupDeps['searchNotes'] = async (queries, sessionId
   })(queries, sessionId, signal)
 }
 
+/**
+ * The meeting files whose words may steer saved-transcript cleanup. Pasted text and read pages (paste_, web_) are
+ * article words, not the room's vocabulary, and so are Prep copies (prep_prep_..., 6.99.19): notes and documents
+ * written before the call. None of them may rewrite the saved transcript.
+ */
+export function cleanupVocabularyFiles(files: ReadonlyArray<{ id: string; name: string; status: string; text: string }>, isPastedFileId: (id: string) => boolean): CleanupFile[] {
+  return files.filter(f => !isPastedFileId(f.id) && !isPrepCopyId(f.id) && f.status === 'ready' && typeof f.text === 'string' && f.text.trim()).map(f => ({ name: f.name, text: f.text }))
+}
+
 const filesDefault: CleanupDeps['files'] = async sessionId => {
   try {
     const { MeetingAskStore, isPastedFileId } = await import('./meeting-ask-store.js')
-    // Pasted text and read pages (paste_, web_) are article words, not the room's vocabulary: they must not rewrite the saved transcript.
-    return new MeetingAskStore().files(sessionId).filter(f => !isPastedFileId(f.id) && f.status === 'ready' && typeof f.text === 'string' && f.text.trim()).map(f => ({ name: f.name, text: f.text }))
+    return cleanupVocabularyFiles(new MeetingAskStore().files(sessionId), isPastedFileId)
   } catch { return [] }
 }
 

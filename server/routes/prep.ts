@@ -8,14 +8,16 @@
  */
 import { Router, type Request, type Response } from 'express'
 import { PrepError } from '../lib/prep-store.js'
-import type { PrepRuntime } from '../lib/prep-runtime.js'
+import { wellFormed, type PrepRuntime } from '../lib/prep-runtime.js'
 
 export const EXPECTED_SERVER_HEADER = 'x-cos-expected-server-instance'
 
 /** An ASCII fallback name plus the RFC 5987 UTF-8 name: no quotes, slashes or control characters reach the header. */
 export function attachmentDisposition(name: string): string {
-  const ascii = name.replace(/[^A-Za-z0-9._ -]/g, '_').replace(/^[ .]+/, '').slice(0, 120) || 'file'
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name.slice(0, 240))}`
+  // By code point, without lone surrogates: encodeURIComponent throws URIError on half an emoji.
+  const whole = Array.from(wellFormed(name)).slice(0, 240).join('')
+  const ascii = whole.replace(/[^A-Za-z0-9._ -]/g, '_').replace(/^[ .]+/, '').slice(0, 120) || 'file'
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(whole)}`
 }
 
 export function createPrepRouter(runtime: PrepRuntime): Router {
@@ -52,6 +54,7 @@ export function createPrepRouter(runtime: PrepRuntime): Router {
   })
   router.get('/prep/drafts', read(req => ({ drafts: runtime.list({ occurrence: req.query.occurrence, state: req.query.state, limit: req.query.limit }) })))
   router.get('/prep/drafts/:id', read(async req => ({ draft: await runtime.get(String(req.params.id)) })))
+  router.delete('/prep/drafts/:id', write(200, async req => ({ draft: await runtime.archive(String(req.params.id)) })))
   router.patch('/prep/drafts/:id', write(200, async req => ({ draft: await runtime.patch(String(req.params.id), req.body) })))
   router.post('/prep/drafts/:id/files', write(200, async req => ({ draft: await runtime.addFiles(String(req.params.id), req.body) })))
   router.delete('/prep/drafts/:id/files/:fileId', write(200, async req => ({ draft: await runtime.removeFile(String(req.params.id), String(req.params.fileId), req.query.revision, req.query.serverInstanceId) })))

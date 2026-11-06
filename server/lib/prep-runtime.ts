@@ -18,8 +18,13 @@
  *   Running panel and by-client lookup unchanged. It never reads or writes COS thread state. Crash-safe in three steps:
  *   (1) the prompt and a 'submitting' run are saved, (2) the job is submitted outside the draft queue under the
  *   clientJobId from shared/prep.ts prepClientJobId (generation 1), (3) the run is recorded 'accepted'. A retry after a
- *   crash at any point finds the admitted job by clientJobId and records it, never submitting twice. A 'submitting' run
- *   blocks a second run (409 run_in_progress). A terminal job's status and answer are copied onto the run on read.
+ *   crash at any point finds the admitted job by clientJobId and records it, never submitting twice. A second run is
+ *   refused (409 run_in_progress) only until the first has a session: while its receipt is 'submitting', or while its
+ *   accepted job has no session and has not ended. The web admission gives a job its session at admission, so from
+ *   that instant a second run may go into the same conversation while the first is still answering. A receipt left
+ *   'submitting' with no live admission (a failed lookup, a drain, a restart) is re-driven by the next run, never left
+ *   to lock the draft. A terminal job's status and answer (20 KB) are copied onto the run on read, without moving the
+ *   draft's revision.
  * - Bind: the exact rows are saved, the binding is written 'applying', merged into the meeting's Meeting Ask files with
  *   putFiles (which keeps every other file), then marked 'applied'. The meeting's limits (100 files, 500 KB text) are
  *   checked first, and nothing is written when they would be exceeded. Removal changes the draft only after putFiles
@@ -45,7 +50,7 @@ import { isTerminalQueryJobStatus, type QueryJobSnapshot } from './query-job-typ
 import {
   PREP_DRAFT_ID, PREP_FILE_ID, PREP_LIMITS, PREP_STEER_FILE_NAME, PREP_SURFACES, PREP_UUID_V4,
   prepAdoptedFileId, prepClientJobId, prepSteerFileId,
-  type PrepBinding, type PrepBindingSnapshot, type PrepDraft, type PrepFile, type PrepFileKind, type PrepRun, type PrepSessionSnapshot, type PrepSurface,
+  type PrepBinding, type PrepBindingSnapshot, type PrepDraft, type PrepFile, type PrepFileKind, type PrepRun, type PrepSessionSnapshot, type PrepSnapshotRecord, type PrepSurface,
 } from '../../shared/prep.js'
 
 export { parsePrepOccurrence, prepClientJobId }
@@ -128,7 +133,10 @@ function byteSlice(text: string, max: number): string {
   return out
 }
 
-function cleanLine(v: string, max: number): string { return v.replace(CONTROL, ' ').replace(/\s+/g, ' ').trim().slice(0, max) }
+/** Lone UTF-16 surrogates (half an emoji) dropped: they are not text, and encodeURIComponent throws on them. */
+export function wellFormed(v: string): string { return v.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '') }
+/** One clean line, cut by code point so an emoji at the limit is kept whole or dropped, never halved. */
+function cleanLine(v: string, max: number): string { return Array.from(wellFormed(v).replace(CONTROL, ' ').replace(/\s+/g, ' ').trim()).slice(0, max).join('').trim() }
 
 function isoOrNull(v: unknown, code: string): string | null {
   if (v === null) return null
@@ -178,6 +186,18 @@ export function prepJobForClient(job: QueryJobSnapshot | null | undefined): Quer
   return rest as QueryJobSnapshot
 }
 
+/** Oldest answers give way first so all of a draft's kept answers stay within PREP_LIMITS.draftAnswerBytes. */
+export function capAnswers(draft: PrepDraft): void {
+  let total = draft.runs.reduce((n, r) => n + Buffer.byteLength(r.answer ?? '', 'utf8'), 0)
+  for (const r of draft.runs) {
+    if (total <= PREP_LIMITS.draftAnswerBytes) break
+    if (!r.answer) continue
+    total -= Buffer.byteLength(r.answer, 'utf8')
+    r.answer = ''
+    r.answerTruncated = true
+  }
+}
+
 const copyRevision = (name: string, text: string) => sha256(`${name}\n${text}`).slice(0, 32)
 
 function asPrepError(e: unknown): PrepError {
@@ -201,6 +221,9 @@ export class PrepRuntime {
   constructor(overrides: Partial<PrepRuntimeDeps> = {}) { this.deps = { ...defaults, ...overrides } }
 
   private iso(): string { return new Date(this.deps.now()).toISOString() }
+
+  /** Bookkeeping the client did not write (a settled answer, an archive at the limit): saved without a CAS bump. */
+  private persist(draft: PrepDraft): PrepDraft { return this.deps.store.write(draft) }
 
   /** One read-modify-write at a time per key; a failure never blocks the next one. */
   private async serial<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
@@ -286,12 +309,40 @@ export class PrepRuntime {
       const existing = this.deps.store.byClientDraftId(clientDraftId)
       if (existing) return { draft: existing, created: false }
       return this.writing((): { draft: PrepDraft; created: boolean } => {
-        if (this.deps.store.list().filter(d => d.state === 'active').length >= PREP_LIMITS.activeDrafts) throw new PrepError('prep_draft_limit', 507)
+        this.makeRoom()
         if (this.deps.store.usageBytes() >= PREP_LIMITS.storeBytes) throw new PrepError('prep_storage_limit', 507)
         const at = this.iso()
-        const draft: PrepDraft = { id: newDraftId(), clientDraftId, serverInstanceId: this.deps.identity(), revision: 1, createdAt: at, updatedAt: at, title: '', startsAt: null, occurrence: null, identity: 'none', steer: '', files: [], fileOperations: [], runs: [], conversation: { sessionId: null }, bindings: [], state: 'active' }
+        const draft: PrepDraft = { id: newDraftId(), clientDraftId, serverInstanceId: this.deps.identity(), revision: 1, createdAt: at, updatedAt: at, title: '', startsAt: null, occurrence: null, identity: 'none', steer: '', files: [], fileOperations: [], runs: [], conversation: { sessionId: null }, bindings: [], snapshots: [], state: 'active' }
         this.applyFields(draft, { title: body.title, startsAt: body.startsAt, occurrence: body.occurrence })
         return { draft: this.deps.store.write(draft), created: true }
+      })
+    })
+  }
+
+  /**
+   * At the 300-draft limit, archive the oldest drafts that are done with (bound to a meeting, or whose start is more
+   * than 7 days past) until there is room; when none qualify the limit stands (507 prep_draft_limit, distinct from the
+   * store's 507 prep_storage_limit). Archiving keeps files and snapshots, so saved meetings still list them.
+   */
+  private makeRoom(): void {
+    const active = this.deps.store.list().filter(d => d.state === 'active')
+    const over = active.length - PREP_LIMITS.activeDrafts + 1
+    if (over <= 0) return
+    const now = this.deps.now()
+    const done = active.filter(d => d.bindings.length > 0 || (d.startsAt !== null && now - Date.parse(d.startsAt) > PREP_LIMITS.autoArchiveAfterMs))
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.id.localeCompare(b.id))
+    if (done.length < over) throw new PrepError('prep_draft_limit', 507)
+    for (const d of done.slice(0, over)) { d.state = 'archived'; this.persist(d) }
+  }
+
+  /** DELETE /prep/drafts/:id: archive. Nothing is deleted: files, runs and snapshots stay, and by-session still lists it. */
+  async archive(id: string): Promise<PrepDraft> {
+    return this.serial(id, () => {
+      const draft = this.draft(id)
+      if (draft.state === 'archived') return draft
+      return this.writing(() => {
+        draft.state = 'archived'
+        return this.commit(draft)
       })
     })
   }
@@ -489,9 +540,13 @@ export class PrepRuntime {
       const prior = draft.runs.find(r => r.clientRequestId === clientRequestId)
       if (prior) {
         if (prior.fingerprint !== print) throw new PrepError('request_reused', 409)
+        if (prior.state === 'failed') throw new PrepError('run_failed', 409, undefined, { run: prior })
         return prior.state === 'submitting' ? { admitting: this.admitOnce(id, prior), draft } : { replay: prior, draft }
       }
       const busy = await this.runInProgress(draft)
+      // A receipt left 'submitting' with no live admission (a failed lookup, a drain, a restart) is re-driven here, the
+      // way its own retry would be, so it can never lock the draft. The caller gets that run's result.
+      if (busy?.state === 'submitting' && !this.admitting.has(`${id}:${busy.clientRequestId}`)) return { admitting: this.admitOnce(id, busy), draft }
       if (busy) throw new PrepError('run_in_progress', 409, undefined, { run: busy })
       this.cas(draft, body.revision)
       return this.writing(async () => {
@@ -521,9 +576,11 @@ export class PrepRuntime {
   }
 
   /**
-   * v1.1 #6: the run that blocks a new one. A 'submitting' receipt (its admission in flight, or stranded by a restart
-   * until its own retry resolves it), or an accepted run whose job is not terminal and has no session yet. A job lookup
-   * that fails counts as in progress: it is not proof the job ended.
+   * v1.1 #6: the run that blocks a new one, until it has a session. A 'submitting' receipt, or an accepted run whose
+   * job is not terminal and has no session yet (a failed lookup counts as in progress: it is not proof the job ended).
+   * The caller re-drives a 'submitting' receipt whose admission is not live, rather than refusing. This does NOT keep
+   * two runs out of one conversation: the web admission gives a job its session at admission, and from that instant a
+   * second run may continue the same conversation while the first is still answering.
    */
   private async runInProgress(draft: PrepDraft): Promise<PrepRun | undefined> {
     const submitting = draft.runs.find(r => r.state === 'submitting')
@@ -571,13 +628,14 @@ export class PrepRuntime {
         // failed (it then stops blocking); a lookup that fails leaves the receipt 'submitting' for a later read.
         try { job = await this.deps.jobs.byClient(pending.clientJobId, 1) } catch { throw new PrepError('run_status_unknown', 503) }
         if (!job) {
-          await this.serial(id, () => this.writing(() => {
+          // Not behind the drain gate: marking a refused run failed only releases the draft's run lock.
+          await this.serial(id, () => {
             const draft = this.draft(id), run = draft.runs.find(r => r.clientRequestId === pending.clientRequestId)
             if (run?.state !== 'submitting') return
             run.state = 'failed'
             run.error = error.code
             this.commit(draft)
-          })).catch(() => {})
+          }).catch(e => console.warn(`[prep] could not mark a refused run failed (${error.code}):`, e instanceof Error ? e.message : 'unknown'))
           throw error
         }
       }
@@ -594,7 +652,9 @@ export class PrepRuntime {
       delete run.error
       // The Prep conversation is its own: continue:true reuses it, and a gone session was replaced by a new one.
       if (admitted.sessionId) draft.conversation = { sessionId: admitted.sessionId }
-      const saved = this.commit(draft)
+      // Recording the admitted job is bookkeeping of the run write that already moved the revision (and may happen on a
+      // read of GET .../runs), so the revision does not move again.
+      const saved = this.persist(draft)
       return { job: prepJobForClient(admitted), run: saved.runs.find(r => r.clientRequestId === run.clientRequestId)!, draft: saved }
     }))
   }
@@ -638,14 +698,16 @@ export class PrepRuntime {
         for (const r of fresh.runs) {
           const job = done.get(r.clientRequestId)
           if (!job || r.settledAt) continue
-          const answer = byteSlice(job.response ?? '', PREP_LIMITS.fileTextBytes)
+          const answer = byteSlice(job.response ?? '', PREP_LIMITS.runAnswerBytes)
           r.status = job.status
           r.answer = answer
           if (answer.length < (job.response ?? '').length || job.responseTruncated) r.answerTruncated = true
           if (job.error?.code) r.error = job.error.code
           r.settledAt = this.iso()
         }
-        return this.commit(fresh)
+        capAnswers(fresh)
+        // A read: no revision or updatedAt change, so it never causes another client's revision_conflict.
+        return this.persist(fresh)
       }))
     } catch { return null }
   }
@@ -699,24 +761,35 @@ export class PrepRuntime {
           throw new PrepError('file_context_limit', 413, undefined, { needBytes, haveBytes, needFiles: count, haveFiles: PREP_LIMITS.meetingFiles })
         }
         // Crash-safe: the frozen rows, then the 'applying' intent, then putFiles, then 'applied'.
-        this.deps.store.putBindPayload(draft.id, sessionId, payload)
+        this.deps.store.putBindPayload(draft.id, sessionId, revision, payload)
+        // The notes the meeting got as secret-held are not repeated in the snapshot either.
+        const steerHeld = !!draft.steer.trim() && redactSecrets(draft.steer.trim()) !== draft.steer.trim()
         const snapshot: PrepBindingSnapshot = {
-          draftRevision: revision, steer: draft.steer.trim(),
+          draftRevision: revision, steer: steerHeld ? '' : draft.steer.trim(), ...(steerHeld ? { held: true as const } : {}),
           files: draft.files.filter(f => ids.has(prepAdoptedFileId(draft.id, f.id))).map(f => ({ id: f.id, name: f.name, revision: rows.find(r => r.id === prepAdoptedFileId(draft.id, f.id))!.revision, sha256: f.sha256 })),
         }
         const binding: PrepBinding = { sessionId, serverInstanceId: this.deps.identity() ?? '', revision, state: 'applying', boundAt: this.iso(), surface: body.surface as PrepSurface, fileIds: [...ids], snapshot, title: draft.title, startsAt: draft.startsAt }
         draft.bindings = [...draft.bindings.filter(b => b.sessionId !== sessionId), binding]
+        // Append-only history: a rebind adds a snapshot and never erases what the meeting used before.
+        const record: PrepSnapshotRecord = { sessionId, boundAt: binding.boundAt, surface: binding.surface, title: draft.title, startsAt: draft.startsAt, snapshot: structuredClone(snapshot) }
+        const mineHere = [...(draft.snapshots ?? []).filter(r => r.sessionId === sessionId), record].slice(-PREP_LIMITS.snapshotsPerSession)
+        draft.snapshots = [...(draft.snapshots ?? []).filter(r => r.sessionId !== sessionId), ...mineHere]
         return this.apply(this.commit(draft), sessionId)
       })
     })
   }
 
-  /** Puts the frozen rows of an 'applying' binding (again, idempotently) and marks it 'applied'. */
+  /**
+   * Puts the frozen rows of an 'applying' binding (again, idempotently) and marks it 'applied'. A file deleted from the
+   * draft since the bind was frozen goes in as 'removed', so a replay never brings it back.
+   */
   private apply(draft: PrepDraft, sessionId: string): { draft: PrepDraft; files: MeetingAskFile[] } {
-    const rows = this.deps.store.readBindPayload(draft.id, sessionId)
-    if (!rows) throw new PrepError('bind_payload_missing', 503)
-    const files = rows.length ? this.putMeetingFiles(sessionId, rows as MeetingAskFile[]) : this.deps.meetingFiles.files(sessionId)
     const binding = draft.bindings.find(b => b.sessionId === sessionId)!
+    const frozen = this.deps.store.readBindPayload(draft.id, sessionId, binding.revision) as MeetingAskFile[] | null
+    if (!frozen) throw new PrepError('bind_payload_missing', 503)
+    const removed = new Set(draft.files.filter(f => f.status === 'removed').map(f => prepAdoptedFileId(draft.id, f.id)))
+    const rows = frozen.map(r => removed.has(r.id) ? { id: r.id, revision: r.revision, name: r.name, status: 'removed' as const, text: '', origin: 'prep' as const } : r)
+    const files = rows.length ? this.putMeetingFiles(sessionId, rows) : this.deps.meetingFiles.files(sessionId)
     binding.state = 'applied'
     return { draft: this.commit(draft), files }
   }
@@ -741,33 +814,42 @@ export class PrepRuntime {
   // ── Reads for a meeting ───────────────────────────────────────────────────
 
   /**
-   * v1.1 #21: what each bind to this meeting adopted, frozen at bind time (removed binds included, with removedAt),
-   * newest first. Never the latest draft: an edit after a bind does not change these.
+   * v1.1 #21: every snapshot a bind of a draft to this meeting froze (rebinds included, removed binds with removedAt),
+   * newest first. Never the latest draft: an edit after a bind does not change these. `current` marks the snapshot the
+   * meeting's copies hold now.
    */
   bySession(sessionId: string): PrepSessionSnapshot[] {
     if (!ASK_SESSION.test(sessionId)) throw new PrepError('invalid_session_id')
-    return this.deps.store.list().flatMap(d => d.bindings.filter(b => b.sessionId === sessionId).map(b => ({
-      draftId: d.id, sessionId, title: b.title, startsAt: b.startsAt, surface: b.surface, state: b.state, boundAt: b.boundAt,
-      ...(b.removedAt ? { removedAt: b.removedAt } : {}), ...structuredClone(b.snapshot),
-    }))).sort((a, b) => b.boundAt.localeCompare(a.boundAt) || b.draftId.localeCompare(a.draftId))
+    return this.deps.store.list().flatMap(d => {
+      const binding = d.bindings.find(b => b.sessionId === sessionId)
+      const records = (d.snapshots ?? []).filter(r => r.sessionId === sessionId)
+      const latest = records.at(-1)
+      return records.map(r => ({
+        draftId: d.id, sessionId, title: r.title, startsAt: r.startsAt, surface: r.surface,
+        state: r === latest && binding ? binding.state : 'applied' as const, boundAt: r.boundAt, current: r === latest,
+        ...(binding?.removedAt ? { removedAt: binding.removedAt } : {}), ...structuredClone(r.snapshot),
+      }))
+    }).sort((a, b) => b.boundAt.localeCompare(a.boundAt) || b.draftId.localeCompare(a.draftId) || b.draftRevision - a.draftRevision)
   }
 
   /**
-   * Suggestions only, never a bind: active drafts whose startsAt is from 90 minutes before to 60 minutes after the
-   * meeting's start, or that were updated in the last 3 hours. The time window is a suggestion; identity is never
-   * derived from it.
+   * Suggestions only, never a bind: up to 5 active drafts whose startsAt is from 90 minutes before to 60 minutes after
+   * the meeting's start, or that were updated in the last 3 hours, nearest start first (a draft with no start after
+   * those, newest first). The time window is a suggestion; identity is never derived from it.
    */
   suggest(query: { sessionId?: unknown; startedAt?: unknown }): PrepDraft[] {
     if (query.sessionId !== undefined && query.sessionId !== '' && (typeof query.sessionId !== 'string' || !ASK_SESSION.test(query.sessionId))) throw new PrepError('invalid_session_id')
     const startedAt = Number(query.startedAt)
     if (!Number.isSafeInteger(startedAt) || startedAt <= 0) throw new PrepError('invalid_started_at')
     const now = this.deps.now()
-    return this.newest(this.deps.store.list().filter(d => {
+    const distance = (d: PrepDraft) => d.startsAt ? Math.abs(Date.parse(d.startsAt) - startedAt) : Infinity
+    return this.deps.store.list().filter(d => {
       if (d.state !== 'active') return false
       const starts = d.startsAt ? Date.parse(d.startsAt) : NaN
       const near = Number.isFinite(starts) && starts >= startedAt - 90 * 60_000 && starts <= startedAt + 60 * 60_000
       const fresh = now - Date.parse(d.updatedAt) <= 3 * 60 * 60_000
       return near || fresh
-    })).slice(0, 20)
+    }).sort((a, b) => distance(a) - distance(b) || b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id))
+      .slice(0, PREP_LIMITS.suggestLimit)
   }
 }

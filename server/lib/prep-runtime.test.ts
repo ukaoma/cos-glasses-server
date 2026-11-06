@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PrepRuntime, buildPrepPrompt, prepClientJobId, type PrepJobs } from './prep-runtime.js'
-import { PrepStore, PrepError } from './prep-store.js'
+import { PrepRuntime, buildPrepPrompt, capAnswers, prepClientJobId, type PrepJobs } from './prep-runtime.js'
+import { PrepStore, PrepError, DRAFT_LOAD_BYTES, DRAFT_WRITE_BYTES } from './prep-store.js'
 import { MeetingAskStore } from './meeting-ask-store.js'
 import { MediaStoreError } from './media-store.js'
 import { PREP_LIMITS, PREP_UUID_V4, prepAdoptedFileId, prepSteerFileId, type PrepDraft } from '../../shared/prep.js'
@@ -269,6 +269,17 @@ describe('Prep files', () => {
     expect(f.store.get(d.id)!.files).toHaveLength(1)
   })
 
+  it('cuts a long file name by code point: an emoji at the limit is never halved', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = (await f.runtime.create({ clientDraftId: uuid() })).draft
+    const name = 'a'.repeat(239) + '\u{1F600}b'   // the emoji is code point 240
+    const added = await f.runtime.addFiles(d.id, { revision: 1, media: [{ id: M(1), name: name.slice(0, 240) }] })
+    expect(added.files[0].name).toBe('a'.repeat(239))   // the input itself ended in half an emoji: dropped
+    const whole = await f.runtime.patch(d.id, { revision: added.revision, title: 'b'.repeat(299) + '\u{1F600}c' })
+    expect(whole.title).toBe('b'.repeat(299) + '\u{1F600}')
+    expect(() => encodeURIComponent(whole.title)).not.toThrow()
+  })
+
   it('maps a missing upload to its media error and writes nothing', async () => {
     const f = make()
     const d = (await f.runtime.create({ clientDraftId: uuid() })).draft
@@ -304,8 +315,8 @@ describe('Prep run', () => {
     expect((f.jobs.prepare as any).mock.calls[0][0].sessionId).toBeUndefined() // the web admission makes the conversation
     expect(out.run).toMatchObject({ clientRequestId: rid, jobId: 'job-1', sessionId: 'conv-1', draftRevision: d.revision })
     expect(out.draft.conversation.sessionId).toBe('conv-1')
-    // Two writes: the frozen 'submitting' run, then 'accepted'.
-    expect(out.draft.revision).toBe(d.revision + 2)
+    // One revision for the run (its frozen 'submitting' receipt); recording the admitted job is bookkeeping.
+    expect(out.draft.revision).toBe(d.revision + 1)
     expect(out.run).toMatchObject({ state: 'accepted', promptSha256: createHash('sha256').update(sent.query as string).digest('hex') })
   })
 
@@ -350,9 +361,6 @@ describe('Prep run', () => {
     write.mockRestore()
     // A restarted server: a fresh store and runtime on the same directory.
     const restarted = new PrepRuntime({ ...f.deps, store: new PrepStore(f.store.root) } as any)
-    // The run stays in flight until it is resolved, so a different run waits.
-    const blocked = await caught(restarted.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision }))
-    expect([blocked.code, blocked.status, (blocked.extra.run as any).clientRequestId]).toEqual(['run_in_progress', 409, rid])
     // The retry carries the revision it first sent (now stale) and still resolves before CAS.
     const again = await restarted.run(d.id, { clientRequestId: rid, revision: d.revision })
     expect(again.job?.jobId).toBe('job-1')
@@ -471,6 +479,71 @@ describe('Prep run', () => {
     expect([err.code, err.status]).toEqual(['message_era_mismatch', 409])
     expect(f.store.get(d.id)!.runs[0]).toMatchObject({ state: 'failed', error: 'message_era_mismatch' })
     expect((await caught(f.runtime.getRun(d.id, rid))).code).toBe('run_not_accepted')
+    // Replaying a failed run says so (409 run_failed with the run), never a fresh 202.
+    const replay = await caught(f.runtime.run(d.id, { clientRequestId: rid, revision: d.revision }))
+    expect([replay.code, replay.status, (replay.extra.run as any).state]).toEqual(['run_failed', 409, 'failed'])
+  })
+
+  it('a stuck submitting receipt (lookup failed) never locks the draft: the next run re-drives it, one submit at most', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = await ready(f)
+    const realByClient = f.deps.jobs.byClient
+    let fail = 1
+    f.deps.jobs.byClient = vi.fn(async (id: string, g: number) => { if (fail-- > 0) throw new Error('store busy'); return realByClient(id, g) })
+    const stuck = uuid()
+    const err = await caught(f.runtime.run(d.id, { clientRequestId: stuck, revision: d.revision }))
+    expect([err.code, err.status]).toEqual(['run_status_unknown', 503])
+    expect(f.store.get(d.id)!.runs.map(r => r.state)).toEqual(['submitting'])
+    const stuckJob = f.store.get(d.id)!.runs[0].clientJobId
+    const results = []
+    for (let i = 0; i < 3; i++) results.push(await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision }))
+    // The first new request re-drove the stuck run; the next two ran on their own.
+    expect(results[0].run.clientRequestId).toBe(stuck)
+    expect(results.map(r => r.run.state)).toEqual(['accepted', 'accepted', 'accepted'])
+    expect((f.jobs.submit as any).mock.calls.filter((c: any[]) => c[0].clientJobId === stuckJob)).toHaveLength(1)
+    expect(f.store.get(d.id)!.runs.filter(r => r.state === 'submitting')).toEqual([])
+  })
+
+  it('a refusal during a drain still marks the run failed (the release is not behind the drain gate)', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = await ready(f)
+    f.deps.jobs.prepare = vi.fn(async () => { f.state.open = false; throw Object.assign(new Error('closing'), { status: 503, code: 'query_job_coordinator_shutting_down' }) })
+    const err = await caught(f.runtime.run(d.id, { clientRequestId: uuid(), revision: d.revision }))
+    expect(err.code).toBe('query_job_coordinator_shutting_down')
+    expect(f.store.get(d.id)!.runs[0].state).toBe('failed')
+    f.state.open = true
+    f.deps.jobs.prepare = vi.fn(async (raw: unknown) => ({ ...(raw as object), sessionId: 'conv-9' })) as any
+    expect((await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision })).run.state).toBe('accepted')
+  })
+
+  it('a drain before submit leaves the receipt; after it the next run re-drives it instead of answering run_in_progress', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = await ready(f)
+    const realByClient = f.deps.jobs.byClient
+    f.deps.jobs.byClient = vi.fn(async (id: string, g: number) => { f.state.open = false; return realByClient(id, g) })
+    const stuck = uuid()
+    expect((await caught(f.runtime.run(d.id, { clientRequestId: stuck, revision: d.revision }))).code).toBe('maintenance')
+    f.deps.jobs.byClient = realByClient
+    f.state.open = true
+    const next = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision })
+    expect(next.run).toMatchObject({ clientRequestId: stuck, state: 'accepted' })
+    expect(f.jobs.submit).toHaveBeenCalledTimes(1)
+  })
+
+  it('reading a finished run copies its answer (20 KB at most) without moving the revision or updatedAt', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = await ready(f)
+    const out = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: d.revision })
+    Object.assign((await f.jobs.byClient(out.run.clientJobId, 1)) as any, { status: 'completed', response: 'é'.repeat(15_000) })
+    const before = f.store.get(d.id)!
+    f.state.now += 60_000
+    const read = await f.runtime.get(d.id)
+    expect([read.revision, read.updatedAt]).toEqual([before.revision, before.updatedAt])
+    expect(f.store.get(d.id)!.revision).toBe(before.revision)
+    expect(Buffer.byteLength(read.runs[0].answer!, 'utf8')).toBeLessThanOrEqual(20_000)
+    expect(read.runs[0]).toMatchObject({ status: 'completed', answerTruncated: true })
+    // A client holding the revision it read can still write.
+    expect((await f.runtime.patch(d.id, { revision: before.revision, steer: 'after the answer' })).steer).toBe('after the answer')
   })
 
   it('GET run returns {run, job}, copies a finished answer onto the run, and 404s a request with no job', async () => {
@@ -598,7 +671,7 @@ describe('Prep bind', () => {
     expect(err.extra).toMatchObject({ needBytes: 90_000, haveBytes: 50_000 })
     expect(f.meetingFiles.files(SESSION)).toEqual(before)
     expect(f.store.get(d.id)).toEqual(withFile)
-    expect(f.store.readBindPayload(d.id, SESSION)).toBeNull()
+    expect(f.store.readBindPayload(d.id, SESSION, withFile.revision)).toBeNull()
     // The file count too.
     const many = Array.from({ length: 100 }, (_, i) => ({ id: `ctl_small_${i}`, revision: 'r1', name: `s${i}`, status: 'ready' as const, text: 'a' }))
     f.meetingFiles.putFiles('meeting_full_1', many)
@@ -619,6 +692,42 @@ describe('Prep bind', () => {
     const retry = await f.runtime.bind(d.id, { revision: ready.revision, sessionId: SESSION, serverInstanceId: SERVER, surface: 'web' })
     expect(retry.draft.bindings[0].state).toBe('applied')
     expect(f.meetingFiles.files(SESSION).map(x => x.id)).toEqual([prepAdoptedFileId(d.id, ready.files[0].id)])
+  })
+
+  it('a replayed bind never brings back a file deleted since it was frozen', async () => {
+    const f = make({ media: { [M(1)]: doc('Renewal list'), [M(2)]: doc('Pricing', 'Pricing.pdf') } })
+    const d = (await f.runtime.create({ clientDraftId: uuid() })).draft
+    const ready = await f.runtime.addFiles(d.id, { revision: 1, media: [{ id: M(1) }, { id: M(2) }] })
+    const put = vi.spyOn(f.meetingFiles, 'putFiles').mockImplementationOnce(() => { throw new Error('disk') })
+    await caught(bindNow(f, d.id, SESSION, 'web'))
+    put.mockRestore()
+    await f.runtime.removeFile(d.id, ready.files[1].id, f.store.get(d.id)!.revision)
+    await f.runtime.bind(d.id, { revision: ready.revision, sessionId: SESSION, serverInstanceId: SERVER, surface: 'web' })
+    const files = f.meetingFiles.files(SESSION)
+    expect(files.find(x => x.id === prepAdoptedFileId(d.id, ready.files[1].id))).toMatchObject({ status: 'removed', text: '' })
+    expect(files.find(x => x.id === prepAdoptedFileId(d.id, ready.files[0].id))!.status).toBe('ready')
+  })
+
+  it('a rebind adds a snapshot and keeps the earlier one, newest first, the latest marked current', async () => {
+    const f = make({ media: { [M(1)]: doc('Renewal list'), [M(2)]: vid() } })
+    const { d } = await bound(f)
+    await f.runtime.patch(d.id, { revision: f.store.get(d.id)!.revision, steer: 'Second take' })
+    await bindNow(f, d.id, SESSION, 'control')
+    const rows = f.runtime.bySession(SESSION)
+    expect(rows.map(r => [r.steer, r.current, r.surface])).toEqual([['Second take', true, 'control'], ['Push on renewals', false, 'web']])
+    expect(rows[0].draftRevision).toBeGreaterThan(rows[1].draftRevision)
+  })
+
+  it('held notes are not repeated in the snapshot: steer is empty with held true', async () => {
+    const f = make()
+    const d = (await f.runtime.create({ clientDraftId: uuid() })).draft
+    const key = 'sk-ant-api03-' + 'B'.repeat(60)
+    await f.runtime.patch(d.id, { revision: 1, steer: `use token ${key}` })
+    await bindNow(f, d.id, SESSION, 'web')
+    expect(f.meetingFiles.files(SESSION)[0]).toMatchObject({ status: 'secret-held', text: '' })
+    const [row] = f.runtime.bySession(SESSION)
+    expect([row.steer, row.held]).toEqual(['', true])
+    expect(JSON.stringify(f.store.get(d.id)!.bindings)).not.toContain(key)
   })
 
   it('by-session returns the frozen snapshot: an edit after the bind leaves it unchanged', async () => {
@@ -672,6 +781,68 @@ describe('Prep bind', () => {
 })
 
 describe('Prep for a meeting', () => {
+  it('suggests at most 5, nearest start first, then drafts with no start, newest first', async () => {
+    const f = make()
+    const start = Date.parse('2026-11-06T22:00:00Z')
+    f.state.now = start
+    const mk = async (title: string, offsetMin: number | null) => { await f.runtime.create({ clientDraftId: uuid(), title, ...(offsetMin === null ? {} : { startsAt: new Date(start + offsetMin * 60_000).toISOString() }) }); f.state.now += 1000 }
+    await mk('no start old', null); await mk('plus 50', 50); await mk('minus 10', -10); await mk('plus 5', 5); await mk('minus 80', -80); await mk('no start new', null)
+    expect(f.runtime.suggest({ startedAt: String(start) }).map(d => d.title)).toEqual(['plus 5', 'minus 10', 'plus 50', 'minus 80', 'no start new'])
+  })
+
+  it('DELETE archives: state archived, files and snapshots kept, by-session still lists it', async () => {
+    const f = make({ media: { [M(1)]: doc('Renewal list') } })
+    const d = (await f.runtime.create({ clientDraftId: uuid(), title: 'QBR' })).draft
+    await f.runtime.addFiles(d.id, { revision: 1, media: [{ id: M(1) }] })
+    await bindNow(f, d.id, SESSION, 'web')
+    const archived = await f.runtime.archive(d.id)
+    expect(archived.state).toBe('archived')
+    expect(archived.files).toHaveLength(1)
+    expect(f.runtime.list({}).map(x => x.id)).toEqual([])
+    expect(f.runtime.list({ state: 'archived' }).map(x => x.id)).toEqual([d.id])
+    expect(f.runtime.bySession(SESSION).map(r => r.draftId)).toEqual([d.id])
+    expect((await f.runtime.archive(d.id)).revision).toBe(archived.revision)   // idempotent
+  })
+
+  it('at 300 active drafts, create archives the oldest bound or long-past drafts; with none, 507 prep_draft_limit', async () => {
+    const f = make()
+    const base = (await f.runtime.create({ clientDraftId: uuid() })).draft
+    const b32 = (n: number) => Array.from({ length: 26 }, (_, k) => 'abcdefghijklmnopqrstuvwxyz234567'[Math.floor(n / 32 ** Math.min(k, 3)) % 32]).join('')
+    const now = f.state.now
+    for (let i = 0; i < PREP_LIMITS.activeDrafts - 1; i++) f.store.write({ ...base, id: 'prep_' + b32(i + 1), clientDraftId: uuid(), updatedAt: new Date(now - (1000 - i) * 1000).toISOString() })
+    const ids = f.store.list().map(x => x.id).filter(x => x !== base.id).sort()
+    // Two qualify: one bound, one whose start was 8 days ago.
+    const bound = f.store.get(ids[10])!, past = f.store.get(ids[20])!
+    f.store.write({ ...bound, bindings: [{ sessionId: SESSION } as any] })
+    f.store.write({ ...past, startsAt: new Date(now - 8 * 24 * 3600_000).toISOString() })
+    const made = await f.runtime.create({ clientDraftId: uuid() })
+    expect(made.created).toBe(true)
+    expect(f.store.list().filter(x => x.state === 'active')).toHaveLength(PREP_LIMITS.activeDrafts)
+    expect([f.store.get(bound.id)!.state, f.store.get(past.id)!.state].sort()).toEqual(['active', 'archived'])
+    await f.runtime.create({ clientDraftId: uuid() })
+    expect([f.store.get(bound.id)!.state, f.store.get(past.id)!.state]).toEqual(['archived', 'archived'])
+    const full = await caught(f.runtime.create({ clientDraftId: uuid() }))
+    expect([full.code, full.status]).toEqual(['prep_draft_limit', 507])
+  }, 60_000)
+
+  it('keeps a maxed draft loadable: answers capped, the file under the loader limit, read back after a restart', async () => {
+    const f = make()
+    const d = (await f.runtime.create({ clientDraftId: uuid() })).draft
+    const draft = f.store.get(d.id)!
+    draft.steer = 'n'.repeat(4000)
+    draft.files = Array.from({ length: 10 }, (_, i) => ({ id: `pf_${String(i).padStart(16, '0')}`, mediaId: 'm_' + String(i).padStart(24, '0'), name: 'x'.repeat(240), mime: 'application/pdf', bytes: 1, sha256: 'a'.repeat(64), uploadSha256: 'a'.repeat(64), addedAt: d.createdAt, kind: 'document' as const, status: 'ready' as const, textChars: 1, source: 'upload' as const }))
+    draft.runs = Array.from({ length: 50 }, (_, i) => ({ clientRequestId: uuid(), clientJobId: uuid(), jobId: `job-${i}`, sessionId: 'conv', draftRevision: 1, createdAt: d.createdAt, state: 'accepted' as const, fingerprint: 'f'.repeat(64), promptSha256: 'p'.repeat(64), steerSha256: 's'.repeat(64), files: draft.files.map(x => ({ id: x.id, sha256: 'a'.repeat(64) })), answer: '"'.repeat(25_000), settledAt: d.createdAt }))
+    draft.snapshots = Array.from({ length: 60 }, (_, i) => ({ sessionId: `meeting_s${i % 3}`, boundAt: d.createdAt, surface: 'web' as const, title: 't'.repeat(300), startsAt: null, snapshot: { draftRevision: i, steer: 'n'.repeat(4000), files: draft.files.map(x => ({ id: x.id, name: x.name, revision: 'r'.repeat(32), sha256: 'a'.repeat(64) })) } }))
+    capAnswers(draft)
+    expect(draft.runs.reduce((n, r) => n + Buffer.byteLength(r.answer ?? '', 'utf8'), 0)).toBeLessThanOrEqual(PREP_LIMITS.draftAnswerBytes)
+    f.store.write(draft)
+    expect(Buffer.byteLength(JSON.stringify(f.store.get(d.id)), 'utf8')).toBeLessThan(DRAFT_LOAD_BYTES)
+    expect(new PrepStore(f.store.root).get(d.id)?.runs).toHaveLength(50)
+    // A draft the loader would refuse is never written.
+    const huge = { ...draft, steer: 'x'.repeat(DRAFT_WRITE_BYTES) }
+    expect(() => f.store.write(huge)).toThrow('prep_draft_too_large')
+  })
+
   it('suggests by startsAt window or recent update, never binds, and by-session lists only bound drafts', async () => {
     const f = make()
     const start = Date.parse('2026-11-06T22:00:00Z')

@@ -17,6 +17,7 @@
  * - POST   /prep/drafts {clientDraftId,title?,startsAt?,occurrence?} -> 201 {draft} (200 and the same draft on a repeat)
  * - GET    /prep/drafts?occurrence=&state=active&limit=20 -> {drafts}, newest first
  * - GET    /prep/drafts/:id -> {draft}
+ * - DELETE /prep/drafts/:id -> {draft}: archives it (state 'archived'); files and snapshots stay, by-session still works
  * - PATCH  /prep/drafts/:id {revision,title?,startsAt?,steer?,occurrence?} -> {draft}; stale -> 409 {error:'revision_conflict',draft}
  * - POST   /prep/drafts/:id/files {operationId,revision,media:[{id,name?,sourceRef?,sha256}]} -> {draft}; over 10 -> 413
  *          {error:'prep_file_limit'}; a copy whose sha256 differs -> 409 {error:'media_hash_mismatch'} with nothing written
@@ -30,7 +31,8 @@
  * - POST   /prep/drafts/:id/bind {revision,sessionId,surface,serverInstanceId?} -> {draft,files}
  * - DELETE /prep/drafts/:id/bind/:sessionId -> {draft}
  * - GET    /prep/by-session/:sessionId -> {snapshots: PrepSessionSnapshot[]} (frozen per bind, never the latest draft)
- * - GET    /prep/suggest?sessionId=&startedAt=<ms> -> {drafts} (suggestions only, never a bind)
+ * - GET    /prep/suggest?sessionId=&startedAt=<ms> -> {drafts}: at most 5 active drafts, nearest startsAt first (a draft
+ *          with no start after, newest first); suggestions only, never a bind
  *
  * Replay before CAS (v1.1 #3): a repeat of a create (clientDraftId), files call (operationId), run (clientRequestId) or
  * bind (sessionId + revision) returns the original result without checking revision. A repeat with a different body is
@@ -52,6 +54,15 @@ export const PREP_LIMITS = Object.freeze({
   /** The durable query job prompt limit (QUERY_JOB_LIMITS.promptChars). */
   promptChars: 48_000,
   listLimit: 50,
+  /** Suggestions returned by GET /prep/suggest. */
+  suggestLimit: 5,
+  /** The answer kept on one run, and on all of a draft's runs together (the draft file must reload under 5 MB). */
+  runAnswerBytes: 20_000,
+  draftAnswerBytes: 1_000_000,
+  /** Snapshots kept per (draft, meeting). */
+  snapshotsPerSession: 20,
+  /** An unbound draft whose start is this far past may be archived to make room at the 300-draft limit. */
+  autoArchiveAfterMs: 7 * 24 * 60 * 60_000,
   /** Meeting Ask's limits for one meeting's files (MeetingAskStore.putFiles), checked before a bind writes. */
   meetingFiles: 100,
   meetingTextBytes: 500_000,
@@ -123,8 +134,11 @@ export interface PrepFileOperation {
 
 /**
  * One run, frozen when it was asked (v1.1 #7). `state` is 'submitting' from the moment the prompt is saved until the
- * job is admitted ('accepted'), or 'failed' when the admission refused it. Once the job ends, its status and answer
- * (up to 100 KB) are copied here, so saved review outlives job retention.
+ * job is admitted ('accepted'), or 'failed' when the admission refused it (a replay is then 409 run_failed). Once the
+ * job ends, its status and answer (up to 20 KB; all of a draft's answers up to 1 MB, oldest dropped first) are copied
+ * here when the draft or run is read, without moving the draft's revision. A new run is refused (409 run_in_progress)
+ * only until the previous one has a session; after that a second run may go into the same conversation while the
+ * first is still answering.
  */
 export interface PrepRun {
   clientRequestId: string
@@ -156,8 +170,20 @@ export interface PrepRun {
  */
 export interface PrepBindingSnapshot {
   draftRevision: number
+  /** '' with held: true when the notes looked like a password or key (the meeting got them as secret-held, no text). */
   steer: string
   files: Array<{ id: string; name: string; revision: string; sha256: string }>
+  held?: true
+}
+
+/** One bind of a draft to a meeting, kept append-only (newest last, at most 20 per meeting) so a rebind never erases what the meeting used before. */
+export interface PrepSnapshotRecord {
+  sessionId: string
+  boundAt: string
+  surface: PrepSurface
+  title: string
+  startsAt: string | null
+  snapshot: PrepBindingSnapshot
 }
 
 /**
@@ -170,8 +196,12 @@ export interface PrepSessionSnapshot extends PrepBindingSnapshot {
   title: string
   startsAt: string | null
   surface: PrepSurface
+  /** The current binding's state for the latest snapshot; 'applied' for an earlier one a rebind replaced. */
   state: 'applying' | 'applied'
   boundAt: string
+  /** True for the snapshot the meeting's copies hold now; false for an earlier bind of the same draft. */
+  current: boolean
+  /** Set on every snapshot of a draft whose binding to this meeting was taken back. */
   removedAt?: string
 }
 
@@ -221,6 +251,8 @@ export interface PrepDraft {
   runs: PrepRun[]
   conversation: { sessionId: string | null }
   bindings: PrepBinding[]
+  /** Every bind's frozen snapshot, append-only (GET /prep/by-session reads these). */
+  snapshots: PrepSnapshotRecord[]
   state: 'active' | 'archived'
 }
 
@@ -237,6 +269,8 @@ export const PREP_SURFACES: readonly PrepSurface[] = ['web', 'control', 'phone',
 export function prepSteerFileId(draftId: string): string { return `prep_${draftId}_steer` }
 /** The Meeting Ask file id a Prep file takes in a bound meeting. */
 export function prepAdoptedFileId(draftId: string, fileId: string): string { return `prep_${draftId}_${fileId}` }
+/** A Meeting Ask file a Prep bind adopted (notes or a file). Saved-transcript cleanup does not take vocabulary from these. */
+export function isPrepCopyId(id: string): boolean { return /^prep_prep_[a-z2-7]{26}_/.test(id) }
 /** The Meeting Ask file name of the steer text. */
 export const PREP_STEER_FILE_NAME = 'Prep notes'
 
