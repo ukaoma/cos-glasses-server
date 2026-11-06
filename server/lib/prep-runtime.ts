@@ -21,10 +21,13 @@
  *   crash at any point finds the admitted job by clientJobId and records it, never submitting twice. A second run is
  *   refused (409 run_in_progress) only until the first has a session: while its receipt is 'submitting', or while its
  *   accepted job has no session and has not ended. The web admission gives a job its session at admission, so from
- *   that instant a second run may go into the same conversation while the first is still answering. A receipt left
- *   'submitting' with no live admission (a failed lookup, a drain, a restart) is re-driven by the next run, never left
- *   to lock the draft; that next request itself does not run and answers 409 run_in_progress {run, redriven: true}. A terminal job's status and answer (20 KB) are copied onto the run on read, without moving the
- *   draft's revision.
+ *   that instant a second run may go into the same conversation while the first is still answering. A new request
+ *   that finds such a run answers 409 run_in_progress {run} and changes nothing. Only a retry with that run's OWN
+ *   clientRequestId re-drives it, with its frozen prompt and options (a receipt left 'submitting' by a failed lookup,
+ *   a drain or a restart included; the clients resend the old id on 409 when run.state is 'submitting'). A terminal
+ *   job's status and answer (20 KB) are copied onto the run by any read that sees it, without moving the draft's
+ *   revision; an accepted run whose job is authoritatively gone (retention) is recorded terminal with outcome
+ *   'unavailable', so it never blocks a new run.
  * - Bind: the exact rows are saved, the binding is written 'applying', merged into the meeting's Meeting Ask files with
  *   putFiles (which keeps every other file), then marked 'applied'. The meeting's limits (100 files, 500 KB text) are
  *   checked first, and nothing is written when they would be exceeded. Removal changes the draft only after putFiles
@@ -535,7 +538,7 @@ export class PrepRuntime {
     const print = fingerprint({ clientRequestId, model: body.model ?? null, effort: body.effort ?? null, continue: body.continue === true })
 
     // Step 1 (draft queue): replay, or save the prompt and a 'submitting' receipt before anything is submitted.
-    const step1 = await this.serial(id, async (): Promise<{ replay?: PrepRun; admitting?: Promise<RunResult>; redriving?: Promise<RunResult>; stuck?: PrepRun; draft: PrepDraft }> => {
+    const step1 = await this.serial(id, async (): Promise<{ replay?: PrepRun; admitting?: Promise<RunResult>; draft: PrepDraft }> => {
       const draft = this.draft(id)
       const prior = draft.runs.find(r => r.clientRequestId === clientRequestId)
       if (prior) {
@@ -543,12 +546,10 @@ export class PrepRuntime {
         if (prior.state === 'failed') throw new PrepError('run_failed', 409, undefined, { run: prior })
         return prior.state === 'submitting' ? { admitting: this.admitOnce(id, prior), draft } : { replay: prior, draft }
       }
+      // A new id never has a side effect while another run is in the way: no re-drive, no record, just 409 with that
+      // run. Only a retry with that run's own clientRequestId re-drives it (above), so a lost answer can always be
+      // looked up under the id that started the provider job.
       const busy = await this.runInProgress(draft)
-      // A receipt left 'submitting' with no live admission (a failed lookup, a drain, a restart) is re-driven here, the
-      // way its own retry would be, so it can never lock the draft. The new request is NOT recorded and does not run:
-      // it answers 409 run_in_progress with the old run (redriven: true), so notes typed since are never silently
-      // answered by the old run's prompt. Its own retry, once the old run has a session, runs at the then-current revision.
-      if (busy?.state === 'submitting' && !this.admitting.has(`${id}:${busy.clientRequestId}`)) return { redriving: this.admitOnce(id, busy), stuck: busy, draft }
       if (busy) throw new PrepError('run_in_progress', 409, undefined, { run: busy })
       this.cas(draft, body.revision)
       return this.writing(async () => {
@@ -572,36 +573,42 @@ export class PrepRuntime {
     })
     if (step1.replay) {
       const job = await this.deps.jobs.byClient(step1.replay.clientJobId, 1).catch(() => undefined)
-      return { job: prepJobForClient(job), run: step1.replay, draft: step1.draft }
-    }
-    if (step1.redriving) {
-      // Whatever the re-drive settled to, this request did not run. A re-drive that failed again leaves the old receipt
-      // as it was (submitting or failed), which is what the 409 reports.
-      const settled = await step1.redriving.catch(() => undefined)
-      const run = settled?.run ?? this.draft(id).runs.find(r => r.clientRequestId === step1.stuck!.clientRequestId) ?? step1.stuck!
-      throw new PrepError('run_in_progress', 409, undefined, { run, job: settled?.job ?? null, redriven: true })
+      // Any read that sees a finished (or gone) job records it, so a later eviction keeps the outcome.
+      const draft = (await this.settle(step1.draft)) ?? step1.draft
+      return { job: prepJobForClient(job), run: draft.runs.find(r => r.clientRequestId === clientRequestId) ?? step1.replay, draft }
     }
     return step1.admitting!
   }
 
   /**
-   * v1.1 #6: the run that blocks a new one, until it has a session. A 'submitting' receipt, or an accepted run whose
-   * job is not terminal and has no session yet (a failed lookup counts as in progress: it is not proof the job ended).
-   * The caller re-drives a 'submitting' receipt whose admission is not live, then still refuses the new request. This does NOT keep
-   * two runs out of one conversation: the web admission gives a job its session at admission, and from that instant a
-   * second run may continue the same conversation while the first is still answering.
+   * v1.1 #6: the run that blocks a new one, until it has a session. A 'submitting' receipt (live, or stranded until
+   * its own clientRequestId is retried), or an accepted run whose job is not terminal and has no session yet (a failed
+   * lookup counts as in progress: it is not proof the job ended). An accepted run whose job is authoritatively gone is
+   * recorded 'unavailable' here (the caller persists it) and does not block. This does NOT keep two runs out of one
+   * conversation: the web admission gives a job its session at admission, and from that instant a second run may
+   * continue the same conversation while the first is still answering.
    */
   private async runInProgress(draft: PrepDraft): Promise<PrepRun | undefined> {
     const submitting = draft.runs.find(r => r.state === 'submitting')
     if (submitting) return submitting
+    let gone = false
     for (const r of draft.runs) {
       if (r.state !== 'accepted' || r.sessionId || r.settledAt) continue
       try {
         const job = await this.deps.jobs.byClient(r.clientJobId, 1)
-        if (job && !isTerminalQueryJobStatus(job.status) && !job.sessionId) return r
+        if (!job) { this.markUnavailable(r); gone = true; continue }
+        if (!isTerminalQueryJobStatus(job.status) && !job.sessionId) return r
       } catch { return r }
     }
+    if (gone) this.persist(draft)
     return undefined
+  }
+
+  /** v1.1 retention: the job is authoritatively gone, so the run ends here, honestly, with no answer unless one was copied. */
+  private markUnavailable(r: PrepRun): void {
+    r.outcome = 'unavailable'
+    r.settledAt = this.iso()
+    if (r.answer === undefined) r.answer = null
   }
 
   /** One admission per (draft, clientRequestId) in this process: concurrent retries share it, so prepare runs once. */
@@ -691,22 +698,29 @@ export class PrepRuntime {
     return { status: 200, run, job: prepJobForClient(job) }
   }
 
-  /** Copies a terminal job's status and answer (up to 100 KB) onto its run. Best effort: a drain leaves it for later. */
+  /**
+   * Copies a terminal job's status and answer (20 KB) onto its run, and records a run whose job is authoritatively
+   * gone (retention) as terminal with outcome 'unavailable'. A lookup that fails proves nothing and changes nothing.
+   * Best effort: a drain leaves it for the next read. Never moves revision or updatedAt.
+   */
   private async settle(draft: PrepDraft): Promise<PrepDraft | null> {
     const open = draft.runs.filter(r => r.state === 'accepted' && !r.settledAt)
     if (!open.length) return null
-    const done = new Map<string, QueryJobSnapshot>()
+    const done = new Map<string, QueryJobSnapshot | null>()
     for (const r of open) {
-      const job = await this.deps.jobs.byClient(r.clientJobId, 1).catch(() => undefined)
-      if (job && isTerminalQueryJobStatus(job.status)) done.set(r.clientRequestId, job)
+      let job: QueryJobSnapshot | undefined
+      try { job = await this.deps.jobs.byClient(r.clientJobId, 1) } catch { continue }
+      if (!job) done.set(r.clientRequestId, null)
+      else if (isTerminalQueryJobStatus(job.status)) done.set(r.clientRequestId, job)
     }
     if (!done.size) return null
     try {
       return await this.serial(draft.id, () => this.writing(() => {
         const fresh = this.draft(draft.id)
         for (const r of fresh.runs) {
+          if (!done.has(r.clientRequestId) || r.settledAt || r.state !== 'accepted') continue
           const job = done.get(r.clientRequestId)
-          if (!job || r.settledAt) continue
+          if (!job) { this.markUnavailable(r); continue }
           const answer = byteSlice(job.response ?? '', PREP_LIMITS.runAnswerBytes)
           r.status = job.status
           r.answer = answer
@@ -780,7 +794,7 @@ export class PrepRuntime {
         const binding: PrepBinding = { sessionId, serverInstanceId: this.deps.identity() ?? '', revision, state: 'applying', boundAt: this.iso(), surface: body.surface as PrepSurface, fileIds: [...ids], snapshot, title: draft.title, startsAt: draft.startsAt }
         draft.bindings = [...draft.bindings.filter(b => b.sessionId !== sessionId), binding]
         // Append-only history: a rebind adds a snapshot and never erases what the meeting used before.
-        const record: PrepSnapshotRecord = { sessionId, boundAt: binding.boundAt, surface: binding.surface, title: draft.title, startsAt: draft.startsAt, snapshot: structuredClone(snapshot) }
+        const record: PrepSnapshotRecord = { sessionId, state: 'applying', boundAt: binding.boundAt, surface: binding.surface, title: draft.title, startsAt: draft.startsAt, snapshot: structuredClone(snapshot) }
         const mineHere = [...(draft.snapshots ?? []).filter(r => r.sessionId === sessionId), record].slice(-PREP_LIMITS.snapshotsPerSession)
         draft.snapshots = [...(draft.snapshots ?? []).filter(r => r.sessionId !== sessionId), ...mineHere]
         return this.apply(this.commit(draft), sessionId)
@@ -799,6 +813,9 @@ export class PrepRuntime {
     const removed = new Set(draft.files.filter(f => f.status === 'removed').map(f => prepAdoptedFileId(draft.id, f.id)))
     const rows = frozen.map(r => removed.has(r.id) ? { id: r.id, revision: r.revision, name: r.name, status: 'removed' as const, text: '', origin: 'prep' as const } : r)
     const files = rows.length ? this.putMeetingFiles(sessionId, rows) : this.deps.meetingFiles.files(sessionId)
+    // Only now did this snapshot reach the meeting.
+    const record = (draft.snapshots ?? []).filter(r => r.sessionId === sessionId && r.snapshot.draftRevision === binding.revision).at(-1)
+    if (record) record.state = 'applied'
     binding.state = 'applied'
     return { draft: this.commit(draft), files }
   }
@@ -815,6 +832,7 @@ export class PrepRuntime {
         // removedAt is written only after putFiles succeeded.
         this.markRemoved(sessionId, binding.fileIds)
         binding.removedAt = this.iso()
+        for (const r of draft.snapshots ?? []) if (r.sessionId === sessionId && r.state === 'applied') r.state = 'removed'
         return this.commit(draft)
       })
     })
@@ -835,7 +853,7 @@ export class PrepRuntime {
       const latest = records.at(-1)
       return records.map(r => ({
         draftId: d.id, sessionId, title: r.title, startsAt: r.startsAt, surface: r.surface,
-        state: r === latest && binding ? binding.state : 'applied' as const, boundAt: r.boundAt, current: r === latest,
+        state: r.state ?? 'applied', boundAt: r.boundAt, current: r === latest,
         ...(binding?.removedAt ? { removedAt: binding.removedAt } : {}), ...structuredClone(r.snapshot),
       }))
     }).sort((a, b) => b.boundAt.localeCompare(a.boundAt) || b.draftId.localeCompare(a.draftId) || b.draftRevision - a.draftRevision)

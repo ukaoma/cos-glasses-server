@@ -484,7 +484,7 @@ describe('Prep run', () => {
     expect([replay.code, replay.status, (replay.extra.run as any).state]).toEqual(['run_failed', 409, 'failed'])
   })
 
-  it('a stuck submitting receipt (lookup failed) never locks the draft: the next run re-drives it, one submit at most', async () => {
+  it('a stuck submitting receipt (lookup failed): a new id gets 409 with no side effect; the old id re-drives it once; then a new id runs', async () => {
     const f = make({ media: { [M(1)]: doc('x') } })
     const d = await ready(f)
     const realByClient = f.deps.jobs.byClient
@@ -495,33 +495,27 @@ describe('Prep run', () => {
     expect([err.code, err.status]).toEqual(['run_status_unknown', 503])
     expect(f.store.get(d.id)!.runs.map(r => r.state)).toEqual(['submitting'])
     const stuckJob = f.store.get(d.id)!.runs[0].clientJobId
-    // The first new request re-drives the stuck run but does not run itself: 409 run_in_progress names the old run.
-    const fresh = uuid()
-    const redrive = await caught(f.runtime.run(d.id, { clientRequestId: fresh, revision: f.store.get(d.id)!.revision }))
-    expect([redrive.code, redrive.status, (redrive.extra.run as any).clientRequestId, (redrive.extra.run as any).state, redrive.extra.redriven]).toEqual(['run_in_progress', 409, stuck, 'accepted', true])
-    expect(f.store.get(d.id)!.runs.map(r => r.clientRequestId)).toEqual([stuck])
-    // Retrying the same new request (now that the old run has a session) runs it on its own, at the current revision.
-    const results = [await f.runtime.run(d.id, { clientRequestId: fresh, revision: f.store.get(d.id)!.revision })]
-    for (let i = 0; i < 2; i++) results.push(await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision }))
-    expect(results[0].run.clientRequestId).toBe(fresh)
-    expect(results.map(r => r.run.state)).toEqual(['accepted', 'accepted', 'accepted'])
+    // A new id: 409 with the stuck run, and nothing else happens (no prepare, no submit, nothing recorded).
+    const before = JSON.stringify(f.store.get(d.id))
+    for (let i = 0; i < 3; i++) {
+      const busy = await caught(f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision }))
+      expect([busy.code, busy.status, (busy.extra.run as any).clientRequestId, (busy.extra.run as any).state]).toEqual(['run_in_progress', 409, stuck, 'submitting'])
+    }
+    expect(f.jobs.prepare).not.toHaveBeenCalled()
+    expect(f.jobs.submit).not.toHaveBeenCalled()
+    expect(JSON.stringify(f.store.get(d.id))).toBe(before)
+    // The client resends the OLD id: it re-drives the stuck run with its frozen prompt, exactly one submit.
+    const redriven = await f.runtime.run(d.id, { clientRequestId: stuck, revision: d.revision })
+    expect(redriven.run).toMatchObject({ clientRequestId: stuck, state: 'accepted' })
     expect((f.jobs.submit as any).mock.calls.filter((c: any[]) => c[0].clientJobId === stuckJob)).toHaveLength(1)
-    expect(f.store.get(d.id)!.runs.filter(r => r.state === 'submitting')).toEqual([])
+    expect(createHash('sha256').update((f.jobs.prepare as any).mock.calls[0][0].query).digest('hex')).toBe(redriven.run.promptSha256)
+    // Then a new id runs on its own.
+    const next = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision })
+    expect(next.run.state).toBe('accepted')
+    expect(f.jobs.submit).toHaveBeenCalledTimes(2)
   })
 
-  it('a refusal during a drain still marks the run failed (the release is not behind the drain gate)', async () => {
-    const f = make({ media: { [M(1)]: doc('x') } })
-    const d = await ready(f)
-    f.deps.jobs.prepare = vi.fn(async () => { f.state.open = false; throw Object.assign(new Error('closing'), { status: 503, code: 'query_job_coordinator_shutting_down' }) })
-    const err = await caught(f.runtime.run(d.id, { clientRequestId: uuid(), revision: d.revision }))
-    expect(err.code).toBe('query_job_coordinator_shutting_down')
-    expect(f.store.get(d.id)!.runs[0].state).toBe('failed')
-    f.state.open = true
-    f.deps.jobs.prepare = vi.fn(async (raw: unknown) => ({ ...(raw as object), sessionId: 'conv-9' })) as any
-    expect((await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision })).run.state).toBe('accepted')
-  })
-
-  it('a drain before submit leaves the receipt; after it the next run re-drives it instead of answering run_in_progress', async () => {
+  it('a drain before submit leaves the receipt: a new id is refused with no submit, the old id re-drives it', async () => {
     const f = make({ media: { [M(1)]: doc('x') } })
     const d = await ready(f)
     const realByClient = f.deps.jobs.byClient
@@ -531,9 +525,60 @@ describe('Prep run', () => {
     f.deps.jobs.byClient = realByClient
     f.state.open = true
     const next = await caught(f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision }))
-    expect([next.code, next.extra.redriven]).toEqual(['run_in_progress', true])
-    expect(next.extra.run).toMatchObject({ clientRequestId: stuck, state: 'accepted' })
+    expect([next.code, (next.extra.run as any).clientRequestId, next.extra.redriven]).toEqual(['run_in_progress', stuck, undefined])
+    expect(f.jobs.submit).not.toHaveBeenCalled()
+    expect((await f.runtime.run(d.id, { clientRequestId: stuck, revision: d.revision })).run.state).toBe('accepted')
     expect(f.jobs.submit).toHaveBeenCalledTimes(1)
+  })
+
+  it('an accepted run whose job is gone (retention) is recorded unavailable: GET says terminal, and a new run is allowed', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = await ready(f)
+    f.deps.jobs.prepare = vi.fn(async (raw: unknown) => ({ ...(raw as object), sessionId: '' })) as any   // no session: it would block
+    const first = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: d.revision })
+    expect((await caught(f.runtime.run(d.id, { clientRequestId: uuid(), revision: first.draft.revision }))).code).toBe('run_in_progress')
+    // A lookup error is not proof: still 503, nothing recorded.
+    const realByClient = f.deps.jobs.byClient
+    f.deps.jobs.byClient = vi.fn(async () => { throw new Error('store busy') })
+    expect((await caught(f.runtime.getRun(d.id, first.run.clientRequestId))).code).toBe('run_status_unknown')
+    expect(f.store.get(d.id)!.runs[0].outcome).toBeUndefined()
+    // Nor through a draft read (settle): a failing lookup records nothing.
+    expect((await f.runtime.get(d.id)).runs[0].outcome).toBeUndefined()
+    expect(f.store.get(d.id)!.runs[0].settledAt).toBeUndefined()
+    // The job is evicted: the lookup now authoritatively finds nothing.
+    f.deps.jobs.byClient = vi.fn(async () => undefined)
+    const got = await f.runtime.getRun(d.id, first.run.clientRequestId)
+    expect(got.status).toBe(200)
+    expect(got.job).toBeNull()
+    expect(got.run).toMatchObject({ state: 'accepted', outcome: 'unavailable', answer: null, settledAt: expect.any(String) })
+    expect(f.store.get(d.id)!.runs[0].outcome).toBe('unavailable')   // durable
+    f.deps.jobs.byClient = realByClient
+    expect((await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision })).run.state).toBe('accepted')
+  })
+
+  it('runInProgress itself records an evicted job unavailable, so the new run goes ahead', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = await ready(f)
+    f.deps.jobs.prepare = vi.fn(async (raw: unknown) => ({ ...(raw as object), sessionId: '' })) as any
+    const first = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: d.revision })
+    const realByClient = f.deps.jobs.byClient
+    f.deps.jobs.byClient = vi.fn(async (id: string, g: number) => id === first.run.clientJobId ? undefined : realByClient(id, g))
+    const next = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: first.draft.revision })
+    expect(next.run.state).toBe('accepted')
+    expect(f.store.get(d.id)!.runs[0]).toMatchObject({ outcome: 'unavailable', answer: null })
+  })
+
+  it('an answer copied before eviction is kept: the run stays completed with its answer', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = await ready(f)
+    const out = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: d.revision })
+    Object.assign((await f.jobs.byClient(out.run.clientJobId, 1)) as any, { status: 'completed', response: 'Lead with demos.' })
+    await f.runtime.run(d.id, { clientRequestId: out.run.clientRequestId, revision: d.revision })   // a replay is a read too
+    expect(f.store.get(d.id)!.runs[0]).toMatchObject({ status: 'completed', answer: 'Lead with demos.' })
+    f.deps.jobs.byClient = vi.fn(async () => undefined)
+    const got = await f.runtime.getRun(d.id, out.run.clientRequestId)
+    expect(got.run).toMatchObject({ status: 'completed', answer: 'Lead with demos.' })
+    expect(got.run.outcome).toBeUndefined()
   })
 
   it('reading a finished run copies its answer (20 KB at most) without moving the revision or updatedAt', async () => {
@@ -714,6 +759,20 @@ describe('Prep bind', () => {
     expect(files.find(x => x.id === prepAdoptedFileId(d.id, ready.files[0].id))!.status).toBe('ready')
   })
 
+  it('history keeps each snapshot\'s own state: an interrupted apply then a rebind gives [applied (current), applying]', async () => {
+    const f = make({ media: { [M(1)]: doc('Renewal list') } })
+    const d = (await f.runtime.create({ clientDraftId: uuid() })).draft
+    await f.runtime.addFiles(d.id, { revision: 1, media: [{ id: M(1) }] })
+    const put = vi.spyOn(f.meetingFiles, 'putFiles').mockImplementationOnce(() => { throw new Error('disk') })
+    await caught(bindNow(f, d.id, SESSION, 'web'))
+    put.mockRestore()
+    await f.runtime.patch(d.id, { revision: f.store.get(d.id)!.revision, steer: 'Second try' })
+    await bindNow(f, d.id, SESSION, 'control')
+    expect(f.runtime.bySession(SESSION).map(r => [r.state, r.current, r.steer])).toEqual([['applied', true, 'Second try'], ['applying', false, '']])
+    await f.runtime.unbind(d.id, SESSION)
+    expect(f.runtime.bySession(SESSION).map(r => r.state)).toEqual(['removed', 'applying'])
+  })
+
   it('a rebind adds a snapshot and keeps the earlier one, newest first, the latest marked current', async () => {
     const f = make({ media: { [M(1)]: doc('Renewal list'), [M(2)]: vid() } })
     const { d } = await bound(f)
@@ -838,7 +897,7 @@ describe('Prep for a meeting', () => {
     draft.steer = 'n'.repeat(4000)
     draft.files = Array.from({ length: 10 }, (_, i) => ({ id: `pf_${String(i).padStart(16, '0')}`, mediaId: 'm_' + String(i).padStart(24, '0'), name: 'x'.repeat(240), mime: 'application/pdf', bytes: 1, sha256: 'a'.repeat(64), uploadSha256: 'a'.repeat(64), addedAt: d.createdAt, kind: 'document' as const, status: 'ready' as const, textChars: 1, source: 'upload' as const }))
     draft.runs = Array.from({ length: 50 }, (_, i) => ({ clientRequestId: uuid(), clientJobId: uuid(), jobId: `job-${i}`, sessionId: 'conv', draftRevision: 1, createdAt: d.createdAt, state: 'accepted' as const, fingerprint: 'f'.repeat(64), promptSha256: 'p'.repeat(64), steerSha256: 's'.repeat(64), files: draft.files.map(x => ({ id: x.id, sha256: 'a'.repeat(64) })), answer: '"'.repeat(25_000), settledAt: d.createdAt }))
-    draft.snapshots = Array.from({ length: 60 }, (_, i) => ({ sessionId: `meeting_s${i % 3}`, boundAt: d.createdAt, surface: 'web' as const, title: 't'.repeat(300), startsAt: null, snapshot: { draftRevision: i, steer: 'n'.repeat(4000), files: draft.files.map(x => ({ id: x.id, name: x.name, revision: 'r'.repeat(32), sha256: 'a'.repeat(64) })) } }))
+    draft.snapshots = Array.from({ length: 60 }, (_, i) => ({ sessionId: `meeting_s${i % 3}`, state: 'applied' as const, boundAt: d.createdAt, surface: 'web' as const, title: 't'.repeat(300), startsAt: null, snapshot: { draftRevision: i, steer: 'n'.repeat(4000), files: draft.files.map(x => ({ id: x.id, name: x.name, revision: 'r'.repeat(32), sha256: 'a'.repeat(64) })) } }))
     capAnswers(draft)
     expect(draft.runs.reduce((n, r) => n + Buffer.byteLength(r.answer ?? '', 'utf8'), 0)).toBeLessThanOrEqual(PREP_LIMITS.draftAnswerBytes)
     f.store.write(draft)

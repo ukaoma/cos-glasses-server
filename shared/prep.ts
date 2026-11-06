@@ -23,7 +23,10 @@
  *          {error:'prep_file_limit'}; a copy whose sha256 differs -> 409 {error:'media_hash_mismatch'} with nothing written
  * - DELETE /prep/drafts/:id/files/:fileId?revision=N -> {draft}
  * - GET    /prep/drafts/:id/files/:fileId -> original bytes; GET .../text -> {text} ('' for a held or unread file)
- * - POST   /prep/drafts/:id/run {clientRequestId,revision,model?,effort?,continue?} -> 202 {job,run,draft}
+ * - POST   /prep/drafts/:id/run {clientRequestId,revision,model?,effort?,continue?} -> 202 {job,run,draft}. While
+ *          another run is in the way (a 'submitting' receipt, or an accepted job with no session yet), a NEW id is
+ *          409 {error:'run_in_progress', run} with no side effect; only a retry with that run's own clientRequestId
+ *          re-drives it. Replaying a failed run is 409 {error:'run_failed', run}.
  * - GET    /prep/drafts/:id/runs/:clientRequestId -> 200 {run,job} once admitted; 202 {run} while its admission is in
  *          flight; 404 {error:'run_not_accepted', run?} when no job exists for it and none is being admitted (a
  *          'submitting' run left by a restart: send the same run again); 503 {error:'run_status_unknown'} when the
@@ -159,7 +162,13 @@ export interface PrepRun {
   error?: string
   /** Copied from the job once it is terminal (optional per v1.1 #22; absent means read the job, or it is gone). */
   status?: string
-  answer?: string
+  /** The answer as copied, or null when the job was gone before any answer was copied (outcome 'unavailable'). */
+  answer?: string | null
+  /**
+   * 'unavailable': the run was accepted but its job is no longer kept (retention), so the server recorded it as ended
+   * with no answer. Terminal: it never blocks a new run, and GET .../runs answers 200 {run, job: null}.
+   */
+  outcome?: 'unavailable'
   answerTruncated?: boolean
   settledAt?: string
 }
@@ -176,9 +185,14 @@ export interface PrepBindingSnapshot {
   held?: true
 }
 
-/** One bind of a draft to a meeting, kept append-only (newest last, at most 20 per meeting) so a rebind never erases what the meeting used before. */
+/**
+ * One bind of a draft to a meeting, kept append-only (newest last, at most 20 per meeting) so a rebind never erases
+ * what the meeting used before. `state` is the snapshot's own: 'applying' until its rows reached Meeting Ask (and
+ * forever, if it was interrupted and then superseded), 'applied' once they did, 'removed' once the bind was taken back.
+ */
 export interface PrepSnapshotRecord {
   sessionId: string
+  state: 'applying' | 'applied' | 'removed'
   boundAt: string
   surface: PrepSurface
   title: string
@@ -196,8 +210,8 @@ export interface PrepSessionSnapshot extends PrepBindingSnapshot {
   title: string
   startsAt: string | null
   surface: PrepSurface
-  /** The current binding's state for the latest snapshot; 'applied' for an earlier one a rebind replaced. */
-  state: 'applying' | 'applied'
+  /** This snapshot's own state (PrepSnapshotRecord.state). An 'applying' snapshot never reached the meeting. */
+  state: 'applying' | 'applied' | 'removed'
   boundAt: string
   /** True for the snapshot the meeting's copies hold now; false for an earlier bind of the same draft. */
   current: boolean
