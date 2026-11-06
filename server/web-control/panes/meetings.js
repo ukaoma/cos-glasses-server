@@ -1271,22 +1271,16 @@
         if (!S.dprep || S.dprep.key !== key) return;
         var seen = {}, out = [];
         list.forEach(function (r) {
-          if (r.status !== 200 || !Array.isArray(r.body.drafts)) return;
-          // Amendment 21: what the meeting used is each binding's frozen snapshot, never the draft as it is now. A binding
-          // taken back off this meeting (removedAt) is not shown. A server without snapshots: the draft as listed.
-          r.body.drafts.forEach(function (d) {
-            if (!d || typeof d.id !== 'string') return;
-            var mine = (d.bindings || []).filter(function (x) { return x && sessions.indexOf(x.sessionId) >= 0; });
-            var live = mine.filter(function (x) { return !x.removedAt; });
-            if (mine.length && !live.length) return;
-            var shots = live.filter(function (x) { return x.snapshot && typeof x.snapshot === 'object'; });
-            if (!shots.length) { if (!seen[d.id]) { seen[d.id] = 1; out.push({ id: d.id, title: d.title, startsAt: d.startsAt, steer: d.steer, files: d.files }); } return; }
-            shots.forEach(function (x) {
-              var sn = x.snapshot, k = d.id + '@' + sn.draftRevision;
-              if (seen[k]) return;
-              seen[k] = 1;
-              out.push({ id: d.id, title: d.title, startsAt: d.startsAt, steer: typeof sn.steer === 'string' ? sn.steer : '', files: Array.isArray(sn.files) ? sn.files : [] });
-            });
+          // Amendment 21: {serverInstanceId, snapshots}, one per binding to this meeting, newest first, each frozen at bind
+          // time (title, startsAt, steer, files), never the draft as it is now. A binding taken back off (removedAt) is
+          // not shown. Open links name the draft and the file.
+          if (r.status !== 200 || !Array.isArray(r.body.snapshots)) return;
+          r.body.snapshots.forEach(function (sn) {
+            if (!sn || typeof sn.draftId !== 'string' || sn.removedAt) return;
+            var k = sn.draftId + '@' + sn.draftRevision;
+            if (seen[k]) return;
+            seen[k] = 1;
+            out.push({ id: sn.draftId, title: sn.title, startsAt: sn.startsAt, steer: typeof sn.steer === 'string' ? sn.steer : '', files: Array.isArray(sn.files) ? sn.files : [] });
           });
         });
         S.dprep.drafts = out;

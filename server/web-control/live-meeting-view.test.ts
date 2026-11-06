@@ -142,7 +142,8 @@ function load(opts: { sid?: string; reduceMotion?: boolean; prep?: boolean } = {
     const bindM = /^\/api\/prep\/drafts\/([^/]+)\/bind$/.exec(url.pathname)
     if (url.pathname === '/api/prep/suggest') body = { drafts: server.suggest }
     else if (/^\/api\/prep\/drafts\/[^/]+$/.test(url.pathname) && (o.method ?? 'GET') === 'GET') body = { draft: { ...server.suggest[0], serverInstanceId: 'inst-2', revision: 5 }, serverInstanceId: 'inst-2' }
-    else if (url.pathname.startsWith('/api/prep/by-session/')) body = { drafts: server.bySession[decodeURIComponent(url.pathname.split('/').pop()!)] ?? [] }
+    // Amendment 21 as the server builds it: {serverInstanceId, snapshots: PrepSessionSnapshot[]}, one per binding.
+    else if (url.pathname.startsWith('/api/prep/by-session/')) body = { serverInstanceId: server.instance, snapshots: server.bySession[decodeURIComponent(url.pathname.split('/').pop()!)] ?? [] }
     else if (bindM && o.method === 'POST') {
       const next = server.bind.shift()
       if (next) { status = next.status; body = next.body }
@@ -514,6 +515,12 @@ describe('files during a live meeting', () => {
 })
 
 // ── 6.99.19 Prep (PREP_CONTRACT_v1) ────────────────────────────────────────────────────────────────────────────────
+// One by-session row: the binding's snapshot, frozen at bind time (shared/prep.ts PrepSessionSnapshot).
+const SNAPSHOT = (over: Record<string, unknown> = {}) => {
+  const d = PREP_DRAFT()
+  return { draftId: d.id, sessionId: SID, surface: 'web', state: 'applied', boundAt: 'x', draftRevision: d.revision, title: d.title, startsAt: d.startsAt, steer: d.steer,
+    files: d.files.filter(f => f.status === 'ready').map(f => ({ id: f.id, name: f.name, revision: 'r1', sha256: 'a'.repeat(64) })), ...over }
+}
 const PREP_DRAFT = () => ({
   id: 'prep_' + 'A'.repeat(26), clientDraftId: '0b0b0b0b-1111-4222-8333-444455556666', revision: 4, title: 'Weekly marketing sync', startsAt: new Date(START + 5 * 60_000).toISOString(),
   steer: 'Focus on the Q4 pricing change and what Gina needs from me.', state: 'active', runs: [], bindings: [], conversation: { sessionId: null },
@@ -657,7 +664,7 @@ describe('Prep in the live view: a suggestion, bound only by a tap', () => {
 describe('Prep in a saved meeting', () => {
   it('lists the prep for the meeting: what it focused on and its files, each opening from the Prep store', async () => {
     const t = load({ prep: true })
-    t.server.bySession[SID] = [PREP_DRAFT()]
+    t.server.bySession[SID] = [SNAPSHOT()]
     t.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
     await flush(14)
     expect(t.server.calls.filter(c => c.path.startsWith('/api/prep/by-session/')).map(c => c.path)).toEqual(['/api/prep/by-session/' + SID])
@@ -672,20 +679,23 @@ describe('Prep in a saved meeting', () => {
 
   it('shows what the meeting used: each binding\u2019s frozen snapshot, not the draft as edited since (amendment 21)', async () => {
     const t = load({ prep: true })
-    const later = { ...PREP_DRAFT(), revision: 9, steer: 'Edited after the meeting.', files: [] }
-    t.server.bySession[SID] = [{ ...later, bindings: [{ sessionId: SID, serverInstanceId: 'inst-1', surface: 'web', boundAt: 'x', fileIds: [],
-      snapshot: { draftRevision: 4, steer: 'What the meeting had: pricing first.', files: [{ id: 'pf_' + '1'.repeat(16), name: 'Q4 pricing.pdf', revision: 'r1', sha256: 'a'.repeat(64) }] } }] }]
+    // Two bindings of the same prep: each shows what that bind adopted, newest first, never the draft as edited since.
+    t.server.bySession[SID] = [
+      SNAPSHOT({ draftRevision: 7, steer: 'Re-bound later: budget too.', files: [] }),
+      SNAPSHOT({ draftRevision: 4, steer: 'What the meeting had: pricing first.', files: [{ id: 'pf_' + '1'.repeat(16), name: 'Q4 pricing.pdf', revision: 'r1', sha256: 'a'.repeat(64) }] }),
+    ]
     t.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
     await flush(14)
     const html = t.$('mt-dprep').innerHTML
     expect(html).toMatch(/What the meeting had: pricing first\./)
-    expect(html).not.toMatch(/Edited after the meeting/)
+    expect(html).toMatch(/Re-bound later: budget too\./)
+    expect(html.indexOf('Re-bound later')).toBeLessThan(html.indexOf('What the meeting had'))
     expect(html).toMatch(new RegExp('href="/api/prep/drafts/' + PREP_DRAFT().id + '/files/pf_1{16}"'))
   })
 
   it('a prep taken back off this meeting (its binding removed) is not listed', async () => {
     const t = load({ prep: true })
-    t.server.bySession[SID] = [{ ...PREP_DRAFT(), bindings: [{ sessionId: SID, serverInstanceId: 'inst-1', surface: 'web', boundAt: 'x', fileIds: [], removedAt: 'y' }] }]
+    t.server.bySession[SID] = [SNAPSHOT({ removedAt: '2026-11-06T16:00:00.000Z' })]
     t.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
     await flush(14)
     expect(t.server.calls.filter(c => c.path.startsWith('/api/prep/by-session/'))).toHaveLength(1)
