@@ -28,6 +28,9 @@ export function parseAskWorkPlanRequest(raw: unknown): AskWorkPlanRequest {
     || ('effort' in b && !(WORK_CHAT_EFFORTS as readonly unknown[]).includes(b.effort))) {
     throw new AskWorkPlanError('invalid_ask_work_plan', 400)
   }
+  // The proposal must preserve the exact reviewed question. Reject sensitive text before
+  // reads or inference instead of silently redacting it into a different native request identity.
+  if (redactSecrets(b.question) !== b.question) throw new AskWorkPlanError('question_contains_sensitive_text', 400)
   return { workID: b.workID, revision: b.revision, question: b.question,
     ...('planner' in b ? { planner: b.planner as WorkChatPlanner } : {}),
     ...('effort' in b ? { effort: b.effort as ClaudeGistEffort } : {}) }

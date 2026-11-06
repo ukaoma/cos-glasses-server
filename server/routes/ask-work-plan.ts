@@ -41,7 +41,9 @@ export function createAskWorkPlanRouter(given: Partial<AskWorkPlanDeps> = {}) {
     const fail = (error: unknown) => {
       const known = error instanceof AskWorkPlanError
       if (!res.destroyed) res.status(known ? error.status : 503).json({ error: known ? error.code : 'ask_work_plan_unavailable',
-        message: 'No assignment was dispatched. Refresh the task and retry the plan.' })
+        message: known && error.code === 'question_contains_sensitive_text'
+          ? 'Remove credentials from the question and try again.'
+          : 'No assignment was dispatched. Refresh the task and retry the plan.' })
     }
     let request
     try { request = parseAskWorkPlanRequest(req.body) } catch (error) { fail(error); return }

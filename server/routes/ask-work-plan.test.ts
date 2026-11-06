@@ -40,6 +40,16 @@ it('advertises a plan-only capability under parent auth without reading state or
   expect(await response.json()).toMatchObject({ protocolVersion: 1, planOnly: true, dispatch: false, controlSnapshot: 1, requiresExistingWork: true, maxAssignments: 3 })
   expect(s.board).not.toHaveBeenCalled(); expect(s.input).not.toHaveBeenCalled(); expect(s.run).not.toHaveBeenCalled()
 })
+it('rejects credentials before reading evidence or running a model without echoing sensitive text', async () => {
+  const s = await setup()
+  const response = await s.post({ ...request, question: 'Use sk-abcdef to review' })
+  expect(response.status).toBe(400)
+  const body = await response.json()
+  expect(body).toEqual({ error: 'question_contains_sensitive_text', message: 'Remove credentials from the question and try again.' })
+  expect(JSON.stringify(body)).not.toContain('sk-abcdef')
+  expect(s.board).not.toHaveBeenCalled(); expect(s.input).not.toHaveBeenCalled(); expect(s.run).not.toHaveBeenCalled()
+  expect(s.release).not.toHaveBeenCalled()
+})
 it('builds trusted input and uses the existing tools-off planner contract, returning a proposal only', async () => {
   const run = vi.fn(async () => output([{ sessionID: sid, prompt: 'Review design' }]))
   const s = await setup({ run })

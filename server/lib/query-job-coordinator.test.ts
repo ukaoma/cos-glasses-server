@@ -883,14 +883,17 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
   })
 
   it('releases its lease for the hold and waits out a drain before taking a start lease', async () => {
-    const fenceEndsAtMs = Date.now() + 300
+    let storeNowMs = Date.now()
+    const fenceEndsAtMs = storeNowMs + 300
     const root = await fencedRoot(fenceEndsAtMs)
     const calls: Array<{ query: string; atMs: number }> = []
     let draining = false
     let live = 0
     let refusals = 0
     const value = new QueryJobCoordinator(
-      liveStore(root),
+      // Freeze the store clock until the held state is observed: async journal setup
+      // must not consume the short fence before the test can exercise the drain.
+      new QueryJobStore({ root, bootId: randomUUID(), requeueNeverStartedOnBoot: true, now: () => new Date(storeNowMs) }),
       answeringRunner(calls),
       {
         partialFlushMs: 0,
@@ -921,7 +924,8 @@ describe('QueryJobCoordinator orphan-fence hold (6.61.3)', () => {
     draining = true
     // The drain must OUTLAST the fence, or the fence alone would keep the job from
     // starting and a hold that ignored the drain would pass (the gate caught exactly that).
-    await waitFor(() => Date.now(), now => now > fenceEndsAtMs + 300)
+    storeNowMs = fenceEndsAtMs + 301
+    await waitFor(() => refusals, count => count >= 2)
     expect(refusals).toBeGreaterThanOrEqual(2)
     expect(calls).toEqual([])
     const drained = await value.getSnapshot(admitted.job.jobId)

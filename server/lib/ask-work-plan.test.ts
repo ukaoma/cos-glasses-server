@@ -25,6 +25,10 @@ describe('Ask Work preparation', () => {
       { ...request, question: '\u0001' }, { ...request, revision: 'a' }, { ...request, workID: 'synthetic' },
       { ...request, planner: 'haiku' }, { ...request, effort: 'max' }]) expect(() => parseAskWorkPlanRequest(bad)).toThrow()
   })
+  it('rejects questions that would change during secret redaction', () => {
+    expect(() => parseAskWorkPlanRequest({ ...request, question: 'Use sk-abcdef to review' }))
+      .toThrow('question_contains_sensitive_text')
+  })
   it('resolves authoritative identity/revision and refuses unknown, ambiguous, finished or broken tasks', () => {
     expect(resolveAskWorkTask(request, [task])).toBe(task)
     for (const [rows, code] of [[[], 'task_not_found'], [[task, task], 'task_identity_ambiguous'],

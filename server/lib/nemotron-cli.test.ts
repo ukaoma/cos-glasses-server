@@ -90,7 +90,7 @@ it('the real spawn path is used when no spawnImpl is given (a missing binary fai
 
 describe('QA 6.61.0: the CLI child gets nothing it does not need', () => {
   it('no COS token, provider key or API key reaches the child; PATH, HOME and TMPDIR do', async () => {
-    const secrets = { COS_API_TOKEN: 'cos-secret', OPENAI_API_KEY: 'sk-secret', ANTHROPIC_API_KEY: 'ant-secret', COS_TELEGRAM_BOT_TOKEN: 'tg', GITHUB_TOKEN: 'gh' }
+    const secrets = { COS_API_TOKEN: 'cos-secret', OPENAI_API_KEY: 'sk-secret', ANTHROPIC_API_KEY: 'ant-secret', COS_TELEGRAM_BOT_TOKEN: 'telegram-secret-value', GITHUB_TOKEN: 'github-secret-value' }
     const saved = Object.fromEntries(Object.keys(secrets).map(k => [k, process.env[k]]))
     Object.assign(process.env, secrets)
     try {
@@ -99,7 +99,8 @@ describe('QA 6.61.0: the CLI child gets nothing it does not need', () => {
       const env = fake.calls[0].env!
       expect(Object.keys(env).sort()).toEqual(Object.keys(nemotronChildEnv()).sort())
       for (const key of Object.keys(env)) expect(key).not.toMatch(/^COS_|TOKEN|KEY|SECRET/)
-      expect(JSON.stringify(env)).not.toMatch(/secret|sk-|ant-/)
+      // An allowed PATH may contain `ask-` (including `sk-`); test actual credential values.
+      for (const secret of Object.values(secrets)) expect(JSON.stringify(env)).not.toContain(secret)
       expect(env.PATH).toBe(process.env.PATH)
       expect(env.HOME).toBe(process.env.HOME)
     } finally {

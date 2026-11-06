@@ -23,6 +23,8 @@ Only these fields are accepted. Question limit: 2,000 characters; body limit: 12
 
 **Revision contract:** use the exact board row's `workRevision`, which Control's `work-context` helper returns unchanged. Do not use `taskRevision`, `controlSnapshotRevision`, or a locally generated hash. Identity must resolve uniquely. Missing metadata, completed cards, changed revisions and ineligible targets fail closed. The board and target evidence are read again after model completion.
 
+Questions containing text changed by the existing secret redactor are refused before evidence reads or inference with HTTP 400 `question_contains_sensitive_text` and “Remove credentials from the question and try again.” This preserves native exact-question matching without echoing sensitive text.
+
 Response includes `protocolVersion: 1`, `planOnly: true`, `workID`, `revision`, `title`, `question`, `createdAt`, `answer`, `assignments`, `model`, `effort`, original `evidence`, and `revalidatedEvidence`. `proposalID` is a content hash, **not durable storage, dispatch identity, or a receipt**. Input timestamps mean a fresh retry can produce a different hash.
 
 Each evidence object supplies Continue/Fork allowlists and availability/provenance. Use `revalidatedEvidence` for the latest eligibility; retain the original evidence for explaining what the planner saw. New-session proposals are disabled until an authoritative executable-provider contract exists. Available quota alone is insufficient.
