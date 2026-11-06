@@ -105,8 +105,11 @@
       jobs: caps.durableQueryJobs === true || h && h.durableQueryJobs === true || !!(caps.durableQueryJobs && caps.durableQueryJobs.enabled) ||
         !!(h && h.features && h.features.durableQueryJobs === true),
       steer: !!(C.caps && C.caps.steer),
-      thread: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1)
+      thread: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1),
+      // 6.99.19: Prep (capabilities.prep, protocol 1). Absent on an older server: "Prep me" stays a plain Ask.
+      prep: prepCapsOf(caps.prep)
     };
+    if (next.prep && next.prep.serverInstanceId) PREP_INST = next.prep.serverInstanceId;
     var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs || C.caps.thread !== next.thread;
     var filesChanged = !!C.caps && C.caps.dropFiles !== next.dropFiles;
     C.caps = next;
@@ -114,6 +117,13 @@
     if (changed && C.onChange) C.onChange();
     else if (filesChanged) paintButtons(CHAT);
     if (next.dropIt) refreshSummary();
+  }
+  function prepCapsOf(p) {
+    if (!p || typeof p !== 'object' || !(Number(p.protocol) >= 1)) return null;
+    var files = Number.isInteger(p.maxFiles) && p.maxFiles > 0 ? Math.min(p.maxFiles, 10) : 10;
+    var chars = Number.isInteger(p.steerChars) && p.steerChars > 0 ? Math.min(p.steerChars, 4000) : 4000;
+    return { protocol: Number(p.protocol), maxFiles: files, steerChars: chars, bind: p.bind === true, suggest: p.suggest === true,
+      serverInstanceId: typeof p.serverInstanceId === 'string' ? p.serverInstanceId : '' };
   }
   // The shell's status read (shell.js checkServer) hands its /api/health answer here.
   function fromHealth(h) { setCaps(h); }
@@ -305,6 +315,7 @@
     if (!el || el.getAttribute('data-mode') !== chatMode()) {
       host.innerHTML = chatSkeleton();
       hydrate(CHAT);
+      if (P) paintPrep(true);
     }
     if (!visible) return;
     loadModels();
@@ -976,7 +987,8 @@
     if (action === 'open_result') return W.go(linkOf('session') ? 'sessions' : linkOf('card') ? 'work' : 'messages');
     if (action === 'open') { if (linkOf('thread')) return W.go('threads'); if (linkOf('meeting')) return W.go('meetings'); return; }
     if (action === 'review') return W.go('work');
-    if (action === 'prep') { if (C.caps && C.caps.jobs) submitAsk('Prep me for ' + (item.title || 'my next meeting'), ''); return; }
+    // 6.99.19: with Prep on the Mac, Prep me opens the Prep composer (notes and files first); without it, the plain Ask.
+    if (action === 'prep') { if (prepOn()) return openPrep(item); if (C.caps && C.caps.jobs) submitAsk('Prep me for ' + (item.title || 'my next meeting'), ''); return; }
     if (action === 'reply') {
       var box = document.getElementById('cos-input');
       if (box) { box.value = 'remind me '; box.focus(); }
@@ -1019,9 +1031,502 @@
     api('/api/query-jobs/' + a.jobId + '/cancel', { method: 'POST', body: { generation: 1 } }).then(function (d) { if (d && d.job) take(a, d.job); paintAsk(a); }, function (err) { W.toast((err && err.message) || 'Cancel did not go through.'); });
   }
 
+  // ── Prep (6.99.19, PREP_CONTRACT_v1) ──────────────────
+  // With capabilities.prep on the Mac, "Prep me" on a prep card opens this composer above the chat's own: what the prep
+  // should focus on, and files, the way the live meeting view takes them. It is a server draft (POST /api/prep/drafts,
+  // the clientDraftId kept in this browser, so opening it again resumes it through GET). Every write sends the draft's
+  // revision; a 409 revision_conflict hands back the newer draft, which is shown, with one line saying so. Prep me
+  // posts .../run, and the job it returns is drawn and polled in the chat exactly like an Ask (take, poll, and the
+  // by-client lookup when the answer to the run was lost). Files reach a meeting only from that meeting's live view.
+  var PREP_STORE = 'cos.web.prepDrafts';
+  var PREP_ACCEPT = 'image/*,.heic,.heif,application/pdf,.pdf,text/plain,.txt,text/markdown,.md,text/csv,.csv,application/json,.json,.xlsx';
+  var PREP_SAVE_MS = 700;
+  var PREP_FILE_STATE = { unsupported: 'No readable text', failed: 'Could not be read', 'secret-held': 'Held: it appears to contain credentials' };
+  // Amendment 19: every Prep write names the server it expects (X-COS-Expected-Server-Instance), the id last read from
+  // capabilities.prep, a draft or a Prep answer. A restarted server answers 409 server_instance_mismatch.
+  var PREP_INST = '';
+  var P = null;   // the open composer: { key, title, startsAt, draft, steer, dirty, ups, note, warn, running, runId, chain, timer, conflicts }
+  function prepCaps() { return C.caps && C.caps.prep ? C.caps.prep : null; }
+  function prepOn() { return !!prepCaps(); }
+  function prepMax() { var c = prepCaps(); return c ? c.maxFiles : 10; }
+  function prepChars() { var c = prepCaps(); return c ? c.steerChars : 4000; }
+  function prepRec(key) { var r = W.readStore(PREP_STORE)[key]; return r && typeof r === 'object' && typeof r.cd === 'string' ? r : null; }
+  function savePrepRec(key, rec) {
+    var all = W.readStore(PREP_STORE);
+    all[key] = rec;
+    // The newest twenty: a prep card a week old has no reason to be found again here.
+    var keys = Object.keys(all).sort(function (a, b) { return (Number(all[a] && all[a].at) || 0) - (Number(all[b] && all[b].at) || 0); });
+    while (keys.length > 20) delete all[keys.shift()];
+    W.writeStore(PREP_STORE, all);
+  }
+  /** A Prep route, answered as { status, body } (a 409 carries the newer draft). Never rejects: no answer is status 0. */
+  function prepCall(path, opts) {
+    var o = opts || {}, method = o.method || 'GET';
+    var headers = { 'X-COS-Web': '1' };
+    if (o.body !== undefined) headers['Content-Type'] = 'application/json';
+    if (method !== 'GET' && PREP_INST) headers['X-COS-Expected-Server-Instance'] = PREP_INST;
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, o.timeoutMs || (method === 'GET' ? 20000 : 30000)) : null;
+    return fetch(path, { method: method, headers: headers, credentials: 'same-origin', body: o.body !== undefined ? JSON.stringify(o.body) : undefined, signal: ctrl ? ctrl.signal : undefined })
+      .then(function (res) {
+        return res.text().then(function (t) {
+          clearTimeout(timer); var b = {}; try { b = t ? JSON.parse(t) : {}; } catch (_e) { b = {}; }
+          b = b || {};
+          var inst = typeof b.serverInstanceId === 'string' && b.serverInstanceId ? b.serverInstanceId : b.draft && typeof b.draft.serverInstanceId === 'string' ? b.draft.serverInstanceId : '';
+          // The server's id as it answers now: from a read, a write it took, or the refusal that says it changed.
+          if (inst && (res.status < 300 || (res.status === 409 && prepCode({ body: b }) === 'server_instance_mismatch'))) PREP_INST = inst;
+          if (res.status === 428 && typeof console !== 'undefined') console.error('[prep] a write went without X-COS-Expected-Server-Instance', method, path);
+          return { status: res.status, body: b };
+        });
+      })
+      .catch(function () { clearTimeout(timer); return { status: 0, body: {} }; });
+  }
+  // sha256 of the bytes this browser uploaded (amendment 20). crypto.subtle needs a secure context, and a plain-http
+  // tailnet page is not one, so a small FIPS 180-4 implementation stands in there.
+  function sha256Hex(bytes) {
+    var subtle = typeof crypto !== 'undefined' && crypto.subtle && (typeof window === 'undefined' || window.isSecureContext !== false) ? crypto.subtle : null;
+    if (subtle) return subtle.digest('SHA-256', bytes).then(function (h) { return hex(new Uint8Array(h)); }, function () { return sha256Js(bytes); });
+    return Promise.resolve(sha256Js(bytes));
+  }
+  function hex(a) { return Array.prototype.map.call(a, function (x) { return (x + 0x100).toString(16).slice(1); }).join(''); }
+  var SHA_K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+  function sha256Js(bytes) {
+    var len = bytes.length, total = ((len + 9 + 63) >> 6) << 6, m = new Uint8Array(total);
+    m.set(bytes); m[len] = 0x80;
+    var bits = len * 8, dv = new DataView(m.buffer);
+    dv.setUint32(total - 8, Math.floor(bits / 0x100000000)); dv.setUint32(total - 4, bits >>> 0);
+    var h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19], w = new Array(64);
+    var rotr = function (x, n) { return (x >>> n) | (x << (32 - n)); };
+    for (var off = 0; off < total; off += 64) {
+      for (var i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+      for (i = 16; i < 64; i++) {
+        var s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3), s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      var a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], k = h[7];
+      for (i = 0; i < 64; i++) {
+        var t1 = (k + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + SHA_K[i] + w[i]) | 0;
+        var t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        k = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      h[0] = (h[0] + a) | 0; h[1] = (h[1] + b) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0; h[4] = (h[4] + e) | 0; h[5] = (h[5] + f) | 0; h[6] = (h[6] + g) | 0; h[7] = (h[7] + k) | 0;
+    }
+    return h.map(function (x) { return ('00000000' + (x >>> 0).toString(16)).slice(-8); }).join('');
+  }
+  /** The exact bytes the media upload sent: the resized JPEG for a photo (uploadMedia keeps it as t.thumb), else the file. */
+  function uploadedBytes(t) {
+    if (t.kind === 'photo' && /^data:/.test(t.thumb || '')) {
+      var bin = atob(t.thumb.slice(t.thumb.indexOf(',') + 1)), out = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return Promise.resolve(out);
+    }
+    if (t.file && typeof t.file.arrayBuffer === 'function') return t.file.arrayBuffer().then(function (b) { return new Uint8Array(b); });
+    return Promise.reject(new Error('This browser could not read the file again to check it. Remove it and add it again.'));
+  }
+  function prepCode(r) { var b = (r && r.body) || {}; return typeof b.error === 'string' ? b.error : (b.error && b.error.code) || b.code || b.reason || ''; }
+  var PREP_CONFLICT = 'This prep changed on another device. It now shows the newest notes and files. Check them, then try again.';
+  function prepErrorText(r) {
+    var code = prepCode(r);
+    if (r.status === 0) return 'COS on your Mac did not answer. Check that it is awake, then try again.';
+    if (r.status === 401) return 'This browser was signed out. Your words are kept here. Sign in, then try again.';
+    if (code === 'server_instance_mismatch') return 'The COS server on your Mac changed. Close this prep and tap Prep me on the card again.';
+    if (r.status === 428) return 'This page did not name the Mac\u2019s COS server, so nothing was changed. Reload the page, then try again.';
+    if (code === 'media_hash_mismatch') return 'The file your Mac kept does not match what this browser sent. Retry to send it again.';
+    if (code === 'maintenance' || r.status === 503) return 'COS is updating. Try again in a minute.';
+    if (code === 'prep_file_limit' || r.status === 413) return 'This prep holds ' + prepMax() + ' files. Remove one, then retry.';
+    if (r.status === 507) return 'COS is out of room for prep files. Remove some files from older preps, then retry.';
+    if (code === 'durable_query_jobs_disabled') return 'Prep me needs the durable query jobs switch on your Mac. Your notes and files are saved.';
+    if (/^media_/.test(code)) return 'The upload expired before COS kept it. Retry.';
+    if (r.status === 404) return 'This prep is no longer on your Mac. Close it and tap Prep me on the card again.';
+    var msg = r.body && typeof r.body.message === 'string' ? r.body.message : '';
+    return msg ? msg : 'COS did not take that (HTTP ' + r.status + '). Try again.';
+  }
+  function prepQueue(p, fn) { var next = p.chain.then(fn); p.chain = next.catch(function () {}); return next; }
+  function prepPath(p) { return '/api/prep/drafts/' + encodeURIComponent(p.draft.id); }
+  function prepFiles(d) { return ((d && d.files) || []).filter(function (f) { return f && f.status !== 'removed'; }); }
+  function prepUploading(p) { return p.ups.some(function (t) { return t.state !== 'failed'; }); }
+  function prepWhen(iso) { return iso && isFinite(Date.parse(iso)) ? timeLabel(iso) : ''; }
+
+  function openPrep(item) {
+    var act = ((item && item.actions) || []).filter(function (a) { return a && a.id === 'prep'; })[0] || {};
+    var info = (act.prep && typeof act.prep === 'object' ? act.prep : item.prep && typeof item.prep === 'object' ? item.prep : {}) || {};
+    var key = 'item:' + item.id;
+    if (P && P.key === key) { paintPrep(); focusPrep(); return; }
+    if (P) closePrep();
+    P = { key: key, title: clip(info.title || item.title || 'my next meeting', 200), startsAt: typeof info.startsAt === 'string' ? info.startsAt : null,
+      draft: null, steer: '', dirty: false, ups: [], note: '', warn: false, running: false, runId: '', chain: Promise.resolve(), timer: null, conflicts: 0, loading: true };
+    paintPrep(true); focusPrep();
+    // On a phone the page scrolls: bring the composer up to where the card was tapped.
+    var slot = prepSlot(false); if (slot && slot.scrollIntoView && !wide()) slot.scrollIntoView({ block: 'start' });
+    loadPrep(P);
+  }
+  function closePrep() {
+    if (!P) return;
+    var p = P;
+    // Words typed and not yet saved go out once more on the way.
+    if (p.dirty && p.draft) savePrepSteer(p);
+    clearTimeout(p.timer);
+    p.ups.forEach(function (t) { if (t.xhr) { try { t.xhr.abort(); } catch (_e) {} } });
+    P = null;
+    paintPrep();
+  }
+  // Resume when this browser has the draft; otherwise create it (the same clientDraftId answers the same draft).
+  function loadPrep(p) {
+    var rec = prepRec(p.key);
+    var create = function (cd) {
+      savePrepRec(p.key, { cd: cd, id: '', at: Date.now() });
+      var body = { clientDraftId: cd, title: p.title };
+      if (p.startsAt) body.startsAt = p.startsAt;
+      return prepCall('/api/prep/drafts', { method: 'POST', body: body });
+    };
+    var step = rec && rec.id ? prepCall('/api/prep/drafts/' + encodeURIComponent(rec.id)).then(function (r) {
+      return r.status === 404 ? create(uuid()) : r;
+    }) : create(rec ? rec.cd : uuid());
+    return step.then(function (r) {
+      p.loading = false;
+      if (r.status >= 200 && r.status < 300 && r.body.draft) { adoptPrep(p, r.body.draft, false); if (p.dirty) schedulePrepSave(p); return; }
+      setPrepNote(p, prepErrorText(r), true);
+    });
+  }
+  function adoptPrep(p, draft, conflict) {
+    p.draft = draft;
+    var rec = prepRec(p.key);
+    savePrepRec(p.key, { cd: (draft && draft.clientDraftId) || (rec && rec.cd) || '', id: draft.id, at: Date.now() });
+    if (conflict || !p.dirty) {
+      p.steer = typeof draft.steer === 'string' ? draft.steer : '';
+      if (conflict) { p.dirty = false; clearTimeout(p.timer); p.conflicts++; }
+      var box = P === p && prepBox();
+      if (box && box.value !== p.steer) { box.value = p.steer; W.autoGrow(box); }
+    }
+    if (conflict) setPrepNote(p, PREP_CONFLICT, true);
+    paintPrep();
+  }
+  /** A write to the draft: the answer's draft is adopted (a 409 revision_conflict's too, with the line that says so). */
+  function prepWrite(p, method, path, body) {
+    return prepCall(path, { method: method, body: body }).then(function (r) {
+      var conflict = r.status === 409 && prepCode(r) === 'revision_conflict';
+      if (r.body && r.body.draft && (conflict || (r.status >= 200 && r.status < 300))) adoptPrep(p, r.body.draft, conflict);
+      if (r.status === 409 && prepCode(r) === 'server_instance_mismatch') { r.mismatch = true; reloadAfterServerChange(p); }
+      return r;
+    });
+  }
+  // The Mac's server changed (it restarted) between reading this prep and writing to it: say so, read the draft again,
+  // and keep words not yet saved, which go out once the draft is read.
+  var PREP_SERVER_CHANGED = 'The COS server on your Mac changed since this prep opened. It was read again. Check it, then try again.';
+  function reloadAfterServerChange(p) {
+    setPrepNote(p, PREP_SERVER_CHANGED, true);
+    if (p.reloading || !p.draft) return;
+    p.reloading = true;
+    prepCall(prepPath(p)).then(function (r) {
+      p.reloading = false;
+      if (r.status === 200 && r.body.draft) { adoptPrep(p, r.body.draft, false); if (p.dirty) schedulePrepSave(p); }
+    });
+  }
+  function schedulePrepSave(p) { clearTimeout(p.timer); p.timer = setTimeout(function () { savePrepSteer(p); }, PREP_SAVE_MS); }
+  function savePrepSteer(p) {
+    clearTimeout(p.timer); p.timer = null;
+    return prepQueue(p, function () {
+      if (!p.dirty || !p.draft) return null;
+      var text = p.steer; p.dirty = false;
+      return prepWrite(p, 'PATCH', prepPath(p), { revision: p.draft.revision, steer: text }).then(function (r) {
+        if (r.mismatch) { if (p.steer === text) p.dirty = true; return r; }
+        if ((r.status >= 200 && r.status < 300) || r.status === 409) return r;
+        // Kept, and sent again with the next change or with Prep me.
+        if (p.steer === text) p.dirty = true;
+        setPrepNote(p, 'Your notes are not saved yet. ' + prepErrorText(r), true);
+        return r;
+      });
+    });
+  }
+  function onPrepInput(box) {
+    var p = P; if (!p) return;
+    var max = prepChars();
+    if (box.value.length > max) box.value = box.value.slice(0, max);
+    p.steer = box.value; p.dirty = true;
+    W.autoGrow(box);
+    schedulePrepSave(p);
+    paintPrepParts(p);
+  }
+
+  // Files: the composer's own upload (uploadMedia), then POST .../files with the draft's revision.
+  function addPrepFiles(list) {
+    var p = P; if (!p) return;
+    var files = Array.prototype.slice.call(list || []), refusals = [];
+    if (!p.draft) { setPrepNote(p, 'This prep is still opening. Add the files again in a moment.', true); return; }
+    files.forEach(function (file) {
+      if (prepFiles(p.draft).length + p.ups.length >= prepMax()) { refusals.push('A prep holds ' + prepMax() + ' files. ' + (file.name || 'A file') + ' was not added.'); return; }
+      var c = classify(file);
+      if (c.refuse) { refusals.push(c.refuse); return; }
+      if (c.kind === 'video') { refusals.push((file.name || 'That video') + ' is a video. Prep reads documents and the text in images, so attach a PDF, a text file or a screenshot.'); return; }
+      var t = { id: uuid(), file: file, name: file.name || (c.kind === 'photo' ? 'Screenshot' : 'File'), size: file.size, kind: c.kind, mime: c.mime || '', state: 'reading', progress: 0, mediaId: '', error: '' };
+      p.ups.push(t);
+      sendPrepFile(p, t);
+    });
+    setPrepNote(p, refusals.join(' '), !!refusals.length);
+    paintPrep();
+  }
+  function sendPrepFile(p, t) {
+    t.state = t.mediaId ? 'adding' : 'reading'; t.progress = 0; t.error = '';
+    var step = t.mediaId ? Promise.resolve({ id: t.mediaId }) : uploadMedia(t, {
+      uploading: function () { t.state = 'uploading'; paintPrep(); },
+      progress: function (x) { t.progress = x; paintPrepProgress(t); }
+    });
+    paintPrep();
+    step.then(function (ref) {
+      if (p.ups.indexOf(t) < 0) return null;
+      if (!ref || !ref.id) { var e = new Error('COS did not keep the file. Retry.'); e.code = 'kept'; throw e; }
+      t.mediaId = ref.id; t.state = 'adding'; paintPrep();
+      // Amendment 20: the sha256 of exactly the bytes uploaded, which the server checks its copy against.
+      return t.sha256 ? null : uploadedBytes(t).then(sha256Hex).then(function (h) { t.sha256 = h; });
+    }).then(function () {
+      if (p.ups.indexOf(t) < 0 || !t.mediaId) return null;
+      // v1.1: one operationId per add, the same on a retry after a lost answer (the server answers the first result).
+      t.opId = t.opId || uuid();
+      return prepQueue(p, function () {
+        var path = prepPath(p) + '/files';
+        var body = function () { return { operationId: t.opId, revision: p.draft.revision, media: [{ id: t.mediaId, name: t.name.slice(0, 240), sha256: t.sha256 }] }; };
+        return prepWrite(p, 'POST', path, body()).then(function (r) { return r.status === 0 ? prepWrite(p, 'POST', path, body()) : r; });
+      });
+    }).then(function (r) {
+      if (!r || p.ups.indexOf(t) < 0) return;
+      if (r.status >= 200 && r.status < 300) { p.ups = p.ups.filter(function (x) { return x !== t; }); paintPrep(); return; }
+      // Refused (a 4xx), so nothing was recorded: Retry is a new operation. No answer or a 5xx: Retry is the same one.
+      if (r.status >= 400 && r.status < 500) t.opId = '';
+      // The staged copy is gone or differs: Retry uploads the bytes again.
+      var code = prepCode(r);
+      if (code === 'media_hash_mismatch' || /^media_(not_found|expired)$/.test(code)) { t.mediaId = ''; t.sha256 = ''; }
+      t.state = 'failed';
+      t.error = r.mismatch ? 'Not added: the Mac\u2019s COS server changed. Retry.' : r.status === 409 && code === 'revision_conflict' ? 'Not added: the prep changed. Retry.' : prepErrorText(r);
+      paintPrep();
+    }).catch(function (err) {
+      if (p.ups.indexOf(t) < 0 || (err && err.code === 'aborted')) return;
+      t.state = 'failed';
+      t.error = err && err.code === 'kept' ? err.message : err && err.status === 401 ? 'Signed out. Sign in, then retry.' : uploadErrorText(err);
+      paintPrep();
+    });
+  }
+  function removePrepFile(p, fileId) {
+    if (!p.draft) return;
+    prepQueue(p, function () {
+      return prepWrite(p, 'DELETE', prepPath(p) + '/files/' + encodeURIComponent(fileId) + '?revision=' + encodeURIComponent(p.draft.revision));
+    }).then(function (r) { if (r && !(r.status >= 200 && r.status < 300) && r.status !== 409) setPrepNote(p, 'Not removed. ' + prepErrorText(r), true); });
+  }
+
+  // Prep me: the notes saved first, then .../run with a clientRequestId kept until the run is known, so a retry after a
+  // lost answer is the same request (the server answers the same job).
+  function runPrep(p) {
+    if (!p || !p.draft || p.running || prepUploading(p)) return;
+    p.running = true; setPrepNote(p, '', false); paintPrep();
+    var seen = p.conflicts;
+    if (p.dirty) savePrepSteer(p);
+    var rid = p.runId || (p.runId = uuid());
+    var path = prepPath(p) + '/run';
+    prepQueue(p, function () {
+      // The notes changed elsewhere, or did not save: nothing runs on words the person has not seen.
+      if (p.conflicts !== seen) return { status: -1, body: {} };
+      if (p.dirty) return { status: -2, body: {} };
+      var body = { clientRequestId: rid, revision: p.draft.revision };
+      if (C.model) body.model = C.model;
+      if (C.effort) body.effort = C.effort;
+      if ((p.draft.runs || []).length && p.draft.conversation && p.draft.conversation.sessionId) body.continue = true;
+      return prepWrite(p, 'POST', path, body).then(function (r) { return r.status === 0 ? prepWrite(p, 'POST', path, body) : r; });
+    }).then(function (r) {
+      p.running = false;
+      if (r.status === 202 || r.status === 200) { p.runId = ''; return startPrepJob(p, r.body.run || {}, r.body.job || null); }
+      if (r.status === 0) return recoverPrepRun(p, rid);
+      // v1.1: one run at a time per draft. The run already going is shown, as its own Ask, instead of a second one.
+      if (r.status === 409 && prepCode(r) === 'run_in_progress' && r.body.run && r.body.run.clientJobId) { p.runId = ''; return startPrepJob(p, r.body.run, null); }
+      // Refused, so no run exists: the next tap is a new request. (-1 and -2: stopped here; the note already says why.)
+      p.runId = '';
+      if (r.status !== -1 && r.status !== -2 && r.status !== 409) setPrepNote(p, prepErrorText(r), true);
+      paintPrep();
+    });
+  }
+  // The run's answer was lost twice. v1.1: GET .../runs/<clientRequestId> answers {run, job} when the run was taken and
+  // 404 run_not_accepted when it was not. A server without that route: the draft lists its runs, and the run's
+  // clientJobId finds the job (/api/query-jobs/by-client).
+  function recoverPrepRun(p, rid) {
+    return prepCall(prepPath(p) + '/runs/' + encodeURIComponent(rid)).then(function (r) {
+      if (r.status === 200 && r.body.run && r.body.run.clientJobId) { p.runId = ''; return startPrepJob(p, r.body.run, r.body.job || null); }
+      if (r.status === 404 && prepCode(r) === 'run_not_accepted') return notStarted(p);
+      return recoverFromDraft(p, rid);
+    });
+  }
+  function notStarted(p) {
+    setPrepNote(p, 'COS on your Mac did not answer, so this prep may not have started. Tap Prep me again; it will not run twice.', true);
+    paintPrep();
+  }
+  function recoverFromDraft(p, rid) {
+    return prepCall(prepPath(p)).then(function (r) {
+      if (r.status === 200 && r.body.draft) adoptPrep(p, r.body.draft, false);
+      var run = r.status === 200 ? (((r.body.draft || {}).runs) || []).filter(function (x) { return x && x.clientRequestId === rid; })[0] : null;
+      if (run && run.clientJobId) { p.runId = ''; return startPrepJob(p, run, null); }
+      notStarted(p);
+    });
+  }
+  // v1.1: the job is an ordinary web Ask titled "Prep: <title>"; the chat shows the same words, and the focus under them.
+  function prepQuery(p) {
+    var steer = String((p.draft && p.draft.steer) || '').trim();
+    return 'Prep: ' + p.title + (steer ? '\n' + clip(steer, 160) : '');
+  }
+  function startPrepJob(p, run, job) {
+    var cid = (run && run.clientJobId) || (job && job.clientJobId) || '';
+    var a = { cid: cid || uuid(), query: prepQuery(p), at: Date.now(), status: 'sending', partial: '', dropId: '', replyKey: '', prepDraftId: p.draft.id,
+      atts: prepFiles(p.draft).filter(function (f) { return f.status === 'ready'; }).map(function (f) { return { name: f.name, kind: f.kind === 'image' ? 'photo' : 'doc' }; }) };
+    C.asks.push(a);
+    if (P === p) closePrep();
+    paintFeed(true);
+    if (job && job.jobId) { take(a, job); paintAsk(a); poll(a); return a; }
+    if (!cid) { a.status = 'failed'; a.error = 'Not sent: the Mac did not say which answer is this prep. Tap Prep me on the card again.'; paintFeed(false); return a; }
+    api('/api/query-jobs/by-client/' + encodeURIComponent(cid) + '?generation=1').then(function (d) {
+      if (!d || !d.job) throw new Error('the Mac did not find the prep answer');
+      take(a, d.job); paintAsk(a); poll(a);
+    }).catch(function (err) {
+      a.status = 'failed';
+      a.error = 'Not sent: ' + ((err && err.message) || 'the Mac did not answer') + '. Tap Prep me on the card again; it will not run twice.';
+      paintFeed(false);
+    });
+    return a;
+  }
+
+  // ── the Prep composer on the page ─────────────────────
+  // It sits above the chat's composer, outside the feed, so a poll that redraws the feed never takes the words or the
+  // caret. Built once per draft; after that only its parts are written.
+  function prepSlot(create) {
+    var chat = C.host && C.host.querySelector && C.host.querySelector('[data-cos-chat]');
+    if (!chat) return null;
+    var slot = chat.querySelector('[data-cos-prep]');
+    if (!P) { if (slot) slot.remove(); return null; }
+    if (!slot && create !== false) {
+      slot = document.createElement('div');
+      slot.className = 'cc-prep'; slot.setAttribute('data-cos-prep', '');
+      chat.insertBefore(slot, chat.querySelector('[data-cos-form="chat"]'));
+    }
+    return slot;
+  }
+  function prepBox() { var slot = prepSlot(false); return slot && slot.querySelector('[data-cos-prep-steer]'); }
+  function focusPrep() { var box = prepBox(); if (box && keyboardFirst()) box.focus(); }
+  function prepHeadLine(p) {
+    var when = prepWhen(p.startsAt);
+    return (when ? 'Starts ' + when + '. ' : '') + 'Add what matters and any files, then Prep me. Add them to the meeting from its live view.';
+  }
+  function prepPanelHtml(p) {
+    return '<section class="mt-panel cc-prep-panel" aria-label="' + esc('Prep for ' + p.title) + '">' +
+      '<div class="mt-ask-head"><h3 class="mt-ask-title cc-prep-title">' + esc('Prep for ' + p.title) + '</h3>' +
+        '<button type="button" class="mt-link" data-cos="prep-close">Close</button></div>' +
+      '<p class="mt-ask-line">' + esc(prepHeadLine(p)) + '</p>' +
+      '<form class="mt-composer cc-prep-form" data-cos-prep-form autocomplete="off">' +
+        '<textarea class="field" rows="3" data-cos-prep-steer maxlength="' + prepChars() + '" placeholder="What should this prep focus on?" aria-label="What should this prep focus on?">' + esc(p.steer) + '</textarea></form>' +
+      '<div class="cc-prep-acts"><span class="mt-muted cc-prep-count" data-prep-count>' + esc(prepCountText(p)) + '</span>' +
+        '<label class="cx-btn quiet mt-addfile cc-prep-add" title="Add a screenshot or files to this prep">' + '<svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg><span>Add file</span>' +
+          '<input type="file" class="cc-file" multiple accept="' + PREP_ACCEPT + '" data-cos-prep-file aria-label="Add files to this prep"></label>' +
+        '<button type="button" class="cx-btn primary" data-cos="prep-run">' + esc(prepRunLabel(p)) + '</button></div>' +
+      '<p class="' + (p.warn ? 'mt-amber-line' : 'mt-muted') + ' cc-prep-note" data-prep-note role="status"' + (p.note ? '' : ' hidden') + '>' + esc(p.note) +
+        (p.signedOut ? ' <button type="button" class="link-btn cc-text-btn" data-cos="sign-in">Sign in again</button>' : '') + '</p>' +
+      // The box and Prep me first, so both show as soon as it opens; the files list under them grows downward.
+      '<div data-prep-files>' + prepFilesHtml(p) + '</div>' +
+      '</section>';
+  }
+  function prepFileMeta(f) {
+    if (f.status === 'ready') return [f.notice || '', Number(f.bytes) > 0 ? sizeLabel(Number(f.bytes)) : ''].filter(Boolean).join(' · ');
+    return f.notice || PREP_FILE_STATE[f.status] || '';
+  }
+  function prepUpMeta(t) {
+    if (t.state === 'reading') return t.kind === 'photo' ? 'Preparing the image' : 'Preparing';
+    if (t.state === 'uploading') return 'Uploading ' + Math.round(t.progress * 100) + '%';
+    if (t.state === 'adding') return t.kind === 'photo' ? 'Reading the text in the image' : 'Adding to the prep';
+    return t.error || 'Did not upload';
+  }
+  function prepFilesHtml(p) {
+    var files = prepFiles(p.draft), ups = p.ups;
+    var title = p.loading ? 'Opening this prep…' : files.length ? 'Files · ' + files.length + (ups.length ? ' · adding ' + ups.filter(function (t) { return t.state !== 'failed'; }).length : '')
+      : ups.length ? 'Adding files' : 'No files yet. Add file, paste or drop one here.';
+    var rows = files.map(function (f) {
+      var meta = prepFileMeta(f);
+      return '<li class="mt-up ready"><span class="mt-files-name">' + esc(f.name) + '</span>' + (meta ? '<span class="mt-up-meta mt-muted">' + esc(meta) + '</span>' : '') +
+        '<span class="mt-up-acts"><button type="button" class="mt-link" data-cos="prep-remove" data-file="' + esc(f.id) + '" aria-label="' + esc('Remove ' + f.name) + '">Remove</button></span></li>';
+    }).concat(ups.map(function (t) {
+      return '<li class="mt-up ' + t.state + '" data-prep-up="' + esc(t.id) + '"><span class="mt-files-name">' + esc(t.name) + '</span>' +
+        '<span class="mt-up-meta ' + (t.state === 'failed' ? 'mt-amber' : 'mt-muted') + '" data-up-meta>' + esc(prepUpMeta(t)) + '</span>' +
+        '<span class="mt-up-acts">' + (t.state === 'failed' ? '<button type="button" class="mt-link" data-cos="prep-retry" data-up="' + esc(t.id) + '">Retry</button>' : '') +
+        '<button type="button" class="mt-link" data-cos="prep-cancel" data-up="' + esc(t.id) + '" aria-label="' + esc('Remove ' + t.name) + '">' + (t.state === 'failed' ? 'Remove' : 'Cancel') + '</button></span>' +
+        (t.state === 'uploading' || t.state === 'reading' ? '<span class="mt-up-bar" data-up-bar style="width:' + Math.round(t.progress * 100) + '%"></span>' : '') + '</li>';
+    }));
+    return '<div class="mt-files live"><div class="mt-files-head quiet"><svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg><span>' + esc(title) + '</span></div>' +
+      (rows.length ? '<ul class="mt-files-list">' + rows.join('') + '</ul>' : '') + '</div>';
+  }
+  function prepCountText(p) {
+    var n = p.steer.length, max = prepChars();
+    return n >= max - 400 ? n.toLocaleString() + ' of ' + max.toLocaleString() + ' characters' : '';
+  }
+  function prepRunLabel(p) { return p.running ? 'Prepping…' : prepUploading(p) ? 'Uploading…' : 'Prep me'; }
+  function setPrepNote(p, text, warn) {
+    p.note = text || ''; p.warn = !!warn && !!text;
+    p.signedOut = /signed out/i.test(p.note);
+    if (P === p) paintPrepParts(p);
+  }
+  function paintPrep(rebuild) {
+    var slot = prepSlot(!!P);
+    if (!slot || !P) return;
+    if (rebuild || slot.getAttribute('data-key') !== P.key) {
+      slot.setAttribute('data-key', P.key);
+      slot.innerHTML = prepPanelHtml(P);
+      var box = slot.querySelector('[data-cos-prep-steer]'); if (box) W.autoGrow(box);
+      return;
+    }
+    var files = slot.querySelector('[data-prep-files]'); if (files) files.innerHTML = prepFilesHtml(P);
+    paintPrepParts(P);
+  }
+  // The button, the count and the note: never the box (the words and the caret stay where they are).
+  function paintPrepParts(p) {
+    var slot = P === p ? prepSlot(false) : null; if (!slot) return;
+    var run = slot.querySelector('[data-cos="prep-run"]');
+    if (run) { run.disabled = !p.draft || p.running || prepUploading(p); run.textContent = prepRunLabel(p); }
+    var count = slot.querySelector('[data-prep-count]'); if (count) count.textContent = prepCountText(p);
+    var pick = slot.querySelector('[data-cos-prep-file]'); if (pick) pick.disabled = !p.draft || prepFiles(p.draft).length + p.ups.length >= prepMax();
+    var note = slot.querySelector('[data-prep-note]');
+    if (note) {
+      note.className = (p.warn ? 'mt-amber-line' : 'mt-muted') + ' cc-prep-note';
+      note.innerHTML = esc(p.note) + (p.signedOut ? ' <button type="button" class="link-btn cc-text-btn" data-cos="sign-in">Sign in again</button>' : '');
+      note.hidden = !p.note;
+    }
+  }
+  function paintPrepProgress(t) {
+    var slot = prepSlot(false); if (!slot) return;
+    var row = slot.querySelector('[data-prep-up="' + t.id + '"]'); if (!row) return;
+    var meta = row.querySelector('[data-up-meta]'); if (meta) meta.textContent = prepUpMeta(t);
+    var bar = row.querySelector('[data-up-bar]'); if (bar) bar.style.width = Math.round(t.progress * 100) + '%';
+  }
+  function onPrepClick(t, what) {
+    var p = P; if (!p) return;
+    if (what === 'prep-close') return closePrep();
+    if (what === 'prep-run') return runPrep(p);
+    if (what === 'prep-remove') return removePrepFile(p, t.getAttribute('data-file'));
+    var up = p.ups.filter(function (x) { return x.id === t.getAttribute('data-up'); })[0];
+    if (!up) return;
+    if (what === 'prep-retry' && up.state === 'failed') return sendPrepFile(p, up);
+    if (what === 'prep-cancel') {
+      if (up.xhr) { try { up.xhr.abort(); } catch (_e) {} }
+      p.ups = p.ups.filter(function (x) { return x !== up; });
+      paintPrep();
+    }
+  }
+  function onPrepDrag(e, slot) {
+    var types = e.dataTransfer && e.dataTransfer.types;
+    if (!(types && Array.prototype.indexOf.call(types, 'Files') >= 0)) return;
+    e.preventDefault();
+    if (e.type === 'dragover' || e.type === 'dragenter') { slot.classList.add('dragging'); return; }
+    slot.classList.remove('dragging');
+    if (e.type === 'drop') addPrepFiles(e.dataTransfer.files);
+  }
+
   // ── events (delegated from the Messages pane) ─────────
   function onClick(t) {
     var what = t.getAttribute('data-cos');
+    if (/^prep-/.test(what || '')) return onPrepClick(t, what);
     if (what === 'ask') return doAsk(kOf(t));
     if (what === 'drop') return doDrop();
     if (what === 'all') return W.go('messages');
@@ -1060,6 +1565,7 @@
     doAsk(k);
   }
   function onInput(e) {
+    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-cos-prep-steer')) return onPrepInput(e.target);
     if (isComposerInput(e.target)) { var k = kOf(e.target); k.draft = e.target.value; saveDraft(k); W.autoGrow(e.target); paintButtons(k); }
   }
   function onChangeEvent(e) {
@@ -1068,6 +1574,7 @@
     if (t.hasAttribute('data-cos-model')) { C.model = t.value; save(); syncMenus(); }
     else if (t.hasAttribute('data-cos-effort')) { C.effort = t.value; save(); syncMenus(); }
     else if (t.hasAttribute('data-cos-file')) { addFiles(kOf(t), t.files); t.value = ''; }
+    else if (t.hasAttribute('data-cos-prep-file')) { addPrepFiles(t.files); t.value = ''; }
   }
   // Two composers can be on screen (the chat beside a reader is not, but a reload can leave either): keep both menus true.
   function syncMenus() {
@@ -1078,15 +1585,23 @@
     var f = e.target.closest && e.target.closest('[data-cos-steer]');
     if (f) { e.preventDefault(); steer(f.getAttribute('data-cos-steer'), (f.querySelector('input') || {}).value || ''); return true; }
     if (e.target.matches && e.target.matches('[data-cos-form]')) { e.preventDefault(); return true; }
+    if (e.target.matches && e.target.matches('[data-cos-prep-form]')) { e.preventDefault(); return true; }
     return false;
   }
   // Paste a photo or a file into the box; drop files on the composer.
   function onPaste(e) {
+    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-cos-prep-steer')) {
+      var pf = e.clipboardData && e.clipboardData.files;
+      if (pf && pf.length) { e.preventDefault(); addPrepFiles(pf); }
+      return;
+    }
     if (!isComposerInput(e.target)) return;
     var files = e.clipboardData && e.clipboardData.files;
     if (files && files.length) { e.preventDefault(); addFiles(kOf(e.target), files); }
   }
   function onDrag(e) {
+    var prep = e.target && e.target.closest && e.target.closest('[data-cos-prep]');
+    if (prep) return onPrepDrag(e, prep);
     var form = e.target && e.target.closest && e.target.closest('[data-cos-form]');
     if (!form) return;
     var types = e.dataTransfer && e.dataTransfer.types;
@@ -1113,6 +1628,10 @@
     setOnChange: function (fn) { C.onChange = fn; }, setOnAnswered: function (fn) { C.onAnswered = fn; },
     // Test and render hooks: what the chat holds right now.
     classify: classify, uploadMedia: uploadMedia, uploadErrorText: uploadErrorText, uuid: uuid,
+    // 6.99.19: Prep. meetings.js reads the capability from here (one /api/health read for the page).
+    prepCaps: prepCaps,
+    _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
+    _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn
   };
 })();

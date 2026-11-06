@@ -115,7 +115,7 @@ function chunk(i: number, speaker = i % 2 ? 'Gina' : 'Miles', words = 'The Liquo
   return { i, elapsedMs: i * 40_000, speaker, text: `${words} (${i})` }
 }
 
-function load(opts: { sid?: string; reduceMotion?: boolean } = {}) {
+function load(opts: { sid?: string; reduceMotion?: boolean; prep?: boolean } = {}) {
   const sid = opts.sid ?? SID
   const dom = new Dom()
   FakeXHR.all = []
@@ -124,18 +124,37 @@ function load(opts: { sid?: string; reduceMotion?: boolean } = {}) {
     chunks: [] as Chunk[], levels: [] as Array<{ i: number; level: number; speechSec: number | null }>, rev: 0, ended: false,
     files: [] as Array<Record<string, unknown>>, attach: [] as Array<{ status: number; body: unknown }>, posts: [] as Array<{ path: string; body: any }>,
     configs: 0, instance: 'inst-1', start: START,
+    // 6.99.19 Prep: what /api/prep/suggest and /api/prep/by-session answer, every request the page made, and the name.
+    titleSteer: '' as string, suggest: [] as Array<Record<string, any>>, bySession: {} as Record<string, Array<Record<string, any>>>,
+    calls: [] as Array<{ method: string; path: string; body: any; headers?: Record<string, string> }>, bind: [] as Array<{ status: number; body: unknown }>,
   }
   const read = (since: number, knownRev: string | null) => ({
-    sessionId: sid, ended: server.ended, unchanged: false, stamp: String(server.chunks.length) + '.' + server.rev, startTime: server.start, lastActivityAt: Date.now(),
+    sessionId: sid, ended: server.ended, unchanged: false, stamp: String(server.chunks.length) + '.' + server.rev, startTime: server.start, lastActivityAt: Date.now(), titleSteer: server.titleSteer || undefined,
     maxIndex: server.chunks.length - 1, settledThrough: server.chunks.length - 1, speakerRevision: server.rev,
     // As readLiveTranscriptSession: a reader that does not know this speaker revision gets every turn.
     fullSnapshot: knownRev !== String(server.rev),
     turns: server.chunks.filter(c => knownRev !== String(server.rev) || c.i > since), levels: server.levels,
   })
-  const fetch = async (path: string, o: { method?: string; body?: string } = {}) => {
+  const fetch = async (path: string, o: { method?: string; body?: string; headers?: Record<string, string> } = {}) => {
     const url = new URL(path, 'http://x')
     let status = 200, body: unknown = {}
-    if (url.pathname === '/api/meetings/live-chunks') {
+    server.calls.push({ method: o.method ?? 'GET', path, body: o.body ? JSON.parse(o.body) : undefined, headers: o.headers })
+    const bindM = /^\/api\/prep\/drafts\/([^/]+)\/bind$/.exec(url.pathname)
+    if (url.pathname === '/api/prep/suggest') body = { drafts: server.suggest }
+    else if (/^\/api\/prep\/drafts\/[^/]+$/.test(url.pathname) && (o.method ?? 'GET') === 'GET') body = { draft: { ...server.suggest[0], serverInstanceId: 'inst-2', revision: 5 }, serverInstanceId: 'inst-2' }
+    else if (url.pathname.startsWith('/api/prep/by-session/')) body = { drafts: server.bySession[decodeURIComponent(url.pathname.split('/').pop()!)] ?? [] }
+    else if (bindM && o.method === 'POST') {
+      const next = server.bind.shift()
+      if (next) { status = next.status; body = next.body }
+      else {
+        // As the contract: the steer as one file, "Prep notes", and every ready file, adopted with origin 'prep'.
+        const d = server.suggest.find(x => x.id === decodeURIComponent(bindM[1]))!
+        const adopted = [{ id: `prep_${d.id}_notes`, revision: 'r1', name: 'Prep notes', status: 'ready', text: d.steer, origin: 'prep' }]
+          .concat(d.files.filter((f: any) => f.status === 'ready').map((f: any) => ({ id: `prep_${d.id}_${f.id}`, revision: 'r1', name: f.name, status: 'ready', text: 'x', origin: 'prep' })))
+        server.files = server.files.concat(adopted)
+        body = { draft: { ...d, bindings: [{ sessionId: sid, serverInstanceId: server.instance, surface: 'web', boundAt: new Date().toISOString(), fileIds: [] }] }, files: server.files }
+      }
+    } else if (url.pathname === '/api/meetings/live-chunks') {
       const r: any = read(Number(url.searchParams.get('since') ?? -1), url.searchParams.get('speakerRevision'))
       body = { sessions: server.ended ? [] : [{ sessionId: sid, mtimeMs: Date.now(), stamp: r.stamp }], read: r }
     } else if (url.pathname === '/api/meeting-ask/files/media') {
@@ -149,6 +168,8 @@ function load(opts: { sid?: string; reduceMotion?: boolean } = {}) {
     return { status, text: async () => JSON.stringify(body) }
   }
   const api = (path: string) => {
+    if (path === '/api/health') return Promise.resolve(opts.prep ? { status: 'ok', capabilities: { durableQueryJobs: true, prep: { protocol: 1, maxFiles: 10, steerChars: 4000, bind: true, suggest: true } } } : { status: 'ok' })
+    if (path.startsWith('/api/meetings/detail')) return Promise.resolve({ title: 'Weekly marketing sync', date: '2026-11-06', time: '09:30', sessionId: sid, contextKeys: ['g2:' + sid], transcript: 'Miles: hello', summary: 'A sync.' })
     if (path === '/api/meeting-ask/config') { server.configs++; return Promise.resolve({ protocolVersion: 2, serverInstanceId: server.instance, selected: { engine: 'claude', model: 'opus' }, models: [{ engine: 'claude', model: 'opus', available: true }], capabilities: {} }) }
     if (path.startsWith('/api/meeting-ask/history')) return Promise.resolve({ exchanges: [], nextOffset: null, files: server.files })
     if (path.startsWith('/api/meetings/live-chunks')) return fetch(path).then(r => r.text()).then(t => JSON.parse(t))
@@ -489,6 +510,228 @@ describe('files during a live meeting', () => {
     t.live._addLiveFiles([pdf()])
     expect(FakeXHR.all).toHaveLength(0)
     expect(t.$('mt-lfiles').innerHTML).toMatch(/This recording has ended\. Files can be added while it records\./)
+  })
+})
+
+// ── 6.99.19 Prep (PREP_CONTRACT_v1) ────────────────────────────────────────────────────────────────────────────────
+const PREP_DRAFT = () => ({
+  id: 'prep_' + 'A'.repeat(26), clientDraftId: '0b0b0b0b-1111-4222-8333-444455556666', revision: 4, title: 'Weekly marketing sync', startsAt: new Date(START + 5 * 60_000).toISOString(),
+  steer: 'Focus on the Q4 pricing change and what Gina needs from me.', state: 'active', runs: [], bindings: [], conversation: { sessionId: null },
+  files: [
+    { id: 'pf_' + '1'.repeat(16), name: 'Q4 pricing.pdf', mime: 'application/pdf', bytes: 2048, status: 'ready', kind: 'document' },
+    { id: 'pf_' + '2'.repeat(16), name: 'Agenda.png', mime: 'image/png', bytes: 9000, status: 'ready', kind: 'image' },
+    { id: 'pf_' + '3'.repeat(16), name: 'Old draft.txt', mime: 'text/plain', bytes: 10, status: 'removed', kind: 'text' },
+  ],
+})
+
+describe('Prep in the live view: a suggestion, bound only by a tap', () => {
+  it('with Prep on the server, the meeting asks for suggestions once and shows one quiet line under the files; nothing binds by itself', async () => {
+    const t = load({ prep: true })
+    t.server.suggest = [PREP_DRAFT()]
+    for (let i = 0; i < 3; i++) t.server.chunks.push(chunk(i))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    const asks = t.server.calls.filter(c => c.path.startsWith('/api/prep/suggest'))
+    expect(asks).toHaveLength(1)
+    expect(asks[0].path).toBe('/api/prep/suggest?sessionId=' + SID + '&startedAt=' + START)
+    const line = t.$('mt-lprep').innerHTML
+    expect(line).toMatch(/Prep for Weekly marketing sync is ready: add its notes and 2 files to this meeting/)
+    expect(line).toMatch(/>Add to this meeting<\/button>/)
+    // The line is its own slot under the files, never in the header and never inside the transcript box.
+    expect(t.$('mt-lhead').innerHTML).not.toMatch(/Prep/)
+    expect(t.$('mt-lfiles').innerHTML).not.toMatch(/Prep for/)
+    // Polls come and go; still no bind and no second suggest.
+    for (let i = 3; i < 8; i++) { t.server.chunks.push(chunk(i)); await t.poll() }
+    expect(t.server.calls.filter(c => /\/bind$/.test(c.path))).toEqual([])
+    expect(t.server.calls.filter(c => c.path.startsWith('/api/prep/suggest'))).toHaveLength(1)
+  })
+
+  it('Add to this meeting binds it to this recording; the files arrive marked From prep and the line says it was added', async () => {
+    const t = load({ prep: true })
+    t.server.suggest = [PREP_DRAFT()]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    const box = t.$('mt-turns'), lineWrites = t.$('mt-lprep').writes
+    const top = box.scrollTop
+    t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
+    await flush(12)
+    const binds = t.server.calls.filter(c => /\/bind$/.test(c.path))
+    // v1.1: the revision the line described, pinned; serverInstanceId from Meeting Ask when neither the draft nor the capability names it.
+    expect(binds.map(c => ({ method: c.method, path: c.path, body: c.body }))).toEqual([{ method: 'POST', path: '/api/prep/drafts/' + PREP_DRAFT().id + '/bind', body: { revision: 4, sessionId: SID, serverInstanceId: 'inst-1', surface: 'web' } }])
+    // Amendment 19: the header is what authorizes the write.
+    expect(binds[0].headers).toMatchObject({ 'X-COS-Web': '1', 'X-COS-Expected-Server-Instance': 'inst-1' })
+    const files = t.$('mt-lfiles').innerHTML
+    expect(files).toMatch(/Files · 3/)
+    expect(files).toMatch(/Prep notes/)
+    expect((files.match(/From prep/g) ?? []).length).toBe(3)
+    expect(files).not.toMatch(/Added from a phone or browser/)
+    expect(t.$('mt-lprep').innerHTML).toMatch(/Added the prep for Weekly marketing sync to this meeting\./)
+    expect(t.$('mt-lprep').innerHTML).not.toMatch(/<button/)
+    expect(t.$('mt-lprep').writes).toBeGreaterThan(lineWrites)
+    expect(box.scrollTop).toBe(top)
+    expect(t.pageScrolls()).toBe(0)
+  })
+
+  it('a restarted server: the line says so, the prep is read again, and nothing binds until the next tap, which names the new server', async () => {
+    const t = load({ prep: true })
+    t.server.suggest = [PREP_DRAFT()]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    t.server.bind.push({ status: 409, body: { error: 'server_instance_mismatch', serverInstanceId: 'inst-2' } })
+    t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
+    await flush(12)
+    expect(t.server.calls.filter(c => /\/bind$/.test(c.path))).toHaveLength(1)
+    expect(t.server.calls.at(-1)).toMatchObject({ method: 'GET', path: '/api/prep/drafts/' + PREP_DRAFT().id })
+    expect(t.$('mt-lprep').innerHTML).toMatch(/The COS server on your Mac changed\. The prep was read again; tap Add to this meeting again\./)
+    t.server.bind.push({ status: 200, body: { draft: PREP_DRAFT(), files: [] } })
+    t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
+    await flush(12)
+    const second = t.server.calls.filter(c => /\/bind$/.test(c.path))[1]
+    expect(second.headers!['X-COS-Expected-Server-Instance']).toBe('inst-2')
+    expect(second.body).toMatchObject({ revision: 5, serverInstanceId: 'inst-2' })
+  })
+
+  it('a refused bind says what happened and keeps the button', async () => {
+    const t = load({ prep: true })
+    t.server.suggest = [PREP_DRAFT()]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    t.server.bind.push({ status: 413, body: { error: 'file_context_limit' } })
+    t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
+    await flush(12)
+    expect(t.server.calls.filter(c => /\/bind$/.test(c.path))).toHaveLength(1)
+    const line = t.$('mt-lprep').innerHTML
+    expect(line).toMatch(/Not added\. This meeting holds as many files as Meeting Ask reads\. Remove one in COS Control on your Mac, then try again\./)
+    expect(line).toMatch(/>Add to this meeting<\/button>/)
+  })
+
+  it('413 file_context_limit says, in one line, how much file text the prep needs and what to remove', async () => {
+    const t = load({ prep: true })
+    t.server.suggest = [{ ...PREP_DRAFT(), serverInstanceId: 'inst-1' }]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    t.server.bind.push({ status: 413, body: { error: 'file_context_limit', needBytes: 180 * 1024, haveBytes: 40 * 1024 } })
+    t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
+    await flush(12)
+    expect(t.server.calls.filter(c => /\/bind$/.test(c.path))[0].body.serverInstanceId).toBe('inst-1')
+    expect(t.$('mt-lprep').innerHTML).toMatch(/Not added\. This meeting has too much file text for this prep: it needs 180 KB and the meeting has room for 40 KB\. Remove a large file from the meeting in COS Control on your Mac, then try again\./)
+  })
+
+  it('a prep that changed since it was offered is not added; the line describes the newer version and waits for another tap', async () => {
+    const t = load({ prep: true })
+    t.server.suggest = [PREP_DRAFT()]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    t.server.bind.push({ status: 409, body: { error: 'revision_conflict', draft: { ...PREP_DRAFT(), revision: 6, steer: '', files: PREP_DRAFT().files.slice(0, 1) } } })
+    t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
+    await flush(12)
+    expect(t.server.calls.filter(c => /\/bind$/.test(c.path))).toHaveLength(1)
+    expect(t.$('mt-lprep').innerHTML).toMatch(/Prep for Weekly marketing sync changed since it was offered: add its 1 file to this meeting/)
+    t.server.bind.push({ status: 200, body: { draft: PREP_DRAFT(), files: [] } })
+    t.tap('prep-bind', { 'data-id': PREP_DRAFT().id })
+    await flush(12)
+    expect(t.server.calls.filter(c => /\/bind$/.test(c.path)).map(c => c.body.revision)).toEqual([4, 6])
+  })
+
+  it('a prep already bound to this recording, or one with nothing in it, is not offered', async () => {
+    const t = load({ prep: true })
+    t.server.suggest = [{ ...PREP_DRAFT(), bindings: [{ sessionId: SID, serverInstanceId: 'inst-1', surface: 'control', boundAt: 'x', fileIds: [] }] }, { ...PREP_DRAFT(), id: 'prep_' + 'B'.repeat(26), steer: '  ', files: [] }]
+    t.server.chunks.push(chunk(0))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    expect(t.$('mt-lprep').innerHTML).toBe('')
+  })
+
+  it('without Prep on the server, the live view asks nothing and draws nothing', async () => {
+    const t = await openWith(3)
+    expect(t.server.calls.filter(c => c.path.startsWith('/api/prep/'))).toEqual([])
+    expect(t.$('mt-lprep').innerHTML).toBe('')
+  })
+})
+
+describe('Prep in a saved meeting', () => {
+  it('lists the prep for the meeting: what it focused on and its files, each opening from the Prep store', async () => {
+    const t = load({ prep: true })
+    t.server.bySession[SID] = [PREP_DRAFT()]
+    t.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
+    await flush(14)
+    expect(t.server.calls.filter(c => c.path.startsWith('/api/prep/by-session/')).map(c => c.path)).toEqual(['/api/prep/by-session/' + SID])
+    const html = t.$('mt-dprep').innerHTML
+    expect(html).toMatch(/<h3 class="mt-ask-title">Prep<\/h3>/)
+    expect(html).toMatch(/Focus on the Q4 pricing change and what Gina needs from me\./)
+    expect(html).toMatch(new RegExp('href="/api/prep/drafts/' + PREP_DRAFT().id + '/files/pf_1{16}"'))
+    expect(html).toMatch(/Q4 pricing\.pdf/)
+    expect(html).toMatch(/Agenda\.png/)
+    expect(html).not.toMatch(/Old draft\.txt/)
+  })
+
+  it('shows what the meeting used: each binding\u2019s frozen snapshot, not the draft as edited since (amendment 21)', async () => {
+    const t = load({ prep: true })
+    const later = { ...PREP_DRAFT(), revision: 9, steer: 'Edited after the meeting.', files: [] }
+    t.server.bySession[SID] = [{ ...later, bindings: [{ sessionId: SID, serverInstanceId: 'inst-1', surface: 'web', boundAt: 'x', fileIds: [],
+      snapshot: { draftRevision: 4, steer: 'What the meeting had: pricing first.', files: [{ id: 'pf_' + '1'.repeat(16), name: 'Q4 pricing.pdf', revision: 'r1', sha256: 'a'.repeat(64) }] } }] }]
+    t.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
+    await flush(14)
+    const html = t.$('mt-dprep').innerHTML
+    expect(html).toMatch(/What the meeting had: pricing first\./)
+    expect(html).not.toMatch(/Edited after the meeting/)
+    expect(html).toMatch(new RegExp('href="/api/prep/drafts/' + PREP_DRAFT().id + '/files/pf_1{16}"'))
+  })
+
+  it('a prep taken back off this meeting (its binding removed) is not listed', async () => {
+    const t = load({ prep: true })
+    t.server.bySession[SID] = [{ ...PREP_DRAFT(), bindings: [{ sessionId: SID, serverInstanceId: 'inst-1', surface: 'web', boundAt: 'x', fileIds: [], removedAt: 'y' }] }]
+    t.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
+    await flush(14)
+    expect(t.server.calls.filter(c => c.path.startsWith('/api/prep/by-session/'))).toHaveLength(1)
+    expect(t.$('mt-dprep').innerHTML).toBe('')
+  })
+
+  it('is hidden when the meeting has no prep, and never asked for on a server without Prep', async () => {
+    const empty = load({ prep: true })
+    empty.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
+    await flush(14)
+    expect(empty.$('mt-dprep').innerHTML).toBe('')
+    const old = load()
+    old.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
+    await flush(14)
+    expect(old.server.calls.filter(c => c.path.startsWith('/api/prep/'))).toEqual([])
+    expect(old.$('mt-dprep').innerHTML).toBe('')
+  })
+})
+
+describe('Copy full context in the live view: the first line names the meeting', () => {
+  it('starts "Live meeting: <title>", not "# Live meeting", and the transcript section follows as before', async () => {
+    const t = load()
+    t.server.titleSteer = 'Weekly marketing sync'
+    t.server.chunks.push(chunk(0), chunk(1))
+    t.pane$.load(['live', SID])
+    await flush(12)
+    const copied: string[] = []
+    ;(t.W as any).copyText = (s: string) => { copied.push(s); return Promise.resolve() }
+    t.tap('live-context')
+    await flush(8)
+    if (!copied.length) { t.tap('live-context'); await flush(8) }
+    expect(copied).toHaveLength(1)
+    const lines = copied[0].split('\n')
+    expect(lines[0]).toBe('Live meeting: Weekly marketing sync')
+    expect(lines[1]).toBe('')
+    expect(lines[2]).toBe('## Transcript')
+    expect(lines[3]).toMatch(/^COS preliminary transcript · /)
+    expect(copied[0]).toMatch(/\[0:00\] Miles: The Liquor pacing/)
+  })
+  it('with no typed name the first line is still a plain title (the source label)', async () => {
+    const t = await openWith(1)
+    const copied: string[] = []
+    ;(t.W as any).copyText = (s: string) => { copied.push(s); return Promise.resolve() }
+    t.tap('live-context'); await flush(8)
+    if (!copied.length) { t.tap('live-context'); await flush(8) }
+    expect(copied[0].split('\n')[0]).toMatch(/^Live meeting: Glasses meeting /)
   })
 })
 

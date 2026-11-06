@@ -172,3 +172,24 @@
 /* 6.99.16: the COS thread's one quiet line, under the title row. */
 .cc-thread { flex-basis: 100%; margin: 0; font-size: 12.5px; line-height: 1.35; color: var(--tertiary); }
 .cc-thread:empty { display: none; }
+
+/* 6.99.19: the Prep composer, above the chat's own. The live meeting view's panel, Files row and composer (meetings.css
+   .mt-panel, .mt-files, .mt-composer), so it reads as the same tool. */
+.cc-prep { padding: 10px 0 2px; }
+.cc-prep-panel { display: grid; gap: 6px; }
+.cc-prep-panel .mt-ask-line { margin: 0 0 4px; }
+.cc-prep-title { min-width: 0; overflow-wrap: anywhere; }
+.cc-prep-panel .mt-files { max-width: none; margin: 0; }
+.cc-prep-panel .mt-files-list li.mt-up { min-height: 44px; align-content: center; }
+.cc-prep-form { margin-top: 2px; }
+.cc-prep-form .field { min-height: 76px; max-height: 220px; }
+.cc-prep-acts { display: flex; align-items: center; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.cc-prep-count { flex: 1; min-width: 0; font-size: 12px; }
+.cc-prep-add { position: relative; cursor: pointer; }
+.cc-prep-add:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cc-prep-acts .cx-btn { height: 40px; }
+.cc-prep-note { margin: 0; font-size: 13px; }
+.cc-prep-note[hidden] { display: none; }
+.cc-prep.dragging .cc-prep-panel { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.cc-prep { scroll-margin-top: calc(64px + var(--safe-top, 0px)); }
+@media (min-width: 860px) { .msg-right .cc-prep { padding: 10px 16px 0; max-height: 55%; overflow-y: auto; flex: none; } }

@@ -722,6 +722,7 @@
     var o = opts || {};
     var headers = { 'X-COS-Web': '1' };
     if (o.body !== undefined) headers['Content-Type'] = 'application/json';
+    if (o.headers) Object.keys(o.headers).forEach(function (k) { headers[k] = o.headers[k]; });
     // A read gives up at 20 s, as W.api's do, so a stalled Mac never freezes a poll that waits on it.
     var method = o.method || 'GET', ctrl = method === 'GET' && typeof AbortController === 'function' ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 20000) : null;
@@ -1170,7 +1171,7 @@
     if (S.detailRow) W.setCrumb(S.detailRow.title || 'Meeting');
     paintDetail();
     if (!S.inbox) loadInbox();
-    if (S.detail) { W.setCrumb(detailRow().title || 'Meeting'); detailSessions().forEach(function (sid) { panelOpen(sid); }); return; }
+    if (S.detail) { W.setCrumb(detailRow().title || 'Meeting'); detailSessions().forEach(function (sid) { panelOpen(sid); }); loadDetailPrep(); return; }
     var id = ++S.detailSeq;
     S.detailLoading = true;
     api('/api/meetings/detail?domain=' + encodeURIComponent(domain) + '&month=' + encodeURIComponent(month) + '&filename=' + encodeURIComponent(filename)).then(function (d) {
@@ -1180,6 +1181,7 @@
       W.setCrumb(detailRow().title || 'Meeting');
       paintDetail();
       detailSessions().forEach(function (sid) { panelOpen(sid); });
+      loadDetailPrep();
       // A deep link has no list row; Control always opens one (its session, voices and captures). Read that day's list.
       if (!S.detailRow && /^\d{4}-\d{2}-\d{2}$/.test(S.detail.date || '')) {
         api('/api/meetings?limit=200&domain=all&day=' + S.detail.date).then(function (l) {
@@ -1189,6 +1191,7 @@
           S.detailRow = hit;
           paintDetail();
           detailSessions().forEach(function (sid) { if (before.indexOf(sid) < 0) panelOpen(sid); });
+          loadDetailPrep();
         }, function () {});
       }
     }, function (err) {
@@ -1248,9 +1251,73 @@
           A(sid).ctx = { saved: true, meeting: row, captureLabel: 'Original recording ' + (i + 1) + '. Questions use its saved cutoff; each recording keeps its own history.' };
           return '<div class="mt-side-panel" id="mt-ask-' + safeId(sid) + '" data-sid="' + esc(sid) + '">' + sidePanelHtml(sid) + '</div>';
         }).join('') +
+        '<div id="mt-dprep">' + detailPrepHtml() + '</div>' +
         '<article class="mt-doc">' + documentHtml(d) + '</article></div>';
     }
     pane.innerHTML = '<div class="cx mt mt-detail" data-tint="meetings">' + head + body + '</div>';
+  }
+  // ── Prep in a saved meeting (6.99.19) ─────────────────
+  // GET /api/prep/by-session/:sessionId for each of the meeting's recordings: what the prep focused on and its files,
+  // each opening from the Prep store. Nothing shows when there is no prep, or on a server without Prep.
+  function detailPrepKey() { return S.detailKey + '|' + detailSessions().join(','); }
+  function loadDetailPrep() {
+    var key = detailPrepKey(), sessions = detailSessions(), cc = W.cosChat;
+    if (!sessions.length || !cc || typeof cc.ensureCaps !== 'function') return;
+    if (S.dprep && S.dprep.key === key) { paintDetailPrep(); return; }
+    S.dprep = { key: key, drafts: [] };
+    cc.ensureCaps().then(function () {
+      if (!prepCapsNow()) return;
+      return Promise.all(sessions.map(function (sid) { return answer('/api/prep/by-session/' + encodeURIComponent(sid)); })).then(function (list) {
+        if (!S.dprep || S.dprep.key !== key) return;
+        var seen = {}, out = [];
+        list.forEach(function (r) {
+          if (r.status !== 200 || !Array.isArray(r.body.drafts)) return;
+          // Amendment 21: what the meeting used is each binding's frozen snapshot, never the draft as it is now. A binding
+          // taken back off this meeting (removedAt) is not shown. A server without snapshots: the draft as listed.
+          r.body.drafts.forEach(function (d) {
+            if (!d || typeof d.id !== 'string') return;
+            var mine = (d.bindings || []).filter(function (x) { return x && sessions.indexOf(x.sessionId) >= 0; });
+            var live = mine.filter(function (x) { return !x.removedAt; });
+            if (mine.length && !live.length) return;
+            var shots = live.filter(function (x) { return x.snapshot && typeof x.snapshot === 'object'; });
+            if (!shots.length) { if (!seen[d.id]) { seen[d.id] = 1; out.push({ id: d.id, title: d.title, startsAt: d.startsAt, steer: d.steer, files: d.files }); } return; }
+            shots.forEach(function (x) {
+              var sn = x.snapshot, k = d.id + '@' + sn.draftRevision;
+              if (seen[k]) return;
+              seen[k] = 1;
+              out.push({ id: d.id, title: d.title, startsAt: d.startsAt, steer: typeof sn.steer === 'string' ? sn.steer : '', files: Array.isArray(sn.files) ? sn.files : [] });
+            });
+          });
+        });
+        S.dprep.drafts = out;
+        paintDetailPrep();
+      });
+    });
+  }
+  function prepItemHtml(d) {
+    var files = (d.files || []).filter(function (x) { return x && x.status !== 'removed' && String(x.name || '').trim(); });
+    var steer = String(d.steer || '').trim();
+    if (!steer && !files.length) return '';
+    var at = d.startsAt ? Date.parse(d.startsAt) : NaN;
+    var when = isFinite(at) ? new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' + clockOf(new Date(at)) : '';
+    return '<div class="mt-prep-item"><p class="mt-q">' + esc((cleanTitle(d.title) || 'Prep') + (when ? ' · ' + when : '')) + '</p>' +
+      (steer ? '<div class="mt-prep-steer">' + steer.split(/\n{2,}/).map(function (para) { return '<p>' + esc(para) + '</p>'; }).join('') + '</div>' : '') +
+      (files.length ? '<ul class="mt-files-list mt-prep-files">' + files.map(function (x) {
+        var meta = x.status === 'ready' ? (x.notice || '') : (x.notice || FILE_STATE[x.status] || '');
+        return '<li class="mt-up"><span class="mt-files-name">' + esc(x.name) + '</span>' + (meta ? '<span class="mt-up-meta mt-muted">' + esc(meta) + '</span>' : '') +
+          '<span class="mt-up-acts"><a class="mt-link" href="/api/prep/drafts/' + encodeURIComponent(d.id) + '/files/' + encodeURIComponent(x.id) + '" target="_blank" rel="noopener" aria-label="' + esc('Open ' + x.name) + '">Open</a></span></li>';
+      }).join('') + '</ul>' : '') + '</div>';
+  }
+  function detailPrepHtml() {
+    var dp = S.dprep;
+    if (!dp || !S.detail || dp.key !== detailPrepKey()) return '';
+    var items = dp.drafts.map(prepItemHtml).filter(Boolean);
+    return items.length ? '<section class="mt-panel mt-prep" aria-label="Prep"><h3 class="mt-ask-title">Prep</h3>' + items.join('') + '</section>' : '';
+  }
+  function paintDetailPrep() {
+    var el = $('mt-dprep'); if (!el || S.view !== 'detail') return;
+    var html = detailPrepHtml();
+    if (el.innerHTML !== html) el.innerHTML = html;
   }
   function paintBar() {
     if (S.view !== 'detail' || !S.detail) return;
@@ -1336,8 +1403,8 @@
     exchanges.reduce(function (all, e) { return all.concat(e.files || []); }, []).concat(current).forEach(function (f) { var k = f.id + '@' + f.revision; if (!seen[k]) { seen[k] = 1; out.push(f); } });
     return out;
   }
-  function fullContext(title, transcript, exchanges, files, cues, cueNote) {
-    var sections = ['# ' + title, '## Transcript\n' + transcript];
+  function fullContext(title, transcript, exchanges, files, cues, cueNote, plainTitle) {
+    var sections = [(plainTitle ? '' : '# ') + title, '## Transcript\n' + transcript];
     exchanges.forEach(function (e, i) {
       var ns = 'Q' + (i + 1), ans = e.answer != null ? e.answer : 'No answer (' + e.status + ').';
       (e.sources || []).forEach(function (s) { ans = ans.split('[' + s.id + ']').join('[' + ns + ':' + s.id + ']'); });
@@ -1814,7 +1881,7 @@
       icon('clip') + '<span>' + esc(title + extra) + (bad ? '<span class="mt-amber"> \u00b7 ' + esc(bad) + '</span>' : '') + '</span>' + (openable ? icon('chev') + '</button>' : '</div>');
     if (a.filesOpen && openable) {
       html += '<ul class="mt-files-list">' + shown.map(function (x) {
-        var line = [x.status !== 'ready' ? (x.notice || FILE_STATE[x.status] || '') : (x.notice || ''), x.origin === 'phone' ? 'Added from a phone or browser' : ''].filter(Boolean).join(' \u00b7 ');
+        var line = [x.status !== 'ready' ? (x.notice || FILE_STATE[x.status] || '') : (x.notice || ''), x.origin === 'phone' ? 'Added from a phone or browser' : x.origin === 'prep' ? 'From prep' : ''].filter(Boolean).join(' \u00b7 ');
         return '<li><span class="mt-files-name">' + esc(x.name) + '</span>' + (line ? '<span class="mt-muted">' + esc(line) + '</span>' : '') + '</li>';
       }).join('') + ups.map(uploadRowHtml).join('') + '</ul>' +
         (note ? '<p class="mt-amber-line mt-files-note" role="status">' + esc(note) + '</p>' : '') +
@@ -1916,6 +1983,8 @@
     var hours = f.turns.some(function (t) { return t.elapsedMs >= 3600000; });
     return [header].concat(f.turns.map(function (t) { return '[' + stampMs(t.elapsedMs, hours) + '] ' + t.speaker + ': ' + t.text; })).join('\n');
   }
+  // The full context's first line for a live meeting: "Live meeting: <its name>", never a bare "# Live meeting".
+  function liveContextTitle(f) { return 'Live meeting: ' + liveTitle(f); }
   function openLive(sid) {
     S.view = 'live';
     if (S.liveSid !== sid) { S.liveSid = sid; S.confirm = ''; S.liveCopy = ''; S.liveReason = ''; }
@@ -1930,10 +1999,10 @@
     pane.innerHTML = '<div class="cx mt mt-livev" data-tint="meetings"><div id="mt-lhead"></div><div class="mt-lgrid"><div class="mt-lmain" id="mt-lmain">' +
       '<div class="mt-tbox"><div id="mt-turns" class="mt-turns" tabindex="0" role="log" aria-live="polite" aria-label="Live transcript"></div>' +
       '<button type="button" class="cx-btn quiet mt-jump" id="mt-jump" data-mt="jump" hidden>Jump to live</button></div>' +
-      '<div id="mt-lbar" class="mt-lbarslot"></div><div id="mt-lfiles"></div><div id="mt-lfoot"></div>' +
+      '<div id="mt-lbar" class="mt-lbarslot"></div><div id="mt-lfiles"></div><div id="mt-lprep"></div><div id="mt-lfoot"></div>' +
       '<input type="file" id="mt-lpick" class="mt-pick" multiple accept="' + esc(LIVE_ACCEPT) + '" tabindex="-1" aria-hidden="true"></div>' +
       '<aside class="mt-side-panel" id="mt-ask-' + safeId(sid) + '" data-sid="' + esc(sid) + '">' + sidePanelHtml(sid) + '</aside></div></div>';
-    S.headHtml = S.footHtml = S.barHtml = S.filesHtml = null;
+    S.headHtml = S.footHtml = S.barHtml = S.filesHtml = S.prepHtml = null;
     paintLiveHead(); paintTurns(true); paintLiveFoot();
     clearInterval(S.liveTimer); clearInterval(S.clockTimer);
     livePoll();
@@ -2031,6 +2100,7 @@
     if (html !== S.headHtml) { S.headHtml = html; el.innerHTML = html; }
     if (W.crumb() !== liveTitle(f)) W.setCrumb(liveTitle(f));
     paintLiveBar(); paintLiveFiles();
+    suggestPrep(f); paintLivePrep();
   }
 
   // ── the recording bar (LiveRecordingBar, 0.5.339) ──────
@@ -2266,6 +2336,117 @@
     if (html !== S.filesHtml) { S.filesHtml = html; el.innerHTML = html; }
   }
   function liveNote(text) { LU().note = text; if (S.liveSid) A(S.liveSid).filesOpen = true; paintLiveFiles(); }
+  // ── Prep in the live view (6.99.19, PREP_CONTRACT_v1) ──
+  // A prep made before the call (the chat's Prep me) can join this meeting. GET /api/prep/suggest lists drafts whose
+  // start is near this recording's; one quiet line under the files offers the first. Only a tap on Add to this meeting
+  // binds it (POST .../bind): its notes and files then join the meeting's files, each marked From prep. The line has a
+  // fixed height and sits under the transcript box, so showing it, adding and the answer never move the transcript.
+  function prepCapsNow() { var cc = W.cosChat; return cc && typeof cc.prepCaps === 'function' ? cc.prepCaps() : null; }
+  function livePrep(sid) { if (!S.lprep || S.lprep.sid !== sid) S.lprep = { sid: sid, asked: false, drafts: [], busy: '', done: null, note: '' }; return S.lprep; }
+  function prepBoundTo(d, sid) { return ((d && d.bindings) || []).some(function (b) { return b && b.sessionId === sid && !b.removedAt; }); }
+  function prepReadyFiles(d) { return ((d && d.files) || []).filter(function (x) { return x && x.status === 'ready'; }); }
+  function prepHasNotes(d) { return !!String((d && d.steer) || '').trim(); }
+  function suggestPrep(f) {
+    if (!f || f.endedAt || !f.start || !canAddFiles(f)) return;
+    var p = livePrep(f.sid), cc = W.cosChat;
+    if (p.asked || !cc || typeof cc.ensureCaps !== 'function') return;
+    p.asked = true;
+    cc.ensureCaps().then(function () {
+      var caps = prepCapsNow();
+      if (!caps || !caps.suggest || !caps.bind) return;
+      return answer('/api/prep/suggest?sessionId=' + encodeURIComponent(f.sid) + '&startedAt=' + Math.round(f.start)).then(function (r) {
+        if (r.status !== 200 || !Array.isArray(r.body.drafts) || S.lprep !== p) return;
+        p.drafts = r.body.drafts.filter(function (d) { return d && typeof d.id === 'string' && !prepBoundTo(d, f.sid) && (prepHasNotes(d) || prepReadyFiles(d).length > 0); });
+        paintLivePrep();
+      });
+    });
+  }
+  function prepWhat(d) {
+    var n = prepReadyFiles(d).length, files = n + (n === 1 ? ' file' : ' files');
+    return prepHasNotes(d) ? (n ? 'its notes and ' + files : 'its notes') : 'its ' + files;
+  }
+  function livePrepHtml() {
+    var f = S.feeds[S.liveSid], p = S.lprep;
+    if (!f || !p || p.sid !== f.sid) return '';
+    var title = cleanTitle(p.done ? p.done.title : '') || '';
+    if (p.done) return '<div class="mt-prepline done" role="status"><span class="mt-prepline-text">' + esc('Added ' + (title ? 'the prep for ' + title : 'the prep') + ' to this meeting. Its files say From prep.') + '</span></div>';
+    var d = p.drafts[0];
+    if (!d || f.endedAt) return '';
+    title = cleanTitle(d.title) || 'this meeting';
+    var text = p.note || 'Prep for ' + title + (p.changed === d.id ? ' changed since it was offered: add ' : ' is ready: add ') + prepWhat(d) + ' to this meeting';
+    return '<div class="mt-prepline"><span class="mt-prepline-text' + (p.note ? ' mt-amber' : '') + '" title="' + esc(text) + '">' + esc(text) + '</span>' +
+      '<button type="button" class="cx-btn quiet" data-mt="prep-bind" data-id="' + esc(d.id) + '"' + (p.busy ? ' disabled' : '') + '>' + (p.busy ? 'Adding…' : 'Add to this meeting') + '</button></div>';
+  }
+  function paintLivePrep() {
+    var el = $('mt-lprep'); if (!el || S.view !== 'live') return;
+    var html = livePrepHtml();
+    if (html !== S.prepHtml) { S.prepHtml = html; el.innerHTML = html; }
+  }
+  var PREP_SERVER_CHANGED = 'The COS server on your Mac changed. The prep was read again; tap Add to this meeting again.';
+  var PREP_BIND_COPY = {
+    maintenance: 'COS is updating. Try again in a minute.', invalid_session_id: 'This recording does not take prep files.',
+    file_context_limit: 'This meeting holds as many files as Meeting Ask reads. Remove one in COS Control on your Mac, then try again.',
+    file_context_storage_limit: 'COS is out of room for meeting files. Remove some in COS Control on your Mac, then try again.',
+    not_found: 'That prep is no longer on your Mac.', unknown_session: 'COS does not know this recording yet. Try again in a moment.',
+    request_reused: 'COS saw a different request with the same id. Reload the page, then try again.'
+  };
+  function kb(n) { return Math.max(1, Math.round(num(n) / 1024)).toLocaleString() + ' KB'; }
+  // v1.1: the bind names the revision the line described ({revision, sessionId, serverInstanceId, surface}), so a newer
+  // version nobody has seen is never attached. serverInstanceId: the draft's, else the capability's, else Meeting Ask's.
+  function bindOnce(sid, d, again) {
+    var caps = prepCapsNow() || {};
+    var known = (typeof d.serverInstanceId === 'string' && d.serverInstanceId) || (again ? '' : caps.serverInstanceId) || '';
+    return (known ? Promise.resolve(known) : loadConfig(again).then(function (conf) { return conf && conf.serverInstanceId; })).then(function (inst) {
+      if (!inst) throw new Error(S.conf.notice || 'Meeting assistance is not available on this server.');
+      // Amendment 19: the header is what authorizes the write; the body carries the same id.
+      return answer('/api/prep/drafts/' + encodeURIComponent(d.id) + '/bind', { method: 'POST', headers: { 'X-COS-Expected-Server-Instance': inst }, body: { revision: d.revision, sessionId: sid, serverInstanceId: inst, surface: 'web' } });
+    }).then(function (a) {
+      var b = a.body || {}, code = typeof b.error === 'string' ? b.error : (b.error && b.error.code) || b.reason || '';
+      if (a.status >= 200 && a.status < 300) return b;
+      // The server restarted between the offer and the tap: the prep is read again (amendment 19) and the line says so.
+      // Adding it again takes another tap, against the server as it is now.
+      if (a.status === 409 && code === 'server_instance_mismatch') {
+        return answer('/api/prep/drafts/' + encodeURIComponent(d.id)).then(function (g) {
+          var e = new Error(PREP_SERVER_CHANGED);
+          e.draft = g.status === 200 && g.body.draft ? g.body.draft : Object.assign({}, d, { serverInstanceId: typeof b.serverInstanceId === 'string' ? b.serverInstanceId : '' });
+          e.changedServer = true;
+          throw e;
+        });
+      }
+      if (a.status === 428 && typeof console !== 'undefined') console.error('[prep] bind went without X-COS-Expected-Server-Instance');
+      var err = new Error(a.status === 0 ? 'COS on your Mac did not answer. Try again when it is awake.' : a.status === 401 ? SIGNED_OUT
+        : a.status === 428 ? 'This page did not name the Mac\u2019s COS server, so nothing was added. Reload the page, then try again.'
+        : code === 'file_context_limit' && b.needBytes != null ? 'This meeting has too much file text for this prep: it needs ' + kb(b.needBytes) + ' and the meeting has room for ' + kb(b.haveBytes) + '. Remove a large file from the meeting in COS Control on your Mac, then try again.'
+        : PREP_BIND_COPY[code] || (a.status === 404 ? PREP_BIND_COPY.not_found : 'COS could not add the prep (HTTP ' + a.status + '). Try again.'));
+      // Changed since it was offered: the line now describes the newer version, and adding it takes another tap.
+      if (a.status === 409 && code === 'revision_conflict' && b.draft) err.draft = b.draft;
+      throw err;
+    });
+  }
+  // Only from a tap on Add to this meeting: nothing here binds on its own.
+  function bindPrep(id) {
+    var f = S.feeds[S.liveSid], p = S.lprep;
+    if (!f || !p || p.sid !== f.sid || p.busy || p.done || f.endedAt) return;
+    var d = p.drafts.filter(function (x) { return x.id === id; })[0]; if (!d) return;
+    p.busy = id; p.note = ''; paintLivePrep();
+    bindOnce(f.sid, d, false).then(function (b) {
+      p.busy = ''; p.done = (b && b.draft) || d;
+      var a = A(f.sid);
+      // The meeting's files as the bind answered them, when it answered Meeting Ask files; and read again either way.
+      if (Array.isArray(b && b.files) && b.files.every(function (x) { return x && typeof x.id === 'string' && x.revision != null; })) a.files = b.files;
+      a.filesOpen = true;
+      paintLivePrep(); paintLiveFiles();
+      (a.openP || Promise.resolve()).then(function () { return askOpen(f.sid, 'poll'); });
+    }, function (err) {
+      p.busy = '';
+      if (err && err.draft && typeof err.draft.id === 'string') {
+        p.drafts = [err.draft].concat(p.drafts.filter(function (x) { return x.id !== err.draft.id; }));
+        if (err.changedServer) p.note = err.message; else { p.changed = err.draft.id; p.note = ''; }
+      }
+      else p.note = 'Not added. ' + ((err && err.message) || 'Try again.');
+      paintLivePrep();
+    });
+  }
   function findUpload(id) { var u = LU(); for (var i = 0; i < u.items.length; i++) if (u.items[i].id === id) return u.items[i]; return null; }
   function onLivePaste(e) {
     if (S.view !== 'live') return;
@@ -2378,7 +2559,9 @@
     if (contextReady([f.sid])) {
       var a = A(f.sid);
       var cueNote = a.cues ? null : (a.cuesState && a.cuesState !== 'older' ? 'Context coverage: cues could not be read from the server.' : null);
-      var text = fullContext('Live meeting', f.turns.length ? liveCopyText(f) : '', a.history, evidenceFiles(a.history, a.files || []), a.cues || [], cueNote) + (a.error ? '\n\nContext coverage: ' + a.error : '');
+      // The first line names the meeting in plain words ("Live meeting: <title>"), so a session started from this paste
+      // is titled by it; the sections under it are what they were.
+      var text = fullContext(liveContextTitle(f), f.turns.length ? liveCopyText(f) : '', a.history, evidenceFiles(a.history, a.files || []), a.cues || [], cueNote, true) + (a.error ? '\n\nContext coverage: ' + a.error : '');
       W.copyText(text).then(function () { done('Copied full meeting context'); }, function (err) { done(err.message); });
       return;
     }
@@ -2476,6 +2659,7 @@
       case 'live-copy': liveCopy('transcript'); return;
       case 'live-context': liveCopy('context'); return;
       case 'jump': jumpToLive(); return;
+      case 'prep-bind': bindPrep(t.getAttribute('data-id')); return;
     }
   });
   pane.addEventListener('input', function (e) {

@@ -306,6 +306,28 @@
 .mt-up-bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--accent); transition: width 0.2s ease; }
 @media (prefers-reduced-motion: reduce) { .mt-up-bar { transition: none; } }
 #mt-lfiles .mt-files { margin-top: 0; }
+/* 6.99.19: one quiet line offering a prep made before the call. A fixed height (two lines of words at most, the button
+   beside them), under the transcript box, so it appearing, Adding… and Added never move the transcript or each other. */
+#mt-lprep:empty { display: none; }
+#mt-lprep { margin-top: 8px; container-type: inline-size; }
+.mt-prepline { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 6px 0 12px; border: 1px solid var(--hairline); border-radius: 9px; min-width: 0; }
+/* Narrow (a phone): the words take the full width over the button, so the sentence is read whole; still one fixed height. */
+@container (max-width: 559px) {
+  .mt-prepline { display: grid; grid-template-columns: minmax(0, 1fr); align-content: center; gap: 6px; height: 96px; padding: 8px 8px 8px 12px; }
+  .mt-prepline .cx-btn { justify-self: end; }
+}
+.mt-prepline-text { flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--sub); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.mt-prepline .cx-btn { flex: none; white-space: nowrap; height: 36px; }
+.mt-prepline.done .mt-prepline-text { color: var(--ink); }
+/* The saved meeting's Prep: what it focused on and its files. */
+#mt-dprep:empty { display: none; }
+.mt-prep { margin: 12px 0; display: grid; gap: 10px; }
+.mt-prep-item { display: grid; gap: 6px; }
+.mt-prep-item .mt-q { margin: 0; }
+.mt-prep-steer p { margin: 0 0 0.5em; font-size: 14px; line-height: 1.5; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mt-prep-steer p:last-child { margin-bottom: 0; }
+.mt-prep-files { border: 1px solid var(--hairline); border-radius: 9px; }
+.mt-prep-files li:last-child { border-bottom: 0; }
 #mt-lfoot .mt-bar { border-top: 0; }
 @media (min-width: 860px) {
   .mt-turns { height: clamp(320px, calc(100dvh - 400px), 1100px); }
