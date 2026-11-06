@@ -765,6 +765,30 @@ describe('Prep in a saved meeting', () => {
     expect(items[1]).not.toMatch(/mt-prep-steer/)
   })
 
+  it('several binds per draft: only the current one shows; a removed one never shows, even without removedAt; applying stays honest', async () => {
+    const t = load({ prep: true })
+    const B = 'prep_' + 'B'.repeat(26), C2 = 'prep_' + 'D'.repeat(26)
+    t.server.bySession[SID] = [
+      SNAPSHOT({ draftRevision: 7, current: true, state: 'applied', steer: 'Current bind of A.' }),
+      SNAPSHOT({ draftRevision: 4, current: false, state: 'applied', steer: 'Earlier bind of A.' }),
+      SNAPSHOT({ draftId: B, title: 'Gina 1:1', current: true, state: 'removed', steer: 'Removed bind of B.' }),
+      SNAPSHOT({ draftId: C2, title: 'Pricing review', current: true, state: 'applying', steer: 'Applying bind of C.' }),
+      SNAPSHOT({ draftId: C2, title: 'Pricing review', draftRevision: 2, current: false, state: 'applying', steer: 'Superseded applying bind of C.' }),
+    ]
+    t.pane$.load(['quilt', '2026-11', '2026-11-06_Weekly_marketing_sync.md'])
+    await flush(14)
+    const html = t.$('mt-dprep').innerHTML
+    expect(html).toMatch(/Current bind of A\./)
+    expect(html).not.toMatch(/Earlier bind of A/)
+    expect(html).not.toMatch(/Removed bind of B|Gina 1:1/)
+    expect(html).toMatch(/Applying bind of C\./)
+    expect(html).not.toMatch(/Superseded applying bind/)
+    const items = html.split('<div class="mt-prep-item">').slice(1)
+    expect(items).toHaveLength(2)
+    expect(items[1]).toMatch(/Still being added to this meeting\./)
+    expect(items[0]).not.toMatch(/Still being added/)
+  })
+
   it('a prep taken back off this meeting (its binding removed) is not listed', async () => {
     const t = load({ prep: true })
     t.server.bySession[SID] = [SNAPSHOT({ removedAt: '2026-11-06T16:00:00.000Z' })]

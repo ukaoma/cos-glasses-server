@@ -1276,8 +1276,13 @@
           // time (title, startsAt, steer, files), never the draft as it is now. A binding taken back off (removedAt) is
           // not shown. Open links name the draft and the file.
           if (r.status !== 200 || !Array.isArray(r.body.snapshots)) return;
-          r.body.snapshots.forEach(function (sn) {
-            if (!sn || typeof sn.draftId !== 'string' || sn.removedAt) return;
+          // Several binds of one draft are kept, newest first; `current` marks the one the meeting's copies hold now.
+          // Only that one is shown when the server marks it. A 'removed' bind (or removedAt) is never shown.
+          var rows = r.body.snapshots.filter(function (sn) { return sn && typeof sn.draftId === 'string' && sn.state !== 'removed' && !sn.removedAt; });
+          var hasCurrent = {};
+          r.body.snapshots.forEach(function (sn) { if (sn && sn.current === true) hasCurrent[sn.draftId] = 1; });
+          rows.forEach(function (sn) {
+            if (hasCurrent[sn.draftId] && sn.current !== true) return;
             var k = sn.draftId + '@' + sn.draftRevision;
             if (seen[k]) return;
             seen[k] = 1;

@@ -1362,7 +1362,7 @@
   function settleRun(p, r, mayRedrive) {
     p.running = false;
     var code = prepCode(r), run = r.body && r.body.run;
-    if (r.status === 202 || r.status === 200) { setPendingRun(p, null); return startPrepJob(p, run || {}, r.body.job || null); }
+    if (r.status === 202 || r.status === 200) { setPendingRun(p, null); return ended(p, run, r.body.job) || startPrepJob(p, run || {}, r.body.job || null); }
     if (r.status === 0) return recoverPrepRun(p, p.pending ? p.pending.rid : '');
     // One run at a time per draft. Still being submitted: send THAT run again, with its own params (the server
     // re-drives it). Already taken: show it, as its own Ask, instead of a second one.
@@ -1397,7 +1397,7 @@
   function recoverPrepRun(p, rid, tries) {
     tries = tries || 0;
     return prepCall(prepPath(p) + '/runs/' + encodeURIComponent(rid)).then(function (r) {
-      if (r.status === 200 && r.body.run && r.body.run.clientJobId) { setPendingRun(p, null); return startPrepJob(p, r.body.run, r.body.job || null); }
+      if (r.status === 200 && r.body.run && (r.body.run.clientJobId || r.body.run.outcome)) { setPendingRun(p, null); return ended(p, r.body.run, r.body.job) || startPrepJob(p, r.body.run, r.body.job || null); }
       if (r.status === 202 && tries < PREP_RUN_WAITS.length) {
         setPrepNote(p, 'Your Mac is starting this prep.', false); p.running = true; paintPrep();
         return new Promise(function (res) { setTimeout(res, PREP_RUN_WAITS[tries]); }).then(function () { p.running = false; return recoverPrepRun(p, rid, tries + 1); });
@@ -1405,6 +1405,22 @@
       if (r.status === 202 || (r.status === 404 && prepCode(r) === 'run_not_accepted') || (r.status === 503 && prepCode(r) === 'run_status_unknown')) return notStarted(p);
       return recoverFromDraft(p, rid);
     });
+  }
+  // A run that already ended and whose job the Mac no longer keeps (outcome 'unavailable', job null): there is nothing
+  // to poll. Its copied answer is shown when the Mac kept one; otherwise one line says so. The stored run is released
+  // by the caller, so the next tap is a fresh run.
+  function ended(p, run, job) {
+    if (!run || job || !(run.outcome === 'unavailable' || run.settledAt)) return false;
+    if (typeof run.answer === 'string' && run.answer) {
+      var a = { cid: run.clientJobId || uuid(), query: prepQuery(p), at: Date.now(), status: 'completed', partial: '', response: run.answer, dropId: '', replyKey: '', prepDraftId: p.draft.id, atts: [] };
+      C.asks.push(a);
+      if (P === p) closePrep();
+      paintFeed(true);
+      return true;
+    }
+    setPrepNote(p, 'This prep finished earlier, but its answer is no longer kept. Tap Prep me to run it again.', true);
+    paintPrep();
+    return true;
   }
   function notStarted(p) {
     setPrepNote(p, 'COS on your Mac did not answer, so this prep may not have started. Tap Prep me again; it will not run twice.', true);

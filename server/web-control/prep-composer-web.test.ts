@@ -592,6 +592,52 @@ describe('a run in flight is never lost (review item 1)', () => {
   })
 })
 
+describe('runs the Mac no longer keeps, and no re-drive for a new id (server 357b0f5)', () => {
+  const storedRun = (h: ReturnType<typeof load>) => (h.store.get('cos.web.prepDrafts') as any)['item:fi_prep1'].run
+  it("outcome 'unavailable' with job null: the stored run is released, one plain line, no polling and no by-client lookup", async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = ['lost', 'lost']
+    h.script['GET runs'] = [{ status: 200, body: { run: { clientRequestId: 'x', clientJobId: 'cj-gone', state: 'accepted', outcome: 'unavailable', settledAt: '2026-11-06T18:00:00.000Z', answer: null }, job: null } }]
+    h.chat._runPrep(); await flush(12)
+    expect(h.chat._prep().note).toBe('This prep finished earlier, but its answer is no longer kept. Tap Prep me to run it again.')
+    expect(storedRun(h)).toBeUndefined()
+    expect(h.chat._state.asks).toHaveLength(0)
+    expect(h.apiCalls.filter(c => /query-jobs/.test(c.path))).toEqual([])
+    await new Promise(r => setTimeout(r, 1700)); await flush()
+    expect(h.calls.filter(c => /\/runs\//.test(c.path))).toHaveLength(1)
+    // The next tap is a fresh run.
+    h.chat._runPrep(); await flush(12)
+    const runs = h.calls.filter(c => c.path.endsWith('/run'))
+    expect(runs.at(-1)!.body.clientRequestId).not.toBe(runs[0].body.clientRequestId)
+  })
+
+  it('a replayed run that ended with its answer copied shows that answer as a finished Ask, with nothing to poll', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = [{ status: 202, body: { job: null, run: { clientRequestId: 'r', clientJobId: 'cj-old', state: 'accepted', outcome: 'unavailable', settledAt: 'x', answer: 'Kept answer.' }, draft: h.draft } }]
+    h.chat._runPrep(); await flush(12)
+    expect(h.chat._state.asks[0]).toMatchObject({ cid: 'cj-old', status: 'completed', response: 'Kept answer.' })
+    expect(h.apiCalls.filter(c => /query-jobs/.test(c.path))).toEqual([])
+    expect(h.chat._prep()).toBe(null)
+  })
+
+  it('409 run_in_progress for an accepted run (a new id never re-drives): no second POST; the run already going is shown', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = [{ status: 409, body: { error: 'run_in_progress', run: { clientRequestId: 'old', clientJobId: 'cj-going', state: 'accepted', jobId: 'job_g' } } }]
+    h.jobs['/api/query-jobs/by-client/cj-going?generation=1'] = { job: { jobId: 'job_g', status: 'running' } }
+    h.chat._runPrep(); await flush(12)
+    expect(h.calls.filter(c => c.path.endsWith('/run'))).toHaveLength(1)
+    expect(h.chat._state.asks[0]).toMatchObject({ cid: 'cj-going', jobId: 'job_g' })
+    // Nothing in the page reads a `redriven` flag: only run.state decides a resend.
+    expect(SOURCE).not.toMatch(/redriven/)
+  })
+})
+
 describe('the draft limit and Archive this prep (review item 3)', () => {
   it('507 prep_draft_limit says how to free a slot', async () => {
     const h = load({ prep: true })
