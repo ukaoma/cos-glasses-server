@@ -648,6 +648,18 @@ export class DropService {
     return { drops: views.slice(0, limit), more: views.length > limit, cardStates }
   }
 
+  /**
+   * 6.99.16: the drops a COS thread digest carries (lib/cos-thread.ts): created at or after `sinceIso`, newest first,
+   * undone ones left out. Reads the store only; never touches Work.
+   */
+  recentDrops(sinceIso: string, limit: number): Array<Pick<DropRecord, 'text' | 'createdAt' | 'state' | 'dest' | 'links'>> {
+    return this.deps.drops.list()
+      .filter(r => r.state !== 'undone' && r.createdAt >= sinceIso)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, Math.max(0, limit))
+      .map(r => ({ text: r.text, createdAt: r.createdAt, state: r.state, dest: r.dest, links: r.links }))
+  }
+
   /** Releases both stores' writer locks (shutdown and tests). */
   close(): void { this.deps.drops.close(); this.deps.feed.close() }
 

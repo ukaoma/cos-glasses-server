@@ -22,6 +22,13 @@
    The same composer answers in the message reader (6.99.12): Reply sends that turn's sessionId, so the answer continues
    that conversation when it is still live (lib/web-ask-admission.ts).
 
+   6.99.16, the COS thread (capabilities.dropIt.thread, routes/cos-thread.ts): each Ask from the chat's own composer
+   reads GET /api/cos-thread first. `continue` sends that sessionId; `fresh` sends none and carries the server's digest
+   as the Ask's `reference` (the query-jobs field for quoted context, so the Messages row shows only the question).
+   While an Ask in the thread is still answering, the next one continues its conversation without asking. When an Ask
+   finishes, POST /api/cos-thread/turn once with its answer. "New thread" in the header posts /api/cos-thread/new.
+   Without the capability, the old rule stands: one conversation per day, kept in this browser.
+
    The rail badge on Messages is a number for `waiting` (GET /api/inbox/summary) and a dot for unread only. It is read
    with the shell's existing status read (shell.js checkServer), never on a timer of its own, and painting it touches
    only the badge, never the pane. */
@@ -44,7 +51,10 @@
     models: null,           // [{ value, label, available }]
     host: null,
     onChange: null,         // messages.js: re-render when Drop it or Ask turns on or off
-    onAnswered: null        // messages.js: re-read Recent when a web Ask lands
+    onAnswered: null,       // messages.js: re-read Recent when a web Ask lands
+    thread: null,           // 6.99.16: the last GET /api/cos-thread answer
+    threadCarried: '',      // the thread's newest session started fresh: 'summary' (it carried a digest) or 'plain'
+    threadBusy: false
   };
   var saved = W.readStore(STORE);
   C.model = typeof saved.model === 'string' ? saved.model : '';
@@ -82,6 +92,8 @@
   function dropFiles() { return C.caps && C.caps.dropIt && C.caps.dropFiles > 0 ? C.caps.dropFiles : 0; }
   function askOn() { return !!(C.caps && C.caps.jobs); }
   function on() { return dropOn() || askOn(); }
+  // 6.99.16: the COS thread, advertised inside dropIt while Drop it is on.
+  function threadOn() { return !!(C.caps && C.caps.dropIt && C.caps.thread); }
   function setCaps(h) {
     var caps = (h && h.capabilities) || {};
     var drop = caps.dropIt;
@@ -90,9 +102,10 @@
       // 6.99.13: how many files a drop takes. 0 (an older server): Drop is words only and says so.
       dropFiles: drop && drop.enabled === true && Number.isInteger(drop.attachments) && drop.attachments > 0 ? Math.min(drop.attachments, MAX_ATTS) : 0,
       jobs: caps.durableQueryJobs === true || h && h.durableQueryJobs === true || !!(caps.durableQueryJobs && caps.durableQueryJobs.enabled),
-      steer: !!(C.caps && C.caps.steer)
+      steer: !!(C.caps && C.caps.steer),
+      thread: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1)
     };
-    var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs;
+    var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs || C.caps.thread !== next.thread;
     var filesChanged = !!C.caps && C.caps.dropFiles !== next.dropFiles;
     C.caps = next;
     if (!next.dropIt) { clearRail(); C.summary = null; }
@@ -268,14 +281,16 @@
   }
 
   // ── the chat ──────────────────────────────────────────
-  function chatMode() { return dropOn() ? 'drop' : 'ask'; }
+  function chatMode() { return dropOn() ? (threadOn() ? 'drop-thread' : 'drop') : 'ask'; }
   function chatSkeleton() {
     var drop = dropOn();
     return '<section class="cc" data-cos-chat data-mode="' + chatMode() + '" data-tint="messages" aria-label="' + (drop ? 'COS chat' : 'Ask COS') + '">' +
       '<header class="cc-head"><span class="cc-avatar big">' + MARK + '</span><div class="cc-head-text"><h2 class="cc-title">' + (drop ? 'COS' : 'Ask COS') + '</h2>' +
         '<p class="cc-sub">' + (drop ? 'Text it anything: a thought, an ask, a reminder. It texts back.' : 'Ask anything, with photos or files. Each answer lands in Messages with its number, here and on the glasses.') + '</p></div>' +
         '<div class="cc-head-acts"><button type="button" class="link-btn cc-all" data-cos="all">All messages</button>' +
-        (drop ? '<button type="button" class="link-btn" data-cos="read-all">Mark all read</button>' : '') + '</div></header>' +
+        (drop ? '<button type="button" class="link-btn" data-cos="read-all">Mark all read</button>' : '') +
+        (threadOn() ? '<button type="button" class="link-btn" data-cos="new-thread">New thread</button>' : '') + '</div>' +
+        (threadOn() ? '<p class="cc-thread" data-cos-thread role="status">' + esc(threadLine()) + '</p>' : '') + '</header>' +
       '<div class="cc-feed" data-cos-feed aria-live="polite"></div>' +
       composerHtml(CHAT, { drop: drop, placeholder: drop ? 'Ask COS, or drop a thought, a task, a reminder' : 'Ask COS anything', label: 'Message to COS' }) +
       '</section>';
@@ -291,6 +306,7 @@
     }
     if (!visible) return;
     loadModels();
+    if (threadOn()) loadThread();
     // Ask only: no inbox to read; the chat holds this page's Asks. Inbox lines from a Drop it session are not shown.
     if (!dropOn()) { if (C.feedMode !== 'ask') { C.items = []; C.feedState = 'ready'; C.feedMode = 'ask'; } paintFeed(true); return; }
     if (C.items === null || C.feedState === 'error' || C.feedMode !== 'drop') loadFeed(); else paintFeed(true);
@@ -750,6 +766,61 @@
     return ids.length ? { attachmentIds: ids } : undefined;
   }
 
+  // ── the COS thread (6.99.16) ──────────────────────────
+  var THREAD_REF = 'Summary carried over from earlier in this COS thread';
+  function threadLine() {
+    var t = C.thread && C.thread.thread, n = C.thread && C.thread.next;
+    var carried = C.threadCarried || (n && n.reason === 'manual' ? (n.digest ? 'summary' : 'plain') : '');
+    if (carried) return carried === 'summary' ? 'New thread. It carries a short summary of the last one.' : 'New thread.';
+    var asks = t && Number(t.asks) > 0 ? Number(t.asks) : 0;
+    return asks ? 'Continues your COS thread · ' + asks + (asks === 1 ? ' ask' : ' asks') : '';
+  }
+  function paintThread() {
+    var line = threadLine();
+    document.querySelectorAll('[data-cos-thread]').forEach(function (el) { el.textContent = line; });
+  }
+  function loadThread() {
+    return api('/api/cos-thread').then(function (t) { C.thread = t; paintThread(); return t; }, function () { return null; });
+  }
+  // What the next Ask in the thread sends: a sessionId to continue, or none and the digest to carry.
+  function threadPlan() {
+    // An Ask in the thread still answering: the next one continues its conversation (its turn is not recorded yet).
+    var live = C.asks.filter(function (x) { return x.threaded && x.sessionId && x.turnState !== 'done' && Date.now() - x.at < 20 * 60000; });
+    if (live.length) return Promise.resolve({ sessionId: live[live.length - 1].sessionId, digest: null });
+    return loadThread().then(function (t) {
+      var n = t && t.next;
+      if (n && n.mode === 'continue' && n.sessionId) return { sessionId: n.sessionId, digest: null };
+      if (n && n.mode === 'fresh') return { sessionId: '', digest: typeof n.digest === 'string' && n.digest ? n.digest : null };
+      // The thread could not be read: continue the session it last named, if any.
+      var last = C.thread && C.thread.thread && C.thread.thread.sessionId;
+      return { sessionId: last || '', digest: null };
+    });
+  }
+  // Once per Ask, when it has finished: the thread records it, with the answer when there is one.
+  function postTurn(a) {
+    if (!a.threaded || !a.sessionId || a.turnState) return;
+    a.turnState = 'posting';
+    var body = { clientId: a.cid, sessionId: a.sessionId, query: String(a.query).slice(0, 20000) };
+    if (a.status === 'completed' && typeof a.response === 'string' && a.response) body.answer = a.response.slice(0, 40000);
+    if (Number.isInteger(a.no) && a.no > 0) body.messageNo = a.no;
+    api('/api/cos-thread/turn', { method: 'POST', body: body }).then(function (t) {
+      a.turnState = 'done';
+      if (t && t.thread) { C.thread = t; paintThread(); }
+    }, function () { a.turnState = 'done'; });
+  }
+  function newThread() {
+    if (C.threadBusy) return;
+    C.threadBusy = true;
+    api('/api/cos-thread/new', { method: 'POST', body: {} }).then(function (t) {
+      C.threadBusy = false;
+      C.thread = t; C.threadCarried = '';
+      paintThread();
+    }, function (err) {
+      C.threadBusy = false;
+      W.toast((err && err.message) || 'New thread did not go through.');
+    });
+  }
+
   // ── Ask ───────────────────────────────────────────────
   function doAsk(k) {
     k = k || CHAT;
@@ -774,7 +845,9 @@
     var body = { clientJobId: a.cid, generation: 1, query: text, source: 'web', activityToolMode: 'status' };
     if (C.model) body.model = C.model;
     if (C.effort) body.effort = C.effort;
-    if (C.session && C.session.id) body.sessionId = C.session.id;
+    // 6.99.16: an Ask from the chat's own composer belongs to the COS thread (a Reply keeps its turn's conversation).
+    a.threaded = threadOn() && !opts.replyKey;
+    if (!a.threaded && C.session && C.session.id) body.sessionId = C.session.id;
     // A reply continues the turn's own conversation (kept when it is still live; else the server starts a new one).
     if (opts.sessionId) body.sessionId = opts.sessionId;
     if (opts.attachmentIds && opts.attachmentIds.length) body.attachmentIds = opts.attachmentIds.slice(0, MAX_ATTS);
@@ -788,10 +861,16 @@
         throw err;
       });
     };
-    admit(true).then(function (d) {
+    var prepare = a.threaded ? threadPlan().then(function (plan) {
+      if (plan.sessionId) body.sessionId = plan.sessionId;
+      else if (plan.digest) body.reference = { query: THREAD_REF, response: plan.digest };
+      a.carried = plan.sessionId ? '' : plan.digest ? 'summary' : 'plain';
+    }) : Promise.resolve();
+    prepare.then(function () { return admit(true); }).then(function (d) {
       var job = d && d.job; if (!job) throw new Error('The Mac did not take the question.');
       take(a, job);
-      if (job.sessionId && !a.replyKey) { C.session = { id: job.sessionId, day: today() }; save(); }
+      if (a.threaded) { C.threadCarried = a.carried; paintThread(); }
+      else if (job.sessionId && !a.replyKey) { C.session = { id: job.sessionId, day: today() }; save(); }
       if (dropId) api('/api/drops/' + encodeURIComponent(dropId) + '/ask', { method: 'POST', body: { clientJobId: a.cid, generation: 1 } }).catch(function () {});
       if (done) done(true);
       poll(a);
@@ -828,6 +907,7 @@
     setTimeout(tick, 600);
   }
   function finished(a) {
+    postTurn(a);
     if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false);
     if (C.onAnswered) C.onAnswered();
     // A drop that became a question gets its answer as a follow-up: read the chat again.
@@ -944,6 +1024,7 @@
     if (what === 'drop') return doDrop();
     if (what === 'all') return W.go('messages');
     if (what === 'read-all') return markReadIfShown(true);
+    if (what === 'new-thread') return newThread();
     if (what === 'retry') { C.feedState = 'idle'; return loadFeed(); }
     if (what === 'act') return act(t.getAttribute('data-item'), t.getAttribute('data-act'));
     if (what === 'move-to') return moveTo(t.getAttribute('data-item'), t.getAttribute('data-dest'), t.getAttribute('data-domain'));
@@ -1030,6 +1111,6 @@
     setOnChange: function (fn) { C.onChange = fn; }, setOnAnswered: function (fn) { C.onAnswered = fn; },
     // Test and render hooks: what the chat holds right now.
     classify: classify, uploadMedia: uploadMedia, uploadErrorText: uploadErrorText, uuid: uuid,
-    _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps
+    _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn
   };
 })();

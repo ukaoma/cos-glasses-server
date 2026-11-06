@@ -457,3 +457,20 @@ describe('the pinned line (6.99.15)', () => {
     expect(pinLine({ kind: 'ping', title: 'Prep for Silas', line: '' })).toBe('Prep for Silas')
   })
 })
+
+describe('recentDrops (6.99.16, the COS thread digest)', () => {
+  it('newest first, since the given instant, undone ones left out, at most the limit', async () => {
+    const h = harness()
+    const a = await h.service.submit(drop('Draft the onboarding email sequence for new liquor stores'))
+    h.advance(60_000)
+    const b = await h.service.submit(drop('remember that the Tulsa store prefers email'))
+    h.advance(60_000)
+    const c = await h.service.submit(drop('remind me Thursday to send the numbers'))
+    await h.service.undo(c.drop.id)
+    const all = h.service.recentDrops('2026-11-04T00:00:00.000Z', 12)
+    expect(all.map(d => d.text)).toEqual([b.drop.text, a.drop.text])
+    expect(all[0]).toMatchObject({ state: 'filed', dest: 'memory', links: [{ kind: 'memory' }] })
+    expect(h.service.recentDrops('2026-11-04T15:00:30.000Z', 12).map(d => d.text)).toEqual([b.drop.text])
+    expect(h.service.recentDrops('2026-11-04T00:00:00.000Z', 1)).toHaveLength(1)
+  })
+})

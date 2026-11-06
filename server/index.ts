@@ -132,7 +132,7 @@ import { skillsRouter } from './routes/skills.js'
 import { shutdownLiveCues } from './lib/live-cues-engine.js'
 import { shutdownLiveCuesV2 } from './lib/live-cues-v2.js'
 import { prewarmContext } from './lib/context-builder.js'
-import { preWarmCLI } from './lib/claude-bridge.js'
+import { getCliSessionId, preWarmCLI } from './lib/claude-bridge.js'
 import { sweepStaleTurnRequests } from './lib/turn-request.js'
 import { getCodexRunConfig } from './lib/codex-run-ledger.js'
 import {
@@ -147,7 +147,7 @@ import { initSessionCache } from './lib/session-cache-writer.js'
 import { initSpeakerEmbeddings } from './lib/speaker-embeddings.js'
 import { startNemotronWarmup } from './lib/nemotron-live.js'
 import { killNemotronChildren } from './lib/nemotron-cli.js'
-import { logActiveSessionsOnShutdown, startAutoSnapshot } from './lib/conversation.js'
+import { getSessionRaw, logActiveSessionsOnShutdown, startAutoSnapshot } from './lib/conversation.js'
 import { getMediaStore } from './lib/media-store.js'
 import { listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
 import { serverMetrics } from './lib/server-metrics.js'
@@ -170,6 +170,8 @@ import { createWorkLensRoundsRouter } from './routes/work-lens-rounds.js'
 import { startWorkOrchestrator } from './lib/work-orchestrator/runtime.js'
 import { createWorkSearchRouter } from './routes/work-search.js'
 import { createDropsRouter, lazyDropService, openDropService } from './routes/drops.js'
+import { createCosThreadRouter } from './routes/cos-thread.js'
+import { claudeContextReader, CosThread, describeDropFiling, lazyCosThread } from './lib/cos-thread.js'
 import { mediaDropAttachments } from './lib/drop-attachments.js'
 import { createDropRouter, sharedDropJevClient, dropDailyCap, dropRouterEnabled } from './lib/drop-router.js'
 import { createBridgeDropWriters } from './lib/drop-destinations.js'
@@ -972,6 +974,22 @@ app.use('/api', createDropsRouter({
     rows: () => workBoardReader.read(10_000, 3_000).catch(() => null),
   }),
 }))
+// 6.99.16: the COS thread (routes/cos-thread.ts): one size-capped conversation behind the COS chat's Ask, with a
+// ledger to recover and search it. Gated with Drop it; its store opens on first use, so an install with it off writes
+// nothing. It reads the Claude Code log tail of the thread's session and the drop store; it calls no model.
+const cosThread = lazyCosThread(() => new CosThread({
+  dir: dataPath('cos-thread'),
+  context: claudeContextReader({ sessionExists: id => !!getSessionRaw(id), nativeFor: id => getCliSessionId(id) }),
+  nativeFor: id => getCliSessionId(id),
+  drops: (since, limit) => (dropService()?.recentDrops(since, limit) ?? []).map(d => ({ text: d.text, createdAt: d.createdAt, filed: describeDropFiling(d) })),
+  answerFor: (sessionId, clientId, messageNo) => {
+    const exchanges = getSessionRaw(sessionId)?.exchanges ?? []
+    const id = clientId.toLowerCase()
+    const hit = exchanges.find(e => e.role === 'assistant' && (e.clientJobId === id || (messageNo !== null && e.globalMsgNum === messageNo)))
+    return hit?.content
+  },
+}))
+app.use('/api', createCosThreadRouter({ enabled: () => dropItEnabled(), thread: cosThread }))
 // Find a session by meaning (Control 0.5.363): consent per provider, its own ledgers and breakers (lib/session-find.ts).
 app.use('/api', createSessionFindRouter())
 app.use('/api', createWorkChatRouter())

@@ -168,3 +168,7 @@
 .cc-dfile-thumb .icon { width: 18px; height: 18px; }
 .cc-dfile-name { min-width: 0; flex: 1; font: 500 13.5px/1.3 var(--body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-dfile-open { flex: none; font: 600 13px/1 var(--body); color: var(--accent); }
+
+/* 6.99.16: the COS thread's one quiet line, under the title row. */
+.cc-thread { flex-basis: 100%; margin: 0; font-size: 12.5px; line-height: 1.35; color: var(--tertiary); }
+.cc-thread:empty { display: none; }
