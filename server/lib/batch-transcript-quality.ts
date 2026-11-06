@@ -31,6 +31,8 @@ export interface SegmentStt {
   primary: SttHypothesis
   secondOpinion?: SttHypothesis
   resolver: { version: string; enabled: boolean; applied: boolean; wordsFromSecond: number; skipped?: string }
+  /** iPhone (6.99.17): dictionary terms borrowed from the live Whisper words, when no second opinion ran. */
+  liveVocabulary?: { chunks: number; applied: boolean; wordsFromLive: number; skipped?: string }
   disagreements: Disagreement[]
 }
 

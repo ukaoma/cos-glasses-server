@@ -130,3 +130,40 @@ describe('stt resolver', () => {
     for (const k of ['am', 'one', 'second', 'first', 'having', 'the']) expect(isProtectedKey(k)).toBe(false)
   })
 })
+
+describe('anchored vocabulary from approximate-clock live words (6.99.17)', () => {
+  const timed = (text: string, at = 0, step = 0.5) => text.split(' ').map((word, i) => ({ word, start: at + i * step, end: at + i * step + 0.4, probability: 0.9 }))
+  const P = (text: string) => ({ engine: 'parakeet-ultra', text, words: timed(text) })
+  const live = (text: string) => ({ engine: 'live-whisper', text, words: timed(text, 7, 1.5) })
+  const opts = { vocabulary: ['ThriftCart'], primaryDeletionProne: false, apply: true, anchoredVocabularyOnly: true }
+
+  it('takes a substitution and clocks it across the primary words it replaces, not the live clock', () => {
+    const r = resolveHypotheses(P('we sell drift card now'), live('we sell ThriftCart now'), opts)
+    expect(r.text).toBe('we sell ThriftCart now')
+    expect(r.words[2]).toMatchObject({ word: 'ThriftCart', start: 1, end: 1.9 })
+    expect(r.timed).toBe(true)
+  })
+
+  it('refuses an insertion the primary has nothing for, and says why', () => {
+    const r = resolveHypotheses(P('we sell now'), live('we sell ThriftCart now'), opts)
+    expect(r.text).toBe('we sell now')
+    expect(r.disagreements).toEqual([expect.objectContaining({ kind: 'second_only', taken: 'primary', reason: 'unanchored' })])
+  })
+
+  it('without the option an insertion carrying a term is still taken (the Large-v3 second opinion, unchanged)', () => {
+    const r = resolveHypotheses(P('we sell now'), live('we sell ThriftCart now'), { ...opts, anchoredVocabularyOnly: false })
+    expect(r.text).toBe('we sell ThriftCart now')
+  })
+
+  it('still never changes a quantity: the term is taken, the unit beside it is not', () => {
+    const r = resolveHypotheses(P('we sell drift card 18 months'), live('we sell ThriftCart 18 minutes'), opts)
+    expect(r.text).toBe('we sell ThriftCart 18 months')
+    expect(r.disagreements.find(d => d.primary === 'months')).toMatchObject({ taken: 'primary' })
+  })
+
+  it('a region whose sides differ in a number is protected even when it holds a term', () => {
+    const r = resolveHypotheses(P('we sell drift card two'), live('we sell ThriftCart 3'), opts)
+    expect(r.text).toBe('we sell drift card two')
+    expect(r.disagreements).toEqual([expect.objectContaining({ reason: 'protected', taken: 'primary' })])
+  })
+})
