@@ -1348,10 +1348,18 @@
   // The run's answer was lost twice. v1.1: GET .../runs/<clientRequestId> answers {run, job} when the run was taken and
   // 404 run_not_accepted when it was not. A server without that route: the draft lists its runs, and the run's
   // clientJobId finds the job (/api/query-jobs/by-client).
-  function recoverPrepRun(p, rid) {
+  // 202 {run}: the Mac is still admitting it, so ask again shortly (a few times). 503 run_status_unknown: the Mac could
+  // not tell; the next tap is the same request, so it cannot run twice.
+  var PREP_RUN_WAITS = [1500, 1500, 3000, 3000, 5000];
+  function recoverPrepRun(p, rid, tries) {
+    tries = tries || 0;
     return prepCall(prepPath(p) + '/runs/' + encodeURIComponent(rid)).then(function (r) {
       if (r.status === 200 && r.body.run && r.body.run.clientJobId) { p.runId = ''; return startPrepJob(p, r.body.run, r.body.job || null); }
-      if (r.status === 404 && prepCode(r) === 'run_not_accepted') return notStarted(p);
+      if (r.status === 202 && tries < PREP_RUN_WAITS.length) {
+        setPrepNote(p, 'Your Mac is starting this prep.', false); p.running = true; paintPrep();
+        return new Promise(function (res) { setTimeout(res, PREP_RUN_WAITS[tries]); }).then(function () { p.running = false; return recoverPrepRun(p, rid, tries + 1); });
+      }
+      if (r.status === 202 || (r.status === 404 && prepCode(r) === 'run_not_accepted') || (r.status === 503 && prepCode(r) === 'run_status_unknown')) return notStarted(p);
       return recoverFromDraft(p, rid);
     });
   }

@@ -387,6 +387,34 @@ describe('Prep me runs as an ordinary Ask in the chat', () => {
     expect(h.chat._state.asks[0]).toMatchObject({ cid: 'cj-runs', jobId: 'job_5', status: 'running' })
   })
 
+  it('202 from .../runs (still being admitted): it asks again, then shows the job once the run is accepted', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = ['lost', 'lost']
+    h.script['GET runs'] = [{ status: 202, body: { run: { clientRequestId: 'x', clientJobId: 'cj-wait', state: 'submitting' } } },
+      { status: 200, body: { run: { clientRequestId: 'x', clientJobId: 'cj-wait', jobId: 'job_w' }, job: { jobId: 'job_w', clientJobId: 'cj-wait', status: 'running' } } }]
+    h.chat._runPrep()
+    await flush(12)
+    expect(h.chat._prep().note).toBe('Your Mac is starting this prep.')
+    expect(h.chat._state.asks).toHaveLength(0)
+    await new Promise(r => setTimeout(r, 1600)); await flush(12)
+    expect(h.calls.filter(c => /\/runs\//.test(c.path))).toHaveLength(2)
+    expect(h.chat._state.asks[0]).toMatchObject({ cid: 'cj-wait', jobId: 'job_w' })
+  })
+
+  it('503 run_status_unknown from .../runs: nothing is claimed, and the next tap is the same request', async () => {
+    const h = load({ prep: true })
+    await h.ready()
+    h.tapPrep(); await flush()
+    h.script['POST run'] = ['lost', 'lost']
+    h.script['GET runs'] = [{ status: 503, body: { error: 'run_status_unknown' } }]
+    h.chat._runPrep()
+    await flush(12)
+    expect(h.chat._prep().note).toBe('COS on your Mac did not answer, so this prep may not have started. Tap Prep me again; it will not run twice.')
+    expect(h.calls.filter(c => c.method === 'GET' && c.path === '/api/prep/drafts/' + DRAFT_ID)).toEqual([])
+  })
+
   it('run_not_accepted: nothing is claimed and the next tap is the same request', async () => {
     const h = load({ prep: true })
     await h.ready()
