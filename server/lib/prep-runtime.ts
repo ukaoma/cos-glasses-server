@@ -687,15 +687,48 @@ export class PrepRuntime {
     if (!run) throw new PrepError('run_not_accepted', 404)
     if (this.admitting.has(`${id}:${clientRequestId}`)) return { status: 202, run, job: null }
     if (run.state === 'failed') throw new PrepError('run_not_accepted', 404, undefined, { run })
+    // Already durably terminal as unavailable: the answer is final, with no fresh lookup that could contradict it.
+    if (run.outcome === 'unavailable' && run.settledAt) return { status: 200, run, job: null }
+    // ONE lookup decides this answer: a second one could miss then fail, or find a job the first did not.
     let job: QueryJobSnapshot | undefined
     try { job = await this.deps.jobs.byClient(run.clientJobId, 1) } catch { throw new PrepError('run_status_unknown', 503) }
     if (run.state === 'submitting') {
       if (!job) throw new PrepError('run_not_accepted', 404, undefined, { run })
       try { ({ run, draft } = await this.admitOnce(id, run)) } catch { /* recorded on a later read or retry; the job is the answer */ }
     }
-    draft = (await this.settle(draft)) ?? draft
-    run = draft.runs.find(r => r.clientRequestId === clientRequestId) ?? run
-    return { status: 200, run, job: prepJobForClient(job) }
+    if (run.state === 'accepted' && !run.settledAt && (!job || isTerminalQueryJobStatus(job.status))) {
+      // Settle from this same lookup. An eviction is only reported once it is durable: if it cannot be written, the
+      // outcome is unknown (503), never an unsettled 'accepted' with job:null that looks final.
+      const settled = await this.settleRun(id, clientRequestId, job ?? null)
+      if (settled) run = settled
+      else if (!job) throw new PrepError('run_status_unknown', 503)
+    }
+    return { status: 200, run, job: run.outcome === 'unavailable' ? null : prepJobForClient(job) }
+  }
+
+  /** Settles one accepted run from a lookup already made. Returns the persisted run, or null if it could not be written. */
+  private async settleRun(id: string, clientRequestId: string, job: QueryJobSnapshot | null): Promise<PrepRun | null> {
+    try {
+      return await this.serial(id, () => this.writing(() => {
+        const fresh = this.draft(id)
+        const r = fresh.runs.find(x => x.clientRequestId === clientRequestId)
+        if (!r || r.state !== 'accepted') return null
+        if (!r.settledAt) {
+          if (!job) this.markUnavailable(r)
+          else {
+            const answer = byteSlice(job.response ?? '', PREP_LIMITS.runAnswerBytes)
+            r.status = job.status
+            r.answer = answer
+            if (answer.length < (job.response ?? '').length || job.responseTruncated) r.answerTruncated = true
+            if (job.error?.code) r.error = job.error.code
+            r.settledAt = this.iso()
+          }
+          capAnswers(fresh)
+        }
+        // A read: no revision or updatedAt change.
+        return this.persist(fresh).runs.find(x => x.clientRequestId === clientRequestId) ?? null
+      }))
+    } catch { return null }
   }
 
   /**

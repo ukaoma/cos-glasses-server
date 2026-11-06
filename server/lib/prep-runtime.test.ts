@@ -552,8 +552,28 @@ describe('Prep run', () => {
     expect(got.job).toBeNull()
     expect(got.run).toMatchObject({ state: 'accepted', outcome: 'unavailable', answer: null, settledAt: expect.any(String) })
     expect(f.store.get(d.id)!.runs[0].outcome).toBe('unavailable')   // durable
+    // Once durable, GET answers from the record: no fresh lookup, and never a stale job beside 'unavailable'.
+    const stale = vi.fn(async () => ({ jobId: 'old', status: 'running' }) as any)
+    f.deps.jobs.byClient = stale
+    const again = await f.runtime.getRun(d.id, first.run.clientRequestId)
+    expect([again.status, again.job, again.run.outcome, stale.mock.calls.length]).toEqual([200, null, 'unavailable', 0])
     f.deps.jobs.byClient = realByClient
     expect((await f.runtime.run(d.id, { clientRequestId: uuid(), revision: f.store.get(d.id)!.revision })).run.state).toBe('accepted')
+  })
+
+  it('GET runs settles from ONE lookup: an eviction it cannot write answers 503, never an unsettled accepted with job:null', async () => {
+    const f = make({ media: { [M(1)]: doc('x') } })
+    const d = await ready(f)
+    const first = await f.runtime.run(d.id, { clientRequestId: uuid(), revision: d.revision })
+    const lookups = vi.fn(async () => undefined)
+    f.deps.jobs.byClient = lookups
+    const write = vi.spyOn(f.store, 'write').mockImplementation(() => { throw new Error('disk full') })
+    const err = await caught(f.runtime.getRun(d.id, first.run.clientRequestId))
+    expect([err.code, err.status, lookups.mock.calls.length]).toEqual(['run_status_unknown', 503, 1])
+    write.mockRestore()
+    expect(f.store.get(d.id)!.runs[0].outcome).toBeUndefined()
+    const got = await f.runtime.getRun(d.id, first.run.clientRequestId)
+    expect([got.status, got.job, got.run.outcome, lookups.mock.calls.length]).toEqual([200, null, 'unavailable', 2])
   })
 
   it('runInProgress itself records an evicted job unavailable, so the new run goes ahead', async () => {
