@@ -1,6 +1,6 @@
 # Ask COS → Work proposal integration
 
-Status: isolated server implementation, not installed or published. Base: server 6.99.15 (`9cbcf5f`). Native conversation/UI is owned by the Control 0.5.374 / server 6.99.16 builder. This contract is additive; it does not replace that builder's conversation/session IDs.
+Status: isolated follow-on server implementation, not installed or published. On November 6, 2026, `codex/ask-cos-orchestration-20261105` was rebased onto the committed server 6.99.16 baseline `a8694c5`; the verified server implementation head is `e6e9c58`. The existing COS thread routes and conversation/session IDs remain intact. Native Ask proposal review/import work is in progress in a separate follow-on Control worktree; it is not part of the frozen Control 0.5.374 / server 6.99.16 release worktrees.
 
 ## Endpoint
 
@@ -45,12 +45,18 @@ A success means **proposed**, never recorded, queued, sent, delivered or complet
 8. Recording a proposal must not trigger auto-send or a queue pump. Send/fork actions use the normal user review and authorization flow.
 9. Show request acceptance, delivery, running and completion separately. When Control is offline or evidence is unavailable, show that limitation rather than an alternate sender.
 
+The native follow-on worktree is `/Users/ukaoma/cos-worktrees/control-ask-orchestration-20261106`, branch `codex/ask-orchestration-20261106`, based on `cdb3d74`. Its scope is broader Ask entry copy, detailed capability discovery through `GET /api/ask/work-plan`, real COS thread provenance, server-bound proposal persistence, and a dedicated explicit review/import action into the existing Work sender. Native implementation and verification remain in progress; this server receipt does not certify those behaviors.
+
+An integration gap remains for publishing fresh Control session snapshots: the existing `POST /api/work/orchestrator/input` also refreshes usage and can launch probes. The native Ask path needs a separately validated snapshot-only publication contract before it can refresh discovery while preserving Ask's cached-usage guarantee. That route is not implemented in the verified `e6e9c58` receipt.
+
 ## Merge and validation
 
-Merge the adapter and documentation from `codex/ask-cos-orchestration-20261105` into the peer's integration branch. Existing source-file changes are the import/mount in `server/index.ts` and an optional cached-usage mode in `server/lib/work-orchestrator/runtime.ts`. Reconcile the mount explicitly with the peer's new cos-thread mount. Existing runtime callers retain their refresh behavior. No version bump or release reservation is made here.
+Continue integration in the separate follow-on worktrees. Do not merge this work into the frozen 6.99.16 or Control 0.5.374 release worktrees. The rebase already reconciled the Ask Work and COS thread mounts in `server/index.ts`; both are present once. The optional cached-usage mode in `server/lib/work-orchestrator/runtime.ts` is retained, and existing Work callers retain their refresh behavior. No follow-on version bump or release reservation is made here.
 
-Before release, test the real native path: Ask → persistent proposal → selected Work card → explicit review/send → native receipt. Include older-server fallback, disconnect, changed card/context, duplicate import/send, missing usage data, app-owned targets, cancellation and partial delivery. This worktree's injected-provider tests do not certify native UI, paid/live model execution, installation or release readiness.
+`/api/ask/work-plan` is exempt from the generic mutation lease because its route owns admission and the planner's maintenance lease. It retains those guards until the underlying provider settles, and retains both after an unconfirmed provider exit. This avoids double lease ownership and preserves the route's maintenance response contract.
+
+Remaining release gates: finish the native follow-on implementation and build; test Ask → persistent proposal → selected Work card → explicit review/send → native receipt; then complete full server and Control release QA, candidate installation checks, and the applicable versioning/distribution gates. Include older-server fallback, disconnect, changed card/context, duplicate import/send, missing usage data, app-owned targets, cancellation and partial delivery. Any real provider canary or native send acceptance must be separately recorded. This worktree's injected-provider tests do not certify native UI, paid/live model execution, installation or release readiness.
 
 ## Isolated validation receipt
 
-November 5, 2026: 98 tests passed across nine suites (Ask core/route, existing Work core/route, orchestrator core/route, usage, hooks and actual runtime). TypeScript passed. Independent review verified authenticated mounting, canonical revision binding, cancellation ownership, fork exclusions and cached-usage process behavior. No live provider invocation, native Control build, service restart or publication was performed. Full server/release QA and native end-to-end checks remain integration gates.
+November 6, 2026, baseline `a8694c5`, verified implementation `e6e9c58`: **110 tests passed across 11 suites** — Ask core/route, Work chat core/route, orchestrator runtime/route, COS thread core/route/web, existing COS chat web, and Drop settings. TypeScript and whitespace checks passed. Dependency declarations were unchanged from 6.99.15 apart from package version metadata. No live provider invocation, native Control build, service restart, installation or publication was performed in this verification. Native implementation is still in progress; full release QA and end-to-end acceptance remain outstanding.
