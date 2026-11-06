@@ -485,6 +485,9 @@ app.use('/api', (req, res, next) => {
     || req.path === '/meetings/live-ask'
     || req.path === '/meeting-ask/requests'
     || /^\/meeting-ask\/requests\/[A-Za-z0-9_-]+\/cancel$/.test(req.path)
+    // Ask Work owns its planner lease through child termination, including an unconfirmed-exit hold.
+    // Let the route enforce its maintenance contract without a second generic mutation lease.
+    || req.path === '/ask/work-plan'
     || req.path.startsWith('/maintenance/drain')
     // 6.83.0 lens plans: each write takes the api_mutation lease itself and answers the contract's 503 `maintenance`.
     || req.path.startsWith('/work/chat/lens-')
