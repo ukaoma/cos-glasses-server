@@ -142,6 +142,40 @@
   // Pane modules (panes/*.js) register here: { load(args, ctx), leave(), up(args) }. A registered
   // pane owns its section; route() only shows it and hands it the hash arguments.
   var PANES = {};
+  // Heavy panes load when first opened, then the rest load quietly once the page is idle.
+  // index.html lists them in #lazy-panes so the server can version each URL (?v=<hash>).
+  // Read on first use, not at parse time: #lazy-panes sits after this script in index.html.
+  var lazyList = null;
+  function LAZY() {
+    if (lazyList) return lazyList;
+    var el = document.getElementById('lazy-panes');
+    if (!el) return {};
+    try { lazyList = JSON.parse(el.textContent || '{}'); } catch (_e) { lazyList = {}; }
+    return lazyList;
+  }
+  var lazyLoads = {};
+  function ensurePane(name) {
+    if (PANES[name] || !LAZY()[name]) return Promise.resolve(PANES[name] || null);
+    if (lazyLoads[name]) return lazyLoads[name];
+    lazyLoads[name] = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = LAZY()[name];
+      s.async = true;
+      s.onload = function () { if (PANES[name]) resolve(PANES[name]); else { delete lazyLoads[name]; reject(new Error('The ' + (TITLES[name] || name) + ' section did not start.')); } };
+      s.onerror = function () { delete lazyLoads[name]; s.remove(); reject(new Error('Could not load the ' + (TITLES[name] || name) + ' section. Check the connection to your Mac.')); };
+      document.body.appendChild(s);
+    });
+    return lazyLoads[name];
+  }
+  function prefetchPanes() {
+    var names = Object.keys(LAZY()).filter(function (n) { return !PANES[n]; });
+    var idle = window.requestIdleCallback || function (fn) { return setTimeout(fn, 200); };
+    (function next() {
+      var n = names.shift();
+      if (!n) return;
+      idle(function () { ensurePane(n).then(next, next); });
+    })();
+  }
   var routeHooks = [];
   var shellHooks = [];
   var crumbDetail = '';
@@ -157,9 +191,9 @@
     if (location.hash === hash) route(); else location.hash = hash;
   }
   function isPhone() { return !window.matchMedia('(min-width: 600px)').matches; }
-  function route() {
+  function route(forceChanged) {
     var r = parseRoute();
-    var changedPane = r.pane !== state.pane || !document.querySelector('#pane-' + r.pane + ':not(.hidden)');
+    var changedPane = forceChanged === true || r.pane !== state.pane || !document.querySelector('#pane-' + r.pane + ':not(.hidden)');
     if (state.pane !== r.pane && PANES[state.pane] && PANES[state.pane].leave) { try { PANES[state.pane].leave(); } catch (err) { console.error(err); } }
     state.pane = r.pane;
     crumbDetail = '';
@@ -187,6 +221,22 @@
     $('topbar').classList.remove('tucked');
     onScroll();
 
+    if (!PANES[r.pane] && LAZY()[r.pane]) {
+      var lazyPane = r.pane, lazyEl = $('pane-' + lazyPane), wasEmpty = lazyEl && !lazyEl.getAttribute('data-lazy-ready');
+      if (wasEmpty && lazyEl && !lazyEl.querySelector('.lazy-wait')) lazyEl.insertAdjacentHTML('afterbegin', '<div class="lazy-wait">' + skeletonRows(4) + '</div>');
+      ensurePane(lazyPane).then(function () {
+        if (lazyEl) { lazyEl.setAttribute('data-lazy-ready', '1'); lazyEl.querySelectorAll('.lazy-wait').forEach(function (n) { n.remove(); }); }
+        // Pass changed=true, the value this pane got on its first open when it loaded at boot. Headless Chrome
+        // probes on 11/06 rendered Work, Meetings, Settings and Speakers with either value; this keeps the old contract.
+        if (state.pane === lazyPane) route(true);
+      }, function (err) {
+        if (!lazyEl) return;
+        lazyEl.querySelectorAll('.lazy-wait').forEach(function (n) { n.remove(); });
+        lazyEl.insertAdjacentHTML('afterbegin', '<div class="lazy-wait"><div class="list"><p class="empty"><strong>' + esc(err.message) + '</strong></p><button type="button" class="btn" data-lazy-retry="' + esc(lazyPane) + '">Try again</button></div></div>');
+      });
+      runHooks(routeHooks, r);
+      return;
+    }
     if (PANES[r.pane]) { try { PANES[r.pane].load(r.args, { changed: changedPane }); } catch (err) { console.error(err); } }
     else if (r.pane === 'today') loadToday();
     else if (r.pane === 'sessions') { if (!reading || !state.sessions.length || changedPane) loadSessions(); if (reading) openSession(r.args[0], r.args[1]); }
@@ -238,7 +288,15 @@
     loadTailnetUrl();
     runHooks(shellHooks, info);
     route();
+    setTimeout(prefetchPanes, 1500);
   }
+  document.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest && e.target.closest('[data-lazy-retry]');
+    if (!b) return;
+    var el = $('pane-' + b.getAttribute('data-lazy-retry'));
+    if (el) el.querySelectorAll('.lazy-wait').forEach(function (n) { n.remove(); });
+    route(true);
+  });
 
   // ── Today ───────────────────────────────────────────────
   function loadToday() {
@@ -3510,7 +3568,7 @@
     if (action === 'ask-work' && q) {
       closeAsk(); go('work');
       // The Work pane (panes/work.js) owns its search box; hand it the query.
-      if (PANES.work && PANES.work.search) PANES.work.search(q);
+      ensurePane('work').then(function () { if (PANES.work && PANES.work.search) PANES.work.search(q); }, function () {});
     }
   });
 

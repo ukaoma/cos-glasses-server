@@ -168,11 +168,27 @@ describe('the shipped web-control folder', () => {
 
   it('versions every boot script and stylesheet in index.html', () => {
     const refs = [...html.matchAll(/(?:src|href)="(\/control\/[^"]+\.(?:js|css))([^"]*)"/g)]
-    expect(refs.length).toBeGreaterThanOrEqual(20)
+    expect(refs.length).toBeGreaterThanOrEqual(13)
     for (const [, url, query] of refs) {
       const asset = table.get(url.replace(/^\/control/, ''))
       expect(asset, url).toBeDefined()
       expect(query, url).toBe(`?v=${asset!.hash}`)
+    }
+  })
+
+  it('versions every pane that loads on demand, and each file registers that pane', () => {
+    const block = html.match(/<script type="application\/json" id="lazy-panes">([\s\S]*?)<\/script>/)
+    expect(block).not.toBeNull()
+    const lazy = JSON.parse(block![1]) as Record<string, string>
+    expect(Object.keys(lazy).sort()).toEqual(['dictation', 'meetings', 'messages', 'settings', 'speakers', 'threads', 'work'])
+    for (const [pane, url] of Object.entries(lazy)) {
+      const m = url.match(/^\/control(\/panes\/[a-z-]+\.js)\?v=([0-9a-f]{16})$/)
+      expect(m, url).not.toBeNull()
+      const asset = table.get(m![1])!
+      expect(asset.hash, url).toBe(m![2])
+      expect(asset.body.toString(), pane).toContain(`registerPane('${pane}'`)
+      // A pane listed for later loading must not also load at boot.
+      expect(html, pane).not.toContain(`src="/control${m![1]}`)
     }
   })
 

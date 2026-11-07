@@ -263,13 +263,16 @@
   <script src="/control/app.js"></script>
   <script src="/control/shell.js"></script>
   <script src="/control/panes/cos-chat.js"></script>
-  <script src="/control/panes/messages.js"></script>
-  <script src="/control/panes/threads.js"></script>
-  <script src="/control/panes/speakers.js"></script>
-  <script src="/control/panes/meetings.js"></script>
-  <script src="/control/panes/work.js"></script>
-  <script src="/control/panes/dictation.js"></script>
-  <script src="/control/panes/settings.js"></script>
   <script src="/control/panes/questions.js"></script>
+  <!-- Loaded when first opened, then in the background once the page is idle (app.js ensurePane). -->
+  <script type="application/json" id="lazy-panes">{
+    "messages": "/control/panes/messages.js",
+    "threads": "/control/panes/threads.js",
+    "speakers": "/control/panes/speakers.js",
+    "meetings": "/control/panes/meetings.js",
+    "work": "/control/panes/work.js",
+    "dictation": "/control/panes/dictation.js",
+    "settings": "/control/panes/settings.js"
+  }</script>
 </body>
 </html>
