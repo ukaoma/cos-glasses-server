@@ -1105,6 +1105,8 @@ function routeRegion() {
       querySelector: () => null, querySelectorAll: () => [] },
     $: (id: string) => (els[id] ??= mk()), state: { pane: 'today', lastLoad: {}, sessions: [] }, PANES, TITLES: { work: 'Work', today: 'Today' }, ROOT_PANES: ['today', 'work'],
     closeMenu: () => {}, onScroll: () => {}, skeletonRows: () => '<i>loading</i>', esc, runHooks: () => {}, loadToday: () => {},
+    // route() releases reader output images on every navigation (readerMedia merge, 6.99.28).
+    readerImagesStop: () => {},
     location: { hash: '#/work' }, window: { scrollTo: () => {} }, setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: () => {},
     console,
   }

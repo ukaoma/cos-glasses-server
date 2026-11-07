@@ -8,6 +8,13 @@ Miles, 11/07 morning: he wants to review agent output away from the desk, includ
 - The Sessions reader and Today's session overlay show images a Claude or Codex session produced in its replies, as thumbnails that open full size. Images are read only from the session's own workspace on the Mac and served through an authenticated route for that exact session (`/api/agent-sessions/<provider>/session/output-images/<id>/content`); the browser never sees a Mac path and the server never fetches a remote URL. Images outside the workspace show as unavailable.
 - A session that the hook or registry reports idle or waiting no longer shows as running just because a file in its workspace changed recently.
 
+**Integration fixes before install** (QA of f5c62ef)
+- Images load on a default install. The image route served from the media store under `~/.cos-glasses/data`, and `send` refuses any path with a dot directory unless told otherwise, so every image answered 503. It now sends with `dotfiles: 'allow'` (as audio already does), and its test serves from a `.cos-glasses/data` folder.
+- An idle session whose transcript gets a record more than 5 s after the idle signal (hook `lastEventAt`/`stopAt`, or the registry's idle time) shows as working again. That is a turn restarted by a background-task notification, with no prompt and no tool call. The records that finish a turn stay idle; waiting, ended and failed are unchanged, and an attached turn still wins.
+- Images are never read when the session's workspace is exactly your home folder, `~/Documents`, `~/Library`, `~/.cos-glasses` or `/Volumes` (added to `/`, `/Users`, `/tmp` and `/var`). Folders inside them, such as `~/Documents/GitHub/<repo>`, still work.
+- When the Mac cannot look up a session's workspace, its images say "This image is temporarily unavailable. Retry in a moment." and keep Retry, instead of saying they are outside the workspace. The unused `missing` and `unsupported` reasons are gone.
+- Tests caught up with the merge: the route test stubs `readerImagesStop`, the lazy pane list includes `readerMedia`, and a typecheck error in the reader image test is fixed.
+
 **Fixes from the 6.99.27 QA** (operations/personal/wk45_2026/qa_6.99.27_2026-11-07: 01_user.md, 02_skeptic.md)
 
 **Phone snags**
