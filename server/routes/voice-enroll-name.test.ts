@@ -18,7 +18,10 @@ async function harness(): Promise<string> {
   const app = express()
   app.use('/api', voiceRouter)
   const server = await new Promise<Server>(resolve => {
-    const s = app.listen(0, () => resolve(s))
+    // Bind loopback exactly: a wildcard bind on macOS can be shadowed by another
+    // process listening on 127.0.0.1 at the same port, and the fetch below
+    // then reaches that process instead (6.99.25 publish gate: "auth required").
+    const s = app.listen(0, '127.0.0.1', () => resolve(s))
   })
   servers.push(server)
   const address = server.address()
