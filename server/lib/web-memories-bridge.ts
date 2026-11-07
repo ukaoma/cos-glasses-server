@@ -306,14 +306,15 @@ export async function dispatchMemoriesWebOp(
       return r.status === 200 ? reply(true, 'Duplicates ready', r.body) : reply(false, r.body.message || r.body.error || 'Failed')
     }
     case 'cues.summary': {
-      // Rating cues opens Control's native cue pane, which the browser does not have, so the
-      // page is told cues are unavailable and hides "Cues to rate" rather than show a button
-      // that does nothing. The counts use Control's keys for when a web cue pane exists.
-      const r = await loopbackFetch('/api/live-cues/history?days=7&limit=200', { timeoutMs: 10_000 })
-      const counts = (r.status === 200 ? r.body.counts ?? {} : {}) as Record<string, any>
-      const unrated = typeof counts.unrated === 'number' ? counts.unrated : 0
-      const rated = typeof counts.rated === 'number' ? counts.rated : 0
-      return reply(true, 'Cues', { available: false, unrated, rated, total: unrated + rated })
+      // Control's CueVerdicts.summary: the cue history read is the capability check. A 200 in the v1 contract means the
+      // server keeps the cue log and verdicts, and COS Control Web rates them in Memories (Cues to rate, Rated cues), so
+      // the answer is available with the week's counts; anything else is unavailable and the entries hide.
+      const r = await loopbackFetch('/api/live-cues/history?days=7&unrated=1&limit=1', { timeoutMs: 10_000 })
+      const counts = (r.status === 200 && r.body.v === 1 ? r.body.counts ?? null : null) as Record<string, any> | null
+      if (!counts || typeof counts.unrated !== 'number' || typeof counts.rated !== 'number' || typeof counts.total !== 'number') {
+        return reply(true, 'Cues', { available: false })
+      }
+      return reply(true, 'Cues', { available: true, unrated: counts.unrated, rated: counts.rated, total: counts.total })
     }
     case 'copy':
       return reply(true, 'Copied', {})

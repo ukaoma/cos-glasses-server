@@ -112,9 +112,12 @@ describe('needs-you count for the web Memories page', () => {
     expect(without.details).not.toHaveProperty('needs_you')
   })
 
-  it('cues.summary hides the cue entries in a browser and uses Control\'s keys', async () => {
-    const loopback = async () => ({ status: 200, body: { counts: { unrated: 4, rated: 9 } } })
-    const r = await dispatchMemoriesWebOp('cues.summary', {}, loopback, 'x', async () => null)
-    expect(r.details).toEqual({ available: false, unrated: 4, rated: 9, total: 13 })
+  // Control Web now rates cues in Memories, so cues.summary reports the history contract instead of always hiding the
+  // entries (web-memories-bridge-cues.test.ts covers both answers). An answer outside the v1 contract stays hidden.
+  it('cues.summary uses Control\'s keys and is available only for a v1 history answer', async () => {
+    const outside = async () => ({ status: 200, body: { counts: { unrated: 4, rated: 9 } } })
+    expect((await dispatchMemoriesWebOp('cues.summary', {}, outside, 'x', async () => null)).details).toEqual({ available: false })
+    const v1 = async () => ({ status: 200, body: { v: 1, counts: { unrated: 4, rated: 9, total: 13 } } })
+    expect((await dispatchMemoriesWebOp('cues.summary', {}, v1, 'x', async () => null)).details).toEqual({ available: true, unrated: 4, rated: 9, total: 13 })
   })
 })

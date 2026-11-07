@@ -33,6 +33,9 @@
     memory: 'Saved memory', occurrence: 'When it happened', assistant_turn: 'An answer' };
   var GATE = { attribution: 'Who said it is unclear', low_confidence: 'Low confidence', prune_ready: 'Ready to quarantine', contradiction: 'Contradicts another memory' };
   var VIEWS = [['recent', 'Recent learning'], ['applied', 'Applied this week'], ['memories', 'All memories'], ['review', 'To review'], ['knowledge', 'Knowledge']];
+  // Control's cue review (MeetingAsk.swift CueReviewPane): shown beside the views once the server's cue history answers.
+  var CUE_VIEWS = [['cues', 'Cues to rate'], ['rated', 'Rated cues']];
+  function knownView(v) { return VIEWS.concat(CUE_VIEWS).some(function (x) { return x[0] === v; }); }
   var KTABS = ['graph', 'sources', 'setup'];
   var PRUNE_READY = 'Prune ready';
   // The bridge's read-only ops (READ_ONLY_MEMORY_WEB_OPS and WORKSPACE_READ_ACTIONS in lib/web-memories-bridge.ts).
@@ -98,11 +101,18 @@
     // Copy stays in this browser: the same copy the rest of Control Web uses (plain-http fallback included).
     if (op === 'copy') return W.copyText(String(a.text || '')).then(function () { return {}; });
     var limit = READ_LIMIT[op] != null ? READ_LIMIT[op] : (isRead(op, a) ? 45000 : 0);
-    return W.api('/api/web-bridge/memories', { method: 'POST', body: { id: ++seq, op: op, args: a }, timeoutMs: limit }).then(function (r) {
+    return W.api('/api/web-bridge/memories', { method: 'POST', body: { id: ++seq, op: op, args: a }, timeoutMs: limit }).then(null, plainNetError).then(function (r) {
       if (r && r.ok) return r.details || {};
       var raw = (r && r.message) || 'Your Mac did not answer that.';
       var err = new Error(PLAIN[raw] || raw); err.code = raw; throw err;
     });
+  }
+  // No HTTP status means the request never reached COS: the browser's own words ("Failed to fetch", "Load failed") say
+  // nothing to a person, so say what happened and what to do. A timeout already says it in plain words (W.api).
+  var UNREACHABLE = 'Could not reach COS on your Mac. Check that the Mac is awake and on Tailscale, then try again.';
+  function plainNetError(err) {
+    if (err && !err.status && err.code !== 'timeout') { var e = new Error(UNREACHABLE); e.code = 'unreachable'; throw e; }
+    throw err;
   }
   function codeOf(e) { return String((e && (e.code || e.message)) || ''); }
 
@@ -111,12 +121,11 @@
   var saved = W.readStore(STORE_KEY);
   function list() { return { rows: [], total: null, cursor: null, loaded: false, loading: false, error: '', paged: undefined, coverage: {}, info: null }; }
   var S = {
-    view: VIEWS.some(function (v) { return v[0] === saved.view; }) ? saved.view : 'recent',
+    view: knownView(saved.view) ? saved.view : 'recent',
     ktab: KTABS.indexOf(saved.ktab) >= 0 ? saved.ktab : 'graph', ktabChosen: false,
     started: false, loadedAt: 0,
     status: null, statusError: '', statusLoading: false,
     recent: list(), review: list(), applied: Object.assign(list(), { days: 7 }), mem: Object.assign(list(), { q: '', hits: null, hitCursor: null }),
-    cues: null,
     graph: null, graphError: '', setup: null, setupError: '', setupLoading: false, setupBusy: '', progress: null,
     ingest: null, ingestLimit: 10, building: '', folderDraft: '',
     detail: {}, memDetail: {}, passages: {}, loading: {},
@@ -153,10 +162,18 @@
       function (e) { S.statusError = e.message; })
       .then(function () { S.statusLoading = false; paint(); });
   }
-  function loadCues() {
-    // Rating cues opens Control's native cue review, which the browser does not have; the bridge answers
-    // available:false, so the two cue entries stay hidden rather than show a button that does nothing.
-    call('cues.summary').then(function (d) { S.cues = d && d.available === true ? d : null; }, function () { S.cues = null; }).then(paint);
+  // Cues to rate and Rated cues read the server's cue history themselves, as Control's store does: the read is the
+  // capability check (a 404 is a server from before the routes, and both entries hide).
+  function loadCues() { loadCueWeek(); }
+  // Newest first, then by event id: many recall rows share one timestamp, and the server's order among them can differ from
+  // one read to the next, which reshuffled Recent learning on every visit.
+  function stableOrder(rows) {
+    return rows.map(function (r, i) { return { r: r, t: toDate(r && r.ts), i: i }; }).sort(function (a, b) {
+      var ta = a.t ? a.t.getTime() : -Infinity, tb = b.t ? b.t.getTime() : -Infinity;
+      if (ta !== tb) return tb - ta;
+      var ia = str(a.r && a.r.event_id), ib = str(b.r && b.r.event_id);
+      return ia < ib ? -1 : ia > ib ? 1 : a.i - b.i;
+    }).map(function (x) { return x.r; });
   }
   // Recent learning: the snapshot pages (protocol 1), else the older 90-day list.
   function loadRecent(more) {
@@ -181,7 +198,7 @@
       });
     }).then(function (r) {
       if (serial !== serials.recent) return;
-      L.rows = more ? L.rows.concat(r.rows) : r.rows; L.total = r.total; L.cursor = r.cursor; L.coverage = r.coverage; L.info = r.info;
+      L.rows = stableOrder(more ? L.rows.concat(r.rows) : r.rows); L.total = r.total != null ? r.total : L.total; L.cursor = r.cursor; L.coverage = r.coverage; L.info = r.info;
       L.loaded = true; L.error = '';
       seedDecisions(r.rows); prefetchLessons(r.rows);
     }, function (e) {
@@ -263,7 +280,7 @@
       }
       var seen = {}; (more ? L.rows : []).forEach(function (e) { seen[e.event_id] = 1; });
       var rows = events.filter(function (e) { if (seen[e.event_id]) return false; seen[e.event_id] = 1; return true; });
-      L.rows = more ? L.rows.concat(rows) : rows; L.total = d.total; L.cursor = d.nextCursor || null; L.coverage = d.coverage || {};
+      L.rows = stableOrder(more ? L.rows.concat(rows) : rows); L.total = d.total; L.cursor = d.nextCursor || null; L.coverage = d.coverage || {};
       L.loaded = true; L.error = '';
       L.rows.forEach(function (e) { if (e.lesson_id) ensureMem(e.lesson_id); });
     }, function (e) { if (serial !== serials.applied) return; L.error = e.message; L.loaded = true; })
@@ -432,6 +449,260 @@
   function hostLabel(h) { return String(h || '').replace(/\.local$/, '').replace(/-/g, ' '); }
   function lockHeld(lk) { return !!lk && (lk.state === 'exclusive' || lk.state === 'shared'); }
 
+  // ── Cues to rate and Rated cues (MeetingAsk.swift CueReviewPane, CueRateCard, CueRatedRow; MeetingAskCore.swift
+  //    CueVerdict, CueVerdicts, CueVerdictsStore) ─────────────────────────────────────────────────────────────────────
+  // The server keeps the cue log and the verdicts: GET /api/live-cues/history (days, unrated, limit) and
+  // POST /api/live-cues/feedback {sessionId, cueId, verdict, note?}. A verdict here never touches the glasses' up or down
+  // vote, which the server keeps beside it. Rating is the only write, and only from a tap or a key on a focused card.
+  var VERDICTS = ['useful', 'late', 'repeat', 'wrong', 'obvious'];
+  var CUE_MIN_SERVER = '6.79.0', CUE_DAYS = 7, CUE_NOTE_MAX = 200;
+  var CUE_KIND = { challenge: 'Challenge', reinforce: 'Reinforce', decision: 'Decision', promise: 'Promise', followUp: 'Follow-up', insight: 'Insight' };
+  var CUE_READ_LINE = {
+    checking: 'Loading cues…', olderServer: 'Rating cues needs server ' + CUE_MIN_SERVER + '. Update the server in Settings.',
+    unreachable: 'COS server unreachable. Cues show here once it answers.', reconnect: 'Sign this browser in again to see cues.',
+    unreadable: 'The server\'s answer about cues was not readable. Update the server in Settings.',
+    storageUnreadable: 'The server\'s ratings file cannot be read, so cues cannot be listed. Check again after the server restarts.' };
+  S.cue = { available: null, weekState: 'checking', queue: [], counts: null, ratedState: 'checking', rated: [], ratedLoaded: false,
+    saving: {}, errors: {}, skipped: [], notes: {}, weekBusy: false, ratedBusy: false, failedStatus: 0, ratedStatus: 0 };
+  function verdictLabel(v) { return v ? v.charAt(0).toUpperCase() + v.slice(1) : ''; }
+  function cueNum(v) { var n = Number(v); return isFinite(n) ? n : 0; }
+  // CueVerdicts.read: the answer to a state, and from a 200 in the contract's shape, the cues and counts.
+  function cueRead(d) {
+    var c = d && d.counts;
+    if (!d || d.v !== 1 || !Array.isArray(d.cues) || !c || typeof c.total !== 'number' || typeof c.rated !== 'number' || typeof c.unrated !== 'number') return { state: 'unreadable' };
+    var by = {}; VERDICTS.forEach(function (v) { by[v] = c.byVerdict && typeof c.byVerdict[v] === 'number' ? c.byVerdict[v] : 0; });
+    var cues = d.cues.filter(function (r) { return r && typeof r.cueId === 'string' && r.cueId && typeof r.sessionId === 'string' && r.sessionId && cueNum(r.createdAt) > 0 && typeof r.detail === 'string' && r.detail; });
+    return { state: 'loaded', cues: cues, counts: { total: c.total, rated: c.rated, unrated: c.unrated, byVerdict: by } };
+  }
+  function cueReadError(err) {
+    var st = err && err.status;
+    if (!st) return { state: 'unreachable' };
+    if (st === 404) return { state: 'olderServer' };
+    if (st === 401 || st === 403) return { state: 'reconnect' };
+    if (st === 503 && err.code === 'verdicts_unreadable') return { state: 'storageUnreadable' };
+    return { state: 'failed', status: st };
+  }
+  function cueLearn(state) {
+    var next = state === 'loaded' ? true : state === 'olderServer' ? false : S.cue.available;
+    S.cue.available = next;
+    if (next === false && (S.view === 'cues' || S.view === 'rated')) { S.view = 'recent'; persist(); }
+  }
+  function cueVerdict(c) { return c && c.rating && c.rating.verdict ? c.rating.verdict : null; }
+  // CueVerdicts.queueOrder: oldest first, then the skipped cues in the order they were skipped.
+  function queueOrder(cues) {
+    var skip = S.cue.skipped;
+    var fresh = cues.filter(function (c) { return skip.indexOf(c.cueId) < 0; }).sort(function (a, b) { return cueNum(a.createdAt) - cueNum(b.createdAt); });
+    return fresh.concat(skip.map(function (id) { return cues.filter(function (c) { return c.cueId === id; })[0]; }).filter(Boolean));
+  }
+  function loadCueWeek() {
+    var C = S.cue; if (C.weekBusy) return;
+    C.weekBusy = true; if (C.weekState !== 'loaded') C.weekState = 'checking'; paint();
+    W.api('/api/live-cues/history?days=' + CUE_DAYS + '&unrated=1&limit=200').then(cueRead, cueReadError).then(function (r) {
+      C.weekBusy = false; cueLearn(r.state); C.weekState = r.state; C.failedStatus = r.status || 0;
+      if (r.state === 'loaded') { C.queue = queueOrder(r.cues.filter(function (c) { return !cueVerdict(c); })); C.counts = r.counts; }
+      paint();
+    });
+  }
+  // The rated list reads the whole week (up to the server's 1,000 rows), so every rated cue shows, not only the newest 200's.
+  function loadCueRated() {
+    var C = S.cue; if (C.ratedBusy) return;
+    C.ratedBusy = true; if (C.ratedState !== 'loaded') C.ratedState = 'checking'; paint();
+    W.api('/api/live-cues/history?days=' + CUE_DAYS + '&limit=1000').then(cueRead, cueReadError).then(function (r) {
+      C.ratedBusy = false; cueLearn(r.state); C.ratedState = r.state; C.ratedStatus = r.status || 0;
+      if (r.state === 'loaded') { C.rated = r.cues.filter(cueVerdict).sort(function (a, b) { return cueNum(b.createdAt) - cueNum(a.createdAt); }); C.counts = r.counts; C.ratedLoaded = true; }
+      paint();
+    });
+  }
+  // CueVerdicts.note: whitespace collapsed, at most 200 UTF-16 units, cut on a character, as the server stores it.
+  function cueNote(raw) {
+    var collapsed = String(raw || '').split(/\s+/).filter(Boolean).join(' '), out = '';
+    for (var i = 0, chars = Array.from(collapsed); i < chars.length; i++) { if (out.length + chars[i].length > CUE_NOTE_MAX) break; out += chars[i]; }
+    return out.trim();
+  }
+  // CueVerdicts.rateOutcome and rateLine: why a rating did not save, in Control's words.
+  function cueRateLine(err) {
+    var st = err && err.status, code = err && err.code;
+    if (code === 'unknown_cue') return 'This cue is older than 30 days and was removed.';
+    if (code === 'cue_session_mismatch' || st === 409) return 'The server files this cue under another meeting. The rating was not saved.';
+    if (code === 'verdicts_unreadable') return 'The server\'s ratings file cannot be read. The rating was not saved.';
+    if (!st) return 'Your Mac did not answer. The rating was not saved; try again.';
+    if (st === 404) return 'Rating cues needs server ' + CUE_MIN_SERVER + '. Update the server in Settings.';
+    if (st === 503) return 'Server is updating. Rating not saved, try again.';
+    if (st === 400) return 'The server did not accept this rating.';
+    if (st === 401 || st === 403) return 'Sign this browser in again to rate cues.';
+    return 'The rating was not saved (HTTP ' + st + '). Try again.';
+  }
+  function findCue(id) {
+    var C = S.cue; return C.queue.filter(function (c) { return c.cueId === id; })[0] || C.rated.filter(function (c) { return c.cueId === id; })[0] || null;
+  }
+  // CueVerdictsStore.rate: one call per cue at a time; on success every list that holds the cue shows the new verdict.
+  function rateCue(id, verdict, note) {
+    var C = S.cue, cue = findCue(id);
+    if (!cue || C.saving[id] || (verdict && VERDICTS.indexOf(verdict) < 0)) return;
+    var text = verdict ? cueNote(note) : '';
+    var body = { sessionId: cue.sessionId, cueId: cue.cueId, verdict: verdict || 'clear' };
+    if (text) body.note = text;
+    C.saving[id] = true; delete C.errors[id]; paint();
+    W.api('/api/live-cues/feedback', { method: 'POST', body: body }).then(function (d) {
+      if (!d || d.ok !== true) throw Object.assign(new Error('not saved'), { status: 200 });
+      var stored = VERDICTS.indexOf(d.verdict) >= 0 ? d.verdict : null, vote = d.vote === 'up' || d.vote === 'down' ? d.vote : null;
+      var old = cueVerdict(cue), updated = Object.assign({}, cue, { rating: stored || vote ? { verdict: stored, note: stored ? text || null : null, vote: vote, at: Date.now() } : null });
+      applyCue(updated, old);
+      delete C.notes[id];
+    }, function (err) {
+      if (err && err.status === 404 && err.code !== 'unknown_cue') C.available = false;
+      C.errors[id] = cueRateLine(err);
+    }).then(function () { delete C.saving[id]; paint(); focusCueCard(); });
+  }
+  function moveCounts(old, next) {
+    var c = S.cue.counts; if (!c || old === next) return;
+    c = { total: c.total, rated: c.rated, unrated: c.unrated, byVerdict: Object.assign({}, c.byVerdict) };
+    if (old) c.byVerdict[old] = Math.max(0, (c.byVerdict[old] || 0) - 1);
+    if (next) c.byVerdict[next] = (c.byVerdict[next] || 0) + 1;
+    if (!old) { c.rated += 1; c.unrated = Math.max(0, c.unrated - 1); }
+    if (!next) { c.rated = Math.max(0, c.rated - 1); c.unrated += 1; }
+    S.cue.counts = c;
+  }
+  function applyCue(cue, old) {
+    var C = S.cue, now = cueVerdict(cue);
+    moveCounts(old, now);
+    C.skipped = C.skipped.filter(function (x) { return x !== cue.cueId; });
+    var waiting = C.queue.filter(function (c) { return c.cueId !== cue.cueId; });
+    if (!now && C.weekState === 'loaded' && cueNum(cue.createdAt) > Date.now() - CUE_DAYS * 86400000) waiting.push(cue);
+    C.queue = queueOrder(waiting);
+    var done = C.rated.filter(function (c) { return c.cueId !== cue.cueId; });
+    if (now && C.ratedState === 'loaded') done.push(cue);
+    C.rated = done.sort(function (a, b) { return cueNum(b.createdAt) - cueNum(a.createdAt); });
+  }
+  function skipCue(id) {
+    var C = S.cue; C.skipped = C.skipped.filter(function (x) { return x !== id; }); C.skipped.push(id);
+    C.queue = queueOrder(C.queue); paint(); focusCueCard();
+  }
+  // The card takes focus after a rating or a skip only when the person was already working from the keyboard there.
+  var cueKeyboard = false;
+  function focusCueCard() { if (!cueKeyboard) return; var card = el('mm-cue-card'); if (card && card.focus) card.focus({ preventScroll: true }); }
+  // CueVerdicts.key: 1 to 5 rate, N goes to the note, S skips; only while the card itself has focus, without modifiers.
+  function cueKey(e) {
+    var card = e.target;
+    if (!card || card.id !== 'mm-cue-card' || e.metaKey || e.ctrlKey || e.altKey) return false;
+    var id = card.getAttribute('data-cue'), k = String(e.key || '');
+    if (/^[1-5]$/.test(k)) { cueKeyboard = true; rateCue(id, VERDICTS[Number(k) - 1], S.cue.notes[id]); return true; }
+    if (k === 'n' || k === 'N') { cueKeyboard = true; var n = el('mm-cue-note'); if (n && n.focus) n.focus(); return true; }
+    if (k === 's' || k === 'S') { cueKeyboard = true; skipCue(id); return true; }
+    return false;
+  }
+  function cueClock(ms) { return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
+  // "Today 7:48 AM, 7 min in"; "Yesterday", a weekday within the week, else "Oct 12".
+  function cueWhen(c) {
+    var d = new Date(cueNum(c.createdAt)), now = new Date();
+    var days = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 86400000);
+    var day = days === 0 ? 'Today' : days === 1 ? 'Yesterday' : days > 1 && days < 7 ? d.toLocaleDateString(undefined, { weekday: 'short' }) : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    var start = c.armedAt ? cueNum(c.armedAt) : (/^meeting_(\d{13})_/.exec(c.sessionId || '') || [])[1] ? Number(/^meeting_(\d{13})_/.exec(c.sessionId)[1]) : null;
+    var sec = start ? (cueNum(c.createdAt) - start) / 1000 : -1;
+    return day + ' ' + cueClock(cueNum(c.createdAt)) + (sec >= 0 && sec < 43200 ? ', ' + Math.floor(sec / 60) + ' min in' : '');
+  }
+  function cueTitle(c) {
+    var saved = (c.titleSource === 'saved' || c.titleSource === 'library') ? str(c.title) : '';
+    return [saved, str(c.meetingTitle)].filter(function (t) { return t.trim(); })[0] || 'Glasses meeting';
+  }
+  function cueScore(g) { return typeof g === 'number' && isFinite(g) ? g.toFixed(2) : ''; }
+  // A host a stranger could own, as MeetingAskText.publicHost decides; anything else stays plain text.
+  function publicHost(raw) {
+    var h = String(raw || '').toLowerCase(); if (h.slice(-1) === '.') h = h.slice(0, -1);
+    if (!h || h.charAt(0) === '.' || h.slice(-1) === '.' || h.indexOf('..') >= 0 || /[:[%]/.test(h)) return false;
+    if (h === 'localhost' || /\.(localhost|local|internal)$/.test(h)) return false;
+    var labels = h.split('.'); return labels.length >= 2 && /^[a-z]/.test(labels[labels.length - 1]);
+  }
+  function cueHttps(u) {
+    try { var x = new URL(String(u || '')); return x.protocol === 'https:' && publicHost(x.hostname) && !x.username && !x.password && (!x.port || x.port === '443') ? x : null; } catch (_e) { return null; }
+  }
+  function cueSourceText(s) {
+    var x = s.kind === 'web' ? cueHttps(s.url) : null;
+    if (x) { var host = x.hostname.toLowerCase().replace(/\.$/, '').replace(/^www\./, ''); return (s.title || host) + ' (' + host + ')'; }
+    return s.date ? (s.title || '') + ' (' + s.date + ')' : (s.title || '');
+  }
+  // CueSourcesList: a web source opens its https page and a memory opens in All memories; a meeting or a file has no place
+  // to open from the browser (the Mac opens its library row or shows the file in Finder), so those stay plain text.
+  function cueSourcesHtml(c) {
+    var src = (c.sources || []).filter(function (s) { return s && s.title; });
+    if (!src.length) return '<p class="mm-muted">Sources: none, from the room only</p>';
+    function opens(s) { return (s.kind === 'web' && cueHttps(s.url)) || (s.kind === 'memory' && s.memoryId); }
+    if (!src.some(opens)) return '<p class="mm-muted">Sources: ' + esc(src.map(cueSourceText).join('; ')) + '</p>';
+    return '<div class="mm-cue-sources"><span class="mm-muted">Sources:</span><ul>' + src.map(function (s) {
+      var t = esc(cueSourceText(s)), x = s.kind === 'web' ? cueHttps(s.url) : null;
+      if (x) return '<li><a href="' + esc(x.href) + '" target="_blank" rel="noopener noreferrer">' + t + '</a></li>';
+      if (s.kind === 'memory' && s.memoryId) return '<li>' + textBtn('cue-memory', t, { id: s.memoryId }) + '</li>';
+      return '<li class="mm-muted">' + t + '</li>';
+    }).join('') + '</ul></div>';
+  }
+  function cueMetaHtml(c, extra) {
+    return '<p class="mm-cue-meta"><b>' + esc(cueTitle(c)) + '</b><span>' + esc(cueWhen(c)) + '</span><span>' + esc(CUE_KIND[c.kind] || c.kind || '') + '</span>' +
+      (cueScore(c.gate) ? '<span class="mm-mono">score ' + esc(cueScore(c.gate)) + '</span>' : '') + (extra || '') + '</p>';
+  }
+  function verdictButtons(id, selected, showKeys, disabled) {
+    return '<div class="mm-verdicts" role="group" aria-label="Rate this cue">' + VERDICTS.map(function (v, i) {
+      var on = v === selected;
+      return '<button type="button" class="cx-btn' + (on ? ' primary' : ' quiet') + '" data-mm="cue-rate" data-id="' + esc(id) + '" data-arg="' + v + '" aria-pressed="' + on + '"' + (disabled ? ' disabled' : '') + '>' +
+        (showKeys ? '<span class="mm-key" aria-hidden="true">' + (i + 1) + '</span>' : '') + esc(verdictLabel(v)) + '</button>';
+    }).join('') + '</div>';
+  }
+  function cueStateHtml(state, status) {
+    var line = state === 'failed' ? 'The server could not list cues (HTTP ' + status + '). Check again.' : CUE_READ_LINE[state];
+    if (!line) return '';
+    return '<div class="cx-list"><div class="mm-state"><strong' + (state === 'checking' ? '' : ' class="mm-warn"') + '>' + esc(line) + '</strong>' +
+      (state !== 'checking' && state !== 'olderServer' ? '<span class="mm-state-act">' + btn('cue-check', 'Check again') + '</span>' : '') + '</div></div>';
+  }
+  function cueHeading(title, detail) {
+    var c = S.cue.counts;
+    return '<div class="mm-cue-head"><div><h2 class="mm-cue-title">' + esc(title) + '</h2><p class="mm-muted">' + detail + '</p>' +
+      (c ? '<p class="mm-muted">Ratings in the last 7 days: ' + fmt(c.rated) + ' of ' + fmt(c.total) + '.</p>' : '') + '</div>' +
+      '<button type="button" class="cx-btn quiet mm-icon-btn" data-mm="cue-check" aria-label="Check again" title="Check again">' + icon('refresh') + '</button></div>';
+  }
+  function cueQueueHtml() {
+    var C = S.cue, head = cueHeading('Cues to rate', 'Oldest first.<span class="mm-keys-hint"> Keys 1 to 5 rate, N adds a note, S skips.</span>');
+    if (C.weekState !== 'loaded') return head + cueStateHtml(C.weekState, C.failedStatus);
+    var cue = C.queue[0];
+    if (!cue) return head + '<div class="cx-list"><div class="mm-state"><strong>' + esc(C.counts && C.counts.total ? 'Every cue from the last 7 days is rated.' : 'No cues in the last 7 days.') + '</strong></div></div>';
+    var id = cue.cueId, saving = !!C.saving[id], left = Math.max(C.queue.length, C.counts ? C.counts.unrated : 0), next = C.queue[1];
+    var vote = cue.rating && cue.rating.vote === 'up' ? 'Voted up on the glasses' : cue.rating && cue.rating.vote === 'down' ? 'Voted down on the glasses' : '';
+    return head + '<section class="cx-card mm-cue" id="mm-cue-card" tabindex="0" data-cue="' + esc(id) + '" aria-label="Cue to rate. Keys 1 to 5 rate, N adds a note, S skips.">' +
+      cueMetaHtml(cue, '<span class="mm-cue-left">' + (left === 1 ? '1 left' : fmt(left) + ' left') + '</span>') +
+      '<p class="mm-cue-text">' + esc(cue.detail) + '</p>' + cueSourcesHtml(cue) +
+      (cue.general && cue.general.query ? '<p class="mm-muted">Searched the web for: ' + esc(cue.general.query) + '</p>' : '') +
+      (cue.before ? '<div class="mm-cue-before"><span class="mm-muted">What was said just before</span><p>' + esc(cue.before) + '</p></div>' : '') +
+      (vote ? '<p class="mm-muted">' + vote + '</p>' : '') + verdictButtons(id, null, true, saving) +
+      '<label class="mm-pick mm-block"><span>Note (optional)</span><input class="field" id="mm-cue-note" data-cue="' + esc(id) + '" maxlength="' + CUE_NOTE_MAX + '" autocomplete="off" placeholder="What would have made it useful?" value="' + esc(C.notes[id] || '') + '"></label>' +
+      '<div class="mm-actions">' + btn('cue-skip', 'Skip', { id: id, disabled: saving }) + (saving ? '<span class="mm-muted">Saving…</span>' : '') +
+      (C.errors[id] ? '<span class="mm-warn">' + esc(C.errors[id]) + '</span>' : '') + '</div></section>' +
+      (next ? '<p class="mm-muted mm-cue-next">Next up: ' + esc(cueClock(cueNum(next.createdAt))) + ' · ' + esc(clip(next.headline || next.detail, 80)) + '</p>' : '');
+  }
+  function cueRatedHtml() {
+    var C = S.cue, head = cueHeading('Rated cues', 'Newest first. Pick another verdict to change one.');
+    if (C.ratedState !== 'loaded') return head + cueStateHtml(C.ratedState, C.ratedStatus);
+    if (!C.rated.length) return head + '<div class="cx-list"><div class="mm-state"><strong>No rated cues in the last 7 days.</strong></div></div>';
+    return head + C.rated.map(function (c) {
+      var id = c.cueId, saving = !!C.saving[id], r = c.rating || {};
+      return '<article class="cx-card mm-cue-row">' + cueMetaHtml(c) + '<p class="mm-cue-text small">' + esc(c.detail) + '</p>' +
+        (r.verdict ? '<p class="mm-cue-rated">Rated ' + esc(verdictLabel(r.verdict)) + (r.note ? ' · “' + esc(r.note) + '”' : '') + '</p>' : '') +
+        '<div class="mm-actions">' + verdictButtons(id, r.verdict, false, saving) +
+        '<button type="button" class="mm-link" data-mm="cue-clear" data-id="' + esc(id) + '" title="Back to Cues to rate"' + (saving ? ' disabled' : '') + '>Clear</button></div>' +
+        (C.errors[id] ? '<p class="mm-warn">' + esc(C.errors[id]) + '</p>' : '') + '</article>';
+    }).join('');
+  }
+  function cueAct(name, id, arg) {
+    var C = S.cue, cue = findCue(id);
+    if (name === 'cue-check') return S.view === 'rated' ? loadCueRated() : loadCueWeek();
+    if (name === 'cue-skip') return skipCue(id);
+    if (name === 'cue-clear') return rateCue(id, null);
+    if (name === 'cue-memory') { S.view = 'memories'; persist(); if (!S.mem.loaded && !S.mem.loading) loadMem(false); return W.go('memories', ['m', id]); }
+    if (name === 'cue-rate') {
+      if (!cue) return;
+      // A rated row keeps its note when its verdict changes; picking the verdict it already has changes nothing.
+      if (cueVerdict(cue)) { if (arg === cueVerdict(cue)) return; return rateCue(id, arg, cue.rating && cue.rating.note); }
+      return rateCue(id, arg, C.notes[id]);
+    }
+  }
+
   // ── chrome: hero, views, counts, footer ──────────────────
   function heroHtml() {
     return '<header class="cx-hero mm-hero" data-tint="memories"><span class="cx-glyph">' + icon('memories') + '</span>' +
@@ -441,8 +712,11 @@
   }
   function viewsHtml() {
     var n = needsCount();
-    return '<div class="cx-switch mm-tabs" role="group" aria-label="Memories view">' + VIEWS.map(function (v) {
-      var label = v[0] === 'review' && n ? 'To review (' + fmt(n) + ')' : v[1];
+    // The two cue views show once the server's cue history has answered (a 404, a server without it, hides them).
+    var cueOn = S.cue.available === true || (S.cue.available === null && (S.view === 'cues' || S.view === 'rated'));
+    var unrated = S.cue.counts ? S.cue.counts.unrated : null;
+    return '<div class="cx-switch mm-tabs" role="group" aria-label="Memories view">' + VIEWS.concat(cueOn ? CUE_VIEWS : []).map(function (v) {
+      var label = v[0] === 'review' && n ? 'To review (' + fmt(n) + ')' : v[0] === 'cues' && unrated ? 'Cues to rate (' + fmt(unrated) + ')' : v[1];
       return '<button type="button" data-mm="view" data-arg="' + v[0] + '" aria-pressed="' + (S.view === v[0]) + '">' + esc(label) + '</button>';
     }).join('') + '</div>';
   }
@@ -453,6 +727,7 @@
     if (n) parts.push('<span><b>' + fmt(n) + '</b> ' + plural(n, 'change', 'changes') + ' to review</span>');
     if (S.recent.total != null) parts.push('<span><b>' + fmt(S.recent.total) + '</b> ' + plural(S.recent.total, 'event', 'events') + ' in 90 days</span>');
     else if (S.recent.loading) parts.push('<span>Counting events…</span>');
+    else if (S.recent.error) parts.push('<span class="mm-warn">Events in 90 days could not be counted</span>');
     if (S.recent.loaded) parts.push('<span><b>' + fmt(checked) + '</b> ' + plural(checked, 'result', 'results') + ' checked on this page</span>');
     parts.push('<span>Capture status in ' + textBtn('settings', 'Memory settings') + '</span>');
     parts.push('<span>' + textBtn('log', 'View activity log') + '<span class="mm-phone-only"><span class="mm-dot" aria-hidden="true"> · </span>' + textBtn('refresh', 'Refresh') + '</span></span>');
@@ -505,6 +780,8 @@
   function selectedId() { var r = W.parseRoute(); return r.pane === 'memories' && r.args.length === 2 ? r.args[1] : (autoPick() || ''); }
 
   function listHtml() {
+    if (S.view === 'cues') return cueQueueHtml();
+    if (S.view === 'rated') return cueRatedHtml();
     if (S.view === 'knowledge') return knowledgeListHtml();
     if (S.view === 'memories') return memListHtml();
     if (S.view === 'applied') return appliedListHtml();
@@ -581,7 +858,7 @@
   }
   // On a wide screen with nothing chosen, the reader shows the first row (Control's page does the same).
   function autoPick() {
-    if (!isWide()) return '';
+    if (!isWide() || S.view === 'cues' || S.view === 'rated') return '';
     if (S.view === 'knowledge') return S.ktab;
     if (S.view === 'memories') { var m = S.mem.hits != null ? S.mem.hits : S.mem.rows; return m[0] ? m[0].id : ''; }
     var rows = S.view === 'applied' ? S.applied.rows : S.view === 'review' ? needsRows().concat(S.review.rows) : S.recent.rows;
@@ -1393,7 +1670,7 @@
       if (++tries < 30) setTimeout(again, 500);
     })();
   }
-  // The workspace's "Find points" button carries an inline onclick the page's CSP blocks; this does its work.
+  // The workspace's Find points button and Enter in its search box run this (the pane's click and keydown handlers).
   function graphSearch() {
     var input = el('graphQuery'), status = el('graphSearchStatus'), q = input ? String(input.value || '').trim() : '';
     if (q.length < 2) { if (status) status.textContent = 'Type at least two characters.'; return; }
@@ -1703,6 +1980,8 @@
     if (!el('mm-root')) pane.innerHTML = SKELETON;
     var reading = r.args.length > 0, split = el('mm-split');
     pane.classList.toggle('reading', reading); if (split) split.classList.toggle('reading', reading);
+    // The cue views are one column at every width, like Control's cue review (a card, not a list beside a reader).
+    if (split) split.classList.toggle('solo', !reading && (S.view === 'cues' || S.view === 'rated'));
     write(el('mm-hero'), heroHtml()); write(el('mm-views'), viewsHtml()); write(el('mm-counts'), countsHtml()); write(el('mm-foot'), footHtml());
     var tools = el('mm-tools');
     if (tools && tools.__view !== S.view) { tools.innerHTML = S.view === 'memories' ? memSearchHtml() : ''; tools.__view = S.view; }
@@ -1746,15 +2025,18 @@
 
   // ── taps, typing, keys ───────────────────────────────────
   function setView(v) {
-    if (!VIEWS.some(function (x) { return x[0] === v; })) return;
+    if (!knownView(v)) return;
     S.view = v; persist();
     if (v === 'memories' && !S.mem.loaded && !S.mem.loading) loadMem(false);
     if (v === 'applied' && !S.applied.loaded && !S.applied.loading) loadApplied(false);
+    if (v === 'cues' && S.cue.weekState !== 'loaded') loadCueWeek();
+    if (v === 'rated' && !S.cue.ratedLoaded) loadCueRated();
     if (W.parseRoute().args.length) W.go('memories'); else paint();
   }
   function refresh() {
     S.loadedAt = Date.now(); S.detail = {}; S.passages = {}; S.decided = {};
     loadStatus(); loadRecent(false); loadReview(false); loadCues(); loadGraph();
+    if (S.cue.ratedLoaded || S.view === 'rated') loadCueRated();
     if (S.mem.loaded || S.view === 'memories') loadMem(false);
     if (S.applied.loaded || S.view === 'applied') loadApplied(false);
     if (S.setup) loadSetup();
@@ -1767,6 +2049,7 @@
   function act(name, t, ev) {
     var id = t.getAttribute('data-id'), arg = t.getAttribute('data-arg');
     if (name.indexOf('steward-') === 0) return stewardAct(name, id || arg);
+    if (name.indexOf('cue-') === 0) return cueAct(name, id, arg);
     switch (name) {
       case 'view': return setView(arg);
       case 'refresh': return refresh();
@@ -1833,7 +2116,8 @@
   pane.addEventListener('click', function (e) {
     var target = e.target;
     var t = target && target.closest ? target.closest('[data-mm]') : null;
-    if (!t) { if (target && target.closest && target.closest('.memory-investigation .graph-search button')) graphSearch(); return; }
+    // The workspace's Find points button (memories/memory-workspace.js, data-role find-points) has no handler of its own.
+    if (!t) { if (target && target.closest && target.closest('.memory-investigation [data-role="find-points"]')) graphSearch(); return; }
     if (t.disabled) return;
     act(t.getAttribute('data-mm'), t, e);
   });
@@ -1850,6 +2134,7 @@
     var t = e.target; if (!t || !t.getAttribute) return;
     if (t.id === 'mm-mem-q') { memQuery(t.value); var clr = pane.querySelector('[data-mm="mem-clear"]'); if (!t.value && clr) { var tl = el('mm-tools'); if (tl) tl.__view = ''; } return; }
     if (t.id === 'mm-ask-q') { S.ask.q = t.value; return; }
+    if (t.id === 'mm-cue-note') { S.cue.notes[t.getAttribute('data-cue')] = t.value; return; }
     if (t.id === 'mm-folder') { S.folderDraft = t.value; return; }
     var dk = t.getAttribute('data-draft'); if (dk) S.drafts[dk] = t.type === 'checkbox' ? !!t.checked : t.value;
   });
@@ -1864,6 +2149,8 @@
   // Enter in a multi-line field writes a new line here: the shell's desktop rule (Enter submits a textarea's form) is
   // for chat boxes, and these lists are one pattern or one exclusion per line.
   pane.addEventListener('keydown', function (e) {
+    if (cueKey(e)) { e.preventDefault(); return; }
+    if (e.target && e.target.id === 'mm-cue-note' && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); e.stopPropagation(); cueKeyboard = true; var cc = el('mm-cue-card'); if (cc) cc.focus({ preventScroll: true }); return; }
     if (e.key === 'Enter' && e.target && e.target.tagName === 'TEXTAREA') e.stopPropagation();
     if (e.key === 'Enter' && e.target && e.target.id === 'graphQuery') { e.preventDefault(); graphSearch(); }
   });
@@ -1885,7 +2172,7 @@
   W.registerPane('memories', {
     load: function (args) {
       if (args[0] === 'view') {
-        if (VIEWS.some(function (v) { return v[0] === args[1]; })) { S.view = args[1]; persist(); }
+        if (knownView(args[1])) { S.view = args[1]; persist(); }
         location.replace('#/memories'); return;
       }
       if (args[0] === 'k') { S.view = 'knowledge'; if (KTABS.indexOf(args[1]) >= 0) { S.ktab = args[1]; S.ktabChosen = true; } persist(); }
@@ -1893,6 +2180,7 @@
       else if (S.graph && lockHeld(S.graph.lock)) watchIngest();
       if (S.view === 'memories' && !S.mem.loaded && !S.mem.loading) loadMem(false);
       if (S.view === 'applied' && !S.applied.loaded && !S.applied.loading) loadApplied(false);
+      if (S.view === 'rated' && !S.cue.ratedLoaded && !S.cue.ratedBusy) loadCueRated();
       paint();
     },
     leave: function () {
@@ -1904,6 +2192,6 @@
     // For the vm tests (web-control/memories-web.test.ts): the same functions taps and loads run.
     _t: { S: S, act: act, paint: paint, listHtml: listHtml, readerHtml: readerHtml, countsHtml: countsHtml, viewsHtml: viewsHtml, modalHtml: modalHtml,
       needsCount: needsCount, needsRows: needsRows, contextText: contextText, findRow: findRow, isRead: isRead, cleanTitle: cleanTitle, mergeFlow: mergeFlow,
-      loadApplied: loadApplied, ask: ask, renderMarkdown: renderMarkdown }
+      loadApplied: loadApplied, ask: ask, renderMarkdown: renderMarkdown, cueKey: cueKey, cueNote: cueNote, cueHttps: cueHttps }
   });
 })();
