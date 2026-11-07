@@ -91,9 +91,9 @@
     Promise.all([
       soft(api('/api/decision-provider')), soft(api('/api/live-cues/v2/settings')), soft(api('/api/morning-brief')),
       soft(api('/api/domains')), soft(api('/api/agent-sessions/fences')), soft(api('/api/meeting-import/fireflies/status')),
-      soft(api('/api/health')), soft(api('/api/drops/settings/p2'))
+      soft(api('/api/health')), soft(api('/api/drops/settings/p2')), soft(api('/api/today/brief/settings'))
     ]).then(function (r) {
-      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7] };
+      S.data = { dp: r[0], cues: r[1], mb: r[2], domains: r[3], fences: r[4], ff: r[5], health: r[6], p2: r[7], tb: r[8] };
       S.state = 'ready';
       render();
     });
@@ -210,6 +210,14 @@
     var out = '';
     if (cat.id === 'reach') return reachBody();
     if (cat.id === 'pet') return petBody() + onMac(cat.mac);
+    // The Today summary (routes/today-brief.ts): Haiku on the Mac writes Today's top lines. Off unless switched on here or
+    // by COS_TODAY_BRIEF_LLM on the Mac, which wins when set.
+    if (cat.id === 'general' && d.tb && typeof d.tb.enabled === 'boolean') {
+      out += group('Today summary', '',
+        row('Write the Today summary with a model', d.tb.source === 'env' ? 'Set on the Mac by the server environment.' :
+          'Haiku reads your session titles and latest lines and writes two or three sentences. Only while Today is open, only when something changed, at most every 10 minutes and 60 times a day.',
+          toggle(d.tb.enabled, 'data-set="today-brief"' + (d.tb.source === 'env' ? ' disabled' : ''), 'Write the Today summary with a model')));
+    }
     if (cat.id === 'ai' && d.dp) {
       var p = d.dp.provider || '';
       var name = function (x) { return x === 'subq' ? 'SubQ' : x === 'jev' ? 'Jev' : x || 'Not set'; };
@@ -325,6 +333,13 @@
       t.setAttribute('aria-checked', String(!on));
       api('/api/live-cues/v2/settings', { method: 'POST', body: { enabled: !on } })
         .then(function () { W.toast(!on ? 'Live cues on' : 'Live cues off'); }, function (err) { t.setAttribute('aria-checked', String(on)); say(err.message, true); });
+      return;
+    }
+    if (act === 'today-brief') {
+      var ton = t.getAttribute('aria-checked') === 'true';
+      t.setAttribute('aria-checked', String(!ton));
+      api('/api/today/brief/settings', { method: 'POST', body: { enabled: !ton } })
+        .then(function (v) { if (S.data && v) S.data.tb = v; W.toast(!ton ? 'Today summary on' : 'Today summary off'); }, function (err) { t.setAttribute('aria-checked', String(ton)); say(err.message, true); });
       return;
     }
     if (act === 'brief') {

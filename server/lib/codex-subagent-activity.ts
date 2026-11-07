@@ -139,3 +139,39 @@ export async function readCodexSubagents(
   }
   return out
 }
+
+/**
+ * 6.99.26 candidate (the Today summary, lib/session-subagents.ts): each parent's direct children by name, most recently
+ * updated first, at most `perParent`. The same read-only snapshot and child lifecycle reader as readCodexSubagents.
+ * Name is the child's nickname, else its role; the task is its thread title. Text only goes to the summary's prompt,
+ * cleaned there; ids and paths never leave this function. A failed read is an empty map, never a made-up zero.
+ */
+export interface CodexSubagentDetail { name: string; task: string; state: ChildState; at: number }
+export async function readCodexSubagentDetails(
+  parents: readonly string[], sessionsRoot: string, now = Date.now(), perParent = 6,
+): Promise<Map<string, CodexSubagentDetail[]>> {
+  const ids = [...new Set(parents.filter(id => UUID.test(id)).map(id => id.toLowerCase()))].slice(0, 12)
+  const out = new Map<string, CodexSubagentDetail[]>()
+  if (!ids.length) return out
+  try {
+    const home = dirname(sessionsRoot)
+    const files = (await readdir(home)).filter(n => /^state_\d+\.sqlite$/.test(n)).sort((a,b) => Number(b.match(/\d+/)![0])-Number(a.match(/\d+/)![0]))
+    if (!files.length) return out
+    // UUID validation above is the SQL parameter boundary.
+    const values = ids.map(id => `'${id}'`).join(',')
+    const query = `SELECT e.parent_thread_id AS root, t.rollout_path, t.archived, t.agent_nickname AS nick, t.agent_role AS role, t.title, t.updated_at_ms AS at
+      FROM thread_spawn_edges e LEFT JOIN threads t ON t.id=e.child_thread_id
+      WHERE e.status='open' AND e.parent_thread_id IN (${values}) ORDER BY t.updated_at_ms DESC LIMIT ${ids.length * perParent * 4}`
+    const { stdout } = await exec('/usr/bin/sqlite3', ['-readonly', '-json', join(home,files[0]), query], { timeout: 2000, maxBuffer: 2*1024*1024 })
+    const rows = JSON.parse(stdout || '[]') as Array<{root:string;rollout_path?:string;archived?:number;nick?:string;role?:string;title?:string;at?:number}>
+    const budget = { bytes: MAX_SNAPSHOT_BYTES }
+    for (const row of rows) {
+      const list = out.get(row.root) ?? []
+      if (list.length >= perParent) continue
+      const state: ChildState = row.archived === 1 ? 'completed' : typeof row.rollout_path === 'string' ? await childState(row.rollout_path, sessionsRoot, now, budget) : 'unknown'
+      list.push({ name: String(row.nick || row.role || 'agent').slice(0, 60), task: String(row.title || '').slice(0, 160), state, at: Number(row.at) || 0 })
+      out.set(row.root, list)
+    }
+  } catch { return new Map() }
+  return out
+}
