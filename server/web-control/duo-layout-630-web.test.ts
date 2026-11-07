@@ -113,7 +113,7 @@ function truthKit(phoneOffsetMs: number, opt: { fetch?: (path: string, init?: an
     requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} }, console }
   // eslint-disable-next-line no-new-func
   return new Function('deps', 'with (deps) {\n' + plainFn + '\n' + TRANSPORT + '\n' + sx + '\n' + md + '\n' + region +
-    '\nreturn { truth: sxTruth, noteGate: sxNoteGate, apply: applyFeed, newFeed: newFeed, answer: apiAnswer, clock: SX_CLOCK, probe: sxProbeAttach, stale: sxGateStale };\n}')(deps)
+    '\nreturn { truth: sxTruth, noteGate: sxNoteGate, apply: applyFeed, newFeed: newFeed, answer: apiAnswer, clock: SX_CLOCK, probe: sxProbeAttach, stale: sxGateStale, elapsed: sxElapsed };\n}')(deps)
 }
 describe('6.99.30: Idle never beats a fresher Working because the phone’s clock is off (sxTruth)', () => {
   const session = (k: any) => ({ provider: 'claude', id: 's', feed: k.newFeed(), live: {}, gate: null, stoppedAt: null })
@@ -141,6 +141,17 @@ describe('6.99.30: Idle never beats a fresher Working because the phone’s cloc
     k.apply(r, { seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_since: new Date(Date.now() - 60_000).toISOString() })
     expect(k.truth(r)).toMatchObject({ word: 'Working', src: 'hook' })
   })
+  // QA 6.99.30 (Skeptic #5): the card's elapsed clock weighs Mac times, so "now" is on the Mac's clock too.
+  for (const offset of [-60_000, 60_000]) {
+    it(`elapsed: phone ${offset < 0 ? '60 s behind' : '60 s ahead'}, the Mac said Working 90 s ago: "1m 30s", not ${offset < 0 ? '"30s"' : '"2m 30s"'}`, async () => {
+      const k = truthKit(offset)
+      await k.answer('/api/health')
+      const r = session(k)
+      const macNow = Date.now()   // this test runs on the Mac's clock; the page sees Date.now() + offset
+      k.apply(r, { seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_since: new Date(macNow - 90_000).toISOString() })
+      expect(['1m 30s', '1m 29s', '1m 31s']).toContain(k.elapsed(r.feed, null))
+    })
+  }
   it('the same two cases with no offset learned are the bug this fixes (the guard is the offset, not luck)', () => {
     const behind = truthKit(-60_000), r1 = session(behind)
     behind.apply(r1, { seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_since: new Date(Date.now() - 30_000).toISOString() })
