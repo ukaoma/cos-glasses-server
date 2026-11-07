@@ -359,6 +359,7 @@ describe('sub-agents (Miles 11/07: "those summaries should be able to see sub ag
     expect(prompt).toContain('- "qa-ghost" (idle, moved 30 min ago): "Ghost \'hunter\' QA in"')
     for (const bad of ['aaaaaaaa', '019a0000', 'claude|', 'codex|', '/Users/']) expect(prompt).not.toContain(bad)
     expect(TODAY_BRIEF_SYSTEM_PROMPT_HAS_UNTRUSTED()).toBe(true)
+    expect(TODAY_BRIEF_SYSTEM_PROMPT).toContain('Use them to say who is on what')
   })
   it('a sub-agent changing state is new news; one ticking along is not', () => {
     const a = withSubagents(base(), reading(), NOW)
