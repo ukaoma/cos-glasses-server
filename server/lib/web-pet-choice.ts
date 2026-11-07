@@ -16,7 +16,7 @@
 import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
-import { controlSupportDir, pngSize, readPetSources } from './web-pet.js'
+import { controlSupportDir, readPetSources } from './web-pet.js'
 
 export type PetChoice =
   | { kind: 'mac' }
@@ -163,6 +163,9 @@ export const GALLERY_TIMEOUT_MS = 10_000
 
 export type PetFetcher = (url: string, init: { signal: AbortSignal; redirect: 'error' }) => Promise<Response>
 const galleryInflight = new Map<string, Promise<{ file: string; type: string }>>()
+/** A picture that just failed is not asked for again for this long, so a broken gallery is not hammered. */
+export const GALLERY_RETRY_MS = 10 * 60_000
+const galleryFailedAt = new Map<string, number>()
 
 /**
  * The gallery picture for one pet, downloaded once from openpets.dev (as COS Control does) and kept under
@@ -175,6 +178,8 @@ export function galleryThumb(pet: { id: string; preview: string }, cacheDir: str
   for (const [ext, type] of [['.webp', 'image/webp'], ['.png', 'image/png'], ['.gif', 'image/gif'], ['.jpg', 'image/jpeg']] as const) {
     if (isFile(base + ext)) return Promise.resolve({ file: base + ext, type })
   }
+  const failed = galleryFailedAt.get(base)
+  if (failed && Date.now() - failed < GALLERY_RETRY_MS) return Promise.reject(new Error('gallery_recently_failed'))
   let job = galleryInflight.get(base)
   if (!job) {
     job = (async () => {
@@ -192,13 +197,9 @@ export function galleryThumb(pet: { id: string; preview: string }, cacheDir: str
       fs.writeFileSync(tmp, body)
       fs.renameSync(tmp, base + ext)
       return { file: base + ext, type }
-    })().finally(() => galleryInflight.delete(base))
+    })().then((ok) => { galleryFailedAt.delete(base); return ok }, (err) => { galleryFailedAt.set(base, Date.now()); throw err })
+      .finally(() => galleryInflight.delete(base))
     galleryInflight.set(base, job)
   }
   return job
-}
-
-/** Width and height of a still for layout, PNG only (others are sized by the browser). */
-export function stillSize(file: string): { width: number; height: number } | null {
-  return file.toLowerCase().endsWith('.png') ? pngSize(file) : null
 }

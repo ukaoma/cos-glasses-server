@@ -178,17 +178,15 @@ export function webControlEnabled(env: NodeJS.ProcessEnv = process.env): boolean
 }
 
 /**
- * CSP for `/control/*`. The shell (index.html, app.js, theme.js) has no inline script, so it
- * gets `script-src 'self'`: an injected `<img onerror>` in rendered session or meeting text
- * cannot run. The hosted Memories page is the native bundle as shipped and still uses inline
- * `onclick` handlers, so only `/control/memories/*` keeps `'unsafe-inline'`.
+ * CSP for `/control/*`. No page has inline script, so every path gets `script-src 'self'`: an injected
+ * `<img onerror>` in rendered session or meeting text cannot run. 6.99.25: Memories is a native pane
+ * (panes/memories.js); the hosted page and its `/control/memories/*` 'unsafe-inline' exception are gone.
  * `frame-ancestors 'self'` stops another site framing the signed-in page.
  */
-export function webControlCsp(requestPath: string): string {
-  const inlineScripts = requestPath.startsWith('/memories/')
+export function webControlCsp(_requestPath: string): string {
   return [
     "default-src 'self'",
-    inlineScripts ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
+    "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "font-src 'self' data:",
     "img-src 'self' data: blob:",

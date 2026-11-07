@@ -348,6 +348,11 @@
     }
   });
 
+  // A gallery picture that will not load shows the pet's name alone, never a broken image.
+  pane.addEventListener('error', function (e) {
+    var img = e.target;
+    if (img && img.tagName === 'IMG' && img.closest && img.closest('.pet-tile, .pet-choice')) img.classList.add('hidden');
+  }, true);
   pane.addEventListener('input', function (e) {
     if (e.target && e.target.id === 'pet-search') { PET.q = e.target.value; filterPets(); }
   });

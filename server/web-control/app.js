@@ -154,7 +154,17 @@
     return lazyList;
   }
   var lazyLoads = {};
-  function ensurePane(name) {
+  // ensurePane(name, waitMs): the pane's script, loaded once. With waitMs, this caller stops waiting after that
+  // long (the load itself carries on, and a later call reuses it), so a stalled download can never hang a tap.
+  function ensurePane(name, waitMs) {
+    var load = loadPane(name);
+    if (!waitMs) return load;
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () { reject(new Error('The ' + (TITLES[name] || name) + ' section is taking too long to load. Check the connection to your Mac.')); }, waitMs);
+      load.then(function (v) { clearTimeout(timer); resolve(v); }, function (e) { clearTimeout(timer); reject(e); });
+    });
+  }
+  function loadPane(name) {
     if (PANES[name] || !LAZY()[name]) return Promise.resolve(PANES[name] || null);
     if (lazyLoads[name]) return lazyLoads[name];
     lazyLoads[name] = new Promise(function (resolve, reject) {
@@ -224,7 +234,7 @@
     if (!PANES[r.pane] && LAZY()[r.pane]) {
       var lazyPane = r.pane, lazyEl = $('pane-' + lazyPane), wasEmpty = lazyEl && !lazyEl.getAttribute('data-lazy-ready');
       if (wasEmpty && lazyEl && !lazyEl.querySelector('.lazy-wait')) lazyEl.insertAdjacentHTML('afterbegin', '<div class="lazy-wait">' + skeletonRows(4) + '</div>');
-      ensurePane(lazyPane).then(function () {
+      ensurePane(lazyPane, 15000).then(function () {
         if (lazyEl) { lazyEl.setAttribute('data-lazy-ready', '1'); lazyEl.querySelectorAll('.lazy-wait').forEach(function (n) { n.remove(); }); }
         // Pass changed=true, the value this pane got on its first open when it loaded at boot. Headless Chrome
         // probes on 11/06 rendered Work, Meetings, Settings and Speakers with either value; this keeps the old contract.
@@ -630,7 +640,7 @@
   }
   function openTodayAction(t) {
     var kind = t.getAttribute('data-today'), key = t.getAttribute('data-key') || '';
-    ensurePane('todayActions').then(function (m) {
+    ensurePane('todayActions', 4000).then(function (m) {
       if (!m || !m.open) throw new Error('The Today overlay did not start.');
       m.open(kind, key, t);
     }).catch(function () {
@@ -2027,7 +2037,7 @@
     var chat = window.COSWeb && window.COSWeb.cosChat;
     // Asked from Today: COS gets a short summary of what Today shows (panes/today-actions.js summary), as the Ask's
     // quoted reference, the query-jobs field for context. Asked from any other pane, nothing extra is sent.
-    var context = state.pane === 'today' ? ensurePane('todayActions').then(function (m) { return m && m.summary ? m.summary() : ''; }, function () { return ''; }) : Promise.resolve('');
+    var context = state.pane === 'today' ? ensurePane('todayActions', 1500).then(function (m) { return m && m.summary ? m.summary() : ''; }, function () { return ''; }) : Promise.resolve('');
     if (chat && chat.askFromSheet) {
       setStatus(statusEl, 'Sending…');
       return context.then(function (ctx) { return chat.askFromSheet(prompt, ctx ? { context: ctx } : undefined); }).then(function (where) { setStatus(statusEl, ''); return where; }, function (err) {

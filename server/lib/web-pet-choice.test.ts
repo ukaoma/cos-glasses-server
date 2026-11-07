@@ -115,6 +115,14 @@ describe('galleryThumb', () => {
     await expect(galleryThumb({ id: 'x', preview: 'https://evil.example/a.webp' }, path.join(root, 'g7'), async () => reply(WEBP))).rejects.toThrow('gallery_pet_invalid')
     for (const d of ['g3', 'g4', 'g5', 'g6']) expect(fs.existsSync(path.join(root, d)) ? fs.readdirSync(path.join(root, d)) : []).toEqual([])
   })
+  it('does not ask again for a picture that just failed', async () => {
+    let calls = 0
+    const p2 = { id: 'halloween-bat', preview: 'https://openpets.dev/pets/content/def/thumb.webp' }
+    const dir = path.join(root, 'g8')
+    await expect(galleryThumb(p2, dir, async () => { calls++; return reply(Buffer.alloc(0), { status: 503 }) })).rejects.toThrow('gallery_http_503')
+    await expect(galleryThumb(p2, dir, async () => { calls++; return reply(WEBP) })).rejects.toThrow('gallery_recently_failed')
+    expect(calls).toBe(1)
+  })
   it('recognises the image types the gallery serves', () => {
     expect(sniffImage(WEBP)).toBe('image/webp')
     expect(sniffImage(strip(1, 2, 2))).toBe('image/png')

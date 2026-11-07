@@ -565,12 +565,13 @@ describe('Web sign-in hardening (limiter, private status, CSP)', () => {
     }
   })
 
-  it('serves the shell with script-src self only, and keeps inline scripts for the hosted Memories page alone', () => {
+  it('serves every path with script-src self only, the graph files under /memories/ included', () => {
     const shell = webControlCsp('/index.html')
     expect(shell).toContain("script-src 'self';")
     expect(shell).not.toMatch(/script-src[^;]*unsafe-inline/)
     expect(webControlCsp('/')).not.toMatch(/script-src[^;]*unsafe-inline/)
-    expect(webControlCsp('/memories/memories.html')).toMatch(/script-src 'self' 'unsafe-inline'/)
+    expect(webControlCsp('/memories/graph-explorer.js')).not.toMatch(/script-src[^;]*unsafe-inline/)
+    expect(webControlCsp('/memories/memories.html')).not.toMatch(/script-src[^;]*unsafe-inline/)
     expect(shell).toContain("frame-ancestors 'self'")
   })
 
