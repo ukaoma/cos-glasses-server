@@ -37,6 +37,9 @@ html.ta-open { overflow: hidden; }
 }
 .ta-grip { flex: none; width: 36px; height: 5px; border-radius: 3px; background: var(--panel-border); margin: 8px auto 0; }
 .ta-head { flex: none; display: flex; align-items: flex-start; gap: 10px; padding: 6px var(--gutter) 4px; }
+.ta-head-main { flex: 1; min-width: 0; }
+.ta-back { display: inline-flex; align-items: center; min-height: 44px; margin: 0 0 -6px; padding: 0; }
+.ta-back[hidden] { display: none; }
 .ta-title { flex: 1; min-width: 0; margin: 8px 0 0; font: 500 22px/1.2 var(--display); letter-spacing: -0.005em; overflow-wrap: anywhere; }
 .ta-x { flex: none; display: grid; place-items: center; width: 44px; height: 44px; margin-right: -8px; border-radius: 12px; color: var(--ink); }
 .ta-x .icon { width: 20px; height: 20px; stroke-width: 1.8; }

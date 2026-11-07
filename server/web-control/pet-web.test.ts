@@ -26,7 +26,10 @@ function el(): El {
   return e
 }
 
-function harness(prefs: Record<string, unknown>, manifest: unknown) {
+// The real splitSessionId (app.js), which the pet keys sessions and questions with.
+const SPLIT = /  function splitSessionId\(provider, id\) \{[\s\S]*?\n  \}\n/.exec(APP)![0]
+
+function harness(prefs: Record<string, unknown>, manifest: unknown, questions: unknown[] = []) {
   const box = el()
   const calls: string[] = []
   const store: Record<string, unknown> = { 'cos-web-pet': prefs }
@@ -39,11 +42,11 @@ function harness(prefs: Record<string, unknown>, manifest: unknown) {
     sxState: (s: { agent_state?: string; running_active?: boolean }) => (s.agent_state === 'waiting' ? 'waiting' : s.running_active || s.agent_state === 'running' ? 'running' : 'recent'),
     state: { pane: 'today', sessions: [] as unknown[] },
     document: { querySelector: () => null, hidden: false },
-    window: { matchMedia: () => ({ matches: true, addEventListener() {} }) },
+    window: { matchMedia: () => ({ matches: true, addEventListener() {} }), COSWeb: { sessionQuestions: { itemsFor: (sid: string) => (sid ? [] : questions) } } },
     Image: class { onload?: () => void; set src(_v: string) { setTimeout(() => this.onload?.(), 0) } },
     setTimeout, clearTimeout, Promise,
   }
-  const kit = new Function('deps', 'with (deps) {\n' + SRC + '\nreturn { petPose: petPose, petCaption: petCaption, renderPet: renderPet };\n}')(deps)
+  const kit = new Function('deps', 'with (deps) {\n' + SPLIT + SRC + '\nreturn { petPose: petPose, petCaption: petCaption, renderPet: renderPet };\n}')(deps)
   return { kit, box, calls, store }
 }
 
@@ -91,5 +94,39 @@ describe('the pet on Today', () => {
     kit.renderPet([])
     await new Promise((r) => setTimeout(r, 5))
     expect(calls).toEqual(['/api/web-pet?pet=mac'])
+  })
+
+  // 6.99.27 (Miles 11/07 09:29): a question waiting here shows the attention strip and leads the caption.
+  it('a question waiting here: the attention strip and "1 question for you"; none: the count pose as before', async () => {
+    const spec = (name: string) => ({ chunks: ['/strip/' + name + '.png'], frames: 1, frameWidth: 100, height: 160, interval: 0.1, perChunk: 1 })
+    const manifest = { available: true, pet: 'mac', kind: 'strips', poses: { idle: spec('idle'), working: spec('working'), attention: spec('attention') } }
+    const q = { id: 'pq_1', sessionId: 'abc', provider: 'claude', kind: 'question', questions: [{ question: 'Ship it?' }] }
+    const held = harness({ pet: 'mac', show: true }, manifest, [q])
+    held.kit.renderPet([{ running_active: true }])
+    await new Promise((r) => setTimeout(r, 10))
+    expect(held.box.querySelector('.pet-sprite')!.style.backgroundImage).toBe('url("/strip/attention.png")')
+    expect(held.box.querySelector('.pet-caption')!.textContent).toBe('1 question for you, 1 running')
+    const calm = harness({ pet: 'mac', show: true }, manifest)
+    calm.kit.renderPet([{ running_active: true }])
+    await new Promise((r) => setTimeout(r, 10))
+    expect(calm.box.querySelector('.pet-sprite')!.style.backgroundImage).toBe('url("/strip/working.png")')
+    expect(calm.box.querySelector('.pet-caption')!.textContent).toBe('1 running')
+  })
+
+  it('a pet without an attention strip falls back the way COS Control does: error, then waiting, then idle', async () => {
+    const spec = (name: string) => ({ chunks: ['/strip/' + name + '.png'], frames: 1, frameWidth: 100, height: 160, interval: 0.1, perChunk: 1 })
+    const q = { id: 'pq_1', sessionId: 'abc', provider: 'claude', kind: 'question', questions: [{ question: 'Ship it?' }] }
+    const h = harness({ pet: 'mac', show: true }, { available: true, pet: 'mac', kind: 'strips', poses: { idle: spec('idle'), waiting: spec('waiting'), working: spec('working') } }, [q])
+    h.kit.renderPet([{ running_active: true }])
+    await new Promise((r) => setTimeout(r, 10))
+    expect(h.box.querySelector('.pet-sprite')!.style.backgroundImage).toBe('url("/strip/waiting.png")')
+  })
+
+  it('a still pet says the question too', async () => {
+    const q = { id: 'pq_1', sessionId: 'abc', provider: 'claude', kind: 'question', questions: [{ question: 'Ship it?' }] }
+    const h = harness({ pet: 'gallery:halloween-bat', show: true }, { available: true, pet: 'gallery:halloween-bat', kind: 'still', poses: {}, still: '/s' }, [q, { ...q, id: 'pq_2', sessionId: 'def' }])
+    h.kit.renderPet([])
+    await new Promise((r) => setTimeout(r, 5))
+    expect(h.box.querySelector('.pet-caption')!.textContent).toBe('2 questions for you')
   })
 })

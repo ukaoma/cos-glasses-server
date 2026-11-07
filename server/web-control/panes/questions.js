@@ -44,9 +44,18 @@
     missing: {},          // id -> the question a Submit tap found unanswered, until the next pick
     timer: null,
     tick: null,
-    stopped: false
+    stopped: false,
+    inflight: false,      // a poll is on the wire
+    again: false,         // something asked for a poll while one was out: one more as soon as it lands
+    lastPollAt: 0         // when the last poll went out (Date.now)
   };
   var DEFAULT_POLL_MS = 10000;
+  // 6.99.27 (Miles 11/07 09:29, "a big delay to see the questions on the homepage"): while this tab is visible on
+  // Today it reads every 3 s, whatever the server's idle pace (10 s). Before, a question parked just after an idle read
+  // waited up to 10 s plus the round trip for the next one. Hidden, the page reads nothing (visibilitychange below).
+  var TODAY_POLL_MS = 3000;
+  // A nudge (a session that just went to waiting, Today coming on screen) never reads more often than this.
+  var NUDGE_GAP_MS = 1000;
   // Miles's words for a question at the Mac (11/07), one place: Today's Needs you reads them from here too.
   var MAC_LINE = "Waiting on your Mac's prompt. Answer it on the Mac (or through Screens).";
   var ANSWERED_LINE = 'Answered. The session carries on.';
@@ -103,27 +112,54 @@
     }, function () { return null; });
   }
   function usable(cap) { return !!(cap && cap.enabled === true && cap.webClient === true); }
+  // The capability for this poll. Once this server has said the web may poll, a poll never waits on /api/models again:
+  // an old answer is refreshed alongside the poll (6.99.27: after five minutes away, coming back read /api/models first
+  // and only then the questions). The first read of a page still waits for it, so an older server is never polled.
+  function capForPoll() {
+    if (usable(Q.cap)) { if (Date.now() - Q.capAt >= 5 * 60000) readCap(); return Promise.resolve(Q.cap); }
+    return readCap();
+  }
+  function onToday() { var st = W.state; return !!(st && st.pane === 'today'); }
+  // The wait before the next read: the server's pace, 3 s while one waits (an answer elsewhere clears it here too), and
+  // 3 s while this tab shows Today.
+  function nextWait(every) { return Q.items.length || onToday() ? Math.min(every, TODAY_POLL_MS) : every; }
   function schedule(ms) {
     clearTimeout(Q.timer);
     Q.timer = setTimeout(poll, ms);
   }
+  function landed() {
+    Q.inflight = false;
+    if (Q.again) { Q.again = false; schedule(0); }
+  }
   function poll() {
     clearTimeout(Q.timer);
     if (Q.stopped || document.hidden || !signedIn()) return;
-    readCap().then(function (cap) {
-      if (!usable(cap)) { clearCards(); schedule(60000); return; }
+    // One read on the wire at a time: a second ask while one is out becomes one more read when it lands.
+    if (Q.inflight) { Q.again = true; return; }
+    Q.inflight = true; Q.again = false; Q.lastPollAt = Date.now();
+    capForPoll().then(function (cap) {
+      if (!usable(cap)) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
       return fetch(pollUrl(), { headers: { 'X-COS-Web': '1' }, credentials: 'same-origin', cache: 'no-store' }).then(function (res) {
-        if (res.status === 401) { Q.stopped = true; clearCards(); return; }
-        if (!res.ok) { schedule(DEFAULT_POLL_MS); return; }
+        if (res.status === 401) { Q.again = false; landed(); Q.stopped = true; clearCards(); return; }
+        if (!res.ok) { schedule(DEFAULT_POLL_MS); landed(); return; }
         return res.json().then(function (d) {
-          if (!d || d.enabled === false) { clearCards(); schedule(60000); return; }
+          if (!d || d.enabled === false) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
+          // Painted as soon as the read lands: take() draws the cards and repaints Today's Needs you and the pet.
           take(Array.isArray(d.items) ? d.items : [], Array.isArray(d.settled) ? d.settled : []);
           var every = Number(d.pollIntervalMs) > 0 ? Number(d.pollIntervalMs) : DEFAULT_POLL_MS;
-          // While one waits, read faster so an answer from the glasses or the Mac clears it here too.
-          schedule(Q.items.length ? Math.min(every, 3000) : every);
+          schedule(nextWait(every));
+          landed();
         });
-      }, function () { schedule(DEFAULT_POLL_MS); });
-    });
+      }, function () { schedule(DEFAULT_POLL_MS); landed(); });
+    }).catch(function () { schedule(DEFAULT_POLL_MS); landed(); });
+  }
+  // Read now, unless a read went out under NUDGE_GAP_MS ago (then at the end of that gap) or one is on the wire (then
+  // once more when it lands). Today calls this when a session goes to waiting, so its question shows at once.
+  function nudge() {
+    if (Q.stopped || document.hidden || !signedIn()) return;
+    if (Q.inflight) { Q.again = true; return; }
+    var since = Date.now() - Q.lastPollAt;
+    schedule(since >= NUDGE_GAP_MS ? 0 : NUDGE_GAP_MS - since);
   }
   function start() { Q.stopped = false; poll(); }
   function stop() { clearTimeout(Q.timer); }
@@ -563,9 +599,12 @@
     return { count: function () { return itemsFor(m.sessionId).length; }, unmount: function () { mounts = mounts.filter(function (x) { return x !== m; }); } };
   }
 
+  // Hidden: no reads at all (a phone in a pocket spends nothing). Visible again: one read at once.
   document.addEventListener('visibilitychange', function () { if (document.hidden) stop(); else if (signedIn()) start(); });
   W.onShell(function () { start(); });
+  // Coming to Today: a read at once (within the nudge gap), then every 3 s while it stays on screen.
+  if (W.onRoute) W.onRoute(function (r) { if (r && r.pane === 'today') nudge(); });
 
-  W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, _advanceMs: ADVANCE_MS, poll: poll, mount: mount,
+  W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, _advanceMs: ADVANCE_MS, _todayPollMs: TODAY_POLL_MS, poll: poll, nudge: nudge, mount: mount,
     itemsFor: itemsFor, atMacFor: atMacFor, answeredFor: answeredFor, wordsOf: wordsOf, macLine: MAC_LINE, answeredLine: ANSWERED_LINE };
 })();
