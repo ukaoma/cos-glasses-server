@@ -7,6 +7,10 @@
  *   GET  /api/work/chat/lens-rounds/:roundId              the round's live state, never its prompts
  *   POST /api/work/chat/lens-rounds/:roundId/send         ask COS Control to send it (two-step confirm, or card Auto-send)
  *   POST /api/work/chat/lens-rounds/:roundId/stop         ask COS Control to Stop assignments
+ * COS Control Web:
+ *   GET  /api/work/chat/web-plans                         { protocolVersion: 1, webPlans: 1, sources }: this server records web plans
+ *                                                         (a web round is refused 409 round_id_conflict when its id is reused
+ *                                                         for a different plan; GET /api/work/chat is unchanged)
  * COS Control (this Mac only):
  *   GET  /api/work/chat/lens-inbox?since=<cursor>[&autoSend=1]   rounds not yet in history, send and stop requests
  *   POST /api/work/chat/lens-rounds/:roundId/history      { state: "in_history", autoSendCard? }
@@ -18,8 +22,8 @@
  * (index.ts leaves these paths to this router so the error code is the contract's).
  */
 import { Router, type Request, type Response } from 'express'
-import { LensRoundError, LensRoundStore, LENS_ROUND_BODY_BYTES, ROUND_ID, SEND_ID, cardSessionsOf, parseLensRound, parseResultBody,
-  parseSendBody, parseStopBody, roundView, defaultLensRoundStore } from '../lib/work-lens-rounds.js'
+import { LensRoundError, LensRoundStore, LENS_ROUND_BODY_BYTES, ROUND_ID, ROUND_SOURCES, SEND_ID, cardSessionsOf, parseLensRound, parseResultBody,
+  parseSendBody, parseStopBody, roundView, sameRoundContent, defaultLensRoundStore } from '../lib/work-lens-rounds.js'
 import type { ControlSnapshot } from '../lib/work-orchestrator/snapshot.js'
 import { orchestratorSnapshots } from '../lib/work-orchestrator/runtime.js'
 import { acquireMaintenanceWork, maintenanceAdmissionsOpen } from '../lib/maintenance-lifecycle.js'
@@ -97,6 +101,9 @@ export function createWorkLensRoundsRouter(given: Partial<WorkLensRoundsDeps> = 
     const input = parseLensRound(req.body)
     // A repeat is answered from the store, even when the board has since changed or is unreachable.
     const replay = deps.store.replay(input.clientRoundId)
+    if (replay && input.source === 'web' && !sameRoundContent(replay, input)) {
+      throw new LensRoundError('round_id_conflict', 409, 'This round id was used for a different plan. Plan again.')
+    }
     if (!replay) {
       let known: boolean
       try { known = await deps.knownWork(input.workID) }
@@ -107,6 +114,12 @@ export function createWorkLensRoundsRouter(given: Partial<WorkLensRoundsDeps> = 
     if (created) console.log(`[work-lens-rounds] recorded ${round.roundId} work=${round.workID} assignments=${round.assignments.length}${round.source === 'web' ? ' source=web' : ''}`)
     return res.status(created ? 201 : 200).json({ roundId: round.roundId, workID: round.workID, state: roundView(round).state, control: { connected: connected() } })
   }))
+
+  // COS Control Web asks this before it shows Work chat. A server without it answers 404, and the web says it needs an update.
+  router.get('/work/chat/web-plans', (_req, res) => {
+    res.set('Cache-Control', 'private, no-store')
+    return res.json({ protocolVersion: 1, webPlans: 1, sources: [...ROUND_SOURCES] })
+  })
 
   router.get('/work/chat/lens-rounds/:roundId', (req, res) => {
     try {
