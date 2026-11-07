@@ -328,7 +328,7 @@
   W.onRoute(function (r) { if (O.open && r.pane !== 'today') close('leave'); });
   // Escape closes the overlay, unless the Ask sheet is open over it (app.js closes that first).
   document.addEventListener('keydown', function (e) {
-    if (!O.open || e.key !== 'Escape') return;
+    if (!O.open || e.key !== 'Escape' || (W.readerMedia && W.readerMedia.isOpen())) return;
     var ask = $('ask-sheet');
     if (ask && !ask.classList.contains('hidden')) return;
     e.preventDefault();
@@ -682,6 +682,7 @@
     if (kind === 'need') recheckNeed(key);
   }
   function stopSession() {
+    if (K.imagesStop) K.imagesStop($('ta-last'));
     if (O.stream) { try { O.stream.close(); } catch (_e) {} O.stream = null; }
     clearInterval(O.clock); O.clock = null;
     clearInterval(O.watch); O.watch = null;
@@ -917,8 +918,8 @@
       var d = a.body || {};
       if (!O.row) { O.row = d; paintMeta(); if (O.open && O.open.kind === 'run') setHead(K.title(d)); }
       var turns = Array.isArray(d.recent_turns) ? d.recent_turns : [];
-      var lastA = turns.filter(function (t) { return lower(t.role) !== 'user' && String(t.text || t.content || '').trim(); }).pop();
-      O.last = lastA ? { text: String(lastA.text || lastA.content).trim(), at: lastA.at } : null;
+      var lastA = turns.filter(function (t) { return lower(t.role) !== 'user' && (String(t.text || t.content || '').trim() || (K.imageHtml && K.imageHtml(t))); }).pop();
+      O.last = lastA ? { text: String(lastA.text || lastA.content || '').trim(), at: lastA.at, outputImages: lastA.outputImages } : null;
       O.lastState = O.last ? 'ready' : 'none';
       O.lastWhy = '';
       paintLast();
@@ -926,6 +927,7 @@
   }
   function paintLast() {
     var box = $('ta-last'); if (!box) return;
+    if (K.imagesStop) K.imagesStop(box);
     if (O.lastState === 'loading') { box.innerHTML = '<div class="ta-last"><div class="skeleton" style="width:74%"></div><div class="skeleton" style="width:52%;margin-top:8px"></div></div>'; return; }
     if (O.lastState === 'error') { box.innerHTML = '<p class="ta-sub">The last reply did not load. Open the session to read it.</p>'; return; }
     if (O.lastState === 'none') { box.innerHTML = O.lastWhy ? '<p class="ta-sub">' + esc(O.lastWhy) + '</p>' : ''; return; }
@@ -933,7 +935,8 @@
     var at = W.toDate(O.last.at), long = O.last.text.length > 700;
     box.innerHTML = '<section class="ta-last" aria-label="Last reply"><p class="ta-last-head">' + esc('Last reply' + (at ? ', ' + W.clock(at) : '')) + '</p>' +
       '<div class="sx-md ta-last-text' + (long ? ' clamped' : '') + '" id="ta-last-text">' + K.markdown(O.last.text.slice(0, 12000)) + '</div>' +
-      (long ? '<button type="button" class="link-btn" data-ta="more">Show all of it</button>' : '') + '</section>';
+      (long ? '<button type="button" class="link-btn" data-ta="more">Show all of it</button>' : '') + (K.imageHtml ? K.imageHtml(O.last) : '') + '</section>';
+    if (K.imagesMount) K.imagesMount(box, O.r);
   }
 
   // Running: the same live stream the reader follows, read with its own reducer (applyFeed, sxFeedWord and friends).
