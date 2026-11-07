@@ -10,11 +10,12 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { agentSessionsRouter, runningHintFor } from './agent-sessions.js'
-import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { agentSessionsRouter, runningHintFor, withRunning } from './agent-sessions.js'
+import { __resetSessionHooksForTests, sessionSignalStore, deriveForRow } from '../lib/session-hooks-runtime.js'
 import { HOOK_ACTIVE_CAP_MS, __resetCodexRolloutStateForTests, codexRolloutReads } from '../lib/codex-rollout-state.js'
 import { resetLockSnapshot } from '../lib/occupancy-probes.js'
+import * as occupancyProbes from '../lib/occupancy-probes.js'
 import { OPEN_TURN_CEILING_MS, type DerivedSessionState } from '../lib/session-state-derive.js'
 import type { HookEnvelope } from '../lib/session-hook-events.js'
 
@@ -35,6 +36,7 @@ afterEach(async () => {
   await Promise.all(closers.splice(0).map(close => close()))
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k] }
   __resetSessionHooksForTests()
+  vi.restoreAllMocks()
 })
 
 function home(): string {
@@ -94,12 +96,52 @@ describe('runningHintFor (pure)', () => {
     expect(runningHintFor('cursor', derived('running', 'hook'), null, now)).toEqual({ running: true, active: false, foreign: true, decides: true })
   })
 
-  it('waiting: running, never active; idle and ended: nothing for Claude/Codex, quiet for Cursor', () => {
-    expect(runningHintFor('claude', derived('waiting', 'hook'), now - 20 * 60_000, now)).toEqual({ running: true, active: false, foreign: false, decides: false })
+  it('authoritative waiting, idle and ended suppress active display without releasing ownership', () => {
+    expect(runningHintFor('claude', derived('waiting', 'hook'), now - 20 * 60_000, now)).toEqual({ running: true, active: false, foreign: false, decides: false, activeDecides: true })
     expect(runningHintFor('cursor', derived('waiting', 'hook'), now, now)).toEqual({ running: true, active: false, foreign: true, decides: true })
     for (const s of ['idle', 'ended', 'failed'] as const) {
-      expect(runningHintFor('claude', derived(s, 'hook'), now, now)).toBeNull()
+      expect(runningHintFor('claude', derived(s, 'hook'), now, now)).toMatchObject({ active: false, activeDecides: true, decides: false })
       expect(runningHintFor('cursor', derived(s, 'hook'), now, now)).toEqual({ running: false, active: false, foreign: false, decides: true })
+    }
+  })
+
+  it('fresh transcript writes cannot resurrect idle or waiting hooks/registry, but still hold the session', () => {
+    const id = 'held-thread'
+    const scan = { occupied: new Map([[id, { threadId: id, owners: 1, foreignOwners: 1, activeRecently: true }]]), degraded: false }
+    for (const provider of ['claude', 'codex'] as const) {
+      for (const source of ['hook', 'registry'] as const) {
+        for (const state of ['idle', 'waiting', 'ended', 'failed'] as const) {
+          const row = withRunning({ session_id: id }, scan, runningHintFor(provider, derived(state, source), now, now))
+          expect(row).toMatchObject({ running: true, running_foreign: true, running_active: false })
+        }
+      }
+    }
+    // Unknown/transcript-only state keeps the existing occupancy fallback.
+    expect(withRunning({ session_id: id }, scan, null).running_active).toBe(true)
+    // A real new active turn can become working again.
+    expect(withRunning({ session_id: id }, scan, runningHintFor('claude', derived('running', 'hook'), now, now)).running_active).toBe(true)
+  })
+
+  it('an attached turn overrides a real stopped derivation before hint and wire stamping, then settles back to idle', () => {
+    const id = '12345678-1234-4234-8234-123456789abc'
+    const scan = { occupied: new Map([[id, { threadId: id, owners: 1, foreignOwners: 0, activeRecently: true }]]), degraded: false }
+    for (const provider of ['claude', 'codex'] as const) {
+      __resetSessionHooksForTests()
+      sessionSignalStore.apply(env(id, provider, now - 2000, 'UserPromptSubmit', { prompt: 'Old turn' }))
+      sessionSignalStore.apply(env(id, provider, now - 1000, 'Stop'))
+      const facts = { sessionId: id, now, registry: { alive: true, status: 'idle' as const, waitingFor: null, statusUpdatedAt: now - 1000, lastActiveAt: now - 1000 },
+        transcript: { inFlight: true, lastActivityAt: now } }
+      const stamp = (attachedTurn: boolean) => {
+        const state = deriveForRow({ ...facts, attachedTurn })!
+        return { state, row: withRunning({ session_id: id }, scan, runningHintFor(provider, state, now, now)) }
+      }
+      const stopped = stamp(false)
+      expect(stopped.state).toMatchObject({ agent_state: 'idle', state_source: 'hook' })
+      expect(stopped.row).toMatchObject({ running: true, running_foreign: false, running_active: false })
+      const attached = stamp(true)
+      expect(attached.state).toMatchObject({ agent_state: 'running', state_source: 'transcript' })
+      expect(attached.row).toMatchObject({ running: true, running_foreign: false, running_active: true })
+      expect(stamp(false).row.running_active).toBe(false)
     }
   })
 
@@ -197,6 +239,28 @@ describe('Claude: hook evidence counts as active for five minutes (plan 1.2)', (
     sessionSignalStore.apply(env(ID, 'claude', now - 90_000, 'PreToolUse', { tool_name: 'Bash', tool_input: { command: 'sleep 120' } }))
     const { row, detail } = await rowAndDetail(await server(), 'claude', ID)
     for (const r of [row, detail]) expect(r).toMatchObject({ agent_state: 'running', state_source: 'hook', running: true, running_active: true })
+  })
+
+  it('a fresh held transcript stays inactive after Stop on both HTTP list and detail, then a new prompt becomes active', async () => {
+    claudeHome(500)
+    process.env.COS_CLAUDE_SESSIONS_ENABLED = '0' // isolate occupancy from the separate peer-list process scan
+    const pid = 987654, procStart = 'Sat Aug 16 10:00:00 2026', startMs = Date.UTC(2026, 7, 16, 10, 0, 0)
+    const dir = process.env.COS_CLAUDE_SESSIONS_DIR!, socket = join(dir, 'fixture.sock')
+    write(socket, ['fixture'])
+    write(join(dir, `${pid}.json`), [JSON.stringify({ pid, sessionId: ID, procStart, kind: 'interactive',
+      entrypoint: 'claude-desktop', cwd: dirname(dir), startedAt: 1, messagingSocketPath: socket })])
+    const real = occupancyProbes.realOccupancyProbes
+    vi.spyOn(occupancyProbes, 'realOccupancyProbes').mockImplementation(ledger => ({ ...real(ledger),
+      isAlive: candidate => candidate === pid, processStartMs: candidate => candidate === pid ? startMs : null,
+    }))
+    const now = Date.now()
+    sessionSignalStore.apply(env(ID, 'claude', now - 2000, 'UserPromptSubmit', { prompt: 'Old turn' }))
+    sessionSignalStore.apply(env(ID, 'claude', now - 1000, 'Stop'))
+    const base = await server(), stopped = await rowAndDetail(base, 'claude', ID)
+    for (const r of [stopped.row, stopped.detail]) expect(r).toMatchObject({ agent_state: 'idle', state_source: 'hook', running: true, running_foreign: true, running_active: false })
+    sessionSignalStore.apply(env(ID, 'claude', now, 'UserPromptSubmit', { prompt: 'New work' }))
+    const working = await rowAndDetail(base, 'claude', ID)
+    for (const r of [working.row, working.detail]) expect(r).toMatchObject({ agent_state: 'running', state_source: 'hook', running: true, running_foreign: true, running_active: true })
   })
 
   it('Esc with no Stop decays: 6 minutes after the last event it is not active', async () => {
