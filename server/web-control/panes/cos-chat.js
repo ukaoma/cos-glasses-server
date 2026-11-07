@@ -874,11 +874,11 @@
         throw err;
       });
     };
-    var prepare = a.threaded ? threadPlan().then(function (plan) {
+    var prepare = (a.threaded ? threadPlan().then(function (plan) {
       if (plan.sessionId) body.sessionId = plan.sessionId;
       else if (plan.digest) body.reference = { query: THREAD_REF, response: plan.digest };
       a.carried = plan.sessionId ? '' : plan.digest ? 'summary' : 'plain';
-    }) : Promise.resolve();
+    }) : Promise.resolve()).then(function () { withContext(body, opts.context); });
     prepare.then(function () { return admit(true); }).then(function (d) {
       var job = d && d.job; if (!job) throw new Error('The Mac did not take the question.');
       take(a, job);
@@ -896,6 +896,15 @@
       if (done) done(false);
     });
     return a;
+  }
+  // An Ask from Today carries what Today shows (app.js askCos, panes/today-actions.js summary) as the quoted reference,
+  // after a carried thread summary when there is one. Bounded, and only on the Ask it was given to.
+  var TODAY_REF = 'What Today in COS Control shows right now', CONTEXT_MAX = 6000;
+  function withContext(body, context) {
+    var text = typeof context === 'string' ? context.trim().slice(0, CONTEXT_MAX) : '';
+    if (!text) return;
+    if (body.reference) body.reference = { query: body.reference.query + ', then ' + TODAY_REF.charAt(0).toLowerCase() + TODAY_REF.slice(1), response: body.reference.response + '\n\n' + text };
+    else body.reference = { query: TODAY_REF, response: text };
   }
   function take(a, job) {
     a.jobId = job.jobId; a.status = job.status || a.status;
@@ -932,11 +941,12 @@
     api('/api/inbox/feed?limit=100').then(function (d) { C.items = (d && d.items) || []; paintFeed(false); markReadIfShown(); }, function () {});
   }
   // The Ask sheet (app.js askCos) hands its words here, so the answer streams in the chat instead of vanishing.
-  function askFromSheet(text) {
+  function askFromSheet(text, extra) {
     return ensureCaps().then(function (caps) {
       if (!caps || !caps.jobs) { var off = new Error('Ask needs the durable query jobs switch on your Mac.'); off.code = 'durable_query_jobs_disabled'; throw off; }
       return new Promise(function (resolve, reject) {
-        submitAsk(String(text || '').trim(), null, function (ok) { if (ok) resolve(['cos']); else reject(new Error('Not sent. The question is in Ask COS; try again there.')); });
+        submitAsk(String(text || '').trim(), null, function (ok) { if (ok) resolve(['cos']); else reject(new Error('Not sent. The question is in Ask COS; try again there.')); },
+          extra && extra.context ? { context: extra.context } : undefined);
       });
     });
   }
