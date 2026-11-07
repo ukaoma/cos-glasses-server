@@ -4107,7 +4107,8 @@
   // The Ask COS row says what it sends, and waits while a file uploads.
   function askRowNote(q) {
     var n = ASK_FILES ? ASK_FILES.atts.length : 0;
-    return '“' + q + '”' + (state.pane === 'today' ? ' with what Today shows' : '') + (n ? (state.pane === 'today' ? ' and ' : ' with ') + (n === 1 ? '1 file' : n + ' files') : '');
+    // The files first: on the folded phone the line is cut, and they are what changed.
+    return '“' + q + '”' + (n ? ' with ' + (n === 1 ? '1 file' : n + ' files') : '') + (state.pane === 'today' ? (n ? ' and' : ' with') + ' what Today shows' : '');
   }
   function paintAskRow() {
     var row = document.querySelector('#ask-results [data-action="ask-cos"]'); if (!row) return;
