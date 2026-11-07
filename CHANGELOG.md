@@ -1,3 +1,12 @@
+## 6.99.24 - Mobile prep and recording controls fit small screens (private)
+
+2026-11-06. Private build on 6.99.23, compatible with COS Control 0.5.376/build 430. Server-served web layout only.
+
+- Recording actions fit a 320 px viewport. Phone recording and prep controls have 44 px touch targets.
+- The mobile prep suggestion reserves enough room for its text and Add to this meeting button.
+- Prep context and files continue through the existing explicit Add to this meeting action. No new automatic calendar binding.
+- Default-on changes: these responsive layout adjustments for web users. No API, recording, transcription, cue, profile, or permission changes.
+
 ## 6.99.23 - Sessions and Work open at once; the pet moves right when unfolded (private)
 
 2026-11-06. Private build on 6.99.22. Server only; no Mac app change.
