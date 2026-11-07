@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="/control/panes/sessions.css">
   <link rel="stylesheet" href="/control/panes/cos-chat.css">
   <link rel="stylesheet" href="/control/panes/questions.css">
+  <link rel="stylesheet" href="/control/panes/memories.css">
   <script src="/control/theme.js"></script>
 </head>
 <body>
@@ -208,9 +209,7 @@
         <section id="pane-dictation" class="pane hidden" data-title="Dictation"></section>
 
         <!-- MEMORIES -->
-        <section id="pane-memories" class="pane flush hidden" data-title="Memories">
-          <iframe id="memories-frame" class="memories-frame" title="Memories" src="about:blank"></iframe>
-        </section>
+        <section id="pane-memories" class="pane hidden" data-title="Memories"><!-- rendered by panes/memories.js --></section>
 
         <!-- SPEAKERS -->
         <section id="pane-speakers" class="pane wide hidden" data-title="Speakers"><!-- rendered by panes/speakers.js --></section>
@@ -273,7 +272,15 @@
     "meetings": "/control/panes/meetings.js",
     "work": "/control/panes/work.js",
     "dictation": "/control/panes/dictation.js",
-    "settings": "/control/panes/settings.js"
+    "settings": "/control/panes/settings.js",
+    "memories": "/control/panes/memories.js"
+  }</script>
+  <!-- The Knowledge graph explorer, loaded by panes/memories.js when the graph first opens. -->
+  <script type="application/json" id="memories-graph-assets">{
+    "css": "/control/memories/graph-explorer.css",
+    "d3": "/control/memories/d3.min.js",
+    "explorer": "/control/memories/graph-explorer.js",
+    "workspace": "/control/memories/memory-workspace.js"
   }</script>
 </body>
 </html>
