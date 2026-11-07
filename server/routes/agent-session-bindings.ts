@@ -2607,10 +2607,13 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (typeof cosSessionId !== 'string' || !COS_SESSION_ID_RE.test(cosSessionId)) {
         return refuseFork('invalid_request')
       }
-      const prompt = body.prompt
-      if (typeof prompt !== 'string' || prompt.trim().length === 0 || prompt.length > maxPromptChars) {
+      const words = body.prompt
+      if (typeof words !== 'string' || words.trim().length === 0 || words.length > maxPromptChars) {
         return refuseFork('invalid_request')
       }
+      // 6.99.27: a fork's first turn takes files as a turn does (the message written with them, sent to the copy).
+      const forkFiles = parseTurnAttachmentIds(body.attachmentIds)
+      if (!forkFiles.ok) return refuseFork('invalid_request')
       // 6.63.0: optional. With it, the fork answers 202 once every gate has passed and runs
       // in the background; without it, the route behaves exactly as before.
       const clientForkId = body.clientForkId
@@ -2633,6 +2636,18 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         const known = forkJobs.get(clientForkId)
         if (known) return known.source === forkSource ? replayForkJob(known) : refuseFork('invalid_request')
       }
+
+      // After the replay (a known fork sends nothing), before the workspace, the claim and the spawn: where each file is
+      // on this Mac goes under the words. Without files the prompt is the words, untouched.
+      const forkComposed = await composeTurnPrompt(words, forkFiles.ids, {
+        runId: `session-fork:${typeof clientForkId === 'string' ? clientForkId : mintId()}`,
+        maxChars: maxPromptChars,
+        ...(deps.turnAttachmentStore ? { store: deps.turnAttachmentStore } : {}),
+      })
+      if (!forkComposed.ok) {
+        return refuseFork('invalid_request', { reasonCopy: TURN_ATTACHMENT_COPY[forkComposed.code], attachmentError: forkComposed.code })
+      }
+      const prompt = forkComposed.prompt
 
       const now = readNow()
       if (now === null) return refuseFork('fork_failed')

@@ -1574,15 +1574,19 @@
         '<p class="sx-copy-note hidden" id="session-copy-note" role="status"></p>' +
         '<div class="sx-chat">' +
           '<div id="session-verdict"></div>' +
-          '<form class="composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
+          '<form class="composer att-composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
+            '<div class="cc-chips att-files hidden" id="session-files"></div>' +
             '<textarea id="session-input" rows="1" placeholder="Continue this session…" enterkeyhint="send" aria-label="Continue this session"></textarea>' +
-            '<div class="composer-actions"><button type="button" class="btn small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
-            '<button type="submit" class="btn primary small">Send</button></div>' +
+            '<div class="composer-actions"><span id="session-clip" class="att-clip"></span><button type="button" class="btn small" data-action="fork-session" title="Copy this session and send the message to the copy">Fork</button>' +
+            '<button type="submit" class="btn primary small" id="session-send">Send</button></div>' +
           '</form><div class="status-line" id="session-status"></div>' +
           '<p class="sx-caution hidden" id="session-caution"></p>' +
           '<div id="session-queue"></div>' +
         '</div>';
       setLive({ working: !!d.running_active });
+      paintReaderFiles();
+      // The Mac's answer about files may not be in yet: ask once, then draw the clip.
+      var kitR = readerKit(); if (kitR && !kitR.turnFiles()) kitR.ensureCaps().then(paintReaderFiles, function () {});
       renderHeld(state.reading);
       loadQueue(provider, id);
       sxProbeAttach(r);
@@ -1916,11 +1920,71 @@
   };
   function viewOf(r) { return (r && r.view) || READER_VIEW; }
 
+  // ── files with a message to a session (6.99.27, Miles: "We still don't have the ability to take picture, or add photo
+  // or files from the web") ──
+  // The COS chat's attach kit (panes/cos-chat.js, W.cosChat.attach), as on Today's reply box: Take photo and the clip,
+  // any file the Mac takes on a turn (threadTurnFileBytes, 64 MB; a video 100 MB), up to 5, sent as it is. The ids go
+  // with the words; the server writes where each file is on the Mac under them. One box per session, kept in this tab.
+  var READER_FILES = {};
+  function readerKit() { var c = window.COSWeb && window.COSWeb.cosChat; return c && c.attach ? c.attach : null; }
+  function readerFilesOn() { var k = readerKit(); return !!(k && k.turnFiles() > 0 && state.reading); }
+  function readerBox(r) {
+    var kit = readerKit(); if (!kit || !r) return null;
+    var key = r.provider + '|' + r.id;
+    if (!READER_FILES[key]) READER_FILES[key] = kit.box({
+      changed: function (box) { if (state.reading && READER_FILES[state.reading.provider + '|' + state.reading.id] === box) paintReaderFiles(); },
+      removed: function () { sessionStatus(''); },
+      signedOut: function () { sessionStatus('This browser was signed out. Your message and files are kept. Sign in, then tap Retry on each file.', 'error'); }
+    }, { anyBytes: kit.turnFileBytes() });
+    if (!READER_FILES[key].anyBytes && !READER_FILES[key].atts.length && kit.turnFileBytes()) READER_FILES[key].anyBytes = kit.turnFileBytes();
+    return READER_FILES[key];
+  }
+  function readerFilesState(box) {
+    var kit = readerKit();
+    if (!kit || !box || !box.atts.length) return 'none';
+    return kit.pending(box) ? 'waiting' : kit.failed(box) ? 'failed' : 'ready';
+  }
+  function paintReaderFiles() {
+    var kit = readerKit(), r = state.reading, slot = $('session-clip'), list = $('session-files');
+    if (!slot || !list) return;
+    if (!readerFilesOn()) { slot.innerHTML = ''; list.innerHTML = ''; list.classList.add('hidden'); return; }
+    var box = readerBox(r), full = box.atts.length >= kit.max, mode = String(box.anyBytes || 0);
+    if (slot.getAttribute('data-mode') !== mode) { slot.innerHTML = kit.cameraHtml('data-sx-file') + kit.clipHtml('data-sx-file', { any: box.anyBytes }); slot.setAttribute('data-mode', mode); }
+    Array.prototype.forEach.call(slot.querySelectorAll('.cc-attach'), function (l) { l.classList.toggle('full', full); });
+    Array.prototype.forEach.call(slot.querySelectorAll('[data-sx-file]'), function (i) { i.disabled = full || !!r.sending; });
+    list.innerHTML = kit.chipsHtml(box, 'data-action') + (box.atts.length ? '<p class="att-limit">' + esc(kit.limitLine(box)) + '</p>' : '');
+    list.classList.toggle('hidden', !box.atts.length);
+    // Send and Fork wait while a file uploads and while one failed.
+    var st = readerFilesState(box), form = $('session-form');
+    if (!form || r.sending) return;
+    var send = $('session-send'), forkBtn = form.querySelector('[data-action="fork-session"]');
+    if (send) { send.disabled = st === 'waiting' || st === 'failed'; send.textContent = st === 'waiting' ? 'Uploading' : 'Send'; }
+    if (forkBtn) forkBtn.disabled = st === 'waiting' || st === 'failed';
+  }
+  function addReaderFiles(list) {
+    var kit = readerKit(), r = state.reading; if (!kit || !r || !readerFilesOn() || !list || !list.length) return;
+    var refusals = kit.add(readerBox(r), list);
+    if (refusals.length) sessionStatus(refusals.join(' '), 'error');
+    paintReaderFiles();
+  }
+  // The files that went with a message leave the box; any added since stay.
+  function readerFilesSent(box, ids) {
+    var kit = readerKit(); if (!kit || !box || !ids || !ids.length) return;
+    box.atts.filter(function (t) { return ids.indexOf(t.mediaId) >= 0; }).forEach(function (t) { kit.remove(box, t.id); });
+  }
+
   function sendSessionTurn(fork, opts) {
     var r = state.reading; var form = $('session-form');
     if (!r || !form) return;
     var input = $('session-input'), text = input.value.trim();
     if (!text) { sessionStatus(fork ? 'Write what the copy should do first.' : 'Write a message first.', 'error'); return; }
+    // 6.99.27: files. Never before every upload has finished, never with one that failed. A fork carries them too: its
+    // first turn is this message, so the copy gets the same files (the fork route writes their paths as a turn does).
+    var fb = readerFilesOn() ? readerBox(r) : null, fst = readerFilesState(fb);
+    if (fst === 'waiting') { sessionStatus('A file is still uploading. ' + (fork ? 'Fork' : 'Send') + ' when it finishes.'); return; }
+    if (fst === 'failed') { sessionStatus('A file did not upload. Retry it or remove it, then ' + (fork ? 'fork' : 'send') + '.', 'error'); return; }
+    var fileIds = fst === 'ready' ? readerKit().ids(fb) : [];
+    if (fileIds.length && !fork) opts = Object.assign({}, opts || {}, { attachmentIds: fileIds });
     // Control's caution (SessionChatVerdict.caution): another app holds this session and looks
     // idle, so the first send asks before it writes. A fork writes to a copy and never asks.
     if (!fork && r.verdict && r.verdict.caution && !r.cautionAck) { r.cautionAsk = true; renderVerdict(r); return; }
@@ -1930,8 +1994,12 @@
     if (r.refusal || r.cautionAsk) { r.refusal = null; r.cautionAsk = false; renderVerdict(r); }
     r.sending = true;
     var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
-    var done = function () { r.sending = false; btns.forEach(function (b) { b.disabled = false; }); };
-    (fork ? forkSession(r, text) : continueSession(r, text, opts || {})).then(done, function (err) {
+    var done = function () { r.sending = false; btns.forEach(function (b) { b.disabled = false; }); paintReaderFiles(); };
+    (fork ? forkSession(r, text, fileIds) : continueSession(r, text, opts || {}).then(function (how) {
+      // The Mac took the message (sent, waiting in line, or held until the reply ends): its files went with it.
+      if (/^(sent|parked|held)$/.test(how)) readerFilesSent(fb, fileIds);
+      return how;
+    })).then(done, function (err) {
       done();
       if (state.reading !== r) return;
       var why = err && err.name === 'AbortError'
@@ -2119,13 +2187,15 @@
 
   // Fork copies the session and runs the message there. One key per draft, so a second tap or
   // a resend after a timeout finds the same job instead of making a second copy.
-  function forkSession(r, text) {
-    if (!r.forkDraft || r.forkDraft.text !== text) r.forkDraft = { text: text, key: 'fk' + newTurnKey().slice(2) };
+  function forkSession(r, text, ids) {
+    ids = Array.isArray(ids) ? ids : [];
+    // Other files are another fork, with its own key.
+    if (!r.forkDraft || r.forkDraft.text !== text || (r.forkDraft.ids || []).join(',') !== ids.join(',')) r.forkDraft = { text: text, key: 'fk' + newTurnKey().slice(2), ids: ids.slice() };
     var forkId = r.forkDraft.key;
     sessionStatus('Copying the session. This can take up to a minute.');
     var settle = function (b) {
       if (b.forked === true) {
-        r.forkDraft = null; clearBoxOf(text);
+        r.forkDraft = null; clearBoxOf(text); readerFilesSent(readerFilesOn() ? readerBox(r) : null, ids);
         sessionStatus('Forked. The copy has your message and shows in Sessions in a moment.');
         setTimeout(function () { if (state.pane === 'sessions') loadSessions(true); }, 4000);
         return true;
@@ -2133,7 +2203,7 @@
       if (b.forked === false || b.state === 'failed' || b.state === 'refused') { sessionStatus((b.reasonCopy || 'COS could not copy that session.'), 'error'); return true; }
       return false;
     };
-    return apiAnswer(sessionPath(r.provider, r.id, '/fork'), { method: 'POST', timeoutMs: 65000, body: { prompt: text, cosSessionId: cosSessionId(), clientForkId: forkId } }).then(function (f) {
+    return apiAnswer(sessionPath(r.provider, r.id, '/fork'), { method: 'POST', timeoutMs: 65000, body: Object.assign({ prompt: text, cosSessionId: cosSessionId(), clientForkId: forkId }, ids.length ? { attachmentIds: ids } : {}) }).then(function (f) {
       if (settle(f.body || {})) return;
       if (f.status !== 202) { sessionStatus('COS could not copy that session.', 'error'); return; }
       // 202: running in the background. Follow its job for up to three minutes.
@@ -4095,11 +4165,11 @@
     var slot = $('ask-clip'), kit = askKit(); if (!slot) return;
     var on = !!(kit && kit.askOn());
     if (!on) { slot.innerHTML = ''; return; }
-    if (!slot.querySelector('[data-ask-file]')) slot.innerHTML = kit.clipHtml('data-ask-file');
+    // 6.99.27: Take photo beside the clip (a phone or tablet only; kit.cameraHtml).
+    if (!slot.querySelector('[data-ask-file]')) slot.innerHTML = kit.cameraHtml('data-ask-file') + kit.clipHtml('data-ask-file');
     var full = !!(ASK_FILES && ASK_FILES.atts.length >= kit.max);
-    var lbl = slot.querySelector('.cc-attach'), inp = slot.querySelector('[data-ask-file]');
-    if (lbl) lbl.classList.toggle('full', full);
-    if (inp) inp.disabled = full || ASK_SENDING;
+    Array.prototype.forEach.call(slot.querySelectorAll ? slot.querySelectorAll('.cc-attach') : [], function (l) { l.classList.toggle('full', full); });
+    Array.prototype.forEach.call(slot.querySelectorAll ? slot.querySelectorAll('[data-ask-file]') : [], function (i) { i.disabled = full || ASK_SENDING; });
   }
   function paintAskFiles() {
     var kit = askKit(), box = $('ask-files'), b = ASK_FILES; if (!box || !kit) return;
@@ -4249,6 +4319,12 @@
     }
     if (action === 'expand-turn') { var tr = document.querySelector('.turn[data-turn="' + t.getAttribute('data-turn') + '"]'); if (tr) tr.classList.remove('clamped'); t.remove(); return; }
     var q = $('ask-q').value.trim();
+    if ((action === 'att-remove' || action === 'att-retry') && t.closest('#session-form') && state.reading) {
+      var kitR = readerKit(), boxR = kitR && readerBox(state.reading); if (!boxR) return;
+      sessionStatus('');
+      if (action === 'att-remove') kitR.remove(boxR, t.getAttribute('data-att')); else kitR.retry(boxR, t.getAttribute('data-att'));
+      return;
+    }
     if (inSheet && (action === 'att-remove' || action === 'att-retry') && ASK_FILES) {
       var kitA = askKit(); setStatus($('ask-status'), '');
       if (action === 'att-remove') kitA.remove(ASK_FILES, t.getAttribute('data-att')); else kitA.retry(ASK_FILES, t.getAttribute('data-att'));
@@ -4288,6 +4364,20 @@
   // The Ask sheet's clip, a pasted screenshot in its box, and files dropped on it (askFiles above).
   document.addEventListener('change', function (e) {
     if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-ask-file')) { addAskFiles(e.target.files); e.target.value = ''; }
+    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-sx-file')) { addReaderFiles(e.target.files); e.target.value = ''; }
+  });
+  // The Sessions reader's box: a pasted screenshot, and files dropped on it.
+  document.addEventListener('paste', function (e) {
+    if (!e.target || e.target.id !== 'session-input') return;
+    var kit = readerKit(), files = kit && readerFilesOn() ? kit.pasted(e) : null;
+    if (files) { e.preventDefault(); addReaderFiles(files); }
+  });
+  ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (type) {
+    document.addEventListener(type, function (e) {
+      var form = e.target && e.target.closest ? e.target.closest('#session-form') : null, kit = readerKit();
+      if (!form || !kit || !readerFilesOn()) return;
+      var files = kit.dragged(e, form); if (files) addReaderFiles(files);
+    });
   });
   document.addEventListener('paste', function (e) {
     if (!e.target || e.target.id !== 'ask-q') return;

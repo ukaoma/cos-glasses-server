@@ -22,6 +22,7 @@
 // /api/media/file STREAMS to disk rather than buffering: see
 // createMediaBinaryBodyParser below.
 
+import { getTurnFileStore } from '../lib/turn-file-store.js'
 import { Router, json, type NextFunction, type Request, type Response } from 'express'
 import { createReadStream, createWriteStream, openSync, statSync } from 'node:fs'
 import {
@@ -554,6 +555,15 @@ mediaRouter.post('/media', async (req: Request, res: Response) => {
  * bounded requests, but composer admission still owns the shared five-item
  * prompt cap. Filename and MIME are hints only; the store sniffs and validates
  * the actual staged bytes. */
+/**
+ * 6.99.27: does a refused upload become a turn file? Only for a session turn, and only when the media store refused the
+ * FORMAT (it cannot read the type, or the text is not UTF-8). Too large, too long, or the Mac unable to process media
+ * right now are said as they always were.
+ */
+export function keepsAsTurnFile(purpose: string | undefined, code: unknown): boolean {
+  return purpose === 'session-turn' && (code === 'unsupported_attachment_format' || code === 'corrupt_attachment')
+}
+
 mediaRouter.post('/media/file', async (req: Request, res: Response) => {
   const staged = takeStagedUploadBody(req)
   try {
@@ -566,14 +576,28 @@ mediaRouter.post('/media/file', async (req: Request, res: Response) => {
     if (rawLabel) {
       try { label = decodeURIComponent(rawLabel).slice(0, 120) } catch { label = rawLabel.slice(0, 120) }
     }
-    const attachment = await getMediaStore().ingestRichMediaFromFile({
-      sourcePath: staged.path,
-      byteLength: staged.bytes,
-      label,
-      declaredMime: safeString(req.header('content-type'), 120),
-      capturedAt: safeString(req.header('x-cos-captured-at'), 40),
-      sessionId: safeString(req.header('x-cos-session-id'), 64),
-    })
+    let attachment: unknown
+    try {
+      attachment = await getMediaStore().ingestRichMediaFromFile({
+        sourcePath: staged.path,
+        byteLength: staged.bytes,
+        label,
+        declaredMime: safeString(req.header('content-type'), 120),
+        capturedAt: safeString(req.header('x-cos-captured-at'), 40),
+        sessionId: safeString(req.header('x-cos-session-id'), 64),
+      })
+    } catch (err) {
+      // 6.99.27: a file for a Claude or Codex session turn, in a format the media store does not read (a .zip, a .docx,
+      // a log in another encoding). The session gets its path and opens it itself, so it is kept as a turn file, which
+      // only the turn and fork routes can resolve (lib/turn-file-store.ts). Anything else refuses as before.
+      if (!keepsAsTurnFile(req.header('x-cos-purpose'), (err as { code?: unknown } | null)?.code)) throw err
+      attachment = getTurnFileStore().ingestFromFile({
+        sourcePath: staged.path,
+        byteLength: staged.bytes,
+        label,
+        declaredMime: safeString(req.header('content-type'), 120),
+      })
+    }
     res.json({ attachment })
   } catch (err) {
     sendMediaError(res, err)

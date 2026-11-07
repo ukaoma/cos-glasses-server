@@ -19,12 +19,37 @@ import {
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
 import { getMediaStore, MediaStoreError } from './media-store.js'
+import { getTurnFileStore } from './turn-file-store.js'
 
 /** What the turns route needs from the media store. The real store satisfies it; tests pass a fake. */
 export interface TurnAttachmentStore {
   resolveUsable(id: string, clientQueueItemId?: string): { record: { ref: MediaAttachmentRef }; path: string }
   /** Moves staged media out of the 4 hour unsubmitted TTL, so a file the session may read again later stays. */
   associate(ids: string[], target: { runId?: string }): Promise<void>
+}
+
+/**
+ * The store a turn reads by default: the media store first, then (6.99.27) the turn files a session upload kept when
+ * the media store could not read their format (lib/turn-file-store.ts). An id lives in at most one of them.
+ */
+export function defaultTurnAttachmentStore(): TurnAttachmentStore {
+  const media = getMediaStore(), files = getTurnFileStore()
+  return {
+    resolveUsable(id) {
+      try {
+        return media.resolveUsable(id)
+      } catch (error) {
+        if (error instanceof MediaStoreError && error.code === 'media_not_found' && files.has(id)) return files.resolveUsable(id)
+        throw error
+      }
+    },
+    async associate(ids, target) {
+      const mine = ids.filter(id => files.has(id))
+      const rest = ids.filter(id => !mine.includes(id))
+      if (rest.length) await media.associate(rest, target)
+      if (mine.length) await files.associate(mine, target)
+    },
+  }
 }
 
 export type TurnAttachmentIds = { ok: true; ids: string[] } | { ok: false }
@@ -63,8 +88,11 @@ function sizeWords(bytes: number | undefined): string {
 
 /** One line per file: what it is, its name, and where it is. */
 export function turnAttachmentLine(ref: MediaAttachmentRef, path: string): string {
-  const category = mediaCategoryOf(ref)
-  const what = category === 'image' ? 'Photo' : category === 'video' ? 'Video' : 'File'
+  // A turn file (lib/turn-file-store.ts) carries category 'file' and the type the browser declared: a photo sent as it
+  // was taken (a HEIC, a full-size PNG) is still called a photo.
+  const category = mediaCategoryOf(ref) as string
+  const mime = String(ref.mime)
+  const what = category === 'image' || /^image\//.test(mime) ? 'Photo' : category === 'video' || /^video\//.test(mime) ? 'Video' : 'File'
   const name = oneLine(ref.label ?? '', 120)
   const facts = [ref.mime, category === 'image' && ref.width && ref.height ? `${ref.width}x${ref.height}` : '', sizeWords(ref.bytes)].filter(Boolean).join(', ')
   return `- ${what}${name ? ` "${name}"` : ''}${facts ? ` (${facts})` : ''}: ${path}`
@@ -127,7 +155,7 @@ export async function composeTurnPrompt(
   opts: { runId: string; maxChars: number; store?: TurnAttachmentStore },
 ): Promise<ComposedTurn> {
   if (ids.length === 0) return { ok: true, prompt, ids: [] }
-  const store: TurnAttachmentStore = opts.store ?? getMediaStore()
+  const store: TurnAttachmentStore = opts.store ?? defaultTurnAttachmentStore()
   const resolved = resolveAll(ids, store)
   if (!resolved.ok) return resolved
   const lines = resolved.files.map(f => turnAttachmentLine(f.ref, f.path))

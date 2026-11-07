@@ -110,7 +110,9 @@
       prep: prepCapsOf(caps.prep),
       // 11/07: how many files a session turn takes (threadTurnAttachments). 0 (an older server): words only, and Today's
       // reply box shows no clip, so a file can never be dropped from a turn in silence.
-      turnFiles: h && Number.isInteger(h.threadTurnAttachments) && h.threadTurnAttachments > 0 ? Math.min(h.threadTurnAttachments, MAX_ATTS) : 0
+      turnFiles: h && Number.isInteger(h.threadTurnAttachments) && h.threadTurnAttachments > 0 ? Math.min(h.threadTurnAttachments, MAX_ATTS) : 0,
+      // 6.99.27: any file for a session turn, up to this many bytes (threadTurnFileBytes). 0: the chat's list only.
+      turnFileBytes: h && Number.isInteger(h.threadTurnFileBytes) && h.threadTurnFileBytes > 0 ? Math.min(h.threadTurnFileBytes, MAX_DOC) : 0
     };
     if (next.prep && next.prep.serverInstanceId) PREP_INST = next.prep.serverInstanceId;
     var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs || C.caps.thread !== next.thread;
@@ -279,7 +281,7 @@
       '<div class="cc-chips hidden" data-cos-chips></div>' +
       '<textarea class="field cc-input" id="' + esc(k.inputId) + '" rows="1" maxlength="2000" placeholder="' + esc(o.placeholder) + '" aria-label="' + esc(o.label) + '"></textarea>' +
       '<div class="cc-buttons">' +
-        clipHtml('data-cos-file') +
+        cameraHtml('data-cos-file') + clipHtml('data-cos-file') +
         '<button type="button" class="cx-btn primary cc-ask" data-cos="ask">Ask</button>' +
         (drop ? '<button type="button" class="cx-btn cc-drop" data-cos="drop">Drop</button>' : '') + '</div>' +
       '<div class="cc-foot"><span class="cc-menus" data-cos-model-slot>' + (C.models ? modelMenuHtml() : '') + '</span>' +
@@ -575,22 +577,60 @@
   // Remove, ui.signedOut(box) says the browser was signed out mid-upload. Progress moves only the chip's own bar
   // (paintProgress, by the chip's id). Nothing here sends: each caller sends the ready ids its own way, and only once
   // pending() and failed() are both false.
-  function clipHtml(fileAttr) {
-    return '<label class="cx-btn cc-attach" title="Attach photos or files"><svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg><span class="sr-only">Attach photos or files</span>' +
+  // opts.any (a session turn): no accept list, so any file, and the label says the limits.
+  function clipHtml(fileAttr, opts) {
+    var any = !!(opts && opts.any);
+    var label = any ? 'Attach photos or files, up to 5, ' + mb(opts.any) + ' each' : 'Attach photos or files';
+    return '<label class="cx-btn cc-attach" title="' + esc(label) + '"><svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg><span class="sr-only">' + esc(label) + '</span>' +
       // No capture attribute: iOS then offers Photo Library, Take Photo and Choose File.
-      '<input type="file" class="cc-file" multiple accept="' + ACCEPT + '" ' + fileAttr + ' aria-label="Attach photos or files"></label>';
+      '<input type="file" class="cc-file" multiple' + (any ? '' : ' accept="' + ACCEPT + '"') + ' ' + fileAttr + ' aria-label="' + esc(label) + '"></label>';
+  }
+  // 6.99.27 (Miles: "take picture"): the camera itself, one tap. On a phone or tablet only: a desktop browser ignores
+  // `capture` and would open a second file picker labelled Take photo.
+  function cameraOn() { return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); }
+  function cameraHtml(fileAttr) {
+    if (!cameraOn()) return '';
+    return '<label class="cx-btn cc-attach cc-camera" title="Take photo"><svg class="icon" aria-hidden="true"><use href="#i-camera"/></svg><span class="sr-only">Take photo</span>' +
+      '<input type="file" class="cc-file" accept="image/*" capture="environment" ' + fileAttr + ' aria-label="Take photo"></label>';
+  }
+  // The limits in plain words, under the chips of a session turn.
+  function limitLine(box) {
+    return box && box.anyBytes ? 'Up to 5 files, ' + mb(box.anyBytes) + ' each (videos up to ' + mb(MAX_VIDEO) + '). The session gets where each one is on your Mac.' : 'Up to 5 photos or files.';
   }
   // A composer here has no ui of its own (it is made before COMPOSER_UI below exists): it is the chat's.
   function uiOf(box) { return box.ui || COMPOSER_UI; }
   function boxChanged(box) { var ui = uiOf(box); if (ui.changed) ui.changed(box); }
+  /**
+   * 6.99.27: what a SESSION turn takes, which is more than the chat does. The agent gets each file's place on the Mac and
+   * opens it with its own tools, so any type goes, up to `maxBytes` (the Mac's threadTurnFileBytes, 64 MB) and up to
+   * 100 MB for an MP4 or MOV (the media store's video cap). Photos go as taken: kind 'photo' only for the chip.
+   */
+  function classifyForSession(file, maxBytes) {
+    var type = String(file.type || '').toLowerCase(), ext = extOf(file.name);
+    var video = VIDEO_EXT[ext] || type === 'video/mp4' || type === 'video/quicktime';
+    var cap = video ? MAX_VIDEO : maxBytes;
+    if (file.size > cap) return { refuse: file.name + ' is ' + mb(file.size) + '. A session takes ' + (video ? 'a video' : 'a file') + ' up to ' + mb(cap) + '.' };
+    if (!file.size) return { refuse: file.name + ' is empty.' };
+    if (/^image\//.test(type) || PHOTO_EXT[ext]) {
+      var heic = /^image\/hei[cf]/.test(type) || ext === 'heic' || ext === 'heif';
+      return { kind: 'photo', mime: type || 'application/octet-stream', showable: !heic || isSafari() };
+    }
+    if (video) return { kind: 'video', mime: type || VIDEO_EXT[ext] };
+    return { kind: DOC_EXT[ext] ? 'doc' : 'file', mime: type && type !== 'application/octet-stream' ? type : DOC_EXT[ext] || 'application/octet-stream' };
+  }
+  function dropThumb(t) { if (t.raw && /^blob:/.test(t.thumb || '')) { try { URL.revokeObjectURL(t.thumb); } catch (_e) {} } }
+  function objectUrl(file) { try { return URL.createObjectURL(file); } catch (_e) { return ''; } }
   function boxAdd(box, files) {
     var list = Array.prototype.slice.call(files || []);
     var refusals = [];
     list.forEach(function (file) {
       if (box.atts.length >= MAX_ATTS) { refusals.push('Up to 5 attachments per message. ' + file.name + ' was not added.'); return; }
-      var c = classify(file);
+      var c = box.anyBytes ? classifyForSession(file, box.anyBytes) : classify(file);
       if (c.refuse) { refusals.push(c.refuse); return; }
       var t = { id: uuid(), file: file, name: file.name || (c.kind === 'photo' ? 'Photo' : 'File'), size: file.size, kind: c.kind, mime: c.mime || '', state: 'reading', progress: 0, mediaId: '', thumb: '', error: '' };
+      // 6.99.27, a session turn: the file as it is, never resized or converted (the agent reads the original), and the
+      // upload says so, so the Mac keeps a format the media store does not read (lib/turn-file-store.ts).
+      if (box.anyBytes) { t.raw = true; t.purpose = 'session-turn'; if (c.kind === 'photo' && c.showable) t.thumb = objectUrl(file); }
       box.atts.push(t);
       startUpload(box, t);
     });
@@ -635,7 +675,7 @@
   }
   function findAtt(k, id) { for (var i = 0; i < k.atts.length; i++) if (k.atts[i].id === id) return k.atts[i]; return null; }
   function boxRemove(box, id) {
-    box.atts = box.atts.filter(function (t) { if (t.id === id && t.xhr) { try { t.xhr.abort(); } catch (_e) {} } return t.id !== id; });
+    box.atts = box.atts.filter(function (t) { if (t.id === id) { if (t.xhr) { try { t.xhr.abort(); } catch (_e) {} } dropThumb(t); } return t.id !== id; });
     var ui = uiOf(box); if (ui.removed) ui.removed(box);
     boxChanged(box);
   }
@@ -650,7 +690,7 @@
   }
   // Everything goes, an upload still running included (its request is stopped, and its late answer finds no record).
   function boxClear(box) {
-    box.atts.forEach(function (t) { if (t.xhr) { try { t.xhr.abort(); } catch (_e) {} } });
+    box.atts.forEach(function (t) { if (t.xhr) { try { t.xhr.abort(); } catch (_e) {} } dropThumb(t); });
     box.atts = [];
     boxChanged(box);
   }
@@ -685,13 +725,15 @@
    * with credentials 'same-origin' (the cookie goes with any same-origin XHR) plus X-COS-Web: 1, which a cookie write
    * needs. A 401 here never opens the sign-in screen: the chip says so and the message stays (see uploadError).
    */
-  function uploadRequest(path, body, headers, onProgress, t) {
+  // extra: more headers (6.99.27: X-COS-Purpose for a session turn's file).
+  function uploadRequest(path, body, headers, onProgress, t, extra) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       t.xhr = xhr;
       xhr.open('POST', path, true);
       xhr.setRequestHeader('X-COS-Web', '1');
       Object.keys(headers).forEach(function (h) { xhr.setRequestHeader(h, headers[h]); });
+      if (extra) Object.keys(extra).forEach(function (h) { xhr.setRequestHeader(h, extra[h]); });
       if (xhr.upload) xhr.upload.onprogress = function (e) { if (e.lengthComputable && e.total) onProgress(e.loaded / e.total); };
       xhr.onload = function () {
         t.xhr = null;
@@ -734,7 +776,7 @@
    */
   function uploadMedia(t, hooks) {
     var at = new Date(t.file.lastModified || Date.now()).toISOString();
-    if (t.kind === 'photo') {
+    if (t.kind === 'photo' && !t.raw) {
       return resizePhoto(t.file).then(function (dataUrl) {
         var data = dataUrl.slice(dataUrl.indexOf(',') + 1);
         var bytes = Math.floor(data.length * 3 / 4);
@@ -749,7 +791,7 @@
       'Content-Type': t.mime || 'application/octet-stream',
       'X-COS-Filename': encodeURIComponent(t.name),
       'X-COS-Captured-At': at
-    }, function (p) { hooks.progress(p); }, t).then(function (d) { return d && d.attachment; });
+    }, function (p) { hooks.progress(p); }, t, t.purpose ? { 'X-COS-Purpose': t.purpose } : null).then(function (d) { return d && d.attachment; });
   }
   /** The chip's words for a failed upload (never the sign-in case, which each caller says its own way). */
   function uploadErrorText(err) {
@@ -1783,13 +1825,14 @@
     // 11/07: the attach kit, for Today's reply and note boxes and the Ask sheet (see "the attach kit" above).
     attach: {
       max: MAX_ATTS, accept: ACCEPT,
-      box: function (ui) { return { atts: [], signedOut: false, ui: ui || {} }; },
+      // opts.anyBytes (a session turn): any file up to that size, sent as it is (classifyForSession).
+      box: function (ui, opts) { return { atts: [], signedOut: false, ui: ui || {}, anyBytes: opts && opts.anyBytes > 0 ? opts.anyBytes : 0 }; },
       add: boxAdd, remove: boxRemove, retry: boxRetry, clear: boxClear,
       pending: uploadsPending, failed: uploadsFailed,
       ids: function (box) { return readyAtts(box).slice(0, MAX_ATTS).map(function (t) { return t.mediaId; }); },
       sent: function (box) { return readyAtts(box).slice(0, MAX_ATTS).map(function (t) { return { name: t.name, kind: t.kind, thumb: t.thumb }; }); },
       chipsHtml: function (box, attr) { return box.atts.map(function (t) { return chipHtml(t, attr); }).join(''); },
-      clipHtml: clipHtml,
+      clipHtml: clipHtml, cameraHtml: cameraHtml, limitLine: limitLine,
       // Files on the clipboard (a pasted screenshot), or none.
       pasted: function (e) { var f = e && e.clipboardData && e.clipboardData.files; return f && f.length ? f : null; },
       // Files dragged over `zone`: marks it while they hover, and answers the files on the drop. Null for anything else.
@@ -1803,6 +1846,7 @@
       },
       // How many files a session turn takes on this Mac (threadTurnAttachments); 0 means words only.
       turnFiles: function () { return C.caps && C.caps.turnFiles > 0 ? C.caps.turnFiles : 0; },
+      turnFileBytes: function () { return C.caps && C.caps.turnFiles > 0 && C.caps.turnFileBytes > 0 ? C.caps.turnFileBytes : 0; },
       askOn: askOn, ensureCaps: ensureCaps
     },
     // 6.99.19: Prep. meetings.js reads the capability from here (one /api/health read for the page).
