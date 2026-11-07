@@ -96,6 +96,29 @@ describe('workspace-scoped native image projection and serving', () => {
     expect(projected.text).toBe(sources.map(() => '[Output image]').join(' '))
     for (const path of sources) expect(JSON.stringify(projected)).not.toContain(path)
   })
+  it.each(['whitespace', 'fenced'])('never displays an unscanned image after a %s prefix', async kind => {
+    const f = fixture(), ctx = await f.service.context('claude', 'session', f.transcript)
+    const prefix = kind === 'whitespace' ? '\n'.repeat(OUTPUT_IMAGE_SCAN_CHARS)
+      : '![Visible](visible.png)\n```\n' + 'code\n'.repeat(Math.ceil(OUTPUT_IMAGE_SCAN_CHARS / 5)) + '```\n'
+    const raw = prefix + `![Private](<${f.artifact}>)`
+    const parsed = recentSessionTurns('claude', [JSON.stringify(row(raw))], 1)[0]
+    const projected = ctx.project('claude', row(raw), parsed)!
+    expect(projected.text).toContain('[Reply shortened at the image preview scan limit.]')
+    expect(JSON.stringify(projected)).not.toContain(f.artifact)
+    expect(projected.outputImages).toHaveLength(kind === 'fenced' ? 1 : 0)
+  })
+  it('drops the entire boundary line, including a partially scanned destination, and marks plain prose truncation', async () => {
+    const f = fixture(), ctx = await f.service.context('claude', 'session', f.transcript)
+    const before = 'Complete line\n' + 'x'.repeat(OUTPUT_IMAGE_SCAN_CHARS - 30)
+    const raw = before + '![Private](/private/very-long-sensitive-destination.png)'
+    const projected = ctx.project('claude', row(raw), null)!
+    expect(projected.text).toBe('Complete line\n[Reply shortened at the image preview scan limit.]')
+    expect(projected.outputImages).toHaveLength(0)
+    const plain = ctx.project('claude', row('p'.repeat(OUTPUT_IMAGE_SCAN_CHARS + 1)), null)!
+    expect(plain.text).toBe('[Reply shortened at the image preview scan limit.]')
+    const exact = ctx.project('claude', row('p'.repeat(OUTPUT_IMAGE_SCAN_CHARS)), { role: 'assistant', text: 'ordinary shaped prose' })!
+    expect(exact.text).toBe('ordinary shaped prose')
+  })
   it('redacts image destinations before the normal text truncation boundary', async () => {
     const f = fixture()
     writeFileSync(f.transcript, JSON.stringify(row('x'.repeat(3980) + `![Result](<${f.artifact}>)`)) + '\n')

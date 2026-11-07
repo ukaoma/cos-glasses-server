@@ -7,7 +7,7 @@ import { constants, realpathSync, statSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import { agentSessionRoots, findAgentSessionFile, isWrapperPrompt, latestAssistantReply, type AgentProvider } from './agent-session-store.js'
+import { agentSessionRoots, findAgentSessionFile, isWrapperPrompt, latestAssistantReply, LATEST_REPLY_MAX, type AgentProvider } from './agent-session-store.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './attached-workspace.js'
 import { readComposerFacts } from './cursor-session-model.js'
 import { MAX_OUTPUT_ARTIFACT_BYTES } from './image-safety.js'
@@ -150,8 +150,13 @@ export class AgentSessionOutputImages {
     const project: SessionTurnProjection = (p, row, turn) => {
       const raw = assistantText(p, row)
       if (!raw) return turn
-      const candidates = imageTokens(raw)
-      if (!candidates.length) return turn
+      // Prose cleanup can collapse a huge whitespace/code prefix, bringing an unscanned
+      // suffix into the visible reply. Never project that suffix. Drop the boundary line
+      // too: it might end halfway through a Markdown destination (or an ordinary sentence).
+      const shortened = raw.length > OUTPUT_IMAGE_SCAN_CHARS
+      const scanned = shortened ? raw.slice(0, raw.lastIndexOf('\n', OUTPUT_IMAGE_SCAN_CHARS - 1) + 1) : raw
+      const candidates = imageTokens(scanned)
+      if (!candidates.length && !shortened) return turn
       const recordKey = digest(JSON.stringify(row))
       const refs = candidates.slice(0, OUTPUT_IMAGES_PER_TURN).map((c, ordinal) => {
         const id = 'ai_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, ordinal, c.source])).digest('hex')
@@ -165,9 +170,12 @@ export class AgentSessionOutputImages {
       // without this opt-in projection retain their original text and contract.
       // The preview cap limits DTOs, not redaction: the sixth image is still private.
       const parts: string[] = []; let end = 0
-      for (const token of candidates) { parts.push(raw.slice(end, token.start), '[Output image]'); end = token.end }
-      parts.push(raw.slice(end))
-      const text = latestAssistantReply(parts.join(''))
+      for (const token of candidates) { parts.push(scanned.slice(end, token.start), '[Output image]'); end = token.end }
+      parts.push(scanned.slice(end))
+      const omission = '[Reply shortened at the image preview scan limit.]'
+      const text = shortened
+        ? [latestAssistantReply(parts.join(''), LATEST_REPLY_MAX - omission.length - 1), omission].filter(Boolean).join('\n')
+        : latestAssistantReply(parts.join(''))
       const at = typeof row.timestamp === 'string' && Number.isFinite(Date.parse(row.timestamp)) ? row.timestamp : undefined
       return { ...(turn ?? { role: 'assistant' as const, text: '', ...(at ? { at } : {}) }), text, outputImages: refs }
     }
