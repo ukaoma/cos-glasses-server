@@ -160,7 +160,10 @@
     var load = loadPane(name);
     if (!waitMs) return load;
     return new Promise(function (resolve, reject) {
-      var timer = setTimeout(function () { reject(new Error('The ' + (TITLES[name] || name) + ' section is taking too long to load. Check the connection to your Mac.')); }, waitMs);
+      var timer = setTimeout(function () {
+        var late = new Error('The ' + (TITLES[name] || name) + ' section is taking too long to load. Check the connection to your Mac.');
+        late.code = 'pane_timeout'; reject(late);
+      }, waitMs);
       load.then(function (v) { clearTimeout(timer); resolve(v); }, function (e) { clearTimeout(timer); reject(e); });
     });
   }
@@ -243,6 +246,12 @@
         if (!lazyEl) return;
         lazyEl.querySelectorAll('.lazy-wait').forEach(function (n) { n.remove(); });
         lazyEl.insertAdjacentHTML('afterbegin', '<div class="lazy-wait"><div class="list"><p class="empty"><strong>' + esc(err.message) + '</strong></p><button type="button" class="btn" data-lazy-retry="' + esc(lazyPane) + '">Try again</button></div></div>');
+        // Only the wait ran out: if the load still finishes, the card clears itself and the pane shows.
+        if (err && err.code === 'pane_timeout') loadPane(lazyPane).then(function () {
+          lazyEl.querySelectorAll('.lazy-wait').forEach(function (n) { n.remove(); });
+          lazyEl.setAttribute('data-lazy-ready', '1');
+          if (state.pane === lazyPane) route(true);
+        }, function () {});
       });
       runHooks(routeHooks, r);
       return;
@@ -300,6 +309,13 @@
     loadTailnetUrl();
     runHooks(shellHooks, info);
     route();
+    // Reloaded with Today's overlay open: its history entry is still current. The overlay opens the same thing again
+    // (panes/today-actions.js restore), so Back closes it; if it cannot load, the entry is unmarked.
+    var held = history.state;
+    if (held && held.cosTodayOverlay) {
+      ensurePane('todayActions', 4000).then(function (m) { if (m && m.restore) m.restore(held); },
+        function () { try { history.replaceState(null, ''); } catch (_e) {} });
+    }
     setTimeout(prefetchPanes, 1500);
   }
   document.addEventListener('click', function (e) {
@@ -473,12 +489,27 @@
   function loadToday() {
     var now = new Date();
     $('today-date').textContent = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) + ', ' + clock(now);
+    var gen = ++TODAY.gen;
+    // Voices and memories answer on their own time (the memories status runs a CLI on the Mac): Today paints what it
+    // has and says it is still reading, then repaints as each one lands.
+    if (Date.now() - TODAY.extraAt > 60000 || TODAY.voices.state === 'failed' || TODAY.memories.state === 'failed') {
+      TODAY.extraAt = Date.now();
+      TODAY.voices = { state: 'pending', groups: [] }; TODAY.memories = { state: 'pending', n: 0 };
+      api('/api/voice/held-groups').then(function (d) {
+        TODAY.voices = { state: 'answered', groups: (d && Array.isArray(d.groups)) ? d.groups : [] };
+      }, function () { TODAY.voices = { state: 'failed', groups: [] }; }).then(function () { paintNeeds(); });
+      api('/api/web-bridge/memories', { method: 'POST', body: { id: 'today-status', op: 'status', args: {} } }).then(function (d) {
+        var n = d && d.details ? d.details.learningToReview : null;
+        TODAY.memories = typeof n === 'number' ? { state: 'answered', n: Math.max(0, n) } : { state: 'failed', n: 0 };
+      }, function () { TODAY.memories = { state: 'failed', n: 0 }; }).then(function () { paintNeeds(); });
+    }
     Promise.all([
       sessionList(15000).catch(function () { return null; }),
       api('/api/work-board/your-move').catch(function () { return null; }),
       api('/api/welcome-context').catch(function () { return null; }),
       api('/api/meetings/live-chunks').catch(function () { return null; })
     ]).then(function (res) {
+      if (gen !== TODAY.gen) return;
       var sessions = (res[0] && res[0].sessions) || [];
       state.sessions = sessions;
       var needs = (res[1] && res[1].items) || [];
@@ -489,19 +520,22 @@
       var recent = live.filter(function (s) { return Date.now() - (s.mtimeMs || 0) < LIVE_FRESH_MS; });
       var offline = !res[0] && !res[1];
       TODAY.needs = needs; TODAY.working = working; TODAY.open = open; TODAY.welcome = welcome; TODAY.offline = offline; TODAY.at = Date.now();
+      // your-move answers {available:false} when the board cannot be read: that is a failed read, not "nothing".
+      TODAY.sessionsState = res[0] ? 'answered' : 'failed';
+      TODAY.workState = res[1] && res[1].available !== false ? 'answered' : 'failed';
+      TODAY.recording = false;
 
-      renderStory(needs.length, working.length, open.length, welcome.nextEvent, false, offline);
       renderRunning(working, open);
       if (!offline) renderPet(sessions);
-      renderNeeds(needs);
+      paintNeeds();
       renderNext(welcome);
       loadTodayIntake();
-      setBadge('today', needs.length > 0);
       setBadge('sessions', working.length > 0);
       liveSession(recent).then(function (rec) {
+        if (gen !== TODAY.gen) return;
         renderRecording(rec);
         setBadge('meetings', !!rec);
-        if (rec) renderStory(needs.length, working.length, open.length, welcome.nextEvent, true, offline);
+        if (rec) { TODAY.recording = true; paintNeeds(); }
       });
     });
   }
@@ -526,30 +560,31 @@
       '<span class="rec-copy"><strong>Recording now</strong><span>' + esc(rec.source + (rec.startTime ? ', ' + span(rec.startTime) + ' so far' : '')) + '</span></span>' +
       '<span class="btn small">Live view</span></button>';
   }
-  function renderStory(needs, working, open, next, recording, offline) {
+  // The headline: COS Control's brief (Models.swift TodayHome.brief) over the same rows Needs you lists.
+  function renderStory(m) {
     var el = $('today-story');
     el.className = 'story';
-    if (offline) { el.textContent = 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'; return; }
-    // Quiet hours (Control 0.5.361, and the rail's line): after 6 PM and at weekends what is
-    // waiting can wait until tomorrow, so Today says so instead of "waiting on you".
-    var nowD = new Date(), quiet = nowD.getDay() === 0 || nowD.getDay() === 6 || nowD.getHours() >= 18;
-    var first = needs > 0
-      ? (quiet ? countWord(needs) + ' ' + plural(needs, 'handoff', 'handoffs') + ' can wait until tomorrow'
-        : countWord(needs) + ' ' + plural(needs, 'handoff is', 'handoffs are') + ' waiting on you')
-      : 'Nothing is waiting on you';
-    var nextBit = '';
-    var nd = next && toDate(next.time);
+    if (TODAY.offline) { el.textContent = 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'; return; }
+    var first = '';
+    if (m.sessionsWaiting > 0) first = countWord(m.sessionsWaiting) + ' ' + plural(m.sessionsWaiting, 'session is', 'sessions are') + ' waiting on you';
+    else if (m.now.length > 0) first = countWord(m.now.length) + ' ' + plural(m.now.length, 'thing needs', 'things need') + ' you' + (m.settled ? '' : ' so far');
+    else if (m.later.length > 0) first = countWord(m.later.length) + ' ' + plural(m.later.length, 'thing', 'things') + ' can wait until tomorrow' + (m.settled ? '' : ' so far');
+    else if (m.settled) first = 'Nothing is waiting on you';
+    var next = TODAY.welcome && TODAY.welcome.nextEvent, nd = next && toDate(next.time);
     if (nd && next.title && (nd.getTime() - Date.now()) < 18 * 3600000 && nd.getTime() > Date.now() - 600000) {
-      var dw = dayWord(nd);
-      nextBit = ', and ' + next.title + ' is at ' + clock(nd) + (dw === 'today' ? '' : ' ' + dw);
+      var dw = dayWord(nd), words = next.title + ' is at ' + clock(nd) + (dw === 'today' ? '' : ' ' + dw);
+      first = first ? first + ', and ' + words : words.charAt(0).toUpperCase() + words.slice(1);
     }
-    var second;
+    var working = TODAY.working.length, open = TODAY.open.length, second;
     if (working > 0) second = countWord(working) + ' ' + plural(working, 'agent is', 'agents are') + ' working' + (open > 0 ? ', with ' + countWord(open, true) + ' more ' + plural(open, 'session', 'sessions') + ' open' : '');
     else if (open > 0) second = countWord(open) + ' ' + plural(open, 'session is', 'sessions are') + ' open and quiet';
     else second = 'No agents are running';
-    if (recording) second += (working > 0 || open > 0 ? ', and ' : '. ') + 'COS is recording a meeting';
-    el.textContent = first + nextBit + '. ' + second + '.';
+    if (TODAY.recording) second += (working > 0 || open > 0 ? ', and ' : '. ') + 'COS is recording a meeting';
+    var out = (first ? first + '. ' : '') + second + '.';
+    if (!m.settled && !m.now.length && !m.later.length) out += m.failed.length ? ' Couldn’t read ' + listWords(m.failed) + ', so this may not be everything.' : ' Still reading what needs you.';
+    el.textContent = out;
   }
+  function listWords(names) { return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]; }
   function runRow(s, activeNow) {
     var key = splitSessionId(s.provider, s.session_id);
     var meta = activeNow
@@ -582,23 +617,119 @@
     if (item.status === 'delivered') return 'Handed to you';
     return 'Needs a look';
   }
-  function renderNeeds(items) {
-    $('needs-count').textContent = items.length ? String(items.length) : '';
-    var list = $('needs-list');
-    if (!items.length) { list.innerHTML = '<p class="card-empty">You are clear. New handoffs from your agents land here.</p>'; return; }
-    // One primary action, on the item that has waited longest for a reply; the rest stay quiet.
-    list.innerHTML = items.slice(0, 6).map(function (it, i) {
-      var key = splitSessionId(it.provider, it.sessionId);
-      var title = it.sessionTitle || it.title || 'Handoff';
+  // ── Needs you (COS Control's TodayHome.things, sourceStates and fold; Models.swift 14291, 14512, 14474) ──
+  // Every source Control's Today reads that the web can: sessions waiting on you (the session list), Work handoffs
+  // (your-move), voices to name (/api/voice/held-groups) and memories to review (the memories bridge's status). One row
+  // per thing. The card's count, the headline and the rail say the same number, from the same rows. "Nothing is
+  // waiting on you" only once every source answered; a source that failed is named instead. Under quiet hours (after
+  // 6 PM, before 6 AM, weekends) everything but a waiting session folds under "can wait until tomorrow".
+  var NEEDS_SHOWN = 6;
+  var NEED_NAMES = { sessions: 'sessions', work: 'Work', voices: 'voices', memories: 'memories' };
+  function quietNowToday(d) { var h = d.getHours(), day = d.getDay(); return day === 0 || day === 6 || h >= 18 || h < 6; }
+  // Control's askedTitle and askedWhy for a session waiting on you.
+  function askedTitle(s) {
+    var t = sxTitle(s);
+    if (sxProvider(s.provider) !== 'claude') return t + ' is waiting for your reply';
+    if (s.waiting_kind === 'plan') return t + ' has a plan for you to approve';
+    if (s.waiting_kind === 'permission') return t + ' wants your permission';
+    if (s.waiting_kind === 'mcp_input') return t + ' needs your input';
+    return t + ' asked you a question';
+  }
+  // Control never shows a bare tool name (TodayHome.toolNames): "AskUserQuestion" says nothing to a person.
+  var TOOL_NAMES = ['AskUserQuestion', 'ExitPlanMode', 'Bash', 'BashOutput', 'KillShell', 'Edit', 'Write', 'Read', 'Grep', 'Glob', 'LS', 'Task', 'Agent',
+    'WebFetch', 'WebSearch', 'TodoWrite', 'NotebookEdit', 'MultiEdit', 'SlashCommand', 'Skill', 'ToolSearch'];
+  function askedWhy(s) {
+    if (s.waiting_kind === 'plan') return 'Has a plan for you to approve';
+    var d = String(s.waiting_detail || '').trim();
+    if (TOOL_NAMES.indexOf(d) >= 0) d = '';
+    if (s.waiting_kind === 'permission' && d) return 'Wants to run ' + (d.length > 80 ? d.slice(0, 79) + '…' : d);
+    if (s.waiting_kind === 'question' && d) return d.length > 160 ? d.slice(0, 159) + '…' : d;
+    return 'Waiting for you' + (sxProvider(s.provider) === 'claude' ? '. Paused until you answer.' : '');
+  }
+  function needsModel() {
+    var states = { sessions: TODAY.sessionsState, work: TODAY.workState, voices: TODAY.voices.state, memories: TODAY.memories.state };
+    var rows = [], seen = {};
+    (state.sessions || []).forEach(function (s) {
+      if (sxKeepWarm(s) || sxState(s) !== 'waiting') return;
+      var k = splitSessionId(s.provider, s.session_id || s.id);
+      seen[k.provider + '|' + String(k.id).toLowerCase()] = 1;
+      rows.push({ kind: 'session', tier: 1, title: askedTitle(s), why: askedWhy(s), since: s.state_since || s.last_activity_at, key: k.provider + '|' + k.id });
+    });
+    (TODAY.needs || []).forEach(function (it) {
+      var k = splitSessionId(it.provider, it.sessionId);
+      if (k.id && seen[k.provider + '|' + String(k.id).toLowerCase()]) return;   // Control: a Work row for a waiting session is the session's row
+      rows.push({ kind: 'work', tier: 3, item: it, key: k.id ? k.provider + '|' + k.id : '' });
+    });
+    var groups = TODAY.voices.groups || [];
+    if (groups.length) {
+      var named = groups.filter(function (g) { return g && g.suggestion && g.suggestion.name; })[0];
+      rows.push({ kind: 'voices', tier: 2, title: groups.length === 1 ? 'Name a held voice' : 'Name ' + groups.length + ' held voices',
+        why: named ? 'One sounds like ' + named.suggestion.name + '.' : 'Held from your recordings until they have a name.' });
+    }
+    if (TODAY.memories.n > 0) {
+      var n = TODAY.memories.n;
+      rows.push({ kind: 'memories', tier: 4, title: n === 1 ? 'Review a memory' : 'Review ' + n + ' memories', why: 'Learned from your meetings and sessions, waiting for a yes or no.' });
+    }
+    var quiet = quietNowToday(new Date());
+    var nowRows = rows.filter(function (r) { return !quiet || r.tier === 1; }), later = rows.filter(function (r) { return quiet && r.tier !== 1; });
+    var failed = Object.keys(states).filter(function (k) { return states[k] === 'failed'; }).map(function (k) { return NEED_NAMES[k]; });
+    var settled = Object.keys(states).every(function (k) { return states[k] === 'answered'; });
+    return { rows: rows, now: nowRows, later: later, failed: failed, settled: settled, states: states,
+      sessionsWaiting: rows.filter(function (r) { return r.kind === 'session'; }).length };
+  }
+  function paintNeeds() {
+    if (!TODAY.at) return;
+    var m = TODAY.model = needsModel();
+    renderStory(m);
+    renderNeeds(m);
+    setBadge('today', m.now.length > 0);
+    if (window.COSWeb && window.COSWeb.setStory) window.COSWeb.setStory('today', todayRailLine(m), m.now.length > 0);
+  }
+  // The rail's Today line, from the same rows (shell.js keeps its own count off Today).
+  function todayRailLine(m) {
+    var n = m.now.length, bits = [];
+    if (n > 0) bits.push(n === 1 ? '1 needs you' : n + ' need you');
+    else if (m.later.length) bits.push(m.later.length + ' can wait until tomorrow');
+    else if (m.settled) bits.push('Nothing needs you');
+    else if (m.failed.length) bits.push('Couldn’t read ' + listWords(m.failed));
+    else bits.push('Reading');
+    if (TODAY.working.length) bits.push(TODAY.working.length + ' running');
+    return bits.join(', ');
+  }
+  function needRowHtml(r, i) {
+    var age = r.since ? ago(r.since) : r.item ? ago(r.item.updatedAt || r.item.createdAt) : '';
+    var top = function (title) { return '<span class="need-top"><span class="need-title">' + esc(title) + '</span>' + (age ? '<span class="need-age">' + esc(age) + '</span>' : '') + '</span>'; };
+    if (r.kind === 'work') {
+      var it = r.item, k = splitSessionId(it.provider, it.sessionId);
       var why = needWhy(it) + (it.domain ? ' in ' + domainLabel(it.domain) : '');
       // The row opens it in an overlay on Today (panes/today-actions.js); Open session still goes to the reader.
       return '<div class="need-row">' +
-        '<button type="button" class="need-open" data-today="need" data-key="' + esc(it.id) + '"' + (key.id ? ' data-session-key="' + esc(key.provider) + '|' + esc(key.id) + '"' : '') + '>' +
-        '<span class="need-top"><span class="need-title">' + esc(title) + '</span><span class="need-age">' + esc(ago(it.updatedAt || it.createdAt)) + '</span></span>' +
-        '<span class="need-foot">' + esc(why) + '</span></button>' +
-        (key.id ? '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(key.provider) + '|' + esc(key.id) + '">Open session</button></div>' : '') +
-      '</div>';
-    }).join('');
+        '<button type="button" class="need-open" data-today="need" data-key="' + esc(it.id) + '"' + (k.id ? ' data-session-key="' + esc(k.provider) + '|' + esc(k.id) + '"' : '') + '>' +
+        top(it.sessionTitle || it.title || 'Handoff') + '<span class="need-foot">' + esc(why) + '</span></button>' +
+        (k.id ? '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(k.provider) + '|' + esc(k.id) + '">Open session</button></div>' : '') + '</div>';
+    }
+    if (r.kind === 'session') {
+      // The session's question shows in the overlay's peek, with its cards to answer.
+      return '<div class="need-row">' +
+        '<button type="button" class="need-open" data-today="run" data-key="' + esc(r.key) + '">' + top(r.title) + '<span class="need-foot">' + esc(r.why) + '</span></button>' +
+        '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(r.key) + '">Open session</button></div></div>';
+    }
+    var go2 = r.kind === 'voices' ? 'speakers' : 'memories/view/review', label = r.kind === 'voices' ? 'Name' : 'Review';
+    return '<div class="need-row">' +
+      '<button type="button" class="need-open" data-goto="' + go2 + '">' + top(r.title) + '<span class="need-foot">' + esc(r.why) + '</span></button>' +
+      '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-goto="' + go2 + '">' + label + '</button></div></div>';
+  }
+  function renderNeeds(m) {
+    var shown = TODAY.showLater ? m.now.concat(m.later) : m.now;
+    $('needs-count').textContent = m.now.length ? String(m.now.length) : '';
+    var list = $('needs-list');
+    var visible = TODAY.showAllNeeds ? shown : shown.slice(0, NEEDS_SHOWN);
+    var html = visible.map(needRowHtml).join('');
+    if (shown.length > visible.length) html += '<button type="button" class="need-more" data-today-needs="all">Show ' + (shown.length - visible.length) + ' more</button>';
+    if (m.later.length && !TODAY.showLater) html += '<button type="button" class="need-more" data-today-needs="later">' + esc(m.later.length + (m.later.length === 1 ? ' thing can' : ' things can') + ' wait until tomorrow. Show') + '</button>';
+    if (!m.rows.length) html = '<p class="card-empty">' + esc(m.settled ? 'Nothing is waiting on you.' : m.failed.length ? '' : 'Reading sessions, Work, voices and memories.') + '</p>';
+    m.failed.forEach(function (name) { html += '<button type="button" class="need-more need-failed" data-today-needs="retry">' + esc('Couldn’t read ' + name + '. Try again') + '</button>'; });
+    list.innerHTML = html;
   }
   function renderNext(w) {
     var card = $('next-card');
@@ -608,7 +739,18 @@
     var dw = dayWord(d);
     $('next-body').innerHTML = '<span class="when">' + esc(clock(d)) + '</span><span><span class="what">' + esc(n.title) + '</span>' +
       '<span class="sub" style="display:block">' + esc((dw.charAt(0).toUpperCase() + dw.slice(1)) + (weather ? '. Now ' + weather : '')) + '</span></span>';
+    // Control's Next up (todayPrepButtons): Prep me opens the Prep composer in the COS chat (panes/cos-chat.js prepFor),
+    // Open meeting opens Meetings. Without a server to answer, Prep me is not offered.
+    var prep = !TODAY.offline && window.COSWeb && window.COSWeb.cosChat && window.COSWeb.cosChat.prepFor;
+    $('next-actions').innerHTML = (prep ? '<button type="button" class="btn small primary" data-today-next="prep">Prep me</button>' : '') +
+      '<button type="button" class="link-btn" data-goto="meetings">Open meeting</button>';
     card.classList.remove('hidden');
+  }
+  function prepNext() {
+    var n = TODAY.welcome && TODAY.welcome.nextEvent, d = n && toDate(n.time), chat = window.COSWeb && window.COSWeb.cosChat;
+    if (!n || !n.title || !chat || !chat.prepFor) return;
+    go('messages', ['cos']);
+    chat.prepFor(n.title, d ? d.toISOString() : null).catch(function (err) { toast((err && err.message) || 'Prep me did not start.'); });
   }
   // From today's meetings: Work's suggestions from meetings held today. They stay here until
   // midnight, then join Sort in Work; Review opens them in Work's Sort.
@@ -630,7 +772,9 @@
   }
   // Today's overlay (panes/today-actions.js) reads what the cards show from here and repaints the intake card after a
   // decision, so the counts move the moment Work takes it.
-  var TODAY = { needs: [], working: [], open: [], welcome: {}, offline: false, at: 0, intake: null, intakeCaps: {}, gone: {} };
+  var TODAY = { needs: [], working: [], open: [], welcome: {}, offline: false, at: 0, intake: null, intakeCaps: {}, gone: {},
+    gen: 0, sessionsState: 'pending', workState: 'pending', voices: { state: 'pending', groups: [] }, memories: { state: 'pending', n: 0 }, extraAt: 0,
+    recording: false, model: null, showAllNeeds: false, showLater: false };
   function todayIntakeOpen() { return (TODAY.intake || []).filter(function (it) { return !TODAY.gone[it.id]; }); }
   function paintTodayIntake() {
     var card = $('intake-card'); if (!card) return;
@@ -649,11 +793,17 @@
     ensurePane('todayActions', 4000).then(function (m) {
       if (!m || !m.open) throw new Error('The Today overlay did not start.');
       m.open(kind, key, t);
-    }).catch(function () {
-      // Without the overlay, the tap goes where it went before: the session reader, or Sort in Work.
+    }).catch(function (err) {
+      // Without the overlay, the tap goes where it went before: the session reader, or Sort in Work. Web has no client
+      // log route, so the failure is said on screen and in the console first. An overlay that half opened leaves its
+      // history entry, which the fallback replaces, so Back from there still lands on Today.
       var s = String(kind === 'run' ? key : t.getAttribute('data-session-key') || '').split('|');
-      if ((kind === 'run' || kind === 'need') && s[1]) return go('sessions', [s[0], s.slice(1).join('|')]);
-      go('work', kind === 'need' ? [] : ['sort']);
+      var session = (kind === 'run' || kind === 'need') && !!s[1];
+      var dest = session ? ['sessions', s[0], s.slice(1).join('|')] : ['work'].concat(kind === 'need' ? [] : ['sort']);
+      console.error('[today] the overlay did not open (' + kind + '); opening ' + dest.join('/') + ' instead.', err);
+      toast(session ? 'Could not open that here. Opening the session.' : 'Could not open that here. Opening it in Work.');
+      if (history.state && history.state.cosTodayOverlay) location.replace('#/' + dest.map(encodeURIComponent).join('/'));
+      else go(dest[0], dest.slice(1));
     });
   }
   function setBadge(name, on) { document.querySelectorAll('[data-badge="' + name + '"]').forEach(function (b) { b.classList.toggle('hidden', !on); }); }
@@ -1311,7 +1461,8 @@
       if (f.tools.length > 8) f.tools.splice(0, f.tools.length - 8);
     }
   }
-  var SX_VERBS = { read: 'Read', edit: 'Edited', write: 'Edited', bash: 'Ran', run: 'Ran', search: 'Searched', grep: 'Searched', glob: 'Searched', fetch: 'Fetched', web: 'Fetched', agent: 'Delegated', task: 'Delegated' };
+  // `other` is the stream's verb for every tool it has no verb for; its target names the tool ("Used SendMessage").
+  var SX_VERBS = { read: 'Read', edit: 'Edited', write: 'Edited', bash: 'Ran', run: 'Ran', search: 'Searched', grep: 'Searched', glob: 'Searched', fetch: 'Fetched', web: 'Fetched', agent: 'Delegated', task: 'Delegated', other: 'Used' };
   function sxToolLine(t) { var v = String(t.verb || 'tool'); var w = SX_VERBS[v] || v.charAt(0).toUpperCase() + v.slice(1); return t.target ? w + ' ' + t.target : w; }
   // The word follows the page's own working flag, which a Stop or a finished turn settles before
   // the stream's status catches up; otherwise the server's derived state, as Control reads it.
@@ -1585,7 +1736,8 @@
 
   // Where the send path below reports: the reader's own page by default. Today's overlay (panes/today-actions.js)
   // hands continueSession a session object with its own view, so a reply or a steer from Today runs this same attach,
-  // turn and queue path (one binding store, one key per draft, the same refusals), never a copy of it.
+  // turn and queue path (one binding store, one key per draft, the same refusals). The overlay keeps its own copies of
+  // the gates around it (sendSessionTurn), the turn watch (watchTurn) and the refusal box (renderVerdict).
   var READER_VIEW = {
     status: function (r, text, kind, actionHtml) { sessionStatus(text, kind, actionHtml); },
     pending: function (r, text, note) { showPendingTurn(text, note); },
@@ -2043,7 +2195,10 @@
     var chat = window.COSWeb && window.COSWeb.cosChat;
     // Asked from Today: COS gets a short summary of what Today shows (panes/today-actions.js summary), as the Ask's
     // quoted reference, the query-jobs field for context. Asked from any other pane, nothing extra is sent.
-    var context = state.pane === 'today' ? ensurePane('todayActions', 1500).then(function (m) { return m && m.summary ? m.summary() : ''; }, function () { return ''; }) : Promise.resolve('');
+    var context = state.pane === 'today' ? ensurePane('todayActions', 1500).then(function (m) {
+      // A broken summary never costs the Ask: it goes without it, and the console says why.
+      try { return m && m.summary ? m.summary() : ''; } catch (err) { console.error('[today] the Today summary failed; asking without it.', err); return ''; }
+    }, function () { return ''; }) : Promise.resolve('');
     if (chat && chat.askFromSheet) {
       setStatus(statusEl, 'Sending…');
       return context.then(function (ctx) { return chat.askFromSheet(prompt, ctx ? { context: ctx } : undefined); }).then(function (where) { setStatus(statusEl, ''); return where; }, function (err) {
@@ -3685,7 +3840,46 @@
     ['today', 'Today'], ['messages', 'Messages'], ['speakers', 'Speakers'], ['meetings', 'Meetings'], ['memories', 'Memories'],
     ['threads', 'Threads'], ['sessions', 'Sessions'], ['work', 'Work'], ['dictation', 'Dictation'], ['usage', 'Usage'], ['settings', 'Settings']
   ];
+  // ⌘K's File to Work inbox (Control's todaySubmitAsk, ActivityWindow.swift 8810): the words become a task in the Work
+  // inbox, in Control's taskDomain (quilt when the server has it, else the first domain it lists: reconcileTaskDomain),
+  // through POST /api/tasks/capture,
+  // the route Work's Add task uses. One captureId per text: a second tap, or a retry after a lost answer, files it once.
+  var ASK_FILE = { text: '', id: '', busy: false, domains: null };
+  function fileDomainEntry() {
+    var d = ASK_FILE.domains || [];
+    return d.filter(function (x) { return x && x.name === 'quilt'; })[0] || d.filter(function (x) { return x && x.name; })[0] || null;
+  }
+  function fileDomain() { var e = fileDomainEntry(); return e ? e.name : 'quilt'; }
+  function fileDomainLabel() { var e = fileDomainEntry(); return (e && e.label) || domainLabel(fileDomain()); }
+  function loadFileDomains() {
+    if (ASK_FILE.domains) return Promise.resolve();
+    return api('/api/domains').then(function (d) { ASK_FILE.domains = (d && Array.isArray(d.domains)) ? d.domains : []; }, function () { ASK_FILE.domains = null; });
+  }
+  function fileToInbox(text) {
+    if (ASK_FILE.busy || !text) return;
+    if (ASK_FILE.text !== text) { ASK_FILE.text = text; ASK_FILE.id = webJobId(); }
+    ASK_FILE.busy = true; renderAskFile();
+    loadFileDomains().then(function () {
+      return api('/api/tasks/capture', { method: 'POST', body: { domain: fileDomain(), text: text, section: 'inbox', captureId: ASK_FILE.id }, timeoutMs: 20000 });
+    }).then(function () {
+      ASK_FILE.busy = false; ASK_FILE.text = '';
+      var box = $('ask-q'); if (box && box.value.trim() === text) { box.value = ''; renderAsk(); }
+      renderAskFile();
+      setStatus($('ask-status'), 'Filed to the Work inbox.');
+      toast('Filed to the Work inbox.');
+      if (PANES.work && PANES.work.intakeChanged) PANES.work.intakeChanged();   // Work reads its board again when it opens
+    }, function (err) {
+      ASK_FILE.busy = false; renderAskFile();
+      setStatus($('ask-status'), 'Not filed: ' + ((err && err.message) || 'your Mac did not answer') + ' Filing again is safe.', true);
+    });
+  }
+  function renderAskFile() {
+    var b = document.querySelector('#ask-results [data-action="ask-file"]'); if (!b) return;
+    b.disabled = ASK_FILE.busy;
+    var g = b.querySelector('.grow'); if (g && g.firstChild) g.firstChild.textContent = ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox';
+  }
   function openAsk(prefill) {
+    loadFileDomains().then(function () { if (!$('ask-sheet').classList.contains('hidden') && $('ask-q').value.trim()) renderAsk(); });
     $('ask-sheet').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     var input = $('ask-q'); input.value = prefill || '';
@@ -3707,6 +3901,7 @@
     var jumps = JUMPS.filter(function (j) { return j[1].toLowerCase().indexOf(q.toLowerCase()) === 0; });
     out.innerHTML = '<div class="list" style="margin-top:14px">' +
       '<button type="button" class="nav-row" data-action="ask-cos"><svg class="icon"><use href="#i-ask"/></svg><span class="grow">Ask COS<span class="note">“' + esc(q) + '”' + (state.pane === 'today' ? ' with what Today shows' : '') + '</span></span></button>' +
+      '<button type="button" class="nav-row" data-action="ask-file"' + (ASK_FILE.busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-work"/></svg><span class="grow">' + (ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox') + '<span class="note">' + esc('As a task in ' + fileDomainLabel()) + '</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-meaning"><svg class="icon"><use href="#i-sessions"/></svg><span class="grow">Find a session about this<span class="note">Ranks every session by meaning</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-work"><svg class="icon"><use href="#i-work"/></svg><span class="grow">Find a task about this<span class="note">Searches Work by meaning</span></span></button>' +
       jumps.map(function (j) { return '<button type="button" class="nav-row" data-goto="' + j[0] + '"><svg class="icon"><use href="#i-' + j[0] + '"/></svg><span class="grow">Go to ' + esc(j[1]) + '</span><span class="chev"></span></button>'; }).join('') +
@@ -3723,7 +3918,7 @@
 
   // ── events (one delegated listener) ─────────────────────
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#device-code-btn');
+    var t = e.target.closest('[data-today-next],[data-today-needs],[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#device-code-btn');
     if (!t) { if (e.target.id === 'ask-sheet') closeAsk(); if (e.target.id === 'section-menu') closeMenu(); return; }
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
@@ -3755,6 +3950,14 @@
     }
     if (t.hasAttribute('data-open-ask')) return openAsk();
     if (t.hasAttribute('data-today')) return openTodayAction(t);
+    if (t.hasAttribute('data-today-next')) return prepNext();
+    if (t.hasAttribute('data-today-needs')) {
+      var which = t.getAttribute('data-today-needs');
+      if (which === 'all') TODAY.showAllNeeds = true;
+      else if (which === 'later') TODAY.showLater = true;
+      else { TODAY.extraAt = 0; return loadToday(); }
+      return paintNeeds();
+    }
     if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); return; }
     if (t.hasAttribute('data-goto') || t.hasAttribute('data-pane')) {
       if (inSheet) closeAsk(); closeMenu();
@@ -3779,6 +3982,7 @@
     if (action === 'expand-turn') { var tr = document.querySelector('.turn[data-turn="' + t.getAttribute('data-turn') + '"]'); if (tr) tr.classList.remove('clamped'); t.remove(); return; }
     var q = $('ask-q').value.trim();
     if (action === 'ask-cos' && q) { askCos(q, $('ask-status')).then(function (where) { closeAsk(); go('messages', Array.isArray(where) ? where : []); }).catch(function () {}); return; }
+    if (action === 'ask-file' && q) return fileToInbox(q);
     if (action === 'ask-meaning' && q) { $('ask-hits').innerHTML = skeletonRows(3); findByMeaning(q).then(function (html) { var el = $('ask-hits'); if (el) el.innerHTML = html; }); return; }
     if (action === 'ask-work' && q) {
       closeAsk(); go('work');
@@ -3901,6 +4105,9 @@
         sessions: state.sessions || [], intake: todayIntakeOpen(), intakeCaps: TODAY.intakeCaps, intakeLoaded: TODAY.intake !== null };
     },
     needWhy: needWhy, sessionTitle: sessionTitle, badge: badge, span: span, splitSessionId: splitSessionId,
+    // Needs you as Today lists it (all four sources), for the overlay's summary and the rail.
+    needs: function () { return TODAY.model; },
+    railLine: function () { return TODAY.model ? { text: todayRailLine(TODAY.model), hot: TODAY.model.now.length > 0 } : null; },
     markGone: function (id, gone) { if (gone) TODAY.gone[id] = 1; else delete TODAY.gone[id]; paintTodayIntake(); },
     reloadIntake: function () { return loadTodayIntake(); },
     refresh: function () { if (state.pane === 'today') loadToday(); }
@@ -3911,6 +4118,7 @@
       return { provider: provider, id: id, draft: null, held: [], view: view, verdict: null, refusal: null, cautionAck: false, feed: newFeed(), live: null, queued: 0 };
     },
     send: function (r, text, opts) { return continueSession(r, text, opts || {}); },
+    newKey: newTurnKey,
     probe: function (r) { return sxProbeAttach(r); },
     path: sessionPath, answer: apiAnswer,
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine },

@@ -2661,6 +2661,9 @@
         return;
       }
       startPoll(); resumeHandoffPolls();
+      // After Today decided a suggestion (intakeChanged), the board and Intake are read again on any route, a card
+      // included, and the read starts before the first paint, so a new card waits for it instead of reading as gone.
+      if (S.reloadNext && !S.loading) { S.reloadNext = false; loadBoard(); }
       render();   // one paint now; loads that finish later go through backgroundPaint
       if (!S.tasks && !S.loading) loadBoard();
       else if (!args.length && Date.now() - S.loadedAt > 60000 && !S.loading) loadBoard();
@@ -2675,8 +2678,8 @@
     search: function (q) { S.q = String(q || ''); S.tab = 'board'; render(); searchMeaning(); },
     // Back unwinds one step: Start work and Edit go to the card, the card to the list.
     up: function (args) { return args.length >= 2 ? [args[0]] : null; },
-    // Today's overlay (panes/today-actions.js) decided a suggestion through this pane's route: read Intake and the board
-    // again the next time Work opens, so the decision shows in its real tab.
-    intakeChanged: function () { S.intake = null; SPLIT = null; S.loadedAt = 0; }
+    // Today's overlay (panes/today-actions.js) decided a suggestion through this pane's route. The next time Work opens,
+    // on the list, Sort or a card (Today's "Open card"), load() reads the board again, and Intake after it.
+    intakeChanged: function () { S.intake = null; SPLIT = null; S.reloadNext = true; }
   });
 })();

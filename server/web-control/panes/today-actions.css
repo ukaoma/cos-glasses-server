@@ -94,3 +94,12 @@ html.ta-open { overflow: hidden; }
 }
 @keyframes ta-rise { from { transform: translateY(32px); opacity: 0.6; } }
 @keyframes ta-slide { from { transform: translateX(32px); opacity: 0.6; } }
+/* Dismiss armed: the second tap removes it (no Undo on this server). */
+.link-btn.quiet.armed { color: var(--hot); font-weight: 600; }
+/* Needs you: "Show N more", "can wait until tomorrow" and a source that could not be read (app.js renderNeeds). */
+.need-more { display: block; width: 100%; text-align: left; padding: 12px 16px; min-height: 44px; border-top: 1px solid var(--row-border); color: var(--accent); font-weight: 600; font-size: 15px; }
+.need-more.need-failed { color: var(--hot); font-weight: 500; }
+/* Next up: Prep me and Open meeting (app.js renderNext). */
+.next-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; padding: 0 16px 14px; }
+.next-actions:empty { display: none; }
+.next-actions .btn.small { min-height: 44px; }

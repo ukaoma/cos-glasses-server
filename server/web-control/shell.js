@@ -122,7 +122,10 @@
         var needText = waitNow > 0 ? (waitNow === 1 ? '1 needs you' : waitNow + ' need you')
           : folded > 0 ? folded + ' can wait until tomorrow'
           : (res[0] || res[1]) ? 'Nothing needs you' : "Couldn't read your Mac";
-        if (recordings > 0) setStory('today', [recordings + ' recording', waitNow > 0 ? needText : ''].filter(Boolean).join(', '), true);
+        // Today, once loaded, counts every source it lists (sessions, Work, voices, memories): the rail says its line.
+        var todayLine = W.today && W.today.railLine ? W.today.railLine() : null;
+        if (recordings > 0) setStory('today', [recordings + ' recording', todayLine ? todayLine.text : waitNow > 0 ? needText : ''].filter(Boolean).join(', '), true);
+        else if (todayLine) setStory('today', todayLine.text, todayLine.hot);
         else setStory('today', [needText, working ? working + ' running' : ''].filter(Boolean).join(', '), waitNow > 0);
       });
 
@@ -291,4 +294,5 @@
   });
   document.addEventListener('visibilitychange', function () { if (!document.hidden && document.querySelector('#app-shell:not(.hidden)')) { loadStories(); checkServer(); } });
   W.refreshStories = loadStories;
+  W.setStory = setStory;
 })();

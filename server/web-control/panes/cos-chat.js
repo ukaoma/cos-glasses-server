@@ -1732,6 +1732,18 @@
     classify: classify, uploadMedia: uploadMedia, uploadErrorText: uploadErrorText, uuid: uuid,
     // 6.99.19: Prep. meetings.js reads the capability from here (one /api/health read for the page).
     prepCaps: prepCaps,
+    // Today's Next up (app.js prepNext): Prep me for that meeting, as the chat's own Prep me does. With Prep on the Mac
+    // the Prep composer opens (it paints when the chat mounts; the same meeting reopens the same draft); without it,
+    // the plain Ask. Resolves to 'prep', 'ask' or '' (neither is on).
+    prepFor: function (title, startsAt) {
+      return ensureCaps().then(function () {
+        var t = String(title || '').trim() || 'my next meeting';
+        var item = { id: 'today-next:' + (startsAt || '') + ':' + t, title: t, prep: { title: t, startsAt: startsAt || null } };
+        if (prepOn()) { openPrep(item); return 'prep'; }
+        if (C.caps && C.caps.jobs) { submitAsk('Prep me for ' + t, ''); return 'ask'; }
+        return '';
+      });
+    },
     // The Prep server id to name on a write: the newest from capabilities.prep or any Prep answer (meetings.js reports its own).
     prepInstance: function () { return PREP_INST; }, notePrepInstance: function (id) { if (typeof id === 'string' && id) PREP_INST = id; },
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,

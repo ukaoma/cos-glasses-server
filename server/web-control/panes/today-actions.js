@@ -5,11 +5,17 @@
    A tap on Today opens the item in an overlay on Today: a bottom sheet on the folded phone, a side sheet from 600 px.
    - Needs you: what the session waits on. A session question or approval is the same card questions.js draws, with the
      same answer route (POST /api/session-questions/:id/answer), drawn here through its mount(). The session's own
-     status line and its last reply. A reply goes through the Sessions reader's own send path (app.js continueSession
-     with this overlay as its view): attach, the per-browser binding, one key per draft, the queue when busy, and the
-     server's refusals word for word. Open session stays a link to the full reader.
+     status line and its last reply. Open session stays a link to the full reader.
    - Running: a peek at what the session is doing now, read with the reader's own activity reducer (applyFeed) from the
-     same live stream, and a short note box on the same send path. Open session goes to the reader.
+     same live stream, and a short note box. Open session goes to the reader.
+   What a reply or a note shares with the Sessions reader, and what is this file's own copy:
+   - Shared (app.js, through COSWeb.sessionKit): the attach, turn and queue path itself (continueSession and parkTurn,
+     run with this overlay as their view), the per-browser binding store, one key per draft, the attachability probe
+     (sxProbeAttach) and the live feed's reducer. The server's refusals arrive word for word.
+   - Copied here, kept in step by hand: the send gates (sendReply mirrors sendSessionTurn: one send at a time, the
+     caution confirm, a lost answer becomes Try again), the turn watch (watchTurn polls the same route for the same
+     three minutes as the reader's watchTurn), and the refusal box (paintVerdict mirrors renderVerdict, with Open session
+     in place of Fork and Refresh).
    - From today's meetings: each suggestion with the decisions COS Control offers on Today (Create task, Dismiss, Open
      in Work, Open card) and Work's Link for a suggested link, through Work's own route (POST
      /api/work-intake/:id/resolve), one decision at a time as Control does. The Today card's count moves at once.
@@ -27,24 +33,32 @@
   var UNDO_SECONDS = 8;          // TodayDismissals.undoSeconds
   var STALE_MS = 60000;          // a decision the server dated a minute before the tap was made elsewhere
   var WATCH_MS = 180000;         // follow a sent turn for three minutes, as the reader does
+  // The Today summary's cap, read by app.js askCos's callers and the tests (registered as summaryMax). The marker that
+  // says something was left out counts against it.
   var SUMMARY_MAX = 4000;
+  var SUMMARY_MORE = '[More is on Today than fits here.]';
   var X_ICON = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>';
-  // Work's words for an intake refusal (panes/work.js INTAKE_REFUSALS), by the code the server sends.
+  // Work's words for an intake refusal, by the code the server sends: a verbatim copy of panes/work.js INTAKE_REFUSALS
+  // (Work loads lazily, so the overlay cannot read it there). today-actions.test.ts fails if the two differ.
+  // intake_not_found never shows: a suggestion that is gone reads as handled on another screen (GONE).
   var REFUSALS = {
-    meeting_identity_changed: 'That meeting was renamed or merged after it was scored. Dismiss this one; the renamed meeting is checked again.',
-    meeting_unavailable: 'That meeting cannot be found. It may have been renamed or removed. Dismiss this one.',
+    meeting_identity_changed: 'That meeting was renamed or merged after it was scored. Dismiss this item; the renamed meeting is checked again.',
+    meeting_unavailable: 'That meeting can’t be found; it may have been renamed or removed. Dismiss this item.',
     intake_task_changed: 'That task changed or was closed since it was suggested. Dismiss this suggestion.',
     meeting_links_full: 'That task already links eight meetings. Dismiss this suggestion.',
-    work_board_read_only: 'This server cannot write Work links yet.',
-    card_creation_unavailable: 'This server cannot create Work cards yet. Update the server.',
-    task_bridge_unavailable: 'The task bridge did not answer. Try again in a moment.',
-    intake_text_collision: 'The same words are on closed or archived work. Reopen that task in Work instead, or dismiss this one.',
-    intake_busy: 'That one is already being saved, here or on another screen. Try again in a moment.',
-    intake_store_full: 'Intake is full. Dismiss older items in Work, then try again.',
+    work_board_read_only: 'This server can’t write Work links yet.',
+    card_creation_unavailable: 'This server can’t create Work cards yet. Update the server.',
+    task_bridge_unavailable: 'The task bridge didn’t answer. Try again in a moment.',
+    intake_text_collision: 'The same words are on closed or archived work. Reopen that task instead, or dismiss this item.',
+    intake_busy: 'That item is already being saved.', intake_not_found: 'That item is no longer in Intake. Refresh.',
+    invalid_intake_action: 'Refresh Intake and try again.', invalid_intake_id: 'Refresh Intake and try again.',
+    intake_store_full: 'Intake is full. Dismiss older items, then try again.',
     intake_store_closed: 'Intake is unavailable while the server restarts. Try again shortly.',
-    work_intake_unavailable: 'Intake is unavailable right now. Try again shortly.'
-  };
+    work_intake_unavailable: 'Intake is unavailable right now. Try again shortly.' };
   var GONE = 'This suggestion is gone. It was handled on another screen.';
+  // The decision words, as COS Control's Today says them (todaySuggestionRow). One place each, so a wording change is
+  // one edit.
+  var CREATE_LABEL = 'Create task', DISMISS_LABEL = 'Dismiss';
 
   var O = {
     open: null,            // { kind: 'need' | 'run' | 'meeting' | 'intake', key, all }
@@ -67,6 +81,23 @@
   };
 
   function $(id) { return document.getElementById(id); }
+  // Per session, in this browser: the words in the box, and a send whose answer has not come ({text, key}), kept apart
+  // from the Sessions reader's store. A week old and they go.
+  var DRAFTS = 'cos.web.today.drafts', DRAFT_DAYS = 7;
+  function draftKey(r) { return r.provider + '|' + r.id; }
+  function draftOf(r) {
+    var d = W.readStore(DRAFTS)[draftKey(r)];
+    return d && typeof d === 'object' && Date.now() - (Number(d.at) || 0) < DRAFT_DAYS * 86400000 ? d : null;
+  }
+  // `unsettled` undefined keeps what is stored; null clears it.
+  function keepDraft(r, text, unsettled) {
+    var all = W.readStore(DRAFTS), k = draftKey(r), now = Date.now(), prev = all[k] || {};
+    Object.keys(all).forEach(function (x) { if (!all[x] || now - (Number(all[x].at) || 0) >= DRAFT_DAYS * 86400000) delete all[x]; });
+    var u = unsettled === undefined ? prev.unsettled || null : unsettled ? { text: unsettled.text, key: unsettled.key } : null;
+    var t = String(text || '');
+    if (!t.trim() && !u) delete all[k]; else all[k] = { text: t, unsettled: u, at: now };
+    W.writeStore(DRAFTS, all);
+  }
   function str(v) { return typeof v === 'string' ? v : ''; }
   function clip(text, n) { var s = String(text || '').replace(/\s+/g, ' ').trim(); return s.length <= n ? s : s.slice(0, n - 1).replace(/\s+$/, '') + '\u2026'; }
   function lower(s) { return String(s || '').toLowerCase(); }
@@ -89,9 +120,15 @@
         '<div class="ta-foot" id="ta-foot"></div>' +
       '</section>';
     document.body.appendChild(layer);
+    // A tap that lands while the sheet is still opening is the second half of the tap that opened it (qa2-user B1: a
+    // double tap on a meeting row dismissed the first suggestion). Caught before anything inside sees it.
+    layer.addEventListener('click', function (e) { if (Date.now() < O.settleAt) { e.stopPropagation(); e.preventDefault(); } }, true);
     layer.addEventListener('click', onClick);
     layer.addEventListener('submit', onSubmit);
     layer.addEventListener('focusin', onFocusIn);
+    layer.addEventListener('input', function (e) {
+      if (e.target && e.target.id === 'ta-input' && O.r) keepDraft(O.r, e.target.value, O.r.draft && O.r.draft.text === e.target.value.trim() ? O.r.draft : undefined);
+    });
     // A drag on the dimmed page never scrolls what is behind it.
     layer.addEventListener('touchmove', function (e) { if (e.target && e.target.classList && e.target.classList.contains('ta-scrim')) e.preventDefault(); }, { passive: false });
     return layer;
@@ -118,18 +155,42 @@
     if (O.open) stopSession();
     O.open = { kind: kind, key: String(key || ''), all: kind === 'intake' };
     O.opener = opener || document.activeElement; O.openerSel = openerSelector(opener);
-    O.note = { text: '', kind: '' }; O.cautionAsk = false; O.needGone = false;
+    O.note = { text: '', kind: '' }; O.cautionAsk = false; O.needGone = false; O.armed = '';
+    O.stopArmed = false; O.stopping = false; O.stopKey = '';
     layer.hidden = false;
     document.documentElement.classList.add('ta-open');
     var shell = $('app-shell'); if (shell) shell.setAttribute('inert', '');
     fit();
-    if (!O.pushed) {
-      try { history.pushState({ cosTodayOverlay: 1 }, ''); O.pushed = true; } catch (_e) { O.pushed = false; }
+    // The entry names what is open, so a reload can open it again and Back still closes it (restore below).
+    var entry = { cosTodayOverlay: 1, kind: kind, key: O.open.key };
+    try {
+      if (!O.pushed) { history.pushState(entry, ''); O.pushed = true; } else history.replaceState(entry, '');
+    } catch (_e) { /* no history API: Back simply leaves Today */ }
+    try {
+      if (kind === 'need' || kind === 'run') openSession(kind, O.open.key);
+      else openIntake();
+    } catch (err) {
+      // A bug here must not leave a half-drawn sheet over an inert page: take it down, keep the history entry for
+      // app.js openTodayAction to replace, and let it say so and go where the tap went before.
+      close('leave');
+      throw err;
     }
-    if (kind === 'need' || kind === 'run') openSession(kind, O.open.key);
-    else openIntake();
     var sheet = $('ta-sheet');
+    O.settleAt = Date.now() + settleMs(sheet);
     if (sheet && sheet.focus) sheet.focus({ preventScroll: true });
+  }
+  // How long taps inside are ignored after opening: the sheet's own open animation (today-actions.css ta-rise and
+  // ta-slide, 220 ms) and a little more, so a quick second tap of the same gesture lands on nothing. Never under 300 ms,
+  // so reduced motion (no animation) keeps the same protection.
+  var SETTLE_EXTRA_MS = 130, SETTLE_MIN_MS = 300;
+  function settleMs(sheet) {
+    var ms = 220;
+    try {
+      var v = String(getComputedStyle(sheet).animationDuration || '').split(',')[0].trim();
+      var n = parseFloat(v);
+      if (isFinite(n)) ms = /ms$/.test(v) ? n : n * 1000;
+    } catch (_e) { /* no computed style: the CSS default above */ }
+    return Math.max(SETTLE_MIN_MS, ms + SETTLE_EXTRA_MS);
   }
 
   // how: 'user' (X, outside, Escape), 'pop' (Back), 'leave' (navigating to another pane)
@@ -163,6 +224,27 @@
     close('leave');
     if (replace) location.replace(hash); else W.go(pane, args || []);
   }
+  // A reload with the overlay open keeps its history entry, and the entry before it is Today at the same address, so
+  // Back from there showed nothing (measured in Chrome 11/07: a same-document popstate). On load, app.js hands that
+  // entry here: open the same thing again, so the first Back closes it as it did before the reload. What cannot be
+  // opened (gone, or Today left meanwhile) just clears the entry's mark.
+  var KINDS = { need: 1, run: 1, meeting: 1, intake: 1 };
+  function restore(st) {
+    if (O.open || !st || !st.cosTodayOverlay) return Promise.resolve(false);
+    var forget = function () { try { history.replaceState(null, ''); } catch (_e) {} return false; };
+    if (!KINDS[st.kind]) return Promise.resolve(forget());
+    var started = Date.now();
+    return new Promise(function (resolve) {
+      (function wait() {
+        var d = T.data(), ready = d.at > 0 && (st.kind === 'need' || st.kind === 'run' || d.intakeLoaded);
+        if (W.parseRoute().pane !== 'today' || O.open) return resolve(forget());
+        if (!ready) { if (Date.now() - started > 15000) return resolve(forget()); return setTimeout(wait, 150); }
+        O.pushed = true;   // this entry is the overlay's own
+        try { open(st.kind, String(st.key || ''), null); resolve(true); }
+        catch (err) { console.error('[today] could not reopen the overlay after a reload.', err); O.pushed = false; resolve(forget()); }
+      })();
+    });
+  }
   window.addEventListener('popstate', function () {
     if (O.ignorePops > 0) { O.ignorePops--; return; }
     if (O.open) close('pop');
@@ -184,15 +266,28 @@
     var b = e.target && e.target.closest ? e.target.closest('[data-ta]') : null;
     if (!b || b.disabled) return;
     var what = b.getAttribute('data-ta'), id = b.getAttribute('data-id') || '';
+    if (what !== 'dismiss' && O.armed) { O.armed = ''; if (O.open && (O.open.kind === 'meeting' || O.open.kind === 'intake')) paintIntake(); }
+    if (what !== 'stop' && O.stopArmed) { O.stopArmed = false; paintLive(); }
     if (what === 'close') return close('user');
     if (what === 'create' || what === 'link') return decide(id, 'accept');
-    if (what === 'dismiss') return decide(id, 'dismiss');
+    if (what === 'dismiss') {
+      // Without Undo on this server a Dismiss cannot be taken back, so it asks once: tap, then tap again (the
+      // armed-tap pattern questions.js uses for Allow and Deny).
+      if (O.loop !== true && O.armed !== id) { O.armed = id; paintIntake(); return; }
+      O.armed = '';
+      return decide(id, 'dismiss');
+    }
     if (what === 'undo') return undo(id);
     if (what === 'show-all') { O.open.all = true; paintIntake(); return; }
     if (what === 'open-work') return leaveTo('work', ['sort']);
     if (what === 'open-card') return leaveTo('work', id ? [id] : []);
     if (what === 'open-session') return O.r ? leaveTo('sessions', [O.r.provider, O.r.id]) : null;
     if (what === 'send') return sendReply();
+    if (what === 'stop') {
+      // A tap arms it (Stop ends the agent's turn on your Mac); the second sends it.
+      if (!O.stopArmed) { O.stopArmed = true; return paintLive(); }
+      return stopRun();
+    }
     if (what === 'retry') return sendReply();
     if (what === 'caution-send') { if (O.r) O.r.cautionAck = true; O.cautionAsk = false; return sendReply(); }
     if (what === 'caution-cancel') { O.cautionAsk = false; return paintVerdict(); }
@@ -228,10 +323,12 @@
   // becomes a task when the server can create cards, else only Open in Work.
   function actionsFor(it) {
     if (it.kind === 'link') return { accept: caps().linkWrites === true ? 'link' : '', acceptLabel: 'Link', card: str(it.task && it.task.workIdentity) };
-    return { accept: caps().cardCreation === true ? 'create' : '', acceptLabel: 'Create task', card: '' };
+    return { accept: caps().cardCreation === true ? 'create' : '', acceptLabel: CREATE_LABEL, card: '' };
   }
 
   function openIntake() {
+    // Whether this server can undo decides whether Dismiss asks twice; ask before the first tap can land.
+    probeLoop().then(function () { if (O.open && (O.open.kind === 'meeting' || O.open.kind === 'intake')) paintIntake(); });
     paintIntake();
     var foot = $('ta-foot');
     if (foot) foot.innerHTML = '<div class="ta-links"><button type="button" class="link-btn" data-ta="open-work">Open Sort in Work</button></div>';
@@ -262,6 +359,8 @@
   }
   function openCount() { return intakeList().length; }
 
+  // A row that has left the count: decided here, or gone. One being decided, or refused, still counts (qa2-user N4).
+  function settled(id) { var r = O.rows[id]; return !!r && /^(created|dismissed|stale|gone)$/.test(r.state); }
   function rowHtml(it) {
     var row = O.rows[it.id] || { state: 'ready' };
     var acts = actionsFor(it), lock = !!O.busy;
@@ -285,7 +384,8 @@
         if (acts.accept) buttons += '<button type="button" class="btn small primary" data-ta="' + acts.accept + '" data-id="' + esc(it.id) + '"' + (lock ? ' disabled' : '') + '>' + esc(row.state === 'failed' ? 'Try again' : acts.acceptLabel) + '</button>';
         if (acts.card) buttons += '<button type="button" class="link-btn" data-ta="open-card" data-id="' + esc(acts.card) + '">Open card</button>';
         if (!acts.accept || it.kind !== 'link') buttons += '<button type="button" class="link-btn" data-ta="open-work">Open in Work</button>';
-        buttons += '<button type="button" class="link-btn quiet" data-ta="dismiss" data-id="' + esc(it.id) + '"' + (lock ? ' disabled' : '') + ' aria-label="' + esc('Dismiss suggestion: ' + clip(textOf(it), 80)) + '" title="Not a task: it leaves Today and does not move to Work at midnight">Dismiss</button>';
+        var armed = O.armed === it.id;
+        buttons += '<button type="button" class="link-btn quiet' + (armed ? ' armed' : '') + '" data-ta="dismiss" data-id="' + esc(it.id) + '"' + (lock ? ' disabled' : '') + ' aria-label="' + esc((armed ? 'Tap again to dismiss: ' : 'Dismiss suggestion: ') + clip(textOf(it), 80)) + '" title="Not a task: it leaves Today and does not move to Work at midnight">' + (armed ? 'Tap again to dismiss' : DISMISS_LABEL) + '</button>';
         line = buttons;
         if (row.note) text += '<p class="ta-note" role="alert">' + esc(row.note) + '</p>';
       }
@@ -309,14 +409,14 @@
     });
     var single = O.open && O.open.kind === 'meeting' && !O.open.all;
     var head = '<p class="ta-sub">' + esc(n === 0 ? 'Nothing from today\u2019s meetings is waiting. What you decided is in Work.'
-      : (single ? (function () { var k = list.filter(function (it) { return !O.rows[it.id]; }).length; return k + ' from this meeting, ' + n + ' from today in all.'; })() : n + (n === 1 ? ' suggestion' : ' suggestions') + ' from today\u2019s meetings.') +
+      : (single ? (function () { var k = list.filter(function (it) { return !settled(it.id); }).length; return k + ' from this meeting, ' + n + ' from today in all.'; })() : n + (n === 1 ? ' suggestion' : ' suggestions') + ' from today\u2019s meetings.') +
       ' They move to Work at midnight.') + '</p>';
     var body = groups.map(function (g) {
       return (single ? '' : '<h3 class="ta-group">' + esc(g.title) + '</h3>') + g.items.map(rowHtml).join('');
     }).join('');
     if (!list.length && n > 0 && single) body = '<p class="ta-sub">Nothing left from this meeting.</p>';
     if (!T.data().intakeLoaded) body = '<p class="ta-sub">Reading today\u2019s suggestions\u2026</p>';
-    var more = single && n > list.filter(function (it) { return !O.rows[it.id]; }).length ? '<button type="button" class="link-btn" data-ta="show-all">Show all ' + n + ' from today</button>' : '';
+    var more = single && n > list.filter(function (it) { return !settled(it.id); }).length ? '<button type="button" class="link-btn" data-ta="show-all">Show all ' + n + ' from today</button>' : '';
     return head + '<div class="ta-list">' + body + '</div>' + more;
   }
   function paintIntake() {
@@ -431,16 +531,23 @@
     O.row = id ? sessionRowFor(provider, id) : null;
     O.r = id ? K.session(provider, id, VIEW) : null;
     if (O.r) O.r.live = { working: !!(O.row && O.row.running_active) };
+    // What was typed, and a send whose answer never came, survive a close, Back or reload: the same words resend under
+    // the same key (skeptic W3, qa2-user N1).
+    var kept = O.r ? draftOf(O.r) : null;
+    if (kept && kept.unsettled) O.r.draft = { text: kept.unsettled.text, key: kept.unsettled.key };
     O.last = null; O.lastState = 'idle';
     setHead(kind === 'need' ? (O.item ? str(O.item.sessionTitle) || str(O.item.title) || 'Handoff' : 'Needs you') : (O.row ? K.title(O.row) : 'Session'));
     var body = $('ta-body');
     if (body) body.innerHTML = '<div id="ta-meta"></div><div id="ta-q" class="ta-q" hidden></div><div id="ta-live"></div><div id="ta-last"></div>';
     var foot = $('ta-foot');
     if (foot) foot.innerHTML = O.r ? composerHtml(kind) : '';
+    var input = $('ta-input');
+    if (input && kept && kept.text) { input.value = kept.text; W.autoGrow(input); }
     paintMeta();
     if (!O.r) return;
     if (W.sessionQuestions && W.sessionQuestions.mount) {
-      O.qMount = W.sessionQuestions.mount($('ta-q'), id, function () { paintMeta(); });
+      // mount() draws at once and calls back before it returns, so the count comes from the callback, not O.qMount.
+      O.qMount = W.sessionQuestions.mount($('ta-q'), id, function (n) { O.qCount = n; paintMeta(); });
     }
     if (kind === 'run') { paintLive(); watchStream(O.r); }
     loadLast(O.r);
@@ -452,6 +559,7 @@
     clearInterval(O.clock); O.clock = null;
     clearInterval(O.watch); O.watch = null;
     if (O.qMount) { O.qMount.unmount(); O.qMount = null; }
+    O.qCount = 0;
     O.r = null; O.row = null; O.item = null;
   }
   // The Needs you list may be minutes old: read it again, and say so if this one is no longer waiting.
@@ -460,7 +568,10 @@
     api('/api/work-board/your-move').then(function (d) {
       if (O.r !== r) return;
       var items = (d && d.items) || [];
-      if (d && d.available !== false && !items.some(function (it) { return it.id === key; })) { O.needGone = true; paintMeta(); }
+      if (d && d.available !== false && !items.some(function (it) { return it.id === key; })) {
+        O.needGone = true; paintMeta();
+        T.refresh();   // and Today drops its row
+      }
     }, function () {});
   }
 
@@ -491,21 +602,35 @@
     if (st === 'stale') return 'Not running on your Mac';
     return s.running ? 'Open and quiet for ' + T.span(s.last_activity_at || s.state_since) : 'Not running right now';
   }
+  function runWords() {
+    var r = O.r, f = r && r.feed;
+    if (f && (f.connected || f.lastSeq > 0)) {
+      var w = K.feed.word(r), since = K.feed.elapsed(f);
+      if (w === 'Working') return 'Working now' + (since ? ', for ' + since : '');
+      if (w === 'Waiting') return 'Waiting for you' + (since ? ', for ' + since : '');
+      if (w === 'Failed') return 'Stopped with an error';
+      if (w === 'Done') return 'Finished';
+      return 'Idle' + (since ? ' for ' + since : '');
+    }
+    return O.row ? stateWords(O.row) : '';
+  }
   function paintMeta() {
     var box = $('ta-meta'); if (!box || !O.open) return;
     var html = '';
-    var questions = O.qMount ? O.qMount.count() : 0;
+    var questions = O.qCount || 0;
     if (O.open.kind === 'need') {
       var it = O.item;
       if (!it) { box.innerHTML = '<p class="ta-note">This is no longer waiting on you. It was handled on another screen.</p>'; return; }
-      html += '<p class="ta-sub">' + esc(needLine(it)) + '</p>';
+      // Gone: say so in place of the waiting line, never under it (qa2-user N3).
       if (O.needGone) html += '<p class="ta-note" role="status">This is no longer waiting on you. It was handled on another screen.</p>';
+      else html += '<p class="ta-sub">' + esc(needLine(it)) + '</p>';
       var card = str(it.title), session = str(it.sessionTitle);
       if (card && card !== session) html += '<p class="ta-card-line">' + esc('Work card: ' + card) + '</p>';
       var p = it.progress && !it.progress.unreadable ? it.progress : null;
       if (p && p.evidence) html += '<blockquote class="ta-quote">' + esc(p.evidence) + '</blockquote>';
-    } else if (O.row) {
-      html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : O.row.provider) + ' <span>' + esc(stateWords(O.row)) + '</span></p>';
+    } else if (O.row || O.r) {
+      // Once the live feed speaks, the line says what it says, so the header and the peek never disagree (qa2-user N3).
+      html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : O.row.provider) + ' <span id="ta-run-state">' + esc(runWords()) + '</span></p>';
     }
     if (O.row && O.open.kind === 'need') html += '<p class="ta-sub">' + esc(stateWords(O.row)) + '</p>';
     if (questions) html += '<p class="ta-ask-line">' + esc(questions === 1 ? 'It is asking you this now. Answer here.' : 'It is asking you ' + questions + ' things now. Answer here.') + '</p>';
@@ -559,6 +684,8 @@
       r.live = r.live || {};
       if (e.kind === 'status') {
         var working = e.state === 'working' || e.agent_state === 'running';
+        // The stream's status trails a Stop by a few seconds (the reader's rule): do not let that echo reopen it.
+        if (working && r.stoppedAt && Date.now() - r.stoppedAt < 8000) working = false;
         if (r.live.working && !working) loadLast(r);
         r.live.working = working;
         if (!working) r.live.prose = null;
@@ -593,7 +720,9 @@
       // Idle: the reader's line repeats the last reply, which the peek shows in full just below.
       var word = K.feed.word(r), detail = word === 'Idle' ? '' : K.feed.detail(f, word);
       html = '<div class="sx-act-state"><span class="sx-dot ' + word.toLowerCase() + '" aria-hidden="true"></span><strong>' + esc(word) + '</strong>' +
-        '<span class="sx-act-detail">' + esc(detail) + '</span><span class="sx-act-clock" id="ta-clock">' + esc(K.feed.elapsed(f)) + '</span></div>' +
+        '<span class="sx-act-detail">' + esc(detail) + '</span><span class="sx-act-clock" id="ta-clock">' + esc(K.feed.elapsed(f)) + '</span>' +
+        (live.working || O.stopping ? '<button type="button" class="cx-btn quiet sx-act-stop' + (O.stopArmed ? ' danger' : '') + '" data-ta="stop"' + (O.stopping ? ' disabled' : '') + '>' +
+          (O.stopping ? 'Stopping' : O.stopArmed ? 'Tap again to stop' : 'Stop') + '</button>' : '') + '</div>' +
         (f.prompt ? '<p class="ta-act-prompt">' + esc('Working on: ' + clip(f.prompt, 240)) + '</p>' : '') +
         '<div class="ta-act-tail">' + f.tools.slice(-5).map(function (t) { return '<div class="sx-act-tool">' + esc(K.feed.tool(t)) + '</div>'; }).join('') +
         (live.working && live.prose ? '<div class="sx-act-prose">' + esc(String(live.prose).slice(-500)) + '</div>' : '') + '</div>';
@@ -601,17 +730,23 @@
       if (f.fallback && !f.connected) html += '<p class="ta-sub ta-feed-note">' + esc(K.feed.fallback(f.fallback)) + '</p>';
     } else html = '<p class="ta-sub">' + esc(f.fallback ? K.feed.fallback(f.fallback) : 'Connecting to the live feed\u2026') + '</p>';
     box.innerHTML = '<div class="sx-activity ta-activity" aria-live="polite">' + html + '</div>';
+    var rs = $('ta-run-state'); if (rs) rs.textContent = runWords();
     clearInterval(O.clock); O.clock = null;
     var w = on ? K.feed.word(r) : '';
     if (w === 'Working' || w === 'Waiting') {
-      O.clock = setInterval(function () { if (O.r !== r) { clearInterval(O.clock); return; } var c = $('ta-clock'); if (c) c.textContent = K.feed.elapsed(r.feed); }, 1000);
+      O.clock = setInterval(function () {
+        if (O.r !== r) { clearInterval(O.clock); return; }
+        var c = $('ta-clock'); if (c) c.textContent = K.feed.elapsed(r.feed);
+        var rs = $('ta-run-state'); if (rs) rs.textContent = runWords();
+      }, 1000);
     }
   }
 
-  // ── sending, through the reader's own path ────────────
-  // continueSession reports through this view (app.js READER_VIEW's methods); everything else about the send is the
-  // reader's code. The overlay never holds a message for later: when COS's own reply is still running it says so, and
-  // the words stay in the box, under the same key, so Send again cannot post twice.
+  // ── sending: the reader's attach, turn and queue path ──
+  // continueSession and parkTurn run as they do in the reader and report through this view (app.js READER_VIEW's
+  // methods). The gates in sendReply, watchTurn and paintVerdict below are this file's copies of the reader's (see the
+  // header). The overlay never holds a message for later: when COS's own reply is still running it says so, and the
+  // words stay in the box, under the same key, so Send again cannot post twice.
   var VIEW = {
     status: function (r, text, kind, actionHtml) { if (r !== O.r) return; O.note = { text: text || '', kind: kind || '' }; paintNote(); },
     pending: function (r, text, note) {
@@ -621,10 +756,12 @@
       paintNote();
     },
     clear: function (r, text) {
-      if (r !== O.r) return;
-      var box = $('ta-input');
-      if (box && box.value.trim() === String(text).trim()) { box.value = ''; W.autoGrow(box); }
+      // The Mac took it: the send is settled, and the kept draft goes with the words that were sent.
       if (r.draft && r.draft.text === text) r.draft = null;
+      var box = r === O.r ? $('ta-input') : null;
+      var left = box ? (box.value.trim() === String(text).trim() ? '' : box.value) : '';
+      if (box && !left) { box.value = ''; W.autoGrow(box); }
+      keepDraft(r, left, null);
     },
     verdict: function (r) { if (r === O.r) paintVerdict(); },
     hold: function (r) {
@@ -636,6 +773,8 @@
     queue: function () {}
   };
   function paintNote() { W.setStatus($('ta-status'), O.note.text, O.note.kind === 'error'); }
+  // A copy of the reader's renderVerdict (app.js): the same boxes and words, with Open session where the reader offers
+  // Fork and Refresh, which live only in the reader.
   function paintVerdict() {
     var box = $('ta-verdict'), r = O.r; if (!box || !r) return;
     var v = r.verdict, html = '';
@@ -676,7 +815,10 @@
     if (r.refusal || O.cautionAsk) { r.refusal = null; O.cautionAsk = false; paintVerdict(); }
     r.sending = true; setSending(true);
     var done = function () { r.sending = false; if (O.r === r) setSending(false); };
-    return K.send(r, text, opts || {}).then(function () { done(); }, function (err) {
+    var sending = K.send(r, text, opts || {});
+    // continueSession picks the key at once (draftFor): keep it until the Mac takes the words.
+    if (r.draft) keepDraft(r, text, r.draft);
+    return sending.then(function () { done(); }, function (err) {
       done();
       if (O.r !== r) return;
       var why = err && err.name === 'AbortError'
@@ -687,7 +829,30 @@
       paintVerdict();
     });
   }
-  // Follow one sent turn to its end, as the reader's watchTurn does, while this overlay shows it.
+  // Stop, as the reader's Stop sends it (app.js stopSession): POST .../cancel with one clientCancelId per attempt, so a
+  // retry after a lost answer replays instead of stopping twice. The server's own words say what happened.
+  function stopRun() {
+    var r = O.r; if (!r || O.stopping) return;
+    O.stopping = true; O.stopArmed = false;
+    if (!O.stopKey) O.stopKey = K.newKey();
+    O.note = { text: 'Stopping', kind: '' }; paintNote(); paintLive();
+    return K.answer(K.path(r.provider, r.id, '/cancel'), { method: 'POST', timeoutMs: 15000, body: { clientCancelId: O.stopKey } }).then(function (c) {
+      O.stopping = false;
+      if (O.r !== r) return;
+      var b = c.body || {};
+      O.stopKey = '';
+      O.note = { text: b.reasonCopy || (b.cancelled ? 'Stopped.' : 'COS could not stop it.'), kind: b.cancelled ? '' : 'error' };
+      if (b.cancelled) { r.stoppedAt = Date.now(); r.live = r.live || {}; r.live.working = false; r.live.prose = null; O.dirty = true; setTimeout(function () { if (O.r === r) loadLast(r); }, 1500); }
+      paintNote(); paintLive();
+    }, function (err) {
+      O.stopping = false;
+      if (O.r !== r) return;
+      O.note = { text: 'No answer from your Mac' + (err && err.message ? ': ' + err.message : '') + '. Stopping again is safe; it will not stop twice.', kind: 'error' };
+      paintNote(); paintLive();
+    });
+  }
+  // A copy of the reader's watchTurn (app.js): the same route, outcomes and three minutes, for as long as the overlay
+  // shows this session. The reader's own watch is tied to its page, so it cannot be reused here.
   function watchTurn(r, bindingId, key) {
     clearInterval(O.watch);
     var started = Date.now();
@@ -705,16 +870,23 @@
 
   // ═════════════ what COS is told about Today ═════════════
   // A short plain summary of what the Today cards show, for an Ask made from Today (app.js askCos). Titles and words
-  // only: no ids, no tokens. Bounded to SUMMARY_MAX characters.
+  // only: no ids, no tokens. At most SUMMARY_MAX characters, the left-out marker included.
   function end(s) { s = String(s || '').trim(); return /[.!?\u2026]$/.test(s) ? s : s + '.'; }
   function summary() {
     var d = T.data();
     if (!d.at) return '';
     var lines = [], now = new Date();
     lines.push('Today, ' + now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) + ', ' + W.clock(now) + '.');
-    var needs = d.needs || [];
-    lines.push(needs.length ? 'Needs you (' + needs.length + '):' : 'Needs you: nothing.');
-    needs.slice(0, 6).forEach(function (it) {
+    // Needs you as Today lists it (app.js needsModel: waiting sessions, Work handoffs, voices, memories), and what it
+    // could not read. Before that model exists, the Work handoffs alone.
+    var m = T.needs ? T.needs() : null;
+    var rows = m ? m.rows : (d.needs || []).map(function (it) { return { kind: 'work', item: it }; });
+    var later = m ? m.later.length : 0;
+    lines.push(rows.length ? 'Needs you (' + rows.length + (later ? ', ' + later + ' of them can wait until tomorrow' : '') + '):'
+      : m && !m.settled ? 'Needs you: nothing found so far.' : 'Needs you: nothing.');
+    rows.slice(0, 6).forEach(function (r) {
+      if (r.kind !== 'work') { lines.push('- ' + end(clip(r.title, 140)) + (r.why ? ' ' + end(clip(r.why, 160)) : '')); return; }
+      var it = r.item;
       var title = str(it.sessionTitle) || str(it.title) || 'Handoff';
       var bits = [end(clip(title, 120)) + ' ' + end(needLine(it))];
       if (str(it.title) && str(it.title) !== str(it.sessionTitle)) bits.push(end('Work card: ' + clip(it.title, 100)));
@@ -722,7 +894,8 @@
       if (p && p.evidence) bits.push('The session said: "' + clip(p.evidence, 200) + '"');
       lines.push('- ' + bits.join(' '));
     });
-    if (needs.length > 6) lines.push('- and ' + (needs.length - 6) + ' more.');
+    if (rows.length > 6) lines.push('- and ' + (rows.length - 6) + ' more.');
+    if (m && m.failed.length) lines.push('Today could not read ' + m.failed.join(', ') + ', so this may not be everything.');
     var working = d.working || [], open = d.open || [];
     lines.push('Running: ' + working.length + ' working' + (open.length ? ', ' + open.length + ' more open and quiet' : '') + (working.length ? ':' : '.'));
     working.slice(0, 6).forEach(function (s) {
@@ -741,10 +914,10 @@
       if (groups.length > 8) lines.push('- and ' + (groups.length - 8) + ' more meetings.');
     }
     var n = d.welcome && d.welcome.nextEvent, nd = n && W.toDate(n.time);
-    if (nd && n.title) lines.push('Up next: ' + clip(n.title, 120) + ' at ' + W.clock(nd) + ' ' + W.dayWord(nd) + '.');
+    if (nd && n.title) lines.push('Next up: ' + clip(n.title, 120) + ' at ' + W.clock(nd) + ' ' + W.dayWord(nd) + '.');
     var out = '', i;
     for (i = 0; i < lines.length; i++) {
-      if (out.length + lines[i].length + 1 > SUMMARY_MAX) { out += '[More is on Today than fits here.]'; break; }
+      if (out.length + lines[i].length + 1 > SUMMARY_MAX - SUMMARY_MORE.length) { out += SUMMARY_MORE; break; }
       out += lines[i] + '\n';
     }
     return out.trim();
@@ -752,7 +925,7 @@
 
   W.registerPane('todayActions', {
     load: function () {},
-    open: open, close: close, summary: summary,
+    open: open, close: close, restore: restore, summary: summary, summaryMax: SUMMARY_MAX,
     isOpen: function () { return !!O.open; },
     _state: O, _decide: decide, _undo: undo, _intakeHtml: intakeHtml, _send: sendReply, _view: VIEW, _paintVerdict: paintVerdict,
     _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater
