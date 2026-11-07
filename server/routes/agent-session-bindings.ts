@@ -132,7 +132,7 @@ import { FORK_PROVIDER_FAILURES, type ForkProviderFailure } from '../lib/fork-th
 import { CLIENT_FORK_ID_RE, ForkJobLedger, type ForkJobRow } from '../lib/fork-job-ledger.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
-import { composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
+import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
@@ -2638,9 +2638,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }
 
       // After the replay (a known fork sends nothing), before the workspace, the claim and the spawn: where each file is
-      // on this Mac goes under the words. Without files the prompt is the words, untouched.
+      // on this Mac goes under the words. Without files the prompt is the words, untouched. Nothing is kept yet: the
+      // files are associated only once this fork holds its claim (below, QA 6.99.27).
       const forkComposed = await composeTurnPrompt(words, forkFiles.ids, {
-        runId: `session-fork:${typeof clientForkId === 'string' ? clientForkId : mintId()}`,
         maxChars: maxPromptChars,
         ...(deps.turnAttachmentStore ? { store: deps.turnAttachmentStore } : {}),
       })
@@ -2657,7 +2657,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       let cwd: string | null = null
       try {
         // 6.62.0: may answer later (a Cursor IDE composer's folder is read from Cursor's own
-        // store). Still before the claim below, which stays the last synchronous step.
+        // store). Before the claim below, whose check and set stay one synchronous call.
         cwd = await resolveWorkspace(providerParam, threadIdParam)
       } catch (error) {
         console.error(`[agent-session-bindings] fork workspace resolve threw: ${error instanceof Error ? error.message : error}`)
@@ -2670,9 +2670,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return refuseFork('fork_workspace_unresolvable')
       }
 
-      // LAST SYNCHRONOUS STATEMENT BEFORE THE FIRST AWAIT. One fork per source
-      // thread at a time: this route spawns a provider CLI, and without a claim a
-      // client retry loop spawns one child per request with nothing bounding it.
+      // Check and set in ONE synchronous call (awaits above, the workspace read and the
+      // files, come before it; nothing may sit between the check and the set). One fork
+      // per source thread at a time: this route spawns a provider CLI, and without a claim
+      // a client retry loop spawns one child per request with nothing bounding it.
       // A DISTINCT key namespace from the turn claim, so a fork can never block a
       // continuation or be blocked by one — `targetKey` is length-prefixed and
       // therefore unambiguous, and this prefix cannot collide with one.
@@ -2685,6 +2686,13 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return refuseFork('fork_in_progress')
       }
       claimedForkKey = forkKey
+
+      // QA 6.99.27 (Skeptic W2): the files are kept with this fork only now that it holds the claim and every gate
+      // has passed, before the job is recorded or anything is spawned. A file that went in the meantime refuses here.
+      if (forkFiles.ids.length > 0) {
+        const kept = await associateTurnAttachments(forkFiles.ids, `session-fork:${typeof clientForkId === 'string' ? clientForkId : mintId()}`, deps.turnAttachmentStore)
+        if (!kept.ok) return refuseFork('invalid_request', { reasonCopy: TURN_ATTACHMENT_COPY[kept.code], attachmentError: kept.code })
+      }
 
       if (typeof clientForkId === 'string') {
         // Recorded BEFORE the spawn and before the 202: a job the ledger cannot hold would
@@ -3040,9 +3048,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
 
       // 11/07: the files' paths on this Mac go under the words HERE, after the ledger replay (a replayed turn sends
       // nothing) and before the receipt (which matches the transcript against what was actually sent). Without files
-      // the prompt is the words, untouched. A file that cannot be read refuses the turn before anything is sent.
+      // the prompt is the words, untouched. A file that cannot be read refuses the turn before anything is sent. The
+      // files are kept with the turn only after the claim and the gates (before the pin, below; QA 6.99.27).
       const composed = await composeTurnPrompt(words, attachIds.ids, {
-        runId: `session-turn:${clientTurnId}`,
         maxChars: maxPromptChars,
         ...(deps.turnAttachmentStore ? { store: deps.turnAttachmentStore } : {}),
       })
@@ -3119,9 +3127,10 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return refuseTurn(fenced, { retryable: false, deliveryState: 'unknown' })
       }
 
-      // LAST SYNCHRONOUS STATEMENT BEFORE THE FIRST AWAIT. Check-and-set in one
-      // call: with an await between them, two turns admitted in the same tick both
-      // see a free target and both deliver.
+      // Check-and-set in ONE synchronous call. Awaits come before it (the files above,
+      // QA 6.99.27) and after it, never between the check and the set: with an await
+      // between them, two turns admitted in the same tick both see a free target and
+      // both deliver.
       if (!guard.tryClaim(key, turnId)) return refuseTurn('native_turn_in_progress')
       claimedKey = key
       // 6.53.0: cancellable from here, with the claim. Same key, same lifetime.
@@ -3172,6 +3181,14 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         // Recorded now rather than on completion, because the user acknowledged
         // this revision whatever the turn goes on to do.
         guard.acknowledgeHead(bindingId, head.digest)
+      }
+
+      // QA 6.99.27 (Skeptic W2): the files are kept with this turn only now, with the claim held and every gate
+      // passed, and before the pin and any hop. A turn refused above keeps nothing past the 4 hour staged TTL.
+      if (attachIds.ids.length > 0) {
+        const kept = await associateTurnAttachments(attachIds.ids, `session-turn:${clientTurnId}`, deps.turnAttachmentStore)
+        stage('files')
+        if (!kept.ok) return refuseTurn('invalid_request', { reasonCopy: TURN_ATTACHMENT_COPY[kept.code], attachmentError: kept.code })
       }
 
       // A failed pin is FATAL, per the registry's own caller contract: an unpinned

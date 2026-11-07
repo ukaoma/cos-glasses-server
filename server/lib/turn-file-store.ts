@@ -11,7 +11,8 @@
 //   - Same ids (m_ + 24 hex), but never in the media index: an Ask, a Drop, Prep or GET /api/media/:id cannot find one
 //     (media_not_found), so a file no model can read never reaches a model. Only the turn and fork routes resolve them.
 //   - Same cap as the media store's own for a file that is not a video: 64 MB (MAX_OTHER_MEDIA_BYTES).
-//   - Kept 4 hours until a turn takes it, then 30 days. Swept on each new file.
+//   - Kept 4 hours until a turn takes it, then 30 days. Swept on each new file, at boot and every 5 minutes after
+//     (startSweep, beside the media store's own GC; QA 6.99.27).
 //   - Each file is `<root>/<id>/file/<its own name, made safe>`, so the agent sees a real name and extension, and the
 //     record is `<root>/<id>/meta.json`, one folder up. No name a person gives a file can reach the record: on the
 //     default case-insensitive macOS disk a file named META.JSON beside the record WAS the record, and the record write
@@ -24,7 +25,7 @@ import { DATA_DIR } from './data-dir.js'
 import { atomicWriteFileSync } from './atomic-fs.js'
 import { MAX_OTHER_MEDIA_BYTES, RichMediaSafetyError } from './rich-media-safety.js'
 import { isValidMediaId, type MediaAttachmentRef } from '../../shared/media-attachment.js'
-import { MediaStoreError } from './media-store.js'
+import { MediaStoreError, MEDIA_GC_INTERVAL_MS } from './media-store.js'
 
 export const TURN_FILE_MAX_BYTES = MAX_OTHER_MEDIA_BYTES
 export const TURN_FILE_STAGED_TTL_MS = 4 * 60 * 60_000
@@ -55,7 +56,9 @@ export interface TurnFileRef {
 /** A filename the agent can read, that cannot climb out of its folder or carry control characters. */
 export function safeTurnFileName(label: string | undefined): string {
   // eslint-disable-next-line no-control-regex
-  let name = String(label ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029/\\:]+/g, ' ').replace(/\s+/g, ' ').trim()
+  // QA 6.99.27: bidi controls go too, so the name on disk (and in the path the agent reads) shows as what it is.
+  let name = String(label ?? '').replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029/\\:]+/g, ' ').replace(/\s+/g, ' ').trim()
   name = name.replace(/^[.\s]+/, '').trimEnd()
   if (!name) name = 'file'
   if (name.length > 120) {
@@ -98,7 +101,7 @@ export class TurnFileStore {
     return typeof m.associatedAtMs === 'number' ? now - m.associatedAtMs > TURN_FILE_KEPT_TTL_MS : now - m.createdAtMs > TURN_FILE_STAGED_TTL_MS
   }
 
-  /** Takes a staged upload (moved, else copied). Throws MediaStoreError('attachment_too_large') past the cap. */
+  /** Takes a staged upload (moved, else copied). Throws RichMediaSafetyError('attachment_too_large') past the cap. */
   ingestFromFile(input: { sourcePath: string; byteLength: number; label?: string; declaredMime?: string }): TurnFileRef {
     if (!Number.isSafeInteger(input.byteLength) || input.byteLength <= 0) throw new RichMediaSafetyError('corrupt_attachment', 'attachment is empty')
     if (input.byteLength > TURN_FILE_MAX_BYTES) throw new RichMediaSafetyError('attachment_too_large', `attachment exceeds ${TURN_FILE_MAX_BYTES} byte limit`)
@@ -146,6 +149,23 @@ export class TurnFileStore {
       if (target.runId) m.runId = target.runId.slice(0, 160)
       atomicWriteFileSync(join(this.dirOf(id), 'meta.json'), JSON.stringify(m))
     }
+  }
+
+  private sweepTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * QA 6.99.27 (Skeptic W2): a sweep at once and then every `intervalMs` (the media store's GC interval), so a file
+   * past its time goes even when no new file arrives. Before, only an upload swept. Idempotent; the timer never holds
+   * the process open.
+   */
+  startSweep(intervalMs: number = MEDIA_GC_INTERVAL_MS): void {
+    if (this.sweepTimer) return
+    this.sweep()
+    this.sweepTimer = setInterval(() => { this.sweep() }, intervalMs)
+    this.sweepTimer.unref?.()
+  }
+  stopSweep(): void {
+    if (this.sweepTimer) clearInterval(this.sweepTimer)
+    this.sweepTimer = null
   }
 
   /** Removes expired files and folders that are not ours. Never throws. */

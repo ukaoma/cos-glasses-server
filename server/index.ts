@@ -151,6 +151,7 @@ import { startNemotronWarmup } from './lib/nemotron-live.js'
 import { killNemotronChildren } from './lib/nemotron-cli.js'
 import { getSessionRaw, logActiveSessionsOnShutdown, startAutoSnapshot } from './lib/conversation.js'
 import { getMediaStore } from './lib/media-store.js'
+import { getTurnFileStore } from './lib/turn-file-store.js'
 import { listenRequiredServers, type RequiredListener } from './lib/listener-startup.js'
 import { serverMetrics } from './lib/server-metrics.js'
 import { initializeServerInstanceId } from './lib/server-instance-id.js'
@@ -1811,6 +1812,9 @@ listenRequiredServers(listeners).then(() => {
 
     // Durable media GC (staged/reserved expiry + generated-image content TTL).
     getMediaStore().startGC()
+    // QA 6.99.27: turn files (lib/turn-file-store.ts) past their time go at boot and on the same interval, not only
+    // when the next file arrives.
+    getTurnFileStore().startSweep()
   }
 
   startProofSafeServices()

@@ -101,12 +101,12 @@ describe('POST /api/media/file: any file for a session turn', () => {
   it('the turn’s store finds both kinds, and the line names the turn file’s real path', async () => {
     const md = await upload('plan.md', '# Plan\n', 'text/markdown', 'session-turn')
     const zip = await upload('build.zip', ZIP, 'application/zip', 'session-turn')
-    const out = await composeTurnPrompt('look at both', [md.body.attachment.id, zip.body.attachment.id], { runId: 'session-turn:ct-both-0001', maxChars: 32_000, store: defaultTurnAttachmentStore() })
+    const out = await composeTurnPrompt('look at both', [md.body.attachment.id, zip.body.attachment.id], { maxChars: 32_000, store: defaultTurnAttachmentStore() })
     expect(out.ok).toBe(true)
     const lines = (out as { prompt: string }).prompt.split('\n')
-    expect(lines.slice(0, 3)).toEqual(['look at both', '', TURN_ATTACHMENTS_HEADING])
-    expect(lines[3]).toMatch(/^- File "plan\.md" \(text\/markdown, 1 KB\): \/.+\/media\/assets\/m_[a-f0-9]{24}\/.+$/)
-    expect(lines[4]).toBe(`- File "build.zip" (application/zip, 1 KB): ${join(root, 'turn-files', zip.body.attachment.id, 'file', 'build.zip')}`)
+    expect(lines.slice(0, 4)).toEqual(['look at both', '', ...TURN_ATTACHMENTS_HEADING.split('\n')])
+    expect(lines[4]).toMatch(/^- File "plan\.md" \(text\/markdown, 1 KB\): "\/.+\/media\/assets\/m_[a-f0-9]{24}\/.+"$/)
+    expect(lines[5]).toBe(`- File "build.zip" (application/zip, 1 KB): ${JSON.stringify(join(root, 'turn-files', zip.body.attachment.id, 'file', 'build.zip'))}`)
   })
 })
 
@@ -129,6 +129,9 @@ describe('TurnFileStore', () => {
     expect(safeTurnFileName('meta.json'), 'the file sits in its own folder, so its name is its own').toBe('meta.json')
     expect(safeTurnFileName('')).toBe('file')
     expect(safeTurnFileName('x'.repeat(300) + '.docx')).toMatch(/^x{115}\.docx$/)
+    // QA 6.99.27: a bidi override never reaches the name on disk, so the path the agent reads shows as what it is.
+    expect(safeTurnFileName('invoice\u202efdp.exe')).toBe('invoicefdp.exe')
+    expect(safeTurnFileName('\u2066a\u2069\u200f.txt')).toBe('a.txt')
   })
   // QA 6.99.27: the record and the file shared one folder, and only a lowercase "meta.json" was renamed. On the default
   // case-insensitive macOS disk a file named META.JSON was the record: the record write replaced the file's bytes.
@@ -155,10 +158,10 @@ describe('TurnFileStore', () => {
     const s = new TurnFileStore(join(root, 'kinds'), () => clock)
     const heic = s.ingestFromFile({ sourcePath: stage(), byteLength: 3_100_000, label: 'IMG_2041.HEIC', declaredMime: 'image/heic' })
     const webm = s.ingestFromFile({ sourcePath: stage(), byteLength: 2048, label: 'clip.webm', declaredMime: 'video/webm' })
-    const out = await composeTurnPrompt('see', [heic.id, webm.id], { runId: 'r', maxChars: 32_000, store: s })
+    const out = await composeTurnPrompt('see', [heic.id, webm.id], { maxChars: 32_000, store: s })
     const lines = (out as { prompt: string }).prompt.split('\n')
-    expect(lines[3]).toMatch(/^- Photo "IMG_2041\.HEIC" \(image\/heic, 3\.0 MB\): /)
-    expect(lines[4]).toMatch(/^- Video "clip\.webm" \(video\/webm, 2 KB\): /)
+    expect(lines[4]).toMatch(/^- Photo "IMG_2041\.HEIC" \(image\/heic, 3\.0 MB\): /)
+    expect(lines[5]).toMatch(/^- Video "clip\.webm" \(video\/webm, 2 KB\): /)
   })
   it('4 hours until a turn takes it; then 30 days; the sweep removes what has gone', async () => {
     const s = new TurnFileStore(join(root, 'ttl'), () => clock)
@@ -174,6 +177,36 @@ describe('TurnFileStore', () => {
     expect(() => s.resolveUsable(b.id)).toThrow(/expired/)
     expect(s.sweep()).toBe(1)
     expect(s.has(b.id)).toBe(false)
+  })
+  // QA 6.99.27 (Skeptic W2): only a new upload swept, so a Mac that took one file and no more kept it forever.
+  it('startSweep sweeps at once and then on the interval, without waiting for a new upload; stopSweep stops it', async () => {
+    let now = clock
+    const s = new TurnFileStore(join(root, 'boot'), () => now)
+    const a = s.ingestFromFile({ sourcePath: stage(), byteLength: 5, label: 'a.log' })
+    now += TURN_FILE_STAGED_TTL_MS + 1
+    const b = s.ingestFromFile({ sourcePath: stage(), byteLength: 5, label: 'b.log' })   // sweeps a, as before
+    expect(s.has(a.id)).toBe(false)
+    const c = s.ingestFromFile({ sourcePath: stage(), byteLength: 5, label: 'c.log' })
+    now += TURN_FILE_STAGED_TTL_MS + 1
+    // A restart: a new store over the same folder, nothing uploaded. The boot sweep removes both at once.
+    const booted = new TurnFileStore(join(root, 'boot'), () => now)
+    try {
+      booted.startSweep(20)
+      expect([booted.has(b.id), booted.has(c.id)], 'the boot sweep').toEqual([false, false])
+      const d = booted.ingestFromFile({ sourcePath: stage(), byteLength: 5, label: 'd.log' })
+      now += TURN_FILE_STAGED_TTL_MS + 1
+      await new Promise(r => setTimeout(r, 80))
+      expect(booted.has(d.id), 'the interval sweep, with no upload').toBe(false)
+      booted.stopSweep()
+      const e = booted.ingestFromFile({ sourcePath: stage(), byteLength: 5, label: 'e.log' })
+      now += TURN_FILE_STAGED_TTL_MS + 1
+      await new Promise(r => setTimeout(r, 80))
+      expect(booted.has(e.id), 'stopped: nothing swept').toBe(true)
+    } finally { booted.stopSweep() }
+  })
+  it('the server starts the turn file sweep beside the media store’s GC (index.ts)', () => {
+    const index = readFileSync(join(dirname(dirname(new URL(import.meta.url).pathname)), 'index.ts'), 'utf8')
+    expect(index).toMatch(/getMediaStore\(\)\.startGC\(\)\n(?:\s*\/\/[^\n]*\n)*\s*getTurnFileStore\(\)\.startSweep\(\)/)
   })
   it('a folder that is not a turn file is swept once it is old; a fresh one is left', () => {
     const s = new TurnFileStore(join(root, 'junk'), () => Date.now() + TURN_FILE_STAGED_TTL_MS * 2)
@@ -196,12 +229,12 @@ describe('POST .../fork with attachmentIds', () => {
   let fserver: Server | null = null, fbase = ''
   afterEach(async () => { if (fserver) { fserver.closeAllConnections(); await new Promise<void>(r => fserver!.close(() => r())) } fserver = null })
   const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
-  async function startFork(prompts: string[]) {
+  async function startFork(prompts: string[], workspace: () => Promise<string | null> = async () => '/tmp/project') {
     const d = {
       probes: { isAlive: () => true, processStartMs: () => clock, fileExists: () => true, dirExists: () => true, readDir: () => [], readFile: () => '{}', lockHolders: () => [], cosSpawnedPids: () => new Map(), cursorAgentSession: () => null },
       dirs: { claudeSessionsDir: '/x/.claude/sessions', codexLocksDir: '/x/.codex', cursorChatsDir: '/x/.cursor' },
       now: () => clock, bindings: { list: () => [], available: () => true } as any, attachEnabled: true, occupancy: () => ({ attachable: true, owners: [], reason: null }),
-      resolveForkWorkspace: async () => '/tmp/project',
+      resolveForkWorkspace: workspace,
       forkThread: async (req: { prompt: string }) => { prompts.push(req.prompt); return { forked: true, forkRef: 'claude:fork-1', sourceIntegrity: 'verified', orphanPossible: false } },
       newId: () => 'nid',
     } as unknown as AgentSessionBindingsDeps
@@ -222,9 +255,26 @@ describe('POST .../fork with attachmentIds', () => {
     await fork({ attachmentIds: [zip.body.attachment.id] })
     await fork({})
     expect(prompts).toEqual([
-      `try it in a copy\n\n${TURN_ATTACHMENTS_HEADING}\n- File "trace.zip" (application/zip, 1 KB): ${join(root, 'turn-files', zip.body.attachment.id, 'file', 'trace.zip')}`,
+      `try it in a copy\n\n${TURN_ATTACHMENTS_HEADING}\n- File "trace.zip" (application/zip, 1 KB): ${JSON.stringify(join(root, 'turn-files', zip.body.attachment.id, 'file', 'trace.zip'))}`,
       'try it in a copy',
     ])
+  })
+  // QA 6.99.27 (Skeptic W2): a fork kept its files before its workspace check and its claim.
+  it('a fork refused at a gate keeps nothing; one that goes keeps its files', async () => {
+    const prompts: string[] = []
+    const metaOf = (id: string) => JSON.parse(readFileSync(join(root, 'turn-files', id, 'meta.json'), 'utf8'))
+    await startFork(prompts, async () => null)
+    const zip = await upload('gate.zip', ZIP, 'application/zip', 'session-turn')
+    const id = zip.body.attachment.id as string
+    const refused = await fork({ attachmentIds: [id] })
+    expect(refused.body).toMatchObject({ forked: false, reason: 'fork_workspace_unresolvable' })
+    expect(metaOf(id).associatedAtMs, 'refused at the workspace gate: still only staged').toBeUndefined()
+    if (fserver) { fserver.closeAllConnections(); await new Promise<void>(r => fserver!.close(() => r())) }
+    await startFork(prompts)
+    await fork({ attachmentIds: [id] })
+    expect(prompts).toHaveLength(1)
+    expect(typeof metaOf(id).associatedAtMs).toBe('number')
+    expect(metaOf(id).runId).toMatch(/^session-fork:/)
   })
   it('a bad list or a file that has gone refuses before anything is copied', async () => {
     const prompts: string[] = []
