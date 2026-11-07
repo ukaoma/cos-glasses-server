@@ -42,7 +42,7 @@ import {
   wirePermissionBrokerToSignals,
 } from './lib/permission-broker.js'
 import { createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './routes/permission-broker.js'
-import { lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, presenceAgeMs } from './lib/client-liveness.js'
+import { lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, presenceAgeMs, webPresenceAgeMs } from './lib/client-liveness.js'
 import {
   createAgentSessionBindingsRouter,
   TargetGuard,
@@ -344,6 +344,7 @@ const permissionBroker = new PermissionBroker({
   lastLegacyPollAt: lastLegacyQuestionsPollAt,
   lastHoldPollAt: lastHoldQuestionsPollAt,
   presenceAgeMs: () => presenceAgeMs(),
+  webPresenceAgeMs: () => webPresenceAgeMs(),
   awayRecentClientMs: () => permissionBrokerAwayRecentClientMs(process.env),
   stillWaitingAtMac: (sessionId, fingerprint) => {
     const signal = sessionSignalStore.get(sessionId)

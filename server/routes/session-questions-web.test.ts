@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { requireApiToken } from '../lib/api-auth.js'
 import { PermissionBroker, brokerSignalSink, questionHookOutput, wirePermissionBrokerToSignals } from '../lib/permission-broker.js'
 import { SessionSignalStore } from '../lib/session-signal-store.js'
-import { __resetClientLivenessForTests, lastQuestionsPollAt } from '../lib/client-liveness.js'
+import { __resetClientLivenessForTests, lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, presenceAgeMs, webPresenceAgeMs } from '../lib/client-liveness.js'
 import { isWebSessionAuthorized, mintWebSessionCookieValue, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
 import { PERMISSION_BROKER_HOOK_PATH, createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './permission-broker.js'
 import { ASK_INPUT, Q1, Q2, permissionEnvelope } from '../lib/__fixtures__/permission-broker.js'
@@ -27,13 +27,23 @@ afterEach(async () => {
 
 interface Harness { base: string; host: string; broker: PermissionBroker; cookie: string }
 
-/** `web: false` leaves the cookie check out of the questions router, as 6.99.11 and earlier mounted it. */
-async function start(opts: { web?: boolean; gate?: boolean } = {}): Promise<Harness> {
+/**
+ * `web: false` leaves the cookie check out of the questions router, as 6.99.11 and earlier mounted it.
+ * `away: true` wires the broker as index.ts does for the away hold (6.60.0, 6.99.26): the real liveness
+ * module's presence readers, a 10 minute hold, and a hook that waits 630 s. `desk` is the desk's idle seconds.
+ */
+async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; awayHoldMs?: number; hookTimeoutS?: number; desk?: () => number } = {}): Promise<Harness> {
   __resetClientLivenessForTests()
   const store = new SessionSignalStore({ isCosSpawnedPid: () => false })
+  const desk = opts.desk ?? (() => 1_000)
   const broker = new PermissionBroker({
     now: () => Date.now(), mode: () => 'all', admissionsOpen: () => true, lastQuestionsPollAt,
-    readDeskIdleSeconds: async () => 1_000, deskIdleSeconds: () => 90, timeoutMs: () => 4_000,
+    readDeskIdleSeconds: async () => desk(), deskIdleSeconds: () => 90, timeoutMs: () => 4_000,
+    ...(opts.away ? {
+      lastLegacyPollAt: lastLegacyQuestionsPollAt, lastHoldPollAt: lastHoldQuestionsPollAt,
+      presenceAgeMs: () => presenceAgeMs(), webPresenceAgeMs: () => webPresenceAgeMs(),
+      awayHoldMs: () => opts.awayHoldMs ?? 600_000, installedHookTimeoutS: () => opts.hookTimeoutS ?? 630, awayRecentClientMs: () => 1_800_000,
+    } : {}),
     signals: brokerSignalSink(store), pollMs: 25, log: () => {},
   })
   brokers.push(broker)
@@ -156,5 +166,99 @@ describe('GET /api/session-questions with the COS Control Web session (6.99.12)'
     expect(fn).toContain('isWebSessionAuthorized(req, API_TOKEN, {')
     expect(fn).toContain('selfDnsName: tailnetSelf.currentSelfDnsName()')
     expect(fn).toContain('allowedPorts: [PORT, HTTPS_PORT]')
+  })
+
+  it('index.ts gives the broker the web touch, beside the wearer presence (6.99.26)', () => {
+    const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
+    const deps = index.slice(index.indexOf('const permissionBroker = new PermissionBroker({'), index.indexOf('stillWaitingAtMac:'))
+    expect(deps).toContain('  presenceAgeMs: () => presenceAgeMs(),\n  webPresenceAgeMs: () => webPresenceAgeMs(),\n')
+  })
+})
+
+// 6.99.26 (Miles 11/07, "Away rule, like phone"): COS Control Web joins the away hold the way the phone does, and
+// never through the plain liveness. Real route, real broker, real liveness module.
+describe('COS Control Web and the away hold (6.99.26)', () => {
+  const hookPost = (h: Harness, extra: Record<string, unknown> = {}) => fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-hook-token': HOOK_TOKEN },
+    body: JSON.stringify({ ...permissionEnvelope('AskUserQuestion', ASK_INPUT), hookWaitS: 630, ...extra }),
+  }).then(r => r.json())
+  /** The hook's answer if it comes within `ms`, else the string 'held'. */
+  const within = <T>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<'held'>(r => setTimeout(() => r('held'), ms))])
+  const webPoll = (h: Harness, query: string) => fetch(`${h.base}/api/session-questions?${query}`, { headers: browser(h) }).then(async r => ({ status: r.status, body: await r.json() as { items: Array<Record<string, any>> } }))
+  const touchedAgo = (ms: number) => `client=web&hold=1&presenceAgeMs=${ms}`
+
+  it('at the desk with the web live and just touched, the question goes to the Mac at once', async () => {
+    const h = await start({ away: true, desk: () => 5 })
+    expect((await webPoll(h, touchedAgo(1_000))).status).toBe(200)
+    expect(webPresenceAgeMs()).not.toBeNull()
+    const t0 = Date.now()
+    expect(await hookPost(h)).toEqual({})
+    expect(Date.now() - t0).toBeLessThan(1_000)
+    // A stamped question (6.71.7) keeps the Mac's own dialog up the whole time, and no card shows while the desk is in use.
+    const stamped = hookPost(h, { askHold: 1 })
+    expect(await within(stamped, 300)).toBe('held')
+    expect((await webPoll(h, touchedAgo(1_000))).body.items).toEqual([])
+    h.broker.stop()
+    expect(await stamped).toEqual({})
+  })
+
+  it('away, with the web touched recently, the question is held and answered from the web', async () => {
+    const h = await start({ away: true })
+    expect((await webPoll(h, touchedAgo(5_000))).status).toBe(200)
+    const hook = hookPost(h)
+    const item = (await until(() => webPoll(h, touchedAgo(6_000)), l => l.body.items.length === 1)).body.items[0]!
+    expect(item).toMatchObject({ kind: 'question', answerable: true, awayHold: true })
+    // Held past the base timeout (4 s here): the away hold, not the plain broker hold.
+    expect(Date.parse(item.deadlineAt) - Date.parse(item.createdAt)).toBeGreaterThan(60_000)
+    const body = { clientAnswerId: 'gw_web_away', answers: [{ labels: ['Publish'] }, { labels: ['Blue'] }] }
+    const ans = await fetch(`${h.base}/api/session-questions/${item.id}/answer`, { method: 'POST', headers: browserWrite(h), body: JSON.stringify(body) })
+    expect(ans.status).toBe(200)
+    expect(await hook).toEqual(questionHookOutput(ASK_INPUT, { [Q1]: ['Publish'], [Q2]: ['Blue'] }))
+    // The web's touch never became a live client of any kind.
+    expect([lastQuestionsPollAt(), lastLegacyQuestionsPollAt(), lastHoldQuestionsPollAt(), presenceAgeMs()]).toEqual([null, null, null, null])
+  })
+
+  it('away, with the web touched over 30 minutes ago, nothing is held, stamped or not', async () => {
+    const h = await start({ away: true })
+    expect((await webPoll(h, touchedAgo(31 * 60_000))).status).toBe(200)
+    expect(webPresenceAgeMs()).toBeGreaterThan(30 * 60_000)
+    expect(await hookPost(h)).toEqual({})
+    expect(await hookPost(h, { askHold: 1 })).toEqual({})
+    expect(h.broker.pendingCount()).toBe(0)
+  })
+
+  it('the web never holds through the plain liveness: no hold=1, no presence, the away hold off, or a short hook', async () => {
+    for (const query of ['client=web', 'client=web&presenceAgeMs=1000', 'client=web&hold=1', 'client=web&hold=1&presenceAgeMs=-5', 'client=web&hold=1&presenceAgeMs=1.5', 'client=web&hold=1&presenceAgeMs=86400001']) {
+      const h = await start({ away: true })
+      expect((await webPoll(h, query)).status, query).toBe(200)
+      expect(webPresenceAgeMs(), query).toBeNull()
+      expect(await hookPost(h), query).toEqual({})
+      expect(await hookPost(h, { askHold: 1 }), query).toEqual({})
+    }
+    // A recent touch with the away hold off, or before Install hooks (a hook that waits 130 s): nothing is held, as
+    // with no client at all. The web counts for the away hold only.
+    for (const opts of [{ awayHoldMs: 0 }, { hookTimeoutS: 130 }]) {
+      const h = await start({ away: true, ...opts })
+      expect((await webPoll(h, touchedAgo(1_000))).status).toBe(200)
+      expect(webPresenceAgeMs()).not.toBeNull()
+      expect(await hookPost(h), JSON.stringify(opts)).toEqual({})
+      expect(h.broker.pendingCount()).toBe(0)
+    }
+    expect([lastQuestionsPollAt(), lastLegacyQuestionsPollAt(), lastHoldQuestionsPollAt(), presenceAgeMs()]).toEqual([null, null, null, null])
+  })
+
+  it('only the browser session naming web records a touch: never the token, never another client name', async () => {
+    const h = await start({ away: true })
+    expect((await fetch(`${h.base}/api/session-questions?${touchedAgo(1_000)}`, { headers: { 'x-cos-token': API_TOKEN } })).status).toBe(200)
+    for (const client of ['phone', 'glasses', 'control', 'WEB']) {
+      expect((await webPoll(h, `client=${client}&hold=1&presenceAgeMs=1000`)).status).toBe(200)
+    }
+    expect(webPresenceAgeMs()).toBeNull()
+    expect(lastQuestionsPollAt()).toBeNull()
+    // The refusals still come first: a forged session records nothing.
+    const forged = `${WEB_SESSION_COOKIE_NAME}=${mintWebSessionCookieValue('not-the-token').value}`
+    expect((await fetch(`${h.base}/api/session-questions?${touchedAgo(1_000)}`, { headers: { cookie: forged } })).status).toBe(401)
+    expect(webPresenceAgeMs()).toBeNull()
+    expect(await hookPost(h)).toEqual({})
   })
 })

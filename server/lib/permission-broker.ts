@@ -91,6 +91,17 @@
 // while Miles is at the desk is still `{}` at once (`desk_active`); every path still ends.
 // Every request answered `{}` is logged with why, the presence age and the window.
 //
+// COS Control Web joins the away hold, never the liveness (6.99.26, Miles 11/07: "Away rule, like
+// phone"; he answers from wherever he is, sometimes the Mac itself through Screens from the phone).
+// A browser poll `?client=web&hold=1&presenceAgeMs=<int>`, the ms since a touch or a key while the
+// page was in front, is its own presence (`webPresenceAgeMs`, lib/client-liveness), read here in
+// exactly two places: it can make a request away (so held up to the away hold while the desk is idle,
+// and answerable from the web), and it keeps an away-held request through the re-check while it is
+// recent. It never makes a client live: not the 6.59.0 liveness, not a `hold=1` client, not a
+// connected client for a stamped question. So with the away hold off, a hook that waits no longer than
+// 120 s, a stale touch (past the same recent window), or a desk in use, the web holds nothing and the
+// Mac's own pop-up shows at once, as Miles chose for an open tab in 6.99.13.
+//
 // NEVER past the hook's own wait. The hold is clamped to `holdCeilingS`: the PermissionRequest
 // `timeout` in the Claude settings file (read, not assumed) and the wait the hook stamped on
 // THIS request (`hookWaitS`, 6.60.0 script), whichever is less, minus 10 s; settings that
@@ -772,6 +783,12 @@ export interface PermissionBrokerDeps {
    */
   presenceAgeMs?(): number | null
   /**
+   * 6.99.26: how long ago COS Control Web's newest touch or key was (`webPresenceAgeMs`,
+   * lib/client-liveness), or null when none since boot. Read for the away hold only, never as a live
+   * client. Absent: null (the web holds nothing).
+   */
+  webPresenceAgeMs?(): number | null
+  /**
    * 6.60.0: how recent that presence must be for the away hold, in ms
    * (`permissionBrokerAwayRecentClientMs`), never below the 30 s live window. Absent: 30 s.
    */
@@ -810,6 +827,8 @@ export interface HoldFacts {
   recentWindowS: number
   /** 6.60.0: why this request is not away-held, or null when it is. */
   notAwayReason: NotAwayReason | null
+  /** 6.99.26: the age of COS Control Web's newest touch or key, present only when the web reported one. */
+  webPresenceAgeMs?: number
 }
 
 /**
@@ -1024,6 +1043,13 @@ function sessionMovedPast(item: Pick<BrokerItem, 'kind' | 'fingerprint' | 'toolN
   return false
 }
 
+/** A presence age from a dep: a finite number of ms at or above 0, else null (absent, throwing or nonsense). */
+function readAgeMs(read: () => number | null): number | null {
+  let ageMs: number | null = null
+  try { ageMs = read() } catch { ageMs = null }
+  return typeof ageMs === 'number' && Number.isFinite(ageMs) && ageMs >= 0 ? ageMs : null
+}
+
 export class PermissionBroker {
   private readonly deps: PermissionBrokerDeps
   private readonly items = new Map<string, BrokerItem>()
@@ -1058,7 +1084,7 @@ export class PermissionBroker {
   }
 
   /** A request answered `{}` without being parked, counted by why. */
-  noteFastPath(reason: BrokerFastPath, context: { notAway?: NotAwayReason; presence?: { ageMs: number | null; windowMs: number }; clientLive?: boolean } = {}): { ok: false; reason: BrokerFastPath } {
+  noteFastPath(reason: BrokerFastPath, context: { notAway?: NotAwayReason; presence?: { ageMs: number | null; windowMs: number; webAgeMs?: number | null }; clientLive?: boolean } = {}): { ok: false; reason: BrokerFastPath } {
     const key = camelKey(reason)
     this.fastPaths[key] = (this.fastPaths[key] ?? 0) + 1
     this.lastFastPath = reason
@@ -1068,7 +1094,9 @@ export class PermissionBroker {
     let presence = context.presence
     if (!presence) { try { presence = this.presence(this.deps.now()) } catch { presence = undefined } }
     const age = presence?.ageMs === null || presence?.ageMs === undefined ? 'null' : String(Math.round(presence.ageMs))
-    this.log(`fast path ${reason}${context.notAway ? ` not_away=${context.notAway}` : ''} presenceAgeMs=${age} windowMs=${presence?.windowMs ?? 'null'}${context.clientLive === undefined ? '' : ` clientLive=${context.clientLive}`}`)
+    // 6.99.26: the web's touch age only once the web has reported one, so every older line reads as before.
+    const web = typeof presence?.webAgeMs === 'number' ? ` webPresenceAgeMs=${Math.round(presence.webAgeMs)}` : ''
+    this.log(`fast path ${reason}${context.notAway ? ` not_away=${context.notAway}` : ''} presenceAgeMs=${age} windowMs=${presence?.windowMs ?? 'null'}${web}${context.clientLive === undefined ? '' : ` clientLive=${context.clientLive}`}`)
     return { ok: false, reason }
   }
 
@@ -1110,16 +1138,17 @@ export class PermissionBroker {
    *   - `holdLive`: a `hold=1` client polled within the live window AND its presence is
    *     recent, so it counts as a live client the way an older client's poll does. A
    *     connected lens nobody touches never counts (QA round 1, Skeptic W1).
+   *   - 6.99.26: `webAgeMs` and `webRecent`, COS Control Web's touch on its own: for the away
+   *     hold only, so it is never part of `recent` or `holdLive`.
    */
-  private presence(now: number): { ageMs: number | null; recent: boolean; holdLive: boolean; windowMs: number } {
-    let ageMs: number | null = null
-    try { ageMs = this.deps.presenceAgeMs?.() ?? null } catch { ageMs = null }
-    if (typeof ageMs !== 'number' || !Number.isFinite(ageMs) || ageMs < 0) ageMs = null
+  private presence(now: number): { ageMs: number | null; recent: boolean; holdLive: boolean; windowMs: number; webAgeMs: number | null; webRecent: boolean } {
+    const ageMs = readAgeMs(() => this.deps.presenceAgeMs?.() ?? null)
+    const webAgeMs = readAgeMs(() => this.deps.webPresenceAgeMs?.() ?? null)
     const windowMs = this.recentWindowMs()
     const recent = ageMs !== null && ageMs <= windowMs
     let holdPollAt: number | null = null
     try { holdPollAt = this.deps.lastHoldPollAt?.() ?? null } catch { holdPollAt = null }
-    return { ageMs, recent, holdLive: recent && this.polledWithin(holdPollAt, now), windowMs }
+    return { ageMs, recent, holdLive: recent && this.polledWithin(holdPollAt, now), windowMs, webAgeMs, webRecent: webAgeMs !== null && webAgeMs <= windowMs }
   }
 
   /** 6.60.0: the installed hook timeout, or null when absent or unreadable. */
@@ -1207,13 +1236,17 @@ export class PermissionBroker {
     // window (Miles, 19:54; QA round 1).
     const switchOn = this.awayHoldMs() > 0
     const ceilingAllowsAway = this.holdMs(facts.hookWaitS, false).ceilingAllowsAway
-    const away = switchOn && ceilingAllowsAway && (askHold || presence.recent)
+    // 6.99.26: a recent touch on COS Control Web makes a request away exactly as a wearer's does,
+    // and does nothing else: it is not in `clientLive`, so without the away hold it holds nothing.
+    const away = switchOn && ceilingAllowsAway && (askHold || presence.recent || presence.webRecent)
     const notAwayReason: NotAwayReason | null = away ? null
       : !switchOn ? 'hold_off'
       : !ceilingAllowsAway ? 'ceiling_at_base'
-      : presence.ageMs === null ? 'no_hold_client'
+      : presence.ageMs === null && presence.webAgeMs === null ? 'no_hold_client'
       : 'stale_presence'
-    if (askHold && !clientLive && !presence.recent) return this.noteFastPath('no_client', { presence, clientLive })
+    // A stamped question is always away when the hold is on; without a client, a wearer's or the web's recent touch,
+    // it goes to the Mac. Without the hold, the line below says so (the web is never a client).
+    if (askHold && !clientLive && !presence.recent && !presence.webRecent) return this.noteFastPath('no_client', { presence, clientLive })
     const hold = this.holdMs(facts.hookWaitS, away)
     // With it, a request is held whether or not a client is polling right now, so a lens or
     // phone that comes back can still answer it. Without it, no client is `{}`, as in 6.59.0.
@@ -1258,6 +1291,7 @@ export class PermissionBroker {
       presenceAgeMs: presence.ageMs === null ? null : Math.round(presence.ageMs),
       recentWindowS: Math.round(presence.windowMs / 1000),
       notAwayReason,
+      ...(presence.webAgeMs === null ? {} : { webPresenceAgeMs: Math.round(presence.webAgeMs) }),
     }
     return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), hold: holdFacts } }
   }
@@ -1631,8 +1665,9 @@ export class PermissionBroker {
       // 6.60.0: an item held by the away hold outlives the client going quiet, but only while
       // the wearer's latest presence is still within the window (QA round 1, Skeptic W2: a
       // single glance must not hold a question 10 more minutes). The desk below still hands
-      // it back.
-      this.settleAll('no_client', item => !item.askHold && (!item.awayHold || !presence.recent))
+      // it back. 6.99.26: a recent touch on COS Control Web keeps an away-held one the same way,
+      // and never one held for a live client alone.
+      this.settleAll('no_client', item => !item.askHold && (!item.awayHold || !(presence.recent || presence.webRecent)))
       if (this.pendingCount() === 0) return
     }
     if (![...this.items.values()].some(item => item.state === 'pending' && (!item.askHold || !item.lensVisible))) return
