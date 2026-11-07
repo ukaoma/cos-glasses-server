@@ -108,6 +108,22 @@ html.ta-open { overflow: hidden; }
   .ta-head { padding-top: calc(var(--safe-top) + 14px); }
   .ta-foot { padding-bottom: calc(var(--safe-bottom) + 14px); }
 }
+/* 6.99.29 (Miles's unfolded Duo, 11/07): the on-screen keyboard is up, at any width (today-actions.js applyFit marks the
+   layer ta-kb when the visible viewport is 120 px or more shorter than the layout one). The sheet fills what is visible,
+   the header folds to one compact row, the reply box stays pinned at the bottom just above the keyboard, and the
+   conversation takes the rest and scrolls. The keyboard covers the home indicator, so the foot drops that inset. */
+.ta-layer.ta-kb .ta-sheet { top: 0; bottom: 0; max-height: none; overflow: hidden; }
+.ta-layer.ta-kb .ta-grip { display: none; }
+.ta-layer.ta-kb .ta-head { align-items: center; padding-top: calc(var(--safe-top) + 6px); padding-bottom: 4px; }
+.ta-layer.ta-kb .ta-head-main { display: flex; align-items: center; gap: 12px; }
+.ta-layer.ta-kb .ta-back { flex: none; min-height: 36px; margin: 0; }
+.ta-layer.ta-kb .ta-title { margin: 0; font-size: 17px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+.ta-layer.ta-kb .ta-x { width: 36px; height: 36px; margin-right: -6px; }
+.ta-layer.ta-kb .ta-body { padding-bottom: 8px; }
+.ta-layer.ta-kb .ta-foot { padding-top: 8px; padding-bottom: 8px; }
+.ta-layer.ta-kb .ta-foot .composer textarea { max-height: 96px; }
+/* Under about three lines left for the conversation: the "Working right now" note waits until the keyboard closes. */
+.ta-layer.ta-kb-tight .ta-foot .sx-park { display: none; }
 @keyframes ta-rise { from { transform: translateY(32px); opacity: 0.6; } }
 @keyframes ta-slide { from { transform: translateX(32px); opacity: 0.6; } }
 /* Dismiss armed: the second tap removes it (no Undo on this server). */

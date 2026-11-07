@@ -113,6 +113,9 @@ interface Opts {
   mac?: number
   pet?: unknown
   held?: unknown[]
+  // 6.99.29: a visualViewport (the on-screen keyboard), the layout viewport's height, and frames run by hand
+  vv?: { height: number; offsetTop?: number; scale?: number }
+  innerHeight?: number
 }
 function load(o: Opts = {}) {
   const els: Record<string, El> = {}
@@ -192,8 +195,14 @@ function load(o: Opts = {}) {
       itemsFor: (sid: string) => (sid ? (o.held || []).filter((i: any) => String(i.sessionId).toLowerCase() === String(sid).toLowerCase()) : (o.held || [])),
       nudge: () => { nudges++ } },
   }
+  const vvListeners: Record<string, Array<() => void>> = {}
+  const visualViewport = o.vv ? { offsetTop: 0, scale: 1, ...o.vv,
+    addEventListener: (t: string, fn: () => void) => { (vvListeners[t] ??= []).push(fn) },
+    removeEventListener: (t: string, fn: () => void) => { vvListeners[t] = (vvListeners[t] || []).filter(f => f !== fn) } } : undefined
+  const frames: Array<() => void> = []
   const ctx = vm.createContext({
-    window: { COSWeb: W, addEventListener: (t: string, fn: () => void) => { winListeners[t] = fn }, visualViewport: undefined },
+    window: { COSWeb: W, addEventListener: (t: string, fn: () => void) => { winListeners[t] = fn }, visualViewport,
+      ...(o.vv ? { innerHeight: o.innerHeight ?? 1000, requestAnimationFrame: (fn: () => void) => { frames.push(fn); return frames.length }, cancelAnimationFrame: (n: number) => { frames[n - 1] = () => {} } } : {}) },
     document, history, location, fetch, EventSource: FakeEventSource, AbortController, console, Date: VDate, JSON, Math, Promise, isFinite, encodeURIComponent,
     setTimeout: (fn: () => void, ms: number) => { (ctx as any).__timers.push({ fn, ms }); return 1 }, clearTimeout: () => {},
     setInterval: () => 1, clearInterval: () => {},
@@ -224,7 +233,12 @@ function load(o: Opts = {}) {
   const runTimers = () => { const t = (ctx as any).__timers.splice(0); t.forEach((x: { fn: () => void }) => x.fn()) }
   const elsAll = new Proxy(els, { get: (_t, id: string) => document.getElementById(id) }) as Record<string, El>
   const later = (ms: number) => { skew += ms }
-  return { ta, els: elsAll, data, layerTap, webStore, later, now: () => realNow() + skew, posts, apiCalls, gone, calls, store, reader, streams, mounts, history, location, document, tap, opener, key, pop, route, runTimers,
+  // The keyboard (or a fold, a zoom, a pan): the visible viewport changes and fires as Safari does; frames run on runFrames.
+  const viewport = (v: { height?: number; offsetTop?: number; scale?: number }, type: 'resize' | 'scroll' = 'resize') => {
+    Object.assign(visualViewport!, v); (vvListeners[type] || []).slice().forEach(fn => fn())
+  }
+  const runFrames = () => { const f = frames.splice(0); f.forEach(fn => fn()); return f.length }
+  return { viewport, runFrames, vvListeners, ta, els: elsAll, data, layerTap, webStore, later, now: () => realNow() + skew, posts, apiCalls, gone, calls, store, reader, streams, mounts, history, location, document, tap, opener, key, pop, route, runTimers,
     refreshed: () => refreshed, reloads: () => reloads, workChanged: () => workChanged, unmounts: () => unmounts, nudges: () => nudges, ctx }
 }
 
@@ -3192,5 +3206,142 @@ describe('one state for the session card: the freshest signal wins, and every pi
     expect(F.truth(r)!.word, 'the echo of the Stop').toBe('Idle')
     F.apply(r, { seq: 3, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date(Date.now() + 9_000).toISOString() })
     expect(F.truth(r)!.word, 'a turn that starts after the echo window').toBe('Working')
+  })
+})
+
+describe('6.99.29: the on-screen keyboard over the session sheet, wide and narrow (Miles’s unfolded Duo, 11/07 11:50)', () => {
+  const CSS = readFileSync(join(HERE, 'panes', 'today-actions.css'), 'utf8')
+  const SID = 'b5c3c5ee-f51d-4c19-9b22-d90b129d2a8e'
+  const P = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID)}${tail}`
+  const ROW = { session_id: SID, provider: 'claude', display_label: 'General COS research to bring more value to users', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString(), alive: true }
+  const busyGate: Routes = {
+    ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+    ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
+  }
+  const layerOf = (h: ReturnType<typeof load>) => h.document.appended as El
+  const height = (el: El, px: number) => { (el as any).offsetHeight = px }
+  /** The sizes the CSS has with the keyboard up: one compact header row, and the reply box with or without its note. */
+  function sizes(h: ReturnType<typeof load>, head: number, foot: number) { height(h.els['ta-head']!, head); height(h.els['ta-foot']!, foot) }
+
+  for (const [label, innerHeight, kbVisible, head, foot] of [
+    ['wide (1430x1000, unfolded)', 1000, 470, 48, 170],
+    ['narrow (700x1000, folded)', 1000, 560, 48, 150],
+  ] as const) {
+    it(`${label}: the keyboard marks the sheet ta-kb and sizes it to the visible viewport; closing it restores the layout`, async () => {
+      const h = load({ data: { sessions: [ROW], working: [] }, routes: busyGate, vv: { height: innerHeight }, innerHeight })
+      h.ta.open('run', 'claude|' + SID, h.opener())
+      await flush()
+      const L = layerOf(h)
+      expect(L.props['--ta-vh'], 'open: the whole viewport').toBe(innerHeight + 'px')
+      expect(L.props['--ta-kb']).toBe('0px')
+      expect(L.cls.has('ta-kb')).toBe(false)
+      sizes(h, head, foot)
+      // The keyboard rises: Safari fires resize and scroll several times; one frame applies them.
+      h.viewport({ height: kbVisible }); h.viewport({ height: kbVisible, offsetTop: 12 }, 'scroll'); h.viewport({ height: kbVisible, offsetTop: 0 })
+      expect(L.cls.has('ta-kb'), 'nothing before the frame').toBe(false)
+      expect(h.runFrames(), 'one frame for the burst').toBe(1)
+      expect(L.cls.has('ta-kb')).toBe(true)
+      expect(L.cls.has('ta-kb-tight'), 'room for the conversation: the note stays').toBe(false)
+      expect(L.props['--ta-vh']).toBe(kbVisible + 'px')
+      expect(L.props['--ta-vt']).toBe('0px')
+      expect(L.props['--ta-kb']).toBe(innerHeight - kbVisible + 'px')
+      // The keyboard goes: the normal layout is back.
+      h.viewport({ height: innerHeight }); h.runFrames()
+      expect(L.cls.has('ta-kb')).toBe(false)
+      expect(L.cls.has('ta-kb-tight')).toBe(false)
+      expect(L.props['--ta-vh']).toBe(innerHeight + 'px')
+      expect(L.props['--ta-kb']).toBe('0px')
+    })
+  }
+
+  it('a form bar or a hardware keyboard’s strip is not a keyboard; a pinch zoom is not either; a panned keyboard still is', () => {
+    const h = load({ vv: { height: 1000 }, innerHeight: 1000 })
+    h.ta.open('meeting', 'Surcharging Push', h.opener())
+    const L = layerOf(h)
+    h.viewport({ height: 1000 - 70 }); h.runFrames()
+    expect(L.cls.has('ta-kb'), 'a 70 px strip').toBe(false)
+    expect(L.props['--ta-kb']).toBe('0px')
+    h.viewport({ height: 500, scale: 2 }); h.runFrames()
+    expect(L.cls.has('ta-kb'), 'zoomed to 2x: half the height, all of the page').toBe(false)
+    h.viewport({ height: 480, scale: 1, offsetTop: 220 }); h.runFrames()
+    expect(L.cls.has('ta-kb'), 'the keyboard, with Safari panned down to the box').toBe(true)
+    expect(L.props['--ta-vt']).toBe('220px')
+  })
+
+  it('under three lines left for the conversation hides the note while typing, and it stays hidden until the keyboard closes', async () => {
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: busyGate, vv: { height: 1000 }, innerHeight: 1000 })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const L = layerOf(h)
+    sizes(h, 48, 230)
+    h.viewport({ height: 340 }); h.runFrames()   // 340 - 48 - 230 = 62 px: under three lines
+    expect(L.cls.has('ta-kb')).toBe(true)
+    expect(L.cls.has('ta-kb-tight')).toBe(true)
+    // With the note hidden the foot is shorter; that must not bring the note back while the keyboard is up.
+    sizes(h, 48, 180)
+    h.viewport({ height: 340 }, 'scroll'); h.runFrames()
+    expect(L.cls.has('ta-kb-tight'), 'no flicker').toBe(true)
+    h.viewport({ height: 1000 }); h.runFrames()
+    expect(L.cls.has('ta-kb-tight')).toBe(false)
+    // Next time the keyboard rises with room to spare: the note shows.
+    sizes(h, 48, 150)
+    h.viewport({ height: 470 }); h.runFrames()
+    expect(L.cls.has('ta-kb')).toBe(true)
+    expect(L.cls.has('ta-kb-tight')).toBe(false)
+  })
+
+  it('the reply box growing while typing (a note or a refusal drawn) measures the room again', async () => {
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: busyGate, vv: { height: 1000 }, innerHeight: 1000 })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const L = layerOf(h)
+    sizes(h, 48, 120)
+    h.viewport({ height: 340 }); h.runFrames()
+    expect(L.cls.has('ta-kb-tight')).toBe(false)
+    sizes(h, 48, 240)
+    h.ta._paintVerdict()
+    expect(h.runFrames(), 'a frame was asked for').toBe(1)
+    expect(L.cls.has('ta-kb-tight')).toBe(true)
+    // A status line under the box (here: Send with nothing typed) asks for one too.
+    h.els['ta-input']!.value = ''
+    h.tap('send')
+    expect(h.els['ta-status']!.textContent).toBe('Write a message first.')
+    expect(h.runFrames(), 'a frame for the status line').toBe(1)
+  })
+
+  it('listens only while the overlay is open, once however often it opens, and a frame due after close changes nothing', () => {
+    const h = load({ vv: { height: 1000 }, innerHeight: 1000 })
+    const count = () => (h.vvListeners.resize || []).length + (h.vvListeners.scroll || []).length
+    expect(count(), 'nothing before the overlay opens').toBe(0)
+    h.ta.open('meeting', 'Surcharging Push', h.opener())
+    expect(count()).toBe(2)
+    h.ta.open('pet', '', h.opener())                 // a sheet replaced in place
+    expect(count(), 'not twice').toBe(2)
+    const L = layerOf(h)
+    h.viewport({ height: 480 }); h.runFrames()
+    expect(L.cls.has('ta-kb')).toBe(true)
+    h.viewport({ height: 470 })                       // a frame is pending
+    h.ta.close('user')
+    expect(count(), 'all removed on close').toBe(0)
+    expect(L.cls.has('ta-kb'), 'close restores the layout').toBe(false)
+    expect(L.props['--ta-kb']).toBe('0px')
+    h.runFrames()
+    expect(L.cls.has('ta-kb'), 'the cancelled frame did nothing').toBe(false)
+    h.ta.open('meeting', 'Surcharging Push', h.opener())
+    expect(count(), 'open again: listening again').toBe(2)
+  })
+
+  it('the stylesheet: the sheet fills the visible viewport, one compact header row, the reply box capped, the note hidden when tight', () => {
+    const rule = (sel: string) => { const i = CSS.indexOf(sel + ' {'); expect(i, sel).toBeGreaterThan(0); return CSS.slice(i, CSS.indexOf('}', i)) }
+    expect(rule('.ta-layer.ta-kb .ta-sheet')).toMatch(/top: 0;.*bottom: 0;.*max-height: none;.*overflow: hidden/)
+    expect(rule('.ta-layer.ta-kb .ta-title')).toMatch(/white-space: nowrap;.*text-overflow: ellipsis/)
+    expect(rule('.ta-layer.ta-kb .ta-head-main')).toContain('display: flex')
+    expect(rule('.ta-layer.ta-kb .ta-x')).toContain('height: 36px')
+    expect(rule('.ta-layer.ta-kb .ta-foot .composer textarea')).toContain('max-height: 96px')
+    expect(rule('.ta-layer.ta-kb-tight .ta-foot .sx-park')).toContain('display: none')
+    // The layer itself still follows the visible viewport (top and height from --ta-vt and --ta-vh).
+    expect(rule('.ta-layer')).toMatch(/top: var\(--ta-vt, 0px\); height: var\(--ta-vh, 100dvh\)/)
+    // The question card in the sheet keeps its 6.99.28 footer at the sheet's bottom.
+    expect(readFileSync(join(HERE, 'panes', 'questions.css'), 'utf8')).toContain('.ta-q .sq-foot { bottom: 0; }')
   })
 })

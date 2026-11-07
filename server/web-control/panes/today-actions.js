@@ -131,7 +131,7 @@
     layer.innerHTML = '<div class="ta-scrim" data-ta="close" aria-hidden="true"></div>' +
       '<section class="ta-sheet" id="ta-sheet" role="dialog" aria-modal="true" aria-labelledby="ta-title" tabindex="-1">' +
         '<div class="ta-grip" aria-hidden="true"></div>' +
-        '<header class="ta-head"><div class="ta-head-main"><button type="button" class="link-btn ta-back" id="ta-back" data-ta="back" hidden>Back to sessions</button>' +
+        '<header class="ta-head" id="ta-head"><div class="ta-head-main"><button type="button" class="link-btn ta-back" id="ta-back" data-ta="back" hidden>Back to sessions</button>' +
           '<h2 class="ta-title" id="ta-title"></h2></div>' +
           '<button type="button" class="ta-x" data-ta="close" aria-label="Close">' + X_ICON + '</button></header>' +
         '<div class="ta-body" id="ta-body"></div>' +
@@ -169,13 +169,61 @@
     return layer;
   }
   // The layer follows the visible viewport, so the on-screen keyboard never covers the reply box or Send.
-  function fit() {
+  // 6.99.29 (Miles's unfolded Duo, 11/07 11:50): on a wide screen the side sheet kept its tall header and the reply box
+  // went under the keyboard while the conversation shrank to one line. With the keyboard up, at any width, the layer is
+  // marked ta-kb (today-actions.css): the sheet fills the visible viewport, the header folds to one compact row, the
+  // reply box stays pinned at the sheet's bottom just above the keyboard, and the conversation takes what is left. If
+  // that leaves under about three lines, ta-kb-tight also hides the "Working right now" note until the keyboard closes.
+  // Keyboard: the visible viewport, at its zoom, is KB_MIN_PX or more shorter than the layout one (a form bar alone is
+  // about 45 px). Read on visualViewport resize and scroll, at most once a frame, only while the overlay is open.
+  var KB_MIN_PX = 120;
+  var BODY_MIN_PX = 72;          // about three lines of the conversation (15 px text at 1.5)
+  var KB = { on: false, tight: false, frame: 0, listening: false };
+  function keyboardInset(vv) {
+    var layoutH = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
+    var inset = Math.round(layoutH - vv.height * (vv.scale || 1));
+    return inset > 0 ? inset : 0;
+  }
+  function tall(el) { return (el && el.offsetHeight) || 0; }
+  // What the conversation gets once the compact header and the reply box have theirs.
+  function bodyRoom(vv) {
+    var sheet = $('ta-sheet'), grip = sheet && sheet.querySelector ? sheet.querySelector('.ta-grip') : null;
+    return vv.height - tall($('ta-head')) - tall($('ta-foot')) - tall(grip);
+  }
+  function applyFit() {
+    KB.frame = 0;
     var vv = window.visualViewport;
     if (!layer || !vv) return;
     layer.style.setProperty('--ta-vh', Math.round(vv.height) + 'px');
     layer.style.setProperty('--ta-vt', Math.round(vv.offsetTop) + 'px');
+    var inset = keyboardInset(vv), on = inset >= KB_MIN_PX;
+    layer.style.setProperty('--ta-kb', (on ? inset : 0) + 'px');
+    if (on !== KB.on) { KB.on = on; KB.tight = false; layer.classList.toggle('ta-kb', on); }
+    // Measured with the compact header in place. Once tight it stays so while the keyboard is up: showing the note
+    // again would take the room back and flicker.
+    if (on && !KB.tight) KB.tight = bodyRoom(vv) < BODY_MIN_PX;
+    layer.classList.toggle('ta-kb-tight', on && KB.tight);
   }
-  if (window.visualViewport) { window.visualViewport.addEventListener('resize', fit); window.visualViewport.addEventListener('scroll', fit); }
+  function fit() {
+    if (KB.frame) return;
+    if (!window.requestAnimationFrame) return applyFit();   // every browser with visualViewport has frames
+    KB.frame = window.requestAnimationFrame(applyFit);
+  }
+  function listenViewport(on) {
+    var vv = window.visualViewport;
+    if (!vv || KB.listening === on) return;
+    KB.listening = on;
+    var m = on ? 'addEventListener' : 'removeEventListener';
+    if (typeof vv[m] === 'function') { vv[m]('resize', fit); vv[m]('scroll', fit); }
+  }
+  function unfit() {
+    listenViewport(false);
+    if (KB.frame && window.cancelAnimationFrame) window.cancelAnimationFrame(KB.frame);
+    KB.frame = 0; KB.on = false; KB.tight = false;
+    if (!layer) return;
+    layer.classList.remove('ta-kb'); layer.classList.remove('ta-kb-tight');
+    layer.style.setProperty('--ta-kb', '0px');
+  }
 
   function openerSelector(t) {
     if (!t || !t.getAttribute) return '';
@@ -200,7 +248,7 @@
     layer.hidden = false;
     document.documentElement.classList.add('ta-open');
     var shell = $('app-shell'); if (shell) shell.setAttribute('inert', '');
-    fit();
+    listenViewport(true); applyFit();
     // The entry names what is open, so a reload can open it again and Back still closes it (restore below).
     var entry = { cosTodayOverlay: 1, kind: kind, key: O.open.key };
     if (O.back) entry.from = 'pet';
@@ -257,6 +305,7 @@
     stopSession();
     O.open = null;
     if (layer) layer.hidden = true;
+    unfit();
     document.documentElement.classList.remove('ta-open');
     var shell = $('app-shell'); if (shell) shell.removeAttribute('inert');
     // X from a session opened off the pet's list unwinds both entries in one step, so the next Back leaves Today as before.
@@ -405,7 +454,8 @@
   // The keyboard rises over the bottom of the sheet: keep the box in view as it does.
   function onFocusIn(e) {
     if (!e.target || e.target.id !== 'ta-input') return;
-    setTimeout(function () { fit(); var f = $('ta-form'); if (f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' }); }, 250);
+    fit();
+    setTimeout(function () { if (!O.open) return; applyFit(); var f = $('ta-form'); if (f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' }); }, 250);
   }
 
   // ═════════════ From today's meetings ═════════════
@@ -1070,7 +1120,7 @@
     watch: function (r, bindingId, key) { watchTurn(r, bindingId, key); },
     queue: function () {}
   };
-  function paintNote() { W.setStatus($('ta-status'), O.note.text, O.note.kind === 'error'); }
+  function paintNote() { W.setStatus($('ta-status'), O.note.text, O.note.kind === 'error'); if (KB.on) fit(); }
   // A copy of the reader's renderVerdict (app.js): the same boxes and words, with Open session where the reader offers
   // Fork and Refresh, which live only in the reader.
   function paintVerdict() {
@@ -1098,6 +1148,7 @@
         : 'Another app on this Mac has this session open. COS asks before the first send.') + '</p>';
     }
     box.innerHTML = html;
+    if (KB.on) fit();   // the reply box's height changed: the conversation's room is measured again
   }
   function setSending(on) {
     var input = $('ta-input');
@@ -1244,6 +1295,6 @@
     open: open, close: close, restore: restore, summary: summary, summaryMax: SUMMARY_MAX,
     isOpen: function () { return !!O.open; },
     _state: O, _decide: decide, _undo: undo, _intakeHtml: intakeHtml, _send: sendReply, _view: VIEW, _paintVerdict: paintVerdict,
-    _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater
+    _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater, _kb: KB, _fitNow: applyFit
   });
 })();
