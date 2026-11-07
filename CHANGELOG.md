@@ -1,5 +1,7 @@
 ## 6.99.30 - Duo layout fixes (private)
 
+**Today weather moves to the top** (Miles, 15:18, IMG_0504): the weather now sits under the date at the top left of Today, and shows even when no meeting is next; Next up keeps only the meeting. Default-on for every web user.
+
 2026-11-07. Private build on 6.99.29 (c925353). Server only (Control Web). Works with COS Control 0.5.376 as installed.
 
 Miles tests on an iPhone Duo (folded about 382x678, unfolded about 1430x1000 landscape and 1000x1430 portrait), in Comet as well as Safari, sometimes with a Bluetooth keyboard. Three QA rounds on 6.99.29 (skeptic, design, user canary) found where the layout assumed Safari or a width. Nothing here assumes a browser now: every size comes from what the browser reports.
