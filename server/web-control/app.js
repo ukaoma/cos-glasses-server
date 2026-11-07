@@ -587,7 +587,9 @@
       if (r.kind === 'work') return { title: r.item.sessionTitle || r.item.title || 'Handoff', why: needWhy(r.item) };
       return { title: r.title, why: r.why || '' };
     });
-    return { sessions: sessions.slice(0, 40), needs: needs, sessionsRead: TODAY.sessionsState === 'answered', needsComplete: !!m.settled,
+    // Today folds all but waiting sessions under "can wait until tomorrow" in quiet hours; the summary says the same.
+    var later = m.later.filter(function (r) { return r.kind !== 'session'; }).length;
+    return { sessions: sessions.slice(0, 40), needs: needs, later: Math.min(later, needs.length), sessionsRead: TODAY.sessionsState === 'answered', needsComplete: !!m.settled,
       unread: m.failed.slice(), recording: !!TODAY.recording };
   }
   // Asked once every source answered or failed, at most once a minute unless what Today read changed (the server
@@ -616,7 +618,8 @@
   function briefWhen(v, m) {
     var mins = briefMinutes(v.at);
     var out = 'Updated ' + (mins < 1 ? 'just now' : span(v.at) + ' ago');
-    if (v.state === 'stale') out += '. Things have moved since';
+    // Stale says so once it is five minutes old: a summary from a minute ago over one new reply is still the picture.
+    if (v.state === 'stale' && mins >= 5) out += '. Things have moved since';
     if (m.failed.length) out += '. Couldn’t read ' + listWords(m.failed) + ', so this may not be everything';
     return out + '.';
   }

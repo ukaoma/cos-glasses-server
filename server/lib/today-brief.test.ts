@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, createTodayBrief,
+  TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
   normalizeTodayBriefInputs, scrubText, todayBriefFingerprint, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
 } from './today-brief.js'
 
@@ -195,7 +195,7 @@ describe('the breaker: 3 failures in a row stop it for an hour', () => {
     const h = harness({ answer: () => 'Nothing is waiting on you right now, all clear.', minIntervalMs: 0 })
     const v = await h.brief.ask(inputs())
     expect(v).toMatchObject({ state: 'failed', reason: 'failed' })
-    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'guarded', model: 'haiku' })])
+    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'guarded', model: 'haiku', guard: 'nothing_waiting' })])
     expect(JSON.parse(readFileSync(h.deps.stateFile, 'utf8')).failures).toBe(1)
   })
 })
@@ -264,6 +264,12 @@ describe('inputs are untrusted data', () => {
     expect(data.length, 'the fixture really fills it').toBeGreaterThan(TODAY_BRIEF_DATA_MAX_CHARS - 600)
     expect(data).toContain('- and more.')
   })
+  it('says how many of Needs you can wait until tomorrow, as Today folds them', () => {
+    const quiet = normalizeTodayBriefInputs({ needs: [{ title: 'Review 7 memories' }, { title: 'Name 97 held voices' }], later: 2, sessionsRead: true, needsComplete: true })
+    expect(buildTodayBriefData(quiet)).toContain('Needs you: 2 items, all of them can wait until tomorrow (quiet hours or the weekend), and every source was read.')
+    expect(normalizeTodayBriefInputs({ needs: [{ title: 'x' }], later: 9 }).later).toBe(1)
+    expect(todayBriefFingerprint(quiet)).not.toBe(todayBriefFingerprint({ ...quiet, later: 0 }))
+  })
   it('says when the session list or Needs you was not read, so the model cannot claim otherwise', () => {
     const data = buildTodayBriefData(normalizeTodayBriefInputs({ sessions: [], needs: [], sessionsRead: false, needsComplete: false, unread: ['memories'] }))
     expect(data).toContain('the session list could not be read')
@@ -279,6 +285,10 @@ describe('the answer is cleaned and checked', () => {
     expect(out.match(/[.!?]/g)!.length).toBeLessThanOrEqual(3)
     expect(out).toContain('nearly done to ships')
   })
+  it('a version number or a decimal is not a sentence end', () => {
+    const out = cleanTodayBrief('You are shipping 6.99.26 in about 1.5 hours. Release QA waits on you. Then the install. A fourth sentence.', seen)
+    expect(out).toBe('You are shipping 6.99.26 in about 1.5 hours. Release QA waits on you. Then the install.')
+  })
   it('refuses "nothing is waiting" unless Today read everything and saw nothing waiting', () => {
     const clear = normalizeTodayBriefInputs({ sessions: [{ title: 'A', state: 'working', minutes: 3 }], needs: [], sessionsRead: true, needsComplete: true })
     expect(cleanTodayBrief('Nothing is waiting on you. One agent is building the route.', clear)).not.toBeNull()
@@ -290,6 +300,11 @@ describe('the answer is cleaned and checked', () => {
     expect(cleanTodayBrief('No agents are running now. One quiet session is open.', idle)).not.toBeNull()
     expect(cleanTodayBrief('No agents are running now. One quiet session is open.', seen)).toBeNull()
     expect(cleanTodayBrief('No agents are running now. One quiet session is open.', { ...idle, sessionsRead: false })).toBeNull()
+  })
+  it('"no sessions are blocked" or "no other session is stuck" is not a claim that nothing runs (the first live answer)', () => {
+    expect(cleanTodayBrief('Three agents are building the release. No sessions are blocked right now.', seen)).not.toBeNull()
+    expect(cleanTodayBriefWithGuard('No sessions are waiting on you. The release is moving.', seen).guard).toBe('nothing_waiting')
+    expect(cleanTodayBriefWithGuard('No agents are working on it. The release is quiet.', seen).guard).toBe('nothing_running')
   })
   it('too short is unusable', () => {
     expect(cleanTodayBrief('  "ok"  ', seen)).toBeNull()
@@ -309,6 +324,6 @@ describe('the audit', () => {
     const row = h.audits[0]!
     expect(row).toMatchObject({ outcome: 'ok', model: 'haiku' })
     expect(row.inputChars).toBeGreaterThan(500)
-    expect(Object.keys(row).sort()).toEqual(['durationMs', 'inputChars', 'model', 'outcome', 'outputChars'])
+    expect(Object.keys(row).sort()).toEqual(['durationMs', 'inputChars', 'model', 'outcome', 'outputChars'])   // no guard on an ok row, and never the text
   })
 })

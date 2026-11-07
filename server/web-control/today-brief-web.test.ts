@@ -44,7 +44,7 @@ function story(opts: { sessions?: any[]; rows?: any[]; states?: Record<string, s
   }
   // eslint-disable-next-line no-new-func
   const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { renderStory: renderStory, BRIEF: BRIEF };\n}')(deps)
-  const m = { rows: opts.rows ?? [], now: opts.rows ?? [], later: [], failed: opts.failed ?? [], settled: opts.settled ?? true,
+  const m = { rows: opts.rows ?? [], now: opts.rows ?? [], later: (opts as any).later ?? [], failed: opts.failed ?? [], settled: opts.settled ?? true,
     states: opts.states ?? { sessions: 'answered', work: 'answered', voices: 'answered', memories: 'answered' },
     sessionsWaiting: (opts.sessions ?? []).filter((s: any) => s.agent_state === 'waiting').length }
   TODAY.model = m
@@ -66,7 +66,7 @@ describe('the Today summary on the web', () => {
     expect(s.posts).toHaveLength(1)
     const body = s.posts[0].body
     expect(s.posts[0]).toMatchObject({ path: '/api/today/brief', method: 'POST' })
-    expect(body).toMatchObject({ sessionsRead: true, needsComplete: true, unread: [], recording: false })
+    expect(body).toMatchObject({ sessionsRead: true, needsComplete: true, unread: [], recording: false, later: 0 })
     expect(body.sessions).toEqual([
       { title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 12, line: 'Asked whether to publish 6.99.26', waiting: 'Wants to run npm publish' },
       { title: 'Today summary build', provider: 'codex', state: 'working', minutes: 25, line: 'Writing the route', waiting: '' },
@@ -75,12 +75,26 @@ describe('the Today summary on the web', () => {
     await s.flush()
     expect(s.els['today-story']!.innerHTML).toBe(esc(FRESH.text) + '<span class="story-when">Updated 6 min ago.</span>')
   })
-  it('a summary written under a minute ago says just now; a stale one says things moved; a failed source is named', async () => {
+  it('a stale one says things moved once it is five minutes old, never on a summary from just now', async () => {
+    const old = story({ sessions: [WORKING], answer: () => ({ ...FRESH, state: 'stale' }) })
+    old.render(); await old.flush()
+    expect(old.els['today-story']!.innerHTML).toContain('<span class="story-when">Updated 6 min ago. Things have moved since.</span>')
+    const young = story({ sessions: [WORKING], answer: () => ({ ...FRESH, state: 'stale', at: '2026-11-04T19:57:00Z' }) })
+    young.render(); await young.flush()
+    expect(young.els['today-story']!.innerHTML).toContain('<span class="story-when">Updated 3 min ago.</span>')
+  })
+  it('a summary written under a minute ago says just now; a failed source is named', async () => {
     const s = story({ sessions: [WORKING], failed: ['memories'], settled: false, states: { sessions: 'answered', work: 'answered', voices: 'answered', memories: 'failed' },
       answer: () => ({ ...FRESH, at: '2026-11-04T19:59:40Z', state: 'stale' }) })
     s.render(); await s.flush()
-    expect(s.els['today-story']!.innerHTML).toContain('<span class="story-when">Updated just now. Things have moved since. Couldn’t read memories, so this may not be everything.</span>')
+    expect(s.els['today-story']!.innerHTML).toContain('<span class="story-when">Updated just now. Couldn’t read memories, so this may not be everything.</span>')
     expect(s.posts[0].body).toMatchObject({ needsComplete: false, unread: ['memories'] })
+  })
+  it('sends how many needs can wait until tomorrow (Today’s quiet-hours fold), never the waiting sessions among them', () => {
+    const mem = { kind: 'memories', title: 'Review 7 memories', why: '' }, wait = { kind: 'session', title: 'Release QA asked you a question', why: '' }
+    const s = story({ sessions: [WAITING], rows: [wait, mem], later: [mem], answer: () => FRESH } as any)
+    s.render()
+    expect(s.posts[0].body).toMatchObject({ needs: [{ title: 'Review 7 memories', why: '' }], later: 1 })
   })
   it('waits for every source before asking: a pending one sends nothing', () => {
     const s = story({ sessions: [WORKING], states: { sessions: 'answered', work: 'answered', voices: 'pending', memories: 'answered' }, answer: () => FRESH })

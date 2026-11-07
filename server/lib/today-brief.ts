@@ -79,6 +79,8 @@ export interface BriefWork { title: string; stage: string; running: boolean }
 export interface TodayBriefInputs {
   sessions: BriefSession[]
   needs: BriefNeed[]
+  /** How many of `needs` Today folds under "can wait until tomorrow" (quiet hours and weekends). */
+  later: number
   work: BriefWork[]
   /** Today read the session list. False: the model may not say anything about what is or is not running. */
   sessionsRead: boolean
@@ -131,7 +133,7 @@ const minutesOf = (v: unknown): number => {
  */
 export function normalizeTodayBriefInputs(raw: unknown, work: BriefWork[] = []): TodayBriefInputs {
   if (!record(raw)) throw new TodayBriefInputError('invalid_today_brief')
-  const allowed = ['sessions', 'needs', 'sessionsRead', 'needsComplete', 'unread', 'recording']
+  const allowed = ['sessions', 'needs', 'later', 'sessionsRead', 'needsComplete', 'unread', 'recording']
   if (Object.keys(raw).some(k => !allowed.includes(k))) throw new TodayBriefInputError('invalid_today_brief')
   if (raw.sessions !== undefined && !Array.isArray(raw.sessions)) throw new TodayBriefInputError('invalid_today_brief')
   if (raw.needs !== undefined && !Array.isArray(raw.needs)) throw new TodayBriefInputError('invalid_today_brief')
@@ -156,6 +158,7 @@ export function normalizeTodayBriefInputs(raw: unknown, work: BriefWork[] = []):
   const unread = [...new Set(((raw.unread as unknown[] | undefined) ?? []).filter((n): n is string => typeof n === 'string' && UNREAD_NAMES.has(n)))]
   return {
     sessions, needs,
+    later: Math.min(needs.length, Math.floor(minutesOf(raw.later))),
     work: work.slice(0, LIMITS.work).map(w => ({ title: scrubText(w.title, LIMITS.workTitle), stage: WORK_STAGE_WORDS[w.stage] ? w.stage : 'draft', running: w.running === true })).filter(w => w.title),
     sessionsRead: raw.sessionsRead === true,
     needsComplete: raw.needsComplete === true && unread.length === 0,
@@ -178,7 +181,7 @@ export function todayBriefFingerprint(inputs: TodayBriefInputs): string {
   const sessions = inputs.sessions.map(s => [s.state, s.title, s.provider, minutesBucket(s.minutes), s.line, s.waiting].join('\u001f')).sort()
   const needs = inputs.needs.map(n => n.title + '\u001f' + n.why).sort()
   const work = inputs.work.map(w => w.title + '\u001f' + w.stage + '\u001f' + w.running).sort()
-  return createHash('sha256').update(JSON.stringify([1, sessions, needs, work, inputs.sessionsRead, inputs.needsComplete, [...inputs.unread].sort(), inputs.recording])).digest('hex')
+  return createHash('sha256').update(JSON.stringify([1, sessions, needs, inputs.later, work, inputs.sessionsRead, inputs.needsComplete, [...inputs.unread].sort(), inputs.recording])).digest('hex')
 }
 
 export function hasBriefInputs(inputs: TodayBriefInputs): boolean {
@@ -228,7 +231,7 @@ export function buildTodayBriefData(inputs: TodayBriefInputs): string {
     ? `Sessions: ${waiting.length} waiting on the person, ${working.length} working, ${quiet.length} open and quiet.`
     : 'Sessions: the session list could not be read, so nothing is known about what is running.')
   lines.push(inputs.needsComplete
-    ? `Needs you: ${inputs.needs.length} ${inputs.needs.length === 1 ? 'item' : 'items'}, and every source was read.`
+    ? `Needs you: ${inputs.needs.length} ${inputs.needs.length === 1 ? 'item' : 'items'}${inputs.later ? `, ${inputs.later === inputs.needs.length ? 'all' : inputs.later} of them can wait until tomorrow (quiet hours or the weekend)` : ''}, and every source was read.`
     : `Needs you: ${inputs.needs.length} found so far; ${inputs.unread.length ? `could not read ${listWords(inputs.unread)}` : 'some sources are still being read'}, so this may not be everything.`)
   if (inputs.recording) lines.push('A meeting is being recorded right now.')
   const sessionLine = (s: BriefSession) => {
@@ -268,8 +271,10 @@ export function buildTodayBriefPrompt(inputs: TodayBriefInputs, now: number): st
 
 // ── the answer ─────────────────────────────────────────────────────────────
 
-const NOTHING_WAITING = /\bnothing\b[^.!?]{0,24}\b(?:waiting|needs you|needs your|is pending)\b|\bno one is waiting\b|\bnothing to (?:do|review|answer)\b|\ball clear\b|\bnothing needs\b/i
-const NOTHING_RUNNING = /\bno (?:agents?|sessions?)\b[^.!?]{0,20}\b(?:running|working|active|open)\b|\bnothing is (?:running|working|happening)\b|\bno (?:agents?|sessions?) (?:are|is)\b/i
+// What Today must have observed before the summary may say it. Narrow on purpose: "no sessions are blocked" is not a
+// claim that nothing runs (the first live answer, 11/07, was refused by a broader pattern; see the guard codes).
+const NOTHING_WAITING = /\bnothing\b[^.!?]{0,24}\b(?:waiting|needs you|needs your|is pending)\b|\bno (?:one|sessions?|agents?)\b[^.!?]{0,20}\bwaiting\b|\bnothing to (?:do|review|answer)\b|\ball clear\b|\bnothing needs\b/i
+const NOTHING_RUNNING = /\bno (?:agents?|sessions?)\b[^.!?]{0,20}\b(?:running|working|active)\b|\bnothing is (?:running|working|happening)\b/i
 
 /**
  * The model's paragraph made safe to show, or null when it is unusable: dashes and arrows become plain punctuation,
@@ -277,6 +282,12 @@ const NOTHING_RUNNING = /\bno (?:agents?|sessions?)\b[^.!?]{0,20}\b(?:running|wo
  * a clear Needs you or an empty session list that Today did not observe.
  */
 export function cleanTodayBrief(raw: string, inputs: TodayBriefInputs): string | null {
+  return cleanTodayBriefWithGuard(raw, inputs).text
+}
+
+export type TodayBriefGuard = 'too_short' | 'nothing_waiting' | 'nothing_running'
+/** cleanTodayBrief, and which rule refused it: a code for the log and the audit, never the text. */
+export function cleanTodayBriefWithGuard(raw: string, inputs: TodayBriefInputs): { text: string | null; guard?: TodayBriefGuard } {
   let s = String(raw || '').replace(CONTROL, ' ')
   s = s.replace(/^\s*(?:summary|today)\s*:\s*/i, '')
   s = s.replace(/[*_#`>|\[\]]/g, ' ')
@@ -285,7 +296,8 @@ export function cleanTodayBrief(raw: string, inputs: TodayBriefInputs): string |
   s = s.replace(URLS, ' ').replace(UUID, ' ').replace(PREFIXED_ID, ' ').replace(PATHS, ' ').replace(LONG_HEX, ' ')
   s = s.replace(/\s+/g, ' ').trim().replace(/^["'\u201c\u2018]+|["'\u201d\u2019]+$/g, '').trim()
   s = s.replace(/\s+([,.;:!?])/g, '$1').replace(/,\s*,/g, ',').replace(/,\s*\./g, '.')
-  const sentences = s.match(/[^.!?]+[.!?]+(?:["'\u201d\u2019)]+)?|[^.!?]+$/g) ?? []
+  // A sentence ends at . ! or ? followed by a space, so 6.99.26 or 3.5 hours stay whole.
+  const sentences = s.split(/(?<=[.!?]["'\u201d\u2019)]?)\s+/).filter(Boolean)
   let out = ''
   for (const sentence of sentences.slice(0, 3)) {
     const next = (out ? out + ' ' : '') + sentence.trim()
@@ -293,13 +305,13 @@ export function cleanTodayBrief(raw: string, inputs: TodayBriefInputs): string |
     out = next
   }
   out = out.trim()
-  if (out.length < 16) return null
+  if (out.length < 16) return { text: null, guard: 'too_short' }
   if (!/[.!?]["'\u201d\u2019)]*$/.test(out)) out += '.'
   const waitingSeen = inputs.needs.length > 0 || inputs.sessions.some(x => x.state === 'waiting')
-  if (NOTHING_WAITING.test(out) && (!inputs.needsComplete || !inputs.sessionsRead || waitingSeen)) return null
+  if (NOTHING_WAITING.test(out) && (!inputs.needsComplete || !inputs.sessionsRead || waitingSeen)) return { text: null, guard: 'nothing_waiting' }
   const runningSeen = inputs.sessions.some(x => x.state === 'working')
-  if (NOTHING_RUNNING.test(out) && (!inputs.sessionsRead || runningSeen)) return null
-  return out
+  if (NOTHING_RUNNING.test(out) && (!inputs.sessionsRead || runningSeen)) return { text: null, guard: 'nothing_running' }
+  return { text: out }
 }
 
 // ── state ──────────────────────────────────────────────────────────────────
@@ -350,7 +362,7 @@ function parseFile(raw: unknown, day: string): BriefFile {
   }
 }
 
-export interface TodayBriefAuditRow { inputChars: number; outputChars: number; durationMs: number; outcome: 'ok' | 'failed' | 'guarded'; model: string }
+export interface TodayBriefAuditRow { inputChars: number; outputChars: number; durationMs: number; outcome: 'ok' | 'failed' | 'guarded'; model: string; guard?: TodayBriefGuard }
 
 export interface TodayBriefDeps {
   stateFile: string
@@ -434,8 +446,8 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
     const prompt = buildTodayBriefPrompt(inputs, now())
     const started = now()
     const inputChars = prompt.length + TODAY_BRIEF_SYSTEM_PROMPT.length
-    const audit = (outcome: TodayBriefAuditRow['outcome'], outputChars: number) => {
-      try { deps.audit?.({ inputChars, outputChars, durationMs: Math.max(0, now() - started), outcome, model: TODAY_BRIEF_MODEL }) } catch { /* never let logging cost the brief */ }
+    const audit = (outcome: TodayBriefAuditRow['outcome'], outputChars: number, guard?: TodayBriefGuard) => {
+      try { deps.audit?.({ inputChars, outputChars, durationMs: Math.max(0, now() - started), outcome, model: TODAY_BRIEF_MODEL, ...(guard ? { guard } : {}) }) } catch { /* never let logging cost the brief */ }
     }
     const fail = () => {
       const g = load()
@@ -446,8 +458,8 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
     return Promise.resolve()
       .then(() => deps.generate(prompt, TODAY_BRIEF_SYSTEM_PROMPT, TODAY_BRIEF_MODEL))
       .then(raw => {
-        const text = cleanTodayBrief(raw, inputs)
-        if (!text) { audit('guarded', String(raw || '').length); fail(); return }
+        const { text, guard } = cleanTodayBriefWithGuard(raw, inputs)
+        if (!text) { console.warn(`[today-brief] answer refused (${guard})`); audit('guarded', String(raw || '').length, guard); fail(); return }
         audit('ok', String(raw || '').length)
         const g = load()
         g.failures = 0

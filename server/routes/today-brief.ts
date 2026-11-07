@@ -37,7 +37,7 @@ export function defaultTodayBrief(): TodayBrief {
     }),
     audit: row => logTokenAudit({
       source: 'web-today-brief', model: row.model, inputChars: row.inputChars, outputChars: row.outputChars,
-      durationMs: row.durationMs, caller: row.outcome === 'ok' ? 'today_brief' : `today_brief_${row.outcome}`,
+      durationMs: row.durationMs, caller: row.outcome === 'ok' ? 'today_brief' : `today_brief_${row.guard ?? row.outcome}`,
     }),
   })
 }
