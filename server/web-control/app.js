@@ -627,6 +627,7 @@
       renderRunning(working, open);
       if (!offline) renderPet(sessions);
       paintNeeds();
+      renderWeather(welcome);
       renderNext(welcome);
       loadTodayIntake();
       setBadge('sessions', working.length > 0);
@@ -959,14 +960,23 @@
     m.failed.forEach(function (name) { html += '<button type="button" class="need-more need-failed" data-today-needs="retry">' + esc('Couldn’t read ' + name + '. Try again') + '</button>'; });
     list.innerHTML = html;
   }
+  // Weather sits under the date at the top left (Miles, 11/07), where the eye starts, not inside Next up.
+  // It shows whether or not a meeting is next.
+  function renderWeather(w) {
+    var el = $('today-weather'); if (!el) return;
+    var x = w && w.weather;
+    if (!x || !x.temp) { el.classList.add('hidden'); el.textContent = ''; return; }
+    var desc = String(x.desc || '').toLowerCase(), place = x.location ? String(x.location).split(',')[0] : '';
+    el.textContent = x.temp + (desc ? ' and ' + desc : '') + (place ? ' in ' + place : '');
+    el.classList.remove('hidden');
+  }
   function renderNext(w) {
     var card = $('next-card');
     var n = w && w.nextEvent; var d = n && toDate(n.time);
     if (!d || !n.title) { card.classList.add('hidden'); return; }
-    var weather = w.weather && w.weather.temp ? w.weather.temp + ' and ' + String(w.weather.desc || '').toLowerCase() + (w.weather.location ? ' in ' + w.weather.location.split(',')[0] : '') : '';
     var dw = dayWord(d);
     $('next-body').innerHTML = '<span class="when">' + esc(clock(d)) + '</span><span><span class="what">' + esc(n.title) + '</span>' +
-      '<span class="sub" style="display:block">' + esc((dw.charAt(0).toUpperCase() + dw.slice(1)) + (weather ? '. Now ' + weather : '')) + '</span></span>';
+      '<span class="sub" style="display:block">' + esc(dw.charAt(0).toUpperCase() + dw.slice(1)) + '</span></span>';
     // Control's Next up (todayPrepButtons): Prep me opens the Prep composer in the COS chat (panes/cos-chat.js prepFor),
     // Open meeting opens Meetings. Without a server to answer, Prep me is not offered.
     var prep = !TODAY.offline && window.COSWeb && window.COSWeb.cosChat && window.COSWeb.cosChat.prepFor;
