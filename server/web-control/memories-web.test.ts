@@ -18,9 +18,13 @@ const flush = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise(
 type Answer = unknown | ((args: any) => unknown)
 interface FakeEl { id: string; innerHTML: string; value: string; classList: { toggle: (c: string, on?: boolean) => void; add: (c: string) => void; remove: (c: string) => void; contains: (c: string) => boolean }; [k: string]: any }
 
-function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandomUUID?: boolean } = {}) {
+type CueAnswer = (path: string, body?: any) => unknown
+function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandomUUID?: boolean; cues?: CueAnswer } = {}) {
   const answers: Record<string, Answer> = { ...base(), ...(opts.answers ?? {}) }
   const calls: Array<{ op: string; args: any }> = []
+  // The cue review talks to /api/live-cues/* directly, as Control's store does; anything else is the Memories bridge.
+  const cueCalls: Array<{ method: string; path: string; body: any }> = []
+  const cueAnswer: CueAnswer = opts.cues ?? (() => { const e = new Error('Not found') as Error & { status?: number }; e.status = 404; throw e })
   const toasts: string[] = []
   const copies: string[] = []
   const els = new Map<string, FakeEl>()
@@ -52,7 +56,11 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
     goBack: () => { route = { pane: 'memories', args: [] }; def.load([]) },
     setCrumb: () => {}, crumb: () => '',
     registerPane: (name: string, d: unknown) => { if (name === 'memories') def = d },
-    api: (path: string, o: { method?: string; body: { op: string; args: any } }) => {
+    api: (path: string, o: { method?: string; body: any } = { body: undefined }) => {
+      if (path.startsWith('/api/live-cues/')) {
+        cueCalls.push({ method: o.method ?? 'GET', path, body: o.body })
+        try { return Promise.resolve(cueAnswer(path, o.body)) } catch (e) { return Promise.reject(e) }
+      }
       expect(path).toBe('/api/web-bridge/memories')
       expect(o.method).toBe('POST')
       const { op, args } = o.body
@@ -61,6 +69,8 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
       const a = answers[key]
       let v: unknown
       try { v = typeof a === 'function' ? (a as (x: unknown) => unknown)(args) : a } catch (e) { return Promise.resolve({ ok: false, message: (e as Error).message, details: {} }) }
+      // A TypeError is the browser's own failure (no HTTP status): the request never reached COS.
+      if (v instanceof TypeError) return Promise.reject(v)
       if (v instanceof Error) return Promise.resolve({ ok: false, message: v.message, details: {} })
       return Promise.resolve({ ok: true, message: '', details: v ?? {} })
     },
@@ -78,14 +88,14 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
   const timeout = (fn: () => void, ms?: number) => { if ((ms ?? 0) >= 6000) { held.push(fn); return 0 } return setTimeout(fn, 0) }
   const window = { COSWeb: W, matchMedia: () => media, crypto, localStorage: { getItem: () => null, setItem: () => {} } }
   const location = { replace: (h: string) => { route = { pane: 'memories', args: h.replace(/^#\/memories\/?/, '').split('/').filter(Boolean) } } }
-  const ctx = vm.createContext({ window, document, location, crypto, console, Date, JSON, Math, Promise, Object, Array, String, Number, RegExp, Error, Uint8Array,
+  const ctx = vm.createContext({ window, document, location, crypto, console, Date, JSON, Math, Promise, Object, Array, String, Number, RegExp, Error, Uint8Array, URL,
     setTimeout: timeout, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {} })
   vm.runInContext(SOURCE, ctx)
   const t = def._t
   const tap = (name: string, attrs: Record<string, string> = {}) => t.act(name, { getAttribute: (k: string) => attrs[k] ?? null, disabled: false }, null)
   const open = async (args: string[] = []) => { route = { pane: 'memories', args }; def.load(args); await flush() }
   const writes = () => calls.filter(c => !isMemoryWebOpReadOnly(c.op, c.args ?? {}))
-  return { def, t, S: t.S, calls, writes, toasts, copies, tap, open, els, answers, held, setRoute: (args: string[]) => { route = { pane: 'memories', args } } }
+  return { def, t, S: t.S, calls, cueCalls, writes, toasts, copies, tap, open, els, answers, held, listeners, setRoute: (args: string[]) => { route = { pane: 'memories', args } } }
 }
 
 // ── fixtures, shaped like the live bridge answered on 11/06 ──
@@ -127,7 +137,8 @@ describe('Control Web Memories: opening and reading never writes', () => {
     const h = load()
     await h.open()
     const ops = h.calls.map(c => c.op === 'workspace.request' ? 'ws:' + c.args.action : c.op)
-    for (const op of ['status', 'ws:learning_page', 'ws:review_page', 'cues.summary', 'graph.status']) expect(ops).toContain(op)
+    for (const op of ['status', 'ws:learning_page', 'ws:review_page', 'graph.status']) expect(ops).toContain(op)
+    expect(h.cueCalls).toEqual([{ method: 'GET', path: '/api/live-cues/history?days=7&unrated=1&limit=200', body: undefined }])
     expect(h.writes()).toEqual([])
   })
 
@@ -449,5 +460,224 @@ describe('Control Web Memories: page rules', () => {
       expect(m, url).not.toBeNull()
       expect(table.get(m![1]!)!.hash).toBe(m![2])
     }
+  })
+})
+
+// ── Cues to rate and Rated cues (Control's CueReviewPane), on fakes shaped like the live history on 11/07 ──
+const HOUR = 3600_000
+const cueRow = (o: Record<string, unknown>) => ({ v: 1, sessionId: 'meeting_1793728868236_emvdsb', meetingTitle: 'G2 Recording 2026-11-03 1201', kind: 'challenge',
+  headline: '', detail: 'A cue', gate: 0.95, sources: [], before: '', title: 'Payroll roadmap review', titleSource: 'saved', rating: null, ...o })
+function cueServer(opts: { rows?: any[]; counts?: any; feedback?: (body: any) => unknown; history?: (path: string) => unknown } = {}) {
+  const now = Date.now()
+  const rows = opts.rows ?? [
+    cueRow({ cueId: 'c-new', createdAt: now - 1 * HOUR, detail: 'Newest unrated cue', headline: 'Newest' }),
+    cueRow({ cueId: 'c-old', createdAt: now - 30 * HOUR, armedAt: now - 30 * HOUR - 7 * 60_000, detail: 'Oldest unrated cue', before: 'what was said',
+      sources: [{ id: 'S1', title: 'Reuters', kind: 'web', url: 'https://www.reuters.com/a' }, { id: 'S2', title: 'Old note', kind: 'memory', memoryId: 'mem_src' },
+        { id: 'S3', title: 'Board deck', kind: 'file', fileId: 'f1' }] }),
+    cueRow({ cueId: 'c-mid', createdAt: now - 10 * HOUR, detail: 'Middle unrated cue', kind: 'followUp' }),
+    cueRow({ cueId: 'c-rated', createdAt: now - 5 * HOUR, detail: 'A rated cue', rating: { verdict: 'useful', note: 'spot on', at: now } }),
+  ]
+  const counts = opts.counts ?? { total: 4, rated: 1, unrated: 3, byVerdict: { useful: 1, late: 0, repeat: 0, wrong: 0, obvious: 0 } }
+  return (path: string, body?: any) => {
+    if (path.startsWith('/api/live-cues/feedback')) return opts.feedback ? opts.feedback(body) : { ok: true, cueId: body.cueId, verdict: body.verdict === 'clear' ? null : body.verdict, vote: null }
+    if (opts.history) return opts.history(path)
+    const unrated = /unrated=1/.test(path)
+    return { v: 1, cues: rows.filter(r => !unrated || !r.rating?.verdict), counts, truncated: false, skipped: 0, maxCuesPerMeeting: 30 }
+  }
+}
+const httpError = (status: number, code?: string) => Object.assign(new Error('HTTP ' + status), { status, code })
+const key = (k: string, extra: Record<string, unknown> = {}) => ({ key: k, target: { id: 'mm-cue-card', getAttribute: (a: string) => (a === 'data-cue' ? (extra.cue as string) ?? 'c-old' : null) }, ...extra })
+
+describe('Control Web Memories: Cues to rate and Rated cues', () => {
+  it('a server without the cue history (404) keeps both cue views hidden; one with it shows them with the unrated count', async () => {
+    const off = load()
+    await off.open()
+    expect(off.S.cue.available).toBe(false)
+    expect(off.t.viewsHtml()).not.toContain('Cues to rate')
+    const on = load({ cues: cueServer({ counts: { total: 457, rated: 10, unrated: 447, byVerdict: {} } }) })
+    await on.open()
+    expect(on.S.cue.available).toBe(true)
+    expect(on.t.viewsHtml()).toContain('Cues to rate (447)')
+    expect(on.t.viewsHtml()).toContain('data-arg="rated"')
+    expect(on.cueCalls.filter(c => c.method === 'POST')).toEqual([])
+  })
+
+  it('the queue is oldest first, one card at a time, with Control\'s card: title, when, kind, score, left, sources, what was said, five verdicts', async () => {
+    const h = load({ cues: cueServer() })
+    await h.open(['view', 'cues'])
+    await h.open()
+    expect(h.S.cue.queue.map((c: any) => c.cueId)).toEqual(['c-old', 'c-mid', 'c-new'])
+    const html: string = h.t.listHtml()
+    expect(html).toContain('Payroll roadmap review')
+    expect(html).toMatch(/, 7 min in</)
+    expect(html).toContain('Challenge')
+    expect(html).toContain('score 0.95')
+    expect(html).toContain('3 left')
+    expect(html).toContain('Oldest unrated cue')
+    expect(html).not.toContain('Newest unrated cue')
+    expect(html).toContain('<a href="https://www.reuters.com/a" target="_blank" rel="noopener noreferrer">Reuters (reuters.com)</a>')
+    expect(html).toContain('data-mm="cue-memory" data-id="mem_src"')
+    expect(html).toContain('<li class="mm-muted">Board deck</li>')
+    expect(html).toContain('What was said just before')
+    expect(html.match(/data-mm="cue-rate"/g)).toHaveLength(5)
+    expect(html).toContain('What would have made it useful?')
+    expect(html).toContain('Next up: ')
+    expect(html).toContain('Middle unrated cue')
+    expect(html).toContain('Ratings in the last 7 days: 1 of 4.')
+  })
+
+  it('a verdict posts the cue with its normalized note, then the next cue shows and the counts move', async () => {
+    const h = load({ cues: cueServer() })
+    await h.open(['view', 'cues'])
+    await h.open()
+    h.S.cue.notes['c-old'] = '  after   the\npoint  '
+    h.tap('cue-rate', { 'data-id': 'c-old', 'data-arg': 'late' }); await flush()
+    const posts = h.cueCalls.filter(c => c.method === 'POST')
+    expect(posts).toEqual([{ method: 'POST', path: '/api/live-cues/feedback', body: { sessionId: 'meeting_1793728868236_emvdsb', cueId: 'c-old', verdict: 'late', note: 'after the point' } }])
+    expect(h.S.cue.queue.map((c: any) => c.cueId)).toEqual(['c-mid', 'c-new'])
+    expect(h.S.cue.counts).toMatchObject({ rated: 2, unrated: 2, byVerdict: { late: 1 } })
+    expect(h.t.viewsHtml()).toContain('Cues to rate (2)')
+    expect(h.t.listHtml()).toContain('Middle unrated cue')
+    expect(h.writes()).toEqual([])
+  })
+
+  it('keys 1 to 5 rate, N goes to the note and S skips, only on the focused card and never with a modifier', async () => {
+    const h = load({ cues: cueServer() })
+    await h.open(['view', 'cues'])
+    await h.open()
+    expect(h.t.cueKey(key('2', { metaKey: true }))).toBe(false)
+    expect(h.t.cueKey({ key: '2', target: { id: 'mm-cue-note', getAttribute: () => 'c-old' } })).toBe(false)
+    expect(h.cueCalls.filter(c => c.method === 'POST')).toEqual([])
+    expect(h.t.cueKey(key('s'))).toBe(true)
+    expect(h.S.cue.queue.map((c: any) => c.cueId)).toEqual(['c-mid', 'c-new', 'c-old'])
+    expect(h.cueCalls.filter(c => c.method === 'POST')).toEqual([])
+    expect(h.t.cueKey(key('5', { cue: 'c-mid' }))).toBe(true); await flush()
+    expect(h.cueCalls.filter(c => c.method === 'POST').map(c => c.body)).toEqual([{ sessionId: 'meeting_1793728868236_emvdsb', cueId: 'c-mid', verdict: 'obvious' }])
+    expect(h.t.cueKey(key('n', { cue: 'c-new' }))).toBe(true)
+  })
+
+  it('one rating per cue at a time: a second tap while the first saves sends nothing', async () => {
+    let release: (v: unknown) => void = () => {}
+    const h = load({ cues: cueServer({ feedback: () => new Promise(r => { release = r }) }) })
+    await h.open(['view', 'cues'])
+    await h.open()
+    h.tap('cue-rate', { 'data-id': 'c-old', 'data-arg': 'useful' })
+    h.tap('cue-rate', { 'data-id': 'c-old', 'data-arg': 'wrong' }); await flush()
+    expect(h.cueCalls.filter(c => c.method === 'POST')).toHaveLength(1)
+    expect(h.t.listHtml()).toContain('Saving…')
+    release({ ok: true, cueId: 'c-old', verdict: 'useful', vote: null }); await flush()
+    expect(h.S.cue.queue[0].cueId).toBe('c-mid')
+  })
+
+  it('a rating that did not save says why in Control\'s words and keeps the cue', async () => {
+    const cases: Array<[unknown, string]> = [
+      [httpError(404, 'unknown_cue'), 'This cue is older than 30 days and was removed.'],
+      [httpError(409, 'cue_session_mismatch'), 'The server files this cue under another meeting. The rating was not saved.'],
+      [httpError(503, 'verdicts_unreadable'), 'The server\'s ratings file cannot be read. The rating was not saved.'],
+      [httpError(503), 'Server is updating. Rating not saved, try again.'],
+      [new Error('Load failed'), 'Your Mac did not answer. The rating was not saved; try again.'],
+      [httpError(400, 'invalid_request'), 'The server did not accept this rating.'],
+    ]
+    for (const [err, line] of cases) {
+      const h = load({ cues: cueServer({ feedback: () => { throw err } }) })
+      await h.open(['view', 'cues'])
+      await h.open()
+      h.tap('cue-rate', { 'data-id': 'c-old', 'data-arg': 'useful' }); await flush()
+      expect(h.S.cue.queue[0].cueId).toBe('c-old')
+      expect(h.t.listHtml()).toContain(line.replace(/'/g, '&#39;'))
+    }
+  })
+
+  it('Rated cues reads the whole week newest first; a new verdict keeps the note, the same verdict sends nothing, Clear sends it back to the queue', async () => {
+    const h = load({ cues: cueServer() })
+    await h.open(['view', 'rated'])
+    await h.open()
+    expect(h.cueCalls.some(c => c.path === '/api/live-cues/history?days=7&limit=1000')).toBe(true)
+    const html: string = h.t.listHtml()
+    expect(html).toContain('Rated Useful · “spot on”')
+    expect(html).toMatch(/data-arg="useful" aria-pressed="true"/)
+    h.tap('cue-rate', { 'data-id': 'c-rated', 'data-arg': 'useful' }); await flush()
+    expect(h.cueCalls.filter(c => c.method === 'POST')).toEqual([])
+    h.tap('cue-rate', { 'data-id': 'c-rated', 'data-arg': 'repeat' }); await flush()
+    expect(h.cueCalls.filter(c => c.method === 'POST').map(c => c.body)).toEqual([{ sessionId: 'meeting_1793728868236_emvdsb', cueId: 'c-rated', verdict: 'repeat', note: 'spot on' }])
+    h.tap('cue-clear', { 'data-id': 'c-rated' }); await flush()
+    expect(h.cueCalls.filter(c => c.method === 'POST').map(c => c.body)[1]).toEqual({ sessionId: 'meeting_1793728868236_emvdsb', cueId: 'c-rated', verdict: 'clear' })
+    expect(h.S.cue.rated).toEqual([])
+    expect(h.S.cue.queue.map((c: any) => c.cueId)).toContain('c-rated')
+  })
+
+  it('a history read that fails says why, with Check again except while loading or on an older server', async () => {
+    const storage = load({ cues: () => { throw httpError(503, 'verdicts_unreadable') } })
+    storage.S.view = 'cues'
+    await storage.open()
+    expect(storage.t.listHtml()).toContain('ratings file cannot be read, so cues cannot be listed')
+    expect(storage.t.listHtml()).toContain('data-mm="cue-check"')
+    const odd = load({ cues: () => ({ cues: [] }) })
+    odd.S.view = 'cues'
+    await odd.open()
+    expect(odd.t.listHtml()).toContain('was not readable')
+    const older = load()
+    older.S.view = 'cues'
+    await older.open()
+    expect(older.S.view).toBe('recent')
+  })
+
+  it('a memory source opens in All memories; notes are cut to 200 UTF-16 units on a character; only public https pages open', async () => {
+    const h = load({ cues: cueServer() })
+    await h.open(['view', 'cues'])
+    await h.open()
+    h.tap('cue-memory', { 'data-id': 'mem_src' }); await flush()
+    expect(h.S.view).toBe('memories')
+    expect(h.t.cueNote('a  b\n c')).toBe('a b c')
+    const emoji = '\u{1F600}'.repeat(150)
+    expect(h.t.cueNote(emoji)).toHaveLength(200)
+    expect(h.t.cueNote('x' + emoji)).toHaveLength(199)
+    for (const bad of ['http://reuters.com', 'https://localhost/x', 'https://10.0.0.1/', 'https://mac.local/', 'https://intranet/', 'https://u:p@reuters.com/', 'https://reuters.com:8443/', 'https://a.internal/'])
+      expect(h.t.cueHttps(bad), bad).toBeNull()
+    expect(h.t.cueHttps('https://www.reuters.com/a')).not.toBeNull()
+  })
+})
+
+describe('Control Web Memories: QA fixes (6.99.26)', () => {
+  it('a request that never reached the Mac says so in plain words, never the browser\'s "Failed to fetch"', async () => {
+    const h = load({ answers: { 'ws:learning_page': new TypeError('Failed to fetch'), 'learning.list': new TypeError('Failed to fetch') } })
+    await h.open()
+    const html: string = h.t.listHtml()
+    expect(html).toContain('Could not reach COS on your Mac. Check that the Mac is awake and on Tailscale, then try again.')
+    expect(html).not.toContain('Failed to fetch')
+  })
+
+  it('the events count says it could not be counted when the first read fails, and keeps its last value when a refresh fails', async () => {
+    const failing = load({ answers: { 'ws:learning_page': new TypeError('Failed to fetch'), 'learning.list': new TypeError('Failed to fetch') } })
+    await failing.open()
+    expect(failing.t.countsHtml()).toContain('Events in 90 days could not be counted')
+    let fail = false
+    const page = base()['ws:learning_page']
+    const h = load({ answers: { 'ws:learning_page': () => (fail ? new TypeError('Failed to fetch') : page), 'learning.list': () => (fail ? new TypeError('Failed to fetch') : { events: [] }) } })
+    await h.open()
+    expect(h.t.countsHtml()).toContain('<b>34,195</b> events in 90 days')
+    fail = true
+    h.tap('refresh'); await flush()
+    expect(h.t.countsHtml()).toContain('<b>34,195</b> events in 90 days')
+  })
+
+  it('Recent learning keeps one order across reads: newest first, ties by event id', async () => {
+    const ts = '2026-11-07T05:12:46Z'
+    const row = (id: string, t = ts) => ({ event_id: id, lesson_id: 'mem_' + id, event_type: 'retrieved', store: 'memory_trace', title: 'Included in context 1 time', source_refs: [], ts: t })
+    let n = 0
+    const reads = [[row('evt_b'), row('evt_c'), row('evt_a'), row('evt_old', '2026-11-01T00:00:00Z')], [row('evt_old', '2026-11-01T00:00:00Z'), row('evt_c'), row('evt_a'), row('evt_b')]]
+    const h = load({ answers: { 'ws:learning_page': () => ({ protocol: 1, matched_total: 4, next_cursor: null, coverage: {}, items: reads[n++ % 2] }) } })
+    await h.open()
+    const first = h.S.recent.rows.map((r: any) => r.event_id)
+    h.tap('refresh'); await flush()
+    expect(first).toEqual(['evt_a', 'evt_b', 'evt_c', 'evt_old'])
+    expect(h.S.recent.rows.map((r: any) => r.event_id)).toEqual(first)
+  })
+
+  it('Find points has no inline handler (the page CSP blocks those); the pane runs it by its data-role', () => {
+    const workspace = readFileSync(join(HERE, 'memories', 'memory-workspace.js'), 'utf8')
+    for (const f of ['memory-workspace.js', 'graph-explorer.js']) expect(readFileSync(join(HERE, 'memories', f), 'utf8'), f).not.toMatch(/\son[a-z]+="/)
+    expect(workspace).toContain('data-role="find-points"')
+    expect(SOURCE).toContain(`closest('.memory-investigation [data-role="find-points"]')`)
   })
 })
