@@ -1,3 +1,40 @@
+## 6.99.27 - Answer session questions from your phone without the snags; attach photos and files anywhere you write to a session (private)
+
+2026-11-07. Private build on 6.99.26 (e403f38). Server only. Works with COS Control 0.5.376 as installed.
+
+Miles tested 6.99.26 on his iPhone, 09:29 to 09:35: the question took a while to appear on Today, he could not submit his answers ("It's not allowing me to answer the Qs"), the pet had no way to reach the question, and "We still don't have the ability to take picture, or add photo or files from the web." His physical iPhone screenshots also showed no way back from a session opened from the pet's list.
+
+**Question cards that work on a phone**
+- Why his first try failed: with question 1 picked and question 2 (multi-select) empty, Submit was greyed out without saying why (the broker refuses an empty answer, and the card wrongly said "Pick any that apply"), and on his screen Submit sat below the fold.
+- Now a footer stays on screen with progress ("1 of 2 answered") and "Review and submit". It never greys out: a tap with something missing names that question and scrolls to it. Each question says what it needs ("Pick one." or "Pick one or more."). A single-choice pick moves on to the next question. Tapping the strip scrolls to that question.
+- A web answer is logged as `web_won` (it was logged as `glasses_won`).
+
+**Questions show up sooner**
+- Today reads questions every 3 s while it is visible (it waited up to 10 s), reads at once when you come back to the tab or to Today, and at once when a session flips to waiting, at most one extra read a second. Worst case from parked to painted drops from about 10 s to about 3 s. Hidden tabs do not read.
+
+**The pet leads with questions**
+- While a question waits for you, the caption reads "1 question for you" (or "N questions for you"), the pet shows its attention pose (the same order as COS Control), and a tap opens that question's card, or a list with "Questions for you" first when several sessions ask.
+- A session opened from the pet's list has "Back to sessions", which returns to the list where you left it; the phone's Back gesture does the same. X still closes the overlay.
+
+**Attach photos and files**
+- Attach in the Sessions reader (Send and Fork), Today's reply and note boxes, the Ask sheet and COS chat. "Take photo" opens the camera on touch devices; the photo library and any file type work too.
+- Caps: 5 files a message, 64 MB each (videos up to 100 MB). The screen says so.
+- Where they land: on the Mac, in `COS_DATA_DIR/media/assets/<id>/` for types the media store reads, or `COS_DATA_DIR/turn-files/<id>/file/<name>` for anything else and for photos sent from a session box (sent full size). Turn files are kept 4 hours, or 30 days once a turn takes them. The session receives the paths on the Mac; the browser never sees a path.
+- A message held until the reply ends keeps its files: Don't send, a timeout or a refusal puts the words and the files back in the box (a file past its 4 hours is named as gone).
+- New health key: `threadTurnFileBytes`.
+
+**Prep that was interrupted can be finished**
+- Reopening a live meeting no longer hides an interrupted prep binding: the retry stays, uses the saved binding revision and needs the server's applied receipt (Codex root).
+
+**Today summary honesty, round 2** (still off unless turned on)
+- More "all clear" phrasings are dropped while anything needs you, any "none running" claim is checked against the sessions, and a sentence with a date or time the inputs do not back is dropped.
+
+**Default-on changes for every web user**
+- Today polls session questions every 3 s while visible (one small GET per visible tab), plus an immediate read on return and on a waiting flip.
+- Question cards: sticky Review and submit footer, auto-advance, per-question needs.
+- Pet: question caption, attention pose and tap to the question; Back to sessions in its list.
+- Attachments: Take photo on touch devices, any file type and full-size photos in session boxes, the new health key. Messages without files go out exactly as before.
+
 ## 6.99.26 - Answer your sessions' questions from Control Web; the pet opens what matters; a Today summary you can turn on (private)
 
 2026-11-07. Private build on 6.99.25 (npm next), including the voice-enroll-name test fix (44f2abf). Server only. Works with COS Control 0.5.376 as installed.
