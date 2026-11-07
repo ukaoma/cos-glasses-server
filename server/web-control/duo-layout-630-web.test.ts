@@ -48,7 +48,7 @@ describe('6.99.30: api() never shows the browser’s own network error, and says
       expect(seen).toEqual([false])
     })
   }
-  it('a timeout keeps its own words; an answer of any status marks the server up, a 502 down; each change is heard once', async () => {
+  it('a timeout keeps its own words; an answer of any status marks the server up, a 502 included (COS sends its own); each change is heard once', async () => {
     let next: () => Promise<unknown> = () => ok(200, { ok: true })
     const t = transport(() => next())
     const seen: boolean[] = []
@@ -58,7 +58,12 @@ describe('6.99.30: api() never shows the browser’s own network error, and says
     await t.ctx.api('/c').catch(() => {})
     next = () => ok(404, { error: 'nope' })
     await t.ctx.api('/d').catch(() => {})
-    expect(seen, 'up once, down on the 502, up on a 404 (the Mac answered)').toEqual([true, false, true])
+    expect(seen, 'up once: a 502 and a 404 are the Mac answering, never a flap (QA 6.99.30 Skeptic)').toEqual([true])
+    next = () => Promise.reject(new TypeError('Load failed'))
+    await t.ctx.api('/f').catch(() => {})
+    next = () => ok(502, { error: 'unsupported_workspace' })
+    await t.ctx.api('/g').catch(() => {})
+    expect(seen, 'down on a request that never reached it, up again on the next answer, a 502 included').toEqual([true, false, true])
     const ctrlErr = Object.assign(new Error('aborted'), { name: 'AbortError' })
     next = () => Promise.reject(ctrlErr)
     const late = await t.ctx.api('/e', { timeoutMs: 1 }).catch((e: any) => e)
@@ -252,11 +257,24 @@ describe('6.99.30: a layout breadcrumb on open and on each keyboard change reach
 describe('6.99.30: Return sends only where a keyboard and a fine pointer are the way in, never mid-composition', () => {
   function sends(fine: boolean, e: Record<string, unknown>) {
     const win = { matchMedia: (q: string) => ({ matches: fine && q === '(hover: hover) and (pointer: fine)' }) }
-    const src = /  function keyboardFirst\(\) \{[^\n]*\}/.exec(APP)![0] + '\n' + /  function returnSends\(e\) \{[^\n]*\}/.exec(APP)![0]
+    const src = /  function keyboardFirst\(\) \{[^\n]*\}/.exec(APP)![0] + '\n' + /  function returnSends\(e\) \{\n[\s\S]*?\n  \}/.exec(APP)![0]
     // eslint-disable-next-line no-new-func
     return new Function('window', src + '\nreturn returnSends;')(win)({ key: 'Enter', target: { tagName: 'TEXTAREA' }, ...e })
   }
   it('the unfolded Duo (1430 wide, touch, a Bluetooth keyboard): Return is a new line', () => { expect(sends(false, {})).toBe(false) })
+  it('Cmd-Return or Ctrl-Return sends on every device (a Bluetooth keyboard on the Duo or an iPad); never mid-composition or with Shift', () => {
+    expect(sends(false, { metaKey: true })).toBe(true)
+    expect(sends(false, { ctrlKey: true })).toBe(true)
+    expect(sends(true, { metaKey: true })).toBe(true)
+    expect(sends(false, { metaKey: true, isComposing: true })).toBe(false)
+    expect(sends(false, { ctrlKey: true, keyCode: 229 })).toBe(false)
+    expect(sends(false, { metaKey: true, shiftKey: true })).toBe(false)
+    expect(sends(false, { metaKey: true, target: { tagName: 'INPUT' } })).toBe(false)
+  })
+  it('Ask COS keeps Return-asks on touch (unchanged) but never on an IME composing key (keyCode 229)', () => {
+    const chat = read('panes/cos-chat.js')
+    expect(chat).toContain("e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || e.shiftKey) return;")
+  })
   it('a Mac or PC: Return sends; Shift-Return, an IME composing, keyCode 229 and an input do not', () => {
     expect(sends(true, {})).toBe(true)
     expect(sends(true, { shiftKey: true })).toBe(false)

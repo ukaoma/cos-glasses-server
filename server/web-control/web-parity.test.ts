@@ -334,7 +334,8 @@ describe('Model and Effort come from /api/models', () => {
 })
 
 // ── session questions (panes/questions.js) ─────────────
-function loadQuestions(cap: Record<string, unknown> | null, poll: { status: number; body?: unknown }) {
+function loadQuestions(cap: Record<string, unknown> | null, poll: { status: number; body?: unknown; reject?: boolean }) {
+  const notes: boolean[] = []
   const fetches: Array<{ url: string; init: any }> = []
   const posts: Array<{ path: string; body: any }> = []
   let authShown = 0
@@ -349,6 +350,7 @@ function loadQuestions(cap: Record<string, unknown> | null, poll: { status: numb
   const W = {
     esc: (s: unknown) => String(s), toast: () => {}, showAuth: () => { authShown++ },
     onShell: (fn: () => void) => { onShell = fn },
+    noteServer: (up: boolean) => { notes.push(up) },
     api: (path: string, o?: { method?: string; body?: unknown }) => {
       if (o?.method === 'POST') { posts.push({ path, body: o.body }); return Promise.resolve({ ok: true }) }
       if (path === '/api/models') return Promise.resolve(cap ? { capabilities: { sessionQuestions: cap } } : {})
@@ -357,6 +359,7 @@ function loadQuestions(cap: Record<string, unknown> | null, poll: { status: numb
   }
   const fetch = (url: string, init: unknown) => {
     fetches.push({ url, init })
+    if (poll.reject) return Promise.reject(new TypeError('Load failed'))
     return Promise.resolve({ status: poll.status, ok: poll.status >= 200 && poll.status < 300, json: () => Promise.resolve(poll.body) })
   }
   const document = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? shell : null), addEventListener: () => {}, hidden: false, activeElement: null }
@@ -369,7 +372,7 @@ function loadQuestions(cap: Record<string, unknown> | null, poll: { status: numb
   const Qs = (W as any).sessionQuestions
   const fire = (type: string, target: Record<string, unknown>) => listeners[type]!({ target })
   const button = (what: string, id: string) => ({ closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? what : a === 'data-sq-id' ? id : null) }) })
-  return { start: () => onShell?.(), fetches, posts, Qs, fire, button, host, authShown: () => authShown }
+  return { start: () => onShell?.(), fetches, posts, Qs, fire, button, host, authShown: () => authShown, notes }
 }
 const ITEM_Q = {
   id: 'pq_aaaaaaaaaaaaaaaaaaaaaaaa', sessionId: 's1', provider: 'claude', kind: 'question', tool: 'AskUserQuestion',
@@ -381,6 +384,23 @@ const ITEM_Q = {
 }
 
 describe('session question cards (6.99.12)', () => {
+  // QA 6.99.30 (Skeptic): Sessions and Meetings keep this 3 s read running and call no api(), so it alone tells app.js
+  // whether the Mac answered; otherwise a "down" mark left Submit, Allow and Deny disabled until the 5-minute check.
+  it('the poll tells app.js the Mac answered (any status, a 500 included) or did not (a network rejection)', async () => {
+    for (const status of [200, 500, 502]) {
+      const h = loadQuestions({ enabled: true, webClient: true }, { status, body: { enabled: true, items: [] } })
+      h.start()
+      await flush(); await flush(); await flush()
+      expect(h.fetches, String(status)).toHaveLength(1)
+      expect(h.notes, String(status)).toEqual([true])
+    }
+    const gone = loadQuestions({ enabled: true, webClient: true }, { status: 0, reject: true })
+    gone.start()
+    await flush(); await flush(); await flush()
+    expect(gone.fetches).toHaveLength(1)
+    expect(gone.notes).toEqual([false])
+  })
+
   it('never calls the questions route unless the server says it takes the browser session', async () => {
     for (const cap of [null, { enabled: true }, { enabled: false, webClient: true }]) {
       const h = loadQuestions(cap, { status: 200, body: { items: [] } })

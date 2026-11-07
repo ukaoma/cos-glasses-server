@@ -3540,6 +3540,16 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
     expect(L.cls.has('ta-kb-strip'), 'focus left: the refit came from focusout').toBe(false)
   })
 
+  it('desktop zoom or a scrollbar (1 to 23 px of rounding) never reads as a strip; 24 px does (QA 6.99.30)', async () => {
+    for (const [inset, want] of [[1, false], [17, false], [23, false], [24, true]] as const) {
+      const h = await opened(1000, { height: 1000 })
+      const L = layerOf(h)
+      h.viewport({ height: 1000 - inset }); focusReply(h); h.runFrames()
+      expect(L.cls.has('ta-kb-strip'), inset + ' px').toBe(want)
+      expect(L.cls.has('ta-kb'), inset + ' px never folds the header').toBe(false)
+    }
+  })
+
   it('focus in a question card’s Other field counts as typing too (a strip is known by focus)', async () => {
     const h = await opened(1000, { height: 1000 })
     const L = layerOf(h)

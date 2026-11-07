@@ -118,7 +118,7 @@
       // Blob bodies keep their deadline after headers: a stalled download must release its queue slot.
       if (timer && o.responseType !== 'blob') clearTimeout(timer);
       sxNoteClock(res, sentAt);
-      noteServer(res.status !== 502);
+      noteServer(true);
       if (res.status === 401 && path.indexOf('/api/web-session/') !== 0) { showAuth(); var gone = new Error('Signed out. Connect this browser again.'); gone.status = 401; throw gone; }
       if (o.responseType === 'blob' && res.ok) return res.blob();
       return res.text().then(function (text) {
@@ -181,8 +181,10 @@
     if (rtt <= SX_CLOCK.rtt || got - SX_CLOCK.at > SX_CLOCK_KEEP_MS) { SX_CLOCK.skew = skew; SX_CLOCK.rtt = rtt; SX_CLOCK.at = got; }
   }
   // 6.99.30 (QA: "Server connected" stayed green for five minutes after the Mac went away): every request says whether
-  // the Mac answered. A request that never reached it, or a 502 from the proxy in front of it, marks it down; any other
-  // answer marks it up. The rail's server line, Today's sheet and the question cards hear each change at once
+  // the Mac answered. A request that never reached it marks it down; any HTTP answer, whatever its status, marks it up.
+  // QA 6.99.30 (Skeptic): never a 502. Nothing sits in front of the Mac (direct HTTPS over Tailscale) and COS sends its
+  // own 502s (an unsupported Memories workspace, a bad Meetings Ask answer), so a 502 flapped the rail, the question
+  // cards and an open sheet down and up again. The rail's server line, Today's sheet and the question cards hear each change at once
   // (COSWeb.onServer). null until the first answer.
   var SERVER = { up: null, hooks: [] };
   function noteServer(up) {
@@ -275,7 +277,12 @@
   // Return in a text box sends only where a keyboard and a pointer are the way in (cos-chat.js keyboardFirst): never on
   // a touch screen, whatever its width (6.99.30: the unfolded Duo's on-screen keyboard sent on Return), and never
   // mid-composition (an IME's Return picks the word; keyCode 229 is Safari's composing key). Shift-Return is a new line.
-  function returnSends(e) { return !!(e && e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && e.target && e.target.tagName === 'TEXTAREA' && keyboardFirst()); }
+  // QA 6.99.30 (Skeptic): Cmd-Return or Ctrl-Return sends on every device, so a Bluetooth keyboard on the Duo or an iPad
+  // (a coarse pointer, so plain Return is a new line there) still has a send key.
+  function returnSends(e) {
+    if (!e || e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229 || !e.target || e.target.tagName !== 'TEXTAREA') return false;
+    return !!(e.metaKey || e.ctrlKey || keyboardFirst());
+  }
   function route(forceChanged) {
     var r = parseRoute();
     var changedPane = forceChanged === true || r.pane !== state.pane || !document.querySelector('#pane-' + r.pane + ':not(.hidden)');
@@ -1667,7 +1674,7 @@
     return fetch(path, { method: o.method || 'GET', headers: headers, credentials: 'same-origin', body: o.body !== undefined ? JSON.stringify(o.body) : undefined, signal: ctrl ? ctrl.signal : undefined })
       .then(function (res) {
         sxNoteClock(res, sentAt);
-        noteServer(res.status !== 502);
+        noteServer(true);
         if (res.status === 401) { showAuth(); throw new Error('Signed out. Connect this browser again.'); }
         return res.text().then(function (t) { var b = {}; try { b = t ? JSON.parse(t) : {}; } catch (_e) { b = {}; } return { status: res.status, body: b || {} }; });
       }, function (err) {
@@ -1947,7 +1954,9 @@
     var t = r ? sxTruth(r) : null;
     var since = t && t.at ? new Date(t.at) : f.stateSince || f.lastEventAt;
     if (!since) return '';
-    var s = Math.max(0, Math.floor((Date.now() - since.getTime()) / 1000));
+    // QA 6.99.30 (Skeptic): every moment here is on the Mac's clock (the truth's own time, or the Mac's state_since), so
+    // now is too; a phone a minute behind read "0s" for a minute.
+    var s = Math.max(0, Math.floor((sxServerTime(Date.now()) - since.getTime()) / 1000));
     if (s < 60) return s + 's';
     if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
     return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
@@ -4951,6 +4960,8 @@
     // 6.99.30: the visible viewport read one way, layout breadcrumbs, the one unreachable sentence, Return-sends.
     viewportFit: viewportFit, layoutCrumb: layoutCrumb, uaClass: uaClass, unreachableCopy: UNREACHABLE_COPY, keyboardFirst: keyboardFirst,
     serverUp: function () { return SERVER.up; },
+    // Panes with their own fetch (the questions poll) say whether the Mac answered, so a "down" mark never outlives it.
+    noteServer: function (up) { noteServer(up); },
     onServer: function (fn) { SERVER.hooks.push(fn); }
   };
   // Today as a place to act (panes/today-actions.js, Miles 11/06): what the Today cards show, a repaint after a

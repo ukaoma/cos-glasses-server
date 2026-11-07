@@ -142,6 +142,9 @@
     capForPoll().then(function (cap) {
       if (!usable(cap)) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
       return fetch(pollUrl(), { headers: { 'X-COS-Web': '1' }, credentials: 'same-origin', cache: 'no-store' }).then(function (res) {
+        // QA 6.99.30 (Skeptic): this 3 s read is what Sessions and Meetings pages keep running, so it tells app.js the Mac
+        // answered (any status) or did not (below); otherwise a "down" mark stranded Submit, Allow and Deny for minutes.
+        if (W.noteServer) W.noteServer(true);
         if (res.status === 401) { Q.again = false; landed(); Q.stopped = true; clearCards(); return; }
         if (!res.ok) { schedule(DEFAULT_POLL_MS); landed(); return; }
         return res.json().then(function (d) {
@@ -152,7 +155,10 @@
           schedule(nextWait(every));
           landed();
         });
-      }, function () { schedule(DEFAULT_POLL_MS); landed(); });
+      }, function (err) {
+        if (W.noteServer && !(err && err.name === 'AbortError')) W.noteServer(false);
+        schedule(DEFAULT_POLL_MS); landed();
+      });
     }).catch(function () { schedule(DEFAULT_POLL_MS); landed(); });
   }
   // Read now, unless a read went out under NUDGE_GAP_MS ago (then at the end of that gap) or one is on the wire (then

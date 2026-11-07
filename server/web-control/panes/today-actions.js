@@ -187,10 +187,12 @@
   //   ta-kb-strip  a field in the sheet has focus and something under KB_MIN_PX covers the bottom (a hardware
   //                keyboard's 55 to 70 px strip): the header stays as it is; the strip covers the home indicator,
   //                so the reply box drops that inset.
-  // KB_MIN_PX matters only with nothing focused (a browser's bar, IMG_0503's 106 px): such a reading never folds the
-  // header. Read on visualViewport resize and scroll while the overlay is open, and on window resize and
+  // KB_MIN_PX applies whether or not a field has focus: a bottom bar under it (Comet's folded bar measured about 110 px)
+  // never folds the header, one of 120 px or more does. A strip counts from KB_STRIP_MIN_PX, so desktop zoom or a
+  // scrollbar (1 to 17 px of rounding, QA 6.99.30) never reads as a keyboard strip. Read on visualViewport resize and scroll while the overlay is open, and on window resize and
   // orientationchange, pageshow, the page coming back into view, and focus moving in the sheet: at most once a frame.
   var KB_MIN_PX = 120;
+  var KB_STRIP_MIN_PX = 24;
   var BODY_MIN_PX = 72;          // about three lines of the conversation (15 px text at 1.5)
   var KB = { on: false, strip: false, tight: false, frame: 0, listening: false, width: 0 };
   function tall(el) { return (el && el.offsetHeight) || 0; }
@@ -222,7 +224,7 @@
     layer.style.setProperty('--ta-vh', v.height + 'px');
     layer.style.setProperty('--ta-vt', v.top + 'px');
     layer.style.setProperty('--ta-below', v.below + 'px');
-    var focus = typing(), on = v.inset >= KB_MIN_PX, strip = !on && focus && v.inset > 0;
+    var focus = typing(), on = v.inset >= KB_MIN_PX, strip = !on && focus && v.inset >= KB_STRIP_MIN_PX;
     // A turned screen measures the room again: what was tight in landscape is not in portrait (QA 6.99.29).
     var w = window.innerWidth || 0, turned = !!(KB.width && w && w !== KB.width);
     if (w) KB.width = w;

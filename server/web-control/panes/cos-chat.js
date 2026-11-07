@@ -1826,7 +1826,7 @@
   }
   function isComposerInput(el) { return !!(el && el.classList && el.classList.contains('cc-input')); }
   function onKey(e) {
-    if (!isComposerInput(e.target) || e.key !== 'Enter' || e.isComposing || e.shiftKey) return;
+    if (!isComposerInput(e.target) || e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || e.shiftKey) return;
     e.preventDefault();
     var k = kOf(e.target);
     if (e.altKey) { if (k === CHAT && dropOn()) doDrop(); return; }
