@@ -238,7 +238,7 @@ export function withRunning<T extends { session_id: string }>(entry: T, scan: Oc
     // clears on its own when the work stops. Still a display hint, never a gate.
     // 6.62.0: or the engine's own hooks (or a Codex rollout) say a turn is open and the
     // last event is inside HOOK_ACTIVE_CAP_MS (plan 1.1-1.3).
-    running_active: decides ? hint!.active : occ?.activeRecently === true || hint?.active === true,
+    running_active: decides || hint?.activeDecides === true ? hint!.active : occ?.activeRecently === true || hint?.active === true,
   }
 }
 
@@ -262,8 +262,9 @@ export function withRunning<T extends { session_id: string }>(entry: T, scan: Oc
  * A hook-derived `running` only exists inside the deriver's 30-minute open-turn ceiling, so an
  * open-quiet Cursor row ends there, or at its Stop or SessionEnd.
  *
- * For Claude and Codex the hint only ADDS to occupancy (a held, freshly written thread still
- * reads as it did). For Cursor, whose list has no occupancy at all, a hook signal decides, and
+ * For Claude and Codex, authoritative idle/waiting states suppress recent-write activity
+ * for display while leaving ownership intact. Other hints add to occupancy. For Cursor,
+ * whose list has no occupancy at all, a hook signal decides, and
  * a running Cursor turn is the user's own (an IDE composer or their terminal; COS's own child
  * is kept out of the phase), so it is foreign.
  */
@@ -273,15 +274,25 @@ export interface RunningHint {
   foreign: boolean
   /** Cursor with hook evidence: this hint IS the answer, occupancy and file time are not read. */
   decides: boolean
+  /** Authoritative non-working state suppresses file-write activity without changing occupancy. */
+  activeDecides?: boolean
 }
 
 export function runningHintFor(provider: AgentProvider, derived: DerivedSessionState | undefined, lastEventAt: number | null, now: number): RunningHint | null {
   const cursor = provider === 'cursor'
   const quiet: RunningHint | null = cursor ? { running: false, active: false, foreign: false, decides: true } : null
   if (!derived) return null
+  // The state deriver already arbitrates fresh work, waits and completed turns.
+  // A transcript flush after Stop must not turn an idle/waiting badge back to
+  // working. Keep ownership/open-window evidence intact: this is display only.
+  if ((derived.state_source === 'hook' || derived.state_source === 'registry') && derived.agent_state !== 'running') {
+    if (cursor) return derived.agent_state === 'waiting'
+      ? { running: true, active: false, foreign: true, decides: true }
+      : quiet
+    return { running: derived.agent_state === 'waiting', active: false, foreign: false, decides: false, activeDecides: true }
+  }
   const inCap = lastEventAt !== null && now - lastEventAt <= HOOK_ACTIVE_CAP_MS && lastEventAt <= now + 5_000
   if (derived.state_source === 'hook') {
-    if (derived.agent_state === 'waiting') return { running: true, active: false, foreign: cursor, decides: cursor }
     if (derived.agent_state === 'running' && inCap) return { running: true, active: true, foreign: cursor, decides: cursor }
     if (derived.agent_state === 'running' && cursor) return { running: true, active: false, foreign: true, decides: true }
     return quiet
