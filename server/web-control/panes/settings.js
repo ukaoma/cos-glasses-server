@@ -378,8 +378,11 @@
         var tries = 0;
         (function scroll() {
           var el = document.getElementById('set-cat-pet');
-          if (el) { el.scrollIntoView({ block: 'start' }); return; }
-          if (++tries < 20) setTimeout(scroll, 150);
+          // Land on the pet in use once the catalog has drawn; until then, the Pet section's top.
+          var chosen = el && el.querySelector('[data-pet][aria-pressed="true"]');
+          if (chosen) { chosen.scrollIntoView({ block: 'center' }); return; }
+          if (el && tries === 0) el.scrollIntoView({ block: 'start' });
+          if (++tries < 40) setTimeout(scroll, 150);
         })();
       }
     }
