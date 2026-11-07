@@ -418,7 +418,9 @@
     else if (working + waiting === 2) pose = 'duel';
     else if (working + waiting === 1) pose = 'working';
     else pose = alive > 0 ? 'patrol' : 'idle';
-    return { pose: pose, working: working, waiting: waiting, questions: qs.length };
+    // QA 6.99.27 (User 6): a permission request is an approval, counted apart from the questions.
+    var approvals = qs.filter(function (it) { return it.kind === 'approval'; }).length;
+    return { pose: pose, working: working, waiting: waiting, questions: qs.length - approvals, approvals: approvals };
   }
   // COS Control's fallbacks (PetSpritePose.fallbackPoses) for a pet that has no strip for the pose.
   var PET_FALLBACK = { attention: ['error', 'waiting', 'idle'], patrol: ['idle'], duel: ['swarm', 'working', 'idle'], trio: ['swarm', 'duel', 'working', 'idle'],
@@ -465,14 +467,18 @@
   function petButtonState(box, c, label) {
     var btn = box.querySelector('.pet-btn');
     if (!btn) return;
-    var any = c.working + c.waiting + (c.questions || 0) > 0;
+    var any = c.working + c.waiting + (c.questions || 0) + (c.approvals || 0) > 0;
     btn.setAttribute('aria-label', any ? label + '. Open' : label);
     btn.setAttribute('aria-disabled', any ? 'false' : 'true');
   }
   function petCaption(c) {
     var parts = [];
-    // A question waiting here leads (6.99.27).
-    if (c.questions) parts.push(c.questions === 1 ? '1 question for you' : c.questions + ' questions for you');
+    // A question or an approval waiting here leads (6.99.27): "1 question for you", "1 approval for you", or
+    // "1 question and 1 approval for you" (QA 6.99.27, User 6: approvals were counted as questions).
+    var asks = [];
+    if (c.questions) asks.push(c.questions === 1 ? '1 question' : c.questions + ' questions');
+    if (c.approvals) asks.push(c.approvals === 1 ? '1 approval' : c.approvals + ' approvals');
+    if (asks.length) parts.push(asks.join(' and ') + ' for you');
     if (c.working) parts.push(c.working + ' running');
     if (c.waiting) parts.push(c.waiting + ' waiting on you');
     return parts.length ? parts.join(', ') : 'Nothing running';
@@ -2014,12 +2020,12 @@
     Array.prototype.forEach.call(slot.querySelectorAll('[data-sx-file]'), function (i) { i.disabled = full || !!r.sending; });
     list.innerHTML = kit.chipsHtml(box, 'data-action') + (box.atts.length ? '<p class="att-limit">' + esc(kit.limitLine(box)) + '</p>' : '');
     list.classList.toggle('hidden', !box.atts.length);
-    // Send and Fork wait while a file uploads and while one failed.
+    // Send and Fork wait while a file uploads. A failed file never greys them out (QA 6.99.27): a tap says why.
     var st = readerFilesState(box), form = $('session-form');
     if (!form || r.sending) return;
     var send = $('session-send'), forkBtn = form.querySelector('[data-action="fork-session"]');
-    if (send) { send.disabled = st === 'waiting' || st === 'failed'; send.textContent = st === 'waiting' ? 'Uploading' : 'Send'; }
-    if (forkBtn) forkBtn.disabled = st === 'waiting' || st === 'failed';
+    if (send) { send.disabled = st === 'waiting'; send.textContent = st === 'waiting' ? 'Uploading' : 'Send'; }
+    if (forkBtn) forkBtn.disabled = st === 'waiting';
   }
   function addReaderFiles(list) {
     var kit = readerKit(), r = state.reading; if (!kit || !r || !readerFilesOn() || !list || !list.length) return;
@@ -2067,7 +2073,7 @@
     // first turn is this message, so the copy gets the same files (the fork route writes their paths as a turn does).
     var fb = readerFilesOn() ? readerBox(r) : null, fst = readerFilesState(fb);
     if (fst === 'waiting') { sessionStatus('A file is still uploading. ' + (fork ? 'Fork' : 'Send') + ' when it finishes.'); return; }
-    if (fst === 'failed') { sessionStatus('A file did not upload. Retry it or remove it, then ' + (fork ? 'fork' : 'send') + '.', 'error'); return; }
+    if (fst === 'failed') { sessionStatus('A file did not upload. Retry it or remove it.', 'error'); return; }
     var fileIds = fst === 'ready' ? readerKit().ids(fb) : [];
     if (fileIds.length && !fork) opts = Object.assign({}, opts || {}, { attachmentIds: fileIds });
     // Control's caution (SessionChatVerdict.caution): another app holds this session and looks

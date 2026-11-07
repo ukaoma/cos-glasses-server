@@ -1733,9 +1733,12 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
 // questions.js in a vm with the page's own clocks (wall and monotonic, moved apart), the document's touch listeners,
 // and a poll whose answer the test sets. Nothing reaches a server.
 const MAC_WORDS = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
-function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown>; reduced?: boolean; fetch?: (url: string) => Promise<unknown> | null; models?: (n: number) => Promise<unknown> | null } = {}) {
+function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown>; reduced?: boolean; fetch?: (url: string) => Promise<unknown> | null; models?: (n: number) => Promise<unknown> | null; vv?: { height: number; offsetTop: number }; innerHeight?: number } = {}) {
   const mk = () => ({ hidden: true, innerHTML: '', isConnected: true, listeners: {} as Record<string, (e: unknown) => void>,
+    style: { props: {} as Record<string, string>, setProperty(k: string, v: string) { this.props[k] = v } },
     addEventListener(t: string, fn: (e: unknown) => void) { this.listeners[t] = fn }, querySelector: () => null, querySelectorAll: () => [], contains: () => false })
+  const vvListeners: Record<string, Array<() => void>> = {}
+  const visualViewport = opt.vv ? { ...opt.vv, addEventListener: (t: string, fn: () => void) => { (vvListeners[t] ??= []).push(fn) } } : undefined
   const host = mk()
   const docListeners: Record<string, Array<(e: unknown) => void>> = {}
   const fetches: string[] = [], timers: Array<{ fn: () => void; ms: number }> = [], posts: Array<{ path: string; body: any }> = []
@@ -1754,7 +1757,8 @@ function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string,
   const document: any = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? { classList: { contains: () => false } } : null),
     addEventListener: (t: string, fn: (e: unknown) => void) => { (docListeners[t] ??= []).push(fn) }, hidden: false, activeElement: null }
   const fetch = (url: string) => { fetches.push(url); const own = opt.fetch ? opt.fetch(url) : null; return own || Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(body()) }) }
-  const ctx = vm.createContext({ window: { COSWeb: W, ...(opt.reduced === undefined ? {} : { matchMedia: (q: string) => ({ matches: !!opt.reduced && q.includes('reduce') }) }) },
+  const ctx = vm.createContext({ window: { COSWeb: W, ...(opt.reduced === undefined ? {} : { matchMedia: (q: string) => ({ matches: !!opt.reduced && q.includes('reduce') }) }),
+      ...(visualViewport ? { visualViewport, innerHeight: opt.innerHeight ?? 800 } : {}) },
     document, fetch, console, Date: QDate, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
     performance: opt.perf === false ? undefined : { now: () => 5_000 + mono },
     setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {} })
@@ -1762,7 +1766,8 @@ function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string,
   const touch = (type = 'pointerdown', trusted = true) => (docListeners[type] || []).forEach(fn => fn({ isTrusted: trusted }))
   const visible = (on: boolean) => { document.hidden = !on; (docListeners.visibilitychange || []).forEach(fn => fn({})) }
   const route = (pane: string) => routeHooks.forEach(fn => fn({ pane }))
-  return { Qs: (W as any).sessionQuestions, host, mk, fetches, timers, posts, touch, document, W, visible, route, modelReads: () => modelReads,
+  const viewport = (height: number, offsetTop = 0) => { visualViewport!.height = height; visualViewport!.offsetTop = offsetTop; (vvListeners.resize || []).forEach(fn => fn()) }
+  return { Qs: (W as any).sessionQuestions, host, mk, fetches, timers, posts, touch, document, W, visible, route, viewport, vvListeners, modelReads: () => modelReads,
     start: async () => { onShell!(); await flush() }, later: (wallMs: number, monoMs = wallMs) => { wall += wallMs; mono += monoMs }, changed: () => changed, refreshed: () => refreshed }
 }
 const isoIn = (ms: number) => new Date(Date.now() + ms).toISOString()
@@ -1822,18 +1827,22 @@ describe('6.99.26: the page tells the Mac when it was last touched, for the away
     expect(Math.abs(noPerf.Qs._presenceAge() - 2_000), 'without performance.now the wall clock alone').toBeLessThan(50)
   })
 
-  it('the first touch in a while reaches the Mac at once, not at the next poll', async () => {
+  // QA 6.99.27 (N4): the touch's read goes through nudge, so it keeps the 1 s gap (it was a flat 250 ms).
+  it('the first touch in a while reaches the Mac at once, not at the next poll, within the 1 s gap', async () => {
     const h = loadQ(() => ({ enabled: true, items: [] }))
     await h.start()
     const before = h.timers.length
     h.touch()
-    expect(h.timers.slice(before).map(t => t.ms)).toEqual([250])
+    const first = h.timers.slice(before).map(t => t.ms)
+    expect(first, 'a read went out a moment ago: at the end of the second').toHaveLength(1)
+    expect(first[0]).toBeGreaterThan(900)
+    expect(first[0]).toBeLessThanOrEqual(1000)
     h.later(5_000)
     h.touch()
-    expect(h.timers.slice(before).map(t => t.ms), 'a touch soon after waits for the next poll').toEqual([250])
+    expect(h.timers.slice(before), 'a touch soon after waits for the next poll').toHaveLength(1)
     h.later(61_000)
     h.touch()
-    expect(h.timers.slice(before).map(t => t.ms)).toEqual([250, 250])
+    expect(h.timers.slice(before).map(t => t.ms)[1], 'long after the last read: at once').toBe(0)
   })
 })
 
@@ -2277,6 +2286,19 @@ describe('6.99.26: the pet opens what matters (Miles 11/07)', () => {
     expect(nosid.kit.petQuestions(), 'a held item with no session is not one the pet can open').toEqual([])
     const none = petKit([WAITS, RUNS])
     expect(none.kit.petCaption(none.kit.petPose([WAITS, RUNS], none.kit.petQuestions())), 'no question: the caption as before').toBe('1 running, 1 waiting on you')
+    // QA 6.99.27 (User 6): a permission request is an approval, never a question.
+    const AP = (id: string, sid: string) => ({ ...QW(id, sid), kind: 'approval', tool: 'Bash', questions: undefined, approval: { tool: 'Bash', summary: 'npm test', detail: 'npm test' } })
+    const ap = petKit([WAITS, RUNS], undefined, [AP('pq_3', 'w1')])
+    expect(ap.kit.petCaption(ap.kit.petPose([WAITS, RUNS], ap.kit.petQuestions()))).toBe('1 approval for you, 1 running')
+    const both = petKit([], undefined, [QW('pq_1', 'w1'), AP('pq_3', 'x9')])
+    expect(both.kit.petCaption(both.kit.petPose([], both.kit.petQuestions()))).toBe('1 question and 1 approval for you')
+    const many = petKit([], undefined, [QW('pq_1', 'w1'), QW('pq_2', 'x9'), AP('pq_3', 'y1'), AP('pq_4', 'y2')])
+    expect(many.kit.petCaption(many.kit.petPose([], many.kit.petQuestions()))).toBe('2 questions and 2 approvals for you')
+    const pose = ap.kit.petPose([], ap.kit.petQuestions())
+    expect([pose.pose, pose.questions, pose.approvals], 'an approval still takes the attention pose').toEqual(['attention', 0, 1])
+    const btn = { attrs: {} as Record<string, string>, setAttribute(k: string, v: string) { this.attrs[k] = v } }
+    ap.kit.petButtonState({ querySelector: () => btn }, pose, '1 approval for you')
+    expect(btn.attrs['aria-disabled'], 'a tap opens it').toBe('false')
     expect(none.kit.petCaption(none.kit.petPose([], []))).toBe('Nothing running')
   })
 
@@ -2686,8 +2708,8 @@ describe('6.99.27: the card answers on a phone (Miles 11/07 09:32, "It’s not a
     const card = { querySelector: (sel: string) => (sel === '[data-sq-qblock="0"]' ? blocks[0] : sel === '[data-sq-qblock="1"]' ? blocks[1] : sel === '[data-sq-review]' ? review : sel === '[data-sq="send"]' ? send : null) }
     return { card, calls }
   }
-  async function setup(opt: { reduced?: boolean; item?: unknown } = {}) {
-    const q = loadQ(() => ({ enabled: true, items: [opt.item ?? TWO], settled: [] }), { reduced: opt.reduced })
+  async function setup(opt: { reduced?: boolean; item?: unknown; post?: (path: string, body: any) => Promise<unknown> } = {}) {
+    const q = loadQ(() => ({ enabled: true, items: [opt.item ?? TWO], settled: [] }), { reduced: opt.reduced, post: opt.post })
     await q.start()
     const el = q.mk()
     q.Qs.mount(el, SID)
@@ -2759,6 +2781,40 @@ describe('6.99.27: the card answers on a phone (Miles 11/07 09:32, "It’s not a
     expect(el.innerHTML).toContain('role="status">Ready to submit.</p>')
   })
 
+  // QA 6.99.27 (User 7): the retry named "Submit" while the button read "Review and submit".
+  it('a card of two questions that cannot reach the Mac names its own button: Review and submit', async () => {
+    const { q, el, pick, tap, runAdvance } = await setup({ post: () => Promise.reject(new TypeError('Failed to fetch')) })
+    pick(0, 0); runAdvance(); pick(1, 0); runAdvance()
+    tap('send'); q.later(450); tap('send'); await flush()
+    expect(q.posts).toHaveLength(1)
+    expect(el.innerHTML).toContain('Could not reach your Mac. Tap Review and submit to retry.')
+    expect(el.innerHTML).toMatch(/data-sq="send" data-sq-id="[^"]+">Review and submit</)
+  })
+
+  // QA 6.99.27 (User 2): Today's own card put its sticky footer under the iOS keyboard. The page now lifts it by the
+  // keyboard's height, read from visualViewport; the overlay's footer sits at the sheet's bottom.
+  it('the page card’s footer rides above the keyboard (visualViewport); the overlay’s sits at the bottom of the sheet', async () => {
+    const q = loadQ(() => ({ enabled: true, items: [], settled: [] }), { vv: { height: 800, offsetTop: 0 }, innerHeight: 800 })
+    await q.start()
+    expect(q.vvListeners.resize?.length, 'it listens to the visible viewport').toBe(1)
+    expect(q.vvListeners.scroll?.length).toBe(1)
+    q.viewport(464)                     // the keyboard takes 336 px
+    expect(q.host.style.props['--sq-kb']).toBe('336px')
+    q.viewport(464, 120)                // scrolled while it is up: the visible part moved down
+    expect(q.host.style.props['--sq-kb']).toBe('216px')
+    q.viewport(800)                     // the keyboard went away
+    expect(q.host.style.props['--sq-kb']).toBe('0px')
+    q.viewport(900)                     // never below zero
+    expect(q.host.style.props['--sq-kb']).toBe('0px')
+    const css = readFileSync(join(HERE, 'panes', 'questions.css'), 'utf8')
+    expect(css).toContain('.sq-host .sq-foot { bottom: max(var(--safe-bottom, 0px), var(--sq-kb, 0px)); }')
+    expect(css).toContain('.ta-q .sq-foot { bottom: 0; }')
+    // No visualViewport (an older browser): nothing breaks and nothing is set.
+    const old = loadQ(() => ({ enabled: true, items: [], settled: [] }))
+    await old.start()
+    expect(old.host.style.props).toEqual({})
+  })
+
   it('the footer is sticky inside the card and the questions clear the top bar and the footer (questions.css)', () => {
     const css = readFileSync(join(HERE, 'panes', 'questions.css'), 'utf8')
     expect(css).toMatch(/\.sq-foot \{ position: sticky; bottom: var\(--safe-bottom, 0px\);/)
@@ -2817,14 +2873,35 @@ describe('6.99.27: a question reaches Today in 3 s, not 10 (Miles 11/07 09:29, "
     expect(h.fetches.length).toBe(n)
   })
 
-  it('visible again: one read at once', async () => {
+  // QA 6.99.27 (N4): coming back goes through nudge: at once, unless a read went out under a second ago.
+  it('visible again: one read at once, never within a second of the last', async () => {
     const h = loadQ(idle)
     h.W.state = { pane: 'today' }
     await h.start()
     h.visible(false)
     const n = h.fetches.length
-    h.visible(true); await flush()
+    h.visible(true)
+    expect(last(h).ms, 'back within the second: at its end').toBeGreaterThan(900)
+    expect(last(h).ms).toBeLessThanOrEqual(1000)
+    h.visible(false)
+    h.later(5_000)
+    h.visible(true)
+    expect(last(h).ms, 'back later: at once').toBe(0)
+    last(h).fn(); await flush()
     expect(h.fetches.length).toBe(n + 1)
+  })
+
+  // QA 6.99.27 (N4): a mount read at once whatever the gap; now it goes through nudge.
+  it('drawing cards into the overlay asks for a read through the 1 s gap, never a second one on the wire', async () => {
+    const h = loadQ(idle)
+    h.W.state = { pane: 'today' }
+    await h.start()
+    h.Qs.mount(h.mk(), 'sess-a')
+    expect(last(h).ms, 'a read went out a moment ago').toBeGreaterThan(900)
+    expect(last(h).ms).toBeLessThanOrEqual(1000)
+    h.later(2_000)
+    h.Qs.mount(h.mk(), 'sess-b')
+    expect(last(h).ms).toBe(0)
   })
 
   it('coming to Today reads at once, never more often than once a second', async () => {
@@ -2853,7 +2930,10 @@ describe('6.99.27: a question reaches Today in 3 s, not 10 (Miles 11/07 09:29, "
     await flush()
     expect(h.fetches, 'still one on the wire').toHaveLength(1)
     gates.shift()!(); await flush()
-    expect(last(h).ms, 'the asked-for read, at once').toBe(0)
+    // QA 6.99.27 (N4): the asked-for read goes through nudge, so it waits out the 1 s gap from the read that just landed.
+    expect(last(h).ms, 'the asked-for read, at the end of the second').toBeGreaterThan(900)
+    expect(last(h).ms).toBeLessThanOrEqual(1000)
+    h.later(1_000)
     last(h).fn(); await flush()
     expect(h.fetches).toHaveLength(2)
     gates.shift()!(); await flush()
@@ -2861,9 +2941,10 @@ describe('6.99.27: a question reaches Today in 3 s, not 10 (Miles 11/07 09:29, "
     // A nudge alone while a read is out (a session went to waiting mid-read) still gets its read.
     last(h).fn(); await flush()
     expect(h.fetches).toHaveLength(3)
+    h.later(1_000)
     h.Qs.nudge()
     gates.shift()!(); await flush()
-    expect(last(h).ms, 'the nudge’s read, at once').toBe(0)
+    expect(last(h).ms, 'the nudge’s read, at once when the last went out a second ago').toBe(0)
     // Hidden: a nudge reads nothing.
     h.later(5000)
     h.visible(false)

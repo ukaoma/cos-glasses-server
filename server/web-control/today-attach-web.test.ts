@@ -249,7 +249,7 @@ type Kit = {
   chipsHtml(box: unknown, attr?: string): string; clipHtml(attr: string, opts?: { any?: number }): string
   pasted(e: unknown): unknown; dragged(e: unknown, zone: unknown): unknown; turnFiles(): number; askOn(): boolean; ensureCaps(): Promise<unknown>
 }
-function loadChat(health: Record<string, unknown> = { threadTurnAttachments: 5, features: { durableQueryJobs: true } }, answers: Record<string, unknown> = {}, o: { coarse?: boolean } = {}) {
+function loadChat(health: Record<string, unknown> = { threadTurnAttachments: 5, features: { durableQueryJobs: true } }, answers: Record<string, unknown> = {}, o: { coarse?: boolean; ua?: string; touchPoints?: number; clock?: boolean } = {}) {
   FakeXHR.sent = []
   revoked.length = 0
   const posts: Array<{ path: string; body: any }> = []
@@ -265,16 +265,28 @@ function loadChat(health: Record<string, unknown> = { threadTurnAttachments: 5, 
   }
   const media = { matches: false, addEventListener: () => {} }
   const coarse = { matches: true, addEventListener: () => {} }
+  const docListeners: Record<string, Array<(e: unknown) => void>> = {}
   const document = {
-    addEventListener: () => {}, querySelectorAll: () => [], querySelector: () => null, getElementById: () => null,
+    addEventListener: (t: string, fn: (e: unknown) => void) => { (docListeners[t] ??= []).push(fn) },
+    removeEventListener: (t: string, fn: (e: unknown) => void) => { docListeners[t] = (docListeners[t] || []).filter(x => x !== fn) },
+    querySelectorAll: () => [], querySelector: () => null, getElementById: () => null,
     activeElement: null, hidden: false, body: { scrollHeight: 0 }, scrollingElement: {}, createElement: () => ({ setAttribute() {}, classList: { add() {} } }),
   }
-  const window = { COSWeb: W, matchMedia: (q: string) => (o.coarse && q === '(pointer: coarse)' ? coarse : media), scrollTo: () => {}, localStorage: { getItem: () => null, setItem: () => {} }, navigator: { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1' } }
-  const ctx = vm.createContext({ window, document, setTimeout, clearTimeout, console, Date, JSON, Math, Promise, localStorage: window.localStorage, crypto: globalThis.crypto, XMLHttpRequest: FakeXHR, encodeURIComponent, URL: { createObjectURL: (f: { name: string }) => 'blob:fake/' + f.name, revokeObjectURL: (u: string) => { revoked.push(u) } } })
+  const window = { COSWeb: W, matchMedia: (q: string) => (o.coarse && q === '(pointer: coarse)' ? coarse : media), scrollTo: () => {}, localStorage: { getItem: () => null, setItem: () => {} },
+    navigator: { userAgent: o.ua ?? 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1', maxTouchPoints: o.touchPoints ?? 0 } }
+  // o.clock: timers the test runs by hand (the upload's stall watch), so a minute passes at once.
+  let timerSeq = 0
+  const timers = new Map<number, { fn: () => void; ms: number }>()
+  const fakeSet = (fn: () => void, ms: number) => { timers.set(++timerSeq, { fn, ms }); return timerSeq }
+  const fakeClear = (id: number) => { timers.delete(id) }
+  const ctx = vm.createContext({ window, document, setTimeout: o.clock ? fakeSet : setTimeout, clearTimeout: o.clock ? fakeClear : clearTimeout, console, Date, JSON, Math, Promise, localStorage: window.localStorage, crypto: globalThis.crypto, XMLHttpRequest: FakeXHR, encodeURIComponent, URL: { createObjectURL: (f: { name: string }) => 'blob:fake/' + f.name, revokeObjectURL: (u: string) => { revoked.push(u) } } })
   vm.runInContext(CHAT, ctx)
   const chat = W.cosChat as Record<string, any>
   if (health) chat.fromHealth(health)
-  return { chat, kit: chat.attach as Kit, posts, W }
+  const visibility = (hidden: boolean) => { document.hidden = hidden; (docListeners.visibilitychange || []).forEach(fn => fn({})) }
+  /** Runs every pending timer of at least `ms` (a minute of no progress). */
+  const elapse = (ms: number) => { for (const [id, t] of [...timers]) if (t.ms <= ms) { timers.delete(id); t.fn() } }
+  return { chat, kit: chat.attach as Kit, posts, W, document, visibility, elapse, timers, docListeners }
 }
 const revoked: string[] = []
 const MB = 1048576
@@ -449,14 +461,16 @@ describe('Today: files with a reply or a note, through the reader’s own send p
     expect(h.els['ta-input']!.value).toBe('')
   })
 
-  it('a failed upload blocks Send with words that say what to do; Retry, then it sends', async () => {
+  // QA 6.99.27 (User 1): a failed upload greyed Send out with no reason. Now Send stays tappable and a tap says why.
+  it('a failed upload leaves Send tappable; a tap sends nothing and says what to do; Retry, then it sends', async () => {
     const { h, pick, chip, turns } = await overlay()
     pick(PDF()); xhr().fail(); await flush()
-    expect(h.els['ta-send']!.disabled).toBe(true)
+    expect(h.els['ta-send']!.disabled, 'never greyed out for a failed file').toBe(false)
+    expect(h.els['ta-send']!.textContent).toBe('Send')
     h.els['ta-input']!.value = 'Look at this'
     h.tap('send'); await flush()
     expect(turns()).toHaveLength(0)
-    expect(h.els['ta-status']!.textContent).toBe('A file did not upload. Retry it or remove it, then send.')
+    expect(h.els['ta-status']!.textContent).toBe('A file did not upload. Retry it or remove it.')
     expect(h.els['ta-files']!.innerHTML).toContain('Retry')
     const id = h.els['ta-files']!.innerHTML.match(/data-att="([^"]+)"/)![1]!
     chip('att-retry', id)
@@ -772,6 +786,100 @@ describe('6.99.27: a session box takes any file, as it is, and says the limits i
   })
 })
 
+// ── QA 6.99.27 (User 3, User 8, Skeptic W3) ──
+describe('QA 6.99.27: HEIC on any iPhone or iPad browser, the video cap, and an upload that stops', () => {
+  const STANDALONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+  const IPAD_DESKTOP = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/140.0 Mobile/15E148'
+  const MAC_CHROME = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+  const heic = () => file('IMG_2041.HEIC', 'image/heic', 3 * MB)
+
+  it('a HEIC photo from the Home Screen app (no "Safari" in its user agent) or iPad Chrome is taken and shows its thumbnail', () => {
+    for (const [ua, touch] of [[STANDALONE, 5], [IPAD_DESKTOP, 5]] as const) {
+      const { kit } = loadChat(undefined, {}, { ua, touchPoints: touch })
+      const chat = kit.box()
+      expect(kit.add(chat, [heic()]), ua).toEqual([])
+      const session = kit.box(undefined, { anyBytes: 64 * MB })
+      expect(kit.add(session, [heic()])).toEqual([])
+      expect(session.atts[0]!.thumb, 'shown, so decodable').toBe('blob:fake/IMG_2041.HEIC')
+    }
+    // A Mac browser that is not Safari still cannot read one: refused in the chat, no thumbnail in a session box.
+    const { kit } = loadChat(undefined, {}, { ua: MAC_CHROME })
+    expect(kit.add(kit.box(), [heic()])[0]).toMatch(/HEIC photo, which only Safari can read/)
+    const session = kit.box(undefined, { anyBytes: 64 * MB })
+    expect(kit.add(session, [heic()])).toEqual([])
+    expect(session.atts[0]!.thumb).toBe('')
+  })
+
+  it('100 MB only for video/mp4 and video/quicktime; any other video is a file, 64 MB', () => {
+    const { kit } = loadChat()
+    const box = kit.box(undefined, { anyBytes: 64 * MB })
+    const refusals = kit.add(box, [
+      file('clip.mp4', 'video/webm', 80 * MB),          // named mp4, but the browser says WebM
+      file('take.mkv', 'video/x-matroska', 80 * MB),
+      file('screen.webm', 'video/webm', 63 * MB),
+      file('trip.mov', 'video/quicktime', 99 * MB),
+      file('demo.mp4', '', 99 * MB),                     // no type: the name decides
+    ])
+    expect(refusals).toEqual([
+      'clip.mp4 is 80 MB. A session takes a file up to 64 MB.',
+      'take.mkv is 80 MB. A session takes a file up to 64 MB.',
+    ])
+    expect(box.atts.map(t => [t.name, t.kind])).toEqual([['screen.webm', 'file'], ['trip.mov', 'video'], ['demo.mp4', 'video']])
+  })
+
+  it('no progress for a minute: the upload stops and says so, without blaming the Mac', async () => {
+    const { kit, elapse } = loadChat(undefined, {}, { clock: true })
+    const box = kit.box()
+    kit.add(box, [PDF()])
+    const x = xhr()
+    x.progress(10, 100)
+    elapse(59_999)
+    expect(box.atts[0]!.state, 'progress keeps it alive').toBe('uploading')
+    elapse(60_000); await flush()
+    expect(x.aborted).toBe(true)
+    expect(box.atts[0]).toMatchObject({ state: 'failed', error: 'The upload stopped. Nothing moved for a minute. Retry it.' })
+    expect(kit.failed(box)).toBe(true)
+  })
+
+  it('stopped while the phone was locked: says so, whether it timed out or the connection dropped', async () => {
+    const a = loadChat(undefined, {}, { clock: true })
+    const boxA = a.kit.box()
+    a.kit.add(boxA, [PDF()])
+    a.visibility(true); a.visibility(false)
+    xhr().fail(); await flush()
+    expect(boxA.atts[0]!.error).toBe('The upload stopped while the phone was locked. Retry it.')
+    const b = loadChat(undefined, {}, { clock: true })
+    const boxB = b.kit.box()
+    b.kit.add(boxB, [PDF()])
+    b.visibility(true)
+    b.elapse(60_000); await flush()
+    expect(boxB.atts[0]!.error).toBe('The upload stopped while the phone was locked. Retry it.')
+    // Visible the whole time, the connection dropped: the Mac's words, as before.
+    const c = loadChat(undefined, {}, { clock: true })
+    const boxC = c.kit.box()
+    const before = (c.docListeners.visibilitychange ?? []).length
+    c.kit.add(boxC, [PDF()])
+    expect((c.docListeners.visibilitychange ?? []).length).toBe(before + 1)
+    xhr().fail(); await flush()
+    expect(boxC.atts[0]!.error).toBe('The Mac did not answer. Retry when it is awake.')
+    expect((c.docListeners.visibilitychange ?? []).length, 'the upload stops listening once it ends').toBe(before)
+    expect(c.timers.size, 'and its stall watch is gone').toBe(0)
+  })
+
+  it('all bytes sent: the Mac reading a big file is not a stall; Remove is still a Remove', async () => {
+    const { kit, elapse } = loadChat(undefined, {}, { clock: true })
+    const box = kit.box()
+    kit.add(box, [PDF(), CSV()])
+    xhr(0).progress(100, 100)
+    elapse(10 * 60_000); await flush()
+    expect(box.atts[0]!.state).toBe('uploading')
+    ok(xhr(0), mediaId('a')); await flush()
+    expect(box.atts[0]!.state).toBe('ready')
+    kit.remove(box, box.atts[1]!.id as string); await flush()
+    expect(box.atts.map(t => t.name)).toEqual(['notes.pdf'])
+  })
+})
+
 describe('6.99.27: Today’s reply box takes any file and says the limits', () => {
   it('a .zip from Today goes as a turn file and its id goes with the words', async () => {
     const c = loadChat(H27)
@@ -848,13 +956,16 @@ describe('6.99.27: the Sessions reader’s box (Fork and Send) takes photos and 
     expect(t.page.box().atts, 'the sent file leaves the box').toEqual([])
   })
 
-  it('a failed upload blocks both, in words; Remove sends the words alone', async () => {
+  it('a failed upload leaves Send and Fork tappable; a tap says why and sends nothing; Remove sends the words alone', async () => {
     const t = readerPage()
     t.page.paint()
     t.page.add([PDF()]); xhr().fail(); await flush()
+    expect(t.els['session-send']!.disabled, 'QA 6.99.27: never greyed out for a failed file').toBe(false)
     t.els['session-input']!.value = 'Words'
+    t.page.send(true); await flush()
+    expect(t.status()).toBe('A file did not upload. Retry it or remove it.')
     t.page.send(false); await flush()
-    expect(t.status()).toBe('A file did not upload. Retry it or remove it, then send.')
+    expect(t.status()).toBe('A file did not upload. Retry it or remove it.')
     expect(t.calls.filter(x => x.method === 'POST')).toEqual([])
     t.kit.remove(t.page.box(), t.page.box().atts[0]!.id as string)
     t.page.send(false); await flush()

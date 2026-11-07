@@ -757,11 +757,12 @@
     }
     paintClip(); paintSendButton();
   }
-  // Send waits while a file uploads and while one failed; it says why in its own words.
+  // Send waits while a file uploads. A failed file never greys it out (QA 6.99.27): a tap says why, as the question
+  // card does.
   function paintSendButton() {
     var send = $('ta-send'); if (!send) return;
     var sending = !!(O.r && O.r.sending), st = filesState(filesBox());
-    send.disabled = sending || st === 'waiting' || st === 'failed';
+    send.disabled = sending || st === 'waiting';
     send.textContent = sending ? 'Sending' : st === 'waiting' ? 'Uploading' : 'Send';
   }
   function addFiles(list) {
@@ -1086,7 +1087,7 @@
     // Files: never before every upload has finished, and never with one that failed.
     var box = filesOn() ? filesBox(r) : null, st = filesState(box);
     if (st === 'waiting') { O.note = { text: 'A file is still uploading. Send when it finishes.', kind: '' }; paintNote(); return; }
-    if (st === 'failed') { O.note = { text: 'A file did not upload. Retry it or remove it, then send.', kind: 'error' }; paintNote(); return; }
+    if (st === 'failed') { O.note = { text: 'A file did not upload. Retry it or remove it.', kind: 'error' }; paintNote(); return; }
     var ids = st === 'ready' ? KIT().ids(box) : [];
     // A send with files cut off by a reload: the chips are gone, the draft kept their ids. The same words go again with
     // the same files under the same key, so a send that did land is answered, never repeated.

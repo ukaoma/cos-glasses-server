@@ -80,7 +80,8 @@
     touch.mono = monoNow(); touch.wall = Date.now();
     // The first touch in a while reaches the Mac now, not at the next poll, so a question that starts a moment later
     // is held for this page.
-    if ((before === null || before > 60000) && !Q.stopped && signedIn()) schedule(250);
+    // QA 6.99.27 (N4): through nudge, so it keeps the 1 s gap and the one read on the wire like every other ask.
+    if (before === null || before > 60000) nudge();
   }
   ['pointerdown', 'touchstart', 'keydown'].forEach(function (t) { document.addEventListener(t, noteTouch, { capture: true, passive: true }); });
   function pollUrl() {
@@ -129,7 +130,8 @@
   }
   function landed() {
     Q.inflight = false;
-    if (Q.again) { Q.again = false; schedule(0); }
+    // QA 6.99.27 (N4): the read asked for while this one was out goes through nudge, so it waits out the 1 s gap too.
+    if (Q.again) { Q.again = false; nudge(); }
   }
   function poll() {
     clearTimeout(Q.timer);
@@ -161,7 +163,8 @@
     var since = Date.now() - Q.lastPollAt;
     schedule(since >= NUDGE_GAP_MS ? 0 : NUDGE_GAP_MS - since);
   }
-  function start() { Q.stopped = false; poll(); }
+  // The first read of the page goes at once; after that (back from hidden, a new sign-in), through nudge (QA 6.99.27, N4).
+  function start() { Q.stopped = false; if (!Q.lastPollAt) poll(); else nudge(); }
   function stop() { clearTimeout(Q.timer); }
 
   // ── state from a poll ─────────────────────────────────
@@ -405,7 +408,9 @@
   // QA round 1: an answer that never reached the server (no HTTP status: offline, a dropped link, a timeout) says so in
   // plain words, with the button to tap; the retry goes under the same clientAnswerId, so the server replays it.
   function unreachable(item, what) {
-    var tap = what === 'leave' ? 'Leave for the Mac' : item && item.kind === 'approval' ? (what === 'deny' ? 'Deny' : 'Allow once') : 'Submit';
+    // QA 6.99.27 (User 7): the button's own name. A card with more than one question says Review and submit.
+    var tap = what === 'leave' ? 'Leave for the Mac' : item && item.kind === 'approval' ? (what === 'deny' ? 'Deny' : 'Allow once')
+      : item && (item.questions || []).length > 1 ? 'Review and submit' : 'Submit';
     return 'Could not reach your Mac. Tap ' + tap + ' to retry.';
   }
   // Answered, here or on another screen: recorded before the card is redrawn (a waiting sheet reads it as it repaints),
@@ -595,16 +600,31 @@
     if (!el) return null;
     var m = { el: el, sessionId: String(sessionId || '').toLowerCase(), scope: 'sqm' + (mounts.length + 1), onChange: onChange || null };
     mounts.push(m); listen(el); drawInto(m);
-    if (!Q.stopped) { clearTimeout(Q.timer); Q.timer = setTimeout(poll, 0); }
+    if (!Q.stopped) nudge();
     return { count: function () { return itemsFor(m.sessionId).length; }, unmount: function () { mounts = mounts.filter(function (x) { return x !== m; }); } };
   }
 
-  // Hidden: no reads at all (a phone in a pocket spends nothing). Visible again: one read at once.
+  // QA 6.99.27 (User 2): Today's own card (#sq-host) has a sticky footer, and iOS puts the keyboard over the layout
+  // viewport, so with Other focused the footer sat under it. The keyboard's height (what of the layout viewport the
+  // visible one leaves at the bottom) goes on the host as --sq-kb, and questions.css lifts the footer by it. Today's
+  // overlay needs none of this: its layer already follows the visible viewport (today-actions.js fit).
+  function keyboardInset() {
+    var vv = window.visualViewport;
+    if (!vv) return 0;
+    var inset = Math.round((window.innerHeight || 0) - (vv.height + vv.offsetTop));
+    return inset > 0 ? inset : 0;
+  }
+  function fitKeyboard() {
+    if (host.style && host.style.setProperty) host.style.setProperty('--sq-kb', keyboardInset() + 'px');
+  }
+  if (window.visualViewport) { window.visualViewport.addEventListener('resize', fitKeyboard); window.visualViewport.addEventListener('scroll', fitKeyboard); }
+
+  // Hidden: no reads at all (a phone in a pocket spends nothing). Visible again: one read at once (within the 1 s gap).
   document.addEventListener('visibilitychange', function () { if (document.hidden) stop(); else if (signedIn()) start(); });
   W.onShell(function () { start(); });
   // Coming to Today: a read at once (within the nudge gap), then every 3 s while it stays on screen.
   if (W.onRoute) W.onRoute(function (r) { if (r && r.pane === 'today') nudge(); });
 
-  W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, _advanceMs: ADVANCE_MS, _todayPollMs: TODAY_POLL_MS, poll: poll, nudge: nudge, mount: mount,
+  W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, _advanceMs: ADVANCE_MS, _todayPollMs: TODAY_POLL_MS, _fitKeyboard: fitKeyboard, poll: poll, nudge: nudge, mount: mount,
     itemsFor: itemsFor, atMacFor: atMacFor, answeredFor: answeredFor, wordsOf: wordsOf, macLine: MAC_LINE, answeredLine: ANSWERED_LINE };
 })();

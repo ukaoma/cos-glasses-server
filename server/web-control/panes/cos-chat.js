@@ -553,11 +553,19 @@
     var ua = (window.navigator && window.navigator.userAgent) || '';
     return /safari/i.test(ua) && !/chrome|chromium|crios|fxios|edg|android|opr/i.test(ua);
   }
+  // QA 6.99.27 (User 3): every browser on an iPhone or iPad is WebKit and decodes HEIC, including the Home Screen web
+  // app, whose user agent has no "Safari" in it. iPadOS asks for the desktop site by default, so it reads as a Mac
+  // with a touch screen.
+  function appleMobile() {
+    var nav = window.navigator || {}, ua = nav.userAgent || '';
+    return /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && Number(nav.maxTouchPoints) > 1);
+  }
+  function heicReadable() { return isSafari() || appleMobile(); }
   /** What a file is to COS: 'photo', 'doc' or 'video', with a refusal sentence when it cannot be attached. */
   function classify(file) {
     var type = String(file.type || '').toLowerCase(), ext = extOf(file.name);
     var heic = /^image\/hei[cf]/.test(type) || ext === 'heic' || ext === 'heif';
-    if (heic && !isSafari()) return { refuse: file.name + ' is a HEIC photo, which only Safari can read here. Attach it from Safari, or save it as a JPEG first.' };
+    if (heic && !heicReadable()) return { refuse: file.name + ' is a HEIC photo, which only Safari can read here. Attach it from Safari, or save it as a JPEG first.' };
     if (/^image\//.test(type) || PHOTO_EXT[ext]) return { kind: 'photo' };
     if (/^video\//.test(type) || VIDEO_EXT[ext]) {
       if (!VIDEO_EXT[ext] && type !== 'video/mp4' && type !== 'video/quicktime') return { refuse: file.name + ' is a video COS cannot read. Use MP4 or MOV.' };
@@ -604,18 +612,22 @@
    * 6.99.27: what a SESSION turn takes, which is more than the chat does. The agent gets each file's place on the Mac and
    * opens it with its own tools, so any type goes, up to `maxBytes` (the Mac's threadTurnFileBytes, 64 MB) and up to
    * 100 MB for an MP4 or MOV (the media store's video cap). Photos go as taken: kind 'photo' only for the chip.
+   * QA 6.99.27 (Skeptic W3): the 100 MB is only for a file whose type is video/mp4 or video/quicktime (or, with no type,
+   * whose name says so). Any other video (WebM, MKV) is a turn file on the Mac, whose cap is 64 MB, so it is refused
+   * here before the upload rather than after it.
    */
   function classifyForSession(file, maxBytes) {
     var type = String(file.type || '').toLowerCase(), ext = extOf(file.name);
-    var video = VIDEO_EXT[ext] || type === 'video/mp4' || type === 'video/quicktime';
+    var kindOf = type || VIDEO_EXT[ext] || '';
+    var video = kindOf === 'video/mp4' || kindOf === 'video/quicktime';
     var cap = video ? MAX_VIDEO : maxBytes;
     if (file.size > cap) return { refuse: file.name + ' is ' + mb(file.size) + '. A session takes ' + (video ? 'a video' : 'a file') + ' up to ' + mb(cap) + '.' };
     if (!file.size) return { refuse: file.name + ' is empty.' };
     if (/^image\//.test(type) || PHOTO_EXT[ext]) {
       var heic = /^image\/hei[cf]/.test(type) || ext === 'heic' || ext === 'heif';
-      return { kind: 'photo', mime: type || 'application/octet-stream', showable: !heic || isSafari() };
+      return { kind: 'photo', mime: type || 'application/octet-stream', showable: !heic || heicReadable() };
     }
-    if (video) return { kind: 'video', mime: type || VIDEO_EXT[ext] };
+    if (video) return { kind: 'video', mime: kindOf };
     return { kind: DOC_EXT[ext] ? 'doc' : 'file', mime: type && type !== 'application/octet-stream' ? type : DOC_EXT[ext] || 'application/octet-stream' };
   }
   function dropThumb(t) { if (t.raw && /^blob:/.test(t.thumb || '')) { try { URL.revokeObjectURL(t.thumb); } catch (_e) {} } }
@@ -754,33 +766,67 @@
    * needs. A 401 here never opens the sign-in screen: the chip says so and the message stays (see uploadError).
    */
   // extra: more headers (6.99.27: X-COS-Purpose for a session turn's file).
+  // QA 6.99.27 (User 8): an upload that makes no progress for a minute stops and says so, and one that stopped while
+  // the page was hidden (the phone locked, the browser in the background) says that, never that the Mac did not answer.
+  var UPLOAD_STALL_MS = 60000;
   function uploadRequest(path, body, headers, onProgress, t, extra) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       t.xhr = xhr;
+      var stall = null, stalled = false, wasHidden = !!document.hidden;
+      var onVisibility = function () { if (document.hidden) wasHidden = true; };
+      var watch = function () { clearTimeout(stall); stall = setTimeout(function () { stalled = true; try { xhr.abort(); } catch (_e) {} }, UPLOAD_STALL_MS); };
+      var settle = function () {
+        clearTimeout(stall); stall = null; t.xhr = null;
+        if (document.removeEventListener) document.removeEventListener('visibilitychange', onVisibility);
+      };
+      // The bytes are all sent: the Mac is reading the file, which is not a stall.
+      var sent = function () { clearTimeout(stall); stall = null; };
+      var stopped = function () {
+        var err = wasHidden || document.hidden ? new Error('The upload stopped while the phone was locked. Retry it.') : new Error('The upload stopped. Nothing moved for a minute. Retry it.');
+        err.code = wasHidden || document.hidden ? 'upload_locked' : 'upload_stalled';
+        return err;
+      };
+      if (document.addEventListener) document.addEventListener('visibilitychange', onVisibility);
       xhr.open('POST', path, true);
       xhr.setRequestHeader('X-COS-Web', '1');
       Object.keys(headers).forEach(function (h) { xhr.setRequestHeader(h, headers[h]); });
       if (extra) Object.keys(extra).forEach(function (h) { xhr.setRequestHeader(h, extra[h]); });
-      if (xhr.upload) xhr.upload.onprogress = function (e) { if (e.lengthComputable && e.total) onProgress(e.loaded / e.total); };
+      if (xhr.upload) {
+        xhr.upload.onprogress = function (e) {
+          if (e.lengthComputable && e.total) { onProgress(e.loaded / e.total); if (e.loaded >= e.total) { sent(); return; } }
+          watch();
+        };
+        xhr.upload.onload = sent;
+      }
       xhr.onload = function () {
-        t.xhr = null;
+        settle();
         var data = {}; try { data = JSON.parse(xhr.responseText || '{}'); } catch (_e) { data = {}; }
         if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
         var err = new Error('The Mac answered ' + xhr.status + '.'); err.status = xhr.status;
         err.code = data && (typeof data.error === 'string' ? data.error : data.error && data.error.code) || '';
         reject(err);
       };
-      xhr.onerror = function () { t.xhr = null; var err = new Error('The Mac did not answer.'); err.code = 'network'; reject(err); };
-      xhr.onabort = function () { t.xhr = null; var err = new Error('Removed.'); err.code = 'aborted'; reject(err); };
+      xhr.onerror = function () {
+        settle();
+        if (wasHidden || document.hidden) return reject(stopped());
+        var err = new Error('The Mac did not answer.'); err.code = 'network'; reject(err);
+      };
+      xhr.onabort = function () {
+        settle();
+        if (stalled) return reject(stopped());
+        var err = new Error('Removed.'); err.code = 'aborted'; reject(err);
+      };
       xhr.send(body);
+      watch();
     });
   }
   var UPLOAD_COPY = {
     batch_too_large: 'Too large for one upload.', too_many_images: 'Up to 5 attachments per message.',
     media_processing_unavailable: 'The Mac cannot read photos right now.', unsupported_kind: 'COS cannot read this kind of file.',
     unsupported_media_type: 'COS cannot read this kind of file.', file_too_large: 'Too large for COS.', attachment_too_large: 'Too large for COS.',
-    server_maintenance: 'The Mac is updating. Retry in a minute.', network: 'The Mac did not answer. Retry when it is awake.'
+    server_maintenance: 'The Mac is updating. Retry in a minute.', network: 'The Mac did not answer. Retry when it is awake.',
+    upload_locked: 'The upload stopped while the phone was locked. Retry it.', upload_stalled: 'The upload stopped. Nothing moved for a minute. Retry it.'
   };
   function uploadError(box, t, err) {
     if (err && err.code === 'aborted') return;
