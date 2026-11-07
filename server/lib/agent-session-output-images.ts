@@ -7,7 +7,7 @@ import { constants, realpathSync, statSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import { agentSessionRoots, findAgentSessionFile, isWrapperPrompt, latestAssistantReply, payloadText, type AgentProvider } from './agent-session-store.js'
+import { agentSessionRoots, findAgentSessionFile, isWrapperPrompt, latestAssistantReply, type AgentProvider } from './agent-session-store.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './attached-workspace.js'
 import { readComposerFacts } from './cursor-session-model.js'
 import { MAX_OUTPUT_ARTIFACT_BYTES } from './image-safety.js'
@@ -55,8 +55,16 @@ function assistantText(provider: AgentProvider, row: Record<string, unknown>): s
     message = row.message as Record<string, unknown> | null
   }
   if (!message || typeof message !== 'object') return null
-  const text = payloadText(message)
-  return text && !isWrapperPrompt(text) ? text : null
+  // The generic prose extractor trims each block, which destroys Markdown indentation.
+  // Preserve it here: an indented first line must not become an image selection.
+  const content = message.content
+  const text = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.flatMap(block => {
+      if (!block || typeof block !== 'object') return []
+      const b = block as Record<string, unknown>
+      return ['text', 'input_text', 'output_text'].includes(String(b.type)) && typeof b.text === 'string' ? [b.text] : []
+    }).join('\n\n') : ''
+  return text.trim() && !isWrapperPrompt(text) ? text : null
 }
 // Deliberately bounded Markdown subset: inline image destinations, including angle-wrapped
 // paths with spaces and balanced parentheses. No HTML, reference definitions, code or URLs.
@@ -64,15 +72,25 @@ function imageTokens(raw: string): Array<Candidate & { start: number; end: numbe
   const text = raw.slice(0, OUTPUT_IMAGE_SCAN_CHARS)
   const out: Array<Candidate & { start: number; end: number }> = []
   let fence = '', inline = 0
-  for (let i = 0; i < text.length && out.length < OUTPUT_IMAGES_PER_TURN; i++) {
+  for (let i = 0; i < text.length; i++) {
     if (i === 0 || text[i - 1] === '\n') {
+      // An indented example is literal text, never an output selection.
+      if (!fence && /^(?: {4}| {0,3}\t)/.test(text.slice(i, i + 4))) {
+        i = text.indexOf('\n', i); if (i < 0) break; continue
+      }
       const m = /^( {0,3})(`{3,}|~{3,})/.exec(text.slice(i, i + 80))
       if (m) { if (!fence) fence = m[2]; else if (m[2][0] === fence[0] && m[2].length >= fence.length) fence = ''; i = text.indexOf('\n', i); if (i < 0) break; continue }
     }
     if (fence) continue
     if (text[i] === '\\') { i++; continue }
     if (text[i] === '`') { let n = 1; while (text[i + n] === '`') n++; if (!inline) inline = n; else if (inline === n) inline = 0; i += n - 1; continue }
-    if (inline || text.slice(i, i + 2) !== '![') continue
+    if (inline) continue
+    // Comments may span lines; nothing inside them authorizes a file read.
+    if (text.startsWith('<!--', i)) {
+      const end = text.indexOf('-->', i + 4); if (end < 0) break
+      i = end + 2; continue
+    }
+    if (text.slice(i, i + 2) !== '![') continue
     const endLabel = text.indexOf('](', i + 2)
     if (endLabel < 0 || endLabel - i > 250 || text.slice(i, endLabel).includes('\n')) continue
     let j = endLabel + 2, source = '', valid = false
@@ -99,7 +117,7 @@ function imageTokens(raw: string): Array<Candidate & { start: number; end: numbe
 }
 export function assistantImageCandidates(provider: AgentProvider, row: Record<string, unknown>): Candidate[] {
   const raw = assistantText(provider, row)
-  return raw ? imageTokens(raw).map(({ source, label }) => ({ source, label })) : []
+  return raw ? imageTokens(raw).slice(0, OUTPUT_IMAGES_PER_TURN).map(({ source, label }) => ({ source, label })) : []
 }
 function inside(root: string, path: string): boolean {
   const rel = relative(root, path)
@@ -135,7 +153,7 @@ export class AgentSessionOutputImages {
       const candidates = imageTokens(raw)
       if (!candidates.length) return turn
       const recordKey = digest(JSON.stringify(row))
-      const refs = candidates.map((c, ordinal) => {
+      const refs = candidates.slice(0, OUTPUT_IMAGES_PER_TURN).map((c, ordinal) => {
         const id = 'ai_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, ordinal, c.source])).digest('hex')
         const allowed = root !== null && inside(root, resolve(root, c.source))
         const descriptor: SessionOutputImage = { id, label: c.label, state: allowed ? 'available' : 'unavailable', ...(!allowed ? { reason: 'outside_workspace' as const } : {}) }
@@ -145,9 +163,11 @@ export class AgentSessionOutputImages {
       })
       // Never turn an explicit local image into a browser-visible Mac path. Existing callers
       // without this opt-in projection retain their original text and contract.
-      let redacted = raw
-      for (const token of [...candidates].reverse()) redacted = redacted.slice(0, token.start) + '[Output image]' + redacted.slice(token.end)
-      const text = latestAssistantReply(redacted)
+      // The preview cap limits DTOs, not redaction: the sixth image is still private.
+      const parts: string[] = []; let end = 0
+      for (const token of candidates) { parts.push(raw.slice(end, token.start), '[Output image]'); end = token.end }
+      parts.push(raw.slice(end))
+      const text = latestAssistantReply(parts.join(''))
       const at = typeof row.timestamp === 'string' && Number.isFinite(Date.parse(row.timestamp)) ? row.timestamp : undefined
       return { ...(turn ?? { role: 'assistant' as const, text: '', ...(at ? { at } : {}) }), text, outputImages: refs }
     }
@@ -156,16 +176,17 @@ export class AgentSessionOutputImages {
 
   async content(provider: AgentProvider, sessionId: string, imageId: string, variant: 'thumb' | 'phone') {
     if (!SESSION_OUTPUT_IMAGE_ID.test(imageId)) return { status: 'not_found' as const }
-    const transcript = await this.deps.findSession(provider, sessionId)
-    if (!transcript) return { status: 'not_found' as const }
-    const context = await this.context(provider, sessionId, transcript)
-    const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
-    if (!recent.turns.some(t => t.outputImages?.some(i => i.id === imageId))) return { status: 'not_found' as const }
-    const source = context.sources.get(imageId)
-    if (!source?.root || source.descriptor.state !== 'available') return { status: 'unavailable' as const }
+    // Admission covers discovery, transcript parsing, authorization and image IO alike.
     if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' as const }
     this.readers++
     try {
+      const transcript = await this.deps.findSession(provider, sessionId)
+      if (!transcript) return { status: 'not_found' as const }
+      const context = await this.context(provider, sessionId, transcript)
+      const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
+      if (!recent.turns.some(t => t.outputImages?.some(i => i.id === imageId))) return { status: 'not_found' as const }
+      const source = context.sources.get(imageId)
+      if (!source?.root || source.descriptor.state !== 'available') return { status: 'unavailable' as const }
       const path = resolve(source.root, source.candidate.source)
       const canonical = realpathSync(path)
       if (!inside(source.root, canonical)) return { status: 'unavailable' as const }

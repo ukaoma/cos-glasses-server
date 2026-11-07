@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, truncateSync
 import { tmpdir, homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
-import { AgentSessionOutputImages, assistantImageCandidates, OUTPUT_IMAGES_PER_TURN, SESSION_OUTPUT_IMAGE_ID } from './agent-session-output-images.js'
+import { AgentSessionOutputImages, assistantImageCandidates, OUTPUT_IMAGES_PER_TURN, OUTPUT_IMAGE_CONCURRENCY, OUTPUT_IMAGE_SCAN_CHARS, SESSION_OUTPUT_IMAGE_ID } from './agent-session-output-images.js'
 import { MAX_OUTPUT_ARTIFACT_BYTES } from './image-safety.js'
 import { readRecentSessionTurns, recentSessionTurns, SESSION_TURNS_MAX } from './agent-session-turns.js'
 import type { AgentProvider } from './agent-session-store.js'
@@ -51,6 +51,25 @@ describe('explicit assistant output image extraction', () => {
     const raw = '[file](secret.png) secret.png <img src="secret.png">\n`![x](secret.png)`\n```md\n![x](secret.png)\n```\n![a](https://example.com/a.png) ![b](data:image/png;base64,aaa) ![c](file:///secret.png) ![d](//host/a.png)'
     expect(assistantImageCandidates('claude', row(raw))).toEqual([])
   })
+  it.each<AgentProvider>(['claude', 'codex', 'cursor'])('keeps indented examples and HTML comments inert for %s', provider => {
+    const raw = [
+      '    ![Example](private-example.png)', '\t![Example](tab-example.png)',
+      '  \t![Example](mixed-example.png)', '<!-- ![Hidden](private-comment.png)',
+      '![Hidden](multiline-comment.png) -->', '![Visible](visible.png)',
+      '<!-- unclosed ![Hidden](unclosed.png)',
+    ].join('\n')
+    expect(assistantImageCandidates(provider, row(raw, provider))).toEqual([{ source: 'visible.png', label: 'Visible' }])
+  })
+  it('preserves code indentation across text blocks and string payloads', () => {
+    const content = [{ type: 'text', text: 'Introduction' }, { type: 'text', text: '    ![Example](private.png)' }]
+    expect(assistantImageCandidates('claude', { type: 'assistant', message: { content } })).toEqual([])
+    expect(assistantImageCandidates('claude', { type: 'assistant', message: { content: '\t![Example](private.png)' } })).toEqual([])
+  })
+  it('honors the scan boundary without interpreting incomplete image syntax', () => {
+    const token = '![End](end.png)'
+    expect(assistantImageCandidates('claude', row('x'.repeat(OUTPUT_IMAGE_SCAN_CHARS - token.length) + token))).toEqual([{ source: 'end.png', label: 'End' }])
+    expect(assistantImageCandidates('claude', row('x'.repeat(OUTPUT_IMAGE_SCAN_CHARS - token.length + 1) + token))).toEqual([])
+  })
   it('bounds image count and accepts escaped syntax as literal', () => {
     expect(assistantImageCandidates('claude', row('\\![literal](secret.png)'))).toEqual([])
     expect(assistantImageCandidates('claude', row(Array.from({ length: OUTPUT_IMAGES_PER_TURN + 4 }, (_, i) => `![x](${i}.png)`).join(' ')))).toHaveLength(OUTPUT_IMAGES_PER_TURN)
@@ -66,6 +85,16 @@ describe('workspace-scoped native image projection and serving', () => {
     expect(turns[0].outputImages?.[0].id).toMatch(SESSION_OUTPUT_IMAGE_ID)
     expect(JSON.stringify(turns)).not.toContain(f.workspace)
     expect(recentSessionTurns('claude', [JSON.stringify(row(`![x](${f.artifact})`))], 1)[0]).not.toHaveProperty('outputImages')
+  })
+  it('redacts every explicit local image after the preview cap without granting extra image ids', async () => {
+    const f = fixture()
+    const sources = Array.from({ length: OUTPUT_IMAGES_PER_TURN + 4 }, (_, i) => join(f.workspace, `private-${i}.png`))
+    const ctx = await f.service.context('claude', 'session', f.transcript)
+    const projected = ctx.project('claude', row(sources.map(path => `![Result](<${path}>)`).join(' ')), null)!
+    expect(projected.outputImages).toHaveLength(OUTPUT_IMAGES_PER_TURN)
+    expect(ctx.sources.size).toBe(OUTPUT_IMAGES_PER_TURN)
+    expect(projected.text).toBe(sources.map(() => '[Output image]').join(' '))
+    for (const path of sources) expect(JSON.stringify(projected)).not.toContain(path)
   })
   it('redacts image destinations before the normal text truncation boundary', async () => {
     const f = fixture()
@@ -136,6 +165,26 @@ describe('workspace-scoped native image projection and serving', () => {
     writeFileSync(f.artifact, 'not an image')
     f.ingest.mockRejectedValueOnce(new Error('unsupported_format private source path'))
     expect(await f.service.content('claude', 'session', id, 'phone')).toEqual({ status: 'unavailable' })
+  })
+  it('admits requests before session discovery and releases admission on lookup failure', async () => {
+    const f = fixture(), id = (await f.preview())[0].outputImages![0].id
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    const findSession = vi.fn(async () => { await blocked; return null as string | null })
+    const workspace = vi.fn(f.deps.workspace)
+    const service = new AgentSessionOutputImages({ ...f.deps, findSession, workspace })
+    const requests = Array.from({ length: OUTPUT_IMAGE_CONCURRENCY }, () => service.content('claude', 'session', id, 'thumb'))
+    expect(findSession).toHaveBeenCalledTimes(OUTPUT_IMAGE_CONCURRENCY)
+    expect(await service.content('claude', 'session', id, 'phone')).toEqual({ status: 'unavailable' })
+    expect(findSession).toHaveBeenCalledTimes(OUTPUT_IMAGE_CONCURRENCY)
+    expect(workspace).not.toHaveBeenCalled()
+    release()
+    expect((await Promise.all(requests)).every(result => result.status === 'not_found')).toBe(true)
+    findSession.mockRejectedValueOnce(new Error('lookup failed'))
+    expect(await service.content('claude', 'session', id, 'phone')).toEqual({ status: 'unavailable' })
+    findSession.mockResolvedValue(f.transcript)
+    expect((await service.content('claude', 'session', id, 'phone')).status).toBe('ok')
+    expect(workspace).toHaveBeenCalledTimes(1)
   })
   it('deduplicates concurrent normalization and invalidates cached bytes when source changes', async () => {
     const f = fixture(), id = (await f.preview())[0].outputImages![0].id
