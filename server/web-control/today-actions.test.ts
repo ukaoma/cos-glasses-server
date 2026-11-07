@@ -99,6 +99,7 @@ interface Opts {
   questions?: number
   store?: Map<string, string>
   readerReading?: unknown
+  webStore?: Map<string, string>
 }
 function load(o: Opts = {}) {
   const els: Record<string, El> = {}
@@ -135,6 +136,7 @@ function load(o: Opts = {}) {
     return Promise.resolve(v ?? {})
   }
   const store = o.store ?? new Map<string, string>()
+  const webStore = o.webStore ?? new Map<string, string>()
   const { fetch, calls } = fakeFetch(o.routes || {})
   const reader = readerKit(fetch, store, o.readerReading ?? null)
   const streams: any[] = []
@@ -145,6 +147,8 @@ function load(o: Opts = {}) {
   const W: Record<string, unknown> = {
     esc, api, go: (p: string, a: string[]) => { location.hash = '#/' + [p].concat(a || []).join('/') }, isPhone: () => true, autoGrow: () => {},
     parseRoute: () => ({ pane: (location as any).pane ?? 'today', args: [] }),
+    readStore: (k: string) => { try { return JSON.parse(webStore.get(k) ?? '{}') } catch { return {} } },
+    writeStore: (k: string, v: unknown) => { webStore.set(k, JSON.stringify(v)) },
     setStatus: (el: El | null, text: string, err: boolean) => { if (el) { el.textContent = text || ''; el.setAttribute('data-error', err ? '1' : '0') } },
     domainLabel: (d: string) => ({ personal: 'Personal', quilt: 'Quilt' } as Record<string, string>)[d] || d,
     ago: () => '3 h', clock: () => '9:00 PM', dayWord: () => 'tomorrow', toDate: (v: unknown) => (v ? new Date(String(v)) : null),
@@ -175,6 +179,16 @@ function load(o: Opts = {}) {
   vm.runInContext(TA, ctx)
   const ta = panes.todayActions
   expect(ta, 'the overlay registers as a lazy pane').toBeTruthy()
+  // A tap that goes through the layer as the browser sends it: the capture guard first, then the overlay's handler.
+  const layerTap = (what: string, id?: string) => {
+    const b = { disabled: false, getAttribute: (a: string) => (a === 'data-ta' ? what : a === 'data-id' ? id ?? null : null), closest() { return this }, remove() {} }
+    const fns = document.appended.listeners.click as Array<(e: unknown) => void>
+    let stopped = false
+    const ev = { target: b, stopPropagation() { stopped = true }, preventDefault() {} }
+    fns[0]!(ev)
+    if (!stopped) fns[1]!(ev)
+    return !stopped
+  }
   const tap = (what: string, id?: string) => {
     const b = { disabled: false, getAttribute: (a: string) => (a === 'data-ta' ? what : a === 'data-id' ? id ?? null : null), closest() { return this }, remove() {} }
     ta._onClick({ target: b })
@@ -185,7 +199,7 @@ function load(o: Opts = {}) {
   const route = (pane: string) => routeHooks.forEach(fn => fn({ pane }))
   const runTimers = () => { const t = (ctx as any).__timers.splice(0); t.forEach((x: { fn: () => void }) => x.fn()) }
   const elsAll = new Proxy(els, { get: (_t, id: string) => document.getElementById(id) }) as Record<string, El>
-  return { ta, els: elsAll, data, posts, apiCalls, gone, calls, store, reader, streams, mounts, history, location, document, tap, opener, key, pop, route, runTimers,
+  return { ta, els: elsAll, data, layerTap, webStore, posts, apiCalls, gone, calls, store, reader, streams, mounts, history, location, document, tap, opener, key, pop, route, runTimers,
     refreshed: () => refreshed, reloads: () => reloads, workChanged: () => workChanged, unmounts: () => unmounts, ctx }
 }
 
@@ -219,6 +233,7 @@ describe('From today’s meetings: decide in the overlay, through Work’s own r
     const at = '2026-11-07T05:00:00.000Z'
     const h = load({ data: { intake: [ITEM(ID1, 'Not a task')] }, api: { [`POST /api/work-intake/${ID1}/resolve`]: resolved(ID1, 'dismiss', at), '/api/work-intake/decisions': { decisions: [] }, 'POST /api/work-intake/undo': { ok: true } } })
     h.ta.open('meeting', 'Surcharging Push', h.opener())
+    await flush()   // the undo route answers: one tap dismisses
     // The decision is made at the server's time: pretend the tap happened then.
     h.ta._state.rows = {}
     const realNow = Date.now
@@ -238,7 +253,7 @@ describe('From today’s meetings: decide in the overlay, through Work’s own r
   it('a dismissed line leaves once its eight seconds have passed', async () => {
     const h = load({ data: { intake: [ITEM(ID1, 'Not a task')] }, api: { [`POST /api/work-intake/${ID1}/resolve`]: resolved(ID1, 'dismiss'), '/api/work-intake/decisions': codeError('', 404) } })
     h.ta.open('meeting', 'Surcharging Push', h.opener())
-    h.tap('dismiss', ID1)
+    h.tap('dismiss', ID1); h.tap('dismiss', ID1)   // no Undo here: tap, then tap again
     await flush()
     expect(h.els['ta-body']!.innerHTML).toContain('Dismissed.')
     h.ta._state.rows[ID1].until = Date.now() - 1
@@ -301,7 +316,7 @@ describe('From today’s meetings: decide in the overlay, through Work’s own r
       '/api/work-intake/decisions': codeError('', 404) } })
     h.ta.open('meeting', 'Surcharging Push', h.opener())
     h.tap('create', ID1); await flush()
-    h.tap('dismiss', ID2); await flush()
+    h.tap('dismiss', ID2); h.tap('dismiss', ID2); await flush()
     h.tap('create', ID3); await flush()
     const html = h.els['ta-body']!.innerHTML
     expect(html).toContain('Already dismissed on another screen.')
@@ -637,7 +652,7 @@ describe('what COS is told when Miles asks from Today', () => {
     expect(s).toContain('From today’s meetings: 3 suggestions waiting for a decision')
     expect(s).toContain('- Surcharging Push (2): "Write the KB plan" (Andy Wheeler’s); "Call Megan".')
     expect(s).toContain('- Seasonal Release (1): "Thrift template".')
-    expect(s).toContain('Up next: Quilt leadership sync at 9:00 PM tomorrow.')
+    expect(s).toContain('Next up: Quilt leadership sync at 9:00 PM tomorrow.')
     expect(s).not.toContain(SID)
     expect(s).not.toContain(ID1)
     expect(s).not.toMatch(/—|->|→/)
@@ -1122,5 +1137,388 @@ describe('the page hands a reloaded overlay entry to the overlay (app.js showShe
     const c = shell(entry, () => Promise.reject(new Error('offline')))
     await flush()
     expect(c.replaced).toEqual([null])
+  })
+})
+
+// ── qa2-user B1 and W1: a double tap that opened the sheet ─────────────
+describe('a quick second tap after opening lands on nothing (qa2-user B1, W1)', () => {
+  it('taps inside the sheet are dropped until the open animation has settled, then count', async () => {
+    const t0 = Date.parse('2026-11-07T06:00:00.000Z'), realNow = Date.now
+    const h = load({ data: { intake: [ITEM(ID1, 'Never read')] }, api: { [`POST /api/work-intake/${ID1}/resolve`]: resolved(ID1, 'dismiss'), '/api/work-intake/decisions': codeError('', 404) } })
+    try {
+      ;(h.ctx as any).Date.now = () => t0
+      h.ta.open('meeting', 'Surcharging Push', h.opener())
+      const settle = h.ta._state.settleAt - t0
+      expect(settle, 'the CSS default (220 ms) and a little more').toBe(350)
+      ;(h.ctx as any).Date.now = () => t0 + 100   // the second tap of a double tap, 100 ms later
+      expect(h.layerTap('dismiss', ID1)).toBe(false)
+      expect(h.layerTap('dismiss', ID1)).toBe(false)
+      expect(h.layerTap('open-work')).toBe(false)
+      expect(h.layerTap('close')).toBe(false)
+      expect(h.ta.isOpen()).toBe(true)
+      expect(h.location.replaced, 'never left Today').toEqual([])
+      ;(h.ctx as any).Date.now = () => t0 + 400
+      expect(h.layerTap('dismiss', ID1)).toBe(true)
+    } finally { (h.ctx as any).Date.now = realNow }
+    await flush()
+    expect(h.posts, 'a single tap after settling only arms Dismiss').toEqual([])
+    expect(h.els['ta-body']!.innerHTML).toContain('Tap again to dismiss')
+  })
+
+  it('with no Undo on the server, Dismiss takes a second tap; another tap in between disarms it', async () => {
+    const h = load({ data: { intake: [ITEM(ID1, 'One'), ITEM(ID2, 'Two')] }, api: { [`POST /api/work-intake/${ID1}/resolve`]: resolved(ID1, 'dismiss'), '/api/work-intake/decisions': codeError('', 404) } })
+    h.ta.open('meeting', 'Surcharging Push', h.opener())
+    await flush()
+    h.tap('dismiss', ID1)
+    expect(h.posts).toEqual([])
+    expect(h.els['ta-body']!.innerHTML).toContain('aria-label="Tap again to dismiss: One"')
+    h.tap('show-all')                     // anything else disarms it
+    expect(h.els['ta-body']!.innerHTML).not.toContain('Tap again to dismiss')
+    h.tap('dismiss', ID2); h.tap('dismiss', ID1)   // arming one row never confirms another
+    expect(h.posts).toEqual([])
+    h.tap('dismiss', ID1)
+    await flush()
+    expect(h.posts).toEqual([{ path: `/api/work-intake/${ID1}/resolve`, body: { action: 'dismiss' } }])
+  })
+
+  it('a refused decision gives the meeting its count back (qa2-user N4)', async () => {
+    const h = load({ data: { intake: [ITEM(ID1, 'One'), ITEM(ID2, 'Two')] }, api: { [`POST /api/work-intake/${ID1}/resolve`]: codeError('task_bridge_unavailable', 503), '/api/work-intake/decisions': codeError('', 404) } })
+    h.ta.open('meeting', 'Surcharging Push', h.opener())
+    expect(h.els['ta-body']!.innerHTML).toContain('2 from this meeting')
+    h.tap('create', ID1)
+    await flush()
+    expect(h.els['ta-body']!.innerHTML).toContain('The task bridge didn’t answer.')
+    expect(h.els['ta-body']!.innerHTML).toContain('2 from this meeting')
+  })
+})
+
+describe('a reply keeps its words and its key across close and reopen (skeptic W3, qa2-user N1)', () => {
+  it('a lost answer, the overlay closed and reopened: the box still has the words, and Send uses the same key', async () => {
+    const webStore = new Map<string, string>(), store = new Map<string, string>()
+    let turnPosts = 0   // counted across both pages: the first answer is lost, the next one lands
+    const routes: Routes = { ...OK_ROUTES, ['POST /api/agent-sessions/bindings/b1/turns']: () => (++turnPosts === 1 ? new TypeError('Load failed') : { status: 202, body: { outcome: 'queued' } }) }
+    const first = load({ data: { needs: [NEED] }, routes, webStore, store, api: { '/api/work-board/your-move': { available: true, items: [NEED] } } })
+    first.ta.open('need', 'act-1', first.opener())
+    await flush()
+    first.els['ta-input']!.value = 'Ship it'
+    first.tap('send')
+    await flush()
+    const key1 = first.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')[0]!.body.clientTurnId
+    first.tap('close')
+    // A new page (a reload) on the same browser storage, with the same routes still answering.
+    const again = load({ data: { needs: [NEED] }, routes, webStore, store, api: { '/api/work-board/your-move': { available: true, items: [NEED] } } })
+    again.ta.open('need', 'act-1', again.opener())
+    await flush()
+    expect(again.els['ta-input']!.value).toBe('Ship it')
+    again.tap('send')
+    await flush()
+    const resent = again.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')
+    expect(resent).toHaveLength(1)
+    expect(resent[0]!.body.clientTurnId, 'the same key, so it cannot post twice').toBe(key1)
+    expect(again.els['ta-input']!.value).toBe('')
+    expect(JSON.parse(webStore.get('cos.web.today.drafts')!)['claude|' + SID], 'settled: nothing kept').toBeUndefined()
+  })
+
+  it('typed words alone come back after a close; a different session has its own', async () => {
+    const webStore = new Map<string, string>()
+    const h = load({ data: { needs: [NEED] }, routes: OK_ROUTES, webStore, api: { '/api/work-board/your-move': { available: true, items: [NEED] } } })
+    h.ta.open('need', 'act-1', h.opener())
+    await flush()
+    h.els['ta-input']!.value = 'Half a thought'
+    ;(h.document.appended.listeners.input as Array<(e: unknown) => void>)[0]!({ target: h.els['ta-input'] })
+    h.key('Escape')
+    h.els['ta-input']!.value = ''
+    h.ta.open('need', 'act-1', h.opener())
+    expect(h.els['ta-input']!.value).toBe('Half a thought')
+    const stored = JSON.parse(webStore.get('cos.web.today.drafts')!)
+    expect(Object.keys(stored)).toEqual(['claude|' + SID])
+    expect(stored['claude|' + SID].unsettled).toBeNull()
+  })
+})
+
+describe('the sheet never contradicts itself (qa2-user N3)', () => {
+  it('a stale Need says only that it is gone, and Today drops the row', async () => {
+    const h = load({ data: { needs: [NEED] }, routes: OK_ROUTES, api: { '/api/work-board/your-move': { available: true, items: [] } } })
+    h.ta.open('need', 'act-1', h.opener())
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('This is no longer waiting on you.')
+    expect(meta).not.toContain('Waiting for your reply')
+    expect(h.refreshed(), 'Today reads again, so the row goes').toBe(1)
+  })
+
+  it('the Running header follows the live feed, and an unknown tool reads as "Used <tool>"', async () => {
+    const CID = '019a0000-1111-2222-3333-444455556666'
+    const ROW = { session_id: CID, provider: 'codex', display_label: 'Codex work', running: true, running_active: true, agent_state: 'running', state_source: 'hook' }
+    const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: { [`GET /api/agent-sessions/codex/${CID}?turns=6`]: { status: 200, body: { recent_turns: [] } } } })
+    h.ta.open('run', 'codex|' + CID, h.opener())
+    await flush()
+    expect(h.els['ta-run-state']!.textContent, 'before the feed: the session list').toBe('Working now, for 20 min')
+    const es = h.streams[0]
+    es.onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_since: new Date(Date.now() - 42000).toISOString() }) })
+    es.onmessage({ data: JSON.stringify({ seq: 2, kind: 'tool', verb: 'other', target: 'SendMessage' }) })
+    expect(h.els['ta-run-state']!.textContent).toMatch(/^Idle for 4\ds$/)
+    expect(h.els['ta-live']!.innerHTML).toContain('<strong>Idle</strong>')
+    expect(h.els['ta-live']!.innerHTML).toContain('Used SendMessage')
+    expect(h.els['ta-live']!.innerHTML).not.toContain('Other SendMessage')
+  })
+})
+
+// ── Parity B2: Needs you counts every source, and says what it could not read ──
+function needsRegion(opts: { at: string; sessions?: unknown[]; needs?: unknown[]; voices?: { state: string; groups: unknown[] }; memories?: { state: string; n: number };
+  sessionsState?: string; workState?: string }) {
+  const start = APP.indexOf("  // The headline: COS Control's brief"), end = APP.indexOf('  function renderNext(w) {')
+  expect(start, 'the headline block').toBeGreaterThan(0); expect(end).toBeGreaterThan(start)
+  const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
+  const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0]
+  const helpers = ['countWord', 'plural', 'ago', 'dayWord', 'splitSessionId', 'domainLabel'].map(n => {
+    const m = new RegExp('  function ' + n + '\\(').exec(APP)!
+    const i = m.index, j = APP.indexOf('\n  function ', i + 5)
+    return APP.slice(i, j)
+  }).join('\n')
+  const words = /  var WORDS = [^\n]*\n/.exec(APP)![0], domains = /  var DOMAINS = [^\n]*\n/.exec(APP)![0]
+  const els: Record<string, El> = {}
+  const t = Date.parse(opts.at)
+  class FakeDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(t) } static now() { return t } }
+  const rail: Array<[string, string, boolean]> = [], badges: Array<[string, boolean]> = []
+  const TODAY = { needs: opts.needs ?? [], working: [], open: [], welcome: {}, offline: false, at: 1, recording: false, model: null, showAllNeeds: false, showLater: false,
+    sessionsState: opts.sessionsState ?? 'answered', workState: opts.workState ?? 'answered',
+    voices: opts.voices ?? { state: 'answered', groups: [] }, memories: opts.memories ?? { state: 'answered', n: 0 } }
+  const deps: Record<string, unknown> = {
+    $: (id: string) => (els[id] ??= new El()), esc, toDate: (v: unknown) => (v ? new FakeDate(String(v)) : null), clock: () => '9:00 AM', Date: FakeDate,
+    state: { sessions: opts.sessions ?? [], serverName: 'Mac' }, TODAY, setBadge: (n: string, on: boolean) => badges.push([n, on]),
+    usualProject: () => '', badge: () => '', span: () => '5 min', sessionTitle: (s: any) => s.display_label || 'Session',
+    window: { COSWeb: { setStory: (n: string, text: string, hot: boolean) => rail.push([n, text, hot]) } },
+  }
+  // eslint-disable-next-line no-new-func
+  new Function('deps', 'with (deps) {\n' + words + domains + plainFn + '\n' + helpers + '\n' + sx + '\n' + APP.slice(start, end) + '\npaintNeeds();\n}')(deps)
+  return { els, rail, badges, TODAY: TODAY as any }
+}
+const WAIT = { session_id: 'aaaaaaaa-1111-4111-8111-111111111111', provider: 'claude', display_label: 'Release QA', alive: true, running: true,
+  agent_state: 'waiting', state_source: 'hook', waiting_kind: 'permission', waiting_detail: 'Bash npm publish', state_since: '2026-11-04T19:00:00Z' }
+const HANDOFF = (id: string, sid: string) => ({ id, provider: 'claude', sessionId: 'claude:' + sid, sessionTitle: 'Handoff ' + id, domain: 'quilt', progress: { reported: 'needsInput' }, updatedAt: '2026-11-04T18:00:00Z' })
+const WED_2PM = '2026-11-04T20:00:00Z'   // 2 PM Central on a Wednesday; the fake clock reads this instant
+describe('Needs you lists every source, and the headline, count and rail agree (parity B2)', () => {
+  it('a waiting session, a Work handoff, voices and memories each show; a handoff for the waiting session is that session’s row', () => {
+    const n = needsRegion({ at: WED_2PM, sessions: [WAIT], needs: [HANDOFF('h1', 'bbbbbbbb-2222-4222-8222-222222222222'), HANDOFF('h2', WAIT.session_id)],
+      voices: { state: 'answered', groups: [{ id: 'g1', suggestion: { name: 'Gina' } }, { id: 'g2' }] }, memories: { state: 'answered', n: 3 } })
+    const list = n.els['needs-list']!.innerHTML
+    expect(list).toContain('Release QA wants your permission')
+    expect(list).toContain('Wants to run Bash npm publish')
+    expect(list).toContain('data-today="run" data-key="claude|' + WAIT.session_id + '"')
+    expect(list).toContain('Handoff h1')
+    expect(list, 'deduped into the session row').not.toContain('Handoff h2')
+    expect(list).toContain('Name 2 held voices')
+    expect(list).toContain('One sounds like Gina.')
+    expect(list).toContain('data-goto="speakers"')
+    expect(list).toContain('Review 3 memories')
+    expect(list).toContain('data-goto="memories/view/review"')
+    expect(n.els['needs-count']!.textContent).toBe('4')
+    expect(n.els['today-story']!.textContent).toMatch(/^One session is waiting on you\. No agents are running\.$/)
+    expect(n.rail).toEqual([['today', '4 need you', true]])
+    expect(n.badges).toContainEqual(['today', true])
+  })
+
+  it('a bare tool name is never the reason line (Control\u2019s tool-name guard)', () => {
+    const asking = { ...WAIT, waiting_kind: 'question', waiting_detail: 'AskUserQuestion', display_label: 'Gong personas' }
+    const n = needsRegion({ at: WED_2PM, sessions: [asking] })
+    expect(n.els['needs-list']!.innerHTML).toContain('Gong personas asked you a question')
+    expect(n.els['needs-list']!.innerHTML).not.toContain('AskUserQuestion')
+    expect(n.els['needs-list']!.innerHTML).toContain('Waiting for you. Paused until you answer.')
+  })
+
+  it('never says clear while a source failed: it names it, with Try again', () => {
+    const n = needsRegion({ at: WED_2PM, memories: { state: 'failed', n: 0 } })
+    expect(n.els['needs-list']!.innerHTML).not.toContain('Nothing is waiting')
+    expect(n.els['needs-list']!.innerHTML).toContain('Couldn’t read memories. Try again')
+    expect(n.els['today-story']!.textContent).toContain('Couldn’t read memories, so this may not be everything.')
+    expect(n.els['today-story']!.textContent).not.toContain('Nothing is waiting')
+    expect(n.rail[0]![1]).toBe('Couldn’t read memories')
+  })
+
+  it('while a source is still reading it says so; once every source answered empty, and only then, Nothing is waiting on you', () => {
+    const reading = needsRegion({ at: WED_2PM, voices: { state: 'pending', groups: [] } })
+    expect(reading.els['needs-list']!.innerHTML).toContain('Reading sessions, Work, voices and memories.')
+    expect(reading.els['today-story']!.textContent).toContain('Still reading what needs you.')
+    expect(reading.els['today-story']!.textContent).not.toContain('Nothing is waiting')
+    const work = needsRegion({ at: WED_2PM, workState: 'failed' })
+    expect(work.els['needs-list']!.innerHTML).toContain('Couldn’t read Work. Try again')
+    const clear = needsRegion({ at: WED_2PM })
+    expect(clear.els['needs-list']!.innerHTML).toContain('Nothing is waiting on you.')
+    expect(clear.els['today-story']!.textContent).toMatch(/^Nothing is waiting on you\./)
+    expect(clear.rail[0]![1]).toBe('Nothing needs you')
+    expect(clear.els['needs-count']!.textContent).toBe('')
+  })
+
+  it('quiet hours fold everything but a waiting session, with the count and the line saying the same', () => {
+    const SAT = '2026-11-07T16:00:00Z'
+    const n = needsRegion({ at: SAT, sessions: [WAIT], needs: [HANDOFF('h1', 'bbbbbbbb-2222-4222-8222-222222222222')], memories: { state: 'answered', n: 2 } })
+    expect(n.els['needs-count']!.textContent).toBe('1')
+    expect(n.els['needs-list']!.innerHTML).toContain('2 things can wait until tomorrow. Show')
+    expect(n.els['needs-list']!.innerHTML).not.toContain('Handoff h1')
+    expect(n.rail[0]![1]).toBe('1 needs you')
+    const later = needsRegion({ at: SAT, needs: [HANDOFF('h1', 'bbbbbbbb-2222-4222-8222-222222222222')] })
+    expect(later.els['today-story']!.textContent).toMatch(/^One thing can wait until tomorrow\./)
+    expect(later.rail[0]![1]).toBe('1 can wait until tomorrow')
+  })
+
+  it('more than six rows: the first six and "Show N more"; the count is every row', () => {
+    const many = Array.from({ length: 9 }, (_, i) => HANDOFF('h' + i, 'cccccccc-3333-4333-8333-33333333333' + i))
+    const n = needsRegion({ at: WED_2PM, needs: many })
+    expect((n.els['needs-list']!.innerHTML.match(/class="need-row"/g) || []).length).toBe(6)
+    expect(n.els['needs-list']!.innerHTML).toContain('Show 3 more')
+    expect(n.els['needs-count']!.textContent).toBe('9')
+    expect(n.els['today-story']!.textContent).toMatch(/^Nine things need you\./)
+  })
+})
+
+describe('Stop on the Running peek (parity gap 4)', () => {
+  const CID = '019a0000-1111-2222-3333-444455556666'
+  const CP = (tail: string) => `/api/agent-sessions/codex/${encodeURIComponent(CID)}${tail}`
+  const ROW = { session_id: CID, provider: 'codex', display_label: 'Codex work', running: true, running_active: true, agent_state: 'running', state_source: 'hook' }
+  function peek(cancel: Reply | ((b: any, n: number) => Reply)) {
+    const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: { ['GET ' + CP('?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['POST ' + CP('/cancel')]: cancel as any } })
+    h.ta.open('run', 'codex|' + CID, h.opener())
+    return h
+  }
+  it('a tap arms it, the second sends the reader’s cancel with one id; the server’s words say what happened', async () => {
+    const h = peek({ status: 200, body: { cancelled: true, reasonCopy: 'Stopped. The turn ended.' } })
+    await flush()
+    expect(h.els['ta-live']!.innerHTML).toContain('data-ta="stop"')
+    h.tap('stop')
+    expect(h.calls.filter(c => c.path === CP('/cancel'))).toHaveLength(0)
+    expect(h.els['ta-live']!.innerHTML).toContain('Tap again to stop')
+    h.tap('stop')
+    h.tap('stop'); h.tap('stop')   // armed and confirmed again while the first is still out: nothing more is sent
+    await flush()
+    const sent = h.calls.filter(c => c.path === CP('/cancel'))
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.body.clientCancelId).toMatch(/^ct[a-z0-9]+$/)
+    expect(h.els['ta-status']!.textContent).toBe('Stopped. The turn ended.')
+    expect(h.els['ta-live']!.innerHTML, 'no Stop once it stopped').not.toContain('data-ta="stop"')
+  })
+  it('a refusal shows the server’s reason; a lost answer says so and the retry reuses the id', async () => {
+    const no = peek({ status: 409, body: { cancelled: false, reason: 'cancel_unsupported', reasonCopy: 'COS did not start this turn, so it cannot stop it here.' } })
+    await flush()
+    no.tap('stop'); no.tap('stop'); await flush()
+    expect(no.els['ta-status']!.textContent).toBe('COS did not start this turn, so it cannot stop it here.')
+    expect(no.els['ta-status']!.getAttribute('data-error')).toBe('1')
+    no.tap('stop'); no.tap('stop'); await flush()   // a new Stop after an answer is a new request, not a replay
+    const tries = no.calls.filter(c => c.path === CP('/cancel')).map(c => c.body.clientCancelId)
+    expect(tries).toHaveLength(2)
+    expect(tries[1]).not.toBe(tries[0])
+    let calls = 0
+    const lost = peek(() => (++calls === 1 ? new TypeError('Load failed') : { status: 200, body: { cancelled: true } }))
+    await flush()
+    lost.tap('stop'); lost.tap('stop'); await flush()
+    expect(lost.els['ta-status']!.textContent).toContain('Stopping again is safe')
+    lost.tap('stop'); lost.tap('stop'); await flush()
+    const ids = lost.calls.filter(c => c.path === CP('/cancel')).map(c => c.body.clientCancelId)
+    expect(ids).toHaveLength(2)
+    expect(ids[1]).toBe(ids[0])
+    expect(lost.els['ta-status']!.textContent).toBe('Stopped.')
+  })
+})
+
+describe('Next up: Prep me and Open meeting (parity gap 9)', () => {
+  it('the card is called Next up and offers both', () => {
+    const html = readFileSync(join(HERE, 'index.html'), 'utf8')
+    expect(html).toContain('<h2 id="next-title" class="panel-title">Next up</h2>')
+    expect(html).not.toContain('Up next')
+    const start = APP.indexOf('  function renderNext(w) {'), end = APP.indexOf("  // From today's meetings: Work's suggestions")
+    const els: Record<string, El> = {}
+    const deps = { $: (id: string) => (els[id] ??= new El()), esc, toDate: (v: unknown) => (v ? new Date(String(v)) : null), clock: () => '3:00 PM', dayWord: () => 'today',
+      TODAY: { offline: false, welcome: {} }, window: { COSWeb: { cosChat: { prepFor: () => Promise.resolve('prep') } } }, go: () => {}, toast: () => {} }
+    // eslint-disable-next-line no-new-func
+    const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { renderNext: renderNext, prepNext: prepNext };\n}')(deps)
+    fns.renderNext({ nextEvent: { title: 'Quilt leadership sync', time: '2026-11-07T21:00:00Z' } })
+    expect(els['next-actions']!.innerHTML).toContain('data-today-next="prep">Prep me</button>')
+    expect(els['next-actions']!.innerHTML).toContain('data-goto="meetings">Open meeting</button>')
+  })
+  it('Prep me goes to the COS chat and asks cos-chat for this meeting’s Prep, by title and start', async () => {
+    const start = APP.indexOf('  function renderNext(w) {'), end = APP.indexOf("  // From today's meetings: Work's suggestions")
+    const went: unknown[] = [], asked: unknown[] = []
+    const deps = { $: () => new El(), esc, toDate: (v: unknown) => (v ? new Date(String(v)) : null), clock: () => '', dayWord: () => 'today', toast: () => {},
+      TODAY: { offline: false, welcome: { nextEvent: { title: 'Quilt leadership sync', time: '2026-11-07T21:00:00Z' } } },
+      window: { COSWeb: { cosChat: { prepFor: (t: string, at: string) => { asked.push([t, at]); return Promise.resolve('prep') } } } }, go: (p: string, a: string[]) => went.push([p, a]) }
+    // eslint-disable-next-line no-new-func
+    const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { prepNext: prepNext };\n}')(deps)
+    fns.prepNext()
+    expect(went).toEqual([['messages', ['cos']]])
+    expect(asked).toEqual([['Quilt leadership sync', '2026-11-07T21:00:00.000Z']])
+  })
+  it('cos-chat prepFor: the Prep composer where Prep is on, else the plain Ask "Prep me for <title>"', async () => {
+    const calls: Array<{ path: string; body: any }> = []
+    const W: Record<string, unknown> = { $: () => null, esc, toast: () => {}, autoGrow: () => {}, md: (x: unknown) => String(x), skeletonRows: () => '', toDate: (x: string) => new Date(x),
+      readStore: () => ({}), writeStore: () => {}, parseRoute: () => ({ pane: 'messages', args: ['cos'] }), go: () => {},
+      api: (path: string, o?: { body?: unknown }) => { calls.push({ path, body: o?.body }); return Promise.resolve(path === '/api/query-jobs' ? { job: { jobId: 'j1', status: 'queued' } } : {}) } }
+    const document = { addEventListener: () => {}, querySelectorAll: () => [], querySelector: () => null, getElementById: () => ({ value: '', focus() {} }), activeElement: null, hidden: false,
+      body: { scrollHeight: 0 }, scrollingElement: {}, createElement: () => ({ setAttribute() {}, classList: { add() {} } }) }
+    const ctx = vm.createContext({ window: { COSWeb: W, matchMedia: () => ({ matches: false, addEventListener: () => {} }), scrollTo: () => {}, localStorage: { getItem: () => null, setItem: () => {} } },
+      document, setTimeout: () => 0, clearTimeout, console, Date, JSON, Math, Promise, localStorage: { getItem: () => null, setItem: () => {} }, crypto: globalThis.crypto })
+    vm.runInContext(CHAT, ctx)
+    const c = W.cosChat as any
+    c._state.caps = { dropIt: false, jobs: true, steer: false, thread: false, dropFiles: 0 }
+    expect(await c.prepFor('Quilt leadership sync', '2026-11-07T21:00:00.000Z')).toBe('ask')
+    await flush()
+    expect(calls.filter(x => x.path === '/api/query-jobs')[0]!.body.query).toBe('Prep me for Quilt leadership sync')
+  })
+})
+
+describe('⌘K files a task to the Work inbox (parity gap 7)', () => {
+  function sheet(domainList: unknown[] = [{ name: 'hermit_crabs', label: 'Hermit Crabs' }, { name: 'quilt', label: 'Quilt' }]) {
+    const start = APP.indexOf("  // ⌘K's File to Work inbox"), end = APP.indexOf('  function openAsk(prefill) {')
+    expect(start).toBeGreaterThan(0)
+    const posts: any[] = [], statuses: Array<[string, boolean]> = [], toasts: string[] = []
+    let capture: () => Promise<unknown> = () => Promise.resolve({ ok: true })
+    const workPane = { changed: 0, intakeChanged() { this.changed++ } }
+    const askQ = { value: 'Book the venue for the Thrift summit' }
+    const deps: Record<string, unknown> = {
+      $: (id: string) => (id === 'ask-q' ? askQ : null), PANES: { work: workPane }, toast: (t: string) => toasts.push(t), renderAsk: () => {},
+      setStatus: (_el: unknown, t: string, err: boolean) => statuses.push([t, !!err]), webJobId: (() => { let n = 0; return () => 'id-' + (++n) })(),
+      domainLabel: (d: string) => ({ quilt: 'Quilt' } as Record<string, string>)[d] || d, document: { querySelector: () => null },
+      api: (path: string, o?: { method?: string; body?: unknown }) => {
+        if (path === '/api/domains') return Promise.resolve({ domains: domainList })
+        posts.push({ path, body: o?.body }); return capture()
+      },
+    }
+    // eslint-disable-next-line no-new-func
+    const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { fileToInbox: fileToInbox, fileDomainLabel: fileDomainLabel, state: ASK_FILE };\n}')(deps)
+    return { fns, posts, statuses, toasts, workPane, askQ, setCapture: (f: () => Promise<unknown>) => { capture = f } }
+  }
+  it('files the words into the first domain’s inbox through Work’s own route; a second tap while it is out sends nothing', async () => {
+    const s = sheet()
+    s.fns.fileToInbox('Book the venue for the Thrift summit')
+    s.fns.fileToInbox('Book the venue for the Thrift summit')
+    await flush()
+    expect(s.posts).toEqual([{ path: '/api/tasks/capture', body: { domain: 'quilt', text: 'Book the venue for the Thrift summit', section: 'inbox', captureId: 'id-1' } }])
+    expect(s.toasts).toEqual(['Filed to the Work inbox.'])
+    expect(s.askQ.value, 'the box clears, as Control clears its draft').toBe('')
+    expect(s.workPane.changed, 'Work reads its board again').toBe(1)
+    expect(s.fns.fileDomainLabel(), 'quilt when the server has it, as Control keeps it').toBe('Quilt')
+    const other = sheet([{ name: 'personal', label: 'Personal' }, { name: 'sprocket_rocket', label: 'Sprocket Rocket' }])
+    other.fns.fileToInbox('Renew the passport')
+    await flush()
+    expect(other.posts[0]!.body.domain, 'else the first domain the server lists').toBe('personal')
+  })
+  it('a failure says so and the retry files under the same id, so it lands once', async () => {
+    const s = sheet()
+    let n = 0
+    s.setCapture(() => (++n === 1 ? Promise.reject(Object.assign(new Error('The task bridge did not answer.'), { status: 503 })) : Promise.resolve({ ok: true })))
+    s.fns.fileToInbox('Call Megan about surcharging')
+    await flush()
+    expect(s.statuses.pop()).toEqual(['Not filed: The task bridge did not answer. Filing again is safe.', true])
+    s.fns.fileToInbox('Call Megan about surcharging')
+    await flush()
+    expect(s.posts.map(p => p.body.captureId)).toEqual(['id-1', 'id-1'])
+    expect(s.toasts).toEqual(['Filed to the Work inbox.'])
+  })
+})
+
+describe('the decision words live in one place (wording item 14)', () => {
+  it('Create task and Dismiss come from their constants', () => {
+    expect(TA).toContain("var CREATE_LABEL = 'Create task', DISMISS_LABEL = 'Dismiss';")
+    expect((TA.match(/'Create task'/g) || []).length, 'only the constant spells it').toBe(1)
+    expect((TA.match(/'Dismiss'/g) || []).length, 'only the constant spells it').toBe(1)
   })
 })
