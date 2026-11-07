@@ -334,7 +334,10 @@ export function buildTodayBriefPrompt(inputs: TodayBriefInputs, now: number): st
   const when = d.toLocaleString('en-US', { weekday: 'long', hour: 'numeric', minute: '2-digit' })
   // A title cannot close the fence: scrubText removes every < and > from the inputs, and every data field passes it.
   const data = buildTodayBriefData(inputs)
-  return `It is ${when}.\n<today-data>\n${data}\n</today-data>\nWrite the Today summary now.`
+  // The opener is the server's own sentence; the model is shown it so it continues after it instead of repeating it.
+  const opener = todayBriefOpener(inputs)
+  const lead = opener ? `\nThe page already shows this sentence first, written by COS: "${opener}" Continue after it. Do not repeat or reword it, and do not count what needs the person.` : ''
+  return `It is ${when}.\n<today-data>\n${data}\n</today-data>${lead}\nWrite the Today summary now.`
 }
 
 // ── the answer ─────────────────────────────────────────────────────────────
@@ -354,6 +357,10 @@ const ALL_CLEAR = /\b(?:all |fully )?caught up\b|\ball clear\b|\ball set\b|\bnot
 export function claimsNothingWaits(sentence: string): boolean {
   return ALL_CLEAR.test(sentence) || (EMPTY_WORD.test(sentence) && ABOUT_NEEDS.test(sentence))
 }
+// A sentence that opens by counting what needs the person repeats the server's opener, often in other words that
+// contradict it (the 11/07 live answer: "Three things need you, and they can wait until Monday" under "Three things
+// can wait until tomorrow."). Dropped whenever the server wrote an opener.
+const RESTATED_COUNT = /^(?:you have |there (?:are|is) )?(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+|a few|several) (?:things?|items?|tasks?|requests?)\b[^.!?]{0,30}\b(?:need|wait|can wait|waiting|pending|for you)/i
 const NOTHING_RUNNING = /\bno (?:agents?|sessions?)\b[^.!?]{0,20}\b(?:running|working|active)\b|\bnothing is (?:running|working|happening)\b/i
 
 /** How many things need the person and how many can wait, counted from Today's rows; the server writes it, not the
@@ -389,7 +396,7 @@ export function cleanTodayBrief(raw: string, inputs: TodayBriefInputs): string |
   return cleanTodayBriefWithGuard(raw, inputs).text
 }
 
-export type TodayBriefGuard = 'too_short' | 'nothing_waiting' | 'nothing_running'
+export type TodayBriefGuard = 'too_short' | 'nothing_waiting' | 'nothing_running' | 'restated_count'
 /** cleanTodayBrief, and which rule refused it: a code for the log and the audit, never the text. */
 export function cleanTodayBriefWithGuard(raw: string, inputs: TodayBriefInputs): { text: string | null; guard?: TodayBriefGuard; dropped?: TodayBriefGuard } {
   let s = String(raw || '').replace(CONTROL, ' ')
@@ -407,8 +414,10 @@ export function cleanTodayBriefWithGuard(raw: string, inputs: TodayBriefInputs):
   // when nothing usable is left is the whole answer refused, with the rule that emptied it.
   const waitingSeen = inputs.needs.length > 0 || inputs.sessions.some(x => x.state === 'waiting')
   const runningSeen = inputs.sessions.some(x => x.state === 'working')
+  const opener = todayBriefOpener(inputs)
   const refuse = (t: string): TodayBriefGuard | null =>
-    claimsNothingWaits(t) && (!inputs.needsComplete || !inputs.sessionsRead || waitingSeen) ? 'nothing_waiting'
+    opener && RESTATED_COUNT.test(t.trim()) ? 'restated_count'
+      : claimsNothingWaits(t) && (!inputs.needsComplete || !inputs.sessionsRead || waitingSeen) ? 'nothing_waiting'
       : NOTHING_RUNNING.test(t) && (!inputs.sessionsRead || runningSeen) ? 'nothing_running' : null
   let out = '', dropped: TodayBriefGuard | undefined, kept = 0
   for (const sentence of sentences) {

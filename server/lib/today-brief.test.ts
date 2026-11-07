@@ -453,7 +453,9 @@ describe('6.99.26 QA: the server writes the count, the guard drops any "nothing 
     const v = await h.brief.ask(inputs())
     expect(v.text).toBe('Two things need you. Two builders are on the Today summary. QA is idle.')
     expect(h.brief.peek().text).toBe(v.text)
-    expect(h.prompts[0]).not.toContain('Two things need you')
+    // The model sees the opener only as the line it must continue after.
+    expect(h.prompts[0]!.split('Two things need you').length - 1).toBe(1)
+    expect(h.prompts[0]).toContain('written by COS: "Two things need you." Continue after it.')
   })
 })
 
@@ -506,5 +508,25 @@ describe('6.99.26 QA: gates before reads, recording and drain, the lease, the st
     const junk = harness({ answer: () => Object.assign(new Error('x'), { code: 'Some Weird/Code' }) })
     await junk.brief.ask(inputs())
     expect(junk.audits[0]!.error).toBe('error')
+  })
+})
+
+describe('6.99.26 QA live call (11/07): the model restated the count the server already wrote', () => {
+  const live = normalizeTodayBriefInputs({ sessions: [{ title: 'COS HTML build', state: 'working', minutes: 8 }],
+    needs: [{ title: 'COS Glasses QA review' }, { title: 'Name 85 held voices' }, { title: 'Review 7 memories' }], later: 3, sessionsRead: true, needsComplete: true })
+  const RAW = 'Three things need you, and they can wait until Monday since it is the weekend: a QA review of COS Glasses before publish, 85 held voices to name (one may be Dave Bounocore), and 7 memories to approve or reject. Meanwhile, the work is building the HTML version of COS, with an attachment builder running now to let Today carry files. Most other threads are in QA or built, including Quilt marketing, the IT Retail site, and Mike\u2019s BDR handoff, and the COS Glasses fix list has passed QA review with its builders done.'
+  it('the counting sentence goes and the rest follows the server\u2019s opener', () => {
+    const out = cleanTodayBriefWithGuard(RAW, live)
+    expect(out.dropped).toBe('restated_count')
+    expect(out.text!.startsWith('Meanwhile, the work is building the HTML version of COS')).toBe(true)
+    expect(todayBriefOpener(live) + ' ' + out.text).toMatch(/^Three things can wait until tomorrow\. Meanwhile, /)
+  })
+  it('the prompt shows the model the opener and tells it not to repeat it; no opener, no such line and no such drop', () => {
+    expect(buildTodayBriefPrompt(live, T0)).toContain('The page already shows this sentence first, written by COS: "Three things can wait until tomorrow." Continue after it.')
+    const none = normalizeTodayBriefInputs({ sessions: [{ title: 'A', state: 'working', minutes: 3 }], sessionsRead: true, needsComplete: true })
+    expect(buildTodayBriefPrompt(none, T0)).not.toContain('already shows this sentence')
+    // With no opener there is nothing to repeat: a count about the work stands.
+    expect(cleanTodayBrief('Two tasks are waiting on the CI run. The builders are moving.', none)).toBe('Two tasks are waiting on the CI run. The builders are moving.')
+    expect(cleanTodayBriefWithGuard('Two tasks wait on reviews from QA. The builders are moving.', live).dropped).toBe('restated_count')
   })
 })
