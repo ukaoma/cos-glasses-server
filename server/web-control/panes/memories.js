@@ -29,7 +29,8 @@
     reverted: 'Reverted', reopened: 'Reopened', consolidated: 'Merged with another', previewed: 'Previewed', accepted: 'Accepted', pruned: 'Quarantined' };
   var STORE = { self_improvement_queue: 'Improvement suggestions', correction_journal: 'Your corrections', bot_memory: 'Saved memory',
     review_ledger: 'Your review decisions', git_versions: 'Skill versions', eval_scores: 'Run checks', reflect_log: 'Daily reflection',
-    capture_ledger: 'Capture record', memory_trace: 'Recall record', retrieval_log: 'Recall record', used: 'Use record' };
+    capture_ledger: 'Capture record', memory_trace: 'Recall record', retrieval_log: 'Recall record', used: 'Use record',
+    memory: 'Saved memory', occurrence: 'When it happened', assistant_turn: 'An answer' };
   var GATE = { attribution: 'Who said it is unclear', low_confidence: 'Low confidence', prune_ready: 'Ready to quarantine', contradiction: 'Contradicts another memory' };
   var VIEWS = [['recent', 'Recent learning'], ['applied', 'Applied this week'], ['memories', 'All memories'], ['review', 'To review'], ['knowledge', 'Knowledge']];
   var KTABS = ['graph', 'sources', 'setup'];
@@ -617,7 +618,7 @@
     if (full && full._error && !(e.store === 'bot_memory')) note += '<div class="cx-notice">' + esc(full._error) + '</div>';
     else if (!full && !(e.store === 'bot_memory' && e.lesson_id) && S.loading[e.event_id]) note += '<p class="cx-note">Reading the full record…</p>';
     if (e.detail && e.detail.truncated) note += '<div class="cx-notice">The record was shortened to fit. Your Mac holds more than shown here.</div>';
-    return readerHead(clip(rowTitle(e), 160), facts, actions) + note +
+    return readerHead(clip(rowTitle(e), 140), facts, actions) + note +
       '<div class="mm-timeline">' + sourceStep(e) + changeStep(e) + useSteps(e) + evidenceStep(e) + '</div>';
   }
   function sourceStep(e) {
