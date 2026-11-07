@@ -20,17 +20,19 @@ function row(over: Partial<TaskBoardRow>): TaskBoardRow {
     due: false, missed: false, failed: false, late: false, carriedOver: false, ...over } as TaskBoardRow
 }
 
+let subagentCalls: string[][] = []
+let subagentAnswer: (keys: string[]) => Promise<Map<string, any>> = async () => new Map()
 async function start(enabled: boolean | null) {
   dir = mkdtempSync(join(tmpdir(), 'today-brief-route-'))
   if (enabled !== null) writeFileSync(join(dir, 's.json'), JSON.stringify({ schema: 1, enabled }))
-  prompts.length = 0; boardReads = 0
+  prompts.length = 0; boardReads = 0; subagentCalls = []
   const brief = createTodayBrief({
     stateFile: join(dir, 'b.json'), settingsFile: join(dir, 's.json'), env: () => ({}),
     generate: async p => { prompts.push(p); return 'The release is moving, and one session waits on you to approve a publish.' },
   })
   const app = express()
   app.use(express.json({ limit: '1mb' }))
-  app.use('/api', createTodayBriefRouter({ brief, board: async () => { boardReads++; return board } }))
+  app.use('/api', createTodayBriefRouter({ brief, board: async () => { boardReads++; return board }, subagents: keys => { subagentCalls.push(keys); return subagentAnswer(keys) }, now: () => Date.parse('2026-11-07T13:00:00Z') }))
   server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`
 }
@@ -39,7 +41,7 @@ afterEach(async () => {
   server = null
   rmSync(dir, { recursive: true, force: true })
 })
-beforeEach(() => { board = [] })
+beforeEach(() => { board = []; subagentAnswer = async () => new Map() })
 
 const post = (path: string, body: unknown) => fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
 const ASK = { sessions: [{ title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 5, waiting: 'Wants to run npm publish' }], needs: [], sessionsRead: true, needsComplete: true, unread: [], recording: false }
@@ -88,6 +90,41 @@ describe('POST /api/today/brief', () => {
   })
 })
 
+describe('sub-agents on the ask', () => {
+  const K = (n: number) => 'claude|aaaaaaaa-1111-4111-8111-11111111111' + n
+  const body = { ...ASK, sessions: [
+    { title: 'Quiet one', provider: 'claude', state: 'open', minutes: 400, key: K(1) },
+    { title: 'Orchestrator', provider: 'claude', state: 'working', minutes: 50, key: K(2), agents: { active: 1, completed: 0, total: 1 } },
+    { title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 5, key: K(3) },
+  ] }
+  it('reads them for waiting and working sessions first, and the prompt names them without any id', async () => {
+    await start(true)
+    subagentAnswer = async () => new Map([[K(2), { rows: [{ name: 'today-brief-builder', task: 'Today summary via Haiku', status: 'running', at: Date.parse('2026-11-07T12:56:00Z') }], running: 1, idle: 0, done: 0, failed: 0, total: 1 }]])
+    expect((await (await post('/today/brief', body)).json()).state).toBe('fresh')
+    expect(subagentCalls).toEqual([[K(3), K(2), K(1)]])
+    expect(prompts[0]).toContain('- "today-brief-builder" (running, moved 4 min ago): "Today summary via Haiku"')
+    expect(prompts[0]).not.toMatch(/aaaaaaaa|claude\|/)
+  })
+  it('a slow read never holds the ask past its wait: the page\u2019s counts go instead', async () => {
+    await start(true)
+    subagentAnswer = () => new Promise(() => {})
+    const t0 = Date.now()
+    expect((await (await post('/today/brief', body)).json()).state).toBe('fresh')
+    expect(Date.now() - t0).toBeLessThan(4000)
+    expect(prompts[0]).toContain('sub-agents: 1 running')
+  }, 8000)
+  it('a failed read is the same as none', async () => {
+    await start(true)
+    subagentAnswer = async () => { throw new Error('boom') }
+    expect((await (await post('/today/brief', body)).json()).state).toBe('fresh')
+  })
+  it('off reads no sub-agents either', async () => {
+    await start(null)
+    await post('/today/brief', body)
+    expect(subagentCalls).toEqual([])
+  })
+})
+
 describe('the settings route', () => {
   it('reads and writes the toggle; anything but { enabled: boolean } is refused', async () => {
     await start(null)
@@ -117,5 +154,29 @@ describe('workInProgress', () => {
     expect(out.map(w => w.title)).not.toContain('Planned only')
     expect(out.map(w => w.title)).not.toContain('Delegated')
     expect(workInProgress(null)).toEqual([])
+  })
+})
+
+describe('readSubagentsFor (the server’s own reads)', () => {
+  it('finds a Claude session by id under the sessions home and reads its sub-agents; a bad or unknown key reads nothing', async () => {
+    const { readSubagentsFor } = await import('./today-brief.js')
+    const home = mkdtempSync(join(tmpdir(), 'brief-home-'))
+    const prev = process.env.COS_AGENT_SESSIONS_HOME
+    process.env.COS_AGENT_SESSIONS_HOME = home
+    try {
+      const id = 'aaaaaaaa-1111-4111-8111-111111111111'
+      const { mkdirSync } = await import('node:fs')
+      mkdirSync(join(home, '.claude', 'projects', '-Users-x-proj'), { recursive: true })
+      writeFileSync(join(home, '.claude', 'projects', '-Users-x-proj', id + '.jsonl'), [
+        JSON.stringify({ type: 'assistant', timestamp: '2026-11-07T12:00:00Z', message: { content: [{ type: 'tool_use', id: 't1', name: 'Agent', input: { name: 'qa-ghost', description: 'Ghost hunter QA' } }] } }),
+        JSON.stringify({ type: 'user', timestamp: '2026-11-07T12:00:01Z', toolUseResult: { status: 'teammate_spawned', name: 'qa-ghost' }, message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } }),
+      ].join('\n') + '\n')
+      const out = await readSubagentsFor(['claude|' + id, 'claude|bbbbbbbb-2222-4222-8222-222222222222', 'cursor|cccccccc-3333-4333-8333-333333333333'])
+      expect([...out.keys()]).toEqual(['claude|' + id])
+      expect(out.get('claude|' + id)!.rows).toEqual([{ name: 'qa-ghost', task: 'Ghost hunter QA', status: 'running', at: Date.parse('2026-11-07T12:00:01Z') }])
+    } finally {
+      if (prev === undefined) delete process.env.COS_AGENT_SESSIONS_HOME; else process.env.COS_AGENT_SESSIONS_HOME = prev
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

@@ -581,7 +581,10 @@
       var k = splitSessionId(s.provider, s.session_id || s.id);
       sessions.push({ title: sessionTitle(s), provider: k.provider, state: kind,
         minutes: briefMinutes(kind === 'open' ? (s.last_activity_at || s.state_since) : (s.state_since || s.last_activity_at)),
-        line: String(s.discussion_summary || '').slice(0, 400), waiting: kind === 'waiting' ? askedWhy(s) : '' });
+        line: String(s.discussion_summary || '').slice(0, 400), waiting: kind === 'waiting' ? askedWhy(s) : '',
+        // Only so the server can read this session's sub-agents (names, tasks, status); it never reaches the model.
+        key: k.provider + '|' + k.id,
+        agents: s.subagent_activity ? { active: s.subagent_activity.active, completed: s.subagent_activity.completed, total: s.subagent_activity.total } : undefined });
     });
     var needs = m.rows.filter(function (r) { return r.kind !== 'session'; }).slice(0, 12).map(function (r) {
       if (r.kind === 'work') return { title: r.item.sessionTitle || r.item.title || 'Handoff', why: needWhy(r.item) };
@@ -598,7 +601,7 @@
     if (BRIEF.inflight || state.pane !== 'today') return;   // renderStory already answered an offline Today
     if (Object.keys(m.states).some(function (k) { return m.states[k] === 'pending'; })) return;
     var body = briefInputs(m);
-    var key = JSON.stringify([body.sessions.map(function (s) { return [s.title, s.state, s.line, s.waiting]; }), body.needs, body.sessionsRead, body.needsComplete, body.unread, body.recording]);
+    var key = JSON.stringify([body.sessions.map(function (s) { return [s.title, s.state, s.line, s.waiting, s.agents]; }), body.needs, body.later, body.sessionsRead, body.needsComplete, body.unread, body.recording]);
     var since = Date.now() - BRIEF.sentAt;
     if (BRIEF.view && BRIEF.view.state === 'off' ? since < BRIEF_OFF_RECHECK_MS : key === BRIEF.sentKey && since < BRIEF_RESEND_MS) return;
     BRIEF.inflight = true; BRIEF.sentKey = key; BRIEF.sentAt = Date.now();

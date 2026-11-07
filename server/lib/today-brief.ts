@@ -43,7 +43,7 @@ export const TODAY_BRIEF_DAILY_CAP = 60
 export const TODAY_BRIEF_BREAKER_FAILURES = 3
 export const TODAY_BRIEF_BREAKER_MS = 60 * 60 * 1000
 /** The fenced data block's bound. Four characters a token: about 3,000 tokens, with the system prompt about 3,300. */
-export const TODAY_BRIEF_DATA_MAX_CHARS = 12_000
+export const TODAY_BRIEF_DATA_MAX_CHARS = 14_000
 /** The request body's bound, before anything is read from it. */
 export const TODAY_BRIEF_BODY_MAX_BYTES = 48 * 1024
 export const TODAY_BRIEF_TEXT_MAX_CHARS = 480
@@ -73,7 +73,27 @@ export interface TodayBriefView {
 // ── inputs ─────────────────────────────────────────────────────────────────
 
 export type BriefSessionState = 'working' | 'waiting' | 'open' | 'quiet'
-export interface BriefSession { title: string; provider: string; state: BriefSessionState; minutes: number; line: string; waiting: string }
+/** One sub-agent as the prompt shows it: name and task are untrusted text (quoted in the prompt), how long since it moved. */
+export interface BriefAgent { name: string; task: string; status: 'running' | 'idle' | 'done' | 'failed' | 'unknown'; minutesAgo: number }
+export interface BriefAgents { rows: BriefAgent[]; running: number; idle: number; done: number; failed: number; total: number }
+export interface BriefSession {
+  title: string; provider: string; state: BriefSessionState; minutes: number; line: string; waiting: string
+  /** "provider|id", ONLY to look the session's sub-agents up on the server. Never in the prompt or the fingerprint. */
+  key: string
+  /** Its sub-agents: counts from the page (the list's subagent_activity), rows from the server's own read. */
+  agents: BriefAgents | null
+}
+export const BRIEF_AGENTS_PER_SESSION = 6
+/** Sub-agent rows across the whole prompt; past this a session shows its counts only. */
+export const BRIEF_AGENT_ROWS_MAX = 30
+const SESSION_KEY = /^(claude|codex|cursor)\|[A-Za-z0-9._-]{6,128}$/
+const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), 999) : 0)
+/** The page's counts (subagent_activity: active, completed, total), or null when it sent none. */
+function agentCounts(raw: unknown): BriefAgents | null {
+  if (!record(raw)) return null
+  const running = count(raw.active), done = count(raw.completed), total = Math.max(count(raw.total), running + done)
+  return total ? { rows: [], running, idle: 0, done, failed: 0, total } : null
+}
 export interface BriefNeed { title: string; why: string }
 export interface BriefWork { title: string; stage: string; running: boolean }
 export interface TodayBriefInputs {
@@ -146,7 +166,8 @@ export function normalizeTodayBriefInputs(raw: unknown, work: BriefWork[] = []):
     const state = row.state as BriefSessionState
     if (!title || !SESSION_STATES.has(state)) continue
     const provider = typeof row.provider === 'string' && PROVIDERS.has(row.provider) ? row.provider : 'claude'
-    sessions.push({ title, provider, state, minutes: minutesOf(row.minutes), line: scrubText(row.line, LIMITS.line), waiting: scrubText(row.waiting, LIMITS.waiting) })
+    const key = typeof row.key === 'string' && SESSION_KEY.test(row.key) ? row.key : ''
+    sessions.push({ title, provider, state, minutes: minutesOf(row.minutes), line: scrubText(row.line, LIMITS.line), waiting: scrubText(row.waiting, LIMITS.waiting), key, agents: agentCounts(row.agents) })
   }
   const needs: BriefNeed[] = []
   for (const row of (raw.needs as unknown[] | undefined) ?? []) {
@@ -167,6 +188,33 @@ export function normalizeTodayBriefInputs(raw: unknown, work: BriefWork[] = []):
   }
 }
 
+/** A server read of one session's sub-agents (lib/session-subagents.ts SessionSubagents, structurally). */
+export interface SubagentReading { rows: Array<{ name: string; task: string; status: BriefAgent['status']; at: number }>; running: number; idle: number; done: number; failed: number; total: number }
+/** The sessions the server reads sub-agents for: waiting and working first, then the most recent open ones. */
+export const BRIEF_SUBAGENT_SESSIONS = 8
+export function subagentLookups(inputs: TodayBriefInputs): string[] {
+  const order: Record<BriefSessionState, number> = { waiting: 0, working: 1, open: 2, quiet: 3 }
+  return [...inputs.sessions].filter(s => s.key).sort((a, b) => order[a.state] - order[b.state] || a.minutes - b.minutes)
+    .slice(0, BRIEF_SUBAGENT_SESSIONS).map(s => s.key)
+}
+/** The inputs with the server's sub-agent reads in place of the page's counts, names and tasks cleaned like any input. */
+export function withSubagents(inputs: TodayBriefInputs, readings: Map<string, SubagentReading>, now: number): TodayBriefInputs {
+  if (!readings.size) return inputs
+  return {
+    ...inputs,
+    sessions: inputs.sessions.map(s => {
+      const r = s.key ? readings.get(s.key) : undefined
+      if (!r || !r.total) return s
+      const rows = r.rows.slice(0, BRIEF_AGENTS_PER_SESSION).map(a => ({
+        // A double quote would end the quoted text early in the prompt: it becomes a single one.
+        name: scrubText(a.name, 40).replace(/"/g, "'") || 'agent', task: scrubText(a.task, 90).replace(/"/g, "'"), status: a.status,
+        minutesAgo: a.at > 0 ? Math.max(0, Math.round((now - a.at) / 60000)) : 0,
+      }))
+      return { ...s, agents: { rows, running: count(r.running), idle: count(r.idle), done: count(r.done), failed: count(r.failed), total: count(r.total) } }
+    }),
+  }
+}
+
 /** How long, coarsely, so a minute ticking by is not new news: under 10 min, an hour, 3 h, 8 h, longer. */
 export function minutesBucket(minutes: number): number {
   if (minutes < 10) return 0
@@ -178,7 +226,9 @@ export function minutesBucket(minutes: number): number {
 
 /** The inputs' fingerprint: order-free, durations bucketed. Two Todays that see the same things agree on it. */
 export function todayBriefFingerprint(inputs: TodayBriefInputs): string {
-  const sessions = inputs.sessions.map(s => [s.state, s.title, s.provider, minutesBucket(s.minutes), s.line, s.waiting].join('\u001f')).sort()
+  // Sub-agents count by who and what and their status, never by when they last moved (that ticks).
+  const agentsOf = (a: BriefAgents | null) => (a ? [a.running, a.idle, a.done, a.failed, a.total, ...a.rows.map(r => r.name + '|' + r.status + '|' + r.task)].join(',') : '')
+  const sessions = inputs.sessions.map(s => [s.state, s.title, s.provider, minutesBucket(s.minutes), s.line, s.waiting, agentsOf(s.agents)].join('\u001f')).sort()
   const needs = inputs.needs.map(n => n.title + '\u001f' + n.why).sort()
   const work = inputs.work.map(w => w.title + '\u001f' + w.stage + '\u001f' + w.running).sort()
   return createHash('sha256').update(JSON.stringify([1, sessions, needs, inputs.later, work, inputs.sessionsRead, inputs.needsComplete, [...inputs.unread].sort(), inputs.recording])).digest('hex')
@@ -234,12 +284,25 @@ export function buildTodayBriefData(inputs: TodayBriefInputs): string {
     ? `Needs you: ${inputs.needs.length} ${inputs.needs.length === 1 ? 'item' : 'items'}${inputs.later ? `, ${inputs.later === inputs.needs.length ? 'all' : inputs.later} of them can wait until tomorrow (quiet hours or the weekend)` : ''}, and every source was read.`
     : `Needs you: ${inputs.needs.length} found so far; ${inputs.unread.length ? `could not read ${listWords(inputs.unread)}` : 'some sources are still being read'}, so this may not be everything.`)
   if (inputs.recording) lines.push('A meeting is being recorded right now.')
+  let agentRows = 0
   const sessionLine = (s: BriefSession) => {
     const head = s.state === 'waiting' ? `waiting ${forWords(s.minutes)}` : s.state === 'working' ? `working ${forWords(s.minutes)}` : `quiet ${forWords(s.minutes)}`
     const bits = [`- ${s.title} (${PROVIDER_WORDS[s.provider] ?? 'Session'}, ${head})`]
     if (s.waiting) bits.push(`waiting for: ${s.waiting}`)
     if (s.line) bits.push(`latest: ${s.line}`)
-    return bits.join('. ')
+    let out = bits.join('. ')
+    const a = s.agents
+    if (a && a.total) {
+      const parts = ([['running', a.running], ['idle', a.idle], ['done', a.done], ['failed', a.failed]] as const).filter(([, n]) => n > 0).map(([w, n]) => `${n} ${w}`)
+      out += `\n  sub-agents: ${parts.length ? parts.join(', ') : `${a.total}, status unknown`}`
+      for (const r of a.rows) {
+        if (agentRows >= BRIEF_AGENT_ROWS_MAX) break
+        agentRows++
+        // Names and tasks are written by agents: quoted, as data.
+        out += `\n  - "${r.name}" (${r.status === 'unknown' ? 'status unknown' : r.status}, moved ${forWords(r.minutesAgo)}${r.minutesAgo < 1 ? '' : ' ago'})${r.task ? `: "${r.task}"` : ''}`
+      }
+    }
+    return out
   }
   const sections: Array<[string, string[]]> = [
     ['Waiting on the person:', waiting.map(sessionLine)],
@@ -248,13 +311,15 @@ export function buildTodayBriefData(inputs: TodayBriefInputs): string {
     ['Work cards in progress:', inputs.work.map(w => `- ${w.title} (${WORK_STAGE_WORDS[w.stage]}${w.running ? ', an agent is on it' : ''})`)],
     ['Open and quiet, most recent first:', quiet.slice(0, 14).map(sessionLine)],
   ]
+  const MORE = '\n- and more.'
   let out = lines.join('\n')
   for (const [title, rows] of sections) {
     if (!rows.length) continue
-    if (out.length + title.length + 2 > TODAY_BRIEF_DATA_MAX_CHARS) break
+    if (out.length + title.length + 2 > TODAY_BRIEF_DATA_MAX_CHARS - MORE.length) break
     out += `\n${title}`
     for (const row of rows) {
-      if (out.length + row.length + 1 > TODAY_BRIEF_DATA_MAX_CHARS) { out += '\n- and more.'; break }
+      // Room is kept for the marker itself, so the block never passes its bound.
+      if (out.length + row.length + 1 > TODAY_BRIEF_DATA_MAX_CHARS - MORE.length) { out += MORE; break }
       out += `\n${row}`
     }
   }

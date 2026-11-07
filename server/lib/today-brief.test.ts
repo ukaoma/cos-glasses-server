@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
-  normalizeTodayBriefInputs, scrubText, todayBriefFingerprint, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
+  TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
+  normalizeTodayBriefInputs, scrubText, subagentLookups, todayBriefFingerprint, withSubagents, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
 } from './today-brief.js'
 
 // No model is ever called here: `generate` is a fake that records its prompts.
@@ -327,3 +327,73 @@ describe('the audit', () => {
     expect(Object.keys(row).sort()).toEqual(['durationMs', 'inputChars', 'model', 'outcome', 'outputChars'])   // no guard on an ok row, and never the text
   })
 })
+
+describe('sub-agents (Miles 11/07: "those summaries should be able to see sub agents as well")', () => {
+  const NOW = Date.parse('2026-11-07T13:00:00Z')
+  const KEY = 'claude|aaaaaaaa-1111-4111-8111-111111111111'
+  const base = () => normalizeTodayBriefInputs({
+    sessions: [
+      { title: 'COS orchestrator', provider: 'claude', state: 'working', minutes: 50, key: KEY, agents: { active: 2, completed: 1, total: 3 } },
+      { title: 'Codex work', provider: 'codex', state: 'working', minutes: 5, key: 'codex|019a0000-1111-2222-3333-444455556666', agents: { active: 1, completed: 0, total: 1 } },
+      { title: 'Quiet', provider: 'claude', state: 'open', minutes: 300, key: 'bogus key with spaces' },
+    ], sessionsRead: true, needsComplete: true,
+  })
+  const reading = (over: Partial<SubagentReading['rows'][number]> = {}): Map<string, SubagentReading> => new Map([[KEY, {
+    rows: [
+      { name: 'today-brief-builder', task: 'Today summary via Haiku, capped', status: 'running', at: NOW - 4 * 60000, ...over },
+      { name: 'qa-ghost', task: 'Ghost "hunter" QA in /Users/ukaoma/x/y', status: 'idle', at: NOW - 30 * 60000 },
+    ], running: 1, idle: 1, done: 0, failed: 0, total: 2,
+  }]])
+
+  it('keeps a valid key only to look sub-agents up, and the page\u2019s counts until the server reads more', () => {
+    const i = base()
+    expect(i.sessions.map(s => s.key)).toEqual([KEY, 'codex|019a0000-1111-2222-3333-444455556666', ''])
+    expect(subagentLookups(i)).toEqual(['codex|019a0000-1111-2222-3333-444455556666', KEY])
+    const data = buildTodayBriefData(i)
+    expect(data).toContain('sub-agents: 2 running, 1 done')
+  })
+  it('puts names, tasks, status and when each moved in the prompt, quoted as data, with no ids, keys or paths', () => {
+    const prompt = buildTodayBriefPrompt(withSubagents(base(), reading(), NOW), NOW)
+    expect(prompt).toContain('sub-agents: 1 running, 1 idle')
+    expect(prompt).toContain('- "today-brief-builder" (running, moved 4 min ago): "Today summary via Haiku, capped"')
+    expect(prompt).toContain('- "qa-ghost" (idle, moved 30 min ago): "Ghost \'hunter\' QA in"')
+    for (const bad of ['aaaaaaaa', '019a0000', 'claude|', 'codex|', '/Users/']) expect(prompt).not.toContain(bad)
+    expect(TODAY_BRIEF_SYSTEM_PROMPT_HAS_UNTRUSTED()).toBe(true)
+  })
+  it('a sub-agent changing state is new news; one ticking along is not', () => {
+    const a = withSubagents(base(), reading(), NOW)
+    const later = withSubagents(base(), reading({ at: NOW - 60000 }), NOW + 3 * 60000)
+    expect(todayBriefFingerprint(later)).toBe(todayBriefFingerprint(a))
+    const idle = withSubagents(base(), reading({ status: 'idle' }), NOW)
+    expect(todayBriefFingerprint(idle)).not.toBe(todayBriefFingerprint(a))
+  })
+  it('at most six per session and thirty across the prompt; the data block keeps its bound', () => {
+    const many = (n: number) => ({ rows: Array.from({ length: n }, (_, k) => ({ name: 'agent-' + k, task: 'task '.repeat(30), status: 'running' as const, at: NOW - k * 60000 })), running: n, idle: 0, done: 0, failed: 0, total: n })
+    const sessions = Array.from({ length: 8 }, (_, k) => ({ title: 'Session ' + k + ' ' + 'w '.repeat(40), provider: 'claude', state: 'working', minutes: k, key: 'claude|aaaaaaaa-1111-4111-8111-11111111111' + k, line: 'reply '.repeat(30) }))
+    const i = normalizeTodayBriefInputs({ sessions, sessionsRead: true, needsComplete: true })
+    const readings = new Map(sessions.map(s => [s.key, many(10)] as [string, SubagentReading]))
+    const enriched = withSubagents(i, readings, NOW)
+    expect(enriched.sessions[0]!.agents!.rows).toHaveLength(6)
+    expect(enriched.sessions[0]!.agents!.total).toBe(10)
+    const data = buildTodayBriefData(enriched)
+    expect((data.match(/^  - "agent-/gm) || []).length).toBeLessThanOrEqual(BRIEF_AGENT_ROWS_MAX)
+    expect(data.length).toBeLessThanOrEqual(TODAY_BRIEF_DATA_MAX_CHARS)
+  })
+  it('the thirty-row cap holds even when everything would fit', () => {
+    const small = (n: number) => ({ rows: Array.from({ length: n }, (_, k) => ({ name: 'a' + k, task: 't', status: 'running' as const, at: NOW })), running: n, idle: 0, done: 0, failed: 0, total: n })
+    const sessions = Array.from({ length: 8 }, (_, k) => ({ title: 'S' + k, provider: 'claude', state: 'working', minutes: k, key: 'claude|aaaaaaaa-1111-4111-8111-11111111111' + k }))
+    const i = withSubagents(normalizeTodayBriefInputs({ sessions, sessionsRead: true, needsComplete: true }), new Map(sessions.map(s => [s.key, small(6)] as [string, SubagentReading])), NOW)
+    const data = buildTodayBriefData(i)
+    expect(data.length, 'well under the bound').toBeLessThan(TODAY_BRIEF_DATA_MAX_CHARS / 2)
+    expect((data.match(/^  - "a\d/gm) || []).length).toBe(BRIEF_AGENT_ROWS_MAX)
+    expect((data.match(/sub-agents: 6 running/g) || []).length, 'every session still says its counts').toBe(8)
+  })
+  it('a session the server could not read keeps the page\u2019s counts', () => {
+    expect(withSubagents(base(), new Map(), NOW).sessions[0]!.agents!.total).toBe(3)
+    const other = new Map([['claude|ffffffff-1111-4111-8111-111111111111', reading().get(KEY)!]])   // a read, but of another session
+    const i = withSubagents(base(), other, NOW)
+    expect(i.sessions[0]!.agents).toEqual({ rows: [], running: 2, idle: 0, done: 1, failed: 0, total: 3 })
+  })
+})
+
+function TODAY_BRIEF_SYSTEM_PROMPT_HAS_UNTRUSTED() { return TODAY_BRIEF_SYSTEM_PROMPT.includes('untrusted data') }

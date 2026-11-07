@@ -55,7 +55,8 @@ function story(opts: { sessions?: any[]; rows?: any[]; states?: Record<string, s
 const WAITING = { session_id: 'aaaaaaaa-1111-4111-8111-111111111111', provider: 'claude', display_label: 'Release QA', agent_state: 'waiting', running: true,
   state_since: '2026-11-04T19:48:00Z', discussion_summary: 'Asked whether to publish 6.99.26' }
 const WORKING = { session_id: 'bbbbbbbb-2222-4222-8222-222222222222', provider: 'codex', display_label: 'Today summary build', running: true, running_active: true,
-  state_since: '2026-11-04T19:35:00Z', discussion_summary: 'Writing the route', project: '-Users-ukaoma-Documents-GitHub-secret' }
+  state_since: '2026-11-04T19:35:00Z', discussion_summary: 'Writing the route', project: '-Users-ukaoma-Documents-GitHub-secret',
+  subagent_activity: { active: 2, completed: 1, unknown: 0, total: 3, checked_at: 1, partial: false } }
 const FRESH = { text: 'You are shipping the Today summary. Release QA waits on you to approve a publish.', at: '2026-11-04T19:54:00Z', state: 'fresh', basis: '2 sessions', model: 'haiku' }
 
 describe('the Today summary on the web', () => {
@@ -68,10 +69,13 @@ describe('the Today summary on the web', () => {
     expect(s.posts[0]).toMatchObject({ path: '/api/today/brief', method: 'POST' })
     expect(body).toMatchObject({ sessionsRead: true, needsComplete: true, unread: [], recording: false, later: 0 })
     expect(body.sessions).toEqual([
-      { title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 12, line: 'Asked whether to publish 6.99.26', waiting: 'Wants to run npm publish' },
-      { title: 'Today summary build', provider: 'codex', state: 'working', minutes: 25, line: 'Writing the route', waiting: '' },
+      { title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 12, line: 'Asked whether to publish 6.99.26', waiting: 'Wants to run npm publish', key: 'claude|' + WAITING.session_id, agents: undefined },
+      { title: 'Today summary build', provider: 'codex', state: 'working', minutes: 25, line: 'Writing the route', waiting: '', key: 'codex|' + WORKING.session_id,
+        agents: { active: 2, completed: 1, total: 3 } },
     ])
-    expect(JSON.stringify(body), 'no ids or folders leave the page').not.toMatch(/aaaaaaaa|bbbbbbbb|secret/)
+    // Ids go only in `key`, for the server's sub-agent lookup; no folder goes at all.
+    const noKeys = JSON.stringify(body.sessions.map((s: any) => ({ ...s, key: undefined })))
+    expect(noKeys, 'no ids or folders outside the lookup key').not.toMatch(/aaaaaaaa|bbbbbbbb|secret/)
     await s.flush()
     expect(s.els['today-story']!.innerHTML).toBe(esc(FRESH.text) + '<span class="story-when">Updated 6 min ago.</span>')
   })

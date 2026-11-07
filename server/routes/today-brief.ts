@@ -16,15 +16,47 @@ import { dataPath } from '../lib/data-dir.js'
 import { runClaudeText } from '../lib/claude-text-runner.js'
 import { logTokenAudit } from '../lib/token-audit.js'
 import type { TaskBoardRow } from '../lib/task-store.js'
+import { agentSessionRoots, findAgentSessionFile } from '../lib/agent-session-store.js'
+import { readClaudeSubagents, summarize, type SessionSubagents } from '../lib/session-subagents.js'
+import { readCodexSubagentDetails } from '../lib/codex-subagent-activity.js'
 import {
   TODAY_BRIEF_BODY_MAX_BYTES, TODAY_BRIEF_EFFORT, TODAY_BRIEF_SETTINGS_FILE, TODAY_BRIEF_STATE_FILE, TODAY_BRIEF_TIMEOUT_MS,
-  TodayBriefInputError, createTodayBrief, normalizeTodayBriefInputs, type BriefWork, type TodayBrief,
+  TodayBriefInputError, createTodayBrief, normalizeTodayBriefInputs, subagentLookups, withSubagents, type BriefWork, type SubagentReading, type TodayBrief,
 } from '../lib/today-brief.js'
 
 export interface TodayBriefRouterDeps {
   brief: TodayBrief
   /** The Work board as the server already reads it (a shared, bounded read), or null when it cannot be read. */
   board: () => Promise<TaskBoardRow[] | null>
+  /** Sub-agents for up to 8 sessions, by "provider|id". Missing keys mean "not read"; the page's counts stay. */
+  subagents?: (keys: string[]) => Promise<Map<string, SubagentReading>>
+  now?: () => number
+}
+
+/** How long the sub-agent reads may hold the ask before it goes on without them. */
+export const TODAY_BRIEF_SUBAGENT_WAIT_MS = 2_500
+
+/**
+ * The server's own sub-agent reads: Claude from the session's transcript tail (lib/session-subagents.ts), Codex from
+ * the spawn-edge snapshot (readCodexSubagentDetails, server home only). Cursor has none. Sequential, bounded, read-only.
+ */
+export async function readSubagentsFor(keys: string[], now = Date.now()): Promise<Map<string, SubagentReading>> {
+  const out = new Map<string, SubagentReading>()
+  const roots = agentSessionRoots()
+  const codex = keys.filter(k => k.startsWith('codex|')).map(k => k.slice(6))
+  for (const key of keys.filter(k => k.startsWith('claude|'))) {
+    const file = await findAgentSessionFile('claude', key.slice(7), roots).catch(() => null)
+    const read: SessionSubagents | null = file ? await readClaudeSubagents(file) : null
+    if (read && read.total) out.set(key, read)
+  }
+  if (codex.length) {
+    const details = await readCodexSubagentDetails(codex, roots.codexSessions, now)
+    for (const [id, list] of details) {
+      const rows = list.map(d => ({ name: d.name, task: d.task, status: d.state === 'active' ? 'running' as const : d.state === 'completed' ? 'done' as const : 'unknown' as const, at: d.at }))
+      if (rows.length) out.set('codex|' + id, summarize(rows, false))
+    }
+  }
+  return out
 }
 
 /** The server's own brief: the data folder, Haiku through the isolated text runner, one audit row per start. */
@@ -76,7 +108,14 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
         return res.json(deps.brief.peek())
       }
       const work = workInProgress(await deps.board().catch(() => null))
-      const inputs = normalizeTodayBriefInputs(req.body, work)
+      let inputs = normalizeTodayBriefInputs(req.body, work)
+      const keys = subagentLookups(inputs)
+      if (keys.length && deps.subagents) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const late = new Promise<Map<string, SubagentReading>>(resolve => { timer = setTimeout(() => resolve(new Map()), TODAY_BRIEF_SUBAGENT_WAIT_MS) })
+        const readings = await Promise.race([deps.subagents(keys).catch(() => new Map<string, SubagentReading>()), late]).finally(() => clearTimeout(timer))
+        inputs = withSubagents(inputs, readings, (deps.now ?? Date.now)())
+      }
       res.json(await deps.brief.ask(inputs))
     } catch (error) {
       if (error instanceof TodayBriefInputError) return res.status(400).json({ error: { code: error.code, message: 'That is not a Today summary request.' } })
