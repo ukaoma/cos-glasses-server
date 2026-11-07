@@ -1,8 +1,18 @@
+## 6.99.32 - Duo follow-ups: a hung Mac, and the Other field under the keyboard
+
+2026-11-07. On 6.99.30 (a90f024, installed privately 17:20). Server only (Control Web). Works with COS Control 0.5.377 (build 431). The first public build with the 6.99.30 Duo layout work below; 6.99.30 itself was never on npm. 6.99.31 is reserved for the phone approvals and is not in this build.
+
+**Default-on changes:**
+- **A Mac that hangs is marked not answering.** Before, a Mac that neither answered nor refused (asleep, a stale Tailscale route) kept "Server connected" up, and one hung question read stopped the 10 s question check for good. Now the question check gives up after 15 s, says the Mac is not answering (the rail, an open session sheet, and Submit, Allow and Deny waiting with the reason), and checks again. Any read api() makes that times out says the same; a write that times out does not (a slow save is not a Mac that went away). The next answer marks it up again.
+- **A focused field comes back into view when the keyboard rises.** Unfolded, a question card's Other field could sit under the on-screen keyboard (the keyboard rises after the focus, so the first scroll landed too early). Once the layout has the keyboard, the focused field (or the reply box) is scrolled into view again, once per keyboard rise.
+
+**Tests:** web-parity (the hung read gives up at 15 s and frees the poll; an answer in time clears the limit), duo-layout-630-web (a read timeout marks down, a write timeout does not), today-actions (the reveal after the keyboard rises, only on a rise, not with focus gone). Every guard mutation-checked.
+
 ## 6.99.30 - Duo layout fixes (private)
 
 **Today weather moves to the top** (Miles, 15:18, IMG_0504): the weather now sits under the date at the top left of Today, and shows even when no meeting is next; Next up keeps only the meeting. Default-on for every web user.
 
-2026-11-07. Private build on 6.99.29 (c925353). Server only (Control Web). Works with COS Control 0.5.376 as installed.
+2026-11-07. Private build on 6.99.29 (c925353), never published to npm; 6.99.32 carries all of it. Server only (Control Web). Works with COS Control 0.5.377 (build 431).
 
 Miles tests on an iPhone Duo (folded about 382x678, unfolded about 1430x1000 landscape and 1000x1430 portrait), in Comet as well as Safari, sometimes with a Bluetooth keyboard. Three QA rounds on 6.99.29 (skeptic, design, user canary) found where the layout assumed Safari or a width. Nothing here assumes a browser now: every size comes from what the browser reports.
 

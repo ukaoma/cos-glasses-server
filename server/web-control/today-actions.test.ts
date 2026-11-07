@@ -3540,6 +3540,36 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
     expect(L.cls.has('ta-kb-strip'), 'focus left: the refit came from focusout').toBe(false)
   })
 
+  // 6.99.32 (QA 6.99.30 canary W2): the keyboard rises AFTER the focus, so the 250 ms scroll can land too early.
+  it('a question card’s Other field focused first, then the keyboard rises: it is scrolled into view on the next frame', async () => {
+    const h = await opened(1000, { height: 1000 })
+    const L = layerOf(h)
+    const other: any = Object.assign(new El(), { tagName: 'INPUT', type: 'text' })
+    const scrolls: string[] = []
+    other.scrollIntoView = (o: { block: string }) => scrolls.push('other ' + o.block)
+    L.contains = ((x: unknown) => x === other) as any
+    h.document.activeElement = other
+    h.viewport({ height: 1000 }); h.runFrames()
+    expect(scrolls, 'no keyboard yet: nothing to reveal').toEqual([])
+    h.viewport({ height: 580 }); h.runFrames()
+    expect(L.cls.has('ta-kb')).toBe(true)
+    expect(scrolls, 'asked for, not done inside the layout frame').toEqual([])
+    h.runFrames()
+    expect(scrolls).toEqual(['other nearest'])
+    h.viewport({ height: 560 }); h.runFrames(); h.runFrames()
+    expect(scrolls, 'only when the keyboard rises, not on every resize while it is up').toEqual(['other nearest'])
+    h.viewport({ height: 1000 }); h.runFrames(); h.runFrames()
+    h.document.activeElement = h.document.body
+    h.viewport({ height: 580 }); h.runFrames(); h.runFrames()
+    expect(scrolls, 'nothing focused: nothing scrolled').toEqual(['other nearest'])
+    h.viewport({ height: 1000 }); h.runFrames(); h.runFrames()
+    h.document.activeElement = other
+    h.viewport({ height: 580 }); h.runFrames()
+    h.document.activeElement = h.document.body   // focus left before the reveal's frame
+    h.runFrames()
+    expect(scrolls, 'focus gone by the next frame: nothing scrolled').toEqual(['other nearest'])
+  })
+
   it('desktop zoom or a scrollbar (1 to 23 px of rounding) never reads as a strip; 24 px does (QA 6.99.30)', async () => {
     for (const [inset, want] of [[1, false], [17, false], [23, false], [24, true]] as const) {
       const h = await opened(1000, { height: 1000 })

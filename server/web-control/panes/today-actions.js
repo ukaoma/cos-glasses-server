@@ -230,14 +230,26 @@
     if (w) KB.width = w;
     var was = KB.on + '|' + KB.strip + '|' + KB.tight;
     if (turned) KB.tight = false;
+    var rose = (on && !KB.on) || (strip && !KB.strip);
     if (on !== KB.on) { KB.on = on; KB.tight = false; layer.classList.toggle('ta-kb', on); }
     if (strip !== KB.strip) { KB.strip = strip; layer.classList.toggle('ta-kb-strip', strip); }
+    // 6.99.32 (QA 6.99.30 canary W2): the keyboard rises after the focus, so onFocusIn's scroll (250 ms) can land before
+    // the layer shrinks and leave a question card's Other field under the keyboard. Once the layout has the keyboard,
+    // bring the focused field into view again.
+    if (rose && focus) revealFocused();
     // Measured with the compact header in place. Once tight it stays so while the keyboard is up: showing the note
     // again would take the room back and flicker.
     if (on && !KB.tight) KB.tight = bodyRoom(v.height) < BODY_MIN_PX;
     layer.classList.toggle('ta-kb-tight', on && KB.tight);
     if (was !== KB.on + '|' + KB.strip + '|' + KB.tight) crumb('kb', v, focus);
     return v;
+  }
+  function revealFocused() {
+    var a = document.activeElement;
+    var f = a && a.id === 'ta-input' ? $('ta-form') : a;
+    var go = function () { if (O.open && typing() && f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' }); };
+    // The next frame, so the scroll measures the layout with ta-kb (or ta-kb-strip) applied.
+    if (window.requestAnimationFrame) window.requestAnimationFrame(go); else go();
   }
   function fit() {
     if (KB.frame || !O.open) return;

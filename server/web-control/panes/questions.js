@@ -50,6 +50,7 @@
     lastPollAt: 0         // when the last poll went out (Date.now)
   };
   var DEFAULT_POLL_MS = 10000;
+  var POLL_TIMEOUT_MS = 15000;
   // 6.99.27 (Miles 11/07 09:29, "a big delay to see the questions on the homepage"): while this tab is visible on
   // Today it reads every 3 s, whatever the server's idle pace (10 s). Before, a question parked just after an idle read
   // waited up to 10 s plus the round trip for the next one. Hidden, the page reads nothing (visibilitychange below).
@@ -141,7 +142,14 @@
     Q.inflight = true; Q.again = false; Q.lastPollAt = Date.now();
     capForPoll().then(function (cap) {
       if (!usable(cap)) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
-      return fetch(pollUrl(), { headers: { 'X-COS-Web': '1' }, credentials: 'same-origin', cache: 'no-store' }).then(function (res) {
+      // 6.99.32 (QA 6.99.30 canary W1): a Mac that hangs (asleep, a stale Tailscale route) never answered and never
+      // refused, so this read stayed in flight forever: no more polls, and the Mac never marked down. It gives up after
+      // POLL_TIMEOUT_MS, says the Mac is not answering, and polls again.
+      var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      var gaveUp = false;
+      var limit = ctrl ? setTimeout(function () { gaveUp = true; ctrl.abort(); }, POLL_TIMEOUT_MS) : null;
+      return fetch(pollUrl(), { headers: { 'X-COS-Web': '1' }, credentials: 'same-origin', cache: 'no-store', signal: ctrl ? ctrl.signal : undefined }).then(function (res) {
+        clearTimeout(limit);
         // QA 6.99.30 (Skeptic): this 3 s read is what Sessions and Meetings pages keep running, so it tells app.js the Mac
         // answered (any status) or did not (below); otherwise a "down" mark stranded Submit, Allow and Deny for minutes.
         if (W.noteServer) W.noteServer(true);
@@ -156,7 +164,8 @@
           landed();
         });
       }, function (err) {
-        if (W.noteServer && !(err && err.name === 'AbortError')) W.noteServer(false);
+        clearTimeout(limit);
+        if (W.noteServer && (gaveUp || !(err && err.name === 'AbortError'))) W.noteServer(false);
         schedule(DEFAULT_POLL_MS); landed();
       });
     }).catch(function () { schedule(DEFAULT_POLL_MS); landed(); });

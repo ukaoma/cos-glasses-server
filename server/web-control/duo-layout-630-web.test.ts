@@ -70,6 +70,20 @@ describe('6.99.30: api() never shows the browser’s own network error, and says
     expect(late.code === 'timeout' || late.name === 'AbortError', 'a timeout is not "unreachable"').toBe(true)
     expect(late.message).not.toBe(SENTENCE)
   })
+  // 6.99.32 (QA 6.99.30 canary W1): a read the Mac never answered in time is a Mac not answering; a slow write is not.
+  it('a read timeout marks the server down; a write timeout does not', async () => {
+    const hang = (_p: string, init?: any) => new Promise((_ok, fail) => { init?.signal?.addEventListener('abort', () => fail(Object.assign(new Error('aborted'), { name: 'AbortError' }))) })
+    const t = transport(hang as any)
+    const seen: boolean[] = []
+    t.ctx.SERVER.hooks.push((up: boolean) => seen.push(up))
+    const w = await t.ctx.api('/w', { method: 'POST', body: {}, timeoutMs: 5 }).catch((e: any) => e)
+    expect(w.code).toBe('timeout')
+    expect(seen, 'a slow save is not a Mac that went away').toEqual([])
+    const r = await t.ctx.api('/r', { timeoutMs: 5 }).catch((e: any) => e)
+    expect(r.code).toBe('timeout')
+    expect(r.message).not.toBe('Could not reach COS on your Mac. Check that it is awake and on Tailscale, then try again.')
+    expect(seen).toEqual([false])
+  })
   it('the panes say the same sentence: no pane keeps its own copy', () => {
     expect(read('panes/memories.js')).not.toContain('Could not reach')
     expect(read('panes/speakers.js')).toContain('W.unreachableCopy')

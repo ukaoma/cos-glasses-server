@@ -142,6 +142,9 @@
     }, function (err) {
       if (timer) clearTimeout(timer);
       if (err && err.name === 'AbortError' && ctrl && ctrl.signal.aborted) {
+        // 6.99.32 (QA 6.99.30 canary W1): a read the Mac never answered in time means it is not answering. A write has
+        // no deadline unless its caller set one, and a slow save is not a Mac that went away, so only reads say so.
+        if (method === 'GET') noteServer(false);
         var late = new Error('Your Mac did not answer in ' + Math.round(limit / 1000) + ' seconds. Check that it is awake, then try again.');
         late.code = 'timeout'; throw late;
       }

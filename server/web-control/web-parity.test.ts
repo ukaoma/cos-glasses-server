@@ -334,7 +334,7 @@ describe('Model and Effort come from /api/models', () => {
 })
 
 // ── session questions (panes/questions.js) ─────────────
-function loadQuestions(cap: Record<string, unknown> | null, poll: { status: number; body?: unknown; reject?: boolean }) {
+function loadQuestions(cap: Record<string, unknown> | null, poll: { status: number; body?: unknown; reject?: boolean; hang?: boolean }) {
   const notes: boolean[] = []
   const fetches: Array<{ url: string; init: any }> = []
   const posts: Array<{ path: string; body: any }> = []
@@ -360,19 +360,25 @@ function loadQuestions(cap: Record<string, unknown> | null, poll: { status: numb
   const fetch = (url: string, init: unknown) => {
     fetches.push({ url, init })
     if (poll.reject) return Promise.reject(new TypeError('Load failed'))
+    if (poll.hang) {
+      const signal = (init as any)?.signal
+      return new Promise((_ok, fail) => { signal?.addEventListener('abort', () => fail(Object.assign(new Error('aborted'), { name: 'AbortError' }))) })
+    }
     return Promise.resolve({ status: poll.status, ok: poll.status >= 200 && poll.status < 300, json: () => Promise.resolve(poll.body) })
   }
   const document = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? shell : null), addEventListener: () => {}, hidden: false, activeElement: null }
   const timers: Array<() => void> = []
+  const delays: number[] = []
+  const cleared = new Set<number>()
   const ctx = vm.createContext({
-    window: { COSWeb: W, addEventListener: () => {} }, document, fetch, console, Date, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
-    setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {},
+    window: { COSWeb: W, addEventListener: () => {} }, document, fetch, console, Date, JSON, Math, Promise, crypto: globalThis.crypto, isFinite, AbortController,
+    setTimeout: (fn: () => void, ms?: number) => { timers.push(fn); delays.push(ms ?? 0); return timers.length }, clearTimeout: (id: number) => { if (id) cleared.add(id) }, setInterval: () => 1, clearInterval: () => {},
   })
   vm.runInContext(QUESTIONS_SOURCE, ctx)
   const Qs = (W as any).sessionQuestions
   const fire = (type: string, target: Record<string, unknown>) => listeners[type]!({ target })
   const button = (what: string, id: string) => ({ closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? what : a === 'data-sq-id' ? id : null) }) })
-  return { start: () => onShell?.(), fetches, posts, Qs, fire, button, host, authShown: () => authShown, notes }
+  return { start: () => onShell?.(), fetches, posts, Qs, fire, button, host, authShown: () => authShown, notes, timers, delays, cleared }
 }
 const ITEM_Q = {
   id: 'pq_aaaaaaaaaaaaaaaaaaaaaaaa', sessionId: 's1', provider: 'claude', kind: 'question', tool: 'AskUserQuestion',
@@ -399,6 +405,30 @@ describe('session question cards (6.99.12)', () => {
     await flush(); await flush(); await flush()
     expect(gone.fetches).toHaveLength(1)
     expect(gone.notes).toEqual([false])
+  })
+
+  // 6.99.32 (QA 6.99.30 canary W1): a Mac that hangs never answered and never refused; the read stayed in flight forever.
+  it('a read that hangs gives up after 15 s, says the Mac is not answering, and frees the poll', async () => {
+    const h = loadQuestions({ enabled: true, webClient: true }, { status: 0, hang: true })
+    h.start()
+    await flush(); await flush(); await flush()
+    expect(h.fetches).toHaveLength(1)
+    expect(h.Qs._state.inflight).toBe(true)
+    const at = h.delays.indexOf(15_000)
+    expect(at, 'a 15 s limit was set on the read').toBeGreaterThan(-1)
+    expect(h.cleared.has(at + 1), 'still running while the read hangs').toBe(false)
+    h.timers[at]!()
+    await flush(); await flush()
+    expect(h.notes).toEqual([false])
+    expect(h.Qs._state.inflight, 'the next poll can go').toBe(false)
+  })
+  it('an answer in time clears the 15 s limit, so it never fires on a read that landed', async () => {
+    const h = loadQuestions({ enabled: true, webClient: true }, { status: 200, body: { enabled: true, items: [] } })
+    h.start()
+    await flush(); await flush(); await flush()
+    const at = h.delays.indexOf(15_000)
+    expect(at).toBeGreaterThan(-1)
+    expect(h.cleared.has(at + 1)).toBe(true)
   })
 
   it('never calls the questions route unless the server says it takes the browser session', async () => {
