@@ -198,3 +198,10 @@
 .cc-prep.dragging .cc-prep-panel { outline: 2px dashed var(--accent); outline-offset: 4px; }
 .cc-prep { scroll-margin-top: calc(64px + var(--safe-top, 0px)); }
 @media (min-width: 860px) { .msg-right .cc-prep { padding: 10px 16px 0; max-height: 55%; overflow-y: auto; flex: none; } }
+
+/* The Ask sheet's files (11/07, app.js askFiles): the attach kit's chips and clip beside the Ask box. */
+.sheet-head .cc-attach { flex: none; height: 44px; border-radius: 12px; }
+.ask-clip:empty { display: none; }
+.ask-files { margin-top: 10px; }
+.ask-files .ask-files-note { flex-basis: 100%; margin: 0 2px; font-size: 13px; line-height: 1.35; color: var(--sub); }
+#ask-sheet .sheet.dragging { outline: 2px dashed var(--accent); outline-offset: -6px; }

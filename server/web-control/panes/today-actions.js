@@ -28,6 +28,12 @@
    Close with the X, a tap outside, Escape, or Back (the overlay holds one history entry of its own). Focus moves in and
    comes back to the row. The page behind is inert and does not scroll.
 
+   Files with a reply or a note (11/07, Miles: "Sometimes I need to pass context via a screenshot, photo or file"): the
+   COS chat's own clip, chips, limits and upload (W.cosChat.attach), shown only where the Mac says a session turn takes
+   files (threadTurnAttachments). The ids go with the words through the same send path; the server writes where each
+   file is on the Mac under the words (lib/session-turn-attachments.ts). Send waits for every upload, and a failed one has
+   to be retried or removed first. The files are part of the draft's key, so other files are another message.
+
    Also the summary COS gets when Miles asks from Today (summary(): app.js askCos passes it as the Ask's reference).
    Loaded on the first tap or once the page is idle (app.js ensurePane, #lazy-panes). */
 (function () {
@@ -101,6 +107,8 @@
     var all = W.readStore(DRAFTS), k = draftKey(r), now = Date.now(), prev = all[k] || {};
     Object.keys(all).forEach(function (x) { if (!all[x] || now - (Number(all[x].at) || 0) >= DRAFT_DAYS * 86400000) delete all[x]; });
     var u = unsettled === undefined ? prev.unsettled || null : unsettled ? { text: unsettled.text, key: unsettled.key } : null;
+    // A send with files that never settled keeps their ids, so after a reload it goes again exactly as it was.
+    if (u && unsettled && unsettled.ids && unsettled.ids.length) u.ids = unsettled.ids.slice();
     var t = String(text || '');
     if (!t.trim() && !u) delete all[k]; else all[k] = { text: t, unsettled: u, at: now };
     W.writeStore(DRAFTS, all);
@@ -135,6 +143,23 @@
     layer.addEventListener('focusin', onFocusIn);
     layer.addEventListener('input', function (e) {
       if (e.target && e.target.id === 'ta-input' && O.r) keepDraft(O.r, e.target.value, O.r.draft && O.r.draft.text === e.target.value.trim() ? O.r.draft : undefined);
+    });
+    // Files: the clip, a pasted screenshot in the box, and files dropped on the reply box.
+    layer.addEventListener('change', function (e) {
+      if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-ta-file')) { addFiles(e.target.files); e.target.value = ''; }
+    });
+    layer.addEventListener('paste', function (e) {
+      if (!e.target || e.target.id !== 'ta-input' || !filesOn()) return;
+      var files = KIT().pasted(e);
+      if (files) { e.preventDefault(); addFiles(files); }
+    });
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (type) {
+      layer.addEventListener(type, function (e) {
+        var form = $('ta-form');
+        if (!form || !filesOn() || !e.target || !e.target.closest || !e.target.closest('#ta-form')) return;
+        var files = KIT().dragged(e, form);
+        if (files) addFiles(files);
+      });
     });
     // A drag on the dimmed page never scrolls what is behind it.
     layer.addEventListener('touchmove', function (e) { if (e.target && e.target.classList && e.target.classList.contains('ta-scrim')) e.preventDefault(); }, { passive: false });
@@ -317,6 +342,12 @@
     // A row of the pet's list opens that session's own sheet in its place; Back still closes the overlay.
     if (what === 'pet-open') { var pk = b.getAttribute('data-kind'); return open(pk === 'wait' ? 'wait' : 'run', id, O.opener); }
     if (what === 'send') return sendReply();
+    if (what === 'att-remove' || what === 'att-retry') {
+      var fb = filesBox(); if (!fb) return;
+      O.note = { text: '', kind: '' }; paintNote();
+      if (what === 'att-remove') KIT().remove(fb, b.getAttribute('data-att')); else KIT().retry(fb, b.getAttribute('data-att'));
+      return;
+    }
     if (what === 'stop') {
       // A tap arms it (Stop ends the agent's turn on your Mac); the second sends it.
       if (!confirmTap('stop', paintLive)) return;
@@ -576,7 +607,10 @@
     // What was typed, and a send whose answer never came, survive a close, Back or reload: the same words resend under
     // the same key (skeptic W3, qa2-user N1).
     var kept = O.r ? draftOf(O.r) : null;
-    if (kept && kept.unsettled) O.r.draft = { text: kept.unsettled.text, key: kept.unsettled.key };
+    if (kept && kept.unsettled) {
+      O.r.draft = { text: kept.unsettled.text, key: kept.unsettled.key };
+      if (Array.isArray(kept.unsettled.ids) && kept.unsettled.ids.length) { O.r.draft.ids = kept.unsettled.ids.slice(); O.r.draft.restored = true; }
+    }
     O.last = null; O.lastState = 'idle';
     setHead(kind === 'need' ? (O.item ? str(O.item.sessionTitle) || str(O.item.title) || 'Handoff' : 'Needs you')
       : kind === 'wait' ? (O.wait ? O.wait.title : 'A session is waiting for you') : (O.row ? K.title(O.row) : 'Session'));
@@ -586,6 +620,18 @@
     if (foot) { foot.innerHTML = O.r ? composerHtml(kind) : ''; foot.hidden = false; }
     var input = $('ta-input');
     if (input && kept && kept.text) { input.value = kept.text; W.autoGrow(input); }
+    if (O.r) {
+      paintFiles();
+      // The Mac's answer about files may not be in yet: ask once, then draw the clip.
+      var kit = KIT(), r0 = O.r;
+      if (kit && !kit.turnFiles()) kit.ensureCaps().then(function () { if (O.r === r0) paintFiles(); }, function () {});
+      // Files of a send a reload cut off go again with the same words; say so, since their chips are gone.
+      if (O.r.draft && O.r.draft.restored) {
+        var nf = O.r.draft.ids.length;
+        O.note = { text: 'Your last message did not finish sending. Send sends it again with the ' + (nf === 1 ? 'file' : nf + ' files') + ' you attached.', kind: '' };
+        paintNote();
+      }
+    }
     paintMeta();
     if (!O.r) return;
     if (W.sessionQuestions && W.sessionQuestions.mount) {
@@ -623,10 +669,66 @@
     var label = kind === 'run' ? 'Send a note to this session' : 'Reply to this session';
     return '<div id="ta-verdict"></div>' +
       '<form class="composer ta-composer" id="ta-form">' +
+        '<div class="cc-chips ta-files hidden" id="ta-files"></div>' +
         '<textarea id="ta-input" rows="1" placeholder="' + esc(label) + '" aria-label="' + esc(label) + '" enterkeyhint="send"></textarea>' +
-        '<div class="composer-actions"><button type="submit" class="btn primary small" id="ta-send">Send</button></div>' +
+        '<div class="composer-actions"><span id="ta-clip" class="ta-clip"></span><button type="submit" class="btn primary small" id="ta-send">Send</button></div>' +
       '</form>' +
       '<p class="status-line" id="ta-status" role="status" aria-live="polite"></p>';
+  }
+
+  // ── files with a reply or a note (the COS chat's attach kit) ──
+  // One box per session, kept while this tab is open, so closing and reopening the sheet keeps what was attached.
+  var FILES = {};
+  function KIT() { return W.cosChat && W.cosChat.attach ? W.cosChat.attach : null; }
+  // Only where the Mac takes files on a session turn: on an older server the words go alone, and no clip says otherwise.
+  function filesOn() { var k = KIT(); return !!(k && k.turnFiles() > 0 && O.r); }
+  function filesBox(r) {
+    r = r || O.r; var kit = KIT();
+    if (!r || !kit) return null;
+    var key = r.provider + '|' + r.id;
+    if (!FILES[key]) FILES[key] = kit.box({
+      changed: function (box) { if (O.r && FILES[O.r.provider + '|' + O.r.id] === box) paintFiles(); },
+      removed: function () {},
+      signedOut: function (box) { if (O.r && FILES[O.r.provider + '|' + O.r.id] === box) { O.note = { text: 'This browser was signed out. Your message and files are kept. Sign in, then tap Retry on each file.', kind: 'error' }; paintNote(); } }
+    });
+    return FILES[key];
+  }
+  function filesState(box) {
+    var kit = KIT();
+    if (!kit || !box || !box.atts.length) return 'none';
+    return kit.pending(box) ? 'waiting' : kit.failed(box) ? 'failed' : 'ready';
+  }
+  function paintClip() {
+    var slot = $('ta-clip'); if (!slot) return;
+    var kit = KIT();
+    if (!filesOn()) { slot.innerHTML = ''; return; }
+    if (!slot.querySelector('[data-ta-file]')) slot.innerHTML = kit.clipHtml('data-ta-file');
+    var box = filesBox(), full = !!(box && box.atts.length >= kit.max);
+    var lbl = slot.querySelector('.cc-attach'), inp = slot.querySelector('[data-ta-file]');
+    if (lbl) lbl.classList.toggle('full', full);
+    if (inp) inp.disabled = full || !!(O.r && O.r.sending);
+  }
+  function paintFiles() {
+    var el = $('ta-files'), kit = KIT(), box = filesBox();
+    if (el && kit && box) {
+      el.innerHTML = kit.chipsHtml(box, 'data-ta');
+      el.classList.toggle('hidden', !box.atts.length);
+    }
+    paintClip(); paintSendButton();
+  }
+  // Send waits while a file uploads and while one failed; it says why in its own words.
+  function paintSendButton() {
+    var send = $('ta-send'); if (!send) return;
+    var sending = !!(O.r && O.r.sending), st = filesState(filesBox());
+    send.disabled = sending || st === 'waiting' || st === 'failed';
+    send.textContent = sending ? 'Sending' : st === 'waiting' ? 'Uploading' : 'Send';
+  }
+  function addFiles(list) {
+    var kit = KIT(), box = filesBox();
+    if (!kit || !box || !list || !list.length || !filesOn()) return;
+    var refusals = kit.add(box, list);
+    if (refusals.length) { O.note = { text: refusals.join(' '), kind: 'error' }; paintNote(); }
+    paintFiles();
   }
 
   function needLine(it) {
@@ -854,8 +956,12 @@
       paintNote();
     },
     clear: function (r, text) {
-      // The Mac took it: the send is settled, and the kept draft goes with the words that were sent.
+      // The Mac took it: the send is settled, and the kept draft goes with the words that were sent. So do the files
+      // that went with them; any added since stay for the next message.
+      var sent = r.draft && r.draft.text === text ? r.draft.ids || [] : [];
       if (r.draft && r.draft.text === text) r.draft = null;
+      var fb = sent.length ? filesBox(r) : null, kit = KIT();
+      if (fb && kit) fb.atts.filter(function (t) { return sent.indexOf(t.mediaId) >= 0; }).forEach(function (t) { kit.remove(fb, t.id); });
       var box = r === O.r ? $('ta-input') : null;
       var left = box ? (box.value.trim() === String(text).trim() ? '' : box.value) : '';
       if (box && !left) { box.value = ''; W.autoGrow(box); }
@@ -899,14 +1005,23 @@
     box.innerHTML = html;
   }
   function setSending(on) {
-    var send = $('ta-send'), input = $('ta-input');
-    if (send) { send.disabled = on; send.textContent = on ? 'Sending' : 'Send'; }
+    var input = $('ta-input');
     if (input) input.readOnly = on;
+    paintSendButton(); paintClip();
   }
   function sendReply(opts) {
     var r = O.r; if (!r) return;
     var input = $('ta-input'), text = input ? input.value.trim() : '';
     if (!text) { O.note = { text: 'Write a message first.', kind: 'error' }; paintNote(); return; }
+    // Files: never before every upload has finished, and never with one that failed.
+    var box = filesOn() ? filesBox(r) : null, st = filesState(box);
+    if (st === 'waiting') { O.note = { text: 'A file is still uploading. Send when it finishes.', kind: '' }; paintNote(); return; }
+    if (st === 'failed') { O.note = { text: 'A file did not upload. Retry it or remove it, then send.', kind: 'error' }; paintNote(); return; }
+    var ids = st === 'ready' ? KIT().ids(box) : [];
+    // A send with files cut off by a reload: the chips are gone, the draft kept their ids. The same words go again with
+    // the same files under the same key, so a send that did land is answered, never repeated.
+    if (!ids.length && r.draft && r.draft.restored && r.draft.text === text && r.draft.ids && r.draft.ids.length) ids = r.draft.ids.slice();
+    if (ids.length) opts = Object.assign({}, opts || {}, { attachmentIds: ids });
     // Control's caution: another app holds this session and looks idle, so the first send asks.
     if (r.verdict && r.verdict.caution && !r.cautionAck) { O.cautionAsk = true; O.armedAt = { caution: Date.now() }; paintVerdict(); return; }
     if (r.sending) return;

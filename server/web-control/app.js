@@ -1498,7 +1498,7 @@
   function writeStore(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (_e) {} }
   function saveHeld(r) {
     var all = readStore(HELD_KEY), k = r.provider + '|' + r.id;
-    var keep = r.held.filter(function (h) { return !h.cancelled; }).map(function (h) { return { text: h.text, key: h.key, since: h.since }; });
+    var keep = r.held.filter(function (h) { return !h.cancelled; }).map(function (h) { return h.ids && h.ids.length ? { text: h.text, key: h.key, since: h.since, ids: h.ids } : { text: h.text, key: h.key, since: h.since }; });
     if (keep.length) all[k] = keep; else delete all[k];
     writeStore(HELD_KEY, all);
   }
@@ -1852,9 +1852,12 @@
     el.className = 'status-line' + (kind === 'error' ? ' error' : '');
     el.innerHTML = esc(text || '') + (actionHtml || '');
   }
-  function draftFor(text, r) {
+  // 11/07: the files sent with the words (media ids) are part of the draft: other files are another message, with a
+  // key of its own, so the server never answers a new message with an old one's replay.
+  function draftFor(text, r, ids) {
     r = r || state.reading;
-    if (!r.draft || r.draft.text !== text) r.draft = { text: text, key: newTurnKey() };
+    var files = Array.isArray(ids) ? ids.slice() : [];
+    if (!r.draft || r.draft.text !== text || (r.draft.ids || []).join(',') !== files.join(',')) r.draft = { text: text, key: newTurnKey(), ids: files };
     return r.draft;
   }
   // The box is cleared only of the very words that were sent; anything typed since stays.
@@ -1934,7 +1937,9 @@
   // Resolves to 'sent' | 'parked' | 'held' | 'refused' | 'changed'.
   function continueSession(r, text, opts) {
     var provider = r.provider, id = r.id;
-    var draft = opts.held ? { text: opts.held.text, key: opts.held.key } : draftFor(text, r), view = viewOf(r);
+    var draft = opts.held ? { text: opts.held.text, key: opts.held.key, ids: opts.held.ids || [] } : draftFor(text, r, opts.attachmentIds), view = viewOf(r);
+    // Files go only to a server that said it takes them (threadTurnAttachments); the caller shows no clip otherwise.
+    var files = draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {};
     if (!opts.held) view.status(r, 'Sending');
     var bound = bindingFor(provider, id);
     var attach = bound ? Promise.resolve({ ok: true, binding: bound }) : apiAnswer(sessionPath(provider, id, '/attach'), { method: 'POST', body: { cosSessionId: cosSessionId() }, timeoutMs: 20000 }).then(function (a) {
@@ -1965,7 +1970,7 @@
       }
       return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(at.binding.bindingId) + '/turns', {
         method: 'POST', timeoutMs: 25000,
-        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}),
+        body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, files, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}),
       }).then(function (t) {
         var b = t.body || {};
         if (t.status >= 200 && t.status < 300 && (b.outcome === 'queued' || b.outcome === 'completed')) {
@@ -2007,7 +2012,7 @@
   var HELD_MAX_MS = 5 * 60000, HELD_RETRY_MS = 8000;
   function holdUntilReplyEnds(r, draft) {
     if (!r.held.some(function (h) { return h.key === draft.key; })) {
-      r.held.push({ text: draft.text, key: draft.key, since: Date.now() });
+      r.held.push({ text: draft.text, key: draft.key, since: Date.now(), ids: draft.ids || [] });
       showPendingTurn(draft.text, 'sends after this reply', draft.key);
       saveHeld(r);
     }
@@ -2061,7 +2066,7 @@
     var view = viewOf(r);
     return apiAnswer(sessionPath(r.provider, r.id, '/queued-turns'), {
       method: 'POST', timeoutMs: 15000,
-      body: { cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text },
+      body: Object.assign({ cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text }, draft.ids && draft.ids.length ? { attachmentIds: draft.ids } : {}),
     }).then(function (q) {
       var b = q.body || {};
       if (b.queued === true || b.error === 'duplicate_turn') {
@@ -2073,7 +2078,8 @@
         return 'parked';
       }
       if (b.error === 'thread_free' && !opts.freeRetry) return continueSession(r, draft.text, Object.assign({}, opts, { freeRetry: true }));
-      var copy = (refusal && refusal.reasonCopy) || (b.error === 'queue_full' ? 'That session already has a full line of waiting messages.' : 'COS could not send or queue that.');
+      // 11/07: a file that could not be kept refuses the park with its own words, which say which step to take.
+      var copy = (b.attachmentError && b.reasonCopy) || (refusal && refusal.reasonCopy) || (b.error === 'queue_full' ? 'That session already has a full line of waiting messages.' : 'COS could not send or queue that.');
       if (opts.held) settleHeld(r, opts.held, 'refused', copy); else view.status(r, copy + ' It is still in the box.', 'error');
       return 'refused';
     });
@@ -2340,7 +2346,8 @@
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
   var TODAY_REFERENCE = 'What Today in COS Control shows right now';
-  function askCos(prompt, statusEl) {
+  // files: { attachmentIds, atts } from the Ask sheet's clip (askSheetFiles), or nothing.
+  function askCos(prompt, statusEl, files) {
     // 6.99.12: "it shows Sent but never shows up" (Miles, 11/04). With Ask COS in Messages, the sheet hands its words to
     // that composer (panes/cos-chat.js submitAsk), so the answer streams on screen and lands as a numbered turn. The
     // request below is the fallback for a page without it; it resolves to the Messages route to open.
@@ -2358,13 +2365,18 @@
     }, function () { return ''; }) : Promise.resolve('');
     if (chat && chat.askFromSheet) {
       setStatus(statusEl, 'Sending…');
-      return context.then(function (ctx) { return chat.askFromSheet(prompt, ctx ? { context: ctx } : undefined); }).then(function (where) { setStatus(statusEl, ''); return where; }, function (err) {
+      return context.then(function (ctx) {
+        var extra = files ? { attachmentIds: files.attachmentIds, atts: files.atts } : {};
+        if (ctx) extra.context = ctx;
+        return chat.askFromSheet(prompt, ctx || files ? extra : undefined);
+      }).then(function (where) { setStatus(statusEl, ''); return where; }, function (err) {
         setStatus(statusEl, err.message, true);
         throw err;
       });
     }
     setStatus(statusEl, 'Sent. COS is answering.');
     var body = { clientJobId: webJobId(), generation: 1, query: prompt, source: 'web', activityToolMode: 'status' };
+    if (files && files.attachmentIds && files.attachmentIds.length) body.attachmentIds = files.attachmentIds;
     return context.then(function (ctx) {
       if (ctx) body.reference = { query: TODAY_REFERENCE, response: ctx };
       return api('/api/query-jobs', { method: 'POST', body: body, timeoutMs: 30000 });
@@ -4046,12 +4058,86 @@
     var q = ($('ask-q') && $('ask-q').value.trim()) || '';
     g.innerHTML = esc(ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox') + fileNoteHtml(q);
   }
+  // ── files with Ask COS (11/07, Miles: "Sometimes I need to pass context via a screenshot, photo or file") ──
+  // The COS chat's own clip, chips, limits and upload (panes/cos-chat.js, W.cosChat.attach): photos, PDF, TXT, MD, CSV,
+  // JSON, XLSX, MP4 and MOV, up to 5, pasted, dropped or picked. They go with Ask COS only; the sheet's other rows take
+  // words. Ask COS waits for every upload, and a file that failed has to be retried or removed first. Closing the sheet
+  // keeps them for the next Ask in this tab.
+  var ASK_FILES = null, ASK_SENDING = false;
+  function askKit() { var c = window.COSWeb && window.COSWeb.cosChat; return c && c.attach ? c.attach : null; }
+  function askFiles() {
+    var kit = askKit(); if (!kit) return null;
+    if (!ASK_FILES) ASK_FILES = kit.box({
+      changed: paintAskFiles,
+      removed: function () { setStatus($('ask-status'), ''); },
+      signedOut: function () { setStatus($('ask-status'), 'This browser was signed out. Your files are kept. Sign in, then tap Retry on each file.', true); }
+    });
+    return ASK_FILES;
+  }
+  function askFilesState() {
+    var kit = askKit(), b = ASK_FILES;
+    if (!kit || !b || !b.atts.length) return 'none';
+    return kit.pending(b) ? 'waiting' : kit.failed(b) ? 'failed' : 'ready';
+  }
+  function paintAskClip() {
+    var slot = $('ask-clip'), kit = askKit(); if (!slot) return;
+    var on = !!(kit && kit.askOn());
+    if (!on) { slot.innerHTML = ''; return; }
+    if (!slot.querySelector('[data-ask-file]')) slot.innerHTML = kit.clipHtml('data-ask-file');
+    var full = !!(ASK_FILES && ASK_FILES.atts.length >= kit.max);
+    var lbl = slot.querySelector('.cc-attach'), inp = slot.querySelector('[data-ask-file]');
+    if (lbl) lbl.classList.toggle('full', full);
+    if (inp) inp.disabled = full || ASK_SENDING;
+  }
+  function paintAskFiles() {
+    var kit = askKit(), box = $('ask-files'), b = ASK_FILES; if (!box || !kit) return;
+    var st = askFilesState();
+    box.innerHTML = st === 'none' ? '' : kit.chipsHtml(b, 'data-action') + '<p class="ask-files-note">' + esc(
+      st === 'waiting' ? 'Uploading. Ask COS waits for it.' : st === 'failed' ? 'A file did not upload. Retry it or remove it, then Ask COS.'
+        : (b.atts.length === 1 ? 'This file goes' : 'These files go') + ' with Ask COS. Write the question above.') + '</p>';
+    box.classList.toggle('hidden', st === 'none');
+    paintAskClip(); paintAskRow();
+  }
+  function addAskFiles(list) {
+    var kit = askKit(), b = askFiles(); if (!kit || !b || !list || !list.length) return;
+    var refusals = kit.add(b, list);
+    setStatus($('ask-status'), refusals.join(' '), !!refusals.length);
+    paintAskFiles();
+  }
+  // The Ask COS row says what it sends, and waits while a file uploads.
+  function askRowNote(q) {
+    var n = ASK_FILES ? ASK_FILES.atts.length : 0;
+    return '“' + q + '”' + (state.pane === 'today' ? ' with what Today shows' : '') + (n ? (state.pane === 'today' ? ' and ' : ' with ') + (n === 1 ? '1 file' : n + ' files') : '');
+  }
+  function paintAskRow() {
+    var row = document.querySelector('#ask-results [data-action="ask-cos"]'); if (!row) return;
+    var st = askFilesState();
+    row.disabled = ASK_SENDING || st === 'waiting' || st === 'failed';
+    var note = row.querySelector('.note'), q = ($('ask-q') && $('ask-q').value.trim()) || '';
+    if (note) note.textContent = ASK_SENDING ? 'Sending…' : st === 'waiting' ? 'Waiting for the upload' : askRowNote(q);
+  }
+  function askSheetSend(q) {
+    if (ASK_SENDING) return;
+    var kit = askKit(), b = ASK_FILES, st = askFilesState();
+    if (st === 'waiting') { setStatus($('ask-status'), 'A file is still uploading. Ask COS when it finishes.'); return; }
+    if (st === 'failed') { setStatus($('ask-status'), 'A file did not upload. Retry it or remove it, then Ask COS.', true); return; }
+    var files = st === 'ready' ? { attachmentIds: kit.ids(b), atts: kit.sent(b) } : null;
+    ASK_SENDING = true; paintAskRow(); paintAskClip();
+    var done = function () { ASK_SENDING = false; paintAskRow(); paintAskClip(); };
+    askCos(q, $('ask-status'), files).then(function (where) {
+      done();
+      // Sent: these files went with it. Anything added while it was sending stays for the next Ask.
+      if (files && b) b.atts.filter(function (t) { return files.attachmentIds.indexOf(t.mediaId) >= 0; }).forEach(function (t) { kit.remove(b, t.id); });
+      closeAsk(); go('messages', Array.isArray(where) ? where : []);
+    }).catch(done);
+  }
   function openAsk(prefill) {
     loadFileDomains().then(function () { if (!$('ask-sheet').classList.contains('hidden') && $('ask-q').value.trim()) renderAsk(); });
     $('ask-sheet').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     var input = $('ask-q'); input.value = prefill || '';
-    renderAsk();
+    renderAsk(); paintAskFiles(); paintAskClip();
+    var kit = askKit(); if (kit && !kit.askOn()) kit.ensureCaps().then(paintAskClip, function () {});
     setTimeout(function () { input.focus(); }, 30);
   }
   function closeAsk() { $('ask-sheet').classList.add('hidden'); document.body.style.overflow = ''; }
@@ -4068,12 +4154,13 @@
     }
     var jumps = JUMPS.filter(function (j) { return j[1].toLowerCase().indexOf(q.toLowerCase()) === 0; });
     out.innerHTML = '<div class="list" style="margin-top:14px">' +
-      '<button type="button" class="nav-row" data-action="ask-cos"><svg class="icon"><use href="#i-ask"/></svg><span class="grow">Ask COS<span class="note">“' + esc(q) + '”' + (state.pane === 'today' ? ' with what Today shows' : '') + '</span></span></button>' +
+      '<button type="button" class="nav-row" data-action="ask-cos"><svg class="icon"><use href="#i-ask"/></svg><span class="grow">Ask COS<span class="note">' + esc(askRowNote(q)) + '</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-file"' + (ASK_FILE.busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-work"/></svg><span class="grow">' + (ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox') + fileNoteHtml(q) + '</span></button>' +
       '<button type="button" class="nav-row" data-action="ask-meaning"><svg class="icon"><use href="#i-sessions"/></svg><span class="grow">Find a session about this<span class="note">Ranks every session by meaning</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-work"><svg class="icon"><use href="#i-work"/></svg><span class="grow">Find a task about this<span class="note">Searches Work by meaning</span></span></button>' +
       jumps.map(function (j) { return '<button type="button" class="nav-row" data-goto="' + j[0] + '"><svg class="icon"><use href="#i-' + j[0] + '"/></svg><span class="grow">Go to ' + esc(j[1]) + '</span><span class="chev"></span></button>'; }).join('') +
       '</div><div id="ask-hits"></div><p class="status-line" id="ask-status"></p>';
+    paintAskRow();
     clearTimeout(renderAsk.t);
     if (q.length >= 2) renderAsk.t = setTimeout(function () {
       api('/api/agent-sessions/search?q=' + encodeURIComponent(q) + '&limit=6').then(function (d) {
@@ -4149,7 +4236,12 @@
     }
     if (action === 'expand-turn') { var tr = document.querySelector('.turn[data-turn="' + t.getAttribute('data-turn') + '"]'); if (tr) tr.classList.remove('clamped'); t.remove(); return; }
     var q = $('ask-q').value.trim();
-    if (action === 'ask-cos' && q) { askCos(q, $('ask-status')).then(function (where) { closeAsk(); go('messages', Array.isArray(where) ? where : []); }).catch(function () {}); return; }
+    if (inSheet && (action === 'att-remove' || action === 'att-retry') && ASK_FILES) {
+      var kitA = askKit(); setStatus($('ask-status'), '');
+      if (action === 'att-remove') kitA.remove(ASK_FILES, t.getAttribute('data-att')); else kitA.retry(ASK_FILES, t.getAttribute('data-att'));
+      return;
+    }
+    if (action === 'ask-cos' && q) return askSheetSend(q);
     if (action === 'ask-file' && q) return fileToInbox(q);
     if (action === 'ask-meaning' && q) { $('ask-hits').innerHTML = skeletonRows(3); findByMeaning(q).then(function (html) { var el = $('ask-hits'); if (el) el.innerHTML = html; }); return; }
     if (action === 'ask-work' && q) {
@@ -4180,6 +4272,22 @@
     }
   });
 
+  // The Ask sheet's clip, a pasted screenshot in its box, and files dropped on it (askFiles above).
+  document.addEventListener('change', function (e) {
+    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-ask-file')) { addAskFiles(e.target.files); e.target.value = ''; }
+  });
+  document.addEventListener('paste', function (e) {
+    if (!e.target || e.target.id !== 'ask-q') return;
+    var kit = askKit(), files = kit && kit.askOn() ? kit.pasted(e) : null;
+    if (files) { e.preventDefault(); addAskFiles(files); }
+  });
+  ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (type) {
+    var sheet = $('ask-sheet'); if (!sheet) return;
+    sheet.addEventListener(type, function (e) {
+      var kit = askKit(), zone = sheet.querySelector('.sheet'); if (!kit || !zone || !kit.askOn()) return;
+      var files = kit.dragged(e, zone); if (files) addAskFiles(files);
+    });
+  });
   document.addEventListener('input', function (e) {
     if (e.target.tagName === 'TEXTAREA') autoGrow(e.target);
     if (e.target.id === 'ask-q') renderAsk();
