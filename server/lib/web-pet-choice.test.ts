@@ -4,7 +4,7 @@ import os from 'os'
 import path from 'path'
 import zlib from 'zlib'
 import {
-  GALLERY_MAX_BYTES, galleryPets, galleryThumb, isOpenPetsUrl, parsePetChoice, petChoiceKey, resolvePet, shippedPets, sniffImage,
+  GALLERY_MAX_BYTES, GALLERY_TIMEOUT_MS, galleryPets, galleryThumb, isOpenPetsUrl, parsePetChoice, petChoiceKey, resolvePet, shippedPets,
   type PetFetcher,
 } from './web-pet-choice.js'
 
@@ -63,9 +63,15 @@ describe('catalog', () => {
   it('keeps only https openpets.dev gallery pets with safe, unique ids', () => {
     expect(galleryPets(support).map((p) => p.id)).toEqual(['halloween-bat'])
     expect(galleryPets(support)[0]).toMatchObject({ name: 'Bat', category: 'western halloween' })
-    expect(isOpenPetsUrl('https://zip.openpets.dev/a.zip')).toBe(true)
-    expect(isOpenPetsUrl('https://openpets.dev.evil.com/a')).toBe(false)
-    expect(isOpenPetsUrl('https://user:pw@openpets.dev/a')).toBe(false)
+    // The Mac helper's rule (isAllowedThumbURL), including its own test cases.
+    expect(isOpenPetsUrl('https://openpets.dev/pets/tmuxai-openpets/thumb.webp')).toBe(true)
+    expect(isOpenPetsUrl('http://openpets.dev/pets/tmuxai-openpets/thumb.webp')).toBe(false)
+    expect(isOpenPetsUrl('https://openpets.dev.evil.com/pets/x/thumb.webp')).toBe(false)
+    expect(isOpenPetsUrl('https://openpets.dev@evil.com/pets/x/thumb.webp')).toBe(false)
+    expect(isOpenPetsUrl('https://zip.openpets.dev/pets/x/thumb.webp')).toBe(false)
+    expect(isOpenPetsUrl('https://openpets.dev/pets/x/archive.zip')).toBe(false)
+    expect(GALLERY_MAX_BYTES).toBe(512 * 1024)
+    expect(GALLERY_TIMEOUT_MS).toBe(6000)
   })
 })
 
@@ -123,10 +129,26 @@ describe('galleryThumb', () => {
     await expect(galleryThumb(p2, dir, async () => { calls++; return reply(WEBP) })).rejects.toThrow('gallery_recently_failed')
     expect(calls).toBe(1)
   })
-  it('recognises the image types the gallery serves', () => {
-    expect(sniffImage(WEBP)).toBe('image/webp')
-    expect(sniffImage(strip(1, 2, 2))).toBe('image/png')
-    expect(sniffImage(Buffer.from('GIF89a'))).toBe('image/gif')
-    expect(sniffImage(Buffer.from('hello'))).toBeNull()
+  it('takes WebP only, as the Mac does, and refuses a PNG', async () => {
+    await expect(galleryThumb(pet, path.join(root, 'g9'), async () => reply(strip(1, 2, 2)), null)).rejects.toThrow('gallery_not_image')
+  })
+  it('uses the thumbnail COS Control already fetched, without downloading', async () => {
+    const mac = path.join(root, 'macsupport')
+    fs.mkdirSync(path.join(mac, 'openpets-thumbs'), { recursive: true })
+    fs.writeFileSync(path.join(mac, 'openpets-thumbs', 'halloween-bat.webp'), WEBP)
+    let calls = 0
+    const got = await galleryThumb(pet, path.join(root, 'g10'), async () => { calls++; return reply(WEBP) }, mac)
+    expect(got.file).toBe(path.join(mac, 'openpets-thumbs', 'halloween-bat.webp'))
+    expect(calls).toBe(0)
+    // A file there that is not a WebP is ignored and the gallery is asked instead.
+    fs.writeFileSync(path.join(mac, 'openpets-thumbs', 'halloween-bat.webp'), 'not an image')
+    await galleryThumb(pet, path.join(root, 'g11'), async () => { calls++; return reply(WEBP) }, mac)
+    expect(calls).toBe(1)
+  })
+  it('stops reading a download as soon as it passes the size limit', async () => {
+    let pulled = 0
+    const body = new ReadableStream<Uint8Array>({ pull(c) { pulled++; c.enqueue(new Uint8Array(64 * 1024)); if (pulled > 50) c.close() } })
+    await expect(galleryThumb(pet, path.join(root, 'g12'), async () => new Response(body), null)).rejects.toThrow('gallery_too_large')
+    expect(pulled).toBeLessThan(12) // 512 KB is 8 chunks of 64 KB; it never pulls all 50
   })
 })

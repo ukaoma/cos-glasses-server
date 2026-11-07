@@ -612,7 +612,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     const found = choice ? resolveFor(choice) : null
     if (!found || found.kind === 'strips') return res.status(404).json({ error: 'pet_unavailable' })
     try {
-      const art = found.kind === 'still' ? found : await galleryThumb(found, petCacheFor('gallery'), deps.petFetch)
+      const art = found.kind === 'still' ? found : await galleryThumb(found, petCacheFor('gallery'), deps.petFetch, petDir())
       await sendImage(res, art.file, art.type, typeof req.query.v === 'string' && req.query.v.length > 0)
     } catch (err) {
       log(`[web-pet] gallery picture failed for ${found.kind === 'gallery' ? found.id : 'still'}: ${err instanceof Error ? err.message : String(err)}`)
@@ -627,7 +627,7 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     if (!found) return res.status(404).json({ error: 'pet_unavailable' })
     try {
       if (found.kind === 'strips') return await sendImage(res, await petPreview(found.dir, petCacheFor(found.cacheName || 'mac-preview'), { run: deps.petRun }), 'png', typeof req.query.v === 'string')
-      const art = found.kind === 'still' ? found : await galleryThumb(found, petCacheFor('gallery'), deps.petFetch)
+      const art = found.kind === 'still' ? found : await galleryThumb(found, petCacheFor('gallery'), deps.petFetch, petDir())
       await sendImage(res, art.file, art.type, typeof req.query.v === 'string')
     } catch (err) {
       log(`[web-pet] preview failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -643,7 +643,12 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     const macTag = mac ? (mac.kind === 'still' ? fileTag(mac.file) : fileTag(path.join(petDir(), 'session-pet-states.json'))) : ''
     res.json({
       mac: { available: !!mac, preview: mac ? preview('mac', 'mac:' + macTag) : null },
-      shipped: shippedPets(petResources()).map((p) => ({ ...p, pet: `shipped:${p.id}`, preview: preview(`shipped:${p.id}`, `shipped:${p.id}`) })),
+      // The tag follows the art on disk, so a COS Control update with new art gets a new preview URL.
+      shipped: shippedPets(petResources()).map((p) => {
+        const r = resolveFor({ kind: 'shipped', id: p.id })
+        const tag = r?.kind === 'strips' ? fileTag(path.join(r.dir, 'session-pet-states.json')) : r?.kind === 'still' ? fileTag(r.file) : ''
+        return { ...p, pet: `shipped:${p.id}`, preview: preview(`shipped:${p.id}`, `shipped:${p.id}:${tag}`) }
+      }),
       gallery: galleryPets(petDir()).map((p) => ({ id: p.id, name: p.name, description: p.description, category: p.category, pet: `gallery:${p.id}`, preview: preview(`gallery:${p.id}`, p.preview) })),
     })
   })

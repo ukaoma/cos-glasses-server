@@ -50,12 +50,13 @@ export function controlResourcesDir(env: NodeJS.ProcessEnv = process.env): strin
   return null
 }
 
-/** Names and blurbs as COS Control shows them (Models.swift bundledCharacters). */
+/** Names and summaries word for word from COS Control (Models.swift bundledCharacters). Cloud Puff has no
+ *  summary there (defaultCharacterName only), so its line is ours. Keep in step when Control adds a character. */
 const SHIPPED_NAMES: Record<string, { name: string; summary: string }> = {
   'jedi-miles-windu': { name: 'Jedi Miles Windu', summary: 'Ten animated states. Purple saber and escalating droid fights.' },
-  'jedi-nia-solari': { name: 'Jedi Nia Solari', summary: 'Idle and four combat loops. Purple saber and Force counters.' },
-  'jedi-elara-vale': { name: 'Jedi Elara Vale', summary: 'Idle and four combat loops. Green saber and agile redirects.' },
-  'jedi-rowan-vale': { name: 'Jedi Rowan Vale', summary: 'Idle and four combat loops. Blue saber and grounded strikes.' },
+  'jedi-nia-solari': { name: 'Jedi Nia Solari', summary: 'Eight-frame idle and four combat loops. Purple saber, braided silhouette, and Force counters.' },
+  'jedi-elara-vale': { name: 'Jedi Elara Vale', summary: 'Eight-frame idle and four combat loops. Green saber, auburn braid, and agile redirects.' },
+  'jedi-rowan-vale': { name: 'Jedi Rowan Vale', summary: 'Eight-frame idle and four combat loops. Blue saber, two-handed guard, and grounded strikes.' },
   'cloud-puff': { name: 'Cloud Puff', summary: 'A simple, calm figure. The default for new installs.' },
 }
 
@@ -109,10 +110,12 @@ export function galleryPets(dir: string = controlSupportDir()): GalleryPet[] {
   return out
 }
 
+/** The Mac helper's rule, exactly (HelperSources/main.swift isAllowedThumbURL): https, host openpets.dev, a path
+ *  ending in /thumb.webp, no user or password. The catalog is untrusted; nothing else is ever fetched. */
 export function isOpenPetsUrl(url: string): boolean {
   try {
     const u = new URL(url)
-    return u.protocol === 'https:' && (u.hostname === 'openpets.dev' || u.hostname.endsWith('.openpets.dev')) && !u.username && !u.password
+    return u.protocol === 'https:' && u.hostname === 'openpets.dev' && !u.username && !u.password && u.pathname.endsWith('/thumb.webp')
   } catch { return false }
 }
 
@@ -149,17 +152,31 @@ export function resolvePet(choice: PetChoice, opts: { supportDir?: string; resou
   return pet ? { kind: 'gallery', id: pet.id, preview: pet.preview } : null
 }
 
-/** Image type from the first bytes, so a gallery download that is not an image is refused. */
-export function sniffImage(b: Buffer): string | null {
-  if (b.length >= 8 && b.readUInt32BE(0) === 0x89504e47) return 'image/png'
-  if (b.length >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
-  if (b.length >= 6 && b.toString('ascii', 0, 4) === 'GIF8') return 'image/gif'
-  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
-  return null
+/** The Mac helper's limits (openPetsThumbMaxBytes, timeout 6): 512 KB, enforced while reading, and 6 seconds. */
+export const GALLERY_MAX_BYTES = 512 * 1024
+export const GALLERY_TIMEOUT_MS = 6_000
+/** COS Control keeps the thumbnails it already fetched here (main.swift openPetsThumbsDir, <id>.webp). */
+export const MAC_THUMBS_DIR = 'openpets-thumbs'
+
+function isWebP(b: Buffer): boolean {
+  return b.length >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP'
 }
 
-export const GALLERY_MAX_BYTES = 1024 * 1024
-export const GALLERY_TIMEOUT_MS = 10_000
+/** Read at most max bytes from a response body, cancelling the stream past the limit. */
+async function readCapped(res: Response, max: number): Promise<Buffer> {
+  const reader = res.body?.getReader()
+  if (!reader) return Buffer.from(await res.arrayBuffer())
+  const parts: Buffer[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > max) { await reader.cancel().catch(() => {}); throw new Error('gallery_too_large') }
+    parts.push(Buffer.from(value))
+  }
+  return Buffer.concat(parts)
+}
 
 export type PetFetcher = (url: string, init: { signal: AbortSignal; redirect: 'error' }) => Promise<Response>
 const galleryInflight = new Map<string, Promise<{ file: string; type: string }>>()
@@ -171,32 +188,35 @@ const galleryFailedAt = new Map<string, number>()
  * The gallery picture for one pet, downloaded once from openpets.dev (as COS Control does) and kept under
  * the data folder. Refuses anything that is not an image, over 1 MB, redirected, or slower than 10 s.
  */
-export function galleryThumb(pet: { id: string; preview: string }, cacheDir: string, fetcher: PetFetcher = fetch as unknown as PetFetcher): Promise<{ file: string; type: string }> {
+export function galleryThumb(pet: { id: string; preview: string }, cacheDir: string, fetcher: PetFetcher = fetch as unknown as PetFetcher, macSupportDir: string | null = null): Promise<{ file: string; type: string }> {
   if (!ID.test(pet.id) || !isOpenPetsUrl(pet.preview)) return Promise.reject(new Error('gallery_pet_invalid'))
+  // The thumbnail COS Control already fetched, when it is a real WebP: no second download (read only).
+  if (macSupportDir) {
+    const mac = path.join(macSupportDir, MAC_THUMBS_DIR, `${pet.id}.webp`)
+    try {
+      if (fs.statSync(mac).isFile() && fs.statSync(mac).size <= GALLERY_MAX_BYTES && isWebP(fs.readFileSync(mac))) return Promise.resolve({ file: mac, type: 'image/webp' })
+    } catch { /* not there: fetch below */ }
+  }
   const tag = crypto.createHash('sha256').update(pet.preview).digest('hex').slice(0, 12)
   const base = path.join(cacheDir, `${pet.id}-${tag}`)
-  for (const [ext, type] of [['.webp', 'image/webp'], ['.png', 'image/png'], ['.gif', 'image/gif'], ['.jpg', 'image/jpeg']] as const) {
-    if (isFile(base + ext)) return Promise.resolve({ file: base + ext, type })
-  }
+  if (isFile(base + '.webp')) return Promise.resolve({ file: base + '.webp', type: 'image/webp' })
   const failed = galleryFailedAt.get(base)
   if (failed && Date.now() - failed < GALLERY_RETRY_MS) return Promise.reject(new Error('gallery_recently_failed'))
   let job = galleryInflight.get(base)
   if (!job) {
     job = (async () => {
       const res = await fetcher(pet.preview, { signal: AbortSignal.timeout(GALLERY_TIMEOUT_MS), redirect: 'error' })
-      if (!res.ok) throw new Error(`gallery_http_${res.status}`)
+      if (res.status !== 200) throw new Error(`gallery_http_${res.status}`)
       const declared = Number(res.headers.get('content-length') || 0)
       if (declared > GALLERY_MAX_BYTES) throw new Error('gallery_too_large')
-      const body = Buffer.from(await res.arrayBuffer())
-      if (body.length > GALLERY_MAX_BYTES) throw new Error('gallery_too_large')
-      const type = sniffImage(body)
-      if (!type) throw new Error('gallery_not_image')
-      const ext = type === 'image/webp' ? '.webp' : type === 'image/png' ? '.png' : type === 'image/gif' ? '.gif' : '.jpg'
+      const body = await readCapped(res, GALLERY_MAX_BYTES)
+      // WebP only, as the Mac (isOpenPetsWebP).
+      if (!isWebP(body)) throw new Error('gallery_not_image')
       fs.mkdirSync(cacheDir, { recursive: true })
       const tmp = `${base}.${process.pid}.${Date.now()}.tmp`
       fs.writeFileSync(tmp, body)
-      fs.renameSync(tmp, base + ext)
-      return { file: base + ext, type }
+      fs.renameSync(tmp, base + '.webp')
+      return { file: base + '.webp', type: 'image/webp' }
     })().then((ok) => { galleryFailedAt.delete(base); return ok }, (err) => { galleryFailedAt.set(base, Date.now()); throw err })
       .finally(() => galleryInflight.delete(base))
     galleryInflight.set(base, job)

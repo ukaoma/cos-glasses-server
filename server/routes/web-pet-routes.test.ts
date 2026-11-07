@@ -31,7 +31,7 @@ beforeAll(async () => {
   fs.mkdirSync(support, { recursive: true })
   fs.writeFileSync(path.join(support, 'idle.png'), strip(4, 10, 8))
   fs.writeFileSync(path.join(support, 'session-pet-states.json'), JSON.stringify({ poses: { idle: { file: 'idle.png', frames: 4, interval: 0.1 } } }))
-  fs.writeFileSync(path.join(support, 'openpets-catalog.json'), JSON.stringify({ catalog: { pets: [{ id: 'halloween-bat', displayName: 'Bat', preview: 'https://openpets.dev/p/bat.webp' }] } }))
+  fs.writeFileSync(path.join(support, 'openpets-catalog.json'), JSON.stringify({ catalog: { pets: [{ id: 'halloween-bat', displayName: 'Bat', preview: 'https://openpets.dev/pets/bat/thumb.webp' }] } }))
   const nia = path.join(resources, 'BundledCharacters', 'jedi-nia-solari')
   fs.mkdirSync(nia, { recursive: true })
   fs.writeFileSync(path.join(nia, 'idle.png'), strip(2, 10, 8))
@@ -86,6 +86,16 @@ describe('pet routes', () => {
     expect(r.headers.get('content-type')).toContain('image/png')
     expect(r.headers.get('cache-control')).toContain('immutable')
     expect((await fetch(`${base}/web-pet/sheet/idle/0?pet=mac&v=0000000000000000`)).headers.get('cache-control')).toBe('private, no-cache')
+  })
+
+  it('a shipped character animates from its own folder, never the Mac pet', async () => {
+    sipsCalls.length = 0
+    const nia = await (await fetch(`${base}/web-pet?pet=shipped:jedi-nia-solari`)).json()
+    const r = await fetch(`http://127.0.0.1:${new URL(base).port}${nia.poses.idle.chunks[0]}`)
+    expect(r.status).toBe(200)
+    const resize = sipsCalls.find((c) => c[0] === '-z')!
+    expect(resize[3]).toBe(path.join(resources, 'BundledCharacters', 'jedi-nia-solari', 'idle.png'))
+    expect(fs.existsSync(path.join(cache, 'shipped-jedi-nia-solari'))).toBe(true)
   })
 
   it('still: a gallery picture is downloaded once, then served from the cache', async () => {
