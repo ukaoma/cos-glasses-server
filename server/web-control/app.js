@@ -563,11 +563,76 @@
       '<span class="rec-copy"><strong>Recording now</strong><span>' + esc(rec.source + (rec.startTime ? ', ' + span(rec.startTime) + ' so far' : '')) + '</span></span>' +
       '<span class="btn small">Live view</span></button>';
   }
+  // ── The Today summary (6.99.26 candidate) ───────────────
+  // "The orchestrator's eyes" (Miles, 11/07): two or three sentences on what the sessions add up to, written by Haiku on
+  // the server (lib/today-brief.ts). Today sends what it already read: session titles, states, how long, each session's
+  // latest line and what needs you. The server decides whether a new one is written (off unless switched on, only when
+  // the inputs changed, 10 minutes apart, 60 a day, a breaker). Today never waits for it: the counts line paints at once
+  // and the summary replaces it when one arrives. Never shown over a session list that was not read.
+  var BRIEF = { view: null, inflight: false, sentKey: '', sentAt: 0 };
+  var BRIEF_RESEND_MS = 60000, BRIEF_OFF_RECHECK_MS = 5 * 60000;
+  function briefMinutes(v) { var d = toDate(v); return d ? Math.max(0, Math.round((Date.now() - d.getTime()) / 60000)) : 0; }
+  function briefInputs(m) {
+    var sessions = [];
+    (state.sessions || []).forEach(function (s) {
+      if (sxKeepWarm(s)) return;
+      var kind = sxState(s) === 'waiting' ? 'waiting' : s.running_active ? 'working' : s.running ? 'open' : '';
+      if (!kind) return;   // only what Today counts: waiting, working and open
+      var k = splitSessionId(s.provider, s.session_id || s.id);
+      sessions.push({ title: sessionTitle(s), provider: k.provider, state: kind,
+        minutes: briefMinutes(kind === 'open' ? (s.last_activity_at || s.state_since) : (s.state_since || s.last_activity_at)),
+        line: String(s.discussion_summary || '').slice(0, 400), waiting: kind === 'waiting' ? askedWhy(s) : '' });
+    });
+    var needs = m.rows.filter(function (r) { return r.kind !== 'session'; }).slice(0, 12).map(function (r) {
+      if (r.kind === 'work') return { title: r.item.sessionTitle || r.item.title || 'Handoff', why: needWhy(r.item) };
+      return { title: r.title, why: r.why || '' };
+    });
+    return { sessions: sessions.slice(0, 40), needs: needs, sessionsRead: TODAY.sessionsState === 'answered', needsComplete: !!m.settled,
+      unread: m.failed.slice(), recording: !!TODAY.recording };
+  }
+  // Asked once every source answered or failed, at most once a minute unless what Today read changed (the server
+  // gates the spend; this only saves requests). When the switch is off, Today asks again every five minutes.
+  function requestBrief(m) {
+    if (BRIEF.inflight || state.pane !== 'today') return;   // renderStory already answered an offline Today
+    if (Object.keys(m.states).some(function (k) { return m.states[k] === 'pending'; })) return;
+    var body = briefInputs(m);
+    var key = JSON.stringify([body.sessions.map(function (s) { return [s.title, s.state, s.line, s.waiting]; }), body.needs, body.sessionsRead, body.needsComplete, body.unread, body.recording]);
+    var since = Date.now() - BRIEF.sentAt;
+    if (BRIEF.view && BRIEF.view.state === 'off' ? since < BRIEF_OFF_RECHECK_MS : key === BRIEF.sentKey && since < BRIEF_RESEND_MS) return;
+    BRIEF.inflight = true; BRIEF.sentKey = key; BRIEF.sentAt = Date.now();
+    api('/api/today/brief', { method: 'POST', body: body, timeoutMs: 45000 }).then(function (v) {
+      BRIEF.view = v && typeof v === 'object' ? v : null;
+    }, function () { /* keep what was shown: the counts line or the last summary */ }).then(function () {
+      BRIEF.inflight = false;
+      if (TODAY.model && state.pane === 'today') renderStory(TODAY.model);
+    });
+  }
+  /** The summary to show, or null: only with text, only over a session list that was read. */
+  function briefShown() {
+    var v = BRIEF.view;
+    if (!v || !v.text || (v.state !== 'fresh' && v.state !== 'stale') || TODAY.sessionsState !== 'answered') return null;
+    return v;
+  }
+  function briefWhen(v, m) {
+    var mins = briefMinutes(v.at);
+    var out = 'Updated ' + (mins < 1 ? 'just now' : span(v.at) + ' ago');
+    if (v.state === 'stale') out += '. Things have moved since';
+    if (m.failed.length) out += '. Couldn’t read ' + listWords(m.failed) + ', so this may not be everything';
+    return out + '.';
+  }
+
   // The headline: COS Control's brief (Models.swift TodayHome.brief) over the same rows Needs you lists.
   function renderStory(m) {
     var el = $('today-story');
     el.className = 'story';
     if (TODAY.offline) { el.textContent = 'COS on ' + state.serverName + ' is not answering right now. Today fills in when it does.'; return; }
+    // The model's summary when there is one (it never blocks: the counts line below shows until it lands). The test
+    // harnesses that run this block alone have no requestBrief, so it is looked up, never assumed.
+    if (typeof requestBrief === 'function') {
+      requestBrief(m);
+      var brief = briefShown();
+      if (brief) { el.innerHTML = esc(brief.text) + '<span class="story-when">' + esc(briefWhen(brief, m)) + '</span>'; return; }
+    }
     var first = '';
     if (m.sessionsWaiting > 0) first = countWord(m.sessionsWaiting) + ' ' + plural(m.sessionsWaiting, 'session is', 'sessions are') + ' waiting on you';
     else if (m.now.length > 0) first = countWord(m.now.length) + ' ' + plural(m.now.length, 'thing needs', 'things need') + ' you' + (m.settled ? '' : ' so far');
@@ -2209,7 +2274,12 @@
     // quoted reference, the query-jobs field for context. Asked from any other pane, nothing extra is sent.
     var context = state.pane === 'today' ? ensurePane('todayActions', 1500).then(function (m) {
       // A broken summary never costs the Ask: it goes without it, and the console says why.
-      try { return m && m.summary ? m.summary() : ''; } catch (err) { console.error('[today] the Today summary failed; asking without it.', err); return ''; }
+      var ctx;
+      try { ctx = m && m.summary ? m.summary() : ''; } catch (err) { console.error('[today] the Today summary failed; asking without it.', err); return ''; }
+      // The model's summary of the sessions leads it when there is one, inside the same cap; past the cap it is left out.
+      var b = typeof briefShown === 'function' ? briefShown() : null;
+      var lead = b ? 'Summary of the sessions, written by a model ' + (briefMinutes(b.at) < 1 ? 'just now' : span(b.at) + ' ago') + (b.state === 'stale' ? ' (things have moved since)' : '') + ': ' + b.text : '';
+      return ctx && lead && lead.length + 1 + ctx.length <= ((m && m.summaryMax) || 4000) ? lead + '\n' + ctx : ctx;
     }, function () { return ''; }) : Promise.resolve('');
     if (chat && chat.askFromSheet) {
       setStatus(statusEl, 'Sending…');
