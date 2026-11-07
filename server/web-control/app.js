@@ -1676,11 +1676,11 @@
   // ACTIVITY (ActivityWindow.swift SessionActivityFeed 6800-6890, SessionLiveFeed.swift): the state
   // word with its clock, the current prompt, the last eight tool lines, and the honest counters.
   // The reducer follows SessionLiveFeed.applying: a reseed (seq 1 after anything) starts over.
-  function newFeed() { return { transport: 'idle', agentState: null, stateSince: null, statusAt: null, waitingKind: null, waitingDetail: null, failure: null, lastReply: null, prompt: '', tools: [], lastSeq: 0, lastEventAt: null, missed: 0, connected: false, fallback: null }; }
+  function newFeed() { return { transport: 'idle', transportSeenAt: null, agentState: null, stateSince: null, stateSeenAt: null, seenMemo: null, statusAt: null, waitingKind: null, waitingDetail: null, failure: null, lastReply: null, prompt: '', tools: [], lastSeq: 0, lastEventAt: null, missed: 0, connected: false, fallback: null }; }
   function applyFeed(r, e) {
     if (typeof e.seq !== 'number') return;
     var f = r.feed;
-    if (e.seq === 1 && f.lastSeq > 0) { var keep = f.connected; f = r.feed = newFeed(); f.connected = keep; }
+    if (e.seq === 1 && f.lastSeq > 0) { var keep = f.connected, seenMemo = f.seenMemo; f = r.feed = newFeed(); f.connected = keep; f.seenMemo = seenMemo; }
     else if (f.lastSeq > 0 && e.seq > f.lastSeq + 1) f.missed += e.seq - f.lastSeq - 1;
     f.lastSeq = e.seq;
     f.lastEventAt = typeof e.at === 'number' ? new Date(e.at) : new Date();
@@ -1688,9 +1688,18 @@
     if (f.fallback === 'reconnecting') f.fallback = null;
     if (e.kind === 'status') {
       f.statusAt = f.lastEventAt;
-      if (e.state) f.transport = e.state;
+      // When this page first saw each state (its own clock): the Stop's echo window is measured by it. The
+      // memo outlives a reseed, so a reconnect that repeats a state seen before a Stop is not news.
+      var memo = f.seenMemo || (f.seenMemo = {});
+      if (e.state) {
+        if (!memo.stream || memo.stream.key !== e.state) memo.stream = { key: e.state, seen: Date.now() };
+        f.transport = e.state; f.transportSeenAt = memo.stream.seen;
+      }
       if (e.agent_state) {
-        f.agentState = e.agent_state; f.stateSince = toDate(e.state_since);
+        var since = toDate(e.state_since), hookKey = e.agent_state + '|' + sxMs(since);
+        if (!memo.hook || memo.hook.key !== hookKey) memo.hook = { key: hookKey, seen: Date.now() };
+        f.stateSeenAt = memo.hook.seen;
+        f.agentState = e.agent_state; f.stateSince = since;
         f.waitingKind = e.waiting_kind || null; f.waitingDetail = e.waiting_detail || null; f.failure = e.failure || null;
         if (e.last_reply) f.lastReply = e.last_reply;
       }
@@ -1719,11 +1728,17 @@
   //          turn or a parked send, or a turn delivered live into the open session, as of the answer;
   //          a later free answer, or a COS child's turn that finished, clears it
   //   stop   this page's Stop (and a finished COS child turn): idle as of then, and no working signal
-  //          from the next SX_STOP_ECHO_MS counts (the stream's status trails a Stop)
-  // The hook's waiting, failed and ended are its own words and stay: a gate that sees a busy file
-  // does not unseat a question. Idle yields only to working seen more than SX_IDLE_GRACE_MS after it,
-  // the server's rule for the flush that trails a Stop (TRANSCRIPT_AFTER_IDLE_GRACE_MS).
+  //          that ARRIVED in the next SX_STOP_ECHO_MS counts (the stream's status trails a Stop). The
+  //          window is the page's own clock (`seen`, when this page observed each signal), never the
+  //          signal's server time, and a turn this page sends ends it (continueSession clears stoppedAt).
+  // Waiting, failed and ended, from the hook or the session row, are the session's own words and stay:
+  // a gate or stream that sees a busy file does not unseat a question (QA 6.99.29: the row and the
+  // hook carry the same state_since, so the row's Waiting must hold as the hook's does). Signals with
+  // the same time are ordered gate, stream, list, hook, stop: the hook's word wins a tie. Idle yields
+  // only to working seen more than SX_IDLE_GRACE_MS after it, the server's rule for the flush that
+  // trails a Stop (TRANSCRIPT_AFTER_IDLE_GRACE_MS).
   var SX_IDLE_GRACE_MS = 5000, SX_STOP_ECHO_MS = 8000, SX_GATE_RECHECK_MS = 20000;
+  var SX_TIE_RANK = { gate: 0, stream: 1, list: 2, hook: 3, stop: 4 };
   function sxMs(v) {
     var t = v instanceof Date ? v.getTime() : typeof v === 'number' ? v : typeof v === 'string' && v ? Date.parse(v) : NaN;
     return isFinite(t) ? t : null;
@@ -1731,25 +1746,28 @@
   var SX_HOOK_WORD = { running: 'Working', waiting: 'Waiting', failed: 'Failed', ended: 'Done', idle: 'Idle' };
   function sxSignals(r) {
     var f = r.feed || {}, out = [];
-    if (f.agentState && SX_HOOK_WORD[f.agentState]) out.push({ word: SX_HOOK_WORD[f.agentState], at: sxMs(f.stateSince) || sxMs(f.statusAt) || 0, src: 'hook' });
-    else if (f.statusAt) out.push({ word: f.transport === 'working' ? 'Working' : f.transport === 'done' ? 'Done' : 'Idle', at: sxMs(f.statusAt), src: 'stream' });
-    if (r.list && r.list.at != null) out.push({ word: r.list.word, at: r.list.at, src: 'list' });
-    if (r.gate && r.gate.busy && r.gate.at != null) out.push({ word: 'Working', at: r.gate.at, src: 'gate' });
+    // `seen`: when this page observed the signal (its own clock), for the Stop's echo window.
+    if (f.agentState && SX_HOOK_WORD[f.agentState]) out.push({ word: SX_HOOK_WORD[f.agentState], at: sxMs(f.stateSince) || sxMs(f.statusAt) || 0, src: 'hook', seen: sxMs(f.stateSeenAt) });
+    else if (f.statusAt) out.push({ word: f.transport === 'working' ? 'Working' : f.transport === 'done' ? 'Done' : 'Idle', at: sxMs(f.statusAt), src: 'stream', seen: sxMs(f.transportSeenAt) });
+    if (r.list && r.list.at != null) out.push({ word: r.list.word, at: r.list.at, src: 'list', seen: sxMs(r.list.seen) });
+    if (r.gate && r.gate.busy && r.gate.at != null) out.push({ word: 'Working', at: r.gate.at, src: 'gate', seen: r.gate.at });
     var stop = sxMs(r.stoppedAt);
-    if (stop !== null) out.push({ word: 'Idle', at: stop, src: 'stop' });
+    if (stop !== null) out.push({ word: 'Idle', at: stop, src: 'stop', seen: stop });
     return out;
   }
   /** { word, at, src }: the one state the whole card shows. Null before any signal. */
   function sxTruth(r) {
     var stop = sxMs(r.stoppedAt);
-    var all = sxSignals(r).sort(function (a, b) { return a.at - b.at; });
+    var all = sxSignals(r).sort(function (a, b) { return a.at - b.at || SX_TIE_RANK[a.src] - SX_TIE_RANK[b.src]; });
     var best = null;
     all.forEach(function (c) {
       if (!best) { best = c; return; }
       if (c.word === 'Working') {
-        if (stop !== null && c.at >= stop && c.at - stop < SX_STOP_ECHO_MS) return;
-        if (stop !== null && c.at < stop) return;
-        if (best.src === 'hook' && c.src !== 'hook' && /^(Waiting|Failed|Done)$/.test(best.word)) return;
+        // The Stop's echo, judged by when this page saw the signal (a signal with no arrival time: by its own).
+        var seen = c.seen != null ? c.seen : c.at;
+        if (stop !== null && seen >= stop && seen - stop < SX_STOP_ECHO_MS) return;
+        if (stop !== null && seen < stop) return;
+        if ((best.src === 'hook' || best.src === 'list') && (c.src === 'gate' || c.src === 'stream') && /^(Waiting|Failed|Done)$/.test(best.word)) return;
         if (best.word === 'Idle' && best.src !== 'stop' && c.src !== best.src && c.at <= best.at + SX_IDLE_GRACE_MS) return;
       }
       best = c;
@@ -1774,12 +1792,18 @@
     var waiting = sxState(row) === 'waiting', working = !!row.running_active && !waiting;
     var at = working ? (sxMs(row.last_activity_at) || sxMs(row.state_since)) : (sxMs(row.state_since) || sxMs(row.last_activity_at));
     // A row with no time of its own is the oldest word: the live feed outranks it the moment it speaks.
-    r.list = { word: working ? 'Working' : waiting ? 'Waiting' : 'Idle', at: at != null ? at : 0 };
+    var word = working ? 'Working' : waiting ? 'Waiting' : 'Idle', was = r.list;
+    // Arrival is the first time this page saw THIS word at THIS time: a re-read of the same row is not news.
+    r.list = { word: word, at: at != null ? at : 0, seen: was && was.word === word && was.at === (at != null ? at : 0) && was.seen != null ? was.seen : Date.now() };
   }
-  /** A gate busy answer that decides the card is re-asked after a while, so it cannot stand forever. */
+  /** A gate busy answer that decides the card is re-asked after a while, so it cannot stand forever. Every
+   *  attempt is stamped (gate.triedAt), and each failed one doubles the wait, up to 16 times (QA 6.99.29: a failing
+   *  probe was re-asked every second). `at` stays the time of the last ANSWER: a failure is no evidence of busy. */
   function sxGateStale(r) {
     var t = sxTruth(r);
-    return !!(t && t.src === 'gate' && r.gate && Date.now() - r.gate.at > SX_GATE_RECHECK_MS && !r.probing);
+    if (!(t && t.src === 'gate' && r.gate) || r.probing) return false;
+    var last = Math.max(r.gate.at || 0, r.gate.triedAt || 0), fails = r.gate.failures || 0;
+    return Date.now() - last > SX_GATE_RECHECK_MS * Math.min(Math.pow(2, fails), 16);
   }
   function sxFeedWord(r) {
     var t = sxTruth(r);
@@ -1845,10 +1869,11 @@
       html += '<p class="sx-act-fallback">' + esc(f.fallback ? sxFallbackLine(f.fallback) : 'Connecting to the live feed…') + '</p>';
     }
     box.innerHTML = html;
-    // The clock ticks only while the session works or waits (Control 0.5.337).
+    // The clock ticks only while the session works or waits (Control 0.5.337). A Working that only the write gate
+    // says is re-asked even with no live feed (QA 6.99.29), so it cannot stand forever once the feed is lost.
     clearInterval(r.feedTimer); r.feedTimer = null;
-    var w = sxFeedWord(r);
-    if ((f.connected || f.lastSeq > 0) && (w === 'Working' || w === 'Waiting')) {
+    var t = sxTruth(r), w = t ? t.word : 'Idle';
+    if (((f.connected || f.lastSeq > 0) && (w === 'Working' || w === 'Waiting')) || (t && t.src === 'gate' && w === 'Working')) {
       r.feedTimer = setInterval(function () {
         if (state.reading !== r) { clearInterval(r.feedTimer); return; }
         var el = $('session-elapsed'); if (el) el.textContent = sxElapsed(r.feed, r);
@@ -1948,13 +1973,20 @@
       var box = $('session-queue'); if (!box || !r || r.id !== id) return;
       var rows = (q.status === 200 && q.body && q.body.turns) || [];
       var waiting = rows.filter(function (t) { return t.status === 'waiting' || t.status === 'queued' || t.status === 'pending'; });
+      // QA 6.99.29: a queued message the server refused (or let expire) stays in view with the server's reason,
+      // instead of vanishing from the line.
+      var notSent = rows.filter(function (t) { return t.status === 'refused' || t.status === 'expired'; });
       if (q.status === 200 && r.queued !== waiting.length) { r.queued = waiting.length; paintActivity(r); }
-      if (!waiting.length) { box.innerHTML = ''; return; }
-      box.innerHTML = '<div class="sx-queue"><p class="sx-queue-head">' + (waiting.length === 1 ? '1 follow-up queued. It sends when this session is available.' : waiting.length + ' follow-ups queued. They send in order when this session is available.') + '</p>' +
+      if (!waiting.length && !notSent.length) { box.innerHTML = ''; return; }
+      box.innerHTML = '<div class="sx-queue">' + (waiting.length ? '<p class="sx-queue-head">' + (waiting.length === 1 ? '1 follow-up queued. It sends when this session is available.' : waiting.length + ' follow-ups queued. They send in order when this session is available.') + '</p>' : '') +
         waiting.map(function (t) {
           var mine = t.owner !== 'codex' && parkedByMe(r, t.clientTurnId);
           return '<div class="sx-queue-row"><span class="sx-queue-state">' + esc(sxQueueLine(t)) + '</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') + '</span>' +
             (mine ? '<button type="button" class="cx-btn quiet" data-action="unqueue" data-turn-key="' + esc(t.clientTurnId) + '" title="Cancel this queued message. It will not be sent.">Cancel</button>' : '') + '</div>';
+        }).join('') +
+        notSent.map(function (t) {
+          return '<div class="sx-queue-row sx-queue-refused"><span class="sx-queue-state">Not sent</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') +
+            '<span class="sx-queue-reason">' + esc(t.reasonCopy || (t.status === 'expired' ? 'Not sent: the thread stayed busy too long.' : 'Not sent: the session refused it.')) + '</span></span></div>';
         }).join('') + '</div>';
     }).catch(function () {});
   }
@@ -1965,17 +1997,20 @@
   function sxProbeAttach(r) {
     // Today's overlay probes its own session object (r.view): the same verdict, painted by its view.
     r.probing = true;
+    // Every attempt is stamped; a failed one backs the next off (sxGateStale). A gate answer resets both.
+    if (r.gate) r.gate.triedAt = Date.now();
+    var failed = function () { if (r.gate) r.gate.failures = (r.gate.failures || 0) + 1; };
     return apiAnswer(sessionPath(r.provider, r.id, '/attachability')).then(function (a) {
       if (state.reading !== r && !r.view) return;
-      if (a.status === 404) { r.verdict = { attachable: false, reason: 'route_absent', reasonCopy: 'Update the COS server to continue a thread from here.', ownerCount: 0 }; viewOf(r).verdict(r); return; }
+      if (a.status === 404) { failed(); r.verdict = { attachable: false, reason: 'route_absent', reasonCopy: 'Update the COS server to continue a thread from here.', ownerCount: 0 }; viewOf(r).verdict(r); return; }
       var b = a.body || {};
-      if (a.status !== 200 || typeof b.attachable !== 'boolean') return;
+      if (a.status !== 200 || typeof b.attachable !== 'boolean') { failed(); return; }
       var owners = Number(b.ownerCount) || 0;
       r.verdict = { attachable: b.attachable, reason: String(b.reason || ''), reasonCopy: String(b.reasonCopy || ''), ownerCount: owners, caution: b.attachable === true && owners > 0 };
       // 6.99.29: the gate's answer is a signal of the one state, as of now.
       sxNoteGate(r, b.attachable === false && b.reason === 'native_thread_working');
       sxRepaint(r);
-    }).catch(function () {}).finally(function () { r.probing = false; });
+    }).catch(failed).finally(function () { r.probing = false; });
   }
   var SX_PARK = {
     cursor: 'Working right now. A message you send goes into this Cursor chat when its turn ends.',
@@ -2244,6 +2279,9 @@
         }
         return 'refused';
       }
+      // QA 6.99.29: a turn this page sends starts new work, so the last Stop (or finished COS turn) no longer
+      // mutes the working signals that follow (a held follow-up goes 800 ms after the end, inside the echo window).
+      r.stoppedAt = null;
       return apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(at.binding.bindingId) + '/turns', {
         method: 'POST', timeoutMs: 25000,
         body: Object.assign({ prompt: draft.text, epoch: at.binding.epoch, targetKey: targetKey(provider, id), clientTurnId: draft.key }, files, opts.acknowledgedRevision ? { acknowledgedRevision: opts.acknowledgedRevision } : {}),

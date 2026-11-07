@@ -3156,15 +3156,50 @@ describe('one state for the session card: the freshest signal wins, and every pi
   })
 
   it('a question stays a question: a busy write gate never turns Waiting into Working', async () => {
-    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', state_since: ago(60_000), alive: true }
+    // QA 6.99.29: the row and the stream carry the SAME state_since in production (session-state-derive.ts), so
+    // the test pins one timestamp for both: two ago() calls a millisecond apart decided the order, and the test flaked.
+    const SINCE = ago(60_000)
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', state_since: SINCE, alive: true }
     const h = load({ data: { sessions: [ROW], working: [] }, routes: busyGate })
     h.ta.open('run', 'claude|' + SID, h.opener())
     await flush()
-    h.streams[0].onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'waiting', state_source: 'hook', state_since: ago(60_000), waiting_kind: 'permission' }) })
+    h.streams[0].onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'waiting', state_source: 'hook', state_since: SINCE, waiting_kind: 'permission' }) })
     const c = card(h)
     expect(c.badge).toBe('Waiting')
     expect(c.header).toMatch(/^Waiting for you/)
     expect(c.parkNote, 'no "Working right now" beside "Waiting"').toBe(false)
+  })
+
+  it('QA 6.99.29: the row and the hook at the same time, a busy gate after both: Waiting, Failed and Done hold, the hook wins the tie, in either order', () => {
+    const h = load({ data: { sessions: [], working: [] }, routes: {} })
+    const F = h.reader.kit.feed
+    const SINCE = ago(60_000)
+    const row = (agent_state: string) => ({ session_id: SID, provider: 'claude', running: true, running_active: false, agent_state, state_source: 'hook', state_since: SINCE, alive: true })
+    const hook = (agent_state: string) => ({ seq: 1, kind: 'status', state: 'working', agent_state, state_source: 'hook', state_since: SINCE, waiting_kind: 'permission' })
+    for (const order of ['list first', 'hook first'] as const) {
+      // The row says waiting with the hook: the card is Waiting from the hook (its detail), and the gate never unseats it.
+      const r = h.reader.kit.session('claude', SID, {})
+      if (order === 'list first') { F.noteList(r, row('waiting')); F.apply(r, hook('waiting')) } else { F.apply(r, hook('waiting')); F.noteList(r, row('waiting')) }
+      expect(F.truth(r), order).toMatchObject({ word: 'Waiting', src: 'hook' })
+      F.noteGate(r, true)
+      expect(F.truth(r), order + ': a busy gate after both').toMatchObject({ word: 'Waiting', src: 'hook' })
+      // The row alone (a stream with no derived state rides along): its Waiting holds against the gate and the stream.
+      const q = h.reader.kit.session('claude', SID, {})
+      F.noteList(q, row('waiting'))
+      F.apply(q, { seq: 1, kind: 'status', state: 'working' })
+      F.noteGate(q, true)
+      expect(F.truth(q), order + ': the row alone').toMatchObject({ word: 'Waiting', src: 'list' })
+      // The hook's own failed and ended hold too, with the row beside them at the same time.
+      for (const [state, word] of [['failed', 'Failed'], ['ended', 'Done']] as const) {
+        const d = h.reader.kit.session('claude', SID, {})
+        if (order === 'list first') { F.noteList(d, row('idle')); F.apply(d, hook(state)) } else { F.apply(d, hook(state)); F.noteList(d, row('idle')) }
+        F.noteGate(d, true)
+        expect(F.truth(d), order + ' ' + state).toMatchObject({ word, src: 'hook' })
+      }
+      // A newer hook running is the question answered: it still wins.
+      F.apply(r, { seq: 2, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString() })
+      expect(F.truth(r)!.word, order + ': answered').toBe('Working')
+    }
   })
 
   it('a message delivered live into the open session: the card reads Working, not done', async () => {
@@ -3204,8 +3239,40 @@ describe('one state for the session card: the freshest signal wins, and every pi
     expect(F.truth(r)).toMatchObject({ word: 'Idle', src: 'stop' })
     F.apply(r, { seq: 2, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date(Date.now() + 2).toISOString() })
     expect(F.truth(r)!.word, 'the echo of the Stop').toBe('Idle')
-    F.apply(r, { seq: 3, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date(Date.now() + 9_000).toISOString() })
-    expect(F.truth(r)!.word, 'a turn that starts after the echo window').toBe('Working')
+    // QA 6.99.29: the window is the page's own clock (when the page SAW the signal), never the signal's server time.
+    // A Mac clock 10 s ahead stamps the Stop's own echo 10 s "after" it: seen now, it is still the echo.
+    F.apply(r, { seq: 3, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date(Date.now() + 10_000).toISOString() })
+    expect(F.truth(r)!.word, 'an echo stamped late by the server, seen inside the window').toBe('Idle')
+    // The Stop was 9 s ago on this page; a turn the server stamps 2 s after it, first seen now, is real work.
+    const s2 = h.reader.kit.session('claude', SID, {})
+    s2.stoppedAt = Date.now() - 9_000
+    F.apply(s2, { seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date(s2.stoppedAt + 2_000).toISOString() })
+    expect(F.truth(s2)!.word, 'a turn that arrives after the echo window').toBe('Working')
+    // An echo stamped late by a Mac clock that runs ahead, seen inside the window, stays the echo when a reconnect
+    // (a reseed, seq 1) repeats it 10 s later: the page first saw it inside the window. (Moving the Stop and the
+    // arrival back 10 s together is the page's clock moving on 10 s.)
+    const s3 = h.reader.kit.session('claude', SID, {})
+    const ahead = new Date(Date.now() + 10_000).toISOString()
+    s3.stoppedAt = Date.now() - 1
+    F.apply(s3, { seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: ahead })
+    expect(F.truth(s3)!.word, 'the echo, seen inside the window').toBe('Idle')
+    s3.stoppedAt -= 10_000; s3.feed.seenMemo.hook.seen -= 10_000; s3.feed.seenMemo.stream.seen -= 10_000
+    F.apply(s3, { seq: 2, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: ahead })
+    expect(F.truth(s3)!.word, 'the same echo repeated 10 s later').toBe('Idle')
+    F.apply(s3, { seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: ahead })
+    expect(F.truth(s3)!.word, 'the same echo after a reseed').toBe('Idle')
+    // The same for the session row: a re-read of a row first seen inside the window is not a new working signal.
+    const s4 = h.reader.kit.session('claude', SID, {})
+    const busyRow = { session_id: SID, provider: 'claude', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: ahead, last_activity_at: ahead, alive: true }
+    s4.stoppedAt = Date.now() - 1
+    F.noteList(s4, busyRow)
+    expect(F.truth(s4)!.word, 'the row, seen inside the window').toBe('Idle')
+    s4.stoppedAt -= 10_000; s4.list.seen -= 10_000
+    F.noteList(s4, busyRow)
+    expect(F.truth(s4)!.word, 'the same row, read again 10 s later').toBe('Idle')
+    // A different row (new activity) seen now, past the window, is real work.
+    F.noteList(s4, { ...busyRow, last_activity_at: new Date(Date.now() + 11_000).toISOString() })
+    expect(F.truth(s4)!.word, 'new activity after the window').toBe('Working')
   })
 })
 
@@ -3506,7 +3573,11 @@ describe('6.99.29: the backdrop and the sheet reach the bottom edge, keyboard op
     const nofoot = '.ta-layer:not(.ta-kb) .ta-sheet:has(> .ta-foot:empty), .ta-layer:not(.ta-kb) .ta-sheet:has(> .ta-foot[hidden])'
     expect(decls(nofoot)['padding-bottom']).toBe('var(--safe-bottom)')
     // Past the bottom edge, with the keyboard down only.
-    expect(decls('.ta-layer:not(.ta-kb) .ta-scrim').bottom).toBe('calc(-1 * var(--ta-bleed))')
+    // QA 6.99.29: the dim's bleed is the layer's own ::before, visual only; the scrim (which closes) stays on screen.
+    expect(decls('.ta-scrim').inset).toBe('0')
+    expect(noComments).not.toMatch(/\.ta-scrim\s*\{[^}]*bottom/)
+    const bleed = decls('.ta-layer:not(.ta-kb)::before')
+    expect([bleed.top, bleed.height, bleed.background]).toEqual(['100%', 'var(--ta-bleed)', decls('.ta-scrim').background])
     const after = decls('.ta-layer:not(.ta-kb) .ta-sheet::after')
     expect([after.top, after.height, after.background]).toEqual(['100%', 'var(--ta-bleed)', 'var(--page)'])
     expect(parseFloat(decls('.ta-layer')['--ta-bleed']!), 'more than the 106 px band').toBeGreaterThan(106)
@@ -3515,10 +3586,213 @@ describe('6.99.29: the backdrop and the sheet reach the bottom edge, keyboard op
     expect(decls('.ta-sheet')['padding-right']).toBe('var(--safe-right)')
   })
 
+  it('QA 6.99.29: a tap on the bleed band below the edge does not close the sheet; a tap on the dim still does', async () => {
+    const h = load({ data: { sessions: [ROW], working: [] }, routes, vv: { height: 1000 }, innerHeight: 1000 })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const L = h.document.appended as El
+    // The band is the layer's own ::before: a tap there is reported on the layer, which carries no data-ta.
+    const onLayer = { target: Object.assign(L, { closest: (sel: string) => (sel === '[data-ta]' && L.hasAttribute('data-ta') ? L : null) }) }
+    h.ta._onClick(onLayer)
+    expect(L.hidden, 'a tap on the band').toBe(false)
+    // The capture guard lets the band's touchmove be held, so the page behind never scrolls.
+    let held = false
+    ;(L.listeners.touchmove || []).forEach(fn => fn({ target: L, preventDefault() { held = true } }))
+    expect(held, 'a drag on the band does not scroll Today').toBe(true)
+    h.tap('close')
+    expect(L.hidden, 'the dim inside the screen still closes').toBe(true)
+  })
+
   it('the 6.99.28 image preview covers the whole screen above the overlay and keeps its own insets once', () => {
     const css = /\.rm-view\{([^}]*)\}/.exec(MEDIA)![1]!
     expect(css).toContain('position:fixed;inset:0')
     expect(Number(/z-index:(\d+)/.exec(css)![1]), 'above the overlay').toBeGreaterThan(Number(decls('.ta-layer')['z-index']))
     expect((css.match(/safe-area-inset-bottom/g) || []).length).toBe(1)
+  })
+})
+
+// ── QA 6.99.29 final (11/07): the Sessions reader's own paths, run from app.js ─────────────────────
+// The reader region of app.js (watchSession, watchTurn, flushHeld, continueSession, paintActivity, sxProbeAttach,
+// loadQueue) with a page clock the test moves, fake timers and intervals, and a fake fetch. Nothing reaches a server.
+function readerPage(routes: Routes) {
+  const start = APP.indexOf('  // ── Sessions: read, send, queue, fork, stop')
+  const end = APP.indexOf("  // Copy session (Control's Kickstart brief")
+  const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
+  const mdRegion = APP.slice(APP.indexOf('  // Markdown for an assistant turn'), APP.indexOf('  function renderTurns('))
+  const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0]
+  const { fetch, calls } = fakeFetch(routes)
+  const els: Record<string, El> = {}
+  const shown = new Set(['session-live', 'session-queue', 'session-state', 'session-status', 'session-verdict'])
+  const $ = (id: string) => (shown.has(id) ? (els[id] ??= Object.assign(new El(), { id })) : null)
+  // A frozen page clock: it moves only when the test says (later()).
+  let skew = 0
+  const base = Date.now()
+  const realNow = () => base
+  class PageDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(realNow() + skew) } static now() { return realNow() + skew } }
+  const timers: Array<{ fn: () => void; ms: number; done?: boolean }> = []
+  const intervals: Array<{ fn: () => void; ms: number; cleared?: boolean }> = []
+  const streams: any[] = []
+  const store = new Map<string, string>()
+  const state: any = { reading: null, turnPoll: null, stream: null }
+  const deps: Record<string, unknown> = {
+    // The page's own Date, so app.js's `instanceof Date` holds for what toDate returns.
+    state, $, esc, md: (s: unknown) => String(s), toDate: (v: unknown) => (v ? new PageDate(String(v)) : null), autoGrow: () => {}, showAuth: () => {},
+    clock: (d: Date) => d.toISOString().slice(11, 16), fetch,
+    api: (path: string) => fetch(path).then((res: any) => res.json()),
+    localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
+    AbortController, Date: PageDate,
+    setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: (n: number) => { if (timers[n - 1]) timers[n - 1]!.done = true },
+    setInterval: (fn: () => void, ms: number) => { intervals.push({ fn, ms }); return intervals.length }, clearInterval: (n: number) => { if (n && intervals[n - 1]) intervals[n - 1]!.cleared = true },
+    requestAnimationFrame: () => 0, document: { querySelector: () => null, createElement: () => new El(), documentElement: { scrollHeight: 0 } },
+    window: { COSWeb: {}, scrollTo: () => {} },
+    EventSource: class { url: string; onmessage: any = null; onerror: any = null; readyState = 1; constructor(url: string) { this.url = url; streams.push(this) } close() {} },
+  }
+  // eslint-disable-next-line no-new-func
+  const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) +
+    '\nreturn { newFeed: newFeed, watchSession: watchSession, watchTurn: watchTurn, flushHeld: flushHeld, replyEnded: replyEnded, paintActivity: paintActivity,' +
+    ' probe: sxProbeAttach, gateStale: sxGateStale, noteGate: sxNoteGate, truth: sxTruth, loadQueue: loadQueue, applyFeed: applyFeed };\n}')(deps)
+  /** Runs the timers due by now (the page's own clock moved with later()). */
+  const runTimers = () => { for (const t of timers) if (!t.done) { t.done = true; t.fn() } }
+  const tick = () => intervals.filter(i => !i.cleared).forEach(i => i.fn())
+  const live = () => els['session-live']?.innerHTML ?? ''
+  return { kit, state, calls, streams, timers, intervals, runTimers, tick, live, els, later: (ms: number) => { skew += ms }, now: () => realNow() + skew }
+}
+
+describe('QA 6.99.29 final: the Sessions reader', () => {
+  const SID = 'c6d4d6ff-a62d-4e2a-9c33-e01b2c3d4e5f'
+  const P = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID)}${tail}`
+  const session = (pg: ReturnType<typeof readerPage>) => {
+    const r: any = { provider: 'claude', id: SID, draft: null, held: [], verdict: null, refusal: null, feed: pg.kit.newFeed(), live: null, queued: 0 }
+    pg.state.reading = r
+    return r
+  }
+  const flushAll = async (pg: ReturnType<typeof readerPage>) => { for (let i = 0; i < 4; i++) { await flush(); pg.runTimers() } await flush() }
+
+  it('a held follow-up sent 800 ms after the end shows Working, with Stop, for its whole run', async () => {
+    let turnPolls = 0
+    const pg = readerPage({
+      ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+      ['GET ' + P('/queued-turns')]: { status: 200, body: { turns: [] } },
+      ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: null, reasonCopy: '', ownerCount: 0 } },
+      ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b9', epoch: 2 } },
+      ['POST /api/agent-sessions/bindings/b9/turns']: { status: 202, body: { outcome: 'queued' } },
+      ['GET /api/agent-sessions/bindings/b1/turns/ctFirst0001']: () => { turnPolls++; return { status: 200, body: { outcome: 'completed', via: 'resume' } } },
+      ['GET /api/agent-sessions/bindings/b9/turns/ctHeld00001']: { status: 200, body: { outcome: 'queued' } },
+    })
+    const r = session(pg)
+    pg.kit.watchSession('claude', SID)
+    const say = (seq: number, e: Record<string, unknown>) => pg.streams[0].onmessage({ data: JSON.stringify({ seq, kind: 'status', state_source: 'hook', ...e }) })
+    const startedAt = pg.now() - 20_000
+    say(1, { state: 'working', agent_state: 'running', state_since: new Date(startedAt).toISOString() })
+    expect(pg.live()).toContain('data-action="stop-session"')
+    // A follow-up typed while COS answers is held on the page.
+    r.held.push({ text: 'and add the test', key: 'ctHeld00001', since: pg.now(), ids: [] })
+    // COS's own turn finishes: the watch says completed (a resume child, not live), which is the end of the work.
+    pg.kit.watchTurn('b1', 'ctFirst0001', 'claude', SID)
+    pg.intervals[pg.intervals.length - 1]!.fn()
+    await flush()
+    expect(turnPolls).toBe(1)
+    const endedAt = pg.now()
+    say(2, { state: 'idle', agent_state: 'idle', state_since: new Date(endedAt).toISOString() })
+    expect(pg.live()).not.toContain('data-action="stop-session"')
+    // 800 ms later the held message goes.
+    pg.later(800)
+    await flushAll(pg)
+    expect(pg.calls.some(c => c.method === 'POST' && c.path === '/api/agent-sessions/bindings/b9/turns' && c.body.prompt === 'and add the test')).toBe(true)
+    // The session starts on it: Working with Stop, and still so at every status of the run, inside and past 8 s.
+    pg.later(400)
+    say(3, { state: 'working', agent_state: 'running', state_since: new Date(endedAt + 1_000).toISOString() })
+    for (const [i, ms] of [[4, 2_000], [5, 4_000], [6, 9_000], [7, 30_000]] as const) {
+      expect(pg.live(), 'Working at ' + (pg.now() - endedAt) + ' ms').toContain('<strong>Working</strong>')
+      expect(pg.live(), 'Stop at ' + (pg.now() - endedAt) + ' ms').toContain('data-action="stop-session"')
+      pg.later(ms)
+      pg.streams[0].onmessage({ data: JSON.stringify({ seq: i, kind: 'tool', verb: 'read', target: 'app.js' }) })
+    }
+    expect(pg.live()).toContain('<strong>Working</strong>')
+    expect(pg.live()).toContain('data-action="stop-session"')
+  })
+
+  it('the probe that re-asks a busy gate stamps every attempt and backs off after a failure; an answer resets it', async () => {
+    let mode: 'fail' | 'throw' | 'busy' = 'fail'
+    const pg = readerPage({
+      ['GET ' + P('/attachability')]: () => mode === 'throw' ? new Error('offline') : mode === 'fail' ? { status: 500, body: {} } : { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
+    })
+    const r = session(pg)
+    r.view = { verdict: () => {}, stateChanged: () => {} }
+    pg.kit.applyFeed(r, { seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_source: 'hook', state_since: new Date(pg.now() - 60_000).toISOString() })
+    pg.kit.noteGate(r, true)
+    expect(pg.kit.truth(r)).toMatchObject({ word: 'Working', src: 'gate' })
+    const askedAfter = async (ms: number) => { pg.later(ms); return pg.kit.gateStale(r) }
+    expect(await askedAfter(19_000), 'a fresh answer is not re-asked').toBe(false)
+    expect(await askedAfter(2_000), '20 s on').toBe(true)
+    await pg.kit.probe(r); await flush()
+    expect(r.gate.failures).toBe(1)
+    expect(r.gate.triedAt).toBe(pg.now())
+    expect(await askedAfter(1_000), 'not every second after a failure').toBe(false)
+    expect(await askedAfter(30_000), 'one failure: 40 s').toBe(false)
+    expect(await askedAfter(10_000)).toBe(true)
+    mode = 'throw'
+    await pg.kit.probe(r); await flush()
+    expect(r.gate.failures, 'a request that never answered is a failure too').toBe(2)
+    expect(await askedAfter(79_000), 'two failures: 80 s').toBe(false)
+    expect(await askedAfter(2_000)).toBe(true)
+    for (let i = 0; i < 4; i++) { await pg.kit.probe(r); await flush() }
+    expect(await askedAfter(319_000), 'capped at 16 times: 320 s').toBe(false)
+    expect(await askedAfter(2_000)).toBe(true)
+    mode = 'busy'
+    await pg.kit.probe(r); await flush()
+    expect(r.gate.failures ?? 0, 'an answer resets the backoff').toBe(0)
+    expect(await askedAfter(19_000)).toBe(false)
+    expect(await askedAfter(2_000)).toBe(true)
+  })
+
+  it('a Working only the write gate says is re-asked even when the live feed never connected', async () => {
+    const pg = readerPage({ ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: null, reasonCopy: '', ownerCount: 0 } } })
+    const r = session(pg)
+    r.feed.fallback = 'http_404'
+    pg.kit.noteGate(r, true)
+    r.live = { working: true }
+    pg.kit.paintActivity(r)
+    expect(pg.live()).toContain('<strong>Working</strong>')
+    const live = pg.intervals.filter(i => !i.cleared)
+    expect(live.length, 'the recheck timer runs with no feed').toBe(1)
+    pg.later(21_000)
+    pg.tick()
+    await flush()
+    expect(pg.calls.filter(c => c.path === P('/attachability')).length, 'the gate was asked again').toBe(1)
+    expect(pg.kit.truth(r), 'a free answer clears it').toBeNull()
+  })
+
+  it('a refused or expired queued message stays in the line with its reason; it does not vanish', async () => {
+    const pg = readerPage({
+      ['GET ' + P('/queued-turns')]: { status: 200, body: { turns: [
+        { clientTurnId: 'ctWait000001', status: 'waiting', position: 0, preview: 'next one', owner: 'cos' },
+        { clientTurnId: 'ctRef0000001', status: 'refused', position: -1, preview: 'the video one', owner: 'cos', reason: 'queued_turn_tampered', reasonCopy: 'Not sent: its words, files or session changed.' },
+        { clientTurnId: 'ctExp0000001', status: 'expired', position: -1, preview: 'old one', owner: 'cos', reason: 'queued_turn_expired' },
+        { clientTurnId: 'ctDone000001', status: 'delivered', position: -1, preview: 'sent one', owner: 'cos' },
+      ] } },
+    })
+    session(pg)
+    pg.kit.loadQueue('claude', SID)
+    await flush()
+    const html = pg.els['session-queue']!.innerHTML
+    expect(html).toContain('1 follow-up queued.')
+    expect(html).toContain('the video one')
+    expect(html).toContain('Not sent: its words, files or session changed.')
+    expect(html).toContain('old one')
+    expect(html).toContain('Not sent: the thread stayed busy too long.')
+    expect(html, 'a delivered row is not a refusal').not.toContain('sent one')
+    expect((html.match(/sx-queue-refused/g) || []).length).toBe(2)
+    expect(html).not.toMatch(/[—→]/)
+  })
+
+  it('only refused rows: they still show, with no "queued" head', async () => {
+    const pg = readerPage({ ['GET ' + P('/queued-turns')]: { status: 200, body: { turns: [{ clientTurnId: 'ctRef0000002', status: 'refused', position: -1, preview: 'gone?', owner: 'cos', reason: 'turn_id_in_use', reasonCopy: 'Not sent: its id belongs to another message.' }] } } })
+    session(pg)
+    pg.kit.loadQueue('claude', SID)
+    await flush()
+    const html = pg.els['session-queue']!.innerHTML
+    expect(html).toContain('Not sent: its id belongs to another message.')
+    expect(html).not.toContain('queued.')
   })
 })

@@ -181,6 +181,8 @@
 .sx-queue-row { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; gap: 8px 10px; align-items: center; padding: 8px 10px; border-radius: 9px; background: var(--panel); border: 1px solid var(--panel-border); }
 .sx-queue-state { font: 700 9.5px/1.2 var(--mono); color: var(--accent); }
 .sx-queue-text { font-size: 13px; line-height: 1.4; color: var(--ink); overflow-wrap: anywhere; }
+.sx-queue-refused .sx-queue-state { color: var(--sub); }
+.sx-queue-reason { display: block; margin-top: 2px; font-size: 12px; color: var(--sub); }
 @media (max-width: 599px) {
   .sx-queue-row { grid-template-columns: minmax(0, 1fr) auto; }
   .sx-queue-state { grid-column: 1 / -1; }

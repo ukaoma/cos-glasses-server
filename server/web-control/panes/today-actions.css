@@ -29,8 +29,10 @@ html.ta-open { overflow: hidden; }
 .ta-layer[hidden] { display: none; }
 .ta-scrim { position: absolute; inset: 0; background: rgba(23, 18, 14, 0.45); touch-action: none; animation: fade 160ms ease; }
 /* Past the bottom edge, in case Safari's fixed viewport ever stops short of it: the dim and the sheet run on below the
-   screen, so no band of Today can show under them. Off with the keyboard up (the keyboard covers that edge). */
-.ta-layer:not(.ta-kb) .ta-scrim { bottom: calc(-1 * var(--ta-bleed)); }
+   screen, so no band of Today can show under them. Off with the keyboard up (the keyboard covers that edge).
+   QA 6.99.29: the dim's bleed is the LAYER's own pseudo-element, never the scrim, so it is visual only: a tap on that
+   band lands on the layer (no data-ta, so nothing happens) instead of closing the overlay or reaching Today below. */
+.ta-layer:not(.ta-kb)::before { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--ta-bleed); background: rgba(23, 18, 14, 0.45); touch-action: none; animation: fade 160ms ease; }
 .ta-layer:not(.ta-kb) .ta-sheet::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--ta-bleed); background: var(--page); pointer-events: none; }
 
 .ta-sheet {

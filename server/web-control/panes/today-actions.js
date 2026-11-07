@@ -165,7 +165,8 @@
       });
     });
     // A drag on the dimmed page never scrolls what is behind it.
-    layer.addEventListener('touchmove', function (e) { if (e.target && e.target.classList && e.target.classList.contains('ta-scrim')) e.preventDefault(); }, { passive: false });
+    // The bleed below the bottom edge is the layer's own ::before (today-actions.css): a drag there is the layer's.
+    layer.addEventListener('touchmove', function (e) { if (e.target && (e.target === layer || (e.target.classList && e.target.classList.contains('ta-scrim')))) e.preventDefault(); }, { passive: false });
     return layer;
   }
   // With the keyboard up the layer follows the visible viewport, so the keyboard never covers the reply box or Send.
