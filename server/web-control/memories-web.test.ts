@@ -19,7 +19,7 @@ type Answer = unknown | ((args: any) => unknown)
 interface FakeEl { id: string; innerHTML: string; value: string; classList: { toggle: (c: string, on?: boolean) => void; add: (c: string) => void; remove: (c: string) => void; contains: (c: string) => boolean }; [k: string]: any }
 
 type CueAnswer = (path: string, body?: any) => unknown
-function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandomUUID?: boolean; cues?: CueAnswer } = {}) {
+function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandomUUID?: boolean; cues?: CueAnswer; stored?: Record<string, unknown> } = {}) {
   const answers: Record<string, Answer> = { ...base(), ...(opts.answers ?? {}) }
   const calls: Array<{ op: string; args: any }> = []
   // The cue review talks to /api/live-cues/* directly, as Control's store does; anything else is the Memories bridge.
@@ -48,7 +48,7 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
   const W = {
     $: (id: string) => els.get(id) ?? null,
     esc: (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!),
-    toast: (t: string) => { toasts.push(t) }, readStore: () => ({}), writeStore: () => {},
+    toast: (t: string) => { toasts.push(t) }, readStore: () => ({ ...(opts.stored ?? {}) }), writeStore: () => {},
     skeletonRows: () => '<div class="list"><div class="skel-row"></div></div>',
     copyText: (t: string) => { copies.push(t); return Promise.resolve() },
     parseRoute: () => route,
@@ -87,7 +87,16 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
   const held: Array<() => void> = []
   const timeout = (fn: () => void, ms?: number) => { if ((ms ?? 0) >= 6000) { held.push(fn); return 0 } return setTimeout(fn, 0) }
   const window = { COSWeb: W, matchMedia: () => media, crypto, localStorage: { getItem: () => null, setItem: () => {} } }
-  const location = { replace: (h: string) => { route = { pane: 'memories', args: h.replace(/^#\/memories\/?/, '').split('/').filter(Boolean) } } }
+  // location.replace changes the hash, and the browser's hashchange runs the route again (app.js route, then load).
+  const location = {
+    get hash() { return '#/' + [route.pane].concat(route.args).map(encodeURIComponent).join('/') },
+    replace: (h: string) => {
+      const args = h.replace(/^#\/memories\/?/, '').split('/').filter(Boolean).map(decodeURIComponent)
+      const changed = JSON.stringify(args) !== JSON.stringify(route.args)
+      route = { pane: 'memories', args }
+      if (changed) setTimeout(() => def.load(args), 0)
+    },
+  }
   const ctx = vm.createContext({ window, document, location, crypto, console, Date, JSON, Math, Promise, Object, Array, String, Number, RegExp, Error, Uint8Array, URL,
     setTimeout: timeout, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {} })
   vm.runInContext(SOURCE, ctx)
@@ -95,7 +104,7 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
   const tap = (name: string, attrs: Record<string, string> = {}) => t.act(name, { getAttribute: (k: string) => attrs[k] ?? null, disabled: false }, null)
   const open = async (args: string[] = []) => { route = { pane: 'memories', args }; def.load(args); await flush() }
   const writes = () => calls.filter(c => !isMemoryWebOpReadOnly(c.op, c.args ?? {}))
-  return { def, t, S: t.S, calls, cueCalls, writes, toasts, copies, tap, open, els, answers, held, listeners, setRoute: (args: string[]) => { route = { pane: 'memories', args } } }
+  return { def, t, S: t.S, calls, cueCalls, writes, toasts, copies, tap, open, els, answers, held, listeners, route: () => route, setRoute: (args: string[]) => { route = { pane: 'memories', args } } }
 }
 
 // ── fixtures, shaped like the live bridge answered on 11/06 ──
@@ -679,5 +688,48 @@ describe('Control Web Memories: QA fixes (6.99.26)', () => {
     for (const f of ['memory-workspace.js', 'graph-explorer.js']) expect(readFileSync(join(HERE, 'memories', f), 'utf8'), f).not.toMatch(/\son[a-z]+="/)
     expect(workspace).toContain('data-role="find-points"')
     expect(SOURCE).toContain(`closest('.memory-investigation [data-role="find-points"]')`)
+  })
+})
+
+describe('Control Web Memories: the tab is in the address (QA N9)', () => {
+  const TABS = ['recent', 'applied', 'memories', 'review', 'knowledge', 'cues', 'rated']
+  it('each tab writes #/memories/t/<tab>, and a fresh browser opened there (no stored view) lands on the same tab', async () => {
+    for (const tab of TABS) {
+      const h = load({ cues: cueServer() })
+      await h.open()
+      h.tap('view', { 'data-arg': tab }); await flush()
+      expect(h.route(), tab).toEqual({ pane: 'memories', args: ['t', tab] })
+      const fresh = load({ cues: cueServer() })
+      await fresh.open(['t', tab])
+      expect(fresh.S.view, tab).toBe(tab)
+      expect(fresh.t.viewsHtml(), tab).toContain(`data-arg="${tab}" aria-pressed="true"`)
+      expect(fresh.route(), tab).toEqual({ pane: 'memories', args: ['t', tab] })
+    }
+  })
+
+  it('a bare #/memories and the older #/memories/view/<tab> link become the tab\'s address; an unknown tab falls back to the stored one', async () => {
+    const bare = load({ stored: { view: 'applied' } })
+    await bare.open([])
+    expect(bare.route().args).toEqual(['t', 'applied'])
+    const old = load()
+    await old.open(['view', 'review'])
+    expect(old.route().args).toEqual(['t', 'review'])
+    const bogus = load({ stored: { view: 'knowledge' } })
+    await bogus.open(['t', 'nonsense'])
+    expect(bogus.route().args).toEqual(['t', 'knowledge'])
+  })
+
+  it('a tab route is the list, not a reader, and Back from a reader lands on its tab', async () => {
+    const h = load({ wide: false })
+    await h.open(['t', 'applied'])
+    expect(h.t.readerHtml({ pane: 'memories', args: ['t', 'applied'] })).toBe('')
+    expect(h.els.get('pane-memories')!.classList.contains('reading')).toBe(false)
+    expect(h.els.get('mm-split')!.classList.contains('reading')).toBe(false)
+    // Wide, the reader shows the tab's first row, and that row is the selected one in the list.
+    const wide = load({ wide: true })
+    await wide.open(['t', 'recent'])
+    expect(wide.t.listHtml()).toMatch(/data-id="evt_r1" aria-selected="true"/)
+    expect(h.def.up(['e', 'evt_x'])).toEqual(['t', 'applied'])
+    expect(h.def.up(['t', 'applied'])).toBeNull()
   })
 })

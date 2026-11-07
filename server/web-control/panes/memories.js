@@ -88,6 +88,14 @@
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
   function icon(name) { return '<svg class="icon"><use href="#i-' + name + '"/></svg>'; }
+  // The tab is in the address: #/memories/t/<view> (app.js isTabRoute), so a reload, a new browser or Safari clearing its
+  // storage all land on the same tab; the stored view is only the fallback for a bare #/memories.
+  function tabRoute(args) { return args.length === 2 && args[0] === 't'; }
+  function readerArgs(r) { return r.pane === 'memories' && !tabRoute(r.args) ? r.args : []; }
+  function showTab(v) {
+    var h = '#/memories/t/' + encodeURIComponent(v);
+    if (location.hash === h) paint(); else location.replace(h);
+  }
   function isWide() { return !!(window.matchMedia && window.matchMedia('(min-width: 760px)').matches); }
   function el(id) { return document.getElementById(id); }
   function btn(act, label, extra) { return '<button type="button" class="cx-btn' + (extra && extra.cls ? ' ' + extra.cls : ' quiet') + '" data-mm="' + act + '"' + (extra && extra.id != null ? ' data-id="' + esc(extra.id) + '"' : '') + (extra && extra.arg != null ? ' data-arg="' + esc(extra.arg) + '"' : '') + (extra && extra.disabled ? ' disabled' : '') + '>' + label + '</button>'; }
@@ -485,7 +493,7 @@
   function cueLearn(state) {
     var next = state === 'loaded' ? true : state === 'olderServer' ? false : S.cue.available;
     S.cue.available = next;
-    if (next === false && (S.view === 'cues' || S.view === 'rated')) { S.view = 'recent'; persist(); }
+    if (next === false && (S.view === 'cues' || S.view === 'rated')) { S.view = 'recent'; persist(); if (tabRoute(W.parseRoute().args)) showTab('recent'); }
   }
   function cueVerdict(c) { return c && c.rating && c.rating.verdict ? c.rating.verdict : null; }
   // CueVerdicts.queueOrder: oldest first, then the skipped cues in the order they were skipped.
@@ -777,7 +785,7 @@
     if (!gaps.length) return '';
     return '<p class="cx-note">Not recorded on this Mac yet: ' + esc(gaps.map(function (k) { return storeName(k); }).join(', ')) + '.</p>';
   }
-  function selectedId() { var r = W.parseRoute(); return r.pane === 'memories' && r.args.length === 2 ? r.args[1] : (autoPick() || ''); }
+  function selectedId() { var a = readerArgs(W.parseRoute()); return a.length === 2 ? a[1] : (autoPick() || ''); }
 
   function listHtml() {
     if (S.view === 'cues') return cueQueueHtml();
@@ -1978,7 +1986,7 @@
   function paint() {
     var r = W.parseRoute(); if (r.pane !== 'memories') return;
     if (!el('mm-root')) pane.innerHTML = SKELETON;
-    var reading = r.args.length > 0, split = el('mm-split');
+    var reading = readerArgs(r).length > 0, split = el('mm-split');
     pane.classList.toggle('reading', reading); if (split) split.classList.toggle('reading', reading);
     // The cue views are one column at every width, like Control's cue review (a card, not a list beside a reader).
     if (split) split.classList.toggle('solo', !reading && (S.view === 'cues' || S.view === 'rated'));
@@ -1990,7 +1998,7 @@
     paintModal();
   }
   function readerHtml(r) {
-    var a = r.args;
+    var a = r.args;  // a tab route (t/<view>) opens no reader: the auto-pick below decides, as on a bare list
     S.crumbText = '';
     if (a[0] === 'e' && a[1]) return eventReader(a[1]);
     if (a[0] === 'm' && a[1]) return memoryReader(a[1]);
@@ -2002,7 +2010,7 @@
   function paintReader(r) {
     var node = el('mm-reader'); if (!node) return;
     var html = readerHtml(r);
-    if (r.args.length && W.crumb && W.crumb() !== S.crumbText) W.setCrumb(S.crumbText);
+    if (readerArgs(r).length && W.crumb && W.crumb() !== S.crumbText) W.setCrumb(S.crumbText);
     if (write(node, html) && el('mm-graph-host')) mountGraph();
     document.body.classList.toggle('mm-graph-open', S.graphFull && !!el('mm-graph-host'));
   }
@@ -2031,7 +2039,7 @@
     if (v === 'applied' && !S.applied.loaded && !S.applied.loading) loadApplied(false);
     if (v === 'cues' && S.cue.weekState !== 'loaded') loadCueWeek();
     if (v === 'rated' && !S.cue.ratedLoaded) loadCueRated();
-    if (W.parseRoute().args.length) W.go('memories'); else paint();
+    showTab(v);
   }
   function refresh() {
     S.loadedAt = Date.now(); S.detail = {}; S.passages = {}; S.decided = {};
@@ -2059,7 +2067,7 @@
       case 'open-m': return W.go('memories', ['m', id]);
       case 'ktab': return openKnowledge(KTABS.indexOf(arg) >= 0 ? arg : 'graph');
       case 'back': return W.goBack();
-      case 'back-learning': S.view = 'recent'; persist(); return S.knowledgeFocus ? W.go('memories', ['e', S.knowledgeFocus]) : W.go('memories');
+      case 'back-learning': S.view = 'recent'; persist(); return S.knowledgeFocus ? W.go('memories', ['e', S.knowledgeFocus]) : showTab('recent');
       case 'more-recent': return loadRecent(true);
       case 'more-review': return loadReview(true);
       case 'more-mem': return loadMem(true);
@@ -2171,10 +2179,12 @@
 
   W.registerPane('memories', {
     load: function (args) {
-      if (args[0] === 'view') {
-        if (knownView(args[1])) { S.view = args[1]; persist(); }
-        location.replace('#/memories'); return;
+      // #/memories/view/<view> (older links) and a bare #/memories become the tab's own address; an unknown tab, the stored one.
+      if (args[0] === 'view' || !args.length || (args[0] === 't' && !knownView(args[1]))) {
+        if (args[0] === 'view' && knownView(args[1])) { S.view = args[1]; persist(); }
+        location.replace('#/memories/t/' + encodeURIComponent(S.view)); return;
       }
+      if (tabRoute(args) && S.view !== args[1]) { S.view = args[1]; persist(); }
       if (args[0] === 'k') { S.view = 'knowledge'; if (KTABS.indexOf(args[1]) >= 0) { S.ktab = args[1]; S.ktabChosen = true; } persist(); }
       if (!S.started) loadAll();
       else if (S.graph && lockHeld(S.graph.lock)) watchIngest();
@@ -2188,7 +2198,8 @@
       if (S.modal && S.modal.kind !== 'merge') closeModal();
       document.body.classList.remove('mm-modal-open'); document.body.classList.remove('mm-graph-open');
     },
-    up: function () { return null; },
+    // Back from a reader lands on the tab it was opened from.
+    up: function (args) { return tabRoute(args) ? null : ['t', S.view]; },
     // For the vm tests (web-control/memories-web.test.ts): the same functions taps and loads run.
     _t: { S: S, act: act, paint: paint, listHtml: listHtml, readerHtml: readerHtml, countsHtml: countsHtml, viewsHtml: viewsHtml, modalHtml: modalHtml,
       needsCount: needsCount, needsRows: needsRows, contextText: contextText, findRow: findRow, isRead: isRead, cleanTitle: cleanTitle, mergeFlow: mergeFlow,
