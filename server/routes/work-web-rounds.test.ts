@@ -104,7 +104,8 @@ describe('a web round is recorded, viewed and listed as web, and only as web', (
   })
   it('validates a web- id exactly as strictly as a lens- id', async () => {
     const h = await setup()
-    const bad = ['web-', 'web-00000001', `web-${'abcdef01-0000-4000-8000-0000000000ab'.toUpperCase()}`, `web-${UUID}0`, ` web-${UUID}`, `web-${UUID.replace(/-/g, '')}`, `web_${UUID}`, `WEB-${UUID}`]
+    const bad = ['web-', 'web-00000001', `web-${'abcdef01-0000-4000-8000-0000000000ab'.toUpperCase()}`, 'web-ABCDEF01-0000-4000-8000-000000000000',
+      'web-abcdef01-0000-4000-8000-00000000000A', `web-${UUID}0`, ` web-${UUID}`, `web-${UUID.replace(/-/g, '')}`, `web_${UUID}`, `WEB-${UUID}`]
     for (const id of bad) {
       const web = await h.post('/work/chat/lens-rounds', plan({ clientRoundId: id }))
       const lens = await h.post('/work/chat/lens-rounds', lensPlan({ clientRoundId: id.replace(/web/i, m => (m === 'WEB' ? 'LENS' : 'lens')) }))
