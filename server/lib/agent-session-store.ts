@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { codexUserAsk, unwrapPeerMessage } from './session-stream-events.js'
+import { withoutTurnFooter } from './turn-footer.js'
 import { profileCodexHomeSubdirs } from './codex-homes.js'
 
 const execFileAsync = promisify(execFile)
@@ -1831,7 +1832,8 @@ export async function parseAgentSession(
         // frame. It IS the user's prompt (dictated on the glasses), so it is the
         // turn's query and never an injected row; the frame is stripped.
         const peer = (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? unwrapPeerMessage(text) : null
-        const query = peer ?? text
+        // 6.99.29: the verify footer of a glasses, phone or web turn is never the turn's query or title.
+        const query = withoutTurnFooter(peer ?? text)
         collectTurn(query, tail, peer === null && (obj.isMeta === true || obj.isCompactSummary === true))
         if (!firstPrompt) firstPrompt = firstLineTitle(query)
         if (!title) title = firstLineTitle(query)

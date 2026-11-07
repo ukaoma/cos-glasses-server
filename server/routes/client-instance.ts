@@ -32,6 +32,17 @@ export const CLIENT_INSTANCE_MAX_SEEN = 64
 
 export interface ClientInstanceRouterDeps {
   now?: () => number
+  /**
+   * G2 authority Tier 1 (unreleased): the owner-per-device map, shared so the turn provenance
+   * can ask which app copy holds the ring for a request's address. Absent: private, as before.
+   */
+  owners?: Map<string, ClientInstanceOwner>
+}
+
+/** The ring owner's id for this device address, when it claimed within `freshMs`; else null. */
+export function pairedInstanceFrom(owners: ReadonlyMap<string, ClientInstanceOwner>, device: string, now: number, freshMs: number): string | null {
+  const owner = owners.get(deviceKey(device))
+  return owner && now - owner.seenAt <= freshMs ? owner.id : null
 }
 
 /** A POST that carries a meeting chunk: a live one, or an iPhone offline chunk replayed. The preview is not one. */
@@ -49,7 +60,7 @@ export function createClientInstanceRouter(deps: ClientInstanceRouterDeps | (() 
   const opts: ClientInstanceRouterDeps = typeof deps === 'function' ? { now: deps } : deps
   const now = opts.now ?? Date.now
   const router = Router()
-  const owners = new Map<string, ClientInstanceOwner>()
+  const owners = opts.owners ?? new Map<string, ClientInstanceOwner>()
   const chunks = new ClientChunkLedger()
   // 6.52.3: when each copy last claimed, so an older boot proves it was awake before it
   // may take a quiet ring back. Bounded like the chunk ledger.

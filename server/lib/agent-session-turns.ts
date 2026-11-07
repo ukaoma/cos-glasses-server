@@ -35,6 +35,7 @@ import {
 } from './agent-session-store.js'
 import type { SessionOutputImage } from './agent-session-output-images.js'
 import { unwrapPeerMessage } from './session-stream-events.js'
+import { withoutTurnFooter } from './turn-footer.js'
 
 export interface SessionTurn {
   role: 'user' | 'assistant'
@@ -108,10 +109,12 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
     // (a teammate's report, an idle notification, another session's SendMessage),
     // written as a plain user row with no origin. QA found 20 of those in one session
     // rendering as "YOU".
-    const peer = unwrapPeerMessage(text)
+    // 6.99.29: the verify footer a glasses, phone or web turn carries is for the agent, not the reader.
+    const wrapped = unwrapPeerMessage(text)
+    const peer = wrapped === null ? null : withoutTurnFooter(wrapped)
     if (peer !== null) return (obj.origin as { kind?: unknown } | undefined)?.kind === 'peer' ? shaped('user', peer, at) : null
     if (obj.isMeta === true || obj.isCompactSummary === true) return null
-    return shaped('user', text, at)
+    return shaped('user', withoutTurnFooter(text), at)
   }
   if (provider === 'codex') {
     if (obj.type !== 'response_item' || !obj.payload || typeof obj.payload !== 'object') return null
@@ -122,7 +125,7 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
     // and an attached-file message reads as the request that was typed.
     const text = payload.role === 'user' ? codexUserText(payload) : payloadText(payload)
     if (!text) return null
-    return shaped(payload.role, text, iso(obj.timestamp))
+    return shaped(payload.role, payload.role === 'user' ? withoutTurnFooter(text) : text, iso(obj.timestamp))
   }
   if (obj.role !== 'user' && obj.role !== 'assistant') return null
   const message = obj.message && typeof obj.message === 'object' ? obj.message as Record<string, unknown> : null

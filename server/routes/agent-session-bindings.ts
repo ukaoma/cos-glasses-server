@@ -98,7 +98,7 @@
 import type { FenceRecord } from '../lib/thread-fence-store.js'
 import { defaultPidStartProbe, fenceLiveness, type FenceLiveness, type FenceLivenessDeps } from '../lib/fence-liveness.js'
 import { Router, type Request, type Response } from 'express'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import {
   threadOccupancy,
   type Occupancy,
@@ -131,6 +131,7 @@ import { isValidNativeThreadId } from '../lib/native-thread-id.js'
 import { FORK_PROVIDER_FAILURES, type ForkProviderFailure } from '../lib/fork-thread.js'
 import { CLIENT_FORK_ID_RE, ForkJobLedger, type ForkJobRow } from '../lib/fork-job-ledger.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
+import { TURN_CARRY_HEADER, type G2TurnProvenance, type OriginVerdict } from '../lib/g2-turn-provenance.js'
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
 import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
@@ -319,6 +320,13 @@ export type AttachedTurnResult =
   | { ok: boolean; delivery: 'not_attempted' | 'aborted' | 'ambiguous' | 'delivered' | 'cancelled' }
 
 export interface AgentSessionBindingsDeps {
+  /**
+   * G2 authority Tier 1, with web origin (6.99.29): where each turn came from. With it, every turn
+   * and fork this router hands to a session is ledgered, and one from the glasses, the phone or a
+   * signed-in COS Control Web browser carries the one verify footer line. Absent: the 6.99.28
+   * behaviour, byte for byte.
+   */
+  provenance?: G2TurnProvenance
   /** Shared fence state. Omit and the router owns a private one, which is correct
    *  for tests and wrong for the server -- see the wiring note at its use site. */
   guard?: TargetGuard
@@ -2715,12 +2723,23 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         console.log(`[agent-session-bindings] fork accepted provider=${providerParam} background=true`)
       }
 
+      // G2 authority Tier 1: a fork is a turn too. Its id is the client's fork id, or one minted
+      // here; the target is the SOURCE thread (the copy's id is not known until it ran). The hash
+      // covers the prompt as composed (words plus any files block), without the footer.
+      let forkPrompt = prompt
+      if (deps.provenance) {
+        const forkVerdict = deps.provenance.originOf(req)
+        const forkTurnId = typeof clientForkId === 'string' ? clientForkId : `fork-${randomBytes(12).toString('hex')}`
+        forkPrompt = deps.provenance.footed(prompt, forkTurnId, forkVerdict)
+        deps.provenance.record({ turnId: forkTurnId, prompt, verdict: forkVerdict, provider: providerParam, sessionId: threadIdParam, via: 'fork', fork: true })
+      }
+
       let raw: unknown
       try {
         raw = await fork({
           provider: providerParam,
           nativeThreadId: threadIdParam,
-          prompt,
+          prompt: forkPrompt,
           cwd,
           // Text-only, same as the attached path. A fork runs a real model turn
           // against a workspace the user did not hand us explicitly.
@@ -3059,6 +3078,26 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }
       const prompt = composed.prompt
 
+      // G2 authority Tier 1 (6.99.29 port, with web origin): who said this, and the exact text the
+      // session will see. A turn the queue drains re-enters over loopback with a single-use carry
+      // token naming the origin captured when it was parked (bound to the WORDS it parked, before
+      // any files block); anything else is judged by its own socket, its token and its cookie.
+      // `prompt` stays the unfooted text: the receipts, the turn ledger and the queue evidence
+      // compare against it, and the transcript readers take the footer off before they compare.
+      const provenance = deps.provenance
+      let turnVerdict: OriginVerdict | null = null
+      let turnCarried = false
+      if (provenance) {
+        const carried = provenance.takeCarry(req.headers[TURN_CARRY_HEADER], clientTurnId, words)
+        turnCarried = carried !== null
+        turnVerdict = carried ?? provenance.originOf(req)
+      }
+      const deliveredPrompt = provenance && turnVerdict ? provenance.footed(prompt, clientTurnId, turnVerdict) : prompt
+      /** Ledgered once the text did, or may have, reached a session. Hash of the text WITHOUT the footer. */
+      const ledgerTurn = (via: string, provider: string, sessionId: string): void => {
+        if (provenance && turnVerdict && clientTurnId !== null) provenance.record({ turnId: clientTurnId, prompt, verdict: turnVerdict, provider, sessionId, via: turnCarried ? `drain-${via}` : via })
+      }
+
       // 6.78.0: RECEIPTS, before any gate, claim, pin or hop. The ledger above is dropped
       // with its binding and records nothing for a pre-202 `live_unverified`; a crash after
       // the pin leaves no record at all. The receipt covers those (target-scoped attempt
@@ -3238,7 +3277,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           live = await deps.deliverLiveTurn({
             provider: binding.provider,
             sessionId: binding.nativeThreadId,
-            prompt,
+            prompt: deliveredPrompt,
             verifyTimeoutMs: LIVE_VERIFY_BUDGET_MS,
             clientTurnId,
           })
@@ -3258,6 +3297,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           const latched = latchedHere()
           if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt })
           console.log(`[agent-session-bindings] turn delivered live provider=${binding.provider} turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} pid=${live.pid ?? 'null'}`)
+          ledgerTurn('live', binding.provider, binding.nativeThreadId)
           respond(200, {
             turnId,
             outcome: 'completed',
@@ -3276,6 +3316,8 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           // 6.53.3: something MAY be in the session and the person asked for it to stop: arm
           // the marker as for a landed turn, and settle this turn as cancelled, never as a
           // retryable hold that the queue would send again after the cancel's two minutes.
+          // The text MAY be in the session, footer and all: a record, so a verify finds it.
+          ledgerTurn('live-unverified', binding.provider, binding.nativeThreadId)
           const latched = latchedHere()
           if (latched) {
             settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'maybe', { prompt, sentAt: handOffAt })
@@ -3317,7 +3359,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           live = await deps.deliverCodexLiveTurn({
             provider: binding.provider,
             sessionId: binding.nativeThreadId,
-            prompt,
+            prompt: deliveredPrompt,
             foreignHolder: true,
           })
         } catch (error) {
@@ -3332,6 +3374,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           // 6.53.3: queued in the Codex app, which only the app can stop ("Stop it there").
           const latched = latchedHere()
           if (latched) settleLatchedCancel(latched, binding.provider, binding.nativeThreadId, 'reached', { prompt, sentAt: handOffAt, busy: busyCodexHop })
+          ledgerTurn('codex-live', binding.provider, binding.nativeThreadId)
           console.log(`[agent-session-bindings] turn delivered live provider=codex turnId=${turnId} bindingId=${bindingId} verifiedBy=${live.verifiedBy ?? 'unknown'} queuedId=${live.queuedId ?? 'null'}`)
           respond(200, {
             turnId,
@@ -3374,6 +3417,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           // delivery is: ambiguous, ledgered (a replay answers the same), and fenced until
           // a person looks at the Codex app's queue and releases it.
           if (live === null || live.reason === 'unverified') {
+            ledgerTurn('codex-live-unverified', binding.provider, binding.nativeThreadId)
             guard.fence(key, 'native_target_fenced', {
               provider: binding.provider,
               headBefore: head.digest,
@@ -3427,6 +3471,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       let delivery: Delivery
       deliveryAttempted = true
       spawnMay = true
+      ledgerTurn('spawn', binding.provider, binding.nativeThreadId)
       try {
         const result = await deliver({
           turnId,
@@ -3437,7 +3482,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           workspaceFingerprint: binding.workspaceFingerprint,
           sourceFingerprint: binding.sourceFingerprint,
           expectedNativeHead: head.raw,
-          prompt,
+          prompt: deliveredPrompt,
           abortSignal: cancelController.signal,
           // 6.62.0 /qa (Q3): only a client that shows `continue_note` gets Cursor Run Everything.
           continueNoteAck: continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]),

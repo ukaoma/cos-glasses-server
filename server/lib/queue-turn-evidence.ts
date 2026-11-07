@@ -17,6 +17,7 @@
 
 import { cancelVoidsOpenTurn, type ThreadCancel } from './session-cancel.js'
 import { unwrapPeerMessage } from './session-stream-events.js'
+import { stripG2TurnFooter, withoutTurnFooter } from './turn-footer.js'
 import type { TurnAttemptLookup } from './agent-session-binding-registry.js'
 import type { QueuedThreadTurn } from './thread-turn-queue.js'
 
@@ -215,11 +216,27 @@ function textOf(content: unknown): string | null {
   return parts.length > 0 ? parts.join('\n') : null
 }
 
-/** The words, as typed or out of Claude Code's peer wrapper, equal the prompt exactly. */
+/**
+ * The words, as typed or out of Claude Code's peer wrapper, equal the prompt exactly.
+ * 6.99.29: a glasses, phone or web turn reaches the session with one trailing verify footer line
+ * (lib/g2-turn-provenance.ts) that the queue row and the turns route never held, so that one
+ * line is taken off the transcript's text before the exact comparison. Nothing else is.
+ */
 function sameWords(text: string | null, want: string): boolean {
   if (text === null) return false
   if (text.trim() === want) return true
+  if (footedWords(text, want)) return true
   return unwrapPeerMessage(text) === want
+}
+
+/** A row that carries a verify footer, as typed or inside the peer wrapper, whose words are `want`. */
+function footedWords(text: string, want: string): boolean {
+  for (const candidate of [text, unwrapPeerMessage(text)]) {
+    if (typeof candidate !== 'string') continue
+    const stripped = stripG2TurnFooter(candidate)
+    if (stripped.turnId !== null && stripped.text.trim() === want) return true
+  }
+  return false
 }
 
 /**
@@ -286,7 +303,7 @@ export function makeDeliveryEvidence(deps: DeliveryEvidenceDeps): (turn: QueuedT
       let codexQueueMatch = false
       if (!transcriptMatch && turn.provider === 'codex' && typeof deps.codexQueueTexts === 'function') {
         const texts = await deps.codexQueueTexts(turn.threadId)
-        codexQueueMatch = texts.some(text => typeof text === 'string' && text.trim() === turn.prompt.trim())
+        codexQueueMatch = texts.some(text => typeof text === 'string' && withoutTurnFooter(text).trim() === turn.prompt.trim())
       }
       return reconcileVerdict({ row: turn, ledgerOutcome, transcriptMatch, codexQueueMatch, attempt })
     } catch {

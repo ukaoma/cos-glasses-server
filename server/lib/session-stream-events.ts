@@ -17,6 +17,8 @@
 // carrying its real name in `target`, so a provider adding a tool tomorrow degrades to
 // a readable line instead of an unrenderable one.
 
+import { withoutTurnFooter } from './turn-footer.js'
+
 /** Closed set. A provider tool name that is not in the table maps to `other`. */
 export type SessionStreamVerb = 'read' | 'edit' | 'write' | 'bash' | 'search' | 'task' | 'other'
 
@@ -557,6 +559,8 @@ export function promptDrafts(message: Record<string, unknown>): SessionStreamDra
   let text = parts.join(' ')
   // A live Continue's words, out of the peer wrapper (see `unwrapPeerMessage`).
   text = unwrapPeerMessage(text) ?? text
+  // 6.99.29: the one trailing verify footer line of a glasses, phone or web turn is for the agent.
+  text = withoutTurnFooter(text)
   // Wrapper blocks out, whole. A partial strip would leave the tag names on the lens.
   text = text.replace(/<(system-reminder|relevant-memories|cache-health|daily-bulletin|cos-alarms|device-handoff|now|memory-stored|local-command-stdout|local-command-stderr|command-name|command-message|command-args)>[\s\S]*?<\/\1>/g, ' ')
   const flat = oneLine(text, PROMPT_MAX_CHARS)

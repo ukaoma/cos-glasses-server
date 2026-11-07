@@ -39,6 +39,7 @@ import { atomicWriteFileSync } from './atomic-fs.js'
 import { dataPath } from './data-dir.js'
 import { isValidNativeThreadId } from './native-thread-id.js'
 import { unwrapPeerMessage } from './session-stream-events.js'
+import { stripG2TurnFooter, withoutTurnFooter } from './turn-footer.js'
 
 /**
  * How long a marker may outlive its cancel. An hour, not the plan's first 15 minutes: the
@@ -263,12 +264,25 @@ export function normalizePromptWords(text: unknown): string {
 export function isDeliveredPrompt(prompt: unknown, delivered: string, options: { verbatim?: boolean } = {}): boolean {
   if (options.verbatim === true) {
     // 6.62.0: Codex's queued turn arrives as its own text. No wrapper to take off.
+    // 6.99.29: a glasses, phone or web turn arrives with one trailing verify footer line the
+    // route's own `prompt` never held; that line, and only that line, comes off first.
     const want = typeof delivered === 'string' ? delivered.trim() : ''
-    return want.length > 0 && typeof prompt === 'string' && prompt.trim() === want
+    return want.length > 0 && typeof prompt === 'string' && withoutTurnFooter(prompt).trim() === want
   }
   const want = normalizePromptWords(delivered)
   if (want.length === 0 || typeof prompt !== 'string') return false
+  if (footedPromptIs(prompt, want)) return true
   return normalizePromptWords(unwrapPeerMessage(prompt) ?? prompt) === want
+}
+
+/** 6.99.29: a prompt that carries a verify footer, as typed or inside the peer wrapper, whose words are `want`. */
+function footedPromptIs(prompt: string, want: string): boolean {
+  for (const candidate of [prompt, unwrapPeerMessage(prompt)]) {
+    if (typeof candidate !== 'string') continue
+    const stripped = stripG2TurnFooter(candidate)
+    if (stripped.turnId !== null && normalizePromptWords(stripped.text) === want) return true
+  }
+  return false
 }
 
 /**

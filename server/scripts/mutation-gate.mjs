@@ -1029,7 +1029,7 @@ const CASES = [
   {
     name: 'referee-not-mounted',
     file: 'server/index.ts',
-    find: "app.use('/api', createClientInstanceRouter())\n",
+    find: "app.use('/api', createClientInstanceRouter({ owners: clientInstanceOwners }))\n",
     replace: "\n",
     tests: ['server/routes/client-instance.test.ts'],
   },

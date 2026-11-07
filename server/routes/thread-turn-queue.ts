@@ -15,6 +15,7 @@
 //
 // EVERY DEPENDENCY IS INJECTED so the whole path is testable without a live server.
 
+import { randomBytes } from 'node:crypto'
 import { Router, type Request, type Response } from 'express'
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 import { nativeQueueControl, plainQueueText, type NativeQueueControl } from '../lib/codex-queue-control.js'
@@ -29,6 +30,7 @@ import { readQueue, writeQueue, queuedThreadKeys } from '../lib/thread-turn-queu
 import type { DeliveryEvidence } from '../lib/queue-turn-evidence.js'
 import { continueLiveEnabled } from '../lib/session-peer-inbox-deps.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
+import { stripG2TurnFooter, type G2TurnProvenance, type OriginVerdict } from '../lib/g2-turn-provenance.js'
 import { defaultTurnAttachmentStore, keepTurnAttachments, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 
 export interface ThreadTurnQueueDeps {
@@ -69,6 +71,12 @@ export interface ThreadTurnQueueDeps {
    * Stop hook. Absent: no Cursor turn is ever drained here, exactly as in 6.61.
    */
   cursorCliChat?: (threadId: string) => boolean
+  /**
+   * G2 authority Tier 1, with web origin (6.99.29), optional: the origin of each parked turn is
+   * captured here (and again on an edit or a Send again) and carried to its drain; a steer and a
+   * native Codex queue edit are ledgered and footed like a turn. Absent: the 6.99.28 behaviour.
+   */
+  provenance?: G2TurnProvenance
   now: () => number
 
   // ------------------------------------------------------------- 6.78.0 (P3)
@@ -456,8 +464,15 @@ async function steerTurn(
   queue: QueuedThreadTurn[],
   gateReason: string | null,
   fallbackNone: boolean,
+  verdict: OriginVerdict | null = null,
 ): Promise<unknown> {
   const { provider, threadId, clientTurnId, prompt } = turn
+  // G2 authority Tier 1 (6.99.29): a steer goes straight into the running session through its peer
+  // inbox, so it is a delivery of its own and carries the footer like a turn.
+  const steerPrompt = deps.provenance && verdict ? deps.provenance.footed(prompt, clientTurnId, verdict) : prompt
+  const ledgerSteer = (via: string): void => {
+    if (deps.provenance && verdict) deps.provenance.record({ turnId: clientTurnId, prompt, verdict, provider, sessionId: threadId, via })
+  }
   const intent: QueuedThreadTurn = {
     ...turn,
     status: 'delivering',
@@ -507,7 +522,7 @@ async function steerTurn(
 
   let live: { ok: boolean; reason: string } | null = null
   try {
-    live = await deps.deliverLiveTurn!({ provider, sessionId: threadId, prompt, verifyTimeoutMs: PEER_VERIFY_TIMEOUT_MS, clientTurnId })
+    live = await deps.deliverLiveTurn!({ provider, sessionId: threadId, prompt: steerPrompt, verifyTimeoutMs: PEER_VERIFY_TIMEOUT_MS, clientTurnId })
   } catch (error) {
     console.error(`[thread-turn-queue] steer delivery threw: ${error instanceof Error ? error.message : error}`)
     live = null
@@ -520,11 +535,13 @@ async function steerTurn(
 
   if (live?.ok === true) {
     journal('sent')
+    ledgerSteer('steer')
     settleRow(row => { row.status = 'delivered'; row.reason = 'steered'; row.settledAt = at })
     return res.status(200).json({ state: 'delivered', reason: 'steered', clientTurnId })
   }
   if (live === null || live.reason === 'unverified' || live.reason === 'write_failed') {
     journal('unknown')
+    ledgerSteer('steer-unverified')
     settleRow(row => { row.status = 'refused'; row.reason = 'steer_unverified'; row.deliveryState = 'unknown'; row.settledAt = at })
     return res.status(200).json({
       state: 'refused',
@@ -629,18 +646,27 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       ...(attach.ids.length > 0 ? { attachmentIds: attach.ids } : {}),
     }
 
+    // G2 authority Tier 1 (6.99.29): who parked these words, judged on this request's own socket,
+    // token and cookie, and held in memory with their hash so the drain can carry it.
+    const verdict = deps.provenance ? deps.provenance.originOf(req) : null
+    if (deps.provenance && verdict) deps.provenance.noteQueued(provider, threadId, clientTurnId, prompt, verdict)
+
     let steerFallback: string | null = null
     if (wantSteer) {
       const availability = steerAvailabilityFor(deps, provider, threadId, gate.reason)
-      if (availability.available) return steerTurn(req, res, deps, turn, queue, gate.reason, fallbackNone)
+      if (availability.available) return steerTurn(req, res, deps, turn, queue, gate.reason, fallbackNone, verdict)
       if (fallbackNone) return res.status(409).json({ error: 'steer_unavailable', reason: availability.reason })
       steerFallback = availability.reason
     }
 
     const admitted = admitToQueue(queue, turn)
-    if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
+    if (!admitted.ok) {
+      deps.provenance?.forgetQueued(provider, threadId, clientTurnId)
+      return res.status(409).json({ error: admitted.reason })
+    }
 
     writeQueue(provider, threadId, admitted.queue)
+    if (deps.provenance && verdict) deps.provenance.record({ turnId: clientTurnId, prompt, verdict, provider, sessionId: threadId, via: 'queue' })
     return res.status(202).json({
       queued: true,
       clientTurnId,
@@ -700,6 +726,13 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
     original.resentAs = newId
     writeQueue(provider, threadId, admitted.queue)
+    // G2 authority Tier 1 (6.99.29): Send again is the resender choosing these words again, so the
+    // copy carries the resender's origin, exactly as an edit carries the editor's.
+    if (deps.provenance) {
+      const verdict = deps.provenance.originOf(req)
+      deps.provenance.noteQueued(provider, threadId, newId, copy.prompt, verdict)
+      deps.provenance.record({ turnId: newId, prompt: copy.prompt, verdict, provider, sessionId: threadId, via: 'queue-resend' })
+    }
     console.log(`[thread-turn-queue] resend provider=${provider} from=${original.clientTurnId} as=${newId} unknown=${original.deliveryState === 'unknown'}`)
     return res.status(200).json(publicRow(copy, queuePosition(admitted.queue, newId)))
   })
@@ -714,7 +747,9 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (provider === 'codex') {
       try {
         native = (await (deps.nativeQueue ?? nativeQueueControl).list(threadId)).map((row, position) => {
-          const text = plainQueueText(row)
+          // G2 authority Tier 1: the lens and the web show (and edit) the words, never the verify footer.
+          const plain = plainQueueText(row)
+          const text = plain === null ? null : stripG2TurnFooter(plain).text
           return { clientTurnId: `codex-native:${row.id}`, status: 'waiting', position, queuedAt: 0,
             attempts: 0, preview: text?.slice(0, 80) ?? 'Message with attachments · manage in Codex',
             ...(text !== null ? { prompt: text } : {}), editable: text !== null, owner: 'codex' }
@@ -734,7 +769,16 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > DEFAULT_MAX_PROMPT_CHARS) return res.status(400).json({ error: 'invalid_prompt' })
     if (provider === 'codex' && id.startsWith('codex-native:')) {
       try {
-        await (deps.nativeQueue ?? nativeQueueControl).update(threadId, id.slice(13), prompt)
+        // G2 authority Tier 1: the edit replaces the text in the Codex app's own queue, so it is a
+        // delivery of its own, under an id minted here (the native row id is not ours).
+        let sent = prompt
+        if (deps.provenance) {
+          const verdict = deps.provenance.originOf(req)
+          const editId = `cnedit-${randomBytes(12).toString('hex')}`
+          sent = deps.provenance.footed(prompt, editId, verdict)
+          deps.provenance.record({ turnId: editId, prompt, verdict, provider, sessionId: threadId, via: 'codex-native-edit' })
+        }
+        await (deps.nativeQueue ?? nativeQueueControl).update(threadId, id.slice(13), sent)
         return res.json({ updated: true })
       } catch { return res.status(409).json({ error: 'queue_edit_unconfirmed' }) }
     }
@@ -743,6 +787,12 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (!row || row.status !== 'waiting') return res.status(409).json({ error: 'already_delivering' })
     row.prompt = prompt
     writeQueue(provider, threadId, queue)
+    // The words are now whoever edited them: their origin replaces the parked one.
+    if (deps.provenance) {
+      const verdict = deps.provenance.originOf(req)
+      deps.provenance.noteQueued(provider, threadId, id, prompt, verdict)
+      deps.provenance.record({ turnId: id, prompt, verdict, provider, sessionId: threadId, via: 'queue-edit' })
+    }
     return res.json({ updated: true })
   })
 
@@ -769,6 +819,7 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       row.status = 'cancelled'
       row.settledAt = now
       writeQueue(provider, threadId, queue)
+      deps.provenance?.forgetQueued(provider, threadId, clientTurnId)
     }
     return res.json({ cancelled: true, clientTurnId, status: row.status })
   })

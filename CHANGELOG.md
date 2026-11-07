@@ -1,3 +1,16 @@
+## Unreleased (6.99.29)
+
+Miles, 11/07 11:04: a message he types in a session's box on COS Control Web (his phone, signed in over Tailscale) reached the running Claude session as "Another Claude session sent a message", and the agent refused it as an approval. This makes a signed-in web turn provable, and lands the glasses design from 10/07 (a3c8c4b, never merged) on the current routes.
+
+**Default-on change: every turn from the glasses, the phone or a signed-in Control Web browser carries one verify footer line.** The session sees the words, then one trailing line: `[COS-G2 turn <id> · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py <id>]` for the glasses and the phone, `[COS-WEB turn <id> · verify: ...]` for the web. Turns from this Mac, from an agent holding the token, or from an unknown caller are delivered unchanged. There is no switch.
+
+- **Provenance ledger** at `<data>/g2-turn-ledger.jsonl` (append-only, rotated at 5 MB): turn id, time, SHA-256 of the words without the footer (trimmed, ASCII whitespace collapsed; with files, the words plus the files block), the socket origin, `originKind` (`g2`, `phone` or `web`), `verifiedOrigin`, target and path.
+- **Web origin.** A turn is verified as `web` only when it came through the signed-in cookie path in full (cookie signature, expiry and session epoch good; `X-COS-Web: 1` and an Origin or Referer naming this server), carried no `X-Cos-Token` header at all, and its socket is neither loopback nor one of this Mac's own addresses. COS Control Web open on the Mac itself is never verified: from the socket it is the same as any local process.
+- **Glasses origin** (the 10/07 rule, unchanged): a non-local socket plus `X-Cos-Client-Instance` naming the app copy that holds the ring for that address.
+- **Every path that hands a session text:** the live Claude hop (peer inbox), the Codex app queue hop, the resume child, queue park, edit, Send again and the drain (the parked origin rides the loopback hop on a single-use token bound to the words), steer, the Cursor Stop hand-off, a native Codex queue edit, fork, and turns with files.
+- **`GET /api/g2-turns/:id`**, alias **`GET /api/turn-provenance/:id`**: X-Cos-Token only (a browser cookie gets 401). Answers `verifiedOrigin` and `originKind`, and vouches only for a record this process wrote and still holds; after a restart recent turns read unverified.
+- The reader, the live feed, the session list and the Codex queue listing show the words without the footer, and the queue's delivery evidence and receipts match a footed transcript row by its words.
+
 ## 6.99.28 - See the images your sessions make, from your phone; the 6.99.27 phone fixes (private)
 
 2026-11-07. Private build on 6.99.27 (6d85cb5). Server only. Works with COS Control 0.5.376 as installed.

@@ -14,12 +14,15 @@ import express, { Router, type NextFunction, type Request, type Response } from 
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { claimNextCursorTurn, cursorStopAcceptsFollowup, cursorStopIsFresh, parseCursorStopEnvelope } from '../lib/cursor-stop-followup.js'
 import { MAX_QUEUED_PER_THREAD, type QueuedThreadTurn } from '../lib/thread-turn-queue.js'
+import type { G2TurnProvenance } from '../lib/g2-turn-provenance.js'
 
 export interface CursorStopFollowupDeps {
   /** The per-install hook token, or null when none has been minted (then nothing is answered). */
   hookToken: () => string | null
   readQueue: (provider: string, threadId: string, now: number) => QueuedThreadTurn[]
   writeQueue: (provider: string, threadId: string, queue: QueuedThreadTurn[]) => void
+  /** G2 authority Tier 1 (unreleased), optional: ledger the hand-off and foot a glasses or phone turn. */
+  provenance?: G2TurnProvenance
   now: () => number
 }
 
@@ -68,7 +71,16 @@ export function createCursorStopFollowupRouter(deps: CursorStopFollowupDeps): Ro
       return res.json({})
     }
     console.log(`[cursor-stop-followup] handed a queued turn to Cursor clientTurnId=${claimed.turn.clientTurnId} chars=${claimed.turn.prompt.length} loop=${facts.loopCount ?? 'null'} cursor=${facts.cursorVersion}`)
-    return res.json({ followup_message: claimed.turn.prompt })
+    let followup = claimed.turn.prompt
+    if (deps.provenance) {
+      // The hook's own socket is local; the origin is the one captured when the turn was
+      // parked, and only while the queued text is still the text it vouched for.
+      const turn = claimed.turn
+      const verdict = deps.provenance.queuedVerdict('cursor', facts.conversationId, turn.clientTurnId, turn.prompt) ?? deps.provenance.originOf(req)
+      followup = deps.provenance.footed(turn.prompt, turn.clientTurnId, verdict)
+      deps.provenance.record({ turnId: turn.clientTurnId, prompt: turn.prompt, verdict, provider: 'cursor', sessionId: facts.conversationId, via: 'cursor-stop-followup' })
+    }
+    return res.json({ followup_message: followup })
   })
   return router
 }
