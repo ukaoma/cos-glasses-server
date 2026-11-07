@@ -132,6 +132,7 @@ import { FORK_PROVIDER_FAILURES, type ForkProviderFailure } from '../lib/fork-th
 import { CLIENT_FORK_ID_RE, ForkJobLedger, type ForkJobRow } from '../lib/fork-job-ledger.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
+import { composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
@@ -437,6 +438,11 @@ export interface AgentSessionBindingsDeps {
    * and before the claim; a hit is replayed, never sent again. Absent: 6.77 behaviour.
    */
   turnReceipt?: (provider: string, nativeThreadId: string, clientTurnId: string, prompt: string) => TurnReceipt | null
+  /**
+   * 11/07 (Control Web attach): the media store a turn's `attachmentIds` resolve against. Absent: the real store
+   * (lib/session-turn-attachments.ts). Tests pass a fake. Never read for a turn without files.
+   */
+  turnAttachmentStore?: TurnAttachmentStore
 
   /**
    * 6.78.0 (COS_SESSION_STEER): could a turn go INTO this thread's running turn? Added to an
@@ -2973,10 +2979,13 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       // an empty one, and must not fall through as a turn with no claims to check.
       if (body === null) return refuseTurn('invalid_request')
 
-      const prompt = body.prompt
-      if (typeof prompt !== 'string' || prompt.trim().length === 0 || prompt.length > maxPromptChars) {
+      const words = body.prompt
+      if (typeof words !== 'string' || words.trim().length === 0 || words.length > maxPromptChars) {
         return refuseTurn('invalid_request')
       }
+      // 11/07: files with the turn, as media-store ids. Absent is the old turn; a bad list refuses it whole.
+      const attachIds = parseTurnAttachmentIds(body.attachmentIds)
+      if (!attachIds.ok) return refuseTurn('invalid_request')
       const epoch = body.epoch
       if (!Number.isInteger(epoch) || (epoch as number) < 1) return refuseTurn('invalid_request')
       const claimedTargetKey = body.targetKey
@@ -3013,6 +3022,19 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         }
         return
       }
+
+      // 11/07: the files' paths on this Mac go under the words HERE, after the ledger replay (a replayed turn sends
+      // nothing) and before the receipt (which matches the transcript against what was actually sent). Without files
+      // the prompt is the words, untouched. A file that cannot be read refuses the turn before anything is sent.
+      const composed = await composeTurnPrompt(words, attachIds.ids, {
+        runId: `session-turn:${clientTurnId}`,
+        maxChars: maxPromptChars,
+        ...(deps.turnAttachmentStore ? { store: deps.turnAttachmentStore } : {}),
+      })
+      if (!composed.ok) {
+        return refuseTurn('invalid_request', { reasonCopy: TURN_ATTACHMENT_COPY[composed.code], attachmentError: composed.code })
+      }
+      const prompt = composed.prompt
 
       // 6.78.0: RECEIPTS, before any gate, claim, pin or hop. The ledger above is dropped
       // with its binding and records nothing for a pre-202 `live_unverified`; a crash after

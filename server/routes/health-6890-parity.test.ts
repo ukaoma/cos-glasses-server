@@ -585,6 +585,8 @@ const GOLDEN_HEALTH_TOP_6870 = [
   'threadAttachProviders',
   'threadForkSupported',
   'threadForkProviders',
+  // 11/07 (Control Web attach): additive, right after the thread-attach fields it qualifies.
+  'threadTurnAttachments',
   'sessionHooks',
   'permissionBroker',
   'continueLive',
