@@ -983,7 +983,7 @@
     return '<section class="wk-section" id="wk-agent-workspace"><h2 class="wk-h2">Agent workspace</h2>' + status + reply +
       (!it.completed ? '<button type="button" class="cx-btn primary" data-wk="start" data-id="' + esc(it.id) + '">Start work</button>' : '') +
       (data && data.savedDestination ? '<p class="wk-fine">' + esc('Saved destination: ' + destinationLabel(data.savedDestination)) + '</p>' : '') +
-      '<p class="wk-fine">Card files and Work chat stay on your Mac. Add or send files from this card in COS Control.</p></section>';
+      '<p class="wk-fine">Card files stay on your Mac. Add or remove them on this card in COS Control.</p></section>';
   }
   // Answer (needs input or blocked) and Not done yet (a reported done): a reply request that continues the same session
   // with a note, naming the handoff it answers. COS Control on the Mac sends it, as it does for the glasses.
@@ -1053,11 +1053,13 @@
   function stopHandoffPolls() {
     HANDOFF_TIMERS.forEach(function (t) { clearTimeout(t); }); HANDOFF_TIMERS.clear();
     [S.start, S.reply].forEach(function (all) { Object.keys(all).forEach(function (k) { all[k].timer = null; }); });
+    chatStopTimers();
   }
   // Back on Work: pick up any request that was still open when the pane was left.
   function resumeHandoffPolls() {
     Object.keys(S.start).forEach(function (wid) { var h = S.start[wid]; if (requestOpen(h) && !h.timer && !h.pollStopped) pollHandoff(h, startUpdate(wid)); });
     Object.keys(S.reply).forEach(function (wid) { var h = S.reply[wid]; if (requestOpen(h) && !h.timer && !h.pollStopped) pollHandoff(h, replyUpdate(wid)); });
+    chatResumePolls();
   }
   function replyUpdate(wid) {
     return function () {
@@ -1109,14 +1111,679 @@
       return;
     }
     W.setCrumb(clip(plainTitle(it.title), 60));
-    pane.innerHTML = '<div class="cx wk" data-tint="work">' + backBar(backLabel()) + notices() +
-      '<div class="wk-detail">' + '<div class="wk-detail-main">' + detailHeader(it) + taskBody(it) + '</div>' +
-      '<aside class="wk-detail-side">' + connections(it) + workspace(it) + '</aside></div></div>';
+    if (!S.chatCaps || Date.now() - S.chatCaps.at > (S.chatCaps.ok ? 60000 : 15000)) loadChatCaps();
+    // Work chat's text box is never replaced while this card shows: a repaint writes the parts around it, so a draft,
+    // the caret and the phone's keyboard survive every poll. While the box has focus only the composer itself changes,
+    // so the page never moves under the keyboard; the rest catches up when the box loses focus.
+    var mount = pane.querySelector('.wk-detail'), box = $('wk-chat-text');
+    var parts = { notices: notices(), main: detailHeader(it) + taskBody(it), side: connections(it) + workspace(it) };
+    if (mount && mount.getAttribute('data-wid') === it.wid && (!!box === chatOffered() || chatComposerFocused())) {
+      if (chatComposerFocused()) S.chatDeferred = true;
+      else {
+        S.chatDeferred = false;
+        chatSetPart('wk-part-notices', parts.notices); chatSetPart('wk-part-main', parts.main);
+        chatSetPart('wk-part-chat', chatHistory(it)); chatSetPart('wk-part-side', parts.side);
+      }
+    } else {
+      S.chatDeferred = false;
+      pane.innerHTML = '<div class="cx wk" data-tint="work">' + backBar(backLabel()) + '<div id="wk-part-notices" class="wk-part">' + parts.notices + '</div>' +
+        '<div class="wk-detail" data-wid="' + esc(it.wid) + '"><div class="wk-detail-main"><div id="wk-part-main" class="wk-part">' + parts.main + '</div>' + chatSectionHtml(it) + '</div>' +
+        '<aside class="wk-detail-side" id="wk-part-side">' + parts.side + '</aside></div></div>';
+      [['wk-part-notices', parts.notices], ['wk-part-main', parts.main], ['wk-part-side', parts.side]].forEach(function (p) { var el = $(p[0]); if (el) el.__html = p[1]; });
+      var hist = $('wk-part-chat'); if (hist) hist.__html = hist.innerHTML;
+    }
+    chatSyncComposer(it);
     if (!S.activity[it.wid] && !S.activityError[it.wid] && !S.activityLoading[it.wid]) {
       S.activityLoading[it.wid] = true;
       loadActivity(it).then(function () { delete S.activityLoading[it.wid]; }).then(function () { var r = W.parseRoute(); if (r.pane === 'work' && r.args[0] === arg && r.args.length === 1) renderDetail(arg); });
     }
   }
+
+  // ── Work chat: message the orchestrator about this card (Control's WorkTaskChatView) ──
+  // The Mac plans with GET /api/work/chat, POST /api/work/orchestrator/input and POST /api/work/chat, then sends with its
+  // own Send. The web plans with the same three routes and the same body, then hands the plan to COS Control through the
+  // lens-round contract, as the glasses do (source "web", webPlans 1): POST /api/work/chat/lens-rounds saves it into this
+  // card's Work chat on the Mac, POST .../:roundId/send with the two-step confirm asks Control to send it, and
+  // GET .../:roundId says how it went. Nothing here sends to a session: COS Control does, with its fences, receipts,
+  // card and meeting files, and Stop. A round's id (web-<uuid>) is made once, so a retried save is the same round, and the
+  // server holds one send per round, so a second Send answers send_in_progress or already_sent and never sends twice.
+  var CHAT_STORE = 'cos.web.work.chat';
+  var CHAT_MAX = 2000;
+  // WorkContextMeter.cosText and meetingsHeader, and WorkProgress.instruction (Control), for the text estimate.
+  var CHAT_COS = 'Preserve other session work. Report changes, checks and questions. This assignment does not authorize external publication, messages to other people, deletion or security changes.';
+  var CHAT_MEETINGS = 'Confirmed source meetings (references; transcript evidence is not included):';
+  var CHAT_TIMEOUT = { caps: 8000, read: 20000, input: 60000, plan: 190000, record: 15000, send: 15000, round: 8000 };
+  var CHAT_POLL = { fast: 3000, slow: 10000, fastFor: 120000, max: 26 * 60000, reply: 15000, replyFor: 30 * 60000 };
+  var CHAT_KEEP = { cards: 30, rounds: 8, draft: 8000 };
+  var CHAT_SID = /^(claude|codex|cursor):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+  var CHAT_PLANNERS = ['sonnet', 'opus'], CHAT_EFFORTS = ['low', 'medium', 'high'];
+  var CHAT_EVIDENCE = ['link', 'created', 'forked', 'continued', 'prompt', 'status', 'listed', 'meeting'];
+  var CHAT_ROW_REASONS = { not_in_session_list: 'not in the session list just read (fork it or start new)', app_owned: 'open in its app (continue it there)',
+    cursor: 'Cursor (send in its app)', plan_limit: 'its plan usage is used up', on_another_card: 'working on another task now' };
+  var CHAT_ROUND_WORD = { planning: 'Planning', planFailed: 'Needs attention', ready: 'Ready to send', answered: 'Answered', sending: 'Sending',
+    held: 'Saved for the Mac', sent: 'Dispatched', partly: 'Partly sent', notDelivered: 'Not delivered', refused: 'Not delivered', stopped: 'Stopped',
+    expired: 'Not sent', quiet: 'Still with COS Control' };
+  var CHAT_ASSIGN_WORD = { pending: 'Waiting', held: 'Queued', sent: 'Sent', delivered: 'Delivered', failed: 'Failed', refused: 'Refused', stopped: 'Stopped' };
+  var CHAT_DELIVERED = 'Instruction delivered to the session. Inspect the response; this does not mark the task complete.';
+  var CHAT_MOVING = { sending: 1, held: 1 };
+  var CHAT_FINAL = { sent: 1, delivered: 1, failed: 1, refused: 1, stopped: 1 };
+  S.chat = {}; S.chatCaps = null; S.chatCapsLoading = null; S.chatDeferred = false;
+  var CHAT_TIMERS = new Set();
+  var chatStore = (function () {
+    var v = W.readStore(CHAT_STORE);
+    return v && v.v === 1 && v.cards && typeof v.cards === 'object' && !Array.isArray(v.cards) ? v : { v: 1, cards: {} };
+  })();
+
+  function chatOwn(message) { var e = new Error(message); e.own = true; return e; }
+  function chatClean(v, n) { return typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').slice(0, n) : ''; }
+  function chatTokens(text) { return Math.ceil(Array.from(String(text || '')).length / 4); }
+  // WorkContextMeter.format: "≈ 950" or "≈ 18.4k".
+  function chatTokenText(n) { return n < 1000 ? '≈ ' + n : '≈ ' + (n / 1000).toFixed(1) + 'k'; }
+  function chatWorkId(t) { return /^[a-z_]+$/.test(str(t.domain)) && /^[a-f0-9]{12}$/.test(identity(t)) ? 'task:' + t.domain + ':' + identity(t) : ''; }
+  function chatInstruction(wid) {
+    var tag = String(wid).split(':')[2] || '';
+    return '\n\nWhen you finish this task, or if you need input or are blocked, make this the first line of your reply, in plain text (not bold, not in a code block), so COS can track it:\n' +
+      'COS-WORK ' + tag + ': <done, needs input or blocked>: <one sentence of evidence>\n' +
+      'Use done only when the work is finished and checked. If you are handling several COS tasks, give one line per task.';
+  }
+  // The task context Control's helper builds for the planner (work-context), from the same board row.
+  function chatContext(t, wid) {
+    var text = 'Canonical Work ID: ' + wid + '\nTask: ' + str(t.text) + '\nDomain: ' + str(t.domain) + '\nStage: ' + str(t.workStage) +
+      '\nDone when: ' + str(t.doneWhen) + '\nSource: ' + str(t.source) + '\n' + CHAT_MEETINGS;
+    (Array.isArray(t.meetingRefs) ? t.meetingRefs : []).forEach(function (m) {
+      if (!m || typeof m !== 'object') return;
+      text += '\n- ' + (typeof m.title === 'string' ? m.title : 'Saved meeting') + ' | canonical ID: ' + str(m.recordId) + ' | domain: ' + str(m.domain) +
+        ' | month: ' + str(m.month) + ' | file: ' + str(m.filename);
+    });
+    return chatClean(text, 16000);
+  }
+  // What each assignment sends as text, by Control's own estimate: the request, the task, one line per meeting and COS
+  // instructions with the status line. Files and earlier updates are added by COS Control on the Mac and are not counted.
+  function chatMeter(question, context, wid) {
+    var parts = context.split('\n' + CHAT_MEETINGS), meetings = 0;
+    var tokens = chatTokens(question) + chatTokens(parts[0].trim()) + chatTokens(CHAT_COS) + Math.ceil(chatInstruction(wid).length / 4);
+    (parts[1] || '').split('\n').forEach(function (raw) { var line = raw.trim(); if (line.indexOf('- ') === 0) { meetings++; tokens += chatTokens(line); } });
+    return { tokens: tokens, meetings: meetings };
+  }
+  function chatMeterText(m) {
+    return 'Each assignment sends ' + chatTokenText(m.tokens) + ' tokens of text: your request, the task, ' +
+      (m.meetings === 1 ? '1 meeting reference' : m.meetings + ' meeting references') + ' and COS instructions. COS Control adds the card’s files on your Mac; they are not counted here.';
+  }
+  function chatWhen(ms) {
+    var d = new Date(ms); if (isNaN(d.getTime())) return '';
+    var time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return localDay(d) === localDay() ? time : MONTHS[d.getMonth()] + ' ' + d.getDate() + ', ' + time;
+  }
+
+  // ── what is kept on this browser (drafts and this browser's rounds, never a token) ──
+  function chatRestored(r) {
+    if (!r || typeof r.key !== 'string' || !/^web-[0-9a-f-]{36}$/.test(r.key) || typeof r.question !== 'string') return null;
+    var out = { key: r.key, roundId: typeof r.roundId === 'string' && /^lr_[a-f0-9]{16}$/.test(r.roundId) ? r.roundId : '', question: r.question.slice(0, CHAT_MAX),
+      answer: chatClean(r.answer, 6000), assignments: Array.isArray(r.assignments) ? r.assignments.slice(0, 3).filter(function (a) { return a && typeof a.id === 'string' && typeof a.prompt === 'string'; }) : [],
+      planner: CHAT_PLANNERS.indexOf(r.planner) >= 0 ? r.planner : '', model: chatClean(r.model, 100), effort: CHAT_EFFORTS.indexOf(r.effort) >= 0 ? r.effort : '',
+      note: chatClean(r.note, 1200), meter: r.meter && typeof r.meter.tokens === 'number' ? { tokens: r.meter.tokens, meetings: r.meter.meetings || 0 } : null,
+      state: CHAT_ROUND_WORD[r.state] ? r.state : 'planFailed', roundState: chatClean(r.roundState, 40), inHistory: r.inHistory === true,
+      states: r.states && typeof r.states === 'object' ? r.states : {}, error: chatClean(r.error, 400), at: Number(r.at) || 0, sentAt: Number(r.sentAt) || 0,
+      sendUnknown: r.sendUnknown === true };
+    // A plan in flight lives only in this page. After a reload it is gone, and nothing was saved or sent for it.
+    if (out.state === 'planning') { out.state = 'planFailed'; out.error = 'Planning stopped when this page closed. Nothing was sent. Use this request again to plan it.'; }
+    return out;
+  }
+  function chatOf(wid) {
+    var c = S.chat[wid];
+    if (c) return c;
+    var saved = chatStore.cards[wid] || {};
+    c = S.chat[wid] = { draft: typeof saved.draft === 'string' ? saved.draft.slice(0, CHAT_KEEP.draft) : '', at: Number(saved.at) || 0,
+      rounds: (Array.isArray(saved.rounds) ? saved.rounds : []).map(chatRestored).filter(Boolean), busy: false, phase: '', error: '' };
+    return c;
+  }
+  function chatStored(r) {
+    return { key: r.key, roundId: r.roundId, question: r.question, answer: r.answer, assignments: r.assignments, planner: r.planner, model: r.model,
+      effort: r.effort, note: r.note, meter: r.meter, state: r.state, roundState: r.roundState, inHistory: r.inHistory, states: r.states, error: r.error,
+      at: r.at, sentAt: r.sentAt, sendUnknown: r.sendUnknown };
+  }
+  var chatSaveTimer = null;
+  function chatSave(now) {
+    clearTimeout(chatSaveTimer); chatSaveTimer = null;
+    if (!now) { chatSaveTimer = setTimeout(function () { chatSave(true); }, 300); return; }
+    var cards = {};
+    Object.keys(chatStore.cards).forEach(function (k) { cards[k] = chatStore.cards[k]; });
+    Object.keys(S.chat).forEach(function (wid) {
+      var c = S.chat[wid];
+      if (!c.draft && !c.rounds.length) { delete cards[wid]; return; }
+      cards[wid] = { at: c.at || Date.now(), draft: c.draft.slice(0, CHAT_KEEP.draft), rounds: c.rounds.slice(-CHAT_KEEP.rounds).map(chatStored) };
+    });
+    var next = { v: 1, cards: {} };
+    if (chatStore.planner) next.planner = chatStore.planner;
+    if (chatStore.effort) next.effort = chatStore.effort;
+    Object.keys(cards).sort(function (a, b) { return (Number(cards[b].at) || 0) - (Number(cards[a].at) || 0); }).slice(0, CHAT_KEEP.cards).forEach(function (k) { next.cards[k] = cards[k]; });
+    chatStore = next;
+    W.writeStore(CHAT_STORE, next);   // wrapped in try/catch by the kit: a full or blocked store keeps the page working
+  }
+  function chatTouch(c) { c.at = Date.now(); chatSave(); }
+
+  // ── what this server offers (GET /api/work/chat) ─────────
+  function chatReadCaps(status, d) {
+    var at = Date.now();
+    if (status === 200 && d && d.protocolVersion === 1 && d.orchestrator === 1 && d.lensPlans === 1 && d.webPlans === 1) {
+      var ctl = d.lensPlansControl && typeof d.lensPlansControl === 'object' ? d.lensPlansControl : null;
+      return { at: at, ok: true,
+        planners: CHAT_PLANNERS.filter(function (p) { return Array.isArray(d.planners) && d.planners.indexOf(p) >= 0; }),
+        efforts: CHAT_EFFORTS.filter(function (e) { return Array.isArray(d.efforts) && d.efforts.indexOf(e) >= 0; }),
+        control: { connected: !!(ctl && ctl.connected === true), lastSeenSec: ctl && typeof ctl.lastSeenSec === 'number' ? ctl.lastSeenSec : null } };
+    }
+    if (status === 200 && d && d.orchestrator === 1 && d.lensPlans === 1) {
+      return { at: at, ok: false, reason: 'This COS server plans Work chat for the Mac and the glasses, but not for the web yet. Update the COS server on your Mac to message this task from here.' };
+    }
+    if (status === 200 || status === 404) return { at: at, ok: false, reason: 'Work chat needs a newer COS server on your Mac. Until then, message this task from COS Control on the Mac.' };
+    if (status === 401) return { at: at, ok: false, retry: true, reason: 'Signed out. Connect this browser again to use Work chat.' };
+    return { at: at, ok: false, retry: true, reason: 'Could not check Work chat on your Mac. Check that it is awake, then try again.' };
+  }
+  function loadChatCaps(force) {
+    var c = S.chatCaps;
+    if (S.chatCapsLoading) return S.chatCapsLoading;
+    if (!force && c && Date.now() - c.at < (c.ok ? 60000 : 15000)) return Promise.resolve();
+    S.chatCapsLoading = api('/api/work/chat', { timeoutMs: CHAT_TIMEOUT.caps }).then(function (d) { S.chatCaps = chatReadCaps(200, d); },
+      function (err) { S.chatCaps = chatReadCaps(err && err.status || 0, null); }).then(function () { S.chatCapsLoading = null; chatRepaintCurrent(); });
+    return S.chatCapsLoading;
+  }
+  function chatPlanner() { var caps = S.chatCaps || {}, list = caps.planners || []; if (!list.length) return ''; return list.indexOf(chatStore.planner) >= 0 ? chatStore.planner : list.indexOf('opus') >= 0 ? 'opus' : list[0]; }
+  function chatEffort() { var caps = S.chatCaps || {}, list = caps.efforts || []; if (!list.length) return ''; return list.indexOf(chatStore.effort) >= 0 ? chatStore.effort : list.indexOf('high') >= 0 ? 'high' : list[list.length - 1]; }
+  function plannerName(p) { return p === 'opus' ? 'Opus' : 'Sonnet'; }
+  // WorkChatPolicy.plannerLabel: only the server's report of what ran is a claim; a request stays a request.
+  function chatPlannerLine(r) {
+    var ran = String(r.model || '').trim(), base = '';
+    if (/\(requested\)$/.test(ran) || (!ran && r.planner)) base = 'requested ' + plannerName(r.planner || (ran.replace(/\s*\(requested\)$/, '').split(':').pop() || '').trim()) + ' (not confirmed)';
+    else if (ran) base = 'planned with ' + (ran.indexOf(':') >= 0 ? ran.slice(ran.indexOf(':') + 1) : ran);
+    if (!base) return '';
+    return CHAT_EFFORTS.indexOf(r.effort) >= 0 ? base + ' · ' + r.effort + ' effort' : base;
+  }
+
+  // ── the planner's input and answer (lens-work-chat.ts readOrchestratorInput / readLensWorkChatPlan) ──
+  function chatIso(v) { return typeof v === 'string' && v.length <= 40 && !isNaN(Date.parse(v)) ? v : null; }
+  function chatReadInput(raw) {
+    if (!raw || typeof raw !== 'object' || raw.protocolVersion !== 1 || !Array.isArray(raw.rows)) return null;
+    var rows = [], seen = {};
+    raw.rows.slice(0, 12).forEach(function (r) {
+      if (!r || typeof r.id !== 'string' || !CHAT_SID.test(r.id) || seen[r.id]) return;
+      seen[r.id] = 1;
+      var row = { id: r.id, title: chatClean(r.title, 300), summary: chatClean(r.summary, 2000), status: chatClean(r.status, 100),
+        discoveredBy: Array.isArray(r.discoveredBy) ? r.discoveredBy.filter(function (k, i, all) { return CHAT_EVIDENCE.indexOf(k) >= 0 && all.indexOf(k) === i; }) : [],
+        linked: r.linked === true, member: r.member === true, lastTouchedCard: chatIso(r.lastTouchedCard), lastActivity: chatIso(r.lastActivity),
+        live: r.live === true, busy: r.busy === true, pickup: chatClean(r.pickup, 1500), available: r.available === true,
+        forkable: r.forkable === true && r.id.indexOf('cursor:') !== 0 };
+      if (CHAT_ROW_REASONS[r.reason]) row.reason = r.reason;
+      rows.push(row);
+    });
+    var leftOut = (Array.isArray(raw.leftOut) ? raw.leftOut : []).filter(function (l) { return l && typeof l.id === 'string' && CHAT_SID.test(l.id) && !seen[l.id]; })
+      .slice(0, 12).map(function (l) { return { id: l.id, title: chatClean(l.title, 300), reason: chatClean(l.reason, 120) || 'left out' }; });
+    var usage = (Array.isArray(raw.usage) ? raw.usage : []).filter(function (u) { return u && ['claude', 'codex', 'cursor'].indexOf(u.provider) >= 0 && ['ok', 'low', 'exhausted', 'unknown'].indexOf(u.state) >= 0; })
+      .slice(0, 3).map(function (u) {
+        return { provider: u.provider, state: u.state, headroomPct: typeof u.headroomPct === 'number' && u.headroomPct >= 0 && u.headroomPct <= 100 ? u.headroomPct : null,
+          resetsAt: chatIso(u.resetsAt), ageSec: Number.isInteger(u.ageSec) && u.ageSec >= 0 ? u.ageSec : null, source: chatClean(u.source, 40) || 'unknown',
+          plan: typeof u.plan === 'string' ? chatClean(u.plan, 40) : null, stale: u.stale === true, note: chatClean(u.note, 200) };
+      });
+    return { rows: rows, leftOut: leftOut, usage: usage };
+  }
+  // Control's rule for a Continue (WorkOrchestrator.automatic): Claude or Codex, and nothing the server says stops it.
+  function chatAutomatic(row) { return row.available && /^(claude|codex):/.test(row.id); }
+  // WorkOrchestrator.emptyExplanation: never plan from an empty list in silence.
+  function chatSessionsNote(input) {
+    var rows = input.rows, left = input.leftOut;
+    if (rows.some(chatAutomatic)) return '';
+    if (!rows.length && !left.length) return 'COS found no session for this task (no link, receipt or COS-WORK handoff). The planner can still start a new session.';
+    var total = rows.length + left.length;
+    var named = rows.slice(0, 4).map(function (r) { return '“' + r.title.slice(0, 40) + '” (' + (CHAT_ROW_REASONS[r.reason] || 'available') + ')'; });
+    var more = total - named.length;
+    return 'COS found ' + total + ' session' + (total === 1 ? '' : 's') + ' for this task, none can take a Continue now' +
+      (named.length ? ': ' + named.join('; ') + (more > 0 ? '; and ' + more + ' more' : '') : '') + '. The planner can fork one or start a new session.';
+  }
+  // The planner input, exactly as the server's parseWorkChatInput reads an orchestrator client's (Control 0.5.333).
+  function chatPlanBody(it, question, input, c, wid) {
+    var t = it.task, ids = {};
+    var sessions = input.rows.map(function (r) {
+      ids[r.id] = 1;
+      var s = { id: r.id, title: r.title, summary: r.summary, status: r.status, automatic: chatAutomatic(r), discoveredBy: r.discoveredBy, linked: r.linked, member: r.member,
+        lastTouchedCard: r.lastTouchedCard, lastActivity: r.lastActivity, live: r.live, busy: r.busy, pickup: r.pickup, available: r.available, forkable: r.forkable };
+      if (r.reason) s.reason = r.reason;
+      return s;
+    });
+    // This browser's earlier rounds on the card (the Mac sends its own last six the same way).
+    var history = c.rounds.filter(function (r) { return r.answer; }).slice(-6).map(function (r) { return { question: r.question.slice(0, 2000), answer: r.answer.slice(0, 6000) }; });
+    var last = c.rounds.filter(function (r) { return r.assignments.length && r.roundId; }).slice(-1)[0];
+    var updates = last ? last.assignments.filter(function (a) { return a.sessionID && ids[a.sessionID]; }).map(function (a) {
+      var st = (last.states || {})[a.id] || {};
+      return { sessionID: a.sessionID, status: chatClean(CHAT_ASSIGN_WORD[st.state] || 'Not sent', 100), detail: chatClean(st.detail, 2000), result: '' };
+    }) : [];
+    var exhausted = {}; input.usage.forEach(function (u) { if (u.state === 'exhausted') exhausted[u.provider] = 1; });
+    var body = { workID: wid, revision: str(t.workRevision), question: question, context: chatContext(t, wid), sessions: sessions, history: history, updates: updates,
+      mode: 'plan', orchestrator: true, now: new Date().toISOString(), usage: input.usage, leftOut: input.leftOut,
+      newSessionProviders: ['claude', 'codex'].filter(function (p) { return !exhausted[p]; }) };
+    var planner = chatPlanner(), effort = chatEffort();
+    if (planner) body.planner = planner;   // only when the server advertised a choice, as Control does
+    if (effort) body.effort = effort;
+    return body;
+  }
+  function chatReadPlan(raw, input, body) {
+    if (!raw || typeof raw !== 'object' || typeof raw.answer !== 'string' || !raw.answer.trim() || raw.answer.length > 6000 || !Array.isArray(raw.assignments)) return null;
+    if (raw.assignments.length > 3) return { tooMany: true };
+    var rows = {}; input.rows.forEach(function (r) { rows[r.id] = r; });
+    var out = [], targets = {};
+    for (var i = 0; i < raw.assignments.length; i++) {
+      var a = raw.assignments[i];
+      if (!a || typeof a.prompt !== 'string' || !a.prompt.trim() || a.prompt.length > 2000) return null;
+      if (a.mode === 'newSession') {
+        if (body.newSessionProviders.indexOf(a.provider) < 0) return null;
+        out.push({ id: 'a' + (i + 1), mode: 'newSession', provider: a.provider, prompt: a.prompt, title: 'New ' + providerName(a.provider) + ' session' });
+        continue;
+      }
+      var row = rows[a.sessionID], mode = a.mode === 'fork' ? 'fork' : 'continue';
+      if (!row || targets[row.id] || (mode === 'continue' ? !chatAutomatic(row) : !row.forkable)) return null;
+      targets[row.id] = 1;
+      var provider = row.id.slice(0, row.id.indexOf(':')), title = row.title || providerName(provider);
+      out.push({ id: 'a' + (i + 1), mode: mode, sessionID: row.id, provider: provider, prompt: a.prompt, title: mode === 'fork' ? 'Fork of ' + title : title });
+    }
+    return { answer: raw.answer, assignments: out };
+  }
+  function chatRoundBody(it, r) {
+    var body = { v: 1, workID: chatWorkId(it.task), clientRoundId: r.key, question: r.question, answer: r.answer, orchestrator: true, source: 'web',
+      createdAt: new Date(r.at || Date.now()).toISOString(),
+      assignments: r.assignments.map(function (a) {
+        var x = { id: a.id, mode: a.mode, provider: a.provider, prompt: a.prompt };
+        if (a.sessionID) x.sessionID = a.sessionID;
+        return x;
+      }) };
+    // Truthful: the planner the server says ran, never only the one asked for.
+    var ran = /\bopus\b/.test(r.model) ? 'opus' : /\bsonnet\b/.test(r.model) ? 'sonnet' : '';
+    if (ran) body.planner = ran;
+    if (CHAT_EFFORTS.indexOf(r.effort) >= 0) body.effort = r.effort;
+    return body;
+  }
+
+  // ── plan, save, send, read (the lens runner's steps, createLensPlanRunner) ──
+  function chatFailure(err, step) {
+    var code = err && err.code, status = err && err.status;
+    if (code === 'timeout' || !status) return step === 'plan' ? 'Your Mac did not answer while planning. Nothing was sent. Plan again when it is awake.' : 'Your Mac did not answer. Nothing was sent. Try again when it is awake.';
+    if (code === 'work_chat_busy') return 'COS is planning another request right now. Nothing was sent. Plan again in a moment.';
+    if (status === 404) return 'This COS server does not plan Work chat. Update the COS server on your Mac. Nothing was sent.';
+    if (code === 'invalid_work_chat' || code === 'invalid_orchestrator_input') return 'The server did not accept this plan request. Nothing was sent.';
+    if (code === 'orchestrator_input_unavailable') return 'COS could not read this task’s sessions just now. Nothing was sent. Plan again in a moment.';
+    if (code === 'work_chat_unavailable') return 'No assignment was dispatched. The planner did not finish; plan again when you are ready.';
+    return (err && err.message ? err.message + ' ' : '') + 'Nothing was sent.';
+  }
+  function chatProblem(it, c) {
+    var caps = S.chatCaps;
+    if (!caps || !caps.ok) return caps ? caps.reason : 'Checking Work chat on your Mac…';
+    if (!chatWorkId(it.task)) return 'This card has no Work identity yet. Refresh Work, then plan.';
+    if (!/^[a-f0-9]{64}$/.test(str(it.task.workRevision))) return 'This card has no saved revision. Refresh Work, then plan.';
+    if (c.busy) return '';
+    var text = c.draft.trim();
+    if (text.length > CHAT_MAX) return 'Keep your request under 2,000 characters.';
+    if (c.rounds.some(function (r) { return r.state === 'planning'; })) return 'A plan is still being made for this card.';
+    return '';
+  }
+  function chatPlan(it) {
+    var c = chatOf(it.wid), question = c.draft.trim();
+    if (c.busy || !question || chatProblem(it, c)) return Promise.resolve(false);
+    var wid = chatWorkId(it.task);
+    c.busy = true; c.error = ''; c.phase = 'Reading the task and its connections…';
+    chatRepaint(it.wid);
+    // The card as it is NOW: a card that changed since this page loaded is planned only after it is read again.
+    return api('/api/work-board/activity?domain=' + encodeURIComponent(it.domain) + '&workIdentity=' + encodeURIComponent(it.id), { timeoutMs: CHAT_TIMEOUT.read }).then(function (d) {
+      if (d) { S.activity[it.wid] = d; delete S.activityError[it.wid]; }
+      var fresh = str(d && d.taskRevision), shown = str(it.task.taskRevision);
+      if (fresh && shown && fresh !== shown) {
+        loadBoard(true);
+        throw chatOwn('This task changed since the page loaded. Check it, then plan again. Your request is still here.');
+      }
+      // From here the request belongs to a round, as on the Mac: the composer is cleared and the round keeps the words.
+      var r = { key: 'web-' + uuid(), roundId: '', question: question, answer: '', assignments: [], planner: chatPlanner(), model: '', effort: '', note: '', meter: null,
+        state: 'planning', roundState: '', inHistory: false, states: {}, error: '', at: Date.now(), sentAt: 0, sendUnknown: false };
+      c.rounds.push(r); c.draft = ''; chatTouch(c);
+      chatResetComposer(it.wid);
+      c.phase = 'Finding this task’s sessions…'; chatRepaint(it.wid);
+      var meetings = (Array.isArray(it.task.meetingRefs) ? it.task.meetingRefs : []).map(function (m) { return m && typeof m.recordId === 'string' ? 'meeting:' + m.recordId : ''; })
+        .filter(function (m) { return m && m.length <= 250 && /^meeting:[^\u0000-\u001f]+$/.test(m); }).slice(0, 20);
+      return api('/api/work/orchestrator/input', { method: 'POST', body: { workID: wid, meetingWorkIDs: meetings }, timeoutMs: CHAT_TIMEOUT.input }).then(function (raw) {
+        var input = chatReadInput(raw);
+        if (!input || raw.workID !== wid) throw chatOwn('The server’s list of this task’s sessions could not be read. Nothing was sent.');
+        var body = chatPlanBody(it, question, input, c, wid);
+        r.note = chatSessionsNote(input);
+        r.meter = chatMeter(question, body.context, wid);
+        c.phase = 'Thinking through the request with ' + plannerName(body.planner || 'sonnet') + '…'; chatRepaint(it.wid);
+        return api('/api/work/chat', { method: 'POST', body: body, timeoutMs: CHAT_TIMEOUT.plan }).then(function (answer) {
+          var plan = chatReadPlan(answer, input, body);
+          if (plan && plan.tooMany) throw chatOwn('The plan has more than 3 assignments, more than COS sends from one plan. Nothing was sent. Plan again.');
+          if (!plan) throw chatOwn('The plan named a session it may not send to here, or broke a limit. Nothing was sent. Plan again.');
+          r.answer = plan.answer; r.assignments = plan.assignments;
+          r.model = chatClean(answer.model, 100); r.effort = CHAT_EFFORTS.indexOf(answer.effort) >= 0 ? answer.effort : '';
+          r.state = plan.assignments.length ? 'ready' : 'answered';
+          chatTouch(c);
+          if (!plan.assignments.length) return true;
+          // As on the lens: the plan goes into the card's Work chat now, before any send. A failed save keeps the plan;
+          // Send saves it again under the same round id.
+          c.phase = 'Saving the plan to this card’s Work chat…'; chatRepaint(it.wid);
+          return chatRecord(it, r).then(function () { return true; });
+        });
+      }).catch(function (err) {
+        r.state = 'planFailed'; r.error = err && err.own ? err.message : chatFailure(err, 'plan');
+        chatTouch(c);
+        return false;
+      });
+    }).catch(function (err) {
+      // Nothing was planned: the words stay in the composer.
+      c.error = err && err.own ? err.message : chatFailure(err, 'read');
+      return false;
+    }).then(function (ok) { c.busy = false; c.phase = ''; chatRepaint(it.wid); return ok; });
+  }
+  function chatRecord(it, r) {
+    return api('/api/work/chat/lens-rounds', { method: 'POST', body: chatRoundBody(it, r), timeoutMs: CHAT_TIMEOUT.record }).then(function (d) {
+      if (d && typeof d.roundId === 'string' && /^lr_[a-f0-9]{16}$/.test(d.roundId)) { r.roundId = d.roundId; r.roundState = str(d.state) || 'recorded'; r.error = ''; }
+      return r.roundId;
+    }, function (err) {
+      var status = err && err.status;
+      if (!status || status === 503 || err.code === 'timeout') { r.error = 'Not saved to the Mac yet: ' + (status ? 'COS is busy or updating.' : 'your Mac did not answer.') + ' Send saves it first.'; return ''; }
+      r.state = 'planFailed';
+      r.error = err.code === 'unknown_work' ? 'This card is not on the Work board any more. Nothing was sent.'
+        : (err.message || 'The server did not save this plan.') + ' Nothing was sent.';
+      return '';
+    }).then(function (id) { chatTouch(chatOf(it.wid)); return id; });
+  }
+  // Send: the two-step confirm is this tap, after the plan was shown. One send per round on the server: a second tap,
+  // a retry after a lost answer, or another device answers send_in_progress or already_sent, never a second send.
+  function chatSend(it, r) {
+    var c = chatOf(it.wid);
+    if (!r || r.sending || r.state !== 'ready' || !r.assignments.length) return Promise.resolve(false);
+    r.sending = true; r.error = ''; chatRepaint(it.wid);
+    var start = r.roundId ? Promise.resolve(r.roundId) : chatRecord(it, r);
+    return start.then(function (id) {
+      if (!id) return false;
+      // After a send whose answer was lost, read the round first: it may already be on its way.
+      var check = r.sendUnknown ? api('/api/work/chat/lens-rounds/' + encodeURIComponent(id), { timeoutMs: CHAT_TIMEOUT.round }).then(function (v) { return v; }, function () { return null; }) : Promise.resolve(null);
+      return check.then(function (view) {
+        if (view && ['send_requested', 'sending', 'sent', 'partly_sent'].indexOf(view.state) >= 0) { chatApplyView(r, view); r.sendUnknown = false; return true; }
+        return api('/api/work/chat/lens-rounds/' + encodeURIComponent(id) + '/send', { method: 'POST', body: { v: 1, confirm: 'two-step', confirmedAt: new Date().toISOString() }, timeoutMs: CHAT_TIMEOUT.send })
+          .then(function () { r.state = 'sending'; r.roundState = 'send_requested'; r.sentAt = Date.now(); r.sendUnknown = false; return true; }, function (err) {
+            var code = err && err.code, status = err && err.status;
+            if (status === 409 && (code === 'send_in_progress' || code === 'already_sent')) { r.state = 'sending'; r.roundState = 'send_requested'; r.sentAt = r.sentAt || Date.now(); r.sendUnknown = false; return true; }
+            if (status === 423) { r.state = 'held'; r.error = ''; r.sendUnknown = false; return true; }
+            if (status === 404) { r.state = 'notDelivered'; r.roundId = ''; r.error = 'Your Mac no longer has this plan. Nothing was sent. Plan again.'; return false; }
+            if (status === 409 && code === 'plan_stale') { r.state = 'notDelivered'; r.error = 'This card’s sessions changed since the plan. Nothing was sent. Plan again.'; return false; }
+            if (!status || code === 'timeout') { r.sendUnknown = true; r.error = 'Your Mac did not answer, so this page cannot tell whether COS Control got the send. Send again checks first; it never sends twice.'; return false; }
+            r.error = (err.message || 'The Mac did not take the send.') + ' The plan is kept.';
+            return false;
+          });
+      });
+    }).then(function (moving) {
+      r.sending = false; chatTouch(c); chatRepaint(it.wid);
+      if (moving) chatSchedule(it.wid, r.key, 0);
+      return moving;
+    });
+  }
+  function chatApplyView(r, v) {
+    var states = {};
+    (Array.isArray(v.assignments) ? v.assignments : []).forEach(function (a) {
+      if (!a || typeof a.id !== 'string' || !/^a[1-9]$/.test(a.id)) return;
+      states[a.id] = { state: CHAT_ASSIGN_WORD[a.state] ? a.state : 'pending', detail: chatClean(a.detail, 200),
+        sessionID: typeof a.sessionID === 'string' && CHAT_SID.test(a.sessionID) ? a.sessionID : '', receiptId: chatClean(a.receiptId, 80) };
+    });
+    r.states = states; r.inHistory = v.inHistory === true; r.roundState = str(v.state);
+    var s = r.roundState;
+    if (s === 'send_requested' || s === 'sending') r.state = 'sending';
+    else if (s === 'sent') r.state = 'sent';
+    else if (s === 'partly_sent') r.state = 'partly';
+    else if (s === 'failed') r.state = 'notDelivered';
+    else if (s === 'refused') r.state = 'refused';
+    else if (s === 'stopped') r.state = 'stopped';
+    else if (s === 'expired') r.state = 'expired';
+    // recorded or in_history: before any send; a plan held for the Mac stays held until the Mac sends it.
+  }
+  function chatFindRound(wid, key) { var c = S.chat[wid]; return c ? c.rounds.filter(function (r) { return r.key === key; })[0] || null : null; }
+  function chatSchedule(wid, key, ms) {
+    var r = chatFindRound(wid, key); if (!r) return;
+    if (r.timer) { clearTimeout(r.timer); CHAT_TIMERS.delete(r.timer); r.timer = null; }
+    r.pollSince = r.pollSince || Date.now();
+    var wait = ms != null ? ms : r.state === 'held' ? CHAT_POLL.slow : Date.now() - r.pollSince < CHAT_POLL.fastFor ? CHAT_POLL.fast : CHAT_POLL.slow;
+    var timer = setTimeout(function () { CHAT_TIMERS.delete(timer); r.timer = null; chatPoll(wid, key); }, wait);
+    r.timer = timer; CHAT_TIMERS.add(timer);
+  }
+  function chatPoll(wid, key) {
+    var r = chatFindRound(wid, key);
+    if (!r || !r.roundId || !CHAT_MOVING[r.state] || W.parseRoute().pane !== 'work') return Promise.resolve();
+    var before = JSON.stringify([r.state, r.roundState, r.states, r.inHistory]);
+    return api('/api/work/chat/lens-rounds/' + encodeURIComponent(r.roundId), { timeoutMs: CHAT_TIMEOUT.round }).then(function (v) {
+      r.fails = 0;
+      if (v && typeof v.state === 'string') chatApplyView(r, v);
+    }, function (err) {
+      if (err && err.status === 404) { r.state = 'notDelivered'; r.error = 'Your Mac no longer has this plan. Check Work on the Mac.'; return; }
+      r.fails = (r.fails || 0) + 1;
+    }).then(function () {
+      var changed = before !== JSON.stringify([r.state, r.roundState, r.states, r.inHistory]);
+      if (changed) { chatTouch(S.chat[wid]); chatReplyRefresh(wid); chatRepaint(wid); }
+      if (!CHAT_MOVING[r.state]) { r.pollSince = 0; chatWatchReplies(wid); return; }
+      // Past the bound the plan is not called stopped (the server has not said so); this page stops reading it.
+      if (Date.now() - (r.pollSince || Date.now()) > CHAT_POLL.max) { r.pollSince = 0; if (r.state === 'sending') { r.state = 'quiet'; r.error = 'Still with COS Control. Check Work on the Mac, or check again here.'; chatTouch(S.chat[wid]); chatRepaint(wid); } return; }
+      chatSchedule(wid, key);
+    });
+  }
+  // The session's reply lands in the card's activity (the receipt COS Control made). Read it again, bounded.
+  function chatReplyRefresh(wid) {
+    var it = itemByWid(wid); if (!it) return Promise.resolve();
+    return loadActivity(it, true).then(function () { chatRepaint(wid); });
+  }
+  function chatWatchReplies(wid) {
+    var c = S.chat[wid]; if (!c) return;
+    if (c.replyTimer) { clearTimeout(c.replyTimer); CHAT_TIMERS.delete(c.replyTimer); c.replyTimer = null; }
+    var it = itemByWid(wid), rt = W.parseRoute();
+    if (!it || rt.pane !== 'work' || rt.args[0] !== it.id) return;
+    var waiting = c.rounds.some(function (r) {
+      return r.sentAt && Date.now() - r.sentAt < CHAT_POLL.replyFor && r.assignments.some(function (a) { var st = (r.states[a.id] || {}).state; return (st === 'sent' || st === 'delivered') && !chatReport(it, r, a); });
+    });
+    if (!waiting) return;
+    var timer = setTimeout(function () { CHAT_TIMERS.delete(timer); c.replyTimer = null; chatReplyRefresh(wid).then(function () { chatWatchReplies(wid); }); }, CHAT_POLL.reply);
+    c.replyTimer = timer; CHAT_TIMERS.add(timer);
+  }
+  function chatStop(it, r) {
+    var ids = chatStoppable(r);
+    if (!r || !r.roundId || !ids.length || r.stopping) return Promise.resolve(false);
+    r.stopping = true; r.error = ''; chatRepaint(it.wid);
+    return api('/api/work/chat/lens-rounds/' + encodeURIComponent(r.roundId) + '/stop', { method: 'POST', body: { v: 1, assignmentIds: ids }, timeoutMs: CHAT_TIMEOUT.send })
+      .then(function () { r.note2 = 'Asked COS Control to stop what has not gone yet. The rows show when it has stopped.'; chatSchedule(it.wid, r.key, 0); return true; },
+        function (err) { r.error = err && err.status === 423 ? 'COS Control is not connected. Stop it from Work on the Mac.' : chatFailure(err, 'stop'); return false; })
+      .then(function (ok) { r.stopping = false; chatTouch(chatOf(it.wid)); chatRepaint(it.wid); return ok; });
+  }
+  function chatStoppable(r) {
+    if (!r || !CHAT_MOVING[r.state]) return [];
+    return r.assignments.map(function (a) { return a.id; }).filter(function (id) { var st = (r.states[id] || {}).state; return !CHAT_FINAL[st]; });
+  }
+  // Use this request again (WorkChatRecoveryControls): the words come back for review; nothing is sent.
+  function chatAgain(it, r) {
+    var c = chatOf(it.wid);
+    if (!r || c.draft.trim() || c.busy) return;
+    c.draft = r.question; chatTouch(c);
+    var box = $('wk-chat-text'); if (box) { box.value = c.draft; chatGrow(box); }
+    chatRepaint(it.wid);
+  }
+  function chatResumePolls() {
+    // Rounds still on their way when this page last closed: read them again, so their outcome lands here.
+    Object.keys(chatStore.cards).forEach(function (wid) {
+      var saved = chatStore.cards[wid] && chatStore.cards[wid].rounds;
+      if (Array.isArray(saved) && saved.some(function (r) { return r && r.roundId && CHAT_MOVING[r.state]; })) chatOf(wid);
+    });
+    Object.keys(S.chat).forEach(function (wid) {
+      S.chat[wid].rounds.forEach(function (r) { if (r.roundId && CHAT_MOVING[r.state] && !r.timer) chatSchedule(wid, r.key, 0); });
+    });
+  }
+  function chatStopTimers() {
+    CHAT_TIMERS.forEach(function (t) { clearTimeout(t); }); CHAT_TIMERS.clear();
+    Object.keys(S.chat).forEach(function (wid) { var c = S.chat[wid]; c.replyTimer = null; c.rounds.forEach(function (r) { r.timer = null; r.pollSince = 0; }); });
+  }
+
+  // ── drawing ──────────────────────────────────────────────
+  // The session's reply, as the card's activity has it: the receipt COS Control made for this assignment.
+  function chatActivity(it, r, a) {
+    var st = r.states[a.id] || {}, acts = ((S.activity[it.wid] || {}).activities || []);
+    if (st.receiptId) { var hit = acts.filter(function (x) { return x && x.id === st.receiptId; })[0]; if (hit) return hit; }
+    return null;
+  }
+  function chatReport(it, r, a) { var act = chatActivity(it, r, a); return act ? tracking(act) : null; }
+  function chatAssignment(it, r, a) {
+    var st = r.states[a.id] || {}, state = st.state || '', act = chatActivity(it, r, a), tr = act ? tracking(act) : null;
+    var sid = st.sessionID || a.sessionID || '', sess = splitSession(sid);
+    var word = !state || (state === 'pending' && r.state === 'ready') ? 'Not sent' : CHAT_ASSIGN_WORD[state] || state;
+    var reply = '';
+    if (state === 'delivered') reply += '<p class="wk-small">' + esc(CHAT_DELIVERED) + '</p>';
+    if (state === 'held' && !st.detail) reply += '<p class="wk-small wk-muted">Waits for earlier work on this card, then COS Control sends it.</p>';
+    if (tr) {
+      reply += '<p class="wk-status" data-tone="' + tr.tone + '">' + esc((tr.byModel ? tr.provider + ' assessment: ' : 'Session reported: ') + tr.label) + '</p>' +
+        (tr.evidence ? '<p class="wk-quote">“' + esc(tr.evidence.slice(0, 280)) + '”</p>' : '');
+    } else if (act && (state === 'sent' || state === 'delivered')) reply += '<p class="wk-small wk-muted">' + esc(activityTitle(act)) + '</p>';
+    if (sess && (state === 'sent' || state === 'delivered')) {
+      reply += '<div class="wk-row wk-wrap"><button type="button" class="wk-text-btn" data-wk="session" data-provider="' + esc(sess.provider) + '" data-sid="' + esc(sess.id) + '">' +
+        esc(sess.provider === 'cursor' ? 'Open Cursor Agents' : (state === 'delivered' || tr ? 'Read the reply in ' : 'Open the session in ') + providerName(sess.provider)) + '</button></div>';
+    }
+    return '<div class="wk-assign"><div class="wk-row wk-top"><strong class="wk-grow">' + esc(a.mode === 'newSession' ? a.title : (a.mode === 'fork' ? '' : 'Continue · ') + a.title) + '</strong>' +
+      '<span class="wk-mono">' + esc(word) + '</span></div>' +
+      '<p class="wk-small wk-pre">' + esc(a.prompt) + '</p>' + (st.detail ? '<p class="wk-small wk-muted">' + esc(st.detail) + '</p>' : '') + reply + '</div>';
+  }
+  // Latest updates: what was delivered, what a session reported and what is still outstanding, read from the round and
+  // the card's receipts. Counted here, never written by a model.
+  function chatUpdates(it, r) {
+    if (!r.sentAt && !Object.keys(r.states).length) return '';
+    var delivered = 0, sent = 0, held = 0, lost = 0, outstanding = 0, lines = [];
+    r.assignments.forEach(function (a) {
+      var st = (r.states[a.id] || {}).state, tr = chatReport(it, r, a);
+      if (st === 'delivered') delivered++; else if (st === 'sent') sent++; else if (st === 'held') held++; else if (st === 'failed' || st === 'refused' || st === 'stopped') lost++;
+      if (tr) lines.push('“' + clip(a.title, 50) + '” reported: ' + tr.label.toLowerCase());
+      if (!(tr && tr.phase === 'done') && st !== 'failed' && st !== 'refused' && st !== 'stopped') outstanding++;
+    });
+    var head = [];
+    if (delivered) head.push('Delivered to ' + delivered + (delivered === 1 ? ' session' : ' sessions'));
+    if (sent) head.push('Sent, not yet confirmed: ' + sent);
+    if (held) head.push('Queued behind earlier work: ' + held);
+    if (lost) head.push('Not sent: ' + lost);
+    lines.push(outstanding ? 'Still outstanding: ' + outstanding : 'Nothing outstanding');
+    return '<div class="wk-updates"><h3>Latest updates</h3><ul>' + head.concat(lines).map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul></div>';
+  }
+  function chatRoundHtml(it, r) {
+    var c = chatOf(it.wid), caps = S.chatCaps || {};
+    var stateWord = CHAT_ROUND_WORD[r.state] || r.state, planned = chatPlannerLine(r);
+    var line = stateWord + (r.sentAt ? ' · sent from this browser' : '') + (planned ? ' · ' + planned : '');
+    var actions = '';
+    if (r.state === 'ready') {
+      actions = '<div class="wk-row wk-wrap wk-round-actions"><button type="button" class="cx-btn primary" data-wk="chat-send" data-key="' + esc(r.key) + '"' + (r.sending ? ' disabled' : '') + '>' +
+        esc(r.sending ? 'Sending…' : r.assignments.length > 1 ? 'Send all ' + r.assignments.length : 'Send') + '</button></div>' +
+        '<p class="wk-fine">Review each assignment. Nothing is sent until you press Send.' + (caps.control && !caps.control.connected ? ' COS Control on your Mac is not connected right now, so the plan would wait there for you to send it from the Mac.' : '') + '</p>';
+    } else if (r.state === 'held') {
+      actions = '<p class="wk-small">Saved in this card’s Work chat. COS Control was not connected, so send it from Work on the Mac. It cannot be sent again from here.</p>';
+    } else if (r.state === 'quiet') {
+      actions = '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-check" data-key="' + esc(r.key) + '">Check again</button></div>';
+    } else if (r.state === 'planFailed' || r.state === 'expired' || (r.state === 'notDelivered' && !r.sentAt)) {
+      actions = '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-again" data-key="' + esc(r.key) + '"' + (c.draft.trim() || c.busy ? ' disabled title="Clear the message box first"' : '') + '>Use this request again</button></div>';
+    }
+    var stop = chatStoppable(r).length && r.roundId ? '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-stop" data-key="' + esc(r.key) + '"' + (r.stopping ? ' disabled' : '') + '>' + (r.stopping ? 'Stopping…' : 'Stop') + '</button>' +
+      '<span class="wk-small wk-muted">Stops what COS Control has not sent yet.</span></div>' : '';
+    var sendingLine = r.state === 'sending' ? '<p class="wk-small wk-muted">' + esc(r.roundState === 'sending' ? 'COS Control on your Mac is sending it. This page checks every few seconds.' : 'Waiting for COS Control on your Mac to pick it up. Nothing has been sent yet.') + '</p>' : '';
+    return '<article class="wk-round" data-key="' + esc(r.key) + '">' +
+      '<p class="wk-round-q">' + esc(r.question) + '</p>' +
+      '<p class="wk-fine wk-round-from">' + esc('From this browser · ' + chatWhen(r.at) + (r.inHistory ? ' · in this card’s Work chat on the Mac' : '')) + '</p>' +
+      (r.note ? '<p class="wk-small wk-muted">' + esc(r.note) + '</p>' : '') +
+      (r.answer ? '<div class="cx-card-body md wk-round-answer">' + W.md(r.answer) + '</div>' : '') +
+      (r.assignments.length && r.meter ? '<p class="wk-small wk-muted">' + esc(chatMeterText(r.meter)) + '</p>' : '') +
+      r.assignments.map(function (a) { return chatAssignment(it, r, a); }).join('') +
+      chatUpdates(it, r) +
+      (r.error ? '<p class="wk-error">' + esc(r.error) + '</p>' : '') + (r.note2 && CHAT_MOVING[r.state] ? '<p class="wk-small wk-muted">' + esc(r.note2) + '</p>' : '') +
+      sendingLine + '<p class="wk-fine wk-round-state">' + esc(line) + '</p>' + actions + stop + '</article>';
+  }
+  function chatHistory(it) {
+    var c = chatOf(it.wid), caps = S.chatCaps;
+    var rounds = c.rounds.map(function (r) { return chatRoundHtml(it, r); }).join('');
+    var reason = !caps ? '<p class="wk-muted">Checking Work chat on your Mac…</p>' : !caps.ok ? '<div class="cx-notice' + (caps.retry ? ' warn' : '') + '"><span>' + esc(caps.reason) +
+      (c.draft.trim() ? ' Your draft is kept on this browser.' : '') + '</span>' + (caps.retry ? '<button type="button" class="wk-text-btn" data-wk="chat-caps">Try again</button>' : '') + '</div>' : '';
+    return rounds + reason;
+  }
+  function chatOffered() { return !!(S.chatCaps && S.chatCaps.ok); }
+  function chatComposerHtml(it) {
+    var nav = window.navigator || {}, c = chatOf(it.wid), mac = /Mac|iPhone|iPad/.test(nav.platform || nav.userAgent || '');
+    var fine = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+    return '<div class="wk-cmp" id="wk-composer" data-wid="' + esc(it.wid) + '">' +
+      '<div class="wk-cmp-status" id="wk-cmp-status" aria-live="polite"></div>' +
+      '<p class="wk-small wk-cmp-files"><strong>Files to send.</strong> COS Control attaches this card’s files and the files from its linked meetings on your Mac when it sends. Add or remove them on this card in COS Control.</p>' +
+      '<div class="wk-cmp-picks" id="wk-cmp-picks"></div>' +
+      '<textarea id="wk-chat-text" class="field wk-cmp-text" rows="3" aria-label="Message this task" aria-describedby="wk-cmp-count" placeholder="Describe the outcome you want" autocomplete="off" autocapitalize="sentences" spellcheck="true" enterkeyhint="enter">' + esc(c.draft) + '</textarea>' +
+      '<div class="wk-cmp-actions" id="wk-cmp-actions"><span class="wk-mono wk-cmp-count" id="wk-cmp-count"></span>' +
+      '<span class="wk-small wk-muted wk-cmp-size" id="wk-cmp-size"></span>' +
+      (fine ? '<span class="wk-fine wk-cmp-hint">' + (mac ? '⌘' : 'Ctrl') + ' Return to plan · Return adds a line</span>' : '') +
+      '<button type="button" class="cx-btn primary wk-cmp-plan" id="wk-cmp-plan" data-wk="chat-plan">Plan</button></div></div>';
+  }
+  function chatPicksHtml() {
+    var caps = S.chatCaps || {}, p = chatPlanner(), e = chatEffort();
+    if (!(caps.planners || []).length) return '<p class="wk-fine">This server plans with Sonnet.</p>';
+    return '<label class="wk-pick"><span>Plan with</span><select class="field" data-wk-chat="planner">' +
+      caps.planners.map(function (x) { return '<option value="' + x + '"' + (x === p ? ' selected' : '') + '>' + plannerName(x) + '</option>'; }).join('') + '</select></label>' +
+      ((caps.efforts || []).length ? '<label class="wk-pick"><span>Effort</span><select class="field" data-wk-chat="effort">' +
+        caps.efforts.map(function (x) { return '<option value="' + x + '"' + (x === e ? ' selected' : '') + '>' + x.charAt(0).toUpperCase() + x.slice(1) + '</option>'; }).join('') + '</select></label>' : '');
+  }
+  function chatSectionHtml(it) {
+    return '<section class="wk-section wk-chat" id="wk-chat" aria-labelledby="wk-chat-h"><h2 class="wk-h2" id="wk-chat-h">Work chat</h2>' +
+      '<p class="wk-muted">Describe the outcome. COS explains its plan and drafts assignments for this card’s sessions. You review the plan, then send it; COS Control on your Mac sends each one and their updates come back here.</p>' +
+      '<div id="wk-part-chat" class="wk-part wk-rounds">' + chatHistory(it) + '</div>' + (chatOffered() ? chatComposerHtml(it) : '') + '</section>';
+  }
+  // The live bits of the composer, set in place so the text box (and the phone's keyboard) is never replaced.
+  function chatSyncComposer(it) {
+    var box = $('wk-chat-text'); if (!box) return;
+    var c = chatOf(it.wid), n = box.value.length, problem = chatProblem(it, c);
+    var count = $('wk-cmp-count'); if (count) { count.textContent = n.toLocaleString('en-US') + '/2,000'; count.classList.toggle('over', box.value.trim().length > CHAT_MAX); }
+    var size = $('wk-cmp-size');
+    if (size) { var text = box.value.trim(), wid = chatWorkId(it.task); size.textContent = text && wid ? 'Sends ' + chatTokenText(chatMeter(text, chatContext(it.task, wid), wid).tokens) + ' tokens of text' : ''; }
+    var plan = $('wk-cmp-plan');
+    if (plan) { plan.disabled = c.busy || !box.value.trim() || !!problem; plan.textContent = c.busy ? 'Planning…' : 'Plan'; }
+    var picks = $('wk-cmp-picks');
+    if (picks && !picks.contains(document.activeElement)) { var html = chatPicksHtml(); if (picks.__html !== html) { picks.innerHTML = html; picks.__html = html; } }
+    if (picks) picks.querySelectorAll('select').forEach(function (s) { s.disabled = c.busy; });
+    var status = $('wk-cmp-status');
+    if (status) {
+      var caps = S.chatCaps || {}, parts = [];
+      if (c.busy && c.phase) parts.push('<p class="wk-cmp-phase"><span class="wk-spin" aria-hidden="true"></span>' + esc(c.phase) + '</p>');
+      if (c.error) parts.push('<p class="wk-error">' + esc(c.error) + '</p>');
+      else if (problem && box.value.trim()) parts.push('<p class="wk-small wk-muted">' + esc(problem) + '</p>');
+      if (caps.ok && caps.control && !caps.control.connected && !c.busy) parts.push('<p class="wk-small wk-warn">COS Control on your Mac is not connected right now. You can plan; the plan waits on the Mac until COS Control sends it.</p>');
+      var html2 = parts.join('');
+      if (status.__html !== html2) { status.innerHTML = html2; status.__html = html2; }
+    }
+    chatGrow(box);
+  }
+  function chatGrow(box) {
+    var vv = window.visualViewport, h = vv ? vv.height : window.innerHeight || 600;
+    var max = Math.max(96, Math.min(320, Math.round(h * 0.42)));
+    box.style.height = 'auto';
+    box.style.height = Math.min(box.scrollHeight + 2, max) + 'px';
+    box.style.overflowY = box.scrollHeight + 2 > max ? 'auto' : 'hidden';
+  }
+  function chatResetComposer(wid) {
+    var box = $('wk-chat-text'), host = $('wk-composer');
+    if (box && host && host.getAttribute('data-wid') === wid) { box.value = chatOf(wid).draft; box.blur(); }
+  }
+  // With the on-screen keyboard up, keep the text box and the Plan row inside what is visible: scroll only as much as
+  // needed, never past the top of the box. On a folded or unfolded Duo the visual viewport tells us what is visible.
+  function chatKeepInView() {
+    var box = $('wk-chat-text'), row = $('wk-cmp-actions'), vv = window.visualViewport;
+    if (!box || !row || document.activeElement !== box) return;
+    var top = vv ? vv.offsetTop : 0, height = vv ? vv.height : window.innerHeight;
+    var bar = document.querySelector('.topbar'), barBottom = bar ? bar.getBoundingClientRect().bottom : 0;
+    var visTop = Math.max(top, barBottom > top ? barBottom : top) + 6, visBottom = top + height - 8;
+    var boxTop = box.getBoundingClientRect().top, rowBottom = row.getBoundingClientRect().bottom, delta = 0;
+    if (rowBottom > visBottom) delta = rowBottom - visBottom;
+    if (boxTop - delta < visTop) delta = boxTop - visTop;
+    if (Math.abs(delta) > 2) window.scrollBy(0, delta);
+  }
+  function chatComposerFocused() { var a = document.activeElement; return !!(a && a.id === 'wk-chat-text'); }
+  function chatRepaintCurrent() { var rt = W.parseRoute(); if (rt.pane === 'work' && rt.args.length === 1) renderDetail(rt.args[0]); }
+  function chatRepaint(wid) {
+    var rt = W.parseRoute(), it = itemByWid(wid);
+    if (it && rt.pane === 'work' && rt.args.length === 1 && rt.args[0] === it.id) renderDetail(it.id);
+  }
+  function chatSetPart(id, html) { var el = $(id); if (el && el.__html !== html) { el.innerHTML = html; el.__html = html; } }
 
   // ── Start work: a handoff request COS Control on the Mac claims and sends (glasses path, 6.59.0) ──
   var FORKABLE = { claude: 1, codex: 1 };
@@ -1520,6 +2187,18 @@
         it = itemFor(id); if (it && S.reply[it.wid]) { S.reply[it.wid].open = act === 'reply-open'; renderDetail(it.id); } return;
       case 'reply-send': it = itemFor(id); if (it) sendReply(it, t.getAttribute('data-intent')); return;
       case 'reply-reset': it = itemFor(id); if (it) { delete S.reply[it.wid]; delete S.activity[it.wid]; renderDetail(it.id); } return;
+      case 'chat-plan':
+        it = current(); if (!it) return;
+        var draftBox = $('wk-chat-text'); if (draftBox) { chatOf(it.wid).draft = draftBox.value; draftBox.blur(); }
+        chatPlan(it); return;
+      case 'chat-send': case 'chat-stop': case 'chat-again': case 'chat-check':
+        it = current(); var round = it && chatFindRound(it.wid, t.getAttribute('data-key')); if (!round) return;
+        if (act === 'chat-send') chatSend(it, round);
+        else if (act === 'chat-stop') chatStop(it, round);
+        else if (act === 'chat-again') chatAgain(it, round);
+        else { round.state = 'sending'; round.error = ''; round.pollSince = 0; chatSchedule(it.wid, round.key, 0); renderDetail(it.id); }
+        return;
+      case 'chat-caps': loadChatCaps(true); return;
       case 'edit-save': it = current(); if (it) editSave(it); return;
       case 'edit-cancel':
         it = current(); if (!it) return W.goBack();
@@ -1568,6 +2247,11 @@
       return renderList();
     }
     if (el.hasAttribute('data-wk-stage')) { it = itemFor(el.getAttribute('data-wk-stage')); if (it) moveStage(it, el.value); return; }
+    if (el.hasAttribute('data-wk-chat')) {
+      chatStore[el.getAttribute('data-wk-chat') === 'effort' ? 'effort' : 'planner'] = el.value; chatSave(true);
+      it = current(); if (it) chatSyncComposer(it);
+      return;
+    }
     if (el.id === 'wk-capture-domain') { S.captureDomain = el.value; return renderList(); }
     if (el.name === 'wk-mode' || el.hasAttribute('data-wk-start')) {
       it = current(); if (!it) return;
@@ -1596,6 +2280,12 @@
       if (b) b.disabled = !(S.captureText.trim() && domainNames().indexOf(S.captureDomain) >= 0 && !S.captureBusy);
       return;
     }
+    if (el.id === 'wk-chat-text') {
+      it = current(); if (!it) return;
+      var cc = chatOf(it.wid); cc.draft = el.value; if (cc.error) cc.error = '';
+      chatTouch(cc); chatSyncComposer(it); chatKeepInView();
+      return;
+    }
     if (el.hasAttribute('data-wk-reply')) {
       it = itemFor(el.getAttribute('data-wk-reply')); var rr = it && S.reply[it.wid]; if (!rr) return;
       rr.text = el.value;
@@ -1616,6 +2306,25 @@
       if (save) save.disabled = !(!ed.busy && !editUnavailable(it.task) && !editValidation(ed) && ed.dirty);
     }
   });
+  // Work chat: Command or Control Return plans (Control's shortcut); Return adds a line.
+  pane.addEventListener('keydown', function (e) {
+    if (e.target && e.target.id === 'wk-chat-text' && e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) {
+      e.preventDefault();
+      var plan = $('wk-cmp-plan'); if (plan && !plan.disabled) plan.click();
+    }
+  });
+  pane.addEventListener('focusin', function (e) { if (e.target && e.target.id === 'wk-chat-text') setTimeout(chatKeepInView, 320); });
+  pane.addEventListener('focusout', function (e) {
+    if (!e.target || e.target.id !== 'wk-chat-text') return;
+    chatSave(true);
+    if (S.chatDeferred) setTimeout(function () { if (!chatComposerFocused()) chatRepaintCurrent(); }, 0);
+  });
+  // The keyboard opening or closing, and the Duo folding or unfolding, change what is visible: keep the box in view and
+  // the draft saved. The draft is in this browser's storage, so a reload or a page Safari dropped comes back with it.
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', function () { var b = $('wk-chat-text'); if (b) { chatGrow(b); chatKeepInView(); } });
+  window.addEventListener('resize', function () { var b = $('wk-chat-text'); if (b) { chatSave(true); chatGrow(b); } });
+  window.addEventListener('pagehide', function () { chatSave(true); });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) chatSave(true); });
   pane.addEventListener('submit', function (e) {
     var f = e.target.getAttribute('data-wk-form');
     if (!f) return;
@@ -1658,10 +2367,17 @@
       if (!S.tasks && !S.loading) loadBoard();
       else if (!args.length && Date.now() - S.loadedAt > 60000 && !S.loading) loadBoard();
     },
-    leave: function () { stopPoll(); stopHandoffPolls(); },
+    leave: function () { stopPoll(); stopHandoffPolls(); chatSave(true); },
+    // For web-control/work-composer-web.test.ts: Work chat's steps, run against a fake server.
+    _chat: { S: S, of: chatOf, plan: chatPlan, send: chatSend, stop: chatStop, again: chatAgain, poll: chatPoll, caps: loadChatCaps, readCaps: chatReadCaps,
+      find: chatFindRound, planBody: chatPlanBody, context: chatContext, meter: chatMeter, readPlan: chatReadPlan, readInput: chatReadInput,
+      store: function () { return chatStore; }, save: chatSave, timers: CHAT_TIMERS, render: renderDetail, restore: chatRestored, item: itemFor },
     // The Ask sheet's "Find a task about this": open the board on this query and ask by meaning.
     search: function (q) { S.q = String(q || ''); S.tab = 'board'; render(); searchMeaning(); },
     // Back unwinds one step: Start work and Edit go to the card, the card to the list.
-    up: function (args) { return args.length >= 2 ? [args[0]] : null; }
+    up: function (args) { return args.length >= 2 ? [args[0]] : null; },
+    // Today's overlay (panes/today-actions.js) decided a suggestion through this pane's route: read Intake and the board
+    // again the next time Work opens, so the decision shows in its real tab.
+    intakeChanged: function () { S.intake = null; SPLIT = null; S.loadedAt = 0; }
   });
 })();

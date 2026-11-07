@@ -1,0 +1,760 @@
+/* COS Control Web: Today as a place to act (Miles, 11/06 23:14: "rather than always kicking the user off into the tab
+   ... on click it opened up an overlay on the today panel that allowed me to see and interact with and make a
+   decision that pushed it inside of its actual tab").
+
+   A tap on Today opens the item in an overlay on Today: a bottom sheet on the folded phone, a side sheet from 600 px.
+   - Needs you: what the session waits on. A session question or approval is the same card questions.js draws, with the
+     same answer route (POST /api/session-questions/:id/answer), drawn here through its mount(). The session's own
+     status line and its last reply. A reply goes through the Sessions reader's own send path (app.js continueSession
+     with this overlay as its view): attach, the per-browser binding, one key per draft, the queue when busy, and the
+     server's refusals word for word. Open session stays a link to the full reader.
+   - Running: a peek at what the session is doing now, read with the reader's own activity reducer (applyFeed) from the
+     same live stream, and a short note box on the same send path. Open session goes to the reader.
+   - From today's meetings: each suggestion with the decisions COS Control offers on Today (Create task, Dismiss, Open
+     in Work, Open card) and Work's Link for a suggested link, through Work's own route (POST
+     /api/work-intake/:id/resolve), one decision at a time as Control does. The Today card's count moves at once.
+   Close with the X, a tap outside, Escape, or Back (the overlay holds one history entry of its own). Focus moves in and
+   comes back to the row. The page behind is inert and does not scroll.
+
+   Also the summary COS gets when Miles asks from Today (summary(): app.js askCos passes it as the Ask's reference).
+   Loaded on the first tap or once the page is idle (app.js ensurePane, #lazy-panes). */
+(function () {
+  'use strict';
+  var W = window.COSWeb;
+  if (!W || !W.today || !W.sessionKit) return;
+  var T = W.today, K = W.sessionKit, esc = W.esc, api = W.api;
+
+  var UNDO_SECONDS = 8;          // TodayDismissals.undoSeconds
+  var STALE_MS = 60000;          // a decision the server dated a minute before the tap was made elsewhere
+  var WATCH_MS = 180000;         // follow a sent turn for three minutes, as the reader does
+  var SUMMARY_MAX = 4000;
+  var X_ICON = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>';
+  // Work's words for an intake refusal (panes/work.js INTAKE_REFUSALS), by the code the server sends.
+  var REFUSALS = {
+    meeting_identity_changed: 'That meeting was renamed or merged after it was scored. Dismiss this one; the renamed meeting is checked again.',
+    meeting_unavailable: 'That meeting cannot be found. It may have been renamed or removed. Dismiss this one.',
+    intake_task_changed: 'That task changed or was closed since it was suggested. Dismiss this suggestion.',
+    meeting_links_full: 'That task already links eight meetings. Dismiss this suggestion.',
+    work_board_read_only: 'This server cannot write Work links yet.',
+    card_creation_unavailable: 'This server cannot create Work cards yet. Update the server.',
+    task_bridge_unavailable: 'The task bridge did not answer. Try again in a moment.',
+    intake_text_collision: 'The same words are on closed or archived work. Reopen that task in Work instead, or dismiss this one.',
+    intake_busy: 'That one is already being saved, here or on another screen. Try again in a moment.',
+    intake_store_full: 'Intake is full. Dismiss older items in Work, then try again.',
+    intake_store_closed: 'Intake is unavailable while the server restarts. Try again shortly.',
+    work_intake_unavailable: 'Intake is unavailable right now. Try again shortly.'
+  };
+  var GONE = 'This suggestion is gone. It was handled on another screen.';
+
+  var O = {
+    open: null,            // { kind: 'need' | 'run' | 'meeting' | 'intake', key, all }
+    opener: null, openerSel: '',
+    pushed: false, ignorePops: 0,
+    dirty: false,          // something was decided or sent: Today reloads on close
+    // From today's meetings
+    busy: '',              // the one suggestion being decided (Control: one at a time)
+    rows: {},              // id -> { state, note, undo, taskId, item, asked, until, undoing, undoNote }
+    shown: {},             // ids drawn in this overlay, so one that vanishes reads as handled elsewhere
+    loop: null,            // the undo route exists on this server (GET /api/work-intake/decisions), null = not asked
+    // Needs you and Running
+    r: null,               // the session object the reader's send path takes (sessionKit.session)
+    row: null,             // the session's row in the session list
+    item: null,            // the Needs you item
+    stream: null, clock: null, watch: null, qMount: null, cautionAsk: false, note: { text: '', kind: '' },
+    last: null,            // { text, at } the session's last reply
+    lastState: 'idle',     // idle | loading | ready | error | none
+    needGone: false
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function str(v) { return typeof v === 'string' ? v : ''; }
+  function clip(text, n) { var s = String(text || '').replace(/\s+/g, ' ').trim(); return s.length <= n ? s : s.slice(0, n - 1).replace(/\s+$/, '') + '\u2026'; }
+  function lower(s) { return String(s || '').toLowerCase(); }
+  function phone() { return W.isPhone ? W.isPhone() : true; }
+
+  // ── the layer ──────────────────────────────────────────
+  var layer = null;
+  function build() {
+    if (layer) return layer;
+    layer = document.createElement('div');
+    layer.id = 'ta-layer';
+    layer.className = 'ta-layer';
+    layer.hidden = true;
+    layer.innerHTML = '<div class="ta-scrim" data-ta="close" aria-hidden="true"></div>' +
+      '<section class="ta-sheet" id="ta-sheet" role="dialog" aria-modal="true" aria-labelledby="ta-title" tabindex="-1">' +
+        '<div class="ta-grip" aria-hidden="true"></div>' +
+        '<header class="ta-head"><h2 class="ta-title" id="ta-title"></h2>' +
+          '<button type="button" class="ta-x" data-ta="close" aria-label="Close">' + X_ICON + '</button></header>' +
+        '<div class="ta-body" id="ta-body"></div>' +
+        '<div class="ta-foot" id="ta-foot"></div>' +
+      '</section>';
+    document.body.appendChild(layer);
+    layer.addEventListener('click', onClick);
+    layer.addEventListener('submit', onSubmit);
+    layer.addEventListener('focusin', onFocusIn);
+    // A drag on the dimmed page never scrolls what is behind it.
+    layer.addEventListener('touchmove', function (e) { if (e.target && e.target.classList && e.target.classList.contains('ta-scrim')) e.preventDefault(); }, { passive: false });
+    return layer;
+  }
+  // The layer follows the visible viewport, so the on-screen keyboard never covers the reply box or Send.
+  function fit() {
+    var vv = window.visualViewport;
+    if (!layer || !vv) return;
+    layer.style.setProperty('--ta-vh', Math.round(vv.height) + 'px');
+    layer.style.setProperty('--ta-vt', Math.round(vv.offsetTop) + 'px');
+  }
+  if (window.visualViewport) { window.visualViewport.addEventListener('resize', fit); window.visualViewport.addEventListener('scroll', fit); }
+
+  function openerSelector(t) {
+    if (!t || !t.getAttribute) return '';
+    var kind = t.getAttribute('data-today'), key = t.getAttribute('data-key');
+    if (!kind) return '';
+    var q = function (v) { return '"' + String(v).replace(/["\\]/g, '\\$&') + '"'; };
+    return '[data-today=' + q(kind) + ']' + (key != null ? '[data-key=' + q(key) + ']' : '');
+  }
+
+  function open(kind, key, opener) {
+    build();
+    if (O.open) stopSession();
+    O.open = { kind: kind, key: String(key || ''), all: kind === 'intake' };
+    O.opener = opener || document.activeElement; O.openerSel = openerSelector(opener);
+    O.note = { text: '', kind: '' }; O.cautionAsk = false; O.needGone = false;
+    layer.hidden = false;
+    document.documentElement.classList.add('ta-open');
+    var shell = $('app-shell'); if (shell) shell.setAttribute('inert', '');
+    fit();
+    if (!O.pushed) {
+      try { history.pushState({ cosTodayOverlay: 1 }, ''); O.pushed = true; } catch (_e) { O.pushed = false; }
+    }
+    if (kind === 'need' || kind === 'run') openSession(kind, O.open.key);
+    else openIntake();
+    var sheet = $('ta-sheet');
+    if (sheet && sheet.focus) sheet.focus({ preventScroll: true });
+  }
+
+  // how: 'user' (X, outside, Escape), 'pop' (Back), 'leave' (navigating to another pane)
+  function close(how) {
+    if (!O.open) return;
+    stopSession();
+    O.open = null;
+    if (layer) layer.hidden = true;
+    document.documentElement.classList.remove('ta-open');
+    var shell = $('app-shell'); if (shell) shell.removeAttribute('inert');
+    if (O.pushed && how !== 'pop' && how !== 'leave') { O.pushed = false; O.ignorePops++; try { history.back(); } catch (_e) { O.ignorePops--; } }
+    if (how === 'pop' || how === 'leave') O.pushed = false;
+    clearTimeout(O.expireTimer);
+    // Settled lines are done once the overlay closes; Today reads the server again if anything changed here.
+    Object.keys(O.rows).forEach(function (id) { var s = O.rows[id].state; if (s !== 'creating' && s !== 'dismissing') delete O.rows[id]; });
+    O.shown = {};
+    if (O.dirty) { O.dirty = false; T.refresh(); }
+    if (how !== 'leave') restoreFocus();
+  }
+  function restoreFocus() {
+    var el = O.opener;
+    if (!el || !el.isConnected) el = O.openerSel ? document.querySelector(O.openerSel) : null;
+    if (!el) el = document.querySelector('#pane-today .panel-title');
+    O.opener = null;
+    if (el && el.focus) { try { el.focus({ preventScroll: true }); } catch (_e) { el.focus(); } }
+  }
+  // Leaving for a tab from inside the overlay replaces the overlay's history entry, so Back from there returns to Today.
+  function leaveTo(pane, args) {
+    var hash = '#/' + [pane].concat(args || []).map(encodeURIComponent).join('/');
+    var replace = O.pushed;
+    close('leave');
+    if (replace) location.replace(hash); else W.go(pane, args || []);
+  }
+  window.addEventListener('popstate', function () {
+    if (O.ignorePops > 0) { O.ignorePops--; return; }
+    if (O.open) close('pop');
+  });
+  W.onRoute(function (r) { if (O.open && r.pane !== 'today') close('leave'); });
+  // Escape closes the overlay, unless the Ask sheet is open over it (app.js closes that first).
+  document.addEventListener('keydown', function (e) {
+    if (!O.open || e.key !== 'Escape') return;
+    var ask = $('ask-sheet');
+    if (ask && !ask.classList.contains('hidden')) return;
+    e.preventDefault();
+    close('user');
+  }, true);
+
+  function setHead(title) { var h = $('ta-title'); if (h) h.textContent = title; }
+
+  // ── clicks inside the overlay ─────────────────────────
+  function onClick(e) {
+    var b = e.target && e.target.closest ? e.target.closest('[data-ta]') : null;
+    if (!b || b.disabled) return;
+    var what = b.getAttribute('data-ta'), id = b.getAttribute('data-id') || '';
+    if (what === 'close') return close('user');
+    if (what === 'create' || what === 'link') return decide(id, 'accept');
+    if (what === 'dismiss') return decide(id, 'dismiss');
+    if (what === 'undo') return undo(id);
+    if (what === 'show-all') { O.open.all = true; paintIntake(); return; }
+    if (what === 'open-work') return leaveTo('work', ['sort']);
+    if (what === 'open-card') return leaveTo('work', id ? [id] : []);
+    if (what === 'open-session') return O.r ? leaveTo('sessions', [O.r.provider, O.r.id]) : null;
+    if (what === 'send') return sendReply();
+    if (what === 'retry') return sendReply();
+    if (what === 'caution-send') { if (O.r) O.r.cautionAck = true; O.cautionAsk = false; return sendReply(); }
+    if (what === 'caution-cancel') { O.cautionAsk = false; return paintVerdict(); }
+    if (what === 'send-anyway') { var rev = O.r && O.r.sendAnyway; if (O.r) O.r.sendAnyway = null; return sendReply({ acknowledgedRevision: rev }); }
+    if (what === 'more') { var box = $('ta-last-text'); if (box) box.classList.remove('clamped'); b.remove(); }
+  }
+  function onSubmit(e) {
+    if (e.target && e.target.id === 'ta-form') { e.preventDefault(); sendReply(); }
+  }
+  // The keyboard rises over the bottom of the sheet: keep the box in view as it does.
+  function onFocusIn(e) {
+    if (!e.target || e.target.id !== 'ta-input') return;
+    setTimeout(function () { fit(); var f = $('ta-form'); if (f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' }); }, 250);
+  }
+
+  // ═════════════ From today's meetings ═════════════
+  function intakeList() { return T.data().intake || []; }
+  function itemById(id) {
+    var hit = intakeList().filter(function (it) { return it.id === id; })[0];
+    return hit || (O.rows[id] && O.rows[id].item) || null;
+  }
+  function textOf(it) { return it.kind === 'link' ? str(it.task && it.task.text) || str(it.text) : str(it.text); }
+  // Control's source line (todaySuggestionRow): whose it is and which meeting.
+  function sourceOf(it) {
+    var meeting = str(it.meeting && it.meeting.title) || 'a meeting today';
+    if (it.kind === 'link') return 'Matches the Work card ' + clip(str(it.task && it.task.text) || str(it.pullTitle) || str(it.text), 90) + ', from ' + meeting;
+    if (it.ownerIsMiles) return 'Yours, from ' + meeting;
+    var owner = str(it.owner).trim();
+    return owner ? owner + '\u2019s, from ' + meeting : 'From ' + meeting;
+  }
+  function caps() { return T.data().intakeCaps || {}; }
+  // Control's suggestionAction: a link opens its card (and, as in Work's Sort, can be linked); an ask or a review
+  // becomes a task when the server can create cards, else only Open in Work.
+  function actionsFor(it) {
+    if (it.kind === 'link') return { accept: caps().linkWrites === true ? 'link' : '', acceptLabel: 'Link', card: str(it.task && it.task.workIdentity) };
+    return { accept: caps().cardCreation === true ? 'create' : '', acceptLabel: 'Create task', card: '' };
+  }
+
+  function openIntake() {
+    paintIntake();
+    var foot = $('ta-foot');
+    if (foot) foot.innerHTML = '<div class="ta-links"><button type="button" class="link-btn" data-ta="open-work">Open Sort in Work</button></div>';
+    // Read Intake again: what was decided on another screen since Today loaded shows as handled, never as a phantom.
+    var asked = T.reloadIntake();
+    if (asked && asked.then) asked.then(function () { if (O.open && (O.open.kind === 'meeting' || O.open.kind === 'intake')) { noteVanished(); paintIntake(); } });
+  }
+  function noteVanished() {
+    var open = {};
+    intakeList().forEach(function (it) { open[it.id] = 1; });
+    Object.keys(O.shown).forEach(function (id) {
+      if (open[id] || O.rows[id]) return;
+      O.rows[id] = { state: 'gone', note: GONE, item: O.shown[id] };
+    });
+  }
+  // What the overlay lists: open suggestions in the server's order, plus this overlay's settled lines in their place.
+  function visibleItems() {
+    var list = intakeList().slice();
+    var listed = {};
+    list.forEach(function (it) { listed[it.id] = 1; });
+    Object.keys(O.rows).forEach(function (id) { if (!listed[id] && O.rows[id].item) list.push(O.rows[id].item); });
+    list.sort(function (a, b) {
+      var x = str(a.meeting && a.meeting.filename) + '|' + a.id, y = str(b.meeting && b.meeting.filename) + '|' + b.id;
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
+    if (O.open && O.open.kind === 'meeting' && !O.open.all) list = list.filter(function (it) { return str(it.meeting && it.meeting.title) === O.open.key; });
+    return list;
+  }
+  function openCount() { return intakeList().length; }
+
+  function rowHtml(it) {
+    var row = O.rows[it.id] || { state: 'ready' };
+    var acts = actionsFor(it), lock = !!O.busy;
+    var text = '<p class="ta-sugg-text">' + esc(textOf(it)) + '</p><p class="ta-sugg-src">' + esc(sourceOf(it)) + '</p>';
+    if (it.kind === 'ask' && it.pull && it.pull.title) text += '<p class="ta-sugg-src">' + esc('Your session may already cover this: ' + clip(it.pull.title, 90)) + '</p>';
+    var line = '';
+    switch (row.state) {
+      case 'creating': line = '<span class="ta-wait" role="status">Creating</span>'; break;
+      case 'dismissing': line = '<span class="ta-wait" role="status">Dismissing</span>'; break;
+      case 'created':
+        line = '<span class="ta-done">' + esc(row.linked ? 'Linked. It is in Work.' : 'Created. It is in Work.') + '</span>' +
+          '<button type="button" class="link-btn" data-ta="open-card" data-id="' + esc(row.taskId || acts.card) + '">Open card</button>' +
+          undoHtml(it, row);
+        break;
+      case 'dismissed':
+        return '<div class="ta-sugg settled" data-row="' + esc(it.id) + '"><span class="ta-done">Dismissed.</span>' + undoHtml(it, row) + '</div>';
+      case 'stale': case 'gone':
+        return '<div class="ta-sugg settled" data-row="' + esc(it.id) + '">' + text + '<p class="ta-note">' + esc(row.note || GONE) + '</p></div>';
+      default: {
+        var buttons = '';
+        if (acts.accept) buttons += '<button type="button" class="btn small primary" data-ta="' + acts.accept + '" data-id="' + esc(it.id) + '"' + (lock ? ' disabled' : '') + '>' + esc(row.state === 'failed' ? 'Try again' : acts.acceptLabel) + '</button>';
+        if (acts.card) buttons += '<button type="button" class="link-btn" data-ta="open-card" data-id="' + esc(acts.card) + '">Open card</button>';
+        if (!acts.accept || it.kind !== 'link') buttons += '<button type="button" class="link-btn" data-ta="open-work">Open in Work</button>';
+        buttons += '<button type="button" class="link-btn quiet" data-ta="dismiss" data-id="' + esc(it.id) + '"' + (lock ? ' disabled' : '') + ' aria-label="' + esc('Dismiss suggestion: ' + clip(textOf(it), 80)) + '" title="Not a task: it leaves Today and does not move to Work at midnight">Dismiss</button>';
+        line = buttons;
+        if (row.note) text += '<p class="ta-note" role="alert">' + esc(row.note) + '</p>';
+      }
+    }
+    return '<div class="ta-sugg" data-row="' + esc(it.id) + '">' + text + '<div class="ta-acts">' + line + '</div></div>';
+  }
+  function undoHtml(it, row) {
+    if (O.loop !== true || !row.undo) return '';
+    if (row.undoing) return '<span class="ta-wait" role="status">Undoing</span>';
+    return '<button type="button" class="link-btn" data-ta="undo" data-id="' + esc(it.id) + '" aria-label="' + esc('Undo: ' + clip(textOf(it), 80)) + '">Undo</button>' +
+      (row.undoNote ? '<span class="ta-note">' + esc(row.undoNote) + '</span>' : '');
+  }
+  function intakeHtml() {
+    var list = visibleItems(), n = openCount();
+    var groups = [], byTitle = {};
+    list.forEach(function (it) {
+      var t = str(it.meeting && it.meeting.title) || 'A meeting';
+      if (!byTitle[t]) { byTitle[t] = { title: t, items: [] }; groups.push(byTitle[t]); }
+      byTitle[t].items.push(it);
+      O.shown[it.id] = it;
+    });
+    var single = O.open && O.open.kind === 'meeting' && !O.open.all;
+    var head = '<p class="ta-sub">' + esc(n === 0 ? 'Nothing from today\u2019s meetings is waiting. What you decided is in Work.'
+      : (single ? (function () { var k = list.filter(function (it) { return !O.rows[it.id]; }).length; return k + ' from this meeting, ' + n + ' from today in all.'; })() : n + (n === 1 ? ' suggestion' : ' suggestions') + ' from today\u2019s meetings.') +
+      ' They move to Work at midnight.') + '</p>';
+    var body = groups.map(function (g) {
+      return (single ? '' : '<h3 class="ta-group">' + esc(g.title) + '</h3>') + g.items.map(rowHtml).join('');
+    }).join('');
+    if (!list.length && n > 0 && single) body = '<p class="ta-sub">Nothing left from this meeting.</p>';
+    if (!T.data().intakeLoaded) body = '<p class="ta-sub">Reading today\u2019s suggestions\u2026</p>';
+    var more = single && n > list.filter(function (it) { return !O.rows[it.id]; }).length ? '<button type="button" class="link-btn" data-ta="show-all">Show all ' + n + ' from today</button>' : '';
+    return head + '<div class="ta-list">' + body + '</div>' + more;
+  }
+  function paintIntake() {
+    if (!O.open || (O.open.kind !== 'meeting' && O.open.kind !== 'intake')) return;
+    var single = O.open.kind === 'meeting' && !O.open.all;
+    setHead(single ? O.open.key : 'From today\u2019s meetings');
+    var body = $('ta-body'); if (body) body.innerHTML = intakeHtml();
+  }
+
+  // One decision at a time (Control: one resolve, its busy ids): every other button waits for it, and the same tap
+  // twice sends once. Accept and dismiss go through Work's own route.
+  function decide(id, action) {
+    if (O.busy || !id) return;
+    var it = itemById(id); if (!it) return;
+    var row = O.rows[id];
+    if (row && /^(created|dismissed|stale|gone)$/.test(row.state)) return;
+    if (action === 'accept' && !actionsFor(it).accept) return;
+    var asked = row && row.asked && row.action === action ? row.asked : Date.now();
+    O.busy = id;
+    O.rows[id] = { state: action === 'accept' ? 'creating' : 'dismissing', item: it, asked: asked, action: action };
+    paintIntake();
+    return api('/api/work-intake/' + encodeURIComponent(id) + '/resolve', { method: 'POST', body: { action: action }, timeoutMs: 75000 }).then(function (d) {
+      O.busy = '';
+      var got = (d && d.item) || {}, res = got.resolution || {};
+      var at = Date.parse(str(res.at));
+      var mine = res.action === action && !(isFinite(at) && at < asked - STALE_MS);
+      O.dirty = true;
+      T.markGone(id, true);
+      workChanged();
+      if (!res.action || mine) {
+        var undoId = res.at ? id + ':' + res.at : '';
+        if (action === 'accept') O.rows[id] = { state: 'created', item: it, taskId: str(res.taskId), linked: it.kind === 'link', undo: undoId };
+        else { O.rows[id] = { state: 'dismissed', item: it, undo: undoId, until: Date.now() + UNDO_SECONDS * 1000 }; expireLater(); }
+      } else {
+        O.rows[id] = { state: 'stale', item: it, note: res.action === 'accept' ? 'Already in Work. It was decided on another screen.' : 'Already dismissed on another screen.' };
+      }
+      return probeLoop().then(paintIntake);
+    }, function (err) {
+      O.busy = '';
+      var code = err && err.code;
+      if (code === 'intake_not_found' || (err && err.status === 404 && code !== 'card_creation_unavailable')) {
+        O.rows[id] = { state: 'gone', item: it, note: GONE };
+        O.dirty = true; T.markGone(id, true);
+      } else {
+        var why = (code && REFUSALS[code]) || (err && err.message) || 'That did not go through.';
+        if (err && err.code === 'timeout') why = 'Your Mac did not answer in time. It may still have saved it. Trying again is safe.';
+        O.rows[id] = { state: action === 'accept' ? 'failed' : 'ready', item: it, note: why, asked: asked, action: action };
+      }
+      paintIntake();
+    });
+  }
+  function expireLater() {
+    clearTimeout(O.expireTimer);
+    O.expireTimer = setTimeout(function () {
+      var now = Date.now(), left = false;
+      Object.keys(O.rows).forEach(function (id) {
+        var r = O.rows[id];
+        if (r.state !== 'dismissed' || r.undoing) return;
+        if (r.until <= now) delete O.rows[id]; else left = true;
+      });
+      paintIntake();
+      if (left) expireLater();
+    }, UNDO_SECONDS * 1000 + 250);
+  }
+  // Undo shows only on a server that has Work's undo route (Control's probeWorkLoopIfNeeded; panes/work.js probeLoop).
+  function probeLoop() {
+    if (O.loop !== null) return Promise.resolve();
+    return api('/api/work-intake/decisions').then(function () { O.loop = true; }, function (err) { if (err && err.status === 404) O.loop = false; });
+  }
+  function undo(id) {
+    var row = O.rows[id];
+    if (!row || !row.undo || row.undoing || O.busy) return;
+    row.undoing = true; row.undoNote = '';
+    paintIntake();
+    return api('/api/work-intake/undo', { method: 'POST', body: { batchId: row.undo } }).then(function () {
+      delete O.rows[id];
+      T.markGone(id, false);
+      O.dirty = true; workChanged();
+      return T.reloadIntake();
+    }, function (err) {
+      row.undoing = false;
+      if (err && err.status === 404) O.loop = false;
+      row.undoNote = err && err.status === 404 ? 'Undo needs a newer COS server. Change it in Work.' : (err && err.message) || 'Undo did not go through.';
+      if (row.state === 'dismissed') { row.until = Date.now() + UNDO_SECONDS * 1000; expireLater(); }
+    }).then(paintIntake);
+  }
+  // Work's own copy of Intake and the board are stale now: it reads them again the next time it opens.
+  function workChanged() {
+    var work = W.pane && W.pane('work');
+    if (work && work.intakeChanged) { try { work.intakeChanged(); } catch (_e) {} }
+  }
+
+  // ═════════════ Needs you and Running ═════════════
+  function sessionRowFor(provider, id) {
+    var want = lower(id);
+    return (T.data().sessions || []).filter(function (s) {
+      var k = T.splitSessionId(s.provider, s.session_id || s.id);
+      return lower(k.id) === want && (!provider || k.provider === provider);
+    })[0] || null;
+  }
+  function needById(id) { return (T.data().needs || []).filter(function (it) { return it.id === id; })[0] || null; }
+
+  function openSession(kind, key) {
+    var provider = '', id = '';
+    O.item = null;
+    if (kind === 'need') {
+      O.item = needById(key);
+      if (O.item) { var k = T.splitSessionId(O.item.provider, O.item.sessionId); provider = k.provider; id = k.id; }
+    } else {
+      var p = key.split('|'); provider = p[0]; id = p.slice(1).join('|');
+    }
+    O.row = id ? sessionRowFor(provider, id) : null;
+    O.r = id ? K.session(provider, id, VIEW) : null;
+    if (O.r) O.r.live = { working: !!(O.row && O.row.running_active) };
+    O.last = null; O.lastState = 'idle';
+    setHead(kind === 'need' ? (O.item ? str(O.item.sessionTitle) || str(O.item.title) || 'Handoff' : 'Needs you') : (O.row ? K.title(O.row) : 'Session'));
+    var body = $('ta-body');
+    if (body) body.innerHTML = '<div id="ta-meta"></div><div id="ta-q" class="ta-q" hidden></div><div id="ta-live"></div><div id="ta-last"></div>';
+    var foot = $('ta-foot');
+    if (foot) foot.innerHTML = O.r ? composerHtml(kind) : '';
+    paintMeta();
+    if (!O.r) return;
+    if (W.sessionQuestions && W.sessionQuestions.mount) {
+      O.qMount = W.sessionQuestions.mount($('ta-q'), id, function () { paintMeta(); });
+    }
+    if (kind === 'run') { paintLive(); watchStream(O.r); }
+    loadLast(O.r);
+    K.probe(O.r);
+    if (kind === 'need') recheckNeed(key);
+  }
+  function stopSession() {
+    if (O.stream) { try { O.stream.close(); } catch (_e) {} O.stream = null; }
+    clearInterval(O.clock); O.clock = null;
+    clearInterval(O.watch); O.watch = null;
+    if (O.qMount) { O.qMount.unmount(); O.qMount = null; }
+    O.r = null; O.row = null; O.item = null;
+  }
+  // The Needs you list may be minutes old: read it again, and say so if this one is no longer waiting.
+  function recheckNeed(key) {
+    var r = O.r;
+    api('/api/work-board/your-move').then(function (d) {
+      if (O.r !== r) return;
+      var items = (d && d.items) || [];
+      if (d && d.available !== false && !items.some(function (it) { return it.id === key; })) { O.needGone = true; paintMeta(); }
+    }, function () {});
+  }
+
+  function composerHtml(kind) {
+    var label = kind === 'run' ? 'Send a note to this session' : 'Reply to this session';
+    return '<div id="ta-verdict"></div>' +
+      '<form class="composer ta-composer" id="ta-form">' +
+        '<textarea id="ta-input" rows="1" placeholder="' + esc(label) + '" aria-label="' + esc(label) + '" enterkeyhint="send"></textarea>' +
+        '<div class="composer-actions"><button type="submit" class="btn primary small" id="ta-send">Send</button></div>' +
+      '</form>' +
+      '<p class="status-line" id="ta-status" role="status" aria-live="polite"></p>';
+  }
+
+  function needLine(it) {
+    var why = T.needWhy(it) + (it.domain ? ' in ' + W.domainLabel(it.domain) : '');
+    var age = W.ago(it.updatedAt || it.createdAt);
+    if (!age) return why;
+    if (age === 'now') return why + ', just now';
+    if (/ (min|h)$/.test(age)) return why + ', ' + age + ' ago';
+    return why + ', since ' + (age === 'Yesterday' ? 'yesterday' : age);
+  }
+  function stateWords(s) {
+    if (!s) return '';
+    var st = K.stateOf(s);
+    if (st === 'running') return 'Working now, for ' + T.span(s.state_since || s.last_activity_at);
+    if (st === 'waiting') { var l = K.stateLabel(s).replace(/^Waiting( · )?/, ''); return 'Waiting for you' + (l ? ': ' + l.replace(/ · /g, ', ') : ''); }
+    if (st === 'error') return K.stateLabel(s).replace(/ · /g, ': ');
+    if (st === 'stale') return 'Not running on your Mac';
+    return s.running ? 'Open and quiet for ' + T.span(s.last_activity_at || s.state_since) : 'Not running right now';
+  }
+  function paintMeta() {
+    var box = $('ta-meta'); if (!box || !O.open) return;
+    var html = '';
+    var questions = O.qMount ? O.qMount.count() : 0;
+    if (O.open.kind === 'need') {
+      var it = O.item;
+      if (!it) { box.innerHTML = '<p class="ta-note">This is no longer waiting on you. It was handled on another screen.</p>'; return; }
+      html += '<p class="ta-sub">' + esc(needLine(it)) + '</p>';
+      if (O.needGone) html += '<p class="ta-note" role="status">This is no longer waiting on you. It was handled on another screen.</p>';
+      var card = str(it.title), session = str(it.sessionTitle);
+      if (card && card !== session) html += '<p class="ta-card-line">' + esc('Work card: ' + card) + '</p>';
+      var p = it.progress && !it.progress.unreadable ? it.progress : null;
+      if (p && p.evidence) html += '<blockquote class="ta-quote">' + esc(p.evidence) + '</blockquote>';
+    } else if (O.row) {
+      html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : O.row.provider) + ' <span>' + esc(stateWords(O.row)) + '</span></p>';
+    }
+    if (O.row && O.open.kind === 'need') html += '<p class="ta-sub">' + esc(stateWords(O.row)) + '</p>';
+    if (questions) html += '<p class="ta-ask-line">' + esc(questions === 1 ? 'It is asking you this now. Answer here.' : 'It is asking you ' + questions + ' things now. Answer here.') + '</p>';
+    var links = '';
+    if (O.r) links += '<button type="button" class="link-btn" data-ta="open-session">Open session</button>';
+    if (O.open.kind === 'need' && O.item && O.item.workIdentity) links += '<button type="button" class="link-btn" data-ta="open-card" data-id="' + esc(O.item.workIdentity) + '">Open card in Work</button>';
+    if (links) html += '<div class="ta-links">' + links + '</div>';
+    if (!O.r && O.open.kind === 'need') html += '<p class="ta-sub">This handoff has no session to reply to. Open it in Work.</p>';
+    box.innerHTML = html;
+  }
+
+  // The session's last reply, from the same read the reader makes (?turns=N, lib/agent-session-turns.ts).
+  function loadLast(r) {
+    O.lastState = 'loading'; paintLast();
+    return K.answer(K.path(r.provider, r.id, '?turns=6'), { timeoutMs: 20000 }).then(function (a) {
+      if (O.r !== r) return;
+      if (a.status === 404) { O.lastState = 'none'; O.lastWhy = 'This session is not on your Mac any more.'; paintLast(); return; }
+      if (a.status !== 200) { O.lastState = 'error'; paintLast(); return; }
+      var d = a.body || {};
+      if (!O.row) { O.row = d; paintMeta(); if (O.open && O.open.kind === 'run') setHead(K.title(d)); }
+      var turns = Array.isArray(d.recent_turns) ? d.recent_turns : [];
+      var lastA = turns.filter(function (t) { return lower(t.role) !== 'user' && String(t.text || t.content || '').trim(); }).pop();
+      O.last = lastA ? { text: String(lastA.text || lastA.content).trim(), at: lastA.at } : null;
+      O.lastState = O.last ? 'ready' : 'none';
+      O.lastWhy = '';
+      paintLast();
+    }, function () { if (O.r === r) { O.lastState = 'error'; paintLast(); } });
+  }
+  function paintLast() {
+    var box = $('ta-last'); if (!box) return;
+    if (O.lastState === 'loading') { box.innerHTML = '<div class="ta-last"><div class="skeleton" style="width:74%"></div><div class="skeleton" style="width:52%;margin-top:8px"></div></div>'; return; }
+    if (O.lastState === 'error') { box.innerHTML = '<p class="ta-sub">The last reply did not load. Open the session to read it.</p>'; return; }
+    if (O.lastState === 'none') { box.innerHTML = O.lastWhy ? '<p class="ta-sub">' + esc(O.lastWhy) + '</p>' : ''; return; }
+    if (!O.last) { box.innerHTML = ''; return; }
+    var at = W.toDate(O.last.at), long = O.last.text.length > 700;
+    box.innerHTML = '<section class="ta-last" aria-label="Last reply"><p class="ta-last-head">' + esc('Last reply' + (at ? ', ' + W.clock(at) : '')) + '</p>' +
+      '<div class="sx-md ta-last-text' + (long ? ' clamped' : '') + '" id="ta-last-text">' + K.markdown(O.last.text.slice(0, 12000)) + '</div>' +
+      (long ? '<button type="button" class="link-btn" data-ta="more">Show all of it</button>' : '') + '</section>';
+  }
+
+  // Running: the same live stream the reader follows, read with its own reducer (applyFeed, sxFeedWord and friends).
+  function watchStream(r) {
+    if (typeof EventSource !== 'function') { r.feed.fallback = 'unsupported'; paintLive(); return; }
+    var es;
+    try { es = new EventSource(K.path(r.provider, r.id, '/stream?seed=turn')); } catch (_e) { r.feed.fallback = 'unsupported'; paintLive(); return; }
+    O.stream = es;
+    es.onmessage = function (ev) {
+      var e; try { e = JSON.parse(ev.data); } catch (_e) { return; }
+      if (O.r !== r) return;
+      K.feed.apply(r, e);
+      r.live = r.live || {};
+      if (e.kind === 'status') {
+        var working = e.state === 'working' || e.agent_state === 'running';
+        if (r.live.working && !working) loadLast(r);
+        r.live.working = working;
+        if (!working) r.live.prose = null;
+      } else if (e.kind === 'prose' && e.text) r.live.prose = String(e.text);
+      paintLive();
+    };
+    es.onerror = function () {
+      if (O.r !== r || O.stream !== es) return;
+      if (es.readyState === 2) {
+        if (r.feed.lastSeq > 0) { r.feed.connected = false; r.feed.fallback = 'stream_lost'; paintLive(); }
+        else probeStream(r);
+      } else { r.feed.fallback = 'reconnecting'; paintLive(); }
+    };
+  }
+  // EventSource hides why a stream was refused: one GET reads the status for the fallback line (the reader's sxProbeStream).
+  function probeStream(r) {
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    fetch(K.path(r.provider, r.id, '/stream?seed=turn'), { headers: { 'X-COS-Web': '1' }, credentials: 'same-origin', signal: ctrl ? ctrl.signal : undefined })
+      .then(function (res) { var code = res.status; if (ctrl) ctrl.abort(); return code; }, function () { return 0; })
+      .then(function (code) {
+        if (O.r !== r || r.feed.lastSeq > 0) return;
+        r.feed.fallback = code === 200 ? 'stream_lost' : code ? 'http_' + code : 'unreachable';
+        paintLive();
+      });
+  }
+  function paintLive() {
+    var box = $('ta-live'); if (!box || !O.r || !O.open || O.open.kind !== 'run') return;
+    var r = O.r, f = r.feed, live = r.live || {};
+    var on = f.connected || f.lastSeq > 0 || live.working;
+    var html;
+    if (on) {
+      // Idle: the reader's line repeats the last reply, which the peek shows in full just below.
+      var word = K.feed.word(r), detail = word === 'Idle' ? '' : K.feed.detail(f, word);
+      html = '<div class="sx-act-state"><span class="sx-dot ' + word.toLowerCase() + '" aria-hidden="true"></span><strong>' + esc(word) + '</strong>' +
+        '<span class="sx-act-detail">' + esc(detail) + '</span><span class="sx-act-clock" id="ta-clock">' + esc(K.feed.elapsed(f)) + '</span></div>' +
+        (f.prompt ? '<p class="ta-act-prompt">' + esc('Working on: ' + clip(f.prompt, 240)) + '</p>' : '') +
+        '<div class="ta-act-tail">' + f.tools.slice(-5).map(function (t) { return '<div class="sx-act-tool">' + esc(K.feed.tool(t)) + '</div>'; }).join('') +
+        (live.working && live.prose ? '<div class="sx-act-prose">' + esc(String(live.prose).slice(-500)) + '</div>' : '') + '</div>';
+      // The feed stopped or was refused: say why under the last state it showed.
+      if (f.fallback && !f.connected) html += '<p class="ta-sub ta-feed-note">' + esc(K.feed.fallback(f.fallback)) + '</p>';
+    } else html = '<p class="ta-sub">' + esc(f.fallback ? K.feed.fallback(f.fallback) : 'Connecting to the live feed\u2026') + '</p>';
+    box.innerHTML = '<div class="sx-activity ta-activity" aria-live="polite">' + html + '</div>';
+    clearInterval(O.clock); O.clock = null;
+    var w = on ? K.feed.word(r) : '';
+    if (w === 'Working' || w === 'Waiting') {
+      O.clock = setInterval(function () { if (O.r !== r) { clearInterval(O.clock); return; } var c = $('ta-clock'); if (c) c.textContent = K.feed.elapsed(r.feed); }, 1000);
+    }
+  }
+
+  // ── sending, through the reader's own path ────────────
+  // continueSession reports through this view (app.js READER_VIEW's methods); everything else about the send is the
+  // reader's code. The overlay never holds a message for later: when COS's own reply is still running it says so, and
+  // the words stay in the box, under the same key, so Send again cannot post twice.
+  var VIEW = {
+    status: function (r, text, kind, actionHtml) { if (r !== O.r) return; O.note = { text: text || '', kind: kind || '' }; paintNote(); },
+    pending: function (r, text, note) {
+      if (r !== O.r) return;
+      O.dirty = true;
+      O.note = { text: note === 'waiting in line' ? 'Waiting in line. It sends on its own when the session is free.' : note === 'already sent' ? 'Already sent.' : 'Sent.', kind: '' };
+      paintNote();
+    },
+    clear: function (r, text) {
+      if (r !== O.r) return;
+      var box = $('ta-input');
+      if (box && box.value.trim() === String(text).trim()) { box.value = ''; W.autoGrow(box); }
+      if (r.draft && r.draft.text === text) r.draft = null;
+    },
+    verdict: function (r) { if (r === O.r) paintVerdict(); },
+    hold: function (r) {
+      if (r !== O.r) return;
+      O.note = { text: 'COS is still answering in this session. Send again when it finishes; it will not post twice. Or open the session, where it sends on its own.', kind: 'error' };
+      paintNote();
+    },
+    watch: function (r, bindingId, key) { watchTurn(r, bindingId, key); },
+    queue: function () {}
+  };
+  function paintNote() { W.setStatus($('ta-status'), O.note.text, O.note.kind === 'error'); }
+  function paintVerdict() {
+    var box = $('ta-verdict'), r = O.r; if (!box || !r) return;
+    var v = r.verdict, html = '';
+    if (O.cautionAsk) {
+      html = '<div class="sx-box confirm" role="alertdialog" aria-labelledby="ta-caution-title"><strong id="ta-caution-title">Send into an open session?</strong>' +
+        '<p>Another app on this Mac has this session open. It looks idle right now, but a reply will run with that session\u2019s own permissions.</p>' +
+        '<div class="sx-box-actions"><button type="button" class="cx-btn danger" data-ta="caution-send">Send anyway</button><button type="button" class="cx-btn quiet" data-ta="caution-cancel">Cancel</button></div></div>';
+    } else if (r.refusal) {
+      var f = r.refusal;
+      html = '<div class="sx-box refusal" role="status"><p>' + esc(f.copy) + '</p>' + (f.supplement ? '<p class="sx-box-sub">' + esc(f.supplement) + '</p>' : '') +
+        '<div class="sx-box-actions">' +
+        (f.changed ? '<button type="button" class="cx-btn quiet" data-ta="send-anyway">Continue anyway</button>' : '') +
+        (f.retry ? '<button type="button" class="cx-btn quiet" data-ta="retry">Try again</button>' : '') +
+        ((f.changed || f.fork) ? '<button type="button" class="cx-btn quiet" data-ta="open-session">' + (f.fork ? 'Open session to fork it' : 'Open session') + '</button>' : '') +
+        '</div></div>';
+    } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
+      html = '<p class="sx-park">' + esc(K.parkCopy(r.provider)) + '</p>';
+    } else if (v && v.attachable === false && v.reasonCopy) {
+      html = '<div class="sx-box refusal" role="status"><p>' + esc(v.reasonCopy) + '</p></div>';
+    } else if (v && v.caution) {
+      html = '<p class="sx-park">' + esc(r.provider === 'codex' ? 'The Codex app has this thread open. COS asks before the first send, then hands your message to the app\u2019s own queue.'
+        : 'Another app on this Mac has this session open. COS asks before the first send.') + '</p>';
+    }
+    box.innerHTML = html;
+  }
+  function setSending(on) {
+    var send = $('ta-send'), input = $('ta-input');
+    if (send) { send.disabled = on; send.textContent = on ? 'Sending' : 'Send'; }
+    if (input) input.readOnly = on;
+  }
+  function sendReply(opts) {
+    var r = O.r; if (!r) return;
+    var input = $('ta-input'), text = input ? input.value.trim() : '';
+    if (!text) { O.note = { text: 'Write a message first.', kind: 'error' }; paintNote(); return; }
+    // Control's caution: another app holds this session and looks idle, so the first send asks.
+    if (r.verdict && r.verdict.caution && !r.cautionAck) { O.cautionAsk = true; paintVerdict(); return; }
+    if (r.sending) return;
+    if (r.refusal || O.cautionAsk) { r.refusal = null; O.cautionAsk = false; paintVerdict(); }
+    r.sending = true; setSending(true);
+    var done = function () { r.sending = false; if (O.r === r) setSending(false); };
+    return K.send(r, text, opts || {}).then(function () { done(); }, function (err) {
+      done();
+      if (O.r !== r) return;
+      var why = err && err.name === 'AbortError'
+        ? 'No answer from your Mac yet. It may still land. Sending again is safe; it will not post twice.'
+        : (err && err.message) || 'Could not reach your Mac.';
+      O.note = { text: '', kind: '' }; paintNote();
+      r.refusal = { copy: why, retry: true };
+      paintVerdict();
+    });
+  }
+  // Follow one sent turn to its end, as the reader's watchTurn does, while this overlay shows it.
+  function watchTurn(r, bindingId, key) {
+    clearInterval(O.watch);
+    var started = Date.now();
+    O.watch = setInterval(function () {
+      if (O.r !== r || Date.now() - started > WATCH_MS) { clearInterval(O.watch); return; }
+      K.answer('/api/agent-sessions/bindings/' + encodeURIComponent(bindingId) + '/turns/' + encodeURIComponent(key)).then(function (s) {
+        if (O.r !== r) return;
+        var o = s.body && s.body.outcome;
+        if (o === 'completed') { clearInterval(O.watch); O.note = { text: 'Done. The reply is below.', kind: '' }; paintNote(); loadLast(r); }
+        else if (o === 'refused') { clearInterval(O.watch); O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); }
+        else if (o === 'ambiguous') { clearInterval(O.watch); O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); }
+      }).catch(function () {});
+    }, 3000);
+  }
+
+  // ═════════════ what COS is told about Today ═════════════
+  // A short plain summary of what the Today cards show, for an Ask made from Today (app.js askCos). Titles and words
+  // only: no ids, no tokens. Bounded to SUMMARY_MAX characters.
+  function end(s) { s = String(s || '').trim(); return /[.!?\u2026]$/.test(s) ? s : s + '.'; }
+  function summary() {
+    var d = T.data();
+    if (!d.at) return '';
+    var lines = [], now = new Date();
+    lines.push('Today, ' + now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) + ', ' + W.clock(now) + '.');
+    var needs = d.needs || [];
+    lines.push(needs.length ? 'Needs you (' + needs.length + '):' : 'Needs you: nothing.');
+    needs.slice(0, 6).forEach(function (it) {
+      var title = str(it.sessionTitle) || str(it.title) || 'Handoff';
+      var bits = [end(clip(title, 120)) + ' ' + end(needLine(it))];
+      if (str(it.title) && str(it.title) !== str(it.sessionTitle)) bits.push(end('Work card: ' + clip(it.title, 100)));
+      var p = it.progress && !it.progress.unreadable ? it.progress : null;
+      if (p && p.evidence) bits.push('The session said: "' + clip(p.evidence, 200) + '"');
+      lines.push('- ' + bits.join(' '));
+    });
+    if (needs.length > 6) lines.push('- and ' + (needs.length - 6) + ' more.');
+    var working = d.working || [], open = d.open || [];
+    lines.push('Running: ' + working.length + ' working' + (open.length ? ', ' + open.length + ' more open and quiet' : '') + (working.length ? ':' : '.'));
+    working.slice(0, 6).forEach(function (s) {
+      var k = T.splitSessionId(s.provider, s.session_id);
+      lines.push('- ' + K.providerLabel(k.provider) + ': ' + clip(T.sessionTitle(s), 120) + ', working for ' + T.span(s.state_since || s.last_activity_at) + '.');
+    });
+    var items = d.intake || [];
+    if (items.length) {
+      lines.push('From today\u2019s meetings: ' + items.length + (items.length === 1 ? ' suggestion' : ' suggestions') + ' waiting for a decision (they move to Work at midnight):');
+      var groups = [], byTitle = {};
+      items.forEach(function (it) { var t = str(it.meeting && it.meeting.title) || 'A meeting'; if (!byTitle[t]) { byTitle[t] = []; groups.push(t); } byTitle[t].push(it); });
+      groups.slice(0, 8).forEach(function (t) {
+        var list = byTitle[t];
+        lines.push('- ' + clip(t, 100) + ' (' + list.length + '): ' + list.slice(0, 4).map(function (it) { return '"' + clip(textOf(it), 110) + '"' + (it.ownerIsMiles ? '' : str(it.owner) ? ' (' + clip(it.owner, 40) + '\u2019s)' : ''); }).join('; ') + (list.length > 4 ? '; and ' + (list.length - 4) + ' more' : '') + '.');
+      });
+      if (groups.length > 8) lines.push('- and ' + (groups.length - 8) + ' more meetings.');
+    }
+    var n = d.welcome && d.welcome.nextEvent, nd = n && W.toDate(n.time);
+    if (nd && n.title) lines.push('Up next: ' + clip(n.title, 120) + ' at ' + W.clock(nd) + ' ' + W.dayWord(nd) + '.');
+    var out = '', i;
+    for (i = 0; i < lines.length; i++) {
+      if (out.length + lines[i].length + 1 > SUMMARY_MAX) { out += '[More is on Today than fits here.]'; break; }
+      out += lines[i] + '\n';
+    }
+    return out.trim();
+  }
+
+  W.registerPane('todayActions', {
+    load: function () {},
+    open: open, close: close, summary: summary,
+    isOpen: function () { return !!O.open; },
+    _state: O, _decide: decide, _undo: undo, _intakeHtml: intakeHtml, _send: sendReply, _view: VIEW, _paintVerdict: paintVerdict,
+    _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater
+  });
+})();

@@ -19,6 +19,8 @@
   <link rel="stylesheet" href="/control/panes/sessions.css">
   <link rel="stylesheet" href="/control/panes/cos-chat.css">
   <link rel="stylesheet" href="/control/panes/questions.css">
+  <link rel="stylesheet" href="/control/panes/memories.css">
+  <link rel="stylesheet" href="/control/panes/today-actions.css">
   <script src="/control/theme.js"></script>
 </head>
 <body>
@@ -149,7 +151,7 @@
           <section class="card hidden" id="intake-card" aria-labelledby="intake-title">
             <div class="panel-head">
               <h2 id="intake-title" class="panel-title">From today's meetings<span id="intake-count" class="count"></span></h2>
-              <button type="button" class="link-btn" data-goto="work/sort">Review</button>
+              <button type="button" class="link-btn" data-today="intake" data-goto="work/sort">Review</button>
             </div>
             <div id="intake-body" class="intake-body"></div>
           </section>
@@ -208,9 +210,7 @@
         <section id="pane-dictation" class="pane hidden" data-title="Dictation"></section>
 
         <!-- MEMORIES -->
-        <section id="pane-memories" class="pane flush hidden" data-title="Memories">
-          <iframe id="memories-frame" class="memories-frame" title="Memories" src="about:blank"></iframe>
-        </section>
+        <section id="pane-memories" class="pane hidden" data-title="Memories"><!-- rendered by panes/memories.js --></section>
 
         <!-- SPEAKERS -->
         <section id="pane-speakers" class="pane wide hidden" data-title="Speakers"><!-- rendered by panes/speakers.js --></section>
@@ -273,7 +273,16 @@
     "meetings": "/control/panes/meetings.js",
     "work": "/control/panes/work.js",
     "dictation": "/control/panes/dictation.js",
-    "settings": "/control/panes/settings.js"
+    "settings": "/control/panes/settings.js",
+    "memories": "/control/panes/memories.js",
+    "todayActions": "/control/panes/today-actions.js"
+  }</script>
+  <!-- The Knowledge graph explorer, loaded by panes/memories.js when the graph first opens. -->
+  <script type="application/json" id="memories-graph-assets">{
+    "css": "/control/memories/graph-explorer.css",
+    "d3": "/control/memories/d3.min.js",
+    "explorer": "/control/memories/graph-explorer.js",
+    "workspace": "/control/memories/memory-workspace.js"
   }</script>
 </body>
 </html>

@@ -7,8 +7,6 @@
   function apply(choice) {
     var mode = resolve(choice);
     document.documentElement.setAttribute('data-theme', mode);
-    var frame = document.getElementById('memories-frame');
-    if (frame) frame.style.colorScheme = mode;
     return mode;
   }
   window.CosTheme = {

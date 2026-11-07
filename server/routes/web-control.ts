@@ -1,5 +1,7 @@
 import express, { Router, type Request, type Response } from 'express'
 import fs from 'node:fs'
+import crypto from 'node:crypto'
+import path from 'node:path'
 import { hostname, networkInterfaces } from 'node:os'
 import {
   hasProxyForwardedHeaders,
@@ -40,7 +42,8 @@ import {
 } from '../lib/web-memories-bridge.js'
 import { listLiveTranscriptSessions, readLiveTranscriptSession } from '../lib/web-live-chunks.js'
 import { getWebUsageSummary } from '../lib/web-usage-bridge.js'
-import { WEB_PET_POSES, controlSupportDir, petChunk, planPose, readPetSources, webPetManifest, type WebPetPose } from '../lib/web-pet.js'
+import { WEB_PET_POSES, controlSupportDir, petChunk, petPreview, planPose, readPetSources, webPetManifest, type WebPetPose } from '../lib/web-pet.js'
+import { controlResourcesDir, galleryPets, galleryThumb, parsePetChoice, petChoiceKey, resolvePet, shippedPets, type PetChoice, type PetFetcher } from '../lib/web-pet-choice.js'
 import { dataPath } from '../lib/data-dir.js'
 
 export { isMemoryWebOpReadOnly, MUTATING_MEMORY_WEB_OPS, READ_ONLY_MEMORY_WEB_OPS }
@@ -51,6 +54,8 @@ export interface WebControlRouterDeps {
   petSupportDir?: () => string
   petCacheDir?: () => string
   petRun?: (cmd: string, args: string[]) => Promise<void>
+  petResourcesDir?: () => string | null
+  petFetch?: PetFetcher
   port: () => number
   publicPort?: () => number
   httpsPort?: () => number | null
@@ -557,29 +562,92 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     res.json(summary)
   })
 
-  // The session pet on Home: the same pet COS Control shows, resized and chunked for a phone (lib/web-pet.ts).
+  // The session pet on Home (lib/web-pet.ts) and the pet picker (lib/web-pet-choice.ts). `?pet=` is the browser's
+  // choice: mac (default), shipped:<id> or gallery:<id>. Everything here reads COS Control's files; nothing writes them.
   const petDir = (): string => deps.petSupportDir?.() ?? controlSupportDir()
-  const petCache = (): string => deps.petCacheDir?.() ?? dataPath('web-pet')
-  router.get('/web-pet', (_req: Request, res: Response) => {
+  const petResources = (): string | null => (deps.petResourcesDir ? deps.petResourcesDir() : controlResourcesDir())
+  const petCacheRoot = (): string => deps.petCacheDir?.() ?? dataPath('web-pet')
+  const petCacheFor = (name: string): string => (name ? path.join(petCacheRoot(), name) : petCacheRoot())
+  const petChoiceOf = (req: Request): PetChoice | null => parsePetChoice(req.query.pet ?? 'mac')
+  const resolveFor = (choice: PetChoice) => resolvePet(choice, { supportDir: petDir(), resources: petResources() })
+  const sendImage = async (res: Response, file: string, type: string, immutable: boolean): Promise<void> => {
+    res.set('Cache-Control', immutable ? 'private, max-age=31536000, immutable' : 'private, no-cache')
+    // Not sendFile: it refuses any path with a dot folder, and the cache lives under ~/.cos-glasses.
+    res.type(type).send(await fs.promises.readFile(file))
+  }
+  const fileTag = (file: string): string => { try { const st = fs.statSync(file); return `${st.size}-${Math.round(st.mtimeMs)}` } catch { return '0' } }
+
+  router.get('/web-pet', (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
-    res.json(webPetManifest(petDir()))
+    const choice = petChoiceOf(req)
+    if (!choice) return res.status(400).json({ error: 'pet_choice_invalid' })
+    const key = petChoiceKey(choice)
+    const found = resolveFor(choice)
+    if (!found) return res.json({ available: false, pet: key, poses: {} })
+    if (found.kind === 'strips') return res.json({ ...webPetManifest(found.dir, key), pet: key, kind: 'strips' })
+    const tag = found.kind === 'still' ? fileTag(found.file) : found.preview
+    return res.json({ available: true, pet: key, kind: 'still', poses: {}, still: `/api/web-pet/still?pet=${encodeURIComponent(key)}&v=${encodeURIComponent(crypto.createHash('sha256').update(tag).digest('hex').slice(0, 16))}` })
   })
+
   router.get('/web-pet/sheet/:pose/:chunk', async (req: Request, res: Response) => {
+    const choice = petChoiceOf(req)
+    const found = choice ? resolveFor(choice) : null
+    if (!found || found.kind !== 'strips') return res.status(404).json({ error: 'pet_unavailable' })
     const pose = String(req.params.pose) as WebPetPose
-    const src = (WEB_PET_POSES as readonly string[]).includes(pose) ? readPetSources(petDir())[pose] : undefined
+    const src = (WEB_PET_POSES as readonly string[]).includes(pose) ? readPetSources(found.dir)[pose] : undefined
     if (!src) return res.status(404).json({ error: 'pet_pose_unavailable' })
     const plan = planPose(src)
     const index = Number(req.params.chunk)
     if (!Number.isInteger(index) || index < 0 || index >= plan.chunks) return res.status(404).json({ error: 'pet_chunk_unavailable' })
     try {
-      const file = await petChunk(plan, index, { cacheDir: petCache(), run: deps.petRun })
-      res.set('Cache-Control', req.query.v === plan.key ? 'private, max-age=31536000, immutable' : 'private, no-cache')
-      // Not sendFile: it refuses any path with a dot folder, and the cache lives under ~/.cos-glasses.
-      res.type('png').send(await fs.promises.readFile(file))
+      const file = await petChunk(plan, index, { cacheDir: petCacheFor(found.cacheName), run: deps.petRun })
+      await sendImage(res, file, 'png', req.query.v === plan.key)
     } catch (err) {
       log(`[web-pet] could not build ${pose} chunk ${index}: ${err instanceof Error ? err.message : String(err)}`)
       res.status(503).json({ error: 'pet_build_failed' })
     }
+  })
+
+  // A still pet: COS Control's single sprite, Cloud Puff, or a gallery picture (downloaded once, as the Mac does).
+  router.get('/web-pet/still', async (req: Request, res: Response) => {
+    const choice = petChoiceOf(req)
+    const found = choice ? resolveFor(choice) : null
+    if (!found || found.kind === 'strips') return res.status(404).json({ error: 'pet_unavailable' })
+    try {
+      const art = found.kind === 'still' ? found : await galleryThumb(found, petCacheFor('gallery'), deps.petFetch)
+      await sendImage(res, art.file, art.type, typeof req.query.v === 'string' && req.query.v.length > 0)
+    } catch (err) {
+      log(`[web-pet] gallery picture failed for ${found.kind === 'gallery' ? found.id : 'still'}: ${err instanceof Error ? err.message : String(err)}`)
+      res.status(502).json({ error: 'pet_picture_unavailable' })
+    }
+  })
+
+  // The picker's small picture: an animated pet's first frame, or the still itself.
+  router.get('/web-pet/preview', async (req: Request, res: Response) => {
+    const choice = petChoiceOf(req)
+    const found = choice ? resolveFor(choice) : null
+    if (!found) return res.status(404).json({ error: 'pet_unavailable' })
+    try {
+      if (found.kind === 'strips') return await sendImage(res, await petPreview(found.dir, petCacheFor(found.cacheName || 'mac-preview'), { run: deps.petRun }), 'png', typeof req.query.v === 'string')
+      const art = found.kind === 'still' ? found : await galleryThumb(found, petCacheFor('gallery'), deps.petFetch)
+      await sendImage(res, art.file, art.type, typeof req.query.v === 'string')
+    } catch (err) {
+      log(`[web-pet] preview failed: ${err instanceof Error ? err.message : String(err)}`)
+      res.status(502).json({ error: 'pet_picture_unavailable' })
+    }
+  })
+
+  // What the picker lists: the Mac's pet, the characters COS Control ships, and its OpenPets gallery.
+  router.get('/web-pet/catalog', (_req: Request, res: Response) => {
+    res.set('Cache-Control', 'private, no-store')
+    const preview = (key: string, tag: string) => `/api/web-pet/preview?pet=${encodeURIComponent(key)}&v=${encodeURIComponent(crypto.createHash('sha256').update(tag).digest('hex').slice(0, 16))}`
+    const mac = resolveFor({ kind: 'mac' })
+    const macTag = mac ? (mac.kind === 'still' ? fileTag(mac.file) : fileTag(path.join(petDir(), 'session-pet-states.json'))) : ''
+    res.json({
+      mac: { available: !!mac, preview: mac ? preview('mac', 'mac:' + macTag) : null },
+      shipped: shippedPets(petResources()).map((p) => ({ ...p, pet: `shipped:${p.id}`, preview: preview(`shipped:${p.id}`, `shipped:${p.id}`) })),
+      gallery: galleryPets(petDir()).map((p) => ({ id: p.id, name: p.name, description: p.description, category: p.category, pet: `gallery:${p.id}`, preview: preview(`gallery:${p.id}`, p.preview) })),
+    })
   })
 
   // Today / Work "Your Move" compatibility route

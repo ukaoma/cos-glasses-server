@@ -1,0 +1,96 @@
+/* COS Control Web: Today as a place to act (panes/today-actions.js). A bottom sheet on the folded phone, a side sheet
+   from 600 px. Built from the page's own tokens and pieces: the composer, .btn, .link-btn, .cx-btn, the reader's
+   activity rows (.sx-act-*) and boxes (.sx-box), and the question cards (questions.css). */
+
+/* The Today rows that open it: whole-row buttons. */
+.need-open { display: block; width: 100%; text-align: left; color: inherit; }
+.need-open .need-top { display: flex; }
+.need-open .need-foot { display: flex; }
+.intake-row { width: 100%; text-align: left; color: inherit; align-items: center; min-height: 40px; }
+.intake-row::after { content: ''; width: 7px; height: 7px; border-right: 2px solid var(--grey); border-bottom: 2px solid var(--grey); transform: rotate(-45deg); flex: none; opacity: 0.6; margin-left: 2px; }
+.intake-row .intake-meeting { flex: 1; }
+
+/* The page behind does not scroll. Only the root: hidden on body too would make body a scroll container and unstick the rail. */
+html.ta-open { overflow: hidden; }
+
+.ta-layer {
+  position: fixed; left: 0; right: 0; z-index: 45;
+  /* The visible viewport (app sets these from visualViewport): the keyboard never covers the reply box. */
+  top: var(--ta-vt, 0px); height: var(--ta-vh, 100dvh);
+  --run-green: rgb(56, 145, 99);
+}
+:root[data-theme='dark'] .ta-layer { --run-green: rgb(108, 207, 143); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .ta-layer { --run-green: rgb(108, 207, 143); } }
+.ta-layer[hidden] { display: none; }
+.ta-scrim { position: absolute; inset: 0; background: rgba(23, 18, 14, 0.45); touch-action: none; animation: fade 160ms ease; }
+
+.ta-sheet {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  /* A strip of Today stays in view above it: context, and somewhere to tap outside. */
+  max-height: calc(100% - var(--safe-top) - 56px);
+  display: flex; flex-direction: column;
+  background: var(--page); color: var(--ink);
+  border-radius: 20px 20px 0 0; box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.25);
+  padding-left: var(--safe-left); padding-right: var(--safe-right);
+  outline: none;
+  animation: ta-rise 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.ta-grip { flex: none; width: 36px; height: 5px; border-radius: 3px; background: var(--panel-border); margin: 8px auto 0; }
+.ta-head { flex: none; display: flex; align-items: flex-start; gap: 10px; padding: 6px var(--gutter) 4px; }
+.ta-title { flex: 1; min-width: 0; margin: 8px 0 0; font: 500 22px/1.2 var(--display); letter-spacing: -0.005em; overflow-wrap: anywhere; }
+.ta-x { flex: none; display: grid; place-items: center; width: 44px; height: 44px; margin-right: -8px; border-radius: 12px; color: var(--ink); }
+.ta-x .icon { width: 20px; height: 20px; stroke-width: 1.8; }
+.ta-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 2px var(--gutter) 16px; }
+.ta-foot { flex: none; padding: 10px var(--gutter) calc(var(--safe-bottom) + 10px); border-top: 1px solid var(--row-border); background: var(--page); }
+.ta-foot:empty { display: none; }
+.ta-foot .composer { margin-top: 0; position: static; }
+.ta-foot .status-line { margin: 6px 4px 0; min-height: 0; }
+.ta-foot .status-line:empty { display: none; }
+.ta-foot .sx-box, .ta-foot .sx-park { margin: 0 0 10px; }
+
+.ta-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0 0 8px; color: var(--sub); font-size: 14.5px; line-height: 1.4; }
+.ta-note { margin: 6px 0 0; color: var(--hot); font-size: 13.5px; line-height: 1.4; }
+.ta-card-line { margin: 0 0 8px; font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
+.ta-quote { margin: 8px 0 10px; padding-left: 12px; border-left: 2px solid var(--btn-border); font: italic 400 16px/1.42 var(--display); color: var(--ink); overflow-wrap: anywhere; }
+.ta-ask-line { margin: 8px 0 4px; font-size: 14.5px; font-weight: 600; color: var(--hot); }
+.ta-links { display: flex; flex-wrap: wrap; gap: 0 18px; }
+.ta-q { display: grid; gap: 12px; margin: 8px 0 12px; }
+.ta-q[hidden] { display: none; }
+.ta-activity { margin: 8px 0 4px; }
+.ta-activity .sx-act-state { margin-top: 0; }
+.ta-act-prompt { margin: 2px 0 0; font-size: 13.5px; line-height: 1.4; color: var(--ink); overflow-wrap: anywhere; }
+.ta-act-tail { margin-top: 6px; display: flex; flex-direction: column; }
+.ta-last { margin-top: 14px; padding: 12px 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--panel-border); font-size: 15px; line-height: 1.5; }
+.ta-last-head { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--sub); }
+.ta-last-text.clamped { max-height: 18em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 72%, transparent); mask-image: linear-gradient(#000 72%, transparent); }
+
+/* From today's meetings */
+.ta-list { margin-top: 2px; }
+.ta-group { margin: 18px 0 0; font: 600 15px/1.3 var(--body); color: var(--ink); overflow-wrap: anywhere; }
+.ta-sugg { padding: 12px 0 10px; border-top: 1px solid var(--row-border); }
+.ta-group + .ta-sugg { border-top: 0; padding-top: 8px; }
+.ta-sugg-text { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.ta-sugg-src { margin: 4px 0 0; font-size: 13.5px; line-height: 1.4; color: var(--sub); overflow-wrap: anywhere; }
+.ta-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 18px; margin-top: 6px; }
+.ta-acts .btn.small { min-height: 44px; padding: 0 16px; }
+.ta-acts .link-btn { font-size: 14.5px; }
+.link-btn.quiet { color: var(--sub); font-weight: 500; }
+.ta-wait { display: inline-flex; align-items: center; min-height: 44px; font-size: 14px; color: var(--sub); }
+.ta-done { font-size: 14.5px; font-weight: 600; color: var(--ink); }
+.ta-sugg.settled { display: flex; flex-wrap: wrap; align-items: center; gap: 0 16px; }
+.ta-sugg.settled > p { flex-basis: 100%; }
+.ta-sugg.settled .ta-sugg-text { color: var(--sub); font-weight: 500; }
+
+/* Unfolded Duo, tablets, desktop: a sheet at the right edge, Today still in view beside it. */
+@media (min-width: 600px) {
+  .ta-sheet {
+    left: auto; top: 0; width: clamp(360px, 60vw, 480px); max-height: none;
+    border-radius: 20px 0 0 20px; box-shadow: -16px 0 48px rgba(0, 0, 0, 0.22);
+    animation-name: ta-slide;
+  }
+  .ta-grip { display: none; }
+  .ta-head { padding-top: calc(var(--safe-top) + 14px); }
+  .ta-foot { padding-bottom: calc(var(--safe-bottom) + 14px); }
+}
+@keyframes ta-rise { from { transform: translateY(32px); opacity: 0.6; } }
+@keyframes ta-slide { from { transform: translateX(32px); opacity: 0.6; } }

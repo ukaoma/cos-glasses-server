@@ -133,7 +133,7 @@
   var state = {
     pane: 'today', serverName: '', tailnetUrl: '',
     sessions: [], sessionsMode: 'words', workTasks: [], workOpenStages: { complete: false },
-    stream: null, memoriesLoaded: false, lastLoad: {}, livePoll: null
+    stream: null, lastLoad: {}, livePoll: null
   };
   // Control's order (ActivitySection.visibleSections): Today, then Messages to Dictation. Usage is a
   // view inside Sessions on the Mac; its route stays so old links work, and the rail marks Sessions.
@@ -240,7 +240,6 @@
     if (PANES[r.pane]) { try { PANES[r.pane].load(r.args, { changed: changedPane }); } catch (err) { console.error(err); } }
     else if (r.pane === 'today') loadToday();
     else if (r.pane === 'sessions') { if (!reading || !state.sessions.length || changedPane) loadSessions(); if (reading) openSession(r.args[0], r.args[1]); }
-    else if (r.pane === 'memories') loadMemories();
     else if (r.pane === 'usage') loadUsage(false);
     state.lastLoad[r.pane] = Date.now();
     runHooks(routeHooks, r);
@@ -320,12 +319,32 @@
   // is "waiting", then one, two, three, four or more sessions in play are working, duel, trio, swarm, an open
   // quiet session is "patrol", none is "idle". Strips come from /api/web-pet, resized and cut for a phone.
   var PET = { manifest: null, fetchedAt: 0, pose: null, timer: null, frame: 0, token: 0 };
+  // This browser's pet settings (Settings > Pet): which pet, and whether Today shows it. Per browser, like the theme.
+  var PET_KEY = 'cos-web-pet';
+  function petPrefs() {
+    var p = readStore(PET_KEY);
+    var pet = typeof p.pet === 'string' && /^(mac|(shipped|gallery):[a-z0-9][a-z0-9-]{0,80})$/.test(p.pet) ? p.pet : 'mac';
+    return { pet: pet, show: p.show !== false };
+  }
+  function setPetPrefs(next) {
+    var cur = petPrefs();
+    var merged = { pet: next.pet != null ? next.pet : cur.pet, show: next.show != null ? !!next.show : cur.show };
+    writeStore(PET_KEY, merged);
+    // Forget the old pet's manifest and loop; Today repaints with the new choice next time it shows.
+    PET.manifest = null; PET.fetchedAt = 0; PET.pose = null; PET.token++; petStop();
+    var box = $('today-pet');
+    if (box) { box.innerHTML = ''; box.classList.add('hidden'); }
+    if (state.pane === 'today' && state.sessions) renderPet(state.sessions);
+    return merged;
+  }
   var PET_HEIGHT = 140;
   function petPose(sessions) {
     var working = 0, waiting = 0, alive = 0;
     sessions.forEach(function (s) {
       var st = sxState(s);
-      if (st === 'running') working++;
+      // Working is the Running card's own test (running_active), so the caption under the pet never
+      // disagrees with the Running count beside it (11/06: the pet said 3 while the card said 2).
+      if (s.running_active) working++;
       else if (st === 'waiting') waiting++;
       if (s.running || s.running_active) alive++;
     });
@@ -367,15 +386,34 @@
     else if (rec.previousElementSibling !== box) rec.parentNode.insertBefore(box, rec);
   }
   if (PET_WIDE) { if (PET_WIDE.addEventListener) PET_WIDE.addEventListener('change', placePet); else if (PET_WIDE.addListener) PET_WIDE.addListener(placePet); }
+  var PET_CHANGE = '<button type="button" class="pet-change" data-goto="settings/pet">Change pet</button>';
+  // A still pet (a gallery pick, Cloud Puff, or a single image on the Mac): one picture for every state.
+  function renderPetStill(box, m, sessions) {
+    var c = petPose(sessions), label = petCaption(c);
+    petStop(); PET.pose = 'still:' + m.still;
+    var img = box.querySelector('.pet-still');
+    if (!img || img.getAttribute('src') !== m.still) {
+      box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><img class="pet-still" alt="" src="' + esc(m.still) + '"><span class="pet-caption"></span></button>' + PET_CHANGE;
+      img = box.querySelector('.pet-still');
+      img.addEventListener('error', function () { box.classList.add('hidden'); });
+      img.addEventListener('load', function () { img.classList.toggle('pixel', img.naturalHeight > 0 && img.naturalHeight < 140); });
+    }
+    box.querySelector('.pet-caption').textContent = label;
+    box.querySelector('.pet-btn').setAttribute('aria-label', 'Sessions: ' + label);
+    box.classList.remove('hidden');
+  }
   function renderPet(sessions) {
     var box = $('today-pet');
     if (!box) return;
     placePet();
-    var fresh = PET.manifest && Date.now() - PET.fetchedAt < 10 * 60000;
-    (fresh ? Promise.resolve(PET.manifest) : api('/api/web-pet').then(function (m) { PET.manifest = m; PET.fetchedAt = Date.now(); return m; }))
-      .catch(function () { return PET.manifest; })
+    var prefs = petPrefs();
+    if (!prefs.show) { box.classList.add('hidden'); box.innerHTML = ''; petStop(); PET.pose = null; return; }
+    var fresh = PET.manifest && PET.manifest.pet === prefs.pet && Date.now() - PET.fetchedAt < 10 * 60000;
+    (fresh ? Promise.resolve(PET.manifest) : api('/api/web-pet?pet=' + encodeURIComponent(prefs.pet)).then(function (m) { PET.manifest = m; PET.fetchedAt = Date.now(); return m; }))
+      .catch(function () { return PET.manifest && PET.manifest.pet === prefs.pet ? PET.manifest : null; })
       .then(function (m) {
         if (!m || !m.available) { box.classList.add('hidden'); petStop(); return; }
+        if (m.kind === 'still') { renderPetStill(box, m, sessions); return; }
         var c = petPose(sessions);
         var pose = m.poses[c.pose] ? c.pose : (m.poses.idle ? 'idle' : Object.keys(m.poses)[0]);
         var spec = m.poses[pose];
@@ -392,7 +430,7 @@
           petStop();
           PET.pose = pose; PET.frame = 0;
           if (!box.querySelector('.pet-sprite')) {
-            box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><span class="pet-sprite" aria-hidden="true"></span><span class="pet-caption"></span></button>';
+            box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><span class="pet-sprite" aria-hidden="true"></span><span class="pet-caption"></span></button>' + PET_CHANGE;
           }
           box.querySelector('.pet-caption').textContent = label;
           box.querySelector('.pet-btn').setAttribute('aria-label', 'Sessions: ' + label);
@@ -434,6 +472,7 @@
       var open = sessions.filter(function (s) { return s.running && !s.running_active; });
       var recent = live.filter(function (s) { return Date.now() - (s.mtimeMs || 0) < LIVE_FRESH_MS; });
       var offline = !res[0] && !res[1];
+      TODAY.needs = needs; TODAY.working = working; TODAY.open = open; TODAY.welcome = welcome; TODAY.offline = offline; TODAY.at = Date.now();
 
       renderStory(needs.length, working.length, open.length, welcome.nextEvent, false, offline);
       renderRunning(working, open);
@@ -501,7 +540,8 @@
       ? 'Working for ' + span(s.state_since || s.last_activity_at)
       : 'Open, quiet for ' + span(s.last_activity_at || s.state_since);
     if (s.project && s.project !== usualProject()) meta += ', in ' + String(s.project).replace(/^-Users-[^-]+-/, '');
-    return '<button type="button" class="run-row" data-session="' + esc(key.provider) + '|' + esc(key.id) + '">' +
+    // A tap opens the peek on Today (panes/today-actions.js); it falls back to the reader if the peek cannot load.
+    return '<button type="button" class="run-row" data-today="run" data-key="' + esc(key.provider) + '|' + esc(key.id) + '">' +
       '<span class="run-who">' + badge(key.provider) + (activeNow ? '<span class="pulse" aria-label="working"></span>' : '') + '</span>' +
       '<span class="run-title">' + esc(sessionTitle(s)) + '</span>' +
       '<span class="run-meta">' + esc(meta) + '</span></button>';
@@ -535,9 +575,11 @@
       var key = splitSessionId(it.provider, it.sessionId);
       var title = it.sessionTitle || it.title || 'Handoff';
       var why = needWhy(it) + (it.domain ? ' in ' + domainLabel(it.domain) : '');
+      // The row opens it in an overlay on Today (panes/today-actions.js); Open session still goes to the reader.
       return '<div class="need-row">' +
-        '<div class="need-top"><span class="need-title">' + esc(title) + '</span><span class="need-age">' + esc(ago(it.updatedAt || it.createdAt)) + '</span></div>' +
-        '<div class="need-foot">' + esc(why) + '</div>' +
+        '<button type="button" class="need-open" data-today="need" data-key="' + esc(it.id) + '"' + (key.id ? ' data-session-key="' + esc(key.provider) + '|' + esc(key.id) + '"' : '') + '>' +
+        '<span class="need-top"><span class="need-title">' + esc(title) + '</span><span class="need-age">' + esc(ago(it.updatedAt || it.createdAt)) + '</span></span>' +
+        '<span class="need-foot">' + esc(why) + '</span></button>' +
         (key.id ? '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(key.provider) + '|' + esc(key.id) + '">Open session</button></div>' : '') +
       '</div>';
     }).join('');
@@ -556,23 +598,47 @@
   // midnight, then join Sort in Work; Review opens them in Work's Sort.
   function localDay(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
   function loadTodayIntake() {
-    var card = $('intake-card'); if (!card) return;
-    api('/api/work-intake').then(function (d) {
+    var card = $('intake-card'); if (!card) return Promise.resolve();
+    return api('/api/work-intake').then(function (d) {
       var today = localDay(new Date());
       var items = ((d && d.items) || []).filter(function (it) {
         if (['suggested', 'review', 'ask'].indexOf(it.status) < 0) return false;
         var day = String((it.meeting && (it.meeting.filename || it.meeting.date)) || '').match(/\d{4}-\d{2}-\d{2}/);
         return day && day[0] === today;
       });
-      if (!items.length) { card.classList.add('hidden'); return; }
-      var meetings = {};
-      items.forEach(function (it) { var t = (it.meeting && it.meeting.title) || 'A meeting'; meetings[t] = (meetings[t] || 0) + 1; });
-      $('intake-count').textContent = String(items.length);
-      $('intake-body').innerHTML = Object.keys(meetings).slice(0, 4).map(function (t) {
-        return '<div class="intake-row"><span class="intake-meeting">' + esc(t) + '</span><span class="intake-n">' + meetings[t] + '</span></div>';
-      }).join('') + '<p class="intake-foot">Moves to Work at midnight.</p>';
-      card.classList.remove('hidden');
+      TODAY.intake = items; TODAY.intakeCaps = (d && d.capabilities) || {};
+      // A decision made on Today hides its row at once; a read that no longer lists it ends the hiding.
+      Object.keys(TODAY.gone).forEach(function (id) { if (!items.some(function (it) { return it.id === id; })) delete TODAY.gone[id]; });
+      paintTodayIntake();
     }, function () { card.classList.add('hidden'); });
+  }
+  // Today's overlay (panes/today-actions.js) reads what the cards show from here and repaints the intake card after a
+  // decision, so the counts move the moment Work takes it.
+  var TODAY = { needs: [], working: [], open: [], welcome: {}, offline: false, at: 0, intake: null, intakeCaps: {}, gone: {} };
+  function todayIntakeOpen() { return (TODAY.intake || []).filter(function (it) { return !TODAY.gone[it.id]; }); }
+  function paintTodayIntake() {
+    var card = $('intake-card'); if (!card) return;
+    var items = todayIntakeOpen();
+    if (!items.length) { card.classList.add('hidden'); return; }
+    var meetings = {};
+    items.forEach(function (it) { var t = (it.meeting && it.meeting.title) || 'A meeting'; meetings[t] = (meetings[t] || 0) + 1; });
+    $('intake-count').textContent = String(items.length);
+    $('intake-body').innerHTML = Object.keys(meetings).slice(0, 4).map(function (t) {
+      return '<button type="button" class="intake-row" data-today="meeting" data-key="' + esc(t) + '"><span class="intake-meeting">' + esc(t) + '</span><span class="intake-n">' + meetings[t] + '</span></button>';
+    }).join('') + '<p class="intake-foot">Moves to Work at midnight.</p>';
+    card.classList.remove('hidden');
+  }
+  function openTodayAction(t) {
+    var kind = t.getAttribute('data-today'), key = t.getAttribute('data-key') || '';
+    ensurePane('todayActions').then(function (m) {
+      if (!m || !m.open) throw new Error('The Today overlay did not start.');
+      m.open(kind, key, t);
+    }).catch(function () {
+      // Without the overlay, the tap goes where it went before: the session reader, or Sort in Work.
+      var s = String(kind === 'run' ? key : t.getAttribute('data-session-key') || '').split('|');
+      if ((kind === 'run' || kind === 'need') && s[1]) return go('sessions', [s[0], s.slice(1).join('|')]);
+      go('work', kind === 'need' ? [] : ['sort']);
+    });
   }
   function setBadge(name, on) { document.querySelectorAll('[data-badge="' + name + '"]').forEach(function (b) { b.classList.toggle('hidden', !on); }); }
 
@@ -1408,14 +1474,15 @@
   // probeChatAttachability): a busy thread parks a send, another app holding it idle asks first,
   // and anything else is the server's refusal, word for word.
   function sxProbeAttach(r) {
-    apiAnswer(sessionPath(r.provider, r.id, '/attachability')).then(function (a) {
-      if (state.reading !== r) return;
-      if (a.status === 404) { r.verdict = { attachable: false, reason: 'route_absent', reasonCopy: 'Update the COS server to continue a thread from here.', ownerCount: 0 }; renderVerdict(r); return; }
+    // Today's overlay probes its own session object (r.view): the same verdict, painted by its view.
+    return apiAnswer(sessionPath(r.provider, r.id, '/attachability')).then(function (a) {
+      if (state.reading !== r && !r.view) return;
+      if (a.status === 404) { r.verdict = { attachable: false, reason: 'route_absent', reasonCopy: 'Update the COS server to continue a thread from here.', ownerCount: 0 }; viewOf(r).verdict(r); return; }
       var b = a.body || {};
       if (a.status !== 200 || typeof b.attachable !== 'boolean') return;
       var owners = Number(b.ownerCount) || 0;
       r.verdict = { attachable: b.attachable, reason: String(b.reason || ''), reasonCopy: String(b.reasonCopy || ''), ownerCount: owners, caution: b.attachable === true && owners > 0 };
-      renderVerdict(r);
+      viewOf(r).verdict(r);
     }).catch(function () {});
   }
   var SX_PARK = {
@@ -1466,8 +1533,8 @@
     el.className = 'status-line' + (kind === 'error' ? ' error' : '');
     el.innerHTML = esc(text || '') + (actionHtml || '');
   }
-  function draftFor(text) {
-    var r = state.reading;
+  function draftFor(text, r) {
+    r = r || state.reading;
     if (!r.draft || r.draft.text !== text) r.draft = { text: text, key: newTurnKey() };
     return r.draft;
   }
@@ -1499,6 +1566,20 @@
   function renderHeld(r) {
     r.held.forEach(function (h) { if (!h.cancelled && !heldBubble(h.key)) showPendingTurn(h.text, 'sends after this reply', h.key); });
   }
+
+  // Where the send path below reports: the reader's own page by default. Today's overlay (panes/today-actions.js)
+  // hands continueSession a session object with its own view, so a reply or a steer from Today runs this same attach,
+  // turn and queue path (one binding store, one key per draft, the same refusals), never a copy of it.
+  var READER_VIEW = {
+    status: function (r, text, kind, actionHtml) { sessionStatus(text, kind, actionHtml); },
+    pending: function (r, text, note) { showPendingTurn(text, note); },
+    clear: function (r, text) { clearBoxOf(text); },
+    verdict: function (r) { renderVerdict(r); },
+    hold: function (r, draft) { holdUntilReplyEnds(r, draft); },
+    watch: function (r, bindingId, key) { watchTurn(bindingId, key, r.provider, r.id); },
+    queue: function (r) { loadQueue(r.provider, r.id); }
+  };
+  function viewOf(r) { return (r && r.view) || READER_VIEW; }
 
   function sendSessionTurn(fork, opts) {
     var r = state.reading; var form = $('session-form');
@@ -1533,8 +1614,8 @@
   // Resolves to 'sent' | 'parked' | 'held' | 'refused' | 'changed'.
   function continueSession(r, text, opts) {
     var provider = r.provider, id = r.id;
-    var draft = opts.held ? { text: opts.held.text, key: opts.held.key } : draftFor(text);
-    if (!opts.held) sessionStatus('Sending');
+    var draft = opts.held ? { text: opts.held.text, key: opts.held.key } : draftFor(text, r), view = viewOf(r);
+    if (!opts.held) view.status(r, 'Sending');
     var bound = bindingFor(provider, id);
     var attach = bound ? Promise.resolve({ ok: true, binding: bound }) : apiAnswer(sessionPath(provider, id, '/attach'), { method: 'POST', body: { cosSessionId: cosSessionId() }, timeoutMs: 20000 }).then(function (a) {
       // 201 Created on success; any 2xx that says attached counts.
@@ -1556,9 +1637,9 @@
         if (opts.held) settleHeld(r, opts.held, 'refused', copy);
         else {
           // Control's refusal box: the server's words, then Fork with this message.
-          sessionStatus('');
+          view.status(r, '');
           r.refusal = { copy: (at.refusal && at.refusal.reasonCopy) || 'COS cannot write to this session right now.', supplement: sxSupplement(why), fork: true };
-          renderVerdict(r);
+          view.verdict(r);
         }
         return 'refused';
       }
@@ -1569,9 +1650,9 @@
         var b = t.body || {};
         if (t.status >= 200 && t.status < 300 && (b.outcome === 'queued' || b.outcome === 'completed')) {
           if (opts.held) settleHeld(r, opts.held, 'sent');
-          else { showPendingTurn(draft.text, b.replayed ? 'already sent' : 'sent'); clearBoxOf(draft.text); }
-          sessionStatus(b.replayed ? 'Already sent. Watching for the reply.' : 'Sent. Watching for the reply.');
-          watchTurn(at.binding.bindingId, draft.key, provider, id);
+          else { view.pending(r, draft.text, b.replayed ? 'already sent' : 'sent'); view.clear(r, draft.text); }
+          view.status(r, b.replayed ? 'Already sent. Watching for the reply.' : 'Sent. Watching for the reply.');
+          view.watch(r, at.binding.bindingId, draft.key);
           return 'sent';
         }
         var reason = b.reason || '';
@@ -1579,15 +1660,15 @@
         // COS's own reply is still running on this thread. The server's queue counts that
         // thread as free (the running child is COS's), so it cannot park this; the page holds
         // it under the same key and sends it the moment the reply ends.
-        if (reason === 'native_turn_in_progress') { if (!opts.held) holdUntilReplyEnds(r, draft); return 'held'; }
+        if (reason === 'native_turn_in_progress') { if (!opts.held) view.hold(r, draft); return 'held'; }
         if (reason === 'native_thread_changed' && b.revision) {
           if (opts.held) settleHeld(r, opts.held, 'refused', 'This session changed on your Mac while your message waited.');
           else {
             // Control's refusal box for a changed thread: Refresh, Continue anyway, Fork with this message.
             r.sendAnyway = b.revision;
-            sessionStatus('');
+            view.status(r, '');
             r.refusal = { copy: b.reasonCopy || 'This session changed on your Mac since you opened it.', changed: true, fork: true };
-            renderVerdict(r);
+            view.verdict(r);
           }
           return 'changed';
         }
@@ -1597,7 +1678,7 @@
         }
         var refusedCopy = b.reasonCopy || 'The session did not take that message.';
         if (opts.held) settleHeld(r, opts.held, 'refused', refusedCopy);
-        else sessionStatus(refusedCopy + ' It is still in the box.', 'error');
+        else view.status(r, refusedCopy + ' It is still in the box.', 'error');
         return 'refused';
       });
     });
@@ -1657,6 +1738,7 @@
   }
 
   function parkTurn(r, draft, refusal, opts) {
+    var view = viewOf(r);
     return apiAnswer(sessionPath(r.provider, r.id, '/queued-turns'), {
       method: 'POST', timeoutMs: 15000,
       body: { cosSessionId: cosSessionId(), clientTurnId: draft.key, prompt: draft.text },
@@ -1665,14 +1747,14 @@
       if (b.queued === true || b.error === 'duplicate_turn') {
         rememberParked(r, draft.key);
         if (opts.held) settleHeld(r, opts.held, 'parked');
-        else { showPendingTurn(draft.text, 'waiting in line'); clearBoxOf(draft.text); }
-        sessionStatus(b.error === 'duplicate_turn' ? 'Already waiting to send.' : (b.position ? 'The session is busy. Yours is #' + (b.position + 1) + ' in line and sends on its own.' : 'The session is busy. Yours sends next, on its own.'));
-        loadQueue(r.provider, r.id);
+        else { view.pending(r, draft.text, 'waiting in line'); view.clear(r, draft.text); }
+        view.status(r, b.error === 'duplicate_turn' ? 'Already waiting to send.' : (b.position ? 'The session is busy. Yours is #' + (b.position + 1) + ' in line and sends on its own.' : 'The session is busy. Yours sends next, on its own.'));
+        view.queue(r);
         return 'parked';
       }
       if (b.error === 'thread_free' && !opts.freeRetry) return continueSession(r, draft.text, Object.assign({}, opts, { freeRetry: true }));
       var copy = (refusal && refusal.reasonCopy) || (b.error === 'queue_full' ? 'That session already has a full line of waiting messages.' : 'COS could not send or queue that.');
-      if (opts.held) settleHeld(r, opts.held, 'refused', copy); else sessionStatus(copy + ' It is still in the box.', 'error');
+      if (opts.held) settleHeld(r, opts.held, 'refused', copy); else view.status(r, copy + ' It is still in the box.', 'error');
       return 'refused';
     });
   }
@@ -1937,21 +2019,28 @@
     var h = Array.prototype.map.call(b, function (x) { return (x + 0x100).toString(16).slice(1); }).join('');
     return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
+  var TODAY_REFERENCE = 'What Today in COS Control shows right now';
   function askCos(prompt, statusEl) {
     // 6.99.12: "it shows Sent but never shows up" (Miles, 11/04). With Ask COS in Messages, the sheet hands its words to
     // that composer (panes/cos-chat.js submitAsk), so the answer streams on screen and lands as a numbered turn. The
     // request below is the fallback for a page without it; it resolves to the Messages route to open.
     var chat = window.COSWeb && window.COSWeb.cosChat;
+    // Asked from Today: COS gets a short summary of what Today shows (panes/today-actions.js summary), as the Ask's
+    // quoted reference, the query-jobs field for context. Asked from any other pane, nothing extra is sent.
+    var context = state.pane === 'today' ? ensurePane('todayActions').then(function (m) { return m && m.summary ? m.summary() : ''; }, function () { return ''; }) : Promise.resolve('');
     if (chat && chat.askFromSheet) {
       setStatus(statusEl, 'Sending…');
-      return chat.askFromSheet(prompt).then(function (where) { setStatus(statusEl, ''); return where; }, function (err) {
+      return context.then(function (ctx) { return chat.askFromSheet(prompt, ctx ? { context: ctx } : undefined); }).then(function (where) { setStatus(statusEl, ''); return where; }, function (err) {
         setStatus(statusEl, err.message, true);
         throw err;
       });
     }
     setStatus(statusEl, 'Sent. COS is answering.');
     var body = { clientJobId: webJobId(), generation: 1, query: prompt, source: 'web', activityToolMode: 'status' };
-    return api('/api/query-jobs', { method: 'POST', body: body, timeoutMs: 30000 }).then(function () {
+    return context.then(function (ctx) {
+      if (ctx) body.reference = { query: TODAY_REFERENCE, response: ctx };
+      return api('/api/query-jobs', { method: 'POST', body: body, timeoutMs: 30000 });
+    }).then(function () {
       // The answer lands in Messages; refresh it there if it is open.
       var again = function () { if (state.pane === 'messages' && PANES.messages && PANES.messages.refresh) PANES.messages.refresh(); };
       setTimeout(again, 4000);
@@ -1962,27 +2051,6 @@
       throw err;
     });
   }
-  // ── Memories (the native page, hosted) ──────────────────
-  function syncFrameTheme() {
-    var frame = $('memories-frame'); if (!frame) return;
-    var mode = window.CosTheme ? window.CosTheme.mode() : 'light';
-    frame.style.colorScheme = mode;
-    try {
-      var root = frame.contentDocument && frame.contentDocument.documentElement;
-      if (root) {
-        root.setAttribute('data-theme', mode);
-        if (isPhone()) root.setAttribute('data-host', 'web-phone'); else root.removeAttribute('data-host');
-      }
-    } catch (_e) {}
-  }
-  function loadMemories() {
-    var frame = $('memories-frame');
-    if (state.memoriesLoaded) { syncFrameTheme(); return; }
-    state.memoriesLoaded = true;
-    frame.addEventListener('load', syncFrameTheme);
-    frame.src = '/control/memories/memories.html';
-  }
-
   // ── Usage ───────────────────────────────────────────────
   // Usage and COS cost are views inside Sessions, as on the Mac (ActivityWindow.swift 2306-2325);
   // an old #/usage link opens the Usage view there. Data: GET /api/usage/summary, the helper's
@@ -3622,7 +3690,7 @@
     }
     var jumps = JUMPS.filter(function (j) { return j[1].toLowerCase().indexOf(q.toLowerCase()) === 0; });
     out.innerHTML = '<div class="list" style="margin-top:14px">' +
-      '<button type="button" class="nav-row" data-action="ask-cos"><svg class="icon"><use href="#i-ask"/></svg><span class="grow">Ask COS<span class="note">“' + esc(q) + '”</span></span></button>' +
+      '<button type="button" class="nav-row" data-action="ask-cos"><svg class="icon"><use href="#i-ask"/></svg><span class="grow">Ask COS<span class="note">“' + esc(q) + '”' + (state.pane === 'today' ? ' with what Today shows' : '') + '</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-meaning"><svg class="icon"><use href="#i-sessions"/></svg><span class="grow">Find a session about this<span class="note">Ranks every session by meaning</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-work"><svg class="icon"><use href="#i-work"/></svg><span class="grow">Find a task about this<span class="note">Searches Work by meaning</span></span></button>' +
       jumps.map(function (j) { return '<button type="button" class="nav-row" data-goto="' + j[0] + '"><svg class="icon"><use href="#i-' + j[0] + '"/></svg><span class="grow">Go to ' + esc(j[1]) + '</span><span class="chev"></span></button>'; }).join('') +
@@ -3639,7 +3707,7 @@
 
   // ── events (one delegated listener) ─────────────────────
   document.addEventListener('click', function (e) {
-    var t = e.target.closest('[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#device-code-btn');
+    var t = e.target.closest('[data-today],[data-goto],[data-pane],[data-session],[data-meeting],[data-speakers],[data-action],[data-open-ask],[data-theme-choice],#topbar-back,#section-btn,#sign-out,#copy-link,#ask-close,#auth-switch,#auth-token-show,#device-code-btn');
     if (!t) { if (e.target.id === 'ask-sheet') closeAsk(); if (e.target.id === 'section-menu') closeMenu(); return; }
     var inSheet = !!t.closest('#ask-sheet');
     if (t.id === 'topbar-back') return goBack();
@@ -3670,7 +3738,8 @@
       return;
     }
     if (t.hasAttribute('data-open-ask')) return openAsk();
-    if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); syncFrameTheme(); return; }
+    if (t.hasAttribute('data-today')) return openTodayAction(t);
+    if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); return; }
     if (t.hasAttribute('data-goto') || t.hasAttribute('data-pane')) {
       if (inSheet) closeAsk(); closeMenu();
       // "work/sort" is a pane and its arguments, not one name.
@@ -3742,8 +3811,6 @@
     });
   });
   window.addEventListener('hashchange', route);
-  // Folding or unfolding the Duo crosses the 600px line: keep the hosted Memories page in step.
-  window.matchMedia('(min-width: 600px)').addEventListener('change', syncFrameTheme);
   window.addEventListener('scroll', onScroll, { passive: true });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden || $('app-shell').classList.contains('hidden')) return;
@@ -3794,6 +3861,8 @@
     state: state, titles: TITLES, go: go, parseRoute: parseRoute, goBack: goBack,
     registerPane: function (name, def) { PANES[name] = def; },
     sessionList: sessionList,
+    petPrefs: petPrefs,
+    setPetPrefs: setPetPrefs,
     onRoute: function (fn) { routeHooks.push(fn); },
     onShell: function (fn) { shellHooks.push(fn); },
     // The detail title after "COS Control > Section" (Control's breadcrumb). Pane modules set it
@@ -3806,6 +3875,31 @@
     // "N waiting on you, N working" counts exactly what the pane lists.
     sessionState: function (s) { return sxState(s); },
     isKeepWarm: function (s) { return sxKeepWarm(s); }
+  };
+  // Today as a place to act (panes/today-actions.js, Miles 11/06): what the Today cards show, a repaint after a
+  // decision, and the Sessions reader's own pieces, so the overlay sends and reads through the reader's code.
+  window.COSWeb.pane = function (name) { return PANES[name] || null; };
+  window.COSWeb.today = {
+    data: function () {
+      return { needs: TODAY.needs, working: TODAY.working, open: TODAY.open, welcome: TODAY.welcome, offline: TODAY.offline, at: TODAY.at,
+        sessions: state.sessions || [], intake: todayIntakeOpen(), intakeCaps: TODAY.intakeCaps, intakeLoaded: TODAY.intake !== null };
+    },
+    needWhy: needWhy, sessionTitle: sessionTitle, badge: badge, span: span, splitSessionId: splitSessionId,
+    markGone: function (id, gone) { if (gone) TODAY.gone[id] = 1; else delete TODAY.gone[id]; paintTodayIntake(); },
+    reloadIntake: function () { return loadTodayIntake(); },
+    refresh: function () { if (state.pane === 'today') loadToday(); }
+  };
+  window.COSWeb.sessionKit = {
+    // A session object for continueSession, with the overlay's own view (READER_VIEW's methods).
+    session: function (provider, id, view) {
+      return { provider: provider, id: id, draft: null, held: [], view: view, verdict: null, refusal: null, cautionAck: false, feed: newFeed(), live: null, queued: 0 };
+    },
+    send: function (r, text, opts) { return continueSession(r, text, opts || {}); },
+    probe: function (r) { return sxProbeAttach(r); },
+    path: sessionPath, answer: apiAnswer,
+    feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine },
+    title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
+    parkCopy: function (p) { return SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
 
   // Every pane module is a plain script after this one; boot waits for all of them.
