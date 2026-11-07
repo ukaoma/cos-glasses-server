@@ -1,6 +1,14 @@
-## Unreleased (6.99.28 fixes)
+## 6.99.28 - See the images your sessions make, from your phone; the 6.99.27 phone fixes (private)
 
-Fixes from the 6.99.27 QA (operations/personal/wk45_2026/qa_6.99.27_2026-11-07: 01_user.md, 02_skeptic.md). No version bump yet. Server only.
+2026-11-07. Private build on 6.99.27 (6d85cb5). Server only. Works with COS Control 0.5.376 as installed.
+
+Miles, 11/07 morning: he wants to review agent output away from the desk, including images a session produced, and his iPhone screenshots showed the reader dropping them.
+
+**Images a session made, in the web reader** (Codex root, codex/output-previews-20261107)
+- The Sessions reader and Today's session overlay show images a Claude or Codex session produced in its replies, as thumbnails that open full size. Images are read only from the session's own workspace on the Mac and served through an authenticated route for that exact session (`/api/agent-sessions/<provider>/session/output-images/<id>/content`); the browser never sees a Mac path and the server never fetches a remote URL. Images outside the workspace show as unavailable.
+- A session that the hook or registry reports idle or waiting no longer shows as running just because a file in its workspace changed recently.
+
+**Fixes from the 6.99.27 QA** (operations/personal/wk45_2026/qa_6.99.27_2026-11-07: 01_user.md, 02_skeptic.md)
 
 **Phone snags**
 - A file that did not upload no longer greys out Send (Today) or Send and Fork (Sessions reader). A tap says "A file did not upload. Retry it or remove it." and sends nothing, the same way the question card names what is missing. Send still waits, as "Uploading", while a file uploads.
@@ -22,6 +30,8 @@ Fixes from the 6.99.27 QA (operations/personal/wk45_2026/qa_6.99.27_2026-11-07: 
 - Comments corrected: the turn and fork claims are "check and set in one call" (they are no longer the last synchronous statement before the first await), and the turn file store names `RichMediaSafetyError` for a file past its cap.
 
 **Default-on changes for every web user**
+- Session readers and Today overlays show images a session produced (workspace files only, authenticated per session).
+- Idle or waiting sessions are no longer shown as running because of a recent file write.
 - Send and Fork stay tappable when a file failed; Today's question footer rides above the keyboard; the overlay footer has no gap.
 - HEIC from any iPhone or iPad browser; the 100 MB video cap only for MP4 and MOV; the 60 s upload stall stop.
 - The pet's approval count; the retry wording.
