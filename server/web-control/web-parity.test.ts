@@ -334,7 +334,7 @@ describe('Model and Effort come from /api/models', () => {
 })
 
 // ── session questions (panes/questions.js) ─────────────
-function loadQuestions(cap: Record<string, unknown> | null, poll: { status: number; body?: unknown; reject?: boolean; hang?: boolean }) {
+function loadQuestions(cap: Record<string, unknown> | null, poll: { status: number; body?: unknown; reject?: boolean; hang?: boolean; bodyHang?: boolean; badJson?: boolean }) {
   const notes: boolean[] = []
   const fetches: Array<{ url: string; init: any }> = []
   const posts: Array<{ path: string; body: any }> = []
@@ -364,7 +364,11 @@ function loadQuestions(cap: Record<string, unknown> | null, poll: { status: numb
       const signal = (init as any)?.signal
       return new Promise((_ok, fail) => { signal?.addEventListener('abort', () => fail(Object.assign(new Error('aborted'), { name: 'AbortError' }))) })
     }
-    return Promise.resolve({ status: poll.status, ok: poll.status >= 200 && poll.status < 300, json: () => Promise.resolve(poll.body) })
+    const signal = (init as any)?.signal
+    const json = poll.badJson ? () => Promise.reject(new SyntaxError('Unexpected token')) : poll.bodyHang
+      ? () => new Promise((_ok, fail) => { signal?.addEventListener('abort', () => fail(Object.assign(new Error('aborted'), { name: 'AbortError' }))) })
+      : () => Promise.resolve(poll.body)
+    return Promise.resolve({ status: poll.status, ok: poll.status >= 200 && poll.status < 300, json })
   }
   const document = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? shell : null), addEventListener: () => {}, hidden: false, activeElement: null }
   const timers: Array<() => void> = []
@@ -405,6 +409,8 @@ describe('session question cards (6.99.12)', () => {
     await flush(); await flush(); await flush()
     expect(gone.fetches).toHaveLength(1)
     expect(gone.notes).toEqual([false])
+    const lim = gone.delays.indexOf(15_000)
+    expect(gone.cleared.has(lim + 1), 'a refused read clears its limit').toBe(true)
   })
 
   // 6.99.32 (QA 6.99.30 canary W1): a Mac that hangs never answered and never refused; the read stayed in flight forever.
@@ -417,10 +423,38 @@ describe('session question cards (6.99.12)', () => {
     const at = h.delays.indexOf(15_000)
     expect(at, 'a 15 s limit was set on the read').toBeGreaterThan(-1)
     expect(h.cleared.has(at + 1), 'still running while the read hangs').toBe(false)
+    const before = h.delays.length
     h.timers[at]!()
     await flush(); await flush()
     expect(h.notes).toEqual([false])
     expect(h.Qs._state.inflight, 'the next poll can go').toBe(false)
+    expect(h.delays.slice(before), 'and it checks again').toContain(10_000)
+  })
+  it('a body that hangs after the headers: the limit still runs, frees the poll, and the Mac stays up (it answered)', async () => {
+    const h = loadQuestions({ enabled: true, webClient: true }, { status: 200, bodyHang: true })
+    h.start()
+    await flush(); await flush(); await flush()
+    expect(h.notes).toEqual([true])
+    const at = h.delays.indexOf(15_000)
+    expect(h.cleared.has(at + 1), 'the limit is not cleared by the headers alone').toBe(false)
+    expect(h.Qs._state.inflight).toBe(true)
+    const before = h.delays.length
+    h.timers[at]!()
+    await flush(); await flush()
+    expect(h.Qs._state.inflight).toBe(false)
+    expect(h.notes, 'never marked down: the headers came').toEqual([true])
+    expect(h.delays.slice(before)).toContain(10_000)
+  })
+  it('every way a read ends clears its limit: a 500, a body that is not JSON, a 401', async () => {
+    for (const [poll, label] of [[{ status: 500, body: {} }, '500'], [{ status: 200, badJson: true }, 'bad JSON'], [{ status: 401, body: {} }, '401']] as const) {
+      const h = loadQuestions({ enabled: true, webClient: true }, poll as any)
+      h.start()
+      await flush(); await flush(); await flush()
+      const at = h.delays.indexOf(15_000)
+      expect(at, label).toBeGreaterThan(-1)
+      expect(h.cleared.has(at + 1), label).toBe(true)
+      expect(h.Qs._state.inflight, label).toBe(false)
+    }
   })
   it('an answer in time clears the 15 s limit, so it never fires on a read that landed', async () => {
     const h = loadQuestions({ enabled: true, webClient: true }, { status: 200, body: { enabled: true, items: [] } })

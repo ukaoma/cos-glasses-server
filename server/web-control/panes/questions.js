@@ -144,28 +144,33 @@
       if (!usable(cap)) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
       // 6.99.32 (QA 6.99.30 canary W1): a Mac that hangs (asleep, a stale Tailscale route) never answered and never
       // refused, so this read stayed in flight forever: no more polls, and the Mac never marked down. It gives up after
-      // POLL_TIMEOUT_MS, says the Mac is not answering, and polls again.
+      // POLL_TIMEOUT_MS, says the Mac is not answering, and polls again. The limit covers the body too (QA 6.99.32
+      // Skeptic W-1): a Mac that sleeps between the headers and the body otherwise held the poll for good.
       var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-      var gaveUp = false;
-      var limit = ctrl ? setTimeout(function () { gaveUp = true; ctrl.abort(); }, POLL_TIMEOUT_MS) : null;
+      var limit = ctrl ? setTimeout(function () { ctrl.abort(); }, POLL_TIMEOUT_MS) : null;
       return fetch(pollUrl(), { headers: { 'X-COS-Web': '1' }, credentials: 'same-origin', cache: 'no-store', signal: ctrl ? ctrl.signal : undefined }).then(function (res) {
-        clearTimeout(limit);
         // QA 6.99.30 (Skeptic): this 3 s read is what Sessions and Meetings pages keep running, so it tells app.js the Mac
         // answered (any status) or did not (below); otherwise a "down" mark stranded Submit, Allow and Deny for minutes.
         if (W.noteServer) W.noteServer(true);
-        if (res.status === 401) { Q.again = false; landed(); Q.stopped = true; clearCards(); return; }
-        if (!res.ok) { schedule(DEFAULT_POLL_MS); landed(); return; }
+        if (res.status === 401) { clearTimeout(limit); Q.again = false; landed(); Q.stopped = true; clearCards(); return; }
+        if (!res.ok) { clearTimeout(limit); schedule(DEFAULT_POLL_MS); landed(); return; }
         return res.json().then(function (d) {
+          clearTimeout(limit);
           if (!d || d.enabled === false) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
           // Painted as soon as the read lands: take() draws the cards and repaints Today's Needs you and the pet.
           take(Array.isArray(d.items) ? d.items : [], Array.isArray(d.settled) ? d.settled : []);
           var every = Number(d.pollIntervalMs) > 0 ? Number(d.pollIntervalMs) : DEFAULT_POLL_MS;
           schedule(nextWait(every));
           landed();
+        }, function () {
+          // The body never finished (cut off, or the limit fired mid-body). The Mac did answer the headers, so it is not
+          // marked down; the poll is freed and goes again.
+          clearTimeout(limit); schedule(DEFAULT_POLL_MS); landed();
         });
-      }, function (err) {
+      }, function () {
+        // No answer at all: refused, unreachable, or the limit fired before the headers (the only abort this read has).
         clearTimeout(limit);
-        if (W.noteServer && (gaveUp || !(err && err.name === 'AbortError'))) W.noteServer(false);
+        if (W.noteServer) W.noteServer(false);
         schedule(DEFAULT_POLL_MS); landed();
       });
     }).catch(function () { schedule(DEFAULT_POLL_MS); landed(); });

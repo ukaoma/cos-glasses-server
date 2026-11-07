@@ -3566,8 +3566,49 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
     h.document.activeElement = other
     h.viewport({ height: 580 }); h.runFrames()
     h.document.activeElement = h.document.body   // focus left before the reveal's frame
+    ;(h.document.body as any).scrollIntoView = () => scrolls.push('body')
     h.runFrames()
     expect(scrolls, 'focus gone by the next frame: nothing scrolled').toEqual(['other nearest'])
+  })
+  it('the reply box reveals its whole form; a strip rise reveals too; a closed sheet and a focus change by the frame are honoured', async () => {
+    const h = await opened(1000, { height: 1000 })
+    const L = layerOf(h)
+    const form: any = h.els['ta-form']!
+    const scrolls: string[] = []
+    form.scrollIntoView = (o: { block: string }) => scrolls.push('form ' + o.block)
+    focusReply(h)
+    h.runFrames()
+    h.viewport({ height: 940 }); h.runFrames()                 // a hardware keyboard's 60 px strip, reply focused
+    expect(L.cls.has('ta-kb-strip')).toBe(true)
+    h.runFrames()
+    expect(scrolls, 'the strip rise reveals the reply form, not the bare textarea').toEqual(['form nearest'])
+    const input: any = h.els['ta-input']!
+    input.scrollIntoView = () => scrolls.push('input')
+    h.viewport({ height: 1000 }); h.runFrames(); h.runFrames()
+    h.viewport({ height: 580 }); h.runFrames()                 // the on-screen keyboard rises
+    h.ta.close('user')
+    h.document.activeElement = input                           // even if focus is still on the (now hidden) reply box
+    h.runFrames()
+    expect(scrolls, 'closed before the frame: nothing scrolled').toEqual(['form nearest'])
+  })
+  it('the frame scrolls what has focus then, and a 120 px bar already holding the keyboard layout still reveals when the keyboard rises', async () => {
+    const h = await opened(1000, { height: 1000 })
+    const L = layerOf(h)
+    const mk = (name: string, scrolls: string[]) => { const e: any = Object.assign(new El(), { tagName: 'INPUT', type: 'text' }); e.scrollIntoView = () => scrolls.push(name); return e }
+    const scrolls: string[] = []
+    const a = mk('a', scrolls), b = mk('b', scrolls)
+    L.contains = ((x: unknown) => x === a || x === b) as any
+    h.document.activeElement = a
+    h.viewport({ height: 580 }); h.runFrames()
+    h.document.activeElement = b                               // focus moved within that frame
+    h.runFrames()
+    expect(scrolls).toEqual(['b'])
+    h.viewport({ height: 1000 }); h.runFrames(); h.runFrames()
+    h.viewport({ height: 870 }); h.runFrames(); h.runFrames()  // a 130 px bar: ta-kb on with no keyboard
+    expect(L.cls.has('ta-kb')).toBe(true)
+    const before = scrolls.length
+    h.viewport({ height: 450 }); h.runFrames(); h.runFrames()  // the keyboard rises on top of it
+    expect(scrolls.length, 'a rise is the cover growing, not a class flip').toBe(before + 1)
   })
 
   it('desktop zoom or a scrollbar (1 to 23 px of rounding) never reads as a strip; 24 px does (QA 6.99.30)', async () => {

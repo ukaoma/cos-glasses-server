@@ -125,7 +125,9 @@
 .sx-act-tool { flex: none; font: 400 11px/16px var(--mono); color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sx-act-prose { flex: none; margin-top: 2px; font-size: 13px; line-height: 16px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .sx-act-fallback { height: calc(var(--act-state) + var(--act-prompt) + var(--act-tail) + 8px); margin: 0; padding-top: 6px; font-size: 12.5px; line-height: 1.4; color: var(--sub); overflow: hidden; box-sizing: border-box; }
-@media (max-width: 599px) { .sx-activity { --act-state: 38px; } }
+/* 6.99.32 (QA Completionist W4): below 600 px every .cx-btn is at least 44 px (app.css), so the row that holds Stop is 46 px;
+   at 38 it clipped Stop's border top and bottom. The fallback's height follows the variable. */
+@media (max-width: 599px) { .sx-activity { --act-state: 46px; } }
 .sx-note { font-size: 12px; color: var(--sub); margin: 0 2px 12px; }
 
 /* YOU and ASSISTANT cards (Control: card fill, a tinted hairline; sessions tint for you, green for the reply). */

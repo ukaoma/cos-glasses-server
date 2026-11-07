@@ -79,10 +79,32 @@ describe('6.99.30: api() never shows the browser’s own network error, and says
     const w = await t.ctx.api('/w', { method: 'POST', body: {}, timeoutMs: 5 }).catch((e: any) => e)
     expect(w.code).toBe('timeout')
     expect(seen, 'a slow save is not a Mac that went away').toEqual([])
+    for (const method of ['PUT', 'PATCH', 'DELETE']) await t.ctx.api('/x', { method, timeoutMs: 5 }).catch(() => {})
+    expect(seen, 'no write method marks down').toEqual([])
     const r = await t.ctx.api('/r', { timeoutMs: 5 }).catch((e: any) => e)
     expect(r.code).toBe('timeout')
     expect(r.message).not.toBe('Could not reach COS on your Mac. Check that it is awake and on Tailscale, then try again.')
     expect(seen).toEqual([false])
+  })
+  it('a read timeout does not mark down when the Mac answered something since that read went out (QA 6.99.32 W-2)', async () => {
+    const hang = (_p: string, init?: any) => new Promise((_ok, fail) => { init?.signal?.addEventListener('abort', () => fail(Object.assign(new Error('aborted'), { name: 'AbortError' }))) })
+    const t = transport(hang as any)
+    const seen: boolean[] = []
+    t.ctx.SERVER.hooks.push((up: boolean) => seen.push(up))
+    const slow = t.ctx.api('/slow-image', { timeoutMs: 30 }).catch((e: any) => e)
+    await new Promise(r => setTimeout(r, 5))
+    t.ctx.noteServer(true)                                    // the question poll answers meanwhile
+    const e = await slow
+    expect(e.code).toBe('timeout')
+    expect(seen, 'up, and not flapped down by the slow read').toEqual([true])
+  })
+  it('phones under 600 px: the row that holds Stop is taller than the 44 px every .cx-btn gets there (QA 6.99.32 W4)', () => {
+    const css = read('app.css'), sx = read('panes/sessions.css')
+    const btn = /@media \(max-width:\s*599px\)[^{]*\{[^@]*?\.cx-btn[^{]*\{[^}]*min-height:\s*(\d+)px/.exec(noComments(css))
+    expect(btn, 'app.css still makes every .cx-btn a minimum height under 600 px').not.toBeNull()
+    const row = /@media \(max-width:\s*599px\)\s*\{\s*\.sx-activity\s*\{\s*--act-state:\s*(\d+)px/.exec(noComments(sx))
+    expect(row).not.toBeNull()
+    expect(Number(row![1])).toBeGreaterThanOrEqual(Number(btn![1]))
   })
   it('the panes say the same sentence: no pane keeps its own copy', () => {
     expect(read('panes/memories.js')).not.toContain('Could not reach')

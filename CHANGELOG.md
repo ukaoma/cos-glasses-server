@@ -1,32 +1,42 @@
 ## 6.99.32 - Duo follow-ups: a hung Mac, and the Other field under the keyboard
 
-2026-11-07. On 6.99.30 (a90f024, installed privately 17:20). Server only (Control Web). Works with COS Control 0.5.377 (build 431). The first public build with the 6.99.30 Duo layout work below; 6.99.30 itself was never on npm. 6.99.31 is reserved for the phone approvals and is not in this build.
+2026-11-07. On 6.99.30 (a90f024, installed privately 17:20). Server only (Control Web); no route changed, so it works with any COS Control that runs 6.99.29. The first public build with the 6.99.30 Duo layout work below; 6.99.30 and 6.99.31 were not published.
 
 **Default-on changes:**
 - **A Mac that hangs is marked not answering.** Before, a Mac that neither answered nor refused (asleep, a stale Tailscale route) kept "Server connected" up, and one hung question read stopped the 10 s question check for good. Now the question check gives up after 15 s, says the Mac is not answering (the rail, an open session sheet, and Submit, Allow and Deny waiting with the reason), and checks again. Any read api() makes that times out says the same; a write that times out does not (a slow save is not a Mac that went away). The next answer marks it up again.
 - **A focused field comes back into view when the keyboard rises.** Unfolded, a question card's Other field could sit under the on-screen keyboard (the keyboard rises after the focus, so the first scroll landed too early). Once the layout has the keyboard, the focused field (or the reply box) is scrolled into view again, once per keyboard rise.
 
-**Tests:** web-parity (the hung read gives up at 15 s and frees the poll; an answer in time clears the limit), duo-layout-630-web (a read timeout marks down, a write timeout does not), today-actions (the reveal after the keyboard rises, only on a rise, not with focus gone). Every guard mutation-checked.
+- **The Stop button's row is 46 px on phones under 600 px wide**, so the 44 px Stop is no longer clipped top and bottom (6.99.30 made every button there 44 px and left the row at 38).
+
+**How the two fixes decide (QA 6.99.32 Skeptic):**
+- The question check's 15 s limit covers the reply's body too. A Mac that answers the headers and then stalls frees the check without being marked down, since it did answer.
+- A read that times out marks the Mac down only if nothing has answered since that read went out. A slow image whose headers came, or a busy Mac whose question check keeps answering, never flaps the status. Write timeouts (POST, PUT, PATCH, DELETE) never mark it down. The Sessions reader's own transport keeps its timeouts to itself.
+- A keyboard "rise" is what covers the bottom growing by 24 px or more while the keyboard layout is on, not a class flip. A 120 px bottom bar already holding the layout still reveals when the keyboard comes. The field revealed is the one focused when the frame runs; the reply box reveals its whole form.
+
+**Known limits:**
+- Not yet accepted on a physical iPhone Duo. Every check so far is the full suite, code review and headless renders at Duo sizes.
+- At the private install of 6.99.30, the provider check skipped Cursor once ("process exited 1"). A live re-check on the installed server passed in 8 s. The cause of that one exit is not known.
+
+**Tests:** web-parity (a hung read gives up at 15 s, marks down, frees the poll and checks again; a body that hangs frees the poll without a down mark; an answer in time clears the limit), duo-layout-630-web (a read timeout marks down; write timeouts do not; a read timeout after another answer does not), today-actions (the reveal after a keyboard or strip rise, only on a rise, the reply form, focus at frame time, never with the sheet closed or focus gone). Each guard was mutation-checked.
 
 ## 6.99.30 - Duo layout fixes (private)
 
-**Today weather moves to the top** (Miles, 15:18, IMG_0504): the weather now sits under the date at the top left of Today, and shows even when no meeting is next; Next up keeps only the meeting. Default-on for every web user.
-
-2026-11-07. Private build on 6.99.29 (c925353), never published to npm; 6.99.32 carries all of it. Server only (Control Web). Works with COS Control 0.5.377 (build 431).
+2026-11-07. Private build on 6.99.29 (c925353). Server only (Control Web). Works with COS Control 0.5.376 as installed.
 
 Miles tests on an iPhone Duo (folded about 382x678, unfolded about 1430x1000 landscape and 1000x1430 portrait), in Comet as well as Safari, sometimes with a Bluetooth keyboard. Three QA rounds on 6.99.29 (skeptic, design, user canary) found where the layout assumed Safari or a width. Nothing here assumes a browser now: every size comes from what the browser reports.
 
 **Default-on changes:**
+- **Today weather moves to the top** (Miles, 15:18, IMG_0504): the weather now sits under the date at the top left of Today, and shows even when no meeting is next; Next up keeps only the meeting.
 - **Today's session sheet is the visible part of the page, keyboard up or down, in any browser.** Its top and height come from visualViewport (100dvh where there is none), so whatever covers the bottom (an on-screen keyboard, a hardware keyboard's strip, Comet's or Chrome's or Safari's bar) stays below the reply box and Send. Only the dim and the sheet's colour reach on to the physical bottom. This replaces 6.99.29's whole-screen layer with the keyboard closed, which put the composer under a bottom bar the page shows through (IMG_0503's 106 px may be Comet's bar).
 - **A hardware keyboard's strip** (55 to 70 px) with a field in the sheet focused is followed too (light layout: the header stays, the reply box drops the home indicator inset). A bar or strip under 120 px never folds the header (Comet's folded bar measured about 110 px); 120 px or more does, focused or not. A strip counts from 24 px, so desktop zoom or a scrollbar never reads as one.
 - **The sheet refits** on window resize, orientationchange, pageshow, the page coming back into view, and focus moving in or out of a field; a turned screen measures the room for the conversation again.
 - **Pinch zoom** is no inset: one shared reading of the visible viewport (Today's sheet and the question card's footer), with the layout height kept from before the zoom.
 - **Every text field is 16 px on a touch screen at every width** (no zoom on focus), and **below 600 px every .cx-btn and .field is at least 44 px**; on touch the small controls the canary measured (nav, switches, chip remove, Retry, camera, clip, Send, question steps, calendar days) reach 44 px.
-- **In session and question boxes, Return sends only with a keyboard and a fine pointer** (`(hover: hover) and (pointer: fine)`), never mid-composition. On the unfolded Duo, Return is a new line. **Cmd-Return or Ctrl-Return sends on every device**, so a Bluetooth keyboard on the Duo or an iPad has a send key. Ask COS keeps Return-asks on touch as before, but never on an IME's composing key.
+- **In session and reply boxes, Return sends only with a keyboard and a fine pointer** (`(hover: hover) and (pointer: fine)`), never mid-composition. On the unfolded Duo, Return is a new line. **Cmd-Return or Ctrl-Return sends on every device**, so a Bluetooth keyboard on the Duo or an iPad has a send key. Ask COS keeps Return-asks on touch as before, but never on an IME's composing key.
 - **"Could not reach COS on your Mac. Check that it is awake and on Tailscale, then try again."** replaces the browser's own "Failed to fetch" or "Load failed" everywhere (api() and the Sessions reader's transport), code `unreachable`.
 - **Server status at once:** a request that never reaches the Mac marks it down; any HTTP answer, whatever its status, marks it up (COS sends its own 502s, so a 502 is never "down"). The question poll that keeps running on Sessions and Meetings reports too, so a down mark never strands the question cards. The rail's server line, an open session sheet ("Your Mac is not answering. This is the last state it sent.") and the question cards (Submit, Allow and Deny wait, with the reason) follow immediately, not on the five-minute check.
 - **The session card's one state uses the Mac's clock** for this page's own moments (a write gate answer, a Stop), learned from each answer's Date header, so a phone a minute off no longer shows Idle over a fresher Working. A probe that never answers gives up after 15 s, so a busy gate is always asked again.
-- **Layout breadcrumbs** go to the existing client diagnostics log (`POST /api/diag/client`, `event: web.layout`; 10 MB with one rotation, 30 lines per 10 s): on opening the sheet and on each keyboard change, the browser family (Comet, Safari, Chrome, CriOS, Firefox), layout and visible heights, offsetTop, zoom, orientation and the sheet's state. Numbers only; never the user agent string, text or ids; at most 40 a page load.
+- **Layout breadcrumbs** go to the existing client diagnostics log (`POST /api/diag/client`, `event: web.layout`; 10 MB with one rotation, 30 lines per 10 s): on opening the sheet and on each keyboard change, the browser family (Comet, Safari, Chrome, CriOS, Firefox), layout and visible heights, offsetTop, zoom, orientation and the sheet's state. Numbers and a few fixed labels (browser family, OS, orientation); never the user agent string, text or ids; at most 40 a page load.
 - **Folded, a waiting question is one line** ("1 question for you. Answer") until tapped, instead of a full card over every pane. Its copy on the page hides while Today's sheet shows it.
 - **Desktop windows under 721 px tall** (a 1366x768 laptop, a short Mac window) show the compact rail instead of the labelled one, the same height clause as the phone step.
 - **Question picks and Other words survive a reload** (this tab only), and typed Other words go into every copy of the card.

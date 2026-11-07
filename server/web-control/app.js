@@ -144,7 +144,7 @@
       if (err && err.name === 'AbortError' && ctrl && ctrl.signal.aborted) {
         // 6.99.32 (QA 6.99.30 canary W1): a read the Mac never answered in time means it is not answering. A write has
         // no deadline unless its caller set one, and a slow save is not a Mac that went away, so only reads say so.
-        if (method === 'GET') noteServer(false);
+        if (method === 'GET' && !(SERVER.lastUpAt >= sentAt)) noteServer(false);
         var late = new Error('Your Mac did not answer in ' + Math.round(limit / 1000) + ' seconds. Check that it is awake, then try again.');
         late.code = 'timeout'; throw late;
       }
@@ -189,9 +189,13 @@
   // own 502s (an unsupported Memories workspace, a bad Meetings Ask answer), so a 502 flapped the rail, the question
   // cards and an open sheet down and up again. The rail's server line, Today's sheet and the question cards hear each change at once
   // (COSWeb.onServer). null until the first answer.
-  var SERVER = { up: null, hooks: [] };
+  // lastUpAt (6.99.32, QA Skeptic W-2): when the Mac last answered anything, on this page's clock. A read that timed out
+  // marks it down only if nothing has answered since that read went out (a slow image whose headers already came, a busy
+  // Mac whose question poll keeps answering), so a slow but alive Mac never flaps.
+  var SERVER = { up: null, hooks: [], lastUpAt: 0 };
   function noteServer(up) {
     up = !!up;
+    if (up) SERVER.lastUpAt = Date.now();
     if (SERVER.up === up) return;
     SERVER.up = up;
     SERVER.hooks.slice().forEach(function (fn) { try { fn(up); } catch (err) { console.error(err); } });
@@ -1667,6 +1671,8 @@
 
   // Like api(), but a 4xx refusal comes back as { status, body } instead of throwing, because
   // these routes answer "busy", "changed" or "not now" with a body the person should read.
+  // A timeout here stays the caller's (an abort: "may have saved", a probe that gives up), never a down mark; api()
+  // reads and the question poll are what say a hung Mac is not answering (6.99.32).
   function apiAnswer(path, opts) {
     var o = opts || {};
     var ctrl = typeof AbortController === 'function' ? new AbortController() : null;

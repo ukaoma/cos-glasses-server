@@ -194,7 +194,7 @@
   var KB_MIN_PX = 120;
   var KB_STRIP_MIN_PX = 24;
   var BODY_MIN_PX = 72;          // about three lines of the conversation (15 px text at 1.5)
-  var KB = { on: false, strip: false, tight: false, frame: 0, listening: false, width: 0 };
+  var KB = { on: false, strip: false, tight: false, frame: 0, listening: false, width: 0, inset: 0 };
   function tall(el) { return (el && el.offsetHeight) || 0; }
   // What the conversation gets once the compact header and the reply box have theirs.
   function bodyRoom(height) {
@@ -230,7 +230,11 @@
     if (w) KB.width = w;
     var was = KB.on + '|' + KB.strip + '|' + KB.tight;
     if (turned) KB.tight = false;
-    var rose = (on && !KB.on) || (strip && !KB.strip);
+    // A rise is what covers the bottom growing by a strip's worth or more while the keyboard layout is on, not a class
+    // flip: a 120 px bar can already hold ta-kb before the keyboard comes, and a keyboard shrinking to a hardware strip
+    // is not a rise (QA 6.99.32 Skeptic N-3).
+    var rose = (on || strip) && v.inset >= (KB.inset || 0) + KB_STRIP_MIN_PX;
+    KB.inset = v.inset;
     if (on !== KB.on) { KB.on = on; KB.tight = false; layer.classList.toggle('ta-kb', on); }
     if (strip !== KB.strip) { KB.strip = strip; layer.classList.toggle('ta-kb-strip', strip); }
     // 6.99.32 (QA 6.99.30 canary W2): the keyboard rises after the focus, so onFocusIn's scroll (250 ms) can land before
@@ -245,9 +249,12 @@
     return v;
   }
   function revealFocused() {
-    var a = document.activeElement;
-    var f = a && a.id === 'ta-input' ? $('ta-form') : a;
-    var go = function () { if (O.open && typing() && f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' }); };
+    // What has focus when the frame runs, not when it was asked for (QA 6.99.32 Skeptic N-2).
+    var go = function () {
+      if (!O.open || !typing()) return;
+      var a = document.activeElement, f = a && a.id === 'ta-input' ? $('ta-form') : a;
+      if (f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' });
+    };
     // The next frame, so the scroll measures the layout with ta-kb (or ta-kb-strip) applied.
     if (window.requestAnimationFrame) window.requestAnimationFrame(go); else go();
   }
@@ -266,7 +273,7 @@
   function unfit() {
     listenViewport(false);
     if (KB.frame && window.cancelAnimationFrame) window.cancelAnimationFrame(KB.frame);
-    KB.frame = 0; KB.on = false; KB.strip = false; KB.tight = false; KB.width = 0;
+    KB.frame = 0; KB.on = false; KB.strip = false; KB.tight = false; KB.width = 0; KB.inset = 0;
     if (!layer) return;
     layer.classList.remove('ta-kb'); layer.classList.remove('ta-kb-strip'); layer.classList.remove('ta-kb-tight');
   }
