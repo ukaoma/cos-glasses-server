@@ -200,6 +200,13 @@ select.field {
 
 /* ── Today ───────────────────────────────────────────────── */
 .today-date { color: var(--sub); font-size: 15px; margin: 6px 0 0; }
+/* The session pet on Today: the pet COS Control shows, in the pose the Mac would pick. */
+.today-pet { display: flex; flex-direction: column; align-items: center; margin: 6px 0 14px; min-height: 166px; }
+.today-pet.hidden { display: none; }
+.pet-btn { background: none; border: 0; padding: 0; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 4px; color: inherit; font: inherit; }
+.pet-btn:focus-visible { outline: 2px solid var(--sub); outline-offset: 4px; border-radius: 8px; }
+.pet-sprite { height: 140px; background-repeat: no-repeat; }
+.pet-caption { color: var(--sub); font-size: 14px; }
 .ask-bar {
   display: flex; align-items: center; gap: 10px; width: 100%;
   min-height: 52px; padding: 0 14px; margin-top: 16px;

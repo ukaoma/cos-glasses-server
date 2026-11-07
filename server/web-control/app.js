@@ -298,6 +298,95 @@
     route(true);
   });
 
+  // ── the session pet (Today) ─────────────────────────────
+  // Same pet and the same pose rule as COS Control (PetSpritePose.resolve): waiting with nothing running
+  // is "waiting", then one, two, three, four or more sessions in play are working, duel, trio, swarm, an open
+  // quiet session is "patrol", none is "idle". Strips come from /api/web-pet, resized and cut for a phone.
+  var PET = { manifest: null, fetchedAt: 0, pose: null, timer: null, frame: 0, token: 0 };
+  var PET_HEIGHT = 140;
+  function petPose(sessions) {
+    var working = 0, waiting = 0, alive = 0;
+    sessions.forEach(function (s) {
+      var st = sxState(s);
+      if (st === 'running') working++;
+      else if (st === 'waiting') waiting++;
+      if (s.running || s.running_active) alive++;
+    });
+    var pose;
+    if (waiting > 0 && working === 0) pose = 'waiting';
+    else if (working + waiting >= 4) pose = 'swarm';
+    else if (working + waiting === 3) pose = 'trio';
+    else if (working + waiting === 2) pose = 'duel';
+    else if (working + waiting === 1) pose = 'working';
+    else pose = alive > 0 ? 'patrol' : 'idle';
+    return { pose: pose, working: working, waiting: waiting };
+  }
+  function petCaption(c) {
+    var parts = [];
+    if (c.working) parts.push(c.working + ' running');
+    if (c.waiting) parts.push(c.waiting + ' waiting on you');
+    return parts.length ? parts.join(', ') : 'Nothing running';
+  }
+  function petStop() { clearTimeout(PET.timer); PET.timer = null; }
+  function petPaint(el, spec, frame, scale) {
+    var chunk = Math.floor(frame / spec.perChunk), inChunk = frame % spec.perChunk;
+    var count = Math.min(spec.perChunk, spec.frames - chunk * spec.perChunk);
+    el.style.backgroundImage = 'url("' + spec.chunks[chunk] + '")';
+    el.style.backgroundSize = Math.round(count * spec.frameWidth * scale) + 'px ' + PET_HEIGHT + 'px';
+    el.style.backgroundPosition = '-' + Math.round(inChunk * spec.frameWidth * scale) + 'px 0';
+  }
+  function petLoadImages(spec) {
+    return Promise.all(spec.chunks.map(function (url) {
+      return new Promise(function (resolve, reject) { var im = new Image(); im.onload = function () { resolve(im); }; im.onerror = reject; im.src = url; });
+    }));
+  }
+  function renderPet(sessions) {
+    var box = $('today-pet');
+    if (!box) return;
+    var fresh = PET.manifest && Date.now() - PET.fetchedAt < 10 * 60000;
+    (fresh ? Promise.resolve(PET.manifest) : api('/api/web-pet').then(function (m) { PET.manifest = m; PET.fetchedAt = Date.now(); return m; }))
+      .catch(function () { return PET.manifest; })
+      .then(function (m) {
+        if (!m || !m.available) { box.classList.add('hidden'); petStop(); return; }
+        var c = petPose(sessions);
+        var pose = m.poses[c.pose] ? c.pose : (m.poses.idle ? 'idle' : Object.keys(m.poses)[0]);
+        var spec = m.poses[pose];
+        var label = petCaption(c);
+        box.classList.remove('hidden');
+        var cap = box.querySelector('.pet-caption');
+        if (cap) cap.textContent = label;
+        var btn = box.querySelector('.pet-btn');
+        if (btn) btn.setAttribute('aria-label', 'Sessions: ' + label);
+        if (PET.pose === pose && PET.timer) return;
+        var token = ++PET.token;
+        petLoadImages(spec).then(function () {
+          if (token !== PET.token) return;
+          petStop();
+          PET.pose = pose; PET.frame = 0;
+          if (!box.querySelector('.pet-sprite')) {
+            box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><span class="pet-sprite" aria-hidden="true"></span><span class="pet-caption"></span></button>';
+          }
+          box.querySelector('.pet-caption').textContent = label;
+          box.querySelector('.pet-btn').setAttribute('aria-label', 'Sessions: ' + label);
+          var el = box.querySelector('.pet-sprite'), scale = PET_HEIGHT / spec.height;
+          el.style.width = Math.round(spec.frameWidth * scale) + 'px';
+          petPaint(el, spec, 0, scale);
+          var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+          if (still || spec.frames < 2) return;
+          var step = function () {
+            // Runs only while Today is on screen: leaving the pane or hiding the page stops the loop.
+            if (token !== PET.token || document.hidden || state.pane !== 'today') { PET.timer = null; return; }
+            PET.frame = (PET.frame + 1) % spec.frames;
+            petPaint(el, spec, PET.frame, scale);
+            PET.timer = setTimeout(step, Math.max(20, spec.interval * 1000));
+          };
+          PET.timer = setTimeout(step, Math.max(20, spec.interval * 1000));
+        }, function () {
+          if (token === PET.token && !box.querySelector('.pet-sprite')) box.classList.add('hidden');
+        });
+      });
+  }
+
   // ── Today ───────────────────────────────────────────────
   function loadToday() {
     var now = new Date();
@@ -320,6 +409,7 @@
 
       renderStory(needs.length, working.length, open.length, welcome.nextEvent, false, offline);
       renderRunning(working, open);
+      if (!offline) renderPet(sessions);
       renderNeeds(needs);
       renderNext(welcome);
       loadTodayIntake();
@@ -3620,6 +3710,8 @@
     // Coming back to the page refreshes Today in place. Other panes keep what is on screen:
     // rebuilding them here moved the page under Miles's finger ("it reloads the section").
     if (state.pane === 'today' && Date.now() - (state.lastLoad.today || 0) > 60000) { state.lastLoad.today = Date.now(); loadToday(); }
+    // Back within the minute: Today keeps its data, but the pet's loop stopped while hidden, so restart it.
+    else if (state.pane === 'today' && PET.pose && !PET.timer) renderPet(state.sessions || []);
   });
   window.addEventListener('message', function (e) {
     if (e.origin !== location.origin) return;

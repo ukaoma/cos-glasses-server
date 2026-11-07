@@ -1,4 +1,5 @@
 import express, { Router, type Request, type Response } from 'express'
+import fs from 'node:fs'
 import { hostname, networkInterfaces } from 'node:os'
 import {
   hasProxyForwardedHeaders,
@@ -39,11 +40,17 @@ import {
 } from '../lib/web-memories-bridge.js'
 import { listLiveTranscriptSessions, readLiveTranscriptSession } from '../lib/web-live-chunks.js'
 import { getWebUsageSummary } from '../lib/web-usage-bridge.js'
+import { WEB_PET_POSES, controlSupportDir, petChunk, planPose, readPetSources, webPetManifest, type WebPetPose } from '../lib/web-pet.js'
+import { dataPath } from '../lib/data-dir.js'
 
 export { isMemoryWebOpReadOnly, MUTATING_MEMORY_WEB_OPS, READ_ONLY_MEMORY_WEB_OPS }
 
 export interface WebControlRouterDeps {
   apiToken: () => string
+  /** Tests: where the pet's state map and strips live, the chunk cache, and a stand-in for sips. */
+  petSupportDir?: () => string
+  petCacheDir?: () => string
+  petRun?: (cmd: string, args: string[]) => Promise<void>
   port: () => number
   publicPort?: () => number
   httpsPort?: () => number | null
@@ -548,6 +555,31 @@ export function createWebControlRouter(deps: WebControlRouterDeps): Router {
     const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true'
     const summary = await getWebUsageSummary({ forceRefresh })
     res.json(summary)
+  })
+
+  // The session pet on Home: the same pet COS Control shows, resized and chunked for a phone (lib/web-pet.ts).
+  const petDir = (): string => deps.petSupportDir?.() ?? controlSupportDir()
+  const petCache = (): string => deps.petCacheDir?.() ?? dataPath('web-pet')
+  router.get('/web-pet', (_req: Request, res: Response) => {
+    res.set('Cache-Control', 'private, no-store')
+    res.json(webPetManifest(petDir()))
+  })
+  router.get('/web-pet/sheet/:pose/:chunk', async (req: Request, res: Response) => {
+    const pose = String(req.params.pose) as WebPetPose
+    const src = (WEB_PET_POSES as readonly string[]).includes(pose) ? readPetSources(petDir())[pose] : undefined
+    if (!src) return res.status(404).json({ error: 'pet_pose_unavailable' })
+    const plan = planPose(src)
+    const index = Number(req.params.chunk)
+    if (!Number.isInteger(index) || index < 0 || index >= plan.chunks) return res.status(404).json({ error: 'pet_chunk_unavailable' })
+    try {
+      const file = await petChunk(plan, index, { cacheDir: petCache(), run: deps.petRun })
+      res.set('Cache-Control', req.query.v === plan.key ? 'private, max-age=31536000, immutable' : 'private, no-cache')
+      // Not sendFile: it refuses any path with a dot folder, and the cache lives under ~/.cos-glasses.
+      res.type('png').send(await fs.promises.readFile(file))
+    } catch (err) {
+      log(`[web-pet] could not build ${pose} chunk ${index}: ${err instanceof Error ? err.message : String(err)}`)
+      res.status(503).json({ error: 'pet_build_failed' })
+    }
   })
 
   // Today / Work "Your Move" compatibility route

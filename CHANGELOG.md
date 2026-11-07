@@ -1,3 +1,15 @@
+## 6.99.22 - The pet comes to COS Control Web (private)
+
+2026-11-06. Private build on 6.99.21. Server only; no Mac app change.
+
+Miles, 11/06: bring the pet to COS Control Web, at the top of Home.
+
+- **The pet on Today.** The same pet COS Control shows, read from its own `session-pet-states.json` in `~/Library/Application Support/COS Control`, so a pet change on the Mac shows on the phone. It takes the pose the Mac would pick (COS Control's `PetSpritePose.resolve`): waiting on you with nothing running is waiting; one, two, three, or four or more sessions in play are working, duel, trio and swarm; an open quiet session is patrol; none is idle. Under it, plain text: "3 running", "1 waiting on you", or "Nothing running". Tapping it opens Sessions. Reduced motion shows a still frame. The loop runs only while Today is on screen.
+- **Phone-sized strips.** The Mac's strips are 256 px tall and up to about 56,000 px wide. `server/lib/web-pet.ts` resizes each pose to 160 px with macOS `sips` and cuts it into chunks no wider than 8,192 px, each holding whole frames, cached under the data folder and keyed by the source file. Only the pose on screen downloads; each is cached for a year. Windu's heaviest pose (swarm) is 4.8 MB across 7 chunks, the lightest (error) 74 KB. Routes: `GET /api/web-pet` and `GET /api/web-pet/sheet/:pose/:chunk`, behind the usual sign-in.
+- `sips` treats a crop offset of 0 as "centre", so the first chunk is cut from the mirrored strip and flipped back. A test runs real `sips` on a synthetic strip and checks every frame's colour in its chunk.
+- **Sign-in wording.** COS Control Web's "Sign in another device" is now "Use COS on another phone or browser", says it is for the iPhone Camera, and says glasses pair from COS Control on the Mac (Miles 11/06: the two QR codes read like the same thing).
+- Default-on changes: the pet on Today and the renamed sign-in row. No change for the glasses app or any other client.
+
 ## 6.99.21 - COS Control Web opens faster on the phone (private)
 
 2026-11-06. Private build on 6.99.20. Server only; no Mac app change.
