@@ -78,6 +78,14 @@ describe('the pet on Today', () => {
     expect(box.querySelector('.pet-caption')!.textContent).toBe('1 running')
   })
 
+  it('a slow answer for a pet that was switched off in the meantime paints nothing', async () => {
+    const { kit, box, store } = harness({ pet: 'mac', show: true }, { available: true, pet: 'mac', kind: 'still', poses: {}, still: '/s' })
+    kit.renderPet([])
+    store['cos-web-pet'] = { pet: 'mac', show: false } // switched off before the answer is handled
+    await new Promise((r) => setTimeout(r, 5))
+    expect(box.classList.contains('hidden')).toBe(true)
+  })
+
   it('a stored choice that is not a valid pet falls back to the Mac pet', async () => {
     const { kit, calls } = harness({ pet: 'shipped:../../etc', show: true }, { available: false })
     kit.renderPet([])

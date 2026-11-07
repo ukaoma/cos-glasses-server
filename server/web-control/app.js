@@ -422,6 +422,9 @@
     (fresh ? Promise.resolve(PET.manifest) : api('/api/web-pet?pet=' + encodeURIComponent(prefs.pet)).then(function (m) { PET.manifest = m; PET.fetchedAt = Date.now(); return m; }))
       .catch(function () { return PET.manifest && PET.manifest.pet === prefs.pet ? PET.manifest : null; })
       .then(function (m) {
+        // A slow answer for a pet that is no longer chosen (or a pet now switched off) paints nothing.
+        var now = petPrefs();
+        if (!now.show || now.pet !== prefs.pet) return;
         if (!m || !m.available) { box.classList.add('hidden'); petStop(); return; }
         if (m.kind === 'still') { renderPetStill(box, m, sessions); return; }
         var c = petPose(sessions);

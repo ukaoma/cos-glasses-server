@@ -24,7 +24,7 @@
     // 6.99.11 (Drop it P2): shown only when the server has the P2 settings and Drop it is on.
     { id: 'reach', title: 'COS reaching out', summary: 'What COS tells you about on its own, when it may interrupt, and your reminders.', mac: [], p2: true },
     { id: 'privacy', title: 'Privacy and permissions', summary: 'What COS can use on this Mac. Each permission turns on one feature.', mac: ['Permissions'] },
-    { id: 'pet', title: 'Pet', summary: 'The session pet: its character, size and motion.', mac: ['Session pet', 'Characters'] },
+    { id: 'pet', title: 'Pet', summary: 'Which pet this browser shows on Today, and whether it shows. Size, motion and the Mac\u2019s own pet are set in COS Control.', mac: ['Session pet size and motion', 'Characters on the Mac'] },
     { id: 'system', title: 'System and updates', summary: 'The COS server on this Mac, app updates, and checks when something is off.', mac: ['App updates', 'Troubleshooting'] }
   ];
   var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];

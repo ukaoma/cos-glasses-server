@@ -70,6 +70,7 @@ describe('catalog', () => {
     expect(isOpenPetsUrl('https://openpets.dev@evil.com/pets/x/thumb.webp')).toBe(false)
     expect(isOpenPetsUrl('https://zip.openpets.dev/pets/x/thumb.webp')).toBe(false)
     expect(isOpenPetsUrl('https://openpets.dev/pets/x/archive.zip')).toBe(false)
+    expect(isOpenPetsUrl('https://openpets.dev:8443/pets/x/thumb.webp')).toBe(false)
     expect(GALLERY_MAX_BYTES).toBe(512 * 1024)
     expect(GALLERY_TIMEOUT_MS).toBe(6000)
   })

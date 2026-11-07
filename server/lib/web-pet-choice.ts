@@ -115,7 +115,7 @@ export function galleryPets(dir: string = controlSupportDir()): GalleryPet[] {
 export function isOpenPetsUrl(url: string): boolean {
   try {
     const u = new URL(url)
-    return u.protocol === 'https:' && u.hostname === 'openpets.dev' && !u.username && !u.password && u.pathname.endsWith('/thumb.webp')
+    return u.protocol === 'https:' && u.hostname === 'openpets.dev' && u.port === '' && !u.username && !u.password && u.pathname.endsWith('/thumb.webp')
   } catch { return false }
 }
 
