@@ -1,3 +1,31 @@
+## 6.99.26 - Answer your sessions' questions from Control Web; the pet opens what matters; a Today summary you can turn on (private)
+
+2026-11-07. Private build on 6.99.25 (npm next), including the voice-enroll-name test fix (44f2abf). Server only. Works with COS Control 0.5.376 as installed.
+
+Miles, 11/07 06:3x to 06:47: "the piece that's most important is being able to address questions ... within that dashboard. So if I have 2 sessions that are waiting on me, I want the ability to interact with those sessions and answer the questions"; questions "like this in the terminal ... via the pet off canvas window"; the pet tap should "open what matters"; and a Today message that is "the orchestrator's eyes summary", written by Haiku without burning tokens, that can see sub-agents.
+
+**Session questions on Control Web, like the G2 (the away rule)**
+- Control Web now takes part in the server's away hold exactly like the phone: the page reports how long since you last touched it (`client=web&hold=1&presenceAgeMs`). When the Mac's desk has been idle 90 s or more and you touched Control Web in the last 30 minutes, a session's question or approval is held for you, up to 10 minutes and never past the hook's own wait, and you answer it on the web. At the desk, or with the hold off, or a stale touch, Claude's own prompt shows at once, as Miles chose in 6.99.13: the web is never a live client.
+- Server: `lib/client-liveness.ts` adds web presence stamps; `lib/permission-broker.ts` admits the away hold on recent web presence (`webRecent`) and keeps it out of live-client checks; `GET /api/session-questions` records web presence only for a signed-in page with `client=web&hold=1` and a valid age. Nothing else changes for the phone, glasses or Mac.
+- Questions read like the terminal's: one entry per question, numbered options with their descriptions, Other typed in place, keys 1-9, multi-select where allowed, "Your answers" to review, then Submit (tap, then tap again). Same card and answer route as before (`POST /api/session-questions/:id/answer`), restyled.
+- A question already at the Mac's prompt shows read-only: "Waiting on your Mac's prompt. Answer it on the Mac (or through Screens)." Right after an answer, "Answered. The session carries on." Two waiting sessions are two Needs you rows, each answered in its own sheet.
+
+**The pet opens what matters**
+- One session in play: its overlay (answer it if waiting, peek and steer if working). Several: a short list of waiting on you, running and done today, counted as the caption counts. None: no action. "Change pet" stays.
+
+**Today summary (off unless turned on)**
+- Settings > General > "Write the Today summary with a model" (or `COS_TODAY_BRIEF_LLM`). When on, Haiku writes two or three sentences on what the sessions are building, who is on what (from each session's sub-agents), what is stuck and what waits on you. Today shows the counts line at once and swaps in the summary with "Updated N min ago".
+- Spend limits: only when the inputs changed, at most once every 10 minutes and 60 times a day, concurrent asks share one call, 3 failures in a row pause it for an hour, state persisted so a restart does not spend again. About 3k input tokens a call ($0.0007 measured), at most about $0.04 a day.
+- Inputs are read on the server: session titles and states, short last-activity lines, Work cards in progress, what needs you, and sub-agents (Claude: a bounded read of the transcript tail, `lib/session-subagents.ts`; Codex: the existing child reader). No ids or paths reach the model; names and tasks are quoted as untrusted data. A sentence that claims something Today did not observe ("nothing is waiting") is dropped. The model can still get small details wrong (it once said "until Monday" on a Saturday), which is one reason it stays off by default.
+- Routes: `GET /api/today/brief` (cached only), `POST /api/today/brief` (Today's rows; may generate when on).
+
+**Default-on changes for every web user**
+- Control Web polls session questions with `hold=1` and its touch age, so on a server with the away hold on, questions can wait for the web while the Mac is idle (up to 10 minutes) instead of going to Claude's prompt at once.
+- Question cards look and behave like the terminal's (strip, numbers, review, Submit).
+- Needs you says where each question is answered; Claude waits with no held question show the Mac line instead of a reply box.
+- The pet tap opens the overlay or list instead of Sessions.
+- Today sends one small POST to `/api/today/brief` per load (every 5 minutes while open), which does nothing while the summary is off; Settings shows the new toggle.
+
 ## 6.99.25 - COS Control Web: act from Today, Work chat, Memories rebuilt, change the pet (private)
 
 2026-11-07. Private build on 6.99.24 (Codex root's mobile layout fix, bb5ff2c, kept unchanged). Server only. Works with COS Control 0.5.376 as installed; two Mac follow-ups are listed at the end.
