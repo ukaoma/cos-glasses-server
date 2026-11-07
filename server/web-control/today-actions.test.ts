@@ -91,6 +91,14 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
   return { kit, touched, deps }
 }
 
+// The one confirm rule (app.js COSWeb.confirmReady), run from app.js itself on the test's clock.
+function realConfirmReady(D: { now(): number }) {
+  const m = /  var ARM_CONFIRM_MS = (\d+);\n[\s\S]*?  window\.COSWeb\.confirmReady = (function \(armedAt\) \{[^\n]*\});/.exec(APP)
+  expect(m, 'app.js defines COSWeb.confirmReady').not.toBeNull()
+  // eslint-disable-next-line no-new-func
+  return new Function('Date', 'ARM_CONFIRM_MS', 'return ' + m![2])(D, Number(m![1])) as (at: unknown) => boolean
+}
+
 // ── the overlay, loaded for real ─────────────────────────
 interface Opts {
   data?: Record<string, unknown>
@@ -100,6 +108,8 @@ interface Opts {
   store?: Map<string, string>
   readerReading?: unknown
   webStore?: Map<string, string>
+  styles?: Record<string, Record<string, string>>
+  model?: unknown
 }
 function load(o: Opts = {}) {
   const els: Record<string, El> = {}
@@ -115,12 +125,13 @@ function load(o: Opts = {}) {
     activeElement: null,
     body: { appendChild: (el: El) => { document.appended = el } },
     documentElement: new El(),
-    createElement: () => { const e = new El(); e.doc = document; return e },
+    createElement: () => { const e = new El(); e.doc = document; e.querySelector = ((sel: string) => (sel === '.ta-scrim' ? scrimEl : null)) as any; return e },
     getElementById: (id: string) => { if (!els[id]) { els[id] = new El(); els[id]!.id = id; els[id]!.doc = document } return els[id] },
     querySelector: (sel: string) => document.selectors?.[sel] ?? null,
     addEventListener: (t: string, fn: (e: any) => void) => { (docListeners[t] ??= []).push(fn) },
   }
   document.getElementById('ask-sheet').classList.add('hidden')
+  const scrimEl = new El(); scrimEl.id = 'scrim'
   const history = { state: null as unknown, pushes: 0, backs: 0, replaces: 0, pushState(s: unknown) { this.state = s; this.pushes++ }, replaceState(s: unknown) { this.state = s; this.replaces++ }, back() { this.backs++ } }
   const location = { hash: '#/today', replaced: [] as string[], replace(h: string) { this.replaced.push(h) } }
   const data: Record<string, unknown> = { needs: [], working: [], open: [], welcome: {}, offline: false, at: 1, sessions: [], intake: [], intakeCaps: { cardCreation: true, linkWrites: true }, intakeLoaded: true, ...(o.data || {}) }
@@ -144,7 +155,12 @@ function load(o: Opts = {}) {
     constructor(url: string) { this.url = url; streams.push(this) } close() { this.closed = true } }
   const mounts: string[] = []
   let unmounts = 0
+  // The page's clock: real time plus whatever the test moves it on (later()).
+  let skew = 0
+  const realNow = Date.now
+  class VDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(realNow() + skew) } static now() { return realNow() + skew } }
   const W: Record<string, unknown> = {
+    confirmReady: realConfirmReady(VDate),
     esc, api, go: (p: string, a: string[]) => { location.hash = '#/' + [p].concat(a || []).join('/') }, isPhone: () => true, autoGrow: () => {},
     parseRoute: () => ({ pane: (location as any).pane ?? 'today', args: [] }),
     readStore: (k: string) => { try { return JSON.parse(webStore.get(k) ?? '{}') } catch { return {} } },
@@ -162,6 +178,7 @@ function load(o: Opts = {}) {
       badge: (p: string) => '<span class="badge ' + p + '">' + p + '</span>', span: () => '20 min',
       splitSessionId: (provider: string, id: string) => { const m = /^(claude|codex|cursor):(.+)$/.exec(String(id || '')); return m ? { provider: m[1], id: m[2] } : { provider: provider || 'claude', id: String(id || '') } },
       markGone: (id: string, g: boolean) => { gone.push([id, g]) },
+      needs: () => o.model ?? null,
       reloadIntake: () => { reloads++; return Promise.resolve() },
       refresh: () => { refreshed++ },
     },
@@ -171,9 +188,10 @@ function load(o: Opts = {}) {
   }
   const ctx = vm.createContext({
     window: { COSWeb: W, addEventListener: (t: string, fn: () => void) => { winListeners[t] = fn }, visualViewport: undefined },
-    document, history, location, fetch, EventSource: FakeEventSource, AbortController, console, Date, JSON, Math, Promise, isFinite, encodeURIComponent,
+    document, history, location, fetch, EventSource: FakeEventSource, AbortController, console, Date: VDate, JSON, Math, Promise, isFinite, encodeURIComponent,
     setTimeout: (fn: () => void, ms: number) => { (ctx as any).__timers.push({ fn, ms }); return 1 }, clearTimeout: () => {},
     setInterval: () => 1, clearInterval: () => {},
+    getComputedStyle: (el: El) => (o.styles ? o.styles[el.id] : undefined),
   })
   ;(ctx as any).__timers = []
   vm.runInContext(TA, ctx)
@@ -199,7 +217,8 @@ function load(o: Opts = {}) {
   const route = (pane: string) => routeHooks.forEach(fn => fn({ pane }))
   const runTimers = () => { const t = (ctx as any).__timers.splice(0); t.forEach((x: { fn: () => void }) => x.fn()) }
   const elsAll = new Proxy(els, { get: (_t, id: string) => document.getElementById(id) }) as Record<string, El>
-  return { ta, els: elsAll, data, layerTap, webStore, posts, apiCalls, gone, calls, store, reader, streams, mounts, history, location, document, tap, opener, key, pop, route, runTimers,
+  const later = (ms: number) => { skew += ms }
+  return { ta, els: elsAll, data, layerTap, webStore, later, now: () => realNow() + skew, posts, apiCalls, gone, calls, store, reader, streams, mounts, history, location, document, tap, opener, key, pop, route, runTimers,
     refreshed: () => refreshed, reloads: () => reloads, workChanged: () => workChanged, unmounts: () => unmounts, ctx }
 }
 
@@ -253,7 +272,7 @@ describe('From today’s meetings: decide in the overlay, through Work’s own r
   it('a dismissed line leaves once its eight seconds have passed', async () => {
     const h = load({ data: { intake: [ITEM(ID1, 'Not a task')] }, api: { [`POST /api/work-intake/${ID1}/resolve`]: resolved(ID1, 'dismiss'), '/api/work-intake/decisions': codeError('', 404) } })
     h.ta.open('meeting', 'Surcharging Push', h.opener())
-    h.tap('dismiss', ID1); h.tap('dismiss', ID1)   // no Undo here: tap, then tap again
+    h.tap('dismiss', ID1); h.later(450); h.tap('dismiss', ID1)   // no Undo here: tap, then tap again a moment later
     await flush()
     expect(h.els['ta-body']!.innerHTML).toContain('Dismissed.')
     h.ta._state.rows[ID1].until = Date.now() - 1
@@ -316,7 +335,7 @@ describe('From today’s meetings: decide in the overlay, through Work’s own r
       '/api/work-intake/decisions': codeError('', 404) } })
     h.ta.open('meeting', 'Surcharging Push', h.opener())
     h.tap('create', ID1); await flush()
-    h.tap('dismiss', ID2); h.tap('dismiss', ID2); await flush()
+    h.tap('dismiss', ID2); h.later(450); h.tap('dismiss', ID2); await flush()
     h.tap('create', ID3); await flush()
     const html = h.els['ta-body']!.innerHTML
     expect(html).toContain('Already dismissed on another screen.')
@@ -538,6 +557,10 @@ describe('Needs you: see what the session waits on and reply, through the reader
     await flush()
     expect(h.els['ta-verdict']!.innerHTML).toContain('Send into an open session?')
     expect(h.calls.some(c => c.method === 'POST')).toBe(false)
+    h.tap('caution-send')   // the second half of the Send double tap: too soon, ignored
+    await flush()
+    expect(h.calls.some(c => c.method === 'POST')).toBe(false)
+    h.later(450)
     h.tap('caution-send')
     await flush()
     expect(h.calls.filter(c => c.path === '/api/agent-sessions/bindings/b1/turns')).toHaveLength(1)
@@ -1149,7 +1172,7 @@ describe('a quick second tap after opening lands on nothing (qa2-user B1, W1)', 
       ;(h.ctx as any).Date.now = () => t0
       h.ta.open('meeting', 'Surcharging Push', h.opener())
       const settle = h.ta._state.settleAt - t0
-      expect(settle, 'the CSS default (220 ms) and a little more').toBe(350)
+      expect(settle, 'the CSS default (220 ms) and a double tap\u2019s second half').toBe(500)
       ;(h.ctx as any).Date.now = () => t0 + 100   // the second tap of a double tap, 100 ms later
       expect(h.layerTap('dismiss', ID1)).toBe(false)
       expect(h.layerTap('dismiss', ID1)).toBe(false)
@@ -1157,7 +1180,10 @@ describe('a quick second tap after opening lands on nothing (qa2-user B1, W1)', 
       expect(h.layerTap('close')).toBe(false)
       expect(h.ta.isOpen()).toBe(true)
       expect(h.location.replaced, 'never left Today').toEqual([])
-      ;(h.ctx as any).Date.now = () => t0 + 400
+      ;(h.ctx as any).Date.now = () => t0 + 417   // W1-r2: the folded Duo's slow second tap
+      expect(h.layerTap('open-work')).toBe(false)
+      expect(h.layerTap('dismiss', ID1)).toBe(false)
+      ;(h.ctx as any).Date.now = () => t0 + 520
       expect(h.layerTap('dismiss', ID1)).toBe(true)
     } finally { (h.ctx as any).Date.now = realNow }
     await flush()
@@ -1174,8 +1200,11 @@ describe('a quick second tap after opening lands on nothing (qa2-user B1, W1)', 
     expect(h.els['ta-body']!.innerHTML).toContain('aria-label="Tap again to dismiss: One"')
     h.tap('show-all')                     // anything else disarms it
     expect(h.els['ta-body']!.innerHTML).not.toContain('Tap again to dismiss')
-    h.tap('dismiss', ID2); h.tap('dismiss', ID1)   // arming one row never confirms another
+    h.tap('dismiss', ID2); h.later(450); h.tap('dismiss', ID1)   // arming one row never confirms another
     expect(h.posts).toEqual([])
+    h.tap('dismiss', ID1)   // a bounce right after arming: still only armed
+    expect(h.posts).toEqual([])
+    h.later(450)
     h.tap('dismiss', ID1)
     await flush()
     expect(h.posts).toEqual([{ path: `/api/work-intake/${ID1}/resolve`, body: { action: 'dismiss' } }])
@@ -1291,8 +1320,8 @@ function needsRegion(opts: { at: string; sessions?: unknown[]; needs?: unknown[]
     window: { COSWeb: { setStory: (n: string, text: string, hot: boolean) => rail.push([n, text, hot]) } },
   }
   // eslint-disable-next-line no-new-func
-  new Function('deps', 'with (deps) {\n' + words + domains + plainFn + '\n' + helpers + '\n' + sx + '\n' + APP.slice(start, end) + '\npaintNeeds();\n}')(deps)
-  return { els, rail, badges, TODAY: TODAY as any }
+  const fns = new Function('deps', 'with (deps) {\n' + words + domains + plainFn + '\n' + helpers + '\n' + sx + '\n' + APP.slice(start, end) + '\npaintNeeds();\nreturn { renderRunning: renderRunning };\n}')(deps)
+  return { els, rail, badges, TODAY: TODAY as any, fns }
 }
 const WAIT = { session_id: 'aaaaaaaa-1111-4111-8111-111111111111', provider: 'claude', display_label: 'Release QA', alive: true, running: true,
   agent_state: 'waiting', state_source: 'hook', waiting_kind: 'permission', waiting_detail: 'Bash npm publish', state_since: '2026-11-04T19:00:00Z' }
@@ -1305,7 +1334,7 @@ describe('Needs you lists every source, and the headline, count and rail agree (
     const list = n.els['needs-list']!.innerHTML
     expect(list).toContain('Release QA wants your permission')
     expect(list).toContain('Wants to run Bash npm publish')
-    expect(list).toContain('data-today="run" data-key="claude|' + WAIT.session_id + '"')
+    expect(list).toContain('data-today="wait" data-key="claude|' + WAIT.session_id + '"')
     expect(list).toContain('Handoff h1')
     expect(list, 'deduped into the session row').not.toContain('Handoff h2')
     expect(list).toContain('Name 2 held voices')
@@ -1398,8 +1427,11 @@ describe('Stop on the Running peek (parity gap 4)', () => {
     h.tap('stop')
     expect(h.calls.filter(c => c.path === CP('/cancel'))).toHaveLength(0)
     expect(h.els['ta-live']!.innerHTML).toContain('Tap again to stop')
+    h.tap('stop')   // 110 ms later in W2-r2: too soon, ignored
+    expect(h.calls.filter(c => c.path === CP('/cancel'))).toHaveLength(0)
+    h.later(450)
     h.tap('stop')
-    h.tap('stop'); h.tap('stop')   // armed and confirmed again while the first is still out: nothing more is sent
+    h.tap('stop'); h.later(450); h.tap('stop')   // armed and confirmed again while the first is still out: nothing more is sent
     await flush()
     const sent = h.calls.filter(c => c.path === CP('/cancel'))
     expect(sent).toHaveLength(1)
@@ -1410,19 +1442,19 @@ describe('Stop on the Running peek (parity gap 4)', () => {
   it('a refusal shows the server’s reason; a lost answer says so and the retry reuses the id', async () => {
     const no = peek({ status: 409, body: { cancelled: false, reason: 'cancel_unsupported', reasonCopy: 'COS did not start this turn, so it cannot stop it here.' } })
     await flush()
-    no.tap('stop'); no.tap('stop'); await flush()
+    no.tap('stop'); no.later(450); no.tap('stop'); await flush()
     expect(no.els['ta-status']!.textContent).toBe('COS did not start this turn, so it cannot stop it here.')
     expect(no.els['ta-status']!.getAttribute('data-error')).toBe('1')
-    no.tap('stop'); no.tap('stop'); await flush()   // a new Stop after an answer is a new request, not a replay
+    no.tap('stop'); no.later(450); no.tap('stop'); await flush()   // a new Stop after an answer is a new request, not a replay
     const tries = no.calls.filter(c => c.path === CP('/cancel')).map(c => c.body.clientCancelId)
     expect(tries).toHaveLength(2)
     expect(tries[1]).not.toBe(tries[0])
     let calls = 0
     const lost = peek(() => (++calls === 1 ? new TypeError('Load failed') : { status: 200, body: { cancelled: true } }))
     await flush()
-    lost.tap('stop'); lost.tap('stop'); await flush()
+    lost.tap('stop'); lost.later(450); lost.tap('stop'); await flush()
     expect(lost.els['ta-status']!.textContent).toContain('Stopping again is safe')
-    lost.tap('stop'); lost.tap('stop'); await flush()
+    lost.tap('stop'); lost.later(450); lost.tap('stop'); await flush()
     const ids = lost.calls.filter(c => c.path === CP('/cancel')).map(c => c.body.clientCancelId)
     expect(ids).toHaveLength(2)
     expect(ids[1]).toBe(ids[0])
@@ -1484,7 +1516,7 @@ describe('⌘K files a task to the Work inbox (parity gap 7)', () => {
     const workPane = { changed: 0, intakeChanged() { this.changed++ } }
     const askQ = { value: 'Book the venue for the Thrift summit' }
     const deps: Record<string, unknown> = {
-      $: (id: string) => (id === 'ask-q' ? askQ : null), PANES: { work: workPane }, toast: (t: string) => toasts.push(t), renderAsk: () => {},
+      $: (id: string) => (id === 'ask-q' ? askQ : null), PANES: { work: workPane }, toast: (t: string) => toasts.push(t), renderAsk: () => {}, esc,
       setStatus: (_el: unknown, t: string, err: boolean) => statuses.push([t, !!err]), webJobId: (() => { let n = 0; return () => 'id-' + (++n) })(),
       domainLabel: (d: string) => ({ quilt: 'Quilt' } as Record<string, string>)[d] || d, document: { querySelector: () => null },
       api: (path: string, o?: { method?: string; body?: unknown }) => {
@@ -1493,7 +1525,7 @@ describe('⌘K files a task to the Work inbox (parity gap 7)', () => {
       },
     }
     // eslint-disable-next-line no-new-func
-    const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { fileToInbox: fileToInbox, fileDomainLabel: fileDomainLabel, state: ASK_FILE };\n}')(deps)
+    const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { fileToInbox: fileToInbox, fileDomainLabel: fileDomainLabel, noteHtml: fileNoteHtml, get state() { return ASK_FILE } };\n}')(deps)
     return { fns, posts, statuses, toasts, workPane, askQ, setCapture: (f: () => Promise<unknown>) => { capture = f } }
   }
   it('files the words into the first domain’s inbox through Work’s own route; a second tap while it is out sends nothing', async () => {
@@ -1517,11 +1549,17 @@ describe('⌘K files a task to the Work inbox (parity gap 7)', () => {
     s.setCapture(() => (++n === 1 ? Promise.reject(Object.assign(new Error('The task bridge did not answer.'), { status: 503 })) : Promise.resolve({ ok: true })))
     s.fns.fileToInbox('Call Megan about surcharging')
     await flush()
-    expect(s.statuses.pop()).toEqual(['Not filed: The task bridge did not answer. Filing again is safe.', true])
+    // W5-r2: the result is on the row and in a toast, never only in a status line under the sheet.
+    expect(s.toasts).toEqual(['Not filed: The task bridge did not answer. Filing again is safe.'])
+    expect(s.fns.state.note).toEqual({ text: 'Call Megan about surcharging', line: 'Not filed: The task bridge did not answer. Filing again is safe.', error: true })
+    expect(s.fns.noteHtml('Call Megan about surcharging')).toContain('class="note file-error" role="alert">Not filed: The task bridge did not answer.')
+    expect(s.fns.noteHtml('Something else'), 'only for the words it was about').toContain('As a task in Quilt')
+    expect(s.statuses, 'nothing goes to the status line under the sheet').toEqual([])
     s.fns.fileToInbox('Call Megan about surcharging')
     await flush()
     expect(s.posts.map(p => p.body.captureId)).toEqual(['id-1', 'id-1'])
-    expect(s.toasts).toEqual(['Filed to the Work inbox.'])
+    expect(s.toasts).toEqual(['Not filed: The task bridge did not answer. Filing again is safe.', 'Filed to the Work inbox.'])
+    expect(s.fns.state.note).toBeNull()
   })
 })
 
@@ -1530,5 +1568,155 @@ describe('the decision words live in one place (wording item 14)', () => {
     expect(TA).toContain("var CREATE_LABEL = 'Create task', DISMISS_LABEL = 'Dismiss';")
     expect((TA.match(/'Create task'/g) || []).length, 'only the constant spells it').toBe(1)
     expect((TA.match(/'Dismiss'/g) || []).length, 'only the constant spells it').toBe(1)
+  })
+})
+
+// ── User QA round 2 (qa2-user-r2.md) ───────────────────────────────────
+describe('W1-r2: the settle window covers the folded bottom sheet’s real open time', () => {
+  it('derives it from the sheet’s and the backdrop’s computed animation and transition, the longer one, plus margin; never under 500 ms', () => {
+    const at = (styles?: Record<string, Record<string, string>>) => {
+      const h = load({ data: { intake: [ITEM(ID1, 'One')] }, styles })
+      const t0 = h.now()
+      h.ta.open('meeting', 'Surcharging Push', h.opener())
+      return h.ta._state.settleAt - t0
+    }
+    const folded = { 'ta-sheet': { animationDuration: '0.22s', animationDelay: '0s', transitionDuration: '0s', transitionDelay: '0s' },
+      scrim: { animationDuration: '0.16s', animationDelay: '0s', transitionDuration: '0s', transitionDelay: '0s' } }
+    expect(at(folded), 'the bottom sheet: 220 ms and the margin').toBeGreaterThanOrEqual(500)
+    expect(at(folded)).toBeLessThan(510)
+    const slowBackdrop = { ...folded, scrim: { animationDuration: '0.16s', animationDelay: '0s', transitionDuration: '0.2s, 0.4s', transitionDelay: '0s, 0.05s' } }
+    expect(at(slowBackdrop), 'the backdrop’s longer transition, delay included, wins').toBeGreaterThanOrEqual(730)
+    expect(at(slowBackdrop)).toBeLessThan(740)
+    const reduced = { 'ta-sheet': { animationDuration: '1e-05s', animationDelay: '0s', transitionDuration: '0s', transitionDelay: '0s' }, scrim: { animationDuration: '1e-05s' } }
+    expect(at(reduced), 'reduced motion keeps the double-tap protection').toBeGreaterThanOrEqual(500)
+  })
+})
+
+describe('W2-r2: a confirm needs its first tap on screen a moment', () => {
+  it('question cards: Allow twice within the moment arms only; after it, the second Allow posts (the shared app.js rule)', async () => {
+    const mk = () => ({ hidden: true, innerHTML: '', isConnected: true, listeners: {} as Record<string, (e: unknown) => void>,
+      addEventListener(t: string, fn: (e: unknown) => void) { this.listeners[t] = fn }, querySelector: () => null, querySelectorAll: () => [], contains: () => false })
+    const host = mk()
+    const posts: Array<{ path: string; body: any }> = []
+    let onShell: (() => void) | null = null, skew = 0
+    const realNow = Date.now
+    class QDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(realNow() + skew) } static now() { return realNow() + skew } }
+    const iso = (ms: number) => new Date(realNow() + ms).toISOString()
+    const item = { id: 'pq_' + 'a'.repeat(24), sessionId: 's1', provider: 'claude', kind: 'approval', tool: 'Bash', createdAt: iso(-5000), deadlineAt: iso(600000), answerable: true, awayHold: false, waitingAtMac: false, approval: { tool: 'Bash', summary: 'npm publish', detail: 'npm publish' } }
+    const W = { esc, toast: () => {}, showAuth: () => {}, onShell: (fn: () => void) => { onShell = fn }, confirmReady: realConfirmReady(QDate),
+      api: (path: string, o?: { method?: string; body?: unknown }) => {
+        if (o?.method === 'POST') { posts.push({ path, body: o.body }); return Promise.resolve({ ok: true }) }
+        return Promise.resolve(path === '/api/models' ? { capabilities: { sessionQuestions: { enabled: true, webClient: true } } } : {})
+      } }
+    const fetch = () => Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve({ enabled: true, items: [item] }) })
+    const document = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? { classList: { contains: () => false } } : null), addEventListener: () => {}, hidden: false, activeElement: null }
+    const ctx = vm.createContext({ window: { COSWeb: W }, document, fetch, console, Date: QDate, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
+      setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {} })
+    vm.runInContext(QUESTIONS, ctx)
+    onShell!()
+    await flush()
+    const allow = { closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? 'allow' : a === 'data-sq-id' ? item.id : null) }) }
+    host.listeners.click!({ target: allow })
+    skew += 110
+    host.listeners.click!({ target: allow })
+    await flush()
+    expect(posts, 'a double tap 110 ms apart never allows').toEqual([])
+    skew += 400
+    host.listeners.click!({ target: allow })
+    await flush()
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.body).toMatchObject({ decision: 'allow' })
+  })
+
+  it('a triple tap on a meeting row (open, then two taps 460 ms apart) arms Dismiss and never sends it at the folded size', async () => {
+    const h = load({ data: { intake: [ITEM(ID1, 'Roundtable branding')] }, api: { [`POST /api/work-intake/${ID1}/resolve`]: resolved(ID1, 'dismiss'), '/api/work-intake/decisions': codeError('', 404) } })
+    h.ta.open('meeting', 'Surcharging Push', h.opener())
+    await flush()
+    h.later(460); expect(h.layerTap('dismiss', ID1), '460 ms: still inside the settle window').toBe(false)
+    h.later(80); h.layerTap('dismiss', ID1)        // 540 ms: past the settle window, arms
+    h.later(100); h.layerTap('dismiss', ID1)       // the bounce 100 ms later: ignored
+    await flush()
+    expect(h.posts).toEqual([])
+    expect(h.els['ta-body']!.innerHTML).toContain('Tap again to dismiss')
+  })
+})
+
+describe('W3-r2: Today never states an absence it did not observe', () => {
+  it('sessions unread: the story says so, the Running card offers Try again, and nothing says "Nothing running"', () => {
+    const n = needsRegion({ at: WED_2PM, sessionsState: 'failed' })
+    const story = n.els['today-story']!.textContent
+    expect(story).toContain('Couldn’t read your sessions.')
+    expect(story).not.toContain('No agents are running')
+    expect(story).not.toContain('Nothing is waiting on you')
+    n.fns.renderRunning([], [])
+    const card = n.els['run-list']!.innerHTML
+    expect(card).toContain('data-today-needs="retry">Couldn’t read sessions. Try again</button>')
+    expect(card).not.toContain('Nothing running')
+    const ok = needsRegion({ at: WED_2PM })
+    ok.fns.renderRunning([], [])
+    expect(ok.els['run-list']!.innerHTML, 'a list that was read and is empty may say so').toContain('Nothing running')
+  })
+
+  it('the pet hides instead of saying "Nothing running" (app.js renderPet)', () => {
+    const start = APP.indexOf('  function renderPet(sessions) {'), end = APP.indexOf('\n  }\n', start)
+    expect(start).toBeGreaterThan(0)
+    const box = new El(), calls: string[] = []
+    const deps = { $: () => box, placePet: () => {}, petPrefs: () => ({ show: true, pet: 'default' }), petStop: () => calls.push('stop'), PET: { pose: 'idle' },
+      state: { sessionsUnread: true }, api: () => { calls.push('api'); return Promise.resolve({}) } }
+    // eslint-disable-next-line no-new-func
+    new Function('deps', 'with (deps) {\n' + APP.slice(start, end + 4) + '\nrenderPet([]);\n}')(deps)
+    expect(box.cls.has('hidden')).toBe(true)
+    expect(calls).toEqual(['stop'])
+  })
+})
+
+describe('W4-r2: a session waiting on a question opens as waiting, never as working', () => {
+  const QSID = 'dddddddd-4444-4444-8444-444444444444'
+  const QROW = { session_id: QSID, provider: 'claude', display_label: 'Gong personas team update', alive: true, running: true, running_active: false,
+    agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
+  const QP = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(QSID)}${tail}`
+  const model = { rows: [{ kind: 'session', key: 'claude|' + QSID, title: 'Gong personas team update asked you a question', why: 'Waiting for you. Paused until you answer.' }], now: [], later: [], failed: [], settled: true }
+  const routes: Routes = { ['GET ' + QP('?turns=6')]: { status: 200, body: { recent_turns: [{ role: 'assistant', text: 'Which personas should I update first?' }] } },
+    ['GET ' + QP('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
+  it('the Needs you row opens the waiting sheet: the question to answer, else the last message and a reply box; no peek, no Stop', async () => {
+    const h = load({ data: { sessions: [QROW] }, routes, model, questions: 0 })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    expect(h.els['ta-title']!.textContent).toBe('Gong personas team update asked you a question')
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('Waiting for you. Paused until you answer.')
+    expect(meta).toContain('Answer it in a reply below, or open the session.')
+    expect(meta).not.toContain('Working')
+    expect(h.streams, 'no live peek').toHaveLength(0)
+    expect(h.els['ta-live']!.innerHTML).toBe('')
+    expect(h.els['ta-last']!.innerHTML).toContain('Which personas should I update first?')
+    expect(h.els['ta-foot']!.innerHTML).toContain('placeholder="Reply to this session"')
+    expect(h.mounts).toEqual([QSID])
+    const held = load({ data: { sessions: [QROW] }, routes, model, questions: 1 })
+    held.ta.open('wait', 'claude|' + QSID, held.opener())
+    await flush()
+    expect(held.els['ta-meta']!.innerHTML).toContain('It is asking you this now. Answer here.')
+  })
+
+  it('a session the list calls active but waiting on you opens with no Stop, before the stream says anything', async () => {
+    const busy = { ...QROW, running_active: true }
+    const h = load({ data: { sessions: [busy] }, routes })
+    h.ta.open('run', 'claude|' + QSID, h.opener())
+    await flush()
+    expect(h.els['ta-run-state']!.textContent).toMatch(/^Waiting for you/)
+    expect(h.els['ta-live']!.innerHTML).not.toContain('data-ta="stop"')
+    expect(h.els['ta-live']!.innerHTML).not.toContain('<strong>Working</strong>')
+  })
+
+  it('a peek of that session from Running says Waiting, and a stream that says the process is up still shows no Stop', async () => {
+    const h = load({ data: { sessions: [QROW] }, routes })
+    h.ta.open('run', 'claude|' + QSID, h.opener())
+    await flush()
+    expect(h.els['ta-run-state']!.textContent).toMatch(/^Waiting for you/)
+    h.streams[0].onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'waiting', waiting_kind: 'question', state_since: new Date(Date.now() - 3600000).toISOString() }) })
+    expect(h.els['ta-run-state']!.textContent).toMatch(/^Waiting for you/)
+    expect(h.els['ta-live']!.innerHTML).toContain('<strong>Waiting</strong>')
+    expect(h.els['ta-live']!.innerHTML).not.toContain('data-ta="stop"')
+    expect(h.els['ta-live']!.innerHTML).not.toContain('Working')
   })
 })

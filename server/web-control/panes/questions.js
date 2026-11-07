@@ -28,6 +28,7 @@
     items: [],            // pending items, oldest first
     picks: {},            // id -> [{ labels: [], other: '' }] per question
     armed: {},            // id -> 'send' | 'allow' | 'deny'
+    armedAt: {},          // id -> when it was armed (COSWeb.confirmReady)
     sending: {},          // id -> clientAnswerId while a POST is out
     notes: {},            // id -> one line under the card
     answerIds: {},        // id -> the clientAnswerId this page answers under (a retry replays it)
@@ -259,8 +260,10 @@
       });
       return;
     }
-    // Tap, then tap again: the first tap only arms the button.
-    if (Q.armed[id] !== what) { Q.armed[id] = what; patchCard(id); return; }
+    // Tap, then tap again: the first tap only arms the button, and the second counts only once the first has been on
+    // screen a moment (COSWeb.confirmReady, the rule Today's overlay uses), so a double tap never allows or sends.
+    if (Q.armed[id] !== what) { Q.armed[id] = what; Q.armedAt[id] = Date.now(); patchCard(id); return; }
+    if (W.confirmReady && !W.confirmReady(Q.armedAt[id])) return;
     if (what === 'send') return sendAnswers(item);
     if (what === 'allow' || what === 'deny') return post(id, { decision: what }, what === 'allow' ? 'Allowed once.' : 'Denied.');
   }

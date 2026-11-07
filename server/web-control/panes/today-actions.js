@@ -67,6 +67,7 @@
     dirty: false,          // something was decided or sent: Today reloads on close
     // From today's meetings
     busy: '',              // the one suggestion being decided (Control: one at a time)
+    armedAt: {},           // the one armed confirm: 'dismiss:<id>' | 'stop' | 'caution' -> when (confirmTap)
     rows: {},              // id -> { state, note, undo, taskId, item, asked, until, undoing, undoNote }
     shown: {},             // ids drawn in this overlay, so one that vanishes reads as handled elsewhere
     loop: null,            // the undo route exists on this server (GET /api/work-intake/decisions), null = not asked
@@ -155,8 +156,8 @@
     if (O.open) stopSession();
     O.open = { kind: kind, key: String(key || ''), all: kind === 'intake' };
     O.opener = opener || document.activeElement; O.openerSel = openerSelector(opener);
-    O.note = { text: '', kind: '' }; O.cautionAsk = false; O.needGone = false; O.armed = '';
-    O.stopArmed = false; O.stopping = false; O.stopKey = '';
+    O.note = { text: '', kind: '' }; O.cautionAsk = false; O.needGone = false; O.armedAt = {};
+    O.stopping = false; O.stopKey = '';
     layer.hidden = false;
     document.documentElement.classList.add('ta-open');
     var shell = $('app-shell'); if (shell) shell.setAttribute('inert', '');
@@ -167,7 +168,7 @@
       if (!O.pushed) { history.pushState(entry, ''); O.pushed = true; } else history.replaceState(entry, '');
     } catch (_e) { /* no history API: Back simply leaves Today */ }
     try {
-      if (kind === 'need' || kind === 'run') openSession(kind, O.open.key);
+      if (kind === 'need' || kind === 'run' || kind === 'wait') openSession(kind, O.open.key);
       else openIntake();
     } catch (err) {
       // A bug here must not leave a half-drawn sheet over an inert page: take it down, keep the history entry for
@@ -179,18 +180,30 @@
     O.settleAt = Date.now() + settleMs(sheet);
     if (sheet && sheet.focus) sheet.focus({ preventScroll: true });
   }
-  // How long taps inside are ignored after opening: the sheet's own open animation (today-actions.css ta-rise and
-  // ta-slide, 220 ms) and a little more, so a quick second tap of the same gesture lands on nothing. Never under 300 ms,
-  // so reduced motion (no animation) keeps the same protection.
-  var SETTLE_EXTRA_MS = 130, SETTLE_MIN_MS = 300;
+  // How long taps inside are ignored after opening: the longest open motion of the sheet and its backdrop (their computed
+  // animation and transition, delay included: today-actions.css ta-rise or ta-slide, 220 ms, and fade, 160 ms), plus
+  // the second half of a double tap. On the folded Duo a second tap 352 to 417 ms after the first still landed on the
+  // sheet's links with a 350 ms window (W1-r2), so the margin brings it to 500 ms, and it never goes under that, so
+  // reduced motion (no animation) keeps the same protection.
+  var SETTLE_EXTRA_MS = 280, SETTLE_MIN_MS = 500;
+  function msList(v) {
+    return String(v || '').split(',').map(function (x) { x = x.trim(); var n = parseFloat(x); return isFinite(n) ? (/ms$/.test(x) ? n : n * 1000) : 0; });
+  }
+  function longestMotion(el) {
+    var cs; try { cs = getComputedStyle(el); } catch (_e) { return null; }
+    if (!cs) return null;
+    var most = 0;
+    [['animationDuration', 'animationDelay'], ['transitionDuration', 'transitionDelay']].forEach(function (p) {
+      var d = msList(cs[p[0]]), w = msList(cs[p[1]]);
+      d.forEach(function (x, i) { most = Math.max(most, x + (w[i % (w.length || 1)] || 0)); });
+    });
+    return most;
+  }
   function settleMs(sheet) {
-    var ms = 220;
-    try {
-      var v = String(getComputedStyle(sheet).animationDuration || '').split(',')[0].trim();
-      var n = parseFloat(v);
-      if (isFinite(n)) ms = /ms$/.test(v) ? n : n * 1000;
-    } catch (_e) { /* no computed style: the CSS default above */ }
-    return Math.max(SETTLE_MIN_MS, ms + SETTLE_EXTRA_MS);
+    var scrim = layer && layer.querySelector ? layer.querySelector('.ta-scrim') : null;
+    var a = longestMotion(sheet), b = scrim ? longestMotion(scrim) : null;
+    var motion = a == null && b == null ? 220 : Math.max(a || 0, b || 0);   // no computed style: the CSS default
+    return Math.max(SETTLE_MIN_MS, motion + SETTLE_EXTRA_MS);
   }
 
   // how: 'user' (X, outside, Escape), 'pop' (Back), 'leave' (navigating to another pane)
@@ -228,7 +241,7 @@
   // Back from there showed nothing (measured in Chrome 11/07: a same-document popstate). On load, app.js hands that
   // entry here: open the same thing again, so the first Back closes it as it did before the reload. What cannot be
   // opened (gone, or Today left meanwhile) just clears the entry's mark.
-  var KINDS = { need: 1, run: 1, meeting: 1, intake: 1 };
+  var KINDS = { need: 1, run: 1, wait: 1, meeting: 1, intake: 1 };
   function restore(st) {
     if (O.open || !st || !st.cosTodayOverlay) return Promise.resolve(false);
     var forget = function () { try { history.replaceState(null, ''); } catch (_e) {} return false; };
@@ -236,7 +249,7 @@
     var started = Date.now();
     return new Promise(function (resolve) {
       (function wait() {
-        var d = T.data(), ready = d.at > 0 && (st.kind === 'need' || st.kind === 'run' || d.intakeLoaded);
+        var d = T.data(), ready = d.at > 0 && (st.kind === 'need' || st.kind === 'run' || st.kind === 'wait' || d.intakeLoaded);
         if (W.parseRoute().pane !== 'today' || O.open) return resolve(forget());
         if (!ready) { if (Date.now() - started > 15000) return resolve(forget()); return setTimeout(wait, 150); }
         O.pushed = true;   // this entry is the overlay's own
@@ -259,6 +272,17 @@
     close('user');
   }, true);
 
+  // Every tap-then-tap-again in the overlay goes through here: the first tap arms (and disarms anything else), and the
+  // second counts only once the first has been on screen COSWeb.confirmReady's moment, so a double tap or a bounce
+  // arms and never confirms (W2-r2). A tap too soon leaves it armed.
+  function confirmReadyAt(at) { return W.confirmReady ? W.confirmReady(at) : typeof at === 'number' && Date.now() - at >= 400; }
+  function confirmTap(key, repaint) {
+    var at = O.armedAt[key];
+    if (at == null) { O.armedAt = {}; O.armedAt[key] = Date.now(); repaint(); return false; }
+    if (!confirmReadyAt(at)) return false;
+    O.armedAt = {};
+    return true;
+  }
   function setHead(title) { var h = $('ta-title'); if (h) h.textContent = title; }
 
   // ── clicks inside the overlay ─────────────────────────
@@ -266,15 +290,15 @@
     var b = e.target && e.target.closest ? e.target.closest('[data-ta]') : null;
     if (!b || b.disabled) return;
     var what = b.getAttribute('data-ta'), id = b.getAttribute('data-id') || '';
-    if (what !== 'dismiss' && O.armed) { O.armed = ''; if (O.open && (O.open.kind === 'meeting' || O.open.kind === 'intake')) paintIntake(); }
-    if (what !== 'stop' && O.stopArmed) { O.stopArmed = false; paintLive(); }
+    if (!/^(dismiss|stop|caution-send)$/.test(what) && Object.keys(O.armedAt).length) {
+      O.armedAt = {};
+      if (O.open && (O.open.kind === 'meeting' || O.open.kind === 'intake')) paintIntake(); else paintLive();
+    }
     if (what === 'close') return close('user');
     if (what === 'create' || what === 'link') return decide(id, 'accept');
     if (what === 'dismiss') {
-      // Without Undo on this server a Dismiss cannot be taken back, so it asks once: tap, then tap again (the
-      // armed-tap pattern questions.js uses for Allow and Deny).
-      if (O.loop !== true && O.armed !== id) { O.armed = id; paintIntake(); return; }
-      O.armed = '';
+      // Without Undo on this server a Dismiss cannot be taken back, so it asks once: tap, then tap again.
+      if (O.loop !== true && !confirmTap('dismiss:' + id, paintIntake)) return;
       return decide(id, 'dismiss');
     }
     if (what === 'undo') return undo(id);
@@ -285,11 +309,15 @@
     if (what === 'send') return sendReply();
     if (what === 'stop') {
       // A tap arms it (Stop ends the agent's turn on your Mac); the second sends it.
-      if (!O.stopArmed) { O.stopArmed = true; return paintLive(); }
+      if (!confirmTap('stop', paintLive)) return;
       return stopRun();
     }
     if (what === 'retry') return sendReply();
-    if (what === 'caution-send') { if (O.r) O.r.cautionAck = true; O.cautionAsk = false; return sendReply(); }
+    if (what === 'caution-send') {
+      // Shown by the Send tap: the same tap twice must not answer it.
+      if (!confirmReadyAt(O.armedAt.caution)) return;
+      if (O.r) O.r.cautionAck = true; O.cautionAsk = false; O.armedAt = {}; return sendReply();
+    }
     if (what === 'caution-cancel') { O.cautionAsk = false; return paintVerdict(); }
     if (what === 'send-anyway') { var rev = O.r && O.r.sendAnyway; if (O.r) O.r.sendAnyway = null; return sendReply({ acknowledgedRevision: rev }); }
     if (what === 'more') { var box = $('ta-last-text'); if (box) box.classList.remove('clamped'); b.remove(); }
@@ -384,7 +412,7 @@
         if (acts.accept) buttons += '<button type="button" class="btn small primary" data-ta="' + acts.accept + '" data-id="' + esc(it.id) + '"' + (lock ? ' disabled' : '') + '>' + esc(row.state === 'failed' ? 'Try again' : acts.acceptLabel) + '</button>';
         if (acts.card) buttons += '<button type="button" class="link-btn" data-ta="open-card" data-id="' + esc(acts.card) + '">Open card</button>';
         if (!acts.accept || it.kind !== 'link') buttons += '<button type="button" class="link-btn" data-ta="open-work">Open in Work</button>';
-        var armed = O.armed === it.id;
+        var armed = O.armedAt['dismiss:' + it.id] != null;
         buttons += '<button type="button" class="link-btn quiet' + (armed ? ' armed' : '') + '" data-ta="dismiss" data-id="' + esc(it.id) + '"' + (lock ? ' disabled' : '') + ' aria-label="' + esc((armed ? 'Tap again to dismiss: ' : 'Dismiss suggestion: ') + clip(textOf(it), 80)) + '" title="Not a task: it leaves Today and does not move to Work at midnight">' + (armed ? 'Tap again to dismiss' : DISMISS_LABEL) + '</button>';
         line = buttons;
         if (row.note) text += '<p class="ta-note" role="alert">' + esc(row.note) + '</p>';
@@ -522,21 +550,26 @@
   function openSession(kind, key) {
     var provider = '', id = '';
     O.item = null;
+    O.wait = null;
     if (kind === 'need') {
       O.item = needById(key);
       if (O.item) { var k = T.splitSessionId(O.item.provider, O.item.sessionId); provider = k.provider; id = k.id; }
     } else {
+      // A session waiting on you (a Needs you row): Today's own row gives the words, as it listed them.
+      if (kind === 'wait') { var nm = T.needs ? T.needs() : null; O.wait = nm ? nm.rows.filter(function (x) { return x.kind === 'session' && x.key === key; })[0] || null : null; }
       var p = key.split('|'); provider = p[0]; id = p.slice(1).join('|');
     }
     O.row = id ? sessionRowFor(provider, id) : null;
     O.r = id ? K.session(provider, id, VIEW) : null;
-    if (O.r) O.r.live = { working: !!(O.row && O.row.running_active) };
+    // Working only when the session is not waiting on you: a session paused on a question is not at work (W4-r2).
+    if (O.r) O.r.live = { working: !!(O.row && O.row.running_active && K.stateOf(O.row) !== 'waiting') };
     // What was typed, and a send whose answer never came, survive a close, Back or reload: the same words resend under
     // the same key (skeptic W3, qa2-user N1).
     var kept = O.r ? draftOf(O.r) : null;
     if (kept && kept.unsettled) O.r.draft = { text: kept.unsettled.text, key: kept.unsettled.key };
     O.last = null; O.lastState = 'idle';
-    setHead(kind === 'need' ? (O.item ? str(O.item.sessionTitle) || str(O.item.title) || 'Handoff' : 'Needs you') : (O.row ? K.title(O.row) : 'Session'));
+    setHead(kind === 'need' ? (O.item ? str(O.item.sessionTitle) || str(O.item.title) || 'Handoff' : 'Needs you')
+      : kind === 'wait' ? (O.wait ? O.wait.title : 'A session is waiting for you') : (O.row ? K.title(O.row) : 'Session'));
     var body = $('ta-body');
     if (body) body.innerHTML = '<div id="ta-meta"></div><div id="ta-q" class="ta-q" hidden></div><div id="ta-live"></div><div id="ta-last"></div>';
     var foot = $('ta-foot');
@@ -628,6 +661,11 @@
       if (card && card !== session) html += '<p class="ta-card-line">' + esc('Work card: ' + card) + '</p>';
       var p = it.progress && !it.progress.unreadable ? it.progress : null;
       if (p && p.evidence) html += '<blockquote class="ta-quote">' + esc(p.evidence) + '</blockquote>';
+    } else if (O.open.kind === 'wait') {
+      // A session waiting on you: what it waits on, its question to answer here when the Mac holds one for this page,
+      // else its last message and the reply box below. No live peek and no Stop: it is not at work (W4-r2).
+      html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : 'claude') + ' <span>' + esc(O.wait ? O.wait.why : 'Waiting for you') + '</span></p>';
+      if (!questions) html += '<p class="ta-sub">' + esc('Answer it in a reply below, or open the session.') + '</p>';
     } else if (O.row || O.r) {
       // Once the live feed speaks, the line says what it says, so the header and the peek never disagree (qa2-user N3).
       html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : O.row.provider) + ' <span id="ta-run-state">' + esc(runWords()) + '</span></p>';
@@ -683,7 +721,8 @@
       K.feed.apply(r, e);
       r.live = r.live || {};
       if (e.kind === 'status') {
-        var working = e.state === 'working' || e.agent_state === 'running';
+        // The agent's own state wins: a process that is up while it waits on you is waiting, not working (W4-r2).
+        var working = e.agent_state ? e.agent_state === 'running' : e.state === 'working';
         // The stream's status trails a Stop by a few seconds (the reader's rule): do not let that echo reopen it.
         if (working && r.stoppedAt && Date.now() - r.stoppedAt < 8000) working = false;
         if (r.live.working && !working) loadLast(r);
@@ -721,8 +760,8 @@
       var word = K.feed.word(r), detail = word === 'Idle' ? '' : K.feed.detail(f, word);
       html = '<div class="sx-act-state"><span class="sx-dot ' + word.toLowerCase() + '" aria-hidden="true"></span><strong>' + esc(word) + '</strong>' +
         '<span class="sx-act-detail">' + esc(detail) + '</span><span class="sx-act-clock" id="ta-clock">' + esc(K.feed.elapsed(f)) + '</span>' +
-        (live.working || O.stopping ? '<button type="button" class="cx-btn quiet sx-act-stop' + (O.stopArmed ? ' danger' : '') + '" data-ta="stop"' + (O.stopping ? ' disabled' : '') + '>' +
-          (O.stopping ? 'Stopping' : O.stopArmed ? 'Tap again to stop' : 'Stop') + '</button>' : '') + '</div>' +
+        (live.working || O.stopping ? '<button type="button" class="cx-btn quiet sx-act-stop' + (O.armedAt.stop != null ? ' danger' : '') + '" data-ta="stop"' + (O.stopping ? ' disabled' : '') + '>' +
+          (O.stopping ? 'Stopping' : O.armedAt.stop != null ? 'Tap again to stop' : 'Stop') + '</button>' : '') + '</div>' +
         (f.prompt ? '<p class="ta-act-prompt">' + esc('Working on: ' + clip(f.prompt, 240)) + '</p>' : '') +
         '<div class="ta-act-tail">' + f.tools.slice(-5).map(function (t) { return '<div class="sx-act-tool">' + esc(K.feed.tool(t)) + '</div>'; }).join('') +
         (live.working && live.prose ? '<div class="sx-act-prose">' + esc(String(live.prose).slice(-500)) + '</div>' : '') + '</div>';
@@ -810,7 +849,7 @@
     var input = $('ta-input'), text = input ? input.value.trim() : '';
     if (!text) { O.note = { text: 'Write a message first.', kind: 'error' }; paintNote(); return; }
     // Control's caution: another app holds this session and looks idle, so the first send asks.
-    if (r.verdict && r.verdict.caution && !r.cautionAck) { O.cautionAsk = true; paintVerdict(); return; }
+    if (r.verdict && r.verdict.caution && !r.cautionAck) { O.cautionAsk = true; O.armedAt = { caution: Date.now() }; paintVerdict(); return; }
     if (r.sending) return;
     if (r.refusal || O.cautionAsk) { r.refusal = null; O.cautionAsk = false; paintVerdict(); }
     r.sending = true; setSending(true);
@@ -833,7 +872,7 @@
   // retry after a lost answer replays instead of stopping twice. The server's own words say what happened.
   function stopRun() {
     var r = O.r; if (!r || O.stopping) return;
-    O.stopping = true; O.stopArmed = false;
+    O.stopping = true; O.armedAt = {};
     if (!O.stopKey) O.stopKey = K.newKey();
     O.note = { text: 'Stopping', kind: '' }; paintNote(); paintLive();
     return K.answer(K.path(r.provider, r.id, '/cancel'), { method: 'POST', timeoutMs: 15000, body: { clientCancelId: O.stopKey } }).then(function (c) {

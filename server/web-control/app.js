@@ -437,6 +437,8 @@
     placePet();
     var prefs = petPrefs();
     if (!prefs.show) { box.classList.add('hidden'); box.innerHTML = ''; petStop(); PET.pose = null; return; }
+    // The session list could not be read: the pet would say "Nothing running" about sessions nobody saw. Hide it.
+    if (state.sessionsUnread) { box.classList.add('hidden'); petStop(); PET.pose = null; return; }
     var fresh = PET.manifest && PET.manifest.pet === prefs.pet && Date.now() - PET.fetchedAt < 10 * 60000;
     (fresh ? Promise.resolve(PET.manifest) : api('/api/web-pet?pet=' + encodeURIComponent(prefs.pet)).then(function (m) { PET.manifest = m; PET.fetchedAt = Date.now(); return m; }))
       .catch(function () { return PET.manifest && PET.manifest.pet === prefs.pet ? PET.manifest : null; })
@@ -522,6 +524,7 @@
       TODAY.needs = needs; TODAY.working = working; TODAY.open = open; TODAY.welcome = welcome; TODAY.offline = offline; TODAY.at = Date.now();
       // your-move answers {available:false} when the board cannot be read: that is a failed read, not "nothing".
       TODAY.sessionsState = res[0] ? 'answered' : 'failed';
+      state.sessionsUnread = !res[0];   // the pet reads this (renderPet)
       TODAY.workState = res[1] && res[1].available !== false ? 'answered' : 'failed';
       TODAY.recording = false;
 
@@ -576,12 +579,17 @@
       first = first ? first + ', and ' + words : words.charAt(0).toUpperCase() + words.slice(1);
     }
     var working = TODAY.working.length, open = TODAY.open.length, second;
-    if (working > 0) second = countWord(working) + ' ' + plural(working, 'agent is', 'agents are') + ' working' + (open > 0 ? ', with ' + countWord(open, true) + ' more ' + plural(open, 'session', 'sessions') + ' open' : '');
+    var unread = TODAY.sessionsState === 'failed';
+    // The sessions sentence speaks only about a list that was read (W3-r2: "No agents are running" while two worked).
+    if (unread) second = 'Couldn\u2019t read your sessions';
+    else if (working > 0) second = countWord(working) + ' ' + plural(working, 'agent is', 'agents are') + ' working' + (open > 0 ? ', with ' + countWord(open, true) + ' more ' + plural(open, 'session', 'sessions') + ' open' : '');
     else if (open > 0) second = countWord(open) + ' ' + plural(open, 'session is', 'sessions are') + ' open and quiet';
     else second = 'No agents are running';
-    if (TODAY.recording) second += (working > 0 || open > 0 ? ', and ' : '. ') + 'COS is recording a meeting';
+    if (TODAY.recording) second += (unread || working > 0 || open > 0 ? ', and ' : '. ') + 'COS is recording a meeting';
     var out = (first ? first + '. ' : '') + second + '.';
-    if (!m.settled && !m.now.length && !m.later.length) out += m.failed.length ? ' Couldn’t read ' + listWords(m.failed) + ', so this may not be everything.' : ' Still reading what needs you.';
+    var others = m.failed.filter(function (n) { return n !== 'sessions'; });
+    if (!m.settled && !m.now.length && !m.later.length) out += (unread ? others : m.failed).length ? ' Couldn\u2019t read ' + listWords(unread ? others : m.failed) + ', so this may not be everything.' : unread ? ' This may not be everything that needs you.' : ' Still reading what needs you.';
+    else if (unread) out += ' This may not be everything that needs you.';
     el.textContent = out;
   }
   function listWords(names) { return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]; }
@@ -600,6 +608,8 @@
   function renderRunning(working, open) {
     $('run-count').textContent = working.length ? String(working.length) : '';
     var list = $('run-list');
+    // Never "Nothing running" about a list that was not read.
+    if (TODAY.sessionsState === 'failed') { list.innerHTML = '<button type="button" class="run-more run-failed" data-today-needs="retry">Couldn\u2019t read sessions. Try again</button>'; return; }
     var shown = working.slice(0, 3);
     var html = shown.map(function (s) { return runRow(s, true); }).join('');
     if (!shown.length) {
@@ -713,7 +723,7 @@
     if (r.kind === 'session') {
       // The session's question shows in the overlay's peek, with its cards to answer.
       return '<div class="need-row">' +
-        '<button type="button" class="need-open" data-today="run" data-key="' + esc(r.key) + '">' + top(r.title) + '<span class="need-foot">' + esc(r.why) + '</span></button>' +
+        '<button type="button" class="need-open" data-today="wait" data-key="' + esc(r.key) + '">' + top(r.title) + '<span class="need-foot">' + esc(r.why) + '</span></button>' +
         '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(r.key) + '">Open session</button></div></div>';
     }
     var go2 = r.kind === 'voices' ? 'speakers' : 'memories/view/review', label = r.kind === 'voices' ? 'Name' : 'Review';
@@ -799,8 +809,8 @@
       // Without the overlay, the tap goes where it went before: the session reader, or Sort in Work. Web has no client
       // log route, so the failure is said on screen and in the console first. An overlay that half opened leaves its
       // history entry, which the fallback replaces, so Back from there still lands on Today.
-      var s = String(kind === 'run' ? key : t.getAttribute('data-session-key') || '').split('|');
-      var session = (kind === 'run' || kind === 'need') && !!s[1];
+      var s = String(kind === 'run' || kind === 'wait' ? key : t.getAttribute('data-session-key') || '').split('|');
+      var session = (kind === 'run' || kind === 'wait' || kind === 'need') && !!s[1];
       var dest = session ? ['sessions', s[0], s.slice(1).join('|')] : ['work'].concat(kind === 'need' ? [] : ['sort']);
       console.error('[today] the overlay did not open (' + kind + '); opening ' + dest.join('/') + ' instead.', err);
       toast(session ? 'Could not open that here. Opening the session.' : 'Could not open that here. Opening it in Work.');
@@ -3846,7 +3856,14 @@
   // inbox, in Control's taskDomain (quilt when the server has it, else the first domain it lists: reconcileTaskDomain),
   // through POST /api/tasks/capture,
   // the route Work's Add task uses. One captureId per text: a second tap, or a retry after a lost answer, files it once.
-  var ASK_FILE = { text: '', id: '', busy: false, domains: null };
+  var ASK_FILE = { text: '', id: '', busy: false, domains: null, note: null };
+  // The result shows on the row itself, so it is in view wherever the sheet is (W5-r2: a status line under the sheet
+  // at 1000x703 hid a refusal), and a toast says it too.
+  function fileNoteHtml(q) {
+    var n = ASK_FILE.note && ASK_FILE.note.text === q ? ASK_FILE.note : null;
+    if (n) return '<span class="note' + (n.error ? ' file-error' : '') + '" role="' + (n.error ? 'alert' : 'status') + '">' + esc(n.line) + '</span>';
+    return '<span class="note">' + esc('As a task in ' + fileDomainLabel()) + '</span>';
+  }
   function fileDomainEntry() {
     var d = ASK_FILE.domains || [];
     return d.filter(function (x) { return x && x.name === 'quilt'; })[0] || d.filter(function (x) { return x && x.name; })[0] || null;
@@ -3860,25 +3877,29 @@
   function fileToInbox(text) {
     if (ASK_FILE.busy || !text) return;
     if (ASK_FILE.text !== text) { ASK_FILE.text = text; ASK_FILE.id = webJobId(); }
-    ASK_FILE.busy = true; renderAskFile();
+    ASK_FILE.busy = true; ASK_FILE.note = null; renderAskFile();
     loadFileDomains().then(function () {
       return api('/api/tasks/capture', { method: 'POST', body: { domain: fileDomain(), text: text, section: 'inbox', captureId: ASK_FILE.id }, timeoutMs: 20000 });
     }).then(function () {
-      ASK_FILE.busy = false; ASK_FILE.text = '';
+      ASK_FILE.busy = false; ASK_FILE.text = ''; ASK_FILE.note = null;
       var box = $('ask-q'); if (box && box.value.trim() === text) { box.value = ''; renderAsk(); }
       renderAskFile();
-      setStatus($('ask-status'), 'Filed to the Work inbox.');
       toast('Filed to the Work inbox.');
       if (PANES.work && PANES.work.intakeChanged) PANES.work.intakeChanged();   // Work reads its board again when it opens
     }, function (err) {
-      ASK_FILE.busy = false; renderAskFile();
-      setStatus($('ask-status'), 'Not filed: ' + ((err && err.message) || 'your Mac did not answer') + ' Filing again is safe.', true);
+      ASK_FILE.busy = false;
+      var line = 'Not filed: ' + ((err && err.message) || 'your Mac did not answer') + ' Filing again is safe.';
+      ASK_FILE.note = { text: text, line: line, error: true };
+      renderAskFile();
+      toast(line);
     });
   }
   function renderAskFile() {
     var b = document.querySelector('#ask-results [data-action="ask-file"]'); if (!b) return;
     b.disabled = ASK_FILE.busy;
-    var g = b.querySelector('.grow'); if (g && g.firstChild) g.firstChild.textContent = ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox';
+    var g = b.querySelector('.grow'); if (!g) return;
+    var q = ($('ask-q') && $('ask-q').value.trim()) || '';
+    g.innerHTML = esc(ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox') + fileNoteHtml(q);
   }
   function openAsk(prefill) {
     loadFileDomains().then(function () { if (!$('ask-sheet').classList.contains('hidden') && $('ask-q').value.trim()) renderAsk(); });
@@ -3903,7 +3924,7 @@
     var jumps = JUMPS.filter(function (j) { return j[1].toLowerCase().indexOf(q.toLowerCase()) === 0; });
     out.innerHTML = '<div class="list" style="margin-top:14px">' +
       '<button type="button" class="nav-row" data-action="ask-cos"><svg class="icon"><use href="#i-ask"/></svg><span class="grow">Ask COS<span class="note">“' + esc(q) + '”' + (state.pane === 'today' ? ' with what Today shows' : '') + '</span></span></button>' +
-      '<button type="button" class="nav-row" data-action="ask-file"' + (ASK_FILE.busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-work"/></svg><span class="grow">' + (ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox') + '<span class="note">' + esc('As a task in ' + fileDomainLabel()) + '</span></span></button>' +
+      '<button type="button" class="nav-row" data-action="ask-file"' + (ASK_FILE.busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-work"/></svg><span class="grow">' + (ASK_FILE.busy ? 'Filing\u2026' : 'File to Work inbox') + fileNoteHtml(q) + '</span></button>' +
       '<button type="button" class="nav-row" data-action="ask-meaning"><svg class="icon"><use href="#i-sessions"/></svg><span class="grow">Find a session about this<span class="note">Ranks every session by meaning</span></span></button>' +
       '<button type="button" class="nav-row" data-action="ask-work"><svg class="icon"><use href="#i-work"/></svg><span class="grow">Find a task about this<span class="note">Searches Work by meaning</span></span></button>' +
       jumps.map(function (j) { return '<button type="button" class="nav-row" data-goto="' + j[0] + '"><svg class="icon"><use href="#i-' + j[0] + '"/></svg><span class="grow">Go to ' + esc(j[1]) + '</span><span class="chev"></span></button>'; }).join('') +
@@ -4101,6 +4122,12 @@
   // Today as a place to act (panes/today-actions.js, Miles 11/06): what the Today cards show, a repaint after a
   // decision, and the Sessions reader's own pieces, so the overlay sends and reads through the reader's code.
   window.COSWeb.pane = function (name) { return PANES[name] || null; };
+  // Tap, then tap again (Today's Dismiss, Stop and Send anyway; a question card's Allow, Deny and Send): the second tap
+  // counts only once the first has been on screen ARM_CONFIRM_MS, so a double tap or a finger bounce arms and never
+  // confirms (W2-r2). The one rule both panes/today-actions.js and panes/questions.js read.
+  var ARM_CONFIRM_MS = 400;
+  window.COSWeb.armConfirmMs = ARM_CONFIRM_MS;
+  window.COSWeb.confirmReady = function (armedAt) { return typeof armedAt === 'number' && Date.now() - armedAt >= ARM_CONFIRM_MS; };
   window.COSWeb.today = {
     data: function () {
       return { needs: TODAY.needs, working: TODAY.working, open: TODAY.open, welcome: TODAY.welcome, offline: TODAY.offline, at: TODAY.at,

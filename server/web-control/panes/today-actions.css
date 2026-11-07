@@ -103,3 +103,7 @@ html.ta-open { overflow: hidden; }
 .next-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; padding: 0 16px 14px; }
 .next-actions:empty { display: none; }
 .next-actions .btn.small { min-height: 44px; }
+/* The Ask sheet's File to Work inbox result, on its own row (app.js fileNoteHtml). */
+.nav-row .note.file-error { color: var(--hot); white-space: normal; }
+/* Running card when the session list could not be read (app.js renderRunning). */
+.run-more.run-failed { color: var(--run-open); }
