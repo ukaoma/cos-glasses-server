@@ -813,8 +813,8 @@ function readerPage(o: { routes?: Routes; health?: Record<string, unknown> } = {
   }
   // eslint-disable-next-line no-new-func
   const page = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) +
-    '\nreturn { send: sendSessionTurn, add: addReaderFiles, paint: paintReaderFiles, box: function () { return readerBox(state.reading); } };\n}')(deps)
-  return { page, els, calls, r, kit: c.kit, status: () => els['session-status']?.innerHTML ?? '' }
+    '\nreturn { send: sendSessionTurn, add: addReaderFiles, paint: paintReaderFiles, box: function () { return readerBox(state.reading); }, dropHeld: dropHeld, flushHeld: function () { flushHeld(state.reading); } };\n}')(deps)
+  return { page, els, calls, r, store, kit: c.kit, status: () => els['session-status']?.innerHTML ?? '' }
 }
 const READER_ROUTES: Routes = {
   ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b1', epoch: 3 } },
@@ -906,6 +906,77 @@ describe('6.99.27: the Sessions reader’s box (Fork and Send) takes photos and 
     const parked = t.calls.filter(x => x.method === 'POST' && x.path === P('/queued-turns'))
     expect(parked[0]!.body).toMatchObject({ prompt: 'When you are free', attachmentIds: [mediaId('c')] })
     expect(t.page.box().atts).toEqual([])
+  })
+
+  // QA 6.99.27: a message held until COS's reply ends. Its files leave the box when it is held (they went with it), but
+  // taking them was a Remove, and a Remove clears the status line, so the held message lost its Don't send. And a held
+  // message that did not go came back as words alone: its files were gone from the box and from what it remembered.
+  const HELD_ROUTES = (second: Reply): Routes => ({ ...READER_ROUTES,
+    ['POST ' + TURNS]: (_b: unknown, n: number) => n === 1 ? { status: 409, body: { outcome: 'refused', reason: 'native_turn_in_progress' } } : second })
+  async function heldWithFile(t: ReturnType<typeof readerPage>, words: string) {
+    t.page.paint()
+    t.page.add([file('trace.zip', 'application/zip')]); xhr().respond(200, { attachment: { id: mediaId('h'), kind: 'session_file' } }); await flush()
+    t.els['session-input']!.value = words
+    t.page.send(false); await flush()
+  }
+
+  it('held until the reply ends: the files go with it, and the status keeps Don’t send', async () => {
+    const t = readerPage({ routes: HELD_ROUTES({ status: 202, body: { outcome: 'queued' } }) })
+    await heldWithFile(t, 'Look at the trace after this')
+    expect(t.r.held, 'the message is held with its file').toMatchObject([{ text: 'Look at the trace after this', ids: [mediaId('h')] }])
+    expect(t.page.box().atts, 'the file went with the held message').toEqual([])
+    expect(t.status()).toContain('COS is still answering.')
+    expect(t.status(), 'taking the files is not a Remove: Don’t send stays').toContain('data-action="drop-after"')
+  })
+
+  it('Don’t send: the words and the file come back, the file as a kept chip that sends with the next message', async () => {
+    const t = readerPage({ routes: HELD_ROUTES({ status: 202, body: { outcome: 'queued' } }) })
+    await heldWithFile(t, 'Look at the trace after this')
+    const saved = JSON.parse(t.store.get('cos_web_held') || '{}')[`claude|${SID}`]
+    expect(saved, 'a reload keeps what the files were, too').toMatchObject([{ ids: [mediaId('h')], files: [{ mediaId: mediaId('h'), name: 'trace.zip' }] }])
+    t.page.dropHeld(); await flush()
+    expect(t.els['session-input']!.value).toBe('Look at the trace after this')
+    expect(t.status()).toBe('Not sent. Your message is back in the box. Its file is attached again.')
+    expect(t.page.box().atts).toMatchObject([{ name: 'trace.zip', state: 'ready', mediaId: mediaId('h') }])
+    expect(t.els['session-files']!.innerHTML).toContain('trace.zip')
+    t.page.send(false); await flush()
+    const turns = t.calls.filter(x => x.method === 'POST' && x.path === TURNS)
+    expect(turns).toHaveLength(2)
+    expect(turns[1]!.body).toMatchObject({ prompt: 'Look at the trace after this', attachmentIds: [mediaId('h')] })
+  })
+
+  it('a held message the session refuses comes back with its file and the session’s words', async () => {
+    const t = readerPage({ routes: HELD_ROUTES({ status: 409, body: { outcome: 'refused', reason: 'thread_closed', reasonCopy: 'This session was closed on your Mac.' } }) })
+    await heldWithFile(t, 'After this one')
+    t.page.flushHeld(); await flush()
+    expect(t.r.held).toEqual([])
+    expect(t.status()).toBe('This session was closed on your Mac. Your message is back in the box. Its file is attached again.')
+    expect(t.page.box().atts).toMatchObject([{ state: 'ready', mediaId: mediaId('h') }])
+  })
+
+  it('a file the Mac no longer keeps (past its 4 hours) is not put back; the status says so plainly', async () => {
+    const t = readerPage({ routes: HELD_ROUTES({ status: 202, body: { outcome: 'queued' } }) })
+    await heldWithFile(t, 'Later')
+    ;(t.r.held[0] as unknown as { files: Array<{ keptAt: number }> }).files[0]!.keptAt -= 4 * 60 * 60_000
+    t.page.dropHeld(); await flush()
+    expect(t.page.box().atts).toEqual([])
+    expect(t.status()).toBe('Not sent. Your message is back in the box. The file it carried was kept for 4 hours and has gone. Attach it again.')
+  })
+
+  it('five at most when they come back: what does not fit is said, never dropped quietly', async () => {
+    const t = readerPage({ routes: HELD_ROUTES({ status: 202, body: { outcome: 'queued' } }) })
+    t.page.paint()
+    t.page.add([file('a.zip', 'application/zip'), file('b.zip', 'application/zip')])
+    xhr(-2).respond(200, { attachment: { id: mediaId('a'), kind: 'session_file' } }); xhr(-1).respond(200, { attachment: { id: mediaId('b'), kind: 'session_file' } }); await flush()
+    t.els['session-input']!.value = 'Both after this'
+    t.page.send(false); await flush()
+    expect(t.page.box().atts).toEqual([])
+    t.page.add([CSV(), CSV(), CSV(), CSV()])
+    for (const [i, c] of ['1', '2', '3', '4'].entries()) xhr(i - 4).respond(200, { attachment: { id: mediaId(c), kind: 'user_document' } })
+    await flush()
+    t.page.dropHeld(); await flush()
+    expect(t.page.box().atts.map((a: { mediaId: string }) => a.mediaId)).toEqual([mediaId('1'), mediaId('2'), mediaId('3'), mediaId('4'), mediaId('a')])
+    expect(t.status()).toContain('1 of its files is attached again. A file it carried did not come back. Attach it again.')
   })
 
   it('a Mac that takes no files on a turn: no clip, no camera, and a send is words only', async () => {

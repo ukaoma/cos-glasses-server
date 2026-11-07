@@ -688,6 +688,34 @@
     boxChanged(box);
     return true;
   }
+  // QA 6.99.27: the files that went with a message leave the box. That is not a Remove, so ui.removed is not told (the
+  // reader's clears the status line, which may be telling the person about the message that just took them). Answers
+  // what left, enough to put each back as a kept chip (boxRestore) if the message does not go after all.
+  function boxTake(box, ids) {
+    var went = [];
+    box.atts = box.atts.filter(function (t) {
+      if (!t.mediaId || ids.indexOf(t.mediaId) < 0) return true;
+      went.push({ mediaId: t.mediaId, name: t.name, size: t.size, kind: t.kind, mime: t.mime, keptAt: t.keptAt || 0 });
+      dropThumb(t);
+      return false;
+    });
+    if (went.length) boxChanged(box);
+    return went;
+  }
+  // Files the Mac already keeps, back on the box as ready chips (no upload), at most five in all. Answers how many are
+  // on the box afterwards out of those asked for.
+  function boxRestore(box, files) {
+    var back = 0;
+    (files || []).forEach(function (f) {
+      if (!f || !f.mediaId) return;
+      if (box.atts.some(function (t) { return t.mediaId === f.mediaId; })) { back++; return; }
+      if (box.atts.length >= MAX_ATTS) return;
+      box.atts.push({ id: uuid(), file: null, name: f.name || 'File', size: f.size || 0, kind: f.kind || 'file', mime: f.mime || '', state: 'ready', progress: 1, mediaId: f.mediaId, thumb: '', error: '', keptAt: f.keptAt || 0 });
+      back++;
+    });
+    if (back) boxChanged(box);
+    return back;
+  }
   // Everything goes, an upload still running included (its request is stopped, and its late answer finds no record).
   function boxClear(box) {
     box.atts.forEach(function (t) { if (t.xhr) { try { t.xhr.abort(); } catch (_e) {} } dropThumb(t); });
@@ -808,7 +836,7 @@
     step.then(function (ref) {
       if (!findAtt(box, t.id)) return;
       if (!ref || !ref.id) { var e = new Error('The Mac did not keep the file.'); e.code = ''; throw e; }
-      t.mediaId = ref.id; t.state = 'ready'; t.progress = 1;
+      t.mediaId = ref.id; t.state = 'ready'; t.progress = 1; t.keptAt = Date.now();
       boxChanged(box);
     }).catch(function (err) {
       if (!findAtt(box, t.id)) return;
@@ -1828,6 +1856,7 @@
       // opts.anyBytes (a session turn): any file up to that size, sent as it is (classifyForSession).
       box: function (ui, opts) { return { atts: [], signedOut: false, ui: ui || {}, anyBytes: opts && opts.anyBytes > 0 ? opts.anyBytes : 0 }; },
       add: boxAdd, remove: boxRemove, retry: boxRetry, clear: boxClear,
+      take: boxTake, restore: boxRestore,
       pending: uploadsPending, failed: uploadsFailed,
       ids: function (box) { return readyAtts(box).slice(0, MAX_ATTS).map(function (t) { return t.mediaId; }); },
       sent: function (box) { return readyAtts(box).slice(0, MAX_ATTS).map(function (t) { return { name: t.name, kind: t.kind, thumb: t.thumb }; }); },

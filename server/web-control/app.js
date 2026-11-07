@@ -1510,7 +1510,11 @@
   function writeStore(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch (_e) {} }
   function saveHeld(r) {
     var all = readStore(HELD_KEY), k = r.provider + '|' + r.id;
-    var keep = r.held.filter(function (h) { return !h.cancelled; }).map(function (h) { return h.ids && h.ids.length ? { text: h.text, key: h.key, since: h.since, ids: h.ids } : { text: h.text, key: h.key, since: h.since }; });
+    var keep = r.held.filter(function (h) { return !h.cancelled; }).map(function (h) {
+      var o = { text: h.text, key: h.key, since: h.since };
+      if (h.ids && h.ids.length) { o.ids = h.ids; if (h.files && h.files.length) o.files = h.files; }
+      return o;
+    });
     if (keep.length) all[k] = keep; else delete all[k];
     writeStore(HELD_KEY, all);
   }
@@ -1882,11 +1886,12 @@
     if (input && input.value.trim() === String(text).trim()) { input.value = ''; autoGrow(input); }
     if (state.reading && state.reading.draft && state.reading.draft.text === text) state.reading.draft = null;
   }
-  // Words go back in the box only if the box is empty; otherwise the status line keeps them.
-  function returnToBox(text, why) {
+  // Words go back in the box only if the box is empty; otherwise the status line keeps them. `files` says what became
+  // of the message's files (heldFilesBack).
+  function returnToBox(text, why, files) {
     var input = $('session-input');
-    if (input && !input.value.trim()) { input.value = text; autoGrow(input); sessionStatus(why + ' Your message is back in the box.', 'error'); }
-    else sessionStatus(why + ' Not sent: “' + String(text).slice(0, 80) + (text.length > 80 ? '…' : '') + '”', 'error');
+    if (input && !input.value.trim()) { input.value = text; autoGrow(input); sessionStatus(why + ' Your message is back in the box.' + (files || ''), 'error'); }
+    else sessionStatus(why + ' Not sent: “' + String(text).slice(0, 80) + (text.length > 80 ? '…' : '') + '”' + (files || ''), 'error');
   }
   // Your words show in the conversation the moment the Mac accepts them; the next refresh of
   // the transcript replaces the bubble with the real turn.
@@ -1967,10 +1972,35 @@
     if (refusals.length) sessionStatus(refusals.join(' '), 'error');
     paintReaderFiles();
   }
-  // The files that went with a message leave the box; any added since stay.
+  // The files that went with a message leave the box; any added since stay. Taken, not removed: the status line stays
+  // (a held message's Don't send is on it). Answers what went, for a held message to keep.
   function readerFilesSent(box, ids) {
-    var kit = readerKit(); if (!kit || !box || !ids || !ids.length) return;
-    box.atts.filter(function (t) { return ids.indexOf(t.mediaId) >= 0; }).forEach(function (t) { kit.remove(box, t.id); });
+    var kit = readerKit(); if (!kit || !box || !ids || !ids.length) return [];
+    return kit.take(box, ids);
+  }
+  // QA 6.99.27: a held message keeps what its files were, so if it does not go, it comes back whole (heldFilesBack).
+  function keepHeldFiles(r, text, ids, went) {
+    if (!went || !went.length) return;
+    r.held.forEach(function (h) { if (!h.files && h.text === text && (h.ids || []).join(',') === ids.join(',')) h.files = went; });
+    saveHeld(r);
+  }
+  // The Mac keeps a file no turn took for 4 hours (lib/turn-file-store.ts, and the media store's own rule); this
+  // trusts a file for 5 minutes less. Past that it says the file has gone rather than offer one the send would refuse.
+  var HELD_FILE_KEEP_MS = 4 * 60 * 60000 - 5 * 60000;
+  function heldFilesBack(r, h) {
+    var ids = h.ids || []; if (!ids.length) return '';
+    var kit = readerKit(), box = readerFilesOn() ? readerBox(r) : null, now = Date.now();
+    var known = (h.files || []).filter(function (f) { return f && ids.indexOf(f.mediaId) >= 0; });
+    var kept = known.filter(function (f) { return f.keptAt > 0 && now - f.keptAt < HELD_FILE_KEEP_MS; });
+    var back = box && kept.length ? kit.restore(box, kept) : 0;
+    var lost = ids.length - back, expired = known.length - kept.length;
+    var said = !back ? '' : back === ids.length ? (back === 1 ? ' Its file is attached again.' : ' Its ' + back + ' files are attached again.')
+      : ' ' + back + ' of its files ' + (back === 1 ? 'is' : 'are') + ' attached again.';
+    if (!lost) return said;
+    var gone = lost === expired
+      ? (lost === 1 ? ' The file it carried was kept for 4 hours and has gone.' : ' The ' + lost + ' files it carried were kept for 4 hours and have gone.')
+      : (lost === 1 ? ' A file it carried did not come back.' : ' ' + lost + ' files it carried did not come back.');
+    return said + gone + ' Attach ' + (lost === 1 ? 'it' : 'them') + ' again.';
   }
 
   function sendSessionTurn(fork, opts) {
@@ -1997,7 +2027,7 @@
     var done = function () { r.sending = false; btns.forEach(function (b) { b.disabled = false; }); paintReaderFiles(); };
     (fork ? forkSession(r, text, fileIds) : continueSession(r, text, opts || {}).then(function (how) {
       // The Mac took the message (sent, waiting in line, or held until the reply ends): its files went with it.
-      if (/^(sent|parked|held)$/.test(how)) readerFilesSent(fb, fileIds);
+      if (/^(sent|parked|held)$/.test(how)) { var went = readerFilesSent(fb, fileIds); if (how === 'held') keepHeldFiles(r, text, fileIds, went); }
       return how;
     })).then(done, function (err) {
       done();
@@ -2128,8 +2158,8 @@
       if (bubble) { bubble.removeAttribute('data-held-key'); bubble.querySelector('.who').textContent = 'You, waiting in line'; }
     } else {
       if (bubble) bubble.remove();
-      if (how === 'cancelled') returnToBox(h.text, 'Not sent.');
-      else returnToBox(h.text, copy || 'Not sent.');
+      // The whole message comes back: its words, and its files where the Mac still keeps them.
+      returnToBox(h.text, how === 'cancelled' ? 'Not sent.' : copy || 'Not sent.', heldFilesBack(r, h));
     }
     if (!r.held.some(function (x) { return !x.cancelled; })) clearInterval(r.heldTimer);
   }
