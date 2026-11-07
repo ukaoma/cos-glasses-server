@@ -133,7 +133,7 @@
   var state = {
     pane: 'today', serverName: '', tailnetUrl: '',
     sessions: [], sessionsMode: 'words', workTasks: [], workOpenStages: { complete: false },
-    stream: null, memoriesLoaded: false, lastLoad: {}, livePoll: null
+    stream: null, lastLoad: {}, livePoll: null
   };
   // Control's order (ActivitySection.visibleSections): Today, then Messages to Dictation. Usage is a
   // view inside Sessions on the Mac; its route stays so old links work, and the rail marks Sessions.
@@ -240,7 +240,6 @@
     if (PANES[r.pane]) { try { PANES[r.pane].load(r.args, { changed: changedPane }); } catch (err) { console.error(err); } }
     else if (r.pane === 'today') loadToday();
     else if (r.pane === 'sessions') { if (!reading || !state.sessions.length || changedPane) loadSessions(); if (reading) openSession(r.args[0], r.args[1]); }
-    else if (r.pane === 'memories') loadMemories();
     else if (r.pane === 'usage') loadUsage(false);
     state.lastLoad[r.pane] = Date.now();
     runHooks(routeHooks, r);
@@ -1962,27 +1961,6 @@
       throw err;
     });
   }
-  // ── Memories (the native page, hosted) ──────────────────
-  function syncFrameTheme() {
-    var frame = $('memories-frame'); if (!frame) return;
-    var mode = window.CosTheme ? window.CosTheme.mode() : 'light';
-    frame.style.colorScheme = mode;
-    try {
-      var root = frame.contentDocument && frame.contentDocument.documentElement;
-      if (root) {
-        root.setAttribute('data-theme', mode);
-        if (isPhone()) root.setAttribute('data-host', 'web-phone'); else root.removeAttribute('data-host');
-      }
-    } catch (_e) {}
-  }
-  function loadMemories() {
-    var frame = $('memories-frame');
-    if (state.memoriesLoaded) { syncFrameTheme(); return; }
-    state.memoriesLoaded = true;
-    frame.addEventListener('load', syncFrameTheme);
-    frame.src = '/control/memories/memories.html';
-  }
-
   // ── Usage ───────────────────────────────────────────────
   // Usage and COS cost are views inside Sessions, as on the Mac (ActivityWindow.swift 2306-2325);
   // an old #/usage link opens the Usage view there. Data: GET /api/usage/summary, the helper's
@@ -3670,7 +3648,7 @@
       return;
     }
     if (t.hasAttribute('data-open-ask')) return openAsk();
-    if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); syncFrameTheme(); return; }
+    if (t.hasAttribute('data-theme-choice')) { window.CosTheme.set(t.getAttribute('data-theme-choice')); paintAppearance(); return; }
     if (t.hasAttribute('data-goto') || t.hasAttribute('data-pane')) {
       if (inSheet) closeAsk(); closeMenu();
       // "work/sort" is a pane and its arguments, not one name.
@@ -3742,8 +3720,6 @@
     });
   });
   window.addEventListener('hashchange', route);
-  // Folding or unfolding the Duo crosses the 600px line: keep the hosted Memories page in step.
-  window.matchMedia('(min-width: 600px)').addEventListener('change', syncFrameTheme);
   window.addEventListener('scroll', onScroll, { passive: true });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden || $('app-shell').classList.contains('hidden')) return;
