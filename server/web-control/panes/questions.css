@@ -6,7 +6,7 @@
 .sq-title { margin: 0; font: 600 16px/1.3 var(--body); color: var(--ink); overflow-wrap: anywhere; }
 .sq-secs { font: 500 12.5px/1.3 var(--body); color: var(--hot); white-space: nowrap; }
 .sq-q { border: 0; margin: 12px 0 0; padding: 0; min-width: 0; }
-.sq-q-text { padding: 0; font: 500 15px/1.4 var(--body); color: var(--ink); overflow-wrap: anywhere; }
+.sq-q-text { padding: 0; font: 700 15.5px/1.4 var(--body); color: var(--ink); overflow-wrap: anywhere; }
 .sq-q-tag { font-size: 12.5px; font-weight: 500; color: var(--tertiary); }
 .sq-fine { margin: 2px 0 0; font-size: 12.5px; color: var(--tertiary); }
 .sq-options { display: grid; gap: 2px; margin-top: 8px; }
@@ -27,6 +27,26 @@
 .sq-leave { min-height: 44px; font-size: 14px; font-weight: 500; color: var(--ink); }
 .sq-note { margin: 8px 0 0; font-size: 13px; color: var(--hot); }
 .sq-note.hidden { display: none; }
+/* 6.99.26: read like Claude Code's question in the terminal (Miles 11/07): the strip, numbered options, Other as the
+   last number, the answers to review, Submit. */
+.sq-steps { display: flex; flex-wrap: wrap; gap: 0 14px; margin: 8px 0 0; padding-bottom: 6px; border-bottom: 1px solid var(--row-border); }
+.sq-step { min-height: 36px; padding: 0; font: 500 13.5px/1.2 var(--mono); color: var(--sub); white-space: nowrap; }
+.sq-step:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.sq-num { flex: none; min-width: 1.6em; font: 500 14px/1.45 var(--mono); color: var(--sub); }
+.sq-option-other { align-items: center; cursor: text; }
+.sq-option-other .sq-other { flex: 1; width: auto; min-width: 0; margin-top: 0; }
+.sq-review { margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--qopen); }
+.sq-review-head { margin: 0 0 4px; font: 600 13px/1.3 var(--body); color: var(--sub); }
+.sq-review-list { margin: 0; padding-left: 1.4em; display: grid; gap: 4px; font-size: 14px; line-height: 1.4; }
+.sq-review-q { font-weight: 600; color: var(--ink); margin-right: 8px; }
+.sq-review-a { color: var(--ink); overflow-wrap: anywhere; }
+.sq-review-a.empty { color: var(--tertiary); }
+.sq-keys { display: none; margin-top: 10px; }
+@media (hover: hover) and (pointer: fine) { .sq-keys { display: block; } }
+/* 6.99.26: a question the Mac's own prompt waits on. Read-only, so it does not take the waiting colour. */
+.sq-card.sq-mac { border-color: var(--panel-border); }
+.sq-mac-q { margin: 10px 0 0; }
+.sq-mac-line { margin: 10px 0 0; font-size: 13.5px; line-height: 1.4; color: var(--sub); }
 @media (max-width: 480px) {
   .sq-acts .cx-btn { flex: 1; justify-content: center; }
 }

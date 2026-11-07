@@ -8,6 +8,12 @@
      status line and its last reply. Open session stays a link to the full reader.
    - Running: a peek at what the session is doing now, read with the reader's own activity reducer (applyFeed) from the
      same live stream, and a short note box. Open session goes to the reader.
+   - A waiting session (6.99.26): its question cards when this page holds the question; when the Mac's own prompt has
+     it, that prompt read-only with Miles's words for it, and no reply box (a reply never answers a prompt); a reply box
+     only where a reply is the answer (Codex and Cursor).
+   - The pet (6.99.26, Miles 11/07: "Open what matters"): one session in play opens its sheet straight away (app.js
+     petTap); several open the short list here, waiting on you first, then running, then done today, each row opening
+     its own sheet.
    What a reply or a note shares with the Sessions reader, and what is this file's own copy:
    - Shared (app.js, through COSWeb.sessionKit): the attach, turn and queue path itself (continueSession and parkTurn,
      run with this overlay as their view), the per-browser binding store, one key per draft, the attachability probe
@@ -61,7 +67,7 @@
   var CREATE_LABEL = 'Create task', DISMISS_LABEL = 'Dismiss';
 
   var O = {
-    open: null,            // { kind: 'need' | 'run' | 'meeting' | 'intake', key, all }
+    open: null,            // { kind: 'need' | 'run' | 'wait' | 'pet' | 'meeting' | 'intake', key, all }
     opener: null, openerSel: '',
     pushed: false, ignorePops: 0,
     dirty: false,          // something was decided or sent: Today reloads on close
@@ -75,7 +81,7 @@
     r: null,               // the session object the reader's send path takes (sessionKit.session)
     row: null,             // the session's row in the session list
     item: null,            // the Needs you item
-    stream: null, clock: null, watch: null, qMount: null, cautionAsk: false, note: { text: '', kind: '' },
+    stream: null, clock: null, watch: null, qMount: null, qCount: 0, macCount: 0, cautionAsk: false, note: { text: '', kind: '' },
     last: null,            // { text, at } the session's last reply
     lastState: 'idle',     // idle | loading | ready | error | none
     needGone: false
@@ -169,6 +175,7 @@
     } catch (_e) { /* no history API: Back simply leaves Today */ }
     try {
       if (kind === 'need' || kind === 'run' || kind === 'wait') openSession(kind, O.open.key);
+      else if (kind === 'pet') openPet();
       else openIntake();
     } catch (err) {
       // A bug here must not leave a half-drawn sheet over an inert page: take it down, keep the history entry for
@@ -241,7 +248,7 @@
   // Back from there showed nothing (measured in Chrome 11/07: a same-document popstate). On load, app.js hands that
   // entry here: open the same thing again, so the first Back closes it as it did before the reload. What cannot be
   // opened (gone, or Today left meanwhile) just clears the entry's mark.
-  var KINDS = { need: 1, run: 1, wait: 1, meeting: 1, intake: 1 };
+  var KINDS = { need: 1, run: 1, wait: 1, pet: 1, meeting: 1, intake: 1 };
   function restore(st) {
     if (O.open || !st || !st.cosTodayOverlay) return Promise.resolve(false);
     var forget = function () { try { history.replaceState(null, ''); } catch (_e) {} return false; };
@@ -249,7 +256,7 @@
     var started = Date.now();
     return new Promise(function (resolve) {
       (function wait() {
-        var d = T.data(), ready = d.at > 0 && (st.kind === 'need' || st.kind === 'run' || st.kind === 'wait' || d.intakeLoaded);
+        var d = T.data(), ready = d.at > 0 && (st.kind === 'need' || st.kind === 'run' || st.kind === 'wait' || st.kind === 'pet' || d.intakeLoaded);
         if (W.parseRoute().pane !== 'today' || O.open) return resolve(forget());
         if (!ready) { if (Date.now() - started > 15000) return resolve(forget()); return setTimeout(wait, 150); }
         O.pushed = true;   // this entry is the overlay's own
@@ -306,6 +313,9 @@
     if (what === 'open-work') return leaveTo('work', ['sort']);
     if (what === 'open-card') return leaveTo('work', id ? [id] : []);
     if (what === 'open-session') return O.r ? leaveTo('sessions', [O.r.provider, O.r.id]) : null;
+    if (what === 'open-sessions') return leaveTo('sessions', []);
+    // A row of the pet's list opens that session's own sheet in its place; Back still closes the overlay.
+    if (what === 'pet-open') { var pk = b.getAttribute('data-kind'); return open(pk === 'wait' ? 'wait' : 'run', id, O.opener); }
     if (what === 'send') return sendReply();
     if (what === 'stop') {
       // A tap arms it (Stop ends the agent's turn on your Mac); the second sends it.
@@ -573,14 +583,15 @@
     var body = $('ta-body');
     if (body) body.innerHTML = '<div id="ta-meta"></div><div id="ta-q" class="ta-q" hidden></div><div id="ta-live"></div><div id="ta-last"></div>';
     var foot = $('ta-foot');
-    if (foot) foot.innerHTML = O.r ? composerHtml(kind) : '';
+    if (foot) { foot.innerHTML = O.r ? composerHtml(kind) : ''; foot.hidden = false; }
     var input = $('ta-input');
     if (input && kept && kept.text) { input.value = kept.text; W.autoGrow(input); }
     paintMeta();
     if (!O.r) return;
     if (W.sessionQuestions && W.sessionQuestions.mount) {
-      // mount() draws at once and calls back before it returns, so the count comes from the callback, not O.qMount.
-      O.qMount = W.sessionQuestions.mount($('ta-q'), id, function (n) { O.qCount = n; paintMeta(); });
+      // mount() draws at once and calls back before it returns, so the counts come from the callback, not O.qMount:
+      // the questions to answer here, and those the Mac's own prompt waits on (drawn read-only).
+      O.qMount = W.sessionQuestions.mount($('ta-q'), id, function (n, mac) { O.qCount = n; O.macCount = mac || 0; paintMeta(); });
     }
     if (kind === 'run') { paintLive(); watchStream(O.r); }
     loadLast(O.r);
@@ -592,7 +603,7 @@
     clearInterval(O.clock); O.clock = null;
     clearInterval(O.watch); O.watch = null;
     if (O.qMount) { O.qMount.unmount(); O.qMount = null; }
-    O.qCount = 0;
+    O.qCount = 0; O.macCount = 0;
     O.r = null; O.row = null; O.item = null;
   }
   // The Needs you list may be minutes old: read it again, and say so if this one is no longer waiting.
@@ -662,10 +673,15 @@
       var p = it.progress && !it.progress.unreadable ? it.progress : null;
       if (p && p.evidence) html += '<blockquote class="ta-quote">' + esc(p.evidence) + '</blockquote>';
     } else if (O.open.kind === 'wait') {
-      // A session waiting on you: what it waits on, its question to answer here when the Mac holds one for this page,
-      // else its last message and the reply box below. No live peek and no Stop: it is not at work (W4-r2).
+      // A session waiting on you: what it waits on, its question to answer here when the Mac holds one for this page;
+      // when the Mac's own prompt has it, that, read-only; else (a reply is the answer) the reply box below. No live
+      // peek and no Stop: it is not at work (W4-r2).
       html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : 'claude') + ' <span>' + esc(O.wait ? O.wait.why : 'Waiting for you') + '</span></p>';
-      if (!questions) html += '<p class="ta-sub">' + esc('Answer it in a reply below, or open the session.') + '</p>';
+      var where = waitWhere();
+      // The Mac card says it itself when there is one; say it here only when there is none.
+      if (where === 'mac' && !O.macCount) html += '<p class="ta-sub ta-mac-line">' + esc(macLine()) + '</p>';
+      if (where === 'answered') html += '<p class="ta-sub ta-mac-line">' + esc((W.sessionQuestions && W.sessionQuestions.answeredLine) || 'Answered. The session carries on.') + '</p>';
+      if (where === 'reply') html += '<p class="ta-sub">' + esc('Answer it in a reply below, or open the session.') + '</p>';
     } else if (O.row || O.r) {
       // Once the live feed speaks, the line says what it says, so the header and the peek never disagree (qa2-user N3).
       html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : O.row.provider) + ' <span id="ta-run-state">' + esc(runWords()) + '</span></p>';
@@ -678,6 +694,49 @@
     if (links) html += '<div class="ta-links">' + links + '</div>';
     if (!O.r && O.open.kind === 'need') html += '<p class="ta-sub">This handoff has no session to reply to. Open it in Work.</p>';
     box.innerHTML = html;
+    // The reply box shows only where a reply can be the answer; what was typed stays in it, hidden.
+    var foot = $('ta-foot');
+    if (foot && O.open.kind === 'wait') foot.hidden = waitWhere() !== 'reply';
+  }
+  // Where a waiting session's question is answered: 'here' (its cards in this sheet), 'answered' (on some screen just
+  // now), 'mac' (a Claude session's own prompt, or a held question that went back to the Mac), or 'reply' (a Codex or
+  // Cursor session asking in words).
+  function waitWhere() {
+    if (O.qCount) return 'here';
+    if (O.r && W.sessionQuestions && W.sessionQuestions.answeredFor && W.sessionQuestions.answeredFor(O.r.id)) return 'answered';
+    if (O.macCount || (O.r && O.r.provider === 'claude') || (O.wait && O.wait.where === 'mac')) return 'mac';
+    return 'reply';
+  }
+  function macLine() { return (W.sessionQuestions && W.sessionQuestions.macLine) || "Waiting on your Mac's prompt. Answer it on the Mac (or through Screens)."; }
+
+  // ═════════════ The pet's sessions ═════════════
+  // The same sessions the pet's caption counts (app.js petPlay): waiting on you, running, then done today. Each row
+  // opens that session's own sheet.
+  var PET_DONE_SHOWN = 5;
+  function openPet() {
+    setHead('Sessions');
+    var p = T.petPlay ? T.petPlay() : { waiting: [], running: [], done: [] };
+    var row = function (s, kind, line) {
+      var k = T.splitSessionId(s.provider, s.session_id || s.id);
+      return '<button type="button" class="ta-pet-row" data-ta="pet-open" data-kind="' + kind + '" data-id="' + esc(k.provider + '|' + k.id) + '">' +
+        '<span class="ta-pet-top">' + T.badge(k.provider) + '<span class="ta-pet-title">' + esc(T.sessionTitle(s)) + '</span></span>' +
+        '<span class="ta-pet-line">' + esc(line) + '</span></button>';
+    };
+    var group = function (title, rows) { return rows.length ? '<section class="ta-pet-group"><h3 class="ta-pet-head">' + esc(title) + '</h3>' + rows.join('') + '</section>' : ''; };
+    var waiting = p.waiting.map(function (s) { return row(s, 'wait', stateWords(s)); });
+    // The pet counts a session as running from the Running card's test; one of those paused on you opens as waiting.
+    var running = p.running.map(function (s) { return row(s, K.stateOf(s) === 'waiting' ? 'wait' : 'run', stateWords(s)); });
+    var done = p.done.slice(0, PET_DONE_SHOWN).map(function (s) { return row(s, 'run', 'Last active ' + doneWhen(s)); });
+    var body = $('ta-body');
+    if (body) body.innerHTML = group('Waiting on you', waiting) + group('Running', running) + group('Done today', done) +
+      (!waiting.length && !running.length ? '<p class="ta-note">Nothing is running or waiting on you now.</p>' : '') +
+      '<div class="ta-links"><button type="button" class="link-btn" data-ta="open-sessions">All sessions</button></div>';
+    var foot = $('ta-foot'); if (foot) { foot.innerHTML = ''; foot.hidden = false; }
+  }
+  function doneWhen(s) {
+    var a = W.ago(s.last_activity_at || s.state_since);
+    if (!a || a === 'now') return 'just now';
+    return /( min| h)$/.test(a) ? a + ' ago' : a;
   }
 
   // The session's last reply, from the same read the reader makes (?turns=N, lib/agent-session-turns.ts).
@@ -924,7 +983,9 @@
     lines.push(rows.length ? 'Needs you (' + rows.length + (later ? ', ' + later + ' of them can wait until tomorrow' : '') + '):'
       : m && !m.settled ? 'Needs you: nothing found so far.' : 'Needs you: nothing.');
     rows.slice(0, 6).forEach(function (r) {
-      if (r.kind !== 'work') { lines.push('- ' + end(clip(r.title, 140)) + (r.why ? ' ' + end(clip(r.why, 160)) : '')); return; }
+      // 6.99.26: where a waiting session can be answered, as the row says it.
+      var where = r.where === 'here' ? ' It can be answered from Today.' : r.where === 'mac' ? ' It waits on the Mac\u2019s own prompt.' : r.where === 'answered' ? ' It was just answered.' : '';
+      if (r.kind !== 'work') { lines.push('- ' + end(clip(r.title, 140)) + (r.why ? ' ' + end(clip(r.why, 160)) : '') + where); return; }
       var it = r.item;
       var title = str(it.sessionTitle) || str(it.title) || 'Handoff';
       var bits = [end(clip(title, 120)) + ' ' + end(needLine(it))];

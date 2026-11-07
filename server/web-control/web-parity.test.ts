@@ -395,7 +395,8 @@ describe('session question cards (6.99.12)', () => {
     h.start()
     await flush(); await flush(); await flush()
     expect(h.fetches).toHaveLength(1)
-    expect(h.fetches[0]!.url).toBe('/api/session-questions?client=web')
+    // 6.99.26: hold=1 always; presenceAgeMs only after a touch on the page (today-actions.test.ts covers the touch).
+    expect(h.fetches[0]!.url).toBe('/api/session-questions?client=web&hold=1')
     expect(h.fetches[0]!.init).toMatchObject({ credentials: 'same-origin', headers: { 'X-COS-Web': '1' } })
     expect(h.authShown()).toBe(0)
     expect(h.Qs._state.stopped).toBe(true)
