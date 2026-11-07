@@ -369,7 +369,8 @@
     probeLoop().then(function () { if (O.open && (O.open.kind === 'meeting' || O.open.kind === 'intake')) paintIntake(); });
     paintIntake();
     var foot = $('ta-foot');
-    if (foot) foot.innerHTML = '<div class="ta-links"><button type="button" class="link-btn" data-ta="open-work">Open Sort in Work</button></div>';
+    // A waiting sheet opened before may have hidden the foot (its reply box); this one always shows (QA round 1).
+    if (foot) { foot.innerHTML = '<div class="ta-links"><button type="button" class="link-btn" data-ta="open-work">Open Sort in Work</button></div>'; foot.hidden = false; }
     // Read Intake again: what was decided on another screen since Today loaded shows as handled, never as a phantom.
     var asked = T.reloadIntake();
     if (asked && asked.then) asked.then(function () { if (O.open && (O.open.kind === 'meeting' || O.open.kind === 'intake')) { noteVanished(); paintIntake(); } });

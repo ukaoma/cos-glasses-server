@@ -333,6 +333,19 @@
     handed_to_desk: 'The Mac has this one now. Answer it there.', hook_gone: 'The session stopped waiting for this answer.',
     not_found: 'This question is gone.', invalid_answer: 'That answer was not accepted. Check each question has a choice.'
   };
+  // QA round 1: an answer that never reached the server (no HTTP status: offline, a dropped link, a timeout) says so in
+  // plain words, with the button to tap; the retry goes under the same clientAnswerId, so the server replays it.
+  function unreachable(item, what) {
+    var tap = what === 'leave' ? 'Leave for the Mac' : item && item.kind === 'approval' ? (what === 'deny' ? 'Deny' : 'Allow once') : 'Submit';
+    return 'Could not reach your Mac. Tap ' + tap + ' to retry.';
+  }
+  // Answered, here or on another screen: recorded before the card is redrawn (a waiting sheet reads it as it repaints),
+  // then Today stops pointing at the Mac and reads its lists again.
+  function noteAnswered(item, id) { if (item && item.sessionId) Q.answered[id] = { sessionId: String(item.sessionId).toLowerCase(), at: Date.now() }; }
+  function answeredTold() {
+    changed();
+    if (W.today && W.today.refresh) { try { W.today.refresh(); } catch (_e) {} }
+  }
   function post(id, body, doneLine) {
     Q.sending[id] = 1; Q.armed[id] = ''; Q.notes[id] = '';
     if (!Q.answerIds[id]) Q.answerIds[id] = answerId();
@@ -341,20 +354,24 @@
     var asked = itemOf(id);
     api('/api/session-questions/' + encodeURIComponent(id) + '/answer', { method: 'POST', body: body, timeoutMs: 20000 }).then(function () {
       delete Q.sending[id];
-      if (asked && asked.sessionId) Q.answered[id] = { sessionId: String(asked.sessionId).toLowerCase(), at: Date.now() };
+      noteAnswered(asked, id);
       Q.items = Q.items.filter(function (i) { return i.id !== id; });
-      render(); changed();
+      render(); answeredTold();
       W.toast(doneLine);
       schedule(500);
     }, function (err) {
       delete Q.sending[id];
       var settled = err && REFUSED[err.code] && err.code !== 'invalid_answer';
       if (settled) {
+        if (err.code === 'already_answered') noteAnswered(asked, id);
         Q.items = Q.items.filter(function (i) { return i.id !== id; });
-        render(); W.toast(REFUSED[err.code]); schedule(500); return;
+        render();
+        if (err.code === 'already_answered') answeredTold(); else changed();
+        W.toast(REFUSED[err.code]); schedule(500); return;
       }
       // A timeout or a lost answer: the same clientAnswerId goes again on the next tap and the server replays it.
-      Q.notes[id] = REFUSED[err && err.code] || ('Not sent: ' + ((err && err.message) || 'the Mac did not answer') + ' Tap again to retry.');
+      Q.notes[id] = REFUSED[err && err.code] || (err && err.status == null ? unreachable(asked, body.decision || 'send')
+        : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer') + ' Tap again to retry.');
       render();
     });
   }
@@ -390,8 +407,8 @@
         delete Q.sending[id]; Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); W.toast('Left for the Mac.'); schedule(500);
       }, function (err) {
         delete Q.sending[id];
-        if (err && REFUSED[err.code] && err.code !== 'invalid_answer') { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); W.toast(REFUSED[err.code]); return; }
-        Q.notes[id] = 'Not sent: ' + ((err && err.message) || 'the Mac did not answer'); render();
+        if (err && REFUSED[err.code] && err.code !== 'invalid_answer') { Q.items = Q.items.filter(function (i) { return i.id !== id; }); render(); changed(); W.toast(REFUSED[err.code]); return; }
+        Q.notes[id] = err && err.status == null ? unreachable(item, 'leave') : 'Not sent: ' + ((err && err.message) || 'the Mac did not answer'); render();
       });
       return;
     }

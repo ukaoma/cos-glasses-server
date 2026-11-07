@@ -1730,19 +1730,19 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
 // questions.js in a vm with the page's own clocks (wall and monotonic, moved apart), the document's touch listeners,
 // and a poll whose answer the test sets. Nothing reaches a server.
 const MAC_WORDS = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
-function loadQ(body: () => unknown, opt: { perf?: boolean } = {}) {
+function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown> } = {}) {
   const mk = () => ({ hidden: true, innerHTML: '', isConnected: true, listeners: {} as Record<string, (e: unknown) => void>,
     addEventListener(t: string, fn: (e: unknown) => void) { this.listeners[t] = fn }, querySelector: () => null, querySelectorAll: () => [], contains: () => false })
   const host = mk()
   const docListeners: Record<string, Array<(e: unknown) => void>> = {}
   const fetches: string[] = [], timers: Array<{ fn: () => void; ms: number }> = [], posts: Array<{ path: string; body: any }> = []
-  let wall = 0, mono = 0, changed = 0, onShell: (() => void) | null = null
+  let wall = 0, mono = 0, changed = 0, refreshed = 0, onShell: (() => void) | null = null
   const realNow = Date.now
   class QDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(realNow() + wall) } static now() { return realNow() + wall } }
   const W: Record<string, unknown> = { esc, toast: () => {}, showAuth: () => {}, onShell: (fn: () => void) => { onShell = fn }, confirmReady: realConfirmReady(QDate),
-    today: { questionsChanged: () => { changed++ } },
+    today: { questionsChanged: () => { changed++ }, refresh: () => { refreshed++ } },
     api: (path: string, o?: { method?: string; body?: unknown }) => {
-      if (o?.method === 'POST') { posts.push({ path, body: o.body }); return Promise.resolve({ ok: true }) }
+      if (o?.method === 'POST') { posts.push({ path, body: o.body }); return opt.post ? opt.post(path, o.body) : Promise.resolve({ ok: true }) }
       return Promise.resolve(path === '/api/models' ? { capabilities: { sessionQuestions: { enabled: true, webClient: true } } } : {})
     } }
   const document: any = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? { classList: { contains: () => false } } : null),
@@ -1754,7 +1754,7 @@ function loadQ(body: () => unknown, opt: { perf?: boolean } = {}) {
   vm.runInContext(QUESTIONS, ctx)
   const touch = (type = 'pointerdown', trusted = true) => (docListeners[type] || []).forEach(fn => fn({ isTrusted: trusted }))
   return { Qs: (W as any).sessionQuestions, host, mk, fetches, timers, posts, touch, document, W,
-    start: async () => { onShell!(); await flush() }, later: (wallMs: number, monoMs = wallMs) => { wall += wallMs; mono += monoMs }, changed: () => changed }
+    start: async () => { onShell!(); await flush() }, later: (wallMs: number, monoMs = wallMs) => { wall += wallMs; mono += monoMs }, changed: () => changed, refreshed: () => refreshed }
 }
 const isoIn = (ms: number) => new Date(Date.now() + ms).toISOString()
 const HELD = (id: string, sid: string, question: string) => ({ id, sessionId: sid, provider: 'claude', kind: 'question', tool: 'AskUserQuestion', createdAt: isoIn(-5_000), deadlineAt: isoIn(600_000),
@@ -2398,6 +2398,79 @@ describe('6.99.26: a held question reads like the terminal, and Submit sends one
       getAttribute: (a: string) => (a === 'data-sq' ? 'step' : a === 'data-sq-id' ? ID : a === 'data-sq-step' ? n : null) }) } })
     step('1'); step('submit')
     expect(calls).toEqual(['scroll q1', 'focus input', 'scroll review', 'focus submit'])
+  })
+})
+
+describe('QA round 1 (6.99.26): after an answer, and when the Mac cannot be reached', () => {
+  const ID = 'pq_' + 'v'.repeat(24), SID = 'sess-v'
+  const tap = (el: any, what: string) => el.listeners.click!({ target: { closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? what : a === 'data-sq-id' ? ID : null) }) } })
+  const pickFirst = (el: any) => el.listeners.change!({ target: { hasAttribute: (a: string) => a === 'data-sq-pick', getAttribute: (a: string) => (({ 'data-sq-id': ID, 'data-q': '0', 'data-o': '0' }) as Record<string, string>)[a], checked: true } })
+  async function sent(post: (path: string, body: any) => Promise<unknown>, item: Record<string, unknown> = HELD(ID, SID, 'Ship it?'), what = 'send') {
+    const q = loadQ(() => ({ enabled: true, items: [item], settled: [] }), { post })
+    await q.start()
+    const el = q.mk(), seen: boolean[] = []
+    q.Qs.mount(el, SID, () => { seen.push(q.Qs.answeredFor(SID)) })
+    if (what === 'send') pickFirst(el)
+    tap(el, what); q.later(450); tap(el, what)
+    await flush()
+    return { q, el, seen }
+  }
+  it('a successful answer: the waiting sheet already reads Answered as it redraws, and Today reads its lists again', async () => {
+    const { q, seen } = await sent(() => Promise.resolve({ ok: true }))
+    expect(q.posts).toHaveLength(1)
+    expect(seen.at(-1), 'the sheet repaints with the answer already recorded').toBe(true)
+    expect(q.refreshed()).toBe(1)
+    expect(q.changed()).toBeGreaterThanOrEqual(2)
+  })
+  it('already answered on another screen: recorded as answered, Today told and refreshed', async () => {
+    const refused = Object.assign(new Error('refused'), { status: 409, code: 'already_answered' })
+    const { q, seen } = await sent(() => Promise.reject(refused))
+    expect(q.Qs.answeredFor(SID)).toBe(true)
+    expect(seen.at(-1)).toBe(true)
+    expect(q.refreshed()).toBe(1)
+  })
+  it('another refusal is not an answer: no Answered, no refresh', async () => {
+    const refused = Object.assign(new Error('refused'), { status: 409, code: 'expired' })
+    const { q } = await sent(() => Promise.reject(refused))
+    expect(q.Qs.answeredFor(SID)).toBe(false)
+    expect(q.refreshed()).toBe(0)
+  })
+  it('no status at all (offline, a timeout): "Could not reach your Mac", naming the button to tap', async () => {
+    const offline = () => Promise.reject(new TypeError('Failed to fetch'))
+    const a = await sent(offline)
+    expect(a.el.innerHTML).toContain('Could not reach your Mac. Tap Submit to retry.')
+    expect(a.q.Qs.answeredFor(SID)).toBe(false)
+    const approval = { ...HELD(ID, SID, ''), kind: 'approval', tool: 'Bash', questions: undefined, approval: { tool: 'Bash', summary: 'npm test', detail: 'npm test' } }
+    expect((await sent(offline, approval, 'allow')).el.innerHTML).toContain('Could not reach your Mac. Tap Allow once to retry.')
+    expect((await sent(offline, approval, 'deny')).el.innerHTML).toContain('Could not reach your Mac. Tap Deny to retry.')
+    const late = Object.assign(new Error('Your Mac did not answer in 20 seconds.'), { code: 'timeout' })
+    expect((await sent(() => Promise.reject(late))).el.innerHTML).toContain('Could not reach your Mac. Tap Submit to retry.')
+    const leave = loadQ(() => ({ enabled: true, items: [HELD(ID, SID, 'Ship it?')], settled: [] }), { post: offline })
+    await leave.start()
+    const el = leave.mk(); leave.Qs.mount(el, SID); tap(el, 'leave'); await flush()
+    expect(el.innerHTML).toContain('Could not reach your Mac. Tap Leave for the Mac to retry.')
+    // A server that answered with an error is not "could not reach".
+    const broken = await sent(() => Promise.reject(Object.assign(new Error('The server answered 500.'), { status: 500 })))
+    expect(broken.el.innerHTML).toContain('Not sent: The server answered 500. Tap again to retry.')
+    // The retry goes under the same clientAnswerId.
+    tap(a.el, 'send'); a.q.later(450); tap(a.el, 'send'); await flush()
+    expect(a.q.posts.map(p => p.body.clientAnswerId)).toEqual([a.q.posts[0]!.body.clientAnswerId, a.q.posts[0]!.body.clientAnswerId])
+  })
+})
+
+describe('QA round 1 (6.99.26): a sheet after a waiting sheet shows its foot again (openIntake)', () => {
+  it('Open Sort in Work is visible after a Claude waiting sheet hid the reply box', async () => {
+    const SID = 'eeeeeeee-5555-4555-8555-555555555555'
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release QA', alive: true, running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
+    const h = load({ data: { sessions: [ROW], intake: [ITEM(ID1, 'Roundtable branding')] }, routes: { [`GET /api/agent-sessions/claude/${SID}?turns=6`]: { status: 200, body: { recent_turns: [] } } }, questions: 0 })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    expect(h.els['ta-foot']!.hidden).toBe(true)
+    h.ta.close('user')
+    h.ta.open('meeting', 'Surcharging Push', h.opener())
+    await flush()
+    expect(h.els['ta-foot']!.innerHTML).toContain('Open Sort in Work')
+    expect(h.els['ta-foot']!.hidden).toBe(false)
   })
 })
 
