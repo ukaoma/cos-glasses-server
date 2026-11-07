@@ -744,6 +744,9 @@ export function approvalCard(toolName: string, toolInput: Record<string, unknown
 // ---------------------------------------------------------------------------
 
 export type BrokerItemKind = 'question' | 'approval'
+/** 6.99.27: the door an answer came through: the Even app with the API token, or COS Control Web's browser session. */
+export type AnswerSurface = 'app' | 'web'
+
 export type BrokerResolution = 'answered' | 'handed_to_desk' | 'expired' | 'hook_gone' | 'retracted' | 'drained' | 'no_client'
 export type BrokerFastPath =
   | 'broker_off' | 'draining' | 'malformed' | 'cursor' | 'approvals_off' | 'unsupported_tool'
@@ -1506,7 +1509,7 @@ export class PermissionBroker {
    * clientAnswerId) replays its 200. `handBack` wins over any answer fields in the same body:
    * it is the safe direction, since it only shows the dialog that would have shown anyway.
    */
-  answer(id: string, body: unknown): AnswerResult {
+  answer(id: string, body: unknown, by: AnswerSurface = 'app'): AnswerResult {
     const item = BROKER_ID_RE.test(id) ? this.items.get(id) : undefined
     if (!item) return { status: 404, body: { error: 'not_found' } }
     const input = isRecord(body) ? body : {}
@@ -1558,7 +1561,9 @@ export class PermissionBroker {
     item.timer = null
     this.counters.answered++
     try { this.deps.signals?.decided(item.sessionId, item.id, item.fingerprint) } catch { /* rows are advisory */ }
-    if (item.kind === 'question') this.log(`glasses_won ${item.id}`)
+    // 6.99.27: who answered, by the door it came through: the Even app (lens or phone, the API token) or COS Control
+    // Web (the browser session). A web answer once logged as glasses_won.
+    if (item.kind === 'question') this.log(`${by === 'web' ? 'web_won' : 'glasses_won'} ${item.id}`)
     this.log(`answered ${item.id} kind=${item.kind} pending=${this.pendingCount()}`)
     this.prune()
     return { status: 200, body: { ok: true, id: item.id, kind: item.kind, ...chosen } }

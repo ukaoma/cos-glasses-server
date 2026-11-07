@@ -332,16 +332,35 @@
   // stories all asked for it separately. Now there is one copy: a request younger than maxAgeMs is
   // answered from it, a request already on the wire is shared, and panes can paint the last copy at
   // once while a fresh one loads (sessionListCached).
-  var SL = { data: null, at: 0, inflight: null };
+  var SL = { data: null, at: 0, inflight: null, waiting: null };
   function sessionList(maxAgeMs) {
     if (SL.data && Date.now() - SL.at < (maxAgeMs || 0)) return Promise.resolve(SL.data);
     if (SL.inflight) return SL.inflight;
     SL.inflight = api('/api/agent-sessions?limit=80&sort=updated').then(function (d) {
-      SL.data = d; SL.at = Date.now(); SL.inflight = null; return d;
+      SL.data = d; SL.at = Date.now(); SL.inflight = null;
+      noteWaiting(d);
+      return d;
     }, function (err) { SL.inflight = null; throw err; });
     return SL.inflight;
   }
   function sessionListCached() { return SL.data ? { data: SL.data, at: SL.at } : null; }
+  // 6.99.27 (Miles 11/07 09:29, "a big delay to see the questions"): a session that has just gone to waiting may have
+  // parked a question for this page. The question poll (panes/questions.js) reads at once rather than at its next turn.
+  function questionsNudge() {
+    var q = window.COSWeb && window.COSWeb.sessionQuestions;
+    if (q && typeof q.nudge === 'function') { try { q.nudge(); } catch (_e) {} }
+  }
+  function noteWaiting(d) {
+    var now = {}, fresh = false;
+    ((d && d.sessions) || []).forEach(function (s) {
+      if (!s || sxState(s) !== 'waiting') return;
+      var k = splitSessionId(s.provider, s.session_id || s.id), key = k.provider + '|' + String(k.id).toLowerCase();
+      now[key] = 1;
+      if (!SL.waiting || !SL.waiting[key]) fresh = true;
+    });
+    SL.waiting = now;
+    if (fresh) questionsNudge();
+  }
 
   // ── the session pet (Today) ─────────────────────────────
   // Same pet and the same pose rule as COS Control (PetSpritePose.resolve): waiting with nothing running
@@ -367,24 +386,48 @@
     return merged;
   }
   var PET_HEIGHT = 140;
-  function petPose(sessions) {
-    var working = 0, waiting = 0, alive = 0;
+  // 6.99.27 (Miles 11/07 09:29, "there wasn't an option for the pet to interact with the questions"): the questions
+  // this page holds (panes/questions.js), the ones that can be answered here. One key per session, as Needs you keys
+  // them.
+  function petQuestions() {
+    var q = window.COSWeb && window.COSWeb.sessionQuestions;
+    var items = q && typeof q.itemsFor === 'function' ? q.itemsFor('') : [];
+    return (items || []).filter(function (it) { return it && it.sessionId; });
+  }
+  function petQKey(it) { var k = splitSessionId(it.provider, it.sessionId); return k.provider + '|' + k.id; }
+  function petPose(sessions, questions) {
+    var working = 0, waiting = 0, alive = 0, asked = {};
+    var qs = questions || [];
+    qs.forEach(function (it) { asked[petQKey(it).toLowerCase()] = 1; });
     sessions.forEach(function (s) {
       var st = sxState(s);
       // Working is the Running card's own test (running_active), so the caption under the pet never
       // disagrees with the Running count beside it (11/06: the pet said 3 while the card said 2).
       if (s.running_active) working++;
-      else if (st === 'waiting') waiting++;
+      // A session whose question the caption already leads with is not counted again as waiting on you.
+      else if (st === 'waiting' && !asked[petKey(s).toLowerCase()]) waiting++;
       if (s.running || s.running_active) alive++;
     });
     var pose;
-    if (waiting > 0 && working === 0) pose = 'waiting';
+    // COS Control's rule (PetSpritePose.resolve): attention outranks every count pose. A question waiting here is the
+    // web's attention: it needs you, and this page can answer it.
+    if (qs.length) pose = 'attention';
+    else if (waiting > 0 && working === 0) pose = 'waiting';
     else if (working + waiting >= 4) pose = 'swarm';
     else if (working + waiting === 3) pose = 'trio';
     else if (working + waiting === 2) pose = 'duel';
     else if (working + waiting === 1) pose = 'working';
     else pose = alive > 0 ? 'patrol' : 'idle';
-    return { pose: pose, working: working, waiting: waiting };
+    return { pose: pose, working: working, waiting: waiting, questions: qs.length };
+  }
+  // COS Control's fallbacks (PetSpritePose.fallbackPoses) for a pet that has no strip for the pose.
+  var PET_FALLBACK = { attention: ['error', 'waiting', 'idle'], patrol: ['idle'], duel: ['swarm', 'working', 'idle'], trio: ['swarm', 'duel', 'working', 'idle'],
+    swarm: ['duel', 'trio', 'working', 'idle'], working: ['idle'], waiting: ['idle'] };
+  function petPoseIn(poses, want) {
+    if (poses[want]) return want;
+    var chain = PET_FALLBACK[want] || [];
+    for (var i = 0; i < chain.length; i++) if (poses[chain[i]]) return chain[i];
+    return poses.idle ? 'idle' : Object.keys(poses)[0];
   }
   // 6.99.26 (Miles 11/07, "Open what matters"): the sessions behind the pet's caption, by the same test petPose
   // counts with, so a tap opens what the caption says. In play: waiting on you, then running. Done today rides along in
@@ -406,6 +449,13 @@
   // One session in play opens its own sheet (waiting: the question card or reply box; else the Running peek); several
   // open the short list; none does nothing.
   function petTap(t) {
+    // A question waiting here comes first: one session's question opens its card in the overlay; questions from
+    // several sessions open the list, question rows first.
+    var qs = petQuestions(), qkeys = {};
+    qs.forEach(function (it) { qkeys[petQKey(it)] = 1; });
+    var qk = Object.keys(qkeys);
+    if (qk.length === 1) return openTodayAction(t, 'wait', qk[0]);
+    if (qk.length > 1) return openTodayAction(t, 'pet', '');
     var p = petPlay(state.sessions || []), n = p.waiting.length + p.running.length;
     if (!n) return;
     if (n > 1) return openTodayAction(t, 'pet', '');
@@ -415,12 +465,14 @@
   function petButtonState(box, c, label) {
     var btn = box.querySelector('.pet-btn');
     if (!btn) return;
-    var any = c.working + c.waiting > 0;
+    var any = c.working + c.waiting + (c.questions || 0) > 0;
     btn.setAttribute('aria-label', any ? label + '. Open' : label);
     btn.setAttribute('aria-disabled', any ? 'false' : 'true');
   }
   function petCaption(c) {
     var parts = [];
+    // A question waiting here leads (6.99.27).
+    if (c.questions) parts.push(c.questions === 1 ? '1 question for you' : c.questions + ' questions for you');
     if (c.working) parts.push(c.working + ' running');
     if (c.waiting) parts.push(c.waiting + ' waiting on you');
     return parts.length ? parts.join(', ') : 'Nothing running';
@@ -451,7 +503,7 @@
   var PET_CHANGE = '<button type="button" class="pet-change" data-goto="settings/pet">Change pet</button>';
   // A still pet (a gallery pick, Cloud Puff, or a single image on the Mac): one picture for every state.
   function renderPetStill(box, m, sessions) {
-    var c = petPose(sessions), label = petCaption(c);
+    var c = petPose(sessions, petQuestions()), label = petCaption(c);
     petStop(); PET.pose = 'still:' + m.still;
     var img = box.querySelector('.pet-still');
     if (!img || img.getAttribute('src') !== m.still) {
@@ -481,8 +533,8 @@
         if (!now.show || now.pet !== prefs.pet) return;
         if (!m || !m.available) { box.classList.add('hidden'); petStop(); return; }
         if (m.kind === 'still') { renderPetStill(box, m, sessions); return; }
-        var c = petPose(sessions);
-        var pose = m.poses[c.pose] ? c.pose : (m.poses.idle ? 'idle' : Object.keys(m.poses)[0]);
+        var c = petPose(sessions, petQuestions());
+        var pose = petPoseIn(m.poses, c.pose);
         var spec = m.poses[pose];
         var label = petCaption(c);
         box.classList.remove('hidden');
@@ -1731,7 +1783,7 @@
     var es;
     try { es = new EventSource(sessionPath(provider, id, '/stream?seed=turn')); } catch (_e) { if (r0) { r0.feed.fallback = 'unsupported'; paintActivity(r0); } return; }
     state.stream = es;
-    var wasWorking = false;
+    var wasWorking = false, wasWaiting = false;
     es.onerror = function () {
       var r = state.reading;
       if (!r || r.id !== id || state.stream !== es) return;
@@ -1755,6 +1807,9 @@
         setLive({ working: working });
         if (wasWorking && !working) { refreshTurns(provider, id); replyEnded(r); }
         wasWorking = working;
+        // Gone to waiting: its question may be parked for this page now (6.99.27).
+        if (waiting && !working && !wasWaiting) questionsNudge();
+        wasWaiting = waiting && !working;
       } else if (e.kind === 'tool') {
         setLive({ step: [e.verb, e.target].filter(Boolean).join(' ') });
       } else if (e.kind === 'prose' && e.text) {
@@ -4529,7 +4584,8 @@
     refresh: function () { if (state.pane === 'today') loadToday(); },
     // 6.99.26: the pet's sessions (petPlay), and a repaint of Needs you when the held questions change.
     petPlay: function () { return petPlay(state.sessions || []); },
-    questionsChanged: function () { if (TODAY.at) paintNeeds(); }
+    // 6.99.27: the pet's caption and pose follow the held questions too.
+    questionsChanged: function () { if (TODAY.at) { paintNeeds(); if (state.pane === 'today' && !TODAY.offline) renderPet(state.sessions || []); } }
   };
   window.COSWeb.sessionKit = {
     // A session object for continueSession, with the overlay's own view (READER_VIEW's methods).

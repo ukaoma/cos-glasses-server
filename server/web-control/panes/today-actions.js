@@ -76,6 +76,8 @@
     open: null,            // { kind: 'need' | 'run' | 'wait' | 'pet' | 'meeting' | 'intake', key, all }
     opener: null, openerSel: '',
     pushed: false, ignorePops: 0,
+    depth: 1,              // history entries the overlay holds: 2 while a session opened from the pet's list shows
+    back: null,            // { scroll } the pet's list that session came from, for Back to sessions
     dirty: false,          // something was decided or sent: Today reloads on close
     // From today's meetings
     busy: '',              // the one suggestion being decided (Control: one at a time)
@@ -129,7 +131,8 @@
     layer.innerHTML = '<div class="ta-scrim" data-ta="close" aria-hidden="true"></div>' +
       '<section class="ta-sheet" id="ta-sheet" role="dialog" aria-modal="true" aria-labelledby="ta-title" tabindex="-1">' +
         '<div class="ta-grip" aria-hidden="true"></div>' +
-        '<header class="ta-head"><h2 class="ta-title" id="ta-title"></h2>' +
+        '<header class="ta-head"><div class="ta-head-main"><button type="button" class="link-btn ta-back" id="ta-back" data-ta="back" hidden>Back to sessions</button>' +
+          '<h2 class="ta-title" id="ta-title"></h2></div>' +
           '<button type="button" class="ta-x" data-ta="close" aria-label="Close">' + X_ICON + '</button></header>' +
         '<div class="ta-body" id="ta-body"></div>' +
         '<div class="ta-foot" id="ta-foot"></div>' +
@@ -182,9 +185,14 @@
     return '[data-today=' + q(kind) + ']' + (key != null ? '[data-key=' + q(key) + ']' : '');
   }
 
-  function open(kind, key, opener) {
+  // opt.from: a session opened from the pet's list ({ scroll }), which gets Back to sessions and its own history entry,
+  // so the phone's Back returns to the list too (Miles's iPhone, 11/07). opt.again: the list shown again from there,
+  // its entry already current.
+  function open(kind, key, opener, opt) {
+    opt = opt || {};
     build();
     if (O.open) stopSession();
+    O.back = opt.from || null;
     O.open = { kind: kind, key: String(key || ''), all: kind === 'intake' };
     O.opener = opener || document.activeElement; O.openerSel = openerSelector(opener);
     O.note = { text: '', kind: '' }; O.cautionAsk = false; O.needGone = false; O.armedAt = {};
@@ -195,9 +203,14 @@
     fit();
     // The entry names what is open, so a reload can open it again and Back still closes it (restore below).
     var entry = { cosTodayOverlay: 1, kind: kind, key: O.open.key };
+    if (O.back) entry.from = 'pet';
     try {
-      if (!O.pushed) { history.pushState(entry, ''); O.pushed = true; } else history.replaceState(entry, '');
+      if (opt.again) { /* the list's own entry is current again */ }
+      else if (!O.pushed) { history.pushState(entry, ''); O.pushed = true; O.depth = 1; }
+      else if (opt.from && O.depth === 1) { history.pushState(entry, ''); O.depth = 2; }
+      else history.replaceState(entry, '');
     } catch (_e) { /* no history API: Back simply leaves Today */ }
+    var backBtn = $('ta-back'); if (backBtn) backBtn.hidden = !O.back;
     try {
       if (kind === 'need' || kind === 'run' || kind === 'wait') openSession(kind, O.open.key);
       else if (kind === 'pet') openPet();
@@ -246,7 +259,12 @@
     if (layer) layer.hidden = true;
     document.documentElement.classList.remove('ta-open');
     var shell = $('app-shell'); if (shell) shell.removeAttribute('inert');
-    if (O.pushed && how !== 'pop' && how !== 'leave') { O.pushed = false; O.ignorePops++; try { history.back(); } catch (_e) { O.ignorePops--; } }
+    // X from a session opened off the pet's list unwinds both entries in one step, so the next Back leaves Today as before.
+    if (O.pushed && how !== 'pop' && how !== 'leave') {
+      var n = O.depth > 1 ? O.depth : 1;
+      O.pushed = false; O.ignorePops++;
+      try { if (n > 1 && typeof history.go === 'function') history.go(-n); else history.back(); } catch (_e) { O.ignorePops--; }
+    }
     if (how === 'pop' || how === 'leave') O.pushed = false;
     clearTimeout(O.expireTimer);
     // Settled lines are done once the overlay closes; Today reads the server again if anything changed here.
@@ -285,15 +303,28 @@
         if (W.parseRoute().pane !== 'today' || O.open) return resolve(forget());
         if (!ready) { if (Date.now() - started > 15000) return resolve(forget()); return setTimeout(wait, 150); }
         O.pushed = true;   // this entry is the overlay's own
-        try { open(st.kind, String(st.key || ''), null); resolve(true); }
+        // A session opened off the pet's list keeps its Back to sessions: the list's entry is still under it.
+        if (st.from === 'pet' && (st.kind === 'wait' || st.kind === 'run')) O.depth = 2;
+        try { open(st.kind, String(st.key || ''), null, st.from === 'pet' && O.depth === 2 ? { from: { scroll: 0 }, again: true } : undefined); resolve(true); }
         catch (err) { console.error('[today] could not reopen the overlay after a reload.', err); O.pushed = false; resolve(forget()); }
       })();
     });
   }
   window.addEventListener('popstate', function () {
     if (O.ignorePops > 0) { O.ignorePops--; return; }
+    // The phone's Back from a session opened off the pet's list goes back to that list, as Back to sessions does.
+    if (O.open && O.back) { backToList(); return; }
     if (O.open) close('pop');
   });
+  // The pet's list again, where it was scrolled to. From the button the session's entry is taken off history too.
+  function backToList(fromButton) {
+    var b = O.back;
+    if (!b) return;
+    if (fromButton && O.depth > 1) { O.ignorePops++; try { history.back(); } catch (_e) { O.ignorePops--; } }
+    O.depth = 1;
+    open('pet', '', O.opener, { again: true });
+    var body = $('ta-body'); if (body) body.scrollTop = b.scroll || 0;
+  }
   W.onRoute(function (r) { if (O.open && r.pane !== 'today') close('leave'); });
   // Escape closes the overlay, unless the Ask sheet is open over it (app.js closes that first).
   document.addEventListener('keydown', function (e) {
@@ -327,6 +358,7 @@
       if (O.open && (O.open.kind === 'meeting' || O.open.kind === 'intake')) paintIntake(); else paintLive();
     }
     if (what === 'close') return close('user');
+    if (what === 'back') return backToList(true);
     if (what === 'create' || what === 'link') return decide(id, 'accept');
     if (what === 'dismiss') {
       // Without Undo on this server a Dismiss cannot be taken back, so it asks once: tap, then tap again.
@@ -339,8 +371,12 @@
     if (what === 'open-card') return leaveTo('work', id ? [id] : []);
     if (what === 'open-session') return O.r ? leaveTo('sessions', [O.r.provider, O.r.id]) : null;
     if (what === 'open-sessions') return leaveTo('sessions', []);
-    // A row of the pet's list opens that session's own sheet in its place; Back still closes the overlay.
-    if (what === 'pet-open') { var pk = b.getAttribute('data-kind'); return open(pk === 'wait' ? 'wait' : 'run', id, O.opener); }
+    // A row of the pet's list opens that session's own sheet in its place, with Back to sessions (and the phone's Back)
+    // returning to the list where it was scrolled; X still closes the overlay.
+    if (what === 'pet-open') {
+      var pk = b.getAttribute('data-kind'), lb = $('ta-body');
+      return open(pk === 'wait' ? 'wait' : 'run', id, O.opener, { from: { scroll: lb ? lb.scrollTop || 0 : 0 } });
+    }
     if (what === 'send') return sendReply();
     if (what === 'att-remove' || what === 'att-retry') {
       var fb = filesBox(); if (!fb) return;
@@ -830,15 +866,40 @@
         '<span class="ta-pet-line">' + esc(line) + '</span></button>';
     };
     var group = function (title, rows) { return rows.length ? '<section class="ta-pet-group"><h3 class="ta-pet-head">' + esc(title) + '</h3>' + rows.join('') + '</section>' : ''; };
-    var waiting = p.waiting.map(function (s) { return row(s, 'wait', stateWords(s)); });
+    // 6.99.27: the questions this page holds come first, one row per session, each opening that session's cards.
+    var asked = petAsked(), keyOf = function (s) { var k = T.splitSessionId(s.provider, s.session_id || s.id); return (k.provider + '|' + k.id).toLowerCase(); };
+    var questions = asked.map(function (a) {
+      var s = sessionRowFor(a.provider, a.id);
+      var k = esc(a.provider + '|' + a.id);
+      return '<button type="button" class="ta-pet-row" data-ta="pet-open" data-kind="wait" data-id="' + k + '">' +
+        '<span class="ta-pet-top">' + T.badge(a.provider) + '<span class="ta-pet-title">' + esc(s ? T.sessionTitle(s) : a.title) + '</span></span>' +
+        '<span class="ta-pet-line">' + esc(a.line) + '</span></button>';
+    });
+    var held = {}; asked.forEach(function (a) { held[(a.provider + '|' + a.id).toLowerCase()] = 1; });
+    var waiting = p.waiting.filter(function (s) { return !held[keyOf(s)]; }).map(function (s) { return row(s, 'wait', stateWords(s)); });
     // The pet counts a session as running from the Running card's test; one of those paused on you opens as waiting.
-    var running = p.running.map(function (s) { return row(s, K.stateOf(s) === 'waiting' ? 'wait' : 'run', stateWords(s)); });
+    var running = p.running.filter(function (s) { return !held[keyOf(s)]; }).map(function (s) { return row(s, K.stateOf(s) === 'waiting' ? 'wait' : 'run', stateWords(s)); });
     var done = p.done.slice(0, PET_DONE_SHOWN).map(function (s) { return row(s, 'run', 'Last active ' + doneWhen(s)); });
     var body = $('ta-body');
-    if (body) body.innerHTML = group('Waiting on you', waiting) + group('Running', running) + group('Done today', done) +
-      (!waiting.length && !running.length ? '<p class="ta-note">Nothing is running or waiting on you now.</p>' : '') +
+    if (body) body.innerHTML = group(questions.length === 1 ? 'A question for you' : 'Questions for you', questions) + group('Waiting on you', waiting) + group('Running', running) + group('Done today', done) +
+      (!questions.length && !waiting.length && !running.length ? '<p class="ta-note">Nothing is running or waiting on you now.</p>' : '') +
       '<div class="ta-links"><button type="button" class="link-btn" data-ta="open-sessions">All sessions</button></div>';
     var foot = $('ta-foot'); if (foot) { foot.innerHTML = ''; foot.hidden = false; }
+  }
+  // The held questions by session (panes/questions.js), oldest first: the words of each session's first question.
+  function petAsked() {
+    var q = W.sessionQuestions, items = q && q.itemsFor ? q.itemsFor('') : [], out = [], at = {};
+    (items || []).forEach(function (it) {
+      if (!it || !it.sessionId) return;
+      var k = T.splitSessionId(it.provider, it.sessionId), key = (k.provider + '|' + k.id).toLowerCase();
+      if (at[key] !== undefined) { out[at[key]].n++; return; }
+      var first = it.kind === 'approval' ? (it.approval && it.approval.summary ? 'Wants to run ' + it.approval.summary : 'Wants your permission')
+        : String(((it.questions || [])[0] || {}).question || 'Asked you a question');
+      at[key] = out.length;
+      out.push({ provider: k.provider, id: k.id, n: 1, line: clip(first, 160), title: it.kind === 'approval' ? 'A session wants your permission' : 'A session asked you a question' });
+    });
+    out.forEach(function (a) { if (a.n > 1) a.line = a.n + ' questions. ' + a.line; });
+    return out;
   }
   function doneWhen(s) {
     var a = W.ago(s.last_activity_at || s.state_since);
@@ -892,6 +953,10 @@
         // The stream's status trails a Stop by a few seconds (the reader's rule): do not let that echo reopen it.
         if (working && r.stoppedAt && Date.now() - r.stoppedAt < 8000) working = false;
         if (r.live.working && !working) loadLast(r);
+        // Gone to waiting: its question may be parked for this page now, so the card reads at once (6.99.27).
+        var waitingNow = !working && (e.agent_state === 'waiting' || e.state === 'waiting' || e.state === 'needs_input');
+        if (waitingNow && !r.live.waiting && W.sessionQuestions && W.sessionQuestions.nudge) W.sessionQuestions.nudge();
+        r.live.waiting = waitingNow;
         r.live.working = working;
         if (!working) r.live.prose = null;
       } else if (e.kind === 'prose' && e.text) r.live.prose = String(e.text);

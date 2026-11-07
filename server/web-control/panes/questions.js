@@ -41,11 +41,21 @@
     atMac: [],            // settled items the Mac's own prompt still waits on, newest first
     seen: {},             // id -> { questions: [text], summary } the words of a card this page drew while it was held
     answered: {},         // id -> { sessionId, at } answered here or anywhere (settled `answered`), for two minutes
+    missing: {},          // id -> the question a Submit tap found unanswered, until the next pick
     timer: null,
     tick: null,
-    stopped: false
+    stopped: false,
+    inflight: false,      // a poll is on the wire
+    again: false,         // something asked for a poll while one was out: one more as soon as it lands
+    lastPollAt: 0         // when the last poll went out (Date.now)
   };
   var DEFAULT_POLL_MS = 10000;
+  // 6.99.27 (Miles 11/07 09:29, "a big delay to see the questions on the homepage"): while this tab is visible on
+  // Today it reads every 3 s, whatever the server's idle pace (10 s). Before, a question parked just after an idle read
+  // waited up to 10 s plus the round trip for the next one. Hidden, the page reads nothing (visibilitychange below).
+  var TODAY_POLL_MS = 3000;
+  // A nudge (a session that just went to waiting, Today coming on screen) never reads more often than this.
+  var NUDGE_GAP_MS = 1000;
   // Miles's words for a question at the Mac (11/07), one place: Today's Needs you reads them from here too.
   var MAC_LINE = "Waiting on your Mac's prompt. Answer it on the Mac (or through Screens).";
   var ANSWERED_LINE = 'Answered. The session carries on.';
@@ -102,27 +112,54 @@
     }, function () { return null; });
   }
   function usable(cap) { return !!(cap && cap.enabled === true && cap.webClient === true); }
+  // The capability for this poll. Once this server has said the web may poll, a poll never waits on /api/models again:
+  // an old answer is refreshed alongside the poll (6.99.27: after five minutes away, coming back read /api/models first
+  // and only then the questions). The first read of a page still waits for it, so an older server is never polled.
+  function capForPoll() {
+    if (usable(Q.cap)) { if (Date.now() - Q.capAt >= 5 * 60000) readCap(); return Promise.resolve(Q.cap); }
+    return readCap();
+  }
+  function onToday() { var st = W.state; return !!(st && st.pane === 'today'); }
+  // The wait before the next read: the server's pace, 3 s while one waits (an answer elsewhere clears it here too), and
+  // 3 s while this tab shows Today.
+  function nextWait(every) { return Q.items.length || onToday() ? Math.min(every, TODAY_POLL_MS) : every; }
   function schedule(ms) {
     clearTimeout(Q.timer);
     Q.timer = setTimeout(poll, ms);
   }
+  function landed() {
+    Q.inflight = false;
+    if (Q.again) { Q.again = false; schedule(0); }
+  }
   function poll() {
     clearTimeout(Q.timer);
     if (Q.stopped || document.hidden || !signedIn()) return;
-    readCap().then(function (cap) {
-      if (!usable(cap)) { clearCards(); schedule(60000); return; }
+    // One read on the wire at a time: a second ask while one is out becomes one more read when it lands.
+    if (Q.inflight) { Q.again = true; return; }
+    Q.inflight = true; Q.again = false; Q.lastPollAt = Date.now();
+    capForPoll().then(function (cap) {
+      if (!usable(cap)) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
       return fetch(pollUrl(), { headers: { 'X-COS-Web': '1' }, credentials: 'same-origin', cache: 'no-store' }).then(function (res) {
-        if (res.status === 401) { Q.stopped = true; clearCards(); return; }
-        if (!res.ok) { schedule(DEFAULT_POLL_MS); return; }
+        if (res.status === 401) { Q.again = false; landed(); Q.stopped = true; clearCards(); return; }
+        if (!res.ok) { schedule(DEFAULT_POLL_MS); landed(); return; }
         return res.json().then(function (d) {
-          if (!d || d.enabled === false) { clearCards(); schedule(60000); return; }
+          if (!d || d.enabled === false) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
+          // Painted as soon as the read lands: take() draws the cards and repaints Today's Needs you and the pet.
           take(Array.isArray(d.items) ? d.items : [], Array.isArray(d.settled) ? d.settled : []);
           var every = Number(d.pollIntervalMs) > 0 ? Number(d.pollIntervalMs) : DEFAULT_POLL_MS;
-          // While one waits, read faster so an answer from the glasses or the Mac clears it here too.
-          schedule(Q.items.length ? Math.min(every, 3000) : every);
+          schedule(nextWait(every));
+          landed();
         });
-      }, function () { schedule(DEFAULT_POLL_MS); });
-    });
+      }, function () { schedule(DEFAULT_POLL_MS); landed(); });
+    }).catch(function () { schedule(DEFAULT_POLL_MS); landed(); });
+  }
+  // Read now, unless a read went out under NUDGE_GAP_MS ago (then at the end of that gap) or one is on the wire (then
+  // once more when it lands). Today calls this when a session goes to waiting, so its question shows at once.
+  function nudge() {
+    if (Q.stopped || document.hidden || !signedIn()) return;
+    if (Q.inflight) { Q.again = true; return; }
+    var since = Date.now() - Q.lastPollAt;
+    schedule(since >= NUDGE_GAP_MS ? 0 : NUDGE_GAP_MS - since);
   }
   function start() { Q.stopped = false; poll(); }
   function stop() { clearTimeout(Q.timer); }
@@ -148,7 +185,7 @@
     });
     Object.keys(Q.answered).forEach(function (id) { if (Date.now() - Q.answered[id].at > ANSWERED_MS) delete Q.answered[id]; });
     var ids = {}; pending.forEach(function (i) { ids[i.id] = 1; });
-    Object.keys(Q.picks).forEach(function (id) { if (!ids[id]) { delete Q.picks[id]; delete Q.armed[id]; delete Q.notes[id]; delete Q.answerIds[id]; } });
+    Object.keys(Q.picks).forEach(function (id) { if (!ids[id]) { delete Q.picks[id]; delete Q.armed[id]; delete Q.notes[id]; delete Q.answerIds[id]; delete Q.missing[id]; } });
     pending.forEach(function (i) {
       if (!Q.picks[i.id]) Q.picks[i.id] = (i.questions || []).map(function () { return { labels: [], other: '' }; });
     });
@@ -203,7 +240,29 @@
     if ((item.questions || []).length < 2) return '';
     return '<div class="sq-review" data-sq-review="' + esc(item.id) + '"><p class="sq-review-head">Your answers</p><ol class="sq-review-list">' + reviewRows(item) + '</ol></div>';
   }
-  function sendText(id) { return Q.sending[id] ? 'Submitting…' : Q.armed[id] === 'send' ? 'Tap again to submit' : 'Submit'; }
+  // 6.99.27 (Miles's phone, 11/07 09:32: "It's not allowing me to answer the Qs"): Submit was greyed out until every
+  // question had an answer, below the fold on a long card, and a multi-select said "Pick any that apply" though the broker
+  // takes no empty answer (validateQuestionAnswers: `unanswered`). Now the card says what each question needs, keeps
+  // its progress and the answer button in a footer that stays on screen, and a tap with something missing goes to it.
+  function needText(q) { return q.multiSelect ? 'Pick one or more.' : 'Pick one.'; }
+  function answeredCount(item) { var n = 0; (item.questions || []).forEach(function (_q, qi) { if (answerWords(item, qi)) n++; }); return n; }
+  function firstMissing(item, after) {
+    var qs = item.questions || [], n = qs.length;
+    for (var k = 1; k <= n; k++) { var qi = ((after == null ? -1 : after) + k) % n; if (!answerWords(item, qi)) return qi; }
+    return -1;
+  }
+  function progressText(item) {
+    var qs = item.questions || [], done = answeredCount(item), miss = Q.missing[item.id];
+    if (miss != null && !complete(item)) return qLabel(qs[miss], miss) + ' still needs an answer. ' + needText(qs[miss]);
+    if (qs.length < 2) return done ? 'Ready to submit.' : 'Not answered yet. ' + needText(qs[0]);
+    return done + ' of ' + qs.length + ' answered';
+  }
+  function sendText(id) {
+    if (Q.sending[id]) return 'Submitting…';
+    if (Q.armed[id] === 'send') return 'Tap again to submit';
+    var item = itemOf(id);
+    return item && (item.questions || []).length > 1 ? 'Review and submit' : 'Submit';
+  }
   function questionCard(item, scope) {
     var picks = Q.picks[item.id] || [];
     var sending = !!Q.sending[item.id];
@@ -214,7 +273,7 @@
       var name = (scope || 'sq') + '-' + item.id + '-' + qi;
       return '<fieldset class="sq-q" data-sq-qblock="' + qi + '" data-sq-id="' + esc(item.id) + '"><legend class="sq-q-text">' + esc(q.question) +
           (single && q.header ? ' <span class="sq-q-tag">' + esc(q.header) + '</span>' : '') + '</legend>' +
-        (q.multiSelect ? '<p class="sq-fine">Pick any that apply.</p>' : '') +
+        '<p class="sq-need" data-sq-need="' + qi + '" data-state="' + (answerWords(item, qi) ? 'done' : 'todo') + '">' + esc(needText(q)) + '</p>' +
         '<div class="sq-options">' + q.options.map(function (o, oi) {
           var on = p.labels.indexOf(o.label) >= 0;
           return '<label class="sq-option"><input type="' + type + '" name="' + esc(name) + '" data-sq-pick data-sq-id="' + esc(item.id) + '" data-q="' + qi + '" data-o="' + oi + '"' + (on ? ' checked' : '') + (sending ? ' disabled' : '') + '>' +
@@ -229,9 +288,13 @@
       '<header class="sq-head"><h2 class="sq-title">' + esc(engine(item)) + ' has a question</h2><span class="sq-secs" data-sq-secs="' + esc(item.id) + '">' + esc(timeLeft(secondsLeft(item))) + '</span></header>' +
       stripHtml(item) + blocks + reviewHtml(item) +
       '<p class="sq-fine sq-keys">Type a number to pick.</p>' +
-      '<div class="sq-acts"><button type="button" class="cx-btn primary sq-send" data-sq="send" data-sq-id="' + esc(item.id) + '"' + (sending || !complete(item) ? ' disabled' : '') + '>' + sendText(item.id) + '</button>' +
+      // Sticky to the bottom of the screen while the card is on it (questions.css): the progress, and the button that
+      // always answers: it never greys out for a missing answer, it goes to it.
+      '<div class="sq-foot" data-sq-foot="' + esc(item.id) + '">' +
+        '<p class="sq-progress" data-sq-progress="' + esc(item.id) + '" role="status"' + (Q.missing[item.id] != null && !complete(item) ? ' data-alert="1"' : '') + '>' + esc(progressText(item)) + '</p>' +
+        '<div class="sq-acts"><button type="button" class="cx-btn primary sq-send" data-sq="send" data-sq-id="' + esc(item.id) + '"' + (sending ? ' disabled' : '') + '>' + sendText(item.id) + '</button>' +
         '<button type="button" class="link-btn sq-leave" data-sq="leave" data-sq-id="' + esc(item.id) + '"' + (sending ? ' disabled' : '') + '>Leave for the Mac</button></div>' +
-      noteHtml(item) + '</article>';
+        noteHtml(item) + '</div></article>';
   }
   function approvalCard(item) {
     var a = item.approval || { tool: item.tool, summary: '', detail: '' };
@@ -318,7 +381,13 @@
   }
   function patchOne(card, id, item) {
     var send = card.querySelector('[data-sq="send"]');
-    if (send) { send.disabled = !!Q.sending[id] || !complete(item); send.textContent = sendText(id); }
+    if (send) { send.disabled = !!Q.sending[id]; send.textContent = sendText(id); }
+    var progress = card.querySelector('[data-sq-progress]');
+    if (progress && item.kind === 'question') {
+      progress.textContent = progressText(item);
+      if (Q.missing[id] != null && !complete(item)) progress.setAttribute('data-alert', '1'); else progress.removeAttribute('data-alert');
+    }
+    card.querySelectorAll('[data-sq-need]').forEach(function (need) { need.setAttribute('data-state', answerWords(item, Number(need.getAttribute('data-sq-need'))) ? 'done' : 'todo'); });
     // The strip's ☐ and ☒ and the answers to review follow each pick, without redrawing the boxes being typed in.
     card.querySelectorAll('[data-sq-step]').forEach(function (step) { var n = step.getAttribute('data-sq-step'); if (n !== 'submit') step.textContent = stepText(item, Number(n)); });
     var review = card.querySelector('[data-sq-review] .sq-review-list'); if (review) review.innerHTML = reviewRows(item);
@@ -385,18 +454,49 @@
     });
     post(item.id, { answers: answers }, 'Sent to ' + engine(item) + '.');
   }
+  // Scroll a part of the card into view: smooth unless reduced motion asks otherwise. Questions carry a scroll margin
+  // (questions.css) so the top bar and the sticky footer never cover them.
+  function bringIn(el, block) {
+    if (!el || !el.scrollIntoView) return;
+    var still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollIntoView({ block: block || 'start', behavior: still ? 'auto' : 'smooth' });
+  }
+  function goToQuestion(card, qi) {
+    var to = card && card.querySelector('[data-sq-qblock="' + qi + '"]');
+    bringIn(to, 'start');
+    var f = to && to.querySelector('input');
+    if (f && f.focus && !f.disabled) f.focus({ preventScroll: true });
+  }
+  function goToSubmit(card) {
+    bringIn(card && card.querySelector('[data-sq-review]'), 'nearest');
+    var send = card && card.querySelector('[data-sq="send"]');
+    if (send && send.focus && !send.disabled) send.focus({ preventScroll: true });
+  }
+  // As in the terminal: a pick on a single-choice question moves on to the next one still unanswered, or to Submit.
+  var ADVANCE_MS = 160;
+  function advance(card, item, qi) {
+    if (!card || (item.questions || []).length < 2) return;
+    var next = firstMissing(item, qi);
+    setTimeout(function () { if (itemOf(item.id) && !Q.sending[item.id]) { if (next === -1) goToSubmit(card); else goToQuestion(card, next); } }, ADVANCE_MS);
+  }
   function onClick(e) {
     var b = e.target.closest('[data-sq]');
     if (!b || b.disabled) return;
     var id = b.getAttribute('data-sq-id'), what = b.getAttribute('data-sq'), item = itemOf(id);
     if (!item) return;
+    var card = b.closest ? b.closest('.sq-card') : null;
     if (what === 'step') {
-      // The strip jumps to a question, or to the answers and Submit.
-      var card = b.closest ? b.closest('.sq-card') : null, n = b.getAttribute('data-sq-step');
-      var to = card && card.querySelector(n === 'submit' ? '[data-sq-review]' : '[data-sq-qblock="' + n + '"]');
-      if (to && to.scrollIntoView) to.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      var f = to && (n === 'submit' ? card.querySelector('[data-sq="send"]') : to.querySelector('input'));
-      if (f && f.focus && !f.disabled) f.focus({ preventScroll: true });
+      // The strip brings a question to the top, or the answers and Submit into view.
+      var n = b.getAttribute('data-sq-step');
+      if (n === 'submit') goToSubmit(card); else goToQuestion(card, Number(n));
+      return;
+    }
+    if (what === 'send' && !complete(item)) {
+      // Something is missing: say which, and go to it. Never a greyed-out button that does nothing.
+      Q.armed[id] = '';
+      Q.missing[id] = firstMissing(item, null);
+      patchCard(id);
+      goToQuestion(card, Q.missing[id]);
       return;
     }
     if (what === 'leave') {
@@ -414,7 +514,11 @@
     }
     // Tap, then tap again: the first tap only arms the button, and the second counts only once the first has been on
     // screen a moment (COSWeb.confirmReady, the rule Today's overlay uses), so a double tap never allows or sends.
-    if (Q.armed[id] !== what) { Q.armed[id] = what; Q.armedAt[id] = Date.now(); patchCard(id); return; }
+    if (Q.armed[id] !== what) {
+      Q.armed[id] = what; Q.armedAt[id] = Date.now(); patchCard(id);
+      if (what === 'send') goToSubmit(card);   // the first tap is the review: the answers come into view
+      return;
+    }
     if (W.confirmReady && !W.confirmReady(Q.armedAt[id])) return;
     if (what === 'send') return sendAnswers(item);
     if (what === 'allow' || what === 'deny') return post(id, { decision: what }, what === 'allow' ? 'Allowed once.' : 'Denied.');
@@ -422,12 +526,14 @@
   function onChange(e) {
     var t = e.target;
     if (!t.hasAttribute('data-sq-pick')) return;
-    applyPick(t.getAttribute('data-sq-id'), Number(t.getAttribute('data-q')), Number(t.getAttribute('data-o')), !!t.checked);
+    var id = t.getAttribute('data-sq-id'), qi = Number(t.getAttribute('data-q')), item = itemOf(id);
+    if (!applyPick(id, qi, Number(t.getAttribute('data-o')), !!t.checked)) return;
+    if (!item.questions[qi].multiSelect) advance(t.closest ? t.closest('.sq-card') : null, item, qi);
   }
   // One pick, from a tap or a number key: the model first, then every drawn copy of the card follows it.
   function applyPick(id, qi, oi, checked) {
-    var item = itemOf(id); if (!item || Q.sending[id]) return;
-    var q = item.questions[qi]; if (!q || !q.options[oi]) return;
+    var item = itemOf(id); if (!item || Q.sending[id]) return false;
+    var q = item.questions[qi]; if (!q || !q.options[oi]) return false;
     var label = q.options[oi].label, p = Q.picks[id][qi];
     if (q.multiSelect) p.labels = checked ? (p.labels.indexOf(label) >= 0 ? p.labels : p.labels.concat([label])) : p.labels.filter(function (l) { return l !== label; });
     else {
@@ -439,7 +545,9 @@
     });
     // A change after Submit was armed takes the arm back: review, then submit.
     Q.armed[id] = '';
+    if (Q.missing[id] != null) delete Q.missing[id];
     patchCard(id);
+    return true;
   }
   // Keys 1 to 9 while a question has focus, as in the terminal: the option with that number, or the last number to type
   // your own. Never while typing in Other, and never with a modifier held.
@@ -459,6 +567,7 @@
       applyPick(id, qi, n - 1, q.multiSelect ? !on : true);
       var input = block.querySelector('[data-sq-pick][data-o="' + (n - 1) + '"]');
       if (input && input.focus) input.focus({ preventScroll: true });
+      if (!q.multiSelect) advance(block.closest ? block.closest('.sq-card') : null, item, qi);
     } else if (n === q.options.length + 1) {
       var other = block.querySelector('[data-sq-other]');
       if (other && other.focus) { e.preventDefault(); other.focus(); }
@@ -476,6 +585,7 @@
       hostsOf().forEach(function (m) { m.el.querySelectorAll('[data-sq-pick][data-sq-id="' + id + '"][data-q="' + qi + '"]').forEach(function (r) { r.checked = false; }); });
     }
     Q.armed[id] = '';
+    if (Q.missing[id] != null) delete Q.missing[id];
     patchCard(id);
   }
   function listen(el) { el.addEventListener('click', onClick); el.addEventListener('change', onChange); el.addEventListener('input', onInput); el.addEventListener('keydown', onKey); }
@@ -489,9 +599,12 @@
     return { count: function () { return itemsFor(m.sessionId).length; }, unmount: function () { mounts = mounts.filter(function (x) { return x !== m; }); } };
   }
 
+  // Hidden: no reads at all (a phone in a pocket spends nothing). Visible again: one read at once.
   document.addEventListener('visibilitychange', function () { if (document.hidden) stop(); else if (signedIn()) start(); });
   W.onShell(function () { start(); });
+  // Coming to Today: a read at once (within the nudge gap), then every 3 s while it stays on screen.
+  if (W.onRoute) W.onRoute(function (r) { if (r && r.pane === 'today') nudge(); });
 
-  W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, poll: poll, mount: mount,
+  W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, _advanceMs: ADVANCE_MS, _todayPollMs: TODAY_POLL_MS, poll: poll, nudge: nudge, mount: mount,
     itemsFor: itemsFor, atMacFor: atMacFor, answeredFor: answeredFor, wordsOf: wordsOf, macLine: MAC_LINE, answeredLine: ANSWERED_LINE };
 })();

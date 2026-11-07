@@ -22,7 +22,7 @@ const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, c => 
 
 // ── a small fake DOM ─────────────────────────────────────
 class El {
-  id = ''; innerHTML = ''; textContent = ''; value = ''; hidden = false; disabled = false; readOnly = false; isConnected = true
+  id = ''; innerHTML = ''; textContent = ''; value = ''; hidden = false; disabled = false; readOnly = false; isConnected = true; scrollTop = 0
   attrs: Record<string, string> = {}
   listeners: Record<string, Array<(e: unknown) => void>> = {}
   cls = new Set<string>()
@@ -112,6 +112,7 @@ interface Opts {
   model?: unknown
   mac?: number
   pet?: unknown
+  held?: unknown[]
 }
 function load(o: Opts = {}) {
   const els: Record<string, El> = {}
@@ -134,7 +135,7 @@ function load(o: Opts = {}) {
   }
   document.getElementById('ask-sheet').classList.add('hidden')
   const scrimEl = new El(); scrimEl.id = 'scrim'
-  const history = { state: null as unknown, pushes: 0, backs: 0, replaces: 0, pushState(s: unknown) { this.state = s; this.pushes++ }, replaceState(s: unknown) { this.state = s; this.replaces++ }, back() { this.backs++ } }
+  const history = { state: null as unknown, pushes: 0, backs: 0, replaces: 0, gos: [] as number[], pushState(s: unknown) { this.state = s; this.pushes++ }, replaceState(s: unknown) { this.state = s; this.replaces++ }, back() { this.backs++ }, go(n: number) { this.gos.push(n) } }
   const location = { hash: '#/today', replaced: [] as string[], replace(h: string) { this.replaced.push(h) } }
   const data: Record<string, unknown> = { needs: [], working: [], open: [], welcome: {}, offline: false, at: 1, sessions: [], intake: [], intakeCaps: { cardCreation: true, linkWrites: true }, intakeLoaded: true, ...(o.data || {}) }
   const answers = o.api || {}
@@ -156,7 +157,7 @@ function load(o: Opts = {}) {
   class FakeEventSource { url: string; closed = false; onmessage: ((e: { data: string }) => void) | null = null; onerror: (() => void) | null = null; readyState = 1
     constructor(url: string) { this.url = url; streams.push(this) } close() { this.closed = true } }
   const mounts: string[] = []
-  let unmounts = 0
+  let unmounts = 0, nudges = 0
   // The page's clock: real time plus whatever the test moves it on (later()).
   let skew = 0
   const realNow = Date.now
@@ -187,7 +188,9 @@ function load(o: Opts = {}) {
     },
     sessionKit: reader.kit,
     // Like questions.js mount(): it draws and calls back with the count before it returns.
-    sessionQuestions: { mount: (_el: El, sid: string, onChange?: (n: number, mac: number) => void) => { mounts.push(sid); if (onChange) onChange(o.questions || 0, o.mac || 0); return { count: () => o.questions || 0, unmount: () => { unmounts++ } } } },
+    sessionQuestions: { mount: (_el: El, sid: string, onChange?: (n: number, mac: number) => void) => { mounts.push(sid); if (onChange) onChange(o.questions || 0, o.mac || 0); return { count: () => o.questions || 0, unmount: () => { unmounts++ } } },
+      itemsFor: (sid: string) => (sid ? (o.held || []).filter((i: any) => String(i.sessionId).toLowerCase() === String(sid).toLowerCase()) : (o.held || [])),
+      nudge: () => { nudges++ } },
   }
   const ctx = vm.createContext({
     window: { COSWeb: W, addEventListener: (t: string, fn: () => void) => { winListeners[t] = fn }, visualViewport: undefined },
@@ -222,7 +225,7 @@ function load(o: Opts = {}) {
   const elsAll = new Proxy(els, { get: (_t, id: string) => document.getElementById(id) }) as Record<string, El>
   const later = (ms: number) => { skew += ms }
   return { ta, els: elsAll, data, layerTap, webStore, later, now: () => realNow() + skew, posts, apiCalls, gone, calls, store, reader, streams, mounts, history, location, document, tap, opener, key, pop, route, runTimers,
-    refreshed: () => refreshed, reloads: () => reloads, workChanged: () => workChanged, unmounts: () => unmounts, ctx }
+    refreshed: () => refreshed, reloads: () => reloads, workChanged: () => workChanged, unmounts: () => unmounts, nudges: () => nudges, ctx }
 }
 
 const MEETING = (title: string) => ({ domain: 'quilt', month: '2026-11', filename: '2026-11-06_' + title.replace(/\W+/g, '_') + '.md', recordId: 'ops:quilt:' + title, title })
@@ -1730,30 +1733,36 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
 // questions.js in a vm with the page's own clocks (wall and monotonic, moved apart), the document's touch listeners,
 // and a poll whose answer the test sets. Nothing reaches a server.
 const MAC_WORDS = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
-function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown> } = {}) {
+function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown>; reduced?: boolean; fetch?: (url: string) => Promise<unknown> | null; models?: (n: number) => Promise<unknown> | null } = {}) {
   const mk = () => ({ hidden: true, innerHTML: '', isConnected: true, listeners: {} as Record<string, (e: unknown) => void>,
     addEventListener(t: string, fn: (e: unknown) => void) { this.listeners[t] = fn }, querySelector: () => null, querySelectorAll: () => [], contains: () => false })
   const host = mk()
   const docListeners: Record<string, Array<(e: unknown) => void>> = {}
   const fetches: string[] = [], timers: Array<{ fn: () => void; ms: number }> = [], posts: Array<{ path: string; body: any }> = []
-  let wall = 0, mono = 0, changed = 0, refreshed = 0, onShell: (() => void) | null = null
+  let wall = 0, mono = 0, changed = 0, refreshed = 0, onShell: (() => void) | null = null, modelReads = 0
+  const routeHooks: Array<(r: { pane: string }) => void> = []
   const realNow = Date.now
   class QDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(realNow() + wall) } static now() { return realNow() + wall } }
   const W: Record<string, unknown> = { esc, toast: () => {}, showAuth: () => {}, onShell: (fn: () => void) => { onShell = fn }, confirmReady: realConfirmReady(QDate),
     today: { questionsChanged: () => { changed++ }, refresh: () => { refreshed++ } },
+    onRoute: (fn: (r: { pane: string }) => void) => { routeHooks.push(fn) },
     api: (path: string, o?: { method?: string; body?: unknown }) => {
       if (o?.method === 'POST') { posts.push({ path, body: o.body }); return opt.post ? opt.post(path, o.body) : Promise.resolve({ ok: true }) }
+      if (path === '/api/models') { modelReads++; const own = opt.models ? opt.models(modelReads) : null; if (own) return own }
       return Promise.resolve(path === '/api/models' ? { capabilities: { sessionQuestions: { enabled: true, webClient: true } } } : {})
     } }
   const document: any = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? { classList: { contains: () => false } } : null),
     addEventListener: (t: string, fn: (e: unknown) => void) => { (docListeners[t] ??= []).push(fn) }, hidden: false, activeElement: null }
-  const fetch = (url: string) => { fetches.push(url); return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(body()) }) }
-  const ctx = vm.createContext({ window: { COSWeb: W }, document, fetch, console, Date: QDate, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
+  const fetch = (url: string) => { fetches.push(url); const own = opt.fetch ? opt.fetch(url) : null; return own || Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(body()) }) }
+  const ctx = vm.createContext({ window: { COSWeb: W, ...(opt.reduced === undefined ? {} : { matchMedia: (q: string) => ({ matches: !!opt.reduced && q.includes('reduce') }) }) },
+    document, fetch, console, Date: QDate, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
     performance: opt.perf === false ? undefined : { now: () => 5_000 + mono },
     setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {} })
   vm.runInContext(QUESTIONS, ctx)
   const touch = (type = 'pointerdown', trusted = true) => (docListeners[type] || []).forEach(fn => fn({ isTrusted: trusted }))
-  return { Qs: (W as any).sessionQuestions, host, mk, fetches, timers, posts, touch, document, W,
+  const visible = (on: boolean) => { document.hidden = !on; (docListeners.visibilitychange || []).forEach(fn => fn({})) }
+  const route = (pane: string) => routeHooks.forEach(fn => fn({ pane }))
+  return { Qs: (W as any).sessionQuestions, host, mk, fetches, timers, posts, touch, document, W, visible, route, modelReads: () => modelReads,
     start: async () => { onShell!(); await flush() }, later: (wallMs: number, monoMs = wallMs) => { wall += wallMs; mono += monoMs }, changed: () => changed, refreshed: () => refreshed }
 }
 const isoIn = (ms: number) => new Date(Date.now() + ms).toISOString()
@@ -2063,7 +2072,7 @@ describe('6.99.26: two held questions in Needs you, each answered in place (real
 
 describe('6.99.26: the pet opens what matters (Miles 11/07)', () => {
   const PET_START = APP.indexOf('  // ── the session pet (Today) ─'), PET_END = APP.indexOf('  // ── Today ──')
-  function petKit(sessions: unknown[], now = '2026-11-07T15:00:00') {
+  function petKit(sessions: unknown[], now = '2026-11-07T15:00:00', questions: unknown[] = []) {
     const opened: Array<[string, string]> = []
     const t = new Date(now).getTime()
     class FakeDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(t) } static now() { return t } }
@@ -2074,11 +2083,13 @@ describe('6.99.26: the pet opens what matters (Miles 11/07)', () => {
       $: () => null, esc, api: () => Promise.resolve(null), readStore: () => ({}), writeStore: () => {}, Date: FakeDate,
       toDate: (v: unknown) => (v ? new FakeDate(String(v)) : null), state: { pane: 'today', sessions },
       openTodayAction: (_t: unknown, kind: string, key: string) => { opened.push([kind, key]) },
-      document: { querySelector: () => null, hidden: false }, window: { matchMedia: () => ({ matches: true, addEventListener() {} }) },
+      document: { querySelector: () => null, hidden: false },
+      window: { matchMedia: () => ({ matches: true, addEventListener() {} }), COSWeb: { sessionQuestions: { itemsFor: (sid: string) => (sid ? [] : questions) } } },
       Image: class {}, setTimeout, clearTimeout, Promise,
     }
     // eslint-disable-next-line no-new-func
-    const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + split + '\n' + sx + '\n' + APP.slice(PET_START, PET_END) + '\nreturn { petPose: petPose, petPlay: petPlay, petTap: petTap, petButtonState: petButtonState };\n}')(deps)
+    const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + split + '\n' + sx + '\n' + APP.slice(PET_START, PET_END) +
+      '\nreturn { petPose: petPose, petPlay: petPlay, petTap: petTap, petButtonState: petButtonState, petCaption: petCaption, petQuestions: petQuestions, petPoseIn: petPoseIn };\n}')(deps)
     return { kit, opened }
   }
   const s = (id: string, extra: Record<string, unknown>) => ({ session_id: id, provider: 'claude', alive: true, display_label: 'S ' + id, ...extra })
@@ -2159,8 +2170,76 @@ describe('6.99.26: the pet opens what matters (Miles 11/07)', () => {
     expect(rowTap('wait', 'claude|w1')).toBe(true)
     await flush()
     expect(h.ta._state.open).toMatchObject({ kind: 'wait', key: 'claude|w1' })
-    expect(h.history.pushes, 'one history entry: Back closes the overlay').toBe(1)
-    expect(h.history.state).toMatchObject({ cosTodayOverlay: 1, kind: 'wait', key: 'claude|w1' })
+    expect(h.history.pushes, 'the list’s entry, then the session’s: Back returns to the list (6.99.27)').toBe(2)
+    expect(h.history.state).toMatchObject({ cosTodayOverlay: 1, kind: 'wait', key: 'claude|w1', from: 'pet' })
+  })
+
+  it('6.99.27 (Miles’s iPhone): a session opened from the list has Back to sessions, to the list where it was scrolled; the phone’s Back does the same; X still closes', async () => {
+    const pet = { waiting: [WAITS], running: [RUNS], done: [DONE] }
+    const h = load({ data: { sessions: [WAITS, RUNS, DONE] }, pet })
+    h.ta.open('pet', '', h.opener())
+    await flush()
+    expect(h.els['ta-back']!.hidden, 'the list itself has no Back').toBe(true)
+    const rowOpen = async (kind: string, id: string) => {
+      h.els['ta-body']!.scrollTop = 240
+      h.later(600)
+      const b = { disabled: false, getAttribute: (a: string) => (({ 'data-ta': 'pet-open', 'data-kind': kind, 'data-id': id }) as Record<string, string>)[a] ?? null, closest() { return this } }
+      h.ta._onClick({ target: b })
+      await flush()
+      h.els['ta-body']!.scrollTop = 0   // the session's sheet starts at its top
+    }
+    // Back to sessions.
+    await rowOpen('run', 'claude|r1')
+    expect(h.ta._state.open).toMatchObject({ kind: 'run', key: 'claude|r1' })
+    expect(h.els['ta-back']!.hidden).toBe(false)
+    expect(h.els['ta-title']!.textContent).not.toBe('Sessions')
+    expect([h.history.pushes, h.history.state]).toEqual([2, expect.objectContaining({ kind: 'run', from: 'pet' })])
+    h.tap('back')
+    await flush()
+    expect(h.ta._state.open).toMatchObject({ kind: 'pet' })
+    expect(h.els['ta-title']!.textContent).toBe('Sessions')
+    expect(h.els['ta-body']!.scrollTop, 'where the list was').toBe(240)
+    expect(h.els['ta-back']!.hidden).toBe(true)
+    expect(h.history.backs, 'the session’s entry is taken off').toBe(1)
+    h.pop()   // that back()'s own popstate
+    expect(h.ta._state.open, 'and its popstate leaves the list open').toMatchObject({ kind: 'pet' })
+    // The phone's Back.
+    await rowOpen('wait', 'claude|w1')
+    expect(h.history.pushes).toBe(3)
+    h.pop()
+    await flush()
+    expect(h.ta._state.open).toMatchObject({ kind: 'pet' })
+    expect(h.els['ta-body']!.scrollTop).toBe(240)
+    expect(h.history.backs, 'the browser already went back').toBe(1)
+    h.pop()
+    expect(h.ta._state.open, 'Back again from the list closes the overlay').toBeNull()
+    // X from a session opened off the list closes the overlay and takes both entries off at once.
+    h.ta.open('pet', '', h.opener())
+    await flush()
+    await rowOpen('run', 'claude|r1')
+    h.tap('close')
+    expect(h.ta._state.open).toBeNull()
+    expect(h.history.gos).toEqual([-2])
+    h.pop()   // go(-2)'s popstate
+    expect(h.ta._state.open).toBeNull()
+    // A session opened from Today (not from the list) has no Back to sessions, and X takes one entry off as before.
+    const backs = h.history.backs
+    h.ta.open('run', 'claude|r1', h.opener())
+    await flush()
+    expect(h.els['ta-back']!.hidden).toBe(true)
+    h.tap('close')
+    expect([h.history.backs, h.history.gos]).toEqual([backs + 1, [-2]])
+  })
+
+  it('6.99.27: a reload on a session opened from the list keeps Back to sessions', async () => {
+    const h = load({ data: { sessions: [RUNS] }, pet: { waiting: [], running: [RUNS], done: [] } })
+    expect(await h.ta.restore({ cosTodayOverlay: 1, kind: 'run', key: 'claude|r1', from: 'pet' })).toBe(true)
+    expect(h.els['ta-back']!.hidden).toBe(false)
+    expect(h.history.pushes, 'the reloaded entry is reused').toBe(0)
+    h.tap('back')
+    await flush()
+    expect(h.ta._state.open).toMatchObject({ kind: 'pet' })
+    expect(h.history.backs).toBe(1)
   })
 
   it('with nothing in play the list says so (a reload onto it, say), and a reload reopens the list', async () => {
@@ -2183,6 +2262,106 @@ describe('6.99.26: the pet opens what matters (Miles 11/07)', () => {
       expect(toasts).toEqual(['Could not open that here. Opening Sessions.'])
       expect(went).toEqual([['sessions']])
     })
+  })
+
+  // ── 6.99.27 (Miles 11/07 09:29, "there wasn't an option for the pet to interact with the questions") ──
+  const QW = (id: string, sid: string, q = 'Ship it?') => HELD(id, sid, q)
+  it('6.99.27: a question waiting here leads the caption, and its session is not counted again as waiting on you', () => {
+    const one = petKit([WAITS, RUNS], undefined, [QW('pq_1', 'w1')])
+    expect(one.kit.petCaption(one.kit.petPose([WAITS, RUNS], one.kit.petQuestions()))).toBe('1 question for you, 1 running')
+    const other = petKit([WAITS, RUNS], undefined, [QW('pq_1', 'x9')])
+    expect(other.kit.petCaption(other.kit.petPose([WAITS, RUNS], other.kit.petQuestions())), 'another session still waits on you').toBe('1 question for you, 1 running, 1 waiting on you')
+    const two = petKit([], undefined, [QW('pq_1', 'w1'), QW('pq_2', 'x9')])
+    expect(two.kit.petCaption(two.kit.petPose([], two.kit.petQuestions()))).toBe('2 questions for you')
+    const nosid = petKit([WAITS, RUNS], undefined, [{ ...QW('pq_1', 'w1'), sessionId: '' }])
+    expect(nosid.kit.petQuestions(), 'a held item with no session is not one the pet can open').toEqual([])
+    const none = petKit([WAITS, RUNS])
+    expect(none.kit.petCaption(none.kit.petPose([WAITS, RUNS], none.kit.petQuestions())), 'no question: the caption as before').toBe('1 running, 1 waiting on you')
+    expect(none.kit.petCaption(none.kit.petPose([], []))).toBe('Nothing running')
+  })
+
+  it('6.99.27: a question waiting here is the attention pose, over every count (COS Control’s rule), with Control’s fallbacks', () => {
+    const many = [RUNS, BUSY_WAITING, s('r3', { running_active: true }), s('r4', { running_active: true })]
+    const { kit } = petKit(many, undefined, [QW('pq_1', 'w1')])
+    expect(kit.petPose(many, kit.petQuestions()).pose).toBe('attention')
+    expect(kit.petPose(many, []).pose, 'no question: the count pose').toBe('swarm')
+    expect(kit.petPose([WAITS], []).pose).toBe('waiting')
+    const poses = (names: string[]) => Object.fromEntries(names.map(n => [n, {}]))
+    expect(kit.petPoseIn(poses(['idle', 'waiting', 'error', 'attention']), 'attention')).toBe('attention')
+    expect(kit.petPoseIn(poses(['idle', 'waiting', 'error']), 'attention')).toBe('error')
+    expect(kit.petPoseIn(poses(['idle', 'waiting']), 'attention')).toBe('waiting')
+    expect(kit.petPoseIn(poses(['working', 'idle']), 'attention')).toBe('idle')
+    expect(kit.petPoseIn(poses(['working']), 'attention'), 'a pack with none of the chain: its first pose').toBe('working')
+    expect(kit.petPoseIn(poses(['working', 'idle']), 'swarm'), 'the count poses fall back as before').toBe('working')
+    expect(kit.petPoseIn(poses(['working', 'idle']), 'done'), 'a pose with no chain: idle, as before').toBe('idle')
+  })
+
+  it('6.99.27: a tap with one session’s question opens its card; questions from several sessions open the list', () => {
+    const cases: Array<[unknown[], unknown[], Array<[string, string]>]> = [
+      [[WAITS, RUNS], [QW('pq_1', 'w1')], [['wait', 'claude|w1']]],
+      [[RUNS], [QW('pq_1', 'q9'), QW('pq_2', 'q9', 'And this?')], [['wait', 'claude|q9']]],
+      [[], [QW('pq_1', 'w1'), QW('pq_2', 'x9')], [['pet', '']]],
+      [[RUNS], [], [['run', 'claude|r1']]],
+      [[], [], []],
+    ]
+    for (const [sessions, questions, want] of cases) {
+      const { kit, opened } = petKit(sessions, undefined, questions)
+      kit.petTap({})
+      expect(opened, JSON.stringify((questions as Array<{ id: string }>).map(q => q.id))).toEqual(want)
+    }
+  })
+
+  it('6.99.27: with only a question waiting the pet is a live button', () => {
+    const { kit } = petKit([])
+    const btn = new El(), box = { querySelector: () => btn }
+    kit.petButtonState(box, { working: 0, waiting: 0, questions: 1 }, '1 question for you')
+    expect([btn.getAttribute('aria-disabled'), btn.getAttribute('aria-label')]).toEqual(['false', '1 question for you. Open'])
+  })
+
+  it('6.99.27: the list puts the questions first, one row per session opening its cards, and does not list that session again', async () => {
+    const pet = { waiting: [WAITS], running: [RUNS, BUSY_WAITING], done: [DONE] }
+    const held = [HELD('pq_1', 'w1', 'Publish to npm next?'), HELD('pq_2', 'w1', 'And the Hub?'), HELD('pq_3', 'n2', 'Which brand goes first?'), HELD('pq_4', 'r2', 'Merge it?')]
+    const h = load({ data: { sessions: [WAITS, RUNS, BUSY_WAITING, DONE] }, pet, held })
+    h.ta.open('pet', '', h.opener())
+    await flush()
+    const body = h.els['ta-body']!.innerHTML
+    expect(body.indexOf('Questions for you')).toBeGreaterThan(-1)
+    expect(body.indexOf('Questions for you')).toBeLessThan(body.indexOf('>Running<'))
+    expect(body.match(/data-kind="wait" data-id="claude\|w1"/g), 'the session with the question once, as a question row').toHaveLength(1)
+    expect(body.match(/data-id="claude\|r2"/g), 'a running session with a question: once, as a question row').toHaveLength(1)
+    expect(body.indexOf('data-id="claude|r2"')).toBeLessThan(body.indexOf('>Running<'))
+    expect(body).toContain('data-kind="run" data-id="claude|r1"')
+    expect(body.indexOf('data-id="claude|w1"')).toBeLessThan(body.indexOf('data-id="claude|n2"'))
+    expect(body).toContain('2 questions. Publish to npm next?')
+    expect(body).toContain('Which brand goes first?')
+    expect(body).toContain('A session asked you a question')
+    expect(body, 'no session waits on you that is not a question row').not.toContain('Waiting on you')
+    const one = load({ data: { sessions: [] }, pet: { waiting: [], running: [], done: [] }, held: [HELD('pq_9', 'n2', 'Ok?')] })
+    one.ta.open('pet', '', one.opener())
+    await flush()
+    expect(one.els['ta-body']!.innerHTML).toContain('A question for you')
+    expect(one.els['ta-body']!.innerHTML, 'a question is not nothing').not.toContain('Nothing is running')
+    const none = load({ data: { sessions: [WAITS] }, pet: { waiting: [WAITS], running: [], done: [] } })
+    none.ta.open('pet', '', none.opener())
+    await flush()
+    expect(none.els['ta-body']!.innerHTML, 'no question: the list as before').not.toContain('uestion')
+    expect(none.els['ta-body']!.innerHTML).toContain('Waiting on you')
+  })
+
+  it('6.99.27: a change in the held questions repaints the pet as well as Needs you', () => {
+    const m = /    questionsChanged: (function \(\) \{[^\n]*\})/.exec(APP)
+    expect(m, 'COSWeb.today.questionsChanged').not.toBeNull()
+    const run = (pane: string, at: number, offline = false) => {
+      const did: string[] = []
+      // eslint-disable-next-line no-new-func
+      const fn = new Function('TODAY', 'state', 'paintNeeds', 'renderPet', 'return ' + m![1])({ at, offline }, { pane, sessions: [] }, () => did.push('needs'), () => did.push('pet'))
+      fn()
+      return did
+    }
+    expect(run('today', 1)).toEqual(['needs', 'pet'])
+    expect(run('sessions', 1), 'off Today the pet is not drawn').toEqual(['needs'])
+    expect(run('today', 1, true), 'an offline Today hides the pet').toEqual(['needs'])
+    expect(run('today', 0), 'Today not read yet').toEqual([])
   })
 })
 
@@ -2280,10 +2459,16 @@ describe('6.99.26: a held question reads like the terminal, and Submit sends one
     expect(html).toContain('<span class="sq-num" aria-hidden="true">4.</span><input class="field sq-other"')   // and 4 for the three-option one
     expect(html).toContain('<span class="sq-option-desc">One session: its sheet. Several: a short list.</span>')
     expect(html).toContain('type="checkbox"')
-    expect(html).toContain('Pick any that apply.')
+    // 6.99.27: what each question needs, honestly (the broker takes no empty multi-select answer).
+    expect(html).toContain('<p class="sq-need" data-sq-need="0" data-state="todo">Pick one.</p>')
+    expect(html).toContain('<p class="sq-need" data-sq-need="1" data-state="todo">Pick one or more.</p>')
+    expect(html).not.toContain('Pick any that apply')
     expect(words(html)).toContain('Your answers')
     expect(words(html)).toContain('Not answered yet')
-    expect(html).toMatch(/data-sq="send" data-sq-id="[^"]+" disabled>Submit</)
+    // The footer: progress, and an answer button that is never greyed out for a missing answer.
+    expect(html).toContain('<div class="sq-foot" data-sq-foot="')
+    expect(html).toContain('role="status">0 of 2 answered</p>')
+    expect(html).toMatch(/data-sq="send" data-sq-id="[^"]+">Review and submit</)
   })
 
   it('answered by tap, number key and Other, reviewed, then one POST with the answer body questions.js always sent', async () => {
@@ -2367,10 +2552,12 @@ describe('6.99.26: a held question reads like the terminal, and Submit sends one
     const fake = (attrs: Record<string, string>) => ({ attrs, textContent: '', innerHTML: '', checked: false, disabled: false, getAttribute: (a: string) => attrs[a] ?? null })
     const steps = [fake({ 'data-sq-step': '0' }), fake({ 'data-sq-step': '1' }), fake({ 'data-sq-step': 'submit' })]
     steps[2]!.textContent = 'kept'
-    const send = fake({}), review = fake({})
+    const send = fake({}), review = fake({}), progress = fake({})
+    const needs = [fake({ 'data-sq-need': '0' }), fake({ 'data-sq-need': '1' })]
+    for (const x of [progress, ...needs]) { (x as any).setAttribute = (k: string, v: string) => { x.attrs[k] = v }; (x as any).removeAttribute = (k: string) => { delete x.attrs[k] } }
     const radios = [0, 1].map(o => fake({ 'data-o': String(o) }))
-    const cardEl = { querySelector: (sel: string) => (sel === '[data-sq="send"]' ? send : sel === '[data-sq-review] .sq-review-list' ? review : null),
-      querySelectorAll: (sel: string) => (sel === '[data-sq-step]' ? steps : []) }
+    const cardEl = { querySelector: (sel: string) => (sel === '[data-sq="send"]' ? send : sel === '[data-sq-review] .sq-review-list' ? review : sel === '[data-sq-progress]' ? progress : null),
+      querySelectorAll: (sel: string) => (sel === '[data-sq-step]' ? steps : sel === '[data-sq-need]' ? needs : []) }
     ;(el as any).querySelector = (sel: string) => (sel === `[data-sq-card="${ID}"]` ? cardEl : null)
     ;(el as any).querySelectorAll = (sel: string) => (sel === `[data-sq-pick][data-sq-id="${ID}"][data-q="0"]` ? radios : [])
     const before = el.innerHTML
@@ -2380,9 +2567,17 @@ describe('6.99.26: a held question reads like the terminal, and Submit sends one
     expect(radios.map(x => x.checked)).toEqual([false, true])
     expect(review.innerHTML).toContain('Open what matters')
     expect(review.innerHTML).toContain('Not answered yet')
-    expect([send.textContent, send.disabled]).toEqual(['Submit', true])
+    expect([send.textContent, send.disabled], 'never greyed out for a missing answer').toEqual(['Review and submit', false])
+    expect(progress.textContent).toBe('1 of 2 answered')
+    expect(needs.map(x => x.attrs['data-state'])).toEqual(['done', 'todo'])
+    // Submit with Publish empty: the footer says so in place, flagged.
+    el.listeners.click!({ target: { closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? 'send' : a === 'data-sq-id' ? ID : null) }) } })
+    expect([progress.textContent, progress.attrs['data-alert']]).toEqual(['Publish still needs an answer. Pick one or more.', '1'])
     pick(1, 0)
-    expect([send.textContent, send.disabled]).toEqual(['Submit', false])
+    expect(progress.attrs['data-alert'], 'a pick clears the flag').toBeUndefined()
+    expect([send.textContent, send.disabled]).toEqual(['Review and submit', false])
+    expect(progress.textContent).toBe('2 of 2 answered')
+    expect(needs.map(x => x.attrs['data-state'])).toEqual(['done', 'done'])
     void q
   })
 
@@ -2474,3 +2669,299 @@ describe('QA round 1 (6.99.26): a sheet after a waiting sheet shows its foot aga
   })
 })
 
+describe('6.99.27: the card answers on a phone (Miles 11/07 09:32, "It’s not allowing me to answer the Qs")', () => {
+  const ID = 'pq_' + 'w'.repeat(24), SID = 'sess-w'
+  const TWO = { ...HELD(ID, SID, ''), questions: [
+    { question: 'Where should it show first?', header: 'Where', multiSelect: false, options: [{ label: 'On the phone, Today', description: '' }, { label: 'Sessions', description: '' }] },
+    { question: 'Which parts look right?', header: 'Card check', multiSelect: true, options: [{ label: 'Numbered options', description: '' }, { label: 'Descriptions', description: '' }] },
+  ] }
+  // A drawn card as the browser has it: each question block, the answers to review and Submit, recording what is
+  // scrolled into view and focused.
+  function cardDom() {
+    const calls: string[] = []
+    const input = (name: string) => ({ disabled: false, focus: () => calls.push('focus ' + name) })
+    const blocks = [0, 1].map(qi => ({ scrollIntoView: (o: { block: string; behavior: string }) => calls.push(`scroll q${qi} ${o.block} ${o.behavior}`), querySelector: () => input('q' + qi) }))
+    const review = { scrollIntoView: (o: { block: string; behavior: string }) => calls.push(`scroll review ${o.block} ${o.behavior}`) }
+    const send = { disabled: false, focus: () => calls.push('focus submit') }
+    const card = { querySelector: (sel: string) => (sel === '[data-sq-qblock="0"]' ? blocks[0] : sel === '[data-sq-qblock="1"]' ? blocks[1] : sel === '[data-sq-review]' ? review : sel === '[data-sq="send"]' ? send : null) }
+    return { card, calls }
+  }
+  async function setup(opt: { reduced?: boolean; item?: unknown } = {}) {
+    const q = loadQ(() => ({ enabled: true, items: [opt.item ?? TWO], settled: [] }), { reduced: opt.reduced })
+    await q.start()
+    const el = q.mk()
+    q.Qs.mount(el, SID)
+    const dom = cardDom()
+    const pick = (qi: number, oi: number, checked = true) => el.listeners.change!({ target: { closest: (sel: string) => (sel === '.sq-card' ? dom.card : null), hasAttribute: (a: string) => a === 'data-sq-pick',
+      getAttribute: (a: string) => (({ 'data-sq-id': ID, 'data-q': String(qi), 'data-o': String(oi) }) as Record<string, string>)[a], checked } })
+    const tap = (what: string, extra: Record<string, string> = {}) => el.listeners.click!({ target: { closest: () => ({ disabled: false, closest: (sel: string) => (sel === '.sq-card' ? dom.card : null),
+      getAttribute: (a: string) => (a === 'data-sq' ? what : a === 'data-sq-id' ? ID : extra[a] ?? null) }) } })
+    const runAdvance = () => { const due = q.timers.filter(t => t.ms === q.Qs._advanceMs); q.timers.splice(0, q.timers.length, ...q.timers.filter(t => t.ms !== q.Qs._advanceMs)); due.forEach(t => t.fn()) }
+    return { q, el, dom, pick, tap, runAdvance }
+  }
+
+  it('his state, Q1 picked and Q2 empty: Submit says what is missing and goes to it, never a dead button', async () => {
+    const { q, el, dom, pick, tap, runAdvance } = await setup()
+    pick(0, 0); runAdvance(); dom.calls.length = 0
+    expect(el.innerHTML).toMatch(/data-sq="send" data-sq-id="[^"]+">Review and submit</)
+    tap('send')
+    expect(q.posts).toEqual([])
+    expect(el.innerHTML).toContain('data-alert="1">Card check still needs an answer. Pick one or more.</p>')
+    expect(el.innerHTML, 'not armed: nothing to confirm yet').not.toContain('Tap again to submit')
+    expect(dom.calls).toEqual(['scroll q1 start smooth', 'focus q1'])
+    pick(1, 0)
+    expect(el.innerHTML).not.toContain('data-alert')
+    expect(el.innerHTML).toContain('role="status">2 of 2 answered</p>')
+    dom.calls.length = 0
+    tap('send')
+    expect(el.innerHTML).toContain('Tap again to submit')
+    expect(dom.calls, 'the first tap is the review').toEqual(['scroll review nearest smooth', 'focus submit'])
+    q.later(450); tap('send'); await flush()
+    expect(q.posts).toHaveLength(1)
+    expect(q.posts[0]!.body.answers).toEqual([{ labels: ['On the phone, Today'] }, { labels: ['Numbered options'] }])
+  })
+
+  it('a pick on a single-choice question moves on to the next unanswered one, then to Submit; a multi-select pick stays', async () => {
+    const { dom, pick, runAdvance } = await setup()
+    pick(0, 1)
+    expect(dom.calls, 'not before the pick has shown').toEqual([])
+    runAdvance()
+    expect(dom.calls).toEqual(['scroll q1 start smooth', 'focus q1'])
+    dom.calls.length = 0
+    pick(1, 0); runAdvance()
+    expect(dom.calls, 'multi-select: more may follow, so it stays').toEqual([])
+    pick(0, 0); runAdvance()
+    expect(dom.calls, 'everything answered: on to the review and Submit').toEqual(['scroll review nearest smooth', 'focus submit'])
+  })
+
+  it('a number key on a single-choice question advances too; reduced motion jumps instead of gliding', async () => {
+    const { q, dom, el, runAdvance } = await setup({ reduced: true })
+    const block = { getAttribute: (a: string) => (a === 'data-sq-id' ? ID : a === 'data-sq-qblock' ? '0' : null), querySelector: () => null, closest: (sel: string) => (sel === '.sq-card' ? dom.card : null) }
+    el.listeners.keydown!({ key: '1', preventDefault() {}, target: { hasAttribute: () => false, closest: (sel: string) => (sel === '[data-sq-qblock]' ? block : null) } })
+    runAdvance()
+    expect(dom.calls).toEqual(['scroll q1 start auto', 'focus q1'])
+    void q
+  })
+
+  it('the strip brings a question to the top, or the review and Submit into view', async () => {
+    const { dom, tap } = await setup()
+    tap('step', { 'data-sq-step': '1' })
+    tap('step', { 'data-sq-step': 'submit' })
+    expect(dom.calls).toEqual(['scroll q1 start smooth', 'focus q1', 'scroll review nearest smooth', 'focus submit'])
+  })
+
+  it('one question: no advance, "Not answered yet. Pick one." then "Ready to submit.", and a plain Submit', async () => {
+    const { el, dom, pick, runAdvance } = await setup({ item: HELD(ID, SID, 'Ship it?') })
+    expect(el.innerHTML).toContain('role="status">Not answered yet. Pick one.</p>')
+    expect(el.innerHTML).toMatch(/data-sq="send" data-sq-id="[^"]+">Submit</)
+    pick(0, 0); runAdvance()
+    expect(dom.calls).toEqual([])
+    expect(el.innerHTML).toContain('role="status">Ready to submit.</p>')
+  })
+
+  it('the footer is sticky inside the card and the questions clear the top bar and the footer (questions.css)', () => {
+    const css = readFileSync(join(HERE, 'panes', 'questions.css'), 'utf8')
+    expect(css).toMatch(/\.sq-foot \{ position: sticky; bottom: var\(--safe-bottom, 0px\);/)
+    expect(css).toMatch(/\.sq-q \{ scroll-margin-top: calc\(var\(--topbar-h, 48px\) \+ var\(--safe-top, 0px\) \+ 12px\); scroll-margin-bottom: 150px; \}/)
+  })
+
+  it('typing your own answer also clears the "still needs an answer" line', async () => {
+    const { el, tap } = await setup()
+    tap('send')
+    expect(el.innerHTML).toContain('data-alert="1">Where still needs an answer. Pick one.</p>')
+    el.listeners.input!({ target: { value: 'Both screens', hasAttribute: (a: string) => a === 'data-sq-other', getAttribute: (a: string) => (({ 'data-sq-id': ID, 'data-q': '0' }) as Record<string, string>)[a] } })
+    expect(el.innerHTML).not.toContain('data-alert')
+    expect(el.innerHTML).toContain('role="status">1 of 2 answered</p>')
+  })
+
+  it('the missing line goes once that question is answered, even while another is still open', async () => {
+    const { el, tap, pick, runAdvance } = await setup()
+    tap('send')
+    expect(el.innerHTML).toContain('data-alert="1">Where still needs an answer. Pick one.</p>')
+    pick(0, 0); runAdvance()
+    expect(el.innerHTML).not.toContain('data-alert')
+    expect(el.innerHTML).toContain('role="status">1 of 2 answered</p>')
+    tap('send')
+    expect(el.innerHTML, 'the next tap names the next one').toContain('data-alert="1">Card check still needs an answer. Pick one or more.</p>')
+  })
+})
+
+
+describe('6.99.27: a question reaches Today in 3 s, not 10 (Miles 11/07 09:29, "a big delay to see the questions on the homepage")', () => {
+  const last = (h: ReturnType<typeof loadQ>) => h.timers[h.timers.length - 1]!
+  const idle = () => ({ enabled: true, items: [], settled: [], pollIntervalMs: 10_000 })
+
+  it('on Today it reads every 3 s; elsewhere at the server’s idle pace; hidden it reads nothing', async () => {
+    const h = loadQ(idle)
+    h.W.state = { pane: 'sessions' }
+    await h.start()
+    expect(h.Qs._todayPollMs).toBe(3000)
+    expect(last(h).ms, 'off Today, idle: the server’s 10 s').toBe(10_000)
+    h.W.state = { pane: 'today' }
+    h.Qs.poll(); await flush()
+    expect(last(h).ms, 'on Today, idle: 3 s').toBe(3000)
+    // The server's own pace is never slowed: a faster one wins.
+    const fast = loadQ(() => ({ ...idle(), pollIntervalMs: 2000 }))
+    fast.W.state = { pane: 'today' }
+    await fast.start()
+    expect(last(fast).ms).toBe(2000)
+    // While one waits it is 3 s anywhere, as before.
+    const held = loadQ(() => ({ enabled: true, items: [HELD('pq_1', 'aaaa', 'Ok?')], settled: [], pollIntervalMs: 3000 }))
+    held.W.state = { pane: 'work' }
+    await held.start()
+    expect(last(held).ms).toBe(3000)
+    // Hidden: no read, and the timer that fires finds a hidden page and reads nothing.
+    const n = h.fetches.length
+    h.visible(false)
+    last(h).fn(); await flush()
+    expect(h.fetches.length).toBe(n)
+  })
+
+  it('visible again: one read at once', async () => {
+    const h = loadQ(idle)
+    h.W.state = { pane: 'today' }
+    await h.start()
+    h.visible(false)
+    const n = h.fetches.length
+    h.visible(true); await flush()
+    expect(h.fetches.length).toBe(n + 1)
+  })
+
+  it('coming to Today reads at once, never more often than once a second', async () => {
+    const h = loadQ(idle)
+    h.W.state = { pane: 'work' }
+    await h.start()
+    h.W.state = { pane: 'today' }
+    h.route('today')
+    expect(last(h).ms, 'a read went out a moment ago: at the end of the second').toBeGreaterThan(900)
+    expect(last(h).ms).toBeLessThanOrEqual(1000)
+    h.later(5000)
+    h.route('today')
+    expect(last(h).ms, 'five seconds on: at once').toBe(0)
+    const n = h.timers.length
+    h.route('work')
+    expect(h.timers.length, 'going elsewhere asks for nothing').toBe(n)
+  })
+
+  it('a nudge while a read is out: one more read when it lands, never two on the wire', async () => {
+    const gates: Array<() => void> = []
+    const h = loadQ(idle, { fetch: () => new Promise(res => gates.push(() => res({ status: 200, ok: true, json: () => Promise.resolve(idle()) }))) })
+    h.W.state = { pane: 'today' }
+    await h.start()
+    expect(h.fetches).toHaveLength(1)
+    h.Qs.nudge(); h.Qs.nudge(); h.Qs.poll()
+    await flush()
+    expect(h.fetches, 'still one on the wire').toHaveLength(1)
+    gates.shift()!(); await flush()
+    expect(last(h).ms, 'the asked-for read, at once').toBe(0)
+    last(h).fn(); await flush()
+    expect(h.fetches).toHaveLength(2)
+    gates.shift()!(); await flush()
+    expect(last(h).ms, 'then back to every 3 s').toBe(3000)
+    // A nudge alone while a read is out (a session went to waiting mid-read) still gets its read.
+    last(h).fn(); await flush()
+    expect(h.fetches).toHaveLength(3)
+    h.Qs.nudge()
+    gates.shift()!(); await flush()
+    expect(last(h).ms, 'the nudge’s read, at once').toBe(0)
+    // Hidden: a nudge reads nothing.
+    h.later(5000)
+    h.visible(false)
+    const t = h.timers.length
+    h.Qs.nudge()
+    expect(h.timers.length, 'no read scheduled while hidden').toBe(t)
+    // A failed read lets the next one out too.
+    const bad = loadQ(idle, { fetch: () => Promise.reject(new Error('offline')) })
+    await bad.start()
+    bad.Qs.nudge(); bad.later(2000); bad.Qs.nudge()
+    expect(last(bad).ms).toBe(0)
+    last(bad).fn(); await flush()
+    expect(bad.fetches).toHaveLength(2)
+  })
+
+  it('once the server has said yes, a poll never waits on /api/models again (it refreshes alongside)', async () => {
+    const h = loadQ(idle, { models: (n) => (n > 1 ? new Promise(() => {}) : null) })
+    await h.start()
+    expect([h.modelReads(), h.fetches.length]).toEqual([1, 1])
+    h.later(6 * 60_000)
+    h.Qs.poll(); await flush()
+    expect(h.modelReads(), 'the old capability is read again').toBe(2)
+    expect(h.fetches.length, 'and the questions are read without waiting for it').toBe(2)
+    // A page that has never heard yes still waits: an older server is never polled.
+    const first = loadQ(idle, { models: () => new Promise(() => {}) })
+    await first.start()
+    expect(first.fetches).toEqual([])
+  })
+
+  it('a session that goes to waiting in the shared session list reads the questions at once', async () => {
+    const start = APP.indexOf('  // ── one session list for every pane'), end = APP.indexOf('  // ── the session pet (Today) ─')
+    expect(start).toBeGreaterThan(0)
+    const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
+    const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0]
+    const split = /  function splitSessionId\(provider, id\) \{[\s\S]*?\n  \}\n/.exec(APP)![0]
+    let reply: unknown = null, nudges = 0
+    const deps = { api: () => Promise.resolve(reply), window: { COSWeb: { sessionQuestions: { nudge: () => { nudges++ } } } }, Date, toDate: (v: unknown) => (v ? new Date(String(v)) : null) }
+    // eslint-disable-next-line no-new-func
+    const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + split + '\n' + sx + '\n' + APP.slice(start, end) + '\nreturn { sessionList: sessionList };\n}')(deps)
+    const row = (id: string, agent_state: string) => ({ session_id: id, provider: 'claude', alive: true, agent_state, state_source: 'hook' })
+    const read = async (rows: unknown[]) => { reply = { sessions: rows }; await kit.sessionList(0) }
+    await read([row('a', 'running')])
+    expect(nudges).toBe(0)
+    await read([row('a', 'waiting')])
+    expect(nudges, 'a went to waiting').toBe(1)
+    await read([row('a', 'waiting')])
+    expect(nudges, 'still waiting: nothing new').toBe(1)
+    await read([row('a', 'waiting'), row('b', 'waiting')])
+    expect(nudges, 'b went to waiting').toBe(2)
+    await read([row('a', 'running'), row('b', 'waiting')])
+    await read([row('a', 'waiting'), row('b', 'waiting')])
+    expect(nudges, 'a went to waiting again').toBe(3)
+  })
+
+  it('the Sessions reader’s stream going to waiting reads the questions at once, once per flip', () => {
+    const start = APP.indexOf('  function watchSession(provider, id) {'), end = APP.indexOf('  function setLive(patch) {')
+    expect(start).toBeGreaterThan(0)
+    const streams: any[] = []
+    let nudges = 0
+    const r = { id: 'a', feed: {} }
+    const deps = {
+      state: { reading: r, stream: null }, sessionPath: () => '/s', applyFeed: () => {}, $: () => null, setLive: () => {}, refreshTurns: () => {}, replyEnded: () => {},
+      paintActivity: () => {}, sxProbeStream: () => {}, questionsNudge: () => { nudges++ }, Date,
+      EventSource: class { constructor() { streams.push(this) } },
+    }
+    // eslint-disable-next-line no-new-func
+    const watch = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn watchSession;\n}')(deps)
+    watch('claude', 'a')
+    const say = (e: Record<string, unknown>) => streams[0].onmessage({ data: JSON.stringify({ kind: 'status', ...e }) })
+    say({ state: 'working', agent_state: 'running' })
+    expect(nudges).toBe(0)
+    say({ state: 'idle', agent_state: 'waiting' })
+    expect(nudges).toBe(1)
+    say({ state: 'idle', agent_state: 'waiting' })
+    expect(nudges, 'still waiting').toBe(1)
+    say({ state: 'working', agent_state: 'running' })
+    say({ state: 'needs_input' })
+    expect(nudges, 'waiting again').toBe(2)
+  })
+
+  it('Today’s sheet stream going to waiting reads the questions at once, once per flip', async () => {
+    const SID = 'eeeeeeee-5555-4555-8555-555555555555'
+    const busy = { session_id: SID, provider: 'claude', display_label: 'Release QA', alive: true, running: true, running_active: true, agent_state: 'running', state_source: 'hook' }
+    const h = load({ data: { sessions: [busy] }, routes: {} })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const say = (e: Record<string, unknown>) => h.streams[0].onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', ...e }) })
+    say({ state: 'working', agent_state: 'running' })
+    expect(h.nudges()).toBe(0)
+    say({ state: 'working', agent_state: 'waiting' })
+    expect(h.nudges()).toBe(1)
+    say({ state: 'working', agent_state: 'waiting' })
+    expect(h.nudges(), 'still waiting').toBe(1)
+    say({ state: 'working', agent_state: 'running' })
+    say({ state: 'idle', agent_state: 'waiting' })
+    expect(h.nudges()).toBe(2)
+    say({ state: 'working', agent_state: 'running' })
+    say({ state: 'waiting', agent_state: 'running' })
+    expect(h.nudges(), 'the agent’s own state wins: running is not waiting').toBe(2)
+  })
+})

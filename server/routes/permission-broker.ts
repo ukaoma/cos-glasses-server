@@ -265,7 +265,12 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
   })
   router.post('/session-questions/:id/answer', (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
-    const result = deps.broker.answer(String(req.params.id ?? ''), req.body)
+    // 6.99.27: label the answer by its door (the /api gate already let it in): the token is the Even app, anything else
+    // is COS Control Web's browser session.
+    let expected = ''
+    try { expected = deps.apiToken() } catch { expected = '' }
+    const by = timingSafeTokenEqual(req.headers['x-cos-token'], expected) ? 'app' : 'web'
+    const result = deps.broker.answer(String(req.params.id ?? ''), req.body, by)
     res.status(result.status).json(result.body)
   })
   return router
