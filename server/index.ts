@@ -219,6 +219,7 @@ import { isPublicApiRequest, requireApiToken } from './lib/api-auth.js'
 import { PairingState, pairingHostsFrom } from './lib/glasses-pairing.js'
 import { createPairingRouter } from './routes/pairing.js'
 import { createWebControlRouter, isAllowedCorsOrigin, webControlCsp, webControlEnabled } from './routes/web-control.js'
+import { createWebControlStatic } from './lib/web-control-static.js'
 import { isWebControlSocketAllowed, isWebSessionAuthorized, setWebSessionEpochFile } from './lib/web-session-auth.js'
 import { getTailnetSelfName, installTailnetSelfName } from './lib/tailnet-self-name.js'
 import { isManagedRuntime, managedServerVersion } from './lib/managed-runtime.js'
@@ -1524,7 +1525,7 @@ if (webControlEnabled()) {
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('Referrer-Policy', 'no-referrer')
     next()
-  }, express.static(webControlDir))
+  }, createWebControlStatic(webControlDir), express.static(webControlDir))
   app.use('/api', createWebControlRouter({
     apiToken: () => API_TOKEN,
     serverVersion: () => managedServerVersion() ?? 'unknown',

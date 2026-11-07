@@ -23,6 +23,7 @@ import cors from 'cors'
 import { isAllowedNetworkIp, isAllowedNetworkOrigin } from '../lib/network-policy.js'
 import { requireApiToken } from '../lib/api-auth.js'
 import { createWebControlRouter, webControlCsp } from '../routes/web-control.js'
+import { createWebControlStatic } from '../lib/web-control-static.js'
 import { Readable } from 'node:stream'
 import { WebHandoffStore } from '../lib/web-session-auth.js'
 import { execFileRunner, parseTailscaleStatus, resolveTailscaleBin, STATUS_ARGS } from '../lib/tailscale-nudge.js'
@@ -92,7 +93,7 @@ app.use('/control', (req, res, next) => {
   // Candidate only: always serve the files on disk so a reload shows the latest edit.
   res.setHeader('Cache-Control', 'no-store')
   next()
-}, express.static(webControlDir, { etag: false, lastModified: false }))
+}, createWebControlStatic(webControlDir), express.static(webControlDir, { etag: false, lastModified: false }))
 
 app.get('/', (_req, res) => res.redirect('/control'))
 
