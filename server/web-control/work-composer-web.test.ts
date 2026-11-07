@@ -4,7 +4,8 @@
  * Nothing here reaches a real server: every route answers from the table in each test.
  *
  * The contract it pins is the Mac's (WorkTaskChat.swift) through the lens-round path (server lib/work-lens-rounds.ts):
- *   GET  /api/work/chat                           orchestrator 1, lensPlans 1, webPlans 1, planners, efforts, lensPlansControl
+ *   GET  /api/work/chat                           orchestrator 1, lensPlans 1, planners, efforts, lensPlansControl (unchanged)
+ *   GET  /api/work/chat/web-plans                 { webPlans: 1 } on a server that records web plans; 404 on an older one
  *   POST /api/work/orchestrator/input             { workID, meetingWorkIDs }
  *   POST /api/work/chat                           the orchestrator planner body (orchestrator: true)
  *   POST /api/work/chat/lens-rounds               { v:1, clientRoundId: web-<uuid>, source: "web", ... }   saved, never sent
@@ -32,7 +33,8 @@ const TASK = { id: ID, workIdentity: ID, domain: 'quilt', text: 'Ship the pricin
   workRevision: 'f'.repeat(64), taskRevision: 'e'.repeat(64), createdAt: '2026-11-05',
   meetingRefs: [{ title: 'Pricing sync', recordId: 'quilt/2026-11/pricing.md', domain: 'quilt', month: '2026-11', filename: 'pricing.md' }] }
 const CAPS = { protocolVersion: 1, planner: 'sonnet', planners: ['sonnet', 'opus'], effort: 'high', efforts: ['low', 'medium', 'high'], automaticProviders: ['claude', 'codex'],
-  maxAssignments: 3, orchestrator: 1, lensPlans: 1, lensPlansControl: { connected: true, lastSeenSec: 2, autoSend: false }, webPlans: 1 }
+  maxAssignments: 3, orchestrator: 1, lensPlans: 1, lensPlansControl: { connected: true, lastSeenSec: 2, autoSend: false } }
+const WEB_PLANS = { protocolVersion: 1, webPlans: 1, sources: ['lens', 'web'] }
 const INPUT = { protocolVersion: 1, workID: WID, now: '2026-11-06T23:00:00.000Z', discovered: 2, snapshotAgeSec: 4, liveListAgeSec: 4, logScanComplete: true, leftOut: [],
   rows: [
     { id: S1, title: 'Pricing page', summary: 'Working on the price table', status: 'idle', discoveredBy: ['link'], linked: true, member: true, lastTouchedCard: null,
@@ -112,7 +114,7 @@ class Dom {
 type Answer = unknown | ((body: any, method: string) => unknown)
 function load(opts: { answers?: Record<string, Answer>; storage?: Record<string, string>; route?: string[] } = {}) {
   const answers: Record<string, Answer> = { '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : PLAN), [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: ACTIVITY,
-    '/api/work/orchestrator/input': INPUT, '/api/work/chat/lens-rounds': RECORDED, [`/api/work/chat/lens-rounds/${ROUND}/send`]: { sendRequestId: 'ls_0123456789abcdef', state: 'send_requested' },
+    '/api/work/chat/web-plans': WEB_PLANS, '/api/work/orchestrator/input': INPUT, '/api/work/chat/lens-rounds': RECORDED, [`/api/work/chat/lens-rounds/${ROUND}/send`]: { sendRequestId: 'ls_0123456789abcdef', state: 'send_requested' },
     '/api/work-board/activity/open': { items: [], available: true }, '/api/work-board': { tasks: [TASK], capabilities: {}, complete: true }, ...opts.answers }
   const calls: Array<{ method: string; path: string; body: any; timeoutMs?: number }> = []
   const storage = opts.storage ?? {}
@@ -129,7 +131,7 @@ function load(opts: { answers?: Record<string, Answer>; storage?: Record<string,
     api: (path: string, o: { method?: string; body?: unknown; timeoutMs?: number } = {}) => {
       const method = o.method ?? 'GET'
       calls.push({ method, path, body: o.body === undefined ? undefined : JSON.parse(JSON.stringify(o.body)), timeoutMs: o.timeoutMs })
-      const a = answers[path]
+      const a = path in answers ? answers[path] : Object.entries(answers).find(([k]) => k.endsWith('*') && path.startsWith(k.slice(0, -1)))?.[1]
       let v: unknown
       try { v = typeof a === 'function' ? (a as (b: unknown, m: string) => unknown)(o.body, method) : a } catch (e) { return Promise.reject(e) }
       if (v instanceof Promise) return v
@@ -167,10 +169,12 @@ function load(opts: { answers?: Record<string, Answer>; storage?: Record<string,
   const tap = (act: string, attrs: Record<string, string> = {}) => dom.fire('click', { closest: (s: string) => (s === '[data-wk]' ? { getAttribute: (n: string) => (n === 'data-wk' ? act : attrs[n] ?? null), disabled: false } : null) })
   const tapEl = (id: string) => { const el = dom.ids.get(id)!; dom.fire('click', { closest: (s: string) => (s === '[data-wk]' ? el : null) }) }
   const render = () => chat.render(ID)
+  // Send is two taps: Send, then (after the guard time) Send to <session>.
+  const send = async (key: string, ids = 'a1,a2') => { tap('chat-send', { 'data-key': key, 'data-ids': ids }); await tick(500); tap('chat-confirm', { 'data-key': key }); await flush(30) }
   const card = () => chat.of(WID)
   const sent = (path: string, method = 'POST') => calls.filter(c => c.path === path && c.method === method)
   const html = () => dom.pane.html + [...dom.ids.values()].filter(e => e !== dom.pane).map(e => e.html).join('')
-  return { chat, def, dom, calls, storage, answers, tick, box, type, tap, tapEl, render, card, sent, html, setRoute: (r: string[], pane = 'work') => { route = { pane, args: r } }, timers }
+  return { chat, def, dom, calls, storage, answers, tick, box, type, tap, tapEl, render, send, card, sent, html, setRoute: (r: string[], pane = 'work') => { route = { pane, args: r } }, timers }
 }
 async function opened(opts: Parameters<typeof load>[0] = {}) {
   const h = load(opts)
@@ -196,16 +200,19 @@ describe('what the server offers: the composer shows only on a server that takes
     expect(h.html()).toContain('Files to send.')
   })
   it('a server without webPlans hides the composer and says why in plain words, keeping a draft', async () => {
-    const { webPlans: _w, ...lensOnly } = CAPS
-    const h = await opened({ answers: { '/api/work/chat': lensOnly }, storage: { 'cos.web.work.chat': JSON.stringify({ v: 1, cards: { [WID]: { at: 1, draft: 'kept words', rounds: [] } } }) } })
+    const h = await opened({ answers: { '/api/work/chat/web-plans': fail(404, 'not_found') }, storage: { 'cos.web.work.chat': JSON.stringify({ v: 1, cards: { [WID]: { at: 1, draft: 'kept words', rounds: [] } } }) } })
     expect(h.box()).toBeNull()
     expect(h.html()).toContain('This COS server plans Work chat for the Mac and the glasses, but not for the web yet.')
     expect(h.html()).toContain('Your draft is kept on this browser.')
-    const old = await opened({ answers: { '/api/work/chat': fail(404, 'not_found') } })
+    const old = await opened({ answers: { '/api/work/chat': fail(404, 'not_found'), '/api/work/chat/web-plans': fail(404, 'not_found') } })
     expect(old.box()).toBeNull()
     expect(old.html()).toContain('Work chat needs a newer COS server on your Mac.')
-    const legacy = await opened({ answers: { '/api/work/chat': { protocolVersion: 1, planners: ['sonnet'] } } })
+    const legacy = await opened({ answers: { '/api/work/chat': { protocolVersion: 1, planners: ['sonnet'] }, '/api/work/chat/web-plans': fail(404, 'not_found') } })
     expect(legacy.box()).toBeNull()
+    // The web-plans check itself unreachable: never shown as supported, and Try again is offered.
+    const flaky = await opened({ answers: { '/api/work/chat/web-plans': fail(undefined, undefined, 'Failed to fetch') } })
+    expect(flaky.box()).toBeNull()
+    expect(flaky.html()).toContain('Could not check Work chat on your Mac.')
   })
   it('an unreachable server says so with Try again, and Try again asks once more', async () => {
     let n = 0
@@ -272,7 +279,7 @@ describe('the request and its plan (the Mac contract)', () => {
   it('a second plan carries this browser\'s earlier round as history and its sends as updates', async () => {
     const h = await planned()
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sent', 'delivered', 'sent')
-    h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(20); await h.tick(1); await flush(20)
+    await h.send(h.card().rounds[0].key); await h.tick(1); await flush(20)
     h.answers['/api/work/chat/lens-rounds'] = { ...RECORDED, roundId: 'lr_1111111111111111' }
     h.type('Now update the docs'); h.tapEl('wk-cmp-plan'); await flush(30)
     const second = h.sent('/api/work/chat')[1]!.body
@@ -358,7 +365,7 @@ describe('the plan failing: nothing is sent, and the words come back', () => {
     const r = h.card().rounds[0]
     expect(r).toMatchObject({ state: 'ready', roundId: '' })
     expect(r.error).toContain('Not saved to the Mac yet')
-    h.tap('chat-send', { 'data-key': r.key }); await flush(30)
+    await h.send(r.key)
     const recs = h.sent('/api/work/chat/lens-rounds')
     expect(recs).toHaveLength(2)
     expect(recs[1]!.body.clientRoundId).toBe(recs[0]!.body.clientRoundId)
@@ -367,30 +374,111 @@ describe('the plan failing: nothing is sent, and the words come back', () => {
 })
 
 describe('Send: once, through COS Control, and truthful about where it is', () => {
-  it('sends with the two-step confirm, once, however many times it is tapped', async () => {
+  it('Send asks first, naming where it goes; a double tap never confirms; the confirm sends once', async () => {
     const h = await planned()
     const key = h.card().rounds[0].key
-    h.tap('chat-send', { 'data-key': key }); h.tap('chat-send', { 'data-key': key }); h.tap('chat-send', { 'data-key': key })
+    // A double tap on Send: the first opens the confirm, the second lands on its button inside the guard time.
+    h.tap('chat-send', { 'data-key': key, 'data-ids': 'a1,a2' }); h.tap('chat-confirm', { 'data-key': key })
+    await flush()
+    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(0)
+    expect(h.html()).toContain('Send to “Pricing page” and a new Codex session?')
+    expect(h.html()).toMatch(/data-wk="chat-confirm"[^>]*disabled>Send to 2 sessions</)
+    await h.tick(500)
+    expect(h.html()).toMatch(/data-wk="chat-confirm"[^>]*>Send to 2 sessions</)
+    expect(h.html()).not.toMatch(/data-wk="chat-confirm"[^>]*disabled/)
+    h.tap('chat-confirm', { 'data-key': key }); h.tap('chat-confirm', { 'data-key': key }); h.tap('chat-send', { 'data-key': key, 'data-ids': 'a1,a2' })
     expect(h.html()).toContain('Sending…')
     await flush(30)
     const sends = h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)
     expect(sends).toHaveLength(1)
-    expect(sends[0]!.body).toEqual({ v: 1, confirm: 'two-step', confirmedAt: expect.stringMatching(/^2026-11-06T23:00:00/) })
+    expect(sends[0]!.body).toEqual({ v: 1, confirm: 'two-step', confirmedAt: expect.stringMatching(/^2026-11-06T23:00:00/), assignmentIds: ['a1', 'a2'] })
     expect(h.card().rounds[0].state).toBe('sending')
-    h.tap('chat-send', { 'data-key': key }); await flush()
+    h.tap('chat-send', { 'data-key': key, 'data-ids': 'a1,a2' }); await h.tick(500); h.tap('chat-confirm', { 'data-key': key }); await flush()
     expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(1)
-    expect(h.html()).toContain('Waiting for COS Control on your Mac to pick it up. Nothing has been sent yet.')
+    expect(h.card().rounds).toHaveLength(1)
+  })
+  it('two sends of the same plan started at once send once', async () => {
+    const h = await planned()
+    const it = h.chat.item(ID), r = h.card().rounds[0]
+    const [a, b] = await Promise.all([h.chat.send(it, r, ['a1', 'a2']), h.chat.send(it, r, ['a1', 'a2'])])
+    await flush(30)
+    expect([a, b].filter(Boolean)).toHaveLength(1)
+    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(1)
+  })
+  it('Cancel closes the confirm and sends nothing', async () => {
+    const h = await planned()
+    const key = h.card().rounds[0].key
+    h.tap('chat-send', { 'data-key': key, 'data-ids': 'a1,a2' }); await h.tick(500)
+    h.tap('chat-cancel', { 'data-key': key }); await flush()
+    expect(h.html()).not.toContain('data-wk="chat-confirm"')
+    h.tap('chat-confirm', { 'data-key': key }); await flush()
+    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(0)
+  })
+  it('says plainly when COS Control has not picked the send up, and never says sent before the Mac sent it', async () => {
+    const h = await planned()
+    h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('send_requested', 'pending', 'pending')
+    await h.send(h.card().rounds[0].key); await h.tick(1)
+    let page = h.html()
+    expect(page).toContain('Waiting for COS Control on your Mac to send this. Nothing has been sent yet.')
+    expect(page).toContain('Waiting for COS Control · planned with')
+    expect(page).not.toContain('sent from this browser')
+    expect(page).not.toContain('Dispatched')
+    expect(page).not.toMatch(/wk-mono">Sent</)
+    await h.tick(61000)
+    page = h.html()
+    expect(page).toContain('It has not picked it up yet: the Mac may be asleep or COS Control closed.')
+    // COS Control picks it up: still not sent until it reports.
+    h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sending', 'pending', 'pending')
+    await h.tick(10000)
+    expect(h.html()).toContain('COS Control on your Mac is sending it.')
+    expect(h.html()).not.toContain('sent from this browser')
+    // Not picked up in 10 minutes: nothing was sent, and it can be sent again.
+    h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('expired', 'pending', 'pending')
+    await h.tick(10000)
+    expect(h.card().rounds[0].state).toBe('expired')
+    expect(h.html()).toContain('COS Control did not pick it up within 10 minutes. Nothing was sent. You can send it again.')
+    expect(h.html()).toContain('data-wk="chat-send"')
+  })
+  it('one assignment at a time: Send names it, Skip drops it, and the rest stays sendable', async () => {
+    const h = await planned()
+    const key = h.card().rounds[0].key
+    h.tap('chat-send', { 'data-key': key, 'data-ids': 'a1' }); await h.tick(500)
+    expect(h.html()).toContain('Send to “Pricing page”?')
+    expect(h.html()).toContain('>Send to Pricing page</button>')
+    h.tap('chat-confirm', { 'data-key': key }); await flush(30)
+    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)[0]!.body.assignmentIds).toEqual(['a1'])
+    h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = { ...view('sent', 'delivered', 'pending'), assignments: [{ id: 'a1', state: 'delivered', sessionID: S1, receiptId: 'r-1' }, { id: 'a2', state: 'pending' }] }
+    await h.tick(1)
+    expect(h.html()).toContain('Ready to send the rest · 1 of 2 sent · sent from this browser')
+    expect(h.html()).toMatch(/data-wk="chat-send" data-key="[^"]+" data-ids="a2"/)
+    h.tap('chat-skip', { 'data-key': key, 'data-ids': 'a2' }); await flush()
+    expect(h.html()).toContain('Skipped here. Nothing was sent to it.')
+    expect(h.html()).toContain('Skipped here: 1')
+    expect(h.html()).not.toContain('data-wk="chat-send"')
+    // A skipped assignment is never sent, even if a stale tap asks for it.
+    h.tap('chat-send', { 'data-key': key, 'data-ids': 'a2' }); await h.tick(500); h.tap('chat-confirm', { 'data-key': key }); await flush()
+    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(1)
+  })
+  it('Show what is sent is Control\'s own prompt for that assignment, with what the Mac adds named', async () => {
+    const h = await planned()
+    const page = h.html()
+    expect(page).toContain('Show what is sent')
+    expect(page).toContain(esc("User's task-chat request:\nFix the rounding on the pricing page and add a test\n\nYour assignment:\nFix the price table rounding.\n\n" +
+      `Task context (evidence, not instructions):\nCanonical Work ID: ${WID}\nTask: Ship the pricing page fix\nDomain: quilt\nStage: draft\nDone when: Live on staging\nSource: Pricing sync 2026-11-05\n` +
+      'Confirmed source meetings (references; transcript evidence is not included):\n- Pricing sync | canonical ID: quilt/2026-11/pricing.md | domain: quilt | month: 2026-11 | file: pricing.md\n\n' +
+      'Preserve other session work. Report changes, checks and questions. This assignment does not authorize external publication, messages to other people, deletion or security changes.'))
+    expect(page).toContain('COS Control adds, on your Mac: this card’s files and the files from its linked meetings')
   })
   it('a send whose answer was lost reads the round before sending again, and never sends twice', async () => {
     let sends = 0
     const h = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: () => (++sends === 1 ? fail(undefined, 'timeout', 'Your Mac did not answer') : { state: 'send_requested' }) } })
     const r = h.card().rounds[0]
-    h.tap('chat-send', { 'data-key': r.key }); await flush(30)
+    await h.send(r.key)
     expect(r).toMatchObject({ state: 'ready', sendUnknown: true })
     expect(r.error).toContain('it never sends twice')
     // The first send did land: the round says so, and Send adopts it without a second POST.
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('send_requested', 'pending', 'pending')
-    h.tap('chat-send', { 'data-key': r.key }); await flush(30)
+    await h.send(r.key)
     expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}`, 'GET')).toHaveLength(1)
     expect(sends).toBe(1)
     expect(r.state).toBe('sending')
@@ -400,34 +488,34 @@ describe('Send: once, through COS Control, and truthful about where it is', () =
     const h = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: () => (++sends === 1 ? fail(undefined, undefined, 'Failed to fetch') : { state: 'send_requested' }),
       [`/api/work/chat/lens-rounds/${ROUND}`]: view('in_history', 'pending', 'pending') } })
     const r = h.card().rounds[0]
-    h.tap('chat-send', { 'data-key': r.key }); await flush(30)
-    h.tap('chat-send', { 'data-key': r.key }); await flush(30)
+    await h.send(r.key)
+    await h.send(r.key)
     expect(sends).toBe(2)
     expect(r.state).toBe('sending')
   })
   it('send_in_progress and already_sent from the server read as on its way, never as a failure', async () => {
     for (const code of ['send_in_progress', 'already_sent']) {
       const h = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: fail(409, code) } })
-      h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(30)
+      await h.send(h.card().rounds[0].key)
       expect(h.card().rounds[0].state, code).toBe('sending')
     }
   })
   it('COS Control not connected (423): the plan is saved for the Mac and is never offered again here', async () => {
     const h = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: fail(423, 'control_not_connected') } })
     const r = h.card().rounds[0]
-    h.tap('chat-send', { 'data-key': r.key }); await flush(30)
+    await h.send(r.key)
     expect(r.state).toBe('held')
     expect(h.html()).toContain('COS Control was not connected, so send it from Work on the Mac. It cannot be sent again from here.')
     expect(h.html()).not.toContain('data-wk="chat-send"')
-    h.tap('chat-send', { 'data-key': r.key }); await flush()
+    h.tap('chat-send', { 'data-key': r.key, 'data-ids': 'a1,a2' }); await h.tick(500); h.tap('chat-confirm', { 'data-key': r.key }); await flush()
     expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(1)
   })
   it('a stale plan and a lost plan end plainly', async () => {
     const stale = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: fail(409, 'plan_stale') } })
-    stale.tap('chat-send', { 'data-key': stale.card().rounds[0].key }); await flush(30)
+    await stale.send(stale.card().rounds[0].key)
     expect(stale.card().rounds[0]).toMatchObject({ state: 'notDelivered', error: 'This card’s sessions changed since the plan. Nothing was sent. Plan again.' })
     const gone = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: fail(404, 'unknown_round') } })
-    gone.tap('chat-send', { 'data-key': gone.card().rounds[0].key }); await flush(30)
+    await gone.send(gone.card().rounds[0].key)
     expect(gone.card().rounds[0].error).toBe('Your Mac no longer has this plan. Nothing was sent. Plan again.')
   })
 })
@@ -436,7 +524,7 @@ describe('after Send: delivery, the reply and the updates come back to this card
   it('reads the round until it ends, then shows delivered (never completed), the reply, and Latest updates', async () => {
     const h = await planned()
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sending', 'pending', 'pending', { inHistory: true })
-    h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(30)
+    await h.send(h.card().rounds[0].key)
     await h.tick(1)
     expect(h.html()).toContain('COS Control on your Mac is sending it.')
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sent', 'delivered', 'sent')
@@ -468,7 +556,7 @@ describe('after Send: delivery, the reply and the updates come back to this card
   it('a reply that lands after the round ended still shows: the card is read again every 15 seconds, then stops', async () => {
     const h = await planned()
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sent', 'delivered', 'delivered')
-    h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(30); await h.tick(1)
+    await h.send(h.card().rounds[0].key); await h.tick(1)
     expect(h.card().rounds[0].state).toBe('sent')
     expect(h.html()).not.toContain('Session reported')
     h.answers[`/api/work-board/activity?domain=quilt&workIdentity=${ID}`] = { ...ACTIVITY, activities: [
@@ -488,7 +576,7 @@ describe('after Send: delivery, the reply and the updates come back to this card
     const h = await planned()
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = { ...view('partly_sent', 'delivered', 'refused'), assignments: [{ id: 'a1', state: 'delivered', sessionID: S1, receiptId: 'r-1' },
       { id: 'a2', state: 'refused', detail: 'No Codex model is available to start a session. Nothing was sent.' }] }
-    h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(30); await h.tick(1)
+    await h.send(h.card().rounds[0].key); await h.tick(1)
     expect(h.card().rounds[0].state).toBe('partly')
     expect(h.html()).toContain('No Codex model is available to start a session. Nothing was sent.')
     expect(h.html()).toContain('Not sent: 1')
@@ -497,7 +585,7 @@ describe('after Send: delivery, the reply and the updates come back to this card
   it('stops reading after 26 minutes without calling it stopped, and Check again reads it once more', async () => {
     const h = await planned()
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sending', 'pending', 'pending')
-    h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(30)
+    await h.send(h.card().rounds[0].key)
     await h.tick(27 * 60000)
     const r = h.card().rounds[0]
     expect(r.state).toBe('quiet')
@@ -510,14 +598,14 @@ describe('after Send: delivery, the reply and the updates come back to this card
     const h = await planned()
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sending', 'delivered', 'pending')
     h.answers[`/api/work/chat/lens-rounds/${ROUND}/stop`] = { stopRequestId: 'lst_0123456789abcdef', state: 'stop_requested' }
-    h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(30); await h.tick(1)
+    await h.send(h.card().rounds[0].key); await h.tick(1)
     h.tap('chat-stop', { 'data-key': h.card().rounds[0].key }); await flush(30)
     expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/stop`)[0]!.body).toEqual({ v: 1, assignmentIds: ['a2'] })
   })
   it('leaving Work stops every read; coming back picks the round up again', async () => {
     const h = await planned()
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sending', 'pending', 'pending')
-    h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(30)
+    await h.send(h.card().rounds[0].key)
     h.def.leave(); h.setRoute([], 'today')
     expect(h.timers.length).toBe(0)
     h.setRoute([ID]); h.def.load([ID]); await flush(); await h.tick(1)
@@ -573,7 +661,7 @@ describe('the draft and the keyboard: nothing typed is lost', () => {
   it('a sending round comes back after a reload and keeps reading the server', async () => {
     const h = await planned()
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sending', 'pending', 'pending')
-    h.tap('chat-send', { 'data-key': h.card().rounds[0].key }); await flush(30)
+    await h.send(h.card().rounds[0].key)
     h.chat.save(true)
     const again = load({ storage: h.storage, answers: { [`/api/work/chat/lens-rounds/${ROUND}`]: view('sent', 'delivered', 'delivered') } })
     again.def.load([ID]); await flush(); await again.tick(1)
@@ -591,5 +679,107 @@ describe('the draft and the keyboard: nothing typed is lost', () => {
     expect(saved['task:quilt:000000000000']).toBeUndefined()
     const broken = await opened({ storage: { 'cos.web.work.chat': '{not json' } })
     expect(broken.box()).not.toBeNull()
+  })
+})
+
+describe('the rest of the card, as on the Mac', () => {
+  const two = { ...ACTIVITY, activities: [
+    { id: 'r-new', workId: WID, status: 'delivered', provider: 'claude', sessionId: S1, sessionTitle: 'Pricing page', createdAt: '2026-11-06T22:59:00.000Z',
+      progress: { reported: 'done', evidence: 'Fixed and checked.', reportedBy: 'session' } },
+    { id: 'r-old', workId: WID, status: 'delivered', provider: 'codex', sessionId: S3, sessionTitle: 'Price test', createdAt: '2026-11-06T20:00:00.000Z',
+      progress: { reported: 'blocked', evidence: 'No fixtures for cents.', reportedBy: 'session' } }] }
+  const writable = (h: ReturnType<typeof load>) => { h.chat.S.caps = { version: 1, writable: true, editTasks: 1 } }
+  // A part repainted in place holds its own HTML; after a full repaint it is the slice of the pane's HTML.
+  const slice = (html: string, from: string, to: string) => { const i = html.indexOf(from); return i < 0 ? '' : html.slice(i + from.length, html.indexOf(to, i)) }
+  const side = (h: ReturnType<typeof load>) => h.dom.ids.get('wk-part-side')!.html || slice(h.dom.pane.html, 'id="wk-part-side">', '</aside>')
+  const main = (h: ReturnType<typeof load>) => h.dom.ids.get('wk-part-main')!.html || slice(h.dom.pane.html, 'id="wk-part-main" class="wk-part">', '<section class="wk-section wk-chat"')
+  it('Connections: Agent workspace, and View progress shows that session\'s handoff until Latest handoff', async () => {
+    const h = await opened({ answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: two } })
+    expect(side(h)).toContain('data-wk="show-workspace">Agent workspace</button>')
+    expect(side(h)).toContain('Inspecting Pricing page')
+    expect(side(h)).toMatch(/data-wk="inspect" data-id="a1b2c3d4e5f6" data-sid="codex:33333333[^"]*">View progress/)
+    h.tap('inspect', { 'data-id': ID, 'data-sid': S3 }); await flush()
+    expect(side(h)).toContain('Inspecting Price test')
+    expect(side(h)).toContain('Session reported: Blocked')
+    expect(side(h)).toContain('data-wk="inspect-clear"')
+    // A reply answers the card's newest handoff only, so it is not offered while another session is inspected.
+    expect(side(h)).not.toContain('data-wk="reply-open"')
+    h.tap('inspect-clear', { 'data-id': ID }); await flush()
+    expect(side(h)).toContain('Inspecting Pricing page')
+    expect(side(h)).not.toContain('data-wk="inspect-clear"')
+    expect(side(h)).toContain('data-wk="reply-open"')
+  })
+  it('Mark complete appears where the session reported done, confirms there, and moves the card to Complete', async () => {
+    const h = load({ answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: two, '/api/work-board/stage': { ok: true } } })
+    writable(h); h.render(); await flush(); h.render(); await flush()
+    expect(side(h)).toContain('data-wk="complete-here"')
+    // A session that reported blocked offers no Mark complete.
+    h.tap('inspect', { 'data-id': ID, 'data-sid': S3 }); await flush()
+    expect(side(h)).not.toContain('data-wk="complete-here"')
+    h.tap('inspect-clear', { 'data-id': ID }); await flush()
+    h.tap('complete-here', { 'data-id': ID }); await flush()
+    expect(side(h)).toContain('Mark “Ship the pricing page fix” complete?')
+    expect(main(h)).toContain('Copy task ID')
+    expect(main(h)).not.toContain('complete?')
+    h.tap('complete-yes', { 'data-id': ID }); await flush()
+    expect(h.sent('/api/work-board/stage')[0]!.body).toEqual({ domain: 'quilt', id: ID, expectedText: 'Ship the pricing page fix', expectedRevision: 'f'.repeat(64), workStage: 'complete' })
+    // Not offered on a server that cannot write Work, or before a session reported done.
+    const ro = await opened({ answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: two } })
+    expect(side(ro)).not.toContain('data-wk="complete-here"')
+  })
+  it('Link a meeting lists a month\'s saved meetings, links one with the card\'s revision, and says why when refused', async () => {
+    const MEETINGS = { meetings: [
+      { domain: 'quilt', month: '2026-11', filename: 'standup.md', title: 'Standup with Graham', recordId: 'quilt/2026-11/standup.md', date: '2026-11-06' },
+      { domain: 'quilt', month: '2026-11', filename: 'pricing.md', title: 'Pricing sync', recordId: 'quilt/2026-11/pricing.md', date: '2026-11-05' },
+      { domain: 'quilt', month: '2026-11', filename: 'broken.md', title: 'No identity' }] }
+    let linkAnswer: unknown = { ok: true }
+    const h = load({ answers: { '/api/meetings?limit=200&domain=all&month=2026-11': MEETINGS, '/api/work-board/meeting': () => linkAnswer } })
+    writable(h); h.render(); await flush(); h.render(); await flush()
+    h.tap('link-meeting', { 'data-id': ID }); await flush()
+    expect(h.calls.some(c => c.path === '/api/meetings?limit=200&domain=all&month=2026-11')).toBe(true)
+    expect(side(h)).toContain('Standup with Graham')
+    expect(side(h)).toMatch(/Pricing sync<\/strong>.*?Linked/)
+    expect(side(h)).not.toContain('No identity')
+    linkAnswer = fail(409, 'meeting_identity_changed')
+    h.tap('link-meeting-pick', { 'data-rid': 'quilt/2026-11/standup.md' }); await flush()
+    expect(side(h)).toContain('That meeting changed since the list loaded. Refresh the list and pick it again.')
+    linkAnswer = { ok: true }
+    h.tap('link-meeting-pick', { 'data-rid': 'quilt/2026-11/standup.md' }); await flush()
+    expect(h.sent('/api/work-board/meeting').at(-1)!.body).toEqual({ domain: 'quilt', id: ID, expectedText: 'Ship the pricing page fix', expectedRevision: 'f'.repeat(64),
+      meeting: { domain: 'quilt', month: '2026-11', filename: 'standup.md', recordId: 'quilt/2026-11/standup.md' } })
+    const ro = await opened()
+    expect(side(ro)).toMatch(/data-wk="link-meeting"[^>]*disabled title="This server can’t write Work links yet\."/)
+  })
+  async function sendBack(stage: string) {
+    let reads = 0
+    const h = load({ answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: two, '/api/work-board/stage': { ok: true },
+      '/api/work-board/handoff-requests': (b: any) => ({ request: { clientRequestId: b.clientRequestId, state: 'pending', createdAt: '2026-11-06T23:00:00.000Z' } }),
+      '/api/work-board/handoff-requests/*': () => ({ request: { state: ++reads === 1 ? 'claimed' : 'sent', receiptId: 'r-9', createdAt: '2026-11-06T23:00:00.000Z' } }) } })
+    h.chat.S.tasks = [{ ...TASK, workStage: stage }]; h.chat.S.loadedAt = Date.now() + 1
+    writable(h); h.render(); await flush(); h.render(); await flush()
+    h.tap('reply-open', { 'data-id': ID }); await flush()
+    h.dom.fire('input', { id: '', hasAttribute: (n: string) => n === 'data-wk-reply', getAttribute: () => ID, value: 'The cents column still rounds down.' })
+    h.tap('reply-send', { 'data-id': ID, 'data-intent': 'notDone' }); await flush()
+    return h
+  }
+  it('Not done yet sends a QA card back to Draft once COS Control sent it, as the Mac does, and leaves other stages', async () => {
+    const h = await sendBack('qa')
+    expect(h.sent('/api/work-board/handoff-requests')[0]!.body).toMatchObject({ intent: 'notDone', replyTo: 'r-new', note: 'The cents column still rounds down.' })
+    expect(h.sent('/api/work-board/stage')).toHaveLength(0)
+    await h.tick(3000); await flush()
+    expect(h.sent('/api/work-board/stage')).toHaveLength(0)   // claimed is not sent
+    await h.tick(3000); await flush()
+    expect(h.sent('/api/work-board/stage').map(c => c.body.workStage)).toEqual(['draft'])
+    await h.tick(9000); await flush()
+    expect(h.sent('/api/work-board/stage')).toHaveLength(1)
+    const planned = await sendBack('planned')
+    await planned.tick(9000); await flush()
+    expect(planned.sent('/api/work-board/stage')).toHaveLength(0)
+  })
+  it('a tap on a plan\'s Send while the Work chat box has focus still opens the confirm', async () => {
+    const h = await planned()
+    h.box()!.focus()
+    h.tap('chat-send', { 'data-key': h.card().rounds[0].key, 'data-ids': 'a1,a2' }); await flush()
+    expect(h.html()).toContain('Send to “Pricing page” and a new Codex session?')
   })
 })
