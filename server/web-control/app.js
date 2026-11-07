@@ -298,6 +298,23 @@
     route(true);
   });
 
+  // ── one session list for every pane ────────────────────
+  // /api/agent-sessions walks every session folder and runs a 2-3 s lock probe on the Mac (measured
+  // 11/06 in the browser: 5.1 s on Sessions, 2.1 s on Work). Today, Sessions, Work and the section
+  // stories all asked for it separately. Now there is one copy: a request younger than maxAgeMs is
+  // answered from it, a request already on the wire is shared, and panes can paint the last copy at
+  // once while a fresh one loads (sessionListCached).
+  var SL = { data: null, at: 0, inflight: null };
+  function sessionList(maxAgeMs) {
+    if (SL.data && Date.now() - SL.at < (maxAgeMs || 0)) return Promise.resolve(SL.data);
+    if (SL.inflight) return SL.inflight;
+    SL.inflight = api('/api/agent-sessions?limit=80&sort=updated').then(function (d) {
+      SL.data = d; SL.at = Date.now(); SL.inflight = null; return d;
+    }, function (err) { SL.inflight = null; throw err; });
+    return SL.inflight;
+  }
+  function sessionListCached() { return SL.data ? { data: SL.data, at: SL.at } : null; }
+
   // ── the session pet (Today) ─────────────────────────────
   // Same pet and the same pose rule as COS Control (PetSpritePose.resolve): waiting with nothing running
   // is "waiting", then one, two, three, four or more sessions in play are working, duel, trio, swarm, an open
@@ -340,9 +357,20 @@
       return new Promise(function (resolve, reject) { var im = new Image(); im.onload = function () { resolve(im); }; im.onerror = reject; im.src = url; });
     }));
   }
+  // Folded (one column) the pet sits above the story. Unfolded (two columns, the same 760px line as
+  // .today-cols in app.css) it moves to the top of the right-hand column, above Needs you (Miles 11/06).
+  var PET_WIDE = window.matchMedia ? window.matchMedia('(min-width: 760px)') : null;
+  function placePet() {
+    var box = $('today-pet'), side = document.querySelector('#pane-today .today-side'), rec = $('today-rec');
+    if (!box || !side || !rec) return;
+    if (PET_WIDE && PET_WIDE.matches) { if (side.firstElementChild !== box) side.insertBefore(box, side.firstElementChild); }
+    else if (rec.previousElementSibling !== box) rec.parentNode.insertBefore(box, rec);
+  }
+  if (PET_WIDE) { if (PET_WIDE.addEventListener) PET_WIDE.addEventListener('change', placePet); else if (PET_WIDE.addListener) PET_WIDE.addListener(placePet); }
   function renderPet(sessions) {
     var box = $('today-pet');
     if (!box) return;
+    placePet();
     var fresh = PET.manifest && Date.now() - PET.fetchedAt < 10 * 60000;
     (fresh ? Promise.resolve(PET.manifest) : api('/api/web-pet').then(function (m) { PET.manifest = m; PET.fetchedAt = Date.now(); return m; }))
       .catch(function () { return PET.manifest; })
@@ -392,7 +420,7 @@
     var now = new Date();
     $('today-date').textContent = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) + ', ' + clock(now);
     Promise.all([
-      api('/api/agent-sessions?limit=40&sort=updated').catch(function () { return null; }),
+      sessionList(15000).catch(function () { return null; }),
       api('/api/work-board/your-move').catch(function () { return null; }),
       api('/api/welcome-context').catch(function () { return null; }),
       api('/api/meetings/live-chunks').catch(function () { return null; })
@@ -731,9 +759,21 @@
     if (SX.view !== 'sessions') { renderUsageView(force === true); return Promise.resolve(); }
     loadSessionHooks();
     if (force !== true && SX.rows && Date.now() - SX.loadedAt < 15000) { renderSessionGroups(); return Promise.resolve(); }
-    SX.loading = true;
-    renderSessionGroups();
-    return api('/api/agent-sessions?limit=80&sort=updated').then(function (d) {
+    // Paint the shared copy at once (Today usually fetched it) and refresh in place behind it.
+    var cached = !SX.rows && sessionListCached();
+    if (cached && cached.data && Array.isArray(cached.data.sessions)) {
+      SX.rows = cached.data.sessions; SX.dropped = cached.data.dropped || null; SX.enabled = cached.data.enabled !== false;
+      SX.loadedAt = cached.at;
+      if (sxQueryActive()) SX.instant = sxInstant(SX.q);
+      var fresh = force !== true && Date.now() - cached.at < 15000;
+      SX.loading = !fresh;   // rows stay on screen; the header reads "Refreshing…" until the new list lands
+      renderSessionGroups();
+      if (fresh) return Promise.resolve();
+    } else {
+      SX.loading = true;
+      renderSessionGroups();
+    }
+    return sessionList(force === true ? 0 : 15000).then(function (d) {
       SX.rows = (d && d.sessions) || [];
       SX.dropped = (d && d.dropped) || null;
       SX.enabled = !(d && d.enabled === false);
@@ -3753,6 +3793,7 @@
     readStore: readStore, writeStore: writeStore, copyText: copyText, isPhone: isPhone,
     state: state, titles: TITLES, go: go, parseRoute: parseRoute, goBack: goBack,
     registerPane: function (name, def) { PANES[name] = def; },
+    sessionList: sessionList,
     onRoute: function (fn) { routeHooks.push(fn); },
     onShell: function (fn) { shellHooks.push(fn); },
     // The detail title after "COS Control > Section" (Control's breadcrumb). Pane modules set it

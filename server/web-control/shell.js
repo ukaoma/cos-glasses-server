@@ -88,7 +88,7 @@
 
     // Sessions and Today share the sessions list and Work's your move.
     Promise.all([
-      soft(storyApi('/api/agent-sessions?limit=80&sort=updated')),
+      soft(W.sessionList ? W.sessionList(30000) : storyApi('/api/agent-sessions?limit=80&sort=updated')),
       soft(storyApi('/api/work-board/your-move')),
       soft(storyApi('/api/meetings/live-chunks'))
     ]).then(function (res) {

@@ -1,3 +1,13 @@
+## 6.99.23 - Sessions and Work open at once; the pet moves right when unfolded (private)
+
+2026-11-06. Private build on 6.99.22. Server only; no Mac app change.
+
+Miles, 11/06 22:4x: "It's still fairly slow when loading sessions and other tabs", and move the pet to the right on the unfolded screen.
+
+- **One session list for every pane.** Timed in the browser on 6.99.22: `/api/agent-sessions` took 5.1 s on Sessions and 2.1 s on Work (it walks every session folder and runs a 2 to 3 s lock probe on the Mac); everything else on those tabs answered in under 0.25 s. Today, Sessions, Work and the section stories each fetched it separately. COS Control Web now keeps one copy: a pane opened within 15 s of the last fetch uses it, a fetch already on the wire is shared, and Sessions paints the last copy at once with "Refreshing…" while a fresh one loads. Measured after: Sessions showed its 68 rows 0.6 s after opening with no new request; Work made no session request (slowest call 0.2 s). The server route is unchanged.
+- **The pet on the unfolded Duo** sits at the top of the right-hand column, above Needs you. Folded, it stays above the story.
+- Default-on changes: Sessions and Work can show a session list up to 15 s old while a fresh one loads; the pet's position when unfolded. No API change.
+
 ## 6.99.22 - The pet comes to COS Control Web (private)
 
 2026-11-06. Private build on 6.99.21. Server only; no Mac app change.

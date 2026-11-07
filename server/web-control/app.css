@@ -207,6 +207,8 @@ select.field {
 .pet-btn:focus-visible { outline: 2px solid var(--sub); outline-offset: 4px; border-radius: 8px; }
 .pet-sprite { height: 140px; background-repeat: no-repeat; }
 .pet-caption { color: var(--sub); font-size: 14px; }
+/* Unfolded: top of the right-hand column, above Needs you (app.js placePet). */
+.today-side > .today-pet { margin: 0 0 14px; }
 .ask-bar {
   display: flex; align-items: center; gap: 10px; width: 100%;
   min-height: 52px; padding: 0 14px; margin-top: 16px;

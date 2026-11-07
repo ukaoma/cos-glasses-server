@@ -418,7 +418,7 @@
   // ── data ─────────────────────────────────────────────────
   function soft(p) { return p.then(function (d) { return d; }, function () { return null; }); }
   function loadSessions() {
-    return soft(api('/api/agent-sessions?limit=80&sort=updated')).then(function (d) {
+    return soft(W.sessionList ? W.sessionList(15000) : api('/api/agent-sessions?limit=80&sort=updated')).then(function (d) {
       if (!d || !Array.isArray(d.sessions)) return;
       var map = {};
       d.sessions.forEach(function (s) { if (s && s.session_id) map[String(s.session_id).toLowerCase()] = s; });
