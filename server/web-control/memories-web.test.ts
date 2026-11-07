@@ -400,6 +400,25 @@ describe('Control Web Memories: Knowledge', () => {
     expect(h.writes()[1]).toEqual({ op: 'graph.setup.sources', args: { action: 'remove', path: '/Users/x/Notes' } })
   })
 
+  it('Ask the graph sends one question, shows the answer with its sources, and looks up the people it names', async () => {
+    const answer = '## Miles Ukaoma\n**Niranjan Reddy** reports to Miles [S1].\n\nEvidence references:\n[S1] Weekly sync · 2026-10-20 · line 4 · resolved'
+    const h = load({ answers: {
+      'graph.ask': { answer, mode: 'hybrid', elapsed_s: 52, investigation: { status: 'ready', nodes: [], links: [] } },
+      'graph.search': (a: any) => ({ items: [{ id: a.q, type: 'person' }] }),
+      'graph.entity': (a: any) => ({ found: true, id: a.id, type: 'person', degree: 3, description: 'About ' + a.id, edges: [] }),
+    } })
+    await h.open(['k', 'graph'])
+    h.t.ask('Show me the relation between Miles Ukaoma and Niranjan Reddy'); await flush(20)
+    expect(h.calls.filter(c => c.op === 'graph.ask').map(c => c.args)).toEqual([{ q: 'Show me the relation between Miles Ukaoma and Niranjan Reddy' }])
+    const html: string = h.t.readerHtml({ pane: 'memories', args: ['k', 'graph'] })
+    expect(html).toContain('<strong>Niranjan Reddy</strong> reports to Miles')
+    expect(html).toContain('Weekly sync')
+    expect(html).toContain('Open Ask the graph to see these points in the graph.')
+    expect(h.calls.filter(c => c.op === 'graph.entity').map(c => c.args.id).sort()).toEqual(['Miles Ukaoma', 'Niranjan Reddy'])
+    expect(html).toContain('data-mm="copy-entity" data-id="Niranjan Reddy"')
+    expect(h.writes()).toEqual([])
+  })
+
   it('a model answer is escaped before any markdown is applied', () => {
     const h = load()
     const html: string = h.t.renderMarkdown('**Bold** <img src=x onerror=alert(1)>\n- item')
