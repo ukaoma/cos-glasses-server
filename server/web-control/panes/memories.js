@@ -146,7 +146,9 @@
   function loadStatus() {
     if (S.statusLoading) return;
     S.statusLoading = true;
-    call('status').then(function (d) { S.status = d; S.statusError = ''; S.decided = {}; chooseDefaultFocus(); },
+    // A decision made here stays out of the needs-you count until Refresh: the status read right after a write can still
+    // list it while the server's needs-you reader catches up.
+    call('status').then(function (d) { S.status = d; S.statusError = ''; chooseDefaultFocus(); },
       function (e) { S.statusError = e.message; })
       .then(function () { S.statusLoading = false; paint(); });
   }
@@ -395,7 +397,8 @@
     return ny && Array.isArray(ny.items) ? ny.items : [];
   }
   function needsRows() {
-    return needsItems().filter(function (it) { return !S.decided[it.lesson_id]; }).map(function (it) {
+    // A row decided here stays listed (its reader offers Restore); only the count leaves it out.
+    return needsItems().map(function (it) {
       var fromList = S.review.rows.filter(function (r) { return r.event_id === it.event_id; })[0] ||
         S.recent.rows.filter(function (r) { return r.event_id === it.event_id; })[0];
       var mem = /^mem_/.test(str(it.lesson_id));
@@ -407,7 +410,7 @@
   }
   function needsCount() {
     var s = S.status || {}, ny = (S.recent.info && S.recent.info.needs_you) || s.needs_you;
-    if (ny && Array.isArray(ny.items)) return needsRows().length;
+    if (ny && Array.isArray(ny.items)) return ny.items.filter(function (it) { return !S.decided[it.lesson_id]; }).length;
     if (ny && ny.count != null) return ny.limit != null ? Math.min(Number(ny.count), Number(ny.limit)) : Number(ny.count);
     if (typeof s.learningToReview === 'number') return s.learningToReview;
     return null;
@@ -522,7 +525,8 @@
     var rest = L.rows.filter(function (e) { return !seen[e.event_id]; });
     var other = rest.filter(function (e) { return !isPruneReady(e); }), ready = rest.filter(isPruneReady);
     var out = '';
-    if (needs.length) out += groupHead('Needs you now', fmt(needs.length)) + '<div class="cx-list">' + needs.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
+    var openNeeds = needsCount();
+    if (needs.length) out += groupHead('Needs you now', openNeeds ? fmt(openNeeds) + ' open' : 'All decided') + '<div class="cx-list">' + needs.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
     if (!L.loaded && L.loading) return out + groupHead('Proposed changes') + loadingBox('Reading the changes waiting for you');
     if (L.error && !L.rows.length) return out + groupHead('Proposed changes') + stateBox('The review list did not load.', L.error, 'refresh');
     if (!needs.length && !rest.length) return groupHead('To review') + stateBox('You are up to date.', 'No proposed changes are waiting for review.');
@@ -1748,7 +1752,7 @@
     if (W.parseRoute().args.length) W.go('memories'); else paint();
   }
   function refresh() {
-    S.loadedAt = Date.now(); S.detail = {}; S.passages = {};
+    S.loadedAt = Date.now(); S.detail = {}; S.passages = {}; S.decided = {};
     loadStatus(); loadRecent(false); loadReview(false); loadCues(); loadGraph();
     if (S.mem.loaded || S.view === 'memories') loadMem(false);
     if (S.applied.loaded || S.view === 'applied') loadApplied(false);
