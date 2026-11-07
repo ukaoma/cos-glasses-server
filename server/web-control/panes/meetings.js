@@ -2352,7 +2352,13 @@
   function prepCapsNow() { var cc = W.cosChat; return cc && typeof cc.prepCaps === 'function' ? cc.prepCaps() : null; }
   function livePrep(sid) { if (!S.lprep || S.lprep.sid !== sid) S.lprep = { sid: sid, asked: false, state: 'idle', drafts: [], busy: '', done: null, note: '', changed: '' }; return S.lprep; }
   function notePrepInstance(b) { var cc = W.cosChat; if (b && cc && typeof cc.notePrepInstance === 'function') cc.notePrepInstance(b.serverInstanceId); }
-  function prepBoundTo(d, sid) { return ((d && d.bindings) || []).some(function (b) { return b && b.sessionId === sid && !b.removedAt; }); }
+  function prepBoundTo(d, sid) { return ((d && d.bindings) || []).some(function (b) { return b && b.sessionId === sid && !b.removedAt && b.state !== 'applying'; }); }
+  // An interrupted bind owns frozen rows at its original revision. A later editable draft is not its retry.
+  function prepPendingBind(d, sid) {
+    return ((d && d.bindings) || []).filter(function (b) {
+      return b && b.sessionId === sid && !b.removedAt && b.state === 'applying' && Number.isSafeInteger(b.revision) && b.revision >= 0;
+    })[0] || null;
+  }
   function prepReadyFiles(d) { return ((d && d.files) || []).filter(function (x) { return x && x.status === 'ready'; }); }
   function prepHasNotes(d) { return !!String((d && d.steer) || '').trim(); }
   // Whether this live view may offer a prep at all: the area is reserved exactly when this is true.
@@ -2376,7 +2382,7 @@
         if (S.lprep !== p) return;
         notePrepInstance(r.body);
         p.drafts = r.status === 200 && Array.isArray(r.body.drafts) ? r.body.drafts.filter(function (d) {
-          return d && typeof d.id === 'string' && !prepBoundTo(d, f.sid) && (prepHasNotes(d) || prepReadyFiles(d).length > 0);
+          return d && typeof d.id === 'string' && !prepBoundTo(d, f.sid) && (prepPendingBind(d, f.sid) || prepHasNotes(d) || prepReadyFiles(d).length > 0);
         }).slice(0, 5) : [];
         p.state = r.status === 200 ? 'ready' : 'failed';
         paintLivePrep();
@@ -2388,7 +2394,7 @@
     return prepHasNotes(d) ? (n ? 'its notes and ' + files : 'its notes') : 'its ' + files;
   }
   function prepAddBtn(p, d) {
-    return '<button type="button" class="cx-btn quiet" data-mt="prep-bind" data-id="' + esc(d.id) + '"' + (p.busy ? ' disabled' : '') + '>' + (p.busy === d.id ? 'Adding…' : 'Add to this meeting') + '</button>';
+    return '<button type="button" class="cx-btn quiet" data-mt="prep-bind" data-id="' + esc(d.id) + '"' + (p.busy ? ' disabled' : '') + '>' + (p.busy === d.id ? 'Adding…' : prepPendingBind(d, p.sid) ? 'Retry add prep' : 'Add to this meeting') + '</button>';
   }
   function prepQuiet(text, warn) { return '<div class="mt-prepline" role="status"><span class="mt-prepline-text' + (warn ? ' mt-amber' : '') + '">' + esc(text) + '</span></div>'; }
   function livePrepHtml() {
@@ -2402,14 +2408,14 @@
     else if (!p.drafts.length) html = prepQuiet('No prep for this meeting. Make one from a Prep me card in COS chat.');
     else if (p.drafts.length === 1) {
       var d = p.drafts[0], title = cleanTitle(d.title) || 'this meeting';
-      var text = p.note || 'Prep for ' + title + (p.changed === d.id ? ' changed since it was offered: add ' : ' is ready: add ') + prepWhat(d) + ' to this meeting';
+      var text = p.note || (prepPendingBind(d, p.sid) ? 'Finish adding the saved prep for ' + title + '. Later edits are not included.' : 'Prep for ' + title + (p.changed === d.id ? ' changed since it was offered: add ' : ' is ready: add ') + prepWhat(d) + ' to this meeting');
       html = '<div class="mt-prepline"><span class="mt-prepline-text' + (p.note ? ' mt-amber' : '') + '" title="' + esc(text) + '">' + esc(text) + '</span>' + prepAddBtn(p, d) + '</div>';
     } else {
       // Several: the person picks. Each row says what it adds; the list scrolls inside the same box.
       html = '<div class="mt-prepline list"><ul class="mt-preplist" aria-label="' + esc(p.drafts.length + ' preps are ready for this meeting') + '">' +
         (p.note ? '<li class="mt-prepnote"><span class="mt-prepline-text mt-amber">' + esc(p.note) + '</span></li>' : '') +
         p.drafts.map(function (d) {
-          var label = (cleanTitle(d.title) || 'Prep') + (p.changed === d.id ? ' (changed)' : '') + ': ' + prepWhat(d).replace(/^its /, '');
+          var label = (cleanTitle(d.title) || 'Prep') + (prepPendingBind(d, p.sid) ? ': finish adding the saved prep. Later edits are not included.' : (p.changed === d.id ? ' (changed)' : '') + ': ' + prepWhat(d).replace(/^its /, ''));
           return '<li><span class="mt-prepline-text" title="' + esc(label) + '">' + esc(label) + '</span>' + prepAddBtn(p, d) + '</li>';
         }).join('') + '</ul></div>';
     }
@@ -2432,16 +2438,21 @@
   // v1.1: the bind names the revision the offer described ({revision, sessionId, serverInstanceId, surface}), so a newer
   // version nobody has seen is never attached. The server id is the newest one read: capabilities.prep or the most
   // recent Prep answer (W.cosChat.prepInstance), else Meeting Ask's, which is the same id.
-  function bindOnce(sid, d) {
+  function bindOnce(sid, d, retry) {
     var cc = W.cosChat, known = cc && typeof cc.prepInstance === 'function' ? cc.prepInstance() : '';
     return (known ? Promise.resolve(known) : loadConfig().then(function (conf) { return conf && conf.serverInstanceId; })).then(function (inst) {
       if (!inst) throw new Error(S.conf.notice || 'Meeting assistance is not available on this server.');
       // Amendment 19: the header is what authorizes the write; the body carries the same id.
-      return answer('/api/prep/drafts/' + encodeURIComponent(d.id) + '/bind', { method: 'POST', headers: { 'X-COS-Expected-Server-Instance': inst }, body: { revision: d.revision, sessionId: sid, serverInstanceId: inst, surface: 'web' } });
+      return answer('/api/prep/drafts/' + encodeURIComponent(d.id) + '/bind', { method: 'POST', headers: { 'X-COS-Expected-Server-Instance': inst }, body: { revision: retry ? retry.revision : d.revision, sessionId: sid, serverInstanceId: inst, surface: 'web' } });
     }).then(function (a) {
       var b = a.body || {}, code = typeof b.error === 'string' ? b.error : (b.error && b.error.code) || b.reason || '';
       if (a.status >= 200 && a.status < 300 || a.status === 409) notePrepInstance(b);
-      if (a.status >= 200 && a.status < 300) return b;
+      if (a.status >= 200 && a.status < 300) {
+        if (retry && !((b.draft && b.draft.bindings) || []).some(function (bound) {
+          return bound && bound.sessionId === sid && bound.revision === retry.revision && bound.state === 'applied' && !bound.removedAt;
+        })) throw new Error('The server has not confirmed adding this prep. Retry add prep.');
+        return b;
+      }
       // A different server than the one that offered it: the prep is read again (amendment 19) and the line says so.
       // Adding it takes another tap, against the server that answers now.
       if (a.status === 409 && code === 'server_instance_mismatch') {
@@ -2469,7 +2480,7 @@
     if (!f || !p || p.sid !== f.sid || p.busy || p.done || f.endedAt) return;
     var d = p.drafts.filter(function (x) { return x.id === id; })[0]; if (!d) return;
     p.busy = id; p.note = ''; paintLivePrep();
-    bindOnce(f.sid, d).then(function (b) {
+    bindOnce(f.sid, d, prepPendingBind(d, f.sid)).then(function (b) {
       p.busy = ''; p.done = (b && b.draft) || d;
       var a = A(f.sid);
       // The meeting's files as the bind answered them, when it answered Meeting Ask files; and read again either way.
