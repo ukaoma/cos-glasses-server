@@ -14,7 +14,7 @@ import express, { Router, type NextFunction, type Request, type Response } from 
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
 import { claimNextCursorTurn, cursorStopAcceptsFollowup, cursorStopIsFresh, parseCursorStopEnvelope } from '../lib/cursor-stop-followup.js'
 import { MAX_QUEUED_PER_THREAD, type QueuedThreadTurn } from '../lib/thread-turn-queue.js'
-import type { G2TurnProvenance } from '../lib/g2-turn-provenance.js'
+import { hasFooterShapedLine, type G2TurnProvenance } from '../lib/g2-turn-provenance.js'
 
 export interface CursorStopFollowupDeps {
   /** The per-install hook token, or null when none has been minted (then nothing is answered). */
@@ -63,6 +63,20 @@ export function createCursorStopFollowupRouter(deps: CursorStopFollowupDeps): Ro
       }
       claimed = claimNextCursorTurn(deps.readQueue('cursor', facts.conversationId, now), now)
       if (!claimed) return res.json({})
+      // G2 authority Tier 1 (Codex re-audit of 910eb90): the queue file is mutable, and this is the
+      // last hand-off before the words reach the composer. Words carrying a footer-shaped line are
+      // refused here exactly as at every other route that hands words to a session: the row is
+      // settled refused (never handed over, never retried) and its parked origin forgotten.
+      if (deps.provenance && hasFooterShapedLine(claimed.turn.prompt)) {
+        const refusedTurn = claimed.turn
+        const settled = claimed.queue.map(t => t.clientTurnId === refusedTurn.clientTurnId
+          ? { ...t, status: 'refused' as const, reason: 'footer_line_refused', settledAt: now }
+          : t)
+        deps.writeQueue('cursor', facts.conversationId, settled)
+        deps.provenance.forgetQueued('cursor', facts.conversationId, refusedTurn.clientTurnId)
+        console.warn(`[cursor-stop-followup] refused a queued turn with a footer-shaped line clientTurnId=${refusedTurn.clientTurnId}`)
+        return res.json({})
+      }
       // Written BEFORE the text leaves: the row must never read `waiting` after the
       // composer has been handed it, or a later Stop would hand it over again.
       deps.writeQueue('cursor', facts.conversationId, claimed.queue)
@@ -77,7 +91,7 @@ export function createCursorStopFollowupRouter(deps: CursorStopFollowupDeps): Ro
       // parked, and only while the queued text is still the text it vouched for.
       const turn = claimed.turn
       const verdict = deps.provenance.queuedVerdict('cursor', facts.conversationId, turn.clientTurnId, turn.prompt) ?? deps.provenance.originOf(req)
-      followup = deps.provenance.footed(turn.prompt, turn.clientTurnId, verdict)
+      followup = deps.provenance.footed(turn.prompt, turn.clientTurnId, verdict, 'cursor')
       // The queue's own hand-off of its parked turn: it continues the record parked under this id.
       deps.provenance.record({ turnId: turn.clientTurnId, prompt: turn.prompt, verdict, provider: 'cursor', sessionId: facts.conversationId, via: 'cursor-stop-followup', continues: true })
       // Settled (handed over): the parked origin is forgotten (QA 6.99.29).

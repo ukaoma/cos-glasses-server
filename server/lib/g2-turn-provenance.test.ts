@@ -80,8 +80,8 @@ describe('the footer', () => {
   it('is one trailing line, stripped back to the words it vouches for', () => {
     const { p } = provenance()
     const verdict = p.originOf(req(PHONE, G2_HEADERS))
-    const sent = p.footed('keep going on the parser\n\n', 'ct-g2-00000001', verdict)
-    expect(sent).toBe(`keep going on the parser\n${g2TurnFooter('ct-g2-00000001')}`)
+    const sent = p.footed('keep going on the parser\n\n', 'ct-g2-00000001', verdict, 'claude')
+    expect(sent).toBe(`keep going on the parser\n${g2TurnFooter('ct-g2-00000001', 'claude')}`)
     expect(sent.split('\n')).toHaveLength(2)
     const back = stripG2TurnFooter(sent)
     expect(back.turnId).toBe('ct-g2-00000001')
@@ -100,23 +100,33 @@ describe('the footer', () => {
     ] as const) {
       const verdict = p.originOf(req(remote, headers))
       expect(footerApplies(verdict), JSON.stringify(headers)).toBe(applies)
-      expect(p.footed('x y', 'ct-g2-00000002', verdict) === 'x y', JSON.stringify(headers)).toBe(!applies)
+      expect(p.footed('x y', 'ct-g2-00000002', verdict, 'claude') === 'x y', JSON.stringify(headers)).toBe(!applies)
     }
   })
   it('never foots a web turn, even one whose verdict claims it is vouched', () => {
     const web: OriginVerdict = { origin: { remote: PHONE, loopback: false, ownAddress: false, clientInstance: null, client: 'web', tokenPresented: false, webSession: true }, verifiedOrigin: true }
     expect(footerApplies(web)).toBe(false)
-    expect(provenance().p.footed('x y', 'ct-web-00000001', web)).toBe('x y')
+    expect(provenance().p.footed('x y', 'ct-web-00000001', web, 'claude')).toBe('x y')
   })
   it('never foots a local turn, whatever it says it is', () => {
     const { p } = provenance()
     const verdict = p.originOf(req('127.0.0.1', G2_HEADERS))
     expect(verdict.origin.client).toBe('local')
-    expect(p.footed('x y', 'ct-g2-00000003', verdict)).toBe('x y')
+    expect(p.footed('x y', 'ct-g2-00000003', verdict, 'claude')).toBe('x y')
+  })
+  it('names the harness it is delivered into (Codex re-audit of 910eb90); an unknown one keeps the placeholder', () => {
+    const { p } = provenance()
+    const verdict = p.originOf(req(PHONE, G2_HEADERS))
+    for (const provider of ['claude', 'codex', 'cursor'] as const) {
+      const sent = p.footed('x y', 'ct-g2-00000009', verdict, provider)
+      expect(sent.endsWith(`verify_g2_turn.py ct-g2-00000009 --session <your session id> --provider ${provider}]`), provider).toBe(true)
+      expect(stripG2TurnFooter(sent)).toMatchObject({ text: 'x y', turnId: 'ct-g2-00000009' })
+    }
+    expect(p.footed('x y', 'ct-g2-00000009', verdict, 'gemini').endsWith('--provider <claude|codex|cursor>]')).toBe(true)
   })
   it('is not added under an id the verifier could not parse', () => {
     const { p } = provenance()
-    expect(p.footed('x', 'bad id', p.originOf(req(PHONE, G2_HEADERS)))).toBe('x')
+    expect(p.footed('x', 'bad id', p.originOf(req(PHONE, G2_HEADERS)), 'claude')).toBe('x')
   })
 })
 
@@ -343,6 +353,43 @@ describe('a queued turn carries its origin across the loopback hop', () => {
   })
 })
 
+describe('approval age runs from when the origin was judged, not from delivery (Codex re-audit of 910eb90, P2)', () => {
+  it('a glasses turn judged 20 minutes ago and drained now reads 20 minutes old, and says when it was judged', async () => {
+    const { p, advance } = provenance()
+    const turn = { provider: 'claude', threadId: 'sid-1', clientTurnId: 'ct-age-00000001', prompt: 'approve the deploy' }
+    p.noteQueued(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt, p.originOf(req(PHONE, G2_HEADERS)))
+    p.record({ turnId: turn.clientTurnId, prompt: turn.prompt, verdict: p.queuedVerdict(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt)!, provider: 'claude', sessionId: 'sid-1', via: 'queue' })
+    advance(20 * 60_000)
+    const carried = p.takeCarry(p.issueCarry(turn), turn.clientTurnId, turn.prompt)
+    expect(carried?.verdict).toMatchObject({ verifiedOrigin: true, judgedAt: NOW })
+    const delivered = p.record({ turnId: turn.clientTurnId, prompt: turn.prompt, verdict: carried!.verdict!, provider: 'claude', sessionId: 'sid-1', via: 'drain-live', continues: true })
+    expect(delivered).toMatchObject({ createdAt: new Date(NOW + 20 * 60_000).toISOString(), originJudgedAt: NOW })
+    const answer = await describeG2Turn(p, turn.clientTurnId, NOW + 20 * 60_000)
+    expect(answer).toMatchObject({ via: 'drain-live', verifiedOrigin: true, ageMs: 20 * 60_000, originJudgedAt: new Date(NOW).toISOString(), createdAt: new Date(NOW + 20 * 60_000).toISOString() })
+    // The verifier's own check: over 15 minutes is refused (verify_g2_turn.py reads ageMs).
+    expect((answer!.ageMs as number) > 15 * 60_000).toBe(true)
+  })
+  it('the 24 h vouch limit runs from the origin too', async () => {
+    const { p } = provenance()
+    const verdict: OriginVerdict = { ...p.originOf(req(PHONE, G2_HEADERS)), judgedAt: NOW - 25 * 3_600_000 }
+    p.record({ turnId: 'ct-age-00000002', prompt: 'x', verdict, provider: 'claude', sessionId: 'sid-1', via: 'drain-live' })
+    expect(await describeG2Turn(p, 'ct-age-00000002', NOW)).toMatchObject({ verifiedOrigin: false, reason: 'record_too_old', ageMs: 25 * 3_600_000 })
+  })
+  it('an origin stamped after its delivery never makes the approval read younger than the delivery', async () => {
+    const { p } = provenance()
+    const verdict: OriginVerdict = { ...p.originOf(req(PHONE, G2_HEADERS)), judgedAt: NOW + 60_000 }
+    p.record({ turnId: 'ct-age-00000003', prompt: 'x', verdict, provider: 'claude', sessionId: 'sid-1', via: 'live' })
+    expect(await describeG2Turn(p, 'ct-age-00000003', NOW + 10_000)).toMatchObject({ ageMs: 10_000, originJudgedAt: new Date(NOW).toISOString() })
+  })
+  it('an older record with no originJudgedAt falls back to createdAt', async () => {
+    const dir = tmp()
+    const file = join(dir, 'g2-turn-ledger.jsonl')
+    appendFileSync(file, `${JSON.stringify({ turnId: 'ct-age-00000004', createdAt: new Date(NOW).toISOString(), textSha256: 'x', origin: { client: 'glasses' }, verifiedOrigin: true, target: { provider: 'claude', sessionId: 's' }, via: 'live' })}\n`)
+    const p = new G2TurnProvenance({ ledger: new G2TurnLedger(file), pairedInstance: () => null, ownAddresses: () => VIEW, now: () => NOW })
+    expect(await describeG2Turn(p, 'ct-age-00000004', NOW + 7_000)).toMatchObject({ ageMs: 7_000, originJudgedAt: new Date(NOW).toISOString() })
+  })
+})
+
 describe('turn ids are not reusable (QA 6.99.29)', () => {
   const g2 = () => { const { p, advance } = provenance(); return { p, advance, verdict: p.originOf(req(PHONE, G2_HEADERS)), local: p.originOf(req('127.0.0.1')) } }
   const base = { turnId: 'ct-reuse-0000001', prompt: 'approve it', provider: 'claude', sessionId: 'sid-1', via: 'live' }
@@ -393,22 +440,28 @@ describe('turn ids are not reusable (QA 6.99.29)', () => {
   })
 })
 
-describe('Send again inherits the original row origin (QA 6.99.29 5a)', () => {
-  it('fresh: the original origin; lapsed: unvouched; unknown or another thread: unvouched', () => {
+describe('Send again is judged by the request that sends it again (Codex re-audit of 910eb90, P1)', () => {
+  it('a verified glasses or phone resender is vouched fresh, judged now; nothing comes from the original', () => {
     const { p, advance } = provenance()
-    const verdict = p.originOf(req(PHONE, G2_HEADERS))
-    p.record({ turnId: 'ct-orig-0000001', prompt: 'x', verdict, provider: 'claude', sessionId: 'sid-1', via: 'queue' })
+    p.record({ turnId: 'ct-orig-0000001', prompt: 'x', verdict: p.originOf(req(PHONE, G2_HEADERS)), provider: 'claude', sessionId: 'sid-1', via: 'queue' })
     advance(60_000)
-    expect(p.inheritedVerdict('ct-orig-0000001', 'claude', 'sid-1')).toMatchObject({ verifiedOrigin: true, judgedAt: NOW, origin: { client: 'glasses' } })
-    expect(p.inheritedVerdict('ct-orig-0000001', 'claude', 'sid-2')).toMatchObject({ verifiedOrigin: false, reason: 'resend_origin_unknown' })
-    expect(p.inheritedVerdict('ct-none-0000001', 'claude', 'sid-1')).toMatchObject({ verifiedOrigin: false, reason: 'resend_origin_unknown', origin: { client: 'unknown' } })
-    advance(QUEUED_ORIGIN_TTL_MS)
-    expect(p.inheritedVerdict('ct-orig-0000001', 'claude', 'sid-1')).toMatchObject({ verifiedOrigin: false, reason: 'resend_origin_lapsed', origin: { client: 'glasses' } })
+    expect(p.resendVerdict(req(PHONE, G2_HEADERS))).toMatchObject({ verifiedOrigin: true, reason: null, judgedAt: NOW + 60_000, origin: { client: 'glasses' } })
+    expect(p.resendVerdict(req(PHONE, { ...G2_HEADERS, 'x-cos-client': 'phone' }))).toMatchObject({ verifiedOrigin: true, origin: { client: 'phone' } })
   })
-  it('an agent-written original stays unvouched, whoever presses Send again', () => {
+  it('anyone else is unvouched with resend_not_reverified, even on a fresh vouched glasses row', () => {
     const { p } = provenance()
-    p.record({ turnId: 'ct-orig-0000002', prompt: 'x', verdict: p.originOf(req('127.0.0.1')), provider: 'claude', sessionId: 'sid-1', via: 'queue' })
-    expect(p.inheritedVerdict('ct-orig-0000002', 'claude', 'sid-1')).toMatchObject({ verifiedOrigin: false, origin: { client: 'local' } })
+    p.record({ turnId: 'ct-orig-0000002', prompt: 'x', verdict: p.originOf(req(PHONE, G2_HEADERS)), provider: 'claude', sessionId: 'sid-1', via: 'queue' })
+    for (const [remote, headers, client] of [
+      ['127.0.0.1', { 'x-cos-token': 't' }, 'local'],
+      ['127.0.0.1', G2_HEADERS, 'local'],
+      ['100.90.1.2', G2_HEADERS, 'glasses'],
+      [PHONE, { ...G2_HEADERS, 'x-cos-client-instance': 'abcdefgh-zzzz' }, 'glasses'],
+      [undefined, G2_HEADERS, 'unknown'],
+    ] as const) {
+      const v = p.resendVerdict(req(remote, headers))
+      expect(v, `${remote} ${JSON.stringify(headers)}`).toMatchObject({ verifiedOrigin: false, reason: 'resend_not_reverified', origin: { client } })
+      expect(footerApplies(v)).toBe(false)
+    }
   })
 })
 

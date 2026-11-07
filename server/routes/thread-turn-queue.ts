@@ -85,7 +85,7 @@ export interface ThreadTurnQueueDeps {
   cursorCliChat?: (threadId: string) => boolean
   /**
    * G2 authority Tier 1, with web origin (6.99.29), optional: the origin of each parked turn is
-   * captured here (and again on an edit; a Send again inherits the original row's) and carried to
+   * captured here (and again on an edit or a Send again, each judged by its own request) and carried to
    * its drain, forgotten on any settle; a steer and a native Codex queue edit are ledgered and
    * footed like a turn. Absent: the 6.99.28 behaviour.
    */
@@ -489,7 +489,7 @@ async function steerTurn(
   const { provider, threadId, clientTurnId, prompt } = turn
   // G2 authority Tier 1 (6.99.29): a steer goes straight into the running session through its peer
   // inbox, so it is a delivery of its own and carries the footer like a turn.
-  const steerPrompt = deps.provenance && verdict ? deps.provenance.footed(prompt, clientTurnId, verdict) : prompt
+  const steerPrompt = deps.provenance && verdict ? deps.provenance.footed(prompt, clientTurnId, verdict, provider) : prompt
   const ledgerSteer = (via: string): void => {
     if (deps.provenance && verdict) deps.provenance.record({ turnId: clientTurnId, prompt, verdict, provider, sessionId: threadId, via })
   }
@@ -758,6 +758,8 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       return res.status(400).json({ error: 'footer_line_refused', reasonCopy: FOOTER_LINE_REFUSED_COPY })
     }
     if (deps.provenance && deps.provenance.holds(newId)) return res.status(409).json({ error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })
+    // Judged now, from THIS request (Codex re-audit of 910eb90, P1): never inherited from the row.
+    const resendVerdict = deps.provenance ? deps.provenance.resendVerdict(req) : null
     // "May not have been sent": a second copy is possible, so the person has to have been told.
     if (original.deliveryState === 'unknown' && body.acknowledge !== 'may_duplicate') {
       return res.status(409).json({ error: 'acknowledge_required' })
@@ -775,15 +777,17 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
     original.resentAs = newId
     writeQueue(provider, threadId, admitted.queue)
-    // G2 authority Tier 1 (QA 6.99.29 5a): the copy inherits the ORIGINAL row's origin, never the
-    // resender's: an agent tapping Send again on Miles's row cannot make it newer than it was, and a
-    // web tap on an agent's row cannot make it Miles's. Lapsed (QUEUED_ORIGIN_TTL_MS from when the
-    // original was judged) or unknown, it is unvouched. A web origin is unvouched anyway.
-    if (deps.provenance) {
+    // G2 authority Tier 1 (Codex re-audit of 910eb90, P1): the row's words and files are mutable, so
+    // the copy NEVER inherits the original row's authority (that let a local caller change a refused
+    // G2 row and mint a new vouched turn from it). It carries the origin of the request that sent it
+    // again: a verified glasses or phone client is vouched on its own socket and instance, like any
+    // new turn; anyone else is recorded unvouched ('resend_not_reverified'), with no footer. The
+    // original id is kept only as the record's `resendOf` annotation.
+    if (deps.provenance && resendVerdict) {
       // After the write: the read-modify-write above stays one synchronous step. Sealed to the copy's files.
-      const sealed = await sealFiles(copy.attachmentIds, deps.provenance.inheritedVerdict(original.clientTurnId, provider, threadId), deps.turnAttachmentStore)
+      const sealed = await sealFiles(copy.attachmentIds, resendVerdict, deps.turnAttachmentStore)
       deps.provenance.noteQueued(provider, threadId, newId, copy.prompt, sealed.verdict, sealed.attachments)
-      deps.provenance.record({ turnId: newId, prompt: copy.prompt, verdict: sealed.verdict, provider, sessionId: threadId, via: 'queue-resend' })
+      deps.provenance.record({ turnId: newId, prompt: copy.prompt, verdict: sealed.verdict, provider, sessionId: threadId, via: 'queue-resend', resendOf: original.clientTurnId })
     }
     console.log(`[thread-turn-queue] resend provider=${provider} from=${original.clientTurnId} as=${newId} unknown=${original.deliveryState === 'unknown'}`)
     return res.status(200).json(publicRow(copy, queuePosition(admitted.queue, newId)))
@@ -831,7 +835,7 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
         if (deps.provenance) {
           const verdict = deps.provenance.originOf(req)
           const editId = `cnedit-${randomBytes(12).toString('hex')}`
-          sent = deps.provenance.footed(prompt, editId, verdict)
+          sent = deps.provenance.footed(prompt, editId, verdict, provider)
           deps.provenance.record({ turnId: editId, prompt, verdict, provider, sessionId: threadId, via: 'codex-native-edit' })
         }
         await (deps.nativeQueue ?? nativeQueueControl).update(threadId, id.slice(13), sent)

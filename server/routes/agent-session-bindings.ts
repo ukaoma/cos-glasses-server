@@ -2743,7 +2743,7 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         // binding exists, a forked turn is recorded UNVERIFIED for the child: no footer, ever.
         const forkVerdict = unvouched(deps.provenance.originOf(req), 'fork_destination_unbound')
         const forkTurnId = typeof clientForkId === 'string' ? clientForkId : `fork-${randomBytes(12).toString('hex')}`
-        forkPrompt = deps.provenance.footed(prompt, forkTurnId, forkVerdict)
+        forkPrompt = deps.provenance.footed(prompt, forkTurnId, forkVerdict, providerParam)
         deps.provenance.record({ turnId: forkTurnId, prompt, verdict: forkVerdict, provider: providerParam, sessionId: threadIdParam, via: 'fork', fork: true })
       }
 
@@ -3126,7 +3126,6 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
           return refuseTurn('invalid_request', { retryable: false, error: 'queued_turn_tampered', reasonCopy: QUEUED_TURN_TAMPERED_COPY })
         }
       }
-      const deliveredPrompt = provenance && turnVerdict ? provenance.footed(prompt, clientTurnId, turnVerdict) : prompt
       /** Ledgered once the text did, or may have, reached a session. Hash of the text WITHOUT the footer. */
       const ledgerTurn = (via: string, provider: string, sessionId: string): void => {
         if (provenance && turnVerdict && clientTurnId !== null) provenance.record({ turnId: clientTurnId, prompt, verdict: turnVerdict, provider, sessionId, via: turnCarried ? `drain-${via}` : via, continues: turnCarried })
@@ -3205,6 +3204,9 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       if (provenance && turnVerdict && provenance.reusesTurnId(clientTurnId, { prompt, verdict: turnVerdict, provider: binding.provider, sessionId: binding.nativeThreadId }, { continues: turnCarried })) {
         return refuseTurn('invalid_request', { retryable: false, error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })
       }
+      // Footed HERE, once the binding names the harness the text goes into: the footer's verify
+      // command carries that provider (Codex re-audit of 910eb90). Every delivery below uses this text.
+      const deliveredPrompt = provenance && turnVerdict ? provenance.footed(prompt, clientTurnId, turnVerdict, binding.provider) : prompt
 
       const key = binding.targetKey
       const fenced = guard.fencedReason(key)

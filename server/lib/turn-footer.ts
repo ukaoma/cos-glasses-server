@@ -3,7 +3,13 @@
 // (session-stream-events.ts), the transcript readers and the queue evidence can take the line off
 // without importing the ledger. lib/g2-turn-provenance.ts re-exports all of it.
 //
-//   [COS-G2 turn <id> · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py <id> --session <your session id> --provider <claude|codex|cursor>]
+//   [COS-G2 turn <id> · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py <id> --session <your session id> --provider claude]
+//
+// The provider is filled in (claude, codex or cursor): the server footing the turn knows which
+// harness it delivers into (Codex re-audit of 910eb90). The session stays a placeholder ON PURPOSE:
+// the receiving agent states its OWN session id and the verifier compares it with the record, so a
+// message that landed in the wrong session does not verify there. An unknown provider keeps the
+// `<claude|codex|cursor>` placeholder rather than naming a wrong one.
 //
 // The COS-WEB tag is reserved for a future web origin backed by a device key the API token cannot
 // produce. In 6.99.29 no turn is footed COS-WEB: a web turn is recorded, never vouched. The readers
@@ -20,8 +26,16 @@ export function turnFooterTag(client: string): 'COS-G2' | 'COS-WEB' {
   return client === 'web' ? 'COS-WEB' : 'COS-G2'
 }
 
-export function turnFooter(turnId: string, client: string = 'glasses'): string {
-  return `[${turnFooterTag(client)} turn ${turnId} · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ${turnId} --session <your session id> --provider <claude|codex|cursor>]`
+/** The harnesses the verifier accepts for --provider. */
+export const FOOTER_PROVIDERS: ReadonlySet<string> = new Set(['claude', 'codex', 'cursor'])
+
+/** The footer's --provider value: the receiving harness when it is one the verifier knows, else the placeholder. */
+export function footerProvider(provider: string | null | undefined): string {
+  return typeof provider === 'string' && FOOTER_PROVIDERS.has(provider) ? provider : '<claude|codex|cursor>'
+}
+
+export function turnFooter(turnId: string, client: string = 'glasses', provider?: string | null): string {
+  return `[${turnFooterTag(client)} turn ${turnId} · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ${turnId} --session <your session id> --provider ${footerProvider(provider)}]`
 }
 
 /**
@@ -43,8 +57,8 @@ export const FOOTER_LINE_REFUSED_COPY = 'This message has a line that looks like
 export const TURN_ID_IN_USE_COPY = 'That message id was already used for a different message. Send it again as a new message.'
 
 /** The 6.66 name, kept: a glasses or phone footer. */
-export function g2TurnFooter(turnId: string): string {
-  return turnFooter(turnId, 'glasses')
+export function g2TurnFooter(turnId: string, provider?: string | null): string {
+  return turnFooter(turnId, 'glasses', provider)
 }
 
 /** The footer line as it ends a delivered prompt (either tag). Used by tests and mirrored by the verifier. */

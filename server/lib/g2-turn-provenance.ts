@@ -90,11 +90,14 @@ export const QUEUED_ORIGIN_MAX = 512
 /** A queued origin lapses this long after it was judged: a turn that waits longer drains unvouched. */
 export const QUEUED_ORIGIN_TTL_MS = 30 * 60_000
 /**
- * The endpoint vouches for a sealed record only this long after it was written. The verifier's own
+ * The endpoint vouches for a sealed record only this long after its origin was judged (never from
+ * a later delivery). The verifier's own
  * window is 15 minutes; this bounds how long any record can ever vouch, so the verifier's
  * consumed-turn store (kept 7 days) always outlives it.
  */
 export const G2_TURN_VOUCH_MAX_MS = 24 * 3_600_000
+/** Why a Send again copy is not vouched: the request that sent it again was not itself a verified origin. */
+export const RESEND_NOT_REVERIFIED_REASON = 'resend_not_reverified'
 /** Why a web turn is never vouched in 6.99.29 (see the header). */
 export const WEB_UNVOUCHED_REASON = 'web_cookie_derivable_from_token'
 const OWN_ADDRESS_CACHE_MS = 30_000
@@ -129,7 +132,7 @@ export interface OriginVerdict {
   verifiedOrigin: boolean
   /** Why it is not vouched (null or absent when it is). */
   reason?: string | null
-  /** When this origin was judged (ms). A queued or inherited origin lapses from here, never later. */
+  /** When this origin was judged (ms). A queued origin lapses from here, never later. */
   judgedAt?: number
 }
 
@@ -147,6 +150,11 @@ export interface G2TurnRecord {
   originJudgedAt?: number
   target: { provider: string; sessionId: string; fork?: true }
   via: string
+  /**
+   * Send again: the row this copy was made from. AN ANNOTATION ONLY, never authority (Codex
+   * re-audit of 910eb90): the copy is judged by the request that sent it again, nothing is inherited.
+   */
+  resendOf?: string
 }
 
 /** The shape of an Express request this module reads. Nothing else. */
@@ -448,13 +456,17 @@ export class G2TurnProvenance {
     }
   }
 
-  /** The text to deliver: with the footer for a vouched glasses or phone turn, otherwise unchanged. */
-  footed(prompt: string, turnId: string, verdict: OriginVerdict): string {
+  /**
+   * The text to deliver: with the footer for a vouched glasses or phone turn, otherwise unchanged.
+   * `provider` is the harness the text is delivered into (claude, codex or cursor), named in the
+   * footer's verify command; every caller knows it at this point (Codex re-audit of 910eb90).
+   */
+  footed(prompt: string, turnId: string, verdict: OriginVerdict, provider: string): string {
     if (!footerApplies(verdict) || !G2_TURN_ID_RE.test(turnId)) return prompt
-    return `${prompt.replace(/[\t\n\v\f\r ]+$/, '')}\n${turnFooter(turnId, verdict.origin.client)}`
+    return `${prompt.replace(/[\t\n\v\f\r ]+$/, '')}\n${turnFooter(turnId, verdict.origin.client, provider)}`
   }
 
-  private build(input: { turnId: string; prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; via: string; fork?: boolean }): G2TurnRecord {
+  private build(input: { turnId: string; prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; via: string; fork?: boolean; resendOf?: string }): G2TurnRecord {
     const originKind = originKindOf(input.verdict.origin.client)
     // A web turn is never vouched, whatever verdict reached here (header).
     const verifiedOrigin = input.verdict.verifiedOrigin === true && originKind !== 'web'
@@ -470,6 +482,7 @@ export class G2TurnProvenance {
       originJudgedAt: typeof input.verdict.judgedAt === 'number' ? input.verdict.judgedAt : this.now(),
       target: { provider: input.provider, sessionId: input.sessionId, ...(input.fork ? { fork: true as const } : {}) },
       via: input.via,
+      ...(typeof input.resendOf === 'string' && input.resendOf.length > 0 ? { resendOf: input.resendOf } : {}),
     }
   }
 
@@ -511,7 +524,7 @@ export class G2TurnProvenance {
    * replaced: an identical retry keeps the first record, a different turn is refused (null, nothing
    * written).
    */
-  record(input: { turnId: string; prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; via: string; fork?: boolean; continues?: boolean }): G2TurnRecord | null {
+  record(input: { turnId: string; prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; via: string; fork?: boolean; continues?: boolean; resendOf?: string }): G2TurnRecord | null {
     try {
       const record = this.build(input)
       const held = this.deps.ledger.held(input.turnId)
@@ -538,7 +551,7 @@ export class G2TurnProvenance {
   /**
    * A turn parked in the queue (or edited there): remember who said these words. The origin lapses
    * QUEUED_ORIGIN_TTL_MS after the verdict was judged (`verdict.judgedAt`), never after this call:
-   * an inherited origin (Send again) cannot be made to last longer by noting it again.
+   * an origin cannot be made to last longer by noting it again.
    */
   noteQueued(provider: string, threadId: string, clientTurnId: string, prompt: string, verdict: OriginVerdict, attachments = ''): void {
     const at = this.now()
@@ -571,25 +584,18 @@ export class G2TurnProvenance {
   }
 
   /**
-   * Send again (QA 6.99.29 5a): the copy inherits the ORIGINAL row's origin, never the resender's.
-   * Read from the record this process holds for the original id on the same thread; lapsed (past
-   * QUEUED_ORIGIN_TTL_MS from when it was judged), unknown or unsealed, it is unvouched.
+   * Send again (Codex re-audit of 910eb90, P1). The row's words are MUTABLE (any local process can
+   * rewrite the queue file), so a copy never inherits the original row's authority: inheriting it by
+   * id once let a local caller change a refused G2 row's words or files and mint a new vouched turn
+   * from them. The copy is judged by THE REQUEST THAT SENT IT AGAIN, fresh: a G2 or phone client
+   * resending is vouched by its own socket and ring-owner instance, exactly like a new turn, and
+   * anything else (an agent's token over loopback, a web cookie, an unknown caller) is recorded
+   * unvouched with RESEND_NOT_REVERIFIED_REASON, so it gets no footer. The original id survives only
+   * as the record's `resendOf` annotation, which vouches for nothing.
    */
-  inheritedVerdict(originalId: string, provider: string, threadId: string): OriginVerdict {
-    let held: G2TurnRecord | null = null
-    try { held = this.deps.ledger.held(originalId) } catch { held = null }
-    if (!held || held.target.provider !== provider || held.target.sessionId !== threadId) {
-      return {
-        origin: { remote: 'unknown', loopback: false, ownAddress: false, clientInstance: null, client: 'unknown' },
-        verifiedOrigin: false,
-        reason: 'resend_origin_unknown',
-        judgedAt: this.now(),
-      }
-    }
-    const judgedAt = typeof held.originJudgedAt === 'number' ? held.originJudgedAt : Date.parse(held.createdAt)
-    const verdict: OriginVerdict = { origin: { ...held.origin }, verifiedOrigin: held.verifiedOrigin === true, reason: held.reason ?? null, judgedAt }
-    if (!Number.isFinite(judgedAt) || this.now() - judgedAt > QUEUED_ORIGIN_TTL_MS) return unvouched(verdict, 'resend_origin_lapsed')
-    return verdict
+  resendVerdict(req: OriginRequest): OriginVerdict {
+    const fresh = this.originOf(req)
+    return fresh.verifiedOrigin === true ? fresh : unvouched(fresh, RESEND_NOT_REVERIFIED_REASON)
   }
 
   /**
@@ -635,8 +641,15 @@ export async function describeG2Turn(provenance: G2TurnProvenance, turnId: strin
   const found = await provenance.ledger.find(turnId)
   if (!found) return null
   const { record, sealed } = found
+  // Codex re-audit of 910eb90 (P2): the age of an APPROVAL is measured from when its origin was
+  // judged (the request Miles sent), never from when it was delivered. A queued, edited or Cursor
+  // Stop turn is recorded again at delivery with a new createdAt; measuring from that made a turn
+  // that waited 20 minutes in the queue read as seconds old to the verifier's 15-minute check. The
+  // earlier of the two is used, so an approval can never read younger than its delivery.
   const createdMs = Date.parse(record.createdAt)
-  const ageMs = Number.isFinite(createdMs) ? Math.max(0, now - createdMs) : null
+  const judgedMs = typeof record.originJudgedAt === 'number' && Number.isFinite(record.originJudgedAt) ? record.originJudgedAt : null
+  const fromMs = judgedMs !== null && Number.isFinite(createdMs) ? Math.min(judgedMs, createdMs) : (judgedMs ?? createdMs)
+  const ageMs = Number.isFinite(fromMs) ? Math.max(0, now - fromMs) : null
   // 6.99.29: g2, phone or web (older records carry only `origin.client`).
   const originKind = record.originKind ?? originKindOf(record.origin?.client)
   // Only a record this process wrote and still holds vouches for anything (see the header), never a
@@ -650,6 +663,8 @@ export async function describeG2Turn(provenance: G2TurnProvenance, turnId: strin
     found: true,
     turnId: record.turnId,
     createdAt: record.createdAt,
+    /** When the origin this turn carries was judged; `ageMs` (and the vouch limit) run from here. */
+    originJudgedAt: Number.isFinite(fromMs) ? new Date(fromMs).toISOString() : null,
     ageMs,
     textSha256: record.textSha256,
     origin: record.origin,
@@ -659,5 +674,6 @@ export async function describeG2Turn(provenance: G2TurnProvenance, turnId: strin
     sealed,
     target: record.target,
     via: record.via,
+    ...(typeof record.resendOf === 'string' ? { resendOf: record.resendOf } : {}),
   }
 }
