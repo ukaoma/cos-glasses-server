@@ -363,18 +363,73 @@ describe('COS Control routes, auth and maintenance', () => {
 })
 
 describe('the existing Work chat routes are unchanged', () => {
-  it('GET /api/work/chat keeps every earlier field and only adds lensPlans and lensPlansControl', async () => {
+  it('GET /api/work/chat keeps every earlier field and only adds lensPlans, lensPlansControl and webPlans', async () => {
     const h = await setup()
     const caps = (await json(await h.get('/work/chat'))).body
     expect(caps).toEqual({ protocolVersion: 1, planner: 'sonnet', planners: ['sonnet', 'opus'], effort: expect.any(String), efforts: expect.any(Array),
       automaticProviders: ['claude', 'codex'], maxAssignments: 3, contextItems: true, maxContextItems: 40, queueRounds: true, references: true, maxReferences: 6,
-      orchestrator: 1, lensPlans: 1, lensPlansControl: { connected: false, lastSeenSec: null, autoSend: false } })
+      orchestrator: 1, lensPlans: 1, lensPlansControl: { connected: false, lastSeenSec: null, autoSend: false }, webPlans: 1 })
   })
   it('POST /api/work/chat still answers a plan and never records a lens round', async () => {
     const h = await setup()
     const r = await h.post('/work/chat', { workID: WORK, revision: 'a'.repeat(64), question: 'What next?', context: '', sessions: [], history: [], updates: [], mode: 'plan' })
     expect(r.status).not.toBe(404)
     expect((await poll(h)).body.rounds).toHaveLength(0)
+  })
+})
+
+// COS Control Web records its own plans through the same contract (webPlans 1): source "web" with a "web-" id.
+const webId = (n: number) => `web-${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`
+const webRound = (n = 1, extra: Record<string, unknown> = {}) => round(n, { clientRoundId: webId(n), source: 'web', ...extra })
+
+describe('a plan COS Control Web made (source web)', () => {
+  it('records 201 and is idempotent on its web- id; the view and the inbox say source web, a lens round says nothing', async () => {
+    const h = await setup()
+    const web = await json(await h.post('/work/chat/lens-rounds', webRound()))
+    expect(web.status).toBe(201)
+    expect(web.body).toEqual({ roundId: expect.stringMatching(/^lr_[a-f0-9]{16}$/), workID: WORK, state: 'recorded', control: { connected: false } })
+    expect(await json(await h.post('/work/chat/lens-rounds', webRound(1, { question: 'changed text' })))).toEqual({ status: 200, body: web.body })
+    const lens = await json(await h.post('/work/chat/lens-rounds', round(2)))
+    expect(lens.status).toBe(201)
+    const webView = (await json(await h.get(`/work/chat/lens-rounds/${web.body.roundId}`))).body
+    const lensView = (await json(await h.get(`/work/chat/lens-rounds/${lens.body.roundId}`))).body
+    expect(webView.source).toBe('web')
+    expect(lensView).not.toHaveProperty('source')
+    const box = (await poll(h)).body
+    const byId = (id: string) => box.rounds.find((r: { roundId: string }) => r.roundId === id)
+    expect(byId(web.body.roundId)).toMatchObject({ source: 'web', clientRoundId: webId(1), question: 'Ship the fix and update the doc' })
+    expect(byId(lens.body.roundId)).not.toHaveProperty('source')
+    expect(h.store.find(lens.body.roundId)).not.toHaveProperty('source')
+    expect(h.store.find(web.body.roundId)?.source).toBe('web')
+  })
+  it('refuses an id that does not start with its source, and any source but lens and web', async () => {
+    const h = await setup()
+    const cases: [Record<string, unknown>, string][] = [
+      [{ clientRoundId: webId(1), source: 'lens' }, 'clientRoundId'],
+      [{ clientRoundId: uuid(1), source: 'web' }, 'clientRoundId'],
+      [{ clientRoundId: webId(1), source: 'phone' }, 'source'],
+      [{ clientRoundId: `phone-${webId(1).slice(4)}`, source: 'web' }, 'clientRoundId'],
+    ]
+    for (const [patch, field] of cases) {
+      const r = await json(await h.post('/work/chat/lens-rounds', { ...round(), ...patch }))
+      expect([r.status, r.body.error, r.body.field], JSON.stringify(patch)).toEqual([400, 'invalid_lens_round', field])
+    }
+    expect((await poll(h)).body.rounds).toHaveLength(0)
+  })
+  it('sends only with the two-step confirm, through COS Control, exactly as a lens round does', async () => {
+    const h = await setup()
+    const id = (await json(await h.post('/work/chat/lens-rounds', webRound()))).body.roundId
+    expect(await json(await h.post(`/work/chat/lens-rounds/${id}/send`, { v: 1 }))).toMatchObject({ status: 428, body: { error: 'confirmation_required' } })
+    expect(await json(await h.post(`/work/chat/lens-rounds/${id}/send`, { v: 1, confirm: 'two-step', confirmedAt: '2026-10-21T14:22:00.000Z' })))
+      .toMatchObject({ status: 423, body: { error: 'control_not_connected' } })
+    await poll(h)
+    expect(await json(await h.post(`/work/chat/lens-rounds/${id}/send`, { v: 1, confirm: 'two-step', confirmedAt: '2026-10-21T14:22:00.000Z' })))
+      .toMatchObject({ status: 202, body: { state: 'send_requested' } })
+    expect(await json(await h.post(`/work/chat/lens-rounds/${id}/send`, { v: 1, confirm: 'two-step', confirmedAt: '2026-10-21T14:22:01.000Z' })))
+      .toMatchObject({ status: 409, body: { error: 'send_in_progress' } })
+    const pick = await poll(h)
+    expect(pick.body.sends).toHaveLength(1)
+    expect(pick.body.sends[0]).toMatchObject({ roundId: id, confirm: 'two-step', round: { source: 'web' } })
   })
 })
 
