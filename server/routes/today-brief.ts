@@ -19,9 +19,11 @@ import type { TaskBoardRow } from '../lib/task-store.js'
 import { agentSessionRoots, findAgentSessionFile } from '../lib/agent-session-store.js'
 import { readClaudeSubagents, summarize, type SessionSubagents } from '../lib/session-subagents.js'
 import { readCodexSubagentDetails } from '../lib/codex-subagent-activity.js'
+import { acquireMaintenanceWork, maintenanceAdmissionsOpen } from '../lib/maintenance-lifecycle.js'
+import { isRecordingLive } from '../lib/stt-runtime.js'
 import {
   TODAY_BRIEF_BODY_MAX_BYTES, TODAY_BRIEF_EFFORT, TODAY_BRIEF_SETTINGS_FILE, TODAY_BRIEF_STATE_FILE, TODAY_BRIEF_TIMEOUT_MS,
-  TodayBriefInputError, createTodayBrief, normalizeTodayBriefInputs, subagentLookups, withSubagents, type BriefWork, type SubagentReading, type TodayBrief,
+  TodayBriefInputError, createTodayBrief, normalizeTodayBriefInputs, subagentLookups, todayBriefFingerprint, withSubagents, type BriefWork, type SubagentReading, type TodayBrief,
 } from '../lib/today-brief.js'
 
 export interface TodayBriefRouterDeps {
@@ -69,8 +71,12 @@ export function defaultTodayBrief(): TodayBrief {
     }),
     audit: row => logTokenAudit({
       source: 'web-today-brief', model: row.model, inputChars: row.inputChars, outputChars: row.outputChars,
-      durationMs: row.durationMs, caller: row.outcome === 'ok' ? 'today_brief' : `today_brief_${row.guard ?? row.outcome}`,
+      durationMs: row.durationMs, caller: row.outcome === 'ok' ? 'today_brief' : `today_brief_${row.guard ?? row.error ?? row.outcome}`,
     }),
+    // No call while a meeting records (it keeps the Mac's CPU and the CLI for the meeting) or while the server drains.
+    blocked: () => (!maintenanceAdmissionsOpen() ? 'maintenance' : isRecordingLive() ? 'recording' : null),
+    // The call holds api_mutation, as the generic mutation lease would have; this route is lifecycle-owned in index.ts.
+    lease: () => acquireMaintenanceWork('api_mutation'),
   })
 }
 
@@ -107,6 +113,11 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
         normalizeTodayBriefInputs(req.body)
         return res.json(deps.brief.peek())
       }
+      // Every gate that needs no reads goes first (switch, recording, drain, breaker, daily cap, interval): a gated ask
+      // answers from the page's rows alone and reads neither the board nor any transcript.
+      const pageInputs = normalizeTodayBriefInputs(req.body)
+      const closed = deps.brief.gate()
+      if (closed) return res.json(deps.brief.askGated(pageInputs, closed))
       const work = workInProgress(await deps.board().catch(() => null))
       let inputs = normalizeTodayBriefInputs(req.body, work)
       const keys = subagentLookups(inputs)
@@ -116,7 +127,7 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
         const readings = await Promise.race([deps.subagents(keys).catch(() => new Map<string, SubagentReading>()), late]).finally(() => clearTimeout(timer))
         inputs = withSubagents(inputs, readings, (deps.now ?? Date.now)())
       }
-      res.json(await deps.brief.ask(inputs))
+      res.json(await deps.brief.ask(inputs, todayBriefFingerprint(pageInputs)))
     } catch (error) {
       if (error instanceof TodayBriefInputError) return res.status(400).json({ error: { code: error.code, message: 'That is not a Today summary request.' } })
       console.warn(`[today-brief] ask failed (${error instanceof Error ? error.name : 'error'})`)

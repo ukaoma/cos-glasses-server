@@ -20,6 +20,7 @@ function row(over: Partial<TaskBoardRow>): TaskBoardRow {
     due: false, missed: false, failed: false, late: false, carriedOver: false, ...over } as TaskBoardRow
 }
 
+let genDelay: Promise<void> = Promise.resolve()
 let subagentCalls: string[][] = []
 let subagentAnswer: (keys: string[]) => Promise<Map<string, any>> = async () => new Map()
 async function start(enabled: boolean | null) {
@@ -28,7 +29,7 @@ async function start(enabled: boolean | null) {
   prompts.length = 0; boardReads = 0; subagentCalls = []
   const brief = createTodayBrief({
     stateFile: join(dir, 'b.json'), settingsFile: join(dir, 's.json'), env: () => ({}),
-    generate: async p => { prompts.push(p); return 'The release is moving, and one session waits on you to approve a publish.' },
+    generate: async p => { prompts.push(p); await genDelay; return 'The release is moving, and one session waits on you to approve a publish.' },
   })
   const app = express()
   app.use(express.json({ limit: '1mb' }))
@@ -125,11 +126,38 @@ describe('sub-agents on the ask', () => {
   })
 })
 
+describe('6.99.26 QA: a gated ask reads nothing', () => {
+  it('two Todays asking at once share the one call: the second is not turned away as inside the interval', async () => {
+    await start(true)
+    let go!: () => void
+    genDelay = new Promise(r => { go = r })
+    const a = post('/today/brief', ASK)
+    await new Promise(r => setTimeout(r, 50))
+    const b = post('/today/brief', ASK)
+    await new Promise(r => setTimeout(r, 50))
+    go()
+    const [va, vb] = await Promise.all([(await a).json(), (await b).json()])
+    genDelay = Promise.resolve()
+    expect([va.state, vb.state]).toEqual(['fresh', 'fresh'])
+    expect(prompts).toHaveLength(1)
+  })
+  it('inside the 10-minute interval the POST reads neither the board nor a transcript, and answers from the page', async () => {
+    await start(true)
+    const body = { ...ASK, sessions: [{ title: 'Release QA', provider: 'claude', state: 'waiting', minutes: 5, key: 'claude|aaaaaaaa-1111-4111-8111-111111111111' }] }
+    expect((await (await post('/today/brief', body)).json()).state).toBe('fresh')
+    const reads = [boardReads, subagentCalls.length]
+    const again = await (await post('/today/brief', { ...body, sessions: [{ ...body.sessions[0], title: 'Release QA moved' }] })).json()
+    expect(again).toMatchObject({ state: 'stale', reason: 'interval' })
+    expect([boardReads, subagentCalls.length]).toEqual(reads)
+    expect(again.text.startsWith('One thing needs you. ')).toBe(true)
+  })
+})
+
 describe('the settings route', () => {
   it('reads and writes the toggle; anything but { enabled: boolean } is refused', async () => {
     await start(null)
     expect(await (await fetch(base + '/today/brief/settings')).json()).toEqual({ enabled: false, source: 'default', saved: null })
-    expect(await (await post('/today/brief/settings', { enabled: true })).json()).toEqual({ enabled: true, source: 'settings', saved: true })
+    expect(await (await post('/today/brief/settings', { enabled: true })).json()).toEqual({ enabled: true, source: 'settings', saved: true, status: null })
     expect((await post('/today/brief/settings', { enabled: 'yes' })).status).toBe(400)
     expect((await post('/today/brief/settings', { enabled: true, extra: 1 })).status).toBe(400)
     expect((await (await post('/today/brief', ASK)).json()).state).toBe('fresh')

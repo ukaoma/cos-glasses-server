@@ -602,7 +602,9 @@
   // the inputs changed, 10 minutes apart, 60 a day, a breaker). Today never waits for it: the counts line paints at once
   // and the summary replaces it when one arrives. Never shown over a session list that was not read.
   var BRIEF = { view: null, inflight: false, sentKey: '', sentAt: 0 };
-  var BRIEF_RESEND_MS = 60000, BRIEF_OFF_RECHECK_MS = 5 * 60000;
+  // 6.99.26 QA: the same rows are asked about again only after five minutes (a Today that sits open still learns what
+  // the server reads itself: sub-agents and Work cards); changed rows are asked about at once, one ask at a time.
+  var BRIEF_RESEND_MS = 5 * 60000, BRIEF_OFF_RECHECK_MS = 5 * 60000, BRIEF_TICK_MS = 60000;
   function briefMinutes(v) { var d = toDate(v); return d ? Math.max(0, Math.round((Date.now() - d.getTime()) / 60000)) : 0; }
   function briefInputs(m) {
     var sessions = [];
@@ -627,8 +629,8 @@
     return { sessions: sessions.slice(0, 40), needs: needs, later: Math.min(later, needs.length), sessionsRead: TODAY.sessionsState === 'answered', needsComplete: !!m.settled,
       unread: m.failed.slice(), recording: !!TODAY.recording };
   }
-  // Asked once every source answered or failed, at most once a minute unless what Today read changed (the server
-  // gates the spend; this only saves requests). When the switch is off, Today asks again every five minutes.
+  // Asked once every source answered or failed: at once when what Today read changed, else at most every five minutes
+  // (the server gates the spend; this only saves requests). When the switch is off, every five minutes.
   function requestBrief(m) {
     if (BRIEF.inflight || state.pane !== 'today') return;   // renderStory already answered an offline Today
     if (Object.keys(m.states).some(function (k) { return m.states[k] === 'pending'; })) return;
@@ -650,6 +652,16 @@
     if (!v || !v.text || (v.state !== 'fresh' && v.state !== 'stale') || TODAY.sessionsState !== 'answered') return null;
     return v;
   }
+  // Forget the summary (Settings turned it on or off): the next Today paint asks at once.
+  function resetBrief() { BRIEF.view = null; BRIEF.sentKey = ''; BRIEF.sentAt = 0; }
+  // Every minute while Today is on screen: "Updated N min ago" moves on, and an unchanged Today asks again once its
+  // five minutes are up (requestBrief's own throttle). Hidden or another pane: nothing.
+  setInterval(function () {
+    if (document.hidden || state.pane !== 'today' || !TODAY.model || TODAY.offline) return;
+    requestBrief(TODAY.model);
+    var v = briefShown(), when = document.querySelector('#today-story .story-when');
+    if (v && when) when.textContent = briefWhen(v, TODAY.model);
+  }, BRIEF_TICK_MS);
   function briefWhen(v, m) {
     var mins = briefMinutes(v.at);
     var out = 'Updated ' + (mins < 1 ? 'just now' : span(v.at) + ' ago');
@@ -4251,6 +4263,7 @@
     sessionList: sessionList,
     petPrefs: petPrefs,
     setPetPrefs: setPetPrefs,
+    resetTodayBrief: resetBrief,
     onRoute: function (fn) { routeHooks.push(fn); },
     onShell: function (fn) { shellHooks.push(fn); },
     // The detail title after "COS Control > Section" (Control's breadcrumb). Pane modules set it

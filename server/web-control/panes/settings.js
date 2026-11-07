@@ -205,6 +205,16 @@
     }, function (err) { if (undo) undo(); say((err && err.message) || 'That did not save.', true); });
   }
 
+  // One line under the Today summary toggle: paused until, today's cap reached, or the last call failed (GET /api/today/brief/settings status).
+  function briefStatus(tb) {
+    var st = tb && tb.enabled && tb.status;
+    if (!st) return '';
+    var at = function (iso) { var d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); };
+    if (st.kind === 'paused') return 'Paused after three failed tries. It tries again at ' + at(st.until) + '.';
+    if (st.kind === 'daily_cap') return 'Today\u2019s ' + st.count + ' are used. It writes again tomorrow.';
+    if (st.kind === 'failed') return 'The last try failed at ' + at(st.at) + (st.code === 'timeout' ? ' (it took too long).' : st.code === 'unavailable' ? ' (Claude Code was not found on your Mac).' : '.');
+    return '';
+  }
   function categoryBody(cat) {
     var d = S.data || {};
     var out = '';
@@ -215,8 +225,9 @@
     if (cat.id === 'general' && d.tb && typeof d.tb.enabled === 'boolean') {
       out += group('Today summary', '',
         row('Write the Today summary with a model', d.tb.source === 'env' ? 'Set on the Mac by the server environment.' :
-          'Haiku reads your session titles and latest lines and writes two or three sentences. Only while Today is open, only when something changed, at most every 10 minutes and 60 times a day.',
-          toggle(d.tb.enabled, 'data-set="today-brief"' + (d.tb.source === 'env' ? ' disabled' : ''), 'Write the Today summary with a model')));
+          'Haiku writes two or three sentences after the count of what needs you. It reads what Today shows (session titles and states, each session\u2019s latest reply, the questions sessions ask you, what needs you) and, on your Mac, each session\u2019s sub-agents and the Work cards in progress. It runs only while Today is open, only when something changed, never during a recording, at most every 10 minutes and 60 times a day.',
+          toggle(d.tb.enabled, 'data-set="today-brief"' + (d.tb.source === 'env' ? ' disabled' : ''), 'Write the Today summary with a model')) +
+        (briefStatus(d.tb) ? '<p class="cx-set-blurb" id="today-brief-status">' + esc(briefStatus(d.tb)) + '</p>' : ''));
     }
     if (cat.id === 'ai' && d.dp) {
       var p = d.dp.provider || '';
@@ -339,7 +350,13 @@
       var ton = t.getAttribute('aria-checked') === 'true';
       t.setAttribute('aria-checked', String(!ton));
       api('/api/today/brief/settings', { method: 'POST', body: { enabled: !ton } })
-        .then(function (v) { if (S.data && v) S.data.tb = v; W.toast(!ton ? 'Today summary on' : 'Today summary off'); }, function (err) { t.setAttribute('aria-checked', String(ton)); say(err.message, true); });
+        .then(function (v) {
+          if (S.data && v) S.data.tb = v;
+          // Today forgets the summary it showed, so turning it on asks at once and turning it off shows the counts line.
+          if (W.resetTodayBrief) W.resetTodayBrief();
+          W.toast(!ton ? 'Today summary on' : 'Today summary off');
+          render();
+        }, function (err) { t.setAttribute('aria-checked', String(ton)); say(err.message, true); });
       return;
     }
     if (act === 'brief') {
