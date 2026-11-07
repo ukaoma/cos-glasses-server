@@ -2,7 +2,8 @@
 // into an agent session (G2 authority Tier 1, see lib/g2-turn-provenance.ts). Behind the global
 // X-Cos-Token gate like every /api route. 400 on a malformed id, 404 `{ found: false }` when no
 // record names it. Answers what was recorded, and vouches (`verifiedOrigin: true`) only for a
-// record this process wrote and still holds.
+// glasses or phone record this process wrote and still holds, written within 24 hours. A web record
+// is reported with `reason: web_cookie_derivable_from_token` and never vouched (6.99.29).
 
 import { Router } from 'express'
 import { timingSafeTokenEqual } from '../lib/token-auth.js'
@@ -21,7 +22,8 @@ export function createG2TurnsRouter(deps: {
   const router = Router()
   const now = deps.now ?? Date.now
   // 6.99.29: one handler, two paths. `/turn-provenance` names what it is now that web turns are
-  // footed too; `/g2-turns` stays for verify_g2_turn.py and every caller of the 6.66 design.
+  // recorded too (reported, never vouched: lib/g2-turn-provenance.ts); `/g2-turns` stays for
+  // verify_g2_turn.py and every caller of the 6.66 design.
   router.get(['/g2-turns/:turnId', '/turn-provenance/:turnId'], async (req, res) => {
     res.set('Cache-Control', 'private, no-store')
     if (deps.apiToken) {

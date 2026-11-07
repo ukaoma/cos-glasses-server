@@ -13,10 +13,18 @@ import {
   stripG2TurnFooter,
   turnTextSha256,
   TURN_CARRY_TTL_MS,
+  QUEUED_ORIGIN_TTL_MS,
+  WEB_UNVOUCHED_REASON,
+  attachmentsDigest,
+  sealMatches,
+  type OriginVerdict,
   type OriginRequest,
   type OwnAddressView,
 } from './g2-turn-provenance.js'
 import { pairedInstanceFrom } from '../routes/client-instance.js'
+import { turnAttachmentManifest, type TurnAttachmentStore } from './session-turn-attachments.js'
+import { writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import type { ClientInstanceOwner } from './client-instance-claim.js'
 
 const PHONE = '100.81.195.27'
@@ -79,18 +87,26 @@ describe('the footer', () => {
     expect(back.turnId).toBe('ct-g2-00000001')
     expect(turnTextSha256(back.text)).toBe(turnTextSha256('keep going on the parser'))
   })
-  it('is added only for a turn the app says came from the glasses or the phone', () => {
+  it('is added only for a VOUCHED turn the app says came from the glasses or the phone', () => {
     const { p } = provenance()
-    for (const [headers, applies] of [
-      [G2_HEADERS, true],
-      [{ ...G2_HEADERS, 'x-cos-client': 'phone' }, true],
-      [{ 'x-cos-client-instance': INSTANCE }, false],
-      [{ ...G2_HEADERS, 'x-cos-client': 'desk' }, false],
+    for (const [remote, headers, applies] of [
+      [PHONE, G2_HEADERS, true],
+      [PHONE, { ...G2_HEADERS, 'x-cos-client': 'phone' }, true],
+      [PHONE, { 'x-cos-client-instance': INSTANCE }, false],
+      [PHONE, { ...G2_HEADERS, 'x-cos-client': 'desk' }, false],
+      // QA 6.99.29 5b: an unverified glasses turn (not the ring owner's address) carries no footer.
+      ['100.90.1.2', G2_HEADERS, false],
+      [PHONE, { ...G2_HEADERS, 'x-cos-client-instance': 'abcdefgh-zzzz' }, false],
     ] as const) {
-      const verdict = p.originOf(req(PHONE, headers))
+      const verdict = p.originOf(req(remote, headers))
       expect(footerApplies(verdict), JSON.stringify(headers)).toBe(applies)
       expect(p.footed('x y', 'ct-g2-00000002', verdict) === 'x y', JSON.stringify(headers)).toBe(!applies)
     }
+  })
+  it('never foots a web turn, even one whose verdict claims it is vouched', () => {
+    const web: OriginVerdict = { origin: { remote: PHONE, loopback: false, ownAddress: false, clientInstance: null, client: 'web', tokenPresented: false, webSession: true }, verifiedOrigin: true }
+    expect(footerApplies(web)).toBe(false)
+    expect(provenance().p.footed('x y', 'ct-web-00000001', web)).toBe('x y')
   })
   it('never foots a local turn, whatever it says it is', () => {
     const { p } = provenance()
@@ -110,6 +126,8 @@ describe('what a request can prove about its origin', () => {
     expect(p.originOf(req(PHONE, G2_HEADERS))).toEqual({
       origin: { remote: PHONE, loopback: false, ownAddress: false, clientInstance: INSTANCE, client: 'glasses', tokenPresented: false, webSession: false },
       verifiedOrigin: true,
+      reason: null,
+      judgedAt: NOW,
     })
     expect(p.originOf(req(`::ffff:${PHONE}`, G2_HEADERS)).verifiedOrigin).toBe(true)
   })
@@ -167,6 +185,25 @@ describe('what a request can prove about its origin', () => {
     const v = provenance().p.originOf(req('127.0.0.1', { ...G2_HEADERS, 'x-forwarded-for': PHONE }))
     expect(v.origin.remote).toBe('127.0.0.1')
     expect(v.verifiedOrigin).toBe(false)
+  })
+  it('names why a verdict is not vouched', () => {
+    const { p } = provenance()
+    expect(p.originOf(req('127.0.0.1', G2_HEADERS)).reason).toBe('local_socket')
+    expect(p.originOf(req(MAC_TS, G2_HEADERS)).reason).toBe('local_socket')
+    expect(p.originOf(req(undefined, G2_HEADERS)).reason).toBe('unknown_socket')
+    expect(p.originOf(req(PHONE, { 'x-cos-client': 'glasses' })).reason).toBe('no_client_instance')
+    expect(p.originOf(req('100.90.1.2', G2_HEADERS)).reason).toBe('not_ring_owner')
+  })
+  it('a full web cookie path from another device is labelled web, recorded, and NEVER vouched', () => {
+    const { p } = provenance({ webSession: () => true })
+    const v = p.originOf(req(PHONE, {}))
+    expect(v).toMatchObject({ verifiedOrigin: false, reason: WEB_UNVOUCHED_REASON, origin: { client: 'web', webSession: true, tokenPresented: false } })
+    // A G2 instance header on a cookie request does not make it a G2 turn.
+    expect(p.originOf(req(PHONE, G2_HEADERS))).toMatchObject({ verifiedOrigin: false, origin: { client: 'web' } })
+    const rec = p.record({ turnId: 'ct-web-00000002', prompt: 'x', verdict: v, provider: 'claude', sessionId: 's', via: 'live' })
+    expect(rec).toMatchObject({ originKind: 'web', verifiedOrigin: false, reason: WEB_UNVOUCHED_REASON })
+    // The G2 rule is untouched when a token is shown: the web check is not even asked.
+    expect(p.originOf(req(PHONE, { ...G2_HEADERS, 'x-cos-token': 't' }))).toMatchObject({ verifiedOrigin: true, origin: { client: 'glasses', webSession: false } })
   })
   it('labels the client by its own word, which never verifies on its own', () => {
     const { p } = provenance({ pairedInstance: () => null })
@@ -244,17 +281,46 @@ describe('the ledger', () => {
 
 describe('a queued turn carries its origin across the loopback hop', () => {
   const turn = { provider: 'claude', threadId: 'sid-1', clientTurnId: 'ct-q-00000001', prompt: 'say it later' }
-  it('issues a single-use token only for a parked turn whose words are unchanged', () => {
+  it('issues a single-use token for every drain; it carries the parked origin only while the words are unchanged', () => {
     const { p } = provenance()
-    expect(p.issueCarry(turn)).toBeNull()
+    // Nothing parked: still a token (the drain's own continuation), carrying no origin.
+    const bare = p.issueCarry(turn)
+    expect(bare).toBe('tok1')
+    expect(p.takeCarry(bare, turn.clientTurnId, turn.prompt)).toEqual({ verdict: null, seal: null })
     const verdict = p.originOf(req(PHONE, G2_HEADERS))
     p.noteQueued(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt, verdict)
-    expect(p.issueCarry({ ...turn, prompt: 'say something else' })).toBeNull()
+    const changed = p.issueCarry({ ...turn, prompt: 'say something else' })
+    expect(p.takeCarry(changed, turn.clientTurnId, 'say something else')).toEqual({ verdict: null, seal: null })
     const token = p.issueCarry(turn)
-    expect(token).toBe('tok1')
-    expect(p.takeCarry(token, turn.clientTurnId, turn.prompt)).toEqual(verdict)
+    expect(p.takeCarry(token, turn.clientTurnId, turn.prompt)).toEqual({ verdict, seal: { provider: 'claude', threadId: 'sid-1', attachments: '' } })
     // Spent.
     expect(p.takeCarry(token, turn.clientTurnId, turn.prompt)).toBeNull()
+  })
+  it('a carry token lives TURN_CARRY_TTL_MS and not a millisecond longer', () => {
+    const { p, advance } = provenance()
+    p.noteQueued(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt, p.originOf(req(PHONE, G2_HEADERS)))
+    const ok = p.issueCarry(turn)
+    advance(TURN_CARRY_TTL_MS - 1)
+    expect(p.takeCarry(ok, turn.clientTurnId, turn.prompt)?.verdict?.verifiedOrigin).toBe(true)
+    const late = p.issueCarry(turn)
+    advance(TURN_CARRY_TTL_MS)
+    expect(p.takeCarry(late, turn.clientTurnId, turn.prompt)).toBeNull()
+  })
+  it('a queued origin lapses QUEUED_ORIGIN_TTL_MS after it was judged: the drain then carries none', () => {
+    const { p, advance } = provenance()
+    p.noteQueued(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt, p.originOf(req(PHONE, G2_HEADERS)))
+    advance(QUEUED_ORIGIN_TTL_MS)
+    expect(p.queuedVerdict(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt)?.verifiedOrigin).toBe(true)
+    advance(1)
+    expect(p.queuedVerdict(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt)).toBeNull()
+    expect(p.takeCarry(p.issueCarry(turn), turn.clientTurnId, turn.prompt)).toEqual({ verdict: null, seal: null })
+  })
+  it('noting an old origin again does not restart its clock', () => {
+    const { p, advance } = provenance()
+    const old = p.originOf(req(PHONE, G2_HEADERS))
+    advance(QUEUED_ORIGIN_TTL_MS + 1)
+    p.noteQueued(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt, old)
+    expect(p.queuedVerdict(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt)).toBeNull()
   })
   it('refuses a token for another turn, other words, an unknown token, or after its TTL', () => {
     const { p, advance } = provenance()
@@ -274,5 +340,124 @@ describe('a queued turn carries its origin across the loopback hop', () => {
     expect(p.queuedVerdict(turn.provider, turn.threadId, turn.clientTurnId, 'edited at the desk')?.verifiedOrigin).toBe(false)
     p.forgetQueued(turn.provider, turn.threadId, turn.clientTurnId)
     expect(p.queuedVerdict(turn.provider, turn.threadId, turn.clientTurnId, 'edited at the desk')).toBeNull()
+  })
+})
+
+describe('turn ids are not reusable (QA 6.99.29)', () => {
+  const g2 = () => { const { p, advance } = provenance(); return { p, advance, verdict: p.originOf(req(PHONE, G2_HEADERS)), local: p.originOf(req('127.0.0.1')) } }
+  const base = { turnId: 'ct-reuse-0000001', prompt: 'approve it', provider: 'claude', sessionId: 'sid-1', via: 'live' }
+
+  it('a different turn under a held id is refused, and the vouched record stands', async () => {
+    const { p, local, verdict } = g2()
+    p.record({ ...base, verdict })
+    expect(p.reusesTurnId(base.turnId, { prompt: 'other words', verdict: local, provider: 'claude', sessionId: 'sid-1' })).toBe(true)
+    expect(p.reusesTurnId(base.turnId, { prompt: base.prompt, verdict: local, provider: 'claude', sessionId: 'sid-1' })).toBe(true)
+    expect(p.reusesTurnId(base.turnId, { prompt: base.prompt, verdict, provider: 'claude', sessionId: 'sid-2' })).toBe(true)
+    expect(p.record({ ...base, verdict: local })).toBeNull()
+    expect(await describeG2Turn(p, base.turnId, NOW)).toMatchObject({ verifiedOrigin: true, via: 'live' })
+  })
+  it('an identical retry is not reuse, and keeps the first record and its time', async () => {
+    const { p, advance, verdict } = g2()
+    const first = p.record({ ...base, verdict })
+    advance(5_000)
+    expect(p.reusesTurnId(base.turnId, { prompt: ' approve  it ', verdict, provider: 'claude', sessionId: 'sid-1' })).toBe(false)
+    expect(p.record({ ...base, via: 'spawn', verdict })).toBe(first)
+    expect(await describeG2Turn(p, base.turnId, NOW + 5_000)).toMatchObject({ ageMs: 5_000, via: 'live' })
+  })
+  it('a continuation extends only a record that is still parked, never a delivered one', async () => {
+    const { p, verdict, local } = g2()
+    p.record({ ...base, via: 'queue', verdict })
+    expect(p.reusesTurnId(base.turnId, { prompt: 'words plus files', verdict: local, provider: 'claude', sessionId: 'sid-1' }, { continues: true })).toBe(false)
+    expect(p.record({ ...base, prompt: 'words plus files', via: 'drain-live', verdict: local, continues: true })).toMatchObject({ via: 'drain-live' })
+    // Delivered now: a second continuation (a row written into the queue file by hand) cannot replace it.
+    expect(p.reusesTurnId(base.turnId, { prompt: 'other', verdict: local, provider: 'claude', sessionId: 'sid-1' }, { continues: true })).toBe(true)
+    expect(p.record({ ...base, prompt: 'other', via: 'drain-live', verdict: local, continues: true })).toBeNull()
+    for (const via of ['queue-edit', 'queue-resend']) {
+      const id = `ct-reuse-${via}`
+      p.record({ ...base, turnId: id, via, verdict })
+      expect(p.record({ ...base, turnId: id, prompt: 'edited', via: 'queue-edit', verdict: local, continues: true })).not.toBeNull()
+    }
+  })
+  it('the ledger itself refuses to replace a held id unless told it continues', async () => {
+    const { p, verdict } = g2()
+    const rec = p.record({ ...base, verdict })!
+    expect(p.ledger.append({ ...rec, verifiedOrigin: false })).toBe(false)
+    expect((await p.ledger.find(base.turnId))?.record.verifiedOrigin).toBe(true)
+    expect(p.ledger.append({ ...rec, verifiedOrigin: false }, { replace: true })).toBe(true)
+  })
+  it('a throwing ledger reads as reuse (refuse)', () => {
+    const { p, verdict } = g2()
+    ;(p.ledger as unknown as { held: () => never }).held = () => { throw new Error('x') }
+    expect(p.reusesTurnId(base.turnId, { prompt: 'x', verdict, provider: 'claude', sessionId: 'sid-1' })).toBe(true)
+    expect(p.holds(base.turnId)).toBe(true)
+  })
+})
+
+describe('Send again inherits the original row origin (QA 6.99.29 5a)', () => {
+  it('fresh: the original origin; lapsed: unvouched; unknown or another thread: unvouched', () => {
+    const { p, advance } = provenance()
+    const verdict = p.originOf(req(PHONE, G2_HEADERS))
+    p.record({ turnId: 'ct-orig-0000001', prompt: 'x', verdict, provider: 'claude', sessionId: 'sid-1', via: 'queue' })
+    advance(60_000)
+    expect(p.inheritedVerdict('ct-orig-0000001', 'claude', 'sid-1')).toMatchObject({ verifiedOrigin: true, judgedAt: NOW, origin: { client: 'glasses' } })
+    expect(p.inheritedVerdict('ct-orig-0000001', 'claude', 'sid-2')).toMatchObject({ verifiedOrigin: false, reason: 'resend_origin_unknown' })
+    expect(p.inheritedVerdict('ct-none-0000001', 'claude', 'sid-1')).toMatchObject({ verifiedOrigin: false, reason: 'resend_origin_unknown', origin: { client: 'unknown' } })
+    advance(QUEUED_ORIGIN_TTL_MS)
+    expect(p.inheritedVerdict('ct-orig-0000001', 'claude', 'sid-1')).toMatchObject({ verifiedOrigin: false, reason: 'resend_origin_lapsed', origin: { client: 'glasses' } })
+  })
+  it('an agent-written original stays unvouched, whoever presses Send again', () => {
+    const { p } = provenance()
+    p.record({ turnId: 'ct-orig-0000002', prompt: 'x', verdict: p.originOf(req('127.0.0.1')), provider: 'claude', sessionId: 'sid-1', via: 'queue' })
+    expect(p.inheritedVerdict('ct-orig-0000002', 'claude', 'sid-1')).toMatchObject({ verifiedOrigin: false, origin: { client: 'local' } })
+  })
+})
+
+describe('the queue seal binds provider, thread and files (Codex audit of e4758a6)', () => {
+  const A = { id: 'm_' + 'a'.repeat(24), sha256: 'a'.repeat(64) }
+  const B = { id: 'm_' + 'b'.repeat(24), sha256: 'b'.repeat(64) }
+  it('the attachment digest changes with any id, any content hash, or the order; none is empty', () => {
+    expect(attachmentsDigest([])).toBe('')
+    const d = attachmentsDigest([A, B])
+    expect(d).toMatch(/^[0-9a-f]{64}$/)
+    expect(attachmentsDigest([B, A])).not.toBe(d)
+    expect(attachmentsDigest([A])).not.toBe(d)
+    expect(attachmentsDigest([A, { ...B, sha256: 'c'.repeat(64) }])).not.toBe(d)
+    expect(attachmentsDigest([A, { ...B, id: 'm_' + 'c'.repeat(24) }])).not.toBe(d)
+  })
+  it('the carry hands back the seal noted with the origin', () => {
+    const { p } = provenance()
+    const turn = { provider: 'codex', threadId: 'thr-9', clientTurnId: 'ct-seal-0000001', prompt: 'with files' }
+    p.noteQueued(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt, p.originOf(req(PHONE, G2_HEADERS)), attachmentsDigest([A]))
+    const got = p.takeCarry(p.issueCarry(turn), turn.clientTurnId, turn.prompt)
+    expect(got?.seal).toEqual({ provider: 'codex', threadId: 'thr-9', attachments: attachmentsDigest([A]) })
+  })
+  it('sealMatches compares every part', () => {
+    const seal = { provider: 'claude', threadId: 't', attachments: 'x' }
+    expect(sealMatches(seal, { ...seal })).toBe(true)
+    expect(sealMatches(seal, { ...seal, provider: 'codex' })).toBe(false)
+    expect(sealMatches(seal, { ...seal, threadId: 'u' })).toBe(false)
+    expect(sealMatches(seal, { ...seal, attachments: 'y' })).toBe(false)
+  })
+})
+
+describe('turnAttachmentManifest: each id with the hash of the bytes it resolves to', () => {
+  const store = (paths: Record<string, string>, over: Partial<TurnAttachmentStore> = {}): TurnAttachmentStore => ({
+    resolveUsable(id) { if (!(id in paths)) throw new Error('media_not_found'); return { record: { ref: { id } as never }, path: paths[id] } },
+    async associate() {},
+    ...over,
+  })
+  it('hashes the real file at the store path, in order; no ids reads nothing', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'a.jpg'), 'first bytes')
+    writeFileSync(join(dir, 'b.jpg'), 'second bytes')
+    const sha = (t: string) => createHash('sha256').update(t).digest('hex')
+    const out = await turnAttachmentManifest(['m_a', 'm_b'], store({ m_a: join(dir, 'a.jpg'), m_b: join(dir, 'b.jpg') }))
+    expect(out).toEqual({ ok: true, manifest: [{ id: 'm_a', sha256: sha('first bytes') }, { id: 'm_b', sha256: sha('second bytes') }] })
+    expect(await turnAttachmentManifest([], store({}, { resolveUsable: () => { throw new Error('never asked') } }))).toEqual({ ok: true, manifest: [] })
+  })
+  it('fails closed on an unknown id, an unreadable file, or a hash that is not one', async () => {
+    expect(await turnAttachmentManifest(['m_x'], store({}))).toEqual({ ok: false })
+    expect(await turnAttachmentManifest(['m_a'], store({ m_a: join(tmp(), 'missing.jpg') }))).toEqual({ ok: false })
+    expect(await turnAttachmentManifest(['m_a'], store({ m_a: '/x' }, { contentSha256: async () => 'nope' }))).toEqual({ ok: false })
   })
 })

@@ -22,7 +22,8 @@ import { deliverQueuedTurnOverLoopback } from '../lib/thread-turn-queue-deliver.
 import { readQueue, writeQueue } from '../lib/thread-turn-queue-store.js'
 import type { QueuedThreadTurn } from '../lib/thread-turn-queue.js'
 import { createG2TurnsRouter } from './g2-turns.js'
-import { createThreadTurnQueueRouter, type ThreadTurnQueueDeps } from './thread-turn-queue.js'
+import { createThreadTurnQueueRouter, drainThread, type ThreadTurnQueueDeps } from './thread-turn-queue.js'
+import { MAX_DELIVERY_ATTEMPTS } from '../lib/thread-turn-queue.js'
 import { CURSOR_STOP_FOLLOWUP_PATH, createCursorStopFollowupRouter } from './cursor-stop-followup.js'
 
 const LAN = Object.values(networkInterfaces()).flat().find(e => e && e.family === 'IPv4' && !e.internal)?.address ?? null
@@ -94,7 +95,7 @@ describe('GET /api/g2-turns/:turnId', () => {
     p.record({ turnId: 'ct-g2-known0001', prompt: 'words', verdict: p.originOf({ socket: { remoteAddress: LAN ?? '100.81.195.27' }, headers: G2H }), provider: 'claude', sessionId: 'sid-1', via: 'live' })
     const res = await call(await endpoint(p), 'GET', '/api/g2-turns/ct-g2-known0001', undefined, auth)
     expect(res.status).toBe(200)
-    expect(Object.keys(res.json).sort()).toEqual(['ageMs', 'createdAt', 'found', 'origin', 'originKind', 'sealed', 'target', 'textSha256', 'turnId', 'verifiedOrigin', 'via'])
+    expect(Object.keys(res.json).sort()).toEqual(['ageMs', 'createdAt', 'found', 'origin', 'originKind', 'reason', 'sealed', 'target', 'textSha256', 'turnId', 'verifiedOrigin', 'via'])
     expect(res.json).toMatchObject({ found: true, turnId: 'ct-g2-known0001', textSha256: turnTextSha256('words'), target: { provider: 'claude', sessionId: 'sid-1' } })
     expect(res.json.originKind).toBe(LAN ? 'g2' : null)
     // 6.99.29: the alias answers the same record.
@@ -102,6 +103,46 @@ describe('GET /api/g2-turns/:turnId', () => {
     expect(alias.status).toBe(200)
     expect({ ...alias.json, ageMs: 0 }).toEqual({ ...res.json, ageMs: 0 })
     expect(typeof res.json.ageMs).toBe('number')
+  })
+})
+
+describe('the endpoint reports a web record, never vouches for it (6.99.29)', () => {
+  async function endpoint(p: G2TurnProvenance, now?: () => number) {
+    const app = express()
+    app.use('/api', requireApiToken(TOKEN))
+    app.use('/api', createG2TurnsRouter({ provenance: p, ...(now ? { now } : {}) }))
+    return listen(app, '127.0.0.1')
+  }
+  const auth = { 'x-cos-token': TOKEN }
+  const webOrigin = { remote: '100.81.195.40', loopback: false, ownAddress: false, clientInstance: null, client: 'web' as const, tokenPresented: false, webSession: true }
+
+  it('a web record answers verifiedOrigin false with the reason, even if a verdict claimed otherwise', async () => {
+    const p = g2()
+    // A verdict that claims to be vouched: the record still is not (the cookie is derivable from the token).
+    const rec = p.record({ turnId: 'ctwebRecord001', prompt: 'words', verdict: { origin: webOrigin, verifiedOrigin: true }, provider: 'claude', sessionId: 'sid-1', via: 'live' })
+    // The record itself says so, not only the endpoint's answer.
+    expect(rec).toMatchObject({ originKind: 'web', verifiedOrigin: false, reason: 'web_cookie_derivable_from_token' })
+    expect(p.ledger.held('ctwebRecord001')?.verifiedOrigin).toBe(false)
+    const res = await call(await endpoint(p), 'GET', '/api/turn-provenance/ctwebRecord001', undefined, auth)
+    expect(res.status).toBe(200)
+    expect(res.json).toMatchObject({ found: true, sealed: true, originKind: 'web', verifiedOrigin: false, reason: 'web_cookie_derivable_from_token' })
+  })
+
+  it('even a sealed record that says web and verified (appended straight to the ledger) is not vouched', async () => {
+    const p = g2()
+    p.ledger.append({ turnId: 'ctwebSealed001', createdAt: new Date().toISOString(), textSha256: turnTextSha256('w'), origin: webOrigin, originKind: 'web', verifiedOrigin: true, target: { provider: 'claude', sessionId: 's' }, via: 'live' })
+    const res = await call(await endpoint(p), 'GET', '/api/g2-turns/ctwebSealed001', undefined, auth)
+    expect(res.json).toMatchObject({ sealed: true, originKind: 'web', verifiedOrigin: false, reason: 'web_cookie_derivable_from_token' })
+  })
+
+  it('a vouched G2 record stops vouching 24 hours after it was written', async () => {
+    const p = g2()
+    p.record({ turnId: 'ct-g2-old-00001', prompt: 'words', verdict: { origin: { ...webOrigin, client: 'glasses', webSession: false, clientInstance: INSTANCE }, verifiedOrigin: true }, provider: 'claude', sessionId: 'sid-1', via: 'live' })
+    const at = Date.now()
+    const fresh = await call(await endpoint(p, () => at + 60_000), 'GET', '/api/g2-turns/ct-g2-old-00001', undefined, auth)
+    expect(fresh.json).toMatchObject({ verifiedOrigin: true, reason: null })
+    const old = await call(await endpoint(p, () => at + 24 * 3_600_000 + 60_000), 'GET', '/api/g2-turns/ct-g2-old-00001', undefined, auth)
+    expect(old.json).toMatchObject({ verifiedOrigin: false, reason: 'record_too_old', sealed: true })
   })
 })
 
@@ -166,6 +207,39 @@ describe.skipIf(!LAN)('the queue paths', () => {
   })
 })
 
+describe('a parked origin is forgotten on ANY settle, kept only while the row waits (QA 6.99.29)', () => {
+  const vouched = { origin: { remote: '100.81.195.27', loopback: false, ownAddress: false, clientInstance: INSTANCE, client: 'glasses' as const }, verifiedOrigin: true, judgedAt: Date.now() }
+  let n = 0
+  async function drainOnce(row: Partial<QueuedThreadTurn>, deliver: ThreadTurnQueueDeps['deliver'], now = 10_000) {
+    const p = g2()
+    const thread = `thr-settle-${++n}`
+    const id = `ct-settle-${String(n).padStart(6, '0')}`
+    writeQueue('claude', thread, [{ clientTurnId: id, cosSessionId: 'cos-1', provider: 'claude', threadId: thread, prompt: 'words', queuedAt: 9_000, status: 'waiting', attempts: 0, ...row } as QueuedThreadTurn])
+    p.noteQueued('claude', thread, id, 'words', vouched)
+    await drainThread('claude', thread, { occupancy: () => ({ attachable: true, reason: null }), turnEnded: () => true, activity: () => 'idle', now: () => now, deliver, provenance: p } as ThreadTurnQueueDeps)
+    const after = readQueue('claude', thread, now).find(t => t.clientTurnId === id)
+    return { status: after?.status, held: p.queuedVerdict('claude', thread, id, 'words') }
+  }
+
+  it('delivered: forgotten', async () => {
+    expect(await drainOnce({}, async () => ({ ok: true }))).toMatchObject({ status: 'delivered', held: null })
+  })
+  it('a failure that leaves the row waiting: kept for the next attempt', async () => {
+    const out = await drainOnce({}, async () => ({ ok: false, reason: 'connect_failed' }))
+    expect(out.status).toBe('waiting')
+    expect(out.held?.verifiedOrigin).toBe(true)
+  })
+  it('the last allowed failure (refused): forgotten', async () => {
+    expect(await drainOnce({ attempts: MAX_DELIVERY_ATTEMPTS - 1 }, async () => ({ ok: false, reason: 'boom', serverRetryable: false }))).toMatchObject({ status: 'refused', held: null })
+  })
+  it('cancelled while being admitted: forgotten', async () => {
+    expect(await drainOnce({}, async () => ({ ok: false, reason: 'turn_cancelled' }))).toMatchObject({ status: 'cancelled', held: null })
+  })
+  it('expired in the queue: forgotten', async () => {
+    expect(await drainOnce({ queuedAt: 1 }, async () => ({ ok: true }), 1 + 7 * 3_600_000)).toMatchObject({ status: 'expired', held: null })
+  })
+})
+
 describe('the drain hop carries the token, and only on the turn leg', () => {
   it('sends X-Cos-Turn-Carry with the turn POST when the issuer has one', async () => {
     const seen: Array<{ url: string; carry: unknown }> = []
@@ -210,6 +284,8 @@ describe('the Cursor Stop hand-off', () => {
     const res = await call(await stopApp(p), 'POST', CURSOR_STOP_FOLLOWUP_PATH, envelope, { 'x-cos-hook-token': 'hook-tok' })
     expect(res.json).toEqual({ followup_message: `from the lens\n${g2TurnFooter('ct-g2-cursor-01')}` })
     expect(await describeG2Turn(p, 'ct-g2-cursor-01', Date.now())).toMatchObject({ via: 'cursor-stop-followup', target: { provider: 'cursor', sessionId: CONV } })
+    // Handed over is settled: the parked origin is forgotten (QA 6.99.29).
+    expect(p.queuedVerdict('cursor', CONV, 'ct-g2-cursor-01', 'from the lens')).toBeNull()
   })
 
   it('a turn whose parked words changed on disk goes out unfooted, ledgered local', async () => {

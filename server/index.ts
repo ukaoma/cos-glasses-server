@@ -377,8 +377,9 @@ app.use(createPermissionBrokerHookRouter({ hookToken: readHookToken, broker: per
 // G2 authority Tier 1, with web origin (6.99.29): which app copy holds the ring per device (shared
 // with the client-instance referee), and the provenance every session-delivery route records into.
 // One per process: the ledger's in-memory seal is what makes a record vouch (lib/g2-turn-provenance.ts).
-// A web turn counts only through the full cookie path, checked exactly as the /api gate checks it
-// (tailnetSelf and HTTPS_PORT are read at request time, after they are set below).
+// A turn is labelled web only through the full cookie path, checked exactly as the /api gate checks
+// it (tailnetSelf and HTTPS_PORT are read at request time, after they are set below). It is
+// recorded, never vouched: the cookie is an HMAC of API_TOKEN, so any token holder can mint one.
 const clientInstanceOwners = new Map<string, ClientInstanceOwner>()
 const g2Provenance = new G2TurnProvenance({
   ledger: new G2TurnLedger(dataPath(G2_TURN_LEDGER_FILE)),

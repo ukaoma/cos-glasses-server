@@ -18,6 +18,8 @@ import {
   mediaCategoryOf,
   type MediaAttachmentRef,
 } from '../../shared/media-attachment.js'
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { getMediaStore, MediaStoreError } from './media-store.js'
 import { getTurnFileStore } from './turn-file-store.js'
 
@@ -26,6 +28,11 @@ export interface TurnAttachmentStore {
   resolveUsable(id: string, clientQueueItemId?: string): { record: { ref: MediaAttachmentRef }; path: string }
   /** Moves staged media out of the 4 hour unsubmitted TTL, so a file the session may read again later stays. */
   associate(ids: string[], target: { runId?: string }): Promise<void>
+  /**
+   * 6.99.29 (queue seal): the SHA-256 of the bytes this id resolves to. Optional; absent, the file at
+   * `resolveUsable(id).path` is hashed. Tests pass a fake.
+   */
+  contentSha256?(id: string): Promise<string>
 }
 
 /**
@@ -195,4 +202,33 @@ export async function associateTurnAttachments(ids: readonly string[], runId: st
     return { ok: false, code: storeCode(error) }
   }
   return { ok: true }
+}
+
+/** One file in a queued turn's seal: its id and the SHA-256 of the bytes it resolves to. */
+export interface TurnAttachmentSealEntry { id: string; sha256: string }
+
+function sha256OfPath(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256')
+    createReadStream(path).on('error', reject).on('data', chunk => hash.update(chunk)).on('end', () => resolve(hash.digest('hex')))
+  })
+}
+
+/**
+ * G2 authority Tier 1 (6.99.29): the manifest a queued turn's origin is sealed to, each id in order
+ * with the hash of its content. The queue file holds mutable ids; the drain recomputes this and
+ * refuses a vouched turn whose files changed. No ids: an empty manifest, nothing read.
+ */
+export async function turnAttachmentManifest(ids: readonly string[], store: TurnAttachmentStore = defaultTurnAttachmentStore()): Promise<{ ok: true; manifest: TurnAttachmentSealEntry[] } | { ok: false }> {
+  const manifest: TurnAttachmentSealEntry[] = []
+  try {
+    for (const id of ids) {
+      const sha256 = store.contentSha256 ? await store.contentSha256(id) : await sha256OfPath(store.resolveUsable(id).path)
+      if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) return { ok: false }
+      manifest.push({ id, sha256 })
+    }
+  } catch {
+    return { ok: false }
+  }
+  return { ok: true, manifest }
 }

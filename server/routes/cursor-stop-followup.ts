@@ -78,7 +78,10 @@ export function createCursorStopFollowupRouter(deps: CursorStopFollowupDeps): Ro
       const turn = claimed.turn
       const verdict = deps.provenance.queuedVerdict('cursor', facts.conversationId, turn.clientTurnId, turn.prompt) ?? deps.provenance.originOf(req)
       followup = deps.provenance.footed(turn.prompt, turn.clientTurnId, verdict)
-      deps.provenance.record({ turnId: turn.clientTurnId, prompt: turn.prompt, verdict, provider: 'cursor', sessionId: facts.conversationId, via: 'cursor-stop-followup' })
+      // The queue's own hand-off of its parked turn: it continues the record parked under this id.
+      deps.provenance.record({ turnId: turn.clientTurnId, prompt: turn.prompt, verdict, provider: 'cursor', sessionId: facts.conversationId, via: 'cursor-stop-followup', continues: true })
+      // Settled (handed over): the parked origin is forgotten (QA 6.99.29).
+      deps.provenance.forgetQueued('cursor', facts.conversationId, turn.clientTurnId)
     }
     return res.json({ followup_message: followup })
   })

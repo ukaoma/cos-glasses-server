@@ -131,9 +131,9 @@ import { isValidNativeThreadId } from '../lib/native-thread-id.js'
 import { FORK_PROVIDER_FAILURES, type ForkProviderFailure } from '../lib/fork-thread.js'
 import { CLIENT_FORK_ID_RE, ForkJobLedger, type ForkJobRow } from '../lib/fork-job-ledger.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
-import { TURN_CARRY_HEADER, type G2TurnProvenance, type OriginVerdict } from '../lib/g2-turn-provenance.js'
+import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, QUEUED_TURN_TAMPERED_COPY, sealMatches, TURN_CARRY_HEADER, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict, type QueueSeal } from '../lib/g2-turn-provenance.js'
 import { KEYED_SESSION_REFUSAL } from '../lib/keyed-sessions.js'
-import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
+import { associateTurnAttachments, composeTurnPrompt, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 import {
   CANCEL_QUEUE_HOLD_MS,
   CLIENT_CANCEL_ID_RE,
@@ -322,9 +322,9 @@ export type AttachedTurnResult =
 export interface AgentSessionBindingsDeps {
   /**
    * G2 authority Tier 1, with web origin (6.99.29): where each turn came from. With it, every turn
-   * and fork this router hands to a session is ledgered, and one from the glasses, the phone or a
-   * signed-in COS Control Web browser carries the one verify footer line. Absent: the 6.99.28
-   * behaviour, byte for byte.
+   * and fork this router hands to a session is ledgered, and a VERIFIED glasses or phone turn
+   * carries the one verify footer line (a Control Web turn is recorded, never vouched or footed).
+   * Footer-shaped words and reused turn ids are refused. Absent: the 6.99.28 behaviour, byte for byte.
    */
   provenance?: G2TurnProvenance
   /** Shared fence state. Omit and the router owns a private one, which is correct
@@ -2656,6 +2656,16 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return refuseFork('invalid_request', { reasonCopy: TURN_ATTACHMENT_COPY[forkComposed.code], attachmentError: forkComposed.code })
       }
       const prompt = forkComposed.prompt
+      // G2 authority Tier 1 (QA 6.99.29): only the server writes a verify footer. Words (or a file
+      // name) carrying anything footer-shaped are refused before anything is spawned.
+      if (deps.provenance && hasFooterShapedLine(prompt)) {
+        return refuseFork('invalid_request', { retryable: false, error: 'footer_line_refused', reasonCopy: FOOTER_LINE_REFUSED_COPY })
+      }
+      // A client fork id this server already holds a turn record for is never reused (a new id
+      // would overwrite that record). A repeat of this same fork was replayed above.
+      if (deps.provenance && typeof clientForkId === 'string' && deps.provenance.holds(clientForkId)) {
+        return refuseFork('invalid_request', { retryable: false, error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })
+      }
 
       const now = readNow()
       if (now === null) return refuseFork('fork_failed')
@@ -2723,12 +2733,15 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         console.log(`[agent-session-bindings] fork accepted provider=${providerParam} background=true`)
       }
 
-      // G2 authority Tier 1: a fork is a turn too. Its id is the client's fork id, or one minted
-      // here; the target is the SOURCE thread (the copy's id is not known until it ran). The hash
-      // covers the prompt as composed (words plus any files block), without the footer.
+      // G2 authority Tier 1: a fork is a turn too, ledgered. Its id is the client's fork id, or one
+      // minted here; the target is the SOURCE thread (the copy's id is not known until it ran). The
+      // hash covers the prompt as composed (words plus any files block). Never vouched (below).
       let forkPrompt = prompt
       if (deps.provenance) {
-        const forkVerdict = deps.provenance.originOf(req)
+        // 6.99.29 (Codex audit of e4758a6): the record names the SOURCE session, never the fork child
+        // that actually receives the words, and the child has no binding yet. Until a destination
+        // binding exists, a forked turn is recorded UNVERIFIED for the child: no footer, ever.
+        const forkVerdict = unvouched(deps.provenance.originOf(req), 'fork_destination_unbound')
         const forkTurnId = typeof clientForkId === 'string' ? clientForkId : `fork-${randomBytes(12).toString('hex')}`
         forkPrompt = deps.provenance.footed(prompt, forkTurnId, forkVerdict)
         deps.provenance.record({ turnId: forkTurnId, prompt, verdict: forkVerdict, provider: providerParam, sessionId: threadIdParam, via: 'fork', fork: true })
@@ -3077,6 +3090,11 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
         return refuseTurn('invalid_request', { reasonCopy: TURN_ATTACHMENT_COPY[composed.code], attachmentError: composed.code })
       }
       const prompt = composed.prompt
+      // G2 authority Tier 1 (QA 6.99.29): only the server writes a verify footer. Words (or a file
+      // name) carrying anything footer-shaped are refused here, before any gate, claim or hop.
+      if (deps.provenance && hasFooterShapedLine(prompt)) {
+        return refuseTurn('invalid_request', { retryable: false, error: 'footer_line_refused', reasonCopy: FOOTER_LINE_REFUSED_COPY })
+      }
 
       // G2 authority Tier 1 (6.99.29 port, with web origin): who said this, and the exact text the
       // session will see. A turn the queue drains re-enters over loopback with a single-use carry
@@ -3087,15 +3105,31 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       const provenance = deps.provenance
       let turnVerdict: OriginVerdict | null = null
       let turnCarried = false
+      /** The seal a vouched queued turn carries; checked against the files here and the binding below. */
+      let turnSeal: QueueSeal | null = null
       if (provenance) {
+        // A carry marks the queue's own drain of a parked turn: it carries the parked origin while
+        // one is held (else none, and the hop is judged as the local call it is) and is the one
+        // caller allowed to add to that turn's record.
         const carried = provenance.takeCarry(req.headers[TURN_CARRY_HEADER], clientTurnId, words)
         turnCarried = carried !== null
-        turnVerdict = carried ?? provenance.originOf(req)
+        turnVerdict = carried?.verdict ?? provenance.originOf(req)
+        turnSeal = carried?.seal ?? null
+      }
+      // 6.99.29 (Codex audit of e4758a6): the queue file holds MUTABLE attachment ids, and the drain
+      // composes them into the text this turn vouches for. A carried seal names the manifest (each id
+      // with its content hash) the origin was given for; files that differ now refuse the turn.
+      if (turnSeal !== null) {
+        const files = attachIds.ids.length === 0 ? { ok: true as const, manifest: [] } : await turnAttachmentManifest(attachIds.ids, deps.turnAttachmentStore)
+        if (!files.ok || attachmentsDigest(files.manifest) !== turnSeal.attachments) {
+          console.warn(`[agent-session-bindings] queued turn seal mismatch (files) turnId=${turnId} clientTurnId=${clientTurnId}`)
+          return refuseTurn('invalid_request', { retryable: false, error: 'queued_turn_tampered', reasonCopy: QUEUED_TURN_TAMPERED_COPY })
+        }
       }
       const deliveredPrompt = provenance && turnVerdict ? provenance.footed(prompt, clientTurnId, turnVerdict) : prompt
       /** Ledgered once the text did, or may have, reached a session. Hash of the text WITHOUT the footer. */
       const ledgerTurn = (via: string, provider: string, sessionId: string): void => {
-        if (provenance && turnVerdict && clientTurnId !== null) provenance.record({ turnId: clientTurnId, prompt, verdict: turnVerdict, provider, sessionId, via: turnCarried ? `drain-${via}` : via })
+        if (provenance && turnVerdict && clientTurnId !== null) provenance.record({ turnId: clientTurnId, prompt, verdict: turnVerdict, provider, sessionId, via: turnCarried ? `drain-${via}` : via, continues: turnCarried })
       }
 
       // 6.78.0: RECEIPTS, before any gate, claim, pin or hop. The ledger above is dropped
@@ -3157,6 +3191,19 @@ export function createAgentSessionBindingsRouter(deps: AgentSessionBindingsDeps)
       }
       if (!isBindableProvider(binding.provider) || !isValidNativeThreadId(binding.nativeThreadId)) {
         return refuseTurn('binding_unusable')
+      }
+      // G2 authority Tier 1 (QA 6.99.29): a turn id this server already holds a record for is never
+      // reused for a different turn (it would overwrite that record: a denial of service on a
+      // vouched turn). An identical retry is not reuse, and the queue's own drain (a carry) continues
+      // its turn while that turn is still parked; never over a delivered record.
+      // ...and the seal names the provider and thread it was parked for: a drain into any other
+      // binding is refused, never delivered under the parked origin.
+      if (turnSeal !== null && !sealMatches(turnSeal, { provider: binding.provider, threadId: binding.nativeThreadId, attachments: turnSeal.attachments })) {
+        console.warn(`[agent-session-bindings] queued turn seal mismatch (target) turnId=${turnId} clientTurnId=${clientTurnId}`)
+        return refuseTurn('invalid_request', { retryable: false, error: 'queued_turn_tampered', reasonCopy: QUEUED_TURN_TAMPERED_COPY })
+      }
+      if (provenance && turnVerdict && provenance.reusesTurnId(clientTurnId, { prompt, verdict: turnVerdict, provider: binding.provider, sessionId: binding.nativeThreadId }, { continues: turnCarried })) {
+        return refuseTurn('invalid_request', { retryable: false, error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })
       }
 
       const key = binding.targetKey

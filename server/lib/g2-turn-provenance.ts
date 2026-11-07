@@ -1,6 +1,6 @@
 // G2 authority, Tier 1 (ported to 6.99.29 from the unmerged 6.66 design, a3c8c4b): verifiable
-// provenance for the turns this server delivers into an agent session on behalf of the glasses,
-// the phone, or a signed-in COS Control Web browser (6.99.29).
+// provenance for the turns this server delivers into an agent session on behalf of the glasses or
+// the phone. Turns from a signed-in COS Control Web browser are recorded too (6.99.29), never vouched.
 //
 // WHY. A turn Miles dictates on the G2 should carry his authority in the Claude, Codex or Cursor
 // session it lands in, and a turn some other local process sends must not. Both arrive through
@@ -21,22 +21,18 @@
 // verifiedOrigin = (1) && (2). `client` (glasses / phone) is the app's own word in X-Cos-Client
 // and labels the turn; it never makes a turn verified.
 //
-// WEB ORIGIN (6.99.29). Miles types into a session's box on COS Control Web from his phone. The
-// browser holds no X-Cos-Token; it holds the HttpOnly `cos_web_session` cookie, minted only after a
-// sign-in with the pairing token, a Mac handoff ticket or a code from an already signed-in device,
-// signed with the token and the current session epoch, and good for 7 days. A turn is
-// verifiedOrigin with client `web` only when ALL of these hold:
-//   1. The request carries NO X-Cos-Token header at all. Agents on this Mac hold the token; a
-//      request that presents it is judged by the G2 rule above and can never be a web turn, even
-//      with a cookie attached.
-//   2. The cookie path passes in full (`webSession`, `isWebSessionAuthorized` in production): the
-//      socket is loopback or a tailnet peer, the cookie's signature, expiry and epoch are good, and
-//      a write carries X-COS-Web: 1 plus an Origin or Referer that names this very server.
-//   3. The socket is not loopback and not this Mac's own address: the same this-Mac test as the G2
-//      rule (1), so a process on the Mac that lifted a cookie still cannot mint a verified turn.
-// COS Control Web open ON the Mac (loopback, or the Mac's own tailnet address) is therefore
-// never verified: from the socket it is indistinguishable from any local process, including an
-// agent that read the cookie out of a browser profile.
+// WEB ORIGIN (6.99.29): RECORDED, NEVER VOUCHED. Miles types into a session's box on COS Control Web
+// from his phone. The browser sends no X-Cos-Token header; it sends the HttpOnly `cos_web_session`
+// cookie. That cookie is NOT a secret the token cannot produce: its signature is an HMAC keyed by
+// the API token itself (web-session-auth.ts, `cos_web_session_v2:<token>`), the epoch sits in
+// web-session.json, and the pairing token also signs a browser in. So any holder of X-Cos-Token
+// (every agent on this Mac) can mint a valid cookie and send from another tailnet node with no
+// token header. A web turn is therefore ledgered with originKind 'web', verifiedOrigin false and
+// reason 'web_cookie_derivable_from_token', gets NO footer, and the endpoint never vouches for it.
+// Real web authority needs a key the token cannot derive (a device key or passkey enrolled out of
+// band); until that exists there is no vouched web origin. `webSession` is still checked in full
+// (cookie signature, expiry, epoch, X-COS-Web and an Origin naming this server, no X-Cos-Token
+// header, a socket that is not this Mac) so the ledger labels the turn honestly.
 //
 // WHAT IS NOT PROVEN. Another device on the tailnet or the LAN that holds the token and has read
 // the live instance id (the app logs it in client diagnostics on this Mac) could pass both
@@ -54,7 +50,17 @@
 // socket origin at delivery is always local. The origin is captured at enqueue (and again at an
 // edit), kept in memory with the hash of the text it vouches for, and carried across the
 // loopback hop by a single-use random token only this process knows. A queue file edited on
-// disk no longer matches the hash and drains as local.
+// disk no longer matches the hash and drains as local. A queued origin is forgotten the moment
+// its row settles (delivered, steered, cancelled, refused, expired) and lapses QUEUED_ORIGIN_TTL_MS
+// after it was judged, so a turn that waits longer drains unvouched. Every drain carries a token,
+// even one with no origin left to carry, so the drain is the one caller allowed to add to the
+// parked turn's ledger record.
+//
+// TURN IDS ARE NOT REUSABLE. A record this process holds is never replaced by a different turn
+// under the same id (a client-chosen id could otherwise overwrite a vouched record: a denial of
+// service on verification). Only an identical retry (same target, same text, same origin) or the
+// server's own continuation of a parked turn (drain carry, queue edit, Cursor Stop hand-off) may
+// add to it; the routes refuse anything else before delivery.
 
 import { createHash, randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, renameSync, statSync } from 'node:fs'
@@ -62,7 +68,7 @@ import { readFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
 import { turnFooter } from './turn-footer.js'
 
-export { G2_TURN_FOOTER_RE, g2TurnFooter, stripG2TurnFooter, turnFooter, turnFooterTag, withoutTurnFooter } from './turn-footer.js'
+export { FOOTER_LINE_REFUSED_COPY, G2_TURN_FOOTER_RE, g2TurnFooter, hasFooterShapedLine, stripG2TurnFooter, TURN_FOOTER_SHAPED_RE, TURN_ID_IN_USE_COPY, turnFooter, turnFooterTag, withoutTurnFooter } from './turn-footer.js'
 
 export const G2_TURN_LEDGER_FILE = 'g2-turn-ledger.jsonl'
 export const G2_TURN_LEDGER_ROTATE_BYTES = 5 * 1024 * 1024
@@ -81,6 +87,16 @@ export const PAIRED_INSTANCE_FRESH_MS = 10 * 60_000
 export const TURN_CARRY_TTL_MS = 30_000
 /** Queued origins held at once (a queue holds 8 per thread). */
 export const QUEUED_ORIGIN_MAX = 512
+/** A queued origin lapses this long after it was judged: a turn that waits longer drains unvouched. */
+export const QUEUED_ORIGIN_TTL_MS = 30 * 60_000
+/**
+ * The endpoint vouches for a sealed record only this long after it was written. The verifier's own
+ * window is 15 minutes; this bounds how long any record can ever vouch, so the verifier's
+ * consumed-turn store (kept 7 days) always outlives it.
+ */
+export const G2_TURN_VOUCH_MAX_MS = 24 * 3_600_000
+/** Why a web turn is never vouched in 6.99.29 (see the header). */
+export const WEB_UNVOUCHED_REASON = 'web_cookie_derivable_from_token'
 const OWN_ADDRESS_CACHE_MS = 30_000
 
 export type TurnClient = 'glasses' | 'phone' | 'web' | 'local' | 'unknown'
@@ -111,6 +127,10 @@ export function originKindOf(client: TurnClient | string | undefined): TurnOrigi
 export interface OriginVerdict {
   origin: TurnOrigin
   verifiedOrigin: boolean
+  /** Why it is not vouched (null or absent when it is). */
+  reason?: string | null
+  /** When this origin was judged (ms). A queued or inherited origin lapses from here, never later. */
+  judgedAt?: number
 }
 
 export interface G2TurnRecord {
@@ -121,6 +141,10 @@ export interface G2TurnRecord {
   /** 6.99.29: g2, phone or web; null when the turn was not footed (a local or unknown caller). */
   originKind: TurnOriginKind | null
   verifiedOrigin: boolean
+  /** 6.99.29: why it is not vouched; null when it is. A web turn says WEB_UNVOUCHED_REASON. */
+  reason?: string | null
+  /** 6.99.29: when its origin was judged (ms): the parking request, for a drained turn. */
+  originJudgedAt?: number
   target: { provider: string; sessionId: string; fork?: true }
   via: string
 }
@@ -146,9 +170,33 @@ export function turnTextSha256(text: string): string {
   return createHash('sha256').update(normalizeTurnText(text), 'utf8').digest('hex')
 }
 
-/** Whether a turn of this origin gets the footer: the glasses, the phone, or a signed-in web browser. */
+/**
+ * Whether a turn of this origin gets the footer: ONLY a vouched glasses or phone turn (QA 6.99.29
+ * 5b: it used to read the label, so an unverified glasses turn and every web turn were footed). A
+ * web turn is never footed, whatever its verdict says.
+ */
 export function footerApplies(verdict: OriginVerdict): boolean {
-  return originKindOf(verdict.origin.client) !== null
+  if (verdict.verifiedOrigin !== true) return false
+  const kind = originKindOf(verdict.origin.client)
+  return kind === 'g2' || kind === 'phone'
+}
+
+/** The same verdict, never vouched, with the reason why. */
+export function unvouched(verdict: OriginVerdict, reason: string): OriginVerdict {
+  return { ...verdict, verifiedOrigin: false, reason }
+}
+
+/** The vias of a turn still parked in the queue: the only records a continuation may extend. */
+export const PARKED_TURN_VIAS: ReadonlySet<string> = new Set(['queue', 'queue-edit', 'queue-resend'])
+
+/** Whether a later record under the same id is the same turn: same target, same text, same origin. */
+function sameTurn(a: G2TurnRecord, b: G2TurnRecord): boolean {
+  return a.target.provider === b.target.provider
+    && a.target.sessionId === b.target.sessionId
+    && (a.target.fork === true) === (b.target.fork === true)
+    && a.textSha256 === b.textSha256
+    && a.originKind === b.originKind
+    && a.verifiedOrigin === b.verifiedOrigin
 }
 
 /** `::ffff:100.64.1.2` and `100.64.1.2` are one address; IPv6 scope ids and case are dropped. */
@@ -234,8 +282,21 @@ export class G2TurnLedger {
     private readonly opts: { rotateBytes?: number; memoryMax?: number } = {},
   ) {}
 
-  /** Append one record. Kept in memory (sealed) even when the disk write fails. Never throws. */
-  append(record: G2TurnRecord): boolean {
+  /** The record this process holds (sealed) for this id, or null. Synchronous: memory only. */
+  held(turnId: string): G2TurnRecord | null {
+    return this.memory.get(turnId) ?? null
+  }
+
+  /**
+   * Append one record. Kept in memory (sealed) even when the disk write fails. Never throws.
+   * A held id is never replaced unless the caller says this record continues it (`replace`):
+   * false, and nothing written, otherwise.
+   */
+  append(record: G2TurnRecord, opts: { replace?: boolean } = {}): boolean {
+    if (this.memory.has(record.turnId) && opts.replace !== true) {
+      console.warn(`[g2-turn-ledger] refused to replace held record turnId=${record.turnId}`)
+      return false
+    }
     this.memory.delete(record.turnId)
     this.memory.set(record.turnId, record)
     const max = this.opts.memoryMax ?? G2_TURN_MEMORY_MAX
@@ -289,8 +350,32 @@ export interface G2TurnProvenanceDeps {
   randomToken?: () => string
 }
 
-interface QueuedOrigin { verdict: OriginVerdict; textSha256: string }
-interface Carry { clientTurnId: string; verdict: OriginVerdict; textSha256: string; expiresAt: number }
+/**
+ * What a queued origin is sealed to besides the words (6.99.29, Codex audit of e4758a6): the provider
+ * and thread it was parked for, and the digest of its attachment manifest (each file id with the hash
+ * of its content; '' for none). The drain recomputes it and a vouched turn whose seal changed is refused.
+ */
+export interface QueueSeal { provider: string; threadId: string; attachments: string }
+
+/** The digest of an attachment manifest ('' for no files): ids in order, each with its content hash. */
+export function attachmentsDigest(manifest: ReadonlyArray<{ id: string; sha256: string }>): string {
+  if (manifest.length === 0) return ''
+  return createHash('sha256').update(JSON.stringify(manifest.map(e => [e.id, e.sha256])), 'utf8').digest('hex')
+}
+
+/** Whether a seal names exactly this provider, thread and attachment digest. */
+export function sealMatches(seal: QueueSeal, actual: QueueSeal): boolean {
+  return seal.provider === actual.provider && seal.threadId === actual.threadId && seal.attachments === actual.attachments
+}
+
+/** The refusal copy for a vouched queued turn whose seal no longer matches at its drain. */
+export const QUEUED_TURN_TAMPERED_COPY = 'This queued message changed after it was queued (its words, files or session no longer match), so it was not sent. Send it again from where you typed it.'
+
+interface QueuedOrigin { verdict: OriginVerdict; textSha256: string; judgedAt: number; attachments: string }
+interface Carry { clientTurnId: string; verdict: OriginVerdict | null; seal: QueueSeal | null; textSha256: string; expiresAt: number }
+
+/** What a route asks before it delivers a client-chosen id: the turn it is about to record. */
+export interface TurnCandidate { prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; fork?: boolean }
 
 export class G2TurnProvenance {
   private readonly now: () => number
@@ -341,39 +426,104 @@ export class G2TurnProvenance {
     const local = loopback || ownAddress
     const client: TurnClient = local ? 'local' : !known ? 'unknown' : webSession ? 'web' : said === 'glasses' || said === 'phone' ? said : 'unknown'
     let verifiedOrigin = false
-    if (known && !loopback && !ownAddress) {
-      if (webSession) {
-        // The cookie path passed, no token was shown, and the socket is not this Mac.
-        verifiedOrigin = true
-      } else if (clientInstance !== null) {
-        let paired: string | null = null
-        try { paired = this.deps.pairedInstance(remote, this.now(), PAIRED_INSTANCE_FRESH_MS) } catch { paired = null }
-        verifiedOrigin = paired !== null && paired === clientInstance
-      }
+    let reason: string | null = null
+    if (!known) reason = 'unknown_socket'
+    else if (local) reason = 'local_socket'
+    else if (webSession) {
+      // The cookie path passed, no token was shown, and the socket is not this Mac. RECORDED, never
+      // vouched: the cookie is an HMAC of the API token, so any token holder can mint one (header).
+      reason = WEB_UNVOUCHED_REASON
+    } else if (clientInstance === null) reason = 'no_client_instance'
+    else {
+      let paired: string | null = null
+      try { paired = this.deps.pairedInstance(remote, this.now(), PAIRED_INSTANCE_FRESH_MS) } catch { paired = null }
+      verifiedOrigin = paired !== null && paired === clientInstance
+      if (!verifiedOrigin) reason = 'not_ring_owner'
     }
-    return { origin: { remote: known ? remote : 'unknown', loopback, ownAddress, clientInstance, client, tokenPresented, webSession }, verifiedOrigin }
+    return {
+      origin: { remote: known ? remote : 'unknown', loopback, ownAddress, clientInstance, client, tokenPresented, webSession },
+      verifiedOrigin,
+      reason,
+      judgedAt: this.now(),
+    }
   }
 
-  /** The text to deliver: with the footer for a glasses, phone or web turn, otherwise unchanged. */
+  /** The text to deliver: with the footer for a vouched glasses or phone turn, otherwise unchanged. */
   footed(prompt: string, turnId: string, verdict: OriginVerdict): string {
     if (!footerApplies(verdict) || !G2_TURN_ID_RE.test(turnId)) return prompt
     return `${prompt.replace(/[\t\n\v\f\r ]+$/, '')}\n${turnFooter(turnId, verdict.origin.client)}`
   }
 
-  /** Ledger one delivered or queued turn. `prompt` is the text WITHOUT the footer. Never throws. */
-  record(input: { turnId: string; prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; via: string; fork?: boolean }): G2TurnRecord | null {
+  private build(input: { turnId: string; prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; via: string; fork?: boolean }): G2TurnRecord {
+    const originKind = originKindOf(input.verdict.origin.client)
+    // A web turn is never vouched, whatever verdict reached here (header).
+    const verifiedOrigin = input.verdict.verifiedOrigin === true && originKind !== 'web'
+    const reason = verifiedOrigin ? null : (originKind === 'web' ? WEB_UNVOUCHED_REASON : (input.verdict.reason ?? 'unverified'))
+    return {
+      turnId: input.turnId,
+      createdAt: new Date(this.now()).toISOString(),
+      textSha256: turnTextSha256(input.prompt),
+      origin: { ...input.verdict.origin },
+      originKind,
+      verifiedOrigin,
+      reason,
+      originJudgedAt: typeof input.verdict.judgedAt === 'number' ? input.verdict.judgedAt : this.now(),
+      target: { provider: input.provider, sessionId: input.sessionId, ...(input.fork ? { fork: true as const } : {}) },
+      via: input.via,
+    }
+  }
+
+  /**
+   * Whether delivering this candidate under `turnId` would reuse an id this process already holds
+   * for a DIFFERENT turn. An identical retry (same target, text and origin) is not reuse. The routes
+   * refuse a reuse before anything is sent. Never throws (a throw reads as reuse: refuse).
+   */
+  reusesTurnId(turnId: string, candidate: TurnCandidate, opts: { continues?: boolean } = {}): boolean {
     try {
-      const record: G2TurnRecord = {
-        turnId: input.turnId,
-        createdAt: new Date(this.now()).toISOString(),
-        textSha256: turnTextSha256(input.prompt),
-        origin: { ...input.verdict.origin },
-        originKind: originKindOf(input.verdict.origin.client),
-        verifiedOrigin: input.verdict.verifiedOrigin,
-        target: { provider: input.provider, sessionId: input.sessionId, ...(input.fork ? { fork: true as const } : {}) },
-        via: input.via,
+      const held = this.deps.ledger.held(turnId)
+      if (!held) return false
+      return this.conflicts(held, this.build({ turnId, via: 'check', ...candidate }), opts.continues === true)
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * The one reuse rule. A held record is extended only by an identical retry, or by the server's
+   * own continuation of a turn that is STILL PARKED (a queue, edit or Send again record). A
+   * continuation never replaces a delivered record: a row written into a queue file by hand under
+   * a delivered turn's id cannot drain over it.
+   */
+  private conflicts(held: G2TurnRecord, next: G2TurnRecord, continues: boolean): boolean {
+    if (sameTurn(held, next)) return false
+    return !(continues && PARKED_TURN_VIAS.has(held.via))
+  }
+
+  /** Whether this process holds any record under this id (a throw reads as held: refuse). */
+  holds(turnId: string): boolean {
+    try { return this.deps.ledger.held(turnId) !== null } catch { return true }
+  }
+
+  /**
+   * Ledger one delivered or queued turn. `prompt` is the text WITHOUT the footer. Never throws.
+   * `continues`: the server's own continuation of the turn parked under this id (drain carry, queue
+   * edit, Cursor Stop hand-off), which may extend a parked record. Otherwise a held id is never
+   * replaced: an identical retry keeps the first record, a different turn is refused (null, nothing
+   * written).
+   */
+  record(input: { turnId: string; prompt: string; verdict: OriginVerdict; provider: string; sessionId: string; via: string; fork?: boolean; continues?: boolean }): G2TurnRecord | null {
+    try {
+      const record = this.build(input)
+      const held = this.deps.ledger.held(input.turnId)
+      if (held) {
+        if (this.conflicts(held, record, input.continues === true)) {
+          console.warn(`[g2-turn-ledger] turn id reuse refused turnId=${input.turnId} via=${input.via} held=${held.via}`)
+          return null
+        }
+        // An identical retry that is not a continuation keeps the first record (and its time).
+        if (input.continues !== true && sameTurn(held, record)) return held
       }
-      this.deps.ledger.append(record)
+      this.deps.ledger.append(record, { replace: held !== null })
       return record
     } catch (error) {
       console.error(`[g2-turn-ledger] record failed: ${error instanceof Error ? error.message : error}`)
@@ -385,11 +535,17 @@ export class G2TurnProvenance {
     return `${provider}\u0000${threadId}\u0000${clientTurnId}`
   }
 
-  /** A turn parked in the queue (or edited there): remember who said these words. */
-  noteQueued(provider: string, threadId: string, clientTurnId: string, prompt: string, verdict: OriginVerdict): void {
+  /**
+   * A turn parked in the queue (or edited there): remember who said these words. The origin lapses
+   * QUEUED_ORIGIN_TTL_MS after the verdict was judged (`verdict.judgedAt`), never after this call:
+   * an inherited origin (Send again) cannot be made to last longer by noting it again.
+   */
+  noteQueued(provider: string, threadId: string, clientTurnId: string, prompt: string, verdict: OriginVerdict, attachments = ''): void {
+    const at = this.now()
+    for (const [k, held] of this.queued) if (at - held.judgedAt > QUEUED_ORIGIN_TTL_MS) this.queued.delete(k)
     const key = this.queueKey(provider, threadId, clientTurnId)
     this.queued.delete(key)
-    this.queued.set(key, { verdict, textSha256: turnTextSha256(prompt) })
+    this.queued.set(key, { verdict, textSha256: turnTextSha256(prompt), judgedAt: typeof verdict.judgedAt === 'number' ? verdict.judgedAt : at, attachments })
     while (this.queued.size > QUEUED_ORIGIN_MAX) this.queued.delete(this.queued.keys().next().value as string)
   }
 
@@ -397,33 +553,80 @@ export class G2TurnProvenance {
     this.queued.delete(this.queueKey(provider, threadId, clientTurnId))
   }
 
-  /** The origin remembered for this queued turn, only while its text is the text it vouched for. */
+  /**
+   * The origin remembered for this queued turn, only while its text is the text it vouched for and
+   * within QUEUED_ORIGIN_TTL_MS of when it was judged. A lapsed origin is forgotten here.
+   */
   queuedVerdict(provider: string, threadId: string, clientTurnId: string, prompt: string): OriginVerdict | null {
-    const held = this.queued.get(this.queueKey(provider, threadId, clientTurnId))
-    if (!held || held.textSha256 !== turnTextSha256(prompt)) return null
-    return held.verdict
+    return this.queuedOrigin(provider, threadId, clientTurnId, prompt)?.verdict ?? null
   }
 
-  /** A single-use token that carries a queued turn's origin across the drainer's loopback hop. */
+  private queuedOrigin(provider: string, threadId: string, clientTurnId: string, prompt: string): QueuedOrigin | null {
+    const key = this.queueKey(provider, threadId, clientTurnId)
+    const held = this.queued.get(key)
+    if (!held) return null
+    if (this.now() - held.judgedAt > QUEUED_ORIGIN_TTL_MS) { this.queued.delete(key); return null }
+    if (held.textSha256 !== turnTextSha256(prompt)) return null
+    return held
+  }
+
+  /**
+   * Send again (QA 6.99.29 5a): the copy inherits the ORIGINAL row's origin, never the resender's.
+   * Read from the record this process holds for the original id on the same thread; lapsed (past
+   * QUEUED_ORIGIN_TTL_MS from when it was judged), unknown or unsealed, it is unvouched.
+   */
+  inheritedVerdict(originalId: string, provider: string, threadId: string): OriginVerdict {
+    let held: G2TurnRecord | null = null
+    try { held = this.deps.ledger.held(originalId) } catch { held = null }
+    if (!held || held.target.provider !== provider || held.target.sessionId !== threadId) {
+      return {
+        origin: { remote: 'unknown', loopback: false, ownAddress: false, clientInstance: null, client: 'unknown' },
+        verifiedOrigin: false,
+        reason: 'resend_origin_unknown',
+        judgedAt: this.now(),
+      }
+    }
+    const judgedAt = typeof held.originJudgedAt === 'number' ? held.originJudgedAt : Date.parse(held.createdAt)
+    const verdict: OriginVerdict = { origin: { ...held.origin }, verifiedOrigin: held.verifiedOrigin === true, reason: held.reason ?? null, judgedAt }
+    if (!Number.isFinite(judgedAt) || this.now() - judgedAt > QUEUED_ORIGIN_TTL_MS) return unvouched(verdict, 'resend_origin_lapsed')
+    return verdict
+  }
+
+  /**
+   * A single-use token for the drainer's loopback hop. ALWAYS issued for a drain: it carries the
+   * parked origin while one is held for these words (else none, and the turn route judges the hop as
+   * the local call it is), and it marks the hop as the queue's own continuation of the parked turn,
+   * the one caller allowed to add to that turn's ledger record. Null only if no token can be made.
+   */
   issueCarry(turn: { provider: string; threadId: string; clientTurnId: string; prompt: string }): string | null {
-    const verdict = this.queuedVerdict(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt)
-    if (!verdict) return null
-    const at = this.now()
-    for (const [token, carry] of this.carries) if (carry.expiresAt <= at) this.carries.delete(token)
-    const token = (this.deps.randomToken ?? (() => randomBytes(32).toString('hex')))()
-    this.carries.set(token, { clientTurnId: turn.clientTurnId, verdict, textSha256: turnTextSha256(turn.prompt), expiresAt: at + TURN_CARRY_TTL_MS })
-    return token
+    try {
+      const held = this.queuedOrigin(turn.provider, turn.threadId, turn.clientTurnId, turn.prompt)
+      const at = this.now()
+      for (const [token, carry] of this.carries) if (carry.expiresAt <= at) this.carries.delete(token)
+      const token = (this.deps.randomToken ?? (() => randomBytes(32).toString('hex')))()
+      // The seal rides with the origin: the turn route checks the binding's provider and thread and
+      // the files it is about to compose against it, and refuses a vouched turn that no longer matches.
+      const seal: QueueSeal | null = held ? { provider: turn.provider, threadId: turn.threadId, attachments: held.attachments } : null
+      this.carries.set(token, { clientTurnId: turn.clientTurnId, verdict: held?.verdict ?? null, seal, textSha256: turnTextSha256(turn.prompt), expiresAt: at + TURN_CARRY_TTL_MS })
+      return token
+    } catch {
+      return null
+    }
   }
 
-  /** Spend a carry token. Null unless it is live, unspent, and names this turn and these words. */
-  takeCarry(token: unknown, clientTurnId: string, prompt: string): OriginVerdict | null {
+  /**
+   * Spend a carry token. Null unless it is live, unspent, and names this turn and these words;
+   * otherwise `{ verdict, seal }`: the parked origin and what it is sealed to, or nulls when none was
+   * left to carry.
+   */
+  takeCarry(token: unknown, clientTurnId: string, prompt: string): { verdict: OriginVerdict | null; seal: QueueSeal | null } | null {
     if (typeof token !== 'string' || token.length === 0) return null
     const carry = this.carries.get(token)
     if (!carry) return null
     this.carries.delete(token)
     if (carry.expiresAt <= this.now()) return null
     if (carry.clientTurnId !== clientTurnId || carry.textSha256 !== turnTextSha256(prompt)) return null
-    return carry.verdict
+    return { verdict: carry.verdict, seal: carry.seal }
   }
 }
 
@@ -433,17 +636,26 @@ export async function describeG2Turn(provenance: G2TurnProvenance, turnId: strin
   if (!found) return null
   const { record, sealed } = found
   const createdMs = Date.parse(record.createdAt)
+  const ageMs = Number.isFinite(createdMs) ? Math.max(0, now - createdMs) : null
+  // 6.99.29: g2, phone or web (older records carry only `origin.client`).
+  const originKind = record.originKind ?? originKindOf(record.origin?.client)
+  // Only a record this process wrote and still holds vouches for anything (see the header), never a
+  // web turn (its cookie is derivable from the token), and never past G2_TURN_VOUCH_MAX_MS.
+  let reason: string | null = null
+  if (originKind === 'web') reason = WEB_UNVOUCHED_REASON
+  else if (record.verifiedOrigin !== true) reason = typeof record.reason === 'string' ? record.reason : 'unverified'
+  else if (!sealed) reason = 'not_sealed'
+  else if (ageMs === null || ageMs > G2_TURN_VOUCH_MAX_MS) reason = 'record_too_old'
   return {
     found: true,
     turnId: record.turnId,
     createdAt: record.createdAt,
-    ageMs: Number.isFinite(createdMs) ? Math.max(0, now - createdMs) : null,
+    ageMs,
     textSha256: record.textSha256,
     origin: record.origin,
-    // 6.99.29: g2, phone or web (older records carry only `origin.client`).
-    originKind: record.originKind ?? originKindOf(record.origin?.client),
-    // Only a record this process wrote and still holds vouches for anything (see the header).
-    verifiedOrigin: sealed && record.verifiedOrigin === true,
+    originKind,
+    verifiedOrigin: reason === null,
+    reason,
     sealed,
     target: record.target,
     via: record.via,

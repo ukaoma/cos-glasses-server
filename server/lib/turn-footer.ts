@@ -1,12 +1,19 @@
-// The one trailing verify line a glasses, phone or web turn carries into an agent session (G2
+// The one trailing verify line a vouched glasses or phone turn carries into an agent session (G2
 // authority Tier 1, 6.99.29). PURE: no I/O, no imports, so the stream grammar
 // (session-stream-events.ts), the transcript readers and the queue evidence can take the line off
 // without importing the ledger. lib/g2-turn-provenance.ts re-exports all of it.
 //
-//   [COS-G2 turn <id> · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py <id>]
-//   [COS-WEB turn <id> · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py <id>]
+//   [COS-G2 turn <id> · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py <id> --session <your session id> --provider <claude|codex|cursor>]
+//
+// The COS-WEB tag is reserved for a future web origin backed by a device key the API token cannot
+// produce. In 6.99.29 no turn is footed COS-WEB: a web turn is recorded, never vouched. The readers
+// still take either tag off.
 //
 // The verifier (MU-Chief-Staff operations/scripts/verify_g2_turn.py) mirrors G2_TURN_FOOTER_RE.
+//
+// FOOTER-SHAPED LINES IN TYPED TEXT ARE REFUSED (QA 6.99.29). Only the server writes a footer, so
+// words that carry anything that looks like one are refused at every route that hands words to a
+// session (turns, queue park and edit, steer, fork, Send again, native Codex queue edit).
 
 /** The footer tag per origin: the glasses and the phone keep COS-G2, a web turn says COS-WEB. */
 export function turnFooterTag(client: string): 'COS-G2' | 'COS-WEB' {
@@ -14,8 +21,26 @@ export function turnFooterTag(client: string): 'COS-G2' | 'COS-WEB' {
 }
 
 export function turnFooter(turnId: string, client: string = 'glasses'): string {
-  return `[${turnFooterTag(client)} turn ${turnId} · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ${turnId}]`
+  return `[${turnFooterTag(client)} turn ${turnId} · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ${turnId} --session <your session id> --provider <claude|codex|cursor>]`
 }
+
+/**
+ * Anything that looks like a footer, anywhere in the text: `[COS-G2 turn` or `[COS-WEB turn`, any
+ * case, with spaces or any dash between the parts. Lenient on purpose: refusing a lookalike costs a
+ * retyped line; accepting one could put a second footer in front of a reader.
+ */
+export const TURN_FOOTER_SHAPED_RE = /\[\s*COS[-\u2010-\u2015\u2212\s]*(?:G2|WEB)\s+turn\b/i
+
+/** Whether typed words carry a footer-shaped line (refused: only the server writes a footer). */
+export function hasFooterShapedLine(text: string): boolean {
+  return typeof text === 'string' && TURN_FOOTER_SHAPED_RE.test(text)
+}
+
+/** The refusal copy for a footer-shaped line, shown where the words were typed. */
+export const FOOTER_LINE_REFUSED_COPY = 'This message has a line that looks like a COS verify footer ("[COS-G2 turn" or "[COS-WEB turn"). Only COS writes those lines. Take that line out and send it again.'
+
+/** The refusal copy for a turn id this server already used for a different turn. */
+export const TURN_ID_IN_USE_COPY = 'That message id was already used for a different message. Send it again as a new message.'
 
 /** The 6.66 name, kept: a glasses or phone footer. */
 export function g2TurnFooter(turnId: string): string {

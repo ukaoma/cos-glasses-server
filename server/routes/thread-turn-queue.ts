@@ -30,8 +30,20 @@ import { readQueue, writeQueue, queuedThreadKeys } from '../lib/thread-turn-queu
 import type { DeliveryEvidence } from '../lib/queue-turn-evidence.js'
 import { continueLiveEnabled } from '../lib/session-peer-inbox-deps.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
-import { stripG2TurnFooter, type G2TurnProvenance, type OriginVerdict } from '../lib/g2-turn-provenance.js'
-import { defaultTurnAttachmentStore, keepTurnAttachments, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
+import { attachmentsDigest, FOOTER_LINE_REFUSED_COPY, hasFooterShapedLine, stripG2TurnFooter, TURN_ID_IN_USE_COPY, unvouched, type G2TurnProvenance, type OriginVerdict } from '../lib/g2-turn-provenance.js'
+import { defaultTurnAttachmentStore, keepTurnAttachments, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, turnAttachmentManifest, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
+
+/**
+ * G2 authority Tier 1 (6.99.29, Codex audit of e4758a6): the verdict a parked turn's files allow, and
+ * the attachment digest its origin is sealed to. Files whose content cannot be read leave the turn
+ * unvouched (it still parks); no files is the empty digest and reads nothing.
+ */
+async function sealFiles(ids: readonly string[] | undefined, verdict: OriginVerdict, store: TurnAttachmentStore | undefined): Promise<{ verdict: OriginVerdict; attachments: string }> {
+  if (!Array.isArray(ids) || ids.length === 0) return { verdict, attachments: '' }
+  const manifest = await turnAttachmentManifest(ids, store)
+  if (!manifest.ok) return { verdict: unvouched(verdict, 'attachments_unsealable'), attachments: '' }
+  return { verdict, attachments: attachmentsDigest(manifest.manifest) }
+}
 
 export interface ThreadTurnQueueDeps {
   /** 11/07: the media store a parked turn's `attachmentIds` are checked against. Absent: the real store. Tests pass a fake. */
@@ -73,8 +85,9 @@ export interface ThreadTurnQueueDeps {
   cursorCliChat?: (threadId: string) => boolean
   /**
    * G2 authority Tier 1, with web origin (6.99.29), optional: the origin of each parked turn is
-   * captured here (and again on an edit or a Send again) and carried to its drain; a steer and a
-   * native Codex queue edit are ledgered and footed like a turn. Absent: the 6.99.28 behaviour.
+   * captured here (and again on an edit; a Send again inherits the original row's) and carried to
+   * its drain, forgotten on any settle; a steer and a native Codex queue edit are ledgered and
+   * footed like a turn. Absent: the 6.99.28 behaviour.
    */
   provenance?: G2TurnProvenance
   now: () => number
@@ -224,6 +237,11 @@ export async function drainThread(
     if (index >= 0) { latest[index] = turn; writeQueue(provider, threadId, latest, durable ? { durable: true } : {}) }
   }
   let refusedGate: ReturnType<ThreadTurnQueueDeps['occupancy']> | null = null
+  // G2 authority Tier 1 (QA 6.99.29): a parked origin is forgotten on ANY settle (delivered,
+  // cancelled, refused, expired, given up). Only a row still `waiting` keeps it for its next attempt.
+  const forgetIfSettled = (turn: QueuedThreadTurn): void => {
+    if (turn.status !== 'waiting') deps.provenance?.forgetQueued(provider, threadId, turn.clientTurnId)
+  }
 
   for (const snapshot of queue) {
     const turn = readQueue(provider, threadId, deps.now()).find(t => t.clientTurnId === snapshot.clientTurnId)
@@ -272,6 +290,7 @@ export async function drainThread(
       turn.reason = decision === 'expire' ? 'queued_turn_expired' : 'delivery_attempts_exhausted'
       turn.settledAt = deps.now()
       retired += 1; persist(turn)
+      forgetIfSettled(turn)
       continue
     }
 
@@ -348,6 +367,7 @@ export async function drainThread(
       held += 1
     }
     persist(turn)
+    forgetIfSettled(turn)
   }
   return { delivered, held, retired }
 }
@@ -482,7 +502,10 @@ async function steerTurn(
     ...(typeof deps.bootId === 'string' && deps.bootId.length > 0 ? { deliveringBootId: deps.bootId } : {}),
   }
   const admitted = admitToQueue(queue, intent)
-  if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
+  if (!admitted.ok) {
+    deps.provenance?.forgetQueued(provider, threadId, clientTurnId)
+    return res.status(409).json({ error: admitted.reason })
+  }
   writeQueue(provider, threadId, admitted.queue, { durable: true })
 
   /** Rewrite this row on the CURRENT file: other requests may have changed others meanwhile. */
@@ -490,6 +513,9 @@ async function steerTurn(
     const latest = readQueue(provider, threadId, deps.now())
     const row = latest.find(t => t.clientTurnId === clientTurnId)
     if (row) { apply(row); writeQueue(provider, threadId, latest, { durable: true }) }
+    // G2 authority Tier 1 (QA 6.99.29): a steer that settled (delivered or refused) forgets its
+    // parked origin; one put back to wait keeps it for the drain.
+    if (!row || row.status !== 'waiting') deps.provenance?.forgetQueued(provider, threadId, clientTurnId)
     return latest
   }
   const backToWaiting = (row: QueuedThreadTurn): void => {
@@ -582,6 +608,12 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       return res.status(400).json({ error: 'invalid_request', reason: 'invalid_cos_session_id' })
     }
 
+    // G2 authority Tier 1 (QA 6.99.29): only the server writes a verify footer. Words carrying
+    // anything footer-shaped are refused where they were typed (this is also the steer's door).
+    if (deps.provenance && hasFooterShapedLine(prompt)) {
+      return res.status(400).json({ error: 'footer_line_refused', reasonCopy: FOOTER_LINE_REFUSED_COPY })
+    }
+
     // 11/07 (Control Web attach): files with the words, as media-store ids. Absent is the old row, byte for byte.
     const attach = parseTurnAttachmentIds(body.attachmentIds)
     if (!attach.ok) return res.status(400).json({ error: 'invalid_request', reason: 'invalid_attachments' })
@@ -609,6 +641,14 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
           ...(heldCopy ? { reasonCopy: heldCopy } : {}),
         })
       }
+    }
+
+    // G2 authority Tier 1 (6.99.29): who parked these words, judged on this request's own socket,
+    // token and cookie. A turn id this server already holds a record for, for a different turn, is
+    // never reused (QA 6.99.29: it would overwrite that record).
+    let verdict = deps.provenance ? deps.provenance.originOf(req) : null
+    if (deps.provenance && verdict && deps.provenance.reusesTurnId(clientTurnId, { prompt, verdict, provider, sessionId: threadId })) {
+      return res.status(409).json({ error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })
     }
 
     // THE GATE DECIDES WHETHER PARKING IS EVEN HONEST. A structural refusal can never
@@ -646,10 +686,13 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       ...(attach.ids.length > 0 ? { attachmentIds: attach.ids } : {}),
     }
 
-    // G2 authority Tier 1 (6.99.29): who parked these words, judged on this request's own socket,
-    // token and cookie, and held in memory with their hash so the drain can carry it.
-    const verdict = deps.provenance ? deps.provenance.originOf(req) : null
-    if (deps.provenance && verdict) deps.provenance.noteQueued(provider, threadId, clientTurnId, prompt, verdict)
+    // Held in memory with the words' hash, sealed to this provider, thread and these files (each id
+    // with its content hash), so the drain can carry it (QUEUED_ORIGIN_TTL_MS at most).
+    if (deps.provenance && verdict) {
+      const sealed = await sealFiles(attach.ids, verdict, deps.turnAttachmentStore)
+      verdict = sealed.verdict
+      deps.provenance.noteQueued(provider, threadId, clientTurnId, prompt, verdict, sealed.attachments)
+    }
 
     let steerFallback: string | null = null
     if (wantSteer) {
@@ -684,7 +727,7 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
   // writing it, so two taps (lens and phone) in the same tick cannot both pass the check.
   // The new row is admitted even when the thread is free: the drain sends it through the
   // ordinary front door, with every gate.
-  router.post('/agent-sessions/:provider/:threadId/queued-turns/:clientTurnId/resend', (req: Request, res: Response, next) => {
+  router.post('/agent-sessions/:provider/:threadId/queued-turns/:clientTurnId/resend', async (req: Request, res: Response, next) => {
     // Off: not a route at all, exactly as on 6.77 (a client reads the 404 as "update the server").
     if (!queueResendEnabled()) return next()
     res.set('Cache-Control', 'private, no-store')
@@ -709,6 +752,12 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
         : { clientTurnId: original.resentAs, resendOf: original.clientTurnId, replayed: true })
     }
     if (original.status !== 'refused' && original.status !== 'expired') return res.status(409).json({ error: 'not_resendable' })
+    // G2 authority Tier 1 (QA 6.99.29): the copy's words go to a session, so they meet the footer
+    // rule like any typed words, and its id may not be one this server already holds a record for.
+    if (deps.provenance && hasFooterShapedLine(original.prompt)) {
+      return res.status(400).json({ error: 'footer_line_refused', reasonCopy: FOOTER_LINE_REFUSED_COPY })
+    }
+    if (deps.provenance && deps.provenance.holds(newId)) return res.status(409).json({ error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })
     // "May not have been sent": a second copy is possible, so the person has to have been told.
     if (original.deliveryState === 'unknown' && body.acknowledge !== 'may_duplicate') {
       return res.status(409).json({ error: 'acknowledge_required' })
@@ -726,12 +775,15 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     if (!admitted.ok) return res.status(409).json({ error: admitted.reason })
     original.resentAs = newId
     writeQueue(provider, threadId, admitted.queue)
-    // G2 authority Tier 1 (6.99.29): Send again is the resender choosing these words again, so the
-    // copy carries the resender's origin, exactly as an edit carries the editor's.
+    // G2 authority Tier 1 (QA 6.99.29 5a): the copy inherits the ORIGINAL row's origin, never the
+    // resender's: an agent tapping Send again on Miles's row cannot make it newer than it was, and a
+    // web tap on an agent's row cannot make it Miles's. Lapsed (QUEUED_ORIGIN_TTL_MS from when the
+    // original was judged) or unknown, it is unvouched. A web origin is unvouched anyway.
     if (deps.provenance) {
-      const verdict = deps.provenance.originOf(req)
-      deps.provenance.noteQueued(provider, threadId, newId, copy.prompt, verdict)
-      deps.provenance.record({ turnId: newId, prompt: copy.prompt, verdict, provider, sessionId: threadId, via: 'queue-resend' })
+      // After the write: the read-modify-write above stays one synchronous step. Sealed to the copy's files.
+      const sealed = await sealFiles(copy.attachmentIds, deps.provenance.inheritedVerdict(original.clientTurnId, provider, threadId), deps.turnAttachmentStore)
+      deps.provenance.noteQueued(provider, threadId, newId, copy.prompt, sealed.verdict, sealed.attachments)
+      deps.provenance.record({ turnId: newId, prompt: copy.prompt, verdict: sealed.verdict, provider, sessionId: threadId, via: 'queue-resend' })
     }
     console.log(`[thread-turn-queue] resend provider=${provider} from=${original.clientTurnId} as=${newId} unknown=${original.deliveryState === 'unknown'}`)
     return res.status(200).json(publicRow(copy, queuePosition(admitted.queue, newId)))
@@ -767,6 +819,10 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     const provider = String(req.params.provider), threadId = String(req.params.threadId), id = String(req.params.clientTurnId)
     const prompt = req.body?.prompt
     if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > DEFAULT_MAX_PROMPT_CHARS) return res.status(400).json({ error: 'invalid_prompt' })
+    // G2 authority Tier 1 (QA 6.99.29): an edit is typed words like any other.
+    if (deps.provenance && hasFooterShapedLine(prompt)) {
+      return res.status(400).json({ error: 'footer_line_refused', reasonCopy: FOOTER_LINE_REFUSED_COPY })
+    }
     if (provider === 'codex' && id.startsWith('codex-native:')) {
       try {
         // G2 authority Tier 1: the edit replaces the text in the Codex app's own queue, so it is a
@@ -785,13 +841,21 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     const queue = readQueue(provider, threadId, deps.now())
     const row = queue.find(t => t.clientTurnId === id)
     if (!row || row.status !== 'waiting') return res.status(409).json({ error: 'already_delivering' })
+    // The words are now whoever edited them: their origin replaces the parked one. Only over a record
+    // that is still parked (QA 6.99.29): a row written into the queue file under a delivered turn's id
+    // cannot be edited over that turn's record.
+    const verdict = deps.provenance ? deps.provenance.originOf(req) : null
+    if (deps.provenance && verdict && deps.provenance.reusesTurnId(id, { prompt, verdict, provider, sessionId: threadId }, { continues: true })) {
+      return res.status(409).json({ error: 'turn_id_in_use', reasonCopy: TURN_ID_IN_USE_COPY })
+    }
     row.prompt = prompt
     writeQueue(provider, threadId, queue)
-    // The words are now whoever edited them: their origin replaces the parked one.
-    if (deps.provenance) {
-      const verdict = deps.provenance.originOf(req)
-      deps.provenance.noteQueued(provider, threadId, id, prompt, verdict)
-      deps.provenance.record({ turnId: id, prompt, verdict, provider, sessionId: threadId, via: 'queue-edit' })
+    if (deps.provenance && verdict) {
+      // Sealed to the row's files as they are now (an edit changes only the words).
+      const sealed = await sealFiles(row.attachmentIds, verdict, deps.turnAttachmentStore)
+      deps.provenance.noteQueued(provider, threadId, id, prompt, sealed.verdict, sealed.attachments)
+      // The queue's own row, re-judged: it continues the record parked under this id.
+      deps.provenance.record({ turnId: id, prompt, verdict: sealed.verdict, provider, sessionId: threadId, via: 'queue-edit', continues: true })
     }
     return res.json({ updated: true })
   })

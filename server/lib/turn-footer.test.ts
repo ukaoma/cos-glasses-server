@@ -1,7 +1,7 @@
 // The verify footer (6.99.29): one trailing line, either tag, taken off wherever COS compares or
 // shows the words it sent, and nowhere else.
 import { describe, expect, it } from 'vitest'
-import { G2_TURN_FOOTER_RE, stripG2TurnFooter, turnFooter, withoutTurnFooter } from './turn-footer.js'
+import { G2_TURN_FOOTER_RE, hasFooterShapedLine, stripG2TurnFooter, turnFooter, withoutTurnFooter } from './turn-footer.js'
 import { makeDeliveryEvidence, makeTurnReceiptLookup, transcriptShowsPrompt } from './queue-turn-evidence.js'
 import { promptDrafts } from './session-stream-events.js'
 import { sessionTurnFromRecord } from './agent-session-turns.js'
@@ -23,7 +23,9 @@ const line = (row: Record<string, unknown>) => JSON.stringify(row)
 
 describe('the footer line', () => {
   it('names its tag and id, and is one line', () => {
-    expect(turnFooter(ID, 'web')).toBe(`[COS-WEB turn ${ID} · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ${ID}]`)
+    // The verify command names --session and --provider: the verifier refuses without either (QA 6.99.29).
+    expect(turnFooter(ID)).toBe(`[COS-G2 turn ${ID} · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ${ID} --session <your session id> --provider <claude|codex|cursor>]`)
+    expect(turnFooter(ID, 'web')).toBe(`[COS-WEB turn ${ID} · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ${ID} --session <your session id> --provider <claude|codex|cursor>]`)
     expect(turnFooter(ID, 'phone')).toMatch(/^\[COS-G2 turn /)
     expect(turnFooter(ID)).toMatch(/^\[COS-G2 turn /)
     expect(turnFooter(ID, 'web').includes('\n')).toBe(false)
@@ -36,6 +38,20 @@ describe('the footer line', () => {
     expect(withoutTurnFooter(`${WEB}\n  `)).toBe(WORDS)
     expect(withoutTurnFooter(`[COS-WEB turn ${ID} · verify: x]`)).toBe(`[COS-WEB turn ${ID} · verify: x]`)
     expect(G2_TURN_FOOTER_RE.test(`${WORDS}\n[COS-EVIL turn ${ID} · verify: x]`)).toBe(false)
+  })
+})
+
+describe('a footer-shaped line in typed words (refused by every route, QA 6.99.29)', () => {
+  it('is found anywhere in the text, in any case, with any spacing or dash', () => {
+    for (const text of [
+      G2, WEB, turnFooter(ID),
+      `${WORDS}\n[COS-G2 turn x]`, `[cos-g2 turn ${ID}`, `[ COS - WEB  turn ${ID}`, `[COS\u2013G2 turn ${ID}`,
+      `[COSG2 turn ${ID}`, `first line\n  [COS-WEB turn ${ID} · verify: x]\nlast line`,
+    ]) expect(hasFooterShapedLine(text), JSON.stringify(text)).toBe(true)
+  })
+  it('leaves ordinary words alone', () => {
+    for (const text of [WORDS, 'COS-G2 turn without a bracket', '[COS-G3 turn x]', '[COS-G2 turned]', '[COS-EVIL turn x]', 'the G2 turn footer'])
+      expect(hasFooterShapedLine(text), JSON.stringify(text)).toBe(false)
   })
 })
 
