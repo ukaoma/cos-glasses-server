@@ -115,13 +115,13 @@
     var text = Q.notes[item.id] || '';
     return '<p class="sq-note' + (text ? '' : ' hidden') + '" data-sq-note="' + esc(item.id) + '" role="status">' + esc(text) + '</p>';
   }
-  function questionCard(item) {
+  function questionCard(item, scope) {
     var picks = Q.picks[item.id] || [];
     var sending = !!Q.sending[item.id];
     var blocks = (item.questions || []).map(function (q, qi) {
       var p = picks[qi] || { labels: [], other: '' };
       var type = q.multiSelect ? 'checkbox' : 'radio';
-      var name = 'sq-' + item.id + '-' + qi;
+      var name = (scope || 'sq') + '-' + item.id + '-' + qi;
       return '<fieldset class="sq-q"><legend class="sq-q-text">' + esc(q.question) + (q.header ? ' <span class="sq-q-tag">' + esc(q.header) + '</span>' : '') + '</legend>' +
         (q.multiSelect ? '<p class="sq-fine">Pick any that apply.</p>' : '') +
         '<div class="sq-options">' + q.options.map(function (o, oi) {
@@ -153,26 +153,48 @@
         '<button type="button" class="link-btn sq-leave" data-sq="leave" data-sq-id="' + esc(item.id) + '"' + (sending ? ' disabled' : '') + '>Leave for the Mac</button></div>' +
       noteHtml(item) + '</article>';
   }
-  function render() {
+  // Other places can show the cards for one session (Today's overlay, panes/today-actions.js): the same items, picks,
+  // answer ids and posts, drawn into their own element. A mount is dropped when its element leaves the page.
+  var mounts = [];
+  function hostsOf() {
+    mounts = mounts.filter(function (m) { return m.el.isConnected !== false; });
+    return [{ el: host, sessionId: null, scope: 'sq' }].concat(mounts);
+  }
+  function itemsFor(sessionId) {
+    var want = String(sessionId || '').toLowerCase();
+    return Q.items.filter(function (i) { return !want || String(i.sessionId || '').toLowerCase() === want; });
+  }
+  function drawInto(m) {
     var active = document.activeElement;
-    var focus = active && active.hasAttribute && active.hasAttribute('data-sq-other') ? { id: active.getAttribute('data-sq-id'), q: active.getAttribute('data-q'), start: active.selectionStart, end: active.selectionEnd } : null;
-    host.innerHTML = Q.items.map(function (i) { return i.kind === 'approval' ? approvalCard(i) : questionCard(i); }).join('');
-    host.hidden = !Q.items.length;
+    var focus = active && active.hasAttribute && active.hasAttribute('data-sq-other') && m.el.contains && m.el.contains(active) ? { id: active.getAttribute('data-sq-id'), q: active.getAttribute('data-q'), start: active.selectionStart, end: active.selectionEnd } : null;
+    var list = itemsFor(m.sessionId);
+    m.el.innerHTML = list.map(function (i) { return i.kind === 'approval' ? approvalCard(i) : questionCard(i, m.scope); }).join('');
+    m.el.hidden = !list.length;
     if (focus) {
-      var box = host.querySelector('[data-sq-other][data-sq-id="' + focus.id + '"][data-q="' + focus.q + '"]');
+      var box = m.el.querySelector('[data-sq-other][data-sq-id="' + focus.id + '"][data-q="' + focus.q + '"]');
       if (box) { box.focus({ preventScroll: true }); try { box.setSelectionRange(focus.start, focus.end); } catch (_e) {} }
     }
+    if (m.onChange) { try { m.onChange(list.length); } catch (_e) {} }
+  }
+  function render() {
+    hostsOf().forEach(drawInto);
     clearInterval(Q.tick);
     if (Q.items.length) Q.tick = setInterval(tickSeconds, 1000);
   }
   function itemOf(id) { for (var i = 0; i < Q.items.length; i++) if (Q.items[i].id === id) return Q.items[i]; return null; }
   // The seconds move without a redraw (a redraw would drop a half-typed answer).
   function tickSeconds() {
-    host.querySelectorAll('[data-sq-secs]').forEach(function (el) { var it = itemOf(el.getAttribute('data-sq-secs')); if (it) el.textContent = timeLeft(secondsLeft(it)); });
+    hostsOf().forEach(function (m) {
+      m.el.querySelectorAll('[data-sq-secs]').forEach(function (el) { var it = itemOf(el.getAttribute('data-sq-secs')); if (it) el.textContent = timeLeft(secondsLeft(it)); });
+    });
   }
   function patchCard(id) {
-    var item = itemOf(id), card = host.querySelector('[data-sq-card="' + id + '"]');
-    if (!item || !card) return render();
+    var item = itemOf(id), cards = [];
+    hostsOf().forEach(function (m) { var c = m.el.querySelector('[data-sq-card="' + id + '"]'); if (c) cards.push(c); });
+    if (!item || !cards.length) return render();
+    cards.forEach(function (card) { patchOne(card, id, item); });
+  }
+  function patchOne(card, id, item) {
     var send = card.querySelector('[data-sq="send"]');
     if (send) { send.disabled = !!Q.sending[id] || !complete(item); send.textContent = Q.sending[id] ? 'Sending…' : Q.armed[id] === 'send' ? 'Tap again to send' : 'Send'; }
     var allow = card.querySelector('[data-sq="allow"]'); if (allow) allow.textContent = Q.armed[id] === 'allow' ? 'Tap again to allow' : 'Allow once';
@@ -219,7 +241,7 @@
     });
     post(item.id, { answers: answers }, 'Sent to ' + engine(item) + '.');
   }
-  host.addEventListener('click', function (e) {
+  function onClick(e) {
     var b = e.target.closest('[data-sq]');
     if (!b || b.disabled) return;
     var id = b.getAttribute('data-sq-id'), what = b.getAttribute('data-sq'), item = itemOf(id);
@@ -241,19 +263,22 @@
     if (Q.armed[id] !== what) { Q.armed[id] = what; patchCard(id); return; }
     if (what === 'send') return sendAnswers(item);
     if (what === 'allow' || what === 'deny') return post(id, { decision: what }, what === 'allow' ? 'Allowed once.' : 'Denied.');
-  });
-  host.addEventListener('change', function (e) {
+  }
+  function onChange(e) {
     var t = e.target;
     if (!t.hasAttribute('data-sq-pick')) return;
     var id = t.getAttribute('data-sq-id'), item = itemOf(id); if (!item) return;
     var qi = Number(t.getAttribute('data-q')), q = item.questions[qi], label = q.options[Number(t.getAttribute('data-o'))].label;
     var p = Q.picks[id][qi];
     if (q.multiSelect) p.labels = t.checked ? p.labels.concat([label]) : p.labels.filter(function (l) { return l !== label; });
-    else { p.labels = [label]; p.other = ''; var box = host.querySelector('[data-sq-other][data-sq-id="' + id + '"][data-q="' + qi + '"]'); if (box) box.value = ''; }
+    else {
+      p.labels = [label]; p.other = '';
+      hostsOf().forEach(function (m) { var box = m.el.querySelector('[data-sq-other][data-sq-id="' + id + '"][data-q="' + qi + '"]'); if (box) box.value = ''; });
+    }
     Q.armed[id] = '';
     patchCard(id);
-  });
-  host.addEventListener('input', function (e) {
+  }
+  function onInput(e) {
     var t = e.target;
     if (!t.hasAttribute('data-sq-other')) return;
     var id = t.getAttribute('data-sq-id'), item = itemOf(id); if (!item) return;
@@ -262,14 +287,24 @@
     // Single choice: typing your own answer clears the picked option, as on the phone.
     if (!q.multiSelect && t.value.trim() && p.labels.length) {
       p.labels = [];
-      host.querySelectorAll('[data-sq-pick][data-sq-id="' + id + '"][data-q="' + qi + '"]').forEach(function (r) { r.checked = false; });
+      hostsOf().forEach(function (m) { m.el.querySelectorAll('[data-sq-pick][data-sq-id="' + id + '"][data-q="' + qi + '"]').forEach(function (r) { r.checked = false; }); });
     }
     Q.armed[id] = '';
     patchCard(id);
-  });
+  }
+  function listen(el) { el.addEventListener('click', onClick); el.addEventListener('change', onChange); el.addEventListener('input', onInput); }
+  listen(host);
+  // Draw this session's cards into `el` and keep them in step; `onChange(count)` hears each redraw.
+  function mount(el, sessionId, onChange) {
+    if (!el) return null;
+    var m = { el: el, sessionId: String(sessionId || '').toLowerCase(), scope: 'sqm' + (mounts.length + 1), onChange: onChange || null };
+    mounts.push(m); listen(el); drawInto(m);
+    if (!Q.stopped) { clearTimeout(Q.timer); Q.timer = setTimeout(poll, 0); }
+    return { count: function () { return itemsFor(m.sessionId).length; }, unmount: function () { mounts = mounts.filter(function (x) { return x !== m; }); } };
+  }
 
   document.addEventListener('visibilitychange', function () { if (document.hidden) stop(); else if (signedIn()) start(); });
   W.onShell(function () { start(); });
 
-  W.sessionQuestions = { _state: Q, _take: take, _render: render, poll: poll };
+  W.sessionQuestions = { _state: Q, _take: take, _render: render, poll: poll, mount: mount, itemsFor: itemsFor };
 })();

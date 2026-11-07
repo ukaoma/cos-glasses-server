@@ -180,7 +180,7 @@ describe('the shipped web-control folder', () => {
     const block = html.match(/<script type="application\/json" id="lazy-panes">([\s\S]*?)<\/script>/)
     expect(block).not.toBeNull()
     const lazy = JSON.parse(block![1]) as Record<string, string>
-    expect(Object.keys(lazy).sort()).toEqual(['dictation', 'meetings', 'messages', 'settings', 'speakers', 'threads', 'work'])
+    expect(Object.keys(lazy).sort()).toEqual(['dictation', 'meetings', 'messages', 'settings', 'speakers', 'threads', 'todayActions', 'work'])
     for (const [pane, url] of Object.entries(lazy)) {
       const m = url.match(/^\/control(\/panes\/[a-z-]+\.js)\?v=([0-9a-f]{16})$/)
       expect(m, url).not.toBeNull()

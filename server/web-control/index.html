@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="/control/panes/sessions.css">
   <link rel="stylesheet" href="/control/panes/cos-chat.css">
   <link rel="stylesheet" href="/control/panes/questions.css">
+  <link rel="stylesheet" href="/control/panes/today-actions.css">
   <script src="/control/theme.js"></script>
 </head>
 <body>
@@ -149,7 +150,7 @@
           <section class="card hidden" id="intake-card" aria-labelledby="intake-title">
             <div class="panel-head">
               <h2 id="intake-title" class="panel-title">From today's meetings<span id="intake-count" class="count"></span></h2>
-              <button type="button" class="link-btn" data-goto="work/sort">Review</button>
+              <button type="button" class="link-btn" data-today="intake" data-goto="work/sort">Review</button>
             </div>
             <div id="intake-body" class="intake-body"></div>
           </section>
@@ -273,7 +274,8 @@
     "meetings": "/control/panes/meetings.js",
     "work": "/control/panes/work.js",
     "dictation": "/control/panes/dictation.js",
-    "settings": "/control/panes/settings.js"
+    "settings": "/control/panes/settings.js",
+    "todayActions": "/control/panes/today-actions.js"
   }</script>
 </body>
 </html>
