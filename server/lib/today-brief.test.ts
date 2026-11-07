@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
-  claimsNothingWaits, todayBriefOpener, normalizeTodayBriefInputs, scrubText, subagentLookups, todayBriefFingerprint, withSubagents, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
+  claimsNothingWaits, todayBriefOpener, unbackedDateClaim, inputsCorpus, normalizeTodayBriefInputs, scrubText, subagentLookups, todayBriefFingerprint, withSubagents, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
 } from './today-brief.js'
 
 // No model is ever called here: `generate` is a fake that records its prompts.
@@ -290,10 +290,10 @@ describe('inputs are untrusted data', () => {
 describe('the answer is cleaned and checked', () => {
   const seen = inputs()
   it('dashes, arrows, markdown, ids and paths go; at most three sentences', () => {
-    const out = cleanTodayBrief('**Summary:** The release — nearly done → ships at 4 from /Users/x/y/z. Session 019a0000-1111-2222-3333-444455556666 waits. Third. Fourth sentence here.', seen)!
+    const out = cleanTodayBrief('**Summary:** The release — nearly done → ships next from /Users/x/y/z. Session 019a0000-1111-2222-3333-444455556666 waits. Third. Fourth sentence here.', seen)!
     expect(out).not.toMatch(/[—–→*]|019a0000|\/Users/)
     expect(out.match(/[.!?]/g)!.length).toBeLessThanOrEqual(3)
-    expect(out).toContain('nearly done to ships')
+    expect(out).toContain('nearly done to ships next')
   })
   it('a version number or a decimal is not a sentence end', () => {
     const out = cleanTodayBrief('You are shipping 6.99.26 in about 1.5 hours. Release QA waits on you. Then the install. A fourth sentence.', seen)
@@ -528,5 +528,64 @@ describe('6.99.26 QA live call (11/07): the model restated the count the server 
     // With no opener there is nothing to repeat: a count about the work stands.
     expect(cleanTodayBrief('Two tasks are waiting on the CI run. The builders are moving.', none)).toBe('Two tasks are waiting on the CI run. The builders are moving.')
     expect(cleanTodayBriefWithGuard('Two tasks wait on reviews from QA. The builders are moving.', live).dropped).toBe('restated_count')
+  })
+})
+
+describe('6.99.27 QA round 2: more "nothing waits" phrasings, "none running", and dates the inputs do not have', () => {
+  const SAT = Date.parse('2026-11-07T15:00:00')   // a Saturday, local time
+  const busy = normalizeTodayBriefInputs({
+    sessions: [{ title: 'Builder', state: 'working', minutes: 9 }, { title: 'Release QA', state: 'waiting', minutes: 3, waiting: 'Approve the publish' }],
+    needs: [{ title: 'Review 7 memories' }], later: 1, sessionsRead: true, needsComplete: true,
+  })
+  const clear = normalizeTodayBriefInputs({ sessions: [{ title: 'Quiet one', state: 'open', minutes: 300 }], sessionsRead: true, needsComplete: true })
+  const KEEP = ' The builders are on the Today summary and the Work pane.'
+  it('each phrasing is dropped while things need the person', () => {
+    for (const claim of ['There are no open questions for you.', 'Everything is handled.', 'You are free for the day.', 'You are all done.',
+      'There is nothing left for you.', 'You\u2019re good.', 'You\'re good for now.', 'Nothing is blocked on you.', 'Nobody is asking you anything.',
+      'Everything has been taken care of.', 'There is nothing for you to handle.', 'Your afternoon is free.', 'All done for now.']) {
+      const out = cleanTodayBriefWithGuard(claim + KEEP, busy, SAT)
+      expect(out, claim).toEqual({ text: KEEP.trim(), dropped: 'nothing_waiting' })
+    }
+  })
+  it('"none of your agents are running" (and its kin) goes whenever a session works or the list was not read', () => {
+    for (const claim of ['None of your agents are running.', 'No sessions are working right now.', 'Nothing is moving.', 'All your agents are idle.', 'Everything is quiet.']) {
+      expect(cleanTodayBriefWithGuard(claim + KEEP, busy, SAT).dropped, claim).toBe('nothing_running')
+      expect(cleanTodayBriefWithGuard(claim + KEEP, { ...clear, sessionsRead: false }, SAT).dropped, claim).toBe('nothing_running')
+    }
+    expect(cleanTodayBrief('None of your agents are running. One session is open and quiet.', clear, SAT)).toBe('None of your agents are running. One session is open and quiet.')
+  })
+  it('the truly clear case still stands', () => {
+    expect(cleanTodayBrief('You are all caught up. One session is open and quiet.', clear, SAT)).toBe('You are all caught up. One session is open and quiet.')
+    expect(cleanTodayBrief('You\u2019re good. Everything is handled.', clear, SAT)).toBe('You\u2019re good. Everything is handled.')
+  })
+  it('a weekday, a month date, a numeric date or a clock time the inputs do not have is dropped', () => {
+    for (const claim of ['These can wait until Monday.', 'The release ships on Friday.', 'Review it tomorrow morning at 9.', 'QA lands at 9:15.',
+      'The deadline is Nov 12.', 'It is due 11/12.', 'The call is at 3 pm.', 'Pick it up tonight.', 'Today the builders finish the release.']) {
+      expect(cleanTodayBriefWithGuard(claim + KEEP, busy, SAT), claim).toEqual({ text: KEEP.trim(), dropped: 'date_claim' })
+    }
+  })
+  it('a date or time the inputs, the opener or the clock back stands; versions and durations are not dates', () => {
+    const withDate = normalizeTodayBriefInputs({ sessions: [{ title: 'Monday standup prep', state: 'working', minutes: 9, line: 'Review moved to Nov 12 at 9:15' }], sessionsRead: true, needsComplete: true })
+    expect(cleanTodayBrief('The Monday standup prep is moving, and the review moved to Nov 12 at 9:15.', withDate, SAT)).toBe('The Monday standup prep is moving, and the review moved to Nov 12 at 9:15.')
+    expect(cleanTodayBrief('It is Saturday, and the builders are moving.', busy, SAT)).toBe('It is Saturday, and the builders are moving.')
+    // The opener says "can wait until tomorrow" (busy has a later item), so "tomorrow" stands; with no fold it does not.
+    expect(todayBriefOpener(busy)).toContain('tomorrow')
+    expect(cleanTodayBrief('The memories can wait until tomorrow. The builders are moving.', busy, SAT)).toBe('The memories can wait until tomorrow. The builders are moving.')
+    const noFold = { ...busy, later: 0 }
+    expect(cleanTodayBriefWithGuard('The memories can wait until tomorrow. The builders are moving.', noFold, SAT).dropped).toBe('date_claim')
+    expect(cleanTodayBrief('Release QA is at 6.99.26, and two builders have run for 2 hours.', busy, SAT)).toBe('Release QA is at 6.99.26, and two builders have run for 2 hours.')
+    expect(cleanTodayBrief('Two builders are at 3 sessions each and 24/7 checks pass.', busy, SAT)).toBe('Two builders are at 3 sessions each and 24/7 checks pass.')
+    expect(unbackedDateClaim('due at 5 pm', inputsCorpus(busy), '', 'saturday')).not.toBeNull()
+    expect(unbackedDateClaim('due 5 pm', inputsCorpus(busy), '', 'saturday')).toBe('5 pm')
+  })
+  it('a generation knows its own weekday: "it is Wednesday" stands on a Wednesday', async () => {
+    const h = harness({ answer: () => 'It is Wednesday and the release work is moving along.' })
+    expect((await h.brief.ask(inputs())).text).toBe('Two things need you. It is Wednesday and the release work is moving along.')
+  })
+  it('a generation drops a date claim with the time of the call, and the audit names it', async () => {
+    const h = harness({ answer: () => 'These can wait until Monday. The release work is moving along.' })
+    const v = await h.brief.ask(inputs())
+    expect(v.text).toBe('Two things need you. The release work is moving along.')
+    expect(h.audits[0]).toMatchObject({ outcome: 'ok', dropped: 'date_claim' })
   })
 })
