@@ -33,7 +33,7 @@ export const CLIENT_INSTANCE_MAX_SEEN = 64
 export interface ClientInstanceRouterDeps {
   now?: () => number
   /**
-   * G2 authority Tier 1 (unreleased): the owner-per-device map, shared so the turn provenance
+   * G2 authority Tier 1 (6.99.29): the owner-per-device map, shared so the turn provenance
    * can ask which app copy holds the ring for a request's address. Absent: private, as before.
    */
   owners?: Map<string, ClientInstanceOwner>

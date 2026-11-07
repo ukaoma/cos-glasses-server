@@ -131,7 +131,8 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
   const message = obj.message && typeof obj.message === 'object' ? obj.message as Record<string, unknown> : null
   const text = message ? payloadText(message) : null
   if (!text) return null
-  return shaped(obj.role, obj.role === 'user' ? cursorQuery(text) : text, iso(obj.timestamp))
+  // QA 6.99.29: a Cursor user row carries the verify footer inside its <user_query> block, like any other turn.
+  return shaped(obj.role, obj.role === 'user' ? withoutTurnFooter(cursorQuery(text)) : text, iso(obj.timestamp))
 }
 
 /** The newest `limit` messages among these lines (file order in, file order out). */

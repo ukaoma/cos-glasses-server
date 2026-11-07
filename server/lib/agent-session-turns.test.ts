@@ -15,6 +15,7 @@ import {
   sessionTurnFromRecord,
 } from './agent-session-turns'
 import { LATEST_REPLY_MAX } from './agent-session-store'
+import { turnFooter } from './turn-footer.js'
 
 const AT = '2026-09-16T22:18:35.744Z'
 const user = (text: string, extra: Record<string, unknown> = {}) => ({ type: 'user', timestamp: AT, ...extra, message: { role: 'user', content: [{ type: 'text', text }] } })
@@ -99,6 +100,18 @@ describe('sessionTurnFromRecord: codex and cursor', () => {
     expect(sessionTurnFromRecord('cursor', row('user', '<user_info>os</user_info>\n<user_query>\nRename the route.\n</user_query>'))).toEqual({ role: 'user', text: 'Rename the route.' })
     expect(sessionTurnFromRecord('cursor', row('assistant', 'Renamed.'))).toEqual({ role: 'assistant', text: 'Renamed.' })
     expect(sessionTurnFromRecord('cursor', row('system', 'x'))).toBeNull()
+  })
+
+  it('QA 6.99.29: a Cursor user row shows its words without the verify footer, which Cursor keeps inside <user_query>', () => {
+    const row = (role: string, text: string) => ({ role, message: { content: [{ type: 'text', text }] } })
+    for (const client of ['glasses', 'web'] as const) {
+      const footed = `Rename the route.\n${turnFooter('ctCursor0001', client, 'cursor')}`
+      expect(sessionTurnFromRecord('cursor', row('user', `<user_info>os</user_info>\n<user_query>\n${footed}\n</user_query>`)), client).toEqual({ role: 'user', text: 'Rename the route.' })
+      expect(sessionTurnFromRecord('cursor', row('user', footed)), client + ', unwrapped').toEqual({ role: 'user', text: 'Rename the route.' })
+    }
+    // A reply that quotes a footer is the agent's own words: shown as written.
+    const quoted = `Checked.\n${turnFooter('ctCursor0001', 'glasses', 'cursor')}`
+    expect(sessionTurnFromRecord('cursor', row('assistant', quoted))).toEqual({ role: 'assistant', text: quoted })
   })
 })
 

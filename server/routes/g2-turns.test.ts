@@ -1,4 +1,4 @@
-// G2 authority Tier 1 (unreleased): the read-only endpoint, and the queue, drain and Cursor
+// G2 authority Tier 1 (6.99.29): the read-only endpoint, and the queue, drain and Cursor
 // Stop paths, each against a real express server. The glasses' address is this Mac's LAN
 // address with the own-address list narrowed (the socket is real; only the list is injected).
 import { describe, it, expect, afterEach, afterAll, vi } from 'vitest'

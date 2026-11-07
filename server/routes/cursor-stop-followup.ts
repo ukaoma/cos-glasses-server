@@ -21,7 +21,7 @@ export interface CursorStopFollowupDeps {
   hookToken: () => string | null
   readQueue: (provider: string, threadId: string, now: number) => QueuedThreadTurn[]
   writeQueue: (provider: string, threadId: string, queue: QueuedThreadTurn[]) => void
-  /** G2 authority Tier 1 (unreleased), optional: ledger the hand-off and foot a glasses or phone turn. */
+  /** G2 authority Tier 1 (6.99.29), optional: ledger the hand-off and foot a glasses or phone turn. */
   provenance?: G2TurnProvenance
   now: () => number
 }
