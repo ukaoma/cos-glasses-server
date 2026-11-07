@@ -386,6 +386,39 @@
     else pose = alive > 0 ? 'patrol' : 'idle';
     return { pose: pose, working: working, waiting: waiting };
   }
+  // 6.99.26 (Miles 11/07, "Open what matters"): the sessions behind the pet's caption, by the same test petPose
+  // counts with, so a tap opens what the caption says. In play: waiting on you, then running. Done today rides along in
+  // the list, never in the count.
+  function petPlay(sessions) {
+    var waiting = [], running = [], done = [], today = new Date().toDateString();
+    (sessions || []).forEach(function (s) {
+      var st = sxState(s);
+      if (s.running_active) running.push(s);
+      else if (st === 'waiting') waiting.push(s);
+      else if ((st === 'recent' || st === 'stale') && !sxKeepWarm(s)) {
+        var d = toDate(s.last_activity_at || s.state_since);
+        if (d && d.toDateString() === today) done.push(s);
+      }
+    });
+    return { waiting: waiting, running: running, done: done };
+  }
+  function petKey(s) { var k = splitSessionId(s.provider, s.session_id || s.id); return k.provider + '|' + k.id; }
+  // One session in play opens its own sheet (waiting: the question card or reply box; else the Running peek); several
+  // open the short list; none does nothing.
+  function petTap(t) {
+    var p = petPlay(state.sessions || []), n = p.waiting.length + p.running.length;
+    if (!n) return;
+    if (n > 1) return openTodayAction(t, 'pet', '');
+    var s = p.waiting[0] || p.running[0];
+    openTodayAction(t, sxState(s) === 'waiting' ? 'wait' : 'run', petKey(s));
+  }
+  function petButtonState(box, c, label) {
+    var btn = box.querySelector('.pet-btn');
+    if (!btn) return;
+    var any = c.working + c.waiting > 0;
+    btn.setAttribute('aria-label', any ? label + '. Open' : label);
+    btn.setAttribute('aria-disabled', any ? 'false' : 'true');
+  }
   function petCaption(c) {
     var parts = [];
     if (c.working) parts.push(c.working + ' running');
@@ -422,13 +455,13 @@
     petStop(); PET.pose = 'still:' + m.still;
     var img = box.querySelector('.pet-still');
     if (!img || img.getAttribute('src') !== m.still) {
-      box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><img class="pet-still" alt="" src="' + esc(m.still) + '"><span class="pet-caption"></span></button>' + PET_CHANGE;
+      box.innerHTML = '<button type="button" class="pet-btn" data-today="pet"><img class="pet-still" alt="" src="' + esc(m.still) + '"><span class="pet-caption"></span></button>' + PET_CHANGE;
       img = box.querySelector('.pet-still');
       img.addEventListener('error', function () { box.classList.add('hidden'); });
       img.addEventListener('load', function () { img.classList.toggle('pixel', img.naturalHeight > 0 && img.naturalHeight < 140); });
     }
     box.querySelector('.pet-caption').textContent = label;
-    box.querySelector('.pet-btn').setAttribute('aria-label', 'Sessions: ' + label);
+    petButtonState(box, c, label);
     box.classList.remove('hidden');
   }
   function renderPet(sessions) {
@@ -455,8 +488,7 @@
         box.classList.remove('hidden');
         var cap = box.querySelector('.pet-caption');
         if (cap) cap.textContent = label;
-        var btn = box.querySelector('.pet-btn');
-        if (btn) btn.setAttribute('aria-label', 'Sessions: ' + label);
+        petButtonState(box, c, label);
         if (PET.pose === pose && PET.timer) return;
         var token = ++PET.token;
         petLoadImages(spec).then(function () {
@@ -464,10 +496,10 @@
           petStop();
           PET.pose = pose; PET.frame = 0;
           if (!box.querySelector('.pet-sprite')) {
-            box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><span class="pet-sprite" aria-hidden="true"></span><span class="pet-caption"></span></button>' + PET_CHANGE;
+            box.innerHTML = '<button type="button" class="pet-btn" data-today="pet"><span class="pet-sprite" aria-hidden="true"></span><span class="pet-caption"></span></button>' + PET_CHANGE;
           }
           box.querySelector('.pet-caption').textContent = label;
-          box.querySelector('.pet-btn').setAttribute('aria-label', 'Sessions: ' + label);
+          petButtonState(box, c, label);
           var el = box.querySelector('.pet-sprite'), scale = PET_HEIGHT / spec.height;
           el.style.width = Math.round(spec.frameWidth * scale) + 'px';
           petPaint(el, spec, 0, scale);
@@ -658,6 +690,29 @@
     if (s.waiting_kind === 'question' && d) return d.length > 160 ? d.slice(0, 159) + '…' : d;
     return 'Waiting for you' + (sxProvider(s.provider) === 'claude' ? '. Paused until you answer.' : '');
   }
+  // 6.99.26: where a waiting session's question can be answered. 'here': this page holds it (panes/questions.js), as
+  // cards in its waiting sheet. 'mac': a Claude session's own prompt (or a held one that went back to the Mac), which
+  // only the Mac can answer, in person or through Screens. 'answered': answered on some screen in the last two minutes,
+  // the list not caught up yet. '': a reply answers it (a Codex or Cursor session).
+  function sessionQs() { var q = window.COSWeb && window.COSWeb.sessionQuestions; return q && q.itemsFor ? q : null; }
+  function askedHere(items) {
+    var it = items[0];
+    if (!it) return '';
+    if (it.kind === 'approval') return it.approval && it.approval.summary ? 'Wants to run ' + clipWords(it.approval.summary, 80) : '';
+    var q = (it.questions || [])[0];
+    return q && q.question ? clipWords(q.question, 160) : '';
+  }
+  function clipWords(text, n) { var t = String(text || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; }
+  function whereFor(provider, id) {
+    var q = sessionQs();
+    var held = q ? q.itemsFor(id) : [], mac = q && q.atMacFor ? q.atMacFor(id) : [];
+    if (held.length) return { where: 'here', ask: askedHere(held) };
+    if (q && q.answeredFor && q.answeredFor(id)) return { where: 'answered', ask: '' };
+    var words = mac.length && q.wordsOf ? q.wordsOf(mac[0].id) : null;
+    var ask = words ? clipWords(words.questions[0] || (words.summary ? 'Wants to run ' + words.summary : ''), 160) : '';
+    if (mac.length || sxProvider(provider) === 'claude') return { where: 'mac', ask: ask };
+    return { where: '', ask: '' };
+  }
   function needsModel() {
     var states = { sessions: TODAY.sessionsState, work: TODAY.workState, voices: TODAY.voices.state, memories: TODAY.memories.state };
     var rows = [], seen = {};
@@ -665,7 +720,19 @@
       if (sxKeepWarm(s) || sxState(s) !== 'waiting') return;
       var k = splitSessionId(s.provider, s.session_id || s.id);
       seen[k.provider + '|' + String(k.id).toLowerCase()] = 1;
-      rows.push({ kind: 'session', tier: 1, title: askedTitle(s), why: askedWhy(s), since: s.state_since || s.last_activity_at, key: k.provider + '|' + k.id });
+      var w = whereFor(k.provider, k.id);
+      rows.push({ kind: 'session', tier: 1, title: askedTitle(s), why: askedWhy(s), since: s.state_since || s.last_activity_at, key: k.provider + '|' + k.id, where: w.where, ask: w.ask });
+    });
+    // A question this page holds for a session the list has not shown waiting yet: its own row, so every held
+    // question is in front of you (two at once each get one).
+    var qs = sessionQs();
+    (qs ? qs.itemsFor('') : []).forEach(function (it) {
+      var k = splitSessionId(it.provider, it.sessionId), sk = k.provider + '|' + String(k.id).toLowerCase();
+      if (!k.id || seen[sk]) return;
+      seen[sk] = 1;
+      var s = (state.sessions || []).filter(function (x) { var xk = splitSessionId(x.provider, x.session_id || x.id); return xk.provider === k.provider && String(xk.id).toLowerCase() === String(k.id).toLowerCase(); })[0];
+      var title = s ? askedTitle(s) : it.kind === 'approval' ? 'A session wants your permission' : 'A session asked you a question';
+      rows.push({ kind: 'session', tier: 1, title: title, why: 'Waiting for you. Paused until you answer.', since: it.createdAt, key: k.provider + '|' + k.id, where: 'here', ask: askedHere([it]) });
     });
     (TODAY.needs || []).forEach(function (it) {
       var k = splitSessionId(it.provider, it.sessionId);
@@ -721,9 +788,11 @@
         (k.id ? '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(k.provider) + '|' + esc(k.id) + '">Open session</button></div>' : '') + '</div>';
     }
     if (r.kind === 'session') {
-      // The session's question shows in the overlay's peek, with its cards to answer.
+      // The session's question shows in the overlay's peek, with its cards to answer. Under it, where it can be answered.
+      var q = sessionQs(), whereLine = r.where === 'here' ? 'Answer it here.' : r.where === 'mac' ? (q && q.macLine) || '' : r.where === 'answered' ? (q && q.answeredLine) || '' : '';
       return '<div class="need-row">' +
-        '<button type="button" class="need-open" data-today="wait" data-key="' + esc(r.key) + '">' + top(r.title) + '<span class="need-foot">' + esc(r.why) + '</span></button>' +
+        '<button type="button" class="need-open" data-today="wait" data-key="' + esc(r.key) + '">' + top(r.title) + '<span class="need-foot">' + esc(r.ask || r.why) + '</span>' +
+        (whereLine ? '<span class="need-foot need-where" data-where="' + esc(r.where) + '">' + esc(whereLine) + '</span>' : '') + '</button>' +
         '<div class="need-actions"><button type="button" class="btn small' + (i === 0 ? ' primary' : '') + '" data-session="' + esc(r.key) + '">Open session</button></div></div>';
     }
     var go2 = r.kind === 'voices' ? 'speakers' : 'memories/view/review', label = r.kind === 'voices' ? 'Name' : 'Review';
@@ -800,8 +869,8 @@
     }).join('') + '<p class="intake-foot">Moves to Work at midnight.</p>';
     card.classList.remove('hidden');
   }
-  function openTodayAction(t) {
-    var kind = t.getAttribute('data-today'), key = t.getAttribute('data-key') || '';
+  function openTodayAction(t, kindIn, keyIn) {
+    var kind = kindIn || t.getAttribute('data-today'), key = keyIn != null ? keyIn : t.getAttribute('data-key') || '';
     ensurePane('todayActions', 4000).then(function (m) {
       if (!m || !m.open) throw new Error('The Today overlay did not start.');
       m.open(kind, key, t);
@@ -811,9 +880,9 @@
       // history entry, which the fallback replaces, so Back from there still lands on Today.
       var s = String(kind === 'run' || kind === 'wait' ? key : t.getAttribute('data-session-key') || '').split('|');
       var session = (kind === 'run' || kind === 'wait' || kind === 'need') && !!s[1];
-      var dest = session ? ['sessions', s[0], s.slice(1).join('|')] : ['work'].concat(kind === 'need' ? [] : ['sort']);
+      var dest = session ? ['sessions', s[0], s.slice(1).join('|')] : kind === 'pet' ? ['sessions'] : ['work'].concat(kind === 'need' ? [] : ['sort']);
       console.error('[today] the overlay did not open (' + kind + '); opening ' + dest.join('/') + ' instead.', err);
-      toast(session ? 'Could not open that here. Opening the session.' : 'Could not open that here. Opening it in Work.');
+      toast(session ? 'Could not open that here. Opening the session.' : kind === 'pet' ? 'Could not open that here. Opening Sessions.' : 'Could not open that here. Opening it in Work.');
       if (history.state && history.state.cosTodayOverlay) location.replace('#/' + dest.map(encodeURIComponent).join('/'));
       else go(dest[0], dest.slice(1));
     });
@@ -3972,7 +4041,7 @@
       return;
     }
     if (t.hasAttribute('data-open-ask')) return openAsk();
-    if (t.hasAttribute('data-today')) return openTodayAction(t);
+    if (t.hasAttribute('data-today')) return t.getAttribute('data-today') === 'pet' ? petTap(t) : openTodayAction(t);
     if (t.hasAttribute('data-today-next')) return prepNext();
     if (t.hasAttribute('data-today-needs')) {
       var which = t.getAttribute('data-today-needs');
@@ -4139,7 +4208,10 @@
     railLine: function () { return TODAY.model ? { text: todayRailLine(TODAY.model), hot: TODAY.model.now.length > 0 } : null; },
     markGone: function (id, gone) { if (gone) TODAY.gone[id] = 1; else delete TODAY.gone[id]; paintTodayIntake(); },
     reloadIntake: function () { return loadTodayIntake(); },
-    refresh: function () { if (state.pane === 'today') loadToday(); }
+    refresh: function () { if (state.pane === 'today') loadToday(); },
+    // 6.99.26: the pet's sessions (petPlay), and a repaint of Needs you when the held questions change.
+    petPlay: function () { return petPlay(state.sessions || []); },
+    questionsChanged: function () { if (TODAY.at) paintNeeds(); }
   };
   window.COSWeb.sessionKit = {
     // A session object for continueSession, with the overlay's own view (READER_VIEW's methods).

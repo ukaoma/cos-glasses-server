@@ -44,6 +44,14 @@
 //     while the Mac sleeps, so on its own it would read a pre-sleep presence as younger
 //     than it is; the wall clock does advance. A wall clock stepped forward reads older
 //     (no hold), never younger.
+//
+// 6.99.26 (Miles 11/07, "Away rule, like phone"): COS Control Web's presence, kept apart from every
+// stamp above. A browser poll `?client=web&hold=1&presenceAgeMs=<int>` (the ms since a touch or a
+// key while the page was in front) records it, and the broker reads it for the away hold ONLY: it
+// never moves the newest poll (/api/health), the 6.59.0 liveness, the `hold=1` poll stamp (which
+// makes a stamped question's client connected without presence), or the wearer presence above. So
+// an open tab nobody touches holds nothing, and at the desk the Mac's own pop-up still shows at once
+// (6.99.13). Same contract and both clocks, forward-only, as the wearer presence.
 
 /** 6.60.0: the most a client may report as `presenceAgeMs`. Anything else is no presence. */
 export const PRESENCE_AGE_MAX_MS = 86_400_000
@@ -53,6 +61,8 @@ let lastLegacyPollAt: number | null = null
 let lastHoldPollAt: number | null = null
 let lastPresenceMono: number | null = null
 let lastPresenceWall: number | null = null
+let lastWebPresenceMono: number | null = null
+let lastWebPresenceWall: number | null = null
 
 /** 6.60.0: the monotonic clock. Milliseconds since this process started; paused while the Mac sleeps. */
 export function monotonicNowMs(): number {
@@ -109,10 +119,33 @@ export function noteQuestionsPoll(at: number, poll: QuestionsPollFacts = {}, mon
  * and the wall-clock age, so a Mac that slept never makes it read younger.
  */
 export function presenceAgeMs(mono: number = monotonicNowMs(), wall: number = Date.now()): number | null {
-  if (lastPresenceMono === null || !Number.isFinite(mono)) return null
-  const monoAge = Math.max(0, mono - lastPresenceMono)
-  const wallAge = lastPresenceWall !== null && Number.isFinite(wall) ? wall - lastPresenceWall : 0
+  return ageOn(lastPresenceMono, lastPresenceWall, mono, wall)
+}
+
+/** The age of a presence stamped on both clocks: the larger of the two, so a Mac that slept never reads younger. */
+function ageOn(stampMono: number | null, stampWall: number | null, mono: number, wall: number): number | null {
+  if (stampMono === null || !Number.isFinite(mono)) return null
+  const monoAge = Math.max(0, mono - stampMono)
+  const wallAge = stampWall !== null && Number.isFinite(wall) ? wall - stampWall : 0
   return Math.max(monoAge, wallAge)
+}
+
+/**
+ * 6.99.26: a COS Control Web poll answered at `at` (server clock) that reported `presenceAgeMs`, the ms
+ * since a touch or a key while the page was in front. Anything outside the contract is no presence and
+ * records nothing. Forward-only on each clock, like the wearer presence.
+ */
+export function noteWebPresence(at: number, presenceAgeMs: number, mono: number = monotonicNowMs()): void {
+  if (!Number.isFinite(at) || !validPresenceAgeMs(presenceAgeMs) || !Number.isFinite(mono)) return
+  const presenceMono = mono - presenceAgeMs
+  const presenceWall = at - presenceAgeMs
+  if (lastWebPresenceMono === null || presenceMono > lastWebPresenceMono) lastWebPresenceMono = presenceMono
+  if (lastWebPresenceWall === null || presenceWall > lastWebPresenceWall) lastWebPresenceWall = presenceWall
+}
+
+/** 6.99.26: how long ago COS Control Web's newest touch or key was, or null when none since this process started. */
+export function webPresenceAgeMs(mono: number = monotonicNowMs(), wall: number = Date.now()): number | null {
+  return ageOn(lastWebPresenceMono, lastWebPresenceWall, mono, wall)
 }
 
 /** When the newest authenticated questions poll of any kind arrived, or null since boot (/api/health). */
@@ -136,4 +169,6 @@ export function __resetClientLivenessForTests(): void {
   lastHoldPollAt = null
   lastPresenceMono = null
   lastPresenceWall = null
+  lastWebPresenceMono = null
+  lastWebPresenceWall = null
 }

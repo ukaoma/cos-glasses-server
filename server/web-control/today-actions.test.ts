@@ -57,7 +57,7 @@ function fakeFetch(routes: Routes) {
     const h = routes[key]
     const out = typeof h === 'function' ? h(body, n) : h ?? { status: 404, body: {} }
     if (out instanceof Error) return Promise.reject(out)
-    return Promise.resolve({ status: out.status, text: () => Promise.resolve(JSON.stringify(out.body)) })
+    return Promise.resolve({ status: out.status, ok: out.status >= 200 && out.status < 300, text: () => Promise.resolve(JSON.stringify(out.body)), json: () => Promise.resolve(out.body) })
   }
   return { fetch, calls }
 }
@@ -110,6 +110,8 @@ interface Opts {
   webStore?: Map<string, string>
   styles?: Record<string, Record<string, string>>
   model?: unknown
+  mac?: number
+  pet?: unknown
 }
 function load(o: Opts = {}) {
   const els: Record<string, El> = {}
@@ -179,12 +181,13 @@ function load(o: Opts = {}) {
       splitSessionId: (provider: string, id: string) => { const m = /^(claude|codex|cursor):(.+)$/.exec(String(id || '')); return m ? { provider: m[1], id: m[2] } : { provider: provider || 'claude', id: String(id || '') } },
       markGone: (id: string, g: boolean) => { gone.push([id, g]) },
       needs: () => o.model ?? null,
+      petPlay: () => o.pet ?? { waiting: [], running: [], done: [] },
       reloadIntake: () => { reloads++; return Promise.resolve() },
       refresh: () => { refreshed++ },
     },
     sessionKit: reader.kit,
     // Like questions.js mount(): it draws and calls back with the count before it returns.
-    sessionQuestions: { mount: (_el: El, sid: string, onChange?: (n: number) => void) => { mounts.push(sid); if (onChange) onChange(o.questions || 0); return { count: () => o.questions || 0, unmount: () => { unmounts++ } } } },
+    sessionQuestions: { mount: (_el: El, sid: string, onChange?: (n: number, mac: number) => void) => { mounts.push(sid); if (onChange) onChange(o.questions || 0, o.mac || 0); return { count: () => o.questions || 0, unmount: () => { unmounts++ } } } },
   }
   const ctx = vm.createContext({
     window: { COSWeb: W, addEventListener: (t: string, fn: () => void) => { winListeners[t] = fn }, visualViewport: undefined },
@@ -1295,7 +1298,7 @@ describe('the sheet never contradicts itself (qa2-user N3)', () => {
 
 // ── Parity B2: Needs you counts every source, and says what it could not read ──
 function needsRegion(opts: { at: string; sessions?: unknown[]; needs?: unknown[]; voices?: { state: string; groups: unknown[] }; memories?: { state: string; n: number };
-  sessionsState?: string; workState?: string }) {
+  sessionsState?: string; workState?: string; qs?: unknown }) {
   const start = APP.indexOf("  // The headline: COS Control's brief"), end = APP.indexOf('  function renderNext(w) {')
   expect(start, 'the headline block').toBeGreaterThan(0); expect(end).toBeGreaterThan(start)
   const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
@@ -1317,10 +1320,10 @@ function needsRegion(opts: { at: string; sessions?: unknown[]; needs?: unknown[]
     $: (id: string) => (els[id] ??= new El()), esc, toDate: (v: unknown) => (v ? new FakeDate(String(v)) : null), clock: () => '9:00 AM', Date: FakeDate,
     state: { sessions: opts.sessions ?? [], serverName: 'Mac' }, TODAY, setBadge: (n: string, on: boolean) => badges.push([n, on]),
     usualProject: () => '', badge: () => '', span: () => '5 min', sessionTitle: (s: any) => s.display_label || 'Session',
-    window: { COSWeb: { setStory: (n: string, text: string, hot: boolean) => rail.push([n, text, hot]) } },
+    window: { COSWeb: { setStory: (n: string, text: string, hot: boolean) => rail.push([n, text, hot]), ...(opts.qs ? { sessionQuestions: opts.qs } : {}) } },
   }
   // eslint-disable-next-line no-new-func
-  const fns = new Function('deps', 'with (deps) {\n' + words + domains + plainFn + '\n' + helpers + '\n' + sx + '\n' + APP.slice(start, end) + '\npaintNeeds();\nreturn { renderRunning: renderRunning };\n}')(deps)
+  const fns = new Function('deps', 'with (deps) {\n' + words + domains + plainFn + '\n' + helpers + '\n' + sx + '\n' + APP.slice(start, end) + '\npaintNeeds();\nreturn { renderRunning: renderRunning, needsModel: needsModel };\n}')(deps)
   return { els, rail, badges, TODAY: TODAY as any, fns }
 }
 const WAIT = { session_id: 'aaaaaaaa-1111-4111-8111-111111111111', provider: 'claude', display_label: 'Release QA', alive: true, running: true,
@@ -1678,19 +1681,21 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
   const model = { rows: [{ kind: 'session', key: 'claude|' + QSID, title: 'Gong personas team update asked you a question', why: 'Waiting for you. Paused until you answer.' }], now: [], later: [], failed: [], settled: true }
   const routes: Routes = { ['GET ' + QP('?turns=6')]: { status: 200, body: { recent_turns: [{ role: 'assistant', text: 'Which personas should I update first?' }] } },
     ['GET ' + QP('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
-  it('the Needs you row opens the waiting sheet: the question to answer, else the last message and a reply box; no peek, no Stop', async () => {
+  it('the Needs you row opens the waiting sheet: the question to answer, else the last message; no peek, no Stop', async () => {
     const h = load({ data: { sessions: [QROW] }, routes, model, questions: 0 })
     h.ta.open('wait', 'claude|' + QSID, h.opener())
     await flush()
     expect(h.els['ta-title']!.textContent).toBe('Gong personas team update asked you a question')
     const meta = h.els['ta-meta']!.innerHTML
     expect(meta).toContain('Waiting for you. Paused until you answer.')
-    expect(meta).toContain('Answer it in a reply below, or open the session.')
+    // 6.99.26: a Claude session's question that this page does not hold is at the Mac's own prompt: said so, read-only.
+    expect(meta).toContain('Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).')
+    expect(meta).not.toContain('Answer it in a reply below')
     expect(meta).not.toContain('Working')
     expect(h.streams, 'no live peek').toHaveLength(0)
     expect(h.els['ta-live']!.innerHTML).toBe('')
     expect(h.els['ta-last']!.innerHTML).toContain('Which personas should I update first?')
-    expect(h.els['ta-foot']!.innerHTML).toContain('placeholder="Reply to this session"')
+    expect(h.els['ta-foot']!.hidden, 'no reply box offered as an answer to a prompt').toBe(true)
     expect(h.mounts).toEqual([QSID])
     const held = load({ data: { sessions: [QROW] }, routes, model, questions: 1 })
     held.ta.open('wait', 'claude|' + QSID, held.opener())
@@ -1720,3 +1725,679 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
     expect(h.els['ta-live']!.innerHTML).not.toContain('Working')
   })
 })
+
+// ═════════════ 6.99.26: questions on Control Web (Miles 11/07) ═════════════
+// questions.js in a vm with the page's own clocks (wall and monotonic, moved apart), the document's touch listeners,
+// and a poll whose answer the test sets. Nothing reaches a server.
+const MAC_WORDS = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
+function loadQ(body: () => unknown, opt: { perf?: boolean } = {}) {
+  const mk = () => ({ hidden: true, innerHTML: '', isConnected: true, listeners: {} as Record<string, (e: unknown) => void>,
+    addEventListener(t: string, fn: (e: unknown) => void) { this.listeners[t] = fn }, querySelector: () => null, querySelectorAll: () => [], contains: () => false })
+  const host = mk()
+  const docListeners: Record<string, Array<(e: unknown) => void>> = {}
+  const fetches: string[] = [], timers: Array<{ fn: () => void; ms: number }> = [], posts: Array<{ path: string; body: any }> = []
+  let wall = 0, mono = 0, changed = 0, onShell: (() => void) | null = null
+  const realNow = Date.now
+  class QDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(realNow() + wall) } static now() { return realNow() + wall } }
+  const W: Record<string, unknown> = { esc, toast: () => {}, showAuth: () => {}, onShell: (fn: () => void) => { onShell = fn }, confirmReady: realConfirmReady(QDate),
+    today: { questionsChanged: () => { changed++ } },
+    api: (path: string, o?: { method?: string; body?: unknown }) => {
+      if (o?.method === 'POST') { posts.push({ path, body: o.body }); return Promise.resolve({ ok: true }) }
+      return Promise.resolve(path === '/api/models' ? { capabilities: { sessionQuestions: { enabled: true, webClient: true } } } : {})
+    } }
+  const document: any = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? { classList: { contains: () => false } } : null),
+    addEventListener: (t: string, fn: (e: unknown) => void) => { (docListeners[t] ??= []).push(fn) }, hidden: false, activeElement: null }
+  const fetch = (url: string) => { fetches.push(url); return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(body()) }) }
+  const ctx = vm.createContext({ window: { COSWeb: W }, document, fetch, console, Date: QDate, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
+    performance: opt.perf === false ? undefined : { now: () => 5_000 + mono },
+    setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {} })
+  vm.runInContext(QUESTIONS, ctx)
+  const touch = (type = 'pointerdown', trusted = true) => (docListeners[type] || []).forEach(fn => fn({ isTrusted: trusted }))
+  return { Qs: (W as any).sessionQuestions, host, mk, fetches, timers, posts, touch, document, W,
+    start: async () => { onShell!(); await flush() }, later: (wallMs: number, monoMs = wallMs) => { wall += wallMs; mono += monoMs }, changed: () => changed }
+}
+const isoIn = (ms: number) => new Date(Date.now() + ms).toISOString()
+const HELD = (id: string, sid: string, question: string) => ({ id, sessionId: sid, provider: 'claude', kind: 'question', tool: 'AskUserQuestion', createdAt: isoIn(-5_000), deadlineAt: isoIn(600_000),
+  answerable: true, awayHold: true, waitingAtMac: false,
+  questions: [{ question, header: '', multiSelect: false, options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }] }] })
+const AT_MAC = (id: string, sid: string, extra: Record<string, unknown> = {}) => ({ id, sessionId: sid, provider: 'claude', kind: 'question', tool: 'AskUserQuestion', createdAt: isoIn(-60_000),
+  deadlineAt: isoIn(500_000), settledAt: isoIn(-1_000), resolution: 'handed_to_desk', answerable: false, awayHold: true, waitingAtMac: true, ...extra })
+/** Text a person reads: the markup with its tags and attributes taken out. */
+const words = (html: string) => html.replace(/<[^>]*>/g, ' ')
+
+describe('6.99.26: the page tells the Mac when it was last touched, for the away hold only', () => {
+  it('polls with hold=1 always; after a real touch, with how long ago it was', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [] }))
+    await h.start()
+    expect(h.fetches).toEqual(['/api/session-questions?client=web&hold=1'])
+    h.touch()
+    h.later(1_500)
+    h.Qs.poll(); await flush()
+    // The real clock moves a few ms under the test's: read the number, not the exact text.
+    const age = (url: string) => Number((/^\/api\/session-questions\?client=web&hold=1&presenceAgeMs=(\d+)$/.exec(url) || [])[1])
+    expect(age(h.fetches[1]!)).toBeGreaterThanOrEqual(1500)
+    expect(age(h.fetches[1]!)).toBeLessThan(1600)
+    h.touch('keydown')
+    h.Qs.poll(); await flush()
+    expect(age(h.fetches[2]!)).toBeGreaterThanOrEqual(0)
+    expect(age(h.fetches[2]!)).toBeLessThan(100)
+  })
+
+  it('only a real touch or key in a visible tab counts', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [] }))
+    h.touch('pointerdown', false)
+    expect(h.Qs._presenceAge(), 'a script-made event').toBeNull()
+    h.document.hidden = true
+    h.touch()
+    expect(h.Qs._presenceAge(), 'a hidden tab').toBeNull()
+    h.document.hidden = false
+    h.touch('touchstart')
+    expect(Math.abs((h.Qs._presenceAge()) - 0)).toBeLessThan(50)
+    const scroll = loadQ(() => ({}))
+    scroll.touch('wheel'); scroll.touch('mousemove')
+    expect(scroll.Qs._presenceAge(), 'a wheel or a passing pointer is not a touch').toBeNull()
+  })
+
+  it('never younger than it is: the larger of the two clocks; past 24 hours, none at all', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [] }))
+    h.touch()
+    h.later(3_600_000, 1_000)          // the phone slept an hour: the monotonic clock barely moved
+    expect(Math.abs((h.Qs._presenceAge()) - 3_600_000)).toBeLessThan(50)
+    h.later(-7_200_000, 4_000)         // the wall clock stepped back two hours: the monotonic clock still counts
+    expect(h.Qs._presenceAge()).toBe(5_000)
+    h.later(86_400_001 + 7_200_000 - 3_600_000, 0)
+    expect(h.Qs._presenceAge()).toBeNull()
+    expect(h.Qs._pollUrl()).toBe('/api/session-questions?client=web&hold=1')
+    const noPerf = loadQ(() => ({}), { perf: false })
+    noPerf.touch(); noPerf.later(2_000)
+    expect(Math.abs(noPerf.Qs._presenceAge() - 2_000), 'without performance.now the wall clock alone').toBeLessThan(50)
+  })
+
+  it('the first touch in a while reaches the Mac at once, not at the next poll', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [] }))
+    await h.start()
+    const before = h.timers.length
+    h.touch()
+    expect(h.timers.slice(before).map(t => t.ms)).toEqual([250])
+    h.later(5_000)
+    h.touch()
+    expect(h.timers.slice(before).map(t => t.ms), 'a touch soon after waits for the next poll').toEqual([250])
+    h.later(61_000)
+    h.touch()
+    expect(h.timers.slice(before).map(t => t.ms)).toEqual([250, 250])
+  })
+})
+
+describe('6.99.26: a question at the Mac shows read-only, with its words when the page saw them', () => {
+  it('draws it in the session’s cards only, with Miles’s words and no way to answer, and never an id', async () => {
+    let body: unknown = { enabled: true, items: [], settled: [AT_MAC('pq_' + 'm'.repeat(24), 'sess-a'), AT_MAC('pq_' + 'n'.repeat(24), 'sess-a', { waitingAtMac: false })] }
+    const h = loadQ(() => body)
+    await h.start()
+    const mine = h.mk(), calls: Array<[number, number]> = []
+    h.Qs.mount(mine, 'SESS-A', (n: number, mac: number) => calls.push([n, mac]))
+    expect(mine.hidden).toBe(false)
+    expect(mine.innerHTML).toContain(MAC_WORDS)
+    expect(mine.innerHTML).toContain('Claude has a question')
+    expect(mine.innerHTML, 'no buttons').not.toContain('data-sq=')
+    expect(mine.innerHTML.match(/data-sq-mac=/g), 'one card: a settled one the Mac no longer waits on is not drawn').toHaveLength(1)
+    expect(words(mine.innerHTML)).not.toContain('pq_')
+    expect(words(mine.innerHTML)).not.toContain('sess-a')
+    expect(calls).toEqual([[0, 1]])
+    expect(h.host.innerHTML, 'the top of every pane keeps to what can be answered').toBe('')
+    expect(h.Qs.mount(h.mk(), 'sess-b', null).count()).toBe(0)
+    body = { enabled: true, items: [], settled: [] }
+    h.Qs.poll(); await flush()
+    expect(mine.innerHTML).toBe('')
+    expect(calls.at(-1)).toEqual([0, 0])
+  })
+
+  it('a held question that goes back to the Mac keeps its words here; once the Mac stops waiting, they go', async () => {
+    const id = 'pq_' + 'q'.repeat(24)
+    let body: unknown = { enabled: true, items: [HELD(id, 'sess-a', 'Ship the release notes now?')], settled: [] }
+    const h = loadQ(() => body)
+    await h.start()
+    const mine = h.mk()
+    h.Qs.mount(mine, 'sess-a')
+    expect(mine.innerHTML).toContain('data-sq="send"')
+    body = { enabled: true, items: [], settled: [AT_MAC(id, 'sess-a')] }
+    h.Qs.poll(); await flush()
+    expect(mine.innerHTML).toContain('Ship the release notes now?')
+    expect(mine.innerHTML).toContain(MAC_WORDS)
+    expect(mine.innerHTML).not.toContain('data-sq="send"')
+    expect(h.Qs.wordsOf(id)).toEqual({ questions: ['Ship the release notes now?'], summary: '' })
+    body = { enabled: true, items: [], settled: [] }
+    h.Qs.poll(); await flush()
+    expect(h.Qs.wordsOf(id)).toBeNull()
+  })
+
+  it('an approval at the Mac names its tool and command when seen; Today hears each change once', async () => {
+    const id = 'pq_' + 'p'.repeat(24)
+    const held = { ...HELD(id, 'sess-a', ''), kind: 'approval', tool: 'Bash', questions: undefined, approval: { tool: 'Bash', summary: 'npm publish', detail: 'npm publish' } }
+    let body: unknown = { enabled: true, items: [held], settled: [] }
+    const h = loadQ(() => body)
+    await h.start()
+    expect(h.changed()).toBe(1)
+    h.Qs.poll(); await flush()
+    expect(h.changed(), 'the same lists again: no repaint').toBe(1)
+    body = { enabled: true, items: [], settled: [AT_MAC(id, 'sess-a', { kind: 'approval', tool: 'Bash' })] }
+    h.Qs.poll(); await flush()
+    expect(h.changed()).toBe(2)
+    const mine = h.mk()
+    h.Qs.mount(mine, 'sess-a')
+    expect(mine.innerHTML).toContain('Claude wants to use Bash')
+    expect(mine.innerHTML).toContain('npm publish')
+    expect(mine.innerHTML).toContain(MAC_WORDS)
+  })
+})
+
+describe('6.99.26: Needs you says where each waiting session can be answered', () => {
+  const S1 = 'aaaaaaaa-1111-4111-8111-111111111111', S2 = 'bbbbbbbb-2222-4222-8222-222222222222'
+  const row = (sid: string, label: string, extra: Record<string, unknown> = {}) => ({ ...WAIT, session_id: sid, display_label: label, waiting_kind: 'question', waiting_detail: 'AskUserQuestion', ...extra })
+  async function held(items: unknown[], settled: unknown[] = []) { const q = loadQ(() => ({ enabled: true, items, settled })); await q.start(); return q.Qs }
+
+  it('two waiting sessions with held questions: two rows, each answerable here, each with its own question', async () => {
+    const qs = await held([HELD('pq_' + 'a'.repeat(24), S1, 'Publish to npm next?'), HELD('pq_' + 'b'.repeat(24), S2, 'Which brand goes first?')])
+    const n = needsRegion({ at: WED_2PM, sessions: [row(S1, 'Release QA'), row(S2, 'Persona refresh')], qs })
+    const list = n.els['needs-list']!.innerHTML
+    expect(list.match(/data-today="wait"/g)).toHaveLength(2)
+    expect(list).toContain('data-key="claude|' + S1 + '"')
+    expect(list).toContain('data-key="claude|' + S2 + '"')
+    expect(list).toContain('Publish to npm next?')
+    expect(list).toContain('Which brand goes first?')
+    expect(list.match(/data-where="here">Answer it here\.</g)).toHaveLength(2)
+    expect(list).not.toContain('Mac&#39;s prompt')
+    expect(n.els['needs-count']!.textContent).toBe('2')
+  })
+
+  it('a Claude question the page does not hold is at the Mac’s prompt; a Codex one is answered by a reply', async () => {
+    const qs = await held([])
+    const n = needsRegion({ at: WED_2PM, sessions: [row(S1, 'Release QA'), row(S2, 'Codex fix', { provider: 'codex' })], qs })
+    const list = n.els['needs-list']!.innerHTML
+    expect(list.match(/data-where="mac"/g)).toHaveLength(1)
+    expect(list).toContain(MAC_WORDS)
+    expect(list).toContain('Codex fix is waiting for your reply')
+    const codexRow = list.slice(list.indexOf('Codex fix'))
+    expect(codexRow.slice(0, codexRow.indexOf('</button>'))).not.toContain('need-where')
+    // A Codex approval the broker handed back to the Mac is at the Mac too.
+    const q2 = loadQ(() => ({ enabled: true, items: [], settled: [AT_MAC('pq_' + 'k'.repeat(24), S2, { provider: 'codex', kind: 'approval', tool: 'Bash' })] }))
+    await q2.start()
+    const codexMac = needsRegion({ at: WED_2PM, sessions: [row(S2, 'Codex fix', { provider: 'codex' })], qs: q2.Qs }).els['needs-list']!.innerHTML
+    expect(codexMac).toContain('data-where="mac"')
+    // Before questions.js has an answer, the same: no claim that it can be answered here.
+    const none = needsRegion({ at: WED_2PM, sessions: [row(S1, 'Release QA')] })
+    expect(none.els['needs-list']!.innerHTML).not.toContain('Answer it here.')
+  })
+
+  it('a question that went back to the Mac shows its words with the Mac line', async () => {
+    const id = 'pq_' + 'c'.repeat(24)
+    const q = loadQ(() => body)
+    let body: unknown = { enabled: true, items: [HELD(id, S1, 'Merge the hotfix branch?')], settled: [] }
+    await q.start()
+    body = { enabled: true, items: [], settled: [AT_MAC(id, S1)] }
+    q.Qs.poll(); await flush()
+    const list = needsRegion({ at: WED_2PM, sessions: [row(S1, 'Release QA')], qs: q.Qs }).els['needs-list']!.innerHTML
+    expect(list).toContain('Merge the hotfix branch?')
+    expect(list).toContain(MAC_WORDS)
+  })
+
+  it('a held question whose session the list has not shown waiting yet still gets its row', async () => {
+    const qs = await held([HELD('pq_' + 'd'.repeat(24), S2, 'Rename the export file?')])
+    const n = needsRegion({ at: WED_2PM, sessions: [row(S1, 'Release QA')], qs })
+    const list = n.els['needs-list']!.innerHTML
+    expect(list.match(/data-today="wait"/g)).toHaveLength(2)
+    expect(list).toContain('data-key="claude|' + S2 + '"')
+    expect(list).toContain('A session asked you a question')
+    expect(list).toContain('Rename the export file?')
+    // The summary COS reads carries the rows' titles and reasons, never a held question's own words.
+    const m = n.fns.needsModel()
+    expect(m.rows.map((r: { why: string }) => r.why).join(' ')).not.toContain('Rename the export file?')
+    const o = load({ model: m })
+    const text = o.ta.summary()
+    expect(text).toContain('A session asked you a question. Waiting for you. Paused until you answer. It can be answered from Today.')
+    expect(text).toContain('Release QA asked you a question. Waiting for you. Paused until you answer. It waits on the Mac’s own prompt.')
+    expect(text).not.toContain('Rename the export file?')
+  })
+})
+
+describe('6.99.26: the waiting sheet offers only an answer that can reach the session', () => {
+  const SID = 'eeeeeeee-5555-4555-8555-555555555555'
+  const ROW = { session_id: SID, provider: 'claude', display_label: 'Release QA', alive: true, running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
+  const P = (prov: string, tail: string) => `/api/agent-sessions/${prov}/${encodeURIComponent(SID)}${tail}`
+  const routesFor = (prov: string): Routes => ({ ['GET ' + P(prov, '?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P(prov, '/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } })
+  const modelFor = (prov: string, where: string) => ({ rows: [{ kind: 'session', key: prov + '|' + SID, title: 'Release QA asked you a question', why: 'Waiting for you. Paused until you answer.', where }], now: [], later: [], failed: [], settled: true })
+
+  it('a Mac card in the sheet says it itself: the line is not repeated, and there is no reply box', async () => {
+    const h = load({ data: { sessions: [ROW] }, routes: routesFor('claude'), model: modelFor('claude', 'mac'), questions: 0, mac: 1 })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('Mac&#39;s prompt')
+    expect(h.els['ta-foot']!.hidden).toBe(true)
+  })
+
+  it('a question held for this page: answer it here, and still no reply box', async () => {
+    const h = load({ data: { sessions: [ROW] }, routes: routesFor('claude'), model: modelFor('claude', 'here'), questions: 1 })
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML).toContain('It is asking you this now. Answer here.')
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('Mac&#39;s prompt')
+    expect(h.els['ta-foot']!.hidden).toBe(true)
+  })
+
+  it('a Codex session waiting for words: the reply box is the answer', async () => {
+    const codex = { ...ROW, provider: 'codex' }
+    const h = load({ data: { sessions: [codex] }, routes: routesFor('codex'), model: modelFor('codex', ''), questions: 0 })
+    h.ta.open('wait', 'codex|' + SID, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML).toContain('Answer it in a reply below, or open the session.')
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('Mac&#39;s prompt')
+    expect(h.els['ta-foot']!.hidden).toBe(false)
+    expect(h.els['ta-foot']!.innerHTML).toContain('placeholder="Reply to this session"')
+  })
+})
+
+describe('6.99.26: two held questions in Needs you, each answered in place (real questions.js in the overlay)', () => {
+  const S1 = 'aaaaaaaa-1111-4111-8111-111111111111', S2 = 'bbbbbbbb-2222-4222-8222-222222222222'
+  const Q1ID = 'pq_' + '1'.repeat(24), Q2ID = 'pq_' + '2'.repeat(24)
+  const sess = (sid: string, label: string) => ({ session_id: sid, provider: 'claude', display_label: label, alive: true, running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' })
+  const P = (sid: string, tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(sid)}${tail}`
+  it('opens each from its row, draws only its card, and sends each answer once, after the settle window and the confirm', async () => {
+    const pending = [HELD(Q1ID, S1, 'Publish to npm next?'), HELD(Q2ID, S2, 'Which brand goes first?')]
+    const routes: Routes = {
+      'GET /api/session-questions?client=web&hold=1': () => ({ status: 200, body: { enabled: true, items: pending.slice(), settled: [], pollIntervalMs: 3_000 } }),
+      ['GET ' + P(S1, '?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P(S2, '?turns=6')]: { status: 200, body: { recent_turns: [] } },
+      ['GET ' + P(S1, '/attachability')]: { status: 200, body: { attachable: true } }, ['GET ' + P(S2, '/attachability')]: { status: 200, body: { attachable: true } },
+    }
+    const model = { rows: [S1, S2].map((sid, i) => ({ kind: 'session', key: 'claude|' + sid, title: (i ? 'Persona refresh' : 'Release QA') + ' asked you a question', why: 'Waiting for you. Paused until you answer.', where: 'here' })), now: [], later: [], failed: [], settled: true }
+    const h = load({ data: { sessions: [sess(S1, 'Release QA'), sess(S2, 'Persona refresh')] }, routes, model,
+      api: { '/api/models': { capabilities: { sessionQuestions: { enabled: true, webClient: true } } }, [`POST /api/session-questions/${Q1ID}/answer`]: { ok: true }, [`POST /api/session-questions/${Q2ID}/answer`]: { ok: true } } })
+    // The real questions.js, in the overlay's own page, replacing the stand-in mount.
+    const W = (h.ctx as any).window.COSWeb
+    let onShell: (() => void) | null = null
+    W.onShell = (fn: () => void) => { onShell = fn }; W.toast = () => {}
+    ;(h.ctx as any).crypto = globalThis.crypto
+    vm.runInContext(QUESTIONS, h.ctx)
+    onShell!()
+    await flush()
+    expect(W.sessionQuestions.itemsFor('').map((i: { id: string }) => i.id)).toEqual([Q1ID, Q2ID])
+    // A tap as the browser delivers it: the layer's capture guard, then the card's own listener on #ta-q.
+    const cardTap = (what: string, id: string) => {
+      const b = { disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? what : a === 'data-sq-id' ? id : null) }
+      const ev = { target: { closest: (sel: string) => (sel === '[data-sq]' ? b : null) }, stopPropagation() { this.stopped = true }, preventDefault() {}, stopped: false }
+      ;(h.document.appended.listeners.click as Array<(e: unknown) => void>)[0]!(ev)
+      if (!ev.stopped) for (const fn of h.els['ta-q']!.listeners.click || []) fn(ev)
+      return !ev.stopped
+    }
+    const pick = (id: string) => { for (const fn of h.els['ta-q']!.listeners.change || []) fn({ target: { hasAttribute: (a: string) => a === 'data-sq-pick', getAttribute: (a: string) => (({ 'data-sq-id': id, 'data-q': '0', 'data-o': '0' }) as Record<string, string>)[a], checked: true } }) }
+    const answer = async (sid: string, id: string, mine: string, other: string) => {
+      h.ta.open('wait', 'claude|' + sid, h.opener())
+      await flush()
+      const q = h.els['ta-q']!
+      expect(q.hidden).toBe(false)
+      expect(q.innerHTML).toContain(mine)
+      expect(q.innerHTML, 'only this session’s card').not.toContain(other)
+      pick(id)
+      h.later(120)
+      expect(cardTap('send', id), 'inside the settle window the tap lands on nothing').toBe(false)
+      h.later(420)
+      expect(cardTap('send', id)).toBe(true)
+      expect(q.innerHTML).toContain('Tap again to submit')
+      h.later(150)
+      cardTap('send', id)
+      await flush()
+      expect(h.posts.filter(p => p.path.includes(id)), 'a second tap 150 ms later never sends').toEqual([])
+      h.later(300)
+      cardTap('send', id)
+      await flush()
+      const sent = h.posts.filter(p => p.path.includes(id))
+      expect(sent).toHaveLength(1)
+      expect(sent[0]!.path).toBe(`/api/session-questions/${id}/answer`)
+      expect(sent[0]!.body.answers).toEqual([{ labels: ['Yes'] }])
+      pending.splice(pending.findIndex(p => p.id === id), 1)
+      h.ta.close('user')
+    }
+    await answer(S1, Q1ID, 'Publish to npm next?', 'Which brand goes first?')
+    await answer(S2, Q2ID, 'Which brand goes first?', 'Publish to npm next?')
+    expect(h.posts.map(p => p.path)).toEqual([`/api/session-questions/${Q1ID}/answer`, `/api/session-questions/${Q2ID}/answer`])
+  })
+})
+
+describe('6.99.26: the pet opens what matters (Miles 11/07)', () => {
+  const PET_START = APP.indexOf('  // ── the session pet (Today) ─'), PET_END = APP.indexOf('  // ── Today ──')
+  function petKit(sessions: unknown[], now = '2026-11-07T15:00:00') {
+    const opened: Array<[string, string]> = []
+    const t = new Date(now).getTime()
+    class FakeDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(t) } static now() { return t } }
+    const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
+    const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0]
+    const split = /  function splitSessionId\(provider, id\) \{[\s\S]*?\n  \}\n/.exec(APP)![0]
+    const deps = {
+      $: () => null, esc, api: () => Promise.resolve(null), readStore: () => ({}), writeStore: () => {}, Date: FakeDate,
+      toDate: (v: unknown) => (v ? new FakeDate(String(v)) : null), state: { pane: 'today', sessions },
+      openTodayAction: (_t: unknown, kind: string, key: string) => { opened.push([kind, key]) },
+      document: { querySelector: () => null, hidden: false }, window: { matchMedia: () => ({ matches: true, addEventListener() {} }) },
+      Image: class {}, setTimeout, clearTimeout, Promise,
+    }
+    // eslint-disable-next-line no-new-func
+    const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + split + '\n' + sx + '\n' + APP.slice(PET_START, PET_END) + '\nreturn { petPose: petPose, petPlay: petPlay, petTap: petTap, petButtonState: petButtonState };\n}')(deps)
+    return { kit, opened }
+  }
+  const s = (id: string, extra: Record<string, unknown>) => ({ session_id: id, provider: 'claude', alive: true, display_label: 'S ' + id, ...extra })
+  const WAITS = s('w1', { agent_state: 'waiting', state_source: 'hook', running: true })
+  const RUNS = s('r1', { running_active: true, running: true, agent_state: 'running', state_source: 'hook' })
+  const BUSY_WAITING = s('r2', { running_active: true, running: true, agent_state: 'waiting', state_source: 'hook' })
+  const DONE = s('d1', { agent_state: 'idle', state_source: 'hook', running: true, last_activity_at: '2026-11-07T13:00:00' })
+  const ENDED = s('d2', { agent_state: 'ended', state_source: 'hook', last_activity_at: '2026-11-07T09:00:00' })
+  const YESTERDAY = s('d3', { agent_state: 'idle', state_source: 'hook', last_activity_at: '2026-11-06T13:00:00' })
+  const QUIET_UP = s('q1', { agent_state: 'running', state_source: 'hook', running: true })   // the server says running, no recent activity
+  const WARM = s('k1', { agent_state: 'idle', state_source: 'hook', running: true, display_label: 'ready', first_prompt: 'ready', last_activity_at: '2026-11-07T14:00:00' })
+
+  it('the list counts what the caption counts', () => {
+    const all = [WAITS, RUNS, BUSY_WAITING, DONE, ENDED, YESTERDAY, QUIET_UP, WARM]
+    const { kit } = petKit(all)
+    const pose = kit.petPose(all), play = kit.petPlay(all)
+    expect([play.waiting.length, play.running.length]).toEqual([pose.waiting, pose.working])
+    expect(play.waiting.map((x: { session_id: string }) => x.session_id)).toEqual(['w1'])
+    expect(play.running.map((x: { session_id: string }) => x.session_id)).toEqual(['r1', 'r2'])
+    expect(play.done.map((x: { session_id: string }) => x.session_id), 'finished today only, never a readiness check').toEqual(['d1', 'd2'])
+  })
+
+  it('one in play opens its own sheet; several open the list; none does nothing', () => {
+    const cases: Array<[unknown[], Array<[string, string]>]> = [
+      [[], []],
+      [[DONE, YESTERDAY], []],
+      [[WAITS, DONE], [['wait', 'claude|w1']]],
+      [[RUNS, DONE], [['run', 'claude|r1']]],
+      [[BUSY_WAITING], [['wait', 'claude|r2']]],
+      [[WAITS, RUNS], [['pet', '']]],
+    ]
+    for (const [sessions, want] of cases) {
+      const { kit, opened } = petKit(sessions)
+      kit.petTap({})
+      expect(opened, JSON.stringify((sessions as Array<{ session_id: string }>).map(x => x.session_id))).toEqual(want)
+    }
+  })
+
+  it('the pet is a Today button, not a link to Sessions; Change pet stays; with nothing in play it says it does nothing', () => {
+    const pet = APP.slice(PET_START, PET_END)
+    expect(pet.match(/class="pet-btn" data-today="pet"/g)).toHaveLength(2)
+    expect(pet).not.toContain('class="pet-btn" data-goto="sessions"')
+    expect(pet).toContain('data-goto="settings/pet">Change pet</button>')
+    expect(APP).toContain("if (t.hasAttribute('data-today')) return t.getAttribute('data-today') === 'pet' ? petTap(t) : openTodayAction(t);")
+    const { kit } = petKit([])
+    const btn = new El(), box = { querySelector: () => btn }
+    kit.petButtonState(box, { working: 0, waiting: 0 }, 'Nothing running')
+    expect([btn.getAttribute('aria-disabled'), btn.getAttribute('aria-label')]).toEqual(['true', 'Nothing running'])
+    kit.petButtonState(box, { working: 1, waiting: 1 }, '1 running, 1 waiting on you')
+    expect([btn.getAttribute('aria-disabled'), btn.getAttribute('aria-label')]).toEqual(['false', '1 running, 1 waiting on you. Open'])
+  })
+
+  it('the list: waiting on you, then running, then done today; a row opens its own sheet in place, after the settle window', async () => {
+    const pet = { waiting: [WAITS], running: [RUNS, BUSY_WAITING], done: [DONE, ENDED] }
+    const h = load({ data: { sessions: [WAITS, RUNS, BUSY_WAITING, DONE, ENDED] }, pet })
+    h.ta.open('pet', '', h.opener())
+    await flush()
+    expect(h.els['ta-title']!.textContent).toBe('Sessions')
+    const body = h.els['ta-body']!.innerHTML
+    const at = (t: string) => body.indexOf(t)
+    expect(at('Waiting on you')).toBeGreaterThan(-1)
+    expect(at('Waiting on you')).toBeLessThan(at('>Running<'))
+    expect(at('>Running<')).toBeLessThan(at('Done today'))
+    expect(body).toContain('data-kind="wait" data-id="claude|w1"')
+    expect(body).toContain('data-kind="run" data-id="claude|r1"')
+    expect(body, 'running by the caption’s count, but paused on you: it opens as waiting').toContain('data-kind="wait" data-id="claude|r2"')
+    expect(body).toContain('data-kind="run" data-id="claude|d1"')
+    expect(body).toContain('data-ta="open-sessions"')
+    const rowTap = (kind: string, id: string) => {
+      const b = { disabled: false, getAttribute: (a: string) => (({ 'data-ta': 'pet-open', 'data-kind': kind, 'data-id': id }) as Record<string, string>)[a] ?? null, closest() { return this } }
+      const ev = { target: b, stopPropagation() { this.stopped = true }, preventDefault() {}, stopped: false }
+      const fns = h.document.appended.listeners.click as Array<(e: unknown) => void>
+      fns[0]!(ev); if (!ev.stopped) fns[1]!(ev)
+      return !ev.stopped
+    }
+    expect(rowTap('wait', 'claude|w1'), 'the second half of the tap that opened the list').toBe(false)
+    h.later(600)
+    expect(rowTap('wait', 'claude|w1')).toBe(true)
+    await flush()
+    expect(h.ta._state.open).toMatchObject({ kind: 'wait', key: 'claude|w1' })
+    expect(h.history.pushes, 'one history entry: Back closes the overlay').toBe(1)
+    expect(h.history.state).toMatchObject({ cosTodayOverlay: 1, kind: 'wait', key: 'claude|w1' })
+  })
+
+  it('with nothing in play the list says so (a reload onto it, say), and a reload reopens the list', async () => {
+    const h = load({ pet: { waiting: [], running: [], done: [DONE] } })
+    expect(await h.ta.restore({ cosTodayOverlay: 1, kind: 'pet', key: '' })).toBe(true)
+    expect(h.ta._state.open).toMatchObject({ kind: 'pet' })
+    expect(h.els['ta-body']!.innerHTML).toContain('Nothing is running or waiting on you now.')
+    expect(h.els['ta-body']!.innerHTML).toContain('Done today')
+  })
+
+  it('a pet tap whose overlay fails opens Sessions and says so', () => {
+    const start = APP.indexOf('  function openTodayAction('), end = APP.indexOf('  function setBadge(')
+    const toasts: string[] = [], went: string[][] = []
+    const deps = { ensurePane: () => Promise.reject(new Error('no overlay')), toast: (t: string) => toasts.push(t), go: (p: string, a: string[]) => went.push([p, ...a]),
+      history: { state: null }, location: { replace: () => {} }, console: { error: () => {} } }
+    // eslint-disable-next-line no-new-func
+    const fn = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn openTodayAction;\n}')(deps)
+    fn({ getAttribute: () => null }, 'pet', '')
+    return flush().then(() => {
+      expect(toasts).toEqual(['Could not open that here. Opening Sessions.'])
+      expect(went).toEqual([['sessions']])
+    })
+  })
+})
+
+describe('6.99.26: just answered, the row says so instead of pointing at the Mac', () => {
+  const S1 = 'aaaaaaaa-1111-4111-8111-111111111111'
+  const row = { ...WAIT, session_id: S1, display_label: 'Release QA', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
+  it('answered here: the row and the sheet say Answered, never the Mac line, until a new question comes', async () => {
+    const id = 'pq_' + 'e'.repeat(24)
+    let body: unknown = { enabled: true, items: [HELD(id, S1, 'Ship it?')], settled: [] }
+    const q = loadQ(() => body)
+    await q.start()
+    const mine = q.mk()
+    q.Qs.mount(mine, S1)
+    const fire = (t: string, target: unknown) => mine.listeners[t]!({ target })
+    fire('change', { hasAttribute: (a: string) => a === 'data-sq-pick', getAttribute: (a: string) => (({ 'data-sq-id': id, 'data-q': '0', 'data-o': '0' }) as Record<string, string>)[a], checked: true })
+    const send = { closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? 'send' : a === 'data-sq-id' ? id : null) }) }
+    fire('click', send); q.later(450); fire('click', send)
+    await flush()
+    expect(q.posts).toHaveLength(1)
+    expect(q.Qs.answeredFor(S1)).toBe(true)
+    const list = needsRegion({ at: WED_2PM, sessions: [row], qs: q.Qs }).els['needs-list']!.innerHTML
+    expect(list).toContain('data-where="answered">Answered. The session carries on.<')
+    expect(list).not.toContain('Mac&#39;s prompt')
+    // The next question for the same session is held here: not "answered" any more.
+    body = { enabled: true, items: [HELD('pq_' + 'h'.repeat(24), S1, 'And the changelog?')], settled: [] }
+    q.Qs.poll(); await flush()
+    expect(q.Qs.answeredFor(S1)).toBe(false)
+    // A newer question at the Mac for the same session wins again.
+    body = { enabled: true, items: [], settled: [AT_MAC('pq_' + 'f'.repeat(24), S1, { settledAt: new Date(Date.now() + 60_000).toISOString() })] }
+    q.Qs.poll(); await flush()
+    expect(q.Qs.answeredFor(S1)).toBe(false)
+    expect(needsRegion({ at: WED_2PM, sessions: [row], qs: q.Qs }).els['needs-list']!.innerHTML).toContain(MAC_WORDS)
+  })
+
+  it('answered on another screen (settled answered), for two minutes only', async () => {
+    const answered = { ...AT_MAC('pq_' + 'g'.repeat(24), S1), resolution: 'answered', waitingAtMac: false, settledAt: new Date().toISOString() }
+    const q = loadQ(() => ({ enabled: true, items: [], settled: [answered] }))
+    await q.start()
+    expect(q.Qs.answeredFor(S1)).toBe(true)
+    expect(q.Qs.answeredFor('someone-else')).toBe(false)
+    q.later(121_000)
+    expect(q.Qs.answeredFor(S1)).toBe(false)
+  })
+
+  it('the sheet: Answered, no Mac line, no reply box', async () => {
+    const SID = 'eeeeeeee-5555-4555-8555-555555555555'
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release QA', alive: true, running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
+    const h = load({ data: { sessions: [ROW] }, routes: { [`GET /api/agent-sessions/claude/${SID}?turns=6`]: { status: 200, body: { recent_turns: [] } } }, questions: 0 })
+    ;(h.ctx as any).window.COSWeb.sessionQuestions.answeredFor = (id: string) => id === SID
+    ;(h.ctx as any).window.COSWeb.sessionQuestions.answeredLine = 'Answered. The session carries on.'
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML).toContain('Answered. The session carries on.')
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('Mac&#39;s prompt')
+    expect(h.els['ta-foot']!.hidden).toBe(true)
+  })
+})
+
+describe('6.99.26: a held question reads like the terminal, and Submit sends one answer (Miles 11/07)', () => {
+  const ID = 'pq_' + 't'.repeat(24)
+  const ITEM2 = { ...HELD(ID, 'sess-t', ''), questions: [
+    { question: 'What should a pet tap open?', header: 'Pet tap', multiSelect: false, options: [
+      { label: 'The Sessions tab', description: 'As today.' }, { label: 'Open what matters', description: 'One session: its sheet. Several: a short list.' }] },
+    { question: 'Which steps should run?', header: 'Publish', multiSelect: true, options: [
+      { label: 'Bump', description: 'Version touchpoints.' }, { label: 'Test', description: '' }, { label: 'Publish', description: 'npm next.' }] },
+  ] }
+  async function card() {
+    const q = loadQ(() => ({ enabled: true, items: [ITEM2], settled: [] }))
+    await q.start()
+    const el = q.mk()
+    q.Qs.mount(el, 'sess-t')
+    const block = (qi: number, focus?: () => void) => ({ getAttribute: (a: string) => (a === 'data-sq-id' ? ID : a === 'data-sq-qblock' ? String(qi) : null), querySelector: (sel: string) => (sel.includes('data-sq-other') ? { focus: focus ?? (() => {}) } : null) })
+    const key = (k: string, qi: number, opts: { other?: boolean; meta?: boolean; focus?: () => void } = {}) => {
+      let prevented = false
+      el.listeners.keydown!({ key: k, metaKey: !!opts.meta, ctrlKey: false, altKey: false, preventDefault: () => { prevented = true },
+        target: { hasAttribute: (a: string) => !!opts.other && a === 'data-sq-other', closest: (sel: string) => (sel === '[data-sq-qblock]' ? block(qi, opts.focus) : null) } })
+      return prevented
+    }
+    const pick = (qi: number, oi: number, checked = true) => el.listeners.change!({ target: { hasAttribute: (a: string) => a === 'data-sq-pick', getAttribute: (a: string) => (({ 'data-sq-id': ID, 'data-q': String(qi), 'data-o': String(oi) }) as Record<string, string>)[a], checked } })
+    const other = (qi: number, value: string) => el.listeners.input!({ target: { value, hasAttribute: (a: string) => a === 'data-sq-other', getAttribute: (a: string) => (({ 'data-sq-id': ID, 'data-q': String(qi) }) as Record<string, string>)[a] } })
+    const submit = () => el.listeners.click!({ target: { closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? 'send' : a === 'data-sq-id' ? ID : null) }) } })
+    return { q, el, key, pick, other, submit }
+  }
+
+  it('draws the strip, bold questions, numbered options with descriptions, Other as the last number, and the review', async () => {
+    const { el } = await card()
+    const html = el.innerHTML
+    expect(html).toContain('<nav class="sq-steps" aria-label="Questions">')
+    expect(words(html)).toContain('☐ Pet tap')
+    expect(words(html)).toContain('☐ Publish')
+    expect(words(html)).toContain('✓ Submit')
+    expect(html).toContain('<legend class="sq-q-text">What should a pet tap open?</legend>')
+    expect(html.match(/<span class="sq-num" aria-hidden="true">(\d+)\.<\/span>/g)!.map(x => x.replace(/<[^>]*>/g, '')), 'numbered from 1, Other last').toEqual(['1.', '2.', '3.', '1.', '2.', '3.', '4.'])
+    expect(html).toContain('<span class="sq-num" aria-hidden="true">3.</span><input class="field sq-other"')   // Other is 3 for the two-option question
+    expect(html).toContain('<span class="sq-num" aria-hidden="true">4.</span><input class="field sq-other"')   // and 4 for the three-option one
+    expect(html).toContain('<span class="sq-option-desc">One session: its sheet. Several: a short list.</span>')
+    expect(html).toContain('type="checkbox"')
+    expect(html).toContain('Pick any that apply.')
+    expect(words(html)).toContain('Your answers')
+    expect(words(html)).toContain('Not answered yet')
+    expect(html).toMatch(/data-sq="send" data-sq-id="[^"]+" disabled>Submit</)
+  })
+
+  it('answered by tap, number key and Other, reviewed, then one POST with the answer body questions.js always sent', async () => {
+    const { q, el, key, pick, other, submit } = await card()
+    expect(key('2', 0), 'key 2 picks the second option').toBe(true)
+    pick(1, 0)                       // tap Bump
+    expect(key('3', 1)).toBe(true)   // key 3 adds Publish (multi-select)
+    expect(key('2', 1, { other: true }), 'typing in Other is never a pick').toBe(false)
+    expect(key('1', 1, { meta: true }), 'a shortcut with a modifier is left alone').toBe(false)
+    expect(key('9', 1), 'past the last number').toBe(false)
+    let focused = 0
+    expect(key('4', 1, { focus: () => { focused++ } }), 'the last number goes to Other').toBe(true)
+    expect(focused).toBe(1)
+    other(1, 'Notarize first')
+    const html = el.innerHTML
+    expect(words(html)).toContain('☒ Pet tap')
+    expect(words(html)).toContain('☒ Publish')
+    expect(words(html)).toContain('Open what matters')
+    expect(words(html)).toContain('Bump, Publish, Notarize first')
+    expect(words(html)).not.toContain('Not answered yet')
+    submit()
+    expect(el.innerHTML).toContain('Tap again to submit')
+    expect(q.posts).toEqual([])
+    q.later(450)
+    submit()
+    await flush()
+    expect(q.posts).toHaveLength(1)
+    expect(q.posts[0]!.path).toBe(`/api/session-questions/${ID}/answer`)
+    expect(q.posts[0]!.body.answers).toEqual([{ labels: ['Open what matters'] }, { labels: ['Bump', 'Publish'], other: 'Notarize first' }])
+    expect(q.posts[0]!.body.clientAnswerId).toMatch(/^gw_[0-9a-f]{24}$/)
+  })
+
+  it('a change after Submit is armed takes the arm back; a double submit sends once', async () => {
+    const { q, el, key, pick, submit } = await card()
+    key('1', 0); pick(1, 1)
+    submit()
+    expect(el.innerHTML).toContain('Tap again to submit')
+    key('2', 0)                       // changed their mind while armed
+    expect(el.innerHTML).not.toContain('Tap again to submit')
+    q.later(450); submit()
+    expect(q.posts, 'the tap after a change only arms again').toEqual([])
+    q.later(450)
+    submit(); submit(); submit()      // a bounce on the confirming tap
+    await flush()
+    expect(q.posts).toHaveLength(1)
+    expect(q.posts[0]!.body.answers).toEqual([{ labels: ['Open what matters'] }, { labels: ['Test'] }])
+    submit(); q.later(450); submit()
+    await flush()
+    expect(q.posts, 'answered: nothing left to send').toHaveLength(1)
+  })
+
+  it('a pick or a key while sending changes nothing', async () => {
+    const { q, key, pick, submit } = await card()
+    key('1', 0); pick(1, 0)
+    submit(); q.later(450); submit()
+    // The POST is out: Q.sending holds until it answers.
+    expect(key('2', 0)).toBe(false)
+    pick(1, 2)
+    expect(q.Qs._state.picks[ID][1].labels, 'a tap while sending changes nothing').toEqual(['Bump'])
+    await flush()
+    expect(q.posts[0]!.body.answers).toEqual([{ labels: ['The Sessions tab'] }, { labels: ['Bump'] }])
+  })
+
+  it('a number key toggles a multi-select option; a single question has no strip and no review', async () => {
+    const { q, key } = await card()
+    key('1', 1); key('3', 1); key('1', 1)
+    expect(q.Qs._state.picks[ID][1].labels).toEqual(['Publish'])
+    key('1', 0); key('2', 0)
+    expect(q.Qs._state.picks[ID][0].labels, 'single choice: the last number wins').toEqual(['Open what matters'])
+    const one = loadQ(() => ({ enabled: true, items: [HELD('pq_' + 'u'.repeat(24), 'sess-u', 'Ship it?')], settled: [] }))
+    await one.start()
+    const el = one.mk()
+    one.Qs.mount(el, 'sess-u')
+    expect(el.innerHTML).not.toContain('sq-steps')
+    expect(el.innerHTML).not.toContain('sq-review')
+    expect(el.innerHTML).toContain('<span class="sq-num" aria-hidden="true">3.</span><input class="field sq-other"')
+  })
+
+  it('the drawn card follows each pick in place: the strip, the boxes, the answers and Submit', async () => {
+    const { q, el, pick } = await card()
+    const fake = (attrs: Record<string, string>) => ({ attrs, textContent: '', innerHTML: '', checked: false, disabled: false, getAttribute: (a: string) => attrs[a] ?? null })
+    const steps = [fake({ 'data-sq-step': '0' }), fake({ 'data-sq-step': '1' }), fake({ 'data-sq-step': 'submit' })]
+    steps[2]!.textContent = 'kept'
+    const send = fake({}), review = fake({})
+    const radios = [0, 1].map(o => fake({ 'data-o': String(o) }))
+    const cardEl = { querySelector: (sel: string) => (sel === '[data-sq="send"]' ? send : sel === '[data-sq-review] .sq-review-list' ? review : null),
+      querySelectorAll: (sel: string) => (sel === '[data-sq-step]' ? steps : []) }
+    ;(el as any).querySelector = (sel: string) => (sel === `[data-sq-card="${ID}"]` ? cardEl : null)
+    ;(el as any).querySelectorAll = (sel: string) => (sel === `[data-sq-pick][data-sq-id="${ID}"][data-q="0"]` ? radios : [])
+    const before = el.innerHTML
+    pick(0, 1)
+    expect(el.innerHTML, 'patched in place, never redrawn').toBe(before)
+    expect(steps.map(x => x.textContent)).toEqual(['☒ Pet tap', '☐ Publish', 'kept'])
+    expect(radios.map(x => x.checked)).toEqual([false, true])
+    expect(review.innerHTML).toContain('Open what matters')
+    expect(review.innerHTML).toContain('Not answered yet')
+    expect([send.textContent, send.disabled]).toEqual(['Submit', true])
+    pick(1, 0)
+    expect([send.textContent, send.disabled]).toEqual(['Submit', false])
+    void q
+  })
+
+  it('the strip jumps to a question, or to the answers with Submit focused', async () => {
+    const { el } = await card()
+    const calls: string[] = []
+    const input = { focus: () => calls.push('focus input'), disabled: false }
+    const block = { scrollIntoView: () => calls.push('scroll q1'), querySelector: () => input }
+    const reviewEl = { scrollIntoView: () => calls.push('scroll review'), querySelector: () => null }
+    const sendEl = { focus: () => calls.push('focus submit'), disabled: false }
+    const cardEl = { querySelector: (sel: string) => (sel === '[data-sq-qblock="1"]' ? block : sel === '[data-sq-review]' ? reviewEl : sel === '[data-sq="send"]' ? sendEl : null) }
+    const step = (n: string) => el.listeners.click!({ target: { closest: () => ({ disabled: false, closest: (sel: string) => (sel === '.sq-card' ? cardEl : null),
+      getAttribute: (a: string) => (a === 'data-sq' ? 'step' : a === 'data-sq-id' ? ID : a === 'data-sq-step' ? n : null) }) } })
+    step('1'); step('submit')
+    expect(calls).toEqual(['scroll q1', 'focus input', 'scroll review', 'focus submit'])
+  })
+})
+

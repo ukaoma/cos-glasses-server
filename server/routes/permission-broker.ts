@@ -35,8 +35,12 @@
 // The hook token still opens nothing here. A browser poll counts as a live answering client
 // only with `?client=web`, which the page sends only while it shows the cards (a visible tab);
 // the same 30 s window as the phone. A cookie poll naming `glasses` or `phone`, or no client,
-// never counts, and a token poll naming `web` never counts either. A browser never reports
-// wearer presence, so it never enables the away hold.
+// never counts, and a token poll naming `web` never counts either.
+// 6.99.26 (Miles 11/07, "Away rule, like phone"): a browser poll `?client=web&hold=1&presenceAgeMs=<int>`
+// (the ms since a touch or a key while the page was in front) records COS Control Web's presence for the
+// away hold ONLY (lib/client-liveness noteWebPresence): never a live client, so at the desk the Mac's own
+// pop-up still comes at once (6.99.13). Without `hold=1` or a valid `presenceAgeMs` it records nothing. A
+// token poll naming `web`, and a browser poll naming anything else, still record nothing.
 // 6.60.0: a poll with `&hold=1&presenceAgeMs=<int>` (COS Glasses 6.9.563 and later) records
 // wearer presence for the away hold instead of the 6.59.0 liveness; a `hold=1` poll without
 // a valid `presenceAgeMs` makes no client live and enables no hold. The response adds
@@ -53,7 +57,7 @@ import {
   type HookReplyChannel,
   type PermissionBroker,
 } from '../lib/permission-broker.js'
-import { noteQuestionsPoll, validPresenceAgeMs, type QuestionsPollFacts } from '../lib/client-liveness.js'
+import { noteQuestionsPoll, noteWebPresence, validPresenceAgeMs, type QuestionsPollFacts } from '../lib/client-liveness.js'
 
 export const PERMISSION_BROKER_HOOK_PATH = '/api/permission-requests/ask'
 /** The hook posts its spool envelope, capped at 1 MiB by the script itself. */
@@ -155,6 +159,8 @@ export interface SessionQuestionsRouterDeps {
   webSessionAuthorized?: (req: Request) => boolean
   /** Where a counted poll is recorded; `noteQuestionsPoll` in production. */
   notePoll?: (at: number, poll: QuestionsPollFacts) => void
+  /** 6.99.26: where COS Control Web's presence is recorded; `noteWebPresence` in production. */
+  noteWebPresence?: (at: number, presenceAgeMs: number) => void
   now?: () => number
   /** 6.60.0: when this server process started (ISO); defaults to the process's own start. */
   serverStartedAt?: string
@@ -179,6 +185,7 @@ export function questionsPollFacts(query: Record<string, unknown>): QuestionsPol
 export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): Router {
   const router = Router()
   const notePoll = deps.notePoll ?? noteQuestionsPoll
+  const noteWeb = deps.noteWebPresence ?? ((at: number, ageMs: number) => noteWebPresence(at, ageMs))
   const now = deps.now ?? Date.now
   router.get('/session-questions', (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
@@ -199,6 +206,11 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
     if (byToken && ANSWERING_CLIENTS.has(client)) notePoll(now(), questionsPollFacts(req.query as Record<string, unknown>))
     // 6.99.13 (Miles, option B): a browser poll never counts as live, so an open web tab never holds a question
     // back from the Mac's own pop-up. The web still lists and answers what the glasses or phone are holding.
+    // 6.99.26: its touch counts for the away hold only, like the phone's (Miles 11/07, "Away rule, like phone").
+    if (byWebSession && client === WEB_ANSWERING_CLIENT) {
+      const facts = questionsPollFacts(req.query as Record<string, unknown>)
+      if (facts.presenceAgeMs !== null && facts.presenceAgeMs !== undefined) noteWeb(now(), facts.presenceAgeMs)
+    }
     const health = deps.broker.health()
     // Listed first: a deadline the timer has not caught yet is settled by the listing.
     const items = deps.broker.list()
