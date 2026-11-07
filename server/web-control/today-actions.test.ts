@@ -3048,3 +3048,149 @@ describe('6.99.27: a question reaches Today in 3 s, not 10 (Miles 11/07 09:29, "
     expect(h.nudges(), 'the agent’s own state wins: running is not waiting').toBe(2)
   })
 })
+
+// ── 6.99.29: one state for the session card (Miles 11/07 11:01) ─────────────────────────────────
+// His screenshot showed, at once, "Idle 40s", "Working on: Yes install and proceed", "Working right now. A message
+// you send waits and lands when this turn ends." and "The session is busy. Yours sends next, on its own." while the
+// session ran. Every piece now reads app.js sxTruth, and the freshest signal wins.
+describe('one state for the session card: the freshest signal wins, and every piece agrees', () => {
+  const SID = 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d'
+  const P = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID)}${tail}`
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString()
+  const busyGate: Routes = {
+    ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+    ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
+    ['POST ' + P('/attach')]: { status: 409, body: { attached: false, reason: 'native_thread_working', reasonCopy: 'Working right now.' } },
+    ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0 } },
+  }
+  const freeGate: Routes = { ...busyGate, ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, reason: null, reasonCopy: '', ownerCount: 0 } } }
+  /** The four pieces the screenshot showed, read off the card. */
+  function card(h: ReturnType<typeof load>) {
+    const live = h.els['ta-live']!.innerHTML
+    const badge = /<strong>([^<]*)<\/strong>/.exec(live)?.[1] ?? null
+    return {
+      badge,
+      header: h.els['ta-run-state']!.textContent,
+      prompt: /class="ta-act-prompt">([^<]*)</.exec(live)?.[1] ?? null,
+      stop: live.includes('data-ta="stop"'),
+      parkNote: h.els['ta-verdict']!.innerHTML.includes('Working right now'),
+    }
+  }
+  function consistent(c: ReturnType<typeof card>, word: 'Working' | 'Idle') {
+    expect(c.badge, 'the badge').toBe(word)
+    if (word === 'Working') {
+      expect(c.header, 'the header').toMatch(/^Working now/)
+      expect(c.prompt, 'the prompt line').toMatch(/^Working on: /)
+      expect(c.stop, 'Stop').toBe(true)
+      expect(c.parkNote, 'the composer note').toBe(true)
+    } else {
+      expect(c.header, 'the header').toMatch(/^Idle/)
+      expect(c.prompt ?? 'Last asked: ', 'the prompt line').toMatch(/^Last asked: /)
+      expect(c.stop, 'Stop').toBe(false)
+      expect(c.parkNote, 'the composer note').toBe(false)
+    }
+  }
+
+  it('the stream says working, the list says idle: Working everywhere', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(120_000), alive: true }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: busyGate })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const es = h.streams[0]
+    es.onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: ago(30_000) }) })
+    es.onmessage({ data: JSON.stringify({ seq: 2, kind: 'prompt', text: 'Yes install and proceed' }) })
+    consistent(card(h), 'Working')
+    expect(card(h).prompt).toBe('Working on: Yes install and proceed')
+  })
+
+  it('the screenshot: the hooks say idle since 40 s ago, the write gate says working now: Working everywhere, and the busy send note agrees', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(40_000), alive: true }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: busyGate })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const es = h.streams[0]
+    es.onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_source: 'hook', state_since: ago(40_000) }) })
+    es.onmessage({ data: JSON.stringify({ seq: 2, kind: 'prompt', text: 'Yes install and proceed' }) })
+    consistent(card(h), 'Working')
+    h.els['ta-input']!.value = 'install 6.99.28'
+    h.tap('send')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session is busy. Yours sends next, on its own.')
+    consistent(card(h), 'Working')
+  })
+
+  it('a fresher idle beats an older busy answer: Idle everywhere, and the prompt line says what was last asked', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: ago(300_000), last_activity_at: ago(60_000), alive: true }
+    const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: busyGate })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    await new Promise(r => setTimeout(r, 15))
+    const es = h.streams[0]
+    es.onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_source: 'hook', state_since: new Date().toISOString() }) })
+    es.onmessage({ data: JSON.stringify({ seq: 2, kind: 'prompt', text: 'Yes install and proceed' }) })
+    consistent(card(h), 'Idle')
+    expect(card(h).prompt).toBe('Last asked: Yes install and proceed')
+  })
+
+  it('a busy file within five seconds of the Stop is the flush that trails it: still Idle', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(1_000), alive: true }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: busyGate })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    h.streams[0].onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_source: 'hook', state_since: ago(1_000) }) })
+    consistent(card(h), 'Idle')
+  })
+
+  it('a question stays a question: a busy write gate never turns Waiting into Working', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'waiting', state_source: 'hook', state_since: ago(60_000), alive: true }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: busyGate })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    h.streams[0].onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'waiting', state_source: 'hook', state_since: ago(60_000), waiting_kind: 'permission' }) })
+    const c = card(h)
+    expect(c.badge).toBe('Waiting')
+    expect(c.header).toMatch(/^Waiting for you/)
+    expect(c.parkNote, 'no "Working right now" beside "Waiting"').toBe(false)
+  })
+
+  it('a message delivered live into the open session: the card reads Working, not done', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(40_000), alive: true }
+    const routes: Routes = { ...freeGate,
+      ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b1', epoch: 3 } },
+      ['POST /api/agent-sessions/bindings/b1/turns']: { status: 200, body: { outcome: 'completed', via: 'live', deliveryState: 'delivered' } } }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    h.streams[0].onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_source: 'hook', state_since: ago(40_000) }) })
+    expect(card(h).badge).toBe('Idle')
+    h.els['ta-input']!.value = 'Yes install and proceed'
+    h.tap('send')
+    await flush()
+    expect(card(h).badge).toBe('Working')
+    expect(card(h).stop).toBe(true)
+    expect(card(h).header).toMatch(/^Working now/)
+  })
+
+  it('the gate goes free: an earlier busy answer no longer counts', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(40_000), alive: true }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: freeGate })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    h.streams[0].onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_source: 'hook', state_since: ago(40_000) }) })
+    consistent(card(h), 'Idle')
+    // The reducer itself: busy, then free, on one session.
+    const F = h.reader.kit.feed, r = h.reader.kit.session('claude', SID, {})
+    F.apply(r, { seq: 1, kind: 'status', state: 'idle', agent_state: 'idle', state_source: 'hook', state_since: ago(40_000) })
+    F.noteGate(r, true)
+    expect(F.truth(r)).toMatchObject({ word: 'Working', src: 'gate' })
+    F.noteGate(r, false)
+    expect(F.truth(r)).toMatchObject({ word: 'Idle', src: 'hook' })
+    // A Stop is idle as of then, and the stream's working echo in the next eight seconds does not reopen it.
+    F.noteGate(r, true); r.stoppedAt = Date.now() + 1
+    expect(F.truth(r)).toMatchObject({ word: 'Idle', src: 'stop' })
+    F.apply(r, { seq: 2, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date(Date.now() + 2).toISOString() })
+    expect(F.truth(r)!.word, 'the echo of the Stop').toBe('Idle')
+    F.apply(r, { seq: 3, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: new Date(Date.now() + 9_000).toISOString() })
+    expect(F.truth(r)!.word, 'a turn that starts after the echo window').toBe('Working')
+  })
+})

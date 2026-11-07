@@ -11,6 +11,11 @@ Miles, 11/07 11:04: a message he types in a session's box on COS Control Web (hi
 - **`GET /api/g2-turns/:id`**, alias **`GET /api/turn-provenance/:id`**: X-Cos-Token only (a browser cookie gets 401). Answers `verifiedOrigin` and `originKind`, and vouches only for a record this process wrote and still holds; after a restart recent turns read unverified.
 - The reader, the live feed, the session list and the Codex queue listing show the words without the footer, and the queue's delivery evidence and receipts match a footed transcript row by its words.
 
+**One state for the session card** (Miles, 11/07 11:01)
+- Today's session overlay and the Sessions reader no longer contradict themselves. His screenshot showed "Idle 40s", "Working on: Yes install and proceed", "Working right now" and "The session is busy" at once while the session ran. The badge read the hooks' derived state, which a turn delivered through the peer inbox does not move; the composer read the server's write gate; the send note read the park answer; and a turn delivered live was read as finished.
+- Every piece of the card (the state word and its clock, the header line, the prompt line, Stop, and the composer's "Working right now" note) now reads one state, and the freshest signal wins: the stream's derived state since it began, the session row as of its last activity, the write gate as of its answer (a later free answer clears it, and an answer that decides the card is asked again after 20 s), and the page's own Stop.
+- The hook's own waiting, failed and ended stay; idle yields only to working seen more than 5 s after it (the flush that trails a Stop). The prompt line says "Working on:" only while working, "Last asked:" otherwise. A message delivered live into the open session reads as working on it, not done.
+
 ## 6.99.28 - See the images your sessions make, from your phone; the 6.99.27 phone fixes (private)
 
 2026-11-07. Private build on 6.99.27 (6d85cb5). Server only. Works with COS Control 0.5.376 as installed.

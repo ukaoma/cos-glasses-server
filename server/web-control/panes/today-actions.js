@@ -640,7 +640,8 @@
     O.row = id ? sessionRowFor(provider, id) : null;
     O.r = id ? K.session(provider, id, VIEW) : null;
     // Working only when the session is not waiting on you: a session paused on a question is not at work (W4-r2).
-    if (O.r) O.r.live = { working: !!(O.row && O.row.running_active && K.stateOf(O.row) !== 'waiting') };
+    // 6.99.29: the row is one signal of the card's one state (app.js sxTruth), timed by its own evidence.
+    if (O.r) { O.r.live = {}; K.feed.noteList(O.r, O.row); K.feed.settle(O.r); }
     // What was typed, and a send whose answer never came, survive a close, Back or reload: the same words resend under
     // the same key (skeptic W3, qa2-user N1).
     var kept = O.r ? draftOf(O.r) : null;
@@ -794,7 +795,7 @@
   function runWords() {
     var r = O.r, f = r && r.feed;
     if (f && (f.connected || f.lastSeq > 0)) {
-      var w = K.feed.word(r), since = K.feed.elapsed(f);
+      var w = K.feed.word(r), since = K.feed.elapsed(f, r);
       if (w === 'Working') return 'Working now' + (since ? ', for ' + since : '');
       if (w === 'Waiting') return 'Waiting for you' + (since ? ', for ' + since : '');
       if (w === 'Failed') return 'Stopped with an error';
@@ -964,19 +965,17 @@
       K.feed.apply(r, e);
       r.live = r.live || {};
       if (e.kind === 'status') {
-        // The agent's own state wins: a process that is up while it waits on you is waiting, not working (W4-r2).
-        var working = e.agent_state ? e.agent_state === 'running' : e.state === 'working';
-        // The stream's status trails a Stop by a few seconds (the reader's rule): do not let that echo reopen it.
-        if (working && r.stoppedAt && Date.now() - r.stoppedAt < 8000) working = false;
-        if (r.live.working && !working) loadLast(r);
+        // 6.99.29: the card's one state (app.js sxTruth) decides working and waiting: the agent's own
+        // waiting still wins over a busy file (W4-r2), and the stream's echo of a Stop still cannot
+        // reopen it, but a stale idle no longer outranks fresher working evidence.
+        var wasWorking = !!r.live.working, wasWaiting = !!r.live.waiting;
+        K.feed.settle(r);
+        if (wasWorking && !r.live.working) loadLast(r);
         // Gone to waiting: its question may be parked for this page now, so the card reads at once (6.99.27).
-        var waitingNow = !working && (e.agent_state === 'waiting' || e.state === 'waiting' || e.state === 'needs_input');
-        if (waitingNow && !r.live.waiting && W.sessionQuestions && W.sessionQuestions.nudge) W.sessionQuestions.nudge();
-        r.live.waiting = waitingNow;
-        r.live.working = working;
-        if (!working) r.live.prose = null;
+        if (r.live.waiting && !wasWaiting && W.sessionQuestions && W.sessionQuestions.nudge) W.sessionQuestions.nudge();
       } else if (e.kind === 'prose' && e.text) r.live.prose = String(e.text);
       paintLive();
+      paintVerdict();
     };
     es.onerror = function () {
       if (O.r !== r || O.stream !== es) return;
@@ -1006,10 +1005,10 @@
       // Idle: the reader's line repeats the last reply, which the peek shows in full just below.
       var word = K.feed.word(r), detail = word === 'Idle' ? '' : K.feed.detail(f, word);
       html = '<div class="sx-act-state"><span class="sx-dot ' + word.toLowerCase() + '" aria-hidden="true"></span><strong>' + esc(word) + '</strong>' +
-        '<span class="sx-act-detail">' + esc(detail) + '</span><span class="sx-act-clock" id="ta-clock">' + esc(K.feed.elapsed(f)) + '</span>' +
+        '<span class="sx-act-detail">' + esc(detail) + '</span><span class="sx-act-clock" id="ta-clock">' + esc(K.feed.elapsed(f, r)) + '</span>' +
         (live.working || O.stopping ? '<button type="button" class="cx-btn quiet sx-act-stop' + (O.armedAt.stop != null ? ' danger' : '') + '" data-ta="stop"' + (O.stopping ? ' disabled' : '') + '>' +
           (O.stopping ? 'Stopping' : O.armedAt.stop != null ? 'Tap again to stop' : 'Stop') + '</button>' : '') + '</div>' +
-        (f.prompt ? '<p class="ta-act-prompt">' + esc('Working on: ' + clip(f.prompt, 240)) + '</p>' : '') +
+        (f.prompt ? '<p class="ta-act-prompt">' + esc(K.feed.promptLine(r, clip(f.prompt, 240))) + '</p>' : '') +
         '<div class="ta-act-tail">' + f.tools.slice(-5).map(function (t) { return '<div class="sx-act-tool">' + esc(K.feed.tool(t)) + '</div>'; }).join('') +
         (live.working && live.prose ? '<div class="sx-act-prose">' + esc(String(live.prose).slice(-500)) + '</div>' : '') + '</div>';
       // The feed stopped or was refused: say why under the last state it showed.
@@ -1022,7 +1021,8 @@
     if (w === 'Working' || w === 'Waiting') {
       O.clock = setInterval(function () {
         if (O.r !== r) { clearInterval(O.clock); return; }
-        var c = $('ta-clock'); if (c) c.textContent = K.feed.elapsed(r.feed);
+        var c = $('ta-clock'); if (c) c.textContent = K.feed.elapsed(r.feed, r);
+        if (K.feed.gateStale(r)) K.probe(r);
         var rs = $('ta-run-state'); if (rs) rs.textContent = runWords();
       }, 1000);
     }
@@ -1054,6 +1054,14 @@
       keepDraft(r, left, null);
     },
     verdict: function (r) { if (r === O.r) paintVerdict(); },
+    // 6.99.29: the card's one state moved (a gate answer, a parked send, a live delivery): repaint all of it.
+    stateChanged: function (r) {
+      if (r !== O.r) return;
+      var wasWorking = !!r.live && !!r.live.working;
+      K.feed.settle(r);
+      if (wasWorking && !r.live.working) loadLast(r);
+      paintLive(); paintVerdict();
+    },
     hold: function (r) {
       if (r !== O.r) return;
       O.note = { text: 'COS is still answering in this session. Send again when it finishes; it will not post twice. Or open the session, where it sends on its own.', kind: 'error' };
@@ -1081,7 +1089,8 @@
         ((f.changed || f.fork) ? '<button type="button" class="cx-btn quiet" data-ta="open-session">' + (f.fork ? 'Open session to fork it' : 'Open session') + '</button>' : '') +
         '</div></div>';
     } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
-      html = '<p class="sx-park">' + esc(K.parkCopy(r.provider)) + '</p>';
+      // 6.99.29: "Working right now" only while the card's one state says so.
+      if (K.feed.parkNoteShows(r)) html = '<p class="sx-park">' + esc(K.parkCopy(r.provider)) + '</p>';
     } else if (v && v.attachable === false && v.reasonCopy) {
       html = '<div class="sx-box refusal" role="status"><p>' + esc(v.reasonCopy) + '</p></div>';
     } else if (v && v.caution) {
@@ -1141,7 +1150,7 @@
       var b = c.body || {};
       O.stopKey = '';
       O.note = { text: b.reasonCopy || (b.cancelled ? 'Stopped.' : 'COS could not stop it.'), kind: b.cancelled ? '' : 'error' };
-      if (b.cancelled) { r.stoppedAt = Date.now(); r.live = r.live || {}; r.live.working = false; r.live.prose = null; O.dirty = true; setTimeout(function () { if (O.r === r) loadLast(r); }, 1500); }
+      if (b.cancelled) { r.stoppedAt = Date.now(); K.feed.settle(r); O.dirty = true; paintLive(); paintVerdict(); setTimeout(function () { if (O.r === r) loadLast(r); }, 1500); }
       paintNote(); paintLive();
     }, function (err) {
       O.stopping = false;
@@ -1160,7 +1169,13 @@
       K.answer('/api/agent-sessions/bindings/' + encodeURIComponent(bindingId) + '/turns/' + encodeURIComponent(key)).then(function (s) {
         if (O.r !== r) return;
         var o = s.body && s.body.outcome;
-        if (o === 'completed') { clearInterval(O.watch); O.note = { text: 'Done. The reply is below.', kind: '' }; paintNote(); loadLast(r); }
+        if (o === 'completed') {
+          clearInterval(O.watch);
+          // 6.99.29: a turn delivered LIVE is in the open session, which now works on it; it is not done.
+          if (s.body.via === 'live') { K.feed.noteGate(r, true); O.note = { text: 'Sent into the open session. It is working on it now.', kind: '' }; }
+          else { O.note = { text: 'Done. The reply is below.', kind: '' }; loadLast(r); }
+          paintNote(); VIEW.stateChanged(r);
+        }
         else if (o === 'refused') { clearInterval(O.watch); O.note = { text: s.body.reasonCopy || 'The session refused that message.', kind: 'error' }; paintNote(); }
         else if (o === 'ambiguous') { clearInterval(O.watch); O.note = { text: s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', kind: 'error' }; paintNote(); }
       }).catch(function () {});

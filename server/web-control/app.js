@@ -1653,7 +1653,8 @@
           '<div id="session-queue"></div>' +
         '</div>';
       readerImagesMount($('session-turns'), r);
-      setLive({ working: !!d.running_active });
+      sxNoteList(r, d);
+      setLive({});
       paintReaderFiles();
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.
       var kitR = readerKit(); if (kitR && !kitR.turnFiles()) kitR.ensureCaps().then(paintReaderFiles, function () {});
@@ -1675,7 +1676,7 @@
   // ACTIVITY (ActivityWindow.swift SessionActivityFeed 6800-6890, SessionLiveFeed.swift): the state
   // word with its clock, the current prompt, the last eight tool lines, and the honest counters.
   // The reducer follows SessionLiveFeed.applying: a reseed (seq 1 after anything) starts over.
-  function newFeed() { return { transport: 'idle', agentState: null, stateSince: null, waitingKind: null, waitingDetail: null, failure: null, lastReply: null, prompt: '', tools: [], lastSeq: 0, lastEventAt: null, missed: 0, connected: false, fallback: null }; }
+  function newFeed() { return { transport: 'idle', agentState: null, stateSince: null, statusAt: null, waitingKind: null, waitingDetail: null, failure: null, lastReply: null, prompt: '', tools: [], lastSeq: 0, lastEventAt: null, missed: 0, connected: false, fallback: null }; }
   function applyFeed(r, e) {
     if (typeof e.seq !== 'number') return;
     var f = r.feed;
@@ -1686,6 +1687,7 @@
     f.connected = true;
     if (f.fallback === 'reconnecting') f.fallback = null;
     if (e.kind === 'status') {
+      f.statusAt = f.lastEventAt;
       if (e.state) f.transport = e.state;
       if (e.agent_state) {
         f.agentState = e.agent_state; f.stateSince = toDate(e.state_since);
@@ -1702,16 +1704,90 @@
   // `other` is the stream's verb for every tool it has no verb for; its target names the tool ("Used SendMessage").
   var SX_VERBS = { read: 'Read', edit: 'Edited', write: 'Edited', bash: 'Ran', run: 'Ran', search: 'Searched', grep: 'Searched', glob: 'Searched', fetch: 'Fetched', web: 'Fetched', agent: 'Delegated', task: 'Delegated', other: 'Used' };
   function sxToolLine(t) { var v = String(t.verb || 'tool'); var w = SX_VERBS[v] || v.charAt(0).toUpperCase() + v.slice(1); return t.target ? w + ' ' + t.target : w; }
-  // The word follows the page's own working flag, which a Stop or a finished turn settles before
-  // the stream's status catches up; otherwise the server's derived state, as Control reads it.
+  // ONE STATE FOR THE SESSION CARD (6.99.29). Miles, 11/07 11:01: Today's session overlay showed
+  // "Idle 40s" over "Working on: Yes install and proceed", beside "Working right now" and "The
+  // session is busy" while the session ran its turn. Each piece read its own source: the badge the
+  // hooks' derived state (which a turn delivered through the peer inbox does not move), the composer
+  // the server's write gate, the send note the park answer, and a delivered live turn was read as a
+  // finished one. Now every piece of the card (the badge word and clock, the prompt line's label,
+  // Stop, the composer's park note and the reader's state line) reads sxTruth, and each signal says
+  // what it saw and WHEN that became true; the freshest wins:
+  //   hook   the stream's derived agent_state, since its state_since
+  //   stream the stream's own state, when no derived state rides it, as of that status line
+  //   list   the session row or detail: running_active as of its last activity, else since state_since
+  //   gate   the server's write gate: native_thread_working on the attachability probe, a refused
+  //          turn or a parked send, or a turn delivered live into the open session, as of the answer;
+  //          a later free answer, or a COS child's turn that finished, clears it
+  //   stop   this page's Stop (and a finished COS child turn): idle as of then, and no working signal
+  //          from the next SX_STOP_ECHO_MS counts (the stream's status trails a Stop)
+  // The hook's waiting, failed and ended are its own words and stay: a gate that sees a busy file
+  // does not unseat a question. Idle yields only to working seen more than SX_IDLE_GRACE_MS after it,
+  // the server's rule for the flush that trails a Stop (TRANSCRIPT_AFTER_IDLE_GRACE_MS).
+  var SX_IDLE_GRACE_MS = 5000, SX_STOP_ECHO_MS = 8000, SX_GATE_RECHECK_MS = 20000;
+  function sxMs(v) {
+    var t = v instanceof Date ? v.getTime() : typeof v === 'number' ? v : typeof v === 'string' && v ? Date.parse(v) : NaN;
+    return isFinite(t) ? t : null;
+  }
+  var SX_HOOK_WORD = { running: 'Working', waiting: 'Waiting', failed: 'Failed', ended: 'Done', idle: 'Idle' };
+  function sxSignals(r) {
+    var f = r.feed || {}, out = [];
+    if (f.agentState && SX_HOOK_WORD[f.agentState]) out.push({ word: SX_HOOK_WORD[f.agentState], at: sxMs(f.stateSince) || sxMs(f.statusAt) || 0, src: 'hook' });
+    else if (f.statusAt) out.push({ word: f.transport === 'working' ? 'Working' : f.transport === 'done' ? 'Done' : 'Idle', at: sxMs(f.statusAt), src: 'stream' });
+    if (r.list && r.list.at != null) out.push({ word: r.list.word, at: r.list.at, src: 'list' });
+    if (r.gate && r.gate.busy && r.gate.at != null) out.push({ word: 'Working', at: r.gate.at, src: 'gate' });
+    var stop = sxMs(r.stoppedAt);
+    if (stop !== null) out.push({ word: 'Idle', at: stop, src: 'stop' });
+    return out;
+  }
+  /** { word, at, src }: the one state the whole card shows. Null before any signal. */
+  function sxTruth(r) {
+    var stop = sxMs(r.stoppedAt);
+    var all = sxSignals(r).sort(function (a, b) { return a.at - b.at; });
+    var best = null;
+    all.forEach(function (c) {
+      if (!best) { best = c; return; }
+      if (c.word === 'Working') {
+        if (stop !== null && c.at >= stop && c.at - stop < SX_STOP_ECHO_MS) return;
+        if (stop !== null && c.at < stop) return;
+        if (best.src === 'hook' && c.src !== 'hook' && /^(Waiting|Failed|Done)$/.test(best.word)) return;
+        if (best.word === 'Idle' && best.src !== 'stop' && c.src !== best.src && c.at <= best.at + SX_IDLE_GRACE_MS) return;
+      }
+      best = c;
+    });
+    return best;
+  }
+  /** Settle the page's working flag from the one state; true when it changed. */
+  function sxSettle(r) {
+    var t = sxTruth(r), working = !!(t && t.word === 'Working');
+    r.live = r.live || {};
+    var was = !!r.live.working;
+    r.live.working = working;
+    r.live.waiting = !!(t && t.word === 'Waiting');
+    if (!working) { r.live.step = null; r.live.prose = null; }
+    return was !== working;
+  }
+  /** What the server's write gate said, and when. A free answer clears an earlier busy one. */
+  function sxNoteGate(r, busy) { r.gate = { busy: !!busy, at: Date.now() }; }
+  /** The list or detail row's view, timed by its own evidence. */
+  function sxNoteList(r, row) {
+    if (!row) return;
+    var waiting = sxState(row) === 'waiting', working = !!row.running_active && !waiting;
+    var at = working ? (sxMs(row.last_activity_at) || sxMs(row.state_since)) : (sxMs(row.state_since) || sxMs(row.last_activity_at));
+    // A row with no time of its own is the oldest word: the live feed outranks it the moment it speaks.
+    r.list = { word: working ? 'Working' : waiting ? 'Waiting' : 'Idle', at: at != null ? at : 0 };
+  }
+  /** A gate busy answer that decides the card is re-asked after a while, so it cannot stand forever. */
+  function sxGateStale(r) {
+    var t = sxTruth(r);
+    return !!(t && t.src === 'gate' && r.gate && Date.now() - r.gate.at > SX_GATE_RECHECK_MS && !r.probing);
+  }
   function sxFeedWord(r) {
-    var f = r.feed;
-    if (r.live && r.live.working) return 'Working';
-    var s = f.agentState || f.transport;
-    if (s === 'waiting') return 'Waiting';
-    if (s === 'failed') return 'Failed';
-    if (s === 'ended' || s === 'done') return 'Done';
-    return 'Idle';
+    var t = sxTruth(r);
+    return t ? t.word : 'Idle';
+  }
+  /** The prompt line: what the session works on, or what it was last asked. */
+  function sxPromptLine(r, text) {
+    return (sxFeedWord(r) === 'Working' ? 'Working on: ' : 'Last asked: ') + text;
   }
   function sxFeedDetail(f, word) {
     if (word === 'Waiting' && f.agentState === 'waiting') {
@@ -1726,8 +1802,9 @@
     if (word === 'Idle' && f.agentState === 'idle') { var reply = String(f.lastReply || '').trim(); return reply ? 'last reply: ' + reply : ''; }
     return '';
   }
-  function sxElapsed(f) {
-    var since = f.stateSince || f.lastEventAt;
+  function sxElapsed(f, r) {
+    var t = r ? sxTruth(r) : null;
+    var since = t && t.at ? new Date(t.at) : f.stateSince || f.lastEventAt;
     if (!since) return '';
     var s = Math.max(0, Math.floor((Date.now() - since.getTime()) / 1000));
     if (s < 60) return s + 's';
@@ -1759,7 +1836,7 @@
       var word = sxFeedWord(r), detail = sxFeedDetail(f, word);
       html += '<div class="sx-act-state"><span class="sx-dot ' + word.toLowerCase() + '" aria-hidden="true"></span><strong>' + word + '</strong>' +
         '<span class="sx-act-detail">' + esc(detail) + '</span>' +
-        '<span class="sx-act-clock" id="session-elapsed">' + esc(sxElapsed(f)) + '</span>' +
+        '<span class="sx-act-clock" id="session-elapsed">' + esc(sxElapsed(f, r)) + '</span>' +
         (live.working ? '<button type="button" class="cx-btn quiet sx-act-stop" data-action="stop-session">Stop</button>' : '') + '</div>' +
         '<p class="sx-act-prompt">' + esc(f.prompt) + '</p>' +
         '<div class="sx-act-tail">' + f.tools.map(function (t) { return '<div class="sx-act-tool">' + esc(sxToolLine(t)) + '</div>'; }).join('') +
@@ -1774,7 +1851,8 @@
     if ((f.connected || f.lastSeq > 0) && (w === 'Working' || w === 'Waiting')) {
       r.feedTimer = setInterval(function () {
         if (state.reading !== r) { clearInterval(r.feedTimer); return; }
-        var el = $('session-elapsed'); if (el) el.textContent = sxElapsed(r.feed);
+        var el = $('session-elapsed'); if (el) el.textContent = sxElapsed(r.feed, r);
+        if (sxGateStale(r)) sxProbeAttach(r);
       }, 1000);
     }
   }
@@ -1812,13 +1890,12 @@
       if (!r || r.id !== id) return;
       applyFeed(r, e);
       if (e.kind === 'status') {
-        var working = e.state === 'working' || e.agent_state === 'running';
-        // The stream's status trails a Stop by a few seconds; do not let that echo reopen it.
-        if (working && r.stoppedAt && Date.now() - r.stoppedAt < 8000) working = false;
-        var waiting = e.state === 'waiting' || e.state === 'needs_input' || e.agent_state === 'waiting';
+        // 6.99.29: the one state (sxTruth), never this line's own reading of itself.
+        setLive({});
+        var working = !!(r.live && r.live.working);
+        var waiting = !working && (e.state === 'waiting' || e.state === 'needs_input' || e.agent_state === 'waiting');
         var el = $('session-state');
         if (el) el.textContent = working ? 'Working now' : waiting ? 'Waiting for you' : 'Open';
-        setLive({ working: working });
         if (wasWorking && !working) { refreshTurns(provider, id); replyEnded(r); }
         wasWorking = working;
         // Gone to waiting: its question may be parked for this page now (6.99.27).
@@ -1835,9 +1912,12 @@
   }
   function setLive(patch) {
     var r = state.reading; if (!r) return;
-    r.live = Object.assign(r.live || {}, patch);
-    if (!r.live.working) { r.live.step = null; r.live.prose = null; }
+    // The working flag is never set here: it is the one state's (sxSettle).
+    var p = Object.assign({}, patch); delete p.working;
+    r.live = Object.assign(r.live || {}, p);
+    var moved = sxSettle(r);
     paintActivity(r);
+    if (moved) renderVerdict(r);
   }
   function refreshTurns(provider, id) {
     var reading = state.reading;
@@ -1884,6 +1964,7 @@
   // and anything else is the server's refusal, word for word.
   function sxProbeAttach(r) {
     // Today's overlay probes its own session object (r.view): the same verdict, painted by its view.
+    r.probing = true;
     return apiAnswer(sessionPath(r.provider, r.id, '/attachability')).then(function (a) {
       if (state.reading !== r && !r.view) return;
       if (a.status === 404) { r.verdict = { attachable: false, reason: 'route_absent', reasonCopy: 'Update the COS server to continue a thread from here.', ownerCount: 0 }; viewOf(r).verdict(r); return; }
@@ -1891,14 +1972,22 @@
       if (a.status !== 200 || typeof b.attachable !== 'boolean') return;
       var owners = Number(b.ownerCount) || 0;
       r.verdict = { attachable: b.attachable, reason: String(b.reason || ''), reasonCopy: String(b.reasonCopy || ''), ownerCount: owners, caution: b.attachable === true && owners > 0 };
-      viewOf(r).verdict(r);
-    }).catch(function () {});
+      // 6.99.29: the gate's answer is a signal of the one state, as of now.
+      sxNoteGate(r, b.attachable === false && b.reason === 'native_thread_working');
+      sxRepaint(r);
+    }).catch(function () {}).finally(function () { r.probing = false; });
   }
   var SX_PARK = {
     cursor: 'Working right now. A message you send goes into this Cursor chat when its turn ends.',
     codex: 'Working right now. A message you send joins the Codex app’s queue for this thread.',
     claude: 'Working right now. A message you send waits and lands when this turn ends.'
   };
+  /** The composer's "Working right now" note: a busy gate verdict, and the one state agrees. */
+  function sxParkNoteShows(r) {
+    var v = r.verdict;
+    if (!v || v.attachable !== false || !/^(native_thread_working|native_target_busy)$/.test(v.reason)) return false;
+    return sxFeedWord(r) === 'Working' || v.reason === 'native_target_busy';
+  }
   function sxSupplement(reason) {
     if (reason === 'native_target_busy') return 'It frees itself within 30 minutes. Detaching is not available in Control yet.';
     if (reason === 'native_target_fenced') return 'Fences can be released from the Fences card in this panel.';
@@ -1924,7 +2013,8 @@
         (f.retry ? '<button type="button" class="cx-btn quiet" data-sx="retry">Retry</button>' : '') +
         (f.fork ? forkBtn : ''));
     } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
-      html = '<div class="sx-park"><p>' + esc(SX_PARK[sxProvider(r.provider)]) + '</p>' + (/fork/i.test(v.reasonCopy) ? '<div class="sx-box-actions">' + forkBtn + '</div>' : '') + '</div>';
+      // 6.99.29: "Working right now" only while the one state says so.
+      if (sxParkNoteShows(r)) html = '<div class="sx-park"><p>' + esc(SX_PARK[sxProvider(r.provider)]) + '</p>' + (/fork/i.test(v.reasonCopy) ? '<div class="sx-box-actions">' + forkBtn + '</div>' : '') + '</div>';
     } else if (v && v.attachable === false && v.reasonCopy) {
       html = refusalBox(v.reasonCopy, sxSupplement(v.reason), /fork/i.test(v.reasonCopy) ? forkBtn : '');
     }
@@ -1937,6 +2027,12 @@
     }
   }
 
+  /** Repaint whichever card shows this session after its one state moved (the reader or a view). */
+  function sxRepaint(r) {
+    sxSettle(r);
+    if (r.view) { if (typeof r.view.stateChanged === 'function') r.view.stateChanged(r); else r.view.verdict(r); return; }
+    if (state.reading === r) { paintActivity(r); renderVerdict(r); }
+  }
   function sessionStatus(text, kind, actionHtml) {
     var el = $('session-status'); if (!el) return;
     el.className = 'status-line' + (kind === 'error' ? ' error' : '');
@@ -2158,6 +2254,8 @@
           else { view.pending(r, draft.text, b.replayed ? 'already sent' : 'sent'); view.clear(r, draft.text); }
           view.status(r, b.replayed ? 'Already sent. Watching for the reply.' : 'Sent. Watching for the reply.');
           view.watch(r, at.binding.bindingId, draft.key);
+          // 6.99.29: a turn that went live is in the open session, which now works on it.
+          if (b.outcome === 'completed' && b.via === 'live') { sxNoteGate(r, true); try { sxRepaint(r); } catch (_e) {} }
           return 'sent';
         }
         var reason = b.reason || '';
@@ -2255,6 +2353,9 @@
         else { view.pending(r, draft.text, 'waiting in line'); view.clear(r, draft.text); }
         view.status(r, b.error === 'duplicate_turn' ? 'Already waiting to send.' : (b.position ? 'The session is busy. Yours is #' + (b.position + 1) + ' in line and sends on its own.' : 'The session is busy. Yours sends next, on its own.'));
         view.queue(r);
+        // 6.99.29: "The session is busy" is the gate's word as of now; the card shows the same. Last, and
+        // never allowed to cost the parked message its settlement.
+        if (b.queued === true && refusal && refusal.reason === 'native_thread_working') { sxNoteGate(r, true); try { sxRepaint(r); } catch (_e) {} }
         return 'parked';
       }
       if (b.error === 'thread_free' && !opts.freeRetry) return continueSession(r, draft.text, Object.assign({}, opts, { freeRetry: true }));
@@ -2275,10 +2376,13 @@
       apiAnswer('/api/agent-sessions/bindings/' + encodeURIComponent(bindingId) + '/turns/' + encodeURIComponent(key)).then(function (s) {
         var o = s.body && s.body.outcome;
         if (o === 'completed') {
-          clearInterval(state.turnPoll); sessionStatus('Done.'); refreshTurns(provider, id);
-          // The finished turn is the authority; the stream's idle status can trail it.
-          setLive({ working: false }); var st = $('session-state'); if (st) st.textContent = 'Open';
-          replyEnded(r);
+          clearInterval(state.turnPoll); refreshTurns(provider, id);
+          // 6.99.29: a turn delivered LIVE is in the open session, which is now working on it; only a
+          // COS child's finished turn is the end of the work. Either way the one state settles it.
+          if (s.body.via === 'live') { sxNoteGate(r, true); sessionStatus('Sent into the open session.'); }
+          else { r.stoppedAt = Date.now(); sessionStatus('Done.'); }
+          setLive({}); var st = $('session-state'); if (st) st.textContent = r.live && r.live.working ? 'Working now' : 'Open';
+          if (s.body.via !== 'live') replyEnded(r);
         } else if (o === 'refused') { clearInterval(state.turnPoll); sessionStatus(s.body.reasonCopy || 'The session refused that message.', 'error'); replyEnded(r); }
         else if (o === 'ambiguous') { clearInterval(state.turnPoll); sessionStatus(s.body.reasonCopy || 'COS cannot tell whether that landed. Look at the session before sending it again.', 'error'); }
       }).catch(function () {});
@@ -2328,7 +2432,7 @@
       if (b.cancelled) {
         r.stoppedAt = Date.now();
         clearInterval(state.turnPoll);
-        setLive({ working: false }); var st = $('session-state'); if (st) st.textContent = 'Open';
+        setLive({}); var st = $('session-state'); if (st) st.textContent = 'Open';
         setTimeout(function () { if (state.reading === r) refreshTurns(r.provider, r.id); }, 1500);
       }
     }).catch(function (err) { sessionStatus(err.message, 'error'); });
@@ -4643,7 +4747,8 @@
     probe: function (r) { return sxProbeAttach(r); },
     path: sessionPath, answer: apiAnswer,
     imageHtml: readerImagesHtml, imagesMount: readerImagesMount, imagesStop: readerImagesStop,
-    feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine },
+    feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
+      truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
     parkCopy: function (p) { return SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
