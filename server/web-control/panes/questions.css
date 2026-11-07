@@ -41,6 +41,19 @@
 .sq-review-q { font-weight: 600; color: var(--ink); margin-right: 8px; }
 .sq-review-a { color: var(--ink); overflow-wrap: anywhere; }
 .sq-review-a.empty { color: var(--tertiary); }
+/* 6.99.27 (Miles's phone test): what each question needs, and a footer that keeps the progress and the answer button
+   on screen while the card is, at every Duo size. Questions clear the top bar and the footer when scrolled to. */
+.sq-need { margin: 2px 0 0; font-size: 13px; line-height: 1.4; }
+.sq-need[data-state="todo"] { color: var(--hot); font-weight: 600; }
+.sq-need[data-state="done"] { color: var(--tertiary); }
+.sq-q { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--safe-top, 0px) + 12px); scroll-margin-bottom: 150px; }
+.ta-q .sq-q { scroll-margin-top: 8px; }
+.sq-review { scroll-margin-bottom: 150px; }
+.sq-foot { position: sticky; bottom: var(--safe-bottom, 0px); z-index: 2; margin: 12px -16px -12px; padding: 10px 16px 12px; background: var(--panel);
+  border-top: 1px solid var(--row-border); border-radius: 0 0 16px 16px; }
+.sq-foot .sq-acts { margin-top: 0; }
+.sq-progress { margin: 0 0 8px; font: 500 13.5px/1.35 var(--body); color: var(--sub); }
+.sq-progress[data-alert] { color: var(--hot); font-weight: 600; }
 .sq-keys { display: none; margin-top: 10px; }
 @media (hover: hover) and (pointer: fine) { .sq-keys { display: block; } }
 /* 6.99.26: a question the Mac's own prompt waits on. Read-only, so it does not take the waiting colour. */

@@ -1730,7 +1730,7 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
 // questions.js in a vm with the page's own clocks (wall and monotonic, moved apart), the document's touch listeners,
 // and a poll whose answer the test sets. Nothing reaches a server.
 const MAC_WORDS = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
-function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown> } = {}) {
+function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string, body: any) => Promise<unknown>; reduced?: boolean } = {}) {
   const mk = () => ({ hidden: true, innerHTML: '', isConnected: true, listeners: {} as Record<string, (e: unknown) => void>,
     addEventListener(t: string, fn: (e: unknown) => void) { this.listeners[t] = fn }, querySelector: () => null, querySelectorAll: () => [], contains: () => false })
   const host = mk()
@@ -1748,7 +1748,8 @@ function loadQ(body: () => unknown, opt: { perf?: boolean; post?: (path: string,
   const document: any = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? { classList: { contains: () => false } } : null),
     addEventListener: (t: string, fn: (e: unknown) => void) => { (docListeners[t] ??= []).push(fn) }, hidden: false, activeElement: null }
   const fetch = (url: string) => { fetches.push(url); return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(body()) }) }
-  const ctx = vm.createContext({ window: { COSWeb: W }, document, fetch, console, Date: QDate, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
+  const ctx = vm.createContext({ window: { COSWeb: W, ...(opt.reduced === undefined ? {} : { matchMedia: (q: string) => ({ matches: !!opt.reduced && q.includes('reduce') }) }) },
+    document, fetch, console, Date: QDate, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
     performance: opt.perf === false ? undefined : { now: () => 5_000 + mono },
     setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {} })
   vm.runInContext(QUESTIONS, ctx)
@@ -2280,10 +2281,16 @@ describe('6.99.26: a held question reads like the terminal, and Submit sends one
     expect(html).toContain('<span class="sq-num" aria-hidden="true">4.</span><input class="field sq-other"')   // and 4 for the three-option one
     expect(html).toContain('<span class="sq-option-desc">One session: its sheet. Several: a short list.</span>')
     expect(html).toContain('type="checkbox"')
-    expect(html).toContain('Pick any that apply.')
+    // 6.99.27: what each question needs, honestly (the broker takes no empty multi-select answer).
+    expect(html).toContain('<p class="sq-need" data-sq-need="0" data-state="todo">Pick one.</p>')
+    expect(html).toContain('<p class="sq-need" data-sq-need="1" data-state="todo">Pick one or more.</p>')
+    expect(html).not.toContain('Pick any that apply')
     expect(words(html)).toContain('Your answers')
     expect(words(html)).toContain('Not answered yet')
-    expect(html).toMatch(/data-sq="send" data-sq-id="[^"]+" disabled>Submit</)
+    // The footer: progress, and an answer button that is never greyed out for a missing answer.
+    expect(html).toContain('<div class="sq-foot" data-sq-foot="')
+    expect(html).toContain('role="status">0 of 2 answered</p>')
+    expect(html).toMatch(/data-sq="send" data-sq-id="[^"]+">Review and submit</)
   })
 
   it('answered by tap, number key and Other, reviewed, then one POST with the answer body questions.js always sent', async () => {
@@ -2367,10 +2374,12 @@ describe('6.99.26: a held question reads like the terminal, and Submit sends one
     const fake = (attrs: Record<string, string>) => ({ attrs, textContent: '', innerHTML: '', checked: false, disabled: false, getAttribute: (a: string) => attrs[a] ?? null })
     const steps = [fake({ 'data-sq-step': '0' }), fake({ 'data-sq-step': '1' }), fake({ 'data-sq-step': 'submit' })]
     steps[2]!.textContent = 'kept'
-    const send = fake({}), review = fake({})
+    const send = fake({}), review = fake({}), progress = fake({})
+    const needs = [fake({ 'data-sq-need': '0' }), fake({ 'data-sq-need': '1' })]
+    for (const x of [progress, ...needs]) { (x as any).setAttribute = (k: string, v: string) => { x.attrs[k] = v }; (x as any).removeAttribute = (k: string) => { delete x.attrs[k] } }
     const radios = [0, 1].map(o => fake({ 'data-o': String(o) }))
-    const cardEl = { querySelector: (sel: string) => (sel === '[data-sq="send"]' ? send : sel === '[data-sq-review] .sq-review-list' ? review : null),
-      querySelectorAll: (sel: string) => (sel === '[data-sq-step]' ? steps : []) }
+    const cardEl = { querySelector: (sel: string) => (sel === '[data-sq="send"]' ? send : sel === '[data-sq-review] .sq-review-list' ? review : sel === '[data-sq-progress]' ? progress : null),
+      querySelectorAll: (sel: string) => (sel === '[data-sq-step]' ? steps : sel === '[data-sq-need]' ? needs : []) }
     ;(el as any).querySelector = (sel: string) => (sel === `[data-sq-card="${ID}"]` ? cardEl : null)
     ;(el as any).querySelectorAll = (sel: string) => (sel === `[data-sq-pick][data-sq-id="${ID}"][data-q="0"]` ? radios : [])
     const before = el.innerHTML
@@ -2380,9 +2389,17 @@ describe('6.99.26: a held question reads like the terminal, and Submit sends one
     expect(radios.map(x => x.checked)).toEqual([false, true])
     expect(review.innerHTML).toContain('Open what matters')
     expect(review.innerHTML).toContain('Not answered yet')
-    expect([send.textContent, send.disabled]).toEqual(['Submit', true])
+    expect([send.textContent, send.disabled], 'never greyed out for a missing answer').toEqual(['Review and submit', false])
+    expect(progress.textContent).toBe('1 of 2 answered')
+    expect(needs.map(x => x.attrs['data-state'])).toEqual(['done', 'todo'])
+    // Submit with Publish empty: the footer says so in place, flagged.
+    el.listeners.click!({ target: { closest: () => ({ disabled: false, getAttribute: (a: string) => (a === 'data-sq' ? 'send' : a === 'data-sq-id' ? ID : null) }) } })
+    expect([progress.textContent, progress.attrs['data-alert']]).toEqual(['Publish still needs an answer. Pick one or more.', '1'])
     pick(1, 0)
-    expect([send.textContent, send.disabled]).toEqual(['Submit', false])
+    expect(progress.attrs['data-alert'], 'a pick clears the flag').toBeUndefined()
+    expect([send.textContent, send.disabled]).toEqual(['Review and submit', false])
+    expect(progress.textContent).toBe('2 of 2 answered')
+    expect(needs.map(x => x.attrs['data-state'])).toEqual(['done', 'done'])
     void q
   })
 
@@ -2471,6 +2488,123 @@ describe('QA round 1 (6.99.26): a sheet after a waiting sheet shows its foot aga
     await flush()
     expect(h.els['ta-foot']!.innerHTML).toContain('Open Sort in Work')
     expect(h.els['ta-foot']!.hidden).toBe(false)
+  })
+})
+
+describe('6.99.27: the card answers on a phone (Miles 11/07 09:32, "It’s not allowing me to answer the Qs")', () => {
+  const ID = 'pq_' + 'w'.repeat(24), SID = 'sess-w'
+  const TWO = { ...HELD(ID, SID, ''), questions: [
+    { question: 'Where should it show first?', header: 'Where', multiSelect: false, options: [{ label: 'On the phone, Today', description: '' }, { label: 'Sessions', description: '' }] },
+    { question: 'Which parts look right?', header: 'Card check', multiSelect: true, options: [{ label: 'Numbered options', description: '' }, { label: 'Descriptions', description: '' }] },
+  ] }
+  // A drawn card as the browser has it: each question block, the answers to review and Submit, recording what is
+  // scrolled into view and focused.
+  function cardDom() {
+    const calls: string[] = []
+    const input = (name: string) => ({ disabled: false, focus: () => calls.push('focus ' + name) })
+    const blocks = [0, 1].map(qi => ({ scrollIntoView: (o: { block: string; behavior: string }) => calls.push(`scroll q${qi} ${o.block} ${o.behavior}`), querySelector: () => input('q' + qi) }))
+    const review = { scrollIntoView: (o: { block: string; behavior: string }) => calls.push(`scroll review ${o.block} ${o.behavior}`) }
+    const send = { disabled: false, focus: () => calls.push('focus submit') }
+    const card = { querySelector: (sel: string) => (sel === '[data-sq-qblock="0"]' ? blocks[0] : sel === '[data-sq-qblock="1"]' ? blocks[1] : sel === '[data-sq-review]' ? review : sel === '[data-sq="send"]' ? send : null) }
+    return { card, calls }
+  }
+  async function setup(opt: { reduced?: boolean; item?: unknown } = {}) {
+    const q = loadQ(() => ({ enabled: true, items: [opt.item ?? TWO], settled: [] }), { reduced: opt.reduced })
+    await q.start()
+    const el = q.mk()
+    q.Qs.mount(el, SID)
+    const dom = cardDom()
+    const pick = (qi: number, oi: number, checked = true) => el.listeners.change!({ target: { closest: (sel: string) => (sel === '.sq-card' ? dom.card : null), hasAttribute: (a: string) => a === 'data-sq-pick',
+      getAttribute: (a: string) => (({ 'data-sq-id': ID, 'data-q': String(qi), 'data-o': String(oi) }) as Record<string, string>)[a], checked } })
+    const tap = (what: string, extra: Record<string, string> = {}) => el.listeners.click!({ target: { closest: () => ({ disabled: false, closest: (sel: string) => (sel === '.sq-card' ? dom.card : null),
+      getAttribute: (a: string) => (a === 'data-sq' ? what : a === 'data-sq-id' ? ID : extra[a] ?? null) }) } })
+    const runAdvance = () => { const due = q.timers.filter(t => t.ms === q.Qs._advanceMs); q.timers.splice(0, q.timers.length, ...q.timers.filter(t => t.ms !== q.Qs._advanceMs)); due.forEach(t => t.fn()) }
+    return { q, el, dom, pick, tap, runAdvance }
+  }
+
+  it('his state, Q1 picked and Q2 empty: Submit says what is missing and goes to it, never a dead button', async () => {
+    const { q, el, dom, pick, tap, runAdvance } = await setup()
+    pick(0, 0); runAdvance(); dom.calls.length = 0
+    expect(el.innerHTML).toMatch(/data-sq="send" data-sq-id="[^"]+">Review and submit</)
+    tap('send')
+    expect(q.posts).toEqual([])
+    expect(el.innerHTML).toContain('data-alert="1">Card check still needs an answer. Pick one or more.</p>')
+    expect(el.innerHTML, 'not armed: nothing to confirm yet').not.toContain('Tap again to submit')
+    expect(dom.calls).toEqual(['scroll q1 start smooth', 'focus q1'])
+    pick(1, 0)
+    expect(el.innerHTML).not.toContain('data-alert')
+    expect(el.innerHTML).toContain('role="status">2 of 2 answered</p>')
+    dom.calls.length = 0
+    tap('send')
+    expect(el.innerHTML).toContain('Tap again to submit')
+    expect(dom.calls, 'the first tap is the review').toEqual(['scroll review nearest smooth', 'focus submit'])
+    q.later(450); tap('send'); await flush()
+    expect(q.posts).toHaveLength(1)
+    expect(q.posts[0]!.body.answers).toEqual([{ labels: ['On the phone, Today'] }, { labels: ['Numbered options'] }])
+  })
+
+  it('a pick on a single-choice question moves on to the next unanswered one, then to Submit; a multi-select pick stays', async () => {
+    const { dom, pick, runAdvance } = await setup()
+    pick(0, 1)
+    expect(dom.calls, 'not before the pick has shown').toEqual([])
+    runAdvance()
+    expect(dom.calls).toEqual(['scroll q1 start smooth', 'focus q1'])
+    dom.calls.length = 0
+    pick(1, 0); runAdvance()
+    expect(dom.calls, 'multi-select: more may follow, so it stays').toEqual([])
+    pick(0, 0); runAdvance()
+    expect(dom.calls, 'everything answered: on to the review and Submit').toEqual(['scroll review nearest smooth', 'focus submit'])
+  })
+
+  it('a number key on a single-choice question advances too; reduced motion jumps instead of gliding', async () => {
+    const { q, dom, el, runAdvance } = await setup({ reduced: true })
+    const block = { getAttribute: (a: string) => (a === 'data-sq-id' ? ID : a === 'data-sq-qblock' ? '0' : null), querySelector: () => null, closest: (sel: string) => (sel === '.sq-card' ? dom.card : null) }
+    el.listeners.keydown!({ key: '1', preventDefault() {}, target: { hasAttribute: () => false, closest: (sel: string) => (sel === '[data-sq-qblock]' ? block : null) } })
+    runAdvance()
+    expect(dom.calls).toEqual(['scroll q1 start auto', 'focus q1'])
+    void q
+  })
+
+  it('the strip brings a question to the top, or the review and Submit into view', async () => {
+    const { dom, tap } = await setup()
+    tap('step', { 'data-sq-step': '1' })
+    tap('step', { 'data-sq-step': 'submit' })
+    expect(dom.calls).toEqual(['scroll q1 start smooth', 'focus q1', 'scroll review nearest smooth', 'focus submit'])
+  })
+
+  it('one question: no advance, "Not answered yet. Pick one." then "Ready to submit.", and a plain Submit', async () => {
+    const { el, dom, pick, runAdvance } = await setup({ item: HELD(ID, SID, 'Ship it?') })
+    expect(el.innerHTML).toContain('role="status">Not answered yet. Pick one.</p>')
+    expect(el.innerHTML).toMatch(/data-sq="send" data-sq-id="[^"]+">Submit</)
+    pick(0, 0); runAdvance()
+    expect(dom.calls).toEqual([])
+    expect(el.innerHTML).toContain('role="status">Ready to submit.</p>')
+  })
+
+  it('the footer is sticky inside the card and the questions clear the top bar and the footer (questions.css)', () => {
+    const css = readFileSync(join(HERE, 'panes', 'questions.css'), 'utf8')
+    expect(css).toMatch(/\.sq-foot \{ position: sticky; bottom: var\(--safe-bottom, 0px\);/)
+    expect(css).toMatch(/\.sq-q \{ scroll-margin-top: calc\(var\(--topbar-h, 48px\) \+ var\(--safe-top, 0px\) \+ 12px\); scroll-margin-bottom: 150px; \}/)
+  })
+
+  it('typing your own answer also clears the "still needs an answer" line', async () => {
+    const { el, tap } = await setup()
+    tap('send')
+    expect(el.innerHTML).toContain('data-alert="1">Where still needs an answer. Pick one.</p>')
+    el.listeners.input!({ target: { value: 'Both screens', hasAttribute: (a: string) => a === 'data-sq-other', getAttribute: (a: string) => (({ 'data-sq-id': ID, 'data-q': '0' }) as Record<string, string>)[a] } })
+    expect(el.innerHTML).not.toContain('data-alert')
+    expect(el.innerHTML).toContain('role="status">1 of 2 answered</p>')
+  })
+
+  it('the missing line goes once that question is answered, even while another is still open', async () => {
+    const { el, tap, pick, runAdvance } = await setup()
+    tap('send')
+    expect(el.innerHTML).toContain('data-alert="1">Where still needs an answer. Pick one.</p>')
+    pick(0, 0); runAdvance()
+    expect(el.innerHTML).not.toContain('data-alert')
+    expect(el.innerHTML).toContain('role="status">1 of 2 answered</p>')
+    tap('send')
+    expect(el.innerHTML, 'the next tap names the next one').toContain('data-alert="1">Card check still needs an answer. Pick one or more.</p>')
   })
 })
 
