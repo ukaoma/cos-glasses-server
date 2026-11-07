@@ -646,7 +646,7 @@ describe('what COS is told when Miles asks from Today', () => {
 
 // ── the Ask carries it (app.js askCos and panes/cos-chat.js) ─────────────
 function askCos(pane: string, chat: unknown) {
-  const start = APP.indexOf('  var TODAY_REFERENCE'), end = APP.indexOf('  // ── Memories (the native page, hosted)')
+  const start = APP.indexOf('  var TODAY_REFERENCE'), end = APP.indexOf('  // ── Usage ──')
   expect(start).toBeGreaterThan(0)
   const posts: any[] = [], ensured: string[] = []
   const deps = {
@@ -656,6 +656,7 @@ function askCos(pane: string, chat: unknown) {
     window: { COSWeb: { cosChat: chat } }, setTimeout: () => 0,
   }
   // eslint-disable-next-line no-new-func
+  if (start < 0 || end < 0 || end < start) throw new Error('askCos markers moved in app.js')
   const fn = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn askCos;\n}')(deps)
   return { fn, posts, ensured }
 }
