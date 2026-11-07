@@ -61,7 +61,7 @@ describe('POST /api/media/file: any file for a session turn', () => {
     expect(JSON.stringify(r.body)).not.toContain(root)
     const { path } = files.resolveUsable(r.body.attachment.id)
     expect(basename(path)).toBe('logs from staging.zip')
-    expect(dirname(path)).toBe(join(root, 'turn-files', r.body.attachment.id))
+    expect(dirname(path)).toBe(join(root, 'turn-files', r.body.attachment.id, 'file'))
     expect(readFileSync(path)).toEqual(ZIP)
   })
 
@@ -106,7 +106,7 @@ describe('POST /api/media/file: any file for a session turn', () => {
     const lines = (out as { prompt: string }).prompt.split('\n')
     expect(lines.slice(0, 3)).toEqual(['look at both', '', TURN_ATTACHMENTS_HEADING])
     expect(lines[3]).toMatch(/^- File "plan\.md" \(text\/markdown, 1 KB\): \/.+\/media\/assets\/m_[a-f0-9]{24}\/.+$/)
-    expect(lines[4]).toBe(`- File "build.zip" (application/zip, 1 KB): ${join(root, 'turn-files', zip.body.attachment.id, 'build.zip')}`)
+    expect(lines[4]).toBe(`- File "build.zip" (application/zip, 1 KB): ${join(root, 'turn-files', zip.body.attachment.id, 'file', 'build.zip')}`)
   })
 })
 
@@ -122,13 +122,29 @@ describe('which refusals become a turn file', () => {
 
 describe('TurnFileStore', () => {
   const stage = (bytes = 'hello') => { const p = join(root, 'stage-' + Math.random().toString(36).slice(2)); writeFileSync(p, bytes); return p }
-  it('names: never a path, never a control character, never hidden, never meta.json', () => {
+  it('names: never a path, never a control character, never hidden', () => {
     expect(safeTurnFileName('../../etc/passwd')).toBe('etc passwd')
     expect(safeTurnFileName('a\u0000b\nc\u001b[2J.txt')).toBe('a b c [2J.txt')
     expect(safeTurnFileName('.env')).toBe('env')
-    expect(safeTurnFileName('meta.json')).toBe('meta.json.file')
+    expect(safeTurnFileName('meta.json'), 'the file sits in its own folder, so its name is its own').toBe('meta.json')
     expect(safeTurnFileName('')).toBe('file')
     expect(safeTurnFileName('x'.repeat(300) + '.docx')).toMatch(/^x{115}\.docx$/)
+  })
+  // QA 6.99.27: the record and the file shared one folder, and only a lowercase "meta.json" was renamed. On the default
+  // case-insensitive macOS disk a file named META.JSON was the record: the record write replaced the file's bytes.
+  it('a file named META.JSON, Meta.Json or meta.json keeps its bytes and the record keeps its own, after a turn takes it too', async () => {
+    const s = new TurnFileStore(join(root, 'case'), () => clock)
+    for (const label of ['META.JSON', 'Meta.Json', 'meta.json']) {
+      const body = 'the payload of ' + label
+      const ref = s.ingestFromFile({ sourcePath: stage(body), byteLength: body.length, label })
+      const first = s.resolveUsable(ref.id)
+      expect(basename(first.path), label).toBe(label)
+      expect(readFileSync(first.path, 'utf8'), label + ' after the upload').toBe(body)
+      await s.associate([ref.id], { runId: 'session-turn:ct-case-0001' })
+      const after = s.resolveUsable(ref.id)
+      expect(readFileSync(after.path, 'utf8'), label + ' after the turn took it').toBe(body)
+      expect(after.record.ref.label).toBe(label)
+    }
   })
   it('past 64 MB is refused at the store too (a video-headed file can pass the upload parser up to 100 MB)', () => {
     const s = new TurnFileStore(join(root, 'cap'), () => clock)
@@ -206,7 +222,7 @@ describe('POST .../fork with attachmentIds', () => {
     await fork({ attachmentIds: [zip.body.attachment.id] })
     await fork({})
     expect(prompts).toEqual([
-      `try it in a copy\n\n${TURN_ATTACHMENTS_HEADING}\n- File "trace.zip" (application/zip, 1 KB): ${join(root, 'turn-files', zip.body.attachment.id, 'trace.zip')}`,
+      `try it in a copy\n\n${TURN_ATTACHMENTS_HEADING}\n- File "trace.zip" (application/zip, 1 KB): ${join(root, 'turn-files', zip.body.attachment.id, 'file', 'trace.zip')}`,
       'try it in a copy',
     ])
   })

@@ -12,8 +12,10 @@
 //     (media_not_found), so a file no model can read never reaches a model. Only the turn and fork routes resolve them.
 //   - Same cap as the media store's own for a file that is not a video: 64 MB (MAX_OTHER_MEDIA_BYTES).
 //   - Kept 4 hours until a turn takes it, then 30 days. Swept on each new file.
-//   - Each file is `<root>/<id>/<its own name, made safe>`, so the agent sees a real name and extension. Nothing here
-//     ever serves the bytes back over HTTP.
+//   - Each file is `<root>/<id>/file/<its own name, made safe>`, so the agent sees a real name and extension, and the
+//     record is `<root>/<id>/meta.json`, one folder up. No name a person gives a file can reach the record: on the
+//     default case-insensitive macOS disk a file named META.JSON beside the record WAS the record, and the record write
+//     replaced its bytes (QA, 6.99.27). Nothing here ever serves the bytes back over HTTP.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, copyFileSync, statSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
@@ -27,6 +29,7 @@ import { MediaStoreError } from './media-store.js'
 export const TURN_FILE_MAX_BYTES = MAX_OTHER_MEDIA_BYTES
 export const TURN_FILE_STAGED_TTL_MS = 4 * 60 * 60_000
 export const TURN_FILE_KEPT_TTL_MS = 30 * 24 * 60 * 60_000
+const PAYLOAD_DIR = 'file'
 
 interface TurnFileMeta {
   id: string
@@ -60,7 +63,7 @@ export function safeTurnFileName(label: string | undefined): string {
     const ext = dot > 0 && name.length - dot <= 12 ? name.slice(dot) : ''
     name = name.slice(0, 120 - ext.length).trimEnd() + ext
   }
-  return name === 'meta.json' ? 'meta.json.file' : name
+  return name
 }
 
 function safeMime(declared: string | undefined): string {
@@ -77,6 +80,8 @@ export class TurnFileStore {
   }
 
   private dirOf(id: string): string { return join(this.root, id) }
+  /** The file's own folder, apart from the record (see the header). */
+  private payloadDirOf(id: string): string { return join(this.root, id, PAYLOAD_DIR) }
 
   private readMeta(id: string): TurnFileMeta | null {
     if (!isValidMediaId(id)) return null
@@ -100,9 +105,10 @@ export class TurnFileStore {
     this.sweep()
     const id = 'm_' + randomBytes(12).toString('hex')
     const dir = this.dirOf(id)
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    const payloadDir = this.payloadDirOf(id)
+    mkdirSync(payloadDir, { recursive: true, mode: 0o700 })
     const name = safeTurnFileName(input.label)
-    const target = join(dir, name)
+    const target = join(payloadDir, name)
     try {
       renameSync(input.sourcePath, target)
     } catch {
@@ -119,8 +125,8 @@ export class TurnFileStore {
     const m = this.readMeta(id)
     if (!m) throw new MediaStoreError('media_not_found', `attachment ${id} not found`)
     if (this.expired(m, this.now())) throw new MediaStoreError('media_expired', `attachment ${id} expired`)
-    const path = join(this.dirOf(id), m.name)
-    if (!resolve(path).startsWith(this.dirOf(id) + sep) || !existsSync(path)) throw new MediaStoreError('media_unavailable', `attachment ${id} content unavailable`)
+    const path = join(this.payloadDirOf(id), m.name)
+    if (!resolve(path).startsWith(this.payloadDirOf(id) + sep) || !existsSync(path)) throw new MediaStoreError('media_unavailable', `attachment ${id} content unavailable`)
     // Shaped as a ref only for the line the agent reads (kind and mime are not in the media contract and never leave
     // this server as one).
     const ref = { id, kind: 'session_file', category: 'file', mime: m.mime, width: 0, height: 0, createdAt: new Date(m.createdAtMs).toISOString(), bytes: m.bytes, label: m.label } as unknown as MediaAttachmentRef
