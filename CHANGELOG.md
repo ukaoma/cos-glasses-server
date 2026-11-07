@@ -1,4 +1,6 @@
-## Unreleased (6.99.29)
+## 6.99.29 - Approve from your phone: messages you type in Control Web verify as you; one state on the session card (private)
+
+2026-11-07. Private build on 6.99.28 (642921b). Server only. Works with COS Control 0.5.376 as installed.
 
 Miles, 11/07 11:04: a message he types in a session's box on COS Control Web (his phone, signed in over Tailscale) reached the running Claude session as "Another Claude session sent a message", and the agent refused it as an approval. This makes a signed-in web turn provable, and lands the glasses design from 10/07 (a3c8c4b, never merged) on the current routes.
 
