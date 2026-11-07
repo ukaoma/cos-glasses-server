@@ -166,7 +166,15 @@ export interface MediaRecord {
   textPath?: string
   derivativePaths?: string[]
   bytes: number
+  /** SHA-256 of the bytes stored NOW. The x265 pass replaces it with the compressed file's hash. */
   sha256: string
+  /**
+   * QA 6.99.29: SHA-256 of the bytes as ingested. Set once at publication and never changed by
+   * compression, so a queued turn sealed to (id, original hash) still matches after the x265 pass
+   * replaced the bytes under the same id. Absent only on a legacy record that was already compressed
+   * before this field existed (its compressed hash is then its stable identity: compression never reruns).
+   */
+  originalSha256?: string
   lifecycle: MediaLifecycle
   /** Set once the background x265 pass replaced the stored original with a
    *  smaller file. Kept so the size drop is explainable and never retried. */
@@ -281,6 +289,8 @@ function sanitizeVideoCompression(raw: unknown): VideoCompressionRecord | null {
   return { label: r.label.slice(0, 64), originalBytes: r.originalBytes, bytes: r.bytes, atMs: r.atMs }
 }
 
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/
+
 function sanitizeRecord(raw: unknown): MediaRecord | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
@@ -309,6 +319,12 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
     ? r.derivativePaths.filter(isOwnedPath).slice(0, VIDEO_SUMMARY_FRAMES_MAX)
     : undefined
   const videoCompression = sanitizeVideoCompression(r.videoCompression)
+  const sha256 = typeof r.sha256 === 'string' ? r.sha256 : ''
+  // A record never compressed still holds its ingested bytes, so its current hash IS the original (backfills
+  // records written before originalSha256 existed). A compressed legacy record has no original to recover.
+  const originalSha256 = typeof r.originalSha256 === 'string' && SHA256_HEX_RE.test(r.originalSha256)
+    ? r.originalSha256
+    : !videoCompression && SHA256_HEX_RE.test(sha256) ? sha256 : undefined
   return {
     ref,
     storagePath: r.storagePath,
@@ -316,7 +332,8 @@ function sanitizeRecord(raw: unknown): MediaRecord | null {
     ...(textPath ? { textPath } : {}),
     ...(derivativePaths?.length ? { derivativePaths } : {}),
     bytes: typeof r.bytes === 'number' && r.bytes >= 0 ? r.bytes : 0,
-    sha256: typeof r.sha256 === 'string' ? r.sha256 : '',
+    sha256,
+    ...(originalSha256 ? { originalSha256 } : {}),
     lifecycle,
     ...(videoCompression ? { videoCompression } : {}),
     contentRemoved: r.contentRemoved === true,
@@ -690,6 +707,7 @@ export class MediaStore {
       ...(derivativePaths.length ? { derivativePaths } : {}),
       bytes: prepared.originalBytes,
       sha256,
+      originalSha256: sha256,
       lifecycle: 'staged',
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       ...(input.videoUploadId ? { videoUploadId: input.videoUploadId } : {}),
@@ -857,12 +875,14 @@ export class MediaStore {
       throw err
     }
 
+    const normalizedSha256 = createHash('sha256').update(normalized.normalized).digest('hex')
     const record: MediaRecord = {
       ref,
       storagePath: join('assets', id, 'original-normalized.jpg'),
       thumbPath: join('assets', id, 'thumb.jpg'),
       bytes: normalized.normalized.length,
-      sha256: createHash('sha256').update(normalized.normalized).digest('hex'),
+      sha256: normalizedSha256,
+      originalSha256: normalizedSha256,
       lifecycle: 'staged',
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       createdAtMs: now,
@@ -1107,6 +1127,25 @@ export class MediaStore {
       throw new MediaStoreError('media_unavailable', `attachment ${id} content unavailable`)
     }
     return { record: rec, path: content.path }
+  }
+
+  /**
+   * QA 6.99.29: the content identity a queued turn's files are sealed to: the hash of the bytes as
+   * ingested (`originalSha256`), stable across the x265 pass that rewrites a video under the same id.
+   * The stored bytes are still hashed, and must be what the index says is stored (the compressed or
+   * the original file): anything else returns the hash of what is really there, so a file swapped
+   * under the id no longer matches its seal. Throws as resolveUsable does.
+   */
+  async contentIdentitySha256(id: string, clientQueueItemId?: string): Promise<string> {
+    const { path } = this.resolveUsable(id, clientQueueItemId)
+    const actual = await sha256OfFile(path)
+    // Read the record AFTER hashing: a compression that swapped the bytes meanwhile has updated it.
+    const rec = this.getRecord(id)
+    if (!rec) throw new MediaStoreError('media_not_found', `attachment ${id} not found`)
+    const original = rec.originalSha256 && SHA256_HEX_RE.test(rec.originalSha256) ? rec.originalSha256 : null
+    const current = SHA256_HEX_RE.test(rec.sha256) ? rec.sha256 : null
+    if (actual === current || actual === original) return original ?? current ?? actual
+    return actual
   }
 
   /** Resolve private model derivatives after lifecycle/ownership validation. */

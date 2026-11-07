@@ -138,9 +138,13 @@ export async function deliverQueuedTurnOverLoopback(
     // Same defect on the turn leg: `refuseTurn` emits `reason`/`reasonCopy`/`retryable`
     // and no `error`. `retryable` is the server's OWN judgement about this refusal --
     // carried through rather than re-derived, so the two layers cannot disagree.
+    // QA 6.99.29: a refusal with its own code (`error`: queued_turn_tampered, turn_id_in_use,
+    // footer_line_refused) under the generic `invalid_request` reason is stored by that code, so the
+    // row says why in plain words instead of settling as a bare invalid_request with no copy.
+    const specific = typeof sent.body.error === 'string' && sent.body.error.length > 0 ? sent.body.error : null
     return {
       ok: false,
-      reason: String(sent.body.reason ?? sent.body.error ?? `turn_${sent.status}`),
+      reason: String(sent.body.reason === 'invalid_request' && specific ? specific : sent.body.reason ?? specific ?? `turn_${sent.status}`),
       serverRetryable: typeof sent.body.retryable === 'boolean' ? sent.body.retryable : undefined,
       // 6.78.0: a REPLAY of a key whose delivery is unknown (a receipt, or an ambiguous
       // ledger record). The drain settles it at once instead of retrying the key until the

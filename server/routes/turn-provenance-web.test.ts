@@ -22,7 +22,8 @@ const FIXTURE = vi.hoisted(() => {
   return { dir }
 })
 import express from 'express'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { createServer as createNetServer, type Server as NetServer } from 'node:net'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -44,8 +45,9 @@ import { deliverQueuedTurnOverLoopback } from '../lib/thread-turn-queue-deliver.
 import { readQueue, writeQueue } from '../lib/thread-turn-queue-store.js'
 import { MAX_QUEUED_PER_THREAD } from '../lib/thread-turn-queue.js'
 import type { Occupancy } from '../lib/thread-occupancy.js'
-import { TURN_ATTACHMENTS_HEADING, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
-import { MediaStoreError } from '../lib/media-store.js'
+import { defaultTurnAttachmentStore, TURN_ATTACHMENTS_HEADING, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
+import { _setMediaStoreForTests, MediaStore, MediaStoreError } from '../lib/media-store.js'
+import { _setTurnFileStoreForTests, TurnFileStore } from '../lib/turn-file-store.js'
 import type { MediaAttachmentRef } from '../../shared/media-attachment.js'
 
 const LAN = Object.values(networkInterfaces()).flat().find(e => e && e.family === 'IPv4' && !e.internal)?.address ?? null
@@ -641,7 +643,8 @@ describe.skipIf(!LAN)('the G2 rule still holds on the current routes (ported a3c
       if (ids.length === 0) delete (row as { attachmentIds?: string[] }).attachmentIds
       clock += 91_000
       const out = await deliverQueuedTurnOverLoopback(row, r.port, TOKEN, t => p.issueCarry(t))
-      expect(out, JSON.stringify(ids)).toMatchObject({ ok: false, reason: 'invalid_request', serverRetryable: false })
+      // QA 6.99.29: the row keeps the route's own code (and so its plain copy), not the generic invalid_request.
+      expect(out, JSON.stringify(ids)).toMatchObject({ ok: false, reason: 'queued_turn_tampered', serverRetryable: false })
     }
     expect(live.frames).toEqual([])
     expect(await describeG2Turn(p, 'ctg2Tamper001', Date.now())).toMatchObject({ via: 'queue', verifiedOrigin: true })
@@ -705,6 +708,117 @@ describe.skipIf(!LAN)('the G2 rule still holds on the current routes (ported a3c
     await until(() => live.frames.length > 1 || r.spawned.length > 0)
     expect(live.frames[1]).toBe(g2Footed(composed(WORDS), 'ctg2EditF0002'))
     writeQueue('claude', SID, [])
+  })
+
+  // QA 6.99.29: the media store's x265 pass rewrites a parked video under the same id. The seal is the id plus the
+  // ORIGINAL content hash the media record keeps, so the drain delivers it, still vouched. A different file swapped in
+  // under the id (another original hash) is still refused. The REAL media store and default turn attachment store.
+  describe('a parked video and its background compression', () => {
+    const VID = 'm_' + 'e'.repeat(24)
+    const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex')
+    function videoStore() {
+      const root = mkdtempSync(join(tmpdir(), 'q-video-'))
+      roots.push(root)
+      const original = Buffer.alloc(40_000, 0x41)
+      mkdirSync(join(root, 'media', 'assets', VID), { recursive: true })
+      writeFileSync(join(root, 'media', 'assets', VID, 'original.mp4'), original)
+      const now = Date.now()
+      const record = (bytes: Buffer, extra: Record<string, unknown> = {}) => ({
+        ref: { id: VID, kind: 'user_video', category: 'video', mime: 'video/mp4', width: 640, height: 360, createdAt: new Date(now).toISOString(), bytes: bytes.length, durationMs: 4_000, frameCount: 0, label: 'clip.mp4' },
+        storagePath: join('assets', VID, 'original.mp4'), thumbPath: join('assets', VID, 'original.mp4'),
+        bytes: bytes.length, sha256: sha(bytes), originalSha256: sha(bytes), lifecycle: 'staged', createdAtMs: now, updatedAtMs: now, ...extra,
+      })
+      const writeIndex = (rec: unknown) => writeFileSync(join(root, 'media', 'index.json'), JSON.stringify({ v: 1, records: { [VID]: rec }, savedAt: new Date(now).toISOString() }))
+      writeIndex(record(original))
+      const smaller = Buffer.alloc(9_000, 0x42)
+      const open = () => new MediaStore(join(root, 'media'), {
+        compressVideoFile: async (inputPath, workDir) => {
+          const outputPath = join(workDir, 'compressed.mp4')
+          writeFileSync(outputPath, smaller)
+          return { status: 'compressed', outputPath, originalBytes: readFileSync(inputPath).length, compressedBytes: smaller.length }
+        },
+      })
+      const store = open()
+      const prevMedia = _setMediaStoreForTests(store)
+      const prevFiles = _setTurnFileStoreForTests(new TurnFileStore(join(root, 'turn-files')))
+      closers.push(async () => { _setMediaStoreForTests(prevMedia); _setTurnFileStoreForTests(prevFiles) })
+      return {
+        root, store, original, smaller, record, writeIndex,
+        compress: (s: MediaStore = store) => (s as unknown as { compressVideoAsset(id: string): Promise<void> }).compressVideoAsset(VID),
+        reopen: () => { const s = open(); _setMediaStoreForTests(s); return s },
+        bytes: () => readFileSync(join(root, 'media', 'assets', VID, 'original.mp4')),
+      }
+    }
+    const drainOnce = (r: Rig, p: G2TurnProvenance) => drainThread('claude', SID, {
+      occupancy: () => ({ attachable: true, reason: null }), turnEnded: () => true, activity: () => 'idle', now: () => 10_000,
+      deliver: t => deliverQueuedTurnOverLoopback(t, r.port, TOKEN, x => p.issueCarry(x)), provenance: p,
+    } as ThreadTurnQueueDeps)
+
+    it('parked from the glasses, compressed while it waits, then drained: delivered, footed and still vouched', async () => {
+      const v = videoStore()
+      const files = defaultTurnAttachmentStore()
+      const p = g2Provenance()
+      const live = await liveSession()
+      const r = await rig(p, { deliverLiveTurn: live.deliverLiveTurn, turnAttachmentStore: files }, { turnAttachmentStore: files })
+      const park = await call(r.lan, 'POST', `/api/agent-sessions/claude/${SID}/queued-turns`, { clientTurnId: 'ctg2Video0001', cosSessionId: 'cos-g2-1', prompt: WORDS, attachmentIds: [VID] }, g2Headers)
+      expect(park.status, park.text).toBe(202)
+      expect(p.queuedVerdict('claude', SID, 'ctg2Video0001', WORDS)?.verifiedOrigin).toBe(true)
+      await v.compress()
+      expect(v.bytes(), 'the encode replaced the bytes under the same id').toEqual(v.smaller)
+      expect(v.store.getRecord(VID)!.originalSha256).toBe(sha(v.original))
+      clock += 91_000
+      const out = await drainOnce(r, p)
+      expect(out.delivered).toBe(1)
+      expect(live.frames.length).toBe(1)
+      expect(live.frames[0]!.startsWith(WORDS + '\n\n' + TURN_ATTACHMENTS_HEADING)).toBe(true)
+      expect(live.frames[0]).toContain(join(v.root, 'media', 'assets', VID, 'original.mp4'))
+      expect(stripG2TurnFooter(live.frames[0]!).turnId, 'footed').toBe('ctg2Video0001')
+      expect(await describeG2Turn(p, 'ctg2Video0001', Date.now())).toMatchObject({ via: 'drain-live', verifiedOrigin: true, originKind: 'g2' })
+      writeQueue('claude', SID, [])
+    })
+
+    it('parked from this Mac (unvouched), compressed, drained: delivered unfooted, not refused as changed', async () => {
+      const v = videoStore()
+      const files = defaultTurnAttachmentStore()
+      const p = provenance()
+      const live = await liveSession()
+      const r = await rig(p, { deliverLiveTurn: live.deliverLiveTurn, turnAttachmentStore: files }, { turnAttachmentStore: files })
+      const park = await call(r.loop, 'POST', `/api/agent-sessions/claude/${SID}/queued-turns`, { clientTurnId: 'ctlocVideo001', cosSessionId: 'cos-web-1', prompt: WORDS, attachmentIds: [VID] }, tokenHeaders)
+      expect(park.status, park.text).toBe(202)
+      await v.compress()
+      clock += 91_000
+      expect((await drainOnce(r, p)).delivered).toBe(1)
+      expect(live.frames.length).toBe(1)
+      expect(stripG2TurnFooter(live.frames[0]!).turnId, 'no footer').toBeNull()
+      writeQueue('claude', SID, [])
+    })
+
+    it('a different file swapped in under the id (a different original hash): refused at the drain with its own reason, nothing sent', async () => {
+      const v = videoStore()
+      const files = defaultTurnAttachmentStore()
+      const p = g2Provenance()
+      const live = await liveSession()
+      const r = await rig(p, { deliverLiveTurn: live.deliverLiveTurn, turnAttachmentStore: files }, { turnAttachmentStore: files })
+      const park = await call(r.lan, 'POST', `/api/agent-sessions/claude/${SID}/queued-turns`, { clientTurnId: 'ctg2VidSwap01', cosSessionId: 'cos-g2-1', prompt: WORDS, attachmentIds: [VID] }, g2Headers)
+      expect(park.status, park.text).toBe(202)
+      // Another file under the same id, with a record that names ITS hash as the original.
+      const other = Buffer.alloc(12_000, 0x43)
+      writeFileSync(join(v.root, 'media', 'assets', VID, 'original.mp4'), other)
+      v.writeIndex(v.record(other, { lifecycle: 'associated', associatedAtMs: Date.now() }))
+      v.reopen()
+      clock += 91_000
+      const out = await drainOnce(r, p)
+      expect(out.delivered).toBe(0)
+      expect(live.frames).toEqual([])
+      const rowOf = () => readQueue('claude', SID, 10_000).find(t => t.clientTurnId === 'ctg2VidSwap01')!
+      // The row keeps the route's own reason (and so its plain copy), not invalid_request.
+      expect(rowOf().reason).toBe('queued_turn_tampered')
+      // The drain's attempt ceiling settles it; it never delivers on a later pass.
+      for (let i = 0; i < 6 && rowOf().status !== 'refused'; i++) { clock += 91_000; expect((await drainOnce(r, p)).delivered).toBe(0) }
+      expect(rowOf()).toMatchObject({ status: 'refused', reason: 'queued_turn_tampered' })
+      expect(live.frames).toEqual([])
+      writeQueue('claude', SID, [])
+    })
   })
 
   it('a carry sealed for one thread, presented on a binding for another, is refused', async () => {

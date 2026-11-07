@@ -65,6 +65,21 @@ describe('deliverQueuedTurnOverLoopback', () => {
     expect(await deliverQueuedTurnOverLoopback(turn, port, 'tok')).toEqual({ ok: false, reason: 'stale_epoch', serverRetryable: false })
   })
 
+  it('QA 6.99.29: a refusal with its own code under invalid_request is stored by that code; a plain invalid_request stays one', async () => {
+    for (const [body, reason] of [
+      [{ reason: 'invalid_request', error: 'queued_turn_tampered', retryable: false }, 'queued_turn_tampered'],
+      [{ reason: 'invalid_request', error: 'turn_id_in_use', retryable: false }, 'turn_id_in_use'],
+      [{ reason: 'invalid_request', error: 'footer_line_refused', retryable: false }, 'footer_line_refused'],
+      [{ reason: 'invalid_request', retryable: false }, 'invalid_request'],
+      [{ reason: 'stale_epoch', error: 'queued_turn_tampered', retryable: false }, 'stale_epoch'],
+      [{ error: 'turn_id_in_use', retryable: false }, 'turn_id_in_use'],
+    ] as const) {
+      const port = await listen(path => path.endsWith('/attach') ? { status: 201, body: { attached: true, bindingId: 'bnd-1', epoch: 1 } } : { status: 400, body })
+      expect(await deliverQueuedTurnOverLoopback(turn, port, 'tok'), JSON.stringify(body)).toEqual({ ok: false, reason, serverRetryable: false })
+      server?.close(); server = null
+    }
+  })
+
   it('6.62.0 /qa (Q3): repeats the parking client\'s Continue-note acknowledgement on attach and turn, and only that', async () => {
     for (const ack of [true, false]) {
       const headers: Array<unknown> = []

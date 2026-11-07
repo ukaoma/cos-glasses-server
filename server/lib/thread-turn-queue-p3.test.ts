@@ -78,6 +78,12 @@ describe('queuedTurnReasonCopy: server-authored, one lens line', () => {
     }
   })
 
+  it('QA 6.99.29: a sealed row refused at its drain says why in plain words', () => {
+    expect(queuedTurnReasonCopy('queued_turn_tampered')).toBe('Not sent: its words, files or session changed.')
+    expect(queuedTurnReasonCopy('turn_id_in_use')).toBe('Not sent: its id belongs to another message.')
+    expect(queuedTurnReasonCopy('footer_line_refused')).toBe('Not sent: it has a line only COS may write.')
+  })
+
   it('the unknown outcome reads as the contract line; a raw or absent reason has no copy', () => {
     const unknown = 'May not have been sent. Read it, then say it again.'
     expect(queuedTurnReasonCopy('delivery_unknown_after_restart')).toBe(unknown)

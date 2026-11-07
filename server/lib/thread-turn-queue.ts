@@ -189,6 +189,9 @@ const QUEUED_TURN_REASON_COPY: Readonly<Record<string, string>> = {
   native_turn_in_progress: 'Waiting: a COS turn is running on this thread.',
   native_target_fenced: 'Waiting: an earlier turn needs a check on your Mac.',
   footer_line_refused: 'Not sent: it has a line only COS may write.',
+  // QA 6.99.29: a sealed queued turn refused at its drain.
+  queued_turn_tampered: 'Not sent: its words, files or session changed.',
+  turn_id_in_use: 'Not sent: its id belongs to another message.',
 }
 
 /**

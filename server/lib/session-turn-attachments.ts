@@ -29,7 +29,8 @@ export interface TurnAttachmentStore {
   /** Moves staged media out of the 4 hour unsubmitted TTL, so a file the session may read again later stays. */
   associate(ids: string[], target: { runId?: string }): Promise<void>
   /**
-   * 6.99.29 (queue seal): the SHA-256 of the bytes this id resolves to. Optional; absent, the file at
+   * 6.99.29 (queue seal): the content identity this id is sealed to, a SHA-256. The real store answers the hash
+   * of the bytes as ingested (a video's x265 pass never changes it, QA 6.99.29); optional, and absent, the file at
    * `resolveUsable(id).path` is hashed. Tests pass a fake.
    */
   contentSha256?(id: string): Promise<string>
@@ -55,6 +56,16 @@ export function defaultTurnAttachmentStore(): TurnAttachmentStore {
       const rest = ids.filter(id => !mine.includes(id))
       if (rest.length) await media.associate(rest, target)
       if (mine.length) await files.associate(mine, target)
+    },
+    // QA 6.99.29: a media id seals to its ORIGINAL content hash, which the x265 pass that rewrites a parked video
+    // under the same id never changes; a turn file is never compressed, so the hash of its bytes is its identity.
+    async contentSha256(id) {
+      try {
+        return await media.contentIdentitySha256(id)
+      } catch (error) {
+        if (error instanceof MediaStoreError && error.code === 'media_not_found' && files.has(id)) return sha256OfPath(files.resolveUsable(id).path)
+        throw error
+      }
     },
   }
 }

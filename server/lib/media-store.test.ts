@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
@@ -464,5 +465,112 @@ describe('MediaStore G2 cache hardening', () => {
     expect(repaired.readUInt32BE(16)).toBe(288)
     expect(repaired.readUInt32BE(20)).toBe(144)
     expect(readdirSync(join(root, 'tmp')).filter(name => name.startsWith(`g2-${ref.id}-`))).toEqual([])
+  })
+})
+
+// QA 6.99.29: a queued turn's files are sealed to (id, content hash), and the x265 pass rewrites a video under the
+// same id. The record keeps the hash of the bytes as ingested, which compression never changes. Seeded from an index
+// file (no ffmpeg needed), compressed by the store's own compressVideoAsset with an injected encoder.
+describe('QA 6.99.29: a video keeps its original content identity through compression', () => {
+  const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex')
+  function seeded(extra: Record<string, unknown> = {}) {
+    const root = newRoot()
+    const id = 'm_' + 'd'.repeat(24)
+    const original = Buffer.alloc(40_000, 0x41)
+    mkdirSync(join(root, 'assets', id), { recursive: true })
+    writeFileSync(join(root, 'assets', id, 'original.mp4'), original)
+    const now = Date.now()
+    const record = {
+      ref: { id, kind: 'user_video', category: 'video', mime: 'video/mp4', width: 640, height: 360, createdAt: new Date(now).toISOString(), bytes: original.length, durationMs: 4_000, frameCount: 0 },
+      storagePath: join('assets', id, 'original.mp4'), thumbPath: join('assets', id, 'original.mp4'),
+      bytes: original.length, sha256: sha(original), lifecycle: 'staged', createdAtMs: now, updatedAtMs: now, ...extra,
+    }
+    writeFileSync(join(root, 'index.json'), JSON.stringify({ v: 1, records: { [id]: record }, savedAt: new Date(now).toISOString() }))
+    const smaller = Buffer.alloc(9_000, 0x42)
+    const store = new MediaStore(root, {
+      compressVideoFile: async (inputPath, workDir) => {
+        const outputPath = join(workDir, 'compressed.mp4')
+        writeFileSync(outputPath, smaller)
+        return { status: 'compressed', outputPath, originalBytes: readFileSync(inputPath).length, compressedBytes: smaller.length }
+      },
+    })
+    return { root, id, original, smaller, store }
+  }
+  const compress = (store: MediaStore, id: string) => (store as unknown as { compressVideoAsset(id: string): Promise<void> }).compressVideoAsset(id)
+
+  it('a record written before the field existed is backfilled on load; compression changes sha256, never originalSha256', async () => {
+    const { root, id, original, smaller, store } = seeded()
+    expect(store.getRecord(id)!.originalSha256, 'backfilled from the uncompressed bytes').toBe(sha(original))
+    expect(await store.contentIdentitySha256(id)).toBe(sha(original))
+    await compress(store, id)
+    const rec = store.getRecord(id)!
+    expect(rec.videoCompression, 'the encode was swapped in').toBeTruthy()
+    expect(readFileSync(join(root, 'assets', id, 'original.mp4'))).toEqual(smaller)
+    expect(rec.sha256).toBe(sha(smaller))
+    expect(rec.originalSha256).toBe(sha(original))
+    expect(await store.contentIdentitySha256(id), 'the same identity after compression').toBe(sha(original))
+    // And after a restart: the index keeps it.
+    const again = new MediaStore(root)
+    expect(again.getRecord(id)!.originalSha256).toBe(sha(original))
+    expect(await again.contentIdentitySha256(id)).toBe(sha(original))
+  })
+
+  it('bytes that are neither the stored nor the original file are their own identity: a swap under the id no longer matches', async () => {
+    const { root, id, original, store } = seeded()
+    await compress(store, id)
+    const other = Buffer.alloc(9_000, 0x43)
+    writeFileSync(join(root, 'assets', id, 'original.mp4'), other)
+    expect(await store.contentIdentitySha256(id)).toBe(sha(other))
+    expect(await store.contentIdentitySha256(id)).not.toBe(sha(original))
+  })
+
+  it('a hash read while the encode is swapped in (the open file is still the original) is the same identity', async () => {
+    const { root, id, original, store } = seeded()
+    await compress(store, id)
+    // The original's bytes on disk with the record already naming the compressed file: what a hash started before
+    // the rename reads.
+    writeFileSync(join(root, 'assets', id, 'original.mp4'), original)
+    expect(await store.contentIdentitySha256(id)).toBe(sha(original))
+  })
+
+  it('a legacy record already compressed has no original to recover: its stored hash is its identity', async () => {
+    const smaller = Buffer.alloc(9_000, 0x42)
+    const { id, root } = seeded({ videoCompression: { label: 'x265', originalBytes: 40_000, bytes: 9_000, atMs: 1 }, sha256: sha(smaller) })
+    writeFileSync(join(root, 'assets', id, 'original.mp4'), smaller)
+    const legacy = new MediaStore(root)
+    expect(legacy.getRecord(id)!.originalSha256, 'never invented for a compressed record').toBeUndefined()
+    expect(await legacy.contentIdentitySha256(id)).toBe(sha(smaller))
+  })
+
+  it('a video ingested today records its original hash, and the background pass leaves it', async (ctx) => {
+    if (!ffmpegAvailable) return ctx.skip()
+    const scratch = newRoot()
+    const clip = join(scratch, 'clip.mp4')
+    execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=320x180:rate=5', '-t', '2', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', clip])
+    const mp4 = readFileSync(clip)
+    const smaller = Buffer.alloc(Math.floor(mp4.length / 3), 0x7a)
+    const store = new MediaStore(newRoot(), {
+      compressVideoFile: async (_inputPath, workDir) => {
+        const outputPath = join(workDir, 'compressed.mp4')
+        writeFileSync(outputPath, smaller)
+        return { status: 'compressed', outputPath, originalBytes: mp4.length, compressedBytes: smaller.length }
+      },
+    })
+    const ref = await store.ingestRichMedia({ bytes: mp4, label: 'clip.mp4', declaredMime: 'video/mp4' })
+    await store._awaitVideoCompressionForTests(ref.id)
+    const rec = store.getRecord(ref.id)!
+    expect(rec.videoCompression, 'compressed in the background').toBeTruthy()
+    expect(rec.sha256).toBe(sha(smaller))
+    expect(rec.originalSha256).toBe(sha(mp4))
+    expect(await store.contentIdentitySha256(ref.id)).toBe(sha(mp4))
+  })
+
+  it('an image ingested today records its original hash too', async (ctx) => {
+    if (!ffmpegAvailable) return ctx.skip()
+    const store = new MediaStore(newRoot())
+    const ref = await store.ingestImage({ bytes: jpeg, kind: 'user_photo' })
+    const rec = store.getRecord(ref.id)!
+    expect(rec.originalSha256).toBe(rec.sha256)
+    expect(await store.contentIdentitySha256(ref.id)).toBe(rec.sha256)
   })
 })
