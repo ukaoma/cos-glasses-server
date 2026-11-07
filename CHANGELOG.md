@@ -1,3 +1,14 @@
+## 6.99.21 - COS Control Web opens faster on the phone (private)
+
+2026-11-06. Private build on 6.99.20. Server only; no Mac app change.
+
+Miles, 11/06: speed up COS Control Web and make it sturdier on the iPhone, first step of the mobile hub plan (`operations/personal/wk45_2026/PLAN_control_web_mobile_hub_2026-11-06.md`).
+
+- **Files are compressed and cached.** `/control` used to serve every file uncompressed with `Cache-Control: max-age=0`, so each open re-checked all 26 boot files with the Mac over Tailscale. `server/lib/web-control-static.ts` now gives each script, stylesheet, font and icon a content hash, rewrites the references in `index.html` and the CSS to `?v=<hash>`, and serves a matching versioned file as cacheable for a year. `index.html`, other HTML pages and any unversioned or stale URL are `no-cache` with an ETag, so a new release shows on the next open. Text files go out brotli or gzip compressed.
+- **Measured on the Mac against 6.99.20** (loopback, browser-style cache): first open 1,969 KB to 708 KB on the wire; a repeat open 26 requests to 1. Not yet timed on the phone over Tailscale.
+- `express.static` stays behind the new layer, so every URL that worked before still works. The tree is re-checked at most once a second, so a worktree test copy picks up edits without a restart.
+- Default-on changes: response headers and compression on `/control/*` only. No API, data or behaviour change.
+
 ## 6.99.20 - Prep opens from COS Control on the Mac (private)
 
 2026-11-06. Private fix on 6.99.19, matched to COS Control 0.5.376 already installed.
