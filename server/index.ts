@@ -502,6 +502,9 @@ app.use('/api', (req, res, next) => {
     || isMacVoiceNamingBatchPost(req.path)
     // 6.99.19 Prep: each write takes the api_mutation lease itself and answers the contract's 503 `maintenance`.
     || req.path.startsWith('/prep/')
+    // 6.99.26 Today summary: the call takes api_mutation itself (routes/today-brief.ts), and a drain or a live recording
+    // answers the cached summary without spending.
+    || (req.path === '/today/brief' && req.method === 'POST')
   if (lifecycleOwned) return next()
 
   // COS Control must prove the candidate while a committed cross-boot gate is

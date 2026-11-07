@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
-  normalizeTodayBriefInputs, scrubText, subagentLookups, todayBriefFingerprint, withSubagents, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
+  claimsNothingWaits, todayBriefOpener, normalizeTodayBriefInputs, scrubText, subagentLookups, todayBriefFingerprint, withSubagents, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
 } from './today-brief.js'
 
 // No model is ever called here: `generate` is a fake that records its prompts.
@@ -16,6 +16,7 @@ const T0 = Date.parse('2026-11-04T15:00:00')   // a Wednesday, local time
 const MIN = 60_000
 
 function harness(opts: { env?: Record<string, string>; answer?: (n: number) => string | Error | Promise<string>; enabled?: boolean | null; dailyCap?: number; minIntervalMs?: number } = {}) {
+  const server = { blocked: null as 'recording' | 'maintenance' | null, leaseThrows: false, leases: 0, released: 0 }
   const clock = { t: T0 }
   const prompts: string[] = []
   const audits: TodayBriefAuditRow[] = []
@@ -38,10 +39,12 @@ function harness(opts: { env?: Record<string, string>; answer?: (n: number) => s
       return v
     },
     audit: row => audits.push(row),
+    blocked: () => server.blocked,
+    lease: () => { if (server.leaseThrows) throw new Error('draining'); server.leases++; return { release: () => { server.released++ } } },
     ...(opts.dailyCap !== undefined ? { dailyCap: opts.dailyCap } : {}),
     ...(opts.minIntervalMs !== undefined ? { minIntervalMs: opts.minIntervalMs } : {}),
   }
-  return { brief: createTodayBrief(deps), deps, clock, prompts, audits, env }
+  return { brief: createTodayBrief(deps), deps, clock, prompts, audits, env, server }
 }
 
 function inputs(over: Partial<TodayBriefInputs> = {}, lineTag = 'a'): TodayBriefInputs {
@@ -67,7 +70,7 @@ describe('the switch (COS_TODAY_BRIEF_LLM, then the Settings toggle, then off)',
   })
   it('the Settings toggle turns it on, and it is saved for the next start', async () => {
     const h = harness({ enabled: null })
-    expect(h.brief.setEnabled(true)).toEqual({ enabled: true, source: 'settings', saved: true })
+    expect(h.brief.setEnabled(true)).toEqual({ enabled: true, source: 'settings', saved: true, status: null })
     expect(JSON.parse(readFileSync(h.deps.settingsFile, 'utf8'))).toEqual({ schema: 1, enabled: true })
     const v = await h.brief.ask(inputs())
     expect(v.state).toBe('fresh')
@@ -194,7 +197,7 @@ describe('the breaker: 3 failures in a row stop it for an hour', () => {
   it('an answer with one false sentence is kept without it, counts as a success, and the audit names the dropped rule', async () => {
     const h = harness({ answer: () => 'Nothing is waiting on you. The release work is moving along.' })
     const v = await h.brief.ask(inputs())
-    expect(v).toMatchObject({ state: 'fresh', text: 'The release work is moving along.' })
+    expect(v).toMatchObject({ state: 'fresh', text: 'Two things need you. The release work is moving along.' })
     expect(h.audits).toEqual([expect.objectContaining({ outcome: 'ok', dropped: 'nothing_waiting' })])
     expect(JSON.parse(readFileSync(h.deps.stateFile, 'utf8')).failures).toBe(0)
   })
@@ -412,3 +415,96 @@ describe('sub-agents (Miles 11/07: "those summaries should be able to see sub ag
 })
 
 function TODAY_BRIEF_SYSTEM_PROMPT_HAS_UNTRUSTED() { return TODAY_BRIEF_SYSTEM_PROMPT.includes('untrusted data') }
+
+describe('6.99.26 QA: the server writes the count, the guard drops any "nothing waits" claim', () => {
+  const rows = (o: { waiting?: number; needs?: number; later?: number; complete?: boolean }) => normalizeTodayBriefInputs({
+    sessions: Array.from({ length: o.waiting ?? 0 }, (_, k) => ({ title: 'Waiting ' + k, state: 'waiting', minutes: 3 })).concat([{ title: 'Builder', state: 'working', minutes: 9 } as any]),
+    needs: Array.from({ length: o.needs ?? 0 }, (_, k) => ({ title: 'Need ' + k })), later: o.later ?? 0,
+    sessionsRead: true, needsComplete: o.complete ?? true,
+  })
+  it('the opener counts from the rows, folds what can wait as Today does, and says "so far" before every source answered', () => {
+    expect(todayBriefOpener(rows({ waiting: 1 }))).toBe('One thing needs you.')
+    expect(todayBriefOpener(rows({ waiting: 1, needs: 3, later: 2 }))).toBe('Two things need you, and two more can wait until tomorrow.')
+    expect(todayBriefOpener(rows({ needs: 3, later: 3 }))).toBe('Three things can wait until tomorrow.')
+    expect(todayBriefOpener(rows({ needs: 12 }))).toBe('12 things need you.')
+    expect(todayBriefOpener(rows({ needs: 2, complete: false }))).toBe('Two things need you so far.')
+    expect(todayBriefOpener(rows({}))).toBe('')
+  })
+  it('QA\u2019s three phrasings and the live one are dropped while anything needs the person', () => {
+    const live = rows({ needs: 3, later: 3 })
+    for (const claim of ['You are all caught up.', 'Nothing requires your attention.', 'Your queue is empty.',
+      'It is Saturday morning and nothing is waiting on you or running right now, so the three items can wait until Monday.',
+      'There is nothing pending for you.', 'No approvals are needed today.', 'Nothing in the queue for you.', 'No one is asking for your attention.', 'You don\u2019t need to answer anything.', 'All clear on your side.']) {
+      expect(claimsNothingWaits(claim), claim).toBe(true)
+      expect(cleanTodayBriefWithGuard(claim + ' The builders are on the Today summary and the Work pane.', live), claim)
+        .toEqual({ text: 'The builders are on the Today summary and the Work pane.', dropped: 'nothing_waiting' })
+    }
+  })
+  it('the same sentence stands when Today read everything and nothing waits', () => {
+    expect(cleanTodayBrief('You are all caught up. The builders are on the Work pane.', rows({}))).toBe('You are all caught up. The builders are on the Work pane.')
+    expect(cleanTodayBriefWithGuard('You are all caught up. The builders are on the Work pane.', rows({ complete: false })).dropped).toBe('nothing_waiting')
+  })
+  it('a sentence about the work, with no empty word, stands', () => {
+    for (const ok of ['Two builders are on the Today summary and the Work pane.', 'Release QA waits on your approval for the publish.', 'The queue work in the server is in QA.'])
+      expect(claimsNothingWaits(ok), ok).toBe(false)
+  })
+  it('the summary shown starts with the opener and the model text follows; GET shows the last opener', async () => {
+    const h = harness({ answer: () => 'Two builders are on the Today summary. QA is idle.' })
+    const v = await h.brief.ask(inputs())
+    expect(v.text).toBe('Two things need you. Two builders are on the Today summary. QA is idle.')
+    expect(h.brief.peek().text).toBe(v.text)
+    expect(h.prompts[0]).not.toContain('Two things need you')
+  })
+})
+
+describe('6.99.26 QA: gates before reads, recording and drain, the lease, the status and the error code', () => {
+  it('gate() names the reason before any read: switch, recording, drain, breaker, cap, interval', async () => {
+    const off = harness({ enabled: null })
+    expect(off.brief.gate()).toBe('switch_off')
+    const h = harness()
+    expect(h.brief.gate()).toBeNull()
+    h.server.blocked = 'recording'
+    expect(h.brief.gate()).toBe('recording')
+    expect(await h.brief.ask(inputs())).toMatchObject({ state: 'failed', reason: 'recording' })
+    h.server.blocked = 'maintenance'
+    expect(h.brief.gate()).toBe('maintenance')
+    h.server.blocked = null
+    await h.brief.ask(inputs())
+    expect(h.brief.gate()).toBe('interval')
+    expect(h.prompts).toHaveLength(1)
+  })
+  it('a gated ask answers from the page\u2019s rows: fresh while they match the summary\u2019s, stale with the reason once they do not', async () => {
+    const h = harness()
+    const page = inputs()
+    await h.brief.ask({ ...page, work: [{ title: 'Card', stage: 'draft', running: false }] }, todayBriefFingerprint(page))
+    expect(h.brief.askGated(page, 'interval')).toMatchObject({ state: 'fresh' })
+    expect(h.brief.askGated(inputs({}, 'moved'), 'interval')).toMatchObject({ state: 'stale', reason: 'interval' })
+    expect(h.prompts).toHaveLength(1)
+  })
+  it('a drain that begins after the gate refuses at the lease: nothing counted, nothing called; a call releases its lease', async () => {
+    const h = harness()
+    h.server.leaseThrows = true
+    expect(await h.brief.ask(inputs())).toMatchObject({ state: 'failed', reason: 'maintenance' })
+    expect(h.prompts).toHaveLength(0)
+    expect(existsSync(h.deps.stateFile) ? JSON.parse(readFileSync(h.deps.stateFile, 'utf8')).count : 0).toBe(0)
+    h.server.leaseThrows = false
+    await h.brief.ask(inputs())
+    expect([h.server.leases, h.server.released]).toEqual([1, 1])
+  })
+  it('the audit and the Settings status carry the runner\u2019s error code; status says paused until, cap reached, or last failed', async () => {
+    const err = Object.assign(new Error('Today brief timeout'), { code: 'timeout' })
+    const h = harness({ answer: () => err, minIntervalMs: 0 })
+    await h.brief.ask(inputs({}, '1'))
+    expect(h.audits[0]).toMatchObject({ outcome: 'failed', error: 'timeout' })
+    expect(h.brief.settings().status).toEqual({ kind: 'failed', at: new Date(T0).toISOString(), code: 'timeout' })
+    await h.brief.ask(inputs({}, '2')); await h.brief.ask(inputs({}, '3'))
+    expect(h.brief.settings().status).toEqual({ kind: 'paused', until: new Date(T0 + 60 * MIN).toISOString() })
+    const c = harness({ dailyCap: 1, minIntervalMs: 0 })
+    await c.brief.ask(inputs())
+    expect(c.brief.settings().status).toEqual({ kind: 'daily_cap', count: 1 })
+    expect(harness().brief.settings().status).toBeNull()
+    const junk = harness({ answer: () => Object.assign(new Error('x'), { code: 'Some Weird/Code' }) })
+    await junk.brief.ask(inputs())
+    expect(junk.audits[0]!.error).toBe('error')
+  })
+})

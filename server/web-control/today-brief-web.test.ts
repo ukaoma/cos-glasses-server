@@ -25,7 +25,10 @@ function story(opts: { sessions?: any[]; rows?: any[]; states?: Record<string, s
   class FakeDate extends Date { constructor(...a: any[]) { if (a.length) super(...(a as [any])); else super(clock.t) } static now() { return clock.t } }
   const TODAY: any = { working: (opts.sessions ?? []).filter((s: any) => s.running_active), open: (opts.sessions ?? []).filter((s: any) => s.running && !s.running_active),
     welcome: {}, offline: !!opts.offline, recording: false, sessionsState: opts.sessionsState ?? 'answered', model: null }
+  const ticks: Array<() => void> = []
+  const doc = { hidden: false, querySelector: (sel: string) => (sel === '#today-story .story-when' ? (els['story-when'] ??= new El()) : null) }
   const deps: Record<string, unknown> = {
+    setInterval: (fn: () => void) => { ticks.push(fn); return ticks.length }, document: doc,
     $: (id: string) => (els[id] ??= new El()), esc, Date: FakeDate,
     toDate: (v: unknown) => (v ? new FakeDate(String(v)) : null), clock: () => '9:00 AM', dayWord: () => 'today',
     span: (v: unknown) => Math.max(1, Math.round((clock.t - Date.parse(String(v))) / 60000)) + ' min',
@@ -43,13 +46,13 @@ function story(opts: { sessions?: any[]; rows?: any[]; states?: Record<string, s
     },
   }
   // eslint-disable-next-line no-new-func
-  const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { renderStory: renderStory, BRIEF: BRIEF };\n}')(deps)
+  const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { renderStory: renderStory, BRIEF: BRIEF, resetBrief: resetBrief };\n}')(deps)
   const m = { rows: opts.rows ?? [], now: opts.rows ?? [], later: (opts as any).later ?? [], failed: opts.failed ?? [], settled: opts.settled ?? true,
     states: opts.states ?? { sessions: 'answered', work: 'answered', voices: 'answered', memories: 'answered' },
     sessionsWaiting: (opts.sessions ?? []).filter((s: any) => s.agent_state === 'waiting').length }
   TODAY.model = m
   const flush = () => new Promise(r => setTimeout(r, 0))
-  return { els, posts, clock, TODAY, m, fns, flush, render: () => fns.renderStory(m), text: () => els['today-story']!.textContent || els['today-story']!.innerHTML }
+  return { els, posts, clock, TODAY, m, fns, flush, ticks, doc, render: () => fns.renderStory(m), text: () => els['today-story']!.textContent || els['today-story']!.innerHTML }
 }
 
 const WAITING = { session_id: 'aaaaaaaa-1111-4111-8111-111111111111', provider: 'claude', display_label: 'Release QA', agent_state: 'waiting', running: true,
@@ -135,7 +138,7 @@ describe('the Today summary on the web', () => {
     expect(s.els['today-story']!.textContent).toContain('is not answering right now')
     expect(s.posts).toHaveLength(0)
   })
-  it('asks at most once a minute for the same inputs, and at once when they change', async () => {
+  it('asks at once when what Today read changed, else at most every five minutes', async () => {
     const s = story({ sessions: [WORKING], answer: () => FRESH })
     s.render(); await s.flush()
     s.render(); await s.flush()
@@ -146,7 +149,35 @@ describe('the Today summary on the web', () => {
     expect(s.posts[1].body.needs).toEqual([{ title: 'Review 2 memories', why: 'Waiting for a yes or no.' }])
     s.clock.t += 61_000
     s.render(); await s.flush()
-    expect(s.posts).toHaveLength(3)
+    expect(s.posts, 'a minute later, the same rows: nothing').toHaveLength(2)
+    s.clock.t += 4 * 60_000
+    s.render(); await s.flush()
+    expect(s.posts, 'five minutes after the last ask').toHaveLength(3)
+  })
+  it('every minute while Today shows, "Updated N min ago" moves on and an unchanged Today asks again after five minutes', async () => {
+    const s = story({ sessions: [WORKING], answer: () => FRESH })
+    s.render(); await s.flush()
+    expect(s.ticks).toHaveLength(1)
+    s.clock.t += 60_000
+    s.ticks[0]!()
+    await s.flush()
+    expect(s.els['story-when']!.textContent).toBe('Updated 7 min ago.')
+    expect(s.posts).toHaveLength(1)
+    s.clock.t += 4 * 60_000
+    s.ticks[0]!(); await s.flush()
+    expect(s.posts).toHaveLength(2)
+    s.doc.hidden = true
+    s.clock.t += 10 * 60_000
+    s.ticks[0]!(); await s.flush()
+    expect(s.posts, 'nothing while the page is hidden').toHaveLength(2)
+  })
+  it('resetBrief (Settings toggled it) forgets the summary: the counts line shows and the next paint asks at once', async () => {
+    const s = story({ sessions: [WORKING], answer: () => FRESH })
+    s.render(); await s.flush()
+    expect(s.els['today-story']!.innerHTML).toContain(esc(FRESH.text))
+    s.fns.resetBrief()
+    s.render(); await s.flush()
+    expect(s.posts).toHaveLength(2)
   })
   it('one ask at a time: a render while one is in flight sends nothing', () => {
     const s = story({ sessions: [WORKING], answer: () => new Promise<View>(() => {}) })
@@ -196,12 +227,31 @@ describe('Ask from Today carries the summary, inside the cap', () => {
   })
 })
 
+describe('Settings: the status line under the toggle', () => {
+  const fn = () => {
+    const i = SETTINGS.indexOf('  function briefStatus(tb) {'), j = SETTINGS.indexOf('\n  }\n', i) + 4
+    // eslint-disable-next-line no-new-func
+    return new Function(SETTINGS.slice(i, j) + '\nreturn briefStatus;')() as (tb: unknown) => string
+  }
+  it('says paused until, today\u2019s cap reached, or the last failure, and nothing when all is well or off', () => {
+    const s = fn()
+    expect(s({ enabled: true, status: { kind: 'paused', until: '2026-11-07T15:00:00Z' } })).toMatch(/^Paused after three failed tries\. It tries again at /)
+    expect(s({ enabled: true, status: { kind: 'daily_cap', count: 60 } })).toBe('Today\u2019s 60 are used. It writes again tomorrow.')
+    expect(s({ enabled: true, status: { kind: 'failed', at: '2026-11-07T15:00:00Z', code: 'timeout' } })).toMatch(/^The last try failed at .*\(it took too long\)\.$/)
+    expect(s({ enabled: true, status: null })).toBe('')
+    expect(s({ enabled: false, status: { kind: 'daily_cap', count: 60 } })).toBe('')
+  })
+})
+
 describe('Settings: "Write the Today summary with a model"', () => {
   it('loads the switch, shows the toggle under General with the cost note, and disables it when the env sets it', () => {
     expect(SETTINGS).toContain("soft(api('/api/today/brief/settings'))")
     expect(SETTINGS).toContain('tb: r[8]')
     expect(SETTINGS).toContain("row('Write the Today summary with a model'")
     expect(SETTINGS).toContain('at most every 10 minutes and 60 times a day')
+    expect(SETTINGS).toContain('each session\\u2019s sub-agents and the Work cards in progress')
+    expect(SETTINGS).toContain('never during a recording')
+    expect(SETTINGS).toContain('if (W.resetTodayBrief) W.resetTodayBrief();')
     expect(SETTINGS).toMatch(/toggle\(d\.tb\.enabled, 'data-set="today-brief"' \+ \(d\.tb\.source === 'env' \? ' disabled' : ''\)/)
     expect(SETTINGS).toContain("api('/api/today/brief/settings', { method: 'POST', body: { enabled: !ton } })")
   })
