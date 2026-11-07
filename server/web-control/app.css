@@ -288,6 +288,11 @@ select.field {
 .next-up .when { font: 500 24px/1 var(--display); white-space: nowrap; }
 .next-up .what { font-weight: 600; }
 .next-up .sub { color: var(--sub); font-size: 14px; }
+.next-later { padding: 0 16px 14px; font-size: 14px; }
+.next-later .later-row { display: flex; gap: 12px; padding: 3px 0; min-width: 0; }
+.next-later .later-when { color: var(--sub); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 4.5em; }
+.next-later .later-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.next-later .later-asof { color: var(--sub); margin-top: 4px; }
 
 /* ── Lists (sessions, meetings, messages) ────────────────── */
 .list { background: var(--panel); border: 1px solid var(--panel-border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow); }

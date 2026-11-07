@@ -19,6 +19,8 @@ import { createHash } from 'node:crypto'
 import { localClock } from './morning-brief-schedule.js'
 import { clockLabel } from './drop-when.js'
 import { PING_RANK, type PingSource } from './ping-budget.js'
+import { parsePrepOccurrence } from './prep-store.js'
+import type { PrepOccurrence } from '../../shared/prep.js'
 
 export interface PingLink { kind: 'card' | 'session' | 'handoff' | 'thread' | 'memory' | 'meeting' | 'file' | 'reminder' | 'ask'; id: string; label: string; domain?: string }
 export interface PingCandidate {
@@ -29,10 +31,10 @@ export interface PingCandidate {
   line: string
   links: PingLink[]
   /**
-   * 6.99.19: the prep card's "Prep me" action also carries `prep` (title, startsAt and a null occurrence: the calendar
-   * gives no event ids today), so a client can open a Prep draft for that event. Additive; a client may ignore it.
+   * 6.99.19: the prep card's "Prep me" action also carries `prep` (title, startsAt and the occurrence when the calendar
+   * gave one, else null), so a client can open the Prep draft for that event. Additive; a client may ignore it.
    */
-  actions: Array<{ id: string; label: string; prep?: { title: string; startsAt: string; occurrence: null } }>
+  actions: Array<{ id: string; label: string; prep?: { title: string; startsAt: string; occurrence: PrepOccurrence | null } }>
   /** Epoch ms the source saw it. */
   createdAt: number
   /** Epoch ms after which it is no longer worth posting (prep: the meeting start). */
@@ -76,17 +78,20 @@ export function isoWeek(nowMs: number, timezone: string): string {
 }
 
 /** Prep: the next meeting, inside 15 minutes of its start. Expires at the start. */
-export function prepCandidates(next: { title?: unknown; time?: unknown } | null | undefined, nowMs: number, timezone: string): PingCandidate[] {
+export function prepCandidates(next: { title?: unknown; time?: unknown; occurrence?: unknown } | null | undefined, nowMs: number, timezone: string): PingCandidate[] {
   if (!next) return []
+  let occurrence: PrepOccurrence | null = null
+  if (next.occurrence != null) { try { occurrence = parsePrepOccurrence(next.occurrence) } catch { occurrence = null } }
   const start = typeof next.time === 'string' ? Date.parse(next.time) : NaN
   const title = clip(next.title, PING_TEXT.title)
   if (!Number.isFinite(start) || !title) return []
   if (start <= nowMs || start - nowMs > PREP_LEAD_MS) return []
   const day = localClock(start, timezone).day
   return [{
-    source: 'prep', key: `prep:${hash(`${title}\n${next.time}`)}:${day}`,
+    // An occurrence key is the real event; without one, title and time as before.
+    source: 'prep', key: `prep:${occurrence ? hash(occurrence.key) : hash(`${title}\n${next.time}`)}:${day}`,
     title, line: `${title} at ${clockLabel(localClock(start, timezone).minutes)}. Prep me?`,
-    links: [], actions: [{ id: 'prep', label: 'Prep me', prep: { title, startsAt: new Date(start).toISOString(), occurrence: null } }, { id: 'dismiss', label: 'Not now' }],
+    links: [], actions: [{ id: 'prep', label: 'Prep me', prep: { title, startsAt: new Date(start).toISOString(), occurrence } }, { id: 'dismiss', label: 'Not now' }],
     createdAt: nowMs, expiresAt: start,
   }]
 }

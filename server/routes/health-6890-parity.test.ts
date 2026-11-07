@@ -3,7 +3,8 @@
 // (601d807). The 6.89.0 change was one new key, /api/health `tailscaleNudge` (lib/tailscale-nudge.ts),
 // which carries no address. Two later additive capabilities are in the goldens below:
 // `phoneMicrophoneMeetings` (iPhone microphone, 6.93.0) and `macLiveVoices` (the live Mac voice
-// switch and window counts, 6.93.0). /api/route-proof is an ordinary unknown path behind the token again, and
+// switch and window counts, 6.93.0), plus `calendar` on /api/models only (where the calendar comes from, counts
+// only, PH plan P1). /api/route-proof is an ordinary unknown path behind the token again, and
 // COS_LAN_FIRST is read by nothing.
 import express from 'express'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
@@ -191,6 +192,7 @@ const GOLDEN_MODELS_TOP = [
   'cursorReady',
   'ollama',
   'ollamaReady',
+  'calendar',
   'serverInstanceId',
   'displayStreamTicket',
   'capabilities',
@@ -354,6 +356,13 @@ const GOLDEN_MODELS_PATHS = [
   '.ollama.models[]',
   '.ollama.refreshedAt',
   '.ollamaReady',
+  '.calendar',
+  '.calendar.source',
+  '.calendar.snapshot',
+  '.calendar.ageMs',
+  '.calendar.access',
+  '.calendar.calendars',
+  '.calendar.selected',
   '.serverInstanceId',
   '.displayStreamTicket',
   '.capabilities',

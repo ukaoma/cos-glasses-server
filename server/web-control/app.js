@@ -1069,6 +1069,27 @@
     $('next-actions').innerHTML = (prep ? '<button type="button" class="btn small primary" data-today-next="prep">Prep me</button>' : '') +
       '<button type="button" class="link-btn" data-goto="meetings">Open meeting</button>';
     card.classList.remove('hidden');
+    loadCalendarLater(n, d);
+  }
+  // PH plan P1: the rest of today from GET /api/calendar/today (selected calendars, next 3), under Next up.
+  // An aging snapshot says when it was read. Not connected or nothing more: the block stays hidden.
+  function loadCalendarLater(n, d) {
+    var box = $('next-later'); if (!box) return;
+    var gen = TODAY.gen;
+    api('/api/calendar/today').then(function (c) {
+      if (gen !== TODAY.gen) return;
+      if (!c || !c.connected) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+      var same = function (r) { var rd = toDate(r.start); return r.title === n.title && rd && d && Math.abs(rd.getTime() - d.getTime()) < 60000; };
+      var rows = (c.next || []).filter(function (r) { return !r.allDay && !same(r); }).slice(0, 2);
+      var asOf = c.stale && c.asOf ? toDate(c.asOf) : null;
+      var html = rows.map(function (r) {
+        var rd = toDate(r.start);
+        return '<div class="later-row"><span class="later-when">' + esc(rd ? clock(rd) : '') + '</span><span class="later-what">' + esc(r.title) + '</span></div>';
+      }).join('');
+      if (asOf) html += '<div class="later-asof">' + esc('Calendar as of ' + clock(asOf)) + '</div>';
+      box.innerHTML = html;
+      box.classList.toggle('hidden', !html);
+    }, function () { box.classList.add('hidden'); box.innerHTML = ''; });
   }
   function prepNext() {
     var n = TODAY.welcome && TODAY.welcome.nextEvent, d = n && toDate(n.time), chat = window.COSWeb && window.COSWeb.cosChat;

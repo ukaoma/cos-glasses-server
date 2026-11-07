@@ -34,7 +34,7 @@ const POLLED: ReadonlySet<PingSource> = new Set<PingSource>(['prep', 'followups'
 export const PING_STATE_LIMITS = { held: 200, consumed: 5_000, consumedDays: 30, fileBytes: 4_000_000 } as const
 
 export interface PingSnapshot {
-  nextEvent?: { title?: unknown; time?: unknown } | null
+  nextEvent?: { title?: unknown; time?: unknown; occurrence?: unknown } | null
   intakeOpen?: readonly IntakeRow[] | null
   threads?: readonly ThreadRow[] | null
   signals?: readonly SignalRow[] | null

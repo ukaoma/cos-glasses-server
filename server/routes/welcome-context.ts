@@ -4,6 +4,7 @@
 
 import { Router } from 'express'
 import { callPython, pythonBridgeAvailable } from '../lib/python-bridge.js'
+import { calendarToday, readCalendar } from '../lib/calendar-source.js'
 import { parsePrepOccurrence } from '../lib/prep-store.js'
 import type { PrepOccurrence } from '../../shared/prep.js'
 
@@ -34,7 +35,8 @@ export function bridgeOccurrence(evt: Record<string, unknown> | null | undefined
       calendarId: pick('calendar_id', 'calendarId'),
       eventId: pick('event_id', 'eventId') ?? null,
       externalId: pick('external_id', 'externalId') ?? null,
-      startsAt: pick('start_time', 'start', 'startsAt'),
+      // occurrence_start (EventKit's original occurrence date) first, so a moved occurrence keeps its draft.
+      startsAt: pick('occurrence_start', 'start_time', 'start', 'startsAt'),
       endsAt: pick('end_time', 'end', 'endsAt') ?? null,
     }) ?? undefined
   } catch { return undefined }
@@ -327,7 +329,8 @@ export async function fetchNextEvent(): Promise<{ event: NextEventPayload | null
   }
 
   try {
-    const cal = await callPython(['calendar']) as {
+    const calRead = await readCalendar()
+    const cal = calRead.data as {
       today_remaining?: Array<{
         title?: string
         start_time?: string
@@ -338,10 +341,14 @@ export async function fetchNextEvent(): Promise<{ event: NextEventPayload | null
       minutes_until_next?: number
     } | null
 
-    const read = calendarAnswerWasRead(pythonBridgeAvailable(), cal)
+    // The EventKit snapshot is a real read without the bridge; 'none' (denied or expired) never is.
+    const sourceReady = calRead.source === 'bridge' ? pythonBridgeAvailable() : calRead.source !== 'none'
+    const read = calendarAnswerWasRead(sourceReady, cal)
     const remaining = cal?.today_remaining ?? []
     const meaningful = remaining.find((evt) => {
       if (evt.is_all_day) return false
+      // Snapshot rows say whether they may become next/prep (declined, shared-calendar travel, holidays).
+      if ((evt as { prep_worthy?: unknown }).prep_worthy === false) return false
       return !isGenericNoiseEvent(evt.title || '')
     })
 
@@ -393,6 +400,19 @@ export function _resetWelcomeContextCachesForTests(): void {
   weatherRestored = false
   lastFailureLogAt.clear()
 }
+
+/**
+ * PH plan P1: Today's calendar for Control Web and desktop. Behind the /api token gate. Selected calendars only, the
+ * next 3 events. `connected: false` means "Calendar not connected", never an empty day.
+ */
+welcomeContextRouter.get('/calendar/today', async (_req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store')
+    res.json(await calendarToday())
+  } catch {
+    res.status(503).json({ error: 'calendar_unavailable' })
+  }
+})
 
 welcomeContextRouter.get('/welcome-context', async (req, res) => {
   const lat = parseCoord(req.query.lat, 'lat')

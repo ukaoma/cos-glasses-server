@@ -1,4 +1,5 @@
 import { MAX_ATTACHMENTS_PER_PROMPT } from '../../shared/media-attachment.js'
+import { calendarStatus } from '../lib/calendar-source.js'
 import { TURN_FILE_MAX_BYTES } from '../lib/turn-file-store.js'
 import { dropItCapability } from '../lib/drop-settings.js'
 import { PREP_CAPABILITY } from '../../shared/prep.js'
@@ -680,6 +681,8 @@ healthRouter.get('/models', async (req, res) => {
     ollamaReady: isOllamaProviderReady(),
     // Key lanes (plan v4 3.1): `keyProfiles` only while a profile is active. Absent when off.
     ...keyProfilesModelsField(),
+    // PH plan P1: where the calendar comes from. Counts only, never titles; not on public /api/health.
+    calendar: calendarStatus(),
     serverInstanceId: getServerInstanceId(),
     // Minted here rather than on a route of its own: this response is already
     // authenticated, and the mint is stateless, so it costs nothing and stores

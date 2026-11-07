@@ -42,6 +42,7 @@ import {
 import { importedLibraryMonths, supersededDayCounts } from './imported-library-rows.js'
 import { getMeetingStore } from './meeting-store.js'
 import { COS_SCRIPTS_DIR, callPython, contextSourceAvailable, pythonBridgeAvailable } from './python-bridge.js'
+import { readCalendar } from './calendar-source.js'
 import { resolveProviderWorkDir } from './launch-dir.js'
 
 /** Highest stamped message number in the active era: live sessions, the day
@@ -113,8 +114,9 @@ export async function probeContext(): Promise<ContextProbe | null> {
 }
 
 export async function probeCalendar(): Promise<CalendarProbe | null> {
-  if (!pythonBridgeAvailable()) return null
-  const data = await callPython(['calendar'], 8_000) as { meetings_today_count?: unknown; today_events?: unknown; data_source?: unknown } | null
+  const read = await readCalendar(8_000)
+  if (read.source === 'none' || (read.source === 'bridge' && !pythonBridgeAvailable())) return null
+  const data = read.data as { meetings_today_count?: unknown; today_events?: unknown; data_source?: unknown } | null
   if (!data || typeof data !== 'object') return null
   const today = typeof data.meetings_today_count === 'number'
     ? data.meetings_today_count

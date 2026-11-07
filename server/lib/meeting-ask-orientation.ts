@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { callPython } from './python-bridge.js'
+import { readCalendar } from './calendar-source.js'
 import { redactSecrets } from './lens-gist-engines.js'
 import { type MeetingAskCalendarMatch, type MeetingAskOrientation } from '../../shared/meeting-ask.js'
 import { domainNames, isSafeDomainName } from './domains.js'
@@ -28,7 +28,7 @@ export function calendarCandidates(raw: unknown, startedAt: number | null): Meet
 export async function meetingCalendar(startedAt: number | null): Promise<{ candidates: MeetingAskCalendarMatch[]; notices: string[] }> {
   if (startedAt === null) return { candidates: [], notices: ['Calendar matching is available for a live recording. Choose a domain for this meeting.'] }
   try {
-    const raw = await callPython(['calendar'], 5000) as any
+    const raw = (await readCalendar(5000)).data as any
     const candidates = calendarCandidates(raw, startedAt)
     return { candidates, notices: candidates.length ? [] : [raw?.error || raw?.is_stale ? 'Calendar context is unavailable or stale. Choose a domain manually.' : 'No calendar event matches this recording. Choose a domain manually.'] }
   } catch { return { candidates: [], notices: ['Calendar context is unavailable. Choose a domain manually.'] } }

@@ -15,6 +15,8 @@ import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { acquireServerInstanceLock, type ServerInstanceLock } from './server-instance-lock.js'
+import { parsePrepOccurrence } from './prep-store.js'
+import type { PrepOccurrence } from '../../shared/prep.js'
 
 export class DropStoreError extends Error {
   constructor(readonly code: string, readonly status = 409) { super(code) }
@@ -81,9 +83,10 @@ export const FEED_KINDS = ['drop', 'receipt', 'question', 'followup', 'ping', 'a
 export type FeedKind = typeof FEED_KINDS[number]
 /**
  * 6.99.19: the prep card's "Prep me" may carry the event it is about, so a client can open a Prep draft for it
- * (ping-sources.ts prepCandidates). Display fields only; occurrence is null until the calendar sends event ids.
+ * (ping-sources.ts prepCandidates). Display fields plus, since the EventKit calendar source (PH plan P1), the event's
+ * occurrence identity when the calendar gave one. Null when it did not (the starter-kit bridge sends no event ids).
  */
-export interface FeedActionPrep { title: string; startsAt: string; occurrence: null }
+export interface FeedActionPrep { title: string; startsAt: string; occurrence: PrepOccurrence | null }
 export interface FeedAction { id: string; label: string; prep?: FeedActionPrep }
 export interface FeedItem {
   id: string
@@ -245,8 +248,11 @@ export function parseDropRecord(raw: unknown): DropRecord {
 function feedActionPrep(raw: unknown): FeedActionPrep | undefined {
   if (!record(raw)) return undefined
   const title = str(raw.title, 300), startsAt = typeof raw.startsAt === 'string' && raw.startsAt.length <= 64 && Number.isFinite(Date.parse(raw.startsAt)) ? raw.startsAt : null
-  if (!title || !startsAt || raw.occurrence !== null) return undefined
-  return { title, startsAt, occurrence: null }
+  if (!title || !startsAt) return undefined
+  // Older rows carry occurrence: null. A present but invalid identity drops to null, never a guess.
+  let occurrence: PrepOccurrence | null = null
+  if (raw.occurrence != null) { try { occurrence = parsePrepOccurrence(raw.occurrence) } catch { occurrence = null } }
+  return { title, startsAt, occurrence }
 }
 
 export function parseFeedItem(raw: unknown): FeedItem {

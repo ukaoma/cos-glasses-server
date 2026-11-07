@@ -38,7 +38,7 @@ export interface DropP2Deps {
   timezone: () => string
   now?: () => number
   /** The next calendar event; undefined when the calendar could not be read. */
-  nextEvent?: () => Promise<{ title?: unknown; time?: unknown } | null | undefined>
+  nextEvent?: () => Promise<{ title?: unknown; time?: unknown; occurrence?: unknown } | null | undefined>
   /** Open Work intake items; undefined when the store is not available. */
   intakeOpen?: () => IntakeRow[] | undefined
   /** operations/scripts, for the thread and signal caches (read only; no script is run). */

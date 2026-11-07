@@ -2,6 +2,7 @@
 // Caches context for 60s to avoid hammering Python scripts every query
 
 import { callPython, COS_MODE } from './python-bridge.js'
+import { readCalendar } from './calendar-source.js'
 import { getOwnerName } from './profile.js'
 
 interface ContextCache {
@@ -76,7 +77,7 @@ async function fetchLiveContext(): Promise<string> {
 
   // Fetch calendar and tasks in parallel
   const [calResult, taskResult] = await Promise.allSettled([
-    callPython(['calendar']),
+    readCalendar().then(r => r.data),
     callPython(['tasks']),
   ])
 
