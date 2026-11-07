@@ -215,7 +215,7 @@
     if (!(r.pane === 'sessions' && r.args.length === 2)) { clearInterval(state.turnPoll); if (state.reading) clearInterval(state.reading.heldTimer); state.reading = null; }
     if (r.pane !== 'meetings' && state.livePoll) { clearInterval(state.livePoll); state.livePoll = null; }
 
-    var reading = r.args.length > 0;
+    var reading = r.args.length > 0 && !isTabRoute(r.args);
     var paneEl = $('pane-' + r.pane);
     if (paneEl) paneEl.classList.toggle('reading', reading);
     var split = paneEl && paneEl.querySelector('.split');
@@ -261,9 +261,12 @@
     var r = parseRoute();
     var up = PANES[r.pane] && PANES[r.pane].up ? PANES[r.pane].up(r.args) : null;
     if (up) go(r.pane, up);
-    else if (r.args.length) go(r.pane);
+    else if (r.args.length && !isTabRoute(r.args)) go(r.pane);
     else go('today');
   }
+  // '#/<pane>/t/<tab>' is the pane's list on one of its tabs, not a reader: the phone keeps the section switcher and Back
+  // leaves the pane. Memories keeps its tab in the address this way, so a reload or a new browser lands on the same tab.
+  function isTabRoute(args) { return args.length === 2 && args[0] === 't'; }
   // On the closed Duo every vertical pixel counts: the top bar slides away while you scroll
   // down and comes back the moment you scroll up.
   var lastY = 0;
