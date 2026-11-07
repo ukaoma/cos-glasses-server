@@ -101,7 +101,8 @@
     var ctrl = limit && window.AbortController ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, limit) : null;
     return fetch(path, { method: method, headers: headers, credentials: 'same-origin', body: body, signal: ctrl ? ctrl.signal : undefined }).then(function (res) {
-      if (timer) clearTimeout(timer);
+      // Blob bodies keep their deadline after headers: a stalled download must release its queue slot.
+      if (timer && o.responseType !== 'blob') clearTimeout(timer);
       if (res.status === 401 && path.indexOf('/api/web-session/') !== 0) { showAuth(); var gone = new Error('Signed out. Connect this browser again.'); gone.status = 401; throw gone; }
       if (o.responseType === 'blob' && res.ok) return res.blob();
       return res.text().then(function (text) {
@@ -119,6 +120,9 @@
         }
         return data;
       });
+    }).then(function (value) {
+      if (timer) clearTimeout(timer);
+      return value;
     }, function (err) {
       if (timer) clearTimeout(timer);
       if (err && err.name === 'AbortError' && ctrl && ctrl.signal.aborted) {

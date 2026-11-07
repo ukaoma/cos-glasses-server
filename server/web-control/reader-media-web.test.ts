@@ -49,19 +49,21 @@ function load(responses: any[] = []) {
   document.querySelectorAll = () => []; document.getElementById = (id: string) => document.ids.get(id) ?? null
   document.addEventListener = (name: string, fn: Function) => { (listeners['doc:' + name] ??= []).push(fn) }
   const made: string[] = [], revoked: string[] = [], calls: any[] = [], panes: any = {}
+  const timers = new Map<number, Function>(); let timerId = 0
   let auth = 0
   const W: any = { esc, registerPane: (name: string, kit: any) => { panes[name] = kit }, setCrumb() {}, toDate: () => null, clock: () => '' }
   const window: any = { COSWeb: W, AbortController, addEventListener: (name: string, fn: Function) => { (listeners[name] ??= []).push(fn) }, scrollTo() {} }
   const fetch = async (path: string, options: any) => {
     calls.push({ path, options }); const result = responses.length ? responses.shift() : new Blob(['image'], { type: 'image/png' })
-    const answer = await (typeof result === 'function' ? result() : result)
+    const answer = await (typeof result === 'function' ? result(options) : result)
     if (answer instanceof Error) throw answer
+    if (typeof answer?.blob === 'function') return answer
     if (answer instanceof Blob) return { status: 200, ok: true, blob: async () => answer, text: async () => { throw new Error('Blob passed through JSON') } }
     return { status: answer?.status ?? 200, ok: !answer?.status || answer.status < 400, text: async () => JSON.stringify(answer?.data ?? {}) }
   }
   const ctx = vm.createContext({ window, document, console, fetch, AbortController, Blob, URL: {
     createObjectURL: () => { const url = 'blob:output-' + made.length; made.push(url); return url }, revokeObjectURL: (url: string) => revoked.push(url),
-  }, setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}, showAuth: () => { auth++ } })
+  }, setTimeout: (fn: Function) => { timers.set(++timerId, fn); return timerId }, clearTimeout: (id: number) => timers.delete(id), setInterval: () => 1, clearInterval() {}, showAuth: () => { auth++ } })
   vm.runInContext(region(APP, '  function api(path, opts)', '  // ── state'), ctx)
   W.api = vm.runInContext('api', ctx)
   vm.runInContext(MEDIA, ctx)
@@ -75,7 +77,7 @@ function load(responses: any[] = []) {
     for (const fn of listeners.keydown ?? []) { if (!stopped) fn(e) }
     for (const fn of listeners['doc:keydown'] ?? []) { if (!stopped) fn(e) }
   }
-  return { W, ctx, window, document, host, hooks, mount, calls, made, revoked, key, panes, ensureCalls, auth: () => auth }
+  return { W, ctx, window, document, host, hooks, mount, calls, made, revoked, key, panes, ensureCalls, timers, expireTimers: () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn() } }, auth: () => auth }
 }
 function named(host: El, name: string) { return host.querySelectorAll('button').find(e => e.textContent === name)! }
 function thumbnail(host: El) { return host.querySelectorAll('button').find(e => e.className === 'cx-thumb')! }
@@ -99,6 +101,20 @@ describe('native output images through the real viewer and app transport', () =>
     expect(await t.W.api('/api/test')).toEqual({ ok: true })
     await expect(t.W.api('/api/image', { responseType: 'blob' })).rejects.toMatchObject({ status: 401 })
     expect(t.auth()).toBe(1); expect(t.made).toEqual([])
+  })
+  it('keeps blob deadlines through stalled bodies and releases both queue slots on timeout', async () => {
+    const stalled = (options: any) => ({ status: 200, ok: true, blob: () => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted body'), { name: 'AbortError' })))
+    }) })
+    const t = load([stalled, stalled, new Blob(['third'], { type: 'image/png' })])
+    await t.mount(['a', 'b', 'c'].map(ch => ({ ...DTO, id: 'ai_' + ch.repeat(64) })))
+    expect(t.calls).toHaveLength(2); expect(t.timers.size).toBe(2)
+    t.expireTimers(); await flush()
+    expect(t.calls.slice(0, 2).every(c => c.options.signal.aborted)).toBe(true)
+    expect(t.calls).toHaveLength(3); expect(t.made).toHaveLength(1); expect(t.timers.size).toBe(0)
+    expect(t.host.querySelectorAll('button').filter(b => b.textContent === 'Retry image' && !b.hidden)).toHaveLength(2)
+    const api = load([stalled]); const result = api.W.api('/api/image', { responseType: 'blob' }).catch((e: any) => e)
+    await flush(); api.expireTimers(); expect(await result).toMatchObject({ code: 'timeout' })
   })
   it('showing the auth gate releases open reader images and the fullscreen viewer', async () => {
     const t = load(); await t.mount(); thumbnail(t.host).click(); await flush()
@@ -202,6 +218,35 @@ describe('production reader and Today hook coverage', () => {
     t.key('Escape'); expect(closed).toBe(1)
     new Function('deps', 'with(deps){' + region(TODAY, '  function stopSession()', '  // The Needs you list') + 'stopSession();}')({ O, K, $: t.document.getElementById, clearInterval() {} })
     expect(t.revoked.sort()).toEqual(t.made.sort())
+  })
+  it('Today refresh retains the fullscreen image while loading, unchanged, or failed; only a changed reply disposes it', async () => {
+    const t = load(), box = t.document.createElement('section'); t.document.ids.set('ta-last', box); t.document.body.appendChild(box)
+    const O: any = { r: { provider: 'codex', id: SID }, row: {}, open: { kind: 'run' } }
+    const replies: any[] = []
+    const K = { answer: () => Promise.resolve(replies.shift()), path: () => '/session', markdown: esc,
+      imageHtml: t.hooks.html, imagesMount: t.hooks.mount, imagesStop: t.hooks.stop }
+    const readLast = new Function('deps', 'with(deps){' + region(TODAY, '  function loadLast(r)', '  // Running: the same live stream') + 'return loadLast;}')({
+      O, K, W: t.W, esc, lower: (s: string) => s.toLowerCase(), $: t.document.getElementById, paintMeta() {}, setHead() {},
+    })
+    const answer = (text = '') => ({ status: 200, body: { recent_turns: [{ role: 'assistant', text, outputImages: [DTO] }] } })
+    replies.push(answer()); await readLast(O.r); await flush(); thumbnail(box).click(); await flush()
+    const firstThumb = thumbnail(box), urls = [...t.made]
+    let finish!: (v: unknown) => void; replies.push(new Promise(r => { finish = r }))
+    const pending = readLast(O.r); expect(t.W.readerMedia.isOpen()).toBe(true); expect(t.revoked).toEqual([])
+    finish(answer()); await pending; await flush(); expect(thumbnail(box)).toBe(firstThumb); expect(t.calls).toHaveLength(2)
+    replies.push({ status: 503 }); await readLast(O.r)
+    expect(t.W.readerMedia.isOpen()).toBe(true); expect(t.revoked).toEqual([])
+    expect(t.document.ids.get('ta-last-refresh')?.textContent).toContain('previous reply')
+    replies.push(Promise.reject(new Error('offline'))); await readLast(O.r)
+    expect(t.W.readerMedia.isOpen()).toBe(true); expect(t.revoked).toEqual([])
+    replies.push(answer('A changed reply')); await readLast(O.r); await flush()
+    expect(t.W.readerMedia.isOpen()).toBe(false); expect(t.revoked.sort()).toEqual(urls.sort())
+    expect(box.innerHTML).toContain('A changed reply'); expect(t.calls).toHaveLength(3)
+    // An earlier request finishing last must not replace a newer successful reply.
+    let finishOlder!: (v: unknown) => void; replies.push(new Promise(r => { finishOlder = r }))
+    const older = readLast(O.r); replies.push(answer('Newest reply')); await readLast(O.r); await flush()
+    const newestThumb = thumbnail(box); finishOlder(answer('Stale reply')); await older; await flush()
+    expect(box.innerHTML).toContain('Newest reply'); expect(thumbnail(box)).toBe(newestThumb)
   })
   it('the existing lazy loader shares one script request between simultaneous readers', async () => {
     const scripts: any[] = [], PANES: any = {}

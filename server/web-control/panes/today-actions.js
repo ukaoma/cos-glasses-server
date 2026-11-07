@@ -910,9 +910,10 @@
 
   // The session's last reply, from the same read the reader makes (?turns=N, lib/agent-session-turns.ts).
   function loadLast(r) {
-    O.lastState = 'loading'; paintLast();
+    var request = r.lastRead = {};
+    O.lastState = 'loading'; O.lastWhy = ''; paintLast();
     return K.answer(K.path(r.provider, r.id, '?turns=6'), { timeoutMs: 20000 }).then(function (a) {
-      if (O.r !== r) return;
+      if (O.r !== r || r.lastRead !== request) return;
       if (a.status === 404) { O.lastState = 'none'; O.lastWhy = 'This session is not on your Mac any more.'; paintLast(); return; }
       if (a.status !== 200) { O.lastState = 'error'; paintLast(); return; }
       var d = a.body || {};
@@ -923,10 +924,21 @@
       O.lastState = O.last ? 'ready' : 'none';
       O.lastWhy = '';
       paintLast();
-    }, function () { if (O.r === r) { O.lastState = 'error'; paintLast(); } });
+    }, function () { if (O.r === r && r.lastRead === request) { O.lastState = 'error'; paintLast(); } });
   }
   function paintLast() {
     var box = $('ta-last'); if (!box) return;
+    // Retain the actual reply nodes (and its open image) during refreshes and transient errors.
+    // Only a successful changed reply replaces them. Metadata changes count as changed too.
+    var signature = O.last ? JSON.stringify([O.last.text, O.last.at, K.imageHtml ? K.imageHtml(O.last) : '']) : '';
+    if (signature && box.__taLastSignature === signature) {
+      var refresh = $('ta-last-refresh');
+      if (refresh) refresh.textContent = O.lastState === 'loading' ? 'Checking for a newer reply…'
+        : O.lastState === 'error' ? 'The latest reply could not load. Showing the previous reply.'
+        : O.lastState === 'none' ? (O.lastWhy || '') : '';
+      return;
+    }
+    box.__taLastSignature = signature;
     if (K.imagesStop) K.imagesStop(box);
     if (O.lastState === 'loading') { box.innerHTML = '<div class="ta-last"><div class="skeleton" style="width:74%"></div><div class="skeleton" style="width:52%;margin-top:8px"></div></div>'; return; }
     if (O.lastState === 'error') { box.innerHTML = '<p class="ta-sub">The last reply did not load. Open the session to read it.</p>'; return; }
@@ -935,7 +947,7 @@
     var at = W.toDate(O.last.at), long = O.last.text.length > 700;
     box.innerHTML = '<section class="ta-last" aria-label="Last reply"><p class="ta-last-head">' + esc('Last reply' + (at ? ', ' + W.clock(at) : '')) + '</p>' +
       '<div class="sx-md ta-last-text' + (long ? ' clamped' : '') + '" id="ta-last-text">' + K.markdown(O.last.text.slice(0, 12000)) + '</div>' +
-      (long ? '<button type="button" class="link-btn" data-ta="more">Show all of it</button>' : '') + (K.imageHtml ? K.imageHtml(O.last) : '') + '</section>';
+      (long ? '<button type="button" class="link-btn" data-ta="more">Show all of it</button>' : '') + (K.imageHtml ? K.imageHtml(O.last) : '') + '<p id="ta-last-refresh" class="ta-sub" role="status"></p></section>';
     if (K.imagesMount) K.imagesMount(box, O.r);
   }
 
