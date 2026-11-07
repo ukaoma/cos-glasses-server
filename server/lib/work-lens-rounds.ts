@@ -38,8 +38,8 @@ const MAX_STOPS_KEPT = 8
 const WORK_ID = /^task:[a-z_]+:[a-f0-9]{12}$/
 const CLIENT_ROUND_ID = /^(lens|web)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
- * Who made the plan: the lens, or COS Control Web (Work chat on the phone or in a browser, `webPlans: 1` on GET
- * /api/work/chat). The client round id starts with its source (`lens-`, `web-`). A web round is the same contract as a
+ * Who made the plan: the lens, or COS Control Web (Work chat on the phone or in a browser; GET /api/work/chat/web-plans
+ * says this server takes it). The client round id starts with its source (`lens-`, `web-`). A web round is the same contract as a
  * lens round: recorded, sent only by COS Control through its own Send, never by this server.
  */
 export const ROUND_SOURCES = ['lens', 'web'] as const
@@ -133,6 +133,18 @@ export function parseLensRound(v: unknown): LensRoundInput {
   })
   return { workID: v.workID, clientRoundId: v.clientRoundId, question: v.question, answer: v.answer, planner: v.planner ?? null,
     effort: v.effort ?? null, orchestrator: v.orchestrator === true, assignments, createdAt: v.createdAt, source: v.source }
+}
+
+/**
+ * A web round sent again under the same id must be the same plan. The lens keeps its replay rule (the stored round is
+ * answered, whatever the repeat carries); a web repeat with any other question, answer, planner, effort or assignment is
+ * refused, so one id can never stand for two plans. createdAt is when the plan was made and may be re-sent as it was.
+ */
+export function sameRoundContent(round: LensRound, input: LensRoundInput): boolean {
+  const plan = (r: { workID: string; question: string; answer: string; planner: string | null; effort: string | null; orchestrator: boolean;
+    assignments: Omit<LensAssignment, 'state'>[] }) => JSON.stringify([r.workID, r.question, r.answer, r.planner, r.effort, r.orchestrator,
+    r.assignments.map(a => [a.id, a.mode, a.sessionID ?? null, a.provider ?? null, a.prompt, a.contextItemIDs ?? null])])
+  return plan(round) === plan(input)
 }
 
 /** The card's sessions as COS Control's snapshot records them: confirmed links, receipt targets and fork children. */

@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const tests = [
   'server/routes/work-lens-rounds.test.ts',
+  'server/routes/work-web-rounds.test.ts',
   'server/routes/work-chat.test.ts',
 ]
 const LR = 'server/lib/work-lens-rounds.ts', RR = 'server/routes/work-lens-rounds.ts', WR = 'server/routes/work-chat.ts'
@@ -25,7 +26,20 @@ const mutations = [
   ['lr-workid', LR, "  if (!str(v.workID, 256) || !WORK_ID.test(v.workID)) throw invalid('workID')\n", ''],
   ['lr-question-bound', LR, "  if (!str(v.question, LENS_QUESTION_CHARS) || !v.question.trim()) throw invalid('question')\n", ''],
   ['lr-answer-bound', LR, "if (!str(v.answer, LENS_ANSWER_CHARS)) throw invalid('answer')", "if (typeof v.answer !== 'string') throw invalid('answer')"],
-  ['lr-source-lens', LR, "  if (v.source !== 'lens') throw invalid('source')\n", ''],
+  ['lr-source-lens', LR, "  if (!(ROUND_SOURCES as readonly unknown[]).includes(v.source)) throw invalid('source')\n", ''],
+  // Web plans (COS Control Web, source "web"): the allow-list, the id prefix, where source is kept and shown, and id reuse.
+  ['lr-source-allow-list', LR, "export const ROUND_SOURCES = ['lens', 'web'] as const", "export const ROUND_SOURCES = ['lens', 'web', 'glasses'] as const"],
+  ['lr-source-prefix', LR, "  if (!v.clientRoundId.startsWith(`${v.source}-`)) throw invalid('clientRoundId', 'The round id must start with its source.')\n", ''],
+  ['lr-source-id-pattern', LR, "const CLIENT_ROUND_ID = /^(lens|web)-[0-9a-f]{8}-", "const CLIENT_ROUND_ID = /^(lens|web)-[0-9A-Fa-f]{8}-"],
+  ['lr-source-stored', LR, "      ...(input.source === 'web' ? { source: 'web' as const } : {}),\n    }", "    }"],
+  ['lr-source-inbox', LR, "      ...(r.source === 'web' ? { source: 'web' as const } : {}),\n      assignments:", "      assignments:"],
+  ['lr-source-view', LR, "    ...(r.source === 'web' ? { source: 'web' as const } : {}),\n    assignments:", "    assignments:"],
+  ['lr-source-lens-untouched', LR, "    ...(r.source === 'web' ? { source: 'web' as const } : {}),\n    assignments:", "    ...({ source: r.source ?? 'lens' }),\n    assignments:"],
+  ['lr-same-content', LR, "  return plan(round) === plan(input)\n", "  return true\n"],
+  ['lr-same-content-ignores-time', LR, "JSON.stringify([r.workID, r.question,", "JSON.stringify([(r as { createdAt?: string }).createdAt, r.workID, r.question,"],
+  ['rr-web-id-reuse-409', RR, "if (replay && input.source === 'web' && !sameRoundContent(replay, input)) {", "if (false) {"],
+  ['rr-web-id-reuse-web-only', RR, "if (replay && input.source === 'web' && !sameRoundContent(replay, input)) {", "if (replay && !sameRoundContent(replay, input)) {"],
+  ['rr-web-plans-capability', RR, "return res.json({ protocolVersion: 1, webPlans: 1, sources: [...ROUND_SOURCES] })", "return res.json({ protocolVersion: 1, webPlans: 0, sources: [...ROUND_SOURCES] })"],
   ['lr-ids-in-order', LR, "a.id !== `a${i + 1}`", "typeof a.id !== 'string'"],
   ['lr-continue-needs-session', LR, "  if (mode !== 'newSession' && !(str(a.sessionID, 64) && SID.test(a.sessionID))) throw invalid('assignments.sessionID')\n", ''],
   ['lr-new-session-provider', LR, "mode === 'newSession' ? !['claude', 'codex'].includes(a.provider)", "mode === 'newSession' ? false"],
