@@ -83,6 +83,8 @@ import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.js'
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 
+import { agentSessionOutputImages } from '../lib/agent-session-output-images.js'
+
 export const agentSessionsRouter = Router()
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -236,7 +238,7 @@ export function withRunning<T extends { session_id: string }>(entry: T, scan: Oc
     // clears on its own when the work stops. Still a display hint, never a gate.
     // 6.62.0: or the engine's own hooks (or a Codex rollout) say a turn is open and the
     // last event is inside HOOK_ACTIVE_CAP_MS (plan 1.1-1.3).
-    running_active: decides ? hint!.active : occ?.activeRecently === true || hint?.active === true,
+    running_active: decides || hint?.activeDecides === true ? hint!.active : occ?.activeRecently === true || hint?.active === true,
   }
 }
 
@@ -260,8 +262,9 @@ export function withRunning<T extends { session_id: string }>(entry: T, scan: Oc
  * A hook-derived `running` only exists inside the deriver's 30-minute open-turn ceiling, so an
  * open-quiet Cursor row ends there, or at its Stop or SessionEnd.
  *
- * For Claude and Codex the hint only ADDS to occupancy (a held, freshly written thread still
- * reads as it did). For Cursor, whose list has no occupancy at all, a hook signal decides, and
+ * For Claude and Codex, authoritative idle/waiting states suppress recent-write activity
+ * for display while leaving ownership intact. Other hints add to occupancy. For Cursor,
+ * whose list has no occupancy at all, a hook signal decides, and
  * a running Cursor turn is the user's own (an IDE composer or their terminal; COS's own child
  * is kept out of the phase), so it is foreign.
  */
@@ -271,15 +274,25 @@ export interface RunningHint {
   foreign: boolean
   /** Cursor with hook evidence: this hint IS the answer, occupancy and file time are not read. */
   decides: boolean
+  /** Authoritative non-working state suppresses file-write activity without changing occupancy. */
+  activeDecides?: boolean
 }
 
 export function runningHintFor(provider: AgentProvider, derived: DerivedSessionState | undefined, lastEventAt: number | null, now: number): RunningHint | null {
   const cursor = provider === 'cursor'
   const quiet: RunningHint | null = cursor ? { running: false, active: false, foreign: false, decides: true } : null
   if (!derived) return null
+  // The state deriver already arbitrates fresh work, waits and completed turns.
+  // A transcript flush after Stop must not turn an idle/waiting badge back to
+  // working. Keep ownership/open-window evidence intact: this is display only.
+  if ((derived.state_source === 'hook' || derived.state_source === 'registry') && derived.agent_state !== 'running') {
+    if (cursor) return derived.agent_state === 'waiting'
+      ? { running: true, active: false, foreign: true, decides: true }
+      : quiet
+    return { running: derived.agent_state === 'waiting', active: false, foreign: false, decides: false, activeDecides: true }
+  }
   const inCap = lastEventAt !== null && now - lastEventAt <= HOOK_ACTIVE_CAP_MS && lastEventAt <= now + 5_000
   if (derived.state_source === 'hook') {
-    if (derived.agent_state === 'waiting') return { running: true, active: false, foreign: cursor, decides: cursor }
     if (derived.agent_state === 'running' && inCap) return { running: true, active: true, foreign: cursor, decides: cursor }
     if (derived.agent_state === 'running' && cursor) return { running: true, active: false, foreign: true, decides: true }
     return quiet
@@ -604,6 +617,32 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
   }
 })
 
+// Authenticated by index.ts's shared /api gate. Neither the request nor the response
+// carries a filesystem path; the resolver reauthorizes exact transcript membership.
+agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:imageId/content', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  res.set('X-Content-Type-Options', 'nosniff')
+  const provider = asProvider(String(req.params.provider ?? '').toLowerCase())
+  if (!provider || (req.query.variant !== undefined && req.query.variant !== 'thumb' && req.query.variant !== 'phone')) {
+    res.status(404).json({ error: 'image_not_found' }); return
+  }
+  try {
+    const content = await agentSessionOutputImages.content(provider, String(req.params.sessionId), String(req.params.imageId), req.query.variant === 'thumb' ? 'thumb' : 'phone')
+    if (content.status !== 'ok') {
+      res.status(content.status === 'not_found' ? 404 : 503).json({ error: content.status === 'not_found' ? 'image_not_found' : 'image_unavailable' }); return
+    }
+    res.type('image/jpeg')
+    res.sendFile(content.path, err => {
+      if (!err) return
+      if (!res.headersSent) res.status(503).json({ error: 'image_unavailable' })
+      else res.destroy()
+    })
+  } catch {
+    console.warn('[agent-sessions] output image unavailable')
+    res.status(503).json({ error: 'image_unavailable' })
+  }
+})
+
 agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res) => {
   res.set('Cache-Control', 'private, no-store')
   const provider = asProvider(String(req.params.provider ?? '').toLowerCase())
@@ -647,7 +686,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     let recentTurns: RecentTurnsRead | null = null
     if (turnsWanted !== null) {
       try {
-        recentTurns = await readRecentSessionTurns(provider, found, turnsWanted)
+        const images = await agentSessionOutputImages.context(provider, sessionId, found)
+        recentTurns = await readRecentSessionTurns(provider, found, turnsWanted, undefined, images.project)
       } catch (error) {
         console.warn(`[agent-sessions] recent turns failed provider=${provider}: ${error instanceof Error ? error.message : error}`)
       }

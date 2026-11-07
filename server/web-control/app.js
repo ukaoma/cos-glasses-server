@@ -101,8 +101,10 @@
     var ctrl = limit && window.AbortController ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, limit) : null;
     return fetch(path, { method: method, headers: headers, credentials: 'same-origin', body: body, signal: ctrl ? ctrl.signal : undefined }).then(function (res) {
-      if (timer) clearTimeout(timer);
+      // Blob bodies keep their deadline after headers: a stalled download must release its queue slot.
+      if (timer && o.responseType !== 'blob') clearTimeout(timer);
       if (res.status === 401 && path.indexOf('/api/web-session/') !== 0) { showAuth(); var gone = new Error('Signed out. Connect this browser again.'); gone.status = 401; throw gone; }
+      if (o.responseType === 'blob' && res.ok) return res.blob();
       return res.text().then(function (text) {
         var data = {};
         try { data = text ? JSON.parse(text) : {}; } catch (_e) { data = {}; }
@@ -118,6 +120,9 @@
         }
         return data;
       });
+    }).then(function (value) {
+      if (timer) clearTimeout(timer);
+      return value;
     }, function (err) {
       if (timer) clearTimeout(timer);
       if (err && err.name === 'AbortError' && ctrl && ctrl.signal.aborted) {
@@ -215,7 +220,7 @@
     var railPane = r.pane === 'usage' ? 'sessions' : r.pane;
     document.querySelectorAll('.rail-btn,.rail-settings').forEach(function (b) { if (b.getAttribute('data-pane') === railPane) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     if (state.stream && !(r.pane === 'sessions' && r.args.length === 2)) { state.stream.close(); state.stream = null; }
-    if (!(r.pane === 'sessions' && r.args.length === 2)) { clearInterval(state.turnPoll); if (state.reading) clearInterval(state.reading.heldTimer); state.reading = null; }
+    if (!(r.pane === 'sessions' && r.args.length === 2)) { readerImagesStop($('session-turns')); clearInterval(state.turnPoll); if (state.reading) clearInterval(state.reading.heldTimer); state.reading = null; }
     if (r.pane !== 'meetings' && state.livePoll) { clearInterval(state.livePoll); state.livePoll = null; }
 
     var reading = r.args.length > 0 && !isTabRoute(r.args);
@@ -292,6 +297,7 @@
 
   // ── auth ────────────────────────────────────────────────
   function showAuth(message) {
+    readerImagesStop($('session-turns')); readerImagesStop($('ta-last'));
     var alreadyOpen = !$('auth-gate').classList.contains('hidden');
     $('app-shell').classList.add('hidden');
     $('auth-gate').classList.remove('hidden');
@@ -1607,6 +1613,7 @@
   function openSession(provider, id) {
     var reader = $('session-reader');
     if (!provider || !id) return;
+    readerImagesStop($('session-turns'));
     if (state.stream) { state.stream.close(); state.stream = null; }
     clearInterval(state.turnPoll);
     if (state.reading) { clearInterval(state.reading.heldTimer); clearInterval(state.reading.feedTimer); }
@@ -1645,6 +1652,7 @@
           '<p class="sx-caution hidden" id="session-caution"></p>' +
           '<div id="session-queue"></div>' +
         '</div>';
+      readerImagesMount($('session-turns'), r);
       setLive({ working: !!d.running_active });
       paintReaderFiles();
       // The Mac's answer about files may not be in yet: ask once, then draw the clip.
@@ -1832,11 +1840,12 @@
     paintActivity(r);
   }
   function refreshTurns(provider, id) {
+    var reading = state.reading;
     api(sessionPath(provider, id, '?turns=' + SX_TURNS)).then(function (d) {
       var r = state.reading;
-      if (!r || r.id !== id) return;
+      if (!r || r !== reading || r.id !== id || r.provider !== provider) return;
       var turns = Array.isArray(d && d.recent_turns) ? d.recent_turns : [];
-      var box = $('session-turns'); if (box) sxMergeTurns(box, r.turns || [], turns, d);
+      var box = $('session-turns'); if (box) { sxMergeTurns(box, r.turns || [], turns, d); readerImagesMount(box, r); }
       // The header keeps the subtitle it opened with: a rewrap above the turns would move them.
       r.detail = d; r.turns = turns; r.more = d.recent_turns_more === true;
       renderHeld(r);
@@ -2333,6 +2342,36 @@
     });
   }
 
+  // Output previews are separate from composer attachments. Only the DTO fields reach the lazy viewer.
+  function readerImagesHtml(turn) {
+    var images = turn && Array.isArray(turn.outputImages) ? turn.outputImages.filter(function (x) {
+      return x && /^ai_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable');
+    }).map(function (x) { return { id: x.id, label: String(x.label || 'Output image').slice(0, 180), state: x.state, reason: x.reason }; }) : [];
+    return images.length ? '<div data-reader-images="' + esc(JSON.stringify(images)) + '"><p class="rm-status" role="status">Loading image previews…</p></div>' : '';
+  }
+  function readerImagesStop(host) {
+    if (!host) return;
+    host.__cosImageOwner = null;
+    if (window.COSWeb.readerMedia) window.COSWeb.readerMedia.unmount(host);
+  }
+  function readerImagesMount(host, r) {
+    if (!host || !r) return;
+    if (!host.querySelectorAll('[data-reader-images]').length) { readerImagesStop(host); return; }
+    var owner = host.__cosImageOwner = {};
+    ensurePane('readerMedia', 4000).then(function (kit) {
+      if (host.__cosImageOwner !== owner || host.isConnected === false) return;
+      if (!kit) throw new Error('Image previews could not load.');
+      kit.mount(host, r.provider, r.id);
+    }).catch(function () {
+      if (host.__cosImageOwner !== owner || host.isConnected === false) return;
+      host.querySelectorAll('[data-reader-images]').forEach(function (slot) {
+        slot.textContent = 'Image previews could not load. ';
+        var retry = document.createElement('button'); retry.type = 'button'; retry.className = 'link-btn'; retry.textContent = 'Retry images';
+        retry.addEventListener('click', function () { readerImagesMount(host, r); }); slot.appendChild(retry);
+      });
+    });
+  }
+
   // Copy session (Control's Kickstart brief, HelperSources/main.swift claudeKickstartCopy). Control
   // builds it from the Mac's transcript; the web builds it from the turns the server serves and
   // the session's first prompt, so it keeps the original request and the newest context.
@@ -2465,7 +2504,7 @@
   // One turn's identity, for telling which turns a refresh brought that the page already shows.
   function sxTurnSig(t) {
     var text = String(t.text || t.content || '').trim();
-    return (String(t.role || '').toLowerCase() === 'user' ? 'u' : 'a') + '|' + (t.at || '') + '|' + text.length + '|' + text.slice(0, 48);
+    return (String(t.role || '').toLowerCase() === 'user' ? 'u' : 'a') + '|' + (t.at || '') + '|' + text.length + '|' + text.slice(0, 48) + '|' + readerImagesHtml(t);
   }
   function sxTurnHtml(t) {
     var role = String(t.role || '').toLowerCase() === 'user' ? 'user' : 'assistant';
@@ -2474,7 +2513,7 @@
     var when = at ? (Date.now() - at.getTime() < 86400000 ? clock(at) : sxShortDate(at)) : '';
     return '<div class="turn ' + role + ' sx-turn" data-sig="' + esc(sxTurnSig(t)) + '"><span class="who"><span>' + (role === 'user' ? 'YOU' : 'ASSISTANT') + '</span>' +
       (when ? '<span class="sx-turn-when">' + esc(when) + '</span>' : '') + '</span>' +
-      (role === 'user' ? '<div class="sx-plain">' + esc(text) + '</div>' : '<div class="sx-md">' + sxMd(text) + '</div>') + '</div>';
+      (role === 'user' ? '<div class="sx-plain">' + esc(text) + '</div>' : '<div class="sx-md">' + sxMd(text) + '</div>' + readerImagesHtml(t)) + '</div>';
   }
   // A refresh never rebuilds what you are reading (Miles, /qa: "start to scroll and then it reloads
   // the section"). The server's window slides as a session grows, so the turns the page already
@@ -4488,6 +4527,7 @@
     if (e.target.id === 'sessions-q' && !e.target.value.trim()) renderSessionGroups(state.sessions);
   });
   document.addEventListener('keydown', function (e) {
+    if (window.COSWeb.readerMedia && window.COSWeb.readerMedia.isOpen()) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openAsk(); return; }
     if (e.key === 'Escape' && !$('ask-sheet').classList.contains('hidden')) { closeAsk(); return; }
     if (e.key === 'Escape' && !$('section-menu').classList.contains('hidden')) { closeMenu(); $('section-btn').focus(); return; }
@@ -4602,6 +4642,7 @@
     newKey: newTurnKey,
     probe: function (r) { return sxProbeAttach(r); },
     path: sessionPath, answer: apiAnswer,
+    imageHtml: readerImagesHtml, imagesMount: readerImagesMount, imagesStop: readerImagesStop,
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
     parkCopy: function (p) { return SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
