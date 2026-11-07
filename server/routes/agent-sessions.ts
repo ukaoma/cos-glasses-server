@@ -256,6 +256,13 @@ export function withRunning<T extends { session_id: string }>(entry: T, scan: Oc
  *                                             and an Esc with no Stop looks the same, QA W8);
  *                                             Claude and Codex: no hint (occupancy answers)
  *   hook waiting                               running, not active
+ *   hook or registry idle (Claude, Codex)      not active even if the file was just written
+ *                                             (a flush after Stop), unless the transcript's
+ *                                             newest record is more than
+ *                                             TRANSCRIPT_AFTER_IDLE_GRACE_MS past the idle
+ *                                             signal: then no hint (occupancy freshness
+ *                                             answers, a hookless restarted turn)
+ *   hook or registry waiting, ended, failed    not active, ownership kept (Cursor: decided)
  *   Codex rollout turn open inside the cap     running, active (no Codex hooks yet)
  *   Cursor, any other hook state               not running, not active (`decides`)
  *
@@ -278,7 +285,15 @@ export interface RunningHint {
   activeDecides?: boolean
 }
 
-export function runningHintFor(provider: AgentProvider, derived: DerivedSessionState | undefined, lastEventAt: number | null, now: number): RunningHint | null {
+/**
+ * A transcript write this long after the idle signal is new work, not the flush that
+ * trails a Stop. Claude writes its last records around the Stop hook; a turn that wakes
+ * later (a background-task notification restarts a text-only turn, with no prompt and no
+ * tool call, so no hook fires until its Stop) writes well past this.
+ */
+export const TRANSCRIPT_AFTER_IDLE_GRACE_MS = 5_000
+
+export function runningHintFor(provider: AgentProvider, derived: DerivedSessionState | undefined, lastEventAt: number | null, now: number, transcriptAt: number | null = null): RunningHint | null {
   const cursor = provider === 'cursor'
   const quiet: RunningHint | null = cursor ? { running: false, active: false, foreign: false, decides: true } : null
   if (!derived) return null
@@ -286,6 +301,15 @@ export function runningHintFor(provider: AgentProvider, derived: DerivedSessionS
   // A transcript flush after Stop must not turn an idle/waiting badge back to
   // working. Keep ownership/open-window evidence intact: this is display only.
   if ((derived.state_source === 'hook' || derived.state_source === 'registry') && derived.agent_state !== 'running') {
+    // An idle signal OLDER than the transcript's newest real record is not the latest
+    // word: a turn restarted with no hook (see TRANSCRIPT_AFTER_IDLE_GRACE_MS) is writing.
+    // Fall back to occupancy freshness. Idle only: waiting keeps `running: true` and its
+    // question; ended and failed stay settled. Cursor's transcript has no clock.
+    if (!cursor && derived.agent_state === 'idle' && transcriptAt !== null) {
+      const since = Date.parse(derived.state_since)
+      const signalAt = Math.max(Number.isFinite(since) ? since : 0, derived.state_source === 'hook' ? lastEventAt ?? 0 : 0)
+      if (transcriptAt > signalAt + TRANSCRIPT_AFTER_IDLE_GRACE_MS) return null
+    }
     if (cursor) return derived.agent_state === 'waiting'
       ? { running: true, active: false, foreign: true, decides: true }
       : quiet
@@ -548,7 +572,7 @@ agentSessionsRouter.get('/agent-sessions', async (req, res) => {
         const derived = derivedById.get(row.session_id)
         const signal = signalFor(row.session_id)
         const facts = rolloutById.get(row.session_id) ?? null
-        const hint = runningHintFor(row.provider, derived, hintClock(signal, derived, facts), now)
+        const hint = runningHintFor(row.provider, derived, hintClock(signal, derived, facts), now, clocks.get(row.session_id) ?? null)
         return {
           ...withRunning(toEntry(row, activity[index], derived, queuedOf(row.provider, row.session_id)), running, hint),
           ...cursorActivityFields(row.provider, signal),
@@ -632,7 +656,12 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:ima
       res.status(content.status === 'not_found' ? 404 : 503).json({ error: content.status === 'not_found' ? 'image_not_found' : 'image_unavailable' }); return
     }
     res.type('image/jpeg')
-    res.sendFile(content.path, err => {
+    // `send` defaults to `dotfiles: 'ignore'` and applies it to the WHOLE absolute path
+    // when no `root` is given, so a media root under `~/.cos-glasses/data` 404'd on
+    // every default install (see the header of lib/send-audio.ts). 'allow' is safe: the
+    // dot component is our data home, and the resolver above returned an exact,
+    // containment-checked path with no caller-supplied segments.
+    res.sendFile(content.path, { dotfiles: 'allow' }, err => {
       if (!err) return
       if (!res.headersSent) res.status(503).json({ error: 'image_unavailable' })
       else res.destroy()
@@ -724,7 +753,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       derived = deriveCodexRow(parsed.session_id, running.occupied.has(parsed.session_id), rollout, now, false)
     }
     const signal = signalFor(parsed.session_id)
-    const hint = runningHintFor(provider, derived, hintClock(signal, derived, rollout), now)
+    const hint = runningHintFor(provider, derived, hintClock(signal, derived, rollout), now, activityClockMs(st.mtimeMs, activity))
     res.json({
       ...withRunning({ session_id: parsed.session_id }, running, hint),
       ...derivedRowFields(derived),

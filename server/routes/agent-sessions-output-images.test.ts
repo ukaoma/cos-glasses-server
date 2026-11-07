@@ -1,6 +1,6 @@
 import express from 'express'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { Server } from 'node:http'
@@ -8,22 +8,26 @@ import { requireApiToken } from '../lib/api-auth.js'
 const content = vi.hoisted(() => vi.fn())
 vi.mock('../lib/agent-session-output-images.js', () => ({ agentSessionOutputImages: { content, context: vi.fn() } }))
 import { agentSessionsRouter } from './agent-sessions.js'
-let server: Server, base: string, root: string
+let server: Server, base: string, tmp: string, root: string
 const path = '/api/agent-sessions/claude/session/output-images/ai_' + 'a'.repeat(64) + '/content'
 beforeAll(async () => {
-  root = mkdtempSync(join(tmpdir(), 'cos-preview-route-'))
+  // The real media root lives under `~/.cos-glasses/data`, a dot directory. `mkdtemp`
+  // alone has no dot component and cannot reproduce `send`'s dotfiles 404.
+  tmp = mkdtempSync(join(tmpdir(), 'cos-preview-route-'))
+  root = join(tmp, '.cos-glasses', 'data'); mkdirSync(root, { recursive: true })
   const app = express(); app.use('/api', requireApiToken('test-preview-token')); app.use('/api', agentSessionsRouter)
   server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   const address = server.address(); base = typeof address === 'object' && address ? `http://127.0.0.1:${address.port}` : ''
 })
-afterAll(async () => { await new Promise<void>(r => server.close(() => r())); rmSync(root, { recursive: true, force: true }) })
+afterAll(async () => { await new Promise<void>(r => server.close(() => r())); rmSync(tmp, { recursive: true, force: true }) })
 beforeEach(() => content.mockReset())
 const request = (suffix = '', token = true) => fetch(base + path + suffix, { headers: token ? { 'X-COS-Token': 'test-preview-token' } : {} })
 describe('authenticated session output-image route', () => {
   it('requires auth before image resolution', async () => {
     expect((await request('', false)).status).toBe(401); expect(content).not.toHaveBeenCalled()
   })
-  it('serves only resolved normalized JPEGs with private caching, through the literal image route', async () => {
+  it('serves only resolved normalized JPEGs with private caching, through the literal image route (media root inside a dot directory)', async () => {
+    expect(root).toContain('/.cos-glasses/')
     const file = join(root, 'normalized.jpg'); writeFileSync(file, 'JPEG fixture')
     content.mockResolvedValue({ status: 'ok', path: file, mime: 'image/jpeg', bytes: 12 })
     const response = await request('?variant=thumb')

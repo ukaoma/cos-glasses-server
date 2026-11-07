@@ -6,7 +6,7 @@ import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { constants, realpathSync, statSync } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { agentSessionRoots, findAgentSessionFile, isWrapperPrompt, latestAssistantReply, LATEST_REPLY_MAX, type AgentProvider } from './agent-session-store.js'
 import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './attached-workspace.js'
 import { readComposerFacts } from './cursor-session-model.js'
@@ -18,7 +18,12 @@ export interface SessionOutputImage {
   id: string
   label: string
   state: 'available' | 'unavailable'
-  reason?: 'outside_workspace' | 'missing' | 'unsupported' | 'unavailable'
+  /**
+   * `outside_workspace`: permanent (the path leaves the workspace, or the workspace is a broad
+   * root that is never eligible). `unavailable`: the workspace lookup failed this time; the
+   * content route re-resolves it, so a retry can succeed.
+   */
+  reason?: 'outside_workspace' | 'unavailable'
 }
 export const SESSION_OUTPUT_IMAGE_ID = /^ai_[a-f0-9]{64}$/
 export const OUTPUT_IMAGES_PER_TURN = 5
@@ -37,6 +42,8 @@ export interface OutputImageDeps {
   store(): PreviewStore
   secret: Buffer
   now(): number
+  /** The home directory the broad-root denylist is built from (tests inject a scratch home). */
+  home?(): string
 }
 
 function assistantText(provider: AgentProvider, row: Record<string, unknown>): string | null {
@@ -123,12 +130,28 @@ function inside(root: string, path: string): boolean {
   const rel = relative(root, path)
   return rel !== '' && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel)
 }
-function canonicalRoot(path: string | null): string | null {
+/**
+ * Exact roots that are never a session workspace, however a session recorded them. EXACT
+ * match only: `~/Documents/GitHub/x` stays eligible while `~/Documents` itself is not. Each
+ * entry is compared both as written and canonicalized, since the workspace is realpath'd.
+ */
+export function broadWorkspaceRoots(home = homedir()): Set<string> {
+  const raw = ['/', '/Users', '/tmp', '/private/tmp', '/var', '/private/var', '/Volumes', home,
+    join(home, 'Documents'), join(home, 'Library'), join(home, '.cos-glasses')]
+  const out = new Set<string>()
+  for (const entry of raw) {
+    out.add(entry)
+    try { out.add(realpathSync(entry)) } catch { /* absent on this Mac: the literal still counts */ }
+  }
+  return out
+}
+/** A canonical workspace root, `'broad'` for a denied exact root, or null when the lookup failed. */
+function canonicalRoot(path: string | null, home: string): string | 'broad' | null {
   if (!path || !isAbsolute(path)) return null
   try {
     const root = realpathSync(path)
-    const broad = ['/', '/Users', '/tmp', '/private/tmp', '/var', '/private/var', homedir()]
-    if (broad.includes(root) || !statSync(root).isDirectory()) return null
+    if (broadWorkspaceRoots(home).has(root)) return 'broad'
+    if (!statSync(root).isDirectory()) return null
     return root
   } catch { return null }
 }
@@ -144,7 +167,10 @@ export class AgentSessionOutputImages {
   async context(provider: AgentProvider, sessionId: string, transcript: string): Promise<PreviewContext> {
     let workspace: string | null = null
     try { workspace = await this.deps.workspace(provider, sessionId, transcript) } catch { /* unavailable, words still load */ }
-    const root = canonicalRoot(workspace)
+    const canonical = canonicalRoot(workspace, this.deps.home?.() ?? homedir())
+    const root = canonical === 'broad' ? null : canonical
+    // A failed lookup is temporary and the content route re-resolves it; a broad root is not.
+    const lookupFailed = canonical === null
     const sources = new Map<string, Source>()
     const transcriptKey = digest(resolve(transcript))
     const project: SessionTurnProjection = (p, row, turn) => {
@@ -161,7 +187,7 @@ export class AgentSessionOutputImages {
       const refs = candidates.slice(0, OUTPUT_IMAGES_PER_TURN).map((c, ordinal) => {
         const id = 'ai_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, ordinal, c.source])).digest('hex')
         const allowed = root !== null && inside(root, resolve(root, c.source))
-        const descriptor: SessionOutputImage = { id, label: c.label, state: allowed ? 'available' : 'unavailable', ...(!allowed ? { reason: 'outside_workspace' as const } : {}) }
+        const descriptor: SessionOutputImage = { id, label: c.label, state: allowed ? 'available' : 'unavailable', ...(!allowed ? { reason: lookupFailed ? 'unavailable' as const : 'outside_workspace' as const } : {}) }
         sources.delete(id); sources.set(id, { candidate: c, root, descriptor })
         while (sources.size > (SESSION_TURNS_MAX + 1) * OUTPUT_IMAGES_PER_TURN) sources.delete(sources.keys().next().value!)
         return descriptor

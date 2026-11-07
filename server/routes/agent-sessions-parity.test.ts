@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { agentSessionsRouter, runningHintFor, withRunning } from './agent-sessions.js'
+import { agentSessionsRouter, runningHintFor, TRANSCRIPT_AFTER_IDLE_GRACE_MS, withRunning } from './agent-sessions.js'
 import { __resetSessionHooksForTests, sessionSignalStore, deriveForRow } from '../lib/session-hooks-runtime.js'
 import { HOOK_ACTIVE_CAP_MS, __resetCodexRolloutStateForTests, codexRolloutReads } from '../lib/codex-rollout-state.js'
 import { resetLockSnapshot } from '../lib/occupancy-probes.js'
@@ -120,6 +120,39 @@ describe('runningHintFor (pure)', () => {
     expect(withRunning({ session_id: id }, scan, null).running_active).toBe(true)
     // A real new active turn can become working again.
     expect(withRunning({ session_id: id }, scan, runningHintFor('claude', derived('running', 'hook'), now, now)).running_active).toBe(true)
+  })
+
+  it('a transcript write newer than the idle signal still reads working (hookless restarted turn); a flush after Stop does not', () => {
+    const id = 'restarted-thread'
+    const scan = { occupied: new Map([[id, { threadId: id, owners: 1, foreignOwners: 0, activeRecently: true }]]), degraded: false }
+    const stopAt = now - 60_000
+    const idleAt = (source: 'hook' | 'registry'): DerivedSessionState =>
+      ({ agent_state: 'idle', state_source: source, state_since: new Date(stopAt).toISOString(), deadScans: 0, deadSince: null })
+    for (const provider of ['claude', 'codex'] as const) {
+      for (const source of ['hook', 'registry'] as const) {
+        const signalClock = source === 'hook' ? stopAt : null
+        // A background-task notification restarted a text-only turn: no prompt, no tool, no hook.
+        const writing = withRunning({ session_id: id }, scan, runningHintFor(provider, idleAt(source), signalClock, now, now - 1000))
+        expect(writing).toMatchObject({ running: true, running_active: true })
+        // A write before, at, or within the grace after the idle signal (the records that
+        // finish the turn) stays idle. Only strictly past signal + grace reads working.
+        for (const at of [stopAt - 1000, stopAt, stopAt + TRANSCRIPT_AFTER_IDLE_GRACE_MS]) {
+          const flushed = withRunning({ session_id: id }, scan, runningHintFor(provider, idleAt(source), signalClock, now, at))
+          expect(flushed).toMatchObject({ running: true, running_active: false })
+        }
+        expect(withRunning({ session_id: id }, scan, runningHintFor(provider, idleAt(source), signalClock, now, stopAt + TRANSCRIPT_AFTER_IDLE_GRACE_MS + 1)).running_active).toBe(true)
+        // Waiting keeps running:true and stays not active, whatever the file says.
+        const waiting = { ...idleAt(source), agent_state: 'waiting' as const }
+        expect(withRunning({ session_id: id }, scan, runningHintFor(provider, waiting, signalClock, now, now - 1000))).toMatchObject({ running: true, running_active: false })
+        for (const settled of ['ended', 'failed'] as const) {
+          expect(withRunning({ session_id: id }, scan, runningHintFor(provider, { ...idleAt(source), agent_state: settled }, signalClock, now, now - 1000)).running_active).toBe(false)
+        }
+      }
+    }
+    // A hook event newer than state_since is the signal's clock too.
+    expect(runningHintFor('claude', idleAt('hook'), now - 2000, now, now - 1000)).toMatchObject({ activeDecides: true, active: false })
+    // Cursor stays decided by its hooks.
+    expect(runningHintFor('cursor', idleAt('hook'), stopAt, now, now - 1000)).toEqual({ running: false, active: false, foreign: false, decides: true })
   })
 
   it('an attached turn overrides a real stopped derivation before hint and wire stamping, then settles back to idle', () => {
@@ -261,6 +294,26 @@ describe('Claude: hook evidence counts as active for five minutes (plan 1.2)', (
     sessionSignalStore.apply(env(ID, 'claude', now, 'UserPromptSubmit', { prompt: 'New work' }))
     const working = await rowAndDetail(base, 'claude', ID)
     for (const r of [working.row, working.detail]) expect(r).toMatchObject({ agent_state: 'running', state_source: 'hook', running: true, running_foreign: true, running_active: true })
+  })
+
+  it('a held transcript written well after the last Stop reads working on HTTP list and detail (hookless restarted turn)', async () => {
+    claudeHome(500)
+    process.env.COS_CLAUDE_SESSIONS_ENABLED = '0'
+    const pid = 987654, procStart = 'Sat Aug 16 10:00:00 2026', startMs = Date.UTC(2026, 7, 16, 10, 0, 0)
+    const dir = process.env.COS_CLAUDE_SESSIONS_DIR!, socket = join(dir, 'fixture.sock')
+    write(socket, ['fixture'])
+    write(join(dir, `${pid}.json`), [JSON.stringify({ pid, sessionId: ID, procStart, kind: 'interactive',
+      entrypoint: 'claude-desktop', cwd: dirname(dir), startedAt: 1, messagingSocketPath: socket })])
+    const real = occupancyProbes.realOccupancyProbes
+    vi.spyOn(occupancyProbes, 'realOccupancyProbes').mockImplementation(ledger => ({ ...real(ledger),
+      isAlive: candidate => candidate === pid, processStartMs: candidate => candidate === pid ? startMs : null,
+    }))
+    const now = Date.now()
+    sessionSignalStore.apply(env(ID, 'claude', now - 61_000, 'UserPromptSubmit', { prompt: 'Start a background task' }))
+    sessionSignalStore.apply(env(ID, 'claude', now - 60_000, 'Stop'))
+    const { row, detail } = await rowAndDetail(await server(), 'claude', ID)
+    // The badge state stays what the hooks said; only the working hint follows the newer write.
+    for (const r of [row, detail]) expect(r).toMatchObject({ agent_state: 'idle', state_source: 'hook', running: true, running_active: true })
   })
 
   it('Esc with no Stop decays: 6 minutes after the last event it is not active', async () => {

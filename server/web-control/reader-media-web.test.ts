@@ -112,7 +112,7 @@ describe('native output images through the real viewer and app transport', () =>
     t.expireTimers(); await flush()
     expect(t.calls.slice(0, 2).every(c => c.options.signal.aborted)).toBe(true)
     expect(t.calls).toHaveLength(3); expect(t.made).toHaveLength(1); expect(t.timers.size).toBe(0)
-    expect(t.host.querySelectorAll('button').filter(b => b.textContent === 'Retry image' && !b.hidden)).toHaveLength(2)
+    expect(t.host.querySelectorAll('button').filter((b: { textContent: string; hidden: boolean }) => b.textContent === 'Retry image' && !b.hidden)).toHaveLength(2)
     const api = load([stalled]); const result = api.W.api('/api/image', { responseType: 'blob' }).catch((e: any) => e)
     await flush(); api.expireTimers(); expect(await result).toMatchObject({ code: 'timeout' })
   })
@@ -140,6 +140,9 @@ describe('native output images through the real viewer and app transport', () =>
     const t = load(); await t.mount([{ ...DTO, state: 'unavailable', reason: 'outside_workspace' }])
     expect(t.calls).toEqual([]); expect(t.host.textContent).toContain('outside the session workspace'); expect(named(t.host, 'Retry image').hidden).toBe(true)
     t.hooks.stop(t.host); await t.mount([{ ...DTO, state: 'unavailable', reason: 'unavailable' }])
+    // A failed workspace lookup is temporary, never worded as outside the workspace, and keeps Retry.
+    expect(t.host.textContent).toContain('temporarily unavailable'); expect(t.host.textContent).not.toContain('outside the session workspace')
+    expect(named(t.host, 'Retry image').hidden).toBe(false)
     expect(t.calls).toEqual([]); named(t.host, 'Retry image').click(); await flush(); expect(t.calls).toHaveLength(1)
   })
   it('404 requires a refreshed session, not an endless retry of an expired id', async () => {

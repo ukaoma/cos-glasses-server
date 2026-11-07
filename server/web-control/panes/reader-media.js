@@ -5,8 +5,9 @@
   if (!W) return;
   var scopes = new Map(), viewer = null, requests = [], activeRequests = 0;
   var ID = /^ai_[a-f0-9]{64}$/;
-  var REASONS = { outside_workspace: 'This image is outside the session workspace.', missing: 'This image is no longer available.',
-    unsupported: 'This image format cannot be previewed.', unavailable: 'This image is not available right now.' };
+  // outside_workspace is permanent. unavailable means the workspace lookup failed this time; the content route re-resolves it.
+  var REASONS = { outside_workspace: 'This image is outside the session workspace.',
+    unavailable: 'This image is temporarily unavailable. Retry in a moment.' };
   var style = document.createElement('style');
   style.textContent = '.rm-item{display:flex;flex-direction:column;gap:6px;max-width:180px}.rm-label,.rm-status{font:12px/1.4 var(--body);color:var(--sub);overflow-wrap:anywhere}.rm-label{color:var(--text)}.rm-item .cx-thumb{cursor:pointer}.rm-view{position:fixed;inset:0;z-index:10000;background:var(--bg,#171717);color:var(--text,#fff);display:flex;flex-direction:column;padding: max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));gap:16px}.rm-view-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.rm-view-label{margin:0;overflow-wrap:anywhere;font:16px/1.4 var(--body)}.rm-view-body{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}.rm-view img{max-width:100%;max-height:100%;object-fit:contain}.rm-viewing{overflow:hidden!important}';
   document.head.appendChild(style);
@@ -144,7 +145,7 @@
         item.retry = button('Retry image', function () { loadThumb(scope, item); }, 'link-btn'); item.retry.hidden = true;
         wrap.appendChild(item.open); wrap.appendChild(element('span', 'rm-label', item.label)); wrap.appendChild(item.status); wrap.appendChild(item.retry); slot.appendChild(wrap);
         if (dto.state === 'available') loadThumb(scope, item);
-        else { item.status.textContent = REASONS[dto.reason] || REASONS.unavailable; item.retry.hidden = dto.reason === 'outside_workspace' || dto.reason === 'unsupported'; }
+        else { item.status.textContent = REASONS[dto.reason] || REASONS.unavailable; item.retry.hidden = dto.reason === 'outside_workspace'; }
       });
     });
   }

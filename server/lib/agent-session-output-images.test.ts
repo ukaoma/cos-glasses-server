@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
-import { AgentSessionOutputImages, assistantImageCandidates, OUTPUT_IMAGES_PER_TURN, OUTPUT_IMAGE_CONCURRENCY, OUTPUT_IMAGE_SCAN_CHARS, SESSION_OUTPUT_IMAGE_ID } from './agent-session-output-images.js'
+import { AgentSessionOutputImages, assistantImageCandidates, broadWorkspaceRoots, OUTPUT_IMAGES_PER_TURN, OUTPUT_IMAGE_CONCURRENCY, OUTPUT_IMAGE_SCAN_CHARS, SESSION_OUTPUT_IMAGE_ID } from './agent-session-output-images.js'
 import { MAX_OUTPUT_ARTIFACT_BYTES } from './image-safety.js'
 import { readRecentSessionTurns, recentSessionTurns, SESSION_TURNS_MAX } from './agent-session-turns.js'
 import type { AgentProvider } from './agent-session-store.js'
@@ -179,6 +179,35 @@ describe('workspace-scoped native image projection and serving', () => {
       expect(t?.outputImages?.[0].state).toBe('unavailable')
     }
     expect(f.ingest).not.toHaveBeenCalled()
+  })
+  it('denies exact broad roots (home, ~/Documents, ~/Library, ~/.cos-glasses, /Volumes) but allows their subfolders', async () => {
+    const f = fixture(), home = join(f.root, 'home')
+    const project = join(home, 'Documents', 'GitHub', 'x')
+    for (const dir of [join(home, 'Library'), join(home, '.cos-glasses'), join(home, 'Desktop'), project]) mkdirSync(dir, { recursive: true })
+    writeFileSync(join(project, 'a.png'), 'project bytes')
+    const descriptor = async (root: string | null) => {
+      const service = new AgentSessionOutputImages({ ...f.deps, workspace: async () => root, home: () => home })
+      const ctx = await service.context('claude', 'session', f.transcript)
+      return ctx.project('claude', row('![x](a.png)'), null)?.outputImages?.[0]
+    }
+    const denied = [home, join(home, 'Documents'), join(home, 'Library'), join(home, '.cos-glasses'), '/', ...(existsSync('/Volumes') ? ['/Volumes'] : [])]
+    for (const root of denied) {
+      expect(broadWorkspaceRoots(home).has(realpathSync(root))).toBe(true)
+      expect(await descriptor(root)).toMatchObject({ state: 'unavailable', reason: 'outside_workspace' })
+    }
+    // Exact-root denial only: a project inside ~/Documents, and an unlisted sibling, stay eligible.
+    expect(await descriptor(project)).toMatchObject({ state: 'available' })
+    expect((await descriptor(project))?.reason).toBeUndefined()
+    expect(await descriptor(join(home, 'Desktop'))).toMatchObject({ state: 'available' })
+    expect(broadWorkspaceRoots(home).has(join(home, 'Documents', 'GitHub'))).toBe(false)
+  })
+  it('a failed workspace lookup is temporarily unavailable (retryable), not outside the workspace', async () => {
+    const f = fixture()
+    for (const workspace of [async () => null, async () => { throw new Error('lookup failed') }, async () => join(f.root, 'gone')]) {
+      const service = new AgentSessionOutputImages({ ...f.deps, workspace })
+      const ctx = await service.context('claude', 'session', f.transcript)
+      expect(ctx.project('claude', row('![x](a.png)'), null)?.outputImages?.[0]).toMatchObject({ state: 'unavailable', reason: 'unavailable' })
+    }
   })
   it('bounds reads before normalization and fails closed on the normalizer error', async () => {
     const f = fixture(), id = (await f.preview())[0].outputImages![0].id
