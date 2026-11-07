@@ -73,6 +73,16 @@ describe('readPetSources', () => {
     expect(pngSize(path.join(dir, 'strip-5.png'))).toEqual({ width: 50, height: 8 })
     expect(pngSize(path.join(dir, 'session-pet-states.json'))).toBeNull()
   })
+  it.runIf(process.platform !== 'win32')('never blocks on a named pipe in place of a strip or the map', () => {
+    const fifoDir = path.join(root, 'fifo')
+    fs.mkdirSync(fifoDir, { recursive: true })
+    execFileSync('/usr/bin/mkfifo', [path.join(fifoDir, 'pipe.png'), path.join(fifoDir, 'session-pet-states.json')])
+    const t = Date.now()
+    expect(pngSize(path.join(fifoDir, 'pipe.png'))).toBeNull()
+    expect(readPetSources(fifoDir)).toEqual({})
+    expect(Date.now() - t).toBeLessThan(1000)
+  })
+
   it('is empty without a state map', () => {
     expect(readPetSources(path.join(root, 'nowhere'))).toEqual({})
     expect(webPetManifest(path.join(root, 'nowhere'))).toEqual({ available: false, poses: {} })

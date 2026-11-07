@@ -40,7 +40,9 @@ export function controlSupportDir(env: NodeJS.ProcessEnv = process.env): string 
 export function pngSize(file: string): { width: number; height: number } | null {
   let fd: number | null = null
   try {
-    fd = fs.openSync(file, 'r')
+    // Non-blocking: a FIFO planted at this path would otherwise hang the whole server (hazard-invariants.test.ts).
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK)
+    if (!fs.fstatSync(fd).isFile()) return null
     const head = Buffer.alloc(24)
     if (fs.readSync(fd, head, 0, 24, 0) < 24) return null
     if (head.readUInt32BE(0) !== 0x89504e47 || head.toString('ascii', 12, 16) !== 'IHDR') return null
@@ -62,7 +64,12 @@ function insideDir(dir: string, name: unknown): string | null {
 /** Read the Mac's pet. Poses with a missing, unreadable or mismatched strip are left out. */
 export function readPetSources(dir: string): Partial<Record<WebPetPose, PetPoseSource>> {
   let map: { poses?: Record<string, { file?: unknown; frames?: unknown; interval?: unknown }> }
-  try { map = JSON.parse(fs.readFileSync(path.join(dir, 'session-pet-states.json'), 'utf8')) } catch { return {} }
+  const mapFile = path.join(dir, 'session-pet-states.json')
+  try {
+    // Only a regular file is read: readFileSync on a FIFO blocks the event loop.
+    if (!fs.statSync(mapFile).isFile()) return {}
+    map = JSON.parse(fs.readFileSync(mapFile, 'utf8'))
+  } catch { return {} }
   const out: Partial<Record<WebPetPose, PetPoseSource>> = {}
   for (const pose of WEB_PET_POSES) {
     const row = map?.poses?.[pose]
@@ -72,6 +79,7 @@ export function readPetSources(dir: string): Partial<Record<WebPetPose, PetPoseS
     if (!file || !Number.isInteger(frames) || frames < 1 || frames > 1000) continue
     let stat: fs.Stats
     try { stat = fs.statSync(file) } catch { continue }
+    if (!stat.isFile()) continue
     const size = pngSize(file)
     if (!size || size.height < 8 || size.width % frames !== 0) continue
     const interval = Number(row.interval)
