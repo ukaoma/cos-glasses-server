@@ -32,6 +32,17 @@ describe('the footer line', () => {
     expect(stripG2TurnFooter(WEB)).toEqual({ text: WORDS, turnId: ID, tag: 'COS-WEB' })
     expect(stripG2TurnFooter(G2)).toEqual({ text: WORDS, turnId: ID, tag: 'COS-G2' })
   })
+  it('fills in the receiving provider when it is known; anything else keeps the placeholder (Codex re-audit of 910eb90)', () => {
+    for (const provider of ['claude', 'codex', 'cursor']) {
+      const f = turnFooter(ID, 'glasses', provider)
+      expect(f).toBe(`[COS-G2 turn ${ID} · verify: operations/scripts/cos_python operations/scripts/verify_g2_turn.py ${ID} --session <your session id> --provider ${provider}]`)
+      expect(stripG2TurnFooter(`${WORDS}\n${f}`)).toEqual({ text: WORDS, turnId: ID, tag: 'COS-G2' })
+      expect(hasFooterShapedLine(f)).toBe(true)
+    }
+    for (const provider of [undefined, null, '', 'gemini', 'Claude', 'claude]']) {
+      expect(turnFooter(ID, 'glasses', provider as string | null | undefined).endsWith('--provider <claude|codex|cursor>]'), String(provider)).toBe(true)
+    }
+  })
   it('only a footer at the very end comes off', () => {
     const middle = `${WORDS}\n${turnFooter(ID, 'web')}\nand more`
     expect(withoutTurnFooter(middle)).toBe(middle)

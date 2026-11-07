@@ -188,6 +188,7 @@ const QUEUED_TURN_REASON_COPY: Readonly<Record<string, string>> = {
   native_target_busy: 'Waiting: another COS turn holds this thread.',
   native_turn_in_progress: 'Waiting: a COS turn is running on this thread.',
   native_target_fenced: 'Waiting: an earlier turn needs a check on your Mac.',
+  footer_line_refused: 'Not sent: it has a line only COS may write.',
 }
 
 /**
