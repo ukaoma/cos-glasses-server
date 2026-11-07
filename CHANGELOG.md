@@ -1,3 +1,38 @@
+## 6.99.30 - Duo layout fixes (private)
+
+2026-11-07. Private build on 6.99.29 (c925353). Server only (Control Web). Works with COS Control 0.5.376 as installed.
+
+Miles tests on an iPhone Duo (folded about 382x678, unfolded about 1430x1000 landscape and 1000x1430 portrait), in Comet as well as Safari, sometimes with a Bluetooth keyboard. Three QA rounds on 6.99.29 (skeptic, design, user canary) found where the layout assumed Safari or a width. Nothing here assumes a browser now: every size comes from what the browser reports.
+
+**Default-on changes:**
+- **Today's session sheet is the visible part of the page, keyboard up or down, in any browser.** Its top and height come from visualViewport (100dvh where there is none), so whatever covers the bottom (an on-screen keyboard, a hardware keyboard's strip, Comet's or Chrome's or Safari's bar) stays below the reply box and Send. Only the dim and the sheet's colour reach on to the physical bottom. This replaces 6.99.29's whole-screen layer with the keyboard closed, which put the composer under a bottom bar the page shows through (IMG_0503's 106 px may be Comet's bar).
+- **A hardware keyboard's strip** (55 to 70 px) with a field in the sheet focused is followed too (light layout: the header stays, the reply box drops the home indicator inset). The 120 px keyboard threshold now applies only with nothing focused.
+- **The sheet refits** on window resize, orientationchange, pageshow, the page coming back into view, and focus moving in or out of a field; a turned screen measures the room for the conversation again.
+- **Pinch zoom** is no inset: one shared reading of the visible viewport (Today's sheet and the question card's footer), with the layout height kept from before the zoom.
+- **Every text field is 16 px on a touch screen at every width** (no zoom on focus), and **below 600 px every .cx-btn and .field is at least 44 px**; on touch the small controls the canary measured (nav, switches, chip remove, Retry, camera, clip, Send, question steps, calendar days) reach 44 px.
+- **Return sends only with a keyboard and a fine pointer** (`(hover: hover) and (pointer: fine)`), never mid-composition. On the unfolded Duo, Return is a new line.
+- **"Could not reach COS on your Mac. Check that it is awake and on Tailscale, then try again."** replaces the browser's own "Failed to fetch" or "Load failed" everywhere (api() and the Sessions reader's transport), code `unreachable`.
+- **Server status at once:** a request that never reaches the Mac, or a 502, marks it down; any answer marks it up. The rail's server line, an open session sheet ("Your Mac is not answering. This is the last state it sent.") and the question cards (Submit, Allow and Deny wait, with the reason) follow immediately, not on the five-minute check.
+- **The session card's one state uses the Mac's clock** for this page's own moments (a write gate answer, a Stop), learned from each answer's Date header, so a phone a minute off no longer shows Idle over a fresher Working. A probe that never answers gives up after 15 s, so a busy gate is always asked again.
+- **Layout breadcrumbs** go to the existing client diagnostics log (`POST /api/diag/client`, `event: web.layout`; 10 MB with one rotation, 30 lines per 10 s): on opening the sheet and on each keyboard change, the browser family (Comet, Safari, Chrome, CriOS, Firefox), layout and visible heights, offsetTop, zoom, orientation and the sheet's state. Numbers only; never the user agent string, text or ids; at most 40 a page load.
+- **Folded, a waiting question is one line** ("1 question for you. Answer") until tapped, instead of a full card over every pane. Its copy on the page hides while Today's sheet shows it.
+- **Question picks and Other words survive a reload** (this tab only), and typed Other words go into every copy of the card.
+- **A refused or expired queued message** shows "Not sent: <reason>" in Today's sheet for that session and a "Not sent" chip on its Sessions row.
+- **Five files no longer push the reply box off the sheet:** the chips scroll in a capped box (one row with the keyboard up).
+- **Light-mode contrast:** `--tertiary` #6e675d (was #8b8378, 3.29:1), a day with nothing to open in --sub, provider badge words about 25 to 30% darker. Dark mode unchanged.
+- **Today with the Mac not answering** shows one row, "Your Mac is not answering. Try again.", with no empty gap above it.
+- **Plain dates** ("Today", "Nov 7") on Meetings and Speakers rows; no raw thread ids ("t1") on Threads rows.
+- **Settings and Dictation stop at 720 px** on the unfolded Duo; prose lines at about 68 characters.
+
+**Also**
+- Back from a tab opened inside the sheet no longer lands on a dead entry (a session opened off the pet's list unwinds its list entry first), and the sheet's own Back steps stop waiting after 700 ms, so they can never swallow a real Back.
+- The live clock and the turn watch skip a hidden page (the watch's three minutes count only visible time); back from the back-forward cache, the sheet and the Sessions reader open their live stream again and read the session again.
+- 100vh to 100dvh with a 100vh fallback (Messages, Meetings, Memories, the Ask sheet). The full rail needs a 721 px tall window too, the same clause as the desktop step.
+- `[hidden]` always hides ("Retry image" showed under loaded images). The attachment limits line wraps inside its row. Under 430 px the Sessions reader's words get their own row above Fork, the clip and Send. With a keyboard up, the question card's footer scrolls with the card.
+- Removed the unread `--ta-kb` variable; comments now give the Duo's real sizes and assume no browser.
+
+**Tests:** duo-layout-630-web.test.ts (new, 38) and today-actions.test.ts (the layer, the reply box and the backdrop worked out from the stylesheet and the page's variables for Safari, Chrome iOS, Comet 56 to 110 px bars, a 60 px strip, the keyboard, a panned page, pinch zoom 1.5, rotation and five files; history, hidden timers, server down, refused messages, question cards). 73 mutations, each landed exactly once from a green baseline, all killed (six first survived and got their own test).
+
 ## 6.99.29 - Verified glasses and phone turns carry a footer; Control Web turns are recorded, not yet vouched; one state on the session card (private)
 
 2026-11-07. Private build on 6.99.28 (642921b). Server only. Works with COS Control 0.5.376 as installed.
