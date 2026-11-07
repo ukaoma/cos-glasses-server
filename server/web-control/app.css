@@ -389,9 +389,6 @@ select.field {
 .speaker-row audio { width: 100%; height: 40px; margin-top: 8px; grid-column: 1 / -1; }
 .speaker-row .capture-row { grid-column: 1 / -1; margin-top: 8px; }
 
-/* Memories: the native Memories page, hosted as-is. */
-.pane.flush { max-width: none; margin: -4px calc(-1 * (var(--gutter) + var(--safe-right))) 0 calc(-1 * (var(--gutter) + var(--safe-left))); }
-.memories-frame { display: block; width: 100%; height: calc(100dvh - var(--topbar-h) - var(--safe-top)); border: 0; background: var(--page); }
 
 /* Ask sheet (⌘K on desktop) */
 .sheet-backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(23, 18, 14, 0.45); display: flex; align-items: flex-start; justify-content: center; animation: fade 160ms ease; }
@@ -469,8 +466,6 @@ select.field {
   .run-title, .run-meta { grid-column: 2; }
   .composer { position: sticky; bottom: calc(var(--safe-bottom) + 12px); }
   .toast { top: auto; bottom: 24px; }
-  .pane.flush { margin: calc(-1 * (var(--safe-top) + 22px)) calc(-1 * (var(--gutter) + var(--safe-right))) calc(-1 * (var(--safe-bottom) + 40px)) calc(-1 * var(--gutter)); }
-  .memories-frame { height: 100dvh; }
   .sheet-backdrop { padding-top: 8vh; }
   .sheet { max-width: 620px; border-radius: 18px; padding: 16px 18px 18px; max-height: 80dvh; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25); }
 }
