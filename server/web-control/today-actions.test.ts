@@ -3339,9 +3339,186 @@ describe('6.99.29: the on-screen keyboard over the session sheet, wide and narro
     expect(rule('.ta-layer.ta-kb .ta-x')).toContain('height: 36px')
     expect(rule('.ta-layer.ta-kb .ta-foot .composer textarea')).toContain('max-height: 96px')
     expect(rule('.ta-layer.ta-kb-tight .ta-foot .sx-park')).toContain('display: none')
-    // The layer itself still follows the visible viewport (top and height from --ta-vt and --ta-vh).
-    expect(rule('.ta-layer')).toMatch(/top: var\(--ta-vt, 0px\); height: var\(--ta-vh, 100dvh\)/)
+    // The layer follows the visible viewport (top and height from --ta-vt and --ta-vh) only with the keyboard up.
+    expect(rule('.ta-layer.ta-kb')).toMatch(/top: var\(--ta-vt, 0px\); height: var\(--ta-vh, 100dvh\)/)
     // The question card in the sheet keeps its 6.99.28 footer at the sheet's bottom.
     expect(readFileSync(join(HERE, 'panes', 'questions.css'), 'utf8')).toContain('.ta-q .sq-foot { bottom: 0; }')
+  })
+})
+
+// ── 6.99.29: the backdrop and the sheet reach the bottom edge (Miles's unfolded Duo, IMG_0503, 11/07 12:48) ─────────
+// With the keyboard closed the sheet and the dim ended about 106 px above the bottom of the screen and Today showed
+// below them: the layer took its height from visualViewport, which reported less than the screen. The layer's box is
+// worked out here from the stylesheet itself (the .ta-layer rules and the variables the page set), so a change to
+// either side is seen.
+describe('6.99.29: the backdrop and the sheet reach the bottom edge, keyboard open or closed (IMG_0503)', () => {
+  const CSS = readFileSync(join(HERE, 'panes', 'today-actions.css'), 'utf8')
+  const MEDIA = readFileSync(join(HERE, 'panes', 'reader-media.js'), 'utf8')
+  const SID = 'b5c3c5ee-f51d-4c19-9b22-d90b129d2a8e'
+  const P = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(SID)}${tail}`
+  const ROW = { session_id: SID, provider: 'claude', display_label: 'General COS research to bring more value to users', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: new Date().toISOString(), alive: true }
+  const routes: Routes = {
+    ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } },
+    ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0 } },
+  }
+  const noComments = CSS.replace(/\/\*[\s\S]*?\*\//g, '')
+  /** The declarations of the first rule whose selector list is exactly `sel` (comments taken out). */
+  const rule = (sel: string) => {
+    const i = noComments.indexOf('\n' + sel + ' {')
+    expect(i, sel).toBeGreaterThan(-1)
+    const open = noComments.indexOf('{', i), close = noComments.indexOf('}', open)
+    return noComments.slice(open + 1, close)
+  }
+  const decls = (sel: string) => {
+    const out: Record<string, string> = {}
+    for (const d of rule(sel).split(';')) { const c = d.indexOf(':'); if (c > 0) out[d.slice(0, c).trim()] = d.slice(c + 1).trim() }
+    return out
+  }
+  /** Where the layer sits, top and bottom, in a viewport `innerHeight` tall: the stylesheet with the page's variables. */
+  function box(L: El, innerHeight: number) {
+    const d = { ...decls('.ta-layer'), ...(L.cls.has('ta-kb') ? decls('.ta-layer.ta-kb') : {}) }
+    if (d.inset) { const v = d.inset.split(/\s+/); d.top ??= v[0]!; d.bottom ??= v[2] ?? v[0]! }
+    const px = (v: string | undefined): number | null => {
+      if (v == null || v === 'auto') return null
+      const r = v.replace(/var\((--[\w-]+)(?:,\s*([^)]+))?\)/g, (_m, name: string, fb?: string) => L.props[name] ?? fb ?? '')
+      if (r === '100dvh') return innerHeight
+      const n = parseFloat(r); return isFinite(n) ? n : null
+    }
+    const top = px(d.top) ?? 0, height = px(d.height)
+    return { top, bottom: height != null ? top + height : innerHeight - (px(d.bottom) ?? 0) }
+  }
+  const layerOf = (h: ReturnType<typeof load>) => h.document.appended as El
+
+  it('IMG_0503: a visible viewport that reports 106 px less than the screen, with no keyboard, leaves the layer on the whole screen', async () => {
+    const h = load({ data: { sessions: [ROW], working: [] }, routes, vv: { height: 1000 - 106 }, innerHeight: 1000 })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const L = layerOf(h)
+    expect(L.cls.has('ta-kb'), '106 px is not a keyboard').toBe(false)
+    expect(L.props['--ta-vh'], 'the short reading is still taken').toBe('894px')
+    expect(box(L, 1000), 'down to the bottom edge, not 894').toEqual({ top: 0, bottom: 1000 })
+    // The same short reading arriving later (Safari's toolbar settling) changes nothing either.
+    h.viewport({ height: 1000 }); h.runFrames(); h.viewport({ height: 894 }); h.runFrames()
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 1000 })
+  })
+
+  it('keyboard open, closed, open again: the layer is the visible viewport while it is up and the whole screen once it goes', async () => {
+    const h = load({ data: { sessions: [ROW], working: [] }, routes, vv: { height: 1000 }, innerHeight: 1000 })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const L = layerOf(h)
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 1000 })
+    h.viewport({ height: 420 }); h.runFrames()
+    expect(L.cls.has('ta-kb')).toBe(true)
+    expect(box(L, 1000), 'visible viewport 420').toEqual({ top: 0, bottom: 420 })
+    h.viewport({ height: 1000 }); h.runFrames()
+    expect(box(L, 1000), 'keyboard gone').toEqual({ top: 0, bottom: 1000 })
+    h.viewport({ height: 340 }); h.runFrames()
+    expect(box(L, 1000), 'visible viewport 340').toEqual({ top: 0, bottom: 340 })
+    // Closed from the keyboard's own Hide key with Safari's reading still 106 px short: the whole screen all the same.
+    h.viewport({ height: 894 }); h.runFrames()
+    expect(L.cls.has('ta-kb')).toBe(false)
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 1000 })
+  })
+
+  it('Safari pans the page as the keyboard rises (scroll events only): the layer moves with offsetTop, one frame a burst', async () => {
+    const h = load({ data: { sessions: [ROW], working: [] }, routes, vv: { height: 1000 }, innerHeight: 1000 })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const L = layerOf(h)
+    h.viewport({ height: 420 }); h.runFrames()
+    for (const top of [40, 120, 220]) h.viewport({ offsetTop: top }, 'scroll')
+    expect(h.runFrames(), 'one frame for three scrolls').toBe(1)
+    expect(L.props['--ta-vt']).toBe('220px')
+    expect(box(L, 1000), 'the visible part of the page').toEqual({ top: 220, bottom: 640 })
+    h.viewport({ offsetTop: 0 }, 'scroll'); h.runFrames()
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 420 })
+  })
+
+  it('rotation, portrait and landscape, with the keyboard up and down', async () => {
+    const h = load({ data: { sessions: [ROW], working: [] }, routes, vv: { height: 1000 }, innerHeight: 1000 })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const L = layerOf(h), win = (h.ctx as any).window
+    // Landscape (1430x1000) with the keyboard up, turned to portrait (1000x1430) with it still up.
+    h.viewport({ height: 420 }); h.runFrames()
+    win.innerHeight = 1430; h.viewport({ height: 760 }); h.runFrames()
+    expect(L.cls.has('ta-kb')).toBe(true)
+    expect(L.props['--ta-kb']).toBe('670px')
+    expect(box(L, 1430)).toEqual({ top: 0, bottom: 760 })
+    // Portrait, keyboard down: the whole screen, even read 106 px short.
+    h.viewport({ height: 1430 - 106 }); h.runFrames()
+    expect(L.cls.has('ta-kb')).toBe(false)
+    expect(box(L, 1430)).toEqual({ top: 0, bottom: 1430 })
+    // Back to landscape with the keyboard down, then up at 340.
+    win.innerHeight = 1000; h.viewport({ height: 1000 }); h.runFrames()
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 1000 })
+    h.viewport({ height: 340 }); h.runFrames()
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 340 })
+  })
+
+  it('Safari’s toolbar collapsed or expanded (the layout viewport itself changes) is never a keyboard', () => {
+    const h = load({ vv: { height: 1000 }, innerHeight: 1000 })
+    h.ta.open('meeting', 'Surcharging Push', h.opener())
+    const L = layerOf(h), win = (h.ctx as any).window
+    win.innerHeight = 1070; h.viewport({ height: 1070 }); h.runFrames()          // collapsed: everything taller
+    expect(L.cls.has('ta-kb')).toBe(false)
+    expect(box(L, 1070)).toEqual({ top: 0, bottom: 1070 })
+    win.innerHeight = 1000; h.viewport({ height: 964 }); h.runFrames()           // expanding, read before it settles
+    expect(L.cls.has('ta-kb')).toBe(false)
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 1000 })
+  })
+
+  it('the session list, a session opened from it (Back to sessions), and a question card all use the same layer', async () => {
+    const h = load({ data: { sessions: [ROW], working: [] }, routes, vv: { height: 894 }, innerHeight: 1000, questions: 1 })
+    h.ta.open('pet', '', h.opener())
+    const L = layerOf(h)
+    expect(h.els['ta-foot']!.innerHTML, 'the list has no reply box: the sheet keeps the home indicator strip').toBe('')
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 1000 })
+    h.ta.open('run', 'claude|' + SID, h.opener(), { from: { scroll: 0 } })
+    await flush()
+    expect(h.els['ta-back']!.hidden, 'Back to sessions shows').toBe(false)
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 1000 })
+    h.viewport({ height: 420 }); h.runFrames()
+    expect(h.els['ta-back']!.hidden, 'and stays with the keyboard up').toBe(false)
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 420 })
+    h.viewport({ height: 1000 }); h.runFrames()
+    // A waiting session whose question is answered in its card here: no reply box under it.
+    h.ta.open('wait', 'claude|' + SID, h.opener())
+    await flush()
+    expect(h.els['ta-foot']!.hidden, 'the reply box steps aside for the card').toBe(true)
+    expect(box(L, 1000)).toEqual({ top: 0, bottom: 1000 })
+  })
+
+  it('the stylesheet: the home indicator is cleared once, inside the sheet, and only with the keyboard down', () => {
+    // Nothing that sizes or places the layer, the dim or the sheet subtracts the safe area.
+    for (const sel of ['.ta-layer', '.ta-layer.ta-kb', '.ta-scrim', '.ta-sheet']) expect(rule(sel), sel).not.toContain('safe-bottom')
+    expect(decls('.ta-layer').inset, 'the whole fixed viewport with the keyboard down').toBe('0')
+    expect(rule('.ta-layer'), 'never sized from visualViewport with the keyboard down').not.toContain('--ta-vh')
+    expect(decls('.ta-sheet').bottom).toBe('0')
+    // The reply box's own padding: once with the keyboard down (narrow and wide), none with it up.
+    // Exactly the inset plus a gap: a count of the token alone would miss `var(--safe-bottom) * 2` (mutation N11, 11/07).
+    expect(decls('.ta-foot').padding, 'narrow').toBe('10px var(--gutter) calc(var(--safe-bottom) + 10px)')
+    const wide = noComments.slice(noComments.indexOf('@media (min-width: 600px) {\n  .ta-sheet {'))
+    expect(/\.ta-foot \{ padding-bottom: ([^;]+);/.exec(wide)![1], 'wide').toBe('calc(var(--safe-bottom) + 14px)')
+    expect(decls('.ta-layer.ta-kb .ta-foot')['padding-bottom'], 'the keyboard covers the indicator').toBe('8px')
+    // No reply box: the sheet keeps the strip, with the keyboard down only.
+    const nofoot = '.ta-layer:not(.ta-kb) .ta-sheet:has(> .ta-foot:empty), .ta-layer:not(.ta-kb) .ta-sheet:has(> .ta-foot[hidden])'
+    expect(decls(nofoot)['padding-bottom']).toBe('var(--safe-bottom)')
+    // Past the bottom edge, with the keyboard down only.
+    expect(decls('.ta-layer:not(.ta-kb) .ta-scrim').bottom).toBe('calc(-1 * var(--ta-bleed))')
+    const after = decls('.ta-layer:not(.ta-kb) .ta-sheet::after')
+    expect([after.top, after.height, after.background]).toEqual(['100%', 'var(--ta-bleed)', 'var(--page)'])
+    expect(parseFloat(decls('.ta-layer')['--ta-bleed']!), 'more than the 106 px band').toBeGreaterThan(106)
+    // The side sheet sits at the right edge: the left inset is not its to keep.
+    expect(/padding-left: 0;/.test(wide.slice(0, wide.indexOf('}'))), 'wide sheet padding-left').toBe(true)
+    expect(decls('.ta-sheet')['padding-right']).toBe('var(--safe-right)')
+  })
+
+  it('the 6.99.28 image preview covers the whole screen above the overlay and keeps its own insets once', () => {
+    const css = /\.rm-view\{([^}]*)\}/.exec(MEDIA)![1]!
+    expect(css).toContain('position:fixed;inset:0')
+    expect(Number(/z-index:(\d+)/.exec(css)![1]), 'above the overlay').toBeGreaterThan(Number(decls('.ta-layer')['z-index']))
+    expect((css.match(/safe-area-inset-bottom/g) || []).length).toBe(1)
   })
 })

@@ -14,15 +14,24 @@
 html.ta-open { overflow: hidden; }
 
 .ta-layer {
-  position: fixed; left: 0; right: 0; z-index: 45;
-  /* The visible viewport (app sets these from visualViewport): the keyboard never covers the reply box. */
-  top: var(--ta-vt, 0px); height: var(--ta-vh, 100dvh);
+  /* 6.99.29 (Miles's unfolded Duo, IMG_0503, 11/07 12:48): with the keyboard closed the layer is the whole fixed
+     viewport, down to the physical bottom edge, whatever visualViewport reports. Sized from visualViewport.height it
+     ended about 106 px short and Today showed below the backdrop and the sheet. The home indicator is cleared once, by
+     the padding inside the sheet (.ta-foot, or .ta-body when there is no reply box), never by the layer or the sheet. */
+  position: fixed; inset: 0; z-index: 45;
+  --ta-bleed: 120px;
   --run-green: rgb(56, 145, 99);
 }
+/* The keyboard is up (today-actions.js applyFit): the layer is the visible viewport, so it never covers the reply box. */
+.ta-layer.ta-kb { top: var(--ta-vt, 0px); height: var(--ta-vh, 100dvh); }
 :root[data-theme='dark'] .ta-layer { --run-green: rgb(108, 207, 143); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .ta-layer { --run-green: rgb(108, 207, 143); } }
 .ta-layer[hidden] { display: none; }
 .ta-scrim { position: absolute; inset: 0; background: rgba(23, 18, 14, 0.45); touch-action: none; animation: fade 160ms ease; }
+/* Past the bottom edge, in case Safari's fixed viewport ever stops short of it: the dim and the sheet run on below the
+   screen, so no band of Today can show under them. Off with the keyboard up (the keyboard covers that edge). */
+.ta-layer:not(.ta-kb) .ta-scrim { bottom: calc(-1 * var(--ta-bleed)); }
+.ta-layer:not(.ta-kb) .ta-sheet::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--ta-bleed); background: var(--page); pointer-events: none; }
 
 .ta-sheet {
   position: absolute; left: 0; right: 0; bottom: 0;
@@ -50,6 +59,10 @@ html.ta-open { overflow: hidden; }
 .ta-foot .status-line { margin: 6px 4px 0; min-height: 0; }
 .ta-foot .status-line:empty { display: none; }
 .ta-foot .sx-box, .ta-foot .sx-park { margin: 0 0 10px; }
+/* No reply box (the session list, a question answered in its card): the sheet itself keeps the home indicator's strip,
+   so the end of the list and the question card's footer stop above it and nothing scrolls under it. With the keyboard
+   up the keyboard covers that strip. */
+.ta-layer:not(.ta-kb) .ta-sheet:has(> .ta-foot:empty), .ta-layer:not(.ta-kb) .ta-sheet:has(> .ta-foot[hidden]) { padding-bottom: var(--safe-bottom); }
 
 .ta-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0 0 8px; color: var(--sub); font-size: 14.5px; line-height: 1.4; }
 .ta-note { margin: 6px 0 0; color: var(--hot); font-size: 13.5px; line-height: 1.4; }
@@ -101,6 +114,8 @@ html.ta-open { overflow: hidden; }
 @media (min-width: 600px) {
   .ta-sheet {
     left: auto; top: 0; width: clamp(360px, 60vw, 480px); max-height: none;
+    /* At the right edge only the right inset (a landscape notch or rounded corner) applies. */
+    padding-left: 0;
     border-radius: 20px 0 0 20px; box-shadow: -16px 0 48px rgba(0, 0, 0, 0.22);
     animation-name: ta-slide;
   }

@@ -168,7 +168,9 @@
     layer.addEventListener('touchmove', function (e) { if (e.target && e.target.classList && e.target.classList.contains('ta-scrim')) e.preventDefault(); }, { passive: false });
     return layer;
   }
-  // The layer follows the visible viewport, so the on-screen keyboard never covers the reply box or Send.
+  // With the keyboard up the layer follows the visible viewport, so the keyboard never covers the reply box or Send.
+  // With it closed the layer is the whole fixed viewport (today-actions.css): --ta-vh and --ta-vt are set but unused, so
+  // a visible viewport that reports less than the screen (IMG_0503, 11/07 12:48: about 106 px) never leaves a band.
   // 6.99.29 (Miles's unfolded Duo, 11/07 11:50): on a wide screen the side sheet kept its tall header and the reply box
   // went under the keyboard while the conversation shrank to one line. With the keyboard up, at any width, the layer is
   // marked ta-kb (today-actions.css): the sheet fills the visible viewport, the header folds to one compact row, the
