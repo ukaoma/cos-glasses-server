@@ -200,6 +200,7 @@ select.field {
 
 /* ── Today ───────────────────────────────────────────────── */
 .today-date { color: var(--sub); font-size: 15px; margin: 6px 0 0; }
+.today-weather { color: var(--sub); font-size: 15px; margin: 2px 0 0; }
 /* The session pet on Today: the pet COS Control shows, in the pose the Mac would pick. */
 .today-pet { display: flex; flex-direction: column; align-items: center; margin: 6px 0 14px; min-height: 166px; }
 .today-pet.hidden { display: none; }
@@ -427,6 +428,7 @@ select.field {
 @media (max-height: 720px) {
   .pane-title { font-size: 34px; }
   .today-date { font-size: 14px; margin-top: 4px; }
+  .today-weather { font-size: 14px; }
   .ask-bar { min-height: 46px; margin-top: 12px; }
   .story { font-size: 21px; line-height: 1.3; margin: 18px 2px; }
   .run-panel { padding-top: 8px; }

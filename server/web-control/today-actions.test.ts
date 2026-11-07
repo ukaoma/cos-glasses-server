@@ -1523,6 +1523,40 @@ describe('Stop on the Running peek (parity gap 4)', () => {
   })
 })
 
+describe('Weather sits under the date, not in Next up (Miles 11/07)', () => {
+  const load = () => {
+    const start = APP.indexOf('  function renderWeather(w) {'), end = APP.indexOf("  // From today's meetings: Work's suggestions")
+    const els: Record<string, El> = {}
+    const deps = { $: (id: string) => (els[id] ??= new El()), esc, toDate: (v: unknown) => (v ? new Date(String(v)) : null), clock: () => '9:15 AM', dayWord: () => 'tomorrow',
+      TODAY: { offline: true, welcome: {} }, window: {}, go: () => {}, toast: () => {} }
+    // eslint-disable-next-line no-new-func
+    const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { renderWeather: renderWeather, renderNext: renderNext };\n}')(deps)
+    return { els, fns }
+  }
+  const weather = { temp: '67°F', desc: 'Mostly clear', location: 'Cedar Park-Liberty Hill, TX' }
+  it('the line under the date carries the weather, even with no meeting next', () => {
+    const html = readFileSync(join(HERE, 'index.html'), 'utf8')
+    expect(html.indexOf('id="today-weather"')).toBeGreaterThan(html.indexOf('id="today-date"'))
+    const { els, fns } = load()
+    fns.renderWeather({ weather })
+    expect(els['today-weather']!.textContent).toBe('67°F and mostly clear in Cedar Park-Liberty Hill')
+    expect(els['today-weather']!.cls.has('hidden')).toBe(false)
+    fns.renderWeather({})
+    expect(els['today-weather']!.textContent).toBe('')
+    expect(els['today-weather']!.cls.has('hidden')).toBe(true)
+  })
+  it('Next up no longer repeats it', () => {
+    const { els, fns } = load()
+    fns.renderNext({ nextEvent: { title: 'New Event', time: '2026-11-08T15:15:00Z' }, weather })
+    expect(els['next-body']!.innerHTML).toContain('Tomorrow')
+    expect(els['next-body']!.innerHTML).not.toContain('67°F')
+    expect(els['next-body']!.innerHTML).not.toContain('Now ')
+  })
+  it('Today paints the weather on the same read as Next up', () => {
+    expect(APP).toContain('      renderWeather(welcome);\n      renderNext(welcome);\n')
+  })
+})
+
 describe('Next up: Prep me and Open meeting (parity gap 9)', () => {
   it('the card is called Next up and offers both', () => {
     const html = readFileSync(join(HERE, 'index.html'), 'utf8')
