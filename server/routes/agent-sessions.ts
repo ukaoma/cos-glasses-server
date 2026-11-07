@@ -83,6 +83,8 @@ import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.js'
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 
+import { agentSessionOutputImages } from '../lib/agent-session-output-images.js'
+
 export const agentSessionsRouter = Router()
 
 function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -604,6 +606,32 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
   }
 })
 
+// Authenticated by index.ts's shared /api gate. Neither the request nor the response
+// carries a filesystem path; the resolver reauthorizes exact transcript membership.
+agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:imageId/content', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  res.set('X-Content-Type-Options', 'nosniff')
+  const provider = asProvider(String(req.params.provider ?? '').toLowerCase())
+  if (!provider || (req.query.variant !== undefined && req.query.variant !== 'thumb' && req.query.variant !== 'phone')) {
+    res.status(404).json({ error: 'image_not_found' }); return
+  }
+  try {
+    const content = await agentSessionOutputImages.content(provider, String(req.params.sessionId), String(req.params.imageId), req.query.variant === 'thumb' ? 'thumb' : 'phone')
+    if (content.status !== 'ok') {
+      res.status(content.status === 'not_found' ? 404 : 503).json({ error: content.status === 'not_found' ? 'image_not_found' : 'image_unavailable' }); return
+    }
+    res.type('image/jpeg')
+    res.sendFile(content.path, err => {
+      if (!err) return
+      if (!res.headersSent) res.status(503).json({ error: 'image_unavailable' })
+      else res.destroy()
+    })
+  } catch {
+    console.warn('[agent-sessions] output image unavailable')
+    res.status(503).json({ error: 'image_unavailable' })
+  }
+})
+
 agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res) => {
   res.set('Cache-Control', 'private, no-store')
   const provider = asProvider(String(req.params.provider ?? '').toLowerCase())
@@ -647,7 +675,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     let recentTurns: RecentTurnsRead | null = null
     if (turnsWanted !== null) {
       try {
-        recentTurns = await readRecentSessionTurns(provider, found, turnsWanted)
+        const images = await agentSessionOutputImages.context(provider, sessionId, found)
+        recentTurns = await readRecentSessionTurns(provider, found, turnsWanted, undefined, images.project)
       } catch (error) {
         console.warn(`[agent-sessions] recent turns failed provider=${provider}: ${error instanceof Error ? error.message : error}`)
       }

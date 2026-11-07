@@ -33,6 +33,7 @@ import {
   payloadText,
   type AgentProvider,
 } from './agent-session-store.js'
+import type { SessionOutputImage } from './agent-session-output-images.js'
 import { unwrapPeerMessage } from './session-stream-events.js'
 
 export interface SessionTurn {
@@ -40,7 +41,11 @@ export interface SessionTurn {
   text: string
   /** The record's ISO timestamp, when the provider writes one (Cursor does not). */
   at?: string
+  /** Opt-in native-session output previews. No local paths or COS message identities. */
+  outputImages?: SessionOutputImage[]
 }
+
+export type SessionTurnProjection = (provider: AgentProvider, record: Record<string, unknown>, turn: SessionTurn | null) => SessionTurn | null
 
 /** What a client may ask for in one read. Forty messages is ~10 lens pages of words. */
 export const SESSION_TURNS_MAX = 40
@@ -127,12 +132,13 @@ export function sessionTurnFromRecord(provider: AgentProvider, obj: Record<strin
 }
 
 /** The newest `limit` messages among these lines (file order in, file order out). */
-export function recentSessionTurns(provider: AgentProvider, lines: readonly string[], limit: number): SessionTurn[] {
+export function recentSessionTurns(provider: AgentProvider, lines: readonly string[], limit: number, project?: SessionTurnProjection): SessionTurn[] {
   const out: SessionTurn[] = []
   for (const line of lines) {
     const obj = parseJsonLine(line)
     if (!obj) continue
-    const turn = sessionTurnFromRecord(provider, obj)
+    const parsed = sessionTurnFromRecord(provider, obj)
+    const turn = project ? project(provider, obj, parsed) : parsed
     if (turn) out.push(turn)
   }
   return limit > 0 ? out.slice(-limit) : []
@@ -155,6 +161,7 @@ export async function readRecentSessionTurns(
   path: string,
   limit: number,
   windows: readonly number[] = SESSION_TURNS_WINDOWS,
+  project?: SessionTurnProjection,
 ): Promise<RecentTurnsRead> {
   const want = Math.max(0, Math.min(SESSION_TURNS_MAX, Math.floor(limit)))
   const { size } = await stat(path)
@@ -177,7 +184,7 @@ export async function readRecentSessionTurns(
       const lines = buffer.toString('utf-8').split('\n')
       if (start > 0) lines.shift()
       // One more than wanted, so `more` can be answered from what was read.
-      found = recentSessionTurns(provider, lines, want + 1)
+      found = recentSessionTurns(provider, lines, want + 1, project)
       if (found.length > want || start === 0) break
     }
     const more = found.length > want || start > 0
