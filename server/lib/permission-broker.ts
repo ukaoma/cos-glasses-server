@@ -101,6 +101,13 @@
 // connected client for a stamped question. So with the away hold off, a hook that waits no longer than
 // 120 s, a stale touch (past the same recent window), or a desk in use, the web holds nothing and the
 // Mac's own pop-up shows at once, as Miles chose for an open tab in 6.99.13.
+// QA round 1 (6.99.26): the web touch admits only what nothing else would (`webOnly`), and changes
+// nothing about a request a glasses or phone client admits: same deadline, flag and hand-back as 6.99.25,
+// and it never keeps one through the re-check. A web-only STAMPED question needs the desk idle at admit
+// (only Claude Desktop is proven to keep its own prompt up while the hook waits, D1) and goes back to the
+// Mac the moment the desk is used, like any away-held request. A touch from the Mac itself never counts
+// (routes/permission-broker.ts requestFromThisMac), and `COS_WEB_AWAY_HOLD=0` turns the web part off
+// alone (`webAwayHoldEnabled`).
 //
 // NEVER past the hook's own wait. The hold is clamped to `holdCeilingS`: the PermissionRequest
 // `timeout` in the Claude settings file (read, not assumed) and the wait the hook stamped on
@@ -139,6 +146,16 @@ import { ASK_USER_QUESTION_TOOL, type SessionSignalStore } from './session-signa
 // ---------------------------------------------------------------------------
 
 export type BrokerMode = 'off' | 'questions' | 'all'
+
+/**
+ * 6.99.26 (QA round 1): `COS_WEB_AWAY_HOLD`: `0`/`false`/`off` turns off COS Control Web's part of the
+ * away hold alone, so it can be rolled back without touching the glasses and phone. Default on; read per
+ * request.
+ */
+export function webAwayHoldEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = (env.COS_WEB_AWAY_HOLD ?? '').trim().toLowerCase()
+  return !(raw === '0' || raw === 'false' || raw === 'off')
+}
 
 /**
  * `COS_PERMISSION_BROKER`: `0`/`false`/`off` answers `{}` to everything (the kill switch,
@@ -788,6 +805,8 @@ export interface PermissionBrokerDeps {
    * client. Absent: null (the web holds nothing).
    */
   webPresenceAgeMs?(): number | null
+  /** 6.99.26 (QA round 1): the web part's own switch (`webAwayHoldEnabled`). Absent: on. */
+  webAwayHold?(): boolean
   /**
    * 6.60.0: how recent that presence must be for the away hold, in ms
    * (`permissionBrokerAwayRecentClientMs`), never below the 30 s live window. Absent: 30 s.
@@ -827,7 +846,9 @@ export interface HoldFacts {
   recentWindowS: number
   /** 6.60.0: why this request is not away-held, or null when it is. */
   notAwayReason: NotAwayReason | null
-  /** 6.99.26: the age of COS Control Web's newest touch or key, present only when the web reported one. */
+  /** 6.99.26: held for COS Control Web's touch alone; absent for every other request. */
+  webOnly?: true
+  /** 6.99.26: the age of that touch, present only with `webOnly`. */
   webPresenceAgeMs?: number
 }
 
@@ -860,6 +881,8 @@ export interface ParkRequest {
   awayHold?: boolean
   askHold?: boolean
   lensVisible?: boolean
+  /** 6.99.26: admitted for COS Control Web's recent touch alone (see THE AWAY HOLD). */
+  webOnly?: boolean
   hold?: HoldFacts
 }
 
@@ -893,6 +916,8 @@ interface BrokerItem {
   awayHold: boolean
   askHold: boolean
   lensVisible: boolean
+  /** 6.99.26: admitted for the web touch alone: kept only while a touch is recent, and the desk hands it back. */
+  webOnly: boolean
   toolUseId: string | null
   questionFingerprint: string
   /**
@@ -1143,7 +1168,9 @@ export class PermissionBroker {
    */
   private presence(now: number): { ageMs: number | null; recent: boolean; holdLive: boolean; windowMs: number; webAgeMs: number | null; webRecent: boolean } {
     const ageMs = readAgeMs(() => this.deps.presenceAgeMs?.() ?? null)
-    const webAgeMs = readAgeMs(() => this.deps.webPresenceAgeMs?.() ?? null)
+    let webOn = true
+    try { webOn = this.deps.webAwayHold?.() !== false } catch { webOn = false }
+    const webAgeMs = webOn ? readAgeMs(() => this.deps.webPresenceAgeMs?.() ?? null) : null
     const windowMs = this.recentWindowMs()
     const recent = ageMs !== null && ageMs <= windowMs
     let holdPollAt: number | null = null
@@ -1236,17 +1263,19 @@ export class PermissionBroker {
     // window (Miles, 19:54; QA round 1).
     const switchOn = this.awayHoldMs() > 0
     const ceilingAllowsAway = this.holdMs(facts.hookWaitS, false).ceilingAllowsAway
-    // 6.99.26: a recent touch on COS Control Web makes a request away exactly as a wearer's does,
-    // and does nothing else: it is not in `clientLive`, so without the away hold it holds nothing.
-    const away = switchOn && ceilingAllowsAway && (askHold || presence.recent || presence.webRecent)
+    // 6.60.0 to 6.99.25, unchanged: what a live client and a wearer's presence allow.
+    const deviceAway = switchOn && ceilingAllowsAway && (askHold || presence.recent)
+    const deviceAdmits = askHold ? clientLive || presence.recent : clientLive || deviceAway
+    // 6.99.26 (QA round 1): a recent touch on COS Control Web admits only what nothing else would, for the away
+    // hold alone. A request a glasses or phone client admits keeps its 6.99.25 deadline, flag and hand-back.
+    const webOnly = !deviceAdmits && switchOn && ceilingAllowsAway && presence.webRecent
+    const away = deviceAway || webOnly
     const notAwayReason: NotAwayReason | null = away ? null
       : !switchOn ? 'hold_off'
       : !ceilingAllowsAway ? 'ceiling_at_base'
-      : presence.ageMs === null && presence.webAgeMs === null ? 'no_hold_client'
+      : presence.ageMs === null ? 'no_hold_client'
       : 'stale_presence'
-    // A stamped question is always away when the hold is on; without a client, a wearer's or the web's recent touch,
-    // it goes to the Mac. Without the hold, the line below says so (the web is never a client).
-    if (askHold && !clientLive && !presence.recent && !presence.webRecent) return this.noteFastPath('no_client', { presence, clientLive })
+    if (askHold && !deviceAdmits && !webOnly) return this.noteFastPath('no_client', { presence, clientLive })
     const hold = this.holdMs(facts.hookWaitS, away)
     // With it, a request is held whether or not a client is polling right now, so a lens or
     // phone that comes back can still answer it. Without it, no client is `{}`, as in 6.59.0.
@@ -1261,6 +1290,10 @@ export class PermissionBroker {
     try { idle = await this.deps.readDeskIdleSeconds() } catch { idle = null }
     if (!askHold && idle === null) return this.noteFastPath('desk_unknown')
     if (!askHold && idle! < this.deskIdleThreshold()) return this.noteFastPath('desk_active', { notAway: 'desk_active', presence, clientLive })
+    // 6.99.26 (QA round 1): a stamped question the web touch alone admits needs the desk idle now. Only Claude
+    // Desktop is proven to keep its own prompt up while the hook waits (D1); at the desk, the Mac answers.
+    if (webOnly && idle === null) return this.noteFastPath('desk_unknown')
+    if (webOnly && idle! < this.deskIdleThreshold()) return this.noteFastPath('desk_active', { notAway: 'desk_active', presence, clientLive })
     const mode = this.deps.mode()
     if (mode === 'off') return this.noteFastPath('broker_off')
     if (!this.deps.admissionsOpen()) return this.noteFastPath('draining')
@@ -1291,9 +1324,9 @@ export class PermissionBroker {
       presenceAgeMs: presence.ageMs === null ? null : Math.round(presence.ageMs),
       recentWindowS: Math.round(presence.windowMs / 1000),
       notAwayReason,
-      ...(presence.webAgeMs === null ? {} : { webPresenceAgeMs: Math.round(presence.webAgeMs) }),
+      ...(webOnly ? { webOnly: true as const, webPresenceAgeMs: Math.round(presence.webAgeMs ?? 0) } : {}),
     }
-    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), hold: holdFacts } }
+    return { ok: true, request: { facts: { ...facts, fingerprint }, kind, questions, approval, deadlineAt, awayHold, askHold, lensVisible: !askHold || (idle !== null && idle >= this.deskIdleThreshold()), ...(webOnly ? { webOnly: true } : {}), hold: holdFacts } }
   }
 
   /** Hold the hook's response until exactly one resolution. Returns the item id. */
@@ -1323,6 +1356,7 @@ export class PermissionBroker {
       channel,
       timer: null,
       awayHold: request.awayHold === true,
+      webOnly: request.webOnly === true,
       askHold: request.askHold === true,
       lensVisible: request.lensVisible !== false,
       toolUseId: facts.toolUseId ?? null,
@@ -1665,12 +1699,14 @@ export class PermissionBroker {
       // 6.60.0: an item held by the away hold outlives the client going quiet, but only while
       // the wearer's latest presence is still within the window (QA round 1, Skeptic W2: a
       // single glance must not hold a question 10 more minutes). The desk below still hands
-      // it back. 6.99.26: a recent touch on COS Control Web keeps an away-held one the same way,
-      // and never one held for a live client alone.
-      this.settleAll('no_client', item => !item.askHold && (!item.awayHold || !(presence.recent || presence.webRecent)))
+      // it back. 6.99.26 (QA round 1): a recent web touch keeps only what it admitted; a glasses or
+      // phone hold reads exactly as in 6.99.25.
+      this.settleAll('no_client', item => item.webOnly
+        ? !(presence.recent || presence.webRecent)
+        : !item.askHold && (!item.awayHold || !presence.recent))
       if (this.pendingCount() === 0) return
     }
-    if (![...this.items.values()].some(item => item.state === 'pending' && (!item.askHold || !item.lensVisible))) return
+    if (![...this.items.values()].some(item => item.state === 'pending' && (!item.askHold || !item.lensVisible || item.webOnly))) return
     if (this.pollInFlight) return
     this.pollInFlight = true
     let idle: number | null = null
@@ -1678,7 +1714,7 @@ export class PermissionBroker {
     if (idle === null) {
       this.counters.deskUnreadable++
       this.deskUnreadableStreak++
-      if (this.deskUnreadableStreak >= 2) this.settleAll('handed_to_desk', item => !item.askHold)
+      if (this.deskUnreadableStreak >= 2) this.settleAll('handed_to_desk', item => !item.askHold || item.webOnly)
       return
     }
     this.deskUnreadableStreak = 0
@@ -1691,7 +1727,8 @@ export class PermissionBroker {
       }
       return
     }
-    this.settleAll('handed_to_desk', item => !item.askHold)
+    // 6.99.26 (QA round 1): a web-only stamped question goes back to the Mac as any away-held request does.
+    this.settleAll('handed_to_desk', item => !item.askHold || item.webOnly)
   }
 
   private settleAll(resolution: 'handed_to_desk' | 'drained' | 'no_client', only: (item: BrokerItem) => boolean = () => true): void {

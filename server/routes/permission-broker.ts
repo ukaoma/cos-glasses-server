@@ -40,7 +40,9 @@
 // (the ms since a touch or a key while the page was in front) records COS Control Web's presence for the
 // away hold ONLY (lib/client-liveness noteWebPresence): never a live client, so at the desk the Mac's own
 // pop-up still comes at once (6.99.13). Without `hold=1` or a valid `presenceAgeMs` it records nothing. A
-// token poll naming `web`, and a browser poll naming anything else, still record nothing.
+// token poll naming `web`, and a browser poll naming anything else, still record nothing. QA round 1: neither
+// does a poll from the Mac itself (loopback, or one of its own addresses, with no proxy header): Control Web
+// open on the Mac is the desk, never away.
 // 6.60.0: a poll with `&hold=1&presenceAgeMs=<int>` (COS Glasses 6.9.563 and later) records
 // wearer presence for the away hold instead of the 6.59.0 liveness; a `hold=1` poll without
 // a valid `presenceAgeMs` makes no client live and enables no hold. The response adds
@@ -58,6 +60,8 @@ import {
   type PermissionBroker,
 } from '../lib/permission-broker.js'
 import { noteQuestionsPoll, noteWebPresence, validPresenceAgeMs, type QuestionsPollFacts } from '../lib/client-liveness.js'
+import { hasProxyForwardedHeaders, isLoopbackAddress, normalizeRemoteIp, reachableIpv4Addresses } from '../lib/network-policy.js'
+import { networkInterfaces } from 'node:os'
 
 export const PERMISSION_BROKER_HOOK_PATH = '/api/permission-requests/ask'
 /** The hook posts its spool envelope, capped at 1 MiB by the script itself. */
@@ -161,6 +165,8 @@ export interface SessionQuestionsRouterDeps {
   notePoll?: (at: number, poll: QuestionsPollFacts) => void
   /** 6.99.26: where COS Control Web's presence is recorded; `noteWebPresence` in production. */
   noteWebPresence?: (at: number, presenceAgeMs: number) => void
+  /** 6.99.26 (QA round 1): whether a request comes from this Mac itself; `requestFromThisMac` in production. */
+  fromThisMac?: (req: Request) => boolean
   now?: () => number
   /** 6.60.0: when this server process started (ISO); defaults to the process's own start. */
   serverStartedAt?: string
@@ -182,10 +188,30 @@ export function questionsPollFacts(query: Record<string, unknown>): QuestionsPol
   return { hold, presenceAgeMs: hold && validPresenceAgeMs(parsed) ? parsed : null }
 }
 
+/**
+ * 6.99.26 (QA round 1): a request from this Mac itself: its socket is loopback or one of the Mac's own addresses (its
+ * tailnet address first), and no proxy header says it was forwarded for someone else (a `tailscale serve` hop arrives on
+ * loopback for a remote peer). Control Web open on the Mac is the desk: its touch never makes the Mac away.
+ */
+export function requestFromThisMac(
+  req: { socket?: { remoteAddress?: string | undefined } | null; headers?: Record<string, unknown> | null },
+  selfAddresses: () => readonly string[] = () => reachableIpv4Addresses(networkInterfaces()).map(a => a.address),
+): boolean {
+  if (hasProxyForwardedHeaders(req.headers)) return false
+  const remote = req.socket?.remoteAddress
+  if (isLoopbackAddress(remote)) return true
+  const ip = normalizeRemoteIp(remote ?? '')
+  if (!ip) return false
+  let own: readonly string[] = []
+  try { own = selfAddresses() } catch { own = [] }
+  return own.includes(ip)
+}
+
 export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): Router {
   const router = Router()
   const notePoll = deps.notePoll ?? noteQuestionsPoll
   const noteWeb = deps.noteWebPresence ?? ((at: number, ageMs: number) => noteWebPresence(at, ageMs))
+  const fromThisMac = deps.fromThisMac ?? ((req: Request) => requestFromThisMac(req))
   const now = deps.now ?? Date.now
   router.get('/session-questions', (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
@@ -209,7 +235,7 @@ export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): 
     // 6.99.26: its touch counts for the away hold only, like the phone's (Miles 11/07, "Away rule, like phone").
     if (byWebSession && client === WEB_ANSWERING_CLIENT) {
       const facts = questionsPollFacts(req.query as Record<string, unknown>)
-      if (facts.presenceAgeMs !== null && facts.presenceAgeMs !== undefined) noteWeb(now(), facts.presenceAgeMs)
+      if (facts.presenceAgeMs !== null && facts.presenceAgeMs !== undefined && !fromThisMac(req)) noteWeb(now(), facts.presenceAgeMs)
     }
     const health = deps.broker.health()
     // Listed first: a deadline the timer has not caught yet is settled by the listing.

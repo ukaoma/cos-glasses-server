@@ -2,7 +2,7 @@
 // on fake clocks and fake stamps: what a recent or stale web touch admits, what it keeps through the re-check, and
 // that it never stands in for a live client. The real route and liveness module: routes/session-questions-web.test.ts.
 import { afterEach, describe, expect, it } from 'vitest'
-import { PermissionBroker, type PermissionBrokerDeps } from './permission-broker.js'
+import { PermissionBroker, webAwayHoldEnabled, type PermissionBrokerDeps } from './permission-broker.js'
 import { ASK_INPUT, permissionEnvelope } from './__fixtures__/permission-broker.js'
 import { __resetClientLivenessForTests, lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, noteWebPresence, presenceAgeMs, webPresenceAgeMs } from './client-liveness.js'
 
@@ -45,7 +45,8 @@ describe('a touch on COS Control Web and the away hold (6.99.26)', () => {
       const { request } = await park(h, body(h))
       expect(request.awayHold).toBe(true)
       expect(request.deadlineAt - h.s.now).toBe(600_000)
-      expect(request.hold).toMatchObject({ clientLive: false, notAwayReason: null, webPresenceAgeMs: 2 * MIN })
+      expect(request.hold).toMatchObject({ clientLive: false, notAwayReason: null, webOnly: true, webPresenceAgeMs: 2 * MIN })
+      expect(request.webOnly).toBe(true)
       expect(h.b.list()).toHaveLength(1)
     }
   })
@@ -58,14 +59,40 @@ describe('a touch on COS Control Web and the away hold (6.99.26)', () => {
     }
   })
 
-  it('at the desk: a stamped question keeps its card hidden until the desk is idle, as with the phone', async () => {
+  it('QA round 1: at the desk, a web touch admits no stamped question; the Mac answers it at once', async () => {
     const h = harness()
     h.s.web = 1_000; h.s.idle = 5
-    const { id } = await park(h, ask(h, { askHold: 1 }))
-    expect(h.b.list()).toEqual([])
-    h.s.now += 90_000; h.s.idle = 95
+    expect(await h.b.admit(ask(h, { askHold: 1 }))).toEqual({ ok: false, reason: 'desk_active' })
+    h.s.idle = null
+    expect(await h.b.admit(ask(h, { askHold: 1 })), 'an unreadable desk is not idle').toEqual({ ok: false, reason: 'desk_unknown' })
+    h.s.idle = 90
+    const { request } = await park(h, ask(h, { askHold: 1 }))
+    expect(request).toMatchObject({ askHold: true, awayHold: true, webOnly: true, lensVisible: true })
+    expect(h.b.list()).toHaveLength(1)
+  })
+
+  it('QA round 1: a web-only stamped question goes back to the Mac the moment the desk is used, or cannot be read twice', async () => {
+    for (const desk of [2, null]) {
+      const h = harness()
+      h.s.web = 1_000
+      const { sent } = await park(h, ask(h, { askHold: 1 }))
+      h.s.idle = desk
+      await h.b.tick()
+      if (desk === null) { expect(h.b.pendingCount(), 'one unreadable read is not the desk').toBe(1); await h.b.tick() }
+      expect(h.b.pendingCount(), String(desk)).toBe(0)
+      expect(h.b.settledList()[0]).toMatchObject({ resolution: 'handed_to_desk', waitingAtMac: true })
+      expect(sent).toEqual([{}])
+    }
+  })
+
+  it('QA round 1: a web-only stamped question also ends when the touch goes stale with no client', async () => {
+    const h = harness()
+    h.s.web = 29 * MIN
+    const { sent } = await park(h, ask(h, { askHold: 1 }))
+    h.s.now += 2 * MIN; h.s.web = 31 * MIN
     await h.b.tick()
-    expect(h.b.list().map(x => x.id)).toEqual([id])
+    expect(h.b.settledList()[0]).toMatchObject({ resolution: 'no_client', waitingAtMac: true })
+    expect(sent).toEqual([{}])
   })
 
   it('stale (over 30 minutes): no hold, stamped or not, and the line says why', async () => {
@@ -77,7 +104,8 @@ describe('a touch on COS Control Web and the away hold (6.99.26)', () => {
     const h = harness()
     h.s.web = 31 * MIN
     await h.b.admit(ask(h))
-    expect(lastLine(h.lines)).toBe(`[permission-broker] fast path no_client not_away=stale_presence presenceAgeMs=null windowMs=1800000 webPresenceAgeMs=${31 * MIN} clientLive=false`)
+    // The reason is the glasses and phone one, as in 6.99.25; the web's age rides beside it.
+    expect(lastLine(h.lines)).toBe(`[permission-broker] fast path no_client not_away=no_hold_client presenceAgeMs=null windowMs=1800000 webPresenceAgeMs=${31 * MIN} clientLive=false`)
   })
 
   it('never a live client: with the away hold off or a hook that waits 130 s, a recent touch holds nothing', async () => {
@@ -147,6 +175,88 @@ describe('a touch on COS Control Web and the away hold (6.99.26)', () => {
     const { request } = await park(h, ask(h))
     expect(request.awayHold).toBe(true)
     expect(request.hold).not.toHaveProperty('webPresenceAgeMs')
+  })
+
+  it('QA round 1: COS_WEB_AWAY_HOLD=0 turns the web part off alone; glasses and phone keep theirs', async () => {
+    expect(['', '1', 'on', 'yes'].map(v => webAwayHoldEnabled({ COS_WEB_AWAY_HOLD: v }))).toEqual([true, true, true, true])
+    expect(['0', 'false', 'OFF', ' off '].map(v => webAwayHoldEnabled({ COS_WEB_AWAY_HOLD: v }))).toEqual([false, false, false, false])
+    expect(webAwayHoldEnabled({})).toBe(true)
+    let on = false
+    const h = harness({ webAwayHold: () => on })
+    h.s.web = 1_000
+    expect(await h.b.admit(ask(h))).toEqual({ ok: false, reason: 'no_client' })
+    expect(lastLine(h.lines), 'off: the web age is not even read').toBe('[permission-broker] fast path no_client not_away=no_hold_client presenceAgeMs=null windowMs=1800000 clientLive=false')
+    h.s.presence = 2 * MIN
+    expect((await h.b.admit(ask(h))).ok, 'the glasses and phone hold still works').toBe(true)
+    // Switched off while one is held: it goes to the Mac at the next check.
+    on = true; h.s.presence = null
+    const { sent } = await park(h, ask(h))
+    on = false
+    await h.b.tick()
+    expect(sent).toEqual([{}])
+    const thrown = harness({ webAwayHold: () => { throw new Error('boom') } })
+    thrown.s.web = 1_000
+    expect(await thrown.b.admit(ask(thrown)), 'an unreadable switch is off').toEqual({ ok: false, reason: 'no_client' })
+  })
+
+  it('QA round 1: the web touch never changes a glasses or phone hold, at admission or at the re-check', async () => {
+    // A phone polling as a live client (no presence): its request keeps the base hold, never the web's 10 minutes.
+    const phone = harness()
+    phone.s.legacy = phone.s.now; phone.s.web = 1_000
+    const r = await park(phone, ask(phone))
+    expect(r.request).toMatchObject({ awayHold: false, deadlineAt: phone.s.now + 110_000 })
+    expect(r.request).not.toHaveProperty('webOnly')
+    expect(r.request.hold).not.toHaveProperty('webPresenceAgeMs')
+    // A lens touched 2 minutes ago: away-held; once its own touch is stale and nothing polls, it goes to the Mac even
+    // though the web was touched a moment ago.
+    const lens = harness()
+    lens.s.presence = 2 * MIN; lens.s.web = 1_000
+    const l = await park(lens, ask(lens))
+    expect(l.request).toMatchObject({ awayHold: true })
+    expect(l.request).not.toHaveProperty('webOnly')
+    lens.s.now += 29 * MIN; lens.s.presence = 31 * MIN; lens.s.web = 1_000
+    await lens.b.tick()
+    expect(lens.b.settledList()[0]).toMatchObject({ resolution: 'no_client' })
+    expect(l.sent).toEqual([{}])
+  })
+
+  it('QA round 1: for every glasses and phone case, a web touch, recent or stale, changes nothing the device decides', async () => {
+    let rows = 0, settledRows = 0, keptRows = 0
+    for (const tool of ['ask', 'stamped', 'bash']) for (const idle of [0, 100, null]) for (const client of ['none', 'legacy', 'hold', 'recent', 'stale'])
+      for (const ceiling of [130, 630]) for (const away of [0, 600_000]) {
+        const make = (web: number | null) => {
+          const h = harness({ installedHookTimeoutS: () => ceiling, awayHoldMs: () => away })
+          h.s.idle = idle; h.s.web = web
+          h.s.legacy = client === 'legacy' ? h.s.now : null
+          h.s.hold = client === 'hold' || client === 'recent' || client === 'stale' ? h.s.now : null
+          h.s.presence = client === 'recent' ? 2 * MIN : client === 'stale' ? 31 * MIN : null
+          return h
+        }
+        const bodyOf = (h: ReturnType<typeof harness>) => tool === 'bash' ? bash(h) : ask(h, tool === 'stamped' ? { askHold: 1 } : {})
+        const base = make(null), stale = make(31 * MIN), recent = make(1_000)
+        const a = await base.b.admit(bodyOf(base)), b = await stale.b.admit(bodyOf(stale)), c = await recent.b.admit(bodyOf(recent))
+        const tag = `${tool}/${idle}/${client}/${ceiling}/${away}`
+        expect(b, 'stale web: ' + tag).toEqual(a)
+        if (a.ok && c.ok) {
+          expect(c, 'recent web on a device-admitted request: ' + tag).toEqual(a)
+          // And the re-check: the device's presence lapses and nothing polls; the web was touched a moment ago.
+          for (const h of [base, recent]) {
+            h.b.park(h === base ? a.request : c.request, { writable: () => true, reply: () => true })
+            h.s.now += 40_000; h.s.legacy = null; h.s.hold = null; h.s.presence = h.s.presence === null ? null : 31 * MIN
+            await h.b.tick()
+          }
+          expect(recent.b.settledList().map(x => x.resolution), 're-check: ' + tag).toEqual(base.b.settledList().map(x => x.resolution))
+          expect(recent.b.pendingCount(), 're-check: ' + tag).toBe(base.b.pendingCount())
+          if (base.b.settledList().length) settledRows++; else keptRows++
+        } else if (a.ok) expect(c, 'recent web on a device-admitted request: ' + tag).toEqual(a)
+        else if (c.ok) expect(c.request.webOnly, 'only the web admitted it: ' + tag).toBe(true)
+        else expect(c.reason === a.reason || c.reason === 'desk_active' || c.reason === 'desk_unknown', tag).toBe(true)
+        rows++
+      }
+    expect(rows).toBe(180)
+    // The re-check comparison ran both ways: some device holds ended, some were kept.
+    expect(settledRows).toBeGreaterThan(5)
+    expect(keptRows).toBeGreaterThan(5)
   })
 
   it('a web age that is not a number is no presence', async () => {

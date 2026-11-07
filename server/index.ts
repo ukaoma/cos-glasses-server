@@ -35,6 +35,7 @@ import {
   brokerSignalSink,
   permissionBrokerAwayHoldMs,
   permissionBrokerAwayRecentClientMs,
+  webAwayHoldEnabled,
   permissionBrokerMode,
   permissionBrokerTimeoutMs,
   readHidIdleSeconds,
@@ -346,6 +347,7 @@ const permissionBroker = new PermissionBroker({
   lastHoldPollAt: lastHoldQuestionsPollAt,
   presenceAgeMs: () => presenceAgeMs(),
   webPresenceAgeMs: () => webPresenceAgeMs(),
+  webAwayHold: () => webAwayHoldEnabled(process.env),
   awayRecentClientMs: () => permissionBrokerAwayRecentClientMs(process.env),
   stillWaitingAtMac: (sessionId, fingerprint) => {
     const signal = sessionSignalStore.get(sessionId)

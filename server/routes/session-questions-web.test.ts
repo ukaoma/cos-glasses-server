@@ -12,7 +12,7 @@ import { PermissionBroker, brokerSignalSink, questionHookOutput, wirePermissionB
 import { SessionSignalStore } from '../lib/session-signal-store.js'
 import { __resetClientLivenessForTests, lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, presenceAgeMs, webPresenceAgeMs } from '../lib/client-liveness.js'
 import { isWebSessionAuthorized, mintWebSessionCookieValue, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
-import { PERMISSION_BROKER_HOOK_PATH, createPermissionBrokerHookRouter, createSessionQuestionsRouter } from './permission-broker.js'
+import { PERMISSION_BROKER_HOOK_PATH, createPermissionBrokerHookRouter, createSessionQuestionsRouter, requestFromThisMac } from './permission-broker.js'
 import { ASK_INPUT, Q1, Q2, permissionEnvelope } from '../lib/__fixtures__/permission-broker.js'
 
 const API_TOKEN = 'api-tok-69912'
@@ -32,7 +32,7 @@ interface Harness { base: string; host: string; broker: PermissionBroker; cookie
  * `away: true` wires the broker as index.ts does for the away hold (6.60.0, 6.99.26): the real liveness
  * module's presence readers, a 10 minute hold, and a hook that waits 630 s. `desk` is the desk's idle seconds.
  */
-async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; awayHoldMs?: number; hookTimeoutS?: number; desk?: () => number } = {}): Promise<Harness> {
+async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; awayHoldMs?: number; hookTimeoutS?: number; desk?: () => number; webSwitch?: () => boolean; macItself?: boolean } = {}): Promise<Harness> {
   __resetClientLivenessForTests()
   const store = new SessionSignalStore({ isCosSpawnedPid: () => false })
   const desk = opts.desk ?? (() => 1_000)
@@ -43,6 +43,7 @@ async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; away
       lastLegacyPollAt: lastLegacyQuestionsPollAt, lastHoldPollAt: lastHoldQuestionsPollAt,
       presenceAgeMs: () => presenceAgeMs(), webPresenceAgeMs: () => webPresenceAgeMs(),
       awayHoldMs: () => opts.awayHoldMs ?? 600_000, installedHookTimeoutS: () => opts.hookTimeoutS ?? 630, awayRecentClientMs: () => 1_800_000,
+      ...(opts.webSwitch ? { webAwayHold: opts.webSwitch } : {}),
     } : {}),
     signals: brokerSignalSink(store), pollMs: 25, log: () => {},
   })
@@ -56,6 +57,9 @@ async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; away
     broker,
     apiToken: () => API_TOKEN,
     ...(opts.web === false ? {} : { webSessionAuthorized: (req: express.Request) => isWebSessionAuthorized(req, API_TOKEN, { selfDnsName: null, allowedPorts: [] }) }),
+    // Every test socket is loopback, which is the Mac itself (QA round 1). The away tests stand in for the phone; the
+    // Mac-itself tests keep the production check.
+    ...(opts.away && !opts.macItself ? { fromThisMac: () => false } : {}),
   }))
   const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   servers.push(server)
@@ -187,19 +191,45 @@ describe('COS Control Web and the away hold (6.99.26)', () => {
   const webPoll = (h: Harness, query: string) => fetch(`${h.base}/api/session-questions?${query}`, { headers: browser(h) }).then(async r => ({ status: r.status, body: await r.json() as { items: Array<Record<string, any>> } }))
   const touchedAgo = (ms: number) => `client=web&hold=1&presenceAgeMs=${ms}`
 
-  it('at the desk with the web live and just touched, the question goes to the Mac at once', async () => {
+  it('at the desk with the web live and just touched, the question goes to the Mac at once, stamped or not', async () => {
     const h = await start({ away: true, desk: () => 5 })
     expect((await webPoll(h, touchedAgo(1_000))).status).toBe(200)
     expect(webPresenceAgeMs()).not.toBeNull()
-    const t0 = Date.now()
+    for (const extra of [{}, { askHold: 1 }]) {
+      const t0 = Date.now()
+      expect(await hookPost(h, extra), JSON.stringify(extra)).toEqual({})
+      expect(Date.now() - t0).toBeLessThan(1_000)
+    }
+    expect(h.broker.pendingCount()).toBe(0)
+  })
+
+  it('away, a web-only stamped question is held for the web; the desk coming back hands it to the Mac within a poll', async () => {
+    let idle = 1_000
+    const h = await start({ away: true, desk: () => idle })
+    expect((await webPoll(h, touchedAgo(2_000))).status).toBe(200)
+    const hook = hookPost(h, { askHold: 1 })
+    const item = (await until(() => webPoll(h, touchedAgo(2_000)), l => l.body.items.length === 1)).body.items[0]!
+    expect(item).toMatchObject({ kind: 'question', answerable: true, awayHold: true })
+    idle = 1
+    expect(await hook).toEqual({})
+    const settled = (await webPoll(h, touchedAgo(2_000))).body as unknown as { settled: Array<Record<string, unknown>> }
+    expect(settled.settled[0]).toMatchObject({ resolution: 'handed_to_desk', waitingAtMac: true })
+  })
+
+  it('Control Web open on the Mac itself (loopback) is the desk: its touch records nothing and holds nothing', async () => {
+    const h = await start({ away: true, macItself: true })
+    expect((await webPoll(h, touchedAgo(1_000))).status).toBe(200)
+    expect(webPresenceAgeMs()).toBeNull()
     expect(await hookPost(h)).toEqual({})
-    expect(Date.now() - t0).toBeLessThan(1_000)
-    // A stamped question (6.71.7) keeps the Mac's own dialog up the whole time, and no card shows while the desk is in use.
-    const stamped = hookPost(h, { askHold: 1 })
-    expect(await within(stamped, 300)).toBe('held')
-    expect((await webPoll(h, touchedAgo(1_000))).body.items).toEqual([])
-    h.broker.stop()
-    expect(await stamped).toEqual({})
+    expect(await hookPost(h, { askHold: 1 })).toEqual({})
+  })
+
+  it('COS_WEB_AWAY_HOLD off: the touch is recorded but holds nothing', async () => {
+    const h = await start({ away: true, webSwitch: () => false })
+    expect((await webPoll(h, touchedAgo(1_000))).status).toBe(200)
+    expect(webPresenceAgeMs()).not.toBeNull()
+    expect(await hookPost(h)).toEqual({})
+    expect(await hookPost(h, { askHold: 1 })).toEqual({})
   })
 
   it('away, with the web touched recently, the question is held and answered from the web', async () => {
@@ -262,3 +292,23 @@ describe('COS Control Web and the away hold (6.99.26)', () => {
     expect(await hookPost(h)).toEqual({})
   })
 })
+
+describe('requestFromThisMac (QA round 1)', () => {
+  const own = () => ['100.101.102.103', '192.168.1.20']
+  const req = (remoteAddress: string, headers: Record<string, unknown> = {}) => ({ socket: { remoteAddress }, headers })
+  it('loopback and the Mac\u2019s own addresses are the Mac; a peer or a proxied request is not', () => {
+    for (const ip of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '100.101.102.103', '::ffff:100.101.102.103', '192.168.1.20']) expect(requestFromThisMac(req(ip), own), ip).toBe(true)
+    for (const ip of ['100.64.0.9', '::ffff:100.64.0.9', '192.168.1.21', '']) expect(requestFromThisMac(req(ip), own), ip).toBe(false)
+    // A `tailscale serve` hop arrives on loopback for a remote peer: never the Mac.
+    expect(requestFromThisMac(req('127.0.0.1', { 'tailscale-user-login': 'miles@example.com' }), own)).toBe(false)
+    expect(requestFromThisMac(req('100.101.102.103', { 'x-forwarded-for': '100.64.0.9' }), own)).toBe(false)
+    expect(requestFromThisMac(req('100.101.102.103'), () => { throw new Error('no interfaces') }), 'unreadable interfaces: only loopback is known').toBe(false)
+    expect(requestFromThisMac({ socket: null }, own)).toBe(false)
+  })
+
+  it('index.ts gives the broker the web switch', () => {
+    const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
+    expect(index).toContain('  webAwayHold: () => webAwayHoldEnabled(process.env),\n')
+  })
+})
+
