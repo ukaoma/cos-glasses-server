@@ -1,4 +1,5 @@
 import { MAX_ATTACHMENTS_PER_PROMPT } from '../../shared/media-attachment.js'
+import { TURN_FILE_MAX_BYTES } from '../lib/turn-file-store.js'
 import { dropItCapability } from '../lib/drop-settings.js'
 import { PREP_CAPABILITY } from '../../shared/prep.js'
 import { phoneMicrophoneMeetingsCapability } from '../lib/phone-recording.js'
@@ -451,6 +452,9 @@ healthRouter.get('/health', async (_req, res) => {
     // route writes each file's path on this Mac under the words. 0 with attach off; absent on an older server. Either
     // way a client sends words only.
     threadTurnAttachments: threadAttach.enabled ? MAX_ATTACHMENTS_PER_PROMPT : 0,
+    // 6.99.27: a session turn also takes ANY file up to this size (lib/turn-file-store.ts), sent to /api/media/file with
+    // X-COS-Purpose: session-turn. 0 with attach off; absent on an older server, which takes only what the media store reads.
+    threadTurnFileBytes: threadAttach.enabled ? TURN_FILE_MAX_BYTES : 0,
     ...sessionHooksHealthFields(),
     // 6.52.0: counts, the mode and two timestamps; never an id, a question, a command, or
     // how many are held (that is on the authenticated questions route).

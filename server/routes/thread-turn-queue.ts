@@ -29,8 +29,7 @@ import { readQueue, writeQueue, queuedThreadKeys } from '../lib/thread-turn-queu
 import type { DeliveryEvidence } from '../lib/queue-turn-evidence.js'
 import { continueLiveEnabled } from '../lib/session-peer-inbox-deps.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
-import { getMediaStore } from '../lib/media-store.js'
-import { keepTurnAttachments, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
+import { defaultTurnAttachmentStore, keepTurnAttachments, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 
 export interface ThreadTurnQueueDeps {
   /** 11/07: the media store a parked turn's `attachmentIds` are checked against. Absent: the real store. Tests pass a fake. */
@@ -615,7 +614,7 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
     // 11/07: every file must be readable now, and is kept past the 4 hour staged TTL while the turn waits. A file
     // that is gone refuses the park here, where the words are still in the box, never later at the drain.
     if (attach.ids.length > 0) {
-      const store = deps.turnAttachmentStore ?? getMediaStore()
+      const store = deps.turnAttachmentStore ?? defaultTurnAttachmentStore()
       const kept = await keepTurnAttachments(attach.ids, `session-turn:${clientTurnId}`, store)
       if (!kept.ok) return res.status(409).json({ error: kept.code, attachmentError: kept.code, reasonCopy: TURN_ATTACHMENT_COPY[kept.code] })
     }

@@ -205,3 +205,14 @@
 .ask-files { margin-top: 10px; }
 .ask-files .ask-files-note { flex-basis: 100%; margin: 0 2px; font-size: 13px; line-height: 1.35; color: var(--sub); }
 #ask-sheet .sheet.dragging { outline: 2px dashed var(--accent); outline-offset: -6px; }
+
+/* 6.99.27: a session's reply box with files (app.js paintReaderFiles, panes/today-actions.js): the kit's chips on a row of
+   their own above the words, Take photo and the clip beside Fork and Send, and the limits in plain words under the chips. */
+.att-composer { flex-wrap: wrap; }
+.att-composer .att-files { flex: 1 1 100%; padding: 2px 0 4px; }
+.att-composer .att-files.hidden { display: none; }
+.att-clip, .ta-clip { display: inline-flex; gap: 6px; }
+.att-clip:empty { display: none; }
+.att-clip .cc-attach { height: 38px; width: 42px; border-radius: var(--radius-sm); }
+.att-composer.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.cc-chips .att-limit { flex-basis: 100%; margin: 0 2px; font-size: 12.5px; line-height: 1.35; color: var(--sub); }

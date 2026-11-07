@@ -687,11 +687,14 @@
     r = r || O.r; var kit = KIT();
     if (!r || !kit) return null;
     var key = r.provider + '|' + r.id;
+    // 6.99.27: any file the Mac takes on a turn (threadTurnFileBytes), sent as it is; else the chat's list.
     if (!FILES[key]) FILES[key] = kit.box({
       changed: function (box) { if (O.r && FILES[O.r.provider + '|' + O.r.id] === box) paintFiles(); },
       removed: function () {},
       signedOut: function (box) { if (O.r && FILES[O.r.provider + '|' + O.r.id] === box) { O.note = { text: 'This browser was signed out. Your message and files are kept. Sign in, then tap Retry on each file.', kind: 'error' }; paintNote(); } }
-    });
+    }, { anyBytes: kit.turnFileBytes() });
+    // The Mac's answer can come after the box was made: a box with nothing in it yet takes it then.
+    if (!FILES[key].anyBytes && !FILES[key].atts.length && kit.turnFileBytes()) FILES[key].anyBytes = kit.turnFileBytes();
     return FILES[key];
   }
   function filesState(box) {
@@ -703,16 +706,17 @@
     var slot = $('ta-clip'); if (!slot) return;
     var kit = KIT();
     if (!filesOn()) { slot.innerHTML = ''; return; }
-    if (!slot.querySelector('[data-ta-file]')) slot.innerHTML = kit.clipHtml('data-ta-file');
     var box = filesBox(), full = !!(box && box.atts.length >= kit.max);
-    var lbl = slot.querySelector('.cc-attach'), inp = slot.querySelector('[data-ta-file]');
-    if (lbl) lbl.classList.toggle('full', full);
-    if (inp) inp.disabled = full || !!(O.r && O.r.sending);
+    var mode = String(box && box.anyBytes || 0);
+    if (slot.getAttribute('data-mode') !== mode) { slot.innerHTML = kit.cameraHtml('data-ta-file') + kit.clipHtml('data-ta-file', { any: box && box.anyBytes }); slot.setAttribute('data-mode', mode); }
+    var lbls = slot.querySelectorAll ? slot.querySelectorAll('.cc-attach') : [], inps = slot.querySelectorAll ? slot.querySelectorAll('[data-ta-file]') : [];
+    Array.prototype.forEach.call(lbls, function (l) { l.classList.toggle('full', full); });
+    Array.prototype.forEach.call(inps, function (i) { i.disabled = full || !!(O.r && O.r.sending); });
   }
   function paintFiles() {
     var el = $('ta-files'), kit = KIT(), box = filesBox();
     if (el && kit && box) {
-      el.innerHTML = kit.chipsHtml(box, 'data-ta');
+      el.innerHTML = kit.chipsHtml(box, 'data-ta') + (box.atts.length ? '<p class="att-limit">' + esc(kit.limitLine(box)) + '</p>' : '');
       el.classList.toggle('hidden', !box.atts.length);
     }
     paintClip(); paintSendButton();

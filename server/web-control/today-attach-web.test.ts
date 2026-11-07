@@ -242,14 +242,16 @@ class FakeXHR {
 }
 type Kit = {
   max: number; accept: string
-  box(ui?: unknown): { atts: Array<Record<string, any>>; signedOut: boolean }
+  box(ui?: unknown, opts?: { anyBytes?: number }): { atts: Array<Record<string, any>>; signedOut: boolean; anyBytes: number }
+  turnFileBytes(): number; limitLine(box: unknown): string; cameraHtml(attr: string): string
   add(box: unknown, files: unknown): string[]; remove(box: unknown, id: string): void; retry(box: unknown, id: string): boolean; clear(box: unknown): void
   pending(box: unknown): boolean; failed(box: unknown): boolean; ids(box: unknown): string[]; sent(box: unknown): unknown[]
-  chipsHtml(box: unknown, attr?: string): string; clipHtml(attr: string): string
+  chipsHtml(box: unknown, attr?: string): string; clipHtml(attr: string, opts?: { any?: number }): string
   pasted(e: unknown): unknown; dragged(e: unknown, zone: unknown): unknown; turnFiles(): number; askOn(): boolean; ensureCaps(): Promise<unknown>
 }
-function loadChat(health: Record<string, unknown> = { threadTurnAttachments: 5, features: { durableQueryJobs: true } }, answers: Record<string, unknown> = {}) {
+function loadChat(health: Record<string, unknown> = { threadTurnAttachments: 5, features: { durableQueryJobs: true } }, answers: Record<string, unknown> = {}, o: { coarse?: boolean } = {}) {
   FakeXHR.sent = []
+  revoked.length = 0
   const posts: Array<{ path: string; body: any }> = []
   const W: Record<string, unknown> = {
     $: () => null, esc: (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]!),
@@ -262,17 +264,19 @@ function loadChat(health: Record<string, unknown> = { threadTurnAttachments: 5, 
     },
   }
   const media = { matches: false, addEventListener: () => {} }
+  const coarse = { matches: true, addEventListener: () => {} }
   const document = {
     addEventListener: () => {}, querySelectorAll: () => [], querySelector: () => null, getElementById: () => null,
     activeElement: null, hidden: false, body: { scrollHeight: 0 }, scrollingElement: {}, createElement: () => ({ setAttribute() {}, classList: { add() {} } }),
   }
-  const window = { COSWeb: W, matchMedia: () => media, scrollTo: () => {}, localStorage: { getItem: () => null, setItem: () => {} }, navigator: { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1' } }
-  const ctx = vm.createContext({ window, document, setTimeout, clearTimeout, console, Date, JSON, Math, Promise, localStorage: window.localStorage, crypto: globalThis.crypto, XMLHttpRequest: FakeXHR, encodeURIComponent })
+  const window = { COSWeb: W, matchMedia: (q: string) => (o.coarse && q === '(pointer: coarse)' ? coarse : media), scrollTo: () => {}, localStorage: { getItem: () => null, setItem: () => {} }, navigator: { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.1 Mobile/15E148 Safari/604.1' } }
+  const ctx = vm.createContext({ window, document, setTimeout, clearTimeout, console, Date, JSON, Math, Promise, localStorage: window.localStorage, crypto: globalThis.crypto, XMLHttpRequest: FakeXHR, encodeURIComponent, URL: { createObjectURL: (f: { name: string }) => 'blob:fake/' + f.name, revokeObjectURL: (u: string) => { revoked.push(u) } } })
   vm.runInContext(CHAT, ctx)
   const chat = W.cosChat as Record<string, any>
   if (health) chat.fromHealth(health)
   return { chat, kit: chat.attach as Kit, posts, W }
 }
+const revoked: string[] = []
 const MB = 1048576
 const file = (name: string, type: string, size = 2048) => ({ name, type, size, lastModified: Date.UTC(2026, 10, 7, 14) })
 const PDF = () => file('notes.pdf', 'application/pdf', 300 * 1024)
@@ -681,5 +685,234 @@ describe('the Ask carries the files into the query job (askCos, then the chat’
     const c2 = loadChat({ threadTurnAttachments: 5, features: { durableQueryJobs: true } }, { 'POST /api/query-jobs': { job: { jobId: 'j2', status: 'queued' } } })
     await c2.chat.askFromSheet('Words only', { context: 'x' })
     expect('attachmentIds' in c2.posts.find(p => p.path === '/api/query-jobs')!.body).toBe(false)
+  })
+})
+
+// ── 6.99.27: any file for a session, Take photo, and the Sessions reader ──
+const H27 = { threadTurnAttachments: 5, threadTurnFileBytes: 64 * MB, features: { durableQueryJobs: true } }
+
+describe('6.99.27: a session box takes any file, as it is, and says the limits in plain words', () => {
+  it('a .zip, a .docx and a HEIC go as they are, marked for a session turn; the chat’s own box still refuses them', async () => {
+    const { kit } = loadChat(H27)
+    expect(kit.turnFileBytes()).toBe(64 * MB)
+    const box = kit.box({}, { anyBytes: kit.turnFileBytes() })
+    expect(kit.add(box, [file('logs.zip', 'application/zip'), file('brief.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'), file('IMG_2041.HEIC', 'image/heic', 3 * MB)])).toEqual([])
+    expect(box.atts.map(t => [t.name, t.kind, t.mime])).toEqual([
+      ['logs.zip', 'file', 'application/zip'],
+      ['brief.docx', 'file', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+      ['IMG_2041.HEIC', 'photo', 'image/heic'],
+    ])
+    // Every one is the file itself to /api/media/file, never a resized JPEG, and says it is for a session turn.
+    expect(FakeXHR.sent.map(x => [x.url, x.headers['X-COS-Purpose'], x.headers['Content-Type'], (x.body as { name: string }).name])).toEqual([
+      ['/api/media/file', 'session-turn', 'application/zip', 'logs.zip'],
+      ['/api/media/file', 'session-turn', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'brief.docx'],
+      ['/api/media/file', 'session-turn', 'image/heic', 'IMG_2041.HEIC'],
+    ])
+    const chat = kit.box()
+    expect(kit.add(chat, [file('logs.zip', 'application/zip')])).toEqual(['logs.zip cannot be attached. COS takes photos, PDF, TXT, MD, CSV, JSON, XLSX, MP4 and MOV.'])
+    kit.add(chat, [PDF()])
+    expect(xhr().headers['X-COS-Purpose'], 'the chat never asks for a turn file').toBeUndefined()
+  })
+
+  it('the caps in plain words: 64 MB a file, 100 MB a video, nothing empty', () => {
+    const { kit } = loadChat(H27)
+    const box = kit.box({}, { anyBytes: 64 * MB })
+    expect(kit.add(box, [file('dump.bin', 'application/octet-stream', 65 * MB), file('walk.mov', 'video/quicktime', 101 * MB), file('blank.txt', 'text/plain', 0)])).toEqual([
+      'dump.bin is 65 MB. A session takes a file up to 64 MB.',
+      'walk.mov is 101 MB. A session takes a video up to 100 MB.',
+      'blank.txt is empty.',
+    ])
+    expect(kit.limitLine(box)).toBe('Up to 5 files, 64 MB each (videos up to 100 MB). The session gets where each one is on your Mac.')
+  })
+
+  it('a photo shows its own thumbnail, and Remove lets it go', () => {
+    const { kit } = loadChat(H27)
+    const box = kit.box({}, { anyBytes: 64 * MB })
+    kit.add(box, [file('Screenshot.png', 'image/png', 900 * 1024)])
+    expect(box.atts[0]!.thumb).toBe('blob:fake/Screenshot.png')
+    kit.remove(box, box.atts[0]!.id as string)
+    expect(revoked).toEqual(['blob:fake/Screenshot.png'])
+  })
+
+  it('threadTurnFileBytes: a whole number of bytes, never above the 64 MB the kit knows', () => {
+    expect(loadChat({ threadTurnAttachments: 5, threadTurnFileBytes: '67108864' }).kit.turnFileBytes()).toBe(0)
+    expect(loadChat({ threadTurnAttachments: 5, threadTurnFileBytes: 1.5 }).kit.turnFileBytes()).toBe(0)
+    expect(loadChat({ threadTurnAttachments: 5, threadTurnFileBytes: 512 * MB }).kit.turnFileBytes()).toBe(64 * MB)
+    expect(loadChat({ threadTurnAttachments: 5, threadTurnFileBytes: 10 * MB }).kit.turnFileBytes()).toBe(10 * MB)
+  })
+
+  it('an older Mac (no threadTurnFileBytes) keeps the chat’s list for a session box', () => {
+    const { kit } = loadChat({ threadTurnAttachments: 5 })
+    expect(kit.turnFileBytes()).toBe(0)
+    expect(kit.turnFileBytes.call(null)).toBe(0)
+    expect(loadChat({ threadTurnAttachments: 0, threadTurnFileBytes: 64 * MB }).kit.turnFileBytes(), 'no files on turns at all').toBe(0)
+  })
+
+  it('the clip: no accept list for a session (any file), the chat’s list elsewhere, which includes image/*', () => {
+    const { kit } = loadChat(H27)
+    const any = kit.clipHtml('data-sx-file', { any: 64 * MB })
+    expect(any).not.toContain('accept=')
+    expect(any).toContain('aria-label="Attach photos or files, up to 5, 64 MB each"')
+    expect(any).not.toMatch(/capture/)
+    const narrow = kit.clipHtml('data-ask-file')
+    expect(narrow).toMatch(/accept="image\/\*,/)
+  })
+
+  it('Take photo: on a phone, the camera itself (image/*, capture environment); on a desktop, not drawn', () => {
+    const phone = loadChat(H27, {}, { coarse: true }).kit.cameraHtml('data-sx-file')
+    expect(phone).toContain('<input type="file" class="cc-file" accept="image/*" capture="environment" data-sx-file aria-label="Take photo">')
+    expect(phone).toContain('#i-camera')
+    expect(loadChat(H27).kit.cameraHtml('data-sx-file')).toBe('')
+  })
+
+  it('the chat’s own composer has Take photo beside the clip on a phone', () => {
+    const c = loadChat(H27, {}, { coarse: true })
+    expect(CHAT).toContain("cameraHtml('data-cos-file') + clipHtml('data-cos-file')")
+    expect(c.kit.cameraHtml('data-cos-file')).toContain('capture="environment"')
+  })
+})
+
+describe('6.99.27: Today’s reply box takes any file and says the limits', () => {
+  it('a .zip from Today goes as a turn file and its id goes with the words', async () => {
+    const c = loadChat(H27)
+    const h = load({ data: { needs: [NEED] }, routes: OK_ROUTES, api: { '/api/work-board/your-move': { available: true, items: [NEED] } }, cosChat: c.chat })
+    h.ta.open('need', 'act-1', h.opener())
+    await flush()
+    expect(h.els['ta-clip']!.innerHTML).not.toContain('accept=')
+    ;(h.document.appended.listeners.change as Array<(e: unknown) => void>)[0]!({ target: { hasAttribute: (a: string) => a === 'data-ta-file', files: [file('trace.zip', 'application/zip')], value: '' } })
+    expect(xhr().headers['X-COS-Purpose']).toBe('session-turn')
+    expect(h.els['ta-files']!.innerHTML).toContain('Up to 5 files, 64 MB each')
+    xhr().respond(200, { attachment: { id: mediaId('d'), kind: 'session_file' } }); await flush()
+    h.els['ta-input']!.value = 'The trace is attached'
+    h.tap('send'); await flush()
+    const turns = h.calls.filter(x => x.method === 'POST' && x.path === TURNS)
+    expect(turns[0]!.body).toMatchObject({ prompt: 'The trace is attached', attachmentIds: [mediaId('d')] })
+  })
+})
+
+// ── the Sessions reader’s box (Fork and Send) ───────────
+function readerPage(o: { routes?: Routes; health?: Record<string, unknown> } = {}) {
+  const start = APP.indexOf('  // ── Sessions: read, send, queue, fork, stop')
+  const end = APP.indexOf("  // Copy session (Control's Kickstart brief")
+  const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
+  const mdRegion = APP.slice(APP.indexOf('  // Markdown for an assistant turn'), APP.indexOf('  function renderTurns('))
+  const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0]
+  const c = loadChat(o.health ?? H27, {}, { coarse: true })
+  const { fetch, calls } = fakeFetch(o.routes ?? READER_ROUTES)
+  const els: Record<string, El> = {}
+  const $ = (id: string) => { if (!els[id]) { els[id] = new El(); els[id]!.id = id } return els[id]! }
+  for (const id of ['session-form', 'session-input', 'session-files', 'session-clip', 'session-send', 'session-status', 'session-verdict']) $(id)
+  ;($('session-turns') as unknown as { appendChild: (e: unknown) => void }).appendChild = () => {}
+  const store = new Map<string, string>()
+  const r = { provider: 'claude', id: SID, draft: null, held: [], view: null, verdict: null, refusal: null, cautionAck: false, feed: null, live: null, queued: 0 }
+  const deps: Record<string, unknown> = {
+    state: { reading: r, turnPoll: null, pane: 'sessions' }, $, esc, md: (s: unknown) => String(s), toDate: (v: unknown) => (v ? new Date(String(v)) : null), autoGrow: () => {}, showAuth: () => {},
+    clock: () => '9:00', fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
+    AbortController, setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0,
+    document: { querySelector: () => null, createElement: () => new El(), documentElement: { scrollHeight: 0 } }, window: { COSWeb: { cosChat: c.chat }, scrollTo: () => {} }, loadSessions: () => {},
+  }
+  // eslint-disable-next-line no-new-func
+  const page = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) +
+    '\nreturn { send: sendSessionTurn, add: addReaderFiles, paint: paintReaderFiles, box: function () { return readerBox(state.reading); } };\n}')(deps)
+  return { page, els, calls, r, kit: c.kit, status: () => els['session-status']?.innerHTML ?? '' }
+}
+const READER_ROUTES: Routes = {
+  ['POST ' + P('/attach')]: { status: 201, body: { attached: true, bindingId: 'b1', epoch: 3 } },
+  ['POST ' + TURNS]: { status: 202, body: { outcome: 'queued' } },
+  ['POST ' + P('/fork')]: { status: 200, body: { forked: true, forkRef: 'claude:copy' } },
+}
+
+describe('6.99.27: the Sessions reader’s box (Fork and Send) takes photos and files', () => {
+  it('draws Take photo and the clip (any file); a file waits on Send and Fork, then one turn carries it', async () => {
+    const t = readerPage()
+    t.page.paint()
+    expect(t.els['session-clip']!.innerHTML).toContain('capture="environment"')
+    expect(t.els['session-clip']!.innerHTML).toContain('data-sx-file')
+    expect(t.els['session-clip']!.innerHTML.match(/accept=/g)).toEqual(['accept='])   // the camera's image/* only
+    t.page.add([file('build-log.txt.gz', 'application/gzip')])
+    expect(t.els['session-files']!.innerHTML).toContain('build-log.txt.gz')
+    expect(t.els['session-files']!.innerHTML).toContain('data-action="att-remove"')
+    expect(t.els['session-files']!.innerHTML).toContain('Up to 5 files, 64 MB each')
+    expect(t.els['session-send']!.disabled).toBe(true)
+    expect(t.els['session-send']!.textContent).toBe('Uploading')
+    t.els['session-input']!.value = 'Why did the build fail?'
+    t.page.send(false); t.page.send(true); await flush()
+    expect(t.calls.filter(x => x.method === 'POST'), 'neither Send nor Fork goes before the upload').toEqual([])
+    expect(t.status()).toBe('A file is still uploading. Fork when it finishes.')
+    xhr().respond(200, { attachment: { id: mediaId('e'), kind: 'session_file' } }); await flush()
+    expect(t.els['session-send']!.disabled).toBe(false)
+    t.page.send(false); t.page.send(false); await flush()
+    const turns = t.calls.filter(x => x.method === 'POST' && x.path === TURNS)
+    expect(turns, 'one turn for a double tap').toHaveLength(1)
+    expect(turns[0]!.body).toMatchObject({ prompt: 'Why did the build fail?', attachmentIds: [mediaId('e')] })
+    expect(t.page.box().atts, 'the sent file leaves the box').toEqual([])
+  })
+
+  it('a failed upload blocks both, in words; Remove sends the words alone', async () => {
+    const t = readerPage()
+    t.page.paint()
+    t.page.add([PDF()]); xhr().fail(); await flush()
+    t.els['session-input']!.value = 'Words'
+    t.page.send(false); await flush()
+    expect(t.status()).toBe('A file did not upload. Retry it or remove it, then send.')
+    expect(t.calls.filter(x => x.method === 'POST')).toEqual([])
+    t.kit.remove(t.page.box(), t.page.box().atts[0]!.id as string)
+    t.page.send(false); await flush()
+    const turns = t.calls.filter(x => x.method === 'POST' && x.path === TURNS)
+    expect(turns).toHaveLength(1)
+    expect('attachmentIds' in turns[0]!.body).toBe(false)
+  })
+
+  it('Fork carries the files to the copy’s first turn; other files are another fork', async () => {
+    const t = readerPage()
+    t.page.paint()
+    t.page.add([CSV()]); ok(xhr(), mediaId('f')); await flush()
+    t.els['session-input']!.value = 'Try the other approach in a copy'
+    t.page.send(true); await flush()
+    const forks = t.calls.filter(x => x.method === 'POST' && x.path === P('/fork'))
+    expect(forks).toHaveLength(1)
+    expect(forks[0]!.body).toMatchObject({ prompt: 'Try the other approach in a copy', attachmentIds: [mediaId('f')] })
+    expect(forks[0]!.body.clientForkId).toMatch(/^fk/)
+    expect(t.page.box().atts, 'a made fork took its files').toEqual([])
+  })
+
+  it('a fork that did not answer keeps its key for the same words and files, and takes a new one for other files', async () => {
+    const routes: Routes = { ...READER_ROUTES, ['POST ' + P('/fork')]: { status: 500, body: {} } }
+    const t = readerPage({ routes })
+    t.page.paint()
+    t.page.add([CSV()]); ok(xhr(), mediaId('a')); await flush()
+    t.els['session-input']!.value = 'Copy it'
+    t.page.send(true); await flush()
+    t.page.send(true); await flush()
+    t.kit.remove(t.page.box(), t.page.box().atts[0]!.id as string)
+    t.page.add([PDF()]); ok(xhr(), mediaId('b')); await flush()
+    t.page.send(true); await flush()
+    const forks = t.calls.filter(x => x.method === 'POST' && x.path === P('/fork'))
+    expect(forks).toHaveLength(3)
+    expect(forks[1]!.body.clientForkId).toBe(forks[0]!.body.clientForkId)
+    expect(forks[2]!.body.clientForkId).not.toBe(forks[0]!.body.clientForkId)
+    expect(forks[2]!.body.attachmentIds).toEqual([mediaId('b')])
+  })
+
+  it('a busy session: the parked message carries the files, and they leave the box', async () => {
+    const routes: Routes = { ...READER_ROUTES,
+      ['POST ' + P('/attach')]: { status: 409, body: { attached: false, reason: 'native_thread_working', reasonCopy: 'Busy.' } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0 } } }
+    const t = readerPage({ routes })
+    t.page.paint()
+    t.page.add([PDF()]); ok(xhr(), mediaId('c')); await flush()
+    t.els['session-input']!.value = 'When you are free'
+    t.page.send(false); await flush()
+    const parked = t.calls.filter(x => x.method === 'POST' && x.path === P('/queued-turns'))
+    expect(parked[0]!.body).toMatchObject({ prompt: 'When you are free', attachmentIds: [mediaId('c')] })
+    expect(t.page.box().atts).toEqual([])
+  })
+
+  it('a Mac that takes no files on a turn: no clip, no camera, and a send is words only', async () => {
+    const t = readerPage({ health: { features: { durableQueryJobs: true } } })
+    t.page.paint()
+    expect(t.els['session-clip']!.innerHTML).toBe('')
+    t.page.add([PDF()])
+    expect(FakeXHR.sent).toEqual([])
   })
 })
