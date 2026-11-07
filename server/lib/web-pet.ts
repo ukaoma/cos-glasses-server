@@ -102,7 +102,7 @@ export function planPose(src: PetPoseSource, height = WEB_PET_HEIGHT, maxChunk =
   return { ...src, outHeight: height, frameWidth, perChunk, chunks, key }
 }
 
-export function webPetManifest(dir: string = controlSupportDir()) {
+export function webPetManifest(dir: string = controlSupportDir(), pet = 'mac') {
   const sources = readPetSources(dir)
   const poses: Record<string, { frames: number; interval: number; frameWidth: number; height: number; perChunk: number; chunks: string[] }> = {}
   for (const pose of WEB_PET_POSES) {
@@ -111,7 +111,7 @@ export function webPetManifest(dir: string = controlSupportDir()) {
     const p = planPose(src)
     poses[pose] = {
       frames: p.frames, interval: p.interval, frameWidth: p.frameWidth, height: WEB_PET_HEIGHT, perChunk: p.perChunk,
-      chunks: Array.from({ length: p.chunks }, (_, i) => `/api/web-pet/sheet/${pose}/${i}?v=${p.key}`),
+      chunks: Array.from({ length: p.chunks }, (_, i) => `/api/web-pet/sheet/${pose}/${i}?pet=${encodeURIComponent(pet)}&v=${p.key}`),
     }
   }
   return { available: Object.keys(poses).length > 0, poses }
@@ -179,4 +179,48 @@ async function buildPose(plan: PetPosePlan, base: string, opts: PetChunkOptions)
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }
+}
+
+/** Height of the first-frame previews in the pet picker. */
+export const WEB_PET_PREVIEW_HEIGHT = 96
+
+/**
+ * One still frame (the first frame of idle, else of the first pose this pet has) for the picker, built once
+ * with sips and cached. Uses the same flip-and-crop as the first chunk, since sips reads offset 0 as centre.
+ */
+export function petPreview(dir: string, cacheDir: string, opts: { run?: Run; sipsPath?: string } = {}): Promise<string> {
+  const sources = readPetSources(dir)
+  const src = sources.idle ?? WEB_PET_POSES.map((p) => sources[p]).find(Boolean)
+  if (!src) return Promise.reject(new Error('no_pet_art'))
+  const plan = planPose(src, WEB_PET_PREVIEW_HEIGHT)
+  const target = path.join(cacheDir, `preview-${plan.key}.png`)
+  if (fs.existsSync(target)) return Promise.resolve(target)
+  let job = inflight.get(target)
+  if (!job) {
+    job = (async () => {
+      const run = opts.run ?? sips
+      const bin = opts.sipsPath ?? '/usr/bin/sips'
+      fs.mkdirSync(cacheDir, { recursive: true })
+      const tmp = fs.mkdtempSync(path.join(cacheDir, '.preview-'))
+      try {
+        const H = plan.outHeight, total = plan.frameWidth * plan.frames, w = plan.frameWidth
+        const resized = path.join(tmp, 'resized.png'), out = path.join(tmp, 'out.png')
+        await run(bin, ['-z', String(H), String(total), plan.file, '--out', resized])
+        if (plan.frames === 1) {
+          fs.copyFileSync(resized, out)
+        } else {
+          const flipped = path.join(tmp, 'flipped.png'), far = path.join(tmp, 'far.png')
+          await run(bin, ['-f', 'horizontal', resized, '--out', flipped])
+          await run(bin, ['-c', String(H), String(w), '--cropOffset', '0', String(total - w), flipped, '--out', far])
+          await run(bin, ['-f', 'horizontal', far, '--out', out])
+        }
+        fs.renameSync(out, target)
+        return target
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true })
+      }
+    })().finally(() => inflight.delete(target))
+    inflight.set(target, job)
+  }
+  return job
 }

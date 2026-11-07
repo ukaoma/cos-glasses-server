@@ -320,12 +320,32 @@
   // is "waiting", then one, two, three, four or more sessions in play are working, duel, trio, swarm, an open
   // quiet session is "patrol", none is "idle". Strips come from /api/web-pet, resized and cut for a phone.
   var PET = { manifest: null, fetchedAt: 0, pose: null, timer: null, frame: 0, token: 0 };
+  // This browser's pet settings (Settings > Pet): which pet, and whether Today shows it. Per browser, like the theme.
+  var PET_KEY = 'cos-web-pet';
+  function petPrefs() {
+    var p = readStore(PET_KEY);
+    var pet = typeof p.pet === 'string' && /^(mac|(shipped|gallery):[a-z0-9][a-z0-9-]{0,80})$/.test(p.pet) ? p.pet : 'mac';
+    return { pet: pet, show: p.show !== false };
+  }
+  function setPetPrefs(next) {
+    var cur = petPrefs();
+    var merged = { pet: next.pet != null ? next.pet : cur.pet, show: next.show != null ? !!next.show : cur.show };
+    writeStore(PET_KEY, merged);
+    // Forget the old pet's manifest and loop; Today repaints with the new choice next time it shows.
+    PET.manifest = null; PET.fetchedAt = 0; PET.pose = null; PET.token++; petStop();
+    var box = $('today-pet');
+    if (box) { box.innerHTML = ''; box.classList.add('hidden'); }
+    if (state.pane === 'today' && state.sessions) renderPet(state.sessions);
+    return merged;
+  }
   var PET_HEIGHT = 140;
   function petPose(sessions) {
     var working = 0, waiting = 0, alive = 0;
     sessions.forEach(function (s) {
       var st = sxState(s);
-      if (st === 'running') working++;
+      // Working is the Running card's own test (running_active), so the caption under the pet never
+      // disagrees with the Running count beside it (11/06: the pet said 3 while the card said 2).
+      if (s.running_active) working++;
       else if (st === 'waiting') waiting++;
       if (s.running || s.running_active) alive++;
     });
@@ -367,15 +387,34 @@
     else if (rec.previousElementSibling !== box) rec.parentNode.insertBefore(box, rec);
   }
   if (PET_WIDE) { if (PET_WIDE.addEventListener) PET_WIDE.addEventListener('change', placePet); else if (PET_WIDE.addListener) PET_WIDE.addListener(placePet); }
+  var PET_CHANGE = '<button type="button" class="pet-change" data-goto="settings/pet">Change pet</button>';
+  // A still pet (a gallery pick, Cloud Puff, or a single image on the Mac): one picture for every state.
+  function renderPetStill(box, m, sessions) {
+    var c = petPose(sessions), label = petCaption(c);
+    petStop(); PET.pose = 'still:' + m.still;
+    var img = box.querySelector('.pet-still');
+    if (!img || img.getAttribute('src') !== m.still) {
+      box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><img class="pet-still" alt="" src="' + esc(m.still) + '"><span class="pet-caption"></span></button>' + PET_CHANGE;
+      img = box.querySelector('.pet-still');
+      img.addEventListener('error', function () { box.classList.add('hidden'); });
+      img.addEventListener('load', function () { img.classList.toggle('pixel', img.naturalHeight > 0 && img.naturalHeight < 140); });
+    }
+    box.querySelector('.pet-caption').textContent = label;
+    box.querySelector('.pet-btn').setAttribute('aria-label', 'Sessions: ' + label);
+    box.classList.remove('hidden');
+  }
   function renderPet(sessions) {
     var box = $('today-pet');
     if (!box) return;
     placePet();
-    var fresh = PET.manifest && Date.now() - PET.fetchedAt < 10 * 60000;
-    (fresh ? Promise.resolve(PET.manifest) : api('/api/web-pet').then(function (m) { PET.manifest = m; PET.fetchedAt = Date.now(); return m; }))
-      .catch(function () { return PET.manifest; })
+    var prefs = petPrefs();
+    if (!prefs.show) { box.classList.add('hidden'); box.innerHTML = ''; petStop(); PET.pose = null; return; }
+    var fresh = PET.manifest && PET.manifest.pet === prefs.pet && Date.now() - PET.fetchedAt < 10 * 60000;
+    (fresh ? Promise.resolve(PET.manifest) : api('/api/web-pet?pet=' + encodeURIComponent(prefs.pet)).then(function (m) { PET.manifest = m; PET.fetchedAt = Date.now(); return m; }))
+      .catch(function () { return PET.manifest && PET.manifest.pet === prefs.pet ? PET.manifest : null; })
       .then(function (m) {
         if (!m || !m.available) { box.classList.add('hidden'); petStop(); return; }
+        if (m.kind === 'still') { renderPetStill(box, m, sessions); return; }
         var c = petPose(sessions);
         var pose = m.poses[c.pose] ? c.pose : (m.poses.idle ? 'idle' : Object.keys(m.poses)[0]);
         var spec = m.poses[pose];
@@ -392,7 +431,7 @@
           petStop();
           PET.pose = pose; PET.frame = 0;
           if (!box.querySelector('.pet-sprite')) {
-            box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><span class="pet-sprite" aria-hidden="true"></span><span class="pet-caption"></span></button>';
+            box.innerHTML = '<button type="button" class="pet-btn" data-goto="sessions"><span class="pet-sprite" aria-hidden="true"></span><span class="pet-caption"></span></button>' + PET_CHANGE;
           }
           box.querySelector('.pet-caption').textContent = label;
           box.querySelector('.pet-btn').setAttribute('aria-label', 'Sessions: ' + label);
@@ -3794,6 +3833,8 @@
     state: state, titles: TITLES, go: go, parseRoute: parseRoute, goBack: goBack,
     registerPane: function (name, def) { PANES[name] = def; },
     sessionList: sessionList,
+    petPrefs: petPrefs,
+    setPetPrefs: setPetPrefs,
     onRoute: function (fn) { routeHooks.push(fn); },
     onShell: function (fn) { shellHooks.push(fn); },
     // The detail title after "COS Control > Section" (Control's breadcrumb). Pane modules set it

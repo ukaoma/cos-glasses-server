@@ -30,6 +30,61 @@
   var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   function soft(p) { return p.then(function (d) { return d; }, function () { return null; }); }
+  // ── Pet (this browser) ──────────────────────────────────
+  // Which pet Today shows here and whether it shows at all. Kept per browser (COSWeb.petPrefs), like the theme.
+  // The Mac's own pet is changed in COS Control: the app does not watch its pet folder, so a change from here
+  // would leave the Mac showing the old pet. Catalog: GET /api/web-pet/catalog (lib/web-pet-choice.ts).
+  var PET = { catalog: null, state: 'idle', q: '' };
+  function loadPetCatalog() {
+    if (PET.state === 'loading' || PET.state === 'ready') return;
+    PET.state = 'loading';
+    api('/api/web-pet/catalog').then(function (c) { PET.catalog = c; PET.state = 'ready'; render(); },
+      function () { PET.state = 'error'; render(); });
+  }
+  function petChoiceRow(pet, name, desc, preview, current) {
+    var on = current === pet;
+    return '<button type="button" class="cx-set-row cx-set-choice pet-choice" data-pet="' + esc(pet) + '" aria-pressed="' + on + '">' +
+      (preview ? '<img class="pet-thumb" alt="" loading="lazy" src="' + esc(preview) + '">' : '<span class="pet-thumb"></span>') +
+      '<span class="cx-set-text"><span class="cx-set-name">' + esc(name) + '</span>' + (desc ? '<span class="cx-set-desc">' + esc(desc) + '</span>' : '') + '</span>' +
+      '<span class="value">' + (on ? '<span class="check">✓</span>' : '') + '</span></button>';
+  }
+  function petBody() {
+    var prefs = W.petPrefs ? W.petPrefs() : { pet: 'mac', show: true };
+    var out = group('On this browser', '',
+      row('Show the pet on Today', 'Only here. The pet on your Mac stays as it is.', toggle(prefs.show, 'data-set="pet-show"', 'Show the pet on Today')));
+    if (PET.state === 'idle') loadPetCatalog();
+    if (PET.state !== 'ready') {
+      return out + group('Character', '', PET.state === 'error'
+        ? '<p class="cx-set-row">Could not load the pets. <button type="button" class="cx-btn quiet" data-set="pet-retry">Try again</button></p>'
+        : W.skeletonRows(3));
+    }
+    var c = PET.catalog || {}, shipped = c.shipped || [], gallery = c.gallery || [];
+    out += group('Character', 'The pet this browser shows on Today. It does not change the pet on your Mac.',
+      petChoiceRow('mac', 'Same as my Mac', c.mac && c.mac.available ? 'Follows the pet COS Control shows.' : 'Your Mac has no pet set.', c.mac && c.mac.preview, prefs.pet) +
+      shipped.map(function (p) { return petChoiceRow(p.pet, p.name, p.summary || (p.animated ? 'Animated.' : ''), p.preview, prefs.pet); }).join(''));
+    if (gallery.length) {
+      var picked = gallery.filter(function (p) { return p.pet === prefs.pet; })[0];
+      out += '<div class="cx-set-group"><h3 class="cx-set-title">Gallery</h3><p class="cx-set-blurb">' + gallery.length +
+        ' pets from the OpenPets gallery COS Control uses. Each shows as one still picture, as it does on the Mac.' + (picked ? ' In use: ' + esc(picked.name) + '.' : '') + '</p>' +
+        '<input type="search" class="pet-search" id="pet-search" placeholder="Search the gallery" aria-label="Search the gallery" value="' + esc(PET.q) + '">' +
+        '<div class="pet-grid" id="pet-grid">' + gallery.map(function (p) {
+          var on = p.pet === prefs.pet, words = (p.name + ' ' + p.category + ' ' + p.description).toLowerCase();
+          return '<button type="button" class="pet-tile" data-pet="' + esc(p.pet) + '" data-words="' + esc(words) + '" aria-pressed="' + on + '" title="' + esc(p.description || p.name) + '">' +
+            '<img alt="" loading="lazy" src="' + esc(p.preview) + '"><span>' + esc(p.name) + '</span></button>';
+        }).join('') + '</div><p class="cx-set-blurb hidden" id="pet-none">No pets match that search.</p></div>';
+    }
+    return out;
+  }
+  function filterPets() {
+    var q = PET.q.trim().toLowerCase(), grid = $('pet-grid'), shown = 0;
+    if (!grid) return;
+    grid.querySelectorAll('.pet-tile').forEach(function (t) {
+      var hit = !q || (t.getAttribute('data-words') || '').indexOf(q) >= 0;
+      t.classList.toggle('hidden', !hit); if (hit) shown++;
+    });
+    var none = $('pet-none'); if (none) none.classList.toggle('hidden', shown > 0);
+  }
+
   function load(force) {
     if (S.state === 'loading' || (S.data && !force)) return;
     S.state = 'loading';
@@ -154,6 +209,7 @@
     var d = S.data || {};
     var out = '';
     if (cat.id === 'reach') return reachBody();
+    if (cat.id === 'pet') return petBody() + onMac(cat.mac);
     if (cat.id === 'ai' && d.dp) {
       var p = d.dp.provider || '';
       var name = function (x) { return x === 'subq' ? 'SubQ' : x === 'jev' ? 'Jev' : x || 'Not set'; };
@@ -226,9 +282,10 @@
       browserGroup() +
       (S.state !== 'ready' ? '<div class="cx-list" style="margin-top:18px">' + W.skeletonRows(4) + '</div>' :
         CATEGORIES.filter(function (cat) { return !cat.p2 || p2On(); }).map(function (cat) {
-          return '<section class="cx-set-cat"><h2 class="cx-col-title">' + esc(cat.title) + '</h2><p class="cx-set-blurb">' + esc(cat.summary) + '</p>' + categoryBody(cat) + '</section>';
+          return '<section class="cx-set-cat" id="set-cat-' + cat.id + '"><h2 class="cx-col-title">' + esc(cat.title) + '</h2><p class="cx-set-blurb">' + esc(cat.summary) + '</p>' + categoryBody(cat) + '</section>';
         }).join('')) +
       '<p class="status-line" id="settings-status"></p></div>';
+    if (PET.q) filterPets();
   }
 
   function say(text, isError) { var el = $('settings-status'); if (el) { el.textContent = text; el.classList.toggle('error', !!isError); } }
@@ -236,8 +293,26 @@
   pane.addEventListener('click', function (e) {
     var go = e.target.closest('[data-go]');
     if (go) { var parts = go.getAttribute('data-go').split('/'); return W.go(parts[0], parts.slice(1)); }
+    var pick = e.target.closest('[data-pet]');
+    if (pick && W.setPetPrefs) {
+      W.setPetPrefs({ pet: pick.getAttribute('data-pet') });
+      pane.querySelectorAll('[data-pet]').forEach(function (b) {
+        var on = b === pick; b.setAttribute('aria-pressed', String(on));
+        var v = b.querySelector('.value'); if (v) v.innerHTML = on ? '<span class="check">✓</span>' : '';
+      });
+      W.toast('Pet changed. Today shows it here.');
+      return;
+    }
     var t = e.target.closest('[data-set]');
     if (!t || t.disabled) return;
+    if (t.getAttribute('data-set') === 'pet-show') {
+      var shown = t.getAttribute('aria-checked') === 'true';
+      t.setAttribute('aria-checked', String(!shown));
+      if (W.setPetPrefs) W.setPetPrefs({ show: !shown });
+      W.toast(!shown ? 'Pet on' : 'Pet off');
+      return;
+    }
+    if (t.getAttribute('data-set') === 'pet-retry') { PET.state = 'idle'; return render(); }
     var act = t.getAttribute('data-set');
     if (act === 'refresh') { S.data = null; S.state = 'idle'; load(true); return render(); }
     if (act === 'provider') {
@@ -273,6 +348,10 @@
     }
   });
 
+  pane.addEventListener('input', function (e) {
+    if (e.target && e.target.id === 'pet-search') { PET.q = e.target.value; filterPets(); }
+  });
+
   // Number, time, day and steer fields save when they change (a number is clamped by the server, then shown as saved).
   pane.addEventListener('change', function (e) {
     var f = e.target && e.target.closest ? e.target.closest('[data-p2]') : null;
@@ -287,6 +366,17 @@
   });
 
   W.registerPane('settings', {
-    load: function () { load(false); render(); }
+    load: function (args) {
+      load(false); render();
+      // "Change pet" on Today opens Settings at the Pet section.
+      if (args && args[0] === 'pet') {
+        var tries = 0;
+        (function scroll() {
+          var el = document.getElementById('set-cat-pet');
+          if (el) { el.scrollIntoView({ block: 'start' }); return; }
+          if (++tries < 20) setTimeout(scroll, 150);
+        })();
+      }
+    }
   });
 })();
