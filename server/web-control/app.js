@@ -3450,7 +3450,7 @@
         var left = exp ? Math.round((exp.getTime() - Date.now()) / 1000) : 0;
         var el = $('device-code-left');
         if (!el) { clearInterval(codeTimer); return; }
-        if (left <= 0) { clearInterval(codeTimer); panel.innerHTML = '<p>That code expired. Choose Sign in another device for a new one.</p>'; return; }
+        if (left <= 0) { clearInterval(codeTimer); panel.innerHTML = '<p>That code expired. Choose Use COS on another phone or browser for a new one.</p>'; return; }
         el.textContent = 'Works once, for ' + (left >= 60 ? Math.ceil(left / 60) + ' more min' : left + ' more sec') + '.';
       };
       tick(); codeTimer = setInterval(tick, 1000);
