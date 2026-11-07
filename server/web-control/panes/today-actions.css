@@ -12,28 +12,35 @@
 
 /* The page behind does not scroll. Only the root: hidden on body too would make body a scroll container and unstick the rail. */
 html.ta-open { overflow: hidden; }
+/* 6.99.30 (design QA): Today's own question card is drawn in the sheet; the one on the page under it waits. */
+html.ta-open #sq-host { display: none; }
 
 .ta-layer {
-  /* 6.99.29 (Miles's unfolded Duo, IMG_0503, 11/07 12:48): with the keyboard closed the layer is the whole fixed
-     viewport, down to the physical bottom edge, whatever visualViewport reports. Sized from visualViewport.height it
-     ended about 106 px short and Today showed below the backdrop and the sheet. The home indicator is cleared once, by
-     the padding inside the sheet (.ta-foot, or .ta-body when there is no reply box), never by the layer or the sheet. */
-  position: fixed; inset: 0; z-index: 45;
+  /* 6.99.30: the layer is the VISIBLE part of the page, keyboard up or down, in any browser: top and height from
+     visualViewport (today-actions.js applyFit, app.js viewportFit), the dynamic viewport where there is none. Whatever
+     covers the bottom (a keyboard, its strip, Comet's or any browser's bottom bar) stays below the reply box and Send.
+     Only the backdrop and the sheet's colour reach on down to the physical bottom (::before and .ta-sheet::after,
+     --ta-below plus the bleed), so no band of Today shows (IMG_0503). The home indicator is cleared once, by the padding
+     inside the sheet (.ta-foot, or the sheet when there is no reply box), never by the layer or the sheet. */
+  position: fixed; left: 0; right: 0; z-index: 45;
+  top: var(--ta-vt, 0px); height: var(--ta-vh, 100vh);
   --ta-bleed: 120px;
   --run-green: rgb(56, 145, 99);
 }
-/* The keyboard is up (today-actions.js applyFit): the layer is the visible viewport, so it never covers the reply box. */
-.ta-layer.ta-kb { top: var(--ta-vt, 0px); height: var(--ta-vh, 100dvh); }
+/* Before the first reading (or with script failing), the dynamic viewport where the browser has it. A var() fallback
+   the browser cannot parse would void the whole height, so the dvh one sits behind @supports. */
+@supports (height: 100dvh) { .ta-layer { height: var(--ta-vh, 100dvh); } }
 :root[data-theme='dark'] .ta-layer { --run-green: rgb(108, 207, 143); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .ta-layer { --run-green: rgb(108, 207, 143); } }
 .ta-layer[hidden] { display: none; }
 .ta-scrim { position: absolute; inset: 0; background: rgba(23, 18, 14, 0.45); touch-action: none; animation: fade 160ms ease; }
-/* Past the bottom edge, in case Safari's fixed viewport ever stops short of it: the dim and the sheet run on below the
-   screen, so no band of Today can show under them. Off with the keyboard up (the keyboard covers that edge).
+/* Below the visible part, down to the physical bottom and past it: whatever lies there (a browser's bar the page shows
+   through, a keyboard, a fixed viewport that stops short) shows the dim and the sheet's own colour, never Today.
+   --ta-below is the layout viewport under the layer; the bleed covers a bottom edge reported short.
    QA 6.99.29: the dim's bleed is the LAYER's own pseudo-element, never the scrim, so it is visual only: a tap on that
    band lands on the layer (no data-ta, so nothing happens) instead of closing the overlay or reaching Today below. */
-.ta-layer:not(.ta-kb)::before { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--ta-bleed); background: rgba(23, 18, 14, 0.45); touch-action: none; animation: fade 160ms ease; }
-.ta-layer:not(.ta-kb) .ta-sheet::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--ta-bleed); background: var(--page); pointer-events: none; }
+.ta-layer::before { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: calc(var(--ta-below, 0px) + var(--ta-bleed)); background: rgba(23, 18, 14, 0.45); touch-action: none; animation: fade 160ms ease; }
+.ta-layer .ta-sheet::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: calc(var(--ta-below, 0px) + var(--ta-bleed)); background: var(--page); pointer-events: none; }
 
 .ta-sheet {
   position: absolute; left: 0; right: 0; bottom: 0;
@@ -62,9 +69,9 @@ html.ta-open { overflow: hidden; }
 .ta-foot .status-line:empty { display: none; }
 .ta-foot .sx-box, .ta-foot .sx-park { margin: 0 0 10px; }
 /* No reply box (the session list, a question answered in its card): the sheet itself keeps the home indicator's strip,
-   so the end of the list and the question card's footer stop above it and nothing scrolls under it. With the keyboard
-   up the keyboard covers that strip. */
-.ta-layer:not(.ta-kb) .ta-sheet:has(> .ta-foot:empty), .ta-layer:not(.ta-kb) .ta-sheet:has(> .ta-foot[hidden]) { padding-bottom: var(--safe-bottom); }
+   so the end of the list and the question card's footer stop above it and nothing scrolls under it. With a keyboard or
+   its strip up, that covers the strip. */
+.ta-layer:not(.ta-kb):not(.ta-kb-strip) .ta-sheet:has(> .ta-foot:empty), .ta-layer:not(.ta-kb):not(.ta-kb-strip) .ta-sheet:has(> .ta-foot[hidden]) { padding-bottom: var(--safe-bottom); }
 
 .ta-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0 0 8px; color: var(--sub); font-size: 14.5px; line-height: 1.4; }
 .ta-note { margin: 6px 0 0; color: var(--hot); font-size: 13.5px; line-height: 1.4; }
@@ -126,9 +133,9 @@ html.ta-open { overflow: hidden; }
   .ta-foot { padding-bottom: calc(var(--safe-bottom) + 14px); }
 }
 /* 6.99.29 (Miles's unfolded Duo, 11/07): the on-screen keyboard is up, at any width (today-actions.js applyFit marks the
-   layer ta-kb when the visible viewport is 120 px or more shorter than the layout one). The sheet fills what is visible,
-   the header folds to one compact row, the reply box stays pinned at the bottom just above the keyboard, and the
-   conversation takes the rest and scrolls. The keyboard covers the home indicator, so the foot drops that inset. */
+   layer ta-kb when 120 px or more of the page is covered at the bottom). The sheet fills what is visible, the header
+   folds to one compact row, the reply box stays pinned at the bottom just above the keyboard, and the conversation
+   takes the rest and scrolls. The keyboard covers the home indicator, so the foot drops that inset. */
 .ta-layer.ta-kb .ta-sheet { top: 0; bottom: 0; max-height: none; overflow: hidden; }
 .ta-layer.ta-kb .ta-grip { display: none; }
 .ta-layer.ta-kb .ta-head { align-items: center; padding-top: calc(var(--safe-top) + 6px); padding-bottom: 4px; }
@@ -139,6 +146,9 @@ html.ta-open { overflow: hidden; }
 .ta-layer.ta-kb .ta-body { padding-bottom: 8px; }
 .ta-layer.ta-kb .ta-foot { padding-top: 8px; padding-bottom: 8px; }
 .ta-layer.ta-kb .ta-foot .composer textarea { max-height: 96px; }
+/* 6.99.30: a hardware keyboard's strip with a field focused (ta-kb-strip): the header stays, the strip covers the home
+   indicator, so the reply box drops that inset. The layer already ends above the strip. */
+.ta-layer.ta-kb-strip .ta-foot { padding-bottom: 8px; }
 /* Under about three lines left for the conversation: the "Working right now" note waits until the keyboard closes. */
 .ta-layer.ta-kb-tight .ta-foot .sx-park { display: none; }
 @keyframes ta-rise { from { transform: translateY(32px); opacity: 0.6; } }
@@ -160,8 +170,18 @@ html.ta-open { overflow: hidden; }
 /* Files with a reply or a note (11/07): the COS chat's own chips and clip (cos-chat.css .cc-chip, .cc-attach), placed in
    the reply box. The chips take their own row above the words; the clip sits beside Send. */
 .ta-composer { flex-wrap: wrap; }
-.ta-composer .ta-files { flex: 1 1 100%; padding: 2px 0 4px; }
+/* 6.99.30 (canary BLOCKER): five files pushed the reply box and Send off the sheet at every size (the foot never
+   shrinks and the keyboard's sheet clips). The chips scroll inside a capped box, so the words and Send always fit: about
+   two chip rows with room, one with the keyboard up. */
+.ta-composer .ta-files { flex: 1 1 100%; padding: 2px 0 4px; max-height: min(30vh, 132px); overflow-y: auto; overscroll-behavior: contain; }
+.ta-layer.ta-kb .ta-composer .ta-files { max-height: 60px; }
 .ta-composer .ta-files.hidden { display: none; }
 .ta-clip:empty { display: none; }
 .ta-clip .cc-attach { height: 38px; width: 42px; border-radius: var(--radius-sm); }
+/* 6.99.30 (canary): with the keyboard up a sticky question footer covered all but part of one option; it scrolls with
+   the card instead while typing. */
+.ta-layer.ta-kb .ta-q .sq-foot, .ta-layer.ta-kb-strip .ta-q .sq-foot { position: static; }
+/* The "Not sent" line for a refused queued message (today-actions.js loadNotSent). */
+.ta-notsent:empty { display: none; }
+.ta-notsent { margin: 4px 0 8px; }
 .ta-composer.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }

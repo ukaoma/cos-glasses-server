@@ -21,7 +21,10 @@
 .mt-wd { text-align: center; font: 600 10px/1 var(--mono); letter-spacing: 0.04em; color: var(--tertiary); padding: 2px 0 4px; }
 .mt-day, .mt-blank { min-height: 42px; }
 .mt-day { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 8px; color: var(--ink); font: 400 14px/1 var(--body); }
-.mt-day:disabled { opacity: 0.38; }
+.mt-day:disabled { opacity: 1; }
+/* 6.99.30 (design QA): a day with nothing to open read at 2.35:1 at 38% ink; the secondary colour keeps it quiet and
+   readable. */
+.mt-day:disabled .mt-dnum { color: var(--sub); }
 .mt-day:not(:disabled):hover { background: var(--qopen); }
 .mt-day[aria-pressed='true'] { background: color-mix(in srgb, var(--tint) 18%, transparent); font-weight: 600; }
 .mt-day:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -353,5 +356,5 @@
 @media (min-width: 860px) {
   .mt-turns { height: clamp(320px, calc(100dvh - 400px), 1100px); }
   .mt-lgrid { grid-template-columns: minmax(0, 1fr) minmax(280px, min(380px, 38%)); align-items: start; column-gap: 24px; }
-  .mt-lgrid > .mt-side-panel { position: sticky; top: calc(62px + var(--safe-top, 0px)); max-height: calc(100vh - 80px - var(--safe-top, 0px)); overflow: auto; }
+  .mt-lgrid > .mt-side-panel { position: sticky; top: calc(62px + var(--safe-top, 0px)); max-height: calc(100vh - 80px - var(--safe-top, 0px)); max-height: calc(100dvh - 80px - var(--safe-top, 0px)); overflow: auto; }
 }

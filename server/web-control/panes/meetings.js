@@ -102,7 +102,7 @@
   // "2026-11-03 · 9:05 PM · P · 60 minutes · Mac System Audio"
   function subtitle(m) {
     var parts = [];
-    if (m.date) parts.push(m.date);
+    if (m.date) parts.push(W.plainDay ? W.plainDay(m.date) : m.date);   // "Today" or "Nov 7", never 2026-11-07 (6.99.30)
     if (m.time) parts.push(fmtTime(m.time));
     var d = domainLabel(m); if (d) parts.push(d);
     if (m.duration) parts.push(m.duration); else if (num(m.durationMinutes) > 0) parts.push(num(m.durationMinutes) + ' min');

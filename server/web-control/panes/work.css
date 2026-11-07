@@ -59,7 +59,7 @@
   .wk-filters { width: 100%; justify-content: flex-start; }
   .wk-filters .cx-search { max-width: none; flex-basis: 100%; }
   .wk-pick { flex: 1 1 140px; flex-direction: column; align-items: stretch; gap: 4px; font-size: 11.5px; }
-  .wk-pick select.field { min-height: 38px; font-size: 15px; width: 100%; background-position: calc(100% - 16px) 17px, calc(100% - 11px) 17px; }
+  .wk-pick select.field { font-size: 15px; width: 100%; background-position: calc(100% - 16px) 17px, calc(100% - 11px) 17px; }
   .wk-text-btn { min-height: 36px; font-size: 14px; }
 }
 

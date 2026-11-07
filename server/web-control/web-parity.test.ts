@@ -362,7 +362,7 @@ function loadQuestions(cap: Record<string, unknown> | null, poll: { status: numb
   const document = { getElementById: (id: string) => (id === 'sq-host' ? host : id === 'app-shell' ? shell : null), addEventListener: () => {}, hidden: false, activeElement: null }
   const timers: Array<() => void> = []
   const ctx = vm.createContext({
-    window: { COSWeb: W }, document, fetch, console, Date, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
+    window: { COSWeb: W, addEventListener: () => {} }, document, fetch, console, Date, JSON, Math, Promise, crypto: globalThis.crypto, isFinite,
     setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {},
   })
   vm.runInContext(QUESTIONS_SOURCE, ctx)

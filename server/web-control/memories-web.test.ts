@@ -648,12 +648,17 @@ describe('Control Web Memories: Cues to rate and Rated cues', () => {
 })
 
 describe('Control Web Memories: QA fixes (6.99.26)', () => {
+  // 6.99.30: W.api itself turns the browser's "Failed to fetch" into the one sentence (app.js, code 'unreachable';
+  // duo-layout-630-web.test.ts runs it); the pane shows what W.api says and no longer translates on its own.
   it('a request that never reached the Mac says so in plain words, never the browser\'s "Failed to fetch"', async () => {
-    const h = load({ answers: { 'ws:learning_page': new TypeError('Failed to fetch'), 'learning.list': new TypeError('Failed to fetch') } })
+    const UNREACHABLE = 'Could not reach COS on your Mac. Check that it is awake and on Tailscale, then try again.'
+    const gone = () => Object.assign(new Error(UNREACHABLE), { code: 'unreachable', cause: new TypeError('Failed to fetch') })
+    const h = load({ answers: { 'ws:learning_page': gone(), 'learning.list': gone() } })
     await h.open()
     const html: string = h.t.listHtml()
-    expect(html).toContain('Could not reach COS on your Mac. Check that the Mac is awake and on Tailscale, then try again.')
+    expect(html).toContain(UNREACHABLE)
     expect(html).not.toContain('Failed to fetch')
+    expect(readFileSync(join(HERE, 'panes', 'memories.js'), 'utf8'), 'no second copy of the sentence in the pane').not.toContain('Could not reach')
   })
 
   it('the events count says it could not be counted when the first read fails, and keeps its last value when a refresh fails', async () => {

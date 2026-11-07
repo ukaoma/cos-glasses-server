@@ -107,7 +107,8 @@
       var off = new Error(OFFLINE); off.code = 'offline'; throw off;
     });
   }
-  var OFFLINE = 'Could not reach your Mac. Check Tailscale on this phone and that the Mac is awake.';
+  // The one sentence Control Web says for a request that never reached the Mac (app.js COSWeb.unreachableCopy, 6.99.30).
+  var OFFLINE = W.unreachableCopy || 'Could not reach COS on your Mac. Check that it is awake and on Tailscale, then try again.';
   // The server answered, but not with JSON (a proxy page, a crash): say that, never that it stopped.
   function unreadable(r) { return new Error('The server answered ' + r.status + ' without a readable reply.'); }
   // A 401 hands the page to the shell's sign-in and stops every timer here, so nothing polls a signed-out session.
@@ -264,7 +265,9 @@
       namedVoices: vr ? int(vr.namedVoices) || 0 : null, humanTouched: vr ? vr.humanTouched === true : null
     };
   }
-  function dateLine(m) { return [m.date, m.time ? clock12(m.time) : '', m.duration].filter(Boolean).join(' · '); }
+  // A row's day in plain words ("Today", "Nov 7"), never the ISO date (6.99.30).
+  function day(v) { return W.plainDay ? W.plainDay(v) : v; }
+  function dateLine(m) { return [day(m.date), m.time ? clock12(m.time) : '', m.duration].filter(Boolean).join(' · '); }
   function countsSummary(m) {
     var parts = [];
     if (m.topicCount > 0) parts.push(m.topicCount + ' topic' + s(m.topicCount));
@@ -579,7 +582,7 @@
       var message = str(r.body.message) || str(r.body.error) || (r.status === 200 ? 'Naming receipt ready' : 'Naming refused (' + r.status + ')');
       return { message: message, receipt: parseReceipt(r.body, r.status) };
     }, function (err) {
-      if (err && err.code === 'offline') throw new Error(OFFLINE + ' Then refresh to review any interrupted naming before retrying.');
+      if (err && err.code === 'offline') throw new Error('Could not reach COS on your Mac. Check that it is awake and on Tailscale, then refresh to review any interrupted naming before retrying.');
       throw err;
     });
   }
@@ -2049,7 +2052,7 @@
       out += '<div class="cx-list sp-list">' + p.appearances.map(function (a) {
         return '<button type="button" class="cx-row sp-arow" data-sp="open-appearance" data-sid="' + esc(a.sessionId) + '">' +
           '<span class="cx-row-glyph' + (a.needsReview ? ' sp-amber' : '') + '">' + icon('speakers') + '</span><span class="cx-row-body">' +
-          '<span class="cx-row-title strong sp-one">' + esc(a.title) + '</span><span class="sp-mono">' + esc(a.date + ' · ' + a.segments + ' segments · ' + formatDuration(a.speakingMs)) + '</span></span>' +
+          '<span class="cx-row-title strong sp-one">' + esc(a.title) + '</span><span class="sp-mono">' + esc([day(a.date), a.segments + ' segments', formatDuration(a.speakingMs)].filter(Boolean).join(' · ')) + '</span></span>' +
           '<span class="sp-match"><b>' + esc(a.observedMatch == null ? '–' : pct(a.observedMatch)) + '</b><small>' + (a.confirmedByHuman ? 'human confirmed' : a.needsReview ? 'review' : 'observed match') + '</small></span>' +
           '<span class="chev"></span></button>';
       }).join('') + '</div>';

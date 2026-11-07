@@ -75,7 +75,7 @@
   var O = {
     open: null,            // { kind: 'need' | 'run' | 'wait' | 'pet' | 'meeting' | 'intake', key, all }
     opener: null, openerSel: '',
-    pushed: false, ignorePops: 0,
+    pushed: false, ignorePops: 0, pops: [],   // pops: our own Back steps still to arrive (quietBack)
     depth: 1,              // history entries the overlay holds: 2 while a session opened from the pet's list shows
     back: null,            // { scroll } the pet's list that session came from, for Back to sessions
     dirty: false,          // something was decided or sent: Today reloads on close
@@ -144,6 +144,8 @@
     layer.addEventListener('click', onClick);
     layer.addEventListener('submit', onSubmit);
     layer.addEventListener('focusin', onFocusIn);
+    // Focus leaving a field (the keyboard's Hide key, a tap outside) refits on the next frame, once it has moved.
+    layer.addEventListener('focusout', function () { fit(); });
     layer.addEventListener('input', function (e) {
       if (e.target && e.target.id === 'ta-input' && O.r) keepDraft(O.r, e.target.value, O.r.draft && O.r.draft.text === e.target.value.trim() ? O.r.draft : undefined);
     });
@@ -169,46 +171,74 @@
     layer.addEventListener('touchmove', function (e) { if (e.target && (e.target === layer || (e.target.classList && e.target.classList.contains('ta-scrim')))) e.preventDefault(); }, { passive: false });
     return layer;
   }
-  // With the keyboard up the layer follows the visible viewport, so the keyboard never covers the reply box or Send.
-  // With it closed the layer is the whole fixed viewport (today-actions.css): --ta-vh and --ta-vt are set but unused, so
-  // a visible viewport that reports less than the screen (IMG_0503, 11/07 12:48: about 106 px) never leaves a band.
-  // 6.99.29 (Miles's unfolded Duo, 11/07 11:50): on a wide screen the side sheet kept its tall header and the reply box
-  // went under the keyboard while the conversation shrank to one line. With the keyboard up, at any width, the layer is
-  // marked ta-kb (today-actions.css): the sheet fills the visible viewport, the header folds to one compact row, the
-  // reply box stays pinned at the sheet's bottom just above the keyboard, and the conversation takes what is left. If
-  // that leaves under about three lines, ta-kb-tight also hides the "Working right now" note until the keyboard closes.
-  // Keyboard: the visible viewport, at its zoom, is KB_MIN_PX or more shorter than the layout one (a form bar alone is
-  // about 45 px). Read on visualViewport resize and scroll, at most once a frame, only while the overlay is open.
+  // 6.99.30 (Miles's Duo, in Comet as well as Safari): the layer is ALWAYS the visible part of the page, read the one
+  // way Control Web reads it (app.js COSWeb.viewportFit): top and height from visualViewport, 100dvh where there is
+  // none. Nothing assumes a browser: whatever covers the bottom (an on-screen keyboard, a hardware keyboard's strip,
+  // Comet's or any browser's bottom bar) is what the browser reports, and the reply box, Send and a question card's
+  // Submit stay above it. Only the backdrop and the sheet's own colour reach on down to the physical bottom
+  // (--ta-below plus the bleed, today-actions.css), so no band of Today shows under a bar that lets the page through.
+  // (6.99.29 made the closed-keyboard layer the whole layout viewport to cover IMG_0503's 106 px band; that band may be
+  // Comet's bottom bar, real covered space, and the composer must not sit under it.)
+  // The layout on top of that box:
+  //   ta-kb        an on-screen keyboard: what covers the bottom is KB_MIN_PX or more. The header folds to one
+  //                compact row, the sheet fills the box, the reply box stays pinned at its bottom, and the
+  //                conversation takes what is left. Under about three lines left, ta-kb-tight also hides the
+  //                "Working right now" note until the keyboard closes (or the screen turns).
+  //   ta-kb-strip  a field in the sheet has focus and something under KB_MIN_PX covers the bottom (a hardware
+  //                keyboard's 55 to 70 px strip): the header stays as it is; the strip covers the home indicator,
+  //                so the reply box drops that inset.
+  // KB_MIN_PX matters only with nothing focused (a browser's bar, IMG_0503's 106 px): such a reading never folds the
+  // header. Read on visualViewport resize and scroll while the overlay is open, and on window resize and
+  // orientationchange, pageshow, the page coming back into view, and focus moving in the sheet: at most once a frame.
   var KB_MIN_PX = 120;
   var BODY_MIN_PX = 72;          // about three lines of the conversation (15 px text at 1.5)
-  var KB = { on: false, tight: false, frame: 0, listening: false };
-  function keyboardInset(vv) {
-    var layoutH = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
-    var inset = Math.round(layoutH - vv.height * (vv.scale || 1));
-    return inset > 0 ? inset : 0;
-  }
+  var KB = { on: false, strip: false, tight: false, frame: 0, listening: false, width: 0 };
   function tall(el) { return (el && el.offsetHeight) || 0; }
   // What the conversation gets once the compact header and the reply box have theirs.
-  function bodyRoom(vv) {
+  function bodyRoom(height) {
     var sheet = $('ta-sheet'), grip = sheet && sheet.querySelector ? sheet.querySelector('.ta-grip') : null;
-    return vv.height - tall($('ta-head')) - tall($('ta-foot')) - tall(grip);
+    return height - tall($('ta-head')) - tall($('ta-foot')) - tall(grip);
+  }
+  // A field that types (the reply box, a question card's Other) has focus inside the sheet.
+  function typing() {
+    var a = document.activeElement;
+    if (!a || !layer || a === layer || !layer.contains || !layer.contains(a)) return false;
+    var tag = String(a.tagName || '').toUpperCase();
+    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (tag === 'INPUT') return !/^(checkbox|radio|button|submit|reset|range|color|file|image|hidden)$/i.test(String(a.type || 'text'));
+    return !!a.isContentEditable;
+  }
+  function viewport() { return W.viewportFit ? W.viewportFit() : null; }
+  function crumb(what, v, focus) {
+    if (!W.layoutCrumb || !O.open || !v) return;
+    W.layoutCrumb(what, { kind: O.open.kind, kb: KB.on, strip: KB.strip, tight: KB.tight, focus: !!focus, inset: v.inset, below: v.below,
+      lh: v.layoutH, top: v.top, h: v.height, zoomed: v.zoomed, wide: !phone() });
   }
   function applyFit() {
     KB.frame = 0;
-    var vv = window.visualViewport;
-    if (!layer || !vv) return;
-    layer.style.setProperty('--ta-vh', Math.round(vv.height) + 'px');
-    layer.style.setProperty('--ta-vt', Math.round(vv.offsetTop) + 'px');
-    var inset = keyboardInset(vv), on = inset >= KB_MIN_PX;
-    layer.style.setProperty('--ta-kb', (on ? inset : 0) + 'px');
+    if (!layer || !O.open) return null;
+    var v = viewport();
+    if (!v) return null;
+    layer.style.setProperty('--ta-vh', v.height + 'px');
+    layer.style.setProperty('--ta-vt', v.top + 'px');
+    layer.style.setProperty('--ta-below', v.below + 'px');
+    var focus = typing(), on = v.inset >= KB_MIN_PX, strip = !on && focus && v.inset > 0;
+    // A turned screen measures the room again: what was tight in landscape is not in portrait (QA 6.99.29).
+    var w = window.innerWidth || 0, turned = !!(KB.width && w && w !== KB.width);
+    if (w) KB.width = w;
+    var was = KB.on + '|' + KB.strip + '|' + KB.tight;
+    if (turned) KB.tight = false;
     if (on !== KB.on) { KB.on = on; KB.tight = false; layer.classList.toggle('ta-kb', on); }
+    if (strip !== KB.strip) { KB.strip = strip; layer.classList.toggle('ta-kb-strip', strip); }
     // Measured with the compact header in place. Once tight it stays so while the keyboard is up: showing the note
     // again would take the room back and flicker.
-    if (on && !KB.tight) KB.tight = bodyRoom(vv) < BODY_MIN_PX;
+    if (on && !KB.tight) KB.tight = bodyRoom(v.height) < BODY_MIN_PX;
     layer.classList.toggle('ta-kb-tight', on && KB.tight);
+    if (was !== KB.on + '|' + KB.strip + '|' + KB.tight) crumb('kb', v, focus);
+    return v;
   }
   function fit() {
-    if (KB.frame) return;
+    if (KB.frame || !O.open) return;
     if (!window.requestAnimationFrame) return applyFit();   // every browser with visualViewport has frames
     KB.frame = window.requestAnimationFrame(applyFit);
   }
@@ -222,11 +252,34 @@
   function unfit() {
     listenViewport(false);
     if (KB.frame && window.cancelAnimationFrame) window.cancelAnimationFrame(KB.frame);
-    KB.frame = 0; KB.on = false; KB.tight = false;
+    KB.frame = 0; KB.on = false; KB.strip = false; KB.tight = false; KB.width = 0;
     if (!layer) return;
-    layer.classList.remove('ta-kb'); layer.classList.remove('ta-kb-tight');
-    layer.style.setProperty('--ta-kb', '0px');
+    layer.classList.remove('ta-kb'); layer.classList.remove('ta-kb-strip'); layer.classList.remove('ta-kb-tight');
   }
+  // The rest of the moments the visible viewport can change without a visualViewport event of its own (QA 6.99.29: the
+  // layer stayed sized for a keyboard that had gone). Each is a no-op while the overlay is closed.
+  window.addEventListener('resize', function () { fit(); });
+  window.addEventListener('orientationchange', function () { if (O.open) { KB.tight = false; fit(); } });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden || !O.open) return;
+    fit();
+    if (O.r && O.open.kind === 'run') paintLive();   // the clock and the state, at once rather than on the next tick
+  });
+  // Back from the back-forward cache (a swipe back, the app switcher): the live stream is closed and everything shown
+  // is as old as the visit away. Open the stream again and read the session again.
+  window.addEventListener('pageshow', function (e) {
+    if (!O.open) return;
+    fit();
+    if (e && e.persisted) revive();
+  });
+  // 6.99.30 (QA): the Mac going away or coming back shows in an open sheet at once, not after the stream gives up: the
+  // live line says the Mac is not answering, and back up the stream opens again and the session is read again.
+  if (W.onServer) W.onServer(function (up) {
+    var r = O.r;
+    if (!O.open || !r) return;
+    if (!up) { r.feed.connected = false; r.feed.fallback = 'unreachable'; if (r.live) r.live.working = false; paintLive(); paintVerdict(); }
+    else revive();
+  });
 
   function openerSelector(t) {
     if (!t || !t.getAttribute) return '';
@@ -275,6 +328,8 @@
     var sheet = $('ta-sheet');
     O.settleAt = Date.now() + settleMs(sheet);
     if (sheet && sheet.focus) sheet.focus({ preventScroll: true });
+    // Measured once the sheet is drawn, and sent home as a breadcrumb (app.js layoutCrumb, 6.99.30).
+    crumb('open', applyFit(), typing());
   }
   // How long taps inside are ignored after opening: the longest open motion of the sheet and its backdrop (their computed
   // animation and transition, delay included: today-actions.css ta-rise or ta-slide, 220 ms, and fade, 160 ms), plus
@@ -314,8 +369,8 @@
     // X from a session opened off the pet's list unwinds both entries in one step, so the next Back leaves Today as before.
     if (O.pushed && how !== 'pop' && how !== 'leave') {
       var n = O.depth > 1 ? O.depth : 1;
-      O.pushed = false; O.ignorePops++;
-      try { if (n > 1 && typeof history.go === 'function') history.go(-n); else history.back(); } catch (_e) { O.ignorePops--; }
+      O.pushed = false;
+      quietBack(n);
     }
     if (how === 'pop' || how === 'leave') O.pushed = false;
     clearTimeout(O.expireTimer);
@@ -333,11 +388,29 @@
     if (el && el.focus) { try { el.focus({ preventScroll: true }); } catch (_e) { el.focus(); } }
   }
   // Leaving for a tab from inside the overlay replaces the overlay's history entry, so Back from there returns to Today.
+  // A session opened off the pet's list holds two entries: the list's comes off first (6.99.30, QA: it stayed under
+  // the new tab, and Back from there landed on it and showed nothing), then the tab replaces the overlay's own.
   function leaveTo(pane, args) {
     var hash = '#/' + [pane].concat(args || []).map(encodeURIComponent).join('/');
-    var replace = O.pushed;
+    var replace = O.pushed, extra = O.pushed && O.depth > 1 ? O.depth - 1 : 0;
     close('leave');
-    if (replace) location.replace(hash); else W.go(pane, args || []);
+    O.depth = 1;
+    if (!replace) { W.go(pane, args || []); return; }
+    if (extra) { quietBack(extra, function () { location.replace(hash); }); return; }
+    location.replace(hash);
+  }
+  // A Back step the overlay takes itself (X, Back to sessions, leaving for a tab): its popstate is ours, not the phone's
+  // Back, and `then` runs once it lands. If it never arrives (history.go with nothing to go back to, or a browser that
+  // drops it) the wait lapses after POP_WAIT_MS and `then` runs anyway, so a real Back later is never swallowed
+  // (6.99.30, QA: ignorePops stayed counted and ate the next Back).
+  var POP_WAIT_MS = 700;
+  function quietBack(n, then) {
+    var w = { then: then || null, timer: 0 };
+    var drop = function () { var i = O.pops.indexOf(w); if (i < 0) return false; O.pops.splice(i, 1); O.ignorePops = O.pops.length; return true; };
+    w.timer = setTimeout(function () { if (drop() && w.then) w.then(); }, POP_WAIT_MS);
+    O.pops.push(w); O.ignorePops = O.pops.length;
+    try { if (n > 1 && typeof history.go === 'function') history.go(-n); else history.back(); }
+    catch (_e) { clearTimeout(w.timer); if (drop() && w.then) w.then(); }
   }
   // A reload with the overlay open keeps its history entry, and the entry before it is Today at the same address, so
   // Back from there showed nothing (measured in Chrome 11/07: a same-document popstate). On load, app.js hands that
@@ -363,7 +436,7 @@
     });
   }
   window.addEventListener('popstate', function () {
-    if (O.ignorePops > 0) { O.ignorePops--; return; }
+    if (O.pops.length) { var w = O.pops.shift(); clearTimeout(w.timer); O.ignorePops = O.pops.length; if (w.then) w.then(); return; }
     // The phone's Back from a session opened off the pet's list goes back to that list, as Back to sessions does.
     if (O.open && O.back) { backToList(); return; }
     if (O.open) close('pop');
@@ -372,7 +445,7 @@
   function backToList(fromButton) {
     var b = O.back;
     if (!b) return;
-    if (fromButton && O.depth > 1) { O.ignorePops++; try { history.back(); } catch (_e) { O.ignorePops--; } }
+    if (fromButton && O.depth > 1) quietBack(1);
     O.depth = 1;
     open('pet', '', O.opener, { again: true });
     var body = $('ta-body'); if (body) body.scrollTop = b.scroll || 0;
@@ -454,11 +527,18 @@
   function onSubmit(e) {
     if (e.target && e.target.id === 'ta-form') { e.preventDefault(); sendReply(); }
   }
-  // The keyboard rises over the bottom of the sheet: keep the box in view as it does.
+  // The keyboard rises over the bottom of the sheet: keep the box in view as it does. Any field that types counts
+  // (the reply box, a question card's Other): a hardware keyboard's strip is known only by focus (6.99.30).
   function onFocusIn(e) {
-    if (!e.target || e.target.id !== 'ta-input') return;
+    if (!e.target || !typing()) return;
     fit();
-    setTimeout(function () { if (!O.open) return; applyFit(); var f = $('ta-form'); if (f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' }); }, 250);
+    var reply = e.target.id === 'ta-input';
+    setTimeout(function () {
+      if (!O.open) return;
+      applyFit();
+      var f = reply ? $('ta-form') : e.target;
+      if (f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' });
+    }, 250);
   }
 
   // ═════════════ From today's meetings ═════════════
@@ -706,7 +786,7 @@
     setHead(kind === 'need' ? (O.item ? str(O.item.sessionTitle) || str(O.item.title) || 'Handoff' : 'Needs you')
       : kind === 'wait' ? (O.wait ? O.wait.title : 'A session is waiting for you') : (O.row ? K.title(O.row) : 'Session'));
     var body = $('ta-body');
-    if (body) body.innerHTML = '<div id="ta-meta"></div><div id="ta-q" class="ta-q" hidden></div><div id="ta-live"></div><div id="ta-last"></div>';
+    if (body) body.innerHTML = '<div id="ta-meta"></div><div id="ta-notsent" class="ta-notsent" role="status"></div><div id="ta-q" class="ta-q" hidden></div><div id="ta-live"></div><div id="ta-last"></div>';
     var foot = $('ta-foot');
     if (foot) { foot.innerHTML = O.r ? composerHtml(kind) : ''; foot.hidden = false; }
     var input = $('ta-input');
@@ -733,7 +813,36 @@
     if (kind === 'run') { paintLive(); watchStream(O.r); }
     loadLast(O.r);
     K.probe(O.r);
+    loadNotSent(O.r);
     if (kind === 'need') recheckNeed(key);
+  }
+  // 6.99.30: a queued message for this session that the server refused or let expire, said here as in the reader
+  // ("Not sent: <reason>"), from the same queue read (app.js sessionKit.notSent). The Sessions list chip follows it.
+  function loadNotSent(r) {
+    if (!r || !K.notSent || !K.answer) return;
+    K.answer(K.path(r.provider, r.id, '/queued-turns')).then(function (q) {
+      if (O.r !== r) return;
+      var rows = (q && q.status === 200 && q.body && q.body.turns) || [];
+      if (q && q.status === 200) K.notSent.note(r.provider, r.id, rows);
+      var box = $('ta-notsent'); if (!box) return;
+      box.innerHTML = K.notSent.rows(rows).map(function (t) {
+        return '<p class="ta-note ta-notsent-line"><strong>' + esc(clip(t.preview || t.prompt || 'A queued message', 80)) + '</strong> ' + esc(K.notSent.line(t)) + '</p>';
+      }).join('');
+    }, function () {});
+  }
+  // Back from the back-forward cache with a session open (pageshow persisted): the stream again, the last reply, the
+  // write gate and the questions, as on opening.
+  function revive() {
+    var r = O.r;
+    if (!r || !O.open) return;
+    if (O.open.kind === 'run') {
+      if (O.stream) { try { O.stream.close(); } catch (_e) {} O.stream = null; }
+      watchStream(r); paintLive();
+    }
+    loadLast(r);
+    K.probe(r);
+    loadNotSent(r);
+    if (W.sessionQuestions && W.sessionQuestions.nudge) W.sessionQuestions.nudge();
   }
   function stopSession() {
     if (K.imagesStop) K.imagesStop($('ta-last'));
@@ -1074,6 +1183,7 @@
     if (w === 'Working' || w === 'Waiting') {
       O.clock = setInterval(function () {
         if (O.r !== r) { clearInterval(O.clock); return; }
+        if (document.hidden) return;   // a hidden page spends nothing; coming back repaints at once (visibilitychange)
         var c = $('ta-clock'); if (c) c.textContent = K.feed.elapsed(r.feed, r);
         if (K.feed.gateStale(r)) K.probe(r);
         var rs = $('ta-run-state'); if (rs) rs.textContent = runWords();
@@ -1219,6 +1329,8 @@
     clearInterval(O.watch);
     var started = Date.now();
     O.watch = setInterval(function () {
+      // Hidden: no reads, and the three minutes count only while the page is in view (6.99.30).
+      if (document.hidden) { started += 3000; return; }
       if (O.r !== r || Date.now() - started > WATCH_MS) { clearInterval(O.watch); return; }
       K.answer('/api/agent-sessions/bindings/' + encodeURIComponent(bindingId) + '/turns/' + encodeURIComponent(key)).then(function (s) {
         if (O.r !== r) return;
@@ -1298,6 +1410,6 @@
     open: open, close: close, restore: restore, summary: summary, summaryMax: SUMMARY_MAX,
     isOpen: function () { return !!O.open; },
     _state: O, _decide: decide, _undo: undo, _intakeHtml: intakeHtml, _send: sendReply, _view: VIEW, _paintVerdict: paintVerdict,
-    _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater, _kb: KB, _fitNow: applyFit
+    _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater, _kb: KB, _fitNow: applyFit, _revive: revive
   });
 })();

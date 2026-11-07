@@ -16,6 +16,9 @@ import vm from 'node:vm'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const TA = readFileSync(join(HERE, 'panes', 'today-actions.js'), 'utf8')
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
+// 6.99.30: what every request learns about the Mac (the unreachable sentence, its clock, whether it answers), shared by
+// api() and the reader's apiAnswer(): it sits between api() and the state in app.js, so a slice of the reader gets it here.
+const TRANSPORT = APP.slice(APP.indexOf('  // ── what every request learns about the Mac'), APP.indexOf('  // ── state ─'))
 const CHAT = readFileSync(join(HERE, 'panes', 'cos-chat.js'), 'utf8')
 const flush = async (n = 10) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)) }
 const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]!)
@@ -72,7 +75,7 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
   // The reader's own session words and markdown, not stubs: sxProvider to sxStateLabel, sxInline to sxListBlock, plain.
   const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
   const mdRegion = APP.slice(APP.indexOf('  // Markdown for an assistant turn'), APP.indexOf('  function renderTurns('))
-  const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0]
+  const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0] + '\n' + TRANSPORT
   expect(sx).toContain('function sxStateLabel(')
   expect(mdRegion).toContain('function sxMd(')
   const touched: string[] = []
@@ -904,7 +907,7 @@ function readerPage(o: { routes?: Routes; health?: Record<string, unknown> } = {
   const end = APP.indexOf("  // Copy session (Control's Kickstart brief")
   const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
   const mdRegion = APP.slice(APP.indexOf('  // Markdown for an assistant turn'), APP.indexOf('  function renderTurns('))
-  const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0]
+  const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0] + '\n' + TRANSPORT
   const c = loadChat(o.health ?? H27, {}, { coarse: true })
   const { fetch, calls } = fakeFetch(o.routes ?? READER_ROUTES)
   const els: Record<string, El> = {}

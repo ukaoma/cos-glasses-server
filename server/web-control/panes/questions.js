@@ -190,8 +190,9 @@
     var ids = {}; pending.forEach(function (i) { ids[i.id] = 1; });
     Object.keys(Q.picks).forEach(function (id) { if (!ids[id]) { delete Q.picks[id]; delete Q.armed[id]; delete Q.notes[id]; delete Q.answerIds[id]; delete Q.missing[id]; } });
     pending.forEach(function (i) {
-      if (!Q.picks[i.id]) Q.picks[i.id] = (i.questions || []).map(function () { return { labels: [], other: '' }; });
+      if (!Q.picks[i.id]) Q.picks[i.id] = keptPicks(i) || (i.questions || []).map(function () { return { labels: [], other: '' }; });
     });
+    forgetPicks(ids);
     Q.items = pending;
     // A card that is already drawn is never redrawn by a poll: a half-typed Other answer stays as it is.
     if (before !== after) { render(); changed(); }
@@ -295,8 +296,9 @@
       // always answers: it never greys out for a missing answer, it goes to it.
       '<div class="sq-foot" data-sq-foot="' + esc(item.id) + '">' +
         '<p class="sq-progress" data-sq-progress="' + esc(item.id) + '" role="status"' + (Q.missing[item.id] != null && !complete(item) ? ' data-alert="1"' : '') + '>' + esc(progressText(item)) + '</p>' +
-        '<div class="sq-acts"><button type="button" class="cx-btn primary sq-send" data-sq="send" data-sq-id="' + esc(item.id) + '"' + (sending ? ' disabled' : '') + '>' + sendText(item.id) + '</button>' +
-        '<button type="button" class="link-btn sq-leave" data-sq="leave" data-sq-id="' + esc(item.id) + '"' + (sending ? ' disabled' : '') + '>Leave for the Mac</button></div>' +
+        '<div class="sq-acts"><button type="button" class="cx-btn primary sq-send" data-sq="send" data-sq-id="' + esc(item.id) + '"' + (sending || offline() ? ' disabled' : '') + '>' + sendText(item.id) + '</button>' +
+        '<button type="button" class="link-btn sq-leave" data-sq="leave" data-sq-id="' + esc(item.id) + '"' + (sending || offline() ? ' disabled' : '') + '>Leave for the Mac</button></div>' +
+        (offline() ? '<p class="sq-offline" role="status">' + esc(OFFLINE_LINE) + '</p>' : '') +
         noteHtml(item) + '</div></article>';
   }
   function approvalCard(item) {
@@ -307,9 +309,10 @@
       '<header class="sq-head"><h2 class="sq-title">' + esc(engine(item)) + ' wants to use ' + esc(a.tool || item.tool || 'a tool') + '</h2><span class="sq-secs" data-sq-secs="' + esc(item.id) + '">' + esc(timeLeft(secondsLeft(item))) + '</span></header>' +
       '<pre class="sq-command">' + esc(a.summary || 'No details were sent with this request.') + '</pre>' +
       (a.detail && a.detail !== a.summary ? '<details class="sq-details"><summary>Full command</summary><pre class="sq-command">' + esc(a.detail) + '</pre></details>' : '') +
-      '<div class="sq-acts"><button type="button" class="cx-btn primary" data-sq="allow" data-sq-id="' + esc(item.id) + '"' + (sending ? ' disabled' : '') + '>' + (armed === 'allow' ? 'Tap again to allow' : 'Allow once') + '</button>' +
-        '<button type="button" class="cx-btn sq-deny" data-sq="deny" data-sq-id="' + esc(item.id) + '"' + (sending ? ' disabled' : '') + '>' + (armed === 'deny' ? 'Tap again to deny' : 'Deny') + '</button>' +
-        '<button type="button" class="link-btn sq-leave" data-sq="leave" data-sq-id="' + esc(item.id) + '"' + (sending ? ' disabled' : '') + '>Leave for the Mac</button></div>' +
+      '<div class="sq-acts"><button type="button" class="cx-btn primary" data-sq="allow" data-sq-id="' + esc(item.id) + '"' + (sending || offline() ? ' disabled' : '') + '>' + (armed === 'allow' ? 'Tap again to allow' : 'Allow once') + '</button>' +
+        '<button type="button" class="cx-btn sq-deny" data-sq="deny" data-sq-id="' + esc(item.id) + '"' + (sending || offline() ? ' disabled' : '') + '>' + (armed === 'deny' ? 'Tap again to deny' : 'Deny') + '</button>' +
+        '<button type="button" class="link-btn sq-leave" data-sq="leave" data-sq-id="' + esc(item.id) + '"' + (sending || offline() ? ' disabled' : '') + '>Leave for the Mac</button></div>' +
+      (offline() ? '<p class="sq-offline" role="status">' + esc(OFFLINE_LINE) + '</p>' : '') +
       noteHtml(item) + '</article>';
   }
   // A question or an approval the Mac's own prompt waits on: what it asks when this page saw it held, and where to answer.
@@ -356,7 +359,11 @@
     var active = document.activeElement;
     var focus = active && active.hasAttribute && active.hasAttribute('data-sq-other') && m.el.contains && m.el.contains(active) ? { id: active.getAttribute('data-sq-id'), q: active.getAttribute('data-q'), start: active.selectionStart, end: active.selectionEnd } : null;
     var list = itemsFor(m.sessionId), mac = atMacFor(m.sessionId);
-    m.el.innerHTML = list.map(function (i) { return i.kind === 'approval' ? approvalCard(i) : questionCard(i, m.scope); }).join('') + mac.map(macCard).join('');
+    var cards = list.map(function (i) { return i.kind === 'approval' ? approvalCard(i) : questionCard(i, m.scope); }).join('') + mac.map(macCard).join('');
+    // The page's own host (over every pane): folded it is one line until tapped (questions.css .sq-banner, 6.99.30).
+    if (m.el === host && list.length) cards = bannerHtml(list) + '<div class="sq-cards' + (Q.bannerOpen ? ' open' : '') + '" id="sq-cards">' + cards + '</div>';
+    else if (m.el === host) Q.bannerOpen = false;
+    m.el.innerHTML = cards;
     m.el.hidden = !list.length && !mac.length;
     if (focus) {
       var box = m.el.querySelector('[data-sq-other][data-sq-id="' + focus.id + '"][data-q="' + focus.q + '"]');
@@ -364,6 +371,17 @@
     }
     if (m.onChange) { try { m.onChange(list.length, mac.length); } catch (_e) {} }
   }
+  // 6.99.30 (canary): "1 question for you. Answer", one line over the pane on a folded phone; a tap opens the cards.
+  function bannerHtml(list) {
+    var qs = list.filter(function (i) { return i.kind !== 'approval'; }).length, n = list.length;
+    var noun = qs === n ? (n === 1 ? 'question' : 'questions') : qs === 0 ? (n === 1 ? 'approval' : 'approvals') : (n === 1 ? 'request' : 'requests');
+    return '<button type="button" class="sq-banner" data-sq="banner" aria-expanded="' + (Q.bannerOpen ? 'true' : 'false') + '" aria-controls="sq-cards">' +
+      '<span class="sq-banner-text">' + esc(n + ' ' + noun + ' for you.') + '</span><span class="sq-banner-act">' + (Q.bannerOpen ? 'Hide' : 'Answer') + '</span></button>';
+  }
+  // 6.99.30 (canary): with the Mac not answering (app.js noteServer), Submit, Allow and Deny wait and say why, instead of
+  // offering a tap that cannot land.
+  function offline() { return !!(W.serverUp && W.serverUp() === false); }
+  var OFFLINE_LINE = 'Your Mac is not answering. You can answer here once it is back.';
   function render() {
     hostsOf().forEach(drawInto);
     clearInterval(Q.tick);
@@ -384,7 +402,7 @@
   }
   function patchOne(card, id, item) {
     var send = card.querySelector('[data-sq="send"]');
-    if (send) { send.disabled = !!Q.sending[id]; send.textContent = sendText(id); }
+    if (send) { send.disabled = !!Q.sending[id] || offline(); send.textContent = sendText(id); }
     var progress = card.querySelector('[data-sq-progress]');
     if (progress && item.kind === 'question') {
       progress.textContent = progressText(item);
@@ -487,6 +505,7 @@
   function onClick(e) {
     var b = e.target.closest('[data-sq]');
     if (!b || b.disabled) return;
+    if (b.getAttribute('data-sq') === 'banner') { Q.bannerOpen = !Q.bannerOpen; drawInto(hostsOf()[0]); return; }
     var id = b.getAttribute('data-sq-id'), what = b.getAttribute('data-sq'), item = itemOf(id);
     if (!item) return;
     var card = b.closest ? b.closest('.sq-card') : null;
@@ -551,8 +570,35 @@
     // A change after Submit was armed takes the arm back: review, then submit.
     Q.armed[id] = '';
     if (Q.missing[id] != null) delete Q.missing[id];
+    keepPicks(id);
     patchCard(id);
     return true;
+  }
+  // 6.99.30 (QA): a reload mid-answer keeps the picks and the typed Other words, per question id, for this tab only
+  // (sessionStorage). Restored only onto the same question (the same number of parts, and labels it still offers);
+  // dropped once the question is answered or gone.
+  var PICKS_KEY = 'cos.web.questions.picks';
+  function picksStore() { try { var v = JSON.parse(window.sessionStorage.getItem(PICKS_KEY) || '{}'); return v && typeof v === 'object' ? v : {}; } catch (_e) { return {}; } }
+  function writePicks(all) { try { window.sessionStorage.setItem(PICKS_KEY, JSON.stringify(all)); } catch (_e) {} }
+  function keepPicks(id) {
+    var all = picksStore(), p = Q.picks[id];
+    if (!p) return;
+    all[id] = p.map(function (x) { return { labels: x.labels.slice(0, 20), other: String(x.other || '').slice(0, 2000) }; });
+    writePicks(all);
+  }
+  function keptPicks(item) {
+    var kept = picksStore()[item.id], qs = item.questions || [];
+    if (!Array.isArray(kept) || kept.length !== qs.length) return null;
+    return qs.map(function (q, qi) {
+      var k = kept[qi] || {}, labels = (q.options || []).map(function (o) { return o.label; });
+      return { labels: (Array.isArray(k.labels) ? k.labels : []).filter(function (l) { return labels.indexOf(l) >= 0; }), other: typeof k.other === 'string' ? k.other : '' };
+    });
+  }
+  function forgetPicks(live) {
+    var all = picksStore(), gone = Object.keys(all).filter(function (id) { return !live[id]; });
+    if (!gone.length) return;
+    gone.forEach(function (id) { delete all[id]; });
+    writePicks(all);
   }
   // Keys 1 to 9 while a question has focus, as in the terminal: the option with that number, or the last number to type
   // your own. Never while typing in Other, and never with a modifier held.
@@ -584,6 +630,10 @@
     var id = t.getAttribute('data-sq-id'), item = itemOf(id); if (!item) return;
     var qi = Number(t.getAttribute('data-q')), q = item.questions[qi], p = Q.picks[id][qi];
     p.other = t.value;
+    // 6.99.30 (QA): the same card drawn on Today and in the sheet keeps one answer: the words go into every copy.
+    hostsOf().forEach(function (m) {
+      m.el.querySelectorAll('[data-sq-other][data-sq-id="' + id + '"][data-q="' + qi + '"]').forEach(function (box) { if (box !== t) box.value = t.value; });
+    });
     // Single choice: typing your own answer clears the picked option, as on the phone.
     if (!q.multiSelect && t.value.trim() && p.labels.length) {
       p.labels = [];
@@ -591,6 +641,7 @@
     }
     Q.armed[id] = '';
     if (Q.missing[id] != null) delete Q.missing[id];
+    keepPicks(id);
     patchCard(id);
   }
   function listen(el) { el.addEventListener('click', onClick); el.addEventListener('change', onChange); el.addEventListener('input', onInput); el.addEventListener('keydown', onKey); }
@@ -604,20 +655,30 @@
     return { count: function () { return itemsFor(m.sessionId).length; }, unmount: function () { mounts = mounts.filter(function (x) { return x !== m; }); } };
   }
 
-  // QA 6.99.27 (User 2): Today's own card (#sq-host) has a sticky footer, and iOS puts the keyboard over the layout
-  // viewport, so with Other focused the footer sat under it. The keyboard's height (what of the layout viewport the
-  // visible one leaves at the bottom) goes on the host as --sq-kb, and questions.css lifts the footer by it. Today's
-  // overlay needs none of this: its layer already follows the visible viewport (today-actions.js fit).
+  // QA 6.99.27 (User 2): Today's own card (#sq-host) has a sticky footer, and the keyboard covers the bottom of the
+  // layout viewport, so with Other focused the footer sat under it. What covers the bottom goes on the host as --sq-kb
+  // and questions.css lifts the footer by it. 6.99.30: read the one way Control Web reads the visible viewport (app.js
+  // COSWeb.viewportFit, which Today's sheet uses too): the layout viewport under the visible box, in layout px, so a
+  // pinch zoom alone lifts nothing and a page the browser panned to the field lifts by what is really under it.
+  // The card in Today's sheet (.ta-q) needs none of this: the sheet itself is the visible box (today-actions.js fit).
   function keyboardInset() {
-    var vv = window.visualViewport;
-    if (!vv) return 0;
-    var inset = Math.round((window.innerHeight || 0) - (vv.height + vv.offsetTop));
-    return inset > 0 ? inset : 0;
+    var v = W.viewportFit ? W.viewportFit() : null;
+    return v && v.vv ? v.below : 0;
   }
   function fitKeyboard() {
-    if (host.style && host.style.setProperty) host.style.setProperty('--sq-kb', keyboardInset() + 'px');
+    var inset = keyboardInset();
+    if (host.style && host.style.setProperty) host.style.setProperty('--sq-kb', inset + 'px');
+    // A keyboard up (120 px or more, or any strip under a field of the card): the footer stops sticking (questions.css).
+    var v = W.viewportFit ? W.viewportFit() : null, a = document.activeElement;
+    var typing = !!(a && host.contains && host.contains(a) && a.hasAttribute && a.hasAttribute('data-sq-other'));
+    if (host.classList) host.classList.toggle('sq-kb-up', !!(v && v.vv && (v.inset >= 120 || (typing && v.inset > 0))));
   }
   if (window.visualViewport) { window.visualViewport.addEventListener('resize', fitKeyboard); window.visualViewport.addEventListener('scroll', fitKeyboard); }
+  window.addEventListener('resize', fitKeyboard); window.addEventListener('orientationchange', fitKeyboard);
+  window.addEventListener('pageshow', fitKeyboard);
+  host.addEventListener('focusin', fitKeyboard); host.addEventListener('focusout', function () { setTimeout(fitKeyboard, 0); });
+  // The Mac going away or coming back redraws the cards at once (their buttons wait while it is away).
+  if (W.onServer) W.onServer(function () { render(); });
 
   // Hidden: no reads at all (a phone in a pocket spends nothing). Visible again: one read at once (within the 1 s gap).
   document.addEventListener('visibilitychange', function () { if (document.hidden) stop(); else if (signedIn()) start(); });

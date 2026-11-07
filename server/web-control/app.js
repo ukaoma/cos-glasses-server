@@ -58,6 +58,19 @@
     if (diff === 1) return 'tomorrow';
     return d.toLocaleDateString(undefined, { weekday: 'long' });
   }
+  // 6.99.30 (design QA): a day in a row, in plain words: "Today", else "Nov 7" ("Nov 7, 2025" in another year). Takes
+  // a YYYY-MM-DD (a meeting's date, read as that calendar day, never shifted by time zone) or a Date. Anything else comes
+  // back as it was.
+  var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function plainDay(v, now) {
+    var y, m, d;
+    if (v instanceof Date && isFinite(v.getTime())) { y = v.getFullYear(); m = v.getMonth(); d = v.getDate(); }
+    else { var p = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v == null ? '' : v)); if (!p) return v == null ? '' : String(v); y = +p[1]; m = +p[2] - 1; d = +p[3]; }
+    if (m < 0 || m > 11 || d < 1 || d > 31) return String(v);
+    var n = now || new Date();
+    if (y === n.getFullYear() && m === n.getMonth() && d === n.getDate()) return 'Today';
+    return MONTHS[m] + ' ' + d + (y === n.getFullYear() ? '' : ', ' + y);
+  }
   var PROVIDERS = { claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor', glasses: 'Glasses', cos: 'COS' };
   function providerLabel(p) { return PROVIDERS[p] || (p ? p.charAt(0).toUpperCase() + p.slice(1) : 'Session'); }
   function badge(p) { var cls = PROVIDERS[p] ? (p === 'cos' ? 'glasses' : p) : 'work'; return '<span class="badge ' + esc(cls) + '">' + esc(providerLabel(p)) + '</span>'; }
@@ -100,9 +113,12 @@
     var limit = o.timeoutMs != null ? o.timeoutMs : (method === 'GET' ? API_READ_TIMEOUT_MS : 0);
     var ctrl = limit && window.AbortController ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, limit) : null;
+    var sentAt = Date.now();
     return fetch(path, { method: method, headers: headers, credentials: 'same-origin', body: body, signal: ctrl ? ctrl.signal : undefined }).then(function (res) {
       // Blob bodies keep their deadline after headers: a stalled download must release its queue slot.
       if (timer && o.responseType !== 'blob') clearTimeout(timer);
+      sxNoteClock(res, sentAt);
+      noteServer(res.status !== 502);
       if (res.status === 401 && path.indexOf('/api/web-session/') !== 0) { showAuth(); var gone = new Error('Signed out. Connect this browser again.'); gone.status = 401; throw gone; }
       if (o.responseType === 'blob' && res.ok) return res.blob();
       return res.text().then(function (text) {
@@ -129,10 +145,55 @@
         var late = new Error('Your Mac did not answer in ' + Math.round(limit / 1000) + ' seconds. Check that it is awake, then try again.');
         late.code = 'timeout'; throw late;
       }
+      // 6.99.30: the browser's own words for a request that never reached the Mac ("Failed to fetch" in Chrome and
+      // Comet, "Load failed" in Safari, "NetworkError..." in Firefox) never reach the page. Anything with no status
+      // that is not a timeout or an abort the caller asked for is the Mac out of reach, said once, here.
+      if (err && err.status == null && !err.code && err.name !== 'AbortError') { noteServer(false); throw unreachableError(err); }
       throw err;
     });
   }
   var API_READ_TIMEOUT_MS = 20000;
+
+  // ── what every request learns about the Mac (6.99.30) ──
+  // api() above and apiAnswer() (the Sessions reader's transport) share these; they sit here, between api() and the
+  // state, so a test that loads api() alone has them.
+  // 6.99.30: the one sentence for a request that never reached the Mac (api() and apiAnswer() below, and the panes with
+  // their own fetch: COSWeb.unreachableCopy). Never the browser's own "Failed to fetch" or "Load failed".
+  var UNREACHABLE_COPY = 'Could not reach COS on your Mac. Check that it is awake and on Tailscale, then try again.';
+  function unreachableError(cause) { var e = new Error(UNREACHABLE_COPY); e.code = 'unreachable'; e.cause = cause; return e; }
+
+  // 6.99.30 (QA: clock skew): the Mac's clock, as this page's offset from it. The session card's one state (sxTruth)
+  // weighs the Mac's own times (state_since, a row's activity) against moments this page stamped with its own clock (a
+  // gate answer, a Stop). A phone a minute behind made every Mac time look a minute newer, so a stale Idle beat a
+  // Working the page had just been told about. Each answer's Date header (whole seconds, read at the midpoint of the
+  // request) gives the offset; the answer with the shortest round trip in the last ten minutes wins, so one slow answer
+  // never moves it. Zero until the first answer. A missing or unreadable header changes nothing.
+  var SX_CLOCK = { skew: 0, rtt: Infinity, at: 0 };
+  var SX_CLOCK_KEEP_MS = 600000;
+  function sxNoteClock(res, sentAt) {
+    var got = Date.now(), h = null;
+    try { h = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('date') : null; } catch (_e) { h = null; }
+    var server = h ? Date.parse(h) : NaN;
+    if (!isFinite(server) || typeof sentAt !== 'number') return;
+    var rtt = Math.max(0, got - sentAt);
+    // The header drops the milliseconds: on average the Mac's moment is half a second after the stamped second.
+    var skew = Math.round(server + 500 - (sentAt + rtt / 2));
+    if (rtt <= SX_CLOCK.rtt || got - SX_CLOCK.at > SX_CLOCK_KEEP_MS) { SX_CLOCK.skew = skew; SX_CLOCK.rtt = rtt; SX_CLOCK.at = got; }
+  }
+  // 6.99.30 (QA: "Server connected" stayed green for five minutes after the Mac went away): every request says whether
+  // the Mac answered. A request that never reached it, or a 502 from the proxy in front of it, marks it down; any other
+  // answer marks it up. The rail's server line, Today's sheet and the question cards hear each change at once
+  // (COSWeb.onServer). null until the first answer.
+  var SERVER = { up: null, hooks: [] };
+  function noteServer(up) {
+    up = !!up;
+    if (SERVER.up === up) return;
+    SERVER.up = up;
+    SERVER.hooks.slice().forEach(function (fn) { try { fn(up); } catch (err) { console.error(err); } });
+  }
+
+  /** This page's moment `t` (its own Date.now()) on the Mac's clock. */
+  function sxServerTime(t) { return t == null ? t : t + SX_CLOCK.skew; }
 
   // ── state ───────────────────────────────────────────────
   var state = {
@@ -209,6 +270,12 @@
     if (location.hash === hash) route(); else location.hash = hash;
   }
   function isPhone() { return !window.matchMedia('(min-width: 600px)').matches; }
+  /** A keyboard and a fine pointer are the way in (a Mac, a PC): Return sends. Touch screens type a new line. */
+  function keyboardFirst() { return !!(window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches); }
+  // Return in a text box sends only where a keyboard and a pointer are the way in (cos-chat.js keyboardFirst): never on
+  // a touch screen, whatever its width (6.99.30: the unfolded Duo's on-screen keyboard sent on Return), and never
+  // mid-composition (an IME's Return picks the word; keyCode 229 is Safari's composing key). Shift-Return is a new line.
+  function returnSends(e) { return !!(e && e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && e.target && e.target.tagName === 'TEXTAREA' && keyboardFirst()); }
   function route(forceChanged) {
     var r = parseRoute();
     var changedPane = forceChanged === true || r.pane !== state.pane || !document.querySelector('#pane-' + r.pane + ':not(.hidden)');
@@ -955,8 +1022,13 @@
     var html = visible.map(needRowHtml).join('');
     if (shown.length > visible.length) html += '<button type="button" class="need-more" data-today-needs="all">Show ' + (shown.length - visible.length) + ' more</button>';
     if (m.later.length && !TODAY.showLater) html += '<button type="button" class="need-more" data-today-needs="later">' + esc(m.later.length + (m.later.length === 1 ? ' thing can' : ' things can') + ' wait until tomorrow. Show') + '</button>';
-    if (!m.rows.length) html = '<p class="card-empty">' + esc(m.settled ? 'Nothing is waiting on you.' : m.failed.length ? '' : 'Reading sessions, Work, voices and memories.') + '</p>';
-    m.failed.forEach(function (name) { html += '<button type="button" class="need-more need-failed" data-today-needs="retry">' + esc('Couldn’t read ' + name + '. Try again') + '</button>'; });
+    // 6.99.30 (design QA): no empty line above a failed read (it left a 45 px gap), and one retry row, never one per
+    // source: with the Mac not answering (sessions and Work both unread, or more than two sources) it says so once.
+    if (!m.rows.length) html = m.failed.length ? '' : '<p class="card-empty">' + esc(m.settled ? 'Nothing is waiting on you.' : 'Reading sessions, Work, voices and memories.') + '</p>';
+    if (m.failed.length) {
+      var silent = TODAY.offline || m.failed.length > 2;
+      html += '<button type="button" class="need-more need-failed" data-today-needs="retry">' + esc(silent ? 'Your Mac is not answering. Try again.' : 'Couldn’t read ' + listWords(m.failed) + '. Try again') + '</button>';
+    }
     list.innerHTML = html;
   }
   function renderNext(w) {
@@ -1275,6 +1347,7 @@
     var meta = sxBadge(key.provider) +
       (s.pinned ? '<span class="sx-pinned">PINNED</span>' : '') +
       (label ? '<span class="sx-chip ' + st + '">' + esc(label) + '</span>' : '') +
+      (notSentFor(key.provider, key.id) ? '<span class="sx-chip refused" title="' + esc(notSentFor(key.provider, key.id).line) + '">Not sent</span>' : '') +
       (upd ? '<span class="sx-when">Updated ' + esc(sxShortDate(upd)) + '</span>' : '') +
       (ambiguous[title] && opened ? '<span class="sx-opened" title="Another session on screen has the same name. This one was opened ' + esc(sxShortDate(opened)) + '.">Opened ' + esc(sxShortDate(opened)) + '</span>' : '') +
       (s.project && String(s.project) !== title ? '<span class="sx-ws">' + esc(s.project) + '</span>' : '');
@@ -1551,6 +1624,27 @@
   }
   function sessionPath(provider, id, tail) { return '/api/agent-sessions/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) + (tail || ''); }
 
+  // 6.99.30 (QA, held from Codex for .30): a queued message the server refused or let expire is said where the person
+  // looks, not only in the Sessions reader: a "Not sent" line in Today's sheet for that session and a chip on its row in
+  // the Sessions list. What the server's queue said last, per session, in this browser for a day; each read of the
+  // queue replaces it, so a row the server drops clears the mark.
+  var NOT_SENT_KEY = 'cos_web_not_sent', NOT_SENT_KEEP_MS = 86400000;
+  function notSentRows(rows) { return (rows || []).filter(function (t) { return t && (t.status === 'refused' || t.status === 'expired'); }); }
+  function notSentLine(t) {
+    var why = String((t && t.reasonCopy) || (t && t.status === 'expired' ? 'the thread stayed busy too long.' : 'the session refused it.')).trim();
+    return /^not sent\b/i.test(why) ? why : 'Not sent: ' + why.charAt(0).toLowerCase() + why.slice(1);
+  }
+  function noteNotSent(provider, id, rows) {
+    var all = readStore(NOT_SENT_KEY), k = provider + '|' + id, now = Date.now(), list = notSentRows(rows);
+    Object.keys(all).forEach(function (x) { if (!all[x] || now - (Number(all[x].at) || 0) > NOT_SENT_KEEP_MS) delete all[x]; });
+    if (list.length) all[k] = { n: list.length, line: notSentLine(list[list.length - 1]).slice(0, 240), at: now }; else delete all[k];
+    writeStore(NOT_SENT_KEY, all);
+  }
+  function notSentFor(provider, id) {
+    var v = readStore(NOT_SENT_KEY)[provider + '|' + id];
+    return v && Date.now() - (Number(v.at) || 0) <= NOT_SENT_KEEP_MS ? v : null;
+  }
+
   // Like api(), but a 4xx refusal comes back as { status, body } instead of throwing, because
   // these routes answer "busy", "changed" or "not now" with a body the person should read.
   function apiAnswer(path, opts) {
@@ -1559,10 +1653,18 @@
     var timer = ctrl && o.timeoutMs ? setTimeout(function () { ctrl.abort(); }, o.timeoutMs) : null;
     var headers = { 'X-COS-Web': '1' };
     if (o.body !== undefined) headers['Content-Type'] = 'application/json';
+    var sentAt = Date.now();
     return fetch(path, { method: o.method || 'GET', headers: headers, credentials: 'same-origin', body: o.body !== undefined ? JSON.stringify(o.body) : undefined, signal: ctrl ? ctrl.signal : undefined })
       .then(function (res) {
+        sxNoteClock(res, sentAt);
+        noteServer(res.status !== 502);
         if (res.status === 401) { showAuth(); throw new Error('Signed out. Connect this browser again.'); }
         return res.text().then(function (t) { var b = {}; try { b = t ? JSON.parse(t) : {}; } catch (_e) { b = {}; } return { status: res.status, body: b || {} }; });
+      }, function (err) {
+        // A timeout this call asked for stays an abort (its callers say "may have saved"); the rest never reached the Mac.
+        if (err && err.name === 'AbortError') throw err;
+        noteServer(false);
+        throw unreachableError(err);
       })
       .finally(function () { if (timer) clearTimeout(timer); });
   }
@@ -1737,7 +1839,7 @@
   // the same time are ordered gate, stream, list, hook, stop: the hook's word wins a tie. Idle yields
   // only to working seen more than SX_IDLE_GRACE_MS after it, the server's rule for the flush that
   // trails a Stop (TRANSCRIPT_AFTER_IDLE_GRACE_MS).
-  var SX_IDLE_GRACE_MS = 5000, SX_STOP_ECHO_MS = 8000, SX_GATE_RECHECK_MS = 20000;
+  var SX_IDLE_GRACE_MS = 5000, SX_STOP_ECHO_MS = 8000, SX_GATE_RECHECK_MS = 20000, SX_PROBE_TIMEOUT_MS = 15000;
   var SX_TIE_RANK = { gate: 0, stream: 1, list: 2, hook: 3, stop: 4 };
   function sxMs(v) {
     var t = v instanceof Date ? v.getTime() : typeof v === 'number' ? v : typeof v === 'string' && v ? Date.parse(v) : NaN;
@@ -1750,9 +1852,11 @@
     if (f.agentState && SX_HOOK_WORD[f.agentState]) out.push({ word: SX_HOOK_WORD[f.agentState], at: sxMs(f.stateSince) || sxMs(f.statusAt) || 0, src: 'hook', seen: sxMs(f.stateSeenAt) });
     else if (f.statusAt) out.push({ word: f.transport === 'working' ? 'Working' : f.transport === 'done' ? 'Done' : 'Idle', at: sxMs(f.statusAt), src: 'stream', seen: sxMs(f.transportSeenAt) });
     if (r.list && r.list.at != null) out.push({ word: r.list.word, at: r.list.at, src: 'list', seen: sxMs(r.list.seen) });
-    if (r.gate && r.gate.busy && r.gate.at != null) out.push({ word: 'Working', at: r.gate.at, src: 'gate', seen: r.gate.at });
+    // A gate answer and a Stop are this page's own moments: ranked on the Mac's clock (sxServerTime) against the Mac's
+    // own times, and kept on this page's clock as `seen` for the echo window (6.99.30, QA: clock skew).
+    if (r.gate && r.gate.busy && r.gate.at != null) out.push({ word: 'Working', at: sxServerTime(r.gate.at), src: 'gate', seen: r.gate.at });
     var stop = sxMs(r.stoppedAt);
-    if (stop !== null) out.push({ word: 'Idle', at: stop, src: 'stop', seen: stop });
+    if (stop !== null) out.push({ word: 'Idle', at: sxServerTime(stop), src: 'stop', seen: stop });
     return out;
   }
   /** { word, at, src }: the one state the whole card shows. Null before any signal. */
@@ -1796,9 +1900,12 @@
     // Arrival is the first time this page saw THIS word at THIS time: a re-read of the same row is not news.
     r.list = { word: word, at: at != null ? at : 0, seen: was && was.word === word && was.at === (at != null ? at : 0) && was.seen != null ? was.seen : Date.now() };
   }
-  /** A gate busy answer that decides the card is re-asked after a while, so it cannot stand forever. Every
-   *  attempt is stamped (gate.triedAt), and each failed one doubles the wait, up to 16 times (QA 6.99.29: a failing
-   *  probe was re-asked every second). `at` stays the time of the last ANSWER: a failure is no evidence of busy. */
+  /** A gate busy answer that decides the card is re-asked while the card shows it: 20 s after the last attempt, and
+   *  each failed attempt doubles the wait, up to 16 times (QA 6.99.29: a failing probe was re-asked every second).
+   *  Every attempt is stamped (gate.triedAt) and ends within SX_PROBE_TIMEOUT_MS (6.99.30: before that a probe that
+   *  never answered left r.probing set, and the gate was never asked again). So a busy gate stands only while the
+   *  server keeps answering busy, or keeps not answering, and a fresher signal (a Stop, the hook going idle more than
+   *  the grace after it) still outranks it. `at` stays the time of the last ANSWER: a failure is no evidence of busy. */
   function sxGateStale(r) {
     var t = sxTruth(r);
     if (!(t && t.src === 'gate' && r.gate) || r.probing) return false;
@@ -1840,6 +1947,7 @@
     if (reason === 'http_503') return 'The server has no room for another live feed right now; showing the stored turns.';
     if (reason === 'reconnecting') return 'Reconnecting to the live feed…';
     if (reason === 'stream_lost') return 'The live feed stopped answering; showing the stored turns. Reopen the session to try again.';
+    if (reason === 'unreachable') return 'Your Mac is not answering. This is the last state it sent.';
     return 'Live feed unavailable (' + reason + '); showing the stored turns.';
   }
   // The block keeps one size whatever it holds (/qa: the turns below moved while Miles read, as tool
@@ -1975,7 +2083,8 @@
       var waiting = rows.filter(function (t) { return t.status === 'waiting' || t.status === 'queued' || t.status === 'pending'; });
       // QA 6.99.29: a queued message the server refused (or let expire) stays in view with the server's reason,
       // instead of vanishing from the line.
-      var notSent = rows.filter(function (t) { return t.status === 'refused' || t.status === 'expired'; });
+      var notSent = notSentRows(rows);
+      if (q.status === 200) noteNotSent(provider, id, rows);
       if (q.status === 200 && r.queued !== waiting.length) { r.queued = waiting.length; paintActivity(r); }
       if (!waiting.length && !notSent.length) { box.innerHTML = ''; return; }
       box.innerHTML = '<div class="sx-queue">' + (waiting.length ? '<p class="sx-queue-head">' + (waiting.length === 1 ? '1 follow-up queued. It sends when this session is available.' : waiting.length + ' follow-ups queued. They send in order when this session is available.') + '</p>' : '') +
@@ -1986,7 +2095,7 @@
         }).join('') +
         notSent.map(function (t) {
           return '<div class="sx-queue-row sx-queue-refused"><span class="sx-queue-state">Not sent</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') +
-            '<span class="sx-queue-reason">' + esc(t.reasonCopy || (t.status === 'expired' ? 'Not sent: the thread stayed busy too long.' : 'Not sent: the session refused it.')) + '</span></span></div>';
+            '<span class="sx-queue-reason">' + esc(notSentLine(t)) + '</span></span></div>';
         }).join('') + '</div>';
     }).catch(function () {});
   }
@@ -2000,7 +2109,7 @@
     // Every attempt is stamped; a failed one backs the next off (sxGateStale). A gate answer resets both.
     if (r.gate) r.gate.triedAt = Date.now();
     var failed = function () { if (r.gate) r.gate.failures = (r.gate.failures || 0) + 1; };
-    return apiAnswer(sessionPath(r.provider, r.id, '/attachability')).then(function (a) {
+    return apiAnswer(sessionPath(r.provider, r.id, '/attachability'), { timeoutMs: SX_PROBE_TIMEOUT_MS }).then(function (a) {
       if (state.reading !== r && !r.view) return;
       if (a.status === 404) { failed(); r.verdict = { attachable: false, reason: 'route_absent', reasonCopy: 'Update the COS server to continue a thread from here.', ownerCount: 0 }; viewOf(r).verdict(r); return; }
       var b = a.body || {};
@@ -4624,7 +4733,7 @@
         .catch(function (err) {
           // The server names what failed (wrong token, wrong code, the glasses code, lockout).
           // No status means the request never reached COS (the browser's own "Load failed").
-          showAuth(err && err.status ? err.message : 'Could not reach COS on your Mac. Check that this phone is on Tailscale and the Mac is awake.');
+          showAuth(err && err.status ? err.message : UNREACHABLE_COPY);
         });
     } else if (f.id === 'session-form') sendSessionTurn(false);
     else if (f.id === 'sessions-search-form') { $('sessions-q').blur(); searchSessions(); }
@@ -4673,7 +4782,7 @@
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openAsk(); return; }
     if (e.key === 'Escape' && !$('ask-sheet').classList.contains('hidden')) { closeAsk(); return; }
     if (e.key === 'Escape' && !$('section-menu').classList.contains('hidden')) { closeMenu(); $('section-btn').focus(); return; }
-    if (e.key === 'Enter' && !e.shiftKey && e.target.tagName === 'TEXTAREA' && !isPhone()) { e.preventDefault(); var form = e.target.closest('form'); if (form) form.requestSubmit(); }
+    if (returnSends(e)) { e.preventDefault(); var form = e.target.closest('form'); if (form) form.requestSubmit(); }
   });
   document.querySelectorAll('[data-mode]').forEach(function (b) {
     b.addEventListener('click', function () {
@@ -4684,6 +4793,17 @@
   });
   window.addEventListener('hashchange', route);
   window.addEventListener('scroll', onScroll, { passive: true });
+  // 6.99.30: back from the browser's back-forward cache (a swipe back, the app switcher) the open reader's live stream
+  // is closed and the page's last reading is however old the visit was. Open the stream again and read the turns.
+  window.addEventListener('pageshow', function (e) {
+    if (!e || !e.persisted) return;
+    var r = state.reading;
+    if (r && r.provider && r.id) {
+      if (state.stream) { try { state.stream.close(); } catch (_e) {} state.stream = null; }
+      watchSession(r.provider, r.id); refreshTurns(r.provider, r.id);
+    }
+    if (state.pane === 'today' && !$('app-shell').classList.contains('hidden')) loadToday();
+  });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden || $('app-shell').classList.contains('hidden')) return;
     // Coming back to the page refreshes Today in place. Other panes keep what is on screen:
@@ -4724,10 +4844,80 @@
     });
   }
 
+  // ── the visible viewport, read one way (6.99.30) ──────
+  // Today's session sheet (panes/today-actions.js) and the question card's footer on Today (panes/questions.js) both
+  // place things above whatever covers the bottom of the page: an on-screen keyboard, a hardware keyboard's strip, or a
+  // browser's own bottom bar (Comet, Chrome, Safari's, whichever: nothing here knows any browser's bar). Only what the
+  // browser reports is used: window.visualViewport's height, offsetTop and scale against the layout viewport.
+  //   layoutH  the layout viewport's height. Read whenever the page is not pinch-zoomed (then innerHeight is the layout
+  //            viewport everywhere) and kept while it is, since some browsers report the zoomed size there.
+  //   inset    what covers the bottom, in unzoomed CSS px: layoutH less the visible height times the zoom. A pinch
+  //            zoom alone is no inset (half the height at 2x is all of the page).
+  //   top, height  the box to fill, in layout px. Unzoomed it is the visible viewport itself (offsetTop is where a
+  //            browser panned the page to keep a focused field in view). Zoomed it is the layout viewport less the
+  //            inset, so a pinch zoom magnifies the sheet instead of shrinking its layout into the zoomed window.
+  //   below    what of the layout viewport lies under that box: the backdrop alone reaches down over it.
+  // No visualViewport (old browsers): the whole layout viewport, nothing covered.
+  var VP = { layoutH: 0 };
+  function viewportFit() {
+    var vv = window.visualViewport, de = document.documentElement;
+    var inner = window.innerHeight || (de && de.clientHeight) || 0;
+    var scale = vv && vv.scale > 0 ? vv.scale : 1, zoomed = scale > 1.01;
+    if (!zoomed || !VP.layoutH) VP.layoutH = zoomed ? Math.max(inner, (de && de.clientHeight) || 0) : inner;
+    var H = VP.layoutH;
+    if (!vv || !(vv.height > 0)) return { layoutH: H, top: 0, height: H, inset: 0, below: 0, scale: 1, zoomed: false, vv: false };
+    var inset = Math.max(0, Math.round(H - vv.height * scale));
+    var top, height;
+    if (!zoomed) { top = Math.max(0, Math.round(vv.offsetTop || 0)); height = Math.min(Math.round(vv.height), H); }
+    else { height = H - inset; top = Math.min(Math.max(0, Math.round(vv.offsetTop || 0)), inset); }
+    if (top + height > H) top = Math.max(0, H - height);
+    return { layoutH: H, top: top, height: height, inset: inset, below: Math.max(0, H - top - height), scale: scale, zoomed: zoomed, vv: true };
+  }
+
+  // ── layout breadcrumbs (6.99.30) ──────────────────────
+  // When a sheet lands wrong on a phone nobody here holds, the numbers have to come back on their own. A breadcrumb
+  // goes to the server's existing client diagnostics log (POST /api/diag/client, routes/diag.ts: 10 MB with one
+  // rotation, 30 lines per 10 s per client) when an overlay opens and each time its keyboard state changes. Numbers and
+  // a browser family only: no address, no text, no ids, never the user agent string itself. At most one identical
+  // line per 2 s and LAYOUT_CRUMB_MAX a page load, fire and forget.
+  var LAYOUT_CRUMB_MAX = 40, LAYOUT_CRUMB_GAP_MS = 2000;
+  var crumbs = { sent: 0, last: '', lastAt: 0 };
+  /** The browser family, from the UA string, for the breadcrumb. Comet first: it says Chrome or Safari too. */
+  function uaClass(ua) {
+    ua = String(ua == null ? (navigator && navigator.userAgent) || '' : ua);
+    var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1);
+    var android = /Android/.test(ua);
+    var os = ios ? 'ios' : android ? 'android' : /Mac OS X|Macintosh/.test(ua) ? 'mac' : /Windows/.test(ua) ? 'windows' : /Linux|CrOS/.test(ua) ? 'linux' : 'other';
+    var hints = typeof navigator !== 'undefined' && navigator.userAgentData && navigator.userAgentData.brands ? navigator.userAgentData.brands.map(function (b) { return b && b.brand; }).join(' ') : '';
+    var brand = /Comet\//i.test(ua) || /\bComet\b/i.test(ua) || /\bComet\b/i.test(hints) ? 'comet'
+      : /CriOS\//.test(ua) ? 'crios' : /FxiOS\//.test(ua) ? 'firefox' : /EdgiOS\/|Edg\//.test(ua) ? 'edge'
+      : /Firefox\//.test(ua) ? 'firefox' : /Chrome\/|Chromium\//.test(ua) ? 'chrome'
+      : /Safari\//.test(ua) ? 'safari' : 'other';
+    return { os: os, brand: brand };
+  }
+  /** One breadcrumb: `event` (open, kb), the viewport as the browser reports it, and the overlay's own state. */
+  function layoutCrumb(event, extra) {
+    try {
+      var vv = window.visualViewport, de = document.documentElement, ua = uaClass();
+      var r = function (n) { return typeof n === 'number' && isFinite(n) ? Math.round(n * 100) / 100 : null; };
+      var o = (screen && screen.orientation && screen.orientation.type) || (typeof window.orientation === 'number' ? 'deg' + window.orientation : '');
+      var data = { what: String(event || ''), ua: ua.brand, os: ua.os, iw: r(window.innerWidth), ih: r(window.innerHeight), ch: r(de && de.clientHeight),
+        vvh: vv ? r(vv.height) : null, vvw: vv ? r(vv.width) : null, vvt: vv ? r(vv.offsetTop) : null, vvs: vv ? r(vv.scale) : null,
+        orient: String(o).slice(0, 24), coarse: !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches) };
+      var x = extra || {};
+      Object.keys(x).forEach(function (k) { var v = x[k]; if (/^[a-z][a-zA-Z0-9]{0,15}$/.test(k) && (typeof v === 'number' || typeof v === 'boolean' || (typeof v === 'string' && v.length <= 24))) data[k] = typeof v === 'number' ? r(v) : v; });
+      var key = JSON.stringify(data), now = Date.now();
+      if (crumbs.sent >= LAYOUT_CRUMB_MAX || (key === crumbs.last && now - crumbs.lastAt < LAYOUT_CRUMB_GAP_MS)) return false;
+      crumbs.sent++; crumbs.last = key; crumbs.lastAt = now;
+      api('/api/diag/client', { method: 'POST', body: { ts: now, level: 'info', event: 'web.layout', data: data }, timeoutMs: 5000 }).catch(function () {});
+      return true;
+    } catch (_e) { return false; }
+  }
+
   // ── the shared kit for pane modules (panes/*.js) ───────
   window.COSWeb = {
     $: $, esc: esc, md: md, plain: plain, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
-    plural: plural, countWord: countWord, dayWord: dayWord, providerLabel: providerLabel, domainLabel: domainLabel,
+    plural: plural, countWord: countWord, dayWord: dayWord, plainDay: plainDay, providerLabel: providerLabel, domainLabel: domainLabel,
     skeletonRows: skeletonRows, emptyBox: emptyBox, setStatus: setStatus, autoGrow: autoGrow,
     readStore: readStore, writeStore: writeStore, copyText: copyText, isPhone: isPhone,
     state: state, titles: TITLES, go: go, parseRoute: parseRoute, goBack: goBack,
@@ -4747,7 +4937,11 @@
     // Control's session state (the Sessions pane's sxState) and warm-up test, so the rail's
     // "N waiting on you, N working" counts exactly what the pane lists.
     sessionState: function (s) { return sxState(s); },
-    isKeepWarm: function (s) { return sxKeepWarm(s); }
+    isKeepWarm: function (s) { return sxKeepWarm(s); },
+    // 6.99.30: the visible viewport read one way, layout breadcrumbs, the one unreachable sentence, Return-sends.
+    viewportFit: viewportFit, layoutCrumb: layoutCrumb, uaClass: uaClass, unreachableCopy: UNREACHABLE_COPY, keyboardFirst: keyboardFirst,
+    serverUp: function () { return SERVER.up; },
+    onServer: function (fn) { SERVER.hooks.push(fn); }
   };
   // Today as a place to act (panes/today-actions.js, Miles 11/06): what the Today cards show, a repaint after a
   // decision, and the Sessions reader's own pieces, so the overlay sends and reads through the reader's code.
@@ -4784,6 +4978,7 @@
     newKey: newTurnKey,
     probe: function (r) { return sxProbeAttach(r); },
     path: sessionPath, answer: apiAnswer,
+    notSent: { rows: notSentRows, line: notSentLine, note: noteNotSent, get: notSentFor },
     imageHtml: readerImagesHtml, imagesMount: readerImagesMount, imagesStop: readerImagesStop,
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
@@ -4799,7 +4994,7 @@
       history.replaceState({}, document.title, location.pathname + location.hash);
       api('/api/web-session/login', { method: 'POST', body: { code: linkCode } }).then(showShell)
         .catch(function (err) {
-          showAuth(err && err.status ? err.message : 'Could not reach COS on your Mac. Check that this phone is on Tailscale and the Mac is awake.');
+          showAuth(err && err.status ? err.message : UNREACHABLE_COPY);
           var box = $('auth-code'); if (box) box.value = linkCode;
         });
       return;
@@ -4811,7 +5006,7 @@
         .catch(function (err) { showAuth(err && err.status ? err.message : 'That sign-in link did not work. Get a new one from COS Control on your Mac or the COS Glasses app, or use a code or the token.'); });
       return;
     }
-    api('/api/web-session/status').then(function (st) { if (st && st.authenticated) showShell(st); else showAuth(); }).catch(function () { showAuth('COS on your Mac is not answering. Check that the Mac is awake and on Tailscale.'); });
+    api('/api/web-session/status').then(function (st) { if (st && st.authenticated) showShell(st); else showAuth(); }).catch(function () { showAuth(UNREACHABLE_COPY); });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 })();

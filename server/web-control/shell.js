@@ -286,6 +286,9 @@
   });
 
   W.onRoute(paintNavbar);
+  // 6.99.30: the server line moves the moment a request fails to reach the Mac or reaches it again (app.js noteServer),
+  // not on the five-minute check. Back up, the health read confirms it and refreshes what rides on it.
+  if (W.onServer) W.onServer(function (up) { setServer(up); if (up) checkServer(); });
   W.onShell(function () {
     Object.keys(FALLBACK).forEach(function (k) { setStory(k, FALLBACK[k], false); });
     setTimeout(function () { loadStories(); checkServer(); }, 2500);

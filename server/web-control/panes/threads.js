@@ -118,14 +118,15 @@
       '<span class="cx-row-glyph"><svg class="icon"><use href="#i-threads"/></svg></span><span class="cx-row-body">' +
       '<span class="cx-row-title strong">' + esc(t.name || '(untitled)') + '</span>' +
       (subtitle(t) ? '<span class="cx-row-sub">' + esc(subtitle(t)) + '</span>' : '') +
-      '<span class="cx-id">' + esc(t.id) + '</span></span><span class="chev"></span></button>';
+      // 6.99.30 (design QA): no raw id ("t1") on the row; the thread's own page still shows it, to copy.
+      '</span><span class="chev"></span></button>';
   }
   function hitRow(h) {
     return '<button type="button" class="cx-row" data-th="open" data-id="' + esc(h.id) + '">' +
       '<span class="cx-row-glyph"><svg class="icon"><use href="#i-threads"/></svg></span><span class="cx-row-body">' +
       '<span class="cx-row-title strong">' + esc(h.title || h.name || '(untitled)') + '</span>' +
       (h.snippet ? '<span class="cx-row-sub">' + esc(h.snippet) + '</span>' : '') +
-      '<span class="cx-meta" style="margin-top:4px"><span class="cx-id" style="margin:0">' + esc(h.id) + '</span><span class="cx-cap">' + esc(matchLabel(h.match)) + '</span></span>' +
+      '<span class="cx-meta" style="margin-top:4px"><span class="cx-cap">' + esc(matchLabel(h.match)) + '</span></span>' +
       '</span><span class="chev"></span></button>';
   }
   function list() {

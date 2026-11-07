@@ -7,11 +7,18 @@
   --pv-claude: rgb(199, 115, 56);
   --pv-codex: rgb(26, 140, 122);
   --pv-cursor: rgb(107, 97, 219);
+  /* 6.99.30 (design QA, light mode): the provider badges' 9 px words, about 25% darker than the glyph colour, so they
+     read at 4.5:1 or better on their tint. Dark mode keeps the glyph colour (below). */
+  --pv-claude-ink: rgb(143, 83, 40);
+  --pv-codex-ink: rgb(20, 105, 92);
+  --pv-cursor-ink: rgb(80, 73, 164);
   --run-green: rgb(56, 145, 99);
 }
-:root[data-theme='dark'] .sx { --pv-claude: rgb(226, 146, 92); --pv-codex: rgb(72, 190, 168); --pv-cursor: rgb(158, 150, 245); --run-green: rgb(108, 207, 143); }
+:root[data-theme='dark'] .sx { --pv-claude: rgb(226, 146, 92); --pv-codex: rgb(72, 190, 168); --pv-cursor: rgb(158, 150, 245); --run-green: rgb(108, 207, 143);
+  --pv-claude-ink: var(--pv-claude); --pv-codex-ink: var(--pv-codex); --pv-cursor-ink: var(--pv-cursor); }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) .sx { --pv-claude: rgb(226, 146, 92); --pv-codex: rgb(72, 190, 168); --pv-cursor: rgb(158, 150, 245); --run-green: rgb(108, 207, 143); }
+  :root:not([data-theme='light']) .sx { --pv-claude: rgb(226, 146, 92); --pv-codex: rgb(72, 190, 168); --pv-cursor: rgb(158, 150, 245); --run-green: rgb(108, 207, 143);
+    --pv-claude-ink: var(--pv-claude); --pv-codex-ink: var(--pv-codex); --pv-cursor-ink: var(--pv-cursor); }
 }
 
 /* ── header, views, clock ─────────────────────────────── */
@@ -41,7 +48,7 @@
 @media (max-width: 599px) {
   .sx-search { order: 0; flex: 1 1 auto; }
   .sx-search .cx-clear { min-height: 40px; padding: 0 2px; }
-  .sx-select { min-height: 40px; height: 40px; font-size: 16px; background-position: calc(100% - 16px) 17px, calc(100% - 11px) 17px; }
+  .sx-select { background-position: calc(100% - 16px) 19px, calc(100% - 11px) 19px; }
   #sessions-recency { max-width: 128px; }
   .sx-ufilters .sx-select { flex: 1 1 150px; max-width: none; }
   .sx-utable .hp { display: none; }
@@ -62,12 +69,14 @@
 .sx-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font: 600 15px/1.3 var(--body); color: var(--ink); }
 .sx-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; margin-top: 3px; font-size: 12.5px; line-height: 1.4; color: var(--sub); }
 .sx-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 5px; min-width: 0; }
-.sx-badge { display: inline-flex; align-items: center; height: 17px; padding: 0 6px; border-radius: 9px; font: 700 9px/1 var(--mono); letter-spacing: 0.06em; color: var(--pv-claude); background: color-mix(in srgb, var(--pv-claude) 14%, transparent); white-space: nowrap; }
-.sx-badge.codex { color: var(--pv-codex); background: color-mix(in srgb, var(--pv-codex) 14%, transparent); }
-.sx-badge.cursor { color: var(--pv-cursor); background: color-mix(in srgb, var(--pv-cursor) 14%, transparent); }
+.sx-badge { display: inline-flex; align-items: center; height: 17px; padding: 0 6px; border-radius: 9px; font: 700 9px/1 var(--mono); letter-spacing: 0.06em; color: var(--pv-claude-ink, var(--pv-claude)); background: color-mix(in srgb, var(--pv-claude) 14%, transparent); white-space: nowrap; }
+.sx-badge.codex { color: var(--pv-codex-ink, var(--pv-codex)); background: color-mix(in srgb, var(--pv-codex) 14%, transparent); }
+.sx-badge.cursor { color: var(--pv-cursor-ink, var(--pv-cursor)); background: color-mix(in srgb, var(--pv-cursor) 14%, transparent); }
 .sx-pinned { display: inline-flex; align-items: center; height: 17px; padding: 0 6px; border-radius: 9px; font: 700 8.5px/1 var(--mono); letter-spacing: 0.06em; color: var(--sub); background: color-mix(in srgb, var(--ink) 8%, transparent); }
 .sx-chip { font: 600 11.5px/1.3 var(--body); color: var(--sub); }
 .sx-chip.waiting { color: var(--amber); }
+/* 6.99.30: a queued message the server refused or let expire (app.js notSentFor). */
+.sx-chip.refused { color: var(--hot); }
 .sx-chip.running { color: var(--run-green); }
 .sx-when, .sx-ws { font-size: 11.5px; line-height: 1.3; color: var(--sub); }
 .sx-ws { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
@@ -116,7 +125,7 @@
 .sx-act-tool { flex: none; font: 400 11px/16px var(--mono); color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sx-act-prose { flex: none; margin-top: 2px; font-size: 13px; line-height: 16px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
 .sx-act-fallback { height: calc(var(--act-state) + var(--act-prompt) + var(--act-tail) + 8px); margin: 0; padding-top: 6px; font-size: 12.5px; line-height: 1.4; color: var(--sub); overflow: hidden; box-sizing: border-box; }
-@media (max-width: 599px) { .sx-activity { --act-state: 38px; } .sx-act-stop.cx-btn { height: 36px; } }
+@media (max-width: 599px) { .sx-activity { --act-state: 38px; } }
 .sx-note { font-size: 12px; color: var(--sub); margin: 0 2px 12px; }
 
 /* YOU and ASSISTANT cards (Control: card fill, a tinted hairline; sessions tint for you, green for the reply). */

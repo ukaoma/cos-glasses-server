@@ -109,19 +109,14 @@
     // Copy stays in this browser: the same copy the rest of Control Web uses (plain-http fallback included).
     if (op === 'copy') return W.copyText(String(a.text || '')).then(function () { return {}; });
     var limit = READ_LIMIT[op] != null ? READ_LIMIT[op] : (isRead(op, a) ? 45000 : 0);
-    return W.api('/api/web-bridge/memories', { method: 'POST', body: { id: ++seq, op: op, args: a }, timeoutMs: limit }).then(null, plainNetError).then(function (r) {
+    return W.api('/api/web-bridge/memories', { method: 'POST', body: { id: ++seq, op: op, args: a }, timeoutMs: limit }).then(function (r) {
       if (r && r.ok) return r.details || {};
       var raw = (r && r.message) || 'Your Mac did not answer that.';
       var err = new Error(PLAIN[raw] || raw); err.code = raw; throw err;
     });
   }
-  // No HTTP status means the request never reached COS: the browser's own words ("Failed to fetch", "Load failed") say
-  // nothing to a person, so say what happened and what to do. A timeout already says it in plain words (W.api).
-  var UNREACHABLE = 'Could not reach COS on your Mac. Check that the Mac is awake and on Tailscale, then try again.';
-  function plainNetError(err) {
-    if (err && !err.status && err.code !== 'timeout') { var e = new Error(UNREACHABLE); e.code = 'unreachable'; throw e; }
-    throw err;
-  }
+  // A request that never reached COS is said in plain words by W.api itself (app.js, 6.99.30: code 'unreachable'),
+  // as a timeout is: nothing to translate here.
   function codeOf(e) { return String((e && (e.code || e.message)) || ''); }
 
   // ── state ────────────────────────────────────────────────

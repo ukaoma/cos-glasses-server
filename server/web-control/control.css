@@ -6,7 +6,8 @@
 
 :root {
   --tint: var(--accent);
-  --tertiary: #8b8378;
+  /* 6.99.30 (design QA): #8b8378 measured 3.29:1 on the light page; this reads at 4.5:1 or better. Dark is unchanged. */
+  --tertiary: #6e675d;
   --gold: #b98a3e;
   --green: #2f7d4f;
   --amber: #a8641c;
@@ -64,8 +65,9 @@
   .rail-settings { min-height: 40px; }
 }
 
-/* Full rail (Control's at window width 1100 and up): name and story beside the glyph. */
-@media (min-width: 1100px) {
+/* Full rail (Control's at window width 1100 and up, on a screen tall enough for it: the same clause as app.css's desktop
+   step, so a wide short window keeps the icon rail and its short-screen sizes). */
+@media (min-width: 1100px) and (min-height: 721px) {
   .app-shell { grid-template-columns: 248px minmax(0, 1fr); }
   .rail { align-items: stretch; padding: calc(var(--safe-top) + 18px) 12px 14px; gap: 2px; }
   .rail-head { flex-direction: row; align-items: center; gap: 8px; padding: 0 8px 14px; }
@@ -145,7 +147,7 @@
 .cx-btn:disabled { opacity: 0.45; }
 .cx-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .cx-btn.quiet { border-color: var(--panel-border); }
-@media (max-width: 599px) { .cx-btn { height: 36px; font-size: 14.5px; } }
+@media (max-width: 599px) { .cx-btn { font-size: 14.5px; } }
 
 /* ── text switch (COSBrand: words with a 2pt gold rule, never pills) ── */
 .cx-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 12px 0 10px; }
@@ -161,7 +163,6 @@
 .cx-check input { width: 16px; height: 16px; accent-color: var(--gold); }
 @media (max-width: 599px) {
   .cx-search { max-width: none; flex-basis: 100%; order: 3; }
-  .cx-search .field { min-height: 40px; font-size: 16px; }
   .cx-switch button { font-size: 15px; padding: 8px 0 9px; }
 }
 
@@ -280,7 +281,7 @@
 .cx-chip { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 4px 0 10px; border-radius: 14px; background: var(--panel); border: 1px solid var(--panel-border); font-size: 13px; color: var(--ink); }
 .cx-chip button, .cx-x { width: 24px; height: 24px; border-radius: 12px; color: var(--sub); font-size: 15px; line-height: 1; display: grid; place-items: center; }
 .cx-chip.more { padding-right: 10px; color: var(--sub); }
-@media (max-width: 599px) { .cx-inline-form .field { min-height: 40px; font-size: 16px; } .cx-chip { height: 32px; } }
+@media (max-width: 599px) { .cx-chip { height: 32px; } }
 
 /* ── Settings (Control's hub categories) ──────────────── */
 .cx-set-cat { margin-top: 8px; }
@@ -323,3 +324,8 @@ html, body { overscroll-behavior-y: none; }
 .intake-meeting { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
 .intake-n { font: 600 12px/1.6 var(--mono); color: var(--sub); }
 .intake-foot { margin: 6px 0 0; font-size: 12.5px; color: var(--tertiary); }
+
+/* 6.99.30 (design QA, the unfolded Duo at 1430 px): Settings and Dictation are forms and short reads, not boards, so
+   their content stops at 720 px instead of running lines to 137 characters; prose lines stop at about 68 characters. */
+#pane-settings, #pane-dictation { max-width: 720px; }
+.cx-set-desc, .cx-set-blurb, .wk-fine { max-width: 68ch; }
