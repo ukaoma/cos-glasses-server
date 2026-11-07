@@ -264,7 +264,7 @@
 .mt-lempty { color: var(--sub); text-align: center; font-size: 14px; padding: 26px 8px; margin: 0; }
 .mt-jump { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); box-shadow: var(--shadow); background: var(--panel); }
 .mt-jump[hidden] { display: none; }
-/* The recording bar (Control's LiveRecordingBar): one row, 50 px, never wraps. Under 560 px of bar Add file is the
+/* The recording bar (Control's LiveRecordingBar): one row, 50 px (56 on phones), never wraps. Under 560 px of bar Add file is the
    paperclip alone; under 340 px the still glyph takes the strip's place. */
 .mt-lbarslot { container-type: inline-size; min-height: 50px; margin-top: 8px; }
 .mt-lbar { display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 8px 0 14px; border: 1px solid var(--panel-border);
@@ -287,7 +287,13 @@
 .mt-addfile .icon { width: 14px; height: 14px; }
 .mt-lbar .mt-side-note { flex: none; }
 @container (max-width: 559px) { .mt-addlabel { display: none; } .mt-addfile { padding-left: 10px; padding-right: 10px; } }
-@container (max-width: 339px) { .mt-meter { visibility: hidden; } .mt-glyph { visibility: visible; } .mt-meterwrap { flex: 0 0 40px; } }
+@container (max-width: 339px) {
+  .mt-lbar { gap: 4px; padding-left: 8px; }
+  .mt-meter { visibility: hidden; }
+  .mt-glyph { visibility: visible; }
+  .mt-meterwrap { flex: 0 0 10px; min-width: 10px; }
+  .mt-lbar .mt-side-note { flex: 1; min-width: 0; }
+}
 .mt-lbarslot > .mt-stopline { margin: 8px 4px 0; }
 .mt-lbarslot > .mt-confirm { margin-top: 8px; }
 /* A file dragged over the pane: the column is outlined. Drawn only, so it moves nothing. */
@@ -327,6 +333,13 @@
 .mt-preplist li:last-child { border-bottom: 0; }
 .mt-preplist .mt-prepline-text { -webkit-line-clamp: 2; color: var(--ink); line-height: 1.3; }
 .mt-preplist .cx-btn { flex: none; white-space: nowrap; height: 34px; }
+@media (max-width: 480px) {
+  .mt-lbar { height: 56px; }
+  .mt-lbar .cx-btn { min-height: 44px; min-width: 44px; }
+  .mt-prepslot { height: 112px; }
+  .mt-prepline .cx-btn { height: 44px; }
+  .mt-preplist li { padding-block: 4px; }
+}
 /* The saved meeting's Prep: what it focused on and its files. */
 #mt-dprep:empty { display: none; }
 .mt-prep { margin: 12px 0; display: grid; gap: 10px; }

@@ -189,6 +189,10 @@
 .cc-prep-add { position: relative; cursor: pointer; }
 .cc-prep-add:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cc-prep-acts .cx-btn { height: 40px; }
+@media (max-width: 480px) {
+  .cc-prep-acts .cx-btn { height: 44px; min-width: 44px; }
+  .cc-prep-head-acts button { min-height: 44px; }
+}
 .cc-prep-note { margin: 0; font-size: 13px; }
 .cc-prep-note[hidden] { display: none; }
 .cc-prep.dragging .cc-prep-panel { outline: 2px dashed var(--accent); outline-offset: 4px; }
