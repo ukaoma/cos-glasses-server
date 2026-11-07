@@ -5,11 +5,17 @@
    A tap on Today opens the item in an overlay on Today: a bottom sheet on the folded phone, a side sheet from 600 px.
    - Needs you: what the session waits on. A session question or approval is the same card questions.js draws, with the
      same answer route (POST /api/session-questions/:id/answer), drawn here through its mount(). The session's own
-     status line and its last reply. A reply goes through the Sessions reader's own send path (app.js continueSession
-     with this overlay as its view): attach, the per-browser binding, one key per draft, the queue when busy, and the
-     server's refusals word for word. Open session stays a link to the full reader.
+     status line and its last reply. Open session stays a link to the full reader.
    - Running: a peek at what the session is doing now, read with the reader's own activity reducer (applyFeed) from the
-     same live stream, and a short note box on the same send path. Open session goes to the reader.
+     same live stream, and a short note box. Open session goes to the reader.
+   What a reply or a note shares with the Sessions reader, and what is this file's own copy:
+   - Shared (app.js, through COSWeb.sessionKit): the attach, turn and queue path itself (continueSession and parkTurn,
+     run with this overlay as their view), the per-browser binding store, one key per draft, the attachability probe
+     (sxProbeAttach) and the live feed's reducer. The server's refusals arrive word for word.
+   - Copied here, kept in step by hand: the send gates (sendReply mirrors sendSessionTurn: one send at a time, the
+     caution confirm, a lost answer becomes Try again), the turn watch (watchTurn polls the same route for the same
+     three minutes as the reader's watchTurn), and the refusal box (paintVerdict mirrors renderVerdict, with Open session
+     in place of Fork and Refresh).
    - From today's meetings: each suggestion with the decisions COS Control offers on Today (Create task, Dismiss, Open
      in Work, Open card) and Work's Link for a suggested link, through Work's own route (POST
      /api/work-intake/:id/resolve), one decision at a time as Control does. The Today card's count moves at once.
@@ -27,23 +33,28 @@
   var UNDO_SECONDS = 8;          // TodayDismissals.undoSeconds
   var STALE_MS = 60000;          // a decision the server dated a minute before the tap was made elsewhere
   var WATCH_MS = 180000;         // follow a sent turn for three minutes, as the reader does
+  // The Today summary's cap, read by app.js askCos's callers and the tests (registered as summaryMax). The marker that
+  // says something was left out counts against it.
   var SUMMARY_MAX = 4000;
+  var SUMMARY_MORE = '[More is on Today than fits here.]';
   var X_ICON = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>';
-  // Work's words for an intake refusal (panes/work.js INTAKE_REFUSALS), by the code the server sends.
+  // Work's words for an intake refusal, by the code the server sends: a verbatim copy of panes/work.js INTAKE_REFUSALS
+  // (Work loads lazily, so the overlay cannot read it there). today-actions.test.ts fails if the two differ.
+  // intake_not_found never shows: a suggestion that is gone reads as handled on another screen (GONE).
   var REFUSALS = {
-    meeting_identity_changed: 'That meeting was renamed or merged after it was scored. Dismiss this one; the renamed meeting is checked again.',
-    meeting_unavailable: 'That meeting cannot be found. It may have been renamed or removed. Dismiss this one.',
+    meeting_identity_changed: 'That meeting was renamed or merged after it was scored. Dismiss this item; the renamed meeting is checked again.',
+    meeting_unavailable: 'That meeting can’t be found; it may have been renamed or removed. Dismiss this item.',
     intake_task_changed: 'That task changed or was closed since it was suggested. Dismiss this suggestion.',
     meeting_links_full: 'That task already links eight meetings. Dismiss this suggestion.',
-    work_board_read_only: 'This server cannot write Work links yet.',
-    card_creation_unavailable: 'This server cannot create Work cards yet. Update the server.',
-    task_bridge_unavailable: 'The task bridge did not answer. Try again in a moment.',
-    intake_text_collision: 'The same words are on closed or archived work. Reopen that task in Work instead, or dismiss this one.',
-    intake_busy: 'That one is already being saved, here or on another screen. Try again in a moment.',
-    intake_store_full: 'Intake is full. Dismiss older items in Work, then try again.',
+    work_board_read_only: 'This server can’t write Work links yet.',
+    card_creation_unavailable: 'This server can’t create Work cards yet. Update the server.',
+    task_bridge_unavailable: 'The task bridge didn’t answer. Try again in a moment.',
+    intake_text_collision: 'The same words are on closed or archived work. Reopen that task instead, or dismiss this item.',
+    intake_busy: 'That item is already being saved.', intake_not_found: 'That item is no longer in Intake. Refresh.',
+    invalid_intake_action: 'Refresh Intake and try again.', invalid_intake_id: 'Refresh Intake and try again.',
+    intake_store_full: 'Intake is full. Dismiss older items, then try again.',
     intake_store_closed: 'Intake is unavailable while the server restarts. Try again shortly.',
-    work_intake_unavailable: 'Intake is unavailable right now. Try again shortly.'
-  };
+    work_intake_unavailable: 'Intake is unavailable right now. Try again shortly.' };
   var GONE = 'This suggestion is gone. It was handled on another screen.';
 
   var O = {
@@ -123,11 +134,20 @@
     document.documentElement.classList.add('ta-open');
     var shell = $('app-shell'); if (shell) shell.setAttribute('inert', '');
     fit();
-    if (!O.pushed) {
-      try { history.pushState({ cosTodayOverlay: 1 }, ''); O.pushed = true; } catch (_e) { O.pushed = false; }
+    // The entry names what is open, so a reload can open it again and Back still closes it (restore below).
+    var entry = { cosTodayOverlay: 1, kind: kind, key: O.open.key };
+    try {
+      if (!O.pushed) { history.pushState(entry, ''); O.pushed = true; } else history.replaceState(entry, '');
+    } catch (_e) { /* no history API: Back simply leaves Today */ }
+    try {
+      if (kind === 'need' || kind === 'run') openSession(kind, O.open.key);
+      else openIntake();
+    } catch (err) {
+      // A bug here must not leave a half-drawn sheet over an inert page: take it down, keep the history entry for
+      // app.js openTodayAction to replace, and let it say so and go where the tap went before.
+      close('leave');
+      throw err;
     }
-    if (kind === 'need' || kind === 'run') openSession(kind, O.open.key);
-    else openIntake();
     var sheet = $('ta-sheet');
     if (sheet && sheet.focus) sheet.focus({ preventScroll: true });
   }
@@ -162,6 +182,27 @@
     var replace = O.pushed;
     close('leave');
     if (replace) location.replace(hash); else W.go(pane, args || []);
+  }
+  // A reload with the overlay open keeps its history entry, and the entry before it is Today at the same address, so
+  // Back from there showed nothing (measured in Chrome 11/07: a same-document popstate). On load, app.js hands that
+  // entry here: open the same thing again, so the first Back closes it as it did before the reload. What cannot be
+  // opened (gone, or Today left meanwhile) just clears the entry's mark.
+  var KINDS = { need: 1, run: 1, meeting: 1, intake: 1 };
+  function restore(st) {
+    if (O.open || !st || !st.cosTodayOverlay) return Promise.resolve(false);
+    var forget = function () { try { history.replaceState(null, ''); } catch (_e) {} return false; };
+    if (!KINDS[st.kind]) return Promise.resolve(forget());
+    var started = Date.now();
+    return new Promise(function (resolve) {
+      (function wait() {
+        var d = T.data(), ready = d.at > 0 && (st.kind === 'need' || st.kind === 'run' || d.intakeLoaded);
+        if (W.parseRoute().pane !== 'today' || O.open) return resolve(forget());
+        if (!ready) { if (Date.now() - started > 15000) return resolve(forget()); return setTimeout(wait, 150); }
+        O.pushed = true;   // this entry is the overlay's own
+        try { open(st.kind, String(st.key || ''), null); resolve(true); }
+        catch (err) { console.error('[today] could not reopen the overlay after a reload.', err); O.pushed = false; resolve(forget()); }
+      })();
+    });
   }
   window.addEventListener('popstate', function () {
     if (O.ignorePops > 0) { O.ignorePops--; return; }
@@ -440,7 +481,8 @@
     paintMeta();
     if (!O.r) return;
     if (W.sessionQuestions && W.sessionQuestions.mount) {
-      O.qMount = W.sessionQuestions.mount($('ta-q'), id, function () { paintMeta(); });
+      // mount() draws at once and calls back before it returns, so the count comes from the callback, not O.qMount.
+      O.qMount = W.sessionQuestions.mount($('ta-q'), id, function (n) { O.qCount = n; paintMeta(); });
     }
     if (kind === 'run') { paintLive(); watchStream(O.r); }
     loadLast(O.r);
@@ -452,6 +494,7 @@
     clearInterval(O.clock); O.clock = null;
     clearInterval(O.watch); O.watch = null;
     if (O.qMount) { O.qMount.unmount(); O.qMount = null; }
+    O.qCount = 0;
     O.r = null; O.row = null; O.item = null;
   }
   // The Needs you list may be minutes old: read it again, and say so if this one is no longer waiting.
@@ -494,7 +537,7 @@
   function paintMeta() {
     var box = $('ta-meta'); if (!box || !O.open) return;
     var html = '';
-    var questions = O.qMount ? O.qMount.count() : 0;
+    var questions = O.qCount || 0;
     if (O.open.kind === 'need') {
       var it = O.item;
       if (!it) { box.innerHTML = '<p class="ta-note">This is no longer waiting on you. It was handled on another screen.</p>'; return; }
@@ -608,10 +651,11 @@
     }
   }
 
-  // ── sending, through the reader's own path ────────────
-  // continueSession reports through this view (app.js READER_VIEW's methods); everything else about the send is the
-  // reader's code. The overlay never holds a message for later: when COS's own reply is still running it says so, and
-  // the words stay in the box, under the same key, so Send again cannot post twice.
+  // ── sending: the reader's attach, turn and queue path ──
+  // continueSession and parkTurn run as they do in the reader and report through this view (app.js READER_VIEW's
+  // methods). The gates in sendReply, watchTurn and paintVerdict below are this file's copies of the reader's (see the
+  // header). The overlay never holds a message for later: when COS's own reply is still running it says so, and the
+  // words stay in the box, under the same key, so Send again cannot post twice.
   var VIEW = {
     status: function (r, text, kind, actionHtml) { if (r !== O.r) return; O.note = { text: text || '', kind: kind || '' }; paintNote(); },
     pending: function (r, text, note) {
@@ -636,6 +680,8 @@
     queue: function () {}
   };
   function paintNote() { W.setStatus($('ta-status'), O.note.text, O.note.kind === 'error'); }
+  // A copy of the reader's renderVerdict (app.js): the same boxes and words, with Open session where the reader offers
+  // Fork and Refresh, which live only in the reader.
   function paintVerdict() {
     var box = $('ta-verdict'), r = O.r; if (!box || !r) return;
     var v = r.verdict, html = '';
@@ -687,7 +733,8 @@
       paintVerdict();
     });
   }
-  // Follow one sent turn to its end, as the reader's watchTurn does, while this overlay shows it.
+  // A copy of the reader's watchTurn (app.js): the same route, outcomes and three minutes, for as long as the overlay
+  // shows this session. The reader's own watch is tied to its page, so it cannot be reused here.
   function watchTurn(r, bindingId, key) {
     clearInterval(O.watch);
     var started = Date.now();
@@ -705,7 +752,7 @@
 
   // ═════════════ what COS is told about Today ═════════════
   // A short plain summary of what the Today cards show, for an Ask made from Today (app.js askCos). Titles and words
-  // only: no ids, no tokens. Bounded to SUMMARY_MAX characters.
+  // only: no ids, no tokens. At most SUMMARY_MAX characters, the left-out marker included.
   function end(s) { s = String(s || '').trim(); return /[.!?\u2026]$/.test(s) ? s : s + '.'; }
   function summary() {
     var d = T.data();
@@ -744,7 +791,7 @@
     if (nd && n.title) lines.push('Up next: ' + clip(n.title, 120) + ' at ' + W.clock(nd) + ' ' + W.dayWord(nd) + '.');
     var out = '', i;
     for (i = 0; i < lines.length; i++) {
-      if (out.length + lines[i].length + 1 > SUMMARY_MAX) { out += '[More is on Today than fits here.]'; break; }
+      if (out.length + lines[i].length + 1 > SUMMARY_MAX - SUMMARY_MORE.length) { out += SUMMARY_MORE; break; }
       out += lines[i] + '\n';
     }
     return out.trim();
@@ -752,7 +799,7 @@
 
   W.registerPane('todayActions', {
     load: function () {},
-    open: open, close: close, summary: summary,
+    open: open, close: close, restore: restore, summary: summary, summaryMax: SUMMARY_MAX,
     isOpen: function () { return !!O.open; },
     _state: O, _decide: decide, _undo: undo, _intakeHtml: intakeHtml, _send: sendReply, _view: VIEW, _paintVerdict: paintVerdict,
     _paintLive: paintLive, _paintMeta: paintMeta, _onClick: onClick, _expire: expireLater

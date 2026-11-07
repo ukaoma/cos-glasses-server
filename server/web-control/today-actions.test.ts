@@ -15,6 +15,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const TA = readFileSync(join(HERE, 'panes', 'today-actions.js'), 'utf8')
 const APP = readFileSync(join(HERE, 'app.js'), 'utf8')
 const CHAT = readFileSync(join(HERE, 'panes', 'cos-chat.js'), 'utf8')
+const WORK = readFileSync(join(HERE, 'panes', 'work.js'), 'utf8')
 const QUESTIONS = readFileSync(join(HERE, 'panes', 'questions.js'), 'utf8')
 const flush = async (n = 10) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)) }
 const esc = (s: unknown) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' } as Record<string, string>)[c]!)
@@ -68,21 +69,25 @@ function readerKit(fetch: unknown, store: Map<string, string>, readerReading: un
   expect(end, 'the reader send region ends').toBeGreaterThan(start)
   expect(ks, 'app.js exports the sessionKit').toBeGreaterThan(0)
   const kitExpr = APP.slice(ks, ke + 4).replace('  window.COSWeb.sessionKit = ', '').replace(/;\s*$/, '')
+  // The reader's own session words and markdown, not stubs: sxProvider to sxStateLabel, sxInline to sxListBlock, plain.
+  const sx = APP.slice(APP.indexOf('  function sxProvider(p)'), APP.indexOf('  function sxReal()'))
+  const mdRegion = APP.slice(APP.indexOf('  // Markdown for an assistant turn'), APP.indexOf('  function renderTurns('))
+  const plainFn = /  function plain\(text\) \{[^\n]*\}/.exec(APP)![0]
+  expect(sx).toContain('function sxStateLabel(')
+  expect(mdRegion).toContain('function sxMd(')
   const touched: string[] = []
   const timers: Array<() => void> = []
   const deps: Record<string, unknown> = {
     state: { reading: readerReading, turnPoll: null },
     $: (id: string) => { touched.push(id); return null },
     esc, md: (s: unknown) => String(s), toDate: (v: unknown) => (v ? new Date(String(v)) : null), autoGrow: () => {}, showAuth: () => {},
-    sxProvider: (p: string) => (p === 'codex' || p === 'cursor' ? p : 'claude'),
-    sxProviderLabel: (p: string) => (p === 'codex' ? 'Codex' : p === 'cursor' ? 'Cursor' : 'Claude'),
-    sxTitle: (s: { display_label?: string }) => s.display_label || 'Session', sxState: () => 'recent', sxStateLabel: () => '', sxMd: (s: string) => esc(s),
+    clock: (d: Date) => d.toISOString().slice(11, 16),
     fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v) } },
     AbortController, setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout: () => {},
     setInterval: () => 1, clearInterval: () => {}, requestAnimationFrame: () => 0, document: {}, window: { COSWeb: {}, scrollTo: () => {} },
   }
   // eslint-disable-next-line no-new-func
-  const kit = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
+  const kit = new Function('deps', 'with (deps) {\n' + plainFn + '\n' + sx + '\n' + mdRegion + '\n' + APP.slice(start, end) + '\nreturn ' + kitExpr + ';\n}')(deps)
   return { kit, touched, deps }
 }
 
@@ -115,7 +120,7 @@ function load(o: Opts = {}) {
     addEventListener: (t: string, fn: (e: any) => void) => { (docListeners[t] ??= []).push(fn) },
   }
   document.getElementById('ask-sheet').classList.add('hidden')
-  const history = { state: null as unknown, pushes: 0, backs: 0, pushState(s: unknown) { this.state = s; this.pushes++ }, back() { this.backs++ } }
+  const history = { state: null as unknown, pushes: 0, backs: 0, replaces: 0, pushState(s: unknown) { this.state = s; this.pushes++ }, replaceState(s: unknown) { this.state = s; this.replaces++ }, back() { this.backs++ } }
   const location = { hash: '#/today', replaced: [] as string[], replace(h: string) { this.replaced.push(h) } }
   const data: Record<string, unknown> = { needs: [], working: [], open: [], welcome: {}, offline: false, at: 1, sessions: [], intake: [], intakeCaps: { cardCreation: true, linkWrites: true }, intakeLoaded: true, ...(o.data || {}) }
   const answers = o.api || {}
@@ -139,6 +144,7 @@ function load(o: Opts = {}) {
   let unmounts = 0
   const W: Record<string, unknown> = {
     esc, api, go: (p: string, a: string[]) => { location.hash = '#/' + [p].concat(a || []).join('/') }, isPhone: () => true, autoGrow: () => {},
+    parseRoute: () => ({ pane: (location as any).pane ?? 'today', args: [] }),
     setStatus: (el: El | null, text: string, err: boolean) => { if (el) { el.textContent = text || ''; el.setAttribute('data-error', err ? '1' : '0') } },
     domainLabel: (d: string) => ({ personal: 'Personal', quilt: 'Quilt' } as Record<string, string>)[d] || d,
     ago: () => '3 h', clock: () => '9:00 PM', dayWord: () => 'tomorrow', toDate: (v: unknown) => (v ? new Date(String(v)) : null),
@@ -156,7 +162,8 @@ function load(o: Opts = {}) {
       refresh: () => { refreshed++ },
     },
     sessionKit: reader.kit,
-    sessionQuestions: { mount: (_el: El, sid: string) => { mounts.push(sid); return { count: () => o.questions || 0, unmount: () => { unmounts++ } } } },
+    // Like questions.js mount(): it draws and calls back with the count before it returns.
+    sessionQuestions: { mount: (_el: El, sid: string, onChange?: (n: number) => void) => { mounts.push(sid); if (onChange) onChange(o.questions || 0); return { count: () => o.questions || 0, unmount: () => { unmounts++ } } } },
   }
   const ctx = vm.createContext({
     window: { COSWeb: W, addEventListener: (t: string, fn: () => void) => { winListeners[t] = fn }, visualViewport: undefined },
@@ -428,7 +435,9 @@ const OK_ROUTES: Routes = {
 
 describe('Needs you: see what the session waits on and reply, through the reader’s own send path', () => {
   it('shows the session’s line, the last reply and the composer; mounts this session’s question cards', async () => {
-    const h = load({ data: { needs: [NEED] }, routes: OK_ROUTES, api: { '/api/work-board/your-move': { available: true, items: [NEED] } }, questions: 1 })
+    const waitingRow = { session_id: SID, provider: 'claude', display_label: 'COS Glasses - QA review before publish', alive: true, running: true,
+      agent_state: 'waiting', state_source: 'hook', waiting_kind: 'permission', waiting_detail: 'Bash git push' }
+    const h = load({ data: { needs: [NEED], sessions: [waitingRow] }, routes: OK_ROUTES, api: { '/api/work-board/your-move': { available: true, items: [NEED] } }, questions: 1 })
     h.ta.open('need', 'act-1', h.opener())
     await flush()
     expect(h.els['ta-title']!.textContent).toBe('COS Glasses - QA review before publish')
@@ -439,7 +448,10 @@ describe('Needs you: see what the session waits on and reply, through the reader
     expect(meta).toContain('It is asking you this now. Answer here.')
     expect(meta).toContain('data-ta="open-session"')
     expect(h.mounts).toEqual([SID])
-    expect(h.els['ta-last']!.innerHTML).toContain('Ready to publish **6.99.24**.')
+    // The reader's own markdown (sxMd), not a stub.
+    expect(h.els['ta-last']!.innerHTML).toContain('<p>Ready to publish <strong>6.99.24</strong>.</p>')
+    // The session's state in the reader's words (sxState, sxStateLabel), read from a real waiting row.
+    expect(meta).toContain('Waiting for you: Permission: Bash git push')
     expect(h.els['ta-foot']!.innerHTML).toContain('id="ta-input"')
   })
 
@@ -558,6 +570,7 @@ describe('Running: a peek at what the session does now, and a note on the same p
     h.ta.open('run', 'codex|' + CID, h.opener())
     await flush()
     expect(h.els['ta-title']!.textContent).toBe('COS Product Work (CODEX)')
+    expect(h.els['ta-meta']!.innerHTML, 'the reader\u2019s sxState reads a hook-backed running row').toContain('Working now, for 20 min')
     expect(h.streams).toHaveLength(1)
     expect(h.streams[0].url).toBe(CP('/stream?seed=turn'))
     const es = h.streams[0]
@@ -636,10 +649,25 @@ describe('what COS is told when Miles asks from Today', () => {
     expect(h.ta.summary()).not.toContain('\u2026.')
   })
 
+  it('never passes its cap, the left-out marker included, even when the text lands right at the edge', () => {
+    const max = load().ta.summaryMax as number
+    expect(max).toBe(4000)
+    let nearest = 0, marked = 0
+    // Suggestion lengths that walk the last line across the cap: some land within the marker's 34 characters of it.
+    for (let len = 40; len <= 140; len++) {
+      const items = Array.from({ length: 48 }, (_, i) => ITEM('wi_' + String(i).padStart(32, '0'), ('word '.repeat(40)).slice(0, len) + i, { meeting: MEETING('Meeting ' + (i % 12)) }))
+      const out = load({ data: { intake: items, needs: [NEED] } }).ta.summary() as string
+      expect(out.length, 'suggestions of ' + len + ' characters').toBeLessThanOrEqual(max)
+      if (out.endsWith('[More is on Today than fits here.]')) { marked++; nearest = Math.max(nearest, out.length) }
+    }
+    expect(marked, 'the fixture really overflows').toBeGreaterThan(20)
+    expect(nearest, 'and some run ends within the marker\u2019s length of the cap').toBeGreaterThan(max - 34)
+  })
+
   it('stays under its bound however much Today holds, and is empty before Today has loaded', () => {
     const many = Array.from({ length: 300 }, (_, i) => ITEM('wi_' + String(i).padStart(32, '0'), 'A long suggestion '.repeat(20), { meeting: MEETING('Meeting ' + (i % 40)) }))
     const h = load({ data: { intake: many, needs: Array.from({ length: 40 }, () => NEED) } })
-    expect(h.ta.summary().length).toBeLessThanOrEqual(4000)
+    expect(h.ta.summary().length).toBeLessThanOrEqual(h.ta.summaryMax)
     expect(load({ data: { at: 0 } }).ta.summary()).toBe('')
   })
 })
@@ -764,13 +792,12 @@ describe('session question cards drawn into the overlay (questions.js mount)', (
 // ── the server already takes it: the query-jobs `reference` field ────────
 describe('the server takes the Today summary through the existing reference field (no server change)', () => {
   it('parseQueryJobRequest keeps the reference as built by askCos and the COS chat, under its limits', async () => {
-    const { parseQueryJobRequest, QUERY_JOB_LIMITS } = await import('../lib/query-job-types.js')
+    const { parseQueryJobRequest } = await import('../lib/query-job-types.js')
     const h = load({ data: { intake: Array.from({ length: 300 }, (_, i) => ITEM('wi_' + String(i).padStart(32, '0'), 'A long suggestion '.repeat(20), { meeting: MEETING('Meeting ' + (i % 40)) })), needs: [NEED] } })
     const summary = h.ta.summary()
     const parsed = parseQueryJobRequest({ clientJobId: '11111111-2222-4333-8444-555555555555', generation: 1, query: 'What first?', sessionId: 'sess0042',
       reference: { query: 'What Today in COS Control shows right now', response: summary } })
     expect(parsed.reference).toEqual({ query: 'What Today in COS Control shows right now', response: summary })
-    expect(summary.length).toBeLessThan(QUERY_JOB_LIMITS.referenceResponseChars)
   })
 })
 
@@ -811,5 +838,289 @@ describe('the Today card (app.js loadTodayIntake, paintTodayIntake, COSWeb.today
     h.today.markGone(ID1, true)
     h.today.markGone(ID2, true)
     expect(h.els['intake-card']!.cls.has('hidden'), 'the card leaves when nothing is left').toBe(true)
+  })
+})
+
+// ── QA round 2 (6.99.25) ───────────────────────────────────────────────
+describe('the overlay’s refusal words are Work’s own', () => {
+  it('REFUSALS in today-actions.js equals INTAKE_REFUSALS in work.js, code for code and word for word', () => {
+    const pick = (src: string, name: string) => {
+      const i = src.indexOf('var ' + name + ' = {'), open = src.indexOf('{', i), close = src.indexOf('};', open)
+      expect(i, name).toBeGreaterThan(0)
+      // eslint-disable-next-line no-new-func
+      return new Function('return ' + src.slice(open, close + 1))() as Record<string, string>
+    }
+    expect(pick(TA, 'REFUSALS')).toEqual(pick(WORK, 'INTAKE_REFUSALS'))
+  })
+})
+
+describe('a bug while opening never leaves a half-drawn overlay', () => {
+  it('open() that throws takes the sheet down, frees the page, keeps its history entry for the fallback to replace, and rethrows', () => {
+    const h = load({ data: { intake: [ITEM(ID1, 'One')] } })
+    ;(h.ctx as any).window.COSWeb.today.data = () => { throw new Error('boom') }
+    expect(() => h.ta.open('meeting', 'Surcharging Push', h.opener())).toThrow('boom')
+    expect(h.ta.isOpen()).toBe(false)
+    expect(h.document.appended.hidden).toBe(true)
+    expect(h.els['app-shell']!.hasAttribute('inert')).toBe(false)
+    expect(h.document.documentElement.cls.has('ta-open')).toBe(false)
+    expect(h.history.backs, 'no back(): it would race the fallback navigation').toBe(0)
+    expect((h.history.state as any).cosTodayOverlay).toBe(1)
+  })
+})
+
+describe('a reload with the overlay open', () => {
+  it('opens the same thing again on its own entry, so the first Back closes it', async () => {
+    const h = load({ data: { intake: [ITEM(ID1, 'One')] } })
+    const entry = { cosTodayOverlay: 1, kind: 'meeting', key: 'Surcharging Push' }
+    h.history.state = entry
+    expect(await h.ta.restore(entry)).toBe(true)
+    expect(h.ta.isOpen()).toBe(true)
+    expect(h.els['ta-title']!.textContent).toBe('Surcharging Push')
+    expect(h.history.pushes, 'no second entry').toBe(0)
+    h.pop()
+    expect(h.ta.isOpen(), 'Back closes it').toBe(false)
+    expect(h.history.backs).toBe(0)
+  })
+
+  it('waits for Today to load before opening, and pushes nothing', async () => {
+    const h = load({ data: { at: 0, intake: [ITEM(ID1, 'One')] } })
+    const done = h.ta.restore({ cosTodayOverlay: 1, kind: 'meeting', key: 'Surcharging Push' })
+    h.runTimers()
+    expect(h.ta.isOpen()).toBe(false)
+    h.data.at = 5
+    h.runTimers()
+    expect(await done).toBe(true)
+    expect(h.ta.isOpen()).toBe(true)
+    expect(h.history.pushes).toBe(0)
+  })
+
+  it('an entry it cannot reopen, or a reload that left Today, only loses its mark', async () => {
+    const bad = load()
+    expect(await bad.ta.restore({ cosTodayOverlay: 1, kind: 'nonsense' })).toBe(false)
+    expect(bad.history.state).toBeNull()
+    expect(bad.ta.isOpen()).toBe(false)
+    const away = load({ data: { intake: [ITEM(ID1, 'One')] } })
+    ;(away.location as any).pane = 'work'
+    expect(await away.ta.restore({ cosTodayOverlay: 1, kind: 'meeting', key: 'Surcharging Push' })).toBe(false)
+    expect(away.ta.isOpen()).toBe(false)
+    expect(away.history.replaces).toBe(1)
+  })
+})
+
+// app.js: openTodayAction and loadTodayIntake, run from the Today region of app.js.
+function todayRegion(over: Record<string, unknown> = {}) {
+  const start = APP.indexOf("  // From today's meetings: Work's suggestions"), end = APP.indexOf('  function setBadge(')
+  expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start)
+  const seen = { toasts: [] as string[], errors: [] as unknown[][], gone: [] as Array<[string, string[]]>, replaced: [] as string[] }
+  const els: Record<string, El> = {}
+  const deps: Record<string, unknown> = {
+    $: (id: string) => (els[id] ??= new El()), esc, api: () => Promise.resolve({}), state: { pane: 'today', sessions: [] }, loadToday: () => {},
+    toast: (t: string) => seen.toasts.push(t), go: (p: string, a: string[]) => seen.gone.push([p, a]),
+    console: { error: (...a: unknown[]) => seen.errors.push(a) },
+    history: { state: null }, location: { replace: (h: string) => seen.replaced.push(h) },
+    ensurePane: () => Promise.reject(new Error('unset')), ...over,
+  }
+  // eslint-disable-next-line no-new-func
+  const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { openTodayAction: openTodayAction };\n}')(deps)
+  const tap = (attrs: Record<string, string>) => fns.openTodayAction({ getAttribute: (n: string) => attrs[n] ?? null })
+  return { tap, seen, deps }
+}
+describe('a Today tap whose overlay fails says so, logs it, and goes where it went before', () => {
+  it('a load failure: a toast, a console error with the cause, then Sort in Work', async () => {
+    const cause = new Error('Could not load the todayActions section.')
+    const t = todayRegion({ ensurePane: () => Promise.reject(cause) })
+    t.tap({ 'data-today': 'meeting', 'data-key': 'Surcharging Push' })
+    await flush()
+    expect(t.seen.toasts).toEqual(['Could not open that here. Opening it in Work.'])
+    expect(t.seen.errors).toHaveLength(1)
+    expect(t.seen.errors[0]![1]).toBe(cause)
+    expect(t.seen.gone).toEqual([['work', ['sort']]])
+  })
+
+  it('an exception inside open(): the same toast and log; the half-open overlay’s entry is replaced, not stacked', async () => {
+    const boom = new Error('open broke')
+    const t = todayRegion({ ensurePane: () => Promise.resolve({ open: () => { throw boom } }), history: { state: { cosTodayOverlay: 1 } } })
+    t.tap({ 'data-today': 'run', 'data-key': 'claude|abc-123' })
+    await flush()
+    expect(t.seen.toasts).toEqual(['Could not open that here. Opening the session.'])
+    expect(t.seen.errors[0]![1]).toBe(boom)
+    expect(t.seen.replaced).toEqual(['#/sessions/claude/abc-123'])
+    expect(t.seen.gone).toEqual([])
+  })
+
+  it('a pane that never registered falls back too; a working overlay shows no toast and logs nothing', async () => {
+    const t = todayRegion({ ensurePane: () => Promise.resolve(null) })
+    t.tap({ 'data-today': 'need', 'data-key': 'act-1', 'data-session-key': 'codex|thr-9' })
+    await flush()
+    expect(t.seen.gone).toEqual([['sessions', ['codex', 'thr-9']]])
+    expect(t.seen.toasts).toHaveLength(1)
+    const opened: unknown[] = []
+    const ok = todayRegion({ ensurePane: () => Promise.resolve({ open: (...a: unknown[]) => opened.push(a) }) })
+    ok.tap({ 'data-today': 'intake' })
+    await flush()
+    expect(opened).toHaveLength(1)
+    expect(ok.seen.toasts).toEqual([])
+    expect(ok.seen.errors).toEqual([])
+  })
+})
+
+describe('Ask from Today never fails because of the summary', () => {
+  it('a summary that throws: the Ask goes without it, and the console says why', async () => {
+    const start = APP.indexOf('  var TODAY_REFERENCE'), end = APP.indexOf('  // ── Usage ──')
+    if (start < 0 || end < 0 || end < start) throw new Error('askCos markers moved in app.js')
+    const posts: any[] = [], errors: unknown[][] = []
+    const deps = { state: { pane: 'today' }, PANES: {}, toast: () => {}, setStatus: () => {}, webJobId: () => '11111111-2222-4333-8444-555555555555',
+      ensurePane: () => Promise.resolve({ summary: () => { throw new Error('summary broke') } }),
+      api: (path: string, o: { body: unknown }) => { posts.push({ path, body: o.body }); return Promise.resolve({}) },
+      window: { COSWeb: { cosChat: null } }, setTimeout: () => 0, console: { error: (...a: unknown[]) => errors.push(a) } }
+    // eslint-disable-next-line no-new-func
+    const askCos = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn askCos;\n}')(deps)
+    await askCos('What first?', null)
+    expect(posts).toHaveLength(1)
+    expect(posts[0].body.query).toBe('What first?')
+    expect(posts[0].body).not.toHaveProperty('reference')
+    expect(String(errors[0]![0])).toContain('Today summary failed')
+  })
+})
+
+// panes/work.js in a vm: Today's Create task, then its Open card.
+function workPane(boards: unknown[]) {
+  const defs: Record<string, any> = {}
+  const calls: string[] = []
+  let route = { pane: 'work', args: [] as string[] }
+  let reads = 0
+  const pane: any = { html: '', get innerHTML() { return this.html }, set innerHTML(v: string) { this.html = v },
+    querySelector: (sel: string) => (sel === '.wk' && /class="cx wk"/.test(pane.html) ? {} : null), querySelectorAll: () => [], addEventListener() {}, contains: () => false }
+  const W: Record<string, unknown> = {
+    $: (id: string) => (id === 'pane-work' ? pane : null), esc, md: (x: unknown) => esc(x), plain: (x: unknown) => String(x), toast: () => {},
+    skeletonRows: () => '<div class="skel"></div>', toDate: (v: unknown) => (v ? new Date(String(v)) : null), readStore: () => ({}), writeStore: () => {},
+    registerPane: (n: string, d: unknown) => { defs[n] = d }, parseRoute: () => route, go: () => {}, goBack: () => {}, setCrumb: () => {},
+    copyText: () => Promise.resolve(), domainLabel: (d: string) => d, sessionList: () => Promise.resolve({ sessions: [] }), isPhone: () => false,
+    api: (path: string) => {
+      calls.push(path)
+      if (path === '/api/work-board') return Promise.resolve(boards[Math.min(reads++, boards.length - 1)])
+      if (path === '/api/work-intake') return Promise.resolve({ items: [], capabilities: {} })
+      if (path === '/api/work-board/activity/open') return Promise.resolve({ items: [], available: true })
+      if (path === '/api/domains') return Promise.resolve({ domains: [] })
+      return Promise.resolve({})
+    },
+  }
+  const document = { addEventListener: () => {}, querySelector: () => null, querySelectorAll: () => [], activeElement: null, hidden: false }
+  const window = { COSWeb: W, matchMedia: () => ({ matches: true, addEventListener() {} }), scrollTo: () => {}, scrollBy: () => {}, scrollY: 0, innerHeight: 800,
+    addEventListener: () => {}, navigator: { platform: 'MacIntel', userAgent: 'test' } }
+  const ctx = vm.createContext({ window, document, navigator: window.navigator, setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
+    console, Date, JSON, Math, Promise, Array, Object, String, Number, Set, Map, Error, RegExp, isNaN, encodeURIComponent, decodeURIComponent, crypto: globalThis.crypto,
+    CSS: { escape: (x: string) => x }, location: { replace: () => {} } })
+  vm.runInContext(WORK, ctx)
+  return { def: defs.work, pane, calls, boardReads: () => reads, go: (args: string[]) => { route = { pane: 'work', args }; defs.work.load(args) } }
+}
+describe('Work after a decision on Today (work.js intakeChanged)', () => {
+  const A = { id: 'aaaaaaaaaaaa', workIdentity: 'aaaaaaaaaaaa', domain: 'quilt', text: 'An older card', workStage: 'planned', workRevision: 'f'.repeat(64), meetingRefs: [] }
+  const B = { id: 'bbbbbbbbbbbb', workIdentity: 'bbbbbbbbbbbb', domain: 'quilt', text: 'Write the KB plan', workStage: 'mentioned', workRevision: 'e'.repeat(64), meetingRefs: [] }
+  it('Open card straight after Create task reads the board again and shows the new card, not "not currently available"', async () => {
+    const w = workPane([{ tasks: [A], capabilities: {}, complete: true }, { tasks: [A, B], capabilities: {}, complete: true }])
+    w.go([])
+    await flush()
+    expect(w.boardReads()).toBe(1)
+    w.def.intakeChanged()            // Today's Create task landed
+    w.go([B.workIdentity])           // Today's Open card
+    await flush()
+    expect(w.boardReads(), 'the card route read the board again').toBe(2)
+    expect(w.calls.filter(c => c === '/api/work-intake').length, 'and Intake after it').toBeGreaterThanOrEqual(1)
+    expect(w.pane.html).toContain('Write the KB plan')
+    expect(w.pane.html).not.toContain('This work is not currently available')
+  })
+  it('without a decision on Today the card route keeps the board it has', async () => {
+    const w = workPane([{ tasks: [A], capabilities: {}, complete: true }])
+    w.go([])
+    await flush()
+    w.go([A.workIdentity])
+    await flush()
+    expect(w.boardReads()).toBe(1)
+  })
+})
+
+// app.js route(): a lazy pane whose wait ran out but which still finishes loading.
+function routeRegion() {
+  const start = APP.indexOf('  var lazyList = null;'), end = APP.indexOf('  function runHooks(')
+  expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start)
+  const timers: Array<{ fn: () => void; ms: number }> = []
+  const scripts: any[] = []
+  const mk = () => { const n: any = { cls: new Set<string>(), attrs: {} as Record<string, string>, waits: [] as any[], textContent: '' }
+    n.classList = { toggle: () => {}, remove: () => {}, add: () => {} }
+    n.getAttribute = (k: string) => n.attrs[k] ?? null; n.setAttribute = (k: string, v: string) => { n.attrs[k] = v }
+    n.querySelector = (sel: string) => (sel === '.lazy-wait' ? n.waits[0] ?? null : null)
+    n.querySelectorAll = (sel: string) => (sel === '.lazy-wait' ? n.waits.slice() : [])
+    n.insertAdjacentHTML = (_p: string, html: string) => { const w = { html, remove: () => { n.waits = n.waits.filter((x: unknown) => x !== w) } }; n.waits.unshift(w) }
+    return n }
+  const els: Record<string, any> = {}
+  const PANES: Record<string, any> = {}
+  const deps: Record<string, unknown> = {
+    document: { getElementById: (id: string) => (id === 'lazy-panes' ? { textContent: JSON.stringify({ work: '/control/panes/work.js' }) } : null),
+      createElement: () => { const s: any = {}; scripts.push(s); s.remove = () => {}; return s }, body: { appendChild: () => {} },
+      querySelector: () => null, querySelectorAll: () => [] },
+    $: (id: string) => (els[id] ??= mk()), state: { pane: 'today', lastLoad: {}, sessions: [] }, PANES, TITLES: { work: 'Work', today: 'Today' }, ROOT_PANES: ['today', 'work'],
+    closeMenu: () => {}, onScroll: () => {}, skeletonRows: () => '<i>loading</i>', esc, runHooks: () => {}, loadToday: () => {},
+    location: { hash: '#/work' }, window: { scrollTo: () => {} }, setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: () => {},
+    console,
+  }
+  // eslint-disable-next-line no-new-func
+  const fns = new Function('deps', 'with (deps) {\n' + APP.slice(start, end) + '\nreturn { route: route };\n}')(deps)
+  return { fns, timers, scripts, els, PANES }
+}
+describe('a lazy pane that loads after its 15 s wait ran out clears its own error card (app.js route)', () => {
+  it('the card says it is taking too long; when the script finally loads, the card goes and the pane loads', async () => {
+    const r = routeRegion()
+    r.fns.route()
+    expect(r.scripts).toHaveLength(1)
+    r.timers.find(t => t.ms === 15000)!.fn()
+    await flush()
+    expect(r.els['pane-work'].waits[0].html).toContain('taking too long')
+    const loads: unknown[] = []
+    r.PANES.work = { load: (...a: unknown[]) => loads.push(a) }
+    r.scripts[0].onload()
+    await flush()
+    expect(r.els['pane-work'].waits, 'the error card cleared itself').toEqual([])
+    expect(r.els['pane-work'].attrs['data-lazy-ready']).toBe('1')
+    expect(loads).toEqual([[[], { changed: true }]])
+  })
+  it('a script that fails after the wait leaves the card and its Try again alone', async () => {
+    const r = routeRegion()
+    r.fns.route()
+    r.timers.find(t => t.ms === 15000)!.fn()
+    await flush()
+    r.scripts[0].onerror()
+    await flush()
+    expect(r.els['pane-work'].waits).toHaveLength(1)
+    expect(r.els['pane-work'].waits[0].html).toContain('Try again')
+  })
+})
+
+describe('the page hands a reloaded overlay entry to the overlay (app.js showShell)', () => {
+  function shell(state: unknown, ensure: (n: string) => Promise<unknown>) {
+    const start = APP.indexOf('  function showShell(info) {'), end = APP.indexOf('\n  }\n', start)
+    expect(start).toBeGreaterThan(0)
+    const seen = { ensured: [] as string[], replaced: [] as unknown[] }
+    const el = () => ({ classList: { add() {}, remove() {} }, textContent: '' })
+    const deps = { $: () => el(), state: {}, loadTailnetUrl: () => {}, runHooks: () => {}, shellHooks: [], route: () => {}, setTimeout: () => 0, prefetchPanes: () => {},
+      ensurePane: (n: string) => { seen.ensured.push(n); return ensure(n) },
+      history: { state, replaceState: (s: unknown) => seen.replaced.push(s) } }
+    // eslint-disable-next-line no-new-func
+    new Function('deps', 'with (deps) {\n' + APP.slice(start, end + 4) + '\nshowShell({});\n}')(deps)
+    return seen
+  }
+  it('reopens it through restore(); a page without the overlay loads nothing extra; a failed load only clears the mark', async () => {
+    const entry = { cosTodayOverlay: 1, kind: 'run', key: 'claude|x' }
+    const got: unknown[] = []
+    const a = shell(entry, () => Promise.resolve({ restore: (s: unknown) => got.push(s) }))
+    await flush()
+    expect(a.ensured).toEqual(['todayActions'])
+    expect(got).toEqual([entry])
+    const b = shell(null, () => Promise.resolve({}))
+    await flush()
+    expect(b.ensured).toEqual([])
+    const c = shell(entry, () => Promise.reject(new Error('offline')))
+    await flush()
+    expect(c.replaced).toEqual([null])
   })
 })

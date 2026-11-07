@@ -160,7 +160,10 @@
     var load = loadPane(name);
     if (!waitMs) return load;
     return new Promise(function (resolve, reject) {
-      var timer = setTimeout(function () { reject(new Error('The ' + (TITLES[name] || name) + ' section is taking too long to load. Check the connection to your Mac.')); }, waitMs);
+      var timer = setTimeout(function () {
+        var late = new Error('The ' + (TITLES[name] || name) + ' section is taking too long to load. Check the connection to your Mac.');
+        late.code = 'pane_timeout'; reject(late);
+      }, waitMs);
       load.then(function (v) { clearTimeout(timer); resolve(v); }, function (e) { clearTimeout(timer); reject(e); });
     });
   }
@@ -243,6 +246,12 @@
         if (!lazyEl) return;
         lazyEl.querySelectorAll('.lazy-wait').forEach(function (n) { n.remove(); });
         lazyEl.insertAdjacentHTML('afterbegin', '<div class="lazy-wait"><div class="list"><p class="empty"><strong>' + esc(err.message) + '</strong></p><button type="button" class="btn" data-lazy-retry="' + esc(lazyPane) + '">Try again</button></div></div>');
+        // Only the wait ran out: if the load still finishes, the card clears itself and the pane shows.
+        if (err && err.code === 'pane_timeout') loadPane(lazyPane).then(function () {
+          lazyEl.querySelectorAll('.lazy-wait').forEach(function (n) { n.remove(); });
+          lazyEl.setAttribute('data-lazy-ready', '1');
+          if (state.pane === lazyPane) route(true);
+        }, function () {});
       });
       runHooks(routeHooks, r);
       return;
@@ -297,6 +306,13 @@
     loadTailnetUrl();
     runHooks(shellHooks, info);
     route();
+    // Reloaded with Today's overlay open: its history entry is still current. The overlay opens the same thing again
+    // (panes/today-actions.js restore), so Back closes it; if it cannot load, the entry is unmarked.
+    var held = history.state;
+    if (held && held.cosTodayOverlay) {
+      ensurePane('todayActions', 4000).then(function (m) { if (m && m.restore) m.restore(held); },
+        function () { try { history.replaceState(null, ''); } catch (_e) {} });
+    }
     setTimeout(prefetchPanes, 1500);
   }
   document.addEventListener('click', function (e) {
@@ -643,11 +659,17 @@
     ensurePane('todayActions', 4000).then(function (m) {
       if (!m || !m.open) throw new Error('The Today overlay did not start.');
       m.open(kind, key, t);
-    }).catch(function () {
-      // Without the overlay, the tap goes where it went before: the session reader, or Sort in Work.
+    }).catch(function (err) {
+      // Without the overlay, the tap goes where it went before: the session reader, or Sort in Work. Web has no client
+      // log route, so the failure is said on screen and in the console first. An overlay that half opened leaves its
+      // history entry, which the fallback replaces, so Back from there still lands on Today.
       var s = String(kind === 'run' ? key : t.getAttribute('data-session-key') || '').split('|');
-      if ((kind === 'run' || kind === 'need') && s[1]) return go('sessions', [s[0], s.slice(1).join('|')]);
-      go('work', kind === 'need' ? [] : ['sort']);
+      var session = (kind === 'run' || kind === 'need') && !!s[1];
+      var dest = session ? ['sessions', s[0], s.slice(1).join('|')] : ['work'].concat(kind === 'need' ? [] : ['sort']);
+      console.error('[today] the overlay did not open (' + kind + '); opening ' + dest.join('/') + ' instead.', err);
+      toast(session ? 'Could not open that here. Opening the session.' : 'Could not open that here. Opening it in Work.');
+      if (history.state && history.state.cosTodayOverlay) location.replace('#/' + dest.map(encodeURIComponent).join('/'));
+      else go(dest[0], dest.slice(1));
     });
   }
   function setBadge(name, on) { document.querySelectorAll('[data-badge="' + name + '"]').forEach(function (b) { b.classList.toggle('hidden', !on); }); }
@@ -1579,7 +1601,8 @@
 
   // Where the send path below reports: the reader's own page by default. Today's overlay (panes/today-actions.js)
   // hands continueSession a session object with its own view, so a reply or a steer from Today runs this same attach,
-  // turn and queue path (one binding store, one key per draft, the same refusals), never a copy of it.
+  // turn and queue path (one binding store, one key per draft, the same refusals). The overlay keeps its own copies of
+  // the gates around it (sendSessionTurn), the turn watch (watchTurn) and the refusal box (renderVerdict).
   var READER_VIEW = {
     status: function (r, text, kind, actionHtml) { sessionStatus(text, kind, actionHtml); },
     pending: function (r, text, note) { showPendingTurn(text, note); },
@@ -2037,7 +2060,10 @@
     var chat = window.COSWeb && window.COSWeb.cosChat;
     // Asked from Today: COS gets a short summary of what Today shows (panes/today-actions.js summary), as the Ask's
     // quoted reference, the query-jobs field for context. Asked from any other pane, nothing extra is sent.
-    var context = state.pane === 'today' ? ensurePane('todayActions', 1500).then(function (m) { return m && m.summary ? m.summary() : ''; }, function () { return ''; }) : Promise.resolve('');
+    var context = state.pane === 'today' ? ensurePane('todayActions', 1500).then(function (m) {
+      // A broken summary never costs the Ask: it goes without it, and the console says why.
+      try { return m && m.summary ? m.summary() : ''; } catch (err) { console.error('[today] the Today summary failed; asking without it.', err); return ''; }
+    }, function () { return ''; }) : Promise.resolve('');
     if (chat && chat.askFromSheet) {
       setStatus(statusEl, 'Sending…');
       return context.then(function (ctx) { return chat.askFromSheet(prompt, ctx ? { context: ctx } : undefined); }).then(function (where) { setStatus(statusEl, ''); return where; }, function (err) {
