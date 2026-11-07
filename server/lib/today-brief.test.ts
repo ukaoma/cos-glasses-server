@@ -191,6 +191,13 @@ describe('the breaker: 3 failures in a row stop it for an hour', () => {
     expect((await h.brief.ask(inputs({}, '3'))).state).toBe('fresh')
     expect(JSON.parse(readFileSync(h.deps.stateFile, 'utf8')).failures).toBe(0)
   })
+  it('an answer with one false sentence is kept without it, counts as a success, and the audit names the dropped rule', async () => {
+    const h = harness({ answer: () => 'Nothing is waiting on you. The release work is moving along.' })
+    const v = await h.brief.ask(inputs())
+    expect(v).toMatchObject({ state: 'fresh', text: 'The release work is moving along.' })
+    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'ok', dropped: 'nothing_waiting' })])
+    expect(JSON.parse(readFileSync(h.deps.stateFile, 'utf8')).failures).toBe(0)
+  })
   it('an unusable answer (empty, or a claim Today did not see) is a failure for the breaker', async () => {
     const h = harness({ answer: () => 'Nothing is waiting on you right now, all clear.', minIntervalMs: 0 })
     const v = await h.brief.ask(inputs())
@@ -292,19 +299,26 @@ describe('the answer is cleaned and checked', () => {
   it('refuses "nothing is waiting" unless Today read everything and saw nothing waiting', () => {
     const clear = normalizeTodayBriefInputs({ sessions: [{ title: 'A', state: 'working', minutes: 3 }], needs: [], sessionsRead: true, needsComplete: true })
     expect(cleanTodayBrief('Nothing is waiting on you. One agent is building the route.', clear)).not.toBeNull()
-    expect(cleanTodayBrief('Nothing is waiting on you. One agent is building the route.', seen)).toBeNull()
-    expect(cleanTodayBrief('Nothing is waiting on you. One agent is building the route.', { ...clear, needsComplete: false })).toBeNull()
+    // The claim is dropped and the rest kept; an answer that is only the claim is refused.
+    expect(cleanTodayBrief('Nothing is waiting on you. One agent is building the route.', seen)).toBe('One agent is building the route.')
+    expect(cleanTodayBriefWithGuard('Nothing is waiting on you right now.', seen)).toEqual({ text: null, guard: 'nothing_waiting' })
+    expect(cleanTodayBriefWithGuard('Nothing is waiting on you right now.', { ...clear, needsComplete: false }).guard).toBe('nothing_waiting')
   })
   it('refuses "no agents are running" unless the list was read and nothing works', () => {
     const idle = normalizeTodayBriefInputs({ sessions: [{ title: 'A', state: 'open', minutes: 300 }], sessionsRead: true, needsComplete: true })
     expect(cleanTodayBrief('No agents are running now. One quiet session is open.', idle)).not.toBeNull()
-    expect(cleanTodayBrief('No agents are running now. One quiet session is open.', seen)).toBeNull()
-    expect(cleanTodayBrief('No agents are running now. One quiet session is open.', { ...idle, sessionsRead: false })).toBeNull()
+    expect(cleanTodayBrief('No agents are running now. One quiet session is open.', seen)).toBe('One quiet session is open.')
+    expect(cleanTodayBriefWithGuard('No agents are running now.', { ...idle, sessionsRead: false })).toEqual({ text: null, guard: 'nothing_running' })
   })
   it('"no sessions are blocked" or "no other session is stuck" is not a claim that nothing runs (the first live answer)', () => {
     expect(cleanTodayBrief('Three agents are building the release. No sessions are blocked right now.', seen)).not.toBeNull()
-    expect(cleanTodayBriefWithGuard('No sessions are waiting on you. The release is moving.', seen).guard).toBe('nothing_waiting')
-    expect(cleanTodayBriefWithGuard('No agents are working on it. The release is quiet.', seen).guard).toBe('nothing_running')
+    expect(cleanTodayBriefWithGuard('No sessions are waiting on you. The release is moving.', seen)).toEqual({ text: 'The release is moving.', dropped: 'nothing_waiting' })
+    expect(cleanTodayBriefWithGuard('No agents are working on it.', seen)).toEqual({ text: null, guard: 'nothing_running' })
+  })
+  it('the second live answer (11/07): its false first sentence goes, the rest stays', () => {
+    const live = normalizeTodayBriefInputs({ sessions: [{ title: 'COS Glasses QA', state: 'open', minutes: 60 }], needs: [{ title: 'COS Glasses QA review' }, { title: 'Name 97 voices' }, { title: 'Review 7 memories' }], later: 3, sessionsRead: true, needsComplete: true })
+    const raw = 'It is Saturday morning and nothing is waiting on you or running right now, so the three items in Needs you can wait until Monday. Your COS Glasses QA review is the one with a reply owed. The other work has gone quiet. The only thing moving is a builder.'
+    expect(cleanTodayBriefWithGuard(raw, live)).toEqual({ text: 'Your COS Glasses QA review is the one with a reply owed. The other work has gone quiet. The only thing moving is a builder.', dropped: 'nothing_waiting' })
   })
   it('too short is unusable', () => {
     expect(cleanTodayBrief('  "ok"  ', seen)).toBeNull()
