@@ -38,8 +38,8 @@ const MAX_STOPS_KEPT = 8
 const WORK_ID = /^task:[a-z_]+:[a-f0-9]{12}$/
 const CLIENT_ROUND_ID = /^(lens|web)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
- * Who made the plan: the lens, or COS Control Web (Work chat on the phone or in a browser, `webPlans: 1` on GET
- * /api/work/chat). The client round id starts with its source (`lens-`, `web-`). A web round is the same contract as a
+ * Who made the plan: the lens, or COS Control Web (Work chat on the phone or in a browser; GET /api/work/chat/web-plans
+ * says this server takes it). The client round id starts with its source (`lens-`, `web-`). A web round is the same contract as a
  * lens round: recorded, sent only by COS Control through its own Send, never by this server.
  */
 export const ROUND_SOURCES = ['lens', 'web'] as const
