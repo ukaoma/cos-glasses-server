@@ -116,6 +116,12 @@ export interface QueuedThreadTurn {
   resendOf?: string
   /** Send again: the row that was copied from this one. Set once, and only once. */
   resentAs?: string
+  /**
+   * 11/07 (Control Web attach): media-store ids sent with the words. The drain hands them to the turns route, which
+   * writes each file's path on this Mac under the words at delivery (lib/session-turn-attachments.ts). The row keeps
+   * the words alone, so the pending row and its preview never show a path. Absent on a turn without files.
+   */
+  attachmentIds?: string[]
 }
 
 // ------------------------------------------------------------------- 6.78.0 flags

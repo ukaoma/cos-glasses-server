@@ -1,3 +1,4 @@
+import { MAX_ATTACHMENTS_PER_PROMPT } from '../../shared/media-attachment.js'
 import { dropItCapability } from '../lib/drop-settings.js'
 import { PREP_CAPABILITY } from '../../shared/prep.js'
 import { phoneMicrophoneMeetingsCapability } from '../lib/phone-recording.js'
@@ -446,6 +447,10 @@ healthRouter.get('/health', async (_req, res) => {
     ...checks,
     server_version: managedServerVersion(),
     ...threadAttachHealthFields(threadAttach),
+    // 11/07 (Control Web attach): a session turn takes up to this many media-store ids as `attachmentIds`, and the turns
+    // route writes each file's path on this Mac under the words. 0 with attach off; absent on an older server. Either
+    // way a client sends words only.
+    threadTurnAttachments: threadAttach.enabled ? MAX_ATTACHMENTS_PER_PROMPT : 0,
     ...sessionHooksHealthFields(),
     // 6.52.0: counts, the mode and two timestamps; never an id, a question, a command, or
     // how many are held (that is on the authenticated questions route).

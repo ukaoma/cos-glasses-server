@@ -120,3 +120,12 @@ html.ta-open { overflow: hidden; }
 .nav-row .note.file-error { color: var(--hot); white-space: normal; }
 /* Running card when the session list could not be read (app.js renderRunning). */
 .run-more.run-failed { color: var(--run-open); }
+
+/* Files with a reply or a note (11/07): the COS chat's own chips and clip (cos-chat.css .cc-chip, .cc-attach), placed in
+   the reply box. The chips take their own row above the words; the clip sits beside Send. */
+.ta-composer { flex-wrap: wrap; }
+.ta-composer .ta-files { flex: 1 1 100%; padding: 2px 0 4px; }
+.ta-composer .ta-files.hidden { display: none; }
+.ta-clip:empty { display: none; }
+.ta-clip .cc-attach { height: 38px; width: 42px; border-radius: var(--radius-sm); }
+.ta-composer.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; }

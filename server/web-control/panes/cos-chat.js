@@ -107,7 +107,10 @@
       steer: !!(C.caps && C.caps.steer),
       thread: !!(drop && drop.enabled === true && drop.thread && drop.thread.protocol === 1),
       // 6.99.19: Prep (capabilities.prep, protocol 1). Absent on an older server: "Prep me" stays a plain Ask.
-      prep: prepCapsOf(caps.prep)
+      prep: prepCapsOf(caps.prep),
+      // 11/07: how many files a session turn takes (threadTurnAttachments). 0 (an older server): words only, and Today's
+      // reply box shows no clip, so a file can never be dropped from a turn in silence.
+      turnFiles: h && Number.isInteger(h.threadTurnAttachments) && h.threadTurnAttachments > 0 ? Math.min(h.threadTurnAttachments, MAX_ATTS) : 0
     };
     if (next.prep && next.prep.serverInstanceId) PREP_INST = next.prep.serverInstanceId;
     var changed = !C.caps || C.caps.dropIt !== next.dropIt || C.caps.jobs !== next.jobs || C.caps.thread !== next.thread;
@@ -276,8 +279,7 @@
       '<div class="cc-chips hidden" data-cos-chips></div>' +
       '<textarea class="field cc-input" id="' + esc(k.inputId) + '" rows="1" maxlength="2000" placeholder="' + esc(o.placeholder) + '" aria-label="' + esc(o.label) + '"></textarea>' +
       '<div class="cc-buttons">' +
-        '<label class="cx-btn cc-attach" title="Attach photos or files"><svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg><span class="sr-only">Attach photos or files</span>' +
-          '<input type="file" class="cc-file" multiple accept="' + ACCEPT + '" data-cos-file aria-label="Attach photos or files"></label>' +
+        clipHtml('data-cos-file') +
         '<button type="button" class="cx-btn primary cc-ask" data-cos="ask">Ask</button>' +
         (drop ? '<button type="button" class="cx-btn cc-drop" data-cos="drop">Drop</button>' : '') + '</div>' +
       '<div class="cc-foot"><span class="cc-menus" data-cos-model-slot>' + (C.models ? modelMenuHtml() : '') + '</span>' +
@@ -566,19 +568,38 @@
     }
     return { refuse: file.name + ' cannot be attached. COS takes photos, PDF, TXT, MD, CSV, JSON, XLSX, MP4 and MOV.' };
   }
-  function addFiles(k, files) {
+  // ── the attach kit (11/07: "attach files and images from the dashboard view as well") ──
+  // The clip, the chips, the limits and the upload above, for any place that sends files with words: the chat's own
+  // composers, Today's reply and note boxes (panes/today-actions.js) and the Ask sheet (app.js). One copy, used by all.
+  // A box is { atts: [], signedOut: false, ui } (W.cosChat.attach.box): ui.changed(box) repaints after any change, ui.removed(box) runs after a
+  // Remove, ui.signedOut(box) says the browser was signed out mid-upload. Progress moves only the chip's own bar
+  // (paintProgress, by the chip's id). Nothing here sends: each caller sends the ready ids its own way, and only once
+  // pending() and failed() are both false.
+  function clipHtml(fileAttr) {
+    return '<label class="cx-btn cc-attach" title="Attach photos or files"><svg class="icon" aria-hidden="true"><use href="#i-clip"/></svg><span class="sr-only">Attach photos or files</span>' +
+      // No capture attribute: iOS then offers Photo Library, Take Photo and Choose File.
+      '<input type="file" class="cc-file" multiple accept="' + ACCEPT + '" ' + fileAttr + ' aria-label="Attach photos or files"></label>';
+  }
+  // A composer here has no ui of its own (it is made before COMPOSER_UI below exists): it is the chat's.
+  function uiOf(box) { return box.ui || COMPOSER_UI; }
+  function boxChanged(box) { var ui = uiOf(box); if (ui.changed) ui.changed(box); }
+  function boxAdd(box, files) {
     var list = Array.prototype.slice.call(files || []);
-    if (!list.length) return;
     var refusals = [];
     list.forEach(function (file) {
-      if (k.atts.length >= MAX_ATTS) { refusals.push('Up to 5 attachments per message. ' + file.name + ' was not added.'); return; }
+      if (box.atts.length >= MAX_ATTS) { refusals.push('Up to 5 attachments per message. ' + file.name + ' was not added.'); return; }
       var c = classify(file);
       if (c.refuse) { refusals.push(c.refuse); return; }
       var t = { id: uuid(), file: file, name: file.name || (c.kind === 'photo' ? 'Photo' : 'File'), size: file.size, kind: c.kind, mime: c.mime || '', state: 'reading', progress: 0, mediaId: '', thumb: '', error: '' };
-      k.atts.push(t);
-      startUpload(k, t);
+      box.atts.push(t);
+      startUpload(box, t);
     });
-    k.signedOut = false;
+    if (list.length) box.signedOut = false;
+    return refusals;
+  }
+  function addFiles(k, files) {
+    if (!files || !files.length) return;
+    var refusals = boxAdd(k, files);
     setNote(k, refusals.join(' '));
     paintChips(k); paintButtons(k);
   }
@@ -588,18 +609,21 @@
     if (t.state === 'failed') return t.error || 'Did not upload';
     return sizeLabel(t.size);
   }
-  function chipHtml(t) {
+  // attr: the click attribute the box's own handler reads ('data-cos' here, 'data-ta' on Today, 'data-action' in the
+  // Ask sheet), so a chip's Remove never reaches another box's handler.
+  function chipHtml(t, attr) {
+    attr = attr || 'data-cos';
     var icon = t.thumb ? '<img src="' + esc(t.thumb) + '" alt="">' : '<svg class="icon" aria-hidden="true"><use href="#i-' + (t.kind === 'video' ? 'video' : t.kind === 'photo' ? 'photo' : 'doc') + '"/></svg>';
     return '<div class="cc-chip ' + t.state + '" data-chip="' + t.id + '"><span class="cc-chip-thumb">' + icon + '</span>' +
       '<span class="cc-chip-text"><span class="cc-chip-name">' + esc(t.name) + '</span><span class="cc-chip-meta" data-chip-meta>' + esc(chipMeta(t)) + '</span></span>' +
-      (t.state === 'failed' ? '<button type="button" class="link-btn cc-chip-retry" data-cos="att-retry" data-att="' + t.id + '">Retry</button>' : '') +
-      '<button type="button" class="cc-chip-x" data-cos="att-remove" data-att="' + t.id + '" aria-label="Remove ' + esc(t.name) + '"><span aria-hidden="true">×</span></button>' +
+      (t.state === 'failed' ? '<button type="button" class="link-btn cc-chip-retry" ' + attr + '="att-retry" data-att="' + t.id + '">Retry</button>' : '') +
+      '<button type="button" class="cc-chip-x" ' + attr + '="att-remove" data-att="' + t.id + '" aria-label="Remove ' + esc(t.name) + '"><span aria-hidden="true">×</span></button>' +
       (t.state === 'uploading' || t.state === 'reading' ? '<span class="cc-chip-bar" data-chip-bar style="width:' + Math.round(t.progress * 100) + '%"></span>' : '') + '</div>';
   }
   function paintChips(k) {
     var form = formOf(k), box = form && form.querySelector('[data-cos-chips]');
     if (!box) return;
-    box.innerHTML = k.atts.map(chipHtml).join('');
+    box.innerHTML = k.atts.map(function (t) { return chipHtml(t); }).join('');
     box.classList.toggle('hidden', !k.atts.length);
   }
   // Progress moves the bar and the words only, never the chip row (a tap on Remove must not miss).
@@ -610,11 +634,32 @@
     var bar = chip.querySelector('[data-chip-bar]'); if (bar) bar.style.width = Math.round(t.progress * 100) + '%';
   }
   function findAtt(k, id) { for (var i = 0; i < k.atts.length; i++) if (k.atts[i].id === id) return k.atts[i]; return null; }
-  function removeAtt(k, id) {
-    k.atts = k.atts.filter(function (t) { if (t.id === id && t.xhr) { try { t.xhr.abort(); } catch (_e) {} } return t.id !== id; });
-    if (!uploadsFailed(k) && /did not upload/i.test(k.note)) setNote(k, '');
-    paintChips(k); paintButtons(k);
+  function boxRemove(box, id) {
+    box.atts = box.atts.filter(function (t) { if (t.id === id && t.xhr) { try { t.xhr.abort(); } catch (_e) {} } return t.id !== id; });
+    var ui = uiOf(box); if (ui.removed) ui.removed(box);
+    boxChanged(box);
   }
+  function removeAtt(k, id) { boxRemove(k, id); }
+  function boxRetry(box, id) {
+    var t = findAtt(box, id);
+    if (!t) return false;
+    box.signedOut = false;
+    startUpload(box, t);
+    boxChanged(box);
+    return true;
+  }
+  // Everything goes, an upload still running included (its request is stopped, and its late answer finds no record).
+  function boxClear(box) {
+    box.atts.forEach(function (t) { if (t.xhr) { try { t.xhr.abort(); } catch (_e) {} } });
+    box.atts = [];
+    boxChanged(box);
+  }
+  // The chat's composers, as boxes.
+  var COMPOSER_UI = {
+    changed: function (k) { paintChips(k); paintButtons(k); },
+    removed: function (k) { if (!uploadsFailed(k) && /did not upload/i.test(k.note)) setNote(k, ''); },
+    signedOut: function (k) { setNote(k, 'This browser was signed out. Your message and files are kept. Sign in, then tap Retry on each file.'); }
+  };
   /** A photo, drawn into a canvas at most 1024 px on its longest edge, as a JPEG at quality 0.85. */
   function resizePhoto(file) {
     return new Promise(function (resolve, reject) {
@@ -667,19 +712,19 @@
     unsupported_media_type: 'COS cannot read this kind of file.', file_too_large: 'Too large for COS.', attachment_too_large: 'Too large for COS.',
     server_maintenance: 'The Mac is updating. Retry in a minute.', network: 'The Mac did not answer. Retry when it is awake.'
   };
-  function uploadError(k, t, err) {
+  function uploadError(box, t, err) {
     if (err && err.code === 'aborted') return;
     t.state = 'failed';
     if (err && err.status === 401) {
       // Signed out mid-message (the browser session expired or every browser was signed out). Nothing is thrown away:
       // the words and the files stay, and Sign in again opens the sign-in screen on purpose, not by surprise.
       t.error = 'Signed out';
-      k.signedOut = true;
-      setNote(k, 'This browser was signed out. Your message and files are kept. Sign in, then tap Retry on each file.');
+      box.signedOut = true;
+      var ui = uiOf(box); if (ui.signedOut) ui.signedOut(box);
     } else {
       t.error = uploadErrorText(err);
     }
-    paintChips(k); paintButtons(k);
+    boxChanged(box);
   }
   /**
    * One file to the media store, the way every web upload goes: a photo resized to a 1024 px JPEG and posted to /api/media,
@@ -712,22 +757,22 @@
     if (err && !err.status && !err.code) return err.message || 'Did not upload';
     return UPLOAD_COPY[err && err.code] || (err && err.status === 413 ? 'Too large for COS.' : 'Did not upload');
   }
-  function startUpload(k, t) {
-    t.state = 'reading'; t.progress = 0; t.error = '';
+  function startUpload(box, t) {
+    t.state = 'reading'; t.progress = 0; t.error = ''; t.mediaId = '';
     var step = uploadMedia(t, {
-      uploading: function () { t.state = 'uploading'; paintChips(k); paintButtons(k); },
-      progress: function (p) { t.progress = p; paintProgress(k, t); }
+      uploading: function () { t.state = 'uploading'; boxChanged(box); },
+      progress: function (p) { t.progress = p; paintProgress(box, t); }
     });
     step.then(function (ref) {
-      if (!findAtt(k, t.id)) return;
+      if (!findAtt(box, t.id)) return;
       if (!ref || !ref.id) { var e = new Error('The Mac did not keep the file.'); e.code = ''; throw e; }
       t.mediaId = ref.id; t.state = 'ready'; t.progress = 1;
-      paintChips(k); paintButtons(k);
+      boxChanged(box);
     }).catch(function (err) {
-      if (!findAtt(k, t.id)) return;
-      if (err && err.code === 'photo_too_large') { t.state = 'failed'; t.error = uploadErrorText(err); paintChips(k); paintButtons(k); return; }
-      if (err && !err.status && !err.code) { t.state = 'failed'; t.error = uploadErrorText(err); paintChips(k); paintButtons(k); return; }
-      uploadError(k, t, err);
+      if (!findAtt(box, t.id)) return;
+      if (err && err.code === 'photo_too_large') { t.state = 'failed'; t.error = uploadErrorText(err); boxChanged(box); return; }
+      if (err && !err.status && !err.code) { t.state = 'failed'; t.error = uploadErrorText(err); boxChanged(box); return; }
+      uploadError(box, t, err);
     });
   }
   function readyAtts(k) { return k.atts.filter(function (t) { return t.state === 'ready' && t.mediaId; }); }
@@ -945,8 +990,13 @@
     return ensureCaps().then(function (caps) {
       if (!caps || !caps.jobs) { var off = new Error('Ask needs the durable query jobs switch on your Mac.'); off.code = 'durable_query_jobs_disabled'; throw off; }
       return new Promise(function (resolve, reject) {
+        // 11/07: files attached in the Ask sheet go with the question, as from the chat's own clip (ready ids only:
+        // the sheet never asks while one is uploading or failed).
+        var o = {};
+        if (extra && extra.context) o.context = extra.context;
+        if (extra && Array.isArray(extra.attachmentIds) && extra.attachmentIds.length) { o.attachmentIds = extra.attachmentIds.slice(0, MAX_ATTS); o.atts = Array.isArray(extra.atts) ? extra.atts.slice(0, MAX_ATTS) : []; }
         submitAsk(String(text || '').trim(), null, function (ok) { if (ok) resolve(['cos']); else reject(new Error('Not sent. The question is in Ask COS; try again there.')); },
-          extra && extra.context ? { context: extra.context } : undefined);
+          o.context || o.attachmentIds ? o : undefined);
       });
     });
   }
@@ -1647,8 +1697,8 @@
     if (what === 'cancel') return cancel(t.getAttribute('data-cid'));
     if (what === 'att-remove') return removeAtt(kOf(t), t.getAttribute('data-att'));
     if (what === 'att-retry') {
-      var k = kOf(t), att = findAtt(k, t.getAttribute('data-att'));
-      if (att) { k.signedOut = false; setNote(k, ''); startUpload(k, att); paintChips(k); paintButtons(k); }
+      var k = kOf(t);
+      if (findAtt(k, t.getAttribute('data-att'))) { setNote(k, ''); boxRetry(k, t.getAttribute('data-att')); }
       return;
     }
     if (what === 'sign-in') { if (W.showAuth) W.showAuth('Sign in again. Your message and files are kept; tap Retry on each file after.'); return; }
@@ -1730,6 +1780,31 @@
     setOnChange: function (fn) { C.onChange = fn; }, setOnAnswered: function (fn) { C.onAnswered = fn; },
     // Test and render hooks: what the chat holds right now.
     classify: classify, uploadMedia: uploadMedia, uploadErrorText: uploadErrorText, uuid: uuid,
+    // 11/07: the attach kit, for Today's reply and note boxes and the Ask sheet (see "the attach kit" above).
+    attach: {
+      max: MAX_ATTS, accept: ACCEPT,
+      box: function (ui) { return { atts: [], signedOut: false, ui: ui || {} }; },
+      add: boxAdd, remove: boxRemove, retry: boxRetry, clear: boxClear,
+      pending: uploadsPending, failed: uploadsFailed,
+      ids: function (box) { return readyAtts(box).slice(0, MAX_ATTS).map(function (t) { return t.mediaId; }); },
+      sent: function (box) { return readyAtts(box).slice(0, MAX_ATTS).map(function (t) { return { name: t.name, kind: t.kind, thumb: t.thumb }; }); },
+      chipsHtml: function (box, attr) { return box.atts.map(function (t) { return chipHtml(t, attr); }).join(''); },
+      clipHtml: clipHtml,
+      // Files on the clipboard (a pasted screenshot), or none.
+      pasted: function (e) { var f = e && e.clipboardData && e.clipboardData.files; return f && f.length ? f : null; },
+      // Files dragged over `zone`: marks it while they hover, and answers the files on the drop. Null for anything else.
+      dragged: function (e, zone) {
+        var types = e && e.dataTransfer && e.dataTransfer.types;
+        if (!types || Array.prototype.indexOf.call(types, 'Files') < 0) return null;
+        e.preventDefault();
+        if (e.type === 'dragover' || e.type === 'dragenter') { zone.classList.add('dragging'); return null; }
+        zone.classList.remove('dragging');
+        return e.type === 'drop' ? e.dataTransfer.files : null;
+      },
+      // How many files a session turn takes on this Mac (threadTurnAttachments); 0 means words only.
+      turnFiles: function () { return C.caps && C.caps.turnFiles > 0 ? C.caps.turnFiles : 0; },
+      askOn: askOn, ensureCaps: ensureCaps
+    },
     // 6.99.19: Prep. meetings.js reads the capability from here (one /api/health read for the page).
     prepCaps: prepCaps,
     // Today's Next up (app.js prepNext): Prep me for that meeting, as the chat's own Prep me does. With Prep on the Mac

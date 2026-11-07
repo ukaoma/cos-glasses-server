@@ -29,8 +29,12 @@ import { readQueue, writeQueue, queuedThreadKeys } from '../lib/thread-turn-queu
 import type { DeliveryEvidence } from '../lib/queue-turn-evidence.js'
 import { continueLiveEnabled } from '../lib/session-peer-inbox-deps.js'
 import { PEER_VERIFY_TIMEOUT_MS } from '../lib/session-peer-inbox.js'
+import { getMediaStore } from '../lib/media-store.js'
+import { keepTurnAttachments, parseTurnAttachmentIds, TURN_ATTACHMENT_COPY, type TurnAttachmentStore } from '../lib/session-turn-attachments.js'
 
 export interface ThreadTurnQueueDeps {
+  /** 11/07: the media store a parked turn's `attachmentIds` are checked against. Absent: the real store. Tests pass a fake. */
+  turnAttachmentStore?: TurnAttachmentStore
   /** Re-runs the FULL occupancy gate. The drainer never decides attachability itself. */
   occupancy: (provider: string, threadId: string) => { attachable: boolean; reason: string | null }
   /** Did the holder's last transcript record end a turn? */
@@ -126,6 +130,8 @@ export function publicRow(turn: QueuedThreadTurn, position: number): Record<stri
     preview: turn.prompt.length > 80 ? `${turn.prompt.slice(0, 79)}…` : turn.prompt,
     ...(turn.reason ? { reason: turn.reason } : {}),
     ...(turn.settledAt ? { settledAt: turn.settledAt } : {}),
+    // 11/07: how many files wait with the words (never their ids or paths). Absent without files.
+    ...(Array.isArray(turn.attachmentIds) && turn.attachmentIds.length > 0 ? { attachments: turn.attachmentIds.length } : {}),
   }
   // 6.78.0: additive, and only while a P3 flag is on, so the row is the 6.77 bytes otherwise.
   // `resendable` is the per-row capability: present only when Send again can act on it.
@@ -560,10 +566,15 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       return res.status(400).json({ error: 'invalid_request', reason: 'invalid_cos_session_id' })
     }
 
+    // 11/07 (Control Web attach): files with the words, as media-store ids. Absent is the old row, byte for byte.
+    const attach = parseTurnAttachmentIds(body.attachmentIds)
+    if (!attach.ok) return res.status(400).json({ error: 'invalid_request', reason: 'invalid_attachments' })
+
     // 6.78.0: `mode: 'steer'` asks for the running turn itself (COS_SESSION_STEER). Off, the
     // field is ignored exactly as a 6.77 server ignores it.
     const steerOn = sessionSteerEnabled()
-    const wantSteer = steerOn && body.mode === 'steer'
+    // A steer goes through the session's peer inbox, which carries words only: a turn with files always parks.
+    const wantSteer = steerOn && body.mode === 'steer' && attach.ids.length === 0
     const fallbackNone = wantSteer && body.fallback === 'none'
 
     // 6.78.0: REPLAY BEFORE THE GATE. A key this queue already holds answers with what that
@@ -601,6 +612,14 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       return res.status(423).json({ error: gate.reason ?? 'probe_failed', queueable: false })
     }
 
+    // 11/07: every file must be readable now, and is kept past the 4 hour staged TTL while the turn waits. A file
+    // that is gone refuses the park here, where the words are still in the box, never later at the drain.
+    if (attach.ids.length > 0) {
+      const store = deps.turnAttachmentStore ?? getMediaStore()
+      const kept = await keepTurnAttachments(attach.ids, `session-turn:${clientTurnId}`, store)
+      if (!kept.ok) return res.status(409).json({ error: kept.code, attachmentError: kept.code, reasonCopy: TURN_ATTACHMENT_COPY[kept.code] })
+    }
+
     const now = deps.now()
     const queue = readQueue(provider, threadId, now)
     const turn: QueuedThreadTurn = {
@@ -608,6 +627,7 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       queuedAt: now, status: 'waiting', attempts: 0,
       // 6.62.0 /qa (Q3): the acknowledgement travels with the row to its drain.
       ...(continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]) ? { continueNoteAck: true as const } : {}),
+      ...(attach.ids.length > 0 ? { attachmentIds: attach.ids } : {}),
     }
 
     let steerFallback: string | null = null
@@ -673,6 +693,8 @@ export function createThreadTurnQueueRouter(deps: ThreadTurnQueueDeps): Router {
       prompt: original.prompt,
       queuedAt: now, status: 'waiting', attempts: 0,
       ...(original.continueNoteAck === true ? { continueNoteAck: true as const } : {}),
+      // 11/07: Send again sends the same files; the turns route refuses it there if one has gone.
+      ...(Array.isArray(original.attachmentIds) && original.attachmentIds.length > 0 ? { attachmentIds: [...original.attachmentIds] } : {}),
       resendOf: original.clientTurnId,
     }
     const admitted = admitToQueue(queue, copy)

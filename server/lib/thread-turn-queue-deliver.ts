@@ -120,6 +120,8 @@ export async function deliverQueuedTurnOverLoopback(
         epoch,
         targetKey: targetKey(turn.provider, turn.threadId),
         ...(boundTo ? { boundTo } : {}),
+        // 11/07: the files parked with the words go with them; the turns route adds their paths.
+        ...(Array.isArray(turn.attachmentIds) && turn.attachmentIds.length > 0 ? { attachmentIds: turn.attachmentIds } : {}),
       },
       noteHeaders,
     )
