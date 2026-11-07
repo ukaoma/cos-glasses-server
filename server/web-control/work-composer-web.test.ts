@@ -491,6 +491,9 @@ describe('Send: once, through COS Control, and truthful about where it is', () =
     await h.send(r.key)
     expect(r).toMatchObject({ state: 'ready', sendUnknown: true })
     expect(r.error).toContain('it never sends twice')
+    // COS Control may already be sending it: no Remove while the answer is unknown (QA2 Ghost round 2).
+    expect(h.html()).not.toContain('Never sent. Removes it from this browser.')
+    expect(h.html()).not.toContain('It stays in this card’s Work chat on the Mac.')
     // The first send did land: the round says so, and Send adopts it without a second POST.
     h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('send_requested', 'pending', 'pending')
     await h.send(r.key)

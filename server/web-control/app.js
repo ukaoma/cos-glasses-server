@@ -627,8 +627,10 @@
   var NEED_NAMES = { sessions: 'sessions', work: 'Work', voices: 'voices', memories: 'memories' };
   function quietNowToday(d) { var h = d.getHours(), day = d.getDay(); return day === 0 || day === 6 || h >= 18 || h < 6; }
   // Control's askedTitle and askedWhy for a session waiting on you.
+  // Control's TodayHome: guarded(title) ?? "A session". Never the workspace path or the session id: this line is shown
+  // on Today and goes into the Today summary sent to the model, which carries no ids.
   function askedTitle(s) {
-    var t = sxTitle(s);
+    var t = plain(s.display_label || s.custom_title || '').replace(/\s+/g, ' ').trim() || 'A session';
     if (sxProvider(s.provider) !== 'claude') return t + ' is waiting for your reply';
     if (s.waiting_kind === 'plan') return t + ' has a plan for you to approve';
     if (s.waiting_kind === 'permission') return t + ' wants your permission';

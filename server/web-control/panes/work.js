@@ -1758,8 +1758,9 @@
   // server: a round never saved exists only here; a saved one stays in the card's Work chat on the Mac (no route deletes it).
   function chatRemovable(r) {
     if (!r || r.sending || CHAT_MOVING[r.state] || r.state === 'planning' || r.state === 'quiet') return false;
-    // sentAt is set whenever COS Control was asked to send (or already had a send), before any state comes back.
-    return !r.sentAt;
+    // Not after a send whose answer was lost (sendUnknown): COS Control may already be sending it, and this round is the
+    // page's only handle on it. sentAt is set once the server confirmed the send request.
+    return !r.sentAt && !r.sendUnknown;
   }
   function chatRemove(it, r) {
     var c = chatOf(it.wid);

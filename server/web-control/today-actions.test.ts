@@ -1327,6 +1327,16 @@ describe('Needs you lists every source, and the headline, count and rail agree (
     expect(n.els['needs-list']!.innerHTML).toContain('Waiting for you. Paused until you answer.')
   })
 
+  it('a waiting session with no title reads "A session", never its folder or id (Control\u2019s TodayHome)', () => {
+    const bare = { ...WAIT, waiting_kind: 'question', display_label: '', custom_title: '', project: '-Users-ukaoma-Documents-GitHub-secret-project' }
+    const n = needsRegion({ at: WED_2PM, sessions: [bare] })
+    const list = n.els['needs-list']!.innerHTML
+    expect(list).toContain('A session asked you a question')
+    expect(list).not.toContain('secret-project')
+    // Ids may sit in data- attributes (Open session needs them); never in the words.
+    expect(list.replace(/ data-[a-z-]+="[^"]*"/g, '')).not.toContain(WAIT.session_id)
+  })
+
   it('never says clear while a source failed: it names it, with Try again', () => {
     const n = needsRegion({ at: WED_2PM, memories: { state: 'failed', n: 0 } })
     expect(n.els['needs-list']!.innerHTML).not.toContain('Nothing is waiting')

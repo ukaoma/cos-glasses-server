@@ -118,6 +118,15 @@ describe('pet routes', () => {
     expect((await fetch(`${base}/web-pet/preview?pet=shipped:cloud-puff&v=x`)).headers.get('content-type')).toContain('image/webp')
   })
 
+  it('a shipped character gets a new preview link when its art on disk changes', async () => {
+    const before = (await (await fetch(`${base}/web-pet/catalog`)).json()).shipped.find((p: { pet: string }) => p.pet === 'shipped:jedi-nia-solari').preview
+    const map = path.join(resources, 'BundledCharacters', 'jedi-nia-solari', 'session-pet-states.json')
+    const later = new Date(Date.now() + 60_000)
+    fs.utimesSync(map, later, later)
+    const after = (await (await fetch(`${base}/web-pet/catalog`)).json()).shipped.find((p: { pet: string }) => p.pet === 'shipped:jedi-nia-solari').preview
+    expect(after).not.toBe(before)
+  })
+
   it('catalog lists the Mac pet, shipped characters and the gallery, each with a preview link', async () => {
     const c = await (await fetch(`${base}/web-pet/catalog`)).json()
     expect(c.mac).toMatchObject({ available: true })

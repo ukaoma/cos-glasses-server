@@ -186,7 +186,7 @@ const galleryFailedAt = new Map<string, number>()
 
 /**
  * The gallery picture for one pet, downloaded once from openpets.dev (as COS Control does) and kept under
- * the data folder. Refuses anything that is not an image, over 1 MB, redirected, or slower than 10 s.
+ * the data folder. Refuses anything the Mac helper would (not WebP, over 512 KB, redirected, slower than 6 s).
  */
 export function galleryThumb(pet: { id: string; preview: string }, cacheDir: string, fetcher: PetFetcher = fetch as unknown as PetFetcher, macSupportDir: string | null = null): Promise<{ file: string; type: string }> {
   if (!ID.test(pet.id) || !isOpenPetsUrl(pet.preview)) return Promise.reject(new Error('gallery_pet_invalid'))
