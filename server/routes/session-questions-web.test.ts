@@ -25,7 +25,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(s => new Promise<void>(r => { s.closeAllConnections?.(); s.close(() => r()) })))
 })
 
-interface Harness { base: string; host: string; broker: PermissionBroker; cookie: string }
+interface Harness { base: string; host: string; broker: PermissionBroker; cookie: string; lines: string[] }
 
 /**
  * `web: false` leaves the cookie check out of the questions router, as 6.99.11 and earlier mounted it.
@@ -36,6 +36,7 @@ async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; away
   __resetClientLivenessForTests()
   const store = new SessionSignalStore({ isCosSpawnedPid: () => false })
   const desk = opts.desk ?? (() => 1_000)
+  const lines: string[] = []
   const broker = new PermissionBroker({
     now: () => Date.now(), mode: () => 'all', admissionsOpen: () => true, lastQuestionsPollAt,
     readDeskIdleSeconds: async () => desk(), deskIdleSeconds: () => 90, timeoutMs: () => 4_000,
@@ -45,7 +46,7 @@ async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; away
       awayHoldMs: () => opts.awayHoldMs ?? 600_000, installedHookTimeoutS: () => opts.hookTimeoutS ?? 630, awayRecentClientMs: () => 1_800_000,
       ...(opts.webSwitch ? { webAwayHold: opts.webSwitch } : {}),
     } : {}),
-    signals: brokerSignalSink(store), pollMs: 25, log: () => {},
+    signals: brokerSignalSink(store), pollMs: 25, log: (line: string) => { lines.push(line) },
   })
   brokers.push(broker)
   wirePermissionBrokerToSignals(broker, store)
@@ -64,7 +65,7 @@ async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; away
   const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   servers.push(server)
   const port = (server.address() as AddressInfo).port
-  return { base: `http://127.0.0.1:${port}`, host: `127.0.0.1:${port}`, broker, cookie: `${WEB_SESSION_COOKIE_NAME}=${mintWebSessionCookieValue(API_TOKEN).value}` }
+  return { base: `http://127.0.0.1:${port}`, host: `127.0.0.1:${port}`, broker, cookie: `${WEB_SESSION_COOKIE_NAME}=${mintWebSessionCookieValue(API_TOKEN).value}`, lines }
 }
 
 async function list(h: Harness, headers: Record<string, string>, client: string | null) {
@@ -161,6 +162,19 @@ describe('GET /api/session-questions with the COS Control Web session (6.99.12)'
     expect(ans.status).toBe(200)
     const answers = { [Q1]: ['Publish'], [Q2]: ['Blue'] }
     expect(await hook).toEqual(questionHookOutput(ASK_INPUT, answers))
+    // 6.99.27: the log names the web as the answerer, never the glasses.
+    expect(h.lines.filter(l => /_won /.test(l))).toEqual([`[permission-broker] web_won ${item.id}`])
+  })
+
+  it('6.99.27: an answer with the API token (the Even app) still logs glasses_won', async () => {
+    const h = await start()
+    expect((await list(h, { 'x-cos-token': API_TOKEN }, 'phone')).status).toBe(200)
+    const hook = fetch(`${h.base}${PERMISSION_BROKER_HOOK_PATH}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-cos-hook-token': HOOK_TOKEN }, body: JSON.stringify(permissionEnvelope('AskUserQuestion', ASK_INPUT)) }).then(r => r.json())
+    const item = (await until(() => list(h, { 'x-cos-token': API_TOKEN }, 'phone'), l => l.body.items.length === 1)).body.items[0]!
+    const ans = await fetch(`${h.base}/api/session-questions/${item.id}/answer`, { method: 'POST', headers: { 'x-cos-token': API_TOKEN, 'content-type': 'application/json' }, body: JSON.stringify({ clientAnswerId: 'gw_app1', answers: [{ labels: ['Publish'] }, { labels: ['Blue'] }] }) })
+    expect(ans.status).toBe(200)
+    await hook
+    expect(h.lines.filter(l => /_won /.test(l))).toEqual([`[permission-broker] glasses_won ${item.id}`])
   })
 
   it('index.ts hands the router the same cookie check the /api gate runs', () => {
