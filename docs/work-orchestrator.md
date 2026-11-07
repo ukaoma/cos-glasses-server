@@ -182,3 +182,22 @@ Rules the server enforces:
 Checks: `server/routes/work-lens-rounds.test.ts` (record, idempotent repeat, send with and without confirm, Auto-send,
 423, `plan_stale`, expiry, stop, loopback-only, maintenance, the existing GET and POST unchanged) and
 `server/scripts/work-lens-rounds-mutation-gate.mjs` (not packaged).
+
+## Web plans (COS Control Web's Work chat)
+
+COS Control Web messages the orchestrator about a card the way the lens does. It plans with the Mac's routes and body
+(`GET /api/work/chat`, `POST /api/work/orchestrator/input` with `{workID, meetingWorkIDs}`, then `POST /api/work/chat`
+with `orchestrator: true`, the card's context in the helper's `work-context` format, and the planner and effort the
+server advertises), then records the plan with `POST /api/work/chat/lens-rounds` and asks COS Control to send it with
+`POST .../:roundId/send` (`confirm: "two-step"`: the Send tap after the plan was shown). Nothing new can send.
+
+| Change | Detail |
+| --- | --- |
+| `GET /api/work/chat` | adds `webPlans: 1`. Every earlier field is unchanged. The web shows its composer only when this is 1. |
+| `POST /api/work/chat/lens-rounds` | `source` is `lens` (a `lens-<uuid>` id, as before) or `web` (a `web-<uuid>` id). An id that does not start with its source is 400 `invalid_lens_round`, field `clientRoundId`. |
+| A web round | stored with `source: "web"`; the round view and the inbox carry `source: "web"`. A lens round carries no `source` key, so its stored shape, view and inbox entry are byte for byte as before. |
+
+COS Control 0.5.3xx reads every inbox round as a lens round, so it labels a web round "From glasses" until it reads
+`source`. Card files and meeting files stay on the Mac: COS Control attaches them when it sends (a round with no
+`contextItemIDs` sends every linked item). The web cannot list or add them. Checks: `server/routes/work-lens-rounds.test.ts`
+("a plan COS Control Web made") and `server/web-control/work-composer-web.test.ts`.

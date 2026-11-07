@@ -37,8 +37,9 @@ export function createWorkChatRouter(given: Partial<typeof WORK_CHAT_DEPS> = {})
   // fork and new-session assignments back (docs/work-orchestrator.md).
   // 6.83.0: lensPlans 1 means the lens may record a plan into the card's Work chat history and ask COS Control to send
   // it (routes/work-lens-rounds.ts); lensPlansControl says whether a COS Control polled the lens inbox in the last 60 s.
+  // webPlans 1 means COS Control Web may record its own plans the same way (source "web"), for COS Control to send.
   router.get('/work/chat',(_req,res)=>res.json({protocolVersion:1,planner:'sonnet',planners:WORK_CHAT_PLANNERS,effort:WORK_CHAT_DEFAULT_EFFORT,efforts:WORK_CHAT_EFFORTS,automaticProviders:['claude','codex'],maxAssignments:WORK_CHAT_MAX_ASSIGNMENTS,contextItems:true,maxContextItems:WORK_CHAT_MAX_ITEMS,queueRounds:true,references:true,maxReferences:WORK_CHAT_MAX_REFERENCES,orchestrator:1,
-    lensPlans:1,lensPlansControl:deps.lensPlansControl()}))
+    lensPlans:1,lensPlansControl:deps.lensPlansControl(),webPlans:1}))
   router.post('/work/chat',async(req,res)=>{
     let input: WorkChatInput
     try {

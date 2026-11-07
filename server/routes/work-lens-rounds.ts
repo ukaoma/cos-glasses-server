@@ -1,8 +1,9 @@
 /**
  * 6.83.0: lens plans in Work chat history, and "Send this plan" (docs/work-orchestrator.md, "Lens plans").
  *
- * Lens (over the network, token auth from the parent /api mount):
- *   POST /api/work/chat/lens-rounds                       record a plan the lens made (idempotent on clientRoundId)
+ * Lens, and COS Control Web (over the network, token or browser sign-in from the parent /api mount):
+ *   POST /api/work/chat/lens-rounds                       record a plan the lens or the web made (idempotent on clientRoundId;
+ *                                                         source "lens" with a lens- id, or "web" with a web- id)
  *   GET  /api/work/chat/lens-rounds/:roundId              the round's live state, never its prompts
  *   POST /api/work/chat/lens-rounds/:roundId/send         ask COS Control to send it (two-step confirm, or card Auto-send)
  *   POST /api/work/chat/lens-rounds/:roundId/stop         ask COS Control to Stop assignments
@@ -103,7 +104,7 @@ export function createWorkLensRoundsRouter(given: Partial<WorkLensRoundsDeps> = 
       if (!known) throw new LensRoundError('unknown_work', 404, 'This card is not on the Work board any more.')
     }
     const { round, created } = deps.store.record(input, cardSessionsOf(deps.snapshot(), input.workID))
-    if (created) console.log(`[work-lens-rounds] recorded ${round.roundId} work=${round.workID} assignments=${round.assignments.length}`)
+    if (created) console.log(`[work-lens-rounds] recorded ${round.roundId} work=${round.workID} assignments=${round.assignments.length}${round.source === 'web' ? ' source=web' : ''}`)
     return res.status(created ? 201 : 200).json({ roundId: round.roundId, workID: round.workID, state: roundView(round).state, control: { connected: connected() } })
   }))
 

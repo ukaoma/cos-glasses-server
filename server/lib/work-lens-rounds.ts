@@ -36,7 +36,14 @@ const MAX_SENDS_KEPT = 8
 const MAX_STOPS_KEPT = 8
 
 const WORK_ID = /^task:[a-z_]+:[a-f0-9]{12}$/
-const CLIENT_ROUND_ID = /^lens-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const CLIENT_ROUND_ID = /^(lens|web)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/**
+ * Who made the plan: the lens, or COS Control Web (Work chat on the phone or in a browser, `webPlans: 1` on GET
+ * /api/work/chat). The client round id starts with its source (`lens-`, `web-`). A web round is the same contract as a
+ * lens round: recorded, sent only by COS Control through its own Send, never by this server.
+ */
+export const ROUND_SOURCES = ['lens', 'web'] as const
+export type RoundSource = typeof ROUND_SOURCES[number]
 const SID = /^(claude|codex|cursor):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const ITEM_ID = /^[a-z]{1,8}(:[a-f0-9]{12})?$/
 const RECEIPT_ID = /^[A-Za-z0-9_.:-]{1,80}$/
@@ -72,6 +79,8 @@ export interface LensRound {
   /** The card's sessions (Control snapshot links and receipts) when the plan was recorded; null when no snapshot. */
   cardSessions: string[] | null
   sends: LensSendRequest[]; stops: LensStopRequest[]; updatedAt: number
+  /** Set only on a round COS Control Web made. A lens round has no `source`, so its stored shape is unchanged. */
+  source?: 'web'
   /** COS Control's own Send of this round's assignments on the Mac (the lens was told to send from the Mac): when, and which. */
   mac?: { at: number; ids: string[] } | null
 }
@@ -89,7 +98,7 @@ const newId = (prefix: string) => `${prefix}_${randomBytes(8).toString('hex')}`
 
 export interface LensRoundInput {
   workID: string; clientRoundId: string; question: string; answer: string; planner: string | null; effort: string | null
-  orchestrator: boolean; assignments: Omit<LensAssignment, 'state'>[]; createdAt: string
+  orchestrator: boolean; assignments: Omit<LensAssignment, 'state'>[]; createdAt: string; source: RoundSource
 }
 
 /** The record body. Unknown keys are ignored and never stored. */
@@ -103,7 +112,8 @@ export function parseLensRound(v: unknown): LensRoundInput {
   if (v.planner !== undefined && !(WORK_CHAT_PLANNERS as readonly unknown[]).includes(v.planner)) throw invalid('planner')
   if (v.effort !== undefined && !(WORK_CHAT_EFFORTS as readonly unknown[]).includes(v.effort)) throw invalid('effort')
   if (v.orchestrator !== undefined && typeof v.orchestrator !== 'boolean') throw invalid('orchestrator')
-  if (v.source !== 'lens') throw invalid('source')
+  if (!(ROUND_SOURCES as readonly unknown[]).includes(v.source)) throw invalid('source')
+  if (!v.clientRoundId.startsWith(`${v.source}-`)) throw invalid('clientRoundId', 'The round id must start with its source.')
   if (!iso(v.createdAt)) throw invalid('createdAt')
   if (!Array.isArray(v.assignments) || v.assignments.length > WORK_CHAT_MAX_ASSIGNMENTS) throw invalid('assignments')
   const assignments: LensRoundInput['assignments'] = []
@@ -122,7 +132,7 @@ export function parseLensRound(v: unknown): LensRoundInput {
       ...(a.contextItemIDs ? { contextItemIDs: [...new Set<string>(a.contextItemIDs)] } : {}) })
   })
   return { workID: v.workID, clientRoundId: v.clientRoundId, question: v.question, answer: v.answer, planner: v.planner ?? null,
-    effort: v.effort ?? null, orchestrator: v.orchestrator === true, assignments, createdAt: v.createdAt }
+    effort: v.effort ?? null, orchestrator: v.orchestrator === true, assignments, createdAt: v.createdAt, source: v.source }
 }
 
 /** The card's sessions as COS Control's snapshot records them: confirmed links, receipt targets and fork children. */
@@ -240,6 +250,7 @@ export class LensRoundStore {
       answer: input.answer, planner: input.planner, effort: input.effort, orchestrator: input.orchestrator,
       assignments: input.assignments.map(a => ({ ...a, state: 'pending' as const })), createdAt: input.createdAt, recordedAt: now,
       inHistory: false, historyAt: null, autoSendCard: false, cardSessions, sends: [], stops: [], updatedAt: now,
+      ...(input.source === 'web' ? { source: 'web' as const } : {}),
     }
     this.file.rounds.push(round)
     while (this.file.rounds.length > LENS_ROUNDS_MAX) {
@@ -320,6 +331,7 @@ export class LensRoundStore {
     if (changed) this.persist()
     const content = (r: LensRound) => ({ roundId: r.roundId, workID: r.workID, clientRoundId: r.clientRoundId, question: r.question, answer: r.answer,
       planner: r.planner, effort: r.effort, orchestrator: r.orchestrator, createdAt: r.createdAt, recordedAt: new Date(r.recordedAt).toISOString(),
+      ...(r.source === 'web' ? { source: 'web' as const } : {}),
       assignments: r.assignments.map(a => ({ id: a.id, mode: a.mode, ...(a.sessionID ? { sessionID: a.sessionID } : {}), ...(a.provider ? { provider: a.provider } : {}),
         prompt: a.prompt, ...(a.contextItemIDs ? { contextItemIDs: a.contextItemIDs } : {}) })) })
     return {
@@ -432,6 +444,7 @@ export function roundView(r: LensRound) {
   }
   return {
     roundId: r.roundId, workID: r.workID, state, inHistory: r.inHistory, autoSendCard: r.autoSendCard,
+    ...(r.source === 'web' ? { source: 'web' as const } : {}),
     assignments: r.assignments.map(a => ({ id: a.id, state: a.state, ...(a.reportedSessionID ?? a.sessionID ? { sessionID: a.reportedSessionID ?? a.sessionID } : {}),
       ...(a.receiptId ? { receiptId: a.receiptId } : {}), ...(a.detail ? { detail: a.detail } : {}) })),
     updatedAt: new Date(r.updatedAt).toISOString(),
