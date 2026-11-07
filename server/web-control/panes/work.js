@@ -989,6 +989,9 @@
       status += '<div class="wk-handoff" data-tone="' + STATE_TONE[st] + '"><p class="wk-state" data-tone="' + STATE_TONE[st] + '">' + esc(STATE_LABEL[st] + ' · ' + providerName(latest.provider) + ' · ' + ageText(latest, st)) + '</p>' +
         '<p><strong>' + esc(str(latest.sessionTitle) || 'Session') + '</strong></p>' + (line ? '<p class="wk-small">' + esc(line) + '</p>' : '') +
         (tr && tr.evidence ? '<p class="wk-quote">“' + esc(tr.evidence) + '”</p>' : '') +
+        // WorkHandoffView's "Open session": the session this handoff went to, in Sessions (Cursor opens Cursor Agents there).
+        (splitSession(latest.sessionId) ? '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="session" data-provider="' + esc(splitSession(latest.sessionId).provider) +
+          '" data-sid="' + esc(splitSession(latest.sessionId).id) + '">Open session</button></div>' : '') +
         // You agree it is finished: COS never marks work complete by itself (WorkHandoffView "Mark complete").
         (tr && tr.phase === 'done' && !it.completed && canChangeStage(it.task)
           ? (S.pendingComplete === it.wid && S.completeHere ? completeConfirm(it) : '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="complete-here" data-id="' + esc(it.id) + '" title="You agree it is finished. COS never marks work complete by itself.">Mark complete</button></div>')
@@ -1169,11 +1172,17 @@
   // card and meeting files, and Stop. A round's id (web-<uuid>) is made once, so a retried save is the same round, and the
   // server holds one send per round, so a second Send answers send_in_progress or already_sent and never sends twice.
   var CHAT_STORE = 'cos.web.work.chat';
+  // The question limit: the server's planner refuses a longer question (lib/work-chat.ts parseWorkChatInput, text(v.question,
+  // 2000); not exported or advertised). work-composer-web.test.ts runs the real parser against this value.
   var CHAT_MAX = 2000;
+  var CHAT_MAX_TEXT = CHAT_MAX.toLocaleString('en-US');
   // WorkContextMeter.cosText and meetingsHeader, and WorkProgress.instruction (Control), for the text estimate.
   var CHAT_COS = 'Preserve other session work. Report changes, checks and questions. This assignment does not authorize external publication, messages to other people, deletion or security changes.';
   var CHAT_MEETINGS = 'Confirmed source meetings (references; transcript evidence is not included):';
   var CHAT_TIMEOUT = { caps: 8000, read: 20000, input: 60000, plan: 190000, record: 15000, send: 15000, round: 8000 };
+  // max: how long one round is read before this page stops, from when it was first read (kept with the round, so a return
+  // to Work never starts it again). The server's own end for a send: picked up within 10 minutes (LENS_SEND_PICKUP_MS) and
+  // reported within 15 after that (LENS_SEND_REPORT_MS), lib/work-lens-rounds.ts, plus a minute. Tested against them.
   var CHAT_POLL = { fast: 3000, slow: 10000, fastFor: 120000, max: 26 * 60000, reply: 15000, replyFor: 30 * 60000 };
   var CHAT_KEEP = { cards: 30, rounds: 8, draft: 8000 };
   var CHAT_SID = /^(claude|codex|cursor):[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -1191,10 +1200,12 @@
   S.chat = {}; S.chatCaps = null; S.chatCapsLoading = null; S.chatDeferred = false;
   S.inspect = {}; S.completeHere = false; S.linkMeeting = null;
   var CHAT_TIMERS = new Set();
-  var chatStore = (function () {
+  // This browser's store, read again before every use: another tab may have saved since (two tabs share it).
+  function chatReadDisk() {
     var v = W.readStore(CHAT_STORE);
     return v && v.v === 1 && v.cards && typeof v.cards === 'object' && !Array.isArray(v.cards) ? v : { v: 1, cards: {} };
-  })();
+  }
+  var chatStore = chatReadDisk();
 
   function chatOwn(message) { var e = new Error(message); e.own = true; return e; }
   function chatClean(v, n) { return typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ').slice(0, n) : ''; }
@@ -1246,7 +1257,8 @@
       note: chatClean(r.note, 1200), meter: r.meter && typeof r.meter.tokens === 'number' ? { tokens: r.meter.tokens, meetings: r.meter.meetings || 0 } : null,
       state: CHAT_ROUND_WORD[r.state] ? r.state : 'planFailed', roundState: chatClean(r.roundState, 40), inHistory: r.inHistory === true,
       states: r.states && typeof r.states === 'object' ? r.states : {}, error: chatClean(r.error, 400), at: Number(r.at) || 0, sentAt: Number(r.sentAt) || 0,
-      sendUnknown: r.sendUnknown === true, context: chatClean(r.context, 4000), skipped: r.skipped && typeof r.skipped === 'object' ? r.skipped : {} };
+      sendUnknown: r.sendUnknown === true, context: chatClean(r.context, 4000), skipped: r.skipped && typeof r.skipped === 'object' ? r.skipped : {},
+      pollSince: Number(r.pollSince) || 0, pollStopped: r.pollStopped === true, up: Number(r.up) || 0 };
     // A plan in flight lives only in this page. After a reload it is gone, and nothing was saved or sent for it.
     if (out.state === 'planning') { out.state = 'planFailed'; out.error = 'Planning stopped when this page closed. Nothing was sent. Use this request again to plan it.'; }
     return out;
@@ -1254,34 +1266,107 @@
   function chatOf(wid) {
     var c = S.chat[wid];
     if (c) return c;
+    chatStore = chatReadDisk();
     var saved = chatStore.cards[wid] || {};
-    c = S.chat[wid] = { draft: typeof saved.draft === 'string' ? saved.draft.slice(0, CHAT_KEEP.draft) : '', at: Number(saved.at) || 0,
-      rounds: (Array.isArray(saved.rounds) ? saved.rounds : []).map(chatRestored).filter(Boolean), busy: false, phase: '', error: '' };
+    c = S.chat[wid] = { draft: typeof saved.draft === 'string' ? saved.draft.slice(0, CHAT_KEEP.draft) : '', at: Number(saved.at) || 0, draftAt: Number(saved.draftAt) || 0,
+      removed: saved.removed && typeof saved.removed === 'object' && !Array.isArray(saved.removed) ? Object.assign({}, saved.removed) : {},
+      rounds: (Array.isArray(saved.rounds) ? saved.rounds : []).filter(function (x) { return !(saved.removed && x && saved.removed[x.key]); })
+        .map(function (x) { var r = chatRestored(x); if (r) chatStamp(r, Number(x.up) || 0); return r; }).filter(Boolean),
+      busy: false, phase: '', error: '' };
     return c;
+  }
+  // A round's own clock for merging two tabs: it moves when the round's saved form changes in this tab.
+  function chatStamp(r, given) {
+    var sig = JSON.stringify(chatStored(r));
+    if (given != null) { r.sig = sig; r.up = given; return r.up; }
+    if (sig !== r.sig) { r.sig = sig; r.up = Date.now(); }
+    return r.up || 0;
+  }
+  // A round still on its way (a saved round id, sending or held) is never dropped: this page is its only handle here.
+  function chatKeepRound(r) { return !!(r && r.roundId && CHAT_MOVING[r.state]); }
+  // Fold what another tab saved into this tab: per round id the newer copy wins; a round this tab is sending keeps its own
+  // copy; rounds only the other tab has are adopted; the newer draft wins unless this tab's box has it in hand.
+  function chatMergeIn(disk) {
+    Object.keys(S.chat).forEach(function (wid) {
+      var c = S.chat[wid], d = disk.cards[wid];
+      if (!d) return;
+      c.removed = c.removed || {};
+      if (d.removed && typeof d.removed === 'object') Object.keys(d.removed).forEach(function (k) { c.removed[k] = Math.max(c.removed[k] || 0, Number(d.removed[k]) || 0); });
+      c.rounds = c.rounds.filter(function (r) { return !c.removed[r.key] || chatKeepRound(r); });
+      (Array.isArray(d.rounds) ? d.rounds : []).forEach(function (x) {
+        if (!x || typeof x.key !== 'string' || c.removed[x.key]) return;
+        var mine = c.rounds.filter(function (r) { return r.key === x.key; })[0], theirsUp = Number(x.up) || 0;
+        if (!mine) {
+          // A plan another tab is still making shows as planning there; one left behind by a closed tab is interrupted.
+          var fresh = chatRestored(x.state === 'planning' && Date.now() - (Number(x.at) || 0) < 240000 ? Object.assign({}, x, { state: 'ready' }) : x);
+          if (!fresh) return;
+          if (x.state === 'planning' && Date.now() - (Number(x.at) || 0) < 240000) { fresh.state = 'planning'; fresh.elsewhere = true; }
+          chatStamp(fresh, theirsUp); c.rounds.push(fresh);
+          if (chatKeepRound(fresh) && !fresh.timer && !fresh.pollStopped && W.parseRoute().pane === 'work') chatSchedule(wid, fresh.key, 0);
+          return;
+        }
+        if (mine.sending || mine.state === 'planning' && !mine.elsewhere) return;
+        if (theirsUp > chatStamp(mine)) {
+          var next = chatRestored(x.state === 'planning' ? Object.assign({}, x, { state: 'ready' }) : x);
+          if (!next) return;
+          if (x.state === 'planning') next.state = 'planning';
+          var keep = { timer: mine.timer, confirm: mine.confirm };
+          Object.keys(chatStored(next)).forEach(function (k) { mine[k] = next[k]; });
+          mine.elsewhere = x.state === 'planning'; mine.timer = keep.timer; mine.confirm = keep.confirm;
+          chatStamp(mine, theirsUp);
+        }
+      });
+      c.rounds.sort(function (a, b) { return (a.at || 0) - (b.at || 0); });
+      var theirDraftAt = Number(d.draftAt) || 0;
+      if (theirDraftAt > (c.draftAt || 0) && typeof d.draft === 'string') {
+        var box = $('wk-chat-text'), host = $('wk-composer'), here = box && host && host.getAttribute('data-wid') === wid;
+        if (!(here && chatComposerFocused())) { c.draft = d.draft.slice(0, CHAT_KEEP.draft); c.draftAt = theirDraftAt; if (here) box.value = c.draft; }
+      }
+    });
+    if ((Number(disk.prefsAt) || 0) > (Number(chatStore.prefsAt) || 0)) { chatStore.planner = disk.planner; chatStore.effort = disk.effort; chatStore.prefsAt = disk.prefsAt; }
   }
   function chatStored(r) {
     return { key: r.key, roundId: r.roundId, question: r.question, answer: r.answer, assignments: r.assignments, planner: r.planner, model: r.model,
       effort: r.effort, note: r.note, meter: r.meter, state: r.state, roundState: r.roundState, inHistory: r.inHistory, states: r.states, error: r.error,
-      at: r.at, sentAt: r.sentAt, sendUnknown: r.sendUnknown, context: r.context, skipped: r.skipped };
+      at: r.at, sentAt: r.sentAt, sendUnknown: r.sendUnknown, context: r.context, skipped: r.skipped, pollSince: r.pollSince || 0, pollStopped: !!r.pollStopped };
+  }
+  function chatTrim(rounds) {
+    var newest = rounds.slice(-CHAT_KEEP.rounds);
+    return rounds.filter(function (r) { return newest.indexOf(r) >= 0 || chatKeepRound(r); });
   }
   var chatSaveTimer = null;
   function chatSave(now) {
     clearTimeout(chatSaveTimer); chatSaveTimer = null;
     if (!now) { chatSaveTimer = setTimeout(function () { chatSave(true); }, 300); return; }
+    // Read the store again and merge: another tab may have saved since this one last did (it never loses that tab's rounds).
+    var disk = chatReadDisk();
+    chatMergeIn(disk);
     var cards = {};
-    Object.keys(chatStore.cards).forEach(function (k) { cards[k] = chatStore.cards[k]; });
+    Object.keys(disk.cards).forEach(function (k) { cards[k] = disk.cards[k]; });
     Object.keys(S.chat).forEach(function (wid) {
       var c = S.chat[wid];
-      if (!c.draft && !c.rounds.length) { delete cards[wid]; return; }
-      cards[wid] = { at: c.at || Date.now(), draft: c.draft.slice(0, CHAT_KEEP.draft), rounds: c.rounds.slice(-CHAT_KEEP.rounds).map(chatStored) };
+      if (!c.draft && !c.rounds.length && !Object.keys(c.removed || {}).length) { if (!(disk.cards[wid] && (Number(disk.cards[wid].at) || 0) > (c.at || 0))) delete cards[wid]; return; }
+      var removed = {}; Object.keys(c.removed || {}).sort(function (x, y) { return c.removed[y] - c.removed[x]; }).slice(0, 40).forEach(function (k) { removed[k] = c.removed[k]; });
+      cards[wid] = { at: Math.max(c.at || 0, Number((disk.cards[wid] || {}).at) || 0) || Date.now(), draft: c.draft.slice(0, CHAT_KEEP.draft), draftAt: c.draftAt || 0, removed: removed,
+        rounds: chatTrim(c.rounds).map(function (r) { var o = chatStored(r); o.up = chatStamp(r); return o; }) };
     });
     var next = { v: 1, cards: {} };
     if (chatStore.planner) next.planner = chatStore.planner;
     if (chatStore.effort) next.effort = chatStore.effort;
-    Object.keys(cards).sort(function (a, b) { return (Number(cards[b].at) || 0) - (Number(cards[a].at) || 0); }).slice(0, CHAT_KEEP.cards).forEach(function (k) { next.cards[k] = cards[k]; });
+    if (chatStore.prefsAt) next.prefsAt = chatStore.prefsAt;
+    var order = Object.keys(cards).sort(function (a, b) { return (Number(cards[b].at) || 0) - (Number(cards[a].at) || 0); });
+    order.forEach(function (k, i) {
+      var keep = i < CHAT_KEEP.cards || (cards[k].rounds || []).some(function (r) { return chatKeepRound(r); });
+      if (keep) next.cards[k] = cards[k];
+    });
     chatStore = next;
     W.writeStore(CHAT_STORE, next);   // wrapped in try/catch by the kit: a full or blocked store keeps the page working
   }
+  // Another tab saved: show its rounds here too. Merge only; writing back here would answer every save with a save.
+  window.addEventListener('storage', function (e) {
+    if (e && e.key !== CHAT_STORE && e.key !== null) return;
+    chatMergeIn(chatReadDisk()); chatRepaintCurrent();
+  });
   function chatTouch(c) { c.at = Date.now(); chatSave(); }
 
   // ── what this server offers (GET /api/work/chat) ─────────
@@ -1421,8 +1506,9 @@
         if (a.sessionID) x.sessionID = a.sessionID;
         return x;
       }) };
-    // Truthful: the planner the server says ran, never only the one asked for.
-    var ran = /\bopus\b/.test(r.model) ? 'opus' : /\bsonnet\b/.test(r.model) ? 'sonnet' : '';
+    // Truthful: the planner the server says ran, never only the one asked for ("claude:opus (requested)" is not a run).
+    var reported = /\(requested\)\s*$/.test(r.model) ? '' : r.model;
+    var ran = /\bopus\b/.test(reported) ? 'opus' : /\bsonnet\b/.test(reported) ? 'sonnet' : '';
     if (ran) body.planner = ran;
     if (CHAT_EFFORTS.indexOf(r.effort) >= 0) body.effort = r.effort;
     return body;
@@ -1446,7 +1532,7 @@
     if (!/^[a-f0-9]{64}$/.test(str(it.task.workRevision))) return 'This card has no saved revision. Refresh Work, then plan.';
     if (c.busy) return '';
     var text = c.draft.trim();
-    if (text.length > CHAT_MAX) return 'Keep your request under 2,000 characters.';
+    if (text.length > CHAT_MAX) return 'Keep your request under ' + CHAT_MAX_TEXT + ' characters.';
     if (c.rounds.some(function (r) { return r.state === 'planning'; })) return 'A plan is still being made for this card.';
     return '';
   }
@@ -1467,7 +1553,7 @@
       // From here the request belongs to a round, as on the Mac: the composer is cleared and the round keeps the words.
       var r = { key: 'web-' + uuid(), roundId: '', question: question, answer: '', assignments: [], planner: chatPlanner(), model: '', effort: '', note: '', meter: null,
         state: 'planning', roundState: '', inHistory: false, states: {}, error: '', at: Date.now(), sentAt: 0, sendUnknown: false, context: '', skipped: {} };
-      c.rounds.push(r); c.draft = ''; chatTouch(c);
+      c.rounds.push(r); c.draft = ''; c.draftAt = Date.now(); chatTouch(c);
       chatResetComposer(it.wid);
       c.phase = 'Finding this task’s sessions…'; chatRepaint(it.wid);
       var meetings = (Array.isArray(it.task.meetingRefs) ? it.task.meetingRefs : []).map(function (m) { return m && typeof m.recordId === 'string' ? 'meeting:' + m.recordId : ''; })
@@ -1488,11 +1574,10 @@
           r.model = chatClean(answer.model, 100); r.effort = CHAT_EFFORTS.indexOf(answer.effort) >= 0 ? answer.effort : '';
           r.state = plan.assignments.length ? 'ready' : 'answered';
           chatTouch(c);
-          if (!plan.assignments.length) return true;
-          // As on the lens: the plan goes into the card's Work chat now, before any send. A failed save keeps the plan;
-          // Send saves it again under the same round id.
-          c.phase = 'Saving the plan to this card’s Work chat…'; chatRepaint(it.wid);
-          return chatRecord(it, r).then(function () { return true; });
+          // The plan is saved to the Mac only on Send. Today's COS Control files every saved round as a plan "from your
+          // glasses" and posts a notice, so saving on Plan would announce a plan nobody chose to send. Send saves it
+          // under this round's id first (the same id on every retry), then asks COS Control to send it.
+          return true;
         });
       }).catch(function (err) {
         r.state = 'planFailed'; r.error = err && err.own ? err.message : chatFailure(err, 'plan');
@@ -1511,7 +1596,7 @@
       return r.roundId;
     }, function (err) {
       var status = err && err.status;
-      if (!status || status === 503 || err.code === 'timeout') { r.error = 'Not saved to the Mac yet: ' + (status ? 'COS is busy or updating.' : 'your Mac did not answer.') + ' Send saves it first.'; return ''; }
+      if (!status || status === 503 || err.code === 'timeout') { r.error = 'Not sent: ' + (status ? 'COS is busy or updating.' : 'your Mac did not answer.') + ' The plan is kept; send it again.'; return ''; }
       r.state = 'planFailed';
       r.error = err.code === 'unknown_work' ? 'This card is not on the Work board any more. Nothing was sent.'
         : (err.message || 'The server did not save this plan.') + ' Nothing was sent.';
@@ -1569,7 +1654,7 @@
           }, function (err) {
             var code = err && err.code, status = err && err.status;
             // Already on its way (a second device, a lost answer): read the round for where it really is.
-            if (status === 409 && (code === 'send_in_progress' || code === 'already_sent')) { r.state = 'sending'; r.roundState = 'send_requested'; r.sentAt = r.sentAt || Date.now(); r.sendUnknown = false; return true; }
+            if (status === 409 && (code === 'send_in_progress' || code === 'already_sent')) { r.state = 'sending'; r.roundState = 'checking'; r.sentAt = r.sentAt || Date.now(); r.sendUnknown = false; return true; }
             if (status === 423) { r.state = 'held'; r.error = ''; r.sendUnknown = false; return true; }
             if (status === 404) { r.state = 'notDelivered'; r.roundId = ''; r.error = 'Your Mac no longer has this plan. Nothing was sent. Plan again.'; return false; }
             if (status === 409 && code === 'plan_stale') { r.state = 'notDelivered'; r.error = 'This card’s sessions changed since the plan. Nothing was sent. Plan again.'; return false; }
@@ -1627,9 +1712,14 @@
       var late = r.state === 'sending' && r.roundState === 'send_requested' && Date.now() - (r.sentAt || Date.now()) >= 60000;
       if (late !== !!r.lateShown) { r.lateShown = late; if (!changed) chatRepaint(wid); }
       if (changed) { chatTouch(S.chat[wid]); chatReplyRefresh(wid); chatRepaint(wid); }
-      if (!CHAT_MOVING[r.state]) { r.pollSince = 0; chatWatchReplies(wid); return; }
+      if (!CHAT_MOVING[r.state]) { r.pollSince = 0; r.pollStopped = false; chatWatchReplies(wid); return; }
       // Past the bound the plan is not called stopped (the server has not said so); this page stops reading it.
-      if (Date.now() - (r.pollSince || Date.now()) > CHAT_POLL.max) { r.pollSince = 0; if (r.state === 'sending') { r.state = 'quiet'; r.error = 'Still with COS Control. Check Work on the Mac, or check again here.'; chatTouch(S.chat[wid]); chatRepaint(wid); } return; }
+      if (Date.now() - (r.pollSince || Date.now()) > CHAT_POLL.max) {
+        r.pollStopped = true;
+        if (r.state === 'sending') { r.state = 'quiet'; r.error = 'Still with COS Control. Check Work on the Mac, or check again here.'; }
+        chatTouch(S.chat[wid]); chatRepaint(wid);
+        return;
+      }
       chatSchedule(wid, key);
     });
   }
@@ -1664,26 +1754,44 @@
     return r.assignments.map(function (a) { return a.id; }).filter(function (id) { var st = (r.states[id] || {}).state; return !CHAT_FINAL[st]; });
   }
   // Use this request again (WorkChatRecoveryControls): the words come back for review; nothing is sent.
+  // A round that never reached COS Control's Send can be removed from this browser's history. Nothing is called on the
+  // server: a round never saved exists only here; a saved one stays in the card's Work chat on the Mac (no route deletes it).
+  function chatRemovable(r) {
+    if (!r || r.sending || CHAT_MOVING[r.state] || r.state === 'planning' || r.state === 'quiet') return false;
+    // sentAt is set whenever COS Control was asked to send (or already had a send), before any state comes back.
+    return !r.sentAt;
+  }
+  function chatRemove(it, r) {
+    var c = chatOf(it.wid);
+    if (!chatRemovable(r)) return false;
+    if (r.timer) { clearTimeout(r.timer); CHAT_TIMERS.delete(r.timer); r.timer = null; }
+    c.rounds = c.rounds.filter(function (x) { return x !== r; });
+    (c.removed || (c.removed = {}))[r.key] = Date.now();
+    chatTouch(c); chatRepaint(it.wid);
+    return true;
+  }
   function chatAgain(it, r) {
     var c = chatOf(it.wid);
     if (!r || c.draft.trim() || c.busy) return;
-    c.draft = r.question; chatTouch(c);
+    c.draft = r.question; c.draftAt = Date.now(); chatTouch(c);
     var box = $('wk-chat-text'); if (box) { box.value = c.draft; chatGrow(box); }
     chatRepaint(it.wid);
   }
   function chatResumePolls() {
     // Rounds still on their way when this page last closed: read them again, so their outcome lands here.
+    chatStore = chatReadDisk();
     Object.keys(chatStore.cards).forEach(function (wid) {
       var saved = chatStore.cards[wid] && chatStore.cards[wid].rounds;
       if (Array.isArray(saved) && saved.some(function (r) { return r && r.roundId && CHAT_MOVING[r.state]; })) chatOf(wid);
     });
     Object.keys(S.chat).forEach(function (wid) {
-      S.chat[wid].rounds.forEach(function (r) { if (r.roundId && CHAT_MOVING[r.state] && !r.timer) chatSchedule(wid, r.key, 0); });
+      S.chat[wid].rounds.forEach(function (r) { if (r.roundId && CHAT_MOVING[r.state] && !r.timer && !r.pollStopped) chatSchedule(wid, r.key, 0); });
     });
   }
   function chatStopTimers() {
     CHAT_TIMERS.forEach(function (t) { clearTimeout(t); }); CHAT_TIMERS.clear();
-    Object.keys(S.chat).forEach(function (wid) { var c = S.chat[wid]; c.replyTimer = null; c.rounds.forEach(function (r) { r.timer = null; r.pollSince = 0; }); });
+    // pollSince stays with the round: leaving Work and coming back never restarts its bound.
+    Object.keys(S.chat).forEach(function (wid) { var c = S.chat[wid]; c.replyTimer = null; c.rounds.forEach(function (r) { r.timer = null; }); });
   }
 
   // ── drawing ──────────────────────────────────────────────
@@ -1750,7 +1858,7 @@
   // The round's state in plain words. "Sent" appears only once COS Control reported it sent; until then it says it waits.
   function chatRoundWord(r) {
     var reached = r.assignments.filter(function (a) { var st = (r.states[a.id] || {}).state; return st === 'sent' || st === 'delivered'; }).length;
-    if (r.state === 'sending') return r.roundState === 'sending' ? 'COS Control is sending' : 'Waiting for COS Control';
+    if (r.state === 'sending') return r.roundState === 'sending' ? 'COS Control is sending' : r.roundState === 'checking' ? 'Checking' : 'Waiting for COS Control';
     if (chatUnsent(r).length) return reached ? 'Ready to send the rest · ' + reached + ' of ' + r.assignments.length + ' sent' : 'Ready to send';
     return CHAT_ROUND_WORD[r.state] || r.state;
   }
@@ -1770,19 +1878,26 @@
       actions = '<div class="wk-row wk-wrap wk-round-actions"><button type="button" class="cx-btn primary" data-wk="chat-send" data-key="' + esc(r.key) + '" data-ids="' + esc(unsent.map(function (a) { return a.id; }).join(',')) + '"' + (r.sending ? ' disabled' : '') + '>' +
         esc(r.sending ? 'Sending…' : unsent.length > 1 ? 'Send all ' + unsent.length : 'Send') + '</button></div>' +
         '<p class="wk-fine">Review each assignment. Nothing is sent until you press Send.' + (caps.control && !caps.control.connected ? ' COS Control on your Mac is not connected right now, so the plan would wait there for you to send it from the Mac.' : '') + '</p>' +
+        (r.state === 'ready' && !r.roundId && !reached ? '<p class="wk-fine">This plan stays on this browser until you send it. Send saves it to this card’s Work chat on the Mac.</p>' : '') +
         (r.state === 'ready' && r.roundId && !r.inHistory && !reached ? '<p class="wk-fine">Saved on the server. COS Control adds it to this card’s Work chat on the Mac when it next checks.</p>' : '') +
         (r.state === 'expired' ? '<p class="wk-small">COS Control did not pick it up within 10 minutes. Nothing was sent. You can send it again.</p>' : '');
     } else if (r.state === 'held') {
-      actions = '<p class="wk-small">Saved in this card’s Work chat. COS Control was not connected, so send it from Work on the Mac. It cannot be sent again from here.</p>';
+      actions = '<p class="wk-small">Saved in this card’s Work chat. COS Control was not connected, so send it from Work on the Mac. It cannot be sent again from here.</p>' +
+        (r.pollStopped ? '<p class="wk-fine">This page stopped checking it. Check again to see whether the Mac sent it.</p><div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-check" data-key="' + esc(r.key) + '">Check again</button></div>' : '');
     } else if (r.state === 'quiet') {
       actions = '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-check" data-key="' + esc(r.key) + '">Check again</button></div>';
     } else if (r.state === 'planFailed' || (r.state === 'notDelivered' && !r.roundId)) {
       actions = '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-again" data-key="' + esc(r.key) + '"' + (c.draft.trim() || c.busy ? ' disabled title="Clear the message box first"' : '') + '>Use this request again</button></div>';
     }
+    if (chatRemovable(r) && !r.confirm) {
+      actions += '<div class="wk-row"><button type="button" class="wk-text-btn" data-wk="chat-remove" data-key="' + esc(r.key) + '">Remove</button>' +
+        '<span class="wk-small wk-muted">' + esc(r.roundId ? 'Removes it from this browser. It stays in this card’s Work chat on the Mac.' : 'Never sent. Removes it from this browser.') + '</span></div>';
+    }
     var stop = chatStoppable(r).length && r.roundId ? '<div class="wk-row"><button type="button" class="cx-btn quiet" data-wk="chat-stop" data-key="' + esc(r.key) + '"' + (r.stopping ? ' disabled' : '') + '>' + (r.stopping ? 'Stopping…' : 'Stop') + '</button>' +
       '<span class="wk-small wk-muted">Stops what COS Control has not sent yet.</span></div>' : '';
     var waited = Date.now() - (r.sentAt || Date.now());
     var sendingLine = r.state !== 'sending' ? '' : '<p class="wk-small wk-muted">' + esc(r.roundState === 'sending' ? 'COS Control on your Mac is sending it. This page checks every few seconds.'
+      : r.roundState === 'checking' ? 'COS Control already has a send for this plan. Checking where it is…'
       : waited < 60000 ? 'Waiting for COS Control on your Mac to send this. Nothing has been sent yet.'
       : 'Waiting for COS Control on your Mac to send this. It has not picked it up yet: the Mac may be asleep or COS Control closed. The request waits 10 minutes, and nothing is sent until COS Control takes it.') + '</p>';
     return '<article class="wk-round" data-key="' + esc(r.key) + '">' +
@@ -1834,7 +1949,7 @@
   function chatSyncComposer(it) {
     var box = $('wk-chat-text'); if (!box) return;
     var c = chatOf(it.wid), n = box.value.length, problem = chatProblem(it, c);
-    var count = $('wk-cmp-count'); if (count) { count.textContent = n.toLocaleString('en-US') + '/2,000'; count.classList.toggle('over', box.value.trim().length > CHAT_MAX); }
+    var count = $('wk-cmp-count'); if (count) { count.textContent = n.toLocaleString('en-US') + '/' + CHAT_MAX_TEXT; count.classList.toggle('over', box.value.trim().length > CHAT_MAX); }
     var size = $('wk-cmp-size');
     if (size) { var text = box.value.trim(), wid = chatWorkId(it.task); size.textContent = text && wid ? 'Sends ' + chatTokenText(chatMeter(text, chatContext(it.task, wid), wid).tokens) + ' tokens of text' : ''; }
     var plan = $('wk-cmp-plan');
@@ -2348,7 +2463,7 @@
         it = current(); if (!it) return;
         var draftBox = $('wk-chat-text'); if (draftBox) { chatOf(it.wid).draft = draftBox.value; draftBox.blur(); }
         chatPlan(it); return;
-      case 'chat-send': case 'chat-confirm': case 'chat-cancel': case 'chat-skip': case 'chat-stop': case 'chat-again': case 'chat-check':
+      case 'chat-send': case 'chat-confirm': case 'chat-cancel': case 'chat-skip': case 'chat-stop': case 'chat-again': case 'chat-check': case 'chat-remove':
         it = current(); var round = it && chatFindRound(it.wid, t.getAttribute('data-key')); if (!round) return;
         var ids = String(t.getAttribute('data-ids') || '').split(',').filter(Boolean);
         if (act === 'chat-send') chatAskSend(it, round, ids);
@@ -2357,7 +2472,8 @@
         else if (act === 'chat-skip') { ids.forEach(function (x) { round.skipped[x] = true; }); round.confirm = null; chatTouch(chatOf(it.wid)); renderDetail(it.id); }
         else if (act === 'chat-stop') chatStop(it, round);
         else if (act === 'chat-again') chatAgain(it, round);
-        else { round.state = 'sending'; round.error = ''; round.pollSince = 0; chatSchedule(it.wid, round.key, 0); renderDetail(it.id); }
+        else if (act === 'chat-remove') chatRemove(it, round);
+        else { if (round.state === 'quiet') round.state = 'sending'; round.error = ''; round.pollSince = 0; round.pollStopped = false; chatSchedule(it.wid, round.key, 0); renderDetail(it.id); }
         return;
       case 'chat-caps': loadChatCaps(true); return;
       case 'show-workspace': var ws = $('wk-agent-workspace'); if (ws && ws.scrollIntoView) ws.scrollIntoView({ block: 'start', behavior: 'smooth' }); return;
@@ -2424,7 +2540,7 @@
     }
     if (el.hasAttribute('data-wk-stage')) { it = itemFor(el.getAttribute('data-wk-stage')); if (it) moveStage(it, el.value); return; }
     if (el.hasAttribute('data-wk-chat')) {
-      chatStore[el.getAttribute('data-wk-chat') === 'effort' ? 'effort' : 'planner'] = el.value; chatSave(true);
+      chatStore[el.getAttribute('data-wk-chat') === 'effort' ? 'effort' : 'planner'] = el.value; chatStore.prefsAt = Date.now(); chatSave(true);
       it = current(); if (it) chatSyncComposer(it);
       return;
     }
@@ -2464,7 +2580,7 @@
     }
     if (el.id === 'wk-chat-text') {
       it = current(); if (!it) return;
-      var cc = chatOf(it.wid); cc.draft = el.value; if (cc.error) cc.error = '';
+      var cc = chatOf(it.wid); cc.draft = el.value; cc.draftAt = Date.now(); if (cc.error) cc.error = '';
       chatTouch(cc); chatSyncComposer(it); chatKeepInView();
       return;
     }
@@ -2553,7 +2669,8 @@
     // For web-control/work-composer-web.test.ts: Work chat's steps, run against a fake server.
     _chat: { S: S, of: chatOf, plan: chatPlan, send: chatSend, stop: chatStop, again: chatAgain, poll: chatPoll, caps: loadChatCaps, readCaps: chatReadCaps,
       find: chatFindRound, planBody: chatPlanBody, context: chatContext, meter: chatMeter, readPlan: chatReadPlan, readInput: chatReadInput,
-      store: function () { return chatStore; }, save: chatSave, timers: CHAT_TIMERS, render: renderDetail, restore: chatRestored, item: itemFor },
+      store: function () { return chatStore; }, save: chatSave, timers: CHAT_TIMERS, render: renderDetail, restore: chatRestored, item: itemFor,
+      mergeIn: function () { chatMergeIn(chatReadDisk()); }, limits: { questionChars: CHAT_MAX, pollMaxMs: CHAT_POLL.max } },
     // The Ask sheet's "Find a task about this": open the board on this query and ask by meaning.
     search: function (q) { S.q = String(q || ''); S.tab = 'board'; render(); searchMeaning(); },
     // Back unwinds one step: Start work and Edit go to the card, the card to the list.

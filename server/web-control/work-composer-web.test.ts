@@ -17,6 +17,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+import { parseWorkChatInput } from '../lib/work-chat.js'
+import { LENS_SEND_PICKUP_MS, LENS_SEND_REPORT_MS } from '../lib/work-lens-rounds.js'
 
 const SOURCE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'panes', 'work.js'), 'utf8')
 const flush = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)) }
@@ -229,10 +231,15 @@ describe('what the server offers: the composer shows only on a server that takes
 })
 
 describe('the request and its plan (the Mac contract)', () => {
-  it('plans with the same three routes and body the Mac uses, then saves the plan as a web round, and sends nothing', async () => {
+  it('plans with the same routes and body the Mac uses, saves nothing until Send, then saves the plan as a web round and sends it', async () => {
     const h = await planned()
+    expect(h.calls.filter(c => c.method === 'POST').map(c => c.path)).toEqual(['/api/work/orchestrator/input', '/api/work/chat'])
+    // Nothing is saved to the Mac on Plan: today's COS Control would file it as a plan from the glasses and post a notice.
+    expect(h.card().rounds[0]).toMatchObject({ state: 'ready', roundId: '' })
+    expect(h.html()).toContain('This plan stays on this browser until you send it. Send saves it to this card’s Work chat on the Mac.')
+    await h.send(h.card().rounds[0].key)
     const order = h.calls.filter(c => c.method === 'POST').map(c => c.path)
-    expect(order).toEqual(['/api/work/orchestrator/input', '/api/work/chat', '/api/work/chat/lens-rounds'])
+    expect(order).toEqual(['/api/work/orchestrator/input', '/api/work/chat', '/api/work/chat/lens-rounds', `/api/work/chat/lens-rounds/${ROUND}/send`])
     expect(h.sent('/api/work/orchestrator/input')[0]!.body).toEqual({ workID: WID, meetingWorkIDs: ['meeting:quilt/2026-11/pricing.md'] })
     const plan = h.sent('/api/work/chat')[0]!
     expect(plan.timeoutMs).toBe(190000)
@@ -251,11 +258,13 @@ describe('the request and its plan (the Mac contract)', () => {
         { id: 'a2', mode: 'newSession', provider: 'codex', prompt: 'Add a test for the rounding.' }] })
     expect(rec.clientRoundId).toMatch(/^web-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
     expect(rec.assignments[1]).not.toHaveProperty('sessionID')
-    expect(h.calls.some(c => c.path.endsWith('/send'))).toBe(false)
     const r = h.card().rounds[0]
-    expect(r).toMatchObject({ state: 'ready', roundId: ROUND, key: rec.clientRoundId })
+    expect(r).toMatchObject({ state: 'sending', roundId: ROUND, key: rec.clientRoundId })
     expect(h.card().draft).toBe('')
     expect(h.box()!.value).toBe('')
+  })
+  it('a planned round reads as ready, and names its planner, its assignments and its Send', async () => {
+    const h = await planned()
     const page = h.html()
     expect(page).toContain('Ready to send · planned with claude-opus-5-5 · high effort')
     expect(page).toContain('Review each assignment. Nothing is sent until you press Send.')
@@ -266,7 +275,11 @@ describe('the request and its plan (the Mac contract)', () => {
   it('names the planner it asked for only as a request when the server did not say what ran', async () => {
     const h = await planned({ answers: { '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : { ...PLAN, model: 'claude:opus (requested)', effort: 'medium' }) } })
     expect(h.html()).toContain('Ready to send · requested Opus (not confirmed) · medium effort')
-    expect(h.sent('/api/work/chat/lens-rounds')[0]!.body.planner).toBe('opus')
+    await h.send(h.card().rounds[0].key)
+    // "claude:opus (requested)" is a request the server could not confirm: the saved round names no planner, only the effort.
+    const rec = h.sent('/api/work/chat/lens-rounds')[0]!.body
+    expect(rec).not.toHaveProperty('planner')
+    expect(rec.effort).toBe('medium')
   })
   it('the planner and effort picked here go in the next plan', async () => {
     const h = await opened()
@@ -303,7 +316,7 @@ describe('the request and its plan (the Mac contract)', () => {
     h.tapEl('wk-cmp-plan'); h.tapEl('wk-cmp-plan')
     await flush(30)
     expect(h.sent('/api/work/chat')).toHaveLength(1)
-    expect(h.sent('/api/work/chat/lens-rounds')).toHaveLength(1)
+    expect(h.sent('/api/work/chat/lens-rounds')).toHaveLength(0)
     expect(h.card().rounds).toHaveLength(1)
   })
   it('two plans started at once (a tap and Command Return together) plan once', async () => {
@@ -359,12 +372,14 @@ describe('the plan failing: nothing is sent, and the words come back', () => {
     expect(h.card().draft).toBe('Keep these words')
     expect(h.dom.ids.get('wk-cmp-status')!.html).toContain('This task changed since the page loaded.')
   })
-  it('a save that gets no answer keeps the plan; Send saves it again under the same round id, then sends', async () => {
+  it('a save that gets no answer keeps the plan; the next Send saves it again under the same round id, then sends', async () => {
     let saves = 0
     const h = await planned({ answers: { '/api/work/chat/lens-rounds': () => (++saves === 1 ? fail(undefined, undefined, 'Failed to fetch') : RECORDED) } })
     const r = h.card().rounds[0]
+    await h.send(r.key)
     expect(r).toMatchObject({ state: 'ready', roundId: '' })
-    expect(r.error).toContain('Not saved to the Mac yet')
+    expect(r.error).toBe('Not sent: your Mac did not answer. The plan is kept; send it again.')
+    expect(h.sent(`/api/work/chat/lens-rounds/${ROUND}/send`)).toHaveLength(0)
     await h.send(r.key)
     const recs = h.sent('/api/work/chat/lens-rounds')
     expect(recs).toHaveLength(2)
@@ -781,5 +796,140 @@ describe('the rest of the card, as on the Mac', () => {
     h.box()!.focus()
     h.tap('chat-send', { 'data-key': h.card().rounds[0].key, 'data-ids': 'a1,a2' }); await flush()
     expect(h.html()).toContain('Send to “Pricing page” and a new Codex session?')
+  })
+})
+
+describe('QA follow-ups: limits, truthful states, two tabs, Open session', () => {
+  it('the 2,000-character limit is the server planner\'s own, and the 26-minute bound is the server\'s send end plus a minute', async () => {
+    const h = load()
+    const n = h.chat.limits.questionChars
+    const body = (q: string) => ({ workID: WID, revision: 'f'.repeat(64), question: q, context: '', sessions: [], history: [], updates: [], mode: 'plan' })
+    expect(() => parseWorkChatInput(body('x'.repeat(n)))).not.toThrow()
+    expect(() => parseWorkChatInput(body('x'.repeat(n + 1)))).toThrow()
+    expect(h.chat.limits.pollMaxMs).toBe(LENS_SEND_PICKUP_MS + LENS_SEND_REPORT_MS + 60_000)
+  })
+  it('send_in_progress and already_sent say Checking, never that nothing has been sent', async () => {
+    for (const code of ['already_sent', 'send_in_progress']) {
+      const h = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: fail(409, code) } })
+      await h.send(h.card().rounds[0].key)
+      const page = h.html()
+      expect(page, code).toContain('COS Control already has a send for this plan. Checking where it is…')
+      expect(page, code).toContain('Checking · planned with')
+      expect(page, code).not.toContain('Nothing has been sent yet')
+    }
+  })
+  it('a held plan stops being read at the bound, stays stopped across visits and reloads, and Check again reads it once', async () => {
+    const h = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: fail(423, 'control_not_connected') } })
+    h.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('in_history', 'pending', 'pending')
+    await h.send(h.card().rounds[0].key)
+    expect(h.card().rounds[0].state).toBe('held')
+    await h.tick(27 * 60000)
+    const r = h.card().rounds[0]
+    expect(r.pollStopped).toBe(true)
+    expect(h.html()).toContain('This page stopped checking it.')
+    const reads = () => h.sent(`/api/work/chat/lens-rounds/${ROUND}`, 'GET').length
+    const before = reads()
+    h.def.leave(); h.setRoute([], 'today'); h.setRoute([ID]); h.def.load([ID]); await flush()
+    await h.tick(60000)
+    expect(reads()).toBe(before)
+    h.chat.save(true)
+    const again = load({ storage: h.storage, answers: { [`/api/work/chat/lens-rounds/${ROUND}`]: view('in_history', 'pending', 'pending') } })
+    again.def.load([ID]); await flush(); await again.tick(60000)
+    expect(again.sent(`/api/work/chat/lens-rounds/${ROUND}`, 'GET')).toHaveLength(0)
+    h.tap('chat-check', { 'data-key': r.key }); await h.tick(1)
+    expect(reads()).toBe(before + 1)
+    expect(r.state).toBe('held')
+  })
+  it('two tabs: neither drops the other\'s rounds, the newer copy of a round wins, and the other tab shows it', async () => {
+    const storage: Record<string, string> = {}
+    const a = await opened({ storage })
+    const b = await opened({ storage })
+    a.type('Plan from tab A'); a.tapEl('wk-cmp-plan'); await flush(30)
+    a.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sending', 'pending', 'pending')
+    await a.send(a.card().rounds[0].key); a.chat.save(true)
+    const key = a.card().rounds[0].key
+    // Tab B loaded before A saved. It types and saves: A's round, still on its way, stays in the store, and B shows it.
+    b.type('Draft in tab B'); await b.tick(400)
+    let stored = JSON.parse(storage['cos.web.work.chat']!).cards[WID]
+    expect(stored.rounds.map((r: { key: string }) => r.key)).toContain(key)
+    expect(stored.draft).toBe('Draft in tab B')
+    expect(b.card().rounds.map((r: { key: string }) => r.key)).toContain(key)
+    // A's round moves on; B's older copy never overwrites it.
+    a.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sent', 'delivered', 'delivered')
+    await a.tick(1); a.chat.save(true)
+    b.type('Draft in tab B, edited'); await b.tick(400)
+    stored = JSON.parse(storage['cos.web.work.chat']!).cards[WID]
+    expect(stored.rounds.find((r: { key: string }) => r.key === key).state).toBe('sent')
+    expect(b.card().rounds.find((r: { key: string }) => r.key === key).state).toBe('sent')
+    expect(stored.draft).toBe('Draft in tab B, edited')
+  })
+  it('a draft typed in one tab shows in another that has not typed since; a tab typing keeps its own', async () => {
+    const storage: Record<string, string> = {}
+    const a = await opened({ storage })
+    const c = await opened({ storage })
+    a.type('From tab A'); await a.tick(400)
+    c.chat.mergeIn()
+    expect(c.card().draft).toBe('From tab A')
+    expect(c.box()!.value).toBe('From tab A')
+    c.box()!.focus(); c.type('Tab C is typing')
+    a.type('A again'); await a.tick(400)
+    c.chat.mergeIn()
+    expect(c.box()!.value).toBe('Tab C is typing')
+  })
+  it('keeps a round still on its way even past the eight a card keeps', async () => {
+    const round = (i: number, state: string, roundId = '') => ({ key: `web-${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`, roundId, question: 'q' + i, answer: 'a', assignments: [{ id: 'a1', mode: 'continue', sessionID: S1, provider: 'claude', prompt: 'p', title: 't' }],
+      state, states: {}, at: Date.parse('2026-11-06T20:00:00.000Z') + i * 1000, sentAt: 0 })
+    const rounds = [round(1, 'sending', 'lr_aaaaaaaaaaaaaaaa'), round(2, 'sent', 'lr_bbbbbbbbbbbbbbbb'), ...[3, 4, 5, 6, 7, 8, 9, 10].map(i => round(i, 'ready'))]
+    const h = await opened({ storage: { 'cos.web.work.chat': JSON.stringify({ v: 1, cards: { [WID]: { at: 1, draft: '', rounds } } }) } })
+    h.type('x'); await h.tick(400)
+    const kept = JSON.parse(h.storage['cos.web.work.chat']!).cards[WID].rounds.map((r: { key: string }) => r.key)
+    expect(kept).toContain(rounds[0]!.key)
+    expect(kept).not.toContain(rounds[1]!.key)
+    expect(kept).toHaveLength(9)
+  })
+  it('Remove takes away a round that was never sent, from this browser only, with no server call', async () => {
+    // A plan that failed: never saved, never sent.
+    const h = await planned({ answers: { '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : fail(503, 'work_chat_unavailable')) } })
+    const r = h.card().rounds[0]
+    expect(r.state).toBe('planFailed')
+    expect(h.html()).toContain('Never sent. Removes it from this browser.')
+    const calls = h.calls.length
+    h.tap('chat-remove', { 'data-key': r.key }); await h.tick(400)
+    expect(h.card().rounds).toHaveLength(0)
+    expect(h.calls.length).toBe(calls)
+    expect(JSON.parse(h.storage['cos.web.work.chat']!).cards[WID].rounds).toHaveLength(0)
+    // A plan that was saved but never sent says where it stays; one on its way or sent has no Remove.
+    const saved = await planned({ answers: { [`/api/work/chat/lens-rounds/${ROUND}/send`]: fail(409, 'plan_stale') } })
+    await saved.send(saved.card().rounds[0].key)
+    const html = saved.html()
+    expect(saved.card().rounds[0].roundId).toBe(ROUND)
+    expect(html).toContain('Removes it from this browser. It stays in this card’s Work chat on the Mac.')
+    const moving = await planned()
+    moving.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sending', 'pending', 'pending')
+    await moving.send(moving.card().rounds[0].key)
+    expect(moving.html()).not.toContain('data-wk="chat-remove"')
+    moving.tap('chat-remove', { 'data-key': moving.card().rounds[0].key }); await flush()
+    expect(moving.card().rounds).toHaveLength(1)
+    moving.answers[`/api/work/chat/lens-rounds/${ROUND}`] = view('sent', 'delivered', 'delivered')
+    await moving.tick(3000)
+    expect(moving.card().rounds[0].state).toBe('sent')
+    expect(moving.html()).not.toContain('data-wk="chat-remove"')
+  })
+  it('a round removed in one tab is not brought back by another tab\'s save', async () => {
+    const storage: Record<string, string> = {}
+    const a = await planned({ storage, answers: { '/api/work/chat': (b: unknown, m: string) => (m === 'GET' ? CAPS : fail(503, 'work_chat_unavailable')) } })
+    a.chat.save(true)
+    const b = await opened({ storage })
+    expect(b.card().rounds).toHaveLength(1)
+    a.tap('chat-remove', { 'data-key': a.card().rounds[0].key }); a.chat.save(true)
+    b.type('B types and saves'); await b.tick(400)
+    expect(JSON.parse(storage['cos.web.work.chat']!).cards[WID].rounds).toHaveLength(0)
+    expect(b.card().rounds).toHaveLength(0)
+  })
+  it('the Agent workspace box has Open session, as the Mac does', async () => {
+    const two = { ...ACTIVITY, activities: [{ id: 'r-new', workId: WID, status: 'delivered', provider: 'claude', sessionId: S1, sessionTitle: 'Pricing page', createdAt: '2026-11-06T22:59:00.000Z' }] }
+    const h = await opened({ answers: { [`/api/work-board/activity?domain=quilt&workIdentity=${ID}`]: two } })
+    const html = h.dom.ids.get('wk-part-side')!.html || h.dom.pane.html
+    expect(html).toMatch(/Agent workspace<\/h2>[\s\S]*data-wk="session" data-provider="claude" data-sid="11111111-1111-4111-8111-111111111111">Open session</)
   })
 })
