@@ -1,3 +1,21 @@
+## Unreleased (Needs you stale)
+
+For 7.0.1. Miles, 11/07: Today's Needs you kept "COS Glasses - QA review before publish, Oct 31, Waiting for your reply in Personal" while he worked in that session all day. Server and Control Web only; no COS Control, glasses or phone update.
+
+**Why it stayed.** The row is a Work handoff (receipt e840cc8e, card a3e811fbc87a on the Personal board, sent 10/30 21:13 UTC into the session as a Continue). COS Control's tracker takes a needs-input report from the session's status line for that card, and the last one it saw was at 10/31 07:25:59 UTC. No later turn mentioned the card again, so nothing replaced the report, and the open list kept the card in needsInput for the whole 14-day tracking window. It was not a queued app note: `waitingInApp` was false. "Oct 31" was the card's newest progress event (that same report), not its creation (10/30).
+
+**Default-on changes (no switch):**
+- **A needs-input or blocked report stops counting once its session moves on.** `GET /api/work-board/activity/open` reads the newest conversation record of each session it would list as waiting (the same clock as the Sessions list, never a relaunch's bookkeeping; a Cursor session's transcript write time). Activity more than a minute after the report (a turn of yours, or the session working) supersedes it: the item is grouped as if no report stood (usually running), and carries `supersededAt`. The report stays in `progress` as COS Control recorded it. At most 12 sessions per read, stopped at 2 s; a session it cannot find or read keeps its report, as before.
+- **Control Web Today leaves a superseded item out of Needs you**, so its count, headline and rail line drop it too.
+- **The inbox summary's `waiting` count (the Messages badge) follows the same rule.**
+- **A waiting Work row on Today is dated by when it started waiting** (the new `waitingSince` field: the newest progress event of the report's own kind, or the newest Jev reading for a Jev report), not by the card's newest event.
+
+**New fields (additive, optional):** `waitingSince` on every Work activity with a needs-input or blocked report, `supersededAt` on open-list items. No route or field was removed.
+
+**Not changed:** COS Control's own Work card still shows the report it recorded; nothing writes the Work journal. There is no Dismiss on the row: the journal is COS Control's, and the server has no clean way to record one. COS Control's Today on the Mac does not show this row at all (its Today reads only `kind`/`action` items from `/api/work-board/your-move`, which this server does not send). Control Web Today still lists running handoffs in Needs you ("Handed to you"), which the inbox count leaves out; unchanged here.
+
+**Tests:** work-activity (the live receipt's times: the wait date, the supersede, the one-minute grace, blocked, done, the linked session only, the floor without a wait time, a completed handoff), work-session-activity (the session read, ids it refuses, the test-runtime guard, the 12-session cap, the Cursor clock, the 2 s bound, the route and the inbox count), needs-you-stale-web (app.js's own needsModel and needRowHtml on the live item). Red on 7.0.0, green here; each guard mutated once and killed.
+
 ## Unreleased (live state, web)
 
 Control Web half of 7.0.1 live state (branch `claude/live-state-web`). Reads `GET /api/events` from the server half (`claude/live-state-server`, `docs/live-events-contract.md`). Control Web only; no glasses, phone or Control update is needed.

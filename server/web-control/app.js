@@ -1532,6 +1532,9 @@
     (TODAY.needs || []).forEach(function (it) {
       var k = splitSessionId(it.provider, it.sessionId);
       if (k.id && seen[k.provider + '|' + String(k.id).toLowerCase()]) return;   // Control: a Work row for a waiting session is the session's row
+      // 7.0.1 (Miles 11/07): the server saw the session move on after its needs-input or blocked report
+      // (work-activity.ts supersededBy). That report is history, not something waiting on you.
+      if (it.supersededAt) return;
       rows.push({ kind: 'work', tier: 3, item: it, key: k.id ? k.provider + '|' + k.id : '' });
     });
     var groups = TODAY.voices.groups || [];
@@ -1571,7 +1574,8 @@
     return bits.join(', ');
   }
   function needRowHtml(r, i) {
-    var age = r.since ? ago(r.since) : r.item ? ago(r.item.updatedAt || r.item.createdAt) : '';
+    // A Work row is dated by when it started waiting (7.0.1), not by the card's newest event.
+    var age = r.since ? ago(r.since) : r.item ? ago(r.item.waitingSince || r.item.updatedAt || r.item.createdAt) : '';
     var top = function (title) { return '<span class="need-top"><span class="need-title">' + esc(title) + '</span>' + (age ? '<span class="need-age">' + esc(age) + '</span>' : '') + '</span>'; };
     if (r.kind === 'work') {
       var it = r.item, k = splitSessionId(it.provider, it.sessionId);

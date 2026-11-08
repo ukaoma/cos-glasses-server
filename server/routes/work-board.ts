@@ -6,6 +6,7 @@ import { listBoard, listBoardWithDates, workBoardCapabilities, setTaskWorkStage,
 import { createWorkBoardReader, WORK_BOARD_READ_LIMITS, WorkBoardTimeoutError, type WorkBoardReader } from '../lib/work-board-reader.js'
 import type { MeetingDescriptor } from '../lib/work-review-store.js'
 import { isSafeDomainName } from '../lib/domains.js'
+import { workSessionActivity, waitingSessionIds } from '../lib/work-session-activity.js'
 import { resolveSavedMeetingDetail } from './meetings.js'
 import type { MeetingDetail } from '../lib/meeting-store.js'
 
@@ -28,11 +29,13 @@ export interface WorkBoardDependencies {
   requests: () => Pick<WorkActivityCapabilities, 'requests' | 'requestsInbox' | 'requestsConsumerSeenAt'>
   /** 6.59.0: the bounded, shared board read (5 s). Defaults to one over `list`. */
   readBoard?: WorkBoardReader<TaskBoardRow>
+  /** 7.0.1: each linked session's newest activity (lib/work-session-activity.ts), for the open list's supersede rule. */
+  sessionActivity: (sessionIds: readonly string[]) => Promise<ReadonlyMap<string, number>>
   now: () => number
 }
 const defaults: WorkBoardDependencies = { journal: () => readWorkJournal(), list: listBoard, capabilities: workBoardCapabilities,
   stage: setTaskWorkStage, link: linkTaskMeeting, edit: editWorkTask, capture: captureWorkItem, captureCapabilities: workIntakeCapabilities, resolveMeeting: resolveSavedMeetingDetail,
-  requests: () => ({ requests: 0, requestsInbox: 0, requestsConsumerSeenAt: null }), now: () => Date.now() }
+  requests: () => ({ requests: 0, requestsInbox: 0, requestsConsumerSeenAt: null }), sessionActivity: ids => workSessionActivity(ids), now: () => Date.now() }
 /** How old a board read the activity and open-work glances accept (the reader shares one read between them). */
 export const WORK_GLANCE_BOARD_AGE_MS = 10_000
 
@@ -82,7 +85,11 @@ export function createWorkBoardRouter(overrides: Partial<WorkBoardDependencies> 
     if (!journal.available) return res.json({ version: 1, available: false, reason: journal.reason, capabilities, items: [], total: 0, truncated: false })
     const rows = await glanceBoard('open work')
     if (!rows) return res.json({ version: 1, available: false, reason: 'Work board is unavailable. Refresh before trying again.', capabilities, items: [], total: 0, truncated: false })
-    return res.json({ version: 1, available: true, capabilities, ...projectOpenWork(journal, rows, deps.now()) })
+    // 7.0.1: a waiting item whose session moved on since its report is not waiting. Only those sessions are read; a
+    // read that fails keeps the list as it was.
+    const now = deps.now(), first = projectOpenWork(journal, rows, now), waiting = waitingSessionIds(first.items)
+    const sessionActivityMs = waiting.length ? await deps.sessionActivity(waiting).catch(() => undefined) : undefined
+    return res.json({ version: 1, available: true, capabilities, ...(sessionActivityMs?.size ? projectOpenWork(journal, rows, now, { sessionActivityMs }) : first) })
   })
   router.get('/work-board', async (_req, res) => {
     try {

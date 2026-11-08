@@ -46,6 +46,12 @@ export interface WorkActivity {
    * `unknown` (older clients); with this flag it is "Sending", not an unresolved delivery. Absent otherwise.
    */
   sending?: true
+  /**
+   * 7.0.1: when the current needs-input or blocked report was made: the newest progress event of that kind (Control
+   * records each report as an event at the reply's own time). Absent for any other report, or when no event says.
+   * Today dates a waiting row by this, not by the card's newest event.
+   */
+  waitingSince?: string
 }
 /** 6.59.0 (S4): where Control's saved draft for the task's current revision sends. Never the draft's prompt. */
 export interface SavedDestination { mode: WorkHandoffMode; provider: string; model?: string; sessionId?: string }
@@ -69,7 +75,9 @@ type JournalRecord = Record<string, unknown>
 export interface WorkJournal { available: true; receipts: JournalRecord[]; drafts: JournalRecord[] }
 export type WorkJournalRead = WorkJournal | { available: false; reason: string }
 
-export const WORK_ACTIVITY_LIMITS = { evidence: 280, evidenceUnits: 1_200, openItems: 50, trackedDays: 14, progressEvents: 1_000, sendingSeconds: 600 } as const
+export const WORK_ACTIVITY_LIMITS = { evidence: 280, evidenceUnits: 1_200, openItems: 50, trackedDays: 14, progressEvents: 1_000, sendingSeconds: 600,
+  /** 7.0.1: session activity this long after a needs-input or blocked report supersedes it (the reply that carried it is not). */
+  supersedeSeconds: 60 } as const
 /** Control's `TaskRow.workStages` (and task-store WORK_STAGES). A move naming anything else is not projected. */
 export const WORK_ACTIVITY_STAGES: readonly string[] = ['mentioned', 'planned', 'draft', 'built', 'qa', 'complete']
 const unavailableJournal = (reason: string): WorkJournalRead => ({ available: false, reason })
@@ -147,7 +155,7 @@ export function cleanEvidence(value: unknown): string | undefined {
  * The receipt's optional `progress` block, parsed on its own. Absent is undefined; a malformed block reads
  * `{ unreadable: true }` and never makes the journal unavailable: Control writes it, and a newer Control may write more.
  */
-function parseProgress(raw: unknown): { projection: WorkActivityProgress | UnreadableWorkProgress; newestAt?: number } | undefined {
+function parseProgress(raw: unknown): { projection: WorkActivityProgress | UnreadableWorkProgress; newestAt?: number; reportAt?: number } | undefined {
   if (raw === undefined || raw === null) return undefined
   const unreadable = { projection: { unreadable: true as const } }
   if (!object(raw)) return unreadable
@@ -173,13 +181,20 @@ function parseProgress(raw: unknown): { projection: WorkActivityProgress | Unrea
   }
   const received = isoFromSeconds(receivedAt)
   if (received) projection.receivedAt = received
+  // 7.0.1: when it started waiting. Control records a session's report as an event of the report's own kind, and a Jev
+  // reading as a 'jev' event; the newest such event is the report standing now.
+  let reportAt: number | undefined
+  if (state === 'needsInput' || state === 'blocked') {
+    const kinds = projection.reportedBy === 'jev' ? [state, 'jev'] : [state]
+    for (const event of list as JournalRecord[]) if (kinds.includes(event.kind as string)) reportAt = reportAt === undefined ? event.at as number : Math.max(reportAt, event.at as number)
+  }
   // The newest move COS made, undone or not (Control's timeline order: events are appended).
   const move = [...list].reverse().find(event => (event as JournalRecord).kind === 'moved') as JournalRecord | undefined
   const moveAt = move && isoFromSeconds(move.at)
   if (move && moveAt && WORK_ACTIVITY_STAGES.includes(move.fromStage as string) && WORK_ACTIVITY_STAGES.includes(move.toStage as string)) {
     projection.lastMove = { from: move.fromStage as string, to: move.toStage as string, at: moveAt, undone: finite(move.undoneAt) }
   }
-  return { projection, newestAt }
+  return { projection, newestAt, reportAt }
 }
 /** The report a progress projection carries, or null (none, or unreadable). */
 export function reportOf(progress: WorkActivity['progress']): WorkActivityProgress['reported'] {
@@ -229,6 +244,8 @@ function projectReceipt(receipt: JournalRecord, domain: string, all: readonly Jo
       ? isoFromSeconds(Math.max(receipt.createdAt as number, progress.newestAt)) ?? createdAt : createdAt
   }
   if (progress) activity.progress = progress.projection
+  const waitingSince = isoFromSeconds(progress?.reportAt)
+  if (waitingSince) activity.waitingSince = waitingSince
   // Control's handledByYou: acknowledged, or an unknown or delivered handoff you marked reviewed.
   activity.acknowledged = finite(receipt.acknowledgedAt) || raw === 'reviewed'
   // Ownership is the SESSION's, across every receipt that names it (Control's appOwner and serverHold look at all of them).
@@ -384,9 +401,32 @@ export function savedDestinationFor(journal: WorkJournal, row: WorkBoardRowLite)
   return draft ? draftDestination(draft) : undefined
 }
 
+/**
+ * 7.0.1: the time a report was superseded, or nothing. The report's time is when it started waiting (`waitingSince`),
+ * else the card's newest event. Activity has to come more than `supersedeSeconds` after it: the reply that carried the
+ * status line is itself activity at that moment.
+ */
+function supersededBy(activity: WorkActivity, sessionActivityMs: ReadonlyMap<string, number> | undefined): string | undefined {
+  if (!activity.sessionId || !sessionActivityMs) return undefined
+  const last = sessionActivityMs.get(activity.sessionId)
+  const since = Date.parse(activity.waitingSince ?? activity.updatedAt ?? '')
+  if (last === undefined || !Number.isFinite(last) || !Number.isFinite(since)) return undefined
+  return last - since > WORK_ACTIVITY_LIMITS.supersedeSeconds * 1000 ? new Date(last).toISOString() : undefined
+}
+
 /** S2 groups, in order. */
 export type OpenWorkGroup = 'needsInput' | 'attention' | 'running' | 'done'
-export interface OpenWorkItem extends WorkActivity { workIdentity: string; title: string; taskRevision: string; group: OpenWorkGroup; savedDestination?: SavedDestination }
+export interface OpenWorkItem extends WorkActivity {
+  workIdentity: string; title: string; taskRevision: string; group: OpenWorkGroup; savedDestination?: SavedDestination
+  /**
+   * 7.0.1: the needs-input or blocked report was superseded: its session did something (a turn of yours, or its own
+   * work) after the report, at this time. The item is grouped as if no report stood. The report itself stays in
+   * `progress`, as Control recorded it.
+   */
+  supersededAt?: string
+}
+/** 7.0.1: what the open list knows about each linked session: its newest conversation activity, ms, by `provider:native`. */
+export interface OpenWorkOptions { sessionActivityMs?: ReadonlyMap<string, number> }
 export interface OpenWorkList { items: OpenWorkItem[]; total: number; truncated: boolean }
 const GROUP_RANK: Record<OpenWorkGroup, number> = { needsInput: 0, attention: 1, running: 2, done: 3 }
 
@@ -400,8 +440,14 @@ const GROUP_RANK: Record<OpenWorkGroup, number> = { needsInput: 0, attention: 1,
  * A report counts only on a receipt that did not fail, was not refused and not canceled (Control's WorkTracking.latest).
  * A checked task shows only while its handoff is queued or running (Control's board). Groups in that order, the most
  * recently updated first within each, cut to 50 after sorting; `total` counts them all. Read-only.
+ *
+ * 7.0.1 (Miles 11/07, a row "Waiting for your reply" since Oct 31 on a session he talks to all day): a needs-input or
+ * blocked report stands only until its session moves on. Control's tracker takes a report from the session's status
+ * line for this task, so a later turn that never mentions the task again leaves the old report in place for the whole
+ * 14 days. When `options.sessionActivityMs` shows the session active more than a minute after the report (a turn of
+ * yours, or the session working), the report no longer groups the item.
  */
-export function projectOpenWork(journal: WorkJournal, rows: readonly WorkBoardRowLite[], nowMs: number): OpenWorkList {
+export function projectOpenWork(journal: WorkJournal, rows: readonly WorkBoardRowLite[], nowMs: number, options: OpenWorkOptions = {}): OpenWorkList {
   const newest = new Map<string, JournalRecord>()
   for (const receipt of journal.receipts) {
     const prior = newest.get(receipt.workID as string)
@@ -419,7 +465,9 @@ export function projectOpenWork(journal: WorkJournal, rows: readonly WorkBoardRo
     if (!receipt || nowSeconds - (receipt.createdAt as number) >= WORK_ACTIVITY_LIMITS.trackedDays * 86_400) continue
     const activity = projectReceipt(receipt, row.domain, journal.receipts, nowMs)
     const status = activity.status, handled = activity.acknowledged === true
-    const reported = ['failed', 'refused', 'canceled'].includes(status) ? null : reportOf(activity.progress)
+    let reported = ['failed', 'refused', 'canceled'].includes(status) ? null : reportOf(activity.progress)
+    const supersededAt = reported === 'needsInput' || reported === 'blocked' ? supersededBy(activity, options.sessionActivityMs) : undefined
+    if (supersededAt) reported = null
     // A send in flight is running, not unresolved.
     const sending = activity.sending === true
     const group: OpenWorkGroup | null = (reported === 'needsInput' || reported === 'blocked') && !handled ? 'needsInput'
@@ -431,6 +479,7 @@ export function projectOpenWork(journal: WorkJournal, rows: readonly WorkBoardRo
     // Control drops a completed task's card unless its handoff is still in progress.
     if (row.checked === true && !sending && !['queued', 'running'].includes(status)) continue
     const item: OpenWorkItem = { ...activity, workIdentity: identity, title: typeof row.title === 'string' ? row.title : '', taskRevision: controlSnapshotRevision(row), group }
+    if (supersededAt) item.supersededAt = supersededAt
     const destination = savedDestinationFor(journal, row)
     if (destination) item.savedDestination = destination
     const updatedAt = activity.updatedAt ? Date.parse(activity.updatedAt) : 0

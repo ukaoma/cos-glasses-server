@@ -189,6 +189,7 @@ import { createBridgeDropWriters } from './lib/drop-destinations.js'
 import { dropItEnabled } from './lib/drop-settings.js'
 import { serverTimezone } from './lib/morning-brief-config.js'
 import { createYourMoveCounter } from './lib/your-move-count.js'
+import { workSessionActivity } from './lib/work-session-activity.js'
 import { readWorkJournal } from './lib/work-activity.js'
 import { createDropP2Boot } from './lib/drop-p2-boot.js'
 import { createP2SettingsReader } from './lib/drop-p2-settings.js'
@@ -1031,6 +1032,7 @@ app.use('/api', createDropsRouter({
   yourMove: createYourMoveCounter({
     journal: () => readWorkJournal(),
     rows: () => workBoardReader.read(10_000, 3_000).catch(() => null),
+    sessionActivity: ids => workSessionActivity(ids),
   }),
 }))
 // 6.99.16: the COS thread (routes/cos-thread.ts): one size-capped conversation behind the COS chat's Ask, with a
