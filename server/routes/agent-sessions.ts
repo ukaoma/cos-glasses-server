@@ -83,7 +83,7 @@ import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.js'
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 
-import { agentSessionOutputImages } from '../lib/agent-session-output-images.js'
+import { agentSessionOutputImages, sharedFileHeaders } from '../lib/agent-session-output-images.js'
 
 export const agentSessionsRouter = Router()
 
@@ -669,6 +669,28 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:ima
   } catch {
     console.warn('[agent-sessions] output image unavailable')
     res.status(503).json({ error: 'image_unavailable' })
+  }
+})
+
+// 6.99.35: a file a Claude session sent with SendUserFile. Same gate, same re-authorization, no path
+// in the request or the response. HTML is an attachment of type octet-stream with a sandbox CSP, never
+// same-origin HTML; a PDF may open inline.
+agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-files/:fileId/content', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  res.set('X-Content-Type-Options', 'nosniff')
+  const provider = asProvider(String(req.params.provider ?? '').toLowerCase())
+  if (!provider) { res.status(404).json({ error: 'file_not_found' }); return }
+  try {
+    const content = await agentSessionOutputImages.fileContent(provider, String(req.params.sessionId), String(req.params.fileId))
+    if (content.status !== 'ok') {
+      const code = content.status === 'not_found' ? 404 : content.status === 'too_large' ? 413 : 503
+      res.status(code).json({ error: content.status === 'not_found' ? 'file_not_found' : content.status === 'too_large' ? 'file_too_large' : 'file_unavailable' }); return
+    }
+    res.set(sharedFileHeaders(content.name, content.kind))
+    res.status(200).end(content.bytes)
+  } catch {
+    console.warn('[agent-sessions] sent file unavailable')
+    res.status(503).json({ error: 'file_unavailable' })
   }
 })
 

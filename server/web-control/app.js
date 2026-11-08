@@ -2763,7 +2763,19 @@
     var images = turn && Array.isArray(turn.outputImages) ? turn.outputImages.filter(function (x) {
       return x && /^ai_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable');
     }).map(function (x) { return { id: x.id, label: String(x.label || 'Output image').slice(0, 180), state: x.state, reason: x.reason }; }) : [];
-    return images.length ? '<div data-reader-images="' + esc(JSON.stringify(images)) + '"><p class="rm-status" role="status">Loading image previews…</p></div>' : '';
+    return (images.length ? '<div data-reader-images="' + esc(JSON.stringify(images)) + '"><p class="rm-status" role="status">Loading image previews…</p></div>' : '') + readerFilesHtml(turn);
+  }
+  // 6.99.35: files a Claude session sent with SendUserFile that are not images. Names, types and sizes only; the
+  // lazy viewer opens them through the authenticated output-files route by opaque id.
+  var READER_FILE_KINDS = ['pdf', 'text', 'html', 'image', 'file'];
+  function readerFilesHtml(turn) {
+    var files = turn && Array.isArray(turn.outputFiles) ? turn.outputFiles.filter(function (x) {
+      return x && /^af_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable');
+    }).map(function (x) {
+      return { id: x.id, name: String(x.name || 'File').slice(0, 120), kind: READER_FILE_KINDS.indexOf(x.kind) >= 0 ? x.kind : 'file',
+        type: String(x.type || 'File').slice(0, 40), size: typeof x.size === 'number' && x.size >= 0 ? x.size : null, state: x.state, reason: x.reason };
+    }) : [];
+    return files.length ? '<div data-reader-files="' + esc(JSON.stringify(files)) + '"><p class="rm-status" role="status">Loading files…</p></div>' : '';
   }
   function readerImagesStop(host) {
     if (!host) return;
@@ -2772,7 +2784,7 @@
   }
   function readerImagesMount(host, r) {
     if (!host || !r) return;
-    if (!host.querySelectorAll('[data-reader-images]').length) { readerImagesStop(host); return; }
+    if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length) { readerImagesStop(host); return; }
     var owner = host.__cosImageOwner = {};
     ensurePane('readerMedia', 4000).then(function (kit) {
       if (host.__cosImageOwner !== owner || host.isConnected === false) return;
@@ -2780,7 +2792,7 @@
       kit.mount(host, r.provider, r.id);
     }).catch(function () {
       if (host.__cosImageOwner !== owner || host.isConnected === false) return;
-      host.querySelectorAll('[data-reader-images]').forEach(function (slot) {
+      Array.prototype.slice.call(host.querySelectorAll('[data-reader-images]')).concat(Array.prototype.slice.call(host.querySelectorAll('[data-reader-files]'))).forEach(function (slot) {
         slot.textContent = 'Image previews could not load. ';
         var retry = document.createElement('button'); retry.type = 'button'; retry.className = 'link-btn'; retry.textContent = 'Retry images';
         retry.addEventListener('click', function () { readerImagesMount(host, r); }); slot.appendChild(retry);

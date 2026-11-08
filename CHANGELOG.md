@@ -1,3 +1,23 @@
+## Unreleased (files a session sent)
+
+2026-11-07. On the Duo tables work (806b4c3). Server (Control Web) plus one new read-only route. No version yet (6.99.35 or later).
+
+Miles: "I can see the previews from claude but not from the COS control. This is one of the elements that need to also be patched and hot fixed."
+
+**Default-on changes:**
+- **Files a Claude session sent show in the Sessions reader and Today's session sheet.** The Claude app's SendUserFile tool shares files inline; Control Web showed nothing for them. Each share now appears where it happened in the conversation, as an assistant card with its caption.
+  - PNG, JPEG, WebP, HEIC and AVIF show as thumbnails that open full size, through the same image route and workspace rule as 6.99.28's output images.
+  - Every other file is a card with its name, type and size. A PDF opens in a new tab. Markdown, text, CSV, JSON, YAML, XML and SVG open as words in the viewer (an SVG is shown as its source, never as a picture from this origin). An HTML page shows in a sandboxed frame with scripts off and its own origin, or downloads. A GIF opens as a picture. Anything else (Word, audio, an EHPK) downloads. Every download is typed as a plain file, so no browser opens it as a page of COS.
+  - A file outside the session's workspace, behind a link that leaves it, or no longer on disk shows "Not available on this Mac" with no button. Only the file's base name ever reaches the browser, never a Mac path.
+  - A share's caption never shows a path: an image written into it reads "[Output image]". Past 10 files in one share, the rest are counted in words.
+- **New route** `GET /api/agent-sessions/:provider/:sessionId/output-files/:fileId/content`, behind the same /api gate. The id is opaque and is re-checked against the session's newest 40 turns on every read; the canonical path must still be inside the exact workspace, with no link in the last component and the same file before and after the read; 32 MB at most (413 above). Headers: PDF inline as application/pdf; text as text/plain; GIF as image/gif; HTML and everything else as an application/octet-stream attachment. Every response is nosniff and no-store, and everything but a PDF carries `Content-Security-Policy: sandbox; default-src 'none'`.
+
+**Not covered:**
+- Codex and Cursor transcripts have no file-share record (Codex's ImageView is the agent looking at an image for itself, not sending it), so there is nothing to show there beyond the Markdown images 6.99.28 already covers.
+- COS Control's Sessions pane on the Mac does not show these files yet (Swift; later, in the Swift slot).
+
+**Tests:** agent-session-sent-files.test.ts (new): parsing, kinds, workspace and link rules, missing files and directories, URLs and home shorthand, a broad root, the per-row cwd, caption redaction, the cap, re-authorization, a link swapped in after listing, the size cap, the header policy and the route. reader-files-web.test.ts (new): the real reader-media.js and app.js DTO filter on fake elements (cards, "Not available on this Mac", junk ids, the PDF retype, the sandboxed HTML frame, octet-stream downloads, text as words, a 413).
+
 ## Unreleased (Duo tables)
 
 2026-11-07. On 6.99.33 (02dd4a7). Server only (Control Web); no route changed. No version yet (6.99.35 or later).
