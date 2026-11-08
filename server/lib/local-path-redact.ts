@@ -155,24 +155,29 @@ function redactOutsideWebURLs(text: string): string {
 }
 
 /**
- * `/Users/<name>` (any letter case, any number of leading slashes) becomes `~`; the rest of the path is kept. Used where a
- * base name would change what the text means: code spans and code blocks (a copied command must still run), a waiting
- * permission's command, an approval card, and the query of a web URL. `/Users/Shared` is not a person's home and stays.
+ * `/Users/<name>` (any letter case, any number of leading slashes). In code spans, code blocks and command fields it
+ * reads as the visible marker `[home]`, keeping the rest of the path, so a reader sees where the path was and that it
+ * was changed. The result is a display, not a runnable command: `~` was not used because a quoted `'~/x'` does not
+ * expand, so it would read as exact while meaning something else. In a web URL's query it reads `~`, which keeps the
+ * URL well formed. `/Users/Shared` is not a person's home and stays.
  */
 const HOME_FOLDER = new RegExp(`(^|[^\\p{L}\\p{N}_.-])/+${USERS}/(?!Shared(?:/|$|[${STOP}]))[^${STOP}/&?#=]+`, 'gu')
 /** The same inside a URL query, percent-encoded: `%2FUsers%2Fjane` is `~`. */
 const ENCODED_HOME_FOLDER = /(?:%2F)+users%2F(?!shared(?:%2F|[&#\s]|$))[^%&?#=\s/]+/gi
+/** What a hidden home folder reads as in code and commands. */
+export const HOME_MARKER = '[home]'
 
-export function hideHomeFolder(text: string): string {
+/** Every `/Users/<name>` in this text as the visible `[home]` marker; nothing else changes. */
+export function markHomeFolder(text: string): string {
   if (typeof text !== 'string' || !text) return text
-  return text.replace(HOME_FOLDER, '$1~')
+  return text.replace(HOME_FOLDER, (_match, before: string) => before + HOME_MARKER)
 }
 
 /** A web URL exactly as written, except a home folder in its query or fragment (`?path=/Users/jane/a.pdf`). */
 function hideHomeInUrl(url: string): string {
   const at = url.search(/[?#]/)
   if (at < 0) return url
-  return url.slice(0, at) + hideHomeFolder(url.slice(at)).replace(ENCODED_HOME_FOLDER, '~')
+  return url.slice(0, at) + url.slice(at).replace(HOME_FOLDER, (_match, before: string) => before + '~').replace(ENCODED_HOME_FOLDER, '~')
 }
 
 /**
@@ -210,8 +215,8 @@ function codeRanges(text: string): Array<[number, number]> {
 
 /**
  * Every private local path in this text. In prose a path becomes its base name (Markdown links to a local file become
- * their words). In code spans and code blocks only the home folder is hidden (`/Users/<name>` reads `~`), so a copied
- * command still means what it said. Web URLs are untouched except a home folder in their query; relative paths, site
+ * their words). In code spans and code blocks the path is kept and only the home folder is replaced, by the visible
+ * `[home]` marker: the code is then a display of the command, not the command. Web URLs are untouched except a home folder in their query; relative paths, site
  * paths and system paths (`/dev/null`, `/usr/bin/env`, `/tmp/x`) stay as written.
  */
 export function redactLocalPaths(text: string): string {
@@ -236,40 +241,32 @@ export function redactLocalPaths(text: string): string {
   let cursor = 0
   for (const [start, end] of codeRanges(linked)) {
     if (start < cursor) continue
-    pieces.push(redactOutsideWebURLs(linked.slice(cursor, start)), hideHomeFolder(linked.slice(start, end)))
+    pieces.push(redactOutsideWebURLs(linked.slice(cursor, start)), markHomeFolder(linked.slice(start, end)))
     cursor = end
   }
   pieces.push(redactOutsideWebURLs(linked.slice(cursor)))
   return pieces.join('')
 }
 
-/** Fields whose words are a command or a reason a client acts on: paths are kept whole, only the home folder is hidden. */
+/**
+ * Fields whose words are a command or a reason (a waiting permission's command, a failure): the path is kept and only
+ * the home folder reads `[home]`, so `rm -rf /Users/<name>/Documents` reads `rm -rf [home]/Documents`, never the
+ * harmless-looking `rm -rf Documents`. Control Web labels that line as a display. The exact command is on the approval
+ * card (`/api/session-questions`), which is not redacted.
+ */
 export const COMMAND_KEYS: ReadonlySet<string> = new Set(['waiting_detail', 'failure'])
 
-export interface RedactDeepOptions {
-  /** Keys whose strings keep their paths whole, with only the home folder hidden (default `COMMAND_KEYS`). */
-  commandKeys?: ReadonlySet<string>
-  /** Keys whose strings are sent exactly as written (an answer names an option by its exact label). */
-  verbatimKeys?: ReadonlySet<string>
-  /** Every string keeps its paths whole, with only the home folder hidden (approval and question cards). */
-  homeOnly?: boolean
-}
-
-/** A copy of this JSON value with every string redacted (keys are left alone). */
-export function redactLocalPathsDeep<T>(value: T, options: RedactDeepOptions = {}): T {
-  const commandKeys = options.commandKeys ?? COMMAND_KEYS
-  const verbatimKeys = options.verbatimKeys ?? new Set<string>()
-  const walk = (item: unknown, homeOnly: boolean): unknown => {
-    if (typeof item === 'string') return homeOnly ? hideHomeFolder(item) : redactLocalPaths(item)
-    if (Array.isArray(item)) return item.map(entry => walk(entry, homeOnly))
+/** A copy of this JSON value with every string redacted (keys are left alone). Command fields keep their paths. */
+export function redactLocalPathsDeep<T>(value: T): T {
+  const walk = (item: unknown, command: boolean): unknown => {
+    if (typeof item === 'string') return command ? markHomeFolder(item) : redactLocalPaths(item)
+    if (Array.isArray(item)) return item.map(entry => walk(entry, command))
     if (item && typeof item === 'object') {
       const out: Record<string, unknown> = {}
-      for (const [key, entry] of Object.entries(item as Record<string, unknown>)) {
-        out[key] = verbatimKeys.has(key) ? entry : walk(entry, homeOnly || commandKeys.has(key))
-      }
+      for (const [key, entry] of Object.entries(item as Record<string, unknown>)) out[key] = walk(entry, command || COMMAND_KEYS.has(key))
       return out
     }
     return item
   }
-  return walk(value, options.homeOnly === true) as T
+  return walk(value, false) as T
 }

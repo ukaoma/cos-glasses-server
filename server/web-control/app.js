@@ -1562,7 +1562,12 @@
     if (s.waiting_kind === 'plan') return 'Has a plan for you to approve';
     var d = String(s.waiting_detail || '').trim();
     if (TOOL_NAMES.indexOf(d) >= 0) d = '';
-    if (s.waiting_kind === 'permission' && d) return 'Wants to run ' + (d.length > 80 ? d.slice(0, 79) + '…' : d);
+    // 7.0.4 W5: the server shows the home folder in this command as "[home]" (lib/local-path-redact.ts COMMAND_KEYS), so
+    // the line is a display, labelled as one. The exact command is on the approval card, which is not redacted.
+    if (s.waiting_kind === 'permission' && d) {
+      var shown = d.length > 80 ? d.slice(0, 79) + '…' : d;
+      return d.indexOf('[home]') >= 0 ? 'Wants to run (home folder hidden) ' + shown : 'Wants to run ' + shown;
+    }
     if (s.waiting_kind === 'question' && d) return d.length > 160 ? d.slice(0, 159) + '…' : d;
     return 'Waiting for you' + (sxProvider(s.provider) === 'claude' ? '. Paused until you answer.' : '');
   }

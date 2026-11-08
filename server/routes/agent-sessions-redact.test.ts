@@ -18,7 +18,7 @@ afterEach(async () => { await Promise.all(closers.splice(0).map(close => close()
 
 /**
  * Independent of the module under test: a person's home folder anywhere (prose or code), or a file or editor URL. Code
- * spans keep system paths and show the home folder as `~` (7.0.4 W5), so `/private/tmp` in backticks is allowed.
+ * spans keep system paths and show the home folder as `[home]` (7.0.4 W5), so `/private/tmp` in backticks is allowed.
  */
 const ABSOLUTE = /\/+users\/(?!shared\b)|\bfile:\/\/|\bvscode:\/\//gi
 const WEB = ['https://github.com/example/repo/pull/12', 'https://example.com/docs/setup#step-2', 'http://localhost:3141/api/health']
@@ -119,7 +119,7 @@ describe('session detail: no absolute local path in any field', () => {
     const json = await res.text()
     assertNoLocalPaths(json)
     const body = JSON.parse(json) as { latest_reply: string; recent_turns: Array<{ text: string }> }
-    for (const want of ['server/app.ts:42', 'app.test.ts:7', '`~/Documents/GitHub/repo/.config/x.json`', 'config.toml', 'server/lib/x.ts:12', '[guide](docs/guide.md)', WEB[0], WEB[1]]) expect(body.latest_reply, want).toContain(want)
+    for (const want of ['server/app.ts:42', 'app.test.ts:7', '`[home]/Documents/GitHub/repo/.config/x.json`', 'config.toml', 'server/lib/x.ts:12', '[guide](docs/guide.md)', WEB[0], WEB[1]]) expect(body.latest_reply, want).toContain(want)
     expect(body.recent_turns.map(x => x.text).join('\n')).toContain('Audit app.ts')
   })
 })

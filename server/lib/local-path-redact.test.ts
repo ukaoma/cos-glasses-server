@@ -3,7 +3,7 @@
  * relative paths are untouched. Fixture strings are hand-written in the shapes Claude and Codex replies use.
  */
 import { describe, expect, it } from 'vitest'
-import { hideHomeFolder, redactLocalPaths, redactLocalPathsDeep } from './local-path-redact.js'
+import { markHomeFolder, redactLocalPaths, redactLocalPathsDeep } from './local-path-redact.js'
 
 /** An independent detector, not the module's own: a private Mac path in prose, a home shorthand or a file URL. */
 const ABSOLUTE = /(?:^|[^A-Za-z0-9.:/-])\/+(?:Users|Volumes|private)\/|\/var\/folders\/|~[A-Za-z][A-Za-z0-9._-]*\/|~\/|\$\{?HOME\}?\/|\bfile:\/\/|\bvscode:\/\//i
@@ -174,42 +174,52 @@ describe('must redact: private Mac paths in every shape', () => {
       expect(out).not.toMatch(HOME)
     })
   }
-  it('a path in backticks keeps its path, with the home folder as ~ (a copied command still runs)', () => {
-    expect(redactLocalPaths('Run `cat /Users/jane/.zshrc` now')).toBe('Run `cat ~/.zshrc` now')
-    expect(redactLocalPaths('Logs in `/Users/jane/My Repo/out.log`.')).toBe('Logs in `~/My Repo/out.log`.')
+  it('a path in backticks keeps its path, with the home folder as the visible [home] marker', () => {
+    expect(redactLocalPaths('Run `cat /Users/jane/.zshrc` now')).toBe('Run `cat [home]/.zshrc` now')
+    expect(redactLocalPaths('Logs in `/Users/jane/My Repo/out.log`.')).toBe('Logs in `[home]/My Repo/out.log`.')
     expect(redactLocalPaths('Run `/private/tmp/build/out.log` now')).toBe('Run `/private/tmp/build/out.log` now')
-    expect(redactLocalPaths('``a `x` /Users/jane/b``')).toBe('``a `x` ~/b``')
+    expect(redactLocalPaths('``a `x` /Users/jane/b``')).toBe('``a `x` [home]/b``')
   })
 })
 
-/** 7.0.4 W5: a command keeps its meaning. A base name would turn `rm -rf /Users/x/Documents` into `rm -rf Documents`. */
-describe('commands keep their meaning', () => {
-  it('rm -rf in a code span keeps the whole path, home as ~', () => {
-    expect(redactLocalPaths('Wants `rm -rf /Users/ukaoma/Documents`')).toBe('Wants `rm -rf ~/Documents`')
+/**
+ * 7.0.4 W5: a base name changed what a command says (`rm -rf /Users/x/Documents` read `rm -rf Documents`). In code the
+ * path is kept and the home folder reads as the visible `[home]` marker. That is a display, not a runnable command: a
+ * `~` would read as exact, and inside quotes it does not even expand.
+ */
+describe('code and commands: the path is kept, the home folder is a visible marker', () => {
+  it('rm -rf in a code span keeps the whole path, home as [home]', () => {
+    expect(redactLocalPaths('Wants `rm -rf /Users/ukaoma/Documents`')).toBe('Wants `rm -rf [home]/Documents`')
+  })
+  it('quoted paths get the marker, never a ~ that the quotes would stop from expanding', () => {
+    expect(redactLocalPaths("`cat '/Users/jane/file.txt'`")).toBe("`cat '[home]/file.txt'`")
+    expect(redactLocalPaths('`cat "/Users/jane/My Notes/file.txt"`')).toBe('`cat "[home]/My Notes/file.txt"`')
+    expect(markHomeFolder("cat '/Users/jane/file.txt'")).toBe("cat '[home]/file.txt'")
+    expect(markHomeFolder('cat "/Users/jane/file.txt"')).not.toContain('~')
   })
   it('cp -r /tmp/build is not touched anywhere', () => {
     expect(redactLocalPaths('cp -r /tmp/build ./out')).toBe('cp -r /tmp/build ./out')
     expect(redactLocalPaths('`cp -r /tmp/build ./out`')).toBe('`cp -r /tmp/build ./out`')
   })
-  it('a fenced shell block keeps every path; only the home folder reads ~', () => {
+  it('a fenced shell block keeps every path; only the home folder reads [home]', () => {
     const block = '```sh\nrm -rf /Users/ukaoma/Documents/old\ncp -r /tmp/build /Users/ukaoma/out\nls /Volumes/Backup >/dev/null\n```'
     expect(redactLocalPaths(`Run this:\n${block}\nThen open /Users/ukaoma/out/index.html.`))
-      .toBe('Run this:\n```sh\nrm -rf ~/Documents/old\ncp -r /tmp/build ~/out\nls /Volumes/Backup >/dev/null\n```\nThen open index.html.')
-    expect(redactLocalPaths('~~~\ncat /Users/x/a.txt\n~~~')).toBe('~~~\ncat ~/a.txt\n~~~')
+      .toBe('Run this:\n```sh\nrm -rf [home]/Documents/old\ncp -r /tmp/build [home]/out\nls /Volumes/Backup >/dev/null\n```\nThen open index.html.')
+    expect(redactLocalPaths('~~~\ncat /Users/x/a.txt\n~~~')).toBe('~~~\ncat [home]/a.txt\n~~~')
     // A fence closes only with its own kind of fence.
-    expect(redactLocalPaths('```\n~~~\nrm /Users/x/a\n```')).toBe('```\n~~~\nrm ~/a\n```')
+    expect(redactLocalPaths('```\n~~~\nrm /Users/x/a\n```')).toBe('```\n~~~\nrm [home]/a\n```')
     // An inline span never crosses a blank line: that is two paragraphs, and the path is prose.
     expect(redactLocalPaths('Start `a\n\nrm /Users/x/b.md then `end')).toBe('Start `a\n\nrm b.md then `end')
     // An unclosed fence runs to the end of the text.
-    expect(redactLocalPaths('```\nrm /Users/x/a')).toBe('```\nrm ~/a')
+    expect(redactLocalPaths('```\nrm /Users/x/a')).toBe('```\nrm [home]/a')
   })
   it('a Markdown link written inside code is code', () => {
-    expect(redactLocalPaths('`[a](/Users/x/a.md)`')).toBe('`[a](~/a.md)`')
+    expect(redactLocalPaths('`[a](/Users/x/a.md)`')).toBe('`[a]([home]/a.md)`')
   })
-  it('hideHomeFolder hides only the home folder; /Users/Shared is not a home', () => {
-    expect(hideHomeFolder('rm -rf /Users/ukaoma/Documents')).toBe('rm -rf ~/Documents')
-    expect(hideHomeFolder('open /Users/Shared/x.png and /tmp/y')).toBe('open /Users/Shared/x.png and /tmp/y')
-    expect(hideHomeFolder('docs/Users/jane/x')).toBe('docs/Users/jane/x')
+  it('markHomeFolder changes only the home folder; /Users/Shared is not a home', () => {
+    expect(markHomeFolder('rm -rf /Users/ukaoma/Documents')).toBe('rm -rf [home]/Documents')
+    expect(markHomeFolder('open /Users/Shared/x.png and /tmp/y')).toBe('open /Users/Shared/x.png and /tmp/y')
+    expect(markHomeFolder('docs/Users/jane/x')).toBe('docs/Users/jane/x')
   })
 })
 
@@ -220,15 +230,9 @@ describe('redactLocalPathsDeep', () => {
   })
 })
 
-describe('redactLocalPathsDeep: command and verbatim keys (7.0.4 W5)', () => {
-  it('waiting_detail and failure keep the command whole, with the home folder as ~', () => {
-    const row = { waiting_detail: 'rm -rf /Users/ukaoma/Documents', failure: 'tool_error at /Users/ukaoma/x.ts', latest_reply: 'Edited /Users/ukaoma/x.ts' }
-    expect(redactLocalPathsDeep(row)).toEqual({ waiting_detail: 'rm -rf ~/Documents', failure: 'tool_error at ~/x.ts', latest_reply: 'Edited x.ts' })
-  })
-  it('homeOnly with verbatim labels: an approval card keeps its paths, an option label is exact', () => {
-    const items = [{ approval: { summary: 'rm -rf /Users/ukaoma/Documents', detail: 'cp /tmp/a /Users/ukaoma/b' }, questions: [{ question: 'Use /Users/ukaoma/a?', options: [{ label: '/Users/ukaoma/a', description: 'at /Users/ukaoma/a' }] }] }]
-    expect(redactLocalPathsDeep(items, { homeOnly: true, verbatimKeys: new Set(['label']) })).toEqual([
-      { approval: { summary: 'rm -rf ~/Documents', detail: 'cp /tmp/a ~/b' }, questions: [{ question: 'Use ~/a?', options: [{ label: '/Users/ukaoma/a', description: 'at ~/a' }] }] },
-    ])
+describe('redactLocalPathsDeep: command fields (7.0.4 W5)', () => {
+  it('waiting_detail and failure keep the command whole, with the home folder as [home]', () => {
+    const row = { waiting_detail: 'rm -rf /Users/ukaoma/Documents', failure: "tool_error at '/Users/ukaoma/x.ts'", latest_reply: 'Edited /Users/ukaoma/x.ts' }
+    expect(redactLocalPathsDeep(row)).toEqual({ waiting_detail: 'rm -rf [home]/Documents', failure: "tool_error at '[home]/x.ts'", latest_reply: 'Edited x.ts' })
   })
 })

@@ -299,6 +299,15 @@ describe('a parked question or approval', () => {
     expect((await list(h)).body.items).toEqual([])
   })
 
+  it('7.0.4 W5: the approval card shows the exact command, home folder and all (only the session list marks it)', async () => {
+    const h = await start()
+    const command = "rm -rf /Users/ukaoma/Documents && cat '/Users/ukaoma/file.txt'"
+    const item = (await held(h, permissionEnvelope('Bash', { command }))).item
+    expect(item.approval.summary).toBe(command)
+    expect(item.approval.detail).toContain(command)
+    expect(JSON.stringify(item)).not.toContain('[home]')
+  })
+
   it('an approval: allow once, or deny with the one message; the card is redacted', async () => {
     const h = await start()
     const secret = { command: 'cd /Users/example/repo && curl -H "Authorization: Bearer abcdefghijklmnopqrst" https://x.test', description: 'call the api' }
