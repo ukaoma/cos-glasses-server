@@ -5967,7 +5967,7 @@
   // the visible box, viewportFit's dock) and html.kb-up while an on-screen keyboard is up (KB_UP_PX or more covered
   // with a typing field focused). Panes hear open, close and after through COSWeb.onKeyboard.
   var KB_UP_PX = 120, KB_AFTER_MS = 300;
-  var LR = { up: false, frame: 0, after: 0, cycle: 0, focusN: 0, device: false, field: null, hooks: [] };
+  var LR = { up: false, frame: 0, after: 0, cycle: 0, focusN: 0, device: false, field: null, hooks: [], box: '' };
   function lrPane() { var r = parseRoute(); return String(r.pane + (r.args[0] === 'cos' ? '.cos' : '')).slice(0, 24); }
   function lrKind(a) {
     var tag = String((a && a.tagName) || '').toLowerCase();
@@ -6027,7 +6027,10 @@
   function lrApply() {
     LR.frame = 0;
     var v = viewportFit(), de = document.documentElement;
-    if (de && de.style && de.style.setProperty) {
+    // Written only when they change: a pinch or pan fires this every frame, and each write restyles the page.
+    var box = v.top + '|' + v.height + '|' + v.dock;
+    if (box !== LR.box && de && de.style && de.style.setProperty) {
+      LR.box = box;
       de.style.setProperty('--vv-top', v.top + 'px'); de.style.setProperty('--vv-h', v.height + 'px'); de.style.setProperty('--vv-below', v.dock + 'px');
     }
     var up = !!(v.vv && v.inset >= KB_UP_PX && vpTyping());

@@ -28,7 +28,7 @@ type Crumb = { what: string; data: Record<string, any> }
 function page(o: { w: number; h: number; route?: { pane: string; args: string[] }; scrollH?: number }) {
   const winListeners: Record<string, Array<() => void>> = {}, docListeners: Record<string, Array<(e?: any) => void>> = {}, vvListeners: Record<string, Array<() => void>> = {}
   const frames: Array<() => void> = [], timers: Array<{ fn: () => void; ms: number }> = []
-  const props: Record<string, string> = {}, cls = new Set<string>()
+  const props: Record<string, string> = {}, cls = new Set<string>(), writes = { n: 0 }
   const vv: any = { height: o.h, width: o.w, offsetTop: 0, scale: 1, addEventListener: (t: string, fn: () => void) => { (vvListeners[t] ??= []).push(fn) } }
   const se: any = { scrollHeight: o.scrollH ?? o.h, clientHeight: o.h, scrollWidth: o.w }
   const window: any = { innerWidth: o.w, innerHeight: o.h, outerHeight: o.h, outerWidth: o.w, scrollY: 0, devicePixelRatio: 3, visualViewport: vv,
@@ -40,7 +40,7 @@ function page(o: { w: number; h: number; route?: { pane: string; args: string[] 
     COSWeb: {} }
   const body: any = { appendChild: () => {}, removeChild: () => {} }
   const document: any = { activeElement: body, body, scrollingElement: se,
-    documentElement: { clientHeight: o.h, style: { setProperty: (k: string, v: string) => { props[k] = v } }, classList: { toggle: (c: string, on: boolean) => { if (on) cls.add(c); else cls.delete(c) } } },
+    documentElement: { clientHeight: o.h, style: { setProperty: (k: string, v: string) => { props[k] = v; writes.n++ } }, classList: { toggle: (c: string, on: boolean) => { if (on) cls.add(c); else cls.delete(c) } } },
     createElement: () => { const el: any = { style: { cssText: '' }, setAttribute: () => {} }; Object.defineProperty(el, 'offsetHeight', { get: () => (/100dvh/.test(el.style.cssText) ? window.innerHeight : /100svh/.test(el.style.cssText) ? 266 : /100lvh/.test(el.style.cssText) ? 557 : 0) }); return el },
     addEventListener: (t: string, fn: (e?: any) => void) => { (docListeners[t] ??= []).push(fn) } }
   const getComputedStyle = (el: any) => ({ fontSize: el.fs ?? '16px', paddingTop: /safe-area-inset-top/.test(el.style?.cssText || '') ? '47px' : '0px', paddingBottom: /safe-area-inset-bottom/.test(el.style?.cssText || '') ? '34px' : '0px' })
@@ -59,7 +59,7 @@ function page(o: { w: number; h: number; route?: { pane: string; args: string[] 
   const focus = (el: any = field) => { document.activeElement = el; (docListeners.focusin || []).forEach(fn => fn({ target: el })); runFrames() }
   const blur = () => { document.activeElement = body; (docListeners.focusout || []).forEach(fn => fn({})); runTimers(); runFrames() }
   const resize = (vh: number, ih = window.innerHeight, top = 0) => { Object.assign(vv, { height: vh, offsetTop: top }); window.innerHeight = ih; (vvListeners.resize || []).forEach(fn => fn()); runFrames() }
-  return { kit, window, document, crumbs, props, cls, shellHooks, runFrames, runTimers, timers, focus, blur, resize, form, field, se, vv, docListeners }
+  return { kit, window, document, crumbs, props, cls, writes, shellHooks, runFrames, runTimers, timers, focus, blur, resize, form, field, se, vv, docListeners }
 }
 
 // ── A3: viewportFit sees the keyboard whether or not the web view shrinks ──────────────────────────────────────────
@@ -164,6 +164,17 @@ describe('7.0.2 A1: layout reports from every pane, numbers and fixed labels onl
     const kb = p.crumbs.filter(c => c.what === 'kb-open' || c.what === 'kb-close')
     expect(kb.map(c => c.what)).toEqual(['kb-open', 'kb-close', 'kb-open', 'kb-close', 'kb-open', 'kb-close'])
     expect(new Set(kb.map(c => JSON.stringify(c.data))).size, 'each line differs').toBe(6)
+  })
+  it('--vv-* are written only when they change (a pinch or pan fires every frame)', () => {
+    const p = page({ w: 382, h: 557 })
+    p.focus(); p.resize(266)
+    const n = p.writes.n
+    expect(n, "the open box, then the keyboard box").toBe(6)
+    for (let i = 0; i < 5; i++) p.resize(266)
+    expect(p.writes.n, 'same box, no writes').toBe(n)
+    p.resize(266, 557, 30)
+    expect(p.writes.n).toBe(n + 3)
+    expect(p.props['--vv-top']).toBe('30px')
   })
   it('something tall covering the bottom with no field focused is not a keyboard', () => {
     const p = page({ w: 382, h: 557 })
@@ -286,7 +297,7 @@ function chat(o: { models?: unknown; route?: { pane: string; args: string[] }; w
   const ctx = vm.createContext({ window, document, setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout, console, Date, JSON, Math, Promise, isFinite, Number, String,
     localStorage: window.localStorage, crypto: globalThis.crypto })
   vm.runInContext(CHAT_SRC, ctx)
-  return { c: W.cosChat as any, posts, gets, kbHooks, docListeners, window, form, se, timers }
+  return { c: W.cosChat as any, posts, gets, kbHooks, docListeners, window, document, form, se, timers }
 }
 const flush = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)) }
 
@@ -393,8 +404,10 @@ describe('7.0.2 A2: after the keyboard closes on the chat, the page scrolls back
 describe('7.0.2 A4: two columns with the keyboard up, the chat column is scrolled to and capped to the visible box', () => {
   function wideChat(top: number, vis: { top: number; height: number }, scrollRoom: number) {
     const h = chat({ wide: true })
-    const mr: any = { style: { maxHeight: '' }, _top: top, getBoundingClientRect: () => ({ top: mr._top }) }
+    const box = { id: 'cos-input' }
+    const mr: any = { style: { maxHeight: '' }, _top: top, getBoundingClientRect: () => ({ top: mr._top }), contains: (x: unknown) => x === box }
     h.c._state.host = mr
+    h.document.activeElement = box
     h.window.COSWeb.viewportFit = () => ({ top: vis.top, height: vis.height })
     h.window.scrollBy = (_x: number, dy: number) => { const moved = Math.min(dy, scrollRoom); scrollRoom -= moved; mr._top -= moved; h.window.scrollY += moved }
     return { h, mr }
@@ -413,10 +426,20 @@ describe('7.0.2 A4: two columns with the keyboard up, the chat column is scrolle
     expect(mr._top).toBe(54)
     expect(mr.style.maxHeight).toBe('147px')
   })
+  it('the keyboard is for the list’s search box on the left: the chat column is left alone', () => {
+    const { h, mr } = wideChat(64, { top: 0, height: 209 }, 280)
+    h.document.activeElement = { id: 'msg-q' }
+    h.kbHooks.forEach(fn => fn('open'))
+    expect(mr._top).toBe(64)
+    expect(mr.style.maxHeight).toBe('')
+  })
   it('one column: nothing is capped (the composer docks by CSS there)', () => {
     const h = chat({ wide: false })
-    const mr: any = { style: { maxHeight: '' }, getBoundingClientRect: () => ({ top: 64 }) }
+    const box = { id: 'cos-input' }
+    const mr: any = { style: { maxHeight: '' }, getBoundingClientRect: () => ({ top: 64 }), contains: (x: unknown) => x === box }
     h.c._state.host = mr
+    h.document.activeElement = box
+    h.window.scrollBy = () => {}
     h.window.COSWeb.viewportFit = () => ({ top: 0, height: 266 })
     h.kbHooks.forEach(fn => fn('open'))
     expect(mr.style.maxHeight).toBe('')

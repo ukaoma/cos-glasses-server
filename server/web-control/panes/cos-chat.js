@@ -1974,12 +1974,14 @@
   // 7.0.2 (A4): two columns (860 px and up, the unfolded Duo) with the keyboard up. cos-chat.css makes the column the
   // visible box (html.kb-up), but a sticky column only reaches its top once the page has scrolled to it, so the page
   // scrolls it there, and where the page is too short to, the column is capped to what is left above the keyboard. The
-  // cap goes when the keyboard closes.
+  // cap goes when the keyboard closes. Only when the keyboard is for a field in the chat column.
   function dockWide(what) {
     var mr = C.host;
     if (!mr || !mr.style || !wide()) return false;
     if (what !== 'open') { mr.style.maxHeight = ''; return false; }
-    var v = W.viewportFit ? W.viewportFit() : null;
+    // Only for a field in the chat column: the list's search box on the left keeps its own place.
+    var a = document.activeElement, v = W.viewportFit ? W.viewportFit() : null;
+    if (!a || !mr.contains || !mr.contains(a)) return false;
     if (W.parseRoute().pane !== 'messages' || !v || !mr.getBoundingClientRect) return false;
     var want = v.top + 8, top = mr.getBoundingClientRect().top;
     if (top > want + 1) { window.scrollBy(0, Math.round(top - want)); top = mr.getBoundingClientRect().top; }
