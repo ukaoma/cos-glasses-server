@@ -60,6 +60,13 @@ describe('parseSnapshot', () => {
     const s = parseSnapshot({ ...snap(), events: [ev(), ev({ calendarId: 'nope' })] })!
     expect(s.events).toHaveLength(1)
   })
+  it('never keeps a full email address as an attendee name (on-device finding 2026-11-07)', () => {
+    const s = parseSnapshot({ ...snap(), events: [ev({ attendees: [{ name: 'pat.lee@example.com', domain: 'example.com' }, { name: 'Pat Lee', domain: 'example.com' }] })] })!
+    expect(s.events[0].attendees).toEqual([{ name: null, domain: 'example.com' }, { name: 'Pat Lee', domain: 'example.com' }])
+    const shape = snapshotToBridgeShape(s, NOW) as { today_events: Array<{ attendees: string[] }> }
+    expect(JSON.stringify(shape)).not.toContain('pat.lee@')
+  })
+
   it('keeps meeting links only for allowlisted hosts', () => {
     const s = parseSnapshot({ ...snap(), events: [ev({ meetingUrl: 'https://evil.example/zoom.us' }), ev({ eventId: 'e2', meetingUrl: 'https://acme.zoom.us/j/1' })] })!
     expect(s.events.map(e => e.meetingUrl)).toEqual([null, 'https://acme.zoom.us/j/1'])
