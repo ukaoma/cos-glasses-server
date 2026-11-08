@@ -1,6 +1,6 @@
 # Live events contract (`GET /api/events`)
 
-Status: server half in build on `claude/live-state-server` (target 7.0.1, private). This file is the contract the
+Status: shipped in server 7.0.1 (private; server half from `claude/live-state-server`, client half from `claude/live-state-web`). This file is the contract the
 Control Web client codes against. If the server changes a shape, it changes here first and the change log at the end
 says what moved.
 
