@@ -8,7 +8,7 @@
  * item is hand-written in the shape the live CLI printed on 2026-11-08; none carries real memory content.
  */
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,12 +20,16 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const read = (p: string) => readFileSync(join(HERE, p), 'utf8')
 const flush = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)) }
 
+// The bar is never restated here: the predicate's fallback, which the Python parity test below pins to MU's
+// RULE_PROMOTION_BAR. Boundary rows are written against it.
+const B = memoryReview.RULE_BAR
+
 // (gate, confidence, decision) -> state
 const REVIEW_CASES: Array<[string, number | null, string | null, string]> = [
   ['rule_ready', 0.38, null, 'learning'],
   ['rule_ready', 0.55, null, 'learning'],
-  ['rule_ready', 0.79, null, 'learning'],
-  ['rule_ready', 0.8, null, 'needs_review'],
+  ['rule_ready', +(B - 0.01).toFixed(2), null, 'learning'],
+  ['rule_ready', B, null, 'needs_review'],
   ['rule_ready', 0.95, null, 'needs_review'],
   ['rule_ready', null, null, 'learning'],
   ['rule_ready', 0.95, 'dismissed', 'history'],
@@ -49,8 +53,7 @@ describe('the Needs review predicate (memory-review.js)', () => {
     expect(memoryReview.itemState({ gate, confidence }, decision)).toBe(state)
   })
 
-  it('the bar is 0.8; an item may carry its own; a bool or a string is not a confidence', () => {
-    expect(memoryReview.RULE_BAR).toBe(0.8)
+  it('an item may carry its own bar; a bool or a string is not a confidence', () => {
     expect(memoryReview.reviewState('rule_ready', 0.6, null, 0.5)).toBe('needs_review')
     expect(memoryReview.itemState({ gate: 'rule_ready', confidence: 0.6, bar: 0.5 })).toBe('needs_review')
     expect(memoryReview.reviewState('rule_ready', true)).toBe('learning')
@@ -60,6 +63,23 @@ describe('the Needs review predicate (memory-review.js)', () => {
     // a gate name never reaches an inherited property
     expect(memoryReview.reviewState('toString', null, null)).toBe('learning')
     expect(memoryReview.reviewState('scope', null, 'constructor')).toBe('needs_review')
+  })
+
+  it('the bar comes from the block the bridge carries; the fallback is used only when the block has none', () => {
+    const item = { gate: 'low_confidence', confidence: 0.75, lesson_id: 'ptn_x', event_id: 'evt_x' }   // no bar of its own
+    const carried: any = memoryReview.normalizeBlock({ count: 1, limit: 7, bar: 0.7, items: [item] })
+    expect(memoryReview.barOf(carried)).toBe(0.7)
+    expect(carried.items).toEqual([item])
+    expect(memoryReview.count(carried)).toBe(1)
+    expect(memoryReview.openItems({ bar: 0.9, items: [item] })).toEqual([])
+    expect(memoryReview.learningItems({ bar: 0.7, learning: [item] })).toEqual([])
+    expect(memoryReview.learningItems({ bar: 0.9, learning: [item] })).toEqual([item])
+    // an item's own bar wins over the block's
+    expect(memoryReview.count({ bar: 0.9, items: [{ ...item, bar: 0.7 }] })).toBe(1)
+    const missing: any = memoryReview.normalizeBlock({ count: 1, limit: 7, items: [item] })
+    expect(memoryReview.barOf(missing)).toBe(B)
+    expect(missing.items).toEqual([])
+    expect(memoryReview.barOf({ bar: '0.7' })).toBe(B)
   })
 
   it('an older producer\'s below-bar suggestions move to Learning and leave the count and gates; nothing is mutated', () => {
@@ -96,19 +116,19 @@ describe('the Needs review predicate (memory-review.js)', () => {
 
 // ── fixtures: the shapes `learning_events.py needs-you` printed on 2026-11-08, with invented ids and titles ──
 const rule = (lesson: string, confidence: number, gate = 'low_confidence', cmp = '<') => ({
-  gate, rank: 3, reason: `promotable at confidence ${confidence} (${cmp} 0.8)`, lesson_id: lesson, event_id: 'evt_' + lesson,
+  gate, rank: 3, reason: `promotable at confidence ${confidence} (${cmp} ${B})`, lesson_id: lesson, event_id: 'evt_' + lesson,
   title: 'Suggested rule ' + lesson, ts: '2026-10-21T13:49:23+00:00', store: 'correction_journal', category: null, confidence, occurrences: 3,
 })
 const BELOW_BAR = [rule('ptn_a', 0.38), rule('ptn_b', 0.38), rule('ptn_c', 0.49), rule('ptn_d', 0.55)]
-const AT_BAR = { ...rule('ptn_ready', 0.8, 'rule_ready', '>='), bar: 0.8, state: 'needs_review' }
+const AT_BAR = { ...rule('ptn_ready', B, 'rule_ready', '>='), bar: B, state: 'needs_review' }
 const PRUNE = Array.from({ length: 47 }, (_, i) => ({ gate: 'prune_ready', rank: 5, reason: 'Prune ready · never recalled', lesson_id: `mem_p${i}`, event_id: `evt_p${i}`,
   title: 'An old memory ' + i, ts: '2026-05-07T01:37:36+00:00', store: 'bot_memory', category: 'Prune ready · never recalled', type: 'memory', state: 'needs_review' }))
 const BEFORE = { count: 51, limit: 7, overflow: 44, gates: { low_confidence: 4, prune_ready: 47 }, items: [...BELOW_BAR, ...PRUNE.slice(0, 3)], window_days: 14, reward_enabled: true }
 const AFTER = { count: 47, limit: 7, overflow: 40, gates: { prune_ready: 47 }, items: PRUNE.slice(0, 7), window_days: 14, reward_enabled: true,
-  learning: BELOW_BAR.map(r => ({ ...r, gate: 'rule_ready', bar: 0.8, state: 'learning' })), learning_count: 4, bar: 0.8 }
+  learning: BELOW_BAR.map(r => ({ ...r, gate: 'rule_ready', bar: B, state: 'learning' })), learning_count: 4, bar: B }
 const MIXED = { count: 4, limit: 7, gates: { rule_ready: 1, prune_ready: 2, attribution: 1 }, window_days: 14,
   items: [{ gate: 'attribution', rank: 0, reason: "names gina near 'said' with no attribution field", lesson_id: 'mem_attr', event_id: 'evt_attr', title: 'decision: x', ts: '2026-11-06T17:20:31+00:00', store: 'bot_memory', category: 'decision', state: 'needs_review' },
-    AT_BAR, PRUNE[0], PRUNE[1]], learning: [{ ...BELOW_BAR[0], gate: 'rule_ready', bar: 0.8, state: 'learning' }], learning_count: 1 }
+    AT_BAR, PRUNE[0], PRUNE[1]], learning: [{ ...BELOW_BAR[0], gate: 'rule_ready', bar: B, state: 'learning' }], learning_count: 1, bar: B }
 
 // The real server reader, fed the CLI's stdout, then the real bridge status.
 async function bridgeStatus(printed: unknown) {
@@ -221,5 +241,22 @@ describe('parity: Today, the rail story and the Memories pane count the same ite
     expect(at).toBeGreaterThan(0)
     expect(at).toBeLessThan(html.indexOf('<script src="/control/app.js"></script>'))
     expect(at).toBeLessThan(html.indexOf('id="lazy-panes"'))
+  })
+})
+
+// One source of truth: the producer's RULE_PROMOTION_BAR. memory-review.js keeps a fallback for blocks without `bar`;
+// this fails if the two ever disagree. It reads the constant from the live COS scripts checkout (COS_SCRIPTS_DIR, or
+// the owner's MU path), and is skipped, by name, only on a machine with neither.
+const PY_CANDIDATES = [process.env.COS_SCRIPTS_DIR, '/Users/ukaoma/Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff/operations/scripts']
+  .filter((d): d is string => !!d).map(d => join(d, 'learning_events.py'))
+const PY_FILE = PY_CANDIDATES.find(f => existsSync(f))
+describe('parity: the Python bar and the JS fallback are one number', () => {
+  it.skipIf(!PY_FILE)('learning_events.py RULE_PROMOTION_BAR equals memory-review.js RULE_BAR', () => {
+    const py = readFileSync(PY_FILE!, 'utf8')
+    const defs = [...py.matchAll(/^RULE_PROMOTION_BAR\s*=\s*([0-9.]+)/gm)]
+    expect(defs.length).toBe(1)
+    expect(Number(defs[0]![1])).toBe(memoryReview.RULE_BAR)
+    // and the JS declares its fallback exactly once
+    expect(read('memory-review.js').match(/var RULE_BAR = [0-9.]+;/g)?.length).toBe(1)
   })
 })

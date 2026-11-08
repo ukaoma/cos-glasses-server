@@ -18,9 +18,10 @@ import '../web-control/memory-review.js'
 
 interface MemoryReviewApi {
   RULE_BAR: number
+  barOf(block: unknown): number
   reviewState(gate: unknown, confidence?: unknown, decision?: unknown, bar?: unknown): 'needs_review' | 'learning' | 'history'
-  itemState(item: unknown, decision?: unknown): 'needs_review' | 'learning' | 'history'
-  needsReview(item: unknown, decision?: unknown): boolean
+  itemState(item: unknown, decision?: unknown, blockBar?: unknown): 'needs_review' | 'learning' | 'history'
+  needsReview(item: unknown, decision?: unknown, blockBar?: unknown): boolean
   normalizeBlock<T>(block: T): T
   openItems(block: unknown, decisions?: Record<string, string>): unknown[]
   count(block: unknown, decisions?: Record<string, string>): number | null

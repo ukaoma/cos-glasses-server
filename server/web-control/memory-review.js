@@ -20,6 +20,9 @@
    never counted. */
 (function (root) {
   'use strict';
+  // The bar is the producer's: learning_events.py RULE_PROMOTION_BAR, carried as `bar` on the needs-you block and on
+  // each rule item. This copy is only the fallback for a block that does not carry one (an older producer); the parity
+  // test in memory-review.test.ts reads the Python constant and fails if the two ever differ.
   var RULE_BAR = 0.8;
   var RULE_GATES = { rule_ready: 1, low_confidence: 1 };
   var DECISION_GATES = { attribution: 1, scope: 1, contradiction: 1, candidate: 1, prune_ready: 1 };
@@ -35,19 +38,22 @@
     if (own(DECISION_GATES, gate)) return NEEDS;
     return LEARNING;
   }
-  /** The same, for a needs-you item; `decision` (a decision made on this page) wins over one on the item. */
-  function itemState(item, decision) {
+  /** The bar a block was judged with: its own `bar`, else the fallback. */
+  function barOf(block) { return block && typeof block === 'object' && isNum(block.bar) ? block.bar : RULE_BAR; }
+  /** The same, for a needs-you item; `decision` (a decision made on this page) wins over one on the item. The item's own
+   *  `bar` wins, then `blockBar` (the block it came in), then the fallback. */
+  function itemState(item, decision, blockBar) {
     if (!item || typeof item !== 'object') return LEARNING;
-    return reviewState(item.gate, item.confidence, decision || item.decision, item.bar);
+    return reviewState(item.gate, item.confidence, decision || item.decision, isNum(item.bar) ? item.bar : blockBar);
   }
-  function needsReview(item, decision) { return itemState(item, decision) === NEEDS; }
+  function needsReview(item, decision, blockBar) { return itemState(item, decision, blockBar) === NEEDS; }
 
   /** A needs-you block whose items are only what needs review. A below-bar suggestion from an older producer moves to
    *  `learning` and leaves `count`; the count keeps every needs-review item past the shown cap. Never mutates. */
   function normalizeBlock(block) {
     if (!block || typeof block !== 'object' || !Array.isArray(block.items)) return block || null;
-    var keep = [], moved = [];
-    block.items.forEach(function (it) { (needsReview(it) ? keep : moved).push(it); });
+    var keep = [], moved = [], bar = barOf(block);
+    block.items.forEach(function (it) { (needsReview(it, null, bar) ? keep : moved).push(it); });
     var out = {};
     Object.keys(block).forEach(function (k) { out[k] = block[k]; });
     out.items = keep;
@@ -58,7 +64,7 @@
       moved.forEach(function (it) { var g = it && it.gate; if (own(gates, g) && isNum(gates[g])) { gates[g] -= 1; if (gates[g] <= 0) delete gates[g]; } });
       out.gates = gates;
     }
-    var learnt = moved.filter(function (it) { return itemState(it) === LEARNING && it && typeof it === 'object' && own(RULE_GATES, it.gate); });
+    var learnt = moved.filter(function (it) { return itemState(it, null, bar) === LEARNING && it && typeof it === 'object' && own(RULE_GATES, it.gate); });
     if (learnt.length || Array.isArray(block.learning)) {
       out.learning = learnt.concat(Array.isArray(block.learning) ? block.learning : []);
       out.learning_count = (isNum(block.learning_count) ? block.learning_count : (Array.isArray(block.learning) ? block.learning.length : 0)) + learnt.length;
@@ -67,8 +73,8 @@
   }
   /** The shown items that still need review, leaving out any decided on this page (`decisions`: lesson_id to decision). */
   function openItems(block, decisions) {
-    var d = decisions || {};
-    return block && Array.isArray(block.items) ? block.items.filter(function (it) { return needsReview(it, it && d[it.lesson_id]); }) : [];
+    var d = decisions || {}, bar = barOf(block);
+    return block && Array.isArray(block.items) ? block.items.filter(function (it) { return needsReview(it, it && d[it.lesson_id], bar); }) : [];
   }
   /** The count every surface shows (Today, the rail, the To review tab): open shown items, else count capped by limit. */
   function count(block, decisions) {
@@ -85,10 +91,10 @@
   }
   /** Below-bar suggestions to show under Learning, leaving out any decided on this page. */
   function learningItems(block, decisions) {
-    var d = decisions || {};
-    return block && Array.isArray(block.learning) ? block.learning.filter(function (it) { return itemState(it, it && d[it.lesson_id]) === LEARNING; }) : [];
+    var d = decisions || {}, bar = barOf(block);
+    return block && Array.isArray(block.learning) ? block.learning.filter(function (it) { return itemState(it, it && d[it.lesson_id], bar) === LEARNING; }) : [];
   }
 
-  root.COSMemoryReview = { RULE_BAR: RULE_BAR, NEEDS: NEEDS, LEARNING: LEARNING, HISTORY: HISTORY, reviewState: reviewState, itemState: itemState,
+  root.COSMemoryReview = { RULE_BAR: RULE_BAR, barOf: barOf, NEEDS: NEEDS, LEARNING: LEARNING, HISTORY: HISTORY, reviewState: reviewState, itemState: itemState,
     needsReview: needsReview, normalizeBlock: normalizeBlock, openItems: openItems, count: count, total: total, learningItems: learningItems };
 })(typeof window !== 'undefined' ? window : globalThis);
