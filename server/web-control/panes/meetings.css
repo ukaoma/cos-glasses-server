@@ -161,9 +161,12 @@
 .md-check { display: inline-block; width: 12px; height: 12px; border: 1.5px solid var(--sub); border-radius: 3px; margin-right: 7px; vertical-align: -1px; }
 .md-check.on { background: var(--green); border-color: var(--green); }
 .md-table-wrap { overflow-x: auto; margin: 0 0 1em; -webkit-overflow-scrolling: touch; }
-.md-table { border-collapse: collapse; font-size: 14px; border: 1px solid var(--panel-border); border-radius: 6px; min-width: 60%; }
+/* Duo tables: separated borders so the held first column (control.css table.tf) keeps its line; the same look. */
+.mt-md { --tf-bg: var(--page); }
+.mt-answer .mt-md { --tf-bg: var(--qopen); }
+.md-table { border-collapse: separate; border-spacing: 0; font-size: 14px; border: 1px solid var(--panel-border); border-radius: 6px; min-width: 60%; }
 .md-table th, .md-table td { padding: 6px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--hairline); }
-.md-table th { font-weight: 600; background: var(--qopen); }
+.md-table th, .md-table.tf thead tr > :first-child { font-weight: 600; background: var(--qopen); }
 .md-table tr:last-child td { border-bottom: 0; }
 .md-table .md-key { color: var(--sub); white-space: nowrap; }
 .md-code { overflow-x: auto; font: 400 12.5px/1.45 var(--mono); background: var(--qopen); border: 1px solid var(--panel-border); padding: 10px; border-radius: 8px; margin: 0 0 1em; }

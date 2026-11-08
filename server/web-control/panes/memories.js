@@ -1069,7 +1069,15 @@
   function renderMarkdown(md) {
     var lines = esc(md || '').split('\n'), out = [], ul = null, table = null;
     function inline(s) { return s.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>'); }
-    function flush() { if (ul) { out.push('<ul>' + ul.join('') + '</ul>'); ul = null; } if (table) { out.push('<div class="mm-table"><table>' + table.join('') + '</table></div>'); table = null; } }
+    function flush() { if (ul) { out.push('<ul>' + ul.join('') + '</ul>'); ul = null; } if (table) { out.push(tableHtml(table)); table = null; } }
+    // Duo tables: the first row is the header; the shared column floors (app.js tableFit) set how far each column shrinks.
+    function tableHtml(rows) {
+      var fit = W.tableFit(rows);
+      return '<div class="mm-table tf-wrap"><table class="' + fit.tableClass + ' tf-grid">' + rows.map(function (cells, n) {
+        var tag = n ? 'td' : 'th';
+        return '<tr>' + cells.map(function (c, k) { var w = fit.width(k, !n); return '<' + tag + (w ? ' style="' + w + '"' : '') + '>' + fit.cell(k, inline(c), !n) + '</' + tag + '>'; }).join('') + '</tr>';
+      }).join('') + '</table></div>';
+    }
     lines.forEach(function (raw) {
       var line = raw.replace(/\s+$/, '');
       if (!line.trim()) { flush(); return; }
@@ -1080,9 +1088,8 @@
       if (/^\s*\|.*\|\s*$/.test(line)) {
         if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) return;
         if (ul) flush();
-        var cells = line.trim().replace(/^\||\|$/g, '').split('|').map(function (c) { return inline(c.trim()); });
-        var tag = table ? 'td' : 'th'; table = table || [];
-        table.push('<tr>' + cells.map(function (c) { return '<' + tag + '>' + c + '</' + tag + '>'; }).join('') + '</tr>'); return;
+        table = table || [];
+        table.push(line.trim().replace(/^\||\|$/g, '').split('|').map(function (c) { return c.trim(); })); return;
       }
       flush(); out.push('<p>' + inline(line) + '</p>');
     });

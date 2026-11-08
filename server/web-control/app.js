@@ -26,6 +26,49 @@
     }).join('\n');
   }
   function plain(text) { return String(text == null ? '' : text).replace(/\*\*|`/g, '').replace(/^#{1,4}\s+/, ''); }
+  // Markdown pipe tables (Duo tables). Every pane that draws one asks tableFit how far each column may shrink. Cells
+  // wrap only at spaces (CSS: overflow-wrap break-word, so a column is never narrower than its longest word), a column
+  // whose text is longer than TF_MIN_CH keeps at least that many characters, a first column of short labels stays on
+  // one line, and a long first column gets a fixed width and wraps at words. Only a token of TF_LONG or more characters
+  // (a URL, a hash) may break inside. A table wider than its box scrolls inside it (CSS .tf-wrap), first column sticky.
+  var TF_LONG = 25, TF_MIN_CH = 10, TF_KEY_WORDS = 3, TF_KEY_CHARS = 28, TF_FIRST_MIN = 14, TF_FIRST_MAX = 26;
+  var TF_LONG_RE = new RegExp('[^\\s<>]{' + TF_LONG + ',}', 'g');
+  function tfText(cell) {
+    return String(cell == null ? '' : cell).replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|quot|#39);/g, '_')
+      .replace(/\[([^\]\n]*)\]\([^)\s]*\)/g, '$1').replace(/\*\*|__|~~|`/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function tfLong(html) {
+    return String(html).split(/(<[^>]*>)/).map(function (part) {
+      return part.charAt(0) === '<' ? part : part.replace(TF_LONG_RE, function (t) { return '<span class="tf-long">' + t + '</span>'; });
+    }).join('');
+  }
+  // rows: every row of raw cell text, the header row first when there is one.
+  function tableFit(rows) {
+    rows = (rows || []).filter(Array.isArray);
+    var n = rows.reduce(function (m, r) { return Math.max(m, r.length); }, 0);
+    var key = n > 1 && rows.length > 0 && rows.every(function (r) {
+      var t = tfText(r[0]);
+      return t.length <= TF_KEY_CHARS && (t ? t.split(' ').length : 0) <= TF_KEY_WORDS;
+    });
+    var cols = [];
+    for (var k = 0; k < n; k++) {
+      var len = rows.reduce(function (m, r) { return Math.max(m, tfText(r[k]).length); }, 0);
+      if (k === 0 && key) cols.push({ min: 0, width: 0 });
+      else if (k === 0 && n > 1) cols.push({ min: Math.min(len, TF_FIRST_MIN), width: Math.min(len, TF_FIRST_MAX) });
+      else cols.push({ min: Math.min(len, TF_MIN_CH), width: 0 });
+    }
+    return {
+      key: key, cols: cols,
+      tableClass: 'tf' + (key ? ' tf-key' : ''),
+      // The first row's cells carry each column's floor (an inner block's min-width counts in every engine's table
+      // sizing) and the first column's width; later rows only get their long tokens marked.
+      width: function (k, first) { var c = cols[k]; return first && c && c.width ? 'width:' + c.width + 'ch' : ''; },
+      cell: function (k, html, first) {
+        var c = cols[k], body = tfLong(html);
+        return first && c && c.min >= 3 ? '<span class="tf-min" style="min-width:' + c.min + 'ch">' + body + '</span>' : body;
+      }
+    };
+  }
   var WORDS = ['No', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten'];
   function countWord(n, lower) { var w = n >= 0 && n <= 10 ? WORDS[n] : String(n); return lower ? w.toLowerCase() : w; }
   function plural(n, one, many) { return n === 1 ? one : many; }
@@ -1601,6 +1644,7 @@
       }
       if (act === 'clear') { var input = $('sessions-q'); input.value = ''; searchSessions(); input.focus(); return; }
       if (act === 'copy-session') return copySessionBrief();
+      if (act === 'full') { if (SX_SPLIT) SX_SPLIT.toggleFull(); return; }
       if (act === 'refresh-turns' && rd) { rd.refusal = null; renderVerdict(rd); refreshTurns(rd.provider, rd.id); return; }
       if (act === 'retry' && rd) { rd.refusal = null; renderVerdict(rd); return sendSessionTurn(!!rd.retryFork); }
       if (act === 'caution-send' && rd) { rd.cautionAck = true; rd.cautionAsk = false; renderVerdict(rd); return sendSessionTurn(false); }
@@ -1628,6 +1672,94 @@
       if (id === 'usage-model') { SX.uModel = e.target.value; SX.uToolBefore = null; uSliceChanged(); return paintUsage(); }
     });
   }
+
+  // Duo tables: the divider between the Sessions list and the reader, where both show side by side (760 px and up).
+  // Drag it with a finger, mouse or pen (pointer events, captured, so a table's own sideways scroll and text selection
+  // in the panes never start a drag), or focus it and use the arrow keys (Shift for bigger steps, Home and End).
+  // A double tap or double click goes back to the default width. The width is a share of the split (CSS clamps it so the
+  // list keeps 240 px and the reader 380 px, also after the screen turns) and is remembered on this device; "Full width"
+  // in the reader hides the list and "Show list" brings it back. Storage that throws (a private window) only means the
+  // choice lasts this visit.
+  var SX_SPLIT_KEY = 'cos_web_sessions_split', SX_LIST_MIN = 240, SX_READER_MIN = 380, SX_HANDLE_W = 18, SX_KEY_STEP = 16, SX_DOUBLE_MS = 350;
+  function sxSplitKit(split, handle, storage) {
+    var saved = {};
+    try { var raw = JSON.parse(storage.getItem(SX_SPLIT_KEY) || 'null'); if (raw && typeof raw === 'object') saved = raw; } catch (_e) { saved = {}; }
+    var share = typeof saved.share === 'number' && saved.share > 0 && saved.share < 100 ? saved.share : null, full = saved.full === true, lastTap = 0;
+    function save() { try { storage.setItem(SX_SPLIT_KEY, JSON.stringify({ share: share, full: full })); } catch (_e) { /* this visit only */ } }
+    function total() { return split.getBoundingClientRect().width; }
+    function listWidth() { var l = split.querySelector('.split-list'); return l ? l.getBoundingClientRect().width : 0; }
+    function bounds(t) { return { min: SX_LIST_MIN, max: Math.max(SX_LIST_MIN, t - SX_HANDLE_W - SX_READER_MIN) }; }
+    function aria() {
+      var t = total(); if (!(t > 0)) return;
+      var b = bounds(t), pct = function (px) { return Math.round(px / t * 100); }, now = pct(listWidth());
+      handle.setAttribute('aria-valuemin', String(pct(b.min)));
+      handle.setAttribute('aria-valuemax', String(pct(b.max)));
+      handle.setAttribute('aria-valuenow', String(now));
+      handle.setAttribute('aria-valuetext', 'Session list ' + now + '% of the width');
+    }
+    function paint() {
+      split.classList.toggle('sx-sized', share != null);
+      if (share != null) split.style.setProperty('--sx-list-share', share.toFixed(2) + '%'); else split.style.removeProperty('--sx-list-share');
+      split.classList.toggle('sx-full', full);
+      document.querySelectorAll('[data-sx="full"]').forEach(function (b) { b.setAttribute('aria-pressed', String(full)); b.textContent = full ? 'Show list' : 'Full width'; });
+      aria();
+    }
+    // px: the list width asked for; kept inside both panes' minimums for the split's width now.
+    function setWidth(px, persist) {
+      var t = total(); if (!(t > 0)) return;
+      var b = bounds(t);
+      share = Math.min(b.max, Math.max(b.min, px)) / t * 100;
+      paint();
+      if (persist) save();
+    }
+    function reset() { share = null; paint(); save(); }
+    handle.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      var x0 = e.clientX, start = listWidth(), moved = false, id = e.pointerId;
+      try { handle.setPointerCapture(id); } catch (_e) {}
+      split.classList.add('sx-dragging');
+      function move(ev) {
+        if (ev.pointerId !== id) return;
+        if (!moved && Math.abs(ev.clientX - x0) < 4) return;
+        moved = true;
+        setWidth(start + ev.clientX - x0, false);
+      }
+      function end(ev) {
+        if (ev.pointerId !== id) return;
+        handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end);
+        split.classList.remove('sx-dragging');
+        // The lift's own position counts: a browser may fold the last moves into it.
+        if (moved) { if (ev.type === 'pointerup') setWidth(start + ev.clientX - x0, false); save(); lastTap = 0; return; }
+        if (ev.type !== 'pointerup') return;
+        var now = Date.now();
+        if (now - lastTap < SX_DOUBLE_MS) { lastTap = 0; reset(); } else lastTap = now;
+      }
+      handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
+    });
+    handle.addEventListener('dblclick', function (e) { e.preventDefault(); reset(); });
+    handle.addEventListener('keydown', function (e) {
+      var t = total(), b = bounds(t), w = listWidth(), step = e.shiftKey ? SX_KEY_STEP * 4 : SX_KEY_STEP;
+      var to = e.key === 'ArrowLeft' ? w - step : e.key === 'ArrowRight' ? w + step : e.key === 'Home' ? b.min : e.key === 'End' ? b.max : null;
+      if (to == null) return;
+      e.preventDefault();
+      setWidth(to, true);
+    });
+    paint();
+    return {
+      setWidth: setWidth, reset: reset, paint: paint,
+      toggleFull: function () { full = !full; paint(); save(); },
+      state: function () { return { share: share, full: full }; }
+    };
+  }
+  var SX_SPLIT = null;
+  (function () {
+    var split = $('sessions-split'), handle = $('sessions-handle');
+    if (!split || !handle) return;
+    var store; try { store = window.localStorage; } catch (_e) { store = null; }
+    SX_SPLIT = sxSplitKit(split, handle, store || { getItem: function () { return null; }, setItem: function () {} });
+    window.addEventListener('resize', function () { SX_SPLIT.paint(); });
+  })();
 
   // ── Sessions: read, send, queue, fork, stop (the glasses' Continue, from a browser) ──
   // The server owns every safety rule (agent-session-bindings.ts): COS writes into a desktop
@@ -1762,6 +1894,11 @@
     return 'Showing the last ' + turns.length + (total > turns.length && !d.truncated ? ' of ' + total : '') + ' turns. Copy session keeps the original request plus the newest context.';
   }
 
+  // Wide layouts: give the reader the whole width, or bring the list back (sxSplitKit). Hidden under 760 px by CSS.
+  function sxFullButton() {
+    var full = !!(SX_SPLIT && SX_SPLIT.state().full);
+    return '<button type="button" class="cx-btn quiet sx-full-btn" data-sx="full" aria-controls="sessions-list-col" aria-pressed="' + full + '">' + (full ? 'Show list' : 'Full width') + '</button>';
+  }
   function openSession(provider, id) {
     var reader = $('session-reader');
     if (!provider || !id) return;
@@ -1785,7 +1922,7 @@
       window.COSWeb.setCrumb(title);
       var trunc = sxTruncNote(d, turns, r.more);
       reader.innerHTML =
-        '<div class="sx-reader-head"><div class="sx-head-line">' + sxBadge(provider) + '<h2 class="sx-reader-title">' + esc(title) + '</h2></div>' +
+        '<div class="sx-reader-head"><div class="sx-head-line">' + sxBadge(provider) + '<h2 class="sx-reader-title">' + esc(title) + '</h2>' + sxFullButton() + '</div>' +
           '<p class="sx-subtitle">' + esc(sxSubtitle(d, provider, turns, r.more)) + '</p></div>' +
         '<div class="sx-activity" id="session-live" aria-live="polite"></div>' +
         (trunc ? '<p class="sx-note">' + esc(trunc) + '</p>' : '') +
@@ -2650,7 +2787,19 @@
     var images = turn && Array.isArray(turn.outputImages) ? turn.outputImages.filter(function (x) {
       return x && /^ai_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable');
     }).map(function (x) { return { id: x.id, label: String(x.label || 'Output image').slice(0, 180), state: x.state, reason: x.reason }; }) : [];
-    return images.length ? '<div data-reader-images="' + esc(JSON.stringify(images)) + '"><p class="rm-status" role="status">Loading image previews…</p></div>' : '';
+    return (images.length ? '<div data-reader-images="' + esc(JSON.stringify(images)) + '"><p class="rm-status" role="status">Loading image previews…</p></div>' : '') + readerFilesHtml(turn);
+  }
+  // 6.99.35: files a Claude session sent with SendUserFile that are not images. Names, types and sizes only; the
+  // lazy viewer opens them through the authenticated output-files route by opaque id.
+  var READER_FILE_KINDS = ['pdf', 'text', 'html', 'image', 'file'];
+  function readerFilesHtml(turn) {
+    var files = turn && Array.isArray(turn.outputFiles) ? turn.outputFiles.filter(function (x) {
+      return x && /^af_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable');
+    }).map(function (x) {
+      return { id: x.id, name: String(x.name || 'File').slice(0, 120), kind: READER_FILE_KINDS.indexOf(x.kind) >= 0 ? x.kind : 'file',
+        type: String(x.type || 'File').slice(0, 40), size: typeof x.size === 'number' && x.size >= 0 ? x.size : null, state: x.state, reason: x.reason };
+    }) : [];
+    return files.length ? '<div data-reader-files="' + esc(JSON.stringify(files)) + '"><p class="rm-status" role="status">Loading files…</p></div>' : '';
   }
   function readerImagesStop(host) {
     if (!host) return;
@@ -2659,7 +2808,7 @@
   }
   function readerImagesMount(host, r) {
     if (!host || !r) return;
-    if (!host.querySelectorAll('[data-reader-images]').length) { readerImagesStop(host); return; }
+    if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length) { readerImagesStop(host); return; }
     var owner = host.__cosImageOwner = {};
     ensurePane('readerMedia', 4000).then(function (kit) {
       if (host.__cosImageOwner !== owner || host.isConnected === false) return;
@@ -2667,7 +2816,7 @@
       kit.mount(host, r.provider, r.id);
     }).catch(function () {
       if (host.__cosImageOwner !== owner || host.isConnected === false) return;
-      host.querySelectorAll('[data-reader-images]').forEach(function (slot) {
+      Array.prototype.slice.call(host.querySelectorAll('[data-reader-images]')).concat(Array.prototype.slice.call(host.querySelectorAll('[data-reader-files]'))).forEach(function (slot) {
         slot.textContent = 'Image previews could not load. ';
         var retry = document.createElement('button'); retry.type = 'button'; retry.className = 'link-btn'; retry.textContent = 'Retry images';
         retry.addEventListener('click', function () { readerImagesMount(host, r); }); slot.appendChild(retry);
@@ -2746,12 +2895,16 @@
       if (line.indexOf('|') >= 0 && i + 1 < lines.length && SX_TABLE_SEP.test(lines[i + 1])) {
         flush();
         var head = sxCells(line), aligns = sxCells(lines[i + 1]).map(function (a) { return /^:-+:$/.test(a) ? 'center' : /-:$/.test(a) ? 'right' : ''; });
-        var cell = function (tag, c, k) { return '<' + tag + (aligns[k] ? ' style="text-align:' + aligns[k] + '"' : '') + '>' + sxInline(c) + '</' + tag + '>'; };
         i += 2;
         var body = [];
         while (i < lines.length && lines[i].indexOf('|') >= 0 && lines[i].trim()) { body.push(sxCells(lines[i])); i += 1; }
-        out.push('<div class="sx-table"><table><thead><tr>' + head.map(function (c, k) { return cell('th', c, k); }).join('') + '</tr></thead><tbody>' +
-          body.map(function (row) { return '<tr>' + head.map(function (_c, k) { return cell('td', row[k] || '', k); }).join('') + '</tr>'; }).join('') + '</tbody></table></div>');
+        var fit = tableFit([head].concat(body));
+        var cell = function (tag, c, k, first) {
+          var st = [aligns[k] ? 'text-align:' + aligns[k] : '', fit.width(k, first)].filter(Boolean).join(';');
+          return '<' + tag + (st ? ' style="' + st + '"' : '') + '>' + fit.cell(k, sxInline(c), first) + '</' + tag + '>';
+        };
+        out.push('<div class="sx-table tf-wrap"><table class="' + fit.tableClass + ' tf-grid"><thead><tr>' + head.map(function (c, k) { return cell('th', c, k, true); }).join('') + '</tr></thead><tbody>' +
+          body.map(function (row) { return '<tr>' + head.map(function (_c, k) { return cell('td', row[k] || '', k, false); }).join('') + '</tr>'; }).join('') + '</tbody></table></div>');
         continue;
       }
       if (/^\s*&gt;/.test(line)) {
@@ -4968,7 +5121,7 @@
 
   // ── the shared kit for pane modules (panes/*.js) ───────
   window.COSWeb = {
-    $: $, esc: esc, md: md, plain: plain, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
+    $: $, esc: esc, md: md, plain: plain, tableFit: tableFit, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
     plural: plural, countWord: countWord, dayWord: dayWord, plainDay: plainDay, providerLabel: providerLabel, domainLabel: domainLabel,
     skeletonRows: skeletonRows, emptyBox: emptyBox, setStatus: setStatus, autoGrow: autoGrow,
     readStore: readStore, writeStore: writeStore, copyText: copyText, isPhone: isPhone,

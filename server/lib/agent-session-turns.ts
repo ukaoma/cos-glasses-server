@@ -33,7 +33,7 @@ import {
   payloadText,
   type AgentProvider,
 } from './agent-session-store.js'
-import type { SessionOutputImage } from './agent-session-output-images.js'
+import type { SessionOutputFile, SessionOutputImage } from './agent-session-output-images.js'
 import { unwrapPeerMessage } from './session-stream-events.js'
 import { withoutTurnFooter } from './turn-footer.js'
 
@@ -44,6 +44,8 @@ export interface SessionTurn {
   at?: string
   /** Opt-in native-session output previews. No local paths or COS message identities. */
   outputImages?: SessionOutputImage[]
+  /** Files a Claude session sent with SendUserFile that are not normalized images (6.99.35). Names only, no paths. */
+  outputFiles?: SessionOutputFile[]
 }
 
 export type SessionTurnProjection = (provider: AgentProvider, record: Record<string, unknown>, turn: SessionTurn | null) => SessionTurn | null

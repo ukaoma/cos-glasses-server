@@ -23,17 +23,42 @@ export interface SessionOutputImage {
    * root that is never eligible). `unavailable`: the workspace lookup failed this time; the
    * content route re-resolves it, so a retry can succeed.
    */
-  reason?: 'outside_workspace' | 'unavailable'
+  reason?: 'outside_workspace' | 'unavailable' | 'missing'
 }
+/**
+ * A file a Claude session sent to the person with its SendUserFile tool (6.99.35), when it is not
+ * an image the preview pipeline normalizes. Only the base name travels; never a Mac path.
+ * `missing`: the path is inside the workspace but nothing is there now.
+ */
+export interface SessionOutputFile {
+  id: string
+  name: string
+  /** How the web may open it: `pdf` inline, `text` as words, `html` sandboxed or downloaded, `image` (GIF) as a picture, `file` downloaded. */
+  kind: SharedFileKind
+  /** A short type for people: "PDF", "HTML page", "Markdown", "Word document". */
+  type: string
+  size?: number
+  state: 'available' | 'unavailable'
+  reason?: 'outside_workspace' | 'unavailable' | 'missing'
+}
+export type SharedFileKind = 'pdf' | 'text' | 'html' | 'image' | 'file'
+export const SESSION_OUTPUT_FILE_ID = /^af_[a-f0-9]{64}$/
+/** Files one SendUserFile row may show (images and other files together). The rest are counted in words. */
+export const SHARED_FILES_PER_TURN = 10
+/** The largest sent file the web may fetch. Bigger files stay listed as "Too large to open here". */
+export const MAX_SHARED_FILE_BYTES = 32 * 1024 * 1024
 export const SESSION_OUTPUT_IMAGE_ID = /^ai_[a-f0-9]{64}$/
 export const OUTPUT_IMAGES_PER_TURN = 5
 export const OUTPUT_IMAGE_SCAN_CHARS = 128 * 1024
 export const OUTPUT_IMAGE_CACHE_MAX = 128
 export const OUTPUT_IMAGE_CONCURRENCY = 2
 const CACHE_TTL = Math.min(30 * 60_000, STAGED_TTL_MS)
+/** Sources kept per read: every preview the newest turns can name, a sent-files turn being the widest. */
+const SOURCES_MAX = (SESSION_TURNS_MAX + 1) * Math.max(OUTPUT_IMAGES_PER_TURN, SHARED_FILES_PER_TURN)
 interface Candidate { source: string; label: string }
 interface Source { candidate: Candidate; root: string | null; descriptor: SessionOutputImage }
-interface PreviewContext { project: SessionTurnProjection; sources: Map<string, Source> }
+interface FileSource { path: string | null; root: string | null; file: SessionOutputFile }
+interface PreviewContext { project: SessionTurnProjection; sources: Map<string, Source>; files: Map<string, FileSource> }
 interface MediaCache { id: string; at: number }
 type PreviewStore = Pick<MediaStore, 'ingestOutputImage' | 'getContent'>
 export interface OutputImageDeps {
@@ -157,6 +182,70 @@ function canonicalRoot(path: string | null, home: string): string | 'broad' | nu
 }
 function digest(value: string): string { return createHash('sha256').update(value).digest('hex') }
 
+// ── Files a Claude session sent with SendUserFile (6.99.35) ──────────────────────────────
+// Its input is { files: [paths], caption?, status, display? }; paths are absolute or relative to the
+// session's working directory at that moment (the row's `cwd`). The row is evidence of what was
+// shared, not permission to read: a file is served only when its canonical path is inside the
+// session's exact workspace, as for images. Codex and Cursor transcripts have no such record.
+const NORMALIZED_IMAGE = /\.(png|jpe?g|webp|hei[cf]|avif)$/i
+const SHARED_KINDS: Array<[RegExp, SharedFileKind, string]> = [
+  [/\.pdf$/i, 'pdf', 'PDF'],
+  [/\.html?$/i, 'html', 'HTML page'],
+  [/\.(md|markdown)$/i, 'text', 'Markdown'],
+  [/\.csv$/i, 'text', 'CSV'],
+  [/\.tsv$/i, 'text', 'TSV'],
+  [/\.json$/i, 'text', 'JSON'],
+  [/\.ya?ml$/i, 'text', 'YAML'],
+  [/\.(txt|log)$/i, 'text', 'Text'],
+  // An SVG can carry script, so it is shown as its source, never as a picture from a same-origin URL.
+  [/\.svg$/i, 'text', 'SVG source'],
+  [/\.xml$/i, 'text', 'XML'],
+  [/\.gif$/i, 'image', 'GIF image'],
+  [/\.docx?$/i, 'file', 'Word document'],
+  [/\.xlsx?$/i, 'file', 'Excel workbook'],
+  [/\.pptx?$/i, 'file', 'PowerPoint deck'],
+  [/\.(wav|mp3|m4a|aac|flac)$/i, 'file', 'Audio'],
+  [/\.(mp4|mov|webm)$/i, 'file', 'Video'],
+  [/\.zip$/i, 'file', 'ZIP archive'],
+  [/\.ehpk$/i, 'file', 'EHPK package'],
+]
+export function sharedFileKind(name: string): { kind: SharedFileKind; type: string } {
+  for (const [re, kind, type] of SHARED_KINDS) if (re.test(name)) return { kind, type }
+  const ext = /\.([a-z0-9]{1,8})$/i.exec(name)
+  return { kind: 'file', type: ext ? ext[1].toUpperCase() + ' file' : 'File' }
+}
+/** The base name a person sees: no directories, no control characters, at most 120 characters. */
+function displayName(source: string): string {
+  const base = source.split(/[\\/]/).filter(Boolean).pop() || ''
+  const clean = base.replace(/[\u0000-\u001f\u007f]/g, '').trim()
+  return (clean || 'File').slice(0, 120)
+}
+interface SentFiles { caption: string; files: string[] }
+/** The SendUserFile tool uses in one Claude assistant row, or null. Pure. */
+export function sentUserFiles(provider: AgentProvider, row: Record<string, unknown>): SentFiles | null {
+  if (provider !== 'claude' || row.type !== 'assistant') return null
+  // A sub-agent's share went to its parent, not to the person; an injected row is no one's.
+  if (row.isSidechain === true || row.isMeta === true || row.isCompactSummary === true) return null
+  const message = row.message as Record<string, unknown> | null
+  const content = message && typeof message === 'object' ? message.content : null
+  if (!Array.isArray(content)) return null
+  const files: string[] = [], captions: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const b = block as Record<string, unknown>
+    if (b.type !== 'tool_use' || b.name !== 'SendUserFile' || !b.input || typeof b.input !== 'object') continue
+    const input = b.input as Record<string, unknown>
+    if (!Array.isArray(input.files)) continue
+    let any = false
+    for (const f of input.files) {
+      if (typeof f !== 'string' || !f || f.length > 4096 || /[\u0000-\u001f\u007f]/.test(f)) continue
+      files.push(f); any = true
+    }
+    if (any && typeof input.caption === 'string' && input.caption.trim()) captions.push(input.caption.trim().slice(0, 4000))
+  }
+  return files.length ? { caption: captions.join('\n\n'), files } : null
+}
+
 export class AgentSessionOutputImages {
   private cache = new Map<string, MediaCache>()
   private pending = new Map<string, Promise<string>>()
@@ -173,7 +262,8 @@ export class AgentSessionOutputImages {
     const lookupFailed = canonical === null
     const sources = new Map<string, Source>()
     const transcriptKey = digest(resolve(transcript))
-    const project: SessionTurnProjection = (p, row, turn) => {
+    const files = new Map<string, FileSource>()
+    const markdown: SessionTurnProjection = (p, row, turn) => {
       const raw = assistantText(p, row)
       if (!raw) return turn
       // Prose cleanup can collapse a huge whitespace/code prefix, bringing an unscanned
@@ -189,7 +279,7 @@ export class AgentSessionOutputImages {
         const allowed = root !== null && inside(root, resolve(root, c.source))
         const descriptor: SessionOutputImage = { id, label: c.label, state: allowed ? 'available' : 'unavailable', ...(!allowed ? { reason: lookupFailed ? 'unavailable' as const : 'outside_workspace' as const } : {}) }
         sources.delete(id); sources.set(id, { candidate: c, root, descriptor })
-        while (sources.size > (SESSION_TURNS_MAX + 1) * OUTPUT_IMAGES_PER_TURN) sources.delete(sources.keys().next().value!)
+        while (sources.size > SOURCES_MAX) sources.delete(sources.keys().next().value!)
         return descriptor
       })
       // Never turn an explicit local image into a browser-visible Mac path. Existing callers
@@ -205,7 +295,69 @@ export class AgentSessionOutputImages {
       const at = typeof row.timestamp === 'string' && Number.isFinite(Date.parse(row.timestamp)) ? row.timestamp : undefined
       return { ...(turn ?? { role: 'assistant' as const, text: '', ...(at ? { at } : {}) }), text, outputImages: refs }
     }
-    return { project, sources }
+    const project: SessionTurnProjection = (p, row, turn) => {
+      const shaped = markdown(p, row, turn)
+      const sent = sentUserFiles(p, row)
+      if (!sent) return shaped
+      const recordKey = digest(JSON.stringify(row))
+      // Relative paths are relative to where the session stood when it sent them, as the tool reads them.
+      const cwd = typeof row.cwd === 'string' && isAbsolute(row.cwd) ? row.cwd : root
+      const images: SessionOutputImage[] = [], out: SessionOutputFile[] = []
+      sent.files.slice(0, SHARED_FILES_PER_TURN).forEach((written, ordinal) => {
+        const name = displayName(written)
+        // Never a URL, a network path or a home shorthand: only a local path is ever opened.
+        const remote = /^[a-z][a-z0-9+.-]*:/i.test(written) || written.startsWith('//') || written.startsWith('~')
+        const lexical = remote || !cwd ? null : resolve(cwd, written)
+        let canonical: string | null = null
+        if (lexical && root !== null) { try { canonical = realpathSync(lexical) } catch { canonical = null } }
+        let reason: SessionOutputFile['reason'] | undefined
+        let size: number | undefined
+        if (root === null) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
+        else if (!lexical) reason = 'outside_workspace'
+        // The canonical file decides: a link that leaves the workspace is outside it.
+        else if (canonical !== null && !inside(root, canonical)) reason = 'outside_workspace'
+        else if (canonical === null) reason = inside(root, lexical) ? 'missing' : 'outside_workspace'
+        else {
+          try {
+            const st = statSync(canonical)
+            if (!st.isFile()) reason = 'missing'
+            else size = st.size
+          } catch { reason = 'missing' }
+        }
+        const allowed = reason === undefined
+        if (NORMALIZED_IMAGE.test(name)) {
+          const id = 'ai_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, 'sent', ordinal, written])).digest('hex')
+          const descriptor: SessionOutputImage = { id, label: name, state: allowed ? 'available' : 'unavailable', ...(reason ? { reason } : {}) }
+          // The canonical path is the source, so the content route's no-symlink check holds for it.
+          sources.delete(id); sources.set(id, { candidate: { source: allowed ? canonical! : written, label: name }, root, descriptor })
+          while (sources.size > SOURCES_MAX) sources.delete(sources.keys().next().value!)
+          images.push(descriptor)
+          return
+        }
+        const id = 'af_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, 'file', ordinal, written])).digest('hex')
+        const { kind, type } = sharedFileKind(name)
+        const file: SessionOutputFile = { id, name, kind, type, ...(size !== undefined ? { size } : {}), state: allowed ? 'available' : 'unavailable', ...(reason ? { reason } : {}) }
+        files.delete(id); files.set(id, { path: allowed ? canonical : null, root, file })
+        while (files.size > SOURCES_MAX) files.delete(files.keys().next().value!)
+        out.push(file)
+      })
+      // The caption is the session's own words; an inline image in it is never a way to show a path.
+      const tokens = imageTokens(sent.caption)
+      let caption = '', end = 0
+      for (const token of tokens) { caption += sent.caption.slice(end, token.start) + '[Output image]'; end = token.end }
+      caption += sent.caption.slice(end)
+      const extra = sent.files.length - SHARED_FILES_PER_TURN
+      const words = [caption && latestAssistantReply(caption), extra > 0 ? extra + (extra === 1 ? ' more file was sent and is not listed here.' : ' more files were sent and are not listed here.') : ''].filter(Boolean).join('\n\n')
+      const at = typeof row.timestamp === 'string' && Number.isFinite(Date.parse(row.timestamp)) ? row.timestamp : undefined
+      const base = shaped ?? { role: 'assistant' as const, text: '', ...(at ? { at } : {}) }
+      return {
+        ...base,
+        text: [base.text, words].filter(Boolean).join('\n\n'),
+        ...(images.length || base.outputImages?.length ? { outputImages: [...(base.outputImages ?? []), ...images] } : {}),
+        ...(out.length ? { outputFiles: out } : {}),
+      }
+    }
+    return { project, sources, files }
   }
 
   async content(provider: AgentProvider, sessionId: string, imageId: string, variant: 'thumb' | 'phone') {
@@ -263,6 +415,62 @@ export class AgentSessionOutputImages {
     } catch { return { status: 'unavailable' as const } }
     finally { this.readers-- }
   }
+
+  /**
+   * The bytes of a file a session sent (6.99.35), re-authorized like an image: the id must name a
+   * file in the session's newest turns, its canonical path must still be inside the exact workspace,
+   * no component may be a link, and the file must be the same one before and after the read.
+   */
+  async fileContent(provider: AgentProvider, sessionId: string, fileId: string): Promise<
+    { status: 'ok'; bytes: Buffer; name: string; kind: SharedFileKind } | { status: 'not_found' | 'unavailable' | 'too_large' }> {
+    if (!SESSION_OUTPUT_FILE_ID.test(fileId)) return { status: 'not_found' }
+    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' }
+    this.readers++
+    try {
+      const transcript = await this.deps.findSession(provider, sessionId)
+      if (!transcript) return { status: 'not_found' }
+      const context = await this.context(provider, sessionId, transcript)
+      const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
+      if (!recent.turns.some(t => t.outputFiles?.some(f => f.id === fileId))) return { status: 'not_found' }
+      const source = context.files.get(fileId)
+      if (!source?.root || !source.path || source.file.state !== 'available') return { status: 'unavailable' }
+      const path = source.path
+      if (!inside(source.root, path) || realpathSync(path) !== path) return { status: 'unavailable' }
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      try {
+        const before = await file.stat()
+        if (!before.isFile()) return { status: 'unavailable' }
+        if (before.size > MAX_SHARED_FILE_BYTES) return { status: 'too_large' }
+        const bytes = Buffer.alloc(before.size)
+        let offset = 0
+        while (offset < bytes.length) { const got = await file.read(bytes, offset, bytes.length - offset, offset); if (!got.bytesRead) break; offset += got.bytesRead }
+        const after = await file.stat(), current = statSync(path)
+        if (offset !== bytes.length || after.size !== before.size || after.mtimeMs !== before.mtimeMs || current.dev !== before.dev || current.ino !== before.ino || realpathSync(path) !== path) return { status: 'unavailable' }
+        return { status: 'ok', bytes, name: source.file.name, kind: source.file.kind }
+      } finally { await file.close() }
+    } catch { return { status: 'unavailable' } }
+    finally { this.readers-- }
+  }
+}
+
+/** Content-Type, Content-Disposition and CSP for a sent file. HTML is never served as HTML. */
+export function sharedFileHeaders(name: string, kind: SharedFileKind): Record<string, string> {
+  const ascii = name.replace(/[^A-Za-z0-9._ -]/g, '_').replace(/^[ .]+/, '') || 'file'
+  const inline = kind === 'pdf'
+  const type = kind === 'pdf' ? 'application/pdf'
+    : kind === 'text' ? 'text/plain; charset=utf-8'
+    : kind === 'image' && /\.gif$/i.test(name) ? 'image/gif'
+    : 'application/octet-stream'
+  const headers: Record<string, string> = {
+    'Content-Type': type,
+    'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'private, no-store',
+    'Cross-Origin-Resource-Policy': 'same-origin',
+  }
+  // Opened directly, nothing in it runs and it cannot reach this origin. A PDF keeps the browser's viewer.
+  if (!inline) headers['Content-Security-Policy'] = "sandbox; default-src 'none'"
+  return headers
 }
 
 export const agentSessionOutputImages = new AgentSessionOutputImages({

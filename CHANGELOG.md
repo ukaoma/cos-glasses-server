@@ -1,3 +1,39 @@
+## Unreleased (files a session sent)
+
+2026-11-07. On the Duo tables work (806b4c3). Server (Control Web) plus one new read-only route. No version yet (6.99.35 or later).
+
+Miles: "I can see the previews from claude but not from the COS control. This is one of the elements that need to also be patched and hot fixed."
+
+**Default-on changes:**
+- **Files a Claude session sent show in the Sessions reader and Today's session sheet.** The Claude app's SendUserFile tool shares files inline; Control Web showed nothing for them. Each share now appears where it happened in the conversation, as an assistant card with its caption.
+  - PNG, JPEG, WebP, HEIC and AVIF show as thumbnails that open full size, through the same image route and workspace rule as 6.99.28's output images.
+  - Every other file is a card with its name, type and size. A PDF opens in a new tab. Markdown, text, CSV, JSON, YAML, XML and SVG open as words in the viewer (an SVG is shown as its source, never as a picture from this origin). An HTML page shows in a sandboxed frame with scripts off and its own origin, or downloads. A GIF opens as a picture. Anything else (Word, audio, an EHPK) downloads. Every download is typed as a plain file, so no browser opens it as a page of COS.
+  - A file outside the session's workspace, behind a link that leaves it, or no longer on disk shows "Not available on this Mac" with no button. Only the file's base name ever reaches the browser, never a Mac path.
+  - A share's caption never shows a path: an image written into it reads "[Output image]". Past 10 files in one share, the rest are counted in words.
+- **New route** `GET /api/agent-sessions/:provider/:sessionId/output-files/:fileId/content`, behind the same /api gate. The id is opaque and is re-checked against the session's newest 40 turns on every read; the canonical path must still be inside the exact workspace, with no link in the last component and the same file before and after the read; 32 MB at most (413 above). Headers: PDF inline as application/pdf; text as text/plain; GIF as image/gif; HTML and everything else as an application/octet-stream attachment. Every response is nosniff and no-store, and everything but a PDF carries `Content-Security-Policy: sandbox; default-src 'none'`.
+
+**Not covered:**
+- Codex and Cursor transcripts have no file-share record (Codex's ImageView is the agent looking at an image for itself, not sending it), so there is nothing to show there beyond the Markdown images 6.99.28 already covers.
+- COS Control's Sessions pane on the Mac does not show these files yet (Swift; later, in the Swift slot).
+
+**Tests:** agent-session-sent-files.test.ts (new): parsing, kinds, workspace and link rules, missing files and directories, URLs and home shorthand, a broad root, the per-row cwd, caption redaction, the cap, re-authorization, a link swapped in after listing, the size cap, the header policy and the route. reader-files-web.test.ts (new): the real reader-media.js and app.js DTO filter on fake elements (cards, "Not available on this Mac", junk ids, the PDF retype, the sandboxed HTML frame, octet-stream downloads, text as words, a 413).
+
+## Unreleased (Duo tables)
+
+2026-11-07. On 6.99.33 (02dd4a7). Server only (Control Web); no route changed. No version yet (6.99.35 or later).
+
+Miles on the unfolded Duo (IMG_0508, IMG_0509): tables in a session reply broke words one letter per line, and the first column ("Toda y", "Sess ion shee t") broke mid-word with room to spare. He asked whether the line between the Sessions list and the reader could be dragged.
+
+**Default-on changes:**
+- **Table words stay whole.** The panes set `overflow-wrap: anywhere`, which lets a table squeeze a column to one letter. Table cells now wrap at spaces only, so a column is never narrower than its longest word. Only a token of 25 or more characters (a URL, a hash) may break inside.
+- **Column floors** (app.js `tableFit`, shared): a column whose text is longer than 10 characters keeps at least 10; a first column of short labels (up to 3 words and 28 characters) stays on one line; a longer first column gets 14 to 26 characters and wraps at words.
+- **A table too wide for its box scrolls inside it**, with the first column held at the left edge. The page never scrolls sideways. Same on the folded Duo. The look is unchanged (the separated border model draws the same 1 px lines, so the held column keeps its own).
+- The same applies to every markdown table in Control Web: the Sessions reader, Today's session sheet, Meetings notes and Ask, and Memories answers. Messages and Work chat do not draw tables (their markdown has none), so nothing changed there.
+- **Drag the line between the Sessions list and the reader** (760 px and up, where both show). Finger, mouse or pen; focus it and use the arrow keys (Shift for bigger steps, Home, End). The list keeps 240 px and the reader 380 px, also after the screen turns. A double tap or double click goes back to the default width. On touch the target is 44 px. The width is remembered on this device; without storage it lasts the visit.
+- **Full width / Show list** in the reader's header hides the list and brings it back, for when dragging is fiddly. Remembered the same way.
+
+**Tests:** duo-tables-web.test.ts (new, 24): tableFit, sxMd and the Memories renderer run from the real files; the divider runs from app.js on fake elements (drag, the lift's position, limits, double tap, a cancel, a second finger, right click, keys, storage that throws or holds junk, Full width); the stylesheet and page facts. reader-media-web.test.ts gives openSession its new sxFullButton dependency. 51 mutations from a green baseline, each landing exactly once, all killed. Headless Chrome renders before and after at 1430x1000, 1000x1430 and 382x678: words broken mid-word went from 3 to 54 per table to 0.
+
 ## 6.99.34 - Calendars from macOS Calendar (PH plan P1)
 
 2026-11-07. On 6.99.33 (02dd4a7, installed privately). Private build for Miles's Mac with COS Control 0.5.378, which writes the calendar snapshot. npm stays on 6.99.33.

@@ -182,7 +182,7 @@
             </header>
             <div class="cx-controls sx-views" id="sessions-views"></div>
             <div class="split sx-split" id="sessions-split">
-              <div class="split-list">
+              <div class="split-list" id="sessions-list-col">
                 <div class="sx-tools">
                   <form class="cx-search sx-search" id="sessions-search-form" role="search">
                     <input id="sessions-q" class="field" type="search" placeholder="Search titles, transcripts…" enterkeyhint="search" autocomplete="off" aria-label="Search titles, transcripts">
@@ -198,6 +198,7 @@
                 <div id="sessions-hooks"></div>
                 <div id="sessions-list"></div>
               </div>
+              <div class="sx-handle" id="sessions-handle" role="separator" aria-orientation="vertical" aria-controls="sessions-list-col" aria-label="Session list width" tabindex="0" title="Drag to resize. Double-tap or double-click to reset."></div>
               <div class="reader sx-reader" id="session-reader"><p class="reader-placeholder">Pick a session to read it and send it a turn.</p></div>
             </div>
             <div class="sx-usage hidden" id="sessions-usage"></div>

@@ -25,6 +25,34 @@
 .sx-views { justify-content: space-between; margin: 10px 0 8px; }
 .sx-clock { margin-left: auto; }
 .sx-split { margin-top: 4px; }
+/* Duo tables: the divider between the list and the reader (app.js sxSplitKit). Only where both show side by side. The
+   column it sits in replaces the split's 18 px gap; a dragged width is a share of the split, clamped so the list keeps
+   240 px and the reader 380 px (app.js SX_LIST_MIN, SX_READER_MIN, SX_HANDLE_W), so a turned screen never squeezes either. */
+.sx-handle, .sx-full-btn { display: none; }
+@media (min-width: 760px) {
+  .split.sx-split { grid-template-columns: minmax(260px, 340px) 18px minmax(0, 1fr); column-gap: 0; }
+  .split.sx-split.sx-sized { grid-template-columns: clamp(240px, var(--sx-list-share, 30%), calc(100% - 398px)) 18px minmax(0, 1fr); }
+  .sx-handle {
+    display: flex; justify-content: center; align-items: center; position: sticky; top: calc(var(--safe-top) + 12px); align-self: start;
+    height: calc(100dvh - var(--safe-top) - 24px); cursor: col-resize; touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; outline: none; z-index: 2;
+  }
+  /* The line is the split's own hairline; the grip shows where to take it. */
+  .sx-handle::after { content: ''; width: 4px; height: 36px; border-radius: 2px; background: var(--panel-border); transition: background 120ms ease, height 120ms ease; }
+  .sx-handle:hover::after, .sx-handle:focus-visible::after, .sx-dragging .sx-handle::after { background: var(--accent); height: 52px; }
+  .sx-handle:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 6px; }
+  /* A finger gets a 44 px target, 13 px over each pane's edge; a mouse keeps the 18 px column. */
+  @media (pointer: coarse) { .sx-handle::before { content: ''; position: absolute; top: 0; bottom: 0; left: -13px; right: -13px; } }
+  /* While dragging, nothing in the panes selects or takes the pointer. */
+  .sx-split.sx-dragging { user-select: none; -webkit-user-select: none; cursor: col-resize; }
+  .sx-split.sx-dragging > .split-list, .sx-split.sx-dragging > .reader { pointer-events: none; }
+  .sx-full-btn { display: inline-flex; margin-left: auto; flex: none; }
+  @media (pointer: coarse) { .sx-full-btn { min-height: 44px; } }
+  /* Full width: the reader takes the split; the list and the divider come back with Show list. */
+  .split.sx-split.sx-full.reading { grid-template-columns: minmax(0, 1fr); }
+  .sx-split.sx-full.reading > .split-list, .sx-split.sx-full.reading > .sx-handle { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .sx-handle::after { transition: none; } }
 @media (max-width: 599px) {
   .sx-views { gap: 2px 18px; }
   .sx-clock { margin-left: 0; }
@@ -164,9 +192,10 @@
 .sx-md a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .sx-md del { color: var(--sub); }
 .sx-table { overflow-x: auto; max-width: 100%; margin: 0 0 0.8em; }
-.sx-table table { border-collapse: collapse; font-size: 13.5px; line-height: 1.4; min-width: 100%; }
-.sx-table th, .sx-table td { border: 1px solid var(--hairline); padding: 6px 9px; text-align: left; vertical-align: top; }
-.sx-table th { font-weight: 600; background: var(--qopen); }
+/* Duo tables: the grid lines, word wrapping and the held first column are control.css (table.tf, table.tf-grid). */
+.sx-table table { font-size: 13.5px; line-height: 1.4; min-width: 100%; }
+.sx-table th, .sx-table td { padding: 6px 9px; text-align: left; vertical-align: top; }
+.sx-table th, .sx-table table.tf thead tr > :first-child { font-weight: 600; background: var(--qopen); }
 
 .sx-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 16px 0 4px; }
 .sx-foot-note { font-size: 11.5px; color: var(--tertiary); }

@@ -391,13 +391,18 @@
           case 'table': {
             var kv = b.header.length === 2 && b.rows.length && b.rows.every(function (r) { return r.length === 2 && r[0].indexOf('**') === 0; });
             var cols = Math.max(b.header.length, b.rows.reduce(function (m, r) { return Math.max(m, r.length); }, 0));
-            function row(r, tag, key) {
+            // Duo tables: the shared column floors (app.js tableFit), measured on the rows that show.
+            var fit = W.tableFit(kv ? b.rows : [b.header].concat(b.rows));
+            function row(r, tag, key, first) {
               var h = '<tr>';
-              for (var c = 0; c < cols; c++) h += '<' + tag + (key && c === 0 ? ' class="md-key"' : '') + '>' + inline(r[c] || '') + '</' + tag + '>';
+              for (var c = 0; c < cols; c++) {
+                var w = fit.width(c, first);
+                h += '<' + tag + (key && c === 0 ? ' class="md-key"' : '') + (w ? ' style="' + w + '"' : '') + '>' + fit.cell(c, inline(r[c] || ''), first) + '</' + tag + '>';
+              }
               return h + '</tr>';
             }
-            return '<div class="md-table-wrap"><table class="md-table' + (kv ? ' kv' : '') + '">' + (kv ? '' : '<thead>' + row(b.header, 'th') + '</thead>') +
-              '<tbody>' + b.rows.map(function (r) { return row(r, 'td', kv); }).join('') + '</tbody></table></div>';
+            return '<div class="md-table-wrap tf-wrap"><table class="md-table ' + fit.tableClass + (kv ? ' kv' : '') + '">' + (kv ? '' : '<thead>' + row(b.header, 'th', false, true) + '</thead>') +
+              '<tbody>' + b.rows.map(function (r, n) { return row(r, 'td', kv, kv && n === 0); }).join('') + '</tbody></table></div>';
           }
           case 'details': {
             var sp = b.blocks.filter(function (x) { return x.t === 'speakers'; })[0];

@@ -138,10 +138,13 @@ describe('native output images through the real viewer and app transport', () =>
   })
   it('shows unavailable descriptors honestly; forbidden/unsupported images never fetch and transient ones retry', async () => {
     const t = load(); await t.mount([{ ...DTO, state: 'unavailable', reason: 'outside_workspace' }])
-    expect(t.calls).toEqual([]); expect(t.host.textContent).toContain('outside the session workspace'); expect(named(t.host, 'Retry image').hidden).toBe(true)
+    expect(t.calls).toEqual([]); expect(t.host.textContent).toContain('Not available on this Mac.'); expect(named(t.host, 'Retry image').hidden).toBe(true)
+    // 6.99.35: an image a session sent that is gone from disk reads the same, with no Retry.
+    t.hooks.stop(t.host); await t.mount([{ ...DTO, state: 'unavailable', reason: 'missing' }])
+    expect(t.calls).toEqual([]); expect(t.host.textContent).toContain('Not available on this Mac.'); expect(named(t.host, 'Retry image').hidden).toBe(true)
     t.hooks.stop(t.host); await t.mount([{ ...DTO, state: 'unavailable', reason: 'unavailable' }])
     // A failed workspace lookup is temporary, never worded as outside the workspace, and keeps Retry.
-    expect(t.host.textContent).toContain('temporarily unavailable'); expect(t.host.textContent).not.toContain('outside the session workspace')
+    expect(t.host.textContent).toContain('temporarily unavailable'); expect(t.host.textContent).not.toContain('Not available on this Mac')
     expect(named(t.host, 'Retry image').hidden).toBe(false)
     expect(t.calls).toEqual([]); named(t.host, 'Retry image').click(); await flush(); expect(t.calls).toHaveLength(1)
   })
@@ -195,7 +198,7 @@ describe('production reader and Today hook coverage', () => {
     const deps = { window: t.window, document: t.document, state, $: t.document.getElementById, clearInterval: noop, readStore: () => ({}), HELD_KEY: 'held',
       newFeed: () => ({}), SX: { view: 'sessions', rows: [] }, sxSave: noop, paintSessionsHero: noop, sxSame: () => false, sxKey: () => '',
       skeletonRows: () => '', api: async () => ({ recent_turns: turns }), sessionPath: () => '/session', SX_TURNS: 40, sxTitle: () => 'Images', sxTruncNote: () => '',
-      sxBadge: () => '', esc, sxSubtitle: () => '', renderTurns: render.render, readerImagesStop: t.hooks.stop, readerImagesMount: t.hooks.mount,
+      sxBadge: () => '', sxFullButton: () => '', esc, sxSubtitle: () => '', renderTurns: render.render, readerImagesStop: t.hooks.stop, readerImagesMount: t.hooks.mount,
       setLive: noop, sxNoteList: noop, paintReaderFiles: noop, readerKit: () => null, renderHeld: noop, loadQueue: noop, sxProbeAttach: noop, requestAnimationFrame: noop, watchSession: noop, sxEmpty: (s: string) => s,
     }
     new Function('deps', 'with(deps){' + region(APP, '  function openSession(provider, id)', '  // ACTIVITY') + 'openSession("codex", "session-one");}')(deps)

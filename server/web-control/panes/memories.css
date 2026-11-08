@@ -134,8 +134,10 @@
 .mm-answer ul { margin: 0 0 8px; padding-left: 1.2em; }
 .mm-answer code { font: 400 13px/1.4 var(--mono); background: var(--panel); padding: 0 3px; border-radius: 4px; }
 .mm-table { overflow-x: auto; max-width: 100%; }
-.mm-answer table { border-collapse: collapse; font-size: 13px; }
-.mm-answer th, .mm-answer td { border: 1px solid var(--panel-border); padding: 4px 8px; text-align: left; vertical-align: top; }
+/* Duo tables: grid lines and the held first column are control.css (table.tf-grid), in this pane's border colour. */
+.mm-answer { --tf-bg: var(--qopen); --tf-line: var(--panel-border); }
+.mm-answer table { font-size: 13px; }
+.mm-answer th, .mm-answer td { padding: 4px 8px; text-align: left; vertical-align: top; }
 .mm-refs ol { margin: 0; padding-left: 1.4em; font-size: 13px; line-height: 1.45; }
 .mm-refs li { margin-bottom: 4px; overflow-wrap: anywhere; }
 .mm-ref { color: var(--accent); font-variant-numeric: tabular-nums; }
