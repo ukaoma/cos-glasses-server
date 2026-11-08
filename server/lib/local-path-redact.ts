@@ -24,12 +24,14 @@ const ROOTS = ['Users', 'Volumes', 'private', 'var', 'tmp', 'opt', 'Applications
 const LOCAL_SCHEMES = ['file', 'vscode', 'vscode-insiders', 'cursor', 'windsurf', 'zed', 'idea', 'subl', 'txmt', 'mvim']
 
 /** Delimiters a path never runs through (besides whitespace) in prose, Markdown and code. */
-const DELIMS = `<>"'\`|)\\]}*,;`
+const DELIMS = `<>"'\`“”‘’|)\\]}*,;`
 const STOP = `\\s${DELIMS}`
 const HEAD = `(?:~[A-Za-z0-9._-]*|\\$HOME|\\$\\{HOME\\})(?=/)|/(?:${ROOTS.join('|')})(?![A-Za-z0-9_.-])`
-/** A bare path: the head must follow the start of the string or a delimiter, never a letter (so never inside a URL). */
-const BARE = new RegExp(`(^|[\\s(\\[{<"'\`=,;:*>|])(${HEAD})([^${STOP}]*)`, 'g')
+/** A bare path follows prose punctuation, never a path segment (including ./ or ../). Web spans are handled separately. */
+const BARE = new RegExp(`(^|[^\\p{L}\\p{N}_./-])(${HEAD})([^${STOP}]*)`, 'gu')
 const SCHEME_URL = new RegExp(`\\b(?:${LOCAL_SCHEMES.join('|')}):\\/\\/[^${STOP}]*`, 'gi')
+/** Complete HTTP(S) tokens, including query/fragment paths. Keep their original bytes rather than reserializing a URL. */
+const WEB_URL = /\bhttps?:\/\/[^\s<>"'`“”‘’]+/gi
 /** `[words](destination)` and `![words](destination)`, the destination angle-wrapped or not (spaces allowed). */
 const LINK = /(!?)\[([^\]\n]{0,500})\]\(\s*(<[^>\n]{1,4096}>|[^\s()<>\n][^)\n]{0,4096}?)\s*\)/g
 const LOCAL_DEST = new RegExp(`^(?:${HEAD})`)
@@ -87,6 +89,33 @@ function redactBare(text: string): string {
   return pieces.join('')
 }
 
+/** URL query values can look exactly like local paths; redact only the text between whole web tokens. */
+function redactOutsideWebURLs(text: string): string {
+  const redact = (part: string) => redactBare(part.replace(SCHEME_URL,
+    url => baseName(url.replace(LOCAL_SCHEME_DEST, '').replace(/^[^/]*\//, '/'))))
+  const pieces: string[] = []
+  let cursor = 0
+  WEB_URL.lastIndex = 0
+  for (let match = WEB_URL.exec(text); match; match = WEB_URL.exec(text)) {
+    let token = match[0]
+    // A prose/Markdown closing parenthesis ends the token; balanced URL path
+    // parentheses remain part of it. Explicit angle/quote wrapping supplies its own end.
+    if (!/[<"'`“‘]/.test(text[match.index - 1] ?? '')) {
+      let depth = 0
+      for (let i = 0; i < token.length; i++) {
+        if (token[i] === '(') depth++
+        else if (token[i] === ')' && depth-- === 0) { token = token.slice(0, i); break }
+      }
+    }
+    try { new URL(token) } catch { continue }
+    pieces.push(redact(text.slice(cursor, match.index)), token)
+    cursor = match.index + token.length
+    WEB_URL.lastIndex = cursor
+  }
+  pieces.push(redact(text.slice(cursor)))
+  return pieces.join('')
+}
+
 /** Every absolute local path in this text, as its base name. Web URLs and relative paths are untouched. */
 export function redactLocalPaths(text: string): string {
   if (typeof text !== 'string' || !text) return text
@@ -103,8 +132,7 @@ export function redactLocalPaths(text: string): string {
     const anchor = /:\d+$/.exec(name)?.[0] ?? ''
     return anchor && !/:\d+$/.test(label) && label.split('/').pop() === name.slice(0, -anchor.length) ? label + anchor : label
   })
-  out = out.replace(SCHEME_URL, url => baseName(url.replace(LOCAL_SCHEME_DEST, '').replace(/^[^/]*\//, '/')))
-  return redactBare(out)
+  return redactOutsideWebURLs(out)
 }
 
 /** A copy of this JSON value with every string redacted (keys are left alone). */

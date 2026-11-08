@@ -31,6 +31,12 @@ describe('redactLocalPaths', () => {
     ['a directory', 'cd /Users/jane/repo/ && ls /tmp', 'cd repo && ls tmp'],
     ['a directory at the end of a sentence', 'Everything is in /Users/jane/repo/.', 'Everything is in repo.'],
     ['a path in quotes and parentheses', '("/Volumes/Backup/a.zip") and \'/opt/homebrew/bin/node\'', '("a.zip") and \'node\''],
+    ['smart double quotes', 'Saved to “/Users/jane/private/report.pdf”.', 'Saved to “report.pdf”.'],
+    ['smart single quotes', 'Saved to ‘/Users/jane/private/report.pdf’.', 'Saved to ‘report.pdf’.'],
+    ['an arrow before a path', 'Open →/Users/jane/private/report.pdf', 'Open →report.pdf'],
+    ['an em dash before a path', 'Result—/Users/jane/private/report.pdf!', 'Result—report.pdf!'],
+    ['closing punctuation before a path', 'See )/Users/jane/private/report.pdf', 'See )report.pdf'],
+    ['symbol punctuation before a home path', 'Saved +~/Documents/report.pdf', 'Saved +report.pdf'],
   ]
   for (const [label, input, output] of cases) {
     it(label, () => {
@@ -44,10 +50,26 @@ describe('redactLocalPaths', () => {
       'https://github.com/example/repo/blob/main/server/app.ts#L42',
       '[the PR](https://github.com/example/repo/pull/12) and <https://example.com/docs?a=1>',
       'http://localhost:3141/api/health and https://example.com/var/tmp/page',
+      'https://example.com/view?path=/var/reports/result.html&mode=preview',
+      '<https://example.com/view?path=/Users/jane/report.pdf&mode=preview>',
+      '[view](https://example.com/view?path=/Users/jane/repo/report.pdf&mode=preview)',
+      '[view](<https://example.com/view?path=/Users/jane/report.pdf&mode=preview>)',
+      'https://example.com/view?file=file:///Users/jane/report.pdf#tab=/Users/jane/notes',
+      'https://example.com/view?first=/var/a&second=~/Documents/b&third=$HOME/c',
+      'https://example.com/docs/a_(b)?path=/var/c#tab=/Users/jane/d',
     ]) expect(redactLocalPaths(text)).toBe(text)
   })
+  it('URL preservation does not hide local prose paths or path-bearing link words beside it', () => {
+    const url = 'https://example.com/view?path=/var/reports/result.html&mode=preview'
+    expect(redactLocalPaths(`See ${url}; wrote /Users/jane/private/report.pdf.`)).toBe(`See ${url}; wrote report.pdf.`)
+    expect(redactLocalPaths(`[open /Users/jane/private/report.pdf](${url})`)).toBe(`[open report.pdf](${url})`)
+    expect(redactLocalPaths(`“${url}” →/Users/jane/private/report.pdf`)).toBe(`“${url}” →report.pdf`)
+    expect(redactLocalPaths(`[view](${url})/Users/jane/private/report.pdf`)).toBe(`[view](${url})report.pdf`)
+    expect(redactLocalPaths(`(https://example.com/a_(b)?path=/var/c)/Users/jane/private/report.pdf`)).toBe('(https://example.com/a_(b)?path=/var/c)report.pdf')
+    expect(redactLocalPaths('[https://example.com/docs](/Users/jane/private/report.pdf)')).toBe('https://example.com/docs')
+  })
   it('relative paths and site paths stay as written', () => {
-    for (const text of ['See [guide](docs/guide.md) and server/lib/x.ts:12', 'GET /api/agent-sessions/:provider/:sessionId', 'and/or 1/2', './run.sh ../up.md', 'GET /variables/list and /usrx/a and /Users-guide/x']) {
+    for (const text of ['See [guide](docs/guide.md) and server/lib/x.ts:12', 'GET /api/agent-sessions/:provider/:sessionId', 'and/or 1/2', './run.sh ../up.md', '../Users/jane/report.pdf and ./Users/jane/report.pdf and docs/Users/jane/report.pdf', 'GET /variables/list and /usrx/a and /Users-guide/x']) {
       expect(redactLocalPaths(text)).toBe(text)
     }
   })
