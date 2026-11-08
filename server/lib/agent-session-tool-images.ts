@@ -115,6 +115,16 @@ function dataUrlBlock(block: unknown): ToolImageRef | null {
   return { kind: 'embedded', mediaType: m[1], data: b.image_url.slice(m[0].length) }
 }
 
+/** Keep the source of a Codex view_image so embedded bytes pass the same filename guard as Read. */
+function codexImagePath(args: unknown): string | undefined {
+  if (typeof args === 'string') {
+    if (args.length > 16_384) return undefined
+    try { args = JSON.parse(args) } catch { return undefined }
+  }
+  const path = obj(args)?.path
+  return typeof path === 'string' && path.trim().length > 0 && path.length <= 4096 && !path.includes('\0') ? path : undefined
+}
+
 /** The tool calls a row makes, by call id: their names, and a Read's file path. Pure. */
 export function toolUsesOf(provider: AgentProvider, row: Record<string, unknown>): Array<[string, ToolUseMeta]> {
   if (row.isSidechain === true) return []
@@ -136,7 +146,8 @@ export function toolUsesOf(provider: AgentProvider, row: Record<string, unknown>
     if (row.type !== 'response_item') return []
     const p = obj(row.payload)
     if (!p || (p.type !== 'function_call' && p.type !== 'custom_tool_call') || typeof p.call_id !== 'string' || typeof p.name !== 'string') return []
-    return [[p.call_id, { name: p.name }]]
+    const path = p.name === 'view_image' ? codexImagePath(p.type === 'function_call' ? p.arguments : p.input) : undefined
+    return [[p.call_id, path ? { name: p.name, path } : { name: p.name }]]
   }
   return []
 }
@@ -180,7 +191,13 @@ export function toolResultImages(provider: AgentProvider, row: Record<string, un
     if (!p || (p.type !== 'function_call_output' && p.type !== 'custom_tool_call_output') || !Array.isArray(p.output)) return []
     const meta = typeof p.call_id === 'string' ? uses.get(p.call_id) : undefined
     const tool = meta?.name === 'view_image' ? 'Read' : toolLabel(meta?.name)
-    for (const block of p.output) { const ref = dataUrlBlock(block); if (ref) out.push({ tool, ref }) }
+    for (const block of p.output) {
+      const ref = dataUrlBlock(block)
+      if (!ref || ref.kind !== 'embedded') continue
+      // A known file-read without a trustworthy source cannot bypass secret filename checks.
+      // Other image tools (for example exec screenshots) do not name a source file.
+      out.push({ tool, ref: meta?.name === 'view_image' ? meta.path ? { ...ref, path: meta.path } : { kind: 'missing' } : ref })
+    }
   }
   return out
 }

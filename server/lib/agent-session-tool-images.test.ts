@@ -230,6 +230,42 @@ describe('the reader shows them at the step where they happened', () => {
     const got = await f.service.toolImageContent('codex', 'session', turns[1].toolImages![0].id)
     expect(got).toMatchObject({ status: 'ok', type: 'image/png' }); expect((got as any).bytes.equals(PNG)).toBe(true)
   })
+  it.each(['function_call', 'custom_tool_call'])('Codex %s view_image retains its source for the secret filename guard', async callType => {
+    const f = fixture(ws => [
+      codex({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Checking images.' }] }),
+      ...['out/shot.png', 'credentials.png', '.env.png', 'id_rsa.png'].flatMap((path, i) => [
+        codex({ type: callType, call_id: 'view' + i, name: 'view_image', [callType === 'function_call' ? 'arguments' : 'input']: JSON.stringify({ path: join(ws, path) }) }),
+        codex({ type: callType + '_output', call_id: 'view' + i, output: [{ type: 'input_image', image_url: dataUrl(PNG) }] }),
+      ]),
+    ], { provider: 'codex' })
+    const { turns } = await f.turns()
+    expect(turns).toHaveLength(1)
+    expect(turns[0].text).toBe('Checking images.')
+    const images = turns[0].toolImages!
+    expect(images.map(i => [i.tool, i.state, i.reason])).toEqual([
+      ['Read', 'available', undefined], ...Array.from({ length: 3 }, () => ['Read', 'unavailable', 'secret_file']),
+    ])
+    expect(await f.service.toolImageContent('codex', 'session', images[0].id)).toMatchObject({ status: 'ok', type: 'image/png' })
+    for (const i of images.slice(1)) expect(await f.service.toolImageContent('codex', 'session', i.id)).toEqual({ status: 'secret' })
+    expect(JSON.stringify(turns)).not.toContain(f.root)
+    expect(JSON.stringify(turns)).not.toContain(b64(PNG))
+    expect(f.ingest).not.toHaveBeenCalled()
+  })
+  it.each([undefined, '{bad json', 'null', '[]', '"path"', '{}', '{"path":42}', '{"path":""}', '{"path":"a\\u0000.png"}'])('Codex view_image with untrusted arguments %j keeps a missing image rather than serving bytes', async args => {
+    const f = fixture(() => [
+      codex({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Checking.' }] }),
+      codex({ type: 'function_call', call_id: 'view', name: 'view_image', arguments: args }),
+      codex({ type: 'function_call_output', call_id: 'view', output: [{ type: 'input_image', image_url: dataUrl(PNG) }] }),
+    ], { provider: 'codex' })
+    const { turns } = await f.turns()
+    expect(turns).toHaveLength(1)
+    expect(turns[0].text).toBe('Checking.')
+    expect(turns[0].toolImages).toHaveLength(1)
+    const img = turns[0].toolImages![0]
+    expect(img).toMatchObject({ tool: 'Read', state: 'unavailable', reason: 'missing' })
+    expect((await f.service.toolImageContent('codex', 'session', img.id)).status).toBe('unavailable')
+    expect(f.ingest).not.toHaveBeenCalled()
+  })
 })
 
 describe('performance: base64 is held only for the one image asked for', () => {
