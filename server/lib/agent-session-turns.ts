@@ -46,6 +46,8 @@ export interface SessionTurn {
   outputImages?: SessionOutputImage[]
   /** Files a Claude session sent with SendUserFile that are not normalized images (6.99.35). Names only, no paths. */
   outputFiles?: SessionOutputFile[]
+  /** 6.99.35: this message had images or files and "Show files and images your sessions make" is off. No names travel. */
+  previewsOff?: true
 }
 
 export type SessionTurnProjection = (provider: AgentProvider, record: Record<string, unknown>, turn: SessionTurn | null) => SessionTurn | null

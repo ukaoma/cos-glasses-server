@@ -1106,7 +1106,7 @@
       if (!O.row) { O.row = d; paintMeta(); if (O.open && O.open.kind === 'run') setHead(K.title(d)); }
       var turns = Array.isArray(d.recent_turns) ? d.recent_turns : [];
       var lastA = turns.filter(function (t) { return lower(t.role) !== 'user' && (String(t.text || t.content || '').trim() || (K.imageHtml && K.imageHtml(t))); }).pop();
-      O.last = lastA ? { text: String(lastA.text || lastA.content || '').trim(), at: lastA.at, outputImages: lastA.outputImages, outputFiles: lastA.outputFiles } : null;
+      O.last = lastA ? { text: String(lastA.text || lastA.content || '').trim(), at: lastA.at, outputImages: lastA.outputImages, outputFiles: lastA.outputFiles, previewsOff: lastA.previewsOff } : null;
       O.lastState = O.last ? 'ready' : 'none';
       O.lastWhy = '';
       paintLast();

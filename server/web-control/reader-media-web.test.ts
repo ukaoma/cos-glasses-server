@@ -152,6 +152,10 @@ describe('native output images through the real viewer and app transport', () =>
     const t = load([{ status: 404, data: { error: 'image_not_found' } }]); await t.mount()
     expect(t.host.textContent).toContain('Reopen the session'); expect(named(t.host, 'Retry image').hidden).toBe(true)
   })
+  it('6.99.35: previews turned off in Settings (403 previews_off) says so and offers no Retry', async () => {
+    const t = load([{ status: 403, data: { error: 'previews_off' } }]); await t.mount()
+    expect(t.host.textContent).toContain('Previews are off. Turn them on in Settings, Privacy.'); expect(named(t.host, 'Retry image').hidden).toBe(true)
+  })
   it('disposal fences delayed blobs, and a refresh of the same slots never duplicates requests or revokes the viewer', async () => {
     let finish: (v: unknown) => void = () => {}
     const t = load([new Promise(r => { finish = r })]); await t.mount()

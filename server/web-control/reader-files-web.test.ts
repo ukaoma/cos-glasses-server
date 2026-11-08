@@ -128,6 +128,12 @@ describe('file cards (reader-media.js)', () => {
     expect(pre.textContent).toBe('# Notes <img src=x onerror=y>')
     expect(pre.children).toEqual([])
   })
+  it('previews turned off in Settings while the page was open: the card says so', async () => {
+    const t = load({ [docx.id]: () => { const e: any = new Error('off'); e.status = 403; throw e } }); t.slot([docx])
+    t.W.readerMedia.mount(t.host, 'claude', 's')
+    named(t.host, 'Download').click(); await flush()
+    expect(t.host.textContent).toContain('Previews are off. Turn them on in Settings, Privacy.')
+  })
   it('a failed open says why in words; a 413 says it is too large', async () => {
     const t = load({ [docx.id]: () => { const e: any = new Error('big'); e.status = 413; throw e } }); t.slot([docx])
     t.W.readerMedia.mount(t.host, 'claude', 's')
@@ -152,6 +158,6 @@ describe('the reader and Today hand file DTOs to the viewer', () => {
   })
   it('a turn with only files still mounts the viewer; Today keeps the files of its last reply', () => {
     expect(APP).toContain("if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length) { readerImagesStop(host); return; }")
-    expect(TODAY).toContain('outputImages: lastA.outputImages, outputFiles: lastA.outputFiles }')
+    expect(TODAY).toContain('outputImages: lastA.outputImages, outputFiles: lastA.outputFiles,')
   })
 })

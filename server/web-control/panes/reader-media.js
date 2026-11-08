@@ -27,10 +27,11 @@
   function revoke(item) { if (item.url) { URL.revokeObjectURL(item.url); item.url = ''; } }
   function failWords(err) {
     if (err && err.status === 401) return 'Signed out. Connect this browser again to view the image.';
+    if (err && err.status === 403) return 'Previews are off. Turn them on in Settings, Privacy.';
     if (err && err.status === 404) return 'This image is no longer available. Reopen the session to refresh its images.';
     return 'The image could not load. Check that your Mac is awake, then retry.';
   }
-  function retryable(err) { return !(err && (err.status === 401 || err.status === 404)); }
+  function retryable(err) { return !(err && (err.status === 401 || err.status === 403 || err.status === 404)); }
   function imageBlob(blob) { return blob && /^image\/(png|jpeg|webp|gif|avif)$/.test(blob.type || '') && blob.size > 0; }
   // The server normalizes at most two images at once. Share that budget across both readers and the viewer.
   function pump() {
@@ -176,6 +177,7 @@
   }
   function fileFailWords(err) {
     if (err && err.status === 401) return 'Signed out. Connect this browser again to open the file.';
+    if (err && err.status === 403) return 'Previews are off. Turn them on in Settings, Privacy.';
     if (err && err.status === 404) return 'This file is no longer in the recent turns. Reopen the session to refresh it.';
     if (err && err.status === 413) return 'Too large to open here. Open it on your Mac.';
     return 'The file could not load. Check that your Mac is awake, then retry.';
