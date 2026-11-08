@@ -19,10 +19,10 @@ import { isAbsolute, resolve } from 'node:path'
 
 /** Names refused wherever they appear as a path segment. Lower-cased input. */
 const SECRET_SEGMENT: readonly RegExp[] = [
-  /^\.env$/, /^\.env\./, // .env, .env.local, .env.production …
+  /^\.env/, // .env*: .env, .env.local, .envrc, .env_backup …
   /-key\.json$/, // service-account keys (gcp-key.json, firebase-admin-key.json)
   /^\.cos-profile/, // the COS profile and its backups
-  /^id_rsa/, /^id_ed25519/, /^id_ecdsa/, // SSH private (and public) keys
+  /^id_/, // id_*: SSH private (and public) keys, including id_dsa and id_xmss
   /\.pem$/, /\.p12$/, /\.pfx$/, /\.key$/, // certificates and private keys
   /^credentials/, // credentials, credentials.json, credentials.csv; this is also what refuses .aws/credentials
   /^\.netrc$/, /^\.npmrc$/, /^\.pypirc$/, // package and network tokens
