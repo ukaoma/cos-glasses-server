@@ -39,11 +39,15 @@ const SECRET_NAME: readonly RegExp[] = [
   /^\.netrc$/, /^\.npmrc$/, /^\.pypirc$/, /^\.pgpass$/, /^\.htpasswd$/, // package, network and database credentials
   /\.keychain/, // login.keychain-db and friends
   /^hook-token$/, // 7.0.5 (preview engine, PLAN 6): the COS hook token beside the glasses data
+  // QA 7.0.5: a link card puts a file one tap away, so these join the list.
+  /^hubspot\.config\.ya?ml$/, // the HubSpot CLI's portal keys
+  /^\.mcp\.json$/, // MCP server definitions, which often carry tokens
+  /^\.credentials\.json$/, // Claude Code's sign-in (~/.claude/.credentials.json)
 ]
 /** Folders whose whole subtree is refused, matched exactly as a folder name. Lower-cased. */
 const SECRET_DIRECTORY = new Set(['.ssh', '.gnupg', 'secrets'])
 /** A file refused only inside this folder (`config` alone is an ordinary name). Lower-cased `folder/file`. */
-const SECRET_PAIR = new Set(['.aws/credentials', '.aws/config', '.docker/config.json', '.kube/config', 'gh/hosts.yml'])
+const SECRET_PAIR = new Set(['.aws/credentials', '.aws/config', '.docker/config.json', '.kube/config', 'gh/hosts.yml', '.codex/auth.json'])
 
 function segments(path: string): string[] {
   return path.split(/[\\/]+/).filter(Boolean).map(s => s.toLowerCase())

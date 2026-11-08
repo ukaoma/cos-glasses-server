@@ -4,14 +4,14 @@
  * A link card or a sent file is served only when its canonical path is inside the session's own workspace OR inside
  * one of the folders named here. Nothing else ever opens. The list starts EMPTY.
  *
- * Stored the way "Show files and images your sessions make" is (lib/session-files-setting.ts): a small private JSON
+ * Stored the way "Show session files, screenshots and images" is (lib/session-files-setting.ts): a small private JSON
  * file in the data folder, written atomically with mode 0600. Only a file that is not there (first use) gets the
  * default (no folders). A saved file that is damaged, unreadable or not this schema fails CLOSED: no extra folders,
  * source 'damaged'. Settings says so, and saving from it writes a good file again.
  *
  * Each folder must be absolute (or ~/...), exist, be a directory, and must not be or contain a broad root: /, /Users,
  * home, ~/Documents, ~/Library, ~/.cos-glasses, /Volumes, the temp roots (the same exact roots a session workspace may
- * never be). A folder inside ~/Library, ~/.cos-glasses or ~/.ssh is refused too. Stored canonical (realpath), and
+ * never be). A folder inside ~/Library, ~/.cos-glasses, ~/.ssh, ~/.codex, ~/.claude or ~/.config is refused too. Stored canonical (realpath), and
  * re-checked on every read, so a folder deleted or replaced by a link later simply stops counting.
  */
 import { readFileSync, realpathSync, statSync } from 'node:fs'
@@ -45,6 +45,9 @@ const MESSAGES: Record<FolderRefusal, string> = {
   too_many: `At most ${PREVIEW_FOLDERS_MAX} folders.`,
 }
 
+/** Folders under home that are never a preview folder, nor anything inside them. */
+export const PRIVATE_HOME_FOLDERS: readonly string[] = ['Library', '.cos-glasses', '.ssh', '.codex', '.claude', '.config']
+
 function within(root: string, path: string): boolean {
   const rel = relative(root, path)
   return rel === '' || (!rel.startsWith('..' + sep) && rel !== '..' && !isAbsolute(rel))
@@ -63,7 +66,8 @@ export function checkFolder(input: unknown, home = homedir()): { ok: true; path:
   try { if (!statSync(canonical).isDirectory()) return { ok: false, code: 'not_folder' } } catch { return { ok: false, code: 'missing' } }
   // Never a broad root, and never a folder that CONTAINS one (/ contains everything, /private contains /private/tmp).
   for (const broad of broadWorkspaceRoots(home)) if (within(canonical, broad)) return { ok: false, code: 'broad' }
-  for (const p of ['Library', '.cos-glasses', '.ssh']) {
+  // QA 7.0.5: the AI apps' own folders hold their sign-in tokens and settings (~/.codex/auth.json, ~/.claude, ~/.config).
+  for (const p of PRIVATE_HOME_FOLDERS) {
     const base = join(home, p)
     let real = base
     try { real = realpathSync(base) } catch { /* absent: the literal still counts */ }

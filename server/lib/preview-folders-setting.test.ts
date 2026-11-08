@@ -10,7 +10,7 @@ afterEach(() => { for (const p of made.splice(0)) { try { chmodSync(p, 0o700) } 
 function setup() {
   const top = realpathSync(mkdtempSync(join(tmpdir(), 'cos folders-'))); made.push(top)
   const home = join(top, 'home')
-  for (const d of ['cos-worktrees', 'cos-release-candidates', 'Documents/GitHub', 'Library/Caches', '.cos-glasses/data', '.ssh', 'file-dir']) mkdirSync(join(home, d), { recursive: true })
+  for (const d of ['cos-worktrees', 'cos-release-candidates', 'Documents/GitHub', 'Library/Caches', '.cos-glasses/data', '.ssh', '.codex/sessions', '.claude/projects', '.config/gh', 'file-dir']) mkdirSync(join(home, d), { recursive: true })
   writeFileSync(join(home, 'file-dir', 'a.txt'), 'x')
   const file = join(top, 'data', 'web-preview-folders.json')
   return { top, home, file, store: createPreviewFoldersSetting({ file: () => file, home: () => home }) }
@@ -37,6 +37,10 @@ describe('checkFolder', () => {
     expect(code('~/Library/Caches')).toBe('private')
     expect(code('~/.cos-glasses/data')).toBe('private')
     expect(code('~/.ssh')).toBe('private')
+    // QA 7.0.5 (agent 2 C-W1): the AI apps' folders, and anything inside them, hold sign-in tokens.
+    for (const p of ['~/.codex', '~/.codex/sessions', '~/.claude', '~/.claude/projects', '~/.config', '~/.config/gh']) expect(code(p), p).toBe('private')
+    symlinkSync(join(s.home, '.claude', 'projects'), join(s.home, 'claude-link'))
+    expect(code('~/claude-link'), 'a link into ~/.claude is judged where it points').toBe('private')
     symlinkSync(join(s.home, 'Library'), join(s.home, 'lib-link'))
     expect(code('~/lib-link'), 'a link to a broad root is that root').toBe('broad')
     expect(code('~/x'.repeat(600))).toBe('too_long')

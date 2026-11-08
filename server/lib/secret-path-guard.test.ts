@@ -26,6 +26,9 @@ describe('isDeniedSecretPath: names', () => {
     ['.netrc', '.netrc'], ['.npmrc', '.npmrc'], ['.pypirc', '.pypirc'],
     ['*.keychain*', 'login.keychain-db'], ['*.keychain*', 'build.keychain'],
     ['hook-token (7.0.5)', 'hook-token'],
+    // QA 7.0.5 (agent 2 C-W1): a link card puts these one tap away.
+    ['hubspot.config.yml (7.0.5 QA)', 'hubspot.config.yml'], ['hubspot.config.yml (7.0.5 QA)', 'HubSpot.config.yaml'],
+    ['.mcp.json (7.0.5 QA)', '.mcp.json'], ['.credentials.json (7.0.5 QA)', '.credentials.json'],
   ]
   for (const [pattern, name] of denied) {
     it(`${pattern}: ${name} is denied`, () => { expect(isDeniedSecretPath(at('config', name))).toBe(true) })
@@ -80,6 +83,14 @@ describe('isDeniedSecretPath: names', () => {
       expect(isDeniedSecretPath(p), p).toBe(true)
     }
     for (const p of ['/Users/x/repo/config', '/Users/x/repo/config.json', '/Users/x/repo/hosts.yml', '/Users/x/repo/.kube-notes/config']) {
+      expect(isDeniedSecretPath(p), p).toBe(false)
+    }
+  })
+  it('7.0.5 QA: .codex/auth.json and ~/.claude/.credentials.json; auth.json elsewhere and near misses are ordinary', () => {
+    for (const p of ['/Users/x/.codex/auth.json', '/Users/x/.CODEX/Auth.json', '/Users/x/.claude/.credentials.json', '/Users/x/repo/.mcp.json', '/Users/x/repo/hubspot.config.yml']) {
+      expect(isDeniedSecretPath(p), p).toBe(true)
+    }
+    for (const p of ['/Users/x/repo/auth.json', '/Users/x/repo/codex/auth.json', '/Users/x/repo/mcp.json', '/Users/x/repo/hubspot.config.md', '/Users/x/repo/my-hubspot.config.yml', '/Users/x/repo/notes-credentials.md', '/Users/x/repo/.claude/settings.json']) {
       expect(isDeniedSecretPath(p), p).toBe(false)
     }
   })
