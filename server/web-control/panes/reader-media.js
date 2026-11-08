@@ -160,7 +160,8 @@
   // origin. A GIF shows as a picture. Anything else downloads. Every blob is retyped here, never trusted as served.
   var FILE_ID = /^af_[a-f0-9]{64}$/, TEXT_SHOWN = 512 * 1024;
   var OFF = 'Not available on this Mac';
-  var FILE_REASONS = { outside_workspace: OFF, missing: OFF, unavailable: 'Not available right now. Retry in a moment.' };
+  // QA 7.0.0: a file card has no Retry (a mounted card is never re-read), so a passing failure says the step that works.
+  var FILE_REASONS = { outside_workspace: OFF, missing: OFF, unavailable: 'Not available right now. Reopen the session to check again.' };
   var BADGE = { pdf: 'PDF', html: 'HTML', image: 'GIF' };
   function fileUrl(scope, id) {
     return '/api/agent-sessions/' + encodeURIComponent(scope.provider) + '/' + encodeURIComponent(scope.id) + '/output-files/' + encodeURIComponent(id) + '/content';

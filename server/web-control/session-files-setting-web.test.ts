@@ -53,6 +53,14 @@ describe('Settings, Privacy: the toggle', () => {
     expect(html).toContain(' disabled')
     expect(html).toContain('Turned off on the Mac by the server environment (COS_WEB_SESSION_FILES=0).')
   })
+  // QA 7.0.0: a saved setting the Mac could not read is off, and the row says why in words, still changeable.
+  it('a damaged saved setting: off, says it could not read it, and the toggle can save it again', () => {
+    const html = settings({ enabled: false, source: 'damaged', saved: null })
+    expect(html).toContain('aria-checked="false"')
+    expect(html).toContain('Couldn\u2019t read the saved setting, so previews are off. Turn it on to save it again.')
+    expect(html).not.toContain('Lets this page show images')
+    expect(html).not.toContain(' disabled')
+  })
   it('nothing renders when the server has no such setting (an older server)', () => {
     expect(settings(null)).toBe('')
     expect(settings({}), 'an answer without the switch').toBe('')

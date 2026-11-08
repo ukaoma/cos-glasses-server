@@ -5,7 +5,7 @@
  * off. Off: both content routes answer 403 previews_off and the reader gets no names, only "previews are off".
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import express from 'express'
@@ -42,11 +42,29 @@ describe('the setting', () => {
       expect(s.read(), v).toEqual({ enabled: false, source: 'settings', saved: false })
     }
   })
-  it('a damaged or foreign file reads as nothing saved, so the default holds', () => {
-    for (const body of ['{not json', JSON.stringify({ schema: 2, enabled: false }), JSON.stringify({ schema: 1, enabled: 'no' })]) {
-      const { s, file } = setting(); s.set(true); writeFileSync(file, body)
-      expect(s.read(), body).toEqual({ enabled: true, source: 'default', saved: null })
+  // QA 7.0.0 (Codex root-completionist): a saved OFF whose file was damaged read as nothing saved, so previews came back
+  // on. Only a file that is not there is first use; a damaged, foreign or unreadable one fails closed.
+  it('a damaged or foreign saved file fails closed: off, source damaged, whatever it once said', () => {
+    for (const body of ['{not json', '', JSON.stringify({ schema: 2, enabled: false }), JSON.stringify({ schema: 1, enabled: 'no' }), 'null', '[]']) {
+      const { s, file } = setting(); s.set(false); writeFileSync(file, body)
+      expect(s.read(), JSON.stringify(body)).toEqual({ enabled: false, source: 'damaged', saved: null })
     }
+  })
+  it('an unreadable saved file (not ENOENT) fails closed too; only a missing file is first use and on', () => {
+    const { s, file } = setting(); s.set(false)
+    rmSync(file); mkdirSync(file)   // EISDIR: it exists and cannot be read as the setting
+    expect(s.read()).toEqual({ enabled: false, source: 'damaged', saved: null })
+    rmSync(file, { recursive: true })
+    expect(s.read(), 'gone again: first use').toEqual({ enabled: true, source: 'default', saved: null })
+  })
+  it('damaged, then the Settings toggle saves a good file again and it is read back', () => {
+    const { s, file } = setting(); s.set(true); writeFileSync(file, '{oops')
+    expect(s.read().source).toBe('damaged')
+    expect(s.set(true)).toEqual({ enabled: true, source: 'settings', saved: true })
+  })
+  it('COS_WEB_SESSION_FILES=0 still says env over a damaged file', () => {
+    const { s, file } = setting({ COS_WEB_SESSION_FILES: '0' }); s.set(true); writeFileSync(file, '{oops')
+    expect(s.read()).toEqual({ enabled: false, source: 'env', saved: null })
   })
   it('the shared instance stores under the data folder, never in the repo', () => {
     expect(SESSION_FILES_SETTINGS_FILE).toBe('web-session-files-settings.json')

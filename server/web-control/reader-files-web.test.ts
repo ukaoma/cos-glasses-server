@@ -86,6 +86,17 @@ describe('file cards (reader-media.js)', () => {
     expect(t.host.textContent).toContain('HTML page · Not available on this Mac')
     expect(t.host.querySelectorAll('button')).toEqual([])
   })
+  // QA 7.0.0 (Codex root-user W3): a passing lookup failure said "Retry in a moment" on a card with no Retry, and a
+  // mounted card is never re-read. It says the step that works instead, and still asks for nothing.
+  it('unavailable for now: no Retry promised without a Retry button; it says to reopen the session', () => {
+    const t = load()
+    t.slot([{ ...pdf, state: 'unavailable', reason: 'unavailable' }])
+    t.W.readerMedia.mount(t.host, 'claude', 's')
+    expect(t.host.textContent).toContain('PDF · Not available right now. Reopen the session to check again.')
+    expect(t.host.textContent).not.toMatch(/retry/i)
+    expect(t.host.querySelectorAll('button')).toEqual([])
+    expect(t.calls).toEqual([])
+  })
   it('junk DTOs never become cards', () => {
     const t = load(); t.slot([{ ...pdf, id: 'ai_' + 'a'.repeat(64) }, { ...pdf, id: '../x' }, { ...pdf, state: 'ok' }, null])
     t.W.readerMedia.mount(t.host, 'claude', 's')

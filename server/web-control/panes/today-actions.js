@@ -942,6 +942,8 @@
       el.classList.toggle('hidden', !box.atts.length);
     }
     paintClip(); paintSendButton();
+    // QA 7.0.0: the "Working right now" note says whether files go with the message.
+    if (O.r && O.r.verdict) paintVerdict();
   }
   // Send waits while a file uploads. A failed file never greys it out (QA 6.99.27): a tap says why, as the question
   // card does.
@@ -1275,7 +1277,8 @@
         '</div></div>';
     } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
       // 6.99.29: "Working right now" only while the card's one state says so.
-      if (K.feed.parkNoteShows(r)) html = '<p class="sx-park">' + esc(K.parkCopy(r.provider, r)) + '</p>';
+      // QA 7.0.0: files in this sheet's box wait for the turn end, so the note says so (app.js sxParkLine).
+      if (K.feed.parkNoteShows(r)) html = '<p class="sx-park">' + esc(K.parkCopy(r.provider, r, !!(filesOn() && filesState(filesBox(r)) !== 'none'))) + '</p>';
     } else if (v && v.attachable === false && v.reasonCopy) {
       html = '<div class="sx-box refusal" role="status"><p>' + esc(v.reasonCopy) + '</p></div>';
     } else if (v && v.caution) {

@@ -2913,8 +2913,14 @@
   };
   // Steer mid-turn: only when the server says this session takes a message inside its running turn.
   var SX_PARK_MIDTURN = 'Working right now. Your message lands at its next step.';
-  function sxParkLine(r) {
-    return r.verdict && r.verdict.midTurn === true ? SX_PARK_MIDTURN : SX_PARK[sxProvider(r.provider)];
+  // QA 7.0.0: a message with files never goes in mid-turn (the drain steers words only; a row with files waits for the
+  // turn end, and the park answer says landsAt turn_end). With files in the box the note says so.
+  var SX_PARK_FILES = 'Working right now. A message with files waits and lands when this turn ends.';
+  // `hasFiles`: a view (Today's sheet) says whether its own box holds files; the reader's box is read here.
+  function sxParkLine(r, hasFiles) {
+    if (!(r.verdict && r.verdict.midTurn === true)) return SX_PARK[sxProvider(r.provider)];
+    if (hasFiles === undefined) hasFiles = sxReaderHasFiles(r);
+    return hasFiles ? SX_PARK_FILES : SX_PARK_MIDTURN;
   }
   /** The composer's "Working right now" note: a busy gate verdict, and the one state agrees. */
   function sxParkNoteShows(r) {
@@ -3044,6 +3050,12 @@
     if (!READER_FILES[key].anyBytes && !READER_FILES[key].atts.length && kit.turnFileBytes()) READER_FILES[key].anyBytes = kit.turnFileBytes();
     return READER_FILES[key];
   }
+  // Whether the reader's own box holds a file for this session (any state: a file still uploading goes with the message).
+  function sxReaderHasFiles(r) {
+    if (!r || r.view || state.reading !== r || !readerFilesOn()) return false;
+    var box = readerBox(r);
+    return !!(box && box.atts.length);
+  }
   function readerFilesState(box) {
     var kit = readerKit();
     if (!kit || !box || !box.atts.length) return 'none';
@@ -3059,6 +3071,8 @@
     Array.prototype.forEach.call(slot.querySelectorAll('[data-sx-file]'), function (i) { i.disabled = full || !!r.sending; });
     list.innerHTML = kit.chipsHtml(box, 'data-action') + (box.atts.length ? '<p class="att-limit">' + esc(kit.limitLine(box)) + '</p>' : '');
     list.classList.toggle('hidden', !box.atts.length);
+    // QA 7.0.0: the "Working right now" note depends on whether files go with the message (sxParkLine).
+    if (r && r.verdict) renderVerdict(r);
     // Send and Fork wait while a file uploads. A failed file never greys them out (QA 6.99.27): a tap says why.
     var st = readerFilesState(box), form = $('session-form');
     if (!form || r.sending) return;
@@ -5817,7 +5831,7 @@
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
-    parkCopy: function (p, r) { return r ? sxParkLine(r) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
+    parkCopy: function (p, r, hasFiles) { return r ? sxParkLine(r, hasFiles) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
 
   // Every pane module is a plain script after this one; boot waits for all of them.

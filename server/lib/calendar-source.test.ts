@@ -144,6 +144,33 @@ describe('selection and dedupe', () => {
     expect(dedupeEvents([holdA, { ...holdB, calendarId: 'cal-gmail' }])).toHaveLength(2)
   })
 
+  // QA 7.0.0 (Codex root-skeptic, root-completionist): the shape fallback keyed on the set of attendee DOMAINS, so two
+  // different meetings at one time with different people from one company merged, and which survived was input order.
+  it('two different meetings with one title and time, different people from the same company, stay two', () => {
+    const a = ev({ eventId: 'w1', externalId: 'ext-a', title: 'Weekly sync', attendees: [{ name: 'Pat Lee', domain: 'example.com' }] })
+    const b = ev({ calendarId: 'cal-gmail', eventId: 'w2', externalId: 'ext-b', title: 'Weekly sync', attendees: [{ name: 'Sam Roe', domain: 'example.com' }] })
+    expect(dedupeEvents([a, b]).map(e => e.eventId)).toEqual(['w1', 'w2'])
+    expect(dedupeEvents([b, a]).map(e => e.eventId)).toEqual(['w2', 'w1'])
+    // Domain-only attendees (an email-shaped name was dropped) are no evidence of the same meeting either.
+    const c = ev({ eventId: 'w3', externalId: 'ext-c', title: 'Weekly sync', attendees: [{ name: null, domain: 'example.com' }] })
+    const d = ev({ calendarId: 'cal-gmail', eventId: 'w4', externalId: 'ext-d', title: 'Weekly sync', attendees: [{ name: null, domain: 'example.com' }] })
+    expect(dedupeEvents([c, d])).toHaveLength(2)
+  })
+
+  it('the same meeting on two accounts merges on a shared named attendee or the same meeting link, never on time alone', () => {
+    const url = 'https://acme.zoom.us/j/123'
+    const exchange = ev({ eventId: 'x1', externalId: 'exch-1', title: 'Pipeline Review ', attendees: [{ name: 'Pat Lee', domain: 'example.com' }], meetingUrl: url })
+    // Gmail drops the display name and keeps a different external id; the link is the same meeting.
+    const gmail = ev({ calendarId: 'cal-gmail', eventId: 'g1', externalId: 'goog-1', title: 'pipeline review', attendees: [{ name: null, domain: 'example.com' }], meetingUrl: url + '?pwd=abc' })
+    expect(dedupeEvents([exchange, gmail]).map(e => e.eventId)).toEqual(['x1'])
+    const gmailNamed = { ...gmail, meetingUrl: null, attendees: [{ name: 'pat lee', domain: 'EXAMPLE.com' }] }
+    expect(dedupeEvents([exchange, gmailNamed]), 'a shared named attendee').toHaveLength(1)
+    expect(dedupeEvents([exchange, { ...gmailNamed, end: at(11) }]), 'a different end is another meeting').toHaveLength(2)
+    expect(dedupeEvents([exchange, { ...gmail, meetingUrl: 'https://acme.zoom.us/j/999' }]), 'another link, no shared name').toHaveLength(2)
+    // On ONE calendar even the same link stays two (two holds, two slots).
+    expect(dedupeEvents([exchange, { ...exchange, eventId: 'x2', externalId: 'exch-2' }])).toHaveLength(2)
+  })
+
   it('a weekly meeting has a distinct occurrence per week and a moved one keeps its own (P1-3)', () => {
     const wk1 = bridgeOccurrence({ provider: 'eventkit', calendar_id: 'cal-work', event_id: 'series', external_id: 'ext', occurrence_start: at(10), start_time: at(10) })!
     const wk2 = bridgeOccurrence({ provider: 'eventkit', calendar_id: 'cal-work', event_id: 'series', external_id: 'ext', occurrence_start: at(10, 0, 7), start_time: at(10, 0, 7) })!
@@ -170,6 +197,28 @@ describe('prep filter (P1-8)', () => {
     const s = snap({ events: [ev({ myStatus: 'declined', title: 'Declined sync' }), ev({ eventId: 'e2', externalId: 'e2', start: at(11), occurrenceStart: at(11), end: at(11, 30), title: 'Real meeting' })] })
     const shape = snapshotToBridgeShape(s, NOW) as { next_event: { title: string } | null }
     expect(shape.next_event?.title).toBe('Real meeting')
+  })
+})
+
+// QA 7.0.0 (Codex root-skeptic): tomorrow ended 24 h after today's midnight, and a DST day is 23 or 25 hours.
+describe('tomorrow is a calendar day in local time', () => {
+  it('fall back (a 25 h tomorrow): a 23:30 event tomorrow counts, and 00:15 the day after does not', () => {
+    vi.stubEnv('TZ', 'America/Chicago')
+    const now = new Date(2026, 9, 31, 9, 0).getTime()   // Sat Oct 31; Sun Nov 1 2026 has 25 hours
+    const t = (d: number, h: number, m = 0) => new Date(2026, 9, d, h, m).toISOString()
+    const events = [ev({ eventId: 'late', externalId: 'late', start: t(32, 23, 30), occurrenceStart: t(32, 23, 30), end: t(32, 23, 50) }),
+      ev({ eventId: 'after', externalId: 'after', start: t(33, 0, 15), occurrenceStart: t(33, 0, 15), end: t(33, 0, 45) })]
+    const s = snap({ writtenAt: new Date(now - 60_000).toISOString(), windowStart: t(30, 0), windowEnd: t(38, 0), events })
+    expect((snapshotToBridgeShape(s, now) as { tomorrow_events_count: number }).tomorrow_events_count).toBe(1)
+  })
+  it('spring forward (a 23 h tomorrow): 00:30 the day after is not tomorrow', () => {
+    vi.stubEnv('TZ', 'America/Chicago')
+    const now = new Date(2026, 2, 7, 9, 0).getTime()   // Sat Mar 7; Sun Mar 8 2026 has 23 hours
+    const t = (d: number, h: number, m = 0) => new Date(2026, 2, d, h, m).toISOString()
+    const events = [ev({ eventId: 'late', externalId: 'late', start: t(8, 23, 30), occurrenceStart: t(8, 23, 30), end: t(8, 23, 50) }),
+      ev({ eventId: 'after', externalId: 'after', start: t(9, 0, 30), occurrenceStart: t(9, 0, 30), end: t(9, 1) })]
+    const s = snap({ writtenAt: new Date(now - 60_000).toISOString(), windowStart: t(6, 0), windowEnd: t(14, 0), events })
+    expect((snapshotToBridgeShape(s, now) as { tomorrow_events_count: number }).tomorrow_events_count).toBe(1)
   })
 })
 
@@ -203,6 +252,33 @@ describe('readCalendar through the data dir', () => {
     const stale = await mod.readCalendar(1000, NOW)
     expect(stale.source).toBe('snapshot-stale')
     expect((stale.data as { is_stale: boolean }).is_stale).toBe(true)
+  })
+
+  // QA 7.0.0 (Codex root-user W2): the 3 were taken before all-day and declined events were dropped, so a day of
+  // all-day events left Today's "Later" empty while timed meetings were still to come.
+  it('today takes the next 3 timed meetings that count: all-day and declined events never use up a slot', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    const allDay = [1, 2, 3].map(i => ev({ eventId: `ad${i}`, externalId: `ad${i}`, allDay: true, start: at(0), occurrenceStart: at(0), end: at(0, 0, 1), title: `All day ${i}` }))
+    const declined = ev({ eventId: 'dec', externalId: 'dec', myStatus: 'declined', start: at(9, 30), occurrenceStart: at(9, 30), end: at(10), title: 'Declined' })
+    const timed = [11, 12, 13, 14].map(h => ev({ eventId: `t${h}`, externalId: `t${h}`, start: at(h), occurrenceStart: at(h), end: at(h, 30), title: `Meeting ${h}` }))
+    writeFileSync(join(dir, 'calendar', 'snapshot.json'), JSON.stringify(snap({ events: [...allDay, declined, ...timed] })))
+    mod.resetCalendarSourceCache()
+    const today = await mod.calendarToday(NOW)
+    expect(today.next.map(n => n.title)).toEqual(['Meeting 11', 'Meeting 12', 'Meeting 13'])
+  })
+
+  it('a bridge answer without prep_worthy: all-day rows still never use up a slot', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    bridge.available = true
+    const row = (title: string, h: number, allDay = false) => ({ title, start_time: at(h), end_time: at(h, 30), is_all_day: allDay, calendar_name: 'Work', meeting_url: null })
+    bridge.answer = { today_remaining: [row('AD 1', 0, true), row('AD 2', 0, true), row('AD 3', 0, true), row('Bridge 11', 11), row('Bridge 12', 12)], meetings_remaining_count: 5 }
+    const today = await mod.calendarToday(NOW)
+    expect(today.source).toBe('bridge')
+    expect(today.next.map(n => n.title)).toEqual(['Bridge 11', 'Bridge 12'])
   })
 
   it('no snapshot and no bridge is "not connected", never an empty day', async () => {
