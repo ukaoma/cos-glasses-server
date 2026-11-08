@@ -59,6 +59,7 @@
 // never be mistaken for a user's explicit opt-out. Off answers 503 and the client
 // polls, which is the same code path as a server too old to have this route at all.
 
+import { redactLocalPaths } from '../lib/local-path-redact.js'
 import { Router, type Response } from 'express'
 import { stat } from 'node:fs/promises'
 import {
@@ -213,6 +214,16 @@ export async function openingState(
  */
 export const SEED_EVENTS = 7
 
+/**
+ * A stream event as it leaves for a client. 7.0.4 final QA: a `prompt` is redacted like the user turns in `?turns=`
+ * history (redactLocalPathsDeep, not a command field), so the lens's prompt match (findTurnStart) still finds its turn.
+ * Every other kind is unchanged.
+ */
+export function clientStreamEvent<T extends { kind: string }>(event: T): T {
+  const text = (event as { text?: unknown }).text
+  return event.kind === 'prompt' && typeof text === 'string' ? { ...event, text: redactLocalPaths(text) } : event
+}
+
 agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', async (req, res) => {
   res.set('Cache-Control', 'private, no-store')
 
@@ -331,6 +342,11 @@ agentSessionStreamRouter.get('/agent-sessions/:provider/:sessionId/stream', asyn
         lastStamp = stampOf(derived)
         out = { ...event, ...statusDraftWithDerived(event, derived) }
       }
+      // 7.0.4 final QA: the turn history (`?turns=`) redacts local paths in user turns, and the lens finds the turn on
+      // screen by matching this prompt's opening words against them (cos-glasses-app session-conversation.ts
+      // findTurnStart). An unredacted prompt with a Mac path never matched, so the lens refetched and showed the turn
+      // twice. The prompt leaves redacted the same way; server-side consumers keep the raw event.
+      out = clientStreamEvent(out)
       const idLine = typeof out.cursor === 'number' ? `id: ${out.epoch ?? RING_EPOCH}.${out.cursor}\n` : ''
       res.write(`${idLine}data: ${JSON.stringify({ seq: ++seq, ...out })}\n\n`)
     } catch {
