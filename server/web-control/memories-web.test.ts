@@ -21,7 +21,7 @@ type Answer = unknown | ((args: any) => unknown)
 interface FakeEl { id: string; innerHTML: string; value: string; classList: { toggle: (c: string, on?: boolean) => void; add: (c: string) => void; remove: (c: string) => void; contains: (c: string) => boolean }; [k: string]: any }
 
 type CueAnswer = (path: string, body?: any) => unknown
-function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandomUUID?: boolean; cues?: CueAnswer; stored?: Record<string, unknown> } = {}) {
+function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandomUUID?: boolean; cues?: CueAnswer; stored?: Record<string, unknown>; staleShell?: boolean } = {}) {
   const answers: Record<string, Answer> = { ...base(), ...(opts.answers ?? {}) }
   const calls: Array<{ op: string; args: any }> = []
   // The cue review talks to /api/live-cues/* directly, as Control's store does; anything else is the Memories bridge.
@@ -44,6 +44,7 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
     return node
   }
   const listeners: Record<string, Array<(e: unknown) => void>> = {}
+  const scripts: Array<{ src: string; onload?: () => void }> = []
   const pane = make('pane-memories'); els.set('pane-memories', pane)
   let route = { pane: 'memories', args: [] as string[] }
   let def: any = null
@@ -83,7 +84,7 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
   const document = {
     getElementById: (id: string) => els.get(id) ?? null, querySelector: () => null, querySelectorAll: () => [],
     addEventListener: (type: string, fn: (e: unknown) => void) => { (listeners['doc:' + type] ??= []).push(fn) },
-    createElement: () => ({ setAttribute() {}, remove() {} }), head: { appendChild: () => {} }, body, activeElement: null,
+    createElement: () => ({ setAttribute() {}, remove() {} }), head: { appendChild: (el: { src?: string }) => { if (el && el.src) scripts.push(el as { src: string; onload?: () => void }) } }, body, activeElement: null,
   }
   const media = { matches: !!opts.wide, addEventListener: () => {} }
   const crypto = opts.noRandomUUID ? { getRandomValues: (b: Uint8Array) => globalThis.crypto.getRandomValues(b) } : globalThis.crypto
@@ -103,13 +104,15 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
   }
   const ctx = vm.createContext({ window, document, location, crypto, console, Date, JSON, Math, Promise, Object, Array, String, Number, RegExp, Error, Uint8Array, URL,
     setTimeout: timeout, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {} })
-  vm.runInContext(REVIEW_SOURCE, ctx)
+  // staleShell: a tab opened before the update, whose index.html never loaded memory-review.js.
+  if (!opts.staleShell) vm.runInContext(REVIEW_SOURCE, ctx)
   vm.runInContext(SOURCE, ctx)
   const t = def._t
   const tap = (name: string, attrs: Record<string, string> = {}) => t.act(name, { getAttribute: (k: string) => attrs[k] ?? null, disabled: false }, null)
   const open = async (args: string[] = []) => { route = { pane: 'memories', args }; def.load(args); await flush() }
   const writes = () => calls.filter(c => !isMemoryWebOpReadOnly(c.op, c.args ?? {}))
-  return { def, t, S: t.S, calls, cueCalls, writes, toasts, copies, tap, open, els, answers, held, listeners, route: () => route, setRoute: (args: string[]) => { route = { pane: 'memories', args } } }
+  const loadReview = () => { vm.runInContext(REVIEW_SOURCE, ctx); for (const sc of scripts) sc.onload?.() }
+  return { def, t, S: t.S, calls, cueCalls, writes, toasts, copies, tap, open, els, answers, held, listeners, scripts, loadReview, route: () => route, setRoute: (args: string[]) => { route = { pane: 'memories', args } } }
 }
 
 // ── fixtures, shaped like the live bridge answered on 11/06 ──
@@ -180,6 +183,22 @@ describe('Control Web Memories: opening and reading never writes', () => {
     for (const op of MUTATING_MEMORY_WEB_OPS) expect(h.t.isRead(op, {}), op).toBe(false)
     expect(h.t.isRead('workspace.request', { action: 'review_page' })).toBe(true)
     expect(h.t.isRead('workspace.request', { action: 'review_memory' })).toBe(false)
+  })
+})
+
+describe('Control Web Memories: a tab opened before the update (7.0.4 QA)', () => {
+  it('loads memory-review.js itself, opens without throwing, and counts with the shared predicate once it arrives', async () => {
+    const h = load({ staleShell: true })
+    expect(h.scripts.map(sc => sc.src)).toEqual(['/control/memory-review.js'])
+    await h.open()
+    expect(h.els.get('pane-memories')!.innerHTML.length).toBeGreaterThan(0)
+    // Until the predicate arrives the count is the server's own, never a throw.
+    expect(h.t.needsCount()).toBe(2)
+    h.loadReview(); await flush()
+    expect(h.t.needsCount()).toBe(1)
+  })
+  it('a current tab (memory-review.js already loaded by index.html) adds no script', () => {
+    expect(load().scripts).toEqual([])
   })
 })
 

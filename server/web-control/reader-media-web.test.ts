@@ -136,6 +136,23 @@ describe('native output images through the real viewer and app transport', () =>
     named(t.host, 'Retry image').click(); await flush(); expect(t.made).toEqual([])
     named(t.host, 'Retry image').click(); await flush(); expect(t.made).toHaveLength(1)
   })
+  it('7.0.4 QA: a busy Mac (503 previews_busy) says so, retries the thumbnail by itself, and stops after four tries', async () => {
+    const busyReply = { status: 503, data: { error: 'previews_busy' } }
+    const t = load([busyReply, new Blob(['ok'], { type: 'image/png' })])
+    await t.mount(); await flush()
+    expect(t.host.textContent).toContain('Your Mac is busy with other previews')
+    expect(t.host.textContent).not.toContain('awake')
+    expect(t.calls).toHaveLength(1)
+    t.expireTimers(); await flush()
+    expect(t.calls).toHaveLength(2); expect(t.made).toHaveLength(1)
+    // Busy every time: four automatic tries after the first, then it waits for Retry with the busy words.
+    const u = load([busyReply, busyReply, busyReply, busyReply, busyReply, busyReply])
+    await u.mount(); await flush()
+    for (let i = 0; i < 6; i++) { u.expireTimers(); await flush() }
+    expect(u.calls).toHaveLength(5)
+    expect(u.host.textContent).toContain('Try again in a moment')
+    expect(named(u.host, 'Retry image').hidden).toBe(false)
+  })
   it('shows unavailable descriptors honestly; forbidden/unsupported images never fetch and transient ones retry', async () => {
     const t = load(); await t.mount([{ ...DTO, state: 'unavailable', reason: 'outside_workspace' }])
     expect(t.calls).toEqual([]); expect(t.host.textContent).toContain('Not available on this Mac.'); expect(named(t.host, 'Retry image').hidden).toBe(true)

@@ -41,8 +41,11 @@ describe('Settings, Privacy: the toggle', () => {
   }
   it('says what it does in one sentence, under Privacy, on by default', () => {
     const html = settings({ enabled: true, source: 'default', saved: null })
-    expect(html).toContain('Show files and images your sessions make')
-    expect(html).toContain('Lets this page show images and files your sessions save in their project folder. Files stay on your Mac.')
+    // 7.0.4: the label and description name everything the switch covers.
+    expect(html).toContain('Show session files, screenshots and images')
+    expect(html).toContain('Lets this page show the files and images your sessions send you, the screenshots and images they open, and images attached to your prompts. Files stay on your Mac.')
+    expect(html).not.toContain('project folder')
+    expect(html).not.toMatch(/[\u2013\u2014\u2192]/)
     expect(html).toContain('aria-checked="true"')
     expect(html).toContain('data-set="session-files"')
     expect(html).not.toContain(' disabled')

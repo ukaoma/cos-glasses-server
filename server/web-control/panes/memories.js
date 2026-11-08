@@ -20,10 +20,18 @@
   'use strict';
   var W = window.COSWeb;
   // What counts as Needs review: one predicate, shared with the server's count (memory-review.js, loaded by index.html).
-  var R = window.COSMemoryReview;
+  var R = window.COSMemoryReview || null;
   var esc = W.esc;
   var pane = W.$('pane-memories');
   if (!pane) return;
+  // 7.0.4 QA: a tab opened before the update has the old index.html, which never loaded memory-review.js, and fetches
+  // this pane fresh. Load the predicate here; until it arrives, review rows and counts read as not yet known.
+  if (!R) {
+    var reviewScript = document.createElement('script');
+    reviewScript.src = '/control/memory-review.js';
+    reviewScript.onload = function () { R = window.COSMemoryReview || null; if (R && !pane.classList.contains('hidden')) { try { paint(); } catch (_e) { /* the next paint draws it */ } } };
+    document.head.appendChild(reviewScript);
+  }
 
   // ── vocabulary (plain words for the store and event names Control's page shows) ──
   var KIND = { captured: 'Captured', proposed: 'Proposed', promotable: 'Suggested rule', saved: 'Saved', retrieved: 'Recalled',
@@ -429,12 +437,12 @@
   }
   function needsBlock() {
     var ny = (S.recent.info && S.recent.info.needs_you) || (S.status && S.status.needs_you) || null;
-    return ny && Array.isArray(ny.items) ? R.normalizeBlock(ny) : null;
+    return R && ny && Array.isArray(ny.items) ? R.normalizeBlock(ny) : null;
   }
-  function needsItems() { return R.openItems(needsBlock(), S.decisions); }
+  function needsItems() { return R ? R.openItems(needsBlock(), S.decisions) : []; }
   function needsLesson(id) { return !!id && needsItems().some(function (it) { return it.lesson_id === id; }); }
   // An item's latest decision closes it (accepted, dismissed, pruned): it leaves To review for history.
-  function closedHere(e) { return R.reviewState(null, null, decisionFor(e)) === R.HISTORY; }
+  function closedHere(e) { return !!R && R.reviewState(null, null, decisionFor(e)) === R.HISTORY; }
   function itemRow(it, extra) {
     var fromList = S.review.rows.filter(function (r) { return r.event_id === it.event_id; })[0] ||
       S.recent.rows.filter(function (r) { return r.event_id === it.event_id; })[0];
@@ -446,6 +454,7 @@
   }
   // Below-bar suggestions: listed under Learning with their confidence, never counted, no warning tone.
   function learningRows() {
+    if (!R) return [];
     return R.learningItems(needsBlock(), S.decisions).filter(function (it) { return it && it.event_id; }).map(function (it) {
       return itemRow(it, { learning: { reason: plainReason(it.reason), confidence: it.confidence, bar: it.bar } });
     });
@@ -460,7 +469,7 @@
   // The same count the server hands Today and the rail (memory-review.js count), less what was decided on this page.
   function needsCount() {
     var s = S.status || {}, ny = (S.recent.info && S.recent.info.needs_you) || s.needs_you;
-    var n = ny ? R.count(R.normalizeBlock(ny), S.decisions) : null;
+    var n = ny && R ? R.count(R.normalizeBlock(ny), S.decisions) : null;
     if (n != null) return n;
     if (typeof s.learningToReview === 'number') return s.learningToReview;
     return null;

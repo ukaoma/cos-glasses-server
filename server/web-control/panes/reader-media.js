@@ -28,7 +28,14 @@
     return '/api/agent-sessions/' + encodeURIComponent(scope.provider) + '/' + encodeURIComponent(scope.id) + '/output-images/' + encodeURIComponent(id) + '/content?variant=' + variant;
   }
   function revoke(item) { if (item.url) { URL.revokeObjectURL(item.url); item.url = ''; } }
+  // 7.0.4 QA: a 503 previews_busy means the Mac is already reading its limit of previews. It is not unreachable.
+  var BUSY_WORDS = 'Your Mac is busy with other previews. Try again in a moment.';
+  function busy(err) { return !!(err && err.status === 503 && err.code === 'previews_busy'); }
+  // A busy thumbnail tries again by itself, after 1, 2, 4 and 8 seconds (with a little spread), then waits for Retry.
+  var BUSY_RETRIES = 4;
+  function busyDelay(tries) { return 1000 * Math.pow(2, tries) + Math.floor(Math.random() * 250); }
   function failWords(err) {
+    if (busy(err)) return BUSY_WORDS;
     if (err && err.status === 401) return 'Signed out. Connect this browser again to view the image.';
     if (err && err.status === 403 && err.code === 'secret_file_denied') return REASONS.secret_file;
     if (err && err.status === 403) return 'Previews are off. Turn them on in Settings, Privacy.';
@@ -71,7 +78,7 @@
     if (!scope.alive || item.active === false || item.busy) return;
     item.busy = true; item.open.textContent = 'Loading image…'; item.status.textContent = 'Loading image…'; item.retry.hidden = true; item.open.disabled = true;
     fetchImage(scope, item, 'thumb', item, function (url) {
-      item.busy = false; item.open.textContent = '';
+      item.busy = false; item.busyTries = 0; item.open.textContent = '';
       var img = element('img'); img.alt = item.label;
       img.addEventListener('error', function () {
         if (!scope.alive || item.active === false || item.url !== url) return;
@@ -81,6 +88,12 @@
       img.src = url; item.open.appendChild(img); item.open.disabled = false; item.status.textContent = '';
     }, function (err) {
       item.busy = false; item.open.textContent = 'Image unavailable'; item.status.textContent = failWords(err); item.retry.hidden = !retryable(err);
+      if (busy(err) && (item.busyTries || 0) < BUSY_RETRIES) {
+        var delay = busyDelay(item.busyTries || 0);
+        item.busyTries = (item.busyTries || 0) + 1;
+        item.open.textContent = 'Waiting…'; item.status.textContent = 'Your Mac is busy with other previews. Trying again…'; item.retry.hidden = true;
+        setTimeout(function () { if (scope.alive && item.active !== false && !item.url) loadThumb(scope, item); }, delay);
+      }
     });
   }
   // Back closes the viewer and lands where you were (11/08). Opening one pushes a history entry on the same address
@@ -293,6 +306,7 @@
     var ext = /\.([a-z0-9]{1,4})$/i.exec(f.name); return ext ? ext[1].toUpperCase() : 'FILE';
   }
   function fileFailWords(err) {
+    if (busy(err)) return 'Your Mac is busy with other previews. Try again in a moment.';
     if (err && err.status === 403 && err.code === 'secret_file_denied') return REASONS.secret_file;
     if (err && err.status === 401) return 'Signed out. Connect this browser again to open the file.';
     if (err && err.status === 403) return 'Previews are off. Turn them on in Settings, Privacy.';
