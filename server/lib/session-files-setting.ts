@@ -25,7 +25,7 @@ import { dataPath } from './data-dir.js'
 import { readSwitch } from './env-switch.js'
 import { securePrivateDirectory } from './secure-user-config.js'
 import type { SessionTurn } from './agent-session-turns.js'
-import { withoutLinkMarkers } from './session-links.js'
+import { withoutLinkCards } from './session-links.js'
 
 export const SESSION_FILES_SETTINGS_FILE = 'web-session-files-settings.json'
 export type SessionFilesSource = 'env' | 'settings' | 'default' | 'damaged'
@@ -80,8 +80,9 @@ export function withoutPreviews(turns: SessionTurn[]): SessionTurn[] {
   return turns.map(t => {
     if (!t.outputImages?.length && !t.outputFiles?.length && !t.toolImages?.length && !t.toolImagesMore && !t.outputLinks?.length) return t
     const { outputImages: _i, outputFiles: _f, toolImages: _t, toolImagesMore: _m, outputLinks: _l, ...rest } = t
-    // Preview engine phase 1: link cards ride this switch. Off, a card marker turns back into the link's words, so not
-    // even a count reaches the browser. The Mac path was already gone from the text (session-links.ts).
-    return { ...rest, ...(_l?.length ? { text: withoutLinkMarkers(rest.text) } : {}), previewsOff: true as const }
+    // Preview engine phase 1: link cards ride this switch. Off, a card marker turns back into the link's words and the
+    // "N more linked files" sentence goes (QA 7.0.5), so not even a count reaches the browser. The Mac path was already
+    // gone from the text (session-links.ts).
+    return { ...rest, ...(_l?.length ? { text: withoutLinkCards(rest.text) } : {}), previewsOff: true as const }
   })
 }

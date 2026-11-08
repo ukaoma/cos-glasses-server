@@ -18,7 +18,7 @@ import { previewErrorCode } from './preview-error-code.js'
 import { readRecentSessionTurns, SESSION_TURNS_MAX, type SessionTurn, type SessionTurnProjection } from './agent-session-turns.js'
 import {
   authorizedRoot, insideRoot, isLocalTarget, LINK_CARDS_PER_TURN, linkCardWords, linkLabel, linkTokens, previewKind, resolveLinkTarget, SESSION_OUTPUT_LINK_ID,
-  splitLineAnchor, type LinkRoots, type PreviewKind, type SessionOutputLink,
+  linkOverflowSentence, splitLineAnchor, type LinkRoots, type PreviewKind, type SessionOutputLink,
 } from './session-links.js'
 import {
   decodeToolImage, estimateBytes, MAX_TOOL_IMAGE_BYTES, promptImages, SESSION_TOOL_IMAGE_ID, TOOL_IMAGES_PER_TURN, toolResultImages, toolUsesOf,
@@ -404,7 +404,7 @@ export class AgentSessionOutputImages {
       const parts: string[] = []; let end = 0
       for (const edit of edits) { parts.push(scanned.slice(end, edit.start), edit.words()); end = edit.end }
       parts.push(scanned.slice(end))
-      if (linkExtra > 0) parts.push('\n\n' + linkExtra + (linkExtra === 1 ? ' more linked file is not shown as a card.' : ' more linked files are not shown as cards.'))
+      if (linkExtra > 0) parts.push('\n\n' + linkOverflowSentence(linkExtra))
       const omission = '[Reply shortened at the image preview scan limit.]'
       let text = shortened
         ? [latestAssistantReply(parts.join(''), LATEST_REPLY_MAX - omission.length - 1), omission].filter(Boolean).join('\n')

@@ -259,3 +259,22 @@ export function resolveLinkTarget(rawTarget: string, bases: readonly (string | n
 export function withoutLinkMarkers(text: string): string {
   return text.replace(LINK_MARKER, '$1')
 }
+
+/** The sentence a reply ends with when it links more files than LINK_CARDS_PER_TURN (added after its last word). */
+export function linkOverflowSentence(extra: number): string {
+  return extra + (extra === 1 ? ' more linked file is not shown as a card.' : ' more linked files are not shown as cards.')
+}
+const LINK_OVERFLOW = /\n\n\d{1,6} more linked files? (?:is|are) not shown as (?:a )?cards?\./g
+/** The reply cap can cut the sentence: `\n\n23 more linked fi…`, at the end or just before the scan-limit line. */
+const LINK_OVERFLOW_CUT = /\n\n(\d{1,6})([^\n…]*)…(?=\n\[Reply shortened at the image preview scan limit\.\]$|$)/
+
+/**
+ * QA 7.0.5 (agent 4 C-N1): previews off sends no count, so the overflow sentence goes as well as the markers. A cut
+ * sentence goes only when what is left is exactly the start of that sentence, so a reply's own words stay. Pure.
+ */
+export function withoutLinkCards(text: string): string {
+  const out = withoutLinkMarkers(text).replace(LINK_OVERFLOW, '')
+  const cut = LINK_OVERFLOW_CUT.exec(out)
+  if (!cut || !linkOverflowSentence(Number(cut[1])).startsWith(cut[1] + cut[2])) return out
+  return out.slice(0, cut.index) + out.slice(cut.index + cut[0].length)
+}

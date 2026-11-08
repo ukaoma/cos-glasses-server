@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { AgentSessionOutputImages, sentUserFiles } from './agent-session-output-images.js'
 import { readRecentSessionTurns } from './agent-session-turns.js'
 import { withoutPreviews } from './session-files-setting.js'
-import { LINK_CARDS_PER_TURN } from './session-links.js'
+import { LINK_CARDS_PER_TURN, linkOverflowSentence, withoutLinkCards } from './session-links.js'
 import type { AgentProvider } from './agent-session-store.js'
 
 const made: string[] = []
@@ -120,6 +120,28 @@ describe('link cards in the session detail', () => {
     expect(off.previewsOff).toBe(true)
     expect(off.text).toBe('See the plan.')
     expect(JSON.stringify(off)).not.toMatch(/al_|cos-file/)
+  })
+  // QA 7.0.5 (agent 4 C-N1): the changelog and CONTRACT promise "no id, no name, no count" with previews off.
+  it('previews off past the card cap: the "N more linked files" sentence goes too, so no count is sent', async () => {
+    const f = fixture(t => [claudeSaid(Array.from({ length: 23 }, (_, i) => `[f${i}](${join(t.sub, `f${i}.md`)})`).join(' '))])
+    const [on] = await f.turns()
+    expect(on.text, 'previews on keeps the count').toContain('3 more linked files are not shown as cards.')
+    const [off] = withoutPreviews([on])
+    expect(off.text).toBe(Array.from({ length: 23 }, (_, i) => `f${i}`).join(' '))
+    expect(off.text).not.toMatch(/more linked file|\d+ more/)
+    expect(JSON.stringify(off)).not.toMatch(/al_|cos-file/)
+    expect(off.previewsOff).toBe(true)
+  })
+  it('withoutLinkCards: one file, a sentence the reply cap cut, and the scan-limit line; a reply\u2019s own words stay', () => {
+    expect(linkOverflowSentence(1)).toBe('1 more linked file is not shown as a card.')
+    expect(withoutLinkCards('[a](cos-file:0)\n\n1 more linked file is not shown as a card.')).toBe('a')
+    expect(withoutLinkCards('[a](cos-file:0)\n\n23 more linked fi…')).toBe('a')
+    expect(withoutLinkCards('[a](cos-file:0)\n\n23…')).toBe('a')
+    expect(withoutLinkCards('[a](cos-file:0)\n\n4 more linked files are not sh…\n[Reply shortened at the image preview scan limit.]'))
+      .toBe('a\n[Reply shortened at the image preview scan limit.]')
+    // Not the sentence: left alone.
+    expect(withoutLinkCards('[a](cos-file:0)\n\n3 options remain…')).toBe('a\n\n3 options remain…')
+    expect(withoutLinkCards('Done.\n\n2 more linked files are coming.')).toBe('Done.\n\n2 more linked files are coming.')
   })
   it('a turn with no local link is unchanged (no outputImages or outputLinks added)', async () => {
     const f = fixture(() => [claudeSaid('Web only: [docs](https://example.com).')])
