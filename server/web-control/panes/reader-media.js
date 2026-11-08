@@ -293,6 +293,7 @@
     var ext = /\.([a-z0-9]{1,4})$/i.exec(f.name); return ext ? ext[1].toUpperCase() : 'FILE';
   }
   function fileFailWords(err) {
+    if (err && err.status === 403 && err.code === 'secret_file_denied') return REASONS.secret_file;
     if (err && err.status === 401) return 'Signed out. Connect this browser again to open the file.';
     if (err && err.status === 403) return 'Previews are off. Turn them on in Settings, Privacy.';
     if (err && err.status === 404) return 'This file is no longer in the recent turns. Reopen the session to refresh it.';

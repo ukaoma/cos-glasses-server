@@ -152,6 +152,16 @@ describe('file cards (reader-media.js)', () => {
     named(t.host, 'Download').click(); await flush()
     expect(t.host.textContent).toContain('Previews are off. Turn them on in Settings, Privacy.')
   })
+  it('late secret refusals on Open, Preview and Download say why without settings advice', async () => {
+    for (const [file, action] of [[pdf, 'Open'], [html, 'Preview'], [docx, 'Download']] as const) {
+      const t = load({ [file.id]: () => { const e: any = new Error('denied'); e.status = 403; e.code = 'secret_file_denied'; throw e } }); t.slot([file])
+      t.W.readerMedia.mount(t.host, 'claude', 's')
+      named(t.host, action).click(); await flush()
+      const words = t.host.textContent + t.body.textContent
+      expect(words).toContain('Not shown: this file may hold secrets.')
+      expect(words).not.toContain('Previews are off')
+    }
+  })
   it('a failed open says why in words; a 413 says it is too large', async () => {
     const t = load({ [docx.id]: () => { const e: any = new Error('big'); e.status = 413; throw e } }); t.slot([docx])
     t.W.readerMedia.mount(t.host, 'claude', 's')
