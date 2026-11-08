@@ -321,7 +321,10 @@
     var hash = '#/' + [pane].concat(args || []).map(encodeURIComponent).join('/');
     if (location.hash === hash) route(); else location.hash = hash;
   }
-  function isPhone() { return !window.matchMedia('(min-width: 600px)').matches; }
+  // 7.0.2 (A8): a phone is under 600 px wide, or a short touch screen at any width (the unfolded Duo is 951x539 in
+  // Comet): height is its scarce axis, so it gets the phone Ask sheet and the 44 px tap floor (app.css), as folded does.
+  var SHORT_TOUCH_MQ = '(pointer: coarse) and (max-height: 720px)';
+  function isPhone() { return !window.matchMedia('(min-width: 600px)').matches || window.matchMedia(SHORT_TOUCH_MQ).matches; }
   /** A keyboard and a fine pointer are the way in (a Mac, a PC): Return sends. Touch screens type a new line. */
   function keyboardFirst() { return !!(window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches); }
   // Return in a text box sends only where a keyboard and a pointer are the way in (cos-chat.js keyboardFirst): never on
@@ -5772,20 +5775,44 @@
   //            inset, so a pinch zoom magnifies the sheet instead of shrinking its layout into the zoomed window.
   //   below    what of the layout viewport lies under that box: the backdrop alone reaches down over it.
   // No visualViewport (old browsers): the whole layout viewport, nothing covered.
+  // 7.0.2 (A3, the Duo audit): some web views shrink innerHeight itself while the keyboard is up (WKWebView in Comet or
+  // Chrome on iOS may), and re-reading it then measured a covered area of 0, so no keyboard was ever seen. So while a
+  // field that types has focus, layoutH is the LARGEST unzoomed innerHeight seen at this width (so this orientation): the
+  // keyboard is the same inset whether the browser shrinks visualViewport only or the whole web view. With no such field
+  // (no on-screen keyboard can be up) it follows innerHeight as before, so a browser bar that comes and goes on scroll is
+  // never a keyboard. A new width (a turn) starts over. Pinch zoom keeps the height read before the zoom.
+  //   dock     the CURRENT layout viewport under the visible box (innerHeight less top and height): what a sticky or
+  //            fixed composer clears to sit above the keyboard. 0 when the web view itself shrank.
   var VP = { layoutH: 0 };
+  VP.maxH = 0; VP.w = -1;
+  function vpTyping() {
+    var a = document.activeElement;
+    if (!a || !a.tagName) return false;
+    var tag = String(a.tagName).toUpperCase();
+    if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (tag === 'INPUT') return !/^(checkbox|radio|button|submit|reset|range|color|file|image|hidden)$/i.test(String(a.type || 'text'));
+    return !!a.isContentEditable;
+  }
   function viewportFit() {
     var vv = window.visualViewport, de = document.documentElement;
     var inner = window.innerHeight || (de && de.clientHeight) || 0;
     var scale = vv && vv.scale > 0 ? vv.scale : 1, zoomed = scale > 1.01;
-    if (!zoomed || !VP.layoutH) VP.layoutH = zoomed ? Math.max(inner, (de && de.clientHeight) || 0) : inner;
+    // A turn always changes the width. The orientation type is not read: an engine that derives it from the viewport's
+    // aspect flips it when the keyboard shrinks a web view wider than it is then tall (WebKit, 382x266), which would
+    // throw away the very height the keyboard is measured against.
+    var w = window.innerWidth || 0;
+    if (w !== VP.w) { VP.w = w; VP.maxH = 0; }
+    if (!zoomed) { VP.maxH = vpTyping() ? Math.max(VP.maxH, inner) : inner; VP.layoutH = VP.maxH; }
+    else if (!VP.layoutH) VP.layoutH = Math.max(inner, (de && de.clientHeight) || 0);
     var H = VP.layoutH;
-    if (!vv || !(vv.height > 0)) return { layoutH: H, top: 0, height: H, inset: 0, below: 0, scale: 1, zoomed: false, vv: false };
+    if (!vv || !(vv.height > 0)) return { layoutH: H, top: 0, height: H, inset: 0, below: 0, dock: 0, scale: 1, zoomed: false, vv: false };
     var inset = Math.max(0, Math.round(H - vv.height * scale));
     var top, height;
     if (!zoomed) { top = Math.max(0, Math.round(vv.offsetTop || 0)); height = Math.min(Math.round(vv.height), H); }
     else { height = H - inset; top = Math.min(Math.max(0, Math.round(vv.offsetTop || 0)), inset); }
     if (top + height > H) top = Math.max(0, H - height);
-    return { layoutH: H, top: top, height: height, inset: inset, below: Math.max(0, H - top - height), scale: scale, zoomed: zoomed, vv: true };
+    var below = Math.max(0, H - top - height);
+    return { layoutH: H, top: top, height: height, inset: inset, below: below, dock: zoomed ? below : Math.max(0, Math.round(inner) - top - height), scale: scale, zoomed: zoomed, vv: true };
   }
 
   // ── layout breadcrumbs (6.99.30) ──────────────────────
@@ -5794,8 +5821,11 @@
   // rotation, 30 lines per 10 s per client) when an overlay opens and each time its keyboard state changes. Numbers and
   // a browser family only: no address, no text, no ids, never the user agent string itself. At most one identical
   // line per 2 s and LAYOUT_CRUMB_MAX a page load, fire and forget.
-  var LAYOUT_CRUMB_MAX = 40, LAYOUT_CRUMB_GAP_MS = 2000;
-  var crumbs = { sent: 0, last: '', lastAt: 0 };
+  // 7.0.2 (A1): every pane reports now (focus, keyboard open and close, the gap after it closes), so the cap is 80, and
+  // at most LAYOUT_CRUMB_RATE leave in any 10 s, under the server's 30 per 10 s (routes/diag.ts), so a burst is
+  // dropped here instead of answered 429 there.
+  var LAYOUT_CRUMB_MAX = 80, LAYOUT_CRUMB_GAP_MS = 2000, LAYOUT_CRUMB_RATE = 20, LAYOUT_CRUMB_WINDOW_MS = 10000;
+  var crumbs = { sent: 0, last: '', lastAt: 0, recent: [] };
   /** The browser family, from the UA string, for the breadcrumb. Comet first: it says Chrome or Safari too. */
   function uaClass(ua) {
     ua = String(ua == null ? (navigator && navigator.userAgent) || '' : ua);
@@ -5822,7 +5852,9 @@
       Object.keys(x).forEach(function (k) { var v = x[k]; if (/^[a-z][a-zA-Z0-9]{0,15}$/.test(k) && (typeof v === 'number' || typeof v === 'boolean' || (typeof v === 'string' && v.length <= 24))) data[k] = typeof v === 'number' ? r(v) : v; });
       var key = JSON.stringify(data), now = Date.now();
       if (crumbs.sent >= LAYOUT_CRUMB_MAX || (key === crumbs.last && now - crumbs.lastAt < LAYOUT_CRUMB_GAP_MS)) return false;
-      crumbs.sent++; crumbs.last = key; crumbs.lastAt = now;
+      crumbs.recent = crumbs.recent.filter(function (t) { return now - t < LAYOUT_CRUMB_WINDOW_MS; });
+      if (crumbs.recent.length >= LAYOUT_CRUMB_RATE) return false;
+      crumbs.sent++; crumbs.last = key; crumbs.lastAt = now; crumbs.recent.push(now);
       api('/api/diag/client', { method: 'POST', body: { ts: now, level: 'info', event: 'web.layout', data: data }, timeoutMs: 5000 }).catch(function () {});
       return true;
     } catch (_e) { return false; }
@@ -5919,6 +5951,112 @@
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
     parkCopy: function (p, r, hasFiles) { return r ? sxParkLine(r, hasFiles) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
+
+  // ── layout reports and the visible box, every pane (7.0.2) ──
+  // The Duo audit (11/07): only Today's session sheet ever sent a layout report, and only when its classes flipped, so
+  // the COS chat composer, the front screen Miles types on most, never sent one, and a keyboard the code failed to see
+  // sent nothing at all. Now, through layoutCrumb (numbers and fixed labels only, never text or ids):
+  //   device     once per page load, after sign-in: the screen, the pixel ratio, safe areas, pointer kind
+  //   focus      a field that types gets focus, on any pane: its computed font size, the scroll position and range,
+  //              and innerWidth against scrollWidth (zoom vs pan vs a page wider than the screen)
+  //   kb-open, kb-close  EVERY keyboard open and close, numbered, so a repeat is never dropped as a duplicate; with
+  //              innerHeight against the layout height (shrank: the web view itself got shorter)
+  //   kb-after   KB_AFTER_MS after a close: the gap below the composer that had the keyboard, scrollY against its
+  //              range, and 100dvh, 100svh and 100lvh in px; measured before and after the panes settle
+  // The same pass publishes the visible box for CSS on <html>: --vv-top, --vv-h, --vv-below (the layout viewport under
+  // the visible box, viewportFit's dock) and html.kb-up while an on-screen keyboard is up (KB_UP_PX or more covered
+  // with a typing field focused). Panes hear open, close and after through COSWeb.onKeyboard.
+  var KB_UP_PX = 120, KB_AFTER_MS = 300;
+  var LR = { up: false, frame: 0, after: 0, cycle: 0, focusN: 0, device: false, field: null, hooks: [] };
+  function lrPane() { var r = parseRoute(); return String(r.pane + (r.args[0] === 'cos' ? '.cos' : '')).slice(0, 24); }
+  function lrKind(a) {
+    var tag = String((a && a.tagName) || '').toLowerCase();
+    return (tag === 'input' ? 'input.' + String(a.type || 'text').toLowerCase() : tag || 'other').slice(0, 24);
+  }
+  function lrScroll() {
+    var se = document.scrollingElement || document.documentElement;
+    var sy = Math.round(window.scrollY || window.pageYOffset || 0);
+    var smax = se ? Math.max(0, Math.round((se.scrollHeight || 0) - (window.innerHeight || se.clientHeight || 0))) : 0;
+    return { sy: sy, smax: smax, sw: se ? Math.round(se.scrollWidth || 0) : 0 };
+  }
+  // One hidden element, measured and removed: its height (h) or a computed padding in px. Null where it cannot be read.
+  function lrProbe(css, prop) {
+    var b = document.body;
+    if (!b || !document.createElement) return null;
+    var el = document.createElement('div'), v = null;
+    el.setAttribute('aria-hidden', 'true');
+    el.style.cssText = 'position:fixed;left:0;top:0;width:1px;visibility:hidden;pointer-events:none;' + css;
+    b.appendChild(el);
+    try { v = prop === 'h' ? el.offsetHeight : parseFloat(getComputedStyle(el)[prop]); } catch (_e) { v = null; }
+    b.removeChild(el);
+    return typeof v === 'number' && isFinite(v) ? v : null;
+  }
+  function lrMatch(q) { try { return !!window.matchMedia(q).matches; } catch (_e) { return false; } }
+  function lrDevice() {
+    if (LR.device) return;
+    LR.device = true;
+    var sc = window.screen || {};
+    layoutCrumb('device', { sw: sc.width, sh: sc.height, sah: sc.availHeight, oh: window.outerHeight, ow: window.outerWidth, dpr: window.devicePixelRatio,
+      sat: lrProbe('padding-top:env(safe-area-inset-top)', 'paddingTop'), sab: lrProbe('padding-bottom:env(safe-area-inset-bottom)', 'paddingBottom'),
+      anyCoarse: lrMatch('(any-pointer: coarse)'), shortTouch: lrMatch(SHORT_TOUCH_MQ), phone: isPhone() });
+  }
+  function lrFocus() {
+    if (!vpTyping()) return;
+    var a = document.activeElement, fs = null;
+    LR.field = a;
+    try { fs = parseFloat(getComputedStyle(a).fontSize); } catch (_e) { fs = null; }
+    var s = lrScroll();
+    layoutCrumb('focus', { pane: lrPane(), field: lrKind(a), fs: fs, sy: s.sy, smax: s.smax, sw: s.sw, kb: LR.up, n: ++LR.focusN });
+    lrFit();
+  }
+  function lrHooks(what, v) { LR.hooks.forEach(function (fn) { try { fn(what, v); } catch (err) { console.error(err); } }); }
+  function lrGap(v) {
+    var f = LR.field, box = f && f.closest ? (f.closest('form') || f) : f;
+    if (!box || box.isConnected === false || !box.getBoundingClientRect) return null;
+    return Math.round(v.top + v.height - box.getBoundingClientRect().bottom);
+  }
+  function lrAfter() {
+    LR.after = 0;
+    if (LR.up) return;
+    var v = viewportFit(), s = lrScroll(), gap = lrGap(v);
+    lrHooks('after', v);
+    var s2 = lrScroll();
+    layoutCrumb('kb-after', { pane: lrPane(), n: LR.cycle, gap: gap, sy: s.sy, smax: s.smax, over: s.sy > s.smax, gapNow: lrGap(viewportFit()), syNow: s2.sy,
+      dvh: lrProbe('height:100dvh', 'h'), svh: lrProbe('height:100svh', 'h'), lvh: lrProbe('height:100lvh', 'h'), lh: v.layoutH });
+  }
+  function lrApply() {
+    LR.frame = 0;
+    var v = viewportFit(), de = document.documentElement;
+    if (de && de.style && de.style.setProperty) {
+      de.style.setProperty('--vv-top', v.top + 'px'); de.style.setProperty('--vv-h', v.height + 'px'); de.style.setProperty('--vv-below', v.dock + 'px');
+    }
+    var up = !!(v.vv && v.inset >= KB_UP_PX && vpTyping());
+    if (de && de.classList) de.classList.toggle('kb-up', up);
+    if (up === LR.up) return v;
+    LR.up = up; LR.cycle++;
+    layoutCrumb(up ? 'kb-open' : 'kb-close', { pane: lrPane(), n: LR.cycle, inset: v.inset, below: v.below, dock: v.dock, lh: v.layoutH, top: v.top, h: v.height,
+      zoomed: v.zoomed, shrank: Math.round(window.innerHeight || 0) < v.layoutH });
+    if (LR.after) { clearTimeout(LR.after); LR.after = 0; }
+    if (!up) LR.after = setTimeout(lrAfter, KB_AFTER_MS);
+    lrHooks(up ? 'open' : 'close', v);
+    return v;
+  }
+  function lrFit() {
+    if (LR.frame) return;
+    if (!window.requestAnimationFrame) { lrApply(); return; }
+    LR.frame = window.requestAnimationFrame(lrApply);
+  }
+  (function lrListen() {
+    var vv = window.visualViewport;
+    if (vv && vv.addEventListener) { vv.addEventListener('resize', lrFit); vv.addEventListener('scroll', lrFit); }
+    window.addEventListener('resize', lrFit); window.addEventListener('orientationchange', lrFit); window.addEventListener('pageshow', lrFit);
+    document.addEventListener('focusin', lrFocus);
+    document.addEventListener('focusout', function () { setTimeout(lrFit, 0); });
+    shellHooks.push(function () { lrDevice(); lrFit(); });
+  })();
+  window.COSWeb.keyboardUp = function () { return LR.up; };
+  window.COSWeb.onKeyboard = function (fn) { if (typeof fn === 'function') LR.hooks.push(fn); };
+  // ── end layout reports
 
   // Every pane module is a plain script after this one; boot waits for all of them.
   function boot() {

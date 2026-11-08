@@ -283,14 +283,19 @@ describe('6.99.30: a layout breadcrumb on open and on each keyboard change reach
     expect(p.body.data['bad-key']).toBeUndefined()
     expect(p.body.data.nested).toBeUndefined()
   })
-  it('the same line twice within 2 s goes once; at most 40 a page load', () => {
+  it('the same line twice within 2 s goes once; at most 20 in any 10 s (7.0.2) and 80 a page load', () => {
     const k = crumbKit(IOS)
     k.ctx.crumb('kb', { kb: true }); k.ctx.crumb('kb', { kb: true })
     expect(k.posts).toHaveLength(1)
     k.later(2500); k.ctx.crumb('kb', { kb: true })
     expect(k.posts).toHaveLength(2)
     for (let i = 0; i < 60; i++) k.ctx.crumb('kb', { inset: i })
+    expect(k.posts, 'a burst stops at 20 per 10 s, under the server’s 30').toHaveLength(20)
+    k.later(10_001)
+    for (let i = 0; i < 60; i++) k.ctx.crumb('kb', { inset: 100 + i })
     expect(k.posts).toHaveLength(40)
+    for (let w = 0; w < 6; w++) { k.later(10_001); for (let i = 0; i < 30; i++) k.ctx.crumb('kb', { inset: 1000 + w * 100 + i }) }
+    expect(k.posts, 'never more than 80 a page load').toHaveLength(80)
   })
   it('the route it posts to exists, is bounded and rate-limited on the server', () => {
     const diag = readFileSync(join(HERE, '..', 'routes', 'diag.ts'), 'utf8')

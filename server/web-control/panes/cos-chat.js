@@ -221,11 +221,23 @@
     });
     return out;
   }
+  // 7.0.2 (A7): what "Default" resolves to on this Mac (/api/models defaultModel: the session's preference, then
+  // COS_G2_DEFAULT_MODEL, then the built-in default), named in the menu: "Default (Codex Frontier)". On 11/07 Default
+  // was Codex while Codex was out of usage, and nothing on the page said so. An older server sends no field: plain Default.
+  function defaultLabel(d) {
+    var pref = d && typeof d.preference === 'string' ? d.preference : '';
+    if (!pref) return '';
+    for (var i = 0; i < CLAUDE_MENU.length; i++) if (CLAUDE_MENU[i][0] === pref) return CLAUDE_MENU[i][1];
+    if (pref === 'haiku') return 'Claude Haiku';
+    return ENGINE[pref] ? (ENGINE[pref] + (FALLBACK[pref] ? ' ' + FALLBACK[pref] : '')) : '';
+  }
   function loadModels() {
     if (C.models) return;
     C.models = [];
-    api('/api/models').then(function (m) {
+    var sid = !threadOn() && C.session && C.session.id ? String(C.session.id) : '';
+    api('/api/models' + (sid ? '?sessionId=' + encodeURIComponent(sid) : '')).then(function (m) {
       C.models = modelsFrom(m);
+      C.defaultLabel = defaultLabel(m && m.defaultModel);
       if (C.model && !C.models.some(function (o) { return o.value === C.model; })) { C.model = ''; save(); }
       // Steer exists only where the server says so (/api/models capabilities.durableQueryJobs.steer).
       var j = m && m.capabilities && m.capabilities.durableQueryJobs;
@@ -235,7 +247,7 @@
   }
   function modelMenuHtml() {
     var list = C.models || [];
-    var opts = ['<option value="">Default</option>'].concat(list.map(function (m) {
+    var opts = ['<option value="">' + esc(C.defaultLabel ? 'Default (' + C.defaultLabel + ')' : 'Default') + '</option>'].concat(list.map(function (m) {
       return '<option value="' + esc(m.value) + '"' + (m.value === C.model ? ' selected' : '') + (m.available ? '' : ' disabled') + '>' + esc(m.label + (m.available ? '' : ' (not available)')) + '</option>';
     }));
     var efforts = ['<option value="">Default</option>'].concat(EFFORTS.map(function (e) {
@@ -454,6 +466,8 @@
         '<button type="button" class="link-btn cc-text-btn" data-cos="cancel" data-cid="' + a.cid + '">Cancel</button>';
     } else if (a.status === 'completed' && a.no) {
       acts = '<button type="button" class="cx-btn primary" data-cos="open-msg" data-no="' + a.no + '">Open in Messages</button>';
+    } else if ((a.status === 'failed' || a.status === 'interrupted') && a.jobId && !a.retried) {
+      acts = '<button type="button" class="cx-btn primary" data-cos="again" data-cid="' + a.cid + '">Ask again</button>';
     }
     // A drop that became a question already shows its words as the drop: only the answer card is added.
     return (linked ? '' : '<div class="cc-line you"><div class="cc-bubble">' + esc(a.query) + '</div>' + sentAttsHtml(a.atts) + '<div class="cc-src">' + (a.replyKey ? 'Replied on the web' : 'Asked on the web') + '</div></div>') +
@@ -1014,6 +1028,8 @@
   function submitAsk(text, dropId, done, opts) {
     opts = opts || {};
     var a = { cid: uuid(), query: text, at: Date.now(), status: 'sending', partial: '', dropId: dropId || '', atts: opts.atts || [], replyKey: opts.replyKey || '' };
+    // 7.0.2 (A6): what Ask again sends: the same words, files and conversation.
+    a.again = { attachmentIds: (opts.attachmentIds || []).slice(0, MAX_ATTS), atts: (opts.atts || []).slice(0, MAX_ATTS), sessionId: opts.sessionId || '', replyKey: opts.replyKey || '', context: opts.context || '' };
     C.asks.push(a);
     if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(true);
     var body = { clientJobId: a.cid, generation: 1, query: text, source: 'web', activityToolMode: 'status' };
@@ -1074,7 +1090,61 @@
     if (typeof job.partialText === 'string') a.partial = job.partialText;
     if (typeof job.response === 'string') a.response = job.response;
     if (job.steerable === false) a.steerable = false;
-    if (job.error && (a.status === 'failed' || a.status === 'interrupted')) a.error = 'COS could not finish this answer. Ask again when you are ready.';
+    if (job.error && (a.status === 'failed' || a.status === 'interrupted')) a.error = errorLine(job);
+  }
+  // 7.0.2 (A6, the Duo audit): the line on a failed card says why and what to do, by the server's error.code. On 11/07
+  // Codex was out of usage until Nov 13 and the card said only "COS could not finish this answer". The reset time comes
+  // from the provider's own words in error.message when they carry one, else from retryAfterMs, else it is left out.
+  var GENERIC_FAIL = 'COS could not finish this answer. Ask again when you are ready.';
+  var PROVIDER_NAME = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor', ollama: 'Ollama' };
+  function providerName(job) {
+    if (job && PROVIDER_NAME[job.provider]) return PROVIDER_NAME[job.provider];
+    var m = String((job && (job.resolvedModel || job.requestedModel)) || '');
+    if (/^codex/.test(m)) return 'Codex';
+    if (/^cursor/.test(m)) return 'Cursor';
+    if (/^ollama/.test(m)) return 'Ollama';
+    if (/^(opus|fable|sonnet|haiku)/.test(m)) return 'Claude';
+    return '';
+  }
+  // "until <when>" or "for <how long>" from the provider's words or retryAfterMs; '' when neither says.
+  function resetTime(err) {
+    var msg = String((err && err.message) || '').slice(0, 2000);
+    var m = /\b(?:try again|available again|resets?)\s+(at|on|after|in)?\s*([^.!\n·(]{2,48})/i.exec(msg), prep = m ? String(m[1] || '').toLowerCase() : '';
+    if (!m) { m = /\buntil\s+()([^.!\n·(]{2,48})/i.exec(msg); prep = ''; }
+    if (m) { var t = m[2].replace(/[\s,;:]+$/, '').trim(); if (/\d/.test(t)) return (prep === 'in' ? 'for ' : 'until ') + t; }
+    var ms = err && Number(err.retryAfterMs);
+    if (ms > 0 && isFinite(ms)) {
+      var d = new Date(Date.now() + ms);
+      try { return 'until ' + d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (_e) { return ''; }
+    }
+    return '';
+  }
+  function errorLine(job) {
+    var err = (job && job.error) || {}, code = String(err.code || ''), who = providerName(job);
+    if (code === 'provider_limit') {
+      var until = resetTime(err);
+      return (who || 'This model') + ' is out of usage ' + (until || 'for now') + '. Pick another model under Model and ask again.';
+    }
+    if (code === 'provider_auth') return (who || 'This model') + ' is not signed in on your Mac. Sign in there, or pick another model under Model and ask again.';
+    if (code === 'provider_timeout') return 'The model took longer than the time limit, so COS stopped waiting. Ask again, or pick a lower Effort for a faster answer.';
+    if (code === 'interrupted' || (job && job.status === 'interrupted' && !code)) {
+      if (err.cause === 'server_shutdown') return 'COS on your Mac shut down before this answer finished. When it is back, ask again.';
+      if (err.cause === 'crash_loop_parked') return 'COS on your Mac stopped after crashing several times, so it set this question aside. Open COS Control on the Mac, then ask again.';
+      return 'COS on your Mac restarted before this answer finished. Ask again when you are ready.';
+    }
+    return GENERIC_FAIL;
+  }
+  // Ask again: the same words and files as a new Ask (a new client job id), with the model and effort picked now. The
+  // failed card keeps its line and loses the button.
+  function askAgain(cid) {
+    var a = C.asks.filter(function (x) { return x.cid === cid; })[0];
+    if (!a || a.retried || !(a.status === 'failed' || a.status === 'interrupted') || !a.jobId) return null;
+    a.retried = true;
+    var g = a.again || {}, o = {};
+    if (g.attachmentIds && g.attachmentIds.length) { o.attachmentIds = g.attachmentIds.slice(0, MAX_ATTS); o.atts = (g.atts || []).slice(0, MAX_ATTS); }
+    if (g.replyKey) { o.replyKey = g.replyKey; o.sessionId = g.sessionId; }
+    if (g.context) o.context = g.context;
+    return submitAsk(a.query, null, null, o);
   }
   function poll(a) {
     var started = Date.now();
@@ -1811,6 +1881,7 @@
       return;
     }
     if (what === 'cancel') return cancel(t.getAttribute('data-cid'));
+    if (what === 'again') return askAgain(t.getAttribute('data-cid'));
     if (what === 'att-remove') return removeAtt(kOf(t), t.getAttribute('data-att'));
     if (what === 'att-retry') {
       var k = kOf(t);
@@ -1880,6 +1951,43 @@
     form.classList.remove('dragging');
     if (e.type === 'drop') addFiles(composer(form.getAttribute('data-cos-form')), e.dataTransfer.files);
   }
+  // 7.0.2 (A2, the Duo audit): after the keyboard closes on the chat (one column, the page scrolls), iOS can leave the
+  // page scrolled past its end, which showed as blank page under Model and Effort. Once it has closed (app.js
+  // COSWeb.onKeyboard 'after'), scrollY comes back inside the page's range, and when the chat's own box had the
+  // keyboard the composer goes back to the bottom of the screen.
+  var LAST = { composer: false };
+  document.addEventListener('focusin', function (e) {
+    var f = e && e.target && e.target.closest ? e.target.closest('[data-cos-form]') : null;
+    LAST.composer = !!(f && f.getAttribute('data-cos-form') === CHAT.name);
+  });
+  function settleAfterKeyboard() {
+    var r = W.parseRoute();
+    if (wide() || r.pane !== 'messages' || r.args[0] !== 'cos') return false;
+    var se = document.scrollingElement || document.documentElement;
+    if (!se) return false;
+    var max = Math.max(0, Math.round((se.scrollHeight || 0) - (window.innerHeight || 0))), y = Math.round(window.scrollY || 0);
+    if (y > max) { window.scrollTo(0, max); return true; }
+    var form = formOf(CHAT);
+    if (LAST.composer && form && form.getBoundingClientRect && (window.innerHeight || 0) - form.getBoundingClientRect().bottom > 1) { window.scrollTo(0, max); return true; }
+    return false;
+  }
+  // 7.0.2 (A4): two columns (860 px and up, the unfolded Duo) with the keyboard up. cos-chat.css makes the column the
+  // visible box (html.kb-up), but a sticky column only reaches its top once the page has scrolled to it, so the page
+  // scrolls it there, and where the page is too short to, the column is capped to what is left above the keyboard. The
+  // cap goes when the keyboard closes.
+  function dockWide(what) {
+    var mr = C.host;
+    if (!mr || !mr.style || !wide()) return false;
+    if (what !== 'open') { mr.style.maxHeight = ''; return false; }
+    var v = W.viewportFit ? W.viewportFit() : null;
+    if (W.parseRoute().pane !== 'messages' || !v || !mr.getBoundingClientRect) return false;
+    var want = v.top + 8, top = mr.getBoundingClientRect().top;
+    if (top > want + 1) { window.scrollBy(0, Math.round(top - want)); top = mr.getBoundingClientRect().top; }
+    mr.style.maxHeight = Math.max(120, Math.round(v.top + v.height - Math.max(top, v.top) - 8)) + 'px';
+    return true;
+  }
+  if (W.onKeyboard) W.onKeyboard(function (what) { if (what === 'after') settleAfterKeyboard(); else dockWide(what); });
+
   // Crossing 860 px shows the chat beside the list: load it then.
   window.matchMedia('(min-width: 860px)').addEventListener('change', function (m) {
     if (m.matches && on() && C.host && W.parseRoute().pane === 'messages') mount(C.host, true);
@@ -1942,6 +2050,7 @@
     prepInstance: function () { return PREP_INST; }, notePrepInstance: function (id) { if (typeof id === 'string' && id) PREP_INST = id; },
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
+    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _settle: settleAfterKeyboard, _dockWide: dockWide, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn
   };
 })();

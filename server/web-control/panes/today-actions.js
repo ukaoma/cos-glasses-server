@@ -194,7 +194,7 @@
   var KB_MIN_PX = 120;
   var KB_STRIP_MIN_PX = 24;
   var BODY_MIN_PX = 72;          // about three lines of the conversation (15 px text at 1.5)
-  var KB = { on: false, strip: false, tight: false, frame: 0, listening: false, width: 0, inset: 0 };
+  var KB = { on: false, strip: false, tight: false, frame: 0, listening: false, width: 0, inset: 0, typed: false };
   function tall(el) { return (el && el.offsetHeight) || 0; }
   // What the conversation gets once the compact header and the reply box have theirs.
   function bodyRoom(height) {
@@ -246,7 +246,11 @@
     // again would take the room back and flicker.
     if (on && !KB.tight) KB.tight = bodyRoom(v.height) < BODY_MIN_PX;
     layer.classList.toggle('ta-kb-tight', on && KB.tight);
-    if (was !== KB.on + '|' + KB.strip + '|' + KB.tight) crumb('kb', v, focus);
+    // 7.0.2 (A1): the breadcrumb goes on every keyboard open and close in the sheet (a field typing with KB_MIN_PX or more
+    // covered), not only when a class flips: a keyboard that came while ta-kb was already on used to send nothing.
+    var typed = focus && v.inset >= KB_MIN_PX, opened = typed !== KB.typed;
+    KB.typed = typed;
+    if (opened || was !== KB.on + '|' + KB.strip + '|' + KB.tight) crumb('kb', v, focus);
     return v;
   }
   function revealFocused() {
@@ -274,7 +278,7 @@
   function unfit() {
     listenViewport(false);
     if (KB.frame && window.cancelAnimationFrame) window.cancelAnimationFrame(KB.frame);
-    KB.frame = 0; KB.on = false; KB.strip = false; KB.tight = false; KB.width = 0; KB.inset = 0;
+    KB.frame = 0; KB.on = false; KB.strip = false; KB.tight = false; KB.width = 0; KB.inset = 0; KB.typed = false;
     if (!layer) return;
     layer.classList.remove('ta-kb'); layer.classList.remove('ta-kb-strip'); layer.classList.remove('ta-kb-tight');
   }

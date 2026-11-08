@@ -3542,6 +3542,46 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
     })
   }
 
+  // 7.0.2 (A3, the Duo audit): a web view that shrinks innerHeight itself with the keyboard (real WebKit's RS model). The
+  // layout height was re-read every frame, so the inset read 0, ta-kb never came and Send sat under the keyboard.
+  const RS: Array<{ name: string; wide: boolean; layout: number; visible: number }> = [
+    { name: 'folded 382x557, 291 px keyboard', wide: false, layout: 557, visible: 266 },
+    { name: 'folded turned 557x382, 200 px keyboard', wide: true, layout: 382, visible: 182 },
+    { name: 'unfolded 951x539, 330 px keyboard', wide: true, layout: 539, visible: 209 },
+  ]
+  for (const c of RS) {
+    it(`7.0.2: ${c.name}, the web view shrinks with the keyboard: ta-kb comes on, the reply box is in view, and a kb breadcrumb is sent`, async () => {
+      const h = await opened(c.layout, { height: c.layout })
+      const L = layerOf(h), win = (h.ctx as any).window
+      focusReply(h)
+      win.innerHeight = c.visible
+      h.viewport({ height: c.visible }); h.runFrames()
+      expect(L.cls.has('ta-kb'), 'the keyboard is seen though innerHeight shrank').toBe(true)
+      const g = geometry(L, c.visible, { safeBottom: 0, wide: c.wide })
+      expect(inside(g.composer, { top: 0, bottom: c.visible }), `reply box ${JSON.stringify(g.composer)} inside 0..${c.visible}`).toBe(true)
+      expect(h.crumbs[h.crumbs.length - 1]).toMatchObject({ what: 'kb', data: { kb: true, focus: true, inset: c.layout - c.visible, lh: c.layout } })
+      // The keyboard closes: the field loses focus and the web view grows back. The sheet fills it again, ta-kb off.
+      blurReply(h); win.innerHeight = c.layout
+      h.viewport({ height: c.layout }); h.runFrames()
+      expect(L.cls.has('ta-kb')).toBe(false)
+      expect(L.props['--ta-vh']).toBe(c.layout + 'px')
+      expect(h.crumbs[h.crumbs.length - 1]).toMatchObject({ what: 'kb', data: { kb: false, inset: 0 } })
+    })
+  }
+  it('7.0.2 (A1): the sheet sends a kb breadcrumb on every keyboard open and close, even when ta-kb was already on', async () => {
+    const h = await opened(678, { height: 678 })
+    const L = layerOf(h)
+    // Something 130 px tall already covers the bottom with nothing focused: ta-kb on, no keyboard.
+    h.viewport({ height: 548 }); h.runFrames()
+    expect(L.cls.has('ta-kb')).toBe(true)
+    const before = h.crumbs.filter(x => x.what === 'kb').length
+    focusReply(h)
+    h.viewport({ height: 548 }, 'scroll'); h.runFrames()
+    expect(h.crumbs.filter(x => x.what === 'kb').length, 'the keyboard opening on a sheet already in ta-kb is reported').toBe(before + 1)
+    blurReply(h); h.runFrames()
+    expect(h.crumbs.filter(x => x.what === 'kb').length, 'and its closing').toBe(before + 2)
+  })
+
   // Canary BLOCKER: five files pushed the reply box and Send off the sheet at every size, keyboard up or down.
   for (const c of CASES.filter(x => /Safari, folded|Comet, folded, 110|on-screen keyboard|60 px hardware/.test(x.name))) {
     it(`${c.name}, five files attached: the chips scroll in their box and the words and Send stay on screen`, async () => {

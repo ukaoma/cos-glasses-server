@@ -186,6 +186,11 @@ select.field {
   padding: 4px calc(var(--gutter) + var(--safe-right)) calc(var(--safe-bottom) + 96px) calc(var(--gutter) + var(--safe-left));
 }
 .pane { max-width: 880px; }
+/* 7.0.2 (A2, the Duo audit): the COS chat route ends at its composer (panes/messages.js sets ws-chat). The 96 px above
+   (and the 40 px from 600 px up) held room for a bottom bar that is gone; under the sticky composer it was blank page
+   that a focused box scrolled to and the closed keyboard left on screen. Two columns from 860 px keep a small margin. */
+.workspace.ws-chat { padding-bottom: 0; }
+@media (min-width: 860px) { .workspace.ws-chat { padding-bottom: calc(var(--safe-bottom) + 16px); } }
 .pane-head { margin: 8px 0 18px; }
 .pane-title { font: 500 40px/1.02 var(--display); letter-spacing: -0.015em; margin: 0; }
 .pane-sub { color: var(--sub); margin: 6px 0 0; font-size: 15px; }
@@ -581,7 +586,8 @@ select.field {
 /* Folded phones: every button and field is at least 44 px tall (design QA: .cx-btn came in six heights from 30 px). A
    minimum only, so it grows the compact ones and leaves the taller ones; the per-pane phone heights that fought it are
    gone. */
-@media (max-width: 599px) {
+/* 7.0.2 (A8): a short touch screen at any width too (the unfolded Duo, 951x539 in Comet, is touch first). */
+@media (max-width: 599px), (pointer: coarse) and (max-height: 720px) {
   .cx-btn, .field { min-height: 44px !important; }
 }
 /* Touch screens: the small controls the canary measured under 44 px (nav 30, switches 30, a chip's remove and Retry 36,
@@ -592,6 +598,12 @@ select.field {
   .nav-btn, .btn.small, .cc-chip-retry, .sq-step, .mt-day { min-height: 44px !important; }
   .cc-chip-x, .cc-attach, .cc-camera { min-width: 44px !important; min-height: 44px !important; }
   .cx-switch button::before { content: ''; position: absolute; inset: -7px -4px; }
+}
+/* 7.0.2 (A8): a short touch screen 600 px wide or more (the unfolded Duo, 951x539) keeps the phone Ask sheet: full width
+   from the top, no centred desktop card with 8 % of a 539 px screen spent above it (app.js isPhone says phone too). */
+@media (min-width: 600px) and (pointer: coarse) and (max-height: 720px) {
+  .sheet-backdrop { padding-top: 0; }
+  .sheet { max-width: none; border-radius: 0 0 20px 20px; padding: calc(var(--safe-top) + 10px) var(--gutter) 14px; max-height: calc(100dvh - 90px); box-shadow: none; }
 }
 /* 6.99.30 (QA): an element with the hidden attribute is hidden, whatever display its classes give it ("Retry image"
    showed under loaded images: .link-btn's inline-flex beat [hidden]). */

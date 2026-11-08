@@ -417,8 +417,18 @@
     }
     SPLIT_KIT.mount(split, $('msg-handle'), SPLIT);
     split.setAttribute('data-show', current[0] === 'cos' ? 'chat' : 'list');
+    chatRoute(current[0] === 'cos');
     return split;
   }
+  // 7.0.2 (A2, the Duo audit): the workspace's bottom padding (app.css, +96 px folded and +40 px from 600 px) is room for
+  // a bottom bar that no longer exists. Under the chat's sticky composer it was blank page: focusing the box scrolled to
+  // it, and after the keyboard closed it stayed as a band under Model and Effort. On the COS chat route the workspace
+  // carries ws-chat, and app.css drops that padding. Any other route takes the class off.
+  function chatRoute(on) {
+    var ws = $('workspace');
+    if (ws && ws.classList) ws.classList.toggle('ws-chat', !!on);
+  }
+  if (W.onRoute) W.onRoute(function (r) { if (!r || r.pane !== 'messages' || r.args[0] !== 'cos') chatRoute(false); });
   function renderList() {
     var focus = document.activeElement && document.activeElement.id === 'msg-q';
     var caret = focus ? document.activeElement.selectionStart : null;
