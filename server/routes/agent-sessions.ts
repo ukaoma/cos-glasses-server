@@ -80,6 +80,7 @@ import {
 import type { OccupancyDirs } from '../lib/thread-occupancy.js'
 import { parseTurnsParam, readRecentSessionTurns, type RecentTurnsRead } from '../lib/agent-session-turns.js'
 import { redactLocalPathsDeep } from '../lib/local-path-redact.js'
+import { isNativeMacCaller } from '../lib/native-mac-caller.js'
 import { cosSpawnedPids } from '../lib/agent-session-ownership-store.js'
 import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.js'
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
@@ -847,7 +848,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     // 7.0.4 S1: every string the detail sends (the reply, the digest, the first prompt, each turn's words, tool
     // labels, file and image names) has its absolute local paths turned into base names (lib/local-path-redact.ts).
     // A walk over the whole value rather than a field list, so a field added later is covered too.
-    res.json(redactLocalPathsDeep({
+    const body = redactLocalPathsDeep({
       ...withRunning({ session_id: parsed.session_id }, running, hint),
       ...derivedRowFields(derived),
       ...queuedTurnsFields((await allQueuedWaitingLookup(Date.now()))(provider, parsed.session_id)),
@@ -908,7 +909,21 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
       ...sessionActFields((await sessionActFactsFor([{ provider, session_id: parsed.session_id, file: found }], {
         noteAck: continueNoteAcknowledged(req.headers[CONTINUE_NOTE_HEADER]),
       }))[0]),
-    }))
+    })
+    // 7.0.4 W1: COS Control's helper on this Mac matches a Work prompt it sent against the session's user turns by
+    // their opening words, and it holds the prompt unredacted. Only the user turns' words in `recent_turns` (the one
+    // field it matches on) are sent as written, and only to that privileged local caller: a direct loopback request
+    // that passed the header-token gate with no browser or proxy header (lib/native-mac-caller.ts). Every browser
+    // (cookie or token), phone, LAN, tailnet and proxied request gets the redacted body. The answer is already
+    // `private, no-store`; Vary names every header the choice reads, so no cache can serve one as the other.
+    if (turnsWanted !== null) res.vary('Cookie').vary('X-COS-Token').vary('Origin').vary('Referer').vary('User-Agent').vary('Sec-Fetch-Mode').vary('Sec-Fetch-Site').vary('Sec-Fetch-Dest')
+    if (recentTurns && Array.isArray(body.recent_turns) && isNativeMacCaller(req, res)) {
+      body.recent_turns = body.recent_turns.map((turn, index) => {
+        const original = recentTurns!.turns[index]
+        return original && original.role === 'user' && turn.role === 'user' ? { ...turn, text: original.text } : turn
+      })
+    }
+    res.json(body)
   } catch (error) {
     console.error(`[agent-sessions] detail failed: ${error instanceof Error ? error.message : error}`)
     res.status(500).json({ error: 'Failed to read agent session', reason: 'agent_sessions_read_failed' })

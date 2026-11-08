@@ -44,6 +44,9 @@ const DISPLAY_STREAM_CAPABILITY_PATH = /^\/display-stream\/\d{1,15}\.[0-9a-f]{64
 // Minting, status and decisions stay behind the token AND a loopback socket.
 const PAIRING_POLL_PATH = new RegExp(`^/pairing/claim/${PAIRING_NONCE_BODY}$`)
 
+/** `res.locals` key the gate sets to `'token'` when the X-COS-Token header matched. */
+export const API_AUTH_BY_LOCAL = 'cosApiAuthBy'
+
 export function isPublicApiRequest(method: string, path: string): boolean {
   if (PUBLIC_API_PATHS.has(path)) return true
   if (method === 'POST' && path === '/pairing/claim') return true
@@ -76,6 +79,9 @@ export function requireApiToken(apiToken: string, options: RequireApiTokenOption
   return (req, res, next) => {
     if (isPublicApiRequest(req.method, req.path)) return next()
     if (timingSafeTokenEqual(req.headers['x-cos-token'], apiToken)) {
+      // 7.0.4 W1: which door let this request in, for routes that answer the Mac's own helper differently from a
+      // browser (lib/native-mac-caller.ts). Set only here, after the header matched; a cookie session never sets it.
+      res.locals[API_AUTH_BY_LOCAL] = 'token'
       if (options.onAuthenticated) {
         try { options.onAuthenticated(req) } catch { /* observer only */ }
       }
