@@ -321,3 +321,79 @@ describe('S2 open list', () => {
   expect(item).toMatchObject({savedDestination:{mode:'newSession',provider:'claude',model:'opus'},taskRevision:controlSnapshotRevision(b)}); serialized(item)
  })
 })
+
+// ---- 7.0.1: Needs you stale (Miles 11/07: "Waiting for your reply" since Oct 31 on a session he talks to all day) ----
+describe('7.0.1 a needs-input report stands only until its session moves on', () => {
+ // The live receipt e840cc8e, as COS Control's journal held it on 11/07 (times exact, text replaced).
+ const S = 'claude:56627115-dbce-4030-ae47-446252b4cdad', WORK = 'a3e811fbc87a'
+ const created = 1_793_394_823.090714, report = 1_793_431_559.453   // 2026-10-30T21:13:43Z, 2026-10-31T07:25:59.453Z
+ const ev = (id: string, atS: number, kind: string) => ({ id, at: atS, kind, text: 'SECRET event' })
+ // eslint-disable-next-line @typescript-eslint/no-explicit-any
+ const live = (patch: Record<string, unknown> = {}): Record<string, any> => receipt({ id: 'e840cc8e-a0be-41fb-a00b-a61d6fca35c3', workID: `task:personal:${WORK}`, provider: 'claude',
+  modelID: 'existing-session', sessionID: S, sessionTitle: 'COS Glasses - QA review before publish', status: 'delivered', channel: 'turn', createdAt: created,
+  progress: { tag: WORK, reported: 'needsInput', reportedBy: 'session', evidence: 'Your test in the morning is the next step.', receivedAt: 1_793_394_824.316062,
+   seenReplies: [], notified: [], baseline: [],
+   events: [ev('1', created, 'sent'), ev('2', 1_793_394_824.316, 'received'), ev('3', 1_793_394_837.418, 'working'), ev('4', 1_793_395_297.034, 'needsInput'),
+    ev('5', 1_793_396_254.728, 'blocked'), ev('6', 1_793_412_229.540, 'needsInput'), ev('7', 1_793_412_585.776, 'jev'), ev('8', 1_793_423_247.492, 'blocked'), ev('9', report, 'needsInput')] },
+  ...patch })
+ const row = { id: WORK, domain: 'personal', title: 'Speaker Diarization for mac meeting', workIdentity: WORK }
+ const now = Date.parse('2026-11-08T05:08:46.000Z'), sessionLast = Date.parse('2026-11-08T05:08:44.839Z')
+ const open = (receipts: unknown[], sessionActivityMs?: ReadonlyMap<string, number>) => projectOpenWork(journalOf(receipts), [row], now, sessionActivityMs ? { sessionActivityMs } : undefined)
+
+ it('dates the wait from the report standing now (the newest event of its kind), not the card or its newest event', () => {
+  const [item] = open([live()]).items
+  expect(item.waitingSince).toBe('2026-10-31T07:25:59.453Z')
+  expect(item.createdAt).toBe('2026-10-30T21:13:43.090Z')
+  // A later event that is no report (a move, a note) moves updatedAt; the wait still began at the report.
+  const progress = (live().progress as { events: unknown[] })
+  const later = live({ progress: { ...live().progress as object, events: [...progress.events, ev('10', report + 3_600, 'moved')] } })
+  const [moved] = open([later]).items
+  expect(moved.updatedAt).toBe('2026-10-31T08:25:59.453Z'); expect(moved.waitingSince).toBe('2026-10-31T07:25:59.453Z')
+  // Done, or no report: no wait to date, even with a 'done' event standing.
+  expect(open([live({ progress: { ...live().progress as object, reported: 'done' } })]).items[0]).not.toHaveProperty('waitingSince')
+  const doneEvent = live({ progress: { ...live().progress as object, reported: 'done', events: [...progress.events, ev('10', report + 60, 'done')] } })
+  expect(open([doneEvent]).items[0]).not.toHaveProperty('waitingSince')
+  // A Jev reading is recorded as a 'jev' event.
+  const jev = live({ progress: { ...live().progress as object, reportedBy: 'jev', events: [ev('1', created, 'sent'), ev('2', report, 'jev')] } })
+  expect(open([jev]).items[0].waitingSince).toBe('2026-10-31T07:25:59.453Z')
+  // A session's report is not dated by a Jev event.
+  const sessionWithJev = live({ progress: { ...live().progress as object, events: [ev('1', created, 'sent'), ev('2', report, 'needsInput'), ev('3', report + 600, 'jev')] } })
+  expect(open([sessionWithJev]).items[0].waitingSince).toBe('2026-10-31T07:25:59.453Z')
+ })
+ it('the Oct 31 report is superseded by the session working on Nov 7: no longer needsInput, the report kept as history', () => {
+  const before = open([live()])
+  expect(before.items[0]).toMatchObject({ group: 'needsInput' }); expect(before.items[0]).not.toHaveProperty('supersededAt')
+  const after = open([live()], new Map([[S, sessionLast]]))
+  expect(after.items[0]).toMatchObject({ group: 'running', supersededAt: '2026-11-08T05:08:44.839Z', status: 'delivered', progress: { reported: 'needsInput' } })
+  serialized(after)
+ })
+ it('activity a minute or less after the report is the reply that carried it, not a move on', () => {
+  const at = (s: number) => new Map([[S, Math.round(report * 1000) + s * 1000]])
+  expect(open([live()], at(60)).items[0].group).toBe('needsInput')
+  expect(open([live()], at(61)).items[0].group).toBe('running')
+  expect(open([live()], at(-3_600)).items[0].group).toBe('needsInput')
+  // The floor is the report, not a later move of the card: activity between them is still a move on.
+  const progress = (live().progress as { events: unknown[] })
+  const movedLater = live({ progress: { ...live().progress as object, events: [...progress.events, ev('10', report + 3_600, 'moved')] } })
+  expect(open([movedLater], at(1_800)).items[0]).toMatchObject({ group: 'running', updatedAt: '2026-10-31T08:25:59.453Z' })
+ })
+ it('blocked is superseded the same way; done, failed and acknowledged are untouched', () => {
+  const blocked = live({ progress: { ...live().progress as object, reported: 'blocked' } })
+  expect(open([blocked], new Map([[S, sessionLast]])).items[0]).toMatchObject({ group: 'running', supersededAt: '2026-11-08T05:08:44.839Z' })
+  const done = live({ progress: { ...live().progress as object, reported: 'done' } })
+  expect(open([done], new Map([[S, sessionLast]])).items[0]).not.toHaveProperty('supersededAt')
+  expect(open([done], new Map([[S, sessionLast]])).items[0].group).toBe('done')
+ })
+ it('only the linked session counts, by its exact id; with no wait time the newest event is the floor', () => {
+  expect(open([live()], new Map([['claude:00000000-0000-4000-8000-000000000000', sessionLast]])).items[0].group).toBe('needsInput')
+  // No needsInput event at all (an older Control): updatedAt (the newest event) is the floor.
+  const bare = live({ progress: { ...live().progress as object, events: [ev('1', created, 'sent'), ev('2', report, 'working')] } })
+  const [item] = open([bare]).items; expect(item).not.toHaveProperty('waitingSince')
+  expect(open([bare], new Map([[S, Math.round(report * 1000) + 30_000]])).items[0].group).toBe('needsInput')
+  expect(open([bare], new Map([[S, sessionLast]])).items[0].group).toBe('running')
+ })
+ it('a completed handoff whose report was superseded asks for a look, as one with no report does', () => {
+  const completed = live({ status: 'completed' })
+  expect(open([completed], new Map([[S, sessionLast]])).items[0]).toMatchObject({ group: 'attention', supersededAt: '2026-11-08T05:08:44.839Z' })
+ })
+})

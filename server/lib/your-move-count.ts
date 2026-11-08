@@ -9,6 +9,7 @@
  * next poll tries again.
  */
 import { projectOpenWork, readWorkJournal, type OpenWorkGroup } from './work-activity.js'
+import { waitingSessionIds } from './work-session-activity.js'
 
 type Journal = ReturnType<typeof readWorkJournal>
 type Rows = Parameters<typeof projectOpenWork>[1]
@@ -17,6 +18,8 @@ export interface YourMoveCounterDeps {
   journal: () => Journal
   /** The board rows, or null when the board cannot be read in time. */
   rows: () => Promise<Rows | null>
+  /** 7.0.1: each linked session's newest activity, so a superseded report is not counted (the open list's own rule). */
+  sessionActivity?: (sessionIds: readonly string[]) => Promise<ReadonlyMap<string, number>>
   now?: () => number
   ttlMs?: number
 }
@@ -25,9 +28,9 @@ export const YOUR_MOVE_TTL_MS = 30_000
 const WAITING_GROUPS: readonly OpenWorkGroup[] = ['needsInput', 'attention', 'done']
 
 /** The pure count: open-work items whose group waits on you. */
-export function countYourMove(journal: Journal, rows: Rows, nowMs: number): number {
+export function countYourMove(journal: Journal, rows: Rows, nowMs: number, sessionActivityMs?: ReadonlyMap<string, number>): number {
   if (!journal.available) return 0
-  return projectOpenWork(journal, rows, nowMs).items.filter(item => WAITING_GROUPS.includes(item.group)).length
+  return projectOpenWork(journal, rows, nowMs, { sessionActivityMs }).items.filter(item => WAITING_GROUPS.includes(item.group)).length
 }
 
 export function createYourMoveCounter(deps: YourMoveCounterDeps): () => Promise<number | null> {
@@ -44,7 +47,10 @@ export function createYourMoveCounter(deps: YourMoveCounterDeps): () => Promise<
         if (!journal.available) return null
         const rows = await deps.rows()
         if (!rows) return null
-        const value = countYourMove(journal, rows, now())
+        const at = now()
+        const waiting = deps.sessionActivity && journal.available ? waitingSessionIds(projectOpenWork(journal, rows, at).items) : []
+        const activity = waiting.length ? await deps.sessionActivity!(waiting).catch(() => undefined) : undefined
+        const value = countYourMove(journal, rows, at, activity)
         cached = { at: now(), value }
         return value
       } catch {
