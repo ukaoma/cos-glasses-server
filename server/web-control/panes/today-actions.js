@@ -230,10 +230,11 @@
     if (w) KB.width = w;
     var was = KB.on + '|' + KB.strip + '|' + KB.tight;
     if (turned) KB.tight = false;
-    // A rise is what covers the bottom growing by a strip's worth or more while the keyboard layout is on, not a class
-    // flip: a 120 px bar can already hold ta-kb before the keyboard comes, and a keyboard shrinking to a hardware strip
-    // is not a rise (QA 6.99.32 Skeptic N-3).
-    var rose = (on || strip) && v.inset >= (KB.inset || 0) + KB_STRIP_MIN_PX;
+    // A rise is what covers the bottom growing, by any amount, while the keyboard layout is on: not a class flip (a
+    // 120 px bar can already hold ta-kb before the keyboard comes, QA 6.99.32 Skeptic N-3), and not a jump past a step
+    // (a keyboard animating up in 20 px frames never crossed one, Codex's root regression on 98f3cde). The reveal is
+    // scrollIntoView 'nearest', so a frame where the field is already in view moves nothing. Shrinking never reveals.
+    var rose = (on || strip) && v.inset > (KB.inset || 0);
     KB.inset = v.inset;
     if (on !== KB.on) { KB.on = on; KB.tight = false; layer.classList.toggle('ta-kb', on); }
     if (strip !== KB.strip) { KB.strip = strip; layer.classList.toggle('ta-kb-strip', strip); }

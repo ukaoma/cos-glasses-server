@@ -3556,20 +3556,52 @@ describe('6.99.30: the sheet is the visible part of the page, in any browser (Co
     expect(scrolls, 'asked for, not done inside the layout frame').toEqual([])
     h.runFrames()
     expect(scrolls).toEqual(['other nearest'])
+    h.viewport({ height: 600 }); h.runFrames(); h.runFrames()
+    h.viewport({ height: 600 }); h.runFrames(); h.runFrames()
+    expect(scrolls, 'a shrinking or unchanged cover never reveals').toEqual(['other nearest'])
     h.viewport({ height: 560 }); h.runFrames(); h.runFrames()
-    expect(scrolls, 'only when the keyboard rises, not on every resize while it is up').toEqual(['other nearest'])
+    expect(scrolls, 'the cover growing again (a suggestion bar) reveals again').toEqual(['other nearest', 'other nearest'])
     h.viewport({ height: 1000 }); h.runFrames(); h.runFrames()
     h.document.activeElement = h.document.body
     h.viewport({ height: 580 }); h.runFrames(); h.runFrames()
-    expect(scrolls, 'nothing focused: nothing scrolled').toEqual(['other nearest'])
+    expect(scrolls, 'nothing focused: nothing scrolled').toEqual(['other nearest', 'other nearest'])
     h.viewport({ height: 1000 }); h.runFrames(); h.runFrames()
     h.document.activeElement = other
     h.viewport({ height: 580 }); h.runFrames()
     h.document.activeElement = h.document.body   // focus left before the reveal's frame
     ;(h.document.body as any).scrollIntoView = () => scrolls.push('body')
     h.runFrames()
-    expect(scrolls, 'focus gone by the next frame: nothing scrolled').toEqual(['other nearest'])
+    expect(scrolls, 'focus gone by the next frame: nothing scrolled').toEqual(['other nearest', 'other nearest'])
   })
+  it('desktop zoom rounding (under 24 px) with a field focused never scrolls: no keyboard layout, no reveal', async () => {
+    const h = await opened(1000, { height: 1000 })
+    const L = layerOf(h)
+    const other: any = Object.assign(new El(), { tagName: 'INPUT', type: 'text' })
+    const scrolls: number[] = []
+    other.scrollIntoView = () => scrolls.push(1)
+    L.contains = ((x: unknown) => x === other) as any
+    h.document.activeElement = other
+    for (const inset of [4, 9, 17, 23]) { h.viewport({ height: 1000 - inset }); h.runFrames(); h.runFrames() }
+    expect(L.cls.has('ta-kb') || L.cls.has('ta-kb-strip')).toBe(false)
+    expect(scrolls).toEqual([])
+  })
+  // Codex root regression on 98f3cde: a keyboard animating up in 20 px frames, and a bar already holding ta-kb.
+  for (const [label, from, to] of [['a keyboard animating 0 to 420 px in 20 px frames', 0, 420], ['a 130 px bar, then 150 to 430 px in 20 px frames', 130, 430]] as const) {
+    it(`${label}: the focused Other field is revealed`, async () => {
+      const h = await opened(1000, { height: 1000 })
+      const L = layerOf(h)
+      const other: any = Object.assign(new El(), { tagName: 'INPUT', type: 'text' })
+      const scrolls: number[] = []
+      L.contains = ((x: unknown) => x === other) as any
+      h.viewport({ height: 1000 - from }); h.runFrames(); h.runFrames()
+      h.document.activeElement = other
+      other.scrollIntoView = () => scrolls.push(1)
+      let beforeLast = 0
+      for (let inset = from + 20; inset <= to; inset += 20) { if (inset === to) beforeLast = scrolls.length; h.viewport({ height: 1000 - inset }); h.runFrames(); h.runFrames() }
+      expect(L.cls.has('ta-kb')).toBe(true)
+      expect(scrolls.length, 'the last frame of the rise reveals, so the field ends in view').toBe(beforeLast + 1)
+    })
+  }
   it('the reply box reveals its whole form; a strip rise reveals too; a closed sheet and a focus change by the frame are honoured', async () => {
     const h = await opened(1000, { height: 1000 })
     const L = layerOf(h)

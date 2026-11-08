@@ -4,14 +4,14 @@
 
 **Default-on changes:**
 - **A Mac that hangs is marked not answering.** Before, a Mac that neither answered nor refused (asleep, a stale Tailscale route) kept "Server connected" up, and one hung question read stopped the 10 s question check for good. Now the question check gives up after 15 s, says the Mac is not answering (the rail, an open session sheet, and Submit, Allow and Deny waiting with the reason), and checks again. Any read api() makes that times out says the same; a write that times out does not (a slow save is not a Mac that went away). The next answer marks it up again.
-- **A focused field comes back into view when the keyboard rises.** Unfolded, a question card's Other field could sit under the on-screen keyboard (the keyboard rises after the focus, so the first scroll landed too early). Once the layout has the keyboard, the focused field (or the reply box) is scrolled into view again, once per keyboard rise.
+- **A focused field comes back into view when the keyboard rises.** Unfolded, a question card's Other field could sit under the on-screen keyboard (the keyboard rises after the focus, so the first scroll landed too early). Once the layout has the keyboard, the focused field (or the reply box) is scrolled into view again, each time the keyboard rises or grows.
 
 - **The Stop button's row is 46 px on phones under 600 px wide**, so the 44 px Stop is no longer clipped top and bottom (6.99.30 made every button there 44 px and left the row at 38).
 
 **How the two fixes decide (QA 6.99.32 Skeptic):**
 - The question check's 15 s limit covers the reply's body too. A Mac that answers the headers and then stalls frees the check without being marked down, since it did answer.
 - A read that times out marks the Mac down only if nothing has answered since that read went out. A slow image whose headers came, or a busy Mac whose question check keeps answering, never flaps the status. Write timeouts (POST, PUT, PATCH, DELETE) never mark it down. The Sessions reader's own transport keeps its timeouts to itself.
-- A keyboard "rise" is what covers the bottom growing by 24 px or more while the keyboard layout is on, not a class flip. A 120 px bottom bar already holding the layout still reveals when the keyboard comes. The field revealed is the one focused when the frame runs; the reply box reveals its whole form.
+- A keyboard "rise" is what covers the bottom growing, by any amount, while the keyboard layout is on: a keyboard that animates up in small frames reveals on each, so its last frame leaves the field in view, and a 120 px bottom bar already holding the layout still reveals when the keyboard comes. Shrinking never reveals, and the scroll moves only as far as needed. The field revealed is the one focused when the frame runs; the reply box reveals its whole form.
 
 **Known limits:**
 - Not yet accepted on a physical iPhone Duo. Every check so far is the full suite, code review and headless renders at Duo sizes.
