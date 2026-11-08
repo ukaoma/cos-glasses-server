@@ -136,7 +136,10 @@ export function parseSnapshot(raw: unknown): CalendarSnapshot | null {
       ? r.attendees.slice(0, 200).flatMap((a): SnapshotAttendee[] => {
         if (!a || typeof a !== 'object') return []
         const x = a as Record<string, unknown>
-        return [{ name: str(x.name, 200), domain: str(x.domain, 253) }]
+        // macOS fills a participant's name with their address when there is no display name. Names only, never an
+        // address: a name that looks like one is dropped (the domain stays). Same rule as Control's attendeeName.
+        const name = str(x.name, 200)
+        return [{ name: name && !name.includes('@') ? name : null, domain: str(x.domain, 253) }]
       })
       : []
     const url = typeof r.meetingUrl === 'string' && r.meetingUrl.length <= 2048 && MEETING_HOSTS.test(r.meetingUrl) ? r.meetingUrl : null
