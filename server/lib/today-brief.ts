@@ -4,7 +4,7 @@
  * Today's top text was counts ("Three agents are working, with 30 more sessions open"). This writes two or three plain
  * sentences about what the sessions are building toward, what is moving, what waits on Miles and what comes next, from
  * what an open Today already read: session titles, states and how long, each session's last line, what needs him, and
- * the Work cards in progress. Haiku writes it through the isolated text runner (claude-text-runner.ts: no tools, MCP,
+ * the Work cards in progress. Sonnet (7.0.1; Haiku before) writes it through the isolated text runner (claude-text-runner.ts: no tools, MCP,
  * hooks or session, `--model` always passed, so it can never become Opus).
  *
  * HOW IT STOPS (every model caller answers this; .claude/rules/gotchas.md "Every new claude -p caller"):
@@ -13,7 +13,9 @@
  *   folder). Neither set: OFF. The server has no clean private-build signal, so OFF is the default for everyone.
  * - CAPS: a generation only when an open Today asks (POST /api/today/brief), only when the trimmed inputs' fingerprint
  *   changed since the last summary, at most one start every 10 minutes, at most 60 starts a local day. A start is
- *   counted BEFORE the call, so a call that ran was spent whatever became of it.
+ *   counted BEFORE the call, so a call that ran was spent whatever became of it. 7.0.1 FORCED REFRESH (the Today
+ *   refresh button, `force: true`): skips the 10-minute interval and the "inputs changed" check, at most one forced
+ *   start every 30 s, and still inside the same 60 a day, the breaker, the switch, recording and drain.
  * - BREAKER: 3 failures in a row (a CLI error, a timeout, an empty or guarded answer) stop it for 1 hour; the next
  *   start after that hour is one trial, and a failed trial reopens it for another hour.
  * - NOT WHILE: a meeting is recording or the server is draining (6.99.26 QA). Those, the switch, the breaker, the cap
@@ -37,11 +39,24 @@ import { localDay } from './local-day.js'
 import { durableAtomicWriteFileSync } from './atomic-fs.js'
 import { securePrivateDirectory } from './secure-user-config.js'
 
-export const TODAY_BRIEF_MODEL = 'haiku'
+/**
+ * 7.0.1 (Miles 11/07, "It might be better to use sonnet for that summary generation"): Sonnet, was Haiku. The isolated
+ * runner passes it as `--model sonnet`, the CLI's alias for the current Sonnet (measured 11/07: it resolved to
+ * claude-sonnet-5-5 through runClaudeText).
+ *
+ * COST, measured 11/07 with a full-size prompt (40 sessions, about 3.6k input tokens, about 100 output) through the
+ * runner's own argv with JSON output: Sonnet $0.0156 to $0.0180 a call, Haiku $0.0008. About twenty times more a call.
+ * The cap stays 60 starts a day (forced refreshes included), so the worst day is about $1.10 where Haiku's was about
+ * $0.05; the 10-minute interval and "only when the inputs changed" keep a normal day far below the cap. On a Claude
+ * subscription the CLI draws plan usage rather than billing; the figures are the CLI's own API-price estimate.
+ */
+export const TODAY_BRIEF_MODEL = 'sonnet'
 export const TODAY_BRIEF_EFFORT = 'low'
 export const TODAY_BRIEF_TIMEOUT_MS = 30_000
 export const TODAY_BRIEF_MIN_INTERVAL_MS = 10 * 60 * 1000
 export const TODAY_BRIEF_DAILY_CAP = 60
+/** 7.0.1: a forced refresh (the Today refresh button) at most once per this, on top of the daily cap. */
+export const TODAY_BRIEF_FORCE_MIN_MS = 30_000
 export const TODAY_BRIEF_BREAKER_FAILURES = 3
 export const TODAY_BRIEF_BREAKER_MS = 60 * 60 * 1000
 /** The fenced data block's bound. Four characters a token: about 3,000 tokens, with the system prompt about 3,300. */
@@ -54,7 +69,7 @@ export const TODAY_BRIEF_SETTINGS_FILE = 'today-brief-settings.json'
 
 export type TodayBriefState = 'fresh' | 'stale' | 'off' | 'failed'
 /** Why there is no fresh summary: the switch, a cap, the breaker, a failed call, or nothing to write about. */
-export type TodayBriefReason = 'switch_off' | 'interval' | 'daily_cap' | 'paused' | 'failed' | 'empty_inputs' | 'not_asked' | 'recording' | 'maintenance'
+export type TodayBriefReason = 'switch_off' | 'interval' | 'daily_cap' | 'paused' | 'failed' | 'empty_inputs' | 'not_asked' | 'recording' | 'maintenance' | 'refresh_throttled'
 export type TodayBriefSwitchSource = 'env' | 'settings' | 'default'
 
 export interface TodayBriefView {
@@ -70,6 +85,8 @@ export interface TodayBriefView {
   /** The switch as resolved now, and what set it. */
   enabled: boolean
   source: TodayBriefSwitchSource
+  /** 7.0.1: with reason `refresh_throttled`, how long until a forced refresh may start. */
+  retryAfterMs?: number
 }
 
 // ── inputs ─────────────────────────────────────────────────────────────────
@@ -484,6 +501,8 @@ interface BriefFile {
   count: number
   /** When the last generation started (the interval). */
   lastStartAt: number
+  /** 7.0.1: when the last FORCED generation started (TODAY_BRIEF_FORCE_MIN_MS). */
+  lastForceAt: number
   /** Failures in a row, and when the breaker opened. */
   failures: number
   openedAt: number
@@ -496,7 +515,7 @@ interface BriefFile {
   lastFailCode: string
   cache: BriefCache | null
 }
-const emptyFile = (day: string): BriefFile => ({ schema: 1, day, count: 0, lastStartAt: 0, failures: 0, openedAt: 0, lastAskFingerprint: '', lastOpener: '', lastFailAt: 0, lastFailCode: '', cache: null })
+const emptyFile = (day: string): BriefFile => ({ schema: 1, day, count: 0, lastStartAt: 0, lastForceAt: 0, failures: 0, openedAt: 0, lastAskFingerprint: '', lastOpener: '', lastFailAt: 0, lastFailCode: '', cache: null })
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
 
 function readJson(file: string): unknown {
@@ -521,6 +540,7 @@ function parseFile(raw: unknown, day: string): BriefFile {
     day: typeof raw.day === 'string' ? raw.day : day,
     count: Math.floor(num(raw.count)),
     lastStartAt: num(raw.lastStartAt),
+    lastForceAt: num(raw.lastForceAt),
     failures: Math.floor(num(raw.failures)),
     openedAt: num(raw.openedAt),
     lastAskFingerprint: typeof raw.lastAskFingerprint === 'string' ? raw.lastAskFingerprint : '',
@@ -560,13 +580,14 @@ export interface TodayBriefSettings { enabled: boolean; source: TodayBriefSwitch
 export interface TodayBrief {
   /** The cached summary, no generation (GET). */
   peek(): TodayBriefView
-  /** Why nothing could be generated now, checked BEFORE the server's board and sub-agent reads; null when it may. */
-  gate(): TodayBriefReason | null
+  /** Why nothing could be generated now, checked BEFORE the server's board and sub-agent reads; null when it may.
+   *  7.0.1 `force` (the refresh button): the 10-minute interval does not apply; one forced start per 30 s does. */
+  gate(opts?: { force?: boolean }): TodayBriefReason | null
   /** A gated ask: the page's rows only, no reads and no call. Fresh while the page's rows match the cached summary's. */
   askGated(pageInputs: TodayBriefInputs, reason: TodayBriefReason): TodayBriefView
   /** An open Today's ask with what it read (POST). Generates only when every gate allows; never throws for a gate.
    *  `pageFingerprint` is the page's rows alone, kept with a new summary for later gated asks. */
-  ask(inputs: TodayBriefInputs, pageFingerprint?: string): Promise<TodayBriefView>
+  ask(inputs: TodayBriefInputs, pageFingerprint?: string, opts?: { force?: boolean }): Promise<TodayBriefView>
   settings(): TodayBriefSettings
   setEnabled(enabled: boolean): TodayBriefSettings
 }
@@ -611,7 +632,16 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
   const within = (since: number, ms: number) => since >= 0 && since < ms
   const breakerOpen = (f: BriefFile) => f.failures >= TODAY_BRIEF_BREAKER_FAILURES && within(now() - f.openedAt, TODAY_BRIEF_BREAKER_MS)
 
+  const forceWait = (f: BriefFile): number => {
+    const since = now() - f.lastForceAt
+    return f.lastForceAt && within(since, TODAY_BRIEF_FORCE_MIN_MS) ? TODAY_BRIEF_FORCE_MIN_MS - since : 0
+  }
   const view = (fingerprint: string, reason?: TodayBriefReason): TodayBriefView => {
+    const base = viewOf(fingerprint, reason)
+    if (reason !== 'refresh_throttled' || !base.enabled) return base
+    return { ...base, reason, retryAfterMs: Math.max(1, Math.ceil(forceWait(load()))) }
+  }
+  const viewOf = (fingerprint: string, reason?: TodayBriefReason): TodayBriefView => {
     const sw = resolveSwitch()
     if (!sw.enabled) return { text: '', at: null, basis: '', model: TODAY_BRIEF_MODEL, state: 'off', reason: 'switch_off', enabled: false, source: sw.source }
     const f = load(), cache = todaysCache(f)
@@ -624,11 +654,12 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
     }
   }
 
-  const generate = (inputs: TodayBriefInputs, fingerprint: string, pageFingerprint: string, lease: { release(): void } | null): Promise<void> => {
+  const generate = (inputs: TodayBriefInputs, fingerprint: string, pageFingerprint: string, lease: { release(): void } | null, force = false): Promise<void> => {
     const f = load()
-    // Counted before the call: a call that started was spent.
+    // Counted before the call: a call that started was spent. A forced start counts against the same daily cap.
     f.count += 1
     f.lastStartAt = now()
+    if (force) f.lastForceAt = now()
     save()
     const prompt = buildTodayBriefPrompt(inputs, now())
     const started = now()
@@ -664,13 +695,16 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
       .finally(() => { try { lease?.release() } catch { /* released by its owner */ } })
   }
   /** The brief's own gates plus the server's (recording, drain). */
-  const gate = (f: BriefFile): TodayBriefReason | null => {
+  const gate = (f: BriefFile, force = false): TodayBriefReason | null => {
     if (!resolveSwitch().enabled) return 'switch_off'
     if (inflight) return null   // an ask waits on the call already running rather than answering stale
     const blocked = deps.blocked?.() ?? null
     if (blocked) return blocked
     if (breakerOpen(f)) return 'paused'
     if (f.count >= dailyCap) return 'daily_cap'
+    // 7.0.1: the refresh button skips the 10-minute interval, never the cap, the breaker or the switch, and has its own
+    // floor so a held-down button cannot spend the day's cap in a minute.
+    if (force) return forceWait(f) > 0 ? 'refresh_throttled' : null
     if (f.lastStartAt && within(now() - f.lastStartAt, minInterval)) return 'interval'
     return null
   }
@@ -693,29 +727,31 @@ export function createTodayBrief(deps: TodayBriefDeps): TodayBrief {
       if (!resolveSwitch().enabled) return view('')
       return view(load().lastAskFingerprint)
     },
-    gate() { return gate(load()) },
+    gate(opts) { return gate(load(), opts?.force === true) },
     askGated(pageInputs, reason) {
       if (!resolveSwitch().enabled) return view('')
       const fingerprint = todayBriefFingerprint(pageInputs)
       remember(load(), fingerprint, todayBriefOpener(pageInputs))
       return view(fingerprint, reason)
     },
-    async ask(inputs, pageFingerprint = '') {
+    async ask(inputs, pageFingerprint = '', opts) {
       if (!resolveSwitch().enabled) return view('')
+      const force = opts?.force === true
       const fingerprint = todayBriefFingerprint(inputs)
       const f = load()
       remember(f, fingerprint, todayBriefOpener(inputs))
       const cache = todaysCache(f)
-      if (cache && cache.fingerprint === fingerprint) return view(fingerprint)
+      // A forced refresh writes again even when nothing changed: the person asked for a fresh summary.
+      if (!force && cache && cache.fingerprint === fingerprint) return view(fingerprint)
       // Concurrent asks share one generation, whichever inputs started it.
       if (inflight) { await inflight; return view(fingerprint, todaysCache(load())?.fingerprint === fingerprint ? undefined : 'interval') }
       if (!hasBriefInputs(inputs)) return view(fingerprint, 'empty_inputs')
-      const closed = gate(f)
+      const closed = gate(f, force)
       if (closed) return view(fingerprint, closed)
       // The call holds the server's lease; a drain that began after the gate refuses here, before anything is spent.
       let lease: { release(): void } | null = null
       try { lease = deps.lease ? deps.lease() : null } catch { return view(fingerprint, 'maintenance') }
-      const run = generate(inputs, fingerprint, pageFingerprint, lease)
+      const run = generate(inputs, fingerprint, pageFingerprint, lease, force)
       inflight = run
       try { await run } finally { if (inflight === run) inflight = null }
       const after = todaysCache(load())

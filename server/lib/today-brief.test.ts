@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
+  TODAY_BRIEF_DAILY_CAP, TODAY_BRIEF_FORCE_MIN_MS, TODAY_BRIEF_DATA_MAX_CHARS, TODAY_BRIEF_MODEL, TODAY_BRIEF_SYSTEM_PROMPT, buildTodayBriefData, buildTodayBriefPrompt, cleanTodayBrief, cleanTodayBriefWithGuard, createTodayBrief,
   claimsNothingWaits, todayBriefOpener, unbackedDateClaim, inputsCorpus, normalizeTodayBriefInputs, scrubText, subagentLookups, todayBriefFingerprint, withSubagents, BRIEF_AGENT_ROWS_MAX, type SubagentReading, type TodayBriefAuditRow, type TodayBriefDeps, type TodayBriefInputs,
 } from './today-brief.js'
 
@@ -31,7 +31,7 @@ function harness(opts: { env?: Record<string, string>; answer?: (n: number) => s
     env: () => env,
     generate: async (prompt, system, model) => {
       prompts.push(prompt)
-      expect(model).toBe('haiku')
+      expect(model).toBe('sonnet')
       expect(system).toContain('untrusted data')
       const a = opts.answer ? opts.answer(prompts.length) : 'Your release work is moving and one session waits on you. Answer it next.'
       const v = await a
@@ -205,7 +205,7 @@ describe('the breaker: 3 failures in a row stop it for an hour', () => {
     const h = harness({ answer: () => 'Nothing is waiting on you right now, all clear.', minIntervalMs: 0 })
     const v = await h.brief.ask(inputs())
     expect(v).toMatchObject({ state: 'failed', reason: 'failed' })
-    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'guarded', model: 'haiku', guard: 'nothing_waiting' })])
+    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'guarded', model: 'sonnet', guard: 'nothing_waiting' })])
     expect(JSON.parse(readFileSync(h.deps.stateFile, 'utf8')).failures).toBe(1)
   })
 })
@@ -339,7 +339,7 @@ describe('the audit', () => {
     await h.brief.ask(inputs())
     expect(h.audits).toHaveLength(1)
     const row = h.audits[0]!
-    expect(row).toMatchObject({ outcome: 'ok', model: 'haiku' })
+    expect(row).toMatchObject({ outcome: 'ok', model: 'sonnet' })
     expect(row.inputChars).toBeGreaterThan(500)
     expect(Object.keys(row).sort()).toEqual(['durationMs', 'inputChars', 'model', 'outcome', 'outputChars'])   // no guard on an ok row, and never the text
   })
@@ -587,5 +587,69 @@ describe('6.99.27 QA round 2: more "nothing waits" phrasings, "none running", an
     const v = await h.brief.ask(inputs())
     expect(v.text).toBe('Two things need you. The release work is moving along.')
     expect(h.audits[0]).toMatchObject({ outcome: 'ok', dropped: 'date_claim' })
+  })
+})
+
+describe('7.0.1: Sonnet and the forced refresh', () => {
+  it('pins Sonnet by the CLI alias the isolated runner passes (never a dated id, never Opus)', () => {
+    expect(TODAY_BRIEF_MODEL).toBe('sonnet')
+    expect(TODAY_BRIEF_DAILY_CAP).toBe(60)
+    expect(TODAY_BRIEF_FORCE_MIN_MS).toBe(30_000)
+  })
+
+  it('a forced ask writes again inside the 10-minute interval and with unchanged inputs', async () => {
+    const h = harness()
+    await h.brief.ask(inputs())
+    expect(h.prompts).toHaveLength(1)
+    h.clock.t += MIN
+    expect(h.brief.gate()).toBe('interval')
+    expect((await h.brief.ask(inputs())).state).toBe('fresh')
+    expect(h.prompts).toHaveLength(1)
+    expect(h.brief.gate({ force: true })).toBeNull()
+    const forced = await h.brief.ask(inputs(), '', { force: true })
+    expect(h.prompts).toHaveLength(2)
+    expect(forced).toMatchObject({ state: 'fresh', model: 'sonnet' })
+  })
+
+  it('a second forced ask inside 30 s is throttled with retryAfterMs, and calls no model', async () => {
+    const h = harness()
+    await h.brief.ask(inputs(), '', { force: true })
+    h.clock.t += 10_000
+    expect(h.brief.gate({ force: true })).toBe('refresh_throttled')
+    const v = await h.brief.ask(inputs({}, 'b'), '', { force: true })
+    expect(v.reason).toBe('refresh_throttled')
+    expect(v.retryAfterMs).toBe(20_000)
+    expect(h.prompts).toHaveLength(1)
+    h.clock.t += 20_000
+    expect(h.brief.gate({ force: true })).toBeNull()
+  })
+
+  it('a forced ask still stops at the daily cap, the breaker, the switch and a recording', async () => {
+    const capped = harness({ dailyCap: 1 })
+    await capped.brief.ask(inputs(), '', { force: true })
+    capped.clock.t += 60_000
+    expect(capped.brief.gate({ force: true })).toBe('daily_cap')
+    expect((await capped.brief.ask(inputs({}, 'z'), '', { force: true })).reason).toBe('daily_cap')
+    expect(capped.prompts).toHaveLength(1)
+
+    const failing = harness({ answer: () => new Error('cli failed') })
+    for (let i = 0; i < 3; i++) { await failing.brief.ask(inputs({}, String(i)), '', { force: true }); failing.clock.t += 31_000 }
+    expect(failing.brief.gate({ force: true })).toBe('paused')
+
+    const off = harness({ enabled: false })
+    expect(off.brief.gate({ force: true })).toBe('switch_off')
+    expect((await off.brief.ask(inputs(), '', { force: true })).state).toBe('off')
+
+    const rec = harness()
+    rec.server.blocked = 'recording'
+    expect(rec.brief.gate({ force: true })).toBe('recording')
+  })
+
+  it('the forced floor survives a restart (it is in the state file)', async () => {
+    const h = harness()
+    await h.brief.ask(inputs(), '', { force: true })
+    const again = createTodayBrief(h.deps)
+    h.clock.t += 5_000
+    expect(again.gate({ force: true })).toBe('refresh_throttled')
   })
 })

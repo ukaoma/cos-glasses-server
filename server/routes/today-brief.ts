@@ -6,6 +6,10 @@
  *                                   what needs you). Generates only when the switch is on, the inputs changed, 10 minutes
  *                                   passed and the day's 60 are not spent. The Work cards in progress come from the
  *                                   server's own shared board read, never the body.
+ *                                   7.0.1: `"force": true` in the body is the Today refresh button. It skips the
+ *                                   10-minute interval and the "inputs unchanged" check, at most once every 30 s,
+ *                                   inside the same 60 a day. A throttled one answers reason `refresh_throttled` and
+ *                                   `retryAfterMs`.
  * - GET  /api/today/brief/settings  the switch and what set it.
  * - POST /api/today/brief/settings  { enabled: boolean }, the Settings toggle. COS_TODAY_BRIEF_LLM, when set, still wins.
  * Auth is the parent /api gate (token or web session cookie). Every answer is private, no-store.
@@ -61,7 +65,7 @@ export async function readSubagentsFor(keys: string[], now = Date.now()): Promis
   return out
 }
 
-/** The server's own brief: the data folder, Haiku through the isolated text runner, one audit row per start. */
+/** The server's own brief: the data folder, Sonnet (7.0.1) through the isolated text runner, one audit row per start. */
 export function defaultTodayBrief(): TodayBrief {
   return createTodayBrief({
     stateFile: dataPath(TODAY_BRIEF_STATE_FILE),
@@ -95,6 +99,14 @@ export function workInProgress(rows: TaskBoardRow[] | null): BriefWork[] {
   return out.sort((a, b) => Number(b.running) - Number(a.running)).slice(0, 12)
 }
 
+/** The body without `force`, and whether it asked to force. Anything but a boolean `force` is a bad request. */
+export function splitForce(raw: unknown): { body: unknown; force: boolean } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('force' in raw)) return { body: raw, force: false }
+  const { force, ...rest } = raw as Record<string, unknown>
+  if (typeof force !== 'boolean') throw new TodayBriefInputError('invalid_today_brief')
+  return { body: rest, force }
+}
+
 export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
   const router = Router()
   router.use('/today/brief', (_req, res, next) => { res.set('Cache-Control', 'private, no-store'); next() })
@@ -108,18 +120,21 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
       if (Buffer.byteLength(JSON.stringify(req.body ?? null)) > TODAY_BRIEF_BODY_MAX_BYTES) {
         return res.status(413).json({ error: { code: 'today_brief_too_large', message: 'Too much for the Today summary.' } })
       }
+      // 7.0.1: `force` is the refresh button's flag, taken off before the rows are read (the rows reject unknown keys).
+      const { body, force } = splitForce(req.body)
       // The switch first: off reads nothing, not even the board.
       if (!deps.brief.settings().enabled) {
-        normalizeTodayBriefInputs(req.body)
+        normalizeTodayBriefInputs(body)
         return res.json(deps.brief.peek())
       }
-      // Every gate that needs no reads goes first (switch, recording, drain, breaker, daily cap, interval): a gated ask
-      // answers from the page's rows alone and reads neither the board nor any transcript.
-      const pageInputs = normalizeTodayBriefInputs(req.body)
-      const closed = deps.brief.gate()
+      // Every gate that needs no reads goes first (switch, recording, drain, breaker, daily cap, interval or, forced,
+      // the 30 s refresh floor): a gated ask answers from the page's rows alone and reads neither the board nor any
+      // transcript.
+      const pageInputs = normalizeTodayBriefInputs(body)
+      const closed = deps.brief.gate({ force })
       if (closed) return res.json(deps.brief.askGated(pageInputs, closed))
       const work = workInProgress(await deps.board().catch(() => null))
-      let inputs = normalizeTodayBriefInputs(req.body, work)
+      let inputs = normalizeTodayBriefInputs(body, work)
       const keys = subagentLookups(inputs)
       if (keys.length && deps.subagents) {
         let timer: ReturnType<typeof setTimeout> | undefined
@@ -127,7 +142,7 @@ export function createTodayBriefRouter(deps: TodayBriefRouterDeps): Router {
         const readings = await Promise.race([deps.subagents(keys).catch(() => new Map<string, SubagentReading>()), late]).finally(() => clearTimeout(timer))
         inputs = withSubagents(inputs, readings, (deps.now ?? Date.now)())
       }
-      res.json(await deps.brief.ask(inputs, todayBriefFingerprint(pageInputs)))
+      res.json(await deps.brief.ask(inputs, todayBriefFingerprint(pageInputs), { force }))
     } catch (error) {
       if (error instanceof TodayBriefInputError) return res.status(400).json({ error: { code: error.code, message: 'That is not a Today summary request.' } })
       console.warn(`[today-brief] ask failed (${error instanceof Error ? error.name : 'error'})`)

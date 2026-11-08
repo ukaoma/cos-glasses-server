@@ -62,7 +62,7 @@ describe('POST /api/today/brief', () => {
     board = [row({ title: 'Ship the Today summary', workStage: 'draft' }), row({ title: 'Done card', checked: true, workStage: 'qa' }), row({ title: 'Someday', workStage: 'planned' })]
     const res = await post('/today/brief', ASK)
     const v = await res.json()
-    expect(v).toMatchObject({ state: 'fresh', model: 'haiku', basis: '1 session and 1 Work card' })
+    expect(v).toMatchObject({ state: 'fresh', model: 'sonnet', basis: '1 session and 1 Work card' })
     expect(v.text).toContain('release')
     expect(prompts[0]).toContain('Ship the Today summary (being built)')
     expect(prompts[0]).not.toContain('Done card')
@@ -206,5 +206,40 @@ describe('readSubagentsFor (the server’s own reads)', () => {
       if (prev === undefined) delete process.env.COS_AGENT_SESSIONS_HOME; else process.env.COS_AGENT_SESSIONS_HOME = prev
       rmSync(home, { recursive: true, force: true })
     }
+  })
+})
+
+describe('7.0.1: the Today refresh button (force)', () => {
+  it('force writes again at once with the same rows; a second inside 30 s answers refresh_throttled with retryAfterMs', async () => {
+    await start(true)
+    expect((await (await post('/today/brief', ASK)).json()).state).toBe('fresh')
+    expect(prompts).toHaveLength(1)
+    // Unforced, the same rows inside the interval write nothing.
+    await post('/today/brief', ASK)
+    expect(prompts).toHaveLength(1)
+    const forced = await post('/today/brief', { ...ASK, force: true })
+    expect(forced.status).toBe(200)
+    expect(await forced.json()).toMatchObject({ state: 'fresh', model: 'sonnet' })
+    expect(prompts).toHaveLength(2)
+    const again = await post('/today/brief', { ...ASK, force: true })
+    const body = await again.json()
+    expect(body.reason).toBe('refresh_throttled')
+    expect(body.retryAfterMs).toBeGreaterThan(0)
+    expect(body.retryAfterMs).toBeLessThanOrEqual(30_000)
+    expect(prompts).toHaveLength(2)
+  })
+
+  it('force must be a boolean; force: false is an ordinary ask', async () => {
+    await start(true)
+    expect((await post('/today/brief', { ...ASK, force: 'yes' })).status).toBe(400)
+    expect((await post('/today/brief', { ...ASK, force: false })).status).toBe(200)
+    expect(prompts).toHaveLength(1)
+  })
+
+  it('off: force reads nothing and calls nothing', async () => {
+    await start(null)
+    expect(await (await post('/today/brief', { ...ASK, force: true })).json()).toMatchObject({ state: 'off' })
+    expect(boardReads).toBe(0)
+    expect(prompts).toHaveLength(0)
   })
 })
