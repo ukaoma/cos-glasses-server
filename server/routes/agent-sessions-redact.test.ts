@@ -104,7 +104,7 @@ describe('session detail: no absolute local path in any field', () => {
     const body = JSON.parse(json) as { latest_reply: string; first_prompt: string; recent_turns: Array<{ text: string; outputFiles?: Array<{ name: string }> }> }
     // Base names with the line anchor, the web untouched, relative paths as written.
     const reply = body.recent_turns.map(x => x.text).join('\n')
-    for (const want of ['app.ts:42', 'routes.ts:9', 'notes.md.', '`/private/tmp/build/out.log`', 'a.ts:3', 'b.md', '[guide](docs/guide.md)', 'server/lib/x.ts:12', ...WEB]) expect(reply, want).toContain(want)
+    for (const want of ['app.ts:42', 'routes.ts:9', 'notes.md.', '`/private/tmp/build/out.log`', 'a.ts:3', 'b.md', '[guide](cos-file:', 'server/lib/x.ts:12', ...WEB]) expect(reply, want).toContain(want)
     expect(body.latest_reply).toContain('Checked app.json.')
     expect(body.latest_reply).toContain(WEB[0])
     // The first prompt is capped by the parser (mid-path here); what is left of the path is a base name.

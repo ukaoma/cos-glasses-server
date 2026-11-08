@@ -103,6 +103,18 @@ export function linkLabel(label: string, name: string): string {
   return clean.slice(0, 120)
 }
 
+/**
+ * The words a link card shows in the reply. A label that is the file's own name keeps the line the link points at,
+ * so `[app.ts](/Users/x/app.ts#L42)` reads `app.ts:42`, as the 7.0.4 redactor wrote it. Prose labels stay as written.
+ */
+export function linkCardWords(label: string, name: string, target: string): string {
+  const words = linkLabel(label, name)
+  const { path, line } = splitLineAnchor(target)
+  if (!line) return words
+  const own = baseName(path.replace(/^file:\/\//i, ''))
+  return words === own || words === name ? words + ':' + line : words
+}
+
 export const LINK_SCAN_CHARS = 128 * 1024
 
 /**

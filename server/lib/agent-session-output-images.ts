@@ -17,7 +17,7 @@ import { isDeniedSecretPath, SECRET_FILE_NOTICE } from './secret-path-guard.js'
 import { previewErrorCode } from './preview-error-code.js'
 import { readRecentSessionTurns, SESSION_TURNS_MAX, type SessionTurn, type SessionTurnProjection } from './agent-session-turns.js'
 import {
-  authorizedRoot, insideRoot, isLocalTarget, LINK_CARDS_PER_TURN, linkLabel, linkTokens, previewKind, resolveLinkTarget, SESSION_OUTPUT_LINK_ID,
+  authorizedRoot, insideRoot, isLocalTarget, LINK_CARDS_PER_TURN, linkCardWords, linkLabel, linkTokens, previewKind, resolveLinkTarget, SESSION_OUTPUT_LINK_ID,
   splitLineAnchor, type LinkRoots, type PreviewKind, type SessionOutputLink,
 } from './session-links.js'
 import {
@@ -390,12 +390,12 @@ export class AgentSessionOutputImages {
         let n = byTarget.get(token.target)
         if (n === undefined) {
           const resolved = resolveLinkTarget(token.target, [rowCwd, root], roots)
-          if (linkRefs.length >= LINK_CARDS_PER_TURN) { linkExtra++; return linkLabel(token.label, resolved.name) }
+          if (linkRefs.length >= LINK_CARDS_PER_TURN) { linkExtra++; return linkCardWords(token.label, resolved.name, token.target) }
           n = linkRefs.length; byTarget.set(token.target, n)
           linkRefs.push(this.describeLink(provider, sessionId, transcriptKey, recordKey, n, token, resolved, lookupFailed, links))
         }
         // Each link keeps its own words; the same target twice shares one card.
-        return '[' + linkLabel(token.label, linkRefs[n].name) + '](cos-file:' + n + ')'
+        return '[' + linkCardWords(token.label, linkRefs[n].name, token.target) + '](cos-file:' + n + ')'
       }
       const edits = [
         ...candidates.map(c => ({ start: c.start, end: c.end, words: () => '[Output image]' })),

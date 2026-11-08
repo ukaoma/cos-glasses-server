@@ -88,6 +88,7 @@ import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-
 import { agentSessionOutputImages, sharedFileHeaders } from '../lib/agent-session-output-images.js'
 import { previewErrorCode } from '../lib/preview-error-code.js'
 import { sessionFilesSetting, withoutPreviews } from '../lib/session-files-setting.js'
+import { withoutLinkMarkers } from '../lib/session-links.js'
 import { createSessionPreviewRouter } from './session-preview.js'
 
 export const agentSessionsRouter = Router()
@@ -942,7 +943,10 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res)
     if (recentTurns && Array.isArray(body.recent_turns) && isNativeMacCaller(req, res)) {
       body.recent_turns = body.recent_turns.map((turn, index) => {
         const original = recentTurns!.turns[index]
-        return original && original.role === 'user' && turn.role === 'user' ? { ...turn, text: original.text } : turn
+        if (original && original.role === 'user' && turn.role === 'user') return { ...turn, text: original.text }
+        // 7.0.5 QA: no COS Control build renders link cards yet, so the Mac gets each card's words, never a
+        // `cos-file:N` marker it would show as a dead link (the rule the web applies when N has no card).
+        return typeof turn.text === 'string' && turn.text.includes('](cos-file:') ? { ...turn, text: withoutLinkMarkers(turn.text) } : turn
       })
     }
     res.json(body)

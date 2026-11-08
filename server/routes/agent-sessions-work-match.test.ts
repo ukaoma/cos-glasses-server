@@ -99,6 +99,8 @@ describe('W1: the Mac helper matches a Work prompt that opens with a path', () =
     const assistant = (res.body.recent_turns ?? []).filter(t => t.role === 'assistant').map(t => t.text).join('\n')
     expect(assistant).not.toContain('/Users/')
     expect(assistant).toContain('plan.md:3')
+    // 7.0.5 QA: the Mac gets the card's words, never a `cos-file:N` marker it cannot render.
+    expect(assistant).not.toContain('cos-file:')
     expect(res.body.latest_reply).not.toContain('/Users/')
     expect(res.body.first_prompt).not.toContain('/Users/')
   })

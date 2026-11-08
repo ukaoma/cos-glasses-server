@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { authorizedRoot, isLocalTarget, linkLabel, linkTokens, previewKind, resolveLinkTarget, splitLineAnchor, withoutLinkMarkers } from './session-links.js'
+import { authorizedRoot, isLocalTarget, linkCardWords, linkLabel, linkTokens, previewKind, resolveLinkTarget, splitLineAnchor, withoutLinkMarkers } from './session-links.js'
 
 const made: string[] = []
 afterEach(() => { for (const p of made.splice(0)) rmSync(p, { recursive: true, force: true }) })
@@ -98,6 +98,15 @@ describe('targets, anchors, kinds and labels', () => {
     expect(linkLabel('the plan', 'PLAN.md')).toBe('the plan')
     expect(linkLabel('operations/personal/PLAN.md', 'PLAN.md')).toBe('operations/personal/PLAN.md')
     expect(linkLabel('   ', 'PLAN.md')).toBe('PLAN.md')
+  })
+
+  it('linkCardWords keeps the line a link points at when the words are the file name (7.0.5 QA)', () => {
+    expect(linkCardWords('app.ts', 'app.ts', '/Users/jane/repo/app.ts#L42')).toBe('app.ts:42')
+    expect(linkCardWords('/Users/jane/repo/plan.md', 'plan.md', '/Users/jane/repo/plan.md:3')).toBe('plan.md:3')
+    expect(linkCardWords('routes.ts:9', 'routes.ts', '/Users/jane/repo/routes.ts:9')).toBe('routes.ts:9')
+    expect(linkCardWords('the plan', 'plan.md', '/Users/jane/plan.md#L3')).toBe('the plan')
+    expect(linkCardWords('app.ts', 'app.ts', '/Users/jane/repo/app.ts')).toBe('app.ts')
+    expect(linkCardWords('a.md', 'a.md', 'file:///Users/u/a.md#L7')).toBe('a.md:7')
   })
   it('markers turn back into words', () => {
     expect(withoutLinkMarkers('See [the plan](cos-file:0) and [b](cos-file:12).')).toBe('See the plan and b.')
