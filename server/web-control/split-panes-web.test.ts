@@ -164,6 +164,16 @@ describe('storage that throws, or is not there', () => {
     p.ctx.mount(again.split, again.handle, MEM_OPTS)
     expect(again.props.get('--split-list-share'), 'redrawn split, same width').toBe('42.00%')
   })
+  it('storage off: this visit’s width is kept per pane, so a Memories drag never sizes Messages when it is drawn', () => {
+    const p = page({ storageGetterThrows: true })
+    const a = p.els()
+    p.ctx.mount(a.split, a.handle, MEM_OPTS)
+    a.drag(400, 520)
+    const m = p.els('.msg-left')
+    p.ctx.mount(m.split, m.handle, MSG_OPTS)
+    expect(m.classes.has('split-sized')).toBe(false)
+    expect(m.props.size).toBe(0)
+  })
   it('junk in storage is ignored', () => {
     for (const v of ['{not json', JSON.stringify({ share: 140 }), JSON.stringify({ share: '40' }), 'null']) {
       const p = page({ stored: { cos_web_memories_split: v } })
@@ -186,6 +196,17 @@ describe('below a pane’s breakpoint the divider does nothing', () => {
     expect(a.fire('dblclick').prevented).toBe(false)
     expect(a.classes.has('split-sized')).toBe(false)
     expect(p.writes).toEqual([])
+  })
+  it('folding mid-drag (wide, then narrow before the move): the move changes nothing; nor does a direct setWidth', () => {
+    const p = page()
+    const a = p.els()
+    const kit = p.ctx.mount(a.split, a.handle, MEM_OPTS)
+    a.fire('pointerdown', { clientX: 400 })
+    p.setWide(false)
+    a.fire('pointermove', { clientX: 520 }); a.fire('pointerup', { clientX: 520 })
+    expect(a.classes.has('split-sized')).toBe(false)
+    kit.setWidth(500, true)
+    expect(a.props.has('--split-list-share')).toBe(false)
   })
   it('a stored width is kept for when the screen is wide again, and a narrow screen does not reset it', () => {
     const p = page({ wide: false, stored: { cos_web_memories_split: JSON.stringify({ share: 45, full: false }) } })
