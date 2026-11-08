@@ -29,7 +29,8 @@ import { AgentSessionBindingRegistry } from './agent-session-binding-registry.js
 import { targetKey } from './agent-session-binding-store.js'
 import { providerActs } from './provider-actions.js'
 
-const FLAGS = ['COS_QUEUE_RECONCILE', 'COS_PIN_BOOT_REAP', 'COS_QUEUE_RESEND', 'COS_SESSION_STEER'] as const
+// Steer mid-turn (11/07): COS_STEER_MIDTURN is a later default-on switch on the same drain, so it is off here too.
+const FLAGS = ['COS_QUEUE_RECONCILE', 'COS_PIN_BOOT_REAP', 'COS_QUEUE_RESEND', 'COS_SESSION_STEER', 'COS_STEER_MIDTURN'] as const
 const saved: Record<string, string | undefined> = Object.fromEntries(FLAGS.map(k => [k, process.env[k]]))
 beforeAll(() => { for (const k of FLAGS) process.env[k] = '0' })
 afterAll(() => {

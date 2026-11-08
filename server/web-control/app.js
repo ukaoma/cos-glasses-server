@@ -1438,7 +1438,7 @@
     var meta = sxBadge(key.provider) +
       (s.pinned ? '<span class="sx-pinned">PINNED</span>' : '') +
       (label ? '<span class="sx-chip ' + st + '">' + esc(label) + '</span>' : '') +
-      (notSentFor(key.provider, key.id) ? '<span class="sx-chip refused" title="' + esc(notSentFor(key.provider, key.id).line) + '">Not sent</span>' : '') +
+      (notSentFor(key.provider, key.id) ? '<span class="sx-chip refused" title="' + esc(notSentFor(key.provider, key.id).line) + '">' + esc(notSentFor(key.provider, key.id).label || 'Not sent') + '</span>' : '') +
       (upd ? '<span class="sx-when">Updated ' + esc(sxShortDate(upd)) + '</span>' : '') +
       (ambiguous[title] && opened ? '<span class="sx-opened" title="Another session on screen has the same name. This one was opened ' + esc(sxShortDate(opened)) + '.">Opened ' + esc(sxShortDate(opened)) + '</span>' : '') +
       (s.project && String(s.project) !== title ? '<span class="sx-ws">' + esc(s.project) + '</span>' : '');
@@ -1869,14 +1869,19 @@
   // queue replaces it, so a row the server drops clears the mark.
   var NOT_SENT_KEY = 'cos_web_not_sent', NOT_SENT_KEEP_MS = 86400000;
   function notSentRows(rows) { return (rows || []).filter(function (t) { return t && (t.status === 'refused' || t.status === 'expired'); }); }
+  // A row COS cannot tell went in or not (deliveryState unknown, e.g. a steer it could not confirm) is not "Not sent":
+  // it may be in the session already, so it has its own label and its own line, never a "Not sent:" prefix.
+  function maybeSent(t) { return !!(t && t.deliveryState === 'unknown'); }
+  function notSentLabel(t) { return maybeSent(t) ? 'May have been sent' : 'Not sent'; }
   function notSentLine(t) {
+    if (maybeSent(t)) return String(t.reasonCopy || 'May not have been sent. Read it, then say it again.').trim();
     var why = String((t && t.reasonCopy) || (t && t.status === 'expired' ? 'the thread stayed busy too long.' : 'the session refused it.')).trim();
     return /^not sent\b/i.test(why) ? why : 'Not sent: ' + why.charAt(0).toLowerCase() + why.slice(1);
   }
   function noteNotSent(provider, id, rows) {
     var all = readStore(NOT_SENT_KEY), k = provider + '|' + id, now = Date.now(), list = notSentRows(rows);
     Object.keys(all).forEach(function (x) { if (!all[x] || now - (Number(all[x].at) || 0) > NOT_SENT_KEEP_MS) delete all[x]; });
-    if (list.length) all[k] = { n: list.length, line: notSentLine(list[list.length - 1]).slice(0, 240), at: now }; else delete all[k];
+    if (list.length) all[k] = { n: list.length, line: notSentLine(list[list.length - 1]).slice(0, 240), label: notSentLabel(list[list.length - 1]), at: now }; else delete all[k];
     writeStore(NOT_SENT_KEY, all);
   }
   function notSentFor(provider, id) {
@@ -2342,7 +2347,7 @@
             (mine ? '<button type="button" class="cx-btn quiet" data-action="unqueue" data-turn-key="' + esc(t.clientTurnId) + '" title="Cancel this queued message. It will not be sent.">Cancel</button>' : '') + '</div>';
         }).join('') +
         notSent.map(function (t) {
-          return '<div class="sx-queue-row sx-queue-refused"><span class="sx-queue-state">Not sent</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') +
+          return '<div class="sx-queue-row sx-queue-refused"><span class="sx-queue-state">' + esc(notSentLabel(t)) + '</span><span class="sx-queue-text">' + esc(t.preview || t.prompt || 'Message') +
             '<span class="sx-queue-reason">' + esc(notSentLine(t)) + '</span></span></div>';
         }).join('') + '</div>';
     }).catch(function () {});
@@ -2363,7 +2368,9 @@
       var b = a.body || {};
       if (a.status !== 200 || typeof b.attachable !== 'boolean') { failed(); return; }
       var owners = Number(b.ownerCount) || 0;
-      r.verdict = { attachable: b.attachable, reason: String(b.reason || ''), reasonCopy: String(b.reasonCopy || ''), ownerCount: owners, caution: b.attachable === true && owners > 0 };
+      r.verdict = { attachable: b.attachable, reason: String(b.reason || ''), reasonCopy: String(b.reasonCopy || ''), ownerCount: owners, caution: b.attachable === true && owners > 0,
+        // Steer mid-turn: the server says whether a message sent now goes into the running turn.
+        midTurn: !!(b.midTurn && b.midTurn.available === true) };
       // 6.99.29: the gate's answer is a signal of the one state, as of now.
       sxNoteGate(r, b.attachable === false && b.reason === 'native_thread_working');
       sxRepaint(r);
@@ -2374,6 +2381,11 @@
     codex: 'Working right now. A message you send joins the Codex app’s queue for this thread.',
     claude: 'Working right now. A message you send waits and lands when this turn ends.'
   };
+  // Steer mid-turn: only when the server says this session takes a message inside its running turn.
+  var SX_PARK_MIDTURN = 'Working right now. Your message lands at its next step.';
+  function sxParkLine(r) {
+    return r.verdict && r.verdict.midTurn === true ? SX_PARK_MIDTURN : SX_PARK[sxProvider(r.provider)];
+  }
   /** The composer's "Working right now" note: a busy gate verdict, and the one state agrees. */
   function sxParkNoteShows(r) {
     var v = r.verdict;
@@ -2406,7 +2418,7 @@
         (f.fork ? forkBtn : ''));
     } else if (v && v.attachable === false && /^(native_thread_working|native_target_busy)$/.test(v.reason)) {
       // 6.99.29: "Working right now" only while the one state says so.
-      if (sxParkNoteShows(r)) html = '<div class="sx-park"><p>' + esc(SX_PARK[sxProvider(r.provider)]) + '</p>' + (/fork/i.test(v.reasonCopy) ? '<div class="sx-box-actions">' + forkBtn + '</div>' : '') + '</div>';
+      if (sxParkNoteShows(r)) html = '<div class="sx-park"><p>' + esc(sxParkLine(r)) + '</p>' + (/fork/i.test(v.reasonCopy) ? '<div class="sx-box-actions">' + forkBtn + '</div>' : '') + '</div>';
     } else if (v && v.attachable === false && v.reasonCopy) {
       html = refusalBox(v.reasonCopy, sxSupplement(v.reason), /fork/i.test(v.reasonCopy) ? forkBtn : '');
     }
@@ -2746,7 +2758,7 @@
         rememberParked(r, draft.key);
         if (opts.held) settleHeld(r, opts.held, 'parked');
         else { view.pending(r, draft.text, 'waiting in line'); view.clear(r, draft.text); }
-        view.status(r, b.error === 'duplicate_turn' ? 'Already waiting to send.' : (b.position ? 'The session is busy. Yours is #' + (b.position + 1) + ' in line and sends on its own.' : 'The session is busy. Yours sends next, on its own.'));
+        view.status(r, b.error === 'duplicate_turn' ? 'Already waiting to send.' : (b.landsAt === 'next_step' ? 'The session is busy. Yours lands at its next step.' : b.position ? 'The session is busy. Yours is #' + (b.position + 1) + ' in line and sends on its own.' : 'The session is busy. Yours sends next, on its own.'));
         view.queue(r);
         // 6.99.29: "The session is busy" is the gate's word as of now; the card shows the same. Last, and
         // never allowed to cost the parked message its settlement.
@@ -5248,12 +5260,12 @@
     newKey: newTurnKey,
     probe: function (r) { return sxProbeAttach(r); },
     path: sessionPath, answer: apiAnswer,
-    notSent: { rows: notSentRows, line: notSentLine, note: noteNotSent, get: notSentFor },
+    notSent: { rows: notSentRows, line: notSentLine, label: notSentLabel, note: noteNotSent, get: notSentFor },
     imageHtml: readerImagesHtml, imagesMount: readerImagesMount, imagesStop: readerImagesStop,
     feed: { fresh: newFeed, apply: applyFeed, word: sxFeedWord, detail: sxFeedDetail, tool: sxToolLine, elapsed: sxElapsed, fallback: sxFallbackLine,
       truth: sxTruth, settle: sxSettle, noteList: sxNoteList, noteGate: sxNoteGate, gateStale: sxGateStale, promptLine: sxPromptLine, parkNoteShows: sxParkNoteShows },
     title: sxTitle, stateOf: sxState, stateLabel: function (s) { return sxStateLabel(s, sxState(s)); },
-    parkCopy: function (p) { return SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
+    parkCopy: function (p, r) { return r ? sxParkLine(r) : SX_PARK[sxProvider(p)]; }, providerLabel: sxProviderLabel, markdown: sxMd
   };
 
   // Every pane module is a plain script after this one; boot waits for all of them.

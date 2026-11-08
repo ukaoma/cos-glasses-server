@@ -473,7 +473,9 @@ settled on evidence, never sent twice), `COS_PIN_BOOT_REAP` (default on: a threa
 run held frees 31 minutes after the restart, once its child is gone), `COS_QUEUE_RESEND`
 (default on: Send again on a refused or expired queued turn), `COS_MESSAGES_STEER` (default
 off: steer a running Claude Ask from the glasses), `COS_SESSION_STEER` (default off: steer a
-busy Claude desk session through its peer inbox) and `COS_QUERY_JOB_DELTA_JOURNAL` (default
+busy Claude desk session through its peer inbox when a client asks), `COS_STEER_MIDTURN` (default
+on: a message parked at a busy Claude desk session lands inside the running turn at its next tool
+step, through the same peer inbox; `0` makes it wait for the turn to end) and `COS_QUERY_JOB_DELTA_JOURNAL` (default
 off until the release after 6.78.0: the compact Ask journal writer),
 `COS_PERMISSION_BROKER` (6.52.0: `0` answers every permission request with
 the Mac's own dialog, `questions` holds questions but not tool approvals; unset holds

@@ -27,7 +27,7 @@ import { REASON_COPY } from './agent-session-bindings.js'
 afterAll(() => { rmSync(FIXTURE.dir, { recursive: true, force: true }) })
 
 const CONTRACT = JSON.parse(readFileSync(new URL('../lib/__fixtures__/pi-durable/contracts/session-steer.json', import.meta.url), 'utf8'))
-const FLAGS = ['COS_QUEUE_RECONCILE', 'COS_PIN_BOOT_REAP', 'COS_QUEUE_RESEND', 'COS_SESSION_STEER', 'COS_CONTINUE_LIVE'] as const
+const FLAGS = ['COS_QUEUE_RECONCILE', 'COS_PIN_BOOT_REAP', 'COS_QUEUE_RESEND', 'COS_SESSION_STEER', 'COS_CONTINUE_LIVE', 'COS_STEER_MIDTURN'] as const
 const savedEnv: Record<string, string | undefined> = Object.fromEntries(FLAGS.map(k => [k, process.env[k]]))
 
 let server: Server | null = null
@@ -448,6 +448,8 @@ describe('Session steer (COS_SESSION_STEER): mode steer on the queued-turns POST
 
   it('held on a permission prompt: queued, never framed (the contract fallback_queued)', async () => {
     process.env.COS_SESSION_STEER = '1'
+    // The 6.78.0 contract body. Steer mid-turn (default on) adds `landsAt`; steer-midturn.test.ts pins that.
+    process.env.COS_STEER_MIDTURN = '0'
     await start(steerDeps(async () => ({ ok: true, reason: 'delivered' }), { steerProbe: () => ({ peerInbox: true, waitingOnPrompt: true }) }))
     const res = await http('POST', base(), { ...CONTRACT.post.body })
     expect(res.status).toBe(202)
@@ -494,6 +496,8 @@ describe('Session steer (COS_SESSION_STEER): mode steer on the queued-turns POST
   })
 
   it('flag off: `mode: steer` is ignored and the 202 is the 6.77 body', async () => {
+    // Every steer switch off, including steer mid-turn (default on; it adds `landsAt`).
+    process.env.COS_STEER_MIDTURN = '0'
     await start(steerDeps(async () => ({ ok: true, reason: 'delivered' })))
     const b = body()
     const res = await http('POST', base(), b)

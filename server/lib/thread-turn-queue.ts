@@ -155,6 +155,16 @@ export function sessionSteerEnabled(env: NodeJS.ProcessEnv = process.env): boole
 }
 
 /**
+ * `COS_STEER_MIDTURN` (steer mid-turn, Miles 2026-11-07): a turn parked at a busy Claude desk
+ * session goes INTO the running turn through its peer inbox at the drain, and lands at its next
+ * tool step, instead of waiting for the turn to end. Default ON; `0` is the 6.99.33 behaviour.
+ * Independent of `COS_SESSION_STEER`, which only answers a client that asks for `mode: "steer"`.
+ */
+export function steerMidturnEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return triStateFlag(env, 'COS_STEER_MIDTURN', true)
+}
+
+/**
  * Reasons whose outcome COS cannot establish. Such a row is never resent and is kept for
  * UNKNOWN_DELIVERY_RETENTION_MS rather than 30 minutes, because the phone has to be able to
  * read "may not have been sent" for as long as the person might come back to it.

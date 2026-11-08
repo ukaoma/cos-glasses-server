@@ -240,7 +240,7 @@ import {
 } from './lib/maintenance-lifecycle.js'
 
 const app = express()
-import { createThreadTurnQueueRouter, drainAllThreads, steerAvailabilityFor } from './routes/thread-turn-queue.js'
+import { createThreadTurnQueueRouter, drainAllThreads, midTurnAvailabilityFor, steerAvailabilityFor } from './routes/thread-turn-queue.js'
 import { createCursorStopFollowupRouter } from './routes/cursor-stop-followup.js'
 import { queuedThreadKeys, readQueue, readTranscriptTailLines, transcriptTurnVerdict, writeQueue } from './lib/thread-turn-queue-store.js'
 import { cursorDeskHaltReady, hookHaltReady, readHookToken } from './lib/claude-hooks-installer.js'
@@ -1132,6 +1132,13 @@ const steerDeps = {
     waitingOnPrompt: sessionHooksEnabled() ? (signalFor(threadId)?.waiting ?? null) !== null : false,
   }),
 }
+/** The attempt journal (the binding registry): Sessions steer, steer mid-turn and the drain stamp. */
+const queueAttemptJournal = {
+  begin: (provider: string, threadId: string, clientTurnId: string, mode: 'turn' | 'steer', now: number) =>
+    agentSessionBindingRegistry.beginAttempt(provider, threadId, clientTurnId, mode, now),
+  settle: (provider: string, threadId: string, clientTurnId: string, exit: 'sent' | 'not_sent' | 'unknown', now: number) =>
+    agentSessionBindingRegistry.settleAttempt(provider, threadId, clientTurnId, exit, now),
+}
 /** The bounded transcript tail the reconcile and the receipts read evidence from. */
 const QUEUE_EVIDENCE_TAIL_BYTES = 4 * 1024 * 1024
 const queueEvidenceLines = (provider: string, threadId: string): readonly string[] | null =>
@@ -1156,6 +1163,10 @@ const queueTurnEvidence = makeQueueTurnEvidence({
   openTurnCeilingMs: OPEN_TURN_CEILING_MS,
   now: () => Date.now(),
 })
+
+// Steer mid-turn (COS_STEER_MIDTURN): the park route asks for a drain pass at once. The kick is
+// made below, after the deps it drains with; until then (and with attach off) this does nothing.
+let kickQueueDrain: ((threadId: string) => void) | null = null
 
 if (threadAttachEnabled()) {
   const queueDeps = {
@@ -1235,16 +1246,12 @@ if (threadAttachEnabled()) {
         .filter((text): text is string => typeof text === 'string'),
     }),
     ...steerDeps,
-    attempts: {
-      begin: (provider: string, threadId: string, clientTurnId: string, mode: 'turn' | 'steer', now: number) =>
-        agentSessionBindingRegistry.beginAttempt(provider, threadId, clientTurnId, mode, now),
-      settle: (provider: string, threadId: string, clientTurnId: string, exit: 'sent' | 'not_sent' | 'unknown', now: number) =>
-        agentSessionBindingRegistry.settleAttempt(provider, threadId, clientTurnId, exit, now),
-    },
+    attempts: queueAttemptJournal,
     // 6.53.0: parked turns hold for two minutes after a cancel on their thread.
     cancelHoldUntil: (provider: string, threadId: string) => cancelHoldUntilFor(provider, threadId),
     // 6.62.0 (W14): a busy Agent CLI chat's parked turn drains here (no Stop hook fires for `-p`).
     cursorCliChat: (threadId: string) => continueFactsDeps.cursorChatDir(threadId) !== null,
+    kickDrain: (threadId: string) => { kickQueueDrain?.(threadId) },
     now: () => Date.now(),
   }
   app.use('/api', createThreadTurnQueueRouter(queueDeps))
@@ -1266,6 +1273,8 @@ if (threadAttachEnabled()) {
     queuedThreadIds: () => queuedThreadKeys().map(k => k.threadId),
   })
   registerDrainKickStats(() => drainKick.stats())
+  // The same in-flight guard as the timer and the Stop hooks: a park never starts a second pass.
+  kickQueueDrain = threadId => { drainKick.kick(threadId) }
   const queueDrainTimer = setInterval(() => { void drainKick.sweep() }, 20_000)
   queueDrainTimer.unref()
   if (sessionHooksEnabled()) {
@@ -1375,6 +1384,8 @@ app.use('/api', createAgentSessionBindingsRouter({
     bootId: serverMetrics.bootId,
   }),
   sessionSteer: (provider, threadId, gateReason) => (sessionSteerEnabled() ? steerAvailabilityFor(steerDeps, provider, threadId, gateReason) : null),
+  // Steer mid-turn: the attachability answer's `midTurn` (null, and absent, with COS_STEER_MIDTURN off).
+  sessionMidTurn: (provider, threadId, gateReason) => midTurnAvailabilityFor({ ...steerDeps, attempts: queueAttemptJournal }, provider, threadId, gateReason),
   // 6.53.0: cancel a session run from the lens. The route's own in-flight map answers for
   // a COS turn; these answer for a run at the desk. Read per request, so Install hooks in
   // Control flips `hooks_outdated` to `desk_run` within the status cache's five seconds.

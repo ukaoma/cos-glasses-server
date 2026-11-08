@@ -3220,6 +3220,45 @@ describe('one state for the session card: the freshest signal wins, and every pi
     consistent(card(h), 'Working')
   })
 
+  it('steer mid-turn: the server says the session takes it mid-turn, so the note and the send line say next step', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(40_000), alive: true }
+    const midTurn: Routes = {
+      ...busyGate,
+      ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0, midTurn: { available: true, mode: 'peer_inbox' } } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0, landsAt: 'next_step' } },
+    }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: midTurn })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const es = h.streams[0]
+    es.onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: ago(5_000) }) })
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Working right now. Your message lands at its next step.')
+    expect(h.els['ta-verdict']!.innerHTML).not.toContain('lands when this turn ends')
+    h.els['ta-input']!.value = 'also check the footer'
+    h.tap('send')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session is busy. Yours lands at its next step.')
+  })
+
+  it('steer mid-turn: not available (a held prompt, Codex, the switch off) keeps the turn-end lines', async () => {
+    const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: false, agent_state: 'idle', state_source: 'hook', state_since: ago(40_000), alive: true }
+    const noMidTurn: Routes = {
+      ...busyGate,
+      ['GET ' + P('/attachability')]: { status: 200, body: { attachable: false, reason: 'native_thread_working', reasonCopy: 'Working right now.', ownerCount: 0, midTurn: { available: false, reason: 'permission_pending' } } },
+      ['POST ' + P('/queued-turns')]: { status: 202, body: { queued: true, position: 0, landsAt: 'turn_end' } },
+    }
+    const h = load({ data: { sessions: [ROW], working: [] }, routes: noMidTurn })
+    h.ta.open('run', 'claude|' + SID, h.opener())
+    await flush()
+    const es = h.streams[0]
+    es.onmessage({ data: JSON.stringify({ seq: 1, kind: 'status', state: 'working', agent_state: 'running', state_source: 'hook', state_since: ago(5_000) }) })
+    expect(h.els['ta-verdict']!.innerHTML).toContain('Working right now. A message you send waits and lands when this turn ends.')
+    h.els['ta-input']!.value = 'also check the footer'
+    h.tap('send')
+    await flush()
+    expect(h.els['ta-status']!.textContent).toBe('The session is busy. Yours sends next, on its own.')
+  })
+
   it('a fresher idle beats an older busy answer: Idle everywhere, and the prompt line says what was last asked', async () => {
     const ROW = { session_id: SID, provider: 'claude', display_label: 'Release', running: true, running_active: true, agent_state: 'running', state_source: 'hook', state_since: ago(300_000), last_activity_at: ago(60_000), alive: true }
     const h = load({ data: { sessions: [ROW], working: [ROW] }, routes: busyGate })
@@ -4113,6 +4152,28 @@ describe('QA 6.99.29 final: the Sessions reader', () => {
     // 6.99.30: the same read marks the session for its Sessions row chip (app.js noteNotSent), the last line kept.
     const mark = JSON.parse(pg.store.get('cos_web_not_sent') || '{}')['claude|' + SID]
     expect(mark).toMatchObject({ n: 2, line: 'Not sent: the thread stayed busy too long.' })
+  })
+
+  it('steer mid-turn: a row COS cannot tell went in has its own label, never "Not sent"', async () => {
+    const pg = readerPage({ ['GET ' + P('/queued-turns')]: { status: 200, body: { turns: [
+      { clientTurnId: 'ctRef0000003', status: 'refused', position: -1, preview: 'tampered', owner: 'cos', reason: 'queued_turn_tampered', reasonCopy: 'Not sent: its words, files or session changed.' },
+      { clientTurnId: 'ctUnk0000001', status: 'refused', position: -1, preview: 'steer this', owner: 'cos', reason: 'steer_unverified', deliveryState: 'unknown', reasonCopy: 'May not have been sent. Read it, then say it again.' },
+    ] } } })
+    session(pg)
+    pg.kit.loadQueue('claude', SID)
+    await flush()
+    const rows = pg.els['session-queue']!.innerHTML.split('sx-queue-row').slice(1)
+    const unknown = rows.find(r => r.includes('steer this'))!
+    expect(unknown).toContain('<span class="sx-queue-state">May have been sent</span>')
+    expect(unknown).toContain('May not have been sent. Read it, then say it again.')
+    expect(unknown).not.toMatch(/Not sent/)
+    // A message refused for tampering still reads "Not sent".
+    const refused = rows.find(r => r.includes('tampered'))!
+    expect(refused).toContain('<span class="sx-queue-state">Not sent</span>')
+    expect(refused).toContain('Not sent: its words, files or session changed.')
+    // The Sessions row chip takes the last row's label and line.
+    const mark = JSON.parse(pg.store.get('cos_web_not_sent') || '{}')['claude|' + SID]
+    expect(mark).toMatchObject({ n: 2, label: 'May have been sent', line: 'May not have been sent. Read it, then say it again.' })
   })
 
   it('only refused rows: they still show, with no "queued" head', async () => {
