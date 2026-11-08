@@ -422,6 +422,7 @@
   // ── auth ────────────────────────────────────────────────
   function showAuth(message) {
     readerImagesStop($('session-turns')); readerImagesStop($('ta-last'));
+    if (typeof liveHide === 'function') { liveHide(); liveStopWatch(); LIVE.mode = 'idle'; }
     var alreadyOpen = !$('auth-gate').classList.contains('hidden');
     $('app-shell').classList.add('hidden');
     $('auth-gate').classList.remove('hidden');
@@ -439,6 +440,7 @@
     loadTailnetUrl();
     runHooks(shellHooks, info);
     route();
+    if (typeof liveStart === 'function') liveStart();   // 7.0.1: the one live stream for this page (a no-op if it is already open)
     // Reloaded with Today's overlay open: its history entry is still current. The overlay opens the same thing again
     // (panes/today-actions.js restore), so Back closes it; if it cannot load, the entry is unmarked.
     var held = history.state;
@@ -468,6 +470,8 @@
     if (SL.inflight) return SL.inflight;
     SL.inflight = api('/api/agent-sessions?limit=80&sort=updated').then(function (d) {
       SL.data = d; SL.at = Date.now(); SL.inflight = null;
+      // 7.0.1: a fresh list is corrected by the live model at once, so it never paints a state the stream already moved.
+      if (typeof liveOn === 'function' && liveOn() && d && Array.isArray(d.sessions)) liveOverlay(d.sessions, { placeholders: true, unknown: true });
       noteWaiting(d);
       return d;
     }, function (err) { SL.inflight = null; throw err; });
@@ -492,6 +496,374 @@
     if (fresh) questionsNudge();
   }
 
+  // ── live state (7.0.1) ──────────────────────────────────
+  // Miles 11/07: the pet, the session rows, Today's counts and the running clocks showed the last fetch, not now. One
+  // EventSource('/api/events') per page (docs/live-events-contract.md) tells the page when the server's own session
+  // state moves: ids, states, counts and times only. The list (/api/agent-sessions) still carries every word; the
+  // stream corrects its rows in place and asks for a fresh list when a session appears, leaves or replies.
+  //   mode  'idle'         not started (signed out)
+  //         'connecting'   a stream is opening; nothing painted differently yet
+  //         'live'         a frame arrived inside the last 30 s: counts are live
+  //         'reconnecting' the stream dropped or went quiet: "Reconnecting", the list read every 5 s until it is back
+  //         'busy'         the server has no room for another stream (503): retried in 30 s, no fast polling
+  //         'absent'       no /api/events (an older server, or COS_WEB_LIVE_EVENTS=0): exactly what 7.0.0 did
+  // A hidden page holds no stream and runs no timer; coming back re-reads the list at once and resumes from the last
+  // id (`?after=<epoch>.<seq>`, the contract's manual resume, since new EventSource cannot set Last-Event-ID).
+  var LIVE_SILENT_MS = 30000, LIVE_POLL_MS = 5000, LIVE_WATCH_MS = 5000, LIVE_RETRY_MS = 3000, LIVE_RETRY_MAX_MS = 30000;
+  var LIVE_BUSY_MS = 30000, LIVE_ABSENT_RECHECK_MS = 10 * 60000, LIVE_LIST_DEBOUNCE_MS = 1000, LIVE_STALE_MS = 30000;
+  var LIVE = {
+    mode: 'idle', es: null, lastId: '', epoch: null, seq: -1, frameAt: 0, skew: 0, gotFrame: false,
+    sessions: {},        // key (provider:sessionid, lowercase) -> LiveSession
+    questions: null, queue: null, degraded: {},
+    freshAt: 0,          // when the counts on screen were last confirmed: a frame on a live stream, or a list read
+    retryMs: LIVE_RETRY_MS, retry: null, poll: null, watch: null, listTimer: null, paintTimer: null,
+    absentAt: 0, hooks: [], gen: 0, pendingRows: [], pendingStructural: false
+  };
+  function liveOnMode(m) { return m === 'live' || m === 'reconnecting' || m === 'busy'; }
+  function liveOn() { return liveOnMode(LIVE.mode); }
+  function liveKey(provider, id) { return String(provider || 'claude').toLowerCase() + ':' + String(id || '').toLowerCase(); }
+  // The contract's join: provider plus the first 8 characters of the id, lowercase (the list may carry a Claude tab
+  // under the registry's short id until it finds the transcript).
+  function liveJoin(provider, id) { return String(provider || 'claude').toLowerCase() + ':' + String(id || '').toLowerCase().slice(0, 8); }
+  function liveRowJoin(s) { var k = splitSessionId(s.provider, s.session_id || s.id); return liveJoin(k.provider, k.id); }
+  function liveIso(ms) { return typeof ms === 'number' && isFinite(ms) ? new Date(ms).toISOString() : null; }
+  /** The list arrays on this page (usually one array, shared): every row a live frame must correct. */
+  function liveLists() {
+    var out = [];
+    [SL.data && SL.data.sessions, state.sessions, typeof SX !== 'undefined' && SX ? SX.rows : null].forEach(function (a) { if (Array.isArray(a) && out.indexOf(a) < 0) out.push(a); });
+    return out;
+  }
+  /** Write one LiveSession onto a list row, in the list's own fields (sxState, running_active, running). */
+  function liveWrite(row, ls) {
+    var st = ls.state;
+    row._live = true;
+    row._liveTurnAt = (st === 'working' || st === 'waiting') && typeof ls.turnStartedAt === 'number' ? ls.turnStartedAt : null;
+    row.state_source = ls.source === 'registry' ? 'registry' : 'hook';
+    row.running_active = st === 'working';
+    row.running = st !== 'ended';
+    row.alive = st !== 'ended';
+    row.agent_state = st === 'working' ? 'running' : st === 'waiting' ? 'waiting' : st === 'ended' ? 'ended' : ls.failed ? 'failed' : 'idle';
+    if (row._liveTurnAt != null) row.state_since = liveIso(row._liveTurnAt);
+    else if (typeof ls.updatedAt === 'number' && row._liveState !== st) row.state_since = liveIso(ls.updatedAt);
+    if (typeof ls.updatedAt === 'number') row.last_activity_at = liveIso(ls.updatedAt);
+    if (typeof ls.queued === 'number') row.queued_turns = ls.queued;
+    row._liveState = st;
+  }
+  /** A session the stream says left the live model: no longer working or open (it may stay in the list as recent). */
+  function liveForget(row) {
+    row._live = false; row._liveTurnAt = null; row._liveState = '';
+    row.running_active = false; row.running = false;
+    if (row.agent_state === 'running' || row.agent_state === 'waiting' || row.agent_state === 'idle') row.agent_state = 'ended';
+  }
+  /** Overlay the live model on the list rows. Returns what moved: { changed: [rows], added: n, unknown: n }. */
+  function liveOverlay(rows, opts) {
+    var o = opts || {}, out = { changed: [], added: 0, unknown: [] }, byJoin = {};
+    Object.keys(LIVE.sessions).forEach(function (k) { var ls = LIVE.sessions[k]; byJoin[liveJoin(ls.provider, ls.sessionId)] = ls; });
+    var seen = {};
+    (rows || []).forEach(function (row) {
+      if (!row) return;
+      var j = liveRowJoin(row), ls = byJoin[j];
+      if (ls) { seen[j] = 1; var before = row._liveState + '|' + row._liveTurnAt + '|' + row.queued_turns; liveWrite(row, ls); if (before !== row._liveState + '|' + row._liveTurnAt + '|' + row.queued_turns) out.changed.push(row); }
+      // A row this page corrected before, now missing from a whole snapshot: it left. Never a row the stream never
+      // spoke for (a Codex or Cursor session whose hooks never reach the server stays as the list says), and never
+      // while the server says it could not read its registry (degraded: absence is not "nothing running").
+      else if (o.whole && row._live && !LIVE.degraded.registry) { liveForget(row); out.changed.push(row); }
+    });
+    // A session the list has not caught up with yet: a placeholder row while it works or waits, so the pet and the
+    // Running count move now, and a fresh list (debounced) brings its title.
+    if (o.placeholders || o.unknown) {
+      Object.keys(byJoin).forEach(function (j) {
+        if (seen[j]) return;
+        var ls = byJoin[j];
+        out.unknown.push(j);
+        if (!o.placeholders || (ls.state !== 'working' && ls.state !== 'waiting')) return;
+        var row = { provider: ls.provider, session_id: ls.sessionId, id: ls.sessionId, title: 'New ' + providerLabel(ls.provider) + ' session', _placeholder: true };
+        liveWrite(row, ls);
+        rows.unshift(row); out.added++; out.changed.push(row);
+      });
+    }
+    return out;
+  }
+  /** Apply the live model to every list on the page, then repaint what shows. */
+  function liveApply(whole) {
+    var lists = liveLists(), changed = [], added = 0, unknown = [];
+    lists.forEach(function (rows, i) {
+      var r = liveOverlay(rows, { whole: whole, placeholders: i === 0, unknown: i === 0 });
+      changed = changed.concat(r.changed); added += r.added; if (i === 0) unknown = r.unknown;
+    });
+    // A session the list has not shown yet: the snapshot and each new session already ask for one fresh list
+    // (liveListSoon in liveFrame), so nothing more here.
+    if (changed.length || added) livePaint(changed, added > 0);
+    return { changed: changed.length, added: added, unknown: unknown.length };
+  }
+  function liveRunHooks(ev) { LIVE.hooks.slice().forEach(function (fn) { try { fn(ev); } catch (err) { console.error(err); } }); }
+  // One frame. Returns false when the stream must be reopened (a gap or a server restart).
+  function liveFrame(f) {
+    if (!f || typeof f !== 'object' || typeof f.kind !== 'string') return true;
+    var now = Date.now();
+    LIVE.frameAt = now;
+    if (typeof f.at === 'number' && isFinite(f.at)) LIVE.skew = now - f.at;
+    var stateFrame = f.kind === 'snapshot' || f.kind === 'session' || f.kind === 'session.removed' || f.kind === 'questions' || f.kind === 'queue';
+    if (f.kind === 'snapshot') {
+      LIVE.epoch = f.epoch; LIVE.seq = typeof f.seq === 'number' ? f.seq : -1;
+      LIVE.sessions = {};
+      (Array.isArray(f.sessions) ? f.sessions : []).forEach(function (ls) { if (ls && ls.sessionId) LIVE.sessions[liveKey(ls.provider, ls.sessionId)] = ls; });
+      LIVE.questions = f.questions || null; LIVE.queue = f.queue || null;
+      LIVE.degraded = f.degraded && typeof f.degraded === 'object' ? f.degraded : {};
+    } else if (typeof f.seq === 'number') {
+      if (LIVE.epoch !== null && f.epoch != null && f.epoch !== LIVE.epoch) return false;   // a new server life
+      if (stateFrame ? f.seq > LIVE.seq + 1 : f.seq > LIVE.seq) return false;              // missed a frame
+      if (stateFrame && f.seq <= LIVE.seq) return true;                                     // already applied
+    }
+    if (stateFrame && typeof f.seq === 'number') { LIVE.seq = f.seq; if (f.epoch != null) LIVE.epoch = f.epoch; LIVE.lastId = LIVE.epoch + '.' + LIVE.seq; }
+    if (!LIVE.gotFrame) { LIVE.gotFrame = true; LIVE.retryMs = LIVE_RETRY_MS; }
+    var wasMode = LIVE.mode;
+    LIVE.mode = 'live';
+    if (!LIVE.degraded.registry) LIVE.freshAt = now;
+    liveStopPoll();
+    if (f.kind === 'snapshot') {
+      liveApply(true);
+      liveListSoon();
+      questionsNudge();
+      liveRunHooks({ kind: 'snapshot' });
+    } else if (f.kind === 'session' && f.session && f.session.sessionId) {
+      var k = liveKey(f.session.provider, f.session.sessionId), was = LIVE.sessions[k];
+      LIVE.sessions[k] = f.session;
+      var r = liveApply(false);
+      // New, or a reply landed (`replies` went up): the words come from the list.
+      if (f.change === 'added' || !was || (typeof f.session.replies === 'number' && was && f.session.replies > (was.replies || 0))) liveListSoon();
+      if (f.session.state === 'waiting' && (!was || was.state !== 'waiting')) questionsNudge();
+      liveRunHooks({ kind: 'session', key: k, session: f.session, previous: was || null, moved: r.changed });
+    } else if (f.kind === 'session.removed') {
+      var j = liveJoin(f.provider, f.sessionId), gone = [];
+      delete LIVE.sessions[liveKey(f.provider, f.sessionId)];
+      liveLists().forEach(function (rows) {
+        for (var i = rows.length - 1; i >= 0; i--) {
+          var row = rows[i]; if (!row || liveRowJoin(row) !== j) continue;
+          if (row._placeholder) { rows.splice(i, 1); gone.push(row); } else if (row._live) { liveForget(row); gone.push(row); }
+        }
+      });
+      if (gone.length) livePaint(gone, true);
+      liveListSoon();
+      liveRunHooks({ kind: 'session.removed', key: liveKey(f.provider, f.sessionId) });
+    } else if (f.kind === 'questions') {
+      LIVE.questions = { total: f.total, approvals: f.approvals, bySession: f.bySession };
+      questionsNudge();   // the cards come from /api/session-questions (questions.js keeps its own poll as the fallback)
+      liveRunHooks({ kind: 'questions' });
+    } else if (f.kind === 'queue') {
+      LIVE.queue = { total: f.total, bySession: f.bySession };
+      liveRunHooks({ kind: 'queue' });
+    }
+    if (wasMode !== 'live') livePaint([], true);
+    return true;
+  }
+  function liveUrl() { return '/api/events' + (LIVE.lastId ? '?after=' + encodeURIComponent(LIVE.lastId) : ''); }
+  function liveVisible() { return !document.hidden; }
+  function liveSignedIn() { var sh = $('app-shell'); return !!(sh && !sh.classList.contains('hidden')); }
+  /** Open the one stream (never a second while one is open). */
+  function liveOpen() {
+    clearTimeout(LIVE.retry); LIVE.retry = null;
+    if (LIVE.es || !liveVisible() || !liveSignedIn()) return;
+    if (typeof EventSource !== 'function') { liveSetMode('absent'); return; }
+    var es, gen = ++LIVE.gen;
+    try { es = new EventSource(liveUrl()); } catch (_e) { liveSetMode('absent'); return; }
+    LIVE.es = es; LIVE.gotFrame = false;
+    if (LIVE.mode !== 'live' && LIVE.mode !== 'reconnecting' && LIVE.mode !== 'busy') LIVE.mode = 'connecting';
+    LIVE.frameAt = Date.now();
+    es.onmessage = function (ev) {
+      if (LIVE.es !== es || gen !== LIVE.gen) return;
+      var f; try { f = JSON.parse(ev.data); } catch (_e) { return; }
+      if (liveFrame(f) === false) {
+        // A gap or a new server life: reopen. A gap resumes from the last applied id; a new life starts fresh.
+        if (f && f.epoch != null && LIVE.epoch !== null && f.epoch !== LIVE.epoch) { LIVE.lastId = ''; LIVE.epoch = null; LIVE.seq = -1; }
+        liveClose(); liveOpen();
+      }
+    };
+    es.onerror = function () {
+      if (LIVE.es !== es || gen !== LIVE.gen) return;
+      if (!LIVE.gotFrame) {
+        // Never got a frame: EventSource hides the status, so one GET reads it (the readers' fallback-status pattern).
+        liveClose();
+        liveProbe(gen);
+        return;
+      }
+      // The stream had been live. The browser reconnects on its own with Last-Event-ID while readyState is 0; a closed
+      // stream (2) is reopened here with ?after. Either way the page says so and reads the list until a frame lands.
+      LIVE.gotFrame = false;
+      if (es.readyState === 2) { liveClose(); liveReconnect(); }
+      else liveSetMode('reconnecting');
+    };
+    liveStartWatch();
+  }
+  function liveClose() {
+    if (LIVE.es) { try { LIVE.es.close(); } catch (_e) {} }
+    LIVE.es = null; LIVE.gen++;
+  }
+  // What the route answered, read once without signing the page out: 404 (no route, or the switch off) and 401 or 403
+  // mean no live stream here, so the page does exactly what 7.0.0 did. 503 is a full server. Anything else (a
+  // network failure, a 200 that dropped) is a stream to reopen.
+  function liveProbe(gen) {
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 10000) : null;
+    fetch(liveUrl(), { headers: { 'X-COS-Web': '1', Accept: 'text/event-stream' }, credentials: 'same-origin', signal: ctrl ? ctrl.signal : undefined })
+      .then(function (res) {
+        var code = res.status, type = '';
+        try { type = String((res.headers && res.headers.get && res.headers.get('content-type')) || ''); } catch (_e) { type = ''; }
+        if (ctrl) ctrl.abort();
+        return { code: code, stream: type.indexOf('text/event-stream') === 0 };
+      }, function () { return { code: 0, stream: false }; })
+      .then(function (r) {
+        if (timer) clearTimeout(timer);
+        if (LIVE.es || LIVE.mode === 'idle') return;
+        if (r.code === 503) { liveSetMode('busy'); LIVE.retry = setTimeout(liveOpen, LIVE_BUSY_MS); return; }
+        if (r.code === 0 || (r.code === 200 && r.stream)) { liveReconnect(); return; }
+        // 404, 401, 403, any other status, or a 200 that is not a stream: polling as today.
+        liveSetMode('absent');
+      });
+  }
+  function liveReconnect() {
+    liveSetMode('reconnecting');
+    clearTimeout(LIVE.retry);
+    var wait = LIVE.retryMs;
+    LIVE.retryMs = Math.min(LIVE.retryMs * 2, LIVE_RETRY_MAX_MS);
+    LIVE.retry = setTimeout(liveOpen, wait);
+  }
+  function liveSetMode(m) {
+    var was = LIVE.mode;
+    LIVE.mode = m;
+    if (m === 'absent') {
+      // Exactly 7.0.0: no stream, no extra timer, no label. Rows this page corrected keep their last values until the
+      // next list read replaces them, as 7.0.0's rows did.
+      liveClose(); liveStopPoll(); liveStopWatch(); clearTimeout(LIVE.retry); LIVE.retry = null;
+      LIVE.absentAt = Date.now(); LIVE.sessions = {};
+    }
+    if (m === 'reconnecting') liveStartPoll(); else if (m !== 'live') liveStopPoll();
+    if (was !== m && (liveOnMode(was) || liveOnMode(m))) livePaint([], true);
+  }
+  // ── the fallbacks: a watchdog for a quiet stream, and the 5 s list read while reconnecting ──
+  function liveStartWatch() {
+    if (LIVE.watch) return;
+    LIVE.watch = setInterval(function () {
+      if (!liveVisible()) return;
+      if ((LIVE.mode === 'live' || LIVE.mode === 'connecting' || LIVE.mode === 'reconnecting') && LIVE.es && Date.now() - LIVE.frameAt > LIVE_SILENT_MS) {
+        // No frame of any kind for 30 s (the heartbeat is every 15 s): the stream is dead whatever readyState says.
+        liveClose(); liveReconnect();
+      }
+      if (liveOn() || LIVE.mode === 'connecting') liveNoteTick();
+    }, LIVE_WATCH_MS);
+  }
+  function liveStopWatch() { clearInterval(LIVE.watch); LIVE.watch = null; }
+  function liveStartPoll() {
+    if (LIVE.poll) return;
+    LIVE.poll = setInterval(function () { if (liveVisible() && LIVE.mode === 'reconnecting') livePollOnce(); }, LIVE_POLL_MS);
+  }
+  function liveStopPoll() { clearInterval(LIVE.poll); LIVE.poll = null; }
+  /** Read the list now, and swap it in on every pane that shows it. Resolves when it landed (or failed). */
+  function livePollOnce() {
+    var before = SL.data && SL.data.sessions;
+    var keysOf = function (a) { return (a || []).map(function (s) { return s ? liveRowJoin(s) : ''; }).join(','); };
+    return sessionList(0).then(function (d) {
+      var rows = (d && d.sessions) || [];
+      var moved = keysOf(before) !== keysOf(rows);
+      if (state.sessions === before || !state.sessions || !state.sessions.length) state.sessions = rows;
+      if (typeof SX !== 'undefined' && SX && SX.rows === before) { SX.rows = rows; SX.loadedAt = Date.now(); }
+      LIVE.freshAt = Date.now();
+      if (liveOn()) livePaint(rows, moved);
+      return true;
+    }, function () { if (liveOn()) livePaint([], false); return false; });
+  }
+  /** A fresh list soon (debounced), for the words of a session that appeared, left or replied. */
+  function liveListSoon() {
+    clearTimeout(LIVE.listTimer);
+    LIVE.listTimer = setTimeout(function () { LIVE.listTimer = null; if (liveVisible()) livePollOnce(); }, LIVE_LIST_DEBOUNCE_MS);
+  }
+  // ── coming back: visible, back from the back-forward cache, back online ──
+  function liveResume() {
+    if (!liveSignedIn()) return;
+    var wasOn = liveOn();
+    if (LIVE.mode === 'absent') {
+      // 7.0.0 behaviour; look again only after a long while (a server updated or switched on since). That look is one
+      // stream attempt, nothing else: the panes read what 7.0.0 read.
+      if (Date.now() - LIVE.absentAt < LIVE_ABSENT_RECHECK_MS) return;
+      LIVE.mode = 'connecting';
+    }
+    if (LIVE.mode === 'idle') return;
+    if (wasOn) livePollOnce();
+    if (!LIVE.es) { clearTimeout(LIVE.retry); LIVE.retry = null; LIVE.retryMs = LIVE_RETRY_MS; liveOpen(); }
+    liveStartWatch();
+    liveNoteTick();
+  }
+  function liveHide() {
+    // A hidden page holds no stream (a locked phone drops it anyway) and spends no timer.
+    liveClose(); liveStopPoll(); clearTimeout(LIVE.retry); LIVE.retry = null; clearTimeout(LIVE.listTimer); LIVE.listTimer = null;
+  }
+  function liveStart() {
+    if (LIVE.mode !== 'idle') return;
+    LIVE.mode = 'connecting';
+    liveOpen();
+  }
+  // ── honesty: how old the counts on screen are ──
+  /** "As of 2 min ago" when the counts are older than 30 s and the page is not live; '' when live, or with no stream
+   *  at all (7.0.0 showed none). */
+  function liveAge(now) {
+    if (LIVE.mode === 'idle' || LIVE.mode === 'absent' || LIVE.mode === 'connecting') return '';
+    var at = Math.max(LIVE.freshAt || 0, LIVE.mode === 'live' && !LIVE.degraded.registry ? LIVE.frameAt : 0);
+    if (!at) return '';
+    var s = Math.max(0, ((now || Date.now()) - at) / 1000);
+    if (s * 1000 < LIVE_STALE_MS) return '';
+    if (s < 60) return 'As of ' + Math.floor(s) + ' s ago';
+    if (s < 3600) return 'As of ' + Math.floor(s / 60) + ' min ago';
+    return 'As of ' + Math.floor(s / 3600) + ' h ago';
+  }
+  /** The running clock: "12s", "4m 12s", "1h 5m". */
+  function liveClock(sec) {
+    var s = Math.max(0, Math.floor(sec));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  }
+  /** Seconds a working row has run: from the stream's turnStartedAt (skew from the frame's `at`), else the row's own
+   *  state_since on the Mac's clock. */
+  function liveElapsed(row, now) {
+    var t = now || Date.now();
+    if (row && typeof row._liveTurnAt === 'number') return (t - LIVE.skew - row._liveTurnAt) / 1000;
+    var d = row ? toDate(row.state_since || row.last_activity_at) : null;
+    return d ? (sxServerTime(t) - d.getTime()) / 1000 : 0;
+  }
+  /** Server ms a row's clock counts from, for the data attribute the 1 s tick reads. */
+  function liveSince(row) {
+    if (row && typeof row._liveTurnAt === 'number') return row._liveTurnAt;
+    var d = row ? toDate(row.state_since || row.last_activity_at) : null;
+    return d ? d.getTime() - SX_CLOCK.skew - LIVE.skew : null;
+  }
+  // ── the 1 s tick: every running clock on screen, never on a hidden page ──
+  var LIVE_TICK = { timer: null };
+  function liveTickStart() {
+    if (LIVE_TICK.timer) return;
+    LIVE_TICK.timer = setInterval(liveTickOnce, 1000);
+  }
+  function liveTickStop() { clearInterval(LIVE_TICK.timer); LIVE_TICK.timer = null; }
+  function liveTickOnce() {
+    if (document.hidden) return;   // paused while hidden; visible again paints at once (liveResume, liveNoteTick)
+    var els = document.querySelectorAll('[data-live-since]'), now = Date.now();
+    if (!els.length && !liveNoteBusy()) { liveTickStop(); return; }
+    for (var i = 0; i < els.length; i++) {
+      var since = Number(els[i].getAttribute('data-live-since'));
+      if (isFinite(since)) els[i].textContent = liveClock((now - LIVE.skew - since) / 1000);
+    }
+    liveNoteTick();
+  }
+  // Repaints are batched: a burst of frames paints once.
+  function livePaint(rows, structural) {
+    LIVE.pendingRows = (LIVE.pendingRows || []).concat(rows || []);
+    LIVE.pendingStructural = LIVE.pendingStructural || !!structural;
+    if (LIVE.paintTimer) return;
+    LIVE.paintTimer = setTimeout(function () {
+      var r = LIVE.pendingRows || [], st = LIVE.pendingStructural;
+      LIVE.paintTimer = null; LIVE.pendingRows = []; LIVE.pendingStructural = false;
+      try { liveRepaint(r, st); } catch (err) { console.error(err); }
+    }, 30);
+  }
   // ── the session pet (Today) ─────────────────────────────
   // Same pet and the same pose rule as COS Control (PetSpritePose.resolve): waiting with nothing running
   // is "waiting", then one, two, three, four or more sessions in play are working, duel, trio, swarm, an open
@@ -708,25 +1080,28 @@
   }
 
   // ── Today ───────────────────────────────────────────────
-  function loadToday() {
+  // force (7.0.1, Today's Refresh): every source read again now, none from a cache. Resolves when the sessions, Work,
+  // welcome and recording reads have painted.
+  function loadToday(force) {
     var now = new Date();
     $('today-date').textContent = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) + ', ' + clock(now);
     var gen = ++TODAY.gen;
     // Voices and memories answer on their own time (the memories status runs a CLI on the Mac): Today paints what it
     // has and says it is still reading, then repaints as each one lands.
-    if (Date.now() - TODAY.extraAt > 60000 || TODAY.voices.state === 'failed' || TODAY.memories.state === 'failed') {
+    var extras = [];
+    if (force === true || Date.now() - TODAY.extraAt > 60000 || TODAY.voices.state === 'failed' || TODAY.memories.state === 'failed') {
       TODAY.extraAt = Date.now();
       TODAY.voices = { state: 'pending', groups: [] }; TODAY.memories = { state: 'pending', n: 0 };
-      api('/api/voice/held-groups').then(function (d) {
+      extras.push(api('/api/voice/held-groups').then(function (d) {
         TODAY.voices = { state: 'answered', groups: (d && Array.isArray(d.groups)) ? d.groups : [] };
-      }, function () { TODAY.voices = { state: 'failed', groups: [] }; }).then(function () { paintNeeds(); });
-      api('/api/web-bridge/memories', { method: 'POST', body: { id: 'today-status', op: 'status', args: {} } }).then(function (d) {
+      }, function () { TODAY.voices = { state: 'failed', groups: [] }; }).then(function () { paintNeeds(); }));
+      extras.push(api('/api/web-bridge/memories', { method: 'POST', body: { id: 'today-status', op: 'status', args: {} } }).then(function (d) {
         var n = d && d.details ? d.details.learningToReview : null;
         TODAY.memories = typeof n === 'number' ? { state: 'answered', n: Math.max(0, n) } : { state: 'failed', n: 0 };
-      }, function () { TODAY.memories = { state: 'failed', n: 0 }; }).then(function () { paintNeeds(); });
+      }, function () { TODAY.memories = { state: 'failed', n: 0 }; }).then(function () { paintNeeds(); }));
     }
-    Promise.all([
-      sessionList(15000).catch(function () { return null; }),
+    var main = Promise.all([
+      sessionList(force === true ? 0 : 15000).catch(function () { return null; }),
       api('/api/work-board/your-move').catch(function () { return null; }),
       api('/api/welcome-context').catch(function () { return null; }),
       api('/api/meetings/live-chunks').catch(function () { return null; })
@@ -758,13 +1133,15 @@
       loadCalendarLater(nx, nx && toDate(nx.time));
       loadTodayIntake();
       setBadge('sessions', working.length > 0);
-      liveSession(recent).then(function (rec) {
+      return liveSession(recent).then(function (rec) {
         if (gen !== TODAY.gen) return;
         renderRecording(rec);
         setBadge('meetings', !!rec);
         if (rec) { TODAY.recording = true; paintNeeds(); }
       });
     });
+    // A forced read waits for the voices and memories too, so the summary it asks for sees every source.
+    return force === true ? Promise.all([main].concat(extras)) : main;
   }
   // A capture counts as live only while it is still being written: an abandoned
   // active-sessions file must never read as "Recording now".
@@ -796,7 +1173,7 @@
   var BRIEF = { view: null, inflight: false, sentKey: '', sentAt: 0 };
   // 6.99.26 QA: the same rows are asked about again only after five minutes (a Today that sits open still learns what
   // the server reads itself: sub-agents and Work cards); changed rows are asked about at once, one ask at a time.
-  var BRIEF_RESEND_MS = 5 * 60000, BRIEF_OFF_RECHECK_MS = 5 * 60000, BRIEF_TICK_MS = 60000;
+  var BRIEF_RESEND_MS = 5 * 60000, BRIEF_OFF_RECHECK_MS = 5 * 60000, BRIEF_TICK_MS = 60000, BRIEF_LIVE_GAP_MS = 60000;
   function briefMinutes(v) { var d = toDate(v); return d ? Math.max(0, Math.round((Date.now() - d.getTime()) / 60000)) : 0; }
   function briefInputs(m) {
     var sessions = [];
@@ -830,6 +1207,9 @@
     var key = JSON.stringify([body.sessions.map(function (s) { return [s.title, s.state, s.line, s.waiting, s.agents]; }), body.needs, body.later, body.sessionsRead, body.needsComplete, body.unread, body.recording]);
     var since = Date.now() - BRIEF.sentAt;
     if (BRIEF.view && BRIEF.view.state === 'off' ? since < BRIEF_OFF_RECHECK_MS : key === BRIEF.sentKey && since < BRIEF_RESEND_MS) return;
+    // 7.0.1: with the live stream Today repaints on every session move, so a changed Today asks at most once a minute
+    // (Refresh asks at once). Without it, 7.0.0's rule above is the only one.
+    if (typeof liveOn === 'function' && liveOn() && since < BRIEF_LIVE_GAP_MS) return;
     BRIEF.inflight = true; BRIEF.sentKey = key; BRIEF.sentAt = Date.now();
     api('/api/today/brief', { method: 'POST', body: body, timeoutMs: 45000 }).then(function (v) {
       BRIEF.view = v && typeof v === 'object' ? v : null;
@@ -902,15 +1282,21 @@
   function listWords(names) { return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]; }
   function runRow(s, activeNow) {
     var key = splitSessionId(s.provider, s.session_id);
+    // 7.0.1: with the live stream, a working row's clock ticks every second from the turn's start (liveTickOnce).
+    // Without it (an older server, the switch off), the minute line 7.0.0 showed.
+    var since = activeNow && typeof liveOn === 'function' && liveOn() ? liveSince(s) : null;
     var meta = activeNow
-      ? 'Working for ' + span(s.state_since || s.last_activity_at)
+      ? 'Working for ' + (since != null ? '\u0000' : span(s.state_since || s.last_activity_at))
       : 'Open, quiet for ' + span(s.last_activity_at || s.state_since);
     if (s.project && s.project !== usualProject()) meta += ', in ' + String(s.project).replace(/^-Users-[^-]+-/, '');
+    var metaHtml = since != null
+      ? esc(meta).replace('\u0000', '<span class="run-clock" data-live-since="' + esc(String(since)) + '">' + esc(liveClock(liveElapsed(s))) + '</span>')
+      : esc(meta);
     // A tap opens the peek on Today (panes/today-actions.js); it falls back to the reader if the peek cannot load.
     return '<button type="button" class="run-row" data-today="run" data-key="' + esc(key.provider) + '|' + esc(key.id) + '">' +
       '<span class="run-who">' + badge(key.provider) + (activeNow ? '<span class="pulse" aria-label="working"></span>' : '') + '</span>' +
       '<span class="run-title">' + esc(sessionTitle(s)) + '</span>' +
-      '<span class="run-meta">' + esc(meta) + '</span></button>';
+      '<span class="run-meta">' + metaHtml + '</span></button>';
   }
   function renderRunning(working, open) {
     $('run-count').textContent = working.length ? String(working.length) : '';
@@ -926,6 +1312,140 @@
     var more = (working.length - shown.length) + (shown.length ? open.length : Math.max(0, open.length - 2));
     if (more > 0) html += '<button type="button" class="run-more" data-goto="sessions">' + countWord(more) + ' more open. All sessions</button>';
     list.innerHTML = html;
+    if (typeof liveTickStart === 'function' && list.querySelector && list.querySelector('[data-live-since]')) liveTickStart();
+  }
+  // ── live state on screen (7.0.1): Today's counts and rows, the pet, the Sessions rows, the header line ──
+  // The live model (above) calls this, batched, after a frame or a list read moved something.
+  function liveRepaint(rows, structural) {
+    if (!liveSignedIn()) return;
+    if (state.pane === 'today' && TODAY.at && !TODAY.offline && TODAY.sessionsState === 'answered') {
+      var sessions = state.sessions || [];
+      TODAY.working = sessions.filter(function (s) { return s.running_active; });
+      TODAY.open = sessions.filter(function (s) { return s.running && !s.running_active; });
+      renderRunning(TODAY.working, TODAY.open);
+      renderPet(sessions);
+      paintNeeds();
+      setBadge('sessions', TODAY.working.length > 0);
+    }
+    if (state.pane === 'sessions' && SX.rows && SX.view === 'sessions') liveSessionRows(rows, structural);
+    liveNoteTick();
+  }
+  // Sessions: a row whose state moved is redrawn where it stands (the list never jumps under a finger); a session that
+  // appeared or left redraws the list. A search on screen keeps its hits; only the hero's counts move.
+  function liveSessionRows(rows, structural) {
+    var list = $('sessions-list');
+    if (!list) return;
+    if (sxQueryActive()) { paintSessionsHero(); return; }
+    if (structural) { renderSessionGroups(); return; }
+    var amb = sxAmbiguous(sxVisible());
+    (rows || []).forEach(function (s) {
+      if (!s || sxKeepWarm(s)) return;
+      var k = splitSessionId(s.provider, s.session_id || s.id), want = k.provider + '|' + k.id;
+      var els = list.querySelectorAll('[data-session]');
+      for (var i = 0; i < els.length; i++) {
+        if (els[i].getAttribute('data-session') !== want) continue;
+        var html = sxRow(s, null, amb);
+        if (els[i].__liveHtml !== html) {
+          var tmp = document.createElement('div'); tmp.innerHTML = html;
+          var next = tmp.firstElementChild || tmp.firstChild;
+          if (next) { next.__liveHtml = html; els[i].parentNode.replaceChild(next, els[i]); }
+        }
+        break;
+      }
+    });
+    paintSessionsHero();
+  }
+  // ── Today's header line and Refresh ──
+  // Refresh (Miles 11/07: "a 'refresh' button to the home 'today' tab that allows the user to get the latest state and
+  // to update the summary"): every Today source read again now, then a new summary asked for with force (the server
+  // still holds its switch, its one-per-30-s refresh limit and its daily cap, and says which in `reason`).
+  var TR = { busy: false, doneAt: 0, msg: '', retryAt: 0 };
+  var TR_REASONS = {
+    daily_cap: 'Daily summary limit reached',
+    recording: 'No new summary while a meeting records',
+    maintenance: 'No new summary while COS updates',
+    paused: 'The summary is paused for now. Try again later',
+    failed: 'The summary did not update',
+    interval: 'The summary updated recently. Try again in a few minutes'
+  };
+  /** The words for a refresh answer, or '' when the summary updated (or is switched off). */
+  function refreshWords(v) {
+    if (!v || typeof v !== 'object') return '';
+    if (typeof v.message === 'string' && v.message.trim()) return v.message.trim();
+    if (v.state === 'off') return '';
+    if (v.reason === 'refresh_throttled') return '';
+    return v.state === 'fresh' && !v.reason ? '' : (TR_REASONS[v.reason] || '');
+  }
+  function todayRefresh() {
+    if (TR.busy) return Promise.resolve(false);
+    TR.busy = true; TR.msg = ''; TR.retryAt = 0;
+    var btn = $('today-refresh'); if (btn) btn.disabled = true;
+    liveNoteTick();
+    var done = function (msg) {
+      TR.busy = false; TR.doneAt = Date.now(); TR.msg = msg || '';
+      var b = $('today-refresh'); if (b) b.disabled = false;
+      liveNoteTick(); liveTickStart();
+      return true;
+    };
+    return Promise.resolve(loadToday(true)).then(function () {
+      if (typeof liveOn === 'function' && liveOn()) LIVE.freshAt = Date.now();
+      if (!TODAY.model || TODAY.offline) return done('');
+      // The summary switched off: the state only.
+      if (BRIEF.view && (BRIEF.view.state === 'off' || BRIEF.view.enabled === false)) return done('');
+      var body = briefInputs(TODAY.model);
+      body.force = true;
+      BRIEF.inflight = true;
+      // A 7.0.0 server refuses the unknown `force` (400 invalid_today_brief): ask it the ordinary way instead.
+      var ask = function (b) { return api('/api/today/brief', { method: 'POST', body: b, timeoutMs: 45000 }); };
+      return ask(body).catch(function (err) {
+        if (!(err && err.status === 400 && err.code === 'invalid_today_brief')) throw err;
+        delete body.force;
+        return ask(body);
+      }).then(function (v) {
+        BRIEF.inflight = false;
+        if (v && typeof v === 'object') { BRIEF.view = v; BRIEF.sentAt = Date.now(); }
+        if (v && v.reason === 'refresh_throttled') TR.retryAt = Date.now() + Math.max(1000, Number(v.retryAfterMs) || 30000);
+        if (TODAY.model && state.pane === 'today') renderStory(TODAY.model);
+        return done(refreshWords(v));
+      }, function (err) {
+        BRIEF.inflight = false;
+        return done(err && err.code === 'unreachable' ? err.message : 'The summary did not update');
+      });
+    }, function () { return done('Could not read everything. Try again'); });
+  }
+  function liveNoteBusy() {
+    var now = Date.now();
+    return TR.busy || TR.retryAt > now || (TR.doneAt && now - TR.doneAt < 10 * 60000) || !!liveAge(now) || LIVE.mode === 'reconnecting';
+  }
+  /** The line beside Refresh: Updating, Reconnecting, the counts' age, when Today was refreshed, the server's limit. */
+  function liveNoteText(now) {
+    now = now || Date.now();
+    if (TR.busy) return 'Updating';
+    var parts = [];
+    if (LIVE.mode === 'reconnecting') parts.push('Reconnecting');
+    var age = liveAge(now);
+    if (age) parts.push(age);
+    if (TR.doneAt && !age) {
+      var m = Math.floor((now - TR.doneAt) / 60000);
+      if (m < 10) parts.push(m < 1 ? 'Updated just now' : 'Updated ' + m + ' min ago');
+    }
+    if (TR.retryAt > now) parts.push('Try again in ' + Math.ceil((TR.retryAt - now) / 1000) + ' s');
+    else if (TR.msg && TR.doneAt && now - TR.doneAt < 10 * 60000) parts.push(TR.msg);
+    return parts.join('. ');
+  }
+  function liveNoteTick() {
+    var el = $('today-live-note');
+    if (el) { var t = liveNoteText(); if (el.textContent !== t) el.textContent = t; el.classList.toggle('warn', LIVE.mode === 'reconnecting'); }
+    var sx = document.querySelector('#sessions-hero .sx-live-note');
+    if (sx) { var n = liveSessionsNote(); sx.textContent = n ? ' · ' + n : ''; }
+  }
+  /** The Sessions hero's honesty suffix: "Reconnecting" and the counts' age, or ''. */
+  function liveSessionsNote() {
+    var bits = [];
+    if (LIVE.mode === 'reconnecting') bits.push('Reconnecting');
+    var age = liveAge();
+    if (age) bits.push(age.charAt(0).toLowerCase() + age.slice(1));
+    return bits.join(' · ');
   }
   function needWhy(item) {
     var p = item.progress || {};
@@ -1358,7 +1878,7 @@
     var stats = view === 'sessions' ? sxStats(vis) : [];
     var busy = view === 'sessions' ? SX.loading : SX.usageLoading;
     hero.innerHTML = '<span class="cx-glyph"><svg class="icon"><use href="#i-sessions"/></svg></span>' +
-      '<div class="cx-hero-text"><h1 class="cx-title">Sessions</h1><p class="cx-detail-line">' + esc(detail) + '</p></div>' +
+      '<div class="cx-hero-text"><h1 class="cx-title">Sessions</h1><p class="cx-detail-line">' + esc(detail) + liveHeroNote(view) + '</p></div>' +
       '<div class="cx-actions"><button type="button" class="cx-btn quiet" data-sx="refresh"' + (busy ? ' disabled' : '') + '><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button></div>' +
       (stats.length ? '<div class="cx-stats">' + stats.map(function (s) { return '<span class="cx-stat"><b>' + esc(typeof s[0] === 'number' ? s[0].toLocaleString() : s[0]) + '</b><span>' + s[1] + '</span></span>'; }).join('') + '</div>' : '');
     var clockOn = view === 'sessions' && !sxQueryActive();
@@ -1373,6 +1893,12 @@
     if (usage) usage.classList.toggle('hidden', view === 'sessions');
   }
 
+  // 7.0.1: the hero's counts say when they are not live ("Reconnecting", "as of 2 min ago"); nothing without a stream.
+  function liveHeroNote(view) {
+    if (view !== 'sessions' || typeof liveSessionsNote !== 'function') return '';
+    var n = liveSessionsNote();
+    return '<span class="sx-live-note">' + (n ? ' · ' + esc(n) : '') + '</span>';
+  }
   function loadSessions(force) {
     var r = parseRoute();
     var reading = r.pane === 'sessions' && r.args.length === 2;
@@ -5075,6 +5601,7 @@
   // is closed and the page's last reading is however old the visit was. Open the stream again and read the turns.
   window.addEventListener('pageshow', function (e) {
     if (!e || !e.persisted) return;
+    liveResume();   // 7.0.1: re-read the list now, then resume the live stream from its last id
     var r = state.reading;
     if (r && r.provider && r.id) {
       if (state.stream) { try { state.stream.close(); } catch (_e) {} state.stream = null; }
@@ -5083,12 +5610,23 @@
     if (state.pane === 'today' && !$('app-shell').classList.contains('hidden')) loadToday();
   });
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden || $('app-shell').classList.contains('hidden')) return;
+    if (document.hidden) { liveHide(); return; }
+    if ($('app-shell').classList.contains('hidden')) return;
+    liveResume();   // 7.0.1: re-read the list now, then resume the live stream from its last id
     // Coming back to the page refreshes Today in place. Other panes keep what is on screen:
     // rebuilding them here moved the page under Miles's finger ("it reloads the section").
     if (state.pane === 'today' && Date.now() - (state.lastLoad.today || 0) > 60000) { state.lastLoad.today = Date.now(); loadToday(); }
     // Back within the minute: Today keeps its data, but the pet's loop stopped while hidden, so restart it.
     else if (state.pane === 'today' && PET.pose && !PET.timer) renderPet(state.sessions || []);
+  });
+  // 7.0.1: back on the network, the same as coming back to the page.
+  window.addEventListener('online', function () { if (!document.hidden) liveResume(); });
+  // 7.0.1: Today's Refresh (todayRefresh).
+  document.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest && e.target.closest('[data-today-refresh]');
+    if (!b) return;
+    e.preventDefault();
+    todayRefresh();
   });
   window.addEventListener('message', function (e) {
     if (e.origin !== location.origin) return;
@@ -5223,7 +5761,17 @@
     noteServer: function (up) { noteServer(up); },
     onServer: function (fn) { SERVER.hooks.push(fn); },
     // Duo tables: the resizable divider between a list and its reader (splitKit above), for panes/*.js.
-    splitKit: { mount: mountSplit, handle: splitHandleHtml, fullButton: splitFullButton }
+    splitKit: { mount: mountSplit, handle: splitHandleHtml, fullButton: splitFullButton },
+    // 7.0.1: the one live stream (docs/live-events-contract.md). mode(): idle, connecting, live, reconnecting, busy or
+    // absent. on(fn) hears each applied frame ({ kind, key, session, previous }). session(provider, id): the live
+    // record, or null. age(): "As of 2 min ago" when the counts are not live, else ''.
+    live: {
+      mode: function () { return LIVE.mode; },
+      on: function (fn) { if (typeof fn === 'function') LIVE.hooks.push(fn); },
+      session: function (provider, id) { var j = liveJoin(provider, id), hit = null; Object.keys(LIVE.sessions).forEach(function (k) { var ls = LIVE.sessions[k]; if (liveJoin(ls.provider, ls.sessionId) === j) hit = ls; }); return hit; },
+      age: function () { return liveAge(); },
+      clock: liveClock
+    }
   };
   // Today as a place to act (panes/today-actions.js, Miles 11/06): what the Today cards show, a repaint after a
   // decision, and the Sessions reader's own pieces, so the overlay sends and reads through the reader's code.
