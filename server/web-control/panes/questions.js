@@ -47,7 +47,8 @@
     stopped: false,
     inflight: false,      // a poll is on the wire
     again: false,         // something asked for a poll while one was out: one more as soon as it lands
-    lastPollAt: 0         // when the last poll went out (Date.now)
+    lastPollAt: 0,        // when the last poll went out (Date.now)
+    load: 'unread'        // W13: 'unread' (no read yet), 'ok' (the last read was the server's answer) or 'failed' (it was not)
   };
   var DEFAULT_POLL_MS = 10000;
   var POLL_TIMEOUT_MS = 15000;
@@ -134,6 +135,19 @@
     // QA 6.99.27 (N4): the read asked for while this one was out goes through nudge, so it waits out the 1 s gap too.
     if (Q.again) { Q.again = false; nudge(); }
   }
+  // W13 (QA week of 11/01-11/08): whether the last read was the server's answer. A failed read leaves no cards, and Today's
+  // sheet read "no card" as "at the Mac's prompt" (a Claude session) with no way to read again. Each change tells the
+  // mounted sheets (their onChange), never on a read that changed nothing.
+  function noteLoad(state) {
+    if (Q.load === state) return;
+    Q.load = state;
+    tellMounts();
+  }
+  function tellMounts() {
+    mounts.forEach(function (m) {
+      if (m.onChange) { try { m.onChange(itemsFor(m.sessionId).length, atMacFor(m.sessionId).length); } catch (_e) {} }
+    });
+  }
   function poll() {
     clearTimeout(Q.timer);
     if (Q.stopped || document.hidden || !signedIn()) return;
@@ -141,7 +155,7 @@
     if (Q.inflight) { Q.again = true; return; }
     Q.inflight = true; Q.again = false; Q.lastPollAt = Date.now();
     capForPoll().then(function (cap) {
-      if (!usable(cap)) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
+      if (!usable(cap)) { Q.again = false; landed(); clearCards(); schedule(60000); noteLoad(cap ? 'ok' : 'failed'); return; }
       // 6.99.32 (QA 6.99.30 canary W1): a Mac that hangs (asleep, a stale Tailscale route) never answered and never
       // refused, so this read stayed in flight forever: no more polls, and the Mac never marked down. It gives up after
       // POLL_TIMEOUT_MS, says the Mac is not answering, and polls again. The limit covers the body too (QA 6.99.32
@@ -153,27 +167,32 @@
         // answered (any status) or did not (below); otherwise a "down" mark stranded Submit, Allow and Deny for minutes.
         if (W.noteServer) W.noteServer(true);
         if (res.status === 401) { clearTimeout(limit); Q.again = false; landed(); Q.stopped = true; clearCards(); return; }
-        if (!res.ok) { clearTimeout(limit); schedule(DEFAULT_POLL_MS); landed(); return; }
+        if (!res.ok) { clearTimeout(limit); schedule(DEFAULT_POLL_MS); landed(); noteLoad('failed'); return; }
         return res.json().then(function (d) {
           clearTimeout(limit);
-          if (!d || d.enabled === false) { Q.again = false; landed(); clearCards(); schedule(60000); return; }
+          if (!d || d.enabled === false) { Q.again = false; landed(); clearCards(); schedule(60000); noteLoad('ok'); return; }
           // Painted as soon as the read lands: take() draws the cards and repaints Today's Needs you and the pet.
+          // The state first, so a redraw take() makes already reads 'ok'; a read that changed no card redraws nothing, so
+          // the sheets still hear that the failure is over.
+          var was = Q.load;
+          Q.load = 'ok';
           take(Array.isArray(d.items) ? d.items : [], Array.isArray(d.settled) ? d.settled : []);
+          if (was !== 'ok') tellMounts();
           var every = Number(d.pollIntervalMs) > 0 ? Number(d.pollIntervalMs) : DEFAULT_POLL_MS;
           schedule(nextWait(every));
           landed();
         }, function () {
           // The body never finished (cut off, or the limit fired mid-body). The Mac did answer the headers, so it is not
           // marked down; the poll is freed and goes again.
-          clearTimeout(limit); schedule(DEFAULT_POLL_MS); landed();
+          clearTimeout(limit); schedule(DEFAULT_POLL_MS); landed(); noteLoad('failed');
         });
       }, function () {
         // No answer at all: refused, unreachable, or the limit fired before the headers (the only abort this read has).
         clearTimeout(limit);
         if (W.noteServer) W.noteServer(false);
-        schedule(DEFAULT_POLL_MS); landed();
+        schedule(DEFAULT_POLL_MS); landed(); noteLoad('failed');
       });
-    }).catch(function () { schedule(DEFAULT_POLL_MS); landed(); });
+    }).catch(function () { schedule(DEFAULT_POLL_MS); landed(); noteLoad('failed'); });
   }
   // Read now, unless a read went out under NUDGE_GAP_MS ago (then at the end of that gap) or one is on the wire (then
   // once more when it lands). Today calls this when a session goes to waiting, so its question shows at once.
@@ -707,5 +726,6 @@
   if (W.onRoute) W.onRoute(function (r) { if (r && r.pane === 'today') nudge(); });
 
   W.sessionQuestions = { _state: Q, _take: take, _render: render, _presenceAge: presenceAge, _pollUrl: pollUrl, _key: onKey, _advanceMs: ADVANCE_MS, _todayPollMs: TODAY_POLL_MS, _fitKeyboard: fitKeyboard, poll: poll, nudge: nudge, mount: mount,
-    itemsFor: itemsFor, atMacFor: atMacFor, answeredFor: answeredFor, wordsOf: wordsOf, macLine: MAC_LINE, answeredLine: ANSWERED_LINE };
+    itemsFor: itemsFor, atMacFor: atMacFor, answeredFor: answeredFor, wordsOf: wordsOf, macLine: MAC_LINE, answeredLine: ANSWERED_LINE,
+    loadState: function () { return Q.load; }, retry: function () { nudge(); } };
 })();

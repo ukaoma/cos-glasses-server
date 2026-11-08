@@ -12,7 +12,7 @@ import { PermissionBroker, brokerSignalSink, questionHookOutput, wirePermissionB
 import { SessionSignalStore } from '../lib/session-signal-store.js'
 import { __resetClientLivenessForTests, lastHoldQuestionsPollAt, lastLegacyQuestionsPollAt, lastQuestionsPollAt, presenceAgeMs, webPresenceAgeMs } from '../lib/client-liveness.js'
 import { isWebSessionAuthorized, mintWebSessionCookieValue, WEB_SESSION_COOKIE_NAME } from '../lib/web-session-auth.js'
-import { PERMISSION_BROKER_HOOK_PATH, createPermissionBrokerHookRouter, createSessionQuestionsRouter, requestFromThisMac } from './permission-broker.js'
+import { PERMISSION_BROKER_HOOK_PATH, createPermissionBrokerHookRouter, createSessionQuestionsRouter, requestFromThisMac, selfAddressesFromInterfaces } from './permission-broker.js'
 import { ASK_INPUT, Q1, Q2, permissionEnvelope } from '../lib/__fixtures__/permission-broker.js'
 
 const API_TOKEN = 'api-tok-69912'
@@ -32,7 +32,7 @@ interface Harness { base: string; host: string; broker: PermissionBroker; cookie
  * `away: true` wires the broker as index.ts does for the away hold (6.60.0, 6.99.26): the real liveness
  * module's presence readers, a 10 minute hold, and a hook that waits 630 s. `desk` is the desk's idle seconds.
  */
-async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; awayHoldMs?: number; hookTimeoutS?: number; desk?: () => number; webSwitch?: () => boolean; macItself?: boolean } = {}): Promise<Harness> {
+async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; awayHoldMs?: number; hookTimeoutS?: number; desk?: () => number; webSwitch?: () => boolean; macItself?: boolean; selfAddresses?: readonly string[] } = {}): Promise<Harness> {
   __resetClientLivenessForTests()
   const store = new SessionSignalStore({ isCosSpawnedPid: () => false })
   const desk = opts.desk ?? (() => 1_000)
@@ -61,6 +61,8 @@ async function start(opts: { web?: boolean; gate?: boolean; away?: boolean; away
     // Every test socket is loopback, which is the Mac itself (QA round 1). The away tests stand in for the phone; the
     // Mac-itself tests keep the production check.
     ...(opts.away && !opts.macItself ? { fromThisMac: () => false } : {}),
+    // W12: the production check with a fixed list of the Mac's own addresses, so a Serve hop can be told apart.
+    ...(opts.away && opts.macItself && opts.selfAddresses ? { fromThisMac: (req: express.Request) => requestFromThisMac(req, () => opts.selfAddresses!) } : {}),
   }))
   const server = await new Promise<Server>(r => { const s = app.listen(0, '127.0.0.1', () => r(s)) })
   servers.push(server)
@@ -238,6 +240,22 @@ describe('COS Control Web and the away hold (6.99.26)', () => {
     expect(await hookPost(h, { askHold: 1 })).toEqual({})
   })
 
+  it('W12 pin: today a `tailscale serve` hop carries no web session at all (review W4), so it can record no touch, desk or away', async () => {
+    // isWebControlSocketAllowed refuses every proxied request, so the router answers 401 before requestFromThisMac is
+    // asked. The reviewer's "stored as away" path is not reachable in 7.0.2; requestFromThisMac's Serve rule (unit tests
+    // below) is what decides the day Control Web is admitted through Serve.
+    const self = ['100.101.102.103', 'fd7a:115c:a1e0::1234', '192.168.1.20']
+    for (const xff of ['100.101.102.103', 'fd7a:115c:a1e0::1234', '127.0.0.1', '100.64.0.9']) {
+      const h = await start({ away: true, macItself: true, selfAddresses: self })
+      const res = await fetch(`${h.base}/api/session-questions?${touchedAgo(1_000)}`, {
+        headers: { ...browser(h), 'x-forwarded-for': xff, 'x-forwarded-host': 'mac.tail1234.ts.net', 'x-forwarded-proto': 'https', 'tailscale-user-login': 'miles@example.com' },
+      })
+      expect(res.status, xff).toBe(401)
+      expect(webPresenceAgeMs(), xff).toBeNull()
+      expect(await hookPost(h)).toEqual({})
+    }
+  })
+
   it('COS_WEB_AWAY_HOLD off: the touch is recorded but holds nothing', async () => {
     const h = await start({ away: true, webSwitch: () => false })
     expect((await webPoll(h, touchedAgo(1_000))).status).toBe(200)
@@ -318,6 +336,57 @@ describe('requestFromThisMac (QA round 1)', () => {
     expect(requestFromThisMac(req('100.101.102.103', { 'x-forwarded-for': '100.64.0.9' }), own)).toBe(false)
     expect(requestFromThisMac(req('100.101.102.103'), () => { throw new Error('no interfaces') }), 'unreadable interfaces: only loopback is known').toBe(false)
     expect(requestFromThisMac({ socket: null }, own)).toBe(false)
+  })
+
+  it('W12: a `tailscale serve` hop from the Mac to itself is the Mac; nothing a remote device can send makes it so', () => {
+    const self = () => ['100.101.102.103', 'fd7a:115c:a1e0::1234', '192.168.1.20']
+    const serve = (xff: unknown, more: Record<string, unknown> = {}, socket = '127.0.0.1') => req(socket, {
+      'x-forwarded-for': xff, 'x-forwarded-host': 'mac.tail1234.ts.net', 'x-forwarded-proto': 'https',
+      'tailscale-user-login': 'miles@example.com', 'tailscale-user-name': 'Miles', ...more,
+    })
+    // The Mac to itself: its own tailnet address (IPv4, IPv4-mapped, IPv6 in either case) or loopback.
+    for (const xff of ['100.101.102.103', '::ffff:100.101.102.103', 'fd7a:115c:a1e0::1234', 'FD7A:115C:A1E0::1234', '127.0.0.1', '::1', ' 100.101.102.103 ']) {
+      expect(requestFromThisMac(serve(xff), self), xff).toBe(true)
+    }
+    // Spoofs and look-alikes.
+    const away: Array<[string, Record<string, unknown>]> = [
+      ['a remote peer', serve('100.64.0.9')],
+      ['the Mac\u2019s LAN address is not a tailnet source', serve('192.168.1.20')],
+      ['a list (an appending proxy kept a spoofed value)', serve('100.101.102.103, 100.64.0.9')],
+      ['a list, spoof last', serve('100.64.0.9, 100.101.102.103')],
+      ['two headers joined', serve(['100.101.102.103', '100.64.0.9'])],
+      ['an array of one', serve(['100.101.102.103'])],
+      ['empty', serve('')],
+      ['garbage', serve('mac.tail1234.ts.net')],
+      ['loopback first in a list', serve('127.0.0.1, 100.64.0.9')],
+      ['loopback first, space separated', serve('127.0.0.1 100.64.0.9')],
+      ['a loopback-looking name', serve('127.evil.example')],
+      ['a spoofed header straight to 3141 from a peer', serve('100.101.102.103', {}, '100.64.0.9')],
+      ['a spoofed header from the Mac\u2019s own tailnet socket is not a Serve hop', serve('100.101.102.103', {}, '100.101.102.103')],
+      ['Forwarded is not Serve', serve('100.101.102.103', { forwarded: 'for=100.101.102.103' })],
+      ['X-Real-IP is not Serve', serve('100.101.102.103', { 'x-real-ip': '100.101.102.103' })],
+      ['an unknown forwarding header', serve('100.101.102.103', { 'x-forwarded-port': '443' })],
+      ['an unknown tailscale header', serve('100.101.102.103', { 'tailscale-funnel-request': '1' })],
+      ['Serve headers without X-Forwarded-For', req('127.0.0.1', { 'tailscale-user-login': 'miles@example.com', 'x-forwarded-proto': 'https' })],
+    ]
+    for (const [why, r] of away) expect(requestFromThisMac(r as never, self), why).toBe(false)
+    // An unreadable interface list knows no tailnet address; loopback still is the Mac.
+    expect(requestFromThisMac(serve('100.101.102.103'), () => { throw new Error('no interfaces') })).toBe(false)
+    expect(requestFromThisMac(serve('127.0.0.1'), () => { throw new Error('no interfaces') })).toBe(true)
+  })
+
+  it('W12: the default list of the Mac\u2019s own addresses includes its Tailscale IPv6', () => {
+    const nets = {
+      utun4: [{ address: '100.101.102.103', family: 'IPv4', internal: false }, { address: 'fd7a:115c:a1e0::1234', family: 'IPv6', internal: false }],
+      en0: [{ address: '192.168.1.20', family: 'IPv4', internal: false }, { address: 'fe80::1', family: 'IPv6', internal: false }],
+      lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }, { address: '::1', family: 'IPv6', internal: true }],
+    }
+    const own = selfAddressesFromInterfaces(nets as never)
+    expect(own).toContain('100.101.102.103')
+    expect(own).toContain('fd7a:115c:a1e0::1234')
+    expect(own).toContain('192.168.1.20')
+    expect(own).not.toContain('fe80::1')
+    expect(own).not.toContain('::1')
   })
 
   it('index.ts gives the broker the web switch', () => {

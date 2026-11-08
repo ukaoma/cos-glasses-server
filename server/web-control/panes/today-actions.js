@@ -529,6 +529,7 @@
     if (what === 'open-card') return leaveTo('work', id ? [id] : []);
     if (what === 'open-session') return O.r ? leaveTo('sessions', [O.r.provider, O.r.id]) : null;
     if (what === 'open-sessions') return leaveTo('sessions', []);
+    if (what === 'q-retry') { if (W.sessionQuestions && W.sessionQuestions.retry) W.sessionQuestions.retry(); return; }
     // A row of the pet's list opens that session's own sheet in its place, with Back to sessions (and the phone's Back)
     // returning to the list where it was scrolled; X still closes the overlay.
     if (what === 'pet-open') {
@@ -1021,8 +1022,15 @@
       // peek and no Stop: it is not at work (W4-r2).
       html += '<p class="ta-sub">' + T.badge(O.r ? O.r.provider : 'claude') + ' <span>' + esc(O.wait ? O.wait.why : 'Waiting for you') + '</span></p>';
       var where = waitWhere();
+      // W13 (QA week of 11/01-11/08): the words Today's row showed for it (its `ask`) stay here, read-only, when no card
+      // draws them: the Mac line and a failed read alike. Never twice: not when the line above already says them.
+      var ask = waitAsk();
+      if (ask && (where === 'mac' || where === 'failed') && !O.macCount) html += '<blockquote class="ta-quote ta-mac-ask">' + esc(ask) + '</blockquote>';
       // The Mac card says it itself when there is one; say it here only when there is none.
       if (where === 'mac' && !O.macCount) html += '<p class="ta-sub ta-mac-line">' + esc(macLine()) + '</p>';
+      // W13: the questions could not be read, so whether one waits here is unknown. Say so, never "at the Mac", and read again.
+      if (where === 'failed') html += '<p class="ta-note ta-q-failed" role="status">' + esc('Couldn\u2019t load this session\u2019s questions, so one may be waiting here.') +
+        ' <button type="button" class="link-btn" data-ta="q-retry">Retry</button></p>';
       if (where === 'answered') html += '<p class="ta-sub ta-mac-line">' + esc((W.sessionQuestions && W.sessionQuestions.answeredLine) || 'Answered. The session carries on.') + '</p>';
       if (where === 'reply') html += '<p class="ta-sub">' + esc('Answer it in a reply below, or open the session.') + '</p>';
     } else if (O.row || O.r) {
@@ -1039,16 +1047,24 @@
     box.innerHTML = html;
     // The reply box shows only where a reply can be the answer; what was typed stays in it, hidden.
     var foot = $('ta-foot');
-    if (foot && O.open.kind === 'wait') foot.hidden = waitWhere() !== 'reply';
+    if (foot && O.open.kind === 'wait') { var w = waitWhere(); foot.hidden = w === 'failed' ? !!(O.r && O.r.provider === 'claude') : w !== 'reply'; }
   }
   // Where a waiting session's question is answered: 'here' (its cards in this sheet), 'answered' (on some screen just
   // now), 'mac' (a Claude session's own prompt, or a held question that went back to the Mac), or 'reply' (a Codex or
   // Cursor session asking in words).
+  // W13: 'failed' when the last questions read failed and no card is drawn: a Claude reply still answers nothing, so the
+  // reply box stays a Codex or Cursor one.
   function waitWhere() {
     if (O.qCount) return 'here';
     if (O.r && W.sessionQuestions && W.sessionQuestions.answeredFor && W.sessionQuestions.answeredFor(O.r.id)) return 'answered';
+    if (!O.macCount && W.sessionQuestions && W.sessionQuestions.loadState && W.sessionQuestions.loadState() === 'failed') return 'failed';
     if (O.macCount || (O.r && O.r.provider === 'claude') || (O.wait && O.wait.where === 'mac')) return 'mac';
     return 'reply';
+  }
+  // The question in Today's own words (its Needs you row), unless the line above the sheet already reads exactly that.
+  function waitAsk() {
+    var a = O.wait && O.wait.ask ? String(O.wait.ask).trim() : '';
+    return a && !(O.wait.why && String(O.wait.why).trim() === a) ? a : '';
   }
   function macLine() { return (W.sessionQuestions && W.sessionQuestions.macLine) || "Waiting on your Mac's prompt. Answer it on the Mac (or through Screens)."; }
 

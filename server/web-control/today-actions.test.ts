@@ -113,6 +113,8 @@ function realViewportFit(win: any, doc: any): () => any {
 
 // ── the overlay, loaded for real ─────────────────────────
 interface Opts {
+  /** W13: what questions.js says of its last read ('unread', 'ok', 'failed'), and a later change of it. */
+  qLoad?: { state: string }
   data?: Record<string, unknown>
   api?: Record<string, unknown | ((body: any, n: number) => unknown)>
   routes?: Routes
@@ -172,7 +174,8 @@ function load(o: Opts = {}) {
   class FakeEventSource { url: string; closed = false; onmessage: ((e: { data: string }) => void) | null = null; onerror: (() => void) | null = null; readyState = 1
     constructor(url: string) { this.url = url; streams.push(this) } close() { this.closed = true } }
   const mounts: string[] = []
-  let unmounts = 0, nudges = 0
+  let unmounts = 0, nudges = 0, retries = 0
+  const qChange: Array<(n: number, mac: number) => void> = []
   // The page's clock: real time plus whatever the test moves it on (later()).
   let skew = 0
   const realNow = Date.now
@@ -203,7 +206,8 @@ function load(o: Opts = {}) {
     },
     sessionKit: reader.kit,
     // Like questions.js mount(): it draws and calls back with the count before it returns.
-    sessionQuestions: { mount: (_el: El, sid: string, onChange?: (n: number, mac: number) => void) => { mounts.push(sid); if (onChange) onChange(o.questions || 0, o.mac || 0); return { count: () => o.questions || 0, unmount: () => { unmounts++ } } },
+    sessionQuestions: { mount: (_el: El, sid: string, onChange?: (n: number, mac: number) => void) => { mounts.push(sid); if (onChange) { qChange.push(onChange); onChange(o.questions || 0, o.mac || 0) } return { count: () => o.questions || 0, unmount: () => { unmounts++ } } },
+      ...(o.qLoad ? { loadState: () => o.qLoad!.state, retry: () => { retries++ } } : {}),
       itemsFor: (sid: string) => (sid ? (o.held || []).filter((i: any) => String(i.sessionId).toLowerCase() === String(sid).toLowerCase()) : (o.held || [])),
       nudge: () => { nudges++ } },
   }
@@ -263,7 +267,8 @@ function load(o: Opts = {}) {
   const tick = () => intervals.filter(i => !i.cleared).forEach(i => i.fn())
   const server = (up: boolean) => serverHooks.forEach(fn => fn(up))
   return { server, viewport, runFrames, vvListeners, winListeners, crumbs, docListeners, intervals, tick, ta, els: elsAll, data, layerTap, webStore, later, now: () => realNow() + skew, posts, apiCalls, gone, calls, store, reader, streams, mounts, history, location, document, tap, opener, key, pop, route, runTimers,
-    refreshed: () => refreshed, reloads: () => reloads, workChanged: () => workChanged, unmounts: () => unmounts, nudges: () => nudges, ctx }
+    refreshed: () => refreshed, reloads: () => reloads, workChanged: () => workChanged, unmounts: () => unmounts, nudges: () => nudges, ctx,
+    retries: () => retries, qChanged: () => qChange.forEach(fn => fn(o.questions || 0, o.mac || 0)) }
 }
 
 const MEETING = (title: string) => ({ domain: 'quilt', month: '2026-11', filename: '2026-11-06_' + title.replace(/\W+/g, '_') + '.md', recordId: 'ops:quilt:' + title, title })
@@ -1818,6 +1823,95 @@ describe('W4-r2: a session waiting on a question opens as waiting, never as work
   })
 })
 
+describe('W13 (QA week of 11/01-11/08): a question with no card keeps its words, and a failed questions read says so', () => {
+  const QSID = 'eeeeeeee-5555-4555-8555-555555555555'
+  const QROW = { session_id: QSID, provider: 'claude', display_label: 'Pricing page review', alive: true, running: true, running_active: false,
+    agent_state: 'waiting', state_source: 'hook', waiting_kind: 'question', waiting_detail: 'AskUserQuestion' }
+  const QP = (tail: string) => `/api/agent-sessions/claude/${encodeURIComponent(QSID)}${tail}`
+  const routes: Routes = { ['GET ' + QP('?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + QP('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
+  const ASK = 'Ship the pricing page today or wait for Brad?'
+  const model = (ask: string) => ({ rows: [{ kind: 'session', key: 'claude|' + QSID, title: 'Pricing page review asked you a question', why: 'Waiting for you. Paused until you answer.', where: 'mac', ask }], now: [], later: [], failed: [], settled: true })
+  const MAC = 'Waiting on your Mac&#39;s prompt. Answer it on the Mac (or through Screens).'
+  const FAILED = 'Couldn&#39;t load this session&#39;s questions, so one may be waiting here.'.replace(/&#39;/g, '\u2019')
+
+  it('at the Mac with no card drawn: the words Today showed stay, read-only, above the Mac line; the reply box stays hidden', async () => {
+    const h = load({ data: { sessions: [QROW] }, routes, model: model(ASK), questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('<blockquote class="ta-quote ta-mac-ask">' + esc(ASK) + '</blockquote>')
+    expect(meta).toContain(MAC)
+    expect(meta.indexOf(esc(ASK))).toBeLessThan(meta.indexOf(MAC))
+    expect(meta).not.toContain('data-ta="q-retry"')
+    expect(h.els['ta-foot']!.hidden).toBe(true)
+  })
+
+  it('never twice: no quote when the Mac card draws it, or when the line above already reads exactly those words', async () => {
+    const card = load({ data: { sessions: [QROW] }, routes, model: model(ASK), questions: 0, mac: 1, qLoad: { state: 'ok' } })
+    card.ta.open('wait', 'claude|' + QSID, card.opener())
+    await flush()
+    expect(card.els['ta-meta']!.innerHTML).not.toContain('ta-mac-ask')
+    const same = { ...model(ASK), rows: [{ ...model(ASK).rows[0]!, why: ASK }] }
+    const h = load({ data: { sessions: [QROW] }, routes, model: same, questions: 0, mac: 0, qLoad: { state: 'ok' } })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML.split(esc(ASK)).length - 1).toBe(1)
+  })
+
+  it('a failed questions read never says "at the Mac": it says so, keeps the words, and Retry reads again', async () => {
+    const q = { state: 'failed' }
+    const h = load({ data: { sessions: [QROW] }, routes, model: model(ASK), questions: 0, mac: 0, qLoad: q })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    let meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain(FAILED)
+    expect(meta).toContain('data-ta="q-retry">Retry</button>')
+    expect(meta).not.toContain(MAC)
+    expect(meta).toContain(esc(ASK))
+    expect(meta).not.toMatch(/[—–]/)
+    // A Claude prompt is not answered by a reply, failed read or not.
+    expect(h.els['ta-foot']!.hidden).toBe(true)
+    h.tap('q-retry')
+    expect(h.retries()).toBe(1)
+    // The read lands: questions.js tells the sheet (onChange) and the Mac line comes back.
+    q.state = 'ok'
+    h.qChanged()
+    meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain(MAC)
+    expect(meta).not.toContain('q-retry')
+  })
+
+  it('a failed read for a Codex session keeps its reply box, since a reply can answer it', async () => {
+    const row = { ...QROW, provider: 'codex' }
+    const key = 'codex|' + QSID
+    const P = (tail: string) => `/api/agent-sessions/codex/${encodeURIComponent(QSID)}${tail}`
+    const r2: Routes = { ['GET ' + P('?turns=6')]: { status: 200, body: { recent_turns: [] } }, ['GET ' + P('/attachability')]: { status: 200, body: { attachable: true, ownerCount: 0 } } }
+    const m = { rows: [{ kind: 'session', key, title: 'Codex asked', why: 'Waiting for you', where: '', ask: '' }], now: [], later: [], failed: [], settled: true }
+    const h = load({ data: { sessions: [row] }, routes: r2, model: m, questions: 0, mac: 0, qLoad: { state: 'failed' } })
+    h.ta.open('wait', key, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML).toContain('data-ta="q-retry"')
+    expect(h.els['ta-foot']!.hidden).toBe(false)
+  })
+
+  it('a Mac card drawn from an earlier read stays the answer when a later read fails', async () => {
+    const h = load({ data: { sessions: [QROW] }, routes, model: model(ASK), questions: 0, mac: 1, qLoad: { state: 'failed' } })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    expect(h.els['ta-meta']!.innerHTML).not.toContain('q-retry')
+  })
+
+  it('a held card on screen wins over a failed later read: the cards are the truth', async () => {
+    const h = load({ data: { sessions: [QROW] }, routes, model: model(ASK), questions: 1, mac: 0, qLoad: { state: 'failed' } })
+    h.ta.open('wait', 'claude|' + QSID, h.opener())
+    await flush()
+    const meta = h.els['ta-meta']!.innerHTML
+    expect(meta).toContain('It is asking you this now. Answer here.')
+    expect(meta).not.toContain('q-retry')
+    expect(meta).not.toContain('ta-mac-ask')
+  })
+})
+
 // ═════════════ 6.99.26: questions on Control Web (Miles 11/07) ═════════════
 // questions.js in a vm with the page's own clocks (wall and monotonic, moved apart), the document's touch listeners,
 // and a poll whose answer the test sets. Nothing reaches a server.
@@ -1942,6 +2036,67 @@ describe('6.99.26: the page tells the Mac when it was last touched, for the away
     h.later(61_000)
     h.touch()
     expect(h.timers.slice(before).map(t => t.ms)[1], 'long after the last read: at once').toBe(0)
+  })
+})
+
+describe('W13: questions.js says whether its last read was the server\u2019s answer, and tells the mounted sheets when that changes', () => {
+  it('unread, then failed on no answer, a non-OK status or a cut body; ok on an answer; each change reaches onChange once', async () => {
+    let mode: 'reject' | '500' | 'body' | 'ok' = 'reject'
+    const h = loadQ(() => ({ enabled: true, items: [] }), {
+      fetch: () => mode === 'reject' ? Promise.reject(new TypeError('Load failed'))
+        : mode === '500' ? Promise.resolve({ status: 500, ok: false, json: () => Promise.resolve({}) })
+        : mode === 'body' ? Promise.resolve({ status: 200, ok: true, json: () => Promise.reject(new Error('cut')) })
+        : null,
+    })
+    expect(h.Qs.loadState()).toBe('unread')
+    const mine = h.mk(), calls: Array<[number, number]> = []
+    h.Qs.mount(mine, 'sess-a', (n: number, mac: number) => calls.push([n, mac]))
+    const drawn = calls.length
+    await h.start()
+    expect(h.Qs.loadState()).toBe('failed')
+    expect(calls.length, 'the failure reached the sheet').toBe(drawn + 1)
+    h.Qs.poll(); await flush()
+    expect(h.Qs.loadState()).toBe('failed')
+    expect(calls.length, 'no change, no call').toBe(drawn + 1)
+    mode = 'ok'; h.Qs.poll(); await flush()
+    expect(h.Qs.loadState()).toBe('ok')
+    expect(calls.length).toBeGreaterThan(drawn + 1)
+    mode = '500'; h.Qs.poll(); await flush()
+    expect(h.Qs.loadState(), 'a non-OK status').toBe('failed')
+    mode = 'ok'; h.Qs.poll(); await flush()
+    expect(h.Qs.loadState()).toBe('ok')
+    const afterOk = calls.length
+    mode = 'body'; h.Qs.poll(); await flush()
+    expect(h.Qs.loadState()).toBe('failed')
+    expect(calls.length).toBe(afterOk + 1)
+  })
+
+  it('an unreadable capability is a failed read; a server that says questions are off is an answer', async () => {
+    const down = loadQ(() => ({ enabled: true, items: [] }), { models: () => Promise.reject(new Error('down')) })
+    await down.start()
+    expect(down.Qs.loadState()).toBe('failed')
+    const off = loadQ(() => ({ enabled: false, items: [] }))
+    await off.start()
+    expect(off.Qs.loadState()).toBe('ok')
+    const older = loadQ(() => ({ enabled: true, items: [] }), { models: () => Promise.resolve({ capabilities: {} }) })
+    await older.start()
+    expect(older.Qs.loadState(), 'a server without the capability answered').toBe('ok')
+  })
+
+  it('a read that throws before it is sent is a failed read too', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [] }), { fetch: () => { throw new TypeError('blocked') } })
+    await h.start()
+    expect(h.Qs.loadState()).toBe('failed')
+  })
+
+  it('retry() reads again through nudge: one read, never a second one on the wire', async () => {
+    const h = loadQ(() => ({ enabled: true, items: [] }), { fetch: () => Promise.reject(new TypeError('Load failed')) })
+    await h.start()
+    expect(h.Qs.loadState()).toBe('failed')
+    h.later(5_000)
+    const before = h.timers.length
+    h.Qs.retry()
+    expect(h.timers.slice(before).map(t => t.ms)).toEqual([0])
   })
 })
 

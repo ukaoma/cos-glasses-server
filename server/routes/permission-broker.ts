@@ -60,8 +60,9 @@ import {
   type PermissionBroker,
 } from '../lib/permission-broker.js'
 import { noteQuestionsPoll, noteWebPresence, validPresenceAgeMs, type QuestionsPollFacts } from '../lib/client-liveness.js'
-import { hasProxyForwardedHeaders, isLoopbackAddress, normalizeRemoteIp, reachableIpv4Addresses } from '../lib/network-policy.js'
+import { hasProxyForwardedHeaders, isLoopbackAddress, isTailscaleIpv4, isTailscaleIpv6, normalizeRemoteIp, reachableIpv4Addresses } from '../lib/network-policy.js'
 import { networkInterfaces } from 'node:os'
+import { isIP } from 'node:net'
 
 export const PERMISSION_BROKER_HOOK_PATH = '/api/permission-requests/ask'
 /** The hook posts its spool envelope, capped at 1 MiB by the script itself. */
@@ -189,22 +190,85 @@ export function questionsPollFacts(query: Record<string, unknown>): QuestionsPol
 }
 
 /**
+ * The Mac's own addresses: every external IPv4 (its tailnet address first) and its Tailscale IPv6 (fd7a:115c:a1e0::/48).
+ * Safari on the Mac often reaches its own MagicDNS name over IPv6, so the IPv6 tailnet address is the Mac too.
+ */
+export function selfAddressesFromInterfaces(
+  nets: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): string[] {
+  const out = reachableIpv4Addresses(nets).map(a => a.address)
+  for (const infos of Object.values(nets)) {
+    for (const info of infos ?? []) {
+      // Node 18.0-18.3 reported the family as a number.
+      const v6 = String(info.family) === 'IPv6' || String(info.family) === '6'
+      if (v6 && isTailscaleIpv6(info.address)) out.push(info.address.toLowerCase())
+    }
+  }
+  return out
+}
+
+/** Headers `tailscale serve` adds to a hop it forwards (ipn/ipnlocal/serve.go). Anything else proxy-shaped is not Serve. */
+const SERVE_HOP_HEADERS = new Set([
+  'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto',
+  'tailscale-user-login', 'tailscale-user-name', 'tailscale-user-profile-pic', 'tailscale-headers-info',
+])
+
+/**
+ * W12 (QA week of 11/01-11/08): a `tailscale serve` hop from the Mac to itself. Control Web opened at the Mac's own
+ * https://<mac>.ts.net is the desk, but Serve forwards it over loopback with proxy headers, so 6.99.26 stored its touch
+ * as away and a web-only hold waited up to 10 minutes. It is the Mac only when ALL of these hold:
+ *   - the socket is loopback: the local Serve proxy connected (a peer reaching 3141 directly has its own address);
+ *   - no `Forwarded` or `X-Real-IP` (Serve never sets either);
+ *   - exactly one `X-Forwarded-For` address, no list. Serve SETS that header to the hop's real source (Header.Set, and
+ *     Go's ReverseProxy drops the incoming X-Forwarded-* before its Rewrite runs), so a remote device's spoofed value
+ *     never survives; a proxy that appended instead would make a list, which is refused;
+ *   - that address is loopback or one of the Mac's own TAILSCALE addresses (Serve listens on the tailnet only).
+ */
+export function serveHopFromThisMac(
+  req: { socket?: { remoteAddress?: string | undefined } | null; headers?: Record<string, unknown> | null },
+  selfAddresses: () => readonly string[],
+): boolean {
+  const headers = req.headers
+  if (!headers || typeof headers !== 'object') return false
+  if (!isLoopbackAddress(req.socket?.remoteAddress)) return false
+  for (const name of ['forwarded', 'x-real-ip']) {
+    const v = headers[name]
+    if (v !== undefined && v !== null && !(typeof v === 'string' && v.trim() === '')) return false
+  }
+  // Only Serve's own headers: an unknown proxy-shaped header means a hop this check does not understand.
+  for (const name of Object.keys(headers)) {
+    if (/^(x-forwarded-|tailscale-)/i.test(name) && !SERVE_HOP_HEADERS.has(name.toLowerCase())) return false
+  }
+  const xff = headers['x-forwarded-for']
+  if (typeof xff !== 'string') return false
+  // One address and nothing else: a list ("a, b"), a padded pair or a name is not an IP, so it is refused here.
+  const ip = normalizeRemoteIp(xff.trim()).toLowerCase()
+  if (isIP(ip) === 0) return false
+  if (isLoopbackAddress(ip)) return true
+  if (!isTailscaleIpv4(ip) && !isTailscaleIpv6(ip)) return false
+  let own: readonly string[] = []
+  try { own = selfAddresses() } catch { own = [] }
+  return own.some(a => normalizeRemoteIp(String(a)).toLowerCase() === ip)
+}
+
+/**
  * 6.99.26 (QA round 1): a request from this Mac itself: its socket is loopback or one of the Mac's own addresses (its
  * tailnet address first), and no proxy header says it was forwarded for someone else (a `tailscale serve` hop arrives on
  * loopback for a remote peer). Control Web open on the Mac is the desk: its touch never makes the Mac away.
+ * W12: a proxied request is the Mac only as a Serve hop from the Mac to itself (serveHopFromThisMac).
  */
 export function requestFromThisMac(
   req: { socket?: { remoteAddress?: string | undefined } | null; headers?: Record<string, unknown> | null },
-  selfAddresses: () => readonly string[] = () => reachableIpv4Addresses(networkInterfaces()).map(a => a.address),
+  selfAddresses: () => readonly string[] = () => selfAddressesFromInterfaces(),
 ): boolean {
-  if (hasProxyForwardedHeaders(req.headers)) return false
+  if (hasProxyForwardedHeaders(req.headers)) return serveHopFromThisMac(req, selfAddresses)
   const remote = req.socket?.remoteAddress
   if (isLoopbackAddress(remote)) return true
-  const ip = normalizeRemoteIp(remote ?? '')
+  const ip = normalizeRemoteIp(remote ?? '').toLowerCase()
   if (!ip) return false
   let own: readonly string[] = []
   try { own = selfAddresses() } catch { own = [] }
-  return own.includes(ip)
+  return own.some(a => normalizeRemoteIp(String(a)).toLowerCase() === ip)
 }
 
 export function createSessionQuestionsRouter(deps: SessionQuestionsRouterDeps): Router {

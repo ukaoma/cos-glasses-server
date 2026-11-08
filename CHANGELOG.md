@@ -55,6 +55,22 @@ On 7.0.2 (f3aa80c). Not versioned yet: it takes the next free number after 7.0.4
 
 **Tests:** memory-review (27: the 19-case table mirrored from MU's `test_memory_review_state.py`, an older producer's block, page decisions, and parity across the server reader and bridge, the real rail story code and the real Memories pane on three live-shaped blocks), memories-web (47: 2 new and 2 rewritten for review, 3 new for the stuck sheet; all 7 fail on 7.0.2's pane), learning-needs-you (6). MU: `test_memory_review_state.py` (28). Mutation checks on a green baseline: 27 in the server (25 killed at first; the 2 survivors became a new assertion that kills one, and a close-time reset that was not load-bearing and was removed), 12 of 12 in MU. Renders (browser emulation, not device proof) at 382x557 and 951x539: `operations/personal/wk45_2026/memory_review/` in MU.
 
+## Unreleased - Questions on Control Web: a failed read says so, a question at the Mac keeps its words, and a Serve hop from the Mac to itself counts as the desk
+
+From 7.0.2 (f3aa80c). QA week of 11/01-11/08, findings W12 and W13. No version number yet; the release lane assigns one. Server and Control Web only.
+
+**Default-on changes (no switch for any of them):**
+- **A failed questions read says so on Today's session sheet.** Before, a read that failed left no cards, and a waiting Claude session read "Waiting on your Mac's prompt" with no way to read again. Now, when the last read of `/api/session-questions` failed (no answer, a non-OK status, a cut body, or an unreadable capability) and no card is drawn, the sheet says "Couldn't load this session's questions, so one may be waiting here." with a Retry link that reads again at once. The Mac line comes back when a read lands. A Codex or Cursor session keeps its reply box; a Claude one does not (a reply does not answer its prompt). A card already drawn from an earlier read stays the answer.
+- **A question at the Mac keeps the words Today showed.** When Today's Needs you row had the question's words and no card on the sheet draws them, the sheet shows them read-only above the Mac line (or the failed-read line), never twice.
+- **`requestFromThisMac` counts a `tailscale serve` hop from the Mac to itself as the desk.** It is the Mac only when the socket is loopback, there is no `Forwarded` or `X-Real-IP`, every `X-Forwarded-*` and `Tailscale-*` header is one Serve sets, and `X-Forwarded-For` is exactly one IP that is loopback or one of the Mac's own Tailscale addresses (IPv4, or IPv6 in fd7a:115c:a1e0::/48, now read from the interfaces too). Serve sets that header itself (`Header.Set` in tailscale's `ipn/ipnlocal/serve.go`, read 2026-11-08), so a remote device's spoofed value does not survive; a list, a name or a padded pair is refused. **No visible change today:** Control Web refuses every proxied request (`isWebControlSocketAllowed`, review W4), so a Serve hop gets 401 before this check runs. It decides only once Control Web is admitted through Serve.
+
+**Known limits:**
+- **At-desk questions still have no words on the web.** With the desk in use the broker takes the `desk_active` fast path before it parses the question, and the session row's `waiting_detail` is the tool name (`toolTarget` has no AskUserQuestion branch). So the sheet keeps words only when the page saw them (a held card) or Today's row had them. Getting them for an at-desk question means the broker or the signal store keeping question text, a privacy decision left for Miles.
+- The sheet tests run the real panes in a vm with a fake DOM; nothing here was rendered on the Duo.
+- The step strip was already 44 px on touch screens (app.css `any-pointer: coarse`, 7.0.2), so it is unchanged.
+
+**Tests:** session-questions-web (22, 3 new), today-actions (230, 10 new). 32 mutants on a green baseline of 252 tests, each landing exactly once and killed.
+
 ## 7.0.2 - Control Web on the iPhone Duo: no blank band under the chat, a composer that fits above the keyboard, and failed Asks that say why
 
 2026-11-08. Private. On 7.0.1 FINAL (2accf69), which carries everything since public 7.0.0. Duo Build A, plus Codex's provider-limit fix (605ca92), from the 11/07 Duo design audit. Server and Control Web only; no glasses, phone or Control update is needed. Sized from what the Duo itself reported in Comet: 382x557 folded, 951x539 unfolded.
