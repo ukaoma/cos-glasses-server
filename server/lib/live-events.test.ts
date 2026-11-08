@@ -254,3 +254,16 @@ describe('projectSession (privacy allowlist)', () => {
     expect(projectSession(s('aaaaaaaa', 'working', { failed: true }), { replies: 0, questions: 0, queued: 0 })!.failed).toBeUndefined()
   })
 })
+
+describe('LiveEventsHub startedAt', () => {
+  it('keeps a session\'s startedAt while it is in the model, so a registry-to-hook source change is not a frame', async () => {
+    const r = rig([s('aaaaaaaa-1', 'working', { startedAt: 100, source: 'registry' })])
+    await r.hub.attach(r.listener)
+    const count = r.frames.length
+    r.sessions = [s('aaaaaaaa-1', 'working', { startedAt: 200, source: 'registry' })]
+    await r.hub.refresh()
+    expect(r.frames.length).toBe(count)
+    const snap = r.hub.snapshotFrame()
+    expect(snap.kind === 'snapshot' && snap.sessions[0]!.startedAt).toBe(100)
+  })
+})

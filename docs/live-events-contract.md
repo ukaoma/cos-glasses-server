@@ -221,3 +221,14 @@ reaches back, else a snapshot).
 
 - 2026-11-07 23:2x: first version (server lead, before build). Shapes may still gain fields; none will be removed
   without a line here.
+- 2026-11-07 23:3x: built as written (commits 7dbdf7f, 86619e0 and the follow-up). Clarifications, no shape change:
+  - The FIRST stream on an idle server primes the model, so its ring starts with one `session` `added` frame per open
+    session (seq 1..N) before the snapshot's seq. A fresh page gets the snapshot only; a resume from inside that range
+    replays those `added` frames, which upsert cleanly.
+  - `startedAt` is fixed while a session is in the model (the registry and the hooks can disagree by seconds).
+  - A Claude tab's `ended` can arrive as two `session` frames (the registry record going, then the hook's SessionEnd):
+    treat `ended` as idempotent.
+  - Measured on a scratch server: hook event to frame 103 to 232 ms (http and https), a killed session's `ended`
+    within about 0.5 s, a clean exit's `ended` within one 2 s tick.
+  - Today refresh: Sonnet measured at $0.016 to $0.018 a call (Haiku $0.0008); `retryAfterMs` is whole ms, at most
+    30000.

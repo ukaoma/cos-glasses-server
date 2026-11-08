@@ -468,8 +468,11 @@ export class LiveEventsHub {
       this.lastSentAt.delete(k)
       this.emit({ ...this.nextBase(), kind: 'session.removed', provider: prev.provider, sessionId: prev.sessionId })
     }
-    for (const [k, next] of nextModel) {
+    for (const [k, nextRaw] of nextModel) {
       const prev = this.sessions.get(k)
+      // When a session started does not change while it is in the model: the registry and the hooks can disagree by
+      // a few seconds (the tab's own start against the first hook), and a flip between them is not news.
+      const next = prev && prev.startedAt !== null && nextRaw.startedAt !== prev.startedAt ? { ...nextRaw, startedAt: prev.startedAt } : nextRaw
       if (!prev) {
         if (this.sessions.size >= LIVE_MAX_SESSIONS) continue
         this.sessions.set(k, next)

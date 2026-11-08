@@ -1,3 +1,23 @@
+## Unreleased (live state)
+
+Target 7.0.1, private. On 7.0.0 (39d063e) plus a test-only isolation fix (ef71c9c). Server half of "Control Web live state" (plan: operations/personal/wk45_2026/PLAN_control_web_live_state_2026-11-07.md). Miles, 11/07: the pet shows what was running at the last fetch, not now; the session activity, replies and running time should be accurate while caching keeps things fast. The client half (Control Web) is a separate branch.
+
+**Default-on changes (everything a 7.0.0 user gets without touching a setting):**
+- **New route `GET /api/events`** (`COS_WEB_LIVE_EVENTS=0` registers no route). One server-sent events stream per open Control Web page, behind the same token or web cookie gate as every other route. It sends a snapshot on connect, then a frame whenever the server's own session state changes: a session added or ended, working, waiting or idle, a reply landed, a question opened or closed, the queue moved. Each session carries `startedAt` and `turnStartedAt`, so the page can tick running time itself. Ids, states, counts and times only, never titles, words, file names or paths. Contract: `docs/live-events-contract.md`.
+- **While at least one stream is open, the server reads the Claude session registry, the questions list and the queue folder every 2 s** to notice changes that have no signal of their own. Measured on a scratch server with this Mac's 76 registry files: about 0.27 % of one CPU core for the first stream, about 0.003 % for each more, no memory growth. With no stream open nothing is read. Hook events (prompt, permission prompt, Stop, SessionEnd) reach an open page in about 0.1 to 0.25 s; a session's end in up to about 2 s.
+- **The Today summary is written by Sonnet, not Haiku** (only when the summary is switched on; it stays off by default). Measured 11/07 with a full-size prompt: about $0.016 to $0.018 a call, against $0.0008 for Haiku. The 60 a day cap and the 10-minute interval are unchanged, so the worst day is about $1.10 where it was about $0.05. On a Claude subscription the CLI draws plan usage; these are the CLI's own estimates at API prices.
+- **`POST /api/today/brief` accepts `"force": true`**, for the Today refresh button. It skips the 10-minute interval and the "nothing changed" check, at most once every 30 s, inside the same 60 a day, breaker, switch, recording and drain gates. A throttled refresh answers the current summary with reason `refresh_throttled` and `retryAfterMs`. Without `force`, nothing changes.
+
+**Limits:**
+- A Codex or Cursor session whose hooks never reached this server has no change signal without reading its transcript, so the stream does not carry it; it still shows through the session list, as in 7.0.0.
+- A Claude tab with no hooks reads the registry's own status (busy, waiting, idle), and its turn clock is when that status last moved.
+- `replies` counts turns that ended since the server started, not a lifetime count.
+- Streams are capped at 16 per server; a client that stops reading is dropped at 256 KB unsent and resumes with its last id.
+
+**Upgrading from 7.0.0:** nothing to do. `COS_WEB_LIVE_EVENTS=0` keeps 7.0.0's polling. The Sonnet change applies only with the summary switched on.
+
+**Tests:** `server/lib/live-events.test.ts` and `server/routes/live-events.test.ts` (seq monotonic, resume, snapshot on a gap, heartbeat, privacy allowlist, auth refused, cap, slow-client drop, switch off means no route, the list's own state derivation), the Today brief suites (Sonnet pin, forced refresh throttle, cap, breaker, switch, persisted floor). 31 mutations, each killed from a green baseline. Live canary on a scratch server: hook to frame 103 to 232 ms over http and https, resume from `Last-Event-ID`, a foreign-origin cookie refused.
+
 ## 7.0.0 - Steer a busy session mid-turn, see the files your sessions send, Duo tables, resizable panes, and calendars from macOS Calendar
 
 2026-11-07. On 6.99.35 (61424472) plus the calendar attendee fix (d7558c7). The first public build after 6.99.33: npm goes from 6.99.33 straight to 7.0.0, and 6.99.34 and 6.99.35 (private builds, below) reach everyone here. Miles chose the major number for this release. No route or response field was removed and every client reads the server version by number, so nothing that works with 6.99.33 needs a change for 7.0.0.
