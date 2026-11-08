@@ -351,6 +351,8 @@ describe('7.0.2 A8: a short wide touch screen is a phone', () => {
 
 // ── A6, A7, A2 scroll-back: the chat itself ──────────────────────────────────────────────────────────────────────
 const CHAT_SRC = read('panes/cos-chat.js')
+/** The Model menu's own "Default" option text (the Effort menu has a plain "Default" too, so never search the whole html). */
+const modelDefault = (html: string) => { const m = /data-cos-model[^>]*><option value="">([^<]*)<\/option>/.exec(html); expect(m, 'the Model select').not.toBeNull(); return m![1] }
 function chat(o: { models?: unknown; route?: { pane: string; args: string[] }; wide?: boolean; failAsk?: { code: string; message: string }; jobSession?: string; jobDone?: boolean;
   serve?: (method: string, path: string, body?: any) => Promise<unknown> | undefined } = {}) {
   const posts: Array<{ path: string; body: any }> = [], gets: string[] = []
@@ -488,7 +490,7 @@ describe('7.0.2 A7: "Default" in the Model menu names what it resolves to', () =
     old.c._state.caps = { jobs: true }
     old.c.mount({ querySelector: () => null, set innerHTML(_v: string) {} } as any, true)
     await flush()
-    expect(old.c._modelMenuHtml()).toContain('<option value="">Default</option>')
+    expect(modelDefault(old.c._modelMenuHtml())).toBe('Default')
   })
   it('a session bound to a key profile reads "Default (key profile)"', async () => {
     const h = chat({ models: { defaultModel: { preference: null, source: 'profile' }, options: [] } })
@@ -725,7 +727,7 @@ describe('7.0.2 skeptic 1: a late /api/models answer for an older session never 
     h.c.mount(HOST(), true); await flush()
     h.c._state.session = { id: 'moved', day: 'x' }               // the chat moved on; no new read yet
     pending[0]!.resolve({ defaultModel: { preference: 'codex-frontier', source: 'env' }, options: [] }); await flush()
-    expect(h.c._modelMenuHtml(), 'never a label for the wrong conversation').toContain('<option value="">Default</option>')
+    expect(modelDefault(h.c._modelMenuHtml()), 'never a label for the wrong conversation').toBe('Default')
   })
 })
 
