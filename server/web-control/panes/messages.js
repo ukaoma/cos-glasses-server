@@ -401,12 +401,21 @@
       }).join('') + '</div>';
   }
   // Drop it on: the list column and the chat column. Built once; each column then paints only itself.
+  // Duo tables: the divider between the two columns from 860 px (app.js splitKit), with its own remembered width. Its
+  // 24 px column replaces the split's 24 px gap, so the default layout is unchanged. The list keeps 240 px like Sessions;
+  // the chat keeps 440, not 380, because its composer (text box, camera, file, Ask, Drop) squeezes the text box to about
+  // 90 px at 380 (headless render at 1000x703).
+  // A page without the kit (a test's stand-in W) draws no divider and keeps working.
+  var SPLIT_KIT = W.splitKit || { handle: function () { return ''; }, mount: function () { return null; } };
+  var SPLIT = { key: 'cos_web_messages_split', label: 'Message list', controls: 'msg-left', sized: '.msg-left', media: '(min-width: 860px)', listMin: 240, readerMin: 440, handleW: 24 };
   function splitHost() {
     var split = pane.querySelector('.msg-split');
     if (!split) {
-      pane.innerHTML = '<div class="msg-split"><div class="msg-left" id="msg-left"></div><div class="msg-right" id="msg-right"></div></div>';
+      pane.innerHTML = '<div class="msg-split"><div class="msg-left" id="msg-left"></div>' +
+        SPLIT_KIT.handle({ id: 'msg-handle', controls: SPLIT.controls, label: SPLIT.label }) + '<div class="msg-right" id="msg-right"></div></div>';
       split = pane.querySelector('.msg-split');
     }
+    SPLIT_KIT.mount(split, $('msg-handle'), SPLIT);
     split.setAttribute('data-show', current[0] === 'cos' ? 'chat' : 'list');
     return split;
   }

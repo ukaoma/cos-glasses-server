@@ -361,3 +361,16 @@
   .mt-lgrid { grid-template-columns: minmax(0, 1fr) minmax(280px, min(380px, 38%)); align-items: start; column-gap: 24px; }
   .mt-lgrid > .mt-side-panel { position: sticky; top: calc(62px + var(--safe-top, 0px)); max-height: calc(100vh - 80px - var(--safe-top, 0px)); max-height: calc(100dvh - 80px - var(--safe-top, 0px)); overflow: auto; }
 }
+
+/* Duo tables: the divider between the notes or live transcript and the Ask panel (app.js splitKit, styled in app.css;
+   meetings.js SPLIT). From 860 px only, where both show. Its 24 px column is the old gap, so the default layout is
+   unchanged; a dragged width sizes the Ask panel, clamped so it keeps 280 px and the notes 380 px. */
+@media (min-width: 860px) {
+  .mt-detail .mt-dbody.split-side { grid-template-columns: minmax(0, 1fr) 24px minmax(280px, min(380px, 38%)); column-gap: 0; }
+  .mt-detail .mt-dbody.split-side.split-sized { grid-template-columns: minmax(0, 1fr) 24px clamp(280px, var(--split-side-share, 30%), calc(100% - 404px)); }
+  .mt-detail .mt-dbody.split-side > .split-handle { display: flex; grid-column: 2; grid-row: 1 / span 20; top: calc(62px + var(--safe-top, 0px)); height: calc(100dvh - 80px - var(--safe-top, 0px)); }
+  .mt-detail .mt-dbody.split-side > :not(.mt-doc):not(.split-handle) { grid-column: 3; }
+  .mt-lgrid.split-side { grid-template-columns: minmax(0, 1fr) 24px minmax(280px, min(380px, 38%)); column-gap: 0; }
+  .mt-lgrid.split-side.split-sized { grid-template-columns: minmax(0, 1fr) 24px clamp(280px, var(--split-side-share, 30%), calc(100% - 404px)); }
+  .mt-lgrid.split-side > .split-handle { display: flex; top: calc(62px + var(--safe-top, 0px)); height: calc(100dvh - 80px - var(--safe-top, 0px)); }
+}

@@ -6,8 +6,12 @@
 .msg-split[data-show='chat'] > .msg-left { display: none; }
 @media (min-width: 860px) {
   /* Two columns from 860 px (the unfolded Duo reads like the Mac): the list left, the chat right. */
-  .msg-split { display: grid; grid-template-columns: minmax(300px, 40%) minmax(0, 1fr); column-gap: 24px; align-items: start; }
+  .msg-split { display: grid; grid-template-columns: minmax(300px, 40%) 24px minmax(0, 1fr); column-gap: 0; align-items: start; }
   .msg-split[data-show] > .msg-left, .msg-split[data-show] > .msg-right { display: block; }
+  /* Duo tables: the divider (app.js splitKit, styled in app.css) is the 24 px column that was the gap; a dragged width
+     is a share of the split, clamped so the list keeps 240 px and the chat 440 px, room for its composer (messages.js SPLIT). */
+  .msg-split.split-sized { grid-template-columns: clamp(240px, var(--split-list-share, 40%), calc(100% - 464px)) 24px minmax(0, 1fr); }
+  .msg-split > .split-handle { display: flex; top: calc(56px + var(--safe-top, 0px)); height: calc(100dvh - 72px - var(--safe-top, 0px)); }
   /* The list column is narrower than the pane: its header's buttons go under the title instead of over it. */
   .msg-left .cx-hero .cx-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .msg-right { position: sticky; top: calc(56px + var(--safe-top, 0px)); height: calc(100vh - 72px - var(--safe-top, 0px)); height: calc(100dvh - 72px - var(--safe-top, 0px)); min-height: 420px; }

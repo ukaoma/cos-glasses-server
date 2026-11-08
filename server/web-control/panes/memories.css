@@ -28,6 +28,18 @@
 .mm-warn { color: var(--amber); font-size: 13px; }
 .mm-split { margin-top: 2px; }
 .mm-split, .mm-list, .mm-reader { min-width: 0; }
+/* Duo tables: the divider between the list and the reader (app.js splitKit, styled in app.css), from 760 px only. Its
+   18 px column replaces the split's 18 px gap, so the default layout is unchanged; a dragged width is a share of the
+   split, clamped so the list keeps 240 px and the reader 380 px (memories.js SPLIT), like Sessions. */
+@media (min-width: 760px) {
+  .split.mm-split { grid-template-columns: minmax(260px, 340px) 18px minmax(0, 1fr); column-gap: 0; }
+  .split.mm-split.split-sized { grid-template-columns: clamp(240px, var(--split-list-share, 30%), calc(100% - 398px)) 18px minmax(0, 1fr); }
+  .split.mm-split > .split-handle { display: flex; }
+  .mm-reader .split-full-btn { display: inline-flex; }
+  /* Full width: the reader takes the split; the list and the divider come back with Show list. */
+  .split.mm-split.split-full.mm-fullable:not(.solo) { grid-template-columns: minmax(0, 1fr); }
+  .split.mm-split.split-full.mm-fullable:not(.solo) > .split-list, .split.mm-split.split-full.mm-fullable:not(.solo) > .split-handle { display: none; }
+}
 
 /* A reader on a narrow screen is a pushed page: the header, views and counts step aside. */
 @media (max-width: 759px) {
@@ -261,6 +273,7 @@ body.mm-modal-open { overflow: hidden; }
 .split.mm-split.solo { display: block; }
 .split.mm-split.solo .split-list { position: static; max-height: none; overflow: visible; max-width: 820px; }
 .split.mm-split.solo .reader { display: none; }
+.split.mm-split.solo > .split-handle { display: none; }
 .mm-cue-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 6px 2px 12px; }
 .mm-cue-head p { margin: 3px 0 0; }
 .mm-cue-title { margin: 0; font: 500 24px/1.15 var(--display); color: var(--ink); letter-spacing: -0.01em; }

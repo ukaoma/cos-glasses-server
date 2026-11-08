@@ -313,3 +313,13 @@
 .wk-pick-row { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px solid var(--hairline); }
 .wk-pick-row > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .wk-pick-row strong { font-size: 13.5px; }
+
+/* Duo tables: the divider between a card and its side panel (app.js splitKit, styled in app.css; work.js DIVIDER). From
+   900 px only, where both show. Its 22 px column is the old gap, so the default layout is unchanged; a dragged width
+   sizes the side panel, clamped so it keeps 320 px and the card 380 px. */
+@media (min-width: 900px) {
+  .wk-detail.split-side { grid-template-columns: minmax(0, 1fr) 22px minmax(320px, 400px); column-gap: 0; }
+  .wk-detail.split-side.split-sized { grid-template-columns: minmax(0, 1fr) 22px clamp(320px, var(--split-side-share, 30%), calc(100% - 402px)); }
+  .wk-detail.split-side > .split-handle { display: flex; }
+}
+@media (min-width: 1300px) { .wk-detail.split-side { grid-template-columns: minmax(0, 1fr) 22px 452px; } }

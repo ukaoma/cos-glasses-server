@@ -1126,6 +1126,13 @@
       (str(t.source) ? fact('Source', t.source) : '') + (str(t.runAt) ? fact('Scheduled', t.runAt) : '') +
       '<p class="wk-fine">Task editing, scheduling, and completion stay attached to the original task. Agent output does not change its completion state.</p></section>';
   }
+  // Duo tables: the divider between a card and its side panel (app.js splitKit, 900 px and up). The side panel is the
+  // column on the right, so it grows as the line moves left; it keeps 320 px and the card 380 px, past a 22 px divider
+  // that is the old gap. A repaint in place keeps the same divider. (DIVIDER, since SPLIT is the Sort split.)
+  // A page without the kit (a test's stand-in W) draws no divider and keeps working.
+  var SPLIT_KIT = W.splitKit || { handle: function () { return ''; }, mount: function () { return null; } };
+  var DIVIDER = { key: 'cos_web_work_split', label: 'Side panel', side: 'end', sized: '.wk-detail-side', cssVar: '--split-side-share', media: '(min-width: 900px)', listMin: 320, readerMin: 380, handleW: 22 };
+  var SPLIT_HANDLE = SPLIT_KIT.handle({ id: 'wk-handle', controls: 'wk-part-side', label: DIVIDER.label });
   function renderDetail(arg) {
     var it = itemFor(arg);
     S.viewWaiting = !it && (S.loading || !S.tasks);
@@ -1151,11 +1158,12 @@
     } else {
       S.chatDeferred = false;
       pane.innerHTML = '<div class="cx wk" data-tint="work">' + backBar(backLabel()) + '<div id="wk-part-notices" class="wk-part">' + parts.notices + '</div>' +
-        '<div class="wk-detail" data-wid="' + esc(it.wid) + '"><div class="wk-detail-main"><div id="wk-part-main" class="wk-part">' + parts.main + '</div>' + chatSectionHtml(it) + '</div>' +
-        '<aside class="wk-detail-side" id="wk-part-side">' + parts.side + '</aside></div></div>';
+        '<div class="wk-detail' + (SPLIT_HANDLE ? ' split-side' : '') + '" data-wid="' + esc(it.wid) + '"><div class="wk-detail-main"><div id="wk-part-main" class="wk-part">' + parts.main + '</div>' + chatSectionHtml(it) + '</div>' +
+        SPLIT_HANDLE + '<aside class="wk-detail-side" id="wk-part-side">' + parts.side + '</aside></div></div>';
       [['wk-part-notices', parts.notices], ['wk-part-main', parts.main], ['wk-part-side', parts.side]].forEach(function (p) { var el = $(p[0]); if (el) el.__html = p[1]; });
       var hist = $('wk-part-chat'); if (hist) hist.__html = hist.innerHTML;
     }
+    SPLIT_KIT.mount(pane.querySelector('.wk-detail'), $('wk-handle'), DIVIDER);
     chatSyncComposer(it);
     if (!S.activity[it.wid] && !S.activityError[it.wid] && !S.activityLoading[it.wid]) {
       S.activityLoading[it.wid] = true;
