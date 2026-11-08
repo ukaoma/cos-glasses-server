@@ -19,6 +19,8 @@
 (function () {
   'use strict';
   var W = window.COSWeb;
+  // What counts as Needs review: one predicate, shared with the server's count (memory-review.js, loaded by index.html).
+  var R = window.COSMemoryReview;
   var esc = W.esc;
   var pane = W.$('pane-memories');
   if (!pane) return;
@@ -31,7 +33,8 @@
     review_ledger: 'Your review decisions', git_versions: 'Skill versions', eval_scores: 'Run checks', reflect_log: 'Daily reflection',
     capture_ledger: 'Capture record', memory_trace: 'Recall record', retrieval_log: 'Recall record', used: 'Use record',
     memory: 'Saved memory', occurrence: 'When it happened', assistant_turn: 'An answer' };
-  var GATE = { attribution: 'Who said it is unclear', low_confidence: 'Low confidence', prune_ready: 'Ready to quarantine', contradiction: 'Contradicts another memory' };
+  var GATE = { attribution: 'Who said it is unclear', rule_ready: 'Ready to become a rule', low_confidence: 'Ready to become a rule', prune_ready: 'Ready to quarantine',
+    contradiction: 'Contradicts another memory', scope: 'No area set', candidate: 'Waiting for your acceptance' };
   var VIEWS = [['recent', 'Recent learning'], ['applied', 'Applied this week'], ['memories', 'All memories'], ['review', 'To review'], ['knowledge', 'Knowledge']];
   // Control's cue review (MeetingAsk.swift CueReviewPane): shown beside the views once the server's cue history answers.
   var CUE_VIEWS = [['cues', 'Cues to rate'], ['rated', 'Rated cues']];
@@ -132,7 +135,7 @@
     graph: null, graphError: '', setup: null, setupError: '', setupLoading: false, setupBusy: '', progress: null,
     ingest: null, ingestLimit: 10, building: '', folderDraft: '',
     detail: {}, memDetail: {}, passages: {}, loading: {},
-    decisions: {}, decisionTs: {}, decided: {},
+    decisions: {}, decisionTs: {}, decided: {}, history: {},
     armed: '', reviewBusy: '', reviewIntent: null, bulk: null,
     ask: { q: '', busy: false, answer: null, error: '', cards: [], cardsBusy: false, startedAt: 0, message: '', pending: null },
     focus: null, focusChosen: false, focusResolved: false, knowledgeFocus: null, neighbors: [], graphVisible: null,
@@ -142,7 +145,7 @@
     owner: null, ownerError: '', ownerBusy: false,
     policy: null, policyError: '', policyBusy: false, policyIntent: null, policyLoading: false,
     guard: null, guardError: '', guardBusy: '', guardRun: null, guardLines: 0, guardLoading: false,
-    steward: { tab: 'rules', rows: [], cursor: null, busy: false, error: '', intent: null, outcomes: null, serial: 0 }
+    steward: { tab: 'rules', rows: [], cursor: null, busy: false, error: '', intent: null, outcomes: null, serial: 0, loaded: false }
   };
   function persist() { W.writeStore(STORE_KEY, { view: S.view, ktab: S.ktab }); }
   var serials = {};
@@ -385,7 +388,16 @@
     var o = outcomeText(e);
     if (o) { var r = typeof e.outcome === 'object' ? e.outcome.result : e.outcome; return { text: 'Checked: ' + o, tone: /^(pass|passed|success)$/.test(r) ? 'ok' : /^(fail|failed)$/.test(r) ? 'bad' : '' }; }
     if (e.needs) return { text: (GATE[e.needs.gate] || 'Needs you') + (e.needs.reason ? '. ' + e.needs.reason : ''), tone: 'warn' };
-    if (isProposal(e) || isPattern(e)) return { text: decisionFor(e) === 'dismissed' ? 'Dismissed' : 'Needs your review', tone: decisionFor(e) === 'dismissed' ? '' : 'warn' };
+    if (e.learning) return { text: 'Learning. ' + (e.learning.reason || 'Not a rule yet'), tone: '' };
+    if (isProposal(e) || isPattern(e)) {
+      // Needs review only when the predicate says so (a suggested rule at its bar, in the needs list); a suggestion
+      // with no next step but Dismiss is listed calmly.
+      if (closedHere(e)) return { text: 'Dismissed', tone: '' };
+      if (needsLesson(e.lesson_id)) return { text: 'Needs your review', tone: 'warn' };
+      var lr = learningFor(e.lesson_id);
+      if (lr) return { text: 'Learning. ' + lr.learning.reason, tone: '' };
+      return { text: isProposal(e) ? 'Suggested by a scheduled task' : 'Watching. Not a rule yet', tone: '' };
+    }
     if (e.event_type === 'dismissed') return { text: 'Dismissed', tone: '' };
     if (e.event_type === 'retrieved') return { text: 'Recalled. Not yet shown to be used.', tone: '' };
     if (e.event_type === 'included') return { text: 'Included in context. Not yet shown to be used.', tone: '' };
@@ -410,38 +422,64 @@
   function plainReason(r) {
     var t = String(r || ''), m;
     if ((m = /^promotable at confidence ([\d.]+) \(< ([\d.]+)\)$/.exec(t))) return 'Confidence ' + m[1] + ', under the ' + m[2] + ' bar for a rule';
+    if ((m = /^promotable at confidence ([\d.]+) \(>= ([\d.]+)\)$/.exec(t))) return 'Confidence ' + m[1] + ', at or over the ' + m[2] + ' bar for a rule';
+    if (/^promotable at confidence unknown/.test(t)) return 'Confidence not known yet, so it cannot become a rule';
     if ((m = /^names (.+?) near '(.+?)' with no attribution field$/.exec(t))) return 'Mentions ' + m[1].replace(/\b\w/g, function (c) { return c.toUpperCase(); }) + ' near "' + m[2] + '" without saying who said it';
     return t;
   }
-  function needsItems() {
+  function needsBlock() {
     var ny = (S.recent.info && S.recent.info.needs_you) || (S.status && S.status.needs_you) || null;
-    return ny && Array.isArray(ny.items) ? ny.items : [];
+    return ny && Array.isArray(ny.items) ? R.normalizeBlock(ny) : null;
   }
-  function needsRows() {
-    // A row decided here stays listed (its reader offers Restore); only the count leaves it out.
-    return needsItems().map(function (it) {
-      var fromList = S.review.rows.filter(function (r) { return r.event_id === it.event_id; })[0] ||
-        S.recent.rows.filter(function (r) { return r.event_id === it.event_id; })[0];
-      var mem = /^mem_/.test(str(it.lesson_id));
-      var base = fromList || { event_id: it.event_id, lesson_id: it.lesson_id, ts: it.ts, title: it.title, category: it.category,
-        store: it.store || (mem ? 'bot_memory' : null), event_type: mem ? 'captured' : 'promotable', scope: 'unknown', engine: 'unknown',
-        target: { kind: mem ? 'memory' : 'pattern', id: it.lesson_id }, source_refs: [], applies_to: [] };
-      return Object.assign({}, base, { needs: { gate: it.gate, reason: plainReason(it.reason) } });
+  function needsItems() { return R.openItems(needsBlock(), S.decisions); }
+  function needsLesson(id) { return !!id && needsItems().some(function (it) { return it.lesson_id === id; }); }
+  // An item's latest decision closes it (accepted, dismissed, pruned): it leaves To review for history.
+  function closedHere(e) { return R.reviewState(null, null, decisionFor(e)) === R.HISTORY; }
+  function itemRow(it, extra) {
+    var fromList = S.review.rows.filter(function (r) { return r.event_id === it.event_id; })[0] ||
+      S.recent.rows.filter(function (r) { return r.event_id === it.event_id; })[0];
+    var mem = /^mem_/.test(str(it.lesson_id));
+    var base = fromList || { event_id: it.event_id, lesson_id: it.lesson_id, ts: it.ts, title: it.title, category: it.category,
+      store: it.store || (mem ? 'bot_memory' : null), event_type: mem ? 'captured' : 'promotable', scope: 'unknown', engine: 'unknown',
+      target: { kind: mem ? 'memory' : 'pattern', id: it.lesson_id }, source_refs: [], applies_to: [] };
+    return Object.assign({}, base, extra);
+  }
+  // Below-bar suggestions: listed under Learning with their confidence, never counted, no warning tone.
+  function learningRows() {
+    return R.learningItems(needsBlock(), S.decisions).filter(function (it) { return it && it.event_id; }).map(function (it) {
+      return itemRow(it, { learning: { reason: plainReason(it.reason), confidence: it.confidence, bar: it.bar } });
     });
   }
+  function learningFor(id) { return id ? learningRows().filter(function (r) { return r.lesson_id === id; })[0] || null : null; }
+  function needsRows() {
+    // Only what still needs review: a row decided here leaves the list for history (its reader stays open on it).
+    return needsItems().map(function (it) {
+      return itemRow(it, { needs: { gate: it.gate, reason: plainReason(it.reason) } });
+    });
+  }
+  // The same count the server hands Today and the rail (memory-review.js count), less what was decided on this page.
   function needsCount() {
     var s = S.status || {}, ny = (S.recent.info && S.recent.info.needs_you) || s.needs_you;
-    if (ny && Array.isArray(ny.items)) return ny.items.filter(function (it) { return !S.decided[it.lesson_id]; }).length;
-    if (ny && ny.count != null) return ny.limit != null ? Math.min(Number(ny.count), Number(ny.limit)) : Number(ny.count);
+    var n = ny ? R.count(R.normalizeBlock(ny), S.decisions) : null;
+    if (n != null) return n;
     if (typeof s.learningToReview === 'number') return s.learningToReview;
     return null;
   }
+  // To review's other rows: proposed changes still open, and suggested rules only once the predicate counts them.
+  function reviewRestRows(seen) {
+    var learn = {};
+    learningRows().forEach(function (r) { learn[r.lesson_id] = 1; });
+    return S.review.rows.filter(function (e) { return !seen[e.event_id] && !closedHere(e) && !(isPattern(e) && learn[e.lesson_id]); });
+  }
   function findRow(id) {
-    var all = needsRows().concat(S.review.rows, S.recent.rows, S.applied.rows);
+    var all = needsRows().concat(learningRows(), S.review.rows, S.recent.rows, S.applied.rows);
     for (var i = 0; i < all.length; i++) if (all[i].event_id === id) return all[i];
+    if (S.history[id]) return S.history[id];
     var d = S.detail[id];
     return d && !d._error && d.event_id ? d : null;
   }
+  // A row decided here leaves the lists; its reader keeps it so Restore stays one tap away.
+  function keepForReader(e) { if (e && e.event_id) S.history[e.event_id] = e; }
   function fullRow(e) { var d = S.detail[e.event_id]; return Object.assign({}, e, d && !d._error ? d : {}); }
   function rewardOn() { return !!(S.status && S.status.learningRewardEnabled === true); }
   function rankingSentence() { return rewardOn() ? '<p>This lesson now ranks ahead of unused memories like it in later recall.</p>' : ''; }
@@ -801,17 +839,20 @@
       (L.cursor ? moreBtn('more-recent', 'Load more', L.loading) : '') + coverageNote(L.coverage);
   }
   function reviewListHtml() {
-    var L = S.review, sel = selectedId(), needs = needsRows(), seen = {};
+    var L = S.review, sel = selectedId(), needs = needsRows(), learning = learningRows(), seen = {};
     needs.forEach(function (e) { seen[e.event_id] = 1; });
-    var rest = L.rows.filter(function (e) { return !seen[e.event_id]; });
+    learning.forEach(function (e) { seen[e.event_id] = 1; });
+    var rest = reviewRestRows(seen);
     var other = rest.filter(function (e) { return !isPruneReady(e); }), ready = rest.filter(isPruneReady);
     var out = '';
-    var openNeeds = needsCount();
-    if (needs.length) out += groupHead('Needs you now', openNeeds ? fmt(openNeeds) + ' open' : 'All decided') + '<div class="cx-list">' + needs.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
-    if (!L.loaded && L.loading) return out + groupHead('Proposed changes') + loadingBox('Reading the changes waiting for you');
-    if (L.error && !L.rows.length) return out + groupHead('Proposed changes') + stateBox('The review list did not load.', L.error, 'refresh');
-    if (!needs.length && !rest.length) return groupHead('To review') + stateBox('You are up to date.', 'No proposed changes are waiting for review.');
-    if (other.length) out += groupHead('Proposed changes', L.total != null ? fmt(L.total) + ' in all' : '') + '<div class="cx-list">' + other.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
+    if (needs.length) out += groupHead('Needs you now', fmt(needsCount() || needs.length) + ' open') + '<div class="cx-list">' + needs.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
+    var learnHtml = learning.length ? groupHead('Learning', fmt(learning.length) + ' ' + plural(learning.length, 'suggestion', 'suggestions')) +
+      '<p class="mm-group-note">Suggested rules still gathering evidence. They cannot become a rule until their confidence reaches the bar, and move to Needs you now on their own when it does.</p>' +
+      '<div class="cx-list">' + learning.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>' : '';
+    if (!L.loaded && L.loading) return out + groupHead('Proposed changes') + loadingBox('Reading the changes waiting for you') + learnHtml;
+    if (L.error && !L.rows.length) return out + groupHead('Proposed changes') + stateBox('The review list did not load.', L.error, 'refresh') + learnHtml;
+    if (!needs.length && !rest.length) return groupHead('To review') + stateBox('You are up to date.', 'Nothing is waiting for your decision.') + learnHtml;
+    if (other.length) out += groupHead('Proposed changes', fmt(other.length) + ' open') + '<div class="cx-list">' + other.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
     if (ready.length) {
       var open = ready.filter(function (e) { return !decisionFor(e); }).length, b = S.bulk;
       out += groupHead('Ready to quarantine', open ? fmt(open) + ' open' : 'All decided') +
@@ -821,7 +862,7 @@
         '<div class="cx-list">' + ready.map(function (e) { return rowHtml(e, e.event_id === sel); }).join('') + '</div>';
     }
     if (L.cursor) out += moreBtn('more-review', 'Load more to review', L.loading);
-    return out;
+    return out + learnHtml;
   }
   function memSearchHtml() {
     return '<form class="cx-search mm-search" data-mm-form="mem-search" role="search"><input class="field" type="search" id="mm-mem-q" placeholder="Search topics, ideas…" value="' + esc(S.mem.q) + '" autocomplete="off" enterkeyhint="search" aria-label="Search memories">' +
@@ -864,7 +905,7 @@
     if (!isWide() || S.view === 'cues' || S.view === 'rated') return '';
     if (S.view === 'knowledge') return S.ktab;
     if (S.view === 'memories') { var m = S.mem.hits != null ? S.mem.hits : S.mem.rows; return m[0] ? m[0].id : ''; }
-    var rows = S.view === 'applied' ? S.applied.rows : S.view === 'review' ? needsRows().concat(S.review.rows) : S.recent.rows;
+    var rows = S.view === 'applied' ? S.applied.rows : S.view === 'review' ? needsRows().concat(reviewRestRows({}), learningRows()) : S.recent.rows;
     return rows[0] ? rows[0].event_id : '';
   }
 
@@ -895,7 +936,8 @@
     var facts = ['<span class="mm-kind">' + esc(o ? 'Checked: ' + o : kindLabel(e)) + '</span>', esc(storeName(e.store)), esc(known(e.scope)), esc(known(e.engine) !== known(e.scope) ? known(e.engine) : ''), esc(when(e.ts))].filter(function (x) { return x && x !== '<span class="mm-kind"></span>'; }).join(' · ');
     var actions = btn('open-sources', 'Open sources', { id: e.event_id }) + btn('explore', 'Explore in graph', { id: e.event_id }) + btn('copy-open', 'Copy context', { id: e.event_id, cls: 'primary' });
     var note = '';
-    if (e.needs) note += '<div class="cx-notice warn">' + esc((GATE[e.needs.gate] || 'Needs you') + (e.needs.reason ? ': ' + e.needs.reason : '') + '.') + '</div>';
+    if (e.needs && !closedHere(e)) note += '<div class="cx-notice warn">' + esc((GATE[e.needs.gate] || 'Needs you') + (e.needs.reason ? ': ' + e.needs.reason : '') + '.') + '</div>';
+    else if (e.learning || learningFor(e.lesson_id)) note += '<div class="cx-notice">' + esc('Learning: ' + ((e.learning || learningFor(e.lesson_id).learning).reason || 'not a rule yet') + '. It moves to Needs you now on its own once its confidence reaches the bar.') + '</div>';
     if (full && full._error && !(e.store === 'bot_memory')) note += '<div class="cx-notice">' + esc(full._error) + '</div>';
     else if (!full && !(e.store === 'bot_memory' && e.lesson_id) && S.loading[e.event_id]) note += '<p class="cx-note">Reading the full record…</p>';
     if (e.detail && e.detail.truncated) note += '<div class="cx-notice">The record was shortened to fit. Your Mac holds more than shown here.</div>';
@@ -1332,7 +1374,7 @@
   function closeModal() {
     var m = S.modal; if (!m) return;
     if (m.kind === 'merge' && S.merge && (S.merge.phase === 'preview' || S.merge.phase === 'loading')) { var pend = S.merge; S.merge = null; if (pend.resolve) pend.resolve(false); W.toast('Nothing was changed.'); }
-    if (m.kind === 'steward') S.steward.serial++;
+    if (m.kind === 'steward') S.steward.serial++;   // supersedes the read in flight; the next open starts its own (stewardLoad)
     S.modal = null; paintModal(); if (m.opener && m.opener.focus) { try { m.opener.focus({ preventScroll: true }); } catch (_e) {} }
   }
   function modalHtml() {
@@ -1438,16 +1480,28 @@
         '<ul class="mm-log">' + flagged.concat(review).slice(0, 60).map(function (x) { return '<li><b class="' + (x.verdict === 'prune' ? 'mm-bad' : '') + '">' + (x.verdict === 'prune' ? (x.applied ? 'Quarantined' : 'Would quarantine') : 'For you') + '</b> <span>' + esc(clip(x.excerpt || x.id, 160)) + '</span><span class="mm-muted">' + esc((x.reasons || []).join('; ')) + (x.by === 'model' ? ' (model)' : '') + '</span></li>'; }).join('') + '</ul>' : '') + '</section>';
   }
   // Stewardship (memories/memory-stewardship.js, ported): standing rules, current sources and outcome evidence.
+  // A read never waits on an older one: each takes a new serial and only the newest may answer. Closing the sheet or
+  // switching tabs supersedes the read in flight, and every read ends (an answer, an error, or STEWARD_READ_MS) so
+  // "Working…" can never outlive it. 7.0.2 kept `busy` set when a read was superseded, and the next open or tab
+  // switch returned early on it: Outcome evidence read "Working…" for good.
+  var STEWARD_READ_MS = 30000;
   function stewardLoad(more) {
-    var T = S.steward; if (T.busy) return;
-    T.busy = true; T.error = ''; var serial = ++T.serial;
+    var T = S.steward; if (T.intent) return;
+    T.busy = true; T.error = ''; T.loaded = false; var serial = ++T.serial;
     var action = T.tab === 'rules' ? 'rule_page' : T.tab === 'sources' ? 'source_status' : 'trace_summary', body = { action: action };
     if (action === 'rule_page') { body.limit = 25; body.cursor = more ? T.cursor : null; }
     paintModal();
-    call('workspace.request', body).then(function (d) {
+    var timer = null;
+    var late = new Promise(function (_ok, fail) { timer = setTimeout(function () { fail(new Error('Your Mac did not answer in ' + (STEWARD_READ_MS / 1000) + ' seconds. Reload to try again.')); }, STEWARD_READ_MS); });
+    Promise.race([call('workspace.request', body), late]).then(function (d) {
       if (serial !== T.serial) return;
+      d = d || {};
       if (action === 'trace_summary') T.outcomes = d; else { T.rows = more ? T.rows.concat(d.items || []) : d.items || []; T.cursor = d.next_cursor || null; }
-    }, function (e) { if (serial !== T.serial) return; T.error = e.message; }).then(function () { if (serial === T.serial) T.busy = false; paintModal(); });
+    }, function (e) { if (serial !== T.serial) return; T.error = e.message; }).then(function () {
+      clearTimeout(timer);
+      if (serial !== T.serial) return;
+      T.busy = false; T.loaded = true; paintModal();
+    });
   }
   function stewardMutate(body) {
     var T = S.steward; if (T.busy) return;
@@ -1487,8 +1541,9 @@
       body += T.rows.length ? T.rows.map(function (r) { return '<section class="cx-card mm-card"><h4>' + esc(r.title || r.id) + '</h4><p class="mm-muted">Revision ' + esc(r.revision) + ' · ' + esc(when(r.captured_at)) + ' · ' + esc(r.projection) + '</p>' + sbtn('steward-refresh', 'Refresh this document', r.id) + '</section>'; }).join('') :
         (!T.busy ? '<p>No granted documents right now. The owner grants documents on the Mac.</p>' : '');
     } else {
-      var d = T.outcomes;
-      body += d ? '<dl class="mm-grid"><dt>Observed runs</dt><dd>' + fmt(d.unique_runs || 0) + '</dd><dt>Checked runs that count</dt><dd>' + fmt(d.checked_eligible_runs || 0) + '</dd><dt>Not conclusive</dt><dd>' + fmt(d.inconclusive_runs || 0) + '</dd><dt>Days observed</dt><dd>' + fmt(d.observation_days || 0) + '</dd><dt>Evidence bar</dt><dd>' + (d.evidence_gate_met ? 'Met' : 'Not met yet') + (d.rate_limit_reason ? '. ' + esc(d.rate_limit_reason) : '') + '</dd></dl>' +
+      var d = T.outcomes, none = d && !(Number(d.unique_runs) > 0) && !(Number(d.checked_eligible_runs) > 0) && !(Number(d.inconclusive_runs) > 0);
+      if (!T.busy && !T.error && T.loaded && (!d || none)) body += '<p>No outcome evidence yet.</p>';
+      body += d && !none ? '<dl class="mm-grid"><dt>Observed runs</dt><dd>' + fmt(d.unique_runs || 0) + '</dd><dt>Checked runs that count</dt><dd>' + fmt(d.checked_eligible_runs || 0) + '</dd><dt>Not conclusive</dt><dd>' + fmt(d.inconclusive_runs || 0) + '</dd><dt>Days observed</dt><dd>' + fmt(d.observation_days || 0) + '</dd><dt>Evidence bar</dt><dd>' + (d.evidence_gate_met ? 'Met' : 'Not met yet') + (d.rate_limit_reason ? '. ' + esc(d.rate_limit_reason) : '') + '</dd></dl>' +
         '<details><summary>Show the raw numbers</summary><pre class="mm-pre">' + esc(JSON.stringify(d, null, 2)) + '</pre></details>' : '';
       body += '<p class="mm-muted">Being recalled, being included in context, a model saying it applied something and an independently checked result are four different things. Too little evidence does not mean things improved.</p>';
     }
@@ -1497,7 +1552,7 @@
   function stewardAct(act, id) {
     var T = S.steward, dr = S.drafts;
     if (act === 'steward-retry') return stewardMutate(T.intent);
-    if (act === 'steward-tab') { if (T.intent) return; T.tab = id; T.rows = []; T.cursor = null; T.outcomes = null; return stewardLoad(false); }
+    if (act === 'steward-tab') { if (T.intent) return; T.tab = id; T.rows = []; T.cursor = null; T.outcomes = null; T.loaded = false; return stewardLoad(false); }
     if (act === 'steward-reload') return stewardLoad(false);
     if (act === 'steward-more') return stewardLoad(true);
     if (act === 'steward-propose') {
@@ -1809,6 +1864,7 @@
     // Restore is Accept on the wire: the bridge returns a quarantined memory to recall before marking it accepted.
     call('memory.review', { id: id, decision: decision === 'restore' ? 'accept' : decision }).then(function (d) {
       var row = d.decision || {};
+      S.review.rows.concat(needsRows(), S.recent.rows).forEach(function (r) { if (r.lesson_id === id) keepForReader(r); });
       S.decisions[id] = row.decision || (decision === 'prune' ? 'pruned' : 'accepted'); S.decisionTs[id] = new Date().toISOString(); S.decided[id] = 1;
       if (decision === 'prune') { S.mem.rows = S.mem.rows.filter(function (m) { return m.id !== id; }); }
       W.toast(decision === 'prune' ? 'Memory quarantined.' : decision === 'restore' ? 'Memory restored to recall.' : 'Memory accepted.');
@@ -1837,6 +1893,7 @@
   function decide(eventId, decision) {
     var e = findRow(eventId); if (!e) return;
     call('learning.decide', { id: e.lesson_id, decision: decision }).then(function () {
+      keepForReader(e);
       S.decisions[e.lesson_id] = decision; if (decision === 'dismissed') S.decided[e.lesson_id] = 1; else delete S.decided[e.lesson_id];
       W.toast(decision === 'dismissed' ? 'Suggestion dismissed.' : 'Suggestion restored.');
       loadReview(false); afterWrite();

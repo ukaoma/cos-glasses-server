@@ -12,13 +12,31 @@ import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
+// The one "Needs review" predicate, shared with the Memories pane (window.COSMemoryReview there). Plain script: it
+// sets globalThis.COSMemoryReview when imported here.
+import '../web-control/memory-review.js'
+
+interface MemoryReviewApi {
+  RULE_BAR: number
+  reviewState(gate: unknown, confidence?: unknown, decision?: unknown, bar?: unknown): 'needs_review' | 'learning' | 'history'
+  itemState(item: unknown, decision?: unknown): 'needs_review' | 'learning' | 'history'
+  needsReview(item: unknown, decision?: unknown): boolean
+  normalizeBlock<T>(block: T): T
+  openItems(block: unknown, decisions?: Record<string, string>): unknown[]
+  count(block: unknown, decisions?: Record<string, string>): number | null
+  total(block: unknown): number | null
+  learningItems(block: unknown, decisions?: Record<string, string>): unknown[]
+}
+export const memoryReview = (globalThis as unknown as { COSMemoryReview: MemoryReviewApi }).COSMemoryReview
 
 export const NEEDS_YOU_TIMEOUT_MS = 10_000
 /** Control: needsYouCacheTTL = 90 s (HelperSources main.swift 10969). */
 export const NEEDS_YOU_TTL_MS = 90_000
 /** Control: needsYouStaleFlagLimit = 3600 s (main.swift 10970): an older stale block loses reward_enabled. */
 export const NEEDS_YOU_STALE_FLAG_LIMIT_MS = 3_600_000
-const KEYS = ['count', 'gates', 'system_backlog', 'window_days', 'limit', 'partial', 'not_implemented', 'items', 'overflow', 'reward_enabled'] as const
+// `learning`, `learning_count` and `bar` (2026-11-08): below-bar suggestions, shown under Learning and never counted.
+const KEYS = ['count', 'gates', 'system_backlog', 'window_days', 'limit', 'partial', 'not_implemented', 'items', 'overflow', 'reward_enabled',
+  'learning', 'learning_count', 'bar'] as const
 
 export type NeedsYouBlock = Partial<Record<(typeof KEYS)[number], unknown>>
 
@@ -44,12 +62,9 @@ export function parseJsonObject(output: string): Record<string, unknown> | null 
   return start >= 0 && end > start ? attempt(text.slice(start, end + 1)) : null
 }
 
-/** Control's count for the rail and the To review tab: count, capped by limit when both are numbers. */
+/** The count Today, the rail and the To review tab show: the shown items that need review (memory-review.js count). */
 export function needsYouCount(block: NeedsYouBlock | null): number | null {
-  if (!block) return null
-  const count = typeof block.count === 'number' ? block.count : Array.isArray(block.items) ? block.items.length : null
-  if (count === null) return null
-  return typeof block.limit === 'number' ? Math.min(count, block.limit) : count
+  return memoryReview.count(block)
 }
 
 function defaultRun(file: string, args: string[], timeoutMs: number): Promise<{ code: number; stdout: string }> {
@@ -82,7 +97,8 @@ export function createNeedsYouReader(deps: NeedsYouDeps = {}) {
     if (!payload || (payload.count === undefined && payload.items === undefined)) return null
     const block: NeedsYouBlock = {}
     for (const key of KEYS) if (payload[key] !== undefined) block[key] = payload[key]
-    return Object.keys(block).length ? block : null
+    // An older learning_events.py lists below-bar suggestions as `low_confidence`; the predicate moves them to Learning.
+    return Object.keys(block).length ? memoryReview.normalizeBlock(block) : null
   }
 
   function stale(): NeedsYouBlock | null {

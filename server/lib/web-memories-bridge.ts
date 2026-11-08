@@ -1,6 +1,6 @@
 import { getOwnerName } from './profile.js'
 import { COS_SCRIPTS_DIR } from './python-bridge.js'
-import { getNeedsYouReader, needsYouCount, type NeedsYouBlock } from './learning-needs-you.js'
+import { getNeedsYouReader, memoryReview, needsYouCount, type NeedsYouBlock } from './learning-needs-you.js'
 
 export const READ_ONLY_MEMORY_WEB_OPS = new Set([
   'status', 'learning.list', 'learning.review', 'learning.event', 'learning.status',
@@ -101,6 +101,8 @@ export async function dispatchMemoriesWebOp(
         // when it cannot be read. Never `learning.to_review`: that is an object of counts, and
         // the page rendered it as "To review (NaN)".
         learningToReview: needsYouCount(needsYou),
+        // Every item that needs review past the shown cap, by the same predicate: the "of N" in Today's "Next 7 of N".
+        learningToReviewTotal: needsYou ? memoryReview.total(needsYou) : null,
         learningTotal: learning.total ?? 0,
         learningRewardEnabled: needsYou ? needsYou.reward_enabled === true : learning.reward_enabled === true,
         ...(needsYou ? { needs_you: needsYou } : {}),

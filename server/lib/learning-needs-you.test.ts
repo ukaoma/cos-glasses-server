@@ -5,6 +5,9 @@ import { join } from 'node:path'
 import { createNeedsYouReader, needsYouCount, NEEDS_YOU_STALE_FLAG_LIMIT_MS, NEEDS_YOU_TIMEOUT_MS, NEEDS_YOU_TTL_MS, parseJsonObject } from './learning-needs-you.js'
 import { dispatchMemoriesWebOp } from './web-memories-bridge.js'
 
+// Prune-ready rows, the shape learning_events.py needs-you prints (hand-written, no real memory content).
+const SEVEN = Array.from({ length: 7 }, (_, i) => ({ gate: 'prune_ready', rank: 5, reason: 'Prune ready · never recalled', lesson_id: `mem_${i}`, event_id: `evt_${i}`, store: 'bot_memory', state: 'needs_review' }))
+
 function scriptsDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'cos-needs-you-'))
   writeFileSync(join(dir, 'cos_python'), '#!/bin/sh\n', { mode: 0o755 })
@@ -21,11 +24,11 @@ describe('needs-you count for the web Memories page', () => {
         scriptsDir: dir,
         run: async (file, args, timeoutMs) => {
           calls.push({ file, args, timeoutMs })
-          return { code: 0, stdout: 'warming up\n{"count": 83, "limit": 7, "reward_enabled": true, "items": [1,2,3,4,5,6,7], "noise": 1}\n' }
+          return { code: 0, stdout: 'warming up\n' + JSON.stringify({ count: 83, limit: 7, reward_enabled: true, items: SEVEN, noise: 1 }) + '\n' }
         },
       })
       const block = await reader.read()
-      expect(block).toEqual({ count: 83, limit: 7, reward_enabled: true, items: [1, 2, 3, 4, 5, 6, 7] })
+      expect(block).toEqual({ count: 83, limit: 7, reward_enabled: true, items: SEVEN })
       expect(needsYouCount(block)).toBe(7)
       expect(calls).toEqual([{ file: join(dir, 'cos_python'), args: [join(dir, 'learning_events.py'), 'needs-you'], timeoutMs: NEEDS_YOU_TIMEOUT_MS }])
     } finally {
@@ -66,7 +69,7 @@ describe('needs-you count for the web Memories page', () => {
     }
     expect(parseJsonObject('[1,2]')).toBeNull()
     expect(needsYouCount(null)).toBeNull()
-    expect(needsYouCount({ items: [1, 2, 3] })).toBe(3)
+    expect(needsYouCount({ items: SEVEN.slice(0, 3) })).toBe(3)
     expect(needsYouCount({ count: 4 })).toBe(4)
   })
 

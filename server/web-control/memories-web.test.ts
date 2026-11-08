@@ -13,6 +13,8 @@ import { MUTATING_MEMORY_WEB_OPS, isMemoryWebOpReadOnly } from '../lib/web-memor
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SOURCE = readFileSync(join(HERE, 'panes', 'memories.js'), 'utf8')
+// index.html loads the shared Needs review predicate before any pane; the harness does the same.
+const REVIEW_SOURCE = readFileSync(join(HERE, 'memory-review.js'), 'utf8')
 const flush = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)) }
 
 type Answer = unknown | ((args: any) => unknown)
@@ -72,6 +74,8 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
       // A TypeError is the browser's own failure (no HTTP status): the request never reached COS.
       if (v instanceof TypeError) return Promise.reject(v)
       if (v instanceof Error) return Promise.resolve({ ok: false, message: v.message, details: {} })
+      // A promise answer is a slow read: it answers when the test settles it.
+      if (v && typeof (v as Promise<unknown>).then === 'function') return (v as Promise<unknown>).then(d => ({ ok: true, message: '', details: d ?? {} }), (e: Error) => ({ ok: false, message: e.message, details: {} }))
       return Promise.resolve({ ok: true, message: '', details: v ?? {} })
     },
   }
@@ -99,6 +103,7 @@ function load(opts: { answers?: Record<string, Answer>; wide?: boolean; noRandom
   }
   const ctx = vm.createContext({ window, document, location, crypto, console, Date, JSON, Math, Promise, Object, Array, String, Number, RegExp, Error, Uint8Array, URL,
     setTimeout: timeout, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {} })
+  vm.runInContext(REVIEW_SOURCE, ctx)
   vm.runInContext(SOURCE, ctx)
   const t = def._t
   const tap = (name: string, attrs: Record<string, string> = {}) => t.act(name, { getAttribute: (k: string) => attrs[k] ?? null, disabled: false }, null)
@@ -179,21 +184,65 @@ describe('Control Web Memories: opening and reading never writes', () => {
 })
 
 describe('Control Web Memories: To review', () => {
-  it('the count is the needs-you list, never the review page total, and that list shows first with plain reasons', async () => {
-    const h = load()
+  it('the count is what needs review, never the review page total; a below-bar suggestion is Learning, shown once, calm', async () => {
+    // 2026-11-08 (IMG_0524/0525): an older producer still lists a 0.52 suggestion as `low_confidence`. Under the 0.8 bar
+    // its only action is Dismiss, so it is not a review: it leaves the count and the Needs you now group. An older
+    // review page may also carry the lesson's proposed event under its own id; that stays out of Proposed changes too.
+    const review = base()['ws:review_page'] as any
+    const h = load({ answers: { 'ws:review_page': { ...review, items: [...review.items, { ...review.items[0], event_id: 'evt_pattern_proposed', event_type: 'proposed' }] } } })
     await h.open()
-    expect(h.t.needsCount()).toBe(2)
-    expect(h.t.viewsHtml()).toContain('To review (2)')
+    expect(h.t.needsCount()).toBe(1)
+    expect(h.t.viewsHtml()).toContain('To review (1)')
     expect(h.t.viewsHtml()).not.toContain('76')
     h.tap('view', { 'data-arg': 'review' }); await flush()
     const html: string = h.t.listHtml()
-    expect(html.indexOf('Needs you now')).toBeGreaterThanOrEqual(0)
-    expect(html.indexOf('Needs you now')).toBeLessThan(html.indexOf('Proposed changes'))
-    // The pattern is in both lists; it shows once, in Needs you now.
+    const needsAt = html.indexOf('Needs you now'), learningAt = html.indexOf('>Learning<')
+    expect(needsAt).toBeGreaterThanOrEqual(0)
+    expect(needsAt).toBeLessThan(html.indexOf('Proposed changes'))
+    expect(learningAt).toBeGreaterThan(needsAt)
+    // The pattern is in both lists; it shows once, under Learning, with its confidence and no warning tone.
     expect(html.split('data-id="evt_pattern"').length - 1).toBe(1)
+    expect(html).not.toContain('data-id="evt_pattern_proposed"')
+    expect(html.indexOf('data-id="evt_pattern"')).toBeGreaterThan(learningAt)
+    expect(html).toContain('Learning. Confidence 0.52, under the 0.8 bar for a rule')
+    expect(html).not.toMatch(/mm-status warn">[^<]*0\.8 bar/)
     expect(html).toContain('Mentions Bradley near &quot;wants&quot; without saying who said it')
-    expect(html).toContain('Confidence 0.52, under the 0.8 bar for a rule')
     expect(html).toContain('Ready to quarantine')
+    // A proposal with no decision waiting is listed calmly, never as Needs your review.
+    expect(html).toContain('Suggested by a scheduled task')
+    expect(html).not.toContain('Needs your review')
+  })
+
+  it('a suggested rule at or over the bar needs review, and one crossing it moves there on the next read', async () => {
+    const rule = (confidence: number) => needsItem({ gate: 'rule_ready', confidence, bar: 0.8, reason: `promotable at confidence ${confidence} (>= 0.8)`, lesson_id: 'ptn_1', event_id: 'evt_pattern', store: 'correction_journal', title: 'Confirm npm is polling' })
+    let block: any = { count: 1, limit: 7, items: [], learning: [{ ...rule(0.55), gate: 'rule_ready', state: 'learning', reason: 'promotable at confidence 0.55 (< 0.8)' }], learning_count: 1 }
+    const h = load({ answers: { status: () => ({ ...base().status as object, learningToReview: 0, needs_you: block }) } })
+    await h.open()
+    expect(h.t.needsCount()).toBe(0)
+    h.tap('view', { 'data-arg': 'review' }); await flush()
+    expect(h.t.listHtml()).toContain('Learning. Confidence 0.55, under the 0.8 bar for a rule')
+    block = { count: 1, limit: 7, items: [rule(0.8)], learning: [], learning_count: 0 }
+    h.tap('refresh'); await flush()
+    expect(h.t.needsCount()).toBe(1)
+    const html: string = h.t.listHtml()
+    expect(html.indexOf('data-id="evt_pattern"')).toBeGreaterThan(html.indexOf('Needs you now'))
+    expect(html).toContain('Confidence 0.8, at or over the 0.8 bar for a rule')
+    expect(html).not.toContain('>Learning<')
+  })
+
+  it('a dismissed suggestion leaves To review for history; its open reader keeps Restore suggestion', async () => {
+    const h = load({ answers: { 'learning.decide': {} } })
+    await h.open()
+    h.tap('view', { 'data-arg': 'review' }); await flush()
+    await h.open(['e', 'evt_pattern'])
+    h.tap('decide', { 'data-id': 'evt_pattern', 'data-arg': 'dismissed' }); await flush()
+    expect(h.writes()).toEqual([{ op: 'learning.decide', args: { id: 'ptn_1', decision: 'dismissed' } }])
+    h.setRoute([]); h.tap('view', { 'data-arg': 'review' }); await flush()
+    expect(h.t.listHtml()).not.toContain('data-id="evt_pattern"')
+    const reader: string = h.t.readerHtml({ pane: 'memories', args: ['e', 'evt_pattern'] })
+    expect(reader).toContain('Change dismissed')
+    expect(reader).toContain('Restore suggestion')
+    expect(reader).not.toContain('cx-notice warn')
   })
 
   it('a saved memory that needs you is read from the memory store, not the learning index', async () => {
@@ -219,10 +268,12 @@ describe('Control Web Memories: To review', () => {
     expect(h.toasts).toContain('Memory quarantined.')
     h.tap('memory-review', { 'data-id': 'mem_old1', 'data-arg': 'restore' }); await flush()
     expect(h.writes()[1]).toEqual({ op: 'memory.review', args: { id: 'mem_old1', decision: 'accept' } })
-    // The decided item leaves the needs-you count, even after the status read that follows the write still lists it,
-    // and stays in the list so its reader can offer Restore.
+    // The decided item leaves the needs-you count and the list, even after the status read that follows the write
+    // still lists it; its reader stays open on it and offers Restore.
     expect(h.calls.filter(c => c.op === 'status').length).toBeGreaterThanOrEqual(2)
-    expect(h.t.needsCount()).toBe(1)
+    expect(h.t.needsCount()).toBe(0)
+    h.tap('view', { 'data-arg': 'review' }); await flush()
+    expect(h.t.listHtml()).not.toContain('data-id="evt_need_mem"')
     expect(h.t.readerHtml({ pane: 'memories', args: ['e', 'evt_need_mem'] })).toContain('Restore to recall')
   })
 
@@ -736,5 +787,67 @@ describe('Control Web Memories: the tab is in the address (QA N9)', () => {
     expect(wide.t.listHtml()).toMatch(/data-id="evt_r1" aria-selected="true"/)
     expect(h.def.up(['e', 'evt_x'])).toEqual(['t', 'applied'])
     expect(h.def.up(['t', 'applied'])).toBeNull()
+  })
+})
+
+// Miles 2026-11-08 (IMG_0524): "Rules, sources and outcome evidence" > Outcome evidence read "Working…" with nothing
+// after it. 7.0.2 cleared `busy` only for the newest read, and closing the sheet or switching tabs made the read in
+// flight stale, so the next open or tab returned early on `busy` for good.
+describe('Control Web Memories: Rules, sources and outcome evidence never stays on Working…', () => {
+  const OUTCOMES = { state: 'legacy', unique_runs: 11812, checked_eligible_runs: 0, inconclusive_runs: 5129, observation_days: 0, evidence_gate_met: false, protocol: 1 }
+  function deferred() { let resolve!: (v: unknown) => void; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
+  const working = (h: ReturnType<typeof load>) => (h.t.modalHtml() as string).includes('Working…')
+
+  it('closing the sheet while Outcome evidence reads, then opening it again, shows the evidence', async () => {
+    const slow = deferred(); let n = 0
+    const h = load({ answers: { 'ws:rule_page': { items: [], next_cursor: null, protocol: 1 }, 'ws:trace_summary': () => (++n === 1 ? slow.promise : OUTCOMES) } })
+    await h.open()
+    h.tap('steward'); await flush()
+    h.tap('steward-tab', { 'data-arg': 'outcomes' }); await flush()
+    expect(working(h)).toBe(true)
+    h.tap('modal-close'); await flush()
+    h.tap('steward'); await flush()
+    expect(working(h)).toBe(false)
+    expect(h.t.modalHtml()).toContain('Observed runs')
+    slow.resolve({ ...OUTCOMES, unique_runs: 1 }); await flush()   // the old read answers late and changes nothing
+    expect(working(h)).toBe(false)
+    expect(h.t.modalHtml()).toContain('11,812')
+  })
+
+  it('switching to Outcome evidence while Standing rules still reads loads the evidence', async () => {
+    const slow = deferred()
+    const h = load({ answers: { 'ws:rule_page': () => slow.promise, 'ws:trace_summary': OUTCOMES } })
+    await h.open()
+    h.tap('steward'); await flush()
+    h.tap('steward-tab', { 'data-arg': 'outcomes' }); await flush()
+    expect(h.calls.filter(c => c.op === 'workspace.request' && c.args.action === 'trace_summary').length).toBe(1)
+    expect(working(h)).toBe(false)
+    expect(h.t.modalHtml()).toContain('Observed runs')
+    slow.resolve({ items: [], protocol: 1 }); await flush()
+    expect(h.t.modalHtml()).toContain('Observed runs')
+  })
+
+  it('no runs yet says so; an error says why and offers Reload; a read that never answers ends after 30 s', async () => {
+    let answer: unknown = { state: 'uninstrumented', unique_runs: 0, eligible_opportunities: 0, protocol: 1 }
+    const h = load({ answers: { 'ws:rule_page': { items: [], protocol: 1 }, 'ws:trace_summary': () => answer } })
+    await h.open()
+    h.tap('steward'); await flush()
+    h.tap('steward-tab', { 'data-arg': 'outcomes' }); await flush()
+    expect(h.t.modalHtml()).toContain('No outcome evidence yet.')
+    expect(h.t.modalHtml()).not.toContain('Observed runs')
+    answer = new Error('Workspace unavailable')
+    h.tap('steward-reload'); await flush()
+    expect(working(h)).toBe(false)
+    expect(h.t.modalHtml()).toContain('Workspace unavailable')
+    expect(h.t.modalHtml()).toContain('data-mm="steward-reload"')
+    expect(h.t.modalHtml()).not.toContain('No outcome evidence yet.')
+    answer = new Promise(() => {})
+    const before = h.held.length
+    h.tap('steward-reload'); await flush()
+    expect(working(h)).toBe(true)
+    expect(h.held.length).toBe(before + 1)
+    h.held.slice(before).forEach(fn => fn()); await flush()
+    expect(working(h)).toBe(false)
+    expect(h.t.modalHtml()).toContain('did not answer in 30 seconds')
   })
 })
