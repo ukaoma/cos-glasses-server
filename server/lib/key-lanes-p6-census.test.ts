@@ -90,6 +90,8 @@ export const CENSUS: CensusRow[] = [
   ["server/lib/key-profile-routing.ts", "isProfilePreference", 1, "if (!envProfileWarned && isProfilePreference(raw?.trim())) {", "closed", "closedEnvDefaultModel: the env default stays closed"],
   ["server/lib/key-profile-routing.ts", "normalizeModelPreference", 1, "return normalizeModelPreference(raw)", "closed", "closedEnvDefaultModel: the env default stays closed"],
   ["server/lib/model-router.ts", "parsePreference", 1, "const requested = parsePreference(model)", "accept", "request model and session binding"],
+  ["server/routes/health.ts", "closedEnvDefaultModel", 1, "const env = closedEnvDefaultModel(input.env)", "closed", "7.0.2 /api/models defaultModel label: reads the env default the same closed way as model-router; never resolves a run"],
+  ["server/routes/health.ts", "isProfilePreference", 1, "const sessionProfile = !!sid && !sessionModel && isProfilePreference(getSessionBinding(sid))", "closed", "7.0.2 /api/models defaultModel label: a key-profile session is only named source profile; it never resolves or exposes the profile"],
   ["server/lib/model-router.ts", "parsePreference", 1, "const bound = requested ?? (sessionModel === null ? parsePreference(getSessionBinding(sid)) : undefined)", "accept", "request model and session binding"],
   ["server/lib/model-router.ts", "closedEnvDefaultModel", 1, "const envDefault = closedEnvDefaultModel(process.env.COS_G2_DEFAULT_MODEL)", "closed", "COS_G2_DEFAULT_MODEL; profile ignored with one warning"],
   ["server/lib/model-router.ts", "isClaudeModel", 1, "if (options?.dispatch && !isClaudeModel(resolvedModel)) {", "closed", "family guard on the closed slot; profiles leave before it"],

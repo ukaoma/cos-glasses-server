@@ -52,6 +52,8 @@ vi.mock('./codex-model-catalog.js', () => ({
 }))
 vi.mock('./codex-run-ledger.js', () => ({
   classifyCodexError: () => 'codex.error',
+  codexTerminalUsageLimitError: () => undefined,
+  safeCodexUsageLimitMessage: (message: string) => message,
   extractCodexThreadId: (event: any) => event?.thread_id,
   finishCodexRun: vi.fn(),
   getCodexExecutionCwd: () => '/tmp',

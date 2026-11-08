@@ -4,7 +4,8 @@
 // which carries no address. Two later additive capabilities are in the goldens below:
 // `phoneMicrophoneMeetings` (iPhone microphone, 6.93.0) and `macLiveVoices` (the live Mac voice
 // switch and window counts, 6.93.0), plus `calendar` on /api/models only (where the calendar comes from, counts
-// only, PH plan P1). /api/route-proof is an ordinary unknown path behind the token again, and
+// only, PH plan P1). 7.0.2 adds `defaultModel` on /api/models (what "Default" resolves to: a
+// slot name and its source, never a profile). /api/route-proof is an ordinary unknown path behind the token again, and
 // COS_LAN_FIRST is read by nothing.
 import express from 'express'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
@@ -185,6 +186,7 @@ const GOLDEN_MODELS_TOP = [
   'threadAttachProviders',
   'threadForkSupported',
   'threadForkProviders',
+  'defaultModel',
   'continueLive',
   'codexLiveQueue',
   'providers',
@@ -236,6 +238,9 @@ const GOLDEN_MODELS_PATHS = [
   '.threadForkSupported',
   '.threadForkProviders',
   '.threadForkProviders[]',
+  '.defaultModel',
+  '.defaultModel.preference',
+  '.defaultModel.source',
   '.continueLive',
   '.continueLive.enabled',
   '.continueLive.attempts',

@@ -94,6 +94,8 @@ vi.mock('./codex-model-catalog.js', () => ({
   resolveCodexServiceTier: () => 'priority',
 }))
 vi.mock('./codex-run-ledger.js', () => ({
+  codexTerminalUsageLimitError: () => undefined,
+  safeCodexUsageLimitMessage: (message: string) => message,
   classifyCodexError: () => 'codex.error',
   extractCodexThreadId: () => undefined,
   finishCodexRun: vi.fn(),
