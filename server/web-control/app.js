@@ -3505,7 +3505,7 @@
     }).slice(0, 12) : [];
     var mine = all.filter(function (x) { return (x.before === true) === before; }).map(function (x) {
       return { id: x.id, tool: READER_TOOLS.indexOf(x.tool) >= 0 ? x.tool : 'Image', index: Math.floor(Number(x.index)) || 1, total: Math.floor(Number(x.total)) || 1, state: x.state,
-        reason: ['outside_workspace', 'unavailable', 'too_large', 'missing'].indexOf(x.reason) >= 0 ? x.reason : undefined };
+        reason: ['outside_workspace', 'unavailable', 'too_large', 'missing', 'secret_file'].indexOf(x.reason) >= 0 ? x.reason : undefined };
     });
     var hasAfter = all.some(function (x) { return x.before !== true; });
     var more = Math.max(0, Math.min(9999, Math.floor(Number(turn && turn.toolImagesMore)) || 0));

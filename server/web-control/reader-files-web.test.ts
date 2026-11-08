@@ -78,6 +78,13 @@ describe('file cards (reader-media.js)', () => {
     expect(cards.map(c => c.querySelectorAll('button').map(b => b.textContent))).toEqual([['Open', 'Download'], ['Preview', 'Download'], ['Open'], ['Download']])
     expect(t.calls, 'nothing is fetched until asked').toEqual([])
   })
+  it('a secret file card says why it is hidden and offers no file action', () => {
+    const t = load(); t.slot([{ ...pdf, state: 'unavailable', reason: 'secret_file', size: undefined }])
+    t.W.readerMedia.mount(t.host, 'claude', 's')
+    expect(t.calls).toEqual([])
+    expect(t.host.textContent).toContain('Not shown: this file may hold secrets.')
+    expect(t.host.querySelectorAll('button')).toHaveLength(0)
+  })
   it('missing or outside the workspace: "Not available on this Mac", no button, no request', () => {
     const t = load()
     t.slot([{ ...pdf, state: 'unavailable', reason: 'missing', size: undefined }, { ...html, state: 'unavailable', reason: 'outside_workspace' }])

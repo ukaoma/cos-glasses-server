@@ -173,6 +173,12 @@ describe('the viewer: lazy thumbnails labelled like the Claude app, tap to enlar
     const retries = t.host.querySelectorAll('button').filter((b: El) => b.textContent === 'Retry image')
     expect(retries.map((b: El) => b.hidden)).toEqual([true, true, true, false])
   })
+  it('a secret tool image is permanently unavailable without revealing a path or retrying', async () => {
+    const t = load(); await t.mount({ toolImages: [readImg('a', { state: 'unavailable', reason: 'secret_file' })] })
+    expect(t.calls).toEqual([])
+    expect(t.host.textContent).toContain('Not shown: this file may hold secrets.')
+    expect(t.host.querySelectorAll('button').find((b: El) => b.textContent === 'Retry image')!.hidden).toBe(true)
+  })
   it('previews off (403), auth refused (401), too large (413) and gone (404) say so and do not retry; no path reaches the DOM', async () => {
     for (const [status, words] of [[403, 'Previews are off. Turn them on in Settings, Privacy.'], [413, 'Too large to show here.'], [404, 'Reopen the session']] as const) {
       const t = load([{ status, data: { error: 'x', path: '/Users/miles/a.png' } }]); await t.mount({ toolImages: [readImg('a')] }); await t.intersect(thumbs(t.host))

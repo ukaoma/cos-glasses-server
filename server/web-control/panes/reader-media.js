@@ -9,7 +9,7 @@
   // outside_workspace and missing are permanent. unavailable means the workspace lookup failed this time; the content route
   // re-resolves it. 6.99.35: outside the workspace and missing (a file a session sent that is gone) read the same, with no path.
   var REASONS = { outside_workspace: 'Not available on this Mac.', missing: 'Not available on this Mac.',
-    unavailable: 'This image is temporarily unavailable. Retry in a moment.', too_large: 'Too large to show here.' };
+    secret_file: 'Not shown: this file may hold secrets.', unavailable: 'This image is temporarily unavailable. Retry in a moment.', too_large: 'Too large to show here.' };
   var style = document.createElement('style');
   style.textContent = '.rm-item{display:flex;flex-direction:column;gap:6px;max-width:180px}.rm-label,.rm-status{font:12px/1.4 var(--body);color:var(--sub);overflow-wrap:anywhere}.rm-label{color:var(--text)}.rm-item .cx-thumb{cursor:pointer}.rm-view{position:fixed;inset:0;z-index:10000;background:var(--bg,#171717);color:var(--text,#fff);display:flex;flex-direction:column;padding: max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));gap:16px}.rm-view-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.rm-view-label{margin:0;overflow-wrap:anywhere;font:16px/1.4 var(--body)}.rm-view-body{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}.rm-view img{max-width:100%;max-height:100%;object-fit:contain}.rm-viewing{overflow:hidden!important}.rm-files{display:flex;flex-direction:column;gap:8px;margin-top:10px}.rm-file{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:4px 12px;align-items:center;padding:10px 12px;border:1px solid var(--panel-border);border-radius:12px;background:var(--panel);max-width:560px}.rm-file-icon{grid-row:1/span 2;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:10px;background:var(--bg);border:1px solid var(--panel-border);font:600 11px/1 var(--body);letter-spacing:.04em;color:var(--sub)}.rm-file-name{font:500 14px/1.35 var(--body);color:var(--text);overflow-wrap:anywhere;min-width:0}.rm-file-meta{font:12px/1.4 var(--body);color:var(--sub);grid-column:2;min-width:0}.rm-file-acts{grid-column:3;grid-row:1/span 2;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.rm-file-acts .cx-btn{min-height:44px}.rm-file .rm-status{grid-column:1/-1}.rm-file.off{opacity:.78}.rm-view-acts{display:flex;gap:8px;align-items:center}.rm-text{flex:1;min-height:0;width:100%;overflow:auto;margin:0;padding:12px;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.rm-frame{flex:1;min-height:0;width:100%;border:1px solid var(--panel-border);border-radius:10px;background:#fff}.rm-tools{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0 2px;align-items:flex-start}.rm-tools.before{margin:2px 0 10px}.rm-tool{display:flex;flex-direction:column;gap:4px;width:132px;min-width:0}.rm-tool-thumb{display:flex;align-items:center;justify-content:center;width:132px;height:88px;padding:0;overflow:hidden;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);color:var(--sub);font:12px/1.3 var(--body);cursor:pointer;text-align:center}.rm-tool-thumb:disabled{cursor:default}.rm-tool-thumb:focus-visible{outline:2px solid var(--accent,currentColor);outline-offset:2px}.rm-tool-thumb img{width:100%;height:100%;object-fit:cover;object-position:top center;display:block}.rm-tool-cap{display:flex;justify-content:space-between;gap:6px;font:12px/1.3 var(--body);min-width:0}.rm-tool-name{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rm-tool-pos{color:var(--sub);white-space:nowrap}.rm-tool .rm-status{font-size:11.5px}.rm-tool-more{display:flex;align-items:center;justify-content:center;width:88px;height:88px;border:1px dashed var(--panel-border);border-radius:10px;color:var(--sub);font:13px/1.3 var(--body)}@media (max-width:599px){.rm-tool{width:104px}.rm-tool-thumb{width:104px;height:72px}.rm-tool-more{width:72px;height:72px}}@media (max-width:599px){.rm-file{grid-template-columns:40px minmax(0,1fr)}.rm-file-icon{width:40px;height:40px}.rm-file-acts{grid-column:1/-1;grid-row:auto;justify-content:flex-start}}';
   document.head.appendChild(style);
@@ -30,6 +30,7 @@
   function revoke(item) { if (item.url) { URL.revokeObjectURL(item.url); item.url = ''; } }
   function failWords(err) {
     if (err && err.status === 401) return 'Signed out. Connect this browser again to view the image.';
+    if (err && err.status === 403 && err.code === 'secret_file_denied') return REASONS.secret_file;
     if (err && err.status === 403) return 'Previews are off. Turn them on in Settings, Privacy.';
     if (err && err.status === 404) return 'This image is no longer available. Reopen the session to refresh its images.';
     if (err && err.status === 413) return 'Too large to show here.';
@@ -202,7 +203,7 @@
         item.retry = button('Retry image', function () { loadThumb(scope, item); }, 'link-btn'); item.retry.hidden = true;
         wrap.appendChild(item.open); wrap.appendChild(element('span', 'rm-label', item.label)); wrap.appendChild(item.status); wrap.appendChild(item.retry); slot.appendChild(wrap);
         if (dto.state === 'available') loadThumb(scope, item);
-        else { item.status.textContent = REASONS[dto.reason] || REASONS.unavailable; item.retry.hidden = dto.reason === 'outside_workspace' || dto.reason === 'missing'; }
+        else { item.status.textContent = REASONS[dto.reason] || REASONS.unavailable; item.retry.hidden = dto.reason === 'outside_workspace' || dto.reason === 'missing' || dto.reason === 'secret_file'; }
       });
     });
   }
@@ -276,7 +277,7 @@
   var FILE_ID = /^af_[a-f0-9]{64}$/, TEXT_SHOWN = 512 * 1024;
   var OFF = 'Not available on this Mac';
   // QA 7.0.0: a file card has no Retry (a mounted card is never re-read), so a passing failure says the step that works.
-  var FILE_REASONS = { outside_workspace: OFF, missing: OFF, unavailable: 'Not available right now. Reopen the session to check again.' };
+  var FILE_REASONS = { secret_file: REASONS.secret_file, outside_workspace: OFF, missing: OFF, unavailable: 'Not available right now. Reopen the session to check again.' };
   var BADGE = { pdf: 'PDF', html: 'HTML', image: 'GIF' };
   function fileUrl(scope, id) {
     return '/api/agent-sessions/' + encodeURIComponent(scope.provider) + '/' + encodeURIComponent(scope.id) + '/output-files/' + encodeURIComponent(id) + '/content';

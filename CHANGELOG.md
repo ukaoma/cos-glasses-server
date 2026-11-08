@@ -1,20 +1,30 @@
-## Unreleased (security): no Mac paths in session words, and secret files are never served
+## 7.0.4 — Session image previews, Today parity and week QA fixes
 
-2026-11-08. For 7.0.4, before its public release; not versioned here (root owns the 7.0.4 integration). On 16bead9 (codex/tool-images-release-7.0.4). Server only; no Control Web, glasses, phone or Control change is needed.
+2026-11-08. Matched candidate with COS Control 0.5.379. Includes the private 7.0.0–7.0.2 line; the public baseline remains 6.99.33 until publication receipts verify promotion. Control 0.5.377 and 0.5.378 keep their existing API contracts; the new native Today summary and calendar cancellation fixes require 0.5.379.
+
+- Images attached to Claude/Codex prompts and returned by tools appear at their original session step, including after a growing history window. Refresh/unmount cancels obsolete thumbnails and requests. Existing Privacy controls still govern previews.
+- Absolute local paths in list/search/detail prose become labels or base names; complete web URLs remain unchanged. Secret file names and realpath targets are denied across file/image routes, with honest permanent refusal copy.
+- Includes calendar source-selection and declined-event fixes, memory review classification parity, question retry/offline fixes, Ask Work availability from actual continuable sessions, and recovery after a provider cannot confirm termination.
+- No speaker naming threshold, enrollment, canonical recording repair or transcript correction is changed. Disabled live/cleanup flags remain disabled. Cursor prompt/tool image parity and physical Duo acceptance are not qualified by this cut.
+- Detailed default changes, switches and limits follow. The historical 7.0.0–7.0.2 sections below describe the cumulative UI changes users receive from 6.99.33; no unrelated branch is implied to be included.
+
+### Session privacy and secret files
+
+2026-11-08. Integrated into 7.0.4. The server and Control Web reader share these changes.
 
 **Default-on changes (no switch for either):**
 - **S1: no absolute Mac path reaches the browser in a session's words.** The session detail (`GET /api/agent-sessions/:provider/:sessionId`, with or without `?turns=`), the session list and session search now turn every absolute local path in every string they send into its base name, keeping a line anchor: `[app.ts](/Users/<name>/repo/app.ts#L42)` reads `app.ts:42`, Codex's `[server/app.ts](/abs/server/app.ts:42)` reads `server/app.ts:42`, and bare paths, paths in backticks, `~/...`, `$HOME/...`, `file://` and editor (`vscode://file/...`) URLs read as their base names. A Markdown link to a local file becomes its words (or the base name when it has none). Web URLs, relative paths and site paths such as `/api/x` are left exactly as written. This covers the reply, the digest, the first prompt, every turn's words and captions, file and image names, and any field added later (a walk over the whole answer, `lib/local-path-redact.ts`). A read-only scan of 14 days had found 111 Claude links and 826 Codex links carrying `/Users/...` into Control Web. Applies to every client of these routes, not only the browser: the lens history and COS Control's session reply and Work reply tracking (which read the same detail) see base names too. Control's fork export reads local transcripts and is unchanged; Work's Cursor handoff match keys on `COS Work handoff <tag>`, which has no path.
-- **S2: one secret-name guard on every route that serves a local file.** `lib/secret-path-guard.ts` (`isDeniedSecretPath`) refuses, case-insensitively and on any path segment: `.env` and `.env.*`, `*-key.json`, `.cos-profile*`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `*.pem`, `*.p12`, `*.pfx`, `*.key`, `credentials*` (so `.aws/credentials`), `.netrc`, `.npmrc`, `.pypirc`, `*.keychain*`, and anything under `.ssh/` or `.gnupg/`. It checks the path as written and its canonical (realpath) file, so an innocently named link to a secret is refused too. Wired into sent output files, sent output images, Markdown output images and path-backed tool images; embedded base64 tool images have no path and are exempt. The token gate, the previews switch (`previews_off`) and the transcript re-authorization of the id still answer first; then a refused file answers **403 `secret_file_denied`**. In the session detail its card is `state: unavailable`, `reason: secret_file`, `notice: "Not shown: this file may hold secrets"`, with the base name only, no size and no path. Before this, a file inside the session's workspace was served whatever its name (a SendUserFile of the repo's `.env` was a downloadable card).
+- **S2: one secret-name guard on every route that serves a local file.** `lib/secret-path-guard.ts` (`isDeniedSecretPath`) refuses, case-insensitively and on any path segment: any `.env*` prefix (including `.envrc`), `*-key.json`, `.cos-profile*`, any `id_*` prefix, `*.pem`, `*.p12`, `*.pfx`, `*.key`, `credentials*` (so `.aws/credentials`), `.netrc`, `.npmrc`, `.pypirc`, `*.keychain*`, and anything under `.ssh/` or `.gnupg/`. It checks the path as written and its canonical (realpath) file, so an innocently named link to a secret is refused too. Wired into sent output files, sent output images, Markdown output images and path-backed tool images; embedded base64 tool images have no path and are exempt. The token gate, the previews switch (`previews_off`) and the transcript re-authorization of the id still answer first; then a refused file answers **403 `secret_file_denied`**. In the session detail its card is `state: unavailable`, `reason: secret_file`, `notice: "Not shown: this file may hold secrets"`, with the base name only, no size and no path. Before this, a file inside the session's workspace was served whatever its name (a SendUserFile of the repo's `.env` was a downloadable card).
 
 **Known limits:**
-- Control Web's reader (`panes/reader-media.js`, root-owned) does not yet map `reason: secret_file`; until it does, a refused image reads "temporarily unavailable" and a refused file "Not available on this Mac". The detail carries `notice` for it to show.
+- Control Web maps `secret_file` descriptors and `secret_file_denied` content refusals to "Not shown: this file may hold secrets." No Retry or incorrect Privacy-switch advice is offered.
 - `*.key` also refuses Keynote decks (same extension), by design of the list.
 - Paths are recognised from their top-level directory (`/Users`, `/Volumes`, `/private`, `/var`, `/tmp`, `/opt`, `/Library`, ...) or a home shorthand. A folder name with spaces is followed only while its words are capitalised; a lowercase one with spaces leaves its tail as plain words (no leading `/`).
 - The live session stream (`agent-session-stream.ts`) and the Claude sessions routes are not covered by S1 here.
 
-## Unreleased (images a session looked at)
+### Images a session looked at
 
-2026-11-08. Not versioned yet (7.0.3 is the Cursor lane; this takes 7.0.4 or the next free number when it is packaged). On 7.0.2 (f3aa80c). Server and Control Web only. Miles, 11/08: the Claude app shows the image a Read of a PNG returned under its step ("Read", "1 of 2"); Control Web showed only words. 6.99.28 covered images written into reply text and 6.99.35 covered SendUserFile; images that came back inside tool results, and images attached to a prompt, were missing.
+2026-11-08. Integrated into 7.0.4, on 7.0.2 (f3aa80c). Server and Control Web. Miles, 11/08: the Claude app shows the image a Read of a PNG returned under its step ("Read", "1 of 2"); Control Web showed only words. 6.99.28 covered images written into reply text and 6.99.35 covered SendUserFile; images that came back inside tool results, and images attached to a prompt, were missing.
 
 **Default-on changes (all behind the existing "Show files and images your sessions make" switch, Settings, Privacy; off means 403 `previews_off` and no image detail in the session):**
 - **The Sessions reader and Today's session sheet show the images a session looked at.** A Read of an image, a browser or computer-use screenshot, any tool result image block, and Codex tool output images (`input_image`). Each is a small thumbnail at the step where it happened, with its tool and place: "Read", "Screenshot", "1 of 2". A step rides on the assistant turn it followed (the words before it); a reply that opened with tool calls shows its step above its words. Tap one to open it full size.
@@ -34,9 +44,9 @@
 - Cursor transcripts are not covered.
 - The renders are browser emulation (headless Chrome at 382x557 and 951x539), not physical Duo acceptance.
 
-## Unreleased (calendar QA fixes)
+### Calendar QA fixes
 
-2026-11-08. Not versioned, not published, not installed. Branch `claude/calendar-qa-fixes` from 7.0.2 (f3aa80c). Fixes W20 (server half), W21 and W23 from the week-wide QA of 1-8 Nov. The Python half is MU `operations/scripts/calendar_context.py` and `cos_api_bridge.py`, which the running server and the scheduled scripts read live from the MU working tree. The Swift half of W20 ships in COS Control 0.5.379.
+2026-11-08. Integrated into 7.0.4 from `claude/calendar-qa-fixes`. Fixes W20 (server half), W21 and W23 from the week-wide QA of 1-8 Nov. The Python half is MU `operations/scripts/calendar_context.py` and `cos_api_bridge.py`, which the running server and the scheduled scripts read live from the MU working tree. The Swift half of W20 ships in COS Control 0.5.379.
 
 **Default-on changes (only for anyone with a calendar snapshot from COS Control; `COS_CALENDAR_SNAPSHOT=0` turns all of it off):**
 - **Connect with nothing picked is "not set up", never an empty day (W20).** A granted snapshot with zero calendars selected now reads as `unselected` (new `calendarStatus().snapshot` value), and every calendar read keeps the previous source, the bridge, until the first pick. Before, it was a fresh, final, empty day. With no bridge either, Today says "not connected".
@@ -51,7 +61,7 @@
 
 **Tests:** calendar-source (+10: W20 state, source and Today; the polarity table and its Python parity pin; travel, family, ownership and remainingCount), meeting-ask-orientation-calendar (new, 5: the prep filter, the classifier call, refusals, names only). MU test_calendar_context (+11). Red before the fix: 13 server, 7 Python. Mutants from a green baseline: 18 of 18 server and 13 of 13 Python killed, each landing exactly once. Smoke on a copy of the real snapshot (counts only): 9 of 24 calendars picked, 129 events, 0 change prep status under the new rule this week; an unpicked copy goes to the bridge; the scripts' snapshot answers today the same as the cache (1), and the classifier answers 20 real rows in about 0.1 s.
 
-## Unreleased (memory review status)
+### Integrated QA work (memory review status)
 
 On 7.0.2 (f3aa80c). Not versioned yet: it takes the next free number after 7.0.4, which the release coordinator confirms before packaging. Miles, 11/08 (IMG_0524, IMG_0525): "There are several suggestions that don't have a next step but are sitting in 'need review' category. We should only tag memories that need actual review with that status." Pairs with MU `learning_events.py` (d48285855), which produces the list.
 

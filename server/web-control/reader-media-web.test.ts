@@ -156,6 +156,16 @@ describe('native output images through the real viewer and app transport', () =>
     const t = load([{ status: 403, data: { error: 'previews_off' } }]); await t.mount()
     expect(t.host.textContent).toContain('Previews are off. Turn them on in Settings, Privacy.'); expect(named(t.host, 'Retry image').hidden).toBe(true)
   })
+  it('secret files name the permanent refusal without fetch or settings advice', async () => {
+    const hidden = load(); await hidden.mount([{ ...DTO, state: 'unavailable', reason: 'secret_file' }])
+    expect(hidden.calls).toEqual([])
+    expect(hidden.host.textContent).toContain('Not shown: this file may hold secrets.')
+    expect(named(hidden.host, 'Retry image').hidden).toBe(true)
+    const late = load([{ status: 403, data: { error: 'secret_file_denied' } }]); await late.mount()
+    expect(late.host.textContent).toContain('Not shown: this file may hold secrets.')
+    expect(late.host.textContent).not.toContain('Previews are off')
+    expect(named(late.host, 'Retry image').hidden).toBe(true)
+  })
   it('disposal fences delayed blobs, and a refresh of the same slots never duplicates requests or revokes the viewer', async () => {
     let finish: (v: unknown) => void = () => {}
     const t = load([new Promise(r => { finish = r })]); await t.mount()
