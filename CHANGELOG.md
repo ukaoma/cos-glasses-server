@@ -1,3 +1,10 @@
+## 7.0.6 - The preview viewer always opens on screen
+
+2026-11-08. 7.0.5 (689b9e8, installed privately on Miles's Mac) plus one fix. Server and Control Web only. Pairs with the same COS Control as 7.0.5.
+
+- **The viewer opens on the visible part of the page (Miles's Duo, IMG_0541 and IMG_0543).** Opening an image, file or preview could show only the viewer's bottom edge, because it filled the browser's whole layout area instead of what is on screen after a keyboard or a browser bar had moved it. It now takes the visible area, read the same way Today's session sheet reads it, and follows it while open. A layout note is logged when it opens or moves, so a device report has the numbers.
+- No other change from 7.0.5. Default-on for every install: this fix only.
+
 ## 7.0.5 - Preview engine phase 1 and the Today summary cap
 
 2026-11-08. On top of the final 7.0.4 (2104410). Server and Control Web. The COS Control Sessions pane reads the same routes (contract in the 7.0.5 preview CONTRACT.md); its Quick Look half ships with Control, not here.
