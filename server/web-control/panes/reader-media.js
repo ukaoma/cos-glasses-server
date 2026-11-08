@@ -4,13 +4,14 @@
   var W = window.COSWeb;
   if (!W) return;
   var scopes = new Map(), viewer = null, requests = [], activeRequests = 0;
-  var ID = /^ai_[a-f0-9]{64}$/;
+  var ID = /^ai_[a-f0-9]{64}$/, TOOL_ID = /^ti_[a-f0-9]{64}$/;
+  var TOOLS = ['Read', 'Screenshot', 'Image', 'Attached'];
   // outside_workspace and missing are permanent. unavailable means the workspace lookup failed this time; the content route
   // re-resolves it. 6.99.35: outside the workspace and missing (a file a session sent that is gone) read the same, with no path.
   var REASONS = { outside_workspace: 'Not available on this Mac.', missing: 'Not available on this Mac.',
-    unavailable: 'This image is temporarily unavailable. Retry in a moment.' };
+    unavailable: 'This image is temporarily unavailable. Retry in a moment.', too_large: 'Too large to show here.' };
   var style = document.createElement('style');
-  style.textContent = '.rm-item{display:flex;flex-direction:column;gap:6px;max-width:180px}.rm-label,.rm-status{font:12px/1.4 var(--body);color:var(--sub);overflow-wrap:anywhere}.rm-label{color:var(--text)}.rm-item .cx-thumb{cursor:pointer}.rm-view{position:fixed;inset:0;z-index:10000;background:var(--bg,#171717);color:var(--text,#fff);display:flex;flex-direction:column;padding: max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));gap:16px}.rm-view-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.rm-view-label{margin:0;overflow-wrap:anywhere;font:16px/1.4 var(--body)}.rm-view-body{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}.rm-view img{max-width:100%;max-height:100%;object-fit:contain}.rm-viewing{overflow:hidden!important}.rm-files{display:flex;flex-direction:column;gap:8px;margin-top:10px}.rm-file{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:4px 12px;align-items:center;padding:10px 12px;border:1px solid var(--panel-border);border-radius:12px;background:var(--panel);max-width:560px}.rm-file-icon{grid-row:1/span 2;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:10px;background:var(--bg);border:1px solid var(--panel-border);font:600 11px/1 var(--body);letter-spacing:.04em;color:var(--sub)}.rm-file-name{font:500 14px/1.35 var(--body);color:var(--text);overflow-wrap:anywhere;min-width:0}.rm-file-meta{font:12px/1.4 var(--body);color:var(--sub);grid-column:2;min-width:0}.rm-file-acts{grid-column:3;grid-row:1/span 2;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.rm-file-acts .cx-btn{min-height:44px}.rm-file .rm-status{grid-column:1/-1}.rm-file.off{opacity:.78}.rm-view-acts{display:flex;gap:8px;align-items:center}.rm-text{flex:1;min-height:0;width:100%;overflow:auto;margin:0;padding:12px;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.rm-frame{flex:1;min-height:0;width:100%;border:1px solid var(--panel-border);border-radius:10px;background:#fff}@media (max-width:599px){.rm-file{grid-template-columns:40px minmax(0,1fr)}.rm-file-icon{width:40px;height:40px}.rm-file-acts{grid-column:1/-1;grid-row:auto;justify-content:flex-start}}';
+  style.textContent = '.rm-item{display:flex;flex-direction:column;gap:6px;max-width:180px}.rm-label,.rm-status{font:12px/1.4 var(--body);color:var(--sub);overflow-wrap:anywhere}.rm-label{color:var(--text)}.rm-item .cx-thumb{cursor:pointer}.rm-view{position:fixed;inset:0;z-index:10000;background:var(--bg,#171717);color:var(--text,#fff);display:flex;flex-direction:column;padding: max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));gap:16px}.rm-view-head{display:flex;align-items:center;justify-content:space-between;gap:16px}.rm-view-label{margin:0;overflow-wrap:anywhere;font:16px/1.4 var(--body)}.rm-view-body{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}.rm-view img{max-width:100%;max-height:100%;object-fit:contain}.rm-viewing{overflow:hidden!important}.rm-files{display:flex;flex-direction:column;gap:8px;margin-top:10px}.rm-file{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:4px 12px;align-items:center;padding:10px 12px;border:1px solid var(--panel-border);border-radius:12px;background:var(--panel);max-width:560px}.rm-file-icon{grid-row:1/span 2;display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:10px;background:var(--bg);border:1px solid var(--panel-border);font:600 11px/1 var(--body);letter-spacing:.04em;color:var(--sub)}.rm-file-name{font:500 14px/1.35 var(--body);color:var(--text);overflow-wrap:anywhere;min-width:0}.rm-file-meta{font:12px/1.4 var(--body);color:var(--sub);grid-column:2;min-width:0}.rm-file-acts{grid-column:3;grid-row:1/span 2;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.rm-file-acts .cx-btn{min-height:44px}.rm-file .rm-status{grid-column:1/-1}.rm-file.off{opacity:.78}.rm-view-acts{display:flex;gap:8px;align-items:center}.rm-text{flex:1;min-height:0;width:100%;overflow:auto;margin:0;padding:12px;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.rm-frame{flex:1;min-height:0;width:100%;border:1px solid var(--panel-border);border-radius:10px;background:#fff}.rm-tools{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0 2px;align-items:flex-start}.rm-tools.before{margin:2px 0 10px}.rm-tool{display:flex;flex-direction:column;gap:4px;width:132px;min-width:0}.rm-tool-thumb{display:flex;align-items:center;justify-content:center;width:132px;height:88px;padding:0;overflow:hidden;border:1px solid var(--panel-border);border-radius:10px;background:var(--panel);color:var(--sub);font:12px/1.3 var(--body);cursor:pointer;text-align:center}.rm-tool-thumb:disabled{cursor:default}.rm-tool-thumb:focus-visible{outline:2px solid var(--accent,currentColor);outline-offset:2px}.rm-tool-thumb img{width:100%;height:100%;object-fit:cover;object-position:top center;display:block}.rm-tool-cap{display:flex;justify-content:space-between;gap:6px;font:12px/1.3 var(--body);min-width:0}.rm-tool-name{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rm-tool-pos{color:var(--sub);white-space:nowrap}.rm-tool .rm-status{font-size:11.5px}.rm-tool-more{display:flex;align-items:center;justify-content:center;width:88px;height:88px;border:1px dashed var(--panel-border);border-radius:10px;color:var(--sub);font:13px/1.3 var(--body)}@media (max-width:599px){.rm-tool{width:104px}.rm-tool-thumb{width:104px;height:72px}.rm-tool-more{width:72px;height:72px}}@media (max-width:599px){.rm-file{grid-template-columns:40px minmax(0,1fr)}.rm-file-icon{width:40px;height:40px}.rm-file-acts{grid-column:1/-1;grid-row:auto;justify-content:flex-start}}';
   document.head.appendChild(style);
 
   function element(tag, cls, text) {
@@ -22,6 +23,8 @@
     var b = element('button', cls || 'cx-btn quiet', text); b.type = 'button'; b.addEventListener('click', action); return b;
   }
   function path(scope, id, variant) {
+    // A tool-result or prompt image has one size; the thumbnail is the same bytes drawn small, fetched only when seen.
+    if (TOOL_ID.test(id)) return '/api/agent-sessions/' + encodeURIComponent(scope.provider) + '/' + encodeURIComponent(scope.id) + '/tool-images/' + encodeURIComponent(id) + '/content';
     return '/api/agent-sessions/' + encodeURIComponent(scope.provider) + '/' + encodeURIComponent(scope.id) + '/output-images/' + encodeURIComponent(id) + '/content?variant=' + variant;
   }
   function revoke(item) { if (item.url) { URL.revokeObjectURL(item.url); item.url = ''; } }
@@ -29,9 +32,10 @@
     if (err && err.status === 401) return 'Signed out. Connect this browser again to view the image.';
     if (err && err.status === 403) return 'Previews are off. Turn them on in Settings, Privacy.';
     if (err && err.status === 404) return 'This image is no longer available. Reopen the session to refresh its images.';
+    if (err && err.status === 413) return 'Too large to show here.';
     return 'The image could not load. Check that your Mac is awake, then retry.';
   }
-  function retryable(err) { return !(err && (err.status === 401 || err.status === 403 || err.status === 404)); }
+  function retryable(err) { return !(err && (err.status === 401 || err.status === 403 || err.status === 404 || err.status === 413)); }
   function imageBlob(blob) { return blob && /^image\/(png|jpeg|webp|gif|avif)$/.test(blob.type || '') && blob.size > 0; }
   // The server normalizes at most two images at once. Share that budget across both readers and the viewer.
   function pump() {
@@ -77,18 +81,53 @@
       item.busy = false; item.open.textContent = 'Image unavailable'; item.status.textContent = failWords(err); item.retry.hidden = !retryable(err);
     });
   }
-  function closeViewer(restore) {
+  // Back closes the viewer and lands where you were (11/08). Opening one pushes a history entry on the same address
+  // (no hashchange, so no pane changes); Back pops it and closes the image. Closing it any other way takes that entry
+  // back off, quietly: its popstate is ours, and the wait lapses after POP_WAIT_MS so a later real Back is never eaten.
+  var ownPops = 0, POP_WAIT_MS = 700;
+  function pushEntry(v) {
+    try { history.pushState(Object.assign({}, history.state || {}, { cosImageViewer: 1 }), ''); v.pushed = true; } catch (_e) { v.pushed = false; }
+  }
+  function dropEntry() {
+    ownPops++;
+    setTimeout(function () { if (ownPops > 0) ownPops--; }, POP_WAIT_MS);
+    try { history.back(); } catch (_e) { ownPops--; }
+  }
+  // Another popstate listener (Today's sheet) may run before or after this one, so the event is marked as well.
+  function mark(e) { try { if (e) e.__cosImagePop = true; } catch (_e) { /* a frozen event: popIsMine still sees the state */ } }
+  window.addEventListener('popstate', function (e) {
+    if (ownPops > 0) { ownPops--; mark(e); return; }
+    if (viewer && viewer.pushed) { viewer.pushed = false; mark(e); closeViewer(); }
+  });
+  function popIsMine(e) { return !!(e && e.__cosImagePop) || ownPops > 0 || !!(viewer && viewer.pushed); }
+  // The scroll spots under the opener: the page and every scrolled box it sits in (Today's sheet body).
+  function scrollSpots(el) {
+    var out = { x: window.scrollX || 0, y: window.scrollY || 0, boxes: [] };
+    for (var p = el && el.parentElement; p; p = p.parentElement) if (p.scrollTop > 0) out.boxes.push([p, p.scrollTop]);
+    return out;
+  }
+  function restoreSpots(spots) {
+    if (!spots) return;
+    spots.boxes.forEach(function (b) { if (b[0].scrollTop !== b[1]) b[0].scrollTop = b[1]; });
+    if ((window.scrollX || 0) !== spots.x || (window.scrollY || 0) !== spots.y) { try { window.scrollTo(spots.x, spots.y); } catch (_e) {} }
+  }
+  // keepEntry: another viewer replaces this one and takes over its history entry.
+  function closeViewer(restore, keepEntry) {
     var v = viewer; if (!v) return;
     viewer = null; v.generation++; revoke(v); v.el.remove(); document.documentElement.classList.remove('rm-viewing');
-    if (restore !== false && v.opener && v.opener.isConnected) v.opener.focus();
+    if (v.pushed && !keepEntry) { v.pushed = false; dropEntry(); }
+    if (restore !== false && v.opener && v.opener.isConnected) { try { v.opener.focus({ preventScroll: true }); } catch (_e) { v.opener.focus(); } }
+    if (restore !== false) restoreSpots(v.spots);
   }
+  function takeOver(v, had) { v.spots = had ? had.spots : scrollSpots(v.opener); if (had && had.pushed) v.pushed = true; else pushEntry(v); }
   function openViewer(scope, item) {
-    closeViewer(false);
+    var had = viewer; closeViewer(false, true);
     var el = element('div', 'rm-view'), head = element('div', 'rm-view-head'), body = element('div', 'rm-view-body');
     el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', 'Image preview: ' + item.label);
     var close = button('Close image', function () { closeViewer(); });
     head.appendChild(element('h2', 'rm-view-label', item.label)); head.appendChild(close); el.appendChild(head); el.appendChild(body);
     var v = viewer = { el: el, body: body, scope: scope, opener: item.open, close: close, url: '', generation: 0 };
+    takeOver(v, had);
     document.body.appendChild(el); document.documentElement.classList.add('rm-viewing'); close.focus();
     function load() {
       body.textContent = ''; var status = element('p', 'rm-status', 'Loading image…'); status.setAttribute('role', 'status'); body.appendChild(status);
@@ -123,6 +162,7 @@
   function unmount(host) {
     var scope = scopes.get(host); if (!scope) return;
     scope.alive = false; scope.records.forEach(function (record) { clearRecord(scope, record); }); scopes.delete(host);
+    if (scope.observer) { scope.observer.disconnect(); scope.observer = null; }
   }
   function mount(host, provider, sessionId) {
     if (!host || !provider || !sessionId) return;
@@ -131,8 +171,12 @@
     if (!scope) { scope = { alive: true, provider: String(provider), id: String(sessionId), records: new Map() }; scopes.set(host, scope); }
     var slots = Array.prototype.slice.call(host.querySelectorAll('[data-reader-images]'));
     var fileSlots = Array.prototype.slice.call(host.querySelectorAll('[data-reader-files]'));
-    scope.records.forEach(function (record, slot) { if (slots.indexOf(slot) < 0 && fileSlots.indexOf(slot) < 0) { clearRecord(scope, record); scope.records.delete(slot); } });
+    var toolSlots = Array.prototype.slice.call(host.querySelectorAll('[data-reader-tools]'));
+    scope.records.forEach(function (record, slot) {
+      if (slots.indexOf(slot) < 0 && fileSlots.indexOf(slot) < 0 && toolSlots.indexOf(slot) < 0) { clearRecord(scope, record); scope.records.delete(slot); }
+    });
     mountFiles(host, scope);
+    mountTools(host, scope, toolSlots);
     slots.forEach(function (slot) {
       if (scope.records.has(slot)) return;
       var raw; try { raw = JSON.parse(slot.getAttribute('data-reader-images') || '[]'); } catch (_e) { raw = []; }
@@ -151,6 +195,62 @@
         if (dto.state === 'available') loadThumb(scope, item);
         else { item.status.textContent = REASONS[dto.reason] || REASONS.unavailable; item.retry.hidden = dto.reason === 'outside_workspace' || dto.reason === 'missing'; }
       });
+    });
+  }
+
+  // ── Images the session looked at (11/08): a Read of a PNG, a screenshot, a prompt's attached image ──
+  // A small thumbnail per image with its tool and place in the step ("Read", "1 of 2"), as the Claude app shows a step.
+  // Lazy: nothing is fetched until the thumbnail is near the screen, so a long session never pulls 50 images at once.
+  // Without IntersectionObserver the thumbnails load as output images do. Tapping one opens it full size.
+  function toolObserver(scope) {
+    if (scope.observer !== undefined) return scope.observer;
+    var IO = window.IntersectionObserver;
+    scope.observer = typeof IO === 'function' ? new IO(function (entries) {
+      entries.forEach(function (e) {
+        if (!e.isIntersecting) return;
+        scope.observer.unobserve(e.target);
+        var item = e.target.__cosToolItem; if (item && scope.alive) loadThumb(scope, item);
+      });
+    }, { rootMargin: '300px 0px' }) : null;
+    return scope.observer;
+  }
+  function mountTools(host, scope, slots) {
+    slots.forEach(function (slot) {
+      if (scope.records.has(slot)) return;
+      var raw; try { raw = JSON.parse(slot.getAttribute('data-reader-tools') || '{}'); } catch (_e) { raw = {}; }
+      var list = raw && Array.isArray(raw.items) ? raw.items : [];
+      slot.textContent = ''; slot.className = 'rm-tools' + (raw && raw.before ? ' before' : ''); slot.setAttribute('aria-label', 'Images the session looked at');
+      var record = { items: [] }; scope.records.set(slot, record);
+      var io = toolObserver(scope);
+      list.forEach(function (dto) {
+        if (!dto || !TOOL_ID.test(dto.id || '') || ['available', 'unavailable'].indexOf(dto.state) < 0) return;
+        var tool = TOOLS.indexOf(dto.tool) >= 0 ? dto.tool : 'Image';
+        var index = Math.max(1, Math.floor(Number(dto.index)) || 1), total = Math.max(index, Math.floor(Number(dto.total)) || index);
+        var pos = index + ' of ' + total;
+        var item = { id: dto.id, label: tool + ', ' + pos, generation: 0, url: '', busy: false };
+        record.items.push(item);
+        var wrap = element('div', 'rm-tool');
+        item.open = button('Image', function () { openViewer(scope, item); }, 'rm-tool-thumb');
+        item.open.setAttribute('aria-label', 'Open image: ' + item.label); item.open.disabled = true;
+        item.status = element('span', 'rm-status'); item.status.setAttribute('role', 'status');
+        item.retry = button('Retry image', function () { loadThumb(scope, item); }, 'link-btn'); item.retry.hidden = true;
+        var cap = element('span', 'rm-tool-cap'); cap.appendChild(element('span', 'rm-tool-name', tool)); cap.appendChild(element('span', 'rm-tool-pos', pos));
+        wrap.appendChild(item.open); wrap.appendChild(cap); wrap.appendChild(item.status); wrap.appendChild(item.retry); slot.appendChild(wrap);
+        if (dto.state !== 'available') {
+          item.open.textContent = 'Unavailable';
+          item.status.textContent = REASONS[dto.reason] || REASONS.unavailable;
+          item.retry.hidden = dto.reason !== 'unavailable' && !!dto.reason;
+          return;
+        }
+        if (io) { item.open.__cosToolItem = item; io.observe(item.open); }
+        else loadThumb(scope, item);
+      });
+      var more = Math.floor(Number(raw && raw.more)) || 0;
+      if (more > 0) {
+        var m = element('span', 'rm-tool-more', '+' + more + ' more');
+        m.setAttribute('title', more === 1 ? 'One more image in this step is not shown here.' : more + ' more images in this step are not shown here.');
+        slot.appendChild(m);
+      }
     });
   }
 
@@ -203,7 +303,7 @@
     return false;
   }
   function fileViewer(scope, f, opener) {
-    closeViewer(false);
+    var had = viewer; closeViewer(false, true);
     var el = element('div', 'rm-view'), head = element('div', 'rm-view-head'), body = element('div', 'rm-view-body'), acts = element('div', 'rm-view-acts');
     el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', f.type + ': ' + f.name);
     var close = button('Close', function () { closeViewer(); });
@@ -211,6 +311,7 @@
     acts.appendChild(close);
     head.appendChild(element('h2', 'rm-view-label', f.name)); head.appendChild(acts); el.appendChild(head); el.appendChild(body);
     var v = viewer = { el: el, body: body, scope: scope, opener: opener, close: close, url: '', generation: 0 };
+    takeOver(v, had);
     document.body.appendChild(el); document.documentElement.classList.add('rm-viewing'); close.focus();
     function failure(err) {
       if (viewer !== v) return;
@@ -295,6 +396,6 @@
     return slots;
   }
 
-  W.readerMedia = { mount: mount, unmount: unmount, isOpen: function () { return !!viewer; }, close: closeViewer };
+  W.readerMedia = { mount: mount, unmount: unmount, isOpen: function () { return !!viewer; }, close: closeViewer, popIsMine: popIsMine };
   W.registerPane('readerMedia', W.readerMedia);
 })();

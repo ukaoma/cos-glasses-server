@@ -3481,13 +3481,38 @@
   }
 
   // Output previews are separate from composer attachments. Only the DTO fields reach the lazy viewer.
+  // opts.part (sxTurnHtml): 'before' is only the step that came before a reply's words, drawn above them; 'after' is
+  // everything else, drawn below; 'user' is a YOU turn's attached images and never a reply's outputs. No opts: all of it.
   function readerImagesHtml(turn) {
+    var opts = arguments[1], part = opts && opts.part;
     // 6.99.35: "Show files and images your sessions make" is off (Settings, Privacy). The server sent no names, only this mark.
-    if (turn && turn.previewsOff === true) return '<p class="rm-status rm-off">Previews are off. Turn them on in Settings, Privacy.</p>';
+    if (turn && turn.previewsOff === true) return part === 'before' ? '' : '<p class="rm-status rm-off">Previews are off. Turn them on in Settings, Privacy.</p>';
+    if (part === 'before') return readerToolsHtml(turn, true);
+    if (part === 'user') return readerToolsHtml(turn, false);
+    var head = part === 'after' ? '' : readerToolsHtml(turn, true);
     var images = turn && Array.isArray(turn.outputImages) ? turn.outputImages.filter(function (x) {
       return x && /^ai_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable');
     }).map(function (x) { return { id: x.id, label: String(x.label || 'Output image').slice(0, 180), state: x.state, reason: x.reason }; }) : [];
-    return (images.length ? '<div data-reader-images="' + esc(JSON.stringify(images)) + '"><p class="rm-status" role="status">Loading image previews…</p></div>' : '') + readerFilesHtml(turn);
+    return head + (images.length ? '<div data-reader-images="' + esc(JSON.stringify(images)) + '"><p class="rm-status" role="status">Loading image previews…</p></div>' : '') + readerFilesHtml(turn) + readerToolsHtml(turn, false);
+  }
+  // 11/08: images the session looked at (a Read of a PNG, a screenshot) and a prompt's attached images, as the Claude
+  // app shows them under a step: "Read", "1 of 2". Only the checked DTO fields travel; the viewer loads them lazily by
+  // opaque id. `before`: the step came before the turn's words. The count of more rides on the last strip shown.
+  var READER_TOOLS = ['Read', 'Screenshot', 'Image', 'Attached'];
+  function readerToolsHtml(turn, before) {
+    var all = turn && Array.isArray(turn.toolImages) ? turn.toolImages.filter(function (x) {
+      return x && /^ti_[a-f0-9]{64}$/.test(x.id || '') && (x.state === 'available' || x.state === 'unavailable');
+    }).slice(0, 12) : [];
+    var mine = all.filter(function (x) { return (x.before === true) === before; }).map(function (x) {
+      return { id: x.id, tool: READER_TOOLS.indexOf(x.tool) >= 0 ? x.tool : 'Image', index: Math.floor(Number(x.index)) || 1, total: Math.floor(Number(x.total)) || 1, state: x.state,
+        reason: ['outside_workspace', 'unavailable', 'too_large', 'missing'].indexOf(x.reason) >= 0 ? x.reason : undefined };
+    });
+    var hasAfter = all.some(function (x) { return x.before !== true; });
+    var more = Math.max(0, Math.min(9999, Math.floor(Number(turn && turn.toolImagesMore)) || 0));
+    var hasBefore = all.some(function (x) { return x.before === true; });
+    var mineMore = more && (before ? hasBefore && !hasAfter : !(hasBefore && !hasAfter)) ? more : 0;
+    if (!mine.length && !mineMore) return '';
+    return '<div data-reader-tools="' + esc(JSON.stringify({ items: mine, more: mineMore, before: before })) + '"><p class="rm-status" role="status">Loading images…</p></div>';
   }
   // 6.99.35: files a Claude session sent with SendUserFile that are not images. Names, types and sizes only; the
   // lazy viewer opens them through the authenticated output-files route by opaque id.
@@ -3508,7 +3533,7 @@
   }
   function readerImagesMount(host, r) {
     if (!host || !r) return;
-    if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length) { readerImagesStop(host); return; }
+    if (!host.querySelectorAll('[data-reader-images]').length && !host.querySelectorAll('[data-reader-files]').length && !host.querySelectorAll('[data-reader-tools]').length) { readerImagesStop(host); return; }
     var owner = host.__cosImageOwner = {};
     ensurePane('readerMedia', 4000).then(function (kit) {
       if (host.__cosImageOwner !== owner || host.isConnected === false) return;
@@ -3516,7 +3541,7 @@
       kit.mount(host, r.provider, r.id);
     }).catch(function () {
       if (host.__cosImageOwner !== owner || host.isConnected === false) return;
-      Array.prototype.slice.call(host.querySelectorAll('[data-reader-images]')).concat(Array.prototype.slice.call(host.querySelectorAll('[data-reader-files]'))).forEach(function (slot) {
+      Array.prototype.slice.call(host.querySelectorAll('[data-reader-images]')).concat(Array.prototype.slice.call(host.querySelectorAll('[data-reader-files]')), Array.prototype.slice.call(host.querySelectorAll('[data-reader-tools]'))).forEach(function (slot) {
         slot.textContent = 'Image previews could not load. ';
         var retry = document.createElement('button'); retry.type = 'button'; retry.className = 'link-btn'; retry.textContent = 'Retry images';
         retry.addEventListener('click', function () { readerImagesMount(host, r); }); slot.appendChild(retry);
@@ -3669,7 +3694,9 @@
     var when = at ? (Date.now() - at.getTime() < 86400000 ? clock(at) : sxShortDate(at)) : '';
     return '<div class="turn ' + role + ' sx-turn" data-sig="' + esc(sxTurnSig(t)) + '"><span class="who"><span>' + (role === 'user' ? 'YOU' : 'ASSISTANT') + '</span>' +
       (when ? '<span class="sx-turn-when">' + esc(when) + '</span>' : '') + '</span>' +
-      (role === 'user' ? '<div class="sx-plain">' + esc(text) + '</div>' : '<div class="sx-md">' + sxMd(text) + '</div>' + readerImagesHtml(t)) + '</div>';
+      // A YOU turn shows only its attached images (and the previews-off mark); never a reply's outputs.
+      (role === 'user' ? '<div class="sx-plain">' + esc(text) + '</div>' + readerImagesHtml(t, { part: 'user' })
+        : readerImagesHtml(t, { part: 'before' }) + '<div class="sx-md">' + sxMd(text) + '</div>' + readerImagesHtml(t, { part: 'after' })) + '</div>';
   }
   // A refresh never rebuilds what you are reading (Miles, /qa: "start to scroll and then it reloads
   // the section"). The server's window slides as a session grows, so the turns the page already

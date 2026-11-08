@@ -1,3 +1,25 @@
+## Unreleased (images a session looked at)
+
+2026-11-08. Not versioned yet (7.0.3 is the Cursor lane; this takes 7.0.4 or the next free number when it is packaged). On 7.0.2 (f3aa80c). Server and Control Web only. Miles, 11/08: the Claude app shows the image a Read of a PNG returned under its step ("Read", "1 of 2"); Control Web showed only words. 6.99.28 covered images written into reply text and 6.99.35 covered SendUserFile; images that came back inside tool results, and images attached to a prompt, were missing.
+
+**Default-on changes (all behind the existing "Show files and images your sessions make" switch, Settings, Privacy; off means 403 `previews_off` and no image detail in the session):**
+- **The Sessions reader and Today's session sheet show the images a session looked at.** A Read of an image, a browser or computer-use screenshot, any tool result image block, and Codex tool output images (`input_image`). Each is a small thumbnail at the step where it happened, with its tool and place: "Read", "Screenshot", "1 of 2". A step rides on the assistant turn it followed (the words before it); a reply that opened with tool calls shows its step above its words. Tap one to open it full size.
+- **Images you attached to a prompt show on your YOU turn**, labelled "Attached" (Claude base64 image blocks, Codex `input_image`).
+- **A Claude prompt that was only an image (sent through the SDK) now appears as a YOU turn reading "[Image]".** Before, it was not in the history at all. This also reaches the lens's scroll-up history (`?turns=`), which reads the same turns.
+- **New route `GET /api/agent-sessions/:provider/:sessionId/tool-images/:imageId/content`.** Behind the same token or web cookie gate. The id is opaque (`ti_` and 64 hex), process-scoped, and must name an image in the session's newest 40 turns. Embedded bytes are decoded on the server and served as the type they ARE (PNG, JPEG, WebP or GIF, read from the bytes, never the declared type; anything else is refused), with `nosniff`, `private, no-store`, `Content-Security-Policy: sandbox; default-src 'none'` and same-origin only. Over 8 MB decoded is refused (413) without decoding. No path in the request or the response.
+- **A Read that names a path and carries no bytes** is served only when its canonical file is inside the session's exact workspace, through the same read and JPEG normalizer as reply-text images. A link out of the workspace, a path outside it (gone or not) and a broad root read "Not available on this Mac"; a path inside that is gone reads the same.
+- **Session detail turns gain `toolImages` and `toolImagesMore`.** Opaque ids, the tool label, the place in the step and a state; no bytes, names or paths. At most 6 thumbnails a turn; the rest are counted and shown as "+N more" and never get an id. A detail read holds no base64 past the line that parsed it; a content read keeps only the one image it names.
+- **Thumbnails load lazily.** Nothing is fetched until a thumbnail is near the screen, two at a time, so a long session does not pull every image. Without IntersectionObserver they load as reply-text images do.
+- **Back closes an enlarged image or file, and you land where you were.** Opening one adds a history entry on the same address; Back (or Escape, or Close) closes only the viewer. The page and Today's sheet keep their scroll position, the session stays open, and a half-typed note is untouched. This also applies to the 6.99.28 image viewer and the 6.99.35 file viewer, where Back used to leave the page or close Today's sheet.
+- **Previews off** strips `toolImages` and `toolImagesMore` from the detail as it does reply-text images and files, and marks the turn, YOU turns included.
+
+**Not changed:** reply-text images (6.99.28) and SendUserFile cards (6.99.35) project and serve as before; their shared workspace read moved into one function (`workspaceImage`) with the same checks.
+
+**Known limits:**
+- A step that never got words before your next prompt (the agent only ran tools, then you spoke) is not shown, so it is never pinned on you.
+- Cursor transcripts are not covered.
+- The renders are browser emulation (headless Chrome at 382x557 and 951x539), not physical Duo acceptance.
+
 ## 7.0.2 - Control Web on the iPhone Duo: no blank band under the chat, a composer that fits above the keyboard, and failed Asks that say why
 
 2026-11-08. Private. On 7.0.1 FINAL (2accf69), which carries everything since public 7.0.0. Duo Build A, plus Codex's provider-limit fix (605ca92), from the 11/07 Duo design audit. Server and Control Web only; no glasses, phone or Control update is needed. Sized from what the Duo itself reported in Comet: 382x557 folded, 951x539 unfolded.

@@ -12,7 +12,7 @@
  *   not this schema fails CLOSED (source 'damaged', off): it may have said off, and a privacy switch never turns itself
  *   back on. The Settings row says so, and saving from it writes a good file again.
  *
- * Off means: GET .../output-images/:id/content and .../output-files/:id/content answer 403 previews_off before any
+ * Off means: GET .../output-images/:id/content, .../output-files/:id/content and .../tool-images/:id/content answer 403 previews_off before any
  * transcript or file is read, and the session detail's turns carry `previewsOff: true` instead of image and file
  * descriptors (withoutPreviews), so not even a name reaches the browser.
  */
@@ -72,11 +72,11 @@ export function createSessionFilesSetting(deps: { file: () => string; env?: () =
 /** The server's switch, in the data folder. */
 export const sessionFilesSetting = createSessionFilesSetting({ file: () => dataPath(SESSION_FILES_SETTINGS_FILE) })
 
-/** Turns with every image and file descriptor removed and `previewsOff` marked where there were any. Pure. */
+/** Turns with every image and file descriptor (tool-result and prompt images too) removed and `previewsOff` marked where there were any. Pure. */
 export function withoutPreviews(turns: SessionTurn[]): SessionTurn[] {
   return turns.map(t => {
-    if (!t.outputImages?.length && !t.outputFiles?.length) return t
-    const { outputImages: _i, outputFiles: _f, ...rest } = t
+    if (!t.outputImages?.length && !t.outputFiles?.length && !t.toolImages?.length && !t.toolImagesMore) return t
+    const { outputImages: _i, outputFiles: _f, toolImages: _t, toolImagesMore: _m, ...rest } = t
     return { ...rest, previewsOff: true as const }
   })
 }

@@ -712,6 +712,44 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-files/:file
   }
 })
 
+// Images a session looked at (tool results such as a Read of a PNG or a browser screenshot) and images attached
+// to its prompts. Same gate and switch as output images, same rule: no path in the request or the response. Embedded
+// bytes are served as the image type they ARE (png, jpeg, webp or gif, sniffed, never the declared type), with a
+// sandbox CSP; a path-only Read comes back through the output-image normalizer as a JPEG.
+export const TOOL_IMAGE_CSP = "sandbox; default-src 'none'"
+agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/tool-images/:imageId/content', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store')
+  res.set('X-Content-Type-Options', 'nosniff')
+  if (!sessionFilesSetting.read().enabled) { res.status(403).json({ error: 'previews_off' }); return }
+  const provider = asProvider(String(req.params.provider ?? '').toLowerCase())
+  if (!provider) { res.status(404).json({ error: 'image_not_found' }); return }
+  try {
+    const content = await agentSessionOutputImages.toolImageContent(provider, String(req.params.sessionId), String(req.params.imageId))
+    if (content.status !== 'ok') {
+      const code = content.status === 'not_found' ? 404 : content.status === 'too_large' ? 413 : 503
+      res.status(code).json({ error: content.status === 'not_found' ? 'image_not_found' : content.status === 'too_large' ? 'image_too_large' : 'image_unavailable' }); return
+    }
+    res.set('Content-Security-Policy', TOOL_IMAGE_CSP)
+    res.set('Cross-Origin-Resource-Policy', 'same-origin')
+    if ('path' in content) {
+      res.type('image/jpeg')
+      // dotfiles 'allow': the media root lives under ~/.cos-glasses/data (see the output-images route above).
+      res.sendFile(content.path, { dotfiles: 'allow' }, err => {
+        if (!err) return
+        if (!res.headersSent) res.status(503).json({ error: 'image_unavailable' })
+        else res.destroy()
+      })
+      return
+    }
+    res.set('Content-Type', content.type)
+    res.set('Content-Disposition', 'inline')
+    res.status(200).end(content.bytes)
+  } catch {
+    console.warn('[agent-sessions] tool image unavailable')
+    res.status(503).json({ error: 'image_unavailable' })
+  }
+})
+
 agentSessionsRouter.get('/agent-sessions/:provider/:sessionId', async (req, res) => {
   res.set('Cache-Control', 'private, no-store')
   const provider = asProvider(String(req.params.provider ?? '').toLowerCase())

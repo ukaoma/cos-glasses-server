@@ -464,8 +464,12 @@
       })();
     });
   }
-  window.addEventListener('popstate', function () {
+  // Back from an enlarged image (panes/reader-media.js pushes one entry over the sheet's) is the image's Back: the
+  // viewer closes and the sheet, its scroll and a half-typed note stay (11/08). The viewer says which pops are its own.
+  function imagePop(e) { return !!(W.readerMedia && typeof W.readerMedia.popIsMine === 'function' && W.readerMedia.popIsMine(e)); }
+  window.addEventListener('popstate', function (e) {
     if (O.pops.length) { var w = O.pops.shift(); clearTimeout(w.timer); O.ignorePops = O.pops.length; if (w.then) w.then(); return; }
+    if (imagePop(e)) return;
     // The phone's Back from a session opened off the pet's list goes back to that list, as Back to sessions does.
     if (O.open && O.back) { backToList(); return; }
     if (O.open) close('pop');
@@ -1115,7 +1119,8 @@
       if (!O.row) { O.row = d; paintMeta(); if (O.open && O.open.kind === 'run') setHead(K.title(d)); }
       var turns = Array.isArray(d.recent_turns) ? d.recent_turns : [];
       var lastA = turns.filter(function (t) { return lower(t.role) !== 'user' && (String(t.text || t.content || '').trim() || (K.imageHtml && K.imageHtml(t))); }).pop();
-      O.last = lastA ? { text: String(lastA.text || lastA.content || '').trim(), at: lastA.at, outputImages: lastA.outputImages, outputFiles: lastA.outputFiles, previewsOff: lastA.previewsOff } : null;
+      O.last = lastA ? { text: String(lastA.text || lastA.content || '').trim(), at: lastA.at, toolImages: lastA.toolImages, toolImagesMore: lastA.toolImagesMore,
+        outputImages: lastA.outputImages, outputFiles: lastA.outputFiles, previewsOff: lastA.previewsOff } : null;
       O.lastState = O.last ? 'ready' : 'none';
       O.lastWhy = '';
       paintLast();

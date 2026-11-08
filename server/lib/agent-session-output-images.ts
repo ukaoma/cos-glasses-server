@@ -12,7 +12,11 @@ import { realAttachedWorkspaceDeps, resolveAttachedWorkspace } from './attached-
 import { readComposerFacts } from './cursor-session-model.js'
 import { MAX_OUTPUT_ARTIFACT_BYTES } from './image-safety.js'
 import { getMediaStore, STAGED_TTL_MS, type MediaStore } from './media-store.js'
-import { readRecentSessionTurns, SESSION_TURNS_MAX, type SessionTurnProjection } from './agent-session-turns.js'
+import { readRecentSessionTurns, SESSION_TURNS_MAX, type SessionTurn, type SessionTurnProjection } from './agent-session-turns.js'
+import {
+  decodeToolImage, estimateBytes, MAX_TOOL_IMAGE_BYTES, promptImages, SESSION_TOOL_IMAGE_ID, TOOL_IMAGES_PER_TURN, toolResultImages, toolUsesOf,
+  type FoundToolImage, type SessionToolImage, type ToolUseMeta,
+} from './agent-session-tool-images.js'
 
 export interface SessionOutputImage {
   id: string
@@ -58,7 +62,11 @@ const SOURCES_MAX = (SESSION_TURNS_MAX + 1) * Math.max(OUTPUT_IMAGES_PER_TURN, S
 interface Candidate { source: string; label: string }
 interface Source { candidate: Candidate; root: string | null; descriptor: SessionOutputImage }
 interface FileSource { path: string | null; root: string | null; file: SessionOutputFile }
-interface PreviewContext { project: SessionTurnProjection; sources: Map<string, Source>; files: Map<string, FileSource> }
+/** Where a tool-result image's bytes are. Embedded bytes are kept only for the one id a content request names. */
+type ToolSource = { kind: 'embedded'; mediaType: string; data: string } | { kind: 'path'; source: string; root: string; label: string }
+interface PreviewContext { project: SessionTurnProjection; sources: Map<string, Source>; files: Map<string, FileSource>; toolSources: Map<string, ToolSource> }
+/** Tool calls remembered per read, so a result row can be labelled by the call that asked for it. */
+const TOOL_USES_MAX = 4096
 interface MediaCache { id: string; at: number }
 type PreviewStore = Pick<MediaStore, 'ingestOutputImage' | 'getContent'>
 export interface OutputImageDeps {
@@ -246,6 +254,13 @@ export function sentUserFiles(provider: AgentProvider, row: Record<string, unkno
   return files.length ? { caption: captions.join('\n\n'), files } : null
 }
 
+/** A Claude row's content has typed words (a text block that is not blank). */
+function hasWords(row: Record<string, unknown>): boolean {
+  const content = (row.message as Record<string, unknown> | null | undefined)?.content
+  if (typeof content === 'string') return content.trim().length > 0
+  return Array.isArray(content) && content.some(b => !!b && typeof b === 'object' && (b as Record<string, unknown>).type === 'text' && typeof (b as Record<string, unknown>).text === 'string' && ((b as Record<string, unknown>).text as string).trim().length > 0)
+}
+
 export class AgentSessionOutputImages {
   private cache = new Map<string, MediaCache>()
   private pending = new Map<string, Promise<string>>()
@@ -253,7 +268,11 @@ export class AgentSessionOutputImages {
   private readers = 0
   constructor(private readonly deps: OutputImageDeps) {}
 
-  async context(provider: AgentProvider, sessionId: string, transcript: string): Promise<PreviewContext> {
+  /**
+   * `want`: the one tool-image id a content request is for. Only its embedded bytes are kept; a detail read
+   * (no `want`) keeps none, so a long session never holds 50 base64 images past the line that parsed them.
+   */
+  async context(provider: AgentProvider, sessionId: string, transcript: string, want?: string): Promise<PreviewContext> {
     let workspace: string | null = null
     try { workspace = await this.deps.workspace(provider, sessionId, transcript) } catch { /* unavailable, words still load */ }
     const canonical = canonicalRoot(workspace, this.deps.home?.() ?? homedir())
@@ -357,7 +376,89 @@ export class AgentSessionOutputImages {
         ...(out.length ? { outputFiles: out } : {}),
       }
     }
-    return { project, sources, files }
+    // ── Images the session looked at: tool results, and images attached to prompts ──
+    // The reader shows messages, not tool calls, so a step's images ride on the assistant turn the step followed
+    // (the words before it, as the Claude app shows the step under them). A step that came before any words in this
+    // window waits for the next assistant turn and is marked `before`. A user turn ends a step that never got words.
+    const toolSources = new Map<string, ToolSource>()
+    const uses = new Map<string, ToolUseMeta>()
+    const groups = new WeakMap<SessionTurn, { before: number; after: number }>()
+    let last: SessionTurn | null = null
+    let pending: SessionToolImage[] = [], pendingExtra = 0
+    const recordKeyOf = (row: Record<string, unknown>) => typeof row.uuid === 'string' && row.uuid ? 'u:' + row.uuid : digest(JSON.stringify(row))
+    const describe = (recordKey: string, scope: 'tool' | 'prompt', ordinal: number, found: FoundToolImage): SessionToolImage => {
+      const id = 'ti_' + createHmac('sha256', this.deps.secret).update(JSON.stringify([provider, sessionId, transcriptKey, recordKey, scope, ordinal])).digest('hex')
+      const ref = found.ref
+      let reason: SessionToolImage['reason'] | undefined
+      if (ref.kind === 'embedded') {
+        if (estimateBytes(ref.data) > MAX_TOOL_IMAGE_BYTES) reason = 'too_large'
+        else if (id === want) toolSources.set(id, { kind: 'embedded', mediaType: ref.mediaType, data: ref.data })
+      } else if (ref.kind === 'path') {
+        // A Read that names a path and carries no bytes: the output-image rule, the session's exact workspace only.
+        if (root === null) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
+        else if (!inside(root, resolve(root, ref.path))) reason = 'outside_workspace'
+        else {
+          // The canonical file decides, as for sent files: a link that leaves the workspace is outside it.
+          let canonical: string | null = null
+          try { canonical = realpathSync(resolve(root, ref.path)) } catch { canonical = null }
+          if (canonical === null) reason = 'missing'
+          else if (!inside(root, canonical)) reason = 'outside_workspace'
+        }
+        if (root !== null && !reason) {
+          // The canonical path is the source, as for sent images, so the content read's no-link check holds for it.
+          toolSources.delete(id); toolSources.set(id, { kind: 'path', source: realpathSync(resolve(root, ref.path)), root, label: found.tool })
+          while (toolSources.size > SOURCES_MAX) toolSources.delete(toolSources.keys().next().value!)
+        }
+      } else reason = 'missing'
+      return { id, tool: found.tool, index: 0, total: 0, state: reason ? 'unavailable' : 'available', ...(reason ? { reason } : {}) }
+    }
+    // The turn is already in the reader's list, so it is extended in place. Past the cap an image is counted, never listed.
+    const attach = (turn: SessionTurn, images: SessionToolImage[], extra: number, before: boolean) => {
+      const g = groups.get(turn) ?? { before: 0, after: 0 }; groups.set(turn, g)
+      const key = before ? 'before' : 'after'
+      const list = turn.toolImages ?? []
+      for (const d of images) {
+        g[key]++
+        if (list.length < TOOL_IMAGES_PER_TURN) list.push({ ...d, index: g[key], ...(before ? { before: true as const } : {}) })
+        else turn.toolImagesMore = (turn.toolImagesMore ?? 0) + 1
+      }
+      if (extra > 0) { g[key] += extra; turn.toolImagesMore = (turn.toolImagesMore ?? 0) + extra }
+      for (const d of list) if ((d.before === true) === before) d.total = g[key]
+      if (list.length) turn.toolImages = list
+    }
+    const withTools: SessionTurnProjection = (p, row, turn) => {
+      for (const [id, meta] of toolUsesOf(p, row)) {
+        uses.delete(id); uses.set(id, meta)
+        while (uses.size > TOOL_USES_MAX) uses.delete(uses.keys().next().value!)
+      }
+      let result = project(p, row, turn)
+      const found = toolResultImages(p, row, uses)
+      if (found.length) {
+        const key = recordKeyOf(row)
+        const described = found.map((f, i) => describe(key, 'tool', i, f))
+        if (last && last.role === 'assistant') attach(last, described, 0, false)
+        else for (const d of described) { if (pending.length < TOOL_IMAGES_PER_TURN) pending.push(d); else pendingExtra++ }
+      }
+      const attached = promptImages(p, row)
+      if (attached.length) {
+        // A Claude prompt that is only an image (sent through the SDK) is still something the person said.
+        if (!result && p === 'claude' && !hasWords(row)) {
+          const at = typeof row.timestamp === 'string' && Number.isFinite(Date.parse(row.timestamp)) ? row.timestamp : undefined
+          result = { role: 'user', text: attached.length === 1 ? '[Image]' : `[${attached.length} images]`, ...(at ? { at } : {}) }
+        }
+        if (result && result.role === 'user') {
+          const key = recordKeyOf(row)
+          attach(result, attached.map((ref, i) => describe(key, 'prompt', i, { tool: 'Attached', ref })), 0, false)
+        }
+      }
+      if (result) {
+        if (result.role === 'assistant' && (pending.length || pendingExtra)) attach(result, pending, pendingExtra, true)
+        pending = []; pendingExtra = 0
+        last = result
+      }
+      return result
+    }
+    return { project: withTools, sources, files, toolSources }
   }
 
   async content(provider: AgentProvider, sessionId: string, imageId: string, variant: 'thumb' | 'phone') {
@@ -373,47 +474,80 @@ export class AgentSessionOutputImages {
       if (!recent.turns.some(t => t.outputImages?.some(i => i.id === imageId))) return { status: 'not_found' as const }
       const source = context.sources.get(imageId)
       if (!source?.root || source.descriptor.state !== 'available') return { status: 'unavailable' as const }
-      const path = resolve(source.root, source.candidate.source)
-      const canonical = realpathSync(path)
-      if (!inside(source.root, canonical)) return { status: 'unavailable' as const }
-      // Reject symlinks in any component and recheck path/fd identity after reading.
-      // A changed path never becomes a published preview.
-      if (canonical !== path) return { status: 'unavailable' as const }
-      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-      let bytes: Buffer, key: string
-      try {
-        const before = await file.stat()
-        if (!before.isFile() || before.size <= 0 || before.size > MAX_OUTPUT_ARTIFACT_BYTES) return { status: 'unavailable' as const }
-        key = digest(JSON.stringify([imageId, before.dev, before.ino, before.size, before.mtimeMs, before.ctimeMs]))
-        // Even a cache hit rechecks that the authorized source still exists within the root.
-        const hit = this.cache.get(key)
-        if (hit && this.deps.now() - hit.at < CACHE_TTL) {
-          const current = statSync(path)
-          if (realpathSync(path) !== canonical || current.dev !== before.dev || current.ino !== before.ino) return { status: 'unavailable' as const }
-          const content = this.deps.store().getContent(hit.id, variant)
-          if (content.status === 'ok') return content
-        }
-        // Bounded positional read, not readFile(): an append during read cannot allocate past the cap.
-        bytes = Buffer.alloc(before.size)
-        let offset = 0
-        while (offset < bytes.length) { const got = await file.read(bytes, offset, bytes.length - offset, offset); if (!got.bytesRead) break; offset += got.bytesRead }
-        const after = await file.stat(), current = statSync(path)
-        if (offset !== bytes.length || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.dev !== before.dev || current.ino !== before.ino || realpathSync(path) !== canonical) return { status: 'unavailable' as const }
-      } finally { await file.close() }
-      let job = this.pending.get(key!)
-      if (!job) {
-        if (this.active >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' as const }
-        this.active++
-        job = this.deps.store().ingestOutputImage({ bytes: bytes!, kind: 'generated_visual', label: source.candidate.label }).then(ref => {
-          this.cache.set(key!, { id: ref.id, at: this.deps.now() })
-          while (this.cache.size > OUTPUT_IMAGE_CACHE_MAX) this.cache.delete(this.cache.keys().next().value!)
-          return ref.id
-        }).finally(() => { this.active--; this.pending.delete(key!) })
-        this.pending.set(key!, job)
-      }
-      return this.deps.store().getContent(await job, variant)
+      return await this.workspaceImage(imageId, source.root, source.candidate.source, source.candidate.label, variant)
     } catch { return { status: 'unavailable' as const } }
     finally { this.readers-- }
+  }
+
+  /**
+   * A tool-result or prompt image (`ti_` id), re-authorized from the transcript: the id must name an image in the
+   * session's newest turns. Embedded bytes are decoded here and typed by what they are; a path-only Read goes
+   * through the same workspace read and normalizer as an output image.
+   */
+  async toolImageContent(provider: AgentProvider, sessionId: string, imageId: string): Promise<
+    { status: 'ok'; bytes: Buffer; type: string } | { status: 'ok'; path: string; mime: string; bytes: number } | { status: 'not_found' | 'unavailable' | 'too_large' }> {
+    if (!SESSION_TOOL_IMAGE_ID.test(imageId)) return { status: 'not_found' }
+    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' }
+    this.readers++
+    try {
+      const transcript = await this.deps.findSession(provider, sessionId)
+      if (!transcript) return { status: 'not_found' }
+      const context = await this.context(provider, sessionId, transcript, imageId)
+      const recent = await readRecentSessionTurns(provider, transcript, SESSION_TURNS_MAX, undefined, context.project)
+      const descriptor = recent.turns.flatMap(t => t.toolImages ?? []).find(i => i.id === imageId)
+      if (!descriptor) return { status: 'not_found' }
+      if (descriptor.reason === 'too_large') return { status: 'too_large' }
+      const source = context.toolSources.get(imageId)
+      if (descriptor.state !== 'available' || !source) return { status: 'unavailable' }
+      if (source.kind === 'embedded') return decodeToolImage(source)
+      const normalized = await this.workspaceImage(imageId, source.root, source.source, source.label, 'phone')
+      return normalized.status === 'ok' ? normalized : { status: 'unavailable' }
+    } catch { return { status: 'unavailable' } }
+    finally { this.readers-- }
+  }
+
+  /** The workspace read every path-based preview shares: exact containment, no links, the same file before and after. */
+  private async workspaceImage(imageId: string, root: string, written: string, label: string, variant: 'thumb' | 'phone') {
+    const source = { root, candidate: { source: written, label } }
+    const path = resolve(source.root, source.candidate.source)
+    const canonical = realpathSync(path)
+    if (!inside(source.root, canonical)) return { status: 'unavailable' as const }
+    // Reject symlinks in any component and recheck path/fd identity after reading.
+    // A changed path never becomes a published preview.
+    if (canonical !== path) return { status: 'unavailable' as const }
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    let bytes: Buffer, key: string
+    try {
+      const before = await file.stat()
+      if (!before.isFile() || before.size <= 0 || before.size > MAX_OUTPUT_ARTIFACT_BYTES) return { status: 'unavailable' as const }
+      key = digest(JSON.stringify([imageId, before.dev, before.ino, before.size, before.mtimeMs, before.ctimeMs]))
+      // Even a cache hit rechecks that the authorized source still exists within the root.
+      const hit = this.cache.get(key)
+      if (hit && this.deps.now() - hit.at < CACHE_TTL) {
+        const current = statSync(path)
+        if (realpathSync(path) !== canonical || current.dev !== before.dev || current.ino !== before.ino) return { status: 'unavailable' as const }
+        const content = this.deps.store().getContent(hit.id, variant)
+        if (content.status === 'ok') return content
+      }
+      // Bounded positional read, not readFile(): an append during read cannot allocate past the cap.
+      bytes = Buffer.alloc(before.size)
+      let offset = 0
+      while (offset < bytes.length) { const got = await file.read(bytes, offset, bytes.length - offset, offset); if (!got.bytesRead) break; offset += got.bytesRead }
+      const after = await file.stat(), current = statSync(path)
+      if (offset !== bytes.length || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || current.dev !== before.dev || current.ino !== before.ino || realpathSync(path) !== canonical) return { status: 'unavailable' as const }
+    } finally { await file.close() }
+    let job = this.pending.get(key!)
+    if (!job) {
+      if (this.active >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' as const }
+      this.active++
+      job = this.deps.store().ingestOutputImage({ bytes: bytes!, kind: 'generated_visual', label: source.candidate.label }).then(ref => {
+        this.cache.set(key!, { id: ref.id, at: this.deps.now() })
+        while (this.cache.size > OUTPUT_IMAGE_CACHE_MAX) this.cache.delete(this.cache.keys().next().value!)
+        return ref.id
+      }).finally(() => { this.active--; this.pending.delete(key!) })
+      this.pending.set(key!, job)
+    }
+    return this.deps.store().getContent(await job, variant)
   }
 
   /**
