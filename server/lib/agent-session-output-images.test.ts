@@ -253,3 +253,15 @@ describe('workspace-scoped native image projection and serving', () => {
     expect(f.ingest).toHaveBeenCalledTimes(2)
   })
 })
+
+// QA 7.0.5: a preview read that threw answers why as a code the route logs, never the error's message (it carries a path).
+describe('7.0.5 QA: previewFile failures carry a code', () => {
+  it('a thrown read is unavailable with reason error_<code>, and the message never comes back', async () => {
+    const f = fixture()
+    const findSession = vi.fn(async () => { throw Object.assign(new Error(`EACCES: permission denied, open '${f.transcript}'`), { code: 'EACCES' }) })
+    const service = new AgentSessionOutputImages({ ...f.deps, findSession })
+    const got = await service.previewFile('claude', 'session', 'al_' + 'a'.repeat(64))
+    expect(got).toEqual({ status: 'unavailable', reason: 'error_EACCES' })
+    expect(JSON.stringify(got)).not.toContain(f.root)
+  })
+})

@@ -46,6 +46,20 @@ describe('qlmanage thumbnails', () => {
       expect(existsSync(join(s.top, 'cache', thumbKey(id()) + '.png'))).toBe(false)
     }
   })
+  // QA 7.0.5: each failure says why, as a fixed word, so the route can log it (never a path or a file name).
+  it('each failure carries a fixed reason: exit, timeout, bad_png, no_png, error_<code>', async () => {
+    const cases: Array<[(f: string, args: string[]) => RunResult, string]> = [
+      [() => ({ code: 1, signal: null, timedOut: false }), 'exit'],
+      [() => ({ code: null, signal: 'SIGKILL', timedOut: true }), 'timeout'],
+      [(_f, args) => { writeOut(args, Buffer.from('<html>not png</html>')); return { code: 0, signal: null, timedOut: false } }, 'bad_png'],
+      [() => ({ code: 0, signal: null, timedOut: false }), 'no_png'],
+      [() => { throw Object.assign(new Error("EACCES: permission denied, open '/Users/x/plan.pdf'"), { code: 'EACCES' }) }, 'error_EACCES'],
+    ]
+    for (const [run, reason] of cases) {
+      const s = setup(run)
+      expect(await s.t.thumbnail(Buffer.from('x'), 'plan.pdf', id())).toEqual({ status: 'unavailable', reason })
+    }
+  })
   it(`at most ${THUMB_CONCURRENCY} at once; the rest are busy`, async () => {
     const waits: Array<() => void> = []
     const s = setup((_f, args) => new Promise(r => waits.push(() => { writeOut(args, PNG); r({ code: 0, signal: null, timedOut: false }) })))

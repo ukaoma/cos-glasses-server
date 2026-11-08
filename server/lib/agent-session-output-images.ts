@@ -618,7 +618,7 @@ export class AgentSessionOutputImages {
    */
   async previewFile(provider: AgentProvider, sessionId: string, id: string, peek = false): Promise<
     | { status: 'ok'; bytes: Buffer; name: string; kind: PreviewKind; type: string; line?: number; identity: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }; path: string; root: string; descriptor: SessionOutputLink | SessionOutputFile }
-    | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'folder' | 'busy' }> {
+    | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'folder' | 'busy'; reason?: string }> {
     const isLink = SESSION_OUTPUT_LINK_ID.test(id)
     if (!isLink && !SESSION_OUTPUT_FILE_ID.test(id)) return { status: 'not_found' }
     // 7.0.4 QA: at the limit the answer is "busy" (503 previews_busy, retried by the web), never "unavailable".
@@ -669,7 +669,10 @@ export class AgentSessionOutputImages {
           || current.dev !== before.dev || current.ino !== before.ino || realpathSync(path) !== path) return { status: 'unavailable' }
         return { ...base, bytes }
       } finally { await file.close() }
-    } catch { return { status: 'unavailable' } }
+    } catch (error) {
+      // QA 7.0.5: the route logs this once, as reason=error_<code> (never the message, which carries the path).
+      return { status: 'unavailable', reason: 'error_' + previewErrorCode(error) }
+    }
     finally { this.readers-- }
   }
 
@@ -678,7 +681,7 @@ export class AgentSessionOutputImages {
     const found = await this.previewFile(provider, sessionId, id, true)
     if (found.status !== 'ok') return found
     if (found.kind !== 'image') return { status: 'unavailable' as const }
-    try { return await this.workspaceImage(id, found.root, found.path, found.name, variant) } catch { return { status: 'unavailable' as const } }
+    try { return await this.workspaceImage(id, found.root, found.path, found.name, variant) } catch (error) { return { status: 'unavailable' as const, reason: 'error_' + previewErrorCode(error) } }
   }
 
   async content(provider: AgentProvider, sessionId: string, imageId: string, variant: 'thumb' | 'phone') {

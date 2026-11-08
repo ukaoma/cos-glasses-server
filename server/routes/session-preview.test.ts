@@ -183,3 +183,56 @@ describe('7.0.4 QA busy answer on the preview routes', () => {
     t.close()
   })
 })
+
+// QA 7.0.5 (agent 3 C-W4, agent 4 C-W3): every refusal or failure on the preview routes logs one line with a stable
+// reason code and the provider, part and kind. Never a path, a file name, an id or a session's words.
+describe('7.0.5 QA: preview refusals and failures are logged, with no path', () => {
+  const PATHY = '/Users/someone/secret/plan.md'
+  async function logged(opts: Parameters<typeof serve>[0], path: string) {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const s = await serve(opts)
+      const r = await fetch(s.base + path)
+      await r.text()
+      s.close()
+      return { status: r.status, lines: warn.mock.calls.map(c => c.map(String).join(' ')) }
+    } finally { warn.mockRestore() }
+  }
+  const pathError = () => Object.assign(new Error(`ENOENT: no such file or directory, open '${PATHY}'`), { code: 'ENOENT' })
+  const meta = `/preview/agent-sessions/claude/session/${ID}/meta`
+  const cases: Array<[string, Parameters<typeof serve>[0], string, number, string]> = [
+    ['previews off', { enabled: false }, url('raw'), 403, '[preview] content refused reason=previews_off provider=claude'],
+    ['a secret', { file: () => ({ status: 'secret' }) }, url('raw'), 403, '[preview] content refused reason=secret_file_denied provider=claude part=raw'],
+    ['busy', { file: () => ({ status: 'busy' }) }, url('text'), 503, '[preview] content refused reason=previews_busy provider=claude part=text'],
+    ['too large', { file: () => ({ status: 'too_large' }) }, meta, 413, '[preview] meta refused reason=preview_too_large provider=claude'],
+    ['the resolver failed', { file: () => ({ status: 'unavailable', reason: 'error_ENOENT' }) }, meta, 503, '[preview] meta refused reason=preview_unavailable provider=claude detail=error_ENOENT'],
+    ['meta threw', { file: () => { throw pathError() } }, meta, 503, '[preview] meta refused reason=preview_unavailable provider=claude detail=error_ENOENT'],
+    ['content threw', { file: () => { throw pathError() } }, url('text'), 503, '[preview] content refused reason=preview_unavailable provider=claude part=text detail=error_ENOENT'],
+    ['a bad part', { file: () => ok('plan.md', 'markdown', 'x') }, url('table'), 400, '[preview] content refused reason=preview_part provider=claude part=table kind=markdown'],
+    ['binary', { file: () => ok('plan.md', 'markdown', Buffer.from([0, 1, 2, 0])) }, url('text'), 415, '[preview] content refused reason=preview_binary provider=claude part=text kind=markdown'],
+    ['no thumbnail', { file: () => ok('plan.pdf', 'pdf', '%PDF'), thumb: { status: 'unavailable', reason: 'timeout' } }, url('thumb'), 503, '[preview] content refused reason=thumb_unavailable provider=claude part=thumb kind=pdf detail=timeout'],
+    ['a picture that failed', { file: () => ok('shot.png', 'image', 'x'), image: { status: 'unavailable', reason: 'error_EACCES' } }, url('inline'), 503, '[preview] content refused reason=preview_unavailable provider=claude part=inline kind=image detail=error_EACCES'],
+  ]
+  for (const [name, opts, path, code, line] of cases) {
+    it(name + ': one line, with its code', async () => {
+      const r = await logged(opts, path)
+      expect(r.status).toBe(code)
+      expect(r.lines).toEqual([line])
+      for (const l of r.lines) {
+        expect(l).not.toContain('/Users')
+        expect(l).not.toContain('plan.')
+        expect(l).not.toContain('shot.')
+        expect(l).not.toContain(ID)
+        expect(l).not.toContain('session')
+      }
+    })
+  }
+  it('a missing id is ordinary and is not logged; a success logs nothing', async () => {
+    expect((await logged({ file: () => ({ status: 'not_found' }) }, url('raw'))).lines).toEqual([])
+    expect((await logged({ file: () => ok('plan.md', 'markdown', '# a') }, url('text'))).lines).toEqual([])
+  })
+  it('a detail that is not a plain word is never written', async () => {
+    const r = await logged({ file: () => ({ status: 'unavailable', reason: PATHY }) }, meta)
+    expect(r.lines).toEqual(['[preview] meta refused reason=preview_unavailable provider=claude'])
+  })
+})

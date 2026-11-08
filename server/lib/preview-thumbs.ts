@@ -17,6 +17,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSyn
 import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
 import { dataPath } from './data-dir.js'
+import { previewErrorCode } from './preview-error-code.js'
 
 export const THUMB_SIZE = 256
 export const THUMB_TIMEOUT_MS = 10_000
@@ -28,6 +29,8 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 export interface Identity { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }
 export type RunResult = { code: number | null; signal: string | null; timedOut: boolean }
+/** QA 7.0.5: why a thumbnail was not made, for the route's one log line (never a path or a file name). */
+export type ThumbFailure = 'timeout' | 'exit' | 'no_png' | 'bad_png' | `error_${string}`
 export interface ThumbDeps {
   dir(): string
   tmp(): string
@@ -85,7 +88,7 @@ export function createThumbnailer(deps: ThumbDeps) {
   return {
     get active() { return active },
     /** The cached or new PNG for these bytes, or why there is none. */
-    async thumbnail(bytes: Buffer, name: string, identity: Identity): Promise<{ status: 'ok'; path: string } | { status: 'unavailable' | 'busy' }> {
+    async thumbnail(bytes: Buffer, name: string, identity: Identity): Promise<{ status: 'ok'; path: string } | { status: 'busy' } | { status: 'unavailable'; reason: ThumbFailure }> {
       const dir = deps.dir()
       const key = thumbKey(identity)
       const cached = join(dir, key + '.png')
@@ -108,18 +111,18 @@ export function createThumbnailer(deps: ThumbDeps) {
         writeFileSync(copy, withUtf8Charset(bytes, name), { mode: 0o600 })
         const out = join(work, 'out'); mkdirSync(out, { mode: 0o700 })
         const result = await deps.run('/usr/bin/nice', ['-n', '10', '/usr/bin/qlmanage', '-t', '-s', String(THUMB_SIZE), '-o', out, copy], THUMB_TIMEOUT_MS)
-        if (result.timedOut || result.code !== 0) return { status: 'unavailable' }
+        if (result.timedOut || result.code !== 0) return { status: 'unavailable', reason: result.timedOut ? 'timeout' : 'exit' }
         const produced = join(out, 'preview' + ext + '.png')
         let png: Buffer
-        try { png = readFileSync(produced) } catch { return { status: 'unavailable' } }
-        if (png.length <= PNG.length || png.length > THUMB_OUTPUT_MAX || !png.subarray(0, 8).equals(PNG)) return { status: 'unavailable' }
+        try { png = readFileSync(produced) } catch { return { status: 'unavailable', reason: 'no_png' } }
+        if (png.length <= PNG.length || png.length > THUMB_OUTPUT_MAX || !png.subarray(0, 8).equals(PNG)) return { status: 'unavailable', reason: 'bad_png' }
         mkdirSync(dir, { recursive: true, mode: 0o700 })
         const staged = join(dir, key + '.' + process.pid + '.tmp')
         writeFileSync(staged, png, { mode: 0o600 })
         renameSync(staged, cached)
         evict(dir)
         return { status: 'ok', path: cached }
-      } catch { return { status: 'unavailable' } }
+      } catch (error) { return { status: 'unavailable', reason: ('error_' + previewErrorCode(error)) as ThumbFailure } }
       finally {
         active--
         try { rmSync(work, { recursive: true, force: true }) } catch { /* temp */ }
