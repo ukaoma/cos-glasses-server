@@ -1,6 +1,6 @@
-## 6.99.32 - Duo follow-ups: a hung Mac, and the Other field under the keyboard
+## 6.99.33 - Duo follow-ups: a hung Mac, and the Other field under the keyboard
 
-2026-11-07. On 6.99.30 (a90f024, installed privately 17:20). Server only (Control Web); no route changed, so it works with any COS Control that runs 6.99.29. The first public build with the 6.99.30 Duo layout work below; npm goes from 6.99.29 straight to 6.99.32.
+2026-11-07. On 6.99.30 (a90f024, installed privately 17:20). 6.99.32 (98f3cde) was the same work installed privately at 18:09 without the small-frames keyboard fix below; 6.99.33 replaces it. Server only (Control Web); no route changed, so it works with any COS Control that runs 6.99.29. The first public build with the 6.99.30 Duo layout work below; npm goes from 6.99.29 straight to 6.99.33.
 
 **Default-on changes:**
 - **A Mac that hangs is marked not answering.** Before, a Mac that neither answered nor refused (asleep, a stale Tailscale route) kept "Server connected" up, and one hung question read stopped the 10 s question check for good. Now the question check gives up after 15 s, says the Mac is not answering (the rail, an open session sheet, and Submit, Allow and Deny waiting with the reason), and checks again. Any read api() makes that times out says the same; a write that times out does not (a slow save is not a Mac that went away). The next answer marks it up again.
