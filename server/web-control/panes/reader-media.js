@@ -130,12 +130,41 @@
   // keepEntry: another viewer replaces this one and takes over its history entry.
   function closeViewer(restore, keepEntry) {
     var v = viewer; if (!v) return;
-    viewer = null; v.generation++; revoke(v); v.el.remove(); document.documentElement.classList.remove('rm-viewing');
+    viewer = null; v.generation++; revoke(v); if (v.unpin) v.unpin(); v.el.remove(); document.documentElement.classList.remove('rm-viewing');
     if (v.pushed && !keepEntry) { v.pushed = false; dropEntry(); }
     if (restore !== false && v.opener && v.opener.isConnected) { try { v.opener.focus({ preventScroll: true }); } catch (_e) { v.opener.focus(); } }
     if (restore !== false) restoreSpots(v.spots);
   }
-  function takeOver(v, had) { v.spots = had ? had.spots : scrollSpots(v.opener); if (had && had.pushed) v.pushed = true; else pushEntry(v); }
+  function takeOver(v, had) { v.spots = had ? had.spots : scrollSpots(v.opener); if (had && had.pushed) v.pushed = true; else pushEntry(v); pinViewer(v); }
+  // 7.0.5 (Miles's Duo, 11/08 IMG_0541 and IMG_0543): the viewer is position:fixed, inset 0, which is the LAYOUT
+  // viewport. When the browser has panned the visible part of the page (a keyboard up or just closed, a bar coming and
+  // going), that box can sit above what is on screen, so the viewer opened with only its bottom edge showing. It now
+  // takes the visible box itself, read the one way Control Web reads it (COSWeb.viewportFit: top and height from
+  // visualViewport), as Today's session sheet does, and follows it while it is open (at most once a frame).
+  // A breadcrumb records the box on open and whenever it moves by more than 40 px, so a device report has numbers.
+  function pinViewer(v) {
+    var fit = W.viewportFit, vv = window.visualViewport, frame = 0, last = null;
+    function place() {
+      frame = 0;
+      if (viewer !== v || !v.el.style) return;
+      var b = typeof fit === 'function' ? fit() : null;
+      if (!b || !b.vv) { v.el.style.top = ''; v.el.style.height = ''; v.el.style.bottom = ''; return; }
+      v.el.style.top = b.top + 'px'; v.el.style.height = b.height + 'px'; v.el.style.bottom = 'auto';
+      if (W.layoutCrumb && (!last || Math.abs(last.top - b.top) > 40 || Math.abs(last.height - b.height) > 40)) {
+        try { W.layoutCrumb(last ? 'viewer-move' : 'viewer-open', { boxTop: b.top, boxH: b.height, inset: b.inset, sy: Math.round(window.scrollY || 0) }); } catch (_e) {}
+      }
+      last = { top: b.top, height: b.height };
+    }
+    function soon() { if (!frame) frame = window.requestAnimationFrame ? window.requestAnimationFrame(place) : setTimeout(place, 16); }
+    place();
+    if (vv && vv.addEventListener) { vv.addEventListener('resize', soon); vv.addEventListener('scroll', soon); }
+    if (window.addEventListener) window.addEventListener('resize', soon);
+    v.unpin = function () {
+      if (vv && vv.removeEventListener) { vv.removeEventListener('resize', soon); vv.removeEventListener('scroll', soon); }
+      if (window.removeEventListener) window.removeEventListener('resize', soon);
+      if (frame) { if (window.cancelAnimationFrame) window.cancelAnimationFrame(frame); else clearTimeout(frame); frame = 0; }
+    };
+  }
   function openViewer(scope, item) {
     if (!scope.alive || item.active === false) return;
     var had = viewer; closeViewer(false, true);
