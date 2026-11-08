@@ -26,6 +26,81 @@
     }).join('\n');
   }
   function plain(text) { return String(text == null ? '' : text).replace(/\*\*|`/g, '').replace(/^#{1,4}\s+/, ''); }
+  // 7.0.5: a COS answer is written for the G2 lens as plain text, so a numbered list arrives inline ("...for me: 1. Prep
+  // before each meeting. 2. Catching conflicts early. 3. ..."), one long paragraph on the phone. Before md() draws a COS
+  // answer (the chat card, the Messages reader), each run of inline items 1, 2, 3 in order goes on its own line under
+  // its lead-in. Only whitespace changes: every character of the answer stays. The lens and the stored text never see it.
+  // Conservative: text with any Markdown structure is left alone; a marker counts only after a sentence end (". " ": "
+  // "? " "! ") and never inside a code span; fewer than two items, or numbers out of order, are not a list;
+  // words after the last item stay in it, except a short "Label:" sentence followed by a new 1, which starts the next list.
+  var LA_STRUCTURED = /^[ \t]*(?:[-*+][ \t]|\d{1,3}[.)][ \t]|#|>|\|)|\n[ \t]*\n|```|~~~/m;
+  var LA_MARK = /([.:?!]["'”’)]?)([ \t]+)([1-9]\d?)\.(?=[ \t]+\S)/g;
+  var LA_END = /[.?!]["'”’)]?([ \t]+)/g;
+  // Code spans only: a link holds no whitespace, and only whitespace is ever replaced, so a link is never cut.
+  var LA_GUARD = /`[^`\n]*`/g;
+  var LA_LABEL_MAX = 100;
+  function structureLensAnswer(text) {
+    var s = text == null ? '' : String(text);
+    if (s.indexOf('. ') < 0 || LA_STRUCTURED.test(s)) return s;
+    var lines = s.split('\n'), out = [], changed = false;
+    for (var i = 0; i < lines.length; i++) {
+      var r = laLine(lines[i]);
+      if (r !== lines[i]) changed = true;
+      // A line that became a list ends with a blank line before whatever follows it.
+      out.push(r !== lines[i] && i < lines.length - 1 ? r + '\n' : r);
+    }
+    return changed ? out.join('\n') : s;
+  }
+  function laLine(line) {
+    var starts = [], ends = [], m;
+    LA_GUARD.lastIndex = 0;
+    while ((m = LA_GUARD.exec(line))) { starts.push(m.index); ends.push(m.index + m[0].length); }
+    // Inside a code span? The spans are in order and never overlap: binary search.
+    var guarded = function (at) {
+      var lo = 0, hi = starts.length - 1;
+      while (lo <= hi) { var mid = (lo + hi) >> 1; if (starts[mid] > at) hi = mid - 1; else if (ends[mid] <= at) lo = mid + 1; else return true; }
+      return false;
+    };
+    var marks = [];
+    LA_MARK.lastIndex = 0;
+    while ((m = LA_MARK.exec(line))) {
+      var ws = m.index + m[1].length, at = ws + m[2].length;
+      if (guarded(m.index) || guarded(at)) continue;
+      marks.push({ colon: m[1].charAt(0) === ':', ws: ws, at: at, body: at + m[3].length + 1, n: Number(m[3]) });
+    }
+    // Runs of 1, 2, 3 in order; two items or more make a list.
+    var runs = [], cur = [];
+    for (var k = 0; k < marks.length; k++) {
+      var c = marks[k];
+      if (cur.length && c.n === cur[cur.length - 1].n + 1) { cur.push(c); continue; }
+      if (cur.length >= 2) runs.push(cur);
+      cur = c.n === 1 ? [c] : [];
+    }
+    if (cur.length >= 2) runs.push(cur);
+    var cuts = [], prevEnd = 0, lists = 0;
+    for (var q = 0; q < runs.length; q++) {
+      var run = runs[q], first = run[0];
+      // After a list, only a "Label:" lead-in starts another; anything else stays in the last item.
+      if (lists && !first.colon) continue;
+      if (first.colon) {
+        // The lead-in is the "Label:" sentence: it gets its own line when it is short.
+        var from = -1, to = -1, e;
+        LA_END.lastIndex = prevEnd;
+        while ((e = LA_END.exec(line)) && e.index + e[0].length < first.ws) {
+          if (!guarded(e.index)) { to = e.index + e[0].length; from = to - e[1].length; }
+        }
+        if (from >= 0 && first.ws - to <= LA_LABEL_MAX) cuts.push([from, to, '\n\n']);
+      }
+      cuts.push([first.ws, first.at, '\n\n']);
+      for (var j = 1; j < run.length; j++) cuts.push([run[j].ws, run[j].at, '\n']);
+      prevEnd = run[run.length - 1].body;   // after the last item's own "5.", which is not a sentence end
+      lists++;
+    }
+    if (!cuts.length) return line;
+    var res = '', pos = 0;
+    for (var x = 0; x < cuts.length; x++) { res += line.slice(pos, cuts[x][0]) + cuts[x][2]; pos = cuts[x][1]; }
+    return res + line.slice(pos);
+  }
   // Markdown pipe tables (Duo tables). Every pane that draws one asks tableFit how far each column may shrink. Cells
   // wrap only at spaces (CSS: overflow-wrap break-word, so a column is never narrower than its longest word), a column
   // whose text is longer than TF_MIN_CH keeps at least that many characters, a first column of short labels stays on
@@ -5963,7 +6038,7 @@
 
   // ── the shared kit for pane modules (panes/*.js) ───────
   window.COSWeb = {
-    $: $, esc: esc, md: md, plain: plain, tableFit: tableFit, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
+    $: $, esc: esc, md: md, plain: plain, structureLensAnswer: structureLensAnswer, tableFit: tableFit, api: api, toast: toast, ago: ago, clock: clock, toDate: toDate,
     plural: plural, countWord: countWord, dayWord: dayWord, plainDay: plainDay, providerLabel: providerLabel, domainLabel: domainLabel,
     skeletonRows: skeletonRows, emptyBox: emptyBox, setStatus: setStatus, autoGrow: autoGrow,
     readStore: readStore, writeStore: writeStore, copyText: copyText, isPhone: isPhone,

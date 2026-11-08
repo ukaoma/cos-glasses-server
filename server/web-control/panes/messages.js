@@ -471,7 +471,7 @@
     var a = atts(t);
     return '<div class="cx-card you"><div class="cx-card-label">YOU</div><div class="cx-card-body" data-hl>' + esc(String(t.query || '').trim() || '(empty query)').replace(/\n/g, '<br>') + '</div></div>' +
       stripHtml(a.filter(isUserAtt), true, msgKey) +
-      '<div class="cx-card"><div class="cx-card-label">COS</div><div class="cx-card-body md" data-hl>' + W.md(String(t.text || '')) + '</div></div>' +
+      '<div class="cx-card"><div class="cx-card-label">COS</div><div class="cx-card-body md" data-hl>' + W.md(W.structureLensAnswer(String(t.text || ''))) + '</div></div>' +
       stripHtml(a.filter(function (x) { return !isUserAtt(x); }), false, msgKey);
   }
   function copyTurnText(t) {

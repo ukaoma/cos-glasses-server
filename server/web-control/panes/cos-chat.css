@@ -83,6 +83,9 @@
 .cc-quote { display: block; width: 100%; text-align: left; margin: 0 0 8px; padding: 6px 10px; border-left: 3px solid var(--gold); background: var(--qopen); border-radius: 6px;
   font-size: 13px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-answer { margin-top: 6px; font-size: 15px; line-height: 1.5; color: var(--ink); overflow-wrap: anywhere; }
+/* 7.0.5: md() keeps an answer's lines as newlines, as the Messages reader shows them (.cx-card-body.md). Without this
+   every line and list of a finished answer ran together into one paragraph. The streaming partial is <p> and <br>. */
+.cc-answer.md { white-space: pre-wrap; }
 .cc-answer p { margin: 0 0 0.6em; }
 .cc-answer p:last-child { margin-bottom: 0; }
 .cc-wait { color: var(--sub); font-size: 14px; }

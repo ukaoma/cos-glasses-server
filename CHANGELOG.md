@@ -13,6 +13,7 @@
 - **SendUserFile `files` sent as a JSON string** (11 of 1,112 real calls) is read like a list, with the same checks. Before, those files were dropped silently.
 - **Today summary: up to 100 a day** (was 60). It is now a setting, "Summaries per day", 1 to 100, in Settings under the Today summary switch. The server enforces it, and the status line says "Today's N summaries are used."
 - **Today summary after a reconnect.** When the sessions or Today read recovers from a failed one, the next summary ask starts at once instead of waiting out the 10-minute spacing. At most once per 10 minutes; "only when something changed", the 3-failure pause, the switch and the daily cap still apply.
+- **COS answers read as lists on the web.** An answer written for the lens as one paragraph ("What it unlocks for me: 1. Prep... 2. Catching conflicts...") is drawn with each numbered item on its own line under its lead-in, in the COS chat card and the Messages reader. Only line breaks are added, on the web only: the lens and the stored answer are unchanged, and an answer that already has Markdown is left alone. The chat card also keeps an answer's own line breaks now (they ran together before).
 
 **Off by default:**
 - **Extra folders** (Settings, Privacy, under the session files switch). Empty until you add one. A session may open files only from its own project folder, plus each folder named there. Broad folders (home, Documents, Library, /, /Volumes, temp) and anything inside Library, .cos-glasses or .ssh are refused with the reason.

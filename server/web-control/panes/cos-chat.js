@@ -464,9 +464,10 @@
       (item.title ? '<p class="cc-card-title">' + esc(item.title) + '</p>' : '') +
       '<p class="cc-card-line">' + esc(item.line) + '</p>' + fileLinksHtml(item, false) + actionsHtml(item) + '</div></div>';
   }
-  // The finished answer as Markdown; while it streams, plain words, so a half-written "**bold" never shows its stars.
+  // The finished answer as Markdown, its lens-plain inline lists on their own lines first (structureLensAnswer); while it
+  // streams, plain words, so a half-written "**bold" never shows its stars.
   function answerHtml(a) {
-    if (a.response) return W.md(a.response);
+    if (a.response) return W.md(W.structureLensAnswer(a.response));
     if (!a.partial) return '';
     return '<p>' + esc(a.partial.replace(/\*\*|__|`|^#+\s*/gm, '')).replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>') + '</p>';
   }
