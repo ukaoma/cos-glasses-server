@@ -768,9 +768,9 @@ describe('7.0.2 skeptic 2: reading the COS thread keys the Default label to the 
 describe('7.0.2 skeptic 3: Ask again goes to the conversation its first try was for, or nowhere', () => {
   // A thread-mode chat whose first Ask fails at the provider. `view` is what /api/cos-thread answers now.
   function threaded() {
-    const state: { view: any } = { view: { thread: { id: 't1', sessionId: 's-1' }, next: { mode: 'continue', sessionId: 's-1' } } }
+    const state: { view: any; reads: Array<() => Promise<unknown>> } = { view: { thread: { id: 't1', sessionId: 's-1' }, next: { mode: 'continue', sessionId: 's-1' } }, reads: [] }
     const h = chat({ serve: (m, path) => {
-      if (m === 'GET' && path === '/api/cos-thread') return Promise.resolve(state.view)
+      if (m === 'GET' && path === '/api/cos-thread') return state.reads.length ? state.reads.shift()!() : Promise.resolve(state.view)
       if (m === 'POST' && path === '/api/cos-thread/new') { state.view = { thread: { id: 't2', sessionId: null }, next: { mode: 'fresh', sessionId: null, digest: null } }; return Promise.resolve(state.view) }
       if (m === 'POST' && path === '/api/query-jobs') return Promise.resolve({ job: { jobId: 'j-' + Math.random().toString(36).slice(2, 8), status: 'running', sessionId: 's-1' } })
       if (m === 'GET' && path.startsWith('/api/query-jobs/j-')) return Promise.resolve({ job: { jobId: path.split('/')[3]!.split('?')[0], status: 'failed', error: { code: 'provider_limit', message: 'usage limit' } } })
@@ -818,6 +818,22 @@ describe('7.0.2 skeptic 3: Ask again goes to the conversation its first try was 
     expect(html).toContain('disabled aria-disabled="true">Ask again</button>')
     expect(html).toContain('This conversation has moved on. Copy your words into a new Ask.')
     expect(html).not.toContain('data-cos="again"')
+  })
+  it('root review (TOCTOU): the thread switches between Ask again’s check and the resend’s own thread read: nothing is sent', async () => {
+    const { h, state } = threaded()
+    const a = await failOnce(h)
+    const t3 = { thread: { id: 't3', sessionId: 's-3' }, next: { mode: 'continue', sessionId: 's-3' } }
+    const late = deferred()
+    state.reads.push(() => Promise.resolve(state.view))      // askAgain's check reads t1: still the same thread
+    state.reads.push(() => late.p)                            // the resend's plan reads the thread later...
+    const again = h.c._askAgain(a.cid)
+    await flush(10)
+    late.resolve(t3)                                          // ...and by then another thread is current
+    await again; await flush(10)
+    expect(jobs(h), 'the old words and files never reach thread t3').toHaveLength(1)
+    expect(a.againBlocked).toBe('This conversation has moved on. Copy your words into a new Ask.')
+    expect(h.c._askHtml(a, false)).toContain('disabled aria-disabled="true">Ask again</button>')
+    expect(h.c._state.asks, 'the unsent try leaves the chat').toHaveLength(1)
   })
   it('after another thread became current (switched elsewhere): nothing is sent', async () => {
     const { h, state } = threaded()
@@ -871,10 +887,29 @@ describe('7.0.2 skeptic 3: Ask again goes to the conversation its first try was 
       const a = h.c._state.asks[0]
       expect(a.conv).toEqual({ kind: 'chat', sessionId: 'c-1' })
       if (moved) h.c._state.session = { id: 'c-2', day: 'x' }
-      await h.c._askAgain(a.cid); await flush(10)
+      const again = await h.c._askAgain(a.cid); await flush(10)
       expect(jobs(h), moved ? 'moved on: not sent' : 'same session: sent').toHaveLength(moved ? 1 : 2)
+      // Moved on is caught before a new try is even made (no card flashes up and away); the send-time check is a backstop.
+      if (moved) { expect(again).toBeNull(); expect(h.c._state.asks).toHaveLength(1) } else expect(again).toBeTruthy()
       if (!moved) expect(jobs(h)[1]!.body.sessionId).toBe('c-1')
     }
+  })
+  it('root review (TOCTOU), chat: the chat moves to another session after the check but before the send: nothing is sent', async () => {
+    const h = chat({ serve: (m: string, path: string) => {
+      if (m === 'POST' && path === '/api/query-jobs') return Promise.resolve({ job: { jobId: 'j-c' + Math.random().toString(36).slice(2, 6), status: 'running', sessionId: 'c-1' } })
+      if (m === 'GET' && path.startsWith('/api/query-jobs/j-c')) return Promise.resolve({ job: { jobId: path.split('/')[3]!.split('?')[0], status: 'failed', error: { code: 'provider_timeout', message: 'x' } } })
+      return undefined
+    } })
+    h.c._state.caps = { jobs: true }
+    h.c._state.session = { id: 'c-1', day: 'x' }
+    await h.c.askFromSheet('hello'); while (h.timers.length) h.timers.shift()!(); await flush(10)
+    const a = h.c._state.asks[0]
+    const again = h.c._askAgain(a.cid)                         // the check has passed: still c-1
+    h.c._state.session = { id: 'c-2', day: 'x' }               // another Ask lands before the resend is built
+    await again; await flush(10)
+    expect(jobs(h)).toHaveLength(1)
+    expect(a.againBlocked).toBe('This conversation has moved on. Copy your words into a new Ask.')
+    expect(h.c._state.asks).toHaveLength(1)
   })
   it('a Reply with no session of its own starts a conversation; it never borrows the chat’s', async () => {
     const h = chat()

@@ -1098,7 +1098,13 @@
       if (plan.sessionId) { body.sessionId = plan.sessionId; C.threadSession = plan.sessionId; }
       else if (plan.digest) body.reference = { query: THREAD_REF, response: plan.digest };
       a.carried = plan.sessionId ? '' : plan.digest ? 'summary' : 'plain';
-    }) : Promise.resolve()).then(function () { withContext(body, opts.context); });
+    }) : Promise.resolve()).then(function () {
+      // An Ask again: the conversation its first try was for must still be the one this send resolved to, checked here,
+      // after the plan, immediately before admission (root review, 7.0.2: the thread can change between askAgain's check
+      // and this send's own thread read, and a retry carries old files and context).
+      if (opts.expect && !sameConversation(opts.expect, a)) throw Object.assign(new Error(MOVED_ON), { code: 'conversation_moved' });
+      withContext(body, opts.context);
+    });
     prepare.then(function () { return admit(true); }).then(function (d) {
       var job = d && d.job; if (!job) throw new Error('The Mac did not take the question.');
       take(a, job);
@@ -1110,6 +1116,14 @@
       if (done) done(true);
       poll(a);
     }, function (err) {
+      if (err && err.code === 'conversation_moved' && opts.retryOf) {
+        // Nothing was sent: this try leaves the chat, and the failed card it came from says why, its button disabled.
+        C.asks = C.asks.filter(function (x) { return x !== a; });
+        opts.retryOf.retried = false; opts.retryOf.againBlocked = MOVED_ON;
+        if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false);
+        if (done) done(false);
+        return;
+      }
       a.status = 'failed';
       a.error = err && err.code === 'durable_query_jobs_disabled' ? 'Ask needs the durable query jobs switch on your Mac.'
         : err && /attachment/.test(String(err.code || '')) ? 'An attachment could not be read: ' + ((err && err.message) || err.code) +
@@ -1196,6 +1210,13 @@
   // 7.0.2). A Reply goes to its turn's session as before. The failed card keeps its line and, once resent, loses the
   // button. Resolves to the new Ask, or null.
   var MOVED_ON = 'This conversation has moved on. Copy your words into a new Ask.';
+  // Whether the Ask `a` (being sent now) resolved to the conversation `c`: the same thread, the chat's same session, or
+  // the same Reply session. Read after the send's own plan, so it sees the thread that send will really use.
+  function sameConversation(c, a) {
+    if (!c || !a.conv || c.kind !== a.conv.kind) return false;
+    if (c.kind === 'thread') return threadOn() && !!c.threadId && a.conv.threadId === c.threadId;
+    return a.conv.sessionId === c.sessionId;
+  }
   function conversationGone(a) {
     var c = a.conv;
     if (!c || c.kind === 'reply') return Promise.resolve('');
@@ -1220,6 +1241,7 @@
       if (g.replyKey) { o.replyKey = g.replyKey; o.sessionId = g.sessionId; }
       if (g.context) o.context = g.context;
       o.reask = true;
+      if (a.conv) { o.expect = a.conv; o.retryOf = a; }
       return submitAsk(a.query, null, null, o);
     });
   }
