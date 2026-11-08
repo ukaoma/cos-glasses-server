@@ -54,7 +54,9 @@
     onAnswered: null,       // messages.js: re-read Recent when a web Ask lands
     thread: null,           // 6.99.16: the last GET /api/cos-thread answer
     threadCarried: '',      // the thread's newest session started fresh: 'summary' (it carried a digest) or 'plain'
-    threadBusy: false
+    threadBusy: false,
+    threadSession: '',      // 7.0.2: the session the COS thread's next Ask continues ('' when it starts fresh)
+    defaultGen: 0           // 7.0.2: the newest /api/models read for the Default label; older answers are dropped
   };
   var saved = W.readStore(STORE);
   C.model = typeof saved.model === 'string' ? saved.model : '';
@@ -236,11 +238,20 @@
   // The session an Ask from the chat continues, whose preference "Default" follows: the COS thread's newest session in
   // thread mode, else the chat's own (C.session).
   function defaultSession() { return threadOn() ? String(C.threadSession || '') : C.session && C.session.id ? String(C.session.id) : ''; }
-  function modelsPath() { var sid = defaultSession(); C.defaultFor = sid; return '/api/models' + (sid ? '?sessionId=' + encodeURIComponent(sid) : ''); }
+  // Each read is stamped with a generation and the session it asked about. An answer is used for the label only while
+  // it is still the newest read and the chat still continues that session, so a slow answer for an older session never
+  // overwrites a newer label (skeptic, 7.0.2).
+  function modelsRead() {
+    var sid = defaultSession();
+    return { gen: ++C.defaultGen, sid: sid, path: '/api/models' + (sid ? '?sessionId=' + encodeURIComponent(sid) : '') };
+  }
+  function currentRead(r) { return r.gen === C.defaultGen && r.sid === defaultSession(); }
   // QA W5: the label is read again after each Ask finishes and whenever that session changes, so it never goes stale.
   function refreshDefault() {
     if (!C.models) return null;
-    return api(modelsPath()).then(function (m) {
+    var r = modelsRead();
+    return api(r.path).then(function (m) {
+      if (!currentRead(r)) return;
       var label = defaultLabel(m && m.defaultModel);
       if (label !== C.defaultLabel) { C.defaultLabel = label; paintModelMenu(); }
     }, function () {});
@@ -248,9 +259,10 @@
   function loadModels() {
     if (C.models) return;
     C.models = [];
-    api(modelsPath()).then(function (m) {
+    var r = modelsRead();
+    api(r.path).then(function (m) {
       C.models = modelsFrom(m);
-      C.defaultLabel = defaultLabel(m && m.defaultModel);
+      if (currentRead(r)) C.defaultLabel = defaultLabel(m && m.defaultModel);
       if (C.model && !C.models.some(function (o) { return o.value === C.model; })) { C.model = ''; save(); }
       // Steer exists only where the server says so (/api/models capabilities.durableQueryJobs.steer).
       var j = m && m.capabilities && m.capabilities.durableQueryJobs;
@@ -480,7 +492,9 @@
     } else if (a.status === 'completed' && a.no) {
       acts = '<button type="button" class="cx-btn primary" data-cos="open-msg" data-no="' + a.no + '">Open in Messages</button>';
     } else if ((a.status === 'failed' || a.status === 'interrupted') && a.jobId && !a.retried && !a.prepDraftId) {
-      acts = '<button type="button" class="cx-btn primary" data-cos="again" data-cid="' + a.cid + '">Ask again</button>';
+      acts = a.againBlocked
+        ? '<button type="button" class="cx-btn" disabled aria-disabled="true">Ask again</button><span class="cc-fine">' + esc(a.againBlocked) + '</span>'
+        : '<button type="button" class="cx-btn primary" data-cos="again" data-cid="' + a.cid + '">Ask again</button>';
     }
     // A drop that became a question already shows its words as the drop: only the answer card is added.
     return (linked ? '' : '<div class="cc-line you"><div class="cc-bubble">' + esc(a.query) + '</div>' + sentAttsHtml(a.atts) + '<div class="cc-src">' + (a.replyKey ? 'Replied on the web' : 'Asked on the web') + '</div></div>') +
@@ -980,8 +994,18 @@
     var line = threadLine();
     document.querySelectorAll('[data-cos-thread]').forEach(function (el) { el.textContent = line; });
   }
+  // Every thread answer (read, a turn recorded, New thread) also says which session the next Ask continues, so the
+  // Default label follows the thread's own session (skeptic, 7.0.2). A fresh start continues none.
+  function threadIdOf(t) { return t && t.thread && typeof t.thread.id === 'string' ? t.thread.id : ''; }
+  function setThread(t) {
+    C.thread = t;
+    var n = t && t.next;
+    var sid = n ? (n.mode === 'continue' && typeof n.sessionId === 'string' ? n.sessionId : '') : (t && t.thread && typeof t.thread.sessionId === 'string' ? t.thread.sessionId : '');
+    if (sid !== C.threadSession) { C.threadSession = sid; if (threadOn()) refreshDefault(); }
+    paintThread();
+  }
   function loadThread() {
-    return api('/api/cos-thread').then(function (t) { C.thread = t; paintThread(); return t; }, function () { return null; });
+    return api('/api/cos-thread').then(function (t) { setThread(t); return t; }, function () { return null; });
   }
   // What the next Ask in the thread sends: a sessionId to continue, or none and the digest to carry.
   function threadPlan() {
@@ -1006,7 +1030,7 @@
     if (Number.isInteger(a.no) && a.no > 0) body.messageNo = a.no;
     api('/api/cos-thread/turn', { method: 'POST', body: body }).then(function (t) {
       a.turnState = 'done';
-      if (t && t.thread) { C.thread = t; paintThread(); }
+      if (t && t.thread) setThread(t);
     }, function () { a.turnState = 'done'; });
   }
   function newThread() {
@@ -1014,8 +1038,8 @@
     C.threadBusy = true;
     api('/api/cos-thread/new', { method: 'POST', body: {} }).then(function (t) {
       C.threadBusy = false;
-      C.thread = t; C.threadCarried = '';
-      paintThread();
+      C.threadCarried = '';
+      setThread(t);
     }, function (err) {
       C.threadBusy = false;
       W.toast((err && err.message) || 'New thread did not go through.');
@@ -1049,10 +1073,15 @@
     if (C.model) body.model = C.model;
     if (C.effort) body.effort = C.effort;
     // 6.99.16: an Ask from the chat's own composer belongs to the COS thread (a Reply keeps its turn's conversation).
+    // An Ask again only reaches here once askAgain has confirmed the conversation is still this one (skeptic, 7.0.2).
     a.threaded = threadOn() && !opts.replyKey;
-    if (!a.threaded && C.session && C.session.id) body.sessionId = C.session.id;
+    // A Reply never takes the chat's session: with no session of its own it starts a conversation, as its card says.
+    if (!a.threaded && !opts.replyKey && C.session && C.session.id) body.sessionId = C.session.id;
     // A reply continues the turn's own conversation (kept when it is still live; else the server starts a new one).
     if (opts.sessionId) body.sessionId = opts.sessionId;
+    // 7.0.2: which conversation this Ask is for, as Ask again needs it: the replied-to turn's session, the COS thread
+    // (its id, read when the plan is made), or the chat's own session ('' for a new one).
+    a.conv = a.replyKey ? { kind: 'reply', sessionId: opts.sessionId || '' } : a.threaded ? { kind: 'thread', threadId: '' } : { kind: 'chat', sessionId: body.sessionId || '' };
     if (opts.attachmentIds && opts.attachmentIds.length) body.attachmentIds = opts.attachmentIds.slice(0, MAX_ATTS);
     if (C.caps && C.caps.steer) body.steerable = true;
     var admit = function (retry) {
@@ -1065,6 +1094,7 @@
       });
     };
     var prepare = (a.threaded ? threadPlan().then(function (plan) {
+      a.conv.threadId = threadIdOf(C.thread);
       if (plan.sessionId) { body.sessionId = plan.sessionId; C.threadSession = plan.sessionId; }
       else if (plan.digest) body.reference = { query: THREAD_REF, response: plan.digest };
       a.carried = plan.sessionId ? '' : plan.digest ? 'summary' : 'plain';
@@ -1160,19 +1190,38 @@
     }
     return GENERIC_FAIL;
   }
-  // Ask again: the same words and files as a new Ask (a new client job id), with the model and effort picked now. The
-  // failed card keeps its line and loses the button.
+  // Ask again: the same words and files as a new Ask (a new client job id), with the model and effort picked now, to the
+  // SAME conversation as the first try. If that conversation has moved on (New thread, another thread now current, the
+  // chat on another session, thread mode switched), nothing is sent: the button stays, disabled, with why (skeptic,
+  // 7.0.2). A Reply goes to its turn's session as before. The failed card keeps its line and, once resent, loses the
+  // button. Resolves to the new Ask, or null.
+  var MOVED_ON = 'This conversation has moved on. Copy your words into a new Ask.';
+  function conversationGone(a) {
+    var c = a.conv;
+    if (!c || c.kind === 'reply') return Promise.resolve('');
+    if (c.kind === 'chat') {
+      var now = C.session && C.session.id ? String(C.session.id) : '';
+      return Promise.resolve(threadOn() || now !== c.sessionId ? MOVED_ON : '');
+    }
+    if (!threadOn() || !c.threadId) return Promise.resolve(MOVED_ON);
+    return loadThread().then(function (t) { return threadIdOf(t) === c.threadId ? '' : MOVED_ON; });
+  }
   function askAgain(cid) {
     var a = C.asks.filter(function (x) { return x.cid === cid; })[0];
     // A Prep card is never resent as a plain Ask (QA W4): Prep has its own Run.
-    if (!a || a.retried || a.prepDraftId || !(a.status === 'failed' || a.status === 'interrupted') || !a.jobId) return null;
-    a.retried = true;
-    var g = a.again || {}, o = {};
-    if (g.attachmentIds && g.attachmentIds.length) { o.attachmentIds = g.attachmentIds.slice(0, MAX_ATTS); o.atts = (g.atts || []).slice(0, MAX_ATTS); }
-    if (g.replyKey) { o.replyKey = g.replyKey; o.sessionId = g.sessionId; }
-    if (g.context) o.context = g.context;
-    o.reask = true;
-    return submitAsk(a.query, null, null, o);
+    if (!a || a.retried || a.checking || a.againBlocked || a.prepDraftId || !(a.status === 'failed' || a.status === 'interrupted') || !a.jobId) return Promise.resolve(null);
+    a.checking = true;
+    return conversationGone(a).then(function (why) {
+      a.checking = false;
+      if (why) { a.againBlocked = why; if (a.replyKey) paintReplyFeed(a.replyKey); else paintFeed(false); return null; }
+      a.retried = true;
+      var g = a.again || {}, o = {};
+      if (g.attachmentIds && g.attachmentIds.length) { o.attachmentIds = g.attachmentIds.slice(0, MAX_ATTS); o.atts = (g.atts || []).slice(0, MAX_ATTS); }
+      if (g.replyKey) { o.replyKey = g.replyKey; o.sessionId = g.sessionId; }
+      if (g.context) o.context = g.context;
+      o.reask = true;
+      return submitAsk(a.query, null, null, o);
+    });
   }
   function poll(a) {
     var started = Date.now();
@@ -2006,6 +2055,7 @@
   // to what is left above the keyboard. The cap follows each change of the visible box while the keyboard is up (a
   // keyboard rising in steps, QA W6) and goes when it closes, when focus leaves the column, or below 860 px (a fold
   // with the keyboard up never keeps it).
+  var DOCK_MIN_PX = 120;
   function dockWide(what, v) {
     var mr = C.host;
     if (!mr || !mr.style) return false;
@@ -2014,8 +2064,11 @@
     v = v || (W.viewportFit ? W.viewportFit() : null);
     if (!keep || !v || !mr.getBoundingClientRect) { mr.style.maxHeight = ''; return false; }
     var want = v.top + 8, top = mr.getBoundingClientRect().top;
-    if (what === 'open' && top > want + 1) { window.scrollBy(0, Math.round(top - want)); top = mr.getBoundingClientRect().top; }
-    mr.style.maxHeight = Math.max(120, Math.round(v.top + v.height - Math.max(top, v.top) - 8)) + 'px';
+    // On open, and on any later move that left the column's top too low to fit a usable column (an unfold with the
+    // keyboard up, canary 7.0.2 WARNING 2), the page scrolls the column up to the visible box.
+    var low = top > v.top + v.height - DOCK_MIN_PX - 8;
+    if ((what === 'open' || low) && top > want + 1) { window.scrollBy(0, Math.round(top - want)); top = mr.getBoundingClientRect().top; }
+    mr.style.maxHeight = Math.max(DOCK_MIN_PX, Math.round(v.top + v.height - Math.max(top, v.top) - 8)) + 'px';
     return true;
   }
   // 7.0.2 (QA W7): which composer the keyboard is for. html.kb-up (app.js) says only that a keyboard is up on the page;
@@ -2031,10 +2084,22 @@
     if (de && de.classList) de.classList.toggle('kb-chat', inChat);
     return inChat;
   }
+  // The composer that has the keyboard, brought into view on open and on every later change of the visible box (a fold
+  // or an unfold with the keyboard up, canary 7.0.2). Only while the keyboard is for the chat, and only for a composer
+  // (a steer box or the search box is left where it is).
+  function revealComposer() {
+    var a = document.activeElement, de = document.documentElement;
+    if (!a || !de || !de.classList || !de.classList.contains('kb-chat')) return false;
+    var form = a.closest ? a.closest('[data-cos-form]') : null;
+    if (!form || !form.scrollIntoView) return false;
+    form.scrollIntoView({ block: 'nearest' });
+    return true;
+  }
   if (W.onKeyboard) W.onKeyboard(function (what, v) {
     if (what === 'after') { settleAfterKeyboard(); return; }
     markKeyboard(what !== 'close');
     dockWide(what, v);
+    if (what !== 'close') revealComposer();
   });
   // Focus moving between fields while the keyboard stays up: mark (and dock) for the new one.
   document.addEventListener('focusin', function () {
@@ -2105,7 +2170,7 @@
     prepInstance: function () { return PREP_INST; }, notePrepInstance: function (id) { if (typeof id === 'string' && id) PREP_INST = id; },
     _prep: function () { return P; }, _openPrep: openPrep, _prepHtml: function () { return P ? prepPanelHtml(P) : ''; }, _addPrepFiles: addPrepFiles,
     _runPrep: function () { runPrep(P); }, _sha256Js: sha256Js, _closePrep: closePrep, _onPrepInput: onPrepInput, _savePrepSteer: function () { return P ? savePrepSteer(P) : null; },
-    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _settle: settleAfterKeyboard, _dockWide: dockWide, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
+    _errorLine: errorLine, _askAgain: askAgain, _askHtml: askHtml, _settle: settleAfterKeyboard, _dockWide: dockWide, _revealComposer: revealComposer, _markKeyboard: markKeyboard, _refreshDefault: refreshDefault, _defaultLabel: defaultLabel, _modelMenuHtml: modelMenuHtml,
     _state: C, _composer: composer, _classify: classify, _modelsFrom: modelsFrom, _addFiles: addFiles, _itemHtml: itemHtml, _setCaps: setCaps, _threadLine: threadLine, _postTurn: postTurn
   };
 })();

@@ -300,8 +300,16 @@ describe('7.0.2 A4: the unfolded chat fits the screen and docks above the keyboa
   it('kb-chat: the two-column chat column is the visible box; the one-column composer sticks above the keyboard', () => {
     expect(CHAT_CSS).toContain('html.kb-chat .msg-right { top: calc(var(--vv-top, 0px) + 8px); height: calc(var(--vv-h, 100dvh) - 16px); min-height: 0; }')
     expect(CHAT_CSS).toContain("html.kb-chat .msg-split[data-show='chat'] .cc-composer { bottom: var(--vv-below, 0px); padding-bottom: 8px; }")
-    // The column's feed may shrink to nothing so the composer fits a 193 px column (WebKit render, 951x209).
-    expect(CHAT_CSS).toContain('html.kb-chat .msg-right .cc-feed { min-height: 0; }')
+  })
+  it('canary WARNING 1: in the two-column card the feed gives way, never the composer (951x539 with the 44 px floor)', () => {
+    const wide = CHAT_CSS.slice(CHAT_CSS.indexOf('@media (min-width: 860px) {'), CHAT_CSS.indexOf('@media (max-width: 859px) {'))
+    expect(wide).toContain('.msg-right .cc-feed { min-height: 0; }')
+    expect(wide).toMatch(/\.msg-right \.cc-composer \{[^}]*flex: none;/)
+    // At 951x539 the card is 100dvh - 72 = 467 px. The heaviest composer there (the 44 px floor on short touch screens):
+    // padding 10 + 12, the box 44, a gap of 8, Model and Effort 44, the fine print on a row of its own (gap 4, about 17).
+    const composer = 10 + 12 + 44 + 8 + 44 + 4 + 17, head = 14 + 42 + 12 + 1
+    expect(head + composer, 'head and composer fit the card with the feed at 0').toBeLessThanOrEqual(539 - 72)
+    expect(/\.cc-feed \{[^}]*min-height: 160px/.test(CHAT_CSS), 'the base floor that caused it is still there for one column').toBe(true)
   })
   it('QA W7: nothing in the chat keys on the page-wide kb-up alone: the column on kb-chat, the composer on .cc-kb', () => {
     for (const r of noComments(read('panes/cos-chat.css')).split('\n').filter(l => /html\.kb-up/.test(l))) expect(r, r).toMatch(/\.cc-kb\b/)
@@ -343,7 +351,8 @@ describe('7.0.2 A8: a short wide touch screen is a phone', () => {
 
 // ── A6, A7, A2 scroll-back: the chat itself ──────────────────────────────────────────────────────────────────────
 const CHAT_SRC = read('panes/cos-chat.js')
-function chat(o: { models?: unknown; route?: { pane: string; args: string[] }; wide?: boolean; failAsk?: { code: string; message: string }; jobSession?: string; jobDone?: boolean } = {}) {
+function chat(o: { models?: unknown; route?: { pane: string; args: string[] }; wide?: boolean; failAsk?: { code: string; message: string }; jobSession?: string; jobDone?: boolean;
+  serve?: (method: string, path: string, body?: any) => Promise<unknown> | undefined } = {}) {
   const posts: Array<{ path: string; body: any }> = [], gets: string[] = []
   const kbHooks: Array<(w: string, v?: any) => void> = [], docListeners: Record<string, Array<(e: any) => void>> = {}
   const htmlCls = new Set<string>(), formCls = new Set<string>()
@@ -353,6 +362,8 @@ function chat(o: { models?: unknown; route?: { pane: string; args: string[] }; w
     toDate: (s: string) => new Date(s), readStore: () => ({}), writeStore: () => {}, parseRoute: () => o.route ?? { pane: 'messages', args: ['cos'] }, go: () => {},
     onKeyboard: (fn: (w: string, v?: any) => void) => kbHooks.push(fn),
     api: (path: string, opts?: { method?: string; body?: any }) => {
+      const served = o.serve ? o.serve(opts?.method || 'GET', path, opts?.body) : undefined
+      if (served !== undefined) { if (opts?.method === 'POST') posts.push({ path, body: opts.body }); else gets.push(path); return served }
       if (opts?.method === 'POST' && path === '/api/query-jobs' && o.failAsk) { posts.push({ path, body: opts.body }); return Promise.reject(Object.assign(new Error(o.failAsk.message), { code: o.failAsk.code })) }
       if (opts?.method === 'POST') { posts.push({ path, body: opts.body }); if (path === '/api/query-jobs') return Promise.resolve({ job: { jobId: 'j' + (++job), status: 'running', ...(o.jobSession ? { sessionId: o.jobSession } : {}) } }); return Promise.resolve({}) }
       gets.push(path)
@@ -369,7 +380,7 @@ function chat(o: { models?: unknown; route?: { pane: string; args: string[] }; w
   const document: any = {
     addEventListener: (t: string, fn: (e: any) => void) => { (docListeners[t] ??= []).push(fn) }, querySelectorAll: (sel: string) => (sel === '.cc-composer.cc-kb' && formCls.has('cc-kb') ? [form] : []), getElementById: () => null,
     querySelector: (sel: string) => (sel === '[data-cos-form="chat"]' ? form : null),
-    activeElement: null, hidden: false, body: { scrollHeight: 900 }, scrollingElement: se, documentElement: { classList: { toggle: (c: string, on: boolean) => { if (on) htmlCls.add(c); else htmlCls.delete(c) } } }, createElement: () => ({ setAttribute() {}, classList: { add() {} } }),
+    activeElement: null, hidden: false, body: { scrollHeight: 900 }, scrollingElement: se, documentElement: { classList: { toggle: (c: string, on: boolean) => { if (on) htmlCls.add(c); else htmlCls.delete(c) }, contains: (c: string) => htmlCls.has(c) } }, createElement: () => ({ setAttribute() {}, classList: { add() {} } }),
   }
   const timers: Array<() => void> = []
   const ctx = vm.createContext({ window, document, setTimeout: (fn: () => void) => { timers.push(fn); return timers.length }, clearTimeout, console, Date, JSON, Math, Promise, isFinite, Number, String,
@@ -439,7 +450,7 @@ describe('7.0.2 A6: a failed Ask says why, by error.code, and offers Ask again',
     const a = { cid: 'p1', jobId: 'j0', query: 'Prep me for Board', status: 'failed', error: 'x', atts: [], prepDraftId: 'draft-1', again: { attachmentIds: [], atts: [] } }
     h.c._state.asks.push(a)
     expect(h.c._askHtml(a, false)).not.toContain('data-cos="again"')
-    expect(h.c._askAgain('p1')).toBeNull()
+    expect(await h.c._askAgain('p1')).toBeNull()
     await flush()
     expect(h.posts.filter(p => p.path === '/api/query-jobs')).toHaveLength(0)
   })
@@ -448,7 +459,7 @@ describe('7.0.2 A6: a failed Ask says why, by error.code, and offers Ask again',
     h.c._state.caps = { jobs: true }
     const a = { cid: 'c2', jobId: 'j0', query: 'q', status: 'failed', error: 'x', atts: [], again: { attachmentIds: ['m_aaaaaaaaaaaaaaaaaaaaaaaa'], atts: [] } }
     h.c._state.asks.push(a)
-    const again = h.c._askAgain('c2')
+    const again = await h.c._askAgain('c2')
     await flush()
     expect(again.status).toBe('failed')
     expect(again.error).toBe('An attachment could not be read: The file expired. Attach the file again in the box and ask again.')
@@ -592,6 +603,36 @@ describe('7.0.2 A4: two columns with the keyboard up, the chat column is scrolle
     h.kbHooks.forEach(fn => fn('close'))
     expect(h.htmlCls.has('kb-chat')).toBe(false)
   })
+  it('canary WARNING 2: an unfold with the keyboard up leaves the column’s top too low: the page scrolls it up on that move too', () => {
+    const { h, mr } = wideChat(582, { top: 0, height: 239 }, 1000)
+    h.kbHooks.forEach(fn => fn('move', { top: 0, height: 239 }))
+    expect(mr._top).toBe(8)
+    expect(mr.style.maxHeight).toBe('223px')
+  })
+  it('a small move with the column already in place never scrolls the page (no fight with the browser)', () => {
+    const { h, mr } = wideChat(30, { top: 0, height: 239 }, 1000)
+    h.kbHooks.forEach(fn => fn('move', { top: 0, height: 239 }))
+    expect(mr._top, 'not moved').toBe(30)
+    expect(mr.style.maxHeight).toBe('201px')
+  })
+  it('canary WARNING 2: the chat composer with the keyboard is brought into view on each move; focus elsewhere, nothing moves', () => {
+    const { h } = wideChat(64, { top: 0, height: 209 }, 280)
+    const seen: any[] = []
+    const form: any = { classList: { add() {}, remove() {} }, scrollIntoView: (o: any) => seen.push(o) }
+    h.document.activeElement = { id: 'cos-input', closest: () => form }
+    h.c._state.host.contains = (x: any) => x && x.id === 'cos-input'
+    h.kbHooks.forEach(fn => fn('open'))
+    h.kbHooks.forEach(fn => fn('move', { top: 0, height: 266 }))
+    h.kbHooks.forEach(fn => fn('move', { top: 0, height: 209 }))
+    expect(seen).toEqual([{ block: 'nearest' }, { block: 'nearest' }, { block: 'nearest' }])
+    // A steer box in the chat: kb-chat, but not a composer.
+    h.document.activeElement = { id: 'cos-input', closest: () => null }
+    h.kbHooks.forEach(fn => fn('move', { top: 0, height: 200 }))
+    // The Messages search box: not the chat at all.
+    h.document.activeElement = { id: 'msg-q', closest: () => form }
+    h.kbHooks.forEach(fn => fn('move', { top: 0, height: 190 }))
+    expect(seen).toHaveLength(3)
+  })
   it('one column: nothing is capped (the composer docks by CSS there)', () => {
     const h = chat({ wide: false })
     const box = { id: 'cos-input' }
@@ -642,5 +683,206 @@ describe('7.0.2 B1: the unfolded Duo (951x539, touch) still loads the rail’s s
     s.clicks.forEach(fn => fn({ target: { closest: (sel: string) => (sel === '#section-btn' ? {} : null) } }))
     await flush()
     expect(s.reads).toContain('sessionList')
+  })
+})
+
+
+// ── skeptic findings on 953e926: the Default label race, the thread's session, Ask again's conversation ───────────────
+const HOST = () => ({ querySelector: () => null, set innerHTML(_v: string) {} } as any)
+const deferred = () => { let resolve!: (v: unknown) => void; const p = new Promise(r => { resolve = r }); return { p, resolve } }
+describe('7.0.2 skeptic 1: a late /api/models answer for an older session never overwrites a newer Default label', () => {
+  it('two overlapping reads resolving out of order: the newer one wins', async () => {
+    const pending: Array<{ path: string; d: ReturnType<typeof deferred> }> = []
+    const h = chat({ serve: (m, path) => { if (m === 'GET' && path.startsWith('/api/models')) { const d = deferred(); pending.push({ path, d }); return d.p } return undefined } })
+    h.c._state.caps = { jobs: true }
+    h.c.mount(HOST(), true)                                    // read 1: no session
+    await flush()
+    h.c._state.session = { id: 's-new', day: 'x' }
+    h.c._refreshDefault()                                      // read 2: the chat now continues s-new
+    expect(pending.map(x => x.path)).toEqual(['/api/models', '/api/models?sessionId=s-new'])
+    pending[1]!.d.resolve({ defaultModel: { preference: 'opus', source: 'session' }, options: [] })
+    await flush()
+    pending[0]!.d.resolve({ defaultModel: { preference: 'codex-frontier', source: 'env' }, options: [] })
+    await flush()
+    expect(h.c._modelMenuHtml(), 'the older read lands last and is dropped').toContain('<option value="">Default (Claude Opus)</option>')
+    expect(h.c._state.models, 'the model list itself is still taken from the first read').toEqual(expect.arrayContaining([expect.objectContaining({ value: 'opus' })]))
+  })
+  it('two refreshes out of order: the newer one wins', async () => {
+    const pending: Array<ReturnType<typeof deferred>> = []
+    const h = chat({ models: { options: [] }, serve: (m, path) => { if (m === 'GET' && path.startsWith('/api/models?')) { const d = deferred(); pending.push(d); return d.p } return undefined } })
+    h.c._state.caps = { jobs: true }
+    h.c.mount(HOST(), true); await flush()
+    h.c._state.session = { id: 'a', day: 'x' }; h.c._refreshDefault()
+    h.c._state.session = { id: 'b', day: 'x' }; h.c._refreshDefault()
+    pending[1]!.resolve({ defaultModel: { preference: 'fable', source: 'session' } }); await flush()
+    pending[0]!.resolve({ defaultModel: { preference: 'sonnet', source: 'session' } }); await flush()
+    expect(h.c._modelMenuHtml()).toContain('Default (Claude Fable)')
+  })
+  it('an answer about a session the chat no longer continues is dropped, even before the next read starts', async () => {
+    const pending: Array<ReturnType<typeof deferred>> = []
+    const h = chat({ serve: (m, path) => { if (m === 'GET' && path.startsWith('/api/models')) { const d = deferred(); pending.push(d); return d.p } return undefined } })
+    h.c._state.caps = { jobs: true }
+    h.c.mount(HOST(), true); await flush()
+    h.c._state.session = { id: 'moved', day: 'x' }               // the chat moved on; no new read yet
+    pending[0]!.resolve({ defaultModel: { preference: 'codex-frontier', source: 'env' }, options: [] }); await flush()
+    expect(h.c._modelMenuHtml(), 'never a label for the wrong conversation').toContain('<option value="">Default</option>')
+  })
+})
+
+describe('7.0.2 skeptic 2: reading the COS thread keys the Default label to the thread’s session', () => {
+  it('thread mode: after /api/cos-thread names its session, /api/models is read for it and the label follows', async () => {
+    const h = chat({ serve: (m, path) => {
+      if (m === 'GET' && path === '/api/cos-thread') return Promise.resolve({ protocol: 1, thread: { id: 't1', sessionId: 's-9', asks: 2 }, next: { mode: 'continue', sessionId: 's-9', reason: 'continue', digest: null } })
+      if (m === 'GET' && path === '/api/models?sessionId=s-9') return Promise.resolve({ defaultModel: { preference: 'opus', source: 'session' }, options: [] })
+      if (m === 'GET' && path === '/api/models') return Promise.resolve({ defaultModel: { preference: 'codex-frontier', source: 'env' }, options: [] })
+      return undefined
+    } })
+    h.c._state.caps = { jobs: true, dropIt: true, thread: true }
+    h.c.mount(HOST(), true)
+    await flush(10)
+    expect(h.c._state.threadSession).toBe('s-9')
+    expect(h.gets).toContain('/api/models?sessionId=s-9')
+    expect(h.c._modelMenuHtml()).toContain('Default (Claude Opus)')
+  })
+  it('a thread that starts fresh continues no session: the label is the Mac’s default again', async () => {
+    let view: any = { thread: { id: 't1', sessionId: 's-9' }, next: { mode: 'continue', sessionId: 's-9' } }
+    const h = chat({ serve: (m, path) => {
+      if (m === 'GET' && path === '/api/cos-thread') return Promise.resolve(view)
+      if (m === 'POST' && path === '/api/cos-thread/new') { view = { thread: { id: 't2', sessionId: null }, next: { mode: 'fresh', sessionId: null, digest: 'x' } }; return Promise.resolve(view) }
+      if (m === 'GET' && path === '/api/models?sessionId=s-9') return Promise.resolve({ defaultModel: { preference: 'opus', source: 'session' }, options: [] })
+      if (m === 'GET' && path === '/api/models') return Promise.resolve({ defaultModel: { preference: 'codex-frontier', source: 'env' }, options: [] })
+      return undefined
+    } })
+    h.c._state.caps = { jobs: true, dropIt: true, thread: true }
+    h.c.mount(HOST(), true); await flush(10)
+    expect(h.c._modelMenuHtml()).toContain('Default (Claude Opus)')
+    h.c.onClick({ getAttribute: (k: string) => (k === 'data-cos' ? 'new-thread' : null) })
+    await flush(10)
+    expect(h.c._state.threadSession).toBe('')
+    expect(h.c._modelMenuHtml()).toContain('Default (Codex Frontier)')
+  })
+})
+
+describe('7.0.2 skeptic 3: Ask again goes to the conversation its first try was for, or nowhere', () => {
+  // A thread-mode chat whose first Ask fails at the provider. `view` is what /api/cos-thread answers now.
+  function threaded() {
+    const state: { view: any } = { view: { thread: { id: 't1', sessionId: 's-1' }, next: { mode: 'continue', sessionId: 's-1' } } }
+    const h = chat({ serve: (m, path) => {
+      if (m === 'GET' && path === '/api/cos-thread') return Promise.resolve(state.view)
+      if (m === 'POST' && path === '/api/cos-thread/new') { state.view = { thread: { id: 't2', sessionId: null }, next: { mode: 'fresh', sessionId: null, digest: null } }; return Promise.resolve(state.view) }
+      if (m === 'POST' && path === '/api/query-jobs') return Promise.resolve({ job: { jobId: 'j-' + Math.random().toString(36).slice(2, 8), status: 'running', sessionId: 's-1' } })
+      if (m === 'GET' && path.startsWith('/api/query-jobs/j-')) return Promise.resolve({ job: { jobId: path.split('/')[3]!.split('?')[0], status: 'failed', error: { code: 'provider_limit', message: 'usage limit' } } })
+      return undefined
+    } })
+    h.c._state.caps = { jobs: true, dropIt: true, thread: true }
+    return { h, state }
+  }
+  async function failOnce(h: ReturnType<typeof chat>) {
+    h.c.mount(HOST(), true); await flush(10)
+    await h.c.askFromSheet('What did Graham say?', { attachmentIds: ['m_aaaaaaaaaaaaaaaaaaaaaaaa'], atts: [{ name: 'a.png', kind: 'image' }] })
+    while (h.timers.length) h.timers.shift()!()
+    await flush(10)
+    const a = h.c._state.asks[0]
+    expect(a.status).toBe('failed')
+    expect(a.conv).toEqual({ kind: 'thread', threadId: 't1' })
+    return a
+  }
+  const jobs = (h: ReturnType<typeof chat>) => h.posts.filter(p => p.path === '/api/query-jobs')
+  it('same thread: resent into it, with the same words and files', async () => {
+    const { h } = threaded()
+    const a = await failOnce(h)
+    const again = await h.c._askAgain(a.cid)
+    await flush(10)
+    expect(again).toBeTruthy()
+    expect(jobs(h)).toHaveLength(2)
+    expect(jobs(h)[1]!.body).toMatchObject({ query: 'What did Graham say?', attachmentIds: ['m_aaaaaaaaaaaaaaaaaaaaaaaa'], sessionId: 's-1' })
+  })
+  it('a double tap while the thread is being checked sends once', async () => {
+    const { h } = threaded()
+    const a = await failOnce(h)
+    const one = h.c._askAgain(a.cid), two = h.c._askAgain(a.cid)
+    await one; await two; await flush(10)
+    expect(jobs(h)).toHaveLength(2)
+  })
+  it('after New thread: nothing is sent, and the card says why with a disabled Ask again', async () => {
+    const { h } = threaded()
+    const a = await failOnce(h)
+    h.c.onClick({ getAttribute: (k: string) => (k === 'data-cos' ? 'new-thread' : null) })
+    await flush(10)
+    expect(await h.c._askAgain(a.cid)).toBeNull()
+    await flush(10)
+    expect(jobs(h), 'the old words never reach the new thread').toHaveLength(1)
+    const html = h.c._askHtml(a, false)
+    expect(html).toContain('disabled aria-disabled="true">Ask again</button>')
+    expect(html).toContain('This conversation has moved on. Copy your words into a new Ask.')
+    expect(html).not.toContain('data-cos="again"')
+  })
+  it('after another thread became current (switched elsewhere): nothing is sent', async () => {
+    const { h, state } = threaded()
+    const a = await failOnce(h)
+    state.view = { thread: { id: 't3', sessionId: 's-3' }, next: { mode: 'continue', sessionId: 's-3' } }
+    expect(await h.c._askAgain(a.cid)).toBeNull()
+    await flush(10)
+    expect(jobs(h)).toHaveLength(1)
+    expect(a.againBlocked).toBe('This conversation has moved on. Copy your words into a new Ask.')
+  })
+  it('thread mode switched off since: nothing is sent', async () => {
+    const { h } = threaded()
+    const a = await failOnce(h)
+    h.c._state.caps = { jobs: true }
+    expect(await h.c._askAgain(a.cid)).toBeNull()
+    expect(jobs(h)).toHaveLength(1)
+  })
+  it('a Reply goes to its turn’s session, whatever the chat or the thread holds now', async () => {
+    const h = chat({ serve: (m, path) => {
+      if (m === 'POST' && path === '/api/query-jobs') return Promise.resolve({ job: { jobId: 'j-r' + h.posts.length, status: 'running', sessionId: 'r-1' } })
+      if (m === 'GET' && path.startsWith('/api/query-jobs/j-r')) return Promise.resolve({ job: { jobId: path.split('/')[3]!.split('?')[0], status: 'failed', error: { code: 'provider_timeout', message: 'x' } } })
+      if (m === 'GET' && path === '/api/cos-thread') return Promise.resolve({ thread: { id: 't9', sessionId: 's-9' }, next: { mode: 'continue', sessionId: 's-9' } })
+      return undefined
+    } })
+    h.c._state.caps = { jobs: true, dropIt: true, thread: true }
+    h.c._state.session = { id: 'chat-1', day: 'x' }
+    const k = h.c._composer('reply-7'); k.sessionId = 'r-1'
+    h.document.getElementById = (id: string) => (id === k.inputId ? { value: 'Follow up please', trim: undefined } : null)
+    h.c.onClick({ getAttribute: (key: string) => (key === 'data-cos' ? 'ask' : null), closest: () => ({ getAttribute: () => 'reply-7' }) })
+    await flush(10)
+    while (h.timers.length) h.timers.shift()!()
+    await flush(10)
+    const a = h.c._state.asks[0]
+    expect(a.conv).toEqual({ kind: 'reply', sessionId: 'r-1' })
+    h.c._state.session = { id: 'chat-2', day: 'x' }
+    await h.c._askAgain(a.cid); await flush(10)
+    expect(jobs(h)).toHaveLength(2)
+    expect(jobs(h)[1]!.body.sessionId).toBe('r-1')
+  })
+  it('the chat without thread mode: the same session is resent to; a chat now on another session is not', async () => {
+    const serve = (m: string, path: string) => {
+      if (m === 'POST' && path === '/api/query-jobs') return Promise.resolve({ job: { jobId: 'j-c' + Math.random().toString(36).slice(2, 6), status: 'running', sessionId: 'c-1' } })
+      if (m === 'GET' && path.startsWith('/api/query-jobs/j-c')) return Promise.resolve({ job: { jobId: path.split('/')[3]!.split('?')[0], status: 'failed', error: { code: 'provider_timeout', message: 'x' } } })
+      return undefined
+    }
+    for (const moved of [false, true]) {
+      const h = chat({ serve })
+      h.c._state.caps = { jobs: true }
+      h.c._state.session = { id: 'c-1', day: 'x' }
+      await h.c.askFromSheet('hello'); while (h.timers.length) h.timers.shift()!(); await flush(10)
+      const a = h.c._state.asks[0]
+      expect(a.conv).toEqual({ kind: 'chat', sessionId: 'c-1' })
+      if (moved) h.c._state.session = { id: 'c-2', day: 'x' }
+      await h.c._askAgain(a.cid); await flush(10)
+      expect(jobs(h), moved ? 'moved on: not sent' : 'same session: sent').toHaveLength(moved ? 1 : 2)
+      if (!moved) expect(jobs(h)[1]!.body.sessionId).toBe('c-1')
+    }
+  })
+  it('a Reply with no session of its own starts a conversation; it never borrows the chat’s', async () => {
+    const h = chat()
+    h.c._state.caps = { jobs: true }
+    h.c._state.session = { id: 'chat-1', day: 'x' }
+    const k = h.c._composer('reply-8'); k.sessionId = ''
+    h.document.getElementById = (id: string) => (id === k.inputId ? { value: 'New question' } : null)
+    h.c.onClick({ getAttribute: (key: string) => (key === 'data-cos' ? 'ask' : null), closest: () => ({ getAttribute: () => 'reply-8' }) })
+    await flush(10)
+    expect(jobs(h)).toHaveLength(1)
+    expect(jobs(h)[0]!.body.sessionId).toBeUndefined()
   })
 })
