@@ -1,3 +1,21 @@
+## 6.99.34 - Calendars from macOS Calendar (PH plan P1)
+
+2026-11-07. On 6.99.33 (02dd4a7, installed privately). Private build for Miles's Mac with COS Control 0.5.378, which writes the calendar snapshot. Not published.
+
+**Default-on changes:** none for anyone who has not turned on Calendars in COS Control (Settings, Activity home, Calendars: off until Connect, nothing picked after the grant). With no snapshot file, every calendar read works exactly as in 6.99.33. Control Web Today asks `GET /api/calendar/today` once per paint and shows nothing new when it answers "not connected".
+
+**What it does once Control writes a snapshot:**
+- **One calendar source.** `lib/calendar-source.ts` reads `~/.cos-glasses/data/calendar/snapshot.json`. Snapshot 2 h old or less: used. Older: the starter-kit bridge if it reads, else the snapshot labeled "as of". Over 24 h, past its window, or an access-denied tombstone: no calendar ("not connected", never an empty day). `COS_CALENDAR_SNAPSHOT=0` ignores the file.
+- **Selected calendars only**, the same meeting on two accounts once, and two holds on one calendar stay two.
+- **Next up and prep skip** declined, all-day and multi-day events, holiday and birthday calendars, and shared-calendar events with no attendees (family flights).
+- **Prep knows the meeting.** Prep pings and Drop it items carry the event's occurrence, so Prep me opens that occurrence's draft, and a moved meeting keeps its draft.
+- **Control Web Today** lists up to two more of today's meetings under Next up, and says "Calendar as of h:mm" when the snapshot is aging.
+- **`/api/models`** reports where the calendar comes from (`calendar`: source, age, access, counts). Counts only, never titles. Not on public `/api/health`.
+
+**Known limits:** Meeting Ask gets no suggested domain for a snapshot event and asks for one. Desktop Today's later rows, a Meetings "Upcoming" strip and a Settings move are proposed, not built (operations/personal/wk45_2026/TEST_PLAN_calendar_p1_2026-11-07.md).
+
+**Tests:** calendar-source (19: staleness, tombstone, selection, dedupe, prep filter, occurrence keys, counts-only status, no titles in logs), welcome-context-snapshot (3), today-calendar-web (4), the 6.89.0 /api/models golden (+ `calendar`). 12 guards mutation-checked. Control's real snapshot output parsed by `parseSnapshot`.
+
 ## 6.99.33 - Duo follow-ups: a hung Mac, and the Other field under the keyboard
 
 2026-11-07. On 6.99.30 (a90f024, installed privately 17:20). 6.99.32 (98f3cde) was the same work installed privately at 18:09 without the small-frames keyboard fix below; 6.99.33 replaces it. Server only (Control Web); no route changed, so it works with any COS Control that runs 6.99.29. The first public build with the 6.99.30 Duo layout work below; npm goes from 6.99.29 straight to 6.99.33.
