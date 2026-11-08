@@ -44,7 +44,8 @@
       if (!job.valid()) { job.resolve(null); continue; }
       activeRequests++;
       (function (j) {
-        Promise.resolve().then(j.run).then(j.resolve, j.reject).then(function () { activeRequests--; pump(); });
+        // The strip can disappear between admission and this microtask.
+        Promise.resolve().then(function () { return j.valid() ? j.run() : null; }).then(j.resolve, j.reject).then(function () { activeRequests--; pump(); });
       })(job);
     }
   }
@@ -57,22 +58,22 @@
   }
   function fetchImage(scope, item, variant, target, ready, failed) {
     var generation = ++target.generation;
-    imageRequest(path(scope, item.id, variant), function () { return scope.alive && generation === target.generation; }, variant === 'phone').then(function (blob) {
-      if (!scope.alive || generation !== target.generation) return;
+    imageRequest(path(scope, item.id, variant), function () { return scope.alive && target.active !== false && generation === target.generation; }, variant === 'phone').then(function (blob) {
+      if (!scope.alive || target.active === false || generation !== target.generation) return;
       if (!imageBlob(blob)) throw new Error('Not a supported image');
       revoke(target); target.url = URL.createObjectURL(blob); ready(target.url);
     }).catch(function (err) {
-      if (scope.alive && generation === target.generation) failed(err);
+      if (scope.alive && target.active !== false && generation === target.generation) failed(err);
     });
   }
   function loadThumb(scope, item) {
-    if (item.busy) return;
+    if (!scope.alive || item.active === false || item.busy) return;
     item.busy = true; item.open.textContent = 'Loading image…'; item.status.textContent = 'Loading image…'; item.retry.hidden = true; item.open.disabled = true;
     fetchImage(scope, item, 'thumb', item, function (url) {
       item.busy = false; item.open.textContent = '';
       var img = element('img'); img.alt = item.label;
       img.addEventListener('error', function () {
-        if (!scope.alive || item.url !== url) return;
+        if (!scope.alive || item.active === false || item.url !== url) return;
         revoke(item); item.open.textContent = 'Image unavailable'; item.open.disabled = true;
         item.status.textContent = 'The image could not be displayed.'; item.retry.hidden = false;
       });
@@ -121,6 +122,7 @@
   }
   function takeOver(v, had) { v.spots = had ? had.spots : scrollSpots(v.opener); if (had && had.pushed) v.pushed = true; else pushEntry(v); }
   function openViewer(scope, item) {
+    if (!scope.alive || item.active === false) return;
     var had = viewer; closeViewer(false, true);
     var el = element('div', 'rm-view'), head = element('div', 'rm-view-head'), body = element('div', 'rm-view-body');
     el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', 'Image preview: ' + item.label);
@@ -156,7 +158,14 @@
     }
   }, true);
   function clearRecord(scope, record) {
-    record.items.forEach(function (item) { item.generation++; revoke(item); });
+    record.items.forEach(function (item) {
+      item.active = false; item.generation++;
+      if (item.open) {
+        if (scope.observer) scope.observer.unobserve(item.open);
+        if (item.open.__cosToolItem === item) delete item.open.__cosToolItem;
+      }
+      revoke(item);
+    });
     if (viewer && viewer.scope === scope && record.items.some(function (item) { return item.open === viewer.opener; })) closeViewer(false);
   }
   function unmount(host) {
@@ -205,14 +214,20 @@
   function toolObserver(scope) {
     if (scope.observer !== undefined) return scope.observer;
     var IO = window.IntersectionObserver;
-    scope.observer = typeof IO === 'function' ? new IO(function (entries) {
+    var observer = typeof IO === 'function' ? new IO(function (entries) {
+      // disconnect/unobserve cannot withdraw a callback already queued by the browser.
+      if (!scope.alive || scope.observer !== observer) return;
       entries.forEach(function (e) {
         if (!e.isIntersecting) return;
-        scope.observer.unobserve(e.target);
-        var item = e.target.__cosToolItem; if (item && scope.alive) loadThumb(scope, item);
+        observer.unobserve(e.target);
+        var item = e.target.__cosToolItem;
+        if (!item || item.active === false) return;
+        delete e.target.__cosToolItem;
+        loadThumb(scope, item);
       });
     }, { rootMargin: '300px 0px' }) : null;
-    return scope.observer;
+    scope.observer = observer;
+    return observer;
   }
   function mountTools(host, scope, slots) {
     slots.forEach(function (slot) {
