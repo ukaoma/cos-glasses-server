@@ -13,6 +13,7 @@ import { readComposerFacts } from './cursor-session-model.js'
 import { MAX_OUTPUT_ARTIFACT_BYTES } from './image-safety.js'
 import { getMediaStore, STAGED_TTL_MS, type MediaStore } from './media-store.js'
 import { isDeniedSecretPath, SECRET_FILE_NOTICE } from './secret-path-guard.js'
+import { previewErrorCode } from './preview-error-code.js'
 import { readRecentSessionTurns, SESSION_TURNS_MAX, type SessionTurn, type SessionTurnProjection } from './agent-session-turns.js'
 import {
   decodeToolImage, estimateBytes, MAX_TOOL_IMAGE_BYTES, promptImages, SESSION_TOOL_IMAGE_ID, TOOL_IMAGES_PER_TURN, toolResultImages, toolUsesOf,
@@ -361,6 +362,9 @@ export class AgentSessionOutputImages {
           try {
             const st = statSync(canonical)
             if (!st.isFile()) reason = 'missing'
+            // 7.0.4 QA: a hard link is the same file under another name, and realpath cannot see it. A sent file can be
+            // any text, so one with more than one link is refused as a secret. Images go through the JPEG normaliser.
+            else if (st.nlink > 1 && !NORMALIZED_IMAGE.test(name)) reason = 'secret_file'
             else size = st.size
           } catch { reason = 'missing' }
         }
@@ -412,24 +416,28 @@ export class AgentSessionOutputImages {
       const ref = found.ref
       let reason: SessionToolImage['reason'] | undefined
       if (ref.kind === 'embedded') {
-        if (estimateBytes(ref.data) > MAX_TOOL_IMAGE_BYTES) reason = 'too_large'
+        // 7.0.4 QA: a Read's embedded bytes are judged by the file it read; bytes with no path (a screenshot, a prompt
+        // attachment) have no name to judge.
+        if (ref.path && secretSource(root, ref.path)) reason = 'secret_file'
+        else if (estimateBytes(ref.data) > MAX_TOOL_IMAGE_BYTES) reason = 'too_large'
         else if (id === want) toolSources.set(id, { kind: 'embedded', mediaType: ref.mediaType, data: ref.data })
       } else if (ref.kind === 'path') {
         // A Read that names a path and carries no bytes: the output-image rule, the session's exact workspace only.
-        // 7.0.4 S2: a secret by name is refused first. Embedded bytes have no path and are exempt.
+        // 7.0.4 S2: a secret by name is refused first (embedded bytes from a Read are judged by the same name above).
+        let canonical: string | null = null
         if (secretSource(root, ref.path)) reason = 'secret_file'
         else if (root === null) reason = lookupFailed ? 'unavailable' : 'outside_workspace'
         else if (!inside(root, resolve(root, ref.path))) reason = 'outside_workspace'
         else {
-          // The canonical file decides, as for sent files: a link that leaves the workspace is outside it.
-          let canonical: string | null = null
+          // The canonical file decides, as for sent files: a link that leaves the workspace is outside it. Resolved
+          // once: a second realpath could throw if the file went away in between (7.0.4 QA), which lost the history.
           try { canonical = realpathSync(resolve(root, ref.path)) } catch { canonical = null }
           if (canonical === null) reason = 'missing'
           else if (!inside(root, canonical)) reason = 'outside_workspace'
         }
-        if (root !== null && !reason) {
+        if (root !== null && !reason && canonical !== null) {
           // The canonical path is the source, as for sent images, so the content read's no-link check holds for it.
-          toolSources.delete(id); toolSources.set(id, { kind: 'path', source: realpathSync(resolve(root, ref.path)), root, label: found.tool })
+          toolSources.delete(id); toolSources.set(id, { kind: 'path', source: canonical, root, label: found.tool })
           while (toolSources.size > SOURCES_MAX) toolSources.delete(toolSources.keys().next().value!)
         }
       } else reason = 'missing'
@@ -493,8 +501,9 @@ export class AgentSessionOutputImages {
 
   async content(provider: AgentProvider, sessionId: string, imageId: string, variant: 'thumb' | 'phone') {
     if (!SESSION_OUTPUT_IMAGE_ID.test(imageId)) return { status: 'not_found' as const }
-    // Admission covers discovery, transcript parsing, authorization and image IO alike.
-    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' as const }
+    // Admission covers discovery, transcript parsing, authorization and image IO alike. Full is `busy` (7.0.4 QA): the
+    // Mac is working on other previews, which is not the same as unreachable.
+    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'busy' as const }
     this.readers++
     try {
       const transcript = await this.deps.findSession(provider, sessionId)
@@ -507,7 +516,7 @@ export class AgentSessionOutputImages {
       if (source?.descriptor.reason === 'secret_file') return { status: 'secret' as const }
       if (!source?.root || source.descriptor.state !== 'available') return { status: 'unavailable' as const }
       return await this.workspaceImage(imageId, source.root, source.candidate.source, source.candidate.label, variant)
-    } catch { return { status: 'unavailable' as const } }
+    } catch (error) { logPreviewFailure('output_image', error); return { status: 'unavailable' as const } }
     finally { this.readers-- }
   }
 
@@ -517,9 +526,9 @@ export class AgentSessionOutputImages {
    * through the same workspace read and normalizer as an output image.
    */
   async toolImageContent(provider: AgentProvider, sessionId: string, imageId: string): Promise<
-    { status: 'ok'; bytes: Buffer; type: string } | { status: 'ok'; path: string; mime: string; bytes: number } | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' }> {
+    { status: 'ok'; bytes: Buffer; type: string } | { status: 'ok'; path: string; mime: string; bytes: number } | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'busy' }> {
     if (!SESSION_TOOL_IMAGE_ID.test(imageId)) return { status: 'not_found' }
-    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' }
+    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'busy' }
     this.readers++
     try {
       const transcript = await this.deps.findSession(provider, sessionId)
@@ -534,8 +543,8 @@ export class AgentSessionOutputImages {
       if (descriptor.state !== 'available' || !source) return { status: 'unavailable' }
       if (source.kind === 'embedded') return decodeToolImage(source)
       const normalized = await this.workspaceImage(imageId, source.root, source.source, source.label, 'phone')
-      return normalized.status === 'ok' ? normalized : { status: 'unavailable' }
-    } catch { return { status: 'unavailable' } }
+      return normalized.status === 'ok' ? normalized : normalized.status === 'busy' ? { status: 'busy' } : { status: 'unavailable' }
+    } catch (error) { logPreviewFailure('tool_image', error); return { status: 'unavailable' } }
     finally { this.readers-- }
   }
 
@@ -571,7 +580,7 @@ export class AgentSessionOutputImages {
     } finally { await file.close() }
     let job = this.pending.get(key!)
     if (!job) {
-      if (this.active >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' as const }
+      if (this.active >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'busy' as const }
       this.active++
       job = this.deps.store().ingestOutputImage({ bytes: bytes!, kind: 'generated_visual', label: source.candidate.label }).then(ref => {
         this.cache.set(key!, { id: ref.id, at: this.deps.now() })
@@ -589,9 +598,9 @@ export class AgentSessionOutputImages {
    * no component may be a link, and the file must be the same one before and after the read.
    */
   async fileContent(provider: AgentProvider, sessionId: string, fileId: string): Promise<
-    { status: 'ok'; bytes: Buffer; name: string; kind: SharedFileKind } | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' }> {
+    { status: 'ok'; bytes: Buffer; name: string; kind: SharedFileKind } | { status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'busy' }> {
     if (!SESSION_OUTPUT_FILE_ID.test(fileId)) return { status: 'not_found' }
-    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'unavailable' }
+    if (this.readers >= OUTPUT_IMAGE_CONCURRENCY) return { status: 'busy' }
     this.readers++
     try {
       const transcript = await this.deps.findSession(provider, sessionId)
@@ -608,6 +617,8 @@ export class AgentSessionOutputImages {
       try {
         const before = await file.stat()
         if (!before.isFile()) return { status: 'unavailable' }
+        // 7.0.4 QA: the hard-link rule again on the open file, so a link made after the listing is refused too.
+        if (before.nlink > 1) return { status: 'secret' }
         if (before.size > MAX_SHARED_FILE_BYTES) return { status: 'too_large' }
         const bytes = Buffer.alloc(before.size)
         let offset = 0
@@ -616,9 +627,14 @@ export class AgentSessionOutputImages {
         if (offset !== bytes.length || after.size !== before.size || after.mtimeMs !== before.mtimeMs || current.dev !== before.dev || current.ino !== before.ino || realpathSync(path) !== path) return { status: 'unavailable' }
         return { status: 'ok', bytes, name: source.file.name, kind: source.file.kind }
       } finally { await file.close() }
-    } catch { return { status: 'unavailable' } }
+    } catch (error) { logPreviewFailure('sent_file', error); return { status: 'unavailable' } }
     finally { this.readers-- }
   }
+}
+
+/** 7.0.4 QA: a preview read that failed is logged with its kind and error code only (lib/preview-error-code.ts). */
+function logPreviewFailure(kind: 'output_image' | 'tool_image' | 'sent_file', error: unknown): void {
+  console.warn(`[agent-session-previews] ${kind} read failed error=${previewErrorCode(error)}`)
 }
 
 /** Content-Type, Content-Disposition and CSP for a sent file. HTML is never served as HTML. */

@@ -227,7 +227,7 @@ describe('workspace-scoped native image projection and serving', () => {
     const service = new AgentSessionOutputImages({ ...f.deps, findSession, workspace })
     const requests = Array.from({ length: OUTPUT_IMAGE_CONCURRENCY }, () => service.content('claude', 'session', id, 'thumb'))
     expect(findSession).toHaveBeenCalledTimes(OUTPUT_IMAGE_CONCURRENCY)
-    expect(await service.content('claude', 'session', id, 'phone')).toEqual({ status: 'unavailable' })
+    expect(await service.content('claude', 'session', id, 'phone')).toEqual({ status: 'busy' }) // 7.0.4 QA: a full reader is busy, not unavailable
     expect(findSession).toHaveBeenCalledTimes(OUTPUT_IMAGE_CONCURRENCY)
     expect(workspace).not.toHaveBeenCalled()
     release()
@@ -246,7 +246,7 @@ describe('workspace-scoped native image projection and serving', () => {
     const a = f.service.content('claude', 'session', id, 'thumb'), b = f.service.content('claude', 'session', id, 'phone')
     await vi.waitFor(() => expect(f.ingest).toHaveBeenCalledTimes(1))
     // Two source reads/normalization requests are the process-wide memory ceiling.
-    expect((await f.service.content('claude', 'session', id, 'phone')).status).toBe('unavailable')
+    expect((await f.service.content('claude', 'session', id, 'phone')).status).toBe('busy')
     release(); expect((await a).status).toBe('ok'); expect((await b).status).toBe('ok')
     writeFileSync(f.artifact, 'different bytes')
     await f.service.content('claude', 'session', id, 'phone')

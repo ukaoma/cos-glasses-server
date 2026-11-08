@@ -86,6 +86,7 @@ import { sessionActFactsFor, sessionActFields } from '../lib/session-act-fields.
 import { CONTINUE_NOTE_HEADER, continueNoteAcknowledged } from '../lib/continue-plan.js'
 
 import { agentSessionOutputImages, sharedFileHeaders } from '../lib/agent-session-output-images.js'
+import { previewErrorCode } from '../lib/preview-error-code.js'
 import { sessionFilesSetting, withoutPreviews } from '../lib/session-files-setting.js'
 
 export const agentSessionsRouter = Router()
@@ -648,6 +649,35 @@ agentSessionsRouter.get('/agent-sessions/search', async (req, res) => {
 
 /** 7.0.4 S2: the 403 every local-file route answers for a file whose name says it may hold secrets. */
 export const SECRET_FILE_DENIED = 'secret_file_denied'
+/** 7.0.4 QA: the 503 a preview answers when the Mac is already reading its limit of previews (not unreachable). */
+export const PREVIEWS_BUSY = 'previews_busy'
+
+type PreviewKind = 'output_image' | 'tool_image' | 'sent_file'
+const previewLogAt = new Map<string, { at: number; quiet: number }>()
+/**
+ * 7.0.4 QA: every preview refusal and failure is logged with its kind and a reason code, never a path or a session's
+ * words. A burst of the same reason (a page of thumbnails while the reader is full) logs once per 10 seconds, with the
+ * count it held back.
+ */
+export function logPreviewOutcome(kind: PreviewKind, reason: string, now = Date.now()): void {
+  const key = kind + ':' + reason
+  const last = previewLogAt.get(key)
+  if (last && now - last.at < 10_000) { last.quiet++; return }
+  previewLogAt.set(key, { at: now, quiet: 0 })
+  console.warn(`[agent-sessions] preview ${kind} refused reason=${reason}${last?.quiet ? ` (+${last.quiet} like it)` : ''}`)
+}
+/** Tests only: forget the burst window, so each case logs. */
+export function resetPreviewLogThrottle(): void { previewLogAt.clear() }
+/** The answer for a preview read that did not succeed, logged (a missing id is ordinary and is not). */
+function previewRefusal(res: import('express').Response, kind: PreviewKind, status: 'not_found' | 'unavailable' | 'too_large' | 'secret' | 'busy'): void {
+  const noun = kind === 'sent_file' ? 'file' : 'image'
+  if (status !== 'not_found') logPreviewOutcome(kind, status === 'secret' ? SECRET_FILE_DENIED : status)
+  if (status === 'secret') { res.status(403).json({ error: SECRET_FILE_DENIED }); return }
+  if (status === 'not_found') { res.status(404).json({ error: `${noun}_not_found` }); return }
+  if (status === 'too_large') { res.status(413).json({ error: `${noun}_too_large` }); return }
+  if (status === 'busy') { res.set('Retry-After', '2'); res.status(503).json({ error: PREVIEWS_BUSY }); return }
+  res.status(503).json({ error: `${noun}_unavailable` })
+}
 
 // Authenticated by index.ts's shared /api gate. Neither the request nor the response
 // carries a filesystem path; the resolver reauthorizes exact transcript membership.
@@ -663,10 +693,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:ima
   try {
     const content = await agentSessionOutputImages.content(provider, String(req.params.sessionId), String(req.params.imageId), req.query.variant === 'thumb' ? 'thumb' : 'phone')
     // 7.0.4 S2: the id was authorized, and the file's name says it may hold secrets (lib/secret-path-guard.ts).
-    if (content.status === 'secret') { res.status(403).json({ error: SECRET_FILE_DENIED }); return }
-    if (content.status !== 'ok') {
-      res.status(content.status === 'not_found' ? 404 : 503).json({ error: content.status === 'not_found' ? 'image_not_found' : 'image_unavailable' }); return
-    }
+    if (content.status !== 'ok') { previewRefusal(res, 'output_image', content.status === 'expired' ? 'unavailable' : content.status); return }
     res.type('image/jpeg')
     // `send` defaults to `dotfiles: 'ignore'` and applies it to the WHOLE absolute path
     // when no `root` is given, so a media root under `~/.cos-glasses/data` 404'd on
@@ -678,8 +705,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-images/:ima
       if (!res.headersSent) res.status(503).json({ error: 'image_unavailable' })
       else res.destroy()
     })
-  } catch {
-    console.warn('[agent-sessions] output image unavailable')
+  } catch (error) {
+    logPreviewOutcome('output_image', 'error_' + previewErrorCode(error))
     res.status(503).json({ error: 'image_unavailable' })
   }
 })
@@ -709,15 +736,11 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/output-files/:file
   if (!provider) { res.status(404).json({ error: 'file_not_found' }); return }
   try {
     const content = await agentSessionOutputImages.fileContent(provider, String(req.params.sessionId), String(req.params.fileId))
-    if (content.status === 'secret') { res.status(403).json({ error: SECRET_FILE_DENIED }); return }
-    if (content.status !== 'ok') {
-      const code = content.status === 'not_found' ? 404 : content.status === 'too_large' ? 413 : 503
-      res.status(code).json({ error: content.status === 'not_found' ? 'file_not_found' : content.status === 'too_large' ? 'file_too_large' : 'file_unavailable' }); return
-    }
+    if (content.status !== 'ok') { previewRefusal(res, 'sent_file', content.status); return }
     res.set(sharedFileHeaders(content.name, content.kind))
     res.status(200).end(content.bytes)
-  } catch {
-    console.warn('[agent-sessions] sent file unavailable')
+  } catch (error) {
+    logPreviewOutcome('sent_file', 'error_' + previewErrorCode(error))
     res.status(503).json({ error: 'file_unavailable' })
   }
 })
@@ -735,11 +758,7 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/tool-images/:image
   if (!provider) { res.status(404).json({ error: 'image_not_found' }); return }
   try {
     const content = await agentSessionOutputImages.toolImageContent(provider, String(req.params.sessionId), String(req.params.imageId))
-    if (content.status === 'secret') { res.status(403).json({ error: SECRET_FILE_DENIED }); return }
-    if (content.status !== 'ok') {
-      const code = content.status === 'not_found' ? 404 : content.status === 'too_large' ? 413 : 503
-      res.status(code).json({ error: content.status === 'not_found' ? 'image_not_found' : content.status === 'too_large' ? 'image_too_large' : 'image_unavailable' }); return
-    }
+    if (content.status !== 'ok') { previewRefusal(res, 'tool_image', content.status); return }
     res.set('Content-Security-Policy', TOOL_IMAGE_CSP)
     res.set('Cross-Origin-Resource-Policy', 'same-origin')
     if ('path' in content) {
@@ -755,8 +774,8 @@ agentSessionsRouter.get('/agent-sessions/:provider/:sessionId/tool-images/:image
     res.set('Content-Type', content.type)
     res.set('Content-Disposition', 'inline')
     res.status(200).end(content.bytes)
-  } catch {
-    console.warn('[agent-sessions] tool image unavailable')
+  } catch (error) {
+    logPreviewOutcome('tool_image', 'error_' + previewErrorCode(error))
     res.status(503).json({ error: 'image_unavailable' })
   }
 })

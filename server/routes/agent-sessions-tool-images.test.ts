@@ -12,7 +12,7 @@ vi.mock('../lib/session-files-setting.js', () => ({
   sessionFilesSetting: { read: () => ({ enabled: enabled.value, source: 'settings', saved: enabled.value }), set: vi.fn() },
   withoutPreviews: (t: unknown) => t,
 }))
-import { agentSessionsRouter } from './agent-sessions.js'
+import { agentSessionsRouter, logPreviewOutcome, resetPreviewLogThrottle } from './agent-sessions.js'
 let server: Server, base: string, tmp: string, root: string
 const ID = 'ti_' + 'a'.repeat(64)
 const path = '/api/agent-sessions/claude/session/tool-images/' + ID + '/content'
@@ -71,5 +71,31 @@ describe('authenticated session tool-image route', () => {
     const d = await request(); expect(d.status).toBe(503); expect(await d.text()).not.toContain('/Users/')
     const e = await request(path.replace('/claude/', '/nobody/')); expect(e.status).toBe(404)
     expect(toolImageContent).toHaveBeenCalledTimes(4)
+  })
+  it('7.0.4 QA: a full reader answers 503 previews_busy with Retry-After, and every refusal is logged by reason, never by path', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    resetPreviewLogThrottle()
+    try {
+      toolImageContent.mockResolvedValueOnce({ status: 'busy' })
+      const a = await request(); expect(a.status).toBe(503); expect(await a.json()).toEqual({ error: 'previews_busy' }); expect(a.headers.get('retry-after')).toBe('2')
+      toolImageContent.mockResolvedValueOnce({ status: 'secret' })
+      const b = await request(); expect(b.status).toBe(403); expect(await b.json()).toEqual({ error: 'secret_file_denied' })
+      toolImageContent.mockResolvedValueOnce({ status: 'too_large' })
+      expect((await request()).status).toBe(413)
+      toolImageContent.mockRejectedValueOnce(Object.assign(new Error("ENOENT: no such file or directory, open '/Users/someone/secret.png'"), { code: 'ENOENT' }))
+      expect((await request()).status).toBe(503)
+      const lines = warn.mock.calls.map(c => c.join(' '))
+      for (const reason of ['reason=busy', 'reason=secret_file_denied', 'reason=too_large', 'reason=error_ENOENT']) expect(lines.some(l => l.includes('preview tool_image') && l.includes(reason)), reason).toBe(true)
+      expect(lines.join('\n')).not.toContain('/Users/')
+    } finally { warn.mockRestore() }
+  })
+  it('a burst of one reason logs once per 10 seconds, with the count it held back', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    resetPreviewLogThrottle()
+    try {
+      for (let i = 0; i < 5; i++) logPreviewOutcome('tool_image', 'busy', 1_000 + i)
+      logPreviewOutcome('tool_image', 'busy', 12_000)
+      expect(warn.mock.calls.map(c => c.join(' '))).toEqual(['[agent-sessions] preview tool_image refused reason=busy', '[agent-sessions] preview tool_image refused reason=busy (+4 like it)'])
+    } finally { warn.mockRestore() }
   })
 })

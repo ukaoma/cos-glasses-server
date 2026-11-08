@@ -5,7 +5,7 @@
  * hand-written record shapes (no real content).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentSessionOutputImages } from './agent-session-output-images.js'
@@ -91,6 +91,24 @@ describe('sent output files (SendUserFile)', () => {
   })
 })
 
+describe('sent output files: hard links (7.0.4 QA)', () => {
+  it('an innocently named hard link to .env is a secret card, and a link made after the listing is refused at read time', async () => {
+    const f = fixture(ws => {
+      writeFileSync(join(ws, 'out', 'notes.txt'), 'plain notes')
+      linkSync(join(ws, '.env'), join(ws, 'out', 'summary.txt'))
+      return [said('Sending.'), share([join(ws, 'out', 'summary.txt')]), share([join(ws, 'out', 'notes.txt')])]
+    })
+    const files = (await f.turns()).flatMap(t => t.outputFiles ?? [])
+    expect(files.map(file => [file.name, file.reason ?? file.state])).toEqual([['summary.txt', 'secret_file'], ['notes.txt', 'available']])
+    expect(await f.service.fileContent('claude', 'session', files[0].id)).toEqual({ status: 'secret' })
+    expect(await f.service.fileContent('claude', 'session', files[1].id)).toMatchObject({ status: 'ok', name: 'notes.txt' })
+    // Linked after the card was listed: the open file is checked again.
+    const cached = (await f.turns()).flatMap(t => t.outputFiles ?? [])[1]
+    linkSync(join(f.ws, 'out', 'notes.txt'), join(f.root, 'elsewhere.txt'))
+    expect(await f.service.fileContent('claude', 'session', cached.id)).toEqual({ status: 'secret' })
+  })
+})
+
 describe('output images: sent images and Markdown images', () => {
   it('a secret by name or by canonical target is a "Not shown" card and the content read answers secret; an ordinary image still serves', async () => {
     const f = fixture(ws => [
@@ -114,19 +132,23 @@ describe('output images: sent images and Markdown images', () => {
 })
 
 describe('tool images', () => {
-  it('a path-backed Read of a secret is refused (by name and through a link); embedded bytes have no path and are exempt', async () => {
+  it('a Read of a secret is refused by the name it read, path-only or with its bytes embedded (7.0.4 QA); bytes with no path are exempt', async () => {
     const f = fixture(ws => [said('Reading.'),
       use('t1', 'Read', { file_path: join(ws, 'out', 'credentials.png') }), pathOnly('t1'),
       use('t2', 'Read', { file_path: join(ws, 'out', 'chart.png') }), pathOnly('t2'),
       use('t3', 'Read', { file_path: join(ws, 'out', 'shot.png') }), pathOnly('t3'),
       use('t4', 'Read', { file_path: join(ws, '.ssh', 'diagram.png') }), embedded('t4'),
+      use('t5', 'Read', { file_path: join(ws, 'Desktop', 'credentials.png') }), embedded('t5'),
+      use('t6', 'Screenshot', {}), embedded('t6'),
     ])
     const images = (await f.turns()).flatMap(t => t.toolImages ?? [])
-    expect(images.map(i => [i.reason ?? i.state, i.notice])).toEqual([['secret_file', NOTICE], ['secret_file', NOTICE], ['available', undefined], ['available', undefined]])
+    expect(images.map(i => [i.reason ?? i.state, i.notice])).toEqual([['secret_file', NOTICE], ['secret_file', NOTICE], ['available', undefined], ['secret_file', NOTICE], ['secret_file', NOTICE], ['available', undefined]])
     expect(await f.service.toolImageContent('claude', 'session', images[0].id)).toEqual({ status: 'secret' })
     expect(await f.service.toolImageContent('claude', 'session', images[1].id)).toEqual({ status: 'secret' })
     expect((await f.service.toolImageContent('claude', 'session', images[2].id)).status).toBe('ok')
-    expect(await f.service.toolImageContent('claude', 'session', images[3].id)).toMatchObject({ status: 'ok', type: 'image/png' })
+    expect(await f.service.toolImageContent('claude', 'session', images[3].id)).toEqual({ status: 'secret' })
+    expect(await f.service.toolImageContent('claude', 'session', images[4].id)).toEqual({ status: 'secret' })
+    expect(await f.service.toolImageContent('claude', 'session', images[5].id)).toMatchObject({ status: 'ok', type: 'image/png' })
   })
 })
 

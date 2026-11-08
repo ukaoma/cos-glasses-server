@@ -39,7 +39,8 @@ export interface SessionToolImage {
   /**
    * `too_large`: the embedded image is over MAX_TOOL_IMAGE_BYTES. `outside_workspace` and
    * `unavailable`: a path-only Read, under the output-image rules. `missing`: no bytes and no path.
-   * `secret_file` (7.0.4): a path-only Read of a file whose name says it may hold secrets (lib/secret-path-guard.ts).
+   * `secret_file` (7.0.4): a Read (path-only, or with its bytes embedded) of a file whose name says it may hold secrets
+   * (lib/secret-path-guard.ts). Embedded bytes with no path (a screenshot, a prompt attachment) have no name to judge.
    */
   reason?: 'outside_workspace' | 'unavailable' | 'too_large' | 'missing' | 'secret_file'
   /** 7.0.4: the words the card shows instead, set only with `secret_file`. */
@@ -57,7 +58,8 @@ export const TOOL_IMAGE_TYPES: readonly string[] = ['image/png', 'image/jpeg', '
 const IMAGE_PATH = /\.(png|jpe?g|webp|gif)$/i
 
 export type ToolImageRef =
-  | { kind: 'embedded'; mediaType: string; data: string }
+  /** `path`: the file a Read named, when its bytes are embedded (7.0.4 QA: the secret guard judges that name). */
+  | { kind: 'embedded'; mediaType: string; data: string; path?: string }
   | { kind: 'path'; path: string }
   | { kind: 'missing' }
 export interface ToolUseMeta { name: string; path?: string }
@@ -155,15 +157,17 @@ export function toolResultImages(provider: AgentProvider, row: Record<string, un
       const b = obj(block)!
       const meta = typeof b.tool_use_id === 'string' ? uses.get(b.tool_use_id) : undefined
       const tool = toolLabel(meta?.name)
+      // 7.0.4 QA: a Read's embedded bytes keep the path it read, so `~/Desktop/credentials.png` is refused by name.
+      const readPath = meta?.name === 'Read' && meta.path ? meta.path : undefined
       const found = Array.isArray(b.content) ? b.content.map(base64Block).filter((x): x is ToolImageRef => x !== null) : []
-      if (found.length) { for (const ref of found) out.push({ tool, ref }); continue }
+      if (found.length) { for (const ref of found) out.push({ tool, ref: readPath && ref.kind === 'embedded' ? { ...ref, path: readPath } : ref }); continue }
       // A Read of an image whose message block was not written: the row's own record of the
       // result may still carry the bytes; else only the path the Read named; else nothing to show.
       const result = obj(row.toolUseResult)
       if (results.length !== 1 || b.is_error === true || result?.type !== 'image') continue
       const file = obj(result.file)
       if (file && typeof file.base64 === 'string' && file.base64 && typeof file.type === 'string' && TOOL_IMAGE_TYPES.includes(file.type)) {
-        out.push({ tool, ref: { kind: 'embedded', mediaType: file.type, data: file.base64 } }); continue
+        out.push({ tool, ref: { kind: 'embedded', mediaType: file.type, data: file.base64, ...(readPath ? { path: readPath } : {}) } }); continue
       }
       if (meta?.name === 'Read' && meta.path && IMAGE_PATH.test(meta.path)) out.push({ tool, ref: { kind: 'path', path: meta.path } })
       else out.push({ tool, ref: { kind: 'missing' } })

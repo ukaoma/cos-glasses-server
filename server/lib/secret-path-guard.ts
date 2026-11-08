@@ -7,29 +7,42 @@
 // image just as easily as a render. Containment says "this session may show files from here", not
 // "every file here is safe to put in a browser". This guard is the second question.
 //
-// HOW. By name, case-insensitively, on EVERY path segment (not only the last), so a file under a
-// directory named like a secret is refused too, and on both the path as given and its canonical
-// (realpath) form, so a symlink with an innocent name that points at a secret is still refused.
-// A path that cannot be canonicalised (gone, permission) is judged by its lexical form only; the
-// callers refuse unreadable files separately.
+// HOW. By name, case-insensitively, and on both the path as given and its canonical (realpath) form, so a symlink
+// with an innocent name that points at a secret is still refused. File-name patterns (`.env*`, `*-key.json`, `id_rsa`,
+// ...) are matched against the BASE NAME only. Folders are matched only against an exact list of secret folder names
+// (`.ssh`, `.gnupg`, `secrets`) and a few exact folder and file pairs (`.aws/config`, `.kube/config`, ...). 7.0.4 QA:
+// the first cut ran every file pattern against every folder, so a repo under `credentials-portal/`, `.envoy/` or
+// `id_verification/` had every preview refused. A path that cannot be canonicalised (gone, permission) is judged by its
+// lexical form only; the callers refuse unreadable files separately.
+//
+// LIMITS. A name-based guard cannot see a COPY of a secret under another name, and realpath does not resolve a HARD
+// link. The sent-file routes, which can serve any text, refuse a file with more than one hard link for that reason
+// (agent-session-output-images.ts); images go through the JPEG normaliser, so a text secret cannot leave as one.
 //
 // The name is fixed (`isDeniedSecretPath`): another branch codes against it.
 import { realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 
-/** Names refused wherever they appear as a path segment. Lower-cased input. */
-const SECRET_SEGMENT: readonly RegExp[] = [
+/** File names refused, matched against the base name only. Lower-cased input. */
+const SECRET_NAME: readonly RegExp[] = [
   /^\.env/, // .env*: .env, .env.local, .envrc, .env_backup …
   /-key\.json$/, // service-account keys (gcp-key.json, firebase-admin-key.json)
+  /^service-account.*\.json$/, // service-account.json, service-account-prod.json
   /^\.cos-profile/, // the COS profile and its backups
-  /^id_/, // id_*: SSH private (and public) keys, including id_dsa and id_xmss
+  /^id_(rsa|dsa|ecdsa|ed25519|xmss)/, /^id_[a-z0-9_-]*(\.pub)?$/, // SSH keys and look-alikes (id_rsa.png), not id_card.png
   /\.pem$/, /\.p12$/, /\.pfx$/, /\.key$/, // certificates and private keys
-  /^credentials/, // credentials, credentials.json, credentials.csv; this is also what refuses .aws/credentials
-  /^\.netrc$/, /^\.npmrc$/, /^\.pypirc$/, // package and network tokens
+  /^authkey_.*\.p8$/, // App Store Connect API keys (AuthKey_ABC123.p8)
+  /^credentials/, // credentials, credentials.json, credentials.csv; also .aws/credentials
+  /^\.git-credentials$/, // plaintext git tokens
+  /^tokens?\.json$/, // OAuth token stores (token.json)
+  /^secrets?\.ya?ml$/, // secrets.yaml, secrets.yml
+  /^\.netrc$/, /^\.npmrc$/, /^\.pypirc$/, /^\.pgpass$/, /^\.htpasswd$/, // package, network and database credentials
   /\.keychain/, // login.keychain-db and friends
 ]
-/** Directories whose whole subtree is refused, matched as a path segment. Lower-cased. */
-const SECRET_DIRECTORY = new Set(['.ssh', '.gnupg'])
+/** Folders whose whole subtree is refused, matched exactly as a folder name. Lower-cased. */
+const SECRET_DIRECTORY = new Set(['.ssh', '.gnupg', 'secrets'])
+/** A file refused only inside this folder (`config` alone is an ordinary name). Lower-cased `folder/file`. */
+const SECRET_PAIR = new Set(['.aws/credentials', '.aws/config', '.docker/config.json', '.kube/config', 'gh/hosts.yml'])
 
 function segments(path: string): string[] {
   return path.split(/[\\/]+/).filter(Boolean).map(s => s.toLowerCase())
@@ -37,7 +50,11 @@ function segments(path: string): string[] {
 
 function deniedLexically(path: string): boolean {
   const parts = segments(path)
-  return parts.some(part => SECRET_DIRECTORY.has(part) || SECRET_SEGMENT.some(re => re.test(part)))
+  const name = parts[parts.length - 1]
+  if (!name) return false
+  if (SECRET_NAME.some(re => re.test(name))) return true
+  if (parts.length >= 2 && SECRET_PAIR.has(parts[parts.length - 2] + '/' + name)) return true
+  return parts.slice(0, -1).some(folder => SECRET_DIRECTORY.has(folder))
 }
 
 /**

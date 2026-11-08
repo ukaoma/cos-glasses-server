@@ -42,11 +42,39 @@ describe('isDeniedSecretPath: names', () => {
     expect(isDeniedSecretPath(at('.SSH', 'config'))).toBe(true)
     expect(isDeniedSecretPath(at('.GnuPG', 'x'))).toBe(true)
   })
-  it('by path segment, not only the base name: a file under a directory named like a secret', () => {
-    expect(isDeniedSecretPath(at('.env', 'readme.txt'))).toBe(true)
-    expect(isDeniedSecretPath(at('.env_backup', 'readme.txt'))).toBe(true)
-    expect(isDeniedSecretPath(at('id_xmss', 'shot.png'))).toBe(true)
-    expect(isDeniedSecretPath(at('credentials', 'shot.png'))).toBe(true)
+  it('7.0.4 QA: file-name patterns match the base name only; a folder named like a secret file is ordinary', () => {
+    expect(isDeniedSecretPath(at('.env', 'readme.txt'))).toBe(false)
+    expect(isDeniedSecretPath(at('.env_backup', 'readme.txt'))).toBe(false)
+    expect(isDeniedSecretPath(at('id_xmss', 'shot.png'))).toBe(false)
+    expect(isDeniedSecretPath(at('credentials', 'shot.png'))).toBe(false)
+  })
+  it('must allow: real project folders the first cut refused', () => {
+    expect(isDeniedSecretPath('/Users/x/repos/credentials-portal/shots/home.png')).toBe(false)
+    expect(isDeniedSecretPath('/Users/x/.envoy/app/shot.png')).toBe(false)
+    expect(isDeniedSecretPath('/Users/x/repos/id_verification/docs/flow.png')).toBe(false)
+    expect(isDeniedSecretPath('/Users/x/repos/app/id_card.png')).toBe(false)
+    expect(isDeniedSecretPath('/Users/x/repos/my-secrets-app/out/shot.png')).toBe(false)
+  })
+  it('must refuse: real secret files, and anything inside secrets/, .ssh/ or .gnupg/', () => {
+    for (const p of ['/Users/x/repo/.env', '/Users/x/repo/x-key.json', '/Users/x/.ssh/id_rsa', '/Users/x/repo/secrets/shot.png', '/Users/x/repo/SECRETS/a/b.txt', '/Users/x/.ssh/config', '/Users/x/.gnupg/pubring.kbx']) {
+      expect(isDeniedSecretPath(p), p).toBe(true)
+    }
+  })
+  it('7.0.4 QA: more secret file names (base name)', () => {
+    for (const name of ['.git-credentials', 'token.json', 'tokens.json', 'secrets.yaml', 'secrets.yml', 'service-account.json', 'service-account-prod.json', '.pgpass', '.htpasswd', 'AuthKey_ABC123XYZ.p8', 'authkey_x.P8']) {
+      expect(isDeniedSecretPath(at('config', name)), name).toBe(true)
+    }
+    for (const name of ['token.md', 'tokens.ts', 'secrets.md', 'service-account.md', 'pgpass.txt', 'AuthKey.png', 'key.p8.md']) {
+      expect(isDeniedSecretPath(at('config', name)), name).toBe(false)
+    }
+  })
+  it('7.0.4 QA: folder and file pairs; the same file name elsewhere is ordinary', () => {
+    for (const p of ['/Users/x/.aws/credentials', '/Users/x/.aws/config', '/Users/x/.docker/config.json', '/Users/x/.kube/config', '/Users/x/.config/gh/hosts.yml']) {
+      expect(isDeniedSecretPath(p), p).toBe(true)
+    }
+    for (const p of ['/Users/x/repo/config', '/Users/x/repo/config.json', '/Users/x/repo/hosts.yml', '/Users/x/repo/.kube-notes/config']) {
+      expect(isDeniedSecretPath(p), p).toBe(false)
+    }
   })
   it('ordinary files are not denied, including near misses', () => {
     for (const name of ['shot.png', 'report.pdf', 'env.md', 'environment.ts', 'my.env-notes.txt', 'key.json', 'monkey.json', 'keys.md', 'profile.json', 'cos-profile.md', 'id-report.txt', 'identity.json', 'my_id_dsa_notes.md', 'rsa.txt', 'pem.txt', 'keyboard.ts', 'netrc.md', 'npmrc.txt', 'my-credentials.txt', 'ssh.md', 'keychain.md']) {
@@ -74,10 +102,10 @@ describe('isDeniedSecretPath: after canonicalising', () => {
       expect(isDeniedSecretPath(alias)).toBe(true)
     })
   }
-  it('an innocent directory symlink into a prefixed secret directory is denied', () => {
-    mkdirSync(at('directory-contract', '.env_backup'), { recursive: true })
-    writeFileSync(at('directory-contract', '.env_backup', 'preview.png'), 'fixture')
-    symlinkSync(at('directory-contract', '.env_backup'), at('directory-contract', 'assets'))
+  it('an innocent directory symlink into a secret directory is denied', () => {
+    mkdirSync(at('directory-contract', 'secrets'), { recursive: true })
+    writeFileSync(at('directory-contract', 'secrets', 'preview.png'), 'fixture')
+    symlinkSync(at('directory-contract', 'secrets'), at('directory-contract', 'assets'))
     expect(isDeniedSecretPath(at('directory-contract', 'assets', 'preview.png'))).toBe(true)
   })
   it('a secret-named symlink to an ordinary file stays denied', () => {
