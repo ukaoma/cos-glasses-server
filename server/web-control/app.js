@@ -3346,10 +3346,16 @@
     if (WEB_KEY.status) return Promise.resolve(WEB_KEY.status);
     if (!WEB_KEY.loading) WEB_KEY.loading = apiAnswer('/api/web-key/status').then(function (a) {
       WEB_KEY.loading = null;
-      WEB_KEY.status = { activeKeys: a.status === 200 && a.body && a.body.ok === true ? Number(a.body.activeKeys) || 0 : 0 };
+      WEB_KEY.status = a.status === 200 && a.body && a.body.ok === true && Number.isSafeInteger(a.body.activeKeys) && a.body.activeKeys >= 0 ? { activeKeys: a.body.activeKeys } : null;
       return WEB_KEY.status;
     }, function () { WEB_KEY.loading = null; return null; });
     return WEB_KEY.loading;
+  }
+  function webKeySetupUrl() {
+    var host = location.hostname;
+    // The passkey belongs to this Mac's full MagicDNS host, never an IP, local alias or public suffix.
+    if (typeof host !== 'string' || host.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net$/.test(host)) return null;
+    return 'https://' + host + ':3144/';
   }
   function phoneApprovalView(r, opts) {
     opts = opts || {};
@@ -3367,8 +3373,17 @@
     if (!webKeyCapable()) return;
     var view = phoneApprovalView(r, opts);
     webKeyStatus().then(function (st) {
-      if (!st || st.activeKeys < 1 || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;
+      if (!st || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;
       if (view.form.querySelector('[data-phone-offer]')) return;
+      if (st.activeKeys === 0) {
+        var setupUrl = webKeySetupUrl(); if (!setupUrl) return;
+        var setup = document.createElement('a');
+        setup.className = 'btn small'; setup.setAttribute('data-phone-offer', '1');
+        setup.setAttribute('data-phone-setup', '1'); setup.setAttribute('href', setupUrl); setup.setAttribute('target', '_top');
+        setup.textContent = 'Set up phone approvals';
+        view.send.parentNode.insertBefore(setup, view.send);
+        return;
+      }
       var b = document.createElement('button');
       b.type = 'button'; b.className = 'btn small'; b.setAttribute('data-phone-offer', '1');
       b.setAttribute(view.prefix === 'ta' ? 'data-ta' : 'data-action', view.prefix === 'ta' ? 'approve-phone' : 'approve-on-phone');

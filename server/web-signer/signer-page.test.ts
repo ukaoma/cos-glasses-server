@@ -147,6 +147,13 @@ describe('never in a frame', () => {
 })
 
 describe('enrollment: device key and passkey in one step, the code computed on the phone', () => {
+  it('instructs typing the phone code into the Mac and comparing fingerprints before Touch ID', () => {
+    const enrollCopy = HTML.slice(HTML.indexOf('<section id="enroll"'), HTML.indexOf('<section id="sign"'))
+    expect(enrollCopy).toContain('This phone will show a 6-digit code. Type it in COS Control on your Mac, compare the key fingerprints, then approve with Touch ID.')
+    expect(enrollCopy).toContain('<h2>Type this code on your Mac</h2>')
+    expect(enrollCopy).toContain('type this code and check that its key fingerprint matches this phone. Then approve with Touch ID.')
+    expect(enrollCopy).not.toMatch(/Mac shows a 6-digit code|Mac only if it shows this same code/)
+  })
   it('shows the locally computed code, which equals the server SAS; becomes enrolled once the Mac approves', async () => {
     server()
     const passkey = p256()

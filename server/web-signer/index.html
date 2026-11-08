@@ -20,7 +20,7 @@
 <section id="enroll" hidden>
 <h2>Set up this phone</h2>
 <p>This lets you approve messages to your Mac with a user-verified passkey on this phone. Nothing else is needed. The key stays on this phone.</p>
-<p>Next, COS Control on your Mac shows a 6-digit code. Approve it there only if it matches the code this phone shows.</p>
+<p>This phone will show a 6-digit code. Type it in COS Control on your Mac, compare the key fingerprints, then approve with Touch ID.</p>
 <label for="enroll-label">Name for this phone</label>
 <input id="enroll-label" type="text" maxlength="64" autocomplete="off" value="iPhone">
 <button type="button" id="enroll-start">Set up phone approval</button>
@@ -29,10 +29,10 @@
 </section>
 
 <section id="pending" hidden>
-<h2>Check the code on your Mac</h2>
+<h2>Type this code on your Mac</h2>
 <p class="code" id="pending-code"></p>
 <p>Key fingerprint <span class="mono" id="pending-fingerprint"></span></p>
-<p>Approve in COS Control on the Mac only if it shows this same code. This page updates when you do.</p>
+<p>In COS Control on your Mac, type this code and check that its key fingerprint matches this phone. Then approve with Touch ID. This page updates when you do.</p>
 </section>
 
 <section id="sign" hidden>

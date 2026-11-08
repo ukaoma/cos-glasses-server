@@ -32,7 +32,7 @@ class El {
   insertBefore(n: El, ref: El) { n.parentNode = this; this.children.splice(Math.max(0, this.children.indexOf(ref)), 0, n) }
 }
 
-function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any> }) {
+function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string }) {
   const prefix = opts.prefix ?? 'session'
   const form = new El('form', prefix + '-form'), actions = new El('div'), send = new El('button', prefix + '-send'), input = new El('textarea', prefix + '-input')
   form.children.push(actions); actions.children.push(send); send.parentNode = actions
@@ -45,7 +45,7 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   const state = { reading: r }
   const apiAnswer = (path: string, o: any = {}) => {
     requests.push({ path, body: o.body })
-    if (path === '/api/web-key/status') return Promise.resolve({ status: 200, body: { ok: true, activeKeys: opts.activeKeys ?? 1 } })
+    if (path === '/api/web-key/status') return opts.statusRead ? opts.statusRead() : Promise.resolve({ status: 200, body: { ok: true, activeKeys: opts.activeKeys ?? 1 } })
     if (path.startsWith('/api/web-key/packets?')) return opts.packetRead ?? Promise.resolve({ status: 200, body: { ok: true, packets: opts.packets ?? [] } })
     if (path.endsWith('/attach')) return Promise.resolve({ status: 201, body: { attached: true, bindingId: 'b-1', epoch: 2 } })
     if (path === '/api/web-key/handoff') return Promise.resolve(opts.handoff ? opts.handoff(o.body) : { status: 201, body: { ok: true, handoffId: 'h'.repeat(24), signerUrl: `https://${HOST}:3144/#h=${'h'.repeat(24)}` } })
@@ -59,11 +59,11 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
     (t: string, k?: string) => statuses.push([t, k]), () => true, () => ({}), () => opts.files ?? 'none',
     (text: string, rr: any) => { rr.draft = rr.draft && rr.draft.text === text ? rr.draft : { text, key: 'ct-key-000001', ids: [] }; return rr.draft },
     () => (opts.bound === false ? null : { bindingId: 'b-1', epoch: 2 }), () => {}, (p: string, i: string, t: string) => `/api/agent-sessions/${p}/${i}${t}`, () => 'cos-1',
-    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: HOST, assign: (u: string) => assigned.push(u) }, URL, () => 'ct-key-000001',
+    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => assigned.push(u) }, URL, () => 'ct-key-000001',
   ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean }
   const liveView = { active: true }
   const viewOpts = { r, prefix, live: () => liveView.active, status: (t: string, k?: string) => statuses.push([t, k]), files: () => opts.files ?? 'none' }
-  return { ...fns, r, state, form, input, requests, assigned, statuses, liveView, viewOpts }
+  return { ...fns, r, state, form, input, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') } }
 }
 
 describe('flag off: the composer is exactly as before', () => {
@@ -73,6 +73,7 @@ describe('flag off: the composer is exactly as before', () => {
     await flush()
     expect(h.requests).toEqual([])
     expect(h.form.querySelector('[data-action="approve-on-phone"]')).toBeNull()
+    expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
   })
   it('the composer markup is the 6.99.29 markup, byte for byte', () => {
     const PINNED = `'<form class="composer att-composer" id="session-form" data-provider="' + esc(provider) + '" data-id="' + esc(id) + '">' +
@@ -102,11 +103,12 @@ describe('flag on with an enrolled phone key', () => {
     expect(h.form.children[0].children.map(c => c.attrs['data-action'] ?? c.id)).toEqual(['approve-on-phone', 'session-send'])
     expect(h.requests.filter(q => q.path === '/api/web-key/status')).toHaveLength(1)
   })
-  it('no enrolled key: no button', async () => {
+  it('no enrolled key: setup link instead of an approval button', async () => {
     const h = harness({ signer: 1, activeKeys: 0 })
     h.paintWebKeyOffer(h.r)
     await flush()
     expect(h.form.querySelector('[data-action="approve-on-phone"]')).toBeNull()
+    expect(h.form.querySelector('[data-phone-setup]')?.textContent).toBe('Set up phone approvals')
   })
   it('the tap posts the handoff (words in the body, never the URL) and navigates top level to the signer', async () => {
     const h = harness({ signer: 1 })
@@ -148,6 +150,85 @@ describe('flag on with an enrolled phone key', () => {
     expect(h.statuses.at(-1)).toEqual(['No phone has a key yet. Set one up on the approval page first.', 'error'])
     expect(h.r.sending).toBe(false)
   })
+})
+
+describe('first phone setup, using the real Sessions and Today offer block', () => {
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: a zero-key read offers one top-level bare same-host signer link with no handoff or packet read`, async () => {
+      const h = harness({ signer: 1, activeKeys: 0, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts)
+      h.paintWebKeyOffer(h.r, h.viewOpts)
+      await flush()
+      const link = h.form.querySelector('[data-phone-setup]')!
+      expect(link).not.toBeNull()
+      expect(link.tag).toBe('a')
+      expect(link.attrs).toMatchObject({ href: `https://${HOST}:3144/`, target: '_top' })
+      expect(h.form.children[0].children.map(c => c.attrs['data-phone-setup'] ?? c.id)).toEqual(['1', prefix + '-send'])
+      expect(h.form.querySelector('[data-action="approve-on-phone"]')).toBeNull()
+      expect(h.form.querySelector('[data-ta="approve-phone"]')).toBeNull()
+      expect(h.requests).toEqual([{ path: '/api/web-key/status', body: undefined }])
+      expect(h.assigned).toEqual([])
+    })
+    it(`${prefix}: capability off never reads status or offers setup`, async () => {
+      const h = harness({ signer: 0, activeKeys: 0, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.requests).toEqual([])
+      expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+    })
+    it(`${prefix}: an enrolled key offers approval and no setup link`, async () => {
+      const h = harness({ signer: 1, activeKeys: 1, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
+      expect(h.requests.some(q => q.path.startsWith('/api/web-key/packets?'))).toBe(true)
+    })
+    for (const stateChange of ['closed', 'replaced-form'] as const) {
+      it(`${prefix}: a late zero-key status cannot paint into a ${stateChange} view`, async () => {
+        let finish!: (value: any) => void
+        const h = harness({ signer: 1, prefix, statusRead: () => new Promise(resolve => { finish = resolve }) })
+        h.paintWebKeyOffer(h.r, h.viewOpts)
+        if (stateChange === 'closed') h.liveView.active = false
+        else h.replaceForm()
+        finish({ status: 200, body: { ok: true, activeKeys: 0 } }); await flush()
+        expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+        expect(h.requests).toHaveLength(1)
+        expect(h.assigned).toEqual([])
+      })
+    }
+  }
+  for (const response of [
+    { status: 503, body: { ok: false } }, { status: 401, body: { ok: false } },
+    { status: 200, body: { ok: true } }, { status: 200, body: { ok: true, activeKeys: '0' } },
+    { status: 200, body: { ok: true, activeKeys: -1 } }, { status: 200, body: { ok: true, activeKeys: 0.5 } },
+  ]) {
+    it(`unknown status ${JSON.stringify(response)} does not claim no key and can retry`, async () => {
+      let reads = 0
+      const h = harness({ signer: 1, statusRead: async () => ++reads === 1 ? response : { status: 200, body: { ok: true, activeKeys: 0 } } })
+      h.paintWebKeyOffer(h.r); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+      h.paintWebKeyOffer(h.r); await flush()
+      expect(h.form.querySelector('[data-phone-setup]')).not.toBeNull()
+      expect(h.requests).toHaveLength(2)
+    })
+  }
+  it('a rejected status request offers neither setup nor approval and can retry', async () => {
+    let reads = 0
+    const h = harness({ signer: 1, statusRead: () => ++reads === 1 ? Promise.reject(new Error('offline')) : Promise.resolve({ status: 200, body: { ok: true, activeKeys: 0 } }) })
+    h.paintWebKeyOffer(h.r); await flush()
+    expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+    h.paintWebKeyOffer(h.r); await flush()
+    expect(h.form.querySelector('[data-phone-setup]')).not.toBeNull()
+    expect(h.requests).toHaveLength(2)
+  })
+  for (const hostname of ['localhost', '127.0.0.1', '[::1]', 'ts.net', 'tail38457f.ts.net', 'evil.example', 'user@' + HOST, HOST + ':3144', '-bad.tail38457f.ts.net', 'bad..tail38457f.ts.net']) {
+    it(`does not offer setup on unsupported host ${hostname}`, async () => {
+      const h = harness({ signer: 1, activeKeys: 0, hostname })
+      h.paintWebKeyOffer(h.r); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+      expect(h.requests).toHaveLength(1)
+      expect(h.assigned).toEqual([])
+    })
+  }
 })
 
 const PACKET = { v: 'cos-web-packet/1', packetId: 'AAECAwQFBgcICQoL', action: 'publish', artifact: '@gotcos/glasses-server', version: '7.0.6', digest: 'sha256:' + 'a'.repeat(64), channel: 'npm-latest', provider: 'claude', sessionId: 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d', createdAt: Date.now(), exp: Date.now() + 1800000 }
