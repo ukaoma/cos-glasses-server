@@ -1,6 +1,6 @@
 ## 7.0.2 - Control Web on the iPhone Duo: no blank band under the chat, a composer that fits above the keyboard, and failed Asks that say why
 
-2026-11-08. Private. On 7.0.1 (675d39e), which carries everything since public 7.0.0. Duo Build A, plus Codex's provider-limit fix (605ca92), from the 11/07 Duo design audit. Server and Control Web only; no glasses, phone or Control update is needed. Sized from what the Duo itself reported in Comet: 382x557 folded, 951x539 unfolded.
+2026-11-08. Private. On 7.0.1 FINAL (2accf69), which carries everything since public 7.0.0. Duo Build A, plus Codex's provider-limit fix (605ca92), from the 11/07 Duo design audit. Server and Control Web only; no glasses, phone or Control update is needed. Sized from what the Duo itself reported in Comet: 382x557 folded, 951x539 unfolded.
 
 **Default-on changes (no switch for any of them):**
 - **No blank band under the COS chat after the keyboard closes.** The chat route (`#/messages/cos`) no longer keeps the page's 96 px bottom padding (40 px from 600 px wide), room for a bottom bar that was removed long ago. When the keyboard closes, the page scrolls back inside its range and, if the chat box had the keyboard, the composer returns to the bottom of the screen. WebKit render at 382x557: the band under the composer went from 96 px to 0.
