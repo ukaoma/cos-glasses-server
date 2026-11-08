@@ -8,6 +8,9 @@
  * WHAT FEEDS IT. Nothing new polls the Mac on its own:
  * - PUSHED: the hook signal store (`sources.subscribe`). A hook event marks the model dirty and a flush runs within
  *   LIVE_FLUSH_MS, so a prompt, a permission prompt, a Stop or a SessionEnd reaches the page in well under a second.
+ *   A push rebuilds only the hook-derived readings (`sessions(now, { hooksOnly: true })`, from the in-memory signal
+ *   store and the registry as last read): no registry folder, broker or queue file is read on a push (ghost review W4:
+ *   dozens of busy sessions fire PreToolUse and PostToolUse many times a second). Those wait for the tick.
  * - A BOUNDED DIFF TICK every LIVE_TICK_MS, ONLY WHILE A STREAM IS OPEN, for the sources with no change signal: the
  *   Claude registry files, the permission broker's in-memory list, the queue files, and the clock itself (an open turn
  *   whose engine goes quiet past the activity cap stops being `working` with no event at all). With no stream open the
@@ -76,8 +79,11 @@ export type LiveFrame =
 export type LiveStateFrame = Extract<LiveFrame, { kind: 'session' | 'session.removed' | 'questions' | 'queue' }>
 
 export interface LiveSources {
-  /** The open sessions right now. Throwing (or `degraded`) keeps the previous model. */
-  sessions(now: number): Promise<{ sessions: LiveSessionReading[]; degraded: boolean }>
+  /**
+   * The open sessions right now. Throwing (or `degraded`) keeps the previous model. `hooksOnly`: rebuild from the hook
+   * signals and the registry as last read, reading no file (a hook push).
+   */
+  sessions(now: number, opts?: { hooksOnly?: boolean }): Promise<{ sessions: LiveSessionReading[]; degraded: boolean }>
   /** The broker's pending items; null when it cannot be read. */
   questions(now: number): LiveQuestionReading[] | null
   /** Waiting follow-ups per thread; null when they cannot be read. */
@@ -204,6 +210,10 @@ export class LiveEventsHub {
   private unsubscribe: (() => void) | null = null
   private running: Promise<void> | null = null
   private rerun = false
+  /** A full read was asked for while a run was in progress: the follow-up run is full. */
+  private rerunFull = false
+  private fullReads = 0
+  private hookReads = 0
   private primed = false
 
   constructor(options: LiveHubOptions) {
@@ -223,6 +233,8 @@ export class LiveEventsHub {
   }
 
   get newestSeq(): number { return this.seq }
+  /** Test seam: how many reads touched every source, and how many rebuilt the hook readings only. */
+  get readCounts(): { full: number; hooks: number } { return { full: this.fullReads, hooks: this.hookReads } }
   get streamCount(): number { return this.listeners.size }
 
   /** Ring bounds for a resume decision; null when empty. */
@@ -282,14 +294,20 @@ export class LiveEventsHub {
     }
   }
 
-  /** Read every source once and emit what changed. Concurrent calls share one run, plus one follow-up. */
-  refresh(): Promise<void> {
-    if (this.running) { this.rerun = true; return this.running }
+  /**
+   * Read the sources once and emit what changed: every source (`full`, the tick and the first stream), or the hook
+   * readings only (a push). Concurrent calls share one run, plus one follow-up, which is full if any caller asked.
+   */
+  refresh(full = true): Promise<void> {
+    if (this.running) { this.rerun = true; if (full) this.rerunFull = true; return this.running }
     this.running = (async () => {
       try {
+        let next = full
         do {
           this.rerun = false
-          await this.readOnce()
+          this.rerunFull = false
+          await this.readOnce(next)
+          next = this.rerunFull
         } while (this.rerun)
       } finally {
         this.running = null
@@ -322,7 +340,7 @@ export class LiveEventsHub {
     if (this.flushHandle !== null) return
     this.flushHandle = this.setTimer(() => {
       this.flushHandle = null
-      void this.refresh().catch(() => { /* readOnce never throws; belt and braces */ })
+      void this.refresh(false).catch(() => { /* readOnce never throws; belt and braces */ })
     }, this.flushMs)
   }
 
@@ -356,12 +374,14 @@ export class LiveEventsHub {
     return { seq: ++this.seq, epoch: this.epoch, at: this.now() }
   }
 
-  private async readOnce(): Promise<void> {
+  private async readOnce(full = true): Promise<void> {
     const now = this.now()
+    if (full) this.fullReads++
+    else this.hookReads++
 
     let readings = this.lastReadings
     try {
-      const read = await this.sources.sessions(now)
+      const read = await this.sources.sessions(now, full ? undefined : { hooksOnly: true })
       if (read.degraded) this.degraded = { ...this.degraded, registry: true }
       else this.degraded = { ...this.degraded, registry: false }
       // A degraded read still carries whatever it did see; it is merged over the last good list, never replacing
@@ -373,13 +393,17 @@ export class LiveEventsHub {
       this.log(`[live-events] session read failed: ${error instanceof Error ? error.message : String(error)}`)
     }
 
-    let questionRows: LiveQuestionReading[] | null = null
-    try { questionRows = this.sources.questions(now) } catch { questionRows = null }
-    let queueRows: LiveQueueReading[] | null = null
-    try { queueRows = this.sources.queue(now) } catch { queueRows = null }
+    // A hook push reads neither the broker nor the queue files: both keep their last value until the tick.
+    let questionRows: LiveQuestionReading[] | null | undefined
+    let queueRows: LiveQueueReading[] | null | undefined
+    if (full) {
+      try { questionRows = this.sources.questions(now) } catch { questionRows = null }
+      try { queueRows = this.sources.queue(now) } catch { queueRows = null }
+    }
 
     // Questions and queue: a null read keeps the last value and flags it.
-    if (questionRows === null) this.degraded = { ...this.degraded, questions: true }
+    if (questionRows === undefined) { /* not read on a push */ }
+    else if (questionRows === null) this.degraded = { ...this.degraded, questions: true }
     else {
       this.degraded = { ...this.degraded, questions: false }
       const per = new Map<string, LiveCountRow>()
@@ -400,7 +424,8 @@ export class LiveEventsHub {
         this.emit({ ...this.nextBase(), kind: 'questions', total: next.total, approvals: next.approvals, bySession: next.bySession.map(r => ({ ...r })) })
       }
     }
-    if (queueRows === null) this.degraded = { ...this.degraded, queue: true }
+    if (queueRows === undefined) { /* not read on a push */ }
+    else if (queueRows === null) this.degraded = { ...this.degraded, queue: true }
     else {
       this.degraded = { ...this.degraded, queue: false }
       const per = new Map<string, LiveCountRow>()

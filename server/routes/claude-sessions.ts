@@ -95,11 +95,15 @@ export async function readClaudePeerRecords(
   dir: string,
   probes: PeerProbes = realProbes,
   showNames = claudeSessionNamesVisible(),
+  /** 7.0.1 live events: a folder that exists but cannot be read (permissions, a transient error) throws instead of
+   *  answering "nothing alive", so the caller keeps its last good reading. A missing folder is still empty. */
+  throwWhenUnreadable = false,
 ): Promise<ClaudePeerRecord[]> {
   let names: string[]
   try {
     names = await readdir(dir)
-  } catch {
+  } catch (error) {
+    if (throwWhenUnreadable && (error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error
     // No directory means Claude Code has never run here, or the path is wrong.
     // An empty presence list is the honest answer; the route reports `enabled`
     // separately so this cannot be mistaken for "the feature is off".

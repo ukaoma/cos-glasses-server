@@ -471,7 +471,11 @@
     SL.inflight = api('/api/agent-sessions?limit=80&sort=updated').then(function (d) {
       SL.data = d; SL.at = Date.now(); SL.inflight = null;
       // 7.0.1: a fresh list is corrected by the live model at once, so it never paints a state the stream already moved.
-      if (typeof liveOn === 'function' && liveOn() && d && Array.isArray(d.sessions)) liveOverlay(d.sessions, { placeholders: true, unknown: true });
+      // Only while a stream is open and live (review W1): reconnecting, busy or hidden, the list is the newest truth.
+      if (typeof liveCanOverlay === 'function' && d && Array.isArray(d.sessions)) {
+        if (liveCanOverlay()) liveOverlay(d.sessions, { placeholders: true, unknown: true });
+        else if (liveOn()) LIVE.freshAt = SL.at;
+      }
       noteWaiting(d);
       return d;
     }, function (err) { SL.inflight = null; throw err; });
@@ -510,22 +514,39 @@
   // A hidden page holds no stream and runs no timer; coming back re-reads the list at once and resumes from the last
   // id (`?after=<epoch>.<seq>`, the contract's manual resume, since new EventSource cannot set Last-Event-ID).
   var LIVE_SILENT_MS = 30000, LIVE_POLL_MS = 5000, LIVE_WATCH_MS = 5000, LIVE_RETRY_MS = 3000, LIVE_RETRY_MAX_MS = 30000;
-  var LIVE_BUSY_MS = 30000, LIVE_ABSENT_RECHECK_MS = 10 * 60000, LIVE_LIST_DEBOUNCE_MS = 1000, LIVE_STALE_MS = 30000;
+  var LIVE_BUSY_MS = 30000, LIVE_ABSENT_RECHECK_MS = 10 * 60000, LIVE_LIST_DEBOUNCE_MS = 1000, LIVE_STALE_MS = 30000, LIVE_REPLY_LIST_GAP_MS = 12000;
   var LIVE = {
     mode: 'idle', es: null, lastId: '', epoch: null, seq: -1, frameAt: 0, skew: 0, gotFrame: false,
     sessions: {},        // key (provider:sessionid, lowercase) -> LiveSession
     questions: null, queue: null, degraded: {},
     freshAt: 0,          // when the counts on screen were last confirmed: a frame on a live stream, or a list read
     retryMs: LIVE_RETRY_MS, retry: null, poll: null, watch: null, listTimer: null, paintTimer: null,
-    absentAt: 0, hooks: [], gen: 0, pendingRows: [], pendingStructural: false
+    absentAt: 0, hooks: [], gen: 0, pendingRows: [], pendingStructural: false, listAt: 0, listDue: 0, noteSaid: null
   };
   function liveOnMode(m) { return m === 'live' || m === 'reconnecting' || m === 'busy'; }
   function liveOn() { return liveOnMode(LIVE.mode); }
+  /** The live model corrects list rows only while a stream is open and live. Reconnecting, busy or hidden, the list
+   *  read is newer than the model (review W1). The model is kept only as the base a resume applies to. */
+  function liveCanOverlay() { return LIVE.mode === 'live' && !!LIVE.es && LIVE.gotFrame; }
   function liveKey(provider, id) { return String(provider || 'claude').toLowerCase() + ':' + String(id || '').toLowerCase(); }
-  // The contract's join: provider plus the first 8 characters of the id, lowercase (the list may carry a Claude tab
-  // under the registry's short id until it finds the transcript).
-  function liveJoin(provider, id) { return String(provider || 'claude').toLowerCase() + ':' + String(id || '').toLowerCase().slice(0, 8); }
-  function liveRowJoin(s) { var k = splitSessionId(s.provider, s.session_id || s.id); return liveJoin(k.provider, k.id); }
+  function liveRowKey(s) { var k = splitSessionId(s.provider, s.session_id || s.id); return liveKey(k.provider, k.id); }
+  // The contract's join (review B1): the full id, lowercase. The 8-character prefix joins only when one side is
+  // exactly 8 characters (the list may carry a Claude tab under the registry's short id until it finds the
+  // transcript) and only one candidate matches, the rule countFor uses on the server. Codex ids are UUIDv7: their
+  // first 8 characters are a timestamp and stay the same for about 65 s, so a prefix alone joins parallel sessions.
+  function liveSame(a, b) {
+    if (a === b) return true;
+    var ia = a.slice(a.indexOf(':') + 1), ib = b.slice(b.indexOf(':') + 1);
+    if (a.slice(0, a.length - ia.length) !== b.slice(0, b.length - ib.length)) return false;
+    // One side must BE the other's first 8 characters, so it is exactly 8 long: two full ids never join here.
+    return ia.length === 8 ? ib.slice(0, 8) === ia : ia.slice(0, 8) === ib;
+  }
+  /** The one key in `keys` this key joins, or '' (none, or more than one by prefix). */
+  function liveMatch(key, keys) {
+    if (keys.indexOf(key) >= 0) return key;
+    var hits = keys.filter(function (k) { return liveSame(key, k); });
+    return hits.length === 1 ? hits[0] : '';
+  }
   function liveIso(ms) { return typeof ms === 'number' && isFinite(ms) ? new Date(ms).toISOString() : null; }
   /** The list arrays on this page (usually one array, shared): every row a live frame must correct. */
   function liveLists() {
@@ -534,15 +555,25 @@
     return out;
   }
   /** Write one LiveSession onto a list row, in the list's own fields (sxState, running_active, running). */
+  // Claude: the registry and the hooks know whether the tab is open, so the stream decides open or closed too. Codex
+  // and Cursor (review W2): the stream's "open" is only a 30-minute hook window, while the list reads the process
+  // itself, so the list decides open or closed and alive; the stream moves working, waiting or idle and the times.
+  function liveOwnsOpen(provider) { return String(provider || 'claude').toLowerCase() === 'claude'; }
   function liveWrite(row, ls) {
     var st = ls.state;
     row._live = true;
     row._liveTurnAt = (st === 'working' || st === 'waiting') && typeof ls.turnStartedAt === 'number' ? ls.turnStartedAt : null;
     row.state_source = ls.source === 'registry' ? 'registry' : 'hook';
     row.running_active = st === 'working';
-    row.running = st !== 'ended';
-    row.alive = st !== 'ended';
-    row.agent_state = st === 'working' ? 'running' : st === 'waiting' ? 'waiting' : st === 'ended' ? 'ended' : ls.failed ? 'failed' : 'idle';
+    if (liveOwnsOpen(ls.provider)) {
+      row.running = st !== 'ended';
+      row.alive = st !== 'ended';
+      row.agent_state = st === 'working' ? 'running' : st === 'waiting' ? 'waiting' : st === 'ended' ? 'ended' : ls.failed ? 'failed' : 'idle';
+    } else if (st === 'working' || st === 'waiting') {
+      row.agent_state = st === 'working' ? 'running' : 'waiting';
+    } else if (row.agent_state === 'running' || row.agent_state === 'waiting' || row.agent_state === 'idle' || row.agent_state === 'failed' || !row.agent_state) {
+      row.agent_state = row.running === false ? 'ended' : ls.failed && st !== 'ended' ? 'failed' : 'idle';
+    }
     if (row._liveTurnAt != null) row.state_since = liveIso(row._liveTurnAt);
     else if (typeof ls.updatedAt === 'number' && row._liveState !== st) row.state_since = liveIso(ls.updatedAt);
     if (typeof ls.updatedAt === 'number') row.last_activity_at = liveIso(ls.updatedAt);
@@ -552,17 +583,23 @@
   /** A session the stream says left the live model: no longer working or open (it may stay in the list as recent). */
   function liveForget(row) {
     row._live = false; row._liveTurnAt = null; row._liveState = '';
-    row.running_active = false; row.running = false;
+    row.running_active = false;
+    if (!liveOwnsOpen(splitSessionId(row.provider, row.session_id || row.id).provider)) {
+      // Codex and Cursor: still open or closed as the list says; only no longer working or waiting.
+      if (row.agent_state === 'running' || row.agent_state === 'waiting') row.agent_state = row.running === false ? 'ended' : 'idle';
+      return;
+    }
+    row.running = false;
     if (row.agent_state === 'running' || row.agent_state === 'waiting' || row.agent_state === 'idle') row.agent_state = 'ended';
   }
   /** Overlay the live model on the list rows. Returns what moved: { changed: [rows], added: n, unknown: n }. */
   function liveOverlay(rows, opts) {
     var o = opts || {}, out = { changed: [], added: 0, unknown: [] }, byJoin = {};
-    Object.keys(LIVE.sessions).forEach(function (k) { var ls = LIVE.sessions[k]; byJoin[liveJoin(ls.provider, ls.sessionId)] = ls; });
-    var seen = {};
+    Object.keys(LIVE.sessions).forEach(function (k) { var ls = LIVE.sessions[k]; byJoin[liveKey(ls.provider, ls.sessionId)] = ls; });
+    var keys = Object.keys(byJoin), seen = {};
     (rows || []).forEach(function (row) {
       if (!row) return;
-      var j = liveRowJoin(row), ls = byJoin[j];
+      var j = liveMatch(liveRowKey(row), keys), ls = j ? byJoin[j] : null;
       if (ls) { seen[j] = 1; var before = row._liveState + '|' + row._liveTurnAt + '|' + row.queued_turns; liveWrite(row, ls); if (before !== row._liveState + '|' + row._liveTurnAt + '|' + row.queued_turns) out.changed.push(row); }
       // A row this page corrected before, now missing from a whole snapshot: it left. Never a row the stream never
       // spoke for (a Codex or Cursor session whose hooks never reach the server stays as the list says), and never
@@ -577,7 +614,7 @@
         var ls = byJoin[j];
         out.unknown.push(j);
         if (!o.placeholders || (ls.state !== 'working' && ls.state !== 'waiting')) return;
-        var row = { provider: ls.provider, session_id: ls.sessionId, id: ls.sessionId, title: 'New ' + providerLabel(ls.provider) + ' session', _placeholder: true };
+        var row = { provider: ls.provider, session_id: ls.sessionId, id: ls.sessionId, title: 'New ' + providerLabel(ls.provider) + ' session', _placeholder: true, running: true, alive: true };
         liveWrite(row, ls);
         rows.unshift(row); out.added++; out.changed.push(row);
       });
@@ -586,6 +623,7 @@
   }
   /** Apply the live model to every list on the page, then repaint what shows. */
   function liveApply(whole) {
+    if (!liveCanOverlay()) return { changed: 0, added: 0, unknown: 0 };
     var lists = liveLists(), changed = [], added = 0, unknown = [];
     lists.forEach(function (rows, i) {
       var r = liveOverlay(rows, { whole: whole, placeholders: i === 0, unknown: i === 0 });
@@ -600,7 +638,7 @@
   // One frame. Returns false when the stream must be reopened (a gap or a server restart).
   function liveFrame(f) {
     if (!f || typeof f !== 'object' || typeof f.kind !== 'string') return true;
-    var now = Date.now();
+    var now = Date.now(), couldOverlay = liveCanOverlay();
     LIVE.frameAt = now;
     if (typeof f.at === 'number' && isFinite(f.at)) LIVE.skew = now - f.at;
     var stateFrame = f.kind === 'snapshot' || f.kind === 'session' || f.kind === 'session.removed' || f.kind === 'questions' || f.kind === 'queue';
@@ -621,6 +659,9 @@
     LIVE.mode = 'live';
     if (!LIVE.degraded.registry) LIVE.freshAt = now;
     liveStopPoll();
+    // The first frame on a (re)opened stream, after a list read won (Reconnecting, busy, or hidden and back): the
+    // resumed model corrects the rows again, including a resume that replayed nothing.
+    if (!couldOverlay && f.kind !== 'snapshot') liveApply(false);
     if (f.kind === 'snapshot') {
       liveApply(true);
       liveListSoon();
@@ -630,16 +671,22 @@
       var k = liveKey(f.session.provider, f.session.sessionId), was = LIVE.sessions[k];
       LIVE.sessions[k] = f.session;
       var r = liveApply(false);
-      // New, or a reply landed (`replies` went up): the words come from the list.
-      if (f.change === 'added' || !was || (typeof f.session.replies === 'number' && was && f.session.replies > (was.replies || 0))) liveListSoon();
+      // New: the words come from the list now. A reply landed (`replies` went up): the words come from the list, at
+      // most one read per LIVE_REPLY_LIST_GAP_MS (ghost W7: dozens of sessions ending turns would poll the list).
+      if (f.change === 'added' || !was) liveListSoon();
+      else if (typeof f.session.replies === 'number' && f.session.replies > (was.replies || 0)) liveListSoon(LIVE_REPLY_LIST_GAP_MS);
       if (f.session.state === 'waiting' && (!was || was.state !== 'waiting')) questionsNudge();
       liveRunHooks({ kind: 'session', key: k, session: f.session, previous: was || null, moved: r.changed });
     } else if (f.kind === 'session.removed') {
-      var j = liveJoin(f.provider, f.sessionId), gone = [];
-      delete LIVE.sessions[liveKey(f.provider, f.sessionId)];
+      var j = liveKey(f.provider, f.sessionId), gone = [];
+      delete LIVE.sessions[j];
+      var others = Object.keys(LIVE.sessions).map(function (k) { return liveKey(LIVE.sessions[k].provider, LIVE.sessions[k].sessionId); });
       liveLists().forEach(function (rows) {
         for (var i = rows.length - 1; i >= 0; i--) {
-          var row = rows[i]; if (!row || liveRowJoin(row) !== j) continue;
+          var row = rows[i]; if (!row) continue;
+          var rk = liveRowKey(row);
+          // This row is the removed session's (by the same join), and no remaining live session claims it.
+          if (liveMatch(rk, others.concat([j])) !== j) continue;
           if (row._placeholder) { rows.splice(i, 1); gone.push(row); } else if (row._live) { liveForget(row); gone.push(row); }
         }
       });
@@ -738,7 +785,18 @@
       LIVE.absentAt = Date.now(); LIVE.sessions = {};
     }
     if (m === 'reconnecting') liveStartPoll(); else if (m !== 'live') liveStopPoll();
+    if (was === 'live' && m !== 'live') liveLetGo();
     if (was !== m && (liveOnMode(was) || liveOnMode(m))) livePaint([], true);
+  }
+  /** Leaving live (review W1): placeholder rows go, and no row keeps a live mark the next list read would not
+   *  replace. The model stays only as the base a resume applies to; nothing overlays it until a frame lands. */
+  function liveLetGo() {
+    liveLists().forEach(function (rows) {
+      for (var i = rows.length - 1; i >= 0; i--) {
+        var row = rows[i]; if (!row) continue;
+        if (row._placeholder) rows.splice(i, 1); else if (row._live) { row._live = false; row._liveTurnAt = null; row._liveState = ''; }
+      }
+    });
   }
   // ── the fallbacks: a watchdog for a quiet stream, and the 5 s list read while reconnecting ──
   function liveStartWatch() {
@@ -761,7 +819,8 @@
   /** Read the list now, and swap it in on every pane that shows it. Resolves when it landed (or failed). */
   function livePollOnce() {
     var before = SL.data && SL.data.sessions;
-    var keysOf = function (a) { return (a || []).map(function (s) { return s ? liveRowJoin(s) : ''; }).join(','); };
+    LIVE.listAt = Date.now();
+    var keysOf = function (a) { return (a || []).map(function (s) { return s ? liveRowKey(s) : ''; }).join(','); };
     return sessionList(0).then(function (d) {
       var rows = (d && d.sessions) || [];
       var moved = keysOf(before) !== keysOf(rows);
@@ -772,10 +831,17 @@
       return true;
     }, function () { if (liveOn()) livePaint([], false); return false; });
   }
-  /** A fresh list soon (debounced), for the words of a session that appeared, left or replied. */
-  function liveListSoon() {
+  /** A fresh list soon (debounced), for the words of a session that appeared, left or replied. With `gapMs` (a reply),
+   *  no sooner than gapMs after the last list read, and never later than a read already due. */
+  function liveListSoon(gapMs) {
+    var now = Date.now(), due = now + LIVE_LIST_DEBOUNCE_MS;
+    if (gapMs) {
+      if (LIVE.listTimer) return;   // a read is already due; it brings this reply's words too
+      due = Math.max(due, (LIVE.listAt || 0) + gapMs);
+    }
     clearTimeout(LIVE.listTimer);
-    LIVE.listTimer = setTimeout(function () { LIVE.listTimer = null; if (liveVisible()) livePollOnce(); }, LIVE_LIST_DEBOUNCE_MS);
+    LIVE.listDue = due;
+    LIVE.listTimer = setTimeout(function () { LIVE.listTimer = null; if (liveVisible()) livePollOnce(); }, due - now);
   }
   // ── coming back: visible, back from the back-forward cache, back online ──
   function liveResume() {
@@ -791,11 +857,13 @@
     if (wasOn) livePollOnce();
     if (!LIVE.es) { clearTimeout(LIVE.retry); LIVE.retry = null; LIVE.retryMs = LIVE_RETRY_MS; liveOpen(); }
     liveStartWatch();
+    liveTickStart();   // stops itself at once when nothing on screen ticks
     liveNoteTick();
   }
   function liveHide() {
-    // A hidden page holds no stream (a locked phone drops it anyway) and spends no timer.
-    liveClose(); liveStopPoll(); clearTimeout(LIVE.retry); LIVE.retry = null; clearTimeout(LIVE.listTimer); LIVE.listTimer = null;
+    // A hidden page holds no stream (a locked phone drops it anyway) and runs no live timer: not the stream, the list
+    // read, the retry, the watchdog or the 1 s clock (ghost note 1).
+    liveClose(); liveStopPoll(); liveStopWatch(); liveTickStop(); clearTimeout(LIVE.retry); LIVE.retry = null; clearTimeout(LIVE.listTimer); LIVE.listTimer = null;
   }
   function liveStart() {
     if (LIVE.mode !== 'idle') return;
@@ -1433,9 +1501,19 @@
     else if (TR.msg && TR.doneAt && now - TR.doneAt < 10 * 60000) parts.push(TR.msg);
     return parts.join('. ');
   }
+  /** What the line says, without its numbers: the polite status line speaks only when this changes (review N10). */
+  function liveNoteState(now) {
+    now = now || Date.now();
+    var age = liveAge(now);
+    return [TR.busy ? 'busy' : '', LIVE.mode === 'reconnecting' ? 'reconnecting' : '', age ? 'age' : '',
+      TR.doneAt && !age && now - TR.doneAt < 10 * 60000 ? 'done' : '', TR.retryAt > now ? 'retry' : '',
+      TR.msg && TR.doneAt && now - TR.doneAt < 10 * 60000 ? TR.msg : ''].join('|');
+  }
   function liveNoteTick() {
-    var el = $('today-live-note');
-    if (el) { var t = liveNoteText(); if (el.textContent !== t) el.textContent = t; el.classList.toggle('warn', LIVE.mode === 'reconnecting'); }
+    var el = $('today-live-note'), t = liveNoteText();
+    if (el) { if (el.textContent !== t) el.textContent = t; el.classList.toggle('warn', LIVE.mode === 'reconnecting'); }
+    var said = $('today-live-status'), key = liveNoteState();
+    if (said && LIVE.noteSaid !== key) { LIVE.noteSaid = key; said.textContent = t; }
     var sx = document.querySelector('#sessions-hero .sx-live-note');
     if (sx) { var n = liveSessionsNote(); sx.textContent = n ? ' · ' + n : ''; }
   }
@@ -1532,9 +1610,11 @@
     (TODAY.needs || []).forEach(function (it) {
       var k = splitSessionId(it.provider, it.sessionId);
       if (k.id && seen[k.provider + '|' + String(k.id).toLowerCase()]) return;   // Control: a Work row for a waiting session is the session's row
-      // 7.0.1 (Miles 11/07): the server saw the session move on after its needs-input or blocked report
-      // (work-activity.ts supersededBy). That report is history, not something waiting on you.
-      if (it.supersededAt) return;
+      // 7.0.1 (Miles 11/07): the server saw you start a turn in the session after its needs-input or blocked report
+      // (work-activity.ts supersededBy). That report is history, not something waiting on you. Only the item that
+      // regrouped to running leaves: a superseded completed handoff regroups to "Needs a look", which the Messages
+      // badge counts, so it stays here too (review N6).
+      if (it.supersededAt && it.group === 'running') return;
       rows.push({ kind: 'work', tier: 3, item: it, key: k.id ? k.provider + '|' + k.id : '' });
     });
     var groups = TODAY.voices.groups || [];
@@ -5786,7 +5866,13 @@
     live: {
       mode: function () { return LIVE.mode; },
       on: function (fn) { if (typeof fn === 'function') LIVE.hooks.push(fn); },
-      session: function (provider, id) { var j = liveJoin(provider, id), hit = null; Object.keys(LIVE.sessions).forEach(function (k) { var ls = LIVE.sessions[k]; if (liveJoin(ls.provider, ls.sessionId) === j) hit = ls; }); return hit; },
+      session: function (provider, id) {
+        if (!liveCanOverlay()) return null;   // outside live the list is the truth (review W1)
+        var byKey = {};
+        Object.keys(LIVE.sessions).forEach(function (k) { var ls = LIVE.sessions[k]; byKey[liveKey(ls.provider, ls.sessionId)] = ls; });
+        var j = liveMatch(liveKey(provider, id), Object.keys(byKey));
+        return j ? byKey[j] : null;
+      },
       age: function () { return liveAge(); },
       clock: liveClock
     }

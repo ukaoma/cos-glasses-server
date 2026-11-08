@@ -40,7 +40,12 @@ import type { PermissionBroker } from '../lib/permission-broker.js'
 
 /** Inside a 30 s client deadline with room for one lost write; the same cadence as `/stream`. */
 export const LIVE_EVENTS_HEARTBEAT_MS = 15_000
-/** Open streams per server. A phone, a laptop and a few tabs each hold one; 16 is room plus a ceiling. */
+/**
+ * Open streams per server. A phone, a laptop and a few tabs each hold one; 16 is room plus a ceiling. At the ceiling the
+ * OLDEST stream is closed to make room (ghost review W5): a peer that vanished behind Tailscale holds its slot until TCP
+ * gives up, and the newest request is usually the person who just opened the page. A closed live client reconnects
+ * with its last id.
+ */
 export const LIVE_EVENTS_MAX_STREAMS = 16
 /** Unsent bytes past this close the stream: a slow client is dropped, never buffered without limit. */
 export const LIVE_EVENTS_MAX_BUFFER_BYTES = 256 * 1024
@@ -141,14 +146,28 @@ export function liveReadings(input: { peers: ClaudePeerRecord[] | null; signals:
   return out
 }
 
-/** The server's own sources. `broker` is read lazily so the route can mount before the broker exists. */
-export function realLiveSources(deps: { broker: () => PermissionBroker | null }): LiveSources {
+/**
+ * The server's own sources. `broker` is read lazily so the route can mount before the broker exists. `readPeers` is a
+ * test seam for the registry read.
+ */
+export function realLiveSources(deps: { broker: () => PermissionBroker | null; readPeers?: () => Promise<ClaudePeerRecord[]> }): LiveSources {
+  const readPeers = deps.readPeers ?? (() => readClaudePeerRecords(claudeSessionsDir(), undefined, undefined, true))
+  // The registry as last read: a hook push rebuilds against it instead of reading the folder (ghost review W4).
+  let last: { peers: ClaudePeerRecord[] | null; degraded: boolean } | null = null
   return {
-    async sessions(now) {
+    async sessions(now, opts) {
       let peers: ClaudePeerRecord[] | null = null
       let degraded = false
-      if (claudeSessionsEnabled()) {
-        try { peers = await readClaudePeerRecords(claudeSessionsDir()) } catch { peers = null; degraded = true }
+      if (opts?.hooksOnly && last) {
+        peers = last.peers
+        degraded = last.degraded
+      } else if (claudeSessionsEnabled()) {
+        // A folder that cannot be read throws: degraded, and the hub keeps its last good model rather than marking
+        // every tab ended (ghost review note 8).
+        try { peers = await readPeers() } catch { peers = null; degraded = true }
+        last = { peers, degraded }
+      } else {
+        last = { peers: null, degraded: false }
       }
       const signals = sessionHooksEnabled() ? sessionSignalStore.snapshot() : []
       return { sessions: liveReadings({ peers, signals, now, signalFor }), degraded }
@@ -182,6 +201,7 @@ export interface LiveEventsRouterDeps {
   maxStreams?: number
   heartbeatMs?: number
   maxBufferBytes?: number
+  log?: (line: string) => void
 }
 
 /**
@@ -209,15 +229,28 @@ export function liveEventsHandler(deps: LiveEventsRouterDeps): (req: Request, re
   const maxStreams = deps.maxStreams ?? LIVE_EVENTS_MAX_STREAMS
   const heartbeatMs = deps.heartbeatMs ?? LIVE_EVENTS_HEARTBEAT_MS
   const maxBuffer = deps.maxBufferBytes ?? LIVE_EVENTS_MAX_BUFFER_BYTES
+  const log = deps.log ?? (line => console.log(line))
   let open = 0
+  /** Each open stream's teardown, oldest first (a Map keeps insertion order). */
+  const streams = new Map<number, (why: string) => void>()
+  let nextStream = 0
 
   return async (req: Request, res: Response) => {
     res.set('Cache-Control', 'private, no-store')
     if (open >= maxStreams) {
-      res.status(503).json({ error: 'too many live streams', reason: 'live_events_capacity' })
-      return
+      const oldest = streams.entries().next().value as [number, (why: string) => void] | undefined
+      if (oldest) {
+        log(`[live-events] stream cap ${maxStreams} reached: closing the oldest stream to admit a new one (open ${open})`)
+        oldest[1]('evicted')
+      }
+      if (open >= maxStreams) {
+        log(`[live-events] stream cap ${maxStreams} reached: refused a new stream, none could be closed (open ${open})`)
+        res.status(503).json({ error: 'too many live streams', reason: 'live_events_capacity' })
+        return
+      }
     }
     open++
+    const streamId = nextStream++
     let closed = false
     let detach: (() => void) | null = null
     let heartbeat: ReturnType<typeof setInterval> | null = null
@@ -228,33 +261,36 @@ export function liveEventsHandler(deps: LiveEventsRouterDeps): (req: Request, re
       if (pending.length > 512) pending.shift()
     }
 
-    const teardown = (): void => {
+    const teardown = (why = 'closed'): void => {
       if (closed) return
       closed = true
       open--
+      streams.delete(streamId)
       if (heartbeat !== null) clearInterval(heartbeat)
       detach?.()
+      if (why === 'slow') log(`[live-events] dropped a stream that stopped reading (${res.writableLength} bytes unsent, open ${open})`)
       try { res.end() } catch { /* already gone */ }
     }
+    streams.set(streamId, teardown)
     const write = (frame: LiveFrame): void => {
       if (closed) return
       try {
         res.write(frameText(frame))
         // BACKPRESSURE: a client that is not reading is dropped. It reconnects with its last id and resumes or
         // snapshots; holding its frames in memory without limit is how one stuck phone grows the server.
-        if (res.writableLength > maxBuffer) teardown()
+        if (res.writableLength > maxBuffer) teardown('slow')
       } catch {
         teardown()
       }
     }
 
-    req.on('close', teardown)
-    res.on('error', teardown)
+    req.on('close', () => teardown())
+    res.on('error', () => teardown())
 
     try {
       detach = await deps.hub.attach(frame => deliver(frame))
     } catch {
-      if (!closed) { closed = true; open--; res.status(503).json({ error: 'live events unavailable', reason: 'live_events_unavailable' }) }
+      if (!closed) { closed = true; open--; streams.delete(streamId); res.status(503).json({ error: 'live events unavailable', reason: 'live_events_unavailable' }) }
       return
     }
     if (closed) { detach(); return }
@@ -283,6 +319,9 @@ export function liveEventsHandler(deps: LiveEventsRouterDeps): (req: Request, re
       write(deps.hub.resumeFrame(replay.length))
     }
     deliver = write
+    // A write during the snapshot or replay can tear the stream down (a throw, or the buffer cap): no heartbeat then,
+    // or its interval would outlive the stream (review N1).
+    if (closed) return
 
     heartbeat = setInterval(() => write(deps.hub.heartbeatFrame()), heartbeatMs)
     ;(heartbeat as { unref?: () => void }).unref?.()

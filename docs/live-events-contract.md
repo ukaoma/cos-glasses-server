@@ -25,9 +25,11 @@ GET /api/events
 - **Switch:** `COS_WEB_LIVE_EVENTS`. Absent or anything but `0`: on. `0`: the route is not registered at all, so the
   request falls through to the normal 404. Read once at server start. A client that gets 404 (or any non-200, or a
   non-`text/event-stream` answer) uses today's polling, which is also what it does against a server older than 7.0.1.
-- **Capacity:** at most `LIVE_EVENTS_MAX_STREAMS` (16) open streams per server. One more answers
-  `503 { reason: "live_events_capacity" }` JSON, before any stream headers. The client falls back to polling and
-  retries later (not in a tight loop: back off to 30 s or more).
+- **Capacity:** at most `LIVE_EVENTS_MAX_STREAMS` (16) open streams per server. One more closes the **oldest** open
+  stream to make room, and the server logs it with the open count (a peer that vanished behind Tailscale would
+  otherwise hold its slot until TCP gives up). The closed client sees its stream end and reconnects with its last id.
+  Only when no stream can be closed does a request answer `503 { reason: "live_events_capacity" }` JSON, before any
+  stream headers (also logged). The client then falls back to polling and retries later (back off to 30 s or more).
 - **Response headers:** `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`,
   `X-Accel-Buffering: no` (the same set `/api/agent-sessions/:p/:id/stream` uses through Tailscale Serve), and the
   first bytes are `retry: 3000`.
@@ -85,8 +87,9 @@ One session was added or changed. Upsert by key (see Ids).
 
 ### `session.removed`
 
-A session left the live model (it ended more than `LIVE_ENDED_LINGER_MS`, 10 minutes, ago, or its registry record
-and hook record are both gone). Remove it from live counts. It may still be in the list as a recent session.
+A session left the live model: it has been `ended` for `LIVE_ENDED_LINGER_MS` (10 minutes). A session whose registry
+record and hook record are both gone is first marked `ended` (a `session` frame) and lingers the same 10 minutes; there
+is no immediate removal. Remove it from live counts. It may still be in the list as a recent session.
 
 ```json
 { "kind": "session.removed", "seq": 44, "epoch": 1762578000123, "at": 1762578003000, "provider": "claude", "sessionId": "…" }
@@ -148,7 +151,7 @@ Sent after a successful replay (see Resume) so the client knows its model is cur
 
 | field | meaning |
 | ----- | ------- |
-| `state` | `working`: the agent is generating now. This is the same test as a list row's `running_active` (the pet's and Running card's test): an open turn whose engine last spoke inside the hook activity cap. `waiting`: the agent is blocked on the user (a permission prompt, a question, a plan, MCP input). `idle`: open, not working. `ended`: the engine said the session ended; it lingers 10 minutes as `ended`, then a `session.removed` follows. |
+| `state` | `working`: the agent is generating now. This is the same test as a list row's `running_active` (the pet's and Running card's test): an open turn whose engine last spoke inside the hook activity cap. One approximation: a Claude tab with no hooks whose registry says `busy` is `working` without the transcript clock the list reads. For Codex and Cursor, `ended` and the open window are the hook window only (open while a hook spoke in the last 30 minutes or a turn or wait is open); the list's process check decides whether such a session is open, so a client takes only working, waiting or idle and the times from the stream for those providers. `waiting`: the agent is blocked on the user (a permission prompt, a question, a plan, MCP input). `idle`: open, not working. `ended`: the engine said the session ended; it lingers 10 minutes as `ended`, then a `session.removed` follows. |
 | `startedAt` | When this session was first seen (registry `startedAt` for a Claude tab, else the first hook event this server heard). ms, or `null`. |
 | `turnStartedAt` | When the current turn started (the prompt that opened it). ms while `state` is `working` or `waiting`, else `null`. **Tick the running clock locally from this**: `elapsed = Date.now() - skew - turnStartedAt`, where `skew = Date.now() - frame.at` measured on the frame you got it in. |
 | `updatedAt` | The newest thing the server heard for this session (a hook event or a registry status move), ms. Changes that touch only `updatedAt` are coalesced to at most one `session` frame per session every `LIVE_ACTIVITY_MIN_MS` (5 s); every other change is sent at once. |
@@ -166,9 +169,12 @@ model names. Ids, states, counts and times only, the same privacy as the pet.
 The key is `provider + ":" + sessionId`, with `sessionId` lowercase.
 
 - `sessionId` is the full id the server has. For a Claude tab that is the registry's full UUID.
+- **Match a list row to a live session by provider plus the full id**, lowercase.
 - The list (`GET /api/agent-sessions`) sometimes carries a Claude tab under the registry's **8-character** short id
-  until it finds the transcript. **Match a list row to a live session by provider plus the first 8 characters of the
-  id**, lowercase, exactly as `deriveForRow` joins registry records to rows.
+  until it finds the transcript. Use the 8-character prefix **only when one side is exactly 8 characters long, and only
+  when exactly one candidate matches**, the rule `countFor` uses on the server. Never join two full ids on their
+  prefix: Codex ids are UUIDv7, whose first 8 characters are a millisecond timestamp's top bits and stay the same for
+  about 65 seconds, so parallel Codex sessions started together share them.
 
 ## Resume
 
@@ -191,11 +197,16 @@ reaches back, else a snapshot).
 ## What feeds it (server side, for reviewers)
 
 - **Hook signals** (`sessionSignalStore.subscribe`): Claude, and Codex and Cursor sessions whose hooks reach the store.
-  Pushed; a change is flushed within `LIVE_FLUSH_MS` (150 ms).
+  Pushed; a change is flushed within `LIVE_FLUSH_MS` (150 ms). **A push rebuilds only the hook-derived readings**
+  (from the in-memory signal store, against the registry as the last tick read it). It reads no registry file, broker
+  or queue file; those wait for the tick. So a brand-new Claude tab can take up to one tick (2 s) to appear.
 - **A bounded diff tick** every `LIVE_TICK_MS` (2 s), **only while at least one stream is open**, over things with no
   change signal: the Claude registry (`~/.claude/sessions`, small JSON files, the same read the per-session stream
   does), the permission broker's in-memory list, the queue files, and the clock (an open turn that goes quiet past the
-  activity cap stops being `working`). No stream open: no tick, no subscription.
+  activity cap stops being `working`). No stream open: no tick and no reads. The hub's one subscription (the reply
+  counter, one Map increment per Stop) is made when the hub is built and stays for the server's life.
+- **A registry folder that exists but cannot be read** marks the registry `degraded` and keeps the last good model; it
+  is never read as "nothing alive". A missing folder is an empty registry.
 - **Not fed (known gap):** a Codex or Cursor session whose hooks have never reached this server. Those rows still
   appear through the list poll, as today. The client should keep a slow list refresh (the existing pane-load refresh,
   plus a debounced refresh on `session` added/removed) so they are not missed.
@@ -205,9 +216,11 @@ reaches back, else a snapshot).
 1. One `EventSource('/api/events')` per page, shared by the pet, Sessions rows, Today counts and question cards.
 2. Paint from cache first; apply `snapshot` as the live truth; apply `session`/`session.removed`/`questions`/`queue`.
 3. Running time ticks locally from `turnStartedAt` (skew-corrected by `at`), no polling.
-4. On `session` added or removed, or a `replies` change: debounced (about 1 s) refresh of `GET /api/agent-sessions`
-   for the words. On `questions`: refresh `GET /api/session-questions`.
-5. 30 s with no frame: "Reconnecting", poll the summary every 5 s, reopen with `?after=<last id>`.
+4. On `session` added or removed: debounced (about 1 s) refresh of `GET /api/agent-sessions` for the words. On a
+   `replies` change: the same refresh, at most once every 12 s. On `questions`: refresh `GET /api/session-questions`.
+5. 30 s with no frame: "Reconnecting", poll the summary every 5 s, reopen with `?after=<last id>`. **Overlay the live
+   model on list reads only while a stream is open and live.** Reconnecting, busy or hidden, the list read is the
+   newest truth: show it as read, drop placeholder rows, and keep the model only as the base a resume applies to.
 6. `visibilitychange` to visible and `pageshow`: re-read the summary at once, then reopen the stream with the last id.
 7. 404 or 503 or a non-stream answer: polling, as today. 503 `live_events_capacity`: retry after 30 s or more.
 8. Counts from a cache older than 30 s show their age.
@@ -239,3 +252,12 @@ reaches back, else a snapshot).
     30000.
 - 2026-11-07 23:4x: **the `snapshot` frame now carries `id: <epoch>.<seq>`** (asked by the web half). Additive: a
   client that builds its last id from `epoch` and `seq` sees the same value.
+- 2026-11-08 01:xx (7.0.1 review fixes, no shape change):
+  - **Ids: join on the full id.** The 8-character prefix only when one side is exactly 8 characters and one candidate
+    matches (skeptic B1: three Codex UUIDv7 rollouts started 16 s apart shared their first 8 characters).
+  - Capacity: at the cap the oldest stream is closed instead of refusing the newest; evictions and refusals are logged.
+  - A hook push rebuilds hook readings only; the registry, broker and queue are read on the tick.
+  - An unreadable registry folder is `degraded`, not "nothing alive".
+  - `session.removed` wording matches the code (a vanished session lingers as `ended` first).
+  - Client: overlay only while live; non-Claude open or closed from the list; reply-triggered list reads at most once
+    every 12 s.

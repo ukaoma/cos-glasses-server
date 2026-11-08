@@ -1455,12 +1455,31 @@ export async function listAgentSessions(
   return rows.slice(0, limit)
 }
 
+/**
+ * Every Claude transcript by its lowercase id (names only, no stat). `shouldStop` lets a bounded caller end the walk
+ * between folders; a stopped walk answers what it has.
+ */
+export async function loadClaudeTranscriptIndex(roots: AgentSessionRoots, shouldStop: () => boolean = () => false): Promise<Map<string, string[]>> {
+  const files = new Map<string, string[]>()
+  for (const folder of await dirents(roots.claudeProjects)) {
+    if (shouldStop()) break
+    const dir = join(roots.claudeProjects, folder)
+    for (const name of await dirents(dir)) {
+      if (!CLAUDE_UUID_JSONL.test(name)) continue
+      const id = name.slice(0, -6).toLowerCase()
+      files.set(id, [...(files.get(id) || []), join(dir, name)])
+    }
+  }
+  return files
+}
+
 export async function findAgentSessionFile(
   provider: AgentProvider,
   sessionId: string,
   roots: AgentSessionRoots,
   now = new Date(),
   preloadedAliases?: ClaudeAliasMap,
+  preloaded?: { claudeFiles?: ReadonlyMap<string, string[]>; codexFiles?: readonly string[] },
 ): Promise<string | null> {
   if (!isSafeSessionId(sessionId)) return null
   const needle = sessionId.trim().toLowerCase()
@@ -1473,15 +1492,8 @@ export async function findAgentSessionFile(
     // Names only. This used to lstat every transcript on this Mac (1,697 of
     // them) to keep directories out of the candidate set, on every call. The
     // isFile check now runs on the one id that matched, below.
-    const files = new Map<string, string[]>()
-    for (const folder of await dirents(roots.claudeProjects)) {
-      const dir = join(roots.claudeProjects, folder)
-      for (const name of await dirents(dir)) {
-        if (!CLAUDE_UUID_JSONL.test(name)) continue
-        const id = name.slice(0, -6).toLowerCase()
-        files.set(id, [...(files.get(id) || []), join(dir, name)])
-      }
-    }
+    // 7.0.1: a caller resolving several ids at once (work-session-activity.ts) builds this index once and hands it in.
+    const files = preloaded?.claudeFiles ?? await loadClaudeTranscriptIndex(roots)
     const exact = aliases.has(needle) || files.has(needle)
     const ids = new Set<string>()
     for (const [id, head] of aliases) {
@@ -1498,8 +1510,9 @@ export async function findAgentSessionFile(
     return matches.length === 1 ? matches[0] : null
   }
   if (provider === 'codex') {
-    for (const root of codexSessionRootsOf(roots)) {
-      for (const file of await listCodexJsonlFiles(root)) {
+    const lists = preloaded?.codexFiles ? [preloaded.codexFiles] : await Promise.all(codexSessionRootsOf(roots).map(root => listCodexJsonlFiles(root)))
+    for (const list of lists) {
+      for (const file of list) {
         const name = file.split('/').pop()?.toLowerCase() ?? ''
         if (name.includes(needle)) return file
       }

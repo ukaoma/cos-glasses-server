@@ -403,8 +403,9 @@ export function savedDestinationFor(journal: WorkJournal, row: WorkBoardRowLite)
 
 /**
  * 7.0.1: the time a report was superseded, or nothing. The report's time is when it started waiting (`waitingSince`),
- * else the card's newest event. Activity has to come more than `supersedeSeconds` after it: the reply that carried the
- * status line is itself activity at that moment.
+ * else the card's newest event. `sessionActivityMs` is the newest turn Miles started in the session
+ * (work-session-activity.ts: a real prompt, never the session's own work, a background agent's notification or a tool
+ * result; review W3). It has to come more than `supersedeSeconds` after the report, a grace for the tracker's clock.
  */
 function supersededBy(activity: WorkActivity, sessionActivityMs: ReadonlyMap<string, number> | undefined): string | undefined {
   if (!activity.sessionId || !sessionActivityMs) return undefined
@@ -419,13 +420,13 @@ export type OpenWorkGroup = 'needsInput' | 'attention' | 'running' | 'done'
 export interface OpenWorkItem extends WorkActivity {
   workIdentity: string; title: string; taskRevision: string; group: OpenWorkGroup; savedDestination?: SavedDestination
   /**
-   * 7.0.1: the needs-input or blocked report was superseded: its session did something (a turn of yours, or its own
-   * work) after the report, at this time. The item is grouped as if no report stood. The report itself stays in
+   * 7.0.1: the needs-input or blocked report was superseded: you started a turn in its session after the report, at
+   * this time. The item is grouped as if no report stood. The report itself stays in
    * `progress`, as Control recorded it.
    */
   supersededAt?: string
 }
-/** 7.0.1: what the open list knows about each linked session: its newest conversation activity, ms, by `provider:native`. */
+/** 7.0.1: what the open list knows about each linked session: the newest turn you started in it, ms, by `provider:native`. */
 export interface OpenWorkOptions { sessionActivityMs?: ReadonlyMap<string, number> }
 export interface OpenWorkList { items: OpenWorkItem[]; total: number; truncated: boolean }
 const GROUP_RANK: Record<OpenWorkGroup, number> = { needsInput: 0, attention: 1, running: 2, done: 3 }
@@ -444,8 +445,8 @@ const GROUP_RANK: Record<OpenWorkGroup, number> = { needsInput: 0, attention: 1,
  * 7.0.1 (Miles 11/07, a row "Waiting for your reply" since Oct 31 on a session he talks to all day): a needs-input or
  * blocked report stands only until its session moves on. Control's tracker takes a report from the session's status
  * line for this task, so a later turn that never mentions the task again leaves the old report in place for the whole
- * 14 days. When `options.sessionActivityMs` shows the session active more than a minute after the report (a turn of
- * yours, or the session working), the report no longer groups the item.
+ * 14 days. When `options.sessionActivityMs` shows a turn you started in the session more than a minute after the report,
+ * the report no longer groups the item. The session's own work never does (review W3).
  */
 export function projectOpenWork(journal: WorkJournal, rows: readonly WorkBoardRowLite[], nowMs: number, options: OpenWorkOptions = {}): OpenWorkList {
   const newest = new Map<string, JournalRecord>()

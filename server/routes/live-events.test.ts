@@ -3,10 +3,14 @@ import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import express from 'express'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { requireApiToken } from '../lib/api-auth.js'
 import { LiveEventsHub, type LiveSessionReading, type LiveSources } from '../lib/live-events.js'
-import { createLiveEventsRouter, frameText, liveEventsEnabled, liveEventsHandler, liveReadings, readingFor, type LiveEventsRouterDeps } from './live-events.js'
+import { createLiveEventsRouter, frameText, liveEventsEnabled, liveEventsHandler, liveReadings, readingFor, realLiveSources, type LiveEventsRouterDeps } from './live-events.js'
+import { readClaudePeerRecords } from './claude-sessions.js'
+import { mkdtempSync, rmSync, chmodSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { __resetSessionHooksForTests, sessionSignalStore } from '../lib/session-hooks-runtime.js'
 import type { HookEnvelope } from '../lib/session-hook-events.js'
 import { HOOK_ACTIVE_CAP_MS } from '../lib/codex-rollout-state.js'
@@ -188,22 +192,35 @@ describe('GET /api/events', () => {
     r.close()
   })
 
-  it('caps concurrent streams with a 503 JSON before any stream header, and frees the slot on close', async () => {
+  it('at the cap the OLDEST stream is closed to admit the new one, and it is logged (ghost review W5)', async () => {
     const f = fakeSources([])
-    const url = await start({ hub: hubOver(f.sources), maxStreams: 1 })
+    const lines: string[] = []
+    const url = await start({ hub: hubOver(f.sources), maxStreams: 2, log: l => { lines.push(l) } })
     const a = await open(`${url}/api/events`)
     await a.waitFor(d => d.kind === 'snapshot')
+    const b = await open(`${url}/api/events`)
+    await b.waitFor(d => d.kind === 'snapshot')
+    const c = await open(`${url}/api/events`)
+    expect(c.status).toBe(200)
+    await c.waitFor(d => d.kind === 'snapshot')
+    await a.ended   // the oldest was closed
+    expect(lines.some(l => /stream cap 2 reached: closing the oldest/.test(l))).toBe(true)
+    // b is still open: a frame still reaches it.
+    f.set([reading('bbbbbbbb-1', 'working')]); f.push('bbbbbbbb-1')
+    await b.waitFor(d => d.kind === 'session')
+    b.close(); c.close()
+  })
+
+  it('refuses with a 503 JSON before any stream header only when nothing can be closed', async () => {
+    const f = fakeSources([])
+    const lines: string[] = []
+    const url = await start({ hub: hubOver(f.sources), maxStreams: 0, log: l => { lines.push(l) } })
     const b = await open(`${url}/api/events`)
     expect(b.status).toBe(503)
     expect(b.type).toContain('application/json')
     await b.ended
     expect(JSON.parse(b.body).reason).toBe('live_events_capacity')
-    a.close()
-    await a.ended
-    await new Promise(r => setTimeout(r, 30))
-    const c = await open(`${url}/api/events`)
-    expect(c.status).toBe(200)
-    c.close()
+    expect(lines.some(l => /refused a new stream/.test(l))).toBe(true)
   })
 
   it('registers no route when switched off (404), and the switch reads absent as on', async () => {
@@ -218,6 +235,13 @@ describe('GET /api/events', () => {
     expect(liveEventsEnabled({ COS_WEB_LIVE_EVENTS: '0' })).toBe(false)
     expect(liveEventsEnabled({ COS_WEB_LIVE_EVENTS: 'off' })).toBe(false)
     expect(liveEventsEnabled({ COS_WEB_LIVE_EVENTS: '1' })).toBe(true)
+  })
+
+  it('server/index.ts mounts the route only behind liveEventsEnabled() (ghost review W6)', () => {
+    const index = readFileSync(new URL('../index.ts', import.meta.url), 'utf8')
+    const mounts = index.match(/createLiveEventsRouter\(/g) ?? []
+    expect(mounts.length).toBe(1)
+    expect(index).toMatch(/\nif \(liveEventsEnabled\(\)\) \{\n  const liveEventsHub = new LiveEventsHub\(\{ sources: realLiveSources\(\{ broker: \(\) => permissionBroker \}\) \}\)\n  app\.use\('\/api', createLiveEventsRouter\(\{ hub: liveEventsHub \}\)\)\n\}/)
   })
 
   it('the switch is in the managed-runtime contract and .env.example', () => {
@@ -255,6 +279,27 @@ describe('liveEventsHandler backpressure', () => {
     expect(writes.length).toBe(n)
   })
 
+  it('a stream torn down while its snapshot is written starts no heartbeat (review N1)', async () => {
+    const f = fakeSources([reading('aaaaaaaa-1', 'idle')])
+    const hub = hubOver(f.sources, { tickMs: 60_000 })
+    const lines: string[] = []
+    const handler = liveEventsHandler({ hub, maxBufferBytes: 64, heartbeatMs: 5, log: l => { lines.push(l) } })
+    const req = Object.assign(new EventEmitter(), { query: {}, get: () => undefined }) as any
+    const writes: string[] = []
+    const res = Object.assign(new EventEmitter(), {
+      writableLength: 0, set() { return res }, status() { return res }, json() { return res }, writeHead() { return res }, flushHeaders() {},
+      write(chunk: string) { writes.push(chunk); res.writableLength += chunk.length; return false }, end() {},
+    }) as any
+    const intervals = vi.spyOn(globalThis, 'setInterval')
+    let heartbeats = -1
+    try { await handler(req, res); heartbeats = intervals.mock.calls.filter(c => c[1] === 5).length } finally { intervals.mockRestore() }
+    expect(heartbeats).toBe(0)   // no heartbeat timer outlives the stream (counted before mockRestore clears the calls)
+    const n = writes.length
+    await new Promise(r => setTimeout(r, 40))
+    expect(writes.length).toBe(n)
+    expect(lines.some(l => /stopped reading/.test(l))).toBe(true)
+  })
+
   it('keeps a client that reads (no unsent bytes) open', async () => {
     const f = fakeSources([reading('aaaaaaaa-1', 'idle')])
     const hub = hubOver(f.sources, { tickMs: 60_000 })
@@ -270,6 +315,35 @@ describe('liveEventsHandler backpressure', () => {
     expect(hub.streamCount).toBe(1)
     req.emit('close')
     expect(hub.streamCount).toBe(0)
+  })
+})
+
+describe('realLiveSources (the registry read)', () => {
+  it('a hook push rebuilds against the registry as last read; a failed registry read is degraded, never "nothing alive"', async () => {
+    const prev = process.env.COS_CLAUDE_SESSIONS_ENABLED
+    process.env.COS_CLAUDE_SESSIONS_ENABLED = '1'
+    try {
+      let reads = 0, fail = false
+      const sources = realLiveSources({ broker: () => null, readPeers: async () => { reads++; if (fail) throw new Error('EACCES'); return [] } })
+      await sources.sessions(1)
+      expect(reads).toBe(1)
+      await sources.sessions(2, { hooksOnly: true })
+      await sources.sessions(3, { hooksOnly: true })
+      expect(reads).toBe(1)
+      fail = true
+      expect((await sources.sessions(4)).degraded).toBe(true)
+      expect(reads).toBe(2)
+      expect((await sources.sessions(5, { hooksOnly: true })).degraded).toBe(true)
+    } finally { if (prev === undefined) delete process.env.COS_CLAUDE_SESSIONS_ENABLED; else process.env.COS_CLAUDE_SESSIONS_ENABLED = prev }
+  })
+  it('readClaudePeerRecords throws for a folder it cannot read when asked to; a missing folder is still empty', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'live-registry-'))
+    try {
+      expect(await readClaudePeerRecords(join(dir, 'missing'), undefined, undefined, true)).toEqual([])
+      chmodSync(dir, 0o000)
+      await expect(readClaudePeerRecords(dir, undefined, undefined, true)).rejects.toBeTruthy()
+      expect(await readClaudePeerRecords(dir)).toEqual([])   // the list route keeps its old answer
+    } finally { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }) }
   })
 })
 

@@ -18,17 +18,21 @@ function rig(initial: LiveSessionReading[] = []) {
   let queue: LiveQueueReading[] | null = []
   let sessionsThrow = false
   let sessionReads = 0
+  let hookOnlyReads = 0
+  let questionReads = 0
+  let queueReads = 0
   let push: ((c: { sessionId: string; turnEnded: boolean }) => void) | null = null
   const timers: Array<{ fn: () => void; at: number; id: number }> = []
   let nextId = 1
   const sources: LiveSources = {
-    async sessions() {
+    async sessions(_now, opts) {
       sessionReads++
+      if (opts?.hooksOnly) hookOnlyReads++
       if (sessionsThrow) throw new Error('registry unreadable')
       return { sessions, degraded: false }
     },
-    questions: () => questions,
-    queue: () => queue,
+    questions: () => { questionReads++; return questions },
+    queue: () => { queueReads++; return queue },
     subscribe(listener) { push = listener; return () => { push = null } },
   }
   const hub = new LiveEventsHub({
@@ -51,6 +55,9 @@ function rig(initial: LiveSessionReading[] = []) {
     set queue(v: LiveQueueReading[] | null) { queue = v },
     set sessionsThrow(v: boolean) { sessionsThrow = v },
     get sessionReads() { return sessionReads },
+    get hookOnlyReads() { return hookOnlyReads },
+    get questionReads() { return questionReads },
+    get queueReads() { return queueReads },
     get timerCount() { return timers.length },
     push(c: { sessionId: string; turnEnded: boolean }) { push?.(c) },
     advance(ms: number) { now += ms },
@@ -144,6 +151,40 @@ describe('LiveEventsHub', () => {
     await r.runTimers()
     const last = r.frames.at(-1)!
     expect(last.kind === 'session' && last.session.state).toBe('working')
+  })
+
+  it('a hook push rebuilds the hook readings only: no full session read, no broker, no queue (ghost review W4)', async () => {
+    const r = rig([s('aaaaaaaa-1', 'idle')])
+    await r.hub.attach(r.listener)
+    const q = r.questionReads, k = r.queueReads
+    expect(r.hookOnlyReads).toBe(0)
+    r.sessions = [s('aaaaaaaa-1', 'working')]
+    for (let i = 0; i < 5; i++) {
+      r.push({ sessionId: 'aaaaaaaa-1', turnEnded: false })
+      r.advance(150)
+      await r.runTimers()
+    }
+    expect(r.hookOnlyReads).toBe(5)
+    expect(r.questionReads).toBe(q)
+    expect(r.queueReads).toBe(k)
+    expect(r.hub.readCounts).toEqual({ full: 1, hooks: 5 })
+    const last = r.frames.at(-1)!
+    expect(last.kind === 'session' && last.session.state).toBe('working')
+    // The tick still reads everything.
+    r.advance(2_000)
+    await r.runTimers()
+    expect(r.questionReads).toBe(q + 1)
+    expect(r.queueReads).toBe(k + 1)
+  })
+
+  it('a full read asked for during a hook-only run follows it as a full read', async () => {
+    const r = rig([s('aaaaaaaa-1', 'idle')])
+    await r.hub.attach(r.listener)
+    const q = r.questionReads
+    const a = r.hub.refresh(false), b = r.hub.refresh(true)
+    await Promise.all([a, b])
+    expect(r.questionReads).toBe(q + 1)
+    expect(r.hub.readCounts).toEqual({ full: 2, hooks: 1 })
   })
 
   it('counts replies from turn ends even with no stream open, and carries them on the session', async () => {

@@ -39,6 +39,10 @@ describe('Needs you: a Work report its session has moved on from', () => {
     expect(harness([live]).needsModel().rows.map(r => r.kind)).toEqual(['work'])
     expect(harness([superseded]).needsModel().rows).toEqual([])
   })
+  it('a superseded completed handoff that regrouped to "Needs a look" still shows, as the Messages badge counts it (review N6)', () => {
+    const lookedAt = { ...live, status: 'completed', group: 'attention', supersededAt: '2026-11-08T05:08:44.839Z' }
+    expect(harness([lookedAt]).needsModel().rows.map(r => r.kind)).toEqual(['work'])
+  })
   it('a waiting Work row is dated by when it started waiting, not by the card\'s newest event', () => {
     const h = harness([live]), [row] = h.needsModel().rows
     const html = h.needRowHtml(row, 0)

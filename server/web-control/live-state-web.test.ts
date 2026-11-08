@@ -57,7 +57,8 @@ function el(id = ''): El {
 const sxState = (s: { agent_state?: string; state_source?: string; running_active?: boolean }) =>
   s.agent_state === 'waiting' ? 'waiting' : s.running_active || s.agent_state === 'running' ? 'running' : s.agent_state === 'ended' ? 'stale' : 'recent'
 
-interface Opts { probe?: { status: number; type?: string } | 'network'; list?: () => unknown[]; hidden?: boolean; brief?: (body: Record<string, any>) => unknown }
+interface Opts { probe?: { status: number; type?: string } | 'network'; list?: () => unknown[]; hidden?: boolean; brief?: (body: Record<string, any>) => unknown; realList?: boolean }
+const SLSRC = between(APP, '  var SL = { data: null', '  function sessionListCached')
 function harness(o: Opts = {}) {
   FakeES.all = []
   const els: Record<string, El> = { 'app-shell': el('app-shell'), 'today-pet': el('today-pet'), 'today-live-note': el('today-live-note'), 'today-refresh': el('today-refresh'), 'sessions-list': el('sessions-list') }
@@ -96,6 +97,7 @@ function harness(o: Opts = {}) {
     // the pet block's own needs
     api: (url: string, opts?: { body?: Record<string, unknown> }) => {
       calls.api.push(url)
+      if (url.indexOf('/api/agent-sessions') === 0) { calls.list++; return Promise.resolve({ sessions: o.list ? o.list() : rows.slice() }) }
       if (url === '/api/today/brief') { calls.brief.push({ ...opts!.body! }); return Promise.resolve(o.brief ? o.brief(opts!.body!) : { state: 'fresh', text: 'All quiet.', at: new Date().toISOString() }) }
       return Promise.resolve({ available: true, pet: 'mac', kind: 'still', poses: {}, still: '/s' })
     },
@@ -115,10 +117,12 @@ function harness(o: Opts = {}) {
     clearInterval: (t: ReturnType<typeof setInterval>) => clearInterval(t),
     Promise, JSON, Math, Number, String, Object, Array, isFinite, encodeURIComponent,
   }
-  const src = 'with (deps) {\n' + SPLIT + TODATE + CORE + PET + VIEW +
+  if (o.realList) { delete deps.SL; delete deps.sessionList; deps.noteWaiting = () => {} }
+  const src = 'with (deps) {\n' + SPLIT + TODATE + (o.realList ? SLSRC : '') + CORE + PET + VIEW +
     '\nvar __realRepaint = liveRepaint; liveRepaint = function (r, s) { deps.__calls.repaint.push({ rows: r, structural: s }); return __realRepaint(r, s); };' +
     '\nreturn { LIVE: LIVE, liveOpen: liveOpen, liveStart: liveStart, liveResume: liveResume, liveHide: liveHide, liveFrame: liveFrame, liveAge: liveAge, liveClock: liveClock, liveElapsed: liveElapsed,' +
-    ' liveTickOnce: liveTickOnce, liveTickStart: liveTickStart, liveOn: liveOn, liveSince: liveSince, todayRefresh: todayRefresh, liveNoteText: liveNoteText, petPose: petPose, petCaption: petCaption, TR: TR };\n}'
+    ' liveTickOnce: liveTickOnce, liveTickStart: liveTickStart, liveOn: liveOn, liveSince: liveSince, todayRefresh: todayRefresh, liveNoteText: liveNoteText, liveNoteTick: liveNoteTick, petPose: petPose, petCaption: petCaption, TR: TR, LIVE_TICK: LIVE_TICK,' +
+    ' SLV: typeof SL !== \'undefined\' ? SL : null, sessionList: typeof sessionList === \'function\' ? sessionList : null };\n}'
   deps.__calls = calls
   const kit = new Function('deps', src)(deps)
   return { kit, els, calls, rows, state, SL, TODAY, BRIEF, doc, deps }
@@ -386,7 +390,7 @@ describe('7.0.1: Today Refresh', () => {
   })
   it('Today’s header carries the Refresh button with a 44 px target and a status line', () => {
     expect(INDEX).toMatch(/<button type="button" id="today-refresh" class="link-btn today-refresh" data-today-refresh>Refresh<\/button>/)
-    expect(INDEX).toMatch(/id="today-live-note"[^>]*role="status"/)
+    expect(INDEX).toMatch(/id="today-live-status"[^>]*role="status"/)
     const css = readFileSync(join(HERE, 'panes/today-actions.css'), 'utf8')
     expect(css).toMatch(/\.today-refresh \{[^}]*min-height: 44px/)
   })
@@ -462,12 +466,11 @@ describe('7.0.1: no stream means 7.0.0 behaviour', () => {
     expect(FakeES.all.length).toBe(2)
     expect(h.calls.list).toBe(0)
   })
-  it('a list read is corrected by the live model only while the stream is live (app.js sessionList)', async () => {
-    const SLSRC = between(APP, '  var SL = { data: null', '  function sessionListCached')
+  it('a list read is corrected by the live model only while the stream is open and live (app.js sessionList)', async () => {
     for (const on of [true, false]) {
       const overlaid: unknown[] = []
-      const deps = { api: () => Promise.resolve({ sessions: [{ provider: 'claude', session_id: 'x' }] }), noteWaiting: () => {}, Date, Promise,
-        liveOn: () => on, liveOverlay: (rows: unknown) => { overlaid.push(rows) } }
+      const deps = { api: () => Promise.resolve({ sessions: [{ provider: 'claude', session_id: 'x' }] }), noteWaiting: () => {}, Date, Promise, LIVE: { freshAt: 0 },
+        liveOn: () => true, liveCanOverlay: () => on, liveOverlay: (rows: unknown) => { overlaid.push(rows) } }
       const sl = new Function('deps', 'with (deps) {\n' + SLSRC + '\nreturn sessionList;\n}')(deps) as (n: number) => Promise<unknown>
       await sl(0)
       expect(overlaid.length).toBe(on ? 1 : 0)
@@ -542,5 +545,274 @@ describe('7.0.1: Sessions rows move in place', () => {
     expect(s.calls.groups).toBe(0)
     expect(s.parent.kids[1].html).toBe('old-b')
     expect(s.calls.hero).toBe(1)
+  })
+})
+
+// ── 7.0.1 review fixes (skeptic B1, W1, W2, N10; ghost W1, W7, note 1) ──────────────────────────────────────────
+// Three Codex rollouts started 16 s apart on 11/07: UUIDv7 ids share their first 8 characters for about 65 s.
+const CX = ['01a1b996-5568-7a00-8000-000000000001', '01a1b996-94be-7f11-a7b3-3bbbcd9dfb53', '01a1b996-da64-7892-bd2d-64cec7a95beb']
+const cxLive = (id: string, state: string, over: Record<string, unknown> = {}) => live({ provider: 'codex', sessionId: id, state, turnStartedAt: state === 'working' || state === 'waiting' ? Date.now() - 5000 : null, ...over })
+const cxRow = (id: string, over: Record<string, unknown> = {}) => ({ provider: 'codex', session_id: id, title: id, running: true, running_active: false, agent_state: 'idle', alive: true, ...over })
+
+describe('7.0.1 review B1: a list row joins its live session on the full id', () => {
+  it('three Codex sessions sharing their first 8 characters stay three rows with three states', async () => {
+    const h = harness()
+    CX.forEach((id) => h.rows.push(cxRow(id)))
+    h.kit.liveStart()
+    const es = FakeES.all[0]
+    es.send(snap([cxLive(CX[0], 'working'), cxLive(CX[1], 'idle'), cxLive(CX[2], 'waiting')]))
+    await vi.advanceTimersByTimeAsync(40)
+    expect(h.rows.length).toBe(3)
+    expect(h.rows.map((r) => r.running_active)).toEqual([true, false, false])
+    expect(h.rows.map((r) => r.agent_state)).toEqual(['running', 'idle', 'waiting'])
+    expect(h.kit.petCaption(h.kit.petPose(h.state.sessions))).toBe('1 running, 1 waiting on you')
+    // One of them leaves the live model: only its own row changes.
+    es.send({ kind: 'session.removed', seq: 2, epoch: 100, at: Date.now(), provider: 'codex', sessionId: CX[2] })
+    await vi.advanceTimersByTimeAsync(40)
+    expect(h.rows[0].running_active).toBe(true)
+    expect(h.rows[0].agent_state).toBe('running')
+    expect(h.rows[1].agent_state).toBe('idle')
+    expect(h.rows[2].agent_state).not.toBe('waiting')
+  })
+  it('a live session with no list row of its own gets a placeholder even when another row shares its prefix', async () => {
+    const h = harness()
+    h.rows.push(cxRow(CX[0]))
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([cxLive(CX[0], 'idle'), cxLive(CX[1], 'working')]))
+    await vi.advanceTimersByTimeAsync(40)
+    const rows = h.state.sessions as Array<Record<string, unknown>>
+    expect(rows.find((r) => r.session_id === CX[0])!.running_active).toBe(false)
+    const placeholder = rows.find((r) => r._placeholder)
+    expect(placeholder?.session_id).toBe(CX[1])
+    expect(rows.length).toBe(2)
+  })
+  it('a Codex row with no live session of its own never takes a sibling\u2019s state by prefix', async () => {
+    const h = harness()
+    h.rows.push(cxRow(CX[2]))   // its hooks never reached the server: the list alone speaks for it
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([cxLive(CX[0], 'working')]))
+    await vi.advanceTimersByTimeAsync(40)
+    const row = (h.state.sessions as Array<Record<string, unknown>>).find((r) => r.session_id === CX[2])!
+    expect(row.running_active).toBe(false)
+    expect(row._live).not.toBe(true)
+  })
+  it('the 8-character prefix joins only when one side is exactly 8 characters, and only when unambiguous', async () => {
+    const h = harness()
+    h.rows.push({ provider: 'codex', session_id: '01a1b996', title: 'short', running: true, agent_state: 'idle' })
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([cxLive(CX[0], 'working'), cxLive(CX[1], 'working')]))
+    await vi.advanceTimersByTimeAsync(40)
+    expect(h.rows.find((r) => r.session_id === '01a1b996')!.running_active).not.toBe(true)   // two candidates: no guess
+  })
+})
+
+describe('7.0.1 review W1: outside live, a fresh list read wins over the last live model', () => {
+  it('Reconnecting: the 5 s list read shows the list as it is; no stale working state, no stale placeholder', async () => {
+    let listed = [{ provider: 'claude', session_id: SID, title: 'Build', running: true, running_active: true, agent_state: 'running', alive: true }]
+    const h = harness({ realList: true, list: () => listed.map((r) => ({ ...r })) })
+    h.kit.liveStart()
+    const es = FakeES.all[0]
+    es.send(snap([live(), live({ sessionId: 'aaaaaaaa-0000-4000-8000-000000000000' })]))
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(h.kit.petCaption(h.kit.petPose(h.state.sessions))).toBe('2 running')
+    // The stream drops; meanwhile the session finished.
+    listed = [{ ...listed[0], running_active: false, agent_state: 'idle' }]
+    es.fail(0)
+    expect(h.kit.LIVE.mode).toBe('reconnecting')
+    await vi.advanceTimersByTimeAsync(5100)
+    const rows = h.state.sessions as Array<Record<string, unknown>>
+    expect(rows.filter((r) => r._placeholder).length).toBe(0)
+    expect(rows[0].running_active).toBe(false)
+    expect(h.kit.petCaption(h.kit.petPose(rows))).toBe('Nothing running')
+    // The counts on screen are as old as that list read: fresh, and they say nothing extra.
+    expect(h.kit.liveAge()).toBe('')
+  })
+  it('a list read while the stream is not open (hidden, then back) is not overlaid', async () => {
+    const listed = [{ provider: 'claude', session_id: SID, title: 'Build', running: true, running_active: false, agent_state: 'idle', alive: true }]
+    const h = harness({ realList: true, list: () => listed.map((r) => ({ ...r })) })
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([live()]))
+    await vi.advanceTimersByTimeAsync(40)
+    h.doc.hidden = true; h.kit.liveHide()
+    const d = await h.kit.sessionList(0) as { sessions: Array<Record<string, unknown>> }
+    expect(d.sessions[0].running_active).toBe(false)
+    expect(d.sessions.length).toBe(1)
+  })
+  it('busy (503): the panes’ own list reads are not overlaid either', async () => {
+    const listed = [{ provider: 'claude', session_id: SID, title: 'Build', running: true, running_active: false, agent_state: 'idle', alive: true }]
+    const h = harness({ realList: true, probe: { status: 503 }, list: () => listed.map((r) => ({ ...r })) })
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([live()]))
+    FakeES.all[0].fail(2)
+    await vi.advanceTimersByTimeAsync(3200)
+    // A closed stream after frames reconnects; the reopened one is refused as busy.
+    const second = open()[0]; if (second) second.fail(2)
+    await vi.advanceTimersByTimeAsync(20)
+    expect(h.kit.LIVE.mode).toBe('busy')
+    const d = await h.kit.sessionList(0) as { sessions: Array<Record<string, unknown>> }
+    expect(d.sessions[0].running_active).toBe(false)
+  })
+  it('busy: the panes\u2019 own list read makes the counts as fresh as that read', async () => {
+    const h = harness({ realList: true, probe: { status: 503 } })
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([]))
+    FakeES.all[0].fail(2)
+    await vi.advanceTimersByTimeAsync(3200)
+    const second = open()[0]; if (second) second.fail(2)
+    await vi.advanceTimersByTimeAsync(20)
+    expect(h.kit.LIVE.mode).toBe('busy')
+    h.kit.LIVE.freshAt = Date.now() - 125000; h.kit.LIVE.frameAt = Date.now() - 125000
+    expect(h.kit.liveAge()).toBe('As of 2 min ago')
+    await h.kit.sessionList(0)
+    expect(h.kit.liveAge()).toBe('')
+  })
+  it('back on the stream with a resume that replayed nothing: the live model corrects the list again', async () => {
+    const h = harness({ realList: true, list: () => [] })
+    h.kit.liveStart()
+    const first = FakeES.all[0]
+    first.send(snap([live()], 5, 100))
+    await vi.advanceTimersByTimeAsync(1200)
+    expect((h.state.sessions as Array<Record<string, unknown>>).filter((r) => r._placeholder).length).toBe(1)
+    first.fail(0)
+    await vi.advanceTimersByTimeAsync(5100)
+    expect((h.state.sessions as Array<Record<string, unknown>>).filter((r) => r._placeholder).length).toBe(0)
+    first.send({ kind: 'resume', seq: 5, epoch: 100, at: Date.now(), replayed: 0 })
+    await vi.advanceTimersByTimeAsync(40)
+    expect((h.state.sessions as Array<Record<string, unknown>>).filter((r) => r._placeholder).length).toBe(1)
+    expect(h.kit.petCaption(h.kit.petPose(h.state.sessions))).toBe('1 running')
+  })
+  it('hidden then back: the list read that lands before the first frame is not overlaid; that frame corrects it', async () => {
+    const h = harness({ realList: true, list: () => [{ provider: 'claude', session_id: SID, title: 'Build', running: true, running_active: false, agent_state: 'idle', alive: true }] })
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([live()], 5, 100))
+    await vi.advanceTimersByTimeAsync(1200)
+    h.doc.hidden = true; h.kit.liveHide()
+    const reads = h.calls.list
+    h.doc.hidden = false; h.kit.liveResume()
+    await vi.advanceTimersByTimeAsync(10)
+    expect(h.calls.list).toBe(reads + 1)
+    const listed = () => (h.kit.SLV.data.sessions as Array<Record<string, unknown>>).find((r) => r.session_id === SID)!
+    expect(listed().running_active).toBe(false)
+    open()[0].send({ kind: 'resume', seq: 5, epoch: 100, at: Date.now(), replayed: 0 })
+    await vi.advanceTimersByTimeAsync(40)
+    expect(listed().running_active).toBe(true)
+  })
+  it('back to live after Reconnecting: the stream corrects the fresh list again', async () => {
+    const listed = [{ provider: 'claude', session_id: SID, title: 'Build', running: true, running_active: false, agent_state: 'idle', alive: true }]
+    const h = harness({ realList: true, list: () => listed.map((r) => ({ ...r })) })
+    h.kit.liveStart()
+    const first = FakeES.all[0]
+    first.send(snap([live({ state: 'idle', turnStartedAt: null })], 1, 100))
+    first.fail(0)
+    await vi.advanceTimersByTimeAsync(5100)
+    first.send({ kind: 'session', seq: 2, epoch: 100, at: Date.now(), change: 'updated', session: live() })
+    await vi.advanceTimersByTimeAsync(40)
+    expect((h.state.sessions as Array<Record<string, unknown>>)[0].running_active).toBe(true)
+  })
+})
+
+describe('7.0.1 review W2: Codex and Cursor open or closed comes from the list', () => {
+  it('the stream moves working, waiting and idle, never running or alive', async () => {
+    const h = harness()
+    h.rows.push(cxRow(CX[0], { running: true }))          // open in the list, quiet past the stream's window
+    h.rows.push(cxRow(CX[1], { running: false, alive: false, agent_state: 'ended' }))   // the app quit
+    h.kit.liveStart()
+    const es = FakeES.all[0]
+    es.send(snap([cxLive(CX[0], 'ended'), cxLive(CX[1], 'idle')]))
+    await vi.advanceTimersByTimeAsync(40)
+    expect(h.rows[0].running).toBe(true); expect(h.rows[0].alive).toBe(true); expect(h.rows[0].agent_state).toBe('idle')
+    expect(h.rows[1].running).toBe(false); expect(h.rows[1].alive).toBe(false)
+    es.send({ kind: 'session', seq: 2, epoch: 100, at: Date.now(), change: 'updated', session: cxLive(CX[0], 'working') })
+    await vi.advanceTimersByTimeAsync(40)
+    expect(h.rows[0].running_active).toBe(true); expect(h.rows[0].agent_state).toBe('running')
+    es.send({ kind: 'session.removed', seq: 3, epoch: 100, at: Date.now(), provider: 'codex', sessionId: CX[0] })
+    await vi.advanceTimersByTimeAsync(40)
+    expect(h.rows[0].running_active).toBe(false); expect(h.rows[0].running).toBe(true); expect(h.rows[0].agent_state).toBe('idle')
+  })
+  it('a Claude row still takes open and closed from the stream', async () => {
+    const h = harness()
+    h.rows.push({ provider: 'claude', session_id: SID, running: true, agent_state: 'idle', alive: true })
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([live({ state: 'ended', turnStartedAt: null })]))
+    await vi.advanceTimersByTimeAsync(40)
+    expect(h.rows[0].running).toBe(false)
+  })
+})
+
+describe('7.0.1 review (ghost W7): a reply asks for the list at most once every 12 s', () => {
+  it('replies every 2 s read the list twice in 20 s; a new session still reads at once', async () => {
+    const h = harness()
+    h.rows.push({ provider: 'claude', session_id: SID, running: true, agent_state: 'idle' })
+    h.kit.liveStart()
+    const es = FakeES.all[0]
+    es.send(snap([live({ state: 'idle', turnStartedAt: null })]))
+    await vi.advanceTimersByTimeAsync(1100)   // the snapshot's own list read
+    const before = h.calls.list
+    for (let i = 1; i <= 10; i++) {
+      es.send({ kind: 'session', seq: 1 + i, epoch: 100, at: Date.now(), change: 'updated', session: live({ state: 'idle', turnStartedAt: null, replies: i }) })
+      await vi.advanceTimersByTimeAsync(2000)
+    }
+    expect(h.calls.list - before).toBeGreaterThanOrEqual(1)
+    expect(h.calls.list - before).toBeLessThanOrEqual(2)
+    const mid = h.calls.list
+    es.send({ kind: 'session', seq: 12, epoch: 100, at: Date.now(), change: 'added', session: live({ sessionId: 'bbbbbbbb-0000-4000-8000-000000000000' }) })
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(h.calls.list).toBe(mid + 1)
+  })
+  it('a reply right after a new session never pushes back the new session\u2019s read', async () => {
+    const h = harness()
+    h.kit.liveStart()
+    const es = FakeES.all[0]
+    es.send(snap([live({ state: 'idle', turnStartedAt: null })]))
+    await vi.advanceTimersByTimeAsync(1100)
+    const before = h.calls.list
+    es.send({ kind: 'session', seq: 2, epoch: 100, at: Date.now(), change: 'added', session: live({ sessionId: 'bbbbbbbb-0000-4000-8000-000000000000' }) })
+    es.send({ kind: 'session', seq: 3, epoch: 100, at: Date.now(), change: 'updated', session: live({ state: 'idle', turnStartedAt: null, replies: 1 }) })
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(h.calls.list).toBe(before + 1)
+  })
+})
+
+describe('7.0.1 review (ghost note 1, skeptic N10): hidden means no live timer; the status line announces state, not seconds', () => {
+  it('hiding stops the watchdog and the 1 s clock; coming back starts them again', async () => {
+    const h = harness()
+    h.kit.liveStart()
+    FakeES.all[0].send(snap([], 1, 1))
+    const clock = el(); clock.attrs['data-live-since'] = String(Date.now() - 5000)
+    h.doc.querySelectorAll = () => [clock]
+    h.kit.liveTickStart()
+    expect(h.kit.LIVE.watch).not.toBe(null)
+    h.doc.hidden = true; h.kit.liveHide()
+    expect(h.kit.LIVE.watch).toBe(null)
+    expect(h.kit.LIVE_TICK.timer).toBe(null)
+    h.doc.hidden = false; h.kit.liveResume()
+    expect(h.kit.LIVE.watch).not.toBe(null)
+    expect(h.kit.LIVE_TICK.timer).not.toBe(null)
+  })
+  it('the countdown ticks in a quiet line; the polite status line changes only when the state does', async () => {
+    expect(INDEX).not.toMatch(/id="today-live-note"[^>]*aria-live/)
+    expect(INDEX).toMatch(/<span id="today-live-status" class="sr-only" role="status" aria-live="polite"><\/span>/)
+    const h = harness({ brief: () => ({ state: 'stale', text: 'Old.', at: null, reason: 'refresh_throttled', retryAfterMs: 20000 }) })
+    h.els['today-live-status'] = el('today-live-status')
+    await h.kit.todayRefresh()
+    const said = h.els['today-live-status'].textContent
+    expect(said).toBe('Updated just now. Try again in 20 s')
+    await vi.advanceTimersByTimeAsync(3000); h.kit.liveNoteTick()
+    expect(h.els['today-live-note'].textContent).toBe('Updated just now. Try again in 17 s')
+    expect(h.els['today-live-status'].textContent).toBe(said)
+    await vi.advanceTimersByTimeAsync(18000); h.kit.liveNoteTick()
+    expect(h.els['today-live-status'].textContent).toBe('Updated just now')
+  })
+})
+
+describe('7.0.1 review (ghost note 9): the client and server constants agree', () => {
+  it('the client watchdog allows two missed heartbeats; the refresh floor matches the server and the Settings copy', async () => {
+    const { LIVE_EVENTS_HEARTBEAT_MS } = await import('../routes/live-events.js')
+    const { TODAY_BRIEF_FORCE_MIN_MS } = await import('../lib/today-brief.js')
+    const silent = Number(/var LIVE_SILENT_MS = (\d+)/.exec(APP)![1])
+    expect(silent).toBe(2 * LIVE_EVENTS_HEARTBEAT_MS)
+    expect(Number(/Number\(v\.retryAfterMs\) \|\| (\d+)\)/.exec(APP)![1])).toBe(TODAY_BRIEF_FORCE_MIN_MS)
+    const settings = readFileSync(join(HERE, 'panes/settings.js'), 'utf8')
+    expect(settings).toContain(`at most every ${TODAY_BRIEF_FORCE_MIN_MS / 1000} seconds`)
   })
 })
