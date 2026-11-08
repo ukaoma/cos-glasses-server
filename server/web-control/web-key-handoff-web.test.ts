@@ -12,6 +12,8 @@ const CHAT = readFileSync(join(HERE, 'panes', 'cos-chat.js'), 'utf8')
 const BEGIN = APP.indexOf('// ── BEGIN web-key handoff')
 const END = APP.indexOf('// ── END web-key handoff ──')
 const BLOCK = APP.slice(BEGIN, END)
+const API_BEGIN = APP.indexOf('  function apiAnswer(path, opts)')
+const API_BLOCK = APP.slice(API_BEGIN, APP.indexOf('\n\n  // Per-browser memory', API_BEGIN))
 const flush = async (n = 20) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)) }
 const HOST = 'ukaoma-mac-studio.tail38457f.ts.net'
 
@@ -33,7 +35,7 @@ class El {
   removeChild(n: El) { const i = this.children.indexOf(n); if (i < 0) throw new Error('not a child'); this.children.splice(i, 1); n.parentNode = null }
 }
 
-function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string }) {
+function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string; navigate?: (url: string) => void; statusWire?: (path: string, init: any) => Promise<any> }) {
   const prefix = opts.prefix ?? 'session'
   const form = new El('form', prefix + '-form'), actions = new El('div'), send = new El('button', prefix + '-send'), input = new El('textarea', prefix + '-input')
   form.children.push(actions); actions.children.push(send); send.parentNode = actions
@@ -42,15 +44,22 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   const requests: Array<{ path: string; body?: any }> = []
   const assigned: string[] = []
   const statuses: Array<[string, string | undefined]> = []
+  const statusTimeouts: number[] = [], timeoutDelays: number[] = [], downMarks: boolean[] = []
+  const timers = new Map<number, () => void>()
+  let timerId = 0, turnCounter = 0
   let now = Date.now()
   class Clock extends Date { static now() { return now } }
   const windowListeners: Record<string, Array<(ev: { persisted: boolean }) => void>> = {}
   const window = { addEventListener: (name: string, fn: (ev: { persisted: boolean }) => void) => { (windowListeners[name] ??= []).push(fn) } }
+  const actualStatus = opts.statusWire ? new Function('fetch', 'AbortController', 'setTimeout', 'clearTimeout', 'sxNoteClock', 'noteServer', 'showAuth', 'unreachableError', 'Date', API_BLOCK + '\nreturn apiAnswer;')(
+    opts.statusWire, AbortController, (fn: () => void, delay: number) => { timeoutDelays.push(delay); timers.set(++timerId, fn); return timerId }, (id: number) => timers.delete(id),
+    () => {}, (up: boolean) => downMarks.push(up), () => {}, (err: unknown) => err, Clock,
+  ) : null
   const r: any = { provider: 'claude', id: 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d', sending: false, draft: null as any }
   const state = { reading: r }
   const apiAnswer = (path: string, o: any = {}) => {
     requests.push({ path, body: o.body })
-    if (path === '/api/web-key/status') return opts.statusRead ? opts.statusRead() : Promise.resolve({ status: 200, body: { ok: true, activeKeys: opts.activeKeys ?? 1 } })
+    if (path === '/api/web-key/status') { statusTimeouts.push(o.timeoutMs); return actualStatus ? actualStatus(path, o) : opts.statusRead ? opts.statusRead() : Promise.resolve({ status: 200, body: { ok: true, activeKeys: opts.activeKeys ?? 1 } }) }
     if (path.startsWith('/api/web-key/packets?')) return opts.packetRead ?? Promise.resolve({ status: 200, body: { ok: true, packets: opts.packets ?? [] } })
     if (path.endsWith('/attach')) return Promise.resolve({ status: 201, body: { attached: true, bindingId: 'b-1', epoch: 2 } })
     if (path === '/api/web-key/handoff') return Promise.resolve(opts.handoff ? opts.handoff(o.body) : { status: 201, body: { ok: true, handoffId: 'h'.repeat(24), signerUrl: `https://${HOST}:3144/#h=${'h'.repeat(24)}` } })
@@ -64,12 +73,13 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
     (t: string, k?: string) => statuses.push([t, k]), () => true, () => ({}), () => opts.files ?? 'none',
     (text: string, rr: any) => { rr.draft = rr.draft && rr.draft.text === text ? rr.draft : { text, key: 'ct-key-000001', ids: [] }; return rr.draft },
     () => (opts.bound === false ? null : { bindingId: 'b-1', epoch: 2 }), () => {}, (p: string, i: string, t: string) => `/api/agent-sessions/${p}/${i}${t}`, () => 'cos-1',
-    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => assigned.push(u) }, URL, () => 'ct-key-000001', window, Clock,
+    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => { if (opts.navigate) opts.navigate(u); assigned.push(u) } }, URL, () => 'ct-key-' + String(++turnCounter).padStart(6, '0'), window, Clock,
   ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean }
   const liveView = { active: true }
   const viewOpts = { r, prefix, live: () => liveView.active, status: (t: string, k?: string) => statuses.push([t, k]), files: () => opts.files ?? 'none' }
   return { ...fns, r, state, form, input, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') },
     pageShow: (persisted = true) => { for (const fn of windowListeners.pageshow ?? []) fn({ persisted }) }, advance: (ms: number) => { now += ms },
+    statusTimeouts, timeoutDelays, downMarks, timerCount: () => timers.size, expireTimers: () => { const pending = [...timers.values()]; timers.clear(); for (const fn of pending) fn() },
     addView: (other: 'session' | 'ta') => {
       const another = new El('form', other + '-form'), buttons = new El('div'), submit = new El('button', other + '-send'), text = new El('textarea', other + '-input')
       another.appendChild(buttons); buttons.appendChild(submit)
@@ -420,4 +430,126 @@ describe('phone setup and revocation after Safari persisted return', () => {
     expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
     expect(h.requests.filter(q => q.path === '/api/web-key/status')).toHaveLength(2)
   })
+})
+
+describe('phone navigation owns only its own busy state', () => {
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: opened approval returns from BFCache and can open a fresh second approval`, async () => {
+      const h = harness({ signer: 1, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      expect(h.r.sending).toBeTruthy()
+      h.pageShow(); await flush()
+      expect(h.r.sending).toBe(false)
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      const posts = h.requests.filter(q => q.path === '/api/web-key/handoff')
+      expect(posts).toHaveLength(2)
+      expect(posts[1].body.clientTurnId).not.toBe(posts[0].body.clientTurnId)
+      expect(h.assigned).toHaveLength(2)
+    })
+    it(`${prefix}: ordinary-send busy is preserved on persisted return`, async () => {
+      const h = harness({ signer: 1, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      h.r.sending = true
+      h.pageShow(); await flush()
+      expect(h.r.sending).toBe(true)
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('busy')
+      expect(h.requests.some(q => q.path === '/api/web-key/handoff')).toBe(false)
+    })
+    it(`${prefix}: a newer ordinary send cannot be unlocked by the old completed phone navigation`, async () => {
+      const h = harness({ signer: 1, prefix })
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('opened')
+      h.r.sending = true
+      h.pageShow(); await flush()
+      expect(h.r.sending).toBe(true)
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('busy')
+    })
+    it(`${prefix}: a pending phone operation is not reset by return before navigation completed`, async () => {
+      let finish!: (value: any) => void
+      const h = harness({ signer: 1, prefix, handoff: () => new Promise(resolve => { finish = resolve }) })
+      const pending = h.approveOnPhone(h.viewOpts); await flush()
+      const owner = h.r.sending
+      expect(owner).toBeTruthy()
+      h.pageShow(); await flush()
+      expect(h.r.sending).toBe(owner)
+      expect(await h.approveOnPhone(h.viewOpts)).toBe('busy')
+      finish({ status: 201, body: { ok: true, signerUrl: `https://${HOST}:3144/#h=${'h'.repeat(24)}` } })
+      expect(await pending).toBe('opened')
+      h.pageShow(); await flush()
+      expect(h.r.sending).toBe(false)
+    })
+    it(`${prefix}: a stale handoff response cannot navigate or clear a newer ordinary busy owner`, async () => {
+      let finish!: (value: any) => void
+      const h = harness({ signer: 1, prefix, handoff: () => new Promise(resolve => { finish = resolve }) })
+      const pending = h.approveOnPhone(h.viewOpts); await flush()
+      h.r.sending = true
+      finish({ status: 201, body: { ok: true, signerUrl: `https://${HOST}:3144/#h=${'h'.repeat(24)}` } })
+      expect(await pending).toBe('stale')
+      expect(h.r.sending).toBe(true)
+      expect(h.assigned).toEqual([])
+      h.pageShow(); await flush()
+      expect(h.r.sending).toBe(true)
+    })
+    it(`${prefix}: navigation failure releases its own busy state but not a newer owner`, async () => {
+      const own = harness({ signer: 1, prefix, navigate: () => { throw new Error('blocked navigation') } })
+      expect(await own.approveOnPhone(own.viewOpts)).toBe('failed')
+      expect(own.r.sending).toBe(false)
+      expect(own.assigned).toEqual([])
+      let newer!: ReturnType<typeof harness>
+      newer = harness({ signer: 1, prefix, navigate: () => { newer.r.sending = true; throw new Error('blocked navigation') } })
+      expect(await newer.approveOnPhone(newer.viewOpts)).toBe('failed')
+      expect(newer.r.sending).toBe(true)
+      newer.pageShow(); await flush()
+      expect(newer.r.sending).toBe(true)
+      expect(newer.assigned).toEqual([])
+    })
+    it(`${prefix}: a rejected old handoff cannot clear a newer phone busy owner`, async () => {
+      let reject!: (err: Error) => void
+      const h = harness({ signer: 1, prefix, handoff: () => new Promise((_resolve, fail) => { reject = fail }) })
+      const pending = h.approveOnPhone(h.viewOpts); await flush()
+      const next = { completed: false }
+      h.r.sending = next; h.r.phoneNavigation = next
+      reject(new Error('offline'))
+      expect(await pending).toBe('failed')
+      expect(h.r.sending).toBe(next)
+      expect(h.r.phoneNavigation).toBe(next)
+      h.pageShow(); await flush()
+      expect(h.r.sending).toBe(next)
+    })
+  }
+})
+
+describe('bounded status refresh uses the real apiAnswer transport', () => {
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: aborting a hung persisted-return status releases refresh ownership for a later healthy return`, async () => {
+      let reads = 0, aborts = 0
+      const h = harness({ signer: 1, prefix, statusWire: async (path, init) => {
+        expect(path).toBe('/api/web-key/status')
+        expect(init.method).toBe('GET')
+        expect(init.credentials).toBe('same-origin')
+        if (++reads === 2) return new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => { aborts += 1; const err = new Error('aborted'); err.name = 'AbortError'; reject(err) }, { once: true })
+        })
+        return { status: 200, text: async () => JSON.stringify({ ok: true, activeKeys: 1 }) }
+      } })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')).not.toBeNull()
+      h.pageShow(); h.pageShow(); await flush()
+      expect(reads).toBe(2)
+      expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+      expect(h.statusTimeouts).toEqual([15000, 15000])
+      expect(h.timeoutDelays).toEqual([15000, 15000])
+      expect(h.timerCount()).toBe(1)
+      h.expireTimers(); await flush()
+      expect(aborts).toBe(1)
+      expect(h.timerCount()).toBe(0)
+      expect(h.downMarks).not.toContain(false)
+      h.pageShow(); await flush()
+      expect(reads).toBe(3)
+      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
+      expect(h.timerCount()).toBe(0)
+      expect(h.statusTimeouts).toEqual([15000, 15000, 15000])
+    })
+  }
 })
