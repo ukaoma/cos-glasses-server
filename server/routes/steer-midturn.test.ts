@@ -150,7 +150,9 @@ describe('COS_STEER_MIDTURN: default on, one switch, documented', () => {
 
   it('the CHANGELOG lists it among the default-on changes', () => {
     const log = readFileSync(new URL('../../CHANGELOG.md', import.meta.url), 'utf8')
-    const section = log.slice(log.indexOf('## Unreleased (steer mid-turn)'), log.indexOf('\n## ', log.indexOf('## Unreleased (steer mid-turn)') + 4))
+    const start = log.indexOf('## 6.99.35 - ')
+    expect(start).toBeGreaterThanOrEqual(0)
+    const section = log.slice(start, log.indexOf('\n## ', start + 4))
     expect(section.length).toBeGreaterThan(100)
     expect(section).toMatch(/\*\*Default-on changes:\*\*[\s\S]*COS_STEER_MIDTURN/)
   })
