@@ -3332,7 +3332,7 @@
   // composer offers "Approve on this phone". That is a TOP-LEVEL navigation to the signer page on port 3144 carrying a
   // one-use handoff id in the fragment. The words stay on the Mac until the signer claims them; they are never in a URL.
   // Without the capability nothing here runs: no request, no button, the composer exactly as before.
-  var WEB_KEY = { status: null, loading: null };
+  var WEB_KEY = { status: null, statusAt: 0, loading: null, generation: 0, views: [], refreshing: null };
   var WEB_KEY_COPY = {
     no_phone_key: 'No phone has a key yet. Set one up on the approval page first.',
     attachments_not_signable: 'Files cannot be approved on the phone yet. Remove them, or use Send.',
@@ -3343,12 +3343,18 @@
   };
   function webKeyCapable() { var k = readerKit(); return !!(k && typeof k.webKeySigner === 'function' && k.webKeySigner() === 1); }
   function webKeyStatus() {
-    if (WEB_KEY.status) return Promise.resolve(WEB_KEY.status);
-    if (!WEB_KEY.loading) WEB_KEY.loading = apiAnswer('/api/web-key/status').then(function (a) {
-      WEB_KEY.loading = null;
-      WEB_KEY.status = a.status === 200 && a.body && a.body.ok === true && Number.isSafeInteger(a.body.activeKeys) && a.body.activeKeys >= 0 ? { activeKeys: a.body.activeKeys } : null;
-      return WEB_KEY.status;
-    }, function () { WEB_KEY.loading = null; return null; });
+    var age = Date.now() - WEB_KEY.statusAt;
+    if (WEB_KEY.status && age >= 0 && age < 30000) return Promise.resolve(WEB_KEY.status);
+    if (!WEB_KEY.loading) {
+      var generation = WEB_KEY.generation;
+      WEB_KEY.loading = apiAnswer('/api/web-key/status').then(function (a) {
+        if (generation !== WEB_KEY.generation) return null;
+        WEB_KEY.loading = null;
+        WEB_KEY.status = a.status === 200 && a.body && a.body.ok === true && Number.isSafeInteger(a.body.activeKeys) && a.body.activeKeys >= 0 ? { activeKeys: a.body.activeKeys } : null;
+        WEB_KEY.statusAt = Date.now();
+        return WEB_KEY.status;
+      }, function () { if (generation === WEB_KEY.generation) { WEB_KEY.loading = null; WEB_KEY.status = null; } return null; });
+    }
     return WEB_KEY.loading;
   }
   function webKeySetupUrl() {
@@ -3364,6 +3370,29 @@
       live: opts.live || function () { return state.reading === r; },
       status: opts.status || sessionStatus, files: opts.files || function () { return readerFilesState(readerFilesOn() ? readerBox(r) : null); } };
   }
+  function phoneApprovalViewLive(view) {
+    return view.live() && view.form && view.send && view.form === $(view.prefix + '-form') && view.send === $(view.prefix + '-send');
+  }
+  function clearPhoneOffer(r, view) {
+    var offer = view.form.querySelector('[data-phone-offer]'), packets = view.form.querySelector('[data-phone-packets]');
+    if (offer && offer.parentNode) offer.parentNode.removeChild(offer);
+    if (packets && packets.parentNode) packets.parentNode.removeChild(packets);
+    r.phonePackets = {}; r.phonePacketSha256 = ''; r.phoneDraft = null;
+  }
+  function refreshWebKeyOffers() {
+    if (!webKeyCapable() || WEB_KEY.refreshing) return;
+    WEB_KEY.status = null; WEB_KEY.statusAt = 0; WEB_KEY.loading = null; WEB_KEY.generation += 1;
+    WEB_KEY.views = WEB_KEY.views.filter(function (entry) { return phoneApprovalViewLive(entry.view); });
+    if (!WEB_KEY.views.length) return;
+    var views = WEB_KEY.views.slice();
+    views.forEach(function (entry) { clearPhoneOffer(entry.r, entry.view); });
+    var fresh = webKeyStatus(); WEB_KEY.refreshing = fresh;
+    fresh.then(function () { if (WEB_KEY.refreshing === fresh) WEB_KEY.refreshing = null; });
+    views.forEach(function (entry) { paintWebKeyOffer(entry.r, entry.opts); });
+  }
+  // Safari can restore this exact DOM after enrollment or revocation on the separate signer origin.
+  // Refetch once per persisted return; closed/replaced readers are pruned and no timer is installed.
+  window.addEventListener('pageshow', function (e) { if (e && e.persisted) refreshWebKeyOffers(); });
   function phonePacketDetails(p, sha) {
     return 'Requested ' + p.action + ': ' + p.artifact + ' ' + p.version + '\nChannel: ' + p.channel + '\nDigest: ' + p.digest +
       '\nReceiver: ' + p.provider + ' / ' + p.sessionId + '\nExpires: ' + new Date(p.exp).toISOString() + '\nPacket: ' + sha +
@@ -3372,9 +3401,16 @@
   function paintWebKeyOffer(r, opts) {
     if (!webKeyCapable()) return;
     var view = phoneApprovalView(r, opts);
+    if (!phoneApprovalViewLive(view)) return;
+    WEB_KEY.views = WEB_KEY.views.filter(function (entry) { return phoneApprovalViewLive(entry.view) && entry.view.form !== view.form; });
+    WEB_KEY.views.push({ r: r, opts: opts, view: view });
+    var generation = WEB_KEY.generation;
     webKeyStatus().then(function (st) {
-      if (!st || !view.live() || !view.form || !view.send || view.form !== $(view.prefix + '-form')) return;
-      if (view.form.querySelector('[data-phone-offer]')) return;
+      if (generation !== WEB_KEY.generation || !phoneApprovalViewLive(view)) return;
+      if (!st) { clearPhoneOffer(r, view); return; }
+      var offer = view.form.querySelector('[data-phone-offer]');
+      if (offer && !!view.form.querySelector('[data-phone-setup]') === (st.activeKeys === 0)) return;
+      if (offer || st.activeKeys === 0) clearPhoneOffer(r, view);
       if (st.activeKeys === 0) {
         var setupUrl = webKeySetupUrl(); if (!setupUrl) return;
         var setup = document.createElement('a');
@@ -3391,14 +3427,14 @@
       b.textContent = 'Approve on this phone';
       view.send.parentNode.insertBefore(b, view.send);
       return apiAnswer('/api/web-key/packets?provider=' + encodeURIComponent(r.provider) + '&sessionId=' + encodeURIComponent(r.id)).then(function (a) {
-        if (!view.live() || view.form !== $(view.prefix + '-form')) return;
+        if (generation !== WEB_KEY.generation || !phoneApprovalViewLive(view) || view.form.querySelector('[data-phone-offer]') !== b) return;
         var rows = a.status === 200 && a.body && a.body.ok === true && Array.isArray(a.body.packets) ? a.body.packets : [];
         rows = rows.filter(function (row) { var p = row && row.packet; return p && p.provider === r.provider && p.sessionId === r.id &&
           (p.action === 'install' || p.action === 'publish') && Number.isSafeInteger(p.exp) && p.exp >= Date.now() && /^[0-9a-f]{64}$/.test(row.packetSha256 || ''); });
         r.phonePackets = {}; rows.forEach(function (row) { r.phonePackets[row.packetSha256] = row.packet; });
         if (!rows.length) return;
         var box = document.createElement('div'), label = document.createElement('label'), select = document.createElement('select'), disclosure = document.createElement('details'), summary = document.createElement('summary'), detail = document.createElement('pre');
-        box.className = 'phone-approval-packet'; select.id = view.prefix + '-phone-packet'; detail.id = view.prefix + '-phone-details';
+        box.className = 'phone-approval-packet'; box.setAttribute('data-phone-packets', '1'); select.id = view.prefix + '-phone-packet'; detail.id = view.prefix + '-phone-details';
         label.textContent = 'What to approve'; label.setAttribute('for', select.id);
         var message = document.createElement('option'); message.value = ''; message.textContent = 'Message only — no release approval'; select.appendChild(message);
         rows.forEach(function (row) { var option = document.createElement('option'), p = row.packet; option.value = row.packetSha256;

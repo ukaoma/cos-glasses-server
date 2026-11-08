@@ -30,6 +30,7 @@ class El {
     return walk(this)
   }
   insertBefore(n: El, ref: El) { n.parentNode = this; this.children.splice(Math.max(0, this.children.indexOf(ref)), 0, n) }
+  removeChild(n: El) { const i = this.children.indexOf(n); if (i < 0) throw new Error('not a child'); this.children.splice(i, 1); n.parentNode = null }
 }
 
 function harness(opts: { signer: number; activeKeys?: number; files?: string; handoff?: (body: any) => { status: number; body: any } | Promise<{ status: number; body: any }>; text?: string; bound?: boolean; packets?: any[]; prefix?: 'session' | 'ta'; packetRead?: Promise<any>; statusRead?: () => Promise<any>; hostname?: string }) {
@@ -41,6 +42,10 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
   const requests: Array<{ path: string; body?: any }> = []
   const assigned: string[] = []
   const statuses: Array<[string, string | undefined]> = []
+  let now = Date.now()
+  class Clock extends Date { static now() { return now } }
+  const windowListeners: Record<string, Array<(ev: { persisted: boolean }) => void>> = {}
+  const window = { addEventListener: (name: string, fn: (ev: { persisted: boolean }) => void) => { (windowListeners[name] ??= []).push(fn) } }
   const r: any = { provider: 'claude', id: 'a4b2b4dd-e40c-4b08-8a11-c89a018c197d', sending: false, draft: null as any }
   const state = { reading: r }
   const apiAnswer = (path: string, o: any = {}) => {
@@ -52,18 +57,25 @@ function harness(opts: { signer: number; activeKeys?: number; files?: string; ha
     return Promise.resolve({ status: 404, body: {} })
   }
   const fns = new Function(
-    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey',
+    'readerKit', 'apiAnswer', 'state', '$', 'document', 'sessionStatus', 'readerFilesOn', 'readerBox', 'readerFilesState', 'draftFor', 'bindingFor', 'rememberBinding', 'sessionPath', 'cosSessionId', 'targetKey', 'location', 'URL', 'newTurnKey', 'window', 'Date',
     BLOCK + '\nreturn { paintWebKeyOffer: paintWebKeyOffer, approveOnPhone: approveOnPhone, webKeySignerUrlOk: webKeySignerUrlOk };',
   )(
     () => ({ webKeySigner: () => opts.signer }), apiAnswer, state, (id: string) => ids[id] ?? null, { createElement: (t: string) => new El(t) },
     (t: string, k?: string) => statuses.push([t, k]), () => true, () => ({}), () => opts.files ?? 'none',
     (text: string, rr: any) => { rr.draft = rr.draft && rr.draft.text === text ? rr.draft : { text, key: 'ct-key-000001', ids: [] }; return rr.draft },
     () => (opts.bound === false ? null : { bindingId: 'b-1', epoch: 2 }), () => {}, (p: string, i: string, t: string) => `/api/agent-sessions/${p}/${i}${t}`, () => 'cos-1',
-    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => assigned.push(u) }, URL, () => 'ct-key-000001',
+    (p: string, i: string) => `${p.length}:${p}:${i.length}:${i}`, { hostname: opts.hostname ?? HOST, assign: (u: string) => assigned.push(u) }, URL, () => 'ct-key-000001', window, Clock,
   ) as { paintWebKeyOffer: (r: unknown, o?: unknown) => void; approveOnPhone: (o?: unknown) => Promise<string>; webKeySignerUrlOk: (u: string) => boolean }
   const liveView = { active: true }
   const viewOpts = { r, prefix, live: () => liveView.active, status: (t: string, k?: string) => statuses.push([t, k]), files: () => opts.files ?? 'none' }
-  return { ...fns, r, state, form, input, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') } }
+  return { ...fns, r, state, form, input, requests, assigned, statuses, liveView, viewOpts, replaceForm: () => { ids[prefix + '-form'] = new El('form', prefix + '-form') },
+    pageShow: (persisted = true) => { for (const fn of windowListeners.pageshow ?? []) fn({ persisted }) }, advance: (ms: number) => { now += ms },
+    addView: (other: 'session' | 'ta') => {
+      const another = new El('form', other + '-form'), buttons = new El('div'), submit = new El('button', other + '-send'), text = new El('textarea', other + '-input')
+      another.appendChild(buttons); buttons.appendChild(submit)
+      ids[other + '-form'] = another; ids[other + '-send'] = submit; ids[other + '-input'] = text
+      return { form: another, opts: { ...viewOpts, prefix: other } }
+    } }
 }
 
 describe('flag off: the composer is exactly as before', () => {
@@ -292,5 +304,120 @@ describe('explicit release packet selection', () => {
     expect(today).toContain('K.phoneOffer(r, phoneApprovalOptions(r))')
     expect(today).toContain('K.approvePhone(phoneApprovalOptions(O.r))')
     expect(APP).toContain('phoneOffer: paintWebKeyOffer, approvePhone: approveOnPhone')
+  })
+})
+
+describe('phone setup and revocation after Safari persisted return', () => {
+  for (const prefix of ['session', 'ta'] as const) {
+    it(`${prefix}: persisted return replaces setup with approval after enrollment, and approval with setup after revocation`, async () => {
+      const opts = { signer: 1, activeKeys: 0, prefix, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] }
+      const h = harness(opts)
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.form.querySelector('[data-phone-setup]')).not.toBeNull()
+      opts.activeKeys = 1
+      h.pageShow(); await flush()
+      expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
+      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      const box = h.form.querySelector('[data-phone-packets]')!
+      expect(box).not.toBeNull()
+      const select = box.children.find(c => c.tag === 'select')!
+      select.value = 'b'.repeat(64); select.listeners.change()
+      expect(h.r.phonePacketSha256).toBe('b'.repeat(64))
+      opts.activeKeys = 0
+      h.pageShow(); await flush()
+      expect(h.form.querySelector('[data-phone-setup]')).not.toBeNull()
+      expect(h.form.querySelector('[data-phone-packets]')).toBeNull()
+      expect(h.r.phonePacketSha256).toBe('')
+      expect(h.r.phonePackets).toEqual({})
+      expect(h.requests.filter(q => q.path === '/api/web-key/status')).toHaveLength(3)
+      expect(h.requests.some(q => q.path === '/api/web-key/handoff')).toBe(false)
+      expect(h.assigned).toEqual([])
+    })
+    it(`${prefix}: non-persisted pageshow and capability-off return have no extra effects`, async () => {
+      const h = harness({ signer: 0, activeKeys: 0, prefix })
+      h.paintWebKeyOffer(h.r, h.viewOpts); h.pageShow(false); h.pageShow(); await flush()
+      expect(h.requests).toEqual([])
+      expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+      const on = harness({ signer: 1, activeKeys: 0, prefix })
+      on.paintWebKeyOffer(on.r, on.viewOpts); await flush()
+      on.pageShow(false); await flush()
+      expect(on.requests).toHaveLength(1)
+    })
+    it(`${prefix}: an old status response cannot overwrite a fresh enrolled-key return`, async () => {
+      let old!: (value: any) => void
+      let reads = 0
+      const h = harness({ signer: 1, prefix, statusRead: () => ++reads === 1 ? new Promise(resolve => { old = resolve }) : Promise.resolve({ status: 200, body: { ok: true, activeKeys: 1 } }) })
+      h.paintWebKeyOffer(h.r, h.viewOpts)
+      h.pageShow(); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      old({ status: 200, body: { ok: true, activeKeys: 0 } }); await flush()
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
+      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      expect(reads).toBe(2)
+    })
+    it(`${prefix}: a late old packet list cannot reappear after revocation`, async () => {
+      let old!: (value: any) => void
+      const opts = { signer: 1, activeKeys: 1, prefix, packetRead: new Promise(resolve => { old = resolve }) }
+      const h = harness(opts)
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+      opts.activeKeys = 0; h.pageShow(); await flush()
+      expect(h.form.querySelector('[data-phone-setup]')).not.toBeNull()
+      old({ status: 200, body: { ok: true, packets: [{ packet: PACKET, packetSha256: 'b'.repeat(64) }] } }); await flush()
+      expect(h.form.querySelector('[data-phone-packets]')).toBeNull()
+      expect(h.r.phonePackets).toEqual({})
+    })
+    for (const changed of ['closed', 'replaced-form'] as const) {
+      it(`${prefix}: persisted return prunes ${changed} views without status or DOM work`, async () => {
+        const h = harness({ signer: 1, activeKeys: 0, prefix })
+        h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+        const original = h.form.querySelector('[data-phone-offer]')
+        if (changed === 'closed') h.liveView.active = false
+        else h.replaceForm()
+        h.pageShow(); await flush()
+        expect(h.requests).toHaveLength(1)
+        expect(h.form.querySelector('[data-phone-offer]')).toBe(original)
+      })
+    }
+    it(`${prefix}: unavailable status on return removes stale approval without claiming no key`, async () => {
+      let reads = 0
+      const h = harness({ signer: 1, prefix, statusRead: async () => ++reads === 1 ? { status: 200, body: { ok: true, activeKeys: 1 } } : { status: 503, body: { ok: false } } })
+      h.paintWebKeyOffer(h.r, h.viewOpts); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')).not.toBeNull()
+      h.pageShow(); await flush()
+      expect(h.form.querySelector('[data-phone-offer]')).toBeNull()
+      expect(h.form.querySelector('[data-phone-packets]')).toBeNull()
+      expect(reads).toBe(2)
+    })
+  }
+  it('repeated return events and two current readers share one new-epoch status request', async () => {
+    let reads = 0, finish!: (value: any) => void
+    const h = harness({ signer: 1, activeKeys: 0, statusRead: () => ++reads === 1 ? Promise.resolve({ status: 200, body: { ok: true, activeKeys: 0 } }) : new Promise(resolve => { finish = resolve }) })
+    const today = h.addView('ta')
+    h.paintWebKeyOffer(h.r, h.viewOpts); h.paintWebKeyOffer(h.r, today.opts); await flush()
+    expect(reads).toBe(1)
+    expect(today.form.querySelector('[data-phone-setup]')).not.toBeNull()
+    h.pageShow(); h.pageShow(); h.pageShow()
+    expect(reads).toBe(2)
+    finish({ status: 200, body: { ok: true, activeKeys: 1 } }); await flush()
+    expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+    expect(today.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+    expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
+    expect(today.form.querySelector('[data-phone-setup]')).toBeNull()
+    expect(reads).toBe(2)
+  })
+  it('ordinary paint reuses a fresh status and refreshes after the bounded cache age without a timer', async () => {
+    const opts = { signer: 1, activeKeys: 0 }
+    const h = harness(opts)
+    h.paintWebKeyOffer(h.r); await flush()
+    opts.activeKeys = 1; h.advance(29999)
+    h.paintWebKeyOffer(h.r); await flush()
+    expect(h.form.querySelector('[data-phone-setup]')).not.toBeNull()
+    expect(h.requests).toHaveLength(1)
+    h.advance(2); h.paintWebKeyOffer(h.r); await flush()
+    expect(h.form.querySelector('[data-phone-setup]')).toBeNull()
+    expect(h.form.querySelector('[data-phone-offer]')?.textContent).toBe('Approve on this phone')
+    expect(h.requests.filter(q => q.path === '/api/web-key/status')).toHaveLength(2)
   })
 })
