@@ -12,7 +12,9 @@
 //   older than 2 h and the bridge reads          -> bridge
 //   older than 2 h, bridge does not read         -> snapshot, labeled "as of"
 //   older than 24 h, past windowEnd, or denied   -> none
-// No snapshot file at all keeps today's behaviour exactly: the bridge.
+// No snapshot file at all keeps today's behaviour exactly: the bridge. So does a
+// granted snapshot with no calendar picked yet (QA W20): Connect before the first
+// pick is "not set up", never an empty day.
 //
 // Privacy: event titles never go to a log line from here. Errors log the
 // reason code only.
@@ -75,7 +77,7 @@ export type CalendarSourceName = 'snapshot' | 'snapshot-stale' | 'bridge' | 'non
 
 export interface SnapshotRead {
   /** 'missing' means no file: callers fall back to the bridge, as before P1. */
-  state: 'missing' | 'invalid' | 'denied' | 'fresh' | 'aging' | 'expired'
+  state: 'missing' | 'invalid' | 'denied' | 'unselected' | 'fresh' | 'aging' | 'expired'
   snapshot: CalendarSnapshot | null
   ageMs: number | null
 }
@@ -167,7 +169,12 @@ let cache: { mtimeMs: number; size: number; snapshot: CalendarSnapshot | null } 
 /** Test seam. */
 export function resetCalendarSourceCache(): void { cache = null }
 
-/** Server-side switch: COS_CALENDAR_SNAPSHOT=0 ignores the snapshot and uses the bridge as before. */
+/**
+ * Server-side switch: COS_CALENDAR_SNAPSHOT=0 ignores the snapshot and uses the bridge as before. On by default; only
+ * `0` (after trimming) turns it off, so `false` or `off` leave it on. QA W21: calendar_context.py once read the
+ * snapshot only when the switch was 1, the opposite default. Its `snapshot_reading_enabled` now has this polarity, and
+ * calendar-source.test.ts runs one table against both readers.
+ */
 export function snapshotReadingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.COS_CALENDAR_SNAPSHOT?.trim() !== '0'
 }
@@ -187,6 +194,8 @@ export function readSnapshot(now = Date.now(), path = snapshotPath()): SnapshotR
   if (!snapshot) return { state: 'invalid', snapshot: null, ageMs: null }
   const ageMs = Math.max(0, now - Date.parse(snapshot.writtenAt))
   if (snapshot.access !== 'granted') return { state: 'denied', snapshot, ageMs }
+  // QA W20: granted with nothing picked is not configured. Keep the previous source until the first selection.
+  if (!snapshot.calendars.some(c => c.selected)) return { state: 'unselected', snapshot, ageMs }
   if (ageMs > SNAPSHOT_MAX_AGE_MS || now > Date.parse(snapshot.windowEnd)) return { state: 'expired', snapshot, ageMs }
   if (ageMs <= SNAPSHOT_FRESH_MS) return { state: 'fresh', snapshot, ageMs }
   return { state: 'aging', snapshot, ageMs }
@@ -197,6 +206,19 @@ export function readSnapshot(now = Date.now(), path = snapshotPath()): SnapshotR
 // ---------------------------------------------------------------------------
 
 const HOLIDAY_OR_BIRTHDAY = /\b(holidays?|birthdays?)\b/i
+/** A family calendar under any name ("Family", "Ukaoma Family", "Family calendar"). */
+const FAMILY_TITLE = /\bfamily\b/i
+/** Travel-shaped titles: the bridge's own `looks_like_flight` (calendar_context CalendarEvent.to_dict), case-folded. */
+const TRAVEL_TITLE = /\bflight\b|\b(wn|aa|ua|dl|as|b6|nk|f9)\s*\d{2,4}\b/i
+
+/** A calendar other people write to: shared, a family calendar by name. Its events are not the owner's by default. */
+export function isFamilyCalendar(calendar: SnapshotCalendar): boolean {
+  return calendar.shared || FAMILY_TITLE.test(calendar.title)
+}
+
+export function isTravelShaped(e: SnapshotEvent): boolean {
+  return TRAVEL_TITLE.test(e.title)
+}
 
 /** Events from selected calendars only, deduped across accounts. Order: start time. */
 export function selectedEvents(snapshot: CalendarSnapshot): SnapshotEvent[] {
@@ -258,17 +280,27 @@ export function isMultiDay(e: SnapshotEvent): boolean {
 }
 
 /**
- * Whether an event may become next(), prep or Ask's "next meeting". Declined,
- * all-day, multi-day, birthday and holiday calendars, and shared-calendar
- * events with no attendees never qualify (shared-calendar flights are not the
- * owner's travel).
+ * Whether an event may become next(), prep, Today's list or Meeting Ask's match. Declined, all-day, multi-day,
+ * birthday and holiday calendars, and shared-calendar events with no attendees never qualify (shared-calendar flights
+ * are not the owner's travel).
+ *
+ * QA W23, the family rule. It was an exact "Family" title or a shared calendar, so a flight on another editable
+ * calendar (iCloud "Calendar", a TripIt import) still qualified. Now:
+ *   - a family calendar matches by word ("Ukaoma Family"), not by exact title;
+ *   - a travel-shaped event (the bridge's flight rule) with no attendees never qualifies, on any calendar;
+ *   - a travel-shaped event on a family or shared calendar never qualifies, even with attendees (a flight a relative
+ *     invited the owner to is still their travel, not a meeting).
+ * A non-travel event with real attendees on a family calendar (a school meeting) still qualifies, and an
+ * attendee-less hold on the owner's own calendar is unchanged.
  */
 export function isPrepWorthy(e: SnapshotEvent, calendar: SnapshotCalendar | undefined): boolean {
   if (e.myStatus === 'declined' || e.allDay || isMultiDay(e)) return false
   if (!calendar) return false
   if (calendar.sourceType === 'birthdays' || HOLIDAY_OR_BIRTHDAY.test(calendar.title)) return false
-  const sharedLike = calendar.shared || calendar.sourceType === 'subscription' || /^family$/i.test(calendar.title.trim())
-  if (sharedLike && e.attendees.length === 0) return false
+  const sharedLike = isFamilyCalendar(calendar) || calendar.sourceType === 'subscription'
+  const travel = isTravelShaped(e)
+  if (sharedLike && (travel || e.attendees.length === 0)) return false
+  if (travel && e.attendees.length === 0) return false
   return true
 }
 
@@ -276,7 +308,13 @@ export function isPrepWorthy(e: SnapshotEvent, calendar: SnapshotCalendar | unde
 // Bridge-shaped output
 // ---------------------------------------------------------------------------
 
-/** One event in the starter-kit bridge's dict shape, plus the occurrence fields bridgeOccurrence reads. */
+/**
+ * One event in the starter-kit bridge's dict shape, plus the occurrence fields bridgeOccurrence reads.
+ *
+ * `domain` and `matched_person` stay null here: the bridge's classifier (people_context.classify_event_by_attendees)
+ * lives in Python people context, which this standalone server does not have. Meeting Ask, the one caller that needs a
+ * domain, asks the bridge's `calendar-classify` for its candidates (QA W21, meeting-ask-orientation.ts).
+ */
 export function bridgeEvent(e: SnapshotEvent, calendar: SnapshotCalendar | undefined): Record<string, unknown> {
   const start = Date.parse(e.start)
   const end = e.end ? Date.parse(e.end) : NaN
@@ -291,7 +329,8 @@ export function bridgeEvent(e: SnapshotEvent, calendar: SnapshotCalendar | undef
     matched_person: null,
     attendees: e.attendees.map(a => a.name).filter((n): n is string => !!n),
     calendar_name: calendar?.title ?? null,
-    ownership: calendar && (calendar.shared || /^family$/i.test(calendar.title.trim())) ? 'family_shared' : 'miles',
+    // The bridge's ownership words: family calendars, then travel it cannot verify, then the owner's own.
+    ownership: calendar && isFamilyCalendar(calendar) ? 'family_shared' : isTravelShaped(e) && e.attendees.length === 0 ? 'unverified_flight' : 'miles',
     meeting_url: e.meetingUrl,
     prep_worthy: isPrepWorthy(e, calendar),
     // Occurrence identity for prep (welcome-context bridgeOccurrence reads these keys).
@@ -367,8 +406,8 @@ let lastSource: CalendarSourceName | null = null
 export async function readCalendar(timeoutMs = 30_000, now = Date.now()): Promise<CalendarRead> {
   const snap = readSnapshot(now)
   const done = (r: CalendarRead): CalendarRead => { lastSource = r.source; return r }
-  if (snap.state === 'missing' || snap.state === 'invalid') {
-    // Pre-P1 behaviour, unchanged.
+  if (snap.state === 'missing' || snap.state === 'invalid' || snap.state === 'unselected') {
+    // Pre-P1 behaviour, unchanged. Unselected (QA W20): Connect with nothing picked keeps this source too.
     return done({ source: 'bridge', data: await callPython(['calendar'], timeoutMs), ageMs: null })
   }
   if (snap.state === 'denied') return done({ source: 'none', data: noCalendarShape('calendar_access_denied'), ageMs: snap.ageMs })
@@ -407,9 +446,18 @@ export function calendarStatus(now = Date.now()): {
 }
 
 /**
+ * A bridge-shaped row that may be listed as a meeting: timed, and not marked unworthy by the prep filter. A bridge row
+ * without prep_worthy counts (the bridge already drops declined and skips all-day). Today and Meeting Ask both use it.
+ */
+export function countsAsMeeting(row: Record<string, unknown> | null | undefined): boolean {
+  return !!row && row.is_all_day !== true && row.prep_worthy !== false
+}
+
+/**
  * Today for Control Web and desktop: selected calendars only, the next 3 timed meetings that count. QA 7.0.0: all-day
  * and non-prep events (declined, holidays, attendee-less shared events) are filtered out BEFORE the 3 are taken, so they
- * never use up the slots Today's "Later" shows. A bridge row without prep_worthy counts.
+ * never use up the slots Today's "Later" shows. QA W23: remainingCount counts the same rows, so a declined meeting or
+ * a family flight is not "remaining".
  */
 export async function calendarToday(now = Date.now()): Promise<{
   connected: boolean
@@ -423,7 +471,8 @@ export async function calendarToday(now = Date.now()): Promise<{
   const data = read.data as Record<string, unknown> | null
   const connected = !!data && typeof data === 'object' && !('error' in data) && (read.source !== 'bridge' || pythonBridgeAvailable())
   const rows = connected && Array.isArray(data!.today_remaining) ? data!.today_remaining as Array<Record<string, unknown>> : []
-  const next = rows.filter(r => r.is_all_day !== true && r.prep_worthy !== false).slice(0, 3).map(r => ({
+  const counted = rows.filter(countsAsMeeting)
+  const next = counted.slice(0, 3).map(r => ({
     title: typeof r.title === 'string' ? r.title : 'Event',
     start: String(r.start_time ?? ''),
     end: typeof r.end_time === 'string' ? r.end_time : null,
@@ -436,7 +485,7 @@ export async function calendarToday(now = Date.now()): Promise<{
     source: read.source,
     asOf: typeof data?.cached_at === 'string' ? data.cached_at : null,
     stale: data?.is_stale === true,
-    remainingCount: connected ? Number(data!.meetings_remaining_count ?? rows.length) || rows.length : 0,
+    remainingCount: connected ? counted.length : 0,
     next,
   }
 }

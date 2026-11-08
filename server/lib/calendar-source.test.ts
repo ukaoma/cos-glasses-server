@@ -1,6 +1,7 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const bridge = vi.hoisted(() => ({ available: false, answer: null as unknown, calls: 0 }))
@@ -335,3 +336,145 @@ describe('B5: occurrence survives the ping and feed round trip (P1-5)', () => {
 
 // Silence unused-import lint for helpers only some tests call.
 void calendarStatus; void calendarToday
+
+// ---------------------------------------------------------------------------
+// Week-wide QA (1-8 Nov), calendar findings W20, W21 and W23.
+// ---------------------------------------------------------------------------
+
+// W20: Connect with nothing picked wrote a granted snapshot with zero selected calendars, and the server read it as a
+// fresh, final, EMPTY day instead of asking the bridge. Granted with nothing selected is "not set up yet".
+describe('W20: granted with zero calendars selected is not configured', () => {
+  const unpicked = () => snap({ calendars: [cal({ selected: false }), cal({ id: 'cal-fam', title: 'Family', selected: false })] })
+
+  it('readSnapshot reports unselected, never fresh', () => {
+    writeSnap(unpicked())
+    expect(readSnapshot(NOW, file).state).toBe('unselected')
+    writeSnap(snap({ calendars: [], events: [] }))
+    expect(readSnapshot(NOW, file).state).toBe('unselected')
+    // One pick makes it a real (possibly empty) day again.
+    writeSnap(snap({ calendars: [cal({ selected: false }), cal({ id: 'cal-fam', title: 'Family', selected: true })] }))
+    expect(readSnapshot(NOW, file).state).toBe('fresh')
+  })
+
+  it('readCalendar keeps the previous source (the bridge) until the first selection', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    writeFileSync(join(dir, 'calendar', 'snapshot.json'), JSON.stringify(unpicked()))
+    mod.resetCalendarSourceCache()
+    bridge.available = true
+    bridge.answer = { today_events: [{ title: 'From the bridge' }], today_remaining: [], data_source: 'cache' }
+    const r = await mod.readCalendar(1000, NOW)
+    expect(r.source).toBe('bridge')
+    expect(bridge.calls).toBe(1)
+    expect(mod.calendarStatus(NOW)).toMatchObject({ snapshot: 'unselected', selected: 0 })
+  })
+
+  it('with no bridge either, Today is "not connected", never an empty connected day', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    writeFileSync(join(dir, 'calendar', 'snapshot.json'), JSON.stringify(unpicked()))
+    mod.resetCalendarSourceCache()
+    const today = await mod.calendarToday(NOW)
+    expect(today.connected).toBe(false)
+    expect(today.source).toBe('bridge')
+  })
+})
+
+// W21: the server read the snapshot unless the switch was 0; calendar_context.py read it only when it was 1. One
+// polarity now: on unless COS_CALENDAR_SNAPSHOT is 0 (after trimming). The same table runs against both readers.
+const SNAPSHOT_SWITCH_TABLE: Array<[string | undefined, boolean]> = [
+  [undefined, true], ['', true], ['1', true], ['0', false], [' 0 ', false], ['0\n', false],
+  ['false', true], ['off', true], ['00', true], ['01', true],
+]
+
+describe('W21: one COS_CALENDAR_SNAPSHOT polarity', () => {
+  it('server: on by default, only 0 turns it off', async () => {
+    const { snapshotReadingEnabled } = await import('./calendar-source.js')
+    for (const [value, on] of SNAPSHOT_SWITCH_TABLE) {
+      const env = value === undefined ? {} : { COS_CALENDAR_SNAPSHOT: value }
+      expect(snapshotReadingEnabled(env as NodeJS.ProcessEnv), JSON.stringify(value)).toBe(on)
+    }
+  })
+
+  const scripts = muScriptsDir()
+  it.runIf(scripts !== null)('parity: calendar_context.snapshot_reading_enabled agrees on every row', () => {
+    const cases = SNAPSHOT_SWITCH_TABLE.map(([v]) => (v === undefined ? {} : { COS_CALENDAR_SNAPSHOT: v }))
+    const code = [
+      'import json, sys',
+      `sys.path.insert(0, ${JSON.stringify(scripts)})`,
+      'import calendar_context as c',
+      'print(json.dumps([c.snapshot_reading_enabled(e) for e in json.loads(sys.argv[1])]))',
+    ].join('\n')
+    const out = execFileSync(join(scripts!, 'venv', 'bin', 'python3'), ['-c', code, JSON.stringify(cases)], {
+      encoding: 'utf8', timeout: 60_000, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', COS_DATA_DIR: dir },
+    })
+    expect(JSON.parse(out.trim().split('\n').pop()!)).toEqual(SNAPSHOT_SWITCH_TABLE.map(([, on]) => on))
+  })
+  it.runIf(scripts === null)('parity pin skipped: MU operations/scripts not reachable (set COS_SCRIPTS_DIR)', () => {
+    // Not a pass: the parity pin could not run here.
+    expect(scripts).toBeNull()
+  })
+})
+
+// W23: family suppression was an exact "Family" title or a shared calendar, so a flight on another editable calendar
+// (iCloud "Calendar", a TripIt import) still became Next up and prep.
+describe('W23: travel and family events never become prep', () => {
+  it('an attendee-less flight on any calendar never qualifies; one with attendees on a work calendar still does', () => {
+    const icloud = cal({ id: 'cal-icloud', title: 'Calendar', sourceType: 'caldav' })
+    expect(isPrepWorthy(ev({ title: 'Flight to Austin (WN 2528)', attendees: [] }), icloud)).toBe(false)
+    expect(isPrepWorthy(ev({ title: 'AA 1146 DFW to AUS', attendees: [] }), cal())).toBe(false)
+    expect(isPrepWorthy(ev({ title: 'Flight plan review', attendees: [{ name: 'Gina', domain: 'example.com' }] }), cal())).toBe(true)
+    // An attendee-less hold on the owner's own calendar is unchanged.
+    expect(isPrepWorthy(ev({ title: 'Focus block', attendees: [] }), cal())).toBe(true)
+  })
+
+  it('a family calendar under any name, and travel on it even with attendees, never qualifies', () => {
+    expect(isPrepWorthy(ev({ title: 'Dinner', attendees: [] }), cal({ title: 'Ukaoma Family', sourceType: 'caldav' }))).toBe(false)
+    expect(isPrepWorthy(ev({ title: 'Dinner', attendees: [] }), cal({ title: 'family calendar ', sourceType: 'caldav' }))).toBe(false)
+    expect(isPrepWorthy(ev({ title: 'Flight home (UA 512)', attendees: [{ name: 'Queen', domain: 'example.com' }] }), cal({ title: 'Family', sourceType: 'caldav' }))).toBe(false)
+    // A family-calendar event with real attendees that is not travel stays (a school meeting).
+    expect(isPrepWorthy(ev({ title: 'Parent teacher conference', attendees: [{ name: 'Ms. Lee', domain: 'school.org' }] }), cal({ title: 'Family', sourceType: 'caldav' }))).toBe(true)
+  })
+
+  it('ownership matches the bridge: family calendars are family_shared, attendee-less travel elsewhere is unverified_flight', () => {
+    const s = snap({
+      calendars: [cal(), cal({ id: 'cal-fam', title: 'Ukaoma Family', sourceType: 'caldav' })],
+      events: [
+        ev({ eventId: 'f', externalId: 'f', title: 'Flight to KC (WN 100)', attendees: [], start: at(11), occurrenceStart: at(11), end: at(13) }),
+        ev({ calendarId: 'cal-fam', eventId: 'd', externalId: 'd', title: 'Dinner', attendees: [], start: at(18), occurrenceStart: at(18), end: at(19) }),
+      ],
+    })
+    const shape = snapshotToBridgeShape(s, NOW) as { today_events: Array<{ title: string; ownership: string }> }
+    expect(Object.fromEntries(shape.today_events.map(e => [e.title, e.ownership]))).toEqual({ 'Flight to KC (WN 100)': 'unverified_flight', Dinner: 'family_shared' })
+  })
+
+  it('Today counts only the meetings it may list: remainingCount skips declined and travel rows', async () => {
+    vi.stubEnv('COS_DATA_DIR', dir)
+    vi.resetModules()
+    const mod = await import('./calendar-source.js')
+    const events = [
+      ev({ eventId: 'dec', externalId: 'dec', myStatus: 'declined', start: at(10), occurrenceStart: at(10), end: at(10, 30), title: 'Declined' }),
+      ev({ eventId: 'fl', externalId: 'fl', attendees: [], start: at(12), occurrenceStart: at(12), end: at(14), title: 'Flight to Austin (WN 2528)' }),
+      ev({ eventId: 'ok', externalId: 'ok', start: at(15), occurrenceStart: at(15), end: at(15, 30), title: 'Real meeting' }),
+    ]
+    writeFileSync(join(dir, 'calendar', 'snapshot.json'), JSON.stringify(snap({ events })))
+    mod.resetCalendarSourceCache()
+    const today = await mod.calendarToday(NOW)
+    expect(today.next.map(n => n.title)).toEqual(['Real meeting'])
+    expect(today.remainingCount).toBe(1)
+  })
+})
+
+function muScriptsDir(): string | null {
+  const candidates = [
+    process.env.COS_SCRIPTS_DIR ? resolve(process.env.COS_SCRIPTS_DIR) : null,
+    resolve(process.cwd(), '../Ukaoma Chief Of Staff/MU-Chief-Staff/operations/scripts'),
+    resolve(homedir(), 'Documents/GitHub/Ukaoma Chief Of Staff/MU-Chief-Staff/operations/scripts'),
+  ].filter((p): p is string => !!p)
+  for (const c of candidates) {
+    if (existsSync(join(c, 'calendar_context.py')) && existsSync(join(c, 'venv', 'bin', 'python3'))) return c
+  }
+  return null
+}
