@@ -1,3 +1,33 @@
+## 7.0.5 - Preview engine phase 1 and the Today summary cap
+
+2026-11-08. On top of the fixed 7.0.4 (09dc233). Server and Control Web. The COS Control Sessions pane reads the same routes (contract in the 7.0.5 preview CONTRACT.md); its Quick Look half ships with Control, not here.
+
+**Default-on changes, for every install:**
+- **Link cards, on through the existing switch.** When a session's reply links a local file (`[the plan](operations/PLAN.md)`, `[server.ts:42](server.ts:42)`, an absolute or `~/` path, a `file://` URL), the link becomes a card where it sits: the link's words, the file's type, size and line. Tapping it opens the file in the reader's viewer. They ride "Show session files, screenshots and images", which is on by default, so every install gets them. Turned off, the words stay and nothing else is sent: no id, no name, no count.
+- **Link paths are always redacted.** Each local link reaches the browser as its words plus an opaque card id (`[the plan](cos-file:0)`), with previews on or off, past the 20-card limit too (those are counted in words). A path-looking label becomes its base name. Web links and `#anchors` are left alone.
+- **One viewer for what a card or a sent file opens**, in the Sessions reader and in Today's session sheet: Markdown drawn with the reply renderer, text and code with line numbers and a jump to the linked line, CSV and TSV as a table (200 rows a page, 50 columns, 5,000 rows), HTML with scripts off, a PDF inline on a desktop and in its own tab on a phone or any touch screen (the unfolded Duo too), pictures through the normaliser. Office files, audio, video and folders still download or say "open it on your Mac" (phase 2).
+- **HTML is shown full length** (up to 32 MB, was cut at 512 KB) under its own sandbox. Nothing on the page loads from the internet: the policy is sent as a header and also injected as the first tag of the page. "Run scripts" is a tap per open, off each time, in an opaque origin: scripts cannot fetch data, read COS, open windows or leave the frame, and the WebRTC constructors are removed before the page's own scripts run (the canary measured 5 UDP packets without that and 0 with it).
+- **Thumbnails** for PDF and HTML cards come from Quick Look (`qlmanage -t`) on a private copy in a 0700 temp folder, two at a time, 10 s at most, cached on disk under the data folder (`preview-thumbs`, 128 MB and 7 days at most). An HTML page with no charset is read as UTF-8 for its thumbnail. No picture means a plain card, never a broken image.
+- **Secret files stay refused for link cards too.** The 7.0.4 secret-name guard decides every card and every read, plus the name `hook-token`. A linked file with another hard link is refused as a secret, as sent files are. A secret card says "Not shown: this file may hold secrets." and offers no button.
+- **SendUserFile `files` sent as a JSON string** (11 of 1,112 real calls) is read like a list, with the same checks. Before, those files were dropped silently.
+- **Today summary: up to 100 a day** (was 60). It is now a setting, "Summaries per day", 1 to 100, in Settings under the Today summary switch. The server enforces it, and the status line says "Today's N summaries are used."
+- **Today summary after a reconnect.** When the sessions or Today read recovers from a failed one, the next summary ask starts at once instead of waiting out the 10-minute spacing. At most once per 10 minutes; "only when something changed", the 3-failure pause, the switch and the daily cap still apply.
+
+**Off by default:**
+- **Extra folders** (Settings, Privacy, under the session files switch). Empty until you add one. A session may open files only from its own project folder, plus each folder named there. Broad folders (home, Documents, Library, /, /Volumes, temp) and anything inside Library, .cos-glasses or .ssh are refused with the reason.
+
+**New routes** (under the usual /api gate; no request or answer carries a path):
+- `GET /api/preview/agent-sessions/:provider/:sessionId/:id/meta` and `.../content?part=raw|inline|text|table|html|html-run|thumb`. A busy Mac answers 503 `previews_busy`; a secret 403 `secret_file_denied`; previews off 403 `previews_off` before anything is read.
+- `GET|POST /api/preview-folders/settings`.
+- `GET|PUT /api/today/brief/settings/cap` (`{ dailyCap }`, clamped to 1 to 100).
+
+**Load:** the preview routes keep one reading of a transcript for 30 s while it is unchanged (20 cards are one parse, not 20), at most 2 preview reads and 2 conversions at once.
+
+**Known limits:**
+- A link inside a previewed Markdown file is shown as its words, not as a card (phase 2).
+- A PDF on a phone opens in a new tab; inline PDF pages on a phone are phase 2.
+- Not checked on a real iPhone Duo yet: the renders are headless Chrome at 458x667, 703x1000 and 1000x703 with touch, and 1440x900.
+
 ## 7.0.4 - Session image previews, Today parity and week QA fixes
 
 2026-11-08. Matched candidate with COS Control 0.5.379. Includes the private 7.0.0 to 7.0.2 line; the public baseline remains 6.99.33 until publication receipts verify promotion. Control 0.5.377 and 0.5.378 keep their existing API contracts; the new native Today summary and calendar cancellation fixes require 0.5.379.
